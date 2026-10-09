@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::FREEZING_K;
 
@@ -348,7 +349,7 @@ pub fn update_snow_age(
     let aging_rate = 1.0e-6 * time_step_seconds;
     let growth = argument.exp() + (10.0 * argument).min(0.0).exp() + 0.3;
     let fresh_snow = (snow_water_equivalent_mm - previous_snow_water_equivalent_mm).max(0.0);
-    Ok((aging_rate.mul_add(growth, snow_age) * (-fresh_snow).mul_add(0.1, 1.0)).max(0.0))
+    Ok((aging_rate.contract(growth, snow_age) * (-fresh_snow).contract(0.1, 1.0)).max(0.0))
 }
 
 /// Port of MOD_NewSnow.F90:newsnow.
@@ -411,7 +412,7 @@ pub fn add_new_snow(input: NewSnowInput, state: &mut RuntimeSnowColumn) -> Resul
         // （雪层建出后第一次往层里加雪）的 `fsno` 差 1 ULP（第 402 轮）。
         state.ground_snow_fraction = (-(f77(1.0)
             - (f77(0.1) * input.ground_snowfall_kg_m2_s * input.time_step_seconds).tanh()))
-        .mul_add(f77(1.0) - state.ground_snow_fraction, f77(1.0));
+        .contract(f77(1.0) - state.ground_snow_fraction, f77(1.0));
         state.ground_snow_fraction = state.ground_snow_fraction.min(f77(1.0));
     }
     Ok(NewSnowOutcome {
@@ -453,7 +454,7 @@ pub fn snow_water(
     // `MOD_SoilSnowHydrology` 的 `snowwater`：表层冰/液更新都是
     // `wice/wliq = wice/wliq + (通量)*deltim`，GIMPLE 把 `通量*deltim`
     // 收进加法（`FMA(deltim, 通量, 原值)`）—— 两处都是。
-    let top_ice_after_surface_flux = input.time_step_seconds.mul_add(
+    let top_ice_after_surface_flux = input.time_step_seconds.contract(
         input.frost_kg_m2_s - input.sublimation_kg_m2_s,
         state.ice_water_kg_m2[top],
     );
@@ -461,7 +462,7 @@ pub fn snow_water(
     if top_ice_after_surface_flux < 0.0 {
         state.liquid_water_kg_m2[top] += top_ice_after_surface_flux;
     }
-    state.liquid_water_kg_m2[top] = input.time_step_seconds.mul_add(
+    state.liquid_water_kg_m2[top] = input.time_step_seconds.contract(
         input.rainfall_kg_m2_s + input.dew_kg_m2_s - input.evaporation_kg_m2_s,
         state.liquid_water_kg_m2[top],
     );
@@ -495,7 +496,7 @@ pub fn snow_water(
         // `_48 = FNMA(ssi, eff, vol_liq); _131 = _48*dz; MAX(_131, 0)`
         // —— 不可约含水那一步（`vol_liq - ssi*eff`）被吸收，`max` 留在乘法**外**。
         // 这两条分支在 dump 里各出现一次（`bb24`/`bb25`），两处都融合。
-        let excess_depth_m = ((-input.irreducible_saturation).mul_add(
+        let excess_depth_m = ((-input.irreducible_saturation).contract(
             effective_porosity[relative],
             liquid_volume_fraction[relative],
         ) * state.thickness_m[slot])
@@ -747,9 +748,9 @@ fn combine_snow_values(target: SnowLayer, other: SnowLayer) -> SnowLayer {
     //   再相加 `hc = h + h2`；合并后的热容同样 `.FMA (wicec, cpice, wliqc*cpliq)`。
     // 没有液水时每个 FMA 的加数都是 0，与平铺写法逐位相同；有液水时平铺（且四项连加）差 1 ULP
     // （AT-Neu 第二年 12 月 31 日雪层分裂，第 432 轮）。
-    let capacity = |ice: f64, liquid: f64| ice.mul_add(f77(2117.27), liquid * f77(4188.0));
+    let capacity = |ice: f64, liquid: f64| ice.contract(f77(2117.27), liquid * f77(4188.0));
     let layer_enthalpy = |layer: SnowLayer| {
-        capacity(layer.ice_water_kg_m2, layer.liquid_water_kg_m2).mul_add(
+        capacity(layer.ice_water_kg_m2, layer.liquid_water_kg_m2).contract(
             layer.temperature_k - FREEZING_K,
             layer.liquid_water_kg_m2 * f77(0.3336e6),
         )
@@ -976,7 +977,7 @@ pub fn compact_snow_layers(
     // `MOD_SnowLayersCombineDivide.F90:153` / `MOD_RainSnowTemp.F90:203`：
     // `forc_wind = sqrt(forc_us**2 + forc_vs**2)`。
     let wind_speed = eastward_wind_m_s
-        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .contract(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
         .sqrt();
     for fortran_layer in state.layer_count + 1..=0 {
         let slot = layer_slot(fortran_layer);
@@ -1011,7 +1012,7 @@ pub fn compact_snow_layers(
             * (ice_density / f77(450.0))
             // `exp(0.1*td + c2*bi)`：GIMPLE 是 `exp(.FMA (td, 0.1, bi*0.023))`。
             * temperature_deficit
-                .mul_add(f77(0.1), ice_density * f77(23.0e-3))
+                .contract(f77(0.1), ice_density * f77(23.0e-3))
                 .exp()
             * f77(7.62237e6);
         let overburden = -(burden + water_mass / f77(2.0)) / viscosity;
@@ -1038,7 +1039,7 @@ pub fn compact_snow_layers(
             state.ice_water_kg_m2[slot] / f77(917.0) + state.liquid_water_kg_m2[slot] / f77(1000.0);
         // `dz*(1.0+pdzdtc*deltim)`：GIMPLE 是 `dz*.FMA (pdzdtc, deltim, 1.0)`。
         state.thickness_m[slot] = (state.thickness_m[slot]
-            * compaction_rate.mul_add(time_step_seconds, 1.0))
+            * compaction_rate.contract(time_step_seconds, 1.0))
         .max(minimum_thickness);
         burden += water_mass;
     }
@@ -1060,19 +1061,19 @@ fn wind_drift_compaction(
     //   `mo   = .FMA (frho, 0.66, 0.34*(-0.583*gs-0.833*sp+0.833))`（后者编译期折成常数）
     //   `si   = mo + .FNMA (exp(-0.085*wind), 2.868, 1.0)`
     //   `zpseudo += .FMA (dz*0.5, 3.25-si, zpseudo)` 的两次累加也都是 FMA。
-    let density_factor = (-(ice_density_kg_m3.max(50.0) - 50.0)).mul_add(0.0042, 1.25);
+    let density_factor = (-(ice_density_kg_m3.max(50.0) - 50.0)).contract(0.0042, 1.25);
     let mobility_index =
-        density_factor.mul_add(0.66, 0.34 * (-0.583 * 0.35e-3 - 0.833 * 1.0 + 0.833));
-    let mut driftability = mobility_index + (-(-0.085 * wind_speed_m_s).exp()).mul_add(2.868, 1.0);
+        density_factor.contract(0.66, 0.34 * (-0.583 * 0.35e-3 - 0.833 * 1.0 + 0.833));
+    let mut driftability = mobility_index + (-(-0.085 * wind_speed_m_s).exp()).contract(2.868, 1.0);
     if driftability <= 0.0 {
         *mobile = false;
         return 0.0;
     }
     driftability = driftability.min(3.25);
-    *pseudo_depth_m = (0.5 * thickness_m).mul_add(3.25 - driftability, *pseudo_depth_m);
+    *pseudo_depth_m = (0.5 * thickness_m).contract(3.25 - driftability, *pseudo_depth_m);
     let rate = -((350.0 - ice_density_kg_m3).max(0.0))
         * (driftability * (-*pseudo_depth_m / 0.1).exp() / (48.0 * 3600.0));
-    *pseudo_depth_m = (0.5 * thickness_m).mul_add(3.25 - driftability, *pseudo_depth_m);
+    *pseudo_depth_m = (0.5 * thickness_m).contract(3.25 - driftability, *pseudo_depth_m);
     rate
 }
 
@@ -1202,7 +1203,7 @@ pub fn relocate_soil_frost_ice(
     const ICE_HEAT_CAPACITY_J_KG_K: f64 = 2117.27;
     const WATER_HEAT_CAPACITY_J_KG_K: f64 = 4188.0;
     let excess = (-(ICE_DENSITY_KG_M3 * soil.porosity))
-        .mul_add(soil.thickness_m, soil.ice_water_kg_m2)
+        .contract(soil.thickness_m, soil.ice_water_kg_m2)
         .max(0.0);
     if excess <= 0.0 {
         return;
@@ -1233,18 +1234,18 @@ pub fn relocate_soil_frost_ice(
         let top = layer_slot(top_index);
         let ice = state.ice_water_kg_m2[top];
         let liquid = state.liquid_water_kg_m2[top];
-        let heat_capacity = ice.mul_add(
+        let heat_capacity = ice.contract(
             ICE_HEAT_CAPACITY_J_KG_K,
             liquid * WATER_HEAT_CAPACITY_J_KG_K,
         );
         let excess_heat_capacity = excess * ICE_HEAT_CAPACITY_J_KG_K;
         state.temperature_k[top] = state.temperature_k[top]
-            .mul_add(heat_capacity, excess_heat_capacity * soil.temperature_k)
+            .contract(heat_capacity, excess_heat_capacity * soil.temperature_k)
             / (excess_heat_capacity + heat_capacity);
         state.ice_water_kg_m2[top] = ice + excess;
         state.thickness_m[top] += added_depth;
         let interface_top = state.interface_depth_m[interface_slot(top_index)];
-        state.node_depth_m[top] = (-state.thickness_m[top]).mul_add(0.5, interface_top);
+        state.node_depth_m[top] = (-state.thickness_m[top]).contract(0.5, interface_top);
         state.interface_depth_m[interface_slot(top_index - 1)] =
             interface_top - state.thickness_m[top];
         state.previous_ice_fraction[top] =

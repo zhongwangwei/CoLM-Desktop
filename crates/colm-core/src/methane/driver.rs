@@ -6,6 +6,7 @@
 //! patch 级聚合状态调 `methane`，分量状态停在冷启动值。水稻、湖未移植。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use super::bgc_link::{self, BgcInputs};
 use super::column::{self, ColumnInput, ColumnResult, ComponentState, LakeHost, LakeState};
@@ -337,14 +338,14 @@ pub fn soil_step(
     };
     let fsat = comp.fsat_bef;
     let col_sum = |x: &[f64; NL_SOIL]| {
-        (0..NL_SOIL).fold(0.0f64, |acc, k| x[k].mul_add(dz[sn(k as i32 + 1)], acc))
+        (0..NL_SOIL).fold(0.0f64, |acc, k| x[k].contract(dz[sn(k as i32 + 1)], acc))
     };
     let totcol_unsat = col_sum(&comp.conc_methane_unsat);
     let totcol_sat = col_sum(&comp.conc_methane_sat);
     let totcol_before = if direct {
         previous_totcol
     } else if (0.0..=1.0).contains(&fsat) {
-        fsat.mul_add(totcol_sat, (1.0 - fsat) * totcol_unsat)
+        fsat.contract(totcol_sat, (1.0 - fsat) * totcol_unsat)
     } else {
         0.5 * (totcol_sat + totcol_unsat)
     };
@@ -765,16 +766,16 @@ fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
                  ru: &mut [f64; NL_SOIL],
                  rs: &mut [f64; NL_SOIL]| {
         for j in 0..NL_SOIL {
-            let s_mix = |a: f64, b: f64| b.mul_add(hs, (1.0 - hs) * a);
-            let r_mix = |a: f64, b: f64| b.mul_add(hr, (1.0 - hr) * a);
+            let s_mix = |a: f64, b: f64| b.contract(hs, (1.0 - hs) * a);
+            let r_mix = |a: f64, b: f64| b.contract(hr, (1.0 - hr) * a);
             if rnew > rold {
                 let delta = rnew - rold;
-                let mixed = r_mix(ru[j], rs[j]).mul_add(rold, delta * s_mix(su[j], ss[j])) / rnew;
+                let mixed = r_mix(ru[j], rs[j]).contract(rold, delta * s_mix(su[j], ss[j])) / rnew;
                 ru[j] = mixed;
                 rs[j] = mixed;
             } else {
                 let delta = rold - rnew;
-                let mixed = (1.0 - rold).mul_add(s_mix(su[j], ss[j]), delta * r_mix(ru[j], rs[j]))
+                let mixed = (1.0 - rold).contract(s_mix(su[j], ss[j]), delta * r_mix(ru[j], rs[j]))
                     / (1.0 - rnew);
                 su[j] = mixed;
                 ss[j] = mixed;
@@ -803,7 +804,7 @@ fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
                 *r = *s;
             } else {
                 let delta = rnew - rold;
-                *r = rold.mul_add(*r, *s * delta) / rnew;
+                *r = rold.contract(*r, *s * delta) / rnew;
             }
         } else {
             if !valid(*r) {
@@ -813,7 +814,7 @@ fn repartition(patch: &mut MethanePatch, old: f64, new: f64) {
                 *s = *r;
             } else {
                 let delta = rold - rnew;
-                *s = s.mul_add(1.0 - rold, delta * *r) / (1.0 - rnew);
+                *s = s.contract(1.0 - rold, delta * *r) / (1.0 - rnew);
             }
         }
     };
@@ -872,7 +873,7 @@ impl LakeSubstepMean {
             (&mut self.grnd_cond_sat, r.sat.grnd_cond),
             (&mut self.grnd_cond_lake, patch.lake.grnd_cond),
         ] {
-            *acc = value.mul_add(dt, *acc);
+            *acc = value.contract(dt, *acc);
         }
     }
 

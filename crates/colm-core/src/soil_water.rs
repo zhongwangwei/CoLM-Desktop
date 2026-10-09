@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::f77;
 
@@ -68,7 +69,7 @@ pub fn solve_campbell_soil_water(
         if plant_hydraulic_uptake {
             net_inflow - input.root_flux_mm_s[layer]
         } else {
-            (-input.transpiration_mm_s).mul_add(input.root_fraction[layer], net_inflow)
+            (-input.transpiration_mm_s).contract(input.root_fraction[layer], net_inflow)
         }
     };
     let root_uptake_mm_s = if plant_hydraulic_uptake {
@@ -140,8 +141,8 @@ pub fn solve_campbell_soil_water(
         // `dhkdw1 = hksati*(2*bsw+3)*(vol/porsl)**(2*bsw+2)/porsl`。
         // **两个指数是各自算出来的**（GIMPLE：`FMA(bsw,2,3)` 与 `FMA(bsw,2,2)`），
         // 不能写成 `exponent - 1.0` —— 后者多舍入一次，跨 binade 时差 1 ULP。
-        let exponent = f77(2.0).mul_add(input.clapp_hornberger_b[source], 3.0);
-        let exponent_lower = f77(2.0).mul_add(input.clapp_hornberger_b[source], 2.0);
+        let exponent = f77(2.0).contract(input.clapp_hornberger_b[source], 3.0);
+        let exponent_lower = f77(2.0).contract(input.clapp_hornberger_b[source], 2.0);
         let conductivity =
             input.saturated_hydraulic_conductivity_mm_s[source] * saturation.lpow(exponent);
         let derivative = input.saturated_hydraulic_conductivity_mm_s[source]
@@ -178,11 +179,11 @@ pub fn solve_campbell_soil_water(
     // `soilwater` 的三对角装配（`:2186-2192` 那一组）：GIMPLE 是
     // `FMS(gradient, 导数, 商)` / `FMA(gradient, 导数, 商)` —— 商先各自舍入，
     // 与 `gradient` 相乘的那个乘积被吸收。三处循环体（首层/中间/末层）同型。
-    outflow_lower_derivative[0] = -gradient[0].mul_add(
+    outflow_lower_derivative[0] = -gradient[0].contract(
         conductivity_lower_derivative[0],
         -(hydraulic_conductivity_mm_s[0] * potential_derivative[0] / separation_mm[0]),
     );
-    outflow_upper_derivative[0] = -gradient[0].mul_add(
+    outflow_upper_derivative[0] = -gradient[0].contract(
         conductivity_upper_derivative[0],
         hydraulic_conductivity_mm_s[0] * potential_derivative[1] / separation_mm[0],
     );
@@ -192,23 +193,23 @@ pub fn solve_campbell_soil_water(
 
     for layer in 1..layers - 1 {
         let inflow = -hydraulic_conductivity_mm_s[layer - 1] * gradient[layer - 1];
-        let inflow_lower_derivative = -gradient[layer - 1].mul_add(
+        let inflow_lower_derivative = -gradient[layer - 1].contract(
             conductivity_lower_derivative[layer - 1],
             -(hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer - 1]
                 / separation_mm[layer - 1]),
         );
-        let inflow_upper_derivative = -gradient[layer - 1].mul_add(
+        let inflow_upper_derivative = -gradient[layer - 1].contract(
             conductivity_upper_derivative[layer - 1],
             hydraulic_conductivity_mm_s[layer - 1] * potential_derivative[layer]
                 / separation_mm[layer - 1],
         );
         outflow[layer] = -hydraulic_conductivity_mm_s[layer] * gradient[layer];
-        outflow_lower_derivative[layer] = -gradient[layer].mul_add(
+        outflow_lower_derivative[layer] = -gradient[layer].contract(
             conductivity_lower_derivative[layer],
             -(hydraulic_conductivity_mm_s[layer] * potential_derivative[layer]
                 / separation_mm[layer]),
         );
-        outflow_upper_derivative[layer] = -gradient[layer].mul_add(
+        outflow_upper_derivative[layer] = -gradient[layer].contract(
             conductivity_upper_derivative[layer],
             hydraulic_conductivity_mm_s[layer] * potential_derivative[layer + 1]
                 / separation_mm[layer],
@@ -222,12 +223,12 @@ pub fn solve_campbell_soil_water(
 
     let last = layers - 1;
     let inflow = -hydraulic_conductivity_mm_s[last - 1] * gradient[last - 1];
-    let inflow_lower_derivative = -gradient[last - 1].mul_add(
+    let inflow_lower_derivative = -gradient[last - 1].contract(
         conductivity_lower_derivative[last - 1],
         -(hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last - 1]
             / separation_mm[last - 1]),
     );
-    let inflow_upper_derivative = -gradient[last - 1].mul_add(
+    let inflow_upper_derivative = -gradient[last - 1].contract(
         conductivity_upper_derivative[last - 1],
         hydraulic_conductivity_mm_s[last - 1] * potential_derivative[last]
             / separation_mm[last - 1],
@@ -526,7 +527,7 @@ fn update_groundwater_with_resolver(
     // `MOD_SoilSnowHydrology.F90` 的 `groundwater`（被 `water_2014` 内联）：
     // `xs1 = wliq(1) - (pondmx+porsl(1)*dzmm(1)-wice(1))`；
     // GIMPLE 把 `porsl(1)*dzmm(1)` 收进加法：`FMA(porsl[0], dzmm[0], pondmx)`。
-    let top_capacity = input.porosity[0].mul_add(thickness_mm[0], input.ponding_limit_mm)
+    let top_capacity = input.porosity[0].contract(thickness_mm[0], input.ponding_limit_mm)
         - input.ice_water_kg_m2[0];
     let excess_top = (liquid_water_kg_m2[0] - top_capacity).max(0.0);
     liquid_water_kg_m2[0] = liquid_water_kg_m2[0].min(top_capacity);
@@ -544,7 +545,7 @@ fn update_groundwater_with_resolver(
         // `:2719 wa = wa + rsubst*deltim` 是 `.FMA (deltim, rsubst, wa)`。
         aquifer_water_mm = input
             .time_step_seconds
-            .mul_add(subsurface_runoff_mm_s, aquifer_water_mm);
+            .contract(subsurface_runoff_mm_s, aquifer_water_mm);
         subsurface_runoff_mm_s = 0.0;
     }
     ensure!(

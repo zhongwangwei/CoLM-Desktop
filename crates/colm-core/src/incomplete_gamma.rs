@@ -30,6 +30,7 @@
 )]
 
 use crate::atmosphere::fortran_sin;
+use colm_numeric::Contract;
 
 /// `E = epsilon(1.)`（real(8)）。
 const EPS: f64 = f64::EPSILON;
@@ -131,7 +132,7 @@ const D70: f64 = 0.344367606892378e-03;
 fn horner(z: f64, coeffs: &[f64]) -> f64 {
     let mut acc = coeffs[0];
     for &c in &coeffs[1..] {
-        acc = acc.mul_add(z, c);
+        acc = acc.contract(z, c);
     }
     acc
 }
@@ -232,7 +233,7 @@ fn gratio_core(a: f64, x: f64, ind: i32) -> Option<(f64, f64)> {
             }
         }
         // 标号 11
-        let t1 = a.mul_add(x.ln(), -x);
+        let t1 = a.contract(x.ln(), -x);
         let r = t1.exp() / gamma(a);
         return Some(label_30(a, x, r, acc, x0));
     }
@@ -249,7 +250,7 @@ fn gratio_core(a: f64, x: f64, ind: i32) -> Option<(f64, f64)> {
     if x < 1.1 {
         return Some(taylor_110(a, x, ax, acc));
     }
-    let t1 = a.mul_add(x.ln(), -x);
+    let t1 = a.contract(x.ln(), -x);
     let u = a * t1.exp();
     if u == 0.0 {
         return Some(P1_Q0);
@@ -385,7 +386,7 @@ fn taylor_110(a: f64, x: f64, ax: f64, acc: f64) -> (f64, f64) {
             break;
         }
     }
-    let j = ax * x.mul_add(sum / 6.0 - 0.5 / (a + 2.0), 1.0 / (a + 1.0));
+    let j = ax * x.contract(sum / 6.0 - 0.5 / (a + 2.0), 1.0 / (a + 1.0));
 
     let z = a * x.ln();
     let h = gam1(a);
@@ -399,7 +400,7 @@ fn taylor_110(a: f64, x: f64, ax: f64, acc: f64) -> (f64, f64) {
     // 标号 135
     let l = rexp(z);
     let w = (l + 0.5) + 0.5;
-    let q = j.mul_add(w, -l).mul_add(g, -h);
+    let q = j.contract(w, -l).contract(g, -h);
     if q < 0.0 {
         return P1_Q0;
     }
@@ -428,13 +429,13 @@ fn cont_frac_170(a: f64, x: f64, r: f64, acc: f64) -> (f64, f64) {
     let mut b2n = x + (1.0 - a);
     let mut c = 1.0_f64;
     let an0 = loop {
-        a2nm1 = x.mul_add(a2n, a2nm1 * c);
-        b2nm1 = x.mul_add(b2n, b2nm1 * c);
+        a2nm1 = x.contract(a2n, a2nm1 * c);
+        b2nm1 = x.contract(b2n, b2nm1 * c);
         let am0 = a2nm1 / b2nm1;
         c += 1.0;
         let cma = c - a;
-        a2n = a2n.mul_add(cma, a2nm1);
-        b2n = b2n.mul_add(cma, b2nm1);
+        a2n = a2n.contract(cma, a2nm1);
+        b2n = b2n.contract(cma, b2nm1);
         let an0 = a2n / b2n;
         if !((an0 - am0).abs() >= tol * an0) {
             break an0;
@@ -678,7 +679,7 @@ fn erfc1(ind: i32, x: f64) -> f64 {
         return if x < 0.0 { 2.0 - e } else { e };
     }
     if x < 0.0 {
-        x2.exp().mul_add(2.0, -e)
+        x2.exp().contract(2.0, -e)
     } else {
         e
     }
@@ -729,10 +730,10 @@ fn rlog(x: f64) -> f64 {
         // 标号 10：U = DBLE(X) - 0.7D0，再 U = U/0.7（两个 0.7 都是 f64）
         let u = x - 0.7;
         let u = u / 0.7;
-        (u, (-u).mul_add(0.3, A))
+        (u, (-u).contract(0.3, A))
     } else if x > 1.18 {
         // 标号 20：U = 0.75D0*DBLE(X) - 1.D0，GIMPLE 为 `.FMA (x, 0.75, -1.0)`
-        let u = x.mul_add(0.75, -1.0);
+        let u = x.contract(0.75, -1.0);
         (u, u / 3.0 + B)
     } else {
         ((x - 0.5) - 0.5, 0.0)
@@ -741,7 +742,7 @@ fn rlog(x: f64) -> f64 {
     let r = u / (u + 2.0);
     let t = r * r;
     let w = horner(t, &[P2, P1, P0]) / horner(t, &[Q2, Q1, 1.0]);
-    (t * 2.0).mul_add((-r).mul_add(w, 1.0 / (1.0 - r)), w1)
+    (t * 2.0).contract((-r).contract(w, 1.0 / (1.0 - r)), w1)
 }
 
 // ---------------------------------------------------------------------------
@@ -859,7 +860,7 @@ fn gamma_large(a: f64) -> f64 {
     let g = horner(t, &[R1, R2, R3, R4, R5]) / x;
     let lnx = glog(x);
     // `G = (D + G) + (Z - 0.5D0)*(LNX - 1.D0)`：GIMPLE 为 `.FMA (z - 0.5, lnx - 1, g + D)`
-    let g = (x - 0.5).mul_add(lnx - 1.0, g + D);
+    let g = (x - 0.5).contract(lnx - 1.0, g + D);
     // `W = G`、`T = G - DBLE(W)`：同为 f64，有限时 T 恒为 0，照 GIMPLE 保留
     let w = g;
     if w > EXPARG_LIMIT {
@@ -949,7 +950,7 @@ fn glog(x: f64) -> f64 {
     let t = (x - nf) / (x + nf);
     let t2 = t * t;
     // `GLOG = W(N - 14) + Z`：`Z = (...)*T` 的乘法并入 `.FMA (poly, t, w)`
-    horner(t2, &[C1, C2, C3, 2.0]).mul_add(t, GLOG_W[(n - 15) as usize])
+    horner(t2, &[C1, C2, C3, 2.0]).contract(t, GLOG_W[(n - 15) as usize])
 }
 
 /// `REAL FUNCTION GAM1(A)`：1/Γ(a+1) - 1，-0.5 <= a <= 1.5。

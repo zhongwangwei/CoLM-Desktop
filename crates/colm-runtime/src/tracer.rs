@@ -1,6 +1,7 @@
 //! 示踪物的运行时部分：namelist 与参数文件 → [`TracerSet`]，陆面示踪物重启的读写
 //! （`MOD_Tracer_Rest`）。
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -350,7 +351,7 @@ pub fn end_of_step(
         output.energy.total_evaporation_kg_m2_s - flood.map_or(0.0, |flood| flood.evaporation_mm_s);
     let runoff = output.water.soil.total_runoff_mm_s;
     let errorw = (-(((precipitation + flood_input_wb) - evaporation_wb) - runoff))
-        .mul_add(deltim, end_total - initial_total_water_mm);
+        .contract(deltim, end_total - initial_total_water_mm);
     {
         let mut tracker = runtime
             .tracker

@@ -5,6 +5,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{initialize_monin_obukhov, monin_obukhov, MoninObukhovInitialInput, MoninObukhovInput};
 
@@ -68,7 +69,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     let impervious_fraction = input.cover_fraction[3] / ground_fraction;
     let pervious_fraction = input.cover_fraction[4] / ground_fraction;
     // `MOD_Urban_GroundFlux.F90:141` `.FMA (tgimp, fgimp, tgper*fgper)`
-    let ground_temperature_k = input.impervious_temperature_k.mul_add(
+    let ground_temperature_k = input.impervious_temperature_k.contract(
         impervious_fraction,
         input.pervious_temperature_k * pervious_fraction,
     );
@@ -86,17 +87,17 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
     let wet_fraction = pervious_fraction + impervious_wet_fraction * impervious_fraction;
     // `:160` `.FMA (qgimp*fgimp, fwet, qgper*fgper) / fwetfac`
     let ground_specific_humidity =
-        (input.impervious_specific_humidity * impervious_fraction).mul_add(
+        (input.impervious_specific_humidity * impervious_fraction).contract(
             impervious_wet_fraction,
             input.pervious_specific_humidity * pervious_fraction,
         ) / wet_fraction;
     let temperature_difference_k = input.reference_temperature_k - ground_temperature_k;
     let humidity_difference_kg_kg = input.reference_specific_humidity - ground_specific_humidity;
     // `:172` `.FMA (dth, .FMA (qm, 0.61, 1), dqh*(th*0.61))`
-    let moist_factor = input.reference_specific_humidity.mul_add(f77(0.61), 1.0);
+    let moist_factor = input.reference_specific_humidity.contract(f77(0.61), 1.0);
     let potential_factor = input.potential_temperature_k * f77(0.61);
     let virtual_temperature_difference_k = temperature_difference_k
-        .mul_add(moist_factor, humidity_difference_kg_kg * potential_factor);
+        .contract(moist_factor, humidity_difference_kg_kg * potential_factor);
     let mut stability = initialize_monin_obukhov(MoninObukhovInitialInput {
         reference_wind_m_s: input.reference_wind_m_s,
         potential_temperature_k: input.potential_temperature_k,
@@ -136,7 +137,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
             .exp();
         // `:193` `.FMA (1+0.61*qm, tstar, (th*0.61)*qstar)`
         let virtual_temperature_scale =
-            moist_factor.mul_add(temperature_scale_k, potential_factor * moisture_scale);
+            moist_factor.contract(temperature_scale_k, potential_factor * moisture_scale);
         let raw_zeta = input.wind_height_m * VON_KARMAN * GRAVITY_M_S2 * virtual_temperature_scale
             / (profile.friction_velocity_m_s.powi(2) * input.virtual_potential_temperature_k);
         dimensionless_height = if raw_zeta >= 0.0 {
@@ -157,7 +158,7 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
             // `:207` `sqrt(.FMA (ur, ur, wc*wc))`
             input
                 .reference_wind_m_s
-                .mul_add(
+                .contract(
                     input.reference_wind_m_s,
                     convective_velocity * convective_velocity,
                 )
@@ -176,11 +177,11 @@ pub fn urban_ground_flux(input: UrbanGroundFluxInput) -> Result<UrbanGroundFluxS
         surface.expect("urban ground-flux loop always performs at least one iteration");
     Ok(UrbanGroundFluxState {
         // `:223-224` `.FMA (tstar, fh2m/vonkar - fh/vonkar, thm)`
-        reference_temperature_k: temperature_scale_k.mul_add(
+        reference_temperature_k: temperature_scale_k.contract(
             profile.heat_at_2m / VON_KARMAN - profile.heat / VON_KARMAN,
             input.reference_temperature_k,
         ),
-        reference_specific_humidity: moisture_scale.mul_add(
+        reference_specific_humidity: moisture_scale.contract(
             profile.moisture_at_2m / VON_KARMAN - profile.moisture / VON_KARMAN,
             input.reference_specific_humidity,
         ),

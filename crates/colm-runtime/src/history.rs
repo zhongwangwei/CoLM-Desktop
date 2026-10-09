@@ -13,6 +13,7 @@
 //! （[`DECLARED_BUT_UNFILLED`] / [`DECLARED_ONLY`]）是**上游在本算例里也留空**，
 //! 不是移植缺 —— 这两件事历史上被混为一谈四次，见 [`UNFILLED`] 的注释。
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -1756,7 +1757,7 @@ pub fn element_surface_input(
         .fold(0.0, |sum, (_, fraction)| sum + fraction);
     let mean = |value: fn(&colm_core::HistoryDiagnosticsInput) -> f64| {
         patches.iter().fold(0.0, |sum, (input, fraction)| {
-            value(input).mul_add(*fraction, sum)
+            value(input).contract(*fraction, sum)
         }) / weight
     };
     Ok(colm_core::HistoryDiagnosticsInput {
@@ -2330,7 +2331,7 @@ pub fn set_lct_balance_errors(
         // CATCHMENT 内核（`CoLMMAIN.F90:1523`）：没有 `rnof` 这一项时 GCC 不收缩，先乘后减。
         (end_water_storage_mm - reference.initial_total_water_mm) - net_wb * dt
     } else {
-        (-net_wb).mul_add(dt, end_water_storage_mm - reference.initial_total_water_mm)
+        (-net_wb).contract(dt, end_water_storage_mm - reference.initial_total_water_mm)
     };
     let xerr = errorw / reference.time_step_seconds;
 

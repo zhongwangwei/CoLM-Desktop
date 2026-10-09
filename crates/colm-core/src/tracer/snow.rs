@@ -26,6 +26,7 @@
 //!
 //! 这些路径都不调用同位素分馏（`MOD_Tracer_Frac`），因此不需要 `TracerPhysics`。
 
+use colm_numeric::Contract;
 use std::fmt;
 
 use super::{soisno_slot, PatchTracerState, TracerPools, TracerSet, MAX_SNOW_LAYERS, TRC_TINY};
@@ -603,7 +604,7 @@ pub fn tracer_relocate_soil_frost_ice(
 ) -> Option<FrostRelocation> {
     debug_assert_eq!(set.len(), state.pools.len());
     let excess = (-(DENICE * input.porsl1))
-        .mul_add(input.dz1, input.wice1)
+        .contract(input.dz1, input.wice1)
         .max(0.0);
     if excess <= 0.0 {
         return None;
@@ -617,19 +618,19 @@ pub fn tracer_relocate_soil_frost_ice(
         let top = soisno_slot(0);
         for p in state.pools.iter_mut() {
             if created_layer {
-                p.wice_soisno[top] = p.wice_soisno[soil].mul_add(fraction, p.scv);
+                p.wice_soisno[top] = p.wice_soisno[soil].contract(fraction, p.scv);
                 p.scv = 0.0;
                 p.wliq_soisno[top] = 0.0;
                 p.solid_soisno[top] = 0.0;
             } else {
-                p.scv = p.wice_soisno[soil].mul_add(fraction, p.scv);
+                p.scv = p.wice_soisno[soil].contract(fraction, p.scv);
             }
             p.wice_soisno[soil] *= 1.0 - fraction;
         }
     } else {
         let top = soisno_slot(input.snl + 1);
         for p in state.pools.iter_mut() {
-            p.wice_soisno[top] = p.wice_soisno[soil].mul_add(fraction, p.wice_soisno[top]);
+            p.wice_soisno[top] = p.wice_soisno[soil].contract(fraction, p.wice_soisno[top]);
             p.wice_soisno[soil] *= 1.0 - fraction;
         }
     }

@@ -10,6 +10,7 @@
 //! 逐条照新的 GIMPLE（`.FMA`/`.FNMA` 才用 `mul_add`）。
 
 /// An analytic least-squares problem in MINPACK's `lmder` form.
+use colm_numeric::Contract;
 pub(crate) trait LeastSquaresProblem {
     /// Write `m` residuals for `x`. Return false for an invalid trial point.
     fn residual(&self, x: &[f64], output: &mut [f64]) -> bool;
@@ -65,10 +66,10 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
         for j in 0..n {
             let diagonal = fjac[j * n + j];
             if diagonal != 0.0 {
-                let sum = (j..m).fold(0.0, |sum, row| wa4[row].mul_add(fjac[row * n + j], sum));
+                let sum = (j..m).fold(0.0, |sum, row| wa4[row].contract(fjac[row * n + j], sum));
                 let scale = -sum / diagonal;
                 for row in j..m {
-                    wa4[row] = fjac[row * n + j].mul_add(scale, wa4[row]);
+                    wa4[row] = fjac[row * n + j].contract(scale, wa4[row]);
                 }
             }
             fjac[j * n + j] = wa1[j];
@@ -81,7 +82,7 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
                 let column = ipvt[j];
                 if wa2[column] != 0.0 {
                     let sum =
-                        (0..=j).fold(0.0, |sum, row| qtf[row].mul_add(fjac[row * n + j], sum));
+                        (0..=j).fold(0.0, |sum, row| qtf[row].contract(fjac[row * n + j], sum));
                     gnorm = gnorm.max((sum / fnorm / wa2[column]).abs());
                 }
             }
@@ -114,7 +115,7 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
             let actred = if 0.1 * fnorm1 < fnorm {
                 // Original MOD_Utils contracts the square and subtraction.
                 let ratio = fnorm1 / fnorm;
-                (-ratio).mul_add(ratio, 1.0)
+                (-ratio).contract(ratio, 1.0)
             } else {
                 -1.0
             };
@@ -123,14 +124,14 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
                 let column = ipvt[j];
                 let step = wa1[column];
                 for row in 0..=j {
-                    wa3[row] = fjac[row * n + j].mul_add(step, wa3[row]);
+                    wa3[row] = fjac[row * n + j].contract(step, wa3[row]);
                 }
             }
             let temp1 = enorm(&wa3) / fnorm;
             let temp2 = par.sqrt() * pnorm / fnorm;
             // `:1636` `temp1**2 + temp2**2/0.5`：GIMPLE 为 `.FMA (temp2², 2.0, temp1²)`
             let (temp1_sq, temp2_sq) = (temp1 * temp1, temp2 * temp2);
-            let prered = temp2_sq.mul_add(2.0, temp1_sq);
+            let prered = temp2_sq.contract(2.0, temp1_sq);
             let dirder = -(temp1_sq + temp2_sq);
             let ratio = if prered != 0.0 { actred / prered } else { 0.0 };
 
@@ -140,7 +141,7 @@ pub(crate) fn lmder(problem: &impl LeastSquaresProblem, x: &mut [f64], m: usize)
                 } else {
                     // `:1656` `0.5D0*dirder/(dirder + 0.5D0*actred)`：GIMPLE 为
                     // `(dirder*0.5) / .FMS (actred, 0.5, temp1² + temp2²)`，后者恰为 `-dirder`
-                    (dirder * 0.5) / actred.mul_add(0.5, dirder)
+                    (dirder * 0.5) / actred.contract(0.5, dirder)
                 };
                 if 0.1 * fnorm1 >= fnorm || temp < 0.1 {
                     temp = 0.1;
@@ -210,7 +211,7 @@ fn lmpar(
         wa1[j] /= r[j * n + j];
         let value = wa1[j];
         for row in 0..j {
-            wa1[row] = (-r[row * n + j]).mul_add(value, wa1[row]);
+            wa1[row] = (-r[row * n + j]).contract(value, wa1[row]);
         }
     }
     for j in 0..n {
@@ -233,14 +234,14 @@ fn lmpar(
             wa1[j] = diag[column] * (wa2[column] / dxnorm);
         }
         for j in 0..n {
-            let sum = (0..j).fold(0.0, |sum, row| wa1[row].mul_add(r[row * n + j], sum));
+            let sum = (0..j).fold(0.0, |sum, row| wa1[row].contract(r[row * n + j], sum));
             wa1[j] = (wa1[j] - sum) / r[j * n + j];
         }
         let norm = enorm(&wa1);
         parl = (fp / delta / norm) / norm;
     }
     for j in 0..n {
-        let sum = (0..=j).fold(0.0, |sum, row| qtb[row].mul_add(r[row * n + j], sum));
+        let sum = (0..=j).fold(0.0, |sum, row| qtb[row].contract(r[row * n + j], sum));
         wa1[j] = sum / diag[ipvt[j]];
     }
     let gnorm = enorm(&wa1);
@@ -281,7 +282,7 @@ fn lmpar(
             wa1[j] /= sdiag[j];
             let value = wa1[j];
             for row in j + 1..n {
-                wa1[row] = (-r[row * n + j]).mul_add(value, wa1[row]);
+                wa1[row] = (-r[row * n + j]).contract(value, wa1[row]);
             }
         }
         let norm = enorm(&wa1);
@@ -330,16 +331,16 @@ fn qrfac(a: &mut [f64], m: usize, n: usize) -> (Vec<usize>, Vec<f64>, Vec<f64>) 
                 // Production MOD_Utils fuses the ordered dot and rank-one
                 // update. Separate rounding perturbs nearly dependent columns.
                 let dot = (j..m).fold(0.0, |sum, row| {
-                    a[row * n + j].mul_add(a[row * n + column], sum)
+                    a[row * n + j].contract(a[row * n + column], sum)
                 });
                 let scale = dot / a[j * n + j];
                 for row in j..m {
-                    a[row * n + column] = (-scale).mul_add(a[row * n + j], a[row * n + column]);
+                    a[row * n + column] = (-scale).contract(a[row * n + j], a[row * n + column]);
                 }
                 if rdiag[column] != 0.0 {
                     let temp = a[j * n + column] / rdiag[column];
                     // `:2249` `sqrt(max(0, 1 - temp**2))`：GIMPLE 为 `.FNMA (temp, temp, 1.0)`
-                    rdiag[column] *= (-temp).mul_add(temp, 1.0).max(0.0).sqrt();
+                    rdiag[column] *= (-temp).contract(temp, 1.0).max(0.0).sqrt();
                     if 0.05 * (rdiag[column] / wa[column]).powi(2) <= f64::EPSILON {
                         rdiag[column] = enorm_column(a, m, n, j + 1, column);
                         wa[column] = rdiag[column];
@@ -388,13 +389,13 @@ fn qrsolv(
                     (cosine * tangent, cosine)
                 };
                 // MOD_Utils fuses the cosine product after rounding the sine product.
-                r[k * n + k] = cosine.mul_add(r[k * n + k], sine * sdiag[k]);
-                let temp = cosine.mul_add(wa[k], sine * qtbpj);
-                qtbpj = cosine.mul_add(qtbpj, -sine * wa[k]);
+                r[k * n + k] = cosine.contract(r[k * n + k], sine * sdiag[k]);
+                let temp = cosine.contract(wa[k], sine * qtbpj);
+                qtbpj = cosine.contract(qtbpj, -sine * wa[k]);
                 wa[k] = temp;
                 for row in k + 1..n {
-                    let temp = cosine.mul_add(r[row * n + k], sine * sdiag[row]);
-                    sdiag[row] = cosine.mul_add(sdiag[row], -sine * r[row * n + k]);
+                    let temp = cosine.contract(r[row * n + k], sine * sdiag[row]);
+                    sdiag[row] = cosine.contract(sdiag[row], -sine * r[row * n + k]);
                     r[row * n + k] = temp;
                 }
             }
@@ -413,7 +414,7 @@ fn qrsolv(
     }
     for offset in 0..nsing {
         let j = nsing - 1 - offset;
-        let sum = (j + 1..nsing).fold(0.0, |sum, row| wa[row].mul_add(r[row * n + j], sum));
+        let sum = (j + 1..nsing).fold(0.0, |sum, row| wa[row].contract(r[row * n + j], sum));
         wa[j] = (wa[j] - sum) / sdiag[j];
     }
     for j in 0..n {
@@ -425,21 +426,21 @@ fn qrsolv_rotation_coefficient(t: f64) -> f64 {
     debug_assert!(t.is_finite() && t.abs() <= 1.0);
     // `:2420/2424` `0.5D0/sqrt(0.25D0 + 0.25D0*t**2)`：GIMPLE 为
     // `0.5 / sqrt(.FMA (t*t, 0.25, 0.25))`
-    0.5 / (t * t).mul_add(0.25, 0.25).sqrt()
+    0.5 / (t * t).contract(0.25, 0.25).sqrt()
 }
 
 fn enorm(values: &[f64]) -> f64 {
     // Production Fortran contracts SUM(x**2); retain its single rounding.
     values
         .iter()
-        .fold(0.0, |sum, value| value.mul_add(*value, sum))
+        .fold(0.0, |sum, value| value.contract(*value, sum))
         .sqrt()
 }
 
 fn enorm_column(a: &[f64], m: usize, n: usize, start: usize, column: usize) -> f64 {
     (start..m)
         .fold(0.0, |sum, row| {
-            a[row * n + column].mul_add(a[row * n + column], sum)
+            a[row * n + column].contract(a[row * n + column], sum)
         })
         .sqrt()
 }

@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `CNVegStructUpdate`：更新 `tsai_p`（每步）与 LAI 反馈下的 `tlai_p`/`lai_p`，再汇总 patch LAI。
 pub fn cn_veg_struct_update(
@@ -43,9 +44,9 @@ pub fn cn_veg_struct_update(
             tlai_old = p.tlai_p[m];
             tsai_old = p.tsai_p[m];
             if sw.laifeedback {
-                p.tlai_p[m] = ((c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx))
-                    - ((c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx)).mul_add(
-                        c.slatop[class].mul_add(s.pft.leafc_p[m], natlaimx),
+                p.tlai_p[m] = ((c.slatop[class].contract(s.pft.leafc_p[m], natlaimx))
+                    - ((c.slatop[class].contract(s.pft.leafc_p[m], natlaimx)).contract(
+                        c.slatop[class].contract(s.pft.leafc_p[m], natlaimx),
                         -(4.0 * theta * natlaimx * c.slatop[class] * s.pft.leafc_p[m]),
                     ))
                     .sqrt())
@@ -62,7 +63,7 @@ pub fn cn_veg_struct_update(
             }
             tsai_min *= 0.5;
             p.tsai_p[m] =
-                (tsai_alpha.mul_add(tsai_old, (tlai_old - p.tlai_p[m]).max(0.0))).max(tsai_min);
+                (tsai_alpha.contract(tsai_old, (tlai_old - p.tlai_p[m]).max(0.0))).max(tsai_min);
             if c.woody[class] == 1.0 {
             } else if ivt >= NPCROPMIN {
                 if sw.crop {
@@ -87,13 +88,13 @@ pub fn cn_veg_struct_update(
                     if s.pft.harvdate_p[m] < 999.0 && p.tlai_p[m] == 0.0 {
                         s.pft.peaklai_p[m] = 0;
                         if sw.fire {
-                            p.tsai_p[m] = 0.25 * ((-s.patch.farea_burned[0]).mul_add(0.90, 1.0));
+                            p.tsai_p[m] = 0.25 * ((-s.patch.farea_burned[0]).contract(0.90, 1.0));
                         }
                     }
                 }
             }
         }
-        p.lai[0] = p.lai_p[m].mul_add(p.pftfrac[m], p.lai[0]);
+        p.lai[0] = p.lai_p[m].contract(p.pftfrac[m], p.lai[0]);
     }
     p.tlai[0] = p.lai[0];
 }

@@ -20,6 +20,7 @@
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `CNNFert`：施肥进入土壤矿质 N。
 pub fn cn_n_fert(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: BgcSwitches) {
@@ -50,17 +51,17 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
     swat = 0.0;
     rz = 0.0;
     for j in 0..d.nl_soil {
-        if 0.5_f64.mul_add(p.dz_soi[j], p.z_soi[j]) <= 0.05 {
-            rwat = ((-p.porsl[j]).mul_add(
+        if 0.5_f64.contract(p.dz_soi[j], p.z_soi[j]) <= 0.05 {
+            rwat = ((-p.porsl[j]).contract(
                 (316230.0 / (-p.psi0[j])).lpow(-(1.0 / p.bsw[j])),
                 p.h2osoi[j],
             ))
-            .mul_add(p.dz_soi[j], rwat);
-            swat = ((-p.porsl[j]).mul_add(
+            .contract(p.dz_soi[j], rwat);
+            swat = ((-p.porsl[j]).contract(
                 (316230.0 / (-p.psi0[j])).lpow(-(1.0 / p.bsw[j])),
                 p.porsl[j],
             ))
-            .mul_add(p.dz_soi[j], swat);
+            .contract(p.dz_soi[j], swat);
             rz += p.dz_soi[j];
         }
     }
@@ -76,13 +77,13 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
         if s.pft.croplive_p[m] && (ivt == 23 || ivt == 24 || ivt == 77 || ivt == 78) {
             if s.patch.fpg[0] < 1.0 {
                 soy_ndemand = (-s.pft_flux.plant_ndemand_p[m])
-                    .mul_add(s.patch.fpg[0], s.pft_flux.plant_ndemand_p[m]);
+                    .contract(s.patch.fpg[0], s.pft_flux.plant_ndemand_p[m]);
                 fxw = wf / 0.85;
                 if s.patch.sminn[0] > sminnthreshold1 {
                     fxn = 0.0;
                 } else if s.patch.sminn[0] > sminnthreshold2 && s.patch.sminn[0] <= sminnthreshold1
                 {
-                    fxn = (-0.005_f64).mul_add(s.patch.sminn[0] * 10.0, 1.5);
+                    fxn = (-0.005_f64).contract(s.patch.sminn[0] * 10.0, 1.5);
                 } else if s.patch.sminn[0] <= sminnthreshold2 {
                     fxn = 1.0;
                 }
@@ -90,13 +91,13 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
                     fxg = 0.0;
                 } else if s.pft.hui_p[m] > gddfracthreshold1 && s.pft.hui_p[m] <= gddfracthreshold2
                 {
-                    fxg = 6.67_f64.mul_add(s.pft.hui_p[m], -1.0);
+                    fxg = 6.67_f64.contract(s.pft.hui_p[m], -1.0);
                 } else if s.pft.hui_p[m] > gddfracthreshold2 && s.pft.hui_p[m] <= gddfracthreshold3
                 {
                     fxg = 1.0;
                 } else if s.pft.hui_p[m] > gddfracthreshold3 && s.pft.hui_p[m] <= gddfracthreshold4
                 {
-                    fxg = (-5.0_f64).mul_add(s.pft.hui_p[m], 3.75);
+                    fxg = (-5.0_f64).contract(s.pft.hui_p[m], 3.75);
                 } else {
                     fxg = 0.0;
                 }
@@ -110,6 +111,6 @@ pub fn cn_soyfix(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, _sw: Bg
         }
     }
     s.patch_flux.soyfixn_to_sminn[0] = (0..npft).fold(0.0, |acc, m| {
-        s.pft_flux.soyfixn_p[m].mul_add(p.pftfrac[m], acc)
+        s.pft_flux.soyfixn_p[m].contract(p.pftfrac[m], acc)
     });
 }

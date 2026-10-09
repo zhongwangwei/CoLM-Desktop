@@ -1,6 +1,7 @@
 //! Cold-start port of `MOD_3DCanopyRadiation.F90` for plant communities.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::extended::DoubleDouble;
 use crate::{
@@ -239,9 +240,9 @@ pub fn three_d_canopy_wrap(
                 // `:181-182`：`FMA(rho, 1-fwet, fwet*rho_sno)`。
                 let dry = 1.0 - pft.wet_snow_fraction;
                 rho[index][band] =
-                    rho[index][band].mul_add(dry, pft.wet_snow_fraction * RHO_SNOW[band]);
+                    rho[index][band].contract(dry, pft.wet_snow_fraction * RHO_SNOW[band]);
                 tau[index][band] =
-                    tau[index][band].mul_add(dry, pft.wet_snow_fraction * TAU_SNOW[band]);
+                    tau[index][band].contract(dry, pft.wet_snow_fraction * TAU_SNOW[band]);
             }
         }
     }
@@ -261,7 +262,7 @@ pub fn three_d_canopy_wrap(
         .map(|index| {
             // `:200-206`：wrap 自己的 `phi1/phi2`，`gdir = FMA(phi2, czen, phi1)`，未经 `cosz` 修正。
             let (phi1, phi2) = leaf_projection(chil[index]);
-            let direct_extinction = phi2.mul_add(cosine_zenith, phi1) / cosine_zenith;
+            let direct_extinction = phi2.contract(cosine_zenith, phi1) / cosine_zenith;
             let area = lsai[index];
             let psun = core.psun[index];
             let (fsun_id, fsun_ii) = if area > 0.0 {
@@ -284,7 +285,7 @@ pub fn three_d_canopy_wrap(
             PcPftRadiation {
                 sunlit_absorption: std::array::from_fn(|band| {
                     [
-                        (fabd[band] - fadd[band]).mul_add(fsun_id, fadd[band]),
+                        (fabd[band] - fadd[band]).contract(fsun_id, fadd[band]),
                         fabi[band] * fsun_ii,
                     ]
                 }),
@@ -312,8 +313,8 @@ pub fn three_d_canopy_wrap(
 /// GIMPLE（`:200-201`、`:481-482`）是 `FNMA(chil, chil*0.33, FNMA(chil, 0.633, 0.5))` 与
 /// `FNMA(phi1, 2, 1)*0.877`。
 fn leaf_projection(chil: f64) -> (f64, f64) {
-    let phi1 = (-chil).mul_add(chil * 0.33, (-chil).mul_add(0.633, 0.5));
-    (phi1, (-phi1).mul_add(2.0, 1.0) * 0.877)
+    let phi1 = (-chil).contract(chil * 0.33, (-chil).contract(0.633, 0.5));
+    (phi1, (-phi1).contract(2.0, 1.0) * 0.877)
 }
 
 struct ThreeDCore {
@@ -373,14 +374,14 @@ fn three_d_canopy(
         crate::atmosphere::fortran_sin(zenith),
         crate::atmosphere::fortran_cos(zenith),
     );
-    let cosz = coszen * (1.0 / (sine * sine).mul_add(1.0, cosine * cosine)).sqrt();
+    let cosz = coszen * (1.0 / (sine * sine).contract(1.0, cosine * cosine)).sqrt();
     let cosd = f64::from_bits(0x3fe0_0000_0000_0001);
     let mut gdir = vec![0.0; count];
     let mut gdif = vec![0.0; count];
     for index in 0..count {
         let (phi1, phi2) = leaf_projection(chil[index]);
-        gdir[index] = phi2.mul_add(cosz, phi1);
-        gdif[index] = phi2.mul_add(cosd, phi1);
+        gdir[index] = phi2.contract(cosz, phi1);
+        gdif[index] = phi2.contract(cosd, phi1);
     }
 
     // `:506-535`：层聚合。`fc0` 是普通加法，其余都是 `FMA(fcover, x, acc)`。
@@ -405,18 +406,18 @@ fn three_d_canopy(
         let lev = canopy_layer[index] - 1;
         let f = fcover[index];
         fc0[lev] += f;
-        csiz_lay[lev] = f.mul_add(size[index], csiz_lay[lev]);
-        chgt_lay[lev] = f.mul_add(height[index], chgt_lay[lev]);
-        lsai_lay[lev] = lsai[index].mul_add(f, lsai_lay[lev]);
-        cosz_lay[lev] = f.mul_add(cosz, cosz_lay[lev]);
-        cosd_lay[lev] = f.mul_add(cosd, cosd_lay[lev]);
-        gdir_lay[lev] = f.mul_add(gdir[index], gdir_lay[lev]);
-        gdif_lay[lev] = f.mul_add(gdif[index], gdif_lay[lev]);
+        csiz_lay[lev] = f.contract(size[index], csiz_lay[lev]);
+        chgt_lay[lev] = f.contract(height[index], chgt_lay[lev]);
+        lsai_lay[lev] = lsai[index].contract(f, lsai_lay[lev]);
+        cosz_lay[lev] = f.contract(cosz, cosz_lay[lev]);
+        cosd_lay[lev] = f.contract(cosd, cosd_lay[lev]);
+        gdir_lay[lev] = f.contract(gdir[index], gdir_lay[lev]);
+        gdif_lay[lev] = f.contract(gdif[index], gdif_lay[lev]);
         for band in 0..BANDS {
             omega[index][band] = rho[index][band] + tau[index][band];
-            tau_lay[lev][band] = f.mul_add(tau[index][band], tau_lay[lev][band]);
-            rho_lay[lev][band] = f.mul_add(rho[index][band], rho_lay[lev][band]);
-            omg_lay[lev][band] = f.mul_add(omega[index][band], omg_lay[lev][band]);
+            tau_lay[lev][band] = f.contract(tau[index][band], tau_lay[lev][band]);
+            rho_lay[lev][band] = f.contract(rho[index][band], rho_lay[lev][band]);
+            omg_lay[lev][band] = f.contract(omega[index][band], omg_lay[lev][band]);
         }
     }
     // `:546-563`：除以 `fc0`（不是乘倒数），再 `max(·, 0)`。
@@ -444,7 +445,7 @@ fn three_d_canopy(
     let mut shadow_d = [0.0; LAYERS];
     let mut shadow_i = [0.0; LAYERS];
     let shadow = |fc: f64, cos: f64| {
-        let value = (1.0 - (-(fc / cos)).exp()) / (-fc).mul_add((-(1.0 / cos)).exp(), 1.0);
+        let value = (1.0 - (-(fc / cos)).exp()) / (-fc).contract((-(1.0 / cos)).exp(), 1.0);
         fc.max(value)
     };
     for lev in 0..LAYERS {
@@ -486,13 +487,13 @@ fn three_d_canopy(
     let zenith2 = cosz_lay[1].acos();
     let oa21 = overlap_area(csiz_lay[1], chgt_lay[1] - hbot_lay[0], zenith2);
     let (sd1, sd2, sd3) = (shadow_d[0], shadow_d[1], shadow_d[2]);
-    let s21 = (-oa21).mul_add(fc0[1], sd2); // sd2 - shad_oa(2,1)
-    let s31 = (-oa31).mul_add(fc0[2], sd3); // sd3 - shad_oa(3,1)
-    let s32 = (-oa32).mul_add(fc0[2], sd3); // sd3 - shad_oa(3,2)
+    let s21 = (-oa21).contract(fc0[1], sd2); // sd2 - shad_oa(2,1)
+    let s31 = (-oa31).contract(fc0[2], sd3); // sd3 - shad_oa(3,1)
+    let s32 = (-oa32).contract(fc0[2], sd3); // sd3 - shad_oa(3,2)
     let mut tt = [[0.0; 5]; 5];
     // `:670-686`
     tt[4][3] = sd3.max(0.0).min(1.0);
-    tt[4][2] = (sd2 * oa32.mul_add(fc0[2], 1.0 - sd3))
+    tt[4][2] = (sd2 * oa32.contract(fc0[2], 1.0 - sd3))
         .max(0.0)
         .min(1.0 - tt[4][3]);
     let s21_s32 = s21 * s32;
@@ -501,8 +502,8 @@ fn three_d_canopy(
         .min(1.0 - tt[4][3] - tt[4][2]);
     let sd1_s21 = sd1 * s21;
     let sd2_s32 = sd2 * s32;
-    let open = (-sd1).mul_add(s31, (sd3 + (sd2 + sd1)) - sd1_s21 - sd2_s32);
-    tt[4][0] = (1.0 - sd1.mul_add(s21_s32, open))
+    let open = (-sd1).contract(s31, (sd3 + (sd2 + sd1)) - sd1_s21 - sd2_s32);
+    tt[4][0] = (1.0 - sd1.contract(s21_s32, open))
         .max(0.0)
         .min(1.0 - tt[4][3] - tt[4][2] - tt[4][1]);
     if sd3 > 0.0 {
@@ -600,7 +601,7 @@ fn three_d_canopy(
             }
             let l = &mut layer[lev];
             l.ftid *= fcad_lay[lev];
-            l.ftii = fcai_lay[lev].mul_add(l.ftii - ftdi_lay_orig[lev], ftdi_lay[lev]);
+            l.ftii = fcai_lay[lev].contract(l.ftii - ftdi_lay_orig[lev], ftdi_lay[lev]);
             l.frid *= fcad_lay[lev];
             l.frii *= fcai_lay[lev];
             l.faid *= fcad_lay[lev];
@@ -621,40 +622,40 @@ fn three_d_canopy(
         let mut a = [[0.0; 6]; 6];
         let mut b = [[0.0; 2]; 6];
         a[0][0] = 1.0;
-        a[0][2] = (-si3).mul_add(l3.ftii, si3) - 1.0;
+        a[0][2] = (-si3).contract(l3.ftii, si3) - 1.0;
         a[1][1] = 1.0;
         a[1][2] = -(si3 * l3.frii);
         a[2][2] = 1.0;
         a[2][1] = -(si2 * l2.frii);
-        let open2 = (-si2).mul_add(l2.ftii, si2) - 1.0;
+        let open2 = (-si2).contract(l2.ftii, si2) - 1.0;
         a[2][4] = open2;
         a[3][3] = 1.0;
         a[3][4] = a[2][1];
         a[3][1] = open2;
         a[4][4] = 1.0;
         a[4][3] = -(si1 * l1.frii);
-        let open1 = (-l1.ftii).mul_add(si1, si1) - 1.0;
+        let open1 = (-l1.ftii).contract(si1, si1) - 1.0;
         a[4][5] = open1 * albgri;
-        a[5][5] = (-(albgri * si1)).mul_add(l1.frii, 1.0);
+        a[5][5] = (-(albgri * si1)).contract(l1.frii, 1.0);
         a[5][3] = open1;
         b[0][0] = tt43 * l3.frid;
         b[0][1] = si3 * l3.frii;
         b[1][0] = tt43 * l3.ftid;
-        b[1][1] = si3.mul_add(l3.ftii, -si3) + 1.0;
+        b[1][1] = si3.contract(l3.ftii, -si3) + 1.0;
         b[2][0] = l2.frid * tt32;
         b[3][0] = l2.ftid * tt32;
         let direct_ground = tt10 * albgrd;
         b[4][0] = l1
             .frid
-            .mul_add(tt21, direct_ground * (l1.ftii.mul_add(si1, -si1) + 1.0));
-        b[5][0] = l1.ftid.mul_add(tt21, direct_ground * si1 * l1.frii);
+            .contract(tt21, direct_ground * (l1.ftii.contract(si1, -si1) + 1.0));
+        b[5][0] = l1.ftid.contract(tt21, direct_ground * si1 * l1.frii);
         let x = gauss(a, b);
 
         // `:877-909`
-        let f31 = tt43.mul_add(l3.faid, x[2][0] * si3 * l3.faii);
-        let f21 = l2.faid.mul_add(tt32, si2 * (x[1][0] + x[4][0]) * l2.faii);
+        let f31 = tt43.contract(l3.faid, x[2][0] * si3 * l3.faii);
+        let f21 = l2.faid.contract(tt32, si2 * (x[1][0] + x[4][0]) * l2.faii);
         let ground_bounce = direct_ground + (x[3][0] + albgri * x[5][0]);
-        let f11 = l1.faid.mul_add(tt21, ground_bounce * si1 * l1.faii);
+        let f11 = l1.faid.contract(tt21, ground_bounce * si1 * l1.faii);
         let (one_minus_albgrd, one_minus_albgri) = (1.0 - albgrd, 1.0 - albgri);
         let f32 = (x[2][1] + 1.0) * si3 * l3.faii;
         let f22 = si2 * (x[1][1] + x[4][1]) * l2.faii;
@@ -711,17 +712,17 @@ fn three_d_canopy(
                 rho[index][band],
             );
             let ftid = fcad[index] * r.ftid;
-            let ftii = fcai[index].mul_add(r.ftii - ftdi_orig[index], ftdi[index]);
+            let ftii = fcai[index].contract(r.ftii - ftdi_orig[index], ftdi[index]);
             let albi = fcai[index] * r.frii;
             let faid = fcad[index] * r.faid;
             let faii = fcai[index] * r.faii;
-            let one_minus_probm = (-albgri).mul_add(sky * albi, 1.0);
-            let ftran = albgrd.mul_add(pd.mul_add(ftdd[index], 1.0 - pd), albgri * (ftid * pd));
+            let one_minus_probm = (-albgri).contract(sky * albi, 1.0);
+            let ftran = albgrd.contract(pd.contract(ftdd[index], 1.0 - pd), albgri * (ftid * pd));
             let fabsm = sky * (faii * ftran) / one_minus_probm;
-            let fabd = faid.mul_add(pd, fabsm);
-            let ftran = (-sky).mul_add(1.0 - ftii, 1.0);
+            let fabd = faid.contract(pd, fabsm);
+            let ftran = (-sky).contract(1.0 - ftii, 1.0);
             let fabsm = sky * (faii * (albgri * ftran)) / one_minus_probm;
-            let fabi = sky.mul_add(faii, fabsm);
+            let fabi = sky.contract(faii, fabsm);
             sum_fabd[lev] += fabd;
             sum_fabi[lev] += fabi;
             let fadd = pd * (1.0 - ftdd[index]) * (1.0 - omega[index][band]);
@@ -794,38 +795,38 @@ fn canopy_rad(
     let (tot_d, dif_d, _) = phi(tau_d, omg, tau_p, rho_p);
     let (tot_i, dif_i, _) = phi(tau_i, omg, tau_p, rho_p);
     let (tot_o, dif_o, pa2) = phi(tau, omg, tau_p, rho_p);
-    let frio = ((-dif_o).mul_add(0.5, tot_o) * 0.5).min(1.0).max(0.0);
+    let frio = ((-dif_o).contract(0.5, tot_o) * 0.5).min(1.0).max(0.0);
     let spread = fc * 1.732_050_807_568_877_2;
     let near = 1.0 - (1.0 - spread / std::f64::consts::TAU).sqrt();
     let far = 1.0 - (1.0 - spread / (3.0 * std::f64::consts::TAU)).sqrt();
-    let muv = near.mul_add(3.0, far * 3.0);
-    let wb = rho_p.mul_add(2.0 / 3.0, tau_p * (1.0 / 3.0));
+    let muv = near.contract(3.0, far * 3.0);
+    let wb = rho_p.contract(2.0 / 3.0, tau_p * (1.0 / 3.0));
     let dry = 1.0 - omg;
-    let alpha = dry.sqrt() * wb.mul_add(2.0, dry).sqrt();
+    let alpha = dry.sqrt() * wb.contract(2.0, dry).sqrt();
     let two_alpha = alpha * 2.0;
-    let nd = (two_alpha + 1.0) / two_alpha.mul_add(cosz, 1.0);
-    let ni = (two_alpha + 1.0) / two_alpha.mul_add(cosd, 1.0);
-    let ac = tot_o * muv * (1.0 - quad_tee(tau)) * dry / (-omg).mul_add(pa2, 1.0);
+    let nd = (two_alpha + 1.0) / two_alpha.contract(cosz, 1.0);
+    let ni = (two_alpha + 1.0) / two_alpha.contract(cosd, 1.0);
+    let ac = tot_o * muv * (1.0 - quad_tee(tau)) * dry / (-omg).contract(pa2, 1.0);
     let ald = fc * ((nd - 1.0) * frio) * (1.0 / shadow_d - cosz / fc);
     let ali = fc * ((ni - 1.0) * frio) * (1.0 / shadow_i - cosd / fc);
     let spread_d = cosz * 0.5 * dif_d;
     let spread_i = cosd * 0.5 * dif_i;
     let mut frid = (-ac)
-        .mul_add(0.5, (tot_d - spread_d).mul_add(0.5, ald))
+        .contract(0.5, (tot_d - spread_d).contract(0.5, ald))
         .min(1.0)
         .max(0.0);
     let mut frii = (-ac)
-        .mul_add(0.5, (tot_i - spread_i).mul_add(0.5, ali))
+        .contract(0.5, (tot_i - spread_i).contract(0.5, ali))
         .min(1.0)
         .max(0.0);
     let mut ftid = (-ac)
-        .mul_add(0.5, (-ald).mul_add(0.5, (spread_d + tot_d) * 0.5))
+        .contract(0.5, (-ald).contract(0.5, (spread_d + tot_d) * 0.5))
         .min(1.0)
         .max(0.0);
     let mut ftii = (-ac)
-        .mul_add(
+        .contract(
             0.5,
-            (-ali).mul_add(0.5, (spread_i + tot_i).mul_add(0.5, ftdi)),
+            (-ali).contract(0.5, (spread_i + tot_i).contract(0.5, ftdi)),
         )
         .min(1.0)
         .max(0.0);
@@ -862,7 +863,7 @@ fn overlap_area(radius: f64, height: f64, zenith: f64) -> f64 {
         return 0.0;
     }
     let theta = cost.acos();
-    secant * (-theta.sin()).mul_add(cost, theta) / std::f64::consts::PI
+    secant * (-theta.sin()).contract(cost, theta) / std::f64::consts::PI
 }
 
 /// `mGauss`（`:1416-1450`）：消元是 `FNMA(A(j,i)/A(i,i), A(i,k), A(j,k))`，
@@ -874,10 +875,10 @@ fn gauss(mut a: [[f64; 6]; 6], mut b: [[f64; 2]; 6]) -> [[f64; 2]; 6] {
         for j in i + 1..=i + STEPS[i] {
             let ratio = a[j][i] / a[i][i];
             for k in 0..6 {
-                a[j][k] = (-ratio).mul_add(a[i][k], a[j][k]);
+                a[j][k] = (-ratio).contract(a[i][k], a[j][k]);
             }
             for k in 0..2 {
-                b[j][k] = (-ratio).mul_add(b[i][k], b[j][k]);
+                b[j][k] = (-ratio).contract(b[i][k], b[j][k]);
             }
         }
     }
@@ -887,7 +888,7 @@ fn gauss(mut a: [[f64; 6]; 6], mut b: [[f64; 2]; 6]) -> [[f64; 2]; 6] {
     }
     for i in (0..5).rev() {
         for k in 0..2 {
-            let sum = (i + 1..6).fold(0.0, |sum, m| a[i][m].mul_add(x[m][k], sum));
+            let sum = (i + 1..6).fold(0.0, |sum, m| a[i][m].contract(x[m][k], sum));
             x[i][k] = (b[i][k] - sum) / a[i][i];
         }
     }

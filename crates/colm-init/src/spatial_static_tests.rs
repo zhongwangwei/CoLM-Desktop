@@ -7,6 +7,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn patch_centroid_retains_upstream_spherical_area_rounding() {
+    colm_numeric::skip_unless_fused!();
     // gfortran -O2 -fdefault-real-8, original MOD_Utils::areaquad and
     // MOD_Pixelset::get_pixelset_rlon/rlat,
     // 2048 pixels cycling through these four cells (no reassociation/fast-math).

@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::{
     initialize_monin_obukhov, monin_obukhov_with_scheme, MoninObukhovInitialInput,
@@ -95,7 +96,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
     // `th*0.61` 都是**跨语句共用**的临时量（下面 dthv 与迭代里的 thvstar 都用它们），
     // `FMA(dth, 1+0.61qm, dqh*(0.61*th))`、`FMA(tstar, 1+0.61qm, (0.61*th)*qstar)`、
     // `sqrt(FMA(ur,ur,wc2))`、`FMA(cgrndl,htvp,raih)`、`FMA(tstar,fh2m/fh 差,thm)`。
-    let momentum_roughness = (1.0 - input.snow_cover_fraction).mul_add(
+    let momentum_roughness = (1.0 - input.snow_cover_fraction).contract(
         input.soil_roughness_m,
         input.snow_cover_fraction * input.snow_roughness_m,
     );
@@ -103,10 +104,10 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
     let mut moisture_roughness = momentum_roughness;
     let temperature_difference = input.reference_temperature_k - input.ground_temperature_k;
     let humidity_difference = input.air_specific_humidity - input.ground_specific_humidity;
-    let one_plus_vapor = VIRTUAL_HUMIDITY_COEFFICIENT.mul_add(input.air_specific_humidity, 1.0);
+    let one_plus_vapor = VIRTUAL_HUMIDITY_COEFFICIENT.contract(input.air_specific_humidity, 1.0);
     let vapor_times_potential = VIRTUAL_HUMIDITY_COEFFICIENT * input.potential_temperature_k;
-    let virtual_temperature_difference =
-        temperature_difference.mul_add(one_plus_vapor, vapor_times_potential * humidity_difference);
+    let virtual_temperature_difference = temperature_difference
+        .contract(one_plus_vapor, vapor_times_potential * humidity_difference);
     let reference_height = input.wind_height_m;
     let initial = initialize_monin_obukhov(MoninObukhovInitialInput {
         reference_wind_m_s: input.reference_wind_m_s,
@@ -152,7 +153,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
             .exp();
         moisture_roughness = heat_roughness;
         let virtual_scale =
-            temperature_scale.mul_add(one_plus_vapor, vapor_times_potential * humidity_scale);
+            temperature_scale.contract(one_plus_vapor, vapor_times_potential * humidity_scale);
         dimensionless_height = reference_height * VON_KARMAN * GRAVITY_M_S2 * virtual_scale
             / (current.friction_velocity_m_s.powi(2) * input.virtual_potential_temperature_k);
         if dimensionless_height >= 0.0 {
@@ -175,7 +176,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
                     .lpow(ONE_THIRD);
             adjusted_wind = input
                 .reference_wind_m_s
-                .mul_add(input.reference_wind_m_s, convective_velocity.powi(2))
+                .contract(input.reference_wind_m_s, convective_velocity.powi(2))
                 .sqrt();
         }
         obukhov_length = reference_height / dimensionless_height;
@@ -203,7 +204,7 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
     let sensible_temperature_derivative = sensible_exchange;
     let latent_temperature_derivative =
         moisture_exchange * input.ground_humidity_temperature_derivative_kg_kg_k;
-    let ground_flux_temperature_derivative = latent_temperature_derivative.mul_add(
+    let ground_flux_temperature_derivative = latent_temperature_derivative.contract(
         input.vaporization_heat_j_kg,
         sensible_temperature_derivative,
     );
@@ -228,11 +229,11 @@ pub fn ground_fluxes(input: GroundFluxInput) -> Result<GroundFluxState> {
         ground_flux_temperature_derivative_w_m2_k: ground_flux_temperature_derivative,
         sensible_temperature_derivative_w_m2_k: sensible_temperature_derivative,
         latent_temperature_derivative_kg_m2_s_k: latent_temperature_derivative,
-        reference_temperature_k: (VON_KARMAN / profile.heat * temperature_difference).mul_add(
+        reference_temperature_k: (VON_KARMAN / profile.heat * temperature_difference).contract(
             profile.heat_at_2m / VON_KARMAN - profile.heat / VON_KARMAN,
             input.reference_temperature_k,
         ),
-        reference_humidity: (VON_KARMAN / profile.moisture * humidity_difference).mul_add(
+        reference_humidity: (VON_KARMAN / profile.moisture * humidity_difference).contract(
             profile.moisture_at_2m / VON_KARMAN - profile.moisture / VON_KARMAN,
             input.air_specific_humidity,
         ),

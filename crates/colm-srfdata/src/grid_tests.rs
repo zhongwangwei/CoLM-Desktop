@@ -6,7 +6,7 @@ use super::*;
 /// 概率远低于各自出错。里程碑 2 的教训是「一条只会说相同的测试比没有更糟」。
 fn binary_search_south(y: f64) -> usize {
     let n = COLM_500M.nlat;
-    let lat = |j: usize| (-COLM_500M.dlat()).mul_add(j as f64, 90.0);
+    let lat = |j: usize| (-COLM_500M.dlat()).contract(j as f64, 90.0);
     if y >= lat(1) {
         return 1;
     }
@@ -95,7 +95,7 @@ fn every_single_cell_edge_agrees_with_the_binary_search() {
     // 会让两者分道扬镳的地方，抽样只会碰巧躲开它。跑完约 30 ms。
     let mut bad = Vec::new();
     for j in 1..=COLM_500M.nlat {
-        let y = (-COLM_500M.dlat()).mul_add(j as f64, 90.0);
+        let y = (-COLM_500M.dlat()).contract(j as f64, 90.0);
         let (got, want) = (COLM_500M.index_of(0.0, y).1, binary_search_south(y));
         if got != want {
             bad.push(format!(

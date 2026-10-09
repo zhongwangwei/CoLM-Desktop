@@ -121,6 +121,7 @@ fn mixed_box_matches_fortran_kernel() {
 
 #[test]
 fn sync_aquifer_and_leaf_pseudo_mass_match_fortran() {
+    colm_numeric::skip_unless_fused!();
     let isotope = descriptor(TracerFamily::Isotope, 2.0052e-3, 0.0);
     let set = TracerSet {
         tracers: vec![isotope.clone()],

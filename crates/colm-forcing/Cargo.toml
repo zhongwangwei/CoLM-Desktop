@@ -8,6 +8,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+colm-numeric = { path = "../colm-numeric" }
 anyhow.workspace = true
 colm-core = { path = "../colm-core" }
 colm-namelist = { path = "../colm-namelist" }

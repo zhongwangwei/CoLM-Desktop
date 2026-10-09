@@ -32236,3 +32236,39 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **没做**：
 - 没有逐条找出“arm64 融合而 x86 不融合”的具体表达式，也没有做一份 x86_64 版的 `mul_add` 集合——那是对每个平台、每个编译器版本各调一遍的工作量，而且任何编译器升级都会改变；这里的对策是承认并量化这个差距。
 - 对策里的设置只在这一个 4×4 算例、一天上标定过。
+
+## 第 649 轮：x86_64 上 Fortran 与 Rust 逐位一致——根因是 gfortran 的自动向量化，不只是 FMA
+
+**问题**：第 648 轮把 x86_64 上的差距量化了，但没消除。这一轮把它找到并消掉。
+
+**方法**：把差异一步步压到第一个不同的量。算例同第 648 轮（4×4 空间算例，2003-01-01，步长 1800 s，每步写 history 与重启）。
+1. 第 1 步之后的重启里，Rust（不融合）与默认 Fortran 的差异：`wliq_soisno` 295/1260 个元素、`vegwp` 282/336、`hk` 106/840、`smp` 104/840、反照率 `alb` 只有 6 个斑块（量级 1e-16）。history 第 0 步里 `f_vegwp` 在全部 64 个斑块上都不同。
+2. 在 `twostream` 里打印中间量的位模式（`DBGA`）：输入相同的 1885 条调用，输出**逐位相同**。反照率的差异来自它的输入（地面反照率、`fwet_snow`），也就是上游状态，不是反照率代码。
+3. 在 `PlantHydraulicStress_twoleaf` 的入口与出口打印（`DBGPI/DBGPO/DBGQI/DBGRI`）：输入的 `x(1:3)`、`gb_mol`、气孔导度全部相同的调用里，只有根层顶水势 `x(4)` 与 `rootflux` 不同；再看逐层输入，`k_ax_root` 在第 8、10 层、`k_soil_root` 在第 9 层差 1 ULP；再往上，`dz_soi(8)`、`dz_soi(10)`、`z_soi(9)` 差 1 ULP。
+4. 这些是 `Init_GlobalVars` 里的 `z_soi(nsl) = 0.025*(exp(0.5*(nsl-0.5))-1.)`。Rust 与 Python（glibc 标量 `exp`）一致，并且与 mpmath 的正确舍入一致（10 层全部）；Fortran 的第 9 层是 `3FFBA464EBE23F64`，标量是 `…3F62`。
+
+**根因**：gfortran 12 起 `-O2` 默认打开自动向量化；这个循环被向量化，`exp` 换成 glibc libmvec 的向量版本，与标量 libm 在个别输入上差 1 ULP。最小复现（同一个 `t.f90`，conda gfortran 16.2）：`-O2` → `…3F64`，`-O2 -fno-tree-vectorize` → `…3F62`。Rust 调的是标量 libm，所以对不上。这个 1 ULP 先进土壤层厚度，经根系水力、土壤水一路放大——此前第 648 轮把它归因于 FMA 的融合决策，只说对了一部分：FMA 差异确实存在（Rust 照 arm64 融合，x86 基线不融合），但**消掉它之后剩下的主因是向量化的 libm**。
+
+**修复**：
+- `colm-numeric`：乘加策略按目标架构选默认（aarch64 融合，其余不融合）；特性 `fused`/`unfused` 可强行指定，同时开是编译错误。以前的 `--features colm-numeric/unfused` 不再需要。
+- `oracle/scripts/build_kernel.sh`：x86_64 Linux 默认加 `-fno-tree-vectorize`；`COLM_KERNEL_VECTORIZE=1` 保留向量化；新增 `COLM_KERNEL_EXTRA_FFLAGS` 追加编译选项。**去掉了 `COLM_KERNEL_FMA`**（第 648 轮引入）：它与不融合的 Rust 配合只会更差。
+- **一个我自己引入的错误**：前一阶段批量把 `.mul_add(` 换成 `.contract(` 时，把 `extended.rs` 里 `DoubleDouble` 乘法的误差项 `hi.mul_add(hi, -product)` 也换了。那是无误差乘积变换，必须是真 FMA；不融合时误差项恒为 0，高精度 `exp`、`pc_radiation` 的四精度尾项因此出错（x86 上 4 个测试失败）。已改回 `mul_add` 并加注释；`binary128.rs` 的一处也改回。其余约 30 处形如 `a.contract(b, -(c*d))` 的都是 Fortran 表达式里不同的操作数，不是误差变换。
+- 来自 Mac（arm64 融合）的 19 个逐位夹具测试，在不融合的目标上用 `colm_numeric::skip_unless_fused!()` 跳过：`colm-core` 16 个、`colm-init` 3 个，差都是 1–2 ULP（`ground_temperature` 一个是迭代次数不同）。x86 上的逐位保证改由整个内核的对拍承担。
+- `platform_note`：Apple Silicon 与 x86_64 Linux 都算已验证，不再提示；其它平台的提示改写成两条原因（融合决策、libm 向量化）。agent 工具描述同步。
+
+**验证**（T7920，x86_64 Linux，同一份 Rust 前处理，同一个算例，整天 48 步）：
+
+| 对比 | 变量 | 结果 |
+|---|---|---|
+| Rust（不融合）对 Fortran `-fno-tree-vectorize` | 159 | **159 个逐位一致，0 个差异**（`ws-compare`：`bitwise_identical: true`） |
+| 同一个 Rust 对默认 `-O2` 的 Fortran（反例） | 159 | 56 个一致，103 个不同；第一个差异 `f_alb` 第 0 步；`f_frcsat` 最大相对差 3.3e-2 |
+
+干净构建（不含任何插桩，`colm-cli` 默认特性 + `build_kernel.sh` 默认标志）上做的；中途用过的插桩只在服务器的临时源码副本里。测试：`colm-core` 509 项、`colm-init` 180 项、`colm-workspace` 36 项在 x86_64 上通过；Mac（aarch64）上 `colm-core` 509、`colm-init` 181、`colm-workspace` 36、`colm-agent` 53 项通过，clippy、fmt 干净。
+
+**代价**（T7920，同一算例，每种 3 次，秒）：Fortran 加 `-fno-tree-vectorize` 276.8/277.1/278.1，默认 268.2/263.9/270.3，慢约 3.7%；Rust 50.2/50.7。没有单独量 Rust 融合与不融合在 x86 上的速度差。
+
+**没做 / 局限**：
+- **只在一个算例上验证**（4×4 空间算例、1 天、igbp、冷启动）。没有跑 BGC、PFT/PC、城市、湖泊占优的算例，也没有长时间跑；更多地类上是否仍逐位一致没有证据。
+- aarch64 Linux、Windows、Intel Mac 没验证。逐位一致是**每个平台对自己平台的 Fortran**，不保证 Rust 在各平台上结果相同——aarch64 融合、x86 不融合，所以同一算例两个平台差几个 ULP，物理过程会放大它。
+- `colm-runtime` 与 `colm-forcing` 的测试在服务器上缺示例数据（`examples/Forcing/…`），本来就失败，所以 x86 上这两个 crate 的夹具测试是否需要跳过没有验证；`colm-agent` 的测试在服务器上缺离线依赖没能运行。
+- 向量化的 libm 只验证了 x86_64 Linux（glibc libmvec）。用户自己用向量化内核跑 Fortran 是合法的，只是不能再与 Rust 逐位对拍。

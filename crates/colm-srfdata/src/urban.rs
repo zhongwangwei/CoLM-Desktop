@@ -1,5 +1,6 @@
 //! Spatial urban material parameters shared by `mksrfdata` and `mkinidata`.
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
@@ -631,32 +632,32 @@ pub fn aggregate_lcz_urban_geometry(
             ensure!(area >= 0.0, "urban patch {patch} has negative land area");
             total_area += area;
             let roof = raw_value(raw.roof_fraction, cell, "roof fraction", patch)?;
-            roof_sum = (if roof <= 0.0 { default_roof } else { roof }).mul_add(area, roof_sum);
+            roof_sum = (if roof <= 0.0 { default_roof } else { roof }).contract(area, roof_sum);
             let height = raw_value(raw.roof_height_m, cell, "roof height", patch)?;
             height_sum = (if height <= 0.0 {
                 LCZ_ROOF_HEIGHT_M[class]
             } else {
                 height
             })
-            .mul_add(area, height_sum);
-            hlr_sum = default_hlr.mul_add(area, hlr_sum);
+            .contract(area, height_sum);
+            hlr_sum = default_hlr.contract(area, hlr_sum);
 
             let tree = raw_value(raw.tree_percent, cell, "tree percent", patch)?;
             let tree_height = raw_value(raw.tree_top_m, cell, "tree height", patch)?;
             if tree >= 0.0 && tree_height >= 0.0 {
                 tree_area += area;
-                tree_sum = tree.mul_add(area, tree_sum);
-                tree_height_sum = tree_height.mul_add(area, tree_height_sum);
+                tree_sum = tree.contract(area, tree_sum);
+                tree_height_sum = tree_height.contract(area, tree_height_sum);
             }
             let water = raw_value(raw.water_percent, cell, "water percent", patch)?;
             if water >= 0.0 {
                 water_area += area;
-                water_sum = water.mul_add(area, water_sum);
+                water_sum = water.contract(area, water_sum);
             }
             let population = raw_value(raw.population_density, cell, "population density", patch)?;
             if population >= 0.0 {
                 population_area += area;
-                population_sum = population.mul_add(area, population_sum);
+                population_sum = population.contract(area, population_sum);
             }
         }
         ensure!(
@@ -737,33 +738,33 @@ pub fn aggregate_ncar_urban_geometry(
             let roof = raw_value(raw.geometry.roof_fraction, cell, "roof fraction", patch)?;
             let table_roof = table.scalar(&table.roof_fraction, class, region, "WTLUNIT_ROOF")?;
             let roof = if roof <= 0.0 { table_roof } else { roof };
-            roof_sum = roof.mul_add(area, roof_sum);
+            roof_sum = roof.contract(area, roof_sum);
             let height = raw_value(raw.geometry.roof_height_m, cell, "roof height", patch)?;
             let height = if height <= 0.0 {
                 table.scalar(&table.roof_height_m, class, region, "HT_ROOF")?
             } else {
                 height
             };
-            height_sum = height.mul_add(area, height_sum);
+            height_sum = height.contract(area, height_sum);
             let hwr = table.scalar(&table.canyon_height_to_width, class, region, "CANYON_HWR")?;
             hwr_sum = (if use_canyon_hwr {
                 hwr
             } else {
                 hwr * (1.0 - table_roof.sqrt()) / table_roof.sqrt()
             })
-            .mul_add(area, hwr_sum);
+            .contract(area, hwr_sum);
 
             let tree = raw_value(raw.geometry.tree_percent, cell, "tree percent", patch)?;
             let tree_height = raw_value(raw.geometry.tree_top_m, cell, "tree height", patch)?;
             if tree >= 0.0 && tree_height >= 0.0 {
                 tree_area += area;
-                tree_sum = tree.mul_add(area, tree_sum);
-                tree_height_sum = tree_height.mul_add(area, tree_height_sum);
+                tree_sum = tree.contract(area, tree_sum);
+                tree_height_sum = tree_height.contract(area, tree_height_sum);
             }
             let water = raw_value(raw.geometry.water_percent, cell, "water percent", patch)?;
             if water >= 0.0 {
                 water_area += area;
-                water_sum = water.mul_add(area, water_sum);
+                water_sum = water.contract(area, water_sum);
             }
             let population = raw_value(
                 raw.geometry.population_density,
@@ -773,7 +774,7 @@ pub fn aggregate_ncar_urban_geometry(
             )?;
             if population >= 0.0 {
                 population_area += area;
-                population_sum = population.mul_add(area, population_sum);
+                population_sum = population.contract(area, population_sum);
             }
         }
         ensure!(
@@ -882,15 +883,15 @@ pub fn aggregate_ncar_urban_material(
             .enumerate()
             {
                 scalar_sums[index] =
-                    (table.scalar(values, class, region, name)?).mul_add(area, scalar_sums[index]);
+                    (table.scalar(values, class, region, name)?).contract(area, scalar_sums[index]);
             }
             for layer in 0..URBAN_LAYERS {
                 roof_cv[layer] =
                     (table.layer(&table.roof_heat_capacity, class, region, layer, "CV_ROOF")?)
-                        .mul_add(area, roof_cv[layer]);
+                        .contract(area, roof_cv[layer]);
                 wall_cv[layer] =
                     (table.layer(&table.wall_heat_capacity, class, region, layer, "CV_WALL")?)
-                        .mul_add(area, wall_cv[layer]);
+                        .contract(area, wall_cv[layer]);
                 roof_tk[layer] = (table.layer(
                     &table.roof_thermal_conductivity,
                     class,
@@ -898,7 +899,7 @@ pub fn aggregate_ncar_urban_material(
                     layer,
                     "TK_ROOF",
                 )?)
-                .mul_add(area, roof_tk[layer]);
+                .contract(area, roof_tk[layer]);
                 wall_tk[layer] = (table.layer(
                     &table.wall_thermal_conductivity,
                     class,
@@ -906,7 +907,7 @@ pub fn aggregate_ncar_urban_material(
                     layer,
                     "TK_WALL",
                 )?)
-                .mul_add(area, wall_tk[layer]);
+                .contract(area, wall_tk[layer]);
                 let cv = table.layer(
                     &table.impervious_heat_capacity,
                     class,
@@ -915,7 +916,7 @@ pub fn aggregate_ncar_urban_material(
                     "CV_IMPROAD",
                 )?;
                 if cv != -999.0 {
-                    impervious_cv[layer] = cv.mul_add(area, impervious_cv[layer]);
+                    impervious_cv[layer] = cv.contract(area, impervious_cv[layer]);
                     impervious_cv_weight[layer] += area;
                 }
                 let tk = table.layer(
@@ -926,7 +927,7 @@ pub fn aggregate_ncar_urban_material(
                     "TK_IMPROAD",
                 )?;
                 if tk != -999.0 {
-                    impervious_tk[layer] = tk.mul_add(area, impervious_tk[layer]);
+                    impervious_tk[layer] = tk.contract(area, impervious_tk[layer]);
                     impervious_tk_weight[layer] += area;
                 }
             }
@@ -940,7 +941,7 @@ pub fn aggregate_ncar_urban_material(
                         radiation,
                         "ALB_ROOF",
                     )?)
-                    .mul_add(area, roof_albedo[solar][radiation]);
+                    .contract(area, roof_albedo[solar][radiation]);
                     wall_albedo[solar][radiation] = (table.spectral(
                         &table.wall_albedo,
                         class,
@@ -949,7 +950,7 @@ pub fn aggregate_ncar_urban_material(
                         radiation,
                         "ALB_WALL",
                     )?)
-                    .mul_add(area, wall_albedo[solar][radiation]);
+                    .contract(area, wall_albedo[solar][radiation]);
                     impervious_albedo[solar][radiation] = (table.spectral(
                         &table.impervious_albedo,
                         class,
@@ -958,7 +959,7 @@ pub fn aggregate_ncar_urban_material(
                         radiation,
                         "ALB_IMPROAD",
                     )?)
-                    .mul_add(area, impervious_albedo[solar][radiation]);
+                    .contract(area, impervious_albedo[solar][radiation]);
                     pervious_albedo[solar][radiation] = (table.spectral(
                         &table.pervious_albedo,
                         class,
@@ -967,7 +968,7 @@ pub fn aggregate_ncar_urban_material(
                         radiation,
                         "ALB_PERROAD",
                     )?)
-                    .mul_add(area, pervious_albedo[solar][radiation]);
+                    .contract(area, pervious_albedo[solar][radiation]);
                 }
             }
         }
@@ -1089,9 +1090,9 @@ pub fn aggregate_urban_tree_index(
                 // `sum(fvegu*area)` 与 `sum(ulai*fvegu*area)` 都是 FMA 链：
                 // `FMA(fvegu, area, w)`、`FMA(ulai*fvegu, area, s)`（Aggregation_Urban.F90:551-555 的 GIMPLE）。
                 let area = raw_value(land_area, cell, "land area", patch)?;
-                weight = tree.mul_add(area, weight);
+                weight = tree.contract(area, weight);
                 let value = raw_value(index, cell, "urban tree index", patch)?;
-                sum = (value * tree).mul_add(area, sum);
+                sum = (value * tree).contract(area, sum);
             }
         }
         if weight > 0.0 {

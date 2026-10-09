@@ -5,6 +5,7 @@
 
 use colm_core::LibmPow;
 use colm_init::catch_network::{CatchState, Hillslope, RiverLakeNetwork};
+use colm_numeric::Contract;
 use rayon::prelude::*;
 
 const GRAV: f64 = 9.80616;
@@ -75,29 +76,29 @@ fn basin_flow(
             let sqrt_up = (wup * GRAV).sqrt();
             let sqrt_dn = (wdn * GRAV).sqrt();
             // `:143` `FMA(vi + vj, 0.5, sqrt_up) - sqrt_dn`
-            let veloc_fc = (vi + vj).mul_add(0.5, sqrt_up) - sqrt_dn;
+            let veloc_fc = (vi + vj).contract(0.5, sqrt_up) - sqrt_dn;
             // `:147` `t = FMA(sqrt_up + sqrt_dn, 0.5, (vi - vj) * 0.25)`，`(t*t) * (1/grav)`
-            let t = (sqrt_up + sqrt_dn).mul_add(0.5, (vi - vj) * 0.25);
+            let t = (sqrt_up + sqrt_dn).contract(0.5, (vi - vj) * 0.25);
             let wdsrf_fc = (t * t) * INV_GRAV;
             let vwave_up = if wup > 0.0 {
                 // `MIN_EXPR (vi - sqrt_up, veloc_fc - sqrt(wfc*g))`
                 (vi - sqrt_up).min(veloc_fc - (wdsrf_fc * GRAV).sqrt())
             } else {
                 // `.FNMA (sqrt_dn, 2, vj)`
-                (-sqrt_dn).mul_add(2.0, vj)
+                (-sqrt_dn).contract(2.0, vj)
             };
             let vwave_dn = if wdn > 0.0 {
                 // `MAX_EXPR (vj + sqrt_dn, sqrt(wfc*g) + veloc_fc)`
                 (vj + sqrt_dn).max((wdsrf_fc * GRAV).sqrt() + veloc_fc)
             } else {
                 // `.FMA (sqrt_up, 2, vi)`
-                sqrt_up.mul_add(2.0, vi)
+                sqrt_up.contract(2.0, vi)
             };
             let hflux_up = vi * wup;
             let hflux_dn = vj * wdn;
             // `:163-164` `FMA(w, v*v, (w*w)*4.90308)`
-            let mflux_up = wup.mul_add(vi * vi, (wup * wup) * HALF_GRAV);
-            let mflux_dn = wdn.mul_add(vj * vj, (wdn * wdn) * HALF_GRAV);
+            let mflux_up = wup.contract(vi * vi, (wup * wup) * HALF_GRAV);
+            let mflux_dn = wdn.contract(vj * vj, (wdn * wdn) * HALF_GRAV);
             let flen = hillslope.flen[i];
             let (hflux_fc, mflux_fc) = if vwave_up >= 0.0 {
                 (hflux_up * flen, mflux_up * flen)
@@ -107,13 +108,13 @@ fn basin_flow(
                 // `:174` `(FMA(vdn*vup, wdn - wup, FMS(vdn, hup, vup*hdn)) * flen) / (vdn - vup)`
                 let vv = vwave_dn * vwave_up;
                 let denom = vwave_dn - vwave_up;
-                let h = vv.mul_add(
+                let h = vv.contract(
                     wdn - wup,
-                    vwave_dn.mul_add(hflux_up, -(vwave_up * hflux_dn)),
+                    vwave_dn.contract(hflux_up, -(vwave_up * hflux_dn)),
                 );
-                let m = vv.mul_add(
+                let m = vv.contract(
                     hflux_dn - hflux_up,
-                    vwave_dn.mul_add(mflux_up, -(vwave_up * mflux_dn)),
+                    vwave_dn.contract(mflux_up, -(vwave_up * mflux_dn)),
                 );
                 ((h * flen) / denom, (m * flen) / denom)
             };
@@ -123,8 +124,8 @@ fn basin_flow(
             sum_m[j] -= mflux_fc;
             // `:185-186` `a = (flen*0.5)*grav`；`FMA(a, wup*wup, z_i)`、`FNMA(a, wdn*wdn, z_j)`
             let a = (flen * 0.5) * GRAV;
-            sum_z[i] = a.mul_add(wup * wup, sum_z[i]);
-            sum_z[j] = (-a).mul_add(wdn * wdn, sum_z[j]);
+            sum_z[i] = a.contract(wup * wup, sum_z[i]);
+            sum_z[j] = (-a).contract(wdn * wdn, sum_z[j]);
         }
         for i in 0..nhru {
             // `:192-196`
@@ -145,7 +146,7 @@ fn basin_flow(
         }
         for i in 0..nhru {
             // `:214` `MAX_EXPR (FNMA (xsurf, dt, w), 0)`
-            wdsrf[i] = (-xsurf[i]).mul_add(dt_this, wdsrf[i]).max(0.0);
+            wdsrf[i] = (-xsurf[i]).contract(dt_this, wdsrf[i]).max(0.0);
             if wdsrf[i] < PONDMIN {
                 momen[i] = 0.0;
             } else {
@@ -153,8 +154,8 @@ fn basin_flow(
                 let friction = (momen[i].abs() * FRICTION_COEF) / wdsrf[i].lpow(7.0 / 3.0);
                 // `:222` `FNMA ((Σm - Σz)/area, dt, momen) / FMA (dt, friction, 1)`
                 momen[i] = (-((sum_m[i] - sum_z[i]) / hillslope.area[i]))
-                    .mul_add(dt_this, momen[i])
-                    / dt_this.mul_add(friction, 1.0);
+                    .contract(dt_this, momen[i])
+                    / dt_this.contract(friction, 1.0);
                 if hillslope.inext[i].is_none() {
                     momen[i] = momen[i].min(0.0);
                 }
@@ -217,8 +218,8 @@ fn basin_flow(
             };
             let h = local(i);
             // `:277-278` `FMA(w, dt, ta)`、`FMA(dt, momen, ta)`
-            wdsrf_ta[h] = wdsrf[i].mul_add(dt_this, wdsrf_ta[h]);
-            momen_ta[h] = dt_this.mul_add(momen[i], momen_ta[h]);
+            wdsrf_ta[h] = wdsrf[i].contract(dt_this, wdsrf_ta[h]);
+            momen_ta[h] = dt_this.contract(momen[i], momen_ta[h]);
         }
         dt_res -= dt_this;
     }

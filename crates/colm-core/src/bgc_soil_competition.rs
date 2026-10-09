@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `SoilBiogeochemCompetition`（NITRIF 开时 NH₄/NO₃ 分开竞争，关时合并为矿质 N）。
 pub fn soil_biogeochem_competition(
@@ -53,7 +54,7 @@ pub fn soil_biogeochem_competition(
     if !sw.nitrif {
         sminn_tot = 0.0;
         for j in 0..d.nl_soil {
-            sminn_tot = s.patch.sminn_vr[j].mul_add(p.dz_soi[j], sminn_tot);
+            sminn_tot = s.patch.sminn_vr[j].contract(p.dz_soi[j], sminn_tot);
         }
         for j in 0..d.nl_soil {
             if sminn_tot > 0.0 {
@@ -64,7 +65,7 @@ pub fn soil_biogeochem_competition(
         }
         for j in 0..d.nl_soil {
             sum_ndemand_vr[j] = s.patch_flux.plant_ndemand[0]
-                .mul_add(nuptake_prof[j], s.patch_flux.potential_immob_vr[j]);
+                .contract(nuptake_prof[j], s.patch_flux.potential_immob_vr[j]);
         }
         for j in 0..d.nl_soil {
             if sum_ndemand_vr[j] * p.deltim < s.patch.sminn_vr[j] {
@@ -106,7 +107,7 @@ pub fn soil_biogeochem_competition(
         }
         for j in 0..d.nl_soil {
             s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
-                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+                .contract(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
         }
         residual_sminn = 0.0;
         residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
@@ -115,9 +116,9 @@ pub fn soil_biogeochem_competition(
                 if nlimit[j] == 0 {
                     residual_sminn_vr[j] = ((-(s.patch_flux.actual_immob_vr[j]
                         + s.patch_flux.sminn_to_plant_vr[j]))
-                        .mul_add(p.deltim, s.patch.sminn_vr[j]))
+                        .contract(p.deltim, s.patch.sminn_vr[j]))
                     .max(0.0);
-                    residual_sminn = residual_sminn_vr[j].mul_add(p.dz_soi[j], residual_sminn);
+                    residual_sminn = residual_sminn_vr[j].contract(p.dz_soi[j], residual_sminn);
                 } else {
                     residual_sminn_vr[j] = 0.0;
                 }
@@ -133,7 +134,7 @@ pub fn soil_biogeochem_competition(
         s.patch_flux.sminn_to_plant[0] = 0.0;
         for j in 0..d.nl_soil {
             s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
-                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+                .contract(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
             sum_ndemand_vr[j] =
                 s.patch_flux.potential_immob_vr[j] + s.patch_flux.sminn_to_plant_vr[j];
         }
@@ -151,9 +152,9 @@ pub fn soil_biogeochem_competition(
         actual_immob = 0.0;
         potential_immob = 0.0;
         for j in 0..d.nl_soil {
-            actual_immob = s.patch_flux.actual_immob_vr[j].mul_add(p.dz_soi[j], actual_immob);
+            actual_immob = s.patch_flux.actual_immob_vr[j].contract(p.dz_soi[j], actual_immob);
             potential_immob =
-                s.patch_flux.potential_immob_vr[j].mul_add(p.dz_soi[j], potential_immob);
+                s.patch_flux.potential_immob_vr[j].contract(p.dz_soi[j], potential_immob);
         }
         if s.patch_flux.plant_ndemand[0] > 0.0 {
             s.patch.fpg[0] = s.patch_flux.sminn_to_plant[0] / s.patch_flux.plant_ndemand[0];
@@ -169,7 +170,7 @@ pub fn soil_biogeochem_competition(
         sminn_tot = 0.0;
         for j in 0..d.nl_soil {
             sminn_tot =
-                (s.patch.smin_no3_vr[j] + s.patch.smin_nh4_vr[j]).mul_add(p.dz_soi[j], sminn_tot);
+                (s.patch.smin_no3_vr[j] + s.patch.smin_nh4_vr[j]).contract(p.dz_soi[j], sminn_tot);
         }
         for j in 0..d.nl_soil {
             if sminn_tot > 0.0 {
@@ -323,7 +324,7 @@ pub fn soil_biogeochem_competition(
         s.patch_flux.sminn_to_plant[0] = 0.0;
         for j in 0..d.nl_soil {
             s.patch_flux.sminn_to_plant[0] = s.patch_flux.sminn_to_plant_vr[j]
-                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+                .contract(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
         }
         residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
         residual_smin_nh4 = 0.0;
@@ -333,10 +334,10 @@ pub fn soil_biogeochem_competition(
                     residual_smin_nh4_vr[j] = ((-(s.patch_flux.actual_immob_nh4_vr[j]
                         + s.patch_flux.smin_nh4_to_plant_vr[j]
                         + s.patch_flux.f_nit_vr[j]))
-                        .mul_add(p.deltim, s.patch.smin_nh4_vr[j]))
+                        .contract(p.deltim, s.patch.smin_nh4_vr[j]))
                     .max(0.0);
                     residual_smin_nh4 =
-                        residual_smin_nh4_vr[j].mul_add(p.dz_soi[j], residual_smin_nh4);
+                        residual_smin_nh4_vr[j].contract(p.dz_soi[j], residual_smin_nh4);
                 } else {
                     residual_smin_nh4_vr[j] = 0.0;
                 }
@@ -356,7 +357,7 @@ pub fn soil_biogeochem_competition(
             s.patch_flux.sminn_to_plant_vr[j] =
                 s.patch_flux.smin_nh4_to_plant_vr[j] + s.patch_flux.smin_no3_to_plant_vr[j];
             s.patch_flux.sminn_to_plant[0] = (s.patch_flux.sminn_to_plant_vr[j])
-                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+                .contract(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
         }
         residual_plant_ndemand = s.patch_flux.plant_ndemand[0] - s.patch_flux.sminn_to_plant[0];
         residual_smin_no3 = 0.0;
@@ -366,10 +367,10 @@ pub fn soil_biogeochem_competition(
                     residual_smin_no3_vr[j] = ((-(s.patch_flux.actual_immob_no3_vr[j]
                         + s.patch_flux.smin_no3_to_plant_vr[j]
                         + s.patch_flux.f_denit_vr[j]))
-                        .mul_add(p.deltim, s.patch.smin_no3_vr[j]))
+                        .contract(p.deltim, s.patch.smin_no3_vr[j]))
                     .max(0.0);
                     residual_smin_no3 =
-                        residual_smin_no3_vr[j].mul_add(p.dz_soi[j], residual_smin_no3);
+                        residual_smin_no3_vr[j].contract(p.dz_soi[j], residual_smin_no3);
                 } else {
                     residual_smin_no3_vr[j] = 0.0;
                 }
@@ -389,14 +390,14 @@ pub fn soil_biogeochem_competition(
             s.patch_flux.sminn_to_plant_vr[j] =
                 s.patch_flux.smin_nh4_to_plant_vr[j] + s.patch_flux.smin_no3_to_plant_vr[j];
             s.patch_flux.sminn_to_plant[0] = (s.patch_flux.sminn_to_plant_vr[j])
-                .mul_add(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
+                .contract(p.dz_soi[j], s.patch_flux.sminn_to_plant[0]);
         }
         actual_immob = 0.0;
         potential_immob = 0.0;
         for j in 0..d.nl_soil {
-            actual_immob = s.patch_flux.actual_immob_vr[j].mul_add(p.dz_soi[j], actual_immob);
+            actual_immob = s.patch_flux.actual_immob_vr[j].contract(p.dz_soi[j], actual_immob);
             potential_immob =
-                s.patch_flux.potential_immob_vr[j].mul_add(p.dz_soi[j], potential_immob);
+                s.patch_flux.potential_immob_vr[j].contract(p.dz_soi[j], potential_immob);
         }
         if s.patch_flux.plant_ndemand[0] > 0.0 {
             s.patch.fpg[0] = s.patch_flux.sminn_to_plant[0] / s.patch_flux.plant_ndemand[0];

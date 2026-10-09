@@ -116,6 +116,7 @@ impl Mul for DoubleDouble {
     type Output = Self;
     fn mul(self, other: Self) -> Self {
         let product = self.hi * other.hi;
+        // 真正的 FMA：这是无误差乘积变换（error = hi*hi - fl(hi*hi)），不能随 colm-numeric 的融合策略走。
         let error = self.hi.mul_add(other.hi, -product);
         Self::normalized(product, error + (self.hi * other.lo + self.lo * other.hi))
     }

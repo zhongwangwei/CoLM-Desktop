@@ -144,7 +144,7 @@ fn matmul_accumulates_columns_with_fma() {
     let inverse = [[0.1, 0.2, 0.0], [0.3, 0.4, 0.0], [0.0, 0.0, 7.0]];
     let vector = [3.0, 5.0, 11.0];
     let out = matmul(&inverse, &vector, 2);
-    assert_eq!(out[0].to_bits(), 0.2_f64.mul_add(5.0, 0.1 * 3.0).to_bits());
-    assert_eq!(out[1].to_bits(), 0.4_f64.mul_add(5.0, 0.3 * 3.0).to_bits());
+    assert_eq!(out[0].to_bits(), 0.2_f64.contract(5.0, 0.1 * 3.0).to_bits());
+    assert_eq!(out[1].to_bits(), 0.4_f64.contract(5.0, 0.3 * 3.0).to_bits());
     assert_eq!(out[2], 0.0);
 }

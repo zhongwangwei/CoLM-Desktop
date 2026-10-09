@@ -13,6 +13,7 @@
 //! 收缩（末尾是除法），`wgt`、`hcap`、雪层热容与焓、`rhosnow` 的累加（两个商之积）是 FMA，
 //! `z_sno = zi - 0.5*dz` 是 FNMA。
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -348,25 +349,26 @@ pub fn mass_energy_conserve(
                     let s = SNOW_LAYERS + l;
                     let vf_water = old["wliq_soisno"].at(p, s) / (dz_soi[l] * DENH2O);
                     let vf_ice = old["wice_soisno"].at(p, s) / (dz_soi[l] * DENICE);
-                    let hcap = vf_ice.mul_add(c_ice, vf_water.mul_add(c_water, csol_old.at(p, l)));
+                    let hcap =
+                        vf_ice.contract(c_ice, vf_water.contract(c_water, csol_old.at(p, l)));
                     cvsoil[k][s] = hcap * dz_soi[l];
                 }
                 let scv_ = old["scv"].at(p, 0);
                 if old["dz_sno"].at(p, sl(0)) < 1.0e-6 && scv_ > 0.0 {
-                    cvsoil[k][SNOW_LAYERS] = scv_.mul_add(CPICE, cvsoil[k][SNOW_LAYERS]);
+                    cvsoil[k][SNOW_LAYERS] = scv_.contract(CPICE, cvsoil[k][SNOW_LAYERS]);
                 }
                 if old["z_sno"].at(p, sl(0)) < 0.0 {
                     for s in 0..SNOW_LAYERS {
                         let wliq = old["wliq_soisno"].at(p, s);
                         let wice = old["wice_soisno"].at(p, s);
-                        cvsoil[k][s] = wliq.mul_add(CPLIQ, CPICE * wice);
-                        let heat = wliq.mul_add(CPLIQ, CPICE * wice);
-                        h[k][s] = heat.mul_add(old["t_soisno"].at(p, s) - TFRZ, HFUS * wliq);
+                        cvsoil[k][s] = wliq.contract(CPLIQ, CPICE * wice);
+                        let heat = wliq.contract(CPLIQ, CPICE * wice);
+                        h[k][s] = heat.contract(old["t_soisno"].at(p, s) - TFRZ, HFUS * wliq);
                     }
                 }
                 let w = weight(k);
                 for s in 0..layers {
-                    wgt[s] = cvsoil[k][s].mul_add(w, wgt[s]);
+                    wgt[s] = cvsoil[k][s].contract(w, wgt[s]);
                 }
                 for s in 0..SNOW_LAYERS {
                     hc[s] += h[k][s] * w / sum_lcc;
@@ -402,7 +404,7 @@ pub fn mass_energy_conserve(
                 }};
             }
             let temperature = |hc: f64, wice: f64, wliq: f64| {
-                let capacity = wice.mul_add(CPICE, CPLIQ * wliq);
+                let capacity = wice.contract(CPICE, CPLIQ * wliq);
                 if hc < 0.0 {
                     TFRZ + hc / capacity
                 } else if hc <= HFUS * wliq {
@@ -446,7 +448,7 @@ pub fn mass_energy_conserve(
                         let s = sl(-l + 1);
                         let mass = old["wliq_soisno"].at(p, s) + old["wice_soisno"].at(p, s);
                         rhosnow[s] =
-                            (mass / old["dz_sno"].at(p, s)).mul_add(w / sum_lcc, rhosnow[s]);
+                            (mass / old["dz_sno"].at(p, s)).contract(w / sum_lcc, rhosnow[s]);
                         l += 1;
                         if l > -maxsnl {
                             break;
@@ -476,7 +478,7 @@ pub fn mass_energy_conserve(
                             );
                             let mass = old["wliq_soisno"].at(p, s) + old["wice_soisno"].at(p, s);
                             rhosnow[top] =
-                                (mass / old["dz_sno"].at(p, s)).mul_add(w / sum_lcc, rhosnow[top]);
+                                (mass / old["dz_sno"].at(p, s)).contract(w / sum_lcc, rhosnow[top]);
                             l += 1;
                             if l > -maxsnl {
                                 break;
@@ -493,7 +495,7 @@ pub fn mass_energy_conserve(
                     set!("t_soisno", s, temperature(hc[s], wice, wliq));
                     let dz = (wice + wliq) / rhosnow[s];
                     set!("dz_sno", s, dz);
-                    set!("z_sno", s, (-0.5f64).mul_add(dz, zi_sno[s]));
+                    set!("z_sno", s, (-0.5f64).contract(dz, zi_sno[s]));
                     if l - 1 < maxsnl + 1 {
                         break;
                     }
@@ -532,7 +534,7 @@ pub fn mass_energy_conserve(
                         if old["dz_sno"].at(p, s) > 0.0 {
                             let mass = old["wliq_soisno"].at(p, s) + old["wice_soisno"].at(p, s);
                             rhosnow[top] =
-                                (mass / old["dz_sno"].at(p, s)).mul_add(w / sum_lcc, rhosnow[top]);
+                                (mass / old["dz_sno"].at(p, s)).contract(w / sum_lcc, rhosnow[top]);
                         }
                     }
                     l -= 1;
@@ -546,7 +548,7 @@ pub fn mass_energy_conserve(
                     set!("t_soisno", top, temperature(hc[top], wice, wliq));
                     let dz = (wice + wliq) / rhosnow[top];
                     set!("dz_sno", top, dz);
-                    set!("z_sno", top, (-0.5f64).mul_add(dz, 0.0));
+                    set!("z_sno", top, (-0.5f64).contract(dz, 0.0));
                 }
             }
 
@@ -906,7 +908,7 @@ fn pft_tail(
     let fsum = |values: &[f64], range: &std::ops::Range<usize>| {
         range
             .clone()
-            .fold(0.0, |acc, ip| values[ip].mul_add(pft.pftfrac[ip], acc))
+            .fold(0.0, |acc, ip| values[ip].contract(pft.pftfrac[ip], acc))
     };
     for &np in matched {
         if new_type[np] != 0 {

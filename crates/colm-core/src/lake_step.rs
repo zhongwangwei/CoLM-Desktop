@@ -9,6 +9,7 @@
 //! 收缩形状逐句对照 `CoLMMAIN.F90` 的 `-fdump-tree-optimized-lineno`。
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::standard_lct_step::packed_snow_soil_state;
 use crate::{
@@ -377,18 +378,18 @@ pub fn lake_snow_step(
         total_water_after + state.soil_water.surface_water_mm
     } else {
         // `:1966` `.FNMA (lake_deficit, deltim, endwb)`
-        (-lake_deficit).mul_add(dt, total_water_after)
+        (-lake_deficit).contract(dt, total_water_after)
     };
     // `:1969-1971` `.FMA (rnof, dt, .FNMA (prc+prl-fevpa, dt, endwb-totwb))`
     let closure = (-((forcing.convective_precipitation_kg_m2_s
         + forcing.large_scale_precipitation_kg_m2_s)
         - thermal.fevpa))
-        .mul_add(dt, total_water_after - total_water_before);
+        .contract(dt, total_water_after - total_water_before);
     // `CatchLateralFlow`（`:1965-1967` 的 `#ifndef`）：不加 `rnof * deltim`。
     let water_balance_error_mm = if input.soil_water.catch_lateral {
         closure
     } else {
-        runoff.mul_add(dt, closure)
+        runoff.contract(dt, closure)
     };
 
     // `snl > maxsnl` 时把空出来的雪槽清零（`:1983-1989`）。

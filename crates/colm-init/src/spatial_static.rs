@@ -4,6 +4,7 @@
 //! `mkinidata/MOD_Initialize.F90`: it keeps NetCDF block I/O here and delegates
 //! lake, soil, texture, and canopy physics to `colm-core`.
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -1293,10 +1294,10 @@ impl SpatialPixelSets {
             } else {
                 center
             };
-            longitude = adjusted_center.mul_add(area, longitude * area_sum);
+            longitude = adjusted_center.contract(area, longitude * area_sum);
             area_sum += area;
             longitude = normalize_longitude(longitude / area_sum);
-            latitude = ((south + north) * 0.5).mul_add(area, latitude);
+            latitude = ((south + north) * 0.5).contract(area, latitude);
         }
         Ok((longitude, latitude / area_sum))
     }

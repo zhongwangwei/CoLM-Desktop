@@ -179,6 +179,7 @@ dependencies = [
  "anyhow",
  "colm-lapack",
  "colm-namelist",
+ "colm-numeric",
 ]
 
 [[package]]
@@ -188,6 +189,7 @@ dependencies = [
  "anyhow",
  "colm-core",
  "colm-namelist",
+ "colm-numeric",
  "netcdf",
 ]
 
@@ -208,6 +210,7 @@ version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
  "colm-h5chunk",
+ "colm-numeric",
  "netcdf",
  "rayon",
 ]
@@ -234,6 +237,7 @@ dependencies = [
  "colm-forcing",
  "colm-namelist",
  "colm-ncchar",
+ "colm-numeric",
  "colm-srfdata",
  "netcdf",
 ]
@@ -254,6 +258,7 @@ name = "colm-lapack"
 version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
+ "colm-numeric",
 ]
 
 [[package]]
@@ -269,6 +274,10 @@ version = "0.3.0-beta.3"
 dependencies = [
  "netcdf",
 ]
+
+[[package]]
+name = "colm-numeric"
+version = "0.3.0-beta.3"
 
 [[package]]
 name = "colm-remote"
@@ -292,6 +301,7 @@ dependencies = [
  "colm-hybrid",
  "colm-init",
  "colm-namelist",
+ "colm-numeric",
  "colm-schema",
  "netcdf",
  "rayon",
@@ -310,6 +320,7 @@ dependencies = [
  "anyhow",
  "colm-h5chunk",
  "colm-namelist",
+ "colm-numeric",
  "netcdf",
  "rayon",
 ]

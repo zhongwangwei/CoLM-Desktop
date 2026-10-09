@@ -1,6 +1,7 @@
 //! Simple building energy model from `MOD_Urban_BEM.F90`.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 /// Inputs and prior state for one `SimpleBEM` update.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -91,7 +92,7 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
     let sun_exchange = (input.sunlit_wall_inner_temperature_k - room) * half_wall;
     let sha_exchange = (input.shaded_wall_inner_temperature_k - room) * half_wall;
     let outer = |half_k: f64, before: f64, inner: f64, now: f64, exchange: f64| {
-        half_k.mul_add(now, half_k.mul_add(before - inner, -exchange))
+        half_k.contract(now, half_k.contract(before - inner, -exchange))
     };
     let rhs = [
         outer(
@@ -116,12 +117,12 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
             sha_exchange,
         ),
         // `:178` `.FMA (sha, f_wsha, .FMA (sun, f_wsun, roof + .FMA (vent, taf, (heat*troom)/dt)))`
-        sha_exchange.mul_add(
+        sha_exchange.contract(
             shaded_wall_weight,
-            sun_exchange.mul_add(
+            sun_exchange.contract(
                 sunlit_wall_weight,
                 roof_exchange
-                    + ventilation.mul_add(input.urban_air_temperature_k, (heat * room) / dt),
+                    + ventilation.contract(input.urban_air_temperature_k, (heat * room) / dt),
             ),
         ),
     ];
@@ -163,22 +164,22 @@ pub fn urban_bem(input: UrbanBemInput) -> Result<UrbanBemState> {
         air_exchange_w_m2 = ventilation * (room_temperature_k - input.urban_air_temperature_k);
         // `:230` `(B(1) - A(1,4)*troom)/A(1,1)` → `.FNMA (troom, A(1,4), B(1)) / A(1,1)`
         roof_inner_temperature_k =
-            (-room_temperature_k).mul_add(matrix[0][3], rhs[0]) / matrix[0][0];
+            (-room_temperature_k).contract(matrix[0][3], rhs[0]) / matrix[0][0];
         sunlit_wall_inner_temperature_k =
-            (-room_temperature_k).mul_add(matrix[1][3], rhs[1]) / matrix[1][1];
+            (-room_temperature_k).contract(matrix[1][3], rhs[1]) / matrix[1][1];
         shaded_wall_inner_temperature_k =
-            (-room_temperature_k).mul_add(matrix[2][3], rhs[2]) / matrix[2][2];
+            (-room_temperature_k).contract(matrix[2][3], rhs[2]) / matrix[2][2];
         // `:235-239`：每一行 `.FMA (前, 系数, 后*系数)`，墙面两项再乘权重
-        let roof_term = (roof_inner_before - room_before).mul_add(
+        let roof_term = (roof_inner_before - room_before).contract(
             half_roof,
             (roof_inner_temperature_k - room_temperature_k) * half_roof,
         );
-        let sun_term = ((sunlit_inner_before - room_before) * half_wall).mul_add(
+        let sun_term = ((sunlit_inner_before - room_before) * half_wall).contract(
             sunlit_wall_weight,
             ((sunlit_wall_inner_temperature_k - room_temperature_k) * half_wall)
                 * sunlit_wall_weight,
         );
-        let sha_term = ((shaded_inner_before - room_before) * half_wall).mul_add(
+        let sha_term = ((shaded_inner_before - room_before) * half_wall).contract(
             shaded_wall_weight,
             ((shaded_wall_inner_temperature_k - room_temperature_k) * half_wall)
                 * shaded_wall_weight,

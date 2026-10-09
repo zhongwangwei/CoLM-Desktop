@@ -581,14 +581,14 @@ impl Tool for ParityCheck {
         "parity_check"
     }
     fn description(&self) -> &'static str {
-        "Run the same case (copies) with the workspace's Rust engine and its Fortran kernel and compare the histories bit for bit; report the first variable and time step that differ. Needs the engine built (build_engine) and the preset's kernel built (build_kernel). Both engines use the same Rust preprocessing, so a difference comes from the colm main loop. Bitwise parity is only verified on Apple Silicon; elsewhere (x86_64 Linux) the Rust port's fused multiply-adds follow arm64 gfortran, so read the platform_note in the result: on x86_64 Linux use rtol=1e-9, first_records=2 (only the earliest records, before the physics amplifies rounding noise) and ignore f_frcsat (a threshold-sensitive diagnostic); this needs a kernel built with COLM_KERNEL_FMA=1, otherwise rtol=1e-6. Records the parity gate with the tolerance it used. Approval can be given once per session."
+        "Run the same case (copies) with the workspace's Rust engine and its Fortran kernel and compare the histories bit for bit; report the first variable and time step that differ. Needs the engine built (build_engine) and the preset's kernel built (build_kernel). Both engines use the same Rust preprocessing, so a difference comes from the colm main loop. Bitwise parity (no tolerance needed) is verified on Apple Silicon and on x86_64 Linux (Rust unfused, kernel built by build_kernel.sh without auto-vectorisation); on other platforms read the platform_note in the result and use rtol=1e-9, first_records=2 (only the earliest records, before the physics amplifies rounding noise) and ignore f_frcsat (a threshold-sensitive diagnostic). Records the parity gate with the tolerance it used. Approval can be given once per session."
     }
     fn parameters(&self) -> Value {
         object(json!({
             "name": name_arg(),
             "case": string("case directory (a small single-site case is best)"),
             "preset": string("kernel preset built in the workspace, e.g. default"),
-            "rtol": nullable("number", "relative tolerance; null for bitwise (right on Apple Silicon)"),
+            "rtol": nullable("number", "relative tolerance; null for bitwise (right on Apple Silicon and x86_64 Linux)"),
             "first_records": nullable("integer", "compare only the first K records of each file (the copies then write history every step); null for all"),
             "ignore": nullable("string", "comma-separated variable names to skip, e.g. f_frcsat; null for none"),
         }))

@@ -25,6 +25,7 @@
 /// `subdiagonal[0]` and `superdiagonal[n - 1]` are unused boundary entries.
 /// Singular pivots retain IEEE division semantics rather than silently
 /// changing the model equation; callers validate their physical inputs.
+use colm_numeric::Contract;
 pub fn solve_tridiagonal(
     subdiagonal: &[f64],
     diagonal: &[f64],
@@ -42,11 +43,11 @@ pub fn solve_tridiagonal(
     solution[0] = rhs[0] / pivot;
     for index in 1..n {
         gamma[index] = superdiagonal[index - 1] / pivot;
-        pivot = (-subdiagonal[index]).mul_add(gamma[index], diagonal[index]);
-        solution[index] = (-subdiagonal[index]).mul_add(solution[index - 1], rhs[index]) / pivot;
+        pivot = (-subdiagonal[index]).contract(gamma[index], diagonal[index]);
+        solution[index] = (-subdiagonal[index]).contract(solution[index - 1], rhs[index]) / pivot;
     }
     for index in (0..n - 1).rev() {
-        solution[index] = (-gamma[index + 1]).mul_add(solution[index + 1], solution[index]);
+        solution[index] = (-gamma[index + 1]).contract(solution[index + 1], solution[index]);
     }
     Ok(solution)
 }

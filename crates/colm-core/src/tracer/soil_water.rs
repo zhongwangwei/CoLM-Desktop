@@ -52,6 +52,7 @@
 // 与 `x += y` 逐位相同）。
 #![allow(clippy::manual_clamp, clippy::assign_op_pattern)]
 
+use colm_numeric::Contract;
 mod common;
 mod reconcile;
 mod wetland;
@@ -463,7 +464,7 @@ pub fn tracer_soil_water(
             let e = input.etroot_actual[k];
             if e > TRC_TINY {
                 transp_water_total = e + transp_water_total;
-                xylem_tracer_total = e.mul_add(ratio_layer[k], xylem_tracer_total);
+                xylem_tracer_total = e.contract(ratio_layer[k], xylem_tracer_total);
             }
         }
         let mut xylem_ratio = source_fallback_ratio;
@@ -540,7 +541,7 @@ pub fn tracer_soil_water(
             return_ratio = if root_gross_water > TRC_TINY && root_return_excess <= 0.0 {
                 root_gross_tracer / root_gross_water
             } else if root_gross_water > TRC_TINY {
-                root_return_excess.mul_add(
+                root_return_excess.contract(
                     excess_ratio,
                     root_gross_tracer * (root_return_water - root_return_excess) / root_gross_water,
                 ) / root_return_water
@@ -605,21 +606,21 @@ pub fn tracer_soil_water(
                 if nonvolatile {
                     continue;
                 }
-                p.wliq_soisno[s(j)] = (-e).mul_add(return_ratio, p.wliq_soisno[s(j)]);
-                root_return_tracer_total = (-e).mul_add(return_ratio, root_return_tracer_total);
+                p.wliq_soisno[s(j)] = (-e).contract(return_ratio, p.wliq_soisno[s(j)]);
+                root_return_tracer_total = (-e).contract(return_ratio, root_return_tracer_total);
             }
             if etroot_aquifer < -TRC_TINY && !nonvolatile {
-                p.wa = (-etroot_aquifer).mul_add(return_ratio, p.wa);
+                p.wa = (-etroot_aquifer).contract(return_ratio, p.wa);
                 root_return_tracer_total =
-                    (-etroot_aquifer).mul_add(return_ratio, root_return_tracer_total);
+                    (-etroot_aquifer).contract(return_ratio, root_return_tracer_total);
             }
             if surface_root_return > TRC_TINY && !nonvolatile {
-                p.wdsrf = surface_root_return.mul_add(return_ratio, p.wdsrf);
+                p.wdsrf = surface_root_return.contract(return_ratio, p.wdsrf);
                 root_return_tracer_total =
-                    surface_root_return.mul_add(return_ratio, root_return_tracer_total);
+                    surface_root_return.contract(return_ratio, root_return_tracer_total);
             }
             if !nonvolatile {
-                let limit = root_return_excess.mul_add(excess_ratio, root_gross_tracer)
+                let limit = root_return_excess.contract(excess_ratio, root_gross_tracer)
                     + (return_ratio.abs() * 1.0e-9).max(1.0e-12);
                 if root_return_tracer_total > limit {
                     bail!("plant hydraulic isotope return exceeds actual donor isotope");
@@ -765,7 +766,7 @@ pub fn tracer_soil_water(
         let mut surface_base_water = (wdsrf_pos + rsur_water) + top_infil_water;
         let mut surface_base_balance = surface_base_water;
         if flood_water > 0.0 {
-            surface_base_balance = dt.mul_add(input.qinfl, rsur_water + wdsrf_pos) - flood_water;
+            surface_base_balance = dt.contract(input.qinfl, rsur_water + wdsrf_pos) - flood_water;
             surface_base_water = surface_base_balance.max(0.0);
         }
         if late_surface_water > TRC_TINY {
@@ -825,7 +826,7 @@ pub fn tracer_soil_water(
         let mut trc_pool_total = if input.snl < 0 {
             let total = trc_gwat_snow + p.wdsrf;
             if input.split_soilsnow {
-                pg_rain_ground.mul_add(1.0 - input.fsno, total)
+                pg_rain_ground.contract(1.0 - input.fsno, total)
             } else {
                 total
             }
@@ -836,7 +837,7 @@ pub fn tracer_soil_water(
             trc_pool_total += state.step[itrc].sm_carry;
         }
 
-        let gwat_evap = (dt.mul_add(eff_qseva.max(0.0), -top_soil_evap_water)
+        let gwat_evap = (dt.contract(eff_qseva.max(0.0), -top_soil_evap_water)
             - imperv_wdsrf_loss
             - imperv_soil_loss
             - imperv_subl_loss)
@@ -1019,7 +1020,7 @@ pub fn tracer_soil_water(
         let mut pending_surface_tracer = 0.0;
         if late_surface_water > TRC_TINY {
             pending_surface_tracer = (-dt)
-                .mul_add(late_ratio * input.qinfl.max(0.0), trc_pool_total)
+                .contract(late_ratio * input.qinfl.max(0.0), trc_pool_total)
                 .max(0.0);
         }
 
@@ -1028,7 +1029,7 @@ pub fn tracer_soil_water(
             state.acc[itrc].qinfl += infil_tracer;
         } else if input.qinfl < -TRC_TINY {
             let acc = &mut state.acc[itrc];
-            acc.qinfl = dt.mul_add(ratio_layer[0] * input.qinfl, acc.qinfl);
+            acc.qinfl = dt.contract(ratio_layer[0] * input.qinfl, acc.qinfl);
         }
         if let Some(flood) = input.flood_tracer_input {
             state.acc[itrc].precip += flood[itrc];
@@ -1037,7 +1038,7 @@ pub fn tracer_soil_water(
         // 2. 地表→第 1 层的入渗（用 qinfl，不用 qlayer(0)），再按 qlayer 逐界面搬运。
         if input.qinfl > TRC_TINY {
             p.wliq_soisno[s(1)] = infil_tracer + p.wliq_soisno[s(1)];
-            water_shadow[0] = dt.mul_add(input.qinfl, water_shadow[0]);
+            water_shadow[0] = dt.contract(input.qinfl, water_shadow[0]);
         }
         let mut layer_transport_ratio = [0.0; SOIL_LAYERS];
         for j in 1..=nl {
@@ -1060,7 +1061,7 @@ pub fn tracer_soil_water(
                 {
                     let in_w = q_in.abs() * dt;
                     // 分子按 GIMPLE 收缩成 FMA；`in_w` 还被乘法用到，分母不收缩。
-                    layer_transport_ratio[soil_slot(j)] = in_w.mul_add(
+                    layer_transport_ratio[soil_slot(j)] = in_w.contract(
                         layer_transport_ratio[soil_slot(j + 1)],
                         p.wliq_soisno[s(j)].max(0.0),
                     ) / (water_shadow[soil_slot(j)].max(0.0)
@@ -1071,7 +1072,7 @@ pub fn tracer_soil_water(
                 let (q_in, q_out) = (input.qlayer[(j - 1) as usize], input.qlayer[j as usize]);
                 if q_in > TRC_TINY && q_out > TRC_TINY && q_out * dt > water_shadow[soil_slot(j)] {
                     let in_w = q_in * dt;
-                    layer_transport_ratio[soil_slot(j)] = in_w.mul_add(
+                    layer_transport_ratio[soil_slot(j)] = in_w.contract(
                         layer_transport_ratio[soil_slot(j - 1)],
                         p.wliq_soisno[s(j)].max(0.0),
                     ) / (water_shadow[soil_slot(j)].max(0.0)
@@ -1108,8 +1109,8 @@ pub fn tracer_soil_water(
                     through[kn] += flux.abs();
                     p.wliq_soisno[s(j)] -= flux;
                     p.wliq_soisno[s(j + 1)] += flux;
-                    water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
-                    water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
+                    water_shadow[k] = (-dt).contract(q, water_shadow[k]);
+                    water_shadow[kn] = dt.contract(q, water_shadow[kn]);
                 } else if q < -TRC_TINY {
                     let mut flux = dt * (q.abs() * layer_transport_ratio[kn]);
                     if clamp {
@@ -1119,8 +1120,8 @@ pub fn tracer_soil_water(
                     through[kn] += flux.abs();
                     p.wliq_soisno[s(j + 1)] -= flux;
                     p.wliq_soisno[s(j)] += flux;
-                    water_shadow[kn] = dt.mul_add(q, water_shadow[kn]);
-                    water_shadow[k] = (-dt).mul_add(q, water_shadow[k]);
+                    water_shadow[kn] = dt.contract(q, water_shadow[kn]);
+                    water_shadow[k] = (-dt).contract(q, water_shadow[k]);
                 }
             }
             if clamp {
@@ -1197,7 +1198,7 @@ pub fn tracer_soil_water(
             p.wliq_soisno[bottom] -= flux;
             p.wa += flux;
             state.acc[itrc].qcharge += flux;
-            water_shadow[kb] = (-dt).mul_add(qcharge_eff, water_shadow[kb]);
+            water_shadow[kb] = (-dt).contract(qcharge_eff, water_shadow[kb]);
         } else if qcharge_eff < -TRC_TINY {
             check(p.wa, aquifer_water_pre_qcharge, "qcharge export")?;
             let ratio_src = if aquifer_actual_water(aquifer_water_pre_qcharge, aquifer_ref_water)
@@ -1223,7 +1224,7 @@ pub fn tracer_soil_water(
             p.wa -= flux;
             p.wliq_soisno[bottom] += flux;
             state.acc[itrc].qcharge -= flux;
-            water_shadow[kb] = (-dt).mul_add(qcharge_eff, water_shadow[kb]);
+            water_shadow[kb] = (-dt).contract(qcharge_eff, water_shadow[kb]);
         }
 
         if nonvolatile && input.wa > TRC_WATER_MIN_FOR_RATIO && p.subsurface_residue > TRC_TINY {
@@ -1243,7 +1244,7 @@ pub fn tracer_soil_water(
             let mut aquifer_orphan_mass = aquifer_actual_mass(p.wa, aquifer_ref_mass);
             let actual_water = aquifer_actual_water(input.wa, aquifer_ref_water);
             if actual_water < -TRC_WATER_MIN_FOR_RATIO {
-                aquifer_orphan_mass = (-actual_water).mul_add(aquifer_ratio, aquifer_orphan_mass);
+                aquifer_orphan_mass = (-actual_water).contract(aquifer_ratio, aquifer_orphan_mass);
             }
             p.wa -= aquifer_orphan_mass;
             state.step[itrc].numerical_residual_step -= aquifer_orphan_mass;
@@ -1281,9 +1282,9 @@ pub fn tracer_soil_water(
             }
             if dew_surface_water > TRC_TINY {
                 let r_dep = ctx.deposition_ratio_for(layer_temp(1), false);
-                pending_surface_tracer = dew_surface_water.mul_add(r_dep, pending_surface_tracer);
+                pending_surface_tracer = dew_surface_water.contract(r_dep, pending_surface_tracer);
                 let acc = &mut state.acc[itrc];
-                acc.precip = dew_surface_water.mul_add(r_dep, acc.precip);
+                acc.precip = dew_surface_water.contract(r_dep, acc.precip);
                 acc.water_precip += dew_surface_water;
             }
             let late_water = late_runoff_water + wdsrf_pos;
@@ -1315,8 +1316,8 @@ pub fn tracer_soil_water(
             p.wliq_soisno[s(1)] = flux + p.wliq_soisno[s(1)];
             let acc = &mut state.acc[itrc];
             acc.precip = flux + acc.precip;
-            acc.water_precip = dt.mul_add(eff_qsdew_topliq, acc.water_precip);
-            water_shadow[0] = dt.mul_add(eff_qsdew_topliq, water_shadow[0]);
+            acc.water_precip = dt.contract(eff_qsdew_topliq, acc.water_precip);
+            water_shadow[0] = dt.contract(eff_qsdew_topliq, water_shadow[0]);
         }
 
         // 5. 第 1 层冰相的外部通量（霜/升华）；先记下实际的外部冰量变化。
@@ -1330,7 +1331,7 @@ pub fn tracer_soil_water(
             p.wice_soisno[s(1)] = flux + p.wice_soisno[s(1)];
             let acc = &mut state.acc[itrc];
             acc.precip = flux + acc.precip;
-            acc.water_precip = dt.mul_add(eff_qfros_top, acc.water_precip);
+            acc.water_precip = dt.contract(eff_qfros_top, acc.water_precip);
         }
         if eff_qsubl_top > TRC_TINY {
             let wice_pre_phase = wice_after_frost.max(0.0);
@@ -1493,7 +1494,7 @@ pub fn tracer_soil_water(
         if let Some(storage) = input.waterstorage_patch {
             tracer.equilibrate_dissolved(
                 (-dt)
-                    .mul_add(input.qflx_irrig_ground.max(0.0), storage)
+                    .contract(input.qflx_irrig_ground.max(0.0), storage)
                     .max(0.0),
                 &mut p.waterstorage,
                 &mut p.waterstorage_solid,

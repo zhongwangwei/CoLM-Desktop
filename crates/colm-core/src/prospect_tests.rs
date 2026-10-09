@@ -4,6 +4,7 @@ use super::*;
 /// 绿叶反射率与透射率。
 #[test]
 fn pft_parameterization_matches_gfortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     let fixture = include_str!("../tests/data/prospect_pft_gfortran.txt");
     let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
     let reflectance = vec![0.1; HIGH_RES_WAVELENGTHS * 2];
@@ -75,6 +76,7 @@ fn pft_update_replaces_only_green_leaf_optics() {
 /// 取样波长的反射率与透射率。
 #[test]
 fn spectrum_matches_gfortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     let fixture = include_str!("../tests/data/prospect_gfortran.txt");
     let hex = |s: &str| f64::from_bits(u64::from_str_radix(s, 16).unwrap());
     let lines: Vec<Vec<&str>> = fixture

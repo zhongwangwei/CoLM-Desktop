@@ -5,6 +5,7 @@ use colm_init::{
     write_single_point_hyperspectral_constant_restarts, SinglePointHyperspectralConfig,
     SinglePointPreprocessFiles,
 };
+use colm_numeric::Contract;
 use colm_srfdata::SiteMode;
 
 // Keep each NetCDF writer + external Fortran reader lifecycle serial, as in
@@ -556,7 +557,7 @@ fn assert_pc_common_absorption_matches_pft_outputs(files: &SinglePointPreprocess
                 let mut expected = 0.0;
                 for (pft, &fraction) in fractions.iter().enumerate() {
                     let value = pft_values[(pft * 2 + rtyp) * 2 + band];
-                    expected = value.mul_add(fraction, expected);
+                    expected = value.contract(fraction, expected);
                 }
                 let actual = common_values[rtyp * 2 + band];
                 assert_eq!(

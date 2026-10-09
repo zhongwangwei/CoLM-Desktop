@@ -6,6 +6,7 @@
 //! `maxsnl+1..=nl_soil`（`-4..=10`）连续存放，用 [`soisno_slot`] 换算。
 
 use super::TracerSet;
+use colm_numeric::Contract;
 
 /// `maxsnl`。
 pub const MAX_SNOW_LAYERS: usize = 5;
@@ -320,7 +321,7 @@ impl PatchTracerState {
                 }
                 // GIMPLE `.FMS (wa + ref_water, R_init, ref_mass)`（`MOD_Tracer_Rest`）。
                 pools.wa =
-                    (water.wa + self.aquifer_ref_water).mul_add(ratio, -pools.aquifer_ref_mass);
+                    (water.wa + self.aquifer_ref_water).contract(ratio, -pools.aquifer_ref_mass);
             } else {
                 pools.wa = water.wa * ratio;
             }

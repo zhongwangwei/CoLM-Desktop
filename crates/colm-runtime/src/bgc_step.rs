@@ -9,6 +9,7 @@
 //! 12 月 31 日 24:00 的那一步重读，读的是刚结束的那一年（上游的时序，实际滞后一年），
 //! 年份钳在 1849–2006。单点 patch 的面积加权映射退化为取包含站点的那个源网格。
 
+use colm_numeric::Contract;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -176,7 +177,7 @@ impl Footprint {
                 let mut sum = 0.0;
                 for &(lat, lon, part) in parts {
                     if part > 0.0 {
-                        sum = part.mul_add(read(lat, lon)?, sum);
+                        sum = part.contract(read(lat, lon)?, sum);
                     }
                 }
                 Ok(sum / area)

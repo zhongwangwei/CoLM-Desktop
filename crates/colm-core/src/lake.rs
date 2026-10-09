@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::snow::{snow_interface_slot, snow_layer_slot, validate_runtime_snow_column};
 use crate::{
@@ -193,7 +194,7 @@ pub fn add_lake_new_snow(
         if input.use_dynamic_lake && snow.layer_count == 0 {
             // `:232-235`：`.FMA (dz, 1-fi, (deltim*pg_rain)*1e-3)`。
             let liquid_depth =
-                lake.thickness_m[0].mul_add(1.0 - lake.ice_fraction[0], (dt * rainfall) * 1.0e-3);
+                lake.thickness_m[0].contract(1.0 - lake.ice_fraction[0], (dt * rainfall) * 1.0e-3);
             let ice_depth = lake.thickness_m[0] * lake.ice_fraction[0];
             lake.thickness_m[0] = liquid_depth + ice_depth;
             lake.ice_fraction[0] = ice_depth / lake.thickness_m[0];
@@ -211,22 +212,22 @@ pub fn add_lake_new_snow(
         let liquid = snow.liquid_water_kg_m2[top];
         // `:259-262` 的 GIMPLE：热容 `.FMA (wice, cpice, wliq*cpliq)`；降水热
         // `deltim*.FMA (pg_rain, cpliq, pg_snow*cpice)`；分母把两项降水各自收进 FMA。
-        let old_heat_capacity = ice.mul_add(
+        let old_heat_capacity = ice.contract(
             ICE_HEAT_CAPACITY_J_KG_K,
             liquid * LIQUID_HEAT_CAPACITY_J_KG_K,
         );
         let precipitation_heat = dt
-            * rainfall.mul_add(
+            * rainfall.contract(
                 LIQUID_HEAT_CAPACITY_J_KG_K,
                 snowfall * ICE_HEAT_CAPACITY_J_KG_K,
             );
-        let numerator = old_heat_capacity.mul_add(
+        let numerator = old_heat_capacity.contract(
             snow.temperature_k[top],
             precipitation_heat * input.precipitation_temperature_k,
         );
-        let denominator = snowfall_mass.mul_add(
+        let denominator = snowfall_mass.contract(
             ICE_HEAT_CAPACITY_J_KG_K,
-            (dt * rainfall).mul_add(LIQUID_HEAT_CAPACITY_J_KG_K, old_heat_capacity),
+            (dt * rainfall).contract(LIQUID_HEAT_CAPACITY_J_KG_K, old_heat_capacity),
         );
         ensure!(
             denominator > 0.0,
@@ -237,7 +238,7 @@ pub fn add_lake_new_snow(
         snow.thickness_m[top] += snowfall_depth;
         // `:267` `.FNMA (dz, 0.5, zi(lb))`
         snow.node_depth_m[top] = (-snow.thickness_m[top])
-            .mul_add(0.5, snow.interface_depth_m[snow_interface_slot(top_layer)]);
+            .contract(0.5, snow.interface_depth_m[snow_interface_slot(top_layer)]);
         snow.interface_depth_m[snow_interface_slot(top_layer - 1)] =
             snow.interface_depth_m[snow_interface_slot(top_layer)] - snow.thickness_m[top];
     }
@@ -298,16 +299,16 @@ fn exchange_precipitation_with_lake(
     let g = (liquid_heat_column * (1.0 - fi)) * (tl - FREEZING_K);
     let h = (water_column * (1.0 - fi)) * FUSION_HEAT_J_KG;
     // `:130` 与 `:133` 共用 `.FMA (deltim*pg_rain, hfus, a)`。
-    let a_plus_b = rain_mass.mul_add(FUSION_HEAT_J_KG, a);
+    let a_plus_b = rain_mass.contract(FUSION_HEAT_J_KG, a);
 
     if fi > 0.999 {
         if a_plus_b <= c {
             let tw = FREEZING_K.min(tp);
             let precipitation_heat = dt * ((pr + ps) * ICE_HEAT_CAPACITY_J_KG_K);
             // `:133` `.FMA (fi, dz*cice*1000*t, .FMA (dt*(..)*cpice, tw, a+b))`
-            lake.temperature_k[0] = fi.mul_add(
+            lake.temperature_k[0] = fi.contract(
                 ice_heat_column * tl,
-                precipitation_heat.mul_add(tw, a_plus_b),
+                precipitation_heat.contract(tw, a_plus_b),
             ) / (ice_heat_column * fi + precipitation_heat);
             snow.water_equivalent_kg_m2 += rain_mass;
             snow.depth_m += rain_mass / new_snow_bulk_density_kg_m3;
@@ -329,7 +330,7 @@ fn exchange_precipitation_with_lake(
         } else {
             // `:154` `(.FMA (dt*pr*cpliq, tp, dz*cwat*tfrz) - c - d) / (…+…)`
             lake.temperature_k[0] =
-                (rain_heat.mul_add(tp, liquid_heat_column * FREEZING_K) - c - d)
+                (rain_heat.contract(tp, liquid_heat_column * FREEZING_K) - c - d)
                     / (rain_heat + liquid_heat_column);
             lake.ice_fraction[0] = 0.0;
         }
@@ -338,7 +339,7 @@ fn exchange_precipitation_with_lake(
             lake.temperature_k[0] = FREEZING_K;
         } else if pr > 0.0 {
             if a >= d {
-                lake.temperature_k[0] = (rain_heat.mul_add(tp, liquid_heat_column * FREEZING_K)
+                lake.temperature_k[0] = (rain_heat.contract(tp, liquid_heat_column * FREEZING_K)
                     - d)
                     / (rain_heat + liquid_heat_column);
                 lake.ice_fraction[0] = 0.0;
@@ -353,7 +354,7 @@ fn exchange_precipitation_with_lake(
             if e >= h {
                 // `:189` `.FMA (dt*ps*cpice, tp, .FMA (dz*cice*1000, tfrz, h)) / (…+…)`
                 lake.temperature_k[0] = snow_heat
-                    .mul_add(tp, ice_heat_column.mul_add(FREEZING_K, h))
+                    .contract(tp, ice_heat_column.contract(FREEZING_K, h))
                     / (ice_heat_column + snow_heat);
                 lake.ice_fraction[0] = 1.0;
             } else {
@@ -370,7 +371,7 @@ fn exchange_precipitation_with_lake(
         let liquid_heat = liquid_heat_column * (1.0 - fi);
         // `:204` `(.FMA (1-fi, t*dz*cwat, dt*(..)*cpliq*tw) - e - f) / (…+…)`
         lake.temperature_k[0] =
-            ((1.0 - fi).mul_add(tl * liquid_heat_column, precipitation_heat * tw) - e - f)
+            ((1.0 - fi).contract(tl * liquid_heat_column, precipitation_heat * tw) - e - f)
                 / (liquid_heat + precipitation_heat);
         snow.water_equivalent_kg_m2 -= snow_mass;
         snow.depth_m -= snowfall_depth;
@@ -390,7 +391,7 @@ fn exchange_precipitation_with_lake(
         let liquid = water_column - ice;
         lake.ice_fraction[0] = ice / (ice + liquid);
     } else {
-        lake.temperature_k[0] = snow_heat.mul_add(tp, ice_heat_column.mul_add(FREEZING_K, g + h))
+        lake.temperature_k[0] = snow_heat.contract(tp, ice_heat_column.contract(FREEZING_K, g + h))
             / (ice_heat_column + snow_heat);
         lake.ice_fraction[0] = 1.0;
     }
@@ -575,8 +576,8 @@ fn melt_snow_into_unfrozen_lake(
         // `MOD_Lake.F90:1789` 两个乘积各收一条 FMA：
         // `.FMA (tfrz-t, wliq*cpliq, .FMA (wice*cpice, tfrz-t, heatsum))`。
         let deficit = FREEZING_K - snow.temperature_k[slot];
-        heat = (layer_ice * ICE_HEAT_CAPACITY_J_KG_K).mul_add(deficit, heat);
-        heat = deficit.mul_add(layer_liquid * LIQUID_HEAT_CAPACITY_J_KG_K, heat);
+        heat = (layer_ice * ICE_HEAT_CAPACITY_J_KG_K).contract(deficit, heat);
+        heat = deficit.contract(layer_liquid * LIQUID_HEAT_CAPACITY_J_KG_K, heat);
     }
     let fusion = ice * FUSION_HEAT_J_KG;
     let a_plus_b = fusion + heat;
@@ -589,8 +590,8 @@ fn melt_snow_into_unfrozen_lake(
         // `:1807` `(.FMS (.FMA (dz*1000, t, (liq+ice)*tfrz), cpliq, heatsum) - b) /
         // (((dz*1000 + ice) + liq)*cpliq)`
         lake.temperature_k[0] = (water_column
-            .mul_add(lake_t, (liquid + ice) * FREEZING_K)
-            .mul_add(LIQUID_HEAT_CAPACITY_J_KG_K, -heat)
+            .contract(lake_t, (liquid + ice) * FREEZING_K)
+            .contract(LIQUID_HEAT_CAPACITY_J_KG_K, -heat)
             - fusion)
             / (((water_column + ice) + liquid) * LIQUID_HEAT_CAPACITY_J_KG_K);
     } else if c + d >= a_plus_b {
@@ -650,7 +651,7 @@ fn saturate_lake_soil(soil: &mut LakeSnowWaterSoil) -> f64 {
         } else {
             // `MOD_Lake.F90:1851` `.FNMA (dz, (a-porsl)*1000, wliq)`
             soil.liquid_water_kg_m2[layer] = (-thickness)
-                .mul_add(
+                .contract(
                     (saturation - porosity) * 1000.0,
                     soil.liquid_water_kg_m2[layer],
                 )
@@ -685,14 +686,14 @@ fn adjust_dynamic_lake_water(
     let ice_before = lake.thickness_m[0] * lake.ice_fraction[0];
     let (mut liquid_depth, mut ice_depth) = if had_snow {
         (
-            (bottom_drainage * dt).mul_add(1.0e-3, liquid_before),
+            (bottom_drainage * dt).contract(1.0e-3, liquid_before),
             ice_before,
         )
     } else {
         (
             (((fluxes.snow_melt_kg_m2_s + input.dew_kg_m2_s) - input.evaporation_kg_m2_s) * dt)
-                .mul_add(1.0e-3, liquid_before),
-            ((input.frost_kg_m2_s - input.sublimation_kg_m2_s) * dt).mul_add(1.0e-3, ice_before),
+                .contract(1.0e-3, liquid_before),
+            ((input.frost_kg_m2_s - input.sublimation_kg_m2_s) * dt).contract(1.0e-3, ice_before),
         )
     };
     if liquid_depth < 0.0 {
@@ -752,10 +753,10 @@ pub fn lake_roughness(input: LakeRoughnessInput) -> Result<LakeRoughness> {
         return Ok(LakeRoughness {
             momentum_m,
             sensible_heat_m: (momentum_m
-                * (-(roughness_reynolds_sqrt.mul_add(4.0, -3.2) * (0.4 / 0.713))).exp())
+                * (-(roughness_reynolds_sqrt.contract(4.0, -3.2) * (0.4 / 0.713))).exp())
             .max(1.0e-5),
             latent_heat_m: (momentum_m
-                * (-(roughness_reynolds_sqrt.mul_add(4.0, -4.2) * (0.4 / 0.66))).exp())
+                * (-(roughness_reynolds_sqrt.contract(4.0, -4.2) * (0.4 / 0.66))).exp())
             .max(1.0e-5),
         });
     }
@@ -837,10 +838,10 @@ pub fn lake_thermal_conductivity(
             let exponent = (-(z[layer] * decay)).max(-40.0);
             // `:2047` `ke = ((z*(ws*0.4))*exp)/.FMA (ri, 37*ri, 1)`
             let eddy = (z[layer] * (surface_water_velocity * 0.4)) * exponent.exp()
-                / richardson.mul_add(richardson * 37.0, 1.0);
-            fang_stefan.mul_add(1.039e-8, eddy + molecular_diffusivity)
+                / richardson.contract(richardson * 37.0, 1.0);
+            fang_stefan.contract(1.039e-8, eddy + molecular_diffusivity)
         } else {
-            fang_stefan.mul_add(1.039e-8, molecular_diffusivity)
+            fang_stefan.contract(1.039e-8, molecular_diffusivity)
         };
         if deep_lake {
             diffusivity *= 5.0;
@@ -870,8 +871,8 @@ pub fn lake_thermal_conductivity(
 /// `rhow = (1-f)*1000*(1 - 1.9549e-5*|t-277|**1.68) + f*917`：
 /// GIMPLE（`MOD_Lake.F90:952/1451/1510`）是 `.FMA ((1-f)*1000, .FNMA (pow, 1.9549e-5, 1), f*917)`。
 pub(crate) fn lake_water_density(temperature_k: f64, ice_fraction: f64) -> f64 {
-    ((1.0 - ice_fraction) * 1000.0).mul_add(
-        (-(temperature_k - 277.0).abs().lpow(1.68)).mul_add(1.9549e-5, 1.0),
+    ((1.0 - ice_fraction) * 1000.0).contract(
+        (-(temperature_k - 277.0).abs().lpow(1.68)).contract(1.9549e-5, 1.0),
         ice_fraction * 917.0,
     )
 }
@@ -881,7 +882,7 @@ pub(crate) fn lake_water_density(temperature_k: f64, ice_fraction: f64) -> f64 {
 fn frozen_thermal_conductivity(diffusivity: f64, ice_fraction: f64) -> f64 {
     let conductivity = diffusivity * LAKE_WATER_HEAT_CAPACITY;
     (conductivity * EFFECTIVE_ICE_CONDUCTIVITY)
-        / (1.0 - ice_fraction).mul_add(EFFECTIVE_ICE_CONDUCTIVITY, conductivity * ice_fraction)
+        / (1.0 - ice_fraction).contract(EFFECTIVE_ICE_CONDUCTIVITY, conductivity * ice_fraction)
 }
 
 /// Remaps a lake column to CoLM's depth-scaled standard ten-layer geometry.
@@ -927,10 +928,10 @@ pub fn adjust_lake_layers(column: &mut LakeColumn) -> Result<()> {
             // 两个质量和各自是普通加法（乘积被温度和复用，不收缩）。
             let ice_part = overlap_m * source_ice;
             let liquid_part = (1.0 - source_ice) * overlap_m;
-            ice_temperature_sum = ice_part.mul_add(source_temperature, ice_temperature_sum);
+            ice_temperature_sum = ice_part.contract(source_temperature, ice_temperature_sum);
             ice_mass += ice_part;
             liquid_temperature_sum =
-                source_temperature.mul_add(liquid_part, liquid_temperature_sum);
+                source_temperature.contract(liquid_part, liquid_temperature_sum);
             liquid_mass += liquid_part;
             target_remaining_m -= overlap_m;
             source_remaining_m -= overlap_m;
@@ -988,9 +989,9 @@ fn target_thickness(total_depth_m: f64) -> Vec<f64> {
     thickness[0] = DEFAULT_THICKNESS_M[0];
     // `dzlak(nl)*dr - (dz_new(1) - dzlak(1)*dr)` 在 GIMPLE 里是
     // `.FMS (dzlak(nl), dr, .FNMA (dr, 0.1, 0.1))`。
-    let top_excess = (-depth_ratio).mul_add(DEFAULT_THICKNESS_M[0], DEFAULT_THICKNESS_M[0]);
+    let top_excess = (-depth_ratio).contract(DEFAULT_THICKNESS_M[0], DEFAULT_THICKNESS_M[0]);
     thickness[LAKE_LAYERS - 1] =
-        DEFAULT_THICKNESS_M[LAKE_LAYERS - 1].mul_add(depth_ratio, -top_excess);
+        DEFAULT_THICKNESS_M[LAKE_LAYERS - 1].contract(depth_ratio, -top_excess);
     thickness
 }
 

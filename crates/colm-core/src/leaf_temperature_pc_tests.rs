@@ -16,8 +16,8 @@ fn single_layer_canopy_air_uses_the_fused_air_term() {
         1, 0, 0, 281.0, 279.0, 0.004, 0.005, &wah, &wgh, &waq, &wgq, &wlhl, &wlql, &mut taf,
         &mut qaf, &mut fact, &mut facq,
     );
-    assert_eq!(taf[0], 0.3f64.mul_add(281.0, 0.5 * 279.0) + 55.0);
-    assert_eq!(qaf[0], 0.2f64.mul_add(0.004, 0.6 * 0.005) + 0.0007);
+    assert_eq!(taf[0], 0.3f64.contract(281.0, 0.5 * 279.0) + 55.0);
+    assert_eq!(qaf[0], 0.2f64.contract(0.004, 0.6 * 0.005) + 0.0007);
     assert_eq!((fact, facq), (1.0, 1.0));
 }
 
@@ -39,7 +39,7 @@ fn frost_on_a_cold_canopy_adds_to_the_snow_pool() {
         1800.0,
         true,
     );
-    assert_eq!(water.snow_mm, 1800.0f64.mul_add(1.0e-5, 0.1));
+    assert_eq!(water.snow_mm, 1800.0f64.contract(1.0e-5, 0.1));
     assert_eq!(water.rain_mm, 0.0);
     assert_eq!(water.total_mm, water.rain_mm + water.snow_mm);
     assert!(fwet_snow > 0.0 && fwet_snow <= 1.0);

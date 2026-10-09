@@ -1,5 +1,6 @@
 use super::*;
 use colm_core::initialize_snow_layers;
+use colm_numeric::Contract;
 
 fn tables() -> SnicarInitialization {
     test_initialization()
@@ -39,9 +40,9 @@ fn snicar_cold_bridge_restores_source_slots_and_folds_only_temporary_snow() {
                 let soil = state.ground.soil[band][incident];
                 let snow = state.ground.snow[band][incident];
                 let expected = if incident == 0 {
-                    snow.mul_add(fraction, (1.0 - fraction) * soil)
+                    snow.contract(fraction, (1.0 - fraction) * soil)
                 } else {
-                    (1.0 - fraction).mul_add(soil, fraction * snow)
+                    (1.0 - fraction).contract(soil, fraction * snow)
                 };
                 assert_eq!(state.ground.ground[band][incident], expected);
                 if depth == 0.0 {

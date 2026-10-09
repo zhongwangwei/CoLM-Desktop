@@ -8,6 +8,7 @@
 //! `min_loss_for_cap = FNMA(r_max, residual_water, trc)`；其余为独立舍入。
 
 /// `evaplimit_default_max_loss_fraction`。
+use colm_numeric::Contract;
 const MAX_LOSS_FRACTION: f64 = 0.10;
 /// `evaplimit_default_max_substeps`。
 const MAX_SUBSTEPS: usize = 80;
@@ -112,7 +113,7 @@ pub fn evaporative_tracer_loss(
         let mut loss = (water_loss * flux_ratio).min(pool_trc_pos);
         if r_max > 0.0 && source_ratio <= r_max {
             let residual_water = pool_water - water_loss;
-            let min_loss_for_cap = (-r_max).mul_add(residual_water, pool_trc_pos);
+            let min_loss_for_cap = (-r_max).contract(residual_water, pool_trc_pos);
             loss = loss.max(min_loss_for_cap);
         }
         return loss;
@@ -137,7 +138,7 @@ pub fn evaporative_tracer_loss(
         let mut trc_loss_step = (step_loss * flux_ratio).min(remaining_trc);
         if r_max > 0.0 && source_ratio <= r_max {
             let residual_water = remaining_water - step_loss;
-            let min_loss_for_cap = (-r_max).mul_add(residual_water, remaining_trc);
+            let min_loss_for_cap = (-r_max).contract(residual_water, remaining_trc);
             trc_loss_step = trc_loss_step.max(min_loss_for_cap);
         }
         remaining_trc -= trc_loss_step;

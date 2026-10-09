@@ -150,17 +150,17 @@ impl Scenario {
             }
         }
         if self.qinfl > 0.0 {
-            w[s(1)] = DT.mul_add(self.qinfl, w[s(1)]);
+            w[s(1)] = DT.contract(self.qinfl, w[s(1)]);
         }
         for j in 1..NL {
             let q = self.qlayer[j as usize];
-            w[s(j)] = (-DT).mul_add(q, w[s(j)]);
-            w[s(j + 1)] = DT.mul_add(q, w[s(j + 1)]);
+            w[s(j)] = (-DT).contract(q, w[s(j)]);
+            w[s(j + 1)] = DT.contract(q, w[s(j + 1)]);
         }
-        w[s(NL)] = (-DT).mul_add(qcharge, w[s(NL)]);
+        w[s(NL)] = (-DT).contract(qcharge, w[s(NL)]);
         w[s(NL)] -= DT * self.rsub;
         if self.snl == 0 {
-            w[s(1)] = DT.mul_add(self.qsdew, w[s(1)]);
+            w[s(1)] = DT.contract(self.qsdew, w[s(1)]);
         }
         w
     }

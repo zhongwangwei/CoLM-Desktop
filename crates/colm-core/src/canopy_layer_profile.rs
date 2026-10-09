@@ -5,6 +5,7 @@
 //! initialization diagnostic use identical canopy transport equations.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{integrated_monin_obukhov_diffusivity, monin_obukhov_diffusivity};
 
@@ -64,7 +65,7 @@ pub fn canopy_wind_speed(input: CanopyWindProfileInput, height_m: f64) -> Result
     // `_24 = bee*fc`、`_28 = (1-bee*fc)*ulog`、`FMA(_24, min(uexp,ulog), _28)`
     // —— 左侧乘积被吸收、地面那一支先舍入。
     let blend = input.canopy_blend_weight * input.canopy_cover_fraction;
-    Ok(blend.mul_add(exponential.min(logarithmic), (1.0 - blend) * logarithmic))
+    Ok(blend.contract(exponential.min(logarithmic), (1.0 - blend) * logarithmic))
 }
 
 /// Port of `MOD_CanopyLayerProfile:kprofile`.
@@ -111,12 +112,12 @@ pub fn mean_canopy_wind_between(
         let height = if index < intervals {
             // `MOD_CanopyLayerProfile` 的积分循环（`uintegral`/`kintegral`）：
             // GIMPLE 是 `FNMA(i-0.5, dz, top)` 与 `FMA(dz, 0.5, bottom)`。
-            (-(index as f64 - 0.5)).mul_add(step, top_height_m)
+            (-(index as f64 - 0.5)).contract(step, top_height_m)
         } else {
             // `dz = top-bottom-(n-1)*dz`：GIMPLE 是 `FNMA(n-1, dz, top-bottom)`，
             // 即 `(n-1)*dz` 被吸收、`top-bottom` 先舍入。
-            step = (-((intervals - 1) as f64)).mul_add(step, top_height_m - bottom_height_m);
-            step.mul_add(0.5, bottom_height_m)
+            step = (-((intervals - 1) as f64)).contract(step, top_height_m - bottom_height_m);
+            step.contract(0.5, bottom_height_m)
         };
         mean +=
             canopy_wind_speed(input, height)?.max(0.0) * step / (top_height_m - bottom_height_m);
@@ -168,7 +169,7 @@ pub fn canopy_wind_integral(
     // 乘积被吸收、`zbot` 那个先舍入，然后才 `+zbot-ztop`。
     let logarithmic = input.wind_at_canopy_top_m_s
         / (input.canopy_top_height_m / input.ground_momentum_roughness_m).ln()
-        * (top_height_m.mul_add(
+        * (top_height_m.contract(
             (top_height_m / input.ground_momentum_roughness_m).ln(),
             -(bottom_height_m * (bottom_height_m / input.ground_momentum_roughness_m).ln()),
         ) + bottom_height_m
@@ -184,7 +185,7 @@ pub fn canopy_wind_integral(
                     / (input.canopy_top_height_m - input.canopy_bottom_height_m))
                     .exp());
         let blend = input.canopy_blend_weight * input.canopy_cover_fraction;
-        Ok(blend.mul_add(exponential, (1.0 - blend) * logarithmic))
+        Ok(blend.contract(exponential, (1.0 - blend) * logarithmic))
     } else {
         Ok(logarithmic)
     }
@@ -198,7 +199,7 @@ pub fn canopy_wind_difference(input: CanopyWindProfileInput, height_m: f64) -> R
         / (input.canopy_top_height_m / input.ground_momentum_roughness_m).ln();
     // `udiff = uexp - ulog`：GIMPLE 是 `FMS(utop, exp, ulog)` —— `utop*exp`
     // 被吸收进减法，`ulog` 是已舍入的加数。
-    Ok(input.wind_at_canopy_top_m_s.mul_add(
+    Ok(input.wind_at_canopy_top_m_s.contract(
         (-input.attenuation_coefficient * (input.canopy_top_height_m - height_m)
             / (input.canopy_top_height_m - input.canopy_bottom_height_m))
             .exp(),
@@ -241,17 +242,17 @@ pub fn canopy_diffusivity_resistance(
         let height = if index < intervals {
             // `MOD_CanopyLayerProfile` 的积分循环（`uintegral`/`kintegral`）：
             // GIMPLE 是 `FNMA(i-0.5, dz, top)` 与 `FMA(dz, 0.5, bottom)`。
-            (-(index as f64 - 0.5)).mul_add(step, top_height_m)
+            (-(index as f64 - 0.5)).contract(step, top_height_m)
         } else {
             // `dz = top-bottom-(n-1)*dz`：GIMPLE 是 `FNMA(n-1, dz, top-bottom)`，
             // 即 `(n-1)*dz` 被吸收、`top-bottom` 先舍入。
-            step = (-((intervals - 1) as f64)).mul_add(step, top_height_m - bottom_height_m);
-            step.mul_add(0.5, bottom_height_m)
+            step = (-((intervals - 1) as f64)).contract(step, top_height_m - bottom_height_m);
+            step.contract(0.5, bottom_height_m)
         };
         // `kintegral = kintegral + 1./k*dz`：GIMPLE 是 `FMA(1/k, dz, 累积)`，
         // 即 `1/k` 先算一次、`(1/k)*dz` 再被吸收 —— **不是** `dz/k`。
         let reciprocal = 1.0 / canopy_diffusivity(input, height)?;
-        resistance = reciprocal.mul_add(step, resistance);
+        resistance = reciprocal.contract(step, resistance);
     }
     Ok(resistance)
 }
@@ -333,7 +334,7 @@ pub fn canopy_diffusivity_profile_integral(
     // GIMPLE 是 `FMA(fl(fl(fac*htop)/ktop), log差, fl((1-fac)*kmonin))` ——
     // 左边那个乘积被吸收，右边那个先舍入。
     let combined = (blend * input.canopy_top_height_m / input.diffusivity_at_canopy_top_m2_s)
-        .mul_add(
+        .contract(
             top_height_m.ln() - bottom_height_m.ln(),
             (1.0 - blend)
                 * integrated_monin_obukhov_diffusivity(
@@ -361,7 +362,7 @@ pub fn canopy_diffusivity_profile_integral(
             (top_height_m - bottom_height_m) / input.diffusivity_at_canopy_top_m2_s
         };
         let blend_area = input.canopy_blend_weight * input.canopy_cover_fraction;
-        Ok(blend_area.mul_add(exponential, (1.0 - blend_area) * combined))
+        Ok(blend_area.contract(exponential, (1.0 - blend_area) * combined))
     } else {
         Ok(combined)
     }
@@ -388,7 +389,7 @@ pub fn canopy_diffusivity_difference(
     let combined = 1.0 / (blend / linear + (1.0 - blend) / monin_obukhov);
     // `kdiff = kexp - kcob`：GIMPLE 是 `FMS(ktop, exp, kcob)` —— `ktop*exp`
     // 被吸收进减法，`kcob` 是已舍入的加数。
-    Ok(input.diffusivity_at_canopy_top_m2_s.mul_add(
+    Ok(input.diffusivity_at_canopy_top_m2_s.contract(
         (-input.attenuation_coefficient * (input.canopy_top_height_m - height_m)
             / (input.canopy_top_height_m - input.canopy_bottom_height_m))
             .exp(),

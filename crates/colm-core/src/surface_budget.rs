@@ -11,6 +11,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::StandardLctEnergyOutput;
 
@@ -51,8 +52,8 @@ pub fn add_precipitation_heat(energy: &StandardLctEnergyOutput, accumulator: f64
     let difference =
         energy.precipitation.precipitation_temperature_k - energy.surface_temperature_k;
     let accumulator = (WATER_HEAT_CAPACITY_J_KG_K * energy.interception.ground_rain_kg_m2_s)
-        .mul_add(difference, accumulator);
-    difference.mul_add(
+        .contract(difference, accumulator);
+    difference.contract(
         ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s,
         accumulator,
     )
@@ -80,8 +81,8 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let outgoing_longwave_coefficient =
         emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4 * previous_surface_temperature_k.powi(3);
     let outgoing_longwave =
-        outgoing_longwave_coefficient.mul_add(temperature_change_k, upward_longwave);
-    let bulk_emissivity = emissivity.mul_add(blackbody_change, upward_longwave)
+        outgoing_longwave_coefficient.contract(temperature_change_k, upward_longwave);
+    let bulk_emissivity = emissivity.contract(blackbody_change, upward_longwave)
         / (upward_longwave + blackbody_change);
     let radiative_temperature_k = (outgoing_longwave / STEFAN_BOLTZMANN_W_M2_K4).lpow(0.25);
 
@@ -109,7 +110,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let latent_heat = if energy.river_lake_flow_build {
         ground_latent_heat + leaf_evaporation * leaf_latent_heat
     } else {
-        leaf_evaporation.mul_add(leaf_latent_heat, ground_latent_heat)
+        leaf_evaporation.contract(leaf_latent_heat, ground_latent_heat)
     };
     // 漫滩蒸发按水面潜热计价（`:1471`）：`lfevpa = FMA(fevpg_fld, hvap-htvp, lfevpa)`；
     // `fgrnd` 末尾对应 `FNMA(hvap-htvp, fevpg_fld, fgrnd)`（`:1492`）。
@@ -120,7 +121,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         )
     });
     let latent_heat = match flood_heat {
-        Some((evaporation, excess)) => evaporation.mul_add(excess, latent_heat),
+        Some((evaporation, excess)) => evaporation.contract(excess, latent_heat),
         None => latent_heat,
     };
 
@@ -137,15 +138,15 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
     let ground_heat = energy
         .leaf
         .downward_longwave_w_m2
-        .mul_add(emissivity, energy.shortwave.ground_absorbed_w_m2);
+        .contract(emissivity, energy.shortwave.ground_absorbed_w_m2);
     let ground_heat = match energy.split_surface {
         None => (-(emissivity * STEFAN_BOLTZMANN_W_M2_K4))
-            .mul_add(previous_surface_temperature_k.powi(4), ground_heat),
+            .contract(previous_surface_temperature_k.powi(4), ground_heat),
         Some(split) => {
             let snow = (-(emissivity * split.snow_cover_fraction * STEFAN_BOLTZMANN_W_M2_K4))
-                .mul_add(split.snow_temperature_k_before.powi(4), ground_heat);
+                .contract(split.snow_temperature_k_before.powi(4), ground_heat);
             (-(emissivity * (1.0 - split.snow_cover_fraction) * STEFAN_BOLTZMANN_W_M2_K4))
-                .mul_add(split.soil_temperature_k_before.powi(4), snow)
+                .contract(split.soil_temperature_k_before.powi(4), snow)
         }
     };
     let longwave_change_coefficient =
@@ -166,7 +167,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
             + difference * (ICE_HEAT_CAPACITY_J_KG_K * energy.interception.ground_snow_kg_m2_s)
     } else {
         let ground_heat =
-            (-longwave_change_coefficient).mul_add(4.0 * temperature_change_k, ground_heat);
+            (-longwave_change_coefficient).contract(4.0 * temperature_change_k, ground_heat);
         let ground_heat =
             ground_heat - (ground_latent_heat + energy.corrected_ground_sensible_heat_w_m2);
         // 降水显热两项：内核把**每一项**熔进累加器（`_1768`/`_1772`），不是先求和再加。
@@ -174,7 +175,7 @@ pub fn surface_budget(energy: &StandardLctEnergyOutput) -> Result<SurfaceBudget>
         add_precipitation_heat(energy, ground_heat)
     };
     let ground_heat = match flood_heat {
-        Some((evaporation, excess)) => (-excess).mul_add(evaporation, ground_heat),
+        Some((evaporation, excess)) => (-excess).contract(evaporation, ground_heat),
         None => ground_heat,
     };
     // `MOD_Vars_1DAccFluxes.F90:2087`：`rnet = sabg + sabvsun + sabvsha - olrg + forc_frl`。

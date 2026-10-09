@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::solve_tridiagonal;
 
@@ -455,7 +456,7 @@ fn transpiration_from_conductance(
     //   `cfw = .FMA(_21, _47, _33)` —— **第二项的最外层乘积收进加法**，第一项是加数。
     // 原先写成 `A + (1-fwet)*delta*(…)` 的平铺链，少收这一处。
     let wet_fraction = (1.0 - input.wet_canopy_fraction) * delta;
-    let leaf = wet_fraction.mul_add(
+    let leaf = wet_fraction.contract(
         input.sunlit_leaf_area_index
             / (1.0 / boundary_conductance_umol_m2_s + 1.0 / sunlit_stomatal_conductance_umol_m2_s)
             / conversion
@@ -477,9 +478,9 @@ fn transpiration_from_conductance(
     // `cqi = (wtaq0 + wtgq0)*qsatl - wtaq0*qm - wtgq0*qg`（`:685`）：
     // 与叶温内核里 `humidity_gradient` 同一个三级减法链，实测收缩成
     // `fma(-wtgq0, qg, fma(wtaq0+wtgq0, qsatl, -(wtaq0*qm)))`（4000/4000）。
-    let driving_humidity = (-ground_weight).mul_add(
+    let driving_humidity = (-ground_weight).contract(
         input.ground_specific_humidity,
-        (air_weight + ground_weight).mul_add(
+        (air_weight + ground_weight).contract(
             input.leaf_saturation_specific_humidity,
             -(air_weight * input.reference_specific_humidity),
         ),
@@ -548,7 +549,7 @@ fn conductance_from_transpiration(
         * boundary_conductance_umol_m2_s
         / conversion;
     // `cqi_leaf = caw*(qsatl-qm) + cgw*(qsatl-qg)`：乘积 + 乘积，收左边（GIMPLE 实测）。
-    let leaf = air.mul_add(
+    let leaf = air.contract(
         input.leaf_saturation_specific_humidity - input.reference_specific_humidity,
         ground * (input.leaf_saturation_specific_humidity - input.ground_specific_humidity),
     );
@@ -565,8 +566,8 @@ fn conductance_from_transpiration(
     // （第 341 轮更正：原先分母也写了 `mul_add`，那是多收了一处。）
     let b1_a2 = b1 * a2;
     let b2_a1 = b2 * a1;
-    let sunlit_leaf_conductance = b1.mul_add(c2, -(b2 * c1)) / (b1_a2 - b2_a1);
-    let shaded_leaf_conductance = c2.mul_add(a1, -(c1 * a2)) / (b2_a1 - b1_a2);
+    let sunlit_leaf_conductance = b1.contract(c2, -(b2 * c1)) / (b1_a2 - b2_a1);
+    let shaded_leaf_conductance = c2.contract(a1, -(c1 * a2)) / (b2_a1 - b1_a2);
     if sunlit_transpiration_kg_m2_s > 0.0 {
         sunlit_stomatal_conductance_umol_m2_s = 1.0
             / ((1.0 - input.wet_canopy_fraction) * delta * input.sunlit_leaf_area_index
@@ -623,12 +624,12 @@ fn root_flux_from_top_potential(
         // 只有 2662/4000）。`rmx` 是**第一次** `tridia` 的右端：它差 1 ULP，
         // `x` 就差，而 `dqeroot`（第二次解的右端 `drmx_hr` 与它无关）可以仍然对上 ——
         // 实测就是先看到 `qeroot` 差、`dqeroot` 相同。
-        rhs[row] = radial[layer].mul_add(input.soil_matric_potential_mm[layer], axial[layer - 1])
+        rhs[row] = radial[layer].contract(input.soil_matric_potential_mm[layer], axial[layer - 1])
             - next_distance.map_or(0.0, |_| axial[layer]);
         if layer == 1 {
             // `… + kax(j-1)/den1*xroot(1)`：`X + 乘积` 形状，收的是外层那个乘积
             // （`fma(q,R,acc)` 4000/4000，不收缩 2935/4000）。
-            rhs[row] = (axial[0] / previous_distance).mul_add(root_one, rhs[row]);
+            rhs[row] = (axial[0] / previous_distance).contract(root_one, rhs[row]);
             derivative_rhs[row] = axial[0] / previous_distance;
         }
     }
@@ -643,7 +644,7 @@ fn root_flux_from_top_potential(
     // 出货汇编 `fmul d0,d0,d13; fdiv d0,d0,d15; fsub d31,d31,d14; fmadd d0,d26,d31,d0`
     // ⇒ **第一个**源乘积 `krad*(smp-xroot(1))` 进 FMA，第二个是独立舍入的加数，
     // 末尾 `- kax` 仍是普通 fsub。（第 341 轮补上；原先两个乘积都独立舍入。）
-    let root_flux = radial[0].mul_add(
+    let root_flux = radial[0].contract(
         input.soil_matric_potential_mm[0] - root_one,
         (root_two - root_one) * axial[0] / (depth_mm[1] - depth_mm[0]),
     ) - axial[0];
@@ -680,7 +681,7 @@ fn root_potential_from_flux(
         // `krad*smp + kax(j-1)`（`MOD_PlantHydraulic.F90:940-960`）。
         // 所以首行是**先减 `qeroot` 再减 `kax`** —— 原先先减 `kax`、
         // 出了循环再减 `qeroot`，结合顺序与上游不同；同时那个乘积也要收缩。
-        rhs[layer] = radial[layer].mul_add(
+        rhs[layer] = radial[layer].contract(
             input.soil_matric_potential_mm[layer],
             previous_distance.map_or(-root_flux_kg_m2_s, |_| axial[layer - 1]),
         ) - next_distance.map_or(0.0, |_| axial[layer]);
@@ -729,7 +730,7 @@ fn spac_change(
     let shaded_gradient = x[XYLEM] - x[SHADED];
     // GIMPLE：`_44 = FNMA(htop, 1000, x(root)-x(xyl))`——`grav1 = htop*1000` 被收进减法。
     // `htop = 0.5` 时 500 是精确值看不出差别，`DEF_LC_HTOP0 = 0.8` 时 `f_vegwp` 差 1 ULP（第 439 轮）。
-    let root_gradient = (-input.canopy_top_height_m).mul_add(1000.0, x[ROOT] - x[XYLEM]);
+    let root_gradient = (-input.canopy_top_height_m).contract(1000.0, x[ROOT] - x[XYLEM]);
     // `A`/`f` 的收缩点**直接读 GIMPLE 定下来的**（`gfortran -fdump-tree-all`，
     // 见 docs 里那一节的说明）。逐条对应：
     // * `A11 = FNMS(qflx_sun, dfsto1, P)` —— 左边是 `-P`（NEG 节点）不是乘积，
@@ -742,20 +743,20 @@ fn spac_change(
     // 也就是"每层收那个乘积操作数；两边都是乘积时收左边"。被收的那个乘法取的是
     // **它自己的最外层乘法**（如 `laisun*kmax_sun*dfx` 收成 `fma(laisun*kmax_sun, dfx, ·)`
     // 的乘数一侧），没收的那侧按源码顺序整项舍入。
-    let a11 = (-sunlit_flux).mul_add(dfsun, -(sunlit_conductance * fxyl));
-    let a13 = (sunlit_conductance * dfxyl).mul_add(sunlit_gradient, sunlit_conductance * fxyl);
-    let a22 = (-shaded_flux).mul_add(dfsha, -(shaded_conductance * fxyl));
-    let a23 = (shaded_conductance * dfxyl).mul_add(shaded_gradient, shaded_conductance * fxyl);
+    let a11 = (-sunlit_flux).contract(dfsun, -(sunlit_conductance * fxyl));
+    let a13 = (sunlit_conductance * dfxyl).contract(sunlit_gradient, sunlit_conductance * fxyl);
+    let a22 = (-shaded_flux).contract(dfsha, -(shaded_conductance * fxyl));
+    let a23 = (shaded_conductance * dfxyl).contract(shaded_gradient, shaded_conductance * fxyl);
     let a31 = sunlit_conductance * fxyl;
     let a32 = shaded_conductance * fxyl;
-    let mut a33 = (-(shaded_conductance * dfxyl)).mul_add(
+    let mut a33 = (-(shaded_conductance * dfxyl)).contract(
         shaded_gradient,
-        (-(sunlit_conductance * dfxyl)).mul_add(sunlit_gradient, -(sunlit_conductance * fxyl)),
+        (-(sunlit_conductance * dfxyl)).contract(sunlit_gradient, -(sunlit_conductance * fxyl)),
     ) - shaded_conductance * fxyl
         - xylem * froot;
-    let a34 = (xylem * dfroot).mul_add(root_gradient, xylem * froot);
+    let a34 = (xylem * dfroot).contract(root_gradient, xylem * froot);
     let a43 = xylem * froot;
-    let a44 = (-(xylem * dfroot)).mul_add(root_gradient, -(xylem * froot)) + root_flux_slope;
+    let a44 = (-(xylem * dfroot)).contract(root_gradient, -(xylem * froot)) + root_flux_slope;
     let mut f = [0.0; VEGETATION_SEGMENTS];
     // 三个乘积（真实内核 dump 里的 `_51`/`_54`/`_57`）同时喂给下面 IF 与 ELSE
     // **两条支路**（`f(xyl)` 的两支、`f(root)`），所以 GCC 一律把它们保持成
@@ -766,8 +767,8 @@ fn spac_change(
     let sunlit_term = sunlit_conductance * fxyl * sunlit_gradient;
     let shaded_term = shaded_conductance * fxyl * shaded_gradient;
     let root_term = xylem * froot * root_gradient;
-    f[SUNLIT] = sunlit_flux.mul_add(fsun, -sunlit_term);
-    f[SHADED] = shaded_flux.mul_add(fsha, -shaded_term);
+    f[SUNLIT] = sunlit_flux.contract(fsun, -sunlit_term);
+    f[SHADED] = shaded_flux.contract(fsha, -shaded_term);
     f[XYLEM] = sunlit_term + shaded_term - root_term;
     f[ROOT] = root_term - root_flux;
     let mut change = [0.0; VEGETATION_SEGMENTS];
@@ -780,9 +781,9 @@ fn spac_change(
         // 这条以前漏验了：当时是拿"神谕算好的 determ"喂进去只比 `dx`，所以四条 `dx`
         // 式子验到 20000/20000，而 `determ` 自己的算法没人管。现在用内核自己打出来的
         // 49 组 `(A, f, dx)` 反推：融合式四个分量**全 49/49**，普通乘减只有 27/49。
-        let determinant = ((a22 * a44) * a33).mul_add(a11, -(((a22 * a44) * a31) * a13));
-        let determinant = (-((a32 * a44) * a23)).mul_add(a11, determinant);
-        let determinant = (-((a43 * a11) * a22)).mul_add(a34, determinant);
+        let determinant = ((a22 * a44) * a33).contract(a11, -(((a22 * a44) * a31) * a13));
+        let determinant = (-((a32 * a44) * a23)).contract(a11, determinant);
+        let determinant = (-((a43 * a11) * a22)).contract(a34, determinant);
         if determinant != 0.0 {
             // `spacAF_twoleaf` 的四条 `dx` 回代式（`MOD_PlantHydraulic.F90:499-509`）。
             // **收缩规则是量出来的，不是猜的**：把上游那四条语句原样抄成独立 Fortran
@@ -801,36 +802,38 @@ fn spac_change(
             // 原先的"全不收缩"写法在这 20000 组里 0 组全中。
             // 交叉验证：`gfortran -fdump-tree-all` 的 GIMPLE 里能看到 `.FMA/.FMS/.FNMA`
             // 恰好落在上面这些位置，与实测一致。
-            let e1 = (a22 * a33).mul_add(a44, -(a22 * a34 * a43));
-            let e1 = (-a44).mul_add(a23 * a32, e1);
-            let e2 = (a11 * a33).mul_add(a44, -(a11 * a34 * a43));
-            let e2 = (-a44).mul_add(a13 * a31, e2);
-            let e3 = (a11 * a22).mul_add(a33, -(a11 * a23 * a32));
-            let e3 = (-(a13 * a22)).mul_add(a31, e3);
-            change[SUNLIT] = (a13 * a22 * a34).mul_add(
+            let e1 = (a22 * a33).contract(a44, -(a22 * a34 * a43));
+            let e1 = (-a44).contract(a23 * a32, e1);
+            let e2 = (a11 * a33).contract(a44, -(a11 * a34 * a43));
+            let e2 = (-a44).contract(a13 * a31, e2);
+            let e3 = (a11 * a22).contract(a33, -(a11 * a23 * a32));
+            let e3 = (-(a13 * a22)).contract(a31, e3);
+            change[SUNLIT] = (a13 * a22 * a34).contract(
                 f[ROOT],
-                (-(a13 * a22 * a44))
-                    .mul_add(f[XYLEM], e1.mul_add(f[SUNLIT], a13 * a32 * a44 * f[SHADED])),
-            ) / determinant;
-            change[SHADED] = (a11 * a23 * a34).mul_add(
-                f[ROOT],
-                (-(a11 * a23 * a44)).mul_add(
+                (-(a13 * a22 * a44)).contract(
                     f[XYLEM],
-                    (a23 * a31 * a44).mul_add(f[SUNLIT], e2 * f[SHADED]),
+                    e1.contract(f[SUNLIT], a13 * a32 * a44 * f[SHADED]),
                 ),
             ) / determinant;
-            change[XYLEM] = (-(a11 * a22 * a34)).mul_add(
+            change[SHADED] = (a11 * a23 * a34).contract(
                 f[ROOT],
-                (a11 * a22 * a44).mul_add(
+                (-(a11 * a23 * a44)).contract(
                     f[XYLEM],
-                    (-(a22 * a31 * a44)).mul_add(f[SUNLIT], -(a11 * a32 * a44 * f[SHADED])),
+                    (a23 * a31 * a44).contract(f[SUNLIT], e2 * f[SHADED]),
                 ),
             ) / determinant;
-            change[ROOT] = e3.mul_add(
+            change[XYLEM] = (-(a11 * a22 * a34)).contract(
                 f[ROOT],
-                (-(a11 * a22 * a43)).mul_add(
+                (a11 * a22 * a44).contract(
                     f[XYLEM],
-                    (a22 * a31 * a43).mul_add(f[SUNLIT], a11 * a32 * a43 * f[SHADED]),
+                    (-(a22 * a31 * a44)).contract(f[SUNLIT], -(a11 * a32 * a44 * f[SHADED])),
+                ),
+            ) / determinant;
+            change[ROOT] = e3.contract(
+                f[ROOT],
+                (-(a11 * a22 * a43)).contract(
+                    f[XYLEM],
+                    (a22 * a31 * a43).contract(f[SUNLIT], a11 * a32 * a43 * f[SHADED]),
                 ),
             ) / determinant;
         }
@@ -847,23 +850,23 @@ fn spac_change(
         //   `dx(root)`：`FMA(f(leafsun), a43*a31,
         //                    FMS((a11*a33 - a13*a31), f(root), f(xyl)*(a11*a43)))`
         a33 = (-(sunlit_conductance * dfxyl))
-            .mul_add(sunlit_gradient, -(sunlit_conductance * fxyl))
+            .contract(sunlit_gradient, -(sunlit_conductance * fxyl))
             - xylem * froot;
         f[XYLEM] = sunlit_term - root_term;
-        let determinant = (a11 * a33).mul_add(a44, -((a11 * a34) * a43));
-        let determinant = (-a44).mul_add(a13 * a31, determinant);
+        let determinant = (a11 * a33).contract(a44, -((a11 * a34) * a43));
+        let determinant = (-a44).contract(a13 * a31, determinant);
         if determinant != 0.0 {
-            change[SUNLIT] = a33.mul_add(a44, -(a34 * a43)).mul_add(
+            change[SUNLIT] = a33.contract(a44, -(a34 * a43)).contract(
                 f[SUNLIT],
-                (a13 * a34).mul_add(f[ROOT], -(f[XYLEM] * (a13 * a44))),
+                (a13 * a34).contract(f[ROOT], -(f[XYLEM] * (a13 * a44))),
             ) / determinant;
-            change[XYLEM] = (-(a44 * a31)).mul_add(
+            change[XYLEM] = (-(a44 * a31)).contract(
                 f[SUNLIT],
-                f[XYLEM].mul_add(a11 * a44, -((a11 * a34) * f[ROOT])),
+                f[XYLEM].contract(a11 * a44, -((a11 * a34) * f[ROOT])),
             ) / determinant;
-            change[ROOT] = (a43 * a31).mul_add(
+            change[ROOT] = (a43 * a31).contract(
                 f[SUNLIT],
-                (a11 * a33 - a13 * a31).mul_add(f[ROOT], -(f[XYLEM] * (a11 * a43))),
+                (a11 * a33 - a13 * a31).contract(f[ROOT], -(f[XYLEM] * (a11 * a43))),
             ) / determinant;
             change[SHADED] = x[SUNLIT] - x[SHADED] + change[SUNLIT];
         }

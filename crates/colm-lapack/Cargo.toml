@@ -8,6 +8,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+colm-numeric = { path = "../colm-numeric" }
 anyhow.workspace = true
 
 # 不继承工作区的 `unsafe_code = "forbid"`：本 crate 存在的唯一理由就是 macOS 上

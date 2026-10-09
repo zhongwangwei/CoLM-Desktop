@@ -17,6 +17,7 @@
 // `min(max(x,0),1)` 对 NaN 的语义（`clamp` 会把 NaN 原样传下去）。
 #![allow(clippy::needless_range_loop, clippy::manual_clamp)]
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -380,7 +381,7 @@ impl SedimentParams {
             .map(|&d| {
                 let s = 6.0 * p.viskin / d;
                 let factor = (p.psedd - p.pwatd) * (2.0 / 3.0) / p.pwatd * GRAV;
-                (d.mul_add(factor, s * s).sqrt() - s) * p.pset
+                (d.contract(factor, s * s).sqrt() - s) * p.pset
             })
             .collect();
         p.validate()?;
@@ -545,18 +546,18 @@ impl WaterAcc {
         }
         self.protected_end = water.protected_end;
         self.time += dt;
-        self.v2 = dt.mul_add(veloc * veloc, self.v2);
-        self.wdsrf = wdsrf.mul_add(dt, self.wdsrf);
-        self.rivsto = dt.mul_add(water.end, self.rivsto);
-        self.rivout = rivout.mul_add(dt, self.rivout);
-        self.abs_rivout = rivout.abs().mul_add(dt, self.abs_rivout);
-        self.floodarea = floodarea.mul_add(dt, self.floodarea);
+        self.v2 = dt.contract(veloc * veloc, self.v2);
+        self.wdsrf = wdsrf.contract(dt, self.wdsrf);
+        self.rivsto = dt.contract(water.end, self.rivsto);
+        self.rivout = rivout.contract(dt, self.rivout);
+        self.abs_rivout = rivout.abs().contract(dt, self.abs_rivout);
+        self.floodarea = floodarea.contract(dt, self.floodarea);
         if let Some(area) = water.protected_area {
             ensure!(
                 area.is_finite() && area >= 0.0,
                 "sediment protected area invalid"
             );
-            self.protected_area = dt.mul_add(area, self.protected_area);
+            self.protected_area = dt.contract(area, self.protected_area);
         }
         Ok(())
     }
@@ -626,8 +627,8 @@ impl BifWaterAcc {
             );
             for k in row {
                 let h = hflux_lev[k];
-                self.forward[k] = dt.mul_add(h.max(0.0), self.forward[k]);
-                self.reverse[k] = dt.mul_add((-h).max(0.0), self.reverse[k]);
+                self.forward[k] = dt.contract(h.max(0.0), self.forward[k]);
+                self.reverse[k] = dt.contract((-h).max(0.0), self.reverse[k]);
                 if h > 0.0 {
                     self.forward_time[k] += dt;
                 }
@@ -881,7 +882,7 @@ impl Sediment {
         let (ns, nl) = (self.p.nsed, self.p.totlyrnum);
         // `max(FNMA(lyrdph, totlyrnum, bed_depth), 0)`。
         let bottom = (-self.p.lyrdph)
-            .mul_add(nl as f64, self.p.bed_depth)
+            .contract(nl as f64, self.p.bed_depth)
             .max(0.0);
         for i in 0..network.len() {
             for s in 0..ns {
@@ -926,12 +927,12 @@ impl Sediment {
                 precip[i] >= 0.0,
                 "sediment forcing: negative rain on valid area"
             );
-            self.precip[i] = precip[i].mul_add(weight, self.precip[i]);
+            self.precip[i] = precip[i].contract(weight, self.precip[i]);
             if precip[i] * 86400.0 > SED_PRECIP_THRESHOLD_MM_DAY {
                 let rate = precip[i] * 3600.0;
                 self.precip_yield[i] = rate
                     .lpow(self.p.pyldpc)
-                    .mul_add(weight, self.precip_yield[i]);
+                    .contract(weight, self.precip_yield[i]);
             }
             self.precip_time[i] += weight;
         }
@@ -1013,8 +1014,8 @@ impl Sediment {
             }
             // `cb*setvel/(1+s) * FNMA(s, a, 1) / FMA(s, 1-a, 1)`。
             let stmp = self.p.setvel[s] / alpha / svel;
-            self.susvel[k] = (self.p.setvel[s] * cb / (1.0 + stmp) * (-stmp).mul_add(a, 1.0)
-                / stmp.mul_add(1.0 - a, 1.0))
+            self.susvel[k] = (self.p.setvel[s] * cb / (1.0 + stmp) * (-stmp).contract(a, 1.0)
+                / stmp.contract(1.0 - a, 1.0))
             .max(0.0);
         }
     }
@@ -1295,7 +1296,7 @@ impl Sediment {
         let mass_before = (0..n)
             .map(|i| {
                 sum(&self.layer[i * ns..(i + 1) * ns])
-                    .mul_add(solid, sum(&self.sedsto[i * ns..(i + 1) * ns]))
+                    .contract(solid, sum(&self.sedsto[i * ns..(i + 1) * ns]))
             })
             .collect::<Vec<_>>();
         self.one_direction(
@@ -1307,10 +1308,10 @@ impl Sediment {
         for k in 0..avail_sto.len() {
             // `max(FNMA(dt, max(out_first, 0), avail), 0)`。
             avail_sto[k] = (-dt)
-                .mul_add(sedout_first[k].max(0.0), avail_sto[k])
+                .contract(sedout_first[k].max(0.0), avail_sto[k])
                 .max(0.0);
             avail_bed[k] = (-dt)
-                .mul_add(bedout_first[k].max(0.0), avail_bed[k])
+                .contract(bedout_first[k].max(0.0), avail_bed[k])
                 .max(0.0);
         }
         self.one_direction(
@@ -1329,12 +1330,12 @@ impl Sediment {
             for k in range.clone() {
                 let sed_round = self.sedsto[k]
                     .max(dt * (self.sedout[k].abs() + sed_ups[k].abs()))
-                    .mul_add(eps8, SED_BALANCE_ABS_TOL);
+                    .contract(eps8, SED_BALANCE_ABS_TOL);
                 let bed_round = self.layer[k]
                     .max(dt * (self.bedout[k].abs() + bed_ups[k].abs()) / solid)
-                    .mul_add(eps8, SED_BALANCE_ABS_TOL);
+                    .contract(eps8, SED_BALANCE_ABS_TOL);
                 // `sedsto = FMA(dt, ups - out, sedsto)`；活动层不收缩。
-                self.sedsto[k] = dt.mul_add(sed_ups[k] - self.sedout[k], self.sedsto[k]);
+                self.sedsto[k] = dt.contract(sed_ups[k] - self.sedout[k], self.sedsto[k]);
                 self.layer[k] += dt * (bed_ups[k] - self.bedout[k]) / solid;
                 ensure!(
                     self.sedsto[k] >= -sed_round && self.layer[k] >= -bed_round,
@@ -1408,7 +1409,8 @@ impl Sediment {
         for i in 0..self.n() {
             let range = i * ns..(i + 1) * ns;
             for (s, k) in range.clone().enumerate() {
-                before[s] = solid.mul_add(self.layer[k], self.sedsto[k] + self.sedsto_protected[k])
+                before[s] = solid
+                    .contract(self.layer[k], self.sedsto[k] + self.sedsto_protected[k])
                     + self.sedbed_protected[k];
             }
             let acc = self.acc[i];
@@ -1450,7 +1452,7 @@ impl Sediment {
                     }
                     let total = sum(&self.sedsto_protected[range.clone()]);
                     // `max(FNMA(protected_end, MAX_SED_CONC, Σ), 0)`。
-                    let excess = (-protected_end[i]).mul_add(MAX_SED_CONC, total).max(0.0);
+                    let excess = (-protected_end[i]).contract(MAX_SED_CONC, total).max(0.0);
                     if excess > 0.0 {
                         for k in range.clone() {
                             let stock = self.sedsto_protected[k];
@@ -1476,7 +1478,8 @@ impl Sediment {
                 self.settle_visible(i, visible_water[i], dt_morph);
             }
             for (s, k) in range.enumerate() {
-                let after = solid.mul_add(self.layer[k], self.sedsto[k] + self.sedsto_protected[k])
+                let after = solid
+                    .contract(self.layer[k], self.sedsto[k] + self.sedsto_protected[k])
                     + self.sedbed_protected[k];
                 assert_balance("levee exchange", i, before[s], after, 0.0)?;
             }
@@ -1492,7 +1495,7 @@ impl Sediment {
         let range = i * ns..(i + 1) * ns;
         if water > 0.0 {
             let total = sum(&self.sedsto[range.clone()]);
-            let excess = (-water).mul_add(MAX_SED_CONC, total).max(0.0);
+            let excess = (-water).contract(MAX_SED_CONC, total).max(0.0);
             if excess > 0.0 {
                 for k in range.clone() {
                     let stock = self.sedsto[k];
@@ -1839,7 +1842,7 @@ impl Sediment {
                     * self.p.dsylunit;
                 for s in 0..ns {
                     let k = i * ns + s;
-                    self.sedinp[k] = base.mul_add(self.frc[k], self.sedinp[k]);
+                    self.sedinp[k] = base.contract(self.frc[k], self.sedinp[k]);
                 }
             }
         }
@@ -1893,9 +1896,9 @@ impl Sediment {
                             / (EXCH_SHEARVEL_BLEND - EXCH_SHEARVEL_MIN))
                             .max(0.0)
                             .min(1.0);
-                        w = w * w * (-w).mul_add(2.0, 3.0);
+                        w = w * w * (-w).contract(2.0, 3.0);
                         // `FMA(w, profile-1, 1)`。
-                        w.mul_add(profile - 1.0, 1.0)
+                        w.contract(profile - 1.0, 1.0)
                     };
                     let raw = self.p.setvel[s] * area * self.sedcon[k] * rouse;
                     d[s] = raw.max(0.0).min(self.sedsto[k] / dt);
@@ -1984,7 +1987,7 @@ impl Sediment {
             let before = sum(&self.sedsto[range.clone()]) + solid * sum(&self.layer[range.clone()]);
             if rivsto[i] > 0.0 && rivsto[i] >= bed_area[i] * self.p.ignore_dph {
                 for k in range.clone() {
-                    self.sedsto[k] = self.sedinp[k].mul_add(dt, self.sedsto[k]);
+                    self.sedsto[k] = self.sedinp[k].contract(dt, self.sedsto[k]);
                 }
                 self.cap_concentration(i, rivsto[i], dt, false);
                 for k in range.clone() {
@@ -2006,16 +2009,16 @@ impl Sediment {
     /// `accumulate_sediment_output`。
     fn accumulate_output(&mut self, dt: f64) {
         for k in 0..self.sedcon.len() {
-            self.a_sedcon[k] = self.sedcon[k].mul_add(dt, self.a_sedcon[k]);
-            self.a_sedout[k] = self.sedout[k].mul_add(dt, self.a_sedout[k]);
-            self.a_bedout[k] = self.bedout[k].mul_add(dt, self.a_bedout[k]);
-            self.a_sedinp[k] = self.sedinp[k].mul_add(dt, self.a_sedinp[k]);
+            self.a_sedcon[k] = self.sedcon[k].contract(dt, self.a_sedcon[k]);
+            self.a_sedout[k] = self.sedout[k].contract(dt, self.a_sedout[k]);
+            self.a_bedout[k] = self.bedout[k].contract(dt, self.a_bedout[k]);
+            self.a_sedinp[k] = self.sedinp[k].contract(dt, self.a_sedinp[k]);
             self.a_netflw[k] =
-                (self.netflw[k] + self.netflw_adv_step[k]).mul_add(dt, self.a_netflw[k]);
-            self.a_layer[k] = self.layer[k].mul_add(dt, self.a_layer[k]);
+                (self.netflw[k] + self.netflw_adv_step[k]).contract(dt, self.a_netflw[k]);
+            self.a_layer[k] = self.layer[k].contract(dt, self.a_layer[k]);
         }
         for i in 0..self.n() {
-            self.a_shearvel[i] = self.shearvel[i].mul_add(dt, self.a_shearvel[i]);
+            self.a_shearvel[i] = self.shearvel[i].contract(dt, self.a_shearvel[i]);
         }
     }
 
@@ -2214,14 +2217,14 @@ impl Sediment {
                     // `max(FMA(end-start, f, start), 0)`，可见 `max(FMA(...) - protected, 0)`。
                     let pspan = acc.protected_end - acc.protected_start;
                     protected_start[i] =
-                        pspan.mul_add(start_fraction, acc.protected_start).max(0.0);
-                    protected_end[i] = pspan.mul_add(end_fraction, acc.protected_start).max(0.0);
+                        pspan.contract(start_fraction, acc.protected_start).max(0.0);
+                    protected_end[i] = pspan.contract(end_fraction, acc.protected_start).max(0.0);
                     let span = acc.rivsto_end - acc.rivsto_start;
-                    rivsto_donor[i] = (span.mul_add(start_fraction, acc.rivsto_start)
+                    rivsto_donor[i] = (span.contract(start_fraction, acc.rivsto_start)
                         - protected_start[i])
                         .max(0.0);
                     rivsto[i] =
-                        (span.mul_add(end_fraction, acc.rivsto_start) - protected_end[i]).max(0.0);
+                        (span.contract(end_fraction, acc.rivsto_start) - protected_end[i]).max(0.0);
                     rivout[i] = avg_rivout;
                     rivout_abs[i] = avg_abs;
                     bed_area[i] = network.rivwth[i] * network.rivlen[i];

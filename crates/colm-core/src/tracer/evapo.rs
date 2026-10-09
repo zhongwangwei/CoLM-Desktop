@@ -25,6 +25,7 @@
 #![allow(clippy::manual_clamp)]
 
 use anyhow::Result;
+use colm_numeric::Contract;
 
 use super::evap_limit::{
     atmospheric_tracer_loss, evaporative_tracer_loss, skin_limited_tracer_loss,
@@ -323,9 +324,9 @@ pub fn tracer_evapo(
                 if j == 1 {
                     let ratio = frac.deposition_ratio(layer_temp(j), false)?;
                     let pools = &mut state.pools[itrc];
-                    pools.wliq_soisno[s] = trc_flux.mul_add(ratio, pools.wliq_soisno[s]);
+                    pools.wliq_soisno[s] = trc_flux.contract(ratio, pools.wliq_soisno[s]);
                     let acc = &mut state.acc[itrc];
-                    acc.precip = trc_flux.mul_add(ratio, acc.precip);
+                    acc.precip = trc_flux.contract(ratio, acc.precip);
                     acc.water_precip += trc_flux;
                 } else {
                     // 深层残差增益：保留本层（或初始）比值。
@@ -373,9 +374,9 @@ pub fn tracer_evapo(
                 if j == 1 {
                     let ratio = frac.deposition_ratio(layer_temp(j), true)?;
                     let pools = &mut state.pools[itrc];
-                    pools.wice_soisno[s] = trc_flux.mul_add(ratio, pools.wice_soisno[s]);
+                    pools.wice_soisno[s] = trc_flux.contract(ratio, pools.wice_soisno[s]);
                     let acc = &mut state.acc[itrc];
-                    acc.precip = trc_flux.mul_add(ratio, acc.precip);
+                    acc.precip = trc_flux.contract(ratio, acc.precip);
                     acc.water_precip += trc_flux;
                 } else {
                     let pools = &mut state.pools[itrc];
@@ -435,7 +436,7 @@ pub fn tracer_flood_evap_loss(
         // Craig-Gordon 比值用开阔水面动力学 α，风速 `sqrt(FMA(us, us, vs*vs))`。
         let wind = input
             .forc_us
-            .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+            .contract(input.forc_us, input.forc_vs * input.forc_vs)
             .sqrt();
         let evap_ratio = |source_ratio: f64, temp: f64, from_ice: bool| {
             if !active {

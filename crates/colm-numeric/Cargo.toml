@@ -1,0 +1,17 @@
+[package]
+name = "colm-numeric"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+description = "Fused multiply-add policy shared by the numerical crates"
+
+[features]
+# 强行指定乘加策略；都不开时按目标架构选（aarch64 融合，其余不融合），见 src/lib.rs。
+fused = []
+unfused = []
+
+[lints]
+workspace = true

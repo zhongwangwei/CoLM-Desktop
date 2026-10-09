@@ -1,6 +1,7 @@
 //! Soil hydraulic functions from `main/HYDRO/MOD_Hydro_SoilFunction.F90`.
 
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// CoLM's lower bound for soil matric potential (mm).
 pub const MIN_SOIL_PSI: f64 = -1.0e8;
@@ -87,7 +88,7 @@ pub fn equilibrium_water_state(
             // `MOD_Hydro_SoilWater.F90:137` 的 GIMPLE 是
             // `.FMA(zwtmm - sp_zi(ilev-1), vliq_up, porsl*(sp_zi(ilev) - zwtmm))`：
             // 第二个源乘积 `porsl*(...)` 独立舍入，第一个源乘积进 FMA。
-            liquid_water_kg_m2[layer] = (water_table_mm - interface_mm[layer]).mul_add(
+            liquid_water_kg_m2[layer] = (water_table_mm - interface_mm[layer]).contract(
                 upper_water,
                 porosity[layer] * (interface_mm[layer + 1] - water_table_mm),
             );
@@ -113,7 +114,7 @@ pub fn equilibrium_water_state(
     let aquifer_water_mm = if water_layer == layers + 1 {
         // `:150` 的 GIMPLE 是 `.FNMA(zwtmm - sp_zi(nlev), 5.0e-1, psi_zwt)`：
         // `psi_zwt - (zwtmm - sp_zi(nlev))*0.5` 是一条 FMA，取负是精确的。
-        let psi = (water_table_mm - interface_mm[layers]).mul_add(-0.5, psi_at_water_table);
+        let psi = (water_table_mm - interface_mm[layers]).contract(-0.5, psi_at_water_table);
         let water = soil_vliq_from_psi(
             psi,
             porosity[layers - 1],
@@ -186,7 +187,7 @@ pub fn soil_vliq_from_psi(
             let esat = (1.0 + (psi * -alpha_vgm).lpow(n_vgm)).lpow(-m_vgm) / sc_vgm;
             // GIMPLE（`MOD_Hydro_SoilFunction.F90` 的 `soil_vliq_from_psi`）：
             // 全模块只有这一处收缩 —— `FMA(porsl-vl_r, esat, vl_r)`。
-            (porosity - residual_water).mul_add(esat, residual_water)
+            (porosity - residual_water).contract(esat, residual_water)
         }
     }
 }

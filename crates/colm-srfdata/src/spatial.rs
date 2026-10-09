@@ -6,6 +6,7 @@
 //! Scientific rawdata aggregation deliberately stays outside this module.
 
 use crate::LibmPow;
+use colm_numeric::Contract;
 use std::collections::{btree_map::Entry, BTreeMap};
 use std::path::{Path, PathBuf};
 
@@ -2609,7 +2610,7 @@ fn validate_methane_ph_axes(latitude: &[f64], longitude: &[f64], path: &Path) ->
         spacing.is_finite()
             && spacing > 0.0
             && longitude.windows(2).all(|pair| {
-                ((pair[1] - pair[0]) - spacing).abs() <= spacing.mul_add(0.01, 1.0e-6)
+                ((pair[1] - pair[0]) - spacing).abs() <= spacing.contract(0.01, 1.0e-6)
             }),
         "PHH2O longitude spacing must be regular"
     );

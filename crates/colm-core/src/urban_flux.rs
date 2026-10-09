@@ -11,6 +11,7 @@
 // `min(1).max(0.001)` 与 `clamp` 在 NaN 上语义不同（后者边界反转时还会 panic）。
 #![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
@@ -223,7 +224,7 @@ fn surfaces(input: &UrbanFluxInput) -> Surfaces {
     let fgimp = input.fcover[3] / fg;
     let fgper = input.fcover[4] / fg;
     // `:1367` `.FMA (tgimp, fgimp, tgper*fgper)`
-    let tg = input.tgimp.mul_add(fgimp, input.tgper * fgper);
+    let tg = input.tgimp.contract(fgimp, input.tgper * fgper);
     // `(max(0, wliq+wice))**(2/3.)`：`2/3.` 是整数除以实数，得 0.6666…（不是字面量 .666666666666）。
     let wetness = |has_snow: bool, fsno: f64, liquid: f64, ice: f64| {
         if has_snow {
@@ -278,12 +279,12 @@ fn surfaces(input: &UrbanFluxInput) -> Surfaces {
 /// 分子 `.FMA (qgimp*fgimp, fwet_gimp, qgper*fgper)`（`:1406`）。
 fn mixed_ground_humidity(input: &UrbanFluxInput, fgimp: f64, fgper: f64, fwet_gimp: f64) -> f64 {
     let fwetfac = fgper + fgimp * fwet_gimp;
-    (input.qgimp * fgimp).mul_add(fwet_gimp, input.qgper * fgper) / fwetfac
+    (input.qgimp * fgimp).contract(fwet_gimp, input.qgper * fgper) / fwetfac
 }
 
 /// `hroof*(1 + 4.43**(-λ)*(λ-1))`：`hroof * .FMA (pow(4.43,-λ), λ-1, 1)`（`:1435`）。
 fn displacement(hroof: f64, lambda: f64) -> f64 {
-    hroof * 4.43_f64.lpow(-lambda).mul_add(lambda - 1.0, 1.0)
+    hroof * 4.43_f64.lpow(-lambda).contract(lambda - 1.0, 1.0)
 }
 
 /// `(hroof-d)*exp(-(3.75*(1-d/hroof)*fai)**(-0.5))`（`:1438`）。
@@ -407,8 +408,8 @@ fn transport(
     };
     let rhocp = input.rhoair * CPAIR;
     // `:1701` `rho*cp/.FMA (ueff, 4.2, 11.8)`
-    let rb0 = rhocp / utop.mul_add(4.2, 11.8);
-    let rb12 = rhocp / ueff2.mul_add(4.2, 11.8);
+    let rb0 = rhocp / utop.contract(4.2, 11.8);
+    let rb12 = rhocp / ueff2.contract(4.2, 11.8);
     Ok(Transport {
         ustar,
         fm: surface.momentum,
@@ -437,9 +438,9 @@ fn anthropogenic_heat(input: &UrbanFluxInput) -> AnthropogenicHeat {
     let denominator = four_hlr + 1.0;
     let hac_wst = input.fhac + input.fwst;
     // `:1806` `.FMA (vehc, fsh, .FMA ((4hlr/(4hlr+1))*(Fhac+Fwst), fsh, Fach)) + meta`
-    let hahe2 = input.vehc.mul_add(
+    let hahe2 = input.vehc.contract(
         FSH,
-        ((four_hlr / denominator) * hac_wst).mul_add(FSH, input.fach),
+        ((four_hlr / denominator) * hac_wst).contract(FSH, input.fach),
     ) + input.meta;
     let hahe3 = (hac_wst * (1.0 / denominator)) * FSH;
     let lahe = (hac_wst + input.vehc) * FLH;
@@ -464,8 +465,8 @@ fn stability(
     // `:2225` `.FMA (1+0.61qm, tstar, (th*0.61)*qstar)`
     let thvstar = input
         .qm
-        .mul_add(0.61, 1.0)
-        .mul_add(tstar, (input.th * 0.61) * qstar);
+        .contract(0.61, 1.0)
+        .contract(tstar, (input.th * 0.61) * qstar);
     let mut zeta = (((zldis * VONKAR) * GRAV) * thvstar) / (input.thv * (ustar * ustar));
     zeta = if zeta >= 0.0 {
         zeta.clamp(1.0e-6, 2.0)
@@ -478,7 +479,7 @@ fn stability(
     } else {
         // `zii = 1000`、`beta = 1`
         let wc = (-((((ustar * GRAV) * thvstar) * 1000.0) / input.thv)).lpow(1.0 / 3.0);
-        ur.mul_add(ur, wc * wc).sqrt()
+        ur.contract(ur, wc * wc).sqrt()
     };
     (tstar, qstar, zeta, obu, um)
 }
@@ -502,15 +503,15 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
     let displau = displau0.max(input.hroof * 0.5);
     let alpha = fai * 9.6;
     // `:503-504` `.FMA (tg, 2, thm)/3`
-    let mut taf2 = s.tg.mul_add(2.0, input.thm) / 3.0;
-    let mut qaf2 = s.qg.mul_add(2.0, input.qm) / 3.0;
+    let mut taf2 = s.tg.contract(2.0, input.thm) / 3.0;
+    let mut qaf2 = s.qg.contract(2.0, input.qm) / 3.0;
     let mut taf3;
     let mut qaf3;
     let mut z0h = z0m;
     let mut z0q = z0m;
     let ur = input
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             input.eastward_wind_m_s,
             input.northward_wind_m_s * input.northward_wind_m_s,
         )
@@ -518,7 +519,7 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         .max(0.1);
     let dth = input.thm - taf2;
     let dqh = input.qm - qaf2;
-    let dthv = dth.mul_add(input.qm.mul_add(0.61, 1.0), dqh * (input.th * 0.61));
+    let dthv = dth.contract(input.qm.contract(0.61, 1.0), dqh * (input.th * 0.61));
     let heights = observation_heights(&input);
     let zldis = heights.0 - displa;
     ensure!(
@@ -566,7 +567,7 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         let top_heat = ((input.troof * fc[0]) / rb0 + anthro.hahe3 / rhocp) + input.thm / t.rah;
         let denominator_t = (1.0 - bt / (rd3 * ct)) * ct;
         // `:697` 分子里的 `aT` 收成 `.FMA (…, bT, …)`（与 VegFlux 不同）
-        taf2 = top_heat.mul_add(
+        taf2 = top_heat.contract(
             bt,
             (((fg * s.tg) / rd2 + anthro.hahe2 / rhocp) + (input.twsun * fc[1]) / rb1)
                 + (input.twsha * fc[2]) / rb2,
@@ -581,7 +582,7 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         let bq = 1.0 / (rd3 * bq_inner);
         let roof_moisture = (fc[0] * (input.qroof * fwet_roof)) / rb0;
         let top_moisture = roof_moisture + input.qm / t.raw;
-        qaf2 = (top_moisture.mul_add(
+        qaf2 = (top_moisture.contract(
             bq,
             ((input.qgper * s.fgper) * fg) / (rd2 + rss_)
                 + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2,
@@ -639,7 +640,7 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
     let croofl = (((fwet_roof * input.rhoair) / rb0) * input.dqroofdt)
         * ((1.0 - ((wet_roof_cover * bq) * bq) / ((rb0 * cq) * one_minus_bq))
             - wet_roof_cover / (rb0 * bq_inner));
-    let croof = croofl.mul_add(input.htvp_roof, croofs);
+    let croof = croofl.contract(input.htvp_roof, croofs);
     let taux = -((input.eastward_wind_m_s * input.rhoair) / t.ram);
     let tauy = -((input.northward_wind_m_s * input.rhoair) / t.ram);
     let fsengper = (rhocp / rd2) * (input.tgper - taf2);
@@ -651,12 +652,12 @@ pub fn urban_bare_flux(input: UrbanFluxInput) -> Result<UrbanFluxOutput> {
         * (1.0 - (fg * s.fgper) / (one_minus_bq * ((rd2 + rss_) * cq)));
     let cgimpl = (((fwet_gimp * input.rhoair) / rd2) * input.dqgimpdt)
         * (1.0 - ((fwet_gimp * fg) * s.fgimp) / (one_minus_bq * (rd2 * cq)));
-    let cgimp = cgimpl.mul_add(input.htvp_gimp, cgrnds);
-    let cgper = cgperl.mul_add(input.htvp_gper, cgrnds);
+    let cgimp = cgimpl.contract(input.htvp_gimp, cgrnds);
+    let cgper = cgperl.contract(input.htvp_gper, cgrnds);
     // `:860` `.FMA (d-2, tg, taf2*2)/d`，`d = displau + z0mu`
     let reference = displau + z0mu;
-    let tref = (reference - 2.0).mul_add(s.tg, taf2 * 2.0) / reference;
-    let qref = (reference - 2.0).mul_add(qg, qaf2 * 2.0) / reference;
+    let tref = (reference - 2.0).contract(s.tg, taf2 * 2.0) / reference;
+    let qref = (reference - 2.0).contract(qg, qaf2 * 2.0) / reference;
     Ok(UrbanFluxOutput {
         taux,
         tauy,
@@ -717,7 +718,7 @@ pub fn urban_vegetated_flux(
     let clai = if tree.vegetation_snow {
         state
             .ldew_snow
-            .mul_add(CPICE, (lsai * 0.2).mul_add(CPLIQ, state.ldew_rain * CPLIQ))
+            .contract(CPICE, (lsai * 0.2).contract(CPLIQ, state.ldew_rain * CPLIQ))
     } else {
         0.0
     };
@@ -759,13 +760,13 @@ pub fn urban_vegetated_flux(
     }
     let displau = displau0.max(input.hroof * 0.5);
     // `:1468-1481`
-    let sqrtdragc = faiv.mul_add(0.3, 0.003).lpow(0.5).min(0.3);
+    let sqrtdragc = faiv.contract(0.3, 0.003).lpow(0.5).min(0.3);
     let alphav = (tree.htop / (tree.htop - displav_lay)) / (VONKAR / sqrtdragc);
     let alphav = (tree.htop * alphav) / input.hroof;
-    let alpha = fai.mul_add(9.6, alphav);
+    let alpha = fai.contract(9.6, alphav);
 
-    let mut taf2 = s.tg.mul_add(2.0, input.thm) / 3.0;
-    let mut qaf2 = s.qg.mul_add(2.0, input.qm) / 3.0;
+    let mut taf2 = s.tg.contract(2.0, input.thm) / 3.0;
+    let mut qaf2 = s.qg.contract(2.0, input.qm) / 3.0;
     let mut taf3;
     let mut qaf3;
     let mut pco2a = tree.pco2m;
@@ -775,7 +776,7 @@ pub fn urban_vegetated_flux(
     let mut z0q = z0m;
     let ur = input
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             input.eastward_wind_m_s,
             input.northward_wind_m_s * input.northward_wind_m_s,
         )
@@ -784,7 +785,7 @@ pub fn urban_vegetated_flux(
     let dth = input.thm - taf2;
     let dqh = input.qm - qaf2;
     // `:1524` `.FMA (dth, 1+0.61qm, dqh*(th*0.61))`
-    let dthv = dth.mul_add(input.qm.mul_add(0.61, 1.0), dqh * (input.th * 0.61));
+    let dthv = dth.contract(input.qm.contract(0.61, 1.0), dqh * (input.th * 0.61));
     let heights = observation_heights(&input);
     let zldis = heights.0 - displa;
     ensure!(
@@ -876,7 +877,7 @@ pub fn urban_vegetated_flux(
         // 气孔（`:1719-1758`）
         if lai > 0.0 {
             // `:1722` `(psrf*qaf)/.FMA (qaf, 0.378, 0.622)`
-            let eah = (input.psrf * qaf2) / qaf2.mul_add(0.378, 0.622);
+            let eah = (input.psrf * qaf2) / qaf2.contract(0.378, 0.622);
             let call = |stress: f64| {
                 stomata(
                     StomataInput {
@@ -916,7 +917,7 @@ pub fn urban_vegetated_flux(
         let delta = if qsatl3 - qaf2 > 0.0 { 1.0 } else { 0.0 };
         let wet_delta = (1.0 - fwet) * delta;
         // `:1766` `1/.FMA ((1-fwet)*delta, lai/(rs+rb3), (lsai*(1-(1-fwet)*delta))/rb3)`
-        rv = 1.0 / wet_delta.mul_add(lai / (rs + rb3), (lsai * (1.0 - wet_delta)) / rb3);
+        rv = 1.0 / wet_delta.contract(lai / (rs + rb3), (lsai * (1.0 - wet_delta)) / rb3);
 
         // 两层温度（`:1806-1817`）
         bt = 1.0 / (rd3 * ((1.0 / t.rah + 1.0 / rd3) + fc[0] / rb0));
@@ -939,7 +940,7 @@ pub fn urban_vegetated_flux(
             + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2;
         let anthropogenic_moisture = (anthro.lahe / input.rhoair) / HVAP;
         let one_minus_bq = 1.0 - bq / (rd3 * cq);
-        qaf2 = (top_moisture.mul_add(bq, ground_moisture + (fc3 * qsatl3) / rv)
+        qaf2 = (top_moisture.contract(bq, ground_moisture + (fc3 * qsatl3) / rv)
             + anthropogenic_moisture)
             / (one_minus_bq * cq);
 
@@ -998,19 +999,19 @@ pub fn urban_vegetated_flux(
         dx = matmul(&tree.ainv, &unit);
         let mut received = 0.0;
         for i in 0..4 {
-            received = x[i].mul_add(tree.veg_vf[i], received);
+            received = x[i].contract(tree.veg_vf[i], received);
         }
-        received = tree.frl.mul_add(tree.veg_vf[4], received);
-        let irab = (received.mul_add(tree.ev, -b1[4]) / fc3).mul_add(fg, tree.lveg);
+        received = tree.frl.contract(tree.veg_vf[4], received);
+        let irab = (received.contract(tree.ev, -b1[4]) / fc3).contract(fg, tree.lveg);
         let mut received_dtl = 0.0;
         for i in 0..4 {
-            received_dtl = dx[i].mul_add(tree.veg_vf[i], received_dtl);
+            received_dtl = dx[i].contract(tree.veg_vf[i], received_dtl);
         }
-        dirab_dtl = (tree.ev.mul_add(received_dtl, -dbdt[4]) / fc3) * fg;
+        dirab_dtl = (tree.ev.contract(received_dtl, -dbdt[4]) / fc3) * fg;
 
         // 叶温增量（`:2010-2039`）
         denominator = ((clai / dt - dirab_dtl) + fsenl_dtl) + fevpl_dtl * HVAP;
-        dtl = (-fevpl).mul_add(HVAP, (irab + tree.sabv) - fsenl) / denominator;
+        dtl = (-fevpl).contract(HVAP, (irab + tree.sabv) - fsenl) / denominator;
         dtl_noadj = dtl;
         if dtl.abs() > 3.0 {
             dtl = (dtl * 3.0) / dtl.abs();
@@ -1024,9 +1025,9 @@ pub fn urban_vegetated_flux(
         del = (dtl * dtl).sqrt();
         let hvap_dtl = HVAP * fevpl_dtl;
         dele = ((dtl * dtl)
-            * hvap_dtl.mul_add(
+            * hvap_dtl.contract(
                 hvap_dtl,
-                dirab_dtl.mul_add(dirab_dtl, fsenl_dtl * fsenl_dtl),
+                dirab_dtl.contract(dirab_dtl, fsenl_dtl * fsenl_dtl),
             ))
         .sqrt();
         let leaf = saturation_specific_humidity(state.tl, input.psrf)?;
@@ -1045,7 +1046,7 @@ pub fn urban_vegetated_flux(
         let ground_moisture = ((input.qgper * s.fgper) * fg) / (rd2 + rss_)
             + (((input.qgimp * fwet_gimp) * s.fgimp) * fg) / rd2;
         qaf2 = (anthropogenic_moisture
-            + top_moisture.mul_add(bq, ground_moisture + (fc3 * qsatl3) / rv))
+            + top_moisture.contract(bq, ground_moisture + (fc3 * qsatl3) / rv))
             / ((1.0 - bq / (rd3 * cq)) * cq);
         qaf3 = ((roof_moisture + qaf2 / rd3) + input.qm / t.raw) / bq_inner;
         fwet_roof = if qaf3 > input.qroof {
@@ -1063,7 +1064,7 @@ pub fn urban_vegetated_flux(
         // 冠层 CO2（`:2208-2212`）
         let gah2o = ((1.0 / t.raw) * tprcor) / input.thm;
         pco2a = (-((input.psrf * 1.37) / gah2o.max(0.446)))
-            .mul_add((assim - respc) - RSOIL, tree.pco2m);
+            .contract((assim - respc) - RSOIL, tree.pco2m);
 
         let updated = stability(&input, zldis, ur, t.ustar, t.fh, t.fq, taf2, qaf2);
         tstar = updated.0;
@@ -1107,21 +1108,21 @@ pub fn urban_vegetated_flux(
     let etr_deficit = (etr - etr_).max(0.0);
 
     // 用最后一次增量把叶片通量外推到新叶温（`:2286-2304`）
-    fsenl = erre.mul_add(
+    fsenl = erre.contract(
         HVAP,
-        denominator.mul_add(dtl_noadj - dtl, fsenl_dtl.mul_add(dtl, fsenl)),
+        denominator.contract(dtl_noadj - dtl, fsenl_dtl.contract(dtl, fsenl)),
     );
-    etr = etr_dtl.mul_add(dtl, etr);
-    evplwet = evplwet_dtl.mul_add(dtl, evplwet);
-    let mut fevpl = fevpl_dtl.mul_add(dtl, fevpl_noadj);
+    etr = etr_dtl.contract(dtl, etr);
+    evplwet = evplwet_dtl.contract(dtl, evplwet);
+    let mut fevpl = fevpl_dtl.contract(dtl, fevpl_noadj);
     let elwmax = state.ldew / dt;
     let elwdif = (evplwet - elwmax).max(0.0);
     evplwet = evplwet.min(elwmax);
     fevpl -= elwdif;
-    fsenl = elwdif.mul_add(HVAP, fsenl);
+    fsenl = elwdif.contract(HVAP, fsenl);
 
     // 冠层水（`:2311-2374`）
-    state.ldew = (-dt).mul_add(evplwet, state.ldew).max(0.0);
+    state.ldew = (-dt).contract(evplwet, state.ldew).max(0.0);
     if tree.vegetation_snow {
         let (qevpl, qdewl, qsubl, qfrol) = if state.tl > TFRZ {
             let mut qevpl = evplwet.max(0.0);
@@ -1142,8 +1143,8 @@ pub fn urban_vegetated_flux(
             }
             (qevpl, 0.0, qsubl, qfrol)
         };
-        state.ldew_rain = dt.mul_add(qdewl - qevpl, state.ldew_rain);
-        state.ldew_snow = dt.mul_add(qfrol - qsubl, state.ldew_snow);
+        state.ldew_rain = dt.contract(qdewl - qevpl, state.ldew_rain);
+        state.ldew_snow = dt.contract(qfrol - qsubl, state.ldew_snow);
         state.ldew = state.ldew_rain + state.ldew_snow;
         state.fwet_snow = 0.0;
         if state.ldew_snow > 0.0 {
@@ -1155,28 +1156,28 @@ pub fn urban_vegetated_flux(
         if state.ldew_snow > 1.0e-6 && state.tl > TFRZ {
             let qmelt = (state.ldew_snow / dt)
                 .min((state.ldew_snow * ((state.tl - TFRZ) * CPICE)) / (dt * HFUS));
-            state.ldew_snow = (-dt).mul_add(qmelt, state.ldew_snow).max(0.0);
-            state.ldew_rain = dt.mul_add(qmelt, state.ldew_rain).max(0.0);
+            state.ldew_snow = (-dt).contract(qmelt, state.ldew_snow).max(0.0);
+            state.ldew_rain = dt.contract(qmelt, state.ldew_rain).max(0.0);
             state.tl = state
                 .fwet_snow
-                .mul_add(TFRZ, state.tl * (1.0 - state.fwet_snow));
+                .contract(TFRZ, state.tl * (1.0 - state.fwet_snow));
         }
         if state.ldew_rain > 1.0e-6 && state.tl < TFRZ {
             let qfrz = (state.ldew_rain / dt)
                 .min((((TFRZ - state.tl) * CPLIQ) * state.ldew_rain) / (dt * HFUS));
-            state.ldew_rain = (-dt).mul_add(qfrz, state.ldew_rain).max(0.0);
-            state.ldew_snow = dt.mul_add(qfrz, state.ldew_snow).max(0.0);
+            state.ldew_rain = (-dt).contract(qfrz, state.ldew_rain).max(0.0);
+            state.ldew_snow = dt.contract(qfrz, state.ldew_snow).max(0.0);
             state.tl = state
                 .fwet_snow
-                .mul_add(TFRZ, state.tl * (1.0 - state.fwet_snow));
+                .contract(TFRZ, state.tl * (1.0 - state.fwet_snow));
         }
     }
     let dheatl = (clai / dt) * dtl;
 
     // 长波（`:2396-2430`）
     let wall = |emissivity: f64, radiance: f64, emitted: f64, dradiance: f64| {
-        let base = emissivity.mul_add(radiance, -emitted) / (1.0 - emissivity);
-        ((emissivity * dradiance) / (1.0 - emissivity)).mul_add(dtl, base)
+        let base = emissivity.contract(radiance, -emitted) / (1.0 - emissivity);
+        ((emissivity * dradiance) / (1.0 - emissivity)).contract(dtl, base)
     };
     let mut lwsun = wall(tree.ewall, x[0], tree.b1[0], dx[0]);
     let mut lwsha = wall(tree.ewall, x[1], tree.b1[1], dx[1]);
@@ -1184,25 +1185,25 @@ pub fn urban_vegetated_flux(
     let mut lgper = wall(tree.egper, x[3], tree.b1[3], dx[3]);
     let mut received = 0.0;
     for i in 0..4 {
-        received = x[i].mul_add(tree.veg_vf[i], received);
+        received = x[i].contract(tree.veg_vf[i], received);
     }
-    received = tree.frl.mul_add(tree.veg_vf[4], received);
-    let lveg_base = tree.ev.mul_add(received, -b1_leaf);
+    received = tree.frl.contract(tree.veg_vf[4], received);
+    let lveg_base = tree.ev.contract(received, -b1_leaf);
     let mut received_dtl = 0.0;
     for i in 0..4 {
-        received_dtl = dx[i].mul_add(tree.veg_vf[i], received_dtl);
+        received_dtl = dx[i].contract(tree.veg_vf[i], received_dtl);
     }
     let mut lveg = tree
         .ev
-        .mul_add(received_dtl, -dbdt_leaf)
-        .mul_add(dtl, lveg_base);
+        .contract(received_dtl, -dbdt_leaf)
+        .contract(dtl, lveg_base);
     let mut lout = 0.0;
     for i in 0..5 {
-        lout = x[i].mul_add(tree.sky_vf[i], lout);
+        lout = x[i].contract(tree.sky_vf[i], lout);
     }
     let mut lout_dtl = 0.0;
     for i in 0..5 {
-        lout_dtl = (dx[i] * tree.sky_vf[i]).mul_add(dtl, lout_dtl);
+        lout_dtl = (dx[i] * tree.sky_vf[i]).contract(dtl, lout_dtl);
     }
     lout += lout_dtl;
     for (value, cover) in [
@@ -1244,7 +1245,7 @@ pub fn urban_vegetated_flux(
     let croofl = (((input.rhoair * fwet_roof) / rb0) * qsatldt0)
         * ((1.0 - ((wet_roof_cover * bq) * bq) / ((rb0 * cq) * one_minus_bq))
             - wet_roof_cover / (rb0 * bq_inner));
-    let croof = croofl.mul_add(input.htvp_roof, croofs);
+    let croof = croofl.contract(input.htvp_roof, croofs);
     let fsengimp = (rhocp / rd2) * (input.tgimp - taf2);
     let fsengper = (rhocp / rd2) * (input.tgper - taf2);
     let fevpgper = (input.rhoair / (rd2 + rss_)) * (input.qgper - qaf2);
@@ -1255,11 +1256,11 @@ pub fn urban_vegetated_flux(
     let cgimpl = (((input.rhoair / rd2) * input.dqgimpdt)
         * (1.0 - ((fwet_gimp * fg) * s.fgimp) / (one_minus_bq * (rd2 * cq))))
         * fwet_gimp;
-    let cgimp = cgimpl.mul_add(input.htvp_gimp, cgrnds);
-    let cgper = cgperl.mul_add(input.htvp_gper, cgrnds);
+    let cgimp = cgimpl.contract(input.htvp_gimp, cgrnds);
+    let cgper = cgperl.contract(input.htvp_gper, cgrnds);
     let reference = z0mu + displau;
-    let tref = (reference - 2.0).mul_add(s.tg, taf2 * 2.0) / reference;
-    let qref = (reference - 2.0).mul_add(qg, qaf2 * 2.0) / reference;
+    let tref = (reference - 2.0).contract(s.tg, taf2 * 2.0) / reference;
+    let qref = (reference - 2.0).contract(qg, qaf2 * 2.0) / reference;
 
     Ok((
         UrbanFluxOutput {
@@ -1321,7 +1322,7 @@ fn matmul(a: &[[f64; 5]; 5], v: &[f64; 5]) -> [f64; 5] {
     for (i, row) in a.iter().enumerate() {
         let mut acc = 0.0;
         for j in 0..5 {
-            acc = row[j].mul_add(v[j], acc);
+            acc = row[j].contract(v[j], acc);
         }
         out[i] = acc;
     }

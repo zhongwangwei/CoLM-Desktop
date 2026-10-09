@@ -6,6 +6,7 @@
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, NPCROPMIN};
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `CNMResp`。温度订正是 `Q10**(((T − 273.15) − 20)/10)`（两次减法，不合并成 293.15）；
 /// 细根逐层累加被收缩成 `FMA((br_root·frootn)·tcsoi(j), rootfr(j), acc)`。
@@ -35,7 +36,7 @@ pub fn cn_m_resp(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants) {
         }
         for j in 0..nl {
             f.froot_mr_p[m] = (br_root * v.frootn_p[m] * tcsoi[j])
-                .mul_add(p.rootfr_p[j + nl * m], f.froot_mr_p[m]);
+                .contract(p.rootfr_p[j + nl * m], f.froot_mr_p[m]);
         }
     }
 }

@@ -12,6 +12,7 @@
 //! 其余都是单次除法与比较。矩阵按 Fortran 列主序展平：`(row, col)` → `row + col·n`。
 
 use anyhow::{bail, Result};
+use colm_numeric::Contract;
 
 use crate::bgc_driver::{is_end_of_year, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -588,7 +589,7 @@ fn negated_matmul(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut out = vec![0.0; n];
     for j in 0..n {
         for i in 0..n {
-            out[i] = a[i + j * n].mul_add(b[j], out[i]);
+            out[i] = a[i + j * n].contract(b[j], out[i]);
         }
     }
     out.iter_mut().for_each(|v| *v = -*v);
@@ -611,7 +612,7 @@ pub(crate) fn inverse(a: &[f64], n: usize) -> Result<Vec<f64>> {
             let coeff = aa[at(i, k)] / aa[at(k, k)];
             l[at(i, k)] = coeff;
             for j in k + 1..n {
-                aa[at(i, j)] = (-coeff).mul_add(aa[at(k, j)], aa[at(i, j)]);
+                aa[at(i, j)] = (-coeff).contract(aa[at(k, j)], aa[at(i, j)]);
             }
         }
     }
@@ -624,14 +625,14 @@ pub(crate) fn inverse(a: &[f64], n: usize) -> Result<Vec<f64>> {
         for i in 1..n {
             d[i] = b[i];
             for j in 0..i {
-                d[i] = (-l[at(i, j)]).mul_add(d[j], d[i]);
+                d[i] = (-l[at(i, j)]).contract(d[j], d[i]);
             }
         }
         x[n - 1] = d[n - 1] / aa[at(n - 1, n - 1)];
         for i in (0..n - 1).rev() {
             x[i] = d[i];
             for j in (i + 1..n).rev() {
-                x[i] = (-aa[at(i, j)]).mul_add(x[j], x[i]);
+                x[i] = (-aa[at(i, j)]).contract(x[j], x[i]);
             }
             x[i] /= aa[at(i, i)];
         }

@@ -19,6 +19,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use anyhow::{anyhow, Result};
+use colm_numeric::Contract;
 
 use crate::bgc_driver::{BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
@@ -30,7 +31,7 @@ const NBEDROCK: usize = 10;
 /// Patankar 的 A 函数 `max(0, (1 − 0.1|Pe|)^5)`：底数收缩成 `FNMA(|Pe|, 0.1, 1)`，
 /// 五次方展开成 `t² · (t²·t)`。
 fn aaa(pe: f64) -> f64 {
-    let t = (-pe.abs()).mul_add(0.1, 1.0);
+    let t = (-pe.abs()).contract(0.1, 1.0);
     let t2 = t * t;
     let t3 = t2 * t;
     (t2 * t3).max(0.0)
@@ -184,7 +185,7 @@ pub fn soil_biogeochem_litt_vert_transp(
                         1.0 / ((1.0 - w_p1) / diffus[j] + w_p1 / diffus[j + 1])
                     } else {
                         // 算术平均：左边的乘积被收缩
-                        (1.0 - w_p1).mul_add(diffus[j], w_p1 * diffus[j + 1])
+                        (1.0 - w_p1).contract(diffus[j], w_p1 * diffus[j + 1])
                     };
                     d_m1_zm1[j] = d_m1 / dz_node[j];
                     d_p1_zp1[j] = d_p1 / dz_node[j + 1];
@@ -207,58 +208,58 @@ pub fn soil_biogeochem_litt_vert_transp(
                     r_tri_c[j] = 0.0;
                     r_tri_n[j] = 0.0;
                 } else if j < nl + 1 {
-                    a_tri[j] = -d_m1_zm1[j].mul_add(aaa(pe_m1[j]), f_m1[j].max(0.0));
-                    c_tri[j] = -d_p1_zp1[j].mul_add(aaa(pe_p1[j]), (-f_p1[j]).max(0.0));
+                    a_tri[j] = -d_m1_zm1[j].contract(aaa(pe_m1[j]), f_m1[j].max(0.0));
+                    c_tri[j] = -d_p1_zp1[j].contract(aaa(pe_p1[j]), (-f_p1[j]).max(0.0));
                     b_tri[j] = -a_tri[j] - c_tri[j] + a_p_0;
                     let source_c = f.decomp_cpools_sourcesink[at(j)] * dz(j) / deltim;
                     let source_n = f.decomp_npools_sourcesink[at(j)] * dz(j) / deltim;
                     if j == 1 {
-                        r_tri_c[j] = (a_p_0 - adv_flux[j]).mul_add(conc_c[j], source_c);
-                        r_tri_n[j] = (a_p_0 - adv_flux[j]).mul_add(conc_n[j], source_n);
+                        r_tri_c[j] = (a_p_0 - adv_flux[j]).contract(conc_c[j], source_c);
+                        r_tri_n[j] = (a_p_0 - adv_flux[j]).contract(conc_n[j], source_n);
                         if sw.sasu || sw.diag_matrix {
                             let k = c_tri[j] / dz(j) * deltim;
                             v.upperVX_c_vr_acc[at_acc(j)] =
-                                (-k).mul_add(conc_c[j + 1], v.upperVX_c_vr_acc[at_acc(j)]);
+                                (-k).contract(conc_c[j + 1], v.upperVX_c_vr_acc[at_acc(j)]);
                             v.diagVX_c_vr_acc[at_acc(j)] =
-                                (-k).mul_add(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
+                                (-k).contract(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
                             v.upperVX_n_vr_acc[at_acc(j)] =
-                                (-k).mul_add(conc_n[j + 1], v.upperVX_n_vr_acc[at_acc(j)]);
+                                (-k).contract(conc_n[j + 1], v.upperVX_n_vr_acc[at_acc(j)]);
                             v.diagVX_n_vr_acc[at_acc(j)] =
-                                (-k).mul_add(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
+                                (-k).contract(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
                         }
                     } else {
-                        r_tri_c[j] = a_p_0.mul_add(conc_c[j], source_c);
-                        r_tri_n[j] = a_p_0.mul_add(conc_n[j], source_n);
+                        r_tri_c[j] = a_p_0.contract(conc_c[j], source_c);
+                        r_tri_n[j] = a_p_0.contract(conc_n[j], source_n);
                         if sw.sasu || sw.diag_matrix {
                             if j <= NBEDROCK {
                                 let ka = a_tri[j] / dz(j) * deltim;
                                 v.lowerVX_c_vr_acc[at_acc(j)] =
-                                    (-ka).mul_add(conc_c[j - 1], v.lowerVX_c_vr_acc[at_acc(j)]);
+                                    (-ka).contract(conc_c[j - 1], v.lowerVX_c_vr_acc[at_acc(j)]);
                                 v.lowerVX_n_vr_acc[at_acc(j)] =
-                                    (-ka).mul_add(conc_n[j - 1], v.lowerVX_n_vr_acc[at_acc(j)]);
+                                    (-ka).contract(conc_n[j - 1], v.lowerVX_n_vr_acc[at_acc(j)]);
                                 if j != nl {
                                     let kc = c_tri[j] / dz(j) * deltim;
-                                    v.upperVX_c_vr_acc[at_acc(j)] =
-                                        (-kc).mul_add(conc_c[j + 1], v.upperVX_c_vr_acc[at_acc(j)]);
-                                    v.upperVX_n_vr_acc[at_acc(j)] =
-                                        (-kc).mul_add(conc_n[j + 1], v.upperVX_n_vr_acc[at_acc(j)]);
+                                    v.upperVX_c_vr_acc[at_acc(j)] = (-kc)
+                                        .contract(conc_c[j + 1], v.upperVX_c_vr_acc[at_acc(j)]);
+                                    v.upperVX_n_vr_acc[at_acc(j)] = (-kc)
+                                        .contract(conc_n[j + 1], v.upperVX_n_vr_acc[at_acc(j)]);
                                     let kb = (b_tri[j] - a_p_0) / dz(j) * deltim;
                                     v.diagVX_c_vr_acc[at_acc(j)] =
-                                        kb.mul_add(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
+                                        kb.contract(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
                                     v.diagVX_n_vr_acc[at_acc(j)] =
-                                        kb.mul_add(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
+                                        kb.contract(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
                                 } else {
                                     v.diagVX_c_vr_acc[at_acc(j)] =
-                                        (-ka).mul_add(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
+                                        (-ka).contract(conc_c[j], v.diagVX_c_vr_acc[at_acc(j)]);
                                     v.diagVX_n_vr_acc[at_acc(j)] =
-                                        (-ka).mul_add(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
+                                        (-ka).contract(conc_n[j], v.diagVX_n_vr_acc[at_acc(j)]);
                                 }
                             } else if j == NBEDROCK + 1 && j != nl && j > 1 {
                                 let ka = a_tri[j] / dz(j - 1) * deltim;
                                 v.diagVX_c_vr_acc[at_acc(j - 1)] =
-                                    ka.mul_add(conc_c[j - 1], v.diagVX_c_vr_acc[at_acc(j - 1)]);
+                                    ka.contract(conc_c[j - 1], v.diagVX_c_vr_acc[at_acc(j - 1)]);
                                 v.diagVX_n_vr_acc[at_acc(j - 1)] =
-                                    ka.mul_add(conc_n[j - 1], v.diagVX_n_vr_acc[at_acc(j - 1)]);
+                                    ka.contract(conc_n[j - 1], v.diagVX_n_vr_acc[at_acc(j - 1)]);
                             }
                         }
                     }
@@ -298,10 +299,10 @@ pub fn soil_biogeochem_litt_vert_transp(
             if j > NBEDROCK {
                 let ratio = dz(j) / dz(NBEDROCK);
                 v.decomp_cpools_vr[at(NBEDROCK)] =
-                    conc_c[j].mul_add(ratio, v.decomp_cpools_vr[at(NBEDROCK)]);
+                    conc_c[j].contract(ratio, v.decomp_cpools_vr[at(NBEDROCK)]);
                 v.decomp_cpools_vr[at(j)] = 0.0;
                 v.decomp_npools_vr[at(NBEDROCK)] =
-                    conc_n[j].mul_add(ratio, v.decomp_npools_vr[at(NBEDROCK)]);
+                    conc_n[j].contract(ratio, v.decomp_npools_vr[at(NBEDROCK)]);
                 v.decomp_npools_vr[at(j)] = 0.0;
             }
         }

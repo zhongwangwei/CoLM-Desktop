@@ -566,7 +566,7 @@ fn relocate_frost_into_scv_or_a_new_layer_matches_the_host() {
         let moved = tracer_relocate_soil_frost_ice(&set, &mut trc, &input).unwrap();
         let p = &trc.pools[0];
         // excess = 9 - 917*0.4*0.02 = 1.664。
-        assert_eq!(moved.excess, (-(917.0 * 0.4_f64)).mul_add(0.02, 9.0));
+        assert_eq!(moved.excess, (-(917.0 * 0.4_f64)).contract(0.02, 9.0));
         assert_eq!(moved.created_layer, water.layer_count == -1);
         if moved.created_layer {
             assert_eq!(p.scv, 0.0);
@@ -601,7 +601,7 @@ fn relocate_frost_into_the_top_layer() {
     let p = &trc.pools[0];
     assert_eq!(
         p.wice_soisno[soisno_slot(-1)],
-        18.0_f64.mul_add(moved.fraction, 7.0)
+        18.0_f64.contract(moved.fraction, 7.0)
     );
     assert_eq!(p.wice_soisno[soisno_slot(1)], (1.0 - moved.fraction) * 18.0);
     assert_eq!(p.wice_soisno[soisno_slot(0)], 0.0);

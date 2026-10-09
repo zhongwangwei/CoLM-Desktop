@@ -13,6 +13,7 @@
 //! * `canopy_input = FMA(deltim*rain_total, R_rain, (deltim*max(forc_snow,0))*R)`。
 
 use super::{PatchTracerState, TracerSet, TRC_TINY, TRC_WATER_MIN_FOR_RATIO};
+use colm_numeric::Contract;
 
 /// 一个 patch 本步的冠层截留水量（`tracer_precip` 的实参）。
 #[derive(Debug, Clone, Copy, Default)]
@@ -66,7 +67,7 @@ pub fn tracer_precip(
         let canopy_trc_beg = (pools.ldew_rain + pools.ldew_snow) + pools.canopy_solid;
 
         let acc = &mut state.acc[itrc];
-        acc.precip = dt.mul_add((input.forc_snow + input.forc_rain) * r_input, acc.precip);
+        acc.precip = dt.contract((input.forc_snow + input.forc_rain) * r_input, acc.precip);
 
         // 喷灌取自 `waterstorage`：内部转移，不进大气输入。
         if input.sprinkler > TRC_TINY {
@@ -100,7 +101,7 @@ pub fn tracer_precip(
             input
                 .forc_rain
                 .max(0.0)
-                .mul_add(r_input, storage_ratio * sprinkler_rate)
+                .contract(r_input, storage_ratio * sprinkler_rate)
                 / rain_total
         } else {
             r_input
@@ -116,8 +117,8 @@ pub fn tracer_precip(
             } else {
                 r_input
             };
-            pools.ldew_snow = (-r_snow).mul_add(smelt, pools.ldew_snow).max(0.0);
-            pools.ldew_rain = r_snow.mul_add(smelt, pools.ldew_rain);
+            pools.ldew_snow = (-r_snow).contract(smelt, pools.ldew_snow).max(0.0);
+            pools.ldew_rain = r_snow.contract(smelt, pools.ldew_rain);
             snow_old -= smelt;
             rain_old += smelt;
         }
@@ -128,8 +129,8 @@ pub fn tracer_precip(
             } else {
                 r_input
             };
-            pools.ldew_rain = (-r_rain).mul_add(frzc, pools.ldew_rain).max(0.0);
-            pools.ldew_snow = r_rain.mul_add(frzc, pools.ldew_snow);
+            pools.ldew_rain = (-r_rain).contract(frzc, pools.ldew_rain).max(0.0);
+            pools.ldew_snow = r_rain.contract(frzc, pools.ldew_snow);
             rain_old -= frzc;
             snow_old += frzc;
         }
@@ -199,7 +200,7 @@ pub fn tracer_precip(
         );
         let canopy_trc_end = (pools.ldew_rain + pools.ldew_snow) + pools.canopy_solid;
         let canopy_input =
-            (dt * rain_total).mul_add(r_rain_input, (dt * input.forc_snow.max(0.0)) * r_input);
+            (dt * rain_total).contract(r_rain_input, (dt * input.forc_snow.max(0.0)) * r_input);
         let canopy_resid = (((canopy_trc_end - canopy_trc_beg) - canopy_input) + trc_rain_ground)
             + trc_snow_ground;
         if canopy_resid.abs() > TRC_TINY {
@@ -256,7 +257,7 @@ fn canopy_phase(
     let pre_mix = old_water - xsc_mass;
     let intercepted = dt * gross_intr.max(0.0);
     let water_mixed = pre_mix + intercepted;
-    let trc_mixed = r_input.mul_add(intercepted, trc_pool - trc_xsc);
+    let trc_mixed = r_input.contract(intercepted, trc_pool - trc_xsc);
     let r_mixed = if water_mixed > TRC_TINY {
         trc_mixed / water_mixed
     } else {
@@ -273,10 +274,10 @@ fn canopy_phase(
             )
         }
         DripCap::Mixed => {
-            let throughfall = dt.mul_add(arriving_rate, -intercepted).max(0.0);
+            let throughfall = dt.contract(arriving_rate, -intercepted).max(0.0);
             (
                 throughfall,
-                (dt.mul_add(pg.max(0.0), -xsc_mass) - throughfall).max(0.0),
+                (dt.contract(pg.max(0.0), -xsc_mass) - throughfall).max(0.0),
             )
         }
     };
@@ -284,7 +285,7 @@ fn canopy_phase(
         DripCap::Intercepted => drip.min(intercepted.max(0.0)),
         DripCap::Mixed => drip.min(water_mixed.max(0.0)),
     };
-    let remaining = (-r_mixed).mul_add(drip, trc_mixed).max(0.0);
-    let ground = r_mixed.mul_add(drip, r_input.mul_add(throughfall, trc_xsc));
+    let remaining = (-r_mixed).contract(drip, trc_mixed).max(0.0);
+    let ground = r_mixed.contract(drip, r_input.contract(throughfall, trc_xsc));
     (ground, remaining)
 }

@@ -4,6 +4,7 @@
 //! field missing from landdata is an error here; the Rust `mksrfdata` path owns rawdata
 //! completion before this stage runs.
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -2947,7 +2948,7 @@ fn weighted_sum(values: &[f64], weights: &[f64]) -> Result<f64> {
     Ok(values
         .iter()
         .zip(weights)
-        .fold(0.0, |sum, (&value, &weight)| value.mul_add(weight, sum)))
+        .fold(0.0, |sum, (&value, &weight)| value.contract(weight, sum)))
 }
 
 /// Expands a one-patch, axis-major field to identical independent patches.

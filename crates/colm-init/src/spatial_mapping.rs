@@ -5,6 +5,7 @@
 //! 有序（`insert_into_sorted_list2`），`grid2pset` 也按这个顺序累加 —— 求和顺序就是逐位的关键。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::spatial_grid::{
     areaquad, find_nearest_east, find_nearest_north, find_nearest_south, find_nearest_west,
@@ -341,7 +342,7 @@ impl AreaWeightedMapping {
             for part in &self.parts[iset] {
                 if part.area > 0.0 {
                     // GIMPLE（latlon 内核）：`.FMA (areapart, pbuff, pdata)`。
-                    sum = part.area.mul_add(value(part.ilon, part.ilat), sum);
+                    sum = part.area.contract(value(part.ilon, part.ilat), sum);
                 }
             }
             sum / self.area[iset]
@@ -384,7 +385,7 @@ mod spatial_mapping_tests;
 pub(crate) fn arclen(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     let (s1, c1) = (libm_sin(lat1), libm_cos(lat1));
     let (s2, c2) = (libm_sin(lat2), libm_cos(lat2));
-    let tmp = s1.mul_add(s2, c1 * c2 * (lon1 - lon2).cos());
+    let tmp = s1.contract(s2, c1 * c2 * (lon1 - lon2).cos());
     let tmp = tmp.max(-1.0).min(1.0);
     6.37122e3 * tmp.acos()
 }

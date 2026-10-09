@@ -1,6 +1,7 @@
 //! Urban absorbed shortwave diagnostics from `MOD_Urban_NetSolar.F90`.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     net_solar::{local_noon_shortwave, visible_absorption},
@@ -97,26 +98,26 @@ pub fn urban_net_solar(
 /// GIMPLE 从 `soll*s(2,1)` 起，依次 `.FMA` 吸收 `sols`、`solsd`、`solld` 三项 ——
 /// 与陆地 `netsolar` 的配对（`MOD_NetSolar.F90:178`）不同，不能共用 `absorption`。
 fn urban_absorption(forcing: ShortwaveForcing, coefficient: [[f64; 2]; 2]) -> f64 {
-    let first = forcing.direct_visible_w_m2.mul_add(
+    let first = forcing.direct_visible_w_m2.contract(
         coefficient[0][0],
         forcing.direct_near_infrared_w_m2 * coefficient[1][0],
     );
-    forcing.diffuse_near_infrared_w_m2.mul_add(
+    forcing.diffuse_near_infrared_w_m2.contract(
         coefficient[1][1],
         forcing
             .diffuse_visible_w_m2
-            .mul_add(coefficient[0][1], first),
+            .contract(coefficient[0][1], first),
     )
 }
 
 /// `sabv`（`:125`）：同样的四项，但 `solsd*ssun(1,2)` 与下一行 `par` 共享，
 /// 被单独舍入后再**相加**（`_85 = _82 + _84`），只有最后一项进 FMA。
 fn tree_absorption(forcing: ShortwaveForcing, coefficient: [[f64; 2]; 2]) -> f64 {
-    let first = forcing.direct_visible_w_m2.mul_add(
+    let first = forcing.direct_visible_w_m2.contract(
         coefficient[0][0],
         forcing.direct_near_infrared_w_m2 * coefficient[1][0],
     );
-    forcing.diffuse_near_infrared_w_m2.mul_add(
+    forcing.diffuse_near_infrared_w_m2.contract(
         coefficient[1][1],
         first + forcing.diffuse_visible_w_m2 * coefficient[0][1],
     )

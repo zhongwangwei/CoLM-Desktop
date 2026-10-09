@@ -249,7 +249,7 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
         .values;
     // 类 1 ← 旧第 0 个（0），类 3 冷启动（101），类 4 ← 旧第 2 个（2）。
     assert_eq!(tleaf, &vec![0.0, 101.0, 2.0]);
-    let expected = 2.0f64.mul_add(0.2, 101.0f64.mul_add(0.3, 0.0f64.mul_add(0.5, 0.0)));
+    let expected = 2.0f64.contract(0.2, 101.0f64.contract(0.3, 0.0f64.contract(0.5, 0.0)));
     assert_eq!(ldew, vec![(0, expected)]);
 }
 
@@ -346,13 +346,13 @@ fn urban_patch_water_is_recomposed_from_the_urban_columns() {
     )
     .unwrap();
     let open = 1.0 - froof;
-    let top = (4.0 * open).mul_add(1.0 - fgper, (2.0 * open).mul_add(fgper, 1.0 * froof));
-    let deep = (2.0 * open).mul_add(fgper, 0.0);
+    let top = (4.0 * open).contract(1.0 - fgper, (2.0 * open).contract(fgper, 1.0 * froof));
+    let deep = (2.0 * open).contract(fgper, 0.0);
     let column = &patch[0].values[8..];
     assert_eq!(column[..6], [top; 6]);
     assert_eq!(column[6..], [deep; 2]);
     // 第 0 个 patch 不在目标里，原样保留。
     assert_eq!(patch[0].values[..8], [9.0; 8]);
-    let scv = (4.0 * open).mul_add(1.0 - fgper, 1.0f64.mul_add(froof, (2.0 * open) * fgper));
+    let scv = (4.0 * open).contract(1.0 - fgper, 1.0f64.contract(froof, (2.0 * open) * fgper));
     assert_eq!(patch[2].values, vec![9.0, scv]);
 }

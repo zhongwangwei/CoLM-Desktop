@@ -5,6 +5,7 @@
 //! reuses the shared soil-property, tridiagonal, and urban phase kernels.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     soil_thermal_properties, solve_tridiagonal, urban_phase_change, SoilThermalInput,
@@ -158,7 +159,7 @@ pub(crate) fn solve_urban_ground_column(
     if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
         capacity[0] = input
             .snow_water_equivalent_kg_m2
-            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
+            .contract(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
     }
     // 以下三步只有不透水地面有（`UrbanPerviousTem` 没有材料覆盖、没有第二次加雪、
     // 也没有顶层补水与冰的热容）
@@ -175,12 +176,12 @@ pub(crate) fn solve_urban_ground_column(
         if input.snow_layers == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
             capacity[0] = input
                 .snow_water_equivalent_kg_m2
-                .mul_add(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
+                .contract(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
         }
         // `:229` `.FMA (wice, cpice, .FMA (wliq, cpliq, cv(1)))`
-        capacity[road_offset] = ice[road_offset].mul_add(
+        capacity[road_offset] = ice[road_offset].contract(
             ICE_HEAT_CAPACITY_J_KG_K,
-            liquid[road_offset].mul_add(WATER_HEAT_CAPACITY_J_KG_K, capacity[road_offset]),
+            liquid[road_offset].contract(WATER_HEAT_CAPACITY_J_KG_K, capacity[road_offset]),
         );
     }
 
@@ -201,7 +202,7 @@ pub(crate) fn solve_urban_ground_column(
     let surface_flux = (input.absorbed_shortwave_w_m2 + input.absorbed_longwave_w_m2)
         - input
             .evaporation_kg_m2_s
-            .mul_add(input.vaporization_heat_j_kg, input.sensible_heat_w_m2);
+            .contract(input.vaporization_heat_j_kg, input.sensible_heat_w_m2);
     let surface_flux_slope =
         input.longwave_temperature_slope_w_m2_k - input.surface_energy_temperature_slope_w_m2_k;
     let before_flux = zero_bottom_fluxes(&conductivity, input.node_depth_m, input.temperature_k);
@@ -242,7 +243,7 @@ fn road_properties(
     let mut conductivity = vec![0.0; layers];
     for snow in 0..input.snow_layers {
         // `:175` `.FMA (wliq, cpliq, wice*cpice)`
-        capacity[snow] = liquid[snow].mul_add(
+        capacity[snow] = liquid[snow].contract(
             WATER_HEAT_CAPACITY_J_KG_K,
             ice[snow] * ICE_HEAT_CAPACITY_J_KG_K,
         );
@@ -250,8 +251,8 @@ fn road_properties(
         // `.FMA (.FMA (rho, 7.75e-5, (rho*1.105e-6)*rho), tkice-tkair, tkair)`
         let density = (ice[snow] + liquid[snow]) / input.layer_thickness_m[snow];
         conductivity[snow] = density
-            .mul_add(7.75e-5, (density * 1.105e-6) * density)
-            .mul_add(
+            .contract(7.75e-5, (density * 1.105e-6) * density)
+            .contract(
                 ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K,
                 AIR_THERMAL_CONDUCTIVITY_W_M_K,
             );
@@ -291,7 +292,7 @@ fn interface_conductivity(
             // `:215`（标量循环）`.FMA (k(i), z(i+1)-zi(i), k(i+1)*(zi(i)-z(i)))`
             ((material[layer] * material[layer + 1])
                 * (node_depth_m[layer + 1] - node_depth_m[layer]))
-                / material[layer].mul_add(
+                / material[layer].contract(
                     node_depth_m[layer + 1] - interface_depth_m[interface],
                     material[layer + 1] * (interface_depth_m[interface] - node_depth_m[layer]),
                 )
@@ -304,7 +305,7 @@ fn column_factor(input: UrbanImperviousTemperatureInput<'_>, capacity: &[f64]) -
     let mut factor = vec![0.0; capacity.len()];
     // `:239` `((deltim/cv)*dz) / (.FMA (capr, z(2)-zi(0), z(1)-zi(0))*0.5)`
     factor[0] = ((input.time_step_seconds / capacity[0]) * input.layer_thickness_m[0])
-        / (input.surface_temperature_factor.mul_add(
+        / (input.surface_temperature_factor.contract(
             input.node_depth_m[1] - input.interface_depth_m[0],
             input.node_depth_m[0] - input.interface_depth_m[0],
         ) * 0.5);
@@ -350,10 +351,10 @@ fn column_system(
     // 还要用，单独舍入，所以这一处是普通加法
     let top_distance = z[1] - z[0];
     let top = ((implicit * factor[0]) * conductivity[0]) / top_distance;
-    diagonal[0] = (-surface_flux_slope).mul_add(factor[0], top + 1.0);
+    diagonal[0] = (-surface_flux_slope).contract(factor[0], top + 1.0);
     superdiagonal[0] = -top;
-    rhs[0] = ((-surface_flux_slope).mul_add(t[0], surface_flux) + cnfac * flux[0])
-        .mul_add(factor[0], t[0]);
+    rhs[0] = ((-surface_flux_slope).contract(t[0], surface_flux) + cnfac * flux[0])
+        .contract(factor[0], t[0]);
     // 中间层（`:259-265`，向量体与标量体同形）
     for layer in 1..bottom {
         let above = z[layer] - z[layer - 1];
@@ -361,24 +362,24 @@ fn column_system(
         let scaled = implicit * factor[layer];
         subdiagonal[layer] = -((conductivity[layer - 1] * scaled) / above);
         diagonal[layer] =
-            (conductivity[layer - 1] / above + conductivity[layer] / below).mul_add(scaled, 1.0);
+            (conductivity[layer - 1] / above + conductivity[layer] / below).contract(scaled, 1.0);
         superdiagonal[layer] = -((conductivity[layer] * scaled) / below);
-        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * factor[layer], t[layer]);
+        rhs[layer] = (flux[layer] - flux[layer - 1]).contract(cnfac * factor[layer], t[layer]);
     }
     // 底层（`:269-273`）：`bt = a + 1`、`rt = .FNMA (cnfac*fact, fn(j-1), t)`
     let above = z[bottom] - z[bottom - 1];
     let bottom_term = ((implicit * factor[bottom]) * conductivity[bottom - 1]) / above;
     subdiagonal[bottom] = -bottom_term;
     diagonal[bottom] = bottom_term + 1.0;
-    rhs[bottom] = (-(cnfac * factor[bottom])).mul_add(flux[bottom - 1], t[bottom]);
+    rhs[bottom] = (-(cnfac * factor[bottom])).contract(flux[bottom - 1], t[bottom]);
     (subdiagonal, diagonal, superdiagonal, rhs)
 }
 
 fn residual_fluxes(cnfac: f64, before: &[f64], after: &[f64], layers: usize) -> Vec<f64> {
     // `:289` `.FMA (1-cnfac, fn1, cnfac*fn)`；`:292` `.FMA (cnfac, dfn, (1-cnfac)*dfn1)`
-    let mut residual = vec![(1.0 - cnfac).mul_add(after[0], cnfac * before[0])];
+    let mut residual = vec![(1.0 - cnfac).contract(after[0], cnfac * before[0])];
     for layer in 1..layers {
-        residual.push(cnfac.mul_add(
+        residual.push(cnfac.contract(
             before[layer] - before[layer - 1],
             (1.0 - cnfac) * (after[layer] - after[layer - 1]),
         ));

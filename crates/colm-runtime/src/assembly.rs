@@ -23,6 +23,7 @@
 //! 也就是 `standard_lct_soil_step` 已移植的那一支。别的分支要有自己的装配，不能
 //! 在这里用默认值凑出来。
 
+use colm_numeric::Contract;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, ensure, Context, Result};
@@ -2159,7 +2160,7 @@ impl StandardLctRestartTemplate {
                     // 不是 `hypot`）。
                     reference_wind_m_s: forcing
                         .eastward_wind_m_s
-                        .mul_add(
+                        .contract(
                             forcing.eastward_wind_m_s,
                             forcing.northward_wind_m_s * forcing.northward_wind_m_s,
                         )

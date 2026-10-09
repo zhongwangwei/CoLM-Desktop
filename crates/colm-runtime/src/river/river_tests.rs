@@ -20,5 +20,5 @@ fn supercritical_flow_takes_the_upwind_state() {
     // 流速远大于波速：全用上游状态。
     let (h, m) = hll_flux(20.0, 20.0, 1.0, 1.0, 2.0);
     assert_eq!(h, 20.0 * 1.0 * 2.0);
-    assert_eq!(m, 1.0_f64.mul_add(400.0, 1.0 * 1.0 * (0.5 * GRAV)) * 2.0);
+    assert_eq!(m, 1.0_f64.contract(400.0, 1.0 * 1.0 * (0.5 * GRAV)) * 2.0);
 }

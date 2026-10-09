@@ -30,6 +30,7 @@ fn cold_bgc_defaults_match_the_fortran_pft_and_soil_contract() {
 
 #[test]
 fn cold_bgc_maps_runtime_profiles_in_fortran_pool_order_and_preserves_full_depth_missing() {
+    colm_numeric::skip_unless_fused!();
     let runtime = BgcEquilibriumState {
         decomposition_carbon_g_m3: (0..BGC_DECOMPOSITION_POOLS)
             .flat_map(|pool| (0..BGC_SOIL_LAYERS).map(move |soil| (pool * 100 + soil) as f64))
@@ -382,6 +383,7 @@ fn merged_cold_bgc_states_use_restart_axis_major_order() {
 
 #[test]
 fn state_summary_matches_the_cn_driver_pool_and_truncation_totals() {
+    colm_numeric::skip_unless_fused!();
     let thickness = (1..=BGC_SOIL_LAYERS)
         .map(|value| value as f64)
         .collect::<Vec<_>>();

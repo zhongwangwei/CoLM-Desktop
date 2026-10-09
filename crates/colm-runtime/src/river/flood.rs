@@ -19,6 +19,7 @@
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]
 
 use anyhow::{bail, ensure, Result};
+use colm_numeric::Contract;
 
 use super::levee::Levee;
 use super::network::{RiverNetwork, RunoffRouting};
@@ -134,11 +135,11 @@ impl FloodFeedback {
     /// 陆面一步之后：`flood_*_acc = FMA(flood_*_patch, deltime, acc)`，再清零逐步量。
     pub fn accumulate(&mut self, deltime: f64) {
         for (acc, rate) in self.evap_acc.iter_mut().zip(&mut self.evap_mm_s) {
-            *acc = rate.mul_add(deltime, *acc);
+            *acc = rate.contract(deltime, *acc);
             *rate = 0.0;
         }
         for (acc, rate) in self.infil_acc.iter_mut().zip(&mut self.infil_mm_s) {
-            *acc = rate.mul_add(deltime, *acc);
+            *acc = rate.contract(deltime, *acc);
             *rate = 0.0;
         }
     }
@@ -365,7 +366,7 @@ impl FloodFeedback {
                 };
                 // `volume = FMA(visible + protected, debit_fraction, volume)`。
                 *volume =
-                    (self.visible_uc[j] + self.protected_uc[j]).mul_add(debit_fraction, *volume);
+                    (self.visible_uc[j] + self.protected_uc[j]).contract(debit_fraction, *volume);
                 fraction_sum[j] += debit_fraction;
             }
         }
@@ -393,7 +394,7 @@ impl FloodFeedback {
                 // `levsto = max(FNMA(protected, fraction_sum, levsto), 0)`。
                 let levsto = &mut state.levsto.as_mut().expect("levee state")[j];
                 *levsto = (-self.protected_uc[j])
-                    .mul_add(fraction_sum[j], *levsto)
+                    .contract(fraction_sum[j], *levsto)
                     .max(0.0);
             }
             // `equilibrate_river_tracer_cell(j, volwater_ucat(j), levsto)`：扣账之后、重新分区之前。
@@ -518,7 +519,7 @@ impl FloodFeedback {
                 );
                 let infiltrated = infiltrated.max(0.0).min(1.0);
                 // `ratio = FMA(1 - evaporated, infiltrated, evaporated)`。
-                ratio_patch[i] = (1.0 - evaporated).mul_add(infiltrated, evaporated);
+                ratio_patch[i] = (1.0 - evaporated).contract(infiltrated, evaporated);
                 if limited && tracer_credit > 0.0 {
                     ratio_patch[i] = (land / tracer_credit).max(0.0).min(1.0);
                 }
@@ -541,8 +542,8 @@ impl FloodFeedback {
                         "grid flood feedback: land tracer input differs from donor exchange"
                     );
                 }
-                ledger[0] = land.mul_add(patch_area, ledger[0]);
-                ledger[1] = vapor_loss.mul_add(patch_area, ledger[1]);
+                ledger[0] = land.contract(patch_area, ledger[0]);
+                ledger[1] = vapor_loss.contract(patch_area, ledger[1]);
             }
             let ratio_uc = to_catchments(&ratio_patch);
             let coefficient: Vec<f64> = (0..n)

@@ -328,17 +328,21 @@ if [ -n "$MPI_FC" ]; then
 fi
 
 # SinglePoint 不白链 MPI；空间预设必须由 MPI Fortran wrapper 同时提供头文件和链接参数。
-# COLM_KERNEL_FMA=1：x86_64 上加 -mfma。Rust 引擎里的 mul_add 是照 arm64 gfortran 的 FMA 融合逐条对出来的
-# （docs/implementation-verification.md 第 648 轮）；x86-64 的基线编译没有 FMA 指令，不融合，所以和 Rust 对不上。
-# 打开它能把 Fortran 与 Rust 的差距缩小约三个数量级（仍不是逐位一致：融合决策依赖目标平台），代价是内核要求
-# 带 FMA 的 CPU（2013 年以后的 x86）。默认关闭，不改变现有产物。
+# x86_64 Linux：关掉自动向量化（-fno-tree-vectorize）。
+# gfortran 12 起 -O2 就开向量化；循环里的 exp/log/pow 于是被换成 glibc libmvec 的向量版本，
+# 与标量 libm 的结果在个别输入上差 1 ULP（实测：土壤节点深度 `0.025*(exp(0.5*(nsl-0.5))-1.)`
+# 的第 9 层，标量 3FFBA464EBE23F62、向量 3FFBA464EBE23F64）。Rust 调的是标量 libm，对不上；
+# 一个 ULP 经根系水力、土壤水一路放大。关掉之后配合 Rust 的不融合乘加（colm-numeric 在非 aarch64 上的默认），
+# 整天 159 个变量逐位一致（docs/implementation-verification.md 第 649 轮）。
+# COLM_KERNEL_VECTORIZE=1 保留向量化（要速度、不要与 Rust 对拍时）。
 EXTRA_FF=""
-if [ "${COLM_KERNEL_FMA:-}" = 1 ]; then
+if [ "$(uname -s)" = Linux ] && [ "${COLM_KERNEL_VECTORIZE:-}" != 1 ]; then
   case "$(uname -m)" in
-    x86_64|amd64) EXTRA_FF="-mfma" ;;
-    *) echo "COLM_KERNEL_FMA=1 only applies to x86_64; ignored on $(uname -m)" >&2 ;;
+    x86_64|amd64) EXTRA_FF="-fno-tree-vectorize" ;;
   esac
 fi
+# COLM_KERNEL_EXTRA_FFLAGS：额外的编译选项，原样追加（调试和对拍用）。
+EXTRA_FF="$EXTRA_FF ${COLM_KERNEL_EXTRA_FFLAGS:-}"
 if [ "$SPATIAL" -eq 1 ]; then
   [ -n "$MPI_FC" ] || { echo "spatial kernel build requires mpifort/mpif90" >&2; exit 2; }
   MAKE_FF="$MPI_FC -fopenmp $EXTRA_FF"

@@ -5,6 +5,7 @@
 //! 本身只给 `lake_id` 与出口坐标。`lake_type >= 2`（水库与受控湖）的流域各占一个水库序号。
 //! 舍入形状取自 GIMPLE（`MOD_Catch_Reservoir.F90` 行号见注释）。
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
@@ -139,7 +140,7 @@ impl CatchReservoirs {
             let total = info.volume(height);
             let normal = total * 0.7;
             // `:338` `FMA (qmean, 0.25, (normal * 0.7) / 15552000)`
-            let qnormal = qmean[b].mul_add(0.25, (normal * 0.7) / 1.5552e7);
+            let qnormal = qmean[b].contract(0.25, (normal * 0.7) / 1.5552e7);
             out.dam_elv.push(network.bedelv[b] + height);
             out.volresv_total.push(total);
             out.volresv_emerg.push(total * 0.94);
@@ -188,7 +189,7 @@ impl CatchReservoirs {
         } else if vol > adjust {
             // `:437-438` `FMA (qflood - qadjust, pow ((vol - adjust) / (emerg - adjust), 0.1), qadjust)`
             let qout =
-                (qflood - qadjust).mul_add(((vol - adjust) / (emerg - adjust)).lpow(0.1), qadjust);
+                (qflood - qadjust).contract(((vol - adjust) / (emerg - adjust)).lpow(0.1), qadjust);
             if qin > qflood {
                 // `:440-441` `qnormal + ((qin - qnormal) * (vol - normal)) / (emerg - normal)`
                 let q1 = qnormal + ((qin - qnormal) * (vol - normal)) / (emerg - normal);
@@ -198,7 +199,7 @@ impl CatchReservoirs {
             }
         } else if vol > normal {
             // `:445-446`
-            (qadjust - qnormal).mul_add(((vol - normal) / (adjust - normal)).lpow(3.0), qnormal)
+            (qadjust - qnormal).contract(((vol - normal) / (adjust - normal)).lpow(3.0), qnormal)
         } else {
             // `:448` `pow (vol / normal, 0.5) * qnormal`
             (vol / normal).lpow(0.5) * qnormal

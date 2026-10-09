@@ -277,8 +277,8 @@ fn metpreprocess_converts_units_and_skips_missing_cells() {
     values[0] = vec![280.0, 280.0];
     values[1] = vec![0.005, 0.005];
     metpreprocess("QIAN", &mut values, 2, &[false, false]).unwrap();
-    let e = 1.0e5 * 0.005 / 0.005_f64.mul_add(0.378, 0.622);
-    let ea = (e * (5.95e-05 * 0.01)).mul_add((1500.0_f64 / 280.0).exp(), 0.70);
+    let e = 1.0e5 * 0.005 / 0.005_f64.contract(0.378, 0.622);
+    let ea = (e * (5.95e-05 * 0.01)).contract((1500.0_f64 / 280.0).exp(), 0.70);
     assert_eq!(
         values[7][0],
         ea * 5.67e-8 * (280.0_f64 * 280.0 * (280.0 * 280.0))

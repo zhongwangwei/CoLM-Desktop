@@ -213,14 +213,17 @@ pub fn run_case_with(
     )
 }
 
-/// 这个平台上“Rust 与 Fortran 逐位一致”能指望吗？Rust 引擎里的 `mul_add` 是照 arm64 gfortran 的 FMA 融合逐条对出来的
-/// （第 648 轮）；融合决策依赖目标平台，所以只有 Apple Silicon 上逐位一致是已验证的。其它平台返回提示。
+/// 这个平台上“Rust 与 Fortran 逐位一致”能指望吗？已验证的有两个：Apple Silicon（Rust 的融合乘加照 arm64 gfortran
+/// 逐条对出来）和 x86_64 Linux（Rust 不融合，Fortran 内核用 `-fno-tree-vectorize` 编，第 649 轮整天 159 个变量逐位一致）。
+/// 其它平台返回提示。
 pub fn platform_note() -> Option<&'static str> {
-    if cfg!(target_arch = "aarch64") && cfg!(target_os = "macos") {
+    if cfg!(all(target_arch = "aarch64", target_os = "macos"))
+        || cfg!(all(target_arch = "x86_64", target_os = "linux"))
+    {
         None
     } else {
         Some(
-            "Bitwise parity between the Rust engine and the Fortran kernel is only verified on Apple Silicon: the Rust port copies arm64 gfortran's fused multiply-add decisions, and those depend on the target. Here, rounding noise is amplified by the physics within a few steps, so judge parity on the earliest records only. Measured on x86_64 Linux (round 648): build the kernel with COLM_KERNEL_FMA=1 and use first_records=2, rtol=1e-9 and ignore f_frcsat (a threshold-sensitive diagnostic that switches branch) - noise is then below 2e-11; without FMA use rtol=1e-6. From about 6 records on, no tolerance separates noise from a real misalignment.",
+            "Bitwise parity between the Rust engine and the Fortran kernel is only verified on Apple Silicon and x86_64 Linux. Two things decide it on any platform: whether gfortran contracts a*b+c into fused multiply-adds (the Rust port follows the target's default, see colm-numeric) and whether its libm calls match the ones Rust makes (a vectorised exp/log/pow from libmvec differs by 1 ULP; build the kernel without auto-vectorisation). Elsewhere rounding noise is amplified by the physics within a few steps, so judge parity on the earliest records only: first_records=2, rtol=1e-9 and ignore f_frcsat (a threshold-sensitive diagnostic that switches branch). From about 6 records on, no tolerance separates noise from a real misalignment.",
         )
     }
 }
@@ -233,7 +236,7 @@ pub struct ParityReport {
     /// 只比较了每个文件的前几条记录（x86_64 上的做法）。
     pub first_records: Option<usize>,
     pub ignored: Vec<String>,
-    /// 非 Apple Silicon 平台上的提示（见 [`platform_note`]）。
+    /// 逐位一致没有验证过的平台上的提示（见 [`platform_note`]）。
     pub platform_note: Option<&'static str>,
     pub case: String,
     pub preset: String,

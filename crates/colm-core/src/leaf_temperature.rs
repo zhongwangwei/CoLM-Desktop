@@ -8,6 +8,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::{
     canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme, canopy_roughness,
@@ -84,7 +85,7 @@ const REFERENCE_LAPSE_RATE_K_M: f64 = 0.0098;
 /// 但上游把它定义成了别的东西。**照抄表达式，不要按名字推断。**
 pub fn reference_height_temperature_k(air_temperature_k: f64, temperature_height_m: f64) -> f64 {
     // `:550` 的 GIMPLE 是 `thm = .FMA(forc_hgt_t, 9.8e-3, forc_t)`：那条乘积被收进加法。
-    REFERENCE_LAPSE_RATE_K_M.mul_add(temperature_height_m, air_temperature_k)
+    REFERENCE_LAPSE_RATE_K_M.contract(temperature_height_m, air_temperature_k)
 }
 
 /// Soil profiles and fixed hydraulic parameters for the two-leaf PHS branch.
@@ -320,14 +321,14 @@ pub fn leaf_temperature(
         // `clai = 0.2*(lai+sai)*cpliq + ldew_rain*cpliq + ldew_snow*cpice`（`main/…:500`）：
         // GIMPLE 是 `.FMA (lsai*0.2, cpliq, ldew_rain*cpliq)` 再 `.FMA (ldew_snow, cpice, …)`
         // —— 熔进去的是冠层项，雨项先舍入（AT-Neu 2 月第 189 步差 1 ULP）。
-        let canopy_capacity = (lsai * 0.2).mul_add(
+        let canopy_capacity = (lsai * 0.2).contract(
             WATER_HEAT_CAPACITY_J_KG_K,
             state.canopy_water.rain_mm * WATER_HEAT_CAPACITY_J_KG_K,
         );
         state
             .canopy_water
             .snow_mm
-            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, canopy_capacity)
+            .contract(ICE_HEAT_CAPACITY_J_KG_K, canopy_capacity)
     } else {
         0.0
     };
@@ -355,14 +356,14 @@ pub fn leaf_temperature(
     let hsink = z0mv + displasink;
     // `:606 z0mg = (1-fsno)*zlnd + fsno*zsno` 的 GIMPLE 是
     // `.FMA(1-fsno, zlnd, fsno*zsno)` —— 第一个乘积进 FMA，第二个独立舍入。
-    let z0mg = (1.0 - input.snow_cover_fraction).mul_add(
+    let z0mg = (1.0 - input.snow_cover_fraction).contract(
         input.soil_roughness_m,
         input.snow_cover_fraction * input.snow_roughness_m,
     );
     let frontal_area = 1.0 - (-0.5 * lsai).exp();
     // `:553 sqrtdragc = min((0.003+0.3*fai)**0.5, 0.3)` 的 GIMPLE 是
     // `__builtin_pow (.FMA(fai, 0.3, 0.003), 0.5)` —— libm `pow`，不是 `sqrt`。
-    let sqrt_drag = 0.3_f64.mul_add(frontal_area, 0.003).lpow(0.5).min(0.3);
+    let sqrt_drag = 0.3_f64.contract(frontal_area, 0.003).lpow(0.5).min(0.3);
     let attenuation = input.canopy_top_height_m
         / (input.canopy_top_height_m - displacement)
         / (VON_KARMAN / sqrt_drag);
@@ -390,7 +391,7 @@ pub fn leaf_temperature(
     // `MOD_LeafTemperature.F90:556`：`ur = max(0.1, sqrt(us*us+vs*vs))`（us 在前）。
     let reference_wind = input
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             input.eastward_wind_m_s,
             input.northward_wind_m_s * input.northward_wind_m_s,
         )
@@ -404,8 +405,8 @@ pub fn leaf_temperature(
     //   `dthv    = fma(dth, _149, dqh*(0.61*th))`
     //   `thvstar = fma(tstar, _149, qstar*(0.61*th))`
     // 原先两处都写成平铺，循环里的那处在 it=6 让 `thvstar` 差 1 ULP。
-    let one_plus_0_61_reference_humidity = 0.61f64.mul_add(input.reference_specific_humidity, 1.0);
-    let virtual_temperature_difference = temperature_difference.mul_add(
+    let one_plus_0_61_reference_humidity = 0.61f64.contract(input.reference_specific_humidity, 1.0);
+    let virtual_temperature_difference = temperature_difference.contract(
         one_plus_0_61_reference_humidity,
         (0.61 * input.potential_temperature_k) * humidity_difference,
     );
@@ -520,7 +521,7 @@ pub fn leaf_temperature(
         // `D = max(ei-ea,50)/psrf`，而这处分母在两个水汽压相近时很小 ——
         // 同一个 1 ULP 在这里会被放大。分子是单个乘除，无可收缩点。
         let canopy_vapor_pressure = canopy_air_humidity * input.surface_pressure_pa
-            / 0.378_f64.mul_add(canopy_air_humidity, 0.622);
+            / 0.378_f64.contract(canopy_air_humidity, 0.622);
         let stomatal_soil_stress = if input.plant_hydraulics.is_some() {
             1.0
         } else {
@@ -732,7 +733,7 @@ pub fn leaf_temperature(
         let leaf_moisture_transfer_sum = laisun
             / (leaf_boundary_resistance + leaf_sunlit_resistance)
             + laisha / (leaf_boundary_resistance + leaf_shaded_resistance);
-        let leaf_moisture_conductance = dry_share.mul_add(
+        let leaf_moisture_conductance = dry_share.contract(
             leaf_moisture_transfer_sum,
             iteration_lsai * evaporation_weight / leaf_boundary_resistance,
         );
@@ -772,7 +773,7 @@ pub fn leaf_temperature(
         let leaf_sensible_heat = input.air_density_kg_m3
             * AIR_HEAT_CAPACITY_J_KG_K
             * leaf_heat_conductance
-            * (heat_weight_sum.mul_add(
+            * (heat_weight_sum.contract(
                 state.leaf_temperature_k,
                 -(air_heat_weight * input.reference_air_temperature_k),
             ) - ground_heat_weight * input.ground_temperature_k);
@@ -790,7 +791,7 @@ pub fn leaf_temperature(
         // `rssun` 修好之后只剩 `etr`/`fevpl` 差 1 ULP，而同一条语句里的
         // `etr_dtl`（不经过这个括号）逐位相同 —— 差别只可能在这个括号里。
         let moisture_weight_sum = air_moisture_weight + ground_moisture_weight;
-        let humidity_gradient = moisture_weight_sum.mul_add(
+        let humidity_gradient = moisture_weight_sum.contract(
             leaf_saturation.specific_humidity,
             -(air_moisture_weight * input.reference_specific_humidity),
         ) - ground_moisture_weight * input.ground_specific_humidity;
@@ -922,11 +923,11 @@ pub fn leaf_temperature(
             denominator.is_finite() && denominator != 0.0,
             "leaf energy denominator is invalid"
         );
-        let numerator = ice_heat_capacity_flux.mul_add(
+        let numerator = ice_heat_capacity_flux.contract(
             precipitation_temperature_difference,
-            water_heat_capacity_flux.mul_add(
+            water_heat_capacity_flux.contract(
                 precipitation_temperature_difference,
-                (-leaf_latent_heat_j_kg).mul_add(
+                (-leaf_latent_heat_j_kg).contract(
                     leaf_evaporation,
                     input.canopy_absorbed_solar_w_m2 + net_longwave - leaf_sensible_heat,
                 ),
@@ -957,9 +958,9 @@ pub fn leaf_temperature(
         // `sqrt(x*x)` 与 `|x|` 在 4e6 组随机位型里只在 `x*x` 上溢时有别，等价。
         let latent_flux_slope = leaf_latent_heat_j_kg * leaf_evaporation_temperature_slope;
         let flux_change = (dtl[iteration].powi(2)
-            * latent_flux_slope.mul_add(
+            * latent_flux_slope.contract(
                 latent_flux_slope,
-                net_longwave_temperature_slope.mul_add(
+                net_longwave_temperature_slope.contract(
                     net_longwave_temperature_slope,
                     leaf_sensible_temperature_slope * leaf_sensible_temperature_slope,
                 ),
@@ -988,7 +989,7 @@ pub fn leaf_temperature(
         //   `_570 = _567 + _569`（fadd）—— **整条平铺，一个都没融**。
         // 差别来自"哪些乘积已经被别处算过"：`taf` 的 `tl*wtl0` 是新鲜的所以被吸收，
         // `qaf` 的 `qsatl*wtlq0` 也是新鲜的却没有 —— 这是 GCC 自己的选择，以汇编为准。
-        canopy_air_temperature = leaf_heat_weight.mul_add(
+        canopy_air_temperature = leaf_heat_weight.contract(
             state.leaf_temperature_k,
             air_heat_weight * input.reference_air_temperature_k
                 + ground_heat_weight * input.ground_temperature_k,
@@ -1014,7 +1015,7 @@ pub fn leaf_temperature(
             - sunlit_resistance.respiration_mol_m2_s
             - shaded_resistance.respiration_mol_m2_s
             - soil_respiration;
-        canopy_air_co2 = (-co2_drawdown_rate).mul_add(co2_sink, input.atmospheric_co2_pa);
+        canopy_air_co2 = (-co2_drawdown_rate).contract(co2_sink, input.atmospheric_co2_pa);
         temperature_difference = input.reference_air_temperature_k - canopy_air_temperature;
         humidity_difference = input.reference_specific_humidity - canopy_air_humidity;
         let temperature_scale =
@@ -1023,7 +1024,7 @@ pub fn leaf_temperature(
             VON_KARMAN / (surface.moisture - profile.moisture_at_top_layer) * humidity_difference;
         // 与循环外那个 `dthv` 共用同一个 `(1.+0.61*qm)`（内核 CSE 成一项），
         // 两个乘积各自融合 —— 见函数上方 `one_plus_0_61_reference_humidity` 的注释。
-        let virtual_temperature_scale = temperature_scale.mul_add(
+        let virtual_temperature_scale = temperature_scale.contract(
             one_plus_0_61_reference_humidity,
             (0.61 * input.potential_temperature_k) * humidity_scale,
         );
@@ -1062,7 +1063,7 @@ pub fn leaf_temperature(
             // 原先写成平铺的 `ur.powi(2) + wc.powi(2)`，在 it=5 让 `um` 差 1 ULP ——
             // `um` 不在当时那 34 个探针量里，于是它到 **it=6** 才以 `ustar` 的形式暴露。
             reference_wind
-                .mul_add(reference_wind, convective_velocity * convective_velocity)
+                .contract(reference_wind, convective_velocity * convective_velocity)
                 .sqrt()
         };
         if prior_obukhov * obukhov < 0.0 {
@@ -1164,22 +1165,22 @@ pub fn leaf_temperature(
     let leaf_sensible_heat = {
         let slope_applied = last
             .leaf_sensible_temperature_slope
-            .mul_add(final_temperature_change, last.leaf_sensible_heat);
+            .contract(final_temperature_change, last.leaf_sensible_heat);
         let bracket = clai / input.time_step_seconds - last.net_longwave_temperature_slope
             + last.leaf_sensible_temperature_slope
             + leaf_latent_heat_j_kg * last.leaf_evaporation_temperature_slope
             + WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain
             + ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow;
         let bracket_applied = (last.unbounded_temperature_change - final_temperature_change)
-            .mul_add(bracket, slope_applied);
-        leaf_latent_heat_j_kg.mul_add(last.evaporation_imbalance, bracket_applied)
+            .contract(bracket, slope_applied);
+        leaf_latent_heat_j_kg.contract(last.evaporation_imbalance, bracket_applied)
     };
     let updated_transpiration = last
         .transpiration_temperature_slope
-        .mul_add(final_temperature_change, last.transpiration);
+        .contract(final_temperature_change, last.transpiration);
     let mut wet_evaporation = last
         .wet_evaporation_temperature_slope
-        .mul_add(final_temperature_change, last.wet_evaporation);
+        .contract(final_temperature_change, last.wet_evaporation);
     // 负蒸腾（水汽进气孔）是叶面凝露，不是倒流的蒸腾：并入湿叶蒸发，蒸腾与根系吸水清零
     // （`MOD_LeafTemperature.F90`，原来只在开示踪物时做，vendor 已解耦成无条件）。
     let dew_from_transpiration = updated_transpiration < 0.0;
@@ -1191,13 +1192,13 @@ pub fn leaf_temperature(
     };
     let leaf_evaporation = last
         .leaf_evaporation_temperature_slope
-        .mul_add(final_temperature_change, last.leaf_evaporation_unadjusted);
+        .contract(final_temperature_change, last.leaf_evaporation_unadjusted);
     let wet_evaporation_limit = state.canopy_water.total_mm / input.time_step_seconds;
     let excessive_wet_evaporation = (wet_evaporation - wet_evaporation_limit).max(0.0);
     wet_evaporation = wet_evaporation.min(wet_evaporation_limit);
     let leaf_evaporation = leaf_evaporation - excessive_wet_evaporation;
     let leaf_sensible_heat =
-        leaf_latent_heat_j_kg.mul_add(excessive_wet_evaporation, leaf_sensible_heat);
+        leaf_latent_heat_j_kg.contract(excessive_wet_evaporation, leaf_sensible_heat);
     // 残差必须**在这一步**算：上游 `:1449` 的 `err` 在冠层持水更新（`:1464`）之前，
     // 所以它吃的是 `elwdif` 修正之后的 `fsenl`/`fevpl`、**没有**吃下面那两笔退回，
     // 也没有吃相变段（`dheatl` 的 Niu(2004) 项、`tl` 拉回）—— 那两样都在它之后。
@@ -1209,7 +1210,7 @@ pub fn leaf_temperature(
     // 所以 LCT 回归一直没碰到；3-PFT 带裸地的 AT-Neu 11 月有 10 步差 1 ULP，只在 `f_zerr` 显形。
     let precipitation_temperature_difference =
         input.precipitation_temperature_k - state.leaf_temperature_k;
-    let precipitation_heat = (WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain).mul_add(
+    let precipitation_heat = (WATER_HEAT_CAPACITY_J_KG_K * intercepted_rain).contract(
         precipitation_temperature_difference,
         ICE_HEAT_CAPACITY_J_KG_K * intercepted_snow * precipitation_temperature_difference,
     );
@@ -1252,7 +1253,7 @@ pub fn leaf_temperature(
                 // （`:1360`）也是左结合（`((dz/sum)*etr_dtl)*dtl`），且
                 // `变量 + 乘积` 会被内核的 `-ffp-contract=fast` 收缩成 FMA。
                 let rate = depth / total_depth * last.transpiration_temperature_slope;
-                *flux = rate.mul_add(final_temperature_change, *flux);
+                *flux = rate.contract(final_temperature_change, *flux);
             }
         }
         if dew_from_transpiration {
@@ -1284,9 +1285,9 @@ pub fn leaf_temperature(
         AIR_HEAT_CAPACITY_J_KG_K * input.air_density_kg_m3 * last.ground_heat_conductance;
     let face_sensible = |face_temperature_k: f64| {
         sensible_factor
-            * (-leaf_temperature_before_phase_change_k).mul_add(
+            * (-leaf_temperature_before_phase_change_k).contract(
                 last.leaf_heat_weight,
-                (1.0 - last.ground_heat_weight).mul_add(
+                (1.0 - last.ground_heat_weight).contract(
                     face_temperature_k,
                     -(last.air_heat_weight * input.reference_air_temperature_k),
                 ),
@@ -1306,7 +1307,7 @@ pub fn leaf_temperature(
     let evaporation_factor = last.ground_moisture_conductance * input.air_density_kg_m3;
     let face_evaporation = |face_humidity: f64| {
         evaporation_factor
-            * ((1.0 - last.ground_moisture_weight).mul_add(
+            * ((1.0 - last.ground_moisture_weight).contract(
                 face_humidity,
                 -(last.air_moisture_weight * input.reference_specific_humidity),
             ) - leaf_moisture_term)
@@ -1330,10 +1331,10 @@ pub fn leaf_temperature(
     let leaf_emission = STEFAN_BOLTZMANN
         * (1.0 - input.canopy_longwave_gap_fraction)
         * previous_leaf_temperature.powi(3)
-        * 4.0f64.mul_add(final_temperature_change, previous_leaf_temperature);
+        * 4.0f64.contract(final_temperature_change, previous_leaf_temperature);
     let downward_longwave = input
         .canopy_longwave_gap_fraction
-        .mul_add(input.atmospheric_longwave_w_m2, leaf_emission);
+        .contract(input.atmospheric_longwave_w_m2, leaf_emission);
     let upward_longwave = upward_longwave(
         input,
         previous_leaf_temperature,
@@ -1378,7 +1379,7 @@ pub fn leaf_temperature(
         * (1.0 - last.ground_moisture_weight)
         * input.ground_humidity_temperature_slope_k;
     let ground_flux_temperature_slope_w_m2_k = ground_latent_slope_kg_m2_s_k
-        .mul_add(input.ground_latent_heat_j_kg, ground_sensible_slope_w_m2_k);
+        .contract(input.ground_latent_heat_j_kg, ground_sensible_slope_w_m2_k);
     // **不**把 `etr` 夹到非负：`main/` 的非 TRACER 路径允许收尾后的 `etr = etr + etr_dtl*dtl`
     // 为很小的负数（只有 TRACER 构建在 `:1107-1113` 把负值并进 `evplwet` 再置 0）。早先这里有
     // 一句 `max(0)`，AT-Neu 灌木地类 1 月第 647 条 Fortran `f_etr = -1.7e-14` 而 Rust 为 0。
@@ -1413,13 +1414,13 @@ pub fn leaf_temperature(
         // `thm`/`qm` 是已舍入的加数。原先是平铺加法，少一次融合。
         air_temperature_2m_k: (VON_KARMAN / (last.surface.heat - last.top_heat)
             * temperature_difference)
-            .mul_add(
+            .contract(
                 last.heat_at_2m / VON_KARMAN - last.surface.heat / VON_KARMAN,
                 input.reference_air_temperature_k,
             ),
         air_specific_humidity_2m: (VON_KARMAN / (last.surface.moisture - last.top_moisture)
             * humidity_difference)
-            .mul_add(
+            .contract(
                 last.moisture_at_2m / VON_KARMAN - last.surface.moisture / VON_KARMAN,
                 input.reference_specific_humidity,
             ),
@@ -1698,19 +1699,19 @@ fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f6
     // `/tmp/gf/irab_shapes.py` 的穷举：`base=fma` 命中 kernel 全部四轮、
     // `base=平铺` 命中 Rust 全部四轮，`tl4=(tl*tl)*(tl*tl)` 两侧都要）。
     let longwave_base =
-        (-2.0 * STEFAN_BOLTZMANN).mul_add(leaf_fourth_power, input.atmospheric_longwave_w_m2);
+        (-2.0 * STEFAN_BOLTZMANN).contract(leaf_fourth_power, input.atmospheric_longwave_w_m2);
     let radiated = if input.options.split_soil_snow {
-        (input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN).mul_add(
+        (input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN).contract(
             input.snow_surface_temperature_k.powi(4),
             ((1.0 - input.snow_cover_fraction) * input.ground_emissivity * STEFAN_BOLTZMANN)
-                .mul_add(input.soil_surface_temperature_k.powi(4), longwave_base),
+                .contract(input.soil_surface_temperature_k.powi(4), longwave_base),
         )
     } else {
         (input.ground_emissivity * STEFAN_BOLTZMANN)
-            .mul_add(input.ground_temperature_k.powi(4), longwave_base)
+            .contract(input.ground_temperature_k.powi(4), longwave_base)
     };
     (
-        radiated.mul_add(
+        radiated.contract(
             factor,
             (1.0 - input.ground_emissivity)
                 * input.canopy_longwave_gap_fraction
@@ -1732,7 +1733,7 @@ fn longwave(input: LeafTemperatureInput<'_>, leaf_temperature_k: f64, factor: f6
                 * (1.0 - input.canopy_longwave_gap_fraction)
                 * factor
                 * STEFAN_BOLTZMANN)
-                .mul_add(leaf_cube, -(leaf_cube * (8.0 * STEFAN_BOLTZMANN) * factor))
+                .contract(leaf_cube, -(leaf_cube * (8.0 * STEFAN_BOLTZMANN) * factor))
         },
     )
 }
@@ -1753,16 +1754,16 @@ fn upward_longwave(
         // split（`main/MOD_LeafTemperature.F90:1158-1160`）的 GIMPLE：叶发射项作起点，
         // 先 `.FMA (((1-fsno)*thermk)*emg, t_soil**4, …)`、再 `.FMA ((fsno*thermk)*emg, t_snow**4, …)`。
         (input.snow_cover_fraction * input.canopy_longwave_gap_fraction * input.ground_emissivity)
-            .mul_add(
+            .contract(
                 input.snow_surface_temperature_k.powi(4),
                 ((1.0 - input.snow_cover_fraction)
                     * input.canopy_longwave_gap_fraction
                     * input.ground_emissivity)
-                    .mul_add(input.soil_surface_temperature_k.powi(4), leaf_canopy_term),
+                    .contract(input.soil_surface_temperature_k.powi(4), leaf_canopy_term),
             )
     } else {
         (input.canopy_longwave_gap_fraction * input.ground_emissivity)
-            .mul_add(input.ground_temperature_k.powi(4), leaf_canopy_term)
+            .contract(input.ground_temperature_k.powi(4), leaf_canopy_term)
     };
     // `MOD_LeafTemperature_Extended.F90:1416` 的第一个加法**左边就是乘积**
     // `stefnc*(fac*t³*(t+4*dtl) + ther mk*emg*tg⁴)` ⇒ GCC 把它收进加法：
@@ -1771,7 +1772,7 @@ fn upward_longwave(
     // 复现内核的 `ulrad`（`4070B00402BA216F`），平铺得到 `…216E`；后三个加法的
     // 收缩在本算例看不出来，保持平铺。
     let reflected_longwave = (1.0 - input.ground_emissivity) * input.canopy_longwave_gap_fraction;
-    let mut value = STEFAN_BOLTZMANN.mul_add(
+    let mut value = STEFAN_BOLTZMANN.contract(
         canopy_emission,
         // 第二项从 `…:1412` 的 `(1-emg)*thermk*thermk*frl` 经 CSE 变成 `:1110` 的
         // `_3203 = thermk*(1-emg)` → `_3178 = thermk*_3203` → `_3179 = _3178*frl`，
@@ -1852,8 +1853,8 @@ fn update_canopy_water(
     // `-ffp-contract=fast` 会收成 FMA。蒸干那一步 Fortran 留下 ~1e-19 的舍入残量
     // （AT-Neu 第 71 步 `f_ldew = 5.1e-19`），平铺写法恒得精确的 0；残量的具体数值
     // 取决于前几步已有的 ULP 差，这里只保证形状一致。
-    water.rain_mm = (qdewl - qevpl).mul_add(dt, water.rain_mm);
-    water.snow_mm = (qfrol - qsubl).mul_add(dt, water.snow_mm);
+    water.rain_mm = (qdewl - qevpl).contract(dt, water.rain_mm);
+    water.snow_mm = (qfrol - qsubl).contract(dt, water.snow_mm);
     water.total_mm = water.rain_mm + water.snow_mm;
 
     let lsai = input.leaf_area_index + input.stem_area_index;
@@ -1876,7 +1877,7 @@ fn update_canopy_water(
         // Niu et al. (2004)
         // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
         // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
-        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+        state.leaf_temperature_k = wet_snow_fraction.contract(
             FREEZING_K,
             state.leaf_temperature_k * (1.0 - wet_snow_fraction),
         );
@@ -1891,7 +1892,7 @@ fn update_canopy_water(
         freeze_mass = freeze * dt;
         // `tl = fwet_snow*tfrz + (1.-fwet_snow)*tl`：GIMPLE 是
         // `.FMA (fwet_snow, tfrz, tl*(1-fwet_snow))`（`main/MOD_LeafTemperature.F90:1280/1290`）。
-        state.leaf_temperature_k = wet_snow_fraction.mul_add(
+        state.leaf_temperature_k = wet_snow_fraction.contract(
             FREEZING_K,
             state.leaf_temperature_k * (1.0 - wet_snow_fraction),
         );

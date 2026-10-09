@@ -49,6 +49,7 @@ fn report(name: &str, total: usize, bad: &[String]) {
 
 #[test]
 fn gratio_matches_gfortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     let rows = records("P");
     let mut bad = Vec::new();
     let mut errors = 0;
@@ -85,6 +86,7 @@ fn gratio_matches_gfortran_bitwise() {
 
 #[test]
 fn gratio_representative_points() {
+    colm_numeric::skip_unless_fused!();
     // 取自金标准的代表点，覆盖 a<1、A=0.5、整数 A、连分式、Temme 与出错返回。
     let cases: [(f64, f64, u64, u64); 6] = [
         (hf("3FE0000000000000"), hf("3FB999999999999A"), 0, 0), // A = 0.5, ERF 分支
@@ -147,6 +149,7 @@ fn check_unary(tag: &str, name: &str, f: impl Fn(f64) -> f64) {
 
 #[test]
 fn gamma_matches_gfortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     check_unary("G", "GAMMA", gamma);
 }
 

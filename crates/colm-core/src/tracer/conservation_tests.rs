@@ -93,6 +93,7 @@ fn e12_5_matches_gfortran() {
 
 #[test]
 fn balance_check_matches_fortran_kernel() {
+    colm_numeric::skip_unless_fused!();
     for (inputs, outputs) in BALANCE_CASES {
         let a: Vec<f64> = inputs.iter().map(|b| f64::from_bits(*b)).collect();
         let o: Vec<f64> = outputs.iter().map(|b| f64::from_bits(*b)).collect();

@@ -9,6 +9,7 @@
 //! 每条浮点语句的舍入形状取自 `MOD_Ozone.F90.273t.optimized`（行号见注释）。
 
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `DEF_USE_OZONEDATA = .false.` 时 `CalcOzoneStress` 写回 `forc_ozone` 的常数 [ppbv]（`MOD_Ozone.F90:80`）。
 pub const CONSTANT_OZONE_PPBV: f64 = 100.0;
@@ -134,7 +135,7 @@ pub fn ozone_stress(
         * input.concentration_ppbv;
     // `:86` `_13 = .FMA (rs, DEF_OZONE_KO3, rb); o3flux = o3conc/(_13 + ram)`
     let flux = concentration_nmol_m3
-        / (input.stomatal_resistance_s_m.mul_add(
+        / (input.stomatal_resistance_s_m.contract(
             parameters.stomatal_resistance_factor,
             input.boundary_resistance_s_m,
         ) + input.aerodynamic_resistance_s_m);
@@ -191,7 +192,7 @@ pub fn ozone_stress(
     let clamp = |value: f64| value.min(1.0).max(0.0);
     match ivt {
         1..=3 => (
-            clamp((-uptake).mul_add(0.0064, 1.005)),
+            clamp((-uptake).contract(0.0064, 1.005)),
             // `:156` `_45 = __builtin_pow (o3uptake, -0.041); _45*0.965`
             clamp(uptake.lpow(-0.041) * 0.965),
         ),
@@ -203,17 +204,17 @@ pub fn ozone_stress(
             // `:163-164` 两条共用同一个 `__builtin_log`。
             let log = uptake.ln();
             (
-                clamp((-log).mul_add(0.074, 1.0)),
-                clamp((-log).mul_add(0.060, 0.991)),
+                clamp((-log).contract(0.074, 1.0)),
+                clamp((-log).contract(0.060, 0.991)),
             )
         }
         12..=14 => (
-            clamp((-uptake).mul_add(0.016, 0.997)),
-            clamp((-uptake.ln()).mul_add(0.045, 0.989)),
+            clamp((-uptake).contract(0.016, 0.997)),
+            clamp((-uptake.ln()).contract(0.045, 0.989)),
         ),
         15.. => (
-            clamp((-uptake.ln()).mul_add(0.028, 0.909)),
-            clamp((-uptake.tanh()).mul_add(0.169, 1.005)),
+            clamp((-uptake.ln()).contract(0.028, 0.909)),
+            clamp((-uptake.tanh()).contract(0.169, 1.005)),
         ),
         _ => (1.0, 1.0),
     }

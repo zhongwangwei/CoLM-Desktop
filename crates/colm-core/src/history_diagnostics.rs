@@ -20,6 +20,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::{monin_obukhov_with_scheme, MoninObukhovInput, SurfaceLayerScheme};
 
@@ -146,7 +147,7 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
     // `MOD_Vars_1DAccFluxes.F90:2743`：`sqrt(taux_e**2+tauy_e**2)`。
     let stress = input
         .eastward_stress_kg_m_s2
-        .mul_add(
+        .contract(
             input.eastward_stress_kg_m_s2,
             input.northward_stress_kg_m_s2 * input.northward_stress_kg_m_s2,
         )
@@ -160,12 +161,12 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
         * (100_000.0 / pressure).lpow(AIR_GAS_CONSTANT_J_KG_K / AIR_HEAT_CAPACITY_J_KG_K);
     // `MOD_Vars_1DAccFluxes.F90:2749` 的 `(1.+0.61*qm)` 在出货汇编里是
     // `fmadd d29,d13,d31,d29`（`d29=1.0`、`d31=0.61`）—— `0.61*qm` 被收进 `1.0`。
-    let one_plus_061_humidity = 0.61f64.mul_add(humidity, 1.0);
+    let one_plus_061_humidity = 0.61f64.contract(humidity, 1.0);
     let virtual_potential_temperature = potential_temperature * one_plus_061_humidity;
     // `:2751-2752` 的 `thvstar = r_tstar_e*(1+0.61*qm) + 0.61*th*r_qstar_e`：
     // 出货汇编是 `fmsub d31,d9,d29,d31`（`d9=-r_tstar_e`、`d29=1+0.61*qm`），
     // 即 `r_tstar_e*F` 那个乘积被收进 `0.61*th*r_qstar_e`。
-    let virtual_scale = temperature_scale.mul_add(
+    let virtual_scale = temperature_scale.contract(
         one_plus_061_humidity,
         (0.61 * potential_temperature) * humidity_scale,
     );
@@ -186,7 +187,7 @@ pub fn history_diagnostics(input: HistoryDiagnosticsInput) -> Result<HistoryDiag
         // `MOD_Vars_1DAccFluxes.F90:2764`：`ur = sqrt(us*us+vs*vs)`。
         input
             .wind_speed_eastward_m_s
-            .mul_add(
+            .contract(
                 input.wind_speed_eastward_m_s,
                 input.wind_speed_northward_m_s * input.wind_speed_northward_m_s,
             )
@@ -279,7 +280,7 @@ fn stability_adjusted_wind(
     // `fmadd d9,d9,d9,d0`（`d9=ur`、`d0=wc2`）⇒ `ur*ur` 被收进 `wc2`。
     // （第 295 轮那句"本处按平铺保留"是拿不出反汇编时的保守写法，现按实测更正。）
     wind_speed
-        .mul_add(wind_speed, convective_squared)
+        .contract(wind_speed, convective_squared)
         .max(0.0)
         .sqrt()
         .max(0.1)

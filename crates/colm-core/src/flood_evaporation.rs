@@ -12,6 +12,7 @@
 #![allow(clippy::manual_clamp)]
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::atmosphere::saturation_specific_humidity;
 use crate::monin_obukhov::{
@@ -80,13 +81,13 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
     let saturation =
         saturation_specific_humidity(input.surface_temperature_k, input.surface_pressure_pa)?;
     let qsatg = saturation.specific_humidity;
-    let thm = input.temperature_height_m.mul_add(0.0098, tm);
+    let thm = input.temperature_height_m.contract(0.0098, tm);
     let th = tm * (1.0e5 / input.surface_pressure_pa).lpow(RGAS_OVER_CPAIR);
-    let moist = qm.mul_add(0.61, 1.0);
+    let moist = qm.contract(0.61, 1.0);
     let thv = th * moist;
     let ur = input
         .wind_east_m_s
-        .mul_add(
+        .contract(
             input.wind_east_m_s,
             input.wind_north_m_s * input.wind_north_m_s,
         )
@@ -95,17 +96,18 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
     let dth = thm - input.surface_temperature_k;
     let dqh = qm - qsatg;
     let th_moist = th * 0.61;
-    let dthv = moist.mul_add(dth, dqh * th_moist);
+    let dthv = moist.contract(dth, dqh * th_moist);
     let zldis = hu;
     let d = tm - TFRZ;
     let d2 = d * d;
-    let polynomial = (-(d * d2)).mul_add(4.84e-9, d2.mul_add(8.301e-6, d.mul_add(6.542e-3, 1.0)));
+    let polynomial =
+        (-(d * d2)).contract(4.84e-9, d2.contract(8.301e-6, d.contract(6.542e-3, 1.0)));
     let visa = polynomial * 1.326e-5;
     // 初值：`ustar = 0.06`、`wc = 0.5`；`um = max(ur, 0.1)`（`ur` 已不小于 0.1）或 `sqrt(ur² + wc²)`。
     let um0 = if dthv >= 0.0 {
         ur
     } else {
-        ur.mul_add(ur, 0.25).sqrt()
+        ur.contract(ur, 0.25).sqrt()
     };
     let viscous = visa * 0.11;
     let charnock = |ustar: f64| (ustar * 0.013) * ustar / GRAVITY + viscous / ustar;
@@ -136,7 +138,7 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
     let mut profile = None;
     for _ in 0..10 {
         z0mg = charnock(ustar);
-        let xq = ((z0mg * ustar) / visa).lpow(0.25).mul_add(2.67, -2.57);
+        let xq = ((z0mg * ustar) / visa).lpow(0.25).contract(2.67, -2.57);
         let z0hg = z0mg / xq.exp();
         let state = monin_obukhov_with_scheme(
             MoninObukhovInput {
@@ -156,7 +158,7 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
         ustar = state.friction_velocity_m_s;
         tstar = dth * (VON_KARMAN / state.heat);
         qstar = dqh * (VON_KARMAN / state.moisture);
-        let thvstar = moist.mul_add(tstar, th_moist * qstar);
+        let thvstar = moist.contract(tstar, th_moist * qstar);
         zol = (hu * VON_KARMAN * GRAVITY * thvstar) / (thv * (ustar * ustar));
         zol = if zol >= 0.0 {
             zol.max(1.0e-6).min(2.0)
@@ -171,7 +173,7 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
                 zii = (hu * 5.0).max(input.boundary_layer_height_m);
             }
             let wc = (-(ustar * GRAVITY * thvstar * zii / thv)).lpow(1.0 / 3.0);
-            um = ur.mul_add(ur, wc * wc).sqrt();
+            um = ur.contract(ur, wc * wc).sqrt();
         }
         profile = Some(state);
         if obu * obuold < 0.0 {
@@ -201,8 +203,8 @@ pub fn flood_evaporation(input: FloodEvaporationInput) -> Result<FloodEvaporatio
         sensible_heat_w_m2: -(dth * raih),
         evaporation_mm_s: -(dqh * raiw),
         reference_temperature_k: tstar
-            .mul_add(state.heat_at_2m / VON_KARMAN - state.heat / VON_KARMAN, thm),
-        reference_humidity_kg_kg: qstar.mul_add(
+            .contract(state.heat_at_2m / VON_KARMAN - state.heat / VON_KARMAN, thm),
+        reference_humidity_kg_kg: qstar.contract(
             state.moisture_at_2m / VON_KARMAN - state.moisture / VON_KARMAN,
             qm,
         ),

@@ -4,6 +4,7 @@
 //! kernel because its optical state is not part of the broadband restart state.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{ColdStartRadiation, MISSING};
 
@@ -212,7 +213,7 @@ pub(crate) fn visible_absorption(
     // 标量复刻件（`-fno-tree-vectorize`，`/tmp/gf/r114/ns.f90`）量出来的方向：
     // `a1*b1 + a2*b2` ⇒ `FMA(a1, b1, a2*b2)` —— **最左**的乘积被吸收，
     // **最右**的是那个已经舍入的加数。（向量化的 dump 看不出这个方向。）
-    forcing.direct_visible_w_m2.mul_add(
+    forcing.direct_visible_w_m2.contract(
         coefficient[0][0],
         forcing.diffuse_visible_w_m2 * coefficient[0][1],
     )
@@ -226,11 +227,11 @@ pub(crate) fn absorption(
     // + forc_solnir*ssun(2,1) + forc_solnird*ssun(2,2)` 是**一条**平铺的四项和
     // （`MOD_NetSolar.F90:178`），不是"先算 visible 再加两项"，所以这里不能再调
     // `visible_absorption`：那个调用会把 visible 那一对先舍入成一次结果。
-    forcing.diffuse_near_infrared_w_m2.mul_add(
+    forcing.diffuse_near_infrared_w_m2.contract(
         coefficient[1][1],
-        forcing.direct_near_infrared_w_m2.mul_add(
+        forcing.direct_near_infrared_w_m2.contract(
             coefficient[1][0],
-            forcing.direct_visible_w_m2.mul_add(
+            forcing.direct_visible_w_m2.contract(
                 coefficient[0][0],
                 forcing.diffuse_visible_w_m2 * coefficient[0][1],
             ),
@@ -240,11 +241,11 @@ pub(crate) fn absorption(
 
 fn absorbed_by_surface(forcing: ShortwaveForcing, albedo: [[f64; RADIATION_TYPES]; BANDS]) -> f64 {
     // 四级同型：外层是最右一项，最内层的加数是第二项（复刻件 `_15/_11/_7`）。
-    forcing.diffuse_near_infrared_w_m2.mul_add(
+    forcing.diffuse_near_infrared_w_m2.contract(
         1.0 - albedo[1][1],
-        forcing.direct_near_infrared_w_m2.mul_add(
+        forcing.direct_near_infrared_w_m2.contract(
             1.0 - albedo[1][0],
-            forcing.direct_visible_w_m2.mul_add(
+            forcing.direct_visible_w_m2.contract(
                 1.0 - albedo[0][0],
                 forcing.diffuse_visible_w_m2 * (1.0 - albedo[0][1]),
             ),

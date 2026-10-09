@@ -15,6 +15,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `reactive_bgc_run_wetland_decomp`：从与完整 BGC driver 相同的干净通量状态出发，跑速率常数、
 /// 潜在分解、无植物的 N 竞争与分解（不推进池）。`p` 只需土壤温度、基质势、层几何与
@@ -108,8 +109,8 @@ fn competition_no_plant(s: &mut BgcState, sw: BgcSwitches, deltim: f64, dz_soi: 
         } else {
             1.0
         };
-        actual_immob = f.actual_immob_vr[j].mul_add(dz_soi[j], actual_immob);
-        potential_immob = dz_soi[j].mul_add(demand, potential_immob);
+        actual_immob = f.actual_immob_vr[j].contract(dz_soi[j], actual_immob);
+        potential_immob = dz_soi[j].contract(demand, potential_immob);
     }
     f.sminn_to_plant[0] = 0.0;
     v.fpg[0] = 1.0;
@@ -162,7 +163,7 @@ fn wetland_matrix_accumulators(s: &mut BgcState, deltim: f64) {
                 .f64_field_mut(&name)
                 .unwrap_or_else(|| panic!("the BGC state has no {name}"));
             for j in 0..nl {
-                acc[j] = value(j).mul_add(deltim, acc[j]);
+                acc[j] = value(j).contract(deltim, acc[j]);
             }
         };
         update(format!("AKX_{}_c_vr_acc", AKX_TRANSFER[k]), &|j| ct[at(j)]);
@@ -201,7 +202,7 @@ pub fn wetland_state_update(
                 let at = j + full * donor;
                 f.decomp_cpools_sourcesink[at] = (-(f.decomp_hr_vr[j + full * k]
                     + f.decomp_ctransfer_vr[j + full * k]))
-                    .mul_add(deltim, f.decomp_cpools_sourcesink[at]);
+                    .contract(deltim, f.decomp_cpools_sourcesink[at]);
             }
         }
         for k in 0..d.ndecomp_transitions {
@@ -210,7 +211,7 @@ pub fn wetland_state_update(
                 for j in 0..nl {
                     let at = j + full * receiver;
                     f.decomp_cpools_sourcesink[at] = f.decomp_ctransfer_vr[j + full * k]
-                        .mul_add(deltim, f.decomp_cpools_sourcesink[at]);
+                        .contract(deltim, f.decomp_cpools_sourcesink[at]);
                 }
             }
         }
@@ -224,7 +225,7 @@ pub fn wetland_state_update(
             for j in 0..nl {
                 let at = j + full * donor;
                 f.decomp_npools_sourcesink[at] = (-f.decomp_ntransfer_vr[j + full * k])
-                    .mul_add(deltim, f.decomp_npools_sourcesink[at]);
+                    .contract(deltim, f.decomp_npools_sourcesink[at]);
             }
         }
         for k in 0..d.ndecomp_transitions {
@@ -234,14 +235,14 @@ pub fn wetland_state_update(
                     let at = j + full * receiver;
                     f.decomp_npools_sourcesink[at] = (f.decomp_ntransfer_vr[j + full * k]
                         + f.decomp_sminn_flux_vr[j + full * k])
-                        .mul_add(deltim, f.decomp_npools_sourcesink[at]);
+                        .contract(deltim, f.decomp_npools_sourcesink[at]);
                 }
             } else {
                 let donor = (inv.donor_pool[k] - 1) as usize;
                 for j in 0..nl {
                     let at = j + full * donor;
                     f.decomp_npools_sourcesink[at] = (-f.decomp_sminn_flux_vr[j + full * k])
-                        .mul_add(deltim, f.decomp_npools_sourcesink[at]);
+                        .contract(deltim, f.decomp_npools_sourcesink[at]);
                 }
             }
         }
@@ -252,22 +253,22 @@ pub fn wetland_state_update(
                     for j in 0..nl {
                         v.sminn_vr[j] = (-(f.sminn_to_denit_decomp_vr[j + full * k]
                             + f.decomp_sminn_flux_vr[j + full * k]))
-                            .mul_add(deltim, v.sminn_vr[j]);
+                            .contract(deltim, v.sminn_vr[j]);
                     }
                 } else {
                     for j in 0..nl {
                         let at = j + full * k;
                         v.sminn_vr[j] = (f.decomp_sminn_flux_vr[at]
                             - f.sminn_to_denit_decomp_vr[at])
-                            .mul_add(deltim, v.sminn_vr[j]);
+                            .contract(deltim, v.sminn_vr[j]);
                     }
                 }
             }
         } else {
             for j in 0..nl {
                 v.smin_nh4_vr[j] = (f.gross_nmin_vr[j] - f.actual_immob_nh4_vr[j])
-                    .mul_add(deltim, v.smin_nh4_vr[j]);
-                v.smin_no3_vr[j] = (-f.actual_immob_no3_vr[j]).mul_add(deltim, v.smin_no3_vr[j]);
+                    .contract(deltim, v.smin_nh4_vr[j]);
+                v.smin_no3_vr[j] = (-f.actual_immob_no3_vr[j]).contract(deltim, v.smin_no3_vr[j]);
                 v.sminn_vr[j] = v.smin_nh4_vr[j] + v.smin_no3_vr[j];
             }
         }

@@ -20,6 +20,7 @@
 
 use anyhow::{bail, ensure, Result};
 use colm_core::tracer::{TracerSet, TRC_TINY};
+use colm_numeric::Contract;
 
 use super::bifurcation::{accumulate, Bifurcation};
 use super::levee::Levee;
@@ -831,14 +832,14 @@ impl RiverTracers {
                         inp_step[i] = (trc_flux[i] * rate_cell[i]).max(0.0);
                     } else {
                         in_mass[i] =
-                            dt_i.mul_add((-(trc_flux[i] * rate_next[i])).max(0.0), in_mass[i]);
+                            dt_i.contract((-(trc_flux[i] * rate_next[i])).max(0.0), in_mass[i]);
                     }
                 }
                 push_ups(net, &inp_step, &mut flux_ups);
                 for i in 0..n {
                     let dt_i = step.dt[i];
                     if dt_i > 0.0 {
-                        in_mass[i] = dt_i.mul_add(flux_ups[i].max(0.0), in_mass[i]);
+                        in_mass[i] = dt_i.contract(flux_ups[i].max(0.0), in_mass[i]);
                     }
                 }
                 // 分汊路径实际送达的量：逐路径重建（净通量会掩盖同一单元流域的同时进出）。
@@ -887,9 +888,9 @@ impl RiverTracers {
                                 // 下游 → 上游：接收方是本地的 `i_up`。
                                 if l > 0 && up_lev {
                                     in_mass_lev[i_up] =
-                                        dt_i.mul_add((-fl).max(0.0), in_mass_lev[i_up]);
+                                        dt_i.contract((-fl).max(0.0), in_mass_lev[i_up]);
                                 } else {
-                                    in_mass[i_up] = dt_i.mul_add((-fl).max(0.0), in_mass[i_up]);
+                                    in_mass[i_up] = dt_i.contract((-fl).max(0.0), in_mass[i_up]);
                                 }
                             }
                         }
@@ -1027,12 +1028,12 @@ impl RiverTracers {
                     continue;
                 }
                 let mass = self.mass[itrc][i];
-                let new = dt_i.mul_add((flux_ups[i] - trc_flux[i]) - bif_net[i], mass);
+                let new = dt_i.contract((flux_ups[i] - trc_flux[i]) - bif_net[i], mass);
                 ensure!(
                     new.is_finite(),
                     "non-finite river tracer mass after coupled donor limiter"
                 );
-                let scale = dt_i.mul_add(
+                let scale = dt_i.contract(
                     (trc_flux[i].abs() + flux_ups[i].abs()) + bif_net[i].abs(),
                     mass.abs(),
                 );
@@ -1042,12 +1043,12 @@ impl RiverTracers {
                 );
                 self.mass[itrc][i] = new.max(0.0);
                 let held = self.levsto[itrc][i];
-                let new_held = (-dt_i).mul_add(bif_lev_net[i], held);
+                let new_held = (-dt_i).contract(bif_lev_net[i], held);
                 ensure!(
                     new_held.is_finite(),
                     "non-finite protected tracer mass after coupled donor limiter"
                 );
-                let held_scale = dt_i.mul_add(bif_lev_net[i].abs(), held.abs());
+                let held_scale = dt_i.contract(bif_lev_net[i].abs(), held.abs());
                 ensure!(
                     new_held >= -(held_scale * UPDATE_ROUNDOFF).max(NEGATIVE_DUST),
                     "negative protected tracer mass after coupled donor limiter"
@@ -1151,28 +1152,28 @@ impl RiverTracers {
             self.history.acctime[i] += dt_i;
             if volwater > V_DRY_OFF {
                 self.history.water_storage[i] =
-                    volwater.mul_add(dt_i, self.history.water_storage[i]);
+                    volwater.contract(dt_i, self.history.water_storage[i]);
             }
             let levsto = match (levee, water.levsto) {
                 (Some(levee), Some(levsto)) if levee.has[i] => Some(levsto),
                 _ => None,
             };
             if let Some(levsto) = levsto.filter(|&l| l > V_DRY_OFF) {
-                self.history.levsto_water[i] = levsto.mul_add(dt_i, self.history.levsto_water[i]);
+                self.history.levsto_water[i] = levsto.contract(dt_i, self.history.levsto_water[i]);
             }
             for &itrc in &transport {
                 if volwater > V_DRY_OFF {
                     self.history.storage_mass[itrc][i] =
-                        self.mass[itrc][i].mul_add(dt_i, self.history.storage_mass[itrc][i]);
+                        self.mass[itrc][i].contract(dt_i, self.history.storage_mass[itrc][i]);
                 }
                 if levsto.is_some_and(|l| l > V_DRY_OFF) {
                     self.history.levsto_mass[itrc][i] =
-                        self.levsto[itrc][i].mul_add(dt_i, self.history.levsto_mass[itrc][i]);
+                        self.levsto[itrc][i].contract(dt_i, self.history.levsto_mass[itrc][i]);
                 }
                 self.history.out[itrc][i] =
-                    self.flux_out[itrc][i].mul_add(dt_i, self.history.out[itrc][i]);
+                    self.flux_out[itrc][i].contract(dt_i, self.history.out[itrc][i]);
                 self.history.bifout[itrc][i] =
-                    self.bif_net_saved[itrc][i].mul_add(dt_i, self.history.bifout[itrc][i]);
+                    self.bif_net_saved[itrc][i].contract(dt_i, self.history.bifout[itrc][i]);
             }
         }
         Ok(())

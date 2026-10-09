@@ -22,6 +22,7 @@ use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
 use crate::MISSING;
+use colm_numeric::Contract;
 
 /// `CNFireArea`：Li et al. (2012–2017) 的火烧面积（农田、泥炭与其他火）。
 pub fn cn_fire_area(
@@ -84,7 +85,7 @@ pub fn cn_fire_area(
         if (c.iscrop[p.pftclass[m] as usize] != 0.0)
             && p.pftfrac[m] > 0.0
             && (0..npft).fold(0.0, |acc, m_s| {
-                s.pft.leafc_p[m_s].mul_add(p.pftfrac[m_s], acc)
+                s.pft.leafc_p[m_s].contract(p.pftfrac[m_s], acc)
             }) > 0.0
         {
             s.patch.fuelc_crop[0] = s.patch.fuelc_crop[0]
@@ -93,7 +94,7 @@ pub fn cn_fire_area(
                     / s.patch.cropf[0]
                 + s.patch.totlitc[0] * s.pft.leafc_p[m]
                     / (0..npft).fold(0.0, |acc, m_s| {
-                        s.pft.leafc_p[m_s].mul_add(p.pftfrac[m_s], acc)
+                        s.pft.leafc_p[m_s].contract(p.pftfrac[m_s], acc)
                     })
                     * p.pftfrac[m]
                     / s.patch.cropf[0];
@@ -124,7 +125,7 @@ pub fn cn_fire_area(
             for j in 0..d.nl_soil {
                 s_node = (p.wliq_soisno[j] / (1000.0 * p.dz_soi[j] * p.porsl[j])).max(0.001);
                 s_node = 1.0_f64.min(s_node);
-                btran2_p[m] = p.rootfr_p[j + d.nl_soil * m].mul_add(s_node, btran2_p[m]);
+                btran2_p[m] = p.rootfr_p[j + d.nl_soil * m].contract(s_node, btran2_p[m]);
             }
         }
         btran2 =
@@ -132,7 +133,7 @@ pub fn cn_fire_area(
                 .max(1.0_f64.min(
                     (btran2_p[m] - c.rswf_min[class]) / (c.rswf_max[class] - c.rswf_min[class]),
                 ))
-                .mul_add(p.pftfrac[m], btran2);
+                .contract(p.pftfrac[m], btran2);
         s.patch.wtlf[0] += p.pftfrac[m];
     }
     s.patch_flux.fire_btran2[0] = MISSING;
@@ -158,21 +159,21 @@ pub fn cn_fire_area(
                 + s.pft.livecrootc_p[m]
                 + s.pft.livecrootc_storage_p[m]
                 + s.pft.livecrootc_xfer_p[m])
-                .mul_add(p.pftfrac[m], s.patch.rootc[0]);
+                .contract(p.pftfrac[m], s.patch.rootc[0]);
             s.patch.fsr[0] += c.fsr_pft[class] * p.pftfrac[m] / (1.0 - s.patch.cropf[0]);
             if s.patch.hdm_lf[0] > 0.1 {
                 if !(c.isbare[class] != 0.0) {
                     if (c.isshrub[class] != 0.0) || (c.isgrass[class] != 0.0) {
-                        s.patch.lgdp[0] += (0.9_f64.mul_add(
+                        s.patch.lgdp[0] += (0.9_f64.contract(
                             (-(1.0 * pi * (s.invariants.gdp_lf[0] / 8.0).lpow(0.5))).exp(),
                             0.1,
                         )) * p.pftfrac[m]
                             / (1.0 - s.patch.cropf[0]);
                         s.patch.lgdp1[0] += (0.8_f64
-                            .mul_add((-(1.0 * pi * (s.invariants.gdp_lf[0] / 7.0))).exp(), 0.2))
+                            .contract((-(1.0 * pi * (s.invariants.gdp_lf[0] / 7.0))).exp(), 0.2))
                             * p.pftfrac[m]
                             / (1.0 - s.patch.cropf[0]);
-                        s.patch.lpop[0] += (0.8_f64.mul_add(
+                        s.patch.lpop[0] += (0.8_f64.contract(
                             (-(1.0 * pi * (s.patch.hdm_lf[0] / 450.0).lpow(0.5))).exp(),
                             0.2,
                         )) * p.pftfrac[m]
@@ -192,7 +193,7 @@ pub fn cn_fire_area(
                             }
                         }
                         s.patch.lpop[0] += (0.6_f64
-                            .mul_add((-(1.0 * pi * (s.patch.hdm_lf[0] / 125.0))).exp(), 0.4))
+                            .contract((-(1.0 * pi * (s.patch.hdm_lf[0] / 125.0))).exp(), 0.4))
                             * p.pftfrac[m]
                             / (1.0 - s.patch.cropf[0]);
                     }
@@ -222,18 +223,18 @@ pub fn cn_fire_area(
             && s.pft.burndate_p[m] >= 999.0
             && p.pftfrac[m] > 0.0
         {
-            fhd = 0.8_f64.mul_add((-(1.0 * pi * (s.patch.hdm_lf[0] / 400.0))).exp(), 0.2);
-            fgdp = 0.95_f64.mul_add((-(1.0 * pi * (s.invariants.gdp_lf[0] / 20.0))).exp(), 0.05);
+            fhd = 0.8_f64.contract((-(1.0 * pi * (s.patch.hdm_lf[0] / 400.0))).exp(), 0.2);
+            fgdp = 0.95_f64.contract((-(1.0 * pi * (s.invariants.gdp_lf[0] / 20.0))).exp(), 0.05);
             if sw.crop {
                 if !s.pft.croplive_p[m] {
                     s.pft.burndate_p[m] = f64::from(kda);
                     s.patch.baf_crop[0] = (s.constants.cropfire_a1 / secsphr * fhd * fgdp)
-                        .mul_add(p.pftfrac[m], s.patch.baf_crop[0]);
+                        .contract(p.pftfrac[m], s.patch.baf_crop[0]);
                 }
             } else {
                 s.pft.burndate_p[m] = f64::from(kda);
                 s.patch.baf_crop[0] = (s.constants.cropfire_a1 / secsphr * fhd * fgdp)
-                    .mul_add(p.pftfrac[m], s.patch.baf_crop[0]);
+                    .contract(p.pftfrac[m], s.patch.baf_crop[0]);
             }
         }
     }
@@ -273,7 +274,7 @@ pub fn cn_fire_area(
                         if p.topoweti[0] > p.mu_twi[0] {
                             eta_fire = p.topoweti[0];
                         } else {
-                            eta_fire = p.alp_twi[0].mul_add(p.chi_twi[0], p.mu_twi[0]);
+                            eta_fire = p.alp_twi[0].contract(p.chi_twi[0], p.mu_twi[0]);
                         }
                         gfun_fire = 0.0;
                         for _niter_fire in 0..20 {
@@ -292,7 +293,7 @@ pub fn cn_fire_area(
                                 0,
                             );
                             gfun_fire = ((eta_fire - p.mu_twi[0])
-                                .mul_add(pgr0_fire, -(p.chi_twi[0] * p.alp_twi[0] * pgr1_fire)))
+                                .contract(pgr0_fire, -(p.chi_twi[0] * p.alp_twi[0] * pgr1_fire)))
                                 / topmod_vdcf
                                 - p.zwt[0];
                             if gfun_fire.abs() <= 1.0e-6 || pgr0_fire <= 0.0 {
@@ -300,7 +301,7 @@ pub fn cn_fire_area(
                             }
                             eta_fire = p.mu_twi[0]
                                 + ((p.chi_twi[0] * p.alp_twi[0])
-                                    .mul_add(pgr1_fire, topmod_vdcf * p.zwt[0]))
+                                    .contract(pgr1_fire, topmod_vdcf * p.zwt[0]))
                                     / pgr0_fire;
                         }
                         crate::incomplete_gamma::gratio_fortran(
@@ -355,14 +356,14 @@ pub fn cn_fire_area(
     let eq: f64 = sat.vapor_pressure_pa;
     let forc_rh: f64 = p.forc_q[0] / eq;
     if s.patch.cropf[0] < 1.0 {
-        s.patch.fuelc[0] = (-s.patch.fuelc_crop[0]).mul_add(
+        s.patch.fuelc[0] = (-s.patch.fuelc_crop[0]).contract(
             s.patch.cropf[0],
             s.patch.totlitc[0] + s.patch.totvegc[0] - s.patch.rootc[0],
         );
         for j in 0..d.nl_soil {
             s.patch.fuelc[0] = s.patch.decomp_cpools_vr
                 [j + d.nl_soil_full * ((s.constants.i_cwd - 1) as usize)]
-                .mul_add(p.dz_soi[j], s.patch.fuelc[0]);
+                .contract(p.dz_soi[j], s.patch.fuelc[0]);
         }
         s.patch.fuelc[0] /= 1.0 - s.patch.cropf[0];
         fb =
@@ -378,14 +379,14 @@ pub fn cn_fire_area(
             );
         arh30 = 1.0 - prh30.max(1.0_f64.min(s.patch.rh30[0] / max_rh30_affecting_fuel));
         if forc_rh < s.constants.rh_hgh && s.patch.wtlf[0] > 0.0 && s.patch.tsoi17[0] > 273.16 {
-            fire_m = ((afuel.mul_add(arh30, (1.0 - afuel) * arh)).lpow(1.5))
+            fire_m = ((afuel.contract(arh30, (1.0 - afuel) * arh)).lpow(1.5))
                 * ((1.0 - (btran2 / s.patch.wtlf[0])).lpow(0.5));
         } else {
             fire_m = 0.0;
         }
         lh =
             s.constants.pot_hmn_ign_counts_alpha * 6.8 * s.patch.hdm_lf[0].lpow(0.43) / 30.0 / 24.0;
-        fs = 1.0 - (0.98_f64.mul_add((-(0.025 * s.patch.hdm_lf[0])).exp(), 0.01));
+        fs = 1.0 - (0.98_f64.contract((-(0.025 * s.patch.hdm_lf[0])).exp(), 0.01));
         if s.patch.trotr1[0] + s.patch.trotr2[0] <= 0.6 {
             ig = (lh
                 + s.patch.lnfm[0]
@@ -398,7 +399,7 @@ pub fn cn_fire_area(
                 * (s.patch.lfwt[0].lpow(0.5)); // 无 FMA（上游第 454 行，乘积被 CSE 共享）
         } else {
             ig = (s.patch.lnfm[0]
-                / (2.16_f64.mul_add(
+                / (2.16_f64.contract(
                     (pi / 180.0 * 3.0 * 60.0_f64.min((p.dlat / pi * 180.0).abs())).cos(),
                     5.16,
                 ))
@@ -407,9 +408,9 @@ pub fn cn_fire_area(
                 * (s.patch.lfwt[0].lpow(0.5));
         }
         s.patch.nfire[0] = ig / secsphr * fb * fire_m * s.patch.lgdp[0];
-        lb_lf = 10.0_f64.mul_add(
+        lb_lf = 10.0_f64.contract(
             1.0 - (-(0.06
-                * (p.forc_us[0].mul_add(p.forc_us[0], p.forc_vs[0] * p.forc_vs[0])).sqrt()))
+                * (p.forc_us[0].contract(p.forc_us[0], p.forc_vs[0] * p.forc_vs[0])).sqrt()))
             .exp(),
             1.0,
         );
@@ -421,7 +422,7 @@ pub fn cn_fire_area(
                 * (s.constants.g0_fire * spread_m * s.patch.fsr[0] * s.patch.fd[0] / 1000.0))
                 * s.patch.nfire[0]
                 * pi)
-                .mul_add(lb_lf, s.patch.baf_crop[0])
+                .contract(lb_lf, s.patch.baf_crop[0])
                 + s.patch.baf_peatf[0],
         );
     } else {
@@ -607,50 +608,50 @@ pub fn cn_fire_fluxes(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _sw
             let class = ivt as usize;
             s.patch_flux.fire_mortality_to_cwdc[j] = (s.pft_flux.m_deadstemc_to_litter_fire_p[m]
                 * s.pft.stem_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
             s.patch_flux.fire_mortality_to_cwdc[j] = (s.pft_flux.m_deadcrootc_to_litter_fire_p[m]
                 * s.pft.croot_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
             s.patch_flux.fire_mortality_to_cwdn[j] = (s.pft_flux.m_deadstemn_to_litter_fire_p[m]
                 * s.pft.stem_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
             s.patch_flux.fire_mortality_to_cwdn[j] = (s.pft_flux.m_deadcrootn_to_litter_fire_p[m]
                 * s.pft.croot_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
             s.patch_flux.fire_mortality_to_cwdc[j] = (s.pft_flux.m_livestemc_to_litter_fire_p[m]
                 * s.pft.stem_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
             s.patch_flux.fire_mortality_to_cwdc[j] = (s.pft_flux.m_livecrootc_to_litter_fire_p[m]
                 * s.pft.croot_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdc[j]);
             s.patch_flux.fire_mortality_to_cwdn[j] = (s.pft_flux.m_livestemn_to_litter_fire_p[m]
                 * s.pft.stem_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
             s.patch_flux.fire_mortality_to_cwdn[j] = (s.pft_flux.m_livecrootn_to_litter_fire_p[m]
                 * s.pft.croot_prof_p[j + d.nl_soil * m])
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cwdn[j]);
             s.patch_flux.fire_mortality_to_met_c[j] =
                 ((s.pft_flux.m_livecrootc_storage_to_litter_fire_p[m]
                     + s.pft_flux.m_livecrootc_xfer_to_litter_fire_p[m]
                     + s.pft_flux.m_deadcrootc_storage_to_litter_fire_p[m]
                     + s.pft_flux.m_deadcrootc_xfer_to_litter_fire_p[m])
-                    .mul_add(
+                    .contract(
                         s.pft.croot_prof_p[j + d.nl_soil * m],
                         (s.pft_flux.m_livestemc_storage_to_litter_fire_p[m]
                             + s.pft_flux.m_livestemc_xfer_to_litter_fire_p[m]
                             + s.pft_flux.m_deadstemc_storage_to_litter_fire_p[m]
                             + s.pft_flux.m_deadstemc_xfer_to_litter_fire_p[m])
-                            .mul_add(
+                            .contract(
                                 s.pft.stem_prof_p[j + d.nl_soil * m],
-                                (s.pft_flux.m_leafc_to_litter_fire_p[m].mul_add(
+                                (s.pft_flux.m_leafc_to_litter_fire_p[m].contract(
                                     c.lf_flab[class],
                                     s.pft_flux.m_leafc_storage_to_litter_fire_p[m],
                                 ) + s.pft_flux.m_leafc_xfer_to_litter_fire_p[m]
                                     + s.pft_flux.m_gresp_storage_to_litter_fire_p[m]
                                     + s.pft_flux.m_gresp_xfer_to_litter_fire_p[m])
-                                    .mul_add(
+                                    .contract(
                                         s.pft.leaf_prof_p[j + d.nl_soil * m],
-                                        (s.pft_flux.m_frootc_to_litter_fire_p[m].mul_add(
+                                        (s.pft_flux.m_frootc_to_litter_fire_p[m].contract(
                                             c.fr_flab[class],
                                             s.pft_flux.m_frootc_storage_to_litter_fire_p[m],
                                         ) + s.pft_flux.m_frootc_xfer_to_litter_fire_p[m])
@@ -658,44 +659,44 @@ pub fn cn_fire_fluxes(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _sw
                                     ),
                             ),
                     ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_met_c[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_met_c[j]);
             s.patch_flux.fire_mortality_to_cel_c[j] =
-                ((s.pft_flux.m_leafc_to_litter_fire_p[m] * c.lf_fcel[class]).mul_add(
+                ((s.pft_flux.m_leafc_to_litter_fire_p[m] * c.lf_fcel[class]).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.pft_flux.m_frootc_to_litter_fire_p[m]
                         * c.fr_fcel[class]
                         * s.pft.froot_prof_p[j + d.nl_soil * m],
                 ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cel_c[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cel_c[j]);
             s.patch_flux.fire_mortality_to_lig_c[j] =
-                ((s.pft_flux.m_leafc_to_litter_fire_p[m] * c.lf_flig[class]).mul_add(
+                ((s.pft_flux.m_leafc_to_litter_fire_p[m] * c.lf_flig[class]).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.pft_flux.m_frootc_to_litter_fire_p[m]
                         * c.fr_flig[class]
                         * s.pft.froot_prof_p[j + d.nl_soil * m],
                 ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_lig_c[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_lig_c[j]);
             s.patch_flux.fire_mortality_to_met_n[j] =
                 ((s.pft_flux.m_livecrootn_storage_to_litter_fire_p[m]
                     + s.pft_flux.m_livecrootn_xfer_to_litter_fire_p[m]
                     + s.pft_flux.m_deadcrootn_storage_to_litter_fire_p[m]
                     + s.pft_flux.m_deadcrootn_xfer_to_litter_fire_p[m])
-                    .mul_add(
+                    .contract(
                         s.pft.croot_prof_p[j + d.nl_soil * m],
                         (s.pft_flux.m_livestemn_storage_to_litter_fire_p[m]
                             + s.pft_flux.m_livestemn_xfer_to_litter_fire_p[m]
                             + s.pft_flux.m_deadstemn_storage_to_litter_fire_p[m]
                             + s.pft_flux.m_deadstemn_xfer_to_litter_fire_p[m])
-                            .mul_add(
+                            .contract(
                                 s.pft.stem_prof_p[j + d.nl_soil * m],
-                                (s.pft_flux.m_leafn_to_litter_fire_p[m].mul_add(
+                                (s.pft_flux.m_leafn_to_litter_fire_p[m].contract(
                                     c.lf_flab[class],
                                     s.pft_flux.m_leafn_storage_to_litter_fire_p[m],
                                 ) + s.pft_flux.m_leafn_xfer_to_litter_fire_p[m]
                                     + s.pft_flux.m_retransn_to_litter_fire_p[m])
-                                    .mul_add(
+                                    .contract(
                                         s.pft.leaf_prof_p[j + d.nl_soil * m],
-                                        (s.pft_flux.m_frootn_to_litter_fire_p[m].mul_add(
+                                        (s.pft_flux.m_frootn_to_litter_fire_p[m].contract(
                                             c.fr_flab[class],
                                             s.pft_flux.m_frootn_storage_to_litter_fire_p[m],
                                         ) + s.pft_flux.m_frootn_xfer_to_litter_fire_p[m])
@@ -703,23 +704,23 @@ pub fn cn_fire_fluxes(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _sw
                                     ),
                             ),
                     ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_met_n[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_met_n[j]);
             s.patch_flux.fire_mortality_to_cel_n[j] =
-                ((s.pft_flux.m_leafn_to_litter_fire_p[m] * c.lf_fcel[class]).mul_add(
+                ((s.pft_flux.m_leafn_to_litter_fire_p[m] * c.lf_fcel[class]).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.pft_flux.m_frootn_to_litter_fire_p[m]
                         * c.fr_fcel[class]
                         * s.pft.froot_prof_p[j + d.nl_soil * m],
                 ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_cel_n[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_cel_n[j]);
             s.patch_flux.fire_mortality_to_lig_n[j] =
-                ((s.pft_flux.m_leafn_to_litter_fire_p[m] * c.lf_flig[class]).mul_add(
+                ((s.pft_flux.m_leafn_to_litter_fire_p[m] * c.lf_flig[class]).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.pft_flux.m_frootn_to_litter_fire_p[m]
                         * c.fr_flig[class]
                         * s.pft.froot_prof_p[j + d.nl_soil * m],
                 ))
-                .mul_add(p.pftfrac[m], s.patch_flux.fire_mortality_to_lig_n[j]);
+                .contract(p.pftfrac[m], s.patch_flux.fire_mortality_to_lig_n[j]);
         }
     }
     for j in 0..d.nl_soil {

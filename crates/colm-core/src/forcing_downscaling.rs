@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::f77;
 use crate::{saturation_specific_humidity, RuntimeForcing};
@@ -291,10 +292,10 @@ pub fn atmospheric_density(
     // `MOD_ForcingDownscaling.F90:82-83` 的 GIMPLE：
     // `FMA(qbot, 1-wv, wv)` 做分母、`FNMA(egcm, 1-wv, pbot)` 做分子。
     let vapor_pressure = specific_humidity * pressure_pa
-        / (1.0 - water_to_dry_air).mul_add(specific_humidity, water_to_dry_air);
+        / (1.0 - water_to_dry_air).contract(specific_humidity, water_to_dry_air);
     let dry_air_gas_constant = AVOGADRO_PER_KMOLE * BOLTZMANN_J_K / DRY_AIR_MOLECULAR_WEIGHT;
     Ok(
-        (-vapor_pressure).mul_add(1.0 - water_to_dry_air, pressure_pa)
+        (-vapor_pressure).contract(1.0 - water_to_dry_air, pressure_pa)
             / (dry_air_gas_constant * temperature_k),
     )
 }
@@ -313,13 +314,13 @@ pub fn downscale_forcings(
     let elevation_difference = input.column_surface_elevation_m - grid.surface_elevation_m;
     // `tbot_c = tbot_g - lapse*(hsurf_c-hsurf_g)` ⇒ `FNMA(Δz, lapse, tbot_g)`。
     let air_temperature_k =
-        (-elevation_difference).mul_add(config.temperature_lapse_rate_k_m, grid.air_temperature_k);
+        (-elevation_difference).contract(config.temperature_lapse_rate_k_m, grid.air_temperature_k);
     let scale_height_m =
         dry_air_gas_constant() * 0.5 * (grid.air_temperature_k + air_temperature_k) / GRAVITY_M_S2;
     let bottom_pressure_pa =
         grid.bottom_pressure_pa * (-elevation_difference / scale_height_m).exp();
     // `thbot_c = thbot_g + (tbot_c-tbot_g)*exp(...)` ⇒ `FMA(tbot_c-tbot_g, exp, thbot_g)`。
-    let potential_temperature_k = (air_temperature_k - grid.air_temperature_k).mul_add(
+    let potential_temperature_k = (air_temperature_k - grid.air_temperature_k).contract(
         ((grid.reference_height_m / scale_height_m)
             * (dry_air_gas_constant() / DRY_AIR_HEAT_CAPACITY_J_KG_K))
             .exp(),
@@ -405,7 +406,7 @@ pub fn downscale_wind(
     // —— **vs 在前**，所以被吸收的是 vs 那个平方（GIMPLE：`FMA(vs, vs, us*us)`）。
     // `hypot` 不等于 `sqrt(vs*vs+us*us)`（前者是为防上溢设计的），必须照抄。
     let grid_speed = northward_wind_m_s
-        .mul_add(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
+        .contract(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
         .sqrt();
     let column_speed = slope_radians
         .iter()
@@ -457,7 +458,7 @@ pub fn downscale_wind_simple(
     // —— **vs 在前**，所以被吸收的是 vs 那个平方（GIMPLE：`FMA(vs, vs, us*us)`）。
     // `hypot` 不等于 `sqrt(vs*vs+us*us)`（前者是为防上溢设计的），必须照抄。
     let grid_speed = northward_wind_m_s
-        .mul_add(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
+        .contract(northward_wind_m_s, eastward_wind_m_s * eastward_wind_m_s)
         .sqrt();
     let column_speed = slope_tangent
         .iter()
@@ -475,7 +476,7 @@ pub fn downscale_wind_simple(
                 // 两个例程必须各写各的形状，不能共用一个表达式。
                 let wind_direction_slope =
                     (wind_direction - simple_aspect(index)).cos() * slope.atan();
-                curvature.mul_add(f77(0.42), wind_direction_slope * f77(0.58) + 1.0)
+                curvature.contract(f77(0.42), wind_direction_slope * f77(0.58) + 1.0)
             }
             .clamp(-1.5, 1.5);
             // `factor == MISSING` 这一支在**编译后的**上游里已经够不着了：`-1e36` 先被
@@ -522,11 +523,11 @@ fn downscale_longwave(
                     .vapor_pressure_pa
                 / 100.0;
             // `0.23 + 0.43*X**（1/5.7)` ⇒ `FMA(X, 0.43, 0.23)`。
-            let clear_sky_emissivity_grid = f77(0.43).mul_add(
+            let clear_sky_emissivity_grid = f77(0.43).contract(
                 (vapor_pressure_grid_hpa / grid.air_temperature_k).lpow(1.0 / 5.7),
                 0.23,
             );
-            let clear_sky_emissivity_column = f77(0.43).mul_add(
+            let clear_sky_emissivity_column = f77(0.43).contract(
                 (vapor_pressure_column_hpa / column_temperature_k).lpow(1.0 / 5.7),
                 0.23,
             );
@@ -541,7 +542,7 @@ fn downscale_longwave(
                 * column_temperature_k.powi(4)
         }
         // GIMPLE：`FNMA(glacier_lapse, Δz, dlrad)`。
-        LongwaveDownscaling::LapseRate if glacier => (-elevation_difference).mul_add(
+        LongwaveDownscaling::LapseRate if glacier => (-elevation_difference).contract(
             config.glacier_longwave_lapse_rate_w_m2_m,
             grid.downward_longwave_w_m2,
         ),
@@ -550,7 +551,7 @@ fn downscale_longwave(
             let slope = 4.0 * grid.downward_longwave_w_m2
                 / (0.5 * (column_temperature_k + grid.air_temperature_k))
                 * config.temperature_lapse_rate_k_m;
-            (-elevation_difference).mul_add(slope, grid.downward_longwave_w_m2)
+            (-elevation_difference).contract(slope, grid.downward_longwave_w_m2)
         }
     };
     Ok(longwave.clamp(
@@ -588,7 +589,7 @@ fn downscale_shortwave(
             // GIMPLE：`_49 = tan(zen)*sin(slp)`、`_53 = cos(asp)`、
             // `_57 = .FMA (_49, _53, cos(slp))` —— 与 simple 支同样必须写成收缩式。
             let illumination = (zenith_radians.tan() * crate::atmosphere::fortran_sin(slope))
-                .mul_add(aspect.cos(), slope.cos())
+                .contract(aspect.cos(), slope.cos())
                 .clamp(0.0, 1.0);
             shadow * illumination * optical_factor * area.clamp(0.0, 1.0) * beam_grid
         })
@@ -613,7 +614,7 @@ fn downscale_shortwave(
                     * terrain_configuration
                     * solar
                         .cosine_zenith
-                        .mul_add(beam_column, (1.0 - sky_view_factor) * diffuse_column)
+                        .contract(beam_column, (1.0 - sky_view_factor) * diffuse_column)
             })
             .sum::<f64>()
     };
@@ -660,7 +661,7 @@ fn downscale_shortwave_simple(
                 // `_40 = .FMA (_35, _38, cos(slp))` —— 这里上游**是收缩的**，
                 // 平铺写 `cos + tan*sin*cos` 会在 5/20000 的样本上差 1 ULP。
                 (zenith_radians.tan() * crate::atmosphere::fortran_sin(slope_angle))
-                    .mul_add(simple_aspect(index).cos(), slope_angle.cos())
+                    .contract(simple_aspect(index).cos(), slope_angle.cos())
                     .clamp(0.0, 1.0)
             };
             illumination * optical_factor * area.clamp(0.0, 1.0) * beam_grid
@@ -684,7 +685,7 @@ fn shortwave_components(
 ) -> (f64, f64, f64) {
     // GIMPLE：`FNMA(cos, 0.01672, 1.0)`。
     let earth_sun_distance_ratio =
-        (-f77(0.01672)).mul_add((0.9856 * (calendar_day - 4.0)).cos(), 1.0);
+        (-f77(0.01672)).contract((0.9856 * (calendar_day - 4.0)).cos(), 1.0);
     let top_of_atmosphere = SOLAR_CONSTANT_W_M2 * earth_sun_distance_ratio.powi(2) * cosine_zenith;
     let mut clearness_index =
         if (simple && top_of_atmosphere < 1.0e-7) || (!simple && top_of_atmosphere == 0.0) {
@@ -696,9 +697,9 @@ fn shortwave_components(
         clearness_index = 1.0;
     }
     // 两级都是收缩：`FNMA(min(clr,1), 4.702, 2.3)` 与 `FNMA(exp(-exp(·)), 1.041, 0.952)`。
-    let exponent = (-f77(4.702)).mul_add(clearness_index.min(1.0), f77(2.3));
+    let exponent = (-f77(4.702)).contract(clearness_index.min(1.0), f77(2.3));
     let diffuse_weight = (-f77(1.041))
-        .mul_add((-exponent.min(3.5).exp()).exp(), f77(0.952))
+        .contract((-exponent.min(3.5).exp()).exp(), f77(0.952))
         .clamp(0.0, 1.0);
     let attenuation_coefficient = if clearness_index <= 0.0 {
         0.0
@@ -739,7 +740,7 @@ fn full_shadow_factor(zenith_radians: f64, azimuth_radians: f64, shadow: ShadowM
                 1.0
             } else {
                 // GIMPLE：`_128 = .FMA (zen_rad, a1, a2)`。
-                (-a1.mul_add(zenith_radians, a2).min(3.5).exp()).exp()
+                (-a1.contract(zenith_radians, a2).min(3.5).exp()).exp()
             }
         }
     };
@@ -773,7 +774,7 @@ fn downscale_precipitation(
             // GIMPLE：分母是 `FNMA(Δz, 0.27, 1.0)`。
             precipitation
                 + precipitation * 0.27 * elevation_difference
-                    / (-f77(0.27)).mul_add(elevation_difference, 1.0)
+                    / (-f77(0.27)).contract(elevation_difference, 1.0)
         }
     };
     (

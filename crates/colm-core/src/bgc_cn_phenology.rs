@@ -21,6 +21,7 @@ use crate::bgc_driver::{is_end_of_year, BgcPftConstants, BgcPhysics, BgcSwitches
 use crate::bgc_state::BgcState;
 use crate::calendar::is_leap_year;
 use crate::MISSING;
+use colm_numeric::Contract;
 
 /// `CNPhenology`：`phase` 1 为气候统计与各类物候判定，2 为转移、凋落与落入土壤。
 pub fn cn_phenology(
@@ -78,7 +79,7 @@ fn cn_phenology_climate(
     let stepperday: f64 = 86400.0 / p.deltim;
     for m in 0..npft {
         s.pft.tempavg_tref_p[m] =
-            p.tref_p[m].mul_add(p.deltim / 86400.0 / dayspyr, s.pft.tempavg_tref_p[m]);
+            p.tref_p[m].contract(p.deltim / 86400.0 / dayspyr, s.pft.tempavg_tref_p[m]);
         if sw.crop {
             if f64::from(p.idate[2]) == p.deltim || s.pft.tref_max_inst_p[m] == MISSING {
                 s.pft.tref_max_inst_p[m] = p.tref_p[m];
@@ -102,14 +103,15 @@ fn cn_phenology_climate(
     let qsat: f64 = sat.specific_humidity;
     s.patch.rh30_today[0] = 100.0 * (p.forc_q[0] / qsat);
     nsteps = (10.0 * stepperday).min(s.patch.accumnstep[0]);
-    s.patch.prec10[0] = (s.patch.prec10[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    s.patch.prec10[0] = (s.patch.prec10[0].contract(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
     nsteps = (30.0 * stepperday).min(s.patch.accumnstep[0]);
-    s.patch.prec30[0] = (s.patch.prec30[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
-    s.patch.rh30[0] = (s.patch.rh30[0].mul_add(nsteps - 1.0, s.patch.rh30_today[0])) / nsteps;
+    s.patch.prec30[0] = (s.patch.prec30[0].contract(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    s.patch.rh30[0] = (s.patch.rh30[0].contract(nsteps - 1.0, s.patch.rh30_today[0])) / nsteps;
     nsteps = (60.0 * stepperday).min(s.patch.accumnstep[0]);
-    s.patch.prec60[0] = (s.patch.prec60[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    s.patch.prec60[0] = (s.patch.prec60[0].contract(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
     nsteps = (365.0 * stepperday).min(s.patch.accumnstep[0]);
-    s.patch.prec365[0] = (s.patch.prec365[0].mul_add(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
+    s.patch.prec365[0] =
+        (s.patch.prec365[0].contract(nsteps - 1.0, s.patch.prec_today[0])) / nsteps;
     (month, _) = crate::bgc_driver::julian_month_day(p.idate[0], p.idate[1]);
     for m in 0..npft {
         let ivt = p.pftclass[m];
@@ -150,11 +152,11 @@ fn cn_phenology_climate(
                     s.pft.gdd1020_p[m] = s.pft.gdd10_p[m];
                 } else {
                     s.pft.gdd020_p[m] =
-                        (yravgm1.mul_add(s.pft.gdd020_p[m], s.pft.gdd0_p[m])) / yravg;
+                        (yravgm1.contract(s.pft.gdd020_p[m], s.pft.gdd0_p[m])) / yravg;
                     s.pft.gdd820_p[m] =
-                        (yravgm1.mul_add(s.pft.gdd820_p[m], s.pft.gdd8_p[m])) / yravg;
+                        (yravgm1.contract(s.pft.gdd820_p[m], s.pft.gdd8_p[m])) / yravg;
                     s.pft.gdd1020_p[m] =
-                        (yravgm1.mul_add(s.pft.gdd1020_p[m], s.pft.gdd10_p[m])) / yravg;
+                        (yravgm1.contract(s.pft.gdd1020_p[m], s.pft.gdd10_p[m])) / yravg;
                 }
             }
             s.pft.gdd0_p[m] = 0.0;
@@ -263,7 +265,7 @@ fn cn_season_decid_phenology(
             s.pft.bglfr_p[m] = 0.0;
             s.pft.bgtr_p[m] = 0.0;
             s.pft.lgsf_p[m] = 0.0;
-            crit_onset_gdd = (0.13_f64.mul_add(s.pft.annavg_tref_p[m] - 273.15, 4.8)).exp();
+            crit_onset_gdd = (0.13_f64.contract(s.pft.annavg_tref_p[m] - 273.15, 4.8)).exp();
             if s.patch.dayl[0] >= s.patch.prev_dayl[0] {
                 ws_flag = 1.0;
             } else {
@@ -327,7 +329,7 @@ fn cn_season_decid_phenology(
                 soilt = p.t_soisno[2];
                 if s.pft.onset_gddflag_p[m] == 1.0 && soilt > 273.15 {
                     s.pft.onset_gdd_p[m] =
-                        (soilt - 273.15).mul_add(p.deltim / 86400.0, s.pft.onset_gdd_p[m]);
+                        (soilt - 273.15).contract(p.deltim / 86400.0, s.pft.onset_gdd_p[m]);
                 }
                 if s.pft.onset_gdd_p[m] > crit_onset_gdd {
                     s.pft.onset_flag_p[m] = 1.0;
@@ -399,7 +401,7 @@ fn cn_stress_decid_phenology(
         if c.isstd[class] != 0.0 {
             soilt = p.t_soisno[2];
             psi = p.smp[2] * 1.0e-5;
-            crit_onset_gdd = (0.13_f64.mul_add(s.pft.annavg_tref_p[m] - 273.15, 4.8)).exp();
+            crit_onset_gdd = (0.13_f64.contract(s.pft.annavg_tref_p[m] - 273.15, 4.8)).exp();
             if s.pft.offset_flag_p[m] == 1.0 {
                 s.pft.offset_counter_p[m] -= p.deltim;
                 if s.pft.offset_counter_p[m].abs() < 0.1 {
@@ -636,10 +638,10 @@ fn crop_phenology(
             }
             if s.pft.croplive_p[m] {
                 if ivt == 21 || ivt == 22 {
-                    s.pft.gddmaturity_p[m] = 0.42_f64.mul_add(s.pft.gdd1020_p[m], 440.0);
+                    s.pft.gddmaturity_p[m] = 0.42_f64.contract(s.pft.gdd1020_p[m], 440.0);
                 }
                 if ivt == 23 || ivt == 24 || ivt == 77 || ivt == 78 {
-                    s.pft.gddmaturity_p[m] = 0.30_f64.mul_add(s.pft.gdd1020_p[m], 710.0);
+                    s.pft.gddmaturity_p[m] = 0.30_f64.contract(s.pft.gdd1020_p[m], 710.0);
                 }
                 if ivt == 17
                     || ivt == 18
@@ -652,13 +654,13 @@ fn crop_phenology(
                     || ivt == 73
                     || ivt == 74
                 {
-                    s.pft.gddmaturity_p[m] = 0.30_f64.mul_add(s.pft.gdd820_p[m], 816.0);
+                    s.pft.gddmaturity_p[m] = 0.30_f64.contract(s.pft.gdd820_p[m], 816.0);
                 }
                 if ivt == 19 || ivt == 20 || ivt == 41 || ivt == 42 {
-                    s.pft.gddmaturity_p[m] = 0.24_f64.mul_add(s.pft.gdd020_p[m], 1349.0);
+                    s.pft.gddmaturity_p[m] = 0.24_f64.contract(s.pft.gdd020_p[m], 1349.0);
                 }
                 if ivt == 61 || ivt == 62 {
-                    s.pft.gddmaturity_p[m] = 0.35_f64.mul_add(s.pft.gdd020_p[m], 587.0);
+                    s.pft.gddmaturity_p[m] = 0.35_f64.contract(s.pft.gdd020_p[m], 587.0);
                 }
                 s.pft.hui_p[m] = s.pft.gddplant_p[m] / s.pft.gddmaturity_p[m];
             }
@@ -804,33 +806,33 @@ fn cn_offset_litterfall(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
             if s.pft.offset_counter_p[m] == p.deltim {
                 t1 = 1.0 / p.deltim;
                 s.pft_flux.leafc_to_litter_p[m] =
-                    t1.mul_add(s.pft.leafc_p[m], s.pft_flux.cpool_to_leafc_p[m]);
+                    t1.contract(s.pft.leafc_p[m], s.pft_flux.cpool_to_leafc_p[m]);
                 s.pft_flux.frootc_to_litter_p[m] =
-                    t1.mul_add(s.pft.frootc_p[m], s.pft_flux.cpool_to_frootc_p[m]);
+                    t1.contract(s.pft.frootc_p[m], s.pft_flux.cpool_to_frootc_p[m]);
                 if ivt >= NPCROPMIN {
                     s.pft_flux.grainc_to_seed_p[m] =
                         t1 * (-s.pft.cropseedc_deficit_p[m]).min(s.pft.grainc_p[m]);
                     s.pft_flux.grainn_to_seed_p[m] =
                         t1 * (-s.pft.cropseedn_deficit_p[m]).min(s.pft.grainn_p[m]);
                     s.pft_flux.grainc_to_food_p[m] = t1
-                        .mul_add(s.pft.grainc_p[m], s.pft_flux.cpool_to_grainc_p[m])
+                        .contract(s.pft.grainc_p[m], s.pft_flux.cpool_to_grainc_p[m])
                         - s.pft_flux.grainc_to_seed_p[m];
                     s.pft_flux.grainn_to_food_p[m] = t1
-                        .mul_add(s.pft.grainn_p[m], s.pft_flux.npool_to_grainn_p[m])
+                        .contract(s.pft.grainn_p[m], s.pft_flux.npool_to_grainn_p[m])
                         - s.pft_flux.grainn_to_seed_p[m];
                     s.pft_flux.livestemc_to_litter_p[m] =
-                        t1.mul_add(s.pft.livestemc_p[m], s.pft_flux.cpool_to_livestemc_p[m]);
+                        t1.contract(s.pft.livestemc_p[m], s.pft_flux.cpool_to_livestemc_p[m]);
                 }
             } else {
                 t1 = p.deltim * 2.0 / (s.pft.offset_counter_p[m] * s.pft.offset_counter_p[m]);
-                s.pft_flux.leafc_to_litter_p[m] = t1.mul_add(
+                s.pft_flux.leafc_to_litter_p[m] = t1.contract(
                     (-s.pft.prev_leafc_to_litter_p[m])
-                        .mul_add(s.pft.offset_counter_p[m], s.pft.leafc_p[m]),
+                        .contract(s.pft.offset_counter_p[m], s.pft.leafc_p[m]),
                     s.pft.prev_leafc_to_litter_p[m],
                 );
-                s.pft_flux.frootc_to_litter_p[m] = t1.mul_add(
+                s.pft_flux.frootc_to_litter_p[m] = t1.contract(
                     (-s.pft.prev_frootc_to_litter_p[m])
-                        .mul_add(s.pft.offset_counter_p[m], s.pft.frootc_p[m]),
+                        .contract(s.pft.offset_counter_p[m], s.pft.frootc_p[m]),
                     s.pft.prev_frootc_to_litter_p[m],
                 );
             }
@@ -904,93 +906,93 @@ fn cn_litter_to_column(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _s
             let class = ivt as usize;
             wtcol = p.pftfrac[m];
             s.patch_flux.phenology_to_met_c[j] =
-                (s.pft_flux.leafc_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                (s.pft_flux.leafc_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_met_c[j],
                 );
             s.patch_flux.phenology_to_cel_c[j] =
-                (s.pft_flux.leafc_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.leafc_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_cel_c[j],
                 );
             s.patch_flux.phenology_to_lig_c[j] =
-                (s.pft_flux.leafc_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                (s.pft_flux.leafc_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_lig_c[j],
                 );
             s.patch_flux.phenology_to_met_n[j] =
-                (s.pft_flux.leafn_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                (s.pft_flux.leafn_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_met_n[j],
                 );
             s.patch_flux.phenology_to_cel_n[j] =
-                (s.pft_flux.leafn_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.leafn_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_cel_n[j],
                 );
             s.patch_flux.phenology_to_lig_n[j] =
-                (s.pft_flux.leafn_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                (s.pft_flux.leafn_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_lig_n[j],
                 );
             s.patch_flux.phenology_to_met_c[j] =
-                (s.pft_flux.frootc_to_litter_p[m] * c.fr_flab[class] * wtcol).mul_add(
+                (s.pft_flux.frootc_to_litter_p[m] * c.fr_flab[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_met_c[j],
                 );
             s.patch_flux.phenology_to_cel_c[j] =
-                (s.pft_flux.frootc_to_litter_p[m] * c.fr_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.frootc_to_litter_p[m] * c.fr_fcel[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_cel_c[j],
                 );
             s.patch_flux.phenology_to_lig_c[j] =
-                (s.pft_flux.frootc_to_litter_p[m] * c.fr_flig[class] * wtcol).mul_add(
+                (s.pft_flux.frootc_to_litter_p[m] * c.fr_flig[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_lig_c[j],
                 );
             s.patch_flux.phenology_to_met_n[j] =
-                (s.pft_flux.frootn_to_litter_p[m] * c.fr_flab[class] * wtcol).mul_add(
+                (s.pft_flux.frootn_to_litter_p[m] * c.fr_flab[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_met_n[j],
                 );
             s.patch_flux.phenology_to_cel_n[j] =
-                (s.pft_flux.frootn_to_litter_p[m] * c.fr_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.frootn_to_litter_p[m] * c.fr_fcel[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_cel_n[j],
                 );
             s.patch_flux.phenology_to_lig_n[j] =
-                (s.pft_flux.frootn_to_litter_p[m] * c.fr_flig[class] * wtcol).mul_add(
+                (s.pft_flux.frootn_to_litter_p[m] * c.fr_flig[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.phenology_to_lig_n[j],
                 );
             if ivt >= NPCROPMIN {
                 s.patch_flux.phenology_to_met_c[j] =
-                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_met_c[j],
                     );
                 s.patch_flux.phenology_to_cel_c[j] =
-                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_cel_c[j],
                     );
                 s.patch_flux.phenology_to_lig_c[j] =
-                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemc_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_lig_c[j],
                     );
                 s.patch_flux.phenology_to_met_n[j] =
-                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_met_n[j],
                     );
                 s.patch_flux.phenology_to_cel_n[j] =
-                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_cel_n[j],
                     );
                 s.patch_flux.phenology_to_lig_n[j] =
-                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                    (s.pft_flux.livestemn_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                         s.pft.leaf_prof_p[j + d.nl_soil * m],
                         s.patch_flux.phenology_to_lig_n[j],
                     );

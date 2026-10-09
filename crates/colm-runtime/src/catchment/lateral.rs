@@ -10,6 +10,7 @@ use colm_core::LakeColumn;
 use colm_init::catch_network::{
     CatchState, CatchTopology, ElementNeighbour, RiverLakeNetwork, SubsurfaceNetwork,
 };
+use colm_numeric::Contract;
 
 use colm_init::catch_reservoir::CatchReservoirs;
 
@@ -180,7 +181,7 @@ impl CatchmentModel {
                 patches[p]
                     .water
                     .wdsrf
-                    .mul_add(topology.hru_patch_frc[p], acc)
+                    .contract(topology.hru_patch_frc[p], acc)
             });
             wdsrf_hru[h] = sum / 1.0e3;
         }
@@ -297,7 +298,7 @@ impl CatchmentModel {
             for j in j0..hs.nhru {
                 let h = hs.ihru[j];
                 // `:257` `FMA (wdsrf_hru_p - wdsrf_hru, area, rnofsrf)`
-                rnofsrf = (wdsrf_hru_p[h] - wdsrf_hru[h]).mul_add(hs.area[j], rnofsrf);
+                rnofsrf = (wdsrf_hru_p[h] - wdsrf_hru[h]).contract(hs.area[j], rnofsrf);
                 sumarea += hs.area[j];
             }
             if sumarea > 0.0 {

@@ -5,6 +5,7 @@
 //! sensible-heat correction in one shared runtime kernel.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::FREEZING_K;
 
@@ -140,19 +141,19 @@ pub fn partition_split_thermal_water(
         let egsmax = (input.snow_ice_water_kg_m2 + input.snow_liquid_water_kg_m2) / dt;
         let egidif = (fevpg_snow - egsmax).max(0.0);
         fevpg_snow = fevpg_snow.min(egsmax);
-        fseng_snow = egidif.mul_add(htvp, fseng_snow);
+        fseng_snow = egidif.contract(htvp, fseng_snow);
     } else {
-        fevpg_soil = fevpg_soil.mul_add(1.0 - fsno, fevpg_snow * fsno);
+        fevpg_soil = fevpg_soil.contract(1.0 - fsno, fevpg_snow * fsno);
     }
     let egsmax = (input.soil_ice_water_kg_m2 + input.soil_liquid_water_kg_m2) / dt;
     let egidif = (fevpg_soil - egsmax).max(0.0);
     fevpg_soil = fevpg_soil.min(egsmax);
-    fseng_soil = egidif.mul_add(htvp, fseng_soil);
+    fseng_soil = egidif.contract(htvp, fseng_soil);
 
     let (fseng, fevpg) = if input.snow_layer_exists {
         (
-            fseng_soil.mul_add(1.0 - fsno, fseng_snow * fsno),
-            fevpg_soil.mul_add(1.0 - fsno, fevpg_snow * fsno),
+            fseng_soil.contract(1.0 - fsno, fseng_snow * fsno),
+            fevpg_soil.contract(1.0 - fsno, fevpg_snow * fsno),
         )
     } else {
         fevpg_snow = 0.0;

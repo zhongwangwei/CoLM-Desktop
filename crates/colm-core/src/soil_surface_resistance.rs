@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel,
@@ -49,7 +50,7 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
             input.saturated_soil_suction_mm / 1000.0 * saturation.lpow(-bsw),
             input.saturated_hydraulic_conductivity_mm_s / 1000.0
                 // `:143` 的指数是 `.FMA (bsw, 2, 3)`。
-                * (liquid_volume / input.porosity).lpow(bsw.mul_add(2.0, 3.0)),
+                * (liquid_volume / input.porosity).lpow(bsw.contract(2.0, 3.0)),
             input.porosity * (input.saturated_soil_suction_mm / -f77(1.0e7)).lpow(1.0 / bsw),
         ),
         model => {
@@ -119,12 +120,12 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
             // `:231-232`：分子分母两处 `0.8*x - y` 都是 `.FMS (x, 0.8, y)`；
             // `max(…)*dz` 再除（第 406 轮，Campbell 算例的 `rss` 差 1 ulp）。
             let dry_layer = (effective_porosity
-                .mul_add(f77(0.8), -liquid_volume)
+                .contract(f77(0.8), -liquid_volume)
                 .max(f77(1.0e-6))
                 * input.layer_thickness_m
                 / input
                     .porosity
-                    .mul_add(f77(0.8), -air_dry_water)
+                    .contract(f77(0.8), -air_dry_water)
                     .max(f77(1.0e-6)))
             .clamp(0.0, 0.2);
             dry_layer / gas_diffusivity
@@ -162,7 +163,7 @@ pub fn soil_surface_resistance(input: SoilSurfaceResistanceInput) -> Result<f64>
         // `:299` `.FMA (fsno, rss, 1-fsno)`
         let denominator = input
             .snow_cover_fraction
-            .mul_add(resistance, 1.0 - input.snow_cover_fraction);
+            .contract(resistance, 1.0 - input.snow_cover_fraction);
         resistance = if denominator > 0.0 {
             resistance / denominator
         } else {

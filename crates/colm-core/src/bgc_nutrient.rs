@@ -4,6 +4,7 @@
 
 use crate::bgc_driver::BgcPhysics;
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// driver 里紧跟需求计算的 `plant_ndemand(i) = sum(plant_ndemand_p*pftfrac)`（从 0 起的 FMA 链）。
 pub fn patch_plant_ndemand(s: &mut BgcState, p: &BgcPhysics) {
@@ -12,5 +13,5 @@ pub fn patch_plant_ndemand(s: &mut BgcState, p: &BgcPhysics) {
         .plant_ndemand_p
         .iter()
         .zip(&p.pftfrac)
-        .fold(0.0, |acc, (demand, frac)| demand.mul_add(*frac, acc));
+        .fold(0.0, |acc, (demand, frac)| demand.contract(*frac, acc));
 }

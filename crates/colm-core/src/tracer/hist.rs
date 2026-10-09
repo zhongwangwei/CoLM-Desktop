@@ -20,6 +20,7 @@ use super::{
     soisno_slot, PatchTracerState, TracerDescriptor, TracerSet, MAX_SNOW_LAYERS, SOIL_LAYERS,
     SOISNO_LAYERS, TRC_TINY, TRC_WATER_MIN_FOR_RATIO,
 };
+use colm_numeric::Contract;
 
 /// `spval`（`MOD_Vars_Global`）。
 pub const SPVAL: f64 = -1.0e36;
@@ -577,7 +578,7 @@ pub fn patch_term(
             let delta = pools.leaf_delta_b;
             if delta != SPVAL && delta.abs() <= TRC_DELTA_SANITY_MAX && pools.leaf_water_moles > 0.0
             {
-                let leaf_r = delta.mul_add(1.0e-3, 1.0) * tracer.ref_ratio;
+                let leaf_r = delta.contract(1.0e-3, 1.0) * tracer.ref_ratio;
                 pair(leaf_r * pools.leaf_water_moles, pools.leaf_water_moles)
             } else {
                 pair(SPVAL, 0.0)

@@ -8,6 +8,7 @@
 //!
 //! 每条浮点语句的舍入形状取自 `-fdump-tree-optimized-lineno` 的 GIMPLE（行号见注释）。
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -211,7 +212,7 @@ impl CatchTopology {
             .map(|cells| {
                 cells
                     .iter()
-                    .fold(0.0, |acc, &cell| self.cell_area(cell).mul_add(1.0e6, acc))
+                    .fold(0.0, |acc, &cell| self.cell_area(cell).contract(1.0e6, acc))
             })
             .collect();
         // `subset_build`（`MOD_Pixelset.F90:660-681`）：子集逐像元 `subfrc + areaquad`（从 0 起），
@@ -612,7 +613,7 @@ pub fn element_neighbours(
         let myelva = elevation_patches[patches.clone()]
             .iter()
             .zip(&topology.elm_patch_frc[patches])
-            .fold(0.0, |acc, (e, f)| e.mul_add(*f, acc));
+            .fold(0.0, |acc, (e, f)| e.contract(*f, acc));
         neighbours.push(ElementNeighbour {
             myarea,
             myelva,
@@ -880,7 +881,7 @@ pub fn estimate_river_depths(
     }
     Ok(bsndis
         .into_iter()
-        .map(|q| q.lpow(0.5).mul_add(0.1, 0.0).max(1.0))
+        .map(|q| q.lpow(0.5).contract(0.1, 0.0).max(1.0))
         .collect())
 }
 
@@ -936,7 +937,7 @@ impl LakeInfo {
                 }
             }
             let sum = self.area[..=i].iter().fold(0.0, |acc, a| acc + a);
-            (surface - (self.depth[0] - self.depth[i])).mul_add(sum, self.dep_vol_curve[i])
+            (surface - (self.depth[0] - self.depth[i])).contract(sum, self.dep_vol_curve[i])
         }
     }
 }
@@ -1123,7 +1124,7 @@ pub fn river_lake_network(
                 for i in 1..nsub {
                     let sum = area_desc[..i].iter().fold(0.0, |acc, a| acc + a);
                     // `.FMA (depth(i-1) - depth(i), sum, curve(i-1))`（`:767`）
-                    curve[i] = (depth_desc[i - 1] - depth_desc[i]).mul_add(sum, curve[i - 1]);
+                    curve[i] = (depth_desc[i - 1] - depth_desc[i]).contract(sum, curve[i - 1]);
                 }
                 lakeinfo[b] = LakeInfo {
                     nsub,
@@ -1307,7 +1308,7 @@ pub fn subsurface_network(
                 lakedepth[patches.clone()]
                     .iter()
                     .zip(&topology.elm_patch_frc[patches])
-                    .fold(0.0, |acc, (d, f)| d.mul_add(*f, acc))
+                    .fold(0.0, |acc, (d, f)| d.contract(*f, acc))
             } else {
                 0.0
             }
@@ -1435,7 +1436,7 @@ pub fn basin_surface(network: &RiverLakeNetwork, b: usize, wdsrf: &[f64]) -> f64
         let volume = wdsrf
             .iter()
             .zip(&info.area0)
-            .fold(0.0, |acc, (w, a)| w.mul_add(*a, acc));
+            .fold(0.0, |acc, (w, a)| w.contract(*a, acc));
         info.surface(volume)
     }
 }
@@ -1597,8 +1598,8 @@ pub fn write_catch_cold_restart(config: CatchColdStartConfig<'_>) -> Result<Path
                         dz[l] = dzlak[l] * ratio;
                     }
                     // `.FMS (ratio, dzlak(nl), .FNMA (ratio, dzlak(1), dz_lake(1)))`（`:1689`）
-                    let top_excess = (-ratio).mul_add(dzlak[0], dz[0]);
-                    dz[layers - 1] = ratio.mul_add(dzlak[layers - 1], -top_excess);
+                    let top_excess = (-ratio).contract(dzlak[0], dz[0]);
+                    dz[layers - 1] = ratio.contract(dzlak[layers - 1], -top_excess);
                 } else if wdsrfm > 0.0 && wdsrfm <= 1.0 {
                     for value in dz.iter_mut() {
                         *value = wdsrfm / layers as f64;

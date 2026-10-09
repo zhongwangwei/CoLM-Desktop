@@ -17,6 +17,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `SoilBiogeochemNStateUpdate1`：沉降、固氮、矿化/固持与植物吸收引起的矿质 N 变化。
 pub fn soil_biogeochem_n_state_update1(
@@ -29,39 +30,39 @@ pub fn soil_biogeochem_n_state_update1(
     if !sw.nitrif {
         for j in 0..d.nl_soil {
             s.patch.sminn_vr[j] = (s.patch_flux.ndep_to_sminn[0] * p.deltim)
-                .mul_add(s.patch.ndep_prof[j], s.patch.sminn_vr[j]);
+                .contract(s.patch.ndep_prof[j], s.patch.sminn_vr[j]);
             s.patch.sminn_vr[j] = (s.patch_flux.nfix_to_sminn[0] * p.deltim)
-                .mul_add(s.patch.nfixation_prof[j], s.patch.sminn_vr[j]);
+                .contract(s.patch.nfixation_prof[j], s.patch.sminn_vr[j]);
         }
     } else {
         for j in 0..d.nl_soil {
             s.patch.smin_nh4_vr[j] = (s.patch_flux.ndep_to_sminn[0] * p.deltim)
-                .mul_add(s.patch.ndep_prof[j], s.patch.smin_nh4_vr[j]);
+                .contract(s.patch.ndep_prof[j], s.patch.smin_nh4_vr[j]);
             s.patch.smin_nh4_vr[j] = (s.patch_flux.nfix_to_sminn[0] * p.deltim)
-                .mul_add(s.patch.nfixation_prof[j], s.patch.smin_nh4_vr[j]);
+                .contract(s.patch.nfixation_prof[j], s.patch.smin_nh4_vr[j]);
         }
     }
     if sw.crop {
         if !sw.nitrif {
             for j in 0..d.nl_soil {
                 s.patch.sminn_vr[j] = (s.patch_flux.fert_to_sminn[0] * p.deltim)
-                    .mul_add(s.patch.ndep_prof[j], s.patch.sminn_vr[j]);
+                    .contract(s.patch.ndep_prof[j], s.patch.sminn_vr[j]);
             }
             if sw.cnsoyfixn {
                 for j in 0..d.nl_soil {
                     s.patch.sminn_vr[j] = (s.patch_flux.soyfixn_to_sminn[0] * p.deltim)
-                        .mul_add(s.patch.nfixation_prof[j], s.patch.sminn_vr[j]);
+                        .contract(s.patch.nfixation_prof[j], s.patch.sminn_vr[j]);
                 }
             }
         } else {
             for j in 0..d.nl_soil {
                 s.patch.smin_nh4_vr[j] = (s.patch_flux.fert_to_sminn[0] * p.deltim)
-                    .mul_add(s.patch.ndep_prof[j], s.patch.smin_nh4_vr[j]);
+                    .contract(s.patch.ndep_prof[j], s.patch.smin_nh4_vr[j]);
             }
             if sw.cnsoyfixn {
                 for j in 0..d.nl_soil {
                     s.patch.smin_nh4_vr[j] = (s.patch_flux.soyfixn_to_sminn[0] * p.deltim)
-                        .mul_add(s.patch.nfixation_prof[j], s.patch.smin_nh4_vr[j]);
+                        .contract(s.patch.nfixation_prof[j], s.patch.smin_nh4_vr[j]);
                 }
             }
         }
@@ -72,7 +73,7 @@ pub fn soil_biogeochem_n_state_update1(
             for j in 0..d.nl_soil {
                 s.patch_flux.decomp_npools_sourcesink
                     [j + d.nl_soil_full * ((s.invariants.donor_pool[k] - 1) as usize)] =
-                    (-s.patch_flux.decomp_ntransfer_vr[j + d.nl_soil_full * k]).mul_add(
+                    (-s.patch_flux.decomp_ntransfer_vr[j + d.nl_soil_full * k]).contract(
                         p.deltim,
                         s.patch_flux.decomp_npools_sourcesink
                             [j + d.nl_soil_full * ((s.invariants.donor_pool[k] - 1) as usize)],
@@ -86,7 +87,7 @@ pub fn soil_biogeochem_n_state_update1(
                         [j + d.nl_soil_full * ((s.invariants.receiver_pool[k] - 1) as usize)] =
                         (s.patch_flux.decomp_ntransfer_vr[j + d.nl_soil_full * k]
                             + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * k])
-                            .mul_add(
+                            .contract(
                                 p.deltim,
                                 s.patch_flux.decomp_npools_sourcesink[j + d.nl_soil_full
                                     * ((s.invariants.receiver_pool[k] - 1) as usize)],
@@ -96,7 +97,7 @@ pub fn soil_biogeochem_n_state_update1(
                 for j in 0..d.nl_soil {
                     s.patch_flux.decomp_npools_sourcesink
                         [j + d.nl_soil_full * ((s.invariants.donor_pool[k] - 1) as usize)] =
-                        (-s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * k]).mul_add(
+                        (-s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * k]).contract(
                             p.deltim,
                             s.patch_flux.decomp_npools_sourcesink
                                 [j + d.nl_soil_full * ((s.invariants.donor_pool[k] - 1) as usize)],
@@ -108,72 +109,72 @@ pub fn soil_biogeochem_n_state_update1(
             for j in 0..d.nl_soil {
                 s.patch.AKX_met_to_soil1_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr[j]
                     + s.patch_flux.decomp_sminn_flux_vr[j])
-                    .mul_add(p.deltim, s.patch.AKX_met_to_soil1_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_met_to_soil1_n_vr_acc[j]);
                 s.patch.AKX_cel_to_soil1_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full])
-                    .mul_add(p.deltim, s.patch.AKX_cel_to_soil1_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cel_to_soil1_n_vr_acc[j]);
                 s.patch.AKX_lig_to_soil2_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 2]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 2])
-                    .mul_add(p.deltim, s.patch.AKX_lig_to_soil2_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_lig_to_soil2_n_vr_acc[j]);
                 s.patch.AKX_soil1_to_soil2_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 3]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 3])
-                    .mul_add(p.deltim, s.patch.AKX_soil1_to_soil2_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil1_to_soil2_n_vr_acc[j]);
                 s.patch.AKX_cwd_to_cel_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 4]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 4])
-                    .mul_add(p.deltim, s.patch.AKX_cwd_to_cel_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cwd_to_cel_n_vr_acc[j]);
                 s.patch.AKX_cwd_to_lig_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 5]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 5])
-                    .mul_add(p.deltim, s.patch.AKX_cwd_to_lig_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cwd_to_lig_n_vr_acc[j]);
                 s.patch.AKX_soil1_to_soil3_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 6]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 6])
-                    .mul_add(p.deltim, s.patch.AKX_soil1_to_soil3_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil1_to_soil3_n_vr_acc[j]);
                 s.patch.AKX_soil2_to_soil1_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 7]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 7])
-                    .mul_add(p.deltim, s.patch.AKX_soil2_to_soil1_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil2_to_soil1_n_vr_acc[j]);
                 s.patch.AKX_soil2_to_soil3_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 8]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 8])
-                    .mul_add(p.deltim, s.patch.AKX_soil2_to_soil3_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil2_to_soil3_n_vr_acc[j]);
                 s.patch.AKX_soil3_to_soil1_n_vr_acc[j] = (s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 9]
                     + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * 9])
-                    .mul_add(p.deltim, s.patch.AKX_soil3_to_soil1_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil3_to_soil1_n_vr_acc[j]);
                 s.patch.AKX_met_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr[j]
-                    .mul_add(p.deltim, s.patch.AKX_met_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_met_exit_n_vr_acc[j]);
                 s.patch.AKX_cel_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full]
-                    .mul_add(p.deltim, s.patch.AKX_cel_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cel_exit_n_vr_acc[j]);
                 s.patch.AKX_lig_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 2]
-                    .mul_add(p.deltim, s.patch.AKX_lig_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_lig_exit_n_vr_acc[j]);
                 s.patch.AKX_soil1_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 3]
-                    .mul_add(p.deltim, s.patch.AKX_soil1_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil1_exit_n_vr_acc[j]);
                 s.patch.AKX_cwd_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 4]
-                    .mul_add(p.deltim, s.patch.AKX_cwd_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cwd_exit_n_vr_acc[j]);
                 s.patch.AKX_cwd_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 5]
-                    .mul_add(p.deltim, s.patch.AKX_cwd_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_cwd_exit_n_vr_acc[j]);
                 s.patch.AKX_soil1_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 6]
-                    .mul_add(p.deltim, s.patch.AKX_soil1_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil1_exit_n_vr_acc[j]);
                 s.patch.AKX_soil2_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 7]
-                    .mul_add(p.deltim, s.patch.AKX_soil2_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil2_exit_n_vr_acc[j]);
                 s.patch.AKX_soil2_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 8]
-                    .mul_add(p.deltim, s.patch.AKX_soil2_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil2_exit_n_vr_acc[j]);
                 s.patch.AKX_soil3_exit_n_vr_acc[j] = s.patch_flux.decomp_ntransfer_vr
                     [j + d.nl_soil_full * 9]
-                    .mul_add(p.deltim, s.patch.AKX_soil3_exit_n_vr_acc[j]);
+                    .contract(p.deltim, s.patch.AKX_soil3_exit_n_vr_acc[j]);
             }
         }
     }
@@ -187,25 +188,25 @@ pub fn soil_biogeochem_n_state_update1(
                         s.patch.sminn_vr[j] = (-(s.patch_flux.sminn_to_denit_decomp_vr
                             [j + d.nl_soil_full * k]
                             + s.patch_flux.decomp_sminn_flux_vr[j + d.nl_soil_full * k]))
-                            .mul_add(p.deltim, s.patch.sminn_vr[j]);
+                            .contract(p.deltim, s.patch.sminn_vr[j]);
                     }
                 } else {
                     for j in 0..d.nl_soil {
                         let index = j + d.nl_soil_full * k;
                         s.patch.sminn_vr[j] = (s.patch_flux.decomp_sminn_flux_vr[index]
                             - s.patch_flux.sminn_to_denit_decomp_vr[index])
-                            .mul_add(p.deltim, s.patch.sminn_vr[j]);
+                            .contract(p.deltim, s.patch.sminn_vr[j]);
                     }
                 }
             }
         }
         for j in 0..d.nl_soil {
             s.patch.sminn_vr[j] =
-                (-s.patch_flux.sminn_to_denit_excess_vr[j]).mul_add(p.deltim, s.patch.sminn_vr[j]);
+                (-s.patch_flux.sminn_to_denit_excess_vr[j]).contract(p.deltim, s.patch.sminn_vr[j]);
             s.patch.sminn_vr[j] =
-                (-s.patch_flux.sminn_to_plant_vr[j]).mul_add(p.deltim, s.patch.sminn_vr[j]);
+                (-s.patch_flux.sminn_to_plant_vr[j]).contract(p.deltim, s.patch.sminn_vr[j]);
             s.patch.sminn_vr[j] =
-                s.patch_flux.supplement_to_sminn_vr[j].mul_add(p.deltim, s.patch.sminn_vr[j]);
+                s.patch_flux.supplement_to_sminn_vr[j].contract(p.deltim, s.patch.sminn_vr[j]);
         }
     } else {
         for j in 0..d.nl_soil {
@@ -214,24 +215,24 @@ pub fn soil_biogeochem_n_state_update1(
             {
                 s.patch.smin_nh4_vr[j] = (s.patch_flux.gross_nmin_vr[j]
                     - s.patch_flux.actual_immob_nh4_vr[j])
-                    .mul_add(p.deltim, s.patch.smin_nh4_vr[j]);
+                    .contract(p.deltim, s.patch.smin_nh4_vr[j]);
                 s.patch.smin_no3_vr[j] = (-s.patch_flux.actual_immob_no3_vr[j])
-                    .mul_add(p.deltim, s.patch.smin_no3_vr[j]);
+                    .contract(p.deltim, s.patch.smin_no3_vr[j]);
                 s.patch.sminn_vr[j] = s.patch.smin_nh4_vr[j] + s.patch.smin_no3_vr[j];
             }
             s.patch.smin_nh4_vr[j] =
-                (-s.patch_flux.smin_nh4_to_plant_vr[j]).mul_add(p.deltim, s.patch.smin_nh4_vr[j]);
+                (-s.patch_flux.smin_nh4_to_plant_vr[j]).contract(p.deltim, s.patch.smin_nh4_vr[j]);
             s.patch.smin_no3_vr[j] =
-                (-s.patch_flux.smin_no3_to_plant_vr[j]).mul_add(p.deltim, s.patch.smin_no3_vr[j]);
+                (-s.patch_flux.smin_no3_to_plant_vr[j]).contract(p.deltim, s.patch.smin_no3_vr[j]);
             s.patch.smin_nh4_vr[j] -= s.patch_flux.f_nit_vr[j] * p.deltim; // 无 FMA（上游第 233 行，乘积被 CSE 共享）
-            s.patch.smin_no3_vr[j] = (s.patch_flux.f_nit_vr[j] * p.deltim).mul_add(
+            s.patch.smin_no3_vr[j] = (s.patch_flux.f_nit_vr[j] * p.deltim).contract(
                 1.0 - s.constants.nitrif_n2o_loss_frac,
                 s.patch.smin_no3_vr[j],
             );
             s.patch.smin_no3_vr[j] =
-                (-s.patch_flux.f_denit_vr[j]).mul_add(p.deltim, s.patch.smin_no3_vr[j]);
+                (-s.patch_flux.f_denit_vr[j]).contract(p.deltim, s.patch.smin_no3_vr[j]);
             s.patch.smin_nh4_vr[j] =
-                s.patch_flux.supplement_to_sminn_vr[j].mul_add(p.deltim, s.patch.smin_nh4_vr[j]);
+                s.patch_flux.supplement_to_sminn_vr[j].contract(p.deltim, s.patch.smin_nh4_vr[j]);
             s.patch.sminn_vr[j] = s.patch.smin_nh4_vr[j] + s.patch.smin_no3_vr[j];
         }
     }

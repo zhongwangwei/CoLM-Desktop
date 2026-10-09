@@ -4,6 +4,7 @@
 //! 气相扩散（`DEF_TRACER_SOIL_VAPOR_DIFFUSION`）。
 
 use anyhow::{bail, Result};
+use colm_numeric::Contract;
 
 use super::super::evap_limit::atmospheric_tracer_loss;
 use super::super::frac::{
@@ -226,9 +227,9 @@ pub fn release_leaf_iso_storage(
             }
         }
         if aquifer_water > 0.0 && aquifer_mass > 0.0 {
-            pools.wa = (-aquifer_mass).mul_add(release_fraction, pools.wa);
+            pools.wa = (-aquifer_mass).contract(release_fraction, pools.wa);
         }
-        pools.leaf_iso_storage = release_fraction.mul_add(pool_total, anomaly);
+        pools.leaf_iso_storage = release_fraction.contract(pool_total, anomaly);
         if pools.leaf_iso_storage.abs() <= TRC_TINY {
             pools.leaf_iso_storage = 0.0;
         }
@@ -488,9 +489,9 @@ pub(super) fn snow_column(
     // Step 1：冰相（霜进、升华出），升华超过冰量时余下的从液相扣。
     let frost_rate = eff_qfros.max(0.0);
     let frost_tracer_rate = frost_rate * ctx.deposition_ratio_for(temp_top, true);
-    p.wice_soisno[top] = dt.mul_add(frost_tracer_rate, p.wice_soisno[top]);
+    p.wice_soisno[top] = dt.contract(frost_tracer_rate, p.wice_soisno[top]);
     let acc = &mut state.acc[itrc];
-    acc.precip = dt.mul_add(frost_tracer_rate, acc.precip);
+    acc.precip = dt.contract(frost_tracer_rate, acc.precip);
     let frost_water = dt * frost_rate;
     let mut water_ice_pool = match frost_shape {
         FrostShape::Shared => {
@@ -498,8 +499,8 @@ pub(super) fn snow_column(
             frost_water + col.wice_soisno_bef[top]
         }
         FrostShape::Fused => {
-            acc.water_precip = dt.mul_add(frost_rate, acc.water_precip);
-            dt.mul_add(frost_rate, col.wice_soisno_bef[top])
+            acc.water_precip = dt.contract(frost_rate, acc.water_precip);
+            dt.contract(frost_rate, col.wice_soisno_bef[top])
         }
     };
     let water_ice_pool_prefrost = water_ice_pool;
@@ -554,15 +555,15 @@ pub(super) fn snow_column(
     p.wliq_soisno[top] = dew_tracer + p.wliq_soisno[top];
     let acc = &mut state.acc[itrc];
     acc.precip = dew_tracer + acc.precip;
-    acc.water_precip = dt.mul_add(dew_rate, acc.water_precip);
+    acc.water_precip = dt.contract(dew_rate, acc.water_precip);
     if eff_qseva > TRC_TINY {
         let mut water_liq_pool = if col.split_soilsnow {
-            dt.mul_add(
-                col.fsno.mul_add(col.pg_rain, dew_rate),
+            dt.contract(
+                col.fsno.contract(col.pg_rain, dew_rate),
                 col.wliq_soisno_bef[top],
             )
         } else {
-            dt.mul_add(dew_rate + col.pg_rain, col.wliq_soisno_bef[top])
+            dt.contract(dew_rate + col.pg_rain, col.wliq_soisno_bef[top])
         };
         if water_ice_pool_prefrost < subl_water {
             water_liq_pool -= subl_water - water_ice_pool_prefrost;

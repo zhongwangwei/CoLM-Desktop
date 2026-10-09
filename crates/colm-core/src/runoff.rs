@@ -7,6 +7,7 @@
 use crate::incomplete_gamma::gratio_fortran;
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel};
 
@@ -191,7 +192,7 @@ fn gamma_saturated_fraction(
     let mut eta = if mean_topographic_index > mu {
         mean_topographic_index
     } else {
-        alpha.mul_add(chi, mu)
+        alpha.contract(chi, mu)
     };
     let (mut pgr0, mut pgr1, mut qgr) = (0.0, 0.0, f64::NAN);
     for _ in 0..20 {
@@ -200,13 +201,13 @@ fn gamma_saturated_fraction(
         gratio_fortran(alpha + 1.0, x, &mut pgr1, &mut qgr, 0);
         gratio_fortran(alpha, x, &mut pgr0, &mut qgr, 0);
         let spread = alpha * chi * pgr1;
-        let gfun = excess.mul_add(pgr0, -spread) / decay_tuning - water_table_depth_m;
+        let gfun = excess.contract(pgr0, -spread) / decay_tuning - water_table_depth_m;
         // x 截到 0（eta <= mu）时 pgr0 = 0，更新式会除以 0。
         if pgr0 <= 0.0 {
             break;
         }
         if gfun.abs() > 1.0e-6 {
-            eta = decay_tuning.mul_add(water_table_depth_m, spread) / pgr0 + mu;
+            eta = decay_tuning.contract(water_table_depth_m, spread) / pgr0 + mu;
         } else {
             break;
         }
@@ -234,7 +235,7 @@ pub fn topmodel_subsurface_runoff(input: TopmodelSubsurfaceInput<'_>) -> Result<
     for layer in start..layers {
         let layer_mm = input.layer_thickness_m[layer] * 1000.0;
         thickness_mm += layer_mm;
-        ice_sum = input.ice_fraction[layer].mul_add(layer_mm, ice_sum);
+        ice_sum = input.ice_fraction[layer].contract(layer_mm, ice_sum);
     }
     let mean_ice = ice_sum / thickness_mm;
     let exp_minus_three = (-3.0_f64).exp();
@@ -315,7 +316,7 @@ pub fn xinanjiang_runoff(
     // `infil = wsat_int - w_int - wsat_int*max(0,wtmp)**(btopo+1)`：
     // 乘积被吸收成 `FNMS(ws, pow, ws-w)` —— 就是上面那 0% → 100% 的那一处。
     let infiltration = (-capacity)
-        .mul_add(wtmp.max(0.0).lpow(shape_plus_one), capacity - water)
+        .contract(wtmp.max(0.0).lpow(shape_plus_one), capacity - water)
         .min(input_depth);
     Ok(StorageRunoffState {
         surface_runoff_mm_s: (input_depth - infiltration) * 1000.0 / input.time_step_seconds,
@@ -412,7 +413,7 @@ fn storage_distribution_runoff(
     // 与 `InfilVarTmp` 的分子 ⇒ 湿季（`watin > 0`、土壤接近饱和）能把整支翻掉，
     // 而干季根本走不到这里（`watin <= 0` 直接返回）。
     let depth_factor = 1.0 - (1.0 - saturated_fraction).lpow(1.0 / bvic);
-    let depth_with_input = depth_factor.mul_add(maximum_depth, input_depth);
+    let depth_with_input = depth_factor.contract(maximum_depth, input_depth);
     let surface_depth = if depth_with_input > maximum_depth {
         input_depth - capacity + water
     } else {
@@ -420,7 +421,7 @@ fn storage_distribution_runoff(
         // `RunoffSurface = watin - wsat_int + w_int + wsat_int*(InfilVarTmp**(1+BVIC))`：
         // 最后一个乘积被吸收（`FMA`）。实测 18185 组随机输入：不收缩 2/18185，
         // 收缩后 **18185/18185**。
-        capacity.mul_add(remaining.lpow(1.0 + bvic), input_depth - capacity + water)
+        capacity.contract(remaining.lpow(1.0 + bvic), input_depth - capacity + water)
     }
     .clamp(0.0, input_depth);
     Ok(StorageRunoffState {
@@ -442,9 +443,9 @@ fn storage(input: StorageRunoffInput<'_>) -> Result<(f64, f64)> {
     let mut water = 0.0;
     let mut capacity = 0.0;
     for layer in 0..6 {
-        water = input.liquid_volume_fraction[layer].mul_add(input.layer_thickness_m[layer], water);
+        water = input.liquid_volume_fraction[layer].contract(input.layer_thickness_m[layer], water);
         capacity =
-            input.effective_porosity[layer].mul_add(input.layer_thickness_m[layer], capacity);
+            input.effective_porosity[layer].contract(input.layer_thickness_m[layer], capacity);
     }
     ensure!(
         capacity > 0.0,

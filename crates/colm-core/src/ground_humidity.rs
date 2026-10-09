@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{saturation_specific_humidity, soil_psi_from_vliq, SoilHydraulicModel};
 
@@ -55,7 +56,7 @@ pub fn non_split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHum
     let relative_humidity = relative_humidity(input);
     // `MOD_Thermal…:583` 的 GIMPLE 是 `qred = .FMA(1-fsno, hr, fsno)`。
     let humidity_reduction =
-        (1.0 - input.snow_cover_fraction).mul_add(relative_humidity, input.snow_cover_fraction);
+        (1.0 - input.snow_cover_fraction).contract(relative_humidity, input.snow_cover_fraction);
     non_split_with(input, relative_humidity, humidity_reduction)
 }
 
@@ -117,7 +118,7 @@ pub fn split_ground_humidity(input: GroundHumidityInput) -> Result<GroundHumidit
 
 fn split_with(input: GroundHumidityInput, relative_humidity: f64) -> Result<GroundHumidityState> {
     let humidity_reduction =
-        (1.0 - input.snow_cover_fraction).mul_add(relative_humidity, input.snow_cover_fraction);
+        (1.0 - input.snow_cover_fraction).contract(relative_humidity, input.snow_cover_fraction);
     let soil = saturation_specific_humidity(input.soil_temperature_k, input.surface_pressure_pa)?;
     let mut soil_specific_humidity = relative_humidity * soil.specific_humidity;
     let mut slope = (1.0 - input.snow_cover_fraction)
@@ -134,10 +135,10 @@ fn split_with(input: GroundHumidityInput, relative_humidity: f64) -> Result<Grou
     // `dqgdT = dqgdT + fsno*qsatgdT`：`变量 + 乘积`，内核收成 FMA。
     let slope = input
         .snow_cover_fraction
-        .mul_add(snow.specific_humidity_temperature_slope_k, slope);
+        .contract(snow.specific_humidity_temperature_slope_k, slope);
     // `qg = (1.-fsno)*q_soil + fsno*q_snow`：GIMPLE 是
     // `.FMA (1-fsno, q_soil, qsatg*fsno)` —— 熔进去的是**左边**那个乘积。
-    let ground_specific_humidity = (1.0 - input.snow_cover_fraction).mul_add(
+    let ground_specific_humidity = (1.0 - input.snow_cover_fraction).contract(
         soil_specific_humidity,
         snow_specific_humidity * input.snow_cover_fraction,
     );
@@ -170,7 +171,7 @@ fn relative_humidity(input: GroundHumidityInput) -> f64 {
             // `MOD_Thermal…:579` 的 GIMPLE 是 `_86 = .FMA(porsl(1)-theta_r(1), fac, theta_r(1))`
             // —— 乘积被收进加法；平铺写 `fac*(porsl-theta_r) + theta_r` 会多一次舍入。
             (input.top_layer_porosity - input.top_layer_residual_water)
-                .mul_add(saturation_fraction, input.top_layer_residual_water),
+                .contract(saturation_fraction, input.top_layer_residual_water),
             input.top_layer_porosity,
             input.top_layer_residual_water,
             input.saturated_soil_suction_mm,

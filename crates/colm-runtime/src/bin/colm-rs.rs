@@ -31,6 +31,7 @@
 //!   （VSF、植物水力、植被上的雪 —— 三者在**上游都是默认打开**），默认直接拒绝并
 //!   一次列全；这个开关只为诊断性测量而存在，用了就会在 stderr 上打出警告。
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -2395,7 +2396,7 @@ fn lulcc_patch_areas(
                     pixel.lon_w[x],
                     pixel.lon_e[x],
                 )
-                .mul_add(1.0e6, area)
+                .contract(1.0e6, area)
             });
             area * topology.shared_fraction[p]
         })
@@ -2568,7 +2569,7 @@ fn lulcc_land_tracers(
                      -> f64 {
                         if !list.is_empty() {
                             list.iter()
-                                .fold(0.0, |v, &(op, w)| w.mul_add(get(&mut old_states[op]), v))
+                                .fold(0.0, |v, &(op, w)| w.contract(get(&mut old_states[op]), v))
                                 / denom
                         } else if let Some(op) = src {
                             get(&mut old_states[op])
@@ -2716,7 +2717,7 @@ fn lulcc_check_land_water_mass(
                         for (itrc, tracer) in set.tracers.iter().enumerate() {
                             if tracer.uses_land_water_transport() {
                                 total[itrc] =
-                                    scalar[k](&state.pools[itrc]).mul_add(area, total[itrc]);
+                                    scalar[k](&state.pools[itrc]).contract(area, total[itrc]);
                             }
                         }
                     }
@@ -2725,7 +2726,7 @@ fn lulcc_check_land_water_mass(
                             for (itrc, tracer) in set.tracers.iter().enumerate() {
                                 if tracer.uses_land_water_transport() {
                                     total[itrc] = layered[k](&state.pools[itrc])[slot]
-                                        .mul_add(area, total[itrc]);
+                                        .contract(area, total[itrc]);
                                 }
                             }
                         }
@@ -2908,7 +2909,7 @@ fn lulcc_forcing_cache(
                 row.fill(0.0);
             }
             for k in 0..ns {
-                row[k] = weight.mul_add(old[op * ns + k], row[k]);
+                row[k] = weight.contract(old[op * ns + k], row[k]);
             }
             total += weight;
             count += 1;

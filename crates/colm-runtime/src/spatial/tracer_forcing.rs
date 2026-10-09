@@ -8,6 +8,7 @@
 //!
 //! 「最近一次有效值」是预报量：写进陆面重启（`trc_forcing_*_last`），续跑原样读回。
 
+use colm_numeric::Contract;
 use std::path::PathBuf;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -580,7 +581,7 @@ impl GriddedTracerForcing {
                             .lower
                             .iter()
                             .zip(&bracket.upper)
-                            .map(|(&a, &b)| a.mul_add(alp1, b * alp2))
+                            .map(|(&a, &b)| a.contract(alp1, b * alp2))
                             .collect()
                     } else {
                         bracket.lower.clone()

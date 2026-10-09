@@ -6,6 +6,7 @@
 //! `wilt + THRESHOLD*(target - wilt)`（FMA）。
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::{soil_vliq_from_psi, LibmPow, SoilHydraulicModel, FREEZING_K};
 
@@ -123,11 +124,11 @@ impl IrrigationState {
             if self.steps_left > 0 {
                 self.steps_left -= 1;
                 // GIMPLE：两处 `waterstorage - irrig_rate*deltim` 都是 FNMA。
-                if (-self.rate_mm_s).mul_add(time_step_seconds, self.water_storage_mm) < 0.0 {
+                if (-self.rate_mm_s).contract(time_step_seconds, self.water_storage_mm) < 0.0 {
                     self.rate_mm_s = self.water_storage_mm / time_step_seconds;
                 }
                 self.water_storage_mm = (-self.rate_mm_s)
-                    .mul_add(time_step_seconds, self.water_storage_mm)
+                    .contract(time_step_seconds, self.water_storage_mm)
                     .max(0.0);
                 match method {
                     IRRIGATION_DRIP => fluxes.drip_mm_s = self.rate_mm_s,
@@ -350,7 +351,7 @@ fn potential_needed(
         field_total
     };
 
-    let threshold = (target - wilting_total).mul_add(settings.threshold_fraction, wilting_total);
+    let threshold = (target - wilting_total).contract(settings.threshold_fraction, wilting_total);
     state.deficit_mm = 0.0;
     {
         state.deficit_mm = if liquid < threshold {

@@ -13,6 +13,7 @@
 //! 工作区对 `unsafe_code` 是 `forbid`；本 crate 单独降为 `deny`，只有 `accelerate` 与 `libm`（`erf` 等标准库没包装的 libm 函数）两个模块放行。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 #[cfg(target_os = "macos")]
 mod accelerate;
@@ -56,7 +57,7 @@ pub fn matmul<const N: usize>(inverse: &[[f64; N]; N], vector: &[f64; N], n: usi
     let mut out = [0.0; N];
     for column in 0..n {
         for (row, value) in out.iter_mut().enumerate().take(n) {
-            *value = inverse[row][column].mul_add(vector[column], *value);
+            *value = inverse[row][column].contract(vector[column], *value);
         }
     }
     out

@@ -5,6 +5,7 @@
 //! 存在 `[j][s]`。
 
 use super::config::{C_H, KH_TBASE, KH_THETA, NGASES, RGAS_LATM};
+use colm_numeric::Contract;
 
 /// `maxsnl`、`nl_soil`、`nl_lake`。
 pub const MAXSNL: i32 = -5;
@@ -74,13 +75,13 @@ pub fn tridiagonal(
             u[at(j)] = r[at(j)] / bet;
         } else {
             gam[at(j)] = c[at(j - 1)] / bet;
-            bet = (-gam[at(j)]).mul_add(a[at(j)], b[at(j)]);
-            u[at(j)] = (-a[at(j)]).mul_add(u[at(j - 1)], r[at(j)]) / bet;
+            bet = (-gam[at(j)]).contract(a[at(j)], b[at(j)]);
+            u[at(j)] = (-a[at(j)]).contract(u[at(j - 1)], r[at(j)]) / bet;
         }
     }
     for j in (lbj..ubj).rev() {
         if j >= jtop {
-            u[at(j)] = (-gam[at(j + 1)]).mul_add(u[at(j + 1)], u[at(j)]);
+            u[at(j)] = (-gam[at(j + 1)]).contract(u[at(j + 1)], u[at(j)]);
         }
     }
 }
@@ -135,9 +136,9 @@ pub fn split_phases(
         if mobile_pore > SMALL {
             let kh = &k_h_cc[k + 1];
             p.conc_ch4_aqu[k] = conc_methane[k] / (f_ch4_storage + p.f_gas[k] / kh[0]);
-            p.conc_ch4_gas[k] = conc_methane[k] / kh[0].mul_add(f_ch4_storage, p.f_gas[k]);
+            p.conc_ch4_gas[k] = conc_methane[k] / kh[0].contract(f_ch4_storage, p.f_gas[k]);
             p.conc_o2_aqu[k] = conc_o2[k] / (p.f_aqu[k] + p.f_gas[k] / kh[1]);
-            p.conc_o2_gas[k] = conc_o2[k] / kh[1].mul_add(p.f_aqu[k], p.f_gas[k]);
+            p.conc_o2_gas[k] = conc_o2[k] / kh[1].contract(p.f_aqu[k], p.f_gas[k]);
         }
         p.conc_ch4_porsl[k] = conc_methane[k] / porsl[k];
         p.conc_ch4_aqu_porsl[k] = p.conc_ch4_aqu[k] / porsl[k];
@@ -222,10 +223,10 @@ pub fn annual_update(
         }
         acc.annsum_counter += dt;
         let w = dt / ys;
-        acc.tempavg_somhr = w.mul_add(somhr, acc.tempavg_somhr);
-        acc.tempavg_finrw = (w * finundated).mul_add(somhr, acc.tempavg_finrw);
-        acc.tempavg_agnpp = w.mul_add(agnpp, acc.tempavg_agnpp);
-        acc.tempavg_bgnpp = w.mul_add(bgnpp, acc.tempavg_bgnpp);
+        acc.tempavg_somhr = w.contract(somhr, acc.tempavg_somhr);
+        acc.tempavg_finrw = (w * finundated).contract(somhr, acc.tempavg_finrw);
+        acc.tempavg_agnpp = w.contract(agnpp, acc.tempavg_agnpp);
+        acc.tempavg_bgnpp = w.contract(bgnpp, acc.tempavg_bgnpp);
     };
     let finish = |acc: &mut AnnualAccumulators| {
         acc.annsum_counter = 0.0;
@@ -245,7 +246,7 @@ pub fn annual_update(
     let secsperyear = year_seconds(idate[0]);
     // GIMPLE：`FMA(real(idate(2)-1), 86400, real(idate(3)))`。
     let end_sec = f64::from(idate[1] - 1)
-        .mul_add(SECSPDAY, f64::from(idate[2]))
+        .contract(SECSPDAY, f64::from(idate[2]))
         .max(0.0);
     if end_sec < deltim {
         let previous = year_seconds(idate[0] - 1);
@@ -324,7 +325,7 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
             if k as i32 + 1 > i.jwt || m.anoxicmicrosites {
                 let w = i.hr_vr[k] * dz(k);
                 raw += w;
-                atten = w.mul_add((-(z(k) / m.z0_methane_prod)).exp(), atten);
+                atten = w.contract((-(z(k) / m.z0_methane_prod)).exp(), atten);
             }
         }
         if atten > 0.0 {
@@ -364,7 +365,7 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
         {
             let seasonalfin = (i.finundated - i.annavg_finrw).max(0.0);
             if seasonalfin > 0.0 {
-                let sif = seasonalfin.mul_add(m.mino2lim, i.annavg_finrw) / i.finundated;
+                let sif = seasonalfin.contract(m.mino2lim, i.annavg_finrw) / i.finundated;
                 base *= sif;
             }
         }
@@ -392,7 +393,7 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
             if i.ph <= m.phmin || i.ph >= m.phmax {
                 f_adj = 0.0;
             } else {
-                let poly = i.ph.mul_add(2.7727, -(i.ph * 0.2235 * i.ph)) - 8.6;
+                let poly = i.ph.contract(2.7727, -(i.ph * 0.2235 * i.ph)) - 8.6;
                 let fact = 10.0f64.lpow(poly) / PH_FACT_REFERENCE;
                 f_adj *= fact.min(1.0).max(0.0);
             }
@@ -406,7 +407,7 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
         let carbon = 0.0f64.max(base * partition_z / dz(k));
         // `f_adj*base*partition_z/dz`：GIMPLE 先 `base*f`、再乘 `partition_z`。
         let raw_prod = partition_z * (base * f_adj) / dz(k);
-        let anoxic = |raw: f64| raw / m.oxinhib.mul_add(i.conc_o2[k], 1.0);
+        let anoxic = |raw: f64| raw / m.oxinhib.contract(i.conc_o2[k], 1.0);
         let legacy = if j > i.jwt {
             0.0f64.max(raw_prod)
         } else if m.anoxicmicrosites {
@@ -435,7 +436,7 @@ pub fn prod(m: &super::config::MethaneConfig, i: &ProdInput<'_>) -> ProdOutput {
                 0.0
             };
         out.methane_prod_depth[k] = prod;
-        let mut o2 = 0.0f64.max((-prod).mul_add(2.0, carbon));
+        let mut o2 = 0.0f64.max((-prod).contract(2.0, carbon));
         if m.anoxia && !m.bgc_anoxia_limits_decomp && i.o_scalar[k] > 0.0 {
             o2 /= i.o_scalar[k].max(0.01);
         }
@@ -696,9 +697,9 @@ pub fn ebul(
         }
         let z = z_soisno[sn(j)];
         let mut pressure = if patchtype == 4 && m.allowlakeprod {
-            (z + lakedepth.max(0.0)).mul_add(rho_g, forc_pbot)
+            (z + lakedepth.max(0.0)).contract(rho_g, forc_pbot)
         } else {
-            (z - zi(jwt)).mul_add(rho_g, forc_pbot)
+            (z - zi(jwt)).contract(rho_g, forc_pbot)
         };
         if patchtype != 4 && sat == 1 && finundated > 0.0 {
             pressure += wdsrf * rho_g / 1000.0 / finundated.max(0.01);
@@ -706,7 +707,7 @@ pub fn ebul(
         let vgc = conc_ch4_gas_porsl[k] * RGASM * t / pressure;
         if vgc > m.vgc_max {
             out[k] =
-                (-m.vgc_max).mul_add(m.bubble_f, vgc) / vgc.max(SMALL) * conc_methane[k] / deltim;
+                (-m.vgc_max).contract(m.bubble_f, vgc) / vgc.max(SMALL) * conc_methane[k] / deltim;
         }
     }
     out
@@ -802,7 +803,7 @@ pub struct TranOutput {
 fn water_poly(s: usize, t_c: f64) -> f64 {
     use super::config::D_CON_W;
     let d = &D_CON_W[s];
-    (t_c * t_c).mul_add(d[2], t_c.mul_add(d[1], d[0]))
+    (t_c * t_c).contract(d[2], t_c.contract(d[1], d[0]))
 }
 
 /// `methane_tran`（`backward_euler_transport = .true.`，非湖）：先按 O2、CH4 的供需限幅各汇项，
@@ -840,14 +841,14 @@ pub fn tran(
             lake_total_depth += d.max(0.0);
         }
         for (&d, &ice) in lake.dz_lake.iter().zip(lake.lake_icefrac) {
-            lake_liquid_depth = d.max(0.0).mul_add(unfrozen(ice), lake_liquid_depth);
+            lake_liquid_depth = d.max(0.0).contract(unfrozen(ice), lake_liquid_depth);
         }
         let mut temp = 0.0f64;
         let mut weight_sum = 0.0f64;
         for ((&d, &ice), &t) in lake.dz_lake.iter().zip(lake.lake_icefrac).zip(lake.t_lake) {
             let weight = d.max(0.0) * unfrozen(ice);
             if !t.is_nan() && t > 150.0 && t < 350.0 {
-                temp = weight.mul_add(t, temp);
+                temp = weight.contract(t, temp);
                 weight_sum += weight;
             }
         }
@@ -887,10 +888,10 @@ pub fn tran(
                 .min(lake_water.o2.max(0.0) / (dt * 2.0));
         }
         lake_water.ch4 = (-dt)
-            .mul_add(out.lake_water_ch4_oxid, lake_water.ch4)
+            .contract(out.lake_water_ch4_oxid, lake_water.ch4)
             .max(0.0);
         lake_water.o2 = (-dt)
-            .mul_add(out.lake_water_ch4_oxid * 2.0, lake_water.o2)
+            .contract(out.lake_water_ch4_oxid * 2.0, lake_water.o2)
             .max(0.0);
     }
     if !m.use_aereoxid_prog {
@@ -898,7 +899,7 @@ pub fn tran(
             if l.methane_aere_depth[k] > 0.0 {
                 let flux = m.aereoxid * l.methane_aere_depth[k];
                 l.methane_oxid_depth[k] += flux;
-                l.o2_oxid_depth[k] = flux.mul_add(2.0, l.o2_oxid_depth[k]);
+                l.o2_oxid_depth[k] = flux.contract(2.0, l.o2_oxid_depth[k]);
                 l.methane_aere_depth[k] -= flux;
             }
         }
@@ -962,7 +963,7 @@ pub fn tran(
         out.methane_stress[k] = ch4stress;
     }
     for k in 0..n {
-        out.methane_ebul_tot = l.methane_ebul_depth[k].mul_add(dz(k), out.methane_ebul_tot);
+        out.methane_ebul_tot = l.methane_ebul_depth[k].contract(dz(k), out.methane_ebul_tot);
     }
     // `source(j,s)`：CH4、O2。
     let mut source = [[0.0f64; 2]; NL_SOIL];
@@ -975,7 +976,7 @@ pub fn tran(
         source[k][1] = (-l.o2_oxid_depth[k] - l.o2_decomp_depth[k]) + i.o2_aere_depth[k];
     }
     for k in 0..n {
-        out.methane_surf_aere = l.methane_aere_depth[k].mul_add(dz(k), out.methane_surf_aere);
+        out.methane_surf_aere = l.methane_aere_depth[k].contract(dz(k), out.methane_surf_aere);
     }
     if i.jwt != 0 {
         let k = (i.jwt - 1) as usize;
@@ -999,8 +1000,10 @@ pub fn tran(
             rel[0][k + 1] = 0.0;
             rel[1][k + 1] = 0.0;
         } else if j <= i.jwt {
-            eps[k][0] = kh[0].mul_add(i.vol_ch4_storage[k], i.vol_gas[k]).max(SMALL);
-            eps[k][1] = kh[1].mul_add(i.vol_aqu[k], i.vol_gas[k]).max(SMALL);
+            eps[k][0] = kh[0]
+                .contract(i.vol_ch4_storage[k], i.vol_gas[k])
+                .max(SMALL);
+            eps[k][1] = kh[1].contract(i.vol_aqu[k], i.vol_gas[k]).max(SMALL);
             rel[0][k + 1] = l.conc_methane[k] / eps[k][0];
             rel[1][k + 1] = i.conc_o2_gas_porsl[k];
         } else {
@@ -1026,7 +1029,7 @@ pub fn tran(
             let airfrac = (1.0 - icefrac - waterfrac).max(0.0);
             let filled = waterfrac + airfrac;
             let snowdiff = if airfrac > 0.05 {
-                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0]) * 1.0e-4 * airfrac.lpow(10.0 / 3.0)
+                t_c.contract(D_CON_G[s][1], D_CON_G[s][0]) * 1.0e-4 * airfrac.lpow(10.0 / 3.0)
                     / (filled * filled)
                     * m.scale_factor_gasdiff
             } else {
@@ -1075,14 +1078,14 @@ pub fn tran(
                 let wind = if us.is_nan() || vs.is_nan() || us.abs() > 1.0e30 || vs.abs() > 1.0e30 {
                     0.0
                 } else {
-                    us.mul_add(us, vs * vs).max(0.0).sqrt()
+                    us.contract(us, vs * vs).max(0.0).sqrt()
                 };
-                let k600 = wind.max(0.0).lpow(1.7).mul_add(0.215, 2.07);
+                let k600 = wind.max(0.0).lpow(1.7).contract(0.215, 2.07);
                 let t_c = 0.0f64.max(30.0f64.min(i.t_h2osfc - TFRZ));
                 let t2 = t_c * t_c;
                 let c = &S_CON[s];
                 let schmidt = c[3]
-                    .mul_add(t_c * t2, t2.mul_add(c[2], t_c.mul_add(c[1], c[0])))
+                    .contract(t_c * t2, t2.contract(c[2], t_c.contract(c[1], c[0])))
                     .max(300.0);
                 lake_exchange_vel = (schmidt / 600.0).lpow(-2.0 / 3.0) * (k600 * 1.0e-2 / 3600.0);
             }
@@ -1115,9 +1118,9 @@ pub fn tran(
                 let first = vg.lpow(10.0 / 3.0) * om_frac / (porsl * porsl);
                 let second = (vg * vg) * one_minus;
                 let ratio_pow = (vg / porsl).lpow(3.0 / i.bsw[k].max(0.5));
-                t_c.mul_add(D_CON_G[s][1], D_CON_G[s][0])
+                t_c.contract(D_CON_G[s][1], D_CON_G[s][0])
                     * 1.0e-4
-                    * second.mul_add(ratio_pow, first)
+                    * second.contract(ratio_pow, first)
                     * m.scale_factor_gasdiff
             } else {
                 i.vol_aqu[k].max(SMALL).lpow(m.satpow)
@@ -1192,7 +1195,7 @@ pub fn tran(
             };
             bt[0] = (lake_sed_water_cond + lake_storage / dt) + lake_exchange_vel;
             ct[0] = -lake_sed_water_cond;
-            rt[0] = (i.k_h_cc[0][s] * lake_exchange_vel).mul_add(i.c_atm[s], old / dt);
+            rt[0] = (i.k_h_cc[0][s] * lake_exchange_vel).contract(i.c_atm[s], old / dt);
         } else {
             bt[0] = 1.0;
             rt[0] = i.c_atm[s];
@@ -1216,17 +1219,17 @@ pub fn tran(
                 ct[j as usize] = -(r * dp1[k]);
                 if j == jwt {
                     at[j as usize] = -a;
-                    bt[j as usize] = kh(j).mul_add(dp1[k], dm1[k]).mul_add(r, e);
+                    bt[j as usize] = kh(j).contract(dp1[k], dm1[k]).contract(r, e);
                 } else {
                     at[j as usize] = if j == jwt + 1 { -(kh(j - 1) * a) } else { -a };
-                    bt[j as usize] = (dm1[k] + dp1[k]).mul_add(r, e);
+                    bt[j as usize] = (dm1[k] + dp1[k]).contract(r, e);
                 }
             } else {
                 let a = dm1[k] * r;
                 at[j as usize] = if j == jwt + 1 { -(kh(j - 1) * a) } else { -a };
                 bt[j as usize] = e + a;
             }
-            rt[j as usize] = e.mul_add(rel[s][j as usize], source[k][s]);
+            rt[j as usize] = e.contract(rel[s][j as usize], source[k][s]);
         }
         let mut u = rel[s];
         tridiagonal(0, NL_SOIL as i32, 0, &at, &bt, &ct, &rt, &mut u);
@@ -1235,11 +1238,11 @@ pub fn tran(
             out.methane_surf_diff = if is_lake_water {
                 lake_water.ch4 = lake_storage * rel[0][0];
                 out.lake_sed_ch4_flux = lake_sed_water_cond * (rel[0][1] - rel[0][0]);
-                (-i.k_h_cc[0][0]).mul_add(i.c_atm[0], rel[0][0]) * lake_exchange_vel
+                (-i.k_h_cc[0][0]).contract(i.c_atm[0], rel[0][0]) * lake_exchange_vel
             } else if jwt != 0 {
                 dm1[0] * (rel[0][1] - i.c_atm[0])
             } else {
-                dm1[0] * (-i.k_h_cc[0][0]).mul_add(i.c_atm[0], rel[0][1])
+                dm1[0] * (-i.k_h_cc[0][0]).contract(i.c_atm[0], rel[0][1])
             };
             out.methane_surf_ebul = if jwt != 0 { 0.0 } else { out.methane_ebul_tot };
             out.methane_surf_diff_phys = out.methane_surf_diff;
@@ -1263,14 +1266,14 @@ pub fn tran(
                 lake_water.o2 = lake_storage * rel[1][0];
                 out.lake_sed_o2_flux = lake_sed_water_cond * (rel[1][1] - rel[1][0]);
                 out.lake_air_o2_flux =
-                    (-i.k_h_cc[0][1]).mul_add(i.c_atm[1], rel[1][0]) * lake_exchange_vel;
+                    (-i.k_h_cc[0][1]).contract(i.c_atm[1], rel[1][0]) * lake_exchange_vel;
             }
             let mut gain = 0.0;
             for k in 0..n {
                 let before = rel[1][k + 1];
                 rel[1][k + 1] = before.max(0.0);
                 if rel[1][k + 1] > before {
-                    gain = ((rel[1][k + 1] - before) * eps[k][1]).mul_add(dz(k), gain);
+                    gain = ((rel[1][k + 1] - before) * eps[k][1]).contract(dz(k), gain);
                 }
             }
             if dt > 0.0 {
@@ -1290,19 +1293,19 @@ pub fn tran(
     }
     let mut err = 0.0f64;
     for k in 0..n {
-        err = (l.conc_methane[k] - conc_ch4_bef[k]).mul_add(dz(k), err);
-        err = (-(dz(k) * i.methane_prod_depth[k])).mul_add(dt, err);
-        err = (dz(k) * l.methane_oxid_depth[k]).mul_add(dt, err);
-        err = (dz(k) * l.methane_tran_depth[k]).mul_add(dt, err);
+        err = (l.conc_methane[k] - conc_ch4_bef[k]).contract(dz(k), err);
+        err = (-(dz(k) * i.methane_prod_depth[k])).contract(dt, err);
+        err = (dz(k) * l.methane_oxid_depth[k]).contract(dt, err);
+        err = (dz(k) * l.methane_tran_depth[k]).contract(dt, err);
     }
     if is_lake_water {
         err = out
             .lake_water_ch4_oxid
-            .mul_add(dt, (err + lake_water.ch4) - lake_ch4_stock_bef);
+            .contract(dt, (err + lake_water.ch4) - lake_ch4_stock_bef);
     }
     out.grnd_methane_cond_effective = spec_grnd_cond[0];
     err =
-        ((out.methane_surf_aere + out.methane_surf_ebul) + out.methane_surf_diff).mul_add(dt, err);
+        ((out.methane_surf_aere + out.methane_surf_ebul) + out.methane_surf_diff).contract(dt, err);
     out.methane_balance_residual = -err / dt;
     out.methane_surf_diff += out.methane_balance_residual;
     anyhow::ensure!(
@@ -1360,7 +1363,7 @@ pub fn f_h2osfc(hydrology: &super::config::MethaneHydrology, slpratio: f64, wdsr
     let f = |d: f64| {
         let cdf = erf(d / s2) + 1.0;
         (
-            (d * 0.5).mul_add(cdf, amp * (-(d * d / twice_var)).exp()) - wdsrf,
+            (d * 0.5).contract(cdf, amp * (-(d * d / twice_var)).exp()) - wdsrf,
             cdf,
         )
     };

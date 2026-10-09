@@ -4,6 +4,7 @@
 //! 建成年份与库容、流量参数。网络里出现的坝按参数表行序编号（续跑里 `volresv` 的次序，
 //! `resv_global_id`）。调度用 CaMa-Flood v4.20 的四段方案（Funato et al.）。
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -187,7 +188,7 @@ impl Reservoir {
         if vol > ve {
             qin.max(qf)
         } else if vol > va {
-            let qout = (qf - qa).mul_add(((vol - va) / (ve - va)).lpow(0.1), qa);
+            let qout = (qf - qa).contract(((vol - va) / (ve - va)).lpow(0.1), qa);
             if qin > qf {
                 let q1 = qn + (qin - qn) * (vol - vn) / (ve - vn);
                 qout.max(q1)
@@ -195,7 +196,7 @@ impl Reservoir {
                 qout
             }
         } else if vol > vn {
-            (qa - qn).mul_add(((vol - vn) / (va - vn)).lpow(3.0), qn)
+            (qa - qn).contract(((vol - vn) / (va - vn)).lpow(3.0), qn)
         } else {
             (vol / vn).lpow(0.5) * qn
         }

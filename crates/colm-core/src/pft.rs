@@ -12,6 +12,7 @@
 //! `tmp = tmp + x*pftfrac(i)` 也一样。见 [`pft_sum`]。
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::radiation::{broadband_radiation_from_ground_using, TwoStreamKind};
 use crate::{
@@ -218,7 +219,7 @@ pub(crate) fn pft_ozone(
 pub fn pft_sum(terms: impl IntoIterator<Item = (f64, f64)>) -> f64 {
     terms
         .into_iter()
-        .fold(0.0, |sum, (value, fraction)| value.mul_add(fraction, sum))
+        .fold(0.0, |sum, (value, fraction)| value.contract(fraction, sum))
 }
 
 /// `LEAF_interception_pftwrap`（`MOD_LeafInterception.F90:629-727`）。
@@ -385,7 +386,7 @@ pub fn pft_snow_fraction(
             column.vegetation_free_fraction = 1.0 - buried;
         }
         // `:148`：`wt_tmp = FMA(wt, pftfrac(i), wt_tmp)`。
-        vegetation_snow_fraction = buried.mul_add(parameters.fraction, vegetation_snow_fraction);
+        vegetation_snow_fraction = buried.contract(parameters.fraction, vegetation_snow_fraction);
     }
     Ok(PftSnowFraction {
         vegetation_snow_fraction,
@@ -442,7 +443,8 @@ pub fn aggregate_pft_radiation(
                 let transmission = state.transmission?;
                 for band in 0..2 {
                     for beam in 0..3 {
-                        sum[band][beam] = transmission[band][beam].mul_add(weight, sum[band][beam]);
+                        sum[band][beam] =
+                            transmission[band][beam].contract(weight, sum[band][beam]);
                     }
                 }
                 Some(sum)
@@ -1161,7 +1163,7 @@ fn pc_records(
         preliminary,
     );
     // `MOD_Thermal.F90:1088`：`z0m_p = (1-fsno)*zlnd + fsno*zsno`，`z0m = sum(z0m_p*pftfrac)`。
-    let ground_roughness = (1.0 - template.snow_cover_fraction).mul_add(
+    let ground_roughness = (1.0 - template.snow_cover_fraction).contract(
         template.soil_roughness_m,
         template.snow_cover_fraction * template.snow_roughness_m,
     );
@@ -1324,10 +1326,10 @@ fn bare_record(context: &PftCanopyContext<'_>, layers: usize) -> PftLeafRecord {
     let stefan = crate::leaf_temperature::STEFAN_BOLTZMANN;
     let ulrad = if context.input.ground_temperature.use_split_soil_snow {
         let fsno = ground.snow_cover_fraction;
-        let snow = (fsno * emissivity * stefan).mul_add(fourth(ground.snow_temperature_k), base);
-        ((1.0 - fsno) * emissivity * stefan).mul_add(fourth(ground.soil_temperature_k), snow)
+        let snow = (fsno * emissivity * stefan).contract(fourth(ground.snow_temperature_k), base);
+        ((1.0 - fsno) * emissivity * stefan).contract(fourth(ground.soil_temperature_k), snow)
     } else {
-        fourth(ground.ground_temperature_k).mul_add(emissivity * stefan, base)
+        fourth(ground.ground_temperature_k).contract(emissivity * stefan, base)
     };
     PftLeafRecord {
         rst: 2.0e4,

@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::FREEZING_K;
 
@@ -112,7 +113,7 @@ pub fn canopy_wetness(
         let snow = coverage(48.0, water.snow_mm);
         // `fwet = fwet_rain + fwet_snow - fwet_rain*fwet_snow`：GIMPLE 是
         // `.FNMA (fwet_rain, fwet_snow, fwet_rain+fwet_snow)`（AT-Neu 1 月第 298 步差 1 ULP）。
-        (-rain).mul_add(snow, rain + snow).min(1.0)
+        (-rain).contract(snow, rain + snow).min(1.0)
     } else {
         coverage(1.0, water.total_mm)
     };
@@ -176,7 +177,7 @@ pub fn canopy_wetness_with_capacity(
         } else {
             0.0
         };
-        (-rain).mul_add(snow, rain + snow).min(1.0)
+        (-rain).contract(snow, rain + snow).min(1.0)
     } else {
         rain_coverage(water.total_mm)
     };
@@ -283,7 +284,7 @@ pub fn canopy_storage_capacity_colm2024(
         return fallback;
     }
     let wind = eastward_wind_m_s
-        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .contract(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
         .max(0.0)
         .sqrt();
     let in_range = |value: f64| value.is_finite() && value > 0.0 && value < 1000.0;
@@ -429,8 +430,8 @@ pub fn intercept_canopy(
         let large_scale_fraction = large_scale_amount / precipitation_amount;
         // `.loc 1 221/222`：`ap`/`cp` 这两个"两乘积相加"里，**第一个**源乘积进 FMA
         // （`fmadd d28,d25,d17,d28` / `fmadd d29,d25,d27,d29`，加数是第二个乘积）。
-        let ap = convective_fraction.mul_add(20.0, large_scale_fraction * 0.206e-8);
-        let cp = convective_fraction.mul_add(0.0001, large_scale_fraction * 0.9999);
+        let ap = convective_fraction.contract(20.0, large_scale_fraction * 0.206e-8);
+        let cp = convective_fraction.contract(0.0001, large_scale_fraction * 0.9999);
         let chiv = if input.leaf_angle_distribution.abs() <= f77(0.01) {
             f77(0.01)
         } else {
@@ -438,10 +439,10 @@ pub fn intercept_canopy(
         };
         // `.loc 1 229`：`0.5 - 0.633*chiv - 0.33*chiv*chiv` 的两步减法各是一条 `fmsub`
         // （第二步收的是 `chiv*(0.33*chiv)`）。
-        let aa1 = (-f77(0.633)).mul_add(chiv, f77(0.5));
-        let aa1 = (-(f77(0.33) * chiv)).mul_add(chiv, aa1);
+        let aa1 = (-f77(0.633)).contract(chiv, f77(0.5));
+        let aa1 = (-(f77(0.33) * chiv)).contract(chiv, aa1);
         // `.loc 1 230`：`0.877*(1. - 2.*aa1)` 里的 `1 - 2*aa1` 是 `fmsub`。
-        let bb1 = f77(0.877) * (-f77(2.0)).mul_add(aa1, f77(1.0));
+        let bb1 = f77(0.877) * (-f77(2.0)).contract(aa1, f77(1.0));
         let exrain = aa1 + bb1;
         let interception_fraction = f77(0.25) * (f77(1.0) - (-exrain * leaf_stem_area).exp());
         let direct_rain_mm =
@@ -495,7 +496,7 @@ pub fn intercept_canopy(
             // `:285 FP = (ppc+ppl)/(10.*ppc+ppl)`：出货汇编是
             // `fmadd d29,d16,d30,d18`（d16=ppc、d30=10）⇒ 分母的 `10.*ppc` 进 FMA。
             let snow_loading_factor = (convective_amount + large_scale_amount)
-                / f77(10.0).mul_add(convective_amount, large_scale_amount);
+                / f77(10.0).contract(convective_amount, large_scale_amount);
             let intercepted_snow_rate = (vegetation_fraction * snow_rate * snow_loading_factor)
                 .min(
                     (saturation_snow - water.snow_mm) / input.time_step_seconds
@@ -509,7 +510,7 @@ pub fn intercept_canopy(
                 // `MOD_LeafInterception.F90:293`: `FV = sqrt(us*us+vs*vs)/1.56e5`.
                 input
                     .eastward_wind_m_s
-                    .mul_add(
+                    .contract(
                         input.eastward_wind_m_s,
                         input.northward_wind_m_s * input.northward_wind_m_s,
                     )
@@ -523,7 +524,7 @@ pub fn intercept_canopy(
             drainage_snow_mm = unloading_rate * input.time_step_seconds;
             // `:295 tti_snow = (1-fvegc)*rate + (fvegc*rate - qintr_snow)` 的出货汇编是
             // `fmadd d30,d23,d19,d30`（第一个乘积进 FMA），`.loc 1 299`。
-            direct_snow_mm = (f77(1.0) - vegetation_fraction).mul_add(
+            direct_snow_mm = (f77(1.0) - vegetation_fraction).contract(
                 snow_rate,
                 vegetation_fraction * snow_rate - intercepted_snow_rate,
             ) * input.time_step_seconds;
@@ -546,8 +547,10 @@ pub fn intercept_canopy(
         // `:328-329`：出货汇编是 `fmadd rate,dt,ldew_x` 再单独 `fsub thru_x`
         // （`.loc 1 328/329`）—— 既不是 `ldew + (rate*dt - thru)` 的结合顺序，
         // 也没把乘积独立舍入。
-        water.rain_mm = rain_rate.mul_add(input.time_step_seconds, water.rain_mm) - through_rain_mm;
-        water.snow_mm = snow_rate.mul_add(input.time_step_seconds, water.snow_mm) - through_snow_mm;
+        water.rain_mm =
+            rain_rate.contract(input.time_step_seconds, water.rain_mm) - through_rain_mm;
+        water.snow_mm =
+            snow_rate.contract(input.time_step_seconds, water.snow_mm) - through_snow_mm;
         water.total_mm = water.rain_mm + water.snow_mm;
     }
 
@@ -638,11 +641,11 @@ fn drainage(
     // `:253-254`：`(ap/bp*(1-exp(-bp*xs))+cp*xs)` 里**第一个**乘积进 FMA
     // （`fmadd d17,d1,d17,d0`）；外层 `A*fpi*(...) - max(0,…)*xs` 是 `fnmsub`
     // （`A*fpi*(...)` 那个乘积进 FMA、`max(0,…)*xs` 是加数）。
-    let bracket = (ap / f77(20.0)).mul_add(
+    let bracket = (ap / f77(20.0)).contract(
         f77(1.0) - (-f77(20.0) * saturated_fraction).exp(),
         cp * saturated_fraction,
     );
-    let drainage = (rain_rate * time_step_seconds * interception_fraction).mul_add(
+    let drainage = (rain_rate * time_step_seconds * interception_fraction).contract(
         bracket,
         -((saturation_capacity - water_mm).max(0.0) * saturated_fraction),
     );

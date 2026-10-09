@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::FREEZING_K;
 
@@ -57,11 +58,11 @@ pub fn soil_thermal_properties(
     // `hcap = csol + vf_water*c_water + vf_ice*c_ice`（`MOD_SoilThermalParameters.F90:299`）。
     // 两个乘积都被收进加法（GIMPLE：`FMA(vfw, cw, csol)` 再 `FMA(vfi, ci, ·)`）——
     // `csol` 是变量不是乘积，所以第一级收的是右边那个。
-    let heat_capacity_j_m3_k = input.ice_volume_fraction.mul_add(
+    let heat_capacity_j_m3_k = input.ice_volume_fraction.contract(
         f77(1.94153e6),
         input
             .liquid_volume_fraction
-            .mul_add(f77(4.188e6), input.dry_heat_capacity_j_m3_k),
+            .contract(f77(4.188e6), input.dry_heat_capacity_j_m3_k),
     );
     let saturation = ((input.liquid_volume_fraction + input.ice_volume_fraction)
         / input.pore_volume_fraction)
@@ -112,7 +113,7 @@ fn conductivity_for_saturated_soil(
             // 乘积被吸收（GIMPLE 的 `FMA(ksat-kdry, ke, kdry)`）。这条在**两个**
             // 方案分支里各出现一次（1–5 一组、6–8 那组），两处都要。
             (saturated - input.dry_conductivity_w_m_k)
-                .mul_add(kersten, input.dry_conductivity_w_m_k)
+                .contract(kersten, input.dry_conductivity_w_m_k)
         }
         ThermalConductivityScheme::TarnawskiLeong => tarnawski_leong(input, saturation, unfrozen),
         ThermalConductivityScheme::DeVries => de_vries(input, saturation, unfrozen),
@@ -121,7 +122,7 @@ fn conductivity_for_saturated_soil(
             // `FNMS(ksat_u, 0.303, 0.201*wf_sand)` —— 第一个乘积被吸收，
             // 第二个是**先舍入**的普通乘积（它被提成公共量）。1.532 最后加。
             let beta = (-input.saturated_unfrozen_conductivity_w_m_k)
-                .mul_add(f77(0.303), -(f77(0.201) * input.sand_mass_fraction))
+                .contract(f77(0.303), -(f77(0.201) * input.sand_mass_fraction))
                 + f77(1.532);
             let kersten = if input.liquid_volume_fraction > f77(0.01) {
                 (1.0 + (input.pore_volume_fraction / beta).lpow(-beta))
@@ -139,7 +140,7 @@ fn conductivity_for_saturated_soil(
             // 乘积被吸收（GIMPLE 的 `FMA(ksat-kdry, ke, kdry)`）。这条在**两个**
             // 方案分支里各出现一次（1–5 一组、6–8 那组），两处都要。
             (saturated - input.dry_conductivity_w_m_k)
-                .mul_add(kersten, input.dry_conductivity_w_m_k)
+                .contract(kersten, input.dry_conductivity_w_m_k)
         }
     }
 }
@@ -167,7 +168,7 @@ fn kersten_number(
                 // 粗粒支是 `ke = 0.7*log10(max(sr,0.05)) + 1.0`，乘积被吸收
                 // （GIMPLE：`FMA(log10, 0.7, 1.0)`）；紧邻的细粒支没有乘积
                 // （`log10(max(sr,0.1)) + 1.0`），保持普通加法。
-                f77(0.7).mul_add(saturation.max(f77(0.05)).log10(), 1.0)
+                f77(0.7).contract(saturation.max(f77(0.05)).log10(), 1.0)
             } else {
                 saturation.max(f77(0.1)).log10() + 1.0
             }
@@ -194,7 +195,7 @@ fn kersten_number(
             };
             // `ke = kappa*sr/(1.0+(kappa-1.0)*sr)`：分子是普通乘积，分母的
             // `(kappa-1.0)*sr` 被吸收（GIMPLE：`FMA(sr, kappa-1, 1.0)`）。
-            kappa * saturation / (kappa - 1.0).mul_add(saturation, 1.0)
+            kappa * saturation / (kappa - 1.0).contract(saturation, 1.0)
         }
         ThermalConductivityScheme::BallandArp => {
             if unfrozen {
@@ -203,13 +204,13 @@ fn kersten_number(
                 // （`MOD_SoilThermalParameters.F90:369-372`）。三处收缩（GIMPLE 实测）：
                 // `FNMA(BA_alpha, vf_sand, 1+vf_om)`、`FMS(wet, wet*wet, dry**3)`、
                 // 以及最后 `thk` 那条 `FMA(ksat-kdry, ke, kdry)`。
-                let exponent_sum = (-input.balland_alpha).mul_add(
+                let exponent_sum = (-input.balland_alpha).contract(
                     input.sand_volume_fraction_of_solids,
                     1.0 + input.organic_volume_fraction_of_solids,
                 ) - input.gravel_volume_fraction_of_solids;
                 let wet_cube_base = 1.0 / (1.0 + (-input.balland_beta * saturation).exp());
                 let dry_cube_base = (1.0 - saturation) / f77(2.0);
-                let cube_difference = wet_cube_base.mul_add(
+                let cube_difference = wet_cube_base.contract(
                     wet_cube_base * wet_cube_base,
                     -(dry_cube_base * dry_cube_base * dry_cube_base),
                 );
@@ -242,11 +243,11 @@ fn tarnawski_leong(input: SoilThermalInput, saturation: f64, unfrozen: bool) -> 
     let coarse_cube = coarse_fraction.powi(3);
     // `aa = 0.0237-0.0175*a**3`、`nwm = 0.088-0.037*a**3`：两个乘积都被吸收
     // （GIMPLE：`FNMA(a**3, 0.0175, 0.0237)` 与 `FNMA(a**3, 0.037, 0.088)`）。
-    let solid_path = (-f77(0.0175)).mul_add(coarse_cube, f77(0.0237));
-    let micro_pore_fraction = (-f77(0.037)).mul_add(coarse_cube, f77(0.088));
+    let solid_path = (-f77(0.0175)).contract(coarse_cube, f77(0.0237));
+    let micro_pore_fraction = (-f77(0.037)).contract(coarse_cube, f77(0.088));
     // `x = 0.6-0.3*a**3`，而 `sr**(-x)` 里 GCC 把负号并进了收缩：
     // `FNMA(a**3, 0.3, 0.6)` 算的正是 `0.3*a**3-0.6 = -x`，所以这里直接算 `-x`。
-    let negated_exponent = f77(0.3).mul_add(coarse_cube, -f77(0.6));
+    let negated_exponent = f77(0.3).contract(coarse_cube, -f77(0.6));
     let wet_micro_pores = if saturation < f77(1.0e-6) {
         0.0
     } else {
@@ -256,23 +257,23 @@ fn tarnawski_leong(input: SoilThermalInput, saturation: f64, unfrozen: bool) -> 
     let air_conductivity = f77(0.024);
     // `kf*nw_nwm + ka*(1-nw_nwm)`：被加数那个乘积被吸收
     // （GIMPLE：`FMA(nw_nwm, kf, ka*(1-nw_nwm))`）。
-    let pore_fluid_conductivity = wet_micro_pores.mul_add(
+    let pore_fluid_conductivity = wet_micro_pores.contract(
         fluid_conductivity,
         air_conductivity * (1.0 - wet_micro_pores),
     );
     let free_pores = 1.0 - input.pore_volume_fraction - solid_path;
     // `sr*vf_pores - nwm*nw_nwm`：减数被吸收（`FNMA(nw_nwm, nwm, vf_pores*sr)`）。
     let liquid_excess =
-        (-micro_pore_fraction).mul_add(wet_micro_pores, input.pore_volume_fraction * saturation);
+        (-micro_pore_fraction).contract(wet_micro_pores, input.pore_volume_fraction * saturation);
     // `vf_pores*(1-sr) - nwm*(1-nw_nwm)`：被减数那个乘积被吸收（`FMS`），
     // 减数是**普通乘积**（它先被 CSE 成 `nwm*(1-nw_nwm)` 供两条分支共用）。
-    let air_excess = input.pore_volume_fraction.mul_add(
+    let air_excess = input.pore_volume_fraction.contract(
         1.0 - saturation,
         -(micro_pore_fraction * (1.0 - wet_micro_pores)),
     );
     // 加和顺序按 GIMPLE：`(2次项/分母 + k_solids*aa)` 先成和，再 `FMA(liquid_excess, kf, ·)`，
     // 最后才加 `ka*air_excess`。
-    liquid_excess.mul_add(
+    liquid_excess.contract(
         fluid_conductivity,
         (free_pores + micro_pore_fraction).powi(2)
             / (free_pores / input.solid_conductivity_w_m_k
@@ -289,34 +290,34 @@ fn de_vries(input: SoilThermalInput, saturation: f64, unfrozen: bool) -> f64 {
     let shape_air = if pore_liquid <= f77(0.09) {
         // `ga = 0.013+0.944*sr*vf_pores`：GIMPLE 先把 `0.944*sr` 舍成 `_163`，
         // 再 `FMA(vf_pores, _163, 0.013)` —— 分组不是"0.944*(sr*vf_pores)"。
-        (f77(0.944) * saturation).mul_add(input.pore_volume_fraction, f77(0.013))
+        (f77(0.944) * saturation).contract(input.pore_volume_fraction, f77(0.013))
     } else {
         // `ga = 0.333-(1-sr)*vf_pores/vf_pores*(0.333-0.035)` ⇒
         // `FNMA((1-sr)*vf_pores/vf_pores, 0.29800000000000004, 0.333)`。
-        (-f77(0.333 - 0.035)).mul_add(
+        (-f77(0.333 - 0.035)).contract(
             (1.0 - saturation) * input.pore_volume_fraction / input.pore_volume_fraction,
             f77(0.333),
         )
     };
     // `gc = 1-2*ga`：乘积被吸收（`FNMA(ga, 2.0, 1.0)`）。
-    let shape_solid = (-f77(2.0)).mul_add(shape_air, 1.0);
+    let shape_solid = (-f77(2.0)).contract(shape_air, 1.0);
     let air_ratio = air_conductivity / fluid_conductivity - 1.0;
     let solid_ratio = input.solid_conductivity_w_m_k / fluid_conductivity - 1.0;
     // 四个 `1/(1+(比值)*形状因子)` 都是 `FMA(形状因子, 比值, 1.0)`。
-    let fluid_shape = (f77(2.0) / air_ratio.mul_add(shape_air, 1.0)
-        + 1.0 / air_ratio.mul_add(shape_solid, 1.0))
+    let fluid_shape = (f77(2.0) / air_ratio.contract(shape_air, 1.0)
+        + 1.0 / air_ratio.contract(shape_solid, 1.0))
         / f77(3.0);
-    let solid_shape = (f77(2.0) / solid_ratio.mul_add(f77(0.125), 1.0)
-        + 1.0 / solid_ratio.mul_add(1.0 - f77(2.0) * f77(0.125), 1.0))
+    let solid_shape = (f77(2.0) / solid_ratio.contract(f77(0.125), 1.0)
+        + 1.0 / solid_ratio.contract(1.0 - f77(2.0) * f77(0.125), 1.0))
         / f77(3.0);
     // 分子：`sr*vf_pores*k_water + (1-sr)*vf_pores*aa*k_air + (1-vf_pores)*aaa*k_solids`
     // ⇒ `FMA(sr*vf_pores, kf, (1-sr)*vf_pores*aa*k_air)` 再 `FMA((1-vf_pores)*aaa, ks, ·)`；
     // 分母里的两个乘积都是普通乘积，和式顺序也与分子一致。
     let pore_one_minus = input.pore_volume_fraction * (1.0 - saturation);
     let solid_term = solid_shape * (1.0 - input.pore_volume_fraction);
-    let numerator = solid_term.mul_add(
+    let numerator = solid_term.contract(
         input.solid_conductivity_w_m_k,
-        pore_liquid.mul_add(
+        pore_liquid.contract(
             fluid_conductivity,
             (fluid_shape * pore_one_minus) * air_conductivity,
         ),

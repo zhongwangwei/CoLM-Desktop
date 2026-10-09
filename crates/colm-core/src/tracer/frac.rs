@@ -12,6 +12,7 @@
 #![allow(clippy::manual_clamp)]
 
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 use super::{TracerDescriptor, TracerPhysics, TRC_TINY};
 
@@ -237,7 +238,7 @@ impl TracerPhysics {
         let remaining_ratio = liquid_fraction.lpow(alpha_il - 1.0) * source_ratio;
         // `:153` `.FNMA (remaining_water, remaining_ratio, pool_trc)`
         (-remaining_water)
-            .mul_add(remaining_ratio, pool_trc)
+            .contract(remaining_ratio, pool_trc)
             .max(0.0)
             .min(pool_trc.max(0.0))
     }
@@ -284,8 +285,8 @@ impl TracerPhysics {
             return 1.0;
         }
         let diff_ratio = self.diffusivity_ratio_air(tracer);
-        let turbulent = diff_ratio.lpow(CG_EXPONENT_LIQUID).mul_add(rb1, ra1);
-        rc1.mul_add(diff_ratio, turbulent) / denom
+        let turbulent = diff_ratio.lpow(CG_EXPONENT_LIQUID).contract(rb1, ra1);
+        rc1.contract(diff_ratio, turbulent) / denom
     }
 
     /// `tracer_alpha_kinetic_soil`。
@@ -418,7 +419,7 @@ impl TracerPhysics {
         let delta_x = Self::ratio_to_delta(tracer, source_ratio);
         let delta_v = Self::ratio_to_delta(tracer, input.vapor_ratio);
         // GIMPLE `FMA((δv - ε_k) - δx, h, (ε_k + δx) + ε_eq)`。
-        let delta_es = ((delta_v - eps_k) - delta_x).mul_add(h, (eps_k + delta_x) + eps_eq);
+        let delta_es = ((delta_v - eps_k) - delta_x).contract(h, (eps_k + delta_x) + eps_eq);
 
         let transp_moles = transp_water * WATER_MOLES_PER_MM;
         let transp_moles_leaf_s = transp_moles / (deltim * leaf_area_safe);
@@ -430,7 +431,7 @@ impl TracerPhysics {
             peclet = if peclet_number > 1.0e-8 {
                 (1.0 - (-peclet_number).exp()) / peclet_number
             } else {
-                (-peclet_number).mul_add(0.5, 1.0)
+                (-peclet_number).contract(0.5, 1.0)
             };
         }
         let peclet = peclet.max(0.0).min(1.0);
@@ -464,15 +465,15 @@ impl TracerPhysics {
         }
         let gross_moles = conductance_gross_moles.max(gross_moles.max(TRC_TINY));
         let relax_b = (alpha_k * alpha_eq) / gross_moles;
-        let denom = (leaf_moles * relax_b).mul_add(peclet, 1.0);
+        let denom = (leaf_moles * relax_b).contract(peclet, 1.0);
         out.new_delta_e = if denom > TRC_TINY {
             let memory = (prev_p * prev_w) * (prev_e - delta_x);
-            let numerator = (leaf_moles * peclet).mul_add(delta_x, memory);
-            numerator.mul_add(relax_b, delta_es) / denom
+            let numerator = (leaf_moles * peclet).contract(delta_x, memory);
+            numerator.contract(relax_b, delta_es) / denom
         } else {
             delta_es
         };
-        out.new_delta_b = (out.new_delta_e - delta_x).mul_add(peclet, delta_x);
+        out.new_delta_b = (out.new_delta_e - delta_x).contract(peclet, delta_x);
 
         let (prev_leaf_water, prev_bulk_ratio) = if input.prev_leaf_moles > TRC_TINY {
             (
@@ -485,7 +486,7 @@ impl TracerPhysics {
         let new_leaf_water = leaf_moles / WATER_MOLES_PER_MM;
         let new_bulk_ratio = Self::delta_to_ratio(tracer, out.new_delta_b);
         let previous_storage = prev_leaf_water * prev_bulk_ratio;
-        let storage_tracer_change = new_bulk_ratio.mul_add(new_leaf_water, -previous_storage);
+        let storage_tracer_change = new_bulk_ratio.contract(new_leaf_water, -previous_storage);
         let storage_scale = (source_ratio * transp_water).max(TRC_TINY);
         let storage_bound = storage_scale * 0.95;
         let storage_tracer_change_used = if storage_tracer_change.abs() > storage_scale * 10.0 {
@@ -557,8 +558,8 @@ pub fn jm84_effective_alpha(alpha_eq: f64, diff_ratio: f64, tc: f64, slope: f64)
     if slope <= 0.0 || tc >= 0.0 {
         return alpha_eq;
     }
-    let s = (-slope).mul_add(tc, 1.0);
-    let denom = (alpha_eq * diff_ratio).mul_add(s - 1.0, 1.0);
+    let s = (-slope).contract(tc, 1.0);
+    let denom = (alpha_eq * diff_ratio).contract(s - 1.0, 1.0);
     if denom <= 0.0 {
         return alpha_eq;
     }
@@ -588,7 +589,7 @@ pub fn ice_deposition_alpha(
         slope,
     );
     let span = TFRZ - JM84_FULL_KINETIC_TEMP;
-    alpha_eq_at_tfrz.mul_add(
+    alpha_eq_at_tfrz.contract(
         temp_k - JM84_FULL_KINETIC_TEMP,
         (TFRZ - temp_k) * alpha_cold,
     ) / span
@@ -598,7 +599,7 @@ pub fn ice_deposition_alpha(
 pub fn mj79_kinetic_alpha(wind: f64, relative_factor: f64) -> f64 {
     let u = wind.max(0.0);
     let k = if u >= MJ79_WIND_THRESHOLD {
-        u.mul_add(MJ79_ROUGH_SLOPE, MJ79_ROUGH_OFFSET)
+        u.contract(MJ79_ROUGH_SLOPE, MJ79_ROUGH_OFFSET)
     } else {
         MJ79_SMOOTH_K
     };
@@ -615,7 +616,7 @@ pub fn soil_kinetic_alpha_core(ra: f64, rs: f64, diff_ratio: f64) -> f64 {
     }
     diff_ratio
         .lpow(CG_EXPONENT_LIQUID)
-        .mul_add(ra1, diff_ratio * rs1)
+        .contract(ra1, diff_ratio * rs1)
         / denom
 }
 
@@ -748,7 +749,7 @@ pub fn equilibration_exchange(
         return 0.0;
     }
     let ratio_old = pool_trc / pool_water;
-    let exchange = (pool_water * f) * alpha_eq.mul_add(vapor_ratio, -ratio_old);
+    let exchange = (pool_water * f) * alpha_eq.contract(vapor_ratio, -ratio_old);
     if exchange < 0.0 {
         -(-exchange).min(pool_trc.max(0.0))
     } else {
@@ -774,7 +775,7 @@ pub fn craig_gordon_ratio_core(
     if one_minus_h <= 0.0 {
         return equilibrium_ratio;
     }
-    let ratio = (-vapor_ratio).mul_add(h, equilibrium_ratio) / (alpha_k * one_minus_h);
+    let ratio = (-vapor_ratio).contract(h, equilibrium_ratio) / (alpha_k * one_minus_h);
     let bound = equilibrium_ratio.abs() * CRAIG_GORDON_MAX_RATIO_AMPLIFICATION;
     bound.min(ratio.max(-bound))
 }
@@ -787,7 +788,7 @@ pub fn surface_relhum(qair: f64, psrf: f64, temp_k: f64, over_ice: bool) -> f64 
     }
     let qsafe = qair.max(0.0);
     let psafe = psrf.max(1.0);
-    let eair = (qsafe * psafe) / qsafe.mul_add(0.378, 0.622);
+    let eair = (qsafe * psafe) / qsafe.contract(0.378, 0.622);
     (eair / esat).max(0.0).min(0.999_999)
 }
 

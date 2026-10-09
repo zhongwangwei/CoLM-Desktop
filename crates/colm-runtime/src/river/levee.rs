@@ -14,6 +14,7 @@
 // 夹紧保留上游 `MIN(MAX(·))` 的次序；逐层下标与上游的层号循环一一对应。
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
@@ -122,8 +123,8 @@ impl Levee {
                     fldgrd[i][j - 1] = 0.0;
                     dhgtnow = 0.0;
                 }
-                let width = (j as f64 - 0.5).mul_add(dwth_inc, rivwth);
-                fldstomax[i][j - 1] = (width * dhgtnow).mul_add(rivlen, dsto_fil);
+                let width = (j as f64 - 0.5).contract(dwth_inc, rivwth);
+                fldstomax[i][j - 1] = (width * dhgtnow).contract(rivlen, dsto_fil);
                 dsto_fil = fldstomax[i][j - 1];
                 dhgtpre = curve.flphgt[j];
             }
@@ -173,11 +174,11 @@ impl Levee {
             };
             levee.bassto[i] = dsto_fil;
             if dwth_add > 0.0 && grade > 0.0 {
-                let width = dwth_add.mul_add(0.5, dwth_fil) + rivwth;
-                levee.bassto[i] = (width * rise).mul_add(rivlen, dsto_fil);
+                let width = dwth_add.contract(0.5, dwth_fil) + rivwth;
+                levee.bassto[i] = (width * rise).contract(rivlen, dsto_fil);
             }
             let dhgtdif = levee.hgt[i] - levee.bashgt[i];
-            levee.topsto[i] = ((levee.dst[i] + rivwth) * dhgtdif).mul_add(rivlen, levee.bassto[i]);
+            levee.topsto[i] = ((levee.dst[i] + rivwth) * dhgtdif).contract(rivlen, levee.bassto[i]);
             levee.filsto[i] =
                 levee.total_volume_from_depth(network, i, curve.rivhgt + levee.hgt[i]);
             levee.topsto[i] = levee.topsto[i].max(levee.bassto[i]);
@@ -212,7 +213,7 @@ impl Levee {
                 break;
             }
             dsto_fil = self.fldstomax[i][j - 1];
-            dwth_fil = dwth_inc.mul_add(j as f64, rivwth);
+            dwth_fil = dwth_inc.contract(j as f64, rivwth);
             dhgtpre = curve.flphgt[j];
             j += 1;
         }
@@ -259,7 +260,7 @@ impl Levee {
                 break;
             }
             dsto_fil = self.fldstomax[i][j - 1];
-            dwth_fil = dwth_inc.mul_add(j as f64, rivwth);
+            dwth_fil = dwth_inc.contract(j as f64, rivwth);
             ddph_fil = curve.flphgt[j];
             j += 1;
         }
@@ -269,7 +270,7 @@ impl Levee {
             let grade = self.fldgrd[i][j - 1];
             if grade > 0.0 {
                 let dwth_add = widen(dwth_fil, dsto_add, rivlen, grade);
-                grade.mul_add(dwth_add, base)
+                grade.contract(dwth_add, base)
             } else {
                 base
             }
@@ -306,7 +307,7 @@ impl Levee {
             if flddph <= curve.flphgt[j] {
                 break;
             }
-            dwth_fil = dwth_inc.mul_add(j as f64, rivwth);
+            dwth_fil = dwth_inc.contract(j as f64, rivwth);
             dhgtpre = curve.flphgt[j];
             j += 1;
         }
@@ -394,7 +395,7 @@ impl Levee {
                 } else {
                     0.0
                 };
-                (add, add.mul_add(grade, ddph_fil))
+                (add, add.contract(grade, ddph_fil))
             } else if dwth_fil > 0.0 {
                 (0.0, dsto_add / dwth_fil / rivlen + ddph_fil)
             } else {
@@ -425,7 +426,7 @@ impl Levee {
         }
         if vol_total < self.filsto[i] {
             // 漫过堤顶、堤内还没灌满：堤外水位停在堤顶，多出来的进堤内。
-            let rivsto = hgt.mul_add(rivlen * rivwth, rivstomax);
+            let rivsto = hgt.contract(rivlen * rivwth, rivstomax);
             let unprotected = (self.topsto[i] - rivsto).max(0.0);
             let levsto = (vol_total - rivsto - unprotected).max(0.0);
             let ilev = ((frc * nlfp_f) as i64 + 1).max(1).min(nlfp as i64) as usize;
@@ -435,12 +436,12 @@ impl Levee {
             let mut j = ilev;
             while j <= nlfp {
                 let level = ((dst + rivwth) * (hgt - curve.flphgt[j]))
-                    .mul_add(rivlen, self.fldstomax[i][j - 1]);
+                    .contract(rivlen, self.fldstomax[i][j - 1]);
                 if vol_total < level {
                     break;
                 }
                 dsto_fil = level;
-                dwth_fil = (j as f64).mul_add(dwth_inc, -dst);
+                dwth_fil = (j as f64).contract(dwth_inc, -dst);
                 ddph_fil = curve.flphgt[j] - bashgt;
                 j += 1;
             }
@@ -454,7 +455,7 @@ impl Levee {
                 };
                 let fraction = (add + dwth_fil + dst) / (nlfp_f * dwth_inc);
                 (
-                    add.mul_add(grade, bashgt + ddph_fil),
+                    add.contract(grade, bashgt + ddph_fil),
                     fraction.max(0.0).min(1.0),
                 )
             } else {
@@ -476,9 +477,9 @@ impl Levee {
         let wdsrf = self.total_depth(network, i, vol_total);
         let flddph = wdsrf - curve.rivhgt;
         let fldfrc = self.flood_fraction_from_depth(network, i, wdsrf);
-        let rivsto = (rivlen * rivwth).mul_add(flddph, rivstomax);
+        let rivsto = (rivlen * rivwth).contract(flddph, rivstomax);
         let unprotected =
-            (((flddph - hgt) * (dst + rivwth)).mul_add(rivlen, self.topsto[i]) - rivsto).max(0.0);
+            (((flddph - hgt) * (dst + rivwth)).contract(rivlen, self.topsto[i]) - rivsto).max(0.0);
         LeveeStage {
             wdsrf,
             levsto: (vol_total - rivsto - unprotected).max(0.0),
@@ -504,7 +505,7 @@ impl Levee {
             self.total_volume_from_depth(network, i, wdsrf)
         } else if flddph <= self.hgt[i] + 1.0e-6 {
             ((self.dst[i] + network.rivwth[i]) * (flddph - self.bashgt[i]).max(0.0))
-                .mul_add(network.rivlen[i], self.bassto[i])
+                .contract(network.rivlen[i], self.bassto[i])
         } else {
             self.total_volume_from_depth(network, i, wdsrf) - levsto.max(0.0)
         };
@@ -515,7 +516,7 @@ impl Levee {
 /// 抛物线剖面上加宽多少才装得下 `dsto_add`：`sqrt(max(w² + 2*dsto/rivlen/grade, 0)) - w`。
 fn widen(dwth_fil: f64, dsto_add: f64, rivlen: f64, grade: f64) -> f64 {
     dwth_fil
-        .mul_add(dwth_fil, dsto_add * 2.0 / rivlen / grade)
+        .contract(dwth_fil, dsto_add * 2.0 / rivlen / grade)
         .max(0.0)
         .sqrt()
         - dwth_fil

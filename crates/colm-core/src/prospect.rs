@@ -11,6 +11,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{HighResolutionLeafOptics, HIGH_RES_WAVELENGTHS};
 
@@ -77,7 +78,7 @@ pub fn prospect_leaf_optics(
         * 1.0e-6;
     // `:338` `N = (0.9*(SLA*10.) + 0.025) / ((SLA*10.) - 0.01)`：分子是 `.FMA (sla*10, 0.9, 0.025)`
     let sla_10 = sla * 10.0;
-    let n = sla_10.mul_add(0.9, 0.025) / (sla_10 - 0.01);
+    let n = sla_10.contract(0.9, 0.025) / (sla_10 - 0.01);
     let cm = 1.0 / (sla * 1.0e4);
     let cab = (vmax25 * 1.0e6 - 3.72) / 1.3;
     // `:347` `0.01 - ((0.01 - 0.)*exp(-5.5*soilmoisture))`：GIMPLE 为 `0.01 - exp(-(sm*5.5))*0.01`
@@ -127,16 +128,16 @@ fn prospect_spectrum(
     let mut transmittance = Vec::with_capacity(HIGH_RES_WAVELENGTHS);
     for wavelength in (0..PROSPECT_WAVELENGTHS).step_by(SAMPLE_INTERVAL) {
         // `:105`：`k_Car*Car` 先乘，其余逐项 `.FMA`，最后除以 N
-        let k = data::DRY_MATTER_ABSORPTION[wavelength].mul_add(
+        let k = data::DRY_MATTER_ABSORPTION[wavelength].contract(
             cm,
-            data::WATER_ABSORPTION[wavelength].mul_add(
+            data::WATER_ABSORPTION[wavelength].contract(
                 cw,
-                data::BROWN_PIGMENT_ABSORPTION[wavelength].mul_add(
+                data::BROWN_PIGMENT_ABSORPTION[wavelength].contract(
                     cbrown,
-                    data::ANTHOCYANIN_ABSORPTION[wavelength].mul_add(
+                    data::ANTHOCYANIN_ABSORPTION[wavelength].contract(
                         anth,
                         data::CHLOROPHYLL_ABSORPTION[wavelength]
-                            .mul_add(cab, data::CAROTENOID_ABSORPTION[wavelength] * car),
+                            .contract(cab, data::CAROTENOID_ABSORPTION[wavelength] * car),
                     ),
                 ),
             ),
@@ -150,11 +151,11 @@ fn prospect_spectrum(
         let t21 = t12 / (refractive * refractive);
         let r21 = 1.0 - t21;
         // `:165` `1 - r21*r21*tau**2`：`.FNMA (tau², r21², 1)`
-        let denominator = (-(tau * tau)).mul_add(r21 * r21, 1.0);
+        let denominator = (-(tau * tau)).contract(r21 * r21, 1.0);
         let ta = talf * tau * t21 / denominator;
-        let ra = (r21 * tau).mul_add(ta, ralf);
+        let ra = (r21 * tau).contract(ta, ralf);
         let t = t12 * tau * t21 / denominator;
-        let r = (r21 * tau).mul_add(t, r12);
+        let r = (r21 * tau).contract(t, r12);
         let one_plus_r = r + 1.0;
         let one_minus_r = 1.0 - r;
         let d =
@@ -168,17 +169,17 @@ fn prospect_spectrum(
         let a2 = a * a;
         // `where (r+t >= 1)` 只覆盖零吸收的波段；上游先按一般式算出 Rsub/Tsub 再覆盖
         let (rsub, tsub) = if t + r >= 1.0 {
-            let tsub = t / (1.0 - t).mul_add(n - 1.0, t);
+            let tsub = t / (1.0 - t).contract(n - 1.0, t);
             (1.0 - tsub, tsub)
         } else {
-            let denominator = a2.mul_add(b_n2, -1.0);
+            let denominator = a2.contract(b_n2, -1.0);
             (
                 a * (b_n2 - 1.0) / denominator,
                 b_nm1 * (a2 - 1.0) / denominator,
             )
         };
         // `:198-200`
-        let denominator = (-rsub).mul_add(r, 1.0);
+        let denominator = (-rsub).contract(r, 1.0);
         let leaf_transmittance = tsub * ta / denominator;
         let leaf_reflectance = ra + ta * rsub * t / denominator;
         ensure!(
@@ -247,11 +248,11 @@ fn absorption_transmittance(k: f64) -> f64 {
     // `:120/135`：多项式整条是 `.FMA` 链；`tau = (1-k)*exp(-k) + k**2*yy` 为
     // `.FMA (1-k, exp(-k), yy*(k*k))`
     let y = if k <= 4.0 {
-        horner(&SMALL_K_COEFFICIENTS, k.mul_add(0.5, -1.0)) - k.ln()
+        horner(&SMALL_K_COEFFICIENTS, k.contract(0.5, -1.0)) - k.ln()
     } else {
         (-k).exp() * horner(&LARGE_K_COEFFICIENTS, 14.5 / (k + 3.25) - 1.0) / k
     };
-    (1.0 - k).mul_add((-k).exp(), y * (k * k))
+    (1.0 - k).contract((-k).exp(), y * (k * k))
 }
 
 fn horner(coefficients: &[f64], x: f64) -> f64 {
@@ -259,7 +260,7 @@ fn horner(coefficients: &[f64], x: f64) -> f64 {
         .iter()
         .copied()
         .fold(coefficients[0], |value, coefficient| {
-            value.mul_add(x, coefficient)
+            value.contract(x, coefficient)
         })
 }
 
@@ -276,18 +277,18 @@ fn tav(theta_degrees: f64) -> Result<Vec<f64>> {
         let a = (refractive + 1.0) * (refractive + 1.0) * 0.5;
         let k = -((n2 - 1.0) * (n2 - 1.0) * 0.25);
         // `sa**2 - np/2` 是 `.FMS (sa, sa, np*0.5)`
-        let b2 = sin_theta.mul_add(sin_theta, -(np * 0.5));
+        let b2 = sin_theta.contract(sin_theta, -(np * 0.5));
         let b1 = if theta_degrees == 90.0 {
             0.0
         } else {
-            b2.mul_add(b2, k).sqrt()
+            b2.contract(b2, k).sqrt()
         };
         let b = b1 - b2;
         let b3 = b * (b * b);
         let a3 = a * a * a;
         let k2 = k * k;
-        let ts =
-            (-b).mul_add(0.5, k / b + k2 / (b3 * 6.0)) - (-a).mul_add(0.5, k / a + k2 / (a3 * 6.0));
+        let ts = (-b).contract(0.5, k / b + k2 / (b3 * 6.0))
+            - (-a).contract(0.5, k / a + k2 / (a3 * 6.0));
         let nm2 = nm * nm;
         let tp1 = -((b - a) * (n2 * 2.0) / (np * np));
         let tp2 = -(n2 * 2.0 * np * (b / a).ln() / nm2);
@@ -295,11 +296,11 @@ fn tav(theta_degrees: f64) -> Result<Vec<f64>> {
         let n2_sq = n2 * n2;
         let np_2 = np * 2.0;
         let tp4 =
-            n2_sq * 16.0 * (n2_sq + 1.0) * (np_2.mul_add(b, -nm2) / np_2.mul_add(a, -nm2)).ln()
+            n2_sq * 16.0 * (n2_sq + 1.0) * (np_2.contract(b, -nm2) / np_2.contract(a, -nm2)).ln()
                 / (np.lpow(3.0) * nm2);
         let tp5 = n2.lpow(3.0)
             * 16.0
-            * (1.0 / (-nm).mul_add(nm, np_2 * b) - 1.0 / (-nm).mul_add(nm, np_2 * a))
+            * (1.0 / (-nm).contract(nm, np_2 * b) - 1.0 / (-nm).contract(nm, np_2 * a))
             / np.lpow(3.0);
         let tp = tp2 + tp1 + tp3 + tp4 + tp5;
         let value = (tp + ts) / (sin_theta_squared * 2.0);

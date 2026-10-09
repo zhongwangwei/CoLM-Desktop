@@ -8,6 +8,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+colm-numeric = { path = "../colm-numeric" }
 # 闸门表那一半刻意不带 netcdf —— GUI 为了问一句「这个内核能产出什么」
 # 不该拖进整个 HDF5。读文件与算指标那一半才需要 netcdf，所以做成 feature。
 # anyhow 是纯 Rust 的错误包装，colm-namelist / colm-case / colm-kernel 也都用它，

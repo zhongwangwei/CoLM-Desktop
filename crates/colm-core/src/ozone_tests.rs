@@ -106,6 +106,7 @@ const FORTRAN_CASES: &[(i32, bool, [u64; 12], [u64; 4])] = &[
 
 #[test]
 fn calc_ozone_stress_matches_fortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     for (row, &(ivt, use_data, input, expected)) in FORTRAN_CASES.iter().enumerate() {
         let x = input.map(f64::from_bits);
         let class = usize::try_from(ivt).unwrap();

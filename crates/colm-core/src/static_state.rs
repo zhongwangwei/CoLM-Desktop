@@ -8,6 +8,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::MISSING;
 
@@ -291,9 +292,9 @@ pub fn derive_lake_layers(depth_m: &[f64], lake_layers: usize) -> Result<LakeSta
             }
             // `dzlak(nl)*dr - (dz_lake(1) - dzlak(1)*dr)`：GIMPLE（单点与 latlon 内核相同）是
             // `.FMS (dr, dzlak(nl), .FNMA (dr, dzlak(1), dz_lake(1)))`。
-            let top_excess = (-ratio).mul_add(DEFAULT_LAKE_THICKNESS_M[0], thickness_m[patch]);
+            let top_excess = (-ratio).contract(DEFAULT_LAKE_THICKNESS_M[0], thickness_m[patch]);
             thickness_m[(lake_layers - 1) * depth_m.len() + patch] =
-                ratio.mul_add(DEFAULT_LAKE_THICKNESS_M[lake_layers - 1], -top_excess);
+                ratio.contract(DEFAULT_LAKE_THICKNESS_M[lake_layers - 1], -top_excess);
             output_depth.push(depth);
         } else if depth > 0.0 && depth <= 1.0 {
             for layer in 0..lake_layers {
@@ -403,7 +404,7 @@ pub fn derive_soil_parameters(
                 HydraulicModel::VanGenuchten => {
                     let saturation = (1.0 + (input.alpha_vgm * 339.9).lpow(input.n_vgm))
                         .lpow(1.0 / input.n_vgm - 1.0);
-                    (input.theta_s - input.theta_r).mul_add(saturation, input.theta_r)
+                    (input.theta_s - input.theta_r).contract(saturation, input.theta_r)
                 }
             };
             let psi0 = match hydraulic_model {

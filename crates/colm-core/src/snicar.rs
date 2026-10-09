@@ -8,6 +8,7 @@
 //! not exposed as supported Rust configuration.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 pub const SNICAR_BANDS: usize = 5;
 pub const SNICAR_BROADBAND_BANDS: usize = 2;
@@ -232,13 +233,13 @@ pub fn snicar_ad_rt(optics: &SnicarOptics, input: &SnicarInput) -> Result<Snicar
         // GIMPLE：`c1 = .FMA (mu², a2, .FMA (mu, a1, a0))`（`c0` 同形）、
         // `factor = .FMA (log10(rds)-6, c1, c0)`、`flx_abs -= (alb*(factor-1))*Σw` 融合成 FNMA。
         let mu2 = mu_not * mu_not;
-        let c1 = mu2.mul_add(SZA_A2, mu_not.mul_add(SZA_A1, SZA_A0));
-        let c0 = mu2.mul_add(SZA_B2, mu_not.mul_add(SZA_B1, SZA_B0));
-        let factor = (top_radius.log10() - 6.0).mul_add(c1, c0);
+        let c1 = mu2.contract(SZA_A2, mu_not.contract(SZA_A1, SZA_A0));
+        let c0 = mu2.contract(SZA_B2, mu_not.contract(SZA_B1, SZA_B0));
+        let factor = (top_radius.log10() - 6.0).contract(c1, c0);
         let nir_weight: f64 = weights[1..].iter().fold(0.0, |sum, weight| sum + weight);
         let adjustment = albedo_broadband[1] * (factor - 1.0);
         albedo_broadband[1] *= factor;
-        absorbed_broadband[0][1] = (-adjustment).mul_add(nir_weight, absorbed_broadband[0][1]);
+        absorbed_broadband[0][1] = (-adjustment).contract(nir_weight, absorbed_broadband[0][1]);
     }
 
     Ok(SnicarResult {
@@ -407,7 +408,7 @@ fn solve_band(
     for layer in 0..layers {
         let g2 = asymmetry[layer] * asymmetry[layer];
         let denominator = if layer < vectorized {
-            (-omega[layer]).mul_add(g2, 1.0)
+            (-omega[layer]).contract(g2, 1.0)
         } else {
             1.0 - omega[layer] * g2
         };
@@ -455,25 +456,25 @@ fn adding_doubling(
             let ws = omega_star[layer];
             let gs = g_star[layer];
             let one_minus_ws = 1.0 - ws;
-            let one_minus_wg = (-ws).mul_add(gs, 1.0);
+            let one_minus_wg = (-ws).contract(gs, 1.0);
             let lm = ((one_minus_ws * 3.0) * one_minus_wg).sqrt();
             let ue = (one_minus_wg * 1.5) / lm;
             let extins = (-(ts * lm)).exp().max(EXP_MIN);
             let ne = ((ue + 1.0) * (ue + 1.0)) / extins - ((ue - 1.0) * (ue - 1.0)) * extins;
-            rdif_a[layer] = (ue.mul_add(ue, -1.0) * (1.0 / extins - extins)) / ne;
+            rdif_a[layer] = (ue.contract(ue, -1.0) * (1.0 / extins - extins)) / ne;
             tdif_a[layer] = (ue * 4.0) / ne;
             trnlay[layer] = (-(ts / mu_not)).exp().max(EXP_MIN);
             let lm2 = lm * lm;
-            let alpha_numerator = one_minus_ws.mul_add(gs, 1.0);
+            let alpha_numerator = one_minus_ws.contract(gs, 1.0);
             let gamma_factor = one_minus_ws * (gs * 3.0);
             let (apg, amg) = apg_amg(ws, mu_not, lm2, alpha_numerator, gamma_factor);
             // `rdir = .FMA (rdif, apg, amg*.FMA (tdif, trnlay, -1))`；
             // `tdir = .FMA (tdif, apg, (.FMS (rdif, amg, apg) + 1)*trnlay)`。
             rdir[layer] =
-                rdif_a[layer].mul_add(apg, tdif_a[layer].mul_add(trnlay[layer], -1.0) * amg);
-            tdir[layer] = tdif_a[layer].mul_add(
+                rdif_a[layer].contract(apg, tdif_a[layer].contract(trnlay[layer], -1.0) * amg);
+            tdir[layer] = tdif_a[layer].contract(
                 apg,
-                (rdif_a[layer].mul_add(amg, -apg) + 1.0) * trnlay[layer],
+                (rdif_a[layer].contract(amg, -apg) + 1.0) * trnlay[layer],
             );
 
             let r1 = rdif_a[layer];
@@ -482,15 +483,15 @@ fn adding_doubling(
             let mut smr = 0.0;
             let mut smt = 0.0;
             for (&mu, &gwt) in GAUSS_POINT.iter().zip(&GAUSS_WEIGHT) {
-                swt = mu.mul_add(gwt, swt);
+                swt = mu.contract(gwt, swt);
                 let trn = (-(ts / mu)).exp().max(EXP_MIN);
                 let (apg, amg) = apg_amg(ws, mu, lm2, alpha_numerator, gamma_factor);
                 // `rdr = .FMA (R1, apg, (T1*amg)*trn) - amg`；
                 // `tdr = .FNMA (trn, apg, .FMA (T1, apg, (R1*amg)*trn)) + trn`。
-                let rdr = r1.mul_add(apg, (t1 * amg) * trn) - amg;
-                let tdr = (-trn).mul_add(apg, t1.mul_add(apg, (r1 * amg) * trn)) + trn;
-                smr = (mu * rdr).mul_add(gwt, smr);
-                smt = (mu * tdr).mul_add(gwt, smt);
+                let rdr = r1.contract(apg, (t1 * amg) * trn) - amg;
+                let tdr = (-trn).contract(apg, t1.contract(apg, (r1 * amg) * trn)) + trn;
+                smr = (mu * rdr).contract(gwt, smr);
+                smt = (mu * tdr).contract(gwt, smt);
             }
             rdif_a[layer] = smr / swt;
             tdif_a[layer] = smt / swt;
@@ -499,12 +500,12 @@ fn adding_doubling(
         }
 
         trndir[layer + 1] = trndir[layer] * trnlay[layer];
-        let refkm1 = 1.0 / (-rdndif[layer]).mul_add(rdif_a[layer], 1.0);
+        let refkm1 = 1.0 / (-rdndif[layer]).contract(rdif_a[layer], 1.0);
         let tdrrdir = trndir[layer] * rdir[layer];
         let tdndif = trntdr[layer] - trndir[layer];
-        trntdr[layer + 1] = trndir[layer].mul_add(
+        trntdr[layer + 1] = trndir[layer].contract(
             tdir[layer],
-            (rdndif[layer].mul_add(tdrrdir, tdndif) * refkm1) * tdif_a[layer],
+            (rdndif[layer].contract(tdrrdir, tdndif) * refkm1) * tdif_a[layer],
         );
         rdndif[layer + 1] =
             rdif_b[layer] + ((tdif_b[layer] * rdndif[layer]) * refkm1) * tdif_a[layer];
@@ -514,22 +515,22 @@ fn adding_doubling(
     rupdir[layers] = input.underlying_albedo_5band[band];
     rupdif[layers] = input.underlying_albedo_5band[band];
     for layer in (0..layers).rev() {
-        let refkp1 = 1.0 / (-rdif_b[layer]).mul_add(rupdif[layer + 1], 1.0);
-        let sum = rupdir[layer + 1].mul_add(
+        let refkp1 = 1.0 / (-rdif_b[layer]).contract(rupdif[layer + 1], 1.0);
+        let sum = rupdir[layer + 1].contract(
             trnlay[layer],
             (tdir[layer] - trnlay[layer]) * rupdif[layer + 1],
         );
-        rupdir[layer] = (sum * refkp1).mul_add(tdif_b[layer], rdir[layer]);
+        rupdir[layer] = (sum * refkp1).contract(tdif_b[layer], rdir[layer]);
         rupdif[layer] =
-            tdif_b[layer].mul_add((tdif_a[layer] * rupdif[layer + 1]) * refkp1, rdif_a[layer]);
+            tdif_b[layer].contract((tdif_a[layer] * rupdif[layer + 1]) * refkp1, rdif_a[layer]);
     }
 
     for interface in 0..interfaces {
-        let refk = 1.0 / (-rdndif[interface]).mul_add(rupdif[interface], 1.0);
+        let refk = 1.0 / (-rdndif[interface]).contract(rupdif[interface], 1.0);
         let diffuse_part = (trntdr[interface] - trndir[interface]) * (1.0 - rupdif[interface]);
         let reflected_part = (1.0 - rdndif[interface]) * (rupdir[interface] * trndir[interface]);
         dfdir[interface] =
-            (-reflected_part).mul_add(refk, refk.mul_add(diffuse_part, trndir[interface]));
+            (-reflected_part).contract(refk, refk.contract(diffuse_part, trndir[interface]));
         if dfdir[interface] < PUNY {
             dfdir[interface] = 0.0;
         }
@@ -541,13 +542,13 @@ fn adding_doubling(
 
     let (albedo, dftmp, reflected_top) = match input.incident {
         SnicarIncident::Direct => {
-            let refk = 1.0 / (-rdndif[0]).mul_add(rupdif[0], 1.0);
+            let refk = 1.0 / (-rdndif[0]).contract(rupdif[0], 1.0);
             let reflected =
-                trndir[0].mul_add(rupdir[0], (trntdr[0] - trndir[0]) * rupdif[0]) * refk;
+                trndir[0].contract(rupdir[0], (trntdr[0] - trndir[0]) * rupdif[0]) * refk;
             (rupdir[0], dfdir, reflected)
         }
         SnicarIncident::Diffuse => {
-            let refk = 1.0 / (-rdndif[0]).mul_add(rupdif[0], 1.0);
+            let refk = 1.0 / (-rdndif[0]).contract(rupdif[0], 1.0);
             let reflected = (trndif[0] * rupdif[0]) * refk;
             (rupdif[0], dfdif, reflected)
         }
@@ -589,20 +590,20 @@ fn adding_doubling(
 /// `gam = (0.5*ws)*(.FMA (((1-ws)*(3gs))*mu, mu, 1)/分母)`，`alp` 不单独舍入：
 /// `apg = .FMA ((0.75*ws)*mu, (1+(1-ws)gs)/分母, gam)`、`amg = .FMS (同上, gam)`。
 fn apg_amg(ws: f64, mu: f64, lm2: f64, alpha_numerator: f64, gamma_factor: f64) -> (f64, f64) {
-    let denominator = (-(lm2 * mu)).mul_add(mu, 1.0);
-    let gamma = (ws * 0.5) * ((gamma_factor * mu).mul_add(mu, 1.0) / denominator);
+    let denominator = (-(lm2 * mu)).contract(mu, 1.0);
+    let gamma = (ws * 0.5) * ((gamma_factor * mu).contract(mu, 1.0) / denominator);
     let alpha_factor = (ws * 0.75) * mu;
     let alpha_ratio = alpha_numerator / denominator;
     (
-        alpha_factor.mul_add(alpha_ratio, gamma),
-        alpha_factor.mul_add(alpha_ratio, -gamma),
+        alpha_factor.contract(alpha_ratio, gamma),
+        alpha_factor.contract(alpha_ratio, -gamma),
     )
 }
 
 /// 近红外归并：`flx_sum = .FMA (w, a, flx_sum)` 从 0 起，除以 `sum(flx_wgt(2:5))`。
 fn weighted_nir(values: [f64; SNICAR_BANDS], weights: [f64; SNICAR_BANDS]) -> f64 {
     let nir_weight: f64 = weights[1..].iter().fold(0.0, |sum, weight| sum + weight);
-    (1..SNICAR_BANDS).fold(0.0, |sum, band| weights[band].mul_add(values[band], sum)) / nir_weight
+    (1..SNICAR_BANDS).fold(0.0, |sum, band| weights[band].contract(values[band], sum)) / nir_weight
 }
 
 fn reduce_albedo(albedo_5band: [f64; SNICAR_BANDS], weights: [f64; SNICAR_BANDS]) -> [f64; 2] {

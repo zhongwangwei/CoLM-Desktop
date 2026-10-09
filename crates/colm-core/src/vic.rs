@@ -7,6 +7,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 const COLM_LAYERS: usize = 10;
 const VIC_LAYERS: usize = 3;
@@ -274,7 +275,7 @@ fn compute_vic_runoff(
             // —— `compute_vic_runoff` 里唯一一处收缩。
             baseflow_step = (soil.maximum_baseflow_mm_day / runoff_steps_per_day as f64
                 * (1.0 - soil.baseflow_fraction / soil.baseflow_threshold))
-                .mul_add(
+                .contract(
                     ((relative_moisture - soil.baseflow_threshold)
                         / (1.0 - soil.baseflow_threshold))
                         .lpow(soil.baseflow_exponent),
@@ -321,7 +322,7 @@ fn compute_vic_runoff(
             moisture_mm[layer] += (liquid[layer] + ice[layer]) * frost_fraction[frost];
         }
         // `cell%runoff = cell%runoff + runoff(fidx)*frost_fract(fidx)`：GIMPLE `.FMA`（`:401`）。
-        surface_runoff_mm = runoff.mul_add(frost_fraction[frost], surface_runoff_mm);
+        surface_runoff_mm = runoff.contract(frost_fraction[frost], surface_runoff_mm);
         subsurface_runoff_mm += baseflow_step * frost_fraction[frost];
         saturated_fraction += fraction * frost_fraction[frost];
     }
@@ -365,7 +366,7 @@ fn distribute_evaporation(
             .iter()
             .zip(frost_fraction)
             .take(frost_count)
-            .fold(0.0, |sum, (&value, fraction)| value.mul_add(fraction, sum));
+            .fold(0.0, |sum, (&value, fraction)| value.contract(fraction, sum));
         let factor = if total > 0.0 { requested / total } else { 1.0 };
         for frost in 0..frost_count {
             output[layer][frost] = available[frost] * factor;
@@ -384,7 +385,7 @@ fn runoff_and_saturation(soil: VicSoil, moisture: [f64; VIC_LAYERS], inflow: f64
     // GIMPLE（`MOD_Hydro_VIC.F90:453/459`）：`i_0` 被内联，`i_0 + inflow` 是
     // `.FMA (max_infil, 1-(1-A)**(1/b), inflow)`，`basis` 复用它；
     // `runoff = .FMA (basis**(1+b), top_max_moist, (inflow-top_max_moist)+top_moist)`。
-    let infiltration_plus_inflow = maximum_infiltration.mul_add(
+    let infiltration_plus_inflow = maximum_infiltration.contract(
         1.0 - (1.0 - saturation).lpow(1.0 / soil.infiltration_shape),
         inflow,
     );
@@ -398,7 +399,7 @@ fn runoff_and_saturation(soil: VicSoil, moisture: [f64; VIC_LAYERS], inflow: f64
         let basis = 1.0 - infiltration_plus_inflow / maximum_infiltration;
         basis
             .lpow(1.0 + soil.infiltration_shape)
-            .mul_add(top_capacity, inflow - top_capacity + top_moisture)
+            .contract(top_capacity, inflow - top_capacity + top_moisture)
     }
     .max(0.0);
     (saturation, runoff)
@@ -414,7 +415,7 @@ fn q12(conductivity: f64, moisture: f64, residual: f64, maximum: f64, exponent: 
     let one_minus_exponent = 1.0 - exponent;
     let first = (moisture - residual).lpow(one_minus_exponent);
     let scaled = conductivity / (maximum - residual).lpow(exponent);
-    let base = (-one_minus_exponent).mul_add(scaled, first);
+    let base = (-one_minus_exponent).contract(scaled, first);
     let root = base.lpow(1.0 / one_minus_exponent);
     moisture - root - residual
 }
@@ -437,7 +438,7 @@ fn grouped_weighted(values: &[f64], weights: &[f64]) -> [f64; VIC_LAYERS] {
         values[range.clone()]
             .iter()
             .zip(&weights[range.clone()])
-            .fold(0.0, |sum, (&value, &weight)| value.mul_add(weight, sum))
+            .fold(0.0, |sum, (&value, &weight)| value.contract(weight, sum))
             / weights[range].iter().sum::<f64>()
     })
 }
@@ -478,8 +479,8 @@ fn partition_ice(values: &[f64]) -> [f64; VIC_LAYERS] {
             let last = ((layers - 1) / vic_layers).min(vic_layers);
             for idx in 1..=last {
                 let multiplier = if layers > idx * vic_layers { 1.0 } else { 0.0 };
-                ice[0] = values[idx - 1].mul_add(multiplier, ice[0]);
-                ice[2] = values[layers - idx].mul_add(multiplier, ice[2]);
+                ice[0] = values[idx - 1].contract(multiplier, ice[0]);
+                ice[2] = values[layers - idx].contract(multiplier, ice[2]);
             }
             // 循环结束后 `idx = last + 1`；`merge((colm_lay-idx*vic_lay)/vic_lay, 0, …)` 是整数除法。
             let idx = last + 1;
@@ -488,8 +489,8 @@ fn partition_ice(values: &[f64]) -> [f64; VIC_LAYERS] {
             } else {
                 0.0
             };
-            ice[0] = values[idx].mul_add(multiplier, ice[0]);
-            ice[2] = values[layers - idx - 1].mul_add(multiplier, ice[2]);
+            ice[0] = values[idx].contract(multiplier, ice[0]);
+            ice[2] = values[layers - idx - 1].contract(multiplier, ice[2]);
         }
     }
     ice[1] = total - ice[0] - ice[2];

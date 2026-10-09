@@ -11,6 +11,7 @@
 // `min(1).max(0.001)` 与 `clamp` 在 NaN 上语义不同（后者边界反转时还会 panic）。
 #![allow(clippy::needless_range_loop, clippy::manual_clamp)]
 use anyhow::{Context, Result};
+use colm_numeric::Contract;
 
 use crate::{
     lake_temperature, root_uptake, saturation_specific_humidity, soil_psi_from_vliq,
@@ -290,10 +291,10 @@ pub fn urban_thermal(
     let thm =
         crate::reference_height_temperature_k(ctx.air_temperature_k, ctx.temperature_height_m);
     let th = ctx.air_temperature_k * (100_000.0 / ctx.surface_pressure_pa).lpow(RGAS / CPAIR);
-    let thv = th * ctx.specific_humidity.mul_add(0.61, 1.0);
+    let thv = th * ctx.specific_humidity.contract(0.61, 1.0);
     let ur = ctx
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             ctx.eastward_wind_m_s,
             ctx.northward_wind_m_s * ctx.northward_wind_m_s,
         )
@@ -308,21 +309,21 @@ pub fn urban_thermal(
         let total = fwsun + dfwsun;
         for (sun, sha) in st.t_wallsun.iter_mut().zip(st.t_wallsha.iter()) {
             // `:608` `.FMA (t_wallsun, fwsun, t_wallsha*dfwsun)/(fwsun+dfwsun)`
-            *sun = sun.mul_add(fwsun, *sha * dfwsun) / total;
+            *sun = sun.contract(fwsun, *sha * dfwsun) / total;
         }
         // 与 `lwsun` 同形：阳面内墙温混入的是阴面内墙温（upstream-bugs 第 52 条，vendor 已修）。
-        *st.twsun_inner = fwsun.mul_add(*st.twsun_inner, dfwsun * *st.twsha_inner) / total;
-        *st.lwsun = fwsun.mul_add(*st.lwsun, dfwsun * *st.lwsha) / total;
+        *st.twsun_inner = fwsun.contract(*st.twsun_inner, dfwsun * *st.twsha_inner) / total;
+        *st.lwsun = fwsun.contract(*st.lwsun, dfwsun * *st.lwsha) / total;
     }
     if dfwsun < 0.0 {
         let total = fwsha - dfwsun;
         for (sha, sun) in st.t_wallsha.iter_mut().zip(st.t_wallsun.iter()) {
             // `:614` `.FNMA (t_wallsun, dfwsun, fwsha*t_wallsha)/(fwsha-dfwsun)`
-            *sha = (-*sun).mul_add(dfwsun, fwsha * *sha) / total;
+            *sha = (-*sun).contract(dfwsun, fwsha * *sha) / total;
         }
         // `:615` `.FMS (twsha_inner, fwsha, dfwsun*twsun_inner)/(…)`
-        *st.twsha_inner = st.twsha_inner.mul_add(fwsha, -(dfwsun * *st.twsun_inner)) / total;
-        *st.lwsha = st.lwsha.mul_add(fwsha, -(dfwsun * *st.lwsun)) / total;
+        *st.twsha_inner = st.twsha_inner.contract(fwsha, -(dfwsun * *st.twsun_inner)) / total;
+        *st.lwsha = st.lwsha.contract(fwsha, -(dfwsun * *st.lwsun)) / total;
     }
     let fwsun = fwsun + dfwsun;
     *st.fwsun = fwsun;
@@ -392,7 +393,7 @@ pub fn urban_thermal(
             // `:696` `vliq = .FMA (porsl-theta_r, fac, theta_r)`
             let residual = ctx.soil_residual_water[0];
             soil_psi_from_vliq(
-                (porsl[0] - residual).mul_add(fac, residual),
+                (porsl[0] - residual).contract(fac, residual),
                 porsl[0],
                 residual,
                 ctx.soil_suction_mm[0],
@@ -402,7 +403,7 @@ pub fn urban_thermal(
         let psit = psit.max(-1.0e8);
         let hr = ((psit / ROVERG) / tgper0).exp();
         // `:700` `.FMA (1-fsno, hr, fsno)`
-        qred = (1.0 - ctx.fsno_gper).mul_add(hr, ctx.fsno_gper);
+        qred = (1.0 - ctx.fsno_gper).contract(hr, ctx.fsno_gper);
         if snow == 0 {
             let liquid = liq[0] + liq[1];
             let frozen = ice[0] + ice[1];
@@ -412,12 +413,12 @@ pub fn urban_thermal(
                 0.001
             } else {
                 // `:709` `(wx*sumdz)/.FMA (dz1, porsl1, dz2*porsl2)`
-                ((wx * depth) / dz[0].mul_add(porsl[0], dz[1] * porsl[1]))
+                ((wx * depth) / dz[0].contract(porsl[0], dz[1] * porsl[1]))
                     .min(1.0)
                     .max(0.001)
             };
             // `:714` `(1-fsno)*exp(.FNMA (fac, 4.255, 8.206))`
-            rss = (1.0 - ctx.fsno_gper) * (-fac).mul_add(4.255, 8.206).exp();
+            rss = (1.0 - ctx.fsno_gper) * (-fac).contract(4.255, 8.206).exp();
         }
     }
     let mut qgper = qred * saturation.specific_humidity;
@@ -464,17 +465,17 @@ pub fn urban_thermal(
         for (i, value) in x.iter_mut().enumerate() {
             let mut acc = 0.0;
             for j in 0..4 {
-                acc = ainv[i][j].mul_add(transfer.source[j], acc);
+                acc = ainv[i][j].contract(transfer.source[j], acc);
             }
             *value = acc;
         }
         let mut l = [0.0; 4];
         for i in 0..4 {
             // `:781` `.FMS (e, X, B1)/(1-e)`
-            l[i] = emissivity[i].mul_add(x[i], -transfer.emitted[i]) / (1.0 - emissivity[i]);
+            l[i] = emissivity[i].contract(x[i], -transfer.emitted[i]) / (1.0 - emissivity[i]);
         }
         for i in 0..4 {
-            lout = x[i].mul_add(transfer.sky_view_factor[i], lout);
+            lout = x[i].contract(transfer.sky_view_factor[i], lout);
         }
         for i in 0..4 {
             if fcover[i + 1] > 0.0 {
@@ -487,18 +488,18 @@ pub fn urban_thermal(
         *st.lgper = l[3] + dlgper;
     }
     // `:809` `.FMA (fc4, dlgper, .FMA (fc3, dlgimp, .FMA (fc1, dlwsun, fc2*dlwsha)))`
-    let mut dlwbef = fcover[4].mul_add(
+    let mut dlwbef = fcover[4].contract(
         dlgper,
-        fcover[3].mul_add(dlgimp, fcover[1].mul_add(dlwsun, fcover[2] * dlwsha)),
+        fcover[3].contract(dlgimp, fcover[1].contract(dlwsun, fcover[2] * dlwsha)),
     );
     if doveg {
-        dlwbef = fcover[5].mul_add(dlveg, dlwbef);
+        dlwbef = fcover[5].contract(dlveg, dlwbef);
     }
     dlwbef *= 1.0 - ctx.flake;
     // `:814` `.FMS (eroof, frl, (eroof*stefnc)*troof^4)`
     let roof_emission = ctx.eroof * STEFNC;
     let troof2 = troof0 * troof0;
-    let lroof = ctx.eroof.mul_add(
+    let lroof = ctx.eroof.contract(
         ctx.downward_longwave_w_m2,
         -(roof_emission * (troof2 * troof2)),
     );
@@ -678,7 +679,7 @@ pub fn urban_thermal(
     let mut cl = [0.0; 4];
     for i in 0..4 {
         // `:950` `(.FMA (e, Ainv(i,i), -1)/(1-e))*dBdT(i)`
-        cl[i] = (emissivity[i].mul_add(ainv[i][i], -1.0) / (1.0 - emissivity[i]))
+        cl[i] = (emissivity[i].contract(ainv[i][i], -1.0) / (1.0 - emissivity[i]))
             * transfer.temperature_derivative[i];
         if fcover[i + 1] > 0.0 {
             cl[i] = fg * (cl[i] / fcover[i + 1]);
@@ -840,7 +841,7 @@ pub fn urban_thermal(
     let tgimp = st.impervious.column.temperature_k[0];
     let tgper = st.pervious.column.temperature_k[0];
     // `:1002` `.FMA (twsun, fwsun, twsha*fwsha)/(fwsun+fwsha)`
-    out.twall = twsun.mul_add(fwsun, twsha * fwsha) / (fwsun + fwsha);
+    out.twall = twsun.contract(fwsun, twsha * fwsha) / (fwsun + fwsha);
     out.troof = troof;
 
     // 水体（`:1005-1041`）
@@ -896,20 +897,20 @@ pub fn urban_thermal(
     let dt2 = twsha - twsha0;
     let dt3 = tgimp - tgimp0;
     let dt4 = tgper - tgper0;
-    let mut fsenroof = dt0.mul_add(flux.croofs, flux.fsenroof);
-    let fsenwsun = dt1.mul_add(flux.cwsuns, flux.fsenwsun);
-    let fsenwsha = dt2.mul_add(flux.cwshas, flux.fsenwsha);
-    let mut fsengimp = dt3.mul_add(flux.cgrnds, flux.fsengimp);
-    let mut fsengper = dt4.mul_add(flux.cgrnds, flux.fsengper);
-    let mut fevproof = dt0.mul_add(flux.croofl, flux.fevproof);
-    let mut fevpgimp = dt3.mul_add(flux.cgimpl, flux.fevpgimp);
-    let mut fevpgper = dt4.mul_add(flux.cgperl, flux.fevpgper);
+    let mut fsenroof = dt0.contract(flux.croofs, flux.fsenroof);
+    let fsenwsun = dt1.contract(flux.cwsuns, flux.fsenwsun);
+    let fsenwsha = dt2.contract(flux.cwshas, flux.fsenwsha);
+    let mut fsengimp = dt3.contract(flux.cgrnds, flux.fsengimp);
+    let mut fsengper = dt4.contract(flux.cgrnds, flux.fsengper);
+    let mut fevproof = dt0.contract(flux.croofl, flux.fevproof);
+    let mut fevpgimp = dt3.contract(flux.cgimpl, flux.fevpgimp);
+    let mut fevpgper = dt4.contract(flux.cgperl, flux.fevpgper);
     let cap = |fevp: &mut f64, fsen: &mut f64, surface: &UrbanSurfaceRef<'_>, htvp: f64| {
         let egsmax =
             (surface.column.ice_water_kg_m2[0] + surface.column.liquid_water_kg_m2[0]) / dt;
         let egidif = (*fevp - egsmax).max(0.0);
         *fevp = fevp.min(egsmax);
-        *fsen = htvp.mul_add(egidif, *fsen);
+        *fsen = htvp.contract(egidif, *fsen);
     };
     cap(&mut fevpgper, &mut fsengper, &st.pervious, htvp_gper);
     cap(&mut fevpgimp, &mut fsengimp, &st.impervious, htvp_gimp);
@@ -917,14 +918,14 @@ pub fn urban_thermal(
 
     // 汇总（`:1092-1138`）
     let lw = [*st.lwsun, *st.lwsha, *st.lgimp, *st.lgper];
-    let mut lnet = lroof.mul_add(fcover[0], fcover[1] * lw[0]);
-    lnet = fcover[2].mul_add(lw[1], lnet);
-    lnet = fcover[3].mul_add(lw[2], lnet);
-    lnet = fcover[4].mul_add(lw[3], lnet);
-    let mut sabg = fcover[0].mul_add(ctx.sabroof, fcover[1] * ctx.sabwsun);
-    sabg = fcover[2].mul_add(ctx.sabwsha, sabg);
-    sabg = fcover[3].mul_add(ctx.sabgimp, sabg);
-    sabg = fcover[4].mul_add(ctx.sabgper, sabg);
+    let mut lnet = lroof.contract(fcover[0], fcover[1] * lw[0]);
+    lnet = fcover[2].contract(lw[1], lnet);
+    lnet = fcover[3].contract(lw[2], lnet);
+    lnet = fcover[4].contract(lw[3], lnet);
+    let mut sabg = fcover[0].contract(ctx.sabroof, fcover[1] * ctx.sabwsun);
+    sabg = fcover[2].contract(ctx.sabwsha, sabg);
+    sabg = fcover[3].contract(ctx.sabgimp, sabg);
+    sabg = fcover[4].contract(ctx.sabgper, sabg);
     // `:1100` 五个乘积与 `fsen_*` 共用，**不**融合
     out.fsen_roof = fsenroof * fcover[0];
     out.fsen_wsun = fcover[1] * fsenwsun;
@@ -933,7 +934,8 @@ pub fn urban_thermal(
     out.fsen_gper = fcover[4] * fsengper;
     let mut fseng =
         (((out.fsen_roof + out.fsen_wsun) + out.fsen_wsha) + out.fsen_gimp) + out.fsen_gper;
-    let mut fevpg = fcover[4].mul_add(fevpgper, fcover[0].mul_add(fevproof, fcover[3] * fevpgimp));
+    let mut fevpg =
+        fcover[4].contract(fevpgper, fcover[0].contract(fevproof, fcover[3] * fevpgimp));
     out.lfevp_roof = fcover[0] * (htvp_roof * fevproof);
     out.lfevp_gimp = fcover[3] * (htvp_gimp * fevpgimp);
     out.lfevp_gper = fcover[4] * (htvp_gper * fevpgper);
@@ -959,12 +961,12 @@ pub fn urban_thermal(
     }
     let anthropogenic = (fhac + fwst) + vehc;
     // `:1137` `.FMA (Fhac+Fwst+vehc, fsh, fsena) + Fach + meta`
-    fsena = (anthropogenic.mul_add(FSH, fsena) + fach) + meta;
-    lfevpa = anthropogenic.mul_add(FLH, lfevpa);
+    fsena = (anthropogenic.contract(FSH, fsena) + fach) + meta;
+    lfevpa = anthropogenic.contract(FLH, lfevpa);
 
     // 与水体按面积混合（`:1141-1159`）：`.FMA (1-flake, x, flake*x_lake)`
     let land = 1.0 - ctx.flake;
-    let blend = |x: f64, lake_x: f64| land.mul_add(x, ctx.flake * lake_x);
+    let blend = |x: f64, lake_x: f64| land.contract(x, ctx.flake * lake_x);
     out.taux = blend(flux.taux, lake.taux);
     out.tauy = blend(flux.tauy, lake.tauy);
     sabg = blend(sabg, ctx.sablake);
@@ -973,7 +975,7 @@ pub fn urban_thermal(
     fsena = blend(fsena, lake.fsena);
     fevpg = blend(fevpg, lake.fevpg);
     let lfevpa_lake_part = ctx.flake * lake.lfevpa;
-    lfevpa = land.mul_add(lfevpa, lfevpa_lake_part);
+    lfevpa = land.contract(lfevpa, lfevpa_lake_part);
     out.tref = blend(flux.tref, lake.tref);
     out.qref = blend(flux.qref, lake.qref);
     out.z0m = blend(flux.z0m, lake.z0m);
@@ -987,7 +989,7 @@ pub fn urban_thermal(
     out.fq = blend(flux.fq, lake.fq);
     out.sabg = sabg;
     // `:1175` `.FMA (tgper, fgper, tgimp*(1-fgper))`
-    out.t_grnd = tgper.mul_add(ctx.fgper, tgimp * (1.0 - ctx.fgper));
+    out.t_grnd = tgper.contract(ctx.fgper, tgimp * (1.0 - ctx.fgper));
 
     // 各面的蒸发/凝结拆分（`:1178-1229`）
     let split = |fevp: f64, liquid: f64, t: f64| {
@@ -1029,27 +1031,27 @@ pub fn urban_thermal(
     for i in 0..n {
         let mut acc = 0.0;
         for j in 0..n {
-            acc = ainv[i][j].mul_add(d[j], acc);
+            acc = ainv[i][j].contract(d[j], acc);
         }
         dx[i] = acc;
     }
     let mut dlw = [0.0; 4];
     for i in 0..4 {
         // `:1236` `.FMS (e, dX, dT*dBdT)/(1-e)`
-        dlw[i] = emissivity[i].mul_add(dx[i], -(dtv[i] * transfer.temperature_derivative[i]))
+        dlw[i] = emissivity[i].contract(dx[i], -(dtv[i] * transfer.temperature_derivative[i]))
             / (1.0 - emissivity[i]);
     }
     let mut dlveg_new = 0.0;
     if doveg {
         let mut acc = 0.0;
         for i in 0..5 {
-            acc = dx[i].mul_add(transfer.vegetation_view_factor[i], acc);
+            acc = dx[i].contract(transfer.vegetation_view_factor[i], acc);
         }
         dlveg_new = transfer.vegetation_emissivity * acc;
     }
     let mut dlout = 0.0;
     for i in 0..n {
-        dlout = dx[i].mul_add(transfer.sky_view_factor[i], dlout);
+        dlout = dx[i].contract(transfer.sky_view_factor[i], dlout);
     }
     for i in 0..4 {
         if fcover[i + 1] > 0.0 {
@@ -1061,35 +1063,35 @@ pub fn urban_thermal(
     }
     lout += dlout;
     // `:1271` `rout = (FMA (1-eroof, frl, eroof*stefnc*tb^4)) + dT0*(4*eroof*stefnc*tb^3)`
-    let rout = (1.0 - ctx.eroof).mul_add(
+    let rout = (1.0 - ctx.eroof).contract(
         ctx.downward_longwave_w_m2,
         roof_emission * (troof2 * troof2),
     ) + dt0 * (four_roof_emission * troof3);
     let roof_linear = dt0 * (four_roof_emission * troof3);
     // `:1273` `.FMA (fg, lout, froof*rout)`，再与水体混合
-    out.olrg = land.mul_add(fg.mul_add(lout, ctx.froof * rout), ctx.flake * lake.olrg);
+    out.olrg = land.contract(fg.contract(lout, ctx.froof * rout), ctx.flake * lake.olrg);
     out.trad = (out.olrg / STEFNC).lpow(0.25);
 
     // 地面热通量与能量闭合（`:1300-1312`）
     let lfevp_ground = (out.lfevp_roof + out.lfevp_gimp) + out.lfevp_gper;
-    let mut fgrnd = (-land).mul_add(
+    let mut fgrnd = (-land).contract(
         ctx.froof * roof_linear,
-        (-land).mul_add(fg * dlout, (sabg + lnet) - dlwbef),
+        (-land).contract(fg * dlout, (sabg + lnet) - dlwbef),
     ) - fseng;
-    fgrnd = (-land).mul_add(lfevp_ground, fgrnd) - lfevpa_lake_part;
+    fgrnd = (-land).contract(lfevp_ground, fgrnd) - lfevpa_lake_part;
     let anthro_total = (((fhac + fwst) + fach) + vehc) + meta;
     // `:1310` `.FNMA (1-flake, fveg*dheatl, (((.FMA (1-flake, anthro, (.FMA (1-flake, sabv*fveg,
     // sabg) + frl) - olrg) - fsena) - lfevpa) - fgrnd))`
-    out.errore = (-land).mul_add(
+    out.errore = (-land).contract(
         ctx.fveg * dheatl,
-        ((land.mul_add(
+        ((land.contract(
             anthro_total,
-            (land.mul_add(ctx.sabv * ctx.fveg, sabg) + ctx.downward_longwave_w_m2) - out.olrg,
+            (land.contract(ctx.sabv * ctx.fveg, sabg) + ctx.downward_longwave_w_m2) - out.olrg,
         ) - fsena)
             - lfevpa)
             - fgrnd,
     );
-    fgrnd = (-land).mul_add(anthro_total, fgrnd);
+    fgrnd = (-land).contract(anthro_total, fgrnd);
     out.fsena = fsena;
     out.fevpa = fevpa;
     out.lfevpa = lfevpa;
@@ -1144,7 +1146,7 @@ pub fn urban_thermal(
     })?;
     // `:1369` `((.FMA (1-flake, Fhac+Fwst+Fach, fgrnd)) + vehc) + meta`
     let bem_heat = (bem.cooling_energy_w_m2 + bem.waste_heat_w_m2) + bem.air_exchange_w_m2;
-    fgrnd = (land.mul_add(bem_heat, fgrnd) + lucy.vehicle_heat) + lucy.metabolic_heat;
+    fgrnd = (land.contract(bem_heat, fgrnd) + lucy.vehicle_heat) + lucy.metabolic_heat;
     out.fgrnd = fgrnd;
     *st.fhac = land * bem.cooling_energy_w_m2;
     *st.fwst = land * bem.waste_heat_w_m2;

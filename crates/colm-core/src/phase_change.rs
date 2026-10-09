@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
 
@@ -218,7 +219,7 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
             {
                 ((1.0 - input.snow_cover_fraction)
                     * input.surface_heat_flux_temperature_derivative_w_m2_k)
-                    .mul_add(temperature_change, input.soil_heat_flux_w_m2)
+                    .contract(temperature_change, input.soil_heat_flux_w_m2)
                     + input.residual_heat_flux_w_m2[layer]
                     - temperature_change / input.fact_seconds_per_j_m2_k[layer]
             } else {
@@ -238,12 +239,12 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
         } else if fortran_layer == 1 || !input.split_soil_snow || input.patch_type == 3 {
             input
                 .surface_heat_flux_temperature_derivative_w_m2_k
-                .mul_add(temperature_change, input.surface_heat_flux_w_m2)
+                .contract(temperature_change, input.surface_heat_flux_w_m2)
                 + input.residual_heat_flux_w_m2[layer]
                 - temperature_change / input.fact_seconds_per_j_m2_k[layer]
         } else {
             (input.snow_cover_fraction * input.surface_heat_flux_temperature_derivative_w_m2_k)
-                .mul_add(temperature_change, input.snow_heat_flux_w_m2)
+                .contract(temperature_change, input.snow_heat_flux_w_m2)
                 + input.residual_heat_flux_w_m2[layer]
                 - temperature_change / input.fact_seconds_per_j_m2_k[layer]
         };
@@ -329,16 +330,16 @@ pub fn phase_change(input: PhaseChangeInput<'_>) -> Result<PhaseChangeState> {
                     && (input.patch_type < 3 || input.is_dry_lake)
                 {
                     (-(input.fact_seconds_per_j_m2_k[layer] * (1.0 - input.snow_cover_fraction)))
-                        .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
+                        .contract(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
                 } else {
                     1.0
                 }
             } else if fortran_layer == 1 || !input.split_soil_snow || input.patch_type == 3 {
                 (-input.fact_seconds_per_j_m2_k[layer])
-                    .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
+                    .contract(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
             } else {
                 (-(input.fact_seconds_per_j_m2_k[layer] * input.snow_cover_fraction))
-                    .mul_add(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
+                    .contract(input.surface_heat_flux_temperature_derivative_w_m2_k, 1.0)
             };
             ensure!(
                 denominator != 0.0,
@@ -437,7 +438,7 @@ pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhase
         heat_residual[layer] = if layer == 0 {
             (input
                 .surface_heat_flux_temperature_derivative_w_m2_k
-                .mul_add(temperature_change, input.surface_heat_flux_w_m2)
+                .contract(temperature_change, input.surface_heat_flux_w_m2)
                 + input.residual_heat_flux_w_m2[layer])
                 - storage
         } else {
@@ -494,7 +495,7 @@ pub fn urban_phase_change(input: UrbanPhaseChangeInput<'_>) -> Result<UrbanPhase
             // 顶层分母 `.FNMA (dhsdT, fact, 1)`；其余层 `t + heatr*fact`（除以 1 是精确的）。
             let correction = if layer == 0 {
                 (-input.surface_heat_flux_temperature_derivative_w_m2_k)
-                    .mul_add(input.fact_seconds_per_j_m2_k[layer], 1.0)
+                    .contract(input.fact_seconds_per_j_m2_k[layer], 1.0)
             } else {
                 1.0
             };

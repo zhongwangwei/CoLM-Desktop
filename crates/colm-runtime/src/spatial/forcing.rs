@@ -6,6 +6,7 @@
 //!
 //! 只读映射用到的那些格子；每个格子上的算式与上游在该格上的算式一一对应，所以只算一部分不影响逐位。
 
+use colm_numeric::Contract;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -646,8 +647,8 @@ pub(super) fn metpreprocess(
                 // GIMPLE：`e = (p*q) / FMA(q, 0.378, 0.622)`，`ea = FMA(e*5.95e-7, exp(1500/t), 0.70)`
                 // （`5.95e-05_R8*0.01_R8` 编译期折叠），`t**4` 是 `(t*t)*(t*t)`。
                 let (t, q, p) = (values[0][i], values[1][i], values[2][i]);
-                let e = p * q / q.mul_add(0.378, 0.622);
-                let ea = (e * (5.95e-05 * 0.01)).mul_add((1500.0 / t).exp(), 0.70);
+                let e = p * q / q.contract(0.378, 0.622);
+                let ea = (e * (5.95e-05 * 0.01)).contract((1500.0 / t).exp(), 0.70);
                 let t2 = t * t;
                 values[7][i] = ea * STEFNC * (t2 * t2);
             }
@@ -745,7 +746,7 @@ fn qian_shortwave(solarin: f64) -> ShortwaveForcing {
     let h2 = h * h;
     let h3 = h * h2;
     let ratio = |c0: f64, c1: f64, c2: f64, c3: f64| {
-        h3.mul_add(c3, (-h2).mul_add(c2, h.mul_add(c1, c0)))
+        h3.contract(c3, (-h2).contract(c2, h.contract(c1, c0)))
             .max(0.01)
             .min(0.99)
     };
@@ -1097,7 +1098,7 @@ impl GriddedForcing {
                             .lower
                             .iter()
                             .zip(&bracket.upper)
-                            .map(|(&a, &b)| a.mul_add(alp1, b * alp2))
+                            .map(|(&a, &b)| a.contract(alp1, b * alp2))
                             .collect()
                     } else {
                         bracket.lower.clone()

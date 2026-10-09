@@ -3,6 +3,7 @@
 //! 单进程下全部单元流域归同一个 worker，顺序就是文件顺序；河系按河口分组（`irivsys`），
 //! 子步长在河系内取最小，所以只有分组影响结果，河系编号不影响。
 
+use colm_numeric::Contract;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -52,7 +53,7 @@ impl FloodplainCurve {
         let mut flpstomax = vec![0.0; nlfp + 1];
         for j in 1..=nlfp {
             flpstomax[j] = (flphgt[j] - flphgt[j - 1])
-                .mul_add((trapezoid[j] + trapezoid[j - 1]) * 0.5, flpstomax[j - 1]);
+                .contract((trapezoid[j] + trapezoid[j - 1]) * 0.5, flpstomax[j - 1]);
         }
         Self {
             rivhgt,
@@ -85,8 +86,8 @@ impl FloodplainCurve {
         } else {
             let g = (self.flphgt[i] - self.flphgt[i - 1]) / self.flparea[i];
             let a = self.flpaccare[i - 1];
-            let root = a.mul_add(a, (v0 - self.flpstomax[i - 1]) * 2.0 / g).sqrt();
-            (root - a).mul_add(g, self.rivhgt + self.flphgt[i - 1])
+            let root = a.contract(a, (v0 - self.flpstomax[i - 1]) * 2.0 / g).sqrt();
+            (root - a).contract(g, self.rivhgt + self.flphgt[i - 1])
         }
     }
 
@@ -109,11 +110,11 @@ impl FloodplainCurve {
         let i = self.layer_of(depth);
         let d = depth - self.rivhgt - self.flphgt[i - 1];
         if i == n + 1 {
-            self.flpaccare[n].mul_add(d, self.rivstomax + self.flpstomax[n])
+            self.flpaccare[n].contract(d, self.rivstomax + self.flpstomax[n])
         } else {
             let h = self.flphgt[i] - self.flphgt[i - 1];
-            let inner = (d / h).mul_add(self.flparea[i], self.flpaccare[i - 1] * 2.0);
-            (inner * d).mul_add(0.5, self.rivstomax + self.flpstomax[i - 1])
+            let inner = (d / h).contract(self.flparea[i], self.flpaccare[i - 1] * 2.0);
+            (inner * d).contract(0.5, self.rivstomax + self.flpstomax[i - 1])
         }
     }
 
@@ -129,7 +130,7 @@ impl FloodplainCurve {
         } else {
             let h = self.flphgt[i] - self.flphgt[i - 1];
             let d = depth - self.rivhgt - self.flphgt[i - 1];
-            (d / h).mul_add(self.flparea[i], self.flpaccare[i - 1])
+            (d / h).contract(self.flparea[i], self.flpaccare[i - 1])
         }
     }
 }

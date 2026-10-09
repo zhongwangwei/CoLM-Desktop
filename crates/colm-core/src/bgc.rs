@@ -5,6 +5,7 @@
 //! PFT restart families borrow the same derived values.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::MISSING;
 
@@ -297,15 +298,15 @@ pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSu
             let density = input.soil_bulk_density_kg_m3[soil];
             *total = (input.nitrogen_g_m3[soil * BGC_DECOMPOSITION_POOLS + pool]
                 / (density * 1000.0))
-                .mul_add(100.0, *total);
+                .contract(100.0, *total);
         }
     }
     let mut mineral_nitrogen = 0.0;
     for (soil, total) in total_soil_nitrogen.iter_mut().enumerate() {
         mineral_nitrogen = input.mineral_nitrogen_g_m3[soil]
-            .mul_add(input.soil_thickness_m[soil], mineral_nitrogen);
+            .contract(input.soil_thickness_m[soil], mineral_nitrogen);
         let density = input.soil_bulk_density_kg_m3[soil];
-        *total = (input.mineral_nitrogen_g_m3[soil] / (density * 1000.0)).mul_add(100.0, *total);
+        *total = (input.mineral_nitrogen_g_m3[soil] / (density * 1000.0)).contract(100.0, *total);
     }
     // 按池类型平铺累加（凋落物 1..3、粗木质残体 4、土壤有机质 5..7）。
     let plain = |values: &[f64]| values.iter().fold(0.0, |sum, value| sum + value);
@@ -320,7 +321,7 @@ pub fn summarize_bgc_state(input: BgcStateSummaryInput<'_>) -> Result<BgcStateSu
             .iter()
             .zip(input.soil_thickness_m)
             .fold(0.0, |sum, (value, thickness)| {
-                value.mul_add(*thickness, sum)
+                value.contract(*thickness, sum)
             })
     };
     // `cnveg_*state_summary`（`:328-616`）：`totvegc_p` 逐 PFT 按源码顺序平铺相加，
@@ -1058,7 +1059,7 @@ fn integrated_pool_totals(values: &[f64], thicknesses: &[f64]) -> Vec<f64> {
     (0..BGC_DECOMPOSITION_POOLS)
         .map(|pool| {
             (0..BGC_SOIL_LAYERS).fold(0.0, |sum, soil| {
-                values[soil * BGC_DECOMPOSITION_POOLS + pool].mul_add(thicknesses[soil], sum)
+                values[soil * BGC_DECOMPOSITION_POOLS + pool].contract(thicknesses[soil], sum)
             })
         })
         .collect()
@@ -1230,7 +1231,7 @@ fn weighted_pft_total(values: &[Vec<f64>], fractions: &[f64], fields: &[&str]) -
                 .map(|name| pft_field(values, name)[pft])
                 .reduce(|acc, value| acc + value)
                 .unwrap_or(0.0);
-            total.mul_add(*fraction, sum)
+            total.contract(*fraction, sum)
         })
 }
 

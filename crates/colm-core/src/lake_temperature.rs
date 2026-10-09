@@ -7,6 +7,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::lake::lake_water_density;
 use crate::{
@@ -172,7 +173,7 @@ pub fn lake_temperature(
     z_lake[0] = dz[0] * 0.5;
     for j in 1..n_lake {
         // `:688` `.FMA (dz(j-1)+dz(j), 0.5, z(j-1))`
-        z_lake[j] = (dz[j - 1] + dz[j]).mul_add(0.5, z_lake[j - 1]);
+        z_lake[j] = (dz[j - 1] + dz[j]).contract(0.5, z_lake[j - 1]);
     }
     let bottom_node = z_lake[n_lake - 1];
     let (idlak, fetch) = if bottom_node < 4.0 {
@@ -202,11 +203,11 @@ pub fn lake_temperature(
     let mut zii = 1000.0;
     let thm = crate::reference_height_temperature_k(forc_t, input.temperature_height_m);
     let th = forc_t * (100_000.0 / input.surface_pressure_pa).lpow(RGAS / CPAIR);
-    let one_plus_061q = forc_q.mul_add(0.61, 1.0);
+    let one_plus_061q = forc_q.contract(0.61, 1.0);
     let thv = th * one_plus_061q;
     let ur = input
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             input.eastward_wind_m_s,
             input.northward_wind_m_s * input.northward_wind_m_s,
         )
@@ -216,22 +217,24 @@ pub fn lake_temperature(
     let mut dth = thm - t_grnd;
     let mut dqh = forc_q - qsatg;
     // `:749` `.FMA (1+0.61q, dth, dqh*(th*0.61))`
-    let dthv = one_plus_061q.mul_add(dth, dqh * th061);
+    let dthv = one_plus_061q.contract(dth, dqh * th061);
     let zldis = input.wind_height_m;
     // `:758` 空气运动黏度：`.FNMA (dT^3, 4.84e-9, .FMA (dT^2, 8.301e-6, .FMA (dT, 6.542e-3, 1)))`
     let dtc = forc_t - TFRZ;
     let dtc2 = dtc * dtc;
-    let visa = (-(dtc * dtc2)).mul_add(4.84e-9, dtc2.mul_add(8.301e-6, dtc.mul_add(6.542e-3, 1.0)))
-        * 1.326e-5;
+    let visa = (-(dtc * dtc2)).contract(
+        4.84e-9,
+        dtc2.contract(8.301e-6, dtc.contract(6.542e-3, 1.0)),
+    ) * 1.326e-5;
     // `:761` Charnock 参数
     let fetch_term = -(((fetch * GRAV) / ur / ur).lpow(1.0 / 3.0) / 22.0);
     let depth_term = -((bottom_node * GRAV).lpow(0.5) / ur);
-    let cur = fetch_term.max(depth_term).exp().mul_add(0.1, 0.01);
+    let cur = fetch_term.max(depth_term).exp().contract(0.1, 0.01);
     let mut um = if dthv >= 0.0 {
         ur.max(0.1)
     } else {
         // `wc = 0.5`：`sqrt(.FMA (ur, ur, 0.25))`
-        ur.mul_add(ur, 0.25).sqrt()
+        ur.contract(ur, 0.25).sqrt()
     };
     let mut ustar = 0.06;
     // 这里的 `z0mg` 只用来收敛 `ustar`：紧接着的 `roughness_lake` 会整个覆盖它。
@@ -292,8 +295,8 @@ pub fn lake_temperature(
                 (column.ice_water_kg_m2[0] + column.liquid_water_kg_m2[0]) / column.thickness_m[0];
             // `:814` `.FMA (.FMA (rho, 7.75e-5, (rho*1.105e-6)*rho), tkice-tkair, tkair)`
             tksur = rhosnow
-                .mul_add(7.75e-5, (rhosnow * 1.105e-6) * rhosnow)
-                .mul_add(TKICE - TKAIR, TKAIR);
+                .contract(7.75e-5, (rhosnow * 1.105e-6) * rhosnow)
+                .contract(TKICE - TKAIR, TKAIR);
             tsur = column.temperature_k[0];
             htvp = HSUB;
         }
@@ -321,20 +324,21 @@ pub fn lake_temperature(
         let latent_conductance = (rho * htvp) / raw;
         // `:838` `ax`：`sabg*b` 起头，`emg*frl`、`3*stftg3*t`、`rho*cp/rah*thm` 依次收进 FMA，
         // 潜热项 `.FNMA`，最后加 `tksur*tsur/dzsur`。
-        let ax = (-latent_conductance).mul_add(
-            (-qsatg_dt).mul_add(t_grnd_bef, qsatg) - forc_q,
-            thm.mul_add(
+        let ax = (-latent_conductance).contract(
+            (-qsatg_dt).contract(t_grnd_bef, qsatg) - forc_q,
+            thm.contract(
                 sensible_conductance,
-                (stftg3 * 3.0).mul_add(t_grnd_bef, frl.mul_add(LAKE_EMISSIVITY, sabg * betaprime)),
+                (stftg3 * 3.0)
+                    .contract(t_grnd_bef, frl.contract(LAKE_EMISSIVITY, sabg * betaprime)),
             ),
         ) + (tksur * tsur) / dzsur;
         // `:841` `.FMA (rho*htvp/raw, qsatgdT, rho*cp/rah + 4*stftg3) + tksur/dzsur`
-        let bx = latent_conductance.mul_add(qsatg_dt, sensible_conductance + stftg3 * 4.0)
+        let bx = latent_conductance.contract(qsatg_dt, sensible_conductance + stftg3 * 4.0)
             + tksur / dzsur;
         t_grnd = ax / bx;
         fseng = (rho_cp * (t_grnd - thm)) / rah;
         // `:858` `(rho*(.FMA (qsatgdT, t-tbef, qsatg) - q))/raw`
-        fevpg = (rho * (qsatg_dt.mul_add(t_grnd - t_grnd_bef, qsatg) - forc_q)) / raw;
+        fevpg = (rho * (qsatg_dt.contract(t_grnd - t_grnd_bef, qsatg) - forc_q)) / raw;
         let saturation = saturation_specific_humidity(t_grnd, input.surface_pressure_pa)?;
         qsatg = saturation.specific_humidity;
         qsatg_dt = saturation.specific_humidity_temperature_slope_k;
@@ -343,7 +347,7 @@ pub fn lake_temperature(
         tstar = dth * (VONKAR / profile.heat);
         qstar = dqh * (VONKAR / profile.moisture);
         // `:865` `.FMA (1+0.61q, tstar, (th*0.61)*qstar)`
-        let thvstar = one_plus_061q.mul_add(tstar, th061 * qstar);
+        let thvstar = one_plus_061q.contract(tstar, th061 * qstar);
         zeta = (((zldis * VONKAR) * GRAV) * thvstar) / (thv * (ustar * ustar));
         zeta = if zeta >= 0.0 {
             zeta.clamp(1.0e-6, 2.0)
@@ -364,7 +368,7 @@ pub fn lake_temperature(
             }
             let wc = (-((((ustar * GRAV) * thvstar) * zii) / thv)).lpow(1.0 / 3.0);
             // `:881` `sqrt(.FMA (ur, ur, wc*wc))`（`beta1 = 1`）
-            um = ur.mul_add(ur, wc * wc).sqrt();
+            um = ur.contract(ur, wc * wc).sqrt();
         }
         roughness = roughness_at(snow, t_grnd, lake.temperature_k[0], input, cur, ustar)?;
         iteration += 1;
@@ -398,14 +402,14 @@ pub fn lake_temperature(
         t_grnd_bef = t_grnd;
         t_grnd = value;
         fseng = (rho_cp * (t_grnd - thm)) / rah;
-        fevpg = (rho * (qsatg_dt.mul_add(t_grnd - t_grnd_bef, qsatg) - forc_q)) / raw;
+        fevpg = (rho * (qsatg_dt.contract(t_grnd - t_grnd_bef, qsatg) - forc_q)) / raw;
     }
     let stftg3 = ((t_grnd_bef * emissive) * t_grnd_bef) * t_grnd_bef;
     let tb2 = t_grnd_bef * t_grnd_bef;
     // `:925` `.FMA (4*stftg3, t-tbef, .FMA (frl, 1-emg, (tb^2)^2*emg*stefnc))`
-    let olrg = (stftg3 * 4.0).mul_add(
+    let olrg = (stftg3 * 4.0).contract(
         t_grnd - t_grnd_bef,
-        frl.mul_add(1.0 - LAKE_EMISSIVITY, (tb2 * tb2) * emissive),
+        frl.contract(1.0 - LAKE_EMISSIVITY, (tb2 * tb2) * emissive),
     );
     htvp = if t_grnd > TFRZ { HVAP } else { HSUB };
     let fgrnd1 = (((sabg * betaprime + frl) - olrg) - fseng) - htvp * fevpg;
@@ -453,11 +457,11 @@ pub fn lake_temperature(
         let liquid = column.liquid_water_kg_m2[layer];
         let ice = column.ice_water_kg_m2[layer];
         // `:993` `.FMA (wliq, cpliq, wice*cpice)`
-        cv[layer] = liquid.mul_add(CPLIQ, ice * CPICE);
+        cv[layer] = liquid.contract(CPLIQ, ice * CPICE);
         let rhosnow = (ice + liquid) / column.thickness_m[layer];
         thk[layer] = rhosnow
-            .mul_add(7.75e-5, (rhosnow * 1.105e-6) * rhosnow)
-            .mul_add(TKICE - TKAIR, TKAIR);
+            .contract(7.75e-5, (rhosnow * 1.105e-6) * rhosnow)
+            .contract(TKICE - TKAIR, TKAIR);
     }
     let z = &column.node_depth_m;
     let zi = &column.interface_depth_m;
@@ -470,7 +474,7 @@ pub fn lake_temperature(
             let below = zi[layer + 1];
             // `:1012` 分母 `.FMA (thk(i), z(i+1)-zi(i), thk(i+1)*(zi(i)-z(i)))`
             ((thk[layer] * thk[layer + 1]) * (z[layer + 1] - z[layer]))
-                / thk[layer].mul_add(z[layer + 1] - below, thk[layer + 1] * (below - z[layer]))
+                / thk[layer].contract(z[layer + 1] - below, thk[layer + 1] * (below - z[layer]))
         };
     }
     let tk_top_soil = thk[snow];
@@ -486,8 +490,8 @@ pub fn lake_temperature(
         let eta = input.lake_depth_m.max(1.0).lpow(-0.424) * 1.1925;
         let top = lyr[5];
         for j in 0..n_lake {
-            let zin = (-dz[j]).mul_add(0.5, z_lake[j]);
-            let zout = dz[j].mul_add(0.5, z_lake[j]);
+            let zin = (-dz[j]).contract(0.5, z_lake[j]);
+            let zout = dz[j].contract(0.5, z_lake[j]);
             let rsfin = (-(eta * (zin - za[idlak]).max(0.0))).exp();
             let rsfout = (-(eta * (zout - za[idlak]).max(0.0))).exp();
             phi[j] = ((rsfin - rsfout) * top) * (1.0 - betaprime);
@@ -498,8 +502,8 @@ pub fn lake_temperature(
     } else if t_grnd > TFRZ && lake.temperature_k[0] > TFRZ && snow == 0 {
         let eta = input.lake_depth_m.max(1.0).lpow(-0.424) * 1.1925;
         for j in 0..n_lake {
-            let zin = (-dz[j]).mul_add(0.5, z_lake[j]);
-            let zout = dz[j].mul_add(0.5, z_lake[j]);
+            let zin = (-dz[j]).contract(0.5, z_lake[j]);
+            let zout = dz[j].contract(0.5, z_lake[j]);
             let rsfin = (-(eta * (zin - za[idlak]).max(0.0))).exp();
             let rsfout = (-(eta * (zout - za[idlak]).max(0.0))).exp();
             phi[j] = (sabg * (rsfin - rsfout)) * (1.0 - betaprime);
@@ -518,7 +522,7 @@ pub fn lake_temperature(
     let mut tx = vec![0.0; total];
     let mut cvx = vec![0.0; total];
     let mut phix = vec![0.0; total];
-    let lake_bottom = dz[n_lake - 1].mul_add(0.5, z_lake[n_lake - 1]);
+    let lake_bottom = dz[n_lake - 1].contract(0.5, z_lake[n_lake - 1]);
     for k in 0..total {
         if k < snow {
             zx[k] = z[k];
@@ -546,18 +550,18 @@ pub fn lake_temperature(
         } else if k + 1 == snow {
             let dzp = zx[k + 1] - zx[k];
             // `:1139` `((tkl1*tk0)*dzp) / .FMA (z_lake1, tk0, tkl1*(-zx0))`
-            ((tk_lake[0] * tk[k]) * dzp) / z_lake[0].mul_add(tk[k], tk_lake[0] * (-zx[k]))
+            ((tk_lake[0] * tk[k]) * dzp) / z_lake[0].contract(tk[k], tk_lake[0] * (-zx[k]))
         } else if k + 1 < soil_start {
             let j = k - snow;
             // `:1143` `((tk_j*tk_j1)*(dz_j1+dz_j)) / .FMA (tk_j, dz_j1, tk_j1*dz_j)`
             ((tk_lake[j] * tk_lake[j + 1]) * (dz[j + 1] + dz[j]))
-                / tk_lake[j].mul_add(dz[j + 1], tk_lake[j + 1] * dz[j])
+                / tk_lake[j].contract(dz[j + 1], tk_lake[j + 1] * dz[j])
         } else if k + 1 == soil_start {
             let j = n_lake - 1;
             let dzp = zx[k + 1] - zx[k];
             // `:1147` `((tktop*tk_n)*dzp) / .FMA (tktop*dz_n, 0.5, z_soisno(1)*tk_n)`
             ((tk_top_soil * tk_lake[j]) * dzp)
-                / (tk_top_soil * dz[j]).mul_add(0.5, z[snow] * tk_lake[j])
+                / (tk_top_soil * dz[j]).contract(0.5, z[snow] * tk_lake[j])
         } else {
             tk[k - n_lake]
         };
@@ -584,31 +588,31 @@ pub fn lake_temperature(
             rhs[0] = match hs {
                 // SNICAR 雪顶（`:1170-1176`）：`.FMA (factx, .FMA (fnx, 0.5, .FNMA (tx, 0, hs)), tx)`
                 Some(hs) if snow > 0 => {
-                    factx[0].mul_add(fnx[0].mul_add(CNFAC, (-tx[0]).mul_add(0.0, hs)), tx[0])
+                    factx[0].contract(fnx[0].contract(CNFAC, (-tx[0]).contract(0.0, hs)), tx[0])
                 }
                 // `.FMA (factx, .FMA (fnx, cnfac, phix) + fgrnd1, tx)`
-                _ => factx[0].mul_add(fnx[0].mul_add(CNFAC, phix[0]) + fgrnd1, tx[0]),
+                _ => factx[0].contract(fnx[0].contract(CNFAC, phix[0]) + fgrnd1, tx[0]),
             };
         } else if k < total - 1 {
             let dzm = zx[k] - zx[k - 1];
             let dzp = zx[k + 1] - zx[k];
             lower[k] = -((half * tkix[k - 1]) / dzm);
-            diagonal[k] = (tkix[k] / dzp + tkix[k - 1] / dzm).mul_add(half, 1.0);
+            diagonal[k] = (tkix[k] / dzp + tkix[k - 1] / dzm).contract(half, 1.0);
             upper[k] = -((tkix[k] * half) / dzp);
             // SNICAR（`:1177-1190`）：非顶雪层的源项是本层吸收；雪下的湖顶层是
             // `.FMA (lyr(1), betaprime, phix)`。
             let source = match snicar {
                 Some(lyr) if k < snow => lyr[5 - snow + k],
-                Some(lyr) if k == snow => lyr[5].mul_add(betaprime, phix[k]),
+                Some(lyr) if k == snow => lyr[5].contract(betaprime, phix[k]),
                 _ => phix[k],
             };
-            rhs[k] = source.mul_add(factx[k], (fnx[k] - fnx[k - 1]).mul_add(half, tx[k]));
+            rhs[k] = source.contract(factx[k], (fnx[k] - fnx[k - 1]).contract(half, tx[k]));
         } else {
             let dzm = zx[k] - zx[k - 1];
             let coupling = (half * tkix[k - 1]) / dzm;
             lower[k] = -coupling;
             diagonal[k] = coupling + 1.0;
-            rhs[k] = (-half).mul_add(fnx[k - 1], tx[k]);
+            rhs[k] = (-half).contract(fnx[k - 1], tx[k]);
         }
     }
     let solved = crate::linear::solve_tridiagonal(&lower, &diagonal, &upper, &rhs)
@@ -631,8 +635,8 @@ pub fn lake_temperature(
     let taux = -((input.eastward_wind_m_s * rho) / ram);
     let tauy = -((input.northward_wind_m_s * rho) / ram);
     let tref = (dth * (VONKAR / profile.heat))
-        .mul_add(profile.heat_at_2m / VONKAR - profile.heat / VONKAR, thm);
-    let qref = (dqh * (VONKAR / profile.moisture)).mul_add(
+        .contract(profile.heat_at_2m / VONKAR - profile.heat / VONKAR, thm);
+    let qref = (dqh * (VONKAR / profile.moisture)).contract(
         profile.moisture_at_2m / VONKAR - profile.moisture / VONKAR,
         forc_q,
     );
@@ -690,7 +694,7 @@ pub fn lake_temperature(
         }
         lake.ice_fraction[j] = fraction;
         // `:1376` `.FMA (melt, cpliq-cpice, cv)`
-        cv_lake[j] = melt.mul_add(CPLIQ - CPICE, cv_lake[j]);
+        cv_lake[j] = melt.contract(CPLIQ - CPICE, cv_lake[j]);
         lake.temperature_k[j] = heat_left / cv_lake[j] + TFRZ;
     }
     for layer in 0..n {
@@ -724,7 +728,7 @@ pub fn lake_temperature(
         }
         column.ice_water_kg_m2[layer] = ice;
         column.liquid_water_kg_m2[layer] = liquid;
-        cv[layer] = melt.mul_add(CPLIQ - CPICE, cv[layer]);
+        cv[layer] = melt.contract(CPLIQ - CPICE, cv[layer]);
         column.temperature_k[layer] = heat_left / cv[layer] + TFRZ;
     }
 
@@ -746,8 +750,8 @@ pub fn lake_temperature(
                 let fi = lake.ice_fraction[i];
                 // `:1462` `.FMA (dz*(t-tfrz), .FMA (1-f, cwat, f*cice_eff), qav)`
                 heat = (dz[i] * (lake.temperature_k[i] - TFRZ))
-                    .mul_add((1.0 - fi).mul_add(CWAT, fi * CICE_EFF), heat);
-                ice = dz[i].mul_add(fi, ice);
+                    .contract((1.0 - fi).contract(CWAT, fi * CICE_EFF), heat);
+                ice = dz[i].contract(fi, ice);
                 depth += dz[i];
             }
             heat /= depth;
@@ -771,13 +775,13 @@ pub fn lake_temperature(
                     lake.temperature_k[i] = frozen_mean + TFRZ;
                 } else if zsum / depth < ice {
                     // `:1498` `.FMS (nav, iceav, zsum)/dz`
-                    let fi = depth.mul_add(ice, -zsum) / dz[i];
+                    let fi = depth.contract(ice, -zsum) / dz[i];
                     lake.ice_fraction[i] = fi;
                     // `:1502` 分子 `.FMA (f*tfroz, cice_eff, ((1-f)*tunfr)*cwat)`，
                     // 分母 `.FMA (f, cice_eff, (1-f)*cwat)`
                     lake.temperature_k[i] = (fi * frozen_mean)
-                        .mul_add(CICE_EFF, ((1.0 - fi) * unfrozen_mean) * CWAT)
-                        / fi.mul_add(CICE_EFF, (1.0 - fi) * CWAT)
+                        .contract(CICE_EFF, ((1.0 - fi) * unfrozen_mean) * CWAT)
+                        / fi.contract(CICE_EFF, (1.0 - fi) * CWAT)
                         + TFRZ;
                 } else {
                     lake.ice_fraction[i] = 0.0;
@@ -855,7 +859,7 @@ fn roughness_at(
 
 /// `cv_lake = dz*(cwat*(1-f) + cice_eff*f)`：`dz * .FMA (1-f, cwat, f*cice_eff)`（`:966`）。
 fn lake_heat_capacity(thickness_m: f64, ice_fraction: f64) -> f64 {
-    thickness_m * (1.0 - ice_fraction).mul_add(CWAT, ice_fraction * CICE_EFF)
+    thickness_m * (1.0 - ice_fraction).contract(CWAT, ice_fraction * CICE_EFF)
 }
 
 /// `ocvts`/`ncvts`（`:1024-1036`、`:1522-1534`）：湖层 `.FMA (cv, t-tfrz, ·)` 再
@@ -872,15 +876,15 @@ fn column_energy(
 ) -> f64 {
     let mut energy = 0.0;
     for j in 0..dz.len() {
-        energy = cv_lake[j].mul_add(lake.temperature_k[j] - TFRZ, energy);
-        energy = (dz[j] * CFUS).mul_add(1.0 - lake.ice_fraction[j], energy);
+        energy = cv_lake[j].contract(lake.temperature_k[j] - TFRZ, energy);
+        energy = (dz[j] * CFUS).contract(1.0 - lake.ice_fraction[j], energy);
     }
     #[allow(clippy::needless_range_loop)] // `layer` 同时索引 cv、t、wliq，且要判第一层
     for layer in 0..column.temperature_k.len() {
-        energy = cv[layer].mul_add(column.temperature_k[layer] - TFRZ, energy);
-        energy = column.liquid_water_kg_m2[layer].mul_add(HFUS, energy);
+        energy = cv[layer].contract(column.temperature_k[layer] - TFRZ, energy);
+        energy = column.liquid_water_kg_m2[layer].contract(HFUS, energy);
         if snow == 0 && layer == 0 && scv > 0.0 {
-            energy = (-scv).mul_add(HFUS, energy);
+            energy = (-scv).contract(HFUS, energy);
         }
     }
     energy

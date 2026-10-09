@@ -8,6 +8,7 @@
 // 循环照 Fortran 的下标逐句对照 GIMPLE（界面导热率的向量体/标量尾部按下标区分）。
 #![allow(clippy::needless_range_loop)]
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{solve_tridiagonal, urban_phase_change, UrbanPhaseChangeInput};
 
@@ -118,9 +119,9 @@ pub fn urban_wall_temperature(
         let upper = z[layer + 1] - zi[interface];
         let lower = zi[interface] - z[layer];
         let denominator = if layer < vector_end {
-            k[layer + 1].mul_add(lower, k[layer] * upper)
+            k[layer + 1].contract(lower, k[layer] * upper)
         } else {
-            k[layer].mul_add(upper, k[layer + 1] * lower)
+            k[layer].contract(upper, k[layer + 1] * lower)
         };
         conductivity[layer] = ((k[layer] * k[layer + 1]) * (z[layer + 1] - z[layer])) / denominator;
     }
@@ -136,7 +137,7 @@ pub fn urban_wall_temperature(
     let cnfac = input.crank_nicolson_factor;
     let inner_distance = zi[layers] - z[bottom];
     // `:152` `.FNMA (cnfac, t(nl), twall_inner) * tk(nl) / (zi(nl)-z(nl))`
-    flux[bottom] = ((-cnfac).mul_add(
+    flux[bottom] = ((-cnfac).contract(
         input.temperature_k[bottom],
         input.inner_surface_temperature_k,
     ) * conductivity[bottom])
@@ -156,12 +157,12 @@ pub fn urban_wall_temperature(
     // `rt = .FMA (fact, .FMA (cnfac, fn(1), .FNMA (t, dhsdT, hs)), t)`
     let top_distance = z[1] - z[0];
     let top = ((implicit * factor[0]) * conductivity[0]) / top_distance;
-    diagonal[0] = (-factor[0]).mul_add(surface_flux_slope, top + 1.0);
+    diagonal[0] = (-factor[0]).contract(surface_flux_slope, top + 1.0);
     superdiagonal[0] = -top;
-    rhs[0] = factor[0].mul_add(
-        cnfac.mul_add(
+    rhs[0] = factor[0].contract(
+        cnfac.contract(
             flux[0],
-            (-input.temperature_k[0]).mul_add(surface_flux_slope, surface_flux),
+            (-input.temperature_k[0]).contract(surface_flux_slope, surface_flux),
         ),
         input.temperature_k[0],
     );
@@ -175,10 +176,10 @@ pub fn urban_wall_temperature(
         subdiagonal[layer] = -((scaled * conductivity[layer - 1]) / above_distance);
         diagonal[layer] = (conductivity[layer - 1] / above_distance
             + conductivity[layer] / below_distance)
-            .mul_add(scaled, 1.0);
+            .contract(scaled, 1.0);
         superdiagonal[layer] = -((scaled * conductivity[layer]) / below_distance);
         rhs[layer] = (flux[layer] - flux[layer - 1])
-            .mul_add(cnfac * factor[layer], input.temperature_k[layer]);
+            .contract(cnfac * factor[layer], input.temperature_k[layer]);
     }
 
     // 底层（`:175-178`）：`bt = .FMA ((1-cnfac)*fact, tk(nl)/dzp + tk(nl-1)/dzm, 1)`，
@@ -186,12 +187,12 @@ pub fn urban_wall_temperature(
     let above_distance = z[bottom] - z[bottom - 1];
     let scaled = implicit * factor[bottom];
     subdiagonal[bottom] = -((scaled * conductivity[bottom - 1]) / above_distance);
-    diagonal[bottom] = scaled.mul_add(
+    diagonal[bottom] = scaled.contract(
         conductivity[bottom] / inner_distance + conductivity[bottom - 1] / above_distance,
         1.0,
     );
-    rhs[bottom] = factor[bottom].mul_add(
-        (-cnfac).mul_add(flux[bottom - 1], flux[bottom]),
+    rhs[bottom] = factor[bottom].contract(
+        (-cnfac).contract(flux[bottom - 1], flux[bottom]),
         input.temperature_k[bottom],
     );
     let temperature_k = solve_tridiagonal(&subdiagonal, &diagonal, &superdiagonal, &rhs)
@@ -224,14 +225,14 @@ pub fn urban_roof_temperature(
     let mut material_conductivity = vec![0.0; layers];
     for layer in 0..roof_offset {
         capacity[layer] = liquid[layer]
-            .mul_add(
+            .contract(
                 WATER_HEAT_CAPACITY_J_KG_K,
                 ice[layer] * ICE_HEAT_CAPACITY_J_KG_K,
             )
             .max(1.0e-6);
         // `:153-154` `bw = (wice+wliq)/dz`；`.FMA (.FMA (bw, 7.75e-5, (bw*1.105e-6)*bw), tkice-tkair, tkair)`
         let bw = (ice[layer] + liquid[layer]) / input.layer_thickness_m[layer];
-        material_conductivity[layer] = bw.mul_add(7.75e-5, (bw * 1.105e-6) * bw).mul_add(
+        material_conductivity[layer] = bw.contract(7.75e-5, (bw * 1.105e-6) * bw).contract(
             ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K,
             AIR_THERMAL_CONDUCTIVITY_W_M_K,
         );
@@ -244,7 +245,7 @@ pub fn urban_roof_temperature(
     if roof_offset == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
         capacity[0] = input
             .snow_water_equivalent_kg_m2
-            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
+            .contract(ICE_HEAT_CAPACITY_J_KG_K, capacity[0]);
     }
     capacity[roof_offset] = (capacity[roof_offset]
         + liquid[roof_offset] * WATER_HEAT_CAPACITY_J_KG_K)
@@ -260,9 +261,9 @@ pub fn urban_roof_temperature(
         let upper = z[layer + 1] - zi[layer + 1];
         let lower = zi[layer + 1] - z[layer];
         let denominator = if vectorized {
-            k[layer + 1].mul_add(lower, k[layer] * upper)
+            k[layer + 1].contract(lower, k[layer] * upper)
         } else {
-            k[layer].mul_add(upper, k[layer + 1] * lower)
+            k[layer].contract(upper, k[layer + 1] * lower)
         };
         ((k[layer] * k[layer + 1]) * (z[layer + 1] - z[layer])) / denominator
     };
@@ -288,7 +289,7 @@ pub fn urban_roof_temperature(
                 / (z[layer + 1] - z[layer]);
         }
         // `:193/234` `.FNMA (cnfac, t(nl), troof_inner) * tk(nl) / (zi(nl)-z(nl))`
-        flux[bottom] = ((-cnfac).mul_add(temperature[bottom], input.inner_surface_temperature_k)
+        flux[bottom] = ((-cnfac).contract(temperature[bottom], input.inner_surface_temperature_k)
             * conductivity[bottom])
             / inner_distance;
         flux
@@ -298,7 +299,7 @@ pub fn urban_roof_temperature(
     let surface_flux = (input.absorbed_shortwave_w_m2 + input.absorbed_longwave_w_m2)
         - input
             .evaporation_kg_m2_s
-            .mul_add(input.vaporization_heat_j_kg, input.sensible_heat_w_m2);
+            .contract(input.vaporization_heat_j_kg, input.sensible_heat_w_m2);
     let surface_flux_slope =
         input.longwave_temperature_slope_w_m2_k - input.surface_energy_temperature_slope_w_m2_k;
 
@@ -312,10 +313,10 @@ pub fn urban_roof_temperature(
     let top_distance = z[1] - z[0];
     let top = ((implicit * factor[0]) * conductivity[0]) / top_distance;
     let surface_conduction = cnfac * flux[0];
-    diagonal[0] = (-surface_flux_slope).mul_add(factor[0], top + 1.0);
+    diagonal[0] = (-surface_flux_slope).contract(factor[0], top + 1.0);
     superdiagonal[0] = -top;
-    rhs[0] = ((-surface_flux_slope).mul_add(t[0], surface_flux) + surface_conduction)
-        .mul_add(factor[0], t[0]);
+    rhs[0] = ((-surface_flux_slope).contract(t[0], surface_flux) + surface_conduction)
+        .contract(factor[0], t[0]);
     // 中间层（`:204-210`）
     for layer in 1..bottom {
         let above = z[layer] - z[layer - 1];
@@ -323,29 +324,29 @@ pub fn urban_roof_temperature(
         let scaled = implicit * factor[layer];
         subdiagonal[layer] = -((conductivity[layer - 1] * scaled) / above);
         diagonal[layer] =
-            (conductivity[layer - 1] / above + conductivity[layer] / below).mul_add(scaled, 1.0);
+            (conductivity[layer - 1] / above + conductivity[layer] / below).contract(scaled, 1.0);
         superdiagonal[layer] = -((conductivity[layer] * scaled) / below);
-        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * factor[layer], t[layer]);
+        rhs[layer] = (flux[layer] - flux[layer - 1]).contract(cnfac * factor[layer], t[layer]);
     }
     // 底层（`:214-219`）：`bt = .FMA ((1-cnfac)*fact, tk(nl)/dzp + tk(nl-1)/dzm, 1)`、
     // `rt = .FMA (fact, .FNMA (cnfac, fn(nl-1), fn(nl)), t)`
     let above = z[bottom] - z[bottom - 1];
     let scaled = implicit * factor[bottom];
     subdiagonal[bottom] = -((scaled * conductivity[bottom - 1]) / above);
-    diagonal[bottom] = scaled.mul_add(
+    diagonal[bottom] = scaled.contract(
         conductivity[bottom] / inner_distance + conductivity[bottom - 1] / above,
         1.0,
     );
     rhs[bottom] =
-        factor[bottom].mul_add((-cnfac).mul_add(flux[bottom - 1], flux[bottom]), t[bottom]);
+        factor[bottom].contract((-cnfac).contract(flux[bottom - 1], flux[bottom]), t[bottom]);
     let mut temperature = solve_tridiagonal(&subdiagonal, &diagonal, &superdiagonal, &rhs)
         .map_err(anyhow::Error::msg)?;
     let after_flux = fluxes(&temperature);
     // `brr`（`:237-240`）：`.FMA (1-cnfac, fn1, cnfac*fn)`、`.FMA (cnfac, dfn, (1-cnfac)*dfn1)`
     let phase_layers = roof_offset + 1;
-    let mut phase_residual = vec![implicit.mul_add(after_flux[0], surface_conduction)];
+    let mut phase_residual = vec![implicit.contract(after_flux[0], surface_conduction)];
     for layer in 1..phase_layers {
-        phase_residual.push(cnfac.mul_add(
+        phase_residual.push(cnfac.contract(
             flux[layer] - flux[layer - 1],
             implicit * (after_flux[layer] - after_flux[layer - 1]),
         ));
@@ -388,7 +389,7 @@ fn roof_factor(input: UrbanRoofTemperatureInput<'_>, capacity: &[f64]) -> Result
     let mut factor = vec![0.0; capacity.len()];
     // `:182` `((deltim/cv)*dz) / (.FMA (capr, z(2)-zi(0), z(1)-zi(0))*0.5)`
     factor[0] = ((input.time_step_seconds / capacity[0]) * input.layer_thickness_m[0])
-        / (input.surface_temperature_factor.mul_add(
+        / (input.surface_temperature_factor.contract(
             input.node_depth_m[1] - input.interface_depth_m[0],
             input.node_depth_m[0] - input.interface_depth_m[0],
         ) * 0.5);

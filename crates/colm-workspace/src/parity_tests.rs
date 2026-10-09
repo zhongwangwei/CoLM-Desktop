@@ -372,14 +372,15 @@ fn parity_with_a_tolerance_accepts_rounding_noise_and_still_catches_a_real_misal
     )
     .unwrap();
     assert!(!real.ok && real.first_difference.unwrap().contains("f_t"));
-    // 提示只在非 Apple Silicon 平台出现。
+    // 提示只在没验证过逐位一致的平台出现（Apple Silicon 与 x86_64 Linux 已验证）。
     assert_eq!(
         real.platform_note.is_some(),
-        !(cfg!(target_arch = "aarch64") && cfg!(target_os = "macos"))
+        !(cfg!(all(target_arch = "aarch64", target_os = "macos"))
+            || cfg!(all(target_arch = "x86_64", target_os = "linux")))
     );
     if let Some(note) = platform_note() {
         assert!(
-            note.contains("COLM_KERNEL_FMA=1")
+            note.contains("libmvec")
                 && note.contains("first_records=2")
                 && note.contains("rtol=1e-9")
                 && note.contains("f_frcsat")

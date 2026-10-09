@@ -8,6 +8,7 @@
 //! gfortran 在 `a*b + c` 上几乎总是收缩成 FMA，所以平铺写法在这里几乎处处是错的。
 
 use anyhow::{bail, ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     canopy_diffusivity, canopy_diffusivity_resistance_analytic, canopy_monin_obukhov_with_scheme,
@@ -202,7 +203,7 @@ pub(crate) fn leaf_temperature_pc(
     }
 
     // `:578`：`FMA(1-fsno, zlnd, fsno*zsno)`
-    let z0mg = (1.0 - fsno).mul_add(leaf.soil_roughness_m, fsno * leaf.snow_roughness_m);
+    let z0mg = (1.0 - fsno).contract(leaf.soil_roughness_m, fsno * leaf.snow_roughness_m);
     let mut z0qg = z0mg;
 
     let canlay: Vec<usize> = drive.iter().map(|d| d.canopy_layer).collect();
@@ -241,9 +242,9 @@ pub(crate) fn leaf_temperature_pc(
         let water = columns[i].leaf.canopy_water;
         if vegetation_snow {
             // `:651`：`FMA(ldew_snow, cpice, FMA(0.2*lsai, cpliq, ldew_rain*cpliq))`
-            clai[i] = water.snow_mm.mul_add(
+            clai[i] = water.snow_mm.contract(
                 ICE_HEAT_CAPACITY_J_KG_K,
-                (lsai[i] * 0.2).mul_add(
+                (lsai[i] * 0.2).contract(
                     WATER_HEAT_CAPACITY_J_KG_K,
                     water.rain_mm * WATER_HEAT_CAPACITY_J_KG_K,
                 ),
@@ -282,9 +283,9 @@ pub(crate) fn leaf_temperature_pc(
     for i in 0..n {
         if vegetated[i] {
             let l = canlay[i] - 1;
-            htop_lay[l] = fcover[i].mul_add(htop[i], htop_lay[l]);
-            hbot_lay[l] = fcover[i].mul_add(hbot[i], hbot_lay[l]);
-            lsai_lay[l] = fcover[i].mul_add(lsai[i], lsai_lay[l]);
+            htop_lay[l] = fcover[i].contract(htop[i], htop_lay[l]);
+            hbot_lay[l] = fcover[i].contract(hbot[i], hbot_lay[l]);
+            lsai_lay[l] = fcover[i].contract(lsai[i], lsai_lay[l]);
             fcover_lay[l] += fcover[i];
         }
     }
@@ -339,7 +340,7 @@ pub(crate) fn leaf_temperature_pc(
     for l in 0..LAYERS {
         if active(l) {
             let fai = 1.0 - (-(lsai_lay[l] * 0.5)).exp();
-            let sqrtdragc = crate::LibmPow::lpow(fai.mul_add(0.3, 0.003), 0.5).min(0.3);
+            let sqrtdragc = crate::LibmPow::lpow(fai.contract(0.3, 0.003), 0.5).min(0.3);
             let gap = htop_lay[l] - displa_lay[l];
             a_lay[l] = htop_lay[l] / gap / (VON_KARMAN / sqrtdragc);
             displa_lay[l] = displa_lay[l].max(htop_lay[l] * 0.5);
@@ -368,7 +369,7 @@ pub(crate) fn leaf_temperature_pc(
     for i in 0..n {
         if fshade[i] > 0.0 && canlay[i] > 0 {
             let l = canlay[i] - 1;
-            thermk_lay[l] = fshade[i].mul_add(thermk[i], thermk_lay[l]);
+            thermk_lay[l] = fshade[i].contract(thermk[i], thermk_lay[l]);
             fshade_lay[l] += fshade[i];
         }
     }
@@ -388,11 +389,14 @@ pub(crate) fn leaf_temperature_pc(
     let one_f1_f2 = one_f1 - f2;
     let f1f2 = f1 * f2;
     tdn[3][0] = one_f1_f2 + f1f2;
-    tdn[4][0] = (-f1f2).mul_add(f3, f2.mul_add(f3, f1.mul_add(f3, f1f2 + (one_f1_f2 - f3))));
+    tdn[4][0] = (-f1f2).contract(
+        f3,
+        f2.contract(f3, f1.contract(f3, f1f2 + (one_f1_f2 - f3))),
+    );
     tdn[2][1] = f1;
     let one_f2 = 1.0 - f2;
     tdn[3][1] = f1 * one_f2;
-    let open23 = f2.mul_add(f3, one_f2 - f3);
+    let open23 = f2.contract(f3, one_f2 - f3);
     tdn[4][1] = f1 * open23;
     tdn[3][2] = f2;
     let one_f3 = 1.0 - f3;
@@ -414,7 +418,7 @@ pub(crate) fn leaf_temperature_pc(
     dlvpar[0] = 1.0;
     let pass1 = one_f1 + f1tk1;
     dlvpar[1] = pass1 * pass1;
-    let pass2 = f1.mul_add(one_f2 * tk1, (f2 * tk2).mul_add(pass1, tdn[3][0]));
+    let pass2 = f1.contract(one_f2 * tk1, (f2 * tk2).contract(pass1, tdn[3][0]));
     dlvpar[2] = pass2 * pass2;
 
     // `:912-935`
@@ -426,18 +430,18 @@ pub(crate) fn leaf_temperature_pc(
             qaf[top] = (qm + qg) * 0.5;
         }
         2 => {
-            taf[bot] = tg.mul_add(2.0, thm) / 3.0;
-            qaf[bot] = qg.mul_add(2.0, qm) / 3.0;
-            taf[top] = thm.mul_add(2.0, tg) / 3.0;
-            qaf[top] = qm.mul_add(2.0, qg) / 3.0;
+            taf[bot] = tg.contract(2.0, thm) / 3.0;
+            qaf[bot] = qg.contract(2.0, qm) / 3.0;
+            taf[top] = thm.contract(2.0, tg) / 3.0;
+            qaf[top] = qm.contract(2.0, qg) / 3.0;
         }
         3 => {
-            taf[0] = tg.mul_add(3.0, thm) * 0.25;
-            qaf[0] = qg.mul_add(3.0, qm) * 0.25;
+            taf[0] = tg.contract(3.0, thm) * 0.25;
+            qaf[0] = qg.contract(3.0, qm) * 0.25;
             taf[1] = (tg + thm) * 0.5;
             qaf[1] = (qg + qm) * 0.5;
-            taf[2] = thm.mul_add(3.0, tg) * 0.25;
-            qaf[2] = qm.mul_add(3.0, qg) * 0.25;
+            taf[2] = thm.contract(3.0, tg) * 0.25;
+            qaf[2] = qm.contract(3.0, qg) * 0.25;
         }
         _ => bail!("PC canopy has {numlay} active layers"),
     }
@@ -451,12 +455,12 @@ pub(crate) fn leaf_temperature_pc(
     let mut z0qv = z0m_lays[3];
     let us = leaf.eastward_wind_m_s;
     let vs = leaf.northward_wind_m_s;
-    let ur = us.mul_add(us, vs * vs).sqrt().max(0.1);
+    let ur = us.contract(us, vs * vs).sqrt().max(0.1);
     let mut dth = thm - taf[top];
     let mut dqh = qm - qaf[top];
-    let one_plus_061_qm = qm.mul_add(0.61, 1.0);
+    let one_plus_061_qm = qm.contract(0.61, 1.0);
     let th061 = th * 0.61;
-    let dthv = dth.mul_add(one_plus_061_qm, dqh * th061);
+    let dthv = dth.contract(one_plus_061_qm, dqh * th061);
     let (hu, ht, hq) = match leaf.options.observation_height_mode {
         crate::ObservationHeightMode::Absolute => {
             let floor = htop_lay[top] + 1.0;
@@ -766,7 +770,7 @@ pub(crate) fn leaf_temperature_pc(
             let rbsun = rb[i] / laisun[i];
             let rbsha = rb[i] / laisha[i];
             let l = canlay[i] - 1;
-            let eah = psrf * qaf[l] / qaf[l].mul_add(0.378, 0.622);
+            let eah = psrf * qaf[l] / qaf[l].contract(0.378, 0.622);
             let saturation = sat[i].expect("vegetated PFT has a saturation state");
             if plant_hydraulics.is_some() {
                 fluxes[i].rstfacsun = 1.0;
@@ -944,7 +948,7 @@ pub(crate) fn leaf_temperature_pc(
             cfh[i] = lsai[i] / rb[i];
             let dry_share = (1.0 - fwet[i]) * delta[i];
             let leaf_sum = laisun[i] / (rb[i] + rssun[i]) + laisha[i] / (rb[i] + rssha[i]);
-            cfw[i] = dry_share.mul_add(leaf_sum, lsai[i] * (1.0 - dry_share) / rb[i]);
+            cfw[i] = dry_share.contract(leaf_sum, lsai[i] * (1.0 - dry_share) / rb[i]);
         }
 
         // `:1304-1359`
@@ -985,8 +989,8 @@ pub(crate) fn leaf_temperature_pc(
         for i in 0..n {
             if vegetated[i] {
                 let l = canlay[i] - 1;
-                wtshi[l] = fcover[i].mul_add(cfh[i], wtshi[l]);
-                wtsqi[l] = fcover[i].mul_add(cfw[i], wtsqi[l]);
+                wtshi[l] = fcover[i].contract(cfh[i], wtshi[l]);
+                wtsqi[l] = fcover[i].contract(cfw[i], wtsqi[l]);
             }
         }
         for l in 0..LAYERS {
@@ -1007,10 +1011,10 @@ pub(crate) fn leaf_temperature_pc(
             if vegetated[i] {
                 let l = canlay[i] - 1;
                 wlh[i] = fcover[i] * (cfh[i] * wtshi[l]);
-                wlhl[l] = wlh[i].mul_add(tl[i], wlhl[l]);
+                wlhl[l] = wlh[i].contract(tl[i], wlhl[l]);
                 wlq[i] = fcover[i] * (cfw[i] * wtsqi[l]);
                 let q = sat[i].expect("vegetated").specific_humidity;
-                wlql[l] = wlq[i].mul_add(q, wlql[l]);
+                wlql[l] = wlq[i].contract(q, wlql[l]);
             }
         }
         solve_canopy_air(
@@ -1024,41 +1028,41 @@ pub(crate) fn leaf_temperature_pc(
             if vegetated[i] {
                 let l = canlay[i] - 1;
                 emitted[l] = (fshade[i] * (1.0 - thermk[i]) * STEFAN_BOLTZMANN)
-                    .mul_add(fourth(tl[i]), emitted[l]);
+                    .contract(fourth(tl[i]), emitted[l]);
             }
         }
         let (l1, l2, l3) = (emitted[0], emitted[1], emitted[2]);
         let ltd3 = f3 * tk3 * frl;
         let ld3 = ltd3 + l3;
-        let ltd2 = tk2 * tdn[4][2].mul_add(frl, f2 * ld3);
+        let ltd2 = tk2 * tdn[4][2].contract(frl, f2 * ld3);
         let ld2 = ltd2 + l2;
-        let ltd1 = tk1 * f1.mul_add(ld2, tdn[4][1].mul_add(frl, tdn[3][1] * ld3));
+        let ltd1 = tk1 * f1.contract(ld2, tdn[4][1].contract(frl, tdn[3][1] * ld3));
         let ld = [0.0, ltd1 + l1, ld2, ld3, frl];
         lin = [0.0; 5];
         for j in 0..5 {
             for k in 0..5 {
-                lin[j] = ld[k].mul_add(tdn[k][j], lin[j]);
+                lin[j] = ld[k].contract(tdn[k][j], lin[j]);
             }
         }
         let one_minus_emg = 1.0 - emg;
         let base = one_minus_emg * lin[0];
         let lg = if leaf.options.split_soil_snow {
             let soil = ((1.0 - fsno) * emg * STEFAN_BOLTZMANN)
-                .mul_add(fourth(leaf.soil_surface_temperature_k), base);
-            (fsno * emg * STEFAN_BOLTZMANN).mul_add(fourth(leaf.snow_surface_temperature_k), soil)
+                .contract(fourth(leaf.soil_surface_temperature_k), base);
+            (fsno * emg * STEFAN_BOLTZMANN).contract(fourth(leaf.snow_surface_temperature_k), soil)
         } else {
-            fourth(tg).mul_add(emg * STEFAN_BOLTZMANN, base)
+            fourth(tg).contract(emg * STEFAN_BOLTZMANN, base)
         };
         let ltu1 = f1tk1 * lg;
         let lu1 = ltu1 + l1;
-        let ltu2 = tk2 * tup[0][2].mul_add(lg, f2 * lu1);
+        let ltu2 = tk2 * tup[0][2].contract(lg, f2 * lu1);
         let lu2 = l2 + ltu2;
-        let ltu3 = tk3 * f3.mul_add(lu2, tup[0][3].mul_add(lg, tup[1][3] * lu1));
+        let ltu3 = tk3 * f3.contract(lu2, tup[0][3].contract(lg, tup[1][3] * lu1));
         let lu = [lg, lu1, lu2, l3 + ltu3, 0.0];
         let mut upward = [0.0; 5];
         for j in 0..5 {
             for k in 0..5 {
-                upward[j] = lu[k].mul_add(tup[k][j], upward[j]);
+                upward[j] = lu[k].contract(tup[k][j], upward[j]);
             }
         }
         for j in 0..5 {
@@ -1076,7 +1080,7 @@ pub(crate) fn leaf_temperature_pc(
                 irab[i] = absorbed - emission;
                 let factor = fshade[i] * (dlvpar[l] * 4.0 * one_minus_emg);
                 dirab[i] = cube(tl[i])
-                    * (gap * (fshade[i] * factor.mul_add(gap, -8.0)) * STEFAN_BOLTZMANN)
+                    * (gap * (fshade[i] * factor.contract(gap, -8.0)) * STEFAN_BOLTZMANN)
                     / fcover[i];
             }
         }
@@ -1117,7 +1121,7 @@ pub(crate) fn leaf_temperature_pc(
                 etr_dtl[i] = 0.0;
             }
             // `:1562-1580`：`FNMA(1-fwet, delta, 1)`
-            let wet_weight = rhoair * (-(1.0 - fwet[i])).mul_add(delta[i], 1.0) * lsai[i] / rb[i];
+            let wet_weight = rhoair * (-(1.0 - fwet[i])).contract(delta[i], 1.0) * lsai[i] / rb[i];
             evplwet[i] = gradient * wet_weight;
             evplwet_dtl[i] = moisture_factor * wet_weight * slope;
             let ldew = columns[i].leaf.canopy_water.total_mm;
@@ -1138,11 +1142,11 @@ pub(crate) fn leaf_temperature_pc(
             let rain_heat = drive[i].retained_rain_kg_m2_s * WATER_HEAT_CAPACITY_J_KG_K;
             let snow_heat = drive[i].retained_snow_kg_m2_s * ICE_HEAT_CAPACITY_J_KG_K;
             let dt_precip = t_precip - tl[i];
-            let numerator = dt_precip.mul_add(
+            let numerator = dt_precip.contract(
                 snow_heat,
-                rain_heat.mul_add(
+                rain_heat.contract(
                     dt_precip,
-                    (-fevpl).mul_add(
+                    (-fevpl).contract(
                         LATENT_HEAT_VAPORIZATION_J_KG,
                         drive[i].absorbed_solar_w_m2 + irab[i] - fluxes[i].fsenl,
                     ),
@@ -1165,9 +1169,9 @@ pub(crate) fn leaf_temperature_pc(
             del[i] = (step * step).sqrt();
             let latent = LATENT_HEAT_VAPORIZATION_J_KG * fevpl_dtl[i];
             dele[i] = ((step * step)
-                * latent.mul_add(
+                * latent.contract(
                     latent,
-                    dirab[i].mul_add(dirab[i], fsenl_dtl[i] * fsenl_dtl[i]),
+                    dirab[i].contract(dirab[i], fsenl_dtl[i] * fsenl_dtl[i]),
                 ))
             .sqrt();
             sat[i] = Some(saturation_specific_humidity(tl[i], psrf)?);
@@ -1179,8 +1183,8 @@ pub(crate) fn leaf_temperature_pc(
         for i in 0..n {
             if vegetated[i] {
                 let l = canlay[i] - 1;
-                wlhl[l] = wlh[i].mul_add(tl[i], wlhl[l]);
-                wlql[l] = wlq[i].mul_add(sat[i].expect("vegetated").specific_humidity, wlql[l]);
+                wlhl[l] = wlh[i].contract(tl[i], wlhl[l]);
+                wlql[l] = wlq[i].contract(sat[i].expect("vegetated").specific_humidity, wlql[l]);
             }
         }
         solve_canopy_air(
@@ -1191,19 +1195,19 @@ pub(crate) fn leaf_temperature_pc(
         // `:1714-1722`
         let gah2o = 1.0 / raw * tprcor / thm;
         let net_uptake = (0..n).fold(0.0, |sum, i| {
-            fcover[i].mul_add(
+            fcover[i].contract(
                 fluxes[i].assimsun + fluxes[i].assimsha - respcsun[i] - respcsha[i] - rsoil,
                 sum,
             )
         });
-        pco2a = (-net_uptake).mul_add(psrf * 1.37 / gah2o.max(0.446), leaf.atmospheric_co2_pa);
+        pco2a = (-net_uptake).contract(psrf * 1.37 / gah2o.max(0.446), leaf.atmospheric_co2_pa);
 
         // `:1728-1756`
         dth = thm - taf[top];
         dqh = qm - qaf[top];
         tstar = dth * (VON_KARMAN / (fh - fht));
         qstar = dqh * (VON_KARMAN / (fq - fqt));
-        let thvstar = one_plus_061_qm.mul_add(tstar, th061 * qstar);
+        let thvstar = one_plus_061_qm.contract(tstar, th061 * qstar);
         zeta = zldis * VON_KARMAN * GRAVITY_M_S2 * thvstar / (thv * (ustar * ustar));
         zeta = if zeta >= 0.0 {
             zeta.clamp(1.0e-6, 2.0)
@@ -1222,7 +1226,7 @@ pub(crate) fn leaf_temperature_pc(
                 ),
             };
             let wc = crate::LibmPow::lpow(-(ustar * GRAVITY_M_S2 * thvstar * zii / thv), 1.0 / 3.0);
-            ur.mul_add(ur, wc * wc).sqrt()
+            ur.contract(ur, wc * wc).sqrt()
         };
         if obuold * obu < 0.0 {
             nmozsgn += 1;
@@ -1307,15 +1311,15 @@ pub(crate) fn leaf_temperature_pc(
         let d = dtl[i][last];
         let rain_heat = drive[i].retained_rain_kg_m2_s * WATER_HEAT_CAPACITY_J_KG_K;
         let snow_heat = drive[i].retained_snow_kg_m2_s * ICE_HEAT_CAPACITY_J_KG_K;
-        let bracket = (fevpl_dtl[i].mul_add(
+        let bracket = (fevpl_dtl[i].contract(
             LATENT_HEAT_VAPORIZATION_J_KG,
             fsenl_dtl[i] + (clai[i] / deltim - dirab[i]),
         ) + rain_heat)
             + snow_heat;
-        let fsenl = (dtl_noadj[i] - d).mul_add(bracket, fsenl_dtl[i].mul_add(d, fluxes[i].fsenl));
-        let mut fsenl = erre[i].mul_add(LATENT_HEAT_VAPORIZATION_J_KG, fsenl);
+        let fsenl = (dtl_noadj[i] - d).contract(bracket, fsenl_dtl[i].contract(d, fluxes[i].fsenl));
+        let mut fsenl = erre[i].contract(LATENT_HEAT_VAPORIZATION_J_KG, fsenl);
         let etr0 = fluxes[i].etr;
-        fluxes[i].etr = d.mul_add(etr_dtl[i], fluxes[i].etr);
+        fluxes[i].etr = d.contract(etr_dtl[i], fluxes[i].etr);
         if let Some(hydraulic) = plant_hydraulics {
             let etr = fluxes[i].etr;
             if etr0.abs() >= 1.0e-15 {
@@ -1332,7 +1336,7 @@ pub(crate) fn leaf_temperature_pc(
                     .iter_mut()
                     .zip(hydraulic.layer_thickness_m)
                 {
-                    *flux = (dz / total * etr_dtl[i]).mul_add(d, *flux);
+                    *flux = (dz / total * etr_dtl[i]).contract(d, *flux);
                 }
             }
             let positive = fluxes[i]
@@ -1355,8 +1359,8 @@ pub(crate) fn leaf_temperature_pc(
                 }
             }
         }
-        evplwet[i] = d.mul_add(evplwet_dtl[i], evplwet[i]);
-        let mut fevpl = d.mul_add(fevpl_dtl[i], fevpl_noadj[i]);
+        evplwet[i] = d.contract(evplwet_dtl[i], evplwet[i]);
+        let mut fevpl = d.contract(fevpl_dtl[i], fevpl_noadj[i]);
         // `:1864-1871`：负蒸腾记作湿叶结露，不是倒流的液流。
         if fluxes[i].etr < 0.0 {
             evplwet[i] += fluxes[i].etr;
@@ -1372,11 +1376,11 @@ pub(crate) fn leaf_temperature_pc(
         let elwdif = (evplwet[i] - elwmax).max(0.0);
         evplwet[i] = elwmax.min(evplwet[i]);
         fevpl -= elwdif;
-        fsenl = elwdif.mul_add(LATENT_HEAT_VAPORIZATION_J_KG, fsenl);
+        fsenl = elwdif.contract(LATENT_HEAT_VAPORIZATION_J_KG, fsenl);
         fluxes[i].fsenl = fsenl;
         fluxes[i].fevpl = fevpl;
         let dt_precip = t_precip - tl[i];
-        fluxes[i].hprl = rain_heat.mul_add(dt_precip, snow_heat * dt_precip);
+        fluxes[i].hprl = rain_heat.contract(dt_precip, snow_heat * dt_precip);
         fluxes[i].dheatl = d * (clai[i] / deltim);
         let (melt, freeze) = update_pc_canopy_water(
             &mut columns[i].leaf.canopy_water,
@@ -1394,12 +1398,12 @@ pub(crate) fn leaf_temperature_pc(
     // `:2061-2065`
     let emission_change =
         |i: usize| cube(tlbef[i]) * (fshade[i] * 4.0 * (1.0 - thermk[i]) * STEFAN_BOLTZMANN);
-    let canopy_down = (0..n).fold(0.0, |sum, i| emission_change(i).mul_add(dtl[i][last], sum));
+    let canopy_down = (0..n).fold(0.0, |sum, i| emission_change(i).contract(dtl[i][last], sum));
     let dlrad = canopy_down + lin[0];
     let absorbed_change = (0..n).fold(0.0, |sum, i| {
-        (fcover[i] * dirab[i]).mul_add(dtl[i][last], sum)
+        (fcover[i] * dirab[i]).contract(dtl[i][last], sum)
     });
-    let ulrad = (-emg).mul_add(canopy_down, lin[4] - absorbed_change);
+    let ulrad = (-emg).contract(canopy_down, lin[4] - absorbed_change);
 
     // `:2071-2131`
     let taux = -(us * rhoair / ram);
@@ -1414,17 +1418,17 @@ pub(crate) fn leaf_temperature_pc(
     let ground_share = 1.0 - wgh[bot];
     let fseng = heat_ground * (tg - taf[bot]);
     let fseng_soil = heat_ground
-        * (ground_share.mul_add(leaf.soil_surface_temperature_k, -air_part) - wlhl[bot]);
+        * (ground_share.contract(leaf.soil_surface_temperature_k, -air_part) - wlhl[bot]);
     let fseng_snow = heat_ground
-        * (ground_share.mul_add(leaf.snow_surface_temperature_k, -air_part) - wlhl[bot]);
+        * (ground_share.contract(leaf.snow_surface_temperature_k, -air_part) - wlhl[bot]);
     let water_ground = rhoair * cgw[bot];
     let moisture_part = waq[bot] * tqaf;
     let ground_moisture_share = 1.0 - wgq[bot];
     let fevpg = water_ground * (qg - qaf[bot]);
     let fevpg_soil = water_ground
-        * (ground_moisture_share.mul_add(leaf.soil_specific_humidity, -moisture_part) - wlql[bot]);
+        * (ground_moisture_share.contract(leaf.soil_specific_humidity, -moisture_part) - wlql[bot]);
     let fevpg_snow = water_ground
-        * (ground_moisture_share.mul_add(leaf.snow_specific_humidity, -moisture_part) - wlql[bot]);
+        * (ground_moisture_share.contract(leaf.snow_specific_humidity, -moisture_part) - wlql[bot]);
     let dqgdt = leaf.ground_humidity_temperature_slope_k;
     let (cgrnds, cgrndl) = if numlay < 3 {
         (
@@ -1437,9 +1441,9 @@ pub(crate) fn leaf_temperature_pc(
             water_ground * ((1.0 - waq[0] * wgq[1] * wgq[0] / facq) - wgq[0]) * dqgdt,
         )
     };
-    let cgrnd = cgrndl.mul_add(leaf.ground_latent_heat_j_kg, cgrnds);
-    let tref = (VON_KARMAN / (fh - fht) * dth).mul_add(fh2m / VON_KARMAN - fh / VON_KARMAN, thm);
-    let qref = (VON_KARMAN / (fq - fqt) * dqh).mul_add(fq2m / VON_KARMAN - fq / VON_KARMAN, qm);
+    let cgrnd = cgrndl.contract(leaf.ground_latent_heat_j_kg, cgrnds);
+    let tref = (VON_KARMAN / (fh - fht) * dth).contract(fh2m / VON_KARMAN - fh / VON_KARMAN, thm);
+    let qref = (VON_KARMAN / (fq - fqt) * dqh).contract(fq2m / VON_KARMAN - fq / VON_KARMAN, qm);
 
     for i in 0..n {
         columns[i].leaf.leaf_temperature_k = tl[i];
@@ -1499,34 +1503,34 @@ fn solve_canopy_air(
 ) {
     match numlay {
         1 => {
-            taf[top] = wah[top].mul_add(thm, wgh[top] * tg) + wlhl[top];
-            qaf[top] = waq[top].mul_add(qm, wgq[top] * qg) + wlql[top];
+            taf[top] = wah[top].contract(thm, wgh[top] * tg) + wlhl[top];
+            qaf[top] = waq[top].contract(qm, wgq[top] * qg) + wlql[top];
             *fact = 1.0;
             *facq = 1.0;
         }
         2 => {
-            let tmpw1 = wgh[bot].mul_add(tg, wlhl[bot]);
-            *fact = (-wgh[top]).mul_add(wah[bot], 1.0);
-            taf[top] = (wah[top].mul_add(thm, wgh[top] * tmpw1) + wlhl[top]) / *fact;
-            let tmpw1 = wgq[bot].mul_add(qg, wlql[bot]);
-            *facq = (-wgq[top]).mul_add(waq[bot], 1.0);
-            qaf[top] = (waq[top].mul_add(qm, wgq[top] * tmpw1) + wlql[top]) / *facq;
-            taf[bot] = wlhl[bot] + wgh[bot].mul_add(tg, wah[bot] * taf[top]);
-            qaf[bot] = wlql[bot] + wgq[bot].mul_add(qg, waq[bot] * qaf[top]);
+            let tmpw1 = wgh[bot].contract(tg, wlhl[bot]);
+            *fact = (-wgh[top]).contract(wah[bot], 1.0);
+            taf[top] = (wah[top].contract(thm, wgh[top] * tmpw1) + wlhl[top]) / *fact;
+            let tmpw1 = wgq[bot].contract(qg, wlql[bot]);
+            *facq = (-wgq[top]).contract(waq[bot], 1.0);
+            qaf[top] = (waq[top].contract(qm, wgq[top] * tmpw1) + wlql[top]) / *facq;
+            taf[bot] = wlhl[bot] + wgh[bot].contract(tg, wah[bot] * taf[top]);
+            qaf[bot] = wlql[bot] + wgq[bot].contract(qg, waq[bot] * qaf[top]);
         }
         _ => {
-            let tmpw1 = wah[2].mul_add(thm, wlhl[2]);
-            let tmpw2 = wgh[0].mul_add(tg, wlhl[0]);
-            *fact = (-wgh[1]).mul_add(wah[0], (-wah[1]).mul_add(wgh[2], 1.0));
-            taf[1] = (tmpw1.mul_add(wah[1], tmpw2 * wgh[1]) + wlhl[1]) / *fact;
-            let tmpw1 = waq[2].mul_add(qm, wlql[2]);
-            let tmpw2 = wgq[0].mul_add(qg, wlql[0]);
-            *facq = (-waq[0]).mul_add(wgq[1], (-waq[1]).mul_add(wgq[2], 1.0));
-            qaf[1] = (waq[1].mul_add(tmpw1, tmpw2 * wgq[1]) + wlql[1]) / *facq;
-            taf[0] = wlhl[0] + wgh[0].mul_add(tg, taf[1] * wah[0]);
-            qaf[0] = wlql[0] + wgq[0].mul_add(qg, qaf[1] * waq[0]);
-            taf[2] = wlhl[2] + wah[2].mul_add(thm, taf[1] * wgh[2]);
-            qaf[2] = wlql[2] + waq[2].mul_add(qm, qaf[1] * wgq[2]);
+            let tmpw1 = wah[2].contract(thm, wlhl[2]);
+            let tmpw2 = wgh[0].contract(tg, wlhl[0]);
+            *fact = (-wgh[1]).contract(wah[0], (-wah[1]).contract(wgh[2], 1.0));
+            taf[1] = (tmpw1.contract(wah[1], tmpw2 * wgh[1]) + wlhl[1]) / *fact;
+            let tmpw1 = waq[2].contract(qm, wlql[2]);
+            let tmpw2 = wgq[0].contract(qg, wlql[0]);
+            *facq = (-waq[0]).contract(wgq[1], (-waq[1]).contract(wgq[2], 1.0));
+            qaf[1] = (waq[1].contract(tmpw1, tmpw2 * wgq[1]) + wlql[1]) / *facq;
+            taf[0] = wlhl[0] + wgh[0].contract(tg, taf[1] * wah[0]);
+            qaf[0] = wlql[0] + wgq[0].contract(qg, qaf[1] * waq[0]);
+            taf[2] = wlhl[2] + wah[2].contract(thm, taf[1] * wgh[2]);
+            qaf[2] = wlql[2] + waq[2].contract(qm, qaf[1] * wgq[2]);
         }
     }
 }
@@ -1544,7 +1548,7 @@ fn update_pc_canopy_water(
     vegetation_snow: bool,
 ) -> (f64, f64) {
     // `:1903`：`max(FNMA(deltim, evplwet, ldew), 0)`
-    water.total_mm = (-deltim).mul_add(evplwet, water.total_mm).max(0.0);
+    water.total_mm = (-deltim).contract(evplwet, water.total_mm).max(0.0);
     if !vegetation_snow {
         // `:1931-1941`：不分冠层雪时也让雨/雪两分量与总量一致。
         let parts = water.rain_mm + water.snow_mm;
@@ -1580,8 +1584,8 @@ fn update_pc_canopy_water(
             qsubl = water.snow_mm / deltim;
         }
     }
-    water.rain_mm = deltim.mul_add(qdewl - qevpl, water.rain_mm);
-    water.snow_mm = deltim.mul_add(qfrol - qsubl, water.snow_mm);
+    water.rain_mm = deltim.contract(qdewl - qevpl, water.rain_mm);
+    water.snow_mm = deltim.contract(qfrol - qsubl, water.snow_mm);
     water.total_mm = water.rain_mm + water.snow_mm;
 
     // `:2005-2038`
@@ -1601,7 +1605,7 @@ fn update_pc_canopy_water(
         melt_mass = melted;
         water.snow_mm = (water.snow_mm - melted).max(0.0);
         water.rain_mm = (melted + water.rain_mm).max(0.0);
-        *tl = fwet_snow.mul_add(FREEZING_K, *tl * (1.0 - fwet_snow));
+        *tl = fwet_snow.contract(FREEZING_K, *tl * (1.0 - fwet_snow));
     }
     if water.rain_mm > 1.0e-6 && *tl < FREEZING_K {
         let qfrz = (water.rain_mm / deltim).min(
@@ -1612,7 +1616,7 @@ fn update_pc_canopy_water(
         freeze_mass = frozen;
         water.rain_mm = (water.rain_mm - frozen).max(0.0);
         water.snow_mm = (frozen + water.snow_mm).max(0.0);
-        *tl = fwet_snow.mul_add(FREEZING_K, *tl * (1.0 - fwet_snow));
+        *tl = fwet_snow.contract(FREEZING_K, *tl * (1.0 - fwet_snow));
     }
     (melt_mass, freeze_mass)
 }

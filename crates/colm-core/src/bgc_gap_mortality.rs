@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `CNGapMortality`：按年死亡率把各植被池转成凋落物通量。
 pub fn cn_gap_mortality(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw: BgcSwitches) {
@@ -83,58 +84,58 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
             let class = ivt as usize;
             wtcol = p.pftfrac[m];
             s.patch_flux.gap_mortality_to_met_c[j] =
-                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_cel_c[j] =
-                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cel_c[j],
                 );
             s.patch_flux.gap_mortality_to_lig_c[j] =
-                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafc_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_lig_c[j],
                 );
             s.patch_flux.gap_mortality_to_met_c[j] =
-                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_flab[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_flab[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_cel_c[j] =
-                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_fcel[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cel_c[j],
                 );
             s.patch_flux.gap_mortality_to_lig_c[j] =
-                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_flig[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootc_to_litter_p[m] * c.fr_flig[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_lig_c[j],
                 );
             s.patch_flux.gap_mortality_to_cwdc[j] = ((s.pft_flux.m_livestemc_to_litter_p[m]
                 + s.pft_flux.m_deadstemc_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cwdc[j],
                 );
             s.patch_flux.gap_mortality_to_cwdc[j] = ((s.pft_flux.m_livecrootc_to_litter_p[m]
                 + s.pft_flux.m_deadcrootc_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.croot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cwdc[j],
                 );
             s.patch_flux.gap_mortality_to_met_c[j] = ((s.pft_flux.m_leafc_storage_to_litter_p[m]
                 + s.pft_flux.m_gresp_storage_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_met_c[j] =
-                (s.pft_flux.m_frootc_storage_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_frootc_storage_to_litter_p[m] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
@@ -142,7 +143,7 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 [m]
                 + s.pft_flux.m_deadstemc_storage_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
@@ -150,26 +151,26 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 ((s.pft_flux.m_livecrootc_storage_to_litter_p[m]
                     + s.pft_flux.m_deadcrootc_storage_to_litter_p[m])
                     * wtcol)
-                    .mul_add(
+                    .contract(
                         s.pft.croot_prof_p[j + d.nl_soil * m],
                         s.patch_flux.gap_mortality_to_met_c[j],
                     );
             s.patch_flux.gap_mortality_to_met_c[j] = ((s.pft_flux.m_leafc_xfer_to_litter_p[m]
                 + s.pft_flux.m_gresp_xfer_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_met_c[j] =
-                (s.pft_flux.m_frootc_xfer_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_frootc_xfer_to_litter_p[m] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_met_c[j] = ((s.pft_flux.m_livestemc_xfer_to_litter_p[m]
                 + s.pft_flux.m_deadstemc_xfer_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
@@ -177,66 +178,66 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 [m]
                 + s.pft_flux.m_deadcrootc_xfer_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.croot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_c[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_flab[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_flab[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_cel_n[j] =
-                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_fcel[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cel_n[j],
                 );
             s.patch_flux.gap_mortality_to_lig_n[j] =
-                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_flig[class] * wtcol).mul_add(
+                (s.pft_flux.m_leafn_to_litter_p[m] * c.lf_flig[class] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_lig_n[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_flab[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_flab[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_cel_n[j] =
-                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_fcel[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_fcel[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cel_n[j],
                 );
             s.patch_flux.gap_mortality_to_lig_n[j] =
-                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_flig[class] * wtcol).mul_add(
+                (s.pft_flux.m_frootn_to_litter_p[m] * c.fr_flig[class] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_lig_n[j],
                 );
             s.patch_flux.gap_mortality_to_cwdn[j] = ((s.pft_flux.m_livestemn_to_litter_p[m]
                 + s.pft_flux.m_deadstemn_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cwdn[j],
                 );
             s.patch_flux.gap_mortality_to_cwdn[j] = ((s.pft_flux.m_livecrootn_to_litter_p[m]
                 + s.pft_flux.m_deadcrootn_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.croot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_cwdn[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] = (s.pft_flux.m_retransn_to_litter_p[m] * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_leafn_storage_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_leafn_storage_to_litter_p[m] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_frootn_storage_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_frootn_storage_to_litter_p[m] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
@@ -244,7 +245,7 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 [m]
                 + s.pft_flux.m_deadstemn_storage_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
@@ -252,24 +253,24 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 ((s.pft_flux.m_livecrootn_storage_to_litter_p[m]
                     + s.pft_flux.m_deadcrootn_storage_to_litter_p[m])
                     * wtcol)
-                    .mul_add(
+                    .contract(
                         s.pft.croot_prof_p[j + d.nl_soil * m],
                         s.patch_flux.gap_mortality_to_met_n[j],
                     );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_leafn_xfer_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_leafn_xfer_to_litter_p[m] * wtcol).contract(
                     s.pft.leaf_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] =
-                (s.pft_flux.m_frootn_xfer_to_litter_p[m] * wtcol).mul_add(
+                (s.pft_flux.m_frootn_xfer_to_litter_p[m] * wtcol).contract(
                     s.pft.froot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
             s.patch_flux.gap_mortality_to_met_n[j] = ((s.pft_flux.m_livestemn_xfer_to_litter_p[m]
                 + s.pft_flux.m_deadstemn_xfer_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.stem_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );
@@ -277,7 +278,7 @@ fn cn_gap_veg_to_litter(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, _
                 [m]
                 + s.pft_flux.m_deadcrootn_xfer_to_litter_p[m])
                 * wtcol)
-                .mul_add(
+                .contract(
                     s.pft.croot_prof_p[j + d.nl_soil * m],
                     s.patch_flux.gap_mortality_to_met_n[j],
                 );

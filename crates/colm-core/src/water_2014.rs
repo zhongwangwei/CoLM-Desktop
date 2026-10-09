@@ -5,6 +5,7 @@
 //! reimplementing their equations in a runtime driver.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     simple_vic_runoff, snow_water, solve_campbell_soil_water, topmodel_surface_runoff,
@@ -343,7 +344,7 @@ pub fn water_2014_soil_step(
     // `:474 wliq = wliq + dwat*dzmm`，`dzmm = dz*1000` 预先算好（`:462`）；GIMPLE 是
     // `.FMA (dwat, dzmm, wliq)`（第 406 轮：原先 `(dwat*dz)*1000` 再相加，Campbell 首步后差 1 ulp）。
     for layer in 0..layers {
-        state.liquid_water_kg_m2[layer] = soil.liquid_water_change[layer].mul_add(
+        state.liquid_water_kg_m2[layer] = soil.liquid_water_change[layer].contract(
             input.layer_thickness_m[layer] * WATER_DENSITY_KG_M3,
             state.liquid_water_kg_m2[layer],
         );
@@ -550,7 +551,7 @@ fn split_snow_soil_step(
     let (snow, ground_rain_kg_m2_s, snowmelt_kg_m2_s) = if snow_state.layer_count < 0 {
         let snow = snow_water(input.snow, snow_state)?;
         let ground_rain = (1.0 - split.snow_cover_fraction)
-            .mul_add(split.rainfall_kg_m2_s, snow.bottom_drainage_kg_m2_s);
+            .contract(split.rainfall_kg_m2_s, snow.bottom_drainage_kg_m2_s);
         // 有雪层时 `meltf` 的 `sm` 恒为 0，式子里也没有它。
         (snow, ground_rain, 0.0)
     } else {
@@ -619,7 +620,7 @@ fn wetland_soil_step(
             + (water_input - input.fluxes.transpiration_kg_m2_s))
             + input.fluxes.soil_frost_kg_m2_s)
             - input.fluxes.soil_sublimation_kg_m2_s;
-        let mut wetland = net.mul_add(
+        let mut wetland = net.contract(
             dt,
             (state.surface_water_mm + state.aquifer_water_mm) + state.wetland_water_mm,
         );
@@ -628,7 +629,7 @@ fn wetland_soil_step(
             if input.temperature_k[layer] > crate::FREEZING_K {
                 // `:1470` `max(.FNMA (porsl*dz, 1000, wliq), 0)`
                 let residual = (-(input.porosity[layer] * input.layer_thickness_m[layer]))
-                    .mul_add(1000.0, state.liquid_water_kg_m2[layer])
+                    .contract(1000.0, state.liquid_water_kg_m2[layer])
                     .max(0.0);
                 state.liquid_water_kg_m2[layer] -= residual;
                 residual_sum += residual;
@@ -812,7 +813,7 @@ pub(crate) fn absorb_condensation(input: CondensationInput, state: &mut Water201
     let ice_before_frost = state.ice_water_kg_m2[0];
     let dew_input_mm = (dt * input.dew_kg_m2_s).max(0.0);
     state.ice_water_kg_m2[0] = dt
-        .mul_add(input.frost_minus_sublimation_kg_m2_s, ice_before_frost)
+        .contract(input.frost_minus_sublimation_kg_m2_s, ice_before_frost)
         .max(0.0);
     let ice = state.ice_water_kg_m2[0];
     let dew_capacity = ((input.top_porosity * input.top_thickness_m - ice / ICE_DENSITY_KG_M3)

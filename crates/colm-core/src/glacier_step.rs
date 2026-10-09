@@ -11,6 +11,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::standard_lct_step::packed_snow_soil_state;
 use crate::{
@@ -186,7 +187,7 @@ pub fn glacier_snow_step(
     if state.soil_water.liquid_water_kg_m2[0] > liquid_capacity {
         let extra = (state.soil_water.liquid_water_kg_m2[0] - liquid_capacity) / dt;
         // `:1635` `.FMA (pg_rain, t_rain, t1*wextra) / (pg_rain + wextra)`
-        rain_temperature = rainfall.mul_add(rain_temperature, state.soil_temperature_k[0] * extra)
+        rain_temperature = rainfall.contract(rain_temperature, state.soil_temperature_k[0] * extra)
             / (rainfall + extra);
         rainfall += extra;
         state.soil_water.liquid_water_kg_m2[0] = liquid_capacity;
@@ -198,7 +199,7 @@ pub fn glacier_snow_step(
     if state.soil_water.ice_water_kg_m2[0] > ice_capacity {
         let extra = (state.soil_water.ice_water_kg_m2[0] - ice_capacity) / dt;
         // `:1647` 同形。
-        snow_temperature = snowfall.mul_add(snow_temperature, state.soil_temperature_k[0] * extra)
+        snow_temperature = snowfall.contract(snow_temperature, state.soil_temperature_k[0] * extra)
             / (snowfall + extra);
         snowfall += extra;
         state.soil_water.ice_water_kg_m2[0] = ice_capacity;
@@ -210,7 +211,7 @@ pub fn glacier_snow_step(
         let rain_heat = rainfall * CPLIQ;
         let snow_heat = snowfall * CPICE;
         precipitation_temperature = rain_heat
-            .mul_add(rain_temperature, snow_heat * snow_temperature)
+            .contract(rain_temperature, snow_heat * snow_temperature)
             / (rain_heat + snow_heat);
     }
 
@@ -356,7 +357,7 @@ pub fn glacier_snow_step(
     // ---- 地表径流（`CoLMMAIN.F90:1718-1742`）----
     let (surface_runoff, total_runoff) = if variably_saturated {
         // `:1723` `a = .FMA (deltim, gwat, wdsrf + wliq(1))`
-        let available = dt.mul_add(
+        let available = dt.contract(
             water_input,
             state.soil_water.surface_water_mm + state.soil_water.liquid_water_kg_m2[0],
         );
@@ -397,7 +398,7 @@ pub fn glacier_snow_step(
     let water_balance_error_mm = if input.soil_water.catch_lateral {
         (total_water_after - total_water_before) - dt * (snowfall + rainfall - thermal.fevpa)
     } else {
-        (-dt).mul_add(
+        (-dt).contract(
             snowfall + rainfall - thermal.fevpa - total_runoff,
             total_water_after - total_water_before,
         )
@@ -599,12 +600,12 @@ pub fn glacier_temperature(
     let potential_temperature =
         input.air_temperature_k * (100_000.0 / input.surface_pressure_pa).lpow(RGAS / CPAIR);
     // `:221` `.FMA (forc_q, 0.61, 1.0)`，与 `groundfluxes_glacier` 的 `(1.+0.61*qm)` 同一项。
-    let one_plus_061_humidity = input.specific_humidity.mul_add(0.61, 1.0);
+    let one_plus_061_humidity = input.specific_humidity.contract(0.61, 1.0);
     let virtual_potential_temperature = potential_temperature * one_plus_061_humidity;
     // `:222` `sqrt(.FMA (us, us, vs*vs))`
     let reference_wind = input
         .eastward_wind_m_s
-        .mul_add(
+        .contract(
             input.eastward_wind_m_s,
             input.northward_wind_m_s * input.northward_wind_m_s,
         )
@@ -639,13 +640,13 @@ pub fn glacier_temperature(
     let surface_temperature = column.temperature_k[0];
     let increment = surface_temperature - previous_temperature[0];
     // `:263-264`
-    let mut fseng = increment.mul_add(turbulent.cgrnds, turbulent.fseng);
-    let mut fevpg = increment.mul_add(turbulent.cgrndl, turbulent.fevpg);
+    let mut fseng = increment.contract(turbulent.cgrnds, turbulent.fseng);
+    let mut fevpg = increment.contract(turbulent.cgrndl, turbulent.fevpg);
     let evaporation_limit = (column.ice_water_kg_m2[0] + column.liquid_water_kg_m2[0]) / dt;
     let excess = (fevpg - evaporation_limit).max(0.0);
     fevpg = fevpg.min(evaporation_limit);
     // `:274` `.FMA (egidif, htvp, fseng)`
-    fseng = excess.mul_add(latent_heat, fseng);
+    fseng = excess.contract(latent_heat, fseng);
     let latent = fevpg * latent_heat;
 
     let (mut qseva, mut qsubl, mut qfros, mut qsdew) = (0.0, 0.0, 0.0, 0.0);
@@ -670,13 +671,13 @@ pub fn glacier_temperature(
     let absorbed =
         input.absorbed_shortwave_w_m2 + input.downward_longwave_w_m2 * GLACIER_EMISSIVITY;
     let mut ground_heat =
-        (-(t0_cubed * emissive)).mul_add(increment.mul_add(4.0, t0), absorbed) - (fseng + latent);
-    ground_heat = precipitation_gap.mul_add(rain_heat, ground_heat);
-    ground_heat = precipitation_gap.mul_add(snow_heat, ground_heat);
+        (-(t0_cubed * emissive)).contract(increment.contract(4.0, t0), absorbed) - (fseng + latent);
+    ground_heat = precipitation_gap.contract(rain_heat, ground_heat);
+    ground_heat = precipitation_gap.contract(snow_heat, ground_heat);
     // `:307` `olrg`
-    let longwave_up = (t0_cubed * (4.0 * GLACIER_EMISSIVITY * STEFNC)).mul_add(
+    let longwave_up = (t0_cubed * (4.0 * GLACIER_EMISSIVITY * STEFNC)).contract(
         increment,
-        input.downward_longwave_w_m2.mul_add(
+        input.downward_longwave_w_m2.contract(
             1.0 - GLACIER_EMISSIVITY,
             (t0_squared * t0_squared) * emissive,
         ),
@@ -688,8 +689,8 @@ pub fn glacier_temperature(
         - fseng
         - latent
         - solved.latent_heat_flux_w_m2;
-    energy_error = precipitation_gap.mul_add(rain_heat, energy_error);
-    energy_error = precipitation_gap.mul_add(snow_heat, energy_error);
+    energy_error = precipitation_gap.contract(rain_heat, energy_error);
+    energy_error = precipitation_gap.contract(snow_heat, energy_error);
     for ((now, before), fact) in column
         .temperature_k
         .iter()
@@ -764,7 +765,7 @@ fn glacier_ground_fluxes(
     let potential_061 = potential_temperature * 0.61;
     // `:480` `.FMA (1+0.61*qm, dth, dqh*(th*0.61))`
     let virtual_difference =
-        one_plus_061_humidity.mul_add(temperature_difference, humidity_difference * potential_061);
+        one_plus_061_humidity.contract(temperature_difference, humidity_difference * potential_061);
     let reference_height = input.wind_height_m;
     let initial = initialize_monin_obukhov(MoninObukhovInitialInput {
         reference_wind_m_s: reference_wind,
@@ -811,7 +812,7 @@ fn glacier_ground_fluxes(
             momentum_roughness / ((momentum_roughness * ustar / 1.5e-5).lpow(0.45) * 0.13).exp();
         // `:506` `.FMA (1+0.61*qm, tstar, (th*0.61)*qstar)`
         let virtual_scale =
-            one_plus_061_humidity.mul_add(temperature_scale, potential_061 * humidity_scale);
+            one_plus_061_humidity.contract(temperature_scale, potential_061 * humidity_scale);
         zeta = virtual_scale * ((reference_height * VONKAR) * GRAV)
             / (virtual_potential_temperature * (ustar * ustar));
         zeta = if zeta >= 0.0 {
@@ -836,7 +837,7 @@ fn glacier_ground_fluxes(
                 .lpow(1.0 / 3.0);
             // `:523` `sqrt(.FMA (ur, ur, wc*wc))`
             reference_wind
-                .mul_add(reference_wind, convective * convective)
+                .contract(reference_wind, convective * convective)
                 .sqrt()
         };
         if previous_obukhov * obukhov < 0.0 {
@@ -856,7 +857,7 @@ fn glacier_ground_fluxes(
     let raiw = input.air_density_kg_m3 / raw;
     let cgrndl = ground_humidity_slope * raiw;
     // `:544` `.FMA (cgrndl, htvp, cgrnds)`
-    let cgrnd = cgrndl.mul_add(latent_heat, raih);
+    let cgrnd = cgrndl.contract(latent_heat, raih);
     let richardson = ((ustar * ustar) * zeta)
         / ((stability_wind * stability_wind) * ((VONKAR * VONKAR) / profile.heat));
     Ok(TurbulentFluxes {
@@ -868,11 +869,11 @@ fn glacier_ground_fluxes(
         fseng: -(temperature_difference * raih),
         fevpg: -(humidity_difference * raiw),
         // `:560-561` `.FMA (tstar, fh2m/vonkar - fh/vonkar, thm)`
-        tref: temperature_scale.mul_add(
+        tref: temperature_scale.contract(
             profile.heat_at_2m / VONKAR - profile.heat / VONKAR,
             reference_temperature,
         ),
-        qref: humidity_scale.mul_add(
+        qref: humidity_scale.contract(
             profile.moisture_at_2m / VONKAR - profile.moisture / VONKAR,
             input.specific_humidity,
         ),
@@ -921,16 +922,16 @@ fn glacier_ground_temperature(
         .enumerate()
         .map(|(layer, (liquid, ice))| {
             if layer < snow {
-                liquid.mul_add(CPLIQ, ice * CPICE)
+                liquid.contract(CPLIQ, ice * CPICE)
             } else {
-                ice.mul_add(CPICE, liquid * CPLIQ)
+                ice.contract(CPICE, liquid * CPLIQ)
             }
         })
         .collect::<Vec<_>>();
     if snow == 0 && input.snow_water_equivalent_kg_m2 > 0.0 {
         heat_capacity[0] = input
             .snow_water_equivalent_kg_m2
-            .mul_add(CPICE, heat_capacity[0]);
+            .contract(CPICE, heat_capacity[0]);
     }
 
     // 导热率（`:692-705`）。
@@ -951,8 +952,8 @@ fn glacier_ground_temperature(
         let density = (ice + liquid) / thickness;
         // `:704` `.FMA (.FMA (rho, 7.75e-5, rho*(rho*1.105e-6)), tkice-tkair, tkair)`
         *value = density
-            .mul_add(7.75e-5, density * (density * 1.105e-6))
-            .mul_add(TKICE - TKAIR, TKAIR);
+            .contract(7.75e-5, density * (density * 1.105e-6))
+            .contract(TKICE - TKAIR, TKAIR);
     }
     let mut interface_conductivity = vec![0.0; n];
     for layer in 0..n - 1 {
@@ -965,7 +966,7 @@ fn glacier_ground_temperature(
             } else {
                 // `:733` 分母 `.FMA (thk(j), z(j+1)-zi(j), thk(j+1)*(zi(j)-z(j)))`
                 conductivity[layer] * conductivity[layer + 1] * (z[layer + 1] - z[layer])
-                    / conductivity[layer].mul_add(
+                    / conductivity[layer].contract(
                         z[layer + 1] - below,
                         conductivity[layer + 1] * (below - z[layer]),
                     )
@@ -985,11 +986,11 @@ fn glacier_ground_temperature(
         .map_or(input.absorbed_shortwave_w_m2, |values| values[0]);
     let surface_flux = absorbed_shortwave + input.downward_longwave_w_m2 * GLACIER_EMISSIVITY
         - (t0_squared * t0_squared) * emissive
-        - latent_heat.mul_add(fevpg, fseng)
+        - latent_heat.contract(fevpg, fseng)
         + rain_heat * precipitation_gap
         + precipitation_gap * snow_heat;
     // `:750` `.FNMS (t^3, 4*emg*stefnc, cgrnd) - cpliq*pg_rain - cpice*pg_snow`
-    let flux_derivative = (-(t0 * t0_squared)).mul_add(4.0 * GLACIER_EMISSIVITY * STEFNC, -cgrnd)
+    let flux_derivative = (-(t0 * t0_squared)).contract(4.0 * GLACIER_EMISSIVITY * STEFNC, -cgrnd)
         - rain_heat
         - snow_heat;
 
@@ -999,7 +1000,7 @@ fn glacier_ground_temperature(
     fact[0] = dt / heat_capacity[0] * column.thickness_m[0]
         / (input
             .surface_temperature_factor
-            .mul_add(z[1] - zi[0], z[0] - zi[0])
+            .contract(z[1] - zi[0], z[0] - zi[0])
             * 0.5);
     for layer in 1..n {
         fact[layer] = dt / heat_capacity[layer];
@@ -1020,10 +1021,10 @@ fn glacier_ground_temperature(
         let dzp = z[1] - z[0];
         let coupling = implicit * fact[0] * interface_conductivity[0] / dzp;
         // `:770` `.FNMA (dhsdT, fact, 1 + …)`；`:772` `.FMA (fact, .FNMA (dhsdT, t, hs) + cnfac*fn, t)`
-        diagonal[0] = (-flux_derivative).mul_add(fact[0], coupling + 1.0);
+        diagonal[0] = (-flux_derivative).contract(fact[0], coupling + 1.0);
         upper[0] = -coupling;
-        rhs[0] = fact[0].mul_add(
-            (-flux_derivative).mul_add(t0, surface_flux) + cnfac * flux[0],
+        rhs[0] = fact[0].contract(
+            (-flux_derivative).contract(t0, surface_flux) + cnfac * flux[0],
             t0,
         );
     }
@@ -1036,14 +1037,14 @@ fn glacier_ground_temperature(
         lower[layer] = -(interface_conductivity[layer - 1] * implicit_fact / dzm);
         diagonal[layer] = (interface_conductivity[layer - 1] / dzm
             + interface_conductivity[layer] / dzp)
-            .mul_add(implicit_fact, 1.0);
+            .contract(implicit_fact, 1.0);
         upper[layer] = -(interface_conductivity[layer] * implicit_fact / dzp);
         // 第 `lb+1` 层到冰层 1：`rt = .FMA (Δfn, cnfac*fact, .FMA (sabg_snow_lyr, fact, t))`（`:782`）。
         let base = match input.snow_layer_absorption_w_m2 {
-            Some(values) if layer <= snow => values[layer].mul_add(fact[layer], t[layer]),
+            Some(values) if layer <= snow => values[layer].contract(fact[layer], t[layer]),
             _ => t[layer],
         };
-        rhs[layer] = (flux[layer] - flux[layer - 1]).mul_add(cnfac * fact[layer], base);
+        rhs[layer] = (flux[layer] - flux[layer - 1]).contract(cnfac * fact[layer], base);
     }
     {
         let layer = n - 1;
@@ -1053,7 +1054,7 @@ fn glacier_ground_temperature(
         diagonal[layer] = coupling + 1.0;
         upper[layer] = 0.0;
         // `:802` `.FNMA (cnfac*fact, fn(j-1), t)`
-        rhs[layer] = (-(cnfac * fact[layer])).mul_add(flux[layer - 1], t[layer]);
+        rhs[layer] = (-(cnfac * fact[layer])).contract(flux[layer - 1], t[layer]);
     }
     let solved = crate::linear::solve_tridiagonal(&lower, &diagonal, &upper, &rhs)
         .map_err(|message| anyhow::anyhow!(message))?;
@@ -1065,9 +1066,9 @@ fn glacier_ground_temperature(
     }
     let mut residual = vec![0.0; n];
     // `:818` `.FMA (1-cnfac, fn1, cnfac*fn)`；`:821` `.FMA (cnfac, Δfn, (1-cnfac)*Δfn1)`
-    residual[0] = implicit.mul_add(solved_flux[0], cnfac * flux[0]);
+    residual[0] = implicit.contract(solved_flux[0], cnfac * flux[0]);
     for layer in 1..n {
-        residual[layer] = cnfac.mul_add(
+        residual[layer] = cnfac.contract(
             flux[layer] - flux[layer - 1],
             implicit * (solved_flux[layer] - solved_flux[layer - 1]),
         );

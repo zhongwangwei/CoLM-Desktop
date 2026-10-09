@@ -11,6 +11,7 @@
 
 use super::super::{soisno_slot, TracerDescriptor, TracerPools, SOIL_LAYERS, SOISNO_LAYERS};
 use super::common::soil_slot;
+use colm_numeric::Contract;
 
 /// `64._r8 * epsilon(1._r8)`。
 const CLOSURE_TOL_SCALE: f64 = 64.0 * f64::EPSILON;
@@ -161,8 +162,8 @@ fn move_dissolved_face(
     );
     let fraction = (moved_water / water_shadow[kd]).min(1.0);
     let available = p.wliq_soisno[d].max(0.0);
-    p.wliq_soisno[d] = (-fraction).mul_add(available, p.wliq_soisno[d]);
-    p.wliq_soisno[r] = fraction.mul_add(available, p.wliq_soisno[r]);
+    p.wliq_soisno[d] = (-fraction).contract(available, p.wliq_soisno[d]);
+    p.wliq_soisno[r] = fraction.contract(available, p.wliq_soisno[r]);
     water_shadow[kd] -= moved_water;
     water_shadow[kr] += moved_water;
 }

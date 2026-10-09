@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::snow::SNOW_AGE_FREEZING_K;
 
@@ -144,7 +145,7 @@ pub fn fresh_snow_radius(air_temperature_k: f64) -> Result<f64> {
         FRESH_SNOW_RADIUS_MAX_UM
     } else {
         // GIMPLE：`.FMA ((tmax-t)/30, 54.526, ((t-tmin)/30)*204.526)`（`tmax - tmin` 恰为 30）。
-        ((tmax - air_temperature_k) / (tmax - tmin)).mul_add(
+        ((tmax - air_temperature_k) / (tmax - tmin)).contract(
             FRESH_SNOW_RADIUS_MIN_UM,
             (air_temperature_k - tmin) / (tmax - tmin) * FRESH_SNOW_RADIUS_MAX_UM,
         )
@@ -214,10 +215,10 @@ pub fn age_snow_grains(
         let upper_temperature = if i == top {
             temperature[top]
         } else {
-            temperature[i - 1].mul_add(dz[i], temperature[i] * dz[i - 1]) / (dz[i] + dz[i - 1])
+            temperature[i - 1].contract(dz[i], temperature[i] * dz[i - 1]) / (dz[i] + dz[i - 1])
         };
         let lower_temperature =
-            temperature[i + 1].mul_add(dz[i], temperature[i] * dz[i + 1]) / (dz[i] + dz[i + 1]);
+            temperature[i + 1].contract(dz[i], temperature[i] * dz[i + 1]) / (dz[i] + dz[i + 1]);
         let gradient = ((upper_temperature - lower_temperature) / column_thickness).abs();
         let density = (mass / column_thickness).max(50.0);
         // Fortran NINT rounds halfway away from zero, as f64::round does.
@@ -234,7 +235,7 @@ pub fn age_snow_grains(
         // GIMPLE：`dr = .FMA (pow(...)*drdt0, dtime/3600, dr_wet)`。
         let growth = (table.initial_growth[index]
             * (tau / (dr_fresh + tau)).lpow(1.0 / table.kappa[index]))
-        .mul_add(dt / 3600.0, wet_growth);
+        .contract(dt / 3600.0, wet_growth);
         let snowfall = if input.snow_capping {
             input.snowcap_ice_kg_m2_s
         } else {
@@ -253,9 +254,9 @@ pub fn age_snow_grains(
         };
         // GIMPLE：`.FMA (frc_refrz, 1000, .FMA (rds+dr, frc_old, frc_new*fresh))`。
         *radius = refrozen_fraction
-            .mul_add(
+            .contract(
                 REFROZEN_SNOW_RADIUS_UM,
-                (*radius + growth).mul_add(old_fraction, fresh_fraction * fresh_radius),
+                (*radius + growth).contract(old_fraction, fresh_fraction * fresh_radius),
             )
             .clamp(FRESH_SNOW_RADIUS_MIN_UM, SNOW_RADIUS_MAX_UM);
     }

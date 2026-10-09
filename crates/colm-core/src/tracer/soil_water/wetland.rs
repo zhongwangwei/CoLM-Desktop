@@ -16,6 +16,7 @@
 //!   `redist_target = FNMA(rsur*dt, pool_ratio, pool_tracer)`。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use super::super::{
     soisno_slot, EvapKind, PatchTracerState, TracerSet, MAX_SNOW_LAYERS, SOIL_LAYERS,
@@ -131,7 +132,7 @@ pub fn tracer_wetland(
     // 开阔水面风速 `sqrt(FMA(us, us, vs*vs))`（GIMPLE 去掉了 `max(·,0)`）。
     let wind = input
         .forc_us
-        .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+        .contract(input.forc_us, input.forc_vs * input.forc_vs)
         .sqrt();
 
     let dt = input.deltim;
@@ -262,7 +263,7 @@ pub fn tracer_wetland(
             if input.t_soisno[slot] > FREEZING_K {
                 let wliq_bef = input.wliq_soisno_bef[slot];
                 let wresi_j = (-(input.porsl[soil_slot(j)] * input.dz_soisno[slot]))
-                    .mul_add(1000.0, wliq_bef)
+                    .contract(1000.0, wliq_bef)
                     .max(0.0);
                 if wresi_j > TRC_TINY {
                     wresi_sum = wresi_j + wresi_sum;
@@ -360,7 +361,7 @@ pub fn tracer_wetland(
             if input.split_soilsnow {
                 pool_tracer = state.step[itrc]
                     .pg_rain_ground
-                    .mul_add(1.0 - input.fsno, pool_tracer);
+                    .contract(1.0 - input.fsno, pool_tracer);
             }
             pool_tracer = trc_gwat_snow_local + pool_tracer;
             pool_water = gwat_snow_local + pool_water;
@@ -373,9 +374,9 @@ pub fn tracer_wetland(
         if q_dew_in + q_frost_in > TRC_TINY {
             let trc_dew_input = q_dew_in * ctx.deposition_ratio_for(layer_temp(1), false);
             let frost_ratio = ctx.deposition_ratio_for(layer_temp(1), true);
-            pool_tracer = q_frost_in.mul_add(frost_ratio, pool_tracer + trc_dew_input);
+            pool_tracer = q_frost_in.contract(frost_ratio, pool_tracer + trc_dew_input);
             let acc = &mut state.acc[itrc];
-            acc.precip = q_frost_in.mul_add(frost_ratio, acc.precip + trc_dew_input);
+            acc.precip = q_frost_in.contract(frost_ratio, acc.precip + trc_dew_input);
             acc.water_precip = (acc.water_precip + q_dew_in) + q_frost_in;
         }
 
@@ -416,7 +417,7 @@ pub fn tracer_wetland(
                 false,
             );
             if q_evap_out > loss_liq_avail {
-                trc_evap_loss = (q_evap_out - loss_liq_avail).mul_add(pool_ratio, trc_evap_loss);
+                trc_evap_loss = (q_evap_out - loss_liq_avail).contract(pool_ratio, trc_evap_loss);
             }
             pool_tracer_loss -= trc_evap_loss;
             pool_water_loss -= q_evap_out;
@@ -435,7 +436,7 @@ pub fn tracer_wetland(
             );
             if q_subl_out > loss_ice_avail {
                 trc_subl_loss =
-                    (q_subl_out - loss_ice_avail).mul_add(pool_ratio_loss, trc_subl_loss);
+                    (q_subl_out - loss_ice_avail).contract(pool_ratio_loss, trc_subl_loss);
             }
             pool_tracer_loss -= trc_subl_loss;
             pool_water_loss -= q_subl_out;
@@ -503,7 +504,7 @@ pub fn tracer_wetland(
             let trc_etr_loss = pool_ratio * q_etr_out;
             (
                 pool_ratio * loss_water,
-                pool_ratio.mul_add(q_evap_out, trc_subl_loss),
+                pool_ratio.contract(q_evap_out, trc_subl_loss),
                 trc_etr_loss,
                 trc_etr_loss,
             )
@@ -554,16 +555,16 @@ pub fn tracer_wetland(
             };
             p.wetwat = input.wetwat * ratio;
             p.wdsrf = input.wdsrf * ratio;
-            p.wa =
-                aquifer_actual_water(input.wa, aquifer_ref_water).mul_add(ratio, -aquifer_ref_mass);
+            p.wa = aquifer_actual_water(input.wa, aquifer_ref_water)
+                .contract(ratio, -aquifer_ref_mass);
             if input.rsur > TRC_TINY {
                 let rsur_water = input.rsur * dt;
                 let acc = &mut state.acc[itrc];
-                acc.rsur = rsur_water.mul_add(ratio, acc.rsur);
-                acc.rnof = rsur_water.mul_add(ratio, acc.rnof);
+                acc.rsur = rsur_water.contract(ratio, acc.rsur);
+                acc.rnof = rsur_water.contract(ratio, acc.rnof);
                 let step = &mut state.step[itrc];
-                step.rnof_step = rsur_water.mul_add(ratio, step.rnof_step);
-                redist_target = (-rsur_water).mul_add(ratio, pool_tracer);
+                step.rnof_step = rsur_water.contract(ratio, step.rnof_step);
+                redist_target = (-rsur_water).contract(ratio, pool_tracer);
             } else {
                 redist_target = pool_tracer;
             }
@@ -601,7 +602,7 @@ pub fn tracer_wetland(
         if let Some(storage) = input.waterstorage_patch {
             tracer.equilibrate_dissolved(
                 (-input.qflx_irrig_ground.max(0.0))
-                    .mul_add(dt, storage)
+                    .contract(dt, storage)
                     .max(0.0),
                 &mut p.waterstorage,
                 &mut p.waterstorage_solid,

@@ -4,6 +4,7 @@
 #![allow(clippy::needless_range_loop)]
 
 use anyhow::{bail, Result};
+use colm_numeric::Contract;
 
 use crate::bgc_driver::BgcPhysics;
 use crate::bgc_state::BgcState;
@@ -20,7 +21,7 @@ fn integral(values: &[f64], dz: &[f64]) -> f64 {
     values
         .iter()
         .zip(dz)
-        .fold(0.0, |acc, (x, d)| x.mul_add(*d, acc))
+        .fold(0.0, |acc, (x, d)| x.contract(*d, acc))
 }
 
 /// `SoilBiogeochemVerticalProfile`。所有逐层累加都被收缩成 FMA。
@@ -64,8 +65,8 @@ pub fn soil_biogeochem_vertical_profile(s: &mut BgcState, p: &BgcPhysics) -> Res
         let mut rootfr_tot = 0.0;
         let mut surface_prof_tot = 0.0;
         for j in 0..active {
-            rootfr_tot = v.cinput_rootfr_p[at(j)].mul_add(dz[j], rootfr_tot);
-            surface_prof_tot = surface_prof[j].mul_add(dz[j], surface_prof_tot);
+            rootfr_tot = v.cinput_rootfr_p[at(j)].contract(dz[j], rootfr_tot);
+            surface_prof_tot = surface_prof[j].contract(dz[j], surface_prof_tot);
         }
         if altmax_positive && rootfr_tot > 0.0 && surface_prof_tot > 0.0 {
             for j in 0..active {
@@ -110,14 +111,14 @@ pub fn soil_biogeochem_vertical_profile(s: &mut BgcState, p: &BgcPhysics) -> Res
     for m in 0..npft {
         for j in 0..nl {
             col_cinput_rootfr[j] =
-                v.cinput_rootfr_p[j + nl * m].mul_add(p.pftfrac[m], col_cinput_rootfr[j]);
+                v.cinput_rootfr_p[j + nl * m].contract(p.pftfrac[m], col_cinput_rootfr[j]);
         }
     }
     let mut rootfr_tot = 0.0;
     let mut surface_prof_tot = 0.0;
     for j in 0..active {
-        rootfr_tot = col_cinput_rootfr[j].mul_add(dz[j], rootfr_tot);
-        surface_prof_tot = surface_prof[j].mul_add(dz[j], surface_prof_tot);
+        rootfr_tot = col_cinput_rootfr[j].contract(dz[j], rootfr_tot);
+        surface_prof_tot = surface_prof[j].contract(dz[j], surface_prof_tot);
     }
     let patch = &mut s.patch;
     if altmax_positive && rootfr_tot > 0.0 && surface_prof_tot > 0.0 {

@@ -20,6 +20,7 @@
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `calc_plant_nutrient_demand_CLM45_default`：分配系数与 N 需求。
 pub fn calc_plant_nutrient_demand(
@@ -118,7 +119,7 @@ pub fn calc_plant_nutrient_demand(
                         } else {
                             s.pft.arepr_p[m] = 0.0;
                             s.pft.aroot_p[m] = (-(c.arooti[class] - c.arootf[class]))
-                                .mul_add(s.pft.hui_p[m], c.arooti[class]);
+                                .contract(s.pft.hui_p[m], c.arooti[class]);
                             fleaf = c.fleafi[class]
                                 * ((-c.bfact[class]).exp()
                                     - (-(c.bfact[class] * s.pft.hui_p[m] / c.grnfill[class]))
@@ -132,7 +133,7 @@ pub fn calc_plant_nutrient_demand(
                         s.pft.grain_flag_p[m] = 0.0;
                     } else if s.pft.hui_p[m] >= c.grnfill[class] {
                         s.pft.aroot_p[m] = (-(c.arooti[class] - c.arootf[class]))
-                            .mul_add(1.0_f64.min(s.pft.hui_p[m]), c.arooti[class]);
+                            .contract(1.0_f64.min(s.pft.hui_p[m]), c.arooti[class]);
                         s.pft.astem_p[m] = c.astemf[class].max(
                             s.pft.astem_p[m]
                                 * 0.0_f64
@@ -186,7 +187,7 @@ pub fn calc_plant_nutrient_demand(
             }
         }
         if c.woody[class] == 1.0 {
-            s.pft.c_allometry_p[m] = (1.0 + g1) * (f3.mul_add(1.0 + f2, 1.0 + f1));
+            s.pft.c_allometry_p[m] = (1.0 + g1) * (f3.contract(1.0 + f2, 1.0 + f1));
             s.pft.n_allometry_p[m] = 1.0 / cnl
                 + f1 / cnfr
                 + (f3 * f4 * (1.0 + f2)) / cnlw
@@ -194,7 +195,7 @@ pub fn calc_plant_nutrient_demand(
         } else if ivt >= NPCROPMIN {
             if sw.crop {
                 cng = c.graincn[class];
-                s.pft.c_allometry_p[m] = (1.0 + g1) * (f3.mul_add(1.0 + f2, 1.0 + f1 + f5));
+                s.pft.c_allometry_p[m] = (1.0 + g1) * (f3.contract(1.0 + f2, 1.0 + f1 + f5));
                 s.pft.n_allometry_p[m] = 1.0 / cnl
                     + f1 / cnfr
                     + f5 / cng
@@ -202,7 +203,7 @@ pub fn calc_plant_nutrient_demand(
                     + (f3 * (1.0 - f4) * (1.0 + f2)) / cndw;
             }
         } else {
-            s.pft.c_allometry_p[m] = f1.mul_add(g1, 1.0 + g1 + f1);
+            s.pft.c_allometry_p[m] = f1.contract(g1, 1.0 + g1 + f1);
             s.pft.n_allometry_p[m] = 1.0 / cnl + f1 / cnfr;
         }
         s.pft_flux.plant_ndemand_p[m] =

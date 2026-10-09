@@ -8,6 +8,7 @@
 //! PFT/PC（[`pft_same_type_assignment`]）：两侧都是土壤 patch 时再按 `pftclass` 逐 PFT 配对。
 //! 城市分支在上游另有一套逐城市类型的配对，调用方先拒绝。
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -372,7 +373,7 @@ pub fn pft_same_type_assignment(
         .map(|np| {
             let value = new.ranges[np]
                 .clone()
-                .fold(0.0f64, |acc, ip| ldew_p[ip].mul_add(new_pftfrac[ip], acc));
+                .fold(0.0f64, |acc, ip| ldew_p[ip].contract(new_pftfrac[ip], acc));
             (np, value)
         })
         .collect();
@@ -579,10 +580,10 @@ pub fn recompose_urban_patch_water(
                 column[l] = roof[u * roof_row + l] * froof[u];
             }
             for l in 0..patch_row {
-                column[l] = (gper[u * gper_row + l] * open).mul_add(pervious, column[l]);
+                column[l] = (gper[u * gper_row + l] * open).contract(pervious, column[l]);
             }
             for l in 0..top {
-                column[l] = (gimp[u * gimp_row + l] * open).mul_add(1.0 - pervious, column[l]);
+                column[l] = (gimp[u * gimp_row + l] * open).contract(1.0 - pervious, column[l]);
             }
         }
     }
@@ -595,8 +596,8 @@ pub fn recompose_urban_patch_water(
         .context("the patch overrides have no scv")?;
     for &(np, u) in targets {
         let open = 1.0 - froof[u];
-        let inner = roof[u].mul_add(froof[u], (gper[u] * open) * fgper[u]);
-        scv.values[np] = (gimp[u] * open).mul_add(1.0 - fgper[u], inner);
+        let inner = roof[u].contract(froof[u], (gper[u] * open) * fgper[u]);
+        scv.values[np] = (gimp[u] * open).contract(1.0 - fgper[u], inner);
     }
     Ok(())
 }

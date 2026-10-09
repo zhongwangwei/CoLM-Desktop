@@ -6,6 +6,7 @@ use crate::{
     SoilHydraulicModel,
 };
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 const MAX_SNOW_LAYERS: usize = 5;
 
@@ -429,7 +430,7 @@ pub fn initialize_profile_soil(
                 // gfortran 收缩成 `FMA(zi(j)-zwt, porsl, (zwt-zi(j-1))*wet) / (zi(j)-zi(j-1))`
                 // （`MOD_IniTimeVariable.F90:393` 的 GIMPLE）。
                 wet = (bottom - water_table_m)
-                    .mul_add(porosity[layer], (water_table_m - top) * wet)
+                    .contract(porosity[layer], (water_table_m - top) * wet)
                     / (bottom - top);
             }
             if temperature >= 273.16 {
@@ -451,8 +452,8 @@ pub fn initialize_profile_soil(
     if patch_type <= 1 && water_table_m > soil_interface_m[layers - 1] {
         // `zwt*1000. - zi*1000.` 是 `FMS(zwt, 1000, zi*1000)`，`psi0 - d*0.5` 是 `FNMA(d, 0.5, psi0)`，
         // `wa = -(d*(porsl - vliq))`（`MOD_IniTimeVariable.F90:407-410` 的 GIMPLE）。
-        let depth_mm = water_table_m.mul_add(1000.0, -(soil_interface_m[layers - 1] * 1000.0));
-        let psi = (-depth_mm).mul_add(0.5, psi_s_mm[layers - 1]);
+        let depth_mm = water_table_m.contract(1000.0, -(soil_interface_m[layers - 1] * 1000.0));
+        let psi = (-depth_mm).contract(0.5, psi_s_mm[layers - 1]);
         let vliq = soil_vliq_from_psi(
             psi,
             porosity[layers - 1],

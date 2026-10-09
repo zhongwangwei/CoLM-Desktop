@@ -2,6 +2,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{soil_psi_from_vliq, soil_vliq_from_psi, SoilHydraulicModel, FREEZING_K};
 
@@ -171,7 +172,7 @@ fn potential_stress(input: RootUptakeInput<'_>, layer: usize) -> f64 {
         // `rootr`（分层根吸水权重），实测黄金湿窗第 466 步的 `f_rootr` 恰差 1 ULP。
         model => soil_psi_from_vliq(
             (input.porosity[layer] - input.residual_water[layer])
-                .mul_add(saturation, input.residual_water[layer]),
+                .contract(saturation, input.residual_water[layer]),
             input.porosity[layer],
             input.residual_water[layer],
             input.saturated_soil_suction_mm[layer],

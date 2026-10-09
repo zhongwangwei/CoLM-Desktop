@@ -20,6 +20,7 @@
 /// `merit_90m` is created through `grid_define_by_name` and shifts every edge
 /// by half a cell before normalization. Keep that identity explicit: a custom
 /// 432000x216000 grid must still use the ordinary `by_ndims` geometry.
+use colm_numeric::Contract;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GridGeometry {
     ByNdims,
@@ -96,19 +97,19 @@ impl Grid {
     }
 
     fn merit_lon_w_raw(&self, i: usize) -> f64 {
-        self.dlon().mul_add((i - 1) as f64, -180.0) - self.dlon() / 2.0
+        self.dlon().contract((i - 1) as f64, -180.0) - self.dlon() / 2.0
     }
 
     fn merit_lon_e_raw(&self, i: usize) -> f64 {
-        self.dlon().mul_add(i as f64, -180.0) - self.dlon() / 2.0
+        self.dlon().contract(i as f64, -180.0) - self.dlon() / 2.0
     }
 
     fn merit_lat_s_raw(&self, j: usize) -> f64 {
-        (-self.dlat()).mul_add(j as f64, 90.0) - self.dlat() / 2.0
+        (-self.dlat()).contract(j as f64, 90.0) - self.dlat() / 2.0
     }
 
     fn merit_lat_n_raw(&self, j: usize) -> f64 {
-        (-self.dlat()).mul_add((j - 1) as f64, 90.0) - self.dlat() / 2.0
+        (-self.dlat()).contract((j - 1) as f64, 90.0) - self.dlat() / 2.0
     }
 
     pub fn dlon(&self) -> f64 {
@@ -129,7 +130,7 @@ impl Grid {
         if self.uses_merit_named_edges() {
             Self::normalize_longitude(self.merit_lon_w_raw(i))
         } else {
-            self.dlon().mul_add((i - 1) as f64, -180.0)
+            self.dlon().contract((i - 1) as f64, -180.0)
         }
     }
 
@@ -160,7 +161,7 @@ impl Grid {
         if self.uses_merit_named_edges() {
             self.merit_lat_s_raw(j).clamp(-90.0, 90.0)
         } else {
-            (-self.dlat()).mul_add(j as f64, 90.0)
+            (-self.dlat()).contract(j as f64, 90.0)
         }
     }
 
@@ -169,7 +170,7 @@ impl Grid {
         if self.uses_merit_named_edges() {
             self.merit_lat_n_raw(j).clamp(-90.0, 90.0)
         } else {
-            (-self.dlat()).mul_add((j - 1) as f64, 90.0)
+            (-self.dlat()).contract((j - 1) as f64, 90.0)
         }
     }
 

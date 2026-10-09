@@ -4,6 +4,7 @@
 //! This module writes its separate `landpft` companion, exactly as CoLM's
 //! `WRITE_PFTimeInvariants` does after `pct_readin` and `HTOP_readin`.
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
@@ -334,10 +335,10 @@ pub fn write_spatial_pft_constant_restarts(
                 "natural patch {patch} has no PFT canopy"
             );
             canopy.patch_top_m[patch] = indices.iter().fold(0.0, |sum, &pft| {
-                pft_heights.top_m[pft].mul_add(pfts.fraction[pft], sum)
+                pft_heights.top_m[pft].contract(pfts.fraction[pft], sum)
             });
             canopy.patch_bottom_m[patch] = indices.iter().fold(0.0, |sum, &pft| {
-                pft_heights.bottom_m[pft].mul_add(pfts.fraction[pft], sum)
+                pft_heights.bottom_m[pft].contract(pfts.fraction[pft], sum)
             });
         }
     }
@@ -1098,7 +1099,7 @@ pub fn write_spatial_pft_cold_time_restarts(
         common_roughness[patch] =
             Some(common_pft_roughness(indices, &canopy.top_m, &pfts.fraction));
         common_sai[patch] = Some(indices.iter().fold(0.0, |sum, &pft| {
-            sai_pft[pft].mul_add(pfts.fraction[pft], sum)
+            sai_pft[pft].contract(pfts.fraction[pft], sum)
         }));
         if high_resolution_canopy {
             for wavelength in 0..HIGH_RES_WAVELENGTHS {
@@ -1133,7 +1134,7 @@ pub fn write_spatial_pft_cold_time_restarts(
             .iter()
             .map(|indices| {
                 indices.iter().fold(0.0, |sum, &pft| {
-                    total_lai[pft].mul_add(pfts.fraction[pft], sum)
+                    total_lai[pft].contract(pfts.fraction[pft], sum)
                 })
             })
             .collect::<Vec<_>>();
@@ -1261,7 +1262,7 @@ fn common_pft_roughness(indices: &[usize], top_m: &[f64], fraction: &[f64]) -> f
     // MOD_HtopReadin aggregates HTOP before MOD_IniTimeVariable applies z0mr.
     indices
         .iter()
-        .fold(0.0, |sum, &pft| top_m[pft].mul_add(fraction[pft], sum))
+        .fold(0.0, |sum, &pft| top_m[pft].contract(fraction[pft], sum))
         * 0.1
 }
 

@@ -377,9 +377,9 @@ fn lake_adjustment_fuses_the_bottom_layer_like_gfortran() {
     adjust_lake_layers(&mut column).unwrap();
     let standard: f64 = DEFAULT_THICKNESS_M.iter().sum();
     let ratio = total / standard;
-    let top_excess = (-ratio).mul_add(0.1, 0.1);
+    let top_excess = (-ratio).contract(0.1, 0.1);
     assert_eq!(column.thickness_m[0], 0.1);
-    assert_eq!(column.thickness_m[9], 10.45f64.mul_add(ratio, -top_excess));
+    assert_eq!(column.thickness_m[9], 10.45f64.contract(ratio, -top_excess));
 }
 
 #[test]

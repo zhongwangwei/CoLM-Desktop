@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches, NPCROPMIN};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `NStateUpdate1`：物候转移、分配与再转移引起的 N 池变化。
 pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw: BgcSwitches) {
@@ -41,11 +42,11 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
     if sw.sasu || sw.diag_matrix {
         for j in 0..d.nl_soil {
             s.patch.I_met_n_vr_acc[j] =
-                s.patch_flux.phenology_to_met_n[j].mul_add(p.deltim, s.patch.I_met_n_vr_acc[j]);
+                s.patch_flux.phenology_to_met_n[j].contract(p.deltim, s.patch.I_met_n_vr_acc[j]);
             s.patch.I_cel_n_vr_acc[j] =
-                s.patch_flux.phenology_to_cel_n[j].mul_add(p.deltim, s.patch.I_cel_n_vr_acc[j]);
+                s.patch_flux.phenology_to_cel_n[j].contract(p.deltim, s.patch.I_cel_n_vr_acc[j]);
             s.patch.I_lig_n_vr_acc[j] =
-                s.patch_flux.phenology_to_lig_n[j].mul_add(p.deltim, s.patch.I_lig_n_vr_acc[j]);
+                s.patch_flux.phenology_to_lig_n[j].contract(p.deltim, s.patch.I_lig_n_vr_acc[j]);
         }
     }
     for m in 0..npft {
@@ -56,32 +57,32 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
         s.pft.frootn_p[m] += s.pft_flux.frootn_xfer_to_frootn_p[m] * p.deltim; // 无 FMA（上游第 165 行，乘积被 CSE 共享）
         s.pft.frootn_xfer_p[m] -= s.pft_flux.frootn_xfer_to_frootn_p[m] * p.deltim; // 无 FMA（上游第 166 行，乘积被 CSE 共享）
         if c.woody[class] == 1.0 {
-            s.pft.livestemn_p[m] =
-                s.pft_flux.livestemn_xfer_to_livestemn_p[m].mul_add(p.deltim, s.pft.livestemn_p[m]);
+            s.pft.livestemn_p[m] = s.pft_flux.livestemn_xfer_to_livestemn_p[m]
+                .contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.livestemn_xfer_p[m] = (-s.pft_flux.livestemn_xfer_to_livestemn_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
-            s.pft.deadstemn_p[m] =
-                s.pft_flux.deadstemn_xfer_to_deadstemn_p[m].mul_add(p.deltim, s.pft.deadstemn_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
+            s.pft.deadstemn_p[m] = s.pft_flux.deadstemn_xfer_to_deadstemn_p[m]
+                .contract(p.deltim, s.pft.deadstemn_p[m]);
             s.pft.deadstemn_xfer_p[m] = (-s.pft_flux.deadstemn_xfer_to_deadstemn_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_xfer_p[m]);
             s.pft.livecrootn_p[m] = s.pft_flux.livecrootn_xfer_to_livecrootn_p[m]
-                .mul_add(p.deltim, s.pft.livecrootn_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_p[m]);
             s.pft.livecrootn_xfer_p[m] = (-s.pft_flux.livecrootn_xfer_to_livecrootn_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_xfer_p[m]);
             s.pft.deadcrootn_p[m] = s.pft_flux.deadcrootn_xfer_to_deadcrootn_p[m]
-                .mul_add(p.deltim, s.pft.deadcrootn_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_p[m]);
             s.pft.deadcrootn_xfer_p[m] = (-s.pft_flux.deadcrootn_xfer_to_deadcrootn_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_xfer_p[m]);
         }
         if ivt >= NPCROPMIN {
-            s.pft.livestemn_p[m] =
-                s.pft_flux.livestemn_xfer_to_livestemn_p[m].mul_add(p.deltim, s.pft.livestemn_p[m]);
+            s.pft.livestemn_p[m] = s.pft_flux.livestemn_xfer_to_livestemn_p[m]
+                .contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.livestemn_xfer_p[m] = (-s.pft_flux.livestemn_xfer_to_livestemn_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
             s.pft.grainn_p[m] =
-                s.pft_flux.grainn_xfer_to_grainn_p[m].mul_add(p.deltim, s.pft.grainn_p[m]);
+                s.pft_flux.grainn_xfer_to_grainn_p[m].contract(p.deltim, s.pft.grainn_p[m]);
             s.pft.grainn_xfer_p[m] =
-                (-s.pft_flux.grainn_xfer_to_grainn_p[m]).mul_add(p.deltim, s.pft.grainn_xfer_p[m]);
+                (-s.pft_flux.grainn_xfer_to_grainn_p[m]).contract(p.deltim, s.pft.grainn_xfer_p[m]);
         }
         if sw.sasu || sw.diag_matrix {
             s.pft.AKX_leafn_xf_to_leafn_p_acc[m] += s.pft_flux.leafn_xfer_to_leafn_p[m] * p.deltim; // 无 FMA（上游第 187 行，乘积被 CSE 共享）
@@ -92,37 +93,37 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
             if c.woody[class] == 1.0 {
                 s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m] =
                     s.pft_flux.livestemn_xfer_to_livestemn_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m]);
                 s.pft.AKX_livestemn_xf_exit_p_acc[m] = s.pft_flux.livestemn_xfer_to_livestemn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
                 s.pft.AKX_deadstemn_xf_to_deadstemn_p_acc[m] =
                     s.pft_flux.deadstemn_xfer_to_deadstemn_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_deadstemn_xf_to_deadstemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_deadstemn_xf_to_deadstemn_p_acc[m]);
                 s.pft.AKX_deadstemn_xf_exit_p_acc[m] = s.pft_flux.deadstemn_xfer_to_deadstemn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_deadstemn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadstemn_xf_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_xf_to_livecrootn_p_acc[m] =
                     s.pft_flux.livecrootn_xfer_to_livecrootn_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livecrootn_xf_to_livecrootn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livecrootn_xf_to_livecrootn_p_acc[m]);
                 s.pft.AKX_livecrootn_xf_exit_p_acc[m] = s.pft_flux.livecrootn_xfer_to_livecrootn_p
                     [m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_xf_exit_p_acc[m]);
                 s.pft.AKX_deadcrootn_xf_to_deadcrootn_p_acc[m] =
                     s.pft_flux.deadcrootn_xfer_to_deadcrootn_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_deadcrootn_xf_to_deadcrootn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_deadcrootn_xf_to_deadcrootn_p_acc[m]);
                 s.pft.AKX_deadcrootn_xf_exit_p_acc[m] = s.pft_flux.deadcrootn_xfer_to_deadcrootn_p
                     [m]
-                    .mul_add(p.deltim, s.pft.AKX_deadcrootn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadcrootn_xf_exit_p_acc[m]);
             }
             if ivt >= NPCROPMIN {
                 s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m] =
                     s.pft_flux.livestemn_xfer_to_livestemn_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livestemn_xf_to_livestemn_p_acc[m]);
                 s.pft.AKX_livestemn_xf_exit_p_acc[m] = s.pft_flux.livestemn_xfer_to_livestemn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
                 s.pft.AKX_grainn_xf_to_grainn_p_acc[m] = s.pft_flux.grainn_xfer_to_grainn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_grainn_xf_to_grainn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_grainn_xf_to_grainn_p_acc[m]);
                 s.pft.AKX_grainn_xf_exit_p_acc[m] = s.pft_flux.grainn_xfer_to_grainn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_grainn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_grainn_xf_exit_p_acc[m]);
             }
         }
         s.pft.leafn_p[m] -= s.pft_flux.leafn_to_litter_p[m] * p.deltim; // 无 FMA（上游第 210 行，乘积被 CSE 共享）
@@ -131,40 +132,40 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
         s.pft.retransn_p[m] += s.pft_flux.leafn_to_retransn_p[m] * p.deltim; // 无 FMA（上游第 213 行，乘积被 CSE 共享）
         if c.woody[class] == 1.0 {
             s.pft.livestemn_p[m] =
-                (-s.pft_flux.livestemn_to_deadstemn_p[m]).mul_add(p.deltim, s.pft.livestemn_p[m]);
+                (-s.pft_flux.livestemn_to_deadstemn_p[m]).contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.deadstemn_p[m] =
-                s.pft_flux.livestemn_to_deadstemn_p[m].mul_add(p.deltim, s.pft.deadstemn_p[m]);
+                s.pft_flux.livestemn_to_deadstemn_p[m].contract(p.deltim, s.pft.deadstemn_p[m]);
             s.pft.livecrootn_p[m] = (-s.pft_flux.livecrootn_to_deadcrootn_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_p[m]);
             s.pft.deadcrootn_p[m] =
-                s.pft_flux.livecrootn_to_deadcrootn_p[m].mul_add(p.deltim, s.pft.deadcrootn_p[m]);
+                s.pft_flux.livecrootn_to_deadcrootn_p[m].contract(p.deltim, s.pft.deadcrootn_p[m]);
             s.pft.livestemn_p[m] =
-                (-s.pft_flux.livestemn_to_retransn_p[m]).mul_add(p.deltim, s.pft.livestemn_p[m]);
+                (-s.pft_flux.livestemn_to_retransn_p[m]).contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.retransn_p[m] =
-                s.pft_flux.livestemn_to_retransn_p[m].mul_add(p.deltim, s.pft.retransn_p[m]);
+                s.pft_flux.livestemn_to_retransn_p[m].contract(p.deltim, s.pft.retransn_p[m]);
             s.pft.livecrootn_p[m] =
-                (-s.pft_flux.livecrootn_to_retransn_p[m]).mul_add(p.deltim, s.pft.livecrootn_p[m]);
+                (-s.pft_flux.livecrootn_to_retransn_p[m]).contract(p.deltim, s.pft.livecrootn_p[m]);
             s.pft.retransn_p[m] =
-                s.pft_flux.livecrootn_to_retransn_p[m].mul_add(p.deltim, s.pft.retransn_p[m]);
+                s.pft_flux.livecrootn_to_retransn_p[m].contract(p.deltim, s.pft.retransn_p[m]);
         }
         if ivt >= NPCROPMIN {
             s.pft.frootn_p[m] =
-                (-s.pft_flux.frootn_to_retransn_p[m]).mul_add(p.deltim, s.pft.frootn_p[m]);
+                (-s.pft_flux.frootn_to_retransn_p[m]).contract(p.deltim, s.pft.frootn_p[m]);
             s.pft.retransn_p[m] =
-                s.pft_flux.frootn_to_retransn_p[m].mul_add(p.deltim, s.pft.retransn_p[m]);
+                s.pft_flux.frootn_to_retransn_p[m].contract(p.deltim, s.pft.retransn_p[m]);
             s.pft.livestemn_p[m] =
-                (-s.pft_flux.livestemn_to_litter_p[m]).mul_add(p.deltim, s.pft.livestemn_p[m]);
+                (-s.pft_flux.livestemn_to_litter_p[m]).contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.livestemn_p[m] =
-                (-s.pft_flux.livestemn_to_retransn_p[m]).mul_add(p.deltim, s.pft.livestemn_p[m]);
+                (-s.pft_flux.livestemn_to_retransn_p[m]).contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.retransn_p[m] =
-                s.pft_flux.livestemn_to_retransn_p[m].mul_add(p.deltim, s.pft.retransn_p[m]);
+                s.pft_flux.livestemn_to_retransn_p[m].contract(p.deltim, s.pft.retransn_p[m]);
             s.pft.grainn_p[m] = (-(s.pft_flux.grainn_to_food_p[m]
                 + s.pft_flux.grainn_to_seed_p[m]))
-                .mul_add(p.deltim, s.pft.grainn_p[m]);
-            s.pft.cropseedn_deficit_p[m] = s.pft_flux.grainn_to_seed_p[m].mul_add(
+                .contract(p.deltim, s.pft.grainn_p[m]);
+            s.pft.cropseedn_deficit_p[m] = s.pft_flux.grainn_to_seed_p[m].contract(
                 p.deltim,
                 (-s.pft_flux.crop_seedn_to_leaf_p[m])
-                    .mul_add(p.deltim, s.pft.cropseedn_deficit_p[m]),
+                    .contract(p.deltim, s.pft.cropseedn_deficit_p[m]),
             );
         }
         if sw.sasu || sw.diag_matrix {
@@ -174,181 +175,181 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
             s.pft.AKX_leafn_exit_p_acc[m] += s.pft_flux.leafn_to_retransn_p[m] * p.deltim; // 无 FMA（上游第 243 行，乘积被 CSE 共享）
             if c.woody[class] == 1.0 {
                 s.pft.AKX_livestemn_to_deadstemn_p_acc[m] = s.pft_flux.livestemn_to_deadstemn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_to_deadstemn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_to_deadstemn_p_acc[m]);
                 s.pft.AKX_livestemn_exit_p_acc[m] = s.pft_flux.livestemn_to_deadstemn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_to_deadcrootn_p_acc[m] = s.pft_flux.livecrootn_to_deadcrootn_p
                     [m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_to_deadcrootn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_to_deadcrootn_p_acc[m]);
                 s.pft.AKX_livecrootn_exit_p_acc[m] = s.pft_flux.livecrootn_to_deadcrootn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
                 s.pft.AKX_livestemn_to_retransn_p_acc[m] = s.pft_flux.livestemn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_to_retransn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_to_retransn_p_acc[m]);
                 s.pft.AKX_livestemn_exit_p_acc[m] = s.pft_flux.livestemn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_to_retransn_p_acc[m] = s.pft_flux.livecrootn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_to_retransn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_to_retransn_p_acc[m]);
                 s.pft.AKX_livecrootn_exit_p_acc[m] = s.pft_flux.livecrootn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
             }
             if ivt >= NPCROPMIN {
                 s.pft.AKX_frootn_to_retransn_p_acc[m] = s.pft_flux.frootn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_frootn_to_retransn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_frootn_to_retransn_p_acc[m]);
                 s.pft.AKX_frootn_exit_p_acc[m] = s.pft_flux.frootn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_frootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_frootn_exit_p_acc[m]);
                 s.pft.AKX_livestemn_exit_p_acc[m] = s.pft_flux.livestemn_to_litter_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
                 s.pft.AKX_livestemn_to_retransn_p_acc[m] = s.pft_flux.livestemn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_to_retransn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_to_retransn_p_acc[m]);
                 s.pft.AKX_livestemn_exit_p_acc[m] = s.pft_flux.livestemn_to_retransn_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
                 s.pft.AKX_grainn_exit_p_acc[m] = (s.pft_flux.grainn_to_food_p[m]
                     + s.pft_flux.grainn_to_seed_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_grainn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_grainn_exit_p_acc[m]);
             }
         }
         s.pft.retransn_p[m] =
-            (-s.pft_flux.retransn_to_npool_p[m]).mul_add(p.deltim, s.pft.retransn_p[m]);
+            (-s.pft_flux.retransn_to_npool_p[m]).contract(p.deltim, s.pft.retransn_p[m]);
         s.pft.retransn_p[m] =
-            (-s.pft_flux.free_retransn_to_npool_p[m]).mul_add(p.deltim, s.pft.retransn_p[m]);
-        s.pft.leafn_p[m] = s.pft_flux.npool_to_leafn_p[m].mul_add(p.deltim, s.pft.leafn_p[m]);
+            (-s.pft_flux.free_retransn_to_npool_p[m]).contract(p.deltim, s.pft.retransn_p[m]);
+        s.pft.leafn_p[m] = s.pft_flux.npool_to_leafn_p[m].contract(p.deltim, s.pft.leafn_p[m]);
         s.pft.leafn_storage_p[m] =
-            s.pft_flux.npool_to_leafn_storage_p[m].mul_add(p.deltim, s.pft.leafn_storage_p[m]);
-        s.pft.frootn_p[m] = s.pft_flux.npool_to_frootn_p[m].mul_add(p.deltim, s.pft.frootn_p[m]);
+            s.pft_flux.npool_to_leafn_storage_p[m].contract(p.deltim, s.pft.leafn_storage_p[m]);
+        s.pft.frootn_p[m] = s.pft_flux.npool_to_frootn_p[m].contract(p.deltim, s.pft.frootn_p[m]);
         s.pft.frootn_storage_p[m] =
-            s.pft_flux.npool_to_frootn_storage_p[m].mul_add(p.deltim, s.pft.frootn_storage_p[m]);
+            s.pft_flux.npool_to_frootn_storage_p[m].contract(p.deltim, s.pft.frootn_storage_p[m]);
         if c.woody[class] == 1.0 {
             s.pft.livestemn_p[m] =
-                s.pft_flux.npool_to_livestemn_p[m].mul_add(p.deltim, s.pft.livestemn_p[m]);
+                s.pft_flux.npool_to_livestemn_p[m].contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.livestemn_storage_p[m] = s.pft_flux.npool_to_livestemn_storage_p[m]
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.deadstemn_p[m] =
-                s.pft_flux.npool_to_deadstemn_p[m].mul_add(p.deltim, s.pft.deadstemn_p[m]);
+                s.pft_flux.npool_to_deadstemn_p[m].contract(p.deltim, s.pft.deadstemn_p[m]);
             s.pft.deadstemn_storage_p[m] = s.pft_flux.npool_to_deadstemn_storage_p[m]
-                .mul_add(p.deltim, s.pft.deadstemn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_storage_p[m]);
             s.pft.livecrootn_p[m] =
-                s.pft_flux.npool_to_livecrootn_p[m].mul_add(p.deltim, s.pft.livecrootn_p[m]);
+                s.pft_flux.npool_to_livecrootn_p[m].contract(p.deltim, s.pft.livecrootn_p[m]);
             s.pft.livecrootn_storage_p[m] = s.pft_flux.npool_to_livecrootn_storage_p[m]
-                .mul_add(p.deltim, s.pft.livecrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_storage_p[m]);
             s.pft.deadcrootn_p[m] =
-                s.pft_flux.npool_to_deadcrootn_p[m].mul_add(p.deltim, s.pft.deadcrootn_p[m]);
+                s.pft_flux.npool_to_deadcrootn_p[m].contract(p.deltim, s.pft.deadcrootn_p[m]);
             s.pft.deadcrootn_storage_p[m] = s.pft_flux.npool_to_deadcrootn_storage_p[m]
-                .mul_add(p.deltim, s.pft.deadcrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_storage_p[m]);
         }
         if ivt >= NPCROPMIN {
             s.pft.livestemn_p[m] =
-                s.pft_flux.npool_to_livestemn_p[m].mul_add(p.deltim, s.pft.livestemn_p[m]);
+                s.pft_flux.npool_to_livestemn_p[m].contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.livestemn_storage_p[m] = s.pft_flux.npool_to_livestemn_storage_p[m]
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.grainn_p[m] =
-                s.pft_flux.npool_to_grainn_p[m].mul_add(p.deltim, s.pft.grainn_p[m]);
+                s.pft_flux.npool_to_grainn_p[m].contract(p.deltim, s.pft.grainn_p[m]);
             s.pft.grainn_storage_p[m] = s.pft_flux.npool_to_grainn_storage_p[m]
-                .mul_add(p.deltim, s.pft.grainn_storage_p[m]);
+                .contract(p.deltim, s.pft.grainn_storage_p[m]);
         }
         if sw.sasu || sw.diag_matrix {
             if s.pft_flux.plant_nalloc_p[m] != 0.0 {
                 f_retr_in_nall = s.pft_flux.retransn_to_npool_p[m] / s.pft_flux.plant_nalloc_p[m];
                 s.pft.AKX_retransn_exit_p_acc[m] = (s.pft_flux.retransn_to_npool_p[m]
                     + s.pft_flux.free_retransn_to_npool_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_retransn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_retransn_exit_p_acc[m]);
                 s.pft.I_leafn_p_acc[m] = (s.pft_flux.npool_to_leafn_p[m] * (1.0 - f_retr_in_nall))
-                    .mul_add(p.deltim, s.pft.I_leafn_p_acc[m]);
+                    .contract(p.deltim, s.pft.I_leafn_p_acc[m]);
                 s.pft.AKX_retransn_to_leafn_p_acc[m] = (s.pft_flux.npool_to_leafn_p[m]
                     * f_retr_in_nall)
-                    .mul_add(p.deltim, s.pft.AKX_retransn_to_leafn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_retransn_to_leafn_p_acc[m]);
                 s.pft.I_leafn_st_p_acc[m] = (s.pft_flux.npool_to_leafn_storage_p[m]
                     * (1.0 - f_retr_in_nall))
-                    .mul_add(p.deltim, s.pft.I_leafn_st_p_acc[m]);
+                    .contract(p.deltim, s.pft.I_leafn_st_p_acc[m]);
                 s.pft.AKX_retransn_to_leafn_st_p_acc[m] = (s.pft_flux.npool_to_leafn_storage_p[m]
                     * f_retr_in_nall)
-                    .mul_add(p.deltim, s.pft.AKX_retransn_to_leafn_st_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_retransn_to_leafn_st_p_acc[m]);
                 s.pft.I_frootn_p_acc[m] = (s.pft_flux.npool_to_frootn_p[m]
                     * (1.0 - f_retr_in_nall))
-                    .mul_add(p.deltim, s.pft.I_frootn_p_acc[m]);
+                    .contract(p.deltim, s.pft.I_frootn_p_acc[m]);
                 s.pft.AKX_retransn_to_frootn_p_acc[m] = (s.pft_flux.npool_to_frootn_p[m]
                     * f_retr_in_nall)
-                    .mul_add(p.deltim, s.pft.AKX_retransn_to_frootn_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_retransn_to_frootn_p_acc[m]);
                 s.pft.I_frootn_st_p_acc[m] = (s.pft_flux.npool_to_frootn_storage_p[m]
                     * (1.0 - f_retr_in_nall))
-                    .mul_add(p.deltim, s.pft.I_frootn_st_p_acc[m]);
+                    .contract(p.deltim, s.pft.I_frootn_st_p_acc[m]);
                 s.pft.AKX_retransn_to_frootn_st_p_acc[m] =
                     (s.pft_flux.npool_to_frootn_storage_p[m] * f_retr_in_nall)
-                        .mul_add(p.deltim, s.pft.AKX_retransn_to_frootn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_retransn_to_frootn_st_p_acc[m]);
                 if c.woody[class] == 1.0 {
                     s.pft.I_livestemn_p_acc[m] = (s.pft_flux.npool_to_livestemn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livestemn_p_acc[m]);
                     s.pft.AKX_retransn_to_livestemn_p_acc[m] = (s.pft_flux.npool_to_livestemn_p[m]
                         * f_retr_in_nall)
-                        .mul_add(p.deltim, s.pft.AKX_retransn_to_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_retransn_to_livestemn_p_acc[m]);
                     s.pft.I_livestemn_st_p_acc[m] = (s.pft_flux.npool_to_livestemn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livestemn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livestemn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_livestemn_st_p_acc[m] =
                         (s.pft_flux.npool_to_livestemn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_livestemn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_livestemn_st_p_acc[m]);
                     s.pft.I_deadstemn_p_acc[m] = (s.pft_flux.npool_to_deadstemn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_deadstemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_deadstemn_p_acc[m]);
                     s.pft.AKX_retransn_to_deadstemn_p_acc[m] = (s.pft_flux.npool_to_deadstemn_p[m]
                         * f_retr_in_nall)
-                        .mul_add(p.deltim, s.pft.AKX_retransn_to_deadstemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_retransn_to_deadstemn_p_acc[m]);
                     s.pft.I_deadstemn_st_p_acc[m] = (s.pft_flux.npool_to_deadstemn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_deadstemn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_deadstemn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_deadstemn_st_p_acc[m] =
                         (s.pft_flux.npool_to_deadstemn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_deadstemn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_deadstemn_st_p_acc[m]);
                     s.pft.I_livecrootn_p_acc[m] = (s.pft_flux.npool_to_livecrootn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livecrootn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livecrootn_p_acc[m]);
                     s.pft.AKX_retransn_to_livecrootn_p_acc[m] =
                         (s.pft_flux.npool_to_livecrootn_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_livecrootn_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_livecrootn_p_acc[m]);
                     s.pft.I_livecrootn_st_p_acc[m] = (s.pft_flux.npool_to_livecrootn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livecrootn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livecrootn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_livecrootn_st_p_acc[m] =
                         (s.pft_flux.npool_to_livecrootn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_livecrootn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_livecrootn_st_p_acc[m]);
                     s.pft.I_deadcrootn_p_acc[m] = (s.pft_flux.npool_to_deadcrootn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_deadcrootn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_deadcrootn_p_acc[m]);
                     s.pft.AKX_retransn_to_deadcrootn_p_acc[m] =
                         (s.pft_flux.npool_to_deadcrootn_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_deadcrootn_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_deadcrootn_p_acc[m]);
                     s.pft.I_deadcrootn_st_p_acc[m] = (s.pft_flux.npool_to_deadcrootn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_deadcrootn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_deadcrootn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_deadcrootn_st_p_acc[m] =
                         (s.pft_flux.npool_to_deadcrootn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_deadcrootn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_deadcrootn_st_p_acc[m]);
                 }
                 if ivt >= NPCROPMIN {
                     s.pft.I_livestemn_p_acc[m] = (s.pft_flux.npool_to_livestemn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livestemn_p_acc[m]);
                     s.pft.AKX_retransn_to_livestemn_p_acc[m] = (s.pft_flux.npool_to_livestemn_p[m]
                         * f_retr_in_nall)
-                        .mul_add(p.deltim, s.pft.AKX_retransn_to_livestemn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_retransn_to_livestemn_p_acc[m]);
                     s.pft.I_livestemn_st_p_acc[m] = (s.pft_flux.npool_to_livestemn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_livestemn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_livestemn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_livestemn_st_p_acc[m] =
                         (s.pft_flux.npool_to_livestemn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_livestemn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_livestemn_st_p_acc[m]);
                     s.pft.I_grainn_p_acc[m] = (s.pft_flux.npool_to_grainn_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_grainn_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_grainn_p_acc[m]);
                     s.pft.AKX_retransn_to_grainn_p_acc[m] = (s.pft_flux.npool_to_grainn_p[m]
                         * f_retr_in_nall)
-                        .mul_add(p.deltim, s.pft.AKX_retransn_to_grainn_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_retransn_to_grainn_p_acc[m]);
                     s.pft.I_grainn_st_p_acc[m] = (s.pft_flux.npool_to_grainn_storage_p[m]
                         * (1.0 - f_retr_in_nall))
-                        .mul_add(p.deltim, s.pft.I_grainn_st_p_acc[m]);
+                        .contract(p.deltim, s.pft.I_grainn_st_p_acc[m]);
                     s.pft.AKX_retransn_to_grainn_st_p_acc[m] =
                         (s.pft_flux.npool_to_grainn_storage_p[m] * f_retr_in_nall)
-                            .mul_add(p.deltim, s.pft.AKX_retransn_to_grainn_st_p_acc[m]);
+                            .contract(p.deltim, s.pft.AKX_retransn_to_grainn_st_p_acc[m]);
                 }
             }
         }
@@ -358,31 +359,31 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
         s.pft.frootn_xfer_p[m] += s.pft_flux.frootn_storage_to_xfer_p[m] * p.deltim; // 无 FMA（上游第 361 行，乘积被 CSE 共享）
         if c.woody[class] == 1.0 {
             s.pft.livestemn_storage_p[m] = (-s.pft_flux.livestemn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.livestemn_xfer_p[m] = s.pft_flux.livestemn_storage_to_xfer_p[m]
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
             s.pft.deadstemn_storage_p[m] = (-s.pft_flux.deadstemn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_storage_p[m]);
             s.pft.deadstemn_xfer_p[m] = s.pft_flux.deadstemn_storage_to_xfer_p[m]
-                .mul_add(p.deltim, s.pft.deadstemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_xfer_p[m]);
             s.pft.livecrootn_storage_p[m] = (-s.pft_flux.livecrootn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_storage_p[m]);
             s.pft.livecrootn_xfer_p[m] = s.pft_flux.livecrootn_storage_to_xfer_p[m]
-                .mul_add(p.deltim, s.pft.livecrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_xfer_p[m]);
             s.pft.deadcrootn_storage_p[m] = (-s.pft_flux.deadcrootn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_storage_p[m]);
             s.pft.deadcrootn_xfer_p[m] = s.pft_flux.deadcrootn_storage_to_xfer_p[m]
-                .mul_add(p.deltim, s.pft.deadcrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_xfer_p[m]);
         }
         if ivt >= NPCROPMIN {
             s.pft.livestemn_storage_p[m] = (-s.pft_flux.livestemn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.livestemn_xfer_p[m] = s.pft_flux.livestemn_storage_to_xfer_p[m]
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
             s.pft.grainn_storage_p[m] = (-s.pft_flux.grainn_storage_to_xfer_p[m])
-                .mul_add(p.deltim, s.pft.grainn_storage_p[m]);
+                .contract(p.deltim, s.pft.grainn_storage_p[m]);
             s.pft.grainn_xfer_p[m] =
-                s.pft_flux.grainn_storage_to_xfer_p[m].mul_add(p.deltim, s.pft.grainn_xfer_p[m]);
+                s.pft_flux.grainn_storage_to_xfer_p[m].contract(p.deltim, s.pft.grainn_xfer_p[m]);
         }
         if sw.sasu {
             s.pft.AKX_leafn_st_to_leafn_xf_p_acc[m] +=
@@ -394,35 +395,35 @@ pub fn n_state_update1(s: &mut BgcState, p: &BgcPhysics, c: &BgcPftConstants, sw
             if c.woody[class] == 1.0 {
                 s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m] =
                     s.pft_flux.livestemn_storage_to_xfer_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m]);
                 s.pft.AKX_livestemn_st_exit_p_acc[m] = s.pft_flux.livestemn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
                 s.pft.AKX_deadstemn_st_to_deadstemn_xf_p_acc[m] =
                     s.pft_flux.deadstemn_storage_to_xfer_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_deadstemn_st_to_deadstemn_xf_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_deadstemn_st_to_deadstemn_xf_p_acc[m]);
                 s.pft.AKX_deadstemn_st_exit_p_acc[m] = s.pft_flux.deadstemn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_deadstemn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadstemn_st_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_st_to_livecrootn_xf_p_acc[m] =
                     s.pft_flux.livecrootn_storage_to_xfer_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livecrootn_st_to_livecrootn_xf_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livecrootn_st_to_livecrootn_xf_p_acc[m]);
                 s.pft.AKX_livecrootn_st_exit_p_acc[m] = s.pft_flux.livecrootn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_st_exit_p_acc[m]);
                 s.pft.AKX_deadcrootn_st_to_deadcrootn_xf_p_acc[m] =
                     s.pft_flux.deadcrootn_storage_to_xfer_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_deadcrootn_st_to_deadcrootn_xf_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_deadcrootn_st_to_deadcrootn_xf_p_acc[m]);
                 s.pft.AKX_deadcrootn_st_exit_p_acc[m] = s.pft_flux.deadcrootn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_deadcrootn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadcrootn_st_exit_p_acc[m]);
             }
             if ivt >= NPCROPMIN {
                 s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m] =
                     s.pft_flux.livestemn_storage_to_xfer_p[m]
-                        .mul_add(p.deltim, s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m]);
+                        .contract(p.deltim, s.pft.AKX_livestemn_st_to_livestemn_xf_p_acc[m]);
                 s.pft.AKX_livestemn_st_exit_p_acc[m] = s.pft_flux.livestemn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
                 s.pft.AKX_grainn_st_to_grainn_xf_p_acc[m] = s.pft_flux.grainn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_grainn_st_to_grainn_xf_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_grainn_st_to_grainn_xf_p_acc[m]);
                 s.pft.AKX_grainn_st_exit_p_acc[m] = s.pft_flux.grainn_storage_to_xfer_p[m]
-                    .mul_add(p.deltim, s.pft.AKX_grainn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_grainn_st_exit_p_acc[m]);
             }
         }
     }
@@ -434,39 +435,39 @@ pub fn n_state_update2(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, s
     let npft = p.pftclass.len();
     for j in 0..d.nl_soil {
         s.patch.decomp_npools_vr[j + d.nl_soil_full * ((s.constants.i_met_lit - 1) as usize)] =
-            s.patch_flux.gap_mortality_to_met_n[j].mul_add(
+            s.patch_flux.gap_mortality_to_met_n[j].contract(
                 p.deltim,
                 s.patch.decomp_npools_vr
                     [j + d.nl_soil_full * ((s.constants.i_met_lit - 1) as usize)],
             );
         s.patch.decomp_npools_vr[j + d.nl_soil_full * ((s.constants.i_cel_lit - 1) as usize)] =
-            s.patch_flux.gap_mortality_to_cel_n[j].mul_add(
+            s.patch_flux.gap_mortality_to_cel_n[j].contract(
                 p.deltim,
                 s.patch.decomp_npools_vr
                     [j + d.nl_soil_full * ((s.constants.i_cel_lit - 1) as usize)],
             );
         s.patch.decomp_npools_vr[j + d.nl_soil_full * ((s.constants.i_lig_lit - 1) as usize)] =
-            s.patch_flux.gap_mortality_to_lig_n[j].mul_add(
+            s.patch_flux.gap_mortality_to_lig_n[j].contract(
                 p.deltim,
                 s.patch.decomp_npools_vr
                     [j + d.nl_soil_full * ((s.constants.i_lig_lit - 1) as usize)],
             );
         s.patch.decomp_npools_vr[j + d.nl_soil_full * ((s.constants.i_cwd - 1) as usize)] =
-            s.patch_flux.gap_mortality_to_cwdn[j].mul_add(
+            s.patch_flux.gap_mortality_to_cwdn[j].contract(
                 p.deltim,
                 s.patch.decomp_npools_vr[j + d.nl_soil_full * ((s.constants.i_cwd - 1) as usize)],
             );
     }
     if sw.sasu || sw.diag_matrix {
         for j in 0..d.nl_soil {
-            s.patch.I_met_n_vr_acc[j] =
-                s.patch_flux.gap_mortality_to_met_n[j].mul_add(p.deltim, s.patch.I_met_n_vr_acc[j]);
-            s.patch.I_cel_n_vr_acc[j] =
-                s.patch_flux.gap_mortality_to_cel_n[j].mul_add(p.deltim, s.patch.I_cel_n_vr_acc[j]);
-            s.patch.I_lig_n_vr_acc[j] =
-                s.patch_flux.gap_mortality_to_lig_n[j].mul_add(p.deltim, s.patch.I_lig_n_vr_acc[j]);
+            s.patch.I_met_n_vr_acc[j] = s.patch_flux.gap_mortality_to_met_n[j]
+                .contract(p.deltim, s.patch.I_met_n_vr_acc[j]);
+            s.patch.I_cel_n_vr_acc[j] = s.patch_flux.gap_mortality_to_cel_n[j]
+                .contract(p.deltim, s.patch.I_cel_n_vr_acc[j]);
+            s.patch.I_lig_n_vr_acc[j] = s.patch_flux.gap_mortality_to_lig_n[j]
+                .contract(p.deltim, s.patch.I_lig_n_vr_acc[j]);
             s.patch.I_cwd_n_vr_acc[j] =
-                s.patch_flux.gap_mortality_to_cwdn[j].mul_add(p.deltim, s.patch.I_cwd_n_vr_acc[j]);
+                s.patch_flux.gap_mortality_to_cwdn[j].contract(p.deltim, s.patch.I_cwd_n_vr_acc[j]);
         }
     }
     for m in 0..npft {
@@ -530,13 +531,13 @@ pub fn n_state_update3(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, s
     if !sw.nitrif {
         for j in 0..d.nl_soil {
             s.patch.sminn_vr[j] =
-                (-s.patch_flux.sminn_leached_vr[j]).mul_add(p.deltim, s.patch.sminn_vr[j]);
+                (-s.patch_flux.sminn_leached_vr[j]).contract(p.deltim, s.patch.sminn_vr[j]);
         }
     } else {
         for j in 0..d.nl_soil {
             s.patch.smin_no3_vr[j] = ((-(s.patch_flux.smin_no3_leached_vr[j]
                 + s.patch_flux.smin_no3_runoff_vr[j]))
-                .mul_add(p.deltim, s.patch.smin_no3_vr[j]))
+                .contract(p.deltim, s.patch.smin_no3_vr[j]))
             .max(0.0);
             s.patch.sminn_vr[j] = s.patch.smin_no3_vr[j] + s.patch.smin_nh4_vr[j];
         }
@@ -592,157 +593,157 @@ pub fn n_state_update3(s: &mut BgcState, p: &BgcPhysics, _c: &BgcPftConstants, s
         }
         for m in 0..npft {
             s.pft.leafn_p[m] =
-                (-s.pft_flux.m_leafn_to_fire_p[m]).mul_add(p.deltim, s.pft.leafn_p[m]);
+                (-s.pft_flux.m_leafn_to_fire_p[m]).contract(p.deltim, s.pft.leafn_p[m]);
             s.pft.frootn_p[m] =
-                (-s.pft_flux.m_frootn_to_fire_p[m]).mul_add(p.deltim, s.pft.frootn_p[m]);
+                (-s.pft_flux.m_frootn_to_fire_p[m]).contract(p.deltim, s.pft.frootn_p[m]);
             s.pft.livestemn_p[m] =
-                (-s.pft_flux.m_livestemn_to_fire_p[m]).mul_add(p.deltim, s.pft.livestemn_p[m]);
+                (-s.pft_flux.m_livestemn_to_fire_p[m]).contract(p.deltim, s.pft.livestemn_p[m]);
             s.pft.deadstemn_p[m] =
-                (-s.pft_flux.m_deadstemn_to_fire_p[m]).mul_add(p.deltim, s.pft.deadstemn_p[m]);
+                (-s.pft_flux.m_deadstemn_to_fire_p[m]).contract(p.deltim, s.pft.deadstemn_p[m]);
             s.pft.livecrootn_p[m] =
-                (-s.pft_flux.m_livecrootn_to_fire_p[m]).mul_add(p.deltim, s.pft.livecrootn_p[m]);
+                (-s.pft_flux.m_livecrootn_to_fire_p[m]).contract(p.deltim, s.pft.livecrootn_p[m]);
             s.pft.deadcrootn_p[m] =
-                (-s.pft_flux.m_deadcrootn_to_fire_p[m]).mul_add(p.deltim, s.pft.deadcrootn_p[m]);
+                (-s.pft_flux.m_deadcrootn_to_fire_p[m]).contract(p.deltim, s.pft.deadcrootn_p[m]);
             s.pft.leafn_p[m] =
-                (-s.pft_flux.m_leafn_to_litter_fire_p[m]).mul_add(p.deltim, s.pft.leafn_p[m]);
+                (-s.pft_flux.m_leafn_to_litter_fire_p[m]).contract(p.deltim, s.pft.leafn_p[m]);
             s.pft.frootn_p[m] =
-                (-s.pft_flux.m_frootn_to_litter_fire_p[m]).mul_add(p.deltim, s.pft.frootn_p[m]);
-            s.pft.livestemn_p[m] = (-s.pft_flux.m_livestemn_to_deadstemn_fire_p[m]).mul_add(
+                (-s.pft_flux.m_frootn_to_litter_fire_p[m]).contract(p.deltim, s.pft.frootn_p[m]);
+            s.pft.livestemn_p[m] = (-s.pft_flux.m_livestemn_to_deadstemn_fire_p[m]).contract(
                 p.deltim,
                 (-s.pft_flux.m_livestemn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.livestemn_p[m]),
+                    .contract(p.deltim, s.pft.livestemn_p[m]),
             );
-            s.pft.deadstemn_p[m] = s.pft_flux.m_livestemn_to_deadstemn_fire_p[m].mul_add(
+            s.pft.deadstemn_p[m] = s.pft_flux.m_livestemn_to_deadstemn_fire_p[m].contract(
                 p.deltim,
                 (-s.pft_flux.m_deadstemn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.deadstemn_p[m]),
+                    .contract(p.deltim, s.pft.deadstemn_p[m]),
             );
-            s.pft.livecrootn_p[m] = (-s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m]).mul_add(
+            s.pft.livecrootn_p[m] = (-s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m]).contract(
                 p.deltim,
                 (-s.pft_flux.m_livecrootn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.livecrootn_p[m]),
+                    .contract(p.deltim, s.pft.livecrootn_p[m]),
             );
-            s.pft.deadcrootn_p[m] = s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m].mul_add(
+            s.pft.deadcrootn_p[m] = s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m].contract(
                 p.deltim,
                 (-s.pft_flux.m_deadcrootn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.deadcrootn_p[m]),
+                    .contract(p.deltim, s.pft.deadcrootn_p[m]),
             );
             s.pft.leafn_storage_p[m] = (-s.pft_flux.m_leafn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.leafn_storage_p[m]);
+                .contract(p.deltim, s.pft.leafn_storage_p[m]);
             s.pft.frootn_storage_p[m] = (-s.pft_flux.m_frootn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.frootn_storage_p[m]);
+                .contract(p.deltim, s.pft.frootn_storage_p[m]);
             s.pft.livestemn_storage_p[m] = (-s.pft_flux.m_livestemn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.deadstemn_storage_p[m] = (-s.pft_flux.m_deadstemn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_storage_p[m]);
             s.pft.livecrootn_storage_p[m] = (-s.pft_flux.m_livecrootn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_storage_p[m]);
             s.pft.deadcrootn_storage_p[m] = (-s.pft_flux.m_deadcrootn_storage_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_storage_p[m]);
             s.pft.leafn_storage_p[m] = (-s.pft_flux.m_leafn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.leafn_storage_p[m]);
+                .contract(p.deltim, s.pft.leafn_storage_p[m]);
             s.pft.frootn_storage_p[m] = (-s.pft_flux.m_frootn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.frootn_storage_p[m]);
+                .contract(p.deltim, s.pft.frootn_storage_p[m]);
             s.pft.livestemn_storage_p[m] = (-s.pft_flux.m_livestemn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_storage_p[m]);
+                .contract(p.deltim, s.pft.livestemn_storage_p[m]);
             s.pft.deadstemn_storage_p[m] = (-s.pft_flux.m_deadstemn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_storage_p[m]);
             s.pft.livecrootn_storage_p[m] = (-s.pft_flux.m_livecrootn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_storage_p[m]);
             s.pft.deadcrootn_storage_p[m] = (-s.pft_flux.m_deadcrootn_storage_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_storage_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_storage_p[m]);
             s.pft.leafn_xfer_p[m] =
-                (-s.pft_flux.m_leafn_xfer_to_fire_p[m]).mul_add(p.deltim, s.pft.leafn_xfer_p[m]);
+                (-s.pft_flux.m_leafn_xfer_to_fire_p[m]).contract(p.deltim, s.pft.leafn_xfer_p[m]);
             s.pft.frootn_xfer_p[m] =
-                (-s.pft_flux.m_frootn_xfer_to_fire_p[m]).mul_add(p.deltim, s.pft.frootn_xfer_p[m]);
+                (-s.pft_flux.m_frootn_xfer_to_fire_p[m]).contract(p.deltim, s.pft.frootn_xfer_p[m]);
             s.pft.livestemn_xfer_p[m] = (-s.pft_flux.m_livestemn_xfer_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
             s.pft.deadstemn_xfer_p[m] = (-s.pft_flux.m_deadstemn_xfer_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_xfer_p[m]);
             s.pft.livecrootn_xfer_p[m] = (-s.pft_flux.m_livecrootn_xfer_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_xfer_p[m]);
             s.pft.deadcrootn_xfer_p[m] = (-s.pft_flux.m_deadcrootn_xfer_to_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_xfer_p[m]);
             s.pft.leafn_xfer_p[m] = (-s.pft_flux.m_leafn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.leafn_xfer_p[m]);
+                .contract(p.deltim, s.pft.leafn_xfer_p[m]);
             s.pft.frootn_xfer_p[m] = (-s.pft_flux.m_frootn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.frootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.frootn_xfer_p[m]);
             s.pft.livestemn_xfer_p[m] = (-s.pft_flux.m_livestemn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.livestemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livestemn_xfer_p[m]);
             s.pft.deadstemn_xfer_p[m] = (-s.pft_flux.m_deadstemn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadstemn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadstemn_xfer_p[m]);
             s.pft.livecrootn_xfer_p[m] = (-s.pft_flux.m_livecrootn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.livecrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.livecrootn_xfer_p[m]);
             s.pft.deadcrootn_xfer_p[m] = (-s.pft_flux.m_deadcrootn_xfer_to_litter_fire_p[m])
-                .mul_add(p.deltim, s.pft.deadcrootn_xfer_p[m]);
+                .contract(p.deltim, s.pft.deadcrootn_xfer_p[m]);
             s.pft.retransn_p[m] =
-                (-s.pft_flux.m_retransn_to_fire_p[m]).mul_add(p.deltim, s.pft.retransn_p[m]);
-            s.pft.retransn_p[m] =
-                (-s.pft_flux.m_retransn_to_litter_fire_p[m]).mul_add(p.deltim, s.pft.retransn_p[m]);
+                (-s.pft_flux.m_retransn_to_fire_p[m]).contract(p.deltim, s.pft.retransn_p[m]);
+            s.pft.retransn_p[m] = (-s.pft_flux.m_retransn_to_litter_fire_p[m])
+                .contract(p.deltim, s.pft.retransn_p[m]);
             if sw.sasu || sw.diag_matrix {
                 s.pft.AKX_leafn_exit_p_acc[m] = (s.pft_flux.m_leafn_to_fire_p[m]
                     + s.pft_flux.m_leafn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_leafn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_leafn_exit_p_acc[m]);
                 s.pft.AKX_leafn_st_exit_p_acc[m] = (s.pft_flux.m_leafn_storage_to_fire_p[m]
                     + s.pft_flux.m_leafn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_leafn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_leafn_st_exit_p_acc[m]);
                 s.pft.AKX_leafn_xf_exit_p_acc[m] = (s.pft_flux.m_leafn_xfer_to_fire_p[m]
                     + s.pft_flux.m_leafn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_leafn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_leafn_xf_exit_p_acc[m]);
                 s.pft.AKX_frootn_exit_p_acc[m] = (s.pft_flux.m_frootn_to_fire_p[m]
                     + s.pft_flux.m_frootn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_frootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_frootn_exit_p_acc[m]);
                 s.pft.AKX_frootn_st_exit_p_acc[m] = (s.pft_flux.m_frootn_storage_to_fire_p[m]
                     + s.pft_flux.m_frootn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_frootn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_frootn_st_exit_p_acc[m]);
                 s.pft.AKX_frootn_xf_exit_p_acc[m] = (s.pft_flux.m_frootn_xfer_to_fire_p[m]
                     + s.pft_flux.m_frootn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_frootn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_frootn_xf_exit_p_acc[m]);
                 s.pft.AKX_livestemn_exit_p_acc[m] = (s.pft_flux.m_livestemn_to_fire_p[m]
                     + s.pft_flux.m_livestemn_to_litter_fire_p[m]
                     + s.pft_flux.m_livestemn_to_deadstemn_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_exit_p_acc[m]);
                 s.pft.AKX_livestemn_st_exit_p_acc[m] = (s.pft_flux.m_livestemn_storage_to_fire_p
                     [m]
                     + s.pft_flux.m_livestemn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_st_exit_p_acc[m]);
                 s.pft.AKX_livestemn_xf_exit_p_acc[m] = (s.pft_flux.m_livestemn_xfer_to_fire_p[m]
                     + s.pft_flux.m_livestemn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livestemn_xf_exit_p_acc[m]);
                 s.pft.AKX_deadstemn_exit_p_acc[m] = (s.pft_flux.m_deadstemn_to_fire_p[m]
                     + s.pft_flux.m_deadstemn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadstemn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadstemn_exit_p_acc[m]);
                 s.pft.AKX_deadstemn_st_exit_p_acc[m] = (s.pft_flux.m_deadstemn_storage_to_fire_p
                     [m]
                     + s.pft_flux.m_deadstemn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadstemn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadstemn_st_exit_p_acc[m]);
                 s.pft.AKX_deadstemn_xf_exit_p_acc[m] = (s.pft_flux.m_deadstemn_xfer_to_fire_p[m]
                     + s.pft_flux.m_deadstemn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadstemn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadstemn_xf_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_exit_p_acc[m] = (s.pft_flux.m_livecrootn_to_fire_p[m]
                     + s.pft_flux.m_livecrootn_to_litter_fire_p[m]
                     + s.pft_flux.m_livecrootn_to_deadcrootn_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_st_exit_p_acc[m] = (s.pft_flux.m_livecrootn_storage_to_fire_p
                     [m]
                     + s.pft_flux.m_livecrootn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_st_exit_p_acc[m]);
                 s.pft.AKX_livecrootn_xf_exit_p_acc[m] = (s.pft_flux.m_livecrootn_xfer_to_fire_p[m]
                     + s.pft_flux.m_livecrootn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_livecrootn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_livecrootn_xf_exit_p_acc[m]);
                 s.pft.AKX_deadcrootn_exit_p_acc[m] = (s.pft_flux.m_deadcrootn_to_fire_p[m]
                     + s.pft_flux.m_deadcrootn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadcrootn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadcrootn_exit_p_acc[m]);
                 s.pft.AKX_deadcrootn_st_exit_p_acc[m] = (s.pft_flux.m_deadcrootn_storage_to_fire_p
                     [m]
                     + s.pft_flux.m_deadcrootn_storage_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadcrootn_st_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadcrootn_st_exit_p_acc[m]);
                 s.pft.AKX_deadcrootn_xf_exit_p_acc[m] = (s.pft_flux.m_deadcrootn_xfer_to_fire_p[m]
                     + s.pft_flux.m_deadcrootn_xfer_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_deadcrootn_xf_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_deadcrootn_xf_exit_p_acc[m]);
                 s.pft.AKX_retransn_exit_p_acc[m] = (s.pft_flux.m_retransn_to_fire_p[m]
                     + s.pft_flux.m_retransn_to_litter_fire_p[m])
-                    .mul_add(p.deltim, s.pft.AKX_retransn_exit_p_acc[m]);
+                    .contract(p.deltim, s.pft.AKX_retransn_exit_p_acc[m]);
                 s.pft.AKX_livestemn_to_deadstemn_p_acc[m] +=
                     s.pft_flux.m_livestemn_to_deadstemn_fire_p[m] * p.deltim; // 无 FMA（上游第 264 行，乘积被 CSE 共享）
                 s.pft.AKX_livecrootn_to_deadcrootn_p_acc[m] +=

@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 /// CoLM's freezing temperature in kelvin.
 pub const FREEZING_K: f64 = 273.16;
@@ -229,7 +230,7 @@ pub fn wet_bulb_temperature(
             saturation.specific_humidity / (1.0 - saturation.specific_humidity);
         // `(twc + t + hvap/cpair*(r-rws))/2.0`：GIMPLE 是
         // `.FMA (r-rws, hvap/cpair, twc+t)`（`MOD_WetBulb.F90`，`-fdump-tree-optimized`）。
-        wet_bulb_k = (LATENT_HEAT_VAPORIZATION / CP_AIR).mul_add(
+        wet_bulb_k = (LATENT_HEAT_VAPORIZATION / CP_AIR).contract(
             mixing_ratio - saturated_mixing_ratio,
             wet_bulb_k + air_temperature_k,
         ) / 2.0;
@@ -263,16 +264,16 @@ pub fn new_snow_bulk_density(
     } else if air_temperature_k > FREEZING_K - 15.0 {
         (air_temperature_k - FREEZING_K + f77(15.0))
             .lpow(f77(1.5))
-            .mul_add(f77(1.7), f77(50.0))
+            .contract(f77(1.7), f77(50.0))
     } else if air_temperature_k > FREEZING_K - 57.55 {
         let temperature_c = air_temperature_k - FREEZING_K;
-        (-temperature_c).mul_add(COLD_SLOPE, -(temperature_c * temperature_c * f77(0.0333)))
+        (-temperature_c).contract(COLD_SLOPE, -(temperature_c * temperature_c * f77(0.0333)))
     } else {
         COLDEST_BULK_DENSITY
     };
     // `MOD_RainSnowTemp.F90:203`：`forc_wind = sqrt(forc_us**2 + forc_vs**2)`。
     let wind = eastward_wind_m_s
-        .mul_add(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
+        .contract(eastward_wind_m_s, northward_wind_m_s * northward_wind_m_s)
         .sqrt();
     if wind > f77(0.1) {
         density += f77(266.861) * ((f77(1.0) + (wind / f77(5.0)).tanh()) / f77(2.0)).lpow(f77(8.8));
@@ -355,7 +356,7 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
                 // `1.0+5.00e-5*exp(...)`：GIMPLE 是 `.FMA (exp, 5e-5, 1.0)`
                 // （`-fdump-tree-optimized` of `MOD_RainSnowTemp.F90`）。
                 let exponential = ((delta + f77(4.0)) * f77(2.0)).exp();
-                (f77(1.0) - f77(1.0) / exponential.mul_add(f77(5.00e-5), f77(1.0))).max(f77(0.0))
+                (f77(1.0) - f77(1.0) / exponential.contract(f77(5.00e-5), f77(1.0))).max(f77(0.0))
             } else {
                 0.0
             }
@@ -396,7 +397,7 @@ pub fn partition_precipitation(input: PrecipitationInput) -> Result<Precipitatio
                 // GIMPLE：`.FMA (forc_t, 0.2, -54.632)`。
                 input
                     .air_temperature_k
-                    .mul_add(f77(0.2), f77(-54.632))
+                    .contract(f77(0.2), f77(-54.632))
                     .max(f77(0.0))
             }
         }
@@ -441,12 +442,12 @@ pub fn orbital_cosine_zenith(
     let pi = 4.0 * fortran_atan(1.0);
     let declination = orbital_declination(calendar_day);
     // Preserve the original angle and final product/subtraction contractions.
-    let angle = (calendar_day + calendar_day).mul_add(pi, longitude_radians);
+    let angle = (calendar_day + calendar_day).contract(pi, longitude_radians);
     // Keep the source's separate SIN/COS calls; LLVM otherwise combines paired
     // calls and changes a few real-grid results by one ULP.
     let cosine_product =
         fortran_cos(latitude_radians) * fortran_cos(declination) * fortran_cos(angle);
-    fortran_sin(latitude_radians).mul_add(fortran_sin(declination), -cosine_product)
+    fortran_sin(latitude_radians).contract(fortran_sin(declination), -cosine_product)
 }
 
 /// Port of MOD_OrbCosazi.F90:orb_cosazi.
@@ -485,9 +486,9 @@ fn orbital_declination(calendar_day: f64) -> f64 {
     // 15 个，按下面这样写 **0 个**。`f_solvd`/`f_xy_solarin` 是 tier1/tier0，
     // 差 1 ULP 就是红条，所以这几处必须照抄编译器的收缩选择。
     let level_inner = (13.0 / 12.0) * fortran_sin(3.0 * mean_anomaly) - 0.25 * sine;
-    let level_1 = eccentricity.mul_add(level_inner, 1.25 * fortran_sin(2.0 * mean_anomaly));
-    let level_2 = eccentricity.mul_add(level_1, 2.0 * sine);
-    let lambda = eccentricity.mul_add(level_2, mean_longitude);
+    let level_1 = eccentricity.contract(level_inner, 1.25 * fortran_sin(2.0 * mean_anomaly));
+    let level_2 = eccentricity.contract(level_1, 2.0 * sine);
+    let lambda = eccentricity.contract(level_2, mean_longitude);
     fortran_asin(fortran_sin(0.409214646) * fortran_sin(lambda))
 }
 
@@ -504,7 +505,7 @@ fn polynomial(x: f64, coefficients: [f64; 9]) -> f64 {
     coefficients
         .into_iter()
         .rev()
-        .fold(0.0, |value, coefficient| x.mul_add(value, coefficient))
+        .fold(0.0, |value, coefficient| x.contract(value, coefficient))
 }
 
 fn vapor_pressure_and_slope(temperature_c: f64) -> Result<(f64, f64)> {

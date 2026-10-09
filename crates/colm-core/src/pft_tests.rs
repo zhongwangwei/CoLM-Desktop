@@ -3,7 +3,7 @@ use super::*;
 #[test]
 fn pft_sum_is_a_fused_chain_from_zero() {
     let terms = [(0.1, 0.6), (0.3, 0.25), (0.7, 0.15)];
-    let expected = 0.7f64.mul_add(0.15, 0.3f64.mul_add(0.25, 0.1f64.mul_add(0.6, 0.0)));
+    let expected = 0.7f64.contract(0.15, 0.3f64.contract(0.25, 0.1f64.contract(0.6, 0.0)));
     assert_eq!(pft_sum(terms).to_bits(), expected.to_bits());
 }
 
@@ -104,7 +104,7 @@ fn bare_pft_absorption_is_cleared_before_the_patch_aggregate() {
     assert_eq!(patch.columns[0].sunlit_absorption, [[0.0; 2]; 2]);
     assert_eq!(
         radiation.sunlit_absorption[0][0].to_bits(),
-        0.3f64.mul_add(0.75, 0.0f64.mul_add(0.25, 0.0)).to_bits()
+        0.3f64.contract(0.75, 0.0f64.contract(0.25, 0.0)).to_bits()
     );
 }
 
@@ -128,7 +128,7 @@ fn tree_burial_uses_the_canopy_bounds_under_vegetation_snow() {
         fraction.vegetation_free_fraction,
         pft_sum([(1.0 - buried, 0.5), (1.0, 0.5)])
     );
-    assert_eq!(fraction.vegetation_snow_fraction, buried.mul_add(0.5, 0.0));
+    assert_eq!(fraction.vegetation_snow_fraction, buried.contract(0.5, 0.0));
 }
 
 /// PC 的三维段截在第一个作物 PFT 前；关掉 `DEF_PC_CROP_SPLIT` 时全部 PFT 都进三维。

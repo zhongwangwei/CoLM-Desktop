@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `SoilBiogeochemNLeaching`：按土壤水量与径流算出 N 淋溶通量。
 pub fn soil_biogeochem_n_leaching(
@@ -41,7 +42,7 @@ pub fn soil_biogeochem_n_leaching(
         if p.zi_soi_from_zero(j + 1) <= depth_runoff_nloss {
             surface_water += p.wliq_soisno[j];
         } else if p.zi_soi_from_zero(j) < depth_runoff_nloss {
-            surface_water = p.wliq_soisno[j].mul_add(
+            surface_water = p.wliq_soisno[j].contract(
                 (depth_runoff_nloss - p.zi_soi_from_zero(j)) / p.dz_soi[j],
                 surface_water,
             );

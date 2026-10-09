@@ -2,6 +2,7 @@
 //! 分解呼吸里扣出来（`decomp_hr`、`er`）。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use super::config::{MethaneConfig, CATOMW, GC_PER_KG_OM};
 use super::physics::{AereOverride, NL_SOIL, SPVAL};
@@ -80,7 +81,7 @@ pub fn patch_inputs(
             for j in 0..NL_SOIL {
                 let c = v.cinput_rootfr_p[j + nl * p];
                 if valid(c) {
-                    out.crootfr[j] = (frac * c.max(0.0)).mul_add(dz_soi[j], out.crootfr[j]);
+                    out.crootfr[j] = (frac * c.max(0.0)).contract(dz_soi[j], out.crootfr[j]);
                 }
             }
         }
@@ -130,11 +131,11 @@ pub fn patch_inputs(
             let soil = in_range && inv.is_soil[index];
             let litter = in_range && (inv.is_litter[index] || inv.is_cwd[index]);
             if soil {
-                out.somhr = dz_soi[j].mul_add(value.max(0.0), out.somhr);
+                out.somhr = dz_soi[j].contract(value.max(0.0), out.somhr);
             } else if litter {
-                out.lithr = dz_soi[j].mul_add(value.max(0.0), out.lithr);
+                out.lithr = dz_soi[j].contract(value.max(0.0), out.lithr);
             } else {
-                unclassified = dz_soi[j].mul_add(value.max(0.0), unclassified);
+                unclassified = dz_soi[j].contract(value.max(0.0), unclassified);
             }
         }
     }
@@ -170,14 +171,14 @@ pub fn patch_inputs(
                 + safe(f.cpool_to_livestemc_storage_p[p])
                 + safe(f.cpool_to_deadstemc_p[p])
                 + safe(f.cpool_to_deadstemc_storage_p[p]);
-            out.agnpp = ag.mul_add(frac, out.agnpp);
+            out.agnpp = ag.contract(frac, out.agnpp);
             let bg = safe(f.cpool_to_frootc_p[p])
                 + safe(f.cpool_to_frootc_storage_p[p])
                 + safe(f.cpool_to_livecrootc_p[p])
                 + safe(f.cpool_to_livecrootc_storage_p[p])
                 + safe(f.cpool_to_deadcrootc_p[p])
                 + safe(f.cpool_to_deadcrootc_storage_p[p]);
-            out.bgnpp = bg.mul_add(frac, out.bgnpp);
+            out.bgnpp = bg.contract(frac, out.bgnpp);
             let rr = safe(f.froot_mr_p[p])
                 + safe(f.cpool_froot_gr_p[p])
                 + safe(f.cpool_froot_storage_gr_p[p])
@@ -188,8 +189,8 @@ pub fn patch_inputs(
                 + safe(f.transfer_froot_gr_p[p])
                 + safe(f.transfer_livecroot_gr_p[p])
                 + safe(f.transfer_deadcroot_gr_p[p]);
-            out.rr = rr.mul_add(frac, out.rr);
-            out.annsum_npp = frac.mul_add(safe(v.annsum_npp_p[p]), out.annsum_npp);
+            out.rr = rr.contract(frac, out.rr);
+            out.annsum_npp = frac.contract(safe(v.annsum_npp_p[p]), out.annsum_npp);
         }
     }
     Ok(out)
@@ -208,7 +209,7 @@ impl RiceWeight {
     fn blend(self, nonrice: f64, rice: f64) -> f64 {
         let rf = self.fraction.max(0.0).min(1.0);
         if self.is_rice_paddy && self.parameter_active && rf > 0.0 {
-            (1.0 - rf).mul_add(nonrice, rf * rice)
+            (1.0 - rf).contract(nonrice, rf * rice)
         } else {
             nonrice
         }
@@ -290,13 +291,13 @@ pub fn finalize(
         for k in 0..bgc.dims.ndecomp_transitions {
             layer += hr[j + full * k];
         }
-        total_hr = dz_soi[j].mul_add(layer, total_hr);
+        total_hr = dz_soi[j].contract(layer, total_hr);
     }
     ensure!(
         total_hr.is_finite() && !(total_hr < -1.0e-12) && net_methane.is_finite(),
         "CH4/BGC carbon partition received invalid respiration"
     );
-    let co2_hr = net_methane.mul_add(CATOMW, total_hr);
+    let co2_hr = net_methane.contract(CATOMW, total_hr);
     ensure!(
         co2_hr.is_finite() && !(co2_hr < -1.0e-12),
         "CH4/BGC carbon partition produced negative CO2 respiration"
@@ -549,13 +550,13 @@ pub fn component_veg_inputs(
             + safe(f.transfer_froot_gr_p[m])
             + safe(f.transfer_livecroot_gr_p[m])
             + safe(f.transfer_deadcroot_gr_p[m]);
-        out.lai[c] = frac.mul_add(pft.lai[m], out.lai[c]);
-        out.agnpp[c] = agnpp_pft.mul_add(frac, out.agnpp[c]);
-        out.bgnpp[c] = bgnpp_pft.mul_add(frac, out.bgnpp[c]);
-        out.rr[c] = rr_pft.mul_add(frac, out.rr[c]);
-        out.annsum_npp[c] = frac.mul_add(safe(v.annsum_npp_p[m]), out.annsum_npp[c]);
+        out.lai[c] = frac.contract(pft.lai[m], out.lai[c]);
+        out.agnpp[c] = agnpp_pft.contract(frac, out.agnpp[c]);
+        out.bgnpp[c] = bgnpp_pft.contract(frac, out.bgnpp[c]);
+        out.rr[c] = rr_pft.contract(frac, out.rr[c]);
+        out.annsum_npp[c] = frac.contract(safe(v.annsum_npp_p[m]), out.annsum_npp[c]);
         for j in 0..NL_SOIL {
-            out.crootfr[c][j] = dz_soi[j].mul_add(
+            out.crootfr[c][j] = dz_soi[j].contract(
                 frac * v.cinput_rootfr_p[j + nl * m].max(0.0),
                 out.crootfr[c][j],
             );

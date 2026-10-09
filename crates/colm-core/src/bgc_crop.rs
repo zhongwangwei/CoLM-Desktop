@@ -8,6 +8,7 @@
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `alpha`（编译期折叠）。
 const ALPHA: f64 = 0.687_193_302_053_350_5;
@@ -35,8 +36,8 @@ pub fn vernalization(
         // GIMPLE：`x = tc + 1.3`；`FMS (2*pow(x,α), C1, pow(x,2α)) / C2`，再 `FMA (…, dt/24, cumvd)`。
         let x = tc + 1.3;
         let rate =
-            (x.lpow(ALPHA) * 2.0).mul_add(OPT_POW_ALPHA, -x.lpow(TWO_ALPHA)) / OPT_POW_TWO_ALPHA;
-        s.pft.cumvd_p[m] = rate.mul_add(dt / 24.0, s.pft.cumvd_p[m]);
+            (x.lpow(ALPHA) * 2.0).contract(OPT_POW_ALPHA, -x.lpow(TWO_ALPHA)) / OPT_POW_TWO_ALPHA;
+        s.pft.cumvd_p[m] = rate.contract(dt / 24.0, s.pft.cumvd_p[m]);
     }
     let cumvd_pow_5 = s.pft.cumvd_p[m].lpow(5.0);
     s.pft.vf_p[m] = cumvd_pow_5 / (cumvd_pow_5 + VF_HALF_POW_5);

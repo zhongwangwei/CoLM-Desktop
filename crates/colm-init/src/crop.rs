@@ -4,6 +4,7 @@
 //! Rust runtime uses the same initialization contract rather than duplicating
 //! CROP setup from `mkinidata`.
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -706,7 +707,7 @@ fn set_spatial_patch_phase(
         pft_to_patch.iter().zip(pft_fraction).zip(&state.crop_phase)
     {
         has_pft[patch] = true;
-        phase[patch] = crop_phase.mul_add(fraction, phase[patch]);
+        phase[patch] = crop_phase.contract(fraction, phase[patch]);
     }
     for patch in 0..patches {
         state.patch_phase[patch] = if has_pft[patch] {
@@ -869,7 +870,7 @@ impl AreaMapping {
                         .iter()
                         .filter(|(_, weight)| *weight > 0.0)
                         .fold(0.0, |sum, &(index, weight)| {
-                            weight.mul_add(field.values[index], sum)
+                            weight.contract(field.values[index], sum)
                         })
                         / area
                 })

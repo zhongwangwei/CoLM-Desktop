@@ -6,6 +6,7 @@
 //!
 //! 收缩形状取自 latlon 内核的 GIMPLE（`gimpleL/MOD_Grid_RiverLakeFlow.F90`），逐句注明。
 
+use colm_numeric::Contract;
 pub mod bifurcation;
 pub mod flood;
 pub mod history;
@@ -506,7 +507,7 @@ impl RiverModel {
         // `acc = FMA(rnof_uc*1e-3, deltime, acc)`。
         for (i, _) in &routing.catchments {
             self.state.acc_rnof[*i] =
-                (rnof_uc[*i] * 1.0e-3).mul_add(deltime, self.state.acc_rnof[*i]);
+                (rnof_uc[*i] * 1.0e-3).contract(deltime, self.state.acc_rnof[*i]);
         }
         // 示踪物径流同一套映射（`trc_rnof_step` → `trc_rnof_uc`），再
         // `tracer_input_from_runoff(rnof_uc*1e-3*deltime, numucat, trc_rnof_uc*1e-3)`。
@@ -1379,7 +1380,7 @@ fn route_system<'a>(
             } else {
                 (sum_h, 0.0)
             };
-            let mut volwater = (-visible_hflux).mul_add(dt, start);
+            let mut volwater = (-visible_hflux).contract(dt, start);
             // `levee_apply_protected_flux`：堤内蓄量扣掉堤内一侧的分汊出流（不收缩，乘积与报错
             // 判断共用），扣穿超过容差就报错。无分汊时通量为 0，蓄量不变；它重算的 `levdph`
             // 随即被下面的重新分区覆盖。
@@ -1442,7 +1443,7 @@ fn route_system<'a>(
                 let manning = net.rivman[i];
                 let friction = (manning * manning * GRAV / w.lpow(7.0 / 3.0)) * momen[k].abs();
                 let gradient = (sum_m - sum_z) / net.rivare[i];
-                momen[k] = (-gradient).mul_add(dt, momen[k]) / dt.mul_add(friction, 1.0);
+                momen[k] = (-gradient).contract(dt, momen[k]) / dt.contract(friction, 1.0);
                 veloc[k] = momen[k] / w;
             } else {
                 momen[k] = 0.0;
@@ -1497,34 +1498,34 @@ fn route_system<'a>(
             ];
             let a = &mut hist[k];
             a[0] += dt;
-            a[1] = w.mul_add(dt, a[1]);
-            a[2] = veloc[k].mul_add(dt, a[2]);
+            a[1] = w.contract(dt, a[1]);
+            a[2] = veloc[k].contract(dt, a[2]);
             // `a_discharge + hflux_fc*dt` 不融合：乘积与调试用的 `totaldis` 共用（`_7820`）。
             a[3] += faces[k].hflux * dt;
-            a[4] = floodarea.mul_add(dt, a[4]);
-            a[5] = rivsto.mul_add(dt, a[5]);
-            a[6] = (volwater - rivsto).mul_add(dt, a[6]);
-            a[7] = (w - curve.rivhgt).max(0.0).mul_add(dt, a[7]);
+            a[4] = floodarea.contract(dt, a[4]);
+            a[5] = rivsto.contract(dt, a[5]);
+            a[6] = (volwater - rivsto).contract(dt, a[6]);
+            a[7] = (w - curve.rivhgt).max(0.0).contract(dt, a[7]);
             match (levee, lev.as_mut()) {
                 (Some(levee), Some(lev)) if levee.has[i] => {
                     let l = &mut lev[k];
-                    a[8] = (volwater + l.0).mul_add(dt, a[8]);
-                    l.2 = l.0.mul_add(dt, l.2);
-                    l.3 = l.1.mul_add(dt, l.3);
+                    a[8] = (volwater + l.0).contract(dt, a[8]);
+                    l.2 = l.0.contract(dt, l.2);
+                    l.3 = l.1.contract(dt, l.3);
                 }
-                _ => a[8] = volwater.mul_add(dt, a[8]),
+                _ => a[8] = volwater.contract(dt, a[8]),
             }
-            a[9] = (net.rivelv[i] + w).mul_add(dt, a[9]);
+            a[9] = (net.rivelv[i] + w).contract(dt, a[9]);
             if let Some(run) = bif.as_mut() {
-                run.bifout[k] = bif_sum[k].mul_add(dt, run.bifout[k]);
+                run.bifout[k] = bif_sum[k].contract(dt, run.bifout[k]);
             }
             if let Some(j) = built[k] {
                 let (_, volresv, a) = &mut reservoirs[j];
                 let (qin, qout) = qresv[j];
                 a[0] += dt;
-                a[1] = volresv.mul_add(dt, a[1]);
-                a[2] = qin.mul_add(dt, a[2]);
-                a[3] = qout.mul_add(dt, a[3]);
+                a[1] = volresv.contract(dt, a[1]);
+                a[2] = qin.contract(dt, a[2]);
+                a[3] = qout.contract(dt, a[3]);
             }
             // `tracer_lifecycle_route_diag_accumulate`：子步末的蓄量（水库取 `volresv`）、
             // 洼地溢流之后的出口通量与本子步的淹没面积。
@@ -1544,7 +1545,7 @@ fn route_system<'a>(
                 // `min(max(FNMA(levee_frc, area, levee_floodarea), 0), area*(1-levee_frc))`。
                 let protected_area = sed_levee.map(|levee| match leveed {
                     Some(_) => (-levee.frc[i])
-                        .mul_add(net.area[i], levee_floodarea[k])
+                        .contract(net.area[i], levee_floodarea[k])
                         .max(0.0)
                         .min(net.area[i] * (1.0 - levee.frc[i])),
                     None => 0.0,
@@ -1729,7 +1730,7 @@ fn bifurcation_substep(
             continue;
         }
         for k in p * levels..(p + 1) * levels {
-            run.bifflw_lev[k] = flux.hflux_lev[k].mul_add(dt, run.bifflw_lev[k]);
+            run.bifflw_lev[k] = flux.hflux_lev[k].contract(dt, run.bifflw_lev[k]);
         }
         run.bifflw_acctime[p] += dt;
     }
@@ -1864,7 +1865,7 @@ fn plain_substep(
             let curve = &net.curves[i];
             let (sum_h, sum_m, sum_z) = sums[k];
             let start = curve.volume(*wdsrf);
-            let mut volume = (-sum_h).mul_add(dt, start);
+            let mut volume = (-sum_h).contract(dt, start);
             volume = volume.max(0.0);
             if system.next[k] == INLAND_DEPRESSION && volume > net.rivstomax[i] {
                 face.hflux = (volume - net.rivstomax[i]) / dt;
@@ -1877,7 +1878,7 @@ fn plain_substep(
                 let manning = net.rivman[i];
                 let friction = (manning * manning * GRAV / w.lpow(7.0 / 3.0)) * momen.abs();
                 let gradient = (sum_m - sum_z) / net.rivare[i];
-                *momen = (-gradient).mul_add(dt, *momen) / dt.mul_add(friction, 1.0);
+                *momen = (-gradient).contract(dt, *momen) / dt.contract(friction, 1.0);
                 *veloc = *momen / w;
             } else {
                 *momen = 0.0;
@@ -1906,16 +1907,16 @@ fn plain_substep(
             let above_bank = (w - curve.rivhgt).max(0.0);
             *flood = [floodarea, above_bank];
             a[0] += dt;
-            a[1] = w.mul_add(dt, a[1]);
-            a[2] = veloc[k].mul_add(dt, a[2]);
+            a[1] = w.contract(dt, a[1]);
+            a[2] = veloc[k].contract(dt, a[2]);
             // `a_discharge + hflux_fc*dt` 不融合：乘积与调试用的 `totaldis` 共用（`_7820`）。
             a[3] += faces[k].hflux * dt;
-            a[4] = floodarea.mul_add(dt, a[4]);
-            a[5] = rivsto.mul_add(dt, a[5]);
-            a[6] = (volume - rivsto).mul_add(dt, a[6]);
-            a[7] = (w - curve.rivhgt).max(0.0).mul_add(dt, a[7]);
-            a[8] = volume.mul_add(dt, a[8]);
-            a[9] = (net.rivelv[i] + w).mul_add(dt, a[9]);
+            a[4] = floodarea.contract(dt, a[4]);
+            a[5] = rivsto.contract(dt, a[5]);
+            a[6] = (volume - rivsto).contract(dt, a[6]);
+            a[7] = (w - curve.rivhgt).max(0.0).contract(dt, a[7]);
+            a[8] = volume.contract(dt, a[8]);
+            a[9] = (net.rivelv[i] + w).contract(dt, a[9]);
         });
     dt
 }
@@ -1965,7 +1966,7 @@ fn face_of(
         zgrad_dn: coefficient * (height_dn * height_dn),
         sum_hflux: h + 0.0,
         sum_mflux: m + 0.0,
-        sum_zgrad: coefficient.mul_add(height_up * height_up, 0.0),
+        sum_zgrad: coefficient.contract(height_up * height_up, 0.0),
     }
 }
 
@@ -1974,40 +1975,40 @@ fn hll_flux(v: f64, v_next: f64, height_up: f64, height_dn: f64, width: f64) -> 
     let c_up = (height_up * GRAV).sqrt();
     let c_dn = (height_dn * GRAV).sqrt();
     // `veloct = FMA(v+vn, 0.5, c_up) - c_dn`；`height_fc = FMA(c_up+c_dn, 0.5, (v-vn)*0.25)^2 * (1/g)`。
-    let veloct = (v + v_next).mul_add(0.5, c_up) - c_dn;
-    let root = (c_up + c_dn).mul_add(0.5, (v - v_next) * 0.25);
+    let veloct = (v + v_next).contract(0.5, c_up) - c_dn;
+    let root = (c_up + c_dn).contract(0.5, (v - v_next) * 0.25);
     let height_fc = root * root * (1.0 / GRAV);
     let c_fc = (height_fc * GRAV).sqrt();
     let wave_up = if height_up > 0.0 {
         (v - c_up).min(veloct - c_fc)
     } else {
-        (-c_dn).mul_add(2.0, v_next)
+        (-c_dn).contract(2.0, v_next)
     };
     let wave_dn = if height_dn > 0.0 {
         (v_next + c_dn).max(c_fc + veloct)
     } else {
-        c_up.mul_add(2.0, v)
+        c_up.contract(2.0, v)
     };
     let half_g = 0.5 * GRAV;
     let hflux_up = v * height_up;
-    let mflux_up = height_up.mul_add(v * v, height_up * height_up * half_g);
+    let mflux_up = height_up.contract(v * v, height_up * height_up * half_g);
     if wave_up >= 0.0 {
         return (hflux_up * width, mflux_up * width);
     }
     let hflux_dn = v_next * height_dn;
-    let mflux_dn = height_dn.mul_add(v_next * v_next, height_dn * height_dn * half_g);
+    let mflux_dn = height_dn.contract(v_next * v_next, height_dn * height_dn * half_g);
     if wave_dn <= 0.0 {
         return (hflux_dn * width, mflux_dn * width);
     }
     let product = wave_dn * wave_up;
     let spread = wave_dn - wave_up;
-    let h = product.mul_add(
+    let h = product.contract(
         height_dn - height_up,
-        wave_dn.mul_add(hflux_up, -(wave_up * hflux_dn)),
+        wave_dn.contract(hflux_up, -(wave_up * hflux_dn)),
     );
-    let m = product.mul_add(
+    let m = product.contract(
         hflux_dn - hflux_up,
-        wave_dn.mul_add(mflux_up, -(wave_up * mflux_dn)),
+        wave_dn.contract(mflux_up, -(wave_up * mflux_dn)),
     );
     (h * width / spread, m * width / spread)
 }

@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{bail, ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     simple_vic_runoff, soil_hydraulic_conductivity, soil_psi_from_vliq, soil_vliq_from_psi,
@@ -455,7 +456,7 @@ pub fn perturb_variable_saturated_drainage(
 /// 还有一个**不能猜**的细节：内核只融合了每个表达式里的**一个**乘积，另一个仍是
 /// 独立的 `fmul`（先舍入一次）。哪个乘积进 FMA 由寄存器序决定，实测映射为
 /// `fmadd(Aik, c, Ajk*s)` 这种形状 —— 也就是"第一个乘积进 FMA、第二个乘积独立舍入"。
-/// 把两个乘积都融合（写成 `Aik.mul_add(c, Ajk.mul_add(s, 0.0))` 之类）同样是错的。
+/// 把两个乘积都融合（写成 `Aik.contract(c, Ajk.contract(s, 0.0))` 之类）同样是错的。
 pub fn solve_variable_saturated_least_squares(
     jacobian_row_major: &[f64],
     active: &[bool],
@@ -480,27 +481,27 @@ pub fn solve_variable_saturated_least_squares(
                 if matrix[lower] != 0.0 {
                     let (cosine, sine) = if matrix[lower].abs() > matrix[diagonal].abs() {
                         let tangent = matrix[diagonal] / matrix[lower];
-                        let sine = 1.0 / tangent.mul_add(tangent, 1.0).sqrt();
+                        let sine = 1.0 / tangent.contract(tangent, 1.0).sqrt();
                         (sine * tangent, sine)
                     } else {
                         let tangent = matrix[lower] / matrix[diagonal];
-                        let cosine = 1.0 / tangent.mul_add(tangent, 1.0).sqrt();
+                        let cosine = 1.0 / tangent.contract(tangent, 1.0).sqrt();
                         (cosine, cosine * tangent)
                     };
-                    matrix[diagonal] = matrix[diagonal].mul_add(cosine, sine * matrix[lower]);
+                    matrix[diagonal] = matrix[diagonal].contract(cosine, sine * matrix[lower]);
                     matrix[lower] = 0.0;
                     for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
                         if column_active {
                             let upper = row * dimension + column;
                             let lower = lower_row * dimension + column;
-                            let value = matrix[upper].mul_add(cosine, sine * matrix[lower]);
-                            matrix[lower] = matrix[lower].mul_add(cosine, -(matrix[upper] * sine));
+                            let value = matrix[upper].contract(cosine, sine * matrix[lower]);
+                            matrix[lower] = matrix[lower].contract(cosine, -(matrix[upper] * sine));
                             matrix[upper] = value;
                         }
                     }
-                    let value = residual[row].mul_add(cosine, sine * residual[lower_row]);
+                    let value = residual[row].contract(cosine, sine * residual[lower_row]);
                     residual[lower_row] =
-                        residual[lower_row].mul_add(cosine, -(residual[row] * sine));
+                        residual[lower_row].contract(cosine, -(residual[row] * sine));
                     residual[row] = value;
                 }
             }
@@ -518,9 +519,9 @@ pub fn solve_variable_saturated_least_squares(
             for (column, &column_active) in active.iter().enumerate().skip(row + 1) {
                 if column_active {
                     // 上游是 `dv(i) = dv(i) - A(i,k)*dv(k)`，内核收缩成 `fmsub`
-                    // （单次舍入）。取负是精确的，所以 `(-A).mul_add(dv_k, dv_i)` 逐位等价。
+                    // （单次舍入）。取负是精确的，所以 `(-A).contract(dv_k, dv_i)` 逐位等价。
                     let coefficient = matrix[row * dimension + column];
-                    update[row] = (-coefficient).mul_add(update[column], update[row]);
+                    update[row] = (-coefficient).contract(update[column], update[row]);
                 }
             }
             update[row] /= diagonal;
@@ -1643,7 +1644,7 @@ pub fn flux_inside_variable_saturated_soil(
     let exponent = match input.hydraulic_model {
         SoilHydraulicModel::Campbell { bsw } => 1.0 / (3.0 / bsw + 2.0),
         SoilHydraulicModel::VanGenuchten { n_vgm, l_vgm, .. } => {
-            1.0 / l_vgm.mul_add(n_vgm - 1.0, n_vgm * 2.0)
+            1.0 / l_vgm.contract(n_vgm - 1.0, n_vgm * 2.0)
         }
     };
     let flux = if gradient < 0.0 {
@@ -1670,7 +1671,7 @@ pub fn flux_inside_variable_saturated_soil(
         let weighted = (input.upper_pressure_head_mm - input.lower_pressure_head_mm)
             / input.distance_mm
             * input.upper_hydraulic_conductivity_mm_s.lpow(1.0 - exponent);
-        weighted.mul_add(
+        weighted.contract(
             input.lower_hydraulic_conductivity_mm_s.lpow(exponent),
             input.upper_hydraulic_conductivity_mm_s,
         )
@@ -1746,7 +1747,7 @@ pub fn flux_at_variable_saturated_interface(
     //   fmadd d31,d12,d30,d31  ; 收进去的是 dz_l*psi_u
     // ⇒ 收的是**第一个**源乘积 `dz_l*psi_u`。outlined 版（第 322 轮）GCC 不收缩，
     // 所以这一处只能靠调用点上下文判定，例程级闭环判不了。
-    let mut interface_pressure_head_mm = input.lower_distance_mm.mul_add(
+    let mut interface_pressure_head_mm = input.lower_distance_mm.contract(
         input.upper_pressure_head_mm,
         input.upper_distance_mm * input.lower_pressure_head_mm,
     ) / (input.upper_distance_mm + input.lower_distance_mm);
@@ -1803,7 +1804,7 @@ pub fn variable_saturated_water_balance(
         let flux_sum = input.upper_boundary.value - input.interface_flux_mm_s[0];
         // 上游是 `blc(lb-1) = dmss - qsum*dt`，出货汇编只有一条 `fmsub`
         // ⇒ 乘积进 FMA、`dmss` 是加数。
-        residual_mm[0] = (-flux_sum).mul_add(input.time_step_seconds, mass_change);
+        residual_mm[0] = (-flux_sum).contract(input.time_step_seconds, mass_change);
     }
     let mut active = 0usize;
     for (layer, thickness) in thickness.iter().copied().enumerate() {
@@ -1824,10 +1825,10 @@ pub fn variable_saturated_water_balance(
         // 第 317 轮"每处只有一个乘积、无收左收右歧义"的说法在这条链上是错的，
         // 模块级闭环实测才判出来。
         let mass_change =
-            porosity_change.mul_add(wetting_front_change, water_table_change * porosity_change);
+            porosity_change.contract(wetting_front_change, water_table_change * porosity_change);
         let mass_change =
             (thickness - input.water_table_thickness_mm[layer] - input.wetting_front_mm[layer])
-                .mul_add(liquid_change, mass_change);
+                .contract(liquid_change, mass_change);
         let flux_sum = input.interface_flux_mm_s[layer] - input.interface_flux_mm_s[layer + 1];
         if !input.saturated[layer] {
             active = layer + 1;
@@ -1839,7 +1840,7 @@ pub fn variable_saturated_water_balance(
             }
         }
         residual_mm[active] =
-            (-flux_sum).mul_add(input.time_step_seconds, residual_mm[active] + mass_change);
+            (-flux_sum).contract(input.time_step_seconds, residual_mm[active] + mass_change);
     }
     if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
         if input.aquifer_water_mm == 0.0 && input.interface_flux_mm_s[layers] >= 0.0 {
@@ -2076,18 +2077,18 @@ pub fn water_table_from_aquifer(
 
     let liquid_at_depth = |depth_mm: f64| {
         soil_vliq_from_psi(
-            (depth_mm - minimum_depth_mm).mul_add(-0.5, saturated_potential_mm),
+            (depth_mm - minimum_depth_mm).contract(-0.5, saturated_potential_mm),
             porosity,
             residual_water,
             saturated_potential_mm,
             hydraulic_model,
         )
     };
-    let mut right = ((-aquifer_water_mm) / porosity).mul_add(2.0, minimum_depth_mm);
+    let mut right = ((-aquifer_water_mm) / porosity).contract(2.0, minimum_depth_mm);
     let mut liquid = liquid_at_depth(right);
     let mut expansion = 0usize;
     while aquifer_water_mm <= -(right - minimum_depth_mm) * (porosity - liquid) {
-        right = (right - minimum_depth_mm).mul_add(2.0, minimum_depth_mm) + 0.1;
+        right = (right - minimum_depth_mm).contract(2.0, minimum_depth_mm) + 0.1;
         liquid = liquid_at_depth(right);
         expansion += 1;
         ensure!(expansion < 256, "VSF water-table bracket did not converge");
@@ -2099,7 +2100,7 @@ pub fn water_table_from_aquifer(
     let mut depth = (left + right) * 0.5;
     for _ in 0..50 {
         liquid = liquid_at_depth(depth);
-        let value = (depth - minimum_depth_mm).mul_add(porosity - liquid, aquifer_water_mm);
+        let value = (depth - minimum_depth_mm).contract(porosity - liquid, aquifer_water_mm);
         if value.abs() < volume_tolerance || right - left < depth_tolerance_mm {
             break;
         }
@@ -2153,7 +2154,7 @@ pub fn apply_variable_saturated_explicit_step(
         // `(wt_m1+wf_m1)*vl_s` 进 FMA，第二个 `(dz-wt_m1-wf_m1)*vl_m1` 独立舍入。
         let previous_water = (input.previous_water_table_thickness_mm[layer]
             + input.previous_wetting_front_mm[layer])
-            .mul_add(
+            .contract(
                 input.porosity[layer],
                 (layer_thickness_mm[layer]
                     - input.previous_water_table_thickness_mm[layer]
@@ -2176,7 +2177,7 @@ pub fn apply_variable_saturated_explicit_step(
             // `(wt_m1+wf_m1)*vl_s` 进 FMA，第二个 `(dz-wt_m1-wf_m1)*vl_m1` 独立舍入。
             let previous_water = (input.previous_water_table_thickness_mm[layer]
                 + input.previous_wetting_front_mm[layer])
-                .mul_add(
+                .contract(
                     input.porosity[layer],
                     (layer_thickness_mm[layer]
                         - input.previous_water_table_thickness_mm[layer]
@@ -2226,7 +2227,7 @@ pub fn apply_variable_saturated_explicit_step(
     if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
         // `:1464` 出货 `fmadd d31,d8,d30,d31`：`dp_m1 + (ubc_val-q)*dt` 是一条 FMA。
         ponding_depth_mm = (input.upper_boundary.value - interface_flux_mm_s[0])
-            .mul_add(input.time_step_seconds, input.previous_ponding_depth_mm)
+            .contract(input.time_step_seconds, input.previous_ponding_depth_mm)
             .max(0.0);
     }
     for layer in 0..layers {
@@ -2236,11 +2237,11 @@ pub fn apply_variable_saturated_explicit_step(
         let water_change_factor = interface_flux_mm_s[layer] - interface_flux_mm_s[layer + 1];
         water_table_thickness_mm[layer] = 0.0;
         wetting_front_mm[layer] = 0.0;
-        liquid_water[layer] = water_change_factor.mul_add(
+        liquid_water[layer] = water_change_factor.contract(
             input.time_step_seconds,
             (input.previous_water_table_thickness_mm[layer]
                 + input.previous_wetting_front_mm[layer])
-                .mul_add(
+                .contract(
                     input.porosity[layer],
                     (layer_thickness_mm[layer]
                         - input.previous_water_table_thickness_mm[layer]
@@ -2252,7 +2253,7 @@ pub fn apply_variable_saturated_explicit_step(
     if input.lower_boundary.kind == VariableSaturatedBoundaryKind::Drainage {
         // `:1479` 出货 `fmadd d31,d8,d30,d31`。
         aquifer_water_mm = interface_flux_mm_s[layers]
-            .mul_add(input.time_step_seconds, input.previous_aquifer_water_mm);
+            .contract(input.time_step_seconds, input.previous_aquifer_water_mm);
         water_table_depth_mm = water_table_from_aquifer(
             input.aquifer_porosity,
             input.residual_water[layers - 1],
@@ -2336,7 +2337,7 @@ pub fn exchange_soil_water_with_aquifer(
                         // `:560` GIMPLE：`_344 = ss_vliq*(zwt-sp_zi(j-1))` 独立舍入，
                         // `_56 = .FMA(zwtp-zwt, porsl, _344)` —— 收的是**第二个**源乘积。
                         unsaturated_liquid_water[layer] =
-                            ((candidate - water_table_depth_mm).mul_add(
+                            ((candidate - water_table_depth_mm).contract(
                                 input.porosity[layer],
                                 unsaturated_liquid_water[layer]
                                     * (water_table_depth_mm - input.interface_depth_mm[layer]),
@@ -2347,7 +2348,7 @@ pub fn exchange_soil_water_with_aquifer(
                     } else {
                         // `:564` 出货 `fadd d31,d11,d12`（`zi+zwt`）+ `fmsub d30,d31,d13,d30`
                         // ⇒ `zwtp - 0.5*(zi+zwt)` 是一条 FMA；外层 `psi_s - …` 是普通 fsub。
-                        let saturated_interface_offset = (-0.5_f64).mul_add(
+                        let saturated_interface_offset = (-0.5_f64).contract(
                             input.interface_depth_mm[water_table_interface_count]
                                 + water_table_depth_mm,
                             candidate,
@@ -2369,7 +2370,7 @@ pub fn exchange_soil_water_with_aquifer(
                             unsaturated_liquid_water[layer] = (input.interface_depth_mm
                                 [water_table_interface_count]
                                 - water_table_depth_mm)
-                                .mul_add(
+                                .contract(
                                     liquid,
                                     unsaturated_liquid_water[layer]
                                         * (water_table_depth_mm - input.interface_depth_mm[layer]),
@@ -2382,7 +2383,7 @@ pub fn exchange_soil_water_with_aquifer(
                             unsaturated_liquid_water[layer] = ((input.interface_depth_mm
                                 [water_table_interface_count]
                                 - water_table_depth_mm)
-                                .mul_add(
+                                .contract(
                                     input.porosity[layer],
                                     unsaturated_liquid_water[layer]
                                         * (water_table_depth_mm - input.interface_depth_mm[layer]),
@@ -2851,14 +2852,14 @@ fn bounded_secant_iteration(
     if *previous_residual == residual_before_previous {
         *value = (*left + *right) * 0.5;
     } else {
-        *value = previous_residual.mul_add(
+        *value = previous_residual.contract(
             value_before_previous,
             -(residual_before_previous * *previous_value),
         ) / (*previous_residual - residual_before_previous);
         // 上游两处夹逼都用 `(1.0_r8 - alp)`，必须按表达式求值，见 `SECANT_ALPHA`。
         let complement = 1.0 - SECANT_ALPHA;
-        *value = (*value).max((*left).mul_add(SECANT_ALPHA, *right * complement));
-        *value = (*value).min((*left).mul_add(complement, *right * SECANT_ALPHA));
+        *value = (*value).max((*left).contract(SECANT_ALPHA, *right * complement));
+        *value = (*value).min((*left).contract(complement, *right * SECANT_ALPHA));
     }
 }
 
@@ -3511,7 +3512,7 @@ fn project_richards_liquid_water(input: RichardsProjection<'_>, liquid_water: &m
     let level_budget = input.mass_budget_mm / (layers + 2) as f64;
     let mut total_residual = 0.0;
     if let Some(top_value) = input.rainfall_top {
-        let residual = (-dt).mul_add(
+        let residual = (-dt).contract(
             top_value - q[0],
             input.ponding_depth_mm.max(0.0) - input.previous_ponding_depth_mm.max(0.0),
         );
@@ -3521,7 +3522,7 @@ fn project_richards_liquid_water(input: RichardsProjection<'_>, liquid_water: &m
         total_residual += residual;
     }
     if input.drainage_bottom {
-        let residual = (-dt).mul_add(
+        let residual = (-dt).contract(
             q[layers],
             input.aquifer_water_mm - input.previous_aquifer_water_mm,
         );
@@ -3542,7 +3543,7 @@ fn project_richards_liquid_water(input: RichardsProjection<'_>, liquid_water: &m
             * ((wf - input.previous_wetting_front_mm[j])
                 + (wt - input.previous_water_table_thickness_mm[j]));
         let flux_change = dt * (q[j] - q[j + 1]);
-        let mut residual = unsat.mul_add(vl - vl_m1, storage_change) - flux_change;
+        let mut residual = unsat.contract(vl - vl_m1, storage_change) - flux_change;
         if !residual.is_finite() || !unsat.is_finite() {
             return false;
         }
@@ -3558,7 +3559,7 @@ fn project_richards_liquid_water(input: RichardsProjection<'_>, liquid_water: &m
             {
                 return false;
             }
-            residual = unsat.mul_add(candidate[j] - vl_m1, storage_change) - flux_change;
+            residual = unsat.contract(candidate[j] - vl_m1, storage_change) - flux_change;
             if residual.abs() > level_budget {
                 return false;
             }
@@ -3780,7 +3781,7 @@ pub fn richards_solver(
                     let influx_mm_s = initial_interface_flux_mm_s[0] - input.upper_boundary.value;
                     // `:817` 出货 `fmsub d31,d8,d30,d31`：`dp_m1 - (q_0-ubc)*dt` 是一条 FMA。
                     if previous_ponding_depth_mm > input.depth_tolerance_mm
-                        && (-influx_mm_s).mul_add(time_this_seconds, previous_ponding_depth_mm)
+                        && (-influx_mm_s).contract(time_this_seconds, previous_ponding_depth_mm)
                             < input.depth_tolerance_mm
                     {
                         wet_to_dry = true;
@@ -3793,7 +3794,7 @@ pub fn richards_solver(
                 .residual_mm
                 .iter()
                 .fold(0.0, |accumulator, residual| {
-                    residual.mul_add(*residual, accumulator)
+                    residual.contract(*residual, accumulator)
                 })
                 .sqrt();
             let converged = residual_norm_mm < RICHARDS_TOLERANCE * time_this_seconds;
@@ -4044,7 +4045,7 @@ pub fn richards_solver(
                             - soil_vliq_from_psi(
                                 // `:966` 出货 `fmadd d31,d26,d27,d31`。
                                 (last_interface_mm - drainage.water_table_depth_mm)
-                                    .mul_add(0.5, input.saturated_potential_mm[ub]),
+                                    .contract(0.5, input.saturated_potential_mm[ub]),
                                 input.aquifer_porosity,
                                 input.residual_water[ub],
                                 input.saturated_potential_mm[ub],
@@ -4206,7 +4207,7 @@ pub fn richards_solver(
                         - soil_vliq_from_psi(
                             // `:1060` 出货 `fmadd d31,d27,d30,d31`。
                             (last_interface_mm - water_table_depth_mm)
-                                .mul_add(0.5, input.saturated_potential_mm[ub]),
+                                .contract(0.5, input.saturated_potential_mm[ub]),
                             input.aquifer_porosity,
                             input.residual_water[ub],
                             input.saturated_potential_mm[ub],
@@ -4220,7 +4221,7 @@ pub fn richards_solver(
             .zip(&zone.interface_flux_mm_s)
         {
             // `:1065` 出货 `fmadd d31,d30,d8,d31`：乘积进 FMA、加数是累加器。
-            *accumulated = flux.mul_add(time_this_seconds, *accumulated);
+            *accumulated = flux.contract(time_this_seconds, *accumulated);
         }
 
         let mut balance_after_mm = zone
@@ -4276,7 +4277,7 @@ pub fn richards_solver(
         if (thickness - water_table).abs() > input.depth_tolerance_mm {
             // `:1085` 出货 `fmadd d31,d28,d29,d31`：同 `:434`，第一个源乘积
             // `ss_wf*vl_s` 进 FMA，第二个独立舍入。
-            state.liquid_water[level] = zone.wetting_front_mm[level].mul_add(
+            state.liquid_water[level] = zone.wetting_front_mm[level].contract(
                 input.porosity[level],
                 (thickness - zone.wetting_front_mm[level] - water_table) * zone.liquid_water[level],
             ) / (thickness - water_table);
@@ -4463,7 +4464,7 @@ pub fn variably_saturated_flow_step(
             // `wresi = wliq - dz*denh2o*vol_liq`。`vol_liq` 只被用一次，GCC 把它
             // 内联进来，于是整条是 `FNMA(dz*denh2o, min(eff, max(wliq/(dz*denh2o),0)), wliq)`
             // —— 乘积被吸收，而 `min/max` 的夹取留在乘积的操作数里。
-            residual_water_kg_m2[level] = (-liquid_capacity).mul_add(
+            residual_water_kg_m2[level] = (-liquid_capacity).contract(
                 liquid_volume_fraction[level],
                 state.liquid_water_kg_m2[level],
             );
@@ -4699,7 +4700,7 @@ pub fn variably_saturated_flow_step(
                     // `vol_liq = (wliq*1000/denh2o - eff*(sp_zi-zwtmm))/(zwtmm - sp_zi(j-1))`，
                     // GIMPLE 把 `eff*(sp_zi-zwtmm)` 收进减法（`FNMA(eff, Δ, 水量mm)`）。
                     // `denh2o` 是常量 1000，dump 里已被折成 `*1e3/1e3` 两步。
-                    liquid_volume_fraction[level] = (-effective_porosity[level]).mul_add(
+                    liquid_volume_fraction[level] = (-effective_porosity[level]).contract(
                         interface_depth_mm[level + 1] - water_table_depth_mm,
                         state.liquid_water_kg_m2[level] * 1000.0 / WATER_DENSITY_KG_M3,
                     ) / (water_table_depth_mm
@@ -4720,9 +4721,9 @@ pub fn variably_saturated_flow_step(
                     let water_mm = state.liquid_water_kg_m2[level] * 1000.0 / WATER_DENSITY_KG_M3;
                     let above_water_table = interface_depth_mm[level + 1] - water_table_depth_mm;
                     let below_water_table = water_table_depth_mm - interface_depth_mm[level];
-                    residual_water_kg_m2[level] = (-liquid_volume_fraction[level]).mul_add(
+                    residual_water_kg_m2[level] = (-liquid_volume_fraction[level]).contract(
                         below_water_table,
-                        (-effective_porosity[level]).mul_add(above_water_table, water_mm),
+                        (-effective_porosity[level]).contract(above_water_table, water_mm),
                     );
                 }
                 break;
@@ -4821,7 +4822,7 @@ pub fn variably_saturated_flow_step(
                 // `_247 = eff*(sp_zi-zwt)` 独立舍入后 `_253 = .FMA(vol_liq, zwt-sp_zi(j-1), _247)`
                 // —— 进 FMA 的是**第二个**源乘积（第 338 轮更正）。
                 state.liquid_water_kg_m2[level] = WATER_DENSITY_KG_M3
-                    * liquid_volume_fraction[level].mul_add(
+                    * liquid_volume_fraction[level].contract(
                         water_table_depth_mm - interface_depth_mm[level],
                         effective_porosity[level]
                             * (interface_depth_mm[level + 1] - water_table_depth_mm),
@@ -4850,7 +4851,7 @@ pub fn variably_saturated_flow_step(
         let ice_before_frost = state.ice_water_kg_m2[0];
         let dew_input = (input.fluxes.soil_dew_kg_m2_s * dt).max(0.0);
         state.ice_water_kg_m2[0] = dt
-            .mul_add(
+            .contract(
                 input.fluxes.soil_frost_kg_m2_s - input.fluxes.soil_sublimation_kg_m2_s,
                 ice_before_frost,
             )
@@ -4992,12 +4993,12 @@ pub fn variably_saturated_flow_step(
             - subsurface_runoff_mm_s
     };
     let mut solver_balance_error_mm =
-        (-column_outflow_mm_s).mul_add(dt, storage_after_kg_m2 - storage_before_kg_m2);
+        (-column_outflow_mm_s).contract(dt, storage_after_kg_m2 - storage_before_kg_m2);
     // 无雪层（`lb >= 1`）时上游再把地表凝结项扣掉一次 —— 因为上面那一步已经
     // 把 `qsdew`/`qfros`/`qsubl` 加进 `wliq_soisno(1)`/`wice_soisno(1)` 了。
     if input.snow_layers == 0 {
         // 同一处的第二级：`FNMA(deltim, qsdew+qfros-qsubl, 上一项)`。
-        solver_balance_error_mm = (-dt).mul_add(
+        solver_balance_error_mm = (-dt).contract(
             input.fluxes.soil_dew_kg_m2_s + input.fluxes.soil_frost_kg_m2_s
                 - input.fluxes.soil_sublimation_kg_m2_s,
             solver_balance_error_mm,
@@ -5271,19 +5272,19 @@ pub fn soil_water_vertical_movement(
         }
         if level < water_table_level.saturating_sub(1) {
             balance_before_mm =
-                state.liquid_water[level].mul_add(*layer_thickness_mm, balance_before_mm);
+                state.liquid_water[level].contract(*layer_thickness_mm, balance_before_mm);
         } else if level + 1 == water_table_level {
-            balance_before_mm = state.liquid_water[level].mul_add(
+            balance_before_mm = state.liquid_water[level].contract(
                 water_table_depth_mm - input.interface_depth_mm[level],
                 balance_before_mm,
             );
-            balance_before_mm = input.porosity[level].mul_add(
+            balance_before_mm = input.porosity[level].contract(
                 input.interface_depth_mm[level + 1] - water_table_depth_mm,
                 balance_before_mm,
             );
         } else {
             balance_before_mm =
-                input.porosity[level].mul_add(*layer_thickness_mm, balance_before_mm);
+                input.porosity[level].contract(*layer_thickness_mm, balance_before_mm);
         }
     }
     balance_before_mm += state.aquifer_water_mm;
@@ -5336,7 +5337,7 @@ pub fn soil_water_vertical_movement(
                 state.liquid_water[level] = 0.0;
             } else if state.liquid_water[level] > input.porosity[level] {
                 transpiration_actual_mm[level] =
-                    (-thickness_mm[level]).mul_add(input.porosity[level], stored_before_mm);
+                    (-thickness_mm[level]).contract(input.porosity[level], stored_before_mm);
                 deficit_mm =
                     -(state.liquid_water[level] - input.porosity[level]) * thickness_mm[level];
                 state.liquid_water[level] = input.porosity[level];
@@ -5352,7 +5353,7 @@ pub fn soil_water_vertical_movement(
         .iter()
         .skip(water_table_level.saturating_sub(1))
     {
-        deficit_mm = demand_mm_s.mul_add(input.time_step_seconds, deficit_mm);
+        deficit_mm = demand_mm_s.contract(input.time_step_seconds, deficit_mm);
     }
 
     // 与含水层交换（`wexchange` 是**体积** mm，不是通量）。
@@ -5368,7 +5369,7 @@ pub fn soil_water_vertical_movement(
                 if input.permeable[level]
                     && water_table_depth_mm < input.interface_depth_mm[level + 1]
                 {
-                    liquid[level].mul_add(
+                    liquid[level].contract(
                         (water_table_depth_mm - input.interface_depth_mm[level]).max(0.0),
                         input.porosity[level]
                             * thickness_mm[level]
@@ -5476,7 +5477,7 @@ pub fn soil_water_vertical_movement(
             for level in 0..nlev {
                 let debit = (layer_before[level] - after[level]).max(0.0);
                 transpiration_actual_mm[level] =
-                    transpiration_fraction.mul_add(debit, transpiration_actual_mm[level]);
+                    transpiration_fraction.contract(debit, transpiration_actual_mm[level]);
                 subsurface_source_layer_mm[level] = subsurface_fraction * debit;
             }
             pond
@@ -5592,7 +5593,7 @@ pub fn soil_water_vertical_movement(
         // `:406 ss_dp = max(ss_dp + qgtop*dt, 0)`：乘积进 FMA（`.loc 1 406`）。
         state.ponding_depth_mm = input
             .ground_water_flux_mm_s
-            .mul_add(input.time_step_seconds, state.ponding_depth_mm)
+            .contract(input.time_step_seconds, state.ponding_depth_mm)
             .max(0.0);
     }
 
@@ -5638,7 +5639,7 @@ pub fn soil_water_vertical_movement(
             // `:434 (ss_vliq*(sp_dz-ss_wt) + porsl*ss_wt)/sp_dz`：`.loc 1 434`
             // 的 `fmul` 先算 `porsl*ss_wt`、`fmadd` 把**第一个**源乘积
             // `ss_vliq*(sp_dz-ss_wt)` 收进去。
-            state.liquid_water[level] = state.liquid_water[level].mul_add(
+            state.liquid_water[level] = state.liquid_water[level].contract(
                 thickness_mm[level] - water_table_thickness_mm[level],
                 input.porosity[level] * water_table_thickness_mm[level],
             ) / thickness_mm[level];
@@ -5657,18 +5658,19 @@ pub fn soil_water_vertical_movement(
         }
         if level < water_table_level.saturating_sub(1) {
             balance_after_mm =
-                state.liquid_water[level].mul_add(*layer_thickness_mm, balance_after_mm);
+                state.liquid_water[level].contract(*layer_thickness_mm, balance_after_mm);
         } else if level + 1 == water_table_level {
-            balance_after_mm = state.liquid_water[level].mul_add(
+            balance_after_mm = state.liquid_water[level].contract(
                 water_table_depth_mm - input.interface_depth_mm[level],
                 balance_after_mm,
             );
-            balance_after_mm = input.porosity[level].mul_add(
+            balance_after_mm = input.porosity[level].contract(
                 input.interface_depth_mm[level + 1] - water_table_depth_mm,
                 balance_after_mm,
             );
         } else {
-            balance_after_mm = input.porosity[level].mul_add(*layer_thickness_mm, balance_after_mm);
+            balance_after_mm =
+                input.porosity[level].contract(*layer_thickness_mm, balance_after_mm);
         }
     }
     balance_after_mm += state.aquifer_water_mm;
@@ -5679,7 +5681,7 @@ pub fn soil_water_vertical_movement(
         - ((input.ground_water_flux_mm_s
             - transpiration_demand_mm.iter().sum::<f64>()
             - input.subsurface_runoff_mm_s)
-            .mul_add(input.time_step_seconds, balance_before_mm)
+            .contract(input.time_step_seconds, balance_before_mm)
             - transpiration_deficit_mm);
 
     // 逐层的 `smp`/`hk`：水位以上按含水率反解，水位那一层按加权含水率，
@@ -5707,7 +5709,7 @@ pub fn soil_water_vertical_movement(
             // `:478 vliq = (ss_vliq*(zwt-zlo) + porsl*(zhi-zwt))/(zhi-zlo)`：
             // 同 `:434`，`.loc 1 478` 的 `fmul` 先算 `porsl*(zhi-zwt)`，
             // `fmadd` 把**第一个**源乘积 `ss_vliq*(zwt-zlo)` 收进去。
-            let volumetric_water = state.liquid_water[level].mul_add(
+            let volumetric_water = state.liquid_water[level].contract(
                 water_table_depth_mm - input.interface_depth_mm[level],
                 input.porosity[level]
                     * (input.interface_depth_mm[level + 1] - water_table_depth_mm),

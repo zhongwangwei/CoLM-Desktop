@@ -6,6 +6,7 @@
 //! precipitation, or broadband-shortwave assumptions.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     orbital_cosine_zenith, partition_precipitation, PrecipitationInput, PrecipitationPhaseScheme,
@@ -281,7 +282,7 @@ pub fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> Shortwa
     let mut cloud = if cosine_zenith == 0.0 {
         0.0
     } else {
-        1160.0f64.mul_add(cosine_zenith, -total_w_m2) / (963.0 * cosine_zenith)
+        1160.0f64.contract(cosine_zenith, -total_w_m2) / (963.0 * cosine_zenith)
     };
     cloud = cloud.max(0.0001);
     cloud = cloud.min(1.0);
@@ -289,9 +290,9 @@ pub fn split_broadband_shortwave(total_w_m2: f64, cosine_zenith: f64) -> Shortwa
     let mut diffuse_fraction = 0.0604 / (cosine_zenith - 0.0223) + 0.0683;
     diffuse_fraction = diffuse_fraction.max(0.0);
     diffuse_fraction = diffuse_fraction.min(1.0);
-    diffuse_fraction = (1.0 - diffuse_fraction).mul_add(cloud, diffuse_fraction);
-    let visible_term = (-cloud).mul_add(464.0, 580.0);
-    let near_infrared_term = (-cloud).mul_add(499.0, 580.0);
+    diffuse_fraction = (1.0 - diffuse_fraction).contract(cloud, diffuse_fraction);
+    let visible_term = (-cloud).contract(464.0, 580.0);
+    let near_infrared_term = (-cloud).contract(499.0, 580.0);
     let visible_fraction = visible_term / (near_infrared_term + visible_term);
     ShortwaveForcing {
         direct_visible_w_m2: total_w_m2 * (1.0 - diffuse_fraction) * visible_fraction,

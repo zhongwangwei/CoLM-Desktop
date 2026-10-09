@@ -9,6 +9,7 @@
 //! 收缩形状对照 `CoLMMAIN_Urban.F90` 与 `MOD_Urban_Hydrology.F90` 的 GIMPLE。
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::snow::{snow_interface_slot, snow_layer_slot, MAX_SNOW_LAYERS};
 use crate::{
@@ -250,8 +251,8 @@ pub fn urban_step(
     let mut pgper_snow = interception.ground_snow_kg_m2_s;
     let qdrip_gper = pgper_rain + pgper_snow;
     // `:891` `.FMA (forc_rain+forc_snow, .FNMA (1-flake, fveg, 1), (1-flake)*(fveg*qdrip_gper))`
-    let qdrip = (forc_rain + forc_snow).mul_add(
-        (-one_minus_flake).mul_add(fveg, 1.0),
+    let qdrip = (forc_rain + forc_snow).contract(
+        (-one_minus_flake).contract(fveg, 1.0),
         one_minus_flake * (fveg * qdrip_gper),
     );
 
@@ -270,13 +271,13 @@ pub fn urban_step(
     };
     let (pgimp_rain, pgimp_snow);
     if fveg_gper <= 1.0 {
-        pgper_rain = pgper_rain.mul_add(fveg_gper, pg_rain * (1.0 - fveg_gper));
-        pgper_snow = pgper_snow.mul_add(fveg_gper, pg_snow * (1.0 - fveg_gper));
+        pgper_rain = pgper_rain.contract(fveg_gper, pg_rain * (1.0 - fveg_gper));
+        pgper_snow = pgper_snow.contract(fveg_gper, pg_snow * (1.0 - fveg_gper));
         pgimp_rain = pg_rain;
         pgimp_snow = pg_snow;
     } else {
-        pgimp_rain = pgper_rain.mul_add(fveg_gimp, pg_rain * (1.0 - fveg_gimp));
-        pgimp_snow = pgper_snow.mul_add(fveg_gimp, pg_snow * (1.0 - fveg_gimp));
+        pgimp_rain = pgper_rain.contract(fveg_gimp, pg_rain * (1.0 - fveg_gimp));
+        pgimp_snow = pgper_snow.contract(fveg_gimp, pg_snow * (1.0 - fveg_gimp));
     }
 
     // 新雪（`:926-959`）
@@ -631,12 +632,12 @@ pub fn urban_step(
             .bottom_drainage_kg_m2_s
         };
         // `:308` `.FMA (gwat, deltim, wliq(1))`
-        surface.liquid_water_kg_m2[0] = gwat.mul_add(dt, surface.liquid_water_kg_m2[0]);
+        surface.liquid_water_kg_m2[0] = gwat.contract(dt, surface.liquid_water_kg_m2[0]);
         if surface.snow.layer_count >= 0 {
             surface.liquid_water_kg_m2[0] =
-                qsdew.mul_add(dt, surface.liquid_water_kg_m2[0]).max(0.0);
+                qsdew.contract(dt, surface.liquid_water_kg_m2[0]).max(0.0);
             surface.ice_water_kg_m2[0] = (qfros - qsubl)
-                .mul_add(dt, surface.ice_water_kg_m2[0])
+                .contract(dt, surface.ice_water_kg_m2[0])
                 .max(0.0);
         }
         let mut xs1 = surface.liquid_water_kg_m2[0] - 1.0;
@@ -709,13 +710,13 @@ pub fn urban_step(
     clear_empty_snow_slots(&mut urban.lake_bed.snow);
     let _ = w_old;
     // `:403-404` `.FMA (flake, dfseng, fseng)`
-    fseng = flake.mul_add(lake_fluxes.sensible_heat_w_m2, fseng);
-    fgrnd = flake.mul_add(lake_fluxes.ground_heat_w_m2, fgrnd);
+    fseng = flake.contract(lake_fluxes.sensible_heat_w_m2, fseng);
+    fgrnd = flake.contract(lake_fluxes.ground_heat_w_m2, fgrnd);
     let fg = 1.0 - froof;
     // `:411` `.FMA (fgper, rsur_gper*fg, .FMA (froof, rsur_roof, (fg*rsur_gimp)*(1-fgper)))`
-    let sealed_runoff = froof.mul_add(rsur_roof, (fg * rsur_gimp) * one_minus_fgper);
-    let rsur = fgper.mul_add(rsur_gper * fg, sealed_runoff);
-    let rnof = fgper.mul_add(rnof_gper * fg, sealed_runoff);
+    let sealed_runoff = froof.contract(rsur_roof, (fg * rsur_gimp) * one_minus_fgper);
+    let rsur = fgper.contract(rsur_gper * fg, sealed_runoff);
+    let rnof = fgper.contract(rnof_gper * fg, sealed_runoff);
 
     // 雪层压实/合并/分裂（`:1108-1215`）
     let melted_of = |flags: &[i32], count: usize| {
@@ -783,7 +784,7 @@ pub fn urban_step(
         + urb_irrig)
         - thermal.fevpa)
         - rnof))
-        .mul_add(dt, total_water_after - total_water_before);
+        .contract(dt, total_water_after - total_water_before);
     let xerr = water_balance_error_mm / dt;
 
     // 下一步的雪盖、雪龄与反照率（`:1278-1320`）
@@ -1041,9 +1042,9 @@ fn total_water(
         .iter()
         .zip(&state.soil_water.liquid_water_kg_m2)
         .fold(0.0, |acc, (ice, liquid)| (ice + liquid) + acc);
-    (one_minus_froof * state.soil_water.aquifer_water_mm).mul_add(
+    (one_minus_froof * state.soil_water.aquifer_water_mm).contract(
         fgper,
-        fveg.mul_add(
+        fveg.contract(
             state.energy.leaf.canopy_water.total_mm,
             state.snow.water_equivalent_kg_m2 + sum,
         ),
@@ -1061,9 +1062,9 @@ fn aggregate3(
     pervious: f64,
     impervious: f64,
 ) -> f64 {
-    (one_minus_froof * impervious).mul_add(
+    (one_minus_froof * impervious).contract(
         one_minus_fgper,
-        froof.mul_add(roof, fgper * (one_minus_froof * pervious)),
+        froof.contract(roof, fgper * (one_minus_froof * pervious)),
     )
 }
 
@@ -1093,8 +1094,8 @@ fn aggregate_columns(
                 urban.impervious.snow.ice_water_kg_m2[slot],
             ),
         ] {
-            let acc = fgper.mul_add(one_minus_froof * gper, froof * roof);
-            *target = (one_minus_froof * gimp).mul_add(one_minus_fgper, acc);
+            let acc = fgper.contract(one_minus_froof * gper, froof * roof);
+            *target = (one_minus_froof * gimp).contract(one_minus_fgper, acc);
         }
         snow.temperature_k[slot] = urban.pervious.snow.temperature_k[slot];
     }
@@ -1116,9 +1117,9 @@ fn aggregate_columns(
         ];
         for (target, roof, gper, gimp) in pairs {
             let mut acc = if layer == 0 { froof * roof[0] } else { 0.0 };
-            acc = fgper.mul_add(one_minus_froof * gper[layer], acc);
+            acc = fgper.contract(one_minus_froof * gper[layer], acc);
             if layer == 0 {
-                acc = (one_minus_froof * gimp[0]).mul_add(one_minus_fgper, acc);
+                acc = (one_minus_froof * gimp[0]).contract(one_minus_fgper, acc);
             }
             *target = acc;
         }
@@ -1155,9 +1156,9 @@ fn aggregate_snow_geometry(
             ),
         ] {
             let mut acc = froof * roof;
-            acc = fgper.mul_add(one_minus_froof * gper, acc);
-            acc = (one_minus_froof * gimp).mul_add(one_minus_fgper, acc);
-            *target = (1.0 - flake).mul_add(acc, flake * lake);
+            acc = fgper.contract(one_minus_froof * gper, acc);
+            acc = (one_minus_froof * gimp).contract(one_minus_fgper, acc);
+            *target = (1.0 - flake).contract(acc, flake * lake);
         }
     }
 }

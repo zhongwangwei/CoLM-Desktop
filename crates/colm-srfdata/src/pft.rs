@@ -1,6 +1,7 @@
 //! PFT-fraction aggregation from `Aggregation_PercentagesPFT.F90`.
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 use rayon::prelude::*;
 
 use crate::{
@@ -174,8 +175,8 @@ pub fn build_crop_land_patches(
         for &cell in patches.raw_cells(patch) {
             let area = area(land_area, cell, patch)?;
             let crop = crop_percent[cell] / 100.0;
-            shares[0] = (1.0 - crop).mul_add(area, shares[0]);
-            shares[1] = crop.mul_add(area, shares[1]);
+            shares[0] = (1.0 - crop).contract(area, shares[0]);
+            shares[1] = crop.contract(area, shares[1]);
         }
         let total = shares.iter().sum::<f64>();
         ensure!(
@@ -205,7 +206,7 @@ pub fn build_crop_land_patches(
             let area = area(land_area, cell, parent.source)?;
             for class in 0..cft_class_count {
                 shares[class] =
-                    cft_percent[class * land_area.len() + cell].mul_add(area, shares[class]);
+                    cft_percent[class * land_area.len() + cell].contract(area, shares[class]);
             }
         }
         let total = shares.iter().sum::<f64>();
@@ -502,9 +503,9 @@ fn normalized_patch_pft_fractions(
         for class in 0..pft_class_count {
             let value = raw_percent[class * land_area.len() + cell];
             sum += value;
-            weighted[class] = value.mul_add(area, weighted[class]);
+            weighted[class] = value.contract(area, weighted[class]);
         }
-        total = area.mul_add(sum, total);
+        total = area.contract(sum, total);
     }
     if total > 0.0 {
         for value in &mut weighted {
@@ -654,9 +655,9 @@ pub fn aggregate_pft_height(
                     for &cell in cells {
                         let percent = percentage(input, class, cell, patch)?.max(0.0);
                         let area = area(input.land_area, cell, patch)?;
-                        weighted_area = percent.mul_add(area, weighted_area);
+                        weighted_area = percent.contract(area, weighted_area);
                         weighted_height =
-                            (raw_height_m[cell] * percent).mul_add(area, weighted_height);
+                            (raw_height_m[cell] * percent).contract(area, weighted_height);
                     }
                     output[pft] = if weighted_area > 0.0 {
                         weighted_height / weighted_area
@@ -742,8 +743,8 @@ fn aggregate_pft_canopy_dimension(
                         if value > 0.0 && value < 1000.0 {
                             let percent = percentage(input, class, cell, patch)?.max(0.0);
                             let area = area(input.land_area, cell, patch)?;
-                            weighted_area = percent.mul_add(area, weighted_area);
-                            weighted_value = (value * percent).mul_add(area, weighted_value);
+                            weighted_area = percent.contract(area, weighted_area);
+                            weighted_value = (value * percent).contract(area, weighted_value);
                         }
                     }
                     output[pft] = if weighted_area > 0.0 {
@@ -774,7 +775,7 @@ fn patch_area_weighted_height(
             format!("PFT forest-height patch {patch} references raw height cell {cell}")
         })?;
         patch_area += area;
-        patch_height = height.mul_add(area, patch_height);
+        patch_height = height.contract(area, patch_height);
     }
     ensure!(
         patch_area > 0.0 && patch_area.is_finite(),
@@ -836,9 +837,9 @@ pub fn aggregate_pft_index(
                         for &cell in patches.raw_cells(patch) {
                             let percent = percentage_index(input, class, cell, patch)?.max(0.0);
                             let area = area(input.land_area, cell, patch)?;
-                            weighted_area = percent.mul_add(area, weighted_area);
+                            weighted_area = percent.contract(area, weighted_area);
                             weighted_index = (index(input, class, cell, patch)? * percent)
-                                .mul_add(area, weighted_index);
+                                .contract(area, weighted_index);
                         }
                         if weighted_area > 0.0 {
                             *slot = weighted_index / weighted_area;
@@ -995,9 +996,9 @@ fn aggregate_patch_index(
         for class in 0..input.raw_class_count {
             let percent = percentage_index(input, class, cell, patch)?.max(0.0);
             percent_sum += percent;
-            value_sum = index(input, class, cell, patch)?.mul_add(percent, value_sum);
+            value_sum = index(input, class, cell, patch)?.contract(percent, value_sum);
         }
-        index_sum = (value_sum / percent_sum.max(1.0e-6)).mul_add(area, index_sum);
+        index_sum = (value_sum / percent_sum.max(1.0e-6)).contract(area, index_sum);
         area_sum += area;
     }
     ensure!(
@@ -1036,7 +1037,7 @@ fn aggregate_natural_patch(
             } else {
                 percentage(input, class, cell, patch)?.max(0.0)
             };
-            output[pft] = (value / total).mul_add(area, output[pft]);
+            output[pft] = (value / total).contract(area, output[pft]);
         }
     }
     ensure!(

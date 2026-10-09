@@ -2,6 +2,7 @@
 //! patch 状态的往返、basin history（`MOD_Catch_Hist`）以及续跑（`WRITE_CatchTimeVariables`，
 //! 和非湖 patch 上被动态湖调整改过的 `dz_lake`/`t_lake`/`lake_icefrc`）。
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
@@ -683,7 +684,7 @@ impl CatchmentRuntime {
             hrus.iter()
                 .map(|&h| {
                     topology.hru_patch[h].clone().fold(0.0, |acc, p| {
-                        value(p).mul_add(topology.hru_patch_frc[p], acc)
+                        value(p).contract(topology.hru_patch_frc[p], acc)
                     })
                 })
                 .collect()

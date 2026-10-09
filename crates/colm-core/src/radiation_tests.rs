@@ -98,6 +98,7 @@ fn from_ground_helpers_preserve_existing_lct_and_pft_snow_cold_start() {
 
 #[test]
 fn canopy_thermal_gap_matches_original_pearl_river_patches() {
+    colm_numeric::skip_unless_fused!();
     assert_eq!(two_stream_zmu(1.0e-6, 0.5), 1.0 / 0.877);
     assert_eq!(two_stream_zmu(0.5, 1.0e-6), 1.0);
     // Linked original MOD_Albedo.o, -O2 -fdefault-real-8; classes 13 and 9.
@@ -175,6 +176,7 @@ fn canopy_thermal_gap_matches_original_pearl_river_patches() {
 
 #[test]
 fn lct_two_stream_matches_all_original_pearl_river_outputs() {
+    colm_numeric::skip_unless_fused!();
     // Original ebe6de9 MOD_Albedo twostream, -O2 -fdefault-real-8.
     // Stored LCT patches e110_n25:826, e110_n20:27/149/1075/1087, e105_n20:1504.
     // Patches 27/149 use the original linked inputs exactly; the actual frozen

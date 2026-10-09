@@ -6,6 +6,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 use rayon::prelude::*;
 
 use crate::{
@@ -444,8 +445,8 @@ impl VgmProblem {
                 let theta = (1.0 + (input.alpha[cell] * pressure).lpow(input.n[cell]))
                     .lpow(1.0 / input.n[cell] - 1.0);
                 // The original array expression contracts this final product.
-                let observed =
-                    (input.theta_s[cell] - input.theta_r[cell]).mul_add(theta, input.theta_r[cell]);
+                let observed = (input.theta_s[cell] - input.theta_r[cell])
+                    .contract(theta, input.theta_r[cell]);
                 let observed_k = input.k_s[cell]
                     * theta.lpow(input.l[cell])
                     * (1.0
@@ -474,14 +475,14 @@ impl LeastSquaresProblem for VgmProblem {
             // Upstream adds two independently accumulated SUMs.
             let mut retention = 0.0;
             let mut conductivity = 0.0;
-            let fitted = (self.phi - x[0]).mul_add(
+            let fitted = (self.phi - x[0]).contract(
                 (1.0 + (x[1] * pressure).lpow(x[2])).lpow(1.0 / x[2] - 1.0),
                 x[0],
             );
             let base = 1.0 + (x[1] * pressure).lpow(x[2]);
             let term = 1.0 - (1.0 - 1.0 / base).lpow(1.0 - 1.0 / x[2]);
             let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
-                .mul_add(base.log10(), x[3].log10())
+                .contract(base.log10(), x[3].log10())
                 + term.powi(2).log10();
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
@@ -489,8 +490,8 @@ impl LeastSquaresProblem for VgmProblem {
                 let theta_residual = (fitted - observed) / self.phi;
                 let conductivity_residual =
                     (fitted_log - observed_log_k) / self.conductivity.log10();
-                retention = theta_residual.mul_add(theta_residual, retention);
-                conductivity = conductivity_residual.mul_add(conductivity_residual, conductivity);
+                retention = theta_residual.contract(theta_residual, retention);
+                conductivity = conductivity_residual.contract(conductivity_residual, conductivity);
             }
             output[index] = retention + conductivity;
         }
@@ -514,13 +515,13 @@ impl LeastSquaresProblem for VgmProblem {
             let q_alpha_power = base.lpow(1.0 / x[2] - 2.0);
             let q_n_factor =
                 (1.0 - x[2]) * z_to_n * z.ln() / (x[2] * base) - base.ln() / x[2].powi(2);
-            let fitted_theta = (self.phi - x[0]).mul_add(q, x[0]);
+            let fitted_theta = (self.phi - x[0]).contract(q, x[0]);
             let u = 1.0 - 1.0 / base;
             let power = 1.0 - 1.0 / x[2];
             let u_power = u.lpow(power);
             let term = 1.0 - u_power;
             let fitted_log = ((1.0 / x[2] - 1.0) * self.l_patch)
-                .mul_add(base.log10(), x[3].log10())
+                .contract(base.log10(), x[3].log10())
                 + term.powi(2).log10();
             let log_alpha = self.l_patch * (1.0 - x[2]) * alpha_power * pressure_power
                 / (base * std::f64::consts::LN_10)
@@ -535,7 +536,7 @@ impl LeastSquaresProblem for VgmProblem {
                 + (1.0 / x[2] - 1.0) * self.l_patch * z_to_n * z.log10() / base;
             let log_n_product = 2.0 * u_power / term;
             let log_n_inner = u.log10() / x[2].powi(2) + power * z.log10() / base;
-            let log_n = log_n_product.mul_add(-log_n_inner, log_n_leading);
+            let log_n = log_n_product.contract(-log_n_inner, log_n_leading);
             let mut retention = [0.0; 3];
             let mut conductivity = [0.0; 3];
             for &[observed_theta, observed_log_k] in
@@ -549,9 +550,9 @@ impl LeastSquaresProblem for VgmProblem {
                     * (1.0 - x[2])
                     * q_alpha_power
                     * alpha_power;
-                retention[1] = alpha_derivative_prefix.mul_add(pressure_power, retention[1]);
+                retention[1] = alpha_derivative_prefix.contract(pressure_power, retention[1]);
                 let n_derivative_prefix = 2.0 * theta_residual / self.phi * (self.phi - x[0]) * q;
-                retention[2] = n_derivative_prefix.mul_add(q_n_factor, retention[2]);
+                retention[2] = n_derivative_prefix.contract(q_n_factor, retention[2]);
                 conductivity[0] += 2.0 * conductivity_residual * log_alpha / log_conductivity;
                 conductivity[1] += 2.0 * conductivity_residual * log_n / log_conductivity;
                 conductivity[2] += 2.0 * conductivity_residual
@@ -587,7 +588,7 @@ impl CampbellProblem {
             for cell in 0..cells {
                 let ratio = -pressure / input.psi_s[cell];
                 let observed = ratio.lpow(-input.lambda[cell]) * input.theta_s[cell];
-                let observed_k_exponent = (-3.0_f64).mul_add(input.lambda[cell], -2.0);
+                let observed_k_exponent = (-3.0_f64).contract(input.lambda[cell], -2.0);
                 let observed_k = ratio.lpow(observed_k_exponent) * input.k_s[cell];
                 samples.push([observed, observed_k.log10()]);
             }
@@ -612,16 +613,16 @@ impl LeastSquaresProblem for CampbellProblem {
             let mut conductivity = 0.0;
             let ratio = -pressure / x[0];
             let fitted = ratio.lpow(-x[1]) * self.phi;
-            let fitted_log_slope = (-3.0_f64).mul_add(x[1], -2.0);
-            let fitted_log = ratio.log10().mul_add(fitted_log_slope, x[2].log10());
+            let fitted_log_slope = (-3.0_f64).contract(x[1], -2.0);
+            let fitted_log = ratio.log10().contract(fitted_log_slope, x[2].log10());
             for &[observed, observed_log_k] in
                 &self.samples[index * self.cells..(index + 1) * self.cells]
             {
                 let theta_residual = (fitted - observed) / self.phi;
                 let conductivity_residual =
                     (fitted_log - observed_log_k) / self.conductivity.log10();
-                retention = theta_residual.mul_add(theta_residual, retention);
-                conductivity = conductivity_residual.mul_add(conductivity_residual, conductivity);
+                retention = theta_residual.contract(theta_residual, retention);
+                conductivity = conductivity_residual.contract(conductivity_residual, conductivity);
             }
             output[index] = retention + conductivity;
         }
@@ -637,9 +638,9 @@ impl LeastSquaresProblem for CampbellProblem {
             let ratio = -pressure / x[0];
             let fitted_theta = ratio.lpow(-x[1]) * self.phi;
             let log_ratio = ratio.log10();
-            let fitted_log_slope = (-3.0_f64).mul_add(x[1], -2.0);
-            let fitted_log = log_ratio.mul_add(fitted_log_slope, x[2].log10());
-            let conductivity_psi_slope = 3.0_f64.mul_add(x[1], 2.0);
+            let fitted_log_slope = (-3.0_f64).contract(x[1], -2.0);
+            let fitted_log = log_ratio.contract(fitted_log_slope, x[2].log10());
+            let conductivity_psi_slope = 3.0_f64.contract(x[1], 2.0);
             let theta = ratio.lpow(-x[1]);
             let mut retention = [0.0; 2];
             let mut conductivity = [0.0; 3];
@@ -650,7 +651,7 @@ impl LeastSquaresProblem for CampbellProblem {
                 let conductivity_residual = (fitted_log - observed_log_k) / log_conductivity;
                 retention[0] += 2.0 * theta_residual * x[1] * theta / x[0];
                 let lambda_retention_prefix = 2.0 * theta_residual * theta;
-                retention[1] = lambda_retention_prefix.mul_add(-ratio.ln(), retention[1]);
+                retention[1] = lambda_retention_prefix.contract(-ratio.ln(), retention[1]);
                 conductivity[0] += 2.0 * conductivity_residual * conductivity_psi_slope
                     / (x[0] * std::f64::consts::LN_10)
                     / log_conductivity;
@@ -736,7 +737,7 @@ fn statistic(values: &[f64], cells: &[usize], area: &[f64], method: SoilStatisti
                 // The production Fortran SUM contracts this weighted product.
                 // One ULP in porosity can change the subsequent LM trajectory.
                 .fold(0.0, |sum, (value, cell)| {
-                    value.mul_add(area[*cell] / total, sum)
+                    value.contract(area[*cell] / total, sum)
                 })
         }
         SoilStatistic::GeometricMean => {

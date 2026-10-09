@@ -12,6 +12,7 @@
 //! `VOLATILE_ATTRIBUTES` 里（每次运行都不同）；写一个非确定值进产物只会让
 //! 逐字节比较多一处噪声，没有消费者需要它。
 
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -200,8 +201,8 @@ impl HistoryVector {
                     .fold((0.0, 0.0), |(t, w), p| {
                         let (mass, water) = pair(p);
                         (
-                            self.subfrc[p].mul_add(mass, t),
-                            self.subfrc[p].mul_add(water, w),
+                            self.subfrc[p].contract(mass, t),
+                            self.subfrc[p].contract(water, w),
                         )
                     })
             })
@@ -231,7 +232,7 @@ impl HistoryVector {
                         acc += v;
                     } else {
                         sumwt += self.subfrc[p];
-                        acc = self.subfrc[p].mul_add(v, acc);
+                        acc = self.subfrc[p].contract(v, acc);
                     }
                 }
                 match (any, total) {

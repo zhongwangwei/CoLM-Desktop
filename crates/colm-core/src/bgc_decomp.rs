@@ -10,6 +10,7 @@
 use crate::bgc_driver::{BgcPhysics, BgcSwitches};
 use crate::bgc_state::{BgcDims, BgcPatchTimeInvariants, BgcPatchTimeVariables, BgcState};
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `catanf(15)/catanf(30)`：两个都是常数，gfortran 在编译期折成这个双精度数。
 const CATANF_RATIO: f64 = 0.547_063_348_006_363_4;
@@ -142,7 +143,7 @@ pub fn soil_biogeochem_potential(s: &mut BgcState) {
     for k in 0..ntrans {
         for j in 0..nl {
             let t = j + nl * k;
-            f.phr_vr[j] = inv.rf_decomp[t].mul_add(f.p_decomp_cpool_loss[t], f.phr_vr[j]);
+            f.phr_vr[j] = inv.rf_decomp[t].contract(f.p_decomp_cpool_loss[t], f.phr_vr[j]);
         }
     }
 }
@@ -226,7 +227,7 @@ pub fn soil_biogeochem_decomp(s: &mut BgcState, p: &BgcPhysics, switches: BgcSwi
         }
     }
     for j in 0..nl {
-        f.net_nmin[0] = f.net_nmin_vr[j].mul_add(p.dz_soi[j], f.net_nmin[0]);
-        f.gross_nmin[0] = f.gross_nmin_vr[j].mul_add(p.dz_soi[j], f.gross_nmin[0]);
+        f.net_nmin[0] = f.net_nmin_vr[j].contract(p.dz_soi[j], f.net_nmin[0]);
+        f.gross_nmin[0] = f.gross_nmin_vr[j].contract(p.dz_soi[j], f.gross_nmin[0]);
     }
 }

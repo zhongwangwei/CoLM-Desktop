@@ -8,6 +8,7 @@ use colm_core::{LibmPow, SoilHydraulicModel};
 use colm_init::catch_network::{
     CatchTopology, ElementNeighbour, RiverLakeNetwork, SubsurfaceNetwork,
 };
+use colm_numeric::Contract;
 
 const DENH2O: f64 = 1000.0;
 const DENICE: f64 = 917.0;
@@ -82,7 +83,7 @@ fn bdamp_of(slope: f64) -> f64 {
         4.8
     } else {
         // `120. / (1 + 150.*slope)`：`120 / FMA (slope, 150, 1)`（`:384`）
-        120.0 / slope.mul_add(150.0, 1.0)
+        120.0 / slope.contract(150.0, 1.0)
     }
 }
 
@@ -143,7 +144,7 @@ pub fn lateral_fluxes(
                     let mut val = 0.0;
                     for l in 0..nl {
                         // `FMS (porsl, dz, wice/917)`
-                        val += s.porsl[l].mul_add(params.dz_soi[l], -(w.wice[l] / DENICE));
+                        val += s.porsl[l].contract(params.dz_soi[l], -(w.wice[l] / DENICE));
                     }
                     let dzsum = params.dz_soi.iter().fold(0.0, |acc, d| acc + d);
                     theta_s_h += (frc(p) * val) / dzsum;
@@ -163,12 +164,12 @@ pub fn lateral_fluxes(
                         let mut val = 0.0;
                         for l in 0..nl {
                             // `FMA (dz, porsl, -(wliq/1000)) - wice/917`
-                            val += params.dz_soi[l].mul_add(s.porsl[l], -(w.wliq[l] / DENH2O))
+                            val += params.dz_soi[l].contract(s.porsl[l], -(w.wliq[l] / DENH2O))
                                 - w.wice[l] / DENICE;
                         }
-                        air_h = frc(p).mul_add(val - w.wa / 1.0e3, air_h);
+                        air_h = frc(p).contract(val - w.wa / 1.0e3, air_h);
                         air_h = air_h.max(0.0);
-                        zwt_h[i] = frc(p).mul_add(w.zwt, zwt_h[i]);
+                        zwt_h[i] = frc(p).contract(w.zwt, zwt_h[i]);
                         sumwt += frc(p);
                     }
                 }
@@ -256,7 +257,7 @@ pub fn lateral_fluxes(
                 ((a / theta_a_h[j]) / delp) / hrus.agwt[j]
             };
             // `:411` `((Kl_fc * (flen * (zup - zdn))) / FMA (dt, cb, FMA (ca, dt, 1))) / delp`
-            let denom = dt.mul_add(cb, ca.mul_add(dt, 1.0));
+            let denom = dt.contract(cb, ca.contract(dt, 1.0));
             xsubs_fc[i] = ((kl_fc * (hrus.flen[i] * (zup - zdn))) / denom) / delp;
             xsubs_h[i] += xsubs_fc[i] / hrus.agwt[i];
             if j_is_river {
@@ -283,7 +284,7 @@ pub fn lateral_fluxes(
             out.xsubs_hru[hrus.ihru[i]] = xsubs_h[i];
             for p in topology.hru_patch[hrus.ihru[i]].clone() {
                 if soilish(p) || hrus.indx[i] == 0 {
-                    out.xwsub[p] = xsubs_h[i].mul_add(1.0e3, out.xwsub[p]);
+                    out.xwsub[p] = xsubs_h[i].contract(1.0e3, out.xwsub[p]);
                 }
             }
             if hrus.indx[0] == 0 {
@@ -310,7 +311,7 @@ pub fn lateral_fluxes(
                     .fold(0.0, |acc, p| acc + topology.hru_patch_frc[p]);
                 if sumwt > 0.0 {
                     let zwt_mean = patches.clone().filter(|&p| soilish(p)).fold(0.0, |acc, p| {
-                        water[p].zwt.mul_add(topology.hru_patch_frc[p], acc)
+                        water[p].zwt.contract(topology.hru_patch_frc[p], acc)
                     }) / sumwt;
                     for p in patches {
                         if soilish(p) {
@@ -318,7 +319,7 @@ pub fn lateral_fluxes(
                                 * std::f64::consts::PI)
                                 / hrus.agwt[i];
                             out.xsubs_pch[p] = -t;
-                            out.xwsub[p] = (-t).mul_add(1.0e3, out.xwsub[p]);
+                            out.xwsub[p] = (-t).contract(1.0e3, out.xwsub[p]);
                         }
                     }
                 }
@@ -330,7 +331,7 @@ pub fn lateral_fluxes(
             let weighted = |v: &[f64]| {
                 v.iter()
                     .zip(&hrus.agwt)
-                    .fold(0.0, |acc, (x, a)| x.mul_add(*a, acc))
+                    .fold(0.0, |acc, (x, a)| x.contract(*a, acc))
                     / sumarea
             };
             theta_a_elm[ie] = weighted(&theta_a_h);
@@ -342,7 +343,7 @@ pub fn lateral_fluxes(
     let wdsrf_elm: Vec<f64> = (0..numelm)
         .map(|ie| {
             topology.elm_hru[ie].clone().fold(0.0, |acc, h| {
-                wdsrf_hru[h].mul_add(topology.elm_hru_frc[h], acc)
+                wdsrf_hru[h].contract(topology.elm_hru_frc[h], acc)
             })
         })
         .collect();
@@ -428,7 +429,7 @@ pub fn lateral_fluxes(
             let ca = ((a / theta_up) / delp) / area_up;
             let cb = ((a / theta_dn) / delp) / area_dn;
             // `:604` `((((zup - zdn) * lenbdr) * Kl_fc) / FMA (dt, cb, FMA (ca, dt, 1))) / delp`
-            let denom = dt.mul_add(cb, ca.mul_add(dt, 1.0));
+            let denom = dt.contract(cb, ca.contract(dt, 1.0));
             let mut xsubs_nb = ((((zsubs_up - zsubs_dn) * lenbdr) * kl_fc) / denom) / delp;
             if !iam_lake {
                 xsubs_nb /= hrus.agwt.iter().fold(0.0, |acc, a| acc + a);
@@ -439,14 +440,14 @@ pub fn lateral_fluxes(
             if nb_is_lake {
                 for p in topology.elm_patch[ie].clone() {
                     if soilish(p) {
-                        out.rsub[p] = xsubs_nb.mul_add(1.0e3, out.rsub[p]);
+                        out.rsub[p] = xsubs_nb.contract(1.0e3, out.rsub[p]);
                     }
                 }
             }
         }
         for p in topology.elm_patch[ie].clone() {
             if iam_lake || soilish(p) {
-                out.xwsub[p] = out.xsubs_elm[ie].mul_add(1.0e3, out.xwsub[p]);
+                out.xwsub[p] = out.xsubs_elm[ie].contract(1.0e3, out.xwsub[p]);
             }
         }
     }
@@ -484,7 +485,7 @@ pub fn exchange(
                 // `:687-689`
                 let vl = ((water.wliq[l] / DENH2O) * 1000.0) / sp_dz[l];
                 vol_liq[l] = eff[l].min(vl.max(0.0));
-                wresi[l] = (-((sp_dz[l] * vol_liq[l]) / 1000.0)).mul_add(DENH2O, water.wliq[l]);
+                wresi[l] = (-((sp_dz[l] * vol_liq[l]) / 1000.0)).contract(DENH2O, water.wliq[l]);
             } else {
                 vol_liq[l] = eff[l];
                 wresi[l] = 0.0;
@@ -510,8 +511,8 @@ pub fn exchange(
                 }
                 vol_liq[k] = vol_liq[k].min(eff[k]).max(0.0);
                 // `:718-719`
-                let stored = vol_liq[k].mul_add(zwtmm - sp_zi[k], eff[k] * (sp_zi[k + 1] - zwtmm));
-                wresi[k] = (-(stored / 1000.0)).mul_add(DENH2O, water.wliq[k]);
+                let stored = vol_liq[k].contract(zwtmm - sp_zi[k], eff[k] * (sp_zi[k + 1] - zwtmm));
+                wresi[k] = (-(stored / 1000.0)).contract(DENH2O, water.wliq[k]);
             }
         }
         let state = colm_core::exchange_soil_water_with_aquifer(
@@ -540,7 +541,7 @@ pub fn exchange(
                     if zwtmm >= sp_zi[l] {
                         // `:733-734`
                         let stored =
-                            vol_liq[l].mul_add(zwtmm - sp_zi[l], (sp_zi[l + 1] - zwtmm) * eff[l]);
+                            vol_liq[l].contract(zwtmm - sp_zi[l], (sp_zi[l + 1] - zwtmm) * eff[l]);
                         water.wliq[l] = (stored / 1000.0) * DENH2O;
                     } else {
                         water.wliq[l] = ((eff[l] * DENH2O) * sp_dz[l]) / 1000.0;
@@ -554,7 +555,7 @@ pub fn exchange(
         water.zwt = zwtmm / 1000.0;
     } else if soil.patchtype == 2 {
         // `:750` `FNMA (xwsub, dt, (wdsrf + wa) + wetwat)`
-        water.wetwat = (-xwsub).mul_add(dt, (water.wdsrf + water.wa) + water.wetwat);
+        water.wetwat = (-xwsub).contract(dt, (water.wdsrf + water.wa) + water.wetwat);
         if water.wetwat > params.wetwatmax {
             water.wdsrf = water.wetwat - params.wetwatmax;
             water.wetwat = params.wetwatmax;
@@ -569,7 +570,7 @@ pub fn exchange(
         }
     } else if soil.patchtype == 4 {
         // `:767` `FNMA (xwsub, dt, wa + wdsrf)`
-        water.wdsrf = (-xwsub).mul_add(dt, water.wa + water.wdsrf);
+        water.wdsrf = (-xwsub).contract(dt, water.wa + water.wdsrf);
         if water.wdsrf < 0.0 {
             water.wa = water.wdsrf;
             water.wdsrf = 0.0;

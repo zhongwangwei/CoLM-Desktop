@@ -263,6 +263,7 @@ impl FortranTopmodelCase {
 
 #[test]
 fn topmodel_matches_vendor_fortran_bitwise() {
+    colm_numeric::skip_unless_fused!();
     let cases = fixture_cases();
     let mut per_method = [0usize; 3];
     let mut bad = Vec::new();

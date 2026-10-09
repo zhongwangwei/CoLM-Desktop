@@ -6,6 +6,7 @@
 //! kernel; the inverse is `colm_lapack::matrix_inverse` (upstream `MatrixInverse`).
 
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::urban_radiation::{tree_shadow, wall_shadow_diffuse, wall_shadow_direct};
 
@@ -281,7 +282,7 @@ fn vegetated_transfer(
     wall_to_tree = wall_tree_wall + wall_tree_sky + wall_tree_ground;
 
     // `:500-506` `F_ = F - Fv + Fv*Td`：`.FMA (Fv, Td, F - Fv)`
-    let through = |total: f64, blocked: f64| blocked.mul_add(transmission, total - blocked);
+    let through = |total: f64, blocked: f64| blocked.contract(transmission, total - blocked);
     let sky_to_wall = through(base.diffuse_wall_shadow, sky.wall);
     let sky_to_ground = through(base.sky_to_ground, sky.ground);
     let ground_to_wall = through(base.ground_to_wall, ground.wall);
@@ -373,9 +374,9 @@ const COS_PI_OVER_3: f64 = f64::from_bits(0x3FE0_0000_0000_0001);
 /// `fwsun = 0.5*(Sw*fg+fb) / (4/PI*fb*HL*tan(theta) + fb)`（`:538`）：
 /// 分子 `.FMA (fg, Sw, fb)`，分母 `.FMA ((fb*(4/PI))*HL, tan, fb)`。
 fn sunlit_wall_fraction(input: UrbanLongwaveInput, base: &Base, shadow: f64) -> f64 {
-    let numerator = base.ground_fraction.mul_add(shadow, base.roof_fraction) * 0.5;
+    let numerator = base.ground_fraction.contract(shadow, base.roof_fraction) * 0.5;
     let slope = base.roof_fraction * (4.0 / std::f64::consts::PI) * input.building_height_to_length;
-    numerator / slope.mul_add(input.zenith_angle_radians.tan(), base.roof_fraction)
+    numerator / slope.contract(input.zenith_angle_radians.tan(), base.roof_fraction)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -435,7 +436,7 @@ fn tree_view(
     zenith_angle_radians: f64,
 ) -> TreeView {
     // `:426` `fv_ = fv - fv*Sw_`：`.FNMA (fv, Sw_, fv)`
-    let tree_fraction = (-cover_fraction).mul_add(partial_shadow, cover_fraction);
+    let tree_fraction = (-cover_fraction).contract(partial_shadow, cover_fraction);
     let shadow = tree_shadow(tree_fraction, zenith_angle_radians);
     let cover = (shadow / ground_fraction).min(1.0);
     let mut wall = (full_shadow - partial_shadow) * shadow;
@@ -533,7 +534,7 @@ fn build_transfer(
     ];
     let mut source = emitted;
     for i in 0..4 {
-        source[i] = reflectance[i].mul_add(incident[i], emitted[i]);
+        source[i] = reflectance[i].contract(incident[i], emitted[i]);
     }
     let temperature_derivative = [
         wall_derivative(wall_fraction[0], input.sunlit_wall_temperature_k),

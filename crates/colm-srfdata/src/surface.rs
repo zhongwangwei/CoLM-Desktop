@@ -11,6 +11,7 @@
 //! tested against the corresponding Fortran routines without a rawdata mount.
 
 use crate::LibmPow;
+use colm_numeric::Contract;
 use std::collections::BTreeMap;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -139,8 +140,8 @@ pub fn derive_topographic_wetness(
         let rank = mean_index + index + 1;
         let xx = -(value - mean_twi);
         let yy = ((1.0 - rank as f64 / count_f) / fsatmax).ln();
-        xx_yy_sum = xx.mul_add(yy, xx_yy_sum);
-        xx_squared_sum = xx.mul_add(xx, xx_squared_sum);
+        xx_yy_sum = xx.contract(yy, xx_yy_sum);
+        xx_squared_sum = xx.contract(xx, xx_squared_sum);
     }
     ensure!(
         xx_squared_sum > 0.0 && xx_squared_sum.is_finite(),
@@ -150,7 +151,7 @@ pub fn derive_topographic_wetness(
     let mut squares = 0.0f64;
     for value in &values {
         let d = value - mean_twi;
-        squares = d.mul_add(d, squares);
+        squares = d.contract(d, squares);
     }
     let sigma_twi = (squares / (count_f - 1.0)).sqrt();
     // 偏度不可用（`sigma <= 0` 或偏度不为正）时上游不改这三个量：patch 留着 `spval = -1e36`（夹紧后为
@@ -161,7 +162,7 @@ pub fn derive_topographic_wetness(
         let mut cubes = 0.0f64;
         for value in &values {
             let d = value - mean_twi;
-            cubes = (d * d).mul_add(d, cubes);
+            cubes = (d * d).contract(d, cubes);
         }
         // `real(npxl)/(real(npxl-1)*real(npxl-2))`：vendor 修掉了上游的 32 位整数溢出。
         let skew_twi = count_f / ((count_f - 1.0) * (count_f - 2.0)) * cubes
@@ -588,7 +589,7 @@ impl FlatPatches {
                     "vegetation-index patch {patch} has a non-finite value or invalid land area"
                 );
                 area_sum += area;
-                index_sum = index.mul_add(area, index_sum);
+                index_sum = index.contract(area, index_sum);
             }
             ensure!(
                 area_sum > 0.0 && area_sum.is_finite(),
@@ -892,7 +893,7 @@ impl FlatPatches {
                     "forest-height patch {patch} has a non-finite value or invalid land area"
                 );
                 area_sum += area;
-                height_sum = height.mul_add(area, height_sum);
+                height_sum = height.contract(area, height_sum);
             }
             ensure!(
                 area_sum > 0.0 && area_sum.is_finite(),
@@ -958,7 +959,7 @@ impl FlatPatches {
                 );
                 if field_value > 0.0 && field_value < 1000.0 {
                     area_sum += area;
-                    value_sum = field_value.mul_add(area, value_sum);
+                    value_sum = field_value.contract(area, value_sum);
                 }
             }
             if area_sum > 0.0 {
@@ -1085,7 +1086,7 @@ impl FlatPatches {
                 );
                 any_valid = true;
                 area_sum += area;
-                elevation_sum = height.mul_add(area, elevation_sum);
+                elevation_sum = height.contract(area, elevation_sum);
             }
             if !any_valid {
                 continue;
@@ -1109,9 +1110,9 @@ impl FlatPatches {
                     std.is_finite() && slope.is_finite(),
                     "topography patch {patch} contains a non-finite standard deviation or slope"
                 );
-                let variance = (height - mean).mul_add(height - mean, std * std);
-                variance_sum = variance.mul_add(area, variance_sum);
-                slope_sum = slope.mul_add(area, slope_sum);
+                let variance = (height - mean).contract(height - mean, std * std);
+                variance_sum = variance.contract(area, variance_sum);
+                slope_sum = slope.contract(area, slope_sum);
             }
             result.elevation[patch] = mean;
             result.elevation_std[patch] = (variance_sum / area_sum).sqrt();
@@ -1267,18 +1268,18 @@ fn regular_shadow_curve(lut: &[f64]) -> [f64; REGULAR_CURVE_PARAMETERS] {
             value
         };
         let y = (-y.ln()).ln();
-        xy_sum = x.mul_add(y, xy_sum);
+        xy_sum = x.contract(y, xy_sum);
         x_sum += x;
         y_sum += y;
-        x2_sum = x.mul_add(x, x2_sum);
+        x2_sum = x.contract(x, x2_sum);
     }
     // `n*x2_sum - x_sum*x_sum` 是 `.FMS (n, x2_sum, x_sum*x_sum)`；`a2` 的分子是 `.FNMA (x_sum, a1, y_sum)`。
-    let denominator = count.mul_add(x2_sum, -(x_sum * x_sum));
+    let denominator = count.contract(x2_sum, -(x_sum * x_sum));
     let (a1, a2) = if denominator == 0.0 {
         (0.0, 0.0)
     } else {
-        let a1 = count.mul_add(xy_sum, -(x_sum * y_sum)) / denominator;
-        (a1, (-x_sum).mul_add(a1, y_sum) / count)
+        let a1 = count.contract(xy_sum, -(x_sum * y_sum)) / denominator;
+        (a1, (-x_sum).contract(a1, y_sum) / count)
     };
     [regular_zenith_angle(index - 1), a1, a2]
 }
@@ -1333,7 +1334,7 @@ fn weighted_not_missing(
         let area = landarea[cell];
         any = true;
         area_sum += area;
-        value_sum = value.mul_add(area, value_sum);
+        value_sum = value.contract(area, value_sum);
     }
     Ok(if any {
         value_sum / area_sum

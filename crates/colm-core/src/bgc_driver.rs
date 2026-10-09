@@ -9,6 +9,7 @@
 //! 类别参数）。
 
 use anyhow::{bail, ensure, Context, Result};
+use colm_numeric::Contract;
 
 use crate::bgc_state::BgcState;
 use crate::bgc_trace::TraceRecord;
@@ -222,7 +223,7 @@ pub(crate) fn vectorized_dot(n: usize, term: impl Fn(usize) -> (f64, f64)) -> f6
     }
     for k in 2 * pairs..n {
         let (a, b) = term(k);
-        acc = a.mul_add(b, acc);
+        acc = a.contract(b, acc);
     }
     acc
 }

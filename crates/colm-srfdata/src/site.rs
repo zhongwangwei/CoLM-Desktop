@@ -6,6 +6,7 @@
 //!
 //! 每个补进去的变量都带一个 `source` 属性，写明它是量出来的还是假设的。
 
+use colm_numeric::Contract;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -2105,7 +2106,7 @@ pub fn append_single_point_topography_factors(
                 // `FNMA(pi/202, z-1, pi/2)`（与上游 sf_lut 逐位对过，未融合的写法 69/1616 处差 1 ULP），
                 // 三处 `0.5*pi - zenith_angle` 共用这一个值。
                 let altitude = (-(std::f64::consts::PI / (2.0 * ZENITHS as f64)))
-                    .mul_add(zenith as f64, std::f64::consts::PI * 0.5);
+                    .contract(zenith as f64, std::f64::consts::PI * 0.5);
                 lut[zenith * AZIMUTHS + azimuth] = if altitude < back {
                     0.0
                 } else if altitude > front {
@@ -2575,7 +2576,7 @@ fn add_colm2024_canopy_structure(
                     *scalar = values
                         .iter()
                         .zip(&fractions)
-                        .fold(0.0, |sum, (value, fraction)| value.mul_add(*fraction, sum));
+                        .fold(0.0, |sum, (value, fraction)| value.contract(*fraction, sum));
                 }
             }
             arrays

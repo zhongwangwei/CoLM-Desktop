@@ -8,6 +8,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     add_new_snow, compact_snow_layers, ground_fluxes, ground_temperature, intercept_canopy,
@@ -538,22 +539,22 @@ fn finish_energy_step(
                 .max(0.0)
                 .min(patch.depth_mm / time_step);
             let evaporation = fraction * local;
-            let depth_after = (-time_step).mul_add(local, patch.depth_mm).max(0.0);
+            let depth_after = (-time_step).contract(local, patch.depth_mm).max(0.0);
             let rest = 1.0 - fraction;
             let ratio = hvap / ground_latent_heat_j_kg;
             let sensible = flux.sensible_heat_w_m2;
             leaf.ground_sensible_heat_w_m2 =
-                sensible.mul_add(fraction, rest * leaf.ground_sensible_heat_w_m2);
+                sensible.contract(fraction, rest * leaf.ground_sensible_heat_w_m2);
             leaf.ground_evaporation_kg_m2_s =
-                evaporation.mul_add(ratio, rest * leaf.ground_evaporation_kg_m2_s);
+                evaporation.contract(ratio, rest * leaf.ground_evaporation_kg_m2_s);
             leaf.soil_sensible_heat_w_m2 =
-                sensible.mul_add(fraction, rest * leaf.soil_sensible_heat_w_m2);
+                sensible.contract(fraction, rest * leaf.soil_sensible_heat_w_m2);
             leaf.soil_evaporation_kg_m2_s =
-                evaporation.mul_add(ratio, rest * leaf.soil_evaporation_kg_m2_s);
+                evaporation.contract(ratio, rest * leaf.soil_evaporation_kg_m2_s);
             leaf.snow_sensible_heat_w_m2 =
-                sensible.mul_add(fraction, rest * leaf.snow_sensible_heat_w_m2);
+                sensible.contract(fraction, rest * leaf.snow_sensible_heat_w_m2);
             leaf.snow_evaporation_kg_m2_s =
-                evaporation.mul_add(ratio, rest * leaf.snow_evaporation_kg_m2_s);
+                evaporation.contract(ratio, rest * leaf.snow_evaporation_kg_m2_s);
             leaf.ground_flux_temperature_slope_w_m2_k *= rest;
             leaf.ground_latent_temperature_slope_kg_m2_s_k *= rest;
             leaf.ground_sensible_temperature_slope_w_m2_k *= rest;
@@ -604,14 +605,14 @@ fn finish_energy_step(
     let evaporation_slope = leaf.ground_latent_temperature_slope_kg_m2_s_k;
     let evaporation_corrected = |value: f64| {
         if input.river_lake_flow_build {
-            evaporation_slope.mul_add(ground_temperature_change, value)
+            evaporation_slope.contract(ground_temperature_change, value)
         } else {
             value + evaporation_change
         }
     };
     // `:1355-1359`：漫滩时把按 `hvap/htvp` 折算进去的那份蒸发先扣回来，`FNMA(ratio, fevpg_fld, ·)`。
     let flood_removed = |value: f64| match flood {
-        Some(flood) => (-(hvap / ground_latent_heat_j_kg)).mul_add(flood.evaporation_mm_s, value),
+        Some(flood) => (-(hvap / ground_latent_heat_j_kg)).contract(flood.evaporation_mm_s, value),
         None => value,
     };
     let corrected_soil_evaporation_kg_m2_s =
@@ -664,7 +665,7 @@ fn finish_energy_step(
         // `FMA(htvp, egidif, fseng)`。`thermal_water` 里存的是**已经乘好的**
         // `sensible_heat_correction_w_m2`，那样再相加就少一次融合，所以这里
         // 用它的原始因子 `water_limited_evaporation_kg_m2_s`（就是 `egidif`）自己收。
-        corrected_ground_sensible_heat_w_m2 = ground_latent_heat_j_kg.mul_add(
+        corrected_ground_sensible_heat_w_m2 = ground_latent_heat_j_kg.contract(
             water.water_limited_evaporation_kg_m2_s,
             corrected_ground_sensible_heat_w_m2,
         );
@@ -735,10 +736,10 @@ fn bare_lct_canopy(
     let stefan = crate::leaf_temperature::STEFAN_BOLTZMANN;
     let upward_longwave_w_m2 = if input.ground_temperature.use_split_soil_snow {
         let fsno = ground.snow_cover_fraction;
-        let snow = (fsno * emissivity * stefan).mul_add(fourth(ground.snow_temperature_k), base);
-        ((1.0 - fsno) * emissivity * stefan).mul_add(fourth(ground.soil_temperature_k), snow)
+        let snow = (fsno * emissivity * stefan).contract(fourth(ground.snow_temperature_k), base);
+        ((1.0 - fsno) * emissivity * stefan).contract(fourth(ground.soil_temperature_k), snow)
     } else {
-        (emissivity * stefan).mul_add(fourth(ground.ground_temperature_k), base)
+        (emissivity * stefan).contract(fourth(ground.ground_temperature_k), base)
     };
     // `tleaf = forc_t`，叶面水全部清零；PHS 下 `vegwp = -2.5e4`（`:765-783`）。
     leaf.leaf_temperature_k = input.forcing.air_temperature_k;
@@ -1820,7 +1821,7 @@ fn ground_flux_input(
         // `moninobukini`，是干窗第 0 步分叉的头号嫌疑）。
         reference_wind_m_s: forcing
             .eastward_wind_m_s
-            .mul_add(
+            .contract(
                 forcing.eastward_wind_m_s,
                 forcing.northward_wind_m_s * forcing.northward_wind_m_s,
             )
@@ -1844,7 +1845,7 @@ fn ground_flux_input(
         // 内层融合。此前这个模块没有 dump、按平铺保留；不融合时 AT-Neu 2010-12-12
         // 的 `thv` 差 1 ulp，经 `moninobukini` 的 `obu` 传到整条叶温链（第 406 轮）。
         virtual_potential_temperature_k: potential_temperature_k
-            * forcing.specific_humidity.mul_add(0.61, 1.0),
+            * forcing.specific_humidity.contract(0.61, 1.0),
         soil_surface_resistance_s_m,
         ..input
     }
@@ -1978,7 +1979,7 @@ fn current_ground_temperature(
     );
     Ok(if input.use_split_soil_snow {
         // GIMPLE（`MOD_Thermal.F90:1339` 的 split 支）：`.FMA (fsno, t_soisno(lb), (1-fsno)*t_soisno(1))`。
-        input.snow_cover_fraction.mul_add(
+        input.snow_cover_fraction.contract(
             state.temperature_k[0],
             (1.0 - input.snow_cover_fraction) * state.temperature_k[input.snow_layers],
         )
@@ -1992,7 +1993,7 @@ fn surface_temperatures(input: GroundTemperatureInput<'_>) -> (f64, f64, f64) {
     let soil_temperature_k = input.temperature_k[input.snow_layers];
     let ground_temperature_k = if input.use_split_soil_snow {
         // GIMPLE（`MOD_Thermal.F90:572`）：`.FMA (t_snow, fsno, t_soil*(1-fsno))`。
-        snow_temperature_k.mul_add(
+        snow_temperature_k.contract(
             input.snow_cover_fraction,
             soil_temperature_k * (1.0 - input.snow_cover_fraction),
         )

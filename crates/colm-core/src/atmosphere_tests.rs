@@ -129,6 +129,7 @@ fn saturation_clamps_temperature_like_qsadv_and_refuses_invalid_inputs() {
 
 #[test]
 fn orbital_geometry_matches_current_fortran() {
+    colm_numeric::skip_unless_fused!();
     // Original MOD_OrbCoszen, -O2 -fdefault-real-8: Pearl River cold-start inputs.
     for (longitude, latitude, expected) in [
         (

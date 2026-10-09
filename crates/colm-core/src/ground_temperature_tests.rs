@@ -75,6 +75,7 @@ fn input() -> GroundTemperatureInput<'static> {
 
 #[test]
 fn equilibrium_soil_column_stays_at_its_fortran_surface_balance() {
+    colm_numeric::skip_unless_fused!();
     let state = ground_temperature(input()).unwrap();
     assert!(state
         .temperature_k

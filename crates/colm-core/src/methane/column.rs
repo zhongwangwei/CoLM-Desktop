@@ -5,6 +5,7 @@
 //! 湖（`patchtype == 4` 且 `allowlakeprod`）未移植，入口处报错。
 
 use anyhow::{bail, ensure, Result};
+use colm_numeric::Contract;
 
 use super::config::{MethaneConfig, RGASM, SECSPDAY};
 use super::physics::{
@@ -430,7 +431,7 @@ pub fn methane(
     let dfsat = finundated - fsat_bef;
     comp.finundated_lag = if redoxlags > 0.0 {
         let e = (-(deltim / redoxlags)).exp();
-        comp.finundated_lag.mul_add(e, (1.0 - e) * finundated)
+        comp.finundated_lag.contract(e, (1.0 - e) * finundated)
     } else {
         finundated
     };
@@ -438,19 +439,19 @@ pub fn methane(
         for k in 0..NL_SOIL {
             if dfsat > 0.0 {
                 comp.conc_methane_sat[k] = comp.conc_methane_sat[k]
-                    .mul_add(fsat_bef, dfsat * comp.conc_methane_unsat[k])
+                    .contract(fsat_bef, dfsat * comp.conc_methane_unsat[k])
                     / finundated;
                 comp.conc_o2_sat[k] = comp.conc_o2_sat[k]
-                    .mul_add(fsat_bef, dfsat * comp.conc_o2_unsat[k])
+                    .contract(fsat_bef, dfsat * comp.conc_o2_unsat[k])
                     / finundated;
             } else if dfsat < 0.0 && finundated < 1.0 {
                 let keep = 1.0 - fsat_bef;
-                comp.conc_methane_unsat[k] = keep.mul_add(
+                comp.conc_methane_unsat[k] = keep.contract(
                     comp.conc_methane_unsat[k],
                     -(dfsat * comp.conc_methane_sat[k]),
                 ) / (1.0 - finundated);
                 comp.conc_o2_unsat[k] = keep
-                    .mul_add(comp.conc_o2_unsat[k], -(dfsat * comp.conc_o2_sat[k]))
+                    .contract(comp.conc_o2_unsat[k], -(dfsat * comp.conc_o2_sat[k]))
                     / (1.0 - finundated);
             }
         }
@@ -478,7 +479,7 @@ pub fn methane(
             .iter()
             .zip(lake.lake_icefrac)
             .fold(0.0f64, |acc, (&d, &ice)| {
-                unfrozen(ice).mul_add(d.max(0.0), acc)
+                unfrozen(ice).contract(d.max(0.0), acc)
             });
         if total <= 1.0e-12 && lake.lakedepth > 0.0 {
             total = lake.lakedepth;
@@ -498,10 +499,10 @@ pub fn methane(
             state.frozen_o2 = 0.0;
         } else if prev.is_nan() || prev.abs() >= 0.5 * SPVAL.abs() {
             let frac = 1.0 - current;
-            state.frozen_ch4 = w.ch4.mul_add(frac, state.frozen_ch4);
-            w.ch4 = (-w.ch4).mul_add(frac, w.ch4);
-            state.frozen_o2 = w.o2.mul_add(frac, state.frozen_o2);
-            w.o2 = (-w.o2).mul_add(frac, w.o2);
+            state.frozen_ch4 = w.ch4.contract(frac, state.frozen_ch4);
+            w.ch4 = (-w.ch4).contract(frac, w.ch4);
+            state.frozen_o2 = w.o2.contract(frac, state.frozen_o2);
+            w.o2 = (-w.o2).contract(frac, w.o2);
         } else if current < prev {
             let frac = (prev - current) / prev;
             let t = w.ch4.min(frac * w.ch4);
@@ -555,10 +556,12 @@ pub fn methane(
             wliq_sat[sn(j)] = vliq_sat * DENH2O;
             wice_sat[sn(j)] = vice_sat * DENICE;
             if finundated < 1.0 {
-                wliq_unsat[sn(j)] =
-                    0.0f64.max((-vliq_sat).mul_add(finundated, vliq) / (1.0 - finundated)) * DENH2O;
-                wice_unsat[sn(j)] =
-                    0.0f64.max((-vice_sat).mul_add(finundated, vice) / (1.0 - finundated)) * DENICE;
+                wliq_unsat[sn(j)] = 0.0f64
+                    .max((-vliq_sat).contract(finundated, vliq) / (1.0 - finundated))
+                    * DENH2O;
+                wice_unsat[sn(j)] = 0.0f64
+                    .max((-vice_sat).contract(finundated, vice) / (1.0 - finundated))
+                    * DENICE;
             }
         }
     }
@@ -641,8 +644,8 @@ pub fn methane(
                 let vol_ice =
                     0.0f64.max((wice[sn(j)] / (dzc * DENICE)).min((i.porsl[k] - vol_liq).max(0.0)));
                 let vol_gas = (i.porsl[k] - vol_liq - vol_ice).max(0.0);
-                conc_ch4[k] = vol_liq.mul_add(k_h_cc[j as usize][0], vol_gas) * r.c_atm[0];
-                conc_o2[k] = vol_liq.mul_add(k_h_cc[j as usize][1], vol_gas) * r.c_atm[1];
+                conc_ch4[k] = vol_liq.contract(k_h_cc[j as usize][0], vol_gas) * r.c_atm[0];
+                conc_o2[k] = vol_liq.contract(k_h_cc[j as usize][1], vol_gas) * r.c_atm[1];
             }
         }
         if sat == 0 {
@@ -651,7 +654,7 @@ pub fn methane(
                 let lag = &mut comp.layer_sat_lag[k];
                 if m.use_vertical_redoxlag && j > jwt && redoxlags_vertical > 0.0 {
                     let e = (-(deltim / redoxlags_vertical)).exp();
-                    *lag = lag.mul_add(e, 1.0 - e);
+                    *lag = lag.contract(e, 1.0 - e);
                 } else if m.use_vertical_redoxlag && redoxlags_vertical > 0.0 {
                     *lag *= (-(deltim / redoxlags_vertical)).exp();
                 } else if j > jwt {
@@ -836,7 +839,8 @@ pub fn methane(
         p.grnd_cond = tran.grnd_methane_cond_effective;
     }
     // 两相的列总量（`sum(x*dz)` 逐层 FMA）。
-    let col_sum = |x: &[f64; NL_SOIL]| (0..NL_SOIL).fold(0.0f64, |acc, k| x[k].mul_add(dz(k), acc));
+    let col_sum =
+        |x: &[f64; NL_SOIL]| (0..NL_SOIL).fold(0.0f64, |acc, k| x[k].contract(dz(k), acc));
     for sat in 0..2 {
         let (p, conc) = if sat == 0 {
             (&mut r.unsat, &comp.conc_methane_unsat)
@@ -858,9 +862,9 @@ pub fn methane(
     }
     // 按淹没比例合并（`FMA(x_sat, fin, x_unsat*(1-fin))`）。
     let w = 1.0 - finundated;
-    let mix = |s: f64, u: f64| s.mul_add(finundated, u * w);
+    let mix = |s: f64, u: f64| s.contract(finundated, u * w);
     let mix_arr = |s: &[f64; NL_SOIL], u: &[f64; NL_SOIL]| -> [f64; NL_SOIL] {
-        std::array::from_fn(|k| s[k].mul_add(finundated, u[k] * w))
+        std::array::from_fn(|k| s[k].contract(finundated, u[k] * w))
     };
     let (u, s) = (r.unsat, r.sat);
     let g = &mut r.merged;
@@ -939,14 +943,14 @@ pub fn methane(
             let mut soilc = *i.lake_soilc;
             for k in 0..NL_SOIL {
                 soilc[k] = (-((s.prod[k] + s.co2_decomp[k]) * deltim))
-                    .mul_add(super::config::CATOMW, soilc[k])
+                    .contract(super::config::CATOMW, soilc[k])
                     .max(0.0);
             }
             r.lake_soilc = Some(soilc);
         }
     }
     if !cold {
-        let err = (-deltim).mul_add(
+        let err = (-deltim).contract(
             (g.prod_tot - g.oxid_tot) - g.surf_flux,
             g.totcol - i.totcol_before,
         );

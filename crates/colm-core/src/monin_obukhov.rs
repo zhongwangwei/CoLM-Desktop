@@ -5,6 +5,7 @@
 
 use crate::LibmPow;
 use anyhow::{ensure, Context, Result};
+use colm_numeric::Contract;
 
 // CoLM's physical constants are unsuffixed Fortran literals assigned to r8.
 // Preserve that source rounding for bit-level differential checks.
@@ -304,7 +305,7 @@ pub fn initialize_monin_obukhov(
         // `FMA(um, um, 0.25)`（`0.5**2` 被 GCC 折成常量）。
         input
             .reference_wind_m_s
-            .mul_add(input.reference_wind_m_s, 0.5_f64.powi(2))
+            .contract(input.reference_wind_m_s, 0.5_f64.powi(2))
             .sqrt()
     };
     // `rib = grav*zldis*dthv/(thv*um*um)`：分母的**结合**是 `(thv*um)*um`
@@ -318,7 +319,7 @@ pub fn initialize_monin_obukhov(
     let zeta = if richardson >= 0.0 {
         // 分母是 `FNMA(min(rib,0.19), 5, 1)`。
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln()
-            / (-5.0_f64).mul_add(richardson.min(f77(0.19)), 1.0))
+            / (-5.0_f64).contract(richardson.min(f77(0.19)), 1.0))
         .clamp(f77(1.0e-6), 2.0)
     } else {
         (richardson * (input.reference_height_m / input.momentum_roughness_m).ln())
@@ -358,7 +359,7 @@ impl MomentumScheme {
                     boundary_zeta.clamp(f77(-1.0e4), f77(-1.0e-5))
                 };
                 // `Bm = 0.0047*(-zetazi) + 0.1854`：GIMPLE 是 `FMA(-zetazi, 0.0047, 0.1854)`。
-                let coefficient = (-boundary_zeta).mul_add(f77(0.0047), f77(0.1854));
+                let coefficient = (-boundary_zeta).contract(f77(0.0047), f77(0.1854));
                 let transition = (0.5
                     * coefficient.powi(4)
                     * (-16.0 - (256.0 + 4.0 / coefficient.powi(4)).sqrt()))
@@ -385,17 +386,17 @@ impl MomentumScheme {
                         - psi(1, transition)
                         + psi(1, roughness_m / obukhov_length_m);
                     let delta = (-zeta).lpow(-0.5) - (-transition).lpow(-0.5);
-                    (-(2.0 * coefficient)).mul_add(delta, log_chain)
+                    (-(2.0 * coefficient)).contract(delta, log_chain)
                 } else if zeta < 0.0 {
                     (distance_m / roughness_m).ln() - psi(1, zeta)
                         + psi(1, roughness_m / obukhov_length_m)
                 } else if zeta <= 1.0 {
-                    (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
+                    (5.0_f64.contract(zeta, (distance_m / roughness_m).ln()))
                         - 5.0 * roughness_m / obukhov_length_m
                 } else {
                     (obukhov_length_m / roughness_m).ln() + 5.0
                         - 5.0 * roughness_m / obukhov_length_m
-                        + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
+                        + (5.0_f64.contract(zeta.ln(), zeta) - 1.0)
                 }
             }
         }
@@ -411,15 +412,15 @@ fn momentum_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -
         let log_chain = (-f77(1.574) * obukhov_length_m / roughness_m).ln() - psi(1, -f77(1.574))
             + psi(1, roughness_m / obukhov_length_m);
         let delta = (-zeta).lpow(f77(0.333)) - ZETAM_POW_0333;
-        f77(1.14).mul_add(delta, log_chain)
+        f77(1.14).contract(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(1, zeta) + psi(1, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
-        (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
+        (5.0_f64.contract(zeta, (distance_m / roughness_m).ln()))
             - 5.0 * roughness_m / obukhov_length_m
     } else {
         (obukhov_length_m / roughness_m).ln() + 5.0 - 5.0 * roughness_m / obukhov_length_m
-            + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
+            + (5.0_f64.contract(zeta.ln(), zeta) - 1.0)
     }
 }
 
@@ -430,15 +431,15 @@ fn heat_integral(distance_m: f64, roughness_m: f64, obukhov_length_m: f64) -> f6
         let log_chain = (-f77(0.465) * obukhov_length_m / roughness_m).ln() - psi(2, -f77(0.465))
             + psi(2, roughness_m / obukhov_length_m);
         let delta = ZETAT_POW_M0333 - (-zeta).lpow(-f77(0.333));
-        f77(0.8).mul_add(delta, log_chain)
+        f77(0.8).contract(delta, log_chain)
     } else if zeta < 0.0 {
         (distance_m / roughness_m).ln() - psi(2, zeta) + psi(2, roughness_m / obukhov_length_m)
     } else if zeta <= 1.0 {
-        (5.0_f64.mul_add(zeta, (distance_m / roughness_m).ln()))
+        (5.0_f64.contract(zeta, (distance_m / roughness_m).ln()))
             - 5.0 * roughness_m / obukhov_length_m
     } else {
         (obukhov_length_m / roughness_m).ln() + 5.0 - 5.0 * roughness_m / obukhov_length_m
-            + (5.0_f64.mul_add(zeta.ln(), zeta) - 1.0)
+            + (5.0_f64.contract(zeta.ln(), zeta) - 1.0)
     }
 }
 
@@ -464,9 +465,9 @@ fn heat_similarity(zeta: f64) -> f64 {
     if zeta < -f77(0.465) {
         UNSTABLE_HEAT_COEFFICIENT * (-zeta).lpow(-f77(0.333))
     } else if zeta < 0.0 {
-        (-f77(16.0)).mul_add(zeta, 1.0).lpow(-0.5)
+        (-f77(16.0)).contract(zeta, 1.0).lpow(-0.5)
     } else if zeta <= 1.0 {
-        5.0_f64.mul_add(zeta, 1.0)
+        5.0_f64.contract(zeta, 1.0)
     } else {
         5.0 + zeta
     }
@@ -476,11 +477,11 @@ fn heat_similarity(zeta: f64) -> f64 {
 /// `1+chik²`；`k==1` 那一支再两级 `FMA(log((1+chik)/2), 2, ·)`、
 /// `FNMA(atan(chik), 2, ·)`（`2*atan(1)` 被 GCC 折成常量 `π/2`）。
 fn psi(kind: i32, zeta: f64) -> f64 {
-    let chik = (-f77(16.0)).mul_add(zeta, 1.0).lpow(0.25);
-    let log_half = (chik.mul_add(chik, 1.0) * 0.5).ln();
+    let chik = (-f77(16.0)).contract(zeta, 1.0).lpow(0.25);
+    let log_half = (chik.contract(chik, 1.0) * 0.5).ln();
     if kind == 1 {
-        let sum = ((1.0 + chik) * 0.5).ln().mul_add(2.0, log_half);
-        (-chik.atan()).mul_add(2.0, sum) + 2.0 * 1.0_f64.atan()
+        let sum = ((1.0 + chik) * 0.5).ln().contract(2.0, log_half);
+        (-chik.atan()).contract(2.0, sum) + 2.0 * 1.0_f64.atan()
     } else {
         2.0 * log_half
     }

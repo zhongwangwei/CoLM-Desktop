@@ -11,6 +11,7 @@ use super::*;
 
 #[test]
 fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
+    colm_numeric::skip_unless_fused!();
     // Actual PC prefixes, original MOD_HtopReadin/MOD_IniTimeVariable SUM(a*b),
     // gfortran -O2 -fdefault-real-8. Prefix weights are not renormalized.
     let height = [0.5, 25.658609866484777];
@@ -57,6 +58,7 @@ fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
 
 #[test]
 fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
+    colm_numeric::skip_unless_fused!();
     // Actual PC patch prefix from PearlRiver_PC_GRID_2x2 e110_n25 patch 1.
     // The expected bit patterns are pristine
     // `sum(ssun_p/ssha_p(...,ps:pe)*pftfrac(ps:pe))`, compiled with

@@ -351,7 +351,7 @@ fn split_soil_snow_gives_the_uncovered_rain_and_soil_face_fluxes_to_the_soil() {
     )
     .unwrap();
 
-    let expected = (1.0 - fsno).mul_add(rain, output.snow.bottom_drainage_kg_m2_s)
+    let expected = (1.0 - fsno).contract(rain, output.snow.bottom_drainage_kg_m2_s)
         - soil_face.evaporation_kg_m2_s;
     assert_eq!(output.soil.water_input_mm_s, expected);
 

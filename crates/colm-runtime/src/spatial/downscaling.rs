@@ -21,6 +21,7 @@
 //! `.FMA (sdata, areapart, acc)`；`pset2grid`（2D、无 `spv`）是 `acc + (pdata/1.)*areapart`，**不**融合；
 //! `get_sumarea` 是普通加法。份的次序就是映射里每个 set 的份次序，set 按 patch 次序。
 
+use colm_numeric::Contract;
 use std::collections::HashMap;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -230,9 +231,9 @@ fn blue_sky_albedo(shortwave: [f64; 4], alb: [[f64; 2]; 2]) -> f64 {
     if total == 0.0 {
         0.0
     } else {
-        solld.mul_add(
+        solld.contract(
             alb[1][1],
-            soll.mul_add(alb[1][0], sols.mul_add(alb[0][0], solsd * alb[0][1])),
+            soll.contract(alb[1][0], sols.contract(alb[0][0], solsd * alb[0][1])),
         ) / total
     }
 }
@@ -593,7 +594,7 @@ impl SpatialDownscaling {
             for (part, value) in set.iter().zip(row.iter_mut()) {
                 if let Some(value) = value {
                     let cell = self.cell_of[&(part.ilon, part.ilat)];
-                    sum[cell] = field(value).mul_add(part.area, sum[cell]);
+                    sum[cell] = field(value).contract(part.area, sum[cell]);
                 }
             }
         }
@@ -759,7 +760,7 @@ fn part_to_set(
         let mut sum = 0.0;
         for (part, value) in mapping.parts[iset].iter().zip(row) {
             if let Some(value) = value {
-                sum = field(value).mul_add(part.area, sum);
+                sum = field(value).contract(part.area, sum);
             }
         }
         sum / mapping.area[iset]

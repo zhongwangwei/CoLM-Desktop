@@ -2,7 +2,7 @@ use super::*;
 
 fn one(total: f64, qmean: f64, qflood: f64) -> CatchReservoirs {
     let normal = total * 0.7;
-    let qnormal = qmean.mul_add(0.25, (normal * 0.7) / 1.5552e7);
+    let qnormal = qmean.contract(0.25, (normal * 0.7) / 1.5552e7);
     CatchReservoirs {
         bsn2resv: vec![Some(0)],
         dam_elv: vec![10.0],

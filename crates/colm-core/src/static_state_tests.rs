@@ -124,6 +124,7 @@ fn van_genuchten_uses_its_own_field_capacity_and_psi0() {
 
 #[test]
 fn van_genuchten_field_capacity_matches_original_single_rounding() {
+    colm_numeric::skip_unless_fused!();
     // Original Pearl River constant restart e100_n20, patch 1, layer 7;
     // MOD_SoilParametersReadin built with -O2 -fdefault-real-8.
     let input = SoilLayerInput {

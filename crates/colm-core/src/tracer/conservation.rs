@@ -22,6 +22,7 @@
 //!   `in/evap/rnof_minus_water_R` 的乘积另有他用，独立舍入后相减。
 
 use super::{soisno_slot, PatchTracerState, TracerPhysics, TracerSet, SOIL_LAYERS, TRC_TINY};
+use colm_numeric::Contract;
 
 /// `trc_balance_abs_tol`。
 const BALANCE_ABS_TOL: f64 = 1.0e-12;
@@ -426,10 +427,10 @@ pub fn tracer_balance_check(
         acc.water_precip += water_input.max(0.0);
         acc.water_rnof += water_rnof.max(0.0);
 
-        let ds_minus_water_r = (-water_ds).mul_add(r_init, ds);
+        let ds_minus_water_r = (-water_ds).contract(r_init, ds);
         let water_input_r = water_input * r_init;
         let in_minus_water_r = step_input - water_input_r;
-        let out_minus_water_r = (-water_output).mul_add(r_init, step_output);
+        let out_minus_water_r = (-water_output).contract(r_init, step_output);
         let water_evap_r = water_evap * r_init;
         let evap_minus_water_r = step_evap - water_evap_r;
         let water_rnof_r = water_rnof * r_init;
@@ -442,7 +443,7 @@ pub fn tracer_balance_check(
             .max(step_output_check.abs())
             .max(reactive_source_sink.abs())
             .max(numerical_source_sink.abs());
-        let balance_tol = balance_scale.mul_add(BALANCE_REL_TOL, BALANCE_ABS_TOL);
+        let balance_tol = balance_scale.contract(BALANCE_REL_TOL, BALANCE_ABS_TOL);
         let resid_scale = 1.0_f64
             .max(storage_end.abs())
             .max(storage_beg.abs())
@@ -468,7 +469,7 @@ pub fn tracer_balance_check(
                 signature_scale = signature_scale.max(step_rnof.abs()).max(water_rnof_r.abs());
             }
         }
-        let signature_tol = signature_scale.mul_add(BALANCE_REL_TOL, BALANCE_ABS_TOL);
+        let signature_tol = signature_scale.contract(BALANCE_REL_TOL, BALANCE_ABS_TOL);
         let itrc_fortran = itrc as i32 + 1;
         if fixed_signature_step && signature_error > signature_tol {
             tracker.signature_nbad += 1;

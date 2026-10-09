@@ -9,6 +9,7 @@
 //! 雪槽一律按 Fortran `-4:0` 存（活动层在末尾）；`ssno_lyr` 多一个土壤层 `1`。
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     age_snow_grains, snicar_ad_rt, snow_aerosol_concentrations, ShortwaveForcing, SnicarAgingTable,
@@ -86,16 +87,16 @@ pub fn snicar_net_solar(
         let diffuse_visible = layer_absorption[0][1][slot];
         let direct_near_infrared = layer_absorption[1][0][slot];
         let diffuse_near_infrared = layer_absorption[1][1][slot];
-        let sum = forcing.direct_visible_w_m2.mul_add(
+        let sum = forcing.direct_visible_w_m2.contract(
             direct_visible,
             forcing.diffuse_visible_w_m2 * diffuse_visible,
         );
         let sum = forcing
             .direct_near_infrared_w_m2
-            .mul_add(direct_near_infrared, sum);
+            .contract(direct_near_infrared, sum);
         let sum = forcing
             .diffuse_near_infrared_w_m2
-            .mul_add(diffuse_near_infrared, sum);
+            .contract(diffuse_near_infrared, sum);
         *value = sum * snow_fraction;
     }
     *soil_absorbed_w_m2 += absorbed[5];
@@ -170,10 +171,10 @@ pub fn snicar_snow_water_aerosols(
     masses[3] += f[4] * dt;
     // 粉尘 `mss + (dry+wet)*deltim` 的乘积没有括号，GIMPLE 融合成 `.FMA (deltim, dry+wet, mss)`；
     // BC/OC 的 `mss + (flx*deltim)` 带括号，不融合。
-    masses[4] = dt.mul_add(f[7] + f[6], masses[4]);
-    masses[5] = dt.mul_add(f[9] + f[8], masses[5]);
-    masses[6] = dt.mul_add(f[11] + f[10], masses[6]);
-    masses[7] = dt.mul_add(f[13] + f[12], masses[7]);
+    masses[4] = dt.contract(f[7] + f[6], masses[4]);
+    masses[5] = dt.contract(f[9] + f[8], masses[5]);
+    masses[6] = dt.contract(f[11] + f[10], masses[6]);
+    masses[7] = dt.contract(f[13] + f[12], masses[7]);
     Ok(())
 }
 

@@ -14,6 +14,7 @@
 use crate::bgc_driver::BgcPhysics;
 use crate::bgc_state::BgcState;
 use crate::LibmPow;
+use colm_numeric::Contract;
 
 /// `0.56 + atan(π·0.45·(−5 + 6.5))/π`（编译期折叠）。
 const PH_FACTOR: f64 = 0.919_737_954_572_236_2;
@@ -39,16 +40,17 @@ pub fn soil_biogeochem_nitrif_denitrif(s: &mut BgcState, p: &BgcPhysics) {
         } else {
             1.0
         };
-        let gas = t.mul_add(c.d_con_g22, c.d_con_g21) * 1.0e-4;
+        let gas = t.contract(c.d_con_g22, c.d_con_g21) * 1.0e-4;
         let organic = (f_a.lpow(10.0 / 3.0) * om_frac) / (porsl * porsl);
-        let diffus = gas * (eps * eps * (1.0 - om_frac)).mul_add(f_a.lpow(3.0 / p.bsw[j]), organic);
+        let diffus =
+            gas * (eps * eps * (1.0 - om_frac)).contract(f_a.lpow(3.0 / p.bsw[j]), organic);
 
         let r_min =
             (c.surface_tension_water * 2.0) / ((p.smp[j] * 1.0e-5).abs().max(1.0e-10) * RHO_G);
         let r_psi = (r_min * r_max).sqrt();
         let water = c
             .d_con_w23
-            .mul_add(t * t, t.mul_add(c.d_con_w22, c.d_con_w21))
+            .contract(t * t, t.contract(c.d_con_w22, c.d_con_w21))
             * 1.0e-9;
         let ratio_diffusivity_water_gas = gas / water;
 
@@ -61,7 +63,7 @@ pub fn soil_biogeochem_nitrif_denitrif(s: &mut BgcState, p: &BgcPhysics) {
                 * v.to2_decomp_depth_unsat[j].lpow(-c.rij_kro_beta)
                 * v.tconc_o2_unsat[j].lpow(c.rij_kro_gamma)
                 * porsl
-                    .mul_add(ratio_diffusivity_water_gas, vol_liq)
+                    .contract(ratio_diffusivity_water_gas, vol_liq)
                     .lpow(c.rij_kro_delta)))
             .exp()
         } else {
@@ -83,14 +85,14 @@ pub fn soil_biogeochem_nitrif_denitrif(s: &mut BgcState, p: &BgcPhysics) {
             / to_ug_per_gsoil_day;
         f.pot_f_denit_vr[j] = anaerobic_frac * fmax_carbon.min(fmax_nitrate).max(0.0);
 
-        let ratio_k1 = (-diffus).mul_add(350.0, 38.4).max(1.7);
+        let ratio_k1 = (-diffus).contract(350.0, 38.4).max(1.7);
         let decay = if soil_co2_prod > 1.0e-9 {
             (-0.8 * (smin_no3_massdens_vr / soil_co2_prod)).exp()
         } else {
             EXP_MINUS_80
         };
         let wfps_vr = (vol_liq / porsl).clamp(0.0, 1.0) * 100.0;
-        let fr_wfps = wfps_vr.mul_add(0.015, -0.32).max(0.1);
+        let fr_wfps = wfps_vr.contract(0.015, -0.32).max(0.1);
         f.n2_n2o_ratio_denit_vr[j] = (0.16 * ratio_k1).max(ratio_k1 * decay) * fr_wfps;
     }
 }

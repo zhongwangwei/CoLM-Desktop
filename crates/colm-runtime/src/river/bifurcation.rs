@@ -10,6 +10,7 @@
 // 夹紧保留上游 `MAX(MIN(·))` 的次序；逐路径、逐单元流域的下标循环与上游 `DO` 循环对应。
 #![allow(clippy::manual_clamp, clippy::needless_range_loop)]
 
+use colm_numeric::Contract;
 use std::path::Path;
 
 use anyhow::{bail, ensure, Context, Result};
@@ -234,7 +235,7 @@ impl Bifurcation {
             let curve = &net.curves[i];
             let mut storage = curve.volume(wdsrf);
             if wdsrf > curve.rivhgt {
-                storage = curve.rivare.mul_add(wdsrf - curve.rivhgt, storage);
+                storage = curve.rivare.contract(wdsrf - curve.rivhgt, storage);
             }
             storage.max(0.0)
         }
@@ -418,7 +419,7 @@ impl Bifurcation {
                 let manning = self.man[l];
                 let friction = (manning * manning * GRAV / h_face.lpow(7.0 / 3.0)) * momen[k].abs();
                 let mflux = dst * (((width * GRAV) * h_face) * slope);
-                let trial = (-(mflux / area)).mul_add(dt, momen[k]) / dt.mul_add(friction, 1.0);
+                let trial = (-(mflux / area)).contract(dt, momen[k]) / dt.contract(friction, 1.0);
                 let v = (trial / h_face).min(20.0).max(-20.0);
                 momen[k] = h_face * v;
                 veloc[k] = v;

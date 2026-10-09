@@ -1,6 +1,7 @@
 //! Glacier water update from `MOD_Glacier.F90`.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     compact_snow_layers, snow_water, RuntimeSnowColumn, SnowToSoilTransfer, SnowWaterInput,
@@ -75,10 +76,10 @@ pub fn glacier_water(
         // 9 月某步首冰层满时经 `a = wdsrf + wliq(1) + gwat*deltim` 让 `wdsrf` 差 1 ulp）。
         surface.liquid_water_kg_m2 = input
             .dew_kg_m2_s
-            .mul_add(input.time_step_seconds, surface.liquid_water_kg_m2)
+            .contract(input.time_step_seconds, surface.liquid_water_kg_m2)
             .max(1.0e-8);
         surface.ice_water_kg_m2 = (input.frost_kg_m2_s - input.sublimation_kg_m2_s)
-            .mul_add(input.time_step_seconds, surface.ice_water_kg_m2)
+            .contract(input.time_step_seconds, surface.ice_water_kg_m2)
             .max(1.0e-8);
         return Ok(input.rainfall_kg_m2_s + input.snow_melt_kg_m2_s - input.evaporation_kg_m2_s);
     }

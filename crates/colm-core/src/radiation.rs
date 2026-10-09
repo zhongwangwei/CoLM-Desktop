@@ -4,6 +4,7 @@
 //! remains the responsibility of the restart writer.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{update_snow_age, LandCoverScheme, SoilReflectance};
 
@@ -47,12 +48,12 @@ impl ColdStartGroundAlbedo {
         let mut soil_absorption = [[0.0; RADIATION_TYPES]; BANDS];
         let mut snow_absorption = [[0.0; RADIATION_TYPES]; BANDS];
         for band in 0..BANDS {
-            soil_absorption[band][0] = transmission[band][2].mul_add(
+            soil_absorption[band][0] = transmission[band][2].contract(
                 1.0 - self.soil[band][0],
                 transmission[band][0] * (1.0 - self.soil[band][1]),
             );
             soil_absorption[band][1] = transmission[band][1] * (1.0 - self.soil[band][1]);
-            snow_absorption[band][0] = (1.0 - self.snow[band][0]).mul_add(
+            snow_absorption[band][0] = (1.0 - self.snow[band][0]).contract(
                 transmission[band][2],
                 transmission[band][0] * (1.0 - self.snow[band][1]),
             );
@@ -548,7 +549,7 @@ pub(crate) fn soil_albedo(
         // `MOD_Albedo.F90:305`：`alb_s_inc = max(0.11-0.40*ssw, 0.)`。
         // GIMPLE（`albland` 第 1 处）是 `_434 = FNMA(ssw, 0.40, 0.11)` ——
         // 乘积被吸收、常数 `0.11` 是已舍入的加数；`max` 留在外面。
-        let increase = (-soil_surface_wetness).mul_add(0.40, 0.11).max(0.0);
+        let increase = (-soil_surface_wetness).contract(0.40, 0.11).max(0.0);
         let visible = (soil.saturated_visible + increase).min(soil.dry_visible);
         let near_infrared = (soil.saturated_near_infrared + increase).min(soil.dry_near_infrared);
         [[visible; RADIATION_TYPES], [near_infrared; RADIATION_TYPES]]
@@ -619,9 +620,9 @@ pub fn mix_ground_albedo(
             let soil = soil[band][radiation_type];
             let snow = snow[band][radiation_type];
             if radiation_type == 0 {
-                snow.mul_add(snow_fraction, (1.0 - snow_fraction) * soil)
+                snow.contract(snow_fraction, (1.0 - snow_fraction) * soil)
             } else {
-                (1.0 - snow_fraction).mul_add(soil, snow_fraction * snow)
+                (1.0 - snow_fraction).contract(soil, snow_fraction * snow)
             }
         })
     })
@@ -657,10 +658,10 @@ pub(crate) fn aged_snow_albedo(
     // `1 - age_factor*age` 是 `FNMA(age, age_factor, 1.0)`；
     // 直射修正是 `FMA(0.4*corr, 1-diffuse, diffuse)`（收左边那个乘积）。
     let doubled_zenith = 2.0 * cosine_zenith;
-    let direct_correction = ((1.5 / doubled_zenith.mul_add(2.0, 1.0)) - 0.5).max(0.0);
+    let direct_correction = ((1.5 / doubled_zenith.contract(2.0, 1.0)) - 0.5).max(0.0);
     let snow_band = |new_snow_albedo: f64, age_factor: f64| {
-        let diffuse = new_snow_albedo * (-age_factor).mul_add(age, 1.0);
-        let direct = (0.4 * direct_correction).mul_add(1.0 - diffuse, diffuse);
+        let diffuse = new_snow_albedo * (-age_factor).contract(age, 1.0);
+        let direct = (0.4 * direct_correction).contract(1.0 - diffuse, diffuse);
         [direct, diffuse]
     };
     Ok(([snow_band(0.85, 0.2), snow_band(0.65, 0.5)], snow_age))
@@ -690,7 +691,7 @@ pub(crate) fn generic_snow_albedo(
 pub(crate) fn two_stream_zmu(phi1: f64, phi2: f64) -> f64 {
     if phi1.abs() > 1.0e-6 && phi2.abs() > 1.0e-6 {
         let log_term = ((phi1 + phi2) / phi1).ln();
-        (phi1 / phi2).mul_add(-log_term, 1.0) * (1.0 / phi2)
+        (phi1 / phi2).contract(-log_term, 1.0) * (1.0 / phi2)
     } else if phi1.abs() <= 1.0e-6 {
         1.0 / 0.877
     } else {
@@ -722,7 +723,7 @@ pub(crate) fn two_stream(
     // `MOD_Albedo.F90:611` 的两级链式 FMA（`twostream` dump 第 1、2 处）：
     // `_3 = FNMA(chil, 0.633, 0.5)`（`0.5-0.633*chil`，乘积被吸收），
     // `_4 = chil*0.33`（这一项**先单独舍入**、被复用），`phi1 = FNMA(_4, chil, _3)`。
-    let phi1 = (-(0.33 * optics.chil)).mul_add(optics.chil, (-optics.chil).mul_add(0.633, 0.5));
+    let phi1 = (-(0.33 * optics.chil)).contract(optics.chil, (-optics.chil).contract(0.633, 0.5));
     // `phi2` 那一句 dump 里**没有**收缩（`_7 = phi1*2; _8 = 1-_7`），保持不融合。
     let phi2 = 0.877 * (1.0 - 2.0 * phi1);
     let projection = phi1 + phi2 * cosine_zenith;
@@ -746,26 +747,26 @@ pub(crate) fn two_stream(
     let mut sunlit_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     let mut shaded_absorption = [[0.0; RADIATION_TYPES]; BANDS];
     for band in 0..BANDS {
-        let mut scattering = (lai / leaf_stem_area).mul_add(
+        let mut scattering = (lai / leaf_stem_area).contract(
             optics.transmittance[band][0] + optics.reflectance[band][0],
             stem_area / leaf_stem_area
                 * (optics.transmittance[band][1] + optics.reflectance[band][1]),
         );
         let directional_scattering = scattering / 2.0 * projection
             / (projection + cosine_zenith * phi2)
-            * (-(cosine_zenith * phi1 / (projection + cosine_zenith * phi2))).mul_add(
+            * (-(cosine_zenith * phi1 / (projection + cosine_zenith * phi2))).contract(
                 ((projection + cosine_zenith * phi2 + cosine_zenith * phi1)
                     / (cosine_zenith * phi1))
                     .ln(),
                 1.0,
             );
-        let mut upward_scattering = (lai / leaf_stem_area).mul_add(
+        let mut upward_scattering = (lai / leaf_stem_area).contract(
             optics.transmittance[band][0],
             stem_area / leaf_stem_area * optics.transmittance[band][1],
         );
         let upward_factor = ((1.0 + optics.chil) / 2.0).powi(2);
         upward_scattering =
-            0.5 * upward_factor.mul_add(upward_scattering.mul_add(-2.0, scattering), scattering);
+            0.5 * upward_factor.contract(upward_scattering.contract(-2.0, scattering), scattering);
         let mut beta0 = (1.0 + zmu * direct_extinction) / (scattering * zmu * direct_extinction)
             * directional_scattering;
         if vegetation_snow {
@@ -775,11 +776,12 @@ pub(crate) fn two_stream(
             // 以及 `*0.5` 那一项）、`_110 = (1-fwet)*scat`（用更新后的 `scat`），
             // 然后三处都对**旧值**做 `FMA(旧值, _110, _113)`。
             let wet_snow_term = wet_snow_fraction * snow_scattering;
-            scattering = scattering.mul_add(1.0 - wet_snow_fraction, wet_snow_term);
+            scattering = scattering.contract(1.0 - wet_snow_fraction, wet_snow_term);
             let snow_scaled_scattering = (1.0 - wet_snow_fraction) * scattering;
-            upward_scattering =
-                upward_scattering.mul_add(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
-            beta0 = beta0.mul_add(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
+            upward_scattering = upward_scattering
+                .contract(snow_scaled_scattering, wet_snow_term * 0.5)
+                / scattering;
+            beta0 = beta0.contract(snow_scaled_scattering, wet_snow_term * 0.5) / scattering;
         }
 
         let be = 1.0 - scattering + upward_scattering;
@@ -789,20 +791,20 @@ pub(crate) fn two_stream(
         let ce_squared = ce * ce;
         let de = scattering * zmu * direct_extinction * beta0;
         let fe = scattering * zmu * direct_extinction * (1.0 - beta0);
-        let psi = be.mul_add(be, -ce_squared).sqrt() / zmu;
+        let psi = be.contract(be, -ce_squared).sqrt() / zmu;
         let power1 = (psi * leaf_stem_area).min(50.0);
         let power2 = (direct_extinction * leaf_stem_area).min(50.0);
         let s1 = (-power1).exp();
         let s2 = (-power2).exp();
-        let p1 = zmu.mul_add(psi, be);
-        let p2 = (-zmu).mul_add(psi, be);
+        let p1 = zmu.contract(psi, be);
+        let p2 = (-zmu).contract(psi, be);
         let p3 = be + zmu * direct_extinction;
         let p4 = be - zmu * direct_extinction;
         let f1 = 1.0 - ground[band][1] * p1 / ce;
         let f2 = 1.0 - ground[band][1] * p2 / ce;
-        let h1 = -de.mul_add(p4, ce * fe);
-        let h4 = -fe.mul_add(p3, ce * de);
-        let sigma = (zmu * direct_extinction).powi(2) + (-be).mul_add(be, ce_squared);
+        let h1 = -de.contract(p4, ce * fe);
+        let h4 = -fe.contract(p3, ce * de);
+        let sigma = (zmu * direct_extinction).powi(2) + (-be).contract(be, ce_squared);
         // `m1`/`m2`/`n1`/`n2` 与两个 Cramer 分母在直接支与漫射支都要用，GIMPLE
         // 只算一次（`_804.._817` 在分支之前）：`_813 = m2*n1`（已舍入、被复用），
         // `_814 = FMS(m1,n2,_813)`、`_816 = FNMA(m1,n2,_813)` —— 即
@@ -812,28 +814,28 @@ pub(crate) fn two_stream(
         let n1 = p1 / ce;
         let n2 = p2 / ce;
         let m2_n1 = m2 * n1;
-        let cramer_direct = m1.mul_add(n2, -m2_n1);
-        let cramer_reverse = (-m1).mul_add(n2, m2_n1);
+        let cramer_direct = m1.contract(n2, -m2_n1);
+        let cramer_reverse = (-m1).contract(n2, m2_n1);
         let (albedo_direct, transmission_direct, eup_direct, edown_direct) = if sigma.abs()
             > 1.0e-10
         {
             let hh1 = h1 / sigma;
             let hh4 = h4 / sigma;
-            let m3 = (ground[band][0] - (-ground[band][1]).mul_add(hh4, hh1)) * s2;
+            let m3 = (ground[band][0] - (-ground[band][1]).contract(hh4, hh1)) * s2;
             let n3 = -hh4;
             // `_192 = FMS(m3, n2, n3*m2)`、`_201 = FMS(m3, n1, n3*m1)`。
-            let hh2 = m3.mul_add(n2, -(m2 * n3)) / cramer_direct;
-            let hh3 = m3.mul_add(n1, -(m1 * n3)) / cramer_reverse;
+            let hh2 = m3.contract(n2, -(m2 * n3)) / cramer_direct;
+            let hh3 = m3.contract(n1, -(m1 * n3)) / cramer_reverse;
             let hh5 = hh2 * p1 / ce;
             let hh6 = hh3 * p2 / ce;
             (
                 hh1 + hh2 + hh3,
-                s2.mul_add(hh4, hh5 * s1) + hh6 / s1,
-                hh1 * s2.mul_add(-s2, 1.0) / (2.0 * direct_extinction)
-                    + hh2 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
+                s2.contract(hh4, hh5 * s1) + hh6 / s1,
+                hh1 * s2.contract(-s2, 1.0) / (2.0 * direct_extinction)
+                    + hh2 * s1.contract(-s2, 1.0) / (direct_extinction + psi)
                     + hh3 * (1.0 - s2 / s1) / (direct_extinction - psi),
-                hh4 * s2.mul_add(-s2, 1.0) / (2.0 * direct_extinction)
-                    + hh5 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
+                hh4 * s2.contract(-s2, 1.0) / (2.0 * direct_extinction)
+                    + hh5 * s1.contract(-s2, 1.0) / (direct_extinction + psi)
                     + hh6 * (1.0 - s2 / s1) / (direct_extinction - psi),
             )
         } else {
@@ -848,8 +850,8 @@ pub(crate) fn two_stream(
             let n3 =
                 1.0 / ce * (h1 * p4 / (4.0 * direct_extinction * direct_extinction) / zmu2 + de);
             // 同一对 Cramer 分子（`_289`/`_298`），形状与直接支一致。
-            let hh2 = m3.mul_add(n2, -(m2 * n3)) / cramer_direct;
-            let hh3 = m3.mul_add(n1, -(m1 * n3)) / cramer_reverse;
+            let hh2 = m3.contract(n2, -(m2 * n3)) / cramer_direct;
+            let hh3 = m3.contract(n1, -(m1 * n3)) / cramer_reverse;
             let hh5 = hh2 * p1 / ce;
             let hh6 = hh3 * p2 / ce;
             (
@@ -874,15 +876,15 @@ pub(crate) fn two_stream(
                         * (leaf_stem_area * s2 * s2 - (1.0 - s2 * s2) / (2.0 * direct_extinction)),
             )
         };
-        let direct_sunlit_bracket = (eup_direct + edown_direct).mul_add(1.0 / zmu, 1.0 - s2);
+        let direct_sunlit_bracket = (eup_direct + edown_direct).contract(1.0 / zmu, 1.0 - s2);
         sunlit_absorption[band][0] = direct_sunlit_bracket * (1.0 - scattering);
         // Preserve the linked original's fused products and evaluation order.
         let absorption_scale = (1.0 - scattering) / zmu;
-        let reflected_direct = ground[band][1].mul_add(transmission_direct, ground[band][0] * s2)
+        let reflected_direct = ground[band][1].contract(transmission_direct, ground[band][0] * s2)
             - transmission_direct;
-        let shaded_direct = scattering.mul_add(1.0 - s2, reflected_direct) - albedo_direct;
+        let shaded_direct = scattering.contract(1.0 - s2, reflected_direct) - albedo_direct;
         shaded_absorption[band][0] =
-            (-(eup_direct + edown_direct)).mul_add(absorption_scale, shaded_direct);
+            (-(eup_direct + edown_direct)).contract(absorption_scale, shaded_direct);
         albedo[band][0] = albedo_direct;
         transmission[band][0] = transmission_direct;
 
@@ -892,12 +894,12 @@ pub(crate) fn two_stream(
         let hh8 = -m1 / cramer_reverse;
         let hh9 = hh7 * p1 / ce;
         let hh10 = hh8 * p2 / ce;
-        let transmission_diffuse = s1.mul_add(hh9, hh10 / s1);
+        let transmission_diffuse = s1.contract(hh9, hh10 / s1);
         let (eup_diffuse, edown_diffuse) = if sigma.abs() > 1.0e-10 {
             (
-                hh7 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
+                hh7 * s1.contract(-s2, 1.0) / (direct_extinction + psi)
                     + hh8 * (1.0 - s2 / s1) / (direct_extinction - psi),
-                hh9 * s1.mul_add(-s2, 1.0) / (direct_extinction + psi)
+                hh9 * s1.contract(-s2, 1.0) / (direct_extinction + psi)
                     + hh10 * (1.0 - s2 / s1) / (direct_extinction - psi),
             )
         } else {
@@ -909,7 +911,7 @@ pub(crate) fn two_stream(
         let albedo_diffuse = hh7 + hh8;
         sunlit_absorption[band][1] = absorption_scale * (eup_diffuse + edown_diffuse);
         shaded_absorption[band][1] = transmission_diffuse
-            .mul_add(ground[band][1] - 1.0, -(albedo_diffuse - 1.0))
+            .contract(ground[band][1] - 1.0, -(albedo_diffuse - 1.0))
             - absorption_scale * (eup_diffuse + edown_diffuse);
         albedo[band][1] = albedo_diffuse;
         transmission[band][1] = transmission_diffuse;
@@ -944,7 +946,7 @@ fn two_stream_mod(
     const BLACK: f64 = 1.0e-6;
     let chil = optics.chil;
     // `:909-910` `phi1 = .FNMA (chil, chil*0.33, .FNMA (chil, 0.633, 0.5))`
-    let phi1 = (-chil).mul_add(chil * 0.33, (-chil).mul_add(0.633, 0.5));
+    let phi1 = (-chil).contract(chil * 0.33, (-chil).contract(0.633, 0.5));
     let phi2 = (1.0 - phi1 * 2.0) * 0.877;
     let zmu = two_stream_zmu(phi1, phi2);
     let lsai = lai + sai;
@@ -959,7 +961,7 @@ fn two_stream_mod(
     let thermal_gap_fraction = (-(lsai / zmu).min(50.0).max(1.0e-5)).exp();
     // `:929-930` `cosdif = -(tmptau / log(exp(-tmptau*0.87) / .FMA (tmptau, 0.92, 1)))`
     let tmptau = lsai * 0.5;
-    let cosdif = -(tmptau / ((-(tmptau * 0.87)).exp() / tmptau.mul_add(0.92, 1.0)).ln());
+    let cosdif = -(tmptau / ((-(tmptau * 0.87)).exp() / tmptau.contract(0.92, 1.0)).ln());
     let lai_weight = lai / lsai;
     let sai_weight = sai / lsai;
     // `:975/979` `((1+chil)*0.5)**2`、`(1+chil)**2`
@@ -986,39 +988,39 @@ fn two_stream_mod(
         for ic in 0..RADIATION_TYPES {
             let cosz = if ic == 1 {
                 // `:941-946` `theta = .FMA (acos(max(cosdif,0.001))/3.14159, 180, chil*5)`
-                let theta = (cosdif.max(0.001).acos() / FORTRAN_PI).mul_add(180.0, chil * 5.0);
+                let theta = (cosdif.max(0.001).acos() / FORTRAN_PI).contract(180.0, chil * 5.0);
                 (theta / 180.0 * FORTRAN_PI).cos()
             } else {
                 cosine_zenith
             };
             // `:951` `proj = .FMA (phi2, cosz, phi1)`
-            let proj = phi2.mul_add(cosz, phi1);
+            let proj = phi2.contract(cosz, phi1);
             let extkb = proj / cosz;
             // `:960-961` `.FMA (lai/lsai, tau1, (sai/lsai)*tau2)`
-            let wtau = lai_weight.mul_add(
+            let wtau = lai_weight.contract(
                 optics.transmittance[band][0],
                 sai_weight * optics.transmittance[band][1],
             );
-            let wrho = lai_weight.mul_add(
+            let wrho = lai_weight.contract(
                 optics.reflectance[band][0],
                 sai_weight * optics.reflectance[band][1],
             );
             let mut scat = wtau + wrho;
             // `:975` `0.5 * .FMA (((1+chil)*0.5)**2, .FNMA (wtau, 2, scat), scat)`
-            let mut upscat = chil_half_sq.mul_add((-wtau).mul_add(2.0, scat), scat) * 0.5;
+            let mut upscat = chil_half_sq.contract((-wtau).contract(2.0, scat), scat) * 0.5;
             // `:979` `(.FMA (((1+chil)**2*(1/extkb))*0.25, wrho-wtau, scat)*0.5)/scat`
             let mut beta0 =
-                (((chil_sq * (1.0 / extkb)) * 0.25).mul_add(wrho - wtau, scat) * 0.5) / scat;
+                (((chil_sq * (1.0 / extkb)) * 0.25).contract(wrho - wtau, scat) * 0.5) / scat;
             if vegetation_snow {
                 // `:985-987`：`scat_sno = (0.8, 0.4)`，`upscat_sno = beta0_sno = 0.5`
                 let snow = if band == 0 { 0.8 } else { 0.4 };
                 let dry = 1.0 - wet_snow_fraction;
                 let wet = wet_snow_fraction * snow;
-                scat = scat.mul_add(dry, wet);
+                scat = scat.contract(dry, wet);
                 let dry_scat = dry * scat;
                 let wet_half = wet * 0.5;
-                upscat = upscat.mul_add(dry_scat, wet_half) / scat;
-                beta0 = beta0.mul_add(dry_scat, wet_half) / scat;
+                upscat = upscat.contract(dry_scat, wet_half) / scat;
+                beta0 = beta0.contract(dry_scat, wet_half) / scat;
             }
             let be = (1.0 - scat) + upscat;
             let ce = upscat;
@@ -1028,21 +1030,21 @@ fn two_stream_mod(
             let fe = zmu_scat_extkb * (1.0 - beta0);
             // `:999` `psi = sqrt(.FMS (be, be, ce*ce))/zmu`
             let ce_sq = ce * ce;
-            let psi = be.mul_add(be, -ce_sq).sqrt() / zmu;
+            let psi = be.contract(be, -ce_sq).sqrt() / zmu;
             let s1 = (-(lsai * psi).min(50.0)).exp();
             let s2 = (-(lsai * extkb).min(50.0)).exp();
             // `:1011-1014`
             let zmu_extkb = zmu * extkb;
-            let p1 = zmu.mul_add(psi, be);
-            let p2 = (-zmu).mul_add(psi, be);
+            let p1 = zmu.contract(psi, be);
+            let p2 = (-zmu).contract(psi, be);
             let p3 = zmu_extkb + be;
             let p4 = be - zmu_extkb;
             let f1 = 1.0 - (p1 * BLACK) / ce;
             let f2 = 1.0 - (p2 * BLACK) / ce;
             // `:1019-1022`
-            let h1 = -de.mul_add(p4, ce * fe);
-            let h4 = -fe.mul_add(p3, ce * de);
-            let sigma = zmu_extkb.mul_add(zmu_extkb, (-be).mul_add(be, ce_sq));
+            let h1 = -de.contract(p4, ce * fe);
+            let h4 = -fe.contract(p3, ce * de);
+            let sigma = zmu_extkb.contract(zmu_extkb, (-be).contract(be, ce_sq));
             if ic == 0 {
                 s2d = s2;
                 extkbd = extkb;
@@ -1053,26 +1055,26 @@ fn two_stream_mod(
             let n1 = p1 / ce;
             let n2 = p2 / ce;
             let m2n1 = m2 * n1;
-            let denominator_2 = m1.mul_add(n2, -m2n1);
-            let denominator_3 = (-m1).mul_add(n2, m2n1);
-            let one_minus_s2s2d = (-s2).mul_add(s2d, 1.0);
+            let denominator_2 = m1.contract(n2, -m2n1);
+            let denominator_3 = (-m1).contract(n2, m2n1);
+            let one_minus_s2s2d = (-s2).contract(s2d, 1.0);
             let extkb_sum = extkb + extkbd;
             let (hh, eup, edw, albv, tran);
             if sigma.abs() > 1.0e-10 {
                 let hh1 = h1 / sigma;
                 let hh4 = h4 / sigma;
                 // `:1036` `m3 = s2 * (1e-6 - .FNMA (hh4, 1e-6, hh1))`
-                let m3 = s2 * (BLACK - (-hh4).mul_add(BLACK, hh1));
+                let m3 = s2 * (BLACK - (-hh4).contract(BLACK, hh1));
                 let n3 = -hh4;
-                let hh2 = m3.mul_add(n2, -(n3 * m2)) / denominator_2;
-                let hh3 = m3.mul_add(n1, -(n3 * m1)) / denominator_3;
+                let hh2 = m3.contract(n2, -(n3 * m2)) / denominator_2;
+                let hh3 = m3.contract(n1, -(n3 * m1)) / denominator_3;
                 let hh5 = (p1 * hh2) / ce;
                 let hh6 = (p2 * hh3) / ce;
                 albv = (hh1 + hh2) + hh3;
                 // `:1049` `.FMA (s2, hh4, s1*hh5) + hh6/s1`
-                tran = s2.mul_add(hh4, s1 * hh5) + hh6 / s1;
+                tran = s2.contract(hh4, s1 * hh5) + hh6 / s1;
                 // `:1053/1057`
-                let one_minus_s1s2d = (-s1).mul_add(s2d, 1.0);
+                let one_minus_s1s2d = (-s1).contract(s2d, 1.0);
                 let psi_sum = psi + extkbd;
                 let one_minus_ratio = 1.0 - s2d / s1;
                 let psi_diff = extkbd - psi;
@@ -1086,15 +1088,15 @@ fn two_stream_mod(
             } else {
                 // `:1066`
                 let term_a = (h1 / zmu2) * (lsai + 1.0 / extkb_sum);
-                let p_combo = lsai.mul_add(p3, p4 / extkb_sum);
-                let inner = (-((h1 / extkb_sum) / zmu2)).mul_add(p_combo, -de);
-                let m3 = s2.mul_add(BLACK, s2.mul_add(term_a, s2 * ((BLACK / ce) * inner)));
+                let p_combo = lsai.contract(p3, p4 / extkb_sum);
+                let inner = (-((h1 / extkb_sum) / zmu2)).contract(p_combo, -de);
+                let m3 = s2.contract(BLACK, s2.contract(term_a, s2 * ((BLACK / ce) * inner)));
                 // `:1070`
                 let p4h1 = p4 * h1;
                 let extkb_sum_sq = extkb_sum * extkb_sum;
                 let n3 = (1.0 / ce) * (de + (p4h1 / extkb_sum_sq) / zmu2);
-                let hh2 = m3.mul_add(n2, -(n3 * m2)) / denominator_2;
-                let hh3 = m3.mul_add(n1, -(n3 * m1)) / denominator_3;
+                let hh2 = m3.contract(n2, -(n3 * m2)) / denominator_2;
+                let hh3 = m3.contract(n1, -(n3 * m1)) / denominator_3;
                 let hh5 = (p1 * hh2) / ce;
                 let hh6 = (p2 * hh3) / ce;
                 // `:1078` `albv = (hh2 - h1/(zmu2*e)) + hh3`
@@ -1102,27 +1104,27 @@ fn two_stream_mod(
                 let hh2_shift = hh2 - h1_over;
                 albv = hh3 + hh2_shift;
                 // `:1081`
-                let bracket = (-p_combo).mul_add(h1_over, -de);
-                tran = s2.mul_add((1.0 / ce) * bracket, s1 * hh5) + hh6 / s1;
+                let bracket = (-p_combo).contract(h1_over, -de);
+                tran = s2.contract((1.0 / ce) * bracket, s1 * hh5) + hh6 / s1;
                 // `:1085` `eup = .FMA (h1/(zmu2 e), .FMS (s2d, lsai*s2, (1-s2 s2d)/e), .FMA (hh3, lsai, (hh2-x)(1-s2 s2d)/e))`
-                let lsai_term = s2d.mul_add(lsai * s2, -(one_minus_s2s2d / extkb_sum));
-                eup = h1_over.mul_add(
+                let lsai_term = s2d.contract(lsai * s2, -(one_minus_s2s2d / extkb_sum));
+                eup = h1_over.contract(
                     lsai_term,
-                    hh3.mul_add(lsai, (hh2_shift * one_minus_s2s2d) / extkb_sum),
+                    hh3.contract(lsai, (hh2_shift * one_minus_s2s2d) / extkb_sum),
                 );
                 // `:1090`
                 let hh5_shift = hh5 - (de + p4h1 / (zmu * extkb_sum_sq)) / ce;
                 let p3_term = (p3 * h1) / (((ce * extkb_sum) * extkb_sum) * zmu2);
-                edw = lsai_term.mul_add(
+                edw = lsai_term.contract(
                     p3_term,
-                    hh6.mul_add(lsai, (hh5_shift * one_minus_s2s2d) / extkb_sum),
+                    hh6.contract(lsai, (hh5_shift * one_minus_s2s2d) / extkb_sum),
                 );
                 hh = [hh1_kept, hh2, hh3, hh4_kept, hh5, hh6];
             }
             albedo[band][ic] = albv;
             transmission[band][ic] = tran;
             // `:1094` `sall = .FNMA (tran + s2, 1-1e-6, 1-albv)`
-            sall[ic] = (-(s2 + tran)).mul_add(1.0 - BLACK, 1.0 - albv);
+            sall[ic] = (-(s2 + tran)).contract(1.0 - BLACK, 1.0 - albv);
             // `:1097/1099`
             let fluxes = inv_zmu * (edw + eup);
             let sunlit = if ic == 0 {
@@ -1147,30 +1149,30 @@ fn two_stream_mod(
         let edw = ((one_minus_s2 * hh[3]) / extkb_diff + (one_minus_s1 * hh[4]) / psi_diff)
             + (inverse_term * hh[5]) / psi_sum;
         let ssun_rev = (s2d * (1.0 - scat))
-            * (eup + edw).mul_add(inv_zmu, (extkb * one_minus_s2) / extkb_diff);
+            * (eup + edw).contract(inv_zmu, (extkb * one_minus_s2) / extkb_diff);
         // `:1135-1156`：先 `ic = 1`（读修正前的 `sall(iw,2)`），再 `ic = 2`
         let albg_dir = ground[band][0];
         let albg_dif = ground[band][1];
         let albv_dif = albedo[band][1];
-        let one_minus_q = (-albg_dif).mul_add(albv_dif, 1.0);
+        let one_minus_q = (-albg_dif).contract(albv_dif, 1.0);
         let s2d_albg = s2d * albg_dir;
-        let tran_dir = albv_dif.mul_add(s2d_albg, transmission[band][0]) / one_minus_q;
+        let tran_dir = albv_dif.contract(s2d_albg, transmission[band][0]) / one_minus_q;
         transmission[band][0] = tran_dir;
-        let reflected = albg_dif.mul_add(tran_dir, s2d_albg);
+        let reflected = albg_dif.contract(tran_dir, s2d_albg);
         let sall_dif_before = sall[1];
-        sall[0] = reflected.mul_add(sall_dif_before, sall[0]);
-        albedo[band][0] = (-s2d).mul_add(
+        sall[0] = reflected.contract(sall_dif_before, sall[0]);
+        albedo[band][0] = (-s2d).contract(
             1.0 - albg_dir,
-            (-tran_dir).mul_add(1.0 - albg_dif, 1.0 - sall[0]),
+            (-tran_dir).contract(1.0 - albg_dif, 1.0 - sall[0]),
         );
-        sunlit_absorption[band][0] = ssun_rev.mul_add(reflected, sunlit_absorption[band][0]);
+        sunlit_absorption[band][0] = ssun_rev.contract(reflected, sunlit_absorption[band][0]);
         shaded_absorption[band][0] = sall[0] - sunlit_absorption[band][0];
         let tran_dif = (s2 + transmission[band][1]) / one_minus_q;
         transmission[band][1] = tran_dif;
         let reflected_dif = albg_dif * tran_dif;
-        sall[1] = sall[1].mul_add(reflected_dif, sall[1]);
-        albedo[band][1] = (-tran_dif).mul_add(1.0 - albg_dif, 1.0 - sall[1]);
-        sunlit_absorption[band][1] = ssun_rev.mul_add(reflected_dif, sunlit_absorption[band][1]);
+        sall[1] = sall[1].contract(reflected_dif, sall[1]);
+        albedo[band][1] = (-tran_dif).contract(1.0 - albg_dif, 1.0 - sall[1]);
+        sunlit_absorption[band][1] = ssun_rev.contract(reflected_dif, sunlit_absorption[band][1]);
         shaded_absorption[band][1] = sall[1] - sunlit_absorption[band][1];
         transmission[band][2] = s2d;
         direct_extinction = extkbd;

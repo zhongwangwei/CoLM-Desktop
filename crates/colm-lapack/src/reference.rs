@@ -11,6 +11,7 @@
 // 循环照参考 LAPACK/BLAS 的下标逐句展开，改成迭代器会让与 netlib 源码的对照失去意义。
 #![allow(clippy::needless_range_loop)]
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 /// 参考 BLAS 的 `c + t*a` 是否被编译器收成 FMA（见模块说明）。
 const FUSED: bool = cfg!(target_arch = "aarch64");
@@ -20,7 +21,7 @@ const SAFE_MINIMUM: f64 = f64::MIN_POSITIVE;
 
 fn update(accumulator: f64, factor: f64, value: f64, fused: bool) -> f64 {
     if fused {
-        factor.mul_add(value, accumulator)
+        factor.contract(value, accumulator)
     } else {
         accumulator + factor * value
     }

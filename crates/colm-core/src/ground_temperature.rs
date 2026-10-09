@@ -6,6 +6,7 @@
 //! `phase_change` with the rest of the Rust model.
 
 use anyhow::{ensure, Result};
+use colm_numeric::Contract;
 
 use crate::{
     phase_change, soil_thermal_properties, solve_tridiagonal, PhaseChangeInput, PhaseChangeState,
@@ -139,7 +140,7 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
         // 薄雪融化时 `scv`/`snowdp`/`qinfl` 由此偏开（第 402 轮探针）。
         layer_capacity[0] = input
             .snow_water_equivalent_kg_m2
-            .mul_add(ICE_HEAT_CAPACITY_J_KG_K, layer_capacity[0]);
+            .contract(ICE_HEAT_CAPACITY_J_KG_K, layer_capacity[0]);
     }
     ensure!(
         layer_capacity
@@ -167,7 +168,7 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
             // 原先是平铺。逐元素位型探针（`/tmp/gf/gtcoef_probe.sh`）在干窗第 0 步
             // 抓到 `tk(3)/tk(5)/tk(7)` 各差 1 ULP，`at`/`ct` 里随之偏 ——
             // `bt`/`rt` 全同，所以问题只在这一条分母上。
-            let denominator = conductivity[layer].mul_add(
+            let denominator = conductivity[layer].contract(
                 input.node_depth_m[layer + 1] - input.interface_depth_m[interface],
                 conductivity[layer + 1]
                     * (input.interface_depth_m[interface] - input.node_depth_m[layer]),
@@ -188,7 +189,7 @@ pub fn ground_temperature(input: GroundTemperatureInput<'_>) -> Result<GroundTem
     // （GIMPLE：`FMA(capr, z(j+1)-zi(j-1), z(j)-zi(j-1))`）。
     factor[0] = input.time_step_seconds / layer_capacity[0] * input.layer_thickness_m[0]
         / (0.5
-            * input.surface_temperature_factor.mul_add(
+            * input.surface_temperature_factor.contract(
                 input.node_depth_m[1] - input.interface_depth_m[0],
                 input.node_depth_m[0] - input.interface_depth_m[0],
             ));
@@ -284,15 +285,15 @@ fn layer_thermal_properties(input: GroundTemperatureInput<'_>) -> Result<(Vec<f6
         //   `thk = .FMA (.FMA (rho, 7.75e-5, (rho*1.105e-6)*rho), tkice-tkair, tkair)`
         // 平铺写法在 AT-Neu 1 月第 130 步（第一个雪层）让 `tk(0)` 与 `cv(0)` 各差 1 ULP，
         // 土壤 1-3 层温度随之偏开（第 402 轮探针）。
-        heat_capacity[layer] = input.liquid_water_kg_m2[layer].mul_add(
+        heat_capacity[layer] = input.liquid_water_kg_m2[layer].contract(
             WATER_HEAT_CAPACITY_J_KG_K,
             input.ice_water_kg_m2[layer] * ICE_HEAT_CAPACITY_J_KG_K,
         );
         let density = (input.liquid_water_kg_m2[layer] + input.ice_water_kg_m2[layer])
             / input.layer_thickness_m[layer];
         conductivity[layer] = density
-            .mul_add(7.75e-5, density * 1.105e-6 * density)
-            .mul_add(
+            .contract(7.75e-5, density * 1.105e-6 * density)
+            .contract(
                 ICE_THERMAL_CONDUCTIVITY_W_M_K - AIR_THERMAL_CONDUCTIVITY_W_M_K,
                 AIR_THERMAL_CONDUCTIVITY_W_M_K,
             );
@@ -318,7 +319,7 @@ fn surface_fluxes(
     // `fseng+fevpg*htvp` 三处都是 `FMA(fevpg, htvp, fseng)`（`_297/_105/_129`）。
     let ground_sensible = input
         .evaporation_ground_kg_m2_s
-        .mul_add(input.vaporization_heat_j_kg, input.sensible_ground_w_m2);
+        .contract(input.vaporization_heat_j_kg, input.sensible_ground_w_m2);
     let precipitation_delta_ground = input.precipitation_temperature_k - input.ground_temperature_k;
     // **第 374 轮更正**：这一段原先的注释写着"四个乘积各自先舍入一次再参与后面的加减"、
     // 于是 `dlrad*emg` 与两个降水热项都写成了平铺 —— 但 `-fdump-tree-optimized-lineno`
@@ -335,30 +336,30 @@ fn surface_fluxes(
     };
     let surface = input
         .downward_longwave_w_m2
-        .mul_add(input.ground_emissivity, surface);
+        .contract(input.ground_emissivity, surface);
     let surface = surface - ground_sensible;
-    let surface = rain_heat_capacity.mul_add(precipitation_delta_ground, surface);
-    let mut surface = precipitation_delta_ground.mul_add(snow_heat_capacity, surface);
+    let surface = rain_heat_capacity.contract(precipitation_delta_ground, surface);
+    let mut surface = precipitation_delta_ground.contract(snow_heat_capacity, surface);
     // `dhsdT` 的辐射项是 `FNMS(stefnc*(emg*4), (t*t)*t, cgrnd)`（`_261/_262/_264/_266`）。
     let stefan_factor = input.ground_emissivity * 4.0 * STEFAN_BOLTZMANN_W_M2_K4;
-    let derivative = (-input.ground_temperature_k.powi(3)).mul_add(
+    let derivative = (-input.ground_temperature_k.powi(3)).contract(
         stefan_factor,
         -input.ground_flux_temperature_derivative_w_m2_k,
     ) - rain_heat_capacity
         - snow_heat_capacity;
     if !input.use_split_soil_snow {
         // `hs = hs - emg*stefnc*t_grnd**4` ⇒ `FNMA(t**4, stefnc*emg, hs)`（`_64`）。
-        surface = (-input.ground_temperature_k.powi(4)).mul_add(emissivity_stefan, surface);
+        surface = (-input.ground_temperature_k.powi(4)).contract(emissivity_stefan, surface);
         return Ok((surface, 0.0, 0.0, derivative));
     }
 
     // 雪/土分开时辐射项按 `(fsno*emg)*stefnc` 分组后再吸收（`_83/_85`、`_91/_92`），
     // 与 `hs_soil`/`hs_snow` 里用的 `stefnc*emg`（`_258`）**不是**同一个分组。
-    surface = (-input.snow_surface_temperature_k.powi(4)).mul_add(
+    surface = (-input.snow_surface_temperature_k.powi(4)).contract(
         input.snow_cover_fraction * input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4,
         surface,
     );
-    surface = (-input.soil_surface_temperature_k.powi(4)).mul_add(
+    surface = (-input.soil_surface_temperature_k.powi(4)).contract(
         (1.0 - input.snow_cover_fraction) * input.ground_emissivity * STEFAN_BOLTZMANN_W_M2_K4,
         surface,
     );
@@ -366,20 +367,20 @@ fn surface_fluxes(
     // 顶层的 `cpliq*rain*Δ` 被 CSE 成公共量，这里的没有被提。
     let soil_sensible = input
         .evaporation_soil_kg_m2_s
-        .mul_add(input.vaporization_heat_j_kg, input.sensible_soil_w_m2);
+        .contract(input.vaporization_heat_j_kg, input.sensible_soil_w_m2);
     let soil_delta = input.precipitation_temperature_k - input.soil_surface_temperature_k;
     // `hs_soil`/`hs_snow` 的第一段（`main/MOD_GroundTemperature.F90:275-287`）GIMPLE 是
     // `.FMS (dlrad, emg, t**4*(emg*stefnc))` —— 熔进去的是 `dlrad*emg`，不是黑体项
     // （旧内核相反）。AT-Neu split 1 月第 233 步的雪层温度 1 ULP 由此而来。
-    let soil_base = input.downward_longwave_w_m2.mul_add(
+    let soil_base = input.downward_longwave_w_m2.contract(
         input.ground_emissivity,
         -(input.soil_surface_temperature_k.powi(4) * emissivity_stefan),
     ) - soil_sensible;
-    let soil = soil_delta.mul_add(
+    let soil = soil_delta.contract(
         snow_heat_capacity,
-        soil_delta.mul_add(rain_heat_capacity, soil_base),
+        soil_delta.contract(rain_heat_capacity, soil_base),
     );
-    let soil = (1.0 - input.snow_cover_fraction).mul_add(soil, input.absorbed_soil_shortwave_w_m2);
+    let soil = (1.0 - input.snow_cover_fraction).contract(soil, input.absorbed_soil_shortwave_w_m2);
     let snow_absorption = if use_snicar && input.snow_layers > 0 {
         snow_top_absorption
     } else {
@@ -387,15 +388,15 @@ fn surface_fluxes(
     };
     let snow_sensible = input
         .evaporation_snow_kg_m2_s
-        .mul_add(input.vaporization_heat_j_kg, input.sensible_snow_w_m2);
+        .contract(input.vaporization_heat_j_kg, input.sensible_snow_w_m2);
     let snow_delta = input.precipitation_temperature_k - input.snow_surface_temperature_k;
-    let snow_base = input.downward_longwave_w_m2.mul_add(
+    let snow_base = input.downward_longwave_w_m2.contract(
         input.ground_emissivity,
         -(input.snow_surface_temperature_k.powi(4) * emissivity_stefan),
     ) - snow_sensible;
-    let snow_inner = snow_delta.mul_add(
+    let snow_inner = snow_delta.contract(
         snow_heat_capacity,
-        snow_delta.mul_add(rain_heat_capacity, snow_base),
+        snow_delta.contract(rain_heat_capacity, snow_base),
     );
     // `hs_snow = hs_snow*fsno + sabg_snow`：乘积**没有**融合 —— GCC 把它提成
     // 两个 SNICAR 分支共用的 `_256`，而紧邻的 `hs_soil` 那一支 `FMA(1-fsno, ·, ·)`
@@ -440,17 +441,17 @@ fn temperature_system(
     // （同一个 `cnfac*fn(0)` 两个分支都用），最后 `FMA(括号, fact, t)`。
     let top_quotient = 1.0 + implicit * factor[0] * conductivity[0] / top_distance;
     if input.snow_layers > 0 && input.use_split_soil_snow {
-        diagonal[0] = (-(input.snow_cover_fraction * factor[0])).mul_add(derivative, top_quotient);
-        rhs[0] = factor[0].mul_add(
+        diagonal[0] = (-(input.snow_cover_fraction * factor[0])).contract(derivative, top_quotient);
+        rhs[0] = factor[0].contract(
             (-(input.snow_cover_fraction * derivative))
-                .mul_add(input.temperature_k[0], snow_heat_flux)
+                .contract(input.temperature_k[0], snow_heat_flux)
                 + input.crank_nicolson_factor * flux[0],
             input.temperature_k[0],
         );
     } else {
-        diagonal[0] = (-factor[0]).mul_add(derivative, top_quotient);
-        rhs[0] = factor[0].mul_add(
-            (-derivative).mul_add(input.temperature_k[0], surface_heat_flux)
+        diagonal[0] = (-factor[0]).contract(derivative, top_quotient);
+        rhs[0] = factor[0].contract(
+            (-derivative).contract(input.temperature_k[0], surface_heat_flux)
                 + input.crank_nicolson_factor * flux[0],
             input.temperature_k[0],
         );
@@ -466,7 +467,7 @@ fn temperature_system(
         // `sum = tk/dzp + tk1/dzm` 是商之和、本身不参与收缩。
         let conductivity_sum =
             conductivity[layer] / upper_distance + conductivity[layer - 1] / lower_distance;
-        let diagonal_sum = conductivity_sum.mul_add(implicit * factor[layer], 1.0);
+        let diagonal_sum = conductivity_sum.contract(implicit * factor[layer], 1.0);
         // 但 `rt = t + cnfac*fact*(fn-fn1)` **不融合**：那个乘积在三个内层分支
         // （雪层／`j==1 && split`／其它）里共用，GCC 把它 CSE 成一个临时量
         // （GIMPLE 的 `_462`）再与 `t` 相加。**相邻两条语句的结论可以相反**，
@@ -480,7 +481,7 @@ fn temperature_system(
             // `.FMA (sabg_snow_lyr, fact, t) + (cnfac项)`（`MOD_GroundTemperature.F90:347-349`）。
             rhs[layer] = if use_snicar {
                 input.snow_layer_absorption_w_m2.unwrap()[layer]
-                    .mul_add(factor[layer], input.temperature_k[layer])
+                    .contract(factor[layer], input.temperature_k[layer])
                     + conduction
             } else {
                 transient
@@ -488,10 +489,10 @@ fn temperature_system(
         } else if fortran_layer == 1 && input.use_split_soil_snow {
             // `bt = 1+P - (1-fsno)*dhsdT*fact` ⇒ 末项吸收（`FNMA((1-fsno)*dhsdT, fact, 1+P)`）。
             diagonal[layer] = (-((1.0 - input.snow_cover_fraction) * derivative))
-                .mul_add(factor[layer], diagonal_sum);
-            rhs[layer] = factor[layer].mul_add(
+                .contract(factor[layer], diagonal_sum);
+            rhs[layer] = factor[layer].contract(
                 (-((1.0 - input.snow_cover_fraction) * derivative))
-                    .mul_add(input.temperature_k[layer], soil_heat_flux),
+                    .contract(input.temperature_k[layer], soil_heat_flux),
                 transient,
             );
         } else {
@@ -506,7 +507,7 @@ fn temperature_system(
     // `rt = t - cnfac*fact*fn1` ⇒ 乘积被吸收（GIMPLE：`FNMA(cnfac*fact, fn1, t)`）。
     // `bt = 1 + (1-cnfac)*fact*tk/dzm` 是**商**，不收缩，原样保留。
     rhs[bottom] = (-(input.crank_nicolson_factor * factor[bottom]))
-        .mul_add(flux[bottom - 1], input.temperature_k[bottom]);
+        .contract(flux[bottom - 1], input.temperature_k[bottom]);
     (sub, diagonal, super_, rhs)
 }
 

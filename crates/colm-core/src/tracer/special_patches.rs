@@ -21,6 +21,7 @@
 //! * 其余（含 `sum(...)` 从 0 起逐项）为源码顺序的独立舍入。
 
 use anyhow::{bail, Result};
+use colm_numeric::Contract;
 
 use super::conservation::{
     tracer_apply_reactive_processes, tracer_balance_check, tracer_save_storage, BalanceCheckInput,
@@ -91,7 +92,7 @@ pub fn sync_tracer_patch_ratio(
         }
     }
     pools.wa = if tracer.is_isotope() {
-        (wa + aquifer_ref_water).mul_add(r_mix, -pools.aquifer_ref_mass)
+        (wa + aquifer_ref_water).contract(r_mix, -pools.aquifer_ref_mass)
     } else {
         wa * r_mix
     };
@@ -268,11 +269,11 @@ fn mixed_box(
         (r_vapor, r_vapor)
     };
     // `FMA(R_frost, dep_ice, FMA(precip, R_precip, R_dew*dep_liq))`。
-    let mut trc_input = r_frost.mul_add(
+    let mut trc_input = r_frost.contract(
         box_water.dep_ice_mass,
         box_water
             .atm_precip_mass
-            .mul_add(r_precip, r_dew * box_water.dep_liq_mass),
+            .contract(r_precip, r_dew * box_water.dep_liq_mass),
     );
     // 水体的湖亏补水按箱内比值：`FMA(R_pool, deficit, ...)`；冰川没有这一项。
     if let Some(deficit_mass) = box_water.deficit_mass {
@@ -281,7 +282,7 @@ fn mixed_box(
         } else {
             r_precip
         };
-        trc_input = r_pool.mul_add(deficit_mass, trc_input);
+        trc_input = r_pool.contract(deficit_mass, trc_input);
     }
     let trc_available = ((storage_beg - trc_held_storage) + trc_input).max(0.0);
     let water_before_output = water_beg + box_water.water_input;
@@ -798,7 +799,7 @@ pub fn tracer_waterbody_patch(
         open_water_wind: Some(
             input
                 .forc_us
-                .mul_add(input.forc_us, input.forc_vs * input.forc_vs)
+                .contract(input.forc_us, input.forc_vs * input.forc_vs)
                 .sqrt(),
         ),
     };

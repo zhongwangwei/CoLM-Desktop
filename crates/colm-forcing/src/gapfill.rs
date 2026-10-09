@@ -2,6 +2,7 @@
 //!
 //! 实现计划与科学边界见 `docs/plan-forcing-gap-repair.md`。
 
+use colm_numeric::Contract;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
@@ -1678,7 +1679,7 @@ impl Era5Catalog {
                     .into_iter()
                     .zip(north)
                     // 与内核一致：风速是 `sqrt(us*us+vs*vs)`，不是 `hypot`。
-                    .map(|(east, north)| east.mul_add(east, north * north).sqrt())
+                    .map(|(east, north)| east.contract(east, north * north).sqrt())
                     .collect())
             }
             6 => self.variable_series(

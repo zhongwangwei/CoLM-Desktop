@@ -19,6 +19,7 @@
 
 use crate::bgc_driver::{BgcPftConstants, BgcPhysics, BgcSwitches};
 use crate::bgc_state::BgcState;
+use colm_numeric::Contract;
 
 /// `BeginCNBalance`：记下步首总量。
 pub fn begin_cn_balance(s: &mut BgcState, _p: &BgcPhysics, _c: &BgcPftConstants, _sw: BgcSwitches) {
@@ -53,7 +54,7 @@ pub fn c_balance_check(
         + s.patch_flux.grainc_to_cropprodc[0]
         - s.patch_flux.som_c_leached[0];
     let col_errcb: f64 = (col_cinputs - col_coutputs)
-        .mul_add(p.deltim, -(s.patch.col_endcb[0] - s.patch.col_begcb[0]));
+        .contract(p.deltim, -(s.patch.col_endcb[0] - s.patch.col_begcb[0]));
     if col_errcb.abs() > cerror {
         // write(*,*)'column cbalance error    = ', col_errcb, i, p_iam_glb
         // write(*,*)'Latdeg,Londeg='             , dlat, dlon
