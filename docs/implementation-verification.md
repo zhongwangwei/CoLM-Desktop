@@ -32289,12 +32289,15 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 | `ch4` | 珠三角 113–115°E、22–24°N，PFT + BGC + CH4 示踪物（`inundation_mode = 'wetwat'`、`allowlakeprod = .false.`），2 天 | 316 | 逐位一致 |
 | `unstr` | `unstructured` 内核，`mesh-new` 默认非结构网格 | 159 | 逐位一致 |
 | `usgs` | `latlon-usgs` 内核 | 159 | **Rust 起初拒绝运行** → 修后逐位一致 |
-| `crop`、`irrig`、`lulcc`、`month` | 见下 | | 见下 |
+| `crop` | `latlon-crop` 内核，PFT + BGC，5 天（原始数据目录里 `global_CFT_surface_data.nc` 是指向集群路径的坏链接，用私有覆盖目录指向 `CFT/` 里的同名文件） | 382 | 逐位一致 |
+| `irrig` | 同上加 `DEF_USE_IRRIGATION`，7 月 5 天 | 401 | 逐位一致 |
+| `lulcc` | `DEF_USE_LULCC`，2005-12-31 起跨年到 2006（先用 `DEF_LC_YEAR = 2006` 补做一遍 mksrfdata，再只跑 colm 阶段） | 318 | 逐位一致（4 个 history 文件） |
+| `month` | 基础算例跑 31 天（1488 步） | 159 | 逐位一致 |
 
 **USGS：Rust 的输入校验比上游严。**`colm-rs: patch 0: plant-hydraulic inputs are physically invalid`。逐项打印失败的条件：四个 `kmax` 与 `vulnerability_shape` 都是 0。USGS 地类表（`MOD_Const_LC.F90:296-318`）里城市、水体、裸地三类的 `kmax_*0_usgs` 是 0，`ck0_usgs` 在这三类与冰雪两类是 0；这些斑块仍有一点叶面积，所以会进植物水力。上游照算：`spacAF_twoleaf` 的行列式为 0 走 `dx = 0`，`ck = 0` 时 `plc = 2**(-1)`、`d1plc = 0`，Fortran 跑完、输出没有 NaN。Rust 的求解本来就有同样的分支，只是 `validate` 要求 `> 0`。改为 `>= 0`（负数仍拒绝），加了单元测试 `zero_hydraulic_conductance_and_shape_follow_the_singular_branch`。这不是 x86 特有的问题：以前 Mac 上从没跑过 USGS 空间算例（USGS 只验证过站点 `uoz`）。修后 USGS 空间算例 159 个变量逐位一致；Mac 上 `colm-core` 510 项、`colm-runtime` 186 项通过。
 
 **没做 / 局限**：
-- 都是 4×4 网格；没有跑季节、年尺度的长时间积分。流域网格（`catchment`）没测：服务器上没有 `DEF_CatchmentMesh_data`。
+- 两批共 16 种配置全部逐位一致。都是 4×4 网格、最长 31 天；没有跑季节、年尺度的长时间积分。流域网格（`catchment`）没测：服务器上没有 `DEF_CatchmentMesh_data`。
 - aarch64 Linux、Windows、Intel Mac 没验证。逐位一致是**每个平台对自己平台的 Fortran**，不保证 Rust 在各平台上结果相同——aarch64 融合、x86 不融合，所以同一算例两个平台差几个 ULP，物理过程会放大它。
 - `colm-runtime` 与 `colm-forcing` 的测试在服务器上缺示例数据（`examples/Forcing/…`），本来就失败，所以 x86 上这两个 crate 的夹具测试是否需要跳过没有验证；`colm-agent` 的测试在服务器上缺离线依赖没能运行。
 - 向量化的 libm 只验证了 x86_64 Linux（glibc libmvec）。用户自己用向量化内核跑 Fortran 是合法的，只是不能再与 Rust 逐位对拍。
