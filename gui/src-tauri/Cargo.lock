@@ -527,6 +527,7 @@ dependencies = [
  "anyhow",
  "colm-lapack",
  "colm-namelist",
+ "colm-numeric",
 ]
 
 [[package]]
@@ -551,6 +552,7 @@ name = "colm-hist"
 version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
+ "colm-numeric",
 ]
 
 [[package]]
@@ -569,6 +571,7 @@ name = "colm-lapack"
 version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
+ "colm-numeric",
 ]
 
 [[package]]
@@ -577,6 +580,10 @@ version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
 ]
+
+[[package]]
+name = "colm-numeric"
+version = "0.3.0-beta.3"
 
 [[package]]
 name = "colm-schema"
