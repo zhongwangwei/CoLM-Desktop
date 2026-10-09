@@ -221,6 +221,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - **补丁的限制**：只能改 `src/` 里的普通文件；不许碰 `.git` 与 `oracle/golden/`（改了黄金等于改答案）；不许二进制补丁；512 KB 上限；应用前先 `git apply --check`，不能应用就一个字节都不改；工作区里有未提交的改动时拒绝。
 - **工具与审批**：读（`workspace_list`、`workspace_status`、`search_code`、`read_file`、`list_symbols`、`compare_outputs`）不审批；`workspace_create`、`apply_patch`、`revert` **每次都问**，审批者选了“本会话都允许”也不记（`Tool::session_allowance`）；`build_engine`、`build_kernel`、`run_tests`、`run_case_with`、`parity_check`、`regression_check` 按会话批一次。补丁的审批卡片里就是补丁本身，不是模型对它的描述。
 - **沙箱**：macOS 用 `sandbox-exec`（断网，只能写工作区、临时目录与 `CARGO_HOME`——cargo 即使 `--offline` 也要写锁文件）；Linux 用 `bwrap`（装了才用）；其余平台不套沙箱，报告里写 `none` 并说明。命令一律 `cargo … --offline --locked`，依赖要事先在本机缓存里。
+- **“两版一致”按改动决定要不要做**（第 654 轮）：只有改了会影响计算结果的路径（`vendor/CoLM202X/`、`build_kernel.sh`、Rust 引擎的计算 crate、`Cargo.lock`/`Cargo.toml`，见 `gates::RESULT_PATHS`）才需要；只改 `colm-hybrid`、界面、助手、工作区、远程、命令行外壳、文档或测试时，灯显示“不需要”（在当前提交上真做过就照实显示）。它本来就不是登记实验内核的前提。
 - **四道门都记“在哪个提交上测的”**：之后又有新提交就变成“过期”。编译与测试在当前提交上通过、回归没有判不通过，才登记实验内核；内核下拉框用的是界面里的匹配表，实验内核**只有人采纳之后**才进入匹配（排在同名正式内核前面），否则同名预设会悄悄抢走正式内核。
 - **回归的判定**：重构要求逐位一致；物理修改只要求没有新的 NaN/无穷大、水量与能量闭合诊断（`f_xerr`、`f_zerr`）不超过基线的十倍（不低于 1e-6）。两个闭合诊断本身是 1e-16 到 1e-10 量级的舍入残差，不放进“变化最大的变量”。
 - **D 级只在界面上**：采纳（设为默认）、导出补丁、回滚、删除是工作区面板里的按钮，对应 Tauri 命令 `workspace_adopt/export/revert/delete`；助手的工具注册表里没有这些名字，测试里断言它们不存在。

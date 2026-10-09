@@ -239,6 +239,14 @@ impl Workspace {
         Ok(workspace)
     }
 
+    /// 相对基线的改动里，有没有会影响计算结果的代码（决定“两版一致”要不要做）。
+    pub fn parity_needed(&self) -> Result<bool> {
+        let changed = git::changed_files(&self.src(), &self.info.base_commit)?;
+        Ok(crate::gates::parity_needed(
+            changed.iter().map(|f| f.path.as_str()),
+        ))
+    }
+
     pub fn summary(&self) -> Result<Summary> {
         let src = self.src();
         let head = git::head(&src)?;
@@ -248,7 +256,7 @@ impl Workspace {
             origin: self.info.origin.clone(),
             commits: git::commits_since(&src, &self.info.base_commit)?.len(),
             dirty: git::is_dirty(&src)?,
-            lights: self.info.gates.lights(&head),
+            lights: self.info.gates.lights_for(&head, self.parity_needed()?),
             head,
             created_at: self.info.created_at,
         })

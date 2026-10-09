@@ -854,7 +854,8 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-pass .ws-light-dot { color: #2e9e5b; }
 .ws-fail .ws-light-dot { color: #d64545; }
 .ws-stale .ws-light-dot { color: #d9a21b; }
-.ws-unknown .ws-light-dot { color: #9aa0a8; }
+.ws-unknown .ws-light-dot, .ws-not_needed .ws-light-dot { color: #9aa0a8; }
+.ws-not_needed .ws-light-state { font-weight: 400; color: var(--muted); }
 .ws-actions { display: grid; gap: 6px; margin-top: 6px; }
 .ws-action { display: grid; grid-template-columns: 9.5em 1fr; gap: 10px; align-items: center; }
 .ws-action .btn-ghost { justify-self: stretch; }

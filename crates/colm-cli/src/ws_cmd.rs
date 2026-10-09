@@ -149,7 +149,8 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             print(json!({
                 "workspace": workspace.info,
                 "head": head,
-                "lights": workspace.info.gates.lights(&head),
+                "lights": workspace.info.gates.lights_for(&head, workspace.parity_needed()?),
+                "parity_needed": workspace.parity_needed()?,
                 "commits": colm_workspace::git::commits_since(&src, &workspace.info.base_commit)?,
                 "changed_files": colm_workspace::git::changed_files(&src, &workspace.info.base_commit)?,
                 "dirty": colm_workspace::git::is_dirty(&src)?,

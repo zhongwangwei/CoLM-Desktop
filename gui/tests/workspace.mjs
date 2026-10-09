@@ -22,6 +22,7 @@ const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href
 assert.equal(workspace.lightText('pass'), '通过');
 assert.equal(workspace.lightText('stale'), '需要重测（之后又改过代码）');
 assert.equal(workspace.lightText('whatever'), '还没测');
+assert.equal(workspace.lightText('not_needed'), '不需要（没改会影响计算结果的代码）');
 assert.equal(
   workspace.lightsSummary({ compile: 'pass', tests: 'stale', regression: 'unknown', parity: 'fail' }),
   '编译 通过 · 测试 需要重测（之后又改过代码） · 两版一致 不通过 · 与原版对比 还没测',

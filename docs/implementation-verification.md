@@ -32352,3 +32352,11 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 助手：窗口上下文里列出启用中的实验内核（预设、工作区、提交）；系统提示要求说明一个回答基于哪个版本，并写清上面那几条规则。
 
 **验证**：`gui/tests` 全部通过（`workspace.mjs` 改为新文字与顺序，加 `LIGHT_HELP`、`adoptedFrom`；`assistant.mjs` 加实验内核的上下文）；`i18n.mjs` 全部有英文；`colm-agent` 54 项通过。面板只有连着后端才打得开，在应用里看。
+
+## 第 654 轮：“两版一致”按改动决定要不要做
+
+**问题**（用户）：加了 AI 替换之类的改动，结果肯定和原来不一样，“两版一致”还有必要吗？澄清：“两版一致”比的是**改后的 Fortran 对改后的 Rust**，不是改前对改后（那是“与原版对比”）。AI 替换本身是给算例装模型，不改源码，也不需要工作区；而 Fortran 内核本来就跑不了装了模型的算例。它真正有用的是**改了影响计算结果的代码**的时候：两边都改的物理修改（确认 Rust 和 Fortran 改成了一样），以及只改 Rust 引擎计算部分的修改（确认 Rust 仍和没动的 Fortran 一致；AI 插槽的代码改在引擎里也属于这一类——对拍用的是没装模型的算例，结果应当不变）。
+
+**改动**：`gates::parity_needed(路径)`：相对基线改动的文件碰了 `RESULT_PATHS`（`vendor/CoLM202X/`、`oracle/scripts/build_kernel.sh`、`colm-core`/`colm-runtime`/`colm-init`/`colm-srfdata`/`colm-forcing`/`colm-hist`/`colm-lapack`/`colm-numeric`/`colm-namelist`/`colm-schema`/`colm-case`/`colm-kernel`/`colm-h5chunk`/`colm-ncchar`、`Cargo.lock`、`Cargo.toml`、`rust-toolchain.toml`）才需要。`Gates::lights_for(head, parity_needed)`：不需要且当前提交上没做过时，灯为新的 `not_needed`；在当前提交上真做过就照实显示（通过或不通过）。`lights()` 保持“一律需要”，登记实验内核的条件不变（本来就不看这一项）。`ws-status` 与工作区列表用新的判断，`ws-status` 多一个 `parity_needed`；面板上是灰色的“不需要（没改会影响计算结果的代码）”，说明里写清什么时候需要；助手的 `parity_check` 描述提示 `parity_needed` 为假时跳过。
+
+**验证**：`vcmax-grass`（改了 Fortran 与 `colm-core`）：`parity_needed=true`，灯“通过”；临时工作区 `docs-only` 只改 `docs/upstream-bugs.md`：`parity_needed=false`，灯 `not_needed`（验证后已删除）。新增 `colm-workspace` 测试：路径判断（含 `colm-hybrid`、GUI、助手、文档、`oracle/scripts/regress.sh` 不需要，`colm-core-extra/` 这种前缀相近的不误判）、灯在各情况下的取值与 JSON 名；`colm-workspace` 40 项、`colm-agent` 54 项、`gui/tests` 全部通过，clippy 干净。

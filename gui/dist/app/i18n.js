@@ -2297,6 +2297,10 @@ const ZH_EN = [
   ['要搜索的权重数', 'Weights to search'],
   ['权重数超过了种群大小，差分进化可能搜不动；建议换小一点的网络，或加大种群。', 'There are more weights than the population size, so differential evolution may not search well; use a smaller network or a larger population.'],
   // 开发工作区面板（workspace.js）
+  ['不需要（没改会影响计算结果的代码）', 'Not needed (no change to code that affects results)'],
+  ['同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。只在改了会影响计算结果的代码（Fortran 上游或 Rust 引擎的计算部分）时需要', 'Whether the changed Fortran and the changed Rust give exactly the same results for the same case. Needed only when code that affects results changed (the Fortran upstream or the computing part of the Rust engine)'],
+  ['：同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。只在改了会影响计算结果的代码（Fortran 上游、Rust 引擎的计算部分或依赖版本）时需要；只改 AI 推理、界面、助手这类代码时显示灰色的“不需要”。', ': whether the changed Fortran and the changed Rust give exactly the same results for the same case. Needed only when code that affects results changed (the Fortran upstream, the computing part of the Rust engine, or dependency versions); when only code such as AI inference, the interface or the assistant changed, it shows a grey “Not needed”.'],
+  ['绿色是通过，红色是不通过，黄色是“需要重测”——检查之后又改过代码，原来的结果不算数了；灰色是还没测，或这次不需要。', 'Green means passed, red failed, yellow “needs retesting”: the code changed after the check, so the earlier result no longer counts; grey means not tested yet, or not needed this time.'],
   ['与原版对比', 'Compared with the original'],
   ['两版一致', 'Both versions agree'],
   ['停用这个内核', 'Stop using this kernel'],

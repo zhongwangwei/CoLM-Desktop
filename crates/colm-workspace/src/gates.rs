@@ -81,6 +81,42 @@ pub enum Light {
     Fail,
     /// 测过，但之后又有新提交。
     Stale,
+    /// 这次的改动用不着这道门（只用于“两版一致”：没改会影响计算结果的代码，见 [`parity_needed`]）。
+    NotNeeded,
+}
+
+/// 会影响两个引擎计算结果的路径：Fortran 上游与内核的编译脚本、Rust 引擎的计算部分与依赖版本。
+/// 只改这些以外的（AI 推理 `colm-hybrid`、界面、助手、工作区、远程、命令行外壳、文档、测试），
+/// 改后的 Fortran 与 Rust 仍是原来那两份，“两版一致”就用不着做。
+const RESULT_PATHS: &[&str] = &[
+    "vendor/CoLM202X/",
+    "oracle/scripts/build_kernel.sh",
+    "crates/colm-core/",
+    "crates/colm-runtime/",
+    "crates/colm-init/",
+    "crates/colm-srfdata/",
+    "crates/colm-forcing/",
+    "crates/colm-hist/",
+    "crates/colm-lapack/",
+    "crates/colm-numeric/",
+    "crates/colm-namelist/",
+    "crates/colm-schema/",
+    "crates/colm-case/",
+    "crates/colm-kernel/",
+    "crates/colm-h5chunk/",
+    "crates/colm-ncchar/",
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+];
+
+/// 这些改动（相对基线的文件路径）需不需要“两版一致”：碰了会影响计算结果的代码才需要。
+pub fn parity_needed<'a>(paths: impl IntoIterator<Item = &'a str>) -> bool {
+    paths.into_iter().any(|path| {
+        RESULT_PATHS
+            .iter()
+            .any(|prefix| path == *prefix || (prefix.ends_with('/') && path.starts_with(prefix)))
+    })
 }
 
 fn light(ok: Option<bool>, measured: Option<&str>, head: &str) -> Light {
@@ -102,9 +138,15 @@ pub struct Lights {
 }
 
 impl Gates {
-    /// 在 `head` 这个提交上，各道门的状态。编译灯看引擎与所有预设的内核：有一个不通过就是不通过，
-    /// 全部通过才是通过。
+    /// 在 `head` 这个提交上，各道门的状态，“两版一致”一律当作需要（见 [`Gates::lights_for`]）。
     pub fn lights(&self, head: &str) -> Lights {
+        self.lights_for(head, true)
+    }
+
+    /// 在 `head` 这个提交上，各道门的状态。编译灯看引擎与所有预设的内核：有一个不通过就是不通过，
+    /// 全部通过才是通过。`parity_needed` 为假（这次没改会影响计算结果的代码）时，“两版一致”显示
+    /// “不需要”——除非在当前提交上真的做过，那就照实显示。
+    pub fn lights_for(&self, head: &str, parity_needed: bool) -> Lights {
         let runs: Vec<&GateRun> = self.engine.iter().chain(self.kernels.values()).collect();
         let compile = if runs.is_empty() {
             Light::Unknown
@@ -145,11 +187,14 @@ impl Gates {
                 self.regression.as_ref().map(|r| r.commit.as_str()),
                 head,
             ),
-            parity: light(
+            parity: match light(
                 self.parity.as_ref().map(|p| p.ok),
                 self.parity.as_ref().map(|p| p.commit.as_str()),
                 head,
-            ),
+            ) {
+                Light::Unknown | Light::Stale if !parity_needed => Light::NotNeeded,
+                other => other,
+            },
         }
     }
 

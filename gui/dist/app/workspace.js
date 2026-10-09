@@ -20,6 +20,7 @@ const LIGHT_TEXT = {
   fail: '不通过',
   stale: '需要重测（之后又改过代码）',
   unknown: '还没测',
+  not_needed: '不需要（没改会影响计算结果的代码）',
 };
 
 /** 四项检查，按做的先后排：先能编译，再测试，再看 Fortran 与 Rust 两版一致，最后和原版比。 */
@@ -29,7 +30,7 @@ const LIGHT_NAMES = { compile: '编译', tests: '测试', parity: '两版一致'
 export const LIGHT_HELP = {
   compile: '改过的代码能不能编出 Rust 引擎和 Fortran 内核',
   tests: '自动测试是否通过，包括 Fortran 和 Rust 里的参数表是否同步',
-  parity: '同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样',
+  parity: '同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。只在改了会影响计算结果的代码（Fortran 上游或 Rust 引擎的计算部分）时需要',
   regression: '和改之前的正式版本比：结果可以变，但不能出现 NaN，水量和能量闭合不能变差',
 };
 
