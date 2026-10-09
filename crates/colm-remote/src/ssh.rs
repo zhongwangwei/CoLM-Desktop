@@ -132,7 +132,9 @@ impl Ssh {
 
     /// 把一个现成的 `.tar.gz` 传上去解开。
     pub fn upload_tarball(&self, tarball: &Path, remote_dir: &str) -> Result<()> {
-        self.upload_with(Command::new("cat").arg(tarball), remote_dir)
+        let file = std::fs::File::open(tarball)
+            .with_context(|| format!("cannot read {}", tarball.display()))?;
+        self.upload_stream(file.into(), remote_dir)
     }
 
     /// 把 `producer` 的输出（gzip 压缩的 tar 流）在远程解到 `remote_dir`。
@@ -143,6 +145,18 @@ impl Ssh {
             .stderr(Stdio::piped());
         let mut producer = producer.spawn().context("cannot start tar")?;
         let stream = producer.stdout.take().context("no tar output")?;
+        let result = self.upload_stream(stream.into(), remote_dir);
+        let producer = producer.wait_with_output()?;
+        if !producer.status.success() {
+            bail!(
+                "packing failed: {}",
+                String::from_utf8_lossy(&producer.stderr).trim()
+            );
+        }
+        result
+    }
+
+    fn upload_stream(&self, stream: Stdio, remote_dir: &str) -> Result<()> {
         let remote = format!(
             "mkdir -p {dir} && tar -xzf - -C {dir}",
             dir = quote(remote_dir)
@@ -153,13 +167,6 @@ impl Ssh {
             .stdin(stream)
             .output()
             .context("cannot start ssh")?;
-        let producer = producer.wait_with_output()?;
-        if !producer.status.success() {
-            bail!(
-                "packing failed: {}",
-                String::from_utf8_lossy(&producer.stderr).trim()
-            );
-        }
         if !ssh.status.success() {
             bail!(
                 "upload to {}:{remote_dir} failed: {}",

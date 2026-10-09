@@ -27,6 +27,9 @@ pub trait Approver {
     fn preapproved(&self, _name: &str, _tier: Tier) -> bool {
         false
     }
+    fn recovery_requires_approval(&self) -> bool {
+        false
+    }
     /// 记下“本会话不再询问”。
     fn remember(&mut self, _name: &str) {}
 }
@@ -133,6 +136,8 @@ pub fn execute_tool(
     };
     let summary = tool.summary(&args);
     let preapproved = tool.tier().needs_approval()
+        && !tool.requires_explicit_approval()
+        && !approver.recovery_requires_approval()
         && tool.session_allowance()
         && approver.preapproved(&call.name, tool.tier());
     emit(Outbound::ToolCall {
@@ -143,6 +148,9 @@ pub fn execute_tool(
         summary: summary.clone(),
         preapproved,
     });
+    if cancel.load(Ordering::SeqCst) {
+        return "error: cancelled before execution; inspect existing state before retrying".into();
+    }
     if tool.tier().needs_approval() && !preapproved {
         let request = Outbound::ApprovalRequest {
             id: call.id.clone(),
@@ -150,10 +158,19 @@ pub fn execute_tool(
             tier: tool.tier(),
             summary,
             arguments: call.arguments.clone(),
+            explicit_only: tool.requires_explicit_approval()
+                || !tool.session_allowance()
+                || approver.recovery_requires_approval(),
         };
         emit(request.clone());
+        if cancel.load(Ordering::SeqCst) {
+            return "error: cancelled before approval".into();
+        }
         let decision = approver.decide(&request);
-        if decision == Decision::ApproveForSession && tool.session_allowance() {
+        if decision == Decision::ApproveForSession
+            && tool.session_allowance()
+            && !approver.recovery_requires_approval()
+        {
             approver.remember(&call.name);
         }
         if let Decision::Deny(note) = decision {

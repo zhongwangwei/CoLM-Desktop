@@ -23,7 +23,7 @@ pub const BINARIES: [(&str, &str); 4] = [
 ];
 
 /// 快照包含的仓库路径（整个 workspace 加编译期读入的 `vendor`）。
-pub const SNAPSHOT_PATHS: [&str; 7] = [
+pub const SNAPSHOT_PATHS: [&str; 8] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates",
@@ -31,6 +31,7 @@ pub const SNAPSHOT_PATHS: [&str; 7] = [
     "xtask",
     "vendor",
     "scripts",
+    "docs",
 ];
 
 /// 引擎源码从哪来。
@@ -143,7 +144,7 @@ pub fn engine_dir(root: &str, id: &str) -> String {
 
 /// 服务器上这份快照的源码在不在（在就不必再传）。
 pub fn uploaded(ssh: &Ssh, root: &str, id: &str) -> Result<bool> {
-    let dir = quote(&format!("{}/src/Cargo.lock", engine_dir(root, id)));
+    let dir = quote(&format!("{}/src/.upload-complete", engine_dir(root, id)));
     Ok(ssh
         .run_ok(&format!("test -f {dir} && echo yes || echo no"))?
         .trim()
@@ -156,11 +157,47 @@ pub fn upload(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<bool> {
         return Ok(false);
     }
     let dest = format!("{}/src", engine_dir(root, &snapshot.id));
-    match &snapshot.source {
-        Source::Checkout(repo) => ssh.upload_list(repo, &snapshot.files, &dest)?,
-        Source::Tarball(path) => ssh.upload_tarball(path, &dest)?,
+    let stage = ssh
+        .run_ok(&format!(
+            "mkdir -p {engine} && mktemp -d {template}",
+            engine = quote(&engine_dir(root, &snapshot.id)),
+            template = quote(&format!("{dest}.upload.XXXXXXXX")),
+        ))?
+        .trim()
+        .to_owned();
+    let result: Result<()> = (|| {
+        match &snapshot.source {
+            Source::Checkout(repo) => ssh.upload_list(repo, &snapshot.files, &stage)?,
+            Source::Tarball(path) => ssh.upload_tarball(path, &stage)?,
+        }
+        ssh.run_ok(&publish_source_script(&stage, &dest))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = ssh.run_ok(&format!("rm -rf -- {}", quote(&stage)));
     }
+    result?;
     Ok(true)
+}
+
+fn publish_source_script(stage: &str, dest: &str) -> String {
+    format!(
+        r#"set -e
+exec 9>{lock}
+flock 9
+if [ -f {dest}/.upload-complete ]; then
+  rm -rf -- {stage}
+else
+  test -f {stage}/Cargo.lock
+  touch {stage}/.upload-complete
+  rm -rf -- {dest}
+  mv -- {stage} {dest}
+fi
+"#,
+        lock = quote(&format!("{dest}.upload.lock")),
+        stage = quote(stage),
+        dest = quote(dest)
+    )
 }
 
 /// 作业脚本里“确保引擎编好”的一段：没编过就加锁编译，编好把四个程序放进 `bin`。

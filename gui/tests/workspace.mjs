@@ -10,10 +10,12 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'colm-workspace-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 for (const [name, body] of Object.entries({
-  'ipc.js': 'export const invoke = async () => ({}); export const listen = async () => {}; export const hasBackend = false;',
-  'ui.js': 'export const $ = () => null; export const status = () => {}; export const baseName = p => String(p).split("/").pop(); export const appConfirm = async () => true; export const appPrompt = async () => null;',
+  'ipc.js': 'export const invoke = async (...args) => globalThis.workspaceInvoke ? globalThis.workspaceInvoke(...args) : ({}); export const listen = async () => {}; export const hasBackend = false;',
+  'ui.js': 'export const $ = id => globalThis.workspaceElements?.[id] ?? null; export const status = () => {}; export const baseName = p => String(p).split("/").pop(); export const appConfirm = async () => true; export const appPrompt = async () => null;',
   'state.js': 'export const state = { kernels: [] };',
 })) await writeFile(join(temp, 'app', name), body);
+await writeFile(join(temp, 'app', 'workspace.js'),
+  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace };\n');
 const workspace = await import(pathToFileURL(join(temp, 'app', 'workspace.js')).href);
 const kernel = await import(pathToFileURL(join(temp, 'app', 'kernel.js')).href);
 const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
@@ -70,13 +72,57 @@ assert.equal(kernel.kernelForSubgrid('IGBP', { grid: 'site' }).dir, '/app/kernel
 
 // 接线：按钮和对话框都在页面里，助手面板头有入口；D 级操作没有出现在助手的工具里。
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
-for (const id of ['workspace-dialog', 'workspace-list', 'workspace-refresh', 'workspace-close', 'assistant-workspaces-btn']) {
+for (const id of ['workspace-dialog', 'workspace-list', 'workspace-refresh', 'workspace-close', 'assistant-workspaces-btn',
+  'research-workspaces-btn', 'workspace-create-form', 'workspace-name', 'workspace-source', 'workspace-rev', 'workspace-create', 'workspace-create-status']) {
   assert.ok(html.includes(`id="${id}"`), id);
 }
+assert.match(html, /id="workspace-name"[^>]*required[^>]*maxlength="40"/);
+assert.match(html, /从仓库创建时只复制已提交的代码，未提交的修改不会带入/);
+assert.match(html, /id="workspace-create-status"[^>]*aria-live="polite"/);
 const main = await readFile(join(root, 'dist', 'app', 'main.js'), 'utf8');
 assert.match(main, /import '\.\/workspace\.js';/);
 const assistant = await readFile(join(root, 'dist', 'app', 'assistant.js'), 'utf8');
 for (const forbidden of ['workspace_adopt', 'workspace_delete', 'workspace_export', 'workspace_revert']) {
   assert.ok(!assistant.includes(forbidden), `${forbidden} must not be reachable from the assistant panel code`);
 }
+
+// Direct creation: invalid input does not call IPC; one pending submit, then retry after failure.
+const elements = Object.fromEntries(['workspace-create-form', 'workspace-name', 'workspace-source', 'workspace-rev',
+  'workspace-source-browse', 'workspace-create', 'workspace-create-status', 'workspace-list']
+  .map(id => [id, { value: '', disabled: false, textContent: '', className: '', replaceChildren() {}, append() {} }]));
+globalThis.workspaceElements = elements;
+globalThis.document = { documentElement: { lang: 'zh' }, createElement: () => ({}) };
+elements['workspace-name'].value = 'experiment';
+elements['workspace-create-form'].reportValidity = () => false;
+const calls = [];
+globalThis.workspaceInvoke = async (...args) => { calls.push(args); return {}; };
+await workspace.createWorkspace({ preventDefault() {} });
+assert.equal(calls.length, 0);
+elements['workspace-create-form'].reportValidity = () => true;
+let rejectCreation;
+globalThis.workspaceInvoke = (...args) => {
+  calls.push(args);
+  return new Promise((_, reject) => { rejectCreation = reject; });
+};
+const pending = workspace.createWorkspace({ preventDefault() {} });
+assert.deepEqual(calls[0], ['workspace_create', { name: 'experiment', source: null, rev: null }]);
+assert.equal(elements['workspace-create'].disabled, true);
+await workspace.createWorkspace({ preventDefault() {} });
+assert.equal(calls.length, 1);
+rejectCreation(new Error('source unavailable'));
+await pending;
+assert.equal(elements['workspace-create'].disabled, false);
+assert.equal(elements['workspace-name'].value, 'experiment');
+assert.equal(elements['workspace-create-status'].textContent, 'source unavailable');
+elements['workspace-source'].value = '/path with spaces/repo';
+elements['workspace-rev'].value = ' feature/soil ';
+globalThis.workspaceInvoke = async (...args) => {
+  calls.push(args);
+  return args[0] === 'workspace_create' ? { dir: '/workspaces/experiment' } : {};
+};
+await workspace.createWorkspace({ preventDefault() {} });
+assert.deepEqual(calls[1], ['workspace_create', { name: 'experiment', source: '/path with spaces/repo', rev: 'feature/soil' }]);
+assert.deepEqual(calls.slice(2).map(call => call[0]).sort(), ['workspace_kernels', 'workspace_list']);
+assert.match(elements['workspace-create-status'].textContent, /已创建工作区 experiment.*\/workspaces\/experiment/);
+assert.equal(elements['workspace-create'].disabled, false);
 console.log('workspace: lights, adoption, kernel matching and wiring ok');

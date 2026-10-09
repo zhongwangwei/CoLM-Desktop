@@ -130,3 +130,58 @@ fn file_periods_and_ranges() {
     assert!(in_range((2004, None), from, to) && !in_range((2005, None), from, to));
     assert!(parse_month("2004-13").is_err() && parse_month("2004").is_err());
 }
+
+#[test]
+fn missing_variables_preserve_existing_output_and_do_not_create_new_output() {
+    let dir = temp("missing-safe");
+    let src = dir.join("CASE_hist_2004-01.nc");
+    history(&src, 2);
+    let out = dir.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let unrelated = out.join("keep.txt");
+    std::fs::write(&unrelated, "existing data").unwrap();
+    assert!(subset_files(&[&src], &out, &set(&["missing"]), 0).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&unrelated).unwrap(),
+        "existing data"
+    );
+    let fresh = dir.join("fresh");
+    assert!(subset_files(&[&src], &fresh, &set(&["missing"]), 0).is_err());
+    assert!(!fresh.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn existing_outputs_are_never_overwritten() {
+    let dir = temp("no-overwrite");
+    let src = dir.join("CASE_hist_2004-01.nc");
+    history(&src, 2);
+    let out = dir.join("out");
+    std::fs::create_dir(&out).unwrap();
+    let target = out.join(src.file_name().unwrap());
+    std::fs::write(&target, "existing data").unwrap();
+    assert!(subset_files(&[&src], &out, &set(&["f_a"]), 0).is_err());
+    assert!(subset_file(&src, &target, &set(&["f_a"]), 0).is_err());
+    assert_eq!(std::fs::read_to_string(target).unwrap(), "existing data");
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn subset_directory_is_complete_on_success_and_removed_on_copy_failure() {
+    let dir = temp("owned-output");
+    let src = dir.join("CASE_hist_2004-01.nc");
+    history(&src, 2);
+    let out = dir.join("out");
+    let stats = subset_files(&[&src], &out, &set(&["f_a"]), 0).unwrap();
+    assert_eq!(stats.found, set(&["f_a"]));
+    let file = netcdf::open(out.join(src.file_name().unwrap())).unwrap();
+    assert!(file.variable("f_a").is_some());
+    assert!(file.variable("f_b").is_none());
+    drop(file);
+    // Duplicate basenames fail exclusive file creation after the first copy.
+    let failed = dir.join("failed");
+    assert!(subset_files(&[&src, &src], &failed, &set(&["f_a"]), 0).is_err());
+    assert!(!failed.exists());
+    assert!(out.exists());
+    std::fs::remove_dir_all(dir).unwrap();
+}

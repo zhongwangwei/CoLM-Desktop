@@ -184,3 +184,27 @@ fn the_docs_directory_is_found_above_the_agent_binary() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn packaged_docs_take_precedence_over_a_checkout_in_the_working_directory() {
+    let root = std::env::temp_dir().join(format!("colm-packaged-docs-{}", std::process::id()));
+    let resources = root.join("CoLM.app/Contents/Resources");
+    let bin = root.join("CoLM.app/Contents/MacOS");
+    let checkout = root.join("checkout");
+    for dir in [&resources, &checkout] {
+        std::fs::create_dir_all(dir.join("docs")).unwrap();
+        std::fs::write(dir.join("docs/design-ai-assistant.md"), "x").unwrap();
+    }
+    std::fs::create_dir_all(&bin).unwrap();
+    assert_eq!(
+        docs_root(&[resources.clone(), bin.clone(), checkout.clone()]),
+        Some(resources.join("docs"))
+    );
+    assert_eq!(docs_root(&[bin, checkout]), Some(resources.join("docs")));
+    // Windows/Linux resource directories can carry docs directly beside the executable.
+    assert_eq!(
+        docs_root(std::slice::from_ref(&resources)),
+        Some(resources.join("docs"))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

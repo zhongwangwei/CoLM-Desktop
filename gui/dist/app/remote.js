@@ -70,6 +70,7 @@ export function jobSummary(job) {
   }
   if (job.state === 'finished') {
     if (job.exit_code !== 0) return `${t('失败')}（${t('退出码')} ${job.exit_code}）`;
+    if (job.autoFetch === false && !job.fetched) return t('完成，等待手动取回结果');
     if (job.fetched && job.partial) return t('完成，已取回所选变量（可以再取回全部）');
     return job.fetched ? t('完成，结果已取回') : t('完成，正在取回结果…');
   }
@@ -294,7 +295,7 @@ function renderJobs() {
       cancel.onclick = () => cancelJob(dir);
       head.appendChild(cancel);
     }
-    if (job.state === 'finished' && job.exit_code === 0 && job.fetched && job.partial) {
+    if (job.state === 'finished' && job.exit_code === 0 && (job.partial || !job.fetched)) {
       const all = Object.assign(document.createElement('button'), { className: 'btn-ghost', type: 'button', textContent: t('取回全部变量') });
       all.onclick = () => { all.disabled = true; fetchJob(dir, true); };
       head.appendChild(all);
@@ -316,6 +317,9 @@ async function refreshJob(dir) {
   const job = jobs.get(dir);
   try {
     const answer = await invoke('remote_status', { case: dir });
+    if (job.job && (answer.record?.job !== job.job || answer.record?.host !== job.host)) {
+      Object.assign(job, { autoFetch: false, fetched: false, partial: false });
+    }
     Object.assign(job, {
       host: answer.record?.host ?? job.host,
       job: answer.record?.job ?? job.job,
@@ -328,7 +332,7 @@ async function refreshJob(dir) {
       progress: answer.progress,
       error: null,
     });
-    if (job.state === 'finished' && job.exit_code === 0 && !job.fetched) await fetchJob(dir);
+    if (job.state === 'finished' && job.exit_code === 0 && !job.fetched && job.autoFetch !== false) await fetchJob(dir);
   } catch (error) {
     job.error = String(error?.message || error);
   }
@@ -353,7 +357,7 @@ async function fetchJob(dir, all = false) {
 
 async function poll() {
   pollTimer = null;
-  const active = [...jobs].filter(([, j]) => j.state === 'running' || j.state === 'queued' || (j.state === 'finished' && j.exit_code === 0 && !j.fetched));
+  const active = [...jobs].filter(([, j]) => j.state === 'running' || j.state === 'queued' || (j.state === 'finished' && j.exit_code === 0 && !j.fetched && j.autoFetch !== false));
   await Promise.all(active.map(([dir]) => refreshJob(dir)));
   renderJobs();
   const running = [...jobs.values()].filter(j => j.state === 'running' || j.state === 'queued');
@@ -407,10 +411,8 @@ async function resumeJobs() {
   for (const dir of dirs) {
     try {
       const answer = await invoke('remote_status', { case: dir });
-      jobs.set(dir, { host: answer.record.host, fetched: false });
+      jobs.set(dir, { host: answer.record.host, job: answer.record.job, fetched: false, autoFetch: !state.cases.find(c => c.dir === dir)?.has_history });
       await refreshJob(dir);
-      // 已经取回过的不再取：本机历史比服务器上的新或一样新时视为已取回。
-      if (jobs.get(dir).state === 'finished' && state.cases.find(c => c.dir === dir)?.has_history) jobs.get(dir).fetched = true;
     } catch {
       // 没在服务器上跑过（没有提交记录），不显示。
     }

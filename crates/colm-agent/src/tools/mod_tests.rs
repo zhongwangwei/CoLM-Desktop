@@ -100,3 +100,22 @@ fn driving_the_window_replaces_background_case_creation() {
         assert!(names(&window).contains(&tool), "{tool}");
     }
 }
+
+#[test]
+fn basic_file_tools_are_shared_by_builtin_and_mcp_registries() {
+    for registry in [Registry::standard(), Registry::standard_with(false, true)] {
+        for (name, tier) in [
+            ("path_info", Tier::Read),
+            ("list_directory", Tier::Read),
+            ("read_text_file", Tier::Read),
+            ("create_directory", Tier::Act),
+            ("copy_file", Tier::Act),
+            ("write_text_file", Tier::Act),
+        ] {
+            let tool = registry
+                .find(name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert_eq!(tool.tier(), tier, "{name}");
+        }
+    }
+}

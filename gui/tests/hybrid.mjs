@@ -9,11 +9,41 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'colm-hybrid-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
+await writeFile(join(temp, 'app', 'hybrid.js'),
+  (await readFile(join(temp, 'app', 'hybrid.js'), 'utf8')) + '\nexport { filterSlotSelect, setImportSlot, syncImportSlot };\n');
 // 没有页面：模块加载时找不到卡片就不接线。
 globalThis.window = {};
 globalThis.document = { getElementById: () => null, documentElement: { lang: 'zh' } };
 globalThis.addEventListener = () => {};
 const hybrid = await import(pathToFileURL(join(temp, 'app', 'hybrid.js')).href);
+const { state: hybridState } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
+
+// A changed select value must also rebuild the import fields; process mode must not be overwritten by async land-mode results.
+{
+  const originalDocument = globalThis.document;
+  const originalStep = hybridState.step;
+  const makeNode = () => ({ children: [], addEventListener() {},
+    append(...nodes) { this.children.push(...nodes); }, appendChild(node) { this.children.push(node); },
+    replaceChildren(...nodes) { this.children = nodes; } });
+  const select = { value: 'land_class', options: ['land_class', 'pft', 'soil_stress'].map(value => ({ value })) };
+  const outputs = makeNode(); outputs.children.push({ read: () => ({ name: 'DEF_LC_VMAX25' }) });
+  const features = { value: 'patchclass' };
+  const nodes = { 'hybrid-slot': select, 'hybrid-outputs': outputs, 'hybrid-features': features };
+  globalThis.document = { ...originalDocument, getElementById: id => nodes[id] ?? null, createElement: makeNode };
+  hybridState.step = 'hybrid-process';
+  assert.equal(hybrid.filterSlotSelect(select, 'process'), true);
+  hybrid.setImportSlot(select.value, true);
+  assert.equal(outputs.children[0].read().name, hybrid.slotDefaults('soil_stress').output.name);
+  assert.equal(features.value, hybrid.slotDefaults('soil_stress').features);
+  hybrid.syncImportSlot([{ land_mode: 'lct' }]);
+  assert.equal(select.value, 'soil_stress');
+  hybridState.step = 'hybrid-learn';
+  hybrid.syncImportSlot([{ land_mode: 'pft' }]);
+  assert.equal(select.value, 'pft');
+  assert.equal(outputs.children[0].read().name, 'DEF_PFT_VMAX25');
+  globalThis.document = originalDocument;
+  hybridState.step = originalStep;
+}
 
 assert.equal(hybrid.slotForMode('lct'), 'land_class');
 assert.equal(hybrid.slotForMode('pft'), 'pft');

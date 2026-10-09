@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-08-28
+- Last refreshed: 2026-10-10
 - Primary product surfaces: CoLM Desktop 单点算例向导、运行工作台、结果分析、不确定性分析、参数调优
 - Evidence reviewed: `docs/design.md`, `docs/design-gui3.md`, `docs/design-gate.md`, `docs/design-prep.md`, `gui/dist/index.html`, `gui/dist/app/results.js`, `gui/dist/app/style.css`
 
@@ -90,3 +90,10 @@
 - 第 1 页必须用字段说明卡解释指标、最少配对、站点方式、spin-up、校准/验证窗口、种群、代数、随机种子、并行数和刷新参数，且每项都有“是什么 / 怎么选 / 选择后果”。
 - 参数调优不暴露额外内核运行目录；内核继承基本设定，并在生成调优任务时记录指纹。
 - 目标变量页必须解释目标权重和可评估条件；预算页必须显示运行次数公式；结果页必须提醒校准/验证对比与另存保护，最佳方案不能覆盖原算例。
+
+## Development workspace creation
+- Decision (2026-10-10): 工作区面板顶部常显“新建工作区”表单，默认当前应用源码，只需填写名称；其他源码与版本折叠为可选项。研究页和助手面板均提供明确的“开发工作区”入口。
+- Reuse: 使用已有 `.card`、`.field`、`.browse`、`.run-btn` 和应用内对话框；不增加框架或样式层。
+- State contract: 创建中锁定表单和重复提交；失败保留输入并显示错误；成功展示工作区位置并刷新列表。名称有标签与格式提示，结果使用 `aria-live`。
+- Source contract: 本地仓库只复制已提交版本，界面明确说明未提交修改不会带入；安装版默认使用随包源码包。新建只创建源码副本，不编译或运行模型。
+- Verification: 17 个 GUI 脚本通过，包含表单调用参数、重复提交、失败恢复和成功刷新；5 项工作区生命周期 Rust 测试通过，包含同名并发创建保护。CLI 用小型 Git 仓库和模拟安装包验证实际创建；前后端接口检查和 Tauri 库类型检查通过。完整 Tauri 构建、打包与桌面实测尚未执行。

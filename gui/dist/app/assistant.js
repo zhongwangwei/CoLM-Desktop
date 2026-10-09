@@ -13,13 +13,14 @@ import { language, translateZh } from './i18n.js';
 // ---- 纯函数（tests/assistant.mjs）----------------------------------------------------------
 
 /** 随消息附上的“当前页面”说明：页面与具体步骤、选中的算例、内核、项目目录，以及这一页的关键信息（`details`）。 */
-export function viewContext({ step, flow, caseDir, kernel, root, details = [] }) {
+export function viewContext({ step, flow, caseDir, kernel, root, variable, details = [] }) {
   return [
     step && `page: ${step}`,
     flow && flow !== step && `workflow step: ${flow}`,
     caseDir && `selected case: ${caseDir}`,
     kernel && `kernel: ${kernel}`,
-    root && `project directory: ${root}`,
+    root && `file operations directory: ${root}`,
+    variable && `selected history variable: ${variable}`,
     ...details,
   ].filter(Boolean).join('\n');
 }
@@ -69,20 +70,27 @@ export function pagePrompts(flow) {
   const table = {
     run: [
       P('检查运行设置', '检查当前算例的运行设置（时段、预热、输出）是否合理。'),
-      P('为什么失败', '上一次运行有没有失败或异常？请看运行状态与日志，找出原因。'),
+      P('为什么失败', '请用固定启动失败流程诊断当前算例，先调用 diagnostic_plan（workflow=startup）；按已确认事实、待验证原因、下一步实验报告。'),
     ],
     'result-overview': [P('总结这次结果', '总结当前算例的结果：模拟时段、主要输出，以及有没有明显异常。')],
-    'result-series': [P('偏差在哪个季节', '时间序列上，模型与观测的偏差主要出现在哪个季节或时段？')],
+    'result-series': [
+      P('诊断选中变量', '请用固定通量偏差流程分析当前选中的变量，先调用 diagnostic_plan（workflow=flux）；核对单位、时段和观测覆盖，再区分已确认事实、待验证原因和下一步实验。'),
+      P('偏差在哪个季节', '时间序列上，模型与观测的偏差主要出现在哪个季节或时段？'),
+    ],
     'result-evaluation': [
+      P('分析潜热偏差', '请用固定通量偏差流程分析当前算例的潜热，先调用 diagnostic_plan（workflow=flux，variable=f_lfevpa）；缺少观测或对齐信息时明确说明，不凭聚合指标认定原因。'),
       P('解释这些指标', '解释当前算例的评估指标：哪些变量模拟得好、哪些差，可能的原因是什么？'),
       P('偏差在哪个季节', '偏差主要出现在哪个季节或时段？请结合时间序列与指标说明。'),
     ],
     'result-comparison': [P('哪个站点最差', '多站点比较里哪个站点模拟得最差？它和其他站点有什么不同？')],
-    'result-diagnostics': [P('检查闭合', '检查水量与能量闭合诊断（f_xerr、f_zerr）有没有异常，异常出在哪个时段。')],
-    research: [P('我该做哪种研究', '根据当前算例的评估结果，我应该先做参数率定、不确定性分析，还是 AI 混合建模？为什么？')],
+    'result-diagnostics': [P('检查闭合', '请用固定闭合诊断流程检查当前算例，先调用 diagnostic_plan（workflow=closure）；同时核对 f_xerr 和 f_zerr，缺失时不能宣称闭合通过。')],
+    research: [
+      P('我该做哪种研究', '根据当前算例的评估结果，我应该先做参数率定、不确定性分析，还是 AI 混合建模？为什么？'),
+      P('定位 Rust/Fortran 差异', '请用固定对齐诊断流程检查当前算例，先调用 diagnostic_plan（workflow=parity）；先核对工作区、版本、平台和构建状态，运行验证前说明所需操作。'),
+    ],
     'result-tuning': [
       P('该率定哪些参数', '针对当前算例的主要偏差，参数率定应该选哪些参数、范围怎么定？'),
-      P('解读率定结果', '解读当前参数率定的结果：最优参数有没有压在范围边界？验证期有没有变好？'),
+      P('解读率定结果', '请用固定率定诊断流程解读当前结果，先调用 diagnostic_plan（workflow=calibration）；同时检查参数范围、可辨识性、训练与验证期表现，不把压边界直接当作结构偏差证据。'),
     ],
     'result-uncertainty': [P('哪些参数最敏感', '当前算例的输出对哪些参数最敏感？不确定性分析该选哪些参数和范围？')],
     'hybrid-learn': [P('适合学哪些参数', '在当前算例上，哪些参数适合让网络按地点特征去学？输入特征怎么选？')],
@@ -99,6 +107,22 @@ export function parseEvent(line) {
   } catch {
     return null;
   }
+}
+
+export function taskPhase(tool) {
+  if (['run_status', 'read_case_config', 'path_info', 'list_cases', 'environment_doctor'].includes(tool)) return 'checkdata';
+  if (['run_case', 'run_case_with', 'parity_check', 'regression_check', 'compare_outputs', 'run_tests'].includes(tool)) return 'validate';
+  return tool === 'write_text_file' ? 'report' : 'localise';
+}
+
+export function taskProgressText(task) {
+  const phases = { checkdata: '检查数据', localise: '定位问题', validate: '验证假设', report: '生成报告' };
+  const states = { running: '进行中', interrupted: '已中断，等待续接', failed: '遇到问题，等待核对', answered: '已回答，验证以工具证据为准' };
+  const actions = task.actions ?? [];
+  const returned = actions.filter(a => a.state !== 'unconfirmed').length;
+  return [t('任务进度'), t(phases[task.phase] ?? '检查数据'), t(states[task.state] ?? '等待核对'),
+    `${returned}/${actions.length} ${t('工具已返回')}`,
+    task.requires_reconciliation && t('先核对已有结果，不自动重放操作')].filter(Boolean).join(' · ');
 }
 
 /** 建算例、运行之后，结果里那个算例的目录（工具卡片上给“在工作台打开”按钮）。 */
@@ -190,6 +214,9 @@ function renderAnswer(host, text) {
 
 const ui = {
   started: false,
+  configKey: null,
+  task: null,
+  progress: null,
   running: false,
   answer: null,
   answerText: '',
@@ -288,6 +315,7 @@ function approvalCard(event) {
   const approve = element('button', 'run-btn', '批准');
   const always = element('button', 'btn-ghost', '本会话都允许');
   always.title = t('批准这次，并在本次会话里不再询问同一类操作');
+  always.hidden = event.explicit_only === true;
   const deny = element('button', 'btn-ghost', '拒绝');
   for (const button of [approve, always, deny]) button.type = 'button';
   const decide = (ok, remember = false) => {
@@ -327,6 +355,9 @@ function uiRequest(event) {
 
 function handle(event) {
   switch (event.type) {
+    case 'task_state':
+      if (!ui.running) renderTask(event.task);
+      break;
     case 'ready':
       $('assistant-model').textContent = event.model || '';
       ui.conversation = event.session || ui.conversation;
@@ -349,9 +380,19 @@ function handle(event) {
       break;
     case 'tool_call':
       toolCard(event);
+      if (ui.task) {
+        ui.task.phase = taskPhase(event.name);
+        ui.task.actions.push({ id: event.id, state: 'unconfirmed' });
+        renderTask(ui.task);
+      }
       break;
     case 'tool_result':
       toolResult(event);
+      if (ui.task) {
+        const action = ui.task.actions.find(a => a.id === event.id);
+        if (action) action.state = event.ok ? 'success' : 'failed';
+        renderTask(ui.task);
+      }
       break;
     case 'approval_request':
       approvalCard(event);
@@ -370,22 +411,36 @@ function handle(event) {
     case 'turn_done':
       finishAnswer();
       setRunning(false);
+      if (ui.task) renderTask({ ...ui.task, phase: 'report', state: 'answered' });
       break;
     case 'error':
       finishAnswer();
       if (event.message === 'cancelled') bubble('note').textContent = t('已停止。');
       else bubble('error').textContent = event.message;
       setRunning(false);
+      if (ui.task) renderTask({ ...ui.task, state: 'failed' });
       break;
     case 'exited':
       ui.started = false;
       setRunning(false);
+      if (ui.task?.state === 'running') renderTask({ ...ui.task, state: 'interrupted', requires_reconciliation: true });
       notice('助手进程已退出；下次发送时会重新启动。');
       break;
     default:
       break;
   }
   scrollDown();
+}
+
+function renderTask(task) {
+  ui.task = task;
+  if (!ui.progress) {
+    ui.progress = element('p', 'mini assistant-task-progress');
+    ui.progress.setAttribute('role', 'status');
+    log().prepend(ui.progress);
+  }
+  ui.progress.textContent = taskProgressText(task);
+  ui.progress.title = task.goal || '';
 }
 
 // ---- 设置 ----------------------------------------------------------------------------
@@ -598,6 +653,7 @@ function currentView() {
     step,
     flow: state.step,
     caseDir,
+    variable: (state.step === 'result-series' || state.step === 'result-diagnostics') ? $('var')?.value : null,
     kernel: $('kernel')?.value,
     root: $('root')?.value?.trim(),
     details: pageDetails(state.step, {
@@ -629,22 +685,31 @@ function renderPageChips() {
 }
 
 /** 项目目录：开着的项目根，否则选中算例的上一级。 */
-function projectRoot(view) {
-  if (view.root) return view.root;
-  const dir = view.caseDir || '';
-  return dir.includes('/') ? dir.slice(0, dir.lastIndexOf('/')) : dir;
+export function projectRoot(view) {
+  const root = view.root?.trim();
+  let dir = root || view.caseDir || '';
+  if (/^(?:[A-Za-z]:[\\/]|\\\\)/.test(dir)) dir = dir.replace(/\\/g, '/');
+  if (root) return dir;
+  dir = dir.replace(/\/+$/, '');
+  if (!dir) return view.caseDir ? '/' : '';
+  if (/^[A-Za-z]:$/.test(dir)) return `${dir}/`;
+  if (/^\/\/[^/]+\/[^/]+$/.test(dir)) return dir;
+  const slash = dir.lastIndexOf('/');
+  if (slash < 0) return dir;
+  const parent = dir.slice(0, slash);
+  return /^[A-Za-z]:$/.test(parent) ? `${parent}/` : parent || '/';
 }
 
 /** 第一次向某个服务发送前，在面板里问一次数据外发（不用 window.confirm：桌面窗口里弹不出来）。 */
 /** 外部后端的说明：数据发给谁、用量算在哪。 */
 const EXTERNAL = {
   codex: {
-    consent: '发送后，你的问题、算例配置、指标与日志片段会经你本机的 Codex 发给 OpenAI，用量计入你的 ChatGPT 订阅。',
+    consent: '发送后，你的问题、算例配置、指标、日志片段与授权目录中的文本文件片段会经你本机的 Codex 发给 OpenAI，用量计入你的 ChatGPT 订阅。',
     missing: '本机没有找到 Codex：请先安装它，然后在终端运行 codex login 登录。',
     loggedOut: 'Codex 还没有登录：请在终端运行 codex login 登录。',
   },
   claude_code: {
-    consent: '发送后，你的问题、算例配置、指标与日志片段会经你本机的 Claude Code 发给 Anthropic，用量计入你的 Claude 订阅。',
+    consent: '发送后，你的问题、算例配置、指标、日志片段与授权目录中的文本文件片段会经你本机的 Claude Code 发给 Anthropic，用量计入你的 Claude 订阅。',
     missing: '本机没有找到 Claude Code：请先安装它，然后在终端运行 claude 并登录。',
     loggedOut: 'Claude Code 还没有登录：请在终端运行 claude 并登录。',
   },
@@ -659,7 +724,7 @@ function askConsent(target) {
       ...(external
         ? [element('p', 'mini', external.consent)]
         : [
-          element('p', 'mini', '发送后，你的问题、算例配置、指标与日志片段会发给这个模型服务：'),
+          element('p', 'mini', '发送后，你的问题、算例配置、指标、日志片段与授权目录中的文本文件片段会发给这个模型服务：'),
           element('p', 'mini assistant-consent-url', target),
         ]),
       element('p', 'muted mini', '换用本机的模型（例如 Ollama）可以避免数据外发。只需确认一次。'),
@@ -703,23 +768,36 @@ async function ensureStarted() {
     settings = { ...settings, egress_acknowledged: target };
     await invoke('assistant_save_settings', { settings });
   }
-  if (!ui.started) {
+  while (true) {
     const view = currentView();
-    // 接上面板上正显示的那段对话（进程重启后也接得上）。
-    await invoke('assistant_start', { projectRoot: projectRoot(view), kernelDir: view.kernel || null, resume: ui.conversation });
-    ui.started = true;
+    view.root = projectRoot(view);
+    const kernelDir = view.kernel || null;
+    const configKey = JSON.stringify([view.root, kernelDir]);
+    if (!ui.started || ui.configKey !== configKey) {
+      // 接上面板上正显示的那段对话（进程重启后也接得上）。
+      await invoke('assistant_start', { projectRoot: view.root, kernelDir, resume: ui.conversation });
+      ui.started = true;
+      ui.configKey = configKey;
+      // 启动期间用户也可能切换目录；发送前确认授权仍然对应当前页面。
+      continue;
+    }
+    return view;
   }
 }
 
 async function send() {
   const text = $('assistant-text').value.trim();
   if (!text || ui.running) return;
-  await ensureStarted();
+  setRunning(true);
+  let view;
+  try { view = await ensureStarted(); }
+  catch (error) { setRunning(false); throw error; }
   bubble('user').textContent = text;
+  renderTask({ goal: text, state: 'running', phase: 'checkdata', actions: [] });
   $('assistant-text').value = '';
   setRunning(true);
   notice('');
-  await invoke('assistant_send', { text, context: viewContext(currentView()) || null }).catch(e => {
+  await invoke('assistant_send', { text, context: viewContext(view) || null }).catch(e => {
     setRunning(false);
     throw e;
   });
@@ -743,6 +821,8 @@ function clearLog() {
   const empty = ui.emptyState;
   log().replaceChildren(...(empty ? [empty] : []));
   ui.tools.clear();
+  ui.task = null;
+  ui.progress = null;
   ui.answer = null;
   ui.answerText = '';
   ui.reasoning = null;
@@ -753,7 +833,9 @@ function clearLog() {
 function renderTranscript(items) {
   clearLog();
   for (const item of items) {
-    if (item.kind === 'user') {
+    if (item.kind === 'task') {
+      renderTask(item.task);
+    } else if (item.kind === 'user') {
       bubble('user').textContent = item.text;
     } else if (item.kind === 'assistant') {
       renderAnswer(bubble('reply'), item.text);

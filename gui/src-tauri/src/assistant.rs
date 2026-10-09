@@ -142,15 +142,24 @@ const REASONING_EFFORTS: [&str; 3] = ["low", "high", "max"];
 /// Claude Code 的 `--effort` 可选值（Claude Code 2.1.293）；Codex 的可选值随模型而定，由 `model/list` 给出。
 const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
-/// 可供 `search_docs` 检索的项目文档目录：从 `colm-agent` 所在目录与当前目录往上找含
-/// `docs/design-ai-assistant.md` 的仓库（开发环境）。安装包里没有仓库文档时为空。
+/// 优先使用当前应用资源中的文档；开发运行才从二进制和工作目录向上找仓库。
 pub(crate) fn docs_root(starts: &[PathBuf]) -> Option<PathBuf> {
-    starts.iter().find_map(|start| {
-        start
-            .ancestors()
-            .map(|dir| dir.join("docs"))
-            .find(|docs| docs.join("design-ai-assistant.md").is_file())
-    })
+    let is_docs = |docs: &PathBuf| docs.join("design-ai-assistant.md").is_file();
+    starts
+        .iter()
+        .flat_map(|start| {
+            [
+                Some(start.join("docs")),
+                start.parent().map(|p| p.join("Resources/docs")),
+            ]
+        })
+        .flatten()
+        .find(is_docs)
+        .or_else(|| {
+            starts
+                .iter()
+                .find_map(|start| start.ancestors().map(|dir| dir.join("docs")).find(is_docs))
+        })
 }
 
 /// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
@@ -499,6 +508,7 @@ pub fn assistant_start(
         }
     }
     let starts: Vec<PathBuf> = [
+        app.path().resource_dir().ok(),
         agent_path().parent().map(PathBuf::from),
         std::env::current_dir().ok(),
     ]

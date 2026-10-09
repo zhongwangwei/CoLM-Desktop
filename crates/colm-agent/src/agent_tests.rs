@@ -364,3 +364,171 @@ fn cancelling_and_runaway_loops_stop_the_turn() {
         .unwrap_err();
     assert!(error.to_string().contains("stopped after 5 model steps"));
 }
+
+#[test]
+fn basic_file_actions_run_through_approval_and_feed_verified_results_back() {
+    let root = std::env::temp_dir().join(format!("colm-agent-files-flow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let provider = Scripted::new(vec![
+        tool_turn(vec![call(
+            "mkdir",
+            "create_directory",
+            r#"{"path":"reports"}"#,
+        )]),
+        tool_turn(vec![call(
+            "write",
+            "write_text_file",
+            r#"{"path":"reports/result.txt","content":"checked\n"}"#,
+        )]),
+        tool_turn(vec![call(
+            "copy",
+            "copy_file",
+            r#"{"source":"reports/result.txt","destination":"reports/copy.txt"}"#,
+        )]),
+        tool_turn(vec![call(
+            "read",
+            "read_text_file",
+            r#"{"path":"reports/copy.txt"}"#,
+        )]),
+        answer("The report was created and its copied contents were checked."),
+    ]);
+    let registry = Registry::standard();
+    let mut runner = agent(&provider, &registry);
+    runner.context.project_root = root.clone();
+    let mut history = vec![Message::User {
+        content: "Create and copy a report.".into(),
+    }];
+    let mut events = Vec::new();
+    let mut approver = Answers(vec![Decision::Approve; 3], 0);
+    runner
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(approver.1, 3);
+    assert_eq!(
+        std::fs::read_to_string(root.join("reports/copy.txt")).unwrap(),
+        "checked\n"
+    );
+    assert!(events
+        .iter()
+        .filter_map(|e| match e {
+            Outbound::ToolResult { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .all(|ok| ok));
+    assert!(provider.seen.lock().unwrap().last().unwrap().iter().any(|m| {
+        matches!(m, Message::Tool { tool_call_id, content } if tool_call_id == "read" && content.contains("checked"))
+    }));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn denying_a_directory_creation_changes_nothing() {
+    let root = std::env::temp_dir().join(format!("colm-agent-files-denied-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let registry = Registry::standard();
+    let context = ToolContext {
+        project_root: root.clone(),
+        ..ToolContext::default()
+    };
+    let result = execute_tool(
+        &registry,
+        &context,
+        &call("mkdir", "create_directory", r#"{"path":"not-created"}"#),
+        &mut |_| {},
+        &mut Answers(vec![Decision::Deny(None)], 0),
+        &AtomicBool::new(false),
+    );
+    assert!(result.contains("declined"));
+    assert!(!root.join("not-created").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn recycle_actions_require_each_approval_even_when_everything_is_preapproved() {
+    struct Automatic(usize);
+    impl Approver for Automatic {
+        fn preapproved(&self, _: &str, _: Tier) -> bool {
+            true
+        }
+        fn decide(&mut self, _: &Outbound) -> Decision {
+            self.0 += 1;
+            Decision::ApproveForSession
+        }
+        fn remember(&mut self, _: &str) {
+            panic!("recycle approval must never be remembered");
+        }
+    }
+    let root = std::env::temp_dir().join(format!("colm-recycle-approval-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("report.txt"), "preserved").unwrap();
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        ..ToolContext::default()
+    };
+    let registry = Registry::standard();
+    let mut approver = Automatic(0);
+    let mut events = Vec::new();
+    let mut run = |name: &str, args: Value| {
+        execute_tool(
+            &registry,
+            &ctx,
+            &call(&format!("{name}-call"), name, &args.to_string()),
+            &mut |event| events.push(event),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+    };
+    let first: Value =
+        serde_json::from_str(&run("trash_path", serde_json::json!({"path":"report.txt"}))).unwrap();
+    assert!(!root.join("report.txt").exists());
+    let restored: Value = serde_json::from_str(&run(
+        "restore_trash",
+        serde_json::json!({"id": first["id"]}),
+    ))
+    .unwrap();
+    assert_eq!(restored["restored"], true);
+    run("trash_path", serde_json::json!({"path":"report.txt"}));
+    assert_eq!(approver.0, 3);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(
+                e,
+                Outbound::ApprovalRequest {
+                    explicit_only: true,
+                    ..
+                }
+            ))
+            .count(),
+        3
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_checkpoint_failure_cancel_stops_before_approval_or_action() {
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+    let cancel = AtomicBool::new(false);
+    let mut approver = Answers(Vec::new(), 0);
+    let result = execute_tool(
+        &registry,
+        &ToolContext::default(),
+        &call("x", "act", r#"{"x":1}"#),
+        &mut |event| {
+            if matches!(event, Outbound::ToolCall { .. }) {
+                cancel.store(true, Ordering::SeqCst);
+            }
+        },
+        &mut approver,
+        &cancel,
+    );
+    assert!(result.contains("cancelled before execution"));
+    assert_eq!(approver.1, 0);
+}

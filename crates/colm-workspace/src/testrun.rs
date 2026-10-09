@@ -148,6 +148,8 @@ pub fn run(
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<Outcome> {
     let list = commands(workspace, kind)?;
+    // 开始时就固定提交：跑测试期间又打了补丁的话，结果不能记在新提交名下。
+    let commit = crate::build::pin_commit(workspace)?;
     let src = workspace.src();
     let target = workspace.target();
     let mut last: Option<Outcome> = None;
@@ -179,11 +181,14 @@ pub fn run(
         outcome.command = commands_run.join("; ");
         outcome.seconds = seconds;
     }
+    let unchanged = crate::build::still_at(workspace, &commit)?;
     let run = GateRun {
-        ok: outcome.ok,
+        ok: outcome.ok && unchanged,
         at: now(),
-        commit: workspace.head()?,
-        detail: if outcome.ok {
+        commit,
+        detail: if !unchanged {
+            "source changed while the tests ran; run them again on the current commit".into()
+        } else if outcome.ok {
             format!("{:.0} s", outcome.seconds)
         } else {
             outcome.tail.lines().last().unwrap_or("failed").to_owned()

@@ -110,3 +110,65 @@ fn the_whole_change_can_be_exported_as_one_patch() {
     assert!(exported.contains("+  REAL(8), PARAMETER :: k = 3.0"));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn quoted_protected_paths_are_rejected_before_any_file_changes() {
+    let (root, ws) = fresh("quoted");
+    let path = ws.src().join("oracle/golden/reference.txt");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "original\n").unwrap();
+    git::run(&ws.src(), &["add", "."]).unwrap();
+    git::run(&ws.src(), &["commit", "-m", "fixture"]).unwrap();
+    let before = ws.head().unwrap();
+    let diff = "diff --git \"a/oracle/golden/reference.txt\" \"b/oracle/golden/reference.txt\"\n--- \"a/oracle/golden/reference.txt\"\n+++ \"b/oracle/golden/reference.txt\"\n@@ -1 +1 @@\n-original\n+tampered\n";
+    let err = apply(&ws, diff, "tamper").unwrap_err();
+    assert!(err.to_string().contains("quoted"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "original\n");
+    assert_eq!(ws.head().unwrap(), before);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// 只改权限的一段没有 `---`/`+++`，路径只在 `diff --git` 头里；它和一段正常改动拼在一起时也要被挡住。
+#[test]
+fn mode_only_sections_on_protected_paths_are_rejected() {
+    let (root, ws) = fresh("modeonly");
+    let golden = ws.src().join("oracle/golden/reference.txt");
+    std::fs::create_dir_all(golden.parent().unwrap()).unwrap();
+    std::fs::write(&golden, "original\n").unwrap();
+    crate::git::run(&ws.src(), &["add", "-A"]).unwrap();
+    crate::git::run(&ws.src(), &["commit", "-q", "-m", "golden"]).unwrap();
+    let diff = format!(
+        "diff --git a/oracle/golden/reference.txt b/oracle/golden/reference.txt\nold mode 100644\nnew mode 100755\n{FORTRAN_DIFF}"
+    );
+    assert!(touched_paths(&diff)
+        .unwrap()
+        .iter()
+        .any(|p| p == "oracle/golden/reference.txt"));
+    assert!(apply(&ws, &diff, "x").is_err());
+    let mode = std::fs::metadata(&golden).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            mode.permissions().mode() & 0o111,
+            0,
+            "the protected file must keep its mode"
+        );
+    }
+    let _ = mode;
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn diff_headers_with_spaces_and_renames_are_split_correctly() {
+    assert_eq!(
+        header_paths("a/my dir/x.F90 b/my dir/x.F90").unwrap(),
+        ["my dir/x.F90"]
+    );
+    assert_eq!(
+        header_paths("a/old.rs b/new.rs").unwrap(),
+        ["old.rs", "new.rs"]
+    );
+    assert!(header_paths("old.rs new.rs").is_err());
+}

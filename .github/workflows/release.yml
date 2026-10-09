@@ -316,6 +316,12 @@ jobs:
           test -x "$app/Contents/MacOS/colm-cli"
           # 远程运行要用的：随附的引擎源码（没有仓库也能在服务器上编），以及两种架构的预编引擎。
           test -f "$app/Contents/Resources/engine/colm-src.tar.gz"
+          test -f "$app/Contents/Resources/docs/colm-process-knowledge.md"
+          test -f "$app/Contents/Resources/docs/knowledge-sources.json"
+          # Public docs must be the exact bytes shipped inside the source snapshot.
+          for doc in colm-process-knowledge.md knowledge-sources.json; do
+            tar -xOzf "$app/Contents/Resources/engine/colm-src.tar.gz" "docs/$doc" | cmp - "$app/Contents/Resources/docs/$doc"
+          done
           test -f "$app/Contents/Resources/engine/colm-engine-linux-x86_64.tar.gz"
           test -f "$app/Contents/Resources/engine/colm-engine-linux-aarch64.tar.gz"
           # 示例站点也必须在里面：少了它，一个刚装好程序的人手上没有任何

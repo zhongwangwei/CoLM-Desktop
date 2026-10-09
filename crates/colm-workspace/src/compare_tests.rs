@@ -142,7 +142,7 @@ fn new_nans_missing_files_and_missing_variables_are_flagged() {
 }
 
 #[test]
-fn the_peak_of_a_variable_ignores_non_finite_values() {
+fn closure_peaks_require_finite_values_in_every_file() {
     let _nc = nc_lock();
     let dir = temp("peak");
     history(
@@ -161,7 +161,14 @@ fn the_peak_of_a_variable_ignores_non_finite_values() {
         )],
     );
     let peaks = max_abs(&dir, &["f_xerr", "f_zerr"]).unwrap();
-    assert!((peaks["f_xerr"] - 2.5e-9).abs() < 1e-20);
+    assert!(!peaks.contains_key("f_xerr"));
+    history(
+        &dir.join("X_hist_2004-01.nc"),
+        &[("f_xerr", series(|_| 2.5e-9))],
+    );
+    assert_eq!(max_abs(&dir, &["f_xerr"]).unwrap()["f_xerr"], 2.5e-9);
+    history(&dir.join("X_hist_2004-02.nc"), &[]);
+    assert!(max_abs(&dir, &["f_xerr"]).unwrap().is_empty());
     assert!(!peaks.contains_key("f_zerr"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -347,4 +354,34 @@ fn only_the_earliest_records_are_compared_and_ignored_variables_are_listed() {
     assert_eq!(three.first_difference.as_ref().unwrap().variable, "f_t");
     assert_eq!(three.first_difference.as_ref().unwrap().step, Some(2));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn candidate_only_variables_are_differences_and_nonfinite_values_are_counted() {
+    let _nc = nc_lock();
+    let dir = temp("extra-variable");
+    let (a, b) = (dir.join("a"), dir.join("b"));
+    std::fs::create_dir_all(&a).unwrap();
+    std::fs::create_dir_all(&b).unwrap();
+    history(&a.join("history.nc"), &[]);
+    history(
+        &b.join("history.nc"),
+        &[("new", series(|i| if i == 0 { f64::NAN } else { 1.0 }))],
+    );
+    let report = compare(&a, &b, Tolerance::default()).unwrap();
+    assert!(!report.bitwise_identical() && !report.acceptable());
+    assert_eq!(report.structural_differences, 1);
+    assert_eq!(report.new_nonfinite, 1);
+    assert_eq!(report.first_difference.unwrap().variable, "new");
+    let ignored = compare_with(
+        &a,
+        &b,
+        &Options {
+            ignore: vec!["new".into()],
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    assert!(ignored.acceptable());
+    let _ = std::fs::remove_dir_all(dir);
 }

@@ -140,7 +140,11 @@ fn the_slot_replaces_beta_and_scales_transpiration_but_not_the_layer_weights() {
     let hybrid = root_uptake(with_slot(&slot, input(1))).unwrap();
     assert_eq!(hybrid.soil_water_stress, 0.25);
     assert_eq!(hybrid.maximum_transpiration_mm_s, 0.001 * 0.25);
-    assert_eq!(hybrid.layer_fraction, physics.layer_fraction);
+    let sum: f64 = physics.layer_fraction.iter().sum();
+    for (actual, physical) in hybrid.layer_fraction.iter().zip(&physics.layer_fraction) {
+        assert!((actual - physical / sum).abs() < 1e-15);
+    }
+    assert!((hybrid.layer_fraction.iter().sum::<f64>() - 1.0).abs() < 1e-15);
     let seen = slot.1.lock().unwrap();
     let (row, features) = seen[0];
     assert_eq!(
@@ -170,4 +174,27 @@ fn without_an_active_layer_the_network_is_not_asked() {
     let slot = Slot(|_: &SoilStressFeatures| Some(0.9), Default::default());
     assert_eq!(root_uptake(with_slot(&slot, frozen)).unwrap(), physics);
     assert!(slot.1.lock().unwrap().is_empty());
+}
+
+#[test]
+fn replacement_beta_preserves_total_uptake_near_wilting() {
+    for beta in [0.0, 0.25, 1.0] {
+        let slot = Slot(move |_: &SoilStressFeatures| Some(beta), Default::default());
+        let mut near_wilting = input(2);
+        // A Campbell layer just above its wilting water content; the other layers are frozen.
+        let wilting = 1000.0 * 0.1 * 0.45 * (1500.0_f64).lpow(-0.25);
+        let water = [wilting + 1e-13, 20.0, 90.0];
+        near_wilting.liquid_water_kg_m2 = &water;
+        near_wilting.temperature_k = &[280.0, 270.0, 270.0];
+        let physics = root_uptake(near_wilting).unwrap();
+        assert!(physics.layer_fraction.iter().sum::<f64>() < 0.01);
+        let hybrid = root_uptake(with_slot(&slot, near_wilting)).unwrap();
+        assert_eq!(hybrid.layer_fraction, [1.0, 0.0, 0.0]);
+        let uptake: f64 = hybrid
+            .layer_fraction
+            .iter()
+            .map(|weight| weight * hybrid.maximum_transpiration_mm_s)
+            .sum();
+        assert_eq!(uptake, near_wilting.maximum_transpiration_mm_s * beta);
+    }
 }

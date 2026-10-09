@@ -159,8 +159,8 @@ pub(crate) fn subset_file(
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut out =
-        netcdf::create(dst).with_context(|| format!("cannot create {}", dst.display()))?;
+    let mut out = netcdf::create_with(dst, netcdf::Options::NETCDF4 | netcdf::Options::NOCLOBBER)
+        .with_context(|| format!("cannot create {}", dst.display()))?;
     let mut defined = BTreeSet::new();
     for variable in &kept {
         for dimension in variable.dimensions() {
@@ -235,27 +235,9 @@ pub(super) fn cmd_history_subset(opts: &Opts) -> Result<()> {
         .unwrap_or(4);
     ensure!(level <= 9, "--compress must be 0-9");
 
-    let mut found = BTreeSet::new();
-    let (mut bytes_in, mut bytes_out) = (0u64, 0u64);
-    for file in &selected {
-        let target = out.join(file.file_name().context("history file without a name")?);
-        let stats = subset_file(file, &target, &vars, level)?;
-        bytes_in += stats.bytes_in;
-        bytes_out += stats.bytes_out;
-        found.extend(stats.found);
-    }
-    let missing: Vec<&String> = vars.iter().filter(|v| !found.contains(*v)).collect();
-    if !missing.is_empty() {
-        let _ = std::fs::remove_dir_all(&out);
-        bail!(
-            "these variables are not in any selected history file: {}",
-            missing
-                .iter()
-                .map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
+    let stats = subset_files(&selected, &out, &vars, level)?;
+    let found = stats.found;
+    let (bytes_in, bytes_out) = (stats.bytes_in, stats.bytes_out);
     println!(
         "{}",
         json!({
@@ -267,6 +249,52 @@ pub(super) fn cmd_history_subset(opts: &Opts) -> Result<()> {
         })
     );
     Ok(())
+}
+
+/// Validate before creating an exclusively owned output directory; never replace existing data.
+fn subset_files(
+    selected: &[&PathBuf],
+    out: &Path,
+    vars: &BTreeSet<String>,
+    level: u8,
+) -> Result<SubsetStats> {
+    let mut found = BTreeSet::new();
+    for path in selected {
+        let file = netcdf::open(path)?;
+        found.extend(
+            file.variables()
+                .map(|v| v.name())
+                .filter(|name| vars.contains(name)),
+        );
+    }
+    let missing: Vec<_> = vars.difference(&found).cloned().collect();
+    ensure!(
+        missing.is_empty(),
+        "these variables are not in any selected history file: {}",
+        missing.join(", ")
+    );
+    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::create_dir(out)
+        .with_context(|| format!("output directory must not already exist: {}", out.display()))?;
+    let result = (|| {
+        let mut total = SubsetStats::default();
+        for file in selected {
+            let target = out.join(file.file_name().context("history file without a name")?);
+            let stats = subset_file(file, &target, vars, level)?;
+            total.bytes_in += stats.bytes_in;
+            total.bytes_out += stats.bytes_out;
+            total.kept += stats.kept;
+            total.found.extend(stats.found);
+        }
+        Ok(total)
+    })();
+    if result.is_err() {
+        // Only this invocation's newly created directory is eligible for cleanup.
+        std::fs::remove_dir_all(out).context("cannot clean up incomplete subset output")?;
+    }
+    result
 }
 
 #[cfg(test)]

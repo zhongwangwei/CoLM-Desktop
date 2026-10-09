@@ -5,6 +5,8 @@
 
 mod act;
 mod code;
+mod diagnostics;
+mod fs;
 mod read;
 pub mod ui;
 pub mod web;
@@ -184,6 +186,10 @@ pub trait Tool: Send + Sync {
     fn session_allowance(&self) -> bool {
         true
     }
+    /// Destructive or restorative actions always require a fresh decision, even in Auto mode.
+    fn requires_explicit_approval(&self) -> bool {
+        false
+    }
     /// 审批卡片与审计日志里的一句话：这次调用要做什么。
     fn summary(&self, args: &Value) -> String {
         format!("{} {}", self.name(), args)
@@ -217,6 +223,8 @@ impl Registry {
         let mut tools = read::tools();
         tools.extend(act::tools());
         tools.extend(code::tools());
+        tools.extend(fs::tools());
+        tools.extend(diagnostics::tools());
         Self { tools }
     }
 

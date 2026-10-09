@@ -99,6 +99,34 @@ fn a_workspace_is_cloned_listed_and_deleted() {
 }
 
 #[test]
+fn concurrent_creation_reserves_one_workspace_without_deleting_the_winner() {
+    let root = temp("concurrent-create");
+    let repo = root.join("source");
+    source_repo(&repo);
+    let ws_root = root.join("ws");
+    let barrier = std::sync::Barrier::new(2);
+    let outcomes = std::thread::scope(|scope| {
+        let first = scope.spawn(|| {
+            barrier.wait();
+            Workspace::create(&ws_root, "demo", repo.to_str().unwrap(), None)
+        });
+        let second = scope.spawn(|| {
+            barrier.wait();
+            Workspace::create(&ws_root, "demo", repo.to_str().unwrap(), None)
+        });
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    assert_eq!(outcomes.iter().filter(|result| result.is_ok()).count(), 1);
+    let workspace = Workspace::open(&ws_root, "demo").unwrap();
+    assert!(workspace
+        .src()
+        .join("crates/colm-core/src/demo.rs")
+        .is_file());
+    assert_eq!(workspace.head().unwrap(), workspace.info.base_commit);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn a_source_package_becomes_a_repository_with_a_base_commit() {
     let root = temp("tar");
     let repo = root.join("source");

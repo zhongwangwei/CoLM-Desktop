@@ -4,7 +4,7 @@
 //! 目录在第一条用户消息时才建：只开了面板、没说话的会话不留痕迹。历史会话可以列出、
 //! 读成界面用的对话记录、续接（接着聊）和删除。
 
-use std::io::Write;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +14,10 @@ use serde_json::json;
 
 use crate::message::{Message, Usage};
 use crate::protocol::Outbound;
+
+#[path = "session_tasks.rs"]
+mod tasks;
+pub use tasks::TaskSnapshot;
 
 pub struct Session {
     pub id: String,
@@ -58,6 +62,11 @@ impl Session {
                 },
             ),
         }
+        if let Some(context) = tasks::load(&dir, true)?.and_then(|task| task.recovery_context()) {
+            if let Some(Message::System { content }) = history.first_mut() {
+                content.push_str(&context);
+            }
+        }
         Ok(Self {
             id: id.to_owned(),
             dir: Some(dir),
@@ -68,8 +77,29 @@ impl Session {
 
     /// 追加一条消息（并写进 `messages.jsonl`）。第一次写时把之前只在内存里的消息（系统提示）一并写出。
     pub fn push(&mut self, message: Message) -> Result<()> {
+        let goal = match &message {
+            Message::User { content } => {
+                Some(user_text(content).chars().take(2000).collect::<String>())
+            }
+            _ => None,
+        };
         self.history.push(message);
-        self.persist_from(self.history.len() - 1)
+        self.persist_from(self.history.len() - 1)?;
+        if let Some(goal) = goal {
+            self.append(
+                "audit.jsonl",
+                &json!({"at_ms": now_ms() as u64, "task_start": {"goal": goal}}),
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn task_snapshot(&self, resumed: bool) -> Result<Option<TaskSnapshot>> {
+        self.dir
+            .as_deref()
+            .map(|dir| tasks::load(dir, resumed))
+            .transpose()
+            .map(Option::flatten)
     }
 
     /// 把这一轮新增的消息写盘（`run_turn` 直接改 `history`，从 `from` 起都是新的）。
@@ -106,7 +136,9 @@ impl Session {
         // 流式增量太碎，审计里不记；其余事件都记。
         if matches!(
             event,
-            Outbound::AssistantDelta { .. } | Outbound::ReasoningDelta { .. }
+            Outbound::AssistantDelta { .. }
+                | Outbound::ReasoningDelta { .. }
+                | Outbound::TaskState { .. }
         ) {
             return Ok(());
         }
@@ -128,10 +160,21 @@ impl Session {
         let path = dir.join(file);
         let mut handle = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .append(true)
             .open(&path)
             .with_context(|| format!("cannot open {}", path.display()))?;
+        // Keep a torn final record separate so the next valid checkpoint can be recovered.
+        if handle.metadata()?.len() > 0 {
+            handle.seek(SeekFrom::End(-1))?;
+            let mut last = [0];
+            handle.read_exact(&mut last)?;
+            if last[0] != b'\n' {
+                handle.write_all(b"\n")?;
+            }
+        }
         writeln!(handle, "{}", serde_json::to_string(value)?)?;
+        handle.sync_data()?;
         Ok(())
     }
 }
@@ -231,6 +274,9 @@ pub fn list(data_dir: &Path) -> Result<Vec<SessionInfo>> {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TranscriptItem {
+    Task {
+        task: TaskSnapshot,
+    },
     User {
         text: String,
     },
@@ -249,7 +295,8 @@ pub enum TranscriptItem {
 
 /// 把会话读成界面要显示的记录：用户与助手的文字、工具调用及其结果（思考过程不显示）。
 pub fn transcript(data_dir: &Path, id: &str) -> Result<Vec<TranscriptItem>> {
-    let messages = read_messages(&session_dir(data_dir, id)?)?;
+    let dir = session_dir(data_dir, id)?;
+    let messages = read_messages(&dir)?;
     let mut items: Vec<TranscriptItem> = Vec::new();
     for message in messages {
         match message {
@@ -292,6 +339,24 @@ pub fn transcript(data_dir: &Path, id: &str) -> Result<Vec<TranscriptItem>> {
                 }
             }
         }
+    }
+    if let Some(task) = tasks::load(&dir, true)? {
+        // A process can exit before model history is saved; retain those calls from the audit journal.
+        for action in &task.actions {
+            if !items
+                .iter()
+                .any(|item| matches!(item, TranscriptItem::Tool { id, .. } if id == &action.id))
+            {
+                items.push(TranscriptItem::Tool {
+                    id: action.id.clone(),
+                    name: action.name.clone(),
+                    arguments: action.arguments.clone(),
+                    result: action.result.clone(),
+                    ok: action.state == "success",
+                });
+            }
+        }
+        items.push(TranscriptItem::Task { task });
     }
     Ok(items)
 }

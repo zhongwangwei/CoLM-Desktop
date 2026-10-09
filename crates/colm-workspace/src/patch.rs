@@ -24,10 +24,47 @@ pub struct Applied {
     pub files: Vec<String>,
 }
 
-/// 补丁里碰到的路径（`--- a/…`、`+++ b/…`、`rename`/`copy` 行）。`/dev/null` 不算。
+/// `diff --git a/X b/Y` 头里的两个路径。只改权限（`old mode`/`new mode`）或二进制标记的那一段没有
+/// `---`/`+++` 行，路径只在这个头里——不读它，那一段就绕过了禁区检查（第 655 轮实测：
+/// 一段只改 `oracle/golden/` 文件权限、一段正常改文档，前者照样被应用）。
+/// 路径可以含空格：两边相同时按长度精确切开，不同（改名）时在第一个 ` b/` 处切开、两边都查。
+fn header_paths(header: &str) -> Result<Vec<String>> {
+    let rest = header
+        .strip_prefix("a/")
+        .ok_or_else(|| anyhow::anyhow!("diff header must name a/… and b/… paths: {header:?}"))?;
+    let same = (rest.len() >= 3 && (rest.len() - 3) % 2 == 0)
+        .then(|| {
+            let half = (rest.len() - 3) / 2;
+            let (a, b) = (rest.get(..half)?, rest.get(half..)?);
+            (b.strip_prefix(" b/") == Some(a)).then(|| a.to_owned())
+        })
+        .flatten();
+    if let Some(path) = same {
+        return Ok(vec![path]);
+    }
+    let (a, b) = rest
+        .split_once(" b/")
+        .ok_or_else(|| anyhow::anyhow!("diff header must name a/… and b/… paths: {header:?}"))?;
+    Ok(vec![a.to_owned(), b.to_owned()])
+}
+
+/// 补丁里碰到的路径（`diff --git` 头、`--- a/…`、`+++ b/…`、`rename`/`copy` 行）。`/dev/null` 不算。
 pub fn touched_paths(diff: &str) -> Result<Vec<String>> {
     let mut paths = Vec::new();
     for line in diff.lines() {
+        // ponytail: reject Git C-quoted paths until a complete decoder is needed.
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            ensure!(
+                !header.contains('"'),
+                "quoted patch paths are not supported"
+            );
+            for path in header_paths(header)? {
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+            continue;
+        }
         let candidate = if let Some(rest) = line.strip_prefix("+++ ") {
             Some(rest)
         } else if let Some(rest) = line.strip_prefix("--- ") {
@@ -42,6 +79,10 @@ pub fn touched_paths(diff: &str) -> Result<Vec<String>> {
             line.strip_prefix("copy from ")
         };
         let Some(raw) = candidate else { continue };
+        ensure!(
+            !raw.starts_with('"'),
+            "quoted patch paths are not supported"
+        );
         // 路径后面可能跟制表符与时间戳。
         let raw = raw.split('\t').next().unwrap_or(raw).trim();
         if raw == "/dev/null" {

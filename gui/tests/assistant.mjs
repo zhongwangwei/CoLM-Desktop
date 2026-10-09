@@ -9,6 +9,15 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const temp = await mkdtemp(join(tmpdir(), 'colm-assistant-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
+// Expose startup only in this copied test module; exercise configuration through a stub IPC.
+await writeFile(join(temp, 'app', 'assistant.js'),
+  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send };\n');
+await writeFile(join(temp, 'app', 'ipc.js'), `
+  export const invoke = (...args) => globalThis.assistantInvoke(...args);
+  export const listen = async () => {};
+  export const hasBackend = () => true;
+`);
+
 globalThis.window = {};
 globalThis.document = { getElementById: () => null, querySelectorAll: () => [], documentElement: { lang: 'zh' } };
 globalThis.addEventListener = () => {};
@@ -19,6 +28,37 @@ assert.equal(
   'page: result\nselected case: /p/A\nkernel: /k',
 );
 assert.equal(assistant.viewContext({}), '');
+assert.equal(assistant.viewContext({ root: '/p' }), 'file operations directory: /p');
+assert.equal(assistant.viewContext({ variable: 'f_lfevpa' }), 'selected history variable: f_lfevpa');
+for (const [page, workflow] of [['run', 'startup'], ['result-diagnostics', 'closure'], ['result-evaluation', 'flux'], ['result-tuning', 'calibration'], ['research', 'parity']]) {
+  assert.ok(assistant.pagePrompts(page).some(p => p.prompt.includes(`workflow=${workflow}`)), page);
+}
+assert.equal(assistant.taskPhase('run_status'), 'checkdata');
+assert.equal(assistant.taskPhase('series_stats'), 'localise');
+assert.equal(assistant.taskPhase('parity_check'), 'validate');
+assert.equal(assistant.taskPhase('write_text_file'), 'report');
+assert.match(assistant.taskProgressText({ state: 'interrupted', phase: 'validate', requires_reconciliation: true,
+  actions: [{ state: 'unconfirmed' }, { state: 'success' }] }), /已中断.*1\/2.*不自动重放/);
+assert.match(assistant.taskProgressText({ state: 'answered', phase: 'report', actions: [] }), /验证以工具证据为准/);
+for (const [view, expected] of [
+  [{}, ''],
+  [{ root: '  /explicit  ', caseDir: '/p/A' }, '/explicit'],
+  [{ root: '   ', caseDir: '/p/A' }, '/p'],
+  [{ root: '/tmp/project\\archive' }, '/tmp/project\\archive'],
+  [{ caseDir: '/tmp/project\\archive/A' }, '/tmp/project\\archive'],
+  [{ caseDir: '/tmp/project\\archive' }, '/tmp'],
+  [{ root: 'C:\\projects\\archive' }, 'C:/projects/archive'],
+  [{ root: '\\\\server\\share\\archive' }, '//server/share/archive'],
+  [{ caseDir: '/p/A/' }, '/p'],
+  [{ caseDir: '/A' }, '/'],
+  [{ caseDir: '/' }, '/'],
+  [{ caseDir: 'C:\\projects\\A' }, 'C:/projects'],
+  [{ caseDir: 'C:\\A' }, 'C:/'],
+  [{ caseDir: 'C:\\' }, 'C:/'],
+  [{ caseDir: '\\\\server\\share\\A' }, '//server/share'],
+  [{ caseDir: '\\\\server\\share\\' }, '//server/share'],
+]) assert.equal(assistant.projectRoot(view), expected, JSON.stringify(view));
+
 // 具体步骤与这一页的关键信息也附上；步骤与页面同名时不重复。
 assert.equal(
   assistant.viewContext({ step: 'result', flow: 'result-evaluation', caseDir: '/p/A', details: ['x: 1'] }),
@@ -161,3 +201,75 @@ assert.match(assistant.backendProblem('codex', { installed: false }), /没有找
 assert.match(assistant.backendProblem('claude_code', { installed: true, logged_in: false }), /Claude Code 还没有登录/);
 assert.equal(assistant.backendProblem('claude_code', { installed: true, logged_in: true }), null);
 assert.equal(assistant.backendProblem('builtin', null), null);
+
+// Every send refreshes a changed directory/kernel grant, while retaining the conversation.
+{
+  const elements = new Map(['root', 'kernel', 'assistant-key-status', 'assistant-key', 'assistant-key-save']
+    .map(id => [id, { value: '' }]));
+  document.getElementById = id => elements.get(id) ?? null;
+  document.querySelector = () => null;
+  const calls = [];
+  globalThis.assistantInvoke = async (command, args) => {
+    calls.push([command, args]);
+    if (command === 'assistant_settings') return { base_url: 'local', egress_acknowledged: 'local' };
+    if (command === 'assistant_has_key') return true;
+    if (command !== 'assistant_start') throw new Error(`Unexpected IPC: ${command}`);
+  };
+  assistant.ui.conversation = 'existing-session';
+  elements.get('root').value = '/p';
+  elements.get('kernel').value = '/k';
+  const first = await assistant.ensureStarted();
+  assert.equal(first.root, '/p');
+  await assistant.ensureStarted();
+  assert.equal(calls.filter(([cmd]) => cmd === 'assistant_start').length, 1);
+  elements.get('root').value = '/different/missing';
+  assert.equal((await assistant.ensureStarted()).root, '/different/missing');
+  elements.get('kernel').value = '/new-kernel';
+  await assistant.ensureStarted();
+  elements.get('root').value = '';
+  assert.equal((await assistant.ensureStarted()).root, '');
+  assert.deepEqual(calls.filter(([cmd]) => cmd === 'assistant_start').map(([, args]) => args), [
+    { projectRoot: '/p', kernelDir: '/k', resume: 'existing-session' },
+    { projectRoot: '/different/missing', kernelDir: '/k', resume: 'existing-session' },
+    { projectRoot: '/different/missing', kernelDir: '/new-kernel', resume: 'existing-session' },
+    { projectRoot: '', kernelDir: '/new-kernel', resume: 'existing-session' },
+  ]);
+  // A root change while assistant_start is pending must refresh again before sending.
+  const originalInvoke = globalThis.assistantInvoke;
+  globalThis.assistantInvoke = async (command, args) => {
+    const result = await originalInvoke(command, args);
+    if (command === 'assistant_start' && args.projectRoot === '/during-start') {
+      elements.get('root').value = '/latest';
+    }
+    return result;
+  };
+  elements.get('root').value = '/during-start';
+  assert.equal((await assistant.ensureStarted()).root, '/latest');
+  assert.equal(calls.filter(([cmd]) => cmd === 'assistant_start').at(-1)[1].projectRoot, '/latest');
+  assert.equal((source.match(/授权目录中的文本文件片段/g) || []).length, 3);
+}
+console.log('assistant: project paths and per-message configuration refresh ok');
+
+// Two clicks during startup must not send the same operation twice; failed startup unlocks the panel.
+{
+  const nodes = new Map([
+    ['assistant-text', { value: 'run current case' }], ['assistant-send', {}], ['assistant-stop', {}],
+  ]);
+  document.getElementById = id => nodes.get(id) ?? null;
+  let rejectStartup;
+  let configurations = 0;
+  globalThis.assistantInvoke = async command => {
+    assert.equal(command, 'assistant_settings');
+    configurations += 1;
+    return new Promise((_, reject) => { rejectStartup = reject; });
+  };
+  assistant.ui.running = false;
+  const first = assistant.send();
+  await assistant.send();
+  assert.equal(configurations, 1);
+  assert.equal(assistant.ui.running, true);
+  rejectStartup(new Error('startup fixture failed'));
+  await assert.rejects(first, /startup fixture failed/);
+  assert.equal(assistant.ui.running, false);
+  assert.equal(nodes.get('assistant-send').disabled, false);
+}

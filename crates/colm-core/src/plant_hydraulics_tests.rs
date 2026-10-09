@@ -203,3 +203,18 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
         "actual={actual:.17e}, expected={expected:.17e}, tolerance={tolerance:.1e}"
     );
 }
+
+#[test]
+fn direct_vegetation_potential_rejects_zero_conductance() {
+    for (root, xylem) in [(0.0, 3e-4), (4e-4, 0.0), (0.0, 0.0)] {
+        let mut input = sample_input();
+        input.maximum_root_hydraulic_conductance = root;
+        input.maximum_xylem_hydraulic_conductance = xylem;
+        for stress in [0.0, 1.0] {
+            let error = vegetation_water_potential(input, stress, stress).unwrap_err();
+            assert!(error
+                .to_string()
+                .contains("requires positive root and xylem"));
+        }
+    }
+}

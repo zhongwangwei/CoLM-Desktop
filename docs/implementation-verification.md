@@ -32360,3 +32360,28 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **改动**：`gates::parity_needed(路径)`：相对基线改动的文件碰了 `RESULT_PATHS`（`vendor/CoLM202X/`、`oracle/scripts/build_kernel.sh`、`colm-core`/`colm-runtime`/`colm-init`/`colm-srfdata`/`colm-forcing`/`colm-hist`/`colm-lapack`/`colm-numeric`/`colm-namelist`/`colm-schema`/`colm-case`/`colm-kernel`/`colm-h5chunk`/`colm-ncchar`、`Cargo.lock`、`Cargo.toml`、`rust-toolchain.toml`）才需要。`Gates::lights_for(head, parity_needed)`：不需要且当前提交上没做过时，灯为新的 `not_needed`；在当前提交上真做过就照实显示（通过或不通过）。`lights()` 保持“一律需要”，登记实验内核的条件不变（本来就不看这一项）。`ws-status` 与工作区列表用新的判断，`ws-status` 多一个 `parity_needed`；面板上是灰色的“不需要（没改会影响计算结果的代码）”，说明里写清什么时候需要；助手的 `parity_check` 描述提示 `parity_needed` 为假时跳过。
 
 **验证**：`vcmax-grass`（改了 Fortran 与 `colm-core`）：`parity_needed=true`，灯“通过”；临时工作区 `docs-only` 只改 `docs/upstream-bugs.md`：`parity_needed=false`，灯 `not_needed`（验证后已删除）。新增 `colm-workspace` 测试：路径判断（含 `colm-hybrid`、GUI、助手、文档、`oracle/scripts/regress.sh` 不需要，`colm-core-extra/` 这种前缀相近的不误判）、灯在各情况下的取值与 JSON 名；`colm-workspace` 40 项、`colm-agent` 54 项、`gui/tests` 全部通过，clippy 干净。
+
+## 第 655 轮：10 月 8–9 日改动的审查，14 项问题逐条核实
+
+**来源**：一份对 10 月 8–9 日 47 次提交的审查列出 14 项问题（3 项 P1、11 项 P2）。Codex 在主仓库工作目录里做了“助手可靠性改进”（见 `docs/assistant-reliability-plan.md`），其中已经修了这 14 项的大部分。这一轮逐条对照当前代码核实，没修全的补上，并和 Codex 的改动一起提交。
+
+| # | 问题 | 结论 |
+|---|---|---|
+| 1 | `history-subset` 变量不存在时删掉整个 `--out` 目录 | Codex 已修：先校验变量，输出目录必须事先不存在（排他创建），失败只清理本次建的目录；远程调用前本来就先 `rm -rf` 临时目录，不受影响 |
+| 2 | 重启后恢复远程任务，旧结果覆盖新本地结果 | Codex 已修：本机已有结果时不自动取回，改为手动“取回全部变量”；任务号或主机对不上也停止自动取回 |
+| 3 | 补丁路径加引号绕过 `oracle/golden/` 保护 | Codex 已挡住带引号的路径。**我补**：只改权限（`old mode`/`new mode`）的一段没有 `---`/`+++`，路径只在 `diff --git` 头里，检查不读它——这样一段和一段正常改动拼在一起，golden 文件被改成可执行，返回的改动列表里也没有它（实测复现）。现在 `diff --git a/X b/Y` 头里的路径也进检查（含空格的路径按长度切开，改名时两边都查，不是 `a/` 开头的头拒绝）；实测同一补丁现在在应用前被拒，文件权限不变 |
+| 4 | AI 替换 β 后吸水权重之和远小于 1，蒸腾没从土壤扣足 | Codex 已修：替换 β 时把分层权重归一化为 1。只在网络被调用（权重和大于下限）时进入，不会除零；不替换时不进这一步，纯物理逐位不变 |
+| 5 | 候选缺月份或删了 `f_xerr/f_zerr` 仍通过物理回归 | Codex 已修：闭合诊断缺任何一个、两边文件或变量形状/类型不同，都判不通过（“比较不完整”）。`read_f64` 读原始值，CoLM 的填充值 `-1e36` 是有限值，空间算例不会因此被误判 |
+| 6 | 比较器只遍历基线变量，候选独有的 NaN 变量漏掉 | Codex 已修：取两边变量并集，一边独有的算结构差异、计入候选里的非有限值，`bitwise_identical` 为假 |
+| 7 | 编译期间提交补丁，旧产物被记成新提交通过 | Codex 修了编译（开始时固定提交、要求源码干净、期间变化就不通过）。**我补**：测试、两版一致、与原版对比原来也是跑完才读 HEAD；现在三者都开始时固定提交（`build::pin_commit`），跑完核对（`build::still_at`）。更要紧的是两版一致与回归跑的是**已编好的程序**——编完又打补丁不重编，跑的是旧程序却会记在新提交名下；现在要求 Rust 引擎（及用到的内核）就是在当前提交上编译通过的（`build::require_built_at`），否则拒绝并提示先重编。新增测试 `checks_refuse_binaries_built_on_an_older_commit` |
+| 8 | `scancel/qdel/bkill` 失败仍写退出码 143 | Codex 已修：取消命令失败就以错误退出，不写终态；后台直接运行的任务确认进程不在了才记终态。调度系统接受取消后立即记终态（不等作业真正退出），风险小，未再改 |
+| 9 | Windows 上传依赖 `cat` | Codex 已修：打开的文件直接作为 SSH 的标准输入 |
+| 10 | 用 `Cargo.lock` 判断源码上传完成，中断后重试编残缺源码 | Codex 已修：先传到临时目录，完整解开后加锁、写完成标记、整体换到正式位置；判断改看完成标记 |
+| 11 | 助手对拍工具不传 `rtol/first_records/ignore` | Codex 已修，测试断言了实际的命令行 |
+| 12 | 外部后端会话不响应联网开关 | Codex 已修：开关一变就按新设置重启外部后端，并续用原外部会话号 |
+| 13 | 切到“替换过程”后表单配置错位，导入失败 | Codex 修了导入表单（强制按新插槽重置，替换过程模式下不让异步刷新改回参数插槽）。**我补**：训练表单同样的问题——插槽被换，特征与输出没换，“自定义”预设清不掉；现在训练表单的插槽一换就按新模式套默认预设 |
+| 14 | 放宽校验后 `vegetation_water_potential` 除以零导水率返回无穷 | Codex 已修：这个接口要求根与木质部导水率为正；函数里只有这两个做除数，`canopy_top_height_m` 已有正值检查；目前只有测试调用它 |
+
+**另外**：clippy 两处（`patch.rs` 用 `contains`；Codex 的 `xtask/src/sidecar.rs` 测试模块后面还有函数，挪到文件末尾）。Codex 把 `docs/` 加进了远程引擎的源码快照（安装版的文档搜索要用）；代价是只改文档也会让服务器重新上传、重新编译引擎。
+
+**验证**（本机）：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check` 通过；`colm-core` 512、`colm-cli` 250 + 19、`colm-agent` 106、`colm-workspace` 47、`colm-remote` 28、`xtask` 29 项通过；`gui/tests` 全部通过；`xtask check-gui` 118 个命令全部解析。第 3 条用重编后的 `colm-cli` 在临时工作区实测：组合补丁在应用前被拒，golden 文件权限不变。未做：完整的整场模拟验证第 4 条的守恒、真实调度系统与 Windows 上的第 8–10 条。

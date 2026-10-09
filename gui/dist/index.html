@@ -439,6 +439,11 @@
       <div class="work-head"><span class="kicker">研究</span></div>
       <h1>你想回答什么问题？</h1>
       <p class="sub">研究都从一个算例出发，产出新的算例；新算例回到工作流里运行，在结果页与原算例比较。</p>
+      <div class="card">
+        <h3>修改模型源码</h3>
+        <p class="mini">新建开发工作区，在源码副本里修改、编译和验证模型。</p>
+        <button class="btn-ghost" type="button" id="research-workspaces-btn">打开开发工作区</button>
+      </div>
       <div class="card research-base">
         <h3>基于算例</h3>
         <div id="research-case" class="ch"></div>
@@ -1229,7 +1234,7 @@
       <div class="grow"></div>
       <button class="btn-ghost" type="button" id="assistant-new">新对话</button>
       <button class="btn-ghost" type="button" id="assistant-history-btn">历史</button>
-      <button class="btn-ghost" type="button" id="assistant-workspaces-btn" title="助手改源码、编译、对照的地方">工作区</button>
+      <button class="btn-ghost" type="button" id="assistant-workspaces-btn" title="新建工作区、修改源码和验证模型">开发工作区</button>
       <button class="btn-ghost" type="button" id="assistant-settings-btn">设置</button>
       <button class="icon-btn" type="button" id="assistant-close" title="关闭">×</button>
     </div>
@@ -1388,6 +1393,32 @@
 <dialog id="workspace-dialog" class="app-dialog workspace-dialog" aria-labelledby="workspace-title">
   <h3 id="workspace-title">开发工作区</h3>
   <p class="mini">开发工作区是一份 CoLM 源码的副本，用来试改代码。你或 AI 助手在副本里改 Fortran 和 Rust 代码、编译、跑测试，再和正式版本对比结果。你正在用的应用和正式内核都不会被改动，除非你在这里点“启用这个内核”。启用、导出、撤回、删除只能由你在这里操作，助手做不了。</p>
+  <form id="workspace-create-form" class="card" aria-labelledby="workspace-create-title">
+    <h3 id="workspace-create-title">新建工作区</h3>
+    <div class="field">
+      <label for="workspace-name">工作区名称</label>
+      <input class="input" id="workspace-name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="例如 soil-water-fix" aria-describedby="workspace-name-help">
+      <p class="mini muted" id="workspace-name-help">使用字母、数字、下划线或短横线，以字母或数字开头。</p>
+    </div>
+    <p class="mini">默认使用当前应用的源码。创建后可让助手在这个工作区里改代码、编译和验证。</p>
+    <details>
+      <summary class="mini">选择其他源码或版本（可选）</summary>
+      <div class="field">
+        <label for="workspace-source">源码目录或源码包的完整路径</label>
+        <div class="browse">
+          <input class="input" id="workspace-source" placeholder="留空使用当前应用源码">
+          <button class="btn-ghost" type="button" id="workspace-source-browse">选择目录…</button>
+        </div>
+      </div>
+      <div class="field">
+        <label for="workspace-rev">分支、标签或提交号</label>
+        <input class="input" id="workspace-rev" placeholder="留空使用来源的当前提交">
+      </div>
+    </details>
+    <p class="mini muted">从仓库创建时只复制已提交的代码，未提交的修改不会带入。</p>
+    <button class="run-btn" type="submit" id="workspace-create">新建工作区</button>
+    <p class="mini" id="workspace-create-status" role="status" aria-live="polite"></p>
+  </form>
   <details class="ws-legend">
     <summary class="mini">四项检查是什么意思？</summary>
     <ul class="mini">

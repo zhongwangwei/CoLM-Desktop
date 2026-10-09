@@ -121,6 +121,8 @@ pub struct Report {
     pub within_tolerance: usize,
     pub differs: usize,
     pub new_nonfinite: usize,
+    /// Missing variables or incompatible numeric shapes/types.
+    pub structural_differences: usize,
     /// 按选项忽略掉的变量（出现过的）。
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<String>,
@@ -310,20 +312,48 @@ pub fn compare_with(a: &Path, b: &Path, options: &Options) -> Result<Report> {
             netcdf::open(path_b).with_context(|| format!("cannot open {}", path_b.display()))?,
         );
         let times: Option<Vec<f64>> = fa.variable("time").and_then(|t| read_f64(&t).ok());
-        for variable in fa.variables() {
-            let var_name = variable.name();
-            if !numeric(&variable) {
-                continue;
-            }
-            if options.ignore.iter().any(|i| i == &var_name) {
+        let names: std::collections::BTreeSet<String> = fa
+            .variables()
+            .chain(fb.variables())
+            .filter(numeric)
+            .map(|v| v.name())
+            .collect();
+        for var_name in names {
+            if options.ignore.contains(&var_name) {
                 if !report.ignored.contains(&var_name) {
                     report.ignored.push(var_name);
                 }
                 continue;
             }
-            let Some(other) = fb.variable(&var_name) else {
-                report.differs += 1;
-                report.changed.push(VarReport {
+            let (variable, other) = (fa.variable(&var_name), fb.variable(&var_name));
+            let compatible = variable.as_ref().zip(other.as_ref()).is_some_and(|(a, b)| {
+                numeric(a)
+                    && numeric(b)
+                    && a.dimensions()
+                        .iter()
+                        .map(|d| (d.name(), d.len()))
+                        .collect::<Vec<_>>()
+                        == b.dimensions()
+                            .iter()
+                            .map(|d| (d.name(), d.len()))
+                            .collect::<Vec<_>>()
+            });
+            let item = if compatible {
+                compare_variable(
+                    name,
+                    &var_name,
+                    &variable.unwrap(),
+                    &other.unwrap(),
+                    times.as_deref(),
+                    options,
+                )?
+            } else {
+                report.structural_differences += 1;
+                let nonfinite = match other.as_ref().filter(|v| numeric(v)) {
+                    Some(v) => read_f64(v)?.iter().filter(|v| !v.is_finite()).count(),
+                    None => 0,
+                };
+                VarReport {
                     file: name.clone(),
                     name: var_name,
                     status: Status::Differs,
@@ -331,18 +361,9 @@ pub fn compare_with(a: &Path, b: &Path, options: &Options) -> Result<Report> {
                     max_rel: f64::INFINITY,
                     first_step: None,
                     first_time: None,
-                    new_nonfinite: 0,
-                });
-                continue;
+                    new_nonfinite: nonfinite,
+                }
             };
-            let item = compare_variable(
-                name,
-                &var_name,
-                &variable,
-                &other,
-                times.as_deref(),
-                options,
-            )?;
             report.new_nonfinite += item.new_nonfinite;
             match item.status {
                 Status::Identical => report.identical += 1,
@@ -377,24 +398,27 @@ pub fn compare_with(a: &Path, b: &Path, options: &Options) -> Result<Report> {
     Ok(report)
 }
 
-/// 一个目录里各 `.nc` 文件中某些变量的最大绝对值（闭合检查用）。
+/// Closure peaks, present only when the variable has finite, nonempty data in every file.
 pub fn max_abs(dir: &Path, names: &[&str]) -> Result<BTreeMap<String, f64>> {
     let mut out = BTreeMap::new();
+    let mut incomplete = std::collections::BTreeSet::new();
     for (_, path) in netcdf_files(dir)? {
         let file = netcdf::open(&path)?;
         for name in names {
-            if let Some(variable) = file.variable(name) {
-                if numeric(&variable) {
-                    let peak = read_f64(&variable)?
-                        .into_iter()
-                        .filter(|v| v.is_finite())
-                        .fold(0.0f64, |m, v| m.max(v.abs()));
-                    let entry = out.entry((*name).to_owned()).or_insert(0.0f64);
-                    *entry = entry.max(peak);
+            if let Some(variable) = file.variable(name).filter(numeric) {
+                let values = read_f64(&variable)?;
+                if values.is_empty() || values.iter().any(|v| !v.is_finite()) {
+                    incomplete.insert((*name).to_owned());
                 }
+                let peak = values.into_iter().fold(0.0f64, |m, v| m.max(v.abs()));
+                let entry = out.entry((*name).to_owned()).or_insert(0.0f64);
+                *entry = entry.max(peak);
+            } else {
+                incomplete.insert((*name).to_owned());
             }
         }
     }
+    out.retain(|name, _| !incomplete.contains(name));
     Ok(out)
 }
 

@@ -127,6 +127,13 @@ pub fn root_uptake(input: RootUptakeInput<'_>) -> Result<RootUptakeState> {
             .unwrap_or(root_total),
         _ => root_total,
     };
+    if stress != root_total {
+        // The physics floor is not an uptake layer: a replacement beta needs a unit partition.
+        let total: f64 = layer_fraction.iter().sum();
+        for fraction in &mut layer_fraction {
+            *fraction /= total;
+        }
+    }
     Ok(RootUptakeState {
         layer_fraction,
         maximum_transpiration_mm_s: input.maximum_transpiration_mm_s * stress,

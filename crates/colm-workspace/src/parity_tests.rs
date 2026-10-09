@@ -64,6 +64,22 @@ fn workspace(root: &Path) -> Workspace {
     Workspace::create(&root.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap()
 }
 
+/// 记一次“在当前提交上编译通过”（假的 colm-cli 与内核没有真编过）。两版一致与回归要求有它。
+fn mark_built(ws: &mut Workspace, preset: &str) {
+    let commit = ws.head().unwrap();
+    let run = crate::gates::GateRun {
+        ok: true,
+        at: 0,
+        commit,
+        detail: "test".into(),
+    };
+    ws.update(|info| {
+        info.gates.engine = Some(run.clone());
+        info.gates.kernels.insert(preset.to_owned(), run.clone());
+    })
+    .unwrap();
+}
+
 fn fake_kernel(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("manifest.json"), "{}").unwrap();
@@ -114,6 +130,7 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
         &[("f_t", good.clone()), ("f_q", good.clone())],
     );
     fake_cli(&ws.bin().join("colm-cli"), &a, &b, 0);
+    mark_built(&mut ws, "default");
     let ok = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
     assert!(ok.ok, "{:?}", ok.first_difference);
     assert!(ok.compare.as_ref().unwrap().bitwise_identical());
@@ -168,7 +185,11 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     let closure = series(|_| 1e-12);
     history(
         &base.join("REF_hist_2004-01.nc"),
-        &[("f_t", t.clone()), ("f_xerr", closure.clone())],
+        &[
+            ("f_t", t.clone()),
+            ("f_xerr", closure.clone()),
+            ("f_zerr", closure.clone()),
+        ],
     );
     let baseline_cli = root.join("baseline/colm-cli");
     fake_cli(&baseline_cli, &base, &base, 0);
@@ -180,9 +201,14 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     // 候选和基线一样：重构通过。
     history(
         &cand.join("REF_hist_2004-01.nc"),
-        &[("f_t", t.clone()), ("f_xerr", closure.clone())],
+        &[
+            ("f_t", t.clone()),
+            ("f_xerr", closure.clone()),
+            ("f_zerr", closure.clone()),
+        ],
     );
     fake_cli(&ws.bin().join("colm-cli"), &cand, &cand, 0);
+    mark_built(&mut ws, "default");
     let same = regress(
         &mut ws,
         &case,
@@ -200,7 +226,11 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     let warmer = series(|i| 280.5 + i as f64);
     history(
         &cand.join("REF_hist_2004-01.nc"),
-        &[("f_t", warmer), ("f_xerr", closure.clone())],
+        &[
+            ("f_t", warmer),
+            ("f_xerr", closure.clone()),
+            ("f_zerr", closure.clone()),
+        ],
     );
     let refactor = regress(
         &mut ws,
@@ -236,14 +266,18 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     let record = ws.info.gates.regression.clone().unwrap();
     assert_eq!(
         (record.kind, record.ok, record.changed, record.identical),
-        (ChangeKind::Physics, true, 1, 2)
+        (ChangeKind::Physics, true, 1, 3)
     );
 
     // 闭合变差（水量不平衡从 1e-12 涨到 1e-3）：物理修改也不通过。
     let leaky = series(|_| 1e-3);
     history(
         &cand.join("REF_hist_2004-01.nc"),
-        &[("f_t", series(|i| 280.5 + i as f64)), ("f_xerr", leaky)],
+        &[
+            ("f_t", series(|i| 280.5 + i as f64)),
+            ("f_xerr", leaky),
+            ("f_zerr", closure.clone()),
+        ],
     );
     let worse = regress(
         &mut ws,
@@ -272,7 +306,11 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     nan[3] = f64::NAN;
     history(
         &cand.join("REF_hist_2004-01.nc"),
-        &[("f_t", nan), ("f_xerr", closure)],
+        &[
+            ("f_t", nan),
+            ("f_xerr", closure.clone()),
+            ("f_zerr", closure.clone()),
+        ],
     );
     let broken = regress(
         &mut ws,
@@ -289,6 +327,26 @@ fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
         "{}",
         broken.verdict
     );
+
+    // Identical output without closure diagnostics is incomplete even for physics changes.
+    for dir in [&base, &cand] {
+        history(
+            &dir.join("REF_hist_2004-01.nc"),
+            &[("f_t", series(|_| 280.0))],
+        );
+    }
+    let missing = regress(
+        &mut ws,
+        &case,
+        "default",
+        "rust",
+        &baseline,
+        ChangeKind::Physics,
+        None,
+    )
+    .unwrap();
+    assert!(!missing.ok && missing.verdict.contains("missing"));
+    assert!(!ws.info.gates.regression.as_ref().unwrap().ok);
 
     // Fortran 引擎的回归必须有工作区自己编的内核。
     assert!(regress(
@@ -325,6 +383,7 @@ fn parity_with_a_tolerance_accepts_rounding_noise_and_still_catches_a_real_misal
     history(&a.join("REF_hist_2004-01.nc"), &[("f_t", good.clone())]);
     history(&b.join("REF_hist_2004-01.nc"), &[("f_t", noise)]);
     fake_cli(&ws.bin().join("colm-cli"), &a, &b, 0);
+    mark_built(&mut ws, "default");
     let strict = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
     assert!(!strict.ok, "bitwise parity fails on rounding noise");
     let loose = parity_check(
@@ -419,5 +478,58 @@ fn the_case_copy_can_write_history_every_step() {
     let bare_copy = root.join("bare-copy");
     copy_case(&bare, &bare_copy).unwrap();
     assert!(set_history_every_step(&bare_copy).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn physics_regression_rejects_incomplete_histories_and_variable_sets() {
+    for report in [
+        Report::default(),
+        Report {
+            files: 1,
+            only_in_a: vec!["missing-month.nc".into()],
+            ..Report::default()
+        },
+        Report {
+            files: 1,
+            only_in_b: vec!["extra-month.nc".into()],
+            ..Report::default()
+        },
+        Report {
+            files: 1,
+            structural_differences: 1,
+            ..Report::default()
+        },
+    ] {
+        let (ok, reason) = judge(ChangeKind::Physics, &report, true);
+        assert!(!ok && reason.contains("incomplete"), "{reason}");
+    }
+}
+
+/// 编完又打了补丁、没重编：两版一致与回归跑的是旧程序，必须拒绝，不能记成新提交通过。
+#[test]
+fn checks_refuse_binaries_built_on_an_older_commit() {
+    let _nc = nc_lock();
+    let root = temp("stalebuild");
+    let case = reference_case(&root);
+    let mut ws = workspace(&root);
+    fake_kernel(&ws.kernels().join("default"));
+    let a = root.join("fx-a");
+    history(
+        &a.join("REF_hist_2004-01.nc"),
+        &[("f_t", series(|i| i as f64))],
+    );
+    fake_cli(&ws.bin().join("colm-cli"), &a, &a, 0);
+    mark_built(&mut ws, "default");
+    std::fs::write(ws.src().join("NEW.txt"), "later change\n").unwrap();
+    crate::git::run(&ws.src(), &["add", "-A"]).unwrap();
+    crate::git::run(&ws.src(), &["commit", "-q", "-m", "after the build"]).unwrap();
+    let err = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap_err();
+    assert!(err.to_string().contains("build_engine"), "{err}");
+    // 有未提交的改动时也不跑。
+    mark_built(&mut ws, "default");
+    std::fs::write(ws.src().join("NEW.txt"), "dirty\n").unwrap();
+    let err = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap_err();
+    assert!(err.to_string().contains("commit or revert"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }

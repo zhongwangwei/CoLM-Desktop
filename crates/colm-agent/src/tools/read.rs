@@ -7,7 +7,10 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
-use super::{object, opt_str, req_str, Tier, Tool, ToolContext};
+use super::{object, opt_str, req_str, Tier, Tool, ToolContext, MAX_RESULT_CHARS};
+
+#[path = "knowledge.rs"]
+mod knowledge;
 
 pub(super) fn tools() -> Vec<Box<dyn Tool>> {
     vec![
@@ -228,6 +231,7 @@ impl Tool for ExplainParameter {
                 "section": d.section, "scope": d.scope, "unit": d.unit, "default": d.default,
                 "default_provider": d.default_provider, "validation": d.validation,
                 "calibration_eligible": d.calibration_eligible, "structural": d.structural_parameter,
+                "visibility": d.visibility, "activation": d.activation,
                 "doc_zh": d.doc_zh, "doc_en": d.doc_en, "source": d.source_location,
             })
         });
@@ -240,17 +244,96 @@ impl Tool for ExplainParameter {
         if descriptor.is_none() && field.is_none() {
             bail!("{name} is neither a namelist field nor a catalogued parameter");
         }
-        let current = match opt_str(args, "case") {
-            Some(_) => {
-                let dir = case_dir(ctx, args, "case")?;
-                read_document(&dir.join("case.nml"))?
-                    .get(name)
-                    .map(ToString::to_string)
+        let parameter = colm_case::parameters::find(name);
+        let key = parameter.map_or(name, |p| p.raw_key.as_str());
+        let mut current = None;
+        let mut applicability = json!({
+            "status": "unknown", "reason": "no case supplied",
+            "calibration_eligible_for_case": null,
+        });
+        if opt_str(args, "case").is_some() {
+            let dir = case_dir(ctx, args, "case")?;
+            let document = read_document(&dir.join("case.nml"))?;
+            current = document.get(key).map(ToString::to_string);
+            applicability = parameter_applicability(ctx, &dir, &document, key)?;
+            if applicability["status"] == "active" {
+                applicability["calibration_eligible_for_case"] =
+                    json!(parameter.map(|p| p.calibration_eligible));
+            } else if applicability["status"] == "inactive" {
+                applicability["calibration_eligible_for_case"] = json!(false);
             }
-            None => None,
-        };
-        Ok(json!({ "parameter": descriptor, "field": field, "current_value": current }))
+        }
+        Ok(
+            json!({ "parameter": descriptor, "field": field, "current_value": current,
+            "applicability": applicability }),
+        )
     }
+}
+
+fn parameter_applicability(
+    ctx: &ToolContext,
+    dir: &Path,
+    document: &colm_namelist::Document,
+    key: &str,
+) -> Result<Value> {
+    let unknown = |reason: &str| {
+        json!({ "status": "unknown", "reason": reason,
+        "calibration_eligible_for_case": null })
+    };
+    if colm_case::tuning::find(key)?.is_none() {
+        return Ok(unknown("no case activity validator for this parameter; catalog visibility and activation are metadata, not proof of runtime use"));
+    }
+    let manifest_path = ctx.kernel_dir.as_ref().map(|p| p.join("manifest.json"));
+    let manifest = manifest_path
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok());
+    let macros = manifest
+        .as_ref()
+        .filter(|m| m["schema"] == 1)
+        .and_then(|m| m["macros"].as_array())
+        .and_then(|a| {
+            a.iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+        });
+    let Some(macros) = macros else {
+        return Ok(unknown("selected kernel manifest macros are unavailable"));
+    };
+    let landtype = match document.get("SITE_landtype") {
+        Some(colm_namelist::Value::Int(value)) if *value > 0 => Some(*value),
+        _ => None,
+    };
+    if macros.iter().any(|m| m == "SinglePoint")
+        && (landtype.is_none() || document.get("SITE_fsitedata").is_some())
+    {
+        return Ok(unknown("single-point runtime land type may be inherited from site data; resolve it before judging activity"));
+    }
+    let result = colm_case::tuning::validate_case_parameter_activity(
+        &dir.join("case.nml"),
+        &[key.to_owned()],
+        &macros,
+        landtype,
+    );
+    let reason = result.err().map(|e| e.to_string());
+    let status = match reason.as_deref() {
+        None => "active",
+        Some(reason)
+            if reason.ends_with("is inactive for the current case/kernel configuration") =>
+        {
+            "inactive"
+        }
+        Some(_) => "unknown",
+    };
+    Ok(json!({
+        "status": status,
+        "reason": reason,
+        "mode": land_mode(document), "kernel_manifest": manifest_path,
+        "kernel_macros": macros, "landtype": landtype,
+        "validator": "crates/colm-case/src/tuning.rs::validate_case_parameter_activity",
+        "qualification": "activity according to the registered case/kernel guards, not proof of output sensitivity",
+        "calibration_eligible_for_case": null,
+    }))
 }
 
 struct RunStatus;
@@ -675,7 +758,7 @@ impl Tool for SearchDocs {
         "search_docs"
     }
     fn description(&self) -> &'static str {
-        "Search the project documentation (design notes, implementation verification log, known upstream bugs) for a word or phrase; returns matching lines with file and line number."
+        "Search project documentation with file/line citations, source content identity and knowledge_checks. Changed source bindings mark knowledge needs_review, withhold stored assertions, and return freshly read source excerpts and read_file follow-ups. Unbound/unknown documents cannot establish current-version behavior."
     }
     fn parameters(&self) -> Value {
         object(json!({ "query": string("case-insensitive text to find") }))
@@ -685,10 +768,16 @@ impl Tool for SearchDocs {
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
         let query = req_str(args, "query")?.to_lowercase();
+        if query.len() > 1024 {
+            bail!("documentation query exceeds 1024 bytes");
+        }
         let root = ctx
             .docs_root
             .as_ref()
             .context("no documentation directory is configured")?;
+        let provenance = documentation_provenance(ctx);
+        let bindings = knowledge::Bindings::load(root, &provenance["application_source"]);
+        let mut knowledge_checks = BTreeMap::new();
         let mut hits = Vec::new();
         let mut files: Vec<PathBuf> = std::fs::read_dir(root)
             .with_context(|| format!("cannot read {}", root.display()))?
@@ -699,12 +788,29 @@ impl Tool for SearchDocs {
         files.sort();
         'outer: for file in files {
             let text = std::fs::read_to_string(&file).unwrap_or_default();
-            for (index, line) in text.lines().enumerate() {
+            let lines: Vec<_> = text.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
                 if line.to_lowercase().contains(&query) {
+                    let name = file
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    let check = knowledge_checks
+                        .entry(name.clone())
+                        .or_insert_with(|| bindings.check(&name, &text, &query));
+                    let stale = check["status"] == "needs_review";
                     hits.push(json!({
                         "file": file.file_name().map(|n| n.to_string_lossy().into_owned()),
+                        "path": file.display().to_string(),
                         "line": index + 1,
-                        "text": line.chars().take(400).collect::<String>(),
+                        "context_start_line": index.saturating_sub(3) + 1,
+                        "context": if stale { vec!["Stored knowledge withheld: source/document changed. Use knowledge_checks fresh_source_evidence and inspect relevant current code before answering.".to_owned()] } else { lines[index.saturating_sub(3)..(index + 5).min(lines.len())]
+                            .iter().map(|s| s.chars().take(400).collect::<String>()).collect::<Vec<_>>()
+                        },
+                        "text": if stale { "Stored assertion requires review".to_owned() } else {line.chars().take(400).collect::<String>()},
+                        "knowledge_status":check["status"],
+                        "may_support_current_answer":check["may_support_current_answer"],
                     }));
                     if hits.len() >= 60 {
                         break 'outer;
@@ -712,8 +818,39 @@ impl Tool for SearchDocs {
                 }
             }
         }
-        Ok(json!({ "query": query, "matches": hits }))
+        let mut result = json!({ "query": query, "matches": hits, "provenance": provenance, "knowledge_checks":knowledge_checks,
+            "truncated": hits.len() >= 60 });
+        while serde_json::to_string(&result)?.chars().count() > MAX_RESULT_CHARS {
+            result["matches"]
+                .as_array_mut()
+                .context("matches must be an array")?
+                .pop()
+                .context("documentation provenance exceeds result limit")?;
+            let remaining: std::collections::BTreeSet<String> = result["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|hit| hit["file"].as_str().map(str::to_owned))
+                .collect();
+            result["knowledge_checks"]
+                .as_object_mut()
+                .unwrap()
+                .retain(|file, _| remaining.contains(file));
+            result["truncated"] = json!(true);
+        }
+        Ok(result)
     }
+}
+
+fn documentation_provenance(ctx: &ToolContext) -> Value {
+    json!({
+        "agent_package_version": env!("CARGO_PKG_VERSION"),
+        "docs_root": ctx.docs_root,
+        "application_source": ctx.cli_json(&["ws-source-info", "--source", "app"])
+            .unwrap_or_else(|error| json!({ "version_status": "unknown", "revision": null,
+                "tag": null, "dirty": null, "reason": error.to_string() })),
+        "verification": "Use search_code/read_file with name=null for the application's source; documentation and package version alone do not establish its revision or the selected simulation kernel revision.",
+    })
 }
 
 struct EnvironmentDoctor;

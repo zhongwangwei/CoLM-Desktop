@@ -424,14 +424,14 @@ let importSlotChosen = false;
 
 function syncImportSlot(infos) {
   const select = $('hybrid-slot');
-  if (!select || importSlotChosen) return;
+  if (!select || importSlotChosen || hybridMode() !== 'params') return;
   const modes = new Set(infos.map(info => info?.land_mode).filter(Boolean));
   if (modes.size === 1) setImportSlot(slotForMode([...modes][0]));
 }
 
-function setImportSlot(slot) {
+function setImportSlot(slot, force = false) {
   const select = $('hybrid-slot');
-  if (!select || select.value === slot && $('hybrid-outputs')?.children.length) return;
+  if (!select || !force && select.value === slot && $('hybrid-outputs')?.children.length) return;
   select.value = slot;
   const defaults = slotDefaults(slot);
   $('hybrid-features').value = defaults.features;
@@ -466,7 +466,7 @@ async function installModel() {
 
 function wireRunCard() {
   if (!$('hybrid-card')) return;
-  $('hybrid-slot').onchange = () => { importSlotChosen = true; setImportSlot($('hybrid-slot').value); };
+  $('hybrid-slot').onchange = () => { importSlotChosen = true; setImportSlot($('hybrid-slot').value, true); };
   $('hybrid-add-output').onclick = () => {
     outputRow($('hybrid-outputs'), { name: outputPrefix($('hybrid-slot').value), lo: '', hi: '', transform: 'sigmoid' }, ['sigmoid', 'clamp', 'identity']);
   };
@@ -595,10 +595,16 @@ function applyMode() {
   const text = MODE_TEXT[mode];
   if ($('hybrid-title')) $('hybrid-title').textContent = t(text.title);
   if ($('hybrid-intro')) $('hybrid-intro').textContent = t(text.intro);
-  if (filterSlotSelect($('hybrid-slot'), mode)) setImportSlot($('hybrid-slot').value);
+  if (filterSlotSelect($('hybrid-slot'), mode)) {
+    importSlotChosen = false;
+    setImportSlot($('hybrid-slot').value, true);
+  }
   const preset = PRESETS.find(p => p.id === selectedPreset);
   if (preset?.slot && !MODE_SLOTS[mode].includes(preset.slot)) selectedPreset = null;
-  filterSlotSelect($('tune-hybrid-slot'), mode);
+  // 训练表单同理：插槽一换，特征与输出也要换成新插槽的（“自定义”预设没有插槽，上面那一句清不掉它）。
+  if (filterSlotSelect($('tune-hybrid-slot'), mode)) {
+    applyPreset(mode === 'process' ? 'beta' : presetForMode(caseMode()));
+  }
   const methods = methodsForMode(mode);
   let current = null;
   for (const b of $('hybrid-method')?.querySelectorAll('button') ?? []) {

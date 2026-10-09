@@ -161,6 +161,33 @@ fn the_tools_ask_the_cli_for_the_workspace_root_when_the_context_has_one() {
         "ws-read --name w --path a.rs --from 3 --root /data/ws"
     );
 
+    let parity = ParityCheck
+        .call(
+            &json!({
+                "name": "w", "case": "c", "preset": "default", "rtol": 1e-9,
+                "first_records": 2, "ignore": "f_frcsat,f_extra"
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(parity["argv"], format!("ws-parity --name w --case {}/c --preset default --rtol 0.000000001 --first-records 2 --ignore f_frcsat,f_extra --root /data/ws", dir.display()));
+    let defaults = ParityCheck
+        .call(
+            &json!({
+                "name": "w", "case": "c", "preset": "default", "rtol": null,
+                "first_records": null, "ignore": null
+            }),
+            &ctx,
+        )
+        .unwrap();
+    assert_eq!(
+        defaults["argv"],
+        format!(
+            "ws-parity --name w --case {}/c --preset default --root /data/ws",
+            dir.display()
+        )
+    );
+
     // 补丁经临时文件交给 colm-cli，用完删掉。
     let applied = ApplyPatch
         .call(

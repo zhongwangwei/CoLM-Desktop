@@ -239,3 +239,93 @@ fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
     // 编引擎的并行度至少 8，与运行线程数无关。
     assert!(rust.contains("-j 8"), "{rust}");
 }
+
+#[test]
+fn source_digest_tracks_bytes_and_paths_not_metadata_or_creation_order() {
+    let root = std::env::temp_dir().join(format!("colm-content-hash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    for name in ["a", "b"] {
+        std::fs::create_dir_all(root.join(name).join("crates/demo/src")).unwrap();
+        std::fs::write(root.join(name).join("Cargo.toml"), "[workspace]\n").unwrap();
+    }
+    for (name, order) in [("a", ["a.rs", "b.rs"]), ("b", ["b.rs", "a.rs"])] {
+        for file in order {
+            std::fs::write(root.join(name).join("crates/demo/src").join(file), file).unwrap();
+        }
+    }
+    let a = root.join("a");
+    let first = source_content_sha256(&a).unwrap();
+    assert_eq!(first.len(), 64);
+    assert_eq!(first, source_content_sha256(&root.join("b")).unwrap());
+    std::fs::write(a.join("crates/demo/src/a.rs"), "a.rs").unwrap();
+    assert_eq!(first, source_content_sha256(&a).unwrap());
+    std::fs::create_dir_all(a.join("crates/demo/target")).unwrap();
+    std::fs::write(a.join("crates/demo/target/generated.rs"), "ignored").unwrap();
+    std::fs::write(a.join("crates/demo/data.nc"), "ignored").unwrap();
+    assert_eq!(first, source_content_sha256(&a).unwrap());
+    std::fs::write(a.join("crates/demo/src/a.rs"), "z.rs").unwrap();
+    assert_ne!(first, source_content_sha256(&a).unwrap());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("b"), a.join("crates/link")).unwrap();
+        assert!(source_content_sha256(&a).is_err());
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn app_source_cache_uses_digest_and_rejects_partial_snapshots() {
+    let root = std::env::temp_dir().join(format!("colm-source-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("source");
+    let cache = root.join("cache");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(source.join("Cargo.lock"), "first").unwrap();
+    let tarball = root.join("source.tar.gz");
+    let pack = || {
+        assert!(Command::new("tar")
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&source)
+            .args(["Cargo.toml", "Cargo.lock"])
+            .status()
+            .unwrap()
+            .success());
+        let mut bytes = std::fs::read(&tarball).unwrap();
+        bytes.resize(16384, 0);
+        std::fs::write(&tarball, bytes).unwrap();
+    };
+    pack();
+    let workers: Vec<_> = (0..3)
+        .map(|_| {
+            let tarball = tarball.clone();
+            let cache = cache.clone();
+            std::thread::spawn(move || unpack_app_source(&tarball, &cache).unwrap())
+        })
+        .collect();
+    let paths: Vec<_> = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap())
+        .collect();
+    assert!(paths.iter().all(|path| path == &paths[0]));
+    let first = paths[0].clone();
+    assert_eq!(first, unpack_app_source(&tarball, &cache).unwrap());
+    std::fs::write(source.join("Cargo.lock"), "other").unwrap();
+    pack();
+    let second = unpack_app_source(&tarball, &cache).unwrap();
+    assert_ne!(first, second);
+    assert_eq!(
+        std::fs::read_to_string(first.join("Cargo.lock")).unwrap(),
+        "first"
+    );
+    assert_eq!(
+        std::fs::read_to_string(second.join("Cargo.lock")).unwrap(),
+        "other"
+    );
+    std::fs::remove_file(second.join(".colm-source-sha256")).unwrap();
+    assert!(unpack_app_source(&tarball, &cache).is_err());
+    assert!(second.join("Cargo.lock").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}

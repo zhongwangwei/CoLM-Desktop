@@ -1,5 +1,5 @@
 //! 开发工作区面板（docs/design-ai-assistant.md 第 5、8 节）：助手改 CoLM 源码、编译、测试、对照的地方。
-//! 实际工作都由 `colm-cli ws-*` 做；这里显示各工作区的状态灯，并提供采纳、导出补丁、回滚、删除。
+//! 实际工作都由 `colm-cli ws-*` 做；这里提供新建、状态和采纳、导出补丁、回滚、删除。
 //!
 //! 这四个按钮是 **D 级**：只在这里有入口，助手的工具里没有对应的工具，模型调不到。
 //!
@@ -99,6 +99,34 @@ function storeAdopted() {
 // ---- 面板 ------------------------------------------------------------------------------------
 
 let registered = [];
+let creating = false;
+
+async function createWorkspace(event) {
+  event.preventDefault();
+  if (creating || !$('workspace-create-form').reportValidity()) return;
+  const name = $('workspace-name').value.trim();
+  const source = $('workspace-source').value.trim() || null;
+  const rev = $('workspace-rev').value.trim() || null;
+  const message = $('workspace-create-status');
+  const submit = $('workspace-create');
+  creating = true;
+  for (const id of ['workspace-name', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create']) $(id).disabled = true;
+  submit.textContent = t('正在创建…');
+  message.className = 'mini';
+  message.textContent = t('正在复制源码，创建完成后会显示在下方。');
+  try {
+    const result = await invoke('workspace_create', { name, source, rev });
+    message.textContent = `${t('已创建工作区')} ${name} · ${t('位置')}：${result.dir}。${t('下一步：让助手在这个工作区里修改代码、编译和验证。')}`;
+    await refresh();
+  } catch (error) {
+    message.className = 'mini assistant-fail';
+    message.textContent = String(error?.message || error);
+  } finally {
+    creating = false;
+    for (const id of ['workspace-name', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create']) $(id).disabled = false;
+    submit.textContent = t('新建工作区');
+  }
+}
 
 async function refresh() {
   const list = $('workspace-list');
@@ -147,7 +175,7 @@ function render(workspaces) {
   if (!workspaces.length) {
     list.append(Object.assign(document.createElement('p'), {
       className: 'muted',
-      textContent: t('还没有开发工作区。让助手建一个（例如“新建工作区 emis，来自当前仓库”），它会在里面改代码、编译和对照。'),
+      textContent: t('还没有开发工作区。在上方填写名称，点击“新建工作区”。'),
     }));
     return;
   }
@@ -293,6 +321,16 @@ function wire() {
   state.adoptedKernels = loadStored();
   if (!hasBackend || !$('workspace-dialog')) return;
   $('assistant-workspaces-btn')?.addEventListener('click', openWorkspaces);
+  $('research-workspaces-btn')?.addEventListener('click', openWorkspaces);
+  $('workspace-create-form').onsubmit = createWorkspace;
+  $('workspace-source-browse').onclick = async () => {
+    try {
+      const path = await invoke('pick_folder', { key: 'workspace-source' });
+      if (path && !creating) $('workspace-source').value = path;
+    } catch (error) {
+      $('workspace-create-status').textContent = String(error?.message || error);
+    }
+  };
   $('workspace-close').onclick = () => $('workspace-dialog').close();
   $('workspace-refresh').onclick = () => refresh();
   // 启动时核一遍：采纳过的内核若门槛作废了，就不再参与匹配。

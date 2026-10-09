@@ -18,5 +18,6 @@ colm-schema = { path = "../colm-schema" }
 # 同步 HTTP 客户端（rustls），流式读 SSE。agent 是独立 sidecar，不需要异步运行时。
 ureq = { version = "3", features = ["json"] }
 
-[lints]
-workspace = true
+# Atomic no-replace recycling requires native rename APIs; only that helper permits FFI.
+[lints.rust]
+unsafe_code = "deny"

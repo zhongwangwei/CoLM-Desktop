@@ -134,7 +134,7 @@ impl Tool for WorkspaceCreate {
     fn parameters(&self) -> Value {
         object(json!({
             "name": string("new workspace name: letters, digits, _ and -, at most 40 characters"),
-            "from": string("local git repository path, repository URL, or colm-src.tar.gz"),
+            "from": string("app for the current application's source, local git repository path, repository URL, or colm-src.tar.gz"),
             "rev": nullable("string", "tag, branch or commit; null for the source's current commit"),
         }))
     }
@@ -606,19 +606,26 @@ impl Tool for ParityCheck {
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
         let case = ctx.resolve(req_str(args, "case")?).display().to_string();
-        ws(
-            ctx,
-            "ws-parity",
-            &[
-                "--name",
-                req_str(args, "name")?,
-                "--case",
-                &case,
-                "--preset",
-                req_str(args, "preset")?,
-            ],
-            true,
-        )
+        let rtol = args["rtol"].as_f64().map(|v| v.to_string());
+        let first_records = args["first_records"].as_u64().map(|v| v.to_string());
+        let mut cli = vec![
+            "--name",
+            req_str(args, "name")?,
+            "--case",
+            &case,
+            "--preset",
+            req_str(args, "preset")?,
+        ];
+        if let Some(value) = &rtol {
+            cli.extend(["--rtol", value]);
+        }
+        if let Some(value) = &first_records {
+            cli.extend(["--first-records", value]);
+        }
+        if let Some(value) = args["ignore"].as_str() {
+            cli.extend(["--ignore", value]);
+        }
+        ws(ctx, "ws-parity", &cli, true)
     }
 }
 

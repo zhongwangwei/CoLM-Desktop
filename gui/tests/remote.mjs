@@ -10,14 +10,16 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-remote-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 // 只测纯函数：把依赖 DOM 与后端的模块换成空壳。
 for (const [name, body] of Object.entries({
-  'ipc.js': 'export const invoke = async () => ({}); export const listen = async () => {}; export const hasBackend = false;',
-  'ui.js': 'export const $ = () => null; export const status = () => {}; export const baseName = p => String(p).split("/").pop();',
+  'ipc.js': 'export const invoke = (...args) => globalThis.remoteInvoke(...args); export const listen = async () => {}; export const hasBackend = false;',
+  'ui.js': 'export const $ = id => globalThis.remoteNodes?.[id] ?? null; export const status = () => {}; export const baseName = p => String(p).split("/").pop();',
   'sites.js': 'export const renderCases = () => {};',
   'results.js': 'export const invalidateResultCase = () => {};',
   'shell.js': 'export const setRunning = () => {};',
   'state.js': 'export const state = {};',
   'engine.js': 'export const modelEngine = () => "rust";',
 })) await writeFile(join(temp, 'app', name), body);
+// Expose internal actions only in the temporary test copy.
+await writeFile(join(temp, 'app', 'remote.js'), (await readFile(join(temp, 'app', 'remote.js'), 'utf8')) + '\nexport { resumeJobs, refreshJob, fetchJob, renderJobs, jobs };\n');
 const remote = await import(pathToFileURL(join(temp, 'app', 'remote.js')).href);
 
 assert.deepEqual(
@@ -79,3 +81,60 @@ for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog'
   assert.ok(html.includes(`id="${id}"`), id);
 }
 console.log('remote: maps, probe summary, job states and wiring ok');
+
+const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
+for (const history of [true, false]) {
+  remote.jobs.clear();
+  state.selected = { dir: '/case' };
+  state.cases = [{ dir: '/case', has_history: history }];
+  const calls = [];
+  globalThis.remoteInvoke = async name => {
+    calls.push(name);
+    return { record: { host: 'server', job: 'old-job' }, status: { state: 'finished', exit_code: 0 } };
+  };
+  await remote.resumeJobs();
+  assert.equal(calls.includes('remote_fetch'), !history);
+  if (history) {
+    assert.equal(remote.jobs.get('/case').fetched, false);
+    await remote.refreshJob('/case');
+    assert.equal(calls.includes('remote_fetch'), false);
+    await remote.fetchJob('/case', true);
+    assert.equal(calls.at(-1), 'remote_fetch');
+  }
+}
+remote.jobs.clear();
+state.cases = [{ dir: '/case', has_history: false }];
+let statusCalls = 0;
+const identityCalls = [];
+globalThis.remoteInvoke = async name => {
+  identityCalls.push(name);
+  return { record: { host: 'server', job: ++statusCalls === 1 ? 'old-job' : 'new-job' }, status: { state: 'finished', exit_code: 0 } };
+};
+await remote.resumeJobs();
+assert.equal(identityCalls.includes('remote_fetch'), false);
+console.log('remote: resume preserves local history, explicit fetch, and changed job identity');
+
+remote.jobs.set('/case', { host: 'server', job: 'new-job', fetched: true });
+globalThis.remoteInvoke = async name => {
+  identityCalls.push(name);
+  return { record: { host: 'other-server', job: 'new-job' }, status: { state: 'finished', exit_code: 0 } };
+};
+await remote.refreshJob('/case');
+assert.equal(remote.jobs.get('/case').fetched, false);
+assert.equal(identityCalls.includes('remote_fetch'), false);
+assert.equal(remote.jobSummary(remote.jobs.get('/case')), '完成，等待手动取回结果');
+
+const nodes = [];
+globalThis.document = { createElement: tag => {
+  const node = { tag, children: [], append(...items) { this.children.push(...items); }, appendChild(item) { this.children.push(item); }, replaceChildren() { this.children = []; } };
+  nodes.push(node);
+  return node;
+} };
+globalThis.remoteNodes = { 'remote-runs': document.createElement('div'), 'remote-run-list': document.createElement('div') };
+remote.renderJobs();
+const fetchButton = nodes.find(node => node.tag === 'button' && node.textContent === '取回全部变量');
+assert.ok(fetchButton, 'resumed job with preserved local history must remain explicitly fetchable');
+fetchButton.onclick();
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(identityCalls.at(-1), 'remote_fetch');
+assert.equal(remote.jobs.get('/case').fetched, true);

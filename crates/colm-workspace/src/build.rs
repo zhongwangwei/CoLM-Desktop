@@ -153,12 +153,51 @@ pub fn run_logged(
     })
 }
 
-fn gate(workspace: &Workspace, outcome: &Outcome) -> Result<GateRun> {
+/// 一道门开始时的提交。源码要干净（改动都已提交），这次的记录才对应得上一个确定的提交。
+pub fn pin_commit(workspace: &Workspace) -> Result<String> {
+    ensure!(
+        !crate::git::is_dirty(&workspace.src())?,
+        "commit or revert source changes before running this check"
+    );
+    workspace.head()
+}
+
+/// 跑完之后源码还在 `commit` 上、也没有新的未提交改动吗。不在的话，这次结果不能记在 `commit` 名下。
+pub fn still_at(workspace: &Workspace, commit: &str) -> Result<bool> {
+    Ok(workspace.head()? == commit && !crate::git::is_dirty(&workspace.src())?)
+}
+
+/// 两版一致与回归跑的是**已经编好的**程序：要求 Rust 引擎（以及给出的预设的内核）就是在 `commit` 上编译通过的。
+/// 编完又打了补丁却没重编，跑的就是旧程序——记成“新提交通过”是错的（第 655 轮）。
+pub fn require_built_at(
+    workspace: &Workspace,
+    commit: &str,
+    kernel_preset: Option<&str>,
+) -> Result<()> {
+    let short = &commit[..commit.len().min(8)];
+    let gates = &workspace.info.gates;
+    ensure!(
+        gates.engine.as_ref().is_some_and(|g| g.ok && g.commit == commit),
+        "the workspace's Rust engine was not built on the current commit {short}; run build_engine first"
+    );
+    if let Some(preset) = kernel_preset {
+        ensure!(
+            gates.kernels.get(preset).is_some_and(|g| g.ok && g.commit == commit),
+            "the workspace's {preset} kernel was not built on the current commit {short}; run build_kernel first"
+        );
+    }
+    Ok(())
+}
+
+fn gate(workspace: &Workspace, commit: &str, outcome: &Outcome) -> Result<GateRun> {
+    let unchanged = still_at(workspace, commit)?;
     Ok(GateRun {
-        ok: outcome.ok,
+        ok: outcome.ok && unchanged,
         at: now(),
-        commit: workspace.head()?,
-        detail: if outcome.ok {
+        commit: commit.to_owned(),
+        detail: if !unchanged {
+            "source changed during build; rebuild the current commit".into()
+        } else if outcome.ok {
             format!("{:.0} s, log {}", outcome.seconds, outcome.log.display())
         } else {
             outcome.tail.lines().last().unwrap_or("failed").to_owned()
@@ -185,6 +224,11 @@ pub fn build_engine(
     }
     let target = workspace.target();
     let src = workspace.src();
+    let commit = workspace.head()?;
+    ensure!(
+        !crate::git::is_dirty(&src)?,
+        "commit or revert source changes before building"
+    );
     let outcome = run_logged(
         workspace,
         "build-engine",
@@ -206,7 +250,7 @@ pub fn build_engine(
                 .with_context(|| format!("cannot copy {} into bin/", binary))?;
         }
     }
-    let run = gate(workspace, &outcome)?;
+    let run = gate(workspace, &commit, &outcome)?;
     workspace.update(|info| info.gates.engine = Some(run))?;
     Ok(outcome)
 }
@@ -231,6 +275,11 @@ pub fn build_kernel(
         preset.to_owned(),
         outdir.display().to_string(),
     ];
+    let commit = workspace.head()?;
+    ensure!(
+        !crate::git::is_dirty(&src)?,
+        "commit or revert source changes before building"
+    );
     let outcome = run_logged(
         workspace,
         &format!("build-kernel-{preset}"),
@@ -249,7 +298,7 @@ pub fn build_kernel(
             manifest.display()
         );
     }
-    let run = gate(workspace, &outcome)?;
+    let run = gate(workspace, &commit, &outcome)?;
     let preset = preset.to_owned();
     workspace.update(|info| {
         info.gates.kernels.insert(preset, run);

@@ -167,8 +167,10 @@ impl Workspace {
             "workspace {name} already exists at {}",
             dir.display()
         );
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("cannot create {}", dir.display()))?;
+        std::fs::create_dir_all(root)
+            .with_context(|| format!("cannot create {}", root.display()))?;
+        // Only the caller that reserves this directory may clean up a failed creation.
+        std::fs::create_dir(&dir).with_context(|| format!("cannot reserve {}", dir.display()))?;
         match Self::populate(&dir, name, from, rev) {
             Ok(workspace) => Ok(workspace),
             Err(error) => {

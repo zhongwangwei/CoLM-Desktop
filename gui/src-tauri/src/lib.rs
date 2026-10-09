@@ -180,6 +180,7 @@ pub fn run() {
             remote_preview,
             remote_kernels,
             workspace::workspace_list,
+            workspace::workspace_create,
             workspace::workspace_status,
             workspace::workspace_kernels,
             workspace::workspace_export,

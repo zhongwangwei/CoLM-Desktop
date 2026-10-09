@@ -323,6 +323,11 @@ pub fn vegetation_water_potential(
             && shaded_stress >= 0.0,
         "plant-hydraulic stress factors must be finite and non-negative"
     );
+    ensure!(
+        input.maximum_root_hydraulic_conductance > 0.0
+            && input.maximum_xylem_hydraulic_conductance > 0.0,
+        "direct vegetation water potential requires positive root and xylem hydraulic conductance"
+    );
     let (soil_root_conductance_mm_s, axial_root_conductance_mm_s) = root_conductances(input)?;
     let boundary_conductance = 1.0 / input.leaf_boundary_resistance_s_m
         * conductance_conversion(input.surface_pressure_pa, input.leaf_temperature_k);

@@ -360,33 +360,185 @@ fn engine_source() -> Result<Source> {
     bail!("the engine sources were not found next to colm-cli; this build cannot run remotely")
 }
 
-/// 应用自己正在运行的那份源码的目录（助手不建工作区时只读地看代码用）：开发环境里是仓库根；
-/// 安装包里把随附的 `colm-src.tar.gz` 解到缓存目录（按版本与包的大小区分，同一份只解一次）。
+/// Workspace creation needs the original package, not the extracted read-only source cache.
+pub(crate) fn workspace_source() -> Result<PathBuf> {
+    Ok(match engine_source()? {
+        Source::Checkout(path) | Source::Tarball(path) => path,
+    })
+}
+
+/// Source identity excludes Git metadata, bulk datasets and generated build/cache directories.
+/// The same relative-path/byte stream is used for checkouts and extracted packages.
+pub(crate) fn source_content_sha256(root: &Path) -> Result<String> {
+    fn collect(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        let path = root.join(relative);
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(meta) => meta,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.into()),
+        };
+        ensure!(
+            !meta.file_type().is_symlink(),
+            "source symlink is not supported: {}",
+            path.display()
+        );
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                if matches!(
+                    name.to_str(),
+                    Some("target" | ".git" | "node_modules" | "__pycache__" | "cache" | ".cache")
+                ) {
+                    continue;
+                }
+                collect(root, &relative.join(name), files)?;
+            }
+        } else if meta.is_file() {
+            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            let ext = path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if matches!(name, "Cargo.lock" | "Makefile" | "CMakeLists.txt")
+                || matches!(
+                    ext.as_str(),
+                    "rs" | "f"
+                        | "f90"
+                        | "f95"
+                        | "for"
+                        | "c"
+                        | "h"
+                        | "cpp"
+                        | "hpp"
+                        | "py"
+                        | "sh"
+                        | "ps1"
+                        | "js"
+                        | "mjs"
+                        | "ts"
+                        | "json"
+                        | "toml"
+                        | "mk"
+                        | "cmake"
+                )
+            {
+                files.push(relative.to_owned());
+            }
+        }
+        Ok(())
+    }
+    ensure!(
+        !std::fs::symlink_metadata(root)?.file_type().is_symlink(),
+        "source root cannot be a symlink"
+    );
+    ensure!(
+        root.join("Cargo.toml").is_file(),
+        "source has no Cargo.toml"
+    );
+    let mut files = Vec::new();
+    for path in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "crates",
+        "vendor",
+        "xtask",
+        "scripts",
+    ] {
+        collect(root, Path::new(path), &mut files)?;
+    }
+    files.sort();
+    let mut hasher = Sha256::new();
+    for file in files {
+        let bytes = std::fs::read(root.join(&file))?;
+        let normalized = file
+            .components()
+            .map(|part| {
+                part.as_os_str()
+                    .to_str()
+                    .context("source path is not UTF-8")
+            })
+            .collect::<Result<Vec<_>>>()?
+            .join("/");
+        hasher.update(normalized.as_bytes());
+        hasher.update([0]);
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    std::io::copy(&mut file, &mut hasher)?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn unpack_app_source(tarball: &Path, cache: &Path) -> Result<PathBuf> {
+    const MARKER: &str = ".colm-source-sha256";
+    let digest = file_sha256(tarball)?;
+    let dest = cache.join(&digest);
+    let complete = |path: &Path| {
+        path.join("Cargo.lock").is_file()
+            && path.join("Cargo.toml").is_file()
+            && std::fs::read_to_string(path.join(MARKER)).is_ok_and(|value| value == digest)
+    };
+    if complete(&dest) {
+        return Ok(dest);
+    }
+    if dest.exists() {
+        ensure!(
+            complete(&dest),
+            "incomplete source cache {}; preserve it for inspection",
+            dest.display()
+        );
+        return Ok(dest);
+    }
+    std::fs::create_dir_all(cache)?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let staging = cache.join(format!(".{digest}.{}.{nonce}", std::process::id()));
+    std::fs::create_dir(&staging)?;
+    let result = (|| {
+        let status = Command::new("tar")
+            .arg("-xzf")
+            .arg(tarball)
+            .arg("-C")
+            .arg(&staging)
+            .status()
+            .context("cannot run tar")?;
+        ensure!(status.success(), "cannot unpack {}", tarball.display());
+        ensure!(
+            staging.join("Cargo.lock").is_file() && staging.join("Cargo.toml").is_file(),
+            "source package is incomplete"
+        );
+        ensure!(
+            file_sha256(tarball)? == digest,
+            "source package changed during extraction"
+        );
+        std::fs::write(staging.join(MARKER), &digest)?;
+        match std::fs::rename(&staging, &dest) {
+            Ok(()) => Ok(dest.clone()),
+            Err(_) if complete(&dest) => Ok(dest.clone()),
+            Err(error) => Err(error.into()),
+        }
+    })();
+    // Only this invocation's private staging directory may be removed.
+    if staging.exists() {
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    result
+}
+
+/// Installed sources are cached by the full package digest, published only after extraction.
 pub(crate) fn app_source_dir() -> Result<PathBuf> {
     match engine_source()? {
         Source::Checkout(repo) => Ok(repo),
         Source::Tarball(tarball) => {
-            let size = std::fs::metadata(&tarball)?.len();
-            let dest = engine::cache_dir()
-                .join("source")
-                .join(format!("{}-{size}", env!("CARGO_PKG_VERSION")));
-            if dest.join("Cargo.lock").is_file() {
-                return Ok(dest);
-            }
-            let staging = dest.with_extension(format!("tmp{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&staging);
-            std::fs::create_dir_all(&staging)?;
-            let status = Command::new("tar")
-                .arg("-xzf")
-                .arg(&tarball)
-                .arg("-C")
-                .arg(&staging)
-                .status()
-                .context("cannot run tar")?;
-            ensure!(status.success(), "cannot unpack {}", tarball.display());
-            let _ = std::fs::remove_dir_all(&dest);
-            std::fs::rename(&staging, &dest)?;
-            Ok(dest)
+            unpack_app_source(&tarball, &engine::cache_dir().join("source"))
         }
     }
 }

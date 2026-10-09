@@ -107,18 +107,46 @@ fn run() -> Result<()> {
 #[derive(Clone)]
 struct Emitter {
     session: Arc<Mutex<Session>>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl Emitter {
     fn emit(&self, event: Outbound) {
-        if let Ok(session) = self.session.lock() {
-            if let Err(error) = session.audit(&event) {
-                eprintln!("colm-agent: audit: {error:#}");
+        let checkpoint = self
+            .session
+            .lock()
+            .map_err(|_| anyhow::anyhow!("session lock poisoned"))
+            .and_then(|session| {
+                session.audit(&event)?;
+                if matches!(
+                    &event,
+                    Outbound::Ready { .. } | Outbound::TurnDone { .. } | Outbound::Error { .. }
+                ) {
+                    session.task_snapshot(matches!(&event, Outbound::Ready { .. }))
+                } else {
+                    Ok(None)
+                }
+            });
+        let (event, task) = match checkpoint {
+            Ok(task) => (event, task),
+            Err(error) => {
+                self.cancel.store(true, Ordering::SeqCst);
+                (Outbound::Error { message: format!("cannot persist task checkpoint: {error:#}; inspect existing outputs before retrying") }, None)
             }
-        }
+        };
         let line = serde_json::to_string(&event).unwrap_or_default();
         let mut out = std::io::stdout().lock();
         let _ = writeln!(out, "{line}");
+        if let Some(task) = task {
+            let snapshot = Outbound::TaskState {
+                task: serde_json::json!(task),
+            };
+            let _ = writeln!(
+                out,
+                "{}",
+                serde_json::to_string(&snapshot).unwrap_or_default()
+            );
+        }
         let _ = out.flush();
     }
 }
@@ -147,12 +175,19 @@ struct ChannelApprover {
     policy: ApprovalPolicy,
     /// 本会话选过“不再询问”的操作；开新会话时清空。
     allowed: Arc<Mutex<BTreeSet<String>>>,
+    reconciliation: bool,
 }
 
 impl Approver for ChannelApprover {
+    fn recovery_requires_approval(&self) -> bool {
+        self.reconciliation
+    }
     /// 运行操作按审批设置放行；代码操作（外部后端的命令、改文件）只在本会话点过“都允许”后放行，
     /// 不受“自动执行”影响。
     fn preapproved(&self, name: &str, tier: Tier) -> bool {
+        if self.reconciliation && tier != Tier::Read {
+            return false;
+        }
         let remembered = self.allowed.lock().unwrap().contains(name);
         match tier {
             Tier::Read => true,
@@ -162,6 +197,9 @@ impl Approver for ChannelApprover {
     }
 
     fn remember(&mut self, name: &str) {
+        if self.reconciliation {
+            return;
+        }
         self.allowed.lock().unwrap().insert(name.to_owned());
     }
 
@@ -293,6 +331,7 @@ fn claude_permission(arguments: &Value, turn: &ActiveTurn) -> String {
         return claude::permission_answer(true, input, None);
     }
     let request = Outbound::ApprovalRequest {
+        explicit_only: false,
         id: arguments["tool_use_id"]
             .as_str()
             .map(str::to_owned)
@@ -316,17 +355,32 @@ struct PanelSink {
 
 impl PanelSink {
     fn decide(emitter: &Emitter, approver: &Mutex<ChannelApprover>, request: Outbound) -> Decision {
-        let Outbound::ApprovalRequest { name, tier, .. } = &request else {
+        let Outbound::ApprovalRequest {
+            name,
+            tier,
+            explicit_only,
+            ..
+        } = &request
+        else {
             return Decision::Deny(None);
         };
         let (name, tier) = (name.clone(), *tier);
         let mut approver = approver.lock().unwrap();
-        if approver.preapproved(&name, tier) {
+        if emitter.cancel.load(Ordering::SeqCst) {
+            return Decision::Deny(Some("task checkpoint unavailable or cancelled".into()));
+        }
+        if !explicit_only && approver.preapproved(&name, tier) {
             return Decision::Approve;
         }
         emitter.emit(request.clone());
+        if emitter.cancel.load(Ordering::SeqCst) {
+            return Decision::Deny(Some("task checkpoint unavailable or cancelled".into()));
+        }
         let decision = approver.decide(&request);
-        if decision == Decision::ApproveForSession {
+        if emitter.cancel.load(Ordering::SeqCst) {
+            return Decision::Deny(Some("task checkpoint unavailable or cancelled".into()));
+        }
+        if !explicit_only && decision == Decision::ApproveForSession {
             approver.remember(&name);
         }
         decision
@@ -395,12 +449,13 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
         data_dir.as_deref(),
         colm_agent::SYSTEM_PROMPT,
     )?));
+    let cancel = Arc::new(AtomicBool::new(false));
     let emitter = Emitter {
         session: Arc::clone(&session),
+        cancel: Arc::clone(&cancel),
     };
     let settings: Arc<Mutex<Option<Settings>>> = Arc::new(Mutex::new(None));
     let busy = Arc::new(AtomicBool::new(false));
-    let cancel = Arc::new(AtomicBool::new(false));
     let (decision_tx, decision_rx): (Sender<(String, Decision)>, _) = mpsc::channel();
     let decision_rx = Arc::new(Mutex::new(decision_rx));
     let (ui_tx, ui_rx): (Sender<(String, bool, Value)>, _) = mpsc::channel();
@@ -583,6 +638,15 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     continue;
                 };
                 cancel.store(false, Ordering::SeqCst);
+                let reconciliation =
+                    session
+                        .lock()
+                        .unwrap()
+                        .task_snapshot(true)?
+                        .is_some_and(|task| {
+                            task.requires_reconciliation
+                                || matches!(task.state.as_str(), "interrupted" | "failed")
+                        });
                 tool_context.cancel = Some(Arc::clone(&cancel));
                 let session = Arc::clone(&session);
                 let emitter = emitter.clone();
@@ -619,6 +683,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             decisions,
                             policy,
                             allowed,
+                            reconciliation,
                         },
                         web_search,
                         data_dir: data_dir.clone(),
@@ -677,6 +742,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             decisions,
                             policy,
                             allowed,
+                            reconciliation,
                         };
                         let outcome = agent.run_turn(
                             &mut history,
@@ -732,6 +798,7 @@ struct External {
     kind: BackendKind,
     /// 属于哪个 CoLM 会话（换会话就换外部会话）。
     session: String,
+    web: bool,
     inner: Box<dyn ExternalSession>,
 }
 
@@ -756,14 +823,8 @@ struct ExternalTurn {
 impl ExternalTurn {
     fn run(self) -> Result<()> {
         // 联网交给外部后端自带的搜索（计入它的订阅），这里不挂 DeepSeek 的 web_search / fetch_url。
-        let mut tool_context = self.tool_context;
-        if !tool_context.project_root.is_dir() {
-            tool_context.project_root = std::env::var_os("HOME")
-                .or_else(|| std::env::var_os("USERPROFILE"))
-                .map(PathBuf::from)
-                .unwrap_or_default();
-        }
-        let content = match self.context.filter(|c| !c.trim().is_empty()) {
+        let tool_context = self.tool_context;
+        let mut content = match self.context.filter(|c| !c.trim().is_empty()) {
             Some(context) => format!(
                 "{}\n\n[Current view in the application]\n{context}",
                 self.text
@@ -772,6 +833,12 @@ impl ExternalTurn {
         };
         let session_id = {
             let mut session = self.session.lock().unwrap();
+            if let Some(recovery) = session
+                .task_snapshot(true)?
+                .and_then(|t| t.recovery_context())
+            {
+                content.push_str(&recovery);
+            }
             session.push(Message::User {
                 content: content.clone(),
             })?;
@@ -808,12 +875,11 @@ impl ExternalTurn {
         });
 
         let mut external = self.external.lock().unwrap();
-        if external
-            .as_ref()
-            .is_none_or(|e| e.kind != self.backend || e.session != session_id)
-        {
+        if external.as_ref().is_none_or(|e| {
+            e.kind != self.backend || e.session != session_id || e.web != self.web_search
+        }) {
             let launch = Launch {
-                cwd: tool_context.project_root.clone(),
+                cwd: external_launch_cwd(&tool_context.project_root)?,
                 mcp_exe: std::env::current_exe()?
                     .with_file_name(format!("colm-mcp{}", std::env::consts::EXE_SUFFIX)),
                 bridge_addr: addr,
@@ -822,12 +888,20 @@ impl ExternalTurn {
                 web: self.web_search,
             };
             // 续接历史对话时接着用当时的外部会话号。
-            let resume = self
-                .data_dir
-                .as_deref()
-                .and_then(|root| session::backend_of(root, &session_id))
-                .filter(|(kind, _)| *kind == self.backend)
-                .map(|(_, id)| id);
+            let resume = external
+                .as_ref()
+                .and_then(|e| {
+                    (e.kind == self.backend && e.session == session_id)
+                        .then(|| e.inner.resume_id())
+                        .flatten()
+                })
+                .or_else(|| {
+                    self.data_dir
+                        .as_deref()
+                        .and_then(|root| session::backend_of(root, &session_id))
+                        .filter(|(kind, _)| *kind == self.backend)
+                        .map(|(_, id)| id)
+                });
             let inner: Box<dyn ExternalSession> = match self.backend {
                 BackendKind::Codex => Box::new(codex::CodexSession::new(launch, resume)),
                 _ => Box::new(claude::ClaudeSession::new(launch, resume)),
@@ -835,6 +909,7 @@ impl ExternalTurn {
             *external = Some(External {
                 kind: self.backend,
                 session: session_id,
+                web: self.web_search,
                 inner,
             });
         }
@@ -875,5 +950,88 @@ impl ExternalTurn {
             steps: 1,
         });
         Ok(())
+    }
+}
+
+// A process needs an existing cwd; this fallback never changes the MCP filesystem grant.
+fn external_launch_cwd(root: &std::path::Path) -> Result<PathBuf> {
+    if !root.as_os_str().is_empty() {
+        if let Some(parent) = root.ancestors().find(|path| path.is_dir()) {
+            return Ok(parent.to_path_buf());
+        }
+    }
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(home) = std::env::var_os(key)
+            .map(PathBuf::from)
+            .filter(|p| p.is_dir())
+        {
+            return Ok(home);
+        }
+    }
+    Ok(std::env::current_dir()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancellation_overrides_remembered_native_approval() {
+        let (_sender, receiver) = mpsc::channel();
+        let approver = Mutex::new(ChannelApprover {
+            decisions: Arc::new(Mutex::new(receiver)),
+            policy: ApprovalPolicy::Auto,
+            allowed: Arc::new(Mutex::new(BTreeSet::from(["shell".into()]))),
+            reconciliation: false,
+        });
+        let emitter = Emitter {
+            session: Arc::new(Mutex::new(Session::new(None, "test").unwrap())),
+            cancel: Arc::new(AtomicBool::new(true)),
+        };
+        assert!(matches!(
+            PanelSink::decide(
+                &emitter,
+                &approver,
+                Outbound::ApprovalRequest {
+                    id: "cancelled".into(),
+                    name: "shell".into(),
+                    tier: Tier::Code,
+                    summary: "run shell".into(),
+                    arguments: "{}".into(),
+                    explicit_only: false,
+                }
+            ),
+            Decision::Deny(_)
+        ));
+    }
+
+    #[test]
+    fn recovery_suppresses_automatic_and_remembered_grants() {
+        let (_sender, receiver) = mpsc::channel();
+        let mut approver = ChannelApprover {
+            decisions: Arc::new(Mutex::new(receiver)),
+            policy: ApprovalPolicy::Auto,
+            allowed: Arc::new(Mutex::new(BTreeSet::from(["run_case".into()]))),
+            reconciliation: true,
+        };
+        assert!(approver.recovery_requires_approval());
+        assert!(!approver.preapproved("run_case", Tier::Act));
+        assert!(!approver.preapproved("run_tests", Tier::Code));
+        assert!(approver.preapproved("run_status", Tier::Read));
+        approver.remember("run_tests");
+        assert!(!approver.allowed.lock().unwrap().contains("run_tests"));
+    }
+
+    #[test]
+    fn launch_cwd_preserves_requested_grant() {
+        let existing = std::env::temp_dir();
+        assert_eq!(external_launch_cwd(&existing).unwrap(), existing);
+        let missing = existing
+            .join(format!("colm-missing-{}", std::process::id()))
+            .join("child");
+        assert!(!missing.parent().unwrap().exists());
+        assert_eq!(external_launch_cwd(&missing).unwrap(), existing);
+        let empty = PathBuf::new();
+        assert!(external_launch_cwd(&empty).unwrap().is_dir());
+        assert!(empty.as_os_str().is_empty());
     }
 }

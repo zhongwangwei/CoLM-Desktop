@@ -78,6 +78,10 @@ pub enum Inbound {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Outbound {
+    /// A checkpoint, not a command to replay any recorded action.
+    TaskState {
+        task: serde_json::Value,
+    },
     Ready {
         session: String,
         model: String,
@@ -111,6 +115,8 @@ pub enum Outbound {
         tier: Tier,
         summary: String,
         arguments: String,
+        #[serde(default)]
+        explicit_only: bool,
     },
     /// 请 GUI 在窗口上做一件事（引导模式）；GUI 以 `ui_result` 回话。
     UiRequest {

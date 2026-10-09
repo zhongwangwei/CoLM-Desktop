@@ -335,16 +335,24 @@ esac
 
 /// 取消脚本里调度器的那一段：先让调度器去结束，再留一个退出码，免得状态一直停在“丢失”。
 pub const CANCEL: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
+[ -f exit_code ] && { echo finished; exit 0; }
 ID=$(cat sched_id 2>/dev/null)
 case "$S" in
-slurm) scancel "$ID" ;;
-pbs) qdel "$ID" ;;
-lsf) bkill "$ID" ;;
-*)
-  P=$(cat pid)
-  kill -TERM -- -"$P" 2>/dev/null || kill -TERM "$P" 2>/dev/null
+slurm) scancel "$ID" || exit $? ;;
+pbs) qdel "$ID" || exit $? ;;
+lsf) bkill "$ID" || exit $? ;;
+bare)
+  P=$(cat pid) || exit 1
+  case "$P" in ''|*[!0-9]*|0|1) echo "invalid job pid" >&2; exit 1;; esac
+  kill -TERM -- -"$P" 2>/dev/null || kill -TERM "$P" 2>/dev/null || exit 1
   sleep 2
-  kill -0 "$P" 2>/dev/null && kill -KILL -- -"$P" 2>/dev/null ;;
+  if kill -0 "$P" 2>/dev/null; then
+    kill -KILL -- -"$P" 2>/dev/null || kill -KILL "$P" 2>/dev/null || exit 1
+    sleep 1
+    if kill -0 "$P" 2>/dev/null; then echo "job still exists" >&2; exit 1; fi
+  fi ;;
+*) echo "unknown scheduler: $S" >&2; exit 1 ;;
+
 esac
 [ -f exit_code ] || echo 143 > exit_code
 echo cancelled

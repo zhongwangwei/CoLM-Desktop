@@ -1,7 +1,7 @@
 //! `colm-cli ws-*`：开发工作区（docs/design-ai-assistant.md 第 4–6 节）。助手的 C 级工具和 GUI 的工作区面板都调它们。
 //!
 //! ```text
-//! colm-cli ws-create   --name N --from <本地仓库|地址|源码包> [--rev R] [--root DIR]
+//! colm-cli ws-create   --name N --from <app|本地仓库|地址|源码包> [--rev R] [--root DIR]
 //! colm-cli ws-list     [--root DIR]
 //! colm-cli ws-status   --name N [--root DIR]
 //! colm-cli ws-search   (--name N | --source DIR) --pattern RE [--glob G]
@@ -82,6 +82,7 @@ fn compact(report: &colm_workspace::compare::Report) -> serde_json::Value {
         "within_tolerance": report.within_tolerance,
         "differs": report.differs,
         "new_nonfinite": report.new_nonfinite,
+        "structural_differences": report.structural_differences,
         "only_in_a": report.only_in_a,
         "only_in_b": report.only_in_b,
         "first_difference": report.first_difference,
@@ -132,11 +133,34 @@ fn compare_options(opts: &Opts) -> Result<compare::Options> {
 
 pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
     match command {
+        "ws-source-info" => {
+            let source = source_root(opts)?.canonicalize()?;
+            let content_sha256 = super::remote_cmd::source_content_sha256(&source).ok();
+            let revision = colm_workspace::git::head(&source).ok();
+            let tag =
+                colm_workspace::git::run(&source, &["describe", "--tags", "--exact-match"]).ok();
+            let dirty = revision
+                .as_ref()
+                .and_then(|_| colm_workspace::git::is_dirty(&source).ok());
+            print(
+                json!({ "source": source, "revision": revision, "tag": tag, "dirty": dirty,
+                "application_version": env!("CARGO_PKG_VERSION"),
+                "content_sha256": content_sha256,
+                "content_hash_scope": "Cargo.toml,Cargo.lock; code/config under crates,vendor,xtask,scripts; excludes build/cache/data",
+                "version_status": if revision.is_some() { "identified" } else { "unknown" } }),
+            );
+        }
         "ws-create" => {
+            let from = opts.need_str("--from")?;
+            let from = if from == "app" {
+                super::remote_cmd::workspace_source()?.display().to_string()
+            } else {
+                from
+            };
             let workspace = Workspace::create(
                 &root(opts),
                 &opts.need_str("--name")?,
-                &opts.need_str("--from")?,
+                &from,
                 opts.get("--rev").as_deref(),
             )?;
             print(json!({ "workspace": workspace.info, "dir": workspace.dir }));

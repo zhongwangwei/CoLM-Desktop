@@ -229,6 +229,7 @@ pub fn approval_request(method: &str, params: &Value) -> Option<Outbound> {
         _ => return None,
     };
     Some(Outbound::ApprovalRequest {
+        explicit_only: false,
         id,
         name: name.to_owned(),
         tier: Tier::Code,

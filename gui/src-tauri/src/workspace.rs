@@ -31,6 +31,42 @@ fn args(command: &str, extra: &[&str]) -> Vec<String> {
         .collect()
 }
 
+fn create_args(name: &str, source: Option<&str>, rev: Option<&str>) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    let source = source.map(str::trim).filter(|s| !s.is_empty());
+    if let Some(source) = source {
+        let path = PathBuf::from(source);
+        if source.contains('\0')
+            || !path.is_absolute()
+            || !(path.is_dir()
+                || (path.is_file() && (source.ends_with(".tar.gz") || source.ends_with(".tgz"))))
+        {
+            return Err("源码来源须为已存在的本地仓库绝对路径或 .tar.gz/.tgz 源码包".into());
+        }
+    }
+    let mut command = args(
+        "ws-create",
+        &["--name", name, "--from", source.unwrap_or("app")],
+    );
+    if let Some(rev) = rev.map(str::trim).filter(|s| !s.is_empty()) {
+        if rev.starts_with('-') || rev.contains('\0') || rev.contains(char::is_whitespace) {
+            return Err("版本须为标签、分支或提交号，不能包含空白或以 - 开头".into());
+        }
+        command.extend(["--rev".into(), rev.into()]);
+    }
+    Ok(command)
+}
+
+/// 从应用对应源码或指定本地来源创建独立开发工作区。
+#[tauri::command]
+pub async fn workspace_create(
+    name: String,
+    source: Option<String>,
+    rev: Option<String>,
+) -> Result<Value, String> {
+    cli_json(create_args(&name, source.as_deref(), rev.as_deref())?, None).await
+}
+
 #[tauri::command]
 pub async fn workspace_list() -> Result<Value, String> {
     cli_json(args("ws-list", &[]), None).await

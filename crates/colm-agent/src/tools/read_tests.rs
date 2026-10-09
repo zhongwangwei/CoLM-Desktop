@@ -120,6 +120,7 @@ fn docs_are_searched_line_by_line() {
     std::fs::write(root.join("b.txt"), "Vcmax in a non-markdown file\n").unwrap();
     let ctx = ToolContext {
         docs_root: Some(root.clone()),
+        cli: root.join("missing-cli"),
         ..ToolContext::default()
     };
     let found = SearchDocs.call(&json!({ "query": "vcmax" }), &ctx).unwrap();
@@ -127,5 +128,127 @@ fn docs_are_searched_line_by_line() {
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0]["file"], "a.md");
     assert_eq!(matches[0]["line"], 2);
+    assert_eq!(matches[0]["context_start_line"], 1);
+    assert_eq!(
+        matches[0]["context"],
+        json!(["intro", "Vcmax compensates", "end"])
+    );
+    assert_eq!(matches[0]["path"], root.join("a.md").display().to_string());
+    assert_eq!(
+        found["provenance"]["application_source"]["version_status"],
+        "unknown"
+    );
+    assert!(found["provenance"]["application_source"]["revision"].is_null());
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn parameter_activity_uses_selected_kernel_and_case_guards() {
+    let root = temp("parameter-activity");
+    let dir = case(
+        &root,
+        "A",
+        " SITE_landtype=1\n DEF_USE_MEDLYNST=.false.\n DEF_USE_WUEST=.true.\n",
+    );
+    let kernel = root.join("kernel");
+    std::fs::create_dir(&kernel).unwrap();
+    std::fs::write(
+        kernel.join("manifest.json"),
+        r#"{"schema":1,"macros":["SinglePoint","LULC_IGBP"]}"#,
+    )
+    .unwrap();
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        kernel_dir: Some(kernel),
+        ..ToolContext::default()
+    };
+    let explain = |name| {
+        ExplainParameter
+            .call(&json!({"name":name,"case":"A"}), &ctx)
+            .unwrap()
+    };
+    assert_eq!(
+        explain("DEF_WUE_LAMBDA")["applicability"]["status"],
+        "active"
+    );
+    assert_eq!(
+        explain("DEF_BALL_BERRY_GRADM")["applicability"]["status"],
+        "inactive"
+    );
+    assert_eq!(
+        explain("DEF_BALL_BERRY_GRADM")["applicability"]["calibration_eligible_for_case"],
+        false
+    );
+    assert_eq!(explain("DEF_USE_PC")["applicability"]["status"], "unknown");
+    let without_kernel = ToolContext {
+        project_root: root.clone(),
+        ..ToolContext::default()
+    };
+    assert_eq!(
+        ExplainParameter
+            .call(
+                &json!({"name":"DEF_WUE_LAMBDA","case":"A"}),
+                &without_kernel
+            )
+            .unwrap()["applicability"]["status"],
+        "unknown"
+    );
+    std::fs::write(dir.join("case.nml"), "&nl_colm\n DEF_USE_WUEST=.true.\n/\n").unwrap();
+    assert_eq!(
+        explain("DEF_WUE_LAMBDA")["applicability"]["status"],
+        "unknown"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn docs_version_is_reported_by_application_source_not_project_git() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("docs-version");
+    let cli = root.join("cli");
+    std::fs::write(&cli, "#!/bin/sh\n[ \"$*\" = 'ws-source-info --source app' ] || exit 1\nprintf '%s\\n' '{\"source\":\"/application/source\",\"revision\":\"app-sha\",\"tag\":\"v1\",\"dirty\":true,\"version_status\":\"identified\"}'\n").unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    std::fs::write(
+        root.join("guide.md"),
+        "energy closure\nphase change matters\n",
+    )
+    .unwrap();
+    let ctx = ToolContext {
+        cli,
+        docs_root: Some(root.clone()),
+        project_root: root.join("unrelated-project"),
+        ..ToolContext::default()
+    };
+    let result = SearchDocs.call(&json!({"query":"closure"}), &ctx).unwrap();
+    let source = &result["provenance"]["application_source"];
+    assert_eq!(source["revision"], "app-sha");
+    assert_eq!(source["dirty"], true);
+    assert_eq!(source["source"], "/application/source");
+    assert_eq!(result["matches"][0]["context"][1], "phase change matters");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn large_document_search_preserves_valid_json_and_explicit_truncation() {
+    let root = temp("docs-budget");
+    std::fs::write(
+        root.join("guide.md"),
+        ("soil ".to_owned() + &"quoted \\\" text ".repeat(40) + "\n").repeat(80),
+    )
+    .unwrap();
+    let ctx = ToolContext {
+        docs_root: Some(root.clone()),
+        ..ToolContext::default()
+    };
+    let result = SearchDocs.call(&json!({"query":"soil"}), &ctx).unwrap();
+    assert_eq!(result["truncated"], true);
+    assert!(!result["matches"].as_array().unwrap().is_empty());
+    let text = super::super::result_text(&result);
+    assert!(text.chars().count() <= MAX_RESULT_CHARS);
+    assert!(serde_json::from_str::<Value>(&text).is_ok());
+    assert!(SearchDocs
+        .call(&json!({"query":"x".repeat(1025)}), &ctx)
+        .is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }

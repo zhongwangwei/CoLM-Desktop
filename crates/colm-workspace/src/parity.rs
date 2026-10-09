@@ -266,6 +266,8 @@ pub fn parity_check(
 ) -> Result<ParityReport> {
     let tolerance = options.tolerance;
     crate::build::check_preset(preset)?;
+    let commit = crate::build::pin_commit(workspace)?;
+    crate::build::require_built_at(workspace, &commit, Some(preset))?;
     let kernel = workspace.kernels().join(preset);
     let cli = workspace.bin().join("colm-cli");
     let run_dir = new_run_dir(workspace)?;
@@ -294,6 +296,13 @@ pub fn parity_check(
             false,
         )
     };
+    let unchanged = crate::build::still_at(workspace, &commit)?;
+    let ok = ok && unchanged;
+    let first = if unchanged {
+        first
+    } else {
+        Some("source changed while the check ran; rebuild and run it again".into())
+    };
     let mut report = ParityReport {
         ok,
         rtol: tolerance.rtol,
@@ -314,7 +323,7 @@ pub fn parity_check(
     let record = ParityRecord {
         ok,
         at: now(),
-        commit: workspace.head()?,
+        commit,
         preset: preset.to_owned(),
         case: case.display().to_string(),
         first_difference: first,
@@ -385,6 +394,14 @@ pub fn regress(
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RegressionReport> {
     crate::build::check_preset(preset)?;
+    let commit = crate::build::pin_commit(workspace)?;
+    // 用到工作区内核时它也要是当前提交编的；Rust 引擎只借基线清单时不需要。
+    let uses_ws_kernel = workspace
+        .kernels()
+        .join(preset)
+        .join("manifest.json")
+        .is_file();
+    crate::build::require_built_at(workspace, &commit, uses_ws_kernel.then_some(preset))?;
     let run_dir = new_run_dir(workspace)?;
     let base = run_copy(
         workspace,
@@ -434,7 +451,7 @@ pub fn regress(
                 });
             }
         }
-        let closure_ok = closure.iter().all(|c| c.ok);
+        let closure_ok = closure.len() == names.len() && closure.iter().all(|c| c.ok);
         let (ok, verdict) = judge(kind, &report, closure_ok);
         (Some(report), verdict, ok)
     } else {
@@ -449,6 +466,15 @@ pub fn regress(
                 }
             ),
             false,
+        )
+    };
+    let unchanged = crate::build::still_at(workspace, &commit)?;
+    let (ok, verdict) = if unchanged {
+        (ok, verdict)
+    } else {
+        (
+            false,
+            "source changed while the check ran; rebuild and run it again".to_owned(),
         )
     };
     let mut result = RegressionReport {
@@ -467,7 +493,7 @@ pub fn regress(
         kind,
         ok,
         at: now(),
-        commit: workspace.head()?,
+        commit,
         case: case.display().to_string(),
         identical: comparison.as_ref().map_or(0, |c| c.identical),
         changed: comparison
@@ -487,10 +513,20 @@ pub fn judge(kind: ChangeKind, report: &Report, closure_ok: bool) -> (bool, Stri
             format!("{} values became NaN or infinite", report.new_nonfinite),
         );
     }
+    if report.files == 0
+        || !report.only_in_a.is_empty()
+        || !report.only_in_b.is_empty()
+        || report.structural_differences > 0
+    {
+        return (
+            false,
+            "incomplete comparison: history files or variable shapes/types differ".into(),
+        );
+    }
     if !closure_ok {
         return (
             false,
-            "water balance (f_xerr) or energy balance (f_zerr) got worse".into(),
+            "water balance (f_xerr) or energy balance (f_zerr) is missing, non-finite, or got worse".into(),
         );
     }
     let changed = report.differs + report.within_tolerance;

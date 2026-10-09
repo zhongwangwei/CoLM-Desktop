@@ -351,3 +351,34 @@ fn submitted_reports_the_right_id_kind() {
     };
     assert_eq!(serde_json::to_value(&bare).unwrap()["pid"], 12);
 }
+
+#[test]
+fn cancellation_failures_never_forge_a_terminal_state() {
+    for (scheduler, command) in [("slurm", "scancel"), ("pbs", "qdel"), ("lsf", "bkill")] {
+        let sb = Sandbox::new(&format!("cancel-fail-{scheduler}"));
+        let dir = PathBuf::from(sb.work()).join("jobs/j-fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scheduler"), scheduler).unwrap();
+        std::fs::write(dir.join("sched_id"), "123").unwrap();
+        sb.stub(command, "echo permission-denied >&2; exit 7");
+        let (out, err, ok) = sb.run(&cancel_script(&sb.work(), "j-fail"));
+        assert!(!ok && err.contains("permission-denied"), "{out} {err}");
+        assert!(!dir.join("exit_code").exists());
+        std::fs::write(dir.join("exit_code"), "0").unwrap();
+        assert!(sb.run(&cancel_script(&sb.work(), "j-fail")).2);
+        assert_eq!(std::fs::read_to_string(dir.join("exit_code")).unwrap(), "0");
+    }
+}
+
+#[test]
+fn cancellation_rejects_unknown_schedulers_and_unsafe_bare_pids() {
+    for scheduler in ["unknown", "bare"] {
+        let sb = Sandbox::new(&format!("cancel-invalid-{scheduler}"));
+        let dir = PathBuf::from(sb.work()).join("jobs/j-invalid");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("scheduler"), scheduler).unwrap();
+        std::fs::write(dir.join("pid"), "0").unwrap();
+        assert!(!sb.run(&cancel_script(&sb.work(), "j-invalid")).2);
+        assert!(!dir.join("exit_code").exists());
+    }
+}

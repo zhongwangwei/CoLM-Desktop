@@ -45,13 +45,25 @@ fn a_logged_command_records_its_output_and_a_gate_on_the_current_commit() {
     )
     .unwrap();
     assert!(!bad.ok);
-    let run = gate(&ws, &bad).unwrap();
+    let run = gate(&ws, &ws.head().unwrap(), &bad).unwrap();
     assert!(!run.ok && run.detail.contains("broken") && run.commit == ws.head().unwrap());
     ws.info.gates.engine = Some(run);
     assert_eq!(
         ws.info.gates.lights(&ws.head().unwrap()).compile,
         crate::gates::Light::Fail
     );
+
+    let built_commit = ws.head().unwrap();
+    crate::git::run(
+        &ws.src(),
+        &["commit", "--allow-empty", "-m", "concurrent edit"],
+    )
+    .unwrap();
+    let stale = gate(&ws, &built_commit, &good).unwrap();
+    assert!(!stale.ok);
+    assert_eq!(stale.commit, built_commit);
+    std::fs::write(ws.src().join("uncommitted.rs"), "changed").unwrap();
+    assert!(!gate(&ws, &ws.head().unwrap(), &good).unwrap().ok);
 
     // 取消标志：长命令被中止。
     let flag = std::sync::atomic::AtomicBool::new(true);
