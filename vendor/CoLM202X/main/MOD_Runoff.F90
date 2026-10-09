@@ -39,6 +39,7 @@ CONTAINS
 !  Author : Yongjiu Dai, 07/29/2002, Guoyue Niu, 06/2012
 !=======================================================================
 
+   USE MOD_Vars_Global,     only: spval
    USE MOD_IncompleteGamma, only: GRATIO
    USE MOD_SPMD_Task
    IMPLICIT NONE
@@ -85,9 +86,14 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-!  fraction of saturated area (updated to gridded 'fsatmax' and 'fsatdcf')
+      eta = spval
+
+      !fraction of saturated area (updated to gridded 'fsatmax' and 'fsatdcf')
       !fsat = wtfact*min(1.0,exp(-0.5*fff*zwt))
-      IF ((DEF_TOPMOD_method == 0) .or. (DEF_TOPMOD_method == 1)) THEN
+      ! method 2 without the TWI distribution falls back to method 0/1 (CoLM-SYSU/CoLM#507)
+      IF ((DEF_TOPMOD_method == 0) .or. (DEF_TOPMOD_method == 1) &
+         .or. ((DEF_TOPMOD_method == 2) .and. (.not. (present(topoweti) &
+         .and. present(alp_twi) .and. present(chi_twi) .and. present(mu_twi))))) THEN
 
          fsat = fsatmax * exp(- fsatdcf * DEF_TUNING_TOPMOD_DECAY * zwt)
 

@@ -667,6 +667,18 @@
   照样并入（schema 重新生成）。Rust：`derive_soil_parameters` 存 `alpha*0.1`、`sc_vgm/fc_vgm` 用换算后的值，
   `soil_surface_resistance` 的常数改 3399。
 - **上游**：已推到 `zhongwangwei/CoLM202X` 的 `fix/colm-desktop-audit`（`7d8a4b4b`，PR #24）。
+- **PR 的后续提交（第 657 轮并入）**：PR 在 10-06 又追加了三个提交（`1e7f8e079`、`9a86e4a34`、`945f68e15`，PR 仍未合并）：
+  - `use_explicit_form` 的"自上而下削减出流"改为带回溯的 `DO WHILE`：某层被抽干（`wa_m1 + dwat < -tol_z`）时，若上界面通量向上
+    且上一层没被抽干过，先把上界面的向上通量削到 `min(q(i) - wa_m1/dt, 0)`，退回上一层重查；否则削减下界面出流（并继承
+    上一层的"抽干"标记）。最上层抽干时，降雨边界先用积水补，补不够才把顶界面截在 `dp_m1/dt + ubc_val`。旧写法一律从更深处
+    补水。固定通量底边界那一段的比较由 `dwat <= -wa_m1` 改为 `wa_m1 < -dwat`（只差相等时）。VSF 默认开启，三份黄金分别
+    从第 7、111、11 步起变化。
+  - `SurfaceRunoff_TOPMOD`：方法 2 缺任一 TWI 可选参数时退回方法 0/1 的指数式，`eta` 先置 `spval`。vendor 的四处调用都传齐，
+    Rust 的 `TopmodelMethod::Gamma` 在类型上就带着四个量，两侧都走不到，照样并入以与上游一致。
+  - `Aggregation_TopoWetness` 的偏度分母改实数乘法、`initialize` 对所有方法先设方法 0 的 `fsatmax/fsatdcf`：vendor 早已按同样语义修过
+    （第 56–60 条），不用再动。
+  - Rust：`apply_variable_saturated_explicit_step` 同样改为回溯循环；`wa_m1 + dwat` 与降雨分支的 `dp_m1 + (ubc-q)*dt` 按 FMA 收缩写
+    （arm64 上三份黄金逐位一致，证明与 gfortran 的收缩方式相同）。
 
 ### 75. `LeafTemperaturePC` 在无植被斑块上提前返回，intent(out) 输出全部未赋值
 

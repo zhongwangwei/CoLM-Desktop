@@ -2147,23 +2147,62 @@ pub fn apply_variable_saturated_explicit_step(
         interface_flux_mm_s[0] =
             input.previous_ponding_depth_mm / input.time_step_seconds + input.upper_boundary.value;
     }
-    for layer in 0..layers {
-        let water_change =
-            (interface_flux_mm_s[layer] - interface_flux_mm_s[layer + 1]) * input.time_step_seconds;
-        // `:1411`/`:1424` 出货 `fmadd d31,d25,d28,d31` ⇒ **第一个**源乘积
-        // `(wt_m1+wf_m1)*vl_s` 进 FMA，第二个 `(dz-wt_m1-wf_m1)*vl_m1` 独立舍入。
-        let previous_water = (input.previous_water_table_thickness_mm[layer]
-            + input.previous_wetting_front_mm[layer])
+    // 自上而下削减出流（CoLM-SYSU/CoLM#507 的新写法）：某层被抽干（`wa_m1 + dwat < -tol_z`）时，
+    // 若上一层的界面通量是向上的且那层没被抽干过，就先削减上界面的向上通量、退回上一层重查；
+    // 否则削减下界面的出流。最上层抽干时，降雨边界先用积水补，补不够才把顶界面也截住。
+    let previous_water_of = |layer: usize| {
+        // `(wt_m1+wf_m1)*vl_s` 进 FMA，`(dz-wt_m1-wf_m1)*vl_m1` 独立舍入（与下面几个循环同一式子）。
+        (input.previous_water_table_thickness_mm[layer] + input.previous_wetting_front_mm[layer])
             .contract(
                 input.porosity[layer],
                 (layer_thickness_mm[layer]
                     - input.previous_water_table_thickness_mm[layer]
                     - input.previous_wetting_front_mm[layer])
                     * input.previous_liquid_water[layer],
-            );
-        if water_change <= -previous_water {
-            interface_flux_mm_s[layer + 1] =
-                interface_flux_mm_s[layer] + previous_water / input.time_step_seconds;
+            )
+    };
+    let mut dried = vec![false; layers];
+    let mut layer = 0;
+    while layer < layers {
+        let dt = input.time_step_seconds;
+        let previous_water = previous_water_of(layer);
+        // `wa_m1 + dwat`：`dwat = (q(i-1)-q(i))*dt` 的乘积收进这个加法。
+        let remaining = (interface_flux_mm_s[layer] - interface_flux_mm_s[layer + 1])
+            .contract(dt, previous_water);
+        if remaining < -input.depth_tolerance_mm {
+            if layer > 0 {
+                if interface_flux_mm_s[layer] < 0.0 && !dried[layer - 1] {
+                    interface_flux_mm_s[layer] =
+                        (interface_flux_mm_s[layer + 1] - previous_water / dt).min(0.0);
+                    layer -= 1;
+                } else {
+                    interface_flux_mm_s[layer + 1] =
+                        interface_flux_mm_s[layer] + previous_water / dt;
+                    if dried[layer - 1] {
+                        dried[layer] = true;
+                    }
+                    layer += 1;
+                }
+            } else {
+                if input.upper_boundary.kind == VariableSaturatedBoundaryKind::Rainfall {
+                    let ponding = (input.upper_boundary.value - interface_flux_mm_s[0])
+                        .contract(dt, input.previous_ponding_depth_mm);
+                    if ponding > -remaining {
+                        interface_flux_mm_s[0] = interface_flux_mm_s[1] - previous_water / dt;
+                    } else {
+                        interface_flux_mm_s[0] =
+                            input.previous_ponding_depth_mm / dt + input.upper_boundary.value;
+                        interface_flux_mm_s[1] = interface_flux_mm_s[0] + previous_water / dt;
+                        dried[0] = true;
+                    }
+                } else {
+                    interface_flux_mm_s[1] = interface_flux_mm_s[0] + previous_water / dt;
+                    dried[0] = true;
+                }
+                layer += 1;
+            }
+        } else {
+            layer += 1;
         }
     }
     if input.lower_boundary.kind == VariableSaturatedBoundaryKind::FixedFlux
@@ -2184,7 +2223,7 @@ pub fn apply_variable_saturated_explicit_step(
                         - input.previous_wetting_front_mm[layer])
                         * input.previous_liquid_water[layer],
                 );
-            if water_change <= -previous_water {
+            if previous_water < -water_change {
                 interface_flux_mm_s[layer] =
                     interface_flux_mm_s[layer + 1] - previous_water / input.time_step_seconds;
             }

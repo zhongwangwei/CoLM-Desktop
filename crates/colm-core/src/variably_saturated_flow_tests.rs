@@ -163,6 +163,89 @@ fn explicit_vsf_fallback_matches_current_fortran() {
     close(state.water_table_depth_mm, 1424.7706282276365, 1.0e-9);
 }
 
+/// 两层、`dt = 1`、层厚 100 mm、`wt = wf = 0`，`wa_m1 = 100*vl_m1`；数都是整数，全程精确。
+fn drying_input<'a>(
+    flux: &'a [f64],
+    previous_liquid: &'a [f64],
+    upper: VariableSaturatedBoundary,
+) -> VariableSaturatedExplicitInput<'a> {
+    const VG: SoilHydraulicModel = SoilHydraulicModel::VanGenuchten {
+        alpha_vgm: 0.002,
+        n_vgm: 1.5,
+        l_vgm: 0.5,
+        sc_vgm: 0.95,
+        fc_vgm: 0.7,
+    };
+    static MODELS: [SoilHydraulicModel; 2] = [VG, VG];
+    let layers = previous_liquid.len();
+    let zeros: &'static [f64] = &[0.0, 0.0];
+    VariableSaturatedExplicitInput {
+        time_step_seconds: 1.0,
+        interface_depth_mm: &[0.0, 100.0, 200.0][..=layers],
+        porosity: &[0.4, 0.4][..layers],
+        residual_water: &[0.0, 0.0][..layers],
+        saturated_potential_mm: &[-10.0, -10.0][..layers],
+        hydraulic_model: &MODELS[..layers],
+        aquifer_porosity: 0.4,
+        upper_boundary: upper,
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::FixedFlux,
+            value: 0.0,
+        },
+        interface_flux_mm_s: flux,
+        wetting_front_mm: &zeros[..layers],
+        liquid_water: previous_liquid,
+        water_table_thickness_mm: &zeros[..layers],
+        ponding_depth_mm: 7.0,
+        aquifer_water_mm: -100.0,
+        water_table_depth_mm: 1200.0,
+        previous_wetting_front_mm: &zeros[..layers],
+        previous_liquid_water: previous_liquid,
+        previous_water_table_thickness_mm: &zeros[..layers],
+        previous_ponding_depth_mm: 2.0,
+        previous_aquifer_water_mm: -100.0,
+        depth_tolerance_mm: 1.0e-8,
+        volume_tolerance: 1.0e-8,
+    }
+}
+
+#[test]
+fn explicit_vsf_drying_cuts_the_upward_flux_from_above_first() {
+    // 第 2 层 wa = 5，上界面向上抽 20：先把上界面的向上通量削到 min(q2 - wa/dt, 0) = -5，
+    // 退回第 1 层重查（10 + 5 ≥ 0），再查第 2 层（5 - 5 = 0）。旧写法是把下界面改成
+    // q1 + wa/dt = -15，从更深处补水（CoLM-SYSU/CoLM#507 改掉的就是这个）。
+    let state = apply_variable_saturated_explicit_step(drying_input(
+        &[0.0, -20.0, 0.0],
+        &[0.1, 0.05],
+        VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::FixedFlux,
+            value: 0.0,
+        },
+    ))
+    .unwrap();
+    assert_eq!(state.interface_flux_mm_s, [0.0, -5.0, 0.0]);
+    assert_eq!(state.liquid_water, [0.15, 0.0]);
+    assert_eq!(state.ponding_depth_mm, 7.0);
+}
+
+#[test]
+fn explicit_vsf_drying_top_layer_limits_the_surface_flux_to_the_ponding() {
+    // 单层、降雨边界 ubc = 0、积水 dp_m1 = 2；wa = 10，底界面排出 20：
+    // 剩余 1·(0 - 1) + 2 = 1 不够补 9 的亏空 ⇒ q0 = dp_m1/dt + ubc = 2，q1 = q0 + wa/dt = 12，积水用尽。
+    let state = apply_variable_saturated_explicit_step(drying_input(
+        &[1.0, 20.0],
+        &[0.1],
+        VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.0,
+        },
+    ))
+    .unwrap();
+    assert_eq!(state.interface_flux_mm_s, [2.0, 12.0]);
+    assert_eq!(state.liquid_water, [0.0]);
+    assert_eq!(state.ponding_depth_mm, 0.0);
+}
+
 #[test]
 fn sublevel_initialization_matches_current_fortran() {
     let model = SoilHydraulicModel::VanGenuchten {
