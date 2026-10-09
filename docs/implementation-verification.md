@@ -32327,3 +32327,15 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **验证**：`ws-search --source app --pattern "SUBROUTINE twostream" --glob '*.F90'` 命中 `MOD_Albedo.F90:458`；`ws-read`、`ws-symbols` 读出 Rust 与 Fortran 文件；`--path ../../etc/passwd` 被拒。新增测试：`colm-workspace` 对一个没有 `.git` 的目录搜索、读行、列符号并拒绝越界；`colm-agent` 三个工具的 `name` 可空、空时传 `--source app`；`gui/tests/assistant.mjs` 覆盖 `viewContext`、`pageDetails`、`pagePrompts`。`colm-agent` 54 项、`colm-workspace` 37 项、`colm-cli` 264 项、`gui/tests` 17 个脚本、`xtask check-gui`、clippy 与 fmt 全部通过。
 
 **没做**：安装包里解压源码那一支只做了代码，没有在打出来的安装包上实测；范围限制只靠系统提示，没有在真实模型上做一组跑题提问的验收；“问助手”按钮还没放进指标表、失败日志与参数字段旁边；诊断工具（P5）未做。
+
+## 第 652 轮：P2 演示，以及测试白名单补上漂移检查
+
+**演示**（应用里的“工作区”面板看状态，命令就是助手工具背后的 `colm-cli ws-*`）：工作区 `vcmax-grass` 从主仓库 `7c91654d` 克隆；一个补丁把 IGBP 草地（第 10 类）的 Vcmax25 从 52 改为 62，Fortran 的 `MOD_Const_LC.F90:502` 与 Rust 的 `land_cover_generated.rs:646` 各一行（提交 `d3248853`）；Rust 引擎 2 分 8 秒、`default` 内核编译通过（沙箱 `sandbox-exec`、断网）；`colm-core` 510 项单元测试通过；AT-Neu 两个月的对拍 254 个变量逐位一致（零容差）；物理回归通过（166 个变量变化、没有新的非有限值，`f_xerr` 4.5e-16 mm/s 不变，`f_zerr` 3.07e-10 → 3.61e-10 W/m²）。两个月平均：GPP +17.6%，潜热 +0.7%，感热 −1.5%。
+
+**缺口**：`land_cover_generated.rs` 由 `xtask gen-landcover` 从 Fortran 生成，`crates/colm-core/tests/drift_landcover.rs` 会重新生成并逐字节比对——正是“改了 Fortran 忘了 Rust”的那道门。但它是集成测试，而 `run_tests kind=cargo` 只跑 `--lib --bins`，助手跑不到它；演示里两边一致只能靠对拍间接确认。
+
+**补上**：`run_tests` 多一类 `drift`：自动找出 `crates/*/tests/drift*.rs`（现有 `colm-core` 的 `drift_co2`、`drift_landcover`，`colm-hist` 与 `colm-schema` 的 `drift`），每个一条 `cargo test -p <包> --test <名字>`；门槛里记作 `drift`。一类测试有多条命令时，全过的报告列出全部命令、用时累加（原来只报最后一条），有一条失败就停在那里报那一条。工具描述里提示：改 Fortran 常量或表时连同它的 Rust 副本一起跑这一类。
+
+**实测**：在 `vcmax-grass` 上 `drift` 4 条全过（7.3 s）；再打一个只改 Fortran 的补丁（62 → 63），`drift` 失败在 `drift_landcover.rs:33`，测试灯变“不通过”，编译、对齐、回归变“过期”；撤回到 `d3248853` 后重跑四道门全绿。新增测试：`colm-workspace` 的漂移命令枚举（只收 `drift*`，不收别的集成测试）；`colm-workspace` 38 项、`colm-agent` 54 项通过。
+
+**顺带记下**：`revert` 的参数是“回到哪个提交”（之后的提交丢弃），不是“撤掉哪个提交”；助手的工具描述是对的，手动调用时我传反过一次。

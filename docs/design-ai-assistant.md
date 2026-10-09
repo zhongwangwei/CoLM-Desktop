@@ -152,7 +152,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 | `revert` | 撤回到指定提交 | 审批 |
 | `build_engine` | 编译 Rust 引擎：`cargo build --release -p colm-runtime -p colm-cli` | 按会话批一次额度 |
 | `build_kernel` | 编译 Fortran 内核：`oracle/scripts/build_kernel.sh <preset> <工作区>/kernels` | 同上 |
-| `run_tests` | 白名单：指定 crate 的 `cargo test`、oracle 分层检查、`check-gui` | 同上 |
+| `run_tests` | 白名单：指定 crate 的 `cargo test`（`--lib --bins`）、漂移检查 `drift`（`crates/*/tests/drift*.rs` 全部：从 Fortran 生成的 Rust 表逐字节比对，第 652 轮）、oracle 分层检查、`check-gui` | 同上 |
 | `run_case_with` | 用工作区编出的引擎或内核，跑一个算例的副本 | 同上 |
 | `compare_outputs` | 与基线逐变量对比：逐位相同、在容差内、有差异；标出 NaN 与量级异常 | 否 |
 | `parity_check` | 同一个算例分别用 Rust 引擎和 Fortran 内核跑，找出第一个出现差异的变量与时间步 | 按会话额度 |

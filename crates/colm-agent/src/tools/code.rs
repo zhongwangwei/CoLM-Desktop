@@ -452,12 +452,12 @@ impl Tool for RunTests {
         "run_tests"
     }
     fn description(&self) -> &'static str {
-        "Run one whitelisted kind of tests in the workspace sandbox: kind=cargo with a package (cargo test -p <package> --lib --bins, serial), kind=oracle (history gate tests and the tier check on the golden files), or kind=check-gui. Records the test gate for that kind on the current commit. Approval can be given once per session."
+        "Run one whitelisted kind of tests in the workspace sandbox: kind=cargo with a package (cargo test -p <package> --lib --bins, serial), kind=drift (every crates/*/tests/drift*.rs: Rust tables generated from the Fortran sources, such as land-cover constants, CO2, history variables and configuration fields, are regenerated and compared byte for byte; run it whenever you change a Fortran constant or table, together with its Rust copy), kind=oracle (history gate tests and the tier check on the golden files), or kind=check-gui. Records the test gate for that kind on the current commit. Approval can be given once per session."
     }
     fn parameters(&self) -> Value {
         object(json!({
             "name": name_arg(),
-            "kind": json!({ "type": "string", "enum": ["cargo", "oracle", "check-gui"], "description": "which tests" }),
+            "kind": json!({ "type": "string", "enum": ["cargo", "drift", "oracle", "check-gui"], "description": "which tests" }),
             "package": nullable("string", "crate name for kind=cargo, e.g. colm-core; null otherwise"),
         }))
     }

@@ -11,7 +11,7 @@
 //! colm-cli ws-revert   --name N --commit HEX
 //! colm-cli ws-build-engine --name N [--network 1]
 //! colm-cli ws-build-kernel --name N --preset P
-//! colm-cli ws-test     --name N --kind cargo|oracle|check-gui [--package P]
+//! colm-cli ws-test     --name N --kind cargo|drift|oracle|check-gui [--package P]
 //! colm-cli ws-run      --name N --case DIR --engine rust|fortran --preset P
 //! colm-cli ws-compare  --a DIR --b DIR [--rtol X] [--atol X] [--first-records K] [--ignore f_a,f_b]
 //! colm-cli ws-parity   --name N --case DIR --preset P [--rtol X] [--atol X]

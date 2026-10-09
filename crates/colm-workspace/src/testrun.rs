@@ -1,5 +1,5 @@
-//! 测试白名单（docs/design-ai-assistant.md 第 4 节 `run_tests`）：指定 crate 的 `cargo test`、oracle 分层检查、
-//! `check-gui`。没有别的：参数是枚举加校验过的包名，不是任意命令。
+//! 测试白名单（docs/design-ai-assistant.md 第 4 节 `run_tests`）：指定 crate 的 `cargo test`、漂移检查、
+//! oracle 分层检查、`check-gui`。没有别的：参数是枚举加校验过的包名，不是任意命令。
 
 use std::path::PathBuf;
 
@@ -13,6 +13,10 @@ use crate::layout::{now, Workspace};
 pub enum Kind {
     /// `cargo test -p <包> --lib --bins`（串行：colm-init 并行跑会撞 HDF5）。
     Cargo(String),
+    /// 漂移检查：`crates/*/tests/drift*.rs` 全部跑一遍。它们把从 Fortran 源码生成的 Rust 表（地类常量、CO₂、
+    /// history 变量、配置字段）重新生成并逐字节比对——改了一边忘了另一边，这里就会失败。
+    /// 是集成测试，`Cargo` 那一类（`--lib --bins`）跑不到它们。
+    Drift,
     /// oracle 的 history 闸门测试与分层检查。
     Oracle,
     /// GUI 命令与前端的一致性检查。
@@ -24,6 +28,7 @@ impl Kind {
     pub fn label(&self) -> String {
         match self {
             Self::Cargo(package) => format!("cargo:{package}"),
+            Self::Drift => "drift".into(),
             Self::Oracle => "oracle".into(),
             Self::CheckGui => "check-gui".into(),
         }
@@ -37,9 +42,10 @@ impl Kind {
                     .ok_or_else(|| anyhow::anyhow!("a cargo test needs a package name"))?
                     .to_owned(),
             ),
+            "drift" => Self::Drift,
             "oracle" => Self::Oracle,
             "check-gui" => Self::CheckGui,
-            other => bail!("unknown test kind {other:?}; use cargo, oracle or check-gui"),
+            other => bail!("unknown test kind {other:?}; use cargo, drift, oracle or check-gui"),
         })
     }
 }
@@ -70,6 +76,26 @@ fn cargo(args: &[&str]) -> Vec<String> {
     all
 }
 
+/// 工作区里的漂移测试：`(包, 测试名)`，按名字排序。包目录名就是包名（与 [`check_package`] 同一约定）。
+pub fn drift_tests(workspace: &Workspace) -> Result<Vec<(String, String)>> {
+    let mut found = Vec::new();
+    let crates = workspace.src().join("crates");
+    for entry in std::fs::read_dir(&crates)?.flatten() {
+        let package = entry.file_name().to_string_lossy().into_owned();
+        let Ok(tests) = std::fs::read_dir(entry.path().join("tests")) else {
+            continue;
+        };
+        for test in tests.flatten() {
+            let file = test.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = file.strip_suffix(".rs").filter(|s| s.starts_with("drift")) {
+                found.push((package.clone(), stem.to_owned()));
+            }
+        }
+    }
+    found.sort();
+    Ok(found)
+}
+
 /// 要跑的命令（每个 Kind 一到几条）。
 pub fn commands(workspace: &Workspace, kind: &Kind) -> Result<Vec<Vec<String>>> {
     Ok(match kind {
@@ -78,6 +104,17 @@ pub fn commands(workspace: &Workspace, kind: &Kind) -> Result<Vec<Vec<String>>> 
             let mut args = cargo(&["test", "-p", package, "--lib", "--bins"]);
             args.extend(["--".into(), "--test-threads=1".into()]);
             vec![args]
+        }
+        Kind::Drift => {
+            let tests = drift_tests(workspace)?;
+            ensure!(
+                !tests.is_empty(),
+                "no drift tests (crates/*/tests/drift*.rs) in this workspace"
+            );
+            tests
+                .iter()
+                .map(|(package, test)| cargo(&["test", "-p", package, "--test", test]))
+                .collect()
         }
         Kind::Oracle => {
             let mut tier = cargo(&["run", "-q", "-p", "oracle", "--bin", "tier-check"]);
@@ -114,6 +151,10 @@ pub fn run(
     let src = workspace.src();
     let target = workspace.target();
     let mut last: Option<Outcome> = None;
+    // 一类测试可能有几条命令（漂移检查每个测试一条）：全过时报告里列出全部命令、用时累加；
+    // 有一条失败就停在那里，报告的就是失败的那一条。
+    let mut commands_run = Vec::new();
+    let mut seconds = 0.0;
     for args in list {
         let outcome = run_logged(
             workspace,
@@ -126,12 +167,18 @@ pub fn run(
             cancel,
         )?;
         let failed = !outcome.ok;
+        commands_run.push(outcome.command.clone());
+        seconds += outcome.seconds;
         last = Some(outcome);
         if failed {
             break;
         }
     }
-    let outcome = last.expect("at least one test command");
+    let mut outcome = last.expect("at least one test command");
+    if outcome.ok {
+        outcome.command = commands_run.join("; ");
+        outcome.seconds = seconds;
+    }
     let run = GateRun {
         ok: outcome.ok,
         at: now(),
