@@ -356,7 +356,7 @@ export function renderPrepReady() {
   const rows = [
     ['站点文件', a.siteFile, a.siteReport?.readiness ?? '未生成'],
     ['强迫场', a.forcingFile, a.forcingFile ? '已匹配标准文件' : '未准备'],
-    ['验证数据（可选）', a.observationFile, a.observationFile ? '已准备，可用于结果评估与调优' : '未准备，不影响模型运行'],
+    ['验证数据（可选）', a.observationFile, a.observationFile ? '已准备，可用于结果评估与率定' : '未准备，不影响模型运行'],
     ['rawdata', a.rawdataDir, a.rawdataDir ? '已选择' : '未选择'],
   ];
   const table = document.createElement('table');

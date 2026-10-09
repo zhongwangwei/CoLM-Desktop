@@ -1,5 +1,5 @@
 //! 两个 Study 工作流共用的纯数据层：预算、状态聚合、评分和分页。
-//! 不碰 DOM/Tauri，便于 Node 直接锁住不确定性分析与参数调优的核心规则。
+//! 不碰 DOM/Tauri，便于 Node 直接锁住不确定性分析与参数率定的核心规则。
 
 export const STUDY_STAGES = ['mksrfdata', 'mkinidata', 'colm'];
 export const MAX_STUDY_CANDIDATES = 1000;
@@ -141,6 +141,21 @@ export function aggregateStudy(study = {}) {
   const finished = COMPLETED_STUDY_STATUSES.has(status);
   const progress = displayTotal ? (finished ? 1 : Math.min(displayDone / displayTotal, 0.99)) : 0;
   return { ...state, members, status, counts, currentTotal: total, currentDone: done, total: displayTotal, succeeded, failed, cancelled, running, done: displayDone, progress };
+}
+
+/** 左栏研究条目右侧的一句状态（`aggregateStudy` 的结果）；还没有任务时返回 `null`。 */
+export function studyBadge(summary) {
+  const finished = Number(summary?.done) || 0;
+  const total = Number(summary?.total) || 0;
+  switch (summary?.status) {
+    case 'Running': return `运行中 ${finished}/${total}`;
+    case 'Completed': return '完成';
+    case 'CompletedWithFailures': return '完成（有失败）';
+    case 'NeedsReview': return '需要检查';
+    case 'Paused': return '已暂停';
+    case 'Cancelled': return '已取消';
+    default: return total ? '任务已生成' : null;
+  }
 }
 
 export function percentageWindow(start, end, fromPercent, toPercent, quantum = 1) {

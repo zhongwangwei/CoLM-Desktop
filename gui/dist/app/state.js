@@ -29,6 +29,8 @@ export const state = {
   availableFlows: new Set(['basic-files']),
   /** 原生折叠组默认收起；用户打开后跨重绘保持。 */
   expandedFlows: new Set(),
+  /** 左栏研究条目右侧的状态（`tuning`、`uq`），由 results.js 按 Study 状态写入。 */
+  studyBadges: {},
   /** 这次要跑什么。'site' | 'watershed' | 'region' | 'global'。 */
   domain: null,
   /** 空间计算网格。空间范围使用 'latlon' | 'unstructured' | 'catchment'；站点为 null。 */

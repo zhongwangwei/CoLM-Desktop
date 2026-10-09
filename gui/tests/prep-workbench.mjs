@@ -63,7 +63,7 @@ for (const id of [
   assert.match(html, new RegExp(`id="${id}"`), `preprocessing UI must expose ${id}`);
 }
 assert.match(html, /验证数据不参与 mksrfdata、mkinidata 或 colm 运行/);
-assert.match(html, /缺少验证数据只会限制后续评估与调优/);
+assert.match(html, /缺少验证数据只会限制后续评估与率定/);
 assert.match(html, /时间标签保持原样，必须与对应强迫场一致/);
 assert.doesNotMatch(html, /时间会统一换算为 UTC/);
 

@@ -218,7 +218,7 @@ function renderOutputs(box) {
   }
   const note = document.createElement('p');
   note.className = 'muted mini';
-  note.textContent = '已按命名约定写入 Observation；进入基本设定重新扫描后会自动用于结果评估与参数调优。';
+  note.textContent = '已按命名约定写入 Observation；进入基本设定重新扫描后会自动用于结果评估与参数率定。';
   card.append(title, table, note);
   const warnings = outputs.flatMap(output => output.warnings ?? []);
   if (warnings.length) {

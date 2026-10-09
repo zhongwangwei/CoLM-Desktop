@@ -1083,7 +1083,7 @@ function appendCatalogDetails(cell, rawKey, runtime = null) {
     `${language() === 'en' ? 'Default provider' : '默认值来源'}：${descriptor.default_provider}`,
     `${language() === 'en' ? 'Effective provenance' : '当前值来源'}：${runtime?.provenance ?? descriptor.default_provider}`,
     `${language() === 'en' ? 'Activation' : '生效条件'}：${descriptor.activation?.join(', ') || (language() === 'en' ? 'always/contextual' : '始终/按上下文')}`,
-    `${language() === 'en' ? 'Calibration' : '可用于调优'}：${descriptor.calibration_eligible ? (language() === 'en' ? 'eligible; range required' : '可选；必须自行提供范围') : (language() === 'en' ? 'no' : '否')}`,
+    `${language() === 'en' ? 'Calibration' : '可用于率定'}：${descriptor.calibration_eligible ? (language() === 'en' ? 'eligible; range required' : '可选；必须自行提供范围') : (language() === 'en' ? 'no' : '否')}`,
   ];
   const text = document.createElement('div');
   text.className = 'parameter-default';

@@ -28,18 +28,29 @@ for (const id of [
     throw new Error(`${id} must stay visible but disabled before a site/case is selected`);
   }
 }
-for (const id of ['result-uncertainty', 'result-tuning', 'result-export']) {
-  const group = groupFor(id);
-  if (!group || group === analysisGroup || group.steps.length !== 1) {
-    throw new Error(`${id} must be a top-level workflow peer of Results analysis`);
+const stepFor = id => groupFor(id)?.steps.find(step => step.id === id);
+{
+  const group = groupFor('result-export');
+  if (!group || group === analysisGroup || group.steps.length !== 1 || group.section) {
+    throw new Error('result-export must be a top-level workflow peer of Results analysis');
   }
-  if (group.steps[0].show) throw new Error(`${id} must stay visible in the top-level workflow`);
+}
+// 研究段：经典方法（参数率定、不确定性分析）与 AI 混合建模（学习参数、替换过程），都在工作流之外、始终可见。
+for (const [id, key] of [['result-tuning', 'research-classic'], ['result-uncertainty', 'research-classic'],
+  ['hybrid-learn', 'research-ai'], ['hybrid-process', 'research-ai'], ['research', 'research-home']]) {
+  const group = groupFor(id);
+  if (group?.section !== 'research' || group.key !== key) throw new Error(`${id} must sit in the research section (${key})`);
+  if (stepFor(id).show) throw new Error(`${id} must stay visible in the research section`);
+  if (stepFor(id).optional !== true) throw new Error(`${id} must be optional`);
+}
+if (WORKFLOW.findIndex(g => g.section === 'research') < WORKFLOW.findIndex(g => g.steps.some(s => s.id === 'result-export'))) {
+  throw new Error('the research section must come after the whole workflow');
 }
 state.selected = { dir: '/cases/pending', name: 'pending' };
 state.cases = [state.selected];
 state.createdCases.add(state.selected.dir);
 for (const id of ['result-uncertainty', 'result-tuning']) {
-  if (groupFor(id).steps[0].need() !== null || groupFor(id).steps[0].optional !== true) {
+  if (stepFor(id).need() !== null) {
     throw new Error(`${id} must unlock as soon as Basic setup has created a case`);
   }
 }
@@ -225,7 +236,7 @@ for (const id of [
 ]) {
   if (!html.includes(`id="${id}"`)) throw new Error(`tuning guidance is missing ${id}`);
 }
-for (const text of ['参数调优要回答什么？', '先设计，再准备任务，最后开始搜索', '目标权重：', '权重必须大于 0', '如果校准明显变好但验证变差']) {
+for (const text of ['参数率定要回答什么？', '先设计，再准备任务，最后开始搜索', '目标权重：', '权重必须大于 0', '如果校准明显变好但验证变差']) {
   if (!html.includes(text)) throw new Error(`tuning scientific guidance is missing: ${text}`);
 }
 for (const metric of ['abs_bias', 'nse', 'r']) {
@@ -688,7 +699,7 @@ if (!resultUi.includes('function invalidateActiveStudy(kind, reason)')
     || !resultUi.includes('currentKeys.has(studyDirDesignKeys[kind]?.[dir])')
     || !resultUi.includes('const studyScopeKey = () => `${currentKernel()}')
     || !resultUi.includes('invalidateActiveStudy(kind,')
-    || !resultUi.includes("invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。')")
+    || !resultUi.includes("invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。')")
     || !resultUi.includes("invalidateActiveStudy(id.startsWith('tune') ? 'tuning' : 'uq'")
     || !resultUi.includes("step.inert = current === 'Running'")
     || !resultUi.includes('setActiveStudyDirs(kind, [])')) {
@@ -1011,7 +1022,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     },
   });
   await applyBestCandidate().catch(error => { failure = error; });
-  if (previews !== 1 || !failure?.message.includes('调优设计已修改')) throw new Error('apply must reach delayed preview and fail at the scope guard');
+  if (previews !== 1 || !failure?.message.includes('率定设计已修改')) throw new Error('apply must reach delayed preview and fail at the scope guard');
   if (applies !== 0) throw new Error('spatial switch before apply prompt/output must stop tuning apply mutation');
 }
 

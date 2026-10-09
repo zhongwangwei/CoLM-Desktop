@@ -304,7 +304,7 @@ function nextStepNote() {
 function spatialStudyNote() {
   const warning = document.createElement('p');
   warning.className = 'warn mini';
-  warning.textContent = '空间算例暂不支持参数调优和不确定性分析。';
+  warning.textContent = '空间算例暂不支持参数率定和不确定性分析。';
   return warning;
 }
 

@@ -1,4 +1,4 @@
-// AI 参数化（hybrid.js）的纯函数：插槽、输出校验、权重数与 Study spec 的 `hybrid` 段。
+// AI 模型（hybrid.js）的纯函数：插槽、输出校验、权重数与 Study spec 的 `hybrid` 段。
 import assert from 'node:assert/strict';
 import { cp, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -84,7 +84,7 @@ assert.equal(hybrid.slotDefaults('soil_stress').output.name, 'beta');
 assert.equal(hybrid.presetForMode('lct'), 'vcmax-lc');
 assert.equal(hybrid.presetForMode('pc'), 'vcmax-pft');
 
-// 两步法的第一步：哪些调优任务能用。
+// 两步法的第一步：哪些率定任务能用。
 const study = { status: 'completed', trains_network: false, parameters: ['DEF_PFT_VMAX25'], best_member: 'm000029', sites: ['CA-SF3'] };
 assert.deepEqual(hybrid.studyUsable(study, ['DEF_PFT_VMAX25']), { usable: true, reason: '' });
 assert.equal(hybrid.studyUsable({ ...study, status: 'running' }, ['DEF_PFT_VMAX25']).usable, false);

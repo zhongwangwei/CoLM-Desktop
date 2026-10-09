@@ -190,7 +190,7 @@
       <div class="flow-pane" data-flow-pane="prep-validation" hidden>
         <div class="card">
           <h3>验证数据（可选）</h3>
-          <div class="ch">验证数据不参与 mksrfdata、mkinidata 或 colm 运行；它在结果页用于模型—观测评估，也是不确定性分析和参数调优检查真实配对数的依据。没有验证数据仍可继续建例和运行。</div>
+          <div class="ch">验证数据不参与 mksrfdata、mkinidata 或 colm 运行；它在结果页用于模型—观测评估，也是不确定性分析和参数率定检查真实配对数的依据。没有验证数据仍可继续建例和运行。</div>
           <p class="muted mini">标准产物放在站点目录旁的 <code>Observation</code> 目录，命名为 <code>&lt;站点名&gt;_Flux.nc</code>。已有标准 NetCDF 无需再次转换；放到该目录后重新扫描即可自动配对。</p>
           <div class="pill-row">
             <button class="btn-ghost" id="validation-skip" type="button">跳过验证数据</button>
@@ -223,7 +223,7 @@
       <div class="flow-pane" data-flow-pane="prep-ready" hidden>
         <div class="card">
           <h3>数据集就绪检查</h3>
-          <div class="ch">这里汇总站点文件、完整运行契约、强迫场和可选验证数据。只有站点与强迫场是运行门槛；缺少验证数据只会限制后续评估与调优。</div>
+          <div class="ch">这里汇总站点文件、完整运行契约、强迫场和可选验证数据。只有站点与强迫场是运行门槛；缺少验证数据只会限制后续评估与率定。</div>
           <div id="prep-ready-summary"></div>
           <div class="pill-row" style="margin-top:14px">
             <button class="btn-next" id="prep-use" disabled>在基本设定中使用这些产物</button>
@@ -316,7 +316,7 @@
           <div class="card">
             <h3>空间算例</h3>
             <div class="ch" id="spatial-summary">向导中的范围与网格会在这里生成并预检。</div>
-            <p class="warn mini" id="spatial-early-warning">空间算例暂不支持参数调优和不确定性分析。</p>
+            <p class="warn mini" id="spatial-early-warning">空间算例暂不支持参数率定和不确定性分析。</p>
             <div class="field"><label for="spatial-rawdata">RawData 目录（CoLMrawdata）</label>
               <div class="browse"><input class="input" id="spatial-rawdata" placeholder="…/CoLMrawdata"><button class="btn-ghost pick" data-for="spatial-rawdata">选择…</button></div></div>
             <div class="field"><label for="spatial-runtime">Runtime 目录（CoLMruntime）</label>
@@ -394,7 +394,7 @@
             <option value="modified">已显式修改</option>
             <option value="inherited">继承内置值</option>
             <option value="inactive">当前不生效</option>
-            <option value="tunable">可用于调优</option>
+            <option value="tunable">可用于率定</option>
             <option value="mixed">当前批量值不一致</option>
           </select>
         </div>
@@ -435,12 +435,45 @@
     </section>
 
     <!-- ④ 运行 -->
-    <section class="page" data-step="hybrid" hidden>
-      <div class="work-head"><span class="kicker">第 3 步 · AI 参数化（可选）</span></div>
-      <h1>AI 参数化</h1>
-      <p class="sub">用训练好的小网络，按每个 patch 的地表与气候特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；不用这一步的算例照常按纯物理运行。</p>
+    <section class="page" data-step="research" hidden>
+      <div class="work-head"><span class="kicker">研究</span></div>
+      <h1>你想回答什么问题？</h1>
+      <p class="sub">研究都从一个算例出发，产出新的算例；新算例回到工作流里运行，在结果页与原算例比较。</p>
+      <div class="card research-base">
+        <h3>基于算例</h3>
+        <div id="research-case" class="ch"></div>
+      </div>
+      <div class="research-groups">
+        <div class="research-group">
+          <h3>经典方法</h3>
+          <div class="ch">不改模型结构，在参数上做文章。</div>
+          <div class="domain-cards research-cards" id="research-classic"></div>
+        </div>
+        <div class="research-group">
+          <h3>AI 混合建模</h3>
+          <div class="ch">让小网络参与模型：给出参数，或替换一个过程。只能用 Rust 引擎运行。</div>
+          <div class="domain-cards research-cards" id="research-ai"></div>
+        </div>
+      </div>
+      <div class="card" id="research-readiness">
+        <h3 id="research-readiness-title">准备情况</h3>
+        <div id="research-readiness-list" class="readiness-list"></div>
+        <div class="pill-row" id="research-readiness-actions"></div>
+      </div>
+    </section>
 
-      <div class="flow-pane" data-flow-pane="hybrid">
+    <section class="page" data-step="hybrid" hidden>
+      <div class="work-head"><span class="kicker" id="hybrid-kicker">研究 · AI 混合建模</span></div>
+      <h1 id="hybrid-title">AI 学习参数</h1>
+      <p class="sub" id="hybrid-intro">用训练好的小网络，按每个 patch 的地表与气候特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；不装模型的算例照常按纯物理运行。</p>
+      <div class="flow-pane" data-flow-pane="hybrid-learn hybrid-process">
+      <div class="seg hybrid-tabs" id="hybrid-tabs" role="tablist">
+        <button type="button" data-hybrid-pane-go="overview" class="on" aria-pressed="true">概览</button>
+        <button type="button" data-hybrid-pane-go="train" aria-pressed="false">训练</button>
+        <button type="button" data-hybrid-pane-go="import" aria-pressed="false">导入外部模型</button>
+      </div>
+
+      <div data-hybrid-pane="overview">
         <div class="card" id="hybrid-card">
           <h3>本次算例</h3>
           <div class="ch">下表列出本次的算例：装了哪个模型、检查结果，以及气候特征是否已计算。没有装模型的算例照常按纯物理运行。</div>
@@ -450,16 +483,16 @@
         <div class="card">
           <h3>从哪里开始</h3>
           <div class="hybrid-start">
-            <button class="domain-card" type="button" data-hybrid-go="hybrid-train"><span class="dt">训练一个模型</span><span class="dd">选要学的参数（有预设），用差分进化或两步法按观测训练，结果直接装到算例。</span></button>
-            <button class="domain-card" type="button" data-hybrid-go="hybrid-import"><span class="dt">导入外部模型</span><span class="dd">已经用 Python 或其他工具训练好的 ONNX 或 .mlp.json 模型。</span></button>
+            <button class="domain-card" type="button" data-hybrid-go="train"><span class="dt">训练一个模型</span><span class="dd">选要学什么（有预设），按观测训练，结果直接装到算例。</span></button>
+            <button class="domain-card" type="button" data-hybrid-go="import"><span class="dt">导入外部模型</span><span class="dd">已经用 Python 或其他工具训练好的 ONNX 或 .mlp.json 模型。</span></button>
           </div>
         </div>
       </div>
 
-      <div class="flow-pane" data-flow-pane="hybrid-train" hidden>
+      <div data-hybrid-pane="train" hidden>
         <div class="card">
           <h3>1 · 要学什么</h3>
-          <div class="ch">选一个预设，或者自定义作用方式、输入特征与输出参数。网络按每个 patch 的特征给出所选参数。</div>
+          <div class="ch">选一个预设，或者自定义作用方式、输入特征与输出。网络按每个 patch 的特征给出所选的参数或过程量。</div>
           <div class="domain-cards hybrid-presets" id="hybrid-presets"></div>
           <details class="fold-card" id="hybrid-custom">
             <summary>查看或修改设置</summary>
@@ -495,16 +528,16 @@
             <button type="button" data-method="gradient" aria-pressed="false">可微训练</button>
           </div>
           <div class="hybrid-method-pane" data-method-pane="de">
-            <p class="ch">网络的权重当作调优参数，用差分进化按观测（GPP、潜热等）直接训练，可以同时调别的参数。基准成员保持纯物理，用来对比；训练好的网络随新算例一起写出。只能用 Rust 引擎；基础算例要先跑完前处理（mkinidata），用来统计特征的标准化。</p>
+            <p class="ch">网络的权重当作率定参数，用差分进化按观测（GPP、潜热等）直接训练，可以同时调别的参数。基准成员保持纯物理，用来对比；训练好的网络随新算例一起写出。只能用 Rust 引擎；基础算例要先跑完前处理（mkinidata），用来统计特征的标准化。</p>
             <div class="pill-row">
-              <label class="check"><input type="checkbox" id="tune-hybrid-on"> 参数调优时同时训练这个网络</label>
-              <button class="run-btn" type="button" id="hybrid-go-tuning">去参数调优，选站点与目标 →</button>
+              <label class="check"><input type="checkbox" id="tune-hybrid-on"> 参数率定时同时训练这个网络</label>
+              <button class="run-btn" type="button" id="hybrid-go-tuning">去参数率定，选站点与目标 →</button>
             </div>
           </div>
           <div class="hybrid-method-pane" data-method-pane="two-step" hidden>
-            <p class="ch">第一步：每个站点各建一个参数调优任务，率定上面的输出参数（例如 DEF_PFT_VMAX25）。第二步：在这里读各任务的最优参数，拟合“特征 → 参数”的网络，并做留一站交叉验证：网络要胜过“用其余站的均值”才算通过。</p>
+            <p class="ch">第一步：每个站点各建一个参数率定任务，率定上面的输出参数（例如 DEF_PFT_VMAX25）。第二步：在这里读各任务的最优参数，拟合“特征 → 参数”的网络，并做留一站交叉验证：网络要胜过“用其余站的均值”才算通过。</p>
             <div class="hybrid-fit-scan">
-              <label for="hybrid-fit-root">在这个目录里找调优任务</label>
+              <label for="hybrid-fit-root">在这个目录里找率定任务</label>
               <div class="hybrid-inline"><input class="input" id="hybrid-fit-root" placeholder="项目目录"><button class="btn-ghost" type="button" id="hybrid-fit-refresh">查找</button></div>
             </div>
             <div id="hybrid-fit-studies" class="result-table-wrap"></div>
@@ -527,10 +560,10 @@
         </div>
       </div>
 
-      <div class="flow-pane" data-flow-pane="hybrid-import" hidden>
+      <div data-hybrid-pane="import" hidden>
         <div class="card">
           <h3>导入训练好的模型</h3>
-          <div class="ch">装到本次的全部算例。支持 ONNX（.onnx）与本软件的原生格式（.mlp.json，参数调优或两步法训练出的就是这种）。特征与输出的次序要和训练模型时一致。</div>
+          <div class="ch">装到本次的全部算例。支持 ONNX（.onnx）与本软件的原生格式（.mlp.json，参数率定或两步法训练出的就是这种）。特征与输出的次序要和训练模型时一致。</div>
           <div class="hybrid-form">
             <label for="hybrid-model-path">模型文件</label>
             <div class="hybrid-inline"><input class="input" id="hybrid-model-path" placeholder="选择 .onnx 或 .mlp.json"><button class="btn-ghost" type="button" id="hybrid-pick-model">选择…</button></div>
@@ -542,7 +575,7 @@
             </select>
             <label for="hybrid-features">输入特征</label>
             <div><input class="input" id="hybrid-features" placeholder="pftclass, pftfrac">
-              <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“AI 参数化”卡片里计算。</p></div>
+              <p class="muted mini">常数重启里的变量名，用逗号分隔；分层变量写成 名字[层号]，层号从 1 起，例如 porsl[1]。气候特征写 clim_tair、clim_tair_amplitude、clim_prec、clim_swdown、clim_vpd，要先在“概览”里计算。</p></div>
             <label>输出参数</label>
             <div><div id="hybrid-outputs"></div><button class="btn-ghost" type="button" id="hybrid-add-output">添加输出</button>
               <p class="muted mini">网络的每个输出对应一个参数；范围是该参数允许的取值区间。勾选“乘数”时网络给出的是乘在查表值上的倍数，范围也按倍数填（如 0.5–2）；这样网络只需学气候让参数偏高还是偏低，能跨植物功能型推广。</p></div>
@@ -557,10 +590,11 @@
           </div>
         </div>
       </div>
+      </div>
     </section>
 
     <section class="page" data-step="run" hidden>
-      <div class="work-head"><span class="kicker">第 4 步</span></div>
+      <div class="work-head"><span class="kicker">第 3 步</span></div>
       <h1>运行</h1>
       <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
         <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
@@ -615,7 +649,7 @@
             <option value="fortran">Fortran 内核</option>
           </select>
         </div>
-        <p class="warn mini" id="hybrid-engine-warning" hidden>本次算例里有装了 AI 参数化模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或在第 3 步“AI 参数化”里移除模型。</p>
+        <p class="warn mini" id="hybrid-engine-warning" hidden>本次有装了 AI 模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型。</p>
         <div class="run-parallel-setting" id="mpi-setting">
           <div>
             <label for="mpi-ranks">每个算例的 MPI 进程数</label>
@@ -652,7 +686,7 @@
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
       <div class="flow-pane" data-flow-pane="result-overview">
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>分析总览</h1>
         <p class="sub">本次创建的所有算例集中在这里。旧目录算例和运行页残留勾选不会改变结果范围。</p>
         <div class="result-kpis" id="result-kpis"></div>
@@ -677,7 +711,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-data" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>数据浏览</h1>
         <p class="sub">查看 history 中实际存在的变量、单位、维度与可视化类型，不再局限于固定变量清单。</p>
         <div class="result-context">
@@ -700,7 +734,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-series" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>时间序列</h1>
         <p class="sub">按需读取当前站点和变量；长序列在 sidecar 中保极值降采样，导出仍可使用完整数据。</p>
         <div class="card result-sticky-tools">
@@ -723,7 +757,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-evaluation" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>模型评估</h1>
         <p class="sub">逐站点匹配观测，查看指标、时间序列、散点和残差。缺少观测只影响当前站点。</p>
         <div class="card result-sticky-tools">
@@ -752,10 +786,15 @@
           </div>
           <div id="evaluation-charts" class="result-chart-host"></div>
         </div>
+        <div class="card next-steps" id="result-next" hidden>
+          <h3>下一步</h3>
+          <div class="ch">评估完了，可以从这个算例出发做研究；产出的新算例会回到工作流里运行和比较。</div>
+          <div id="result-next-list" class="next-steps-list"></div>
+        </div>
       </div>
 
       <div class="flow-pane" data-flow-pane="result-comparison" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>多站点比较</h1>
         <p class="sub">评估本次所有已完成算例。单站点失败不会终止批次，缺失原因会完整保留。</p>
         <div class="card">
@@ -790,7 +829,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-diagnostics" hidden>
-        <div class="work-head"><span class="kicker">第 5 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>过程诊断</h1>
         <p class="sub">检查时间覆盖、缺测、物理范围和能量平衡。缺少所需变量时明确列出缺项，不生成伪结论。</p>
         <div class="result-context">
@@ -801,7 +840,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-uncertainty" hidden>
-        <div class="work-head"><span class="kicker">第 6 步 · 不确定性分析</span></div>
+        <div class="work-head"><span class="kicker">研究 · 经典方法</span></div>
         <h1>不确定性分析</h1>
         <p class="sub">这是基本设定完成后的可选研究流程。生成和运行分析任务不会修改原算例；只有点击“应用到当前算例”才会同步基本设定里的预热。</p>
         <div class="card study-purpose" id="uq-purpose">
@@ -944,12 +983,12 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-tuning" hidden>
-        <div class="work-head"><span class="kicker">第 7 步 · 参数调优</span></div>
-        <h1>参数调优</h1>
-        <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立调优任务中搜索参数，不覆盖原算例。</p>
+        <div class="work-head"><span class="kicker">研究 · 经典方法</span></div>
+        <h1>参数率定</h1>
+        <p class="sub">这是基本设定完成后的可选研究流程。差分进化会在独立率定任务中搜索参数，不覆盖原算例。</p>
         <div class="card study-purpose" id="tune-purpose">
-          <h3>参数调优要回答什么？</h3>
-          <p>参数调优会把模型输出与观测配对，自动搜索一组让目标函数更小的参数。它用于校准当前算例的可调参数，并用独立验证期检查这组参数是否只是在校准期“凑巧变好”。</p>
+          <h3>参数率定要回答什么？</h3>
+          <p>参数率定会把模型输出与观测配对，自动搜索一组让目标函数更小的参数。它用于校准当前算例的可调参数，并用独立验证期检查这组参数是否只是在校准期“凑巧变好”。</p>
           <div class="study-purpose-grid">
             <div><strong>可以回答</strong><span>在给定参数范围、目标变量和观测证据下，哪组参数让校准期误差最低，以及这组参数在验证期是否仍然表现稳定。</span></div>
             <div><strong>不能直接回答</strong><span>最优参数不是唯一真值；观测误差、未调参数、错误物理方案或过短验证期都会让“最优”只对当前设置成立。</span></div>
@@ -973,7 +1012,7 @@
         <div class="study-wizard-progress" aria-live="polite"><span id="tune-step-progress">第 1/7 页 · 优化设计</span></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="0">
           <h3>1 · 优化设计</h3>
-          <div class="ch">选择目标指标、校准/验证百分比窗口和差分进化预算。尚未运行过原算例也可以准备；调优任务会自行运行基准成员和候选成员。</div>
+          <div class="ch">选择目标指标、校准/验证百分比窗口和差分进化预算。尚未运行过原算例也可以准备；率定任务会自行运行基准成员和候选成员。</div>
           <p class="muted mini">算法实现为确定性 DE/rand/1/bin。奠基文献：Storn, R. and Price, K. (1997), Differential Evolution – A Simple and Efficient Heuristic for Global Optimization over Continuous Spaces, Journal of Global Optimization, 11(4), 341–359. DOI: 10.1023/A:1008202821328。</p>
           <div class="study-design-grid">
             <section class="study-design-field">
@@ -996,11 +1035,11 @@
             </section>
             <section class="study-design-field">
               <label for="tune-site-mode">站点方式</label>
-              <select class="select" id="tune-site-mode" aria-describedby="tune-site-mode-help"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独调优任务</option></select>
+              <select class="select" id="tune-site-mode" aria-describedby="tune-site-mode-help"><option value="shared">多站点共享参数向量</option><option value="independent">每个站点单独率定任务</option></select>
               <dl class="study-field-help" id="tune-site-mode-help">
                 <div><dt>是什么</dt><dd>决定多个站点是共用一组参数，还是每个站点各自搜索一组参数。</dd></div>
-                <div><dt>怎么选</dt><dd>默认共享参数，适合寻找跨站点更稳健的参数；只有明确研究站点差异时才用单站独立调优。</dd></div>
-                <div><dt>选择后果</dt><dd>共享参数更难但更不容易过拟合单站；独立调优可能提升单站指标，但任务量和解释复杂度都会增加。</dd></div>
+                <div><dt>怎么选</dt><dd>默认共享参数，适合寻找跨站点更稳健的参数；只有明确研究站点差异时才用单站独立率定。</dd></div>
+                <div><dt>选择后果</dt><dd>共享参数更难但更不容易过拟合单站；独立率定可能提升单站指标，但任务量和解释复杂度都会增加。</dd></div>
               </dl>
             </section>
             <section class="study-design-field study-design-field-wide">
@@ -1016,7 +1055,7 @@
                 <div><dt>选择后果</dt><dd>预热会增加每个候选成员耗时，但能降低初值影响；点击应用才会同步当前基础算例。</dd></div>
               </dl>
               <p class="muted mini" id="tune-spinup-note">读取当前算例预热设置后显示。</p>
-              <p class="muted mini">内核自动沿用基本设定，创建时记录指纹；调优不需要也不显示额外运行目录。</p>
+              <p class="muted mini">内核自动沿用基本设定，创建时记录指纹；率定不需要也不显示额外运行目录。</p>
             </section>
             <section class="study-design-field study-design-field-wide">
               <span class="study-field-label">校准与独立验证窗口（按各站点时段百分比）</span>
@@ -1057,7 +1096,7 @@
               <input class="input" id="tune-seed" type="number" min="0" max="9007199254740991" step="1" value="1" aria-describedby="tune-seed-help">
               <dl class="study-field-help" id="tune-seed-help">
                 <div><dt>是什么</dt><dd>控制初始种群和候选扰动的整数，让同一设计可以复现。</dd></div>
-                <div><dt>怎么选</dt><dd>需要复现时保持不变；想检查搜索偶然性时换种子重新生成调优任务。</dd></div>
+                <div><dt>怎么选</dt><dd>需要复现时保持不变；想检查搜索偶然性时换种子重新生成率定任务。</dd></div>
                 <div><dt>选择后果</dt><dd>不同种子可能找到不同局部最优；如果结果对种子很敏感，说明预算或参数约束还不够稳。</dd></div>
               </dl>
             </section>
@@ -1077,7 +1116,7 @@
             </section>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点独立调优还会乘以站点数。预算页用于在真正生成任务前确认运行规模。</div><div class="study-scale-guide"><p><strong>预算公式：</strong>大致运行次数 =（1 个基准成员 + 种群 ×（代数 + 1））× 目标站点数。并行数只能缩短墙钟时间，不能减少总运行次数；spin-up 会叠加到每个成员。</p></div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点独立率定还会乘以站点数。预算页用于在真正生成任务前确认运行规模。</div><div class="study-scale-guide"><p><strong>预算公式：</strong>大致运行次数 =（1 个基准成员 + 种群 ×（代数 + 1））× 目标站点数。并行数只能缩短墙钟时间，不能减少总运行次数；spin-up 会叠加到每个成员。</p></div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。只有模型 history 与观测在校准窗口内达到最少配对数的变量，才会进入目标函数。</div><div class="study-scale-guide"><p><strong>目标权重：</strong>权重决定多个目标如何合成为一个总分。权重大表示优化器更重视该变量；权重必须大于 0，不参与请取消勾选。正式结果需说明使用了哪些目标、权重和有效配对数。</p></div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden>
           <h3>3 · 参数范围</h3>
@@ -1089,15 +1128,15 @@
           </div>
           <div id="tune-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可调参数。</div></div>
           <div class="card tune-hybrid-summary" id="tune-hybrid-summary">
-            <h4>AI 参数化</h4>
+            <h4>AI 混合建模</h4>
             <p class="mini" id="tune-hybrid-summary-text"></p>
-            <div class="pill-row"><button class="btn-ghost" type="button" id="tune-hybrid-edit">在第 3 步设置 →</button></div>
+            <div class="pill-row"><button class="btn-ghost" type="button" id="tune-hybrid-edit">去 AI 混合建模设置 →</button></div>
           </div>
           <label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
         </div>
         <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>
-          <h3>5 · 生成调优任务</h3>
-          <div class="ch">把目标函数、参数范围、校准/验证窗口和搜索预算冻结成可复现的调优任务。这里只准备成员，不开始搜索。</div>
+          <h3>5 · 生成率定任务</h3>
+          <div class="ch">把目标函数、参数范围、校准/验证窗口和搜索预算冻结成可复现的率定任务。这里只准备成员，不开始搜索。</div>
           <div class="study-prepare-grid">
             <div><strong>冻结证据</strong><span>记录基础算例、观测文件、目标函数和当前内核指纹。</span></div>
             <div><strong>生成候选</strong><span>准备基准成员、初始种群和后续差分进化任务。</span></div>
@@ -1105,14 +1144,14 @@
           </div>
           <div class="study-primary-action">
             <div><strong>确认后生成</strong><span>生成成功会自动进入“开始搜索与监控”。若返回修改设计，需要重新生成任务。</span></div>
-            <button class="btn-next" id="tune-create">生成调优任务</button>
+            <button class="btn-next" id="tune-create">生成率定任务</button>
           </div>
         </div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden>
           <h3>6 · 开始搜索与监控</h3>
           <div class="ch">开始后会运行基准成员和候选成员，并按代更新搜索结果。进度会自动更新；暂停只停止派发新成员。</div>
           <div class="study-launch-panel">
-            <div><strong id="tune-run-heading">等待生成调优任务</strong><span id="tune-run-state" aria-live="polite">完成第 5 页后即可开始参数搜索。</span></div>
+            <div><strong id="tune-run-heading">等待生成率定任务</strong><span id="tune-run-state" aria-live="polite">完成第 5 页后即可开始参数搜索。</span></div>
             <div class="study-parallel-setting">
               <label for="tune-run-jobs">本次同时运行数（并行） <input class="input" id="tune-run-jobs" type="number" min="1" step="1" value="1" aria-describedby="tune-run-jobs-note"></label>
               <span id="tune-run-jobs-note">与设计页同步；普通笔记本建议 1–2，软件会限制在本机逻辑 CPU 上限。</span>
@@ -1126,17 +1165,17 @@
             <button class="btn-ghost" id="tune-pause" disabled hidden>暂停新任务</button>
             <button class="btn-ghost" id="tune-resume" disabled hidden>继续搜索</button>
             <button class="btn-ghost btn-stop" id="tune-cancel" disabled>终止运行</button>
-            <button class="btn-ghost" id="tune-export-study" disabled>导出调优记录</button>
+            <button class="btn-ghost" id="tune-export-study" disabled>导出率定记录</button>
           </div>
           <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>
-          <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成调优任务。</pre></details>
+          <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成率定任务。</pre></details>
         </div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div></div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="tune-step-prev">← 上一步</button><span class="study-wizard-note" id="tune-step-note"></span><button class="btn-next" id="tune-step-next">下一步 →</button></div>
       </div>
 
       <div class="flow-pane" data-flow-pane="result-export" hidden>
-        <div class="work-head"><span class="kicker">第 8 步 · 报告与导出</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 报告与导出</span></div>
         <h1>报告与导出</h1>
         <p class="sub">导出当前分析范围、指标、失败原因和软件署名；不会把未完成站点伪装成零值。</p>
         <div class="card">

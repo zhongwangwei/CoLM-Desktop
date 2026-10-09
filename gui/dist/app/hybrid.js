@@ -1,5 +1,5 @@
-//! AI 参数化（混合模型，docs/design-hybrid.md）：运行页的算例卡片、导入表单，以及参数调优里
-//! “同时训练 AI 参数化”的表单。
+//! AI 混合建模（docs/design-hybrid.md）：研究里的“AI 学习参数”与“AI 替换过程”两个入口（同一个页面的两种模式），
+//! 运行页的算例卡片、导入表单，以及参数率定里“同时训练网络”的表单。
 //!
 //! 只依赖 ipc/state/ui/batch/shell/engine/i18n：runner.js 与 results.js 都导入它，反过来导入会成环。
 //! 算例上的配置由 `colm-cli hybrid-info` 读出（JSON），这里不解析 TOML。
@@ -26,6 +26,25 @@ export const SOIL_STRESS = 'soil_stress';
 
 /** β 插槽每步现算的特征（colm-core 给出；其余特征与参数插槽同一套取法）。 */
 export const STRESS_FEATURES = 'beta_physics, root_saturation, root_temperature, frozen_root_fraction';
+
+/** 两种模式各用哪些插槽：学习参数是参数插槽（按 PFT 或按地类），替换过程是过程插槽。 */
+export const MODE_SLOTS = { params: ['pft', 'land_class'], process: [SOIL_STRESS] };
+
+/** 研究入口决定模式：`hybrid-process` 是替换过程，其余（`hybrid-learn`）是学习参数。 */
+export function modeForStep(step) {
+  return step === 'hybrid-process' ? 'process' : 'params';
+}
+
+/** 这个模式能用的预设（“自定义”两种模式都有）。 */
+export function presetsForMode(mode) {
+  const slots = MODE_SLOTS[mode] ?? MODE_SLOTS.params;
+  return PRESETS.filter(preset => !preset.slot || slots.includes(preset.slot));
+}
+
+/** 这个模式能用的训练方法：两步法拟合“特征 → 率定出的参数”，只属于学习参数；可微训练（计划中）是给 β 的。 */
+export function methodsForMode(mode) {
+  return mode === 'process' ? ['de', 'gradient'] : ['de', 'two-step'];
+}
 
 /** 插槽能驱动的参数前缀；β 插槽的输出就叫 `beta`。 */
 export function outputPrefix(slot) {
@@ -86,10 +105,10 @@ export function weightCount(features, hidden, outputs) {
 /** Study spec 的 `hybrid` 段。 */
 export function studySection({ slot, features, outputs, size }) {
   const names = parseFeatures(features);
-  if (!names.length) throw new Error('AI 参数化至少需要一个输入特征');
-  if (!outputs.length) throw new Error('AI 参数化至少需要一个输出参数');
+  if (!names.length) throw new Error('AI 模型至少需要一个输入特征');
+  if (!outputs.length) throw new Error('AI 模型至少需要一个输出参数');
   const checked = outputs.map(output => checkOutput(slot, output));
-  if (new Set(checked.map(o => o.name)).size !== checked.length) throw new Error('AI 参数化的输出参数不能重复');
+  if (new Set(checked.map(o => o.name)).size !== checked.length) throw new Error('AI 模型的输出参数不能重复');
   for (const output of checked) {
     if (!['sigmoid', 'clamp'].includes(output.transform)) throw new Error('训练时输出只能用 S 形映射或截断');
   }
@@ -138,7 +157,7 @@ export function presetForMode(mode) {
   return mode === 'lct' ? 'vcmax-lc' : 'vcmax-pft';
 }
 
-/** 调优任务能不能用作两步法的第一步：已完成、本身没训练网络、率定了网络的全部输出。 */
+/** 率定任务能不能用作两步法的第一步：已完成、本身没训练网络、率定了网络的全部输出。 */
 export function studyUsable(study, outputNames) {
   if (!['completed', 'completed_with_failures'].includes(study.status)) return { usable: false, reason: '还没跑完' };
   if (study.trains_network) return { usable: false, reason: '这个任务本身在训练网络' };
@@ -248,14 +267,14 @@ function statusCell(info) {
     return cell;
   }
   const cell = element('td', '');
-  cell.textContent = info.slots.some(slot => slot.trained_by_study) ? '已安装（参数调优训练）' : '已安装';
+  cell.textContent = info.slots.some(slot => slot.trained_by_study) ? '已安装（参数率定训练）' : '已安装';
   return cell;
 }
 
 function renderCaseTable(cases, infos) {
   const table = element('table');
   const head = element('tr');
-  for (const label of ['算例', '地表模式', 'AI 参数化', '作用参数', '模型文件', '气候特征', '']) head.appendChild(element('th', '', label));
+  for (const label of ['算例', '地表模式', 'AI 模型', '作用参数', '模型文件', '气候特征', '']) head.appendChild(element('th', '', label));
   table.appendChild(head);
   cases.forEach((c, index) => {
     const info = infos[index];
@@ -391,10 +410,10 @@ async function checkCase(c) {
 }
 
 async function removeCase(c) {
-  const question = '移除这个算例的 AI 参数化模型？算例回到纯物理参数；之后的运行会按新设定重跑。';
+  const question = '移除这个算例的 AI 模型？算例回到纯物理参数；之后的运行会按新设定重跑。';
   if (!(await appConfirm(language() === 'en' ? translateZh(question) : question))) return;
   await invoke('hybrid_remove', { dirs: [c.dir] });
-  status('已移除 AI 参数化模型');
+  status('已移除 AI 模型');
   $('hybrid-check-result')?.replaceChildren();
   await refreshHybridCard();
 }
@@ -454,7 +473,7 @@ function wireRunCard() {
   $('hybrid-pick-model').onclick = () => pickInto('hybrid-model-path', 'hybrid-model', 'onnx,json').catch(e => status(e));
   $('hybrid-pick-normalize').onclick = () => pickInto('hybrid-normalize-path', 'hybrid-normalize', 'json').catch(e => status(e));
   $('hybrid-install').onclick = () => installModel().catch(e => status(e?.message || e));
-  // 训练在参数调优里：跳过去并打开“同时训练 AI 参数化”。
+  // 训练在参数率定里：跳过去并打开“同时训练 AI 模型”。
   $('hybrid-go-tuning').onclick = () => {
     go('result-tuning');
     const toggle = $('tune-hybrid-on');
@@ -468,9 +487,9 @@ function wireRunCard() {
   });
 }
 
-// ---- 参数调优：同时训练 AI 参数化 ------------------------------------------------------------
+// ---- 参数率定：同时训练 AI 模型 ------------------------------------------------------------
 
-/** 勾了“训练 AI 参数化”时返回 spec 的 `hybrid` 段，否则 `null`；填写不合法时抛出说明。 */
+/** 勾了“训练 AI 模型”时返回 spec 的 `hybrid` 段，否则 `null`；填写不合法时抛出说明。 */
 export function tuneHybridSection() {
   if (!$('tune-hybrid-on')?.checked) return null;
   return studySection({
@@ -495,7 +514,7 @@ export function renderTuneHybridWeights(population) {
 /** `onChange` 在表单任何改动后调用（results.js 用它作废已生成的任务并刷新预算）。 */
 export function wireTuneHybrid(onChange) {
   if (!$('tune-hybrid-on')) return;
-  // 表单在第 3 步，摘要在第 7 步：任何改动都要同时作废已生成的调优任务、刷新摘要与两步法的任务列表。
+  // 表单在 AI 混合建模页，摘要在参数率定页：任何改动都要同时作废已生成的率定任务、刷新摘要与两步法的任务列表。
   const changed = () => {
     onChange?.();
     renderTuneSummary();
@@ -525,13 +544,88 @@ export function wireTuneHybrid(onChange) {
 
 wireRunCard();
 
-// ---- 第 3 步 · 训练 ------------------------------------------------------------------------
+// ---- 研究 · AI 混合建模：模式与页内面板 ------------------------------------------------------
 
 let selectedPreset = null;
 let fitResult = null;
+let hybridPane = 'overview';
+
+const isHybridStep = () => state.step === 'hybrid-learn' || state.step === 'hybrid-process';
+export const hybridMode = () => modeForStep(state.step);
+
+const MODE_TEXT = {
+  params: {
+    title: 'AI 学习参数',
+    intro: '用训练好的小网络，按每个 patch 的地表与气候特征给出物理参数（例如 Vcmax25），代替查表值。只有 Rust 引擎能运行；不装模型的算例照常按纯物理运行。',
+  },
+  process: {
+    title: 'AI 替换过程',
+    intro: '用训练好的小网络替换模型里的一个过程量。目前的过程插槽是土壤水分胁迫 β（替换 eroot 那一段），要先关闭植物水力，不支持 PC 模式。只有 Rust 引擎能运行；不装模型的算例照常按纯物理运行。',
+  },
+};
+
+/** 只留下这个模式的插槽选项；当前值不在其中时换成第一个。 */
+function filterSlotSelect(select, mode) {
+  if (!select) return false;
+  const slots = MODE_SLOTS[mode];
+  for (const option of select.options ?? []) {
+    const allowed = slots.includes(option.value);
+    option.hidden = !allowed;
+    option.disabled = !allowed;
+  }
+  if (slots.includes(select.value)) return false;
+  select.value = mode === 'params' ? slotForMode(caseMode()) : slots[0];
+  return true;
+}
+
+function showPane(name) {
+  hybridPane = name;
+  for (const pane of document.querySelectorAll('[data-hybrid-pane]')) pane.hidden = pane.dataset.hybridPane !== name;
+  for (const b of document.querySelectorAll('[data-hybrid-pane-go]')) {
+    const on = b.dataset.hybridPaneGo === name;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', String(on));
+  }
+  if (name === 'train') enterTraining();
+}
+
+/** 进入或切换模式：标题、插槽、预设与训练方法都跟着模式走。 */
+function applyMode() {
+  const mode = hybridMode();
+  const text = MODE_TEXT[mode];
+  if ($('hybrid-title')) $('hybrid-title').textContent = t(text.title);
+  if ($('hybrid-intro')) $('hybrid-intro').textContent = t(text.intro);
+  if (filterSlotSelect($('hybrid-slot'), mode)) setImportSlot($('hybrid-slot').value);
+  const preset = PRESETS.find(p => p.id === selectedPreset);
+  if (preset?.slot && !MODE_SLOTS[mode].includes(preset.slot)) selectedPreset = null;
+  filterSlotSelect($('tune-hybrid-slot'), mode);
+  const methods = methodsForMode(mode);
+  let current = null;
+  for (const b of $('hybrid-method')?.querySelectorAll('button') ?? []) {
+    b.hidden = !methods.includes(b.dataset.method);
+    if (b.classList.contains('on')) current = b.dataset.method;
+  }
+  if (!methods.includes(current)) setMethod('de');
+  showPane(hybridPane);
+}
+
+function enterTraining() {
+  if (!selectedPreset) applyPreset(hybridMode() === 'process' ? 'beta' : presetForMode(caseMode()));
+  // 每次进来都重画：β 预设能不能用取决于算例（地表模式、植物水力），算例信息是异步读到的。
+  else renderPresets();
+  if (!$('hybrid-fit-root').value) $('hybrid-fit-root').value = $('root')?.value ?? '';
+}
 
 function cachedCaseInfo() {
   return batchTarget().map(c => infoCache.get(c.dir)).find(Boolean);
+}
+
+/** 本次第一个算例上 β 插槽能不能用（研究总览的准备情况）；不能用时返回原因，没有算例时返回空串。 */
+export async function processSlotBlocked() {
+  const c = batchTarget()[0];
+  if (!c || !hasBackend) return '';
+  const info = infoCache.get(c.dir) ?? await caseInfo(c.dir).catch(() => null);
+  return presetBlocked(PRESETS.find(preset => preset.slot === SOIL_STRESS), info);
 }
 
 function caseMode() {
@@ -542,7 +636,7 @@ function caseMode() {
 function renderPresets() {
   const host = $('hybrid-presets');
   if (!host) return;
-  host.replaceChildren(...PRESETS.map(preset => {
+  host.replaceChildren(...presetsForMode(hybridMode()).map(preset => {
     const card = element('button', 'domain-card');
     card.type = 'button';
     card.dataset.preset = preset.id;
@@ -620,7 +714,7 @@ function renderStudies() {
   let names = [];
   try { names = currentNetwork().outputs.map(o => o.name); } catch { /* 表单还没填好：只列出任务 */ }
   if (!studies.length) {
-    host.replaceChildren(element('div', 'result-empty', '这个目录里没有参数调优任务。先在第 7 步为每个站点建一个，率定上面的输出参数。'));
+    host.replaceChildren(element('div', 'result-empty', '这个目录里没有参数率定任务。先在“研究 → 参数率定”里为每个站点建一个，率定上面的输出参数。'));
     return;
   }
   const table = element('table', 'result-table');
@@ -642,7 +736,7 @@ function renderStudies() {
     table.appendChild(row);
   }
   const usable = studies.filter(s => studyUsable(s, names).usable).length;
-  host.replaceChildren(element('p', 'mini muted', `找到 ${studies.length} 个调优任务，可用 ${usable} 个。`), table);
+  host.replaceChildren(element('p', 'mini muted', `找到 ${studies.length} 个率定任务，可用 ${usable} 个。`), table);
 }
 
 function selectedStudies() {
@@ -652,7 +746,7 @@ function selectedStudies() {
 async function runFit() {
   const network = currentNetwork();
   const chosen = selectedStudies();
-  if (!chosen.length) throw new Error('至少勾选一个可用的调优任务');
+  if (!chosen.length) throw new Error('至少勾选一个可用的率定任务');
   const root = $('hybrid-fit-root').value.trim();
   const linear = !network.hidden.length;
   const request = {
@@ -721,15 +815,15 @@ async function installFitted() {
   });
   status(dirs.length === 1 ? '已把拟合的模型装到算例' : `已把拟合的模型装到 ${dirs.length} 个算例`);
   await refreshHybridCard();
-  go('hybrid');
+  showPane('overview');
 }
 
-/** 第 7 步只显示一行摘要，设置都在第 3 步。 */
+/** 参数率定里只显示一行摘要，设置都在 AI 混合建模页。 */
 function renderTuneSummary() {
   const text = $('tune-hybrid-summary-text');
   if (!text) return;
   if (!$('tune-hybrid-on').checked) {
-    text.textContent = t('本次调优不训练 AI 参数化。要训练，请到第 3 步“AI 参数化 → 训练”。');
+    text.textContent = t('本次率定不训练 AI 模型。要训练，请到“研究 → AI 混合建模”的“训练”。');
     return;
   }
   let detail = '';
@@ -739,7 +833,7 @@ function renderTuneSummary() {
   } catch (error) {
     detail = ` · ${String(error?.message || error)}`;
   }
-  text.textContent = `${t('本次调优同时训练 AI 参数化')}：${t(presetTitle())}${detail}`;
+  text.textContent = `${t('本次率定同时训练 AI 模型')}：${t(presetTitle())}${detail}`;
 }
 
 let tuneChanged = () => {};
@@ -748,20 +842,22 @@ let tuneChanged = () => {};
 // 预设卡片第一次进训练页时才画。
 function wireTraining() {
   addEventListener('click', event => {
-    const target = event.target?.closest?.('#hybrid-method [data-method], [data-hybrid-go], #hybrid-fit-refresh, #hybrid-fit-run, #tune-hybrid-edit');
+    const target = event.target?.closest?.('#hybrid-method [data-method], [data-hybrid-go], [data-hybrid-pane-go], #hybrid-fit-refresh, #hybrid-fit-run, #tune-hybrid-edit');
     if (!target) return;
     if (target.dataset.method) setMethod(target.dataset.method);
-    else if (target.dataset.hybridGo) go(target.dataset.hybridGo);
+    else if (target.dataset.hybridGo) showPane(target.dataset.hybridGo);
+    else if (target.dataset.hybridPaneGo) showPane(target.dataset.hybridPaneGo);
     else if (target.id === 'hybrid-fit-refresh') refreshStudies().catch(e => status(e?.message || e));
     else if (target.id === 'hybrid-fit-run') {
       runFit().catch(e => $('hybrid-fit-result').replaceChildren(element('p', 'assistant-fail', String(e?.message || e))));
-    } else if (target.id === 'tune-hybrid-edit') { go('hybrid-train'); setMethod('de'); }
+    } else if (target.id === 'tune-hybrid-edit') {
+      hybridPane = 'train';
+      go($('tune-hybrid-slot')?.value === SOIL_STRESS ? 'hybrid-process' : 'hybrid-learn');
+      setMethod('de');
+    }
   });
   addEventListener('colm:step', () => {
-    if (state.step === 'hybrid-train' && !selectedPreset) applyPreset(presetForMode(caseMode()));
-    // 每次进来都重画：β 预设能不能用取决于算例（地表模式、植物水力），算例信息是异步读到的。
-    else if (state.step === 'hybrid-train') renderPresets();
-    if (state.step === 'hybrid-train' && !$('hybrid-fit-root').value) $('hybrid-fit-root').value = $('root')?.value ?? '';
+    if (isHybridStep()) applyMode();
     renderTuneSummary();
   });
 }

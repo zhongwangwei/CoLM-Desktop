@@ -13,7 +13,7 @@ const labels = {
   watershed: '流域', region: '区域', global: '全球',
   latlon: '经纬度网格', unstructured: '非结构网格', catchment: '流域网格',
 };
-const spatialStudyText = '空间算例暂不支持参数调优和不确定性分析。';
+const spatialStudyText = '空间算例暂不支持参数率定和不确定性分析。';
 const spatialContext = () => JSON.stringify({
   root: $('spatial-root')?.value.trim(), name: $('spatial-name')?.value.trim(),
   domain: state.domain, grid: state.grid, spatial: state.spatial, subgrid: state.subgrid, wizard: state.wizard,

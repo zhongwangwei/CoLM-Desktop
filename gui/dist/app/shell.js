@@ -18,7 +18,7 @@ const resultsReady = () => ready() ?? (hasResults() ? null : '先运行完成至
 const spatialCaseEntry = c => c?.spatial === true;
 const spatialStudyDisabled = () => !!(state.domain && state.domain !== 'site')
   || state.cases.some(c => state.createdCases.has(c.dir) && spatialCaseEntry(c));
-const spatialStudyMessage = '空间算例暂不支持参数调优和不确定性分析。';
+const spatialStudyMessage = '空间算例暂不支持参数率定和不确定性分析。';
 const studyReady = () => ready() ?? (spatialStudyDisabled() ? spatialStudyMessage : null);
 
 // 前处理（强迫场转换、站点属性、验证数据）在软件外完成，不进工作流；页面代码保留，入口隐藏。
@@ -49,17 +49,10 @@ export const WORKFLOW = [
     { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
-  // AI 参数化在运行前装模型；可选，“下一步”不强制经过它。
-  { n: 3, key: 'hybrid', collapsible: true, t: 'AI 参数化', d: '可选：小网络给出物理参数', steps: [
-    { id: 'hybrid', page: 'hybrid', t: '概览', d: '本次算例装了什么模型', need: ready, optional: true },
-    // 两步法只读项目里的调优任务，不需要先选算例。
-    { id: 'hybrid-train', page: 'hybrid', t: '训练', d: '预设、差分进化、两步法', need: () => null, optional: true },
-    { id: 'hybrid-import', page: 'hybrid', t: '导入外部模型', d: 'ONNX 或 .mlp.json', need: ready, optional: true },
-  ] },
-  { n: 4, t: '运行', d: '输出与运行', steps: [
+  { n: 3, t: '运行', d: '输出与运行', steps: [
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
   ] },
-  { n: 5, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
+  { n: 4, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
     { id: 'result-overview', page: 'result', t: '分析总览', d: '本次站点与产物状态', need: ready },
     { id: 'result-data', page: 'result', t: '数据浏览', d: '变量、单位与维度', need: ready, show: hasResults },
     { id: 'result-series', page: 'result', t: '时间序列', d: '按站点和变量绘图', need: ready, show: hasResults },
@@ -67,14 +60,23 @@ export const WORKFLOW = [
     { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
   ] },
-  { n: 6, t: '不确定性分析', d: 'OAT / LHS 参数扰动', steps: [
-    { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: '可选：OAT / LHS 参数扰动', need: studyReady, optional: true },
-  ] },
-  { n: 7, t: '参数调优', d: '差分进化与目标函数', steps: [
-    { id: 'result-tuning', page: 'result', t: '参数调优', d: '可选：差分进化与目标函数', need: studyReady, optional: true },
-  ] },
-  { n: 8, t: '报告与导出', d: '保存分析结果', steps: [
+  { n: 5, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
+  ] },
+  // 研究：从一个算例出发、产出更好的算例；都是可选的，“下一步”不经过它们。
+  // 左栏画成平铺的列表（不编号）；`badge` 是右侧的状态（运行中、完成），由各自的模块写进 state.studyBadges。
+  { section: 'research', key: 'research-home', list: true, steps: [
+    { id: 'research', page: 'research', t: '研究总览', d: '你想回答什么问题', need: () => null, optional: true },
+  ] },
+  { section: 'research', key: 'research-classic', list: true, t: '经典方法', steps: [
+    { id: 'result-tuning', page: 'result', t: '参数率定', d: '找最贴近观测的参数', need: studyReady, optional: true, badge: () => state.studyBadges?.tuning },
+    { id: 'result-uncertainty', page: 'result', t: '不确定性分析', d: '参数敏感性与误差范围', need: studyReady, optional: true, badge: () => state.studyBadges?.uq },
+  ] },
+  // AI 学习参数与 AI 替换过程是同一个页面的两种模式（hybrid.js 的 hybridMode）：插槽、预设与训练方法按模式过滤。
+  // 两步法只读项目里的率定任务，不需要先选算例。
+  { section: 'research', key: 'research-ai', list: true, t: 'AI 混合建模', steps: [
+    { id: 'hybrid-learn', page: 'hybrid', t: 'AI 学习参数', d: '按地点特征预测参数', need: () => null, optional: true },
+    { id: 'hybrid-process', page: 'hybrid', t: 'AI 替换过程', d: '用网络替代物理公式', need: () => null, optional: true },
   ] },
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
@@ -142,7 +144,7 @@ export function go(id) {
   if (group?.collapsible) state.expandedFlows.add(group.key);
   for (const p of document.querySelectorAll('.page')) p.hidden = p.dataset.step !== step.page;
   for (const p of document.querySelectorAll('[data-flow-pane]')) {
-    p.hidden = p.dataset.flowPane !== id;
+    p.hidden = !p.dataset.flowPane.split(/\s+/).includes(id);
   }
   document.querySelector?.('.app')?.classList.toggle('live-collapsed', state.liveCollapsed);
   $('work').scrollTop = 0;
@@ -153,9 +155,18 @@ export function go(id) {
 export function renderSteps() {
   const box = $('steps');
   box.textContent = '';
+  let section = 'workflow';
   for (const group of WORKFLOW) {
     const steps = group.steps.filter(step => !step.show || step.show());
     if (!steps.length) continue;
+    if ((group.section ?? 'workflow') !== section) {
+      section = group.section;
+      const head = document.createElement('h4');
+      head.className = 'rail-section';
+      head.textContent = '研究';
+      box.appendChild(head);
+    }
+    if (group.list) { box.appendChild(renderList(group, steps)); continue; }
     const active = steps.some(s => s.id === state.step);
     const why = steps[0].need();
     const block = document.createElement(group.collapsible ? 'details' : 'div');
@@ -221,6 +232,30 @@ export function renderSteps() {
   // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();
+}
+
+/** 研究那一段：可选的子标题加平铺的条目，右侧是状态（`badge`）或说明。 */
+function renderList(group, steps) {
+  const block = document.createElement('div');
+  block.className = 'flow-block flow-list';
+  block.dataset.group = group.key;
+  if (group.t) {
+    const label = document.createElement('div');
+    label.className = 'flow-sub';
+    label.textContent = group.t;
+    block.appendChild(label);
+  }
+  for (const s of steps) {
+    const why = s.need();
+    const badge = s.badge?.();
+    const row = document.createElement('div');
+    row.className = 'substep' + (state.step === s.id ? ' active' : '');
+    if (why) row.setAttribute('aria-disabled', 'true');
+    row.innerHTML = `<span class="t">${s.t}</span><span class="d${badge && !why ? ' badge-line' : ''}">${why ?? badge ?? s.d}</span>`;
+    row.onclick = () => go(s.id);
+    block.appendChild(row);
+  }
+  return block;
 }
 
 export function setStatus(msg) { $('status').textContent = String(msg); }

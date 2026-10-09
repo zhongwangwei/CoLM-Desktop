@@ -129,7 +129,7 @@ for (const domain of ['流域', '区域', '全球']) {
 showDomainGate();
 choose('区域'); next(); choose('非结构网格'); next();
 if (ids.gatetitle.textContent !== '空间输入怎么准备？') throw new Error('spatial selections must collect domain and grid inputs');
-if (nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('空间算例暂不支持参数调优和不确定性分析')) {
+if (nodeText(ids.gatecards).includes('early state') || !nodeText(ids.gatecards).includes('空间算例暂不支持参数率定和不确定性分析')) {
   throw new Error('spatial setup must state that Study is unavailable, without an early-state label');
 }
 if (findNode(ids.gatecards, node => node.id === 'spatial-west')
@@ -604,7 +604,7 @@ state.cases = [state.selected];
 state.createdCases.add('/cases/spatial');
 state.step = 'basic-files';
 go('result-uncertainty');
-if (state.step === 'result-uncertainty' || !ids.status.textContent.includes('空间算例暂不支持参数调优和不确定性分析')) {
+if (state.step === 'result-uncertainty' || !ids.status.textContent.includes('空间算例暂不支持参数率定和不确定性分析')) {
   throw new Error('spatial workflow must disable uncertainty-analysis navigation');
 }
 state.domain = 'site';
@@ -619,7 +619,7 @@ state.selected = { name: 'imported-spatial', dir: '/cases/imported-spatial', spa
 state.cases = [state.selected];
 state.createdCases = new Set(['/cases/imported-spatial']);
 go('result-tuning');
-if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间算例暂不支持参数调优和不确定性分析')) {
+if (state.step === 'result-tuning' || !ids.status.textContent.includes('空间算例暂不支持参数率定和不确定性分析')) {
   throw new Error('imported spatial case metadata must disable tuning navigation');
 }
 

@@ -857,3 +857,37 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-unknown .ws-light-dot { color: #9aa0a8; }
 .ws-actions { display: flex; gap: 6px; flex-wrap: wrap; }
 .ws-detail { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #d0d4da); }
+
+/* ---- 研究（research.js）：左栏的第二段、总览页与结果页的“下一步” ---- */
+.rail h4.rail-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
+.flow-list { margin: 0 4px 6px; }
+.flow-list:not(:last-child)::after { display: none; }
+.flow-list .flow-sub { color: var(--muted); font-size: 11px; font-weight: 650; margin: 8px 8px 2px; }
+.flow-list .substep::before { display: none; }
+.flow-list .substep .d.badge-line { color: var(--accent-ink); }
+.research-groups { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: var(--s-lg); }
+.research-group h3 { margin-bottom: 2px; }
+#research-readiness { margin-top: var(--s-lg); }
+.research-cards { justify-content: flex-start; margin-top: var(--s-md); }
+.research-card { width: 100%; }
+.research-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.research-card .dq { font-size: 13px; color: var(--text); }
+.research-status { font-size: 11px; color: var(--accent-ink); }
+.research-badge { font-size: 11px; padding: 2px 8px; border-radius: var(--r-sm);
+  background: var(--accent-weak); color: var(--accent-ink); }
+.readiness-list { display: grid; gap: 6px; margin: 8px 0 12px; }
+.readiness-item { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.readiness-icon { width: 18px; height: 18px; flex: none; display: grid; place-items: center;
+  border-radius: 50%; font-size: 11px; font-weight: 700; }
+.readiness-item.ok .readiness-icon { background: var(--pass-bg); color: var(--pass); }
+.readiness-item.warn .readiness-icon { background: var(--warn-bg); color: var(--warn); }
+.readiness-item.warn { color: var(--warn); }
+.readiness-item.missing .readiness-icon { background: var(--fail-bg, var(--warn-bg)); color: var(--fail); }
+.readiness-item.missing { color: var(--fail); }
+.link-btn { border: 0; background: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; }
+.link-btn:hover { text-decoration: underline; }
+.next-steps { border-color: var(--accent); }
+.next-steps-list { display: grid; gap: 8px; margin-top: 8px; }
+.next-step { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); }
+.next-step.recommended { color: var(--text); }
+.hybrid-tabs { margin: 4px 0 var(--s-lg); }

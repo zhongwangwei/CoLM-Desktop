@@ -21,6 +21,7 @@ import './assistant.js';
 import './guide.js';
 import './remote.js';
 import './workspace.js';
+import './research.js';
 
 initI18n();
 initShell();

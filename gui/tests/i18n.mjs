@@ -147,7 +147,7 @@ if (translateZh('检测到 12 个逻辑 CPU；批量算例使用普通线程池�
       !== 'Spatial case yangtze passed preflight') {
   throw new Error('dynamic spatial-run guidance is not translated');
 }
-if (translateZh('参数调优任务已生成。') !== 'Parameter-tuning task prepared.'
+if (translateZh('参数率定任务已生成。') !== 'Calibration task prepared.'
     || translateZh('Qle 的权重必须是正数。') !== 'Qle weight must be positive.'
     || translateZh('请先生成分析任务。') !== 'Prepare an analysis task first.'
     || translateZh('没有符合筛选条件的日志。') !== 'No log entries match the filters.') {

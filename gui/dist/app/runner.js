@@ -366,7 +366,7 @@ async function startRun(stage) {
   const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) { status('本次还没有可运行的算例；先在基本设定中创建或打开算例'); return; }
   if (stage !== 'mksrfdata' && stage !== 'mkinidata' && (await fortranBlockedCases(dirs)).length) {
-    status('有算例装了 AI 参数化模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“AI 参数化”里移除模型');
+    status('有算例装了 AI 模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型');
     return;
   }
   // 运行位置选了服务器：交给 remote.js 提交，之后由它查状态、取回结果。

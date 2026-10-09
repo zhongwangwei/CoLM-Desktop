@@ -13,7 +13,7 @@ import { language, translateZh } from './i18n.js';
 import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
 import { renderTuneHybridWeights, tuneHybridSection, wireTuneHybrid } from './hybrid.js';
-import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
+import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, studyBadge, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
   rowsToCsv, seriesKey, seriesStats, sortedImportanceRows,
@@ -825,6 +825,8 @@ async function evaluateCurrent() {
     state.resultMetrics = state.resultMetrics.filter(row => row.case_dir !== c.dir);
     rows.forEach(row => state.resultMetrics.push({ site: c.name, case_dir: c.dir, ...row }));
     renderMetrics(rows, missing);
+    // 研究总览与结果页的“下一步”按指标推荐（research.js）。
+    globalThis.dispatchEvent?.(new Event('colm:metrics'));
     if (rows.length) drawComparison(rows[0]);
     status(language() === 'en'
       ? `${c.name}: ${rows.length} variable(s) evaluated${missing.length ? `; ${missing.length} had no valid paired samples` : ''}`
@@ -1555,7 +1557,7 @@ const studyAsyncRequests = { params: 0, outputs: 0, targets: 0 };
 const studyRefreshRequests = { uq: 0, tuning: 0 };
 const studyWizardTitles = {
   uq: ['方法与预热', '输出变量', '参数范围', '预算确认', '生成分析任务', '开始计算与监控', '查看结果'],
-  tuning: ['目标与搜索', '目标变量', '参数范围', '预算确认', '生成调优任务', '开始搜索与监控', '查看最优结果'],
+  tuning: ['目标与搜索', '目标变量', '参数范围', '预算确认', '生成率定任务', '开始搜索与监控', '查看最优结果'],
 };
 const studyWizardHelp = {
   uq: [
@@ -1571,8 +1573,8 @@ const studyWizardHelp = {
     ['选择目标指标、最少有效配对数、站点组织方式、模型预热、校准/验证时段、种群、代数、随机种子和并行数。', '这些设置共同定义优化问题、初始状态、数据证据门槛和搜索成本；生成时先检查观测覆盖，运行时先用基准成员复核真实模型—观测配对数，通过后才派发候选；验证期独立检验参数泛化能力。'],
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
-    ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '调优成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
-    ['冻结输入、观测、目标函数和内核，生成可复现的调优成员与任务清单。', '生成任务只准备搜索问题；冻结与复制保证候选可复现，并保护原算例不被覆盖。'],
+    ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '率定成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
+    ['冻结输入、观测、目标函数和内核，生成可复现的率定成员与任务清单。', '生成任务只准备搜索问题；冻结与复制保证候选可复现，并保护原算例不被覆盖。'],
     ['设置本次同时运行数，启动搜索并跟踪基准成员、候选成员、校准与验证状态和运行日志。', '并行数只影响耗时和资源占用，不改变搜索定义；状态与日志会自动更新。'],
     ['比较候选目标函数、最佳成员、校准/验证表现和成员表，并预览最佳参数改动。', '结果页用于确认改进是否跨验证期成立，再决定是否把最佳候选另存并进入后续模拟。'],
   ],
@@ -1592,8 +1594,8 @@ const studyScope = () => {
 };
 const spatialCaseEntry = c => c?.spatial === true;
 const spatialStudyReason = () => {
-  if (state.domain && state.domain !== 'site') return '空间算例暂不支持参数调优和不确定性分析。';
-  if (studyScope().some(spatialCaseEntry)) return '空间算例暂不支持参数调优和不确定性分析。';
+  if (state.domain && state.domain !== 'site') return '空间算例暂不支持参数率定和不确定性分析。';
+  if (studyScope().some(spatialCaseEntry)) return '空间算例暂不支持参数率定和不确定性分析。';
   return '';
 };
 const studyMutationGuard = (kind, dirs = activeStudyDirs(kind), kernel = currentKernel()) => {
@@ -1604,7 +1606,7 @@ const studyMutationGuard = (kind, dirs = activeStudyDirs(kind), kernel = current
 };
 const ensureStudyMutationCurrent = (kind, current) => {
   if (!current()) throw new Error(kind === 'tuning'
-    ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+    ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
 };
 const studyScopeKey = () => `${currentKernel()}\u001e${studyScope()
   .map(c => `${c.dir}\u001f${observationFor(c)}`)
@@ -1632,8 +1634,9 @@ function invalidateActiveStudy(kind, reason) {
   setActiveStudyDirs(kind, []);
   studyViews[kind] = null;
   studyEvents[kind] = [];
+  if (state.studyBadges[kind]) { state.studyBadges[kind] = null; renderSteps(); }
   saveStudyDirs();
-  setPreview(kind, reason || (kind === 'tuning' ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。'));
+  setPreview(kind, reason || (kind === 'tuning' ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。'));
   renderStudyActions(kind);
   renderStudyWizard(kind);
 }
@@ -1673,8 +1676,8 @@ function renderStudyActions(kind) {
   const create = $(`${prefix}-create`);
   if (create) {
     create.textContent = dialogText(studyCreating[kind] ? '正在生成任务…' : hasTask
-      ? (tuning ? '重新生成调优任务' : '重新生成分析任务')
-      : (tuning ? '生成调优任务' : '生成分析任务'));
+      ? (tuning ? '重新生成率定任务' : '重新生成分析任务')
+      : (tuning ? '生成率定任务' : '生成分析任务'));
     if (disabledReason) { create.disabled = true; create.title = dialogText(disabledReason); }
     else create.title = '';
   }
@@ -1737,7 +1740,7 @@ function renderStudyActions(kind) {
   const apply = tuning ? $('tune-apply-best') : null;
   if (apply) {
     apply.disabled = !actions.apply;
-    apply.title = actions.apply ? '' : dialogText(disabledReason || '调优完成后才能另存最佳方案。');
+    apply.title = actions.apply ? '' : dialogText(disabledReason || '率定完成后才能另存最佳方案。');
   }
 }
 
@@ -1776,7 +1779,7 @@ async function applyStudySpinup(kind) {
   state.text = r.text;
   if (kind === 'tuning') tuningDatesInitialized = '';
   await markResultsStale(dirs);
-  invalidateActiveStudy(kind, kind === 'tuning' ? '预热设置已修改，请重新生成调优任务。' : '预热设置已修改，请重新生成分析任务。');
+  invalidateActiveStudy(kind, kind === 'tuning' ? '预热设置已修改，请重新生成率定任务。' : '预热设置已修改，请重新生成分析任务。');
   await renderStudySpinup(kind);
   status(repeat > 0 && years > 0 ? `预热：每轮 ${years} 年，共重复 ${repeat} 轮` : '已关闭预热');
 }
@@ -1791,7 +1794,7 @@ function studyWizardIssue(kind, page) {
     if (!cases.length) return '先在“基本设定 / 文件与目录”创建算例';
     if (new Set(cases.map(c => parentDir(c.dir))).size !== 1) return '分析任务中的算例必须位于同一个项目目录';
     if (!currentKernel()) return '当前配置没有匹配的内核运行产物';
-    if (tuning && cases.some(c => !observationFor(c))) return '参数调优要求分析范围内每个算例都有观测文件。';
+    if (tuning && cases.some(c => !observationFor(c))) return '参数率定要求分析范围内每个算例都有观测文件。';
     try { studyDesign(kind); } catch (error) { return error?.message || String(error); }
   }
   if (page === 1) {
@@ -1811,12 +1814,12 @@ function studyWizardIssue(kind, page) {
     } catch (error) { return error?.message || String(error); }
     if (!$(`${prefix}-range-confirm`)?.checked) return '检查范围后勾选责任确认';
   }
-  if (page === 4 && !activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。';
+  if (page === 4 && !activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。';
   if (page === 5) {
-    if (!activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。';
+    if (!activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。';
     if (!studyResultsReady(studyViews[kind])) {
       return kind === 'tuning'
-        ? '调优任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
+        ? '率定任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
         : '分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。';
     }
   }
@@ -1986,7 +1989,7 @@ function renderStudyParams(hostId) {
     const kind = tuning ? 'tuning' : 'uq';
     const confirmation = $(tuning ? 'tune-range-confirm' : 'uq-range-confirm');
     if (confirmation) confirmation.checked = false;
-    invalidateActiveStudy(kind, tuning ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+    invalidateActiveStudy(kind, tuning ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
     renderStudyBudget(kind);
   };
   host.textContent = '';
@@ -2119,7 +2122,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
   const hadSelection = previous.size > 0;
   const cases = studyScope();
   if (!cases.length || cases.some(c => !observationFor(c))) {
-    host.innerHTML = '<div class="result-empty">参数调优要求分析范围内每个算例都有观测文件。</div>';
+    host.innerHTML = '<div class="result-empty">参数率定要求分析范围内每个算例都有观测文件。</div>';
     renderStudyBudget('tuning');
     return;
   }
@@ -2159,7 +2162,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
     input.dataset.targetSites = sites.join('\u001f');
     input.disabled = independent ? n === 0 : n !== cases.length;
     if (input.disabled) input.checked = false;
-    input.onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyBudget('tuning'); };
+    input.onchange = () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); renderStudyBudget('tuning'); };
     const text = node('span');
     const why = reasons.size ? ` · ${[...reasons].join('；')}` : '';
     text.append(node('b', '', label), node('small', '', `${v.name} · ${v.model_var} ↔ ${v.obs_var} · ${n}/${cases.length} 站点${why}`));
@@ -2167,7 +2170,7 @@ async function renderTuningTargets(stillCurrent = () => true) {
     const weight = node('input', 'input mini-input');
     weight.type = 'number'; weight.min = '0.000001'; weight.step = '0.1'; weight.value = saved?.weight ?? '1';
     weight.dataset.tuneWeight = v.name; weight.setAttribute('aria-label', `${label} 权重`);
-    weight.oninput = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderStudyBudget('tuning'); };
+    weight.oninput = () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); renderStudyBudget('tuning'); };
     weightLabel.appendChild(weight);
     row.append(input, text, weightLabel);
     host.appendChild(row);
@@ -2305,7 +2308,7 @@ function renderStudyReadiness(kind) {
       : (en ? `Observation files ${observations}/${cases.length}; every case requires one` : `观测文件 ${observations}/${cases.length}；每个算例都必须有观测`),
   });
   checks.push(
-    { ok: parameterCount > 0 || hybridReady?.ok === true, text: parameterCount ? (en ? `${parameterCount} parameter(s) have valid ranges` : `已选择 ${parameterCount} 个参数并填写有效范围`) : hybridReady?.ok ? (en ? 'Only the AI parameterization is trained' : '只训练 AI 参数化，不调其他参数') : (en ? 'Select at least one parameter and enter finite ranges' : '至少选择一个参数并填写有限范围') },
+    { ok: parameterCount > 0 || hybridReady?.ok === true, text: parameterCount ? (en ? `${parameterCount} parameter(s) have valid ranges` : `已选择 ${parameterCount} 个参数并填写有效范围`) : hybridReady?.ok ? (en ? 'Only the AI parameterization is trained' : '只训练 AI 模型，不调其他参数') : (en ? 'Select at least one parameter and enter finite ranges' : '至少选择一个参数并填写有限范围') },
     ...(hybridReady && !hybridReady.ok ? [{ ok: false, text: hybridReady.text }] : []),
     { ok: selectionCount > 0 && uncovered.length === 0, text: uncovered.length
       ? (en ? `No selected applicable ${tuning ? 'target' : 'output'} for: ${uncovered.map(caseName).join(', ')}` : `以下算例没有选中的适用${tuning ? '目标' : '输出变量'}：${uncovered.map(caseName).join('、')}`)
@@ -2322,11 +2325,11 @@ function renderStudyReadiness(kind) {
 
 function studyDesign(kind) {
   if (kind === 'tuning') {
-    const fromPct = percentValue('tune-from', '调优目标需要校准期开始和结束百分比。');
-    const toPct = percentValue('tune-to', '调优目标需要校准期开始和结束百分比。');
+    const fromPct = percentValue('tune-from', '率定目标需要校准期开始和结束百分比。');
+    const toPct = percentValue('tune-to', '率定目标需要校准期开始和结束百分比。');
     const useValidation = $('tune-validation')?.checked !== false;
-    const validationFromPct = useValidation ? percentValue('tune-val-from', '调优目标需要验证期开始和结束百分比。') : undefined;
-    const validationToPct = useValidation ? percentValue('tune-val-to', '调优目标需要验证期开始和结束百分比。') : undefined;
+    const validationFromPct = useValidation ? percentValue('tune-val-from', '率定目标需要验证期开始和结束百分比。') : undefined;
+    const validationToPct = useValidation ? percentValue('tune-val-to', '率定目标需要验证期开始和结束百分比。') : undefined;
     if (fromPct >= toPct || (useValidation && validationFromPct >= validationToPct)) throw new Error('校准期/验证期必须满足开始百分比 < 结束百分比。');
     if (useValidation && !(validationToPct <= fromPct || validationFromPct >= toPct)) throw new Error('校准期与验证期不能重叠。');
     const minPairs = Number($('tune-min-pairs')?.value);
@@ -2359,11 +2362,11 @@ function studySpec(kind, cases, independent = false) {
   const design = studyDesign(kind);
   const kernel_dir = currentKernel() || undefined;
   const observations = Object.fromEntries(cases.map(c => [studySiteId(c), observationFor(c)]).filter(([, obs]) => obs));
-  if (tuning && Object.keys(observations).length !== cases.length) throw new Error('参数调优需要每个站点都有观测文件。');
+  if (tuning && Object.keys(observations).length !== cases.length) throw new Error('参数率定需要每个站点都有观测文件。');
   const parameters = selectedStudyParams(tuning ? 'tune-params' : 'uq-params');
   const hybrid = tuning ? tuneHybridSection() : null;
   if (!parameters.length && !hybrid) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
-  if (hybrid && modelEngine() !== 'rust') throw new Error('训练 AI 参数化只能用 Rust 引擎；请在运行页把“模拟引擎”换成 Rust 引擎。');
+  if (hybrid && modelEngine() !== 'rust') throw new Error('训练 AI 模型只能用 Rust 引擎；请在运行页把“模拟引擎”换成 Rust 引擎。');
   if (!$(tuning ? 'tune-range-confirm' : 'uq-range-confirm')?.checked) throw new Error('请确认采样范围由用户负责。');
   if (tuning) {
     const targets = [...document.querySelectorAll('[data-tune-target]:checked')]
@@ -2382,7 +2385,7 @@ function studySpec(kind, cases, independent = false) {
           };
         });
       }).flat();
-    if (!targets.length) throw new Error('参数调优至少选择一个目标变量。');
+    if (!targets.length) throw new Error('参数率定至少选择一个目标变量。');
     return {
       kind: 'tuning', method: 'differential-evolution', seed: design.seed, kernel_dir,
       base_cases: cases.map(c => c.dir), observations, parameters, site_mode: independent ? 'independent' : 'shared',
@@ -2440,7 +2443,7 @@ async function createStudy(kind) {
     && JSON.stringify(designKeys) === JSON.stringify(studyDesignKeys(kind));
   const ensureCurrent = () => {
     if (!isCurrent()) throw new Error(kind === 'tuning'
-      ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+      ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
   };
   studyCreating[kind] = true;
   const create = $(kind === 'tuning' ? 'tune-create' : 'uq-create');
@@ -2475,7 +2478,7 @@ async function createStudy(kind) {
         ensureCurrent();
       }
     } catch (error) {
-      const unregistered = kind === 'tuning' ? '已生成但未登记的调优任务：' : '已生成但未登记的分析任务：';
+      const unregistered = kind === 'tuning' ? '已生成但未登记的率定任务：' : '已生成但未登记的分析任务：';
       const suffix = dirs.length ? `\n${dialogText(unregistered)}\n${dirs.join('\n')}` : '';
       throw new Error(`${error?.message || error}${suffix}`);
     }
@@ -2490,7 +2493,7 @@ async function createStudy(kind) {
     await refreshStudy(kind);
     if (!isCurrent()) return;
     setStudyWizardPage(kind, 5);
-    status(kind === 'tuning' ? '参数调优任务已生成。' : '不确定性分析任务已生成。');
+    status(kind === 'tuning' ? '参数率定任务已生成。' : '不确定性分析任务已生成。');
   } finally {
     studyCreating[kind] = false;
     renderStudyReadiness(kind);
@@ -2531,6 +2534,11 @@ function renderStudyEnvelope(kind, envelope) {
   delete view.event_only;
   studyViews[flowKind] = view;
   const summary = aggregateStudy(view);
+  const badge = studyBadge(summary);
+  if (state.studyBadges[flowKind] !== badge) {
+    state.studyBadges[flowKind] = badge;
+    renderSteps();
+  }
   const box = node('div', 'study-status-box');
   if (flowKind === 'tuning') {
     const manifests = view.manifests || (view.manifest ? [view.manifest] : []);
@@ -2734,7 +2742,7 @@ async function renderBestTuningCard(envelope, dir, metricRows = []) {
         const weights = String(row.new).match(/\d+/)?.[0] ?? '—';
         const what = node('td');
         what.append(node('span', '', '训练出的网络，权重数：'), node('span', '', weights));
-        tr.append(td(row.site), td('AI 参数化'), td('纯物理'), what, td('—'), td('—'));
+        tr.append(td(row.site), td('AI 模型'), td('纯物理'), what, td('—'), td('—'));
         table.appendChild(tr);
         continue;
       }
@@ -2912,10 +2920,10 @@ async function renderStudyResults(kind, envelopes, isCurrent = () => true) {
   destroyChartsInside(host);
   host.textContent = '';
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return host.appendChild(node('div', 'result-empty', kind === 'tuning' ? '尚未生成调优任务。' : '尚未生成分析任务。'));
+  if (!dirs.length) return host.appendChild(node('div', 'result-empty', kind === 'tuning' ? '尚未生成率定任务。' : '尚未生成分析任务。'));
   if (envelopes.some(envelope => !studyResultsReady(envelope))) {
     return host.appendChild(node('div', 'result-empty', kind === 'tuning'
-      ? '调优任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
+      ? '率定任务尚未完成；请到“开始搜索与监控”页启动搜索，完成后再查看结果。'
       : '分析任务尚未完成；请到“开始计算与监控”页启动计算，完成后再查看结果。'));
   }
   const content = document.createDocumentFragment();
@@ -2999,7 +3007,7 @@ async function refreshStudy(kind) {
   const dirs = activeStudyDirs(kind);
   const isCurrent = () => request === studyRefreshRequests[kind] && scope === studyScopeKey()
     && JSON.stringify(dirs) === JSON.stringify(activeStudyDirs(kind));
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
   const envelopes = [];
   for (const dir of dirs) {
     try {
@@ -3036,9 +3044,9 @@ async function runStudy(kind) {
   if (aggregateStudy(studyViews[kind] || {}).status === 'NeedsReview') return retryStudy(kind);
   const dirs = activeStudyDirs(kind);
   const kernel = currentKernel();
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
   if (!kernel) return status('请先选择内核。');
-  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数调优任务正在运行。' : '不确定性分析任务正在运行。');
+  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。');
   const isCurrent = studyMutationGuard(kind, dirs, kernel);
   const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
@@ -3077,8 +3085,8 @@ async function retryStudy(kind) {
   if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
   const dirs = activeStudyDirs(kind);
   const isCurrent = studyMutationGuard(kind, dirs);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
-  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数调优任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
+  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数率定任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。');
   const envelopes = [];
   for (const dir of dirs) {
     envelopes.push(JSON.parse(await invoke('study_status', { studyDir: dir })));
@@ -3101,7 +3109,7 @@ async function controlStudy(kind, action) {
   if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
   const dirs = activeStudyDirs(kind);
   const isCurrent = studyMutationGuard(kind, dirs);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
   const control = action === 'pause' ? dir => invoke('study_pause', { studyDir: dir })
     : action === 'resume' ? dir => invoke('study_resume', { studyDir: dir })
       : action === 'cancel' ? dir => invoke('study_cancel', { studyDir: dir })
@@ -3119,7 +3127,7 @@ async function controlStudy(kind, action) {
 
 async function exportStudy(kind) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成调优任务。' : '请先生成分析任务。');
+  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
   const out = await appPrompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
   if (!out) return;
   const exported = [];
@@ -3136,7 +3144,7 @@ async function applyBestCandidate() {
   if (blocked) { status(dialogText(blocked)); renderStudyReadiness('tuning'); return; }
   const dirs = activeStudyDirs('tuning');
   const isCurrent = studyMutationGuard('tuning', dirs);
-  if (!dirs.length) return status('请先生成调优任务。');
+  if (!dirs.length) return status('请先生成率定任务。');
   const previews = [];
   const members = [];
   for (const dir of dirs) {
@@ -3152,7 +3160,7 @@ async function applyBestCandidate() {
     previews.push(`${dir}\n${rows.map(row => `${row.site}: ${row.field} ${row.old} -> ${row.new}`).join('\n')}`);
   }
   const hybridNote = previews.some(text => text.includes('hybrid slot'))
-    ? `\n\n${dialogText('训练出的 AI 参数化模型会一起写进新算例（hybrid.toml 与 models/），新算例只能用 Rust 引擎运行。')}` : '';
+    ? `\n\n${dialogText('训练出的 AI 模型会一起写进新算例（hybrid.toml 与 models/），新算例只能用 Rust 引擎运行。')}` : '';
   const previewText = previews.join('\n\n') + hybridNote;
   setPreview('tuning', previewText);
   if (!(await appConfirm(`${dialogText('即将应用以下参数改动：')}\n\n${previewText.slice(0, 3000)}`))) return;
@@ -3204,29 +3212,29 @@ wireStudyButton('tune-apply-best', applyBestCandidate);
 for (const id of ['uq-method', 'uq-count', 'uq-seed', 'tune-pop', 'tune-gen', 'tune-seed', 'tune-metric']) if ($(id)) $(id).oninput = $(id).onchange = () => {
   const kind = id.startsWith('tune') ? 'tuning' : 'uq';
   if (id === 'uq-method') for (const target of ['uq-count', 'uq-seed']) $(target).disabled = $('uq-method').value === 'oat';
-  invalidateActiveStudy(kind, kind === 'tuning' ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+  invalidateActiveStudy(kind, kind === 'tuning' ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
   renderStudyBudget(kind);
 };
 bindStudyJobInputs('uq');
 bindStudyJobInputs('tuning');
 wireTuneHybrid(() => {
-  invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+  invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
   renderStudyBudget('tuning');
 });
-if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。'); renderTuningTargets().catch(e => status(e.message || e)); };
+if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); renderTuningTargets().catch(e => status(e.message || e)); };
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;
-  invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+  invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
   renderTuningWindowPreview();
   renderStudyBudget('tuning');
 };
 for (const id of ['uq-range-confirm', 'tune-range-confirm']) if ($(id)) $(id).onchange = () => {
-  invalidateActiveStudy(id.startsWith('tune') ? 'tuning' : 'uq', id.startsWith('tune') ? '调优设计已修改，请重新生成调优任务。' : '分析设计已修改，请重新生成分析任务。');
+  invalidateActiveStudy(id.startsWith('tune') ? 'tuning' : 'uq', id.startsWith('tune') ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
   renderStudyBudget(id.startsWith('tune') ? 'tuning' : 'uq');
 };
 for (const id of ['tune-from', 'tune-to', 'tune-val-from', 'tune-val-to', 'tune-min-pairs']) if ($(id)) {
   $(id).oninput = $(id).onchange = () => {
-    invalidateActiveStudy('tuning', '调优设计已修改，请重新生成调优任务。');
+    invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
     renderTuningWindowPreview();
     renderStudyReadiness('tuning');
   };
