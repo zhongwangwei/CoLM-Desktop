@@ -23,7 +23,8 @@ const GRIDS = [
 ];
 
 const SUBGRIDS = [
-  { id: 'USGS', t: 'USGS', d: '24 类地表覆盖' },
+  // USGS 已退役：仍可选（旧算例要能复现），但卡片上标明不建议用，新算例请选 IGBP 或 PFT/PC。
+  { id: 'USGS', t: 'USGS', d: '24 类地表覆盖', tag: '已退役', note: () => '已退役，不建议使用；新算例请选 IGBP、PFT 或 PC' },
   { id: 'IGBP', t: 'IGBP', d: '17 类地表覆盖', ready: true },
   { id: 'PFT', t: 'PFT', d: '植物功能型', ready: true },
   { id: 'PC', t: 'PC', d: '植物群落' },
@@ -417,6 +418,12 @@ function card(item, selected, choose, blocked, multi) {
   const title = document.createElement('span');
   title.className = 'dt';
   title.textContent = item.t;
+  if (item.tag) {
+    const tag = document.createElement('span');
+    tag.className = 'dtag';
+    tag.textContent = item.tag;
+    title.appendChild(tag);
+  }
   b.appendChild(title);
 
   const desc = document.createElement('span');

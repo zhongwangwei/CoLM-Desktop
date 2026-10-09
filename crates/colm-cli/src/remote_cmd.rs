@@ -13,6 +13,7 @@
 //! colm-cli remote-kernels --host H --root R         列出服务器上的内核
 //! colm-cli remote-dist  --host H --root R [--targets x86_64,aarch64] [--out 目录]
 //! colm-cli remote-fetch  <case> [--vars a,b] [--from YYYY-MM] [--to YYYY-MM] [--compress N]
+//!                         [--overwrite-newer 1]   # 本机结果比这次远程运行新时也覆盖（默认拒绝）
 //!                        只取所选变量与月份（先在服务器上裁剪压缩，R5）；不给就取全部
 //! colm-cli remote-status <case> [--lines N]
 //! colm-cli remote-cancel <case>
@@ -1276,9 +1277,48 @@ pub(crate) const FETCH_MARK: &str = ".colm-fetch.json";
 /// 不给 `--vars`、`--from`、`--to` 就取全部 history。给了就先在服务器上用 `colm-cli history-subset`
 /// 裁成只含所选变量与月份的压缩小文件，再只把这些取回来（R5）：经慢链路时取回量与耗时随变量数线性下降。
 /// 部分取回会在算例里留一个 `.colm-fetch.json`，说明取回了什么；同名文件会被覆盖，不在所选月份里的旧文件不动。
+/// 本机 history 里最新的文件修改时间（Unix 秒）；没有 history 时为 `None`。
+fn newest_local_history(case: &Path, case_name: &str) -> Option<u64> {
+    let dir = super::Layout::new(case)
+        .out()
+        .join(case_name)
+        .join("history");
+    std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "nc"))
+        .filter_map(|e| e.metadata().ok()?.modified().ok())
+        .filter_map(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .max()
+}
+
+/// 本机结果比这次远程运行还新（提交之后本机又跑过），取回会覆盖它：除非明确要求，否则拒绝。
+/// 界面的自动取回不带 `--overwrite-newer`，手动点“取回”才带（审查第 2 条的复查：恢复任务时本机还没有结果，
+/// 之后本机跑完了，原来记下的“可以自动取回”不能再算数）。
+pub(crate) fn refuse_to_overwrite_newer(
+    newest_local: Option<u64>,
+    submitted_at: u64,
+    overwrite: bool,
+) -> Result<()> {
+    if let Some(local) = newest_local.filter(|_| !overwrite) {
+        ensure!(
+            local <= submitted_at,
+            "local results are newer than this remote job (local history written after the job was submitted); \
+             fetch with --overwrite-newer 1 to replace them with the server's"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let case = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
     let record = read_record(&case)?;
+    refuse_to_overwrite_newer(
+        newest_local_history(&case, &record.case_name),
+        record.submitted_at,
+        opts.get("--overwrite-newer").is_some_and(|v| v == "1"),
+    )?;
     let ssh = Ssh::new(&record.host)?;
     let history = format!("out/{}/history", record.case_name);
     let vars = opts.get("--vars");

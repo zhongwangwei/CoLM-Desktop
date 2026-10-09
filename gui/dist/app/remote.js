@@ -332,17 +332,19 @@ async function refreshJob(dir) {
       progress: answer.progress,
       error: null,
     });
-    if (job.state === 'finished' && job.exit_code === 0 && !job.fetched && job.autoFetch !== false) await fetchJob(dir);
+    if (job.state === 'finished' && job.exit_code === 0 && !job.fetched && job.autoFetch !== false) await fetchJob(dir, false, false);
   } catch (error) {
     job.error = String(error?.message || error);
   }
 }
 
-async function fetchJob(dir, all = false) {
+/** 取回结果。`manual` 是用户点了“取回”：这时才允许覆盖比这次远程运行更新的本机结果。 */
+async function fetchJob(dir, all = false, manual = true) {
   const job = jobs.get(dir);
   try {
-    const answer = await invoke('remote_fetch', { case: dir, host: job.host, all });
+    const answer = await invoke('remote_fetch', { case: dir, host: job.host, all, overwriteNewer: manual });
     job.fetched = true;
+    job.error = null;
     job.partial = answer?.partial === true;
     const c = state.cases.find(c => c.dir === dir);
     if (c) c.has_history = true;
@@ -350,7 +352,14 @@ async function fetchJob(dir, all = false) {
     renderCases();
     status(`${baseName(dir)}：${t(job.partial ? '服务器上的运行完成，已取回所选变量' : '服务器上的运行完成，结果已取回')}`);
   } catch (error) {
-    job.error = `${t('取回结果失败')}：${String(error?.message || error)}`;
+    const text = String(error?.message || error);
+    if (!manual && text.includes('newer than this remote job')) {
+      // 提交之后本机又跑过：不自动覆盖，等用户决定要不要用服务器上的结果。
+      job.autoFetch = false;
+      job.error = t('本机的结果比这次服务器运行更新，没有自动取回；要用服务器上的结果，点“取回全部变量”。');
+    } else {
+      job.error = `${t('取回结果失败')}：${text}`;
+    }
   }
   renderJobs();
 }

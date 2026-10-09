@@ -125,3 +125,80 @@ fn prebuilt_packages_are_found_by_arch_and_identified_by_content() {
     std::env::remove_var("COLM_ENGINE_CACHE");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// 只改文档：远程快照的标识不变（服务器不必重传、重编）；安装包的源码包里仍带着文档。
+#[test]
+fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
+    let dir = std::env::temp_dir().join(format!("colm-remote-docs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, body) in [
+        ("Cargo.toml", "[workspace]\n"),
+        ("Cargo.lock", "lock"),
+        ("crates/colm-cli/src/main.rs", "fn main() {}"),
+        ("docs/guide.md", "first"),
+    ] {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, body).unwrap();
+    }
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    let source = Source::Checkout(dir.clone());
+    let before = snapshot(&source).unwrap();
+    assert!(
+        before.files.iter().all(|f| !f.starts_with("docs/")),
+        "{:?}",
+        before.files
+    );
+    std::fs::write(dir.join("docs/guide.md"), "second").unwrap();
+    assert_eq!(
+        snapshot(&source).unwrap().id,
+        before.id,
+        "a docs edit must not change the remote engine"
+    );
+    std::fs::write(dir.join("crates/colm-cli/src/main.rs"), "fn main() { }").unwrap();
+    assert_ne!(
+        snapshot(&source).unwrap().id,
+        before.id,
+        "a source edit must change it"
+    );
+    let pack = dir.join("pack.tar.gz");
+    let checkout = snapshot(&source).unwrap();
+    pack_source(&checkout, &pack).unwrap();
+    let listing = Command::new("tar").arg("-tzf").arg(&pack).output().unwrap();
+    let listing = String::from_utf8_lossy(&listing.stdout);
+    assert!(listing.lines().any(|l| l == "docs/guide.md"), "{listing}");
+    assert!(
+        listing.lines().any(|l| l == "crates/colm-cli/src/main.rs"),
+        "{listing}"
+    );
+    // 安装版（读源码包）与开发版（读仓库）对同一份源码给出同一个标识。
+    let installed = |path: &Path| snapshot(&Source::Tarball(path.to_path_buf())).unwrap().id;
+    assert_eq!(installed(&pack), checkout.id);
+    // 重新打包（压缩包里的修改时间等元数据不同）：标识不变。
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    std::fs::write(dir.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let again = dir.join("again.tar.gz");
+    pack_source(&snapshot(&source).unwrap(), &again).unwrap();
+    assert_ne!(
+        std::fs::read(&pack).unwrap(),
+        std::fs::read(&again).unwrap(),
+        "the archives themselves differ"
+    );
+    assert_eq!(installed(&again), checkout.id);
+    // 只改文档的安装包：标识也不变。
+    std::fs::write(dir.join("docs/guide.md"), "third").unwrap();
+    let docs = dir.join("docs.tar.gz");
+    pack_source(&snapshot(&source).unwrap(), &docs).unwrap();
+    assert_eq!(installed(&docs), checkout.id);
+    let _ = std::fs::remove_dir_all(&dir);
+}

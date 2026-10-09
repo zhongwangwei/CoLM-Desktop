@@ -189,6 +189,14 @@ pub fn require_built_at(
     Ok(())
 }
 
+/// 门槛记录判了不通过、而命令本身成功时，把返回结果也改成失败，并说明原因。
+pub(crate) fn disown_if_failed(outcome: &mut Outcome, run: &GateRun) {
+    if outcome.ok && !run.ok {
+        outcome.ok = false;
+        outcome.tail = format!("{}\n{}", outcome.tail.trim_end(), run.detail);
+    }
+}
+
 fn gate(workspace: &Workspace, commit: &str, outcome: &Outcome) -> Result<GateRun> {
     let unchanged = still_at(workspace, commit)?;
     Ok(GateRun {
@@ -229,7 +237,7 @@ pub fn build_engine(
         !crate::git::is_dirty(&src)?,
         "commit or revert source changes before building"
     );
-    let outcome = run_logged(
+    let mut outcome = run_logged(
         workspace,
         "build-engine",
         &program("cargo"),
@@ -251,6 +259,8 @@ pub fn build_engine(
         }
     }
     let run = gate(workspace, &commit, &outcome)?;
+    // 记录判了不通过（编译期间源码变了），返回给调用方的也必须是失败，不能让助手据此报告成功。
+    disown_if_failed(&mut outcome, &run);
     workspace.update(|info| info.gates.engine = Some(run))?;
     Ok(outcome)
 }
@@ -280,7 +290,7 @@ pub fn build_kernel(
         !crate::git::is_dirty(&src)?,
         "commit or revert source changes before building"
     );
-    let outcome = run_logged(
+    let mut outcome = run_logged(
         workspace,
         &format!("build-kernel-{preset}"),
         &program("bash"),
@@ -299,6 +309,8 @@ pub fn build_kernel(
         );
     }
     let run = gate(workspace, &commit, &outcome)?;
+    // 记录判了不通过（编译期间源码变了），返回给调用方的也必须是失败，不能让助手据此报告成功。
+    disown_if_failed(&mut outcome, &run);
     let preset = preset.to_owned();
     workspace.update(|info| {
         info.gates.kernels.insert(preset, run);

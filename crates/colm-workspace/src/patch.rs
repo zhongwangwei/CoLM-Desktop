@@ -111,15 +111,25 @@ pub fn check_path(path: &str) -> Result<()> {
         "the patch must use relative paths inside the repository: {path:?}"
     );
     for part in path.split('/') {
+        // 空段（`oracle//golden/x`）与 `.` 段会被 git 规整掉、落到同一个文件上，却对不上下面的前缀比较。
+        ensure!(
+            !part.is_empty() && part != ".",
+            "the patch path must not contain empty or '.' segments: {path:?}"
+        );
         ensure!(
             part != "..",
             "the patch may not leave the repository: {path:?}"
         );
-        ensure!(part != ".git", "the patch may not touch .git: {path:?}");
+        // macOS 与 Windows 的默认文件系统不分大小写：`.GIT`、`Oracle/Golden` 写到的就是受保护的那个。
+        ensure!(
+            !part.eq_ignore_ascii_case(".git"),
+            "the patch may not touch .git: {path:?}"
+        );
     }
+    let lower = path.to_ascii_lowercase();
     for prefix in FORBIDDEN_PREFIXES {
         ensure!(
-            !path.starts_with(prefix),
+            !lower.starts_with(prefix),
             "{path} is protected (reference answers and git internals cannot be patched)"
         );
     }

@@ -12,6 +12,9 @@ anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+# 读安装包随附的 colm-src.tar.gz，按与开发版相同的算法算快照标识（见 engine::tarball_content_id）。
+flate2 = "1.1"
+tar = "0.4"
 
 [lints]
 workspace = true

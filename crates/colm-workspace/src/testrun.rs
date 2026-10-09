@@ -194,6 +194,7 @@ pub fn run(
             outcome.tail.lines().last().unwrap_or("failed").to_owned()
         },
     };
+    crate::build::disown_if_failed(&mut outcome, &run);
     let label = kind.label();
     workspace.update(|info| {
         info.gates.tests.insert(label, run);

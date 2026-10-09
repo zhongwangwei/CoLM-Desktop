@@ -172,3 +172,22 @@ fn diff_headers_with_spaces_and_renames_are_split_correctly() {
     );
     assert!(header_paths("old.rs new.rs").is_err());
 }
+
+/// 路径写法不同、落到的是同一个受保护文件：空段、`.` 段、大小写（macOS 与 Windows 的文件系统不分大小写）。
+#[test]
+fn protected_paths_cannot_be_reached_through_another_spelling() {
+    for path in [
+        "oracle//golden/ref.txt",
+        "oracle/./golden/ref.txt",
+        "./oracle/golden/ref.txt",
+        "Oracle/Golden/ref.txt",
+        "ORACLE/golden/ref.txt",
+        ".GIT/config",
+        "crates/x/.Git/hooks/pre-commit",
+        "crates//colm-core/src/lib.rs",
+    ] {
+        assert!(check_path(path).is_err(), "{path} must be rejected");
+    }
+    assert!(check_path("crates/colm-core/src/lib.rs").is_ok());
+    assert!(check_path("oracle/scripts/build_kernel.sh").is_ok());
+}

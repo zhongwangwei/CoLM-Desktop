@@ -9,7 +9,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 
 use crate::ssh::{quote, Ssh};
@@ -22,8 +22,9 @@ pub const BINARIES: [(&str, &str); 4] = [
     ("colm-runtime", "colm-rs"),
 ];
 
-/// 快照包含的仓库路径（整个 workspace 加编译期读入的 `vendor`）。
-pub const SNAPSHOT_PATHS: [&str; 8] = [
+/// 快照包含的仓库路径：编译远程引擎要用的（整个 workspace 加编译期读入的 `vendor`）。快照标识只按这些文件算，
+/// 所以只改文档不会让服务器重新上传、重新编译。
+pub const SNAPSHOT_PATHS: [&str; 7] = [
     "Cargo.toml",
     "Cargo.lock",
     "crates",
@@ -31,8 +32,11 @@ pub const SNAPSHOT_PATHS: [&str; 8] = [
     "xtask",
     "vendor",
     "scripts",
-    "docs",
 ];
+
+/// 安装包随附的源码包（`engine-pack`）在编译用的之外多带的路径：文档。安装版的助手靠它们搜文档
+/// （`search_docs`）与读源码（`--source app`）；远程编译用不着，不进快照标识。
+pub const PACK_EXTRA_PATHS: [&str; 1] = ["docs"];
 
 /// 引擎源码从哪来。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,7 +66,7 @@ pub struct Snapshot {
     pub files: Vec<String>,
 }
 
-fn git_files(repo: &Path) -> Result<Vec<String>> {
+fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)
@@ -76,7 +80,7 @@ fn git_files(repo: &Path) -> Result<Vec<String>> {
             "--exclude-standard",
             "--",
         ])
-        .args(SNAPSHOT_PATHS)
+        .args(paths)
         .output()
         .context("cannot run git")?;
     if !output.status.success() {
@@ -101,14 +105,55 @@ fn git_files(repo: &Path) -> Result<Vec<String>> {
 pub fn content_id(base: &Path, files: &[String]) -> Result<String> {
     let mut hasher = Sha256::new();
     for file in files {
-        hasher.update(file.as_bytes());
-        hasher.update([0]);
         let mut bytes = Vec::new();
         std::fs::File::open(base.join(file))
             .with_context(|| format!("cannot read {file}"))?
             .read_to_end(&mut bytes)?;
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(&bytes);
+        hash_file(&mut hasher, file, &bytes);
+    }
+    Ok(format!("{:x}", hasher.finalize())[..16].to_owned())
+}
+
+fn hash_file(hasher: &mut Sha256, path: &str, bytes: &[u8]) {
+    hasher.update(path.as_bytes());
+    hasher.update([0]);
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+}
+
+/// 路径属不属于快照（`SNAPSHOT_PATHS` 之一，或在其下）。
+fn in_snapshot(path: &str) -> bool {
+    SNAPSHOT_PATHS
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+}
+
+/// 安装包随附的源码包的快照标识：读包里的文件，只取 `SNAPSHOT_PATHS` 下的（不含文档），按与 [`content_id`]
+/// 完全相同的算法算。于是同一份源码在开发版与安装版上是同一个标识（服务器上编好的引擎可以共用），
+/// 改文档、重新打包（压缩包里的修改时间等元数据变了）都不会让服务器重传、重编。
+pub fn tarball_content_id(path: &Path) -> Result<String> {
+    let file = std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+    for entry in archive.entries().context("not a gzip-compressed tar archive")? {
+        let mut entry = entry?;
+        if !entry.header().entry_type().is_file() {
+            continue;
+        }
+        let name = entry.path()?.to_string_lossy().into_owned();
+        let name = name.strip_prefix("./").unwrap_or(&name).to_owned();
+        if !in_snapshot(&name) {
+            continue;
+        }
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes)?;
+        files.push((name, bytes));
+    }
+    ensure!(!files.is_empty(), "{} has no engine sources", path.display());
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = Sha256::new();
+    for (name, bytes) in &files {
+        hash_file(&mut hasher, name, bytes);
     }
     Ok(format!("{:x}", hasher.finalize())[..16].to_owned())
 }
@@ -116,7 +161,7 @@ pub fn content_id(base: &Path, files: &[String]) -> Result<String> {
 pub fn snapshot(source: &Source) -> Result<Snapshot> {
     match source {
         Source::Checkout(repo) => {
-            let files = git_files(repo)?;
+            let files = git_files(repo, &SNAPSHOT_PATHS)?;
             if files.is_empty() {
                 bail!("{} has no engine sources", repo.display());
             }
@@ -126,15 +171,11 @@ pub fn snapshot(source: &Source) -> Result<Snapshot> {
                 files,
             })
         }
-        Source::Tarball(path) => {
-            let bytes =
-                std::fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-            Ok(Snapshot {
-                id: format!("{:x}", Sha256::digest(&bytes))[..16].to_owned(),
-                source: source.clone(),
-                files: Vec::new(),
-            })
-        }
+        Source::Tarball(path) => Ok(Snapshot {
+            id: tarball_content_id(path)?,
+            source: source.clone(),
+            files: Vec::new(),
+        }),
     }
 }
 
@@ -323,11 +364,16 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     let Source::Checkout(repo) = &snapshot.source else {
         bail!("only a checkout can be packed");
     };
+    // 编译用的文件之外再带上文档（见 `PACK_EXTRA_PATHS`）。
+    let mut files = snapshot.files.clone();
+    files.extend(git_files(repo, &PACK_EXTRA_PATHS)?);
+    files.sort();
+    files.dedup();
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let list = std::env::temp_dir().join(format!("colm-pack-{}.txt", std::process::id()));
-    std::fs::write(&list, snapshot.files.join("\n") + "\n")?;
+    std::fs::write(&list, files.join("\n") + "\n")?;
     let status = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")
         .arg("-czf")

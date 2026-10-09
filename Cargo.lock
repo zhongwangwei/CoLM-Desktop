@@ -284,9 +284,11 @@ name = "colm-remote"
 version = "0.3.0-beta.3"
 dependencies = [
  "anyhow",
+ "flate2",
  "serde",
  "serde_json",
  "sha2",
+ "tar",
 ]
 
 [[package]]

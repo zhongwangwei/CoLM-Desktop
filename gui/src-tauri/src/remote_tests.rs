@@ -196,20 +196,25 @@ fn fetching_only_the_configured_variables_unless_everything_is_asked_for() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     // 没配：取全部。
     assert_eq!(
-        fetch_args("/c".into(), Some(&server), false),
+        fetch_args("/c".into(), Some(&server), false, false),
         ["remote-fetch", "/c"]
     );
     server.fetch_vars = " f_fsena,f_rnet ".into();
     assert_eq!(
-        fetch_args("/c".into(), Some(&server), false),
+        fetch_args("/c".into(), Some(&server), false, false),
         ["remote-fetch", "/c", "--vars", "f_fsena,f_rnet"]
     );
     // 要全部：不加 --vars。找不到服务器配置时也一样。
     assert_eq!(
-        fetch_args("/c".into(), Some(&server), true),
+        fetch_args("/c".into(), Some(&server), true, false),
         ["remote-fetch", "/c"]
     );
-    assert_eq!(fetch_args("/c".into(), None, false), ["remote-fetch", "/c"]);
+    assert_eq!(fetch_args("/c".into(), None, false, false), ["remote-fetch", "/c"]);
+    // 手动取回才允许覆盖比远程运行更新的本机结果。
+    assert_eq!(
+        fetch_args("/c".into(), None, true, true),
+        ["remote-fetch", "/c", "--overwrite-newer", "1"]
+    );
     for bad in ["f_a;rm", "f a", "f_a -x"] {
         server.fetch_vars = bad.into();
         assert!(

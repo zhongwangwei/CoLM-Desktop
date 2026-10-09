@@ -560,6 +560,8 @@ body.resizing-live { user-select: none; }
 .domain-card .dsoon { font-size: 11px; color: var(--warn); margin-top: 4px; }
 /* 灰选项的约束原因用告警色；可回退的卡片会把来源页也写在这里。 */
 .domain-card .dwhy { font-size: 11px; color: var(--warn); margin-top: 4px; }
+.domain-card .dtag { margin-left: 6px; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 4px;
+  vertical-align: middle; color: var(--warn); background: var(--warn-bg); border: 1px solid var(--warn); }
 .domain-card .dnote { font-size: 11px; line-height: 1.45; color: var(--warn); margin-top: 4px; }
 .spatial-config { width: 100%; margin: 0; text-align: left; }
 .spatial-config h3:not(:first-child) { margin-top: 18px; }

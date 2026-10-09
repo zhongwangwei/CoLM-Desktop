@@ -329,3 +329,14 @@ fn app_source_cache_uses_digest_and_rejects_partial_snapshots() {
     assert!(second.join("Cargo.lock").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// 本机结果比远程运行新时不自动覆盖；明确要求才覆盖；没有本机结果或本机结果更旧时照常取回。
+#[test]
+fn fetching_refuses_to_overwrite_local_results_newer_than_the_remote_job() {
+    assert!(refuse_to_overwrite_newer(None, 100, false).is_ok());
+    assert!(refuse_to_overwrite_newer(Some(90), 100, false).is_ok());
+    assert!(refuse_to_overwrite_newer(Some(100), 100, false).is_ok());
+    let err = refuse_to_overwrite_newer(Some(101), 100, false).unwrap_err();
+    assert!(err.to_string().contains("newer than this remote job"));
+    assert!(refuse_to_overwrite_newer(Some(101), 100, true).is_ok());
+}

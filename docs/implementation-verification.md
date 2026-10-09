@@ -32388,3 +32388,16 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **另外**：clippy 两处（`patch.rs` 用 `contains`；Codex 的 `xtask/src/sidecar.rs` 测试模块后面还有函数，挪到文件末尾）。Codex 把 `docs/` 加进了远程引擎的源码快照（安装版的文档搜索要用）；代价是只改文档也会让服务器重新上传、重新编译引擎。
 
 **验证**（本机）：`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check` 通过；`colm-core` 512、`colm-cli` 250 + 19、`colm-agent` 106、`colm-workspace` 47、`colm-remote` 28、`xtask` 29 项通过；`gui/tests` 全部通过；`xtask check-gui` 118 个命令全部解析。第 3 条用重编后的 `colm-cli` 在临时工作区实测：组合补丁在应用前被拒，golden 文件权限不变。未做：完整的整场模拟验证第 4 条的守恒、真实调度系统与 Windows 上的第 8–10 条。
+
+## 第 656 轮：复查的三条、文档不再触发远程重编、USGS 标为已退役
+
+**复查**（对第 655 轮修复的再审查，三条都确认存在）：
+- **黄金参考保护仍能绕过**（原 #3）：`check_path` 允许空路径段，`oracle//golden/ref.txt` 对不上前缀 `oracle/golden/`，git 应用时却规整到同一个文件。另外 macOS 与 Windows 的默认文件系统不分大小写，`Oracle/Golden/…`、`.GIT/…` 也写得到受保护的文件。现在拒绝空段与 `.` 段，禁区与 `.git` 不分大小写比较；新测试覆盖 8 种写法；用重编的 `colm-cli` 实测 `oracle//golden/…` 的补丁在应用前被拒，文件权限不变。
+- **旧远程结果仍可能覆盖新本地结果**（原 #2）：恢复任务时本机没有结果，记下了“可以自动取回”，之后本机跑完，远程任务仍按这个标志下载。改在取回那一步按时间判断：`colm-cli remote-fetch` 默认在本机 history 有文件比这次远程任务的提交时间（`.colm-remote.json` 的 `submitted_at`）新时拒绝覆盖，`--overwrite-newer 1` 才覆盖；界面的自动取回不带它，被拒时停止自动取回并提示手动取，手动点“取回全部变量”时带上它。
+- **检查失效后对外仍返回成功**（原 #7）：编译或测试期间源码变了，门槛记录判了不通过，返回给调用方的 `Outcome.ok` 却仍是真，助手会据此报告成功。现在 `build::disown_if_failed` 把返回结果也改成失败并附上原因（编译、测试两处；两版一致与回归原本就同步改了返回值）。
+
+**只改文档不再触发远程重传、重编**：Codex 为了让安装版能搜文档，把 `docs/` 加进了远程快照，快照标识按全部文件算，改一个字的文档服务器也要重编。现在 `SNAPSHOT_PATHS` 只含编译要用的路径，`docs/` 单列为 `PACK_EXTRA_PATHS`，只在 `engine-pack` 打安装包的源码包时带上。安装版原来用**整个压缩包**的哈希作标识：除了文档会改变它，重新打包时压缩包里的修改时间等元数据也会改变它（源码一字未改也要重编），而且与开发版对同一份源码的标识对不上，服务器上编好的引擎不能共用。现在安装版用 `tarball_content_id`：读包里 `SNAPSHOT_PATHS` 下的文件，按与开发版 `content_id` 完全相同的算法（路径与内容、按路径排序）算。测试：只改文档、只改源码、重新打包、安装版对开发版四种情况的标识都符合预期（`docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack`）。`colm-remote` 新增直接依赖 `flate2`、`tar`（锁文件里已有，离线可用）。服务器上已有的引擎在升级后会按新标识重编一次。
+
+**USGS 标为已退役**：向导的地类卡片上 USGS 带“已退役”标签，说明写“已退役，不建议使用；新算例请选 IGBP、PFT 或 PC”。仍可选，已有的 USGS 算例照常打开和运行。
+
+**验证**：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 与 GUI 后端的 clippy 通过；`colm-workspace` 49、`colm-remote` 29、`colm-cli` 251 + 19、GUI 后端 221 项通过；`gui/tests` 全部通过；`xtask check-gui` 通过；`--locked` 构建通过。

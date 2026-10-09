@@ -513,8 +513,18 @@ pub async fn remote_cancel(case: String) -> Result<Value, String> {
 }
 
 /// `remote-fetch` 的参数：服务器设置里配了“取回的变量”就只取这些，`all` 为真时取全部。
-pub(crate) fn fetch_args(case: String, server: Option<&Server>, all: bool) -> Vec<String> {
+pub(crate) fn fetch_args(
+    case: String,
+    server: Option<&Server>,
+    all: bool,
+    overwrite_newer: bool,
+) -> Vec<String> {
     let mut args = vec!["remote-fetch".to_owned(), case];
+    // 自动取回不带它：本机结果比这次远程运行新时，colm-cli 拒绝覆盖；用户手动点“取回”才带。
+    if overwrite_newer {
+        args.push("--overwrite-newer".into());
+        args.push("1".into());
+    }
     if let Some(server) = server.filter(|_| !all) {
         let vars = server.fetch_vars.trim();
         if !vars.is_empty() {
@@ -531,10 +541,16 @@ pub async fn remote_fetch(
     case: String,
     host: Option<String>,
     all: Option<bool>,
+    overwrite_newer: Option<bool>,
 ) -> Result<Value, String> {
     let server = host.and_then(|h| server_for(app, &h).ok());
     cli_json(
-        fetch_args(case, server.as_ref(), all.unwrap_or(false)),
+        fetch_args(
+            case,
+            server.as_ref(),
+            all.unwrap_or(false),
+            overwrite_newer.unwrap_or(false),
+        ),
         None,
     )
     .await

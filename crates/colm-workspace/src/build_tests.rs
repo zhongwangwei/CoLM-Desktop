@@ -92,3 +92,35 @@ fn a_kernel_build_needs_the_script_and_a_known_preset() {
     assert!(format!("{err}").contains("build_kernel.sh"), "{err}");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// 记录判了不通过（编译或测试期间源码变了）时，返回给调用方（助手）的结果也必须是失败。
+#[test]
+fn a_gate_that_fails_after_a_successful_command_turns_the_outcome_into_a_failure() {
+    let mut outcome = Outcome {
+        ok: true,
+        command: "cargo build".into(),
+        log: std::path::PathBuf::from("/tmp/log"),
+        tail: "Finished".into(),
+        seconds: 1.0,
+        sandbox: crate::sandbox::detect(),
+    };
+    let passed = crate::gates::GateRun {
+        ok: true,
+        at: 0,
+        commit: "c".into(),
+        detail: "1 s".into(),
+    };
+    disown_if_failed(&mut outcome, &passed);
+    assert!(outcome.ok);
+    let changed = crate::gates::GateRun {
+        ok: false,
+        at: 0,
+        commit: "c".into(),
+        detail: "source changed during build; rebuild the current commit".into(),
+    };
+    disown_if_failed(&mut outcome, &changed);
+    assert!(!outcome.ok);
+    assert!(outcome
+        .tail
+        .ends_with("source changed during build; rebuild the current commit"));
+}

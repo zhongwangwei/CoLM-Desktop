@@ -2317,6 +2317,9 @@ const ZH_EN = [
   ['1 个隐藏层，8 个节点', '1 hidden layer, 8 nodes'],
   ['要搜索的权重数', 'Weights to search'],
   ['权重数超过了种群大小，差分进化可能搜不动；建议换小一点的网络，或加大种群。', 'There are more weights than the population size, so differential evolution may not search well; use a smaller network or a larger population.'],
+  ['本机的结果比这次服务器运行更新，没有自动取回；要用服务器上的结果，点“取回全部变量”。', 'Local results are newer than this server run, so they were not fetched automatically; to use the server\'s results, click “Fetch all variables”.'],
+  ['已退役', 'Retired'],
+  ['已退役，不建议使用；新算例请选 IGBP、PFT 或 PC', 'Retired and not recommended; choose IGBP, PFT or PC for new cases'],
   // 开发工作区面板（workspace.js）
   ['正在创建…', 'Creating…'],
   ["修改模型源码", "Modify model source"],
