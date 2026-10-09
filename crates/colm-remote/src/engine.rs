@@ -123,19 +123,26 @@ fn hash_file(hasher: &mut Sha256, path: &str, bytes: &[u8]) {
 
 /// 路径属不属于快照（`SNAPSHOT_PATHS` 之一，或在其下）。
 fn in_snapshot(path: &str) -> bool {
-    SNAPSHOT_PATHS
-        .iter()
-        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|rest| rest.starts_with('/')))
+    SNAPSHOT_PATHS.iter().any(|p| {
+        path == *p
+            || path
+                .strip_prefix(p)
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }
 
 /// 安装包随附的源码包的快照标识：读包里的文件，只取 `SNAPSHOT_PATHS` 下的（不含文档），按与 [`content_id`]
 /// 完全相同的算法算。于是同一份源码在开发版与安装版上是同一个标识（服务器上编好的引擎可以共用），
 /// 改文档、重新打包（压缩包里的修改时间等元数据变了）都不会让服务器重传、重编。
 pub fn tarball_content_id(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let file =
+        std::fs::File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
     let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-    for entry in archive.entries().context("not a gzip-compressed tar archive")? {
+    for entry in archive
+        .entries()
+        .context("not a gzip-compressed tar archive")?
+    {
         let mut entry = entry?;
         if !entry.header().entry_type().is_file() {
             continue;
@@ -149,7 +156,11 @@ pub fn tarball_content_id(path: &Path) -> Result<String> {
         entry.read_to_end(&mut bytes)?;
         files.push((name, bytes));
     }
-    ensure!(!files.is_empty(), "{} has no engine sources", path.display());
+    ensure!(
+        !files.is_empty(),
+        "{} has no engine sources",
+        path.display()
+    );
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut hasher = Sha256::new();
     for (name, bytes) in &files {

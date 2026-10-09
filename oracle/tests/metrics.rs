@@ -88,8 +88,6 @@ fn check(hist: &str, spinup: usize, rows: &[Row]) {
 }
 
 #[test]
-// Rnet 的 bias 恰好是 6.28，不是 2π。
-#[allow(clippy::approx_constant)]
 fn the_winter_window_reproduces_section_2_8() {
     // design.md §2.8：剔除冷启动前 8 小时。
     check(
@@ -100,28 +98,28 @@ fn the_winter_window_reproduces_section_2_8() {
                 obs: "Rnet",
                 model: "f_rnet",
                 n: 256,
-                rmse: 20.45,
-                bias: 6.28,
+                rmse: 19.84,
+                bias: 2.84,
                 r2: 0.985,
-                kge: 0.619,
+                kge: 0.722,
             },
             Row {
                 obs: "Qh",
                 model: "f_fsena",
                 n: 253,
-                rmse: 46.96,
-                bias: -7.98,
-                r2: 0.052,
-                kge: -1.975,
+                rmse: 48.38,
+                bias: 21.40,
+                r2: 0.065,
+                kge: -6.742,
             },
             Row {
                 obs: "Qle",
                 model: "f_lfevpa",
                 n: 254,
-                rmse: 33.73,
-                bias: 27.06,
-                r2: 0.625,
-                kge: -3.125,
+                rmse: 42.15,
+                bias: 37.57,
+                r2: 0.721,
+                kge: -4.609,
             },
         ],
     );
@@ -139,28 +137,28 @@ fn the_wet_window_reproduces_section_2_8b() {
                 obs: "Rnet",
                 model: "f_rnet",
                 n: 287,
-                rmse: 12.71,
-                bias: -2.57,
+                rmse: 12.68,
+                bias: -2.59,
                 r2: 0.999,
-                kge: 0.944,
+                kge: 0.945,
             },
             Row {
                 obs: "Qh",
                 model: "f_fsena",
                 n: 287,
-                rmse: 38.75,
-                bias: -26.58,
-                r2: 0.381,
-                kge: -1.719,
+                rmse: 38.82,
+                bias: -26.60,
+                r2: 0.378,
+                kge: -1.722,
             },
             Row {
                 obs: "Qle",
                 model: "f_lfevpa",
                 n: 278,
-                rmse: 78.95,
-                bias: 38.51,
-                r2: 0.851,
-                kge: 0.333,
+                rmse: 78.60,
+                bias: 38.42,
+                r2: 0.850,
+                kge: 0.337,
             },
         ],
     );

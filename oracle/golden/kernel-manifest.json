@@ -2,7 +2,7 @@
   "schema": 1,
   "preset": "default",
   "platform": "Darwin-arm64",
-  "colm_git_sha": "1c908715",
+  "colm_git_sha": "f59ffdce",
   "generator_args": "SinglePoint LULC_IGBP CaMaOFF CROPOFF",
   "build_profile": "production",
   "macros": ["LULC_IGBP","SinglePoint","URBAN_MODEL"],
@@ -11,8 +11,8 @@
   "netcdf_fortran": "4.6.3",
   "hdf5": "1.14.6",
   "sha256": {
-    "mksrfdata": "158a678a451f45112790aa0677d598f3464670802c709dae72d7b0dbf444213b",
-    "mkinidata": "58f41718626defeec823bb0c41280216a7ee809edff6f73b4dc8a560102b3977",
-    "colm":      "abba9afe0aa8ee85c2cdfa74a4c30559ced38bfe14067006c90ee08e29e31f04"
+    "mksrfdata": "ead637cd044821a0cbc1ce6d2b5f770e6d3fdd0f96e1ed5abde5f04f0412def3",
+    "mkinidata": "e9d044da7020825b6b301ab66f3c5703fd42d816d9e632c2d0f4c205957e1b5a",
+    "colm":      "9177cebf4123217a7b3607ddabd0b0bb4377aece3024d3d1a65ed4b131d20f37"
   }
 }

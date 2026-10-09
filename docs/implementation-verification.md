@@ -32401,3 +32401,40 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **USGS 标为已退役**：向导的地类卡片上 USGS 带“已退役”标签，说明写“已退役，不建议使用；新算例请选 IGBP、PFT 或 PC”。仍可选，已有的 USGS 算例照常打开和运行。
 
 **验证**：`cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 与 GUI 后端的 clippy 通过；`colm-workspace` 49、`colm-remote` 29、`colm-cli` 251 + 19、GUI 后端 221 项通过；`gui/tests` 全部通过；`xtask check-gui` 通过；`--locked` 构建通过。
+
+## 第 657 轮：并入 CoLM-SYSU/CoLM#507 的后续提交；黄金重生成与配对重跑
+
+**并入的内容**（PR 仍是 OPEN，第 564 轮合到 `f3b1f8da2`，之后 10-06 又追加了三个提交，逐条见 upstream-bugs #74）：
+- `use_explicit_form`：自上而下削减出流改为带回溯的循环——某层被抽干时，若上界面通量向上且上一层没被抽干过，先削减上界面的向上通量、退回上一层重查；最上层抽干时降雨边界先用积水补。Rust `apply_variable_saturated_explicit_step` 同步改写。
+- `SurfaceRunoff_TOPMOD` 的方法 2 缺 TWI 参数时回退：两侧都走不到，照样并入。其余两处（偏度分母、`fsatmax` 缺省）vendor 早已修过。
+- vendor 打补丁：PR 的增量 diff 里土壤水那一份能直接打上，`MOD_Runoff` 手工并入；`MOD_Initialize` 与 `Aggregation_TopoWetness` 已等价，不动。
+
+**FMA 收缩**：新判据 `wa_m1 + dwat < -tol_z` 里 `dwat` 的乘积、降雨分支的 `dp_m1 + (ubc-q)*dt` 都按收缩写（`contract`）。arm64 上三份黄金逐位一致，即与 gfortran 实际的收缩方式相同。x86_64 上 Rust 不收缩、内核关自动向量化（第 649 轮），这次没有在 T7920 上复测。
+
+**黄金**（`kernels/default`，`colm_git_sha = f59ffdce`）：
+- 新内核对旧黄金：三份分别从第 7（`CN-Cng`，`f_h2osoi/f_qinfl/f_qlayer`）、111（`CN-Cng-wet`）、11（`US-NR1-snow`）步起不同——VSF 默认开，显式回退确实被走到。
+- Rust 只跑 colm 阶段对新 Fortran：三份 `[]`（逐位一致）。反证：改动前的 Rust（`f9ed0bf3`）对新 Fortran 同样从第 7 步起不同，对旧黄金 `[]`。
+- 重生成三份黄金；先后用 `kernels507/default`（未提交时编的）与 `kernels/default`（提交后编的）两次生成，数据逐位相同。
+- design.md §2.8/§2.8b 的指标表与 `oracle/tests/metrics.rs` 更新。先用改动前的输出确认 `colm-cli metrics` 能精确复现旧表（20.45 / +6.28 / 0.985 / +0.619 …），再取新值。冬季窗口：Qh bias −7.98 → +21.40、Qle bias +27.06 → +37.57、Rnet RMSE 20.45 → 19.84；湿季窗口只在第二位小数上变。
+- `PLUMBER2_ROOT=/Volumes/Data/Data/PLUMBER2s cargo test --release -p oracle` 全过。
+
+**配对重跑**（两侧都从头跑全链路，Fortran 侧纯 Fortran 预处理，内核 `kernels507/*`，逐变量逐位比较所有 `.nc`）：
+
+| 算例 | 内核 | 文件数 | 结果 |
+|---|---|---|---|
+| `cbl` `st` `sol` `isosite` `isosum` `isosol` | default | 7 / 7 / 8 / 8 / 8 / 8 | 全部一致 |
+| `isod` | default | 26 | 一致 |
+| `gr` | latlon | 287 | 一致 |
+| `gh` | latlon | 293 | 一致 |
+| `gho` | latlon | 293 | 一致 |
+| `iso` | latlon | 261 | 一致 |
+| `sed` | latlon | 261 | 一致 |
+| `pr`（珠江，流域网格，3 天） | catchment | 1689 | 一致（Fortran 3086 s，Rust 471 s） |
+| 示例 CN-Cng 2008–2009 | default | 42 | 一致 |
+| 示例 AT-Neu 2010–2012 | default | 78 | 一致 |
+| 示例 US-Ne3 2002–2003（PFT + CROP） | crop | 73 | 一致 |
+| 示例 AU-Preston 2003-01–2004-10（城市） | default | 18 / 51 | **不一致，早已存在，与本轮无关**（见下） |
+
+- **AU-Preston**：2004 年起每份 history 从第 0 步就有差异（1 月 `f_assim` maxrel 3.5e-14，年中涨到 1e-4–1e-2），2004-001 起的重启都不同。改动前的内核（vendor `1d41ad09`）配改动前的 Rust 得到**完全相同**的差异（maxrel 一致）。Fortran 主循环换成吃 Rust 预处理的结果后仍不一致，所以是城市路径的主循环差异，在 2003 年预热期间就已出现。另外两处预处理差异：Fortran `srfdata.nc` 存 23 年树木 LAI/SAI，Rust 只存 2 年；Rust 重启多 `gs0sha/gs0sun/vegwp`。另开任务排查。
+- **第 564 轮那 187 个算例这次没法重跑**：它们的目录（`fortran-rust-refactor-8df5bb/tmp/<case>-{fortran,rust}`）已经不在了，只剩脚本（`b564[a-k].sh`、`inipair.sh` 等）和上表前 13 对。要恢复这套全量回归，得按脚本重新派生算例。
+- 更正第 656 轮：那一轮记的 `cargo fmt --check` 通过并不属实，`colm-remote/src/engine.rs` 新加的 `in_snapshot`、`tarball_content_id` 没格式化。本轮补上，只改格式。
