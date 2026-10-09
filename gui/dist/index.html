@@ -1387,7 +1387,18 @@
 
 <dialog id="workspace-dialog" class="app-dialog workspace-dialog" aria-labelledby="workspace-title">
   <h3 id="workspace-title">开发工作区</h3>
-  <p class="muted mini">助手在这里改 CoLM 源码（Fortran 上游和 Rust 引擎）、编译、测试和对照。正式内核和应用本体不会被改动；改动都在各自的 git 分支里，每个补丁是一次提交。采纳、导出补丁、回滚、删除只能在这里由你来做，助手没有对应的工具。编译和测试在沙箱里跑（断网，只能写工作区），但这只能防误写，不是运行恶意代码的完整安全边界。</p>
+  <p class="mini">开发工作区是一份 CoLM 源码的副本，用来试改代码。你或 AI 助手在副本里改 Fortran 和 Rust 代码、编译、跑测试，再和正式版本对比结果。你正在用的应用和正式内核都不会被改动，除非你在这里点“启用这个内核”。启用、导出、撤回、删除只能由你在这里操作，助手做不了。</p>
+  <details class="ws-legend">
+    <summary class="mini">四项检查是什么意思？</summary>
+    <ul class="mini">
+      <li><b>编译</b>：改过的代码能不能编出 Rust 引擎和 Fortran 内核。</li>
+      <li><b>测试</b>：自动测试是否通过，包括 Fortran 和 Rust 里的参数表是否同步。</li>
+      <li><b>两版一致</b>：同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。</li>
+      <li><b>与原版对比</b>：和改之前的正式版本比：结果可以变，但不能出现 NaN，水量和能量闭合不能变差。</li>
+      <li>绿色是通过，红色是不通过，黄色是“需要重测”——检查之后又改过代码，原来的结果不算数了。</li>
+    </ul>
+    <p class="muted mini">编译和测试在受限环境里运行（不能联网、只能写这个工作区的文件夹）。这能防止误改别处的文件，但不是防恶意代码的安全措施。</p>
+  </details>
   <div id="workspace-list"></div>
   <div class="assistant-approval-actions">
     <button class="btn-ghost" type="button" id="workspace-refresh">刷新</button>

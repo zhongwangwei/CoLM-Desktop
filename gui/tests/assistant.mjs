@@ -36,6 +36,11 @@ assert.equal(assistant.viewContext({ step: 'run', flow: 'run' }), 'page: run');
   assert.ok(assistant.pageDetails('result-tuning', { badges: { tuning: '运行中 3/9' } })
     .includes('calibration Study status: 运行中 3/9'));
   assert.ok(assistant.pageDetails('hybrid-process')[0].includes('process replacement'));
+  // 启用过的实验内核要告诉助手（不然它会以为结果来自正式内核）。
+  assert.ok(assistant.pageDetails('run', {
+    adopted: [{ preset: 'default', experimental: { workspace: 'vcmax-grass', head: 'd32488535882' } }],
+  })[0].includes('workspace vcmax-grass (commit d3248853)'));
+  assert.deepEqual(assistant.pageDetails('run', { adopted: [{ preset: 'default' }] }), []);
 }
 // 提问建议跟着步骤走；没有建议的步骤返回空。
 assert.ok(assistant.pagePrompts('result-evaluation').length >= 2);

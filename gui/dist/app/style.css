@@ -855,7 +855,14 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-fail .ws-light-dot { color: #d64545; }
 .ws-stale .ws-light-dot { color: #d9a21b; }
 .ws-unknown .ws-light-dot { color: #9aa0a8; }
-.ws-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.ws-actions { display: grid; gap: 6px; margin-top: 6px; }
+.ws-action { display: grid; grid-template-columns: 9.5em 1fr; gap: 10px; align-items: center; }
+.ws-action .btn-ghost { justify-self: stretch; }
+.ws-in-use { font-size: 11px; padding: 2px 8px; border-radius: 6px; background: var(--accent-weak); color: var(--accent-ink); }
+.ws-light-state { font-weight: 600; }
+.ws-detail-title { font-weight: 650; margin-top: 6px; }
+.ws-legend { margin: 6px 0 4px; }
+.ws-legend ul { margin: 4px 0; padding-left: 18px; }
 .ws-detail { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #d0d4da); }
 
 /* ---- 研究（research.js）：左栏的第二段、总览页与结果页的“下一步” ---- */

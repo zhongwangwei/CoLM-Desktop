@@ -20,11 +20,11 @@ const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href
 
 // 状态灯
 assert.equal(workspace.lightText('pass'), '通过');
-assert.equal(workspace.lightText('stale'), '过期（之后又有新提交）');
-assert.equal(workspace.lightText('whatever'), '还没测过');
+assert.equal(workspace.lightText('stale'), '需要重测（之后又改过代码）');
+assert.equal(workspace.lightText('whatever'), '还没测');
 assert.equal(
   workspace.lightsSummary({ compile: 'pass', tests: 'stale', regression: 'unknown', parity: 'fail' }),
-  '编译 通过 · 测试 过期（之后又有新提交） · 回归 还没测过 · 对齐 不通过',
+  '编译 通过 · 测试 需要重测（之后又改过代码） · 两版一致 不通过 · 与原版对比 还没测',
 );
 
 // 只显示这个工作区的实验内核。
@@ -47,7 +47,13 @@ assert.equal(workspace.stillRegistered([entry], registered).length, 1);
 assert.equal(workspace.stillRegistered([entry], [{ ...registered[0], head: 'h9' }]).length, 0);
 assert.equal(workspace.stillRegistered([entry], []).length, 0);
 assert.deepEqual(workspace.stillRegistered(undefined, registered), []);
-assert.equal(workspace.commitLine({ short: 'abc1234', subject: 'ws: emg 0.95' }), 'abc1234 ws: emg 0.95');
+assert.equal(workspace.commitLine({ short: 'abc1234', subject: 'ws: emg 0.95' }), 'abc1234 · emg 0.95');
+// 每项检查都有一句白话说明。
+assert.deepEqual(Object.keys(workspace.LIGHT_HELP).sort(), ['compile', 'parity', 'regression', 'tests']);
+// 正在使用的内核：只看这个工作区的。
+assert.deepEqual(workspace.adoptedFrom([entry], 'emis').map(k => k.preset), ['default']);
+assert.deepEqual(workspace.adoptedFrom([entry], 'other'), []);
+assert.deepEqual(workspace.adoptedFrom(undefined, 'emis'), []);
 
 // 内核匹配：没采纳过时只看正式内核（行为不变）；采纳后同预设的实验内核排在前面。
 const official = { preset: 'default', dir: '/app/kernels/default', macros: ['SinglePoint', 'LULC_IGBP'] };

@@ -30,9 +30,16 @@ const fixed = (value, digits) => (Number.isFinite(value) ? Number(value).toFixed
  * 这一页的关键信息（英文，给模型看，不显示）：评估页附上已算出的指标，研究页附上 Study 状态与 AI 模式。
  * `metrics` 是 `state.resultMetrics` 里属于选中算例的行；`badges` 是 `state.studyBadges`。
  */
-export function pageDetails(flow, { metrics = [], badges = {}, batch = 0 } = {}) {
+export function pageDetails(flow, { metrics = [], badges = {}, batch = 0, adopted = [] } = {}) {
   const lines = [];
   if (batch > 1) lines.push(`cases in this batch: ${batch}`);
+  // 用户在开发工作区面板里启用的实验内核：之后用 Fortran 内核跑这些预设时用的不是正式内核。
+  for (const kernel of adopted) {
+    const from = kernel?.experimental;
+    if (from?.workspace) {
+      lines.push(`experimental Fortran kernel in use for preset ${kernel.preset}: built in development workspace ${from.workspace} (commit ${String(from.head ?? '').slice(0, 8)}), not the official kernel`);
+    }
+  }
   if (flow?.startsWith('result-') || flow === 'research') {
     const rows = metrics.filter(row => row && row.name).slice(0, 8);
     if (rows.length) {
@@ -597,6 +604,7 @@ function currentView() {
       metrics: (state.resultMetrics ?? []).filter(row => !caseDir || row.case_dir === caseDir),
       badges: state.studyBadges ?? {},
       batch: state.batch?.length ?? 0,
+      adopted: state.adoptedKernels ?? [],
     }),
   };
 }
