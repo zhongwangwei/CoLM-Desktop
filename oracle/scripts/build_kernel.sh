@@ -356,6 +356,19 @@ DEST="$OUT_BASE/$PRESET"
 mkdir -p "$DEST"
 cp run/mksrfdata.x run/mkinidata.x run/colm.x "$DEST/"
 
+# 城市辐射的矩阵求逆（`MatrixInverse` = DGETRF + DGETRI）在 Rust 里是照 netlib 参考 LAPACK 逐句移植的
+# （macOS 例外，那里直接调 Accelerate）。Linux 上 `-llapack -lblas` 若解析到 OpenBLAS、MKL 之类的优化库，
+# 运算顺序不同，城市算例从第 0 步的反照率起就与 Rust 不逐位一致（第 649 轮：OpenBLAS 下 178 个变量里 94 个不同）。
+# 只警告不报错：非城市算例不受影响。conda 环境里换成参考实现：
+#   conda install -c conda-forge "libblas=*=*netlib" "liblapack=*=*netlib"
+if [ "$(uname -s)" = Linux ] && command -v ldd >/dev/null 2>&1; then
+  OPT_BLAS=$(ldd "$DEST/colm.x" 2>/dev/null | grep -o -i -E 'lib(openblas|mkl[a-z_]*|blis|satlas|tatlas|flexiblas)[^ ]*' | sort -u | tr '\n' ' ' || true)
+  if [ -n "$OPT_BLAS" ]; then
+    echo "warning: colm.x links an optimised BLAS/LAPACK ($OPT_BLAS); urban cases will not match the Rust engine bit for bit." >&2
+    echo "         Use the netlib reference LAPACK/BLAS (conda-forge: libblas=*=*netlib liblapack=*=*netlib)." >&2
+  fi
+fi
+
 # Windows 上改成 `.exe`。CoLM 的 Makefile 在所有平台都写 `.x`，而 Windows 的
 # `PATHEXT` 不含它 —— 系统于是不把这个文件当可执行文件，PowerShell 拒绝执行
 # （实测 `Cannot run a document in the middle of a pipeline`），双击也没反应，

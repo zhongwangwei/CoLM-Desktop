@@ -32239,7 +32239,7 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 
 ## 第 649 轮：x86_64 上 Fortran 与 Rust 逐位一致——根因是 gfortran 的自动向量化，不只是 FMA
 
-**问题**：第 648 轮把 x86_64 上的差距量化了，但没消除。这一轮把它找到并消掉。
+**问题**：第 648 轮把 x86_64 上的差距量化了，但没消除。这一轮把它找到并消掉。根因有两个：gfortran 的自动向量化（所有算例）与内核链的 LAPACK 实现（城市算例）。
 
 **方法**：把差异一步步压到第一个不同的量。算例同第 648 轮（4×4 空间算例，2003-01-01，步长 1800 s，每步写 history 与重启）。
 1. 第 1 步之后的重启里，Rust（不融合）与默认 Fortran 的差异：`wliq_soisno` 295/1260 个元素、`vegwp` 282/336、`hk` 106/840、`smp` 104/840、反照率 `alb` 只有 6 个斑块（量级 1e-16）。history 第 0 步里 `f_vegwp` 在全部 64 个斑块上都不同。
@@ -32267,8 +32267,23 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 
 **代价**（T7920，同一算例，每种 3 次，秒）：Fortran 加 `-fno-tree-vectorize` 276.8/277.1/278.1，默认 268.2/263.9/270.3，慢约 3.7%；Rust 50.2/50.7。没有单独量 Rust 融合与不融合在 x86 上的速度差。
 
+**扩大验证**（同一套干净构建，每个算例新建 4×4 网格，`mesh-new --grid-kind latlon --nlon 720 --nlat 360`，都是冷启动、每步写 history）：
+
+| 算例 | 改动 | 变量 | 结果 |
+|---|---|---|---|
+| `pft` | `DEF_USE_PFT`（PFT 重启文件确实生成） | 159 | 逐位一致 |
+| `pc` | `DEF_USE_PC` | 159 | 逐位一致 |
+| `bgc` | PFT + `DEF_USE_BGC`，1 天 | 316 | 逐位一致 |
+| `long5` | 基础算例跑 5 天（240 步） | 159 | 逐位一致 |
+| `tropics` | 100–102°E、0–2°N，7 月 1 日 | 159 | 逐位一致 |
+| `highlat` | 20–22°E、62–64°N，1 月，5 天（积雪） | 159 | 逐位一致 |
+| `ice` | 45–43°W、70–72°N（格陵兰冰盖），3 天 | 159 | 逐位一致 |
+| `urban` | 116–118°E、39–41°N，`DEF_URBAN_RUN` | 178 | **起初 94 个不同**（第 0 步 `f_alb` 起，量级 1e-15）→ 修后逐位一致 |
+
+**城市算例的第二个根因：LAPACK 实现**。第 1 步的城市重启里，短波吸收 `swsun/swsha/sgimp/sgper` 有十几个元素不同，而温度、水分只差两三个——短波计算本身给了不同的位。城市辐射的 `MatrixInverse` 是 `DGETRF + DGETRI`；`colm-lapack` 在 macOS 上 FFI 调 Accelerate，在其它平台上是 **netlib 参考 LAPACK 的逐句移植**（Windows 内核由 MSYS2 构建，链的就是参考实现）。而 T7920 的 conda 环境里 `-llapack -lblas` 解析到 OpenBLAS（`libblas 3.11.0=*_openblas`，内核的 `NEEDED` 直接写成 `libopenblas.so.0`，运行期换不掉）。在 `tools/fenv` 里换成 `libblas=*=*netlib liblapack=*=*netlib`（只改这两个包，3 MB；`libopenblas` 保留，旧内核照旧能跑）重新链接后，城市算例 **178 个变量逐位一致**。`build_kernel.sh` 在 Linux 上编完内核后用 `ldd` 检查：链到 OpenBLAS/MKL/BLIS/ATLAS/FlexiBLAS 时给出警告与换法（只警告不报错，非城市算例不受影响）；对旧内核与新内核各试一次，检测正确。换成 netlib 的内核重跑基础算例，仍是 159 个变量逐位一致。
+
 **没做 / 局限**：
-- **只在一个算例上验证**（4×4 空间算例、1 天、igbp、冷启动）。没有跑 BGC、PFT/PC、城市、湖泊占优的算例，也没有长时间跑；更多地类上是否仍逐位一致没有证据。
+- 以上 9 个算例都是 4×4 网格、最长 5 天；没有跑更长时间（季节、年）、CROP、灌溉、甲烷、LULCC、非结构网格与流域网格。
 - aarch64 Linux、Windows、Intel Mac 没验证。逐位一致是**每个平台对自己平台的 Fortran**，不保证 Rust 在各平台上结果相同——aarch64 融合、x86 不融合，所以同一算例两个平台差几个 ULP，物理过程会放大它。
 - `colm-runtime` 与 `colm-forcing` 的测试在服务器上缺示例数据（`examples/Forcing/…`），本来就失败，所以 x86 上这两个 crate 的夹具测试是否需要跳过没有验证；`colm-agent` 的测试在服务器上缺离线依赖没能运行。
 - 向量化的 libm 只验证了 x86_64 Linux（glibc libmvec）。用户自己用向量化内核跑 Fortran 是合法的，只是不能再与 Rust 逐位对拍。
