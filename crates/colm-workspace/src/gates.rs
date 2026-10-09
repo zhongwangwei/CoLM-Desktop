@@ -15,7 +15,7 @@ pub struct GateRun {
 }
 
 /// 一次对齐检查（Rust 引擎对 Fortran 内核）。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParityRecord {
     pub ok: bool,
     pub at: u64,
@@ -24,6 +24,16 @@ pub struct ParityRecord {
     pub case: String,
     /// 第一个出现差异的变量与时间步；逐位一致时为空。
     pub first_difference: Option<String>,
+    /// 判定用的容差；0 表示逐位。老记录没有这两项，当作 0。
+    #[serde(default)]
+    pub rtol: f64,
+    #[serde(default)]
+    pub atol: f64,
+    /// 只比较了每个文件的前几条记录；`None` 是全部。
+    #[serde(default)]
+    pub first_records: Option<usize>,
+    #[serde(default)]
+    pub ignored: Vec<String>,
 }
 
 /// 回归检查的判定类型：重构要求逐位一致，物理修改只列出变了什么。

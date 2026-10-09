@@ -58,6 +58,10 @@ fn gates_round_trip_through_json() {
         preset: "default".into(),
         case: "ref".into(),
         first_difference: None,
+        rtol: 0.0,
+        atol: 0.0,
+        first_records: None,
+        ignored: Vec::new(),
     });
     let text = serde_json::to_string(&gates).unwrap();
     assert_eq!(serde_json::from_str::<Gates>(&text).unwrap(), gates);

@@ -7,7 +7,7 @@ use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
 
 use crate::build::{run_logged, Outcome};
-use crate::compare::{self, Report, Tolerance};
+use crate::compare::{self, Options, Report, Tolerance};
 use crate::gates::{ChangeKind, ParityRecord, Regression};
 use crate::layout::{now, Workspace};
 
@@ -69,6 +69,27 @@ pub fn copy_case(src: &Path, dst: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 把算例副本的 history 频率改成每个时间步写一次（只看最早几条记录的对齐检查要用）。
+pub fn set_history_every_step(case: &Path) -> Result<()> {
+    let path = case.join("case.nml");
+    let text = std::fs::read_to_string(&path)?;
+    let mut changed = false;
+    let rewritten: Vec<String> = text
+        .lines()
+        .map(|line| {
+            if line.trim_start().starts_with("DEF_HIST_FREQ") {
+                changed = true;
+                "   DEF_HIST_FREQ = 'TIMESTEP'".to_owned()
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect();
+    ensure!(changed, "case.nml has no DEF_HIST_FREQ to change");
+    std::fs::write(&path, rewritten.join("\n") + "\n")?;
+    Ok(())
+}
+
 /// `case.nml` 里的 `DEF_CASE_NAME`。
 pub fn case_name(case: &Path) -> Result<String> {
     let text = std::fs::read_to_string(case.join("case.nml"))
@@ -114,6 +135,7 @@ pub fn run_copy(
     cli: &Path,
     kernel: &Path,
     engine: &str,
+    every_step: bool,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<RunResult> {
     ensure!(
@@ -132,6 +154,9 @@ pub fn run_copy(
     );
     let copy = run_dir.join(label);
     copy_case(case, &copy)?;
+    if every_step {
+        set_history_every_step(&copy)?;
+    }
     let args = vec![
         "run".to_owned(),
         copy.display().to_string(),
@@ -183,13 +208,33 @@ pub fn run_case_with(
         &workspace.bin().join("colm-cli"),
         &kernel,
         engine,
+        false,
         cancel,
     )
+}
+
+/// 这个平台上“Rust 与 Fortran 逐位一致”能指望吗？Rust 引擎里的 `mul_add` 是照 arm64 gfortran 的 FMA 融合逐条对出来的
+/// （第 648 轮）；融合决策依赖目标平台，所以只有 Apple Silicon 上逐位一致是已验证的。其它平台返回提示。
+pub fn platform_note() -> Option<&'static str> {
+    if cfg!(target_arch = "aarch64") && cfg!(target_os = "macos") {
+        None
+    } else {
+        Some(
+            "Bitwise parity between the Rust engine and the Fortran kernel is only verified on Apple Silicon: the Rust port copies arm64 gfortran's fused multiply-add decisions, and those depend on the target. Here, rounding noise is amplified by the physics within a few steps, so judge parity on the earliest records only. Measured on x86_64 Linux (round 648): build the kernel with COLM_KERNEL_FMA=1 and use first_records=2, rtol=1e-9 and ignore f_frcsat (a threshold-sensitive diagnostic that switches branch) - noise is then below 2e-11; without FMA use rtol=1e-6. From about 6 records on, no tolerance separates noise from a real misalignment.",
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ParityReport {
     pub ok: bool,
+    pub rtol: f64,
+    pub atol: f64,
+    /// 只比较了每个文件的前几条记录（x86_64 上的做法）。
+    pub first_records: Option<usize>,
+    pub ignored: Vec<String>,
+    /// 非 Apple Silicon 平台上的提示（见 [`platform_note`]）。
+    pub platform_note: Option<&'static str>,
     pub case: String,
     pub preset: String,
     pub run_dir: PathBuf,
@@ -213,25 +258,28 @@ pub fn parity_check(
     workspace: &mut Workspace,
     case: &Path,
     preset: &str,
+    options: &Options,
     cancel: Option<&std::sync::atomic::AtomicBool>,
 ) -> Result<ParityReport> {
+    let tolerance = options.tolerance;
     crate::build::check_preset(preset)?;
     let kernel = workspace.kernels().join(preset);
     let cli = workspace.bin().join("colm-cli");
     let run_dir = new_run_dir(workspace)?;
+    let every_step = options.first_records.is_some();
     let rust = run_copy(
-        workspace, case, &run_dir, "rust", &cli, &kernel, "rust", cancel,
+        workspace, case, &run_dir, "rust", &cli, &kernel, "rust", every_step, cancel,
     )?;
     let fortran = run_copy(
-        workspace, case, &run_dir, "fortran", &cli, &kernel, "fortran", cancel,
+        workspace, case, &run_dir, "fortran", &cli, &kernel, "fortran", every_step, cancel,
     )?;
     let (comparison, first, ok) = if rust.outcome.ok && fortran.outcome.ok {
-        let report = compare::compare(&rust.history, &fortran.history, Tolerance::default())?;
+        let report = compare::compare_with(&rust.history, &fortran.history, options)?;
         let first = report
             .first_difference
             .as_ref()
             .map(compare::First::describe);
-        let ok = report.bitwise_identical();
+        let ok = report.acceptable();
         (Some(report), first, ok)
     } else {
         (
@@ -245,6 +293,11 @@ pub fn parity_check(
     };
     let mut report = ParityReport {
         ok,
+        rtol: tolerance.rtol,
+        atol: tolerance.atol,
+        first_records: options.first_records,
+        ignored: options.ignore.clone(),
+        platform_note: platform_note(),
         case: case.display().to_string(),
         preset: preset.to_owned(),
         run_dir,
@@ -262,6 +315,10 @@ pub fn parity_check(
         preset: preset.to_owned(),
         case: case.display().to_string(),
         first_difference: first,
+        rtol: tolerance.rtol,
+        atol: tolerance.atol,
+        first_records: options.first_records,
+        ignored: options.ignore.clone(),
     };
     workspace.update(|info| info.gates.parity = Some(record))?;
     Ok(report)
@@ -334,6 +391,7 @@ pub fn regress(
         &baseline.cli,
         &baseline.kernel,
         engine,
+        false,
         cancel,
     )?;
     // 工作区没编这个预设的内核时，Rust 引擎只需要清单，借基线的内核目录。
@@ -353,6 +411,7 @@ pub fn regress(
         &workspace.bin().join("colm-cli"),
         &kernel,
         engine,
+        false,
         cancel,
     )?;
     let mut closure = Vec::new();

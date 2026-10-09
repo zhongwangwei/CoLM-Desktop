@@ -1,6 +1,6 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::*;
-use crate::compare::Status;
+use crate::compare::{Options, Status};
 use crate::layout::layout_tests::{nc_lock, source_repo, temp};
 
 fn history(path: &Path, vars: &[(&str, Vec<f64>)]) {
@@ -114,7 +114,7 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
         &[("f_t", good.clone()), ("f_q", good.clone())],
     );
     fake_cli(&ws.bin().join("colm-cli"), &a, &b, 0);
-    let ok = parity_check(&mut ws, &case, "default", None).unwrap();
+    let ok = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
     assert!(ok.ok, "{:?}", ok.first_difference);
     assert!(ok.compare.as_ref().unwrap().bitwise_identical());
     assert!(ws.info.gates.parity.as_ref().unwrap().ok);
@@ -133,7 +133,7 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
         &b.join("REF_hist_2004-01.nc"),
         &[("f_t", good.clone()), ("f_q", off)],
     );
-    let bad = parity_check(&mut ws, &case, "default", None).unwrap();
+    let bad = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
     assert!(!bad.ok);
     let first = bad
         .compare
@@ -149,7 +149,7 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
 
     // 一边跑崩了：不比较，如实说。
     fake_cli(&ws.bin().join("colm-cli"), &a, &b, 1);
-    let crashed = parity_check(&mut ws, &case, "default", None).unwrap();
+    let crashed = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
     assert!(!crashed.ok && crashed.compare.is_none());
     assert!(crashed.first_difference.unwrap().contains("a run failed"));
     let _ = std::fs::remove_dir_all(&root);
@@ -309,4 +309,114 @@ fn the_closure_limit_is_ten_times_the_baseline_but_never_below_a_floor() {
     assert_eq!(closure_limit(1e-12), 1e-6);
     assert_eq!(closure_limit(5e-6), 5e-5);
     let _ = Status::Identical;
+}
+
+/// 带容差：舍入噪声通过，真正的错位不通过；报告里带上容差和平台提示。
+#[test]
+fn parity_with_a_tolerance_accepts_rounding_noise_and_still_catches_a_real_misalignment() {
+    let _nc = nc_lock();
+    let root = temp("paritytol");
+    let case = reference_case(&root);
+    let mut ws = workspace(&root);
+    fake_kernel(&ws.kernels().join("default"));
+    let (a, b) = (root.join("fx-a"), root.join("fx-b"));
+    let good = series(|i| 280.0 + i as f64);
+    let noise: Vec<f64> = good.iter().map(|v| v * (1.0 + 4e-16)).collect();
+    history(&a.join("REF_hist_2004-01.nc"), &[("f_t", good.clone())]);
+    history(&b.join("REF_hist_2004-01.nc"), &[("f_t", noise)]);
+    fake_cli(&ws.bin().join("colm-cli"), &a, &b, 0);
+    let strict = parity_check(&mut ws, &case, "default", &Options::default(), None).unwrap();
+    assert!(!strict.ok, "bitwise parity fails on rounding noise");
+    let loose = parity_check(
+        &mut ws,
+        &case,
+        "default",
+        &Options::from(Tolerance {
+            rtol: 1e-9,
+            atol: 0.0,
+        }),
+        None,
+    )
+    .unwrap();
+    assert!(
+        loose.ok && loose.rtol == 1e-9,
+        "{:?} {:?}",
+        loose.first_difference,
+        loose.compare.as_ref().map(|c| (
+            c.differs,
+            c.new_nonfinite,
+            &c.only_in_a,
+            &c.only_in_b,
+            c.files
+        ))
+    );
+    let record = ws.info.gates.parity.clone().unwrap();
+    assert!(
+        record.ok && record.rtol == 1e-9,
+        "the gate remembers the tolerance it was judged with"
+    );
+    // 0.5 K 的偏差是真错位：1e-9 的容差抓得住。
+    history(
+        &b.join("REF_hist_2004-01.nc"),
+        &[("f_t", series(|i| 280.5 + i as f64))],
+    );
+    let real = parity_check(
+        &mut ws,
+        &case,
+        "default",
+        &Options::from(Tolerance {
+            rtol: 1e-9,
+            atol: 0.0,
+        }),
+        None,
+    )
+    .unwrap();
+    assert!(!real.ok && real.first_difference.unwrap().contains("f_t"));
+    // 提示只在非 Apple Silicon 平台出现。
+    assert_eq!(
+        real.platform_note.is_some(),
+        !(cfg!(target_arch = "aarch64") && cfg!(target_os = "macos"))
+    );
+    if let Some(note) = platform_note() {
+        assert!(
+            note.contains("COLM_KERNEL_FMA=1")
+                && note.contains("first_records=2")
+                && note.contains("rtol=1e-9")
+                && note.contains("f_frcsat")
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// 只看最早的记录时，算例副本要改成每步写 history；其余设置不动。
+#[test]
+fn the_case_copy_can_write_history_every_step() {
+    let root = temp("everystep");
+    let case = reference_case(&root);
+    let nml = case.join("case.nml");
+    let text = std::fs::read_to_string(&nml).unwrap();
+    std::fs::write(
+        &nml,
+        text.replace("DEF_CASE_NAME", " DEF_HIST_FREQ = 'DAILY'\n DEF_CASE_NAME"),
+    )
+    .unwrap();
+    let copy = root.join("copy");
+    copy_case(&case, &copy).unwrap();
+    assert!(std::fs::read_to_string(copy.join("case.nml"))
+        .unwrap()
+        .contains("'DAILY'"));
+    set_history_every_step(&copy).unwrap();
+    let after = std::fs::read_to_string(copy.join("case.nml")).unwrap();
+    assert!(
+        after.contains("DEF_HIST_FREQ = 'TIMESTEP'")
+            && !after.contains("'DAILY'")
+            && after.contains("DEF_CASE_NAME = 'REF'"),
+        "{after}"
+    );
+    // 没有这一项就报错，而不是悄悄不改。
+    let bare = reference_case(&root.join("bare"));
+    let bare_copy = root.join("bare-copy");
+    copy_case(&bare, &bare_copy).unwrap();
+    assert!(set_history_every_step(&bare_copy).is_err());
+    let _ = std::fs::remove_dir_all(&root);
 }

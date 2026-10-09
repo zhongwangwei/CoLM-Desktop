@@ -13,8 +13,9 @@
 //! colm-cli ws-build-kernel --name N --preset P
 //! colm-cli ws-test     --name N --kind cargo|oracle|check-gui [--package P]
 //! colm-cli ws-run      --name N --case DIR --engine rust|fortran --preset P
-//! colm-cli ws-compare  --a DIR --b DIR [--rtol X] [--atol X]
-//! colm-cli ws-parity   --name N --case DIR --preset P
+//! colm-cli ws-compare  --a DIR --b DIR [--rtol X] [--atol X] [--first-records K] [--ignore f_a,f_b]
+//! colm-cli ws-parity   --name N --case DIR --preset P [--rtol X] [--atol X]
+//!                        [--first-records K] [--ignore f_a,f_b]    # x86_64：只看最早的 K 条记录并忽略对阈值敏感的诊断量
 //! colm-cli ws-regress  --name N --case DIR --preset P --kind refactor|physics
 //!                      --baseline-cli F --baseline-kernel DIR [--engine rust|fortran]
 //! colm-cli ws-kernels  [--root DIR]
@@ -89,6 +90,34 @@ fn run_summary(run: &colm_workspace::parity::RunResult) -> serde_json::Value {
         "case_copy": run.case_copy,
         "history": run.history,
         "tail": if run.outcome.ok { None } else { Some(&run.outcome.tail) },
+    })
+}
+
+/// `--rtol`、`--atol`、`--first-records`、`--ignore a,b` 合成对比选项。
+fn compare_options(opts: &Opts) -> Result<compare::Options> {
+    let number = |name: &str| -> Result<f64> {
+        Ok(opts
+            .get(name)
+            .map(|v| v.parse())
+            .transpose()
+            .with_context(|| format!("{name} must be a number"))?
+            .unwrap_or(0.0))
+    };
+    Ok(compare::Options {
+        tolerance: Tolerance {
+            rtol: number("--rtol")?,
+            atol: number("--atol")?,
+        },
+        first_records: self::number(opts, "--first-records")?,
+        ignore: opts
+            .get("--ignore")
+            .map(|v| {
+                v.split(',')
+                    .map(|n| n.trim().to_owned())
+                    .filter(|n| !n.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -192,37 +221,35 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             )?));
         }
         "ws-compare" => {
-            let tolerance = Tolerance {
-                rtol: opts
-                    .get("--rtol")
-                    .map(|v| v.parse())
-                    .transpose()?
-                    .unwrap_or(0.0),
-                atol: opts
-                    .get("--atol")
-                    .map(|v| v.parse())
-                    .transpose()?
-                    .unwrap_or(0.0),
-            };
-            let report = compare::compare(
+            let options = compare_options(opts)?;
+            let report = compare::compare_with(
                 &PathBuf::from(opts.need_str("--a")?),
                 &PathBuf::from(opts.need_str("--b")?),
-                tolerance,
+                &options,
             )?;
-            print(
-                json!({ "bitwise_identical": report.bitwise_identical(), "compare": compact(&report) }),
-            );
+            print(json!({
+                "bitwise_identical": report.bitwise_identical(),
+                "acceptable": report.acceptable(),
+                "compare": compact(&report),
+            }));
         }
         "ws-parity" => {
             let mut workspace = open(opts)?;
+            let options = compare_options(opts)?;
             let report = parity::parity_check(
                 &mut workspace,
                 &PathBuf::from(opts.need_str("--case")?),
                 &opts.need_str("--preset")?,
+                &options,
                 None,
             )?;
             print(json!({
                 "ok": report.ok,
+                "rtol": report.rtol,
+                "atol": report.atol,
+                "first_records": report.first_records,
+                "ignored": report.ignored,
+                "platform_note": report.platform_note,
                 "first_difference": report.first_difference,
                 "preset": report.preset,
                 "case": report.case,

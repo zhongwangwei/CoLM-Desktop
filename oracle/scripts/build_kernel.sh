@@ -328,11 +328,22 @@ if [ -n "$MPI_FC" ]; then
 fi
 
 # SinglePoint 不白链 MPI；空间预设必须由 MPI Fortran wrapper 同时提供头文件和链接参数。
+# COLM_KERNEL_FMA=1：x86_64 上加 -mfma。Rust 引擎里的 mul_add 是照 arm64 gfortran 的 FMA 融合逐条对出来的
+# （docs/implementation-verification.md 第 648 轮）；x86-64 的基线编译没有 FMA 指令，不融合，所以和 Rust 对不上。
+# 打开它能把 Fortran 与 Rust 的差距缩小约三个数量级（仍不是逐位一致：融合决策依赖目标平台），代价是内核要求
+# 带 FMA 的 CPU（2013 年以后的 x86）。默认关闭，不改变现有产物。
+EXTRA_FF=""
+if [ "${COLM_KERNEL_FMA:-}" = 1 ]; then
+  case "$(uname -m)" in
+    x86_64|amd64) EXTRA_FF="-mfma" ;;
+    *) echo "COLM_KERNEL_FMA=1 only applies to x86_64; ignored on $(uname -m)" >&2 ;;
+  esac
+fi
 if [ "$SPATIAL" -eq 1 ]; then
   [ -n "$MPI_FC" ] || { echo "spatial kernel build requires mpifort/mpif90" >&2; exit 2; }
-  MAKE_FF="$MPI_FC -fopenmp"
+  MAKE_FF="$MPI_FC -fopenmp $EXTRA_FF"
 else
-  MAKE_FF="gfortran -fopenmp $MPI_INC"
+  MAKE_FF="gfortran -fopenmp $MPI_INC $EXTRA_FF"
 fi
 make FF="$MAKE_FF" COLM_KERNEL_PROFILE="$PROFILE" \
   mksrfdata.x mkinidata.x colm.x

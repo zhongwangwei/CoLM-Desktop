@@ -12,6 +12,15 @@ use serde::Serialize;
 pub const RESIDUAL_VARIABLES: [&str; 2] = ["f_xerr", "f_zerr"];
 
 impl Report {
+    /// 容差之内可以接受：没有超出容差的变量、没有新的 NaN/无穷大、文件齐全。容差为 0 时就是逐位一致。
+    pub fn acceptable(&self) -> bool {
+        self.differs == 0
+            && self.new_nonfinite == 0
+            && self.only_in_a.is_empty()
+            && self.only_in_b.is_empty()
+            && self.files > 0
+    }
+
     /// 变化最大的几个变量（去掉舍入残差，同名的只留文件里最大的一条）。
     pub fn largest_changes(&self, count: usize) -> Vec<&VarReport> {
         let mut seen = std::collections::BTreeSet::new();
@@ -40,6 +49,28 @@ impl Default for Tolerance {
     }
 }
 
+/// 对比的选项：容差，只看每个文件里最早的几条记录，以及显式忽略的变量。
+///
+/// 只看最早的几条记录是给“逐位一致做不到”的平台用的（例如 x86_64：Rust 的融合乘加是照 arm64 gfortran 对的）：
+/// 舍入噪声会被物理过程逐步放大，几天以后任何容差都分不清噪声和真错位；而最早的几步里噪声还停在 1e-11 以下，
+/// 真错位（比如一个常数偏 1%）仍然在 1e-3 以上。忽略名单只忽略你写出来的名字，并在报告里列出。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Options {
+    pub tolerance: Tolerance,
+    /// 每个文件只比较前 K 条记录（第一维是 `time` 的变量）；`None` 是全部。
+    pub first_records: Option<usize>,
+    pub ignore: Vec<String>,
+}
+
+impl From<Tolerance> for Options {
+    fn from(tolerance: Tolerance) -> Self {
+        Self {
+            tolerance,
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -54,6 +85,7 @@ pub struct VarReport {
     pub name: String,
     pub status: Status,
     pub max_abs: f64,
+    /// 最大差 ÷ 该变量的最大值。
     pub max_rel: f64,
     /// 第一个超出容差的元素所在的时间步（变量第一维是 `time` 时）。
     pub first_step: Option<usize>,
@@ -89,6 +121,12 @@ pub struct Report {
     pub within_tolerance: usize,
     pub differs: usize,
     pub new_nonfinite: usize,
+    /// 按选项忽略掉的变量（出现过的）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub ignored: Vec<String>,
+    /// 只比较了前 K 条记录。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_records: Option<usize>,
     /// 不是逐位相同的那些（最多 300 条，差得多的在前）。
     pub changed: Vec<VarReport>,
     pub first_difference: Option<First>,
@@ -135,15 +173,29 @@ fn numeric(variable: &netcdf::Variable) -> bool {
     matches!(variable.vartype(), Int(_) | Float(_))
 }
 
+/// 闭合残差只按绝对容差判（相对差对 1e-16 量级的舍入残差没有意义），且不低于这个下限；容差为 0 时仍要逐位一致。
+pub const RESIDUAL_ATOL_FLOOR: f64 = 1e-6;
+
+/// 一个元素允许的最大差：`atol + rtol × 该变量的最大值`（相对**整个变量**，而不是逐元素——接近 0 的元素上，
+/// 逐元素的相对差没有意义，`0` 对 `3.8e-17` 会是 100%）。
+fn allowed(name: &str, tolerance: Tolerance, field_scale: f64) -> f64 {
+    if RESIDUAL_VARIABLES.contains(&name) && (tolerance.rtol > 0.0 || tolerance.atol > 0.0) {
+        tolerance.atol.max(RESIDUAL_ATOL_FLOOR)
+    } else {
+        tolerance.atol + tolerance.rtol * field_scale
+    }
+}
+
 fn compare_variable(
     file: &str,
     name: &str,
     a: &netcdf::Variable,
     b: &netcdf::Variable,
     times: Option<&[f64]>,
-    tolerance: Tolerance,
+    options: &Options,
 ) -> Result<VarReport> {
-    let (x, y) = (read_f64(a)?, read_f64(b)?);
+    let tolerance = options.tolerance;
+    let (mut x, mut y) = (read_f64(a)?, read_f64(b)?);
     let shape =
         |v: &netcdf::Variable| -> Vec<usize> { v.dimensions().iter().map(|d| d.len()).collect() };
     if x.len() != y.len() || shape(a) != shape(b) {
@@ -165,6 +217,16 @@ fn compare_variable(
         .map(|d| d.len())
         .filter(|n| *n > 0);
     let slice = steps.map_or(x.len().max(1), |n| (x.len() / n).max(1));
+    if let (Some(limit), Some(_)) = (options.first_records, steps) {
+        x.truncate(limit * slice);
+        y.truncate(limit * slice);
+    }
+    // 整个变量（已按记录数截取）里的最大值：相对差都按它衡量。
+    let field_scale = x
+        .iter()
+        .chain(&y)
+        .filter(|v| v.is_finite())
+        .fold(0.0f64, |m, v| m.max(v.abs()));
     let (mut max_abs, mut max_rel) = (0.0f64, 0.0f64);
     let (mut any, mut outside, mut nonfinite) = (false, false, 0usize);
     let mut first_outside: Option<usize> = None;
@@ -177,18 +239,17 @@ fn compare_variable(
             nonfinite += 1;
         }
         let diff = (p - q).abs();
-        let scale = p.abs().max(q.abs());
         if diff.is_finite() {
             max_abs = max_abs.max(diff);
-            if scale > 0.0 {
-                max_rel = max_rel.max(diff / scale);
+            if field_scale > 0.0 {
+                max_rel = max_rel.max(diff / field_scale);
             }
         } else {
             max_abs = f64::INFINITY;
             max_rel = f64::INFINITY;
         }
         // NaN 的差也算在容差之外，所以不写成 `!(diff <= …)`。
-        if diff.is_nan() || diff > tolerance.atol + tolerance.rtol * scale {
+        if diff.is_nan() || diff > allowed(name, tolerance, field_scale) {
             outside = true;
             first_outside.get_or_insert(i);
         }
@@ -215,11 +276,16 @@ fn compare_variable(
 
 /// 对比两个目录里同名的 `.nc` 文件（或两个文件）。
 pub fn compare(a: &Path, b: &Path, tolerance: Tolerance) -> Result<Report> {
+    compare_with(a, b, &Options::from(tolerance))
+}
+
+pub fn compare_with(a: &Path, b: &Path, options: &Options) -> Result<Report> {
     let (files_a, files_b) = (netcdf_files(a)?, netcdf_files(b)?);
     if files_a.is_empty() && files_b.is_empty() {
         bail!("no NetCDF files in {} or {}", a.display(), b.display());
     }
     let mut report = Report {
+        first_records: options.first_records,
         only_in_a: files_a
             .keys()
             .filter(|k| !files_b.contains_key(*k))
@@ -249,6 +315,12 @@ pub fn compare(a: &Path, b: &Path, tolerance: Tolerance) -> Result<Report> {
             if !numeric(&variable) {
                 continue;
             }
+            if options.ignore.iter().any(|i| i == &var_name) {
+                if !report.ignored.contains(&var_name) {
+                    report.ignored.push(var_name);
+                }
+                continue;
+            }
             let Some(other) = fb.variable(&var_name) else {
                 report.differs += 1;
                 report.changed.push(VarReport {
@@ -269,7 +341,7 @@ pub fn compare(a: &Path, b: &Path, tolerance: Tolerance) -> Result<Report> {
                 &variable,
                 &other,
                 times.as_deref(),
-                tolerance,
+                options,
             )?;
             report.new_nonfinite += item.new_nonfinite;
             match item.status {
