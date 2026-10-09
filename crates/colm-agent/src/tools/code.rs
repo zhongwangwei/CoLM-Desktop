@@ -41,6 +41,22 @@ fn name_arg() -> Value {
     string("workspace name (see workspace_list)")
 }
 
+/// 读代码工具的 `name`：可空。空就读应用自己正在运行的那份源码（`colm-cli ws-* --source app`），不必先建工作区。
+fn source_arg() -> Value {
+    nullable(
+        "string",
+        "workspace name (see workspace_list), or null to read the application's own source: the version that is running, read-only",
+    )
+}
+
+/// `--name N` 或 `--source app`。
+fn source_cli(args: &Value) -> [&str; 2] {
+    match opt_str(args, "name") {
+        Some(name) => ["--name", name],
+        None => ["--source", "app"],
+    }
+}
+
 /// 调 `colm-cli ws-<命令>`，工作区根目录来自上下文（不给就用 colm-cli 的默认）。
 fn ws(ctx: &ToolContext, command: &str, args: &[&str], long: bool) -> Result<Value> {
     let mut all: Vec<String> = vec![command.to_owned()];
@@ -158,11 +174,11 @@ impl Tool for SearchCode {
         "search_code"
     }
     fn description(&self) -> &'static str {
-        "Search the workspace sources with an extended regular expression (git grep). Returns path, line and text of up to 200 hits; `glob` limits the paths, e.g. *.F90 or crates/colm-core/*."
+        "Search the CoLM sources with an extended regular expression (git grep): the Fortran upstream under vendor/CoLM202X, the Rust engine under crates/, the GUI under gui/ and the docs. With name null it searches the application's own source (the version that is running); with a workspace name, that workspace. Returns path, line and text of up to 200 hits; `glob` limits the paths, e.g. *.F90 or crates/colm-core/*."
     }
     fn parameters(&self) -> Value {
         object(json!({
-            "name": name_arg(),
+            "name": source_arg(),
             "pattern": string("extended regular expression"),
             "glob": nullable("string", "path glob such as *.F90, or null"),
         }))
@@ -171,12 +187,8 @@ impl Tool for SearchCode {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        let mut cli = vec![
-            "--name",
-            req_str(args, "name")?,
-            "--pattern",
-            req_str(args, "pattern")?,
-        ];
+        let mut cli = source_cli(args).to_vec();
+        cli.extend(["--pattern", req_str(args, "pattern")?]);
         if let Some(glob) = opt_str(args, "glob") {
             cli.extend(["--glob", glob]);
         }
@@ -190,11 +202,11 @@ impl Tool for ReadFile {
         "read_file"
     }
     fn description(&self) -> &'static str {
-        "Read lines of a text file in the workspace (path relative to the repository root), with line numbers. At most 400 lines per call; give from_line and to_line (1-based, inclusive)."
+        "Read lines of a text file of the CoLM sources (path relative to the repository root), with line numbers: the application's own source when name is null, or a workspace's copy. At most 400 lines per call; give from_line and to_line (1-based, inclusive)."
     }
     fn parameters(&self) -> Value {
         object(json!({
-            "name": name_arg(),
+            "name": source_arg(),
             "path": string("file path relative to the repository root"),
             "from_line": nullable("integer", "first line, 1-based; null for 1"),
             "to_line": nullable("integer", "last line; null for 400 lines from from_line"),
@@ -206,12 +218,8 @@ impl Tool for ReadFile {
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
         let from = args["from_line"].as_u64().map(|n| n.to_string());
         let to = args["to_line"].as_u64().map(|n| n.to_string());
-        let mut cli = vec![
-            "--name",
-            req_str(args, "name")?,
-            "--path",
-            req_str(args, "path")?,
-        ];
+        let mut cli = source_cli(args).to_vec();
+        cli.extend(["--path", req_str(args, "path")?]);
         if let Some(from) = &from {
             cli.extend(["--from", from.as_str()]);
         }
@@ -232,24 +240,16 @@ impl Tool for ListSymbols {
     }
     fn parameters(&self) -> Value {
         object(
-            json!({ "name": name_arg(), "path": string("file path relative to the repository root") }),
+            json!({ "name": source_arg(), "path": string("file path relative to the repository root") }),
         )
     }
     fn tier(&self) -> Tier {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        ws(
-            ctx,
-            "ws-symbols",
-            &[
-                "--name",
-                req_str(args, "name")?,
-                "--path",
-                req_str(args, "path")?,
-            ],
-            false,
-        )
+        let mut cli = source_cli(args).to_vec();
+        cli.extend(["--path", req_str(args, "path")?]);
+        ws(ctx, "ws-symbols", &cli, false)
     }
 }
 

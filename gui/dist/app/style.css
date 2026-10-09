@@ -891,3 +891,6 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .next-step { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); }
 .next-step.recommended { color: var(--text); }
 .hybrid-tabs { margin: 4px 0 var(--s-lg); }
+
+.assistant-page-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.assistant-page-chips .assistant-chip { font-size: 12px; padding: 4px 10px; }

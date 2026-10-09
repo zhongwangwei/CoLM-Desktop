@@ -195,3 +195,20 @@ fn the_tools_ask_the_cli_for_the_workspace_root_when_the_context_has_one() {
 }
 
 use std::path::{Path, PathBuf};
+
+/// 读代码的三个工具：`name` 可空，空就读应用自己的源码（`--source app`），给了就读那个工作区。
+#[test]
+fn reading_code_without_a_workspace_reads_the_application_source() {
+    assert_eq!(source_cli(&json!({ "name": null })), ["--source", "app"]);
+    assert_eq!(source_cli(&json!({ "name": "demo" })), ["--name", "demo"]);
+    let registry = registry();
+    for name in ["search_code", "read_file", "list_symbols"] {
+        let schema = registry.find(name).unwrap().parameters();
+        assert!(
+            schema["properties"]["name"]["type"]
+                .to_string()
+                .contains("null"),
+            "{name}: name must be nullable"
+        );
+    }
+}

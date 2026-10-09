@@ -19,6 +19,33 @@ assert.equal(
   'page: result\nselected case: /p/A\nkernel: /k',
 );
 assert.equal(assistant.viewContext({}), '');
+// 具体步骤与这一页的关键信息也附上；步骤与页面同名时不重复。
+assert.equal(
+  assistant.viewContext({ step: 'result', flow: 'result-evaluation', caseDir: '/p/A', details: ['x: 1'] }),
+  'page: result\nworkflow step: result-evaluation\nselected case: /p/A\nx: 1',
+);
+assert.equal(assistant.viewContext({ step: 'run', flow: 'run' }), 'page: run');
+{
+  const lines = assistant.pageDetails('result-evaluation', {
+    metrics: [{ name: 'Qle', n: 100, nse: 0.41, kge: 0.5, rmse: 30.2, bias: -12 }],
+    batch: 3,
+  });
+  assert.equal(lines[0], 'cases in this batch: 3');
+  assert.ok(lines.some(line => line.includes('Qle') && line.includes('NSE=0.410')), lines.join('\n'));
+  assert.deepEqual(assistant.pageDetails('run', { metrics: [{ name: 'Qle', nse: 0.4 }] }), []);
+  assert.ok(assistant.pageDetails('result-tuning', { badges: { tuning: '运行中 3/9' } })
+    .includes('calibration Study status: 运行中 3/9'));
+  assert.ok(assistant.pageDetails('hybrid-process')[0].includes('process replacement'));
+}
+// 提问建议跟着步骤走；没有建议的步骤返回空。
+assert.ok(assistant.pagePrompts('result-evaluation').length >= 2);
+assert.ok(assistant.pagePrompts('params-water')[0].prompt.includes('过程参数'));
+assert.ok(assistant.pagePrompts('basic-files').length === 1);
+assert.deepEqual(assistant.pagePrompts('prep-site'), []);
+assert.deepEqual(assistant.pagePrompts(undefined), []);
+for (const step of ['run', 'research', 'result-tuning', 'result-uncertainty', 'hybrid-learn', 'hybrid-process', 'result-diagnostics']) {
+  for (const { label, prompt } of assistant.pagePrompts(step)) assert.ok(label && prompt, step);
+}
 
 assert.deepEqual(assistant.parseEvent('{"type":"turn_done","content":"x","steps":1}'), { type: 'turn_done', content: 'x', steps: 1 });
 assert.equal(assistant.parseEvent('not json'), null);

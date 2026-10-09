@@ -132,3 +132,30 @@ fn fortran_and_rust_keywords_with_modifiers_are_recognised() {
     );
     assert_eq!(rust_symbol("let fn_name = 3;"), None);
 }
+
+/// 不建工作区也能看代码：任一目录（解开的源码包没有 `.git`，走 `git grep --no-index`）。
+#[test]
+fn a_plain_source_directory_can_be_searched_read_and_listed() {
+    let root = temp("plain");
+    let dir = root.join("colm-src");
+    std::fs::create_dir_all(dir.join("vendor")).unwrap();
+    std::fs::write(
+        dir.join("vendor/MOD_A.F90"),
+        "MODULE MOD_A\nCONTAINS\n   SUBROUTINE leaf_area()\n   END SUBROUTINE leaf_area\nEND MODULE MOD_A\n",
+    )
+    .unwrap();
+    assert!(!dir.join(".git").exists());
+    let hits = search_in(&dir, "leaf_area", Some("*.F90")).unwrap();
+    assert!(
+        hits.iter()
+            .any(|h| h.path.ends_with("MOD_A.F90") && h.line == 3),
+        "{hits:?}"
+    );
+    let part = read_lines_in(&dir, "vendor/MOD_A.F90", 3, 3).unwrap();
+    assert!(part.text.contains("SUBROUTINE leaf_area"));
+    let symbols = symbols_in(&dir, "vendor/MOD_A.F90").unwrap();
+    assert!(symbols.iter().any(|s| s.name == "leaf_area"));
+    // 越界照样挡住。
+    assert!(read_lines_in(&dir, "../outside.txt", 1, 1).is_err());
+    let _ = std::fs::remove_dir_all(&root);
+}

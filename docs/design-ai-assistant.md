@@ -131,6 +131,7 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 | `study_summary` | Study 的状态、最优成员、参数是否压到边界、校准与验证期对比 | `colm-cli study-status` |
 | `hybrid_info` / `hybrid_check` | AI 参数化模型的配置与空跑结果 | 现有命令 |
 | `search_docs` | 搜项目文档（设计文档、实现记录、`upstream-bugs.md`） | ripgrep |
+| `search_code` / `read_file` / `list_symbols`（不给工作区名） | 读**应用自己正在运行的那份源码**：Fortran 上游、Rust 引擎、GUI、文档（第 651 轮） | `colm-cli ws-* --source app`：开发环境里是仓库，安装包里把随附的 `colm-src.tar.gz` 解到缓存目录 |
 | `environment_doctor` | 工具链（gfortran、mpif90、netCDF、cargo）、内核、数据盘、远程主机的状态 | 新增 |
 
 ### B 级：运行操作，逐次审批
@@ -290,6 +291,13 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 从应用里启动时（外部后端挂载），`colm-mcp` 只做转发：经本机回环 TCP、带一次性令牌交回 `colm-agent`，用和内置后端同一处 `execute_tool` 执行，所以审批、审计、联网、操作窗口都一样。
 - 单独启动（`colm-mcp --cli <colm-cli>`，例如在终端的 Claude Code 里挂上）时只提供只读工具，就地执行。
 - stdout 只输出 MCP 消息，日志写 stderr，stdin 关闭即退出。
+
+### 8.2 范围与上下文（第 651 轮，2026-10-09 用户）
+
+- **范围**（写进系统提示）：CoLM 与本应用（建例、运行、排错、配置、日志、结果、Study、物理与参数、代码、开发工作区）；与 CoLM 建模相关的陆面科学；**通用编程与数据分析也答**（Fortran、Rust、Python、NetCDF、shell、数值方法、统计）。**闲聊与日常、无关问题不答**：一句话说明能帮什么，给一个贴合当前页面的下一步；问候与道谢只回一行。不另加话题分类器（多一次调用，误拦难调）。
+- **讲代码要看代码**：解释 CoLM 或本仓库怎么实现时，用读代码工具与 `search_docs`，引用文件与行号；不凭记忆。读代码工具不建工作区也能用。
+- **随消息附上的窗口上下文**（`[Current view in the application]`）：页面、具体步骤（`result-tuning`、`hybrid-process`……）、选中的算例、内核、项目目录；评估与研究页另附已算出的指标（每个变量的 n、NSE、KGE、RMSE、偏差，最多 8 个）、Study 状态与 AI 混合建模的模式。只是摘要，数字仍要用工具确认。
+- **每一步的提问建议**：输入框上方几个按钮（`pagePrompts`），点了填进输入框、可改了再发；空状态里原有的三个通用建议不变。
 
 ## 10. 分阶段计划与验收
 

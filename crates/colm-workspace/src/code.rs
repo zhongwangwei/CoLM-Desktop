@@ -1,7 +1,8 @@
 //! 只读的代码工具（docs/design-ai-assistant.md 第 4 节 C 级里不需要审批的那几个）：搜索、按行读文件、
-//! 列符号。全部限定在工作区的 `src/` 里。
+//! 列符号。限定在一个源码根目录里：工作区的 `src/`，或者应用自己正在运行的那份源码（`*_in` 系列，
+//! 给不建工作区时只读地看代码用）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{bail, ensure, Context, Result};
 use serde::Serialize;
@@ -22,12 +23,21 @@ pub struct Hit {
 
 /// 在工作区里搜索（`git grep -E`，只看受管理的文件）。`glob` 可以限定路径，例如 `*.F90`。
 pub fn search(workspace: &Workspace, pattern: &str, glob: Option<&str>) -> Result<Vec<Hit>> {
+    search_in(&workspace.src(), pattern, glob)
+}
+
+/// 在任一源码根目录里搜索：是 git 仓库就只看受管理的文件，否则（解开的源码包）用 `git grep --no-index`。
+pub fn search_in(root: &Path, pattern: &str, glob: Option<&str>) -> Result<Vec<Hit>> {
     ensure!(
         !pattern.is_empty() && pattern.len() <= 200,
         "the pattern must be 1-200 characters"
     );
     ensure!(!pattern.contains('\0'), "bad pattern");
-    let mut args = vec!["grep", "-n", "-I", "-E", "--no-color", "-e", pattern];
+    let mut args = vec!["grep", "-n", "-I", "-E", "--no-color"];
+    if !root.join(".git").exists() {
+        args.push("--no-index");
+    }
+    args.extend(["-e", pattern]);
     if let Some(glob) = glob {
         ensure!(
             glob.len() <= 100 && !glob.starts_with('-') && !glob.contains(".."),
@@ -38,7 +48,7 @@ pub fn search(workspace: &Workspace, pattern: &str, glob: Option<&str>) -> Resul
     }
     let output = std::process::Command::new("git")
         .arg("-C")
-        .arg(workspace.src())
+        .arg(root)
         .args(&args)
         .output()
         .context("cannot run git")?;
@@ -68,6 +78,11 @@ pub fn search(workspace: &Workspace, pattern: &str, glob: Option<&str>) -> Resul
 
 /// 把相对路径解析到 `src/` 里的一个普通文件；跟着符号链接跑出去也不行。
 pub fn resolve(workspace: &Workspace, path: &str) -> Result<PathBuf> {
+    resolve_in(&workspace.src(), path)
+}
+
+/// 同 [`resolve`]，根目录任给。
+pub fn resolve_in(root: &Path, path: &str) -> Result<PathBuf> {
     crate::patch::check_path(path).or_else(|e| {
         // 读 oracle/golden 是允许的（只是不能改），这里只挡 .git 与越界。
         if path.starts_with("oracle/golden/") {
@@ -76,13 +91,14 @@ pub fn resolve(workspace: &Workspace, path: &str) -> Result<PathBuf> {
             Err(e)
         }
     })?;
-    let src = workspace.src().canonicalize()?;
-    let full = workspace
-        .src()
+    let src = root
+        .canonicalize()
+        .with_context(|| format!("source root {} does not exist", root.display()))?;
+    let full = root
         .join(path)
         .canonicalize()
-        .with_context(|| format!("{path} does not exist in the workspace"))?;
-    ensure!(full.starts_with(&src), "{path} is outside the workspace");
+        .with_context(|| format!("{path} does not exist in the source"))?;
+    ensure!(full.starts_with(&src), "{path} is outside the source");
     ensure!(full.is_file(), "{path} is not a file");
     Ok(full)
 }
@@ -98,11 +114,16 @@ pub struct Excerpt {
 
 /// 读 `[from, to]`（从 1 起，含）行，最多 [`MAX_READ_LINES`] 行；每行前带行号。
 pub fn read_lines(workspace: &Workspace, path: &str, from: usize, to: usize) -> Result<Excerpt> {
+    read_lines_in(&workspace.src(), path, from, to)
+}
+
+/// 同 [`read_lines`]，根目录任给。
+pub fn read_lines_in(root: &Path, path: &str, from: usize, to: usize) -> Result<Excerpt> {
     ensure!(
         from >= 1 && to >= from,
         "give a line range with 1 <= from <= to"
     );
-    let full = resolve(workspace, path)?;
+    let full = resolve_in(root, path)?;
     let bytes = std::fs::read(&full)?;
     ensure!(
         !bytes.contains(&0),
@@ -143,7 +164,12 @@ pub struct Symbol {
 /// 列出一个文件里的符号：Fortran 的 module、subroutine、function、program、type；Rust 的 fn、struct、enum、
 /// trait、impl、mod、const、static。按行首关键字识别，不做完整解析——够用来定位。
 pub fn symbols(workspace: &Workspace, path: &str) -> Result<Vec<Symbol>> {
-    let full = resolve(workspace, path)?;
+    symbols_in(&workspace.src(), path)
+}
+
+/// 同 [`symbols`]，根目录任给。
+pub fn symbols_in(root: &Path, path: &str) -> Result<Vec<Symbol>> {
+    let full = resolve_in(root, path)?;
     let text = std::fs::read_to_string(&full).with_context(|| format!("cannot read {path}"))?;
     let lower = path.to_ascii_lowercase();
     let fortran = [".f90", ".f", ".f95", ".f03", ".for"]

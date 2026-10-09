@@ -32313,3 +32313,17 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **验证**：`gui/tests` 17 个脚本全部通过（新增 `research.mjs`：推荐、准备情况、左栏状态、两种模式的过滤；`results.mjs` 改为断言研究段的位置与可选性；`i18n.mjs` 跟着英文改名）；`xtask check-gui`：117 个命令全部解析、没有循环依赖。浏览器里（静态服务、无后端）逐页看过左栏、研究总览、两种模式的训练页、结果页“下一步”与英文界面。
 
 **没做**：研究入口的状态只接了参数率定与不确定性分析（AI 两项没有 Study 状态可显示）；推荐只看 NSE；没有后端的真机流程（建例 → 跑 → 评估 → 率定 → 应用 → 比较）未在 Tauri 里走一遍。
+
+## 第 651 轮：AI 助手——范围、窗口上下文、每步提问建议，不建工作区也能读源码
+
+**问题**（用户）：助手要限定在 CoLM 上、不发散；和 CoLM 结合得更紧；“每个结论都来自工具结果”就应该允许它看源码。现状：系统提示只说了身份，没有说什么不答；随消息附上的“当前页面”取的是页面（`result`）而不是步骤（`result-tuning`），助手分不清是在评估还是在率定；`search_code`/`read_file`/`list_symbols` 必须先建一个开发工作区，不建就看不了代码，只能凭记忆讲实现。
+
+**改动**：
+- 系统提示（`colm-agent/src/prompt.md`）加“Scope”一节：CoLM、本应用、与建模相关的陆面科学、**通用编程与数据分析**在范围内；**闲聊与无关问题不答**（一句话说明并给出贴合当前页面的下一步，问候只回一行）；讲 CoLM 或本仓库的实现时读源码与文档、引用文件与行号。并说明消息末尾 `[Current view in the application]` 块的含义（与 `session.rs` 的 `VIEW_MARKER` 一致）。
+- **读源码**：`colm-workspace::code` 的搜索、读行、列符号改为对任一根目录工作（`search_in`/`read_lines_in`/`symbols_in`；工作区版本调用它们，行为不变）；不是 git 仓库的目录用 `git grep --no-index`。`colm-cli ws-search/ws-read/ws-symbols` 多了 `--source DIR`，`--source app` 是应用自己正在运行的那份源码：开发环境里是仓库（与远程功能找引擎源码同一套 `engine_source`），安装包里把随附的 `colm-src.tar.gz` 解到 `cache_dir()/source/<版本>-<大小>/`，只解一次。助手的三个读代码工具 `name` 改为可空，空就是 `--source app`。
+- **窗口上下文**：`assistant.js` 的 `viewContext` 多附具体步骤，以及 `pageDetails`：评估与研究页附上已算出的指标（最多 8 个变量的 n、NSE、KGE、RMSE、偏差）、参数率定与不确定性分析的 Study 状态、AI 混合建模的模式、本次的算例数。
+- **每步的提问建议**：`pagePrompts(step)`，显示在输入框上方，点了填进输入框；覆盖基本设定、过程参数、运行、结果分析各页、研究总览、参数率定、不确定性分析、AI 两种模式。
+
+**验证**：`ws-search --source app --pattern "SUBROUTINE twostream" --glob '*.F90'` 命中 `MOD_Albedo.F90:458`；`ws-read`、`ws-symbols` 读出 Rust 与 Fortran 文件；`--path ../../etc/passwd` 被拒。新增测试：`colm-workspace` 对一个没有 `.git` 的目录搜索、读行、列符号并拒绝越界；`colm-agent` 三个工具的 `name` 可空、空时传 `--source app`；`gui/tests/assistant.mjs` 覆盖 `viewContext`、`pageDetails`、`pagePrompts`。`colm-agent` 54 项、`colm-workspace` 37 项、`colm-cli` 264 项、`gui/tests` 17 个脚本、`xtask check-gui`、clippy 与 fmt 全部通过。
+
+**没做**：安装包里解压源码那一支只做了代码，没有在打出来的安装包上实测；范围限制只靠系统提示，没有在真实模型上做一组跑题提问的验收；“问助手”按钮还没放进指标表、失败日志与参数字段旁边；诊断工具（P5）未做。

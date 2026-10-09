@@ -360,6 +360,37 @@ fn engine_source() -> Result<Source> {
     bail!("the engine sources were not found next to colm-cli; this build cannot run remotely")
 }
 
+/// 应用自己正在运行的那份源码的目录（助手不建工作区时只读地看代码用）：开发环境里是仓库根；
+/// 安装包里把随附的 `colm-src.tar.gz` 解到缓存目录（按版本与包的大小区分，同一份只解一次）。
+pub(crate) fn app_source_dir() -> Result<PathBuf> {
+    match engine_source()? {
+        Source::Checkout(repo) => Ok(repo),
+        Source::Tarball(tarball) => {
+            let size = std::fs::metadata(&tarball)?.len();
+            let dest = engine::cache_dir()
+                .join("source")
+                .join(format!("{}-{size}", env!("CARGO_PKG_VERSION")));
+            if dest.join("Cargo.lock").is_file() {
+                return Ok(dest);
+            }
+            let staging = dest.with_extension(format!("tmp{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&staging);
+            std::fs::create_dir_all(&staging)?;
+            let status = Command::new("tar")
+                .arg("-xzf")
+                .arg(&tarball)
+                .arg("-C")
+                .arg(&staging)
+                .status()
+                .context("cannot run tar")?;
+            ensure!(status.success(), "cannot unpack {}", tarball.display());
+            let _ = std::fs::remove_dir_all(&dest);
+            std::fs::rename(&staging, &dest)?;
+            Ok(dest)
+        }
+    }
+}
+
 /// 这次用哪个引擎：服务器上从源码编，或者传一个预编包。
 enum Engine {
     Source(Snapshot),

@@ -4,9 +4,9 @@
 //! colm-cli ws-create   --name N --from <本地仓库|地址|源码包> [--rev R] [--root DIR]
 //! colm-cli ws-list     [--root DIR]
 //! colm-cli ws-status   --name N [--root DIR]
-//! colm-cli ws-search   --name N --pattern RE [--glob G]
-//! colm-cli ws-read     --name N --path P [--from L] [--to L]
-//! colm-cli ws-symbols  --name N --path P
+//! colm-cli ws-search   (--name N | --source DIR) --pattern RE [--glob G]
+//! colm-cli ws-read     (--name N | --source DIR) --path P [--from L] [--to L]
+//! colm-cli ws-symbols  (--name N | --source DIR) --path P      # --source：应用自己的源码，只读，不建工作区
 //! colm-cli ws-patch    --name N --message M (--diff-file F | --diff TEXT)
 //! colm-cli ws-revert   --name N --commit HEX
 //! colm-cli ws-build-engine --name N [--network 1]
@@ -37,6 +37,15 @@ use colm_workspace::{build, code, compare, kernels, layout, parity, patch, testr
 use serde_json::json;
 
 use super::Opts;
+
+/// 只读代码命令的根目录：`--source app`（应用自己正在运行的那份源码）、`--source DIR`，或 `--name N`（工作区的 `src/`）。
+fn source_root(opts: &Opts) -> Result<PathBuf> {
+    match opts.get("--source").as_deref() {
+        Some("app") => super::remote_cmd::app_source_dir(),
+        Some(dir) => Ok(PathBuf::from(dir)),
+        None => Ok(open(opts)?.src()),
+    }
+}
 
 fn root(opts: &Opts) -> PathBuf {
     opts.get("--root")
@@ -149,8 +158,8 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             }));
         }
         "ws-search" => {
-            let hits = code::search(
-                &open(opts)?,
+            let hits = code::search_in(
+                &source_root(opts)?,
                 &opts.need_str("--pattern")?,
                 opts.get("--glob").as_deref(),
             )?;
@@ -159,15 +168,15 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         "ws-read" => {
             let from = number(opts, "--from")?.unwrap_or(1);
             let to = number(opts, "--to")?.unwrap_or(from + code::MAX_READ_LINES - 1);
-            print(json!(code::read_lines(
-                &open(opts)?,
+            print(json!(code::read_lines_in(
+                &source_root(opts)?,
                 &opts.need_str("--path")?,
                 from,
                 to
             )?));
         }
         "ws-symbols" => print(json!({
-            "symbols": code::symbols(&open(opts)?, &opts.need_str("--path")?)?
+            "symbols": code::symbols_in(&source_root(opts)?, &opts.need_str("--path")?)?
         })),
         "ws-patch" => {
             let workspace = open(opts)?;

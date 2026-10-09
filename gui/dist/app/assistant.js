@@ -12,14 +12,76 @@ import { language, translateZh } from './i18n.js';
 
 // ---- 纯函数（tests/assistant.mjs）----------------------------------------------------------
 
-/** 随消息附上的“当前页面”说明：页面、选中的算例、内核、项目目录。 */
-export function viewContext({ step, caseDir, kernel, root }) {
+/** 随消息附上的“当前页面”说明：页面与具体步骤、选中的算例、内核、项目目录，以及这一页的关键信息（`details`）。 */
+export function viewContext({ step, flow, caseDir, kernel, root, details = [] }) {
   return [
     step && `page: ${step}`,
+    flow && flow !== step && `workflow step: ${flow}`,
     caseDir && `selected case: ${caseDir}`,
     kernel && `kernel: ${kernel}`,
     root && `project directory: ${root}`,
+    ...details,
   ].filter(Boolean).join('\n');
+}
+
+const fixed = (value, digits) => (Number.isFinite(value) ? Number(value).toFixed(digits) : 'n/a');
+
+/**
+ * 这一页的关键信息（英文，给模型看，不显示）：评估页附上已算出的指标，研究页附上 Study 状态与 AI 模式。
+ * `metrics` 是 `state.resultMetrics` 里属于选中算例的行；`badges` 是 `state.studyBadges`。
+ */
+export function pageDetails(flow, { metrics = [], badges = {}, batch = 0 } = {}) {
+  const lines = [];
+  if (batch > 1) lines.push(`cases in this batch: ${batch}`);
+  if (flow?.startsWith('result-') || flow === 'research') {
+    const rows = metrics.filter(row => row && row.name).slice(0, 8);
+    if (rows.length) {
+      lines.push('evaluation already computed in the window (model vs observations):');
+      for (const row of rows) {
+        lines.push(`- ${row.name}: n=${row.n ?? 'n/a'}, NSE=${fixed(row.nse, 3)}, KGE=${fixed(row.kge, 3)}, RMSE=${fixed(row.rmse, 3)}, bias=${fixed(row.bias, 3)}`);
+      }
+    }
+  }
+  if (flow === 'result-tuning' && badges.tuning) lines.push(`calibration Study status: ${badges.tuning}`);
+  if (flow === 'result-uncertainty' && badges.uq) lines.push(`uncertainty Study status: ${badges.uq}`);
+  if (flow === 'hybrid-learn') lines.push('AI hybrid modeling mode: learned parameters (network sets parameters per patch from features)');
+  if (flow === 'hybrid-process') lines.push('AI hybrid modeling mode: process replacement (network replaces soil-moisture stress beta)');
+  return lines;
+}
+
+/** 每一步给出的提问建议（`label` 显示在按钮上，`prompt` 填进输入框）。没有建议的步骤返回空数组。 */
+export function pagePrompts(flow) {
+  const P = (label, prompt) => ({ label, prompt });
+  if (!flow) return [];
+  if (flow.startsWith('basic-')) {
+    return [P('帮我建算例', '帮我用这个目录里的站点建一个算例，需要我拿主意的地方再问我。')];
+  }
+  if (flow.startsWith('params-')) {
+    return [P('解释这一页的参数', '解释当前页面这些过程参数的含义、常用取值，以及改动它们会影响哪些输出。')];
+  }
+  const table = {
+    run: [
+      P('检查运行设置', '检查当前算例的运行设置（时段、预热、输出）是否合理。'),
+      P('为什么失败', '上一次运行有没有失败或异常？请看运行状态与日志，找出原因。'),
+    ],
+    'result-overview': [P('总结这次结果', '总结当前算例的结果：模拟时段、主要输出，以及有没有明显异常。')],
+    'result-series': [P('偏差在哪个季节', '时间序列上，模型与观测的偏差主要出现在哪个季节或时段？')],
+    'result-evaluation': [
+      P('解释这些指标', '解释当前算例的评估指标：哪些变量模拟得好、哪些差，可能的原因是什么？'),
+      P('偏差在哪个季节', '偏差主要出现在哪个季节或时段？请结合时间序列与指标说明。'),
+    ],
+    'result-comparison': [P('哪个站点最差', '多站点比较里哪个站点模拟得最差？它和其他站点有什么不同？')],
+    'result-diagnostics': [P('检查闭合', '检查水量与能量闭合诊断（f_xerr、f_zerr）有没有异常，异常出在哪个时段。')],
+    research: [P('我该做哪种研究', '根据当前算例的评估结果，我应该先做参数率定、不确定性分析，还是 AI 混合建模？为什么？')],
+    'result-tuning': [
+      P('该率定哪些参数', '针对当前算例的主要偏差，参数率定应该选哪些参数、范围怎么定？'),
+      P('解读率定结果', '解读当前参数率定的结果：最优参数有没有压在范围边界？验证期有没有变好？'),
+    ],
+    'result-uncertainty': [P('哪些参数最敏感', '当前算例的输出对哪些参数最敏感？不确定性分析该选哪些参数和范围？')],
+    'hybrid-learn': [P('适合学哪些参数', '在当前算例上，哪些参数适合让网络按地点特征去学？输入特征怎么选？')],
+    'hybrid-process': [P('能不能替换 β', '当前算例能不能用 AI 替换土壤水分胁迫 β？前提条件（植物水力、地表模式、引擎）满足吗？')],
+  };
+  return table[flow] ?? [];
 }
 
 /** 一行协议事件；读不懂的返回 null。 */
@@ -524,12 +586,38 @@ async function saveSettings() {
 
 function currentView() {
   const step = document.querySelector('.page:not([hidden])')?.dataset.step;
+  const caseDir = state.selected?.dir;
   return {
     step,
-    caseDir: state.selected?.dir,
+    flow: state.step,
+    caseDir,
     kernel: $('kernel')?.value,
     root: $('root')?.value?.trim(),
+    details: pageDetails(state.step, {
+      metrics: (state.resultMetrics ?? []).filter(row => !caseDir || row.case_dir === caseDir),
+      badges: state.studyBadges ?? {},
+      batch: state.batch?.length ?? 0,
+    }),
   };
+}
+
+/** 输入框上方的提问建议：跟着当前步骤变；点一下填进输入框，可以改了再发。 */
+function renderPageChips() {
+  const host = $('assistant-page-chips');
+  if (!host) return;
+  const prompts = pagePrompts(state.step);
+  host.hidden = !prompts.length;
+  host.replaceChildren(...prompts.map(({ label, prompt }) => {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'assistant-chip';
+    chip.textContent = language() === 'en' ? translateZh(label) : label;
+    chip.onclick = () => {
+      $('assistant-text').value = language() === 'en' ? translateZh(prompt) : prompt;
+      $('assistant-text').focus();
+    };
+    return chip;
+  }));
 }
 
 /** 项目目录：开着的项目根，否则选中算例的上一级。 */
@@ -854,6 +942,8 @@ function wire() {
     };
   }
   ui.emptyState = log().querySelector('.assistant-empty');
+  renderPageChips();
+  addEventListener('colm:step', renderPageChips);
   $('assistant-new').onclick = () => { $('assistant-history').hidden = true; startNewConversation(); };
   $('assistant-history-btn').onclick = () => showHistory().catch(e => notice(String(e?.message || e)));
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
