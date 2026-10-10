@@ -731,7 +731,7 @@ body:not(.expert) .assistant-settings [data-expert-only],
 body:not(.expert) .assistant-settings:not([data-provider="custom"]) [data-assistant-address],
 body.expert .assistant-settings [data-assistant-normal] { display: none !important; }
 .assistant-model-row { display: flex; gap: 8px; min-width: 0; }
-.assistant-model-row .input { min-width: 0; flex: 1; }
+.assistant-model-row .input, .assistant-model-row .select { min-width: 0; flex: 1; }
 .assistant-model-row button { flex: none; }
 .assistant-settings > p:empty { display: none; }
 /* 只属于某个后端的设置项：隐藏时压过各自的 grid/flex 显示方式。 */
@@ -751,6 +751,7 @@ body.expert .assistant-settings [data-assistant-normal] { display: none !importa
 .assistant-history-item:hover .icon-btn { opacity: 1; }
 .assistant-settings > label { padding-top: 7px; font-size: 12.5px; }
 .assistant-settings > p, .assistant-settings > .pill-row, .assistant-key-row { grid-column: 2; margin: 0; }
+.assistant-settings > .assistant-opencode-setup { grid-column: 1 / -1; min-width: 0; }
 .assistant-key-row { display: flex; gap: 6px; }
 .assistant-key-ok { color: var(--pass); font-weight: 600; }
 .assistant-key-row .input { flex: 1; }
@@ -913,3 +914,9 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 
 .assistant-page-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .assistant-page-chips .assistant-chip { font-size: 12px; padding: 4px 10px; }
+
+/* Keep connection actions visible when the server form scrolls. */
+#remote-dialog .input { margin-bottom: 0; }
+#remote-dialog > .assistant-approval-actions { position: sticky; bottom: 0; background: var(--elevated); padding-top: 12px; }
+.remote-auth-row { grid-column: 1 / -1; }
+.remote-auth-row[hidden] { display: none; }

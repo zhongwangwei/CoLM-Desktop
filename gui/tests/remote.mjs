@@ -10,7 +10,7 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-remote-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 // 只测纯函数：把依赖 DOM 与后端的模块换成空壳。
 for (const [name, body] of Object.entries({
-  'ipc.js': 'export const invoke = (...args) => globalThis.remoteInvoke(...args); export const listen = async () => {}; export const hasBackend = false;',
+  'ipc.js': 'export const invoke = (...args) => globalThis.remoteInvoke(...args); export const listen = async () => {}; export const hasBackend = true;',
   'ui.js': 'export const $ = id => globalThis.remoteNodes?.[id] ?? null; export const status = () => {}; export const baseName = p => String(p).split("/").pop();',
   'sites.js': 'export const renderCases = () => {};',
   'results.js': 'export const invalidateResultCase = () => {};',
@@ -19,7 +19,7 @@ for (const [name, body] of Object.entries({
   'engine.js': 'export const modelEngine = () => "rust";',
 })) await writeFile(join(temp, 'app', name), body);
 // Expose internal actions only in the temporary test copy.
-await writeFile(join(temp, 'app', 'remote.js'), (await readFile(join(temp, 'app', 'remote.js'), 'utf8')) + '\nexport { resumeJobs, refreshJob, fetchJob, renderJobs, jobs };\n');
+await writeFile(join(temp, 'app', 'remote.js'), (await readFile(join(temp, 'app', 'remote.js'), 'utf8')) + '\nexport { resumeJobs, refreshJob, fetchJob, renderJobs, jobs, formServer, fillDialog, closeDialog, testConnection, saveServer, syncAuth, clearPassword, wire };\n');
 const remote = await import(pathToFileURL(join(temp, 'app', 'remote.js')).href);
 
 assert.deepEqual(
@@ -90,6 +90,7 @@ for (const history of [true, false]) {
   const calls = [];
   globalThis.remoteInvoke = async name => {
     calls.push(name);
+    if (name === 'remote_job_record') return { host: 'server', job: 'old-job' };
     return { record: { host: 'server', job: 'old-job' }, status: { state: 'finished', exit_code: 0 } };
   };
   await remote.resumeJobs();
@@ -104,11 +105,11 @@ for (const history of [true, false]) {
 }
 remote.jobs.clear();
 state.cases = [{ dir: '/case', has_history: false }];
-let statusCalls = 0;
 const identityCalls = [];
 globalThis.remoteInvoke = async name => {
   identityCalls.push(name);
-  return { record: { host: 'server', job: ++statusCalls === 1 ? 'old-job' : 'new-job' }, status: { state: 'finished', exit_code: 0 } };
+  if (name === 'remote_job_record') return { host: 'server', job: 'old-job' };
+  return { record: { host: 'server', job: 'new-job' }, status: { state: 'finished', exit_code: 0 } };
 };
 await remote.resumeJobs();
 assert.equal(identityCalls.includes('remote_fetch'), false);
@@ -138,3 +139,161 @@ fetchButton.onclick();
 await new Promise(resolve => setImmediate(resolve));
 assert.equal(identityCalls.at(-1), 'remote_fetch');
 assert.equal(remote.jobs.get('/case').fetched, true);
+
+remote.jobs.clear();
+
+// Authentication fields keep secrets out of serialized server profiles.
+function field(value = '') {
+  return { value, hidden: false, options: [], children: [], handlers: {},
+    addEventListener(name, fn) { this.handlers[name] = fn; },
+    replaceChildren(...items) { this.children = items; this.options = items; },
+    appendChild(item) { this.children.push(item); this.options = this.children; },
+    prepend(item) { this.children.unshift(item); }, close() {}, showModal() {},
+  };
+}
+globalThis.Option = function(text, value) { return { text, value }; };
+globalThis.addEventListener = () => {};
+const authIds = ['run-target', 'manage-servers', 'serverRunCard', 'preview-job', 'remote-preview-close',
+  'remote-which', 'remote-host', 'remote-username', 'remote-port', 'remote-auth', 'remote-identity',
+  'remote-password', 'remote-password-note', 'remote-key-row', 'remote-password-row', 'remote-pick-key',
+  'remote-root', 'remote-maps', 'remote-threads', 'remote-scheduler', 'remote-partition', 'remote-account',
+  'remote-walltime', 'remote-cpus', 'remote-memory', 'remote-nodes', 'remote-fetch-vars', 'remote-env',
+  'remote-directives', 'remote-delete', 'remote-probe-result', 'remote-dialog', 'remote-test',
+  'remote-list-kernels', 'remote-build-kernel', 'remote-save', 'remote-close', 'remote-queue-list'];
+globalThis.remoteNodes = Object.fromEntries(authIds.map(id => [id, field()]));
+const fields = globalThis.remoteNodes;
+let configured = { servers: [{ host: 'legacy', root: '/data/jobs' }] };
+const authCalls = [];
+globalThis.remoteInvoke = async (name, args) => {
+  authCalls.push({ name, args });
+  if (name === 'remote_config') return configured;
+  if (name === 'remote_save_config') configured = args.config;
+  if (name === 'remote_probe') return { hostname: 'server', os: 'Linux', arch: 'x86_64' };
+};
+remote.wire();
+await new Promise(resolve => setImmediate(resolve));
+remote.fillDialog('legacy');
+assert.equal(fields['remote-auth'].value, 'config');
+assert.equal(fields['remote-username'].value, '');
+assert.equal(fields['remote-port'].value, '');
+assert.equal(fields['remote-key-row'].hidden, true);
+assert.equal(fields['remote-password-row'].hidden, true);
+fields['remote-auth'].value = 'key';
+fields['remote-auth'].handlers.change();
+assert.equal(fields['remote-key-row'].hidden, false);
+fields['remote-identity'].value = '/private/key';
+assert.equal(remote.formServer().identity_file, '/private/key');
+fields['remote-auth'].value = 'password';
+fields['remote-auth'].handlers.change();
+fields['remote-username'].value = 'alice';
+fields['remote-port'].value = '2222';
+fields['remote-password'].value = 'example-test-secret';
+assert.equal(fields['remote-password-row'].hidden, false);
+assert.equal(fields['remote-key-row'].hidden, true);
+assert.equal(remote.formServer().identity_file, '');
+assert.equal(JSON.stringify(remote.formServer()).includes('example-test-secret'), false);
+authCalls.length = 0;
+await remote.testConnection();
+assert.deepEqual(authCalls.map(c => c.name), ['remote_set_password', 'remote_probe']);
+assert.deepEqual(authCalls[0].args, { host: 'legacy', username: 'alice', port: 2222, password: 'example-test-secret' });
+assert.equal(authCalls[1].args.server.auth, 'password');
+assert.equal(JSON.stringify(authCalls[1]).includes('example-test-secret'), false);
+assert.equal(fields['remote-password'].value, '');
+authCalls.length = 0;
+await remote.testConnection();
+assert.deepEqual(authCalls.map(c => c.name), ['remote_probe'], 'empty password preserves the backend session credential');
+for (const id of ['remote-host', 'remote-username', 'remote-port']) {
+  fields['remote-password'].value = 'draft';
+  fields[id].handlers.input();
+  assert.equal(fields['remote-password'].value, '', `${id} changes must clear the secret draft`);
+}
+fields['remote-password'].value = 'draft';
+fields['remote-auth'].handlers.change();
+assert.equal(fields['remote-password'].value, '');
+fields['remote-password'].value = 'draft';
+remote.closeDialog(null);
+assert.equal(fields['remote-password'].value, '');
+fields['remote-port'].value = '65536';
+assert.throws(() => remote.formServer(), /端口/);
+fields['remote-port'].value = '22.5';
+assert.throws(() => remote.formServer(), /端口/);
+fields['remote-port'].value = '2222';
+fields['remote-password'].value = 'save-secret';
+authCalls.length = 0;
+await remote.saveServer();
+assert.deepEqual(authCalls.map(c => c.name), ['remote_set_password', 'remote_save_config', 'remote_config', 'remote_job_record']);
+assert.equal(JSON.stringify(configured).includes('save-secret'), false);
+assert.equal(configured.servers[0].username, 'alice');
+assert.equal(fields['remote-password'].value, '');
+
+// Switching profiles while a probe is in flight must not show the old server's result.
+let finishProbe;
+let probeCount = 0;
+globalThis.remoteInvoke = async name => {
+  if (name === 'remote_probe') { probeCount++; return new Promise(resolve => { finishProbe = resolve; }); }
+};
+const pendingProbe = remote.testConnection();
+await new Promise(resolve => setImmediate(resolve));
+await remote.testConnection();
+await remote.saveServer();
+assert.equal(probeCount, 1, 'repeated actions cannot race the pending credential/probe operation');
+remote.fillDialog(null);
+fields['remote-probe-result'].textContent = 'new profile';
+finishProbe({ hostname: 'stale-server', os: 'Linux', arch: 'x86_64' });
+await pendingProbe;
+assert.equal(fields['remote-probe-result'].textContent, 'new profile');
+console.log('remote: authentication modes, scoped session secrets, legacy profiles and stale probes');
+
+let finishPicker;
+globalThis.remoteInvoke = async (name, args) => {
+  assert.equal(name, 'pick_file');
+  assert.deepEqual(args, { key: 'remote-identity', filter: '' });
+  return new Promise(resolve => { finishPicker = resolve; });
+};
+const pendingPicker = fields['remote-pick-key'].onclick();
+remote.closeDialog(null);
+finishPicker('/private/old-key');
+await pendingPicker;
+assert.equal(fields['remote-identity'].value, '');
+console.log('remote: duplicate actions blocked and stale key picker ignored');
+
+// A local submission record remains visible when a restart has lost the session password.
+remote.jobs.clear();
+fields['remote-runs'] = field();
+fields['remote-run-list'] = field();
+state.selected = { dir: '/case' };
+state.cases = [{ dir: '/case', has_history: true }];
+let sessionPassword = false;
+const restartCalls = [];
+globalThis.remoteInvoke = async (name, args) => {
+  restartCalls.push(name);
+  if (name === 'remote_job_record') return { host: 'legacy', job: 'existing-job' };
+  if (name === 'remote_status') {
+    if (!sessionPassword) throw new Error('Re-enter your server password');
+    return { record: { host: 'legacy', job: 'existing-job' }, status: { state: 'finished', exit_code: 0 } };
+  }
+  if (name === 'remote_set_password') sessionPassword = true;
+  if (name === 'remote_config') return configured;
+  if (name === 'remote_save_config') configured = args.config;
+};
+await remote.resumeJobs();
+assert.equal(remote.jobs.get('/case').host, 'legacy');
+assert.match(remote.jobs.get('/case').error, /Re-enter/);
+assert.equal(fields['remote-runs'].hidden, false);
+const reconnectButton = nodes.find(node => node.tag === 'button' && node.textContent === '重新连接服务器…');
+assert.ok(reconnectButton, 'a failed resume must offer a visible reconnect action');
+remote.fillDialog('legacy');
+fields['remote-password'].value = 'reentered-test-secret';
+await remote.saveServer();
+assert.equal(remote.jobs.get('/case').error, null);
+assert.equal(remote.jobs.get('/case').state, 'finished');
+assert.equal(restartCalls.filter(name => name === 'remote_status').length, 2);
+assert.equal(restartCalls.includes('remote_fetch'), false, 'reconnection preserves newer local history');
+remote.jobs.clear();
+const absentCalls = [];
+globalThis.remoteInvoke = async name => { absentCalls.push(name); return null; };
+await remote.resumeJobs();
+assert.equal(remote.jobs.size, 0);
+assert.deepEqual(absentCalls, ['remote_job_record']);
+assert.equal(fields['remote-runs'].hidden, true);
+console.log('remote: restarted password jobs remain visible, reconnect retries, absent records are quiet');

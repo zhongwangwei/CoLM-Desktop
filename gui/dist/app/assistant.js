@@ -233,6 +233,10 @@ const ui = {
   historyDraft: '',
   /** 本机 Codex 的模型清单（`model/list`），第一次用到时取。 */
   codexModels: null,
+  opencodeModels: null,
+  opencodeModelError: null,
+  choicesRequest: 0,
+  statusRequest: 0,
 };
 
 function log() {
@@ -567,6 +571,9 @@ export function modelOptions(backend, codexModels) {
     return [['', '默认'], ['fable', 'Fable'], ['opus', 'Opus'], ['sonnet', 'Sonnet'], ['haiku', 'Haiku']];
   }
   const models = codexModels || [];
+  if (backend === 'opencode') {
+    return [['', '请选择模型'], ...models.map(m => [m.id, `${m.name || m.id} · ${m.id}`])];
+  }
   const fallback = models.find(m => m.default);
   return [
     ['', fallback ? `默认（${fallback.name || fallback.id}）` : '默认'],
@@ -579,6 +586,10 @@ export function modelOptions(backend, codexModels) {
 export function thinkOptions(backend, model, codexModels, provider = 'deepseek') {
   if (backend === 'builtin') {
     return apiEfforts(provider, model).map(value => [value, value === '' ? '思考：默认' : value === 'off' ? '不思考' : value === 'on' ? '开启思考' : `思考：${value}`]);
+  }
+  if (backend === 'opencode') {
+    const entry = (codexModels || []).find(m => m.id === model);
+    return [['', '思考：默认'], ...(entry?.efforts || []).map(e => [e, `思考：${e}`])];
   }
   let efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
   let fallback = '';
@@ -627,15 +638,62 @@ async function codexModels() {
   return ui.codexModels;
 }
 
+async function externalModels(backend) {
+  if (backend === 'codex') return codexModels();
+  if (backend === 'opencode') {
+    if (!ui.opencodeModels) {
+      ui.opencodeModels = await invoke('assistant_opencode_models');
+      ui.opencodeModelError = null;
+    }
+    return ui.opencodeModels;
+  }
+  return null;
+}
+
+async function refreshExternalModels() {
+  const button = $('assistant-ext-refresh');
+  button.disabled = true;
+  try {
+    ui.opencodeModels = await invoke('assistant_opencode_models');
+    ui.opencodeModelError = null;
+    if ($('assistant-backend').value !== 'opencode') return;
+    ui.settingsDraft = captureSettingsDraft();
+    await renderChoices(ui.settingsDraft, 'opencode');
+    await refreshBackendStatus();
+  } catch (error) {
+    ui.opencodeModelError = String(error?.message || error);
+    status(`${t('模型刷新失败，当前输入已保留。')} ${ui.opencodeModelError}`);
+  }
+  finally { button.disabled = false; }
+}
+
 /** 按后端填设置里的模型选框与输入框下的思考选框。 */
 async function renderChoices(settings, backend) {
-  const models = backend === 'codex' ? await codexModels() : null;
+  const request = ++ui.choicesRequest;
   const model = backend === 'builtin' ? settings.model : settings.external?.[backend]?.model || '';
-  if (backend !== 'builtin') fillSelect($('assistant-ext-model'), modelOptions(backend, models), model);
-  fillSelect($('assistant-think'), thinkOptions(backend, model, models, providerId(settings)), currentThink(settings, backend));
+  const render = models => {
+    if (backend !== 'builtin') fillSelect($('assistant-ext-model'), modelOptions(backend, models), model);
+    fillSelect($('assistant-think'), thinkOptions(backend, model, models, providerId(settings)), currentThink(settings, backend));
+  };
+  // Show the destination draft before discovery can yield to another switch.
+  render(backend === 'opencode' ? ui.opencodeModels : ui.codexModels);
+  const controls = ['assistant-ext-model', 'assistant-think', 'assistant-settings-save'];
+  controls.forEach(id => { $(id).disabled = true; });
+  try {
+    const models = await externalModels(backend);
+    if (request !== ui.choicesRequest) return;
+    render(models);
+  } catch (error) {
+    if (request !== ui.choicesRequest) return;
+    if (backend === 'opencode') ui.opencodeModelError = String(error?.message || error);
+    status(`${t('模型刷新失败，当前输入已保留。')} ${error?.message || error}`);
+  } finally {
+    if (request === ui.choicesRequest) controls.forEach(id => { $(id).disabled = false; });
+  }
+  if (request !== ui.choicesRequest) return;
   $('assistant-think').title = t(backend === 'builtin'
     ? '思考强度：随时可改，下一条消息生效'
-    : '思考强度：随时可改，下一条消息生效（Codex / Claude Code）');
+    : '思考强度：随时可改，下一条消息生效（外部后端）');
 }
 
 async function changeThink() {
@@ -653,8 +711,10 @@ async function changeThink() {
 /** 设置里换了模型：Codex 的强度选项随模型变。 */
 async function changeExternalModel() {
   const backend = $('assistant-backend').value;
-  const models = backend === 'codex' ? await codexModels() : null;
+  const request = ui.choicesRequest;
   const model = $('assistant-ext-model').value;
+  const models = await externalModels(backend);
+  if (request !== ui.choicesRequest || backend !== $('assistant-backend').value || model !== $('assistant-ext-model').value) return;
   const think = $('assistant-think');
   const keep = think.value;
   const options = thinkOptions(backend, model, models);
@@ -666,12 +726,15 @@ export function backendProblem(backend, info) {
   const external = EXTERNAL[backend];
   if (!external) return null;
   if (!info?.installed) return t(external.missing);
+  if (info.error) return String(info.error);
+  if (backend === 'opencode') return info.configured ? null : t(external.loggedOut);
   if (!info.logged_in) return t(external.loggedOut);
   return null;
 }
 
 /** 设置里“后端”下面的一行状态；返回那个后端的状态（内置后端返回 null）。 */
 async function refreshBackendStatus(backend = $('assistant-backend').value) {
+  const request = ++ui.statusRequest;
   const line = $('assistant-backend-status');
   // 服务地址、模型、API Key 只属于内置后端；Codex / Claude Code 用各自的登录，不显示这些。
   for (const el of document.querySelectorAll('#assistant-settings [data-backend-only]')) {
@@ -685,13 +748,19 @@ async function refreshBackendStatus(backend = $('assistant-backend').value) {
   line.textContent = t('正在检查…');
   const status = await invoke('assistant_backend_status').catch(e => ({ error: String(e?.message || e) }));
   const info = status?.[backend];
-  const problem = status?.error ?? backendProblem(backend, info);
+  if (request !== ui.statusRequest) return info;
+  const setup = $('assistant-opencode-setup');
+  if (setup) {
+    setup.hidden = backend !== 'opencode' || info?.configured || !info?.setup_command;
+    $('assistant-opencode-command').textContent = info?.setup_command || '';
+  }
+  const problem = status?.error ?? (backend === 'opencode' ? ui.opencodeModelError : null) ?? backendProblem(backend, info);
   if (problem) {
     line.textContent = problem;
     line.className = 'mini assistant-fail';
   } else {
     const plan = info.subscription ? `${info.subscription} ${t('订阅')}` : (info.auth_method || '');
-    line.textContent = `✓ ${t('已登录')}${plan ? ` · ${plan}` : ''} · ${info.version || ''}`;
+    line.textContent = `✓ ${t(backend === 'opencode' ? '已配置' : '已登录')}${plan ? ` · ${plan}` : ''} · ${info.version || ''}`;
     line.className = 'mini assistant-key-ok';
   }
   return info;
@@ -798,16 +867,27 @@ const EXTERNAL = {
     missing: '本机没有找到 Claude Code：请先安装它，然后在终端运行 claude 并登录。',
     loggedOut: 'Claude Code 还没有登录：请在终端运行 claude 并登录。',
   },
+  opencode: {
+    consent: '发送后，你的问题、算例配置、指标、日志片段与授权目录中的文本文件片段会经本机 OpenCode 发给所选模型服务商，用量按该服务商的账户配置计费。',
+    missing: '本机没有找到 OpenCode：请先安装它，并配置模型服务商。',
+    loggedOut: 'CoLM 的 OpenCode 配置尚未连接模型：展开“首次连接模型”完成连接，再刷新模型。',
+  },
 };
 
-function askConsent(target) {
+export function egressTarget(settings) {
+  const backend = settings.backend || 'builtin';
+  if (backend === 'builtin') return settings.base_url;
+  return backend === 'opencode' ? `opencode:${settings.external?.opencode?.model || ''}` : backend;
+}
+
+function askConsent(target, backend = target) {
   return new Promise(resolve => {
     const card = element('div', 'assistant-consent');
-    const external = EXTERNAL[target];
+    const external = EXTERNAL[backend];
     card.append(
       element('div', 'assistant-approval-title', '发送前请确认'),
       ...(external
-        ? [element('p', 'mini', external.consent)]
+        ? [element('p', 'mini', external.consent), ...(backend === 'opencode' ? [element('p', 'mini assistant-consent-url', target.slice('opencode:'.length))] : [])]
         : [
           element('p', 'mini', '发送后，你的问题、算例配置、指标、日志片段与授权目录中的文本文件片段会发给这个模型服务：'),
           element('p', 'mini assistant-consent-url', target),
@@ -845,11 +925,15 @@ async function ensureStarted() {
       $('assistant-settings').hidden = false;
       throw new Error(problem);
     }
+    if (backend === 'opencode' && !settings.external?.opencode?.model) {
+      $('assistant-settings').hidden = false;
+      throw new Error(t('请先选择 OpenCode 模型。'));
+    }
   }
-  // 外发确认按“发给谁”记：API 服务按地址，外部后端按后端名。
-  const target = backend === 'builtin' ? settings.base_url : backend;
+  // OpenCode 可跨服务商切换，确认绑定到所选 provider/model。
+  const target = egressTarget(settings);
   if (settings.egress_acknowledged !== target) {
-    if (!(await askConsent(target))) throw new Error(t('已取消发送'));
+    if (!(await askConsent(target, backend))) throw new Error(t('已取消发送'));
     settings = { ...settings, egress_acknowledged: target };
     await invoke('assistant_save_settings', { settings });
   }
@@ -1215,6 +1299,7 @@ function wire() {
     renderChoices(ui.settingsDraft, $('assistant-backend').value).catch(e => status(e?.message || e));
   });
   $('assistant-ext-model').addEventListener('change', () => changeExternalModel().catch(e => status(e?.message || e)));
+  $('assistant-ext-refresh').onclick = () => refreshExternalModels();
   $('assistant-text').addEventListener('keydown', event => {
     if (recallInput(event, $('assistant-text'))) return;
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;

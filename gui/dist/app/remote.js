@@ -146,10 +146,38 @@ async function previewJob() {
 // ---- 服务器对话框 ----------------------------------------------------------------------------
 
 let dialogDone = null;
+let dialogRevision = 0;
+let dialogBusy = false;
+
+function clearPassword() {
+  $('remote-password').value = '';
+  dialogRevision += 1;
+}
+
+function syncAuth() {
+  const auth = $('remote-auth').value;
+  $('remote-key-row').hidden = auth !== 'key';
+  $('remote-password-row').hidden = auth !== 'password';
+  $('remote-password-note').textContent = t('密码仅在本次应用会话中使用，不会保存。留空沿用该账号本次会话的密码；重启后需重新输入。');
+}
+
+async function setPassword(server) {
+  const password = $('remote-password').value;
+  $('remote-password').value = '';
+  if (server.auth === 'password' && password) {
+    await invoke('remote_set_password', { host: server.host, username: server.username, port: server.port, password });
+  }
+}
 
 function fillDialog(host) {
   const server = config.servers.find(s => s.host === host);
-  $('remote-host').value = server?.host ?? '';
+  clearPassword();
+  $('remote-host').value = server?.host ?? host ?? '';
+  $('remote-username').value = server?.username ?? '';
+  $('remote-port').value = server?.port || '';
+  $('remote-auth').value = server?.auth ?? 'config';
+  $('remote-identity').value = server?.identity_file ?? '';
+  syncAuth();
   $('remote-root').value = server?.root ?? '';
   $('remote-maps').value = formatMaps(server?.maps);
   $('remote-threads').value = server?.threads ?? 8;
@@ -178,6 +206,8 @@ function formServer() {
   const root = $('remote-root').value.trim();
   if (!host) throw new Error(t('请填写主机（ssh 配置里的别名）'));
   if (!root.startsWith('/')) throw new Error(t('工作目录要是服务器上的绝对路径'));
+  const port = Number($('remote-port').value);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new Error(t('端口应为 1–65535，留空使用 SSH 默认配置'));
   const threads = Number($('remote-threads').value);
   const count = id => {
     const n = Number($(id).value);
@@ -185,6 +215,10 @@ function formServer() {
   };
   return {
     host,
+    username: $('remote-username').value.trim(),
+    port,
+    auth: $('remote-auth').value || 'config',
+    identity_file: $('remote-auth').value === 'key' ? $('remote-identity').value.trim() : '',
     root,
     maps: parseMaps($('remote-maps').value),
     threads: Number.isFinite(threads) && threads > 0 ? Math.round(threads) : 8,
@@ -219,6 +253,7 @@ export async function openServerDialog(host = null) {
 }
 
 function closeDialog(result) {
+  clearPassword();
   $('remote-dialog').close();
   const done = dialogDone;
   dialogDone = null;
@@ -226,12 +261,19 @@ function closeDialog(result) {
 }
 
 async function testConnection() {
+  if (dialogBusy) return;
+  dialogBusy = true;
+  $('remote-test').disabled = $('remote-save').disabled = true;
+  const revision = dialogRevision;
   const box = $('remote-probe-result');
   box.className = 'remote-probe mini muted';
   box.textContent = t('正在连接…');
   try {
     const server = formServer();
-    const probe = await invoke('remote_probe', { host: server.host, root: server.root });
+    await setPassword(server);
+    if (revision !== dialogRevision) return;
+    const probe = await invoke('remote_probe', { server });
+    if (revision !== dialogRevision) return;
     $('remote-queue-list').replaceChildren(...(probe.queues ?? []).map(q => new Option(q, q)));
     box.replaceChildren(...probeLines(probe).map(line => Object.assign(document.createElement('div'), { textContent: line })));
     for (const problem of probe.problems ?? []) {
@@ -240,25 +282,42 @@ async function testConnection() {
     box.className = `remote-probe mini ${probe.problems?.length ? '' : 'assistant-key-ok'}`;
     box.prepend(Object.assign(document.createElement('div'), { textContent: probe.problems?.length ? t('连上了，但还缺：') : `✓ ${t('连接正常，可以运行')}` }));
   } catch (error) {
+    if (revision !== dialogRevision) return;
     box.className = 'remote-probe mini assistant-fail';
     box.textContent = String(error?.message || error);
+  } finally {
+    dialogBusy = false;
+    $('remote-test').disabled = $('remote-save').disabled = false;
   }
 }
 
 async function saveServer() {
+  if (dialogBusy) return;
+  dialogBusy = true;
+  $('remote-test').disabled = $('remote-save').disabled = true;
+  const revision = dialogRevision;
   try {
     const server = formServer();
+    await setPassword(server);
+    if (revision !== dialogRevision) return;
     const servers = config.servers.filter(s => s.host !== server.host && s.host !== $('remote-which').value);
     servers.push(server);
     await invoke('remote_save_config', { config: { servers } });
+    if (revision !== dialogRevision) return;
     state.runTarget = server.host;
     await loadConfig();
+    if (revision !== dialogRevision) return;
     status(`${t('已保存服务器')} ${server.host}`);
     closeDialog(server.host);
+    await resumeJobs(server.host);
   } catch (error) {
+    if (revision !== dialogRevision) return;
     const box = $('remote-probe-result');
     box.className = 'remote-probe mini assistant-fail';
     box.textContent = String(error?.message || error);
+  } finally {
+    dialogBusy = false;
+    $('remote-test').disabled = $('remote-save').disabled = false;
   }
 }
 
@@ -290,6 +349,11 @@ function renderJobs() {
       Object.assign(document.createElement('span'), { className: 'muted mini', textContent: `@ ${job.host}` }),
       Object.assign(document.createElement('span'), { className: 'mini remote-run-state', textContent: jobSummary(job) }),
     );
+    if (job.error) {
+      const reconnect = Object.assign(document.createElement('button'), { className: 'btn-ghost', type: 'button', textContent: t('重新连接服务器…') });
+      reconnect.onclick = () => openServerDialog(job.host);
+      head.appendChild(reconnect);
+    }
     if (job.state === 'running' || job.state === 'queued' || job.state === 'submitting') {
       const cancel = Object.assign(document.createElement('button'), { className: 'btn-ghost btn-stop', type: 'button', textContent: t('终止') });
       cancel.onclick = () => cancelJob(dir);
@@ -414,18 +478,21 @@ export async function remoteRun(stage, dirs, force) {
 }
 
 /** 打开运行页时接上已提交的远程作业（关掉应用后再打开也能接着跟踪）。 */
-async function resumeJobs() {
-  // 不管现在选的运行位置是什么都要接：算例可能是上次在服务器上跑的。
+async function resumeJobs(retryHost = null) {
+  // 本机记录不需要服务器凭据；连接失败也保留作业，让用户重新输入密码。
   const dirs = (state.batch?.length ? state.batch : state.selected ? [state.selected.dir] : []).filter(d => !jobs.has(d));
+  const retry = [...jobs].filter(([, job]) => retryHost && job.host === retryHost && job.error).map(([dir]) => dir);
   for (const dir of dirs) {
     try {
-      const answer = await invoke('remote_status', { case: dir });
-      jobs.set(dir, { host: answer.record.host, job: answer.record.job, fetched: false, autoFetch: !state.cases.find(c => c.dir === dir)?.has_history });
+      const record = await invoke('remote_job_record', { case: dir });
+      if (!record) continue;
+      jobs.set(dir, { host: record.host, job: record.job, state: 'unknown', fetched: false, autoFetch: !state.cases.find(c => c.dir === dir)?.has_history });
       await refreshJob(dir);
-    } catch {
-      // 没在服务器上跑过（没有提交记录），不显示。
+    } catch (error) {
+      status(error);
     }
   }
+  await Promise.all(retry.map(dir => refreshJob(dir)));
   renderJobs();
   if ([...jobs.values()].some(j => j.state === 'running' || j.state === 'queued')) schedulePoll();
 }
@@ -488,6 +555,15 @@ function wire() {
   $('remote-preview-close').onclick = () => $('remote-preview-dialog').close();
   $('manage-servers').onclick = () => openServerDialog(runTarget() === 'local' ? null : runTarget());
   $('remote-which').addEventListener('change', () => fillDialog($('remote-which').value || null));
+  for (const id of ['remote-host', 'remote-username', 'remote-port']) $(id).addEventListener('input', clearPassword);
+  $('remote-auth').addEventListener('change', () => { clearPassword(); syncAuth(); });
+  $('remote-pick-key').onclick = async () => {
+    const revision = dialogRevision;
+    try {
+      const path = await invoke('pick_file', { key: 'remote-identity', filter: '' });
+      if (path && revision === dialogRevision) $('remote-identity').value = path;
+    } catch (error) { status(error); }
+  };
   $('remote-test').onclick = () => testConnection();
   $('remote-list-kernels').onclick = () => listKernels();
   $('remote-build-kernel').onclick = () => buildKernel();

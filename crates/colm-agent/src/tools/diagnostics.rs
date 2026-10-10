@@ -78,7 +78,8 @@ impl Tool for DiagnosticPlan {
             "case": {"type":"string", "description":"case directory"},
             "variable": {"type":["string","null"], "description":"history variable for flux, e.g. f_assim"},
             "study": {"type":["string","null"], "description":"Study directory for calibration"},
-            "workspace": {"type":["string","null"], "description":"development workspace name for parity"}
+            "workspace": {"type":["string","null"], "description":"development workspace name for parity"},
+            "flux": flux_parameters()
         }))
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
@@ -89,7 +90,8 @@ impl Tool for DiagnosticPlan {
         let case = req_str(args, "case")?;
         if args.as_object().is_none_or(|a| {
             a.keys().any(|k| {
-                !["workflow", "case", "variable", "study", "workspace"].contains(&k.as_str())
+                !["workflow", "case", "variable", "study", "workspace", "flux"]
+                    .contains(&k.as_str())
             })
         }) {
             bail!("unexpected diagnostic argument");
@@ -105,6 +107,12 @@ impl Tool for DiagnosticPlan {
             }) {
                 bail!("{key} exceeds 1024 bytes");
             }
+        }
+        if !args["flux"].is_null() && (workflow != "flux" || !args["flux"].is_object()) {
+            bail!("flux must be an object for the flux workflow only");
+        }
+        if args["flux"].to_string().len() > 16384 {
+            bail!("flux request exceeds 16 KiB");
         }
         let mut steps = Vec::new();
         let (mut status, run) = collect(
@@ -147,7 +155,15 @@ impl Tool for DiagnosticPlan {
                 } else {
                     opt_str(args, "variable").into_iter().collect()
                 };
-                if vars.is_empty() {
+                if workflow == "flux" && args["flux"].is_object() {
+                    steps.push(pending(
+                        "series",
+                        "checkdata",
+                        "Collect bounded flux evidence",
+                        "Awaiting the bounded flux diagnostic",
+                        Value::Null,
+                    ));
+                } else if vars.is_empty() {
                     steps.push(pending(
                         "series",
                         "checkdata",
@@ -259,17 +275,124 @@ impl Tool for DiagnosticPlan {
             Value::Null,
         ));
         steps.push(pending("report", "report", "Report confirmed facts, unverified hypotheses and remaining evidence", "Evidence collection is not a completed diagnosis; resolve each pending/missing check before stating a cause or physical pass.", Value::Null));
+        let mut flux_evidence = Value::Null;
+        if workflow == "flux" && args["flux"].is_object() {
+            let mut request = args["flux"].clone();
+            request["variable"] = json!(req_str(args, "variable")?);
+            request["obs"] = json!(ctx.resolve(req_str(&request, "obs")?));
+            if request["experiment"].is_object() {
+                request["experiment"]["case"] =
+                    json!(ctx.resolve(req_str(&request["experiment"], "case")?));
+            }
+            let case_path = ctx.resolve(case);
+            let result = ctx.cli_json(&[
+                "flux-diagnose",
+                &case_path.to_string_lossy(),
+                "--request",
+                &request.to_string(),
+            ]);
+            match result {
+                Ok(data) => {
+                    for step in &mut steps {
+                        let key = match step["id"].as_str() {
+                            Some("observation_alignment") => Some("alignment"),
+                            Some("series") => Some("metrics"),
+                            Some("regimes") => Some("regimes"),
+                            _ => None,
+                        };
+                        if let Some(key) = key {
+                            step["status"] = json!(if ["alignment", "metrics"].contains(&key)
+                                && data[key]["status"] == "computed"
+                            {
+                                "collected"
+                            } else if key == "regimes" {
+                                "partial"
+                            } else {
+                                "missing"
+                            });
+                            if key == "regimes"
+                                && ["calendar_month", "daylight", "wetness"]
+                                    .iter()
+                                    .all(|k| data[key][*k]["status"] == "computed")
+                            {
+                                step["status"] = json!("collected");
+                            }
+                            step["evidence"] = json!({"evidence_id":data["evidence_id"],"ref":format!("flux_evidence.{key}")});
+                            step["missing"] = if step["status"] == "collected" {
+                                json!([])
+                            } else {
+                                json!(["See structured evidence for missing or insufficient observations/regime conditions."])
+                            };
+                        }
+                        if step["id"] == "minimal_validation" {
+                            step["evidence"] = json!({"evidence_id":data["evidence_id"],"ref":if data.get("experiment").is_some(){"flux_evidence.experiment"}else{"flux_evidence.minimal_experiment"}});
+                            step["status"] = json!(if data.get("experiment").is_some() {
+                                "unverified"
+                            } else {
+                                "proposed"
+                            });
+                            step["missing"]=json!(["Experimental identity, causal mechanism and independent validation remain unverified."]);
+                        }
+                        if step["id"] == "report" {
+                            step["status"] = json!("collected");
+                            step["evidence"] = json!({"scope":"Descriptive evidence and experiment proposal only; no confirmed cause.","evidence_id":data["evidence_id"]});
+                            step["missing"] = json!([]);
+                        }
+                    }
+                    hypotheses = data["hypotheses"].as_array().cloned().unwrap_or_default();
+                    flux_evidence = data;
+                }
+                Err(e) => {
+                    for step in &mut steps {
+                        if step["id"] == "observation_alignment" {
+                            step["status"] = json!("missing");
+                            step["missing"] =
+                                json!([e.to_string().chars().take(1000).collect::<String>()]);
+                        }
+                    }
+                }
+            }
+        }
         let confirmed: Vec<_> = steps.iter().filter(|s| s["status"] == "collected")
             .map(|s| json!({"step":s["id"],"fact":"Source evidence collected; interpretation remains subject to required checks."})).collect();
-        Ok(
-            json!({"version":1,"workflow":workflow,"inputs":{"case":case,"variable":args["variable"],"study":args["study"],"workspace":args["workspace"]},
+        let mut result = json!({"version":1,"workflow":workflow,"inputs":{"case":case,"variable":args["variable"],"study":args["study"],"workspace":args["workspace"]},
             "phases":["checkdata","localise","validate","report"],"status":"incomplete",
-            "steps":steps,"confirmed_facts":confirmed,"hypotheses":hypotheses,
-            "minimal_experiment":{"status":"proposed_not_executed","description":experiment}}),
-        )
+            "steps":steps,"flux_evidence":flux_evidence,"confirmed_facts":confirmed,"hypotheses":hypotheses,
+            "minimal_experiment":if flux_evidence.is_null(){json!({"status":"proposed_not_executed","description":experiment})}else{json!({"status":"proposed_not_executed","ref":"flux_evidence.minimal_experiment"})}});
+        // Keep JSON parseable under the registry's 24k-character transport limit.
+        if !flux_evidence.is_null() && result.to_string().len() > 22000 {
+            result["flux_evidence"] = json!({"status":"abbreviated","evidence_id":flux_evidence["evidence_id"],"metrics":flux_evidence["metrics"],"notice":"Detailed evidence exceeded the response budget; missing referenced sections were omitted. Request a narrower diagnostic or inspect flux-diagnose directly.","minimal_experiment":{"status":"proposed_not_executed","cause_verified":false,"missing":["Detailed evidence omitted; no validation or causal claim is established."]}});
+            if !flux_evidence["experiment"].is_null() {
+                result["flux_evidence"]["experiment"] = json!({"status":"unverified","cause_verified":false,"missing":["Detailed experimental evidence omitted; no validation or causal claim is established."]});
+            }
+        }
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 #[path = "diagnostics_tests.rs"]
 mod tests;
+
+fn flux_parameters() -> Value {
+    let nullable = |mut v: Value| {
+        v["type"] = json!(["object", "null"]);
+        v
+    };
+    let text = json!({"type":"string"});
+    let number = json!({"type":"number"});
+    nullable(object(json!({
+        "obs":{"type":"string","description":"Observation NetCDF; single point only."},
+        "observation_variable":text,"observation_qc":{"type":["string","null"],"description":"QC=0 is measured; null explicitly permits finite-only observations."},
+        "from":{"type":"integer","description":"Inclusive Unix UTC seconds."},"to":{"type":"integer","description":"Exclusive Unix UTC seconds, at most 366 days after from."},
+        "model_units":text,"obs_units":text,"output_units":text,"model_scale":number,"obs_scale":number,
+        "sign_convention":{"type":"string","description":"Explicit common physical sign after applying scales; never infer."},
+        "model_utc_offset_seconds":{"type":"integer","description":"Model clock minus UTC; whole-minute offset only, 0 required for Greenwich case."},
+        "observation_utc_offset_seconds":{"type":"integer","description":"Observation clock minus UTC, explicit whole-minute fixed offset; no DST."},
+        "alignment":{"type":"string","enum":["colm_plumber2_fixed_offset"]},
+        "model_interval_seconds":{"type":"integer","enum":[1800,3600]},"observation_interval_seconds":{"type":"integer","enum":[1800]},
+        "daylight":nullable(object(json!({"variable":text,"qc_variable":text,"units":{"type":"string","enum":["W m-2"]},"threshold":number}))),
+        "wetness":nullable(object(json!({"variable":text,"qc_variable":text,"units":{"type":"string","enum":["kg m-2 s-1"]},"window_hours":{"type":"integer","minimum":1,"maximum":168},"threshold_mm":number}))),
+        "experiment":nullable(object(json!({"case":text,"field":text,"expected_direction":{"type":"string","enum":["bias_increase","bias_decrease","rmse_decrease"]}})))
+    })))
+}

@@ -68,6 +68,38 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     assert!(validate_settings(&external("codex", Some("--yolo"), None)).is_err());
     assert!(validate_settings(&external("codex", Some("a b"), None)).is_err());
     assert!(validate_settings(&external("gemini", None, None)).is_err());
+    assert!(validate_settings(&external(
+        "opencode",
+        Some("deepseek/deepseek-flash"),
+        Some("high")
+    ))
+    .is_ok());
+    assert!(validate_settings(&external(
+        "opencode",
+        Some("openrouter/anthropic/claude"),
+        None
+    ))
+    .is_ok());
+    for model in [
+        "deepseek",
+        "/flash",
+        "deepseek/",
+        "deepseek/flash?key=x",
+        "deepseek/flash#x",
+    ] {
+        assert!(validate_settings(&external("opencode", Some(model), None)).is_err());
+    }
+    assert!(validate_settings(&AssistantSettings {
+        backend: "opencode".into(),
+        ..AssistantSettings::default()
+    })
+    .is_err());
+    let mut open_code = external("opencode", Some("deepseek/deepseek-flash"), Some("high"));
+    open_code.backend = "opencode".into();
+    assert!(validate_settings(&open_code).is_ok());
+    let configure = configure_message(&open_code, "/project", None, None);
+    assert_eq!(configure["backend"], "opencode");
+    assert_eq!(configure["external"]["model"], "deepseek/deepseek-flash");
     for (effort, ok) in [
         ("low", true),
         ("high", true),

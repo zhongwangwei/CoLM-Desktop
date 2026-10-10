@@ -173,3 +173,112 @@ fn oversized_evidence_stays_valid_json_and_arguments_are_bounded() {
     assert!(DiagnosticPlan.call(&request, &ctx).is_err());
     std::fs::remove_dir_all(ctx.project_root).unwrap();
 }
+
+#[test]
+#[cfg(unix)]
+fn flux_evidence_updates_steps_but_experiment_stays_unverified() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut ctx = fixture("flux-steps");
+    let script = ctx.project_root.join("fake-cli");
+    std::fs::write(&script,r#"#!/bin/sh
+if [ "$1" != 'flux-diagnose' ]; then exit 5; fi
+cat <<'JSON'
+{"alignment":{"status":"computed"},"metrics":{"status":"computed","n":12},"regimes":{"calendar_month":{"status":"computed"},"daylight":{"status":"computed"},"wetness":{"status":"missing"}},"hypotheses":[],"evidence_id":"proof","experiment":{"status":"unverified","cause_verified":false}}
+JSON
+"#).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    ctx.cli = script;
+    let mut request = args("flux");
+    request["variable"] = json!("f_lfevpa");
+    request["flux"] = json!({"obs":"obs.nc"});
+    let result = DiagnosticPlan.call(&request, &ctx).unwrap();
+    assert_eq!(step(&result, "series")["status"], "collected");
+    assert_eq!(
+        step(&result, "observation_alignment")["status"],
+        "collected"
+    );
+    assert_eq!(step(&result, "regimes")["status"], "partial");
+    assert_eq!(step(&result, "minimal_validation")["status"], "unverified");
+    assert_eq!(result["status"], "incomplete");
+    let script_text = std::fs::read_to_string(&ctx.cli)
+        .unwrap()
+        .replace(
+            "\"calendar_month\":{\"status\":\"computed\"}",
+            "\"calendar_month\":{\"status\":\"partial\",\"missing\":[\"month_02\"]}",
+        )
+        .replace(
+            "\"wetness\":{\"status\":\"missing\"}",
+            "\"wetness\":{\"status\":\"computed\"}",
+        );
+    std::fs::write(&ctx.cli, script_text).unwrap();
+    let partial_month = DiagnosticPlan.call(&request, &ctx).unwrap();
+    assert_eq!(step(&partial_month, "regimes")["status"], "partial");
+    assert!(!step(&partial_month, "regimes")["missing"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn annual_flux_and_experiment_evidence_remain_parseable_under_transport_budget() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut ctx = fixture("flux-budget");
+    let metric = json!({"status":"computed","n":1400,"bias":0.12345678912345678,"rmse":9.987654321098765,"mae":1.34567890123456,"correlation":0.8712345678901234,"model_mean":117.123456789,"obs_mean":116.987654321});
+    let groups: serde_json::Map<String, Value> = (1..=12)
+        .map(|month| (format!("month_{month:02}"), metric.clone()))
+        .collect();
+    let regimes = json!({"calendar_month":{"status":"computed","groups":groups},"daylight":{"status":"computed","day":metric,"night":metric},"wetness":{"status":"computed","wet":metric,"dry":metric}});
+    let mut data = json!({"alignment":{"status":"computed","paired":17520},"metrics":metric,"regimes":regimes,"hypotheses":[],"evidence_id":"proof","minimal_experiment":{"status":"proposed_not_executed","cause_verified":false},"experiment":{"status":"unverified","cause_verified":false,"regimes":regimes,"metrics":metric,"missing":["Fresh output identity is unverified."]}});
+    let script = ctx.project_root.join("fake-cli");
+    let mut request = args("flux");
+    request["variable"] = json!("f_lfevpa");
+    request["flux"] = json!({"obs":"obs.nc"});
+    for scenario in 0..3 {
+        let oversized = scenario > 0;
+        if oversized {
+            data["experiment"]["configuration_differences"] = json!("x".repeat(40000));
+        }
+        if scenario == 2 {
+            data.as_object_mut().unwrap().remove("experiment");
+            data["regimes"]["large_detail"] = json!("x".repeat(40000));
+        }
+        std::fs::write(&script, format!("#!/bin/sh\ncat <<'JSON'\n{data}\nJSON\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        ctx.cli = script.clone();
+        let value = DiagnosticPlan.call(&request, &ctx).unwrap();
+        let transported = super::super::result_text(&value);
+        assert!(transported.chars().count() < 24000);
+        let decoded: Value = serde_json::from_str(&transported).unwrap();
+        let proof_key = if scenario == 2 {
+            "minimal_experiment"
+        } else {
+            "experiment"
+        };
+        if scenario == 2 {
+            assert!(decoded["flux_evidence"].get("experiment").is_none());
+        }
+        assert_eq!(decoded["flux_evidence"][proof_key]["cause_verified"], false);
+        assert!(!decoded["flux_evidence"][proof_key]["missing"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        if !oversized {
+            assert_eq!(
+                decoded["flux_evidence"]["regimes"]["calendar_month"]["groups"]
+                    .as_object()
+                    .unwrap()
+                    .len(),
+                12
+            );
+        } else {
+            assert_eq!(decoded["flux_evidence"]["status"], "abbreviated");
+        }
+        assert_eq!(
+            step(&decoded, "regimes")["evidence"]["ref"],
+            "flux_evidence.regimes"
+        );
+    }
+    std::fs::remove_dir_all(ctx.project_root).unwrap();
+}

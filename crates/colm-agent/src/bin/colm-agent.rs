@@ -11,6 +11,7 @@
 //! colm-agent --data-dir <目录> --delete-session <会话号>
 //! colm-agent --backend-status                              # 本机 Codex / Claude Code 的安装与登录状态（JSON）
 //! colm-agent --codex-models                                # 本机 Codex 可用的模型与各自的思考强度（JSON）
+//! colm-agent --opencode-models                             # OpenCode V2 启用的模型与变体（JSON）
 //! ```
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 use anyhow::{bail, Context, Result};
 use colm_agent::agent::{execute_tool, Agent, Approver, Decision, Limits};
 use colm_agent::backend::{
-    self, claude, codex, BackendKind, ExternalChoice, ExternalSession, Launch, TurnSink,
+    self, claude, codex, opencode, BackendKind, ExternalChoice, ExternalSession, Launch, TurnSink,
 };
 use colm_agent::bridge::{random_hex, BridgeHandler, BridgeServer};
 use colm_agent::mcp::tool_entry;
@@ -55,11 +56,23 @@ fn run() -> Result<()> {
             .cloned()
     };
     if args.iter().any(|a| a == "--backend-status") {
-        println!("{}", backend::status());
+        println!(
+            "{}",
+            backend::status(value("--data-dir").map(PathBuf::from).as_deref())
+        );
         return Ok(());
     }
     if args.iter().any(|a| a == "--codex-models") {
         println!("{}", codex::list_models()?);
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "--opencode-models") {
+        println!(
+            "{}",
+            opencode::list_models(&opencode::profile_dir(
+                value("--data-dir").map(PathBuf::from).as_deref()
+            )?)?
+        );
         return Ok(());
     }
     // 历史会话的查看与删除不碰 Key。
@@ -265,6 +278,7 @@ fn display_model(backend: BackendKind, builtin: &str, external: &ExternalChoice)
         BackendKind::Builtin => return builtin.to_owned(),
         BackendKind::Codex => "Codex",
         BackendKind::ClaudeCode => "Claude Code",
+        BackendKind::Opencode => "OpenCode",
     };
     match external.cleaned().model {
         Some(model) => format!("{name} · {model}"),
@@ -533,7 +547,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         workspace_root: None,
                     },
                     approval,
-                    web_search,
+                    web_search: web_search && backend != BackendKind::Opencode,
                     ui,
                     backend,
                     external: choice,
@@ -819,6 +833,7 @@ type SharedBridge = Arc<Mutex<Option<(BridgeServer, Arc<AgentBridge>)>>>;
 /// 当前会话对应的外部会话。
 struct External {
     kind: BackendKind,
+    cwd: PathBuf,
     /// 属于哪个 CoLM 会话（换会话就换外部会话）。
     session: String,
     web: bool,
@@ -897,12 +912,16 @@ impl ExternalTurn {
             cancel: Arc::clone(&self.cancel),
         });
 
+        let cwd = external_launch_cwd(&tool_context.project_root)?;
         let mut external = self.external.lock().unwrap();
         if external.as_ref().is_none_or(|e| {
-            e.kind != self.backend || e.session != session_id || e.web != self.web_search
+            e.kind != self.backend
+                || e.session != session_id
+                || e.web != self.web_search
+                || e.cwd != cwd
         }) {
             let launch = Launch {
-                cwd: external_launch_cwd(&tool_context.project_root)?,
+                cwd: cwd.clone(),
                 mcp_exe: std::env::current_exe()?
                     .with_file_name(format!("colm-mcp{}", std::env::consts::EXE_SUFFIX)),
                 bridge_addr: addr,
@@ -927,10 +946,16 @@ impl ExternalTurn {
                 });
             let inner: Box<dyn ExternalSession> = match self.backend {
                 BackendKind::Codex => Box::new(codex::CodexSession::new(launch, resume)),
+                BackendKind::Opencode => Box::new(opencode::OpenCodeSession::new(
+                    launch,
+                    resume,
+                    opencode::profile_dir(self.data_dir.as_deref())?,
+                )),
                 _ => Box::new(claude::ClaudeSession::new(launch, resume)),
             };
             *external = Some(External {
                 kind: self.backend,
+                cwd,
                 session: session_id,
                 web: self.web_search,
                 inner,

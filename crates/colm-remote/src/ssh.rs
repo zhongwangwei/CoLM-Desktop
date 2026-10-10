@@ -33,22 +33,18 @@ impl Ssh {
         if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
             bail!("not an ssh host: {host:?}");
         }
+        crate::auth::check_host(host)?;
         Ok(Self {
             host: host.to_owned(),
         })
     }
 
     /// ssh 命令的公共部分：不交互、连接超时、保活；Unix 上复用连接（经跳板机时省掉每次握手）。
-    fn command(&self) -> Command {
+    fn command(&self) -> Result<Command> {
+        crate::auth::check_host(&self.host)?;
         let mut command = Command::new("ssh");
-        command.args([
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=20",
-            "-o",
-            "ServerAliveInterval=30",
-        ]);
+        crate::auth::configure(&mut command)?;
+        command.args(["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30"]);
         if cfg!(unix) {
             command.args([
                 "-o",
@@ -60,13 +56,13 @@ impl Ssh {
             ]);
         }
         command.arg(&self.host);
-        command
+        Ok(command)
     }
 
     /// 在远程主机上用 bash 执行一段脚本（经 stdin 传，免去层层转义）。
     pub fn run(&self, script: &str) -> Result<Output> {
         let mut child = self
-            .command()
+            .command()?
             .arg("bash -s")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -83,7 +79,7 @@ impl Ssh {
             success: output.status.success(),
             code: output.status.code(),
             stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stderr: crate::auth::redact(&String::from_utf8_lossy(&output.stderr)),
         })
     }
 
@@ -162,7 +158,7 @@ impl Ssh {
             dir = quote(remote_dir)
         );
         let ssh = self
-            .command()
+            .command()?
             .arg(remote)
             .stdin(stream)
             .output()
@@ -171,7 +167,7 @@ impl Ssh {
             bail!(
                 "upload to {}:{remote_dir} failed: {}",
                 self.host,
-                String::from_utf8_lossy(&ssh.stderr).trim()
+                crate::auth::redact(&String::from_utf8_lossy(&ssh.stderr)).trim()
             );
         }
         Ok(())
@@ -187,7 +183,7 @@ impl Ssh {
         let list: Vec<String> = entries.iter().map(|e| quote(e)).collect();
         let remote = format!("tar -czf - -C {} {}", quote(remote_dir), list.join(" "));
         let mut ssh = self
-            .command()
+            .command()?
             .arg(remote)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -207,7 +203,7 @@ impl Ssh {
             bail!(
                 "download from {}:{remote_dir} failed: {}",
                 self.host,
-                String::from_utf8_lossy(&ssh.stderr).trim()
+                crate::auth::redact(&String::from_utf8_lossy(&ssh.stderr)).trim()
             );
         }
         if !tar.status.success() {
@@ -229,7 +225,7 @@ pub fn connection_hint(host: &str, output: &Output) -> String {
         {
             "the server's host key is unknown or changed; connect once in a terminal (ssh HOST) and check it"
         } else if stderr.contains("Permission denied") {
-            "ssh needs a password or one-time code; log in once in a terminal (ssh HOST) so the connection can be reused, or set up a key"
+            "ssh authentication failed; check the selected username, key or password. For one-time codes, log in once in a terminal (ssh HOST) so the connection can be reused, or set up a key"
         } else {
             "cannot connect; check the alias in ~/.ssh/config, the VPN or jump host, and that `ssh HOST` works in a terminal"
         }

@@ -4,8 +4,11 @@ struct Fixture(PathBuf);
 
 impl Fixture {
     fn new() -> Self {
+        Self::in_dir(&std::env::temp_dir())
+    }
+    fn in_dir(parent: &Path) -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = std::env::temp_dir().join(format!(
+        let path = parent.join(format!(
             "colm-trash-test-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
@@ -479,7 +482,8 @@ fn tree_entry_count_is_bounded_before_any_move() {
 #[cfg(unix)]
 #[test]
 fn special_files_and_symlinks_added_to_payload_are_rejected() {
-    let fixture = Fixture::new();
+    // Unix socket paths must fit sun_path even when TMPDIR is a long job path.
+    let fixture = Fixture::in_dir(Path::new("/tmp"));
     fs::create_dir(fixture.0.join("reports")).unwrap();
     let socket =
         std::os::unix::net::UnixListener::bind(fixture.0.join("reports/socket.txt")).unwrap();

@@ -45,6 +45,7 @@
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod fingerprint;
+mod flux_diagnostics;
 mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
@@ -221,11 +222,17 @@ usage:
 ";
 
 fn main() -> Result<()> {
+    if let Some(code) = colm_remote::auth::run_askpass_if_requested() {
+        std::process::exit(code);
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         print!("{USAGE}");
         std::process::exit(2);
     };
+    if cmd.starts_with("remote-") {
+        colm_remote::auth::initialize_from_stdin()?;
+    }
     let opts = Opts::parse(&args[1..])?;
     match cmd.as_str() {
         "help" | "-h" | "--help" => print!("{USAGE}"),
@@ -276,6 +283,14 @@ fn main() -> Result<()> {
                     .as_deref()
                     .map(Path::new),
             )?;
+        }
+        "flux-diagnose" => {
+            let request = opts
+                .get("--request")
+                .context("--request JSON is required")?;
+            let result =
+                flux_diagnostics::run(&opts.positional_case()?, &serde_json::from_str(&request)?)?;
+            println!("{}", serde_json::to_string(&result)?);
         }
         "metrics" => {
             let case = opts.positional_case()?;

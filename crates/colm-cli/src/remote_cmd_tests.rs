@@ -344,3 +344,23 @@ fn fetching_refuses_to_overwrite_local_results_newer_than_the_remote_job() {
     assert!(err.to_string().contains("newer than this remote job"));
     assert!(refuse_to_overwrite_newer(Some(101), 100, true).is_ok());
 }
+
+#[test]
+fn job_connection_binding_is_optional_and_contains_no_password() {
+    let legacy = serde_json::json!({
+        "host": "server", "root": "/work", "job": "job-1", "remote_case": "/work/case",
+        "case_name": "case", "engine": "rust", "submitted_at": 1
+    });
+    let mut record: Record = serde_json::from_value(legacy).unwrap();
+    assert!(record.ssh_auth.is_none());
+    record.ssh_auth = Some(colm_remote::auth::Connection {
+        host: "server".into(),
+        username: "user".into(),
+        port: 2222,
+        auth: "password".into(),
+        identity_file: String::new(),
+    });
+    let encoded = serde_json::to_value(&record).unwrap();
+    assert!(encoded["ssh_auth"].get("password").is_none());
+    assert_eq!(serde_json::from_value::<Record>(encoded).unwrap(), record);
+}

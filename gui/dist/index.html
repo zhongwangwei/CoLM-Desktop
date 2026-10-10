@@ -1245,11 +1245,21 @@
         <option value="builtin">API Key（多家模型与自定义服务）</option>
         <option value="codex">Codex（用你的 ChatGPT 订阅）</option>
         <option value="claude_code">Claude Code（用你的 Claude 订阅）</option>
+        <option value="opencode">OpenCode（独立配置）</option>
       </select>
       <p class="mini muted" id="assistant-backend-status"></p>
-      <label data-backend-only="codex claude_code" for="assistant-ext-model">模型</label>
-      <select data-backend-only="codex claude_code" class="select" id="assistant-ext-model"></select>
-      <p data-backend-only="codex claude_code" data-expert-only class="muted mini">思考强度在输入框下面随时可改。选“默认”时用 Codex / Claude Code 自己的设置。</p>
+        <details data-backend-only="opencode" class="assistant-opencode-setup" id="assistant-opencode-setup" hidden>
+          <summary>首次连接模型</summary>
+          <p class="muted mini">CoLM 使用独立 OpenCode 配置。请在终端运行下面的命令，再在 OpenCode 中连接模型服务商；完成后刷新模型。</p>
+          <p class="muted mini">需要 OpenCode 2.0.6 与 sqlite3；仅连接模型服务商，不支持组织配置。</p>
+          <pre class="assistant-code" id="assistant-opencode-command"></pre>
+        </details>
+      <label data-backend-only="codex claude_code opencode" for="assistant-ext-model">模型</label>
+      <div data-backend-only="codex claude_code opencode" class="assistant-model-row">
+        <select class="select" id="assistant-ext-model"></select>
+        <button data-backend-only="opencode" class="btn-ghost" type="button" id="assistant-ext-refresh" aria-label="刷新可用模型" title="刷新可用模型">刷新</button>
+      </div>
+      <p data-backend-only="codex claude_code opencode" data-expert-only class="muted mini">思考强度在输入框下面随时可改。选“默认”时用外部后端自己的设置。</p>
       <p class="muted mini">订阅通过官方客户端登录；API 按平台账户额度计费。</p>
       <p data-expert-only class="muted mini">订阅接入使用本机 Codex / Claude Code 的登录；API 使用平台账户额度，按服务商规则计费。其他聊天订阅不能直接当作 API Key。</p>
       <label data-backend-only="builtin" for="assistant-provider">模型服务商</label>
@@ -1291,14 +1301,15 @@
         <option value="auto">自动执行，不再询问</option>
       </select>
       <p data-expert-only class="muted mini">指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。</p>
-      <label for="assistant-web">联网搜索</label>
-      <select class="select" id="assistant-web">
+      <label data-backend-only="builtin codex claude_code" for="assistant-web">联网搜索</label>
+      <select data-backend-only="builtin codex claude_code" class="select" id="assistant-web">
         <option value="on">开启</option>
         <option value="off">不联网</option>
       </select>
       <p data-backend-only="builtin" data-assistant-normal class="muted mini">联网搜索需另存 DeepSeek Key。</p>
       <p data-backend-only="builtin" data-expert-only class="muted mini">API 联网搜索使用单独保存的 DeepSeek API Key；可切到 DeepSeek 服务商保存 Key，再切回当前模型。</p>
       <p data-backend-only="codex claude_code" data-expert-only class="muted mini">开启后助手用 Codex / Claude Code 自带的联网搜索查文献与资料，计入你的订阅，不需要 DeepSeek Key。</p>
+      <p data-backend-only="opencode" data-expert-only class="muted mini">OpenCode 使用 CoLM 独立配置中的模型；操作通过 CoLM 工具审批，首版关闭原生 Shell 和网页工具。</p>
       <p data-assistant-normal class="muted mini">服务地址与更多参数可在顶部“专家”模式中设置。</p>
       <div class="pill-row"><button class="run-btn" type="button" id="assistant-settings-save">保存设置</button></div>
     </div>
@@ -1346,12 +1357,31 @@
 
 <dialog id="remote-dialog" class="app-dialog remote-dialog" aria-labelledby="remote-title">
   <h3 id="remote-title">服务器</h3>
-  <p class="muted mini">经你自己的 ssh 连接（~/.ssh/config 里的别名、跳板机、密钥都可以用），应用不保存任何密码或私钥。需要动态口令或 VPN 的机器，请先在终端登录一次。</p>
+  <p class="muted mini">选择 SSH 配置、密钥或密码连接。密码仅在本次应用会话中保留，关闭应用后需要重新输入；私钥只读取所选文件。首次连接请在终端核对服务器指纹。</p>
   <div class="remote-form">
     <label for="remote-which">配置</label>
     <select class="select" id="remote-which"></select>
     <label for="remote-host">主机</label>
-    <div><input class="input" id="remote-host" list="remote-host-list" placeholder="ssh 配置里的别名，例如 7920land" autocomplete="off"><datalist id="remote-host-list"></datalist></div>
+    <div><input class="input" id="remote-host" list="remote-host-list" placeholder="主机地址或 SSH 别名，例如 7920ts" autocomplete="off"><datalist id="remote-host-list"></datalist></div>
+    <label for="remote-username">登录用户名</label>
+    <input class="input" id="remote-username" placeholder="例如 zhwei；留空使用 SSH 配置" autocomplete="username">
+    <label for="remote-port">SSH 端口</label>
+    <input class="input" id="remote-port" type="number" min="1" max="65535" step="1" placeholder="留空使用 SSH 配置或 22">
+    <label for="remote-auth">认证方式</label>
+    <select class="select" id="remote-auth">
+      <option value="config">沿用 SSH 配置</option>
+      <option value="key">密钥</option>
+      <option value="password">密码</option>
+    </select>
+    <div class="remote-form remote-auth-row" id="remote-key-row" hidden>
+      <label for="remote-identity">私钥文件</label>
+      <div class="browse"><input class="input" id="remote-identity" placeholder="留空使用 SSH 配置或密钥代理" autocomplete="off"><button class="btn-ghost" type="button" id="remote-pick-key">选择文件…</button></div>
+      <div></div><p class="muted mini">有口令的私钥请先加入系统密钥代理（ssh-agent）。</p>
+    </div>
+    <div class="remote-form remote-auth-row" id="remote-password-row" hidden>
+      <label for="remote-password">登录密码</label>
+      <div><input class="input" id="remote-password" type="password" autocomplete="off" aria-describedby="remote-password-note" placeholder="输入密码；留空保留本次会话已输入的密码"><p class="muted mini" id="remote-password-note">密码不会写入配置；重启应用后请重新输入。</p></div>
+    </div>
     <label for="remote-root">工作目录</label>
     <input class="input" id="remote-root" placeholder="服务器上的绝对路径，例如 /data/你的用户名/colm-desktop" autocomplete="off">
     <label for="remote-maps">路径对应</label>

@@ -1,11 +1,12 @@
-//! 外部后端：用户本机装好并登录的 Codex 与 Claude Code（docs/design-ai-assistant.md 第 3.2、3.3 节）。
+//! 外部后端：用户本机的 Codex、Claude Code 与 OpenCode V2。
 //!
-//! 应用只启动用户自己的官方 CLI，不碰任何凭据，所以用量计在用户自己的订阅上（ChatGPT 或 Claude）。
+//! 应用启动官方 CLI，不读取登录凭据；计费沿用各 CLI 自己的服务商账户。
 //! CoLM 的工具经 `colm-mcp` 提供给它们，`colm-mcp` 再经 [`crate::bridge`] 交回本进程执行，审批、审计与
 //! 操作窗口都和内置后端一样。CLI 自己的动作（执行命令、改文件）发起的审批也转成面板上的审批卡片。
 
 pub mod claude;
 pub mod codex;
+pub mod opencode;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,6 +31,8 @@ pub enum BackendKind {
     Codex,
     /// 用户本机的 Claude Code（Claude 订阅登录）。
     ClaudeCode,
+    /// Private OpenCode V2 server; CoLM tools retain the shared approval bridge.
+    Opencode,
 }
 
 /// 外部后端的模型与思考强度；`None` 用它自己的默认。
@@ -140,6 +143,7 @@ fn extra_dirs() -> Vec<PathBuf> {
         .unwrap_or_default();
     let mut dirs = vec![
         home.join(".local/bin"),
+        home.join(".opencode/bin"),
         home.join(".npm-global/bin"),
         home.join(".claude/local"),
         home.join(".bun/bin"),
@@ -196,7 +200,7 @@ fn run_text(exe: &Path, args: &[&str]) -> Option<(bool, String)> {
 }
 
 /// 两个外部后端的安装与登录状态（不读任何凭据文件，只问 CLI 自己）。
-pub fn status() -> Value {
+pub fn status(data_dir: Option<&Path>) -> Value {
     let claude = find_cli("claude").map(|exe| {
         let version = run_text(&exe, &["--version"]).map(|(_, v)| v);
         let auth = run_text(&exe, &["auth", "status"])
@@ -229,6 +233,7 @@ pub fn status() -> Value {
     json!({
         "claude_code": claude.unwrap_or_else(missing),
         "codex": codex.unwrap_or_else(missing),
+        "opencode": match opencode::profile_dir(data_dir) {Ok(profile)=>opencode::status(&profile),Err(error)=>json!({"installed":find_cli("opencode").is_some(),"configured":false,"error":error.to_string()})},
     })
 }
 

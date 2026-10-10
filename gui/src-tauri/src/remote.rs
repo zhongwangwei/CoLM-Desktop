@@ -1,7 +1,11 @@
 //! 远程运行（R1）：服务器配置、测试连接、提交、查状态、取消、取回结果。实际工作都由
 //! `colm-cli remote-*` 做（经用户自己的 ssh），这里只存配置、转调命令、把日志末尾解析成阶段与进度。
 
+use std::collections::HashMap;
+use std::io::Write;
 use std::path::PathBuf;
+use std::process::Stdio;
+use std::sync::{Mutex, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -19,6 +23,15 @@ pub struct PathMap {
 pub struct Server {
     /// ssh 配置里的别名（或 `user@host`）。
     pub host: String,
+    #[serde(default)]
+    pub username: String,
+    /// 0 means use the SSH configuration or default port.
+    #[serde(default)]
+    pub port: u16,
+    #[serde(default = "default_auth")]
+    pub auth: String,
+    #[serde(default)]
+    pub identity_file: String,
     /// 服务器上的工作根目录（绝对路径）。
     pub root: String,
     #[serde(default)]
@@ -56,6 +69,50 @@ pub struct Server {
     pub directives: Vec<String>,
 }
 
+fn default_auth() -> String {
+    "config".into()
+}
+
+// Passwords live only in this process, bound to the exact connection.
+type Passwords = HashMap<(String, String, u16), String>;
+static PASSWORDS: OnceLock<Mutex<Passwords>> = OnceLock::new();
+fn passwords() -> &'static Mutex<Passwords> {
+    PASSWORDS.get_or_init(Mutex::default)
+}
+
+fn validate_login(username: &str) -> Result<(), String> {
+    if !username.is_empty()
+        && (username.starts_with('-')
+            || !username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c)))
+    {
+        return Err("登录用户名只能含字母、数字、下划线、点和连字符".into());
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn remote_set_password(
+    host: String,
+    username: String,
+    port: u16,
+    password: String,
+) -> Result<(), String> {
+    if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
+        return Err("服务器名不合法".into());
+    }
+    validate_login(&username)?;
+    if password.is_empty() || password.contains(['\n', '\r', '\0']) || password.len() > 4096 {
+        return Err("密码不能为空或包含换行，长度不能超过 4096 字节".into());
+    }
+    passwords()
+        .lock()
+        .map_err(|_| "密码会话不可用")?
+        .insert((host, username, port), password);
+    Ok(())
+}
+
 fn default_threads() -> u32 {
     8
 }
@@ -85,6 +142,16 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
         let host = server.host.trim();
         if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
             return Err(format!("服务器名不合法：{host:?}"));
+        }
+        validate_login(&server.username)?;
+        if !["config", "key", "password"].contains(&server.auth.as_str()) {
+            return Err("认证方式只能是 SSH 配置、密钥或密码".into());
+        }
+        if !server.identity_file.is_empty()
+            && (!std::path::Path::new(&server.identity_file).is_absolute()
+                || server.identity_file.contains(['\n', '\r', '\0']))
+        {
+            return Err("密钥文件要是本机的绝对路径".into());
         }
         let root = server.root.trim();
         if !root.starts_with('/') || root == "/" || root.contains(char::is_whitespace) {
@@ -182,7 +249,19 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
         &path,
         serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| format!("{}: {e}", path.display()))
+    .map_err(|e| format!("{}: {e}", path.display()))?;
+    passwords()
+        .lock()
+        .map_err(|_| "密码会话不可用")?
+        .retain(|(host, username, port), _| {
+            config.servers.iter().any(|s| {
+                s.auth == "password"
+                    && &s.host == host
+                    && &s.username == username
+                    && &s.port == port
+            })
+        });
+    Ok(())
 }
 
 /// ssh 配置里的主机别名（不含通配符），给“选择服务器”用；只读别名，不读别的。
@@ -222,25 +301,138 @@ fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().resource_dir().ok()
 }
 
-/// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
+fn auth_payload(server: &Server) -> Result<Value, String> {
+    let password = if server.auth == "password" {
+        Some(
+            passwords()
+                .lock()
+                .map_err(|_| "密码会话不可用")?
+                .get(&(server.host.clone(), server.username.clone(), server.port))
+                .cloned()
+                .ok_or_else(|| format!("请在服务器设置中为 {} 的登录账号 {}（端口 {}）重新输入密码；密码只保留到应用关闭", server.host, if server.username.is_empty() { "SSH 配置中的账号" } else { &server.username }, if server.port == 0 { "SSH 配置或 22".to_owned() } else { server.port.to_string() }))?,
+        )
+    } else {
+        None
+    };
+    Ok(
+        json!({"host": server.host, "username": server.username, "port": server.port,
+        "auth": server.auth, "identity_file": server.identity_file, "password": password}),
+    )
+}
+
+fn command_server(config: &RemoteConfig, args: &[String]) -> Result<Option<Server>, String> {
+    if let Some(at) = args.iter().position(|a| a == "--host") {
+        return Ok(args
+            .get(at + 1)
+            .and_then(|host| config.servers.iter().find(|s| &s.host == host))
+            .cloned());
+    }
+    let Some(case) = args.get(1) else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(case).join(".colm-remote.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Ok(None);
+    };
+    let record: Value = serde_json::from_str(&text).map_err(|_| "远程作业记录不合法")?;
+    server_from_record(config, &record).map(Some)
+}
+
+fn server_from_record(config: &RemoteConfig, record: &Value) -> Result<Server, String> {
+    let host = record["host"].as_str().ok_or("远程作业记录缺少主机")?;
+    let saved = config.servers.iter().find(|s| s.host == host).cloned();
+    let Some(binding) = record.get("ssh_auth").filter(|v| !v.is_null()) else {
+        // Legacy jobs were submitted through the original SSH alias/configuration.
+        let mut server = saved
+            .or_else(|| serde_json::from_value(json!({"host": host, "root": record["root"]})).ok())
+            .ok_or_else(|| "远程作业记录缺少工作目录".to_owned())?;
+        server.username.clear();
+        server.port = 0;
+        server.auth = default_auth();
+        server.identity_file.clear();
+        server.root = record["root"]
+            .as_str()
+            .ok_or("远程作业记录缺少工作目录")?
+            .to_owned();
+        return Ok(server);
+    };
+    if binding["host"].as_str() != Some(host) {
+        return Err("远程作业认证主机与作业主机不一致".into());
+    }
+    let mut fields = binding.clone();
+    fields["root"] = record["root"].clone();
+    let connection: Server =
+        serde_json::from_value(fields).map_err(|_| "远程作业认证信息不合法")?;
+    validate(&RemoteConfig {
+        servers: vec![connection.clone()],
+    })?;
+    let mut server = saved.unwrap_or_else(|| connection.clone());
+    server.username = connection.username;
+    server.port = connection.port;
+    server.auth = connection.auth;
+    server.identity_file = connection.identity_file;
+    server.root = connection.root;
+    Ok(server)
+}
+
+// Shared sidecar calls without SSH credentials (development workspaces).
 pub(crate) async fn cli_json(
     args: Vec<String>,
     resources: Option<PathBuf>,
 ) -> Result<Value, String> {
+    ssh_cli_json(args, resources, None).await
+}
+
+/// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
+async fn ssh_cli_json(
+    args: Vec<String>,
+    resources: Option<PathBuf>,
+    server: Option<&Server>,
+) -> Result<Value, String> {
+    let payload = server.map(auth_payload).transpose()?;
+    let password = payload
+        .as_ref()
+        .and_then(|p| p["password"].as_str())
+        .map(str::to_owned);
+    let payload = payload.map(|p| p.to_string());
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
     command.args(&args);
+    if payload.is_some() {
+        command
+            .env("COLM_SSH_AUTH_STDIN", "1")
+            .stdin(Stdio::piped());
+    }
     if let Some(dir) = resources {
         command.env("COLM_RESOURCE_DIR", dir);
     }
     colm_kernel::run::no_console(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
-        let output = command
-            .output()
+        let mut child = command
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|e| format!("无法启动 colm-cli：{e}"))?;
+        if let Some(payload) = payload {
+            let result = child.stdin.take().ok_or("no stdin").and_then(|mut stdin| {
+                writeln!(stdin, "{payload}").map_err(|_| "无法传递 SSH 登录信息")
+            });
+            if let Err(error) = result {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|e| format!("colm-cli：{e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let tail: Vec<&str> = stderr.lines().rev().take(6).collect();
-            return Err(tail.into_iter().rev().collect::<Vec<_>>().join("\n"));
+            let mut error = tail.into_iter().rev().collect::<Vec<_>>().join("\n");
+            if let Some(password) = &password {
+                error = error.replace(password, "[redacted]");
+            }
+            return Err(error);
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         let last = stdout
@@ -255,20 +447,20 @@ pub(crate) async fn cli_json(
 }
 
 #[tauri::command]
-pub async fn remote_probe(
-    app: tauri::AppHandle,
-    host: String,
-    root: String,
-) -> Result<Value, String> {
-    cli_json(
+pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
+    validate(&RemoteConfig {
+        servers: vec![server.clone()],
+    })?;
+    ssh_cli_json(
         vec![
             "remote-probe".into(),
             "--host".into(),
-            host,
+            server.host.clone(),
             "--root".into(),
-            root,
+            server.root.clone(),
         ],
         resource_dir(&app),
+        Some(&server),
     )
     .await
 }
@@ -409,9 +601,10 @@ pub async fn remote_run(
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
     let engine = Engine { engine, ranks };
-    cli_json(
+    ssh_cli_json(
         run_args(&server, case, kernel, stage, force, false, &engine),
         resources,
+        Some(&server),
     )
     .await
 }
@@ -420,15 +613,16 @@ pub async fn remote_run(
 #[tauri::command]
 pub async fn remote_kernels(app: tauri::AppHandle, host: String) -> Result<Value, String> {
     let server = server_for(app, &host)?;
-    cli_json(
+    ssh_cli_json(
         vec![
             "remote-kernels".into(),
             "--host".into(),
-            server.host,
+            server.host.clone(),
             "--root".into(),
-            server.root,
+            server.root.clone(),
         ],
         None,
+        Some(&server),
     )
     .await
 }
@@ -453,7 +647,7 @@ pub async fn remote_build_kernel(
         preset,
     ];
     args.extend(scheduler_args(&server));
-    cli_json(args, resources).await
+    ssh_cli_json(args, resources, Some(&server)).await
 }
 
 /// 提交前给用户看的作业脚本全文（不上传、不提交任何东西）。
@@ -472,17 +666,34 @@ pub async fn remote_preview(
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
     let engine = Engine { engine, ranks };
-    cli_json(
+    ssh_cli_json(
         run_args(&server, case, kernel, stage, force, true, &engine),
         resources,
+        Some(&server),
     )
     .await
 }
 
+/// Recover job identity before connecting, so a missing session password stays visible.
+#[tauri::command]
+pub fn remote_job_record(case: String) -> Result<Option<Value>, String> {
+    let path = PathBuf::from(case).join(".colm-remote.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取远程作业记录失败：{error}")),
+    };
+    let record: Value = serde_json::from_str(&text).map_err(|_| "远程作业记录不合法")?;
+    let host = record["host"].as_str().ok_or("远程作业记录缺少主机")?;
+    let job = record["job"].as_str().ok_or("远程作业记录缺少作业编号")?;
+    Ok(Some(json!({"host":host,"job":job})))
+}
+
 /// 远程作业的状态，加上从日志末尾解析出的阶段与进度（和本机运行同一套解析）。
 #[tauri::command]
-pub async fn remote_status(case: String) -> Result<Value, String> {
-    let mut answer = cli_json(
+pub async fn remote_status(app: tauri::AppHandle, case: String) -> Result<Value, String> {
+    let server = command_server(&remote_config(app), &["remote-status".into(), case.clone()])?;
+    let mut answer = ssh_cli_json(
         vec![
             "remote-status".into(),
             case.clone(),
@@ -490,6 +701,7 @@ pub async fn remote_status(case: String) -> Result<Value, String> {
             "200".into(),
         ],
         None,
+        server.as_ref(),
     )
     .await?;
     let log = answer["status"]["log_tail"]
@@ -508,8 +720,10 @@ pub async fn remote_status(case: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
-pub async fn remote_cancel(case: String) -> Result<Value, String> {
-    cli_json(vec!["remote-cancel".into(), case], None).await
+pub async fn remote_cancel(app: tauri::AppHandle, case: String) -> Result<Value, String> {
+    let args = vec!["remote-cancel".into(), case];
+    let server = command_server(&remote_config(app), &args)?;
+    ssh_cli_json(args, None, server.as_ref()).await
 }
 
 /// `remote-fetch` 的参数：服务器设置里配了“取回的变量”就只取这些，`all` 为真时取全部。
@@ -543,8 +757,10 @@ pub async fn remote_fetch(
     all: Option<bool>,
     overwrite_newer: Option<bool>,
 ) -> Result<Value, String> {
-    let server = host.and_then(|h| server_for(app, &h).ok());
-    cli_json(
+    // Authentication follows the persisted job host, never the UI selection.
+    let server = command_server(&remote_config(app), &["remote-fetch".into(), case.clone()])?;
+    let _ = host;
+    ssh_cli_json(
         fetch_args(
             case,
             server.as_ref(),
@@ -552,6 +768,7 @@ pub async fn remote_fetch(
             overwrite_newer.unwrap_or(false),
         ),
         None,
+        server.as_ref(),
     )
     .await
 }

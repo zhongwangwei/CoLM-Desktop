@@ -62,13 +62,13 @@ pub struct AssistantSettings {
     /// 联网搜索（DeepSeek 原生搜索，用 DeepSeek 的 Key）与读网页。
     #[serde(default = "default_web_search")]
     pub web_search: bool,
-    /// 后端：`builtin`（上面的 API 服务）、`codex`、`claude_code`（用户本机已登录的 CLI）。
+    /// 后端：API 服务或用户本机配置的 Codex、Claude Code、OpenCode。
     #[serde(default = "default_backend")]
     pub backend: String,
     /// 用户已确认过“数据会发给模型服务商”的那个服务地址。
     #[serde(default)]
     pub egress_acknowledged: Option<String>,
-    /// 外部后端各自的模型与思考强度（键是 `codex`、`claude_code`）；没选的用它自己的默认。
+    /// 外部后端各自的模型与思考强度；OpenCode 使用 provider/model 与模型 variant。
     #[serde(default)]
     pub external: std::collections::BTreeMap<String, ExternalChoice>,
 }
@@ -167,7 +167,7 @@ fn default_backend() -> String {
     "builtin".into()
 }
 
-const BACKENDS: [&str; 3] = ["builtin", "codex", "claude_code"];
+const BACKENDS: [&str; 4] = ["builtin", "codex", "claude_code", "opencode"];
 
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let dir = app
@@ -334,7 +334,7 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
         return Err("审批方式只能是 ask 或 auto".into());
     }
     for (backend, choice) in &settings.external {
-        if !matches!(backend.as_str(), "codex" | "claude_code") {
+        if !matches!(backend.as_str(), "codex" | "claude_code" | "opencode") {
             return Err(format!("没有这个外部后端：{backend}"));
         }
         // 这两个值会成为 CLI 的参数，不能像选项、不能含空白。
@@ -353,8 +353,32 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
                 }
             }
         }
+        if backend == "opencode" {
+            if let Some(model) = &choice.model {
+                if !valid_opencode_model(model) {
+                    return Err("OpenCode 模型须为 provider/model".into());
+                }
+            }
+        }
+    }
+    if settings.backend == "opencode"
+        && settings
+            .external
+            .get("opencode")
+            .and_then(|c| c.model.as_deref())
+            .is_none()
+    {
+        return Err("请先选择 OpenCode 模型。".into());
     }
     Ok(())
+}
+
+fn valid_opencode_model(model: &str) -> bool {
+    model.len() <= 256
+        && model
+            .split_once('/')
+            .is_some_and(|(provider, name)| !provider.is_empty() && !name.is_empty())
+        && !model.contains(['?', '#', '\\'])
 }
 
 #[tauri::command]
@@ -412,11 +436,14 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
-/// 本机 Codex 与 Claude Code 的安装与登录状态（由 `colm-agent --backend-status` 问 CLI 自己，不读凭据）。
+/// 本机外部后端的安装与配置状态（问 CLI 自己，不读凭据）。
 #[tauri::command]
-pub async fn assistant_backend_status() -> Result<Value, String> {
+pub async fn assistant_backend_status(app: tauri::AppHandle) -> Result<Value, String> {
     let mut command = std::process::Command::new(agent_path());
-    command.arg("--backend-status");
+    command
+        .arg("--backend-status")
+        .arg("--data-dir")
+        .arg(data_dir(&app)?);
     colm_kernel::run::no_console(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
         let output = command
@@ -433,9 +460,19 @@ pub async fn assistant_backend_status() -> Result<Value, String> {
 
 /// 本机 Codex 可用的模型与各自支持的思考强度（`colm-agent --codex-models` 问 Codex 自己）。
 #[tauri::command]
-pub async fn assistant_codex_models() -> Result<Value, String> {
+pub async fn assistant_codex_models(app: tauri::AppHandle) -> Result<Value, String> {
+    external_models(&app, "--codex-models").await
+}
+
+/// OpenCode 已配置的服务商模型与 variant；不发送模型请求。
+#[tauri::command]
+pub async fn assistant_opencode_models(app: tauri::AppHandle) -> Result<Value, String> {
+    external_models(&app, "--opencode-models").await
+}
+
+async fn external_models(app: &tauri::AppHandle, flag: &str) -> Result<Value, String> {
     let mut command = std::process::Command::new(agent_path());
-    command.arg("--codex-models");
+    command.arg(flag).arg("--data-dir").arg(data_dir(app)?);
     colm_kernel::run::no_console(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
         let output = command

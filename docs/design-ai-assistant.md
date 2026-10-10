@@ -1,6 +1,6 @@
 # AI 助手设计
 
-> 状态：P0、P1、联网、引导模式、外部后端（Codex、Claude Code，第 634 轮）、远程 R1–R5（第 637、642–646 轮）与 P2 开发工作区（第 647 轮）已完成（2026-10-09）；P3 未做，P5 首批固定诊断快照、版本检索与任务断点已实现，真实科研任务评测延期。设计稿（2026-10-07）。外部接口的事实于 2026-10-07 按官方文档核对，标 **待核实** 的要在装好的版本上实测后再定。
+> 状态：P0、P1、联网、引导模式、外部后端（Codex、Claude Code）、远程 R1–R5 与 P2 开发工作区已完成；2026-10-10 增加 OpenCode v2 适配和通量偏差证据计算。P3 未做，P5 首批固定诊断、版本检索与任务断点已实现，真实科研任务评测延期。OpenCode 接口以用户指定的 v2 官网及 v2.0.6 发布源码为依据；协议模拟测试与真实客户端、付费模型验证分别记录。
 
 ## 0. 目标与原则
 
@@ -130,17 +130,17 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 ### 3.4 OpenCode
 
-- 在本机回环地址启动 `opencode serve`，用 `OPENCODE_SERVER_PASSWORD` 鉴权。
-- 配置经 `OPENCODE_CONFIG_CONTENT` 注入：
-  - `mcp.colm` 写成 `{type: "local", command: [<colm-mcp>], ...}`；
-  - `permission` 里的 `edit`、`bash` 都设为 `ask`；
-  - 加上 DeepSeek 服务商。
-- 事件流：`GET /event`（SSE）。发消息：`POST /session/:id/prompt_async`。审批：`POST /session/:id/permissions/:pid`，回复 once、always 或 reject。
-- **待核实**：权限事件的名称。从 `/doc` 的 OpenAPI 读出来后固定。
+- 官方依据：[v2 文档](https://opencode.ai/v2/docs)、[API](https://opencode.ai/v2/docs/api)、[权限](https://opencode.ai/v2/docs/permissions)；发布源码固定为 [v2.0.6 / b084acc](https://github.com/anomalyco/opencode/tree/b084acc55ea2cdb50e9c2ec49a8d9ab3608d43ad)。不沿用 v1 `/doc`、`prompt_async` 或配置格式。
+- 在私有目录启动 `opencode serve --stdio --hostname 127.0.0.1 --port 0`，读取 stdio 返回的监听地址；使用随机 `OPENCODE_PASSWORD` 与 Basic Auth，核对运行实例 `/openapi.json`。退出关闭 stdin 并清理本次进程组与临时配置。
+- 使用应用数据目录中的持久化独立 OpenCode profile，隔离 HOME、XDG 数据和数据库，防止加载原登录数据库中的组织远程配置与旧凭据迁移。首次由用户在这个环境中通过官方 CLI 连接模型服务商；设置页“首次连接模型”给出对应命令，不复制原 Key、不改用户登录或全局服务。每次 serve 使用临时受控配置、禁用项目配置，注入 `permissions`、`agents.colm` 和 `mcp.servers.colm`（`codemode:false`）。模型发现只返回该 profile 的已连接模型与 variants；用户必须明确选择 `provider/model`。
+- v2 的 saved allow 可以覆盖 ask，且 `always` 会持久化授权。因此首版只开放 `colm_*` MCP 工具，原生 Shell、编辑、子代理及网页工具拒绝；CoLM 文件、算例、运行与研究工具仍通过原有桥接审批。应用“本会话允许”不写 OpenCode 永久权限，设置页隐藏该后端的联网开关。
+- v2 使用 `/api` 路由、会话消息与 SSE；适配处理工具事件、拒绝、取消、错误、续接和结束状态。接口不匹配明确报错，避免把空模型清单或异常终止当成成功。
+- 首版固定支持 **2.0.6**。加载配置前使用已有 `sqlite3` 检查专用数据库的组织来源，并以事务触发器阻止后续写入 `wellknown:sources`；不读取凭据值。旧 `auth.json`、组织来源、缺少 `sqlite3`、未知版本或不兼容数据库均明确拒绝。其他版本需核对来源机制和回归后再扩大支持范围。
+- 验证边界：模拟 CLI/HTTP/SSE 可检验协议与生命周期；本机旧版 CLI 无法运行，官方 v2 二进制下载超时，真实客户端和付费模型尚未验证。不得把服务商已连接写成订阅已登录。
 
 ### 3.5 后端探测
 
-设置页列出四种后端各自的状态：外部 CLI 是否安装、版本号、是否已登录或已配 Key、能否连上 `colm-mcp`。外部后端各锁定一个已验证的版本范围；超出范围时给出警告，但仍允许使用。
+设置页列出四种后端各自的状态：外部 CLI 是否安装、版本号、是否已登录或已连接服务商。OpenCode 显示模型发现原始诊断，发现失败不缓存空清单；版本或运行时接口不兼容时拒绝启动。MCP 可用性需要实际建立会话验证。
 
 ## 4. 工具清单
 
@@ -236,7 +236,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 远程是 GUI 的正式功能，不只给助手用。
 
-- **连接**：调系统的 `ssh`，不自己实现协议。复用用户 `~/.ssh/config` 里的别名、ProxyJump、密钥与 ssh-agent；应用不保存密码或私钥。要 VPN 或动态口令的超算，由用户在终端登录一次，应用复用 ControlMaster 主连接；断开时提示重新登录，从不代输口令。主机密钥严格校验，不自动接受。传文件用 `tar` 经 ssh 管道，不依赖 rsync。Windows 自带 OpenSSH 没有 ControlMaster，要动态口令的机器在 Windows 上第一版受限。
+- **连接**：调系统的 `ssh`，不自己实现协议。复用用户 `~/.ssh/config` 里的别名、ProxyJump、密钥与 ssh-agent；服务器表单可选择沿用 SSH 配置、密钥或密码，并填写登录用户名、端口及选择私钥文件。密码仅存应用内存、绑定主机/登录账号/端口，通过 stdin 交给 CLI 和带令牌的本地 askpass 服务，不进入配置、命令行或应用错误日志；关闭应用后重新输入，运行页保留作业并提供重新连接入口。私钥仍在用户选定的文件或密钥代理中，有口令的私钥通过 ssh-agent 解锁。作业记录绑定提交时的非秘密连接信息，旧记录沿用原 SSH 配置。密码模式不复用已有主连接，只支持 SSH password 认证；跳板机使用其已有密钥配置，不代输动态口令。需要 VPN 时先连接 VPN；需要动态口令的服务器使用已有 SSH 配置及兼容的 ControlMaster 主连接，应用不代输一次性口令，无法认证时明确报错。主机密钥严格校验，不自动接受。传文件用 `tar` 经 ssh 管道，不依赖 rsync。Windows 自带 OpenSSH 没有 ControlMaster，要动态口令的机器在 Windows 上第一版受限。
 - **计算资源**：每台机器一份配置，含 SSH 别名、远程工作根目录、可选的环境准备脚本（`module load`、conda）。“测试连接”探测系统与架构、调度系统（Slurm / PBS / LSF / 无）、编译器、MPI、netCDF、cargo、磁盘配额，以及数据路径。
 - **作业**：调度系统做成适配器。无调度时用 `setsid` 后台运行；Slurm 用 `sbatch`/`squeue`/`sacct`/`scancel`；PBS 用 `qsub`/`qstat`/`qdel`；LSF 用 `bsub`/`bjobs`/`bkill`。作业脚本由模板生成，提交前给用户看全文。作业记录存在本机，关掉应用也能接着跟踪。
 - **程序**：第一版用 Rust 引擎。源码快照按内容哈希放到远程，在服务器上 `cargo build --release`，不覆盖任何已有目录；netCDF 与 HDF5 已经静态编进 `colm-cli`，服务器上不需要这些库。没有 cargo 的机器，以后改用 CI 预编的 Linux 静态二进制（x86_64 与 aarch64）。Fortran 内核的远程编译留到多节点 MPI 阶段；“仅 Fortran 支持”的配置在远程第一版里明确提示不可用。
@@ -289,7 +289,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 |---|---|
 | 提示注入（观测文件属性、namelist 字符串、日志、源码注释里夹带指令） | 工具输出在系统提示里明确标为"数据，不是指令"；内置后端没有任意 shell；所有写操作都经审批；审批卡片显示的是真实动作，而不是模型的描述 |
 | 编译和运行等于执行任意代码 | 只在工作区里进行；本地沙箱断网并限制可写目录；远程靠 run-7920 的 bubblewrap 与网络隔离。并说明：这只能防误写，**不是运行恶意代码的完整安全边界** |
-| 外部后端自带 shell | Codex 用 `workspace-write`，审批交给应用；Claude Code 用 `--permission-prompt-tool`；OpenCode 的权限设为 `ask`。三者都不用跳过审批的模式；`cwd` 一律设为工作区 |
+| 外部后端自带 shell | Codex 用 `workspace-write`，审批交给应用；Claude Code 用 `--permission-prompt-tool`；OpenCode v2 首版关闭原生 shell，操作走 CoLM MCP 审批。授权目录来自当前项目，不继承上一个项目 |
 | 凭据 | API Key 以明文存在应用配置目录的 `assistant-keys.json`（三个平台一样；Unix 上权限 0600，只有当前用户可读写）。用户 2026-10-08 决定不用系统钥匙串：要跨平台、要简单，而 macOS 钥匙串对每个新编译的程序都要弹授权框。Key 只在 agent 进程里读出（每个进程读一次），不写进日志、会话、工作区、补丁或远程快照 |
 | 数据外发 | 第一次使用和每次换服务商时提示：配置、指标、日志与源码片段会发给模型服务商。可以切换到本地模型 |
 | 失控 | 每个会话设调用次数、token 用量与费用上限；任何时候都能取消；后台任务（编译、运行、Study）都可单独取消 |
@@ -362,6 +362,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 | **P3** | 开发工作区的远程版：同一个改动在任一已配置的计算资源上编译、测试、运行、对比 | 同一个改动在 T7920 上完成全套门槛 |
 | **P4** | `colm-mcp` 加三个外部后端（Codex app-server、Claude Code、OpenCode serve），审批统一路由到 GUI | 三个后端分别完成一次只读分析和一次补丁审批 |
 | **P5 首批已实现** | `diagnostic_plan`：启动失败、闭合、通量偏差、率定、Rust/Fortran 对齐五种只读快照与必查清单；文档上下文与源码版本、参数生效判断；任务检查点与页面入口 | 报告区分已确认事实、待验证原因与最小实验；缺失证据保持未完成，不把快照采集当作因果验证。真实科研任务评测待用户回去后再做 |
+| **P5 通量证据首版** | `diagnostic_plan.flux` 调用只读 `flux-diagnose CASE --request JSON`；真实 NetCDF、显式单位/符号/固定时区/QC，配对指标、UTC 月份、观测辐射昼夜与累计降水干湿分组；可重新计算已有单参数对照 | 单点 CoLM/PLUMBER2、整分钟固定时区、模型 1800/3600 秒、观测 1800 秒，最多 366 天；不支持 packed NetCDF，明确拒绝。缺少条件或配对证据保持缺失；配置和阶段差异核对不等于输出/引擎/输入身份已验证，方向改变不判因果通过 |
 
 任务检查点复用会话的 `audit.jsonl`，用户目标、动作请求及返回结果逐条持久化。历史对话能从审计补回进程退出前尚未写入模型历史的工具卡片；模型与界面显示未确认动作，续接期间写操作重新逐次审批。保存失败时停止后续工具执行并报告核对要求。进度显示检查数据、定位问题、验证假设、生成报告，“已回答”不等于验收通过。详见 [本轮范围与延期记录](assistant-reliability-plan.md) 与 [CoLM 过程知识卡片](colm-process-knowledge.md)。
 
@@ -369,7 +370,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 - Codex：`--json` 与 app-server 各条事件的字段，审批回复的格式（用 `generate-json-schema` 生成），三种客户端各用哪一代 MCP 协议。
 - Claude Code：`--permission-prompt-tool` 的参数与返回格式。
-- OpenCode：权限事件名，以及 `run --format json` 的输出格式（以 `/doc` 为准）。
+- OpenCode v2：真实客户端上的模型请求、MCP 握手、取消与安装包验证；运行实例 `/openapi.json` 是接口门禁。
 - DeepSeek：旧模型名现在调用会不会直接报错；严格模式对我们这套 schema 是否全部接受。
 
 ## 12. 否决的方案

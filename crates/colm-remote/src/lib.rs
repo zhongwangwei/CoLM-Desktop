@@ -2,11 +2,12 @@
 //! 运行算例、取回结果。
 //!
 //! - 调系统的 `ssh`，不自己实现协议：用户 `~/.ssh/config` 里的别名、跳板机、密钥与 ssh-agent 原样可用，应用不保存
-//!   任何密码或私钥。未知主机不自动接受（`BatchMode`，不交互）。
+//!   任何密码或私钥到磁盘。显式密码经 stdin 进入 CLI，仅在内存中供 askpass 使用；未知主机不自动接受。
 //! - 传文件用 `tar` 经 ssh 管道，不依赖 rsync，三个平台一样。
 //! - 服务器上的一切都放在用户指定的工作根目录下（例如 `/media/zhwei/data02/zhwei/colm-desktop`），按内容
 //!   哈希建目录，不覆盖任何已有目录。
 
+pub mod auth;
 pub mod engine;
 pub mod job;
 pub mod kernel;

@@ -11,6 +11,10 @@ fn server_settings_are_validated() {
     let server = |host: &str, root: &str| Server {
         host: host.into(),
         root: root.into(),
+        username: String::new(),
+        port: 0,
+        auth: "config".into(),
+        identity_file: String::new(),
         maps: vec![PathMap {
             // 本机一侧按本机的绝对路径规则校验（Windows 要带盘符）。
             local: if cfg!(windows) {
@@ -234,4 +238,137 @@ fn fetching_only_the_configured_variables_unless_everything_is_asked_for() {
             "{bad}"
         );
     }
+}
+
+#[test]
+fn legacy_servers_keep_ssh_config_and_password_is_never_serialized() {
+    let server: Server = serde_json::from_str(
+        r#"{"host":"legacy","root":"/data/colm","password":"should-never-save"}"#,
+    )
+    .unwrap();
+    assert_eq!(server.auth, "config");
+    assert!(server.username.is_empty());
+    assert_eq!(server.port, 0);
+    let saved = serde_json::to_string(&server).unwrap();
+    assert!(!saved.contains("password\":") && !saved.contains("should-never-save"));
+}
+
+#[test]
+fn passwords_are_session_only_and_bound_to_the_connection() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"password-test-only","root":"/data/colm","auth":"password","username":"alice","port":2222}"#).unwrap();
+    let missing = auth_payload(&server).unwrap_err();
+    assert!(missing.contains("alice") && missing.contains("2222"));
+    remote_set_password(
+        server.host.clone(),
+        server.username.clone(),
+        server.port,
+        "test-only-secret".into(),
+    )
+    .unwrap();
+    assert_eq!(
+        auth_payload(&server).unwrap()["password"],
+        "test-only-secret"
+    );
+    server.username = "bob".into();
+    assert!(auth_payload(&server).is_err());
+    server.username = "alice".into();
+    server.port = 22;
+    assert!(auth_payload(&server).is_err());
+    server.auth = "key".into();
+    assert!(auth_payload(&server).unwrap()["password"].is_null());
+    for password in ["", "one\ntwo", "one\rtwo", "one\0two"] {
+        assert!(remote_set_password("p-test".into(), "alice".into(), 22, password.into()).is_err());
+    }
+    assert!(remote_set_password("-option".into(), "alice".into(), 22, "valid".into()).is_err());
+    assert!(remote_set_password("host".into(), "-option".into(), 22, "valid".into()).is_err());
+    passwords()
+        .lock()
+        .unwrap()
+        .remove(&("password-test-only".into(), "alice".into(), 2222));
+}
+
+#[test]
+fn connection_options_reject_invalid_modes_users_and_relative_keys() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    for user in ["-root", "alice@host", "alice bob", "alice\nroot"] {
+        server.username = user.into();
+        assert!(validate(&RemoteConfig {
+            servers: vec![server.clone()]
+        })
+        .is_err());
+    }
+    server.username = "alice".into();
+    server.auth = "unknown".into();
+    assert!(validate(&RemoteConfig {
+        servers: vec![server.clone()]
+    })
+    .is_err());
+    server.auth = "key".into();
+    server.identity_file = "relative-key".into();
+    assert!(validate(&RemoteConfig {
+        servers: vec![server.clone()]
+    })
+    .is_err());
+    server.identity_file.clear();
+    assert!(validate(&RemoteConfig {
+        servers: vec![server]
+    })
+    .is_ok());
+}
+
+#[test]
+fn saved_jobs_keep_their_original_login_when_a_profile_changes() {
+    let changed: Server = serde_json::from_value(json!({"host":"c1", "root":"/data/new", "auth":"key", "username":"bob", "port":22, "fetch_vars":"f_rnet"})).unwrap();
+    let config = RemoteConfig {
+        servers: vec![changed],
+    };
+    let record = json!({"host":"c1", "root":"/data/original", "ssh_auth":{"host":"c1", "username":"alice", "port":2222, "auth":"password", "identity_file":""}});
+    let original = server_from_record(&config, &record).unwrap();
+    assert_eq!(
+        (
+            original.username.as_str(),
+            original.port,
+            original.auth.as_str()
+        ),
+        ("alice", 2222, "password")
+    );
+    assert_eq!(original.root, "/data/original");
+    assert_eq!(original.fetch_vars, "f_rnet");
+    assert_eq!(
+        server_from_record(&RemoteConfig::default(), &record)
+            .unwrap()
+            .port,
+        2222
+    );
+    let mut wrong_host = record.clone();
+    wrong_host["ssh_auth"]["host"] = json!("other");
+    assert!(server_from_record(&config, &wrong_host).is_err());
+    let old = json!({"host":"c1", "root":"/data/original"});
+    assert_eq!(server_from_record(&config, &old).unwrap().username, "");
+    assert_eq!(
+        server_from_record(&RemoteConfig::default(), &old)
+            .unwrap()
+            .auth,
+        "config"
+    );
+}
+
+#[test]
+fn job_identity_can_be_recovered_without_credentials() {
+    let dir = std::env::temp_dir().join(format!("colm-gui-auth-record-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.to_string_lossy().into_owned();
+    assert!(remote_job_record(case.clone()).unwrap().is_none());
+    let record = dir.join(".colm-remote.json");
+    std::fs::write(
+        &record,
+        r#"{"host":"c1","job":"run-1","password":"never-return"}"#,
+    )
+    .unwrap();
+    let identity = remote_job_record(case.clone()).unwrap().unwrap();
+    assert_eq!(identity, json!({"host":"c1","job":"run-1"}));
+    assert!(!identity.to_string().contains("never-return"));
+    std::fs::write(&record, "broken").unwrap();
+    assert!(remote_job_record(case).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
 }

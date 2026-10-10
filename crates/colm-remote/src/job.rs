@@ -161,7 +161,7 @@ pub fn parse_status(text: &str) -> Status {
         state,
         phase,
         detail,
-        log_tail: log.to_owned(),
+        log_tail: crate::auth::redact(log),
     }
 }
 

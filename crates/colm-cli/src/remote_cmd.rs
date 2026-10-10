@@ -303,6 +303,8 @@ pub(crate) const RECORD: &str = ".colm-remote.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_auth: Option<colm_remote::auth::Connection>,
     pub host: String,
     pub root: String,
     pub job: String,
@@ -326,7 +328,9 @@ fn read_record(case: &Path) -> Result<Record> {
     let path = case.join(RECORD);
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("{} has not been run remotely (no {RECORD})", case.display()))?;
-    Ok(serde_json::from_str(&text)?)
+    let record: Record = serde_json::from_str(&text)?;
+    colm_remote::auth::check_connection(record.ssh_auth.as_ref())?;
+    Ok(record)
 }
 
 fn short_hash(text: &str) -> String {
@@ -1224,6 +1228,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     };
     let submitted = job::submit(&ssh, &root, &id, &body, &spec)?;
     let record = Record {
+        ssh_auth: colm_remote::auth::current_connection(),
         host: ssh.host.clone(),
         root,
         job: id.clone(),

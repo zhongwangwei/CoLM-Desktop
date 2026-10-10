@@ -10,6 +10,7 @@ fn decisions_map_to_codex_words_and_the_child_path_has_install_dirs() {
     assert_eq!(decision_word(&Decision::Deny(None)), "decline");
     let path: Vec<PathBuf> = std::env::split_paths(&child_path()).collect();
     assert!(path.iter().any(|p| p.ends_with(".local/bin")));
+    assert!(path.iter().any(|p| p.ends_with(".opencode/bin")));
     assert!(path.iter().any(|p| p == Path::new("/opt/homebrew/bin")));
     assert!(instructions("RULES", true).starts_with("RULES"));
     assert!(instructions("RULES", true).contains("mcp__colm__"));

@@ -11,7 +11,7 @@ await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 // Expose startup only in this copied test module; exercise configuration through a stub IPC.
 await writeFile(join(temp, 'app', 'assistant.js'),
-  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send, refreshApiModels, startNewConversation, refreshInputHistory };\n');
+  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send, refreshApiModels, startNewConversation, refreshInputHistory, renderChoices, refreshBackendStatus, externalModels };\n');
 await writeFile(join(temp, 'app', 'ipc.js'), `
   export const invoke = (...args) => globalThis.assistantInvoke(...args);
   export const listen = async () => {};
@@ -168,6 +168,11 @@ assert.deepEqual(assistant.modelOptions('codex', codex).map(o => o[0]), ['', 'gp
 assert.equal(assistant.modelOptions('codex', codex)[0][1], '默认（GPT-6.1-Sol）');
 assert.deepEqual(assistant.modelOptions('codex', []), [['', '默认']]);
 assert.deepEqual(assistant.modelOptions('claude_code').map(o => o[0]), ['', 'fable', 'opus', 'sonnet', 'haiku']);
+const openCode = [
+  { id: 'deepseek/deepseek-flash', name: 'Flash', efforts: ['low', 'high', 'max'] },
+  { id: 'local/custom', name: 'Local', efforts: [] },
+];
+assert.deepEqual(assistant.modelOptions('opencode', openCode).map(o => o[0]), ['', 'deepseek/deepseek-flash', 'local/custom']);
 const values = options => options.map(o => o[0]);
 assert.deepEqual(values(assistant.thinkOptions('builtin')), ['', 'low', 'high', 'max', 'off']);
 assert.deepEqual(values(assistant.thinkOptions('claude_code', 'opus')), ['', 'low', 'medium', 'high', 'xhigh', 'max']);
@@ -176,6 +181,9 @@ assert.deepEqual(values(assistant.thinkOptions('codex', '', codex)), ['', 'low',
 assert.equal(assistant.thinkOptions('codex', '', codex)[0][1], '思考：默认（low）');
 assert.deepEqual(values(assistant.thinkOptions('codex', 'gpt-6-astra', codex)), ['', 'medium', 'xhigh']);
 assert.deepEqual(values(assistant.thinkOptions('codex', '', [])), ['', 'low', 'medium', 'high', 'xhigh']);
+assert.deepEqual(values(assistant.thinkOptions('opencode', 'deepseek/deepseek-flash', openCode)), ['', 'low', 'high', 'max']);
+assert.deepEqual(values(assistant.thinkOptions('opencode', 'local/custom', openCode)), ['']);
+assert.deepEqual(values(assistant.thinkOptions('opencode', 'unknown/model', openCode)), ['']);
 const saved = { thinking: null, reasoning_effort: 'max', external: { codex: { model: 'gpt-6-astra', effort: 'xhigh' } } };
 assert.equal(assistant.currentThink(saved, 'builtin'), 'max');
 assert.equal(assistant.currentThink(saved, 'codex'), 'xhigh');
@@ -208,6 +216,76 @@ assert.equal(assistant.shouldOpenCreatedCase({ name: 'create_case' }, null, null
 assert.match(assistant.backendProblem('codex', { installed: false }), /没有找到 Codex/);
 assert.match(assistant.backendProblem('claude_code', { installed: true, logged_in: false }), /Claude Code 还没有登录/);
 assert.equal(assistant.backendProblem('claude_code', { installed: true, logged_in: true }), null);
+assert.equal(assistant.backendProblem('opencode', { installed: true, configured: true }), null);
+assert.match(assistant.backendProblem('opencode', { installed: true, logged_in: true, configured: false }), /首次连接模型/);
+assert.match(assistant.backendProblem('opencode', { installed: false }), /没有找到 OpenCode/);
+assert.equal(assistant.egressTarget({ base_url: 'https://api.example/v1' }), 'https://api.example/v1');
+assert.equal(assistant.egressTarget({ backend: 'codex' }), 'codex');
+assert.equal(assistant.egressTarget({ backend: 'opencode', external: { opencode: { model: 'deepseek/deepseek-flash' } } }), 'opencode:deepseek/deepseek-flash');
+assert.notEqual(assistant.egressTarget({ backend: 'opencode', external: { opencode: { model: 'anthropic/claude' } } }), 'opencode:deepseek/deepseek-flash');
+
+// Delayed discovery cannot overwrite another backend's draft or status; failed discovery is retried.
+{
+  const select = () => ({ value: '', disabled: false, replaceChildren(...items) { this.items = items; }, appendChild(item) { this.items.push(item); } });
+  const nodes = new Map([
+    ['assistant-backend', { value: 'opencode' }], ['assistant-ext-model', select()],
+    ['assistant-think', select()], ['assistant-settings-save', { disabled: false }],
+    ['assistant-backend-status', { textContent: '' }],
+    ['assistant-opencode-setup', { hidden: true }], ['assistant-opencode-command', { textContent: '' }],
+  ]);
+  globalThis.document = { getElementById: id => nodes.get(id), querySelectorAll: () => [],
+    createElement: () => ({}), documentElement: { lang: 'zh' } };
+  assistant.ui.opencodeModels = null;
+  let releaseModels;
+  globalThis.assistantInvoke = async command => {
+    assert.equal(command, 'assistant_opencode_models');
+    return new Promise(resolve => { releaseModels = resolve; });
+  };
+  const settings = { external: { opencode: { model: 'deepseek/deepseek-flash', effort: 'high' }, claude_code: { model: 'sonnet', effort: 'low' } } };
+  const stale = assistant.renderChoices(settings, 'opencode');
+  assert.equal(nodes.get('assistant-ext-model').value, 'deepseek/deepseek-flash');
+  assert.equal(nodes.get('assistant-settings-save').disabled, true);
+  nodes.get('assistant-backend').value = 'claude_code';
+  await assistant.renderChoices(settings, 'claude_code');
+  releaseModels(openCode);
+  await stale;
+  assert.equal(nodes.get('assistant-ext-model').value, 'sonnet');
+  assert.equal(nodes.get('assistant-think').value, 'low');
+  assert.equal(nodes.get('assistant-settings-save').disabled, false);
+  assert.deepEqual(assistant.withChoice(settings, 'claude_code', { model: nodes.get('assistant-ext-model').value, effort: nodes.get('assistant-think').value }).external.claude_code,
+    { model: 'sonnet', effort: 'low' });
+
+  let releaseStatus;
+  globalThis.assistantInvoke = async () => new Promise(resolve => { releaseStatus = resolve; });
+  nodes.get('assistant-backend').value = 'opencode';
+  const staleStatus = assistant.refreshBackendStatus();
+  nodes.get('assistant-backend').value = 'builtin';
+  await assistant.refreshBackendStatus();
+  releaseStatus({ opencode: { installed: true, configured: true, version: '2.0.0' } });
+  await staleStatus;
+  assert.equal(nodes.get('assistant-backend-status').textContent, '');
+
+  nodes.get('assistant-backend').value = 'opencode';
+  globalThis.assistantInvoke = async () => ({ opencode: { installed: true, configured: false, setup_command: "env HOME='/profile' opencode --standalone" } });
+  await assistant.refreshBackendStatus();
+  assert.equal(nodes.get('assistant-opencode-setup').hidden, false);
+  assert.equal(nodes.get('assistant-opencode-command').textContent, "env HOME='/profile' opencode --standalone");
+  globalThis.assistantInvoke = async () => ({ opencode: { installed: true, configured: true, version: '2.0.6' } });
+  await assistant.refreshBackendStatus();
+  assert.equal(nodes.get('assistant-opencode-setup').hidden, true);
+  assert.equal(nodes.get('assistant-opencode-command').textContent, '');
+
+  assistant.ui.opencodeModels = null;
+  let attempts = 0;
+  globalThis.assistantInvoke = async () => {
+    if (++attempts === 1) throw new Error('unsupported OpenCode contract');
+    return openCode;
+  };
+  await assert.rejects(assistant.externalModels('opencode'), /unsupported OpenCode contract/);
+  assert.equal(assistant.ui.opencodeModels, null);
+  assert.deepEqual(await assistant.externalModels('opencode'), openCode);
+  assert.equal(attempts, 2);
+}
 assert.equal(assistant.backendProblem('builtin', null), null);
 
 // Every send refreshes a changed directory/kernel grant, while retaining the conversation.
@@ -276,7 +354,7 @@ assert.equal(assistant.backendProblem('builtin', null), null);
   };
   await assert.rejects(assistant.ensureStarted(), /reset failed/);
   assert.equal(assistant.ui.pendingNewConversation, true, 'retry resets before sending');
-  assert.equal((source.match(/授权目录中的文本文件片段/g) || []).length, 3);
+  assert.equal((source.match(/授权目录中的文本文件片段/g) || []).length, 4);
 }
 
 // History navigation restores the unsent draft and leaves multiline/IME editing alone.
