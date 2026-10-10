@@ -7,6 +7,7 @@ use crate::layout::layout_tests::temp;
 #[cfg(unix)]
 use crate::layout::layout_tests::{nc_lock, source_repo};
 
+#[cfg(unix)]
 fn history(path: &Path, vars: &[(&str, Vec<f64>)]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     let mut file = netcdf::create(path).unwrap();
