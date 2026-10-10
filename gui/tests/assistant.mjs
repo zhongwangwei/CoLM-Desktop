@@ -11,7 +11,7 @@ await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 // Expose startup only in this copied test module; exercise configuration through a stub IPC.
 await writeFile(join(temp, 'app', 'assistant.js'),
-  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send };\n');
+  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send, refreshApiModels, startNewConversation, refreshInputHistory };\n');
 await writeFile(join(temp, 'app', 'ipc.js'), `
   export const invoke = (...args) => globalThis.assistantInvoke(...args);
   export const listen = async () => {};
@@ -22,6 +22,8 @@ globalThis.window = {};
 globalThis.document = { getElementById: () => null, querySelectorAll: () => [], documentElement: { lang: 'zh' } };
 globalThis.addEventListener = () => {};
 const assistant = await import(pathToFileURL(join(temp, 'app', 'assistant.js')).href);
+assert.equal(assistant.ui.conversation, null, 'restart starts with a new conversation');
+assert.equal(assistant.ui.pendingNewConversation, true);
 
 assert.equal(
   assistant.viewContext({ step: 'result', caseDir: '/p/A', kernel: '/k', root: '' }),
@@ -125,6 +127,12 @@ for (const [, id] of source.matchAll(/\$\('([\w-]+)'\)/g)) {
   assert.ok(html.includes(`id="${id}"`), `index.html has no #${id}`);
 }
 assert.ok(!/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML/.test(source), 'assistant.js must not use innerHTML');
+assert.ok(!source.includes('restoreLatest'), 'opening the panel must not restore a previous session');
+assert.match(html, /aria-describedby="assistant-input-help"/);
+for (const site of ['CN-Cng', 'AT-Neu', 'AU-Preston', 'US-Ne3']) {
+  assert.ok(html.includes(`data-prompt="我想试试自带的 ${site}`), site);
+}
+assert.ok(html.includes('点击只会填入问题'));
 // 助手栏宽度：至少 320，并给主页面留至少 480。
 assert.equal(assistant.clampAssistantWidth(200, 1600, 250), 320);
 assert.equal(assistant.clampAssistantWidth(600, 1600, 250), 600);
@@ -146,7 +154,7 @@ console.log('assistant: context, events, answer blocks and page wiring ok');
 // 输入框下的“思考”选框与设置之间的换算：不思考关闭思考模式，其余只设强度。
 assert.equal(assistant.thinkValue({ thinking: false, reasoning_effort: 'max' }), 'off');
 assert.equal(assistant.thinkValue({ thinking: null, reasoning_effort: 'low' }), 'low');
-assert.equal(assistant.thinkValue({ thinking: true, reasoning_effort: null }), '');
+assert.equal(assistant.thinkValue({ thinking: true, reasoning_effort: null }), 'on');
 assert.deepEqual(assistant.thinkSettings('off'), { thinking: false, reasoning_effort: null });
 assert.deepEqual(assistant.thinkSettings('max'), { thinking: null, reasoning_effort: 'max' });
 assert.deepEqual(assistant.thinkSettings(''), { thinking: null, reasoning_effort: null });
@@ -213,9 +221,10 @@ assert.equal(assistant.backendProblem('builtin', null), null);
     calls.push([command, args]);
     if (command === 'assistant_settings') return { base_url: 'local', egress_acknowledged: 'local' };
     if (command === 'assistant_has_key') return true;
-    if (command !== 'assistant_start') throw new Error(`Unexpected IPC: ${command}`);
+    if (!['assistant_start', 'assistant_new_session'].includes(command)) throw new Error(`Unexpected IPC: ${command}`);
   };
   assistant.ui.conversation = 'existing-session';
+  assistant.ui.pendingNewConversation = false;
   elements.get('root').value = '/p';
   elements.get('kernel').value = '/k';
   const first = await assistant.ensureStarted();
@@ -246,8 +255,119 @@ assert.equal(assistant.backendProblem('builtin', null), null);
   elements.get('root').value = '/during-start';
   assert.equal((await assistant.ensureStarted()).root, '/latest');
   assert.equal(calls.filter(([cmd]) => cmd === 'assistant_start').at(-1)[1].projectRoot, '/latest');
+  assistant.ui.started = false;
+  assistant.ui.conversation = null;
+  assistant.ui.pendingNewConversation = true;
+  await assistant.ensureStarted();
+  assert.equal(calls.filter(([cmd]) => cmd === 'assistant_start').at(-1)[1].resume, null);
+  assert.equal(calls.at(-1)[0], 'assistant_new_session');
+  assert.equal(assistant.ui.pendingNewConversation, false);
+  // Settings can require configuration while the process retains the previous native session.
+  assistant.ui.conversation = 'live-old-session';
+  assistant.ui.started = false;
+  assistant.ui.pendingNewConversation = true;
+  await assistant.ensureStarted();
+  assert.equal(calls.filter(([cmd]) => cmd === 'assistant_start').at(-1)[1].resume, null);
+  assert.equal(calls.at(-1)[0], 'assistant_new_session');
+  assistant.ui.pendingNewConversation = true;
+  globalThis.assistantInvoke = async (command, args) => {
+    if (command === 'assistant_new_session') throw new Error('reset failed');
+    return originalInvoke(command, args);
+  };
+  await assert.rejects(assistant.ensureStarted(), /reset failed/);
+  assert.equal(assistant.ui.pendingNewConversation, true, 'retry resets before sending');
   assert.equal((source.match(/授权目录中的文本文件片段/g) || []).length, 3);
 }
+
+// History navigation restores the unsent draft and leaves multiline/IME editing alone.
+{
+  assert.deepEqual(assistant.inputHistory(['old', '', null, 'old', 'new']), ['old', 'new']);
+  assert.equal(assistant.inputHistory(Array.from({ length: 110 }, (_, i) => `${i}`))[0], '10');
+  assert.deepEqual(assistant.inputHistory(['x'.repeat(32001)]), []);
+  const cursor = { historyIndex: null, historyDraft: '' };
+  const textarea = { value: 'unsent draft', selectionStart: 12, selectionEnd: 12,
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; } };
+  const press = (key, extras = {}) => {
+    let prevented = false;
+    const handled = assistant.recallInput({ key, preventDefault() { prevented = true; }, ...extras }, textarea, ['older\nquestion', 'newest'], cursor);
+    assert.equal(prevented, handled);
+    return handled;
+  };
+  assert.equal(press('ArrowDown'), false);
+  assert.equal(press('ArrowUp'), true); assert.equal(textarea.value, 'newest');
+  assert.equal(press('ArrowUp'), true); assert.equal(textarea.value, 'older\nquestion');
+  assert.equal(press('ArrowUp'), true); assert.equal(textarea.value, 'older\nquestion');
+  assert.equal(press('ArrowDown'), true); assert.equal(textarea.value, 'newest');
+  assert.equal(press('ArrowDown'), true); assert.equal(textarea.value, 'unsent draft');
+  assert.equal(cursor.historyIndex, null);
+  for (const extra of [{ isComposing: true }, { keyCode: 229 }, { shiftKey: true }, { ctrlKey: true }, { altKey: true }, { metaKey: true }]) assert.equal(press('ArrowUp', extra), false);
+  textarea.value = 'first\nsecond'; textarea.setSelectionRange(12, 12);
+  assert.equal(press('ArrowUp'), false);
+  textarea.setSelectionRange(0, 5); assert.equal(press('ArrowUp'), false);
+  textarea.setSelectionRange(3, 3); assert.equal(press('ArrowUp'), true);
+}
+
+// New conversation never removes stored sessions or carries over an unsent draft.
+{
+  const empty = {};
+  const nodes = new Map([
+    ['assistant-log', { replaceChildren(...children) { this.children = children; } }],
+    ['assistant-usage', {}], ['assistant-notice', {}],
+    ['assistant-text', { value: 'old draft', focus() {} }],
+  ]);
+  document.getElementById = id => nodes.get(id) ?? null;
+  assistant.ui.emptyState = empty;
+  assistant.ui.conversation = 'previous'; assistant.ui.started = true; assistant.ui.running = false;
+  assistant.ui.historyIndex = 0; assistant.ui.historyDraft = 'saved draft';
+  const commands = [];
+  globalThis.assistantInvoke = async command => { commands.push(command); };
+  await assistant.startNewConversation();
+  assert.equal(assistant.ui.conversation, null);
+  assert.equal(nodes.get('assistant-text').value, '');
+  assert.equal(assistant.ui.historyIndex, null);
+  assert.deepEqual(nodes.get('assistant-log').children, [empty]);
+  assert.equal(nodes.get('assistant-log').scrollTop, 0);
+  assert.deepEqual(commands, [], 'the native reset happens before the next send');
+  assert.equal(assistant.ui.pendingNewConversation, true);
+  assistant.ui.running = true;
+  nodes.get('assistant-text').value = 'keep during run';
+  await assistant.startNewConversation();
+  assert.equal(nodes.get('assistant-text').value, 'keep during run');
+  assistant.ui.running = false;
+}
+
+// Read only stored prompts, merge new sends during loading and honor session deletion.
+{
+  let resolveHistory;
+  globalThis.assistantInvoke = async command => {
+    assert.equal(command, 'assistant_input_history');
+    return new Promise(resolve => { resolveHistory = resolve; });
+  };
+  assistant.ui.inputHistoryLoading = null;
+  const loading = assistant.refreshInputHistory();
+  assistant.ui.pendingInputs.push('sent while loading');
+  resolveHistory(['previous user input']); await loading;
+  assert.deepEqual(assistant.ui.inputHistory, ['previous user input', 'sent while loading']);
+  assistant.ui.historyIndex = 0; assistant.ui.historyDraft = 'unsent draft';
+  globalThis.assistantInvoke = async () => [];
+  await assistant.refreshInputHistory();
+  assert.deepEqual(assistant.ui.inputHistory, []);
+  assert.equal(document.getElementById('assistant-text').value, 'unsent draft');
+  assert.equal(assistant.ui.historyIndex, null);
+  let historyReads = 0;
+  globalThis.assistantInvoke = async () => {
+    historyReads += 1;
+    if (historyReads === 1) return new Promise(resolve => { resolveHistory = resolve; });
+    return ['still-saved'];
+  };
+  const oldRead = assistant.refreshInputHistory();
+  const deletionRefresh = assistant.refreshInputHistory(true);
+  resolveHistory(['deleted-session-input']);
+  await Promise.all([oldRead, deletionRefresh]);
+  assert.equal(historyReads, 2);
+  assert.deepEqual(assistant.ui.inputHistory, ['still-saved']);
+}
+console.log('assistant: new conversation, example entry points and persisted input navigation ok');
 console.log('assistant: project paths and per-message configuration refresh ok');
 
 // Two clicks during startup must not send the same operation twice; failed startup unlocks the panel.
@@ -272,4 +392,28 @@ console.log('assistant: project paths and per-message configuration refresh ok')
   await assert.rejects(first, /startup fixture failed/);
   assert.equal(assistant.ui.running, false);
   assert.equal(nodes.get('assistant-send').disabled, false);
+}
+
+// Model discovery offers suggestions without changing a typed model, including failed requests.
+{
+  const nodes = new Map([
+    ['assistant-model-refresh', {}], ['assistant-base', { value: 'https://models.example/v1' }],
+    ['assistant-api-format', { value: 'responses' }], ['assistant-model-name', { value: 'my-future-model' }],
+    ['assistant-model-status', {}], ['assistant-models', { replaceChildren(...items) { this.items = items; } }],
+  ]);
+  document.getElementById = id => nodes.get(id) ?? null;
+  document.createElement = () => ({});
+  globalThis.assistantInvoke = async (command, args) => {
+    assert.equal(command, 'assistant_api_models');
+    assert.deepEqual(args, { baseUrl: 'https://models.example/v1', apiFormat: 'responses' });
+    return ['model-one', 'model-two'];
+  };
+  await assistant.refreshApiModels();
+  assert.deepEqual(nodes.get('assistant-models').items.map(o => o.value), ['model-one', 'model-two']);
+  assert.equal(nodes.get('assistant-model-name').value, 'my-future-model');
+  globalThis.assistantInvoke = async () => { throw new Error('discovery unavailable'); };
+  await assistant.refreshApiModels();
+  assert.equal(nodes.get('assistant-model-name').value, 'my-future-model');
+  assert.equal(nodes.get('assistant-model-refresh').disabled, false);
+  assert.match(nodes.get('assistant-model-status').textContent, /已保留/);
 }

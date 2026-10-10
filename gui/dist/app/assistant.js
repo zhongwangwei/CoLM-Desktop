@@ -1,6 +1,6 @@
 //! AI 助手面板（docs/design-ai-assistant.md 第 8 节）。对话循环与工具都在 `colm-agent` 里，
 //! 这里只负责：启动与配置、发消息、渲染事件流（回答、思考过程、工具卡片、审批卡片、用量），
-//! 以及历史对话（列出、打开后接着聊、删除；打开面板时自动接上最近一次）。
+//! 以及历史对话（列出、打开后接着聊、删除；重启后从新对话开始）。
 //!
 //! 只依赖 ipc/state/ui/i18n：shell、runner、results 都可能导入它，反过来导入会成环。
 //! 模型的回答一律按纯文本建 DOM（不用 innerHTML），表格与代码块由 `renderAnswer` 安全地转成元素。
@@ -9,6 +9,7 @@ import { invoke, listen, hasBackend } from './ipc.js';
 import { state } from './state.js';
 import { $, status, appConfirm } from './ui.js';
 import { language, translateZh } from './i18n.js';
+import { API_PROVIDERS, providerId, rememberProfile, selectProvider, apiEfforts, parseApiOptions, settingsForSave } from './assistant-providers.js';
 
 // ---- 纯函数（tests/assistant.mjs）----------------------------------------------------------
 
@@ -224,8 +225,12 @@ const ui = {
   tools: new Map(),
   /** 面板上显示的这段对话的会话号；新对话在第一条消息前为 null。 */
   conversation: null,
-  /** 打开面板时是否已经接上过最近一次对话。 */
-  restored: false,
+  pendingNewConversation: true,
+  inputHistory: [],
+  inputHistoryLoading: null,
+  pendingInputs: [],
+  historyIndex: null,
+  historyDraft: '',
   /** 本机 Codex 的模型清单（`model/list`），第一次用到时取。 */
   codexModels: null,
 };
@@ -447,8 +452,9 @@ function renderTask(task) {
 
 async function loadSettings() {
   const settings = await invoke('assistant_settings');
-  $('assistant-base').value = settings.base_url;
-  $('assistant-model-name').value = settings.model;
+  ui.settingsDraft = settings;
+  ui.settingsBackend = settings.backend || 'builtin';
+  renderApiProfile(settings);
   $('assistant-approval').value = settings.approval || 'ask';
   $('assistant-web').value = settings.web_search === false ? 'off' : 'on';
   $('assistant-backend').value = settings.backend || 'builtin';
@@ -458,15 +464,100 @@ async function loadSettings() {
   return settings;
 }
 
+function renderApiProfile(settings) {
+  $('assistant-settings').dataset.provider = providerId(settings);
+  fillSelect($('assistant-provider'), API_PROVIDERS.map(p => [p.id, p.name]), providerId(settings));
+  $('assistant-base').value = settings.base_url || '';
+  $('assistant-model-name').value = settings.model || '';
+  $('assistant-api-format').value = settings.api_format || 'chat_completions';
+  $('assistant-max-output').value = settings.max_output_tokens ?? 16384;
+  $('assistant-timeout').value = settings.timeout_seconds ?? 600;
+  $('assistant-strict').checked = settings.strict === true;
+  $('assistant-api-options').value = JSON.stringify(settings.api_options || {}, null, 2);
+  const preset = API_PROVIDERS.find(p => p.id === providerId(settings));
+  $('assistant-models').replaceChildren(...(preset?.models || (preset?.model ? [preset.model] : [])).map(model => {
+    const option = document.createElement('option'); option.value = model; return option;
+  }));
+  $('assistant-model-status').textContent = '';
+  renderEndpointNote();
+}
+
+function renderEndpointNote() {
+  const preset = API_PROVIDERS.find(p => p.id === $('assistant-provider').value);
+  const address = $('assistant-base').value.trim();
+  const normalize = url => url.replace(/\/+$/, '');
+  $('assistant-endpoint-note').textContent = preset?.base_url && normalize(address) !== normalize(preset.base_url)
+    ? `${t('自定义地址')}：${address}` : '';
+}
+
+function readApiProfile(settings) {
+  const positive = id => {
+    const value = Number($(id).value);
+    if (!Number.isSafeInteger(value) || value < 1) throw new Error(t('输出上限与超时必须是正整数。'));
+    return value;
+  };
+  return rememberProfile({ ...settings,
+    provider_id: $('assistant-provider').value,
+    base_url: $('assistant-base').value.trim(), model: $('assistant-model-name').value.trim(),
+    api_format: $('assistant-api-format').value,
+    api_options: parseApiOptions($('assistant-api-options').value),
+    strict: $('assistant-strict').checked,
+    max_output_tokens: positive('assistant-max-output'), timeout_seconds: positive('assistant-timeout'),
+  });
+}
+
+function captureSettingsDraft() {
+  let draft = readApiProfile(ui.settingsDraft || {});
+  const backend = ui.settingsBackend || 'builtin';
+  draft = backend === 'builtin'
+    ? rememberProfile({ ...draft, ...thinkSettings($('assistant-think').value) })
+    : withChoice(draft, backend, { model: $('assistant-ext-model').value, effort: $('assistant-think').value });
+  return draft;
+}
+
+async function changeProvider() {
+  const next = $('assistant-provider').value;
+  const old = providerId(ui.settingsDraft);
+  try {
+    $('assistant-provider').value = old;
+    if ($('assistant-key').value.trim()) throw new Error(t('请先保存或清空当前服务的 Key，再切换服务商。'));
+    const draft = captureSettingsDraft();
+    ui.settingsDraft = selectProvider(draft, next);
+    renderApiProfile(ui.settingsDraft);
+    await renderChoices(ui.settingsDraft, $('assistant-backend').value);
+    await refreshKeyStatus($('assistant-base').value.trim());
+  } catch (error) { $('assistant-provider').value = old; throw error; }
+}
+
+async function refreshApiModels() {
+  const button = $('assistant-model-refresh');
+  const baseUrl = $('assistant-base').value.trim();
+  const apiFormat = $('assistant-api-format').value;
+  button.disabled = true;
+  $('assistant-model-status').textContent = t('正在检查…');
+  try {
+    const models = await invoke('assistant_api_models', { baseUrl, apiFormat });
+    if ($('assistant-base').value.trim() !== baseUrl || $('assistant-api-format').value !== apiFormat) return;
+    $('assistant-models').replaceChildren(...models.map(model => {
+      const option = document.createElement('option'); option.value = model; return option;
+    }));
+    $('assistant-model-status').textContent = models.length
+      ? `${t('可用模型')}：${models.length}` : t('服务未返回模型，可手动输入。');
+  } catch (error) {
+    $('assistant-model-status').textContent = `${t('模型刷新失败，当前输入已保留。')} ${error?.message || error}`;
+  } finally { button.disabled = false; }
+}
+
 /** 输入框下的“思考”选框：不思考 = 关闭思考模式；其余是思考强度（默认交给服务端，DeepSeek 为 high）。 */
 export function thinkValue(settings) {
   if (settings.thinking === false) return 'off';
+  if (settings.thinking === true && !settings.reasoning_effort) return 'on';
   return settings.reasoning_effort || '';
 }
 
 export function thinkSettings(value) {
-  return value === 'off'
-    ? { thinking: false, reasoning_effort: null }
+  return ['off', 'on'].includes(value)
+    ? { thinking: value === 'on', reasoning_effort: null }
     : { thinking: null, reasoning_effort: value || null };
 }
 
@@ -485,9 +576,9 @@ export function modelOptions(backend, codexModels) {
 
 /** 输入框下“思考”选框的选项：内置后端是 DeepSeek 的强度；Claude Code 是 --effort 的五档；
  *  Codex 随所选模型（没选用默认模型）而定，取不到清单时给常见的四档。 */
-export function thinkOptions(backend, model, codexModels) {
+export function thinkOptions(backend, model, codexModels, provider = 'deepseek') {
   if (backend === 'builtin') {
-    return [['', '思考：默认'], ['low', '思考：low'], ['high', '思考：high'], ['max', '思考：max'], ['off', '不思考']];
+    return apiEfforts(provider, model).map(value => [value, value === '' ? '思考：默认' : value === 'off' ? '不思考' : value === 'on' ? '开启思考' : `思考：${value}`]);
   }
   let efforts = ['low', 'medium', 'high', 'xhigh', 'max'];
   let fallback = '';
@@ -539,20 +630,21 @@ async function codexModels() {
 /** 按后端填设置里的模型选框与输入框下的思考选框。 */
 async function renderChoices(settings, backend) {
   const models = backend === 'codex' ? await codexModels() : null;
-  const model = settings.external?.[backend]?.model || '';
+  const model = backend === 'builtin' ? settings.model : settings.external?.[backend]?.model || '';
   if (backend !== 'builtin') fillSelect($('assistant-ext-model'), modelOptions(backend, models), model);
-  fillSelect($('assistant-think'), thinkOptions(backend, model, models), currentThink(settings, backend));
+  fillSelect($('assistant-think'), thinkOptions(backend, model, models, providerId(settings)), currentThink(settings, backend));
   $('assistant-think').title = t(backend === 'builtin'
     ? '思考强度：随时可改，下一条消息生效'
     : '思考强度：随时可改，下一条消息生效（Codex / Claude Code）');
 }
 
 async function changeThink() {
+  if (!$('assistant-settings').hidden) { ui.settingsDraft = captureSettingsDraft(); return; }
   const saved = await invoke('assistant_settings');
   const backend = saved.backend || 'builtin';
   const value = $('assistant-think').value;
   const settings = backend === 'builtin'
-    ? { ...saved, ...thinkSettings(value) }
+    ? rememberProfile({ ...saved, ...thinkSettings(value) })
     : withChoice(saved, backend, { effort: value });
   await invoke('assistant_save_settings', { settings });
   ui.started = false; // 下一条消息发出前重新配置
@@ -586,7 +678,7 @@ async function refreshBackendStatus(backend = $('assistant-backend').value) {
     el.hidden = !el.dataset.backendOnly.split(' ').includes(backend);
   }
   if (backend === 'builtin') {
-    line.textContent = t('使用下面的服务地址、模型与 API Key。');
+    line.textContent = '';
     line.className = 'mini muted';
     return null;
   }
@@ -617,31 +709,25 @@ async function refreshKeyStatus(baseUrl) {
 }
 
 function formSettings(previous) {
-  const backend = $('assistant-backend').value || 'builtin';
-  const think = $('assistant-think').value;
-  const base = {
-    ...previous,
-    base_url: $('assistant-base').value.trim(),
-    model: $('assistant-model-name').value.trim(),
+  return { ...previous, ...captureSettingsDraft(),
     approval: $('assistant-approval').value || 'ask',
     web_search: $('assistant-web').value !== 'off',
-    backend,
+    backend: $('assistant-backend').value || 'builtin',
     egress_acknowledged: previous?.egress_acknowledged ?? null,
   };
-  // 思考选框显示的是当前后端的强度：内置后端存进 DeepSeek 的设置，外部后端存进它自己的那一份。
-  return backend === 'builtin'
-    ? { ...base, ...thinkSettings(think) }
-    : withChoice(base, backend, { model: $('assistant-ext-model').value, effort: think });
 }
 
 async function saveSettings() {
   const previous = await invoke('assistant_settings');
-  const settings = formSettings(previous);
+  const draft = formSettings(previous);
+  const settings = settingsForSave(draft, previous);
   await invoke('assistant_save_settings', { settings });
   ui.started = false;
+  ui.settingsDraft = draft;
   await refreshKeyStatus(settings.base_url);
   $('assistant-settings').hidden = true;
-  status(t('已保存助手设置'));
+  status(t(Object.keys(draft.api_profiles || {}).length > Object.keys(settings.api_profiles).length
+    ? '已保存助手设置；未填写完整的服务仅保留在当前表单。' : '已保存助手设置'));
 }
 
 // ---- 发送 ----------------------------------------------------------------------------
@@ -677,8 +763,7 @@ function renderPageChips() {
     chip.className = 'assistant-chip';
     chip.textContent = language() === 'en' ? translateZh(label) : label;
     chip.onclick = () => {
-      $('assistant-text').value = language() === 'en' ? translateZh(prompt) : prompt;
-      $('assistant-text').focus();
+      fillPrompt(prompt);
     };
     return chip;
   }));
@@ -775,11 +860,15 @@ async function ensureStarted() {
     const configKey = JSON.stringify([view.root, kernelDir]);
     if (!ui.started || ui.configKey !== configKey) {
       // 接上面板上正显示的那段对话（进程重启后也接得上）。
-      await invoke('assistant_start', { projectRoot: view.root, kernelDir, resume: ui.conversation });
+      await invoke('assistant_start', { projectRoot: view.root, kernelDir, resume: ui.pendingNewConversation ? null : ui.conversation });
       ui.started = true;
       ui.configKey = configKey;
       // 启动期间用户也可能切换目录；发送前确认授权仍然对应当前页面。
       continue;
+    }
+    if (ui.pendingNewConversation) {
+      await invoke('assistant_new_session');
+      ui.pendingNewConversation = false;
     }
     return view;
   }
@@ -801,7 +890,65 @@ async function send() {
     setRunning(false);
     throw e;
   });
+  ui.inputHistory = inputHistory([...ui.inputHistory, text]);
+  if (ui.inputHistoryLoading) ui.pendingInputs.push(text);
+  resetInputHistory();
   scrollDown();
+}
+
+/** Keep the same bounded, chronological view as the stored user transcripts. */
+export function inputHistory(items) {
+  const texts = items.filter(text => typeof text === 'string' && text.trim() && text.length <= 32000);
+  return texts.filter((text, i) => text !== texts[i - 1]).slice(-100);
+}
+
+function resetInputHistory() {
+  ui.historyIndex = null;
+  ui.historyDraft = '';
+}
+
+function fillPrompt(prompt) {
+  $('assistant-text').value = language() === 'en' ? translateZh(prompt) : prompt;
+  resetInputHistory();
+  $('assistant-text').focus();
+}
+
+async function refreshInputHistory(force = false) {
+  if (ui.inputHistoryLoading) {
+    if (!force) return ui.inputHistoryLoading;
+    await ui.inputHistoryLoading.catch(() => {});
+    return refreshInputHistory(true);
+  }
+  ui.pendingInputs = [];
+  ui.inputHistoryLoading = invoke('assistant_input_history').then(items => {
+    const recalled = ui.historyIndex === null ? null : ui.inputHistory[ui.historyIndex];
+    ui.inputHistory = inputHistory([...items, ...ui.pendingInputs]);
+    if (recalled !== null) {
+      const index = ui.inputHistory.lastIndexOf(recalled);
+      if (index < 0) { $('assistant-text').value = ui.historyDraft; resetInputHistory(); }
+      else ui.historyIndex = index;
+    }
+  }).finally(() => { ui.inputHistoryLoading = null; ui.pendingInputs = []; });
+  return ui.inputHistoryLoading;
+}
+
+/** Multiline editing and IME selection retain their normal arrow-key behavior. */
+export function recallInput(event, textarea, history = ui.inputHistory, cursor = ui) {
+  if (!['ArrowUp', 'ArrowDown'].includes(event.key) || event.isComposing || event.keyCode === 229
+      || event.shiftKey || event.ctrlKey || event.altKey || event.metaKey || !history.length
+      || textarea.selectionStart !== textarea.selectionEnd) return false;
+  const browsing = cursor.historyIndex !== null;
+  if (!browsing && (event.key === 'ArrowDown' || textarea.value.slice(0, textarea.selectionStart).includes('\n'))) return false;
+  if (!browsing) {
+    cursor.historyDraft = textarea.value;
+    cursor.historyIndex = history.length;
+  }
+  cursor.historyIndex = Math.max(0, Math.min(history.length, cursor.historyIndex + (event.key === 'ArrowUp' ? -1 : 1)));
+  textarea.value = cursor.historyIndex === history.length ? cursor.historyDraft : history[cursor.historyIndex];
+  if (cursor.historyIndex === history.length) cursor.historyIndex = null;
+  textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+  event.preventDefault();
+  return true;
 }
 
 // ---- 历史对话 ------------------------------------------------------------------------
@@ -820,6 +967,7 @@ export function sessionTime(ms, now = Date.now()) {
 function clearLog() {
   const empty = ui.emptyState;
   log().replaceChildren(...(empty ? [empty] : []));
+  log().scrollTop = 0;
   ui.tools.clear();
   ui.task = null;
   ui.progress = null;
@@ -863,6 +1011,7 @@ async function openConversation(id) {
   const items = await invoke('assistant_transcript', { id });
   renderTranscript(items);
   ui.conversation = id;
+  ui.pendingNewConversation = false;
   $('assistant-history').hidden = true;
   notice('');
   if (ui.started) await invoke('assistant_resume', { id });
@@ -894,7 +1043,8 @@ async function showHistory() {
       if (!(await appConfirm(t('删除这段对话？删除后无法恢复。'), { okText: t('删除') }))) return;
       try {
         await invoke('assistant_delete_session', { id: session.id });
-        if (session.id === ui.conversation) startNewConversation();
+        if (session.id === ui.conversation) await startNewConversation();
+        await refreshInputHistory(true);
         box.hidden = true;
         await showHistory();
       } catch (e) {
@@ -908,20 +1058,15 @@ async function showHistory() {
   box.hidden = false;
 }
 
-function startNewConversation() {
+async function startNewConversation() {
   if (ui.running) return;
   clearLog();
   ui.conversation = null;
-  if (ui.started) invoke('assistant_new_session').catch(e => status(e));
-}
-
-/** 第一次打开面板：面板还空着时接上最近一次对话。 */
-async function restoreLatest() {
-  if (ui.restored) return;
-  ui.restored = true;
-  if (ui.conversation || log().querySelector('.assistant-msg')) return;
-  const sessions = await invoke('assistant_sessions');
-  if (sessions.length) await openConversation(sessions[0].id);
+  ui.pendingNewConversation = true;
+  $('assistant-text').value = '';
+  resetInputHistory();
+  notice('');
+  $('assistant-text').focus();
 }
 
 /** 助手栏宽度：至少 320，并给主页面留至少 480。 */
@@ -979,7 +1124,7 @@ function togglePanel(open = $('assistant-panel').hidden) {
   if (open) restoreWidth();
   if (open) {
     loadSettings().catch(e => status(e));
-    restoreLatest().catch(e => notice(String(e?.message || e)));
+    refreshInputHistory().catch(e => status(e?.message || e));
     $('assistant-text').focus();
   }
 }
@@ -999,7 +1144,17 @@ function wire() {
   });
   $('assistant-settings-btn').onclick = () => {
     $('assistant-history').hidden = true;
-    $('assistant-settings').hidden = !$('assistant-settings').hidden;
+    const settingsPanel = $('assistant-settings');
+    if (!settingsPanel.hidden) {
+      try { ui.settingsDraft = captureSettingsDraft(); }
+      catch (error) { status(error?.message || error); return; }
+    }
+    settingsPanel.hidden = !settingsPanel.hidden;
+    if (settingsPanel.hidden) {
+      invoke('assistant_settings').then(saved => renderChoices(saved, saved.backend || 'builtin')).catch(e => status(e));
+    } else {
+      renderChoices(ui.settingsDraft, $('assistant-backend').value).catch(e => status(e));
+    }
   };
   $('assistant-settings-save').onclick = () => saveSettings().catch(e => status(e?.message || e));
   $('assistant-key-save').onclick = async () => {
@@ -1027,28 +1182,46 @@ function wire() {
   $('assistant-stop').onclick = () => invoke('assistant_cancel').catch(e => status(e));
   for (const chip of document.querySelectorAll('.assistant-chip')) {
     chip.onclick = () => {
-      $('assistant-text').value = language() === 'en' ? translateZh(chip.dataset.prompt) : chip.dataset.prompt;
-      $('assistant-text').focus();
+      fillPrompt(chip.dataset.prompt);
     };
   }
   ui.emptyState = log().querySelector('.assistant-empty');
   renderPageChips();
   addEventListener('colm:step', renderPageChips);
-  $('assistant-new').onclick = () => { $('assistant-history').hidden = true; startNewConversation(); };
+  $('assistant-new').onclick = () => {
+    $('assistant-history').hidden = true;
+    startNewConversation().catch(e => notice(String(e?.message || e)));
+  };
   $('assistant-history-btn').onclick = () => showHistory().catch(e => notice(String(e?.message || e)));
   // 回车发送，Shift + 回车换行；输入法选词时的回车（isComposing / keyCode 229）不发送。
   $('assistant-think').addEventListener('change', () => changeThink().catch(e => status(e?.message || e)));
   $('assistant-backend').addEventListener('change', async () => {
     const backend = $('assistant-backend').value;
-    await renderChoices(await invoke('assistant_settings'), backend).catch(e => status(e?.message || e));
-    refreshBackendStatus().catch(e => status(e));
+    try {
+      ui.settingsDraft = captureSettingsDraft();
+      ui.settingsBackend = backend;
+      await renderChoices(ui.settingsDraft, backend);
+      refreshBackendStatus().catch(e => status(e));
+    } catch (e) { $('assistant-backend').value = ui.settingsBackend; status(e?.message || e); }
+  });
+  $('assistant-provider').addEventListener('change', () => changeProvider().catch(e => status(e?.message || e)));
+  $('assistant-model-refresh').onclick = () => refreshApiModels();
+  $('assistant-base').addEventListener('change', () => {
+    renderEndpointNote();
+    refreshKeyStatus($('assistant-base').value.trim());
+  });
+  $('assistant-model-name').addEventListener('change', () => {
+    ui.settingsDraft = captureSettingsDraft();
+    renderChoices(ui.settingsDraft, $('assistant-backend').value).catch(e => status(e?.message || e));
   });
   $('assistant-ext-model').addEventListener('change', () => changeExternalModel().catch(e => status(e?.message || e)));
   $('assistant-text').addEventListener('keydown', event => {
+    if (recallInput(event, $('assistant-text'))) return;
     if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
     event.preventDefault();
     send().catch(e => notice(String(e?.message || e)));
   });
+  $('assistant-text').addEventListener('input', resetInputHistory);
   listen('assistant://event', event => {
     const parsed = parseEvent(event.payload);
     if (parsed) handle(parsed);

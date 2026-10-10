@@ -1,4 +1,4 @@
-//! 对话消息（OpenAI Chat Completions 格式）。
+//! Persistent conversation messages with optional provider-scoped opaque state.
 //!
 //! DeepSeek 的思考模式要求：有工具调用时，之后每一轮都要把助手消息的 `reasoning_content` 原样回传，
 //! 否则返回 400（docs/design-ai-assistant.md 第 3.1 节）。所以助手消息保留它，序列化时一并写出。
@@ -27,6 +27,9 @@ pub enum Message {
         content: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// Signed thinking and encrypted reasoning, replayed only to the matching provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider_state: Option<Value>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
     },
@@ -46,6 +49,7 @@ impl Message {
                 content,
                 reasoning_content,
                 tool_calls,
+                ..
             } => {
                 let mut message = json!({ "role": "assistant", "content": content });
                 if let Some(reasoning) = reasoning_content {

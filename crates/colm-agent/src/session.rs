@@ -270,6 +270,67 @@ pub fn list(data_dir: &Path) -> Result<Vec<SessionInfo>> {
     Ok(sessions)
 }
 
+/// Recent sent input, derived from saved conversations so deleting a session also removes its input.
+pub fn input_history(data_dir: &Path) -> Result<Vec<String>> {
+    let root = data_dir.join("sessions");
+    let entries = match std::fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut sessions = Vec::new();
+    for entry in entries.flatten() {
+        let id = entry.file_name().to_string_lossy().into_owned();
+        let Ok(dir) = session_dir(data_dir, &id) else {
+            continue;
+        };
+        let path = dir.join("messages.jsonl");
+        let Ok(modified) = std::fs::metadata(&path).and_then(|meta| meta.modified()) else {
+            continue;
+        };
+        sessions.push((modified, id, path));
+    }
+    // shortcut: messages lack timestamps; use session recency until per-message timing is stored.
+    sessions.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+    sessions.truncate(20);
+    let mut inputs = std::collections::VecDeque::new();
+    for (_, _, path) in sessions.into_iter().rev() {
+        let Ok(mut file) = std::fs::File::open(path) else {
+            continue;
+        };
+        let start = file.metadata()?.len().saturating_sub(8 * 1024 * 1024);
+        file.seek(SeekFrom::Start(start))?;
+        let mut bytes = Vec::new();
+        file.take(8 * 1024 * 1024).read_to_end(&mut bytes)?;
+        // A bounded tail can start inside a JSON record; discard that partial record.
+        let offset = if start == 0 {
+            0
+        } else {
+            bytes
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |index| index + 1)
+        };
+        for line in bytes[offset..].split(|byte| *byte == b'\n') {
+            let Ok(Message::User { content }) = serde_json::from_slice::<Message>(line) else {
+                continue;
+            };
+            let text = user_text(&content);
+            if text.is_empty()
+                || text.chars().count() > 32_000
+                || inputs.back().is_some_and(|last| last == text)
+            {
+                continue;
+            }
+            inputs.push_back(text.to_owned());
+            if inputs.len() > 100 {
+                inputs.pop_front();
+            }
+        }
+    }
+    Ok(inputs.into_iter().collect())
+}
+
 /// 界面上显示的一条记录。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]

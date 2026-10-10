@@ -78,6 +78,35 @@ GUI 助手面板 ──(Tauri 事件)── sidecar.rs ──stdio JSONL── c
 - 默认分工：分析与操作用 `deepseek-flash`；读写代码用 `deepseek-v4-pro`。可在设置里改。
 - 实现上不绑死 DeepSeek：只要是 OpenAI 兼容的服务都能接，填地址、模型和 Key 即可，包括 Qwen、本地的 Ollama 或 vLLM。
 
+#### 新对话与输入历史（2026-10-10）
+
+应用重启后默认显示新对话欢迎页，旧会话保留在“历史”中，由用户主动选择续聊。欢迎页介绍四个随包示例站点（CN-Cng 草地、AT-Neu 甲烷、AU-Preston 城市、US-Ne3 农田），并提供自有数据建例、运行条件检查、参数与源码解释、已有结果分析入口。点击推荐只填入输入框，不自动运行；示例安装和建例仍走现有引导及操作审批。
+
+输入框 ↑ / ↓ 浏览最近 20 个已保存会话中的最多 100 条用户输入，↓ 越过最新条目恢复未发送草稿。首行以外的普通多行编辑、输入法选词和组合键不被历史操作占用；手动编辑退出历史浏览。历史来自已有会话记录，不复制到 localStorage，删除会话时同步更新。现有会话无逐消息时间戳，跨会话顺序以会话更新时间为准；超长输入跳过而不截断。
+
+#### 多服务设置与原生协议（2026-10-10）
+
+设置中已加入 DeepSeek、OpenAI / ChatGPT API、Anthropic / Claude API、Grok、GLM、Gemini、Kimi、Qwen 和自定义服务。每个服务分别保留地址、模型、思考选项、超时、输出上限及高级参数。常规模式只显示接入方式、服务商、模型、Key、审批和联网选项；地址及高级参数、技术说明放在顶部现有“专家”模式。自定义服务的必填地址在常规模式仍显示；预设地址被修改时显示实际目标地址。切换模式不改变配置，隐藏字段照常保留和保存。预设模型只是起点，刷新模型清单和手动输入均不会自动替换当前模型。模型权限、区域和思考档位以当前账户及服务商文档为准。
+
+| 服务 | 接口格式与默认模型 | 思考配置 |
+| --- | --- | --- |
+| DeepSeek | Chat Completions；`deepseek-flash`，另提供 `deepseek-v4-pro` | 开关及 low / high / max |
+| OpenAI | Responses；`gpt-6.1-sol` | low / medium / high / xhigh / max；默认交给模型 |
+| Claude | Anthropic Messages；`claude-sonnet-5-5` | adaptive thinking 与 `output_config.effort`；不发送通用 `reasoning_effort` |
+| Grok | Chat Completions；`grok-4.7` | low / medium / high / xhigh；较旧模型档位不同 |
+| GLM | Chat Completions；`glm-5.3` | 5.3 使用 low / high / max，不能关闭；较旧型号使用开关 |
+| Gemini | OpenAI 兼容接口；`gemini-3.8-flash` | 默认及模型支持的 reasoning effort；原生 thinking 参数可在高级 JSON 中填写 |
+| Kimi | Chat Completions；`kimi-k3` | K3 仅 low / high / max；K2.7 Code 始终思考；K2.6 使用开关 |
+| Qwen | Chat Completions；`qwen3.8-flash` | `enable_thinking` 开关；`thinking_budget` 可通过高级 JSON 设置 |
+
+OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 原生 Messages 保留 thinking / signature / redacted thinking 和 tool use；Gemini 保留工具调用的 thought signature。状态绑定服务商、接口、地址及模型，切换服务时不会回传其他模型的私有状态。流式错误、截断或不完整工具参数阻止执行工具；拒答显示实际文本。
+
+模型刷新通过 sidecar 使用已保存 Key，窗口仅接收模型 ID。通用兼容接口读取 `/models`；Qwen 官方服务读取服务根路径的 `/api/v1/models`，分页最多 500 个模型；GLM 未确认通用列表接口，失败后继续使用预设或手动输入。HTTP 重定向不自动跟随，防止 `x-api-key` 被转发给另一个服务。高级 JSON 是原始 HTTP 请求体附加字段，禁止覆盖模型、历史、工具、流式控制、Responses 状态及凭据。
+
+订阅接入继续使用本机已登录的官方 Codex / Claude Code；API 使用平台账户额度。其他聊天会员或受工具限制的 Coding Plan 不应直接宣传为 CoLM 自定义助手可用的 API 订阅。国内/国际/区域端点可编辑，必须与 API Key 的所属平台和区域匹配。
+
+官方合同核对于 2026-10-10：[OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning)、[Claude Messages](https://platform.claude.com/docs/en/api/messages/create)、[Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort)、[Grok reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning)、[Gemini OpenAI 兼容](https://ai.google.dev/gemini-api/docs/openai)、[DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode/)、[GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3)、[Kimi thinking](https://platform.kimi.ai/docs/guide/use-thinking-models)、[Qwen 模型列表](https://help.aliyun.com/en/model-studio/list-models)。本次验证使用本地模拟 HTTP 和持久化回合测试，没有消费真实账户额度；发版前仍需真实服务与安装包实测。
+
 ### 3.2 Codex（第 634 轮已实现并实测，codex-cli 0.160.1，ChatGPT 登录）
 
 - 一个 CoLM 会话常驻一个 `codex app-server`（stdio 上的 JSON-RPC，消息不带 `jsonrpc`）：`initialize`、`initialized`、`thread/start`（或续接时 `thread/resume`），每轮 `turn/start`，取消用 `turn/interrupt`。

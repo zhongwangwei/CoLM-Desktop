@@ -724,8 +724,16 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-head .grow { flex: 1; }
 #assistant-model:not(:empty) { padding: 1px 8px; border-radius: 999px; background: var(--surface-2); font-family: ui-monospace, monospace; }
 .assistant-settings { display: grid; grid-template-columns: max-content 1fr; gap: 8px 12px; padding: 12px 14px;
-  border-bottom: 1px solid var(--border-soft); background: var(--surface); }
+  min-height: 0; overflow-y: auto; border-bottom: 1px solid var(--border-soft); background: var(--surface); }
+.assistant-settings details > label { display: block; margin-top: 8px; }
 .assistant-settings[hidden] { display: none; }
+body:not(.expert) .assistant-settings [data-expert-only],
+body:not(.expert) .assistant-settings:not([data-provider="custom"]) [data-assistant-address],
+body.expert .assistant-settings [data-assistant-normal] { display: none !important; }
+.assistant-model-row { display: flex; gap: 8px; min-width: 0; }
+.assistant-model-row .input { min-width: 0; flex: 1; }
+.assistant-model-row button { flex: none; }
+.assistant-settings > p:empty { display: none; }
 /* 只属于某个后端的设置项：隐藏时压过各自的 grid/flex 显示方式。 */
 .assistant-settings [data-backend-only][hidden] { display: none !important; }
 /* 引导模式：助手填过的控件。获得焦点（用户接手）时去掉。 */
@@ -750,7 +758,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-log { flex: 1; min-height: 0; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
 .assistant-empty { margin: auto 0; text-align: center; padding: 24px 12px; }
 .assistant-empty-title { font-size: 15px; font-weight: 600; margin-bottom: 6px; }
-.assistant-suggestions { display: flex; flex-direction: column; gap: 8px; margin-top: 14px; align-items: center; }
+.assistant-suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 14px; align-items: center; }
 .assistant-chip { border: 1px solid var(--border); background: var(--surface); color: var(--text); border-radius: 999px;
   padding: 6px 14px; font-size: 12.5px; cursor: pointer; }
 .assistant-chip:hover { border-color: var(--accent); color: var(--accent); }
@@ -800,6 +808,7 @@ body.resizing-assistant { user-select: none; cursor: col-resize; }
 .assistant-approval-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-top: 8px; }
 .assistant-input { padding: 10px 14px 12px; border-top: 1px solid var(--border-soft); background: var(--surface); }
 .assistant-input textarea { resize: vertical; min-height: 64px; }
+.assistant-input-help { margin: 4px 0 0; font-size: 11px; }
 .assistant-input-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .assistant-input-row #assistant-usage { margin-right: auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assistant-input-row button { flex: none; white-space: nowrap; }

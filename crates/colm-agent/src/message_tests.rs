@@ -3,6 +3,7 @@ use super::*;
 #[test]
 fn assistant_messages_keep_reasoning_and_tool_calls_for_the_next_turn() {
     let message = Message::Assistant {
+        provider_state: None,
         content: String::new(),
         reasoning_content: Some("look at the metrics first".into()),
         tool_calls: vec![ToolCall {
@@ -23,6 +24,7 @@ fn assistant_messages_keep_reasoning_and_tool_calls_for_the_next_turn() {
     );
 
     let plain = Message::Assistant {
+        provider_state: None,
         content: "done".into(),
         reasoning_content: None,
         tool_calls: Vec::new(),
@@ -50,6 +52,7 @@ fn messages_round_trip_through_the_transcript_format() {
             content: "u".into(),
         },
         Message::Assistant {
+            provider_state: None,
             content: "a".into(),
             reasoning_content: Some("r".into()),
             tool_calls: vec![ToolCall {

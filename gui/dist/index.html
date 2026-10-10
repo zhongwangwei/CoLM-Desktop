@@ -1240,21 +1240,43 @@
     </div>
     <div class="assistant-history" id="assistant-history" hidden></div>
     <div class="assistant-settings" id="assistant-settings" hidden>
-      <label for="assistant-backend">后端</label>
+      <label for="assistant-backend">接入方式</label>
       <select class="select" id="assistant-backend">
-        <option value="builtin">内置（DeepSeek 或其他 API 服务）</option>
+        <option value="builtin">API Key（多家模型与自定义服务）</option>
         <option value="codex">Codex（用你的 ChatGPT 订阅）</option>
         <option value="claude_code">Claude Code（用你的 Claude 订阅）</option>
       </select>
       <p class="mini muted" id="assistant-backend-status"></p>
       <label data-backend-only="codex claude_code" for="assistant-ext-model">模型</label>
       <select data-backend-only="codex claude_code" class="select" id="assistant-ext-model"></select>
-      <p data-backend-only="codex claude_code" class="muted mini">思考强度在输入框下面随时可改。选“默认”时用 Codex / Claude Code 自己的设置。</p>
-      <label data-backend-only="builtin" for="assistant-base">服务地址</label>
-      <input data-backend-only="builtin" class="input" id="assistant-base" placeholder="https://api.deepseek.com">
+      <p data-backend-only="codex claude_code" data-expert-only class="muted mini">思考强度在输入框下面随时可改。选“默认”时用 Codex / Claude Code 自己的设置。</p>
+      <p class="muted mini">订阅通过官方客户端登录；API 按平台账户额度计费。</p>
+      <p data-expert-only class="muted mini">订阅接入使用本机 Codex / Claude Code 的登录；API 使用平台账户额度，按服务商规则计费。其他聊天订阅不能直接当作 API Key。</p>
+      <label data-backend-only="builtin" for="assistant-provider">模型服务商</label>
+      <select data-backend-only="builtin" class="select" id="assistant-provider"></select>
+      <label data-backend-only="builtin" data-assistant-address for="assistant-base">服务地址</label>
+      <input data-backend-only="builtin" data-assistant-address class="input" id="assistant-base" placeholder="https://api.deepseek.com">
+      <p data-backend-only="builtin" class="muted mini" id="assistant-endpoint-note" hidden></p>
       <label data-backend-only="builtin" for="assistant-model-name">模型</label>
-      <input data-backend-only="builtin" class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
-      <datalist data-backend-only="builtin" id="assistant-models"><option value="deepseek-flash"></option><option value="deepseek-v4-pro"></option></datalist>
+      <div data-backend-only="builtin" class="assistant-model-row">
+        <input class="input" id="assistant-model-name" list="assistant-models" placeholder="deepseek-flash">
+        <button class="btn-ghost" type="button" id="assistant-model-refresh" aria-label="刷新可用模型" title="刷新可用模型">刷新</button>
+      </div>
+      <datalist data-backend-only="builtin" id="assistant-models"></datalist>
+      <p data-backend-only="builtin" class="muted mini" id="assistant-model-status" aria-live="polite"></p>
+      <details data-backend-only="builtin" data-expert-only style="grid-column: 2">
+        <summary>高级 API 设置</summary>
+        <label for="assistant-api-format">接口格式</label>
+        <select class="select" id="assistant-api-format"><option value="chat_completions">OpenAI Chat Completions</option><option value="responses">OpenAI Responses</option><option value="anthropic">Anthropic Messages</option></select>
+        <label for="assistant-max-output">最大输出 token</label>
+        <input class="input" id="assistant-max-output" type="number" min="1" step="1" value="16384">
+        <label for="assistant-timeout">请求超时（秒）</label>
+        <input class="input" id="assistant-timeout" type="number" min="1" step="1" value="600">
+        <label><input id="assistant-strict" type="checkbox"> 严格工具参数（仅支持的服务）</label>
+        <label for="assistant-api-options">附加请求参数（JSON 对象）</label>
+        <textarea class="input" id="assistant-api-options" rows="4" spellcheck="false">{}</textarea>
+        <p class="muted mini">思考选项取决于模型；不支持的选项请用默认。附加参数按服务商文档填写，不要填写密钥。</p>
+      </details>
       <label data-backend-only="builtin" for="assistant-key">API Key</label>
       <div data-backend-only="builtin" class="assistant-key-row">
         <input class="input" id="assistant-key" type="password" autocomplete="off" placeholder="粘贴后点“保存 Key”">
@@ -1262,37 +1284,48 @@
         <button class="btn-ghost" type="button" id="assistant-key-delete">删除 Key</button>
       </div>
       <p data-backend-only="builtin" class="muted mini" id="assistant-key-status"></p>
-      <p data-backend-only="builtin" class="muted mini">Key 以明文保存在本机的应用配置目录（assistant-keys.json，只有当前用户可读），不会写进日志或算例。默认用 DeepSeek 官方 API；也可以填任何兼容 OpenAI 格式的服务，例如本机的 Ollama（http://127.0.0.1:11434/v1）。</p>
+      <p data-backend-only="builtin" data-expert-only class="muted mini">Key 以明文保存在本机的应用配置目录（assistant-keys.json，只有当前用户可读），不会写进日志或算例。服务地址、模型和接口格式均可编辑；也支持本机兼容服务，例如 Ollama（http://127.0.0.1:11434/v1）。</p>
       <label for="assistant-approval">操作审批</label>
       <select class="select" id="assistant-approval">
         <option value="ask">每次询问</option>
         <option value="auto">自动执行，不再询问</option>
       </select>
-      <p class="muted mini">指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。</p>
+      <p data-expert-only class="muted mini">指建算例、改配置、运行算例与 Study 这类操作。选“每次询问”时，审批卡片上也可以点“本会话都允许”，同一类操作在这次会话里就不再询问。</p>
       <label for="assistant-web">联网搜索</label>
       <select class="select" id="assistant-web">
         <option value="on">开启</option>
         <option value="off">不联网</option>
       </select>
-      <p data-backend-only="builtin" class="muted mini">开启后助手可以搜索网页、打开搜索结果读正文，用于查文献与资料。用 DeepSeek 原生搜索（用上面的 DeepSeek Key，每次约 2 秒、几千 token），只能打开搜索结果或你消息里给出的网址。</p>
-      <p data-backend-only="codex claude_code" class="muted mini">开启后助手用 Codex / Claude Code 自带的联网搜索查文献与资料，计入你的订阅，不需要 DeepSeek Key。</p>
+      <p data-backend-only="builtin" data-assistant-normal class="muted mini">联网搜索需另存 DeepSeek Key。</p>
+      <p data-backend-only="builtin" data-expert-only class="muted mini">API 联网搜索使用单独保存的 DeepSeek API Key；可切到 DeepSeek 服务商保存 Key，再切回当前模型。</p>
+      <p data-backend-only="codex claude_code" data-expert-only class="muted mini">开启后助手用 Codex / Claude Code 自带的联网搜索查文献与资料，计入你的订阅，不需要 DeepSeek Key。</p>
+      <p data-assistant-normal class="muted mini">服务地址与更多参数可在顶部“专家”模式中设置。</p>
       <div class="pill-row"><button class="run-btn" type="button" id="assistant-settings-save">保存设置</button></div>
     </div>
     <p class="warn mini assistant-notice" id="assistant-notice" hidden></p>
     <div class="assistant-log" id="assistant-log">
       <div class="assistant-empty">
-        <div class="assistant-empty-title">问问你的算例与结果</div>
-        <p class="muted mini">助手读取算例配置、运行日志、指标与 Study 结果来回答，每个结论都会注明出处；建算例、改配置或运行前按设置里的“操作审批”征得你同意。</p>
+        <div class="assistant-empty-title">从一个示例开始，还是用自己的数据？</div>
+        <p class="muted mini">我们准备了四个自带示例，想先试哪一个？可以从准备数据、创建算例一路体验到运行和分析结果。</p>
         <div class="assistant-suggestions">
-          <button class="assistant-chip" type="button" data-prompt="当前算例的 GPP 与潜热模拟得怎么样？问题可能出在哪里？">当前算例模拟得怎么样？</button>
-          <button class="assistant-chip" type="button" data-prompt="列出项目里的算例，并比较它们的配置与指标差异。">比较项目里的算例</button>
-          <button class="assistant-chip" type="button" data-prompt="上一次运行有没有报错或异常？请检查运行状态与日志。">检查最近一次运行</button>
+          <button class="assistant-chip" type="button" data-prompt="我想试试自带的 CN-Cng 草地示例。请通过界面引导我加载示例、创建算例并检查运行条件；实际开始计算前让我核对设置。">草地入门 · CN-Cng</button>
+          <button class="assistant-chip" type="button" data-prompt="我想试试自带的 AT-Neu 甲烷示例。请引导我选择甲烷方案、加载示例并检查数据和内核条件；缺少条件时明确说明，实际开始计算前让我核对设置。">甲烷过程 · AT-Neu</button>
+          <button class="assistant-chip" type="button" data-prompt="我想试试自带的 AU-Preston 城市示例。请引导我选择城市方案、加载示例并检查运行条件；实际开始计算前让我核对设置。">城市模拟 · AU-Preston</button>
+          <button class="assistant-chip" type="button" data-prompt="我想试试自带的 US-Ne3 农田示例。请引导我选择作物方案、加载示例并检查运行条件；实际开始计算前让我核对设置。">农田作物 · US-Ne3</button>
+        </div>
+        <p class="muted mini">也可以从这些任务开始。点击只会填入问题，可以修改后再发送。</p>
+        <div class="assistant-suggestions">
+          <button class="assistant-chip" type="button" data-prompt="我想用自己的站点数据建算例。请先了解我的数据类型，检查所需站点、强迫场和观测数据，再引导我准备和创建算例。">用自己的数据建算例</button>
+          <button class="assistant-chip" type="button" data-prompt="请检查当前算例的内核、输入数据、模拟时段和输出设置，告诉我是否具备运行条件以及还缺什么。">检查运行条件</button>
+          <button class="assistant-chip" type="button" data-prompt="请解释当前选中的过程或参数，检索对应版本的源码和文档，说明含义、单位、适用开关及如何验证它是否生效。">理解参数与源码</button>
+          <button class="assistant-chip" type="button" data-prompt="请分析当前算例的模拟结果；先核对运行状态、观测覆盖、单位和时间对齐，再区分已确认事实、待验证原因与下一步实验。">分析已有模拟结果</button>
         </div>
       </div>
     </div>
     <div class="assistant-input">
       <div class="assistant-page-chips" id="assistant-page-chips" hidden></div>
-      <textarea class="input" id="assistant-text" rows="3" placeholder="输入问题，回车发送，Shift + 回车换行"></textarea>
+      <textarea class="input" id="assistant-text" rows="3" aria-describedby="assistant-input-help" placeholder="输入问题，回车发送，Shift + 回车换行"></textarea>
+      <p class="muted mini assistant-input-help" id="assistant-input-help">↑ / ↓ 选择历史输入；↓ 回到草稿。回车发送，Shift + 回车换行。</p>
       <div class="assistant-input-row">
         <select class="select assistant-think" id="assistant-think" title="思考强度：随时可改，下一条消息生效" aria-label="思考强度">
           <option value="">思考：默认</option>

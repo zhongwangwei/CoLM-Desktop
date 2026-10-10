@@ -6,6 +6,7 @@
 //! colm-agent --key-file <文件> --has-key <服务地址>       # 打印 true / false
 //! colm-agent --key-file <文件> --delete-key <服务地址>
 //! colm-agent --data-dir <目录> --list-sessions            # 历史会话列表（JSON）
+//! colm-agent --data-dir <目录> --input-history            # 最近发送的用户输入（JSON）
 //! colm-agent --data-dir <目录> --transcript <会话号>      # 一个会话的对话记录（JSON）
 //! colm-agent --data-dir <目录> --delete-session <会话号>
 //! colm-agent --backend-status                              # 本机 Codex / Claude Code 的安装与登录状态（JSON）
@@ -63,6 +64,13 @@ fn run() -> Result<()> {
     }
     // 历史会话的查看与删除不碰 Key。
     if let Some(data_dir) = value("--data-dir").map(PathBuf::from) {
+        if args.iter().any(|a| a == "--input-history") {
+            println!(
+                "{}",
+                serde_json::to_string(&session::input_history(&data_dir)?)?
+            );
+            return Ok(());
+        }
         if args.iter().any(|a| a == "--list-sessions") {
             println!("{}", serde_json::to_string(&session::list(&data_dir)?)?);
             return Ok(());
@@ -95,6 +103,21 @@ fn run() -> Result<()> {
     }
     if let Some(base) = value("--delete-key") {
         return colm_agent::secrets::delete(&key_file, &base);
+    }
+    if let Some(base) = value("--list-models") {
+        let key = colm_agent::secrets::get(&key_file, &base)?.unwrap_or_default();
+        let mut config = ProviderConfig::deepseek("models", key);
+        config.provider_id.clear();
+        config.base_url = base;
+        config.api_format = serde_json::from_value(serde_json::json!(
+            value("--api-format").unwrap_or_else(|| "chat_completions".into())
+        ))?;
+        config.timeout_seconds = 30;
+        println!(
+            "{}",
+            serde_json::to_string(&colm_agent::provider::list_models(&config)?)?
+        );
+        return Ok(());
     }
     let data_dir = value("--data-dir").map(PathBuf::from);
     let cli = value("--cli")
@@ -498,7 +521,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
             } => {
                 let model = display_model(backend, &provider.model, &choice);
                 *settings.lock().unwrap() = Some(Settings {
-                    provider,
+                    provider: *provider,
                     context: ToolContext {
                         project_root: PathBuf::from(project_root),
                         cli: cli.clone(),
@@ -930,6 +953,7 @@ impl ExternalTurn {
             session.push(Message::Assistant {
                 content: outcome.content.clone(),
                 reasoning_content: None,
+                provider_state: None,
                 tool_calls: Vec::new(),
             })?;
             if let Some(id) = &resume {

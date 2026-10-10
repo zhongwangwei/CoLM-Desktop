@@ -8,6 +8,7 @@ fn temp_dir(name: &str) -> PathBuf {
 
 fn assistant(content: &str, calls: &[(&str, &str)]) -> Message {
     Message::Assistant {
+        provider_state: None,
         content: content.into(),
         reasoning_content: Some("thinking".into()),
         tool_calls: calls
@@ -204,5 +205,117 @@ fn torn_journal_tails_do_not_swallow_the_next_message_or_checkpoint() {
         reopened.task_snapshot(true).unwrap().unwrap().goal,
         "second"
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn history_fixture(root: &Path, id: &str, updated: u64, messages: &[Message]) {
+    let dir = root.join("sessions").join(id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("messages.jsonl");
+    let text = messages
+        .iter()
+        .map(|message| serde_json::to_string(message).unwrap() + "\n")
+        .collect::<String>();
+    std::fs::write(&path, text).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_times(
+            std::fs::FileTimes::new()
+                .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(updated)),
+        )
+        .unwrap();
+}
+
+#[test]
+fn input_history_contains_only_sent_prompts_and_follows_session_updates() {
+    let root = temp_dir("input-history");
+    assert!(input_history(&root).unwrap().is_empty());
+    let user = |content: &str| Message::User {
+        content: content.into(),
+    };
+    history_fixture(
+        &root,
+        "200-1",
+        1,
+        &[
+            Message::System {
+                content: "private system".into(),
+            },
+            user(" first \n\n[Current view in the application]\nprivate context"),
+            assistant("not input", &[]),
+            Message::Tool {
+                tool_call_id: "1".into(),
+                content: "not input either".into(),
+            },
+            user("same"),
+        ],
+    );
+    // An older conversation resumed later is more recent than a newer conversation.
+    history_fixture(
+        &root,
+        "100-1",
+        2,
+        &[user("same"), user(" \n "), user("last")],
+    );
+    assert_eq!(input_history(&root).unwrap(), ["first", "same", "last"]);
+    delete(&root, "100-1").unwrap();
+    assert_eq!(input_history(&root).unwrap(), ["first", "same"]);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn input_history_limits_sessions_inputs_and_oversized_prompts() {
+    let root = temp_dir("input-history-limits");
+    for index in 0..21 {
+        history_fixture(
+            &root,
+            &format!("{index}-1"),
+            index,
+            &[Message::User {
+                content: format!("session {index}"),
+            }],
+        );
+    }
+    let history = input_history(&root).unwrap();
+    assert_eq!(history.len(), 20);
+    assert_eq!(history[0], "session 1");
+    assert_eq!(history[19], "session 20");
+    let mut messages = (0..110)
+        .map(|index| Message::User {
+            content: format!("input {index}"),
+        })
+        .collect::<Vec<_>>();
+    messages.push(Message::User {
+        content: "x".repeat(32_001),
+    });
+    history_fixture(&root, "21-1", 21, &messages);
+    let history = input_history(&root).unwrap();
+    assert_eq!(history.len(), 100);
+    assert_eq!(history[0], "input 10");
+    assert_eq!(history[99], "input 109");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn input_history_recovers_recent_input_from_a_large_or_torn_transcript() {
+    let root = temp_dir("input-history-tail");
+    history_fixture(
+        &root,
+        "1-1",
+        1,
+        &[
+            assistant(&"大".repeat(3 * 1024 * 1024), &[]),
+            Message::User {
+                content: "尾部输入".into(),
+            },
+        ],
+    );
+    let path = root.join("sessions/1-1/messages.jsonl");
+    let mut file = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    file.write_all(b"{\"role\":\"user\",\"content\":\"torn")
+        .unwrap();
+    assert_eq!(input_history(&root).unwrap(), ["尾部输入"]);
     std::fs::remove_dir_all(root).unwrap();
 }

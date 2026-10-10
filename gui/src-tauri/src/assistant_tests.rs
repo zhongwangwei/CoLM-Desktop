@@ -10,6 +10,11 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         ("https://api.example.com/v1", true),
         ("http://127.0.0.1:11434/v1", true),
         ("http://localhost:8000", true),
+        ("http://[::1]:8000/v1", true),
+        ("http://localhost.evil.test/v1", false),
+        ("https://key@api.example.com/v1", false),
+        ("https://api.example.com/v1?key=secret", false),
+        ("https://api.example.com/v1#fragment", false),
         ("http://api.example.com", false),
         ("ftp://x", false),
     ] {
@@ -36,6 +41,10 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     assert_eq!(old.approval, "ask");
     assert!(old.web_search);
     assert_eq!(old.backend, "builtin");
+    assert_eq!(old.provider_id, "");
+    assert_eq!(old.api_format, "chat_completions");
+    assert_eq!(old.max_output_tokens, 16384);
+    assert!(old.api_profiles.is_empty());
     let odd_backend = AssistantSettings {
         backend: "gemini".into(),
         ..AssistantSettings::default()
@@ -63,7 +72,12 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         ("low", true),
         ("high", true),
         ("max", true),
-        ("medium", false),
+        ("medium", true),
+        ("xhigh", true),
+        ("future_level", true),
+        ("", false),
+        ("high effort", false),
+        ("--high", false),
     ] {
         let s = AssistantSettings {
             reasoning_effort: Some(effort.into()),
@@ -71,6 +85,62 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
         };
         assert_eq!(validate_settings(&s).is_ok(), ok, "{effort}");
     }
+}
+
+#[test]
+fn api_profiles_round_trip_and_reject_unsafe_overrides() {
+    let mut settings = AssistantSettings {
+        provider_id: "anthropic".into(),
+        base_url: "https://api.anthropic.com/v1".into(),
+        model: "claude-sonnet-5-5".into(),
+        api_format: "anthropic".into(),
+        reasoning_effort: Some("xhigh".into()),
+        api_options: json!({"temperature":0.2}),
+        timeout_seconds: 60,
+        max_output_tokens: 8192,
+        ..AssistantSettings::default()
+    };
+    settings
+        .api_profiles
+        .insert("anthropic".into(), settings.api_profile());
+    assert!(validate_settings(&settings).is_ok());
+    let serialized = serde_json::to_value(&settings).unwrap();
+    assert_eq!(
+        serde_json::from_value::<AssistantSettings>(serialized).unwrap(),
+        settings
+    );
+    let message = configure_message(&settings, "/p", None, None);
+    for (key, value) in [
+        ("provider_id", json!("anthropic")),
+        ("api_format", json!("anthropic")),
+        ("max_output_tokens", json!(8192)),
+        ("timeout_seconds", json!(60)),
+        ("api_options", json!({"temperature":0.2})),
+    ] {
+        assert_eq!(message["provider"][key], value);
+    }
+    for key in [
+        "messages",
+        "tools",
+        "api_key",
+        "headers",
+        "store",
+        "include",
+        "previous_response_id",
+    ] {
+        let mut invalid = settings.clone();
+        invalid.api_options = json!({key:"override"});
+        assert!(validate_settings(&invalid).is_err(), "{key}");
+    }
+    let mut invalid = settings.clone();
+    invalid
+        .api_profiles
+        .get_mut("anthropic")
+        .unwrap()
+        .timeout_seconds = 0;
+    assert!(validate_settings(&invalid).is_err());
+    settings.api_format = "unknown".into();
+    assert!(validate_settings(&settings).is_err());
 }
 
 #[test]

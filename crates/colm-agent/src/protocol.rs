@@ -22,7 +22,7 @@ pub enum ApprovalPolicy {
 pub enum Inbound {
     /// 设定（或更换）模型服务与工具环境。Key 不经这里传，agent 自己从本地 Key 文件取。
     Configure {
-        provider: ProviderConfig,
+        provider: Box<ProviderConfig>,
         project_root: String,
         #[serde(default)]
         kernel_dir: Option<String>,

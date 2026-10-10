@@ -36,10 +36,24 @@ impl AssistantProcess {
 pub struct AssistantSettings {
     pub base_url: String,
     pub model: String,
-    /// DeepSeek 思考模式；`None` 用服务端默认（开启）。
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default = "default_api_format")]
+    pub api_format: String,
+    #[serde(default = "default_api_options")]
+    pub api_options: Value,
+    #[serde(default = "default_output_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub strict: bool,
+    #[serde(default)]
+    pub api_profiles: std::collections::BTreeMap<String, ApiProfile>,
+    /// 服务商对应的思考开关；`None` 用服务端默认。
     #[serde(default)]
     pub thinking: Option<bool>,
-    /// 思考强度 low / high / max；`None` 用服务端默认（high）。
+    /// 服务商和模型对应的思考强度；`None` 用服务端默认。
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// 运行操作的审批：`ask` 每次询问（审批卡可选本会话不再询问），`auto` 直接执行。
@@ -59,6 +73,56 @@ pub struct AssistantSettings {
     pub external: std::collections::BTreeMap<String, ExternalChoice>,
 }
 
+/// Each API service retains its own editable configuration; credentials stay in the key file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ApiProfile {
+    pub base_url: String,
+    pub model: String,
+    #[serde(default)]
+    pub thinking: Option<bool>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default = "default_api_format")]
+    pub api_format: String,
+    #[serde(default = "default_api_options")]
+    pub api_options: Value,
+    #[serde(default = "default_output_tokens")]
+    pub max_output_tokens: u32,
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    #[serde(default)]
+    pub strict: bool,
+}
+
+fn default_api_format() -> String {
+    "chat_completions".into()
+}
+fn default_api_options() -> Value {
+    json!({})
+}
+fn default_output_tokens() -> u32 {
+    16384
+}
+fn default_timeout() -> u64 {
+    600
+}
+
+impl AssistantSettings {
+    fn api_profile(&self) -> ApiProfile {
+        ApiProfile {
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            thinking: self.thinking,
+            reasoning_effort: self.reasoning_effort.clone(),
+            api_format: self.api_format.clone(),
+            api_options: self.api_options.clone(),
+            max_output_tokens: self.max_output_tokens,
+            timeout_seconds: self.timeout_seconds,
+            strict: self.strict,
+        }
+    }
+}
+
 /// 外部后端的模型与思考强度。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalChoice {
@@ -73,6 +137,13 @@ impl Default for AssistantSettings {
         Self {
             base_url: "https://api.deepseek.com".into(),
             model: "deepseek-flash".into(),
+            provider_id: "deepseek".into(),
+            api_format: default_api_format(),
+            api_options: default_api_options(),
+            max_output_tokens: default_output_tokens(),
+            timeout_seconds: default_timeout(),
+            strict: false,
+            api_profiles: Default::default(),
             thinking: None,
             reasoning_effort: None,
             approval: default_approval(),
@@ -136,8 +207,90 @@ fn agent_path() -> PathBuf {
     }
 }
 
-/// DeepSeek 实际生效的三档（medium 会被归到 high，xhigh、ultra 归到 max，列出来没有意义）。
-const REASONING_EFFORTS: [&str; 3] = ["low", "high", "max"];
+const PROVIDERS: [&str; 9] = [
+    "deepseek",
+    "openai",
+    "anthropic",
+    "grok",
+    "glm",
+    "gemini",
+    "kimi",
+    "qwen",
+    "custom",
+];
+
+pub(crate) fn validate_api_address(base_url: &str) -> Result<(), String> {
+    let url = tauri::Url::parse(base_url.trim()).map_err(|_| "服务地址不是有效的网址")?;
+    let local = matches!(
+        url.host_str(),
+        Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+    );
+    if url.host_str().is_none() || !(url.scheme() == "https" || (url.scheme() == "http" && local)) {
+        return Err("服务地址必须是 https://，或本机的 http://127.0.0.1 / localhost".into());
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err("服务地址不能含用户名、密码、查询参数或片段；API Key 单独保存".into());
+    }
+    Ok(())
+}
+
+fn validate_api_profile(profile: &ApiProfile) -> Result<(), String> {
+    validate_api_address(&profile.base_url)?;
+    if profile.model.trim().is_empty()
+        || profile.model.len() > 256
+        || profile.model.contains(char::is_whitespace)
+    {
+        return Err("请填写不含空白的模型名（最多 256 字节）".into());
+    }
+    if !matches!(
+        profile.api_format.as_str(),
+        "chat_completions" | "responses" | "anthropic"
+    ) {
+        return Err("不支持这个 API 接口格式".into());
+    }
+    if !(1..=3600).contains(&profile.timeout_seconds)
+        || !(1..=1_000_000).contains(&profile.max_output_tokens)
+    {
+        return Err("超时须为 1–3600 秒，最大输出须为 1–1000000 token".into());
+    }
+    if profile.reasoning_effort.as_ref().is_some_and(|e| {
+        e.is_empty() || e.len() > 32 || !e.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    }) {
+        return Err("思考程度须为不超过 32 字节的英文档位名".into());
+    }
+    let options = profile
+        .api_options
+        .as_object()
+        .ok_or("额外参数须为 JSON 对象")?;
+    if profile.api_options.to_string().len() > 16384 {
+        return Err("额外参数超过 16 KiB".into());
+    }
+    if options.keys().any(|key| {
+        matches!(
+            key.to_ascii_lowercase().as_str(),
+            "model"
+                | "messages"
+                | "input"
+                | "instructions"
+                | "system"
+                | "tools"
+                | "stream"
+                | "api_key"
+                | "authorization"
+                | "headers"
+                | "store"
+                | "include"
+                | "previous_response_id"
+        )
+    }) {
+        return Err("额外参数不能覆盖模型、对话、工具、流式设置或凭据".into());
+    }
+    Ok(())
+}
 
 /// Claude Code 的 `--effort` 可选值（Claude Code 2.1.293）；Codex 的可选值随模型而定，由 `model/list` 给出。
 const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
@@ -164,26 +317,21 @@ pub(crate) fn docs_root(starts: &[PathBuf]) -> Option<PathBuf> {
 
 /// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
 pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), String> {
-    let url = settings.base_url.trim();
-    let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"]
-        .iter()
-        .any(|prefix| url.starts_with(prefix));
-    if !(url.starts_with("https://") || local) {
-        return Err("服务地址必须是 https://，或本机的 http://127.0.0.1 / localhost".into());
+    validate_api_profile(&settings.api_profile())?;
+    if !settings.provider_id.is_empty() && !PROVIDERS.contains(&settings.provider_id.as_str()) {
+        return Err("没有这个 API 服务预设；其他服务请选择自定义".into());
     }
-    if settings.model.trim().is_empty() {
-        return Err("请填写模型名".into());
+    for (id, profile) in &settings.api_profiles {
+        if !PROVIDERS.contains(&id.as_str()) {
+            return Err(format!("没有这个 API 服务预设：{id}"));
+        }
+        validate_api_profile(profile)?;
     }
     if !BACKENDS.contains(&settings.backend.as_str()) {
         return Err(format!("后端只能是 {}", BACKENDS.join("、")));
     }
     if !matches!(settings.approval.as_str(), "ask" | "auto") {
         return Err("审批方式只能是 ask 或 auto".into());
-    }
-    if let Some(effort) = &settings.reasoning_effort {
-        if !REASONING_EFFORTS.contains(&effort.as_str()) {
-            return Err(format!("思考强度只能是 {}", REASONING_EFFORTS.join("、")));
-        }
     }
     for (backend, choice) in &settings.external {
         if !matches!(backend.as_str(), "codex" | "claude_code") {
@@ -309,6 +457,13 @@ pub async fn assistant_sessions(app: tauri::AppHandle) -> Result<Value, String> 
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
+/// 从已保存的会话读取最近发送的用户输入（从旧到新）。
+#[tauri::command]
+pub async fn assistant_input_history(app: tauri::AppHandle) -> Result<Vec<String>, String> {
+    let text = session_command(&app, vec!["--input-history".into()]).await?;
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
 /// 一个历史会话的对话记录。
 #[tauri::command]
 pub async fn assistant_transcript(app: tauri::AppHandle, id: String) -> Result<Value, String> {
@@ -422,6 +577,35 @@ pub async fn assistant_delete_key(
     Ok(())
 }
 
+/// Refresh through the sidecar so the saved API key never enters the WebView.
+#[tauri::command]
+pub async fn assistant_api_models(
+    app: tauri::AppHandle,
+    base_url: String,
+    api_format: String,
+) -> Result<Vec<String>, String> {
+    validate_api_address(&base_url)?;
+    if !matches!(
+        api_format.as_str(),
+        "chat_completions" | "responses" | "anthropic"
+    ) {
+        return Err("不支持这个 API 接口格式".into());
+    }
+    let mut command = key_command(&app, "--list-models", base_url.trim())?;
+    command.args(["--api-format", &api_format]);
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command
+            .output()
+            .map_err(|e| format!("cannot start model refresh: {e}"))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 发一行给 `colm-agent`。
 fn send(process: &AssistantProcess, message: &Value) -> Result<(), String> {
     let mut guard = process.inner.lock().map_err(|e| e.to_string())?;
@@ -442,6 +626,12 @@ pub(crate) fn configure_message(
         "provider": {
             "base_url": settings.base_url.trim(),
             "model": settings.model.trim(),
+            "provider_id":settings.provider_id,
+            "api_format":settings.api_format,
+            "api_options":settings.api_options,
+            "max_output_tokens":settings.max_output_tokens,
+            "timeout_seconds":settings.timeout_seconds,
+            "strict":settings.strict,
             "thinking": settings.thinking,
             "reasoning_effort": settings.reasoning_effort,
         },

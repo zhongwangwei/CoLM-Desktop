@@ -1,4 +1,4 @@
-//! OpenAI 兼容的 Chat Completions 客户端（流式），默认对接 DeepSeek。
+//! Streaming Chat Completions, OpenAI Responses and Anthropic Messages transports.
 //!
 //! 只依赖通用格式：服务地址、模型名与 Key 都可配置，所以 Qwen、本地 Ollama/vLLM 等兼容服务也能用。
 //! DeepSeek 专有的部分（`thinking` 参数、回传 `reasoning_content`）按配置开关，见
@@ -19,15 +19,22 @@ pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 /// 模型服务的配置。Key 不在这里持久化，由调用方从本地 Key 文件取出后填入。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
+    #[serde(default)]
+    pub provider_id: String,
+    #[serde(default)]
+    pub api_format: ApiFormat,
+    #[serde(default = "empty_options")]
+    pub api_options: Value,
+    #[serde(default = "default_max_tokens")]
+    pub max_output_tokens: u32,
     pub base_url: String,
     pub model: String,
     #[serde(skip)]
     pub api_key: String,
-    /// DeepSeek 的思考模式：`None` 不发这个参数（服务端默认开启）。
+    /// Provider-specific thinking switch; None leaves the service default.
     #[serde(default)]
     pub thinking: Option<bool>,
-    /// 思考强度（`reasoning_effort`）：DeepSeek 只认 low、high、max；`None` 用服务端默认（high）。
-    /// 关闭思考时不发。
+    /// Provider-specific effort; native adapters map it to their own request fields.
     #[serde(default)]
     pub reasoning_effort: Option<String>,
     /// 工具 schema 带 `strict: true`（DeepSeek 要配 `/beta` 地址）。
@@ -35,6 +42,21 @@ pub struct ProviderConfig {
     pub strict: bool,
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiFormat {
+    #[default]
+    ChatCompletions,
+    Responses,
+    Anthropic,
+}
+fn empty_options() -> Value {
+    json!({})
+}
+fn default_max_tokens() -> u32 {
+    16384
 }
 
 fn default_timeout() -> u64 {
@@ -45,6 +67,10 @@ impl ProviderConfig {
     /// DeepSeek 官方 API 的缺省配置。
     pub fn deepseek(model: &str, api_key: String) -> Self {
         Self {
+            provider_id: "deepseek".into(),
+            api_format: ApiFormat::ChatCompletions,
+            api_options: empty_options(),
+            max_output_tokens: default_max_tokens(),
             base_url: DEEPSEEK_BASE_URL.into(),
             model: model.into(),
             api_key,
@@ -67,6 +93,7 @@ pub enum StreamEvent {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Turn {
     pub content: String,
+    pub provider_state: Option<Value>,
     pub reasoning: Option<String>,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Usage,
@@ -78,6 +105,7 @@ impl Turn {
     pub fn message(&self) -> Message {
         Message::Assistant {
             content: self.content.clone(),
+            provider_state: self.provider_state.clone(),
             reasoning_content: self.reasoning.clone(),
             tool_calls: self.tool_calls.clone(),
         }
@@ -98,20 +126,47 @@ pub trait Provider: Send + Sync {
 pub fn request_body(config: &ProviderConfig, messages: &[Message], tools: &[Value]) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": messages.iter().map(Message::to_api).collect::<Vec<_>>(),
+        "messages": messages.iter().map(|m| chat_message(config, m)).collect::<Vec<_>>(),
         "stream": true,
+        "max_tokens": config.max_output_tokens,
         "stream_options": { "include_usage": true },
     });
     if !tools.is_empty() {
         body["tools"] = json!(tools);
     }
-    if let Some(thinking) = config.thinking {
+    let glm_53 = provider_id(config) == "glm" && config.model.contains("glm-5.3");
+    if let Some(thinking) = config
+        .thinking
+        .filter(|_| matches!(provider_id(config), "deepseek" | "glm") && !glm_53)
+    {
         body["thinking"] = json!({ "type": if thinking { "enabled" } else { "disabled" } });
     }
-    if config.thinking != Some(false) {
+    if provider_id(config) == "qwen" {
+        if let Some(thinking) = config.thinking {
+            body["enable_thinking"] = json!(thinking);
+        }
+    }
+    if provider_id(config) == "kimi" && config.model.contains("k2.6") {
+        if let Some(thinking) = config.thinking {
+            body["thinking"] = json!({"type":if thinking {"enabled"} else {"disabled"}});
+        }
+    }
+    if (config.thinking != Some(false) || glm_53)
+        && (!matches!(provider_id(config), "glm" | "qwen") || glm_53)
+        && !(provider_id(config) == "kimi" && !config.model.contains("k3"))
+    {
         if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             body["reasoning_effort"] = json!(effort);
         }
+    }
+    merge_options(&mut body, &config.api_options);
+    if provider_id(config) == "gemini"
+        && (body["extra_body"]["google"]
+            .get("thinking_config")
+            .is_some()
+            || body["google"].get("thinking_config").is_some())
+    {
+        body.as_object_mut().unwrap().remove("reasoning_effort");
     }
     body
 }
@@ -123,6 +178,7 @@ pub struct StreamAssembler {
     turn: Turn,
     reasoning: String,
     calls: Vec<(String, String, String)>,
+    extras: std::collections::BTreeMap<usize, Value>,
 }
 
 impl StreamAssembler {
@@ -159,6 +215,9 @@ impl StreamAssembler {
                 self.calls
                     .resize(index + 1, (String::new(), String::new(), String::new()));
             }
+            if let Some(extra) = call.get("extra_content") {
+                self.extras.insert(index, extra.clone());
+            }
             let slot = &mut self.calls[index];
             if let Some(id) = call["id"].as_str() {
                 slot.0.push_str(id);
@@ -177,10 +236,12 @@ impl StreamAssembler {
         if !self.reasoning.is_empty() {
             self.turn.reasoning = Some(self.reasoning);
         }
+        if !self.extras.is_empty() {
+            self.turn.provider_state = Some(json!({"tool_call_extra":self.extras}));
+        }
         self.turn.tool_calls = self
             .calls
             .into_iter()
-            .filter(|(_, name, _)| !name.is_empty())
             .map(|(id, name, arguments)| ToolCall {
                 id,
                 name,
@@ -196,21 +257,21 @@ impl StreamAssembler {
 }
 
 /// 逐行读 SSE：`data: {...}` 交给 `on_data`，遇到 `data: [DONE]` 结束。注释行与空行忽略。
-pub fn read_sse(reader: impl Read, mut on_data: impl FnMut(&str) -> Result<()>) -> Result<()> {
-    for line in BufReader::new(reader).lines() {
+pub fn read_sse(reader: impl Read, mut on_data: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+    for line in BufReader::new(reader.take(16 * 1024 * 1024 + 1)).lines() {
         let line = line.context("the model stream was interrupted")?;
         let Some(data) = line.strip_prefix("data:") else {
             continue;
         };
         let data = data.trim();
         if data == "[DONE]" {
-            break;
+            return Ok(true);
         }
         if !data.is_empty() {
             on_data(data)?;
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 /// 真实的 HTTP 客户端。
@@ -223,6 +284,8 @@ impl OpenAiCompatible {
     pub fn new(config: ProviderConfig) -> Self {
         let agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(config.timeout_seconds)))
+            .max_redirects(0)
+            .max_redirects_will_error(false)
             .http_status_as_error(false)
             .build()
             .into();
@@ -237,42 +300,15 @@ impl Provider for OpenAiCompatible {
         tools: &[Value],
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<Turn> {
-        if self.config.api_key.trim().is_empty() {
-            bail!("no API key is configured for {}", self.config.base_url);
-        }
-        let url = format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        );
-        let response = self
-            .agent
-            .post(&url)
-            .header("Authorization", &format!("Bearer {}", self.config.api_key))
-            .header("Accept", "text/event-stream")
-            .send_json(request_body(&self.config, messages, tools))
-            .with_context(|| format!("cannot reach {url}"))?;
-        let status = response.status().as_u16();
-        let mut body = response.into_body();
-        if !(200..300).contains(&status) {
-            let text = body.read_to_string().unwrap_or_default();
-            bail!("{url} answered HTTP {status}: {}", text.trim());
-        }
-        let mut assembler = StreamAssembler::default();
-        read_sse(body.as_reader(), |data| {
-            let chunk: Value = serde_json::from_str(data)
-                .with_context(|| format!("unreadable stream chunk: {data}"))?;
-            if let Some(error) = chunk.get("error") {
-                bail!("the model service reported an error: {error}");
-            }
-            for event in assembler.push(&chunk) {
-                on_event(event);
-            }
-            Ok(())
-        })?;
-        Ok(assembler.finish())
+        complete_http(&self.config, &self.agent, messages, tools, on_event)
     }
 }
 
 #[cfg(test)]
 #[path = "provider_tests.rs"]
 mod provider_tests;
+
+#[path = "provider_adapters.rs"]
+mod adapters;
+pub use adapters::list_models;
+use adapters::*;
