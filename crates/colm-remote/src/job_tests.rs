@@ -1,5 +1,7 @@
 use std::io::Write;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use super::*;
@@ -131,14 +133,17 @@ impl Sandbox {
         }
     }
 
+    #[cfg(unix)]
     fn set(&self, file: &str, value: &str) {
         std::fs::write(self.bin.join(file), value).unwrap();
     }
 
+    #[cfg(unix)]
     fn unset(&self, file: &str) {
         let _ = std::fs::remove_file(self.bin.join(file));
     }
 
+    #[cfg(unix)]
     fn read(&self, file: &str) -> String {
         std::fs::read_to_string(self.bin.join(file)).unwrap_or_default()
     }
@@ -175,12 +180,14 @@ impl Sandbox {
         )
     }
 
+    #[cfg(unix)]
     fn status(&self, id: &str) -> Status {
         let (out, err, ok) = self.run(&status_script(&self.work(), id, 5));
         assert!(ok, "{err}");
         parse_status(&out)
     }
 
+    #[cfg(unix)]
     fn job_dir(&self, id: &str) -> PathBuf {
         Path::new(&job_dir(&self.work(), id)).to_path_buf()
     }

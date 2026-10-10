@@ -32473,3 +32473,4 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - 第三、四轮：`colm-remote` 的沙箱在 Windows 上仍要用 `ChildStdin::write_all`，`std::io::Write` 不能跟着改成 Unix 专属（按名字找用法查不出 trait 方法，判断错了）。`colm-workspace` 的 `a_logged_command_records…` 直接调 `/bin/sh`，`the_seatbelt_profile…` 是 macOS 的 seatbelt 配置（Windows 路径的反斜杠会被转义），限定 Unix。
   - 第五轮：Windows 上 `concurrent_gate_updates_do_not_lose_each_other` 查出工作区锁的真问题。12 个线程抢 `workspace.lock`，持有者 `remove_file` 后文件在 Windows 上先处于“等待删除”，此时别的线程 `create_new` 得到的是 `Access is denied (os error 5)` 而不是“已存在”，原来直接报错退出。Windows 上把 `PermissionDenied` 也当作有人占着锁，在同样的 15 秒期限内重试（真没有写权限时 15 秒后报错，不会卡住）。
   - 第六轮：Windows 上 `colm-cli` 的 3 个。`remote_cmd_tests` 的映射用 Unix 本机路径，限定 Unix；`hybrid_studies_lists…` 拿 `canonicalize()` 过的根（Windows 上是 `\\?\C:\…`）去比 Study 记录的普通路径，两边都规范化再比。
+  - 第七轮：Windows 上测试全过，clippy（`-D warnings`）报 `colm-remote` 沙箱的 `set/unset/read/status/job_dir` 与 `std::path::Path` 只被 Unix 专属测试用到，一并按 `cfg(unix)` 编译。
