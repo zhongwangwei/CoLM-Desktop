@@ -32458,3 +32458,11 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 **测试**：colm-core 514、colm-runtime 186、colm-init 181 + 23（串行）、colm-srfdata 273（串行；城市单点的断言改为写出全部年份）、colm-cli 251 + 19（串行）全过。
 
 **另外修的一个偶发失败**：`remote_cmd_tests::app_source_cache_uses_digest_and_rejects_partial_snapshots` 约一半概率失败（`File exists (os error 17)`）。三个线程同时解压时，暂存目录名是"进程号 + 纳秒时间戳"，而 macOS 的 `SystemTime` 只到微秒，同一微秒的线程撞名。加了进程内原子计数；修前 6 次里 4 次失败，修后 15 次全过。另外，本机 `colm-cli` 测试并行跑时也会偶发 `Netcdf(-101)`，与 colm-init 的情况相同，串行就不出现。
+
+## 第 659 轮：推送后 CI 的四处失败
+
+推送第 643–658 轮后 `ci` 在三个平台都红了（上一次绿是 10-08），逐条查明：
+- **Linux（x86_64）`colm-srfdata` 11 个**：第 649 轮让非 aarch64 默认不收缩，`colm-core` 里依赖 arm64 gfortran FMA 位型的测试当时加了 `skip_unless_fused!()`，`colm-srfdata` 漏了。在本机用 `--features colm-numeric/unfused` 模拟，同类共 14 个（`grid`、`minpack`、`soil`、`pft`、`surface`），都加上；两种模式下 273 个都过。（本机模拟时 `colm-core` 另有 5 个 `incomplete_gamma`/`vic` 失败，Linux CI 上它们是过的：模拟用的仍是 arm64 的 libm，不是真 x86，不改。）
+- **macOS `xtask kernel_profile`**：第 648 轮给 `MAKE_FF` 加了 `$EXTRA_FF`，断言没跟着改。
+- **Windows `colm-agent` 两个**：`the_tools_ask_the_cli_for_the_workspace_root…` 用 sh 脚本冒充 `colm-cli`，Windows 不能执行，限定 Unix。`tampered_records_cannot_escape_scope…` 查出一个真问题：Windows 上 `/tmp/escape.txt` 有根无盘符，`is_absolute()` 为假，被篡改的回收站记录在列表里显示为可恢复（会映射到项目内的 `tmp/escape.txt`，不越出授权范围）。记录校验加上 `has_root()`。
+- **三平台 gui**：`gui/src-tauri/src/remote_tests.rs`（第 656 轮）没格式化。`cargo fmt --all` 不覆盖 `gui/src-tauri` 这个独立工作区，以后要在那里单独跑 `cargo fmt --check`。

@@ -27,6 +27,7 @@ fn binary_search_south(y: f64) -> usize {
 
 #[test]
 fn the_grid_is_the_one_colm_defines() {
+    colm_numeric::skip_unless_fused!();
     // share/MOD_Grid.F90 的 grid_define_by_ndims(86400, 43200)
     assert_eq!(COLM_500M.nlon, 86400);
     assert_eq!(COLM_500M.nlat, 43200);
@@ -190,6 +191,7 @@ fn the_tile_offset_reconstructs_the_global_index() {
 
 #[test]
 fn raw_edges_keep_the_production_fortran_single_rounding() {
+    colm_numeric::skip_unless_fused!();
     // Pristine MOD_Grid, gfortran -O2 -fdefault-real-8, ARM64.
     // Separate multiply/subtract changes real patch areas and soil-fit branches.
     assert_eq!(COLM_500M.lat_s(16439).to_bits(), 0x4035811111111111);

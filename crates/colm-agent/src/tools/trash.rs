@@ -242,7 +242,9 @@ fn load_record(scope: &Scope, area: &Path, id: &str) -> Result<(Record, PathBuf,
         || record.root != scope.root
         || !record.recoverable
         || !matches!(record.kind.as_str(), "file" | "directory")
+        // Windows 上 `/tmp/x` 有根但没有盘符，`is_absolute()` 为假：记录里的路径只能是纯相对路径。
         || record.original.is_absolute()
+        || record.original.has_root()
         || record.original.as_os_str().is_empty()
     {
         bail!("trash record does not match this root and entry");

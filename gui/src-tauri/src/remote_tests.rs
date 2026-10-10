@@ -209,7 +209,10 @@ fn fetching_only_the_configured_variables_unless_everything_is_asked_for() {
         fetch_args("/c".into(), Some(&server), true, false),
         ["remote-fetch", "/c"]
     );
-    assert_eq!(fetch_args("/c".into(), None, false, false), ["remote-fetch", "/c"]);
+    assert_eq!(
+        fetch_args("/c".into(), None, false, false),
+        ["remote-fetch", "/c"]
+    );
     // 手动取回才允许覆盖比远程运行更新的本机结果。
     assert_eq!(
         fetch_args("/c".into(), None, true, true),

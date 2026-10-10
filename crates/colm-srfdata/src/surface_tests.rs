@@ -165,6 +165,7 @@ fn lct_lai_and_sai_are_area_weighted_without_wmo_sharing() {
 
 #[test]
 fn weighted_surface_means_preserve_original_sum_rounding() {
+    colm_numeric::skip_unless_fused!();
     // One real Pearl River LAI patch, reused for the identical weighted SUM
     // in forest height, elevation and slope. Original gfortran -O2
     // -fdefault-real-8 gives 3fee690826d1f3ea; separate multiply/add gives ...ec.
@@ -211,6 +212,7 @@ fn weighted_surface_means_preserve_original_sum_rounding() {
 
 #[test]
 fn topography_variance_preserves_original_outer_sum_rounding() {
+    colm_numeric::skip_unless_fused!();
     // Two cells from the real Pearl River topography request. Expected bits
     // come from unchanged Aggregation_Topography expressions compiled with
     // gfortran -O2 -fdefault-real-8. Without outer FMA, std ends in ...3ea7.

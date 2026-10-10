@@ -44,6 +44,7 @@ fn pft_canopy_structure_uses_pft_weights_and_patch_fallbacks() {
 
 #[test]
 fn pft_ordered_reductions_match_original_compiled_sums() {
+    colm_numeric::skip_unless_fused!();
     // Original MOD_LandPFT, Aggregation_LAI and Aggregation_ForestHeight expressions.
     let rows = include_str!("../tests/fixtures/pft_ordered_reductions.txt")
         .lines()

@@ -268,7 +268,7 @@ fn kernel_build_uses_portable_mpi_fortran_wrapper_names() {
     let script = read("oracle/scripts/build_kernel.sh");
     assert!(script.contains("for candidate in mpifort mpifort.openmpi mpif90 mpif90.openmpi"));
     assert!(script.contains("spatial kernel build requires mpifort/mpif90"));
-    assert!(script.contains("MAKE_FF=\"$MPI_FC -fopenmp\""));
+    assert!(script.contains("MAKE_FF=\"$MPI_FC -fopenmp $EXTRA_FF\""));
 }
 
 #[test]

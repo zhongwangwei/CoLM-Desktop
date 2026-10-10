@@ -115,6 +115,8 @@ fn the_patch_approval_card_shows_the_real_diff_and_files() {
     assert!(ApplyPatch.summary(&long).contains("只显示前 6000 个字符"));
 }
 
+// 假的 colm-cli 是 sh 脚本，Windows 上不能直接执行。
+#[cfg(unix)]
 #[test]
 fn the_tools_ask_the_cli_for_the_workspace_root_when_the_context_has_one() {
     // 假的 colm-cli：把收到的参数原样打成 JSON。
@@ -122,11 +124,8 @@ fn the_tools_ask_the_cli_for_the_workspace_root_when_the_context_has_one() {
     std::fs::create_dir_all(&dir).unwrap();
     let cli = dir.join("colm-cli");
     std::fs::write(&cli, "#!/bin/sh\nprintf '{\"argv\":\"%s\"}' \"$*\"\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
     let mut ctx = ToolContext {
         cli: cli.clone(),
         project_root: dir.clone(),

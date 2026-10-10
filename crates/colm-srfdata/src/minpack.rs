@@ -476,6 +476,7 @@ mod tests {
 
     #[test]
     fn damped_qr_rotations_retain_original_single_rounding() {
+        colm_numeric::skip_unless_fused!();
         // Original MOD_Utils::qrsolv linked unchanged at -O2 -fdefault-real-8.
         // This fixture isolates fused rotation updates. 加 -fdefault-double-8 后
         // 结果不变；旋转角系数由上一个测试与 soil.rs 的端到端 lmder 比对覆盖。
@@ -520,6 +521,7 @@ mod tests {
 
     #[test]
     fn norms_retain_original_square_sum_single_rounding() {
+        colm_numeric::skip_unless_fused!();
         // Independently linked original MOD_Utils::enorm, production -O2.
         // Separate multiply/add gives ...095 instead; one ULP in xnorm can
         // terminate LM at its initial point on the xtol boundary.
@@ -533,6 +535,7 @@ mod tests {
 
     #[test]
     fn pivoted_qr_retains_original_dot_and_householder_rounding() {
+        colm_numeric::skip_unless_fused!();
         // Original MOD_Utils::qrfac, -O2 -fdefault-real-8. Nearly dependent
         // columns expose separate rounding of the dot and rank-one update.
         let mut a = [
