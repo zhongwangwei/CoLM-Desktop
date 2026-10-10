@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -78,6 +79,8 @@ fn status_output_is_parsed() {
 
 // ---- 用模拟的调度命令真正执行生成的脚本（bash 与 sed 在 macOS 与 Linux 上都有；调度命令的输出格式照各家文档） ----
 
+// 沙箱用 bash 与 POSIX 工具扮演调度器。Windows 上 `bash` 会落到没装发行版的 WSL，
+// 真正提交、轮询作业的测试只在 Unix 上跑。
 struct Sandbox {
     root: PathBuf,
     bin: PathBuf,
@@ -190,6 +193,7 @@ impl Drop for Sandbox {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn slurm_job_goes_queued_running_finished() {
     let sb = Sandbox::new("slurm");
@@ -243,6 +247,7 @@ fn slurm_job_goes_queued_running_finished() {
     assert_eq!(done.phase.as_deref(), Some("going"));
 }
 
+#[cfg(unix)]
 #[test]
 fn slurm_job_the_scheduler_killed_is_lost_with_its_reason() {
     let sb = Sandbox::new("slurm-lost");
@@ -258,6 +263,7 @@ fn slurm_job_the_scheduler_killed_is_lost_with_its_reason() {
     assert_eq!(lost.detail.as_deref(), Some("TIMEOUT|0:0"));
 }
 
+#[cfg(unix)]
 #[test]
 fn slurm_cancel_asks_the_scheduler_and_leaves_an_exit_code() {
     let sb = Sandbox::new("slurm-cancel");
@@ -275,6 +281,7 @@ fn slurm_cancel_asks_the_scheduler_and_leaves_an_exit_code() {
     assert_eq!(sb.status("j-3").state, State::Finished { exit_code: 143 });
 }
 
+#[cfg(unix)]
 #[test]
 fn a_failed_submission_is_reported_not_swallowed() {
     let sb = Sandbox::new("slurm-fail");
@@ -290,6 +297,7 @@ fn a_failed_submission_is_reported_not_swallowed() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn pbs_job_states_and_cancel() {
     let sb = Sandbox::new("pbs");
@@ -315,6 +323,7 @@ fn pbs_job_states_and_cancel() {
     assert_eq!(sb.read("cancelled").trim(), "777.pbsserver");
 }
 
+#[cfg(unix)]
 #[test]
 fn lsf_job_states_and_cancel() {
     let sb = Sandbox::new("lsf");
@@ -352,6 +361,7 @@ fn submitted_reports_the_right_id_kind() {
     assert_eq!(serde_json::to_value(&bare).unwrap()["pid"], 12);
 }
 
+#[cfg(unix)]
 #[test]
 fn cancellation_failures_never_forge_a_terminal_state() {
     for (scheduler, command) in [("slurm", "scancel"), ("pbs", "qdel"), ("lsf", "bkill")] {

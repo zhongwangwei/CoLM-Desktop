@@ -220,6 +220,7 @@ fn the_tools_ask_the_cli_for_the_workspace_root_when_the_context_has_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(unix)]
 use std::path::{Path, PathBuf};
 
 /// 读代码的三个工具：`name` 可空，空就读应用自己的源码（`--source app`），给了就读那个工作区。

@@ -32466,3 +32466,7 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - **macOS `xtask kernel_profile`**：第 648 轮给 `MAKE_FF` 加了 `$EXTRA_FF`，断言没跟着改。
 - **Windows `colm-agent` 两个**：`the_tools_ask_the_cli_for_the_workspace_root…` 用 sh 脚本冒充 `colm-cli`，Windows 不能执行，限定 Unix。`tampered_records_cannot_escape_scope…` 查出一个真问题：Windows 上 `/tmp/escape.txt` 有根无盘符，`is_absolute()` 为假，被篡改的回收站记录在列表里显示为可恢复（会映射到项目内的 `tmp/escape.txt`，不越出授权范围）。记录校验加上 `has_root()`。
 - **三平台 gui**：`gui/src-tauri/src/remote_tests.rs`（第 656 轮）没格式化。`cargo fmt --all` 不覆盖 `gui/src-tauri` 这个独立工作区，以后要在那里单独跑 `cargo fmt --check`。
+- **第二轮 CI**（上面几处修完后）又露出三处，都是第 637–658 轮新加、此前从未在 CI 上跑过的测试：
+  - Linux `mksrfdata-rs` 的 `spatial_lct_urban_assimilates_5km_geometry_grid`：500 m 网格边界是按 FMA 位型算的，不收缩时边上多出两列像元（52 对 50），同样 `skip_unless_fused!()`。本机模拟时只跑了 `--lib`，漏了 `--bins`。
+  - Windows `colm-remote` 7 个调度器作业测试：沙箱用 `bash` 扮演 Slurm/PBS/LSF，Windows runner 上 `bash` 落到没装发行版的 WSL。限定 Unix（服务器端本来就是 Linux）；同样只用沙箱、不执行脚本的 `cancellation_rejects_unknown_schedulers…` 仍在 Windows 上跑。`colm-workspace` 的 4 个两版一致 / 回归测试用 sh 写的假 `colm-cli`，同样限定 Unix，只被它们用到的辅助函数与 import 一起按 `cfg(unix)` 编译（三平台 clippy 都带 `-D warnings`）。
+  - Windows GUI `server_settings_are_validated`：测试把本机一侧的路径写死成 macOS 的 `/Volumes/…`，Windows 上不是绝对路径。改为按平台给（`D:\Data\…`）。服务器一侧按 `/` 开头校验，本来就对。

@@ -1,7 +1,11 @@
 #![allow(clippy::field_reassign_with_default)]
 use super::*;
-use crate::compare::{Options, Status};
-use crate::layout::layout_tests::{nc_lock, source_repo, temp};
+#[cfg(unix)]
+use crate::compare::Options;
+use crate::compare::Status;
+use crate::layout::layout_tests::temp;
+#[cfg(unix)]
+use crate::layout::layout_tests::{nc_lock, source_repo};
 
 fn history(path: &Path, vars: &[(&str, Vec<f64>)]) {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -19,6 +23,7 @@ fn history(path: &Path, vars: &[(&str, Vec<f64>)]) {
     }
 }
 
+#[cfg(unix)]
 fn series(f: impl Fn(usize) -> f64) -> Vec<f64> {
     (0..12).map(f).collect()
 }
@@ -43,6 +48,8 @@ fn reference_case(dir: &Path) -> PathBuf {
 }
 
 /// 假的 `colm-cli`：收到 `run <算例> --kernel K --engine E …` 就把夹具里 E 对应的 history 拷到算例的输出里。
+/// 它是 sh 脚本，用到它的测试只在 Unix 上跑。
+#[cfg(unix)]
 fn fake_cli(path: &Path, fixture_rust: &Path, fixture_fortran: &Path, exit: i32) {
     let script = format!(
         "#!/bin/sh\ncase=\"$2\"\nengine=\"$6\"\n[ \"$1\" = run ] || exit 9\nif [ \"$engine\" = fortran ]; then src={f}; else src={r}; fi\nmkdir -p \"$case/out/REF/history\"\ncp \"$src\"/*.nc \"$case/out/REF/history/\"\nexit {exit}\n",
@@ -51,13 +58,11 @@ fn fake_cli(path: &Path, fixture_rust: &Path, fixture_fortran: &Path, exit: i32)
     );
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(path, script).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
+#[cfg(unix)]
 fn workspace(root: &Path) -> Workspace {
     let repo = root.join("source");
     source_repo(&repo);
@@ -65,6 +70,7 @@ fn workspace(root: &Path) -> Workspace {
 }
 
 /// 记一次“在当前提交上编译通过”（假的 colm-cli 与内核没有真编过）。两版一致与回归要求有它。
+#[cfg(unix)]
 fn mark_built(ws: &mut Workspace, preset: &str) {
     let commit = ws.head().unwrap();
     let run = crate::gates::GateRun {
@@ -80,6 +86,7 @@ fn mark_built(ws: &mut Workspace, preset: &str) {
     .unwrap();
 }
 
+#[cfg(unix)]
 fn fake_kernel(dir: &Path) {
     std::fs::create_dir_all(dir).unwrap();
     std::fs::write(dir.join("manifest.json"), "{}").unwrap();
@@ -112,6 +119,7 @@ fn a_case_copy_writes_its_output_into_itself() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when_not() {
     let _nc = nc_lock();
@@ -172,6 +180,7 @@ fn parity_is_bitwise_when_both_engines_agree_and_names_the_first_difference_when
     let _ = std::fs::remove_dir_all(&root);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_refactor_must_be_bitwise_but_a_physics_change_only_has_to_stay_sane() {
     let _nc = nc_lock();
@@ -370,6 +379,7 @@ fn the_closure_limit_is_ten_times_the_baseline_but_never_below_a_floor() {
 }
 
 /// 带容差：舍入噪声通过，真正的错位不通过；报告里带上容差和平台提示。
+#[cfg(unix)]
 #[test]
 fn parity_with_a_tolerance_accepts_rounding_noise_and_still_catches_a_real_misalignment() {
     let _nc = nc_lock();
@@ -507,6 +517,7 @@ fn physics_regression_rejects_incomplete_histories_and_variable_sets() {
 }
 
 /// 编完又打了补丁、没重编：两版一致与回归跑的是旧程序，必须拒绝，不能记成新提交通过。
+#[cfg(unix)]
 #[test]
 fn checks_refuse_binaries_built_on_an_older_commit() {
     let _nc = nc_lock();

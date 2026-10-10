@@ -6487,6 +6487,8 @@ mod tests {
 
     #[test]
     fn spatial_lct_urban_assimilates_5km_geometry_grid() {
+        // 网格边界按 arm64 gfortran 的 FMA 位型算（`grid_tests.rs`），不收缩时边上会多出像元列。
+        colm_numeric::skip_unless_fused!();
         let (root, _) = case_namelist("urban-geometry-grid", "&nl_colm /\n");
         let mesh = root.join("mesh.nc");
         let mut file = netcdf::create(&mesh).unwrap();

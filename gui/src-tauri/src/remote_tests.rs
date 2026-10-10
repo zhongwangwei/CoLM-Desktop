@@ -12,7 +12,13 @@ fn server_settings_are_validated() {
         host: host.into(),
         root: root.into(),
         maps: vec![PathMap {
-            local: "/Volumes/Data/Data/PLUMBER2s".into(),
+            // 本机一侧按本机的绝对路径规则校验（Windows 要带盘符）。
+            local: if cfg!(windows) {
+                r"D:\Data\PLUMBER2s"
+            } else {
+                "/Volumes/Data/Data/PLUMBER2s"
+            }
+            .into(),
             remote: "/media/zhwei/data02/zhwei/training2026/PLUMBER2s".into(),
         }],
         threads: 8,
