@@ -3266,11 +3266,13 @@ fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
     prepare_urban(&source, &prepared).unwrap();
     {
         let _netcdf_guard = netcdf_write_lock().lock().unwrap();
-        write_urban_single_point_surface(&prepared, &output, false, Some((2000, 2004)), true, 1)
-            .unwrap();
+        write_urban_single_point_surface(&prepared, &output, false, true, 1).unwrap();
     }
     let file = netcdf::open(&output).unwrap();
-    assert_eq!(file.dimension("LAI_year").unwrap().len(), 5);
+    assert_eq!(
+        file.dimension("LAI_year").unwrap().len(),
+        crate::urban_extra::LAI_YEARS.len()
+    );
     assert_eq!(
         file.variable("URBAN_TYPE")
             .unwrap()
@@ -3307,15 +3309,7 @@ fn urban_surface_projection_resolves_lcz_defaults_and_the_case_lai_window() {
     }
     drop(file);
     let inactive_output = output.with_file_name("urban-surface-output-inactive.nc");
-    write_urban_single_point_surface(
-        &prepared,
-        &inactive_output,
-        false,
-        Some((2000, 2004)),
-        false,
-        1,
-    )
-    .unwrap();
+    write_urban_single_point_surface(&prepared, &inactive_output, false, false, 1).unwrap();
     assert!(
         netcdf::open(&inactive_output)
             .unwrap()

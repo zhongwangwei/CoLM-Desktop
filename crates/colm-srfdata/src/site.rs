@@ -254,15 +254,11 @@ pub struct SinglePointSurfaceRun {
     /// `DEF_USE_CANYON_HWR` selects the source geometry representation for
     /// urban sites.  The two source fields are not interchangeable.
     pub urban_canyon_hwr: bool,
-    /// The exact simulation/LAI window used when this crate supplied missing
-    /// urban LAI from its built-in point table.
-    pub urban_lai_year_window: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct UrbanSurfaceOptions {
     canyon_hwr: bool,
-    lai_year_window: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -360,7 +356,6 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
     // 上游 `MOD_Namelist.F90:261` 默认 `.true.`（schema 同此）；原先这里给 `false`，
     // AU-Preston 的 `BUILDING_HLR` 因此取了 `wall_to_plan_area_ratio` 那一支（0.2247 对 0.2096）。
     let urban_canyon_hwr = namelist_bool(&document, "DEF_USE_CANYON_HWR", true)?;
-    let urban_lai_year_window = urban_lai_year_window(&document, urban)?;
     let lai_frequency = if !urban
         && subgrid == SurfaceSubgrid::Lct
         && !namelist_bool(&document, "DEF_LAI_MONTHLY", true)?
@@ -432,7 +427,6 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
         eight_day_lai_years,
         monthly_lai_years,
         urban_canyon_hwr,
-        urban_lai_year_window,
     })
 }
 
@@ -477,7 +471,6 @@ pub fn materialize_single_point_surface_from_namelist_with_subgrid(
         SinglePointMaterializeOptions {
             urban: UrbanSurfaceOptions {
                 canyon_hwr: run.urban_canyon_hwr,
-                lai_year_window: run.urban_lai_year_window,
             },
             lai_frequency: run.lai_frequency,
             use_site_lai: run.use_site_lai,
@@ -619,39 +612,6 @@ fn single_point_lai_years(document: &colm_namelist::Document) -> Result<Vec<i32>
     let first = simulation_start.max(lai_start).min(lai_end);
     let last = simulation_end.min(lai_end).max(lai_start);
     Ok((first..=last).collect())
-}
-
-fn urban_lai_year_window(
-    document: &colm_namelist::Document,
-    urban: bool,
-) -> Result<Option<(i32, i32)>> {
-    if !urban {
-        return Ok(None);
-    }
-    let (Some(Value::Int(start)), Some(Value::Int(end))) = (
-        document.get("DEF_simulation_time%start_year"),
-        document.get("DEF_simulation_time%end_year"),
-    ) else {
-        return Ok(None);
-    };
-    let start = i32::try_from(*start).context("DEF_simulation_time%start_year is out of range")?;
-    let end = i32::try_from(*end).context("DEF_simulation_time%end_year is out of range")?;
-    let (first, last) = if namelist_bool(document, "DEF_LAI_CHANGE_YEARLY", true)? {
-        let available_first = namelist_i32(document, "DEF_LAI_START_YEAR", 2000)?;
-        let available_last = namelist_i32(document, "DEF_LAI_END_YEAR", 2020)?;
-        ensure!(
-            available_first <= available_last,
-            "DEF_LAI_START_YEAR exceeds DEF_LAI_END_YEAR"
-        );
-        (
-            start.max(available_first).min(available_last),
-            end.min(available_last).max(available_first),
-        )
-    } else {
-        let year = namelist_i32(document, "DEF_LC_YEAR", 2005)?;
-        (year, year)
-    };
-    Ok(Some((first, last)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3529,7 +3489,6 @@ fn publish_single_point_surface(
             source,
             target,
             urban.canyon_hwr,
-            urban.lai_year_window,
             use_soil_texture,
             compression_level,
         )
@@ -3985,7 +3944,6 @@ fn write_urban_single_point_surface(
     source: &Path,
     target: &Path,
     canyon_hwr: bool,
-    lai_year_window: Option<(i32, i32)>,
     use_soil_texture: bool,
     compression_level: u8,
 ) -> Result<()> {
@@ -4004,12 +3962,8 @@ fn write_urban_single_point_surface(
         tree_lai.len() == years.len() * 12 && tree_sai.len() == years.len() * 12,
         "TREE_LAI and TREE_SAI must each have one 12-month record per LAI_year"
     );
-    let (years, tree_lai, tree_sai) =
-        if string_attribute(&input, GENERATED_URBAN_LAI_ATTRIBUTE).as_deref() == Some("true") {
-            select_urban_lai_years(years, tree_lai, tree_sai, lai_year_window)?
-        } else {
-            (years, tree_lai, tree_sai)
-        };
+    // 站点文件里有 `TREE_LAI` 时上游原样读入全部年份（`MOD_SingleSrfdata.F90:1806-1810`），
+    // 内置表补上的也一样（Fortran 看不出它是补的）；运行期按年查表，多出的年份不影响结果。
     let roof_raw = scalar_f64(&input, "roof_area_fraction")?;
     let water_raw = scalar_f64(&input, "water_area_fraction")?;
     let impervious_raw = scalar_f64(&input, "impervious_area_fraction")?;
@@ -4197,37 +4151,6 @@ fn urban_scalar_or(input: &netcdf::File, names: &[&str], fallback: f64) -> Resul
         }
     }
     Ok(fallback)
-}
-
-fn select_urban_lai_years(
-    years: Vec<i32>,
-    tree_lai: Vec<f64>,
-    tree_sai: Vec<f64>,
-    window: Option<(i32, i32)>,
-) -> Result<(Vec<i32>, Vec<f64>, Vec<f64>)> {
-    let Some((first, last)) = window else {
-        return Ok((years, tree_lai, tree_sai));
-    };
-    let indices = years
-        .iter()
-        .enumerate()
-        .filter_map(|(index, &year)| ((first..=last).contains(&year)).then_some(index))
-        .collect::<Vec<_>>();
-    ensure!(
-        !indices.is_empty(),
-        "built-in urban LAI has no years within the case window {first}..={last}"
-    );
-    let copied = |values: &[f64]| {
-        indices
-            .iter()
-            .flat_map(|&index| values[index * 12..(index + 1) * 12].iter().copied())
-            .collect::<Vec<_>>()
-    };
-    Ok((
-        indices.iter().map(|&index| years[index]).collect(),
-        copied(&tree_lai),
-        copied(&tree_sai),
-    ))
 }
 
 fn urban_values_or(

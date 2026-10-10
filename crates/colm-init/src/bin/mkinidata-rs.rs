@@ -890,8 +890,10 @@ fn spatial_namelist_run_with_subgrid(
         canopy_structure: namelist_i32(&document, "DEF_Interception_scheme", 1)? == 8,
         greenwich: namelist_bool(&document, "DEF_simulation_time%greenwich", true)?,
         dynamic_lake,
-        plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
-        ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", false)?,
+        // 开城市模型时上游把这两个强制关掉（`MOD_Namelist.F90`）。
+        plant_hydraulics: namelist_bool(&document, "DEF_USE_PLANTHYDRAULICS", true)?
+            && !urban_enabled,
+        ozone_stress: namelist_bool(&document, "DEF_USE_OZONESTRESS", false)? && !urban_enabled,
         variably_saturated_flow,
         vegetation_snow: namelist_bool(&document, "DEF_VEG_SNOW", true)?,
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,

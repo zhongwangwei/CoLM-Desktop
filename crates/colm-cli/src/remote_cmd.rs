@@ -498,10 +498,17 @@ fn unpack_app_source(tarball: &Path, cache: &Path) -> Result<PathBuf> {
         return Ok(dest);
     }
     std::fs::create_dir_all(cache)?;
+    // macOS 的 `SystemTime` 只到微秒：同一进程的几个线程会拿到同一个时间戳，
+    // 所以再加一个进程内计数，暂存目录名才不撞（撞了 `create_dir` 报 EEXIST）。
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
-    let staging = cache.join(format!(".{digest}.{}.{nonce}", std::process::id()));
+    let sequence = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let staging = cache.join(format!(
+        ".{digest}.{}.{nonce}.{sequence}",
+        std::process::id()
+    ));
     std::fs::create_dir(&staging)?;
     let result = (|| {
         let status = Command::new("tar")

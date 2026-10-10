@@ -32435,6 +32435,26 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 | 示例 US-Ne3 2002–2003（PFT + CROP） | crop | 73 | 一致 |
 | 示例 AU-Preston 2003-01–2004-10（城市） | default | 18 / 51 | **不一致，早已存在，与本轮无关**（见下） |
 
-- **AU-Preston**：2004 年起每份 history 从第 0 步就有差异（1 月 `f_assim` maxrel 3.5e-14，年中涨到 1e-4–1e-2），2004-001 起的重启都不同。改动前的内核（vendor `1d41ad09`）配改动前的 Rust 得到**完全相同**的差异（maxrel 一致）。Fortran 主循环换成吃 Rust 预处理的结果后仍不一致，所以是城市路径的主循环差异，在 2003 年预热期间就已出现。另外两处预处理差异：Fortran `srfdata.nc` 存 23 年树木 LAI/SAI，Rust 只存 2 年；Rust 重启多 `gs0sha/gs0sun/vegwp`。另开任务排查。
+- **AU-Preston**（第 658 轮已修好，见下一轮）：2004 年起每份 history 从第 0 步就有差异（1 月 `f_assim` maxrel 3.5e-14，年中涨到 1e-4–1e-2），2004-001 起的重启都不同。改动前的内核（vendor `1d41ad09`）配改动前的 Rust 得到**完全相同**的差异（maxrel 一致）。Fortran 主循环换成吃 Rust 预处理的结果后仍不一致，所以是城市路径的主循环差异，在 2003 年预热期间就已出现。另外两处预处理差异：Fortran `srfdata.nc` 存 23 年树木 LAI/SAI，Rust 只存 2 年；Rust 重启多 `gs0sha/gs0sun/vegwp`。另开任务排查。
 - **第 564 轮那 187 个算例这次没法重跑**：它们的目录（`fortran-rust-refactor-8df5bb/tmp/<case>-{fortran,rust}`）已经不在了，只剩脚本（`b564[a-k].sh`、`inipair.sh` 等）和上表前 13 对。要恢复这套全量回归，得按脚本重新派生算例。
 - 更正第 656 轮：那一轮记的 `cargo fmt --check` 通过并不属实，`colm-remote/src/engine.rs` 新加的 `in_snapshot`、`tarball_content_id` 没格式化。本轮补上，只改格式。
+
+## 第 658 轮：AU-Preston 城市站 Fortran 与 Rust 逐位一致
+
+第 657 轮查出的 AU-Preston（城市单点，2003-01 至 2004-10）不一致有三处，都是 Rust 的问题。
+
+**一、跨年那一步的天顶角（结果差异的来源）**
+- 定位：只跑 2003 年一致；从 2004-01-01 冷启动一致；只要把 2003 年的状态带进 2004 年，第一步就差 1 ULP。两侧都从 2003-12-01 的重启起跑仍可复现，2003-12 一致、2004-01 第 0 条不同。逐步长写重启：`2004-001-00000` 两侧相同，走完 2004 年第一步后屋顶、墙、地面温度都差 1 ULP。在 `UrbanTHERMAL` 两侧插桩打印输入的位型：强迫、短波吸收、温度全同，只有 `theta` 不同（`3FE294E061BD6530` 对 `3FE294E061BD646A`）。
+- 原因：`CoLMMAIN_Urban` 的 `theta = acos(max(coszen,0.01))` 用的是 `coszen` 状态量——上一步末尾 `orb_coszen(calendarday(idate))`，而那一步的 `idate` 是步末、未规整的 `(2003, 365, 86400)`，`calday = 366.0`。Rust 城市路径用的是按规整后的步首时刻 `(2004, 1, 0)` 现算的 `forcing.cosine_zenith`，`calday = 1.0`。平时两者逐位相等（日界处 `d + 86400/86400` 与 `(d+1) + 0` 相同），只有跨年时轨道相位差一整周期，数学上相等，末位不同。非城市路径不受影响（`CoLMMAIN` 的天顶角只在步末给反照率用，Rust 那里本来就用步末的值）。
+- 修法：`UrbanPatchState::cosine_zenith` 保存上一步末的 `coszen`，装配时取起跑重启的 `coszen`（重启里没有时退回原值），每步末更新为 `surface_cosine_zenith`，`theta` 用它。
+- 顺带确认：Fortran 从 `2004-001` 重启续跑与连续跑本身就不一致（`gs0sun/gs0sha` 等不进重启），Rust 从重启续跑与连续跑一致。这是上游的续跑特性，不是本轮的问题。
+
+**二、城市冷启动多写了植物水力量**：开城市模型时上游 namelist 把 `DEF_USE_PLANTHYDRAULICS`、`DEF_USE_OZONESTRESS` 等强制关掉，冷启动重启因此没有 `vegwp/gs0sun/gs0sha`。Rust 运行期（`physics.rs`）早就套用了这条规则，colm-init 的单点（`single_point.rs`）与空间（`mkinidata-rs`）冷启动没有套，所以多写了这三个量，运行期又把它们原样带下去。两处都改为 `&& !urban_run`。
+
+**三、`srfdata.nc` 的树木 LAI 年份**：`colm-cli new` 把内置的 23 年 `TREE_LAI/TREE_SAI` 写进站点文件，上游看到站点文件里有 `TREE_LAI` 就原样读入全部年份（`MOD_SingleSrfdata.F90:1806-1810`）。Rust 却按模拟时段截成 2 年（第 6e1c3622 次提交加的截取，原意是模仿"从 `urban_lai_500m` 瓦片读"）。现在去掉截取，全部写出；运行期按年查表，结果不变。
+
+**实测**：AU-Preston 全链路（Fortran 侧纯 Fortran 预处理，`kernels507/default`）49 个文件全部逐位一致（修前 18/51）。CN-Cng 2008–2009 示例复跑仍是 42 个全一致。三份黄金这次没有复跑（`/Volumes/Data` 中途卸载，读不到 PLUMBER2 强迫）；本轮只改了城市路径。空间城市算例（第 564 轮的 `g1urb*`）目录已不在，没有复跑。
+
+**测试**：colm-core 514、colm-runtime 186、colm-init 181 + 23（串行）、colm-srfdata 273（串行；城市单点的断言改为写出全部年份）、colm-cli 251 + 19（串行）全过。
+
+**另外修的一个偶发失败**：`remote_cmd_tests::app_source_cache_uses_digest_and_rejects_partial_snapshots` 约一半概率失败（`File exists (os error 17)`）。三个线程同时解压时，暂存目录名是"进程号 + 纳秒时间戳"，而 macOS 的 `SystemTime` 只到微秒，同一微秒的线程撞名。加了进程内原子计数；修前 6 次里 4 次失败，修后 15 次全过。另外，本机 `colm-cli` 测试并行跑时也会偶发 `Netcdf(-101)`，与 colm-init 的情况相同，串行就不出现。

@@ -403,6 +403,7 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
         .with_context(|| format!("cannot read case namelist {}", namelist.display()))?;
     let document = parse(&text)
         .with_context(|| format!("cannot parse case namelist {}", namelist.display()))?;
+    let urban_run = optional_bool_or(&document, "DEF_URBAN_RUN", false)?;
     let subgrid = single_point_subgrid(&document, subgrid_fallback)?;
     let snicar = crate::SnicarInitialization::from_document(&document)?;
     reject_unsupported_cold_start_features(&document, subgrid)?;
@@ -450,8 +451,11 @@ pub fn single_point_cold_start_run_from_namelist_with_subgrid(
         lai_start_year,
         lai_end_year,
         dynamic_lake: optional_bool_or(&document, "DEF_USE_Dynamic_Lake", false)?,
-        plant_hydraulics: optional_bool_or(&document, "DEF_USE_PLANTHYDRAULICS", true)?,
-        ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", false)?,
+        // `MOD_Namelist.F90` 开城市模型时把植物水力与臭氧胁迫强制关掉（运行期 `physics.rs` 同一条），
+        // 冷启动重启因此不写 `vegwp/gs0sun/gs0sha`。
+        plant_hydraulics: optional_bool_or(&document, "DEF_USE_PLANTHYDRAULICS", true)?
+            && !urban_run,
+        ozone_stress: optional_bool_or(&document, "DEF_USE_OZONESTRESS", false)? && !urban_run,
         bgc,
         cn_initial_state: enabled_existing_path(&document, "DEF_USE_CN_INIT", "DEF_file_cn_init")?,
         nitrification: optional_bool_or(&document, "DEF_USE_NITRIF", true)?,

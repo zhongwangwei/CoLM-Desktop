@@ -72,6 +72,11 @@ pub struct UrbanPatchState {
     /// 更新；不进重启，续跑后重新从 `spval` 开始。`None` 即 `spval`。
     pub fsen_urbl: Option<f64>,
     pub lfevp_urbl: Option<f64>,
+    /// 上一步末算的 `coszen`（主重启的 `coszen`，`CoLMMAIN_Urban.F90:1278-1279`），本步的
+    /// `theta` 用它。跨年那一步上游的 `idate` 是 `(上一年, 365/366, 86400)`，`calday` 为 366/367，
+    /// 与按规整后的步首时刻（`calday = 1`）现算的 `coszen` 末位不同。`None`：起跑重启里没有
+    /// `coszen`，退回 [`UrbanClock::cosine_zenith`]。
+    pub cosine_zenith: Option<f64>,
 }
 
 /// 城市 patch 的时不变量（城市常数重启与主常数重启里的城市字段）。
@@ -132,7 +137,7 @@ pub struct UrbanClock {
     pub time: CalendarTime,
     pub greenwich: bool,
     pub longitude_radians: f64,
-    /// 强迫时刻的 `coszen`（`theta = acos(max(coszen, 0.01))`）。
+    /// 步首时刻现算的 `coszen`：[`UrbanPatchState::cosine_zenith`] 缺失时 `theta` 才用它。
     pub cosine_zenith: f64,
     /// 步末的 `coszen`（末尾 `alburban` 用）。
     pub surface_cosine_zenith: f64,
@@ -185,8 +190,12 @@ pub fn urban_step(
     let sai = state.energy.canopy.stem_area_index;
     let sigf = state.energy.canopy.vegetation_free_fraction;
 
-    // `:713`
-    let theta = clock.cosine_zenith.max(0.01).acos();
+    // `:713`：`coszen` 是上一步末带过来的状态量。
+    let theta = urban
+        .cosine_zenith
+        .unwrap_or(clock.cosine_zenith)
+        .max(0.01)
+        .acos();
     let shortwave = urban_net_solar(
         UrbanNetSolarInput {
             forcing: input.energy.solar.forcing,
@@ -873,6 +882,8 @@ pub fn urban_step(
         urban.pervious.snow.age,
         urban.impervious.snow.age,
     );
+    // `:1278-1279`：下一步的 `coszen`。
+    urban.cosine_zenith = Some(clock.surface_cosine_zenith);
     urban.radiation = cold_start_urban_radiation(UrbanRadiationInput {
         roof_fraction: froof,
         pervious_ground_fraction: fgper,

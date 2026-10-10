@@ -3761,6 +3761,11 @@ impl UrbanTemplate {
             meta: scalar_u(&time, "meta")?,
             fsen_urbl: None,
             lfevp_urbl: None,
+            cosine_zenith: main_time
+                .variable_dimensions("coszen")
+                .is_ok()
+                .then(|| scalar(main_time, "coszen", patch))
+                .transpose()?,
         };
         let mut restart_values = std::collections::BTreeMap::new();
         for name in time.float_names() {
