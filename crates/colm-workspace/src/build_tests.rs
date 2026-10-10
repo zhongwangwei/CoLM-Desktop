@@ -13,6 +13,7 @@ fn only_known_presets_are_accepted() {
 }
 
 /// 命令的输出进日志文件，失败如实报告，门槛记在当前提交上。
+#[cfg(unix)]
 #[test]
 fn a_logged_command_records_its_output_and_a_gate_on_the_current_commit() {
     let root = temp("build");

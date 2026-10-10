@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(unix)]
 #[test]
 fn the_seatbelt_profile_denies_network_and_lists_the_writable_places() {
     let dir = std::env::temp_dir().join("colm-sbx-profile");

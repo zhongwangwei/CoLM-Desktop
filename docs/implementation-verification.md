@@ -32470,3 +32470,4 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - Linux `mksrfdata-rs` 的 `spatial_lct_urban_assimilates_5km_geometry_grid`：500 m 网格边界是按 FMA 位型算的，不收缩时边上多出两列像元（52 对 50），同样 `skip_unless_fused!()`。本机模拟时只跑了 `--lib`，漏了 `--bins`。
   - Windows `colm-remote` 7 个调度器作业测试：沙箱用 `bash` 扮演 Slurm/PBS/LSF，Windows runner 上 `bash` 落到没装发行版的 WSL。限定 Unix（服务器端本来就是 Linux）；同样只用沙箱、不执行脚本的 `cancellation_rejects_unknown_schedulers…` 仍在 Windows 上跑。`colm-workspace` 的 4 个两版一致 / 回归测试用 sh 写的假 `colm-cli`，同样限定 Unix，只被它们用到的辅助函数与 import 一起按 `cfg(unix)` 编译（三平台 clippy 都带 `-D warnings`）。
   - Windows GUI `server_settings_are_validated`：测试把本机一侧的路径写死成 macOS 的 `/Volumes/…`，Windows 上不是绝对路径。改为按平台给（`D:\Data\…`）。服务器一侧按 `/` 开头校验，本来就对。
+  - 第三、四轮：`colm-remote` 的沙箱在 Windows 上仍要用 `ChildStdin::write_all`，`std::io::Write` 不能跟着改成 Unix 专属（按名字找用法查不出 trait 方法，判断错了）。`colm-workspace` 的 `a_logged_command_records…` 直接调 `/bin/sh`，`the_seatbelt_profile…` 是 macOS 的 seatbelt 配置（Windows 路径的反斜杠会被转义），限定 Unix。
