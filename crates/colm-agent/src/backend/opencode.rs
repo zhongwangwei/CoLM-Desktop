@@ -245,6 +245,8 @@ impl Server {
         check_profile_sources(profile)?;
         let root =
             std::env::temp_dir().join(format!("colm-opencode-{}", crate::bridge::random_hex(16)));
+        // 只有 Unix 要设权限位；Windows 上它不必可变。
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut dir = std::fs::DirBuilder::new();
         #[cfg(unix)]
         {

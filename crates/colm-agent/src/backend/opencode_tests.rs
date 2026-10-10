@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use crate::agent::Decision;
 #[test]
 fn models_only_include_enabled_models_and_variants() {
@@ -102,12 +103,14 @@ impl Drop for Fixture {
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
+#[cfg(unix)]
 #[derive(Default)]
 struct Sink {
     events: Vec<Outbound>,
     approvals: usize,
     remember: bool,
 }
+#[cfg(unix)]
 impl TurnSink for Sink {
     fn emit(&mut self, event: Outbound) {
         self.events.push(event);
