@@ -336,7 +336,13 @@ impl InfoLock {
                 .open(&path)
             {
                 Ok(_) => return Ok(Self(path)),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                // Windows 上锁文件刚被另一个持有者删掉、还处在“等待删除”时，`create_new`
+                // 报的是拒绝访问（os error 5）而不是已存在：同样是有人占着，等一下再试。
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::AlreadyExists
+                        || (cfg!(windows)
+                            && error.kind() == std::io::ErrorKind::PermissionDenied) =>
+                {
                     let stale = std::fs::metadata(&path)
                         .and_then(|m| m.modified())
                         .ok()
