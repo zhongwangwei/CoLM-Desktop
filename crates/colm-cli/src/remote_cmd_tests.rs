@@ -1,5 +1,7 @@
 use super::*;
 
+// 映射与算例路径用的是 Unix 本机路径（Windows 上不是绝对路径，`parse_mapping` 会拒绝）。
+#[cfg(unix)]
 fn maps() -> Vec<Mapping> {
     vec![
         parse_mapping(
@@ -10,6 +12,7 @@ fn maps() -> Vec<Mapping> {
     ]
 }
 
+#[cfg(unix)]
 #[test]
 fn paths_go_into_the_case_copy_or_through_the_longest_mapping() {
     let case = Path::new("/Users/me/Desktop/CA-Qfo-pc");
@@ -62,6 +65,7 @@ fn paths_go_into_the_case_copy_or_through_the_longest_mapping() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn staging_copies_inputs_only_and_rewrites_every_path() {
     let root = std::env::temp_dir().join(format!("colm-remote-stage-{}", std::process::id()));

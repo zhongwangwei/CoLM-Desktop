@@ -1206,7 +1206,8 @@ mod tests {
     fn hybrid_studies_lists_tuning_studies_under_the_project_colm_dir() {
         let root = temp("hybrid-studies").canonicalize().unwrap();
         let manifest = create(&root, &spec(&root)).unwrap();
-        let study = PathBuf::from(&manifest.root);
+        // 两边都规范化再比：Windows 上 `canonicalize` 给的是 `\\?\C:\…`，记录里是普通路径。
+        let study = PathBuf::from(&manifest.root).canonicalize().unwrap();
         assert!(
             study.starts_with(&root),
             "{} not under {}",
