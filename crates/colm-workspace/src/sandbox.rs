@@ -19,6 +19,39 @@ pub struct SandboxInfo {
     pub note: String,
 }
 
+thread_local! {
+    static OUTER_BOUNDARY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The trusted remote controller calls this only after verifying its outer Linux boundary.
+/// This scope is process-local and thread-local; environment variables cannot enable it.
+pub fn with_outer_sandbox<T>(
+    root: &Path,
+    work: impl FnOnce() -> anyhow::Result<T>,
+) -> anyhow::Result<T> {
+    let root = root.canonicalize()?;
+    anyhow::ensure!(
+        root.parent().is_some(),
+        "outer sandbox root cannot be filesystem root"
+    );
+    OUTER_BOUNDARY.with(|slot| -> anyhow::Result<()> {
+        anyhow::ensure!(
+            slot.borrow().is_none(),
+            "outer sandbox scope is already active"
+        );
+        *slot.borrow_mut() = Some(root);
+        Ok(())
+    })?;
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            OUTER_BOUNDARY.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    let _reset = Reset;
+    work()
+}
+
 /// 沙箱策略：除了工作区，还有哪些目录可写；要不要联网。
 #[derive(Debug, Clone, Default)]
 pub struct Policy {
@@ -117,6 +150,34 @@ pub(crate) fn seatbelt_profile(policy: &Policy) -> String {
 
 /// 把 `program args…` 包进沙箱，返回可以直接 `spawn` 的命令与沙箱说明。
 pub fn wrap(program: &Path, args: &[String], policy: &Policy) -> (Command, SandboxInfo) {
+    if let Some(root) = OUTER_BOUNDARY.with(|slot| slot.borrow().clone()) {
+        let allowed = !policy.allow_network
+            && policy
+                .writable
+                .iter()
+                .all(|path| path.canonicalize().is_ok_and(|p| p.starts_with(&root)));
+        let mut command = Command::new(if allowed {
+            program
+        } else {
+            Path::new("/bin/false")
+        });
+        if allowed {
+            command.args(args);
+        }
+        return (
+            command,
+            SandboxInfo {
+                kind: "bubblewrap".into(),
+                network_blocked: true,
+                note: if allowed {
+                    "verified outer bubblewrap boundary; writes confined to private remote job"
+                } else {
+                    "rejected policy outside private outer sandbox boundary"
+                }
+                .into(),
+            },
+        );
+    }
     let info = detect();
     let mut command = match info.kind.as_str() {
         "seatbelt" => {

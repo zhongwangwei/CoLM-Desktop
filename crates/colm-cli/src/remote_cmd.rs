@@ -354,7 +354,7 @@ fn root_of(opts: &Opts) -> Result<String> {
 }
 
 /// 引擎源码：开发环境里是这个仓库，安装包里是随应用附带的 `colm-src.tar.gz`。
-fn engine_source() -> Result<Source> {
+pub(super) fn engine_source() -> Result<Source> {
     let dir = exe_dir()?;
     if let Some(source) = Source::find_checkout(&dir) {
         return Ok(source);
@@ -687,7 +687,7 @@ impl RunPlan {
     }
 }
 
-fn parse_scheduler(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Scheduler> {
+pub(super) fn parse_scheduler(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Scheduler> {
     Ok(match opts.get("--scheduler").as_deref() {
         // auto：问服务器有什么调度系统，取第一个；没有就直接后台运行。
         Some("auto") => colm_remote::probe::probe(ssh, root)?
@@ -701,7 +701,12 @@ fn parse_scheduler(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Scheduler> {
     })
 }
 
-fn resources_from(opts: &Opts, threads: u32, ranks: u32, nodes: u32) -> Result<Resources> {
+pub(super) fn resources_from(
+    opts: &Opts,
+    threads: u32,
+    ranks: u32,
+    nodes: u32,
+) -> Result<Resources> {
     let resources = Resources {
         cpus: opts
             .get("--cpus")

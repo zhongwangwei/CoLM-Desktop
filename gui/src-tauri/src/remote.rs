@@ -297,7 +297,7 @@ pub fn remote_ssh_hosts() -> Vec<String> {
 }
 
 /// 安装包的资源目录；`colm-cli` 在里面找随附的源码包与预编引擎（`COLM_RESOURCE_DIR`）。
-fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
+pub(crate) fn resource_dir(app: &tauri::AppHandle) -> Option<PathBuf> {
     app.path().resource_dir().ok()
 }
 
@@ -338,7 +338,7 @@ fn command_server(config: &RemoteConfig, args: &[String]) -> Result<Option<Serve
     server_from_record(config, &record).map(Some)
 }
 
-fn server_from_record(config: &RemoteConfig, record: &Value) -> Result<Server, String> {
+pub(crate) fn server_from_record(config: &RemoteConfig, record: &Value) -> Result<Server, String> {
     let host = record["host"].as_str().ok_or("远程作业记录缺少主机")?;
     let saved = config.servers.iter().find(|s| s.host == host).cloned();
     let Some(binding) = record.get("ssh_auth").filter(|v| !v.is_null()) else {
@@ -384,7 +384,7 @@ pub(crate) async fn cli_json(
 }
 
 /// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
-async fn ssh_cli_json(
+pub(crate) async fn ssh_cli_json(
     args: Vec<String>,
     resources: Option<PathBuf>,
     server: Option<&Server>,
@@ -551,7 +551,7 @@ pub(crate) fn run_args(
 }
 
 /// 调度与环境的参数（编内核、跑算例共用）。
-fn scheduler_args(server: &Server) -> Vec<String> {
+pub(crate) fn scheduler_args(server: &Server) -> Vec<String> {
     let mut args: Vec<String> = vec!["--scheduler".into(), server.scheduler.clone()];
     let mut optional = |flag: &str, value: &str| {
         if !value.trim().is_empty() {

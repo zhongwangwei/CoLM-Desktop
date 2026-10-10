@@ -51,6 +51,7 @@ mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
 mod remote_cmd;
+mod remote_workspace_cmd;
 mod study;
 mod ws_cmd;
 
@@ -311,6 +312,7 @@ fn main() -> Result<()> {
         "hybrid-install" => hybrid_cmd::cmd_hybrid_install(&opts)?,
         "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
+        "remote-workspace" => remote_workspace_cmd::run(&opts)?,
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
         "remote-dist" => remote_cmd::cmd_dist(&opts)?,

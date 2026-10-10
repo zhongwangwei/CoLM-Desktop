@@ -185,6 +185,7 @@ pub fn run() {
             remote_kernels,
             workspace::workspace_list,
             workspace::workspace_create,
+            workspace::workspace_remote,
             workspace::workspace_status,
             workspace::workspace_kernels,
             workspace::workspace_export,

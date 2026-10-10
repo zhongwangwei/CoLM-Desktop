@@ -216,14 +216,179 @@ function render(workspaces) {
         () => revert(ws.name), ws.commits === 0, '还没有改动'),
       action('删除工作区…', '删除整个副本，包括编出的内核和测试报告，不能恢复；正在使用的内核会一起停用。', () => remove(ws.name)),
     );
-    card.append(head, lights, actions);
+    card.append(head, lights, actions, remotePanel(ws.name));
     list.append(card);
   }
 }
 
+export function remoteRequest(action, preset, casePath, packageName, changeKind = 'refactor') {
+  const request = { action, preset: preset.trim() || 'default' };
+  if (action === 'verify' || action === 'test') {
+    if (!/^[A-Za-z0-9_-]+$/.test(packageName.trim())) throw new Error(t('请输入测试包名称'));
+    Object.assign(request, { kind: action === 'verify' ? changeKind : 'cargo', package: packageName.trim() });
+  }
+  if (action === 'verify') {
+    if (!casePath.trim().startsWith('/') || /[\0\r\n]/.test(casePath)) throw new Error(t('请输入服务器上算例的绝对路径'));
+    request.case = casePath.trim();
+  }
+  return request;
+}
+
+export function remoteJobText(job, live) {
+  const stateText = { preparing: '准备中', submitting: '正在提交', queued: '等待运行', running: '正在运行', finished: '已完成', failed: '失败', lost: '作业已丢失', unknown: '状态未知' };
+  const value = live?.state === 'finished' && live.exit_code !== 0 ? 'failed' : live?.state ?? job.state;
+  return `${job.id} · ${job.host} · ${t(stateText[value] ?? '状态未知')} · ${String(job.commit ?? '').slice(0, 8)}${job.stale ? ` · ${t('需要重测（之后又改过代码）')}` : ''}`;
+}
+
+export function remoteEvidenceText(evidence) {
+  const gateLight = (runs, commit) => {
+    if (!runs.length || runs.some(run => !run)) return 'unknown';
+    if (evidence.stale || runs.some(run => run.commit !== commit)) return 'stale';
+    return runs.some(run => run.ok === false) ? 'fail' : runs.every(run => run.ok === true) ? 'pass' : 'unknown';
+  };
+  const lines = [];
+  for (const [key, label, commit] of [['candidate', '修改后的源码', evidence.commit], ['baseline', '原版源码', evidence.base_commit]]) {
+    const gates = evidence.gates?.[key] ?? {};
+    const kernels = Object.values(gates.kernels ?? {});
+    lines.push(`${t(label)} · ${String(commit ?? '').slice(0, 8)}`);
+    lines.push(lightsSummary({
+      compile: gateLight([gates.engine, ...(kernels.length ? kernels : [null])], commit),
+      tests: gateLight(Object.values(gates.tests ?? {}), commit),
+      parity: gateLight([gates.parity], commit),
+      regression: gateLight([gates.regression], commit),
+    }));
+  }
+  for (const outcome of (evidence.outcomes ?? []).slice(0, 20)) {
+    const detail = [outcome.command, outcome.verdict].filter(Boolean).join(' · ');
+    if (detail) lines.push(detail.slice(0, 1200));
+    if (outcome.first_difference != null) lines.push(`${t('首个差异')}：${JSON.stringify(outcome.first_difference).slice(0, 1200)}`);
+    const compare = Object.entries(outcome.compare ?? {}).filter(([, value]) => value != null);
+    if (compare.length) lines.push(`${t('对比统计')}：${compare.map(([key, value]) => `${key}=${value}`).join(', ').slice(0, 1200)}`);
+  }
+  return lines.join('\n');
+}
+
+function remotePanel(name) {
+  const panel = document.createElement('details');
+  panel.className = 'ws-detail';
+  panel.append(Object.assign(document.createElement('summary'), { textContent: t('在服务器上编译和验证') }));
+  const form = document.createElement('form');
+  const field = (text, input) => {
+    const label = Object.assign(document.createElement('label'), { className: 'field', textContent: t(text) });
+    label.append(input);
+    form.append(label);
+    return input;
+  };
+  const server = field('服务器', document.createElement('select'));
+  server.required = true;
+  const preset = field('预设', Object.assign(document.createElement('input'), { value: 'default', required: true }));
+  const casePath = field('服务器算例绝对路径', Object.assign(document.createElement('input'), { placeholder: '/media/data/cases/site' }));
+  const packageName = field('测试包', Object.assign(document.createElement('input'), { value: 'colm-core', required: true }));
+  const task = field('任务', document.createElement('select'));
+  for (const [value, label] of [['verify', '完整验证'], ['build-engine', '编译 Rust 引擎'], ['build-kernel', '编译 Fortran 内核'], ['test', '运行测试']]) {
+    task.append(Object.assign(document.createElement('option'), { value, textContent: t(label) }));
+  }
+  const changeKind = field('改动类型', document.createElement('select'));
+  for (const [value, label] of [['refactor', '重构（结果应保持一致）'], ['physics', '物理过程修改（检查闭合）']]) changeKind.append(Object.assign(document.createElement('option'), { value, textContent: t(label) }));
+  const help = Object.assign(document.createElement('p'), { className: 'mini muted', textContent: t('上传当前工作区源码快照，在服务器独立目录运行。完整验证包含编译、测试、与原版对比及两版一致检查；算例须已在服务器上。远程结果不改变本机内核。') });
+  const submit = Object.assign(document.createElement('button'), { type: 'submit', className: 'btn-ghost', textContent: t('提交远程任务'), disabled: true });
+  const message = Object.assign(document.createElement('p'), { className: 'mini' });
+  message.setAttribute('role', 'status');
+  message.setAttribute('aria-live', 'polite');
+  const jobs = document.createElement('div');
+  const refreshButton = button('刷新远程任务', () => loadJobs(true));
+  form.append(help, submit);
+  const evidenceBox = Object.assign(document.createElement('pre'), { className: 'mini', hidden: true });
+  panel.append(form, message, refreshButton, jobs, evidenceBox);
+  let loaded = false;
+  let busy = false;
+  let timer;
+  const errorText = error => { message.className = 'mini assistant-fail'; message.textContent = String(error?.message || error); };
+  const call = (operation, extra = {}) => invoke('workspace_remote', { name, operation, host: null, job: null, request: null, ...extra });
+  async function jobAction(operation, job) {
+    if (busy) return;
+    busy = true;
+    refreshButton.disabled = true;
+    message.className = 'mini';
+    message.textContent = t('正在处理远程任务…');
+    try {
+      const result = await call(operation, { job: job.id });
+      if (operation === 'fetch') {
+        message.textContent = `${t('已取回远程报告')}：${result.job?.report_dir ?? ''} · ${remoteJobText(result.job ?? job, result.status)}`;
+        evidenceBox.hidden = !result.evidence;
+        evidenceBox.textContent = result.evidence ? `${t('远程验证证据')} · ${job.id}\n${remoteEvidenceText(result.evidence)}` : '';
+      }
+      else message.textContent = '';
+      await loadJobs(false);
+    } catch (error) { errorText(error); }
+    finally { busy = false; refreshButton.disabled = false; }
+  }
+  async function loadJobs(updateStatus) {
+    clearTimeout(timer);
+    try {
+      const result = await call('list');
+      const entries = [];
+      let pending = false;
+      for (const record of result.jobs ?? []) {
+        let job = record;
+        let live;
+        let failure;
+        if (updateStatus) {
+          try { const result = await call('status', { job: job.id }); job = result.job; live = result.status; }
+          catch (error) { failure = String(error?.message || error); }
+        }
+        const active = ['preparing', 'submitting', 'queued', 'running', 'unknown', 'lost'].includes(live?.state ?? job.state);
+        pending ||= active && !failure;
+        const row = Object.assign(document.createElement('div'), { className: 'ws-action' });
+        row.append(Object.assign(document.createElement('p'), { className: 'mini', textContent: remoteJobText(job, live) }));
+        row.append(Object.assign(document.createElement('p'), { className: 'mini muted', textContent: `${t('源码哈希')}：${job.source_sha256 ?? ''}` }));
+        if (live?.phase) row.append(Object.assign(document.createElement('p'), { textContent: live.phase }));
+        if (failure || live?.log_tail) row.append(Object.assign(document.createElement('pre'), { textContent: failure || live.log_tail }));
+        if (active) row.append(button('取消远程任务', () => jobAction('cancel', job)));
+        else row.append(button('取回报告和日志', () => jobAction('fetch', job)));
+        if (job.report_dir) row.append(Object.assign(document.createElement('p'), { className: 'mini', textContent: `${t('报告位置')}：${job.report_dir}` }));
+        entries.push(row);
+      }
+      jobs.replaceChildren(...entries);
+      if (!entries.length) jobs.append(Object.assign(document.createElement('p'), { className: 'mini muted', textContent: t('还没有远程任务') }));
+      if (pending && panel.open && panel.isConnected) timer = setTimeout(() => { if (panel.open && panel.isConnected && $('workspace-dialog')?.open && !busy) loadJobs(true); }, 5000);
+    } catch (error) { errorText(error); }
+  }
+  panel.addEventListener('toggle', async () => {
+    if (!panel.open) { clearTimeout(timer); return; }
+    if (!loaded) {
+      try {
+        const config = await invoke('remote_config');
+        for (const entry of config.servers ?? []) server.append(Object.assign(document.createElement('option'), { value: entry.host, textContent: entry.host }));
+        submit.disabled = !(config.servers ?? []).length;
+        if (submit.disabled) message.textContent = t('请先在服务器设置中添加服务器');
+        loaded = true;
+      } catch (error) { errorText(error); }
+    }
+    await loadJobs(true);
+  });
+  form.onsubmit = async event => {
+    event.preventDefault();
+    if (busy || !form.reportValidity()) return;
+    busy = true;
+    submit.disabled = true;
+    try {
+      const request = remoteRequest(task.value, preset.value, casePath.value, packageName.value, changeKind.value);
+      message.className = 'mini';
+      message.textContent = t('正在上传源码并提交任务…');
+      const result = await call('submit', { host: server.value, request });
+      message.textContent = remoteJobText(result.job, result.status);
+      if (result.error) errorText(result.error);
+      await loadJobs(true);
+    } catch (error) { errorText(error); }
+    finally { busy = false; submit.disabled = !server.value; }
+  };
+  return panel;
+}
+
 async function showDetail(name, card) {
-  card.querySelector('.ws-detail')?.remove();
-  const box = Object.assign(document.createElement('div'), { className: 'ws-detail mini' });
+  card.querySelector('.ws-local-detail')?.remove();
+  const box = Object.assign(document.createElement('div'), { className: 'ws-detail ws-local-detail mini' });
   try {
     const d = await invoke('workspace_status', { name });
     const section = (title, lines) => {

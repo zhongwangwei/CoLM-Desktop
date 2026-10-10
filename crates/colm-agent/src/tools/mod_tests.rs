@@ -46,6 +46,9 @@ fn every_standard_tool_has_a_strict_mode_schema() {
                     "run_case_with",
                     "parity_check",
                     "regression_check",
+                    "remote_workspace_submit",
+                    "remote_workspace_cancel",
+                    "remote_workspace_fetch",
                 ]
                 .contains(&tool.name()),
                 "{} is a code-tier tool but not a workspace tool",

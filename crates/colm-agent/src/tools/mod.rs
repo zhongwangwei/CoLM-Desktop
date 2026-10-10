@@ -8,6 +8,7 @@ mod code;
 mod diagnostics;
 mod fs;
 mod read;
+mod remote_workspace;
 pub mod ui;
 pub mod web;
 
@@ -245,6 +246,7 @@ impl Registry {
         if ui {
             registry.tools.retain(|tool| tool.name() != "create_case");
             registry.tools.extend(ui::tools());
+            registry.tools.extend(remote_workspace::tools());
         }
         registry
     }

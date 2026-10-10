@@ -71,3 +71,30 @@ fn create_validates_local_sources_and_preserves_single_arguments() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn remote_workspace_commands_reject_unknown_actions_and_keep_json_as_one_argument() {
+    let request =
+        serde_json::json!({"action":"verify", "case":"/data/case with spaces", "preset":"default"});
+    let command = remote_args("demo", "submit", None, Some(&request)).unwrap();
+    assert_eq!(command.last().unwrap(), &request.to_string());
+    assert_eq!(command[0], "remote-workspace");
+    assert!(remote_args("demo", "shell", None, None).is_err());
+    assert!(remote_args(
+        "demo",
+        "submit",
+        None,
+        Some(&serde_json::json!({"action":"shell"}))
+    )
+    .is_err());
+    assert!(remote_args("demo", "cancel", Some("../escape"), None).is_err());
+    assert!(remote_args("demo", "status", None, None).is_err());
+    assert!(remote_args("demo", "list", None, None).is_ok());
+    assert_eq!(
+        remote_args("demo", "fetch", Some("job-123"), None)
+            .unwrap()
+            .last()
+            .unwrap(),
+        "job-123"
+    );
+}

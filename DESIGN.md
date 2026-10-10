@@ -122,3 +122,9 @@
 - Decision (2026-10-10): 服务器表单常显主机、登录用户名、SSH 端口和认证方式；沿用 SSH 配置保留旧配置兼容性，密钥模式显示本机私钥选择，密码模式显示登录密码。
 - Credentials: 密码仅存应用内存，绑定主机、登录用户名和端口，关闭后重新输入；不进入配置、作业记录、命令行和日志。任务查询、取消及取回按作业记录的服务器加载认证。
 - Host trust: 不自动接受未知或变更的服务器指纹；第一次连接在终端核对。有口令的私钥由系统密钥代理解锁。
+
+## Remote development workspaces (P3)
+- Each local workspace has a collapsed “Build and verify on a server” panel. It reuses configured server authentication and uploads an immutable source snapshot into an isolated server directory.
+- Main action: full verification (build candidate/baseline, tests, regression and parity); build-only and package tests remain explicit alternatives. The case field is an absolute server path; no automatic data upload.
+- Jobs survive application restart. Show host, source commit/hash, state, stale evidence, phase/logs, and report location. Refresh live tasks while the panel is open; keep failed jobs and connection errors visible. Cancel and fetch act on the saved job connection.
+- Remote reports stay separate from local acceptance lights and kernel adoption. Fetching a failed report means download completed, never verification passed.

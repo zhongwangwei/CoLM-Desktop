@@ -11,6 +11,7 @@ import { state } from './state.js';
 import { $ } from './ui.js';
 import { STEPS, go } from './shell.js';
 import { scanPreparedSites, pickSite } from './sites.js';
+import { invoke } from './ipc.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const text = el => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
@@ -341,6 +342,15 @@ async function commit(target) {
 
 async function perform(action, args) {
   switch (action) {
+    case 'workspace_remote_servers': {
+      const config = await invoke('remote_config');
+      return { servers: (config?.servers ?? []).map(({ host, root, scheduler, cpus, memory_gb }) => ({ host, root, scheduler, cpus, memory_gb })) };
+    }
+    case 'workspace_remote':
+      return invoke('workspace_remote', {
+        name: args.name, operation: args.operation, host: args.host ?? null,
+        job: args.job ?? null, request: args.request ?? null,
+      });
     case 'state':
       return uiState();
     case 'go': {

@@ -15,7 +15,7 @@ for (const [name, body] of Object.entries({
   'state.js': 'export const state = { kernels: [] };',
 })) await writeFile(join(temp, 'app', name), body);
 await writeFile(join(temp, 'app', 'workspace.js'),
-  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace };\n');
+  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace, remotePanel, showDetail };\n');
 const workspace = await import(pathToFileURL(join(temp, 'app', 'workspace.js')).href);
 const kernel = await import(pathToFileURL(join(temp, 'app', 'kernel.js')).href);
 const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
@@ -126,3 +126,97 @@ assert.deepEqual(calls.slice(2).map(call => call[0]).sort(), ['workspace_kernels
 assert.match(elements['workspace-create-status'].textContent, /已创建工作区 experiment.*\/workspaces\/experiment/);
 assert.equal(elements['workspace-create'].disabled, false);
 console.log('workspace: lights, adoption, kernel matching and wiring ok');
+
+// Remote workflows retain failures/stale evidence and never adopt a remote binary.
+assert.deepEqual(workspace.remoteRequest('verify', ' default ', '/data/case one', 'colm-core'), {
+  action: 'verify', preset: 'default', kind: 'refactor', package: 'colm-core', case: '/data/case one',
+});
+assert.throws(() => workspace.remoteRequest('verify', 'default', 'relative', 'colm-core'));
+assert.throws(() => workspace.remoteRequest('test', 'default', '', '--bad package'));
+assert.match(workspace.remoteJobText({ id: 'j1', host: 'server', state: 'failed', commit: 'abcdef012', stale: true }), /失败.*abcdef01.*需要重测/);
+class Element {
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.value = ''; this.disabled = false; this.isConnected = false; }
+  append(...items) { this.children.push(...items); if (this.tag === 'select' && !this.value) this.value = items[0]?.value ?? ''; }
+  replaceChildren(...items) { this.children = items; }
+  setAttribute() {}
+  addEventListener(event, fn) { this.listeners[event] = fn; }
+  reportValidity() { return true; }
+}
+globalThis.document.createElement = tag => new Element(tag);
+const remoteCalls = [];
+let remoteJobs = [{ id: 'job-1', host: 'srv', state: 'running', commit: '123456789', source_sha256: 'hash', stale: true }];
+globalThis.workspaceInvoke = async (command, request) => {
+  remoteCalls.push([command, request]);
+  if (command === 'remote_config') return { servers: [{ host: 'srv' }] };
+  if (request.operation === 'list') return { jobs: remoteJobs };
+  if (request.operation === 'status') return { job: { ...remoteJobs[0], state: 'failed' }, status: { state: 'finished', exit_code: 1, phase: 'test', log_tail: 'test failed' } };
+  if (request.operation === 'fetch') return { job: { ...remoteJobs[0], state: 'failed', report_dir: '/reports/job-1' }, status: { state: 'finished', exit_code: 1 } };
+  if (request.operation === 'submit') throw new Error('SSH password required');
+};
+const panel = workspace.remotePanel('experiment');
+panel.open = true;
+await panel.listeners.toggle();
+const [summary, form, message, refreshButton, jobs] = panel.children;
+assert.match(summary.textContent, /服务器/);
+assert.match(jobs.children[0].children[0].textContent, /失败.*需要重测/);
+assert.equal(jobs.children[0].children.find(c => c.tag === 'pre').textContent, 'test failed');
+assert.equal(remoteCalls[1][1].operation, 'list', 'reopening retrieves persisted jobs');
+await jobs.children[0].children.find(c => c.tag === 'button').onclick();
+assert.match(message.textContent, /已取回.*失败/, 'fetching failed evidence is never marked passing');
+form.children[2].children[0].value = '/data/case';
+await form.onsubmit({ preventDefault() {} });
+assert.equal(message.textContent, 'SSH password required');
+assert.equal(form.children.at(-1).disabled, false, 'retry enabled after failed submit');
+assert.ok(remoteCalls.every(([command]) => command !== 'workspace_adopt'));
+console.log('workspace: remote lifecycle, stale evidence, failure recovery and separate adoption ok');
+
+let pendingSubmission;
+globalThis.workspaceInvoke = async (command, request) => {
+  remoteCalls.push([command, request]);
+  if (request.operation === 'submit') return new Promise(resolve => { pendingSubmission = resolve; });
+  if (request.operation === 'list') return { jobs: [] };
+};
+const submitsBefore = remoteCalls.filter(([, args]) => args?.operation === 'submit').length;
+const submitting = form.onsubmit({ preventDefault() {} });
+await form.onsubmit({ preventDefault() {} });
+assert.equal(remoteCalls.filter(([, args]) => args?.operation === 'submit').length, submitsBefore + 1, 'no duplicate submissions');
+pendingSubmission({ job: { id: 'uncertain', host: 'srv', state: 'unknown' }, status: { state: 'unknown' }, error: 'connection interrupted after launch' });
+await submitting;
+assert.equal(message.textContent, 'connection interrupted after launch', 'ambiguous submission retains actionable failure');
+assert.equal(form.children.at(-1).disabled, false);
+
+const card = new Element('div');
+card.append(panel);
+card.querySelector = selector => {
+  assert.equal(selector, '.ws-local-detail', 'local history must not remove remote controls');
+  return undefined;
+};
+globalThis.workspaceInvoke = async () => ({ workspace: { base_commit: 'base' }, commits: [], changed_files: [] });
+await workspace.showDetail('experiment', card);
+assert.equal(card.children[0], panel, 'remote controls survive local detail opening');
+assert.match(card.children[1].className, /ws-local-detail/);
+
+const evidence = { commit: 'candidate', base_commit: 'baseline', stale: true, execution_succeeded: false,
+  gates: { candidate: { engine: { ok: true, commit: 'candidate' }, kernels: { default: { ok: true, commit: 'candidate' } },
+    tests: { cargo: { ok: false, commit: 'candidate' } } } },
+  outcomes: [{ verdict: 'closure degraded', first_difference: { variable: 'f_lfev', record: 4 }, compare: { differs: 1, files: 2 } }],
+};
+assert.match(workspace.remoteEvidenceText(evidence), /编译 需要重测/);
+assert.match(workspace.remoteEvidenceText(evidence), /首个差异.*f_lfev/);
+assert.match(workspace.remoteEvidenceText(evidence), /closure degraded/);
+assert.match(workspace.remoteEvidenceText(evidence), /对比统计.*differs=1/);
+const freshPanel = workspace.remotePanel('experiment');
+globalThis.workspaceInvoke = async (command, request) => {
+  if (command === 'remote_config') return { servers: [{ host: 'srv' }] };
+  if (request.operation === 'fetch') return { job: { ...remoteJobs[0], state: 'failed' }, status: { state: 'finished', exit_code: 1 }, evidence };
+  if (request.operation === 'status') return { job: { ...remoteJobs[0], state: 'failed' }, status: { state: 'finished', exit_code: 1 } };
+  return { jobs: remoteJobs };
+};
+freshPanel.open = true;
+await freshPanel.listeners.toggle();
+await freshPanel.children[4].children[0].children.find(c => c.tag === 'button').onclick();
+assert.equal(freshPanel.children[5].hidden, false);
+assert.match(freshPanel.children[5].textContent, /远程验证证据.*job-1/);
+assert.match(freshPanel.children[5].textContent, /closure degraded/);
+await freshPanel.children[3].onclick();
+assert.match(freshPanel.children[5].textContent, /closure degraded/, 'refresh keeps fetched evidence separate from job rows');

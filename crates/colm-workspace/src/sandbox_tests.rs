@@ -62,3 +62,51 @@ fn a_sandboxed_command_cannot_write_outside_the_workspace() {
     assert!(inside.join("a").is_file());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn outer_boundary_is_scoped_and_rejects_broader_policies() {
+    let root = std::env::temp_dir().join(format!("colm-outer-scope-{}", std::process::id()));
+    let inside = root.join("workspace");
+    std::fs::create_dir_all(&inside).unwrap();
+    let program = Path::new("/usr/bin/example");
+    with_outer_sandbox(&root, || {
+        let policy = Policy {
+            writable: vec![inside.clone()],
+            allow_network: false,
+        };
+        let (command, info) = wrap(program, &["fixed-argument".into()], &policy);
+        assert_eq!(command.get_program(), program);
+        assert!(info.network_blocked);
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("fixed-argument")]
+        );
+        for rejected in [
+            Policy {
+                writable: vec![std::env::temp_dir()],
+                allow_network: false,
+            },
+            Policy {
+                writable: vec![inside.clone()],
+                allow_network: true,
+            },
+        ] {
+            let (command, info) = wrap(program, &[], &rejected);
+            assert_eq!(command.get_program(), Path::new("/bin/false"));
+            assert!(info.note.contains("rejected"));
+        }
+        assert!(with_outer_sandbox(&root, || Ok(())).is_err());
+        assert!(
+            std::thread::spawn(|| OUTER_BOUNDARY.with(|slot| slot.borrow().is_none()))
+                .join()
+                .unwrap()
+        );
+        Ok(())
+    })
+    .unwrap();
+    assert!(OUTER_BOUNDARY.with(|slot| slot.borrow().is_none()));
+    let failure: anyhow::Result<()> = with_outer_sandbox(&root, || anyhow::bail!("failure"));
+    assert!(failure.is_err());
+    assert!(OUTER_BOUNDARY.with(|slot| slot.borrow().is_none()));
+    std::fs::remove_dir_all(root).unwrap();
+}

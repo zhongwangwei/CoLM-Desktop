@@ -135,6 +135,98 @@ pub async fn workspace_adopt(name: String, preset: String) -> Result<Value, Stri
     .await
 }
 
+/// Remote results stay separate from the local workspace acceptance gates.
+fn remote_args(
+    name: &str,
+    operation: &str,
+    job: Option<&str>,
+    request: Option<&Value>,
+) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    if !["submit", "list", "status", "cancel", "fetch"].contains(&operation) {
+        return Err("不支持的远程工作区操作".into());
+    }
+    let mut command = args(
+        "remote-workspace",
+        &["--operation", operation, "--name", name],
+    );
+    if operation == "submit" {
+        let request = request.ok_or("缺少远程工作区任务")?;
+        if !request.is_object()
+            || !matches!(
+                request["action"].as_str(),
+                Some(
+                    "build-engine"
+                        | "build-kernel"
+                        | "test"
+                        | "run"
+                        | "parity"
+                        | "regress"
+                        | "verify"
+                )
+            )
+        {
+            return Err("不支持的远程工作区任务".into());
+        }
+        command.extend(["--request".into(), request.to_string()]);
+    } else if operation != "list" {
+        let job = job.ok_or("缺少远程作业编号")?;
+        if job.is_empty()
+            || !job
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err("远程作业编号不合法".into());
+        }
+        command.extend(["--job".into(), job.into()]);
+    }
+    Ok(command)
+}
+
+#[tauri::command]
+pub async fn workspace_remote(
+    app: tauri::AppHandle,
+    name: String,
+    operation: String,
+    host: Option<String>,
+    job: Option<String>,
+    request: Option<Value>,
+) -> Result<Value, String> {
+    let mut command = remote_args(&name, &operation, job.as_deref(), request.as_ref())?;
+    if operation == "list" {
+        return cli_json(command, None).await;
+    }
+    let resources = crate::remote::resource_dir(&app);
+    let config = crate::remote::remote_config(app);
+    let server = if operation == "submit" {
+        let host = host.as_deref().ok_or("请选择服务器")?;
+        let server = config
+            .servers
+            .iter()
+            .find(|s| s.host == host)
+            .cloned()
+            .ok_or("没有配置这台服务器")?;
+        command.extend([
+            "--host".into(),
+            server.host.clone(),
+            "--remote-root".into(),
+            server.root.clone(),
+        ]);
+        command.extend(crate::remote::scheduler_args(&server));
+        server
+    } else {
+        let records = cli_json(remote_args(&name, "list", None, None)?, None).await?;
+        let mut record = records["jobs"]
+            .as_array()
+            .and_then(|jobs| jobs.iter().find(|r| r["id"].as_str() == job.as_deref()))
+            .cloned()
+            .ok_or("找不到远程作业记录")?;
+        record["ssh_auth"] = record["connection"].clone();
+        crate::remote::server_from_record(&config, &record)?
+    };
+    crate::remote::ssh_cli_json(command, resources, Some(&server)).await
+}
+
 #[cfg(test)]
 #[path = "workspace_tests.rs"]
 mod workspace_tests;
