@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 """Local-only fake CLI: asserts the wire contract and never invokes a provider."""
+# Diagnostics first: stderr is discarded by the caller, so errors and a stack dump of a
+# start-up that hangs past 10 s go to stderr.log next to the script (the test prints it).
+import faulthandler
+import pathlib
+import sys
+_log = open(pathlib.Path(__file__).with_name('stderr.log'), 'a')
+sys.stderr = _log
+faulthandler.enable(_log)
+faulthandler.dump_traceback_later(10, exit=False, file=_log)
 import base64
 import http.server
 import json
@@ -105,4 +114,5 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
 print(json.dumps({'url': 'http://127.0.0.1:' + str(server.server_port)}), flush=True)
+faulthandler.cancel_dump_traceback_later()
 server.serve_forever()

@@ -82,7 +82,10 @@ impl Fixture {
             model: Some("mock/model".into()),
             effort: Some("high".into()),
         });
-        session.connect_with(&self.exe).unwrap();
+        if let Err(error) = session.connect_with(&self.exe) {
+            let log = std::fs::read_to_string(self.root.join("stderr.log")).unwrap_or_default();
+            panic!("{error:#}\n--- fake OpenCode stderr ---\n{log}");
+        }
         session
     }
     fn requests(&self) -> Vec<Value> {
