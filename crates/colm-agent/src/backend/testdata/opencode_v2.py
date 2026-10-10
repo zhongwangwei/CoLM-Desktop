@@ -15,6 +15,7 @@ import json
 import os
 import pathlib
 import sys
+import socketserver
 import sqlite3
 import threading
 import time
@@ -112,7 +113,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send({'interrupted': True})
         else: self.send({'error': 'unexpected path'}, 404)
 
-server = http.server.ThreadingHTTPServer(('127.0.0.1', port), Handler)
+class Server(http.server.ThreadingHTTPServer):
+    # HTTPServer.server_bind calls socket.getfqdn(), a reverse DNS lookup of 127.0.0.1 that
+    # stalls past the caller's 15 s start-up limit on the macOS CI runners. Bind without it.
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+server = Server(('127.0.0.1', port), Handler)
 print(json.dumps({'url': 'http://127.0.0.1:' + str(server.server_port)}), flush=True)
 faulthandler.cancel_dump_traceback_later()
 server.serve_forever()
