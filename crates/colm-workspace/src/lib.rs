@@ -19,5 +19,6 @@ pub mod parity;
 pub mod patch;
 pub mod sandbox;
 pub mod testrun;
+pub mod version;
 
 pub use layout::{Info, Workspace};

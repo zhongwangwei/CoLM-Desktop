@@ -78,6 +78,48 @@ pub async fn workspace_status(name: String) -> Result<Value, String> {
     cli_json(args("ws-status", &["--name", &name]), None).await
 }
 
+fn version_check_args(
+    name: &str,
+    kernel: &str,
+    engine: Option<&str>,
+) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    if kernel.contains('\0') || !PathBuf::from(kernel).is_absolute() {
+        return Err("内核目录须为绝对路径".into());
+    }
+    let engine = engine.unwrap_or("rust");
+    if !matches!(engine, "rust" | "fortran") {
+        return Err(format!("未知模拟引擎 {engine:?}；只能选择 rust 或 fortran"));
+    }
+    Ok(args(
+        "version-check",
+        &["--name", name, "--kernel", kernel, "--engine", engine],
+    ))
+}
+
+/// 运行方式里的就绪清单：修改版 `name` 能不能用这个引擎、这个（按算例配置选出的）正式内核跑。
+#[tauri::command]
+pub async fn version_check(
+    name: String,
+    kernel: String,
+    engine: Option<String>,
+) -> Result<Value, String> {
+    cli_json(version_check_args(&name, &kernel, engine.as_deref())?, None).await
+}
+
+fn produced_by_args(case: &str) -> Result<Vec<String>, String> {
+    if case.contains('\0') || !PathBuf::from(case).is_absolute() {
+        return Err("算例目录须为绝对路径".into());
+    }
+    Ok(args("produced-by", &[case]))
+}
+
+/// 算例最近一次运行的出处（`out/<名>/produced-by.json`）；没跑过返回 null。
+#[tauri::command]
+pub async fn read_produced_by(case: String) -> Result<Value, String> {
+    cli_json(produced_by_args(&case)?, None).await
+}
+
 /// 可登记的实验内核（编译与测试在当前提交上通过的）。
 #[tauri::command]
 pub async fn workspace_kernels() -> Result<Value, String> {

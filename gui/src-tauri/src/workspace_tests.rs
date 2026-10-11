@@ -108,3 +108,34 @@ fn remote_knowledge_does_not_require_a_local_workspace_or_job() {
     assert!(remote_args("../escape", "knowledge", None, Some(&request)).is_err());
     assert!(remote_args("", "submit", None, Some(&request)).is_err());
 }
+
+#[test]
+fn version_checks_and_provenance_reads_validate_before_the_command_line() {
+    let kernel = std::env::temp_dir().join("kernels").join("default");
+    let kernel = kernel.to_str().unwrap();
+    let command = version_check_args("snow", kernel, None).unwrap();
+    assert_eq!(
+        command,
+        [
+            "version-check",
+            "--name",
+            "snow",
+            "--kernel",
+            kernel,
+            "--engine",
+            "rust"
+        ]
+    );
+    assert_eq!(
+        version_check_args("snow", kernel, Some("fortran")).unwrap()[6],
+        "fortran"
+    );
+    assert!(version_check_args("../x", kernel, None).is_err());
+    assert!(version_check_args("snow", "kernels/default", None).is_err());
+    assert!(version_check_args("snow", kernel, Some("auto")).is_err());
+
+    let case = std::env::temp_dir().join("case");
+    let case = case.to_str().unwrap();
+    assert_eq!(produced_by_args(case).unwrap(), ["produced-by", case]);
+    assert!(produced_by_args("relative/case").is_err());
+}

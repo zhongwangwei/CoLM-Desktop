@@ -935,6 +935,8 @@ fn job_body(
     if plan.ranks > 1 {
         run.push_str(&format!(" --ranks {}", plan.ranks));
     }
+    // 取回本机的 `produced-by.json` 要说清结果是在服务器上算的（旧引擎不认这一项，照样忽略）。
+    run.push_str(" --location server");
     // MPI 进程怎么起：Slurm 里用 srun（跨节点），其余用 PATH 里的 mpiexec。`colm-cli` 认 COLM_MPIEXEC。
     let srun = match plan.launcher.as_str() {
         "srun" => true,

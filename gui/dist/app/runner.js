@@ -14,6 +14,7 @@ import { modelEngine } from './engine.js';
 import { fortranBlockedCases } from './hybrid.js';
 import { language, translateZh } from './i18n.js';
 import { runTarget, remoteRun } from './remote.js';
+import { OFFICIAL, modelVersion, runModeBlocker } from './run-mode.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 // Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），在进程内用多线程并行，所以 rank 数只对 Fortran 内核生效。
@@ -371,10 +372,16 @@ async function startRun(stage) {
   if (stage !== 'mksrfdata' && stage !== 'mkinidata' && (await fortranBlockedCases(dirs)).length) {
     throw new Error('有算例装了 AI 模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型');
   }
+  // 运行方式（第 3 步）没准备好就不开跑：修改版还没编好、或选了服务器（修改版暂时只能在本机跑）。
+  const version = modelVersion();
+  const blocked = runModeBlocker({ version, target: runTarget(), readiness: state.versionReadiness });
+  if (blocked) throw new Error(blocked);
   // 运行位置选了服务器：交给 remote.js 提交，之后由它查状态、取回结果。
   if (runTarget() !== 'local') {
     return await remoteRun(stage, dirs, stage !== null || $('force').checked);
   }
+  // 修改版按正式内核的预设去取它自己的内核（`colm-cli run --model-version`），启用过的实验内核不混进来。
+  const kernel = version === OFFICIAL ? $('kernel').value : (kernelForSubgrid(undefined, undefined, { official: true })?.dir ?? $('kernel').value);
   const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;
@@ -396,12 +403,12 @@ async function startRun(stage) {
     }, 90000);
     const completion = dirs.length === 1
       ? invoke('run_case', {
-        runId, case: dirs[0], kernel: $('kernel').value, force, stage, mpiRanks,
-        engine: modelEngine(), threads,
+        runId, case: dirs[0], kernel, force, stage, mpiRanks,
+        engine: modelEngine(), threads, modelVersion: version,
       })
       : invoke('run_batch', {
-        runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
-        force, stage, mpiRanks, engine: modelEngine(), threads,
+        runId, cases: dirs, kernel, maxConcurrent: requestedWorkers(),
+        force, stage, mpiRanks, engine: modelEngine(), threads, modelVersion: version,
       });
     // IPC lasts for the whole simulation; retain its failure handling after acknowledging launch.
     Promise.resolve(completion).then(result => {

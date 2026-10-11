@@ -240,6 +240,7 @@ fn the_job_body_launches_mpi_through_srun_only_where_that_fits() {
     // Rust 引擎的作业体不变。
     let rust = body(&[], Scheduler::Slurm);
     assert!(rust.contains("--engine rust --preprocessors rust") && !rust.contains("--ranks"));
+    assert!(rust.contains(" --location server"), "{rust}");
     // 编引擎的并行度至少 8，与运行线程数无关。
     assert!(rust.contains("-j 8"), "{rust}");
 }

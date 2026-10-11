@@ -2636,6 +2636,45 @@ const ZH_EN = [
   ['研究 · AI 混合建模', 'Research · AI hybrid modeling'],
   ['研究 · 经典方法', 'Research · Classic methods'],
   ['去 AI 混合建模设置 →', 'Set up in AI hybrid modeling →'],
+  // 运行方式、上下文条与结果出处（run-mode.js、run-mode-view.js、index.html 的运行方式页）
+  ["官方版", "Official version"],
+  ["修改版", "Modified version"],
+  ["改了 Rust 引擎和 Fortran 内核", "Changes the Rust engine and the Fortran kernel"],
+  ["改了 Rust 引擎", "Changes the Rust engine"],
+  ["改了 Fortran 内核", "Changes the Fortran kernel"],
+  ["没改会影响计算结果的代码", "No change to code that affects results"],
+  ["这次运行失败", "This run failed"],
+  ["运行结束时间", "Run finished at"],
+  ["还没有匹配这个算例配置的正式内核", "No official kernel matches this case configuration yet"],
+  ["正在检查这个版本能不能运行…", "Checking whether this version can run…"],
+  ["去改代码", "Go to Change code"],
+  ["改运行方式", "Change run mode"],
+  ["在“运行方式”里修改", "Change it in “Run mode”"],
+  ["还不能运行", "Not ready to run"],
+  ["这批结果没有出处记录（由旧版应用运行）。", "These results have no provenance record (run by an older version of the app)."],
+  ["出处", "Produced by"],
+  ["；要对比请按当前运行方式重跑。", "; rerun with the current run mode to compare."],
+  ["读不到修改版列表", "Cannot read the list of modified versions"],
+  ["上次用的修改版已不存在，改回官方版", "The modified version used last time no longer exists; switched back to the official version"],
+  ["检查失败", "Check failed"],
+  ["当前提交", "current commit"],
+  ["Rust 引擎", "Rust engine"],
+  ["运行方式与运行", "Run mode and run"],
+  ["模型版本、位置与引擎", "Model version, location and engine"],
+  ["该用哪一版", "Which version to use"],
+  ["我想比较修改版和官方版的结果，运行方式该怎么选？请结合当前的版本检查结果说明。", "I want to compare the modified and the official version. How should I set the run mode? Explain with the current version check."],
+  ["为什么不能运行", "Why can it not run"],
+  ["当前选的模型版本为什么还不能运行？按检查清单逐条说明，并告诉我在哪里补齐。", "Why can the selected model version not run yet? Go through the checklist item by item and tell me where to fix each one."],
+  ["每次运行 = 算例 × 模型版本 × 运行方式（在哪里跑、用哪个引擎）。这里选好之后，运行页、结果页和 AI 助手都按它来。", "Every run = case × model version × run mode (where and with which engine). Once chosen here, the run page, the results and the AI assistant all follow it."],
+  ["模型版本", "Model version"],
+  ["官方版是应用自带的 CoLM。修改版是你在“改代码”（开发工作区）里改过的一份，跑的是它自己编出的引擎与内核；官方版不受影响。", "The official version is the CoLM that ships with the app. A modified version is a copy you changed in “Change code” (development workspaces); it runs its own engine and kernel, and the official version is not affected."],
+  ["用哪一版", "Which version"],
+  ["新建的修改版会自动出现在这里，不用另外登记。", "New modified versions appear here automatically; no registration needed."],
+  ["改代码…", "Change code…"],
+  ["当前运行方式", "Current run mode"],
+  ["在哪里跑、用哪个引擎", "Where and with which engine"],
+  ["并行设置跟着引擎与算例类型变化，只显示用得上的那几项。", "Parallel settings follow the engine and the case type; only the ones that apply are shown."],
+  ["预热在第 1 步“基本设定”，版本、位置与引擎在上一步“运行方式”。", "Spin-up is in step 1 “Basic setup”; version, location and engine are in the previous step “Run mode”."],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2679,6 +2718,13 @@ export function translateZh(text, target = 'en') {
     .replace(/^已把拟合的模型装到 (\d+) 个算例$/, 'Installed the fitted model into $1 cases')
     .replace(/^思考：默认（(\S+)）$/, 'Think: default ($1)')
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
+    .replace(/^修改版：(.+)$/, 'Modified version: $1')
+    .replace(/^修改版 (\S+) 目前只能在本机运行：请把运行位置换成本机，或把模型版本换回官方版$/, 'Modified version $1 can only run on this computer for now: set the location to this computer, or switch back to the official version')
+    .replace(/^还在检查修改版 (\S+) 能不能运行，请稍候再试$/, 'Still checking whether modified version $1 can run; try again in a moment')
+    .replace(/^修改版 (\S+) 还不能运行：(.*)$/, 'Modified version $1 cannot run yet: $2')
+    .replace(/^(.+) 等 (\S+) 个$/, '$1 and others ($2 in total)')
+    .replace(/^提交 (\S+)，基于 (\S+)$/, 'Commit $1, based on $2')
+    .replace(/^这批结果是用(.+)跑的，当前选的是(.+)$/, 'These results were produced with $1; the current selection is $2')
     .replace(/^默认（(.+)）$/, 'Default ($1)')
     .replace(/^空间算例 (.+) 已生成；当前已切换工作流，未加入本次算例列表$/, 'Spatial case $1 was created; the workflow has changed, so it was not added to this session')
     // 运行进度（`run-format.js` 的 progressText）：先整句匹配，免得被下面的逐段规则拆坏。

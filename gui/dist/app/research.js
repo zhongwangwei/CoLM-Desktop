@@ -71,7 +71,7 @@ export function readiness(study, ctx) {
         : { level: 'ok', text: '土壤水分胁迫 β 插槽可用' });
     }
     items.push(ctx.engine === 'fortran'
-      ? { level: 'warn', text: '当前是 Fortran 引擎；装了网络的算例要换成 Rust 引擎运行', step: 'run' }
+      ? { level: 'warn', text: '当前是 Fortran 引擎；装了网络的算例要换成 Rust 引擎运行', step: 'run-mode' }
       : { level: 'ok', text: '当前是 Rust 引擎，能运行装了网络的算例' });
   }
   return items;

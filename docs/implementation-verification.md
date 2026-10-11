@@ -32474,3 +32474,19 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
   - 第五轮：Windows 上 `concurrent_gate_updates_do_not_lose_each_other` 查出工作区锁的真问题。12 个线程抢 `workspace.lock`，持有者 `remove_file` 后文件在 Windows 上先处于“等待删除”，此时别的线程 `create_new` 得到的是 `Access is denied (os error 5)` 而不是“已存在”，原来直接报错退出。Windows 上把 `PermissionDenied` 也当作有人占着锁，在同样的 15 秒期限内重试（真没有写权限时 15 秒后报错，不会卡住）。
   - 第六轮：Windows 上 `colm-cli` 的 3 个。`remote_cmd_tests` 的映射用 Unix 本机路径，限定 Unix；`hybrid_studies_lists…` 拿 `canonicalize()` 过的根（Windows 上是 `\\?\C:\…`）去比 Study 记录的普通路径，两边都规范化再比。
   - 第七轮：Windows 上测试全过，clippy（`-D warnings`）报 `colm-remote` 沙箱的 `set/unset/read/status/job_dir` 与 `std::path::Path`、`colm-workspace` 两版一致测试的 `history` 只被 Unix 专属测试用到，一并按 `cfg(unix)` 编译。
+
+## 第 660 轮：界面重组第 1 阶段——“运行方式”一步、上下文条、结果出处
+
+**问题**（用户）：运行位置、开发工作区（藏在 AI 助手里）、服务器和研究互不相连，“开发工作区”难懂；改了代码之后，应当既能在本机跑也能在服务器上跑。查下来最要紧的一条：“启用实验内核”只换 Fortran 内核，**Rust 引擎永远是应用自带的那份**——在工作区里改了 Rust 物理、用默认的 Rust 引擎跑，结果和没改一样，界面上看不出来。商定的重组（示意稿 8 张画板）：每次运行 = 算例 × 模型版本 × 运行方式（在哪里跑、用哪个引擎）；分 5 个阶段做，本轮是第 1 阶段，只做本机。
+
+**改动**：
+- `colm_workspace::version::check`（新）：一个工作区作为“修改版”能不能用选定的引擎跑，给出就绪清单——源码干净；Rust 引擎与前处理在当前提交上编过（编排、前处理和引擎都用版本自己的程序，所以总是需要）；改动碰了哪边（`vendor/CoLM202X/`、`build_kernel.sh` 算 Fortran 内核，`RESULT_PATHS` 里其余的算 Rust 引擎）；没改 Fortran 就用传进来的正式内核，改了就要求本版本里同预设的内核在当前提交上编好；引擎与改动不对口（只改 Rust 却选 Fortran 内核，或反过来）时不阻塞、给提示。
+- `colm-cli run --model-version NAME [--workspace-root DIR]`：先检查，不就绪就列出阻塞项退出；就绪就把同一条 `run`（参数原样，只换内核、去掉外层自己的几项）交给**那个版本自己编出的 `colm-cli`**——它旁边的 `colm-rs` 与两个 Rust 前处理就是改过的那份，和 `ws-run` 是同一条路。`colm-cli version-check`（就绪清单 JSON）、`colm-cli produced-by <算例>`（新）。
+- `out/<算例名>/produced-by.json`：每次 `run`（成败都）写下版本（官方版带 `colm-cli` 版本；修改版带工作区名、提交、基线、改动范围）、引擎、前处理、MPI 进程数、阶段、内核身份、位置、起止时间、失败原因。修改版由外层写，里层用 `COLM_PROVENANCE_BY_PARENT` 跳过；服务器作业的命令行加 `--location server`（旧引擎不认这一项，照样忽略）。写不了只警告，不改变运行成败。
+- Tauri：`run_case`/`run_batch` 多一个 `modelVersion`（官方版不加参数，与旧调用完全相同；名字按工作区名校验）；新命令 `version_check`、`read_produced_by`。
+- 界面：工作流第 3 步拆成“运行方式”与“运行算例”两小步。“运行方式”里是模型版本（官方版 + 所有工作区，新建的自动出现，不用登记）、版本卡（基于哪里、改了几次、当前提交、改了哪边）、就绪清单（阻塞项旁有“去改代码”）、运行位置、引擎与并行设置（从运行页挪过来）。每页顶部一条上下文条：算例 · 版本 · 位置 · 引擎，点一下回到对应设置，不能跑时标“还不能运行”。运行页上有一行“运行方式：……”和不能运行的原因；开跑前检查不过就不跑；修改版选了服务器时拦下（远程跑修改版是第 3 阶段）。选了修改版时传正式内核（`kernelForSubgrid(…, { official: true })`），启用过的实验内核不混进来。结果总览上方显示出处标签，并在“结果所用版本/引擎”与当前所选不同时提示。助手的窗口上下文每页带上运行方式，运行方式与运行页带上就绪清单，结果页带上出处；“运行方式”页有两条提问建议。研究页“Fortran 引擎跑不了装了网络的算例”的提示改为跳到“运行方式”。
+
+**验证**：
+- 端到端（本机，CN-Cng 2008-01-01 至 02-05，Rust 引擎与前处理，`kernels/default`）：在临时工作区 `snowtest` 里把 `ground_fluxes.rs` 的冯·卡门常数 0.4 改成 0.41 并提交，`ws-build-engine` 编好（2 分钟）。同一算例的三份副本：官方版 `colm-cli run`、`colm-cli run --model-version snowtest`、`ws-run --name snowtest`，三段全部成功。`ws-compare`：**`--model-version` 对 `ws-run` 逐位一致**；对官方版不一致，第一处差异在 `CN-Cng_hist_2008-01.nc` 第 0 步的 `f_emis`。两份 `colm-rs` 的 sha256 不同（`ba36c6f8…` 对 `1cf50b80…`）。两份 `produced-by.json` 分别记为官方版（`colm_cli` 0.3.0-beta.3）与修改版 `snowtest`（提交 `e1646ce8`、基线 `ffe9ab26`、`touches.engine=true`），内核都是 `default@f59ffdce#production`。在工作区里留一处未提交的改动再跑：报“源码里有还没提交的改动”并拒跑。
+- 踩到的坑：第一次只改了新雪密度的温度阈值，这段时间里没有触发，修改版与官方版逐位一致——看不出跑的是哪份程序。换成每步都起作用的常数才分得开；以后验证“确实跑了改过的程序”要选必然生效的改动。另外测试目录放在很深的临时目录下时，重启文件路径超过 CoLM 的 256 字节上限，`run` 正确拒跑，`produced-by.json` 记下了失败原因。
+- 新测试：`colm-workspace` `version_tests`（改动归类；只改 Rust 时用正式内核、引擎没编或有新提交或源码不干净时阻塞、Fortran 引擎给提示；改 Fortran 时要求自己的内核）；`colm-cli` `provenance_tests`（官方版记录、失败原因、读不出算例名不写、Unix 下转交给版本自己的 `colm-cli` 的参数与环境变量）；`remote_cmd_tests` 作业体带 `--location server`；GUI 后端 `sidecar_tests`（`--model-version` 只对修改版加、名字校验）、`workspace_tests`（两条新命令的参数校验）；`gui/tests/run-mode.mjs`（阻塞条件、上下文条、助手快照、出处标签与不一致提示）；`assistant.mjs`（运行方式与出处进入窗口上下文）；`runview.mjs` 改为要求版本、位置、引擎与并行设置只在“运行方式”里出现一次；`research.mjs` 跳转目标；新文字都有英文（`i18n.mjs`）。在浏览器里看过“运行方式”页、修改版的版本卡与就绪清单、上下文条与运行页那一行。

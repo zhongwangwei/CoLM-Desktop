@@ -702,9 +702,11 @@ fn run_args(
     stage: Option<&str>,
     mpi_ranks: usize,
     engine: Option<&str>,
+    model_version: Option<&str>,
 ) -> Result<Vec<String>, String> {
     validate_run_stage(stage)?;
     validate_engine(engine)?;
+    validate_model_version(model_version)?;
     if mpi_ranks == 0 {
         return Err("mpiRanks must be at least 1".into());
     }
@@ -728,7 +730,19 @@ fn run_args(
     if let Some(engine) = engine {
         args.extend(["--engine".to_string(), engine.to_string()]);
     }
+    // 官方版不写：与没有这一项的旧调用完全相同。
+    if let Some(version) = model_version.filter(|v| *v != "official") {
+        args.extend(["--model-version".to_string(), version.to_string()]);
+    }
     Ok(args)
+}
+
+/// 模型版本：`official` 或一个工作区名（与工作区名同一套校验，拼进命令行前挡住）。
+fn validate_model_version(version: Option<&str>) -> Result<(), String> {
+    match version {
+        None | Some("official") => Ok(()),
+        Some(name) => crate::workspace::valid_name(name),
+    }
 }
 
 /// `colm` 第三段的引擎。拼错的值在这里拦下，而不是让 sidecar 起来之后才报。
@@ -753,12 +767,23 @@ pub async fn run_case(
     mpi_ranks: usize,
     engine: Option<String>,
     threads: Option<usize>,
+    model_version: Option<String>,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         run_case_blocking(
-            app, processes, run_id, case, kernel, force, stage, mpi_ranks, engine, threads,
+            app,
+            processes,
+            run_id,
+            case,
+            kernel,
+            force,
+            stage,
+            mpi_ranks,
+            engine,
+            threads,
+            model_version,
         )
     })
     .await
@@ -972,6 +997,7 @@ pub async fn run_batch(
     mpi_ranks: usize,
     engine: Option<String>,
     threads: Option<usize>,
+    model_version: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -988,6 +1014,7 @@ pub async fn run_batch(
             mpi_ranks,
             engine,
             threads,
+            model_version,
         )
     })
     .await
@@ -1008,9 +1035,11 @@ fn run_batch_blocking(
     mpi_ranks: usize,
     engine: Option<String>,
     threads: Option<usize>,
+    model_version: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
     validate_engine(engine.as_deref())?;
+    validate_model_version(model_version.as_deref())?;
     if mpi_ranks == 0 {
         return Err("mpiRanks must be at least 1".into());
     }
@@ -1030,6 +1059,7 @@ fn run_batch_blocking(
     let succeeded = Arc::new(AtomicUsize::new(0));
     let mut workers = Vec::with_capacity(width);
     for _ in 0..width {
+        let version = model_version.clone();
         let (a, r, k, q, ok, requested_stage, p, e) = (
             app.clone(),
             run_id.clone(),
@@ -1060,6 +1090,7 @@ fn run_batch_blocking(
                     mpi_ranks,
                     e.as_deref(),
                     Some(threads),
+                    version.as_deref(),
                 )
             }));
             match outcome {
@@ -1129,6 +1160,7 @@ fn run_case_blocking(
     mpi_ranks: usize,
     engine: Option<String>,
     threads: Option<usize>,
+    model_version: Option<String>,
 ) -> Result<i32, String> {
     if threads == Some(0) {
         return Err("threads must be at least 1".into());
@@ -1145,6 +1177,7 @@ fn run_case_blocking(
         mpi_ranks,
         engine.as_deref(),
         threads,
+        model_version.as_deref(),
     )
 }
 
@@ -1161,6 +1194,7 @@ fn run_one(
     mpi_ranks: usize,
     engine: Option<&str>,
     threads: Option<usize>,
+    model_version: Option<&str>,
 ) -> Result<i32, String> {
     if processes.take_cancelled(case)? {
         let _ = app.emit(
@@ -1184,7 +1218,7 @@ fn run_one(
     if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
         cmd.env("RAYON_NUM_THREADS", threads.to_string());
     }
-    let args = run_args(case, kernel, force, stage, mpi_ranks, engine)?;
+    let args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
     let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
         .args(args)
         .stdout(std::process::Stdio::piped())

@@ -49,7 +49,8 @@ export const WORKFLOW = [
     { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
-  { n: 3, t: '运行', d: '输出与运行', steps: [
+  { n: 3, key: 'run', collapsible: true, t: '运行', d: '运行方式与运行', steps: [
+    { id: 'run-mode', page: 'run', t: '运行方式', d: '模型版本、位置与引擎', need: ready },
     { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
   ] },
   { n: 4, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
@@ -232,6 +233,8 @@ export function renderSteps() {
   // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();
+  // 上下文条（算例 · 版本 · 位置 · 引擎）跟着同一份状态刷新。
+  globalThis.dispatchEvent?.(new Event('colm:context'));
 }
 
 /** 研究那一段：可选的子标题加平铺的条目，右侧是状态（`badge`）或说明。 */

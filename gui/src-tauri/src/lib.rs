@@ -192,6 +192,8 @@ pub fn run() {
             workspace::workspace_revert,
             workspace::workspace_delete,
             workspace::workspace_adopt,
+            workspace::version_check,
+            workspace::read_produced_by,
             remote_build_kernel,
             remote_status,
             remote_job_record,

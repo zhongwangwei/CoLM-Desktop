@@ -9,6 +9,8 @@ import { invoke, listen, hasBackend } from './ipc.js';
 import { state } from './state.js';
 import { $, status, appConfirm } from './ui.js';
 import { language, translateZh } from './i18n.js';
+import { modelEngine } from './engine.js';
+import { modelVersion, runModeSnapshot } from './run-mode.js';
 import { API_PROVIDERS, providerId, rememberProfile, selectProvider, apiEfforts, parseApiOptions, settingsForSave } from './assistant-providers.js';
 
 // ---- 纯函数（tests/assistant.mjs）----------------------------------------------------------
@@ -32,9 +34,23 @@ const fixed = (value, digits) => (Number.isFinite(value) ? Number(value).toFixed
  * 这一页的关键信息（英文，给模型看，不显示）：评估页附上已算出的指标，研究页附上 Study 状态与 AI 模式。
  * `metrics` 是 `state.resultMetrics` 里属于选中算例的行；`badges` 是 `state.studyBadges`。
  */
-export function pageDetails(flow, { metrics = [], badges = {}, batch = 0, adopted = [] } = {}) {
+export function pageDetails(flow, { metrics = [], badges = {}, batch = 0, adopted = [], runMode = null, provenance = null } = {}) {
   const lines = [];
   if (batch > 1) lines.push(`cases in this batch: ${batch}`);
+  // 上下文条（算例 · 版本 · 位置 · 引擎）：每页都附上，助手据此知道“这次按哪一版、在哪里、用哪个引擎跑”。
+  if (runMode) {
+    const version = runMode.version === 'official' ? 'official release' : `modified version (development workspace) ${runMode.version}`;
+    lines.push(`run mode: model version ${version}; location ${runMode.target}; engine ${runMode.engine}${runMode.ready ? '' : '; NOT ready to run'}`);
+    if (flow === 'run-mode' || flow === 'run') {
+      for (const row of runMode.readiness ?? []) lines.push(`- version check [${row.kind}] ${row.text}`);
+    }
+  }
+  // 结果页：这批结果实际是哪一版、哪个引擎跑出来的（produced-by.json）。
+  if (provenance?.version && (flow?.startsWith('result-') || flow === 'research')) {
+    const v = provenance.version;
+    const by = v.kind === 'workspace' ? `modified version ${v.name} (commit ${String(v.head ?? '').slice(0, 8)})` : 'official release';
+    lines.push(`these results were produced by ${by} with the ${provenance.engine} engine (${provenance.ok === false ? 'the run failed' : 'run completed'})`);
+  }
   // 用户在开发工作区面板里启用的实验内核：之后用 Fortran 内核跑这些预设时用的不是正式内核。
   for (const kernel of adopted) {
     const from = kernel?.experimental;
@@ -69,6 +85,10 @@ export function pagePrompts(flow) {
     return [P('解释这一页的参数', '解释当前页面这些过程参数的含义、常用取值，以及改动它们会影响哪些输出。')];
   }
   const table = {
+    'run-mode': [
+      P('该用哪一版', '我想比较修改版和官方版的结果，运行方式该怎么选？请结合当前的版本检查结果说明。'),
+      P('为什么不能运行', '当前选的模型版本为什么还不能运行？按检查清单逐条说明，并告诉我在哪里补齐。'),
+    ],
     run: [
       P('检查运行设置', '检查当前算例的运行设置（时段、预热、输出）是否合理。'),
       P('为什么失败', '请用固定启动失败流程诊断当前算例，先调用 diagnostic_plan（workflow=startup）；按已确认事实、待验证原因、下一步实验报告。'),
@@ -816,6 +836,8 @@ function currentView() {
       badges: state.studyBadges ?? {},
       batch: state.batch?.length ?? 0,
       adopted: state.adoptedKernels ?? [],
+      runMode: runModeSnapshot({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: modelEngine(), readiness: state.versionReadiness }),
+      provenance: caseDir ? state.provenance?.[caseDir] : null,
     }),
   };
 }

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn run_arguments_forward_plain_mpi_rank_count() {
-    let args = run_args("/case", "/kernel", false, None, 8, None).expect("args");
+    let args = run_args("/case", "/kernel", false, None, 8, None, None).expect("args");
     assert_eq!(
         args.windows(2).find(|pair| pair[0] == "--ranks"),
         Some(&["--ranks".into(), "8".into()][..])
@@ -589,7 +589,7 @@ fn batch_summary_distinguishes_success_from_attempted() {
 #[test]
 fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
     assert_eq!(
-        run_args("/case", "/kernel", false, Some("mksrfdata"), 1, None).unwrap(),
+        run_args("/case", "/kernel", false, Some("mksrfdata"), 1, None, None).unwrap(),
         [
             "run",
             "/case",
@@ -604,10 +604,10 @@ fn a_requested_stage_is_forwarded_to_the_cli_without_changing_full_runs() {
         ]
     );
     assert_eq!(
-        run_args("/case", "/kernel", true, None, 1, None).unwrap(),
+        run_args("/case", "/kernel", true, None, 1, None, None).unwrap(),
         ["run", "/case", "--kernel", "/kernel", "--stream", "1", "--ranks", "1", "--force", "1",]
     );
-    assert!(run_args("/case", "/kernel", false, Some("unknown"), 1, None).is_err());
+    assert!(run_args("/case", "/kernel", false, Some("unknown"), 1, None, None).is_err());
 }
 
 #[test]
@@ -742,11 +742,11 @@ fn contextual_study_rows_keep_catalog_id_and_pft_index() {
 
 #[test]
 fn engine_is_forwarded_only_when_chosen_and_must_be_known() {
-    let args = run_args("/case", "/kernel", false, None, 1, Some("fortran")).unwrap();
+    let args = run_args("/case", "/kernel", false, None, 1, Some("fortran"), None).unwrap();
     assert!(args.ends_with(&["--engine".to_string(), "fortran".to_string()]));
-    let args = run_args("/case", "/kernel", false, None, 1, None).unwrap();
+    let args = run_args("/case", "/kernel", false, None, 1, None, None).unwrap();
     assert!(!args.iter().any(|arg| arg == "--engine"));
-    assert!(run_args("/case", "/kernel", false, None, 1, Some("auto")).is_err());
+    assert!(run_args("/case", "/kernel", false, None, 1, Some("auto"), None).is_err());
     let args = study_run_args(
         "/s".into(),
         "/k".into(),
@@ -878,4 +878,16 @@ fn hybrid_fit_arguments_follow_the_request() {
         ..request
     };
     assert!(hybrid_fit_args(&bad, "n", "m").is_err());
+}
+
+#[test]
+fn a_model_version_is_passed_only_when_it_is_not_the_official_one() {
+    let args = run_args("/case", "/kernel", false, None, 1, None, Some("snow")).unwrap();
+    assert!(args.windows(2).any(|w| w == ["--model-version", "snow"]));
+    for version in [None, Some("official")] {
+        let args = run_args("/case", "/kernel", false, None, 1, None, version).unwrap();
+        assert!(!args.iter().any(|a| a == "--model-version"));
+    }
+    assert!(run_args("/case", "/kernel", false, None, 1, None, Some("../x")).is_err());
+    assert!(run_args("/case", "/kernel", false, None, 1, None, Some("-x")).is_err());
 }

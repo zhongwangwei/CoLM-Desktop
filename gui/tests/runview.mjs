@@ -78,11 +78,18 @@ if (outputVariables < 0 || startRun < 0 || outputVariables > startRun) {
   throw new Error('start-run card must be below output variables');
 }
 const runSection = html.slice(startRun, html.indexOf('</section>', startRun));
+// 并行设置与位置、引擎一起在第 3 步的“运行方式”里配置，只配一次。
+const runModeStart = html.indexOf('data-flow-pane="run-mode"');
+const runModePane = html.slice(runModeStart, html.indexOf('data-flow-pane="run"', runModeStart));
 if ((html.match(/id="cpu-workers"/g) || []).length !== 1
-    || !runSection.includes('id="cpu-workers"')
-    || !runSection.includes('id="cpu-capacity"')
-    || !runSection.includes('批量并行算例数')) {
-  throw new Error('batch parallelism must be configured once, next to the Step 3 run controls');
+    || runModeStart < 0
+    || !runModePane.includes('id="cpu-workers"')
+    || !runModePane.includes('id="cpu-capacity"')
+    || !runModePane.includes('批量并行算例数')
+    || !runModePane.includes('id="model-version"')
+    || !runModePane.includes('id="run-target"')
+    || !runModePane.includes('id="model-engine"')) {
+  throw new Error('version, location, engine and batch parallelism must be configured once, in the Step 3 run-mode pane');
 }
 const runnerJs = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 if (!runnerJs.includes('const spatialDefaultRanks = Math.min(8, cpuCapacity);')

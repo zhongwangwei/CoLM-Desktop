@@ -920,3 +920,53 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 #remote-dialog > .assistant-approval-actions { position: sticky; bottom: 0; background: var(--elevated); padding-top: 12px; }
 .remote-auth-row { grid-column: 1 / -1; }
 .remote-auth-row[hidden] { display: none; }
+
+/* ---------------- 运行方式：上下文条、版本卡、就绪清单、结果出处 ---------------- */
+/* 上下文条贴在工作区顶部，滚动时不走：算例 · 版本 · 位置 · 引擎。 */
+.context-bar {
+  position: sticky; top: calc(-1 * var(--s-xl)); z-index: 5;
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-sm) var(--s-md);
+  margin: calc(-1 * var(--s-xl)) calc(-1 * (var(--s-xl) + 4px)) var(--s-lg);
+  padding: var(--s-md) calc(var(--s-xl) + 4px);
+  background: var(--bg); border-bottom: 1px solid var(--border-soft);
+}
+.context-chip {
+  display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;
+  padding: 3px 10px; border: 1px solid var(--border-soft); border-radius: 999px;
+  background: var(--surface); color: var(--text); font: inherit; font-size: 12px; cursor: pointer;
+}
+.context-chip:hover { border-color: var(--border); }
+.context-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.context-label { color: var(--muted); }
+.context-value { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-modified { background: var(--accent-weak); border-color: transparent; color: var(--accent-ink); }
+.context-modified .context-label { color: inherit; opacity: .75; }
+.context-warn { font-size: 12px; padding: 3px 10px; border-radius: 999px; background: var(--warn-bg); color: var(--warn); }
+
+.version-card {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-sm) var(--s-md);
+  margin-top: var(--s-md); padding: var(--s-md) 12px;
+  border-radius: var(--r-sm); background: var(--surface);
+}
+.readiness { list-style: none; margin: var(--s-md) 0 0; padding: 0; display: grid; gap: 6px; }
+.readiness li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-md); font-size: 12.5px; }
+.readiness-mark {
+  flex: none; width: 18px; height: 18px; border-radius: 50%;
+  display: inline-grid; place-items: center; font-size: 11px; font-weight: 700;
+}
+.readiness-ok .readiness-mark { background: var(--pass-bg); color: var(--pass); }
+.readiness-warn .readiness-mark { background: var(--warn-bg); color: var(--warn); }
+.readiness-block .readiness-mark { background: var(--fail-bg); color: var(--fail); }
+.readiness-wait { color: var(--muted); }
+
+.run-mode-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-sm) var(--s-md); margin-top: var(--s-md); font-size: 12.5px; }
+.run-mode-line .warn { flex-basis: 100%; margin: 0; }
+
+.provenance { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin: 0 0 var(--s-lg); }
+.provenance .warn { flex-basis: 100%; margin: 2px 0 0; }
+.provenance-label { font-size: 12px; color: var(--muted); }
+.provenance-chip { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text); }
+.provenance-modified { background: var(--accent-weak); color: var(--accent-ink); font-weight: 600; }
+.provenance-warn { background: var(--fail-bg); color: var(--fail); }
+/* 上面几块都有自己的 display，`hidden` 要压过它们。 */
+.version-card[hidden], .readiness[hidden], .provenance[hidden] { display: none; }

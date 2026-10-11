@@ -54,7 +54,7 @@ assert.ok(!research.blocked(research.readiness('process', base)));
 {
   const items = research.readiness('learn', { ...base, engine: 'fortran' });
   assert.ok(!research.blocked(items));
-  assert.equal(items.find(item => item.level === 'warn').step, 'run');
+  assert.equal(items.find(item => item.level === 'warn').step, 'run-mode');
 }
 
 // 左栏状态。

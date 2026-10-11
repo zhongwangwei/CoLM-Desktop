@@ -83,6 +83,18 @@ assert.equal(assistant.viewContext({ step: 'run', flow: 'run' }), 'page: run');
     adopted: [{ preset: 'default', experimental: { workspace: 'vcmax-grass', head: 'd32488535882' } }],
   })[0].includes('workspace vcmax-grass (commit d3248853)'));
   assert.deepEqual(assistant.pageDetails('run', { adopted: [{ preset: 'default' }] }), []);
+  // 上下文条（版本 · 位置 · 引擎）每页都告诉助手；检查清单只在运行相关的页上附上。
+  const runMode = { version: 'snow', target: 'local', engine: 'rust', ready: false, readiness: [{ kind: 'block', text: 'engine not built' }] };
+  const onRunMode = assistant.pageDetails('run-mode', { runMode });
+  assert.equal(onRunMode[0], 'run mode: model version modified version (development workspace) snow; location local; engine rust; NOT ready to run');
+  assert.equal(onRunMode[1], '- version check [block] engine not built');
+  assert.equal(assistant.pageDetails('result-series', { runMode }).length, 1);
+  assert.match(assistant.pageDetails('basic-files', { runMode: { version: 'official', target: 'srv', engine: 'fortran', ready: true } })[0], /official release; location srv; engine fortran$/);
+  // 结果页说出这批结果实际由哪一版跑出。
+  const provenance = { ok: true, engine: 'rust', version: { kind: 'workspace', name: 'snow', head: '0123456789' } };
+  assert.ok(assistant.pageDetails('result-overview', { provenance })
+    .includes('these results were produced by modified version snow (commit 01234567) with the rust engine (run completed)'));
+  assert.deepEqual(assistant.pageDetails('run', { provenance }), []);
 }
 // 提问建议跟着步骤走；没有建议的步骤返回空。
 assert.ok(assistant.pagePrompts('result-evaluation').length >= 2);
@@ -90,7 +102,7 @@ assert.ok(assistant.pagePrompts('params-water')[0].prompt.includes('过程参数
 assert.ok(assistant.pagePrompts('basic-files').length === 1);
 assert.deepEqual(assistant.pagePrompts('prep-site'), []);
 assert.deepEqual(assistant.pagePrompts(undefined), []);
-for (const step of ['run', 'research', 'result-tuning', 'result-uncertainty', 'hybrid-learn', 'hybrid-process', 'result-diagnostics']) {
+for (const step of ['run-mode', 'run', 'research', 'result-tuning', 'result-uncertainty', 'hybrid-learn', 'hybrid-process', 'result-diagnostics']) {
   for (const { label, prompt } of assistant.pagePrompts(step)) assert.ok(label && prompt, step);
 }
 

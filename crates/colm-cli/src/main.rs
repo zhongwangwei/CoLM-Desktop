@@ -17,6 +17,10 @@
 //!                    [--preprocessors rust|fortran] [--engine rust|fortran]
 //!                    [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
 //!                    [--stage mksrfdata|mkinidata|colm]
+//!                    [--model-version official|<工作区名>] [--workspace-root DIR] [--location local|server]
+//! colm-cli version-check --name N --kernel <目录> [--engine rust|fortran] [--preprocessors rust|fortran]
+//!                    [--root DIR]                  # 修改版能不能跑：就绪清单（JSON）
+//! colm-cli produced-by <算例目录>                  # 最近一次运行的出处（JSON；没有就是 null）
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
 //!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
@@ -50,6 +54,7 @@ mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
 mod observation_table;
+mod provenance;
 mod remote_cmd;
 mod remote_workspace_cmd;
 mod study;
@@ -94,6 +99,8 @@ usage:
                    [--stage mksrfdata|mkinidata|colm] [--preprocessors rust|fortran]
                    [--engine rust|fortran]
                    [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
+                   [--model-version official|<workspace>] [--workspace-root <dir>]
+                   # --model-version 用一个工作区（修改版）自己编出的程序跑；跑完写 out/<名>/produced-by.json
                    # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
@@ -104,6 +111,9 @@ usage:
                    # HYPERSPECTRAL PFT/PC：--highres-params 包含 fsds/、
                    # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
                    # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
+  colm-cli version-check --name N --kernel <dir> [--engine rust|fortran]
+                   [--preprocessors rust|fortran] [--root <dir>]
+  colm-cli produced-by <case-dir>
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -269,21 +279,20 @@ fn main() -> Result<()> {
             let case = cmd_new(&opts)?;
             println!("case ready: {}", case.display());
         }
-        "run" => {
-            cmd_run(
-                &opts.positional_case()?,
+        "run" => run_with_provenance(&opts)?,
+        "version-check" => {
+            let readiness = colm_workspace::version::check(
+                &provenance::workspace_root(opts.get("--root")),
+                &opts.need_str("--name")?,
+                requested_engine(opts.get("--engine").as_deref())?.as_str(),
+                requested_preprocessors(opts.get("--preprocessors").as_deref())?.as_str(),
                 &opts.need("--kernel")?,
-                opts.get("--stream").is_some(),
-                opts.get("--force").is_some(),
-                requested_run_stage(opts.get("--stage").as_deref())?,
-                opts.count("--ranks", 1)? as usize,
-                requested_preprocessors(opts.get("--preprocessors").as_deref())?,
-                requested_engine(opts.get("--engine").as_deref())?,
-                opts.get("--highres-params").as_deref().map(Path::new),
-                opts.get("--soil-hyper-albedo-dir")
-                    .as_deref()
-                    .map(Path::new),
             )?;
+            println!("{}", serde_json::to_string(&readiness)?);
+        }
+        "produced-by" => {
+            let record = provenance::read(&opts.positional_case()?)?;
+            println!("{}", serde_json::to_string(&record)?);
         }
         "flux-diagnose" => {
             let request = opts
@@ -2503,6 +2512,88 @@ enum RunNotice<'a> {
     StageSkipped(&'a str),
     Log { stage: &'a str, line: &'a str },
     StageDone { stage: &'a str, ok: bool },
+}
+
+/// `run`：按 `--model-version` 选官方版或一个修改版跑，跑完（成败都）写出处。
+fn run_with_provenance(opts: &Opts) -> Result<()> {
+    let case = opts.positional_case()?;
+    let kernel = opts.need("--kernel")?;
+    let stage = requested_run_stage(opts.get("--stage").as_deref())?;
+    let ranks = opts.count("--ranks", 1)? as usize;
+    let preprocessors = requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+    let engine = requested_engine(opts.get("--engine").as_deref())?;
+    let force = opts.get("--force").is_some();
+    let location = opts.get("--location").unwrap_or_else(|| "local".into());
+    let started = provenance::now();
+    let version = match opts.get("--model-version").as_deref() {
+        None | Some("official") => provenance::Version::Official,
+        Some(name) => provenance::Version::Workspace(Box::new(provenance::resolve(
+            &provenance::workspace_root(opts.get("--workspace-root")),
+            name,
+            engine.as_str(),
+            preprocessors.as_str(),
+            &kernel,
+        )?)),
+    };
+    let result = match &version {
+        provenance::Version::Official => cmd_run(
+            &case,
+            &kernel,
+            opts.get("--stream").is_some(),
+            force,
+            stage,
+            ranks,
+            preprocessors,
+            engine,
+            opts.get("--highres-params").as_deref().map(Path::new),
+            opts.get("--soil-hyper-albedo-dir")
+                .as_deref()
+                .map(Path::new),
+        ),
+        provenance::Version::Workspace(readiness) => {
+            // 交给版本自己的 colm-cli：参数原样转过去，只换掉内核、去掉只有外层认的几项。
+            let own = [
+                "--model-version",
+                "--workspace-root",
+                "--kernel",
+                "--location",
+            ];
+            let mut args: Vec<String> = opts.positional.clone();
+            for (flag, value) in &opts.flags {
+                if !own.contains(&flag.as_str()) {
+                    args.extend([flag.clone(), value.clone()]);
+                }
+            }
+            match provenance::delegate(readiness, &args) {
+                Ok(0) => Ok(()),
+                Ok(code) => Err(anyhow::anyhow!(
+                    "model version {} exited with status {code}",
+                    readiness.name
+                )),
+                Err(e) => Err(e),
+            }
+        }
+    };
+    let used_kernel = match &version {
+        provenance::Version::Workspace(readiness) => readiness.kernel.clone(),
+        provenance::Version::Official => kernel.clone(),
+    };
+    let stage_name = stage.map(|s| s.program());
+    let record = provenance::Record {
+        case: &case,
+        kernel: &used_kernel,
+        engine: engine.as_str(),
+        preprocessors: preprocessors.as_str(),
+        ranks,
+        stage: stage_name,
+        force,
+        location: &location,
+        version: &version,
+        started,
+    };
+    let error = result.as_ref().err().map(|e| format!("{e:#}"));
+    provenance::write(&record, result.is_ok(), error.as_deref());
+    result
 }
 
 #[allow(clippy::too_many_arguments)]
