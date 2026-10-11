@@ -26,7 +26,7 @@ pub struct RunOptions<'a> {
     pub engine: crate::ModelEngine,
 }
 
-struct StudyRunLock {
+pub(crate) struct StudyRunLock {
     path: PathBuf,
     stop: mpsc::Sender<()>,
     heartbeat: Option<std::thread::JoinHandle<()>>,
@@ -48,7 +48,7 @@ fn should_emit_task_log(last: &mut Option<Instant>, now: Instant) -> bool {
 }
 
 impl StudyRunLock {
-    fn acquire(study_dir: &Path) -> Result<Self> {
+    pub(crate) fn acquire(study_dir: &Path) -> Result<Self> {
         let path = study_dir.join("run.lock");
         let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => file,
@@ -280,7 +280,9 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
     } else {
         case_root.join(path)
     };
-    let kernel_macros = colm_kernel::Kernel::open(&resolved)?.manifest.macros;
+    let kernel_macros = colm_kernel::Kernel::open_manifest(&resolved)?
+        .manifest
+        .macros;
     super::engine::ensure_supported_study_inputs(&base_case_paths, &kernel_macros)?;
     super::engine::baseline(&base_case_paths, &spec, &kernel_macros)?;
     if spec.kind == StudyKind::Uncertainty {
@@ -382,7 +384,14 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     let _run_lock = StudyRunLock::acquire(&study_dir)?;
     let kernel_dir = colm_kernel::manifest::absolute(options.kernel_dir)?;
     let manifest = super::engine::status(&study_dir)?;
-    let kernel = colm_kernel::Kernel::open(&kernel_dir)?;
+    // As in run_case, only an entirely Rust pipeline can run with a manifest alone.
+    let kernel = if options.engine == crate::ModelEngine::Rust
+        && options.preprocessors == crate::PreprocessorMode::Rust
+    {
+        colm_kernel::Kernel::open_manifest(&kernel_dir)?
+    } else {
+        colm_kernel::Kernel::open(&kernel_dir)?
+    };
     let kernel_identity = format!(
         "{} ({})",
         kernel.manifest.identity(),
@@ -4580,6 +4589,96 @@ mod tests {
         )
         .unwrap();
         spec
+    }
+
+    fn manifest_only_study_fixture(hyperspectral: bool) -> (PathBuf, PathBuf, PathBuf) {
+        let (root, _) = preview_fixture();
+        let kernel = write_fake_kernel(&root);
+        for program in colm_kernel::PROGRAMS {
+            std::fs::remove_file(kernel.join(colm_kernel::program_file(program))).unwrap();
+        }
+        if hyperspectral {
+            let path = kernel.join("manifest.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            manifest["macros"]
+                .as_array_mut()
+                .unwrap()
+                .push("HYPERSPECTRAL".into());
+            write_json(&path, &manifest).unwrap();
+        }
+        let spec_path = root.join("spec.json");
+        let mut spec: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&spec_path).unwrap()).unwrap();
+        spec["kernel_dir"] = serde_json::json!(kernel);
+        spec["outputs"] = serde_json::json!(["f_lfevpa"]);
+        write_json(&spec_path, &spec).unwrap();
+        preflight_create(&root, &spec_path).unwrap();
+        let manifest = super::super::engine::create(&root, &spec_path).unwrap();
+        (root, kernel, PathBuf::from(manifest.root))
+    }
+
+    #[test]
+    fn manifest_only_study_metadata_and_preview_do_not_require_fortran_programs() {
+        let (root, kernel, study) = manifest_only_study_fixture(false);
+        assert!(colm_kernel::Kernel::open(&kernel).is_err());
+        let manifest = super::super::engine::status(&study).unwrap();
+        assert!(!manifest.provenance.kernel_id.is_empty());
+        super::super::engine::verify_frozen_inputs(&manifest).unwrap();
+        super::super::engine::ensure_supported_study_manifest(&manifest, None).unwrap();
+        assert!(!apply_preview(&study, "m000001").unwrap().is_empty());
+        let retry_error = retry(&study, false).unwrap_err().to_string();
+        assert!(
+            retry_error.contains("no retryable failed tasks"),
+            "{retry_error}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn manifest_only_study_run_requires_fortran_programs_unless_both_backends_are_rust() {
+        // The existing HYPERSPECTRAL guard is reached before Rust executable
+        // discovery. This verifies kernel selection without fake scientific runs.
+        let (root, kernel, study) = manifest_only_study_fixture(true);
+        let checkpoints = checkpoint_count(&study);
+        for (engine, preprocessors) in [
+            (crate::ModelEngine::Rust, crate::PreprocessorMode::Rust),
+            (crate::ModelEngine::Rust, crate::PreprocessorMode::Fortran),
+            (crate::ModelEngine::Fortran, crate::PreprocessorMode::Rust),
+            (
+                crate::ModelEngine::Fortran,
+                crate::PreprocessorMode::Fortran,
+            ),
+        ] {
+            let error = run(
+                &study,
+                RunOptions {
+                    kernel_dir: &kernel,
+                    jobs: 1,
+                    stream: false,
+                    retry_failed: false,
+                    preprocessors,
+                    engine,
+                },
+            )
+            .unwrap_err()
+            .to_string();
+            if engine == crate::ModelEngine::Rust && preprocessors == crate::PreprocessorMode::Rust
+            {
+                assert!(
+                    error.contains("Rust preprocessing does not yet support HYPERSPECTRAL"),
+                    "{error}"
+                );
+            } else {
+                assert!(
+                    error.contains("mksrfdata") && error.contains("missing"),
+                    "{error}"
+                );
+            }
+            assert_eq!(checkpoint_count(&study), checkpoints);
+            assert!(!study.join("run.lock").exists());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -107,7 +107,7 @@ pub fn write_generation(
     Ok(members)
 }
 
-pub(super) fn verify_generation_hash(path: &Path) -> Result<()> {
+pub(crate) fn verify_generation_hash(path: &Path) -> Result<()> {
     let expected = fs::read_to_string(generation_hash_path(path))
         .with_context(|| format!("missing immutable hash for {}", path.display()))?;
     let actual = format!("{:x}", Sha256::digest(fs::read(path)?));
@@ -207,7 +207,7 @@ pub fn physical(manifest: &Manifest, vector: &[f64]) -> Result<Vec<f64>> {
         .collect())
 }
 
-fn read_sample_file(path: &Path) -> Result<Vec<MemberPlan>> {
+pub(crate) fn read_sample_file(path: &Path) -> Result<Vec<MemberPlan>> {
     let text = fs::read_to_string(path)?;
     let mut lines = text.lines();
     let header = lines

@@ -208,10 +208,47 @@ pub(crate) struct Side {
     pub baseline_validation: Option<f64>,
 }
 
+fn comparison_version(study_dir: &Path) -> Result<(String, Option<String>)> {
+    if let Some(version) = pinned(study_dir)? {
+        return Ok((version.name, Some(version.head)));
+    }
+    let record_path = study_dir.join(crate::remote_cmd::remote_study::RECORD);
+    match std::fs::symlink_metadata(&record_path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(("official".into(), None));
+        }
+        Err(error) => return Err(error).context("cannot inspect captured remote Study version"),
+    }
+    // Comparison is a local metadata read, not an SSH operation: recorded
+    // password settings must not require credentials or initialize global auth.
+    let record: crate::remote_cmd::remote_study::StudyRecord = serde_json::from_str(
+        &std::fs::read_to_string(&record_path)
+            .context("cannot read captured remote Study version")?,
+    )
+    .context("cannot parse captured remote Study version")?;
+    let version = &record.provenance["version"];
+    match version["kind"].as_str() {
+        Some("official") => Ok(("official".into(), None)),
+        Some("workspace") => {
+            let name = version["name"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("captured remote workspace version has no name")?;
+            let head = version["head"]
+                .as_str()
+                .filter(|s| !s.trim().is_empty())
+                .context("captured remote workspace version has no commit")?;
+            Ok((name.into(), Some(head.into())))
+        }
+        _ => bail!("captured remote Study version has no supported kind"),
+    }
+}
+
 fn side(study_dir: &Path) -> Result<(Side, study::spec::StudySpec)> {
     let manifest = study::engine::status(study_dir)?;
     let state = study::runner::status_state(study_dir)?;
-    let version = pinned(study_dir)?;
+    let (version, head) = comparison_version(study_dir)?;
     let best = state.as_ref().and_then(|s| s.best_member.clone());
     let candidate = |member: &str| {
         state
@@ -228,10 +265,8 @@ fn side(study_dir: &Path) -> Result<(Side, study::spec::StudySpec)> {
     Ok((
         Side {
             study: study_dir.display().to_string(),
-            version: version
-                .as_ref()
-                .map_or_else(|| "official".to_owned(), |v| v.name.clone()),
-            head: version.as_ref().map(|v| v.head.clone()),
+            version,
+            head,
             status: state.as_ref().map_or_else(
                 || "not started".to_owned(),
                 |s| format!("{:?}", s.status).to_lowercase(),

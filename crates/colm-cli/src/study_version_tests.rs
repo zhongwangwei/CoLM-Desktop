@@ -242,3 +242,105 @@ fn resuming_a_pin_repairs_its_ledger_without_changing_the_captured_commit() {
     assert_eq!(rows[0].head, saved.head);
     assert!(!rows[0].current);
 }
+
+fn captured_remote_version(study: &Path, version: serde_json::Value) {
+    let record = serde_json::json!({
+        "host":"server","root":"/srv/colm","job":"study-1",
+        "remote_project":"/srv/colm/s/one","engine":"0123456789abcdef",
+        "submitted_at":1,"scheduler":"direct","provenance":{"version":version}
+    });
+    std::fs::write(
+        study.join(crate::remote_cmd::remote_study::RECORD),
+        record.to_string(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn remote_comparison_uses_the_captured_workspace_identity_and_same_version_note() {
+    let root = temp("remote-version");
+    captured_remote_version(
+        &root,
+        serde_json::json!({"kind":"workspace","name":"snow","label":"snow","head":"0123456789abcdef"}),
+    );
+    let (name, head) = comparison_version(&root).unwrap();
+    assert_eq!(name, "snow");
+    assert_eq!(head.as_deref(), Some("0123456789abcdef"));
+    let mut remote = side(&name, Some(0.4), Some(0.5));
+    remote.head = head.clone();
+    let mut local = side("snow", Some(0.4), Some(0.5));
+    local.head = head;
+    let result = verdict(local, remote, true);
+    assert_eq!(result["a"]["version"], result["b"]["version"]);
+    assert_eq!(result["a"]["head"], result["b"]["head"]);
+    assert!(result["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|v| v.as_str().unwrap().contains("same model version")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn malformed_remote_version_is_not_silently_official_and_local_pin_has_priority() {
+    let root = temp("remote-invalid");
+    assert_eq!(
+        comparison_version(&root).unwrap(),
+        ("official".into(), None)
+    );
+    captured_remote_version(
+        &root,
+        serde_json::json!({"kind":"official","label":"官方版"}),
+    );
+    assert_eq!(
+        comparison_version(&root).unwrap(),
+        ("official".into(), None)
+    );
+    for version in [
+        serde_json::json!({}),
+        serde_json::json!({"kind":"workspace","name":"snow"}),
+        serde_json::json!({"kind":"unknown"}),
+    ] {
+        captured_remote_version(&root, version);
+        assert!(comparison_version(&root).is_err());
+    }
+    std::fs::write(
+        root.join(crate::remote_cmd::remote_study::RECORD),
+        "broken json",
+    )
+    .unwrap();
+    assert!(comparison_version(&root).is_err());
+    let kernel = root.join("kernel");
+    let ready = readiness(&root, kernel.clone());
+    pin(&root, &ready, &kernel).unwrap();
+    assert_eq!(
+        comparison_version(&root).unwrap(),
+        (ready.name, Some(ready.head))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn captured_versions_from_different_password_servers_compare_without_credentials() {
+    let root = temp("remote-password-metadata");
+    let original_auth = colm_remote::auth::current_connection();
+    for (name, host) in [("snow", "server-a"), ("soil", "server-b")] {
+        let study = root.join(name);
+        std::fs::create_dir(&study).unwrap();
+        captured_remote_version(
+            &study,
+            serde_json::json!({"kind":"workspace","name":name,"head":"0123456789abcdef"}),
+        );
+        let path = study.join(crate::remote_cmd::remote_study::RECORD);
+        let mut record: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        record["ssh_auth"] = serde_json::json!({"host":host,"username":"researcher","port":22,"auth":"password","identity_file":""});
+        std::fs::write(&path, record.to_string()).unwrap();
+        assert_eq!(
+            comparison_version(&study).unwrap(),
+            (name.into(), Some("0123456789abcdef".into()))
+        );
+    }
+    assert_eq!(colm_remote::auth::current_connection(), original_auth);
+    std::fs::remove_dir_all(root).unwrap();
+}

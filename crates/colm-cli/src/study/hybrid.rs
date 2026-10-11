@@ -153,7 +153,7 @@ pub fn freeze_normalization(spec: &mut StudySpec, base_cases: &[PathBuf]) -> Res
     let kernel_dir = spec.kernel_dir.as_deref().context(
         "computing the hybrid feature normalization needs kernel_dir (or give hybrid.normalize)",
     )?;
-    let kernel = colm_kernel::Kernel::open(Path::new(kernel_dir))?;
+    let kernel = colm_kernel::Kernel::open_manifest(Path::new(kernel_dir))?;
     let scratch = std::env::temp_dir().join(format!(
         "colm-study-hybrid-{}-{}",
         std::process::id(),
@@ -270,3 +270,55 @@ fn pooled(summaries: &[DryRunSlot], features: usize) -> Result<HybridNormalizati
 #[cfg(test)]
 #[path = "hybrid_tests.rs"]
 mod hybrid_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_only_hybrid_normalization_reaches_rust_kernel_validation() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-hybrid-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut manifest: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../oracle/golden/kernel-manifest.json"
+        ))
+        .unwrap();
+        // An unsupported land-cover selection stops dry_run before executable
+        // discovery; no fake model output or environment override is needed.
+        manifest["macros"] = serde_json::json!(["SinglePoint"]);
+        std::fs::write(
+            root.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut spec: StudySpec = serde_json::from_value(serde_json::json!({
+            "kind": "tuning",
+            "method": "differential-evolution",
+            "kernel_dir": root,
+            "base_cases": ["site"],
+            "parameters": [],
+            "hybrid": {
+                "slot": "land_class",
+                "features": ["latitude"],
+                "outputs": [{"name": "LCT_vcmax25", "range": [10.0, 100.0]}]
+            }
+        }))
+        .unwrap();
+        let error = freeze_normalization(&mut spec, std::slice::from_ref(&root)).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("the Rust model engine needs a LULC_IGBP or LULC_USGS kernel"),
+            "{message}"
+        );
+        assert!(spec.hybrid.unwrap().normalize.is_none());
+        assert!(!root.join("hybrid.toml").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

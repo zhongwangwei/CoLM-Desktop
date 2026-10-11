@@ -80,7 +80,7 @@ fn lhs_member(
     anyhow::bail!("cannot sample a valid parameter vector after 1000 deterministic retries")
 }
 
-pub(super) fn validate_vector(spec: &StudySpec, values: &BTreeMap<String, f64>) -> Result<()> {
+pub(crate) fn validate_vector(spec: &StudySpec, values: &BTreeMap<String, f64>) -> Result<()> {
     let mut case_scalars = Vec::new();
     for parameter in &spec.parameters {
         let key = parameter.member_key();

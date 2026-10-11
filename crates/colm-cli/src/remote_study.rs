@@ -493,9 +493,298 @@ pub(crate) fn transplant_state(
 }
 
 /// `remote-study-fetch`：作业跑完后，核对成员一致，把状态与 `results/` 移植进本机研究。
+// Reject links and special files before importing server-controlled trees or
+// moving existing local data into the transaction backup.
+fn regular_tree_files(
+    root: &Path,
+    read_contents: bool,
+) -> Result<std::collections::BTreeMap<PathBuf, Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        read_contents: bool,
+        files: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Result<()> {
+        ensure!(
+            std::fs::symlink_metadata(dir)?.file_type().is_dir(),
+            "not a regular directory: {}",
+            dir.display()
+        );
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_dir() {
+                visit(root, &entry.path(), read_contents, files)?;
+            } else {
+                ensure!(
+                    kind.is_file(),
+                    "non-regular fetched file: {}",
+                    entry.path().display()
+                );
+                files.insert(
+                    entry.path().strip_prefix(root)?.to_owned(),
+                    if read_contents {
+                        std::fs::read(entry.path())?
+                    } else {
+                        Vec::new()
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut files = std::collections::BTreeMap::new();
+    visit(root, root, read_contents, &mut files)?;
+    Ok(files)
+}
+
+fn validate_fetched_samples(
+    manifest: &study::spec::Manifest,
+    state: &study::state::StudyState,
+    staged: &Path,
+) -> Result<()> {
+    use study::spec::StudyMethod;
+    let local = regular_tree_files(&Path::new(&manifest.root).join("samples"), true)?;
+    let remote = regular_tree_files(&staged.join("samples"), true)?;
+    // Immutable local generations must never be replaced, even on a repeated fetch.
+    for (name, bytes) in &local {
+        ensure!(
+            remote.get(name) == Some(bytes),
+            "local sample conflicts with fetched sample: {}",
+            name.display()
+        );
+    }
+    let de = manifest.spec.method == StudyMethod::DifferentialEvolution;
+    let initial = if de { "g000000.csv" } else { "design.csv" };
+    let bytes = remote
+        .get(Path::new(initial))
+        .context("fetched Study has no initial samples")?;
+    ensure!(
+        colm_kernel::sha256_hex(bytes) == manifest.provenance.samples_sha256,
+        "fetched initial samples differ from frozen local samples"
+    );
+    let mut generations = std::collections::BTreeSet::new();
+    for name in remote.keys() {
+        let text = name.to_str().context("invalid sample filename")?;
+        ensure!(
+            name.components().count() == 1,
+            "nested sample path is not supported"
+        );
+        if text == initial {
+            continue;
+        }
+        let csv = text.strip_suffix(".sha256").unwrap_or(text);
+        let digits = csv
+            .strip_prefix('g')
+            .and_then(|s| s.strip_suffix(".csv"))
+            .context("unexpected sample file")?;
+        ensure!(
+            de && digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit()),
+            "unexpected generation filename"
+        );
+        let generation: usize = digits.parse()?;
+        ensure!(
+            generation > 0 && generation <= manifest.spec.budget.generations.unwrap_or(0),
+            "sample generation exceeds Study budget"
+        );
+        ensure!(
+            remote.contains_key(Path::new(csv))
+                && remote.contains_key(Path::new(&format!("{csv}.sha256"))),
+            "incomplete immutable generation"
+        );
+        let path = staged.join("samples").join(csv);
+        study::generation::verify_generation_hash(&path)?;
+        if generations.insert(generation) {
+            let rows = study::generation::read_sample_file(&path)?;
+            ensure!(
+                rows.len() == manifest.spec.budget.population.unwrap_or(0),
+                "incomplete generation population"
+            );
+            ensure!(
+                rows.iter().all(|row| row.generation == generation),
+                "sample row generation does not match its filename"
+            );
+        }
+    }
+    ensure!(
+        generations.iter().copied().eq(1..=generations.len()),
+        "non-contiguous fetched generations"
+    );
+    let mut imported = manifest.clone();
+    imported.root = staged.to_string_lossy().into_owned();
+    let members = study::generation::load_members(&imported)?;
+    let names = study::sample::sorted_parameter_names(&manifest.spec)
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut by_id = std::collections::BTreeMap::new();
+    for member in &members {
+        ensure!(
+            member.id == format!("m{:06}", member.candidate_index),
+            "sample member identity mismatch"
+        );
+        if member.generation == 0 {
+            ensure!(
+                manifest
+                    .members
+                    .iter()
+                    .any(|m| serde_json::to_value(m).ok() == serde_json::to_value(member).ok()),
+                "initial member differs from frozen Study"
+            );
+        } else {
+            ensure!(
+                !member.baseline && generations.contains(&member.generation),
+                "invalid generated member"
+            );
+            ensure!(
+                member
+                    .parameters
+                    .keys()
+                    .cloned()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    == names,
+                "generation parameter columns do not match Study"
+            );
+            study::sample::validate_vector(&manifest.spec, &member.parameters)?;
+            ensure!(
+                member.parameters.values().all(|v| v.is_finite()),
+                "non-finite generation parameter"
+            );
+            for parameter in &manifest.spec.parameters {
+                let value = member.parameters[&parameter.member_key()];
+                ensure!(
+                    value >= parameter.sample_min && value <= parameter.sample_max,
+                    "generation parameter is outside frozen sampling bounds"
+                );
+            }
+            if let Some(hybrid) = &manifest.spec.hybrid {
+                for (name, value) in &member.parameters {
+                    if !manifest
+                        .spec
+                        .parameters
+                        .iter()
+                        .any(|p| p.member_key() == *name)
+                    {
+                        ensure!(
+                            value.abs() <= hybrid.weight_range,
+                            "hybrid weight exceeds frozen bounds"
+                        );
+                    }
+                }
+            }
+        }
+        by_id.insert(member.id.as_str(), member);
+    }
+    ensure!(
+        members.len()
+            == manifest.members.len()
+                + generations.len() * manifest.spec.budget.population.unwrap_or(0),
+        "incomplete generation population"
+    );
+    ensure!(
+        state.schema_version == 1 && state.study_id == manifest.id,
+        "fetched state identity mismatch"
+    );
+    ensure!(
+        state.tasks.len() == members.len() * manifest.spec.base_cases.len(),
+        "state tasks do not cover all sampled members"
+    );
+    for (id, task) in &state.tasks {
+        ensure!(
+            by_id.contains_key(task.member.as_str())
+                && manifest.spec.base_cases.contains(&task.site),
+            "state references unknown sampled member/site"
+        );
+        ensure!(
+            *id == study::state::task_id(&task.member, &task.site),
+            "state task identity mismatch"
+        );
+        ensure!(
+            Path::new(&task.case_dir)
+                == Path::new(&manifest.root)
+                    .join("members")
+                    .join(&task.member)
+                    .join(&task.site),
+            "state task path does not match local member"
+        );
+    }
+    for (id, candidate) in &state.candidates {
+        ensure!(
+            by_id
+                .get(id.as_str())
+                .is_some_and(|m| m.generation == candidate.generation),
+            "candidate has no matching sample generation"
+        );
+    }
+    for id in state.population.iter().chain(state.best_member.iter()) {
+        ensure!(
+            by_id.contains_key(id.as_str()),
+            "state refers to an unknown member"
+        );
+    }
+    Ok(())
+}
+
+fn ensure_fetch_boundary(study_dir: &Path) -> Result<()> {
+    for path in [study_dir.to_path_buf(), study_dir.join("checkpoints")] {
+        ensure!(
+            std::fs::symlink_metadata(&path)?.file_type().is_dir(),
+            "fetch requires a real directory inside the Study: {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn install_fetched_study(study_dir: &Path, staged: &Path) -> Result<()> {
+    ensure_fetch_boundary(study_dir)?;
+    let entries = ["results", "samples", "checkpoints/state", RECORD];
+    let mut changed = Vec::new();
+    let result = (|| {
+        for (index, entry) in entries.iter().enumerate() {
+            let destination = study_dir.join(entry);
+            let backup = staged.join(format!("previous-{index}"));
+            let had_previous = destination.exists();
+            if had_previous {
+                std::fs::rename(&destination, &backup)?;
+            }
+            changed.push((index, had_previous, false));
+            std::fs::rename(staged.join(entry), &destination)?;
+            changed.last_mut().unwrap().2 = true;
+        }
+        Ok(())
+    })();
+    if let Err(error) = result {
+        for (index, had_previous, installed) in changed.into_iter().rev() {
+            let destination = study_dir.join(entries[index]);
+            if installed {
+                std::fs::rename(&destination, staged.join(entries[index])).with_context(|| {
+                    format!(
+                        "fetch rollback failed; preserved backup in {}",
+                        staged.display()
+                    )
+                })?;
+            }
+            if had_previous {
+                std::fs::rename(staged.join(format!("previous-{index}")), &destination)
+                    .with_context(|| {
+                        format!(
+                            "fetch rollback failed; preserved backup in {}",
+                            staged.display()
+                        )
+                    })?;
+            }
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    ensure_fetch_boundary(&study_dir)?;
+    let _fetch_lock = study::runner::StudyRunLock::acquire(&study_dir)?;
     let manifest = study::engine::status(&study_dir)?;
+    study::engine::verify_frozen_inputs(&manifest)?;
     let mut record = read_record(&study_dir)?;
     let ssh = Ssh::new(&record.host)?;
     let status = job::status(&ssh, &record.root, &record.job, 20)?;
@@ -518,23 +807,37 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let state = transplant_state(state, &manifest.id, &remote_root, &study_dir);
     let typed: study::state::StudyState =
         serde_json::from_value(state).context("the server Study state is not readable here")?;
-    // `results/` 整个换成服务器上的。
-    let tmp = study_dir.join(".fetch-results");
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp)?;
-    ssh.download(&remote_root, &["results".to_owned()], &tmp)?;
-    let results = study_dir.join("results");
-    let _ = std::fs::remove_dir_all(&results);
-    std::fs::rename(tmp.join("results"), &results)?;
-    let _ = std::fs::remove_dir_all(&tmp);
-    study::checkpoint::write_next(&study_dir.join("checkpoints/state"), &typed)?;
+    // Stage all data and the next checkpoint before replacing anything local.
+    let tmp = study_dir.join(format!(
+        ".fetch-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir(&tmp)?;
+    ssh.download(
+        &remote_root,
+        &["results".to_owned(), "samples".to_owned()],
+        &tmp,
+    )?;
+    validate_fetched_samples(&manifest, &typed, &tmp)?;
+    regular_tree_files(&tmp.join("results"), false)?;
+    if study_dir.join("results").exists() {
+        regular_tree_files(&study_dir.join("results"), false)?;
+    }
+    for (name, bytes) in regular_tree_files(&study_dir.join("checkpoints/state"), true)? {
+        let path = tmp.join("checkpoints/state").join(name);
+        std::fs::create_dir_all(path.parent().context("checkpoint has no parent")?)?;
+        std::fs::write(path, bytes)?;
+    }
+    study::checkpoint::write_next(&tmp.join("checkpoints/state"), &typed)?;
     record.fetched_at = Some(now());
     record.provenance["ok"] = json!(exit_code == 0);
     record.provenance["finished"] = json!(now());
-    std::fs::write(
-        study_dir.join(RECORD),
-        serde_json::to_string_pretty(&record)?,
-    )?;
+    std::fs::write(tmp.join(RECORD), serde_json::to_string_pretty(&record)?)?;
+    install_fetched_study(&study_dir, &tmp)?;
+    let _ = std::fs::remove_dir_all(&tmp);
     println!(
         "{}",
         json!({

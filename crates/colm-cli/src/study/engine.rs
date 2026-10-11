@@ -182,7 +182,7 @@ pub(super) fn ensure_supported_study_manifest(
         ensure_supported_study_inputs(&[], kernel_macros)?;
     }
     if let Some(kernel_dir) = manifest.spec.kernel_dir.as_deref() {
-        let kernel = colm_kernel::Kernel::open(Path::new(kernel_dir))
+        let kernel = colm_kernel::Kernel::open_manifest(Path::new(kernel_dir))
             .with_context(|| format!("cannot inspect Study kernel {}", kernel_dir))?;
         ensure_supported_study_inputs(&[], &kernel.manifest.macros)?;
     }
@@ -330,7 +330,7 @@ pub fn status(study_dir: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-pub(super) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
+pub(crate) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
     spec::validate_spec(&manifest.spec).context("Study spec is no longer supported")?;
     if manifest.provenance.parameter_catalog_version != 0
         && manifest.provenance.parameter_catalog_version != colm_case::parameters::CATALOG_VERSION
@@ -1053,7 +1053,7 @@ fn provenance(
     }
     let kernel_id = match spec.kernel_dir.as_deref() {
         Some(path) => {
-            let kernel = colm_kernel::Kernel::open(Path::new(path))?;
+            let kernel = colm_kernel::Kernel::open_manifest(Path::new(path))?;
             format!(
                 "{} ({})",
                 kernel.manifest.identity(),
