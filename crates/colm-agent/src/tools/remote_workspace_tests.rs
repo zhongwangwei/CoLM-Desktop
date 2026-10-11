@@ -79,3 +79,28 @@ fn remote_tools_are_window_only_and_reject_arbitrary_commands() {
         .call(&json!({}), &ToolContext::default())
         .is_err());
 }
+
+#[test]
+fn remote_knowledge_is_read_only_and_rejects_unsafe_paths_before_ssh() {
+    let window = Arc::new(Window::default());
+    let ctx = ToolContext {
+        ui: Some(UiHandle(window.clone())),
+        ..Default::default()
+    };
+    let tool = RemoteWorkspace(Operation::Knowledge);
+    assert_eq!(tool.tier(), Tier::Read);
+    for path in [
+        "/etc/passwd",
+        "crates/../secret.rs",
+        "vendor/.secret.rs",
+        "crates/a\\b.rs",
+        "crates/password.txt",
+    ] {
+        assert!(tool.call(&json!({"name":null,"host":"server","source":"/data/repo","query":"","paths":[path]}),&ctx).is_err());
+    }
+    assert!(window.0.lock().unwrap().is_empty());
+    assert!(valid_source_path("vendor/CoLM/main.F90"));
+    assert!(Registry::standard_for(false, false, true)
+        .find("remote_workspace_knowledge")
+        .is_some());
+}

@@ -111,3 +111,55 @@ fn unsafe_and_unbound_sources_cannot_support_current_answers() {
     }
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn remote_bindings_use_server_bytes_and_withhold_obsolete_assertions() {
+    let (root, text) = fixture("remote");
+    let path = "crates/core/flux.rs";
+    let local_hash = digest(&std::fs::read(root.join(path)).unwrap());
+    let info = json!({"source":"/server/code","sources":[{"path":path,"sha256":local_hash,"from_line":1,"lines":["server same bytes"]}]});
+    let matched = Bindings::load(&root.join("docs"), &info).check("cards.md", &text, "energy");
+    assert_eq!(matched["status"], "current");
+    let mut changed = info.clone();
+    changed["sources"][0]["sha256"] = json!(digest(b"server edits"));
+    changed["sources"][0]["lines"] = json!(["server changed energy formula"]);
+    let checked = Bindings::load(&root.join("docs"), &changed).check("cards.md", &text, "energy");
+    assert_eq!(checked["status"], "needs_review");
+    assert_eq!(checked["may_support_current_answer"], false);
+    assert_eq!(
+        checked["fresh_source_evidence"][0]["lines"][0],
+        "server changed energy formula"
+    );
+    let missing = Bindings::load(
+        &root.join("docs"),
+        &json!({"source":"/server/code","sources":[]}),
+    )
+    .check("cards.md", &text, "energy");
+    assert_eq!(missing["status"], "needs_review");
+    assert_eq!(missing["source_checks"][0]["status"], "unavailable");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn remote_snapshot_rejects_a_different_source_on_the_same_host() {
+    use crate::tools::ui::{UiBridge, UiHandle};
+    struct WrongSource;
+    impl UiBridge for WrongSource {
+        fn request(&self, _: &str, _: Value) -> Result<Value> {
+            Ok(
+                json!({"scope":{"kind":"remote","name":null,"host":"server","source":"/other/code"},"sources":[]}),
+            )
+        }
+    }
+    let ctx = crate::tools::ToolContext {
+        ui: Some(UiHandle(std::sync::Arc::new(WrongSource))),
+        ..Default::default()
+    };
+    let error = snapshot(
+        &ctx,
+        &json!({"kind":"remote","name":null,"host":"server","source":"/expected/code"}),
+        &[],
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("source identity mismatch"));
+}

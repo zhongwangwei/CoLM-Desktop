@@ -49,7 +49,7 @@ assert.match(
 
 assert.match(
   sites,
-  /const token = \+\+activeCaseSelection[\s\S]*const isCurrent = \(\) => token === activeCaseSelection && state\.selected\?\.dir === c\.dir[\s\S]*if \(!isCurrent\(\)\) return;[\s\S]*catch \(e\) \{ if \(isCurrent\(\)\)/,
+  /const token = \+\+activeCaseSelection[\s\S]*const isCurrent = \(\) => token === activeCaseSelection && state\.selected\?\.dir === c\.dir[\s\S]*if \(!isCurrent\(\)\) return;[\s\S]*catch \(e\) \{\s*if \(isCurrent\(\)\)/,
   'case selection must ignore stale read_text/unknown_fields responses',
 );
 assert.match(

@@ -3,6 +3,33 @@
 //! 同步翻译新节点，而不是要求每个 render 函数再维护一套 DOM。
 
 const ZH_EN = [
+  ['结果页面已变化，请重新读取界面。', 'The result page changed; read the interface again.'],
+  ['尚未完成校验', 'Validation is pending'],
+  ['没有可导出的图表，请先绘图。', 'No chart is available for export; plot it first.'],
+  ['分析上下文已变化，请重新读取界面和结果。', 'The analysis context changed; read the interface and results again.'],
+  ['请先生成报告。', 'Generate a report first.'],
+  ["先完成拟合并检查交叉验证结果", "Complete fitting and check cross-validation first"],
+  ["交叉验证未通过，不能安装此模型", "Cross-validation failed; this model cannot be installed"],
+  ["参数率定页尚不可用，请先检查算例准备状态", "Calibration is unavailable; check case readiness first"],
+  ["NAME · 分析范围", "NAME · Analysis scope"],
+  ["请选择有结果的算例和变量。", "Select a case with results and a variable."],
+  ["结果上下文已变化，请重新检查。", "The result context changed; check it again."],
+  ["请至少选择一个可用的评估变量。", "Select at least one available evaluation variable."],
+  ["没有可评估的算例。", "No cases are available for evaluation."],
+  ["批量评估已取消，保留已完成结果。", "Batch evaluation was cancelled; completed results are retained."],
+  ["部分站点评估失败：NAME", "Some site evaluations failed: NAME"],
+  ["请选择有结果的算例。", "Select a case with results."],
+  ["任务正在生成，请先查询状态。", "A task is being created; check its status first."],
+  ["候选超过 200 个，请调整预算或由用户在页面确认生成。", "More than 200 candidates: adjust the budget or confirm creation on the page."],
+  ["用户取消了操作。", "The user cancelled the operation."],
+  ["任务上下文已变化，请重新检查。", "The task context changed; check it again."],
+  ["原进程状态不确定，请由用户确认进程已退出后在页面重试。", "The original process status is uncertain; confirm it exited before retrying on the page."],
+  ["请先填写导出目录。", "Enter an export directory first."],
+  ["用户取消了导出。", "The user cancelled the export."],
+  ["导出目录（留空时手动选择）", "Export directory (leave empty to choose manually)"],
+  ["当前页面不能执行此操作，请重新读取界面。", "This action is unavailable on the current page; read the interface again."],
+  ["请先评估当前站点。", "Evaluate the current site first."],
+  ["PDF 请使用 export-pdf 操作打开打印窗口。", "For PDF, use export-pdf to open the print dialog."],
   ['OpenCode（独立配置）', 'OpenCode (separate configuration)'],
   ['首次连接模型', 'Connect a model for the first time'],
   ['需要 OpenCode 2.0.6 与 sqlite3；仅连接模型服务商，不支持组织配置。', 'Requires OpenCode 2.0.6 and sqlite3. Connect model providers only; organization configuration is unsupported.'],
@@ -1326,6 +1353,23 @@ const ZH_EN = [
   ['已跑过', 'Previously run'],
   ['未跑', 'Not run'],
   ['已建算例', 'Case created'],
+  ['算例正在创建，请等待结果', 'Case creation is in progress; wait for the result'],
+  ['空间工作流已变化，请重新核对设置', 'The spatial workflow changed; check the settings again'],
+  ['工作流已变化，请重新打开算例', 'The workflow changed; open the case again'],
+  ['无法进入请求的算例页面', 'Could not open the requested case page'],
+  ['正在打开算例，请等待结果', 'A case is being opened; wait for the result'],
+  ['未选择算例目录', 'No case directory was selected'],
+  ['没有正在运行的算例', 'There are no running cases'],
+  ['算例正在运行或启动，请先等待或取消', 'Cases are running or starting; wait or cancel first'],
+  ['算例未能启动或运行失败，请检查运行日志', 'A case failed to start or run; check the run logs'],
+  ['启动尚未确认，任务可能仍在启动；请核对运行状态，不要重复提交', 'Launch is not confirmed; the task may still be starting. Check run status and do not submit again'],
+  ['服务器任务提交失败', 'Server task submission failed'],
+  ['未找到已创建的算例，请检查算例目录', 'Created cases were not found; check the case directory'],
+  ['当前算例已变化，请重新核对选择', 'The current case changed; check the selection again'],
+  ['站点目录已变化，请重新核对输入', 'The site directory changed; check the inputs again'],
+  ['示例目录没有可用的站点文件', 'The example directory has no usable site files'],
+  ['无法核对建例结果：', 'Could not verify case creation: '],
+  ['建例结果不完整，请核对已写入的算例目录后再继续', 'Case creation is incomplete; check the written case directories before continuing'],
   ['先点一个站点，或勾选几个', 'Click one site or check several'],
   ['先在“基本设定 / 文件与目录”指定算例放哪', 'Choose the case location under “Basic setup / Files & directories” first'],
   ['没有强迫场文件，建不了算例', 'has no forcing file, so its case cannot be created'],
@@ -2603,6 +2647,7 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    .replace(/^结果校验失败：(.*)$/, 'Result validation failed: $1')
     // 运行日志的阶段小标题（`sidecar.rs` 的 stage_heading）。
     .replace(/^──── 制作地表数据（(\w+)）────$/, '──── Surface data ($1) ────')
     .replace(/^──── 制作初始场（(\w+)）────$/, '──── Initial state ($1) ────')

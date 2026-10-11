@@ -209,6 +209,8 @@ function input(cls, value, placeholder = '', type = 'text') {
   return el;
 }
 
+let outputRowId = 0;
+
 /** 一行输出：参数名、下限、上限、变换、删除。 */
 function outputRow(host, output, transforms, onChange) {
   const row = element('div', 'hybrid-output-row');
@@ -234,6 +236,11 @@ function outputRow(host, output, transforms, onChange) {
   for (const el of [name, lo, hi, transform]) el.addEventListener('input', () => onChange?.());
   transform.addEventListener('change', () => onChange?.());
   relative.addEventListener('change', () => onChange?.());
+  const rowId = `${host.id}-row-${++outputRowId}`;
+  for (const [key, control] of Object.entries({ name, lo, hi, transform, relative, remove })) {
+    control.id = `${rowId}-${key}`;
+    control.ariaLabel = `${output.name || '输出'} ${key}`;
+  }
   row.append(name, lo, element('span', 'muted', '–'), hi, transform, relativeLabel, remove);
   row.read = () => ({
     name: name.value, lo: lo.value, hi: hi.value, transform: transform.value, relative: relative.checked,
@@ -282,11 +289,17 @@ function renderCaseTable(cases, infos) {
     const slots = info?.slots ?? [];
     const actions = element('td');
     const climate = element('button', 'btn-ghost', info?.climate ? '重算气候特征' : '计算气候特征');
+    climate.id = `hybrid-climate-${index}`;
+    climate.dataset.hybridCase = c.dir;
+    climate.dataset.hybridAction = 'climate';
     climate.type = 'button';
     climate.onclick = () => computeClimate(c, climate).catch(e => status(e));
     actions.appendChild(climate);
     if (info?.installed) {
       const check = element('button', 'btn-ghost', '检查');
+      check.id = `hybrid-check-${index}`;
+      check.dataset.hybridCase = c.dir;
+      check.dataset.hybridAction = 'check';
       check.type = 'button';
       check.onclick = () => checkCase(c).catch(e => status(e));
       const remove = element('button', 'btn-ghost', '移除');
@@ -337,7 +350,7 @@ function syncEngineWarning() {
 }
 
 /** 重新读本次算例的配置并重画卡片。 */
-export async function refreshHybridCard() {
+export async function refreshHybridCard({ strict = false } = {}) {
   const host = $('hybrid-cases');
   if (!host || !hasBackend) return;
   const token = ++refreshToken;
@@ -348,8 +361,14 @@ export async function refreshHybridCard() {
     syncEngineWarning();
     return;
   }
-  const infos = await Promise.all(cases.map(c => caseInfo(c.dir).catch(() => null)));
-  if (token !== refreshToken) return;
+  const infos = await Promise.all(cases.map(c => caseInfo(c.dir).catch(error => {
+    if (strict) throw error;
+    return null;
+  })));
+  if (token !== refreshToken) {
+    if (strict) throw new Error('任务上下文已变化，请重新检查。');
+    return;
+  }
   host.replaceChildren(renderCaseTable(cases, infos));
   syncEngineWarning();
   syncImportSlot(infos);
@@ -380,7 +399,7 @@ async function checkCase(c) {
     summary = JSON.parse(await invoke('hybrid_check', { case: c.dir, kernelDir }));
   } catch (error) {
     host.replaceChildren(element('p', 'warn mini', String(error?.message || error)));
-    return;
+    throw error;
   }
   const title = element('div', 'hybrid-check-title');
   title.append(element('h4', '', '检查结果'), element('span', 'muted mini', c.name || baseName(c.dir)));
@@ -475,9 +494,7 @@ function wireRunCard() {
   $('hybrid-install').onclick = () => installModel().catch(e => status(e?.message || e));
   // 训练在参数率定里：跳过去并打开“同时训练 AI 模型”。
   $('hybrid-go-tuning').onclick = () => {
-    go('result-tuning');
-    const toggle = $('tune-hybrid-on');
-    if (toggle && !toggle.checked) toggle.click();
+    try { goToTuning(); } catch (error) { status(error?.message || error); }
   };
   addEventListener('colm:step', () => refreshHybridCard().catch(e => status(e)));
   // 算例勾选与引擎下拉框的 change 冒泡到窗口；在这里统一接，不依赖那两个元素何时建好。
@@ -548,6 +565,7 @@ wireRunCard();
 
 let selectedPreset = null;
 let fitResult = null;
+const FIT_INSTALL = 'hybrid-fit-install';
 let hybridPane = 'overview';
 
 const isHybridStep = () => state.step === 'hybrid-learn' || state.step === 'hybrid-process';
@@ -681,14 +699,14 @@ function presetTitle() {
   return PRESETS.find(p => p.id === selectedPreset)?.title ?? '自定义';
 }
 
-function setMethod(method) {
+function setMethod(method, refresh = true) {
   for (const b of $('hybrid-method').querySelectorAll('button')) {
     const on = b.dataset.method === method;
     b.classList.toggle('on', on);
     b.setAttribute('aria-pressed', String(on));
   }
   for (const pane of document.querySelectorAll('[data-method-pane]')) pane.hidden = pane.dataset.methodPane !== method;
-  if (method === 'two-step' && !$('hybrid-fit-studies').childElementCount) refreshStudies().catch(e => status(e?.message || e));
+  if (refresh && method === 'two-step' && !$('hybrid-fit-studies').childElementCount) refreshStudies().catch(e => status(e?.message || e));
 }
 
 /** 当前“要学什么”的网络设置（与 Study 的 hybrid 段同格式）；不合法时抛出说明。 */
@@ -707,7 +725,7 @@ async function refreshStudies() {
   const root = $('hybrid-fit-root').value.trim() || $('root')?.value?.trim();
   if (!root) {
     $('hybrid-fit-studies').replaceChildren(element('div', 'result-empty', '先填项目目录'));
-    return;
+    throw new Error('先填项目目录');
   }
   $('hybrid-fit-root').value = root;
   $('hybrid-fit-studies').replaceChildren(element('div', 'result-empty', '正在查找…'));
@@ -727,12 +745,14 @@ function renderStudies() {
   const head = element('tr');
   for (const title of ['', '站点', '率定的参数', '状态', '']) head.appendChild(element('th', '', title));
   table.appendChild(head);
-  for (const study of studies) {
+  for (const [index, study] of studies.entries()) {
     const check = studyUsable(study, names);
     const row = element('tr');
     const box = element('input');
     box.type = 'checkbox';
     box.dataset.study = study.dir;
+    box.id = `hybrid-fit-study-${index}`;
+    box.setAttribute('aria-label', `${study.sites.join(', ')} · ${study.dir}`);
     box.checked = check.usable;
     box.disabled = !check.usable;
     const cell = element('td');
@@ -765,11 +785,15 @@ async function runFit() {
     epochs: linear ? null : Number($('hybrid-fit-epochs').value),
   };
   const box = $('hybrid-fit-result');
+  fitResult = null;
   box.replaceChildren(element('p', 'mini muted', `正在拟合（${chosen.length} 个任务，每个都要在基础算例上取特征，可能要几分钟）…`));
   $('hybrid-fit-run').disabled = true;
   try {
     fitResult = { ...(await invoke('hybrid_fit', { request })), network };
     renderFitResult();
+  } catch (error) {
+    box.replaceChildren(element('p', 'assistant-fail', String(error?.message || error)));
+    throw error;
   } finally {
     $('hybrid-fit-run').disabled = false;
   }
@@ -803,6 +827,7 @@ function renderFitResult() {
     parts.push(table);
   }
   const install = element('button', 'run-btn', '装到本次算例');
+  install.id = FIT_INSTALL;
   install.type = 'button';
   install.disabled = summary.passed === false;
   install.onclick = () => installFitted().catch(e => status(e?.message || e));
@@ -812,6 +837,8 @@ function renderFitResult() {
 }
 
 async function installFitted() {
+  if (!fitResult) throw new Error('先完成拟合并检查交叉验证结果');
+  if (fitSummary(fitResult.report).passed === false) throw new Error('交叉验证未通过，不能安装此模型');
   const dirs = batchTarget().map(c => c.dir);
   if (!dirs.length) throw new Error('本次还没有算例；先在基本设定里建算例');
   const { network, model, normalize } = fitResult;
@@ -869,3 +896,80 @@ function wireTraining() {
 }
 
 wireTraining();
+
+function goToTuning() {
+  currentNetwork();
+  go('result-tuning');
+  if (state.step !== 'result-tuning') throw new Error('参数率定页尚不可用，请先检查算例准备状态');
+  const toggle = $('tune-hybrid-on');
+  if (toggle && !toggle.checked) toggle.click();
+}
+
+// Reuse the same visible controls and awaited operations as the manual workflow.
+export const hybridGuide = {
+  async prepare() {
+    if (!isHybridStep()) return;
+    await refreshHybridCard({ strict: true });
+    applyMode();
+  },
+  fields() {
+    if (!isHybridStep()) return [];
+    return [...document.querySelectorAll('[data-flow-pane="hybrid-learn hybrid-process"] input, [data-flow-pane="hybrid-learn hybrid-process"] select')].filter(el => el.id);
+  },
+  actions() {
+    if (!isHybridStep()) return {};
+    const actions = {};
+    const add = (id, element, kind, run) => {
+      if (element) { element.id = id; actions[id] = { element, kind, run }; }
+    };
+    for (const button of document.querySelectorAll('#hybrid-tabs [data-hybrid-pane-go]')) {
+      add(`hybrid-pane-${button.dataset.hybridPaneGo}`, button, 'click', () => showPane(button.dataset.hybridPaneGo));
+    }
+    for (const button of document.querySelectorAll('#hybrid-presets [data-preset]')) {
+      add(`hybrid-preset-${button.dataset.preset}`, button, 'click', () => applyPreset(button.dataset.preset));
+    }
+    for (const button of document.querySelectorAll('#hybrid-method [data-method]')) {
+      const method = button.dataset.method;
+      if (!methodsForMode(hybridMode()).includes(method) || method === 'gradient') continue;
+      add(`hybrid-method-${method}`, button, 'click', async () => {
+        setMethod(method, false);
+        if (method === 'two-step') await refreshStudies();
+      });
+    }
+    for (const id of ['hybrid-add-output', 'tune-hybrid-add-output']) {
+      add(id, $(id), 'click', () => $(id).onclick());
+    }
+    for (const button of document.querySelectorAll('#hybrid-outputs .hybrid-output-row button, #tune-hybrid-outputs .hybrid-output-row button')) {
+      add(button.id, button, 'click', () => button.onclick());
+    }
+    add('hybrid-custom-open', $('hybrid-custom')?.querySelector('summary'), 'click', () => { $('hybrid-custom').open = true; });
+    if (hybridMode() === 'params') {
+      add('hybrid-fit-refresh', $('hybrid-fit-refresh'), 'click', refreshStudies);
+      add('hybrid-fit-run', $('hybrid-fit-run'), 'commit', runFit);
+      add(FIT_INSTALL, $(FIT_INSTALL), 'commit', installFitted);
+    }
+    add('hybrid-go-tuning', $('hybrid-go-tuning'), 'click', goToTuning);
+    add('hybrid-install', $('hybrid-install'), 'commit', installModel);
+    for (const button of document.querySelectorAll('#hybrid-cases [data-hybrid-action]')) {
+      const c = batchTarget().find(c => c.dir === button.dataset.hybridCase);
+      if (!c) continue;
+      const climate = button.dataset.hybridAction === 'climate';
+      add(button.id, button, climate ? 'commit' : 'click', () => climate ? computeClimate(c, button) : checkCase(c));
+    }
+    return actions;
+  },
+  state() {
+    if (!isHybridStep()) return {};
+    const validation = fitResult ? fitSummary(fitResult.report) : null;
+    if (validation) validation.rows = validation.rows.slice(0, 32);
+    return {
+      mode: hybridMode(), pane: hybridPane, preset: selectedPreset,
+      method: document.querySelector('#hybrid-method button.on')?.dataset.method ?? null,
+      fit: fitResult ? { model: fitResult.model, validation } : null,
+      status: ($('hybrid-fit-result')?.textContent ?? '').slice(0, 4000),
+      cases: ($('hybrid-cases')?.textContent ?? '').slice(0, 4000),
+      check: ($('hybrid-check-result')?.textContent ?? '').slice(0, 4000),
+      studies: ($('hybrid-fit-studies')?.textContent ?? '').slice(0, 4000),
+    };
+  },
+};

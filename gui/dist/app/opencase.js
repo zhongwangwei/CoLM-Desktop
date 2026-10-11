@@ -61,57 +61,81 @@ function report(message) {
 
 /** 打开一个算例目录；不给目录时让用户选。助手建好算例后经 `colm:open-case-dir` 直接传目录进来，
  *  并可指定打开后停在哪一步（建好的算例直接到“运行”）。 */
-export async function openExistingCase(chosen, step = 'basic-files') {
-  const dir = typeof chosen === 'string' ? chosen : await invoke('pick_folder', { key: 'open-case' });
-  if (!dir) return;
-  let opened;
-  try {
-    opened = await invoke('open_case', { dir });
-  } catch (e) {
-    report(String(e));
+let openingPending = false;
+export async function openExistingCase(chosen, step = 'basic-files', { strict = false } = {}) {
+  if (openingPending) {
+    const error = new Error('正在打开算例，请等待结果');
+    if (strict) throw error;
+    report(String(error));
     return;
   }
-  // 打开算例走的也是 startSession；告诉「文件与目录」页这次不是新向导，表单不要重置成新建状态。
-  state.openingCase = true;
+  openingPending = true;
+  const initialWizard = state.wizard;
   try {
-    startSession(sessionFromProfile(opened.profile));
+    const dir = typeof chosen === 'string' ? chosen : await invoke('pick_folder', { key: 'open-case' });
+    if (!dir) {
+      if (strict) throw new Error('未选择算例目录');
+      return;
+    }
+    const opened = await invoke('open_case', { dir });
+    if (state.wizard !== initialWizard) throw new Error('工作流已变化，请重新打开算例');
+    for (const id of ['launchgate', 'domaingate']) if ($(id)) $(id).hidden = true;
+    // 打开算例走的也是 startSession；告诉「文件与目录」页这次不是新向导，表单不要重置成新建状态。
+    state.openingCase = true;
+    try {
+      startSession(sessionFromProfile(opened.profile));
+    } finally {
+      state.openingCase = false;
+    }
+    // 跑过的算例记着上次的内核；按宏匹配到的若不是它，换回它。
+    const last = state.kernels.find(k => k.preset === opened.profile.kernel_preset);
+    if (last) $('kernel').value = last.dir;
+    // 建算例表单里的输入原样填回：站点算例是 RawData/Runtime 与根目录，空间算例是整张表单。
+    const inputs = opened.profile.inputs;
+    const wizardRef = state.wizard;
+    const checkCurrent = () => {
+      if (state.wizard !== wizardRef) throw new Error('工作流已变化，请重新打开算例');
+    };
+    for (const [id, value] of [['root', opened.root], ['rawdata', inputs.rawdata], ['runtime', inputs.runtime]]) {
+      const el = $(id);
+      if (!el) continue;
+      el.value = value ?? '';
+      el.dispatchEvent(new Event('change'));
+    }
+    if (opened.profile.spatial) await fillSpatialForm(inputs, opened.root);
+    checkCurrent();
+    let cases;
+    try {
+      cases = await invoke('list_cases', { root: opened.root });
+    } catch {
+      cases = [opened.entry];
+    }
+    checkCurrent();
+    state.cases = cases;
+    const entry = state.cases.find(c => c.dir === opened.entry.dir) ?? opened.entry;
+    state.createdCases.add(entry.dir);
+    state.pickedCases.add(entry.dir);
+    renderCases();
+    await selectCase(entry, { strict: true });
+    checkCurrent();
+    if (state.selected?.dir !== entry.dir) throw new Error('当前算例已变化，请重新核对选择');
+    renderSteps();
+    go(step);
+    if (state.step !== step) throw new Error('无法进入请求的算例页面');
+    setStatus(`已打开算例 ${entry.name}`);
+    return entry;
+  } catch (e) {
+    report(String(e));
+    if (strict) throw e;
   } finally {
-    state.openingCase = false;
+    openingPending = false;
   }
-  // 跑过的算例记着上次的内核；按宏匹配到的若不是它，换回它。
-  const last = state.kernels.find(k => k.preset === opened.profile.kernel_preset);
-  if (last) $('kernel').value = last.dir;
-  // 建算例表单里的输入原样填回：站点算例是 RawData/Runtime 与根目录，空间算例是整张表单。
-  const inputs = opened.profile.inputs;
-  for (const [id, value] of [['root', opened.root], ['rawdata', inputs.rawdata], ['runtime', inputs.runtime]]) {
-    const el = $(id);
-    if (!el || !value) continue;
-    el.value = value;
-    el.dispatchEvent(new Event('change'));
-  }
-  if (opened.profile.spatial) await fillSpatialForm(inputs, opened.root);
-  try {
-    state.cases = await invoke('list_cases', { root: opened.root });
-  } catch {
-    state.cases = [opened.entry];
-  }
-  const entry = state.cases.find(c => c.dir === opened.entry.dir) ?? opened.entry;
-  state.createdCases.add(entry.dir);
-  state.pickedCases.add(entry.dir);
-  renderCases();
-  await selectCase(entry);
-  renderSteps();
-  go(step);
-  if (state.step !== step) go('basic-files');
-  setStatus(`已打开算例 ${entry.name}`);
 }
 
 addEventListener('colm:open-case', () => openExistingCase());
 addEventListener('colm:open-case-dir', event => {
   const dir = event.detail?.dir;
   if (!dir) return;
-  // 首页（启动页、配置向导）上点的：先收起它们，再打开算例。
-  for (const id of ['launchgate', 'domaingate']) if ($(id)) $(id).hidden = true;
   return openExistingCase(dir, event.detail?.step);
 });
 $('open-case')?.addEventListener('click', () => openExistingCase());

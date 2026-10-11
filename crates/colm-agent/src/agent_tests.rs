@@ -9,6 +9,8 @@ use crate::tools::{object, Tier, Tool};
 struct Scripted {
     turns: Mutex<Vec<Turn>>,
     seen: Mutex<Vec<Vec<Message>>>,
+    seen_tools: Mutex<Vec<Vec<Value>>>,
+    stream_content: bool,
 }
 
 impl Scripted {
@@ -17,6 +19,8 @@ impl Scripted {
         Self {
             turns: Mutex::new(turns),
             seen: Mutex::new(Vec::new()),
+            seen_tools: Mutex::new(Vec::new()),
+            stream_content: true,
         }
     }
 }
@@ -25,12 +29,13 @@ impl Provider for Scripted {
     fn complete(
         &self,
         messages: &[Message],
-        _tools: &[Value],
+        tools: &[Value],
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<Turn> {
         self.seen.lock().unwrap().push(messages.to_vec());
+        self.seen_tools.lock().unwrap().push(tools.to_vec());
         let turn = self.turns.lock().unwrap().pop().expect("script ran out");
-        if !turn.content.is_empty() {
+        if self.stream_content && !turn.content.is_empty() {
             on_event(StreamEvent::Content(turn.content.clone()));
         }
         Ok(turn)
@@ -331,7 +336,7 @@ fn a_patch_is_asked_about_every_time_even_if_the_user_chose_always_allow() {
 }
 
 #[test]
-fn cancelling_and_runaway_loops_stop_the_turn() {
+fn cancelling_stops_the_turn_and_budget_exhaustion_returns_a_summary() {
     let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
     let provider = Scripted::new(vec![answer("never")]);
     let cancelled = AtomicBool::new(true);
@@ -347,22 +352,254 @@ fn cancelling_and_runaway_loops_stop_the_turn() {
         .unwrap_err();
     assert!(error.to_string().contains("cancelled"));
 
-    let provider = Scripted::new(
-        (0..5)
-            .map(|i| tool_turn(vec![call(&i.to_string(), "echo", r#"{"x":1}"#)]))
-            .collect(),
-    );
-    let error = agent(&provider, &registry)
+    let mut turns: Vec<_> = (0..4)
+        .map(|i| {
+            tool_turn(vec![call(
+                &i.to_string(),
+                "echo",
+                &format!(r#"{{"x":{i}}}"#),
+            )])
+        })
+        .collect();
+    turns.push(answer(
+        "Checked four inputs; the remaining work is unverified.",
+    ));
+    let provider = Scripted::new(turns);
+    let mut history = vec![Message::User {
+        content: "x".into(),
+    }];
+    let outcome = agent(&provider, &registry)
         .run_turn(
-            &mut vec![Message::User {
-                content: "x".into(),
-            }],
+            &mut history,
             &mut |_| {},
             &mut Answers(Vec::new(), 0),
             &AtomicBool::new(false),
         )
-        .unwrap_err();
-    assert!(error.to_string().contains("stopped after 5 model steps"));
+        .unwrap();
+    assert_eq!(outcome.steps, 5);
+    assert!(outcome.content.contains("unverified"));
+    assert!(provider.seen_tools.lock().unwrap()[4].is_empty());
+    assert!(
+        matches!(provider.seen.lock().unwrap()[4].last(), Some(Message::User { content }) if content.contains("last model generation"))
+    );
+    assert_eq!(
+        history
+            .iter()
+            .filter(|m| matches!(m, Message::User { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn repeated_read_queries_finalize_early_with_canonical_arguments_and_usage() {
+    let mut turns: Vec<_> = [r#"{"x":1}"#, r#"{ "x" : 1 }"#, r#"{"x":1}"#]
+        .iter()
+        .enumerate()
+        .map(|(i, args)| tool_turn(vec![call(&i.to_string(), "echo", args)]))
+        .collect();
+    turns.push(answer("Still running; completion is unverified."));
+    for turn in &mut turns {
+        turn.usage = Usage {
+            prompt_tokens: 10,
+            completion_tokens: 2,
+        };
+    }
+    let provider = Scripted::new(turns);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
+    let mut history = vec![Message::User {
+        content: "wait".into(),
+    }];
+    let mut events = Vec::new();
+    let outcome = agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut Answers(Vec::new(), 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.steps, 4);
+    assert_eq!(
+        outcome.usage,
+        Usage {
+            prompt_tokens: 40,
+            completion_tokens: 8
+        }
+    );
+    assert!(provider.seen_tools.lock().unwrap()[3].is_empty());
+    assert!(
+        matches!(provider.seen.lock().unwrap()[3].last(), Some(Message::User { content }) if content.contains("repeated three times"))
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Outbound::ToolCall { .. }))
+            .count(),
+        3
+    );
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Outbound::AssistantDelta { text } if text == &outcome.content)));
+}
+
+#[test]
+fn identical_ui_requests_with_changing_results_keep_tools_available() {
+    use crate::tools::ui::{UiBridge, UiHandle};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+
+    struct Advancing(AtomicUsize);
+    impl UiBridge for Advancing {
+        fn request(&self, _action: &str, _args: Value) -> Result<Value> {
+            let page = self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(serde_json::json!({ "step": page }))
+        }
+    }
+
+    for (tool, args) in [
+        ("ui_click", r#"{"target":"next-step"}"#),
+        ("ui_state", "{}"),
+    ] {
+        let mut turns: Vec<_> = (0..4)
+            .map(|i| tool_turn(vec![call(&i.to_string(), tool, args)]))
+            .collect();
+        turns.push(answer("The workflow advanced."));
+        let provider = Scripted::new(turns);
+        let registry = Registry::standard_with(false, true);
+        let mut agent = agent(&provider, &registry);
+        agent.limits.max_steps = 6;
+        agent.context.ui = Some(UiHandle(Arc::new(Advancing(AtomicUsize::new(0)))));
+        let outcome = agent
+            .run_turn(
+                &mut vec![Message::User {
+                    content: "continue".into(),
+                }],
+                &mut |_| {},
+                &mut Answers(Vec::new(), 0),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.steps, 5, "{tool}");
+        assert_eq!(outcome.content, "The workflow advanced.");
+        assert!(provider
+            .seen_tools
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|tools| !tools.is_empty()));
+    }
+}
+
+#[test]
+fn different_reads_and_intervening_actions_do_not_trigger_repetition_summary() {
+    let provider = Scripted::new(vec![
+        tool_turn(vec![call("1", "echo", r#"{"x":1}"#)]),
+        tool_turn(vec![call("2", "echo", r#"{"x":2}"#)]),
+        tool_turn(vec![call("3", "echo", r#"{"x":2}"#)]),
+        tool_turn(vec![call("4", "act", r#"{"x":2}"#)]),
+        tool_turn(vec![call("5", "echo", r#"{"x":2}"#)]),
+        answer("Checked after the change."),
+    ]);
+    let registry = Registry::with(vec![Box::new(Echo(Tier::Read)), Box::new(Echo(Tier::Act))]);
+    let mut agent = agent(&provider, &registry);
+    agent.limits.max_steps = 8;
+    let mut approvals = Answers(vec![Decision::Approve], 0);
+    let outcome = agent
+        .run_turn(
+            &mut vec![Message::User {
+                content: "check".into(),
+            }],
+            &mut |_| {},
+            &mut approvals,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.steps, 6);
+    assert_eq!(approvals.1, 1);
+    assert!(provider
+        .seen_tools
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|tools| !tools.is_empty()));
+}
+
+#[test]
+fn final_generation_never_executes_unsolicited_tools_or_persists_control_prompts() {
+    for reply in [
+        Turn::default(),
+        tool_turn(vec![call("unexpected", "act", r#"{"x":1}"#)]),
+    ] {
+        let provider = Scripted::new(vec![reply]);
+        let registry = Registry::with(vec![Box::new(Echo(Tier::Act))]);
+        let mut agent = agent(&provider, &registry);
+        agent.limits.max_steps = 1;
+        let mut history = vec![Message::User {
+            content: "check".into(),
+        }];
+        let mut events = Vec::new();
+        let outcome = agent
+            .run_turn(
+                &mut history,
+                &mut |e| events.push(e),
+                &mut Answers(Vec::new(), 0),
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+        assert_eq!(outcome.steps, 1);
+        assert!(outcome.content.contains("before completion was confirmed"));
+        assert!(events.iter().all(|e| !matches!(
+            e,
+            Outbound::ToolCall { .. } | Outbound::ApprovalRequest { .. }
+        )));
+        assert_eq!(history.len(), 2);
+        assert!(
+            matches!(history.last(), Some(Message::Assistant { tool_calls, .. }) if tool_calls.is_empty())
+        );
+    }
+}
+
+#[test]
+fn zero_step_budget_is_rejected_before_calling_the_provider() {
+    let provider = Scripted::new(vec![]);
+    let registry = Registry::with(vec![]);
+    let mut agent = agent(&provider, &registry);
+    agent.limits.max_steps = 0;
+    assert!(agent
+        .run_turn(
+            &mut vec![],
+            &mut |_| {},
+            &mut Answers(Vec::new(), 0),
+            &AtomicBool::new(false)
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("max_steps must be positive"));
+    assert!(provider.seen.lock().unwrap().is_empty());
+}
+
+#[test]
+fn summary_is_visible_when_provider_returns_text_without_content_deltas() {
+    let mut provider = Scripted::new(vec![answer("The job is still running.")]);
+    provider.stream_content = false;
+    let registry = Registry::with(vec![]);
+    let mut agent = agent(&provider, &registry);
+    agent.limits.max_steps = 1;
+    let mut events = Vec::new();
+    let outcome = agent
+        .run_turn(
+            &mut vec![Message::User {
+                content: "wait".into(),
+            }],
+            &mut |e| events.push(e),
+            &mut Answers(Vec::new(), 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Outbound::AssistantDelta { text } if text == &outcome.content)));
 }
 
 #[test]

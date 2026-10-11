@@ -6,8 +6,10 @@
 mod act;
 mod code;
 mod diagnostics;
+mod experience;
 mod fs;
-mod read;
+mod knowledge_drafts;
+pub(crate) mod read;
 mod remote_workspace;
 pub mod ui;
 pub mod web;
@@ -60,6 +62,10 @@ pub struct ToolContext {
     pub ui: Option<ui::UiHandle>,
     /// 开发工作区的根目录；空表示用 `colm-cli` 的默认（`COLM_WORKSPACES` 或 `~/CoLM-Workspaces`）。
     pub workspace_root: Option<PathBuf>,
+    /// 当前应用数据目录中的经验库；不同会话及模型共享，按项目隔离。
+    pub experience: Option<crate::experience::Store>,
+    /// Version-scoped generated knowledge, separate from installed reviewed documents.
+    pub knowledge_root: Option<PathBuf>,
 }
 
 /// 长命令的结果：是否成功、输出末尾。
@@ -76,6 +82,14 @@ fn tail_lines(text: &str, lines: usize) -> String {
 }
 
 impl ToolContext {
+    pub(crate) fn note_failure(&self, name: &str, id: &str, kind: &str) {
+        if let Some(store) = &self.experience {
+            if let Err(error) = store.note_failure(self, name, id, kind) {
+                eprintln!("experience observation unavailable: {error:#}");
+            }
+        }
+    }
+
     /// 把参数里的路径按项目目录解析。
     pub fn resolve(&self, path: &str) -> PathBuf {
         let path = Path::new(path);
@@ -226,6 +240,8 @@ impl Registry {
         tools.extend(code::tools());
         tools.extend(fs::tools());
         tools.extend(diagnostics::tools());
+        tools.extend(experience::tools());
+        tools.extend(knowledge_drafts::tools());
         Self { tools }
     }
 
@@ -237,15 +253,26 @@ impl Registry {
     /// 全部工具，按需加联网与引导模式（`ui_*`）。
     ///
     /// 能驱动窗口时不提供后台的 `create_case`：两条路都在时模型会挑省事的后台那条，建出的算例
-    /// 用户在工作台里看不到（第 631 轮实测）。窗口里也能批量建例（勾选多个站点）。
+    /// 用户在工作台里看不到（第 631 轮实测）。Study 同样走页面，保留配置、预算和任务状态。
     pub fn standard_with(web: bool, ui: bool) -> Self {
+        Self::standard_for(web, ui, false)
+    }
+
+    pub fn standard_for(web: bool, ui: bool, remote: bool) -> Self {
         let mut registry = Self::standard();
         if web {
             registry.tools.extend(web::tools());
         }
         if ui {
-            registry.tools.retain(|tool| tool.name() != "create_case");
+            registry.tools.retain(|tool| {
+                !matches!(
+                    tool.name(),
+                    "create_case" | "create_study" | "run_study" | "study_control"
+                )
+            });
             registry.tools.extend(ui::tools());
+        }
+        if ui || remote {
             registry.tools.extend(remote_workspace::tools());
         }
         registry

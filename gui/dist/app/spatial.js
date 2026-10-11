@@ -67,8 +67,8 @@ export async function fillSpatialForm(inputs, root) {
   await loadForcingDatasets();
   const set = (id, value) => {
     const el = $(id);
-    if (!el || value == null || value === '') return;
-    el.value = String(value);
+    if (!el) return;
+    el.value = String(value ?? '');
     el.dispatchEvent(new Event('change'));
   };
   set('spatial-rawdata', inputs.rawdata);
@@ -161,23 +161,35 @@ function problem() {
   return null;
 }
 
-$('make-spatial-case').onclick = async () => {
+let spatialCreationPending = false;
+export async function createSpatialCase({ strict = false } = {}) {
+  if (spatialCreationPending) {
+    const error = new Error('算例正在创建，请等待结果');
+    if (strict) throw error;
+    setStatus(error);
+    return;
+  }
   const error = problem();
   $('spatial-error').hidden = !error;
   $('spatial-error').textContent = error ?? '';
-  if (error) return;
+  if (error) {
+    if (strict) throw new Error(error);
+    return;
+  }
   const button = $('make-spatial-case');
   button.disabled = true;
+  spatialCreationPending = true;
   const root = $('spatial-root').value.trim();
   const name = $('spatial-name').value.trim();
   const context = spatialContext();
   const wizardRef = state.wizard;
   const stillCurrent = () => context === spatialContext() && wizardRef === state.wizard;
   const out = joinPath(root, name);
-  const domain = state.spatial.domain;
-  const grid = state.spatial.grid;
+  const domain = state.spatial?.domain;
+  const grid = state.spatial?.grid;
   setStatus('正在生成并预检空间算例…');
   try {
+    if (!domain || !grid) throw new Error('空间工作流已变化，请重新核对设置');
     await invoke('new_spatial_case', {
       domain: domain.kind, gridKind: grid.kind,
       shapefile: domain.shapefile ?? null,
@@ -202,37 +214,39 @@ $('make-spatial-case').onclick = async () => {
       fields: wizardFields(),
     });
     if (!stillCurrent()) {
-      setStatus(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
-      return;
+      throw new Error(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
     }
     const cases = await invoke('list_cases', { root });
     if (!stillCurrent()) {
-      setStatus(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
-      return;
+      throw new Error(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
     }
     state.createdCases.add(out);
     adoptCaseList(cases);
-    const made = state.cases.find(c => c.dir === out) ?? state.cases.find(c => c.name === name);
+    const made = state.cases.find(c => c.dir === out);
     if (!made) throw new Error('算例已生成，但重新扫描时没有找到它');
     state.batch = [made.dir];
     state.pickedCases.clear();
     state.pickedCases.add(made.dir);
-    await selectCase(made);
+    await selectCase(made, { strict: true });
     if (!stillCurrent()) {
-      setStatus(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
-      return;
+      throw new Error(`空间算例 ${name} 已生成；当前已切换工作流，未加入本次算例列表`);
     }
+    if (state.selected?.dir !== out) throw new Error('当前算例已变化，请重新核对选择');
     renderCases();
     renderSteps();
     setStatus(`空间算例 ${name} 已通过预检`);
+    return made;
   } catch (e) {
     $('spatial-error').hidden = false;
     $('spatial-error').textContent = String(e);
     setStatus(e);
+    if (strict) throw e;
   } finally {
+    spatialCreationPending = false;
     button.disabled = false;
   }
-};
+}
+$('make-spatial-case').onclick = () => createSpatialCase();
 
 // 新向导是一次新任务：上一个（可能是打开的）算例的名称与强迫场不能带进来；日期保留，常常沿用。
 function resetSpatialForm() {

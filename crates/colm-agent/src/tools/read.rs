@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use super::{object, opt_str, req_str, Tier, Tool, ToolContext, MAX_RESULT_CHARS};
 
 #[path = "knowledge.rs"]
-mod knowledge;
+pub(crate) mod knowledge;
 
 pub(super) fn tools() -> Vec<Box<dyn Tool>> {
     vec![
@@ -242,7 +242,7 @@ impl Tool for ExplainParameter {
             })
         });
         if descriptor.is_none() && field.is_none() {
-            bail!("{name} is neither a namelist field nor a catalogued parameter");
+            bail!("{name} is neither a namelist field nor a catalogued parameter. Read get_case_config for an existing case or search_code to discover exact field names; do not guess aliases. Spin-up uses DEF_simulation_time%spinup_year/month/day/sec/repeat; spinup_year is a cutoff year, not a duration. In the window, use basic-timing controls tm-years/tm-repeat to edit the duration.");
         }
         let parameter = colm_case::parameters::find(name);
         let key = parameter.map_or(name, |p| p.raw_key.as_str());
@@ -758,10 +758,12 @@ impl Tool for SearchDocs {
         "search_docs"
     }
     fn description(&self) -> &'static str {
-        "Search project documentation with file/line citations, source content identity and knowledge_checks. Changed source bindings mark knowledge needs_review, withhold stored assertions, and return freshly read source excerpts and read_file follow-ups. Unbound/unknown documents cannot establish current-version behavior."
+        "Search documentation and generated knowledge for the app (name=null) or a development workspace. Checks actual source hashes, withholds obsolete assertions and returns fresh source evidence. On changed or uncovered topics inspect source then automatically rewrite a scoped card with knowledge_update; AI drafts are never scientific validation. Use remote_workspace_knowledge for server edits."
     }
     fn parameters(&self) -> Value {
-        object(json!({ "query": string("case-insensitive text to find") }))
+        object(
+            json!({ "query": string("case-insensitive text to find"), "name": nullable_string("development workspace name, or null for application source") }),
+        )
     }
     fn tier(&self) -> Tier {
         Tier::Read
@@ -775,8 +777,9 @@ impl Tool for SearchDocs {
             .docs_root
             .as_ref()
             .context("no documentation directory is configured")?;
-        let provenance = documentation_provenance(ctx);
-        let bindings = knowledge::Bindings::load(root, &provenance["application_source"]);
+        let name = opt_str(args, "name");
+        let provenance = documentation_provenance(ctx, name);
+        let bindings = knowledge::Bindings::load(root, &provenance["knowledge_source"]);
         let mut knowledge_checks = BTreeMap::new();
         let mut hits = Vec::new();
         let mut files: Vec<PathBuf> = std::fs::read_dir(root)
@@ -799,13 +802,14 @@ impl Tool for SearchDocs {
                     let check = knowledge_checks
                         .entry(name.clone())
                         .or_insert_with(|| bindings.check(&name, &text, &query));
-                    let stale = check["status"] == "needs_review";
+                    let stale = check["status"] == "needs_review"
+                        || (check["status"] == "unknown" && bindings.is_bound(&name));
                     hits.push(json!({
                         "file": file.file_name().map(|n| n.to_string_lossy().into_owned()),
                         "path": file.display().to_string(),
                         "line": index + 1,
                         "context_start_line": index.saturating_sub(3) + 1,
-                        "context": if stale { vec!["Stored knowledge withheld: source/document changed. Use knowledge_checks fresh_source_evidence and inspect relevant current code before answering.".to_owned()] } else { lines[index.saturating_sub(3)..(index + 5).min(lines.len())]
+                        "context": if stale { vec!["Stored knowledge withheld: source/document changed or cannot be verified. Use knowledge_checks fresh_source_evidence and inspect relevant current code before answering.".to_owned()] } else { lines[index.saturating_sub(3)..(index + 5).min(lines.len())]
                             .iter().map(|s| s.chars().take(400).collect::<String>()).collect::<Vec<_>>()
                         },
                         "text": if stale { "Stored assertion requires review".to_owned() } else {line.chars().take(400).collect::<String>()},
@@ -818,8 +822,29 @@ impl Tool for SearchDocs {
                 }
             }
         }
+        let scope = &provenance["scope"];
+        let drafts = if ctx.knowledge_root.is_some() {
+            super::knowledge_drafts::search(ctx, scope, &query)?
+        } else {
+            Vec::new()
+        };
+        for check in knowledge_checks.values_mut() {
+            for source in check["source_checks"].as_array_mut().into_iter().flatten() {
+                if !source["next_tool"].is_null() {
+                    source["next_tool"]["arguments"]["name"] = json!(name);
+                }
+            }
+        }
         let mut result = json!({ "query": query, "matches": hits, "provenance": provenance, "knowledge_checks":knowledge_checks,
+            "drafts":drafts,"scope":scope,
+            "refresh_instruction":"On changed or uncovered topics, inspect current source and automatically rewrite a concise card with knowledge_update, exact source hashes and this scope. Keep units, switches, formulas, output effects and validation limits. Do not certify drafts or replace the reviewed baseline.",
             "truncated": hits.len() >= 60 });
+        while serde_json::to_string(&result)?.chars().count() > MAX_RESULT_CHARS
+            && !result["drafts"].as_array().unwrap().is_empty()
+        {
+            result["drafts"].as_array_mut().unwrap().pop();
+            result["truncated"] = json!(true);
+        }
         while serde_json::to_string(&result)?.chars().count() > MAX_RESULT_CHARS {
             result["matches"]
                 .as_array_mut()
@@ -842,14 +867,17 @@ impl Tool for SearchDocs {
     }
 }
 
-fn documentation_provenance(ctx: &ToolContext) -> Value {
+fn documentation_provenance(ctx: &ToolContext, name: Option<&str>) -> Value {
+    let (scope, source) = knowledge::local_source(ctx, name).unwrap_or_else(|error| (
+        json!({"kind":if name.is_some() {"workspace"} else {"app"},"name":name,"host":null,"source":null}),
+        json!({"version_status":"unknown","revision":null,"tag":null,"dirty":null,"reason":error.to_string()})
+    ));
     json!({
         "agent_package_version": env!("CARGO_PKG_VERSION"),
         "docs_root": ctx.docs_root,
-        "application_source": ctx.cli_json(&["ws-source-info", "--source", "app"])
-            .unwrap_or_else(|error| json!({ "version_status": "unknown", "revision": null,
-                "tag": null, "dirty": null, "reason": error.to_string() })),
-        "verification": "Use search_code/read_file with name=null for the application's source; documentation and package version alone do not establish its revision or the selected simulation kernel revision.",
+        "application_source": if name.is_none() {source.clone()} else {Value::Null},
+        "knowledge_source":source,"scope":scope,
+        "verification": "Use search_code/read_file with the same workspace name (null for app). Documentation and package version alone do not establish the selected simulation kernel revision.",
     })
 }
 

@@ -6,13 +6,18 @@
 pub mod agent;
 pub mod backend;
 pub mod bridge;
+pub mod experience;
 pub mod mcp;
 pub mod message;
 pub mod protocol;
 pub mod provider;
 pub mod secrets;
 pub mod session;
+pub mod terminal;
+pub mod terminal_remote;
 pub mod tools;
 
 /// 内置后端的系统提示。
 pub const SYSTEM_PROMPT: &str = include_str!("prompt.md");
+
+mod terminal_signals;

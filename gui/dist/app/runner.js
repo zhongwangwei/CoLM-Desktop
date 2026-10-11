@@ -312,22 +312,25 @@ const RUN_STAGES = ['mksrfdata', 'mkinidata', 'colm', null];
 const RUN_BUTTONS = ['run-mksrfdata', 'run-mkinidata', 'run-colm', 'runall'];
 
 for (let i = 0; i < RUN_STAGES.length; i++) {
-  $(RUN_BUTTONS[i]).onclick = () => runRequested(RUN_STAGES[i]);
+  $(RUN_BUTTONS[i]).onclick = () => runRequested(RUN_STAGES[i]).catch(status);
 }
 
-$('cancel-run').onclick = async () => {
+$('cancel-run').onclick = () => cancelRequested().catch(status);
+
+export async function cancelRequested() {
   const cases = [...state.runningCases];
-  if (!cases.length) return;
+  if (!cases.length) throw new Error('没有正在运行的算例');
   $('cancel-run').disabled = true;
   setRunning('busy', '正在取消运行…');
   try {
     const count = await invoke('cancel_runs', { cases });
     status(`已请求取消 ${count} 个算例`);
+    return { requested: count, cases };
   } catch (error) {
     syncCancelButton();
-    status(error);
+    throw error;
   }
-};
+}
 
 /** 下方四个按钮共用同一批目标。指定单段是明确的手工重建意图，始终强制
  *  执行该段；“运行全部”才由“强制全部重跑”决定是否忽略阶段指纹。 */
@@ -335,12 +338,12 @@ $('cancel-run').onclick = async () => {
 // 连点会对同一批站点并发建例、再起第二个批次。
 let runStarting = false;
 
-async function runRequested(stage) {
-  if (runStarting) return;
+export async function runRequested(stage = null) {
+  if (runStarting || state.runningCases.size) throw new Error('算例正在运行或启动，请先等待或取消');
   runStarting = true;
   for (const id of RUN_BUTTONS) { const b = $(id); if (b) b.disabled = true; }
   try {
-    await startRun(stage);
+    return await startRun(stage);
   } finally {
     runStarting = false;
     updateCaseBatchButtons();
@@ -356,46 +359,72 @@ async function startRun(stage) {
   if (unbuilt.length) {
     // 运行页一个都没勾表示"全部运行"；这时把新建的算例加进勾选会把批次缩成只有它们。
     const narrowed = state.pickedCases.size > 0;
-    const made = await ensureCases(unbuilt);
-    if (!made.length) { status('勾选的站点没能建出算例，未开始运行'); return; }
+    const made = await ensureCases(unbuilt, { strict: true });
+    if (!made.length) throw new Error('勾选的站点没能建出算例，未开始运行');
     for (const c of made) {
       if (!state.batch.includes(c.dir)) state.batch.push(c.dir);
       if (narrowed) state.pickedCases.add(c.dir);
     }
   }
   const dirs = batchTarget().map(c => c.dir);
-  if (!dirs.length) { status('本次还没有可运行的算例；先在基本设定中创建或打开算例'); return; }
+  if (!dirs.length) throw new Error('本次还没有可运行的算例；先在基本设定中创建或打开算例');
   if (stage !== 'mksrfdata' && stage !== 'mkinidata' && (await fortranBlockedCases(dirs)).length) {
-    status('有算例装了 AI 模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型');
-    return;
+    throw new Error('有算例装了 AI 模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型');
   }
   // 运行位置选了服务器：交给 remote.js 提交，之后由它查状态、取回结果。
   if (runTarget() !== 'local') {
-    await remoteRun(stage, dirs, stage !== null || $('force').checked);
-    return;
+    return await remoteRun(stage, dirs, stage !== null || $('force').checked);
   }
   const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;
   const mpiRanks = requestedRanks();
   const threads = requestedThreads();
+  let resolveStart, rejectStart;
+  const started = new Promise((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
+  let unlisten, startTimer;
+  let confirmationTimedOut = false;
   try {
-    if (dirs.length === 1) {
-      await invoke('run_case', {
+    // Subscribe before invoking: a fast child can start before the IPC promise returns.
+    unlisten = await listen('run://started', ({ payload }) => {
+      if (payload.run_id !== runId || !dirs.includes(payload.case)) return;
+      resolveStart({ run_id: runId, phase: 'started', started: [payload.case], queued: dirs.filter(dir => dir !== payload.case) });
+    });
+    startTimer = setTimeout(() => {
+      confirmationTimedOut = true;
+      rejectStart(new Error('启动尚未确认，任务可能仍在启动；请核对运行状态，不要重复提交'));
+    }, 90000);
+    const completion = dirs.length === 1
+      ? invoke('run_case', {
         runId, case: dirs[0], kernel: $('kernel').value, force, stage, mpiRanks,
         engine: modelEngine(), threads,
-      });
-    } else {
-      await invoke('run_batch', {
+      })
+      : invoke('run_batch', {
         runId, cases: dirs, kernel: $('kernel').value, maxConcurrent: requestedWorkers(),
         force, stage, mpiRanks, engine: modelEngine(), threads,
       });
-    }
+    // IPC lasts for the whole simulation; retain its failure handling after acknowledging launch.
+    Promise.resolve(completion).then(result => {
+      if (result === 0 || (result?.failed === 0 && result?.succeeded === dirs.length)) {
+        resolveStart({ run_id: runId, phase: 'completed', completed: dirs });
+      } else {
+        rejectStart(new Error('算例未能启动或运行失败，请检查运行日志'));
+      }
+    }).catch(e => {
+      if (activeRunId === runId) {
+        failPendingRuns(e);
+        status(e);
+        setRunning('fail', '批次启动失败');
+      }
+      rejectStart(e);
+    });
+    return await started;
   } catch (e) {
-    failPendingRuns(e);
-    // run://done 只在子进程真的起来之后才会发。起不来的话这里是唯一的收尾点。
-    status(e);
-    setRunning('fail', '批次启动失败');
+    if (!confirmationTimedOut && activeRunId === runId) failPendingRuns(e);
+    throw e;
+  } finally {
+    clearTimeout(startTimer);
+    unlisten?.();
   }
 }
 

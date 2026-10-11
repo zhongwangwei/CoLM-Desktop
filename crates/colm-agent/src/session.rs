@@ -120,6 +120,15 @@ impl Session {
 
     /// 记下外部后端的会话号（续接历史对话时接着用它）。会话已落盘时才写。
     pub fn save_backend(&self, kind: crate::backend::BackendKind, id: &str) -> Result<()> {
+        self.save_backend_context(kind, id, None)
+    }
+
+    pub fn save_backend_context(
+        &self,
+        kind: crate::backend::BackendKind,
+        id: &str,
+        experience_fingerprint: Option<&str>,
+    ) -> Result<()> {
         let Some(dir) = self
             .dir
             .as_ref()
@@ -128,8 +137,12 @@ impl Session {
             return Ok(());
         };
         let path = dir.join("backend.json");
-        std::fs::write(&path, json!({ "kind": kind, "id": id }).to_string())
-            .with_context(|| format!("cannot write {}", path.display()))
+        std::fs::write(
+            &path,
+            json!({ "kind": kind, "id": id, "experience_fingerprint": experience_fingerprint })
+                .to_string(),
+        )
+        .with_context(|| format!("cannot write {}", path.display()))
     }
 
     pub fn audit(&self, event: &Outbound) -> Result<()> {
@@ -431,6 +444,14 @@ pub fn backend_of(data_dir: &Path, id: &str) -> Option<(crate::backend::BackendK
         serde_json::from_value(saved["kind"].clone()).ok()?,
         saved["id"].as_str()?.to_owned(),
     ))
+}
+
+/// 旧外部会话只有经验上下文仍一致时才可以续接。
+pub fn backend_context_of(data_dir: &Path, id: &str) -> Option<String> {
+    let dir = session_dir(data_dir, id).ok()?;
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("backend.json")).ok()?).ok()?;
+    saved["experience_fingerprint"].as_str().map(str::to_owned)
 }
 
 /// 这个会话存过吗（开了还没说话的会话没有存）。

@@ -117,9 +117,10 @@ assert.doesNotMatch(scope, /innerHTML/, 'batch case names must be appended as te
 assert.match(scope, /bar\.append/, 'batch scope summary should preserve markup without unsafe name interpolation');
 
 assert.match(params, /let renderFieldsGeneration = 0/);
-assert.match(params, /const stillCurrent = \(\) => generation === renderFieldsGeneration && externalStillCurrent\(\)/);
-assert.match(params, /await renderTiming\(stillCurrent\)/);
-assert.match(params, /await renderHistVars\(hist, stillCurrent\)/);
+assert.match(params, /const current = generation === renderFieldsGeneration && externalStillCurrent\(\)/);
+assert.match(params, /if \(strict && !current\) throw new Error/);
+assert.match(params, /await renderTiming\(stillCurrent, \{ strict \}\)/);
+assert.match(params, /await renderHistVars\(hist, stillCurrent, \{ strict \}\)/);
 
 console.log('params: scheme choices have readable labels while preserving raw CoLM values');
 assert.match(params, /process_parameter_files/);
@@ -127,7 +128,7 @@ assert.match(params, /set_process_parameter_field/);
 assert.match(params, /expertCaseDir/);
 assert.match(params, /修改站点/);
 assert.match(params, /renderTierFields/);
-assert.match(params, /if \(state\.expert\) \{[\s\S]*renderExpertProcessFiles\(processes, flows, stillCurrent\)[\s\S]*renderPftParameters\(processes, flows, stillCurrent\)/);
+assert.match(params, /if \(state\.expert\) \{[\s\S]*renderExpertProcessFiles\(processes, flows, stillCurrent, \{ strict \}\)[\s\S]*renderPftParameters\(processes, flows, stillCurrent, \{ strict \}\)/);
 assert.doesNotMatch(params, /renderPftParameters\(processes, flows, !state\.expert\)/);
 assert.match(params, /appendCatalogDetails/);
 assert.match(params, /Stable ID/);
@@ -149,7 +150,7 @@ const pftRender = params.slice(
   params.indexOf('async function renderPftParameters'),
   params.indexOf('function publishFlows'),
 );
-assert.match(pftRender, /try \{\s*usable = await pftSites\(selectedCases\);\s*if \(!stillCurrent\(\)\) return;\s*\} catch \(error\) \{\s*if \(stillCurrent\(\)\) status\(error\);\s*return;/);
+assert.match(pftRender, /try \{\s*usable = await pftSites\(selectedCases\);\s*if \(!stillCurrent\(\)\) return;\s*\} catch \(error\) \{\s*if \(stillCurrent\(\)\) status\(error\);\s*if \(strict\) throw error;\s*return;/);
 assert.doesNotMatch(pftRender, /loaded\.filter/, 'a failed All-sites PFT read must block editing, not drop that site');
 assert.match(params, /\.filter\(id => id !== 0\)/);
 assert.match(params, /renderParameterSearch/);

@@ -9,13 +9,34 @@
 
 import { state } from './state.js';
 import { $ } from './ui.js';
-import { STEPS, go } from './shell.js';
-import { scanPreparedSites, pickSite } from './sites.js';
+import { STEPS, go, nextOf } from './shell.js';
+import { scanPreparedSites, pickSite, confirmSelection, loadExample } from './sites.js';
+import { createSpatialCase } from './spatial.js';
+import { openExistingCase } from './opencase.js';
+import { runRequested, cancelRequested } from './runner.js';
 import { invoke } from './ipc.js';
+import { resultsGuide } from './results.js';
+import { hybridGuide } from './hybrid.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const text = el => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const shown = el => !!el && !el.closest('[hidden]') && el.getClientRects().length > 0;
+
+function taskGuide() {
+  if (screen() !== 'workbench') return null;
+  if (state.step?.startsWith('result-')) return resultsGuide;
+  if (['hybrid-learn', 'hybrid-process'].includes(state.step)) return hybridGuide;
+  return null;
+}
+
+function taskFields() {
+  return (taskGuide()?.fields() ?? []).filter(shown);
+}
+
+function taskActions() {
+  return Object.fromEntries(Object.entries(taskGuide()?.actions() ?? {})
+    .filter(([, action]) => shown(action.element)));
+}
 
 /** 按按钮才生效的草稿字段（各页的元素 id）。 */
 const DRAFT_FIELDS = {
@@ -177,16 +198,23 @@ export function uiState() {
     };
   }
   if (where === 'setup-wizard') return { screen: where, wizard: wizardState(), status };
+  const next = nextOf(state.step);
   return {
     screen: where,
     step: state.step,
     case: state.selected?.dir ?? null,
     model: state.wizard ? { domain: state.domain, subgrid: state.subgrid, physics: state.wizard.physics } : null,
     steps: steps(),
-    fields: [...draftFields(DRAFT_FIELDS[state.step] ?? []), ...tableFields()],
+    fields: [...draftFields(DRAFT_FIELDS[state.step] ?? []),
+      ...taskFields().map(el => ({ ...describeControl(el.id, el, false), label: labelFor(el) })), ...tableFields()],
     sites: siteList(),
-    buttons: [...buttons(CLICKS, 'click'), ...buttons(COMMITS, 'commit')],
+    buttons: [...buttons(CLICKS, 'click'), ...buttons(COMMITS, 'commit'),
+      ...Object.entries(taskActions()).map(([name, action]) => ({
+        name, label: text(action.element), kind: action.kind, enabled: !action.element.disabled,
+      })),
+      ...(next ? [{ name: 'next-step', label: `下一步：${next.t}`, kind: 'click', enabled: !next.need() }] : [])],
     status,
+    task: taskGuide()?.state(),
   };
 }
 
@@ -199,7 +227,7 @@ function mark(el) {
 }
 
 /** 把文字值落到控件上：选项可以写值或显示文字；逻辑量接受 true/false。 */
-function assign(el, raw) {
+function assign(el, raw, notify = true) {
   const value = String(raw ?? '').trim();
   if (el.tagName === 'SELECT') {
     const want = value.toLowerCase();
@@ -214,15 +242,18 @@ function assign(el, raw) {
   } else {
     el.value = value;
   }
-  el.dispatchEvent(new Event('input', { bubbles: true }));
-  el.dispatchEvent(new Event('change', { bubbles: true }));
+  if (notify) {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+  }
   mark(el);
 }
 
-function fill(fields) {
-  const allowed = new Set(screen() === 'setup-wizard' ? GATE_FIELDS : DRAFT_FIELDS[state.step] ?? []);
+async function fill(fields) {
   const done = [];
   for (const { field, value } of fields ?? []) {
+    const allowed = new Set(screen() === 'setup-wizard' ? GATE_FIELDS
+      : [...(DRAFT_FIELDS[state.step] ?? []), ...taskFields().map(el => el.id)]);
     const el = allowed.has(field) ? $(field) : null;
     if (!el || !shown(el)) {
       const saves = tableRows().some(row => row.dataset.parameterKey === field);
@@ -231,7 +262,18 @@ function fill(fields) {
         : `${field} is not a draft field on this page; read ui_state for the fields here`);
     }
     if (el.disabled) throw new Error(`${field} is disabled here`);
-    assign(el, value);
+    if (el.readOnly) throw new Error(`${field} is read-only here`);
+    assign(el, value, false);
+    // DOM dispatch does not await async property handlers; invoke them once ourselves.
+    for (const type of ['input', 'change']) {
+      const event = new Event(type, { bubbles: true });
+      const handler = el[`on${type}`];
+      el[`on${type}`] = null;
+      try { el.dispatchEvent(event); }
+      finally { el[`on${type}`] = handler; }
+      if (typeof handler === 'function') await handler.call(el, event);
+    }
+    await taskGuide()?.changed?.(el);
     done.push({ field, value: el.type === 'checkbox' ? String(el.checked) : el.value });
   }
   return done;
@@ -241,17 +283,17 @@ function fill(fields) {
 async function set(fields) {
   const done = [];
   for (const { field, value } of fields ?? []) {
-    const row = tableRows().find(r => r.dataset.parameterKey === field);
+    const rows = tableRows().filter(r => r.dataset.parameterKey === field);
+    if (rows.length > 1) throw new Error(`${field} appears in several scopes; select a single scope before saving`);
+    const row = rows[0];
     const control = row?.querySelector('select, input');
     if (!control) throw new Error(`${field} is not an editable parameter on this page; read ui_state`);
-    if (control.disabled) throw new Error(`${field} cannot be changed here: ${row.querySelector('td')?.title || 'disabled'}`);
-    const before = text($('status'));
-    assign(control, value);
-    // 自动保存后会重画表格；等状态栏变化或表格换新，最多 15 秒。
-    for (let i = 0; i < 75; i += 1) {
-      await sleep(200);
-      if (!control.isConnected || text($('status')) !== before) break;
-    }
+    if (control.disabled || control.readOnly) throw new Error(`${field} cannot be changed here: ${row.querySelector('td')?.title || 'read only'}`);
+    if (typeof control.onchange !== 'function') throw new Error(`${field} has no save action`);
+    const dir = state.selected?.dir;
+    assign(control, value, false);
+    await control.onchange({ strict: true });
+    if (state.selected?.dir !== dir) throw new Error('the selected case changed while saving; check the written configuration');
     const now = tableRows().find(r => r.dataset.parameterKey === field)?.querySelector('select, input');
     if (now) mark(now);
     done.push({ field, value: now ? now.value : null, status: text($('status')) });
@@ -260,15 +302,8 @@ async function set(fields) {
 }
 
 /** 打开已有算例并停在某一步（默认“运行”）：读算例，不写文件。 */
-async function openCase(dir, step = 'run') {
-  const before = state.selected?.dir ?? null;
-  dispatchEvent(new CustomEvent('colm:open-case-dir', { detail: { dir, step } }));
-  for (let i = 0; i < 150; i += 1) {
-    await sleep(200);
-    if (state.selected?.dir === dir && state.step === step) return;
-    if (state.selected?.dir === dir && i > 10) return;
-  }
-  if ((state.selected?.dir ?? null) === before) throw new Error(text($('status')) || `cannot open ${dir}`);
+async function openCase(dir, step = 'basic-files') {
+  await openExistingCase(dir, step, { strict: true });
 }
 
 async function click(target) {
@@ -301,7 +336,26 @@ async function click(target) {
     return;
   }
   if (target === 'scan' && state.step === 'basic-files') {
-    await scanPreparedSites();
+    await scanPreparedSites(null, { strict: true });
+    return;
+  }
+  if (target === 'next-step') {
+    const next = nextOf(state.step);
+    if (!next) throw new Error('there is no next page in this workflow');
+    const blocked = next.need();
+    if (blocked) throw new Error(blocked);
+    go(next.id);
+    if (state.step !== next.id) throw new Error(text($('status')) || 'the next page could not be opened');
+    await taskGuide()?.prepare?.();
+    return;
+  }
+  const task = taskActions()[target];
+  if (task) {
+    if (task.kind !== 'click') throw new Error(`${target} saves or runs something; use ui_commit`);
+    if (task.element.disabled) throw new Error(`${target} is disabled here`);
+    const step = state.step;
+    await task.run();
+    if (state.step !== step) await taskGuide()?.prepare?.();
     return;
   }
   const el = CLICKS[state.step]?.[target]?.();
@@ -311,6 +365,13 @@ async function click(target) {
 }
 
 async function commit(target) {
+  const task = taskActions()[target];
+  if (task) {
+    if (task.kind !== 'commit') throw new Error(`${target} does not save anything; use ui_click`);
+    if (task.element.disabled) throw new Error(`${target} is disabled here`);
+    const outcome = await task.run();
+    return { ...outcome, pressed: target };
+  }
   const el = COMMITS[state.step]?.[target]?.();
   if (!el || !shown(el)) {
     throw new Error(CLICKS[state.step]?.[target] || target.startsWith('site:')
@@ -318,26 +379,27 @@ async function commit(target) {
       : `${target} is not a commit button on this page; read ui_state`);
   }
   if (el.disabled) throw new Error(`${target} is disabled: ${text($('status')) || 'the page is not complete'}`);
-  const before = state.selected?.dir ?? null;
-  const status = text($('status'));
-  el.click();
-  if (target === 'create-case' || target === 'make-spatial-case') {
-    // 建算例要读站点、写文件：等到选中的算例换成新的，或状态栏报错，最多两分钟。建好就跳到“运行”。
-    for (let i = 0; i < 600; i += 1) {
-      await sleep(200);
-      if ((state.selected?.dir ?? null) !== before) {
-        const created = state.selected.dir;
-        await sleep(300);
-        go('run');
-        return { created, step: state.step };
-      }
-      const now = text($('status'));
-      if (now !== status && /失败|错误|error|failed|cannot|不能|缺/i.test(now)) throw new Error(now);
-    }
-    throw new Error('the case was not created within two minutes; check the status bar');
+  if (target === 'create-case') {
+    const made = await confirmSelection();
+    return { created: made[0].dir, cases: made.map(c => c.dir), step: state.step };
   }
-  await sleep(500);
-  return { pressed: target, status: text($('status')) };
+  if (target === 'use-example') {
+    await loadExample();
+    return { pressed: target, status: text($('status')) };
+  }
+  if (target === 'apply-spinup') {
+    if (typeof el.onclick !== 'function') throw new Error('spin-up has no save action');
+    const result = await el.onclick({ strict: true });
+    return { ...result, status: text($('status')) };
+  }
+  if (target === 'make-spatial-case') {
+    const made = await createSpatialCase({ strict: true });
+    return { created: made.dir, step: state.step };
+  }
+  if (target === 'cancel-run') return await cancelRequested();
+  const stage = { 'run-all': null, 'run-mksrfdata': 'mksrfdata', 'run-mkinidata': 'mkinidata', 'run-colm': 'colm' };
+  if (Object.hasOwn(stage, target)) return await runRequested(stage[target]);
+  throw new Error(`${target} has no awaited commit action`);
 }
 
 async function perform(action, args) {
@@ -357,11 +419,12 @@ async function perform(action, args) {
       if (screen() !== 'workbench') throw new Error(`the ${screen()} screen is showing; finish it first`);
       go(args.step);
       if (state.step !== args.step) throw new Error(text($('status')) || `cannot open ${args.step}`);
-      await sleep(150);
+      if (taskGuide()?.prepare) await taskGuide().prepare();
+      else await sleep(150);
       return uiState();
     }
     case 'fill':
-      return { filled: fill(args.fields), page: uiState() };
+      return { filled: await fill(args.fields), page: uiState() };
     case 'set': {
       if (screen() !== 'workbench') throw new Error('no parameter page is showing');
       return { saved: await set(args.fields), page: uiState() };

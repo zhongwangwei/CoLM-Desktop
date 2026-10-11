@@ -36,6 +36,9 @@ pub enum Inbound {
         /// GUI 能被驱动（引导模式的 `ui_*` 工具）。
         #[serde(default)]
         ui: bool,
+        /// Headless frontend can answer remote workspace bridge requests.
+        #[serde(default)]
+        remote: bool,
         /// 用哪个后端回答：内置（默认）、用户本机的 Codex 或 Claude Code。
         #[serde(default)]
         backend: crate::backend::BackendKind,

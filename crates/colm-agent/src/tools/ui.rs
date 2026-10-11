@@ -67,7 +67,7 @@ impl Tool for UiGo {
         "ui_go"
     }
     fn description(&self) -> &'static str {
-        "Open a step in the application window (a step name from ui_state, e.g. basic-files, basic-timing, run). Shows the user where you are; returns the new page state."
+        "Open a step from ui_state. Use the built-in result-* pages for analysis, result-tuning for calibration, result-uncertainty for uncertainty, hybrid-learn for AI parameter learning and hybrid-process for AI process replacement. Operate the page's fields/buttons afterwards; do not substitute custom scripts. Returns the new page state."
     }
     fn parameters(&self) -> Value {
         object(json!({ "step": { "type": "string", "description": "step name from ui_state" } }))
@@ -164,7 +164,7 @@ impl Tool for UiClick {
         "ui_click"
     }
     fn description(&self) -> &'static str {
-        "Press a button or choose an item in the application window that does not save or run anything (e.g. scan a directory, select a site in a list, pick a choice card, or 'open-case:<case directory>' to open an existing case on its run step). The application refuses buttons that save or run; use ui_commit for those. Returns the page state afterwards."
+        "Press a button or choose an item in the application window that does not save or run anything (e.g. scan a directory, select a site, pick a choice card, 'next-step' to advance exactly one visible workflow page, or 'open-case:<case directory>' to open an existing case on its first setup page). The application refuses buttons that save or run; use ui_commit for those. Returns the page state afterwards."
     }
     fn parameters(&self) -> Value {
         object(json!({

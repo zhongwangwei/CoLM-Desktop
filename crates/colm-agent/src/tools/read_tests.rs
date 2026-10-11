@@ -252,3 +252,77 @@ fn large_document_search_preserves_valid_json_and_explicit_truncation() {
         .is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn guessed_spinup_parameter_is_rejected_with_real_controls() {
+    let error = ExplainParameter
+        .call(
+            &json!({"name":"DEF_SPINUP_YEARS","case":null}),
+            &ToolContext::default(),
+        )
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("neither a namelist field"));
+    assert!(error.contains("get_case_config"));
+    assert!(error.contains("cutoff year, not a duration"));
+    assert!(error.contains("tm-years/tm-repeat"));
+    let actual = ExplainParameter
+        .call(
+            &json!({"name":"DEF_simulation_time%spinup_year","case":null}),
+            &ToolContext::default(),
+        )
+        .unwrap();
+    assert_eq!(actual["field"]["name"], "DEF_simulation_time%spinup_year");
+}
+
+#[cfg(unix)]
+#[test]
+fn knowledge_search_checks_the_selected_workspace_and_withholds_unknown_cards() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("knowledge-workspace");
+    let docs = root.join("docs");
+    let source = root.join("workspace-source");
+    std::fs::create_dir_all(&docs).unwrap();
+    std::fs::create_dir_all(source.join("crates/core")).unwrap();
+    let path = "crates/core/flux.rs";
+    let text = "# energy\nOld formula in `crates/core/flux.rs`\n";
+    std::fs::write(docs.join("colm-process-knowledge.md"), text).unwrap();
+    std::fs::write(source.join(path), "fn energy() { 2 }\n").unwrap();
+    let manifest = json!({"schema":1,"bound_at_unix_ms":1,"documents":{"colm-process-knowledge.md":{
+        "document_sha256":knowledge::digest(text.as_bytes()),"sources":{path:knowledge::digest(b"fn energy() { 1 }\n")}}}});
+    std::fs::write(docs.join("knowledge-sources.json"), manifest.to_string()).unwrap();
+    let cli = root.join("cli");
+    let info = json!({"source":source,"revision":"edited","dirty":true});
+    std::fs::write(&cli, format!("#!/bin/sh\n[ \"$1\" = ws-source-info ] && [ \"$2\" = --name ] && [ \"$3\" = experiment ] || exit 1\nprintf '%s\\n' '{}'\n", info)).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ctx = ToolContext {
+        cli,
+        docs_root: Some(docs.clone()),
+        ..Default::default()
+    };
+    let result = SearchDocs
+        .call(&json!({"query":"energy","name":"experiment"}), &ctx)
+        .unwrap();
+    assert_eq!(result["scope"]["kind"], "workspace");
+    assert_eq!(
+        result["knowledge_checks"]["colm-process-knowledge.md"]["status"],
+        "needs_review"
+    );
+    assert!(!result["matches"][0]["context"]
+        .to_string()
+        .contains("Old formula"));
+    assert_eq!(
+        result["knowledge_checks"]["colm-process-knowledge.md"]["source_checks"][0]["next_tool"]
+            ["arguments"]["name"],
+        "experiment"
+    );
+    std::fs::write(docs.join("knowledge-sources.json"), "broken").unwrap();
+    let unknown = SearchDocs
+        .call(&json!({"query":"energy","name":"experiment"}), &ctx)
+        .unwrap();
+    assert_eq!(unknown["matches"][0]["knowledge_status"], "unknown");
+    assert!(!unknown["matches"][0]["context"]
+        .to_string()
+        .contains("Old formula"));
+    std::fs::remove_dir_all(root).unwrap();
+}

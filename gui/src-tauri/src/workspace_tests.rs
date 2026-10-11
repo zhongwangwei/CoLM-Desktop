@@ -98,3 +98,13 @@ fn remote_workspace_commands_reject_unknown_actions_and_keep_json_as_one_argumen
         "job-123"
     );
 }
+
+#[test]
+fn remote_knowledge_does_not_require_a_local_workspace_or_job() {
+    let request = serde_json::json!({"source":"/data/source with spaces","query":"water","paths":["crates/core/src/lib.rs"]});
+    let args = remote_args("", "knowledge", None, Some(&request)).unwrap();
+    assert_eq!(args.last().unwrap(), &request.to_string());
+    assert!(remote_args("", "knowledge", None, None).is_err());
+    assert!(remote_args("../escape", "knowledge", None, Some(&request)).is_err());
+    assert!(remote_args("", "submit", None, Some(&request)).is_err());
+}

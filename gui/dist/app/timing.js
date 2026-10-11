@@ -16,15 +16,22 @@ import { editTarget, renderScope } from './batch.js';
 import { markResultsStale } from './results.js';
 
 /** 画卡片。`box` 是 `#timing`。 */
-export async function renderTiming(stillCurrent = () => true) {
+export async function renderTiming(stillCurrent = () => true, { strict = false } = {}) {
   const box = $('timing');
   box.textContent = '';
   const dirs = editTarget();
   if (!dirs.length) return;
   let t;
   try { t = await invoke('read_timing', { dirs }); }
-  catch (e) { if (stillCurrent()) box.textContent = String(e); return; }
-  if (!stillCurrent()) return;
+  catch (e) {
+    if (stillCurrent()) box.textContent = String(e);
+    if (strict) throw e;
+    return;
+  }
+  if (!stillCurrent()) {
+    if (strict) throw new Error('spin-up loading was superseded; check the current page');
+    return;
+  }
 
   const card = document.createElement('div');
   card.className = 'card';
@@ -46,11 +53,13 @@ export async function renderTiming(stillCurrent = () => true) {
   box.appendChild(card);
 
   note(t);
-  const apply = async () => {
+  const apply = async ({ strict = false } = {}) => {
     const years = Number($('tm-years').value);
     const repeat = Number($('tm-repeat').value);
     if (!Number.isSafeInteger(years) || years < 0 || !Number.isSafeInteger(repeat) || repeat < 0) {
-      status('预热年数和重复轮数必须是非负整数。');
+      const error = new Error('预热年数和重复轮数必须是非负整数。');
+      status(error.message);
+      if (strict) throw error;
       return;
     }
     try {
@@ -64,8 +73,9 @@ export async function renderTiming(stillCurrent = () => true) {
         : '已关闭预热';
       status(r.written > 1 ? `${what}（${r.written} 个算例）` : what);
       // 重画自己：输出起始日跟着变，而那正是这个开关的代价所在。
-      await renderTiming(stillCurrent);
-    } catch (e) { status(e); }
+      await renderTiming(stillCurrent, { strict });
+      return { written: r.written, years, repeat };
+    } catch (e) { status(e); if (strict) throw e; }
   };
   // 两个数是一项配置，必须成组提交。逐格 onchange 会在第一格改完、第二格
   // 仍是 0 时把后端关掉并重绘，两个输入就会立刻一起跳回 0。

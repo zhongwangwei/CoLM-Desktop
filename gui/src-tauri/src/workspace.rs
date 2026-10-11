@@ -142,15 +142,25 @@ fn remote_args(
     job: Option<&str>,
     request: Option<&Value>,
 ) -> Result<Vec<String>, String> {
-    valid_name(name)?;
-    if !["submit", "list", "status", "cancel", "fetch"].contains(&operation) {
+    if operation != "knowledge" || !name.is_empty() {
+        valid_name(name)?;
+    }
+    if !["submit", "list", "status", "cancel", "fetch", "knowledge"].contains(&operation) {
         return Err("不支持的远程工作区操作".into());
     }
     let mut command = args(
         "remote-workspace",
         &["--operation", operation, "--name", name],
     );
-    if operation == "submit" {
+    if operation == "knowledge" {
+        let request = request
+            .filter(|v| v.is_object())
+            .ok_or("缺少源码检索请求")?;
+        if request.to_string().len() > 16384 {
+            return Err("源码检索请求过长".into());
+        }
+        command.extend(["--request".into(), request.to_string()]);
+    } else if operation == "submit" {
         let request = request.ok_or("缺少远程工作区任务")?;
         if !request.is_object()
             || !matches!(
@@ -198,7 +208,7 @@ pub async fn workspace_remote(
     }
     let resources = crate::remote::resource_dir(&app);
     let config = crate::remote::remote_config(app);
-    let server = if operation == "submit" {
+    let server = if operation == "submit" || operation == "knowledge" {
         let host = host.as_deref().ok_or("请选择服务器")?;
         let server = config
             .servers

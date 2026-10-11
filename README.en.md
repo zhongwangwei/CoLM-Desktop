@@ -38,6 +38,12 @@ Get the installer for your platform from the [v0.3.0-beta.3 prerelease page](htt
 
 Each installer contains the desktop app, the `colm-cli` command line, the Rust engine (`mksrfdata-rs`, `mkinidata-rs`, `colm-rs`) and example sites. For platforms without a release, or for development builds, see "Running from source" below.
 
+## Terminal assistant
+
+Run `colm-agent chat --project-root /your/project` without the desktop window. It supports streaming responses, explicit approvals and saved conversations. `colm-agent config` sets the provider, model, API format and reasoning options, or selects the existing Codex, Claude Code or OpenCode backend.
+
+pip distribution is temporarily paused: wheel generation and publishing are disabled. The desktop app and native CLI remain available. See [terminal usage](docs/terminal-assistant.md).
+
 ## What's new in 0.3.0-beta.3
 
 - **River-lake routing is optional.** A "River-lake routing" card next to BGC on the start page's process step decides whether rivers are computed (new namelist switch `DEF_USE_GridRiverLakeFlow`). Leave it off and no river network is built, no routing runs and the "Rivers and reservoirs" step disappears; land results are unchanged. The card warns that a watershed boundary, a region or an unstructured mesh may not match the unit catchments of the river network.

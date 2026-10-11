@@ -38,6 +38,12 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 
 安装包包含桌面端、命令行 `colm-cli`、Rust 引擎（`mksrfdata-rs`、`mkinidata-rs`、`colm-rs`）与示例站点。尚未发布的平台或开发版可以按下文从源码运行。
 
+## 终端助手
+
+终端无需打开桌面窗口：`colm-agent chat --project-root /你的项目目录` 可直接对话，支持流式回答、写操作审批和历史会话恢复。模型服务地址、模型、API 格式和思考程度可通过 `colm-agent config` 设置；也可选择现有 Codex、Claude Code、OpenCode 后端。
+
+pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI 继续可用，详见 [终端助手使用说明](docs/terminal-assistant.md)。
+
 ## 0.3.0-beta.3 的主要变化
 
 - **河湖汇流可选**：首页"还要打开哪些过程？"里与 BGC 并列的"河湖汇流"卡片决定是否计算河道（新 namelist 开关 `DEF_USE_GridRiverLakeFlow`）。不选时不建河网、不汇流，也不出现"河道与水库"页；陆面结果不变。卡片会按流域边界、区域或非结构 mesh 提醒它们与河网的单元流域可能不一致。

@@ -410,9 +410,13 @@ function control(e, meta, fieldState) {
 /** 批量编辑区先说清楚会动几个文件；过程参数改用独立的站点下拉。 */
 let renderFieldsGeneration = 0;
 
-export async function renderFields(externalStillCurrent = () => true) {
+export async function renderFields(externalStillCurrent = () => true, { strict = false } = {}) {
   const generation = ++renderFieldsGeneration;
-  const stillCurrent = () => generation === renderFieldsGeneration && externalStillCurrent();
+  const stillCurrent = () => {
+    const current = generation === renderFieldsGeneration && externalStillCurrent();
+    if (strict && !current) throw new Error('configuration loading was superseded; check the current page');
+    return current;
+  };
   wireParameterSearch();
   wireParameterTransfer();
   renderParameterSearch();
@@ -428,7 +432,7 @@ export async function renderFields(externalStillCurrent = () => true) {
   for (const [, basic] of basics) basic.textContent = '';
   for (const [, process] of processes) process.textContent = '';
   // 时间在基本设定，输出在运行页，但仍写回同一份 case.nml。
-  await renderTiming(stillCurrent);
+  await renderTiming(stillCurrent, { strict });
   if (!stillCurrent()) return;
   if (!state.text) {
     output.innerHTML = '<p class="muted">先选一个算例</p>';
@@ -449,7 +453,11 @@ export async function renderFields(externalStillCurrent = () => true) {
       if (!stillCurrent() || state.selected?.dir !== selectedDir) return;
       state.text = text;
     }
-    catch (e) { if (stillCurrent() && state.selected?.dir === selectedDir) status(e); return; }
+    catch (e) {
+      if (stillCurrent() && state.selected?.dir === selectedDir) status(e);
+      if (strict) throw e;
+      return;
+    }
   }
   let entries;
   try {
@@ -462,6 +470,7 @@ export async function renderFields(externalStillCurrent = () => true) {
     for (const [, target] of basics.concat(processes)) target.textContent = String(e);
     status(e);
     publishFlows(flows);
+    if (strict) throw e;
     return;
   }
   // 列表来自源码 schema，而不是只列 case.nml 里已经写过的项；
@@ -496,6 +505,7 @@ export async function renderFields(externalStillCurrent = () => true) {
     if (!stillCurrent()) return;
     state.parameterLctContexts = [];
     status(error);
+    if (strict) throw error;
   }
   const selectedProcessCase = expertCase();
   const processDirs = expertDirs();
@@ -506,7 +516,11 @@ export async function renderFields(externalStillCurrent = () => true) {
     });
     if (!stillCurrent()) return;
     state.varies = new Set(varies);
-  } catch (e) { if (!stillCurrent()) return; state.varies = new Set(); status(e); }
+  } catch (e) {
+    if (!stillCurrent()) return;
+    state.varies = new Set(); status(e);
+    if (strict) throw e;
+  }
   const representativeDir = selectedProcessCase?.dir ?? processDirs[0];
   let processInGroup = inGroup;
   if (representativeDir && representativeDir !== state.selected?.dir) {
@@ -516,7 +530,11 @@ export async function renderFields(externalStillCurrent = () => true) {
       const processEntries = await invoke('read_case', { text });
       if (!stillCurrent()) return;
       processInGroup = complete(processEntries);
-    } catch (e) { if (stillCurrent()) status(e); return; }
+    } catch (e) {
+      if (stillCurrent()) status(e);
+      if (strict) throw e;
+      return;
+    }
   }
   let fieldStates = new Map();
   let processFieldStates = new Map();
@@ -558,6 +576,7 @@ export async function renderFields(externalStillCurrent = () => true) {
     state.fieldStates = new Map();
     status(message);
     publishFlows(flows);
+    if (strict) throw e;
     return;
   }
   if (!stillCurrent()) return;
@@ -642,9 +661,9 @@ export async function renderFields(externalStillCurrent = () => true) {
     }
   }
   if (state.expert) {
-    await renderExpertProcessFiles(processes, flows, stillCurrent);
+    await renderExpertProcessFiles(processes, flows, stillCurrent, { strict });
     if (!stillCurrent()) return;
-    await renderPftParameters(processes, flows, stillCurrent);
+    await renderPftParameters(processes, flows, stillCurrent, { strict });
     if (!stillCurrent()) return;
   }
 
@@ -662,7 +681,7 @@ export async function renderFields(externalStillCurrent = () => true) {
   }
   publishFlows(flows);
   if (!stillCurrent()) return;
-  await renderHistVars(hist, stillCurrent);
+  await renderHistVars(hist, stillCurrent, { strict });
   if (!stillCurrent()) return;
   renderParameterSearch();
 }
@@ -917,8 +936,11 @@ function renderExpertTable(file, dirs) {
       inp.style.opacity = '0.55';
       inp.title += (inp.title ? '\n' : '') + '当前文件未设置，显示代码默认值';
     }
-    inp.onchange = async () => {
-      if (entry.unset && !inp.value.trim()) return;
+    inp.onchange = async ({ strict = false } = {}) => {
+      if (entry.unset && !inp.value.trim()) {
+        if (strict) throw new Error('an empty value was not saved');
+        return;
+      }
       try {
         const r = await invoke('set_process_parameter_field_batch', {
           dirs, file: file.file, path: entry.path, value: inp.value,
@@ -928,11 +950,12 @@ function renderExpertTable(file, dirs) {
         status(r.written > 1
           ? `已写入 ${r.written} 个站点：${entry.path}`
           : `已保存 ${baseName(dirs[0])}：${entry.path}`);
-        await renderFields();
+        await renderFields(() => true, { strict });
       } catch (e) {
         status(e);
         const raw = entry.value.replace(/^'|'$/g, '');
         inp.value = entry.kind === 'real' ? (fortranNumberInputValue(raw) ?? raw) : raw;
+        if (strict) throw e;
       }
     };
     v.appendChild(inp);
@@ -965,7 +988,7 @@ function renderExpertTable(file, dirs) {
   return wrap;
 }
 
-async function renderExpertProcessFiles(processes, flows, stillCurrent = () => true) {
+async function renderExpertProcessFiles(processes, flows, stillCurrent = () => true, { strict = false } = {}) {
   const cases = expertCases();
   const dirs = expertDirs();
   if (!dirs.length) return;
@@ -977,6 +1000,7 @@ async function renderExpertProcessFiles(processes, flows, stillCurrent = () => t
     files = commonProcessFiles(lists);
   } catch (e) {
     if (stillCurrent()) status(e);
+    if (strict) throw e;
     return;
   }
   for (const [page, target] of processes) {
@@ -1172,7 +1196,7 @@ function renderPftParameterGroup(group, parameters, dirs, pftType) {
     const valueCell = document.createElement('td');
     const control = pftParameterControl(parameter);
     if (parameter.value == null) control.style.opacity = '0.55';
-    control.onchange = async () => {
+    control.onchange = async ({ strict = false } = {}) => {
       try {
         const result = await invoke('set_pft_parameter_batch', {
           dirs, pftType: Number(pftType), name: parameter.name,
@@ -1182,11 +1206,12 @@ function renderPftParameterGroup(group, parameters, dirs, pftType) {
         status(result.written > 1
           ? `${parameter.name} 已写入 ${result.written} 个站点`
           : `${parameter.name} 已保存`);
-        await renderFields();
+        await renderFields(() => true, { strict });
       } catch (error) {
         status(error);
         control.value = fortranNumberInputValue(parameter.value ?? parameter.default)
           ?? (parameter.value ?? parameter.default);
+        if (strict) throw error;
       }
     };
     valueCell.appendChild(control);
@@ -1295,7 +1320,7 @@ async function renderPftParameterMatrix(target, types, ids, group) {
         const control = pftParameterControl(parameter);
         control.title = `${parameter.scope_label} · ${parameter.provenance}`;
         if (parameter.value == null) control.style.opacity = '0.55';
-        control.onchange = async () => {
+        control.onchange = async ({ strict = false } = {}) => {
           const dirs = types.get(id).sites.map(item => item.dir);
           try {
             const result = await invoke('set_pft_parameter_batch', {
@@ -1303,8 +1328,8 @@ async function renderPftParameterMatrix(target, types, ids, group) {
               kernelDir: $('kernel').value,
             });
             await markChanged(result, dirs);
-            await renderFields();
-          } catch (error) { status(error); }
+            await renderFields(() => true, { strict });
+          } catch (error) { status(error); if (strict) throw error; }
         };
         const reset = document.createElement('button');
         reset.type = 'button';
@@ -1364,7 +1389,7 @@ async function renderPftParameterMatrix(target, types, ids, group) {
   target.appendChild(details);
 }
 
-async function renderPftParameters(processes, flows, stillCurrent = () => true) {
+async function renderPftParameters(processes, flows, stillCurrent = () => true, { strict = false } = {}) {
   const eco = processes.find(([page]) => page.id === 'params-eco');
   if (!eco) return;
   const [, target] = eco;
@@ -1380,6 +1405,7 @@ async function renderPftParameters(processes, flows, stillCurrent = () => true) 
     if (!stillCurrent()) return;
   } catch (error) {
     if (stillCurrent()) status(error);
+    if (strict) throw error;
     return;
   }
 
@@ -1412,6 +1438,7 @@ async function renderPftParameters(processes, flows, stillCurrent = () => true) 
     if (!stillCurrent()) return;
   } catch (error) {
     if (stillCurrent()) status(error);
+    if (strict) throw error;
     return;
   }
   if (!parameters.length) return;
@@ -1642,11 +1669,11 @@ function table(
       if (PATH_FIELDS[e.path]) inp.readOnly = true;
       // 未设过的字段标灰：它显示的是 CoLM 的默认值，不是这份文件里的内容。
       if (e.unset) { inp.style.opacity = '0.55'; v.title = '这份配置没设它，显示的是默认值'; }
-      inp.onchange = async () => {
+      inp.onchange = async ({ strict = false } = {}) => {
         const before = e.value.replace(/^'|'$/g, '');
         try {
           if (e.synthetic === 'stomatal') {
-            if (inp.value === 'INVALID') return;
+            if (inp.value === 'INVALID') throw new Error('choose a valid stomatal scheme');
             const fields = [
               { path: 'DEF_USE_MEDLYNST', value: inp.value === 'MEDLYN' ? '.true.' : '.false.' },
               { path: 'DEF_USE_WUEST', value: inp.value === 'WUE' ? '.true.' : '.false.' },
@@ -1663,33 +1690,41 @@ function table(
             status(r.written > 1
               ? `已为 ${r.written} 个算例设置气孔导度方案`
               : '已保存气孔导度方案');
-            await renderFields();
+            await renderFields(() => true, { strict });
             return;
           }
           if (enabled(inp.value) && e.path === 'DEF_USE_CBL_HEIGHT') {
             if (dirs.length !== 1) throw new Error('请先在“修改站点”中选择一个站点');
             const picked = await pickParameterPath('DEF_USE_CBL_HEIGHT', 'file');
-            if (!picked) { inp.value = before; return; }
+            if (!picked) {
+              inp.value = before;
+              if (strict) throw new Error('file selection was cancelled; no change was saved');
+              return;
+            }
             const r = await invoke('configure_cbl_batch', {
               dirs, file: picked, kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
             await markChanged(r, dirs);
             status(`已为 ${baseName(dirs[0])} 校验并接入边界层高度文件`);
-            await renderFields();
+            await renderFields(() => true, { strict });
             return;
           }
           if (enabled(inp.value)
               && (e.path === 'DEF_USE_OZONESTRESS' || e.path === 'DEF_USE_OZONEDATA')) {
             const picked = await pickParameterPath('DEF_file_Ozone', 'file');
-            if (!picked) { inp.value = before; return; }
+            if (!picked) {
+              inp.value = before;
+              if (strict) throw new Error('file selection was cancelled; no change was saved');
+              return;
+            }
             const r = await invoke('configure_ozone_batch', {
               dirs, file: picked, kernelDir: $('kernel').value,
             });
             if (syncText) state.text = r.text;
             await markChanged(r, dirs);
             status('已校验臭氧数据，并启用臭氧胁迫与数据读取');
-            await renderFields();
+            await renderFields(() => true, { strict });
             return;
           }
           if (e.path === 'DEF_file_Ozone') {
@@ -1699,7 +1734,7 @@ function table(
             if (syncText) state.text = r.text;
             await markChanged(r, dirs);
             status('已校验并更换臭氧数据文件');
-            await renderFields();
+            await renderFields(() => true, { strict });
             return;
           }
           const changes = [{ path: e.path, value: inp.value }];
@@ -1711,7 +1746,11 @@ function table(
             const spec = PATH_ON_ENABLE[e.path];
             const picked = await pickParameterPath(spec.path, spec.kind);
             // 取消选择就不打开父开关，避免留下 true + null。
-            if (!picked) { inp.value = before; return; }
+            if (!picked) {
+              inp.value = before;
+              if (strict) throw new Error('file selection was cancelled; no change was saved');
+              return;
+            }
             changes.push({ path: spec.path, value: picked });
           }
           if (enabled(inp.value) && MUTEX_ON_ENABLE[e.path]) {
@@ -1747,13 +1786,14 @@ function table(
             v.title = '';
             return;
           }
-          await renderFields();
+          await renderFields(() => true, { strict });
         } catch (err) {
           // 类型不对在后端就被拦下了，原样报出来 —— 它说得比我们编的具体
           status(err);
           const raw = e.value.replace(/^'|'$/g, '');
           inp.value = meta?.kind?.startsWith('Real')
             ? (fortranNumberInputValue(raw) ?? '') : raw;
+          if (strict) throw err;
         }
       };
       v.appendChild(inp);

@@ -105,6 +105,19 @@ fn sessions_are_written_on_the_first_message_and_can_be_resumed() {
         ))
     );
 
+    assert_eq!(backend_context_of(&root, &session.id), None);
+    again
+        .save_backend_context(
+            crate::backend::BackendKind::ClaudeCode,
+            "4844562a-80d3",
+            Some("fresh-hash"),
+        )
+        .unwrap();
+    assert_eq!(
+        backend_context_of(&root, &session.id).as_deref(),
+        Some("fresh-hash")
+    );
+
     delete(&root, &session.id).unwrap();
     assert!(list(&root).unwrap().is_empty());
     let _ = std::fs::remove_dir_all(&root);

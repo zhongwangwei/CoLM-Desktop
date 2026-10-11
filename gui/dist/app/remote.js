@@ -461,20 +461,27 @@ async function cancelJob(dir) {
 /** 运行页的运行按钮在“运行位置”是服务器时走这里：逐个算例提交，之后定时查状态，跑完自动取回结果。 */
 export async function remoteRun(stage, dirs, force) {
   const host = runTarget();
+  const submitted = [], failed = [];
   for (const dir of dirs) {
     jobs.set(dir, { host, state: 'submitting', fetched: false });
     renderJobs();
     try {
       const answer = await invoke('remote_run', { case: dir, host, kernel: $('kernel').value, stage, force, ...engineChoice() });
       Object.assign(jobs.get(dir), { job: answer.job, state: 'running', phase: 'submitted' });
+      submitted.push({ case: dir, job: answer.job });
       if (answer.engine_uploaded) status(`${t('已把引擎源码传到')} ${host}${t('，首次会在服务器上编译')}`);
     } catch (error) {
-      Object.assign(jobs.get(dir), { state: 'unknown', error: String(error?.message || error) });
+      const reason = String(error?.message || error);
+      Object.assign(jobs.get(dir), { state: 'unknown', error: reason });
+      failed.push({ case: dir, error: reason });
     }
     renderJobs();
   }
-  setRunning('busy', `${t('服务器运行中')}（${dirs.length}）`);
-  schedulePoll();
+  setRunning(submitted.length ? 'busy' : 'fail', submitted.length
+    ? `${t('服务器运行中')}（${submitted.length}/${dirs.length}）` : t('服务器任务提交失败'));
+  if (submitted.length) schedulePoll();
+  if (failed.length) throw new Error(JSON.stringify({ host, submitted, failed }));
+  return { host, submitted, failed };
 }
 
 /** 打开运行页时接上已提交的远程作业（关掉应用后再打开也能接着跟踪）。 */

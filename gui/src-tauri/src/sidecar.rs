@@ -1196,6 +1196,10 @@ fn run_one(
         })?;
     remember_process(processes, case, &mut child)?;
     let (out, err_pipe) = take_process_pipes(&mut child, processes, case)?;
+    let _ = app.emit(
+        "run://started",
+        serde_json::json!({ "run_id": run_id, "case": case }),
+    );
     let reader = pump(app, run_id, case, out);
     let errs = drain_stderr(err_pipe);
     let (status, cancelled) = wait_process(&mut child, processes, case)?;

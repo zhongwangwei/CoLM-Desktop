@@ -84,6 +84,11 @@ pub(super) fn merge_options(body: &mut Value, options: &Value) {
             }
         }
     }
+    if body.get("tools").is_none() {
+        // 总结请求不提供工具；用户的强制选工具配置不能阻止它答复。
+        body.as_object_mut().unwrap().remove("tool_choice");
+        body.as_object_mut().unwrap().remove("parallel_tool_calls");
+    }
 }
 
 fn state<'a>(c: &ProviderConfig, state: &'a Option<Value>) -> Option<&'a Value> {

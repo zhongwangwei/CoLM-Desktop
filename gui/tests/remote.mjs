@@ -75,7 +75,7 @@ assert.deepEqual(
 
 // 运行页与首页都接上了：运行按钮在选了服务器时交给 remote.js；首页的服务器卡片可点。
 const runner = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
-assert.match(runner, /if \(runTarget\(\) !== 'local'\) \{\s*await remoteRun\(/);
+assert.match(runner, /if \(runTarget\(\) !== 'local'\) \{\s*return await remoteRun\(/);
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 for (const id of ['run-target', 'manage-servers', 'remote-runs', 'remote-dialog', 'remote-host', 'remote-root', 'remote-maps', 'remote-test', 'remote-save', 'remote-scheduler', 'remote-partition', 'remote-account', 'remote-walltime', 'remote-cpus', 'remote-memory', 'remote-env', 'remote-directives', 'preview-job', 'remote-preview-dialog', 'remote-preview-text', 'remote-nodes', 'remote-kernel-preset', 'remote-list-kernels', 'remote-build-kernel', 'remote-kernels-result', 'remote-fetch-vars']) {
   assert.ok(html.includes(`id="${id}"`), id);
@@ -140,6 +140,28 @@ await new Promise(resolve => setImmediate(resolve));
 assert.equal(identityCalls.at(-1), 'remote_fetch');
 assert.equal(remote.jobs.get('/case').fetched, true);
 
+remote.jobs.clear();
+
+// Partial submissions retain their job IDs and report every failed target.
+globalThis.remoteNodes['kernel'] = {value:'rust'};
+globalThis.remoteNodes['run-target'] = {value:'server'};
+const nativeTimeout = globalThis.setTimeout;
+globalThis.setTimeout = () => 0;
+globalThis.remoteInvoke = async (command, args) => {
+  assert.equal(command, 'remote_run');
+  if(args.case === '/bad') throw new Error('SSH rejected');
+  return {job:'job-ok'};
+};
+await assert.rejects(remote.remoteRun(null,['/ok','/bad'],false), error => {
+  const details = JSON.parse(error.message);
+  assert.deepEqual(details.submitted,[{case:'/ok',job:'job-ok'}]);
+  assert.deepEqual(details.failed,[{case:'/bad',error:'SSH rejected'}]);
+  return true;
+});
+assert.equal(remote.jobs.get('/ok').state,'running');
+await assert.rejects(remote.remoteRun(null,['/bad'],false), /SSH rejected/);
+assert.deepEqual((await remote.remoteRun(null,['/ok'],false)).submitted,[{case:'/ok',job:'job-ok'}]);
+globalThis.setTimeout = nativeTimeout;
 remote.jobs.clear();
 
 // Authentication fields keep secrets out of serialized server profiles.

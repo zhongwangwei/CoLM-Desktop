@@ -89,6 +89,33 @@ fn a_call_without_arguments_gets_an_empty_object() {
     assert_eq!(turn.tool_calls[0].arguments, "{}");
 }
 
+#[test]
+fn tool_free_summary_requests_override_forced_tool_options_for_all_api_formats() {
+    let tools = [
+        json!({"type":"function","function":{"name":"status","description":"status","parameters":{"type":"object","properties":{}}}}),
+    ];
+    for format in [
+        ApiFormat::ChatCompletions,
+        ApiFormat::Responses,
+        ApiFormat::Anthropic,
+    ] {
+        let mut config = ProviderConfig::deepseek("test", "k".into());
+        config.api_format = format;
+        config.api_options =
+            json!({"tool_choice":"required","parallel_tool_calls":true,"temperature":0.2});
+        let body = |tools: &[Value]| match format {
+            ApiFormat::ChatCompletions => request_body(&config, &[], tools),
+            _ => adapters::native_body(&config, &[], tools).unwrap(),
+        };
+        let summary = body(&[]);
+        assert!(summary.get("tools").is_none());
+        assert!(summary.get("tool_choice").is_none());
+        assert!(summary.get("parallel_tool_calls").is_none());
+        assert_eq!(summary["temperature"], 0.2);
+        assert_eq!(body(&tools)["tool_choice"], "required");
+    }
+}
+
 fn native_config(format: ApiFormat) -> ProviderConfig {
     let mut c = ProviderConfig::deepseek("model", "secret".into());
     c.api_format = format;

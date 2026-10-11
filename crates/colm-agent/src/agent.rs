@@ -1,4 +1,4 @@
-//! 对话循环：模型 → 工具调用 →（需要时）审批 → 结果回填 → 直到模型不再调工具，或超出限额、被取消。
+//! 对话循环：模型 → 工具调用 →（需要时）审批 → 结果回填；重复查询或接近限额时收束答复。
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
@@ -37,7 +37,7 @@ pub trait Approver {
 /// 每轮的限额。
 #[derive(Debug, Clone, Copy)]
 pub struct Limits {
-    /// 一轮里最多几次“模型生成”（每次可以带多个工具调用）。
+    /// 一轮里最多几次“模型生成”，最后一次预留给不调用工具的总结。
     pub max_steps: usize,
 }
 
@@ -74,36 +74,125 @@ impl Agent<'_> {
     ) -> Result<TurnOutcome> {
         let tools = self.registry.api_tools(self.strict);
         let mut outcome = TurnOutcome::default();
+        anyhow::ensure!(self.limits.max_steps > 0, "max_steps must be positive");
+        let mut previous_reads = Vec::new();
+        let mut repeated_reads = 0;
         for step in 1..=self.limits.max_steps {
             if cancel.load(Ordering::SeqCst) {
                 bail!("cancelled");
             }
-            let turn = self.provider.complete(history, &tools, &mut |event| {
-                emit(match event {
-                    StreamEvent::Content(text) => Outbound::AssistantDelta { text },
-                    StreamEvent::Reasoning(text) => Outbound::ReasoningDelta { text },
-                })
-            })?;
+            let finalizing = step == self.limits.max_steps || repeated_reads >= 3;
+            if finalizing {
+                self.context.note_failure(
+                    if repeated_reads >= 3 {
+                        "repeated_read_queries"
+                    } else {
+                        "turn_budget"
+                    },
+                    "",
+                    "execution_limit",
+                );
+            }
+            let mut summary_history;
+            let messages = if finalizing {
+                // 运行控制提示只用于本次请求，不伪装成用户保存的消息。
+                summary_history = history.clone();
+                let reason = if repeated_reads >= 3 {
+                    "The same read-only queries have been repeated three times with unchanged results."
+                } else {
+                    "This is the last model generation allowed in this turn."
+                };
+                summary_history.push(Message::User {
+                    content: format!("[Turn execution limit] {reason} Tools are unavailable for this response. Give a concise final answer in the user's language using the evidence already collected: confirmed progress, unresolved work, and the next useful step. Do not claim completion or scientific validation without evidence. If a job is still running, report its last observed status; do not pretend to keep monitoring after this reply."),
+                });
+                &summary_history
+            } else {
+                &*history
+            };
+            let mut final_events = Vec::new();
+            let mut turn = self.provider.complete(
+                messages,
+                if finalizing { &[] } else { &tools },
+                &mut |event| {
+                    if finalizing {
+                        final_events.push(event);
+                        return;
+                    }
+                    emit(match event {
+                        StreamEvent::Content(text) => Outbound::AssistantDelta { text },
+                        StreamEvent::Reasoning(text) => Outbound::ReasoningDelta { text },
+                    })
+                },
+            )?;
             outcome.steps = step;
             outcome.usage.prompt_tokens += turn.usage.prompt_tokens;
             outcome.usage.completion_tokens += turn.usage.completion_tokens;
+            if finalizing {
+                if cancel.load(Ordering::SeqCst) {
+                    bail!("cancelled");
+                }
+                if !turn.tool_calls.is_empty() || turn.content.trim().is_empty() {
+                    // 服务商忽略无工具请求时，也不能执行新操作或保存未配对的工具调用。
+                    turn = crate::provider::Turn {
+                        content: "本轮已停止继续调用工具，任务尚未确认全部完成。已有操作和结果已保留；请核对最后的运行状态，再继续未完成的步骤。\nThis turn stopped calling tools before completion was confirmed. Existing actions and results are retained; check the last run status before continuing.".into(),
+                        ..Default::default()
+                    };
+                } else {
+                    for event in final_events {
+                        if let StreamEvent::Reasoning(text) = event {
+                            emit(Outbound::ReasoningDelta { text });
+                        }
+                    }
+                }
+                // GUI 依赖增量事件显示正文；不依赖服务商一定发送内容增量。
+                emit(Outbound::AssistantDelta {
+                    text: turn.content.clone(),
+                });
+            }
             history.push(turn.message());
             if turn.tool_calls.is_empty() {
                 outcome.content = turn.content;
                 return Ok(outcome);
             }
+            let mut results = Vec::new();
             for call in &turn.tool_calls {
                 let content = self.call_tool(call, emit, approver, cancel);
+                results.push(
+                    serde_json::from_str::<Value>(&content)
+                        .unwrap_or_else(|_| Value::String(content.clone())),
+                );
                 history.push(Message::Tool {
                     tool_call_id: call.id.clone(),
                     content,
                 });
             }
+            let reads: Option<Vec<_>> = turn
+                .tool_calls
+                .iter()
+                .zip(results)
+                .map(|(call, result)| {
+                    let tool = self.registry.find(&call.name)?;
+                    if tool.tier() != Tier::Read {
+                        return None;
+                    }
+                    let args = serde_json::from_str::<Value>(&call.arguments).ok()?;
+                    // Read-tier UI actions can advance pages without changing their arguments.
+                    Some((call.name.clone(), args, result))
+                })
+                .collect();
+            if let Some(reads) = reads {
+                repeated_reads = if reads == previous_reads {
+                    repeated_reads + 1
+                } else {
+                    1
+                };
+                previous_reads = reads;
+            } else {
+                previous_reads.clear();
+                repeated_reads = 0;
+            }
         }
-        bail!(
-            "stopped after {} model steps without a final answer; ask a narrower question or raise the limit",
-            self.limits.max_steps
-        )
+        unreachable!("the reserved final generation always ends the turn")
     }
 
     fn call_tool(
@@ -128,11 +217,15 @@ pub fn execute_tool(
     cancel: &AtomicBool,
 ) -> String {
     let Some(tool) = registry.find(&call.name) else {
+        context.note_failure(&call.name, &call.id, "unknown_tool");
         return format!("error: there is no tool named {}", call.name);
     };
     let args: Value = match serde_json::from_str(&call.arguments) {
         Ok(args) => args,
-        Err(error) => return format!("error: the arguments are not valid JSON ({error})"),
+        Err(error) => {
+            context.note_failure(&call.name, &call.id, "invalid_arguments");
+            return format!("error: the arguments are not valid JSON ({error})");
+        }
     };
     let summary = tool.summary(&args);
     let preapproved = tool.tier().needs_approval()
@@ -203,6 +296,9 @@ pub fn execute_tool(
         result: text.clone(),
         elapsed_ms: started.elapsed().as_millis() as u64,
     });
+    if !ok {
+        context.note_failure(&call.name, &call.id, "tool_failed");
+    }
     text
 }
 

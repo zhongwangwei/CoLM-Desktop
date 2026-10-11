@@ -1,4 +1,4 @@
-//! P3 goes through the window so SSH credentials stay in its session.
+//! P3 uses a trusted frontend bridge; credentials never reach model arguments.
 use super::{object, opt_str, req_str, Tier, Tool, ToolContext};
 use anyhow::{ensure, Context, Result};
 use serde_json::{json, Value};
@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 #[derive(Clone, Copy)]
 enum Operation {
     Resources,
+    Knowledge,
     Submit,
     Status,
     Cancel,
@@ -16,6 +17,7 @@ struct RemoteWorkspace(Operation);
 pub(super) fn tools() -> Vec<Box<dyn Tool>> {
     [
         Operation::Resources,
+        Operation::Knowledge,
         Operation::Submit,
         Operation::Status,
         Operation::Cancel,
@@ -32,10 +34,22 @@ fn nullable(kind: &str, description: &str) -> Value {
     json!({"type":[kind,"null"], "description":description})
 }
 
+fn valid_source_path(path: &str) -> bool {
+    path.len() <= 256
+        && !path.contains(|c: char| c.is_control() || c == '\\' || c == ':')
+        && matches!(path.split('/').next(), Some("crates" | "vendor"))
+        && path
+            .split('/')
+            .all(|p| !p.is_empty() && !p.starts_with('.'))
+        && [".rs", ".f90", ".f", ".h"]
+            .iter()
+            .any(|ext| path.to_ascii_lowercase().ends_with(ext))
+}
 impl Tool for RemoteWorkspace {
     fn name(&self) -> &'static str {
         match self.0 {
             Operation::Resources => "remote_workspace_resources",
+            Operation::Knowledge => "remote_workspace_knowledge",
             Operation::Submit => "remote_workspace_submit",
             Operation::Status => "remote_workspace_status",
             Operation::Cancel => "remote_workspace_cancel",
@@ -44,7 +58,8 @@ impl Tool for RemoteWorkspace {
     }
     fn description(&self) -> &'static str {
         match self.0 {
-            Operation::Resources => "List configured remote servers without credentials. Source edits remain in a local development workspace; remote jobs use committed snapshots.",
+            Operation::Knowledge => "Read current source bytes and SHA256 from an existing absolute source directory on a configured server, including uncommitted edits. No upload, build or server writes. Returns bounded cited excerpts and checks curated knowledge freshness. A matching hash does not validate scientific conclusions. name may be null; no local workspace is required.",
+            Operation::Resources => "List configured remote servers without credentials. Build jobs use committed local snapshots; knowledge reads can inspect an existing server source tree including uncommitted edits.",
             Operation::Submit => "Submit a fixed remote workspace action on a configured Linux server. verify builds candidate and baseline, tests, runs regression and Rust/Fortran parity. case is an existing absolute SERVER case directory; no external data are uploaded. Requires approval. Saves a job ID before launch; submission is not gate success. Inspect status and fetch reports; never resubmit an uncertain job automatically.",
             Operation::Status => "Inspect a remote workspace job's source identity, state, log and stale status; job=null lists saved jobs without contacting the server. Exit 0 alone does not prove all scientific acceptance gates passed.",
             Operation::Cancel => "Cancel only this saved remote workspace job. Closing a conversation does not cancel a detached server job. Requires approval.",
@@ -54,6 +69,13 @@ impl Tool for RemoteWorkspace {
     fn parameters(&self) -> Value {
         match self.0 {
             Operation::Resources => object(json!({})),
+            Operation::Knowledge => object(json!({
+                "name":nullable("string","optional local workspace association; null for a server-only source tree"),
+                "host":string("configured host from remote_workspace_resources"),
+                "source":string("existing absolute SERVER source directory"),
+                "query":string("text to locate in each source file; empty for file beginnings"),
+                "paths":{"type":["array","null"],"items":{"type":"string"},"minItems":0,"maxItems":16,"description":"relative source files under crates/ or vendor/; null uses curated knowledge bindings"}
+            })),
             Operation::Submit => object(json!({
                 "name":string("local workspace name"), "host":string("configured host from remote_workspace_resources"),
                 "action":{"type":"string","enum":["build-engine","build-kernel","test","run","parity","regress","verify"]},
@@ -74,7 +96,7 @@ impl Tool for RemoteWorkspace {
     }
     fn tier(&self) -> Tier {
         match self.0 {
-            Operation::Resources | Operation::Status => Tier::Read,
+            Operation::Resources | Operation::Status | Operation::Knowledge => Tier::Read,
             _ => Tier::Code,
         }
     }
@@ -94,11 +116,39 @@ impl Tool for RemoteWorkspace {
         )
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        let window = ctx.ui.as_ref().context(
-            "remote workspace tools require the application window and its server settings",
-        )?;
+        let window = ctx
+            .ui
+            .as_ref()
+            .context("remote workspace tools require a configured frontend server bridge")?;
         if matches!(self.0, Operation::Resources) {
             return window.0.request("workspace_remote_servers", json!({}));
+        }
+        if matches!(self.0, Operation::Knowledge) {
+            let source = req_str(args, "source")?;
+            let query = req_str(args, "query")?;
+            ensure!(
+                source.starts_with('/')
+                    && source != "/"
+                    && source.len() <= 4096
+                    && !source.contains(char::is_control),
+                "invalid server source directory"
+            );
+            ensure!(
+                query.len() <= 256 && !query.contains(char::is_control),
+                "invalid knowledge query"
+            );
+            let paths: Vec<String> = if args.get("paths").is_none_or(Value::is_null) {
+                super::read::knowledge::bound_paths(ctx)?
+            } else {
+                serde_json::from_value(args["paths"].clone())?
+            };
+            ensure!(paths.len() <= 16, "request at most 16 source files");
+            for path in &paths {
+                ensure!(valid_source_path(path), "invalid source path: {path}");
+            }
+            let mut result = window.0.request("workspace_remote", json!({"name":opt_str(args,"name").unwrap_or(""),"operation":"knowledge","host":req_str(args,"host")?,"job":null,"request":{"source":source,"query":query,"paths":paths}}))?;
+            super::read::knowledge::augment_remote(ctx, &mut result, query)?;
+            return Ok(result);
         }
         let name = req_str(args, "name")?;
         let (operation, request) = match self.0 {
@@ -151,7 +201,7 @@ impl Tool for RemoteWorkspace {
                 req_str(args, "job")?;
                 ("fetch", Value::Null)
             }
-            Operation::Resources => unreachable!(),
+            Operation::Resources | Operation::Knowledge => unreachable!(),
         };
         window.0.request(
             "workspace_remote",

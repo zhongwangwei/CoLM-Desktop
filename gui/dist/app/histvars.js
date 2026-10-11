@@ -13,17 +13,25 @@ import { $, status } from './ui.js';
 
 let generation = 0;
 
-export async function renderHistVars(box, stillCurrent = () => true) {
+export async function renderHistVars(box, stillCurrent = () => true, { strict = false } = {}) {
   // 取一次变量表；搜索与「只看已勾选」只在这份表上过滤、只重画下面的列表 —— 整块重建会让搜索框
   // 每敲一个字就换成新元素（焦点丢失），重新请求的回复还可能迟到、盖掉更新的结果。
   const token = ++generation;
-  const current = () => token === generation && stillCurrent();
+  const current = () => {
+    const valid = token === generation && stillCurrent();
+    if (strict && !valid) throw new Error('output selection loading was superseded; check the current page');
+    return valid;
+  };
   const kernel = $('kernel').value;
-  if (!kernel) { box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>'; return; }
+  if (!kernel) {
+    box.innerHTML = '<p class="muted">当前安装缺少与向导配置匹配的运行产物</p>';
+    if (strict) throw new Error('当前安装缺少与向导配置匹配的运行产物');
+    return;
+  }
   let vars;
   // 开关存在算例目录下的输出变量文件里，要带上代表算例的目录。
   try { vars = await invoke('hist_vars', { text: state.text, kernelDir: kernel, dir: state.selected?.dir ?? null }); }
-  catch (e) { if (current()) box.textContent = String(e); return; }
+  catch (e) { if (current()) box.textContent = String(e); if (strict) throw e; return; }
   if (!current()) return;
 
   const bar = document.createElement('div');

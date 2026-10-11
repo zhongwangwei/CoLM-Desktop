@@ -123,7 +123,7 @@ export function renderCases() {
   updateCaseBatchButtons();
 }
 
-export async function selectCase(c) {
+export async function selectCase(c, { strict = false } = {}) {
   const token = ++activeCaseSelection;
   const isCurrent = () => token === activeCaseSelection && state.selected?.dir === c.dir;
   state.selected = c;
@@ -152,10 +152,13 @@ export async function selectCase(c) {
         unknown.join('、');
       u.appendChild(p);
     }
-    await renderFields(isCurrent);
+    await renderFields(isCurrent, { strict });
     if (!isCurrent()) return;
     refreshVars();
-  } catch (e) { if (isCurrent()) $('status').textContent = String(e); }
+  } catch (e) {
+    if (isCurrent()) $('status').textContent = String(e);
+    if (strict) throw e;
+  }
 }
 
 /** 选一个站点：**算例按需建**。
@@ -180,15 +183,18 @@ export function pickSite(s) {
  *
  *  勾了就用勾中的那些，一个没勾就用高亮的那一个 —— 与批量按钮同一条规则，
  *  而按钮上的字说出它会做什么，不留隐藏模式。 */
-async function confirmSelection() {
+let caseSelectionPending = false;
+export async function confirmSelection() {
+  if (caseSelectionPending) throw new Error('算例正在创建，请等待结果');
   const checked = sitesForWizard().filter(s => state.picked.has(s.site_file));
   const target = checked.length ? checked : (state.pickedSite ? [state.pickedSite] : []);
-  if (!target.length) { setStatus('先点一个站点，或勾选几个'); return; }
+  if (!target.length) throw new Error('先点一个站点，或勾选几个');
   const btn = $('makecase').querySelector('button');
   if (btn) btn.disabled = true;
+  caseSelectionPending = true;
   try {
-    const made = await ensureCases(target);
-    if (!made.length) return;
+    const made = await ensureCases(target, { strict: true });
+    if (!made.length) throw new Error('未找到已创建的算例，请检查算例目录');
     // 整批都交给参数页。代表算例是第一个，但改动落到每一个上。
     state.batch = [...new Set(made.map(c => c.dir))];
     // **刚建的这批就是马上要跑的那批。** 不灌 pickedCases 的话，
@@ -199,8 +205,11 @@ async function confirmSelection() {
     // **走 selectCase，不要只设 state.selected。** 那里还要把 case.nml 读进来、
     // 查出 CoLM 不认识的字段、刷新参数表与预设 —— 只设一个字段的话，
     // 参数页会是空的，而空页面不会报错，只是什么都没有。实测踩过。
-    await selectCase(made[0]);
+    await selectCase(made[0], { strict: true });
+    if (state.selected?.dir !== made[0].dir) throw new Error('当前算例已变化，请重新核对选择');
+    return made;
   } finally {
+    caseSelectionPending = false;
     // 整表重画，不只是重画按钮 —— 站点行上有「已建算例」标记，
     // 而刚刚正是建算例。只刷按钮的话，同一张卡片里下半截列出了新算例、
     // 上半截还说这些站点没建过。
@@ -226,7 +235,8 @@ export function renderMakeCase() {
   else if (one) b.textContent = `建算例：${one.name}`;
   else b.textContent = '先点一个站点，或勾选几个';
   b.disabled = !n && !one;
-  b.onclick = confirmSelection;
+  b.disabled ||= caseSelectionPending;
+  b.onclick = () => confirmSelection().catch(setStatus);
   foot.appendChild(b);
   const info = $('pickinfo');
   if (info) info.textContent = n ? `已勾 ${n} 个` : (one ? `已选 ${one.name}` : '还没选');
@@ -287,24 +297,24 @@ $('sitedir').addEventListener('change', () => {
 // 已经列出站点后再更换强迫场目录，旧的“无强迫场”标签不能留到手动重扫。
 $('forcingdir').addEventListener('change', scheduleSiteScan);
 
-/** 这个站点的算例，没有就建一个。返回**算例名**，建不了返回 `null`。
+/** 这个站点的算例，没有就建一个。返回**算例名**，建不了抛出原始错误。
  *
  *  **不自己扫描。** 每建一个就 `list_cases` 一次的话，90 个站点要扫 90 次，
  *  每次都遍历算例根目录并读每份 case.nml，还要重画两个容器（行数
  *  1…90 递增，约 8000 个行节点）。扫描与渲染交给 `ensureCases` 收尾做一次，
  *  中途的进度靠 `setStatus` 报。
  *
- *  返回名字而不是 `Case` 对象，是因为对象要等收尾那次扫描才拿得到。 */
+ *  返回名字而不是 `Case` 对象，是因为对象要等收尾那次扫描才拿得到；失败向调用方返回原始错误。 */
 async function ensureCase(s) {
   const root = $('root').value.trim();
-  if (!root) { setStatus('先在“基本设定 / 文件与目录”指定算例放哪'); return null; }
+  if (!root) throw new Error('先在“基本设定 / 文件与目录”指定算例放哪');
   const madeDir = state.createdBySite.get(s.site_file);
   const made = state.cases.find(c => c.dir === madeDir);
-  if (made) return made.name;
+  if (made && made.dir === joinPath(root, made.name)) return made.name;
   // 从扫描时定的名字起算：`s.caseName` 建好后会改成实际用的名字，下一次会话再从它起算就会
   // 一层层叠后缀（CN-Cng → CN-Cng-2 → CN-Cng-2-2）。
   const cname = freshCaseName(s.baseCaseName ?? s.caseName ?? s.name);
-  if (!s.met_file) { setStatus(`${s.name} 没有强迫场文件，建不了算例`); return null; }
+  if (!s.met_file) throw new Error(`${s.name} 没有强迫场文件，建不了算例`);
   setStatus(`正在为 ${s.name} 建算例…`);
   try {
     const out = joinPath(root, cname);
@@ -330,16 +340,20 @@ async function ensureCase(s) {
     s.caseName = cname;
     setStatus(`已为 ${s.name} 建好算例`);
     return cname;
-  } catch (e) { setStatus(`${s.name}：${e}`); return null; }
+  } catch (e) { setStatus(`${s.name}：${e}`); throw e; }
 }
 
 
 // ---------------------------------------------------------------- 站点库
 
 /** 扫一个 Sitedata 目录。`selectFile` 来自前处理交接；普通手工扫描留空。 */
-export async function scanPreparedSites(selectFile = null) {
+export async function scanPreparedSites(selectFile = null, { strict = false } = {}) {
   const dir = $('sitedir').value.trim();
-  if (!dir) { status('要先填 Sitedata 目录'); return null; }
+  if (!dir) {
+    status('要先填 Sitedata 目录');
+    if (strict) throw new Error('要先填 Sitedata 目录');
+    return null;
+  }
   const forcingDir = $('forcingdir').value.trim();
   siteScanPending = false;
   $('scan').disabled = true;
@@ -351,8 +365,10 @@ export async function scanPreparedSites(selectFile = null) {
     });
     if ($('sitedir').value.trim() !== dir || $('forcingdir').value.trim() !== forcingDir) {
       siteScanPending = true;
+      if (strict) throw new Error('站点目录已变化，请重新核对输入');
       return null;
     }
+    if (strict && !r.sites.length) throw new Error(r.hint || '示例目录没有可用的站点文件');
     // 算例目录也别问 —— 默认放在站点数据旁边。**显示出来且可改**，
     // 不是偷偷决定：产物落在哪儿是用户该看得见的事。
     if (!$('root').value.trim()) {
@@ -379,8 +395,15 @@ export async function scanPreparedSites(selectFile = null) {
     renderSteps();
     return state.pickedSite;
   } catch (e) {
-    if ($('sitedir').value.trim() === dir && $('forcingdir').value.trim() === forcingDir) status(e);
-    else siteScanPending = true;
+    if ($('sitedir').value.trim() === dir && $('forcingdir').value.trim() === forcingDir) {
+      state.sites = [];
+      state.picked.clear();
+      state.pickedSite = null;
+      renderSites();
+      renderSteps();
+      status(e);
+    } else siteScanPending = true;
+    if (strict) throw e;
     return null;
   }
   finally {
@@ -511,7 +534,7 @@ export function renderSites(r = {}) {
  *  串行：每次都要读站点文件与强迫场并写出 site.nc，瓶颈在磁盘，
  *  并发只是让它们互相抢。一个失败不中止整批，失败的会点名 ——
  *  一批悄悄少建几个，要到运行时才发现，那时已经隔了一层。 */
-export async function ensureCases(sites) {
+export async function ensureCases(sites, { strict = false } = {}) {
   const names = [];
   const failed = [];
   const root = $('root').value.trim();
@@ -522,8 +545,9 @@ export async function ensureCases(sites) {
   }
   for (const [i, s] of sites.entries()) {
     setStatus(`准备算例 ${i + 1}/${sites.length}：${s.name}`);
-    const n = await ensureCase(s);
-    if (n) names.push(n); else failed.push(s.name);
+    try {
+      names.push(await ensureCase(s));
+    } catch (e) { failed.push(`${s.name}：${e?.message || e}`); }
   }
   // **扫一次，不是每建一个扫一次。** 见 ensureCase 的注释。
   if (root) {
@@ -531,13 +555,22 @@ export async function ensureCases(sites) {
       adoptCaseList(await invoke('list_cases', { root }));
       renderCases();
       renderSteps();
-    } catch (e) { setStatus(e); }
+    } catch (e) {
+      setStatus(e);
+      if (strict) throw new Error(`无法核对建例结果：${e?.message || e}${failed.length ? '；' + failed.join('；') : ''}`);
+    }
   }
-  if (failed.length) setStatus(`${names.length}/${sites.length} 个就绪；建不了：${failed.join('、')}`);
+  if (failed.length) {
+    const message = `${names.length}/${sites.length} 个就绪；建不了：${failed.join('；')}`;
+    setStatus(message);
+    if (strict) throw new Error(message);
+  }
   // 对外仍然返回 Case 对象 —— confirmSelection 要拿 made[0] 去 selectCase、
   // 拿 .dir 填 batch 与 pickedCases。
-  const byName = new Map(state.cases.map(c => [c.name, c]));
-  return names.map(n => byName.get(n)).filter(Boolean);
+  const byDir = new Map(state.cases.map(c => [c.dir, c]));
+  const made = names.map(n => byDir.get(joinPath(root, n))).filter(Boolean);
+  if (strict && made.length !== sites.length) throw new Error('建例结果不完整，请核对已写入的算例目录后再继续');
+  return made;
 }
 
 
@@ -555,20 +588,23 @@ $('pick-none').onclick = () => { state.picked.clear(); renderSites(); };
  *  安装目录本身是只读的（macOS 的 .app、Windows 的 Program Files），
  *  所以要先复制出来 —— 否则建算例时会拿到一个权限错误，
  *  而错误信息里看不出问题出在"那是安装目录"。 */
-$('use-example').onclick = async () => {
+export async function loadExample() {
   $('use-example').disabled = true;
   try {
     const e = await invoke('install_example');
     $('sitedir').value = e.sitedir;
     $('forcingdir').value = e.forcingdir;
-    $('root').value = e.root;
-    if (e.runtimedir && (state.wizard?.physics?.bgc || state.wizard?.physics?.crop || methaneEnabled())) $('runtime').value = e.runtimedir;
-    for (const id of ['sitedir', 'forcingdir', 'root', 'runtime']) $(id).dispatchEvent(new Event('change'));
+    if (!$('root').value.trim()) $('root').value = e.root;
+    // Bundled inputs must not inherit unavailable paths from an earlier user dataset.
+    $('rawdata').value = '';
+    $('runtime').value = (state.wizard?.physics?.bgc || state.wizard?.physics?.crop || methaneEnabled()) ? (e.runtimedir || '') : '';
+    for (const id of ['sitedir', 'forcingdir', 'root', 'rawdata', 'runtime']) $(id).dispatchEvent(new Event('change'));
     setStatus(e.already ? '示例数据已经在了' : '示例数据已放好');
-    scheduleSiteScan();
-  } catch (err) { setStatus(err); }
-  finally { $('use-example').disabled = false; }
-};
+    if (scanTimer !== null) { clearTimeout(scanTimer); scanTimer = null; }
+    await scanPreparedSites(null, { strict: true });
+  } finally { $('use-example').disabled = false; }
+}
+$('use-example').onclick = () => loadExample().catch(setStatus);
 
 // 新会话（向导或打开已有算例）清掉了本次算例；两个列表与运行按钮要跟着清，否则旧算例还挂在页上。
 addEventListener('colm:wizard', renderCases);

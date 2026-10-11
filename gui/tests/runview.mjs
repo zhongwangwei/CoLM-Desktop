@@ -42,7 +42,7 @@ if (long.length > 40020 || !long.endsWith('site-only\n')) {
 }
 const runner = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 if (!runner.includes('function failPendingRuns(reason)')
-    || !/catch \(e\) \{\s*failPendingRuns\(e\);/.test(runner)) {
+    || !/catch\(e => \{\s*if \(activeRunId === runId\) \{\s*failPendingRuns\(e\);/.test(runner)) {
   throw new Error('a rejected batch launch must clear every pending per-site run');
 }
 if (!runner.includes("dirs.length === 1\n    ? progressText")) {

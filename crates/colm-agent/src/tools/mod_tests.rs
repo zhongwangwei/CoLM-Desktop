@@ -86,13 +86,20 @@ fn string_nulls_from_the_model_count_as_missing() {
 }
 
 #[test]
-fn driving_the_window_replaces_background_case_creation() {
+fn driving_the_window_replaces_background_case_and_study_actions() {
     let names = |registry: &Registry| -> Vec<&str> { registry.tools().map(|t| t.name()).collect() };
     let plain = Registry::standard_with(false, false);
-    assert!(names(&plain).contains(&"create_case"));
+    for name in ["create_case", "create_study", "run_study", "study_control"] {
+        assert!(names(&plain).contains(&name));
+    }
     assert!(!names(&plain).contains(&"ui_state"));
     let window = Registry::standard_with(true, true);
-    assert!(!names(&window).contains(&"create_case"));
+    for name in ["create_case", "create_study", "run_study", "study_control"] {
+        assert!(!names(&window).contains(&name));
+    }
+    let remote = Registry::standard_for(false, false, true);
+    assert!(names(&remote).contains(&"run_study"));
+    assert!(!names(&remote).contains(&"ui_state"));
     for tool in [
         "ui_state",
         "ui_commit",

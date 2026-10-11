@@ -593,8 +593,98 @@ COLM_FETCH_PY
     }
     Ok(evidence)
 }
+// Fixed read-only reader: descriptor-relative opens reject symlink races and special files.
+const KNOWLEDGE_READER: &str = r#"
+import hashlib,json,os,stat,sys,time
+req=json.loads(sys.argv[1])
+def text(v,limit):
+    return isinstance(v,str) and len(v)<=limit and not any(ord(c)<32 or ord(c)==127 for c in v)
+source=req.get('source'); query=req.get('query',''); paths=req.get('paths')
+assert text(source,4096) and source.startswith('/') and source!='/' and not any(p in ('.','..') for p in source.split('/')), 'invalid server source directory'
+assert text(query,256), 'invalid knowledge query'
+assert isinstance(paths,list) and 0<=len(paths)<=16 and len(set(paths))==len(paths), 'request at most 16 distinct source paths'
+for path in paths:
+    assert text(path,256) and '\\' not in path and ':' not in path and all(p and not p.startswith('.') for p in path.split('/')) and path.split('/')[0] in ('crates','vendor'), 'invalid source path'
+    assert path.lower().endswith(('.rs','.f90','.f','.h')), 'source file extension required'
+flags=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK
+root=os.open('/',flags|os.O_DIRECTORY)
+try:
+    for part in filter(None,source.split('/')):
+        child=os.open(part,flags|os.O_DIRECTORY,dir_fd=root);os.close(root);root=child
+    canonical=os.path.realpath(source)
+    def read_file(path,limit):
+        parent=os.dup(root)
+        try:
+            parts=path.split('/')
+            for part in parts[:-1]:
+                child=os.open(part,flags|os.O_DIRECTORY,dir_fd=parent);os.close(parent);parent=child
+            fd=os.open(parts[-1],flags,dir_fd=parent)
+            with os.fdopen(fd,'rb') as f:
+                before=os.fstat(f.fileno())
+                assert stat.S_ISREG(before.st_mode) and before.st_size<=limit, 'source is not a bounded regular file'
+                data=f.read(limit+1);after=os.fstat(f.fileno())
+                assert len(data)<=limit and (before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_size,after.st_mtime_ns,after.st_ctime_ns), 'source changed during reading'
+                return data
+        finally: os.close(parent)
+    sources=[]
+    budget=6000//max(1,len(paths))
+    for path in paths:
+        data=read_file(path,4*1024*1024)
+        assert b'\x00' not in data, 'binary source file'
+        lines=data.decode('utf-8',errors='replace').splitlines()
+        match=next((i for i,line in enumerate(lines) if query and query.lower() in line.lower()),0)
+        start=match; excerpt=[]; size=0
+        for original in lines[start:start+40]:
+            if budget-size<2: break
+            line=original[:min(1024,budget-size-2)]
+            while len(json.dumps(line,ensure_ascii=False))>budget-size: line=line[:-1]
+            excerpt.append(line);size+=len(json.dumps(line,ensure_ascii=False))
+        sources.append({'path':path,'sha256':hashlib.sha256(data).hexdigest(),'from_line':start+1,'lines':excerpt,'total_lines':len(lines),'excerpt_truncated':start>0 or len(excerpt)<len(lines) or any(line!=original for line,original in zip(excerpt,lines[start:]))})
+    revision=None
+    try:
+        head=read_file('.git/HEAD',1024).decode('ascii').strip()
+        if head.startswith('ref: refs/'):
+            ref=head[5:]
+            assert all(p and not p.startswith('.') for p in ref.split('/'))
+            head=read_file('.git/'+ref,1024).decode('ascii').strip()
+        if len(head) in (40,64) and all(c in '0123456789abcdef' for c in head): revision=head
+    except (OSError,UnicodeError,AssertionError): pass
+    current=os.stat(source,follow_symlinks=False);opened=os.fstat(root)
+    assert (current.st_dev,current.st_ino)==(opened.st_dev,opened.st_ino) and os.path.realpath(source)==canonical, 'source directory changed during reading'
+    print(json.dumps({'source':canonical,'revision':revision,'dirty':None,'checked_at':int(time.time()),'sources':sources,'scientifically_validated':False},ensure_ascii=False))
+finally: os.close(root)
+"#;
+
+fn knowledge(opts: &Opts) -> Result<Value> {
+    let request: Value = serde_json::from_str(&opts.need_str("--request")?)?;
+    ensure!(
+        request.is_object() && request.to_string().len() <= 16384,
+        "invalid knowledge request"
+    );
+    let host = opts.need_str("--host")?;
+    let ssh = Ssh::new(&host)?;
+    let script = format!(
+        "python3 -I - {} <<'COLM_KNOWLEDGE_PY'\n{}\nCOLM_KNOWLEDGE_PY",
+        quote(&request.to_string()),
+        KNOWLEDGE_READER
+    );
+    let output = ssh.run_ok(&script)?;
+    ensure!(
+        output.len() <= 1024 * 1024,
+        "knowledge response exceeds limit"
+    );
+    let mut value: Value = serde_json::from_str(&output)?;
+    value["host"] = json!(host);
+    value["scope"] = json!({"kind":"remote","name":opts.get("--name").filter(|s| !s.is_empty()),"host":host,"source":value["source"],"revision":value["revision"],"dirty":value["dirty"]});
+    Ok(value)
+}
+
 pub(crate) fn run(opts: &Opts) -> Result<()> {
     let operation = opts.need_str("--operation")?;
+    if operation == "knowledge" {
+        println!("{}", knowledge(opts)?);
+        return Ok(());
+    }
     if operation == "execute" {
         return execute(opts);
     }
@@ -662,6 +752,108 @@ pub(crate) fn run(opts: &Opts) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn read_knowledge_fixture(request: Value) -> std::process::Output {
+        Command::new("python3")
+            .args(["-I", "-c", KNOWLEDGE_READER, &request.to_string()])
+            .output()
+            .unwrap()
+    }
+    #[test]
+    fn knowledge_reader_hashes_current_bytes_and_rejects_escapes() {
+        let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "colm-knowledge-{}-{}",
+            std::process::id(),
+            layout::now()
+        ));
+        std::fs::create_dir_all(dir.join("crates/demo/src")).unwrap();
+        let file = dir.join("crates/demo/src/lib.rs");
+        std::fs::write(&file, b"// physics\r\nconst A: i32 = 1;\r\n").unwrap();
+        let request = json!({"source":dir,"query":"physics","paths":["crates/demo/src/lib.rs"]});
+        let output = read_knowledge_fixture(request.clone());
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let before: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            before["sources"][0]["sha256"],
+            workspace::sha256(&std::fs::read(&file).unwrap())
+        );
+        assert_eq!(before["sources"][0]["from_line"], 1);
+        assert_eq!(before["scientifically_validated"], false);
+        std::fs::write(&file, b"// edited without committing\n").unwrap();
+        let after: Value =
+            serde_json::from_slice(&read_knowledge_fixture(request.clone()).stdout).unwrap();
+        assert_ne!(
+            before["sources"][0]["sha256"],
+            after["sources"][0]["sha256"]
+        );
+        for path in [
+            "../secret.rs",
+            "crates/../secret.rs",
+            "crates/.secret.rs",
+            "crates/demo/password.txt",
+            "/etc/passwd",
+            "crates/demo/src/lib.rs\n",
+        ] {
+            let mut bad = request.clone();
+            bad["paths"] = json!([path]);
+            assert!(!read_knowledge_fixture(bad).status.success(), "{path}");
+        }
+        let mut bad = request.clone();
+        bad["source"] = json!(dir.join("missing"));
+        assert!(!read_knowledge_fixture(bad).status.success());
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&file, dir.join("crates/demo/src/link.rs")).unwrap();
+            let mut bad = request.clone();
+            bad["paths"] = json!(["crates/demo/src/link.rs"]);
+            assert!(!read_knowledge_fixture(bad).status.success());
+        }
+        std::fs::write(&file, "x".repeat(100_000)).unwrap();
+        let out = read_knowledge_fixture(request);
+        assert!(out.status.success());
+        assert!(out.stdout.len() < 12000);
+        let bounded: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(bounded["sources"][0]["excerpt_truncated"], true);
+        let mut paths = Vec::new();
+        for i in 0..16 {
+            let relative = format!("crates/demo/src/file{i}.rs");
+            std::fs::write(
+                dir.join(&relative),
+                format!(
+                    "{}\nneedle {}\n{}",
+                    "before".repeat(1000),
+                    "\\\"汉".repeat(2000),
+                    "after".repeat(1000)
+                ),
+            )
+            .unwrap();
+            paths.push(relative);
+        }
+        let out = read_knowledge_fixture(json!({"source":dir,"query":"needle","paths":paths}));
+        assert!(out.status.success());
+        assert!(String::from_utf8_lossy(&out.stdout).chars().count() < 12000);
+        let bounded: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let sources = bounded["sources"].as_array().unwrap();
+        assert_eq!(sources.len(), 16);
+        let mut chars = 0;
+        for source in sources {
+            assert_eq!(source["from_line"], 2);
+            assert_eq!(source["excerpt_truncated"], true);
+            assert!(source["lines"][0].as_str().unwrap().starts_with("needle"));
+            chars += source["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap().chars().count())
+                .sum::<usize>();
+        }
+        assert!(chars <= 6000);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     fn fixture() -> (PathBuf, Workspace) {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

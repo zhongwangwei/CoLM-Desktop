@@ -262,6 +262,8 @@ function renderOverview() {
     check.checked = state.resultSelection.has(c.dir);
     check.disabled = !hasValidatedHistory(c);
     check.title = '加入多站点分析范围';
+    check.id = `result-scope-${encodeURIComponent(c.dir)}`;
+    check.setAttribute('aria-label', `${c.name} · 分析范围`);
     check.onchange = event => {
       event.stopPropagation();
       state.resultSelectionTouched = true;
@@ -348,7 +350,7 @@ function setResultCase(dir) {
   }
   syncResultCaseSelects();
   syncObservation();
-  prepareActivePane();
+  return prepareActivePane();
 }
 
 function syncObservation() {
@@ -358,26 +360,38 @@ function syncObservation() {
   updateButtons();
 }
 
-async function validateHistoryCases(cases = allCurrent()) {
+async function validateHistoryCases(cases = allCurrent(), refresh = true) {
   const pending = cases.filter(c => c.has_history && !historyHealth.has(c.dir));
-  if (!pending.length) return;
+  const existing = cases.map(c => historyHealth.get(c.dir)?.promise).filter(Boolean);
+  if (!pending.length) { await Promise.all(existing); return; }
   if (!hasBackend) {
     pending.forEach(c => historyHealth.set(c.dir, { ok: true }));
     return;
   }
-  pending.forEach(c => historyHealth.set(c.dir, { ok: false, pending: true }));
+  const entries = pending.map(c => {
+    const entry = { ok: false, pending: true };
+    historyHealth.set(c.dir, entry);
+    return entry;
+  });
   const width = Math.max(1, Math.min(4, Number(navigator.hardwareConcurrency) || 1));
-  const results = await boundedMap(pending, width, async c => {
+  const work = boundedMap(pending, width, async c => {
     const catalog = JSON.parse(await invoke('history_catalog', { case: c.dir }));
     assertUsableCatalog(catalog);
-    catalogCache.set(c.dir, catalog);
     return catalog;
+  }).then(results => {
+    results.forEach((result, index) => {
+      const c = pending[index];
+      // A refresh may have invalidated this request while its files were being read.
+      if (historyHealth.get(c.dir) !== entries[index]) return;
+      if (result.ok) {
+        catalogCache.set(c.dir, result.value);
+        historyHealth.set(c.dir, { ok: true });
+      } else historyHealth.set(c.dir, { ok: false, error: result.error });
+    });
   });
-  results.forEach((result, index) => {
-    const c = pending[index];
-    if (result.ok) historyHealth.set(c.dir, { ok: true });
-    else historyHealth.set(c.dir, { ok: false, error: result.error });
-  });
+  entries.forEach(entry => { entry.promise = work; });
+  await Promise.all([...existing, work]);
+  if (!refresh) return;
   if (['result-data', 'result-series', 'result-evaluation', 'result-comparison'].includes(state.step)) {
     await prepareActivePane();
   } else {
@@ -469,6 +483,8 @@ function evaluationVariableNode(variable, availabilityText = '') {
   label.className = `evaluation-variable${variable.available ? '' : ' unavailable'}`;
   const input = document.createElement('input');
   input.type = 'checkbox';
+  input.dataset.evaluationVariable = variable.name;
+  input.setAttribute('aria-label', `${evaluationLabel(variable)} · ${variable.name}`);
   input.checked = state.evaluationVariables.has(variable.name);
   input.disabled = !variable.available;
   input.onchange = () => setEvaluationVariable(variable.name, input.checked);
@@ -531,7 +547,7 @@ function renderBatchEvaluationSelector() {
   }
 }
 
-async function refreshCurrentEvaluationCatalog() {
+async function refreshCurrentEvaluationCatalog(strict = false) {
   const c = activeCase();
   const obs = $('obs').value.trim();
   const isCurrent = () => state.step === 'result-evaluation'
@@ -545,7 +561,7 @@ async function refreshCurrentEvaluationCatalog() {
     currentEvaluationCatalog = rows;
     renderEvaluationSelector();
     updateButtons();
-  } catch (error) { if (isCurrent()) status(error); }
+  } catch (error) { if (isCurrent()) status(error); if (strict === true) throw error; }
 }
 
 async function refreshBatchEvaluationCatalogs() {
@@ -576,7 +592,7 @@ function kindLabel(kind) {
   return { series: '时间序列', profile: '垂直剖面', category: '分类维度', scalar: '标量' }[kind] ?? kind;
 }
 
-async function renderDataBrowser() {
+async function renderDataBrowser(strict = false) {
   const token = ++activeDataBrowserRequest;
   const c = activeCase();
   const table = $('result-variable-table');
@@ -616,6 +632,7 @@ async function renderDataBrowser() {
   } catch (error) {
     if (token === activeDataBrowserRequest && state.step === 'result-data' && activeCase()?.dir === c.dir) {
       table.appendChild(node('caption', 'warn', String(error)));
+      if (strict === true) throw error;
     }
   }
 }
@@ -716,10 +733,10 @@ function chartColors() {
   };
 }
 
-async function plotSeries() {
+async function plotSeries(strict = false) {
   const c = activeCase();
   const variable = $('var').value;
-  if (!c || !variable) return;
+  if (!c || !variable) { if (strict === true) throw new Error('请选择有结果的算例和变量。'); return; }
   const token = ++activeSeriesRequest;
   $('plot').disabled = true;
   status(`读取 ${c.name} · ${variable}…`);
@@ -732,7 +749,7 @@ async function plotSeries() {
       }),
       loadCatalog(c),
     ]);
-    if (token !== activeSeriesRequest || activeCase()?.dir !== c.dir) return;
+    if (token !== activeSeriesRequest || activeCase()?.dir !== c.dir) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
     const values = data.vars[variable];
     const catalogVariable = catalog.variables.find(item => item.name === variable);
     const meta = variableMeta(variable, catalogVariable?.units);
@@ -746,7 +763,7 @@ async function plotSeries() {
     $('series-png').disabled = false;
     $('series-csv').disabled = false;
     status(`${c.name} · ${meta.label} 已绘制${data.downsampled ? '（显示已保极值降采样）' : ''}`);
-  } catch (error) { status(error); }
+  } catch (error) { status(error); if (strict === true) throw error; }
   finally { if (token === activeSeriesRequest) $('plot').disabled = false; }
 }
 
@@ -767,10 +784,10 @@ function renderSeriesStats(data, values, meta) {
   }
 }
 
-async function exportFullSeries() {
+async function exportFullSeries(strict = false) {
   const c = activeCase();
   const variable = $('var').value;
-  if (!c || !variable) return;
+  if (!c || !variable) { if (strict === true) throw new Error('请选择有结果的算例和变量。'); return; }
   $('series-csv').disabled = true;
   status(`读取 ${c.name} · ${variable} 完整序列…`);
   try {
@@ -786,7 +803,7 @@ async function exportFullSeries() {
     downloadText(rowsToCsv(rows, ['time_utc', 'unix_seconds', 'variable', 'value']),
       `${c.name}-${variable}.csv`, 'text/csv;charset=utf-8');
     status(`${c.name} · ${variable} 完整 CSV 已导出：${data.n} 行`);
-  } catch (error) { status(error); }
+  } catch (error) { status(error); if (strict === true) throw error; }
   finally { $('series-csv').disabled = !activeCase() || !$('var').value; }
 }
 
@@ -802,14 +819,15 @@ async function getMetrics(c, obs, spinup, corrected, summaryOnly = false, pairVa
   return metricsCache.set(key, rows);
 }
 
-async function evaluateCurrent() {
+async function evaluateCurrent(strict = false) {
   const c = activeCase();
   const obs = $('obs').value.trim();
-  if (!c || !obs) { status('要先给当前站点选择观测文件'); return; }
+  if (!c || !obs) { if (strict === true) throw new Error('要先给当前站点选择观测文件'); status('要先给当前站点选择观测文件'); return; }
   const selected = currentEvaluationCatalog
     .filter(variable => variable.available && state.evaluationVariables.has(variable.name))
     .map(variable => variable.name);
   if (!selected.length) {
+    if (strict === true) throw new Error('请至少选择一个可用的评估变量。');
     status(language() === 'en' ? 'Select at least one variable available at this site.' : '请至少选择一个当前站点可用的评估变量');
     return;
   }
@@ -818,7 +836,7 @@ async function evaluateCurrent() {
   $('evaluate').disabled = true;
   try {
     const rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked, true, selected);
-    if (token !== activeMetricRequest || activeCase()?.dir !== c.dir) return;
+    if (token !== activeMetricRequest || activeCase()?.dir !== c.dir) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
     const returned = new Set(rows.map(row => row.name));
     const missing = selected.filter(variable => !returned.has(variable));
     currentMetricRows = rows;
@@ -827,11 +845,11 @@ async function evaluateCurrent() {
     renderMetrics(rows, missing);
     // 研究总览与结果页的“下一步”按指标推荐（research.js）。
     globalThis.dispatchEvent?.(new Event('colm:metrics'));
-    if (rows.length) drawComparison(rows[0]);
+    if (rows.length) await drawComparison(rows[0], strict);
     status(language() === 'en'
       ? `${c.name}: ${rows.length} variable(s) evaluated${missing.length ? `; ${missing.length} had no valid paired samples` : ''}`
       : `${c.name} 评估完成：${rows.length} 个变量${missing.length ? `；${missing.length} 个没有有效配对样本` : ''}`);
-  } catch (error) { status(error); }
+  } catch (error) { status(error); if (strict === true) throw error; }
   finally { if (token === activeMetricRequest) $('evaluate').disabled = false; }
 }
 
@@ -874,7 +892,7 @@ function renderMetrics(rows, missing = []) {
     : `当前时段没有有效配对样本：${missing.join('、')}`));
 }
 
-async function drawComparison(summaryRow) {
+async function drawComparison(summaryRow, strict = false) {
   currentComparisonSummary = summaryRow;
   const c = activeCase();
   const obs = $('obs').value.trim();
@@ -885,7 +903,7 @@ async function drawComparison(summaryRow) {
   try {
     rows = await getMetrics(c, obs, Number($('spinup').value) || 0, $('corrected').checked,
       false, [summaryRow.name], 2400);
-  } catch (error) { status(error); return; }
+  } catch (error) { status(error); if (strict === true) throw error; return; }
   if (token !== activeMetricChartRequest || activeCase()?.dir !== c.dir) return;
   const row = rows[0];
   if (!row?.time || !row?.model || !row?.obs) { status(`${summaryRow.name} 没有可绘制的配对点`); return; }
@@ -939,11 +957,12 @@ function updateComparisonButton() {
   $('eval-all').textContent = `评估分析范围内的 ${scope.length} 个站点`;
 }
 
-async function evaluateAll() {
+async function evaluateAll(strict = false) {
   const todo = resultScope();
-  if (!todo.length) return;
+  if (!todo.length) { if (strict === true) throw new Error('没有可评估的算例。'); return; }
   const selected = selectedEvaluationNames();
   if (!selected.length) {
+    if (strict === true) throw new Error('请至少选择一个可用的评估变量。');
     status(language() === 'en' ? 'Select at least one variable for batch evaluation.' : '请至少选择一个批量评估变量');
     return;
   }
@@ -1002,6 +1021,8 @@ async function evaluateAll() {
   status(cancelled
     ? `批量评估已取消：保留 ${new Set(state.resultMetrics.map(row => row.case_dir)).size} 个已完成站点`
     : `批量评估完成：${new Set(state.resultMetrics.map(row => row.case_dir)).size}/${todo.length} 个站点有结果`);
+  if (strict === true && (cancelled || state.resultFailures.length)) throw new Error(cancelled
+    ? '批量评估已取消，保留已完成结果。' : `部分站点评估失败：${state.resultFailures.map(item => `${item.site}: ${item.reason}`).join('；')}`);
 }
 
 function renderComparison() {
@@ -1098,9 +1119,9 @@ function renderRanking(rows, metric) {
   }
 }
 
-async function diagnoseCurrent() {
+async function diagnoseCurrent(strict = false) {
   const c = activeCase();
-  if (!c) return;
+  if (!c) { if (strict === true) throw new Error('请选择有结果的算例。'); return; }
   $('diagnose').disabled = true;
   const host = $('diagnostics');
   host.textContent = '';
@@ -1145,6 +1166,7 @@ async function diagnoseCurrent() {
     host.appendChild(diagnosticCard('变量结构', '', [['时间序列', catalog.variables.filter(v => v.kind === 'series').length], ['垂直剖面', profile], ['分类维度', category]], profile || category ? '多维变量已识别，不会被错误压成一维折线。' : '当前 history 以标量时间序列为主。'));
   } catch (error) {
     host.appendChild(diagnosticCard('诊断失败', 'fail', [['原因', String(error)]]));
+    if (strict === true) throw error;
   } finally { $('diagnose').disabled = false; }
 }
 
@@ -1287,7 +1309,7 @@ function printableReportHtml(data) {
     <footer>${en ? 'Copyright: CoLM LSM Development Team, School of Atmospheric Sciences, SYSU' : '版权所有：CoLM陆面模式开发团队，中山大学大气科学学院'}</footer>`;
 }
 
-async function exportPdfReport() {
+async function exportPdfReport(strict = false) {
   document.querySelector('#print-report')?.remove();
   const report = document.createElement('article');
   report.id = 'print-report';
@@ -1308,13 +1330,14 @@ async function exportPdfReport() {
   } catch (error) {
     cleanup();
     status(error);
+    if (strict === true) throw error;
   }
 }
 
-function generateReport() {
+async function generateReport(strict = false) {
   const data = reportData();
   const format = $('export-format').value;
-  if (format === 'pdf') { exportPdfReport(); return; }
+  if (format === 'pdf') { await exportPdfReport(strict === true); return; }
   if (format === 'json') { reportText = JSON.stringify(data, null, 2) + '\n'; reportExtension = 'json'; }
   else if (format === 'csv') {
     reportText = rowsToCsv(data.metrics, ['site', 'name', 'n', 'rmse', 'mae', 'bias', 'r2', 'correlation', 'nse', 'kge', 'alpha', 'beta']);
@@ -1346,9 +1369,9 @@ function downloadText(text, filename, type = 'text/plain') {
   setTimeout(() => URL.revokeObjectURL(link.href), 5000);
 }
 
-function exportChart(host, filename) {
+function exportChart(host, filename, strict = false) {
   const canvas = host.querySelector('canvas');
-  if (!canvas) return;
+  if (!canvas) { if (strict === true) throw new Error('没有可导出的图表，请先绘图。'); return; }
   const link = document.createElement('a'); link.href = canvas.toDataURL('image/png'); link.download = filename; link.click();
 }
 
@@ -1389,10 +1412,17 @@ function updateButtons() {
   updateComparisonButton();
 }
 
-async function prepareActivePane() {
+async function prepareActivePane(strict = false) {
   if (!state.step.startsWith('result-')) return;
-  const token = ++activePaneRequest;
   const step = state.step;
+  if (strict === true && !['result-tuning', 'result-uncertainty'].includes(step)) {
+    const cases = allCurrent();
+    await validateHistoryCases(cases, false);
+    if (state.step !== step) throw new Error('结果页面已变化，请重新读取界面。');
+    const failed = cases.filter(c => c.has_history && historyHealth.get(c.dir)?.ok === false);
+    if (failed.length) throw new Error(`结果校验失败：${failed.map(c => `${c.name}: ${historyHealth.get(c.dir)?.error || '尚未完成校验'}`).join('；')}`);
+  }
+  const token = ++activePaneRequest;
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
@@ -1417,9 +1447,10 @@ async function prepareActivePane() {
       if (kind === 'tuning') await renderTuningTargets(isCurrent);
       else await renderStudyOutputs(isCurrent);
       if (!isCurrent()) return;
-      if (activeStudyDirs(kind).length) await refreshStudy(kind);
+      if (activeStudyDirs(kind).length) await refreshStudy(kind, strict);
     } catch (error) {
       if (token === activePaneRequest && state.step === step) status(error);
+      if (strict === true) throw error;
     }
     if (token === activePaneRequest && state.step === step) {
       renderStudyBudget(kind);
@@ -1437,12 +1468,12 @@ async function prepareActivePane() {
       fillVariableSelect(catalog);
       if (!$('series-from').value) $('series-from').value = inputClock(catalog.start);
       if (!$('series-to').value) $('series-to').value = inputClock(catalog.end);
-      if (step === 'result-data') await renderDataBrowser();
+      if (step === 'result-data') await renderDataBrowser(strict);
       if (!isCurrent()) return;
-    } catch (error) { if (isCurrent()) status(error); }
+    } catch (error) { if (isCurrent()) status(error); if (strict === true) throw error; }
   }
   if (step === 'result-evaluation') {
-    await refreshCurrentEvaluationCatalog();
+    await refreshCurrentEvaluationCatalog(strict);
     if (!isCurrent()) return;
   }
   if (step === 'result-comparison') {
@@ -1494,7 +1525,7 @@ $('batch-eval-select-all').onclick = () => replaceEvaluationSelection(
     .some(item => item.name === variable.name && item.available))).map(variable => variable.name));
 $('batch-eval-select-none').onclick = () => replaceEvaluationSelection([]);
 $('evaluate').onclick = evaluateCurrent;
-$('corrected').onchange = () => { if (currentMetricRows.length) evaluateCurrent(); };
+$('corrected').onchange = resetEvaluationResults;
 $('evaluation-chart-refresh').onclick = () => {
   const row = currentComparisonSummary ?? currentMetricRows[0];
   if (row) drawComparison(row);
@@ -1766,10 +1797,10 @@ async function renderStudySpinup(kind, stillCurrent = () => true) {
   } catch (error) { if (stillCurrent()) note.textContent = `无法读取预热设置：${error?.message || error}`; }
 }
 
-async function applyStudySpinup(kind) {
+async function applyStudySpinup(kind, strict = false) {
   const prefix = kind === 'tuning' ? 'tune' : 'uq';
   const dirs = studySpinupTarget();
-  if (!dirs.length) return status('没有已建算例可设置预热。');
+  if (!dirs.length) { if (strict === true) throw new Error('没有已建算例可设置预热。'); return status('没有已建算例可设置预热。'); }
   const years = Number($(`${prefix}-spinup-years`)?.value);
   const repeat = Number($(`${prefix}-spinup-repeat`)?.value);
   if (!Number.isSafeInteger(years) || years < 0 || !Number.isSafeInteger(repeat) || repeat < 0) {
@@ -2429,15 +2460,15 @@ function studyDesignKeys(kind, cases = studyScope()) {
   catch { return []; }
 }
 
-async function createStudy(kind) {
+async function createStudy(kind, strict = false) {
   const blocked = spatialStudyReason();
-  if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
-  if (studyCreating[kind]) return;
+  if (blocked) { if (strict === true) throw new Error(dialogText(blocked)); status(dialogText(blocked)); renderStudyReadiness(kind); return; }
+  if (studyCreating[kind]) { if (strict === true) throw new Error('任务正在生成，请先查询状态。'); return; }
   const scope = studyScopeKey();
   const cases = studyScope();
-  if (!cases.length) return status('没有已建算例可用于生成分析任务。');
+  if (!cases.length) { if (strict === true) throw new Error('没有已建算例可用于生成分析任务。'); return status('没有已建算例可用于生成分析任务。'); }
   const roots = new Set(cases.map(c => parentDir(c.dir)));
-  if (roots.size !== 1) return status('分析任务要求所有算例位于同一个项目目录。');
+  if (roots.size !== 1) { if (strict === true) throw new Error('分析任务要求所有算例位于同一个项目目录。'); return status('分析任务要求所有算例位于同一个项目目录。'); }
   const designKeys = studyDesignKeys(kind, cases);
   const isCurrent = () => !spatialStudyReason() && scope === studyScopeKey()
     && JSON.stringify(designKeys) === JSON.stringify(studyDesignKeys(kind));
@@ -2465,7 +2496,8 @@ async function createStudy(kind) {
     if (!Number.isSafeInteger(maxCandidates) || maxCandidates > MAX_STUDY_CANDIDATES) {
       throw new Error(`候选成员数必须不超过 ${MAX_STUDY_CANDIDATES}。`);
     }
-    if (totalCandidates > 200 && !(await appConfirm(dialogText(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)))) return;
+    if (strict === true && totalCandidates > 200) throw new Error('候选超过 200 个，请调整预算或由用户在页面确认生成。');
+    if (totalCandidates > 200 && !(await appConfirm(dialogText(`本次共会创建 ${totalCandidates} 个候选成员，可能耗时很长。是否继续？`)))) { if (strict === true) throw new Error('用户取消了操作。'); return; }
     for (const plan of plans) {
       await invoke('study_preflight_json', plan);
       ensureCurrent();
@@ -2489,9 +2521,9 @@ async function createStudy(kind) {
     }
     saveStudyDirs();
     setPreview(kind, dirs.join('\n'));
-    if (!isCurrent()) return;
-    await refreshStudy(kind);
-    if (!isCurrent()) return;
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
+    await refreshStudy(kind, strict);
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
     setStudyWizardPage(kind, 5);
     status(kind === 'tuning' ? '参数率定任务已生成。' : '不确定性分析任务已生成。');
   } finally {
@@ -3001,13 +3033,13 @@ async function renderStudyResults(kind, envelopes, isCurrent = () => true) {
   if (isCurrent()) host.appendChild(content);
 }
 
-async function refreshStudy(kind) {
+async function refreshStudy(kind, strict = false) {
   const request = ++studyRefreshRequests[kind];
   const scope = studyScopeKey();
   const dirs = activeStudyDirs(kind);
   const isCurrent = () => request === studyRefreshRequests[kind] && scope === studyScopeKey()
     && JSON.stringify(dirs) === JSON.stringify(activeStudyDirs(kind));
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
+  if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
   const envelopes = [];
   for (const dir of dirs) {
     try {
@@ -3016,7 +3048,7 @@ async function refreshStudy(kind) {
       const reason = error?.message || String(error);
       envelopes.push({ error: reason, study_dir: dir, state: { status: 'failed', tasks: { error: { member: 'study', site: dir.split(/[\\/]/).pop(), status: 'failed', reason } } }, events: [{ study_dir: dir, study_key: dir, kind: 'study_error', reason }] });
     }
-    if (!isCurrent()) return;
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
   }
   if (envelopes.length === 1 && !envelopes[0].error) renderStudyEnvelope(kind, { ...envelopes[0], kind_hint: kind });
   else {
@@ -3032,21 +3064,23 @@ async function refreshStudy(kind) {
   studyEvents[kind] = envelopes.flatMap((envelope, studyIndex) => (envelope.events || []).map(event => ({ ...event, study_dir: dirs[studyIndex], study_key: dirs[studyIndex] }))).slice(-300);
   try { await renderStudyResults(kind, envelopes, isCurrent); }
   catch (error) {
-    if (!isCurrent()) return;
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
     $(kind === 'tuning' ? 'tune-results' : 'uq-results')
       ?.appendChild(node('div', 'warn mini', error?.message || String(error)));
+    if (strict === true) throw error;
   }
+  if (strict === true && envelopes.some(item => item.error)) throw new Error(envelopes.filter(item => item.error).map(item => item.error).join('；'));
 }
 
-async function runStudy(kind) {
+async function runStudy(kind, strict = false) {
   const blocked = spatialStudyReason();
-  if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
-  if (aggregateStudy(studyViews[kind] || {}).status === 'NeedsReview') return retryStudy(kind);
+  if (blocked) { if (strict === true) throw new Error(dialogText(blocked)); status(dialogText(blocked)); renderStudyReadiness(kind); return; }
+  if (aggregateStudy(studyViews[kind] || {}).status === 'NeedsReview') return retryStudy(kind, strict);
   const dirs = activeStudyDirs(kind);
   const kernel = currentKernel();
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
-  if (!kernel) return status('请先选择内核。');
-  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。');
+  if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
+  if (!kernel) { if (strict === true) throw new Error('请先选择内核。'); return status('请先选择内核。'); }
+  if (studyRunning[kind]) { if (strict === true) throw new Error(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); return status(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); }
   const isCurrent = studyMutationGuard(kind, dirs, kernel);
   const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
@@ -3064,9 +3098,9 @@ async function runStudy(kind) {
         }),
       };
     });
-    if (!isCurrent()) return;
-    await refreshStudy(kind);
-    if (!isCurrent()) return;
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
+    await refreshStudy(kind, strict);
+    if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
     setPreview(kind, results.filter(result => result.ok)
       .map(result => `${result.value.dir}\n${result.value.out}`).join('\n\n'));
     const failed = results.filter(result => !result.ok);
@@ -3080,13 +3114,13 @@ async function runStudy(kind) {
   }
 }
 
-async function retryStudy(kind) {
+async function retryStudy(kind, strict = false) {
   const blocked = spatialStudyReason();
-  if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
+  if (blocked) { if (strict === true) throw new Error(dialogText(blocked)); status(dialogText(blocked)); renderStudyReadiness(kind); return; }
   const dirs = activeStudyDirs(kind);
   const isCurrent = studyMutationGuard(kind, dirs);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
-  if (studyRunning[kind]) return status(kind === 'tuning' ? '参数率定任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。');
+  if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
+  if (studyRunning[kind]) { if (strict === true) throw new Error(kind === 'tuning' ? '参数率定任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。'); return status(kind === 'tuning' ? '参数率定任务正在运行，不能重试。' : '不确定性分析任务正在运行，不能重试。'); }
   const envelopes = [];
   for (const dir of dirs) {
     envelopes.push(JSON.parse(await invoke('study_status', { studyDir: dir })));
@@ -3094,22 +3128,23 @@ async function retryStudy(kind) {
   }
   const needsConfirmation = envelopes.some(envelope => Object.values(envelope.state?.tasks || {})
     .some(task => ['needs_review', 'running', 'evaluating'].includes(task.status)));
-  if (needsConfirmation && !(await appConfirm(dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？')))) return;
+  if (strict === true && needsConfirmation) throw new Error('原进程状态不确定，请由用户确认进程已退出后在页面重试。');
+  if (needsConfirmation && !(await appConfirm(dialogText('存在无法确认原进程状态的任务。仅在确认原模型进程已经退出后重试，是否继续？')))) { if (strict === true) throw new Error('用户取消了操作。'); return; }
   ensureStudyMutationCurrent(kind, isCurrent);
   for (const dir of dirs) {
     ensureStudyMutationCurrent(kind, isCurrent);
     await invoke('study_retry', { studyDir: dir, includeReview: needsConfirmation });
     ensureStudyMutationCurrent(kind, isCurrent);
   }
-  await runStudy(kind);
+  await runStudy(kind, strict);
 }
 
-async function controlStudy(kind, action) {
+async function controlStudy(kind, action, strict = false) {
   const blocked = action === 'resume' ? spatialStudyReason() : '';
-  if (blocked) { status(dialogText(blocked)); renderStudyReadiness(kind); return; }
+  if (blocked) { if (strict === true) throw new Error(dialogText(blocked)); status(dialogText(blocked)); renderStudyReadiness(kind); return; }
   const dirs = activeStudyDirs(kind);
   const isCurrent = studyMutationGuard(kind, dirs);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
+  if (!dirs.length) { if (strict === true) throw new Error('请先生成任务。'); return status('请先生成任务。'); }
   const control = action === 'pause' ? dir => invoke('study_pause', { studyDir: dir })
     : action === 'resume' ? dir => invoke('study_resume', { studyDir: dir })
       : action === 'cancel' ? dir => invoke('study_cancel', { studyDir: dir })
@@ -3121,15 +3156,17 @@ async function controlStudy(kind, action) {
     if (action === 'resume') ensureStudyMutationCurrent(kind, isCurrent);
   }
   status(action === 'pause' ? '已请求暂停派发新任务。' : action === 'resume' ? '已恢复派发。' : '已请求停止剩余任务。');
-  if (action === 'resume' && !studyRunning[kind]) await runStudy(kind);
-  else await refreshStudy(kind);
+  if (action === 'resume' && !studyRunning[kind]) await runStudy(kind, strict);
+  else await refreshStudy(kind, strict);
 }
 
-async function exportStudy(kind) {
+async function exportStudy(kind, strict = false) {
   const dirs = activeStudyDirs(kind);
-  if (!dirs.length) return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。');
-  const out = await appPrompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
-  if (!out) return;
+  if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
+  const directory = $(`${kind === 'tuning' ? 'tune' : 'uq'}-export-dir`)?.value.trim();
+  if (strict === true && !directory) throw new Error('请先填写导出目录。');
+  const out = directory || await appPrompt(dialogText('导出目录'), `${parentDir(dirs[0])}/exports`);
+  if (!out) { if (strict === true) throw new Error('用户取消了导出。'); return; }
   const exported = [];
   for (const dir of dirs) {
     const destination = dirs.length === 1 ? out : `${out}/${dir.split(/[\\/]/).pop()}`;
@@ -3221,7 +3258,7 @@ wireTuneHybrid(() => {
   invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
   renderStudyBudget('tuning');
 });
-if ($('tune-site-mode')) $('tune-site-mode').onchange = () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); renderTuningTargets().catch(e => status(e.message || e)); };
+if ($('tune-site-mode')) $('tune-site-mode').onchange = async () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); await renderTuningTargets(); };
 if ($('tune-validation')) $('tune-validation').onchange = () => {
   for (const id of ['tune-val-from', 'tune-val-to']) $(id).disabled = !$('tune-validation').checked;
   invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
@@ -3254,3 +3291,122 @@ addEventListener('colm:mode', () => {
   if (state.step === 'result-uncertainty' || state.step === 'result-tuning') prepareActivePane();
 });
 refreshVars();
+
+// The assistant operates the same visible controls and awaits the same implementations.
+export const resultsGuide = {
+  prepare: () => prepareActivePane(true),
+  async changed(el) {
+    if (Object.hasOwn(el.dataset, 'resultCase')) await prepareActivePane(true);
+    else if (el.id === 'obs') await refreshCurrentEvaluationCatalog(true);
+    else if (['result-variable-search', 'result-variable-kind'].includes(el.id)) await renderDataBrowser(true);
+  },
+  fields() {
+    const pane = document.querySelector(`[data-flow-pane="${state.step}"]`);
+    if (!state.step.startsWith('result-') || !pane) return [];
+    const prefix = state.step === 'result-tuning' ? 'tune' : state.step === 'result-uncertainty' ? 'uq' : null;
+    if (prefix && $(`${prefix}-export-study`) && !$(`${prefix}-export-dir`)) {
+      const label = document.createElement('label'); label.textContent = '导出目录（留空时手动选择）';
+      const input = document.createElement('input'); input.type = 'text'; input.className = 'input';
+      input.id = `${prefix}-export-dir`; input.setAttribute('aria-label', '导出目录');
+      label.appendChild(input); $(`${prefix}-export-study`).before(label);
+    }
+    return [...pane.querySelectorAll('input, select, textarea')].filter(el => {
+      if (['file', 'button', 'submit', 'hidden'].includes(el.type)) return false;
+      if (!el.id) {
+        const key = Object.entries(el.dataset).find(([name]) => [
+          'studyParam', 'studyMin', 'studyMax', 'studyScale', 'uqOutput', 'tuneTarget', 'tuneWeight', 'evaluationVariable', 'resultCase',
+        ].includes(name));
+        if (!key) return false;
+        el.id = `${state.step}-${key[0]}-${encodeURIComponent(key[1])}`;
+      }
+      return true;
+    });
+  },
+  actions() {
+    const step = state.step;
+    const pane = document.querySelector(`[data-flow-pane="${step}"]`);
+    if (!step.startsWith('result-') || !pane) return {};
+    const actions = {};
+    const add = (id, kind, run) => {
+      const element = $(id);
+      if (!element || !pane.contains(element)) return;
+      actions[id] = { kind, element, run: async () => {
+        if (state.step !== step || element.disabled || element.closest('[hidden]')) throw new Error('当前页面不能执行此操作，请重新读取界面。');
+        const caseDir = activeCase()?.dir;
+        const outcome = await run();
+        if (state.step !== step || activeCase()?.dir !== caseDir) throw new Error('分析上下文已变化，请重新读取界面和结果。');
+        return outcome || {};
+      } };
+    };
+    add('result-refresh', 'click', async () => { allCurrent().forEach(c => invalidateResultCase(c.dir)); await prepareActivePane(true); });
+    add('plot', 'click', () => plotSeries(true));
+    add('series-reset', 'click', async () => {
+      const c = activeCase(); if (!c) throw new Error('请选择有结果的算例。');
+      const catalog = await loadCatalog(c);
+      $('series-from').value = inputClock(catalog.start); $('series-to').value = inputClock(catalog.end);
+      await plotSeries(true);
+    });
+    add('series-csv', 'commit', async () => { await exportFullSeries(true); return { outcome: 'download_requested', file_saved: false }; });
+    add('series-png', 'commit', () => {
+      exportChart($('charts'), `${activeCase()?.name ?? 'colm'}-${$('var').value}.png`, true);
+      return { outcome: 'download_requested', file_saved: false };
+    });
+    add('evaluate', 'click', () => evaluateCurrent(true));
+    add('eval-all', 'click', () => evaluateAll(true));
+    add('eval-cancel', 'click', () => comparisonController?.abort());
+    for (const id of ['eval-select-all', 'eval-select-none', 'batch-eval-select-all', 'batch-eval-select-none']) add(id, 'click', () => $(id).onclick());
+    add('evaluation-chart-refresh', 'click', () => {
+      const row = currentComparisonSummary ?? currentMetricRows[0];
+      if (!row) throw new Error('请先评估当前站点。');
+      return drawComparison(row, true);
+    });
+    add('diagnose', 'click', () => diagnoseCurrent(true));
+    add('export-report', 'click', () => {
+      if ($('export-format').value === 'pdf') throw new Error('PDF 请使用 export-pdf 操作打开打印窗口。');
+      return generateReport(true);
+    });
+    add('export-pdf', 'commit', async () => { await exportPdfReport(true); return { outcome: 'print_dialog_opened', file_saved: false }; });
+    add('export-download', 'commit', () => {
+      if (!reportText) throw new Error('请先生成报告。');
+      downloadText(reportText, `colm-results-${new Date().toISOString().slice(0, 10)}.${reportExtension}`);
+      return { outcome: 'download_requested', file_saved: false };
+    });
+    const kind = step === 'result-tuning' ? 'tuning' : step === 'result-uncertainty' ? 'uq' : null;
+    if (kind) {
+      const prefix = kind === 'tuning' ? 'tune' : 'uq';
+      for (const [suffix, tier, run] of [
+        ['refresh-params', 'click', () => prepareActivePane(true)],
+        ['spinup-apply', 'commit', () => applyStudySpinup(kind, true)],
+        ['create', 'commit', () => createStudy(kind, true)],
+        ['run', 'commit', () => runStudy(kind, true)],
+        ['retry', 'commit', () => retryStudy(kind, true)],
+        ['status', 'click', () => refreshStudy(kind, true)],
+        ['export-study', 'commit', () => exportStudy(kind, true)],
+        ...['pause', 'resume', 'cancel'].map(action => [action, 'commit', () => controlStudy(kind, action, true)]),
+      ]) add(`${prefix}-${suffix}`, tier, run);
+      for (const [suffix, delta] of [['prev', -1], ['next', 1]]) add(`${prefix}-step-${suffix}`, 'click', () => {
+        const page = studyWizardPages[kind];
+        const issue = delta > 0 ? studyWizardIssue(kind, page) : '';
+        if (issue) throw new Error(issue);
+        setStudyWizardPage(kind, page + delta);
+      });
+    }
+    return actions;
+  },
+  state() {
+    const kind = state.step === 'result-tuning' ? 'tuning' : state.step === 'result-uncertainty' ? 'uq' : null;
+    const prefix = kind === 'tuning' ? 'tune' : 'uq';
+    const pane = document.querySelector(`[data-flow-pane="${state.step}"]`);
+    const content = pane?.innerText || '';
+    return {
+      case: activeCase()?.dir ?? null,
+      ...(kind ? { study: { kind, page: studyWizardPages[kind] + 1, issue: studyWizardIssue(kind, studyWizardPages[kind]),
+        directories: activeStudyDirs(kind), status: aggregateStudy(studyViews[kind] || {}).status,
+        budget: $(`${prefix}-budget`)?.textContent || '', running: studyRunning[kind] } } : {}),
+      metrics: state.resultMetrics.slice(0, 30).map(stripMetricPairs),
+      metrics_truncated: state.resultMetrics.length > 30,
+      failures: state.resultFailures.slice(0, 20),
+      page_text: content.slice(0, 14000), page_text_truncated: content.length > 14000,
+    };
+  },
+};
