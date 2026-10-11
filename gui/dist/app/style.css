@@ -1081,3 +1081,8 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-create-progress [aria-current="step"] { color:var(--accent); font-weight:600; }
 .ws-create-wizard section { margin:var(--s-lg) 0; }
 .ws-create-wizard .run-mode-card { text-align:left; }
+
+.assistant-visible-context { margin:0; padding:8px 14px; color:var(--muted); border-bottom:1px solid var(--border-soft); }
+.assistant-next-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.assistant-next-actions p { flex-basis:100%; margin:0; }
+.assistant-next-actions button { white-space:normal; text-align:left; overflow-wrap:anywhere; }

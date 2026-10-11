@@ -164,10 +164,11 @@ export function answerBlocks(text) {
   let i = 0;
   while (i < lines.length) {
     const line = lines[i];
-    if (line.trim().startsWith('```')) {
+    const fence = line.trim().match(/^(\x60{3,}|~{3,})/)?.[1];
+    if (fence) {
       const body = [];
       i++;
-      while (i < lines.length && !lines[i].trim().startsWith('```')) body.push(lines[i++]);
+      while (i < lines.length && !lines[i].trim().startsWith(fence)) body.push(lines[i++]);
       i++;
       blocks.push({ kind: 'code', text: body.join('\n') });
       continue;
@@ -184,7 +185,7 @@ export function answerBlocks(text) {
       continue;
     }
     const para = [];
-    while (i < lines.length && lines[i].trim() !== '' && !lines[i].trim().startsWith('```') && !lines[i].trim().startsWith('|')) {
+    while (i < lines.length && lines[i].trim() !== '' && !/^(\x60{3,}|~{3,})/.test(lines[i].trim()) && !lines[i].trim().startsWith('|')) {
       para.push(lines[i++]);
     }
     if (para.length) blocks.push({ kind: 'text', text: para.join('\n') });
@@ -207,6 +208,7 @@ function element(tag, cls = '', text = '') {
 /** 用 `answerBlocks` 安全地建回答的 DOM。 */
 function renderAnswer(host, text) {
   host.replaceChildren();
+  const actions = nextRequests(text);
   for (const block of answerBlocks(text)) {
     if (block.kind === 'code') {
       host.appendChild(element('pre', 'assistant-code', block.text));
@@ -224,6 +226,24 @@ function renderAnswer(host, text) {
       host.appendChild(element('p', 'assistant-text', block.text));
     }
   }
+  if (actions.length) {
+    const row = element('div', 'assistant-next-actions');
+    row.appendChild(element('p', 'mini muted', t('点击只会填入请求，不会发送；写操作仍需审批。')));
+    for (const request of actions) {
+      const button = element('button', 'assistant-chip', request);
+      button.type = 'button';
+      button.disabled = ui.running;
+      button.onclick = () => { if (!ui.running) fillPrompt(request); };
+      row.appendChild(button);
+    }
+    host.appendChild(row);
+  }
+}
+
+export function nextRequests(text) {
+  return answerBlocks(text).filter(block => block.kind === 'text').flatMap(block => block.text.split('\n'))
+    .map(line => line.match(/^(?:下一步：|Next action:)\s*(\S.*?)\s*$/)?.[1])
+    .filter(request => request && request.length <= 240).slice(0, 3);
 }
 
 const ui = {
@@ -263,6 +283,7 @@ function scrollDown() {
 
 function setRunning(running) {
   ui.running = running;
+  for (const button of document.querySelectorAll('.assistant-next-actions button')) button.disabled = running;
   $('assistant-send').disabled = running;
   $('assistant-stop').disabled = !running;
 }
@@ -814,24 +835,73 @@ async function saveSettings() {
 
 // ---- 发送 ----------------------------------------------------------------------------
 
+const visible = el => !!el && !el.closest?.('[hidden]') && (!el.getClientRects || el.getClientRects().length > 0);
+const visibleText = el => visible(el) ? String(el.innerText ?? el.textContent ?? '').trim().slice(0, 2000) : '';
+
 function currentView() {
-  const step = document.querySelector('.page:not([hidden])')?.dataset.step;
-  const caseDir = state.selected?.dir;
+  const page = document.querySelector('.page:not([hidden])');
+  const step = page?.dataset.step;
+  const caseDir = state.step?.startsWith('result-') ? state.resultCaseDir || state.selected?.dir : state.selected?.dir;
+  const metrics = visibleText($('metrics')) ? (state.resultMetrics ?? []).filter(row => !caseDir || row.case_dir === caseDir) : [];
+  const prefix = state.step === 'result-tuning' ? 'tune' : state.step === 'result-uncertainty' ? 'uq' : null;
+  const study = prefix ? ['step-progress', 'budget', 'run-state', 'run-mode-status'].map(suffix => visibleText($(`${prefix}-${suffix}`))).filter(Boolean) : [];
+  if (prefix && visible($(`${prefix}-run-mode`))) {
+    for (const card of $(`${prefix}-run-mode`).querySelectorAll('[aria-pressed="true"]')) {
+      const selected = visibleText(card);
+      if (selected) study.push(selected);
+    }
+  }
+  const detail = visible($('workspace-detail')) ? $('workspace-detail') : null;
+  const versionDetail = detail ? [visibleText(detail.querySelector('.ws-detail-header')), visibleText(detail.querySelector('[role="tabpanel"]:not([hidden])'))].filter(Boolean) : [];
+  const checks = [visibleText($('version-readiness')),
+    detail ? visibleText(detail.querySelector('#workspace-panel-checks')) : ''].filter(Boolean);
+  const pageName = page ? [...page.querySelectorAll('h1')].map(visibleText).find(Boolean) || state.step || step || '' : '';
+  const snapshot = { header: visible($('context-bar')), pageName, metrics: metrics.length, study, versionDetail, checks };
   return {
-    step,
-    flow: state.step,
-    caseDir,
+    step, flow: state.step, caseDir, snapshot,
     variable: (state.step === 'result-series' || state.step === 'result-diagnostics') ? $('var')?.value : null,
-    kernel: $('kernel')?.value,
-    root: $('root')?.value?.trim(),
-    details: pageDetails(state.step, {
-      metrics: (state.resultMetrics ?? []).filter(row => !caseDir || row.case_dir === caseDir),
-      badges: state.studyBadges ?? {},
-      batch: state.batch?.length ?? 0,
-      runMode: runModeSnapshot({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: modelEngine(), readiness: state.versionReadiness }),
+    kernel: $('kernel')?.value, root: $('root')?.value?.trim(),
+    details: [...pageDetails(state.step, {
+      metrics, badges: prefix && study.length ? { [prefix === 'tune' ? 'tuning' : 'uq']: state.studyBadges?.[prefix === 'tune' ? 'tuning' : 'uq'] } : {}, batch: state.batch?.length ?? 0,
+      runMode: snapshot.header ? runModeSnapshot({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: modelEngine(), readiness: state.versionReadiness }) : null,
       provenance: caseDir ? state.provenance?.[caseDir] : null,
-    }),
+    }), ...study.map(text => `visible Study page: ${text}`), ...versionDetail.map(text => `visible version detail: ${text}`),
+      ...checks.map(text => `visible checks: ${text}`)],
   };
+}
+
+export function visibleContextText(snapshot = {}) {
+  const items = [snapshot.header && t('上下文条'), snapshot.pageName && `${t('本页')} ${snapshot.pageName}`,
+    snapshot.metrics > 0 && t('评估指标'), snapshot.study?.length && t('研究设置与状态'),
+    snapshot.versionDetail?.length && t('版本详情'), snapshot.checks?.length && t('检查结果')].filter(Boolean);
+  return `${t('看得到：')}${items.join(' · ') || t('当前没有可见页面数据')}`;
+}
+
+function refreshVisibleContext(view = currentView()) {
+  const line = $('assistant-visible-context');
+  if (!line) return;
+  const text = visibleContextText(view.snapshot);
+  if (line.textContent !== text) line.textContent = text;
+}
+
+function watchVisibleContext() {
+  let scheduled = false;
+  const refresh = () => {
+    if (scheduled) return;
+    scheduled = true;
+    queueMicrotask(() => { scheduled = false; refreshVisibleContext(); });
+  };
+  for (const event of ['colm:step', 'colm:context', 'colm:metrics', 'colm:versions']) addEventListener(event, refresh);
+  // Observe only the work area and header, never assistant output.
+  if (globalThis.MutationObserver) {
+    const observer = new MutationObserver(refresh);
+    for (const root of [$('work'), $('context-bar')].filter(Boolean)) {
+      observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true,
+        attributeFilter: ['hidden', 'aria-pressed', 'aria-selected', 'open'] });
+      root.addEventListener('change', refresh);
+    }
+  }
+  refreshVisibleContext();
 }
 
 /** 输入框上方的提问建议：跟着当前步骤变；点一下填进输入框，可以改了再发。 */
@@ -979,6 +1049,7 @@ async function send() {
   let view;
   try { view = await ensureStarted(); }
   catch (error) { setRunning(false); throw error; }
+  refreshVisibleContext(view);
   bubble('user').textContent = text;
   renderTask({ goal: text, state: 'running', phase: 'checkdata', actions: [] });
   $('assistant-text').value = '';
@@ -1174,6 +1245,17 @@ export function clampAssistantWidth(width, viewport, railWidth) {
 }
 
 const WIDTH_KEY = 'colm.assistant.width';
+const OPEN_KEY = 'colm.assistant.open';
+let panelPreference = null;
+
+export function defaultPanelOpen(width, preference = null) {
+  return preference === 'true' ? true : preference === 'false' ? false : width >= 1400;
+}
+
+function restorePanel() {
+  try { panelPreference = localStorage.getItem(OPEN_KEY); } catch {}
+  togglePanel(defaultPanelOpen(innerWidth, panelPreference), { remember: false, focus: false });
+}
 const DEFAULT_WIDTH = 440;
 
 function setAssistantWidth(width) {
@@ -1214,17 +1296,30 @@ function beginResize(event) {
   window.addEventListener('pointercancel', up);
 }
 
-function togglePanel(open = $('assistant-panel').hidden) {
+function togglePanel(open = $('assistant-panel').hidden, { remember = true, focus = true, load = true } = {}) {
+  if (remember) {
+    panelPreference = String(open);
+    try { localStorage.setItem(OPEN_KEY, panelPreference); } catch {}
+  }
   $('assistant-panel').hidden = !open;
   document.querySelector('.app')?.classList.toggle('assistant-open', open);
   document.body.classList.toggle('assistant-open', open);
   for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.setAttribute('aria-pressed', String(open));
   if (open) restoreWidth();
-  if (open) {
+  if (open && load) {
     loadSettings().catch(e => status(e));
     refreshInputHistory().catch(e => status(e?.message || e));
-    $('assistant-text').focus();
   }
+  if (open && focus) $('assistant-text').focus();
+}
+
+function resizePanel() {
+  const panel = $('assistant-panel');
+  if (panelPreference !== 'true' && panelPreference !== 'false') {
+    const open = defaultPanelOpen(innerWidth);
+    if (open !== !panel.hidden) togglePanel(open, { remember: false, focus: false });
+  }
+  if (!panel.hidden) setAssistantWidth(panel.getBoundingClientRect().width);
 }
 
 function wire() {
@@ -1232,6 +1327,8 @@ function wire() {
     for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.hidden = !hasBackend;
     return;
   }
+  restorePanel();
+  watchVisibleContext();
   for (const button of document.querySelectorAll('[data-assistant-toggle]')) button.onclick = () => togglePanel();
   // 别的页面（例如改代码页的“让助手改”）请助手帮忙：打开面板，把请求填进输入框，由用户改完再发。
   addEventListener('colm:assistant-prompt', event => {
@@ -1242,9 +1339,7 @@ function wire() {
   $('assistant-resizer').addEventListener('pointerdown', beginResize);
   $('assistant-resizer').addEventListener('dblclick', () => saveWidth(setAssistantWidth(DEFAULT_WIDTH)));
   // 窗口变窄时把助手栏收回到不挤掉主页面的宽度。
-  addEventListener('resize', () => {
-    if (!$('assistant-panel').hidden) setAssistantWidth($('assistant-panel').getBoundingClientRect().width);
-  });
+  addEventListener('resize', resizePanel);
   $('assistant-settings-btn').onclick = () => {
     $('assistant-history').hidden = true;
     const settingsPanel = $('assistant-settings');

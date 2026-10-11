@@ -11,7 +11,7 @@ await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 // Expose startup only in this copied test module; exercise configuration through a stub IPC.
 await writeFile(join(temp, 'app', 'assistant.js'),
-  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send, refreshApiModels, startNewConversation, refreshInputHistory, renderChoices, refreshBackendStatus, externalModels };\n');
+  (await readFile(join(temp, 'app', 'assistant.js'), 'utf8')) + '\nexport { ensureStarted, ui, send, refreshApiModels, startNewConversation, refreshInputHistory, renderChoices, refreshBackendStatus, externalModels, currentView, refreshVisibleContext, watchVisibleContext, restorePanel, resizePanel, togglePanel, renderAnswer, setRunning };\n');
 await writeFile(join(temp, 'app', 'ipc.js'), `
   export const invoke = (...args) => globalThis.assistantInvoke(...args);
   export const listen = async () => {};
@@ -131,6 +131,10 @@ const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 const source = await readFile(join(root, 'dist', 'app', 'assistant.js'), 'utf8');
 for (const [, id] of source.matchAll(/\$\('([\w-]+)'\)/g)) {
   if (['kernel', 'root'].includes(id)) continue;
+  if (id === 'workspace-detail') {
+    assert.match(await readFile(join(root, 'dist', 'app', 'workspace.js'), 'utf8'), /id: 'workspace-detail'/);
+    continue;
+  }
   assert.ok(html.includes(`id="${id}"`), `index.html has no #${id}`);
 }
 assert.ok(!/\.(innerHTML|outerHTML)\s*=|insertAdjacentHTML/.test(source), 'assistant.js must not use innerHTML');
@@ -502,3 +506,142 @@ console.log('assistant: project paths and per-message configuration refresh ok')
   assert.equal(nodes.get('assistant-model-refresh').disabled, false);
   assert.match(nodes.get('assistant-model-status').textContent, /已保留/);
 }
+
+// T7: restore loads the saved backend without focusing or starting a conversation.
+{
+  for (const [width, preference, open] of [[1399, null, false], [1400, null, true], [1800, 'false', false], [900, 'true', true]]) {
+    assert.equal(assistant.defaultPanelOpen(width, preference), open);
+  }
+  const stored = new Map(); let focuses = 0; const calls = [];
+  globalThis.localStorage = { getItem: key => stored.get(key) ?? null, setItem: (key, value) => stored.set(key, value) };
+  globalThis.innerWidth = 1600;
+  const settings = { backend: 'codex', base_url: 'local', external: { codex: { model: 'gpt-6.1-sol', effort: 'high' } } };
+  globalThis.assistantInvoke = async command => {
+    calls.push(command);
+    if (command === 'assistant_settings') return settings;
+    if (command === 'assistant_input_history') return ['saved input'];
+    if (command === 'assistant_codex_models') return codex;
+    if (command === 'assistant_backend_status') return { codex: { installed: true, logged_in: true, version: 'test' } };
+    if (command === 'assistant_has_key') return false;
+    throw new Error(`unexpected startup IPC: ${command}`);
+  };
+  const node = () => ({ value: '', dataset: {}, children: [], replaceChildren(...children) { this.children = children; }, appendChild(child) { this.children.push(child); } });
+  const nodes = new Map([...html.matchAll(/id="([^"]+)"/g)].map(([, id]) => [id, node()]));
+  const panel = nodes.get('assistant-panel'); panel.hidden = true; panel.getBoundingClientRect = () => ({ width: 440 });
+  nodes.get('assistant-text').focus = () => { focuses++; };
+  document.getElementById = id => nodes.get(id) ?? null;
+  document.createElement = () => node();
+  document.querySelector = () => null;
+  document.querySelectorAll = () => [];
+  document.body = { classList: { toggle() {} } };
+  document.documentElement.style = { setProperty() {} };
+  assistant.ui.codexModels = null; assistant.ui.inputHistoryLoaded = false; assistant.ui.inputHistoryLoading = null;
+  assistant.restorePanel(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(panel.hidden, false); assert.equal(focuses, 0); assert.equal(stored.size, 0);
+  assert.equal(assistant.ui.settingsDraft, settings);
+  assert.equal(nodes.get('assistant-backend').value, 'codex');
+  assert.equal(nodes.get('assistant-ext-model').value, 'gpt-6.1-sol');
+  assert.equal(nodes.get('assistant-think').value, 'high');
+  assert.ok(calls.includes('assistant_settings')); assert.ok(calls.includes('assistant_input_history'));
+  assert.ok(calls.includes('assistant_codex_models'));
+  const beforeResize = calls.length;
+  assistant.resizePanel(); assistant.resizePanel();
+  assert.equal(calls.length, beforeResize, 'same expansion state does not reload settings');
+  globalThis.innerWidth = 1000; assistant.resizePanel(); assert.equal(panel.hidden, true);
+  globalThis.innerWidth = 1600; assistant.resizePanel(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(panel.hidden, false); assert.equal(focuses, 0);
+  assert.equal(calls.filter(command => command === 'assistant_settings').length, 2);
+  assistant.togglePanel(false); assistant.restorePanel();
+  assert.equal(panel.hidden, true); assert.equal(stored.get('colm.assistant.open'), 'false');
+  assistant.resizePanel(); assert.equal(panel.hidden, true);
+  globalThis.innerWidth = 900;
+  assistant.togglePanel(true); await new Promise(resolve => setImmediate(resolve));
+  assistant.restorePanel(); await new Promise(resolve => setImmediate(resolve));
+  assistant.resizePanel();
+  assert.equal(panel.hidden, false); assert.equal(focuses, 1);
+  assert.equal(calls.some(command => ['assistant_start', 'assistant_send', 'assistant_new_session'].includes(command)), false);
+}
+
+// The context label and sent context derive from the same visible-page snapshot.
+{
+  const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
+  const shown = (text = '') => ({ textContent: text, closest() { return this.hidden ? {} : null; }, getClientRects() { return this.hidden ? [] : [{}]; } });
+  const hiddenHeading = Object.assign(shown('结果总览'), { hidden: true });
+  const page = { dataset: { step: 'result' }, querySelectorAll: () => [hiddenHeading, shown('参数率定')] };
+  const cards = [shown('研究版本 snow'), shown('7920ts'), shown('Rust')];
+  const mode = Object.assign(shown(), { querySelectorAll: () => cards });
+  const nodes = new Map([
+    ['context-bar', shown()], ['model-version', { value: 'official' }], ['model-engine', { value: 'fortran' }], ['run-target', { value: 'local' }],
+    ['tune-run-mode', mode], ['tune-run-mode-status', shown('研究检查通过')], ['tune-step-progress', shown('4 / 8')],
+    ['assistant-visible-context', shown()], ['work', shown()],
+  ]);
+  document.getElementById = id => nodes.get(id) ?? null;
+  document.querySelector = () => page;
+  state.step = 'result-tuning'; state.selected = { dir: '/p/old' }; state.resultCaseDir = '/p/current';
+  let view = assistant.currentView();
+  assert.equal(view.caseDir, '/p/current');
+  assert.equal(view.snapshot.pageName, '参数率定', 'skip the hidden overview heading on result subpages');
+  assert.match(view.details.join('\n'), /official release; location local; engine fortran/);
+  assert.match(view.details.join('\n'), /研究版本 snow/);
+  assert.match(view.details.join('\n'), /7920ts/);
+  assistant.refreshVisibleContext(view);
+  assert.equal(nodes.get('assistant-visible-context').textContent, assistant.visibleContextText(view.snapshot));
+  mode.hidden = true; nodes.get('tune-run-mode-status').hidden = true;
+  assert.doesNotMatch(assistant.currentView().details.join('\n'), /研究版本 snow|7920ts|研究检查通过/);
+  state.step = 'result-evaluation';
+  nodes.set('metrics', shown('Qle: NSE 0.4'));
+  state.resultMetrics = [{ case_dir: '/p/current', name: 'Qle', nse: 0.4 }, { case_dir: '/p/old', name: 'Old', nse: 0.1 }];
+  view = assistant.currentView(); assert.equal(view.snapshot.metrics, 1);
+  assert.match(view.details.join('\n'), /Qle/); assert.doesNotMatch(view.details.join('\n'), /Old/);
+  nodes.get('metrics').hidden = true;
+  assert.equal(assistant.currentView().snapshot.metrics, 0);
+  state.step = 'code';
+  const checks = shown('编译 通过 · 测试 不通过');
+  const detail = Object.assign(shown(), { querySelector: selector => selector === '.ws-detail-header' ? shown('snow') : checks });
+  nodes.set('workspace-detail', detail);
+  view = assistant.currentView(); assert.match(view.details.join('\n'), /测试 不通过/);
+  detail.hidden = true; nodes.get('context-bar').hidden = true;
+  view = assistant.currentView(); assert.equal(view.snapshot.versionDetail.length, 0); assert.equal(view.snapshot.header, false);
+  // Observer never watches assistant output, and async page mutations refresh the same label.
+  const watched = []; const callbacks = []; let changed;
+  globalThis.MutationObserver = class { constructor(callback) { changed = callback; } observe(root) { watched.push(root); } };
+  globalThis.addEventListener = (name, callback) => callbacks.push([name, callback]);
+  for (const id of ['work', 'context-bar']) nodes.get(id).addEventListener = () => {};
+  assistant.watchVisibleContext();
+  assert.deepEqual(watched, [nodes.get('work'), nodes.get('context-bar')]);
+  detail.hidden = false; changed(); await Promise.resolve();
+  assert.match(nodes.get('assistant-visible-context').textContent, /版本详情/);
+  assert.ok(callbacks.some(([name]) => name === 'colm:step'));
+  delete globalThis.MutationObserver;
+}
+
+// Next actions are plain text requests, excluded from quotes/code and never executed on click.
+{
+  assert.deepEqual(assistant.nextRequests('下一步：检查 snow\n\nNext action: Check server 7920ts'), ['检查 snow', 'Check server 7920ts']);
+  assert.deepEqual(assistant.nextRequests('> 下一步：quoted\n```js\n下一步：code\n```\n~~~\nNext action: code\n~~~'), []);
+  assert.equal(assistant.nextRequests(Array.from({ length: 5 }, (_, i) => `下一步：${i}`).join('\n')).length, 3);
+  assert.deepEqual(assistant.nextRequests(`下一步：${'x'.repeat(241)}`), []);
+  class Node {
+    constructor(tag) { this.tagName = tag; this.children = []; this.textContent = ''; }
+    append(...children) { this.children.push(...children); }
+    appendChild(child) { this.append(child); return child; }
+    replaceChildren(...children) { this.children = children; }
+  }
+  let focuses = 0; let calls = 0;
+  const input = { value: '', focus() { focuses++; } };
+  const host = new Node('div'); const buttons = [];
+  document.createElement = tag => { const node = new Node(tag); if (tag === 'button') buttons.push(node); return node; };
+  document.getElementById = id => id === 'assistant-text' ? input : {};
+  document.querySelectorAll = selector => selector === '.assistant-next-actions button' ? buttons : [];
+  globalThis.assistantInvoke = async () => { calls++; };
+  assistant.ui.running = false;
+  const literal = '<img src=x onerror=alert(1)>';
+  assistant.renderAnswer(host, `下一步：${literal}`);
+  assert.equal(buttons.length, 1); assert.equal(buttons[0].textContent, literal);
+  buttons[0].onclick(); assert.equal(input.value, literal); assert.equal(focuses, 1); assert.equal(calls, 0);
+  assistant.setRunning(true); assert.equal(buttons[0].disabled, true);
+  input.value = 'keep'; buttons[0].onclick(); assert.equal(input.value, 'keep');
+  assistant.setRunning(false); assert.equal(buttons[0].disabled, false);
+  assert.match(host.children.at(-1).children[0].textContent, /不会发送/);
+}
+console.log('assistant: default docking, visible page snapshots and fill-only next actions ok');

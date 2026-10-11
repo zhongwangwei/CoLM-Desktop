@@ -2984,6 +2984,14 @@ const ZH_EN = [
   ["连接与路径状态来自上次测试；刷新仅重读本地记录，点击“检查连接”才访问服务器。", "Connection and path status come from the last test. Refresh reads local records only; click Test connection to access the server."],
   ['任务已提交，请注意', 'Task submitted; please note'],
   ['请勿同时用旧版软件向这个服务器目录提交任务。', 'Do not submit jobs to this server directory concurrently from older software.'],
+  ["点击只会填入请求，不会发送；写操作仍需审批。", "Clicking fills the request without sending it; writes still require approval."],
+  ["上下文条", "Context bar"],
+  ["本页", "Page"],
+  ["评估指标", "Evaluation metrics"],
+  ["研究设置与状态", "Study settings and status"],
+  ["版本详情", "Version details"],
+  ["看得到：", "Can see: "],
+  ["当前没有可见页面数据", "No page data is currently visible"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
