@@ -476,7 +476,8 @@ function remotePanel(name, host = null) {
   const refreshButton = button('刷新远程任务', () => loadJobs(true));
   form.append(help, submit);
   const evidenceBox = Object.assign(document.createElement('pre'), { className: 'mini', hidden: true });
-  panel.append(form, message, refreshButton, jobs, evidenceBox);
+  const submissionWarnings = Object.assign(document.createElement('p'), { className: 'mini warn', hidden: true });
+  panel.append(form, message, refreshButton, jobs, evidenceBox, submissionWarnings);
   let loaded = false;
   let busy = false;
   let timer;
@@ -556,6 +557,8 @@ function remotePanel(name, host = null) {
       message.className = 'mini';
       message.textContent = t('正在上传源码并提交任务…');
       const result = await call('submit', { host: server.value, request });
+      submissionWarnings.hidden = !result.warnings?.length;
+      submissionWarnings.textContent = (result.warnings ?? []).map(warning => `${t('任务已提交，请注意')}：${warning}`).join('\n');
       message.textContent = remoteJobText(result.job, result.status);
       if (result.error) errorText(result.error);
       await loadJobs(true);

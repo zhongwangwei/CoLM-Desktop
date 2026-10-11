@@ -167,6 +167,11 @@ await assert.rejects(remote.remoteRun(null,['/ok','/bad'],false), error => {
 assert.equal(remote.jobs.get('/ok').state,'running');
 await assert.rejects(remote.remoteRun(null,['/bad'],false), /SSH rejected/);
 assert.deepEqual((await remote.remoteRun(null,['/ok'],false)).submitted,[{case:'/ok',job:'job-ok'}]);
+globalThis.remoteInvoke = async () => ({job:'submitted-with-warning',record_warning:'record disk full',lock_warning:'lock retained'});
+await remote.remoteRun(null,['/warning'],false);
+assert.equal(remote.jobs.get('/warning').state,'running');
+assert.equal(remote.jobs.get('/warning').job,'submitted-with-warning');
+assert.ok(nodes.some(node => node.textContent?.includes('任务已提交，请注意：lock retained')), 'successful submission warnings remain visible');
 globalThis.setTimeout = nativeTimeout;
 remote.jobs.clear();
 

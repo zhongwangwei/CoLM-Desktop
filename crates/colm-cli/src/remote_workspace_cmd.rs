@@ -37,6 +37,12 @@ fn root(opts: &Opts) -> PathBuf {
 fn records(ws: &Workspace) -> PathBuf {
     ws.reports().join("remote")
 }
+fn normalized_root(root: &str) -> Result<String> {
+    let root = root.trim_end_matches('/');
+    workspace::check_absolute(root)?;
+    Ok(root.to_owned())
+}
+
 fn save(ws: &Workspace, r: &Record) -> Result<()> {
     let dir = records(ws).join(&r.id);
     std::fs::create_dir_all(&dir)?;
@@ -150,8 +156,7 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
     validate(&request)?;
     let commit = build::pin_commit(ws)?;
     let host = opts.need_str("--host")?;
-    let remote_root = opts.need_str("--remote-root")?;
-    workspace::check_absolute(&remote_root)?;
+    let remote_root = normalized_root(&opts.need_str("--remote-root")?)?;
     let ssh = Ssh::new(&host)?;
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
@@ -181,6 +186,7 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
         report_dir: records(ws).join(&id).join("results"),
     };
     save(ws, &record)?;
+    let mut submission_warnings = Vec::new();
     let result = (|| -> Result<()> {
         let dir = job::job_dir(&record.root, &id);
         let remote_ws = format!("{dir}/workspaces");
@@ -217,6 +223,9 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
             );
         }
         let snapshot = engine::snapshot(&app)?;
+        let mut engine_lock =
+            colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &record.root)?;
+        engine_lock.run(|| {
         engine::upload(&ssh, &record.root, &snapshot)?;
         ssh.upload(
             &staging,
@@ -263,9 +272,18 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
         ));
         record.state = "submitting".into();
         save(ws, &record)?;
-        job::submit(&ssh, &record.root, &id, &body, &spec)?;
+        job::submit(&ssh, &record.root, &id, &body, &spec, &snapshot.id)?;
+            Ok(())
+        })?;
         record.state = "queued".into();
-        save(ws, &record)?;
+        if let Err(error) = save(ws, &record) {
+            submission_warnings.push(format!(
+                "Job {id} submitted, but local record could not be saved: {error:#}"
+            ));
+        }
+        if let Some(warning) = engine_lock.finish_submitted(&id) {
+            submission_warnings.push(warning);
+        }
         Ok(())
     })();
     if let Err(error) = result {
@@ -275,8 +293,14 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
             json!({"job":record,"status":{"state":"unknown","phase":"submission","log_tail":error.to_string()},"error":error.to_string()}),
         );
     }
-    std::fs::remove_dir_all(&staging)?;
-    Ok(json!({"job":record,"status":{"state":"queued","phase":"bootstrap","log_tail":""}}))
+    if let Err(error) = std::fs::remove_dir_all(&staging) {
+        submission_warnings.push(format!(
+            "Job {id} submitted; local staging cleanup failed: {error}"
+        ));
+    }
+    Ok(
+        json!({"job":record,"warnings":submission_warnings,"status":{"state":"queued","phase":"bootstrap","log_tail":""}}),
+    )
 }
 fn sandbox_script(dir: &str, cli: &str, workspace: &str, cpus: u32, case: Option<&str>) -> String {
     let controller = quote(cli.rsplit_once('/').expect("absolute controller path").0);
@@ -1047,6 +1071,13 @@ mod tests {
         ] {
             let req: Request = serde_json::from_value(value).unwrap();
             assert!(validate(&req).is_err());
+        }
+    }
+    #[test]
+    fn workspace_root_normalizes_trailing_slashes_but_rejects_escape() {
+        assert_eq!(normalized_root("/data/colm///").unwrap(), "/data/colm");
+        for bad in ["/", "///", "/data/../other", "relative"] {
+            assert!(normalized_root(bad).is_err());
         }
     }
 }

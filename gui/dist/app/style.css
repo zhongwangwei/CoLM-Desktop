@@ -990,6 +990,13 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .resource-kernel { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; }
 .resource-kernel .select { width: auto; min-width: 9em; }
 .resource-card .remote-probe:empty { display: none; }
+.resource-section { border-top: 1px solid var(--border-soft); margin-top: 12px; padding-top: 10px; }
+.resource-section h3 { font-size: 13px; margin: 0 0 6px; }
+.resource-map, .resource-engine { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; padding: 5px 0; overflow-wrap: anywhere; }
+.resource-map span { flex: 1 1 230px; min-width: 0; }
+.resource-engine strong { flex: 1 1 180px; }
+.resource-status { font-weight: 600; }
+.resource-card .mini { overflow-wrap: anywhere; }
 /* 比较两个版本：结论一句话。 */
 .compare-verdict { font-weight: 600; margin: var(--s-md) 0 var(--s-sm); }
 .study-version { margin: 0 0 var(--s-sm); color: var(--muted); flex-basis: 100%; }

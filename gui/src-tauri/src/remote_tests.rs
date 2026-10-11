@@ -437,3 +437,23 @@ fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member()
     assert!(value("--ranks").is_none() && value("--nodes").is_none());
     assert!(absolute_study("rel/study").is_err());
 }
+
+#[test]
+fn engine_resource_commands_validate_snapshot_and_preserve_connection() {
+    let server: Server = serde_json::from_str(r#"{"host":"legacy","root":"/data/colm"}"#).unwrap();
+    assert_eq!(
+        engine_resource_args("remote-engine-clean", &server, Some("0123456789abcdef")).unwrap(),
+        [
+            "remote-engine-clean",
+            "--host",
+            "legacy",
+            "--root",
+            "/data/colm",
+            "--snapshot",
+            "0123456789abcdef"
+        ]
+    );
+    for bad in ["../x", "", "pre-0123456789abcdef", "0123456789abcdef;rm"] {
+        assert!(engine_resource_args("remote-engine-clean", &server, Some(bad)).is_err());
+    }
+}

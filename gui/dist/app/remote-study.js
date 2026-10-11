@@ -41,6 +41,7 @@ export async function submitStudies(dirs, { host, kernel, engine, jobs, versionF
       studyDir: dir, host, kernel, engine, jobs, modelVersion: await versionFor(dir),
     });
     if (submitted?.ledger_warning) warnings.push(`${t('研究已提交，但版本记录未写入')}：${dir}: ${submitted.ledger_warning}`);
+    for (const warning of [submitted?.record_warning, submitted?.lock_warning].filter(Boolean)) warnings.push(`${t('任务已提交，请注意')}：${dir}: ${warning}`);
   }
   return warnings;
 }

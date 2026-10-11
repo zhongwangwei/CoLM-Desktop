@@ -336,6 +336,8 @@ fn main() -> Result<()> {
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
         "remote-workspace" => remote_workspace_cmd::run(&opts)?,
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
+        "remote-engines" => remote_cmd::cmd_engines(&opts)?,
+        "remote-engine-clean" => remote_cmd::cmd_engine_clean(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
         "remote-study-run" => remote_cmd::remote_study::cmd_run(&opts)?,
         "remote-study-status" => remote_cmd::remote_study::cmd_status(&opts)?,

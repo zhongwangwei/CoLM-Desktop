@@ -26,6 +26,19 @@ pub struct Output {
     pub stderr: String,
 }
 
+/// Preserve whether SSH confirmed a remote command's terminal exit.
+#[derive(Debug)]
+pub struct CommandFailure {
+    pub code: Option<i32>,
+    pub message: String,
+}
+impl std::fmt::Display for CommandFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+impl std::error::Error for CommandFailure {}
+
 impl Ssh {
     pub fn new(host: &str) -> Result<Self> {
         let host = host.trim();
@@ -87,7 +100,11 @@ impl Ssh {
     pub fn run_ok(&self, script: &str) -> Result<String> {
         let output = self.run(script)?;
         if !output.success {
-            bail!("{}", connection_hint(&self.host, &output));
+            return Err(CommandFailure {
+                code: output.code,
+                message: connection_hint(&self.host, &output),
+            }
+            .into());
         }
         Ok(output.stdout)
     }
@@ -143,13 +160,14 @@ impl Ssh {
         let stream = producer.stdout.take().context("no tar output")?;
         let result = self.upload_stream(stream.into(), remote_dir);
         let producer = producer.wait_with_output()?;
+        result?;
         if !producer.status.success() {
             bail!(
                 "packing failed: {}",
                 String::from_utf8_lossy(&producer.stderr).trim()
             );
         }
-        result
+        Ok(())
     }
 
     fn upload_stream(&self, stream: Stdio, remote_dir: &str) -> Result<()> {
@@ -164,11 +182,15 @@ impl Ssh {
             .output()
             .context("cannot start ssh")?;
         if !ssh.status.success() {
-            bail!(
-                "upload to {}:{remote_dir} failed: {}",
-                self.host,
-                crate::auth::redact(&String::from_utf8_lossy(&ssh.stderr)).trim()
-            );
+            return Err(CommandFailure {
+                code: ssh.status.code(),
+                message: format!(
+                    "upload to {}:{remote_dir} failed: {}",
+                    self.host,
+                    crate::auth::redact(&String::from_utf8_lossy(&ssh.stderr)).trim()
+                ),
+            }
+            .into());
         }
         Ok(())
     }

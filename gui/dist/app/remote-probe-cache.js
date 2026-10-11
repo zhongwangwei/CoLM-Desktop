@@ -1,7 +1,7 @@
 // Cache observations only; never initiate SSH or retain credentials/configuration.
 const KEY = 'colm.remote-probes.v1';
 const fields = ['host', 'root', 'username', 'port', 'auth', 'identity_file', 'maps', 'threads', 'scheduler', 'partition', 'account', 'walltime', 'cpus', 'memory_gb', 'nodes', 'fetch_vars', 'env_script', 'directives'];
-const probeFields = ['hostname', 'os', 'arch', 'cpus', 'memory_gb', 'root_free_gb', 'cargo', 'gfortran', 'mpi', 'schedulers', 'queues', 'engine', 'problems'];
+const probeFields = ['hostname', 'os', 'arch', 'cpus', 'memory_gb', 'root_free_gb', 'cargo', 'gfortran', 'mpi', 'schedulers', 'queues', 'engine', 'problems', 'maps'];
 
 function identity(server) {
   const text = JSON.stringify(fields.map(key => [key, server[key] ?? null]));

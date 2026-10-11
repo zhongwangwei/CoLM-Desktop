@@ -40,6 +40,10 @@ globalThis.statusMessages = [];
 globalThis.fakeInvoke = async () => ({ledger_warning:'disk full'});
 const warnings = await remote.submitStudies(['/s/a'], {host:'c1',kernel:'/k',engine:'rust',jobs:2,versionFor:async()=> 'snow'});
 assert.match(warnings[0], /研究已提交，但版本记录未写入.*disk full/);
+globalThis.fakeInvoke = async () => ({job:'real-job',record_warning:'record disk full',lock_warning:'lock retained'});
+const submissionWarnings = await remote.submitStudies(['/s/a'], {host:'c1',kernel:'/k',engine:'rust',jobs:2,versionFor:async()=> 'snow'});
+assert.equal(submissionWarnings.length,2);
+assert.match(submissionWarnings[1], /任务已提交，请注意.*lock retained/);
 
 // 等到跑完：先运行中，再结束（退出码 0）→ 取回。
 let polls = 0;

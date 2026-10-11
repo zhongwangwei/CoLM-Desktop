@@ -10,6 +10,18 @@ use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 
+pub fn source_root(start: &Path) -> Result<std::path::PathBuf> {
+    start
+        .ancestors()
+        .find(|dir| {
+            dir.join(".git").exists()
+                && dir.join("gui/dist").is_dir()
+                && dir.join("gui/src-tauri/src/lib.rs").is_file()
+        })
+        .map(Path::to_path_buf)
+        .context("check-gui must run inside the checkout being checked")
+}
+
 pub fn check(root: &Path) -> Result<()> {
     let html = frontend_sources(&root.join("gui/dist"))?;
     let lib = std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs"))?;
@@ -486,6 +498,22 @@ mod tests {
             std::fs::write(&p, body).unwrap();
         }
         d
+    }
+
+    #[test]
+    fn source_root_uses_the_current_checkout_and_rejects_unrelated_directories() {
+        let d = tree(
+            "runtime-root",
+            &[
+                ("gui/dist/index.html", ""),
+                ("gui/src-tauri/src/lib.rs", ""),
+            ],
+        );
+        assert!(source_root(&d).is_err());
+        // A worktree uses a .git file instead of a directory.
+        std::fs::write(d.join(".git"), "gitdir: /unused-for-this-read-only-check").unwrap();
+        assert_eq!(source_root(&d.join("gui/src-tauri/src")).unwrap(), d);
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]

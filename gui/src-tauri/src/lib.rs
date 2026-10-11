@@ -182,6 +182,8 @@ pub fn run() {
             remote_set_password,
             remote_ssh_hosts,
             remote_probe,
+            remote_engines,
+            remote_engine_clean,
             remote_run,
             remote_study_run,
             remote_study_status,

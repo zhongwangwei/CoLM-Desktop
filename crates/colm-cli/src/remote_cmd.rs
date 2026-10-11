@@ -931,11 +931,13 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
         );
         return Ok(());
     }
-    let uploaded = engine::upload(&ssh, &root, &snapshot)?;
-    let src = quote(&format!("{}/src", engine::engine_dir(&root, &snapshot.id)));
-    let tmp = quote(&format!("{root}/kernels/.build-{name}"));
-    let body = format!(
-        "echo \"building the Fortran kernel {preset}\" > phase\n\
+    let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let (uploaded, id) = engine_lock.run(|| {
+        let uploaded = engine::upload(&ssh, &root, &snapshot)?;
+        let src = quote(&format!("{}/src", engine::engine_dir(&root, &snapshot.id)));
+        let tmp = quote(&format!("{root}/kernels/.build-{name}"));
+        let body = format!(
+            "echo \"building the Fortran kernel {preset}\" > phase\n\
          export COLM_GIT_SHA={sha} COLM_KERNEL_PROFILE={profile}\n\
          rm -rf {tmp}\n\
          bash {src}/oracle/scripts/build_kernel.sh {preset} {tmp}\n\
@@ -943,16 +945,19 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
          mv {tmp}/{preset} {kdir_q}\n\
          rm -rf {tmp}\n\
          echo \"kernel ready\" >> phase\n",
-        sha = quote(&source_sha),
-        kdir_q = quote(&kdir),
-    );
-    let id = format!("kernel-{}", now());
-    let spec = Spec {
-        scheduler,
-        resources,
-        name: sched::job_name(&format!("k{preset}")),
-    };
-    job::submit(&ssh, &root, &id, &body, &spec)?;
+            sha = quote(&source_sha),
+            kdir_q = quote(&kdir),
+        );
+        let id = format!("kernel-{}", now());
+        let spec = Spec {
+            scheduler,
+            resources,
+            name: sched::job_name(&format!("k{preset}")),
+        };
+        job::submit(&ssh, &root, &id, &body, &spec, &snapshot.id)?;
+        Ok((uploaded, id))
+    })?;
+    let lock_warning = engine_lock.finish_submitted(&id);
     eprintln!(
         "building the Fortran kernel {preset} on {} as job {id}{}",
         ssh.host,
@@ -969,7 +974,7 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
     );
     println!(
         "{}",
-        json!({ "kernel": kdir, "name": name, "built": true, "manifest": built })
+        json!({ "kernel": kdir, "name": name, "built": true, "manifest": built, "job": id, "lock_warning": lock_warning })
     );
     Ok(())
 }
@@ -1133,6 +1138,8 @@ pub(super) fn cmd_dist(opts: &Opts) -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(engine::cache_dir);
     let snapshot = engine::snapshot(&engine_source()?)?;
+    let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let (uploaded, id, dist_dir) = engine_lock.run(|| {
     let uploaded = engine::upload(&ssh, &root, &snapshot)?;
     let src = quote(&format!("{}/src", engine::engine_dir(&root, &snapshot.id)));
     let dist_dir = format!("{}/dist", engine::engine_dir(&root, &snapshot.id));
@@ -1144,7 +1151,10 @@ pub(super) fn cmd_dist(opts: &Opts) -> Result<()> {
         tools = quote(&format!("{root}/tools")),
         targets = targets.join(" "),
     );
-    job::submit(&ssh, &root, &id, &body, &Spec::bare())?;
+    job::submit(&ssh, &root, &id, &body, &Spec::bare(), &snapshot.id)?;
+        Ok((uploaded, id, dist_dir))
+    })?;
+    let lock_warning = engine_lock.finish_submitted(&id);
     eprintln!(
         "building prebuilt engines ({}) on {} as job {id}; source snapshot {}{}",
         targets.join(", "),
@@ -1162,7 +1172,10 @@ pub(super) fn cmd_dist(opts: &Opts) -> Result<()> {
             .with_context(|| format!("cannot move {name} into {}", out.display()))?;
         files.push(cached.display().to_string());
     }
-    println!("{}", json!({ "snapshot": snapshot.id, "files": files }));
+    println!(
+        "{}",
+        json!({ "snapshot": snapshot.id, "files": files, "job": id, "lock_warning": lock_warning })
+    );
     Ok(())
 }
 
@@ -1183,7 +1196,13 @@ pub(super) fn cmd_pack(opts: &Opts) -> Result<()> {
 
 pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
-    let mut probe = colm_remote::probe::probe(&ssh, &root_of(opts)?)?;
+    let maps = opts
+        .get_all("--map")
+        .iter()
+        .map(|m| parse_mapping(m))
+        .collect::<Result<Vec<_>>>()?;
+    let paths: Vec<String> = maps.iter().map(|m| m.remote.clone()).collect();
+    let (mut probe, present) = colm_remote::probe::probe_paths(&ssh, &root_of(opts)?, &paths)?;
     // 服务器编不了引擎时，有预编包也能用；两样都没有才算问题。
     if probe.build_problems.is_empty() {
         probe.engine = Some("source".into());
@@ -1206,7 +1225,162 @@ pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
             probe.problems.push(hint);
         }
     }
-    println!("{}", serde_json::to_string(&probe)?);
+    let mut result = serde_json::to_value(probe)?;
+    result["maps"] = json!(maps
+        .iter()
+        .zip(present)
+        .map(|(map, remote_exists)| json!({
+            "local": map.local, "remote": map.remote,
+            "local_exists": Path::new(&map.local).exists(), "remote_exists": remote_exists
+        }))
+        .collect::<Vec<_>>());
+    println!("{result}");
+    Ok(())
+}
+
+/// Content identities of existing source versions protect their remote caches.
+fn inventory_versions(opts: &Opts) -> (Vec<serde_json::Value>, Vec<String>) {
+    let mut versions = Vec::new();
+    let mut blockers = Vec::new();
+    match engine_source().and_then(|source| engine::snapshot(&source)) {
+        Ok(snapshot) => {
+            versions.push(json!({"name":"official", "snapshot":snapshot.id, "dirty":false}))
+        }
+        Err(error) => blockers.push(format!("Cannot verify official source snapshot: {error}")),
+    }
+    let root = super::provenance::workspace_root(opts.get("--workspace-root"));
+    let result = inventory_workspace_versions(&root).map(|entries| versions.extend(entries));
+    if let Err(error) = result {
+        blockers.push(format!("Cannot verify workspace source snapshots: {error}"));
+    }
+    (versions, blockers)
+}
+
+fn inventory_workspace_versions(root: &Path) -> Result<Vec<serde_json::Value>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut versions = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        ensure!(
+            !entry.file_type()?.is_symlink(),
+            "workspace entry is a symbolic link: {}",
+            entry.path().display()
+        );
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        match std::fs::symlink_metadata(entry.path().join("workspace.json")) {
+            Ok(metadata) => ensure!(
+                metadata.is_file() && !metadata.file_type().is_symlink(),
+                "invalid workspace metadata"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("workspace name is not UTF-8"))?;
+        let workspace = colm_workspace::Workspace::open(root, &name)?;
+        workspace.summary()?;
+        let snapshot = engine::snapshot(&Source::Checkout(workspace.src()))?;
+        versions.push(json!({"name":name, "snapshot":snapshot.id, "dirty":colm_workspace::git::is_dirty(&workspace.src())?}));
+    }
+    Ok(versions)
+}
+
+fn cleanup_result(
+    mut result: serde_json::Value,
+    unlocked: Result<()>,
+) -> Result<serde_json::Value> {
+    if result.get("removed").is_some() {
+        if let Err(error) = unlocked {
+            result["warning"] = json!(format!(
+                "Engine removed, but cleanup lock remains: {error:#}"
+            ));
+        }
+        Ok(result)
+    } else {
+        let unlock_warning = unlocked
+            .err()
+            .map(|error| format!("; cleanup lock remains: {error:#}"))
+            .unwrap_or_default();
+        bail!(
+            "engine cleanup refused: {}{unlock_warning}",
+            result["refused"]
+        )
+    }
+}
+
+pub(super) fn cmd_engines(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = root_of(opts)?;
+    let (versions, blockers) = inventory_versions(opts);
+    let mut result = colm_remote::engine_inventory::list(&ssh, &root)?;
+    for item in result["engines"]
+        .as_array_mut()
+        .context("invalid engine inventory")?
+    {
+        let names: Vec<_> = versions
+            .iter()
+            .filter(|v| v["snapshot"] == item["id"])
+            .map(|v| v["name"].clone())
+            .collect();
+        let reasons = item["protected_reasons"]
+            .as_array_mut()
+            .context("invalid protection reasons")?;
+        reasons.extend(blockers.iter().map(|s| json!(s)));
+        for name in &names {
+            reasons.push(json!(format!(
+                "Matches current source version {}",
+                name.as_str().unwrap_or_default()
+            )));
+        }
+        item["can_clean"] = json!(reasons.is_empty());
+        item["versions"] = json!(names);
+    }
+    result["cleanup_blockers"]
+        .as_array_mut()
+        .context("invalid cleanup blockers")?
+        .extend(blockers.into_iter().map(|s| json!(s)));
+    result["versions"] = json!(versions);
+    println!("{result}");
+    Ok(())
+}
+
+pub(super) fn cmd_engine_clean(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = root_of(opts)?;
+    let snapshot = opts.need_str("--snapshot")?;
+    ensure!(
+        snapshot.len() == 16
+            && snapshot
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        "invalid engine snapshot"
+    );
+    let (versions, blockers) = inventory_versions(opts);
+    ensure!(
+        blockers.is_empty(),
+        "engine cleanup refused: {}",
+        blockers.join("; ")
+    );
+    ensure!(
+        !versions
+            .iter()
+            .any(|v| v["snapshot"].as_str() == Some(&snapshot)),
+        "engine cleanup refused: snapshot matches an existing source version"
+    );
+    let mut lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let result = lock.clean(&snapshot);
+    // A failed removal may have been interrupted; keep the lock in that case.
+    let result = result?;
+    let result = cleanup_result(result, lock.finish())?;
+    println!("{result}");
     Ok(())
 }
 
@@ -1344,6 +1518,8 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         );
         return Ok(());
     }
+    let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let (engine_uploaded, id, submitted) = engine_lock.run(|| {
     let engine_uploaded = engine.upload(&ssh, &root)?;
     if !fortran {
         ssh.run_ok(&format!(
@@ -1378,7 +1554,9 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         resources,
         name: sched::job_name(&case_name),
     };
-    let submitted = job::submit(&ssh, &root, &id, &body, &spec)?;
+    let submitted = job::submit(&ssh, &root, &id, &body, &spec, engine.id())?;
+        Ok((engine_uploaded, id, submitted))
+    })?;
     let provenance = json!({
         "schema": 1,
         "started": now(),
@@ -1411,7 +1589,10 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         scheduler_id: submitted.scheduler_id.clone(),
         provenance: Some(provenance),
     };
-    std::fs::write(case.join(RECORD), serde_json::to_string_pretty(&record)?)?;
+    let record_warning = std::fs::write(case.join(RECORD), serde_json::to_string_pretty(&record)?)
+        .err()
+        .map(|e| format!("Job {id} submitted, but local record could not be saved: {e}"));
+    let lock_warning = engine_lock.finish_submitted(&id);
     println!(
         "{}",
         json!({
@@ -1425,6 +1606,8 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             "engine_kind": engine.kind(),
             "engine_uploaded": engine_uploaded,
             "case_bytes": staged.bytes,
+            "record_warning": record_warning,
+            "lock_warning": lock_warning,
             "remote_inputs": staged.remote_inputs,
             "uploaded_extra": staged.uploaded_extra,
         })

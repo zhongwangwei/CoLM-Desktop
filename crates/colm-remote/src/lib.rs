@@ -9,6 +9,7 @@
 
 pub mod auth;
 pub mod engine;
+pub mod engine_inventory;
 pub mod job;
 pub mod kernel;
 pub mod probe;

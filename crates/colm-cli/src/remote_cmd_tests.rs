@@ -472,3 +472,32 @@ fn a_remote_model_version_must_be_committed_and_carries_its_provenance() {
     assert!(remote_version(&official).unwrap().is_none());
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn inventory_does_not_hide_broken_workspace_metadata_or_root_errors() {
+    let root = std::env::temp_dir().join(format!("colm-strict-inventory-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    assert!(inventory_workspace_versions(&root).unwrap().is_empty());
+    std::fs::create_dir_all(root.join("broken")).unwrap();
+    std::fs::write(root.join("broken/workspace.json"), "not JSON").unwrap();
+    assert!(inventory_workspace_versions(&root).is_err());
+    let file = root.join("not-a-directory");
+    std::fs::write(&file, "x").unwrap();
+    assert!(inventory_workspace_versions(&file).is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn successful_cleanup_preserves_removed_fact_when_unlock_fails() {
+    let value = cleanup_result(
+        json!({"removed":"0123456789abcdef"}),
+        Err(anyhow::anyhow!("SSH disconnected")),
+    )
+    .unwrap();
+    assert_eq!(value["removed"], "0123456789abcdef");
+    assert!(value["warning"]
+        .as_str()
+        .unwrap()
+        .contains("SSH disconnected"));
+    assert!(cleanup_result(json!({"refused":["referenced"]}), Ok(())).is_err());
+}

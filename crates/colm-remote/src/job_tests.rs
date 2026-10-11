@@ -398,3 +398,20 @@ fn cancellation_rejects_unknown_schedulers_and_unsafe_bare_pids() {
         assert!(!dir.join("exit_code").exists());
     }
 }
+
+#[test]
+fn engine_markers_accept_source_and_prebuilt_and_refuse_injection() {
+    for id in ["0123456789abcdef", "pre-0123456789abcdef"] {
+        assert!(engine_body(id, "true")
+            .unwrap()
+            .starts_with(&format!("# colm-engine-snapshot: {id}\n")));
+    }
+    for id in [
+        "",
+        "../engine",
+        "pre-0123456789abcdeF",
+        "0123456789abcdef\nfalse",
+    ] {
+        assert!(engine_body(id, "true").is_err());
+    }
+}

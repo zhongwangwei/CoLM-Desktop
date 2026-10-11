@@ -451,14 +451,60 @@ pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value
     validate(&RemoteConfig {
         servers: vec![server.clone()],
     })?;
+    let mut command = engine_resource_args("remote-probe", &server, None)?;
+    for map in &server.maps {
+        command.extend(["--map".into(), format!("{}={}", map.local, map.remote)]);
+    }
+    ssh_cli_json(command, resource_dir(&app), Some(&server)).await
+}
+
+fn engine_resource_args(
+    command: &str,
+    server: &Server,
+    snapshot: Option<&str>,
+) -> Result<Vec<String>, String> {
+    validate(&RemoteConfig {
+        servers: vec![server.clone()],
+    })?;
+    let mut args = vec![
+        command.into(),
+        "--host".into(),
+        server.host.clone(),
+        "--root".into(),
+        server.root.clone(),
+    ];
+    if let Some(snapshot) = snapshot {
+        if snapshot.len() != 16
+            || !snapshot
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err("Invalid engine snapshot identifier".into());
+        }
+        args.extend(["--snapshot".into(), snapshot.into()]);
+    }
+    Ok(args)
+}
+
+#[tauri::command]
+pub async fn remote_engines(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
     ssh_cli_json(
-        vec![
-            "remote-probe".into(),
-            "--host".into(),
-            server.host.clone(),
-            "--root".into(),
-            server.root.clone(),
-        ],
+        engine_resource_args("remote-engines", &server, None)?,
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await
+}
+
+/// Explicit human-confirmed deletion; deliberately absent from assistant tools.
+#[tauri::command]
+pub async fn remote_engine_clean(
+    app: tauri::AppHandle,
+    server: Server,
+    snapshot: String,
+) -> Result<Value, String> {
+    ssh_cli_json(
+        engine_resource_args("remote-engine-clean", &server, Some(&snapshot))?,
         resource_dir(&app),
         Some(&server),
     )

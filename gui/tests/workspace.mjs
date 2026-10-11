@@ -151,6 +151,13 @@ await submitting;
 assert.equal(message.textContent, 'connection interrupted after launch', 'ambiguous submission retains actionable failure');
 assert.equal(form.children.at(-1).disabled, false);
 
+globalThis.workspaceInvoke = async (command, request) => request.operation === 'submit'
+  ? {job:{id:'saved-job',host:'srv',state:'queued'},status:{state:'queued'},warnings:['lock retained']}
+  : {jobs:[]};
+await form.onsubmit({preventDefault(){}});
+assert.equal(panel.children.at(-1).hidden,false);
+assert.match(panel.children.at(-1).textContent,/任务已提交，请注意.*lock retained/,'refresh must not hide a successful submission warning');
+
 
 const evidence = { commit: 'candidate', base_commit: 'baseline', stale: true, execution_succeeded: false,
   gates: { candidate: { engine: { ok: true, commit: 'candidate' }, kernels: { default: { ok: true, commit: 'candidate' } },

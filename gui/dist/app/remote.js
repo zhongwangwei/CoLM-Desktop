@@ -95,6 +95,10 @@ async function loadConfig() {
   return config;
 }
 
+export function sessionJobs() {
+  return structuredClone([...jobs].map(([dir, job]) => ({ dir, ...job })));
+}
+
 export function configuredServers() {
   return structuredClone(config.servers);
 }
@@ -378,6 +382,7 @@ function renderJobs() {
       head.appendChild(all);
     }
     row.appendChild(head);
+    for (const warning of job.warnings ?? []) row.append(Object.assign(document.createElement('p'), { className: 'mini warn', textContent: `${t('任务已提交，请注意')}：${warning}` }));
     const failed = job.state === 'finished' && job.exit_code !== 0;
     if (job.log && (failed || job.state === 'lost')) {
       const details = document.createElement('details');
@@ -480,7 +485,7 @@ export async function remoteRun(stage, dirs, force) {
     renderJobs();
     try {
       const answer = await invoke('remote_run', { case: dir, host, kernel: $('kernel').value, stage, force, ...engineChoice() });
-      Object.assign(jobs.get(dir), { job: answer.job, state: 'running', phase: 'submitted' });
+      Object.assign(jobs.get(dir), { job: answer.job, state: 'running', phase: 'submitted', warnings: [answer.record_warning, answer.lock_warning].filter(Boolean) });
       submitted.push({ case: dir, job: answer.job });
       if (answer.engine_uploaded) status(`${t('已把引擎源码传到')} ${host}${t('，首次会在服务器上编译')}`);
     } catch (error) {

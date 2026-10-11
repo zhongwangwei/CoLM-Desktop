@@ -118,3 +118,25 @@ fn submitted_study_ledger_uses_captured_version_and_real_local_directory() {
     assert!(!rows[0].current);
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn study_body_declares_json_encoded_project_reference() {
+    let project = "/srv/colm/s/quote\"and\nnewline";
+    let body = study_job_body(
+        "/srv/colm",
+        "0123456789abcdef",
+        project,
+        "/kernel",
+        1,
+        1,
+        "rust",
+        "rust",
+    );
+    let marker = body
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("# colm-study-root: ")
+        .unwrap();
+    assert_eq!(serde_json::from_str::<String>(marker).unwrap(), project);
+}

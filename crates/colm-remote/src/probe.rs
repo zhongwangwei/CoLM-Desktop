@@ -138,6 +138,28 @@ pub fn probe(ssh: &Ssh, root: &str) -> Result<Probe> {
     Ok(parse(root, &text))
 }
 
+/// Probe mappings in the same SSH request as the connection check.
+fn paths_script(root: &str, paths: &[String]) -> String {
+    let mut command = script(root);
+    for (index, path) in paths.iter().enumerate() {
+        command.push_str(&format!(
+            "if test -e {}; then echo map_{index}=1; else echo map_{index}=0; fi\n",
+            quote(path)
+        ));
+    }
+    command
+}
+
+pub fn probe_paths(ssh: &Ssh, root: &str, paths: &[String]) -> Result<(Probe, Vec<bool>)> {
+    let text = ssh.run_ok(&paths_script(root, paths))?;
+    let present = paths
+        .iter()
+        .enumerate()
+        .map(|(index, _)| text.lines().any(|line| line == format!("map_{index}=1")))
+        .collect();
+    Ok((parse(root, &text), present))
+}
+
 #[cfg(test)]
 #[path = "probe_tests.rs"]
 mod probe_tests;

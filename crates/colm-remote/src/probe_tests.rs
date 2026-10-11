@@ -36,3 +36,11 @@ slurm=\npbs=\nlsf=\nqueues=\nroot_exists=\nroot_writable=1\nroot_free_kb=2791728
     );
     assert_eq!(queues.queues, ["cpu", "gpu", "long"]);
 }
+
+#[test]
+fn path_probe_quotes_special_characters_and_uses_numeric_keys() {
+    let command = paths_script("/data/root", &["/data/it's here\n$(touch bad)".into()]);
+    assert!(command.contains("test -e '/data/it'\\''s here\n$(touch bad)'"));
+    assert!(command.contains("echo map_0=1"));
+    assert!(command.contains("echo map_0=0"));
+}

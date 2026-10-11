@@ -124,13 +124,14 @@ pub(crate) fn study_job_body(
 ) -> String {
     let bin = quote(&format!("{}/bin", engine::engine_dir(root, engine_id)));
     format!(
-        "echo \"preparing the engine\" > phase\n{ensure}\
+        "# colm-study-root: {study_marker}\necho \"preparing the engine\" > phase\n{ensure}\
          echo \"creating the Study\" >> phase\n\
          {bin}/colm-cli study-create {project} --spec {spec} > study_create.out\n\
          tail -n 1 study_create.out > study_root\n\
          STUDY=$(cat study_root)\n\
          echo \"running the Study\" >> phase\n\
          RAYON_NUM_THREADS={threads} {bin}/colm-cli study-run \"$STUDY\" --kernel {kernel} --stream 1 --jobs {jobs} --engine {plan_engine} --preprocessors {preprocessors}\n",
+        study_marker = serde_json::to_string(remote_project).expect("strings serialize to JSON"),
         ensure = engine::ensure_script(root, engine_id, threads.max(8).clamp(1, 64)),
         project = quote(remote_project),
         spec = quote(&format!("{remote_project}/spec.json")),
@@ -292,6 +293,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             );
         }
     }
+    let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let (engine_uploaded, id, submitted) = engine_lock.run(|| {
     let engine_uploaded = engine.upload(&ssh, &root)?;
     if !fortran {
         ssh.run_ok(&format!(
@@ -307,7 +310,9 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     ssh.upload(&staging, &entries, &remote_project)?;
     let _ = std::fs::remove_dir_all(&staging);
     let id = format!("study-{}-{}", now(), short_hash(&manifest.id));
-    let submitted = job::submit(&ssh, &root, &id, &body, &job_spec)?;
+    let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
+        Ok((engine_uploaded, id, submitted))
+    })?;
     let record = StudyRecord {
         ssh_auth: colm_remote::auth::current_connection(),
         host: ssh.host.clone(),
@@ -333,10 +338,13 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         }),
         fetched_at: None,
     };
-    std::fs::write(
+    let record_warning = std::fs::write(
         study_dir.join(RECORD),
         serde_json::to_string_pretty(&record)?,
-    )?;
+    )
+    .err()
+    .map(|e| format!("Job {id} submitted, but local record could not be saved: {e}"));
+    let lock_warning = engine_lock.finish_submitted(&id);
     // Submission has already succeeded: ledger failure must not invite a duplicate submission.
     let ledger_warning = record_version_use(
         version.as_ref(),
@@ -353,6 +361,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         "{}",
         json!({
             "ledger_warning": ledger_warning,
+            "record_warning": record_warning,
+            "lock_warning": lock_warning,
             "job": id,
             "host": ssh.host,
             "remote_project": remote_project,

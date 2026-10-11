@@ -32,7 +32,8 @@ fn main() -> Result<()> {
         "gen-histmap" => gen_histmap(),
         "gen-landcover" => gen_landcover(),
         "gen-co2mlo" => gen_co2mlo(),
-        "check-gui" => gui::check(&repo_root()?),
+        // Reused build artifacts can embed a previous checkout's manifest path.
+        "check-gui" => gui::check(&gui::source_root(&std::env::current_dir()?)?),
         "parameter-audit" => parameter_audit(),
         "stage-sidecar" => sidecar::stage(&repo_root()?),
         _ => bail!(

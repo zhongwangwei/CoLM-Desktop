@@ -183,9 +183,29 @@ pub struct Submitted {
     pub scheduler_id: Option<String>,
 }
 
-pub fn submit(ssh: &Ssh, root: &str, id: &str, body: &str, spec: &Spec) -> Result<Submitted> {
+fn engine_body(engine_id: &str, body: &str) -> Result<String> {
+    let digest = engine_id.strip_prefix("pre-").unwrap_or(engine_id);
+    anyhow::ensure!(
+        digest.len() == 16
+            && digest
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        "invalid engine snapshot"
+    );
+    Ok(format!("# colm-engine-snapshot: {engine_id}\n{body}"))
+}
+
+pub fn submit(
+    ssh: &Ssh,
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    engine_id: &str,
+) -> Result<Submitted> {
     check_id(id)?;
-    let out = ssh.run_ok(&submit_script(root, id, body, spec)?)?;
+    let body = engine_body(engine_id, body)?;
+    let out = ssh.run_ok(&submit_script(root, id, &body, spec)?)?;
     let last = out
         .trim()
         .lines()
