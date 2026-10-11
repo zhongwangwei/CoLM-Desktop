@@ -1014,3 +1014,23 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .hub-detail { margin-top: 12px; padding: 12px; border-radius: var(--r-md); background: var(--surface); }
 .hub-detail p { margin: 0 0 8px; }
 .hub-reason { font-weight: 600; }
+
+/* 总流程图（flow.js）。 */
+.flow-map { display: grid; gap: 12px; }
+.flow-band { border: 1px solid var(--border); border-radius: var(--r-md); padding: 14px; background: var(--elevated); }
+.flow-band-title { font-weight: 600; margin-bottom: 10px; }
+.flow-row { display: flex; flex-wrap: wrap; align-items: stretch; gap: 8px; }
+.flow-arrow, .flow-down { color: var(--muted); align-self: center; }
+.flow-down { text-align: center; font-size: 18px; }
+.flow-node { display: grid; gap: 2px; text-align: left; padding: 10px 12px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; cursor: pointer; }
+.flow-node span { font-size: 12px; color: var(--muted); }
+.flow-node:hover { border-color: var(--accent); }
+.flow-key { border-color: var(--accent); }
+.flow-hub { background: var(--accent-weak); border-color: var(--accent); }
+.flow-static { cursor: default; }
+.flow-branches { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; }
+.flow-branch { display: grid; gap: 6px; align-content: start; padding: 10px; border-radius: var(--r-sm); background: var(--surface); }
+.flow-out { font-size: 12px; color: var(--accent-ink); }
+.flow-return { padding: 10px 14px; border-radius: var(--r-md); border: 1px dashed var(--accent); color: var(--accent-ink); }
+.flow-side { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px; }

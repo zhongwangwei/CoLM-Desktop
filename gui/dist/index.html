@@ -543,6 +543,63 @@
       </div>
     </section>
 
+    <!-- 总流程图：以结果为枢纽的循环（flow.js）。方块可点，跳到对应的一步。 -->
+    <section class="page" data-step="flow" hidden>
+      <div class="work-head"><span class="kicker">总览</span></div>
+      <h1>总流程：以结果为枢纽的循环</h1>
+      <p class="sub">每一次运行 = 算例 × 模型版本 × 运行方式（在哪里 · 引擎）。工作流、研究、改代码最后都在产生运行，汇到结果页对比。</p>
+      <div class="flow-map">
+        <div class="flow-band">
+          <div class="flow-band-title">工作流 · 建算例、跑一次</div>
+          <div class="flow-row">
+            <button type="button" class="flow-node" data-go="basic-files"><b>1 · 建算例</b></button>
+            <span class="flow-arrow" aria-hidden="true">→</span>
+            <button type="button" class="flow-node" data-go="params-water"><b>2 · 参数</b></button>
+            <span class="flow-arrow" aria-hidden="true">→</span>
+            <button type="button" class="flow-node flow-key" data-go="run-mode"><b>3 · 运行方式</b><span>版本 × 在哪里 × 引擎</span></button>
+            <span class="flow-arrow" aria-hidden="true">→</span>
+            <button type="button" class="flow-node" data-go="run"><b>4 · 运行</b></button>
+            <span class="flow-arrow" aria-hidden="true">→</span>
+            <button type="button" class="flow-node flow-hub" data-go="result-overview"><b>5 · 结果与评估</b><span>枢纽</span></button>
+          </div>
+        </div>
+        <div class="flow-down" aria-hidden="true">↓</div>
+        <div class="flow-band">
+          <div class="flow-band-title">结果页的“下一步”：问题在哪</div>
+          <p class="mini muted">依据评估指标、做过的率定和这批结果来自哪个版本给出推荐，并写明理由。AI 助手也可以帮你判断。</p>
+          <div class="flow-branches">
+            <div class="flow-branch">
+              <b>参数不对</b><span class="mini muted">偏差像是参数没调好</span>
+              <button type="button" class="flow-node" data-go="result-tuning">研究：参数率定</button>
+              <button type="button" class="flow-node" data-go="hybrid-learn">研究：AI 学习参数</button>
+              <span class="flow-out">产出：新算例（带参数或网络）</span>
+            </div>
+            <div class="flow-branch">
+              <b>过程或结构不对</b><span class="mini muted">率定后仍在的系统偏差</span>
+              <button type="button" class="flow-node" data-go="code">改代码：新建修改版</button>
+              <button type="button" class="flow-node" data-go="hybrid-process">研究：AI 替换过程</button>
+              <span class="flow-out">产出：新版本，或带网络的新算例</span>
+            </div>
+            <div class="flow-branch">
+              <b>想知道稳不稳</b><span class="mini muted">结果对哪些参数敏感</span>
+              <button type="button" class="flow-node" data-go="result-uncertainty">研究：不确定性分析</button>
+              <span class="flow-out">产出：敏感参数，带进参数率定</span>
+            </div>
+            <div class="flow-branch">
+              <b>公平比较</b><span class="mini muted">新版本真的更好吗</span>
+              <button type="button" class="flow-node" data-go="result-tuning">比较两个版本</button>
+              <span class="flow-out">产出：两个版本在验证期上的比较</span>
+            </div>
+          </div>
+        </div>
+        <div class="flow-return">↺ 产出回流：新算例、新版本自动出现在第 3 步，重跑后在结果页对比</div>
+        <div class="flow-side">
+          <button type="button" class="flow-node" data-go="resources"><b>计算资源</b><span>本机与服务器：第 3 步和研究都从这里选在哪里跑</span></button>
+          <div class="flow-node flow-static"><b>AI 助手 · 每一页都能打开</b><span>读顶部上下文条（算例 · 版本 · 位置 · 引擎）和当前页，帮你判断下一步并代为执行，每一步都经你确认。</span></div>
+        </div>
+      </div>
+    </section>
+
     <section class="page" data-step="hybrid" hidden>
       <div class="work-head"><span class="kicker" id="hybrid-kicker">研究 · AI 混合建模</span></div>
       <h1 id="hybrid-title">AI 学习参数</h1>
@@ -676,7 +733,7 @@
 
     <section class="page" data-step="run" hidden>
       <div class="flow-pane" data-flow-pane="run-mode">
-        <div class="work-head"><span class="kicker">第 3 步 · 运行</span></div>
+        <div class="work-head"><span class="kicker">第 3 步 · 运行方式</span></div>
         <h1>运行方式</h1>
         <p class="sub">每次运行 = 算例 × 模型版本 × 运行方式（在哪里跑、用哪个引擎）。这里选好之后，运行页、结果页和 AI 助手都按它来。</p>
 
@@ -747,7 +804,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="run">
-        <div class="work-head"><span class="kicker">第 3 步 · 运行</span></div>
+        <div class="work-head"><span class="kicker">第 4 步 · 运行</span></div>
         <h1>运行</h1>
         <p class="sub">设置输出，然后依次运行 <code>mksrfdata</code>、<code>mkinidata</code>、
           <code>colm</code>。<b>输入没变的阶段会按输入指纹跳过</b>。
@@ -797,9 +854,9 @@
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
       <div class="flow-pane" data-flow-pane="result-overview">
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
-        <h1>分析总览</h1>
-        <p class="sub">本次创建的所有算例集中在这里。旧目录算例和运行页残留勾选不会改变结果范围。</p>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
+        <h1>结果与评估</h1>
+        <p class="sub">所有流程（工作流、研究、修改版、服务器）的结果都汇到这里对比，再从这里决定下一步。本次创建的所有算例集中在下方。</p>
         <section class="card hub" aria-labelledby="hub-runs-title">
           <h3 id="hub-runs-title">这个算例的运行</h3>
           <div class="ch">每条都标明出处：模型版本 · 参数 · 在哪里跑 · 引擎。以这个算例为基础的研究也列在这里。</div>
@@ -836,7 +893,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-data" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
         <h1>数据浏览</h1>
         <p class="sub">查看 history 中实际存在的变量、单位、维度与可视化类型，不再局限于固定变量清单。</p>
         <div class="result-context">
@@ -859,7 +916,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-series" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
         <h1>时间序列</h1>
         <p class="sub">按需读取当前站点和变量；长序列在 sidecar 中保极值降采样，导出仍可使用完整数据。</p>
         <div class="card result-sticky-tools">
@@ -882,7 +939,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-evaluation" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
         <h1>模型评估</h1>
         <p class="sub">逐站点匹配观测，查看指标、时间序列、散点和残差。缺少观测只影响当前站点。</p>
         <div class="card result-sticky-tools">
@@ -919,7 +976,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-comparison" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
         <h1>多站点比较</h1>
         <p class="sub">评估本次所有已完成算例。单站点失败不会终止批次，缺失原因会完整保留。</p>
         <div class="card">
@@ -954,7 +1011,7 @@
       </div>
 
       <div class="flow-pane" data-flow-pane="result-diagnostics" hidden>
-        <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
+        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
         <h1>过程诊断</h1>
         <p class="sub">检查时间覆盖、缺测、物理范围和能量平衡。缺少所需变量时明确列出缺项，不生成伪结论。</p>
         <div class="result-context">

@@ -29,11 +29,15 @@ for (const id of [
   }
 }
 const stepFor = id => groupFor(id)?.steps.find(step => step.id === id);
+// 工作流是扁平的五步：建算例 · 参数 · 运行方式 · 运行 · 结果与评估（报告与导出在结果之下）。
 {
-  const group = groupFor('result-export');
-  if (!group || group === analysisGroup || group.steps.length !== 1 || group.section) {
-    throw new Error('result-export must be a top-level workflow peer of Results analysis');
+  const numbered = WORKFLOW.filter(group => Number.isFinite(group.n) && group.n > 0).map(group => [group.n, group.t]);
+  if (JSON.stringify(numbered) !== JSON.stringify([[1, '建算例'], [2, '参数'], [3, '运行方式'], [4, '运行'], [5, '结果与评估']])) {
+    throw new Error(`the workflow must be five flat steps, got ${JSON.stringify(numbered)}`);
   }
+  if (groupFor('result-export') !== analysisGroup) throw new Error('result-export must sit under Results and evaluation');
+  if (groupFor('run-mode')?.n !== 3 || groupFor('run')?.n !== 4) throw new Error('run mode and run must be steps 3 and 4');
+  if (groupFor('flow')?.section !== 'resources' || groupFor('resources')?.section !== 'resources') throw new Error('compute resources and the flow map sit after the workflow');
 }
 // 研究段：经典方法（参数率定、不确定性分析）与 AI 混合建模（学习参数、替换过程），都在工作流之外、始终可见。
 for (const [id, key] of [['result-tuning', 'research-classic'], ['result-uncertainty', 'research-classic'],
@@ -54,7 +58,7 @@ for (const id of ['result-uncertainty', 'result-tuning']) {
     throw new Error(`${id} must unlock as soon as Basic setup has created a case`);
   }
 }
-if (!groupFor('result-export').steps[0].need()?.includes('至少一个算例')) {
+if (!stepFor('result-export').need()?.includes('至少一个算例')) {
   throw new Error('result-export must still require a completed result');
 }
 state.selected.has_history = true;

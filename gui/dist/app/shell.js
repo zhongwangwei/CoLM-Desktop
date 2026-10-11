@@ -32,7 +32,7 @@ export const WORKFLOW = [
     { id: 'prep-validation', page: 'prep', t: '验证数据（可选）', d: '制作模型评估观测', need: () => null, show: prepHidden },
     { id: 'prep-ready', page: 'prep', t: '就绪检查', d: '核对产物并交给基本设定', need: () => null, show: prepHidden },
   ] },
-  { n: 1, key: 'basic', collapsible: true, t: '基本设定', d: '建例与基础输入', steps: [
+  { n: 1, key: 'basic', collapsible: true, t: '建算例', d: '站点、时段与基础输入', steps: [
     { id: 'basic-files', page: 'basic', t: '文件与目录', d: '选站点并建算例', need: () => null, show: available('basic-files') },
     { id: 'basic-site', page: 'basic', t: '站点信息', d: '逐站点数据来源设置', need: ready, show: available('basic-site') },
     { id: 'basic-timing', page: 'basic', t: '预热', d: '慢变量平衡设置', need: ready, show: available('basic-timing') },
@@ -41,7 +41,7 @@ export const WORKFLOW = [
     { id: 'basic-initial', page: 'basic', t: '初始场', d: '初始状态设置', need: ready, show: available('basic-initial') },
     { id: 'basic-forcing', page: 'basic', t: '强迫场', d: '强迫场读取设置', need: ready, show: available('basic-forcing') },
   ] },
-  { n: 2, key: 'params', collapsible: true, t: '过程参数', d: '按过程逐项配置', steps: [
+  { n: 2, key: 'params', collapsible: true, t: '参数', d: '按过程逐项配置', steps: [
     { id: 'params-water', page: 'params', t: '水热过程', d: '土壤、积雪与水分', need: ready, show: processAvailable('params-water') },
     { id: 'params-eco', page: 'params', t: '生态与生地化', d: '植被、碳氮过程', need: ready, show: processAvailable('params-eco') },
     { id: 'params-river', page: 'params', t: '河道与水库', d: '汇流与水库过程', need: ready, show: processAvailable('params-river') },
@@ -49,19 +49,20 @@ export const WORKFLOW = [
     { id: 'params-tracer', page: 'params', t: '示踪剂', d: '示踪过程设置', need: ready, show: processAvailable('params-tracer') },
     { id: 'params-urban', page: 'params', t: '城市过程', d: '城市冠层与人为热', need: ready, show: processAvailable('params-urban') },
   ] },
-  { n: 3, key: 'run', collapsible: true, t: '运行', d: '运行方式与运行', steps: [
-    { id: 'run-mode', page: 'run', t: '运行方式', d: '模型版本、位置与引擎', need: ready },
-    { id: 'run', page: 'run', t: '运行算例', d: '输出、阶段与日志', need: ready },
+  { n: 3, t: '运行方式', d: '版本 × 在哪里 × 引擎', steps: [
+    { id: 'run-mode', page: 'run', t: '运行方式', d: '版本 × 在哪里 × 引擎', need: ready },
   ] },
-  { n: 4, key: 'results', collapsible: true, t: '结果分析', d: '浏览、评估与诊断', steps: [
-    { id: 'result-overview', page: 'result', t: '分析总览', d: '本次站点与产物状态', need: ready },
+  { n: 4, t: '运行', d: '输出、阶段与日志', steps: [
+    { id: 'run', page: 'run', t: '运行', d: '输出、阶段与日志', need: ready },
+  ] },
+  // 结果是枢纽：所有流程的结果都汇到这里，“下一步”从这里分流（results-hub.js）。
+  { n: 5, key: 'results', collapsible: true, t: '结果与评估', d: '枢纽：对比与下一步', steps: [
+    { id: 'result-overview', page: 'result', t: '汇总与下一步', d: '每次运行的出处、问题在哪', need: ready },
     { id: 'result-data', page: 'result', t: '数据浏览', d: '变量、单位与维度', need: ready, show: hasResults },
     { id: 'result-series', page: 'result', t: '时间序列', d: '按站点和变量绘图', need: ready, show: hasResults },
     { id: 'result-evaluation', page: 'result', t: '模型评估', d: '模型与观测配对', need: ready, show: hasResults },
     { id: 'result-comparison', page: 'result', t: '多站点比较', d: '排名与批量指标', need: ready, show: hasMultipleResults },
     { id: 'result-diagnostics', page: 'result', t: '过程诊断', d: '质量与物理检查', need: ready, show: hasResults },
-  ] },
-  { n: 5, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
   ] },
   // 改进模型：两种手段平级——调参数与网络（研究：从一个算例出发、产出新算例）与改代码（产出新的模型版本）。
@@ -84,14 +85,15 @@ export const WORKFLOW = [
   { section: 'research', key: 'research-code', list: true, t: '改代码', steps: [
     { id: 'code', page: 'code', t: '模型版本', d: '新建、修改、编译与检查', need: () => null, optional: true },
   ] },
-  // 计算资源：本机与服务器（resources.js）。
+  // 计算资源：本机与服务器（resources.js）；总流程图：以结果为枢纽的循环（flow.js）。
   { section: 'resources', key: 'resources', list: true, steps: [
-    { id: 'resources', page: 'resources', t: '本机与服务器', d: '在哪里跑', need: () => null, optional: true },
+    { id: 'resources', page: 'resources', t: '计算资源', d: '本机与服务器', need: () => null, optional: true },
+    { id: 'flow', page: 'flow', t: '总流程图', d: '以结果为枢纽的循环', need: () => null, optional: true },
   ] },
 ];
 
 /** 左栏分段的标题。 */
-const SECTION_TITLES = { research: '改进模型', resources: '计算资源' };
+const SECTION_TITLES = { research: '改进模型', resources: '其他' };
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
 const visibleSteps = () => STEPS.filter(step => !step.show || step.show());
 const sequentialSteps = () => visibleSteps().filter(step => !step.optional);
