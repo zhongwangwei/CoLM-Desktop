@@ -2757,6 +2757,29 @@ const ZH_EN = [
   ["添加服务器…", "Add server…"],
   ["本机，或一台经你自己的 ssh 连接的服务器。运行方式里的“运行位置”从这里选；修改版在服务器上会用它自己的源码编引擎，改过 Fortran 时也要在那台服务器上编它的内核。", "This computer, or a server reached through your own ssh. The run location in “Run mode” is chosen from these; on a server a modified version builds its engine from its own source, and if it changes Fortran its kernel must be built on that server too."],
   ["本机，或一台已配置的服务器：经你自己的 ssh 连接，在服务器上编译并运行，跑完自动把结果取回本机。修改版在服务器上用它自己的源码编。", "This computer, or a configured server: connected through your own ssh, built and run there; the results come back here automatically. A modified version is built on the server from its own source."],
+  // 比较两个版本与研究的模型版本（version-compare.js、run-mode.js、results.js）
+  ["验证期", "validation period"],
+  ["率定期", "calibration period"],
+  ["两个研究的设定不一样（参数、预算、种子、目标或时段），这不是公平比较。", "The two Studies differ in parameters, budget, seed, targets or periods; this is not a fair comparison."],
+  ["还有研究没有得到最优成员，暂时比不出来。", "A Study has no best member yet, so the versions cannot be compared yet."],
+  ["率定期目标", "Calibration objective"],
+  ["验证期目标", "Validation objective"],
+  ["基线", "Baseline"],
+  ["比较两个版本一次只比较一个率定任务；当前有多个（按站点分开的率定），请只保留一个。", "Comparing two versions works on one calibration task at a time; there are several now (calibrated per site), so keep only one."],
+  ["先在上面生成一个参数率定任务。", "Create a calibration task above first."],
+  ["两边选了同一个版本；请给版本 B 选另一个。", "Both sides use the same version; choose another one for version B."],
+  ["正在按同样的设置建第二个率定任务…", "Creating a second calibration task with the same settings…"],
+  ["比较两个版本", "Compare two versions"],
+  ["新结构是否真的更好？两个模型版本用同样的设置（参数、预算、种子、率定期与验证期）各自率定，再在验证期上比较最优结果，排除“只是参数没调”的影响。第二个率定任务会按上面这个任务的设置自动建好。", "Is the new structure really better? Both model versions are calibrated with the same settings (parameters, budget, seed, calibration and validation periods), then their best results are compared on the validation period, ruling out “the parameters just weren't tuned”. The second calibration task is created automatically from the settings of the one above."],
+  ["版本 A", "Version A"],
+  ["版本 B", "Version B"],
+  ["按同样设置率定两个版本并比较", "Calibrate both versions with the same settings and compare"],
+  ["正在率定", "Calibrating"],
+  ["这个率定任务已经用", "This calibration task has already run with"],
+  ["跑过，版本 A 固定为它", "; version A is fixed to it"],
+  ["参数怎么调都不对，像是过程或结构的问题", "No parameter setting fixes it; it looks like a process or structure problem"],
+  ["改代码（新建修改版）", "Change code (new modified version)"],
+  ["改了代码，想公平地比较新旧两个版本", "Changed the code and want a fair comparison of the old and new versions"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2802,6 +2825,10 @@ export function translateZh(text, target = 'en') {
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
     .replace(/^请在修改版 (\S+) 里改代码：(.*)$/, (m, name) => `Please change the code in modified version ${name}: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:`)
     .replace(/^修改版：(.+)$/, 'Modified version: $1')
+    .replace(/^模型版本：修改版 (\S+)（快照：提交 (\S+)；之后改代码不影响这个研究）$/, 'Model version: modified version $1 (snapshot of commit $2; later code changes do not affect this Study)')
+    .replace(/^模型版本：官方版$/, 'Model version: official')
+    .replace(/^在(.+)上，两个版本一样好。$/, (m, p) => `On the ${p === '验证期' ? 'validation' : 'calibration'} period, both versions are equally good.`)
+    .replace(/^在(.+)上，(.+)更好（目标值更低）。$/, (m, p, v) => `On the ${p === '验证期' ? 'validation' : 'calibration'} period, ${v} is better (lower objective).`)
     .replace(/^编译 修改版：(.+) 的内核$/, 'Build the kernel of modified version $1')
     .replace(/^编译 (.+) 的内核$/, 'Build the kernel of $1')
     .replace(/^修改版 (\S+) 目前只能在本机运行：请把运行位置换成本机，或把模型版本换回官方版$/, 'Modified version $1 can only run on this computer for now: set the location to this computer, or switch back to the official version')

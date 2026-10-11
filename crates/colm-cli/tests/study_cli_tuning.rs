@@ -1807,3 +1807,150 @@ fn failed_tuning_baseline_finishes_retryable_without_running_candidates() {
     assert_eq!(recovered["status"], "completed");
     fs::remove_dir_all(root).unwrap();
 }
+
+/// 一个最小的“修改版”：工作区目录、它的源码仓库、在当前提交上编过的引擎记录，`bin/` 里放一份真的 colm-cli
+/// （和测试用的是同一个程序，两边结果应当一样）与三个不会被执行的占位程序（Fortran 引擎与前处理不用它们）。
+fn fake_version(root: &Path, name: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = root.join(format!("{name}-source"));
+    fs::create_dir_all(repo.join("crates/colm-core/src")).unwrap();
+    fs::write(repo.join("crates/colm-core/src/lib.rs"), "// v1\n").unwrap();
+    let git = |dir: &Path, args: &[&str]| {
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    };
+    git(&repo, &["init", "-q", "-b", "main"]);
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-q", "-m", "base"]);
+    let ws_root = root.join("workspaces");
+    run_ok(&[
+        "ws-create",
+        "--name",
+        name,
+        "--from",
+        repo.to_str().unwrap(),
+        "--root",
+        ws_root.to_str().unwrap(),
+        "--note",
+        "test version",
+    ]);
+    let ws = ws_root.join(name);
+    fs::write(ws.join("src/crates/colm-core/src/lib.rs"), "// v2\n").unwrap();
+    git(&ws.join("src"), &["commit", "-q", "-am", "engine tweak"]);
+    let head = String::from_utf8(
+        Command::new("git")
+            .arg("-C")
+            .arg(ws.join("src"))
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+    let info_path = ws.join("workspace.json");
+    let mut info: Value = serde_json::from_str(&fs::read_to_string(&info_path).unwrap()).unwrap();
+    info["gates"]["engine"] =
+        serde_json::json!({ "ok": true, "at": 1, "commit": head, "detail": "" });
+    fs::write(&info_path, serde_json::to_vec_pretty(&info).unwrap()).unwrap();
+    let bin = ws.join("bin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::copy(super_bin(), bin.join("colm-cli")).unwrap();
+    fs::set_permissions(bin.join("colm-cli"), fs::Permissions::from_mode(0o755)).unwrap();
+    for program in ["colm-rs", "mksrfdata-rs", "mkinidata-rs"] {
+        fs::write(bin.join(program), "#!/bin/sh\nexit 9\n").unwrap();
+    }
+    ws_root
+}
+
+fn super_bin() -> &'static str {
+    bin()
+}
+
+/// 研究按模型版本运行：修改版第一次运行时拍快照、之后续跑沿用、不能中途换版本；同一份设定再建的研究
+/// （study-clone）与原研究公平比较（study-compare）。
+#[test]
+fn two_model_versions_are_calibrated_with_the_same_design_and_compared() {
+    let _guard = netcdf_lock();
+    let root = temp_root("versions");
+    let kernel = fake_kernel(&root, None);
+    for site in ["siteA", "siteB"] {
+        write_case(&root, site);
+        write_obs(&root.join(format!("{site}-obs.nc")), 264);
+    }
+    let spec = write_tuning_spec(&root, &kernel, 10);
+    let study_a = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let study_b = run_ok(&["study-clone", &study_a]).trim().to_string();
+    assert_ne!(study_a, study_b);
+    let ws_root = fake_version(&root, "snow");
+    let common = [
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+        "--preprocessors",
+        "fortran",
+    ];
+
+    let mut args_a = vec!["study-run", study_a.as_str()];
+    args_a.extend(common);
+    let state_a: Value = serde_json::from_str(&run_ok(&args_a)).unwrap();
+    assert_eq!(state_a["status"], "completed");
+
+    let mut args_b = vec!["study-run", study_b.as_str()];
+    args_b.extend(common);
+    args_b.extend([
+        "--model-version",
+        "snow",
+        "--workspace-root",
+        ws_root.to_str().unwrap(),
+    ]);
+    run_ok(&args_b);
+    let status_b = status_json(&study_b).unwrap();
+    assert_eq!(status_b["model_version"]["name"], "snow");
+    assert_eq!(status_b["model_version"]["note"], "test version");
+    assert!(
+        Path::new(status_b["model_version"]["cli"].as_str().unwrap())
+            .starts_with(Path::new(&study_b).join("version/bin"))
+    );
+    assert_eq!(status_b["state"]["status"], "completed");
+    assert!(status_json(&study_a).unwrap()["model_version"].is_null());
+
+    // 开始过就不能换版本：官方研究不能改成修改版，修改版研究不能换别的。
+    let mut switch_a = args_a.clone();
+    switch_a.extend([
+        "--model-version",
+        "snow",
+        "--workspace-root",
+        ws_root.to_str().unwrap(),
+    ]);
+    assert!(run_fail(&switch_a).contains("started with the official version"));
+    let mut switch_b = vec!["study-run", study_b.as_str()];
+    switch_b.extend(common);
+    switch_b.extend(["--model-version", "other"]);
+    assert!(run_fail(&switch_b).contains("started with model version snow"));
+
+    // 同一份设定、同一个程序：两边应当打平，且声明设定一致。
+    let compared: Value =
+        serde_json::from_str(&run_ok(&["study-compare", &study_a, &study_b])).unwrap();
+    assert_eq!(compared["same_design"], true, "{compared}");
+    assert_eq!(compared["a"]["version"], "official");
+    assert_eq!(compared["b"]["version"], "snow");
+    assert_eq!(compared["period"], "validation", "{compared}");
+    assert_eq!(compared["better"], "tie", "{compared}");
+    fs::remove_dir_all(root).unwrap();
+}

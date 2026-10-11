@@ -76,3 +76,9 @@ assert.deepEqual(hybrid.methodsForMode('params'), ['de', 'two-step']);
 assert.deepEqual(hybrid.methodsForMode('process'), ['de', 'gradient']);
 
 console.log('research: recommendation, readiness, study badges and hybrid modes');
+
+// 研究之外的两条去向：改代码、比较两个版本。
+{
+  const { NEXT_ROUTES } = research;
+  assert.deepEqual(NEXT_ROUTES.map(r => r.step), ['code', 'result-tuning']);
+}

@@ -23,6 +23,7 @@ import './remote.js';
 import './workspace.js';
 import './run-mode-view.js';
 import './resources.js';
+import './version-compare.js';
 import './research.js';
 
 initI18n();

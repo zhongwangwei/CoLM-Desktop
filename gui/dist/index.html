@@ -1282,7 +1282,18 @@
           <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>
           <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成率定任务。</pre></details>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div>
+          <section class="version-compare" id="version-compare-card" aria-labelledby="version-compare-title">
+          <h4 id="version-compare-title">比较两个版本</h4>
+          <div class="ch">新结构是否真的更好？两个模型版本用同样的设置（参数、预算、种子、率定期与验证期）各自率定，再在验证期上比较最优结果，排除“只是参数没调”的影响。第二个率定任务会按上面这个任务的设置自动建好。</div>
+          <div class="result-tools result-tools-wide">
+            <label>版本 A <select class="select" id="compare-version-a"><option value="official">官方版</option></select></label>
+            <label>版本 B <select class="select" id="compare-version-b"><option value="official">官方版</option></select></label>
+            <button class="run-btn" type="button" id="compare-versions-run">按同样设置率定两个版本并比较</button>
+          </div>
+          <div id="compare-versions-result" class="study-results"></div>
+        </section>
+        </div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="tune-step-prev">← 上一步</button><span class="study-wizard-note" id="tune-step-note"></span><button class="btn-next" id="tune-step-next">下一步 →</button></div>
       </div>
 

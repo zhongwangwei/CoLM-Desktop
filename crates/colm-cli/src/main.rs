@@ -32,7 +32,10 @@
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
+//! colm-cli study-clone <研究>                  # 同一份设定再建一个研究（比较两个版本的另一边）
+//! colm-cli study-compare <研究A> <研究B>          # 比较两个版本：两边最优成员的率定期、验证期成绩（JSON）
 //! colm-cli study-run <study-dir> --kernel <目录> [--stream 1] [--preprocessors rust|fortran]
+//!                    [--model-version official|<修改版>]   # 第一次给修改版时拍快照，之后一直用它
 //!                    [--engine rust|fortran]
 //! colm-cli study-export <study-dir> --out <目录>
 //! colm-cli study-pause|study-resume|study-cancel <study-dir>
@@ -58,6 +61,7 @@ mod provenance;
 mod remote_cmd;
 mod remote_workspace_cmd;
 mod study;
+mod study_version;
 mod ws_cmd;
 
 use std::path::{Path, PathBuf};
@@ -385,6 +389,8 @@ fn main() -> Result<()> {
                 cancel_requested: bool,
                 results: Vec<study::runner::ResultFile>,
                 events: Vec<serde_json::Value>,
+                /// 这个研究固定的模型版本；官方版为空。
+                model_version: Option<study_version::Pinned>,
             }
             let study_dir = opts.positional_case()?;
             println!(
@@ -396,6 +402,7 @@ fn main() -> Result<()> {
                     cancel_requested: study::state::cancel_requested(&study_dir),
                     results: study::runner::result_files(&study_dir)?,
                     events: study::runner::event_log_tail(&study_dir, 300)?,
+                    model_version: study_version::pinned(&study_dir)?,
                 })?
             );
         }
@@ -413,6 +420,33 @@ fn main() -> Result<()> {
                 .get("--kernel")
                 .or_else(|| manifest.spec.kernel_dir.clone())
                 .context("study-run needs --kernel or spec.kernel_dir")?;
+            // 模型版本：第一次给 `--model-version` 时拍快照，之后一直用快照（见 study_version.rs）。
+            if std::env::var_os(study_version::DELEGATED_ENV).is_none() {
+                let engine = requested_engine(opts.get("--engine").as_deref())?;
+                let preprocessors =
+                    requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+                if let Some(pinned) = study_version::ensure(
+                    &study_dir,
+                    opts.get("--model-version").as_deref(),
+                    &provenance::workspace_root(opts.get("--workspace-root")),
+                    engine.as_str(),
+                    preprocessors.as_str(),
+                    Path::new(&kernel),
+                )? {
+                    let own = ["--model-version", "--workspace-root", "--kernel"];
+                    let mut args: Vec<String> = opts.positional.clone();
+                    for (flag, value) in &opts.flags {
+                        if !own.contains(&flag.as_str()) {
+                            args.extend([flag.clone(), value.clone()]);
+                        }
+                    }
+                    let code = study_version::delegate(&pinned, &args)?;
+                    if code != 0 {
+                        std::process::exit(code);
+                    }
+                    return Ok(());
+                }
+            }
             cmd_study_run(
                 &study_dir,
                 Path::new(&kernel),
@@ -425,6 +459,18 @@ fn main() -> Result<()> {
                 requested_preprocessors(opts.get("--preprocessors").as_deref())?,
                 requested_engine(opts.get("--engine").as_deref())?,
             )?;
+        }
+        "study-clone" => println!(
+            "{}",
+            study_version::clone_study(&opts.positional_case()?)?.display()
+        ),
+        "study-compare" => {
+            let a = opts.positional_case()?;
+            let b = opts.positional_at(1, "a second Study directory")?;
+            println!(
+                "{}",
+                serde_json::to_string(&study_version::compare(&a, &b)?)?
+            );
         }
         "study-export" => {
             let output = match opts.get("--out") {

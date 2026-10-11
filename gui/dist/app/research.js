@@ -28,6 +28,12 @@ export const STUDIES = [
     note: '网络每步替换一个过程量（目前是土壤水分胁迫 β）。' },
 ];
 
+/** 结果页“下一步”里研究之外的两条去向：改代码（过程或结构不对），以及改完之后的公平比较。 */
+export const NEXT_ROUTES = [
+  { when: '参数怎么调都不对，像是过程或结构的问题', title: '改代码（新建修改版）', step: 'code' },
+  { when: '改了代码，想公平地比较新旧两个版本', title: '比较两个版本', step: 'result-tuning' },
+];
+
 /** NSE 低于它就推荐参数率定。 */
 export const NSE_THRESHOLD = 0.5;
 
@@ -207,6 +213,16 @@ export function renderNextSteps() {
   const rows = [line(recommended.study, reason[recommended.study](), true)];
   for (const study of ['tuning', 'uq', 'process', 'learn']) {
     if (study !== recommended.study) rows.push(line(study, others[study], false));
+  }
+  // 改代码与公平比较：不是研究，但同样从这里出发。
+  for (const route of NEXT_ROUTES) {
+    const row = element('div', 'next-step');
+    row.append(element('span', '', `${t(route.when)} →`));
+    const link = element('button', 'link-btn', t(route.title));
+    link.type = 'button';
+    link.onclick = () => go(route.step);
+    row.append(link);
+    rows.push(row);
   }
   $('result-next-list').replaceChildren(...rows);
 }

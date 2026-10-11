@@ -1,0 +1,207 @@
+use super::*;
+use colm_workspace::version::{Readiness, Touches};
+
+fn temp(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("colm-study-version-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn readiness(root: &Path, kernel: PathBuf) -> Readiness {
+    let bin = root.join("ws/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    for program in PROGRAMS {
+        std::fs::write(bin.join(exe(program)), program).unwrap();
+    }
+    Readiness {
+        name: "snow".into(),
+        head: "0123456789abcdef".into(),
+        base_commit: "fedcba98".into(),
+        origin: "app".into(),
+        note: "lower aged-snow albedo".into(),
+        based_on: None,
+        touches: Touches {
+            engine: true,
+            kernel: false,
+        },
+        ready: true,
+        items: Vec::new(),
+        cli: bin.join(exe("colm-cli")),
+        kernel,
+        preset: "default".into(),
+    }
+}
+
+#[test]
+fn a_study_pins_a_copy_of_the_versions_programs() {
+    let root = temp("pin");
+    let study = root.join("study");
+    std::fs::create_dir_all(&study).unwrap();
+    let official = root.join("kernels/default");
+    let ready = readiness(&root, official.clone());
+    let pinned = pin(&study, &ready, &official).unwrap();
+    assert_eq!(pinned.cli, study.join("version/bin").join(exe("colm-cli")));
+    assert_eq!(
+        pinned.kernel, official,
+        "Fortran unchanged: the official kernel"
+    );
+    assert_eq!(pinned.note, "lower aged-snow albedo");
+    for program in PROGRAMS {
+        assert_eq!(
+            std::fs::read_to_string(study.join("version/bin").join(exe(program))).unwrap(),
+            program
+        );
+    }
+    // 快照是拷贝：之后工作区重编不影响研究。
+    std::fs::write(&ready.cli, "rebuilt").unwrap();
+    assert_eq!(std::fs::read_to_string(&pinned.cli).unwrap(), "colm-cli");
+    assert_eq!(super::pinned(&study).unwrap(), Some(pinned.clone()));
+
+    // 已固定：同名或不给都用快照，换名字报错。
+    let ws_root = root.join("workspaces");
+    for requested in [None, Some("snow")] {
+        assert_eq!(
+            ensure(&study, requested, &ws_root, "rust", "rust", &official).unwrap(),
+            Some(pinned.clone())
+        );
+    }
+    let other = ensure(&study, Some("other"), &ws_root, "rust", "rust", &official).unwrap_err();
+    assert!(format!("{other:#}").contains("started with model version snow"));
+    let official_again = ensure(
+        &study,
+        Some("official"),
+        &ws_root,
+        "rust",
+        "rust",
+        &official,
+    )
+    .unwrap_err();
+    assert!(format!("{official_again:#}").contains("cannot switch to official"));
+}
+
+#[test]
+fn a_fortran_change_pins_the_versions_own_kernel_and_official_studies_pin_nothing() {
+    let root = temp("kernel");
+    let study = root.join("study");
+    std::fs::create_dir_all(&study).unwrap();
+    let official = root.join("kernels/default");
+    let own = root.join("ws/kernels/default");
+    std::fs::create_dir_all(&own).unwrap();
+    std::fs::write(own.join("manifest.json"), "{}").unwrap();
+    let pinned = pin(&study, &readiness(&root, own), &official).unwrap();
+    assert_eq!(pinned.kernel, study.join("version/kernel"));
+    assert!(study.join("version/kernel/manifest.json").is_file());
+
+    let plain = root.join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    for requested in [None, Some("official"), Some("")] {
+        assert_eq!(
+            ensure(&plain, requested, &root, "rust", "rust", &official).unwrap(),
+            None
+        );
+    }
+    assert!(!plain.join(FILE).exists());
+}
+
+fn side(version: &str, calibration: Option<f64>, validation: Option<f64>) -> Side {
+    Side {
+        study: format!("/studies/{version}"),
+        version: version.into(),
+        head: None,
+        status: "completed".into(),
+        best_member: calibration.map(|_| "m1".into()),
+        calibration,
+        validation,
+        baseline_calibration: Some(1.0),
+        baseline_validation: Some(1.0),
+    }
+}
+
+#[test]
+fn two_versions_are_compared_on_the_validation_period_when_both_have_it() {
+    let v = verdict(
+        side("official", Some(0.3), Some(0.5)),
+        side("snow", Some(0.4), Some(0.45)),
+        true,
+    );
+    assert_eq!(v["period"], "validation");
+    assert_eq!(
+        v["better"], "b",
+        "lower validation objective wins even with a worse fit"
+    );
+    assert!(v["notes"].as_array().unwrap().is_empty());
+
+    let v = verdict(
+        side("official", Some(0.3), None),
+        side("snow", Some(0.4), Some(0.2)),
+        true,
+    );
+    assert_eq!(v["period"], "calibration");
+    assert_eq!(v["better"], "a");
+    assert!(v["notes"][0]
+        .as_str()
+        .unwrap()
+        .contains("no validation score"));
+
+    let v = verdict(
+        side("snow", Some(0.3), Some(0.3)),
+        side("snow", Some(0.3), Some(0.3)),
+        false,
+    );
+    assert_eq!(v["better"], "tie");
+    let notes: Vec<&str> = v["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n.as_str().unwrap())
+        .collect();
+    assert!(notes.iter().any(|n| n.contains("not a fair comparison")));
+    assert!(notes.iter().any(|n| n.contains("same model version")));
+
+    let v = verdict(
+        side("official", None, None),
+        side("snow", Some(0.4), Some(0.4)),
+        true,
+    );
+    assert!(v["better"].is_null());
+}
+
+/// 交给快照里的 colm-cli：同一条 study-run，换上固定的内核，并标明由外层转交（里层不再转交）。
+#[cfg(unix)]
+#[test]
+fn a_pinned_study_runs_with_the_snapshot_cli() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("delegate");
+    let log = root.join("args.txt");
+    let cli = root.join("colm-cli");
+    std::fs::write(
+        &cli,
+        format!(
+            "#!/bin/sh\necho \"$@ by-parent=$COLM_STUDY_BY_PARENT\" > '{}'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let pinned = Pinned {
+        name: "snow".into(),
+        head: "abc".into(),
+        base_commit: "def".into(),
+        note: String::new(),
+        based_on: None,
+        touches: Touches {
+            engine: true,
+            kernel: false,
+        },
+        cli,
+        kernel: PathBuf::from("/k/default"),
+        pinned_unix: 0,
+    };
+    let args: Vec<String> = ["/study", "--stream", "1"].map(String::from).to_vec();
+    assert_eq!(delegate(&pinned, &args).unwrap(), 0);
+    assert_eq!(
+        std::fs::read_to_string(&log).unwrap().trim(),
+        "study-run /study --stream 1 --kernel /k/default by-parent=1"
+    );
+}

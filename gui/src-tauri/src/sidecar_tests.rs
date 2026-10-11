@@ -891,3 +891,10 @@ fn a_model_version_is_passed_only_when_it_is_not_the_official_one() {
     assert!(run_args("/case", "/kernel", false, None, 1, None, Some("../x")).is_err());
     assert!(run_args("/case", "/kernel", false, None, 1, None, Some("-x")).is_err());
 }
+
+#[test]
+fn study_runs_only_name_a_modified_version() {
+    assert!(validate_model_version(Some("snow")).is_ok());
+    assert!(validate_model_version(Some("official")).is_ok());
+    assert!(validate_model_version(Some("../x")).is_err());
+}

@@ -2138,6 +2138,30 @@ fn parse_number(value: &str) -> Option<f64> {
         .ok()
 }
 
+/// 比较两个版本：用同一份设定再建一个研究。返回新研究的目录。
+#[tauri::command]
+pub async fn study_clone(study_dir: String) -> Result<String, String> {
+    if study_dir.contains('\0') || !PathBuf::from(&study_dir).is_absolute() {
+        return Err("研究目录须为绝对路径".into());
+    }
+    Ok(capture_async(vec!["study-clone".into(), study_dir])
+        .await?
+        .trim()
+        .to_owned())
+}
+
+/// 比较两个版本：两个研究最优成员的率定期与验证期成绩。
+#[tauri::command]
+pub async fn study_compare(a: String, b: String) -> Result<serde_json::Value, String> {
+    for dir in [&a, &b] {
+        if dir.contains('\0') || !PathBuf::from(dir).is_absolute() {
+            return Err("研究目录须为绝对路径".into());
+        }
+    }
+    let out = capture_async(vec!["study-compare".into(), a, b]).await?;
+    serde_json::from_str(out.trim()).map_err(|e| format!("cannot read study-compare output: {e}"))
+}
+
 #[tauri::command]
 pub async fn study_create_json(case_root: String, spec_json: String) -> Result<String, String> {
     capture_study_spec("study-create", case_root, spec_json).await
@@ -2214,11 +2238,17 @@ pub async fn study_run(
     jobs: Option<usize>,
     retry_failed: Option<bool>,
     engine: Option<String>,
+    model_version: Option<String>,
 ) -> Result<String, String> {
     validate_engine(engine.as_deref())?;
+    validate_model_version(model_version.as_deref())?;
     let key = study_process_key(&study_dir);
     processes.prepare(std::slice::from_ref(&key))?;
-    let args = study_run_args(study_dir, kernel, stream, jobs, retry_failed, engine);
+    let mut args = study_run_args(study_dir, kernel, stream, jobs, retry_failed, engine);
+    // 研究第一次给修改版时拍快照，之后续跑沿用（`colm-cli study-run --model-version`）；官方版不加参数。
+    if let Some(version) = model_version.filter(|v| v != "official") {
+        args.extend(["--model-version".into(), version]);
+    }
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || study_run_blocking(app, processes, args))
         .await

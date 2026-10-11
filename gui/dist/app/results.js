@@ -12,6 +12,7 @@ import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
+import { modelVersion, studyBlocker, studyVersionText } from './run-mode.js';
 import { renderTuneHybridWeights, tuneHybridSection, wireTuneHybrid } from './hybrid.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, studyBadge, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
@@ -1375,6 +1376,29 @@ function exportChart(host, filename, strict = false) {
   const link = document.createElement('a'); link.href = canvas.toDataURL('image/png'); link.download = filename; link.click();
 }
 
+/**
+ * 这个研究这次要不要带上模型版本：已经固定过版本的、或已经用官方版开始跑的研究沿用原来的（不带参数），
+ * 还没开始的才用运行方式里现在选的修改版。
+ */
+export async function studyVersionArg(dir, version) {
+  if (!version || version === 'official') return null;
+  const envelope = JSON.parse(await invoke('study_status', { studyDir: dir }));
+  if (envelope.model_version) return null;
+  const started = Object.values(envelope.state?.tasks || {})
+    .some(task => !['pending', 'materialized'].includes(String(task.status).toLowerCase()));
+  return started ? null : version;
+}
+
+/** 当前的参数率定研究目录（“比较两个版本”从它出发）。 */
+export function activeTuningStudies() {
+  return [...activeStudyDirs('tuning')];
+}
+
+/** 重新读参数率定研究的状态与结果。 */
+export function refreshTuningStudy() {
+  return refreshStudy('tuning');
+}
+
 export async function markResultsStale(dirs) {
   const target = new Set(dirs);
   for (const c of state.cases) {
@@ -2572,6 +2596,8 @@ function renderStudyEnvelope(kind, envelope) {
     renderSteps();
   }
   const box = node('div', 'study-status-box');
+  // 单个研究：说出它固定的模型版本（多个研究汇总时各自不同，不在这里写）。
+  if (!view.manifests && view.manifest) box.appendChild(node('p', 'mini study-version', studyVersionText(view.model_version)));
   if (flowKind === 'tuning') {
     const manifests = view.manifests || (view.manifest ? [view.manifest] : []);
     const baselines = Math.max(1, manifests.length);
@@ -3081,6 +3107,14 @@ async function runStudy(kind, strict = false) {
   if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
   if (!kernel) { if (strict === true) throw new Error('请先选择内核。'); return status('请先选择内核。'); }
   if (studyRunning[kind]) { if (strict === true) throw new Error(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); return status(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); }
+  // 运行方式里的模型版本：研究第一次运行时拍快照，之后续跑、重试沿用研究自己固定的版本（研究在本机跑）。
+  const version = modelVersion();
+  const versionArgs = {};
+  for (const dir of dirs) versionArgs[dir] = await studyVersionArg(dir, version);
+  if (Object.values(versionArgs).some(Boolean)) {
+    const versionBlocked = studyBlocker({ version, readiness: state.versionReadiness, engine: modelEngine() });
+    if (versionBlocked) { if (strict === true) throw new Error(dialogText(versionBlocked)); return status(dialogText(versionBlocked)); }
+  }
   const isCurrent = studyMutationGuard(kind, dirs, kernel);
   const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
@@ -3094,7 +3128,7 @@ async function runStudy(kind, strict = false) {
         dir,
         out: await invoke('study_run', {
           studyDir: dir, kernel, stream: true, jobs: perStudyJobs, retryFailed: false,
-          engine: modelEngine(),
+          engine: modelEngine(), modelVersion: versionArgs[dir],
         }),
       };
     });

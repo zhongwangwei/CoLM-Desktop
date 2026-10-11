@@ -24,7 +24,7 @@ fn under(path: &str, prefixes: &[&str]) -> bool {
 }
 
 /// 改动落在哪里：Rust 引擎（计算部分）、Fortran 内核，或都没碰（只改了界面、助手、文档等）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Touches {
     pub engine: bool,
     pub kernel: bool,

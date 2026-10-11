@@ -140,6 +140,8 @@ pub fn run() {
             cancel_runs,
             history_catalog,
             study_parameter_contexts,
+            study_clone,
+            study_compare,
             study_create_json,
             study_preflight_json,
             study_run,

@@ -937,6 +937,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
   let spatial = false;
   let runs = 0;
   const engines = [];
+  const versions = [];
   const runStudy = runInNewContext(helper + resultUi.slice(
     resultUi.indexOf('async function runStudy('),
     resultUi.indexOf('\nasync function retryStudy('),
@@ -955,16 +956,20 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
       return out;
     },
     invoke: async (command, args) => {
-      if (command === 'study_run') { runs++; engines.push(args.engine); }
+      if (command === 'study_run') { runs++; engines.push(args.engine); versions.push(args.modelVersion); }
       return 'ok';
     },
     refreshStudy: async () => {}, setPreview() {}, renderStudyWizard() {},
     modelEngine: () => 'fortran',
+    modelVersion: () => 'snow', studyVersionArg: async (dir, version) => (dir === '/studies/a' ? version : null),
+    studyBlocker: () => null, state: {}, dialogText: x => x,
   });
   await runStudy('uq').catch(() => {});
   if (runs !== 1) throw new Error('spatial switch must stop queued Study runs without killing the already-started one');
   // Study 与普通运行共用运行页的引擎选择；漏传就会悄悄落回 colm-cli 的默认值。
   if (engines.join() !== 'fortran') throw new Error(`Study runs must forward the selected model engine, got ${engines}`);
+  // 还没开始的研究带上运行方式里选的版本；已固定或已开始的由 studyVersionArg 判为不带。
+  if (versions.join() !== 'snow') throw new Error(`Study runs must forward the model version per Study, got ${versions}`);
 }
 
 {
