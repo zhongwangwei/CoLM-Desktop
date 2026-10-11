@@ -11,6 +11,7 @@ import { language, translateZh } from './i18n.js';
 import { modelEngine } from './engine.js';
 import { OFFICIAL, versionLabel, runModeBlocker } from './run-mode.js';
 import { activeTuningStudies, refreshTuningStudy, studyVersionArg } from './results.js';
+import { awaitServerStudy, studyTarget, submitStudies } from './remote-study.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 const PAIRS_KEY = 'colm.versionComparePairs';
@@ -109,17 +110,28 @@ function renderResult(result) {
   ]);
 }
 
-/** 修改版要先能在本机跑（研究在本机跑）。 */
+/** 修改版要能在选定的位置跑（本机要先编好；服务器上要源码干净）。 */
 async function checkReady(version) {
   if (version === OFFICIAL) return null;
   const readiness = await invoke('version_check', { name: version, kernel: $('kernel').value, engine: modelEngine() });
-  return runModeBlocker({ version, target: 'local', readiness, engine: modelEngine() });
+  return runModeBlocker({ version, target: studyTarget(), readiness, engine: modelEngine() });
 }
 
 async function runSide(dir, version, label) {
   const envelope = JSON.parse(await invoke('study_status', { studyDir: dir }));
   if (finished(envelope)) return;
   show([`${t('正在率定')} ${label}（${t(versionLabel(version))}）…`], 'muted');
+  const target = studyTarget();
+  if (target !== 'local') {
+    // 服务器上跑：交过去，等它跑完、取回（研究的状态与结果移植进本机这个研究）。
+    if (!envelope.remote?.host) {
+      await submitStudies([dir], {
+        host: target, kernel: $('kernel').value, engine: modelEngine(), jobs: null, versionFor: d => studyVersionArg(d, version),
+      });
+    }
+    await awaitServerStudy(dir, { onProgress: text => show([`${label}：${t(text)}`], 'muted') });
+    return;
+  }
   await invoke('study_run', {
     studyDir: dir, kernel: $('kernel').value, stream: true, jobs: null, retryFailed: false,
     engine: modelEngine(), modelVersion: await studyVersionArg(dir, version),

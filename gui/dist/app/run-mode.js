@@ -151,9 +151,3 @@ export function studyVersionText(pinned) {
   return `模型版本：修改版 ${pinned.name}（快照：提交 ${short(pinned.head)}；之后改代码不影响这个研究）`;
 }
 
-/**
- * 研究在本机跑（服务器上跑研究还没有）：按本机的要求检查修改版；官方版不检查。返回挡住的原因或 null。
- */
-export function studyBlocker({ version, readiness, engine }) {
-  return runModeBlocker({ version, target: 'local', readiness, engine });
-}

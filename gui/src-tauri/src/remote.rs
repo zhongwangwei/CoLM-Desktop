@@ -817,3 +817,99 @@ pub async fn remote_fetch(
 #[cfg(test)]
 #[path = "remote_tests.rs"]
 mod remote_tests;
+
+// ---- 在服务器上跑研究（`remote-study-*`）-----------------------------------------------------
+
+/// `remote-study-run` 的参数：服务器设置（目录对应、调度、资源）与 `remote-run` 相同；研究成员各用一个进程。
+pub(crate) fn study_args(
+    server: &Server,
+    study: String,
+    kernel: String,
+    engine: &Engine,
+    jobs: Option<usize>,
+) -> Vec<String> {
+    let single = Engine {
+        engine: engine.engine.clone(),
+        ranks: None,
+        model_version: engine.model_version.clone(),
+    };
+    let mut args = run_args(server, study, kernel, None, false, false, &single);
+    args[0] = "remote-study-run".into();
+    if let Some(jobs) = jobs.filter(|j| *j > 0) {
+        args.push("--jobs".into());
+        args.push(jobs.to_string());
+    }
+    args
+}
+
+/// 研究交给了哪台服务器（研究目录里的 `.colm-remote-study.json`）。
+fn study_server(config: &RemoteConfig, study: &str) -> Result<Server, String> {
+    let path = PathBuf::from(study).join(".colm-remote-study.json");
+    let text = std::fs::read_to_string(path).map_err(|_| "这个研究没有交给服务器跑过")?;
+    let record: Value = serde_json::from_str(&text).map_err(|_| "服务器研究记录不合法")?;
+    server_from_record(config, &record)
+}
+
+fn absolute_study(study: &str) -> Result<(), String> {
+    if study.contains('\0') || !PathBuf::from(study).is_absolute() {
+        return Err("研究目录须为绝对路径".into());
+    }
+    Ok(())
+}
+
+/// 把研究交给服务器：同一份设定在那里重建并运行。
+#[tauri::command]
+pub async fn remote_study_run(
+    app: tauri::AppHandle,
+    study_dir: String,
+    host: String,
+    kernel: String,
+    engine: Option<String>,
+    jobs: Option<usize>,
+    model_version: Option<String>,
+) -> Result<Value, String> {
+    absolute_study(&study_dir)?;
+    model_version_args(model_version.as_deref())?;
+    let resources = resource_dir(&app);
+    let server = server_for(app, &host)?;
+    let engine = Engine {
+        engine,
+        ranks: None,
+        model_version,
+    };
+    ssh_cli_json(
+        study_args(&server, study_dir, kernel, &engine, jobs),
+        resources,
+        Some(&server),
+    )
+    .await
+}
+
+/// 服务器上研究的作业状态与进度。
+#[tauri::command]
+pub async fn remote_study_status(
+    app: tauri::AppHandle,
+    study_dir: String,
+) -> Result<Value, String> {
+    absolute_study(&study_dir)?;
+    let server = study_server(&remote_config(app), &study_dir)?;
+    ssh_cli_json(
+        vec!["remote-study-status".into(), study_dir],
+        None,
+        Some(&server),
+    )
+    .await
+}
+
+/// 跑完后取回：核对成员一致，把状态与结果移植进本机研究。
+#[tauri::command]
+pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Result<Value, String> {
+    absolute_study(&study_dir)?;
+    let server = study_server(&remote_config(app), &study_dir)?;
+    ssh_cli_json(
+        vec!["remote-study-fetch".into(), study_dir],
+        None,
+        Some(&server),
+    )
+    .await
+}

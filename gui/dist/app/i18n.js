@@ -2780,6 +2780,12 @@ const ZH_EN = [
   ["参数怎么调都不对，像是过程或结构的问题", "No parameter setting fixes it; it looks like a process or structure problem"],
   ["改代码（新建修改版）", "Change code (new modified version)"],
   ["改了代码，想公平地比较新旧两个版本", "Changed the code and want a fair comparison of the old and new versions"],
+  // 在服务器上跑研究（remote-study.js、results.js）
+  ["服务器上的研究跑完了，正在取回…", "The Study finished on the server; fetching…"],
+  ["服务器上的作业不在了（可能被终止或机器重启）", "The server job is gone (it may have been killed or the machine restarted)"],
+  ["在服务器的调度系统里排队", "Queued in the server scheduler"],
+  ["服务器上正在准备（编译引擎、建研究）", "Preparing on the server (building the engine, creating the Study)"],
+  ["已取回服务器上的研究结果", "Fetched the Study results from the server"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2825,6 +2831,11 @@ export function translateZh(text, target = 'en') {
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
     .replace(/^请在修改版 (\S+) 里改代码：(.*)$/, (m, name) => `Please change the code in modified version ${name}: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:`)
     .replace(/^修改版：(.+)$/, 'Modified version: $1')
+    .replace(/^在服务器 (\S+) 上跑完，结果已取回（成员的模拟输出留在服务器上）$/, 'Finished on server $1; results fetched (member outputs stay on the server)')
+    .replace(/^在服务器 (\S+) 上运行（作业 (\S+)）；跑完会自动取回结果$/, 'Running on server $1 (job $2); results are fetched automatically when it finishes')
+    .replace(/^服务器上的研究失败（退出码 (\S+)）$/, 'The Study failed on the server (exit code $1)')
+    .replace(/^服务器上运行中：已完成 (\S+) 个候选$/, 'Running on the server: $1 candidates done')
+    .replace(/^研究已交给服务器 (\S+)；跑完会自动取回结果。$/, 'The Study was sent to server $1; results are fetched automatically when it finishes.')
     .replace(/^模型版本：修改版 (\S+)（快照：提交 (\S+)；之后改代码不影响这个研究）$/, 'Model version: modified version $1 (snapshot of commit $2; later code changes do not affect this Study)')
     .replace(/^模型版本：官方版$/, 'Model version: official')
     .replace(/^在(.+)上，两个版本一样好。$/, (m, p) => `On the ${p === '验证期' ? 'validation' : 'calibration'} period, both versions are equally good.`)

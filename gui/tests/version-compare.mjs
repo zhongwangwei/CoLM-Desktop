@@ -13,6 +13,7 @@ for (const [name, body] of Object.entries({
   'ipc.js': 'export const invoke = async () => ({}); export const listen = async () => {}; export const hasBackend = false;',
   'ui.js': 'export const $ = () => null; export const status = () => {};',
   'results.js': 'export const activeTuningStudies = () => []; export const refreshTuningStudy = async () => {}; export const studyVersionArg = async () => null;',
+  'remote-study.js': 'export const awaitServerStudy = async () => {}; export const studyTarget = () => "local"; export const submitStudies = async () => {};',
 })) await writeFile(join(temp, 'app', name), body);
 globalThis.addEventListener = () => {};
 const compare = await import(pathToFileURL(join(temp, 'app', 'version-compare.js')).href);

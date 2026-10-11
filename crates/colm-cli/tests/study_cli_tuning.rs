@@ -1954,3 +1954,187 @@ fn two_model_versions_are_calibrated_with_the_same_design_and_compared() {
     assert_eq!(compared["better"], "tie", "{compared}");
     fs::remove_dir_all(root).unwrap();
 }
+
+/// 一台“服务器”：本机的一个目录，`PATH` 前面放一个假的 `ssh`（把远程命令在本机执行）与 `setsid`（macOS 没有）。
+fn fake_server(root: &Path) -> (PathBuf, String) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = root.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        bin.join("ssh"),
+        "#!/bin/bash\nwhile [ $# -gt 0 ]; do case \"$1\" in -o|-i|-p|-F|-l|-J) shift 2;; -*) shift;; *) break;; esac; done\nshift\nif [ \"$*\" = \"bash -s\" ]; then exec bash -s; else exec bash -c \"$*\"; fi\n",
+    )
+    .unwrap();
+    fs::write(bin.join("setsid"), "#!/bin/sh\nexec \"$@\"\n").unwrap();
+    for name in ["ssh", "setsid"] {
+        fs::set_permissions(bin.join(name), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    // 服务器根目录要短：服务器上研究成员的重启文件路径受 CoLM 的 256 字节限制（macOS 的临时目录很长）。
+    let server = PathBuf::from("/tmp").join(format!("cs{}", std::process::id()));
+    let _ = fs::remove_dir_all(&server);
+    (server, path)
+}
+
+fn run_with_path(path: &str, args: &[&str]) -> String {
+    let output = Command::new(bin())
+        .args(args)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{args:?}\nstdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// 研究在服务器上跑：同一份设定在服务器上重建、运行，取回后移植进本机研究；结果与本机跑的同一个研究打平。
+#[test]
+fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
+    use std::os::unix::fs::PermissionsExt;
+    let _guard = netcdf_lock();
+    let root = temp_root("remote-study");
+    let kernel = fake_kernel(&root, None);
+    for site in ["siteA", "siteB"] {
+        write_case(&root, site);
+        write_obs(&root.join(format!("{site}-obs.nc")), 264);
+    }
+    let spec = write_tuning_spec(&root, &kernel, 10);
+    let study = run_ok(&[
+        "study-create",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ])
+    .trim()
+    .to_string();
+    let twin = run_ok(&["study-clone", &study]).trim().to_string();
+    let (server, path) = fake_server(&root);
+    fs::create_dir_all(server.join("kernels")).unwrap();
+    // 服务器上编好的 Fortran 内核（假内核的拷贝）。
+    let server_kernel = server.join("kernels/cli-study-test-a");
+    fs::create_dir_all(&server_kernel).unwrap();
+    for entry in fs::read_dir(&kernel).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), server_kernel.join(entry.file_name())).unwrap();
+    }
+    let host = "fakehost";
+    let server_root = server.to_str().unwrap();
+    let common = [
+        "--host",
+        host,
+        "--root",
+        server_root,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--engine",
+        "fortran",
+        "--preprocessors",
+        "fortran",
+        "--scheduler",
+        "bare",
+        "--engine-mode",
+        "source",
+        "--upload-unmapped",
+        "1",
+        "--jobs",
+        "2",
+    ];
+    // 引擎快照号：先演练一遍拿到，然后把“已经编好的引擎”放到服务器上（不在测试里编 Rust）。
+    let mut dry = vec!["remote-study-run", study.as_str()];
+    dry.extend(common);
+    dry.extend(["--dry-run", "1"]);
+    let preview: Value =
+        serde_json::from_str(run_with_path(&path, &dry).trim().lines().last().unwrap()).unwrap();
+    let engine = preview["engine"].as_str().unwrap().to_owned();
+    assert!(preview["spec"]["kernel_dir"]
+        .as_str()
+        .unwrap()
+        .starts_with(server_root));
+    assert!(preview["spec"]["observations"]["siteA"]
+        .as_str()
+        .unwrap()
+        .ends_with("/obs/siteA-siteA-obs.nc"));
+    let engine_dir = server.join("engine").join(&engine);
+    fs::create_dir_all(engine_dir.join("src")).unwrap();
+    fs::write(engine_dir.join("src/.upload-complete"), "").unwrap();
+    fs::create_dir_all(engine_dir.join("bin")).unwrap();
+    fs::copy(bin(), engine_dir.join("bin/colm-cli")).unwrap();
+    for program in ["colm-rs", "mksrfdata-rs", "mkinidata-rs"] {
+        fs::write(engine_dir.join("bin").join(program), "#!/bin/sh\nexit 9\n").unwrap();
+    }
+    for entry in fs::read_dir(engine_dir.join("bin")).unwrap() {
+        fs::set_permissions(entry.unwrap().path(), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut submit = vec!["remote-study-run", study.as_str()];
+    submit.extend(common);
+    let submitted: Value = serde_json::from_str(run_with_path(&path, &submit).trim()).unwrap();
+    assert_eq!(submitted["engine"], engine.as_str());
+    // 本机研究已交给服务器：本机不能再从头跑它（防止两边各跑一份）。
+    let started = Instant::now();
+    let finished = loop {
+        let status: Value =
+            serde_json::from_str(run_with_path(&path, &["remote-study-status", &study]).trim())
+                .unwrap();
+        if status["status"]["state"] == "finished" {
+            break status;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(180),
+            "server job did not finish: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    assert_eq!(finished["status"]["exit_code"], 0, "{finished}");
+    assert_eq!(finished["study"]["status"], "completed", "{finished}");
+
+    let fetched: Value =
+        serde_json::from_str(run_with_path(&path, &["remote-study-fetch", &study]).trim()).unwrap();
+    assert_eq!(fetched["fetched"], true);
+    let local = status_json(&study).unwrap();
+    assert_eq!(local["state"]["status"], "completed", "{local}");
+    assert_eq!(local["state"]["study_id"], local["manifest"]["id"]);
+    assert!(local["state"]["tasks"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|task| task["case_dir"].as_str().unwrap().starts_with(&study)));
+    assert_eq!(local["remote"]["host"], host, "{local}");
+    // 本机再跑一份同设定的研究，与服务器上跑的比：打平。
+    run_ok(&[
+        "study-run",
+        &twin,
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--jobs",
+        "2",
+        "--preprocessors",
+        "fortran",
+    ]);
+    let compared: Value = serde_json::from_str(&run_ok(&["study-compare", &study, &twin])).unwrap();
+    assert_eq!(compared["same_design"], true, "{compared}");
+    assert_eq!(compared["better"], "tie", "{compared}");
+    assert_eq!(
+        compared["a"]["best_member"], compared["b"]["best_member"],
+        "{compared}"
+    );
+    // 交给过服务器的研究，本机不能再从头跑。
+    let mut again = vec!["remote-study-run", study.as_str()];
+    again.extend(common);
+    let output = Command::new(bin())
+        .args(&again)
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    fs::remove_dir_all(root).unwrap();
+    fs::remove_dir_all(server).unwrap();
+}

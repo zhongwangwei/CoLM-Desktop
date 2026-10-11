@@ -407,3 +407,33 @@ fn a_remote_run_of_a_modified_version_names_it_and_the_official_one_adds_nothing
     assert!(model_version_args(Some("../x")).is_err());
     assert!(model_version_args(Some("-x")).is_err());
 }
+
+#[test]
+fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    server.nodes = 2;
+    let args = study_args(
+        &server,
+        "/p/.colm/studies/s-1".into(),
+        "/k".into(),
+        &Engine {
+            engine: Some("fortran".into()),
+            ranks: Some(8),
+            model_version: Some("snow".into()),
+        },
+        Some(4),
+    );
+    assert_eq!(args[0], "remote-study-run");
+    assert_eq!(args[1], "/p/.colm/studies/s-1");
+    let value = |flag: &str| {
+        args.iter()
+            .position(|a| a == flag)
+            .map(|i| args[i + 1].clone())
+    };
+    assert_eq!(value("--host").as_deref(), Some("c1"));
+    assert_eq!(value("--engine").as_deref(), Some("fortran"));
+    assert_eq!(value("--jobs").as_deref(), Some("4"));
+    assert_eq!(value("--model-version").as_deref(), Some("snow"));
+    assert!(value("--ranks").is_none() && value("--nodes").is_none());
+    assert!(absolute_study("rel/study").is_err());
+}

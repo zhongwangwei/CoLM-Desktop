@@ -12,7 +12,8 @@ import { metricText } from './metric-format.js';
 import { language, translateZh } from './i18n.js';
 import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
-import { modelVersion, studyBlocker, studyVersionText } from './run-mode.js';
+import { modelVersion, runModeBlocker, studyVersionText } from './run-mode.js';
+import { serverStudyText, studyTarget, submitStudies, watchServerStudy } from './remote-study.js';
 import { renderTuneHybridWeights, tuneHybridSection, wireTuneHybrid } from './hybrid.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, studyBadge, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
 import {
@@ -2597,7 +2598,15 @@ function renderStudyEnvelope(kind, envelope) {
   }
   const box = node('div', 'study-status-box');
   // 单个研究：说出它固定的模型版本（多个研究汇总时各自不同，不在这里写）。
-  if (!view.manifests && view.manifest) box.appendChild(node('p', 'mini study-version', studyVersionText(view.model_version)));
+  if (!view.manifests && view.manifest) {
+    const pinned = view.model_version ?? (view.remote?.provenance?.version?.kind === 'workspace' ? view.remote.provenance.version : null);
+    box.appendChild(node('p', 'mini study-version', studyVersionText(pinned)));
+    if (view.remote?.host) {
+      box.appendChild(node('p', 'mini study-version', serverStudyText(view.remote)));
+      // 还没取回的服务器研究：接着查，跑完自动取回。
+      if (!view.remote.fetched_at && view.manifest?.root) watchServerStudy(view.manifest.root, () => refreshStudy(flowKind));
+    }
+  }
   if (flowKind === 'tuning') {
     const manifests = view.manifests || (view.manifest ? [view.manifest] : []);
     const baselines = Math.max(1, manifests.length);
@@ -3111,9 +3120,20 @@ async function runStudy(kind, strict = false) {
   const version = modelVersion();
   const versionArgs = {};
   for (const dir of dirs) versionArgs[dir] = await studyVersionArg(dir, version);
+  const target = studyTarget();
   if (Object.values(versionArgs).some(Boolean)) {
-    const versionBlocked = studyBlocker({ version, readiness: state.versionReadiness, engine: modelEngine() });
+    const versionBlocked = runModeBlocker({ version, target, readiness: state.versionReadiness, engine: modelEngine() });
     if (versionBlocked) { if (strict === true) throw new Error(dialogText(versionBlocked)); return status(dialogText(versionBlocked)); }
+  }
+  // 运行位置是服务器：研究交给它（同一份设定在那里重建并运行），跑完自动取回。
+  if (target !== 'local') {
+    await submitStudies(dirs, {
+      host: target, kernel, engine: modelEngine(), jobs: studyJobCount(kind), versionFor: async dir => versionArgs[dir],
+    });
+    for (const dir of dirs) watchServerStudy(dir, () => refreshStudy(kind));
+    status(dialogText(`研究已交给服务器 ${target}；跑完会自动取回结果。`));
+    await refreshStudy(kind, strict);
+    return;
   }
   const isCurrent = studyMutationGuard(kind, dirs, kernel);
   const jobs = studyJobCount(kind);

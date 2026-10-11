@@ -1619,6 +1619,10 @@ pub(crate) fn fetched_provenance(
     value
 }
 
+/// 在服务器上跑研究（第 5 阶段）；用这里的路径改写、引擎与内核的选择和作业提交。
+#[path = "remote_study.rs"]
+pub(crate) mod remote_study;
+
 #[cfg(test)]
 #[path = "remote_cmd_tests.rs"]
 mod remote_cmd_tests;

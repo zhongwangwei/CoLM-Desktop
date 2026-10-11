@@ -328,6 +328,9 @@ fn main() -> Result<()> {
         "remote-workspace" => remote_workspace_cmd::run(&opts)?,
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
+        "remote-study-run" => remote_cmd::remote_study::cmd_run(&opts)?,
+        "remote-study-status" => remote_cmd::remote_study::cmd_status(&opts)?,
+        "remote-study-fetch" => remote_cmd::remote_study::cmd_fetch(&opts)?,
         "remote-dist" => remote_cmd::cmd_dist(&opts)?,
         "remote-kernel" => remote_cmd::cmd_kernel(&opts)?,
         "remote-kernels" => remote_cmd::cmd_kernels(&opts)?,
@@ -391,6 +394,8 @@ fn main() -> Result<()> {
                 events: Vec<serde_json::Value>,
                 /// 这个研究固定的模型版本；官方版为空。
                 model_version: Option<study_version::Pinned>,
+                /// 交给服务器跑过的记录（`remote-study-run`）；没有为空。
+                remote: Option<serde_json::Value>,
             }
             let study_dir = opts.positional_case()?;
             println!(
@@ -403,6 +408,17 @@ fn main() -> Result<()> {
                     results: study::runner::result_files(&study_dir)?,
                     events: study::runner::event_log_tail(&study_dir, 300)?,
                     model_version: study_version::pinned(&study_dir)?,
+                    remote: std::fs::read_to_string(
+                        study_dir.join(remote_cmd::remote_study::RECORD),
+                    )
+                    .ok()
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+                    .map(|mut record| {
+                        if let Some(map) = record.as_object_mut() {
+                            map.remove("ssh_auth");
+                        }
+                        record
+                    }),
                 })?
             );
         }

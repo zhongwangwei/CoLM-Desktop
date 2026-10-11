@@ -236,10 +236,11 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
         .collect();
     normalize_observations(&case_root, &base_cases, &mut spec)?;
     spec::validate_target_site_coverage(&spec, &spec.base_cases)?;
+    // 建研究只要内核的宏：只有清单的内核（服务器上给 Rust 引擎用的）也行。
     let kernel_macros = spec
         .kernel_dir
         .as_deref()
-        .map(|path| colm_kernel::Kernel::open(Path::new(path)))
+        .map(|path| colm_kernel::Kernel::open_manifest(Path::new(path)))
         .transpose()?
         .map(|kernel| kernel.manifest.macros)
         .unwrap_or_default();

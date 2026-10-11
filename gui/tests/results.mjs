@@ -962,7 +962,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     refreshStudy: async () => {}, setPreview() {}, renderStudyWizard() {},
     modelEngine: () => 'fortran',
     modelVersion: () => 'snow', studyVersionArg: async (dir, version) => (dir === '/studies/a' ? version : null),
-    studyBlocker: () => null, state: {}, dialogText: x => x,
+    runModeBlocker: () => null, state: {}, dialogText: x => x, studyTarget: () => 'local',
   });
   await runStudy('uq').catch(() => {});
   if (runs !== 1) throw new Error('spatial switch must stop queued Study runs without killing the already-started one');
