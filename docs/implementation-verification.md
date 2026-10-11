@@ -32547,3 +32547,7 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 端到端（`study_cli_tuning` 新测试，Unix）：用一个假的 `ssh`（把远程命令在本机执行）与 `setsid`（macOS 没有）把本机的一个短目录当服务器，服务器上放好一份“已编好的引擎”（真的 `colm-cli`）与一份 Fortran 内核（假内核的拷贝）。演练（`--dry-run 1`）给出的设定里内核与观测已是服务器路径；提交后作业在“服务器”上建研究、跑完，`remote-study-status` 报完成；`remote-study-fetch` 后本机研究的状态为 completed、编号与本机清单一致、全部 `case_dir` 都在本机研究目录下、`remote.host` 正确；再在本机跑一份同设定的研究（`study-clone`），`study-compare` 判打平、最优成员相同；交给过服务器的研究不能再提交一次。
 - 单元测试：观测文件名带站点、作业脚本先建研究再跑并记下研究目录、成员不一致不取回、状态移植（编号、`case_dir`、进程身份）、只接受项目内的研究；GUI 后端 `remote_tests`（研究交给服务器的参数：沿用服务器设置、每个成员一个进程、带 `--jobs` 与 `--model-version`、研究目录要绝对路径）；`gui/tests/remote-study.mjs`（状态与进度文字、运行位置、提交参数、等到取回与失败）、`version-compare.mjs`、`results.mjs`（研究按运行位置分流）。`check-gui` 132 条命令全部被调用；全套检查通过。
 - **没做到的**：真实服务器（T7920）上跑一次。`7920ts`、`7920mp` 仍在 SSH 握手时被关闭；上面的端到端用的是本机模拟的服务器，`ssh` 链路本身（连接复用、密码登录）由已有的 `ssh_auth` 测试覆盖。
+
+### 第 664 轮补记（2026-10-12）：修改版在 T7920 上真跑一次
+
+T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.04、x86_64、96 核、cargo 1.95、可从源码编。同一个 CN-Cng 两个月算例（强迫场放进算例目录，`site.nc` 随算例上传），`remote-run --scheduler bare --engine-mode source` 分别以官方版与修改版 `snow`（`ground_fluxes.rs` 冯·卡门常数 0.41，提交 `5387c904`）提交：引擎快照分别为 `36e33dc1ca183fed` 与 `37149550c56e2d58`，服务器各自从源码编、三段都成功（退出码 0）。`remote-fetch` 后本机两份 `produced-by.json`：位置 `{"kind":"server","host":"7920ts"}`，版本分别为官方版与 `workspace snow 5387c904`，`ok=true`，带引擎快照号。两份取回的 history 用 `ws-compare` 比：不一致，第一处差异在 `CN-Cng_hist_2008-01.nc` 第 0 步的 `f_emis`——与本机的对照一致，服务器上跑的确实是改过的程序。`remote-study-run` 在真实服务器上还没跑。
