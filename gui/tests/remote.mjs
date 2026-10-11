@@ -63,10 +63,13 @@ assert.equal(remote.jobSummary({ state: 'finished', exit_code: 0, fetched: true,
 assert.equal(remote.jobSummary({ state: 'finished', exit_code: 0, fetched: true, partial: false }), '完成，结果已取回');
 
 // Fortran 引擎（R4）：只有它用 MPI 进程数；服务器上的内核摘要。
-assert.deepEqual(remote.engineChoice('rust', '8'), { engine: 'rust', ranks: null });
-assert.deepEqual(remote.engineChoice('fortran', '8'), { engine: 'fortran', ranks: 8 });
-assert.deepEqual(remote.engineChoice('fortran', 'abc'), { engine: 'fortran', ranks: 1 });
-assert.deepEqual(remote.engineChoice('fortran', '0'), { engine: 'fortran', ranks: 1 });
+assert.deepEqual(remote.engineChoice('rust', '8', 'official'), { engine: 'rust', ranks: null, modelVersion: null });
+assert.deepEqual(remote.engineChoice('fortran', '8', 'official'), { engine: 'fortran', ranks: 8, modelVersion: null });
+assert.deepEqual(remote.engineChoice('fortran', 'abc', 'official'), { engine: 'fortran', ranks: 1, modelVersion: null });
+assert.deepEqual(remote.engineChoice('fortran', '0', 'official'), { engine: 'fortran', ranks: 1, modelVersion: null });
+// 修改版：服务器上用它的源码编、用它跑。
+assert.deepEqual(remote.engineChoice('rust', '8', 'snow'), { engine: 'rust', ranks: null, modelVersion: 'snow' });
+assert.match(remote.kernelLines([{ name: 'default-b', preset: 'default', full: true, colm_git_sha: 'ws-snow-01234567' }])[0], /修改版 snow-01234567/);
 assert.deepEqual(remote.kernelLines([]), ['服务器上还没有内核']);
 assert.deepEqual(
   remote.kernelLines([{ name: 'latlon-ab12', preset: 'latlon', full: true }, { name: 'default-cd34', preset: 'default', full: false }]),

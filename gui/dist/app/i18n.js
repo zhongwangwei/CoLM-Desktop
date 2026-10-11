@@ -2729,6 +2729,34 @@ const ZH_EN = [
   ["调参数，还是改代码？", "Tune parameters, or change code?"],
   ["两种手段平级：调参数与网络不碰代码，产出新算例；改代码产出新的模型版本。做完都回到工作流第 3 步“运行方式”重跑，在结果页对比。", "Two equal routes: tuning parameters and networks leaves the code alone and produces new cases; changing code produces a new model version. Either way, rerun from workflow step 3 “Run mode” and compare in Results."],
   ["调参数与网络", "Tune parameters and networks"],
+  // 计算资源页与远程修改版（resources.js、run-mode.js、index.html）
+  ["自动识别调度", "Scheduler detected automatically"],
+  ["不用调度系统", "No scheduler"],
+  ["还没有目录对应", "No path mappings yet"],
+  ["条目录对应", "path mappings"],
+  ["线程", "threads"],
+  ["个逻辑 CPU", "logical CPUs"],
+  ["Rust 引擎随应用安装", "Rust engine installed with the app"],
+  ["没有找到 Fortran 内核", "No Fortran kernel found"],
+  ["当前运行位置", "Current run location"],
+  ["官方版直接可用；修改版要先在“改代码”里编好它的引擎。", "The official version is ready to use; a modified version needs its engine built in “Change code” first."],
+  ["设为运行位置", "Use as run location"],
+  ["编译官方版内核", "Build the official kernel"],
+  ["检查连接", "Test connection"],
+  ["查看内核", "List kernels"],
+  ["修改…", "Edit…"],
+  ["Fortran 内核预设", "Fortran kernel preset"],
+  ["还没有服务器。点“添加服务器…”，填 ssh 能连上的主机名和服务器上的工作目录。", "No servers yet. Click “Add server…” and enter a host name ssh can reach and a working directory on the server."],
+  ["在服务器上会用这个版本的源码编 Rust 引擎与前处理（第一次要几分钟）", "The server builds the Rust engine and preprocessors from this version's source (a few minutes the first time)"],
+  ["这个版本改了 Fortran：用 Fortran 引擎在服务器上跑之前，要先在那台服务器上编它的内核（计算资源 → 编译内核）", "This version changes Fortran: before running it on the Fortran engine on a server, build its kernel on that server (Compute resources → Build kernel)"],
+  ["这个版本改了 Fortran；Rust 引擎只用内核的宏，服务器上用正式内核的清单", "This version changes Fortran; the Rust engine only uses the kernel's macros, so the server uses the official kernel manifest"],
+  ["本机与服务器", "This computer and servers"],
+  ["在哪里跑", "Where to run"],
+  ["计算资源", "Compute resources"],
+  ["计算资源…", "Compute resources…"],
+  ["添加服务器…", "Add server…"],
+  ["本机，或一台经你自己的 ssh 连接的服务器。运行方式里的“运行位置”从这里选；修改版在服务器上会用它自己的源码编引擎，改过 Fortran 时也要在那台服务器上编它的内核。", "This computer, or a server reached through your own ssh. The run location in “Run mode” is chosen from these; on a server a modified version builds its engine from its own source, and if it changes Fortran its kernel must be built on that server too."],
+  ["本机，或一台已配置的服务器：经你自己的 ssh 连接，在服务器上编译并运行，跑完自动把结果取回本机。修改版在服务器上用它自己的源码编。", "This computer, or a configured server: connected through your own ssh, built and run there; the results come back here automatically. A modified version is built on the server from its own source."],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2774,6 +2802,8 @@ export function translateZh(text, target = 'en') {
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
     .replace(/^请在修改版 (\S+) 里改代码：(.*)$/, (m, name) => `Please change the code in modified version ${name}: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:`)
     .replace(/^修改版：(.+)$/, 'Modified version: $1')
+    .replace(/^编译 修改版：(.+) 的内核$/, 'Build the kernel of modified version $1')
+    .replace(/^编译 (.+) 的内核$/, 'Build the kernel of $1')
     .replace(/^修改版 (\S+) 目前只能在本机运行：请把运行位置换成本机，或把模型版本换回官方版$/, 'Modified version $1 can only run on this computer for now: set the location to this computer, or switch back to the official version')
     .replace(/^还在检查修改版 (\S+) 能不能运行，请稍候再试$/, 'Still checking whether modified version $1 can run; try again in a moment')
     .replace(/^修改版 (\S+) 还不能运行：(.*)$/, 'Modified version $1 cannot run yet: $2')

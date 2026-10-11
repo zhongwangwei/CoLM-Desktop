@@ -37,7 +37,14 @@ const notBuilt = {
 };
 assert.equal(runModeBlocker({ version: OFFICIAL, target: 'srv', readiness: null }), null);
 assert.equal(runModeBlocker({ version: 'snow', target: 'local', readiness: ready }), null);
-assert.match(runModeBlocker({ version: 'snow', target: 'srv', readiness: ready }), /只能在本机运行/);
+// 服务器上：服务器自己用这个版本的源码编引擎，本机没编好不要紧；源码不干净仍然挡住。
+assert.equal(runModeBlocker({ version: 'snow', target: 'srv', readiness: notBuilt }), null);
+const dirty = { ...notBuilt, items: [{ code: 'clean', ok: false, blocking: true, message: '源码里有还没提交的改动' }] };
+assert.match(runModeBlocker({ version: 'snow', target: 'srv', readiness: dirty }), /没提交的改动/);
+const fortranChange = { name: 'snow', ready: false, items: [{ code: 'kernel_built', ok: false, blocking: true, message: '先编内核' }] };
+assert.deepEqual(readinessRows(fortranChange, 'srv', 'fortran').map(r => r.kind), ['warn']);
+assert.deepEqual(readinessRows(fortranChange, 'srv', 'rust').map(r => r.kind), ['ok']);
+assert.deepEqual(readinessRows(fortranChange, 'local', 'fortran').map(r => r.kind), ['block']);
 assert.match(runModeBlocker({ version: 'snow', target: 'local', readiness: null }), /还在检查/);
 // 上一个版本的检查结果不能拿来放行这一个。
 assert.match(runModeBlocker({ version: 'snow', target: 'local', readiness: { ...ready, name: 'other' } }), /还在检查/);

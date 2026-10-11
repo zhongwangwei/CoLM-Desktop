@@ -11,6 +11,7 @@ import { renderCases } from './sites.js';
 import { invalidateResultCase } from './results.js';
 import { setRunning } from './shell.js';
 import { modelEngine } from './engine.js';
+import { modelVersion, OFFICIAL } from './run-mode.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 const POLL_MS = 10_000;
@@ -117,10 +118,12 @@ function syncTarget() {
 }
 
 /** 运行页选的引擎与 MPI 进程数；只有 Fortran 内核用进程数。 */
-export function engineChoice(engine = modelEngine(), ranksText = $('mpi-ranks')?.value) {
-  if (engine !== 'fortran') return { engine: 'rust', ranks: null };
+export function engineChoice(engine = modelEngine(), ranksText = $('mpi-ranks')?.value, version = modelVersion()) {
+  // 修改版：服务器上用它自己的源码编、用它跑（`remote-run --model-version`）。
+  const modelVersionName = version && version !== OFFICIAL ? version : null;
+  if (engine !== 'fortran') return { engine: 'rust', ranks: null, modelVersion: modelVersionName };
   const ranks = Math.max(1, Math.trunc(Number(ranksText)) || 1);
-  return { engine: 'fortran', ranks };
+  return { engine: 'fortran', ranks, modelVersion: modelVersionName };
 }
 
 /** 把将要提交的作业脚本全文给用户看（不上传、不提交）。 */
@@ -507,7 +510,10 @@ async function resumeJobs(retryHost = null) {
 /** 服务器上内核的几行摘要。 */
 export function kernelLines(kernels) {
   if (!kernels?.length) return [t('服务器上还没有内核')];
-  return kernels.map(k => `${k.name} · ${k.preset || '?'} · ${k.full ? t('完整') : t('只有清单（Rust 引擎用）')}`);
+  return kernels.map(k => {
+    const from = String(k.colm_git_sha ?? '').startsWith('ws-') ? ` · ${t('修改版')} ${k.colm_git_sha.slice(3)}` : '';
+    return `${k.name} · ${k.preset || '?'} · ${k.full ? t('完整') : t('只有清单（Rust 引擎用）')}${from}`;
+  });
 }
 
 async function listKernels() {
@@ -537,7 +543,8 @@ async function buildKernel() {
     button.disabled = true;
     box.className = 'remote-probe mini muted';
     box.textContent = `${t('正在服务器上编译')} ${preset}（${t('十几分钟，请不要关闭本窗口')}）…`;
-    const answer = await invoke('remote_build_kernel', { host: server.host, preset });
+    const version = modelVersion();
+    const answer = await invoke('remote_build_kernel', { host: server.host, preset, modelVersion: version === OFFICIAL ? null : version });
     box.className = 'remote-probe mini assistant-key-ok';
     box.textContent = `✓ ${answer.built ? t('已编好') : t('已经有了，没有重编')}：${answer.name}`;
   } catch (error) {

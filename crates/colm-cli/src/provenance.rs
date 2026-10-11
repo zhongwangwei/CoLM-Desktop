@@ -52,13 +52,17 @@ fn kernel_identity(kernel: &Path) -> Value {
     }
 }
 
+pub(crate) fn official_version_value() -> Value {
+    json!({
+        "kind": "official",
+        "label": "官方版",
+        "colm_cli": env!("CARGO_PKG_VERSION"),
+    })
+}
+
 fn version_value(version: &Version) -> Value {
     match version {
-        Version::Official => json!({
-            "kind": "official",
-            "label": "官方版",
-            "colm_cli": env!("CARGO_PKG_VERSION"),
-        }),
+        Version::Official => official_version_value(),
         Version::Workspace(r) => json!({
             "kind": "workspace",
             "name": r.name,
@@ -98,12 +102,17 @@ pub(crate) fn write(record: &Record<'_>, ok: bool, error: Option<&str>) {
     if std::env::var_os(DELEGATED_ENV).is_some() {
         return;
     }
+    write_value(record.case, &value(record, ok, error));
+}
+
+/// 把一份出处写到 `case` 的 `out/<算例名>/produced-by.json`（远程取回时也用它）。尽力而为，写不了只警告。
+pub(crate) fn write_value(case: &Path, record: &Value) {
     let result = (|| -> Result<()> {
-        let layout = colm_case::Layout::new(record.case);
+        let layout = colm_case::Layout::new(case);
         let name = colm_case::case_name(&layout.case_nml())?;
         let dir = layout.out().join(name);
         std::fs::create_dir_all(&dir)?;
-        let text = serde_json::to_string_pretty(&value(record, ok, error))?;
+        let text = serde_json::to_string_pretty(record)?;
         let tmp = dir.join(format!("{FILE}.tmp"));
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, dir.join(FILE))?;

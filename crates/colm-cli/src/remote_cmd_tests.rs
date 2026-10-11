@@ -365,3 +365,110 @@ fn job_connection_binding_is_optional_and_contains_no_password() {
     assert!(encoded["ssh_auth"].get("password").is_none());
     assert_eq!(serde_json::from_value::<Record>(encoded).unwrap(), record);
 }
+
+fn remote_kernel(name: &str, sha: &str, modified: u64) -> colm_remote::kernel::RemoteKernel {
+    colm_remote::kernel::RemoteKernel {
+        name: name.into(),
+        dir: format!("/srv/kernels/{name}"),
+        preset: "default".into(),
+        macros: Vec::new(),
+        platform: "Linux-x86_64".into(),
+        colm_git_sha: sha.into(),
+        full: true,
+        modified,
+    }
+}
+
+fn version(touches_kernel: bool) -> RemoteVersion {
+    RemoteVersion {
+        name: "snow".into(),
+        head: "0123456789abcdef".into(),
+        src: PathBuf::from("src"),
+        touches: colm_workspace::version::Touches {
+            engine: true,
+            kernel: touches_kernel,
+        },
+        value: json!({ "kind": "workspace", "name": "snow" }),
+    }
+}
+
+/// 修改版改了 Fortran：只认用它自己的提交编的内核；官方运行的 auto 不挑这种内核，哪怕它最新。
+#[test]
+fn modified_versions_and_official_runs_never_share_a_fortran_kernel() {
+    let kernels = vec![
+        remote_kernel("default-a", "f59ffdce", 10),
+        remote_kernel("default-b", "ws-snow-01234567", 30),
+        remote_kernel("default-c", "ws-other-89abcdef", 40),
+    ];
+    assert_eq!(version(true).kernel_identity(), "ws-snow-01234567");
+    assert_eq!(
+        version_kernel(&kernels, "default", Some(&version(true))).unwrap(),
+        Some("/srv/kernels/default-b".into())
+    );
+    // 没改 Fortran 的修改版与官方版一样用正式内核。
+    assert_eq!(
+        version_kernel(&kernels, "default", Some(&version(false))).unwrap(),
+        None
+    );
+    assert_eq!(version_kernel(&kernels, "default", None).unwrap(), None);
+    let official = official_kernels(&kernels);
+    assert_eq!(
+        colm_remote::kernel::newest_full(&official, "default").map(|k| k.name.as_str()),
+        Some("default-a")
+    );
+    let missing = version_kernel(&kernels[..1], "default", Some(&version(true))).unwrap_err();
+    assert!(format!("{missing:#}").contains("remote-kernel --preset default --model-version snow"));
+}
+
+#[test]
+fn fetched_results_record_the_server_jobs_outcome() {
+    let submitted = json!({ "schema": 1, "version": { "kind": "official" }, "location": { "kind": "server", "host": "7920" } });
+    let ok = fetched_provenance(&submitted, Some(job::State::Finished { exit_code: 0 }));
+    assert_eq!(ok["ok"], true);
+    assert!(ok["error"].is_null());
+    assert_eq!(ok["location"]["host"], "7920");
+    assert!(ok["finished"].as_u64().is_some());
+    let failed = fetched_provenance(&submitted, Some(job::State::Finished { exit_code: 3 }));
+    assert_eq!(failed["ok"], false);
+    assert_eq!(failed["error"], "the server job exited with status 3");
+    assert!(fetched_provenance(&submitted, None)["ok"].is_null());
+}
+
+/// `--model-version`：源码要干净；出处里带着版本、提交与改动范围。
+#[test]
+fn a_remote_model_version_must_be_committed_and_carries_its_provenance() {
+    use colm_workspace::git;
+    let root = std::env::temp_dir().join(format!("colm-remote-version-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let repo = root.join("source");
+    std::fs::create_dir_all(repo.join("vendor/CoLM202X/main")).unwrap();
+    std::fs::write(repo.join("vendor/CoLM202X/main/MOD_A.F90"), "! a\n").unwrap();
+    git::run(&repo, &["init", "-q", "-b", "main"]).unwrap();
+    git::set_identity(&repo).unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "base"]).unwrap();
+    let ws_root = root.join("ws");
+    let ws =
+        colm_workspace::Workspace::create(&ws_root, "snow", repo.to_str().unwrap(), None).unwrap();
+    std::fs::write(ws.src().join("vendor/CoLM202X/main/MOD_A.F90"), "! b\n").unwrap();
+    let opts = Opts::parse(&[
+        "--model-version".into(),
+        "snow".into(),
+        "--workspace-root".into(),
+        ws_root.display().to_string(),
+    ])
+    .unwrap();
+    let dirty = remote_version(&opts)
+        .err()
+        .expect("uncommitted changes are refused");
+    assert!(format!("{dirty:#}").contains("uncommitted"));
+    git::run(&ws.src(), &["commit", "-q", "-am", "fortran"]).unwrap();
+    let version = remote_version(&opts).unwrap().expect("a modified version");
+    assert!(version.touches.kernel && !version.touches.engine);
+    assert_eq!(version.value["name"], "snow");
+    assert_eq!(version.value["head"], version.head.as_str());
+    assert_eq!(version.src, ws.src());
+    let official = Opts::parse(&["--model-version".into(), "official".into()]).unwrap();
+    assert!(remote_version(&official).unwrap().is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -980,3 +980,7 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-checks p[role="status"] { white-space: pre-wrap; }
 @media (max-width: 640px) { .ws-action { grid-template-columns: 1fr; } }
 .research-path { font-size: 15px; margin: var(--s-xl) 0 var(--s-md); }
+/* 计算资源页：服务器卡上的“编内核”一行。 */
+.resource-kernel { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 10px; }
+.resource-kernel .select { width: auto; min-width: 9em; }
+.resource-card .remote-probe:empty { display: none; }

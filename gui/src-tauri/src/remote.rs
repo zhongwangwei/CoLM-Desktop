@@ -471,6 +471,22 @@ pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value
 pub(crate) struct Engine {
     pub engine: Option<String>,
     pub ranks: Option<u32>,
+    /// 模型版本：`official`（或不给）是官方版，否则是一个修改版的名字（服务器上用它的源码编、用它跑）。
+    pub model_version: Option<String>,
+}
+
+/// 修改版名字拼进命令行前先校验；官方版不加参数。
+fn model_version_args(version: Option<&str>) -> Result<Vec<String>, String> {
+    match version
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "official")
+    {
+        None => Ok(Vec::new()),
+        Some(name) => {
+            crate::workspace::valid_name(name)?;
+            Ok(vec!["--model-version".into(), name.into()])
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -547,6 +563,16 @@ pub(crate) fn run_args(
             }
         }
     }
+    // 名字在命令入口已经校验过（`model_version_args`）；这里只是拼上。
+    if let Some(name) = engine
+        .model_version
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty() && *v != "official")
+    {
+        args.push("--model-version".into());
+        args.push(name.to_owned());
+    }
     args
 }
 
@@ -597,10 +623,16 @@ pub async fn remote_run(
     force: bool,
     engine: Option<String>,
     ranks: Option<u32>,
+    model_version: Option<String>,
 ) -> Result<Value, String> {
+    model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
-    let engine = Engine { engine, ranks };
+    let engine = Engine {
+        engine,
+        ranks,
+        model_version,
+    };
     ssh_cli_json(
         run_args(&server, case, kernel, stage, force, false, &engine),
         resources,
@@ -634,7 +666,9 @@ pub async fn remote_build_kernel(
     app: tauri::AppHandle,
     host: String,
     preset: String,
+    model_version: Option<String>,
 ) -> Result<Value, String> {
+    let version = model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
     let mut args: Vec<String> = vec![
@@ -646,6 +680,7 @@ pub async fn remote_build_kernel(
         "--preset".into(),
         preset,
     ];
+    args.extend(version);
     args.extend(scheduler_args(&server));
     ssh_cli_json(args, resources, Some(&server)).await
 }
@@ -662,10 +697,16 @@ pub async fn remote_preview(
     force: bool,
     engine: Option<String>,
     ranks: Option<u32>,
+    model_version: Option<String>,
 ) -> Result<Value, String> {
+    model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
     let server = server_for(app, &host)?;
-    let engine = Engine { engine, ranks };
+    let engine = Engine {
+        engine,
+        ranks,
+        model_version,
+    };
     ssh_cli_json(
         run_args(&server, case, kernel, stage, force, true, &engine),
         resources,

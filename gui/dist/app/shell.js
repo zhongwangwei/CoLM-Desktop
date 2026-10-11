@@ -84,7 +84,14 @@ export const WORKFLOW = [
   { section: 'research', key: 'research-code', list: true, t: '改代码', steps: [
     { id: 'code', page: 'code', t: '模型版本', d: '新建、修改、编译与检查', need: () => null, optional: true },
   ] },
+  // 计算资源：本机与服务器（resources.js）。
+  { section: 'resources', key: 'resources', list: true, steps: [
+    { id: 'resources', page: 'resources', t: '本机与服务器', d: '在哪里跑', need: () => null, optional: true },
+  ] },
 ];
+
+/** 左栏分段的标题。 */
+const SECTION_TITLES = { research: '改进模型', resources: '计算资源' };
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
 const visibleSteps = () => STEPS.filter(step => !step.show || step.show());
 const sequentialSteps = () => visibleSteps().filter(step => !step.optional);
@@ -169,7 +176,7 @@ export function renderSteps() {
       section = group.section;
       const head = document.createElement('h4');
       head.className = 'rail-section';
-      head.textContent = '改进模型';
+      head.textContent = SECTION_TITLES[section] ?? section;
       box.appendChild(head);
     }
     if (group.list) { box.appendChild(renderList(group, steps)); continue; }

@@ -8,7 +8,9 @@
 //!                        [--cpus N] [--mem-gb N] [--env-script TEXT] [--directive '-x…']… [--dry-run 1]
 //!                        [--engine rust|fortran] [--remote-kernel auto|名字|路径] [--preprocessors rust|fortran]
 //!                        [--ranks N] [--nodes N] [--launcher auto|srun|mpiexec]
+//!                        [--model-version official|<修改版>] [--workspace-root DIR]
 //! colm-cli remote-kernel --host H --root R --preset P [--env-script TEXT] [--profile production|debug] [--force 1]
+//!                        [--model-version <修改版>]   # 用修改版的源码编，内核身份记为 ws-<名>-<提交>
 //!                        [调度选项同 remote-run]    在服务器上编 Fortran 内核（R4），登记在 <根>/kernels/<预设>-<标识>
 //! colm-cli remote-kernels --host H --root R         列出服务器上的内核
 //! colm-cli remote-dist  --host H --root R [--targets x86_64,aarch64] [--out 目录]
@@ -30,6 +32,12 @@
 //! 的默认报错列出来（大数据不悄悄上传），`--upload-unmapped 1` 时把其中的文件随算例一起传。提交记录写在本机
 //! 算例的 `.colm-remote.json`，关掉应用也能接着查状态与取结果。取回时只取 `out/<名字>/history` 与日志，不取
 //! `stages.json`：它记着服务器上的路径与程序哈希，本机那份保持不变（本机再跑时自己判断要不要重跑）。
+//!
+//! **修改版**（`--model-version`）：引擎源码换成那个工作区的 `src/`（要求没有未提交的改动，快照就是它的 HEAD），
+//! 服务器从源码编出它自己的四个程序（快照号不同，和官方引擎互不覆盖；预编包是官方构建，不能用）。改了 Fortran
+//! 又用 Fortran 引擎时，服务器上的内核也要用它的源码编（`remote-kernel --model-version`，身份 `ws-<名>-<提交>`），
+//! 官方运行的 `--remote-kernel auto` 不会挑到这种内核。提交记录里带着出处，取回结果时写成本机的
+//! `out/<名字>/produced-by.json`（位置记为这台服务器）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -318,6 +326,9 @@ pub(crate) struct Record {
     /// 调度系统给的作业号（bare 没有）。
     #[serde(default)]
     pub scheduler_id: Option<String>,
+    /// 这次运行的出处（版本、引擎、服务器）；取回结果时写成本机的 `produced-by.json`。老记录没有。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<serde_json::Value>,
 }
 
 fn bare() -> String {
@@ -370,6 +381,67 @@ pub(crate) fn workspace_source() -> Result<PathBuf> {
     Ok(match engine_source()? {
         Source::Checkout(path) | Source::Tarball(path) => path,
     })
+}
+
+/// `--model-version` 选的修改版：它的源码、提交与改动范围。官方版（不给或 `official`）为 `None`。
+pub(crate) struct RemoteVersion {
+    pub name: String,
+    pub head: String,
+    pub src: PathBuf,
+    pub touches: colm_workspace::version::Touches,
+    /// 出处里 `version` 那一段（和本机运行的 `produced-by.json` 同形）。
+    pub value: serde_json::Value,
+}
+
+impl RemoteVersion {
+    /// 用这个版本的源码在服务器上编的 Fortran 内核，清单里的 `colm_git_sha` 记成它。
+    pub fn kernel_identity(&self) -> String {
+        format!("ws-{}-{}", self.name, &self.head[..self.head.len().min(8)])
+    }
+}
+
+pub(crate) fn remote_version(opts: &Opts) -> Result<Option<RemoteVersion>> {
+    let name = match opts.get("--model-version") {
+        None => return Ok(None),
+        Some(name) if name == "official" => return Ok(None),
+        Some(name) => name,
+    };
+    let root = super::provenance::workspace_root(opts.get("--workspace-root"));
+    let workspace = colm_workspace::Workspace::open(&root, &name)?;
+    let src = workspace.src();
+    ensure!(
+        !colm_workspace::git::is_dirty(&src)?,
+        "model version {name} has uncommitted source changes; commit or revert them first, so the server runs a definite commit"
+    );
+    let head = workspace.head()?;
+    let changed = workspace.changes_from_official()?;
+    let touches = colm_workspace::version::touches(changed.iter().map(|c| c.path.as_str()));
+    let value = json!({
+        "kind": "workspace",
+        "name": workspace.info.name,
+        "label": workspace.info.name,
+        "head": head,
+        "base_commit": workspace.info.base_commit,
+        "origin": workspace.info.origin,
+        "note": workspace.info.note,
+        "based_on": workspace.info.based_on,
+        "touches": touches,
+    });
+    Ok(Some(RemoteVersion {
+        name,
+        head,
+        src,
+        touches,
+        value,
+    }))
+}
+
+/// 这次的引擎源码：修改版用它自己的 `src/`，官方版用应用的源码。
+fn source_for(version: Option<&RemoteVersion>) -> Result<Source> {
+    match version {
+        Some(version) => Ok(Source::Checkout(version.src.clone())),
+        None => engine_source(),
+    }
 }
 
 /// Source identity excludes Git metadata, bulk datasets and generated build/cache directories.
@@ -596,18 +668,34 @@ fn exe_dir() -> Result<PathBuf> {
 /// - `source`：把源码传上去，在服务器上编（要 cargo、cmake 与 C 编译器）；
 /// - `prebuilt`：传预编包（`--prebuilt 路径`，或应用随附的、缓存里与当前源码一致的那份）；
 /// - `auto`（默认）：服务器能编就从源码编，不能（没有 cargo 等）就用预编包，两样都没有就说明怎么办。
-fn choose_engine(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Engine> {
+fn choose_engine(
+    opts: &Opts,
+    ssh: &Ssh,
+    root: &str,
+    version: Option<&RemoteVersion>,
+) -> Result<Engine> {
     let mode = opts.get("--engine-mode").unwrap_or_else(|| "auto".into());
     ensure!(
         ["auto", "source", "prebuilt"].contains(&mode.as_str()),
         "--engine-mode must be auto, source or prebuilt"
     );
-    let source = engine_source().and_then(|s| engine::snapshot(&s));
+    let source = source_for(version).and_then(|s| engine::snapshot(&s));
     if mode == "source" {
         return Ok(Engine::Source(source?));
     }
     let probe = colm_remote::probe::probe(ssh, root)?;
     let can_build = probe.cargo.is_some() && probe.cmake && probe.cc;
+    // 预编包是官方构建：修改版只能在服务器上从它自己的源码编。
+    if let Some(version) = version {
+        ensure!(
+            mode != "prebuilt" && can_build,
+            "model version {} has to be built on {} from its own source, which needs cargo, cmake and a C compiler there; \
+             a prebuilt engine is the official build and cannot run a modified version",
+            version.name,
+            ssh.host
+        );
+        return Ok(Engine::Source(source?));
+    }
     if mode == "auto" && can_build {
         return Ok(Engine::Source(source?));
     }
@@ -816,14 +904,20 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
         .unwrap_or(16);
     let scheduler = parse_scheduler(opts, &ssh, &root)?;
     let resources = resources_from(opts, threads, 1, 0)?;
-    let snapshot = engine::snapshot(&engine_source()?)?;
+    let version = remote_version(opts)?;
+    let snapshot = engine::snapshot(&source_for(version.as_ref())?)?;
+    // 修改版的内核在清单里记成 `ws-<名>-<提交>`：它的运行按这个身份认领，官方运行的 auto 不会挑到它。
+    let source_sha = match &version {
+        Some(version) => version.kernel_identity(),
+        None => fortran_source_sha(),
+    };
     let name = format!(
         "{preset}-{}",
         short_hash(&format!(
             "{}|{}|{profile}|{}",
             snapshot.id,
             resources.env_script.as_deref().unwrap_or(""),
-            fortran_source_sha()
+            source_sha
         ))
     );
     let kdir = format!("{root}/kernels/{name}");
@@ -849,7 +943,7 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
          mv {tmp}/{preset} {kdir_q}\n\
          rm -rf {tmp}\n\
          echo \"kernel ready\" >> phase\n",
-        sha = quote(&fortran_source_sha()),
+        sha = quote(&source_sha),
         kdir_q = quote(&kdir),
     );
     let id = format!("kernel-{}", now());
@@ -880,13 +974,63 @@ pub(super) fn cmd_kernel(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 官方运行能挑的内核：去掉用修改版源码编的（清单身份 `ws-…`）。
+pub(crate) fn official_kernels(
+    kernels: &[colm_remote::kernel::RemoteKernel],
+) -> Vec<colm_remote::kernel::RemoteKernel> {
+    kernels
+        .iter()
+        .filter(|k| !k.colm_git_sha.starts_with("ws-"))
+        .cloned()
+        .collect()
+}
+
+/// 改了 Fortran 的修改版要用自己源码编的内核（清单身份 `ws-<名>-<提交>`）；没有就说明怎么编。
+/// 没改 Fortran 的修改版与官方版一样用正式内核（返回 `None`）。
+pub(crate) fn version_kernel(
+    kernels: &[colm_remote::kernel::RemoteKernel],
+    preset: &str,
+    version: Option<&RemoteVersion>,
+) -> Result<Option<String>> {
+    let Some(version) = version.filter(|v| v.touches.kernel) else {
+        return Ok(None);
+    };
+    let identity = version.kernel_identity();
+    let own: Vec<_> = kernels
+        .iter()
+        .filter(|k| k.colm_git_sha == identity)
+        .cloned()
+        .collect();
+    colm_remote::kernel::newest_full(&own, preset)
+        .map(|k| Some(k.dir.clone()))
+        .with_context(|| {
+            format!(
+                "model version {} changes Fortran, and the server has no {preset} kernel built from its commit {}; \
+                 build it first (colm-cli remote-kernel --preset {preset} --model-version {})",
+                version.name,
+                &version.head[..version.head.len().min(8)],
+                version.name
+            )
+        })
+}
+
 /// `--engine fortran` 要的服务器上的内核：`--remote-kernel auto`（默认）取与本机内核同一预设、最新的完整内核；
 /// 也可以给 `<根>/kernels/` 下的名字或绝对路径。
-fn resolve_remote_kernel(opts: &Opts, ssh: &Ssh, root: &str, preset: &str) -> Result<String> {
+fn resolve_remote_kernel(
+    opts: &Opts,
+    ssh: &Ssh,
+    root: &str,
+    preset: &str,
+    version: Option<&RemoteVersion>,
+) -> Result<String> {
     let kernels = colm_remote::kernel::list(ssh, root)?;
     let wanted = opts.get("--remote-kernel").unwrap_or_else(|| "auto".into());
     if wanted == "auto" {
-        return colm_remote::kernel::newest_full(&kernels, preset)
+        if let Some(dir) = version_kernel(&kernels, preset, version)? {
+            return Ok(dir);
+        }
+        let official = official_kernels(&kernels);
+        return colm_remote::kernel::newest_full(&official, preset)
             .map(|k| k.dir.clone())
             .with_context(|| {
                 format!(
@@ -1157,14 +1301,15 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     }
 
     // 3. 引擎源码、内核清单、算例副本上传。
-    let engine = choose_engine(opts, &ssh, &root)?;
+    let version = remote_version(opts)?;
+    let engine = choose_engine(opts, &ssh, &root, version.as_ref())?;
     let fortran = plan.engine == "fortran";
     let manifest = match &local_kernel {
         Some((dir, _)) => std::fs::read_to_string(dir.join("manifest.json"))?,
         None => String::new(),
     };
     let remote_kernel = if fortran {
-        resolve_remote_kernel(opts, &ssh, &root, &preset)?
+        resolve_remote_kernel(opts, &ssh, &root, &preset, version.as_ref())?
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest))
     };
@@ -1234,6 +1379,25 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         name: sched::job_name(&case_name),
     };
     let submitted = job::submit(&ssh, &root, &id, &body, &spec)?;
+    let provenance = json!({
+        "schema": 1,
+        "started": now(),
+        "version": match &version {
+            Some(version) => version.value.clone(),
+            None => super::provenance::official_version_value(),
+        },
+        "engine": plan.engine,
+        "preprocessors": plan.preprocessors,
+        "ranks": plan.ranks,
+        "stage": opts.get("--stage"),
+        "force": opts.get("--force").is_some_and(|v| v == "1"),
+        "location": { "kind": "server", "host": ssh.host },
+        "kernel": match &local_kernel {
+            Some((_, kernel)) if !fortran => json!({ "dir": remote_kernel, "identity": kernel.manifest.identity(), "preset": preset }),
+            _ => json!({ "dir": remote_kernel, "preset": preset }),
+        },
+        "engine_snapshot": engine.id(),
+    });
     let record = Record {
         ssh_auth: colm_remote::auth::current_connection(),
         host: ssh.host.clone(),
@@ -1245,6 +1409,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         submitted_at: now(),
         scheduler: submitted.scheduler.to_owned(),
         scheduler_id: submitted.scheduler_id.clone(),
+        provenance: Some(provenance),
     };
     std::fs::write(case.join(RECORD), serde_json::to_string_pretty(&record)?)?;
     println!(
@@ -1422,12 +1587,36 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
         let _ = std::fs::remove_file(case.join(FETCH_MARK));
     }
     colm_case::clear_results_stale(&case)?;
+    if let Some(provenance) = &record.provenance {
+        let state = job::status(&ssh, &record.root, &record.job, 0).map(|s| s.state);
+        super::provenance::write_value(&case, &fetched_provenance(provenance, state.ok()));
+    }
     let files = std::fs::read_dir(case.join(&history))?.count();
     println!(
         "{}",
         json!({ "fetched": entries, "history_files": files, "partial": partial, "subset": subset })
     );
     Ok(())
+}
+
+/// 取回时的出处：提交时记下的那份，加上作业的结局。
+pub(crate) fn fetched_provenance(
+    submitted: &serde_json::Value,
+    state: Option<job::State>,
+) -> serde_json::Value {
+    let mut value = submitted.clone();
+    let (ok, error) = match state {
+        Some(job::State::Finished { exit_code: 0 }) => (json!(true), json!(null)),
+        Some(job::State::Finished { exit_code }) => (
+            json!(false),
+            json!(format!("the server job exited with status {exit_code}")),
+        ),
+        _ => (json!(null), json!("the server job state is unknown")),
+    };
+    value["ok"] = ok;
+    value["error"] = error;
+    value["finished"] = json!(now());
+    value
 }
 
 #[cfg(test)]

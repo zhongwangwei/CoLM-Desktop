@@ -30,15 +30,33 @@ export function engineLabel(engine) {
 }
 
 /**
+ * 在服务器上跑时的就绪清单：服务器会用这个版本的源码自己编引擎，所以本机有没有编好不要紧，只要源码干净；
+ * 改过 Fortran 又用 Fortran 引擎时，要先在那台服务器上编它的内核（本机看不到，给提示，由提交时检查）。
+ */
+export function readinessFor(readiness, target, engine) {
+  if (!readiness || !target || target === 'local') return readiness;
+  const items = (readiness.items ?? []).map(item => {
+    if (item.code === 'engine_built') {
+      return { ...item, ok: true, blocking: false, message: '在服务器上会用这个版本的源码编 Rust 引擎与前处理（第一次要几分钟）' };
+    }
+    if (item.code === 'kernel_built') {
+      return engine === 'fortran'
+        ? { ...item, ok: false, blocking: false, message: '这个版本改了 Fortran：用 Fortran 引擎在服务器上跑之前，要先在那台服务器上编它的内核（计算资源 → 编译内核）' }
+        : { ...item, ok: true, blocking: false, message: '这个版本改了 Fortran；Rust 引擎只用内核的宏，服务器上用正式内核的清单' };
+    }
+    return item;
+  });
+  return { ...readiness, items, ready: !items.some(item => item.blocking) };
+}
+
+/**
  * 能不能按这个运行方式开跑；不能就返回原因（直接给用户看的一句话）。
  * `readiness` 是 `version_check` 的结果（只对修改版有意义）。
  */
-export function runModeBlocker({ version, target, readiness }) {
+export function runModeBlocker({ version, target, readiness, engine }) {
   if (!version || version === OFFICIAL) return null;
-  if (target && target !== 'local') {
-    return `修改版 ${version} 目前只能在本机运行：请把运行位置换成本机，或把模型版本换回官方版`;
-  }
   if (!readiness || readiness.name !== version) return `还在检查修改版 ${version} 能不能运行，请稍候再试`;
+  readiness = readinessFor(readiness, target, engine);
   if (!readiness.ready) {
     const why = (readiness.items ?? []).filter(item => item.blocking).map(item => item.message);
     return `修改版 ${version} 还不能运行：${why.join('；') || '检查没有通过'}`;
@@ -46,9 +64,9 @@ export function runModeBlocker({ version, target, readiness }) {
   return null;
 }
 
-/** 就绪清单里的一行：状态（ok / warn / block）与文字。 */
-export function readinessRows(readiness) {
-  return (readiness?.items ?? []).map(item => ({
+/** 就绪清单里的一行：状态（ok / warn / block）与文字。`target` 不是本机时按服务器的要求看（`readinessFor`）。 */
+export function readinessRows(readiness, target = 'local', engine = 'rust') {
+  return (readinessFor(readiness, target, engine)?.items ?? []).map(item => ({
     code: item.code,
     kind: item.blocking ? 'block' : (item.ok ? 'ok' : 'warn'),
     text: item.message,
@@ -85,9 +103,9 @@ export function runModeSnapshot({ version, target, engine, readiness }) {
     version_label: versionLabel(version),
     target: target || 'local',
     engine: engine || 'rust',
-    ready: !runModeBlocker({ version, target, readiness }),
+    ready: !runModeBlocker({ version, target, readiness, engine }),
     readiness: version && version !== OFFICIAL && readiness?.name === version
-      ? readinessRows(readiness)
+      ? readinessRows(readiness, target, engine)
       : [],
   };
 }

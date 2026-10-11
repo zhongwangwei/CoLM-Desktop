@@ -123,7 +123,7 @@ function renderVersionCard() {
     list.replaceChildren(el('li', { className: 'readiness-wait', textContent: t('正在检查这个版本能不能运行…') }));
     return;
   }
-  list.replaceChildren(...readinessRows(readiness).map(row => {
+  list.replaceChildren(...readinessRows(readiness, runTarget(), modelEngine()).map(row => {
     const li = el('li', { className: `readiness-${row.kind}` }, [
       el('span', { className: 'readiness-mark', textContent: row.kind === 'ok' ? '✓' : row.kind === 'warn' ? '!' : '✗' }),
       el('span', { textContent: t(row.text) }),
@@ -136,7 +136,7 @@ function renderVersionCard() {
 }
 
 function blocker() {
-  return runModeBlocker({ version: modelVersion(), target: runTarget(), readiness: state.versionReadiness });
+  return runModeBlocker({ version: modelVersion(), target: runTarget(), readiness: state.versionReadiness, engine: modelEngine() });
 }
 
 function renderRunLine() {

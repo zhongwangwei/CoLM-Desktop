@@ -180,6 +180,7 @@ fn the_fortran_engine_passes_ranks_and_nodes_only_when_it_uses_mpi() {
             &Engine {
                 engine: engine.map(str::to_owned),
                 ranks,
+                model_version: None,
             },
         )
     };
@@ -371,4 +372,38 @@ fn job_identity_can_be_recovered_without_credentials() {
     std::fs::write(&record, "broken").unwrap();
     assert!(remote_job_record(case).is_err());
     std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_remote_run_of_a_modified_version_names_it_and_the_official_one_adds_nothing() {
+    let server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    let go = |version: Option<&str>| {
+        run_args(
+            &server,
+            "/c".into(),
+            "/k".into(),
+            None,
+            false,
+            false,
+            &Engine {
+                engine: None,
+                ranks: None,
+                model_version: version.map(str::to_owned),
+            },
+        )
+    };
+    let modified = go(Some("snow"));
+    assert!(modified
+        .windows(2)
+        .any(|w| w == ["--model-version", "snow"]));
+    for version in [None, Some("official"), Some(" ")] {
+        assert!(!go(version).iter().any(|a| a == "--model-version"));
+    }
+    assert_eq!(
+        model_version_args(Some("snow")).unwrap(),
+        ["--model-version", "snow"]
+    );
+    assert!(model_version_args(Some("official")).unwrap().is_empty());
+    assert!(model_version_args(Some("../x")).is_err());
+    assert!(model_version_args(Some("-x")).is_err());
 }

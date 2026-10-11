@@ -372,9 +372,9 @@ async function startRun(stage) {
   if (stage !== 'mksrfdata' && stage !== 'mkinidata' && (await fortranBlockedCases(dirs)).length) {
     throw new Error('有算例装了 AI 模型，Fortran 内核运行不了；请把模拟引擎换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型');
   }
-  // 运行方式（第 3 步）没准备好就不开跑：修改版还没编好、或选了服务器（修改版暂时只能在本机跑）。
+  // 运行方式（第 3 步）没准备好就不开跑：修改版源码不干净，或在本机跑却还没编好。
   const version = modelVersion();
-  const blocked = runModeBlocker({ version, target: runTarget(), readiness: state.versionReadiness });
+  const blocked = runModeBlocker({ version, target: runTarget(), readiness: state.versionReadiness, engine: modelEngine() });
   if (blocked) throw new Error(blocked);
   // 运行位置选了服务器：交给 remote.js 提交，之后由它查状态、取回结果。
   if (runTarget() !== 'local') {

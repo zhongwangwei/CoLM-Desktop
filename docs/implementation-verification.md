@@ -32502,3 +32502,18 @@ GPP 的均值被 4 个基线 KGE 低于 −0.5 的站拉低（BE-Lon、DE-Geb、
 - 采纳并入版本：内核匹配只看正式内核；旧的 `colm.adoptedKernels` 记录在启动时迁移成默认的模型版本（只在还没选过版本时）然后删除；Tauri 的 `workspace_adopt`、`workspace_kernels` 删掉（`ws-adopt`/`ws-kernels` 只留在命令行）；助手窗口上下文不再列“启用的实验内核”，系统提示改为“每次运行 = 算例 × 模型版本 × 运行方式，修改版只在运行方式里选中时才用”。
 
 **验证**：`colm-workspace` 54 项（新增：从父版本分出来的版本，父版本改了 Fortran、自己只改 Rust，`touches` 两边都是真、要求自己的内核，`commits` 仍从父版本的提交数起）；`colm-cli` 270 项；GUI 后端 233 项（新增建版本参数、本机检查映射与校验）；`gui/tests` 全部通过（`workspace.mjs` 改为版本卡文字、旧记录迁移、只匹配正式内核、页面接线与“没有对话框和助手入口”）；`check-gui` 127 条命令全部被调用；clippy（`-D warnings`）干净；新文字都有英文。命令行实测：从工作区 `parent`（改了一行 Fortran）分出 `child`，`root_commit` 为官方的 `f86c0bdd`、`base_commit` 为父版本的 `47ad00c7`，`ws-list` 里 `child` 的 `touches.kernel=true`，`version-check` 要求 `kernel_built`。浏览器里看过改代码页与左栏。
+
+## 第 662 轮：界面重组第 3 阶段——“计算资源”页，修改版可以在服务器上跑
+
+**问题**（用户）：“改了代码，我既可以在本地上运行，也可以在服务器上运行。”第 660 轮修改版只能在本机跑；服务器设置藏在运行页的对话框里。
+
+**改动**：
+- `remote-run --model-version NAME [--workspace-root DIR]`：引擎源码换成那个工作区的 `src/`（要求没有未提交的改动，否则拒绝：服务器要跑一个确定的提交），快照号随源码内容变，服务器上和官方引擎各编各的、互不覆盖。修改版不能用预编包（那是官方构建），服务器编不了时说明原因。`remote-kernel --model-version NAME`：用修改版的源码编 Fortran 内核，清单身份记为 `ws-<名>-<提交前 8 位>`。改了 Fortran 又用 Fortran 引擎时，`--remote-kernel auto` 只认这个身份的内核，没有就提示先编；官方运行的 auto 去掉所有 `ws-` 内核，不会挑到修改版编的（`official_kernels`、`version_kernel`）。
+- 出处：提交时把版本、引擎、前处理、进程数、服务器、内核写进 `.colm-remote.json` 的 `provenance`；`remote-fetch` 取回后按作业结局（退出码）补上成败，写成本机的 `out/<名字>/produced-by.json`，位置记为这台服务器。不依赖服务器上那份 `colm-cli` 新旧。远程作业的 `run` 命令行带 `--location server`。
+- Tauri：`remote_run`、`remote_preview` 多一个 `modelVersion`，`remote_build_kernel` 也多一个（名字按工作区名校验，官方版不加参数）。
+- 界面：新的“计算资源 → 本机与服务器”页：本机一张卡（逻辑 CPU、随应用的引擎与内核），每台服务器一张卡（工作目录、调度、目录对应；设为运行位置、检查连接、查看内核、修改…、按当前选的版本编 Fortran 内核）；“添加服务器…”。服务器的详细设置仍在原来的对话框里。运行方式里“运行位置”旁加“计算资源…”。修改版在服务器上跑时就绪清单按服务器的要求看：本机没编引擎不阻塞（服务器自己编）；改了 Fortran 又用 Fortran 引擎时提示先在那台服务器上编内核；源码不干净仍然阻塞。服务器上内核列表标出修改版编的内核。
+
+**验证**：
+- 新测试：`remote_cmd_tests`（修改版只认自己身份的内核、没有时报出编译命令，没改 Fortran 的修改版与官方版用正式内核，官方 auto 不挑 `ws-` 内核；取回时按退出码写成败；`--model-version` 对不干净的源码拒绝、出处带版本名、提交与改动范围，`official` 等于不给）；GUI 后端 `remote_tests`（修改版加 `--model-version`，官方版与空白不加，名字校验）；`gui/tests/remote.mjs`（`engineChoice` 带版本、内核列表标出修改版）、`run-mode.mjs`（服务器上的就绪清单）、新的 `resources.mjs`；`check-gui` 127 条命令全部被调用；clippy 干净；新文字都有英文。
+- 作业脚本（`--dry-run 1 --scheduler bare --engine-mode source`，不连服务器）：同一算例，官方版的引擎快照 `6a3462f6058fd4a1`，修改版 `snow`（改了冯·卡门常数）为 `54626f982902c4a2`，作业里 `run` 用的是各自快照的 `bin/colm-cli`，都带 `--location server`；`snow` 里留一处未提交的改动再提交，报“uncommitted source changes”并拒绝。
+- **没做到的**：真正提交到 T7920、取回结果、核对 `produced-by.json`。`7920ts` 与 `7920mp` 都在 SSH 握手时被关闭（多半是 Tailscale 节点密钥过期），等服务器能连上再补；这一步之前，取回写出处的路径只有单元测试覆盖。
