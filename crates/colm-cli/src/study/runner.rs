@@ -2649,6 +2649,22 @@ pub fn apply(
                 Value::Str(destination.join("out").to_string_lossy().into_owned()),
             )?;
             fs::write(&case_nml, document.to_string())?;
+            // 这个算例从哪来：结果页的“这个算例的运行”据此写“率定参数 · 研究 … 成员 …”。
+            fs::write(
+                staged.join(crate::case_runs::DERIVED_FILE),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "study": manifest.id,
+                    "study_dir": study_dir,
+                    "kind": manifest.spec.kind,
+                    "member": member.id,
+                    "site": site,
+                    "version": crate::study_version::pinned(&study_dir)?.map(|v| v.name),
+                    "applied_unix": std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or_default(),
+                }))?,
+            )?;
             let after = sha256(&fs::read(baseline.join("case.nml"))?);
             if before != after {
                 bail!("baseline case changed while applying {member_id}");

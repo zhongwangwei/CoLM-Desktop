@@ -199,7 +199,7 @@ pub fn run() {
             workspace::workspace_note,
             workspace::workspace_check,
             workspace::workspace_import_patch,
-            workspace::read_produced_by,
+            workspace::case_runs,
             remote_build_kernel,
             remote_status,
             remote_job_record,

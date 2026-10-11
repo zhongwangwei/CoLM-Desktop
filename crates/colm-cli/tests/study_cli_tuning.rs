@@ -1016,6 +1016,17 @@ fn multi_site_tuning_runs_and_applies_best_member() {
     assert_eq!(applied.as_array().unwrap().len(), 2);
     assert!(out.join("siteA/case.nml").is_file());
     assert!(out.join("siteB/case.nml").is_file());
+    // 另存出的算例记着来自哪个研究的哪个成员（结果页“这个算例的运行”用）。
+    let derived: Value = serde_json::from_str(
+        &fs::read_to_string(out.join("siteA/.colm-derived-from.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        derived["study"],
+        Path::new(&study).file_name().unwrap().to_str().unwrap()
+    );
+    assert!(derived["member"].as_str().unwrap().starts_with('m'));
+    assert_eq!(derived["site"], "siteA");
     for row in preview.as_array().unwrap() {
         let saved =
             fs::read_to_string(out.join(row["site"].as_str().unwrap()).join("case.nml")).unwrap();

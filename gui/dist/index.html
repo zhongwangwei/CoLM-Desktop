@@ -800,7 +800,20 @@
         <div class="work-head"><span class="kicker">第 4 步 · 结果分析</span></div>
         <h1>分析总览</h1>
         <p class="sub">本次创建的所有算例集中在这里。旧目录算例和运行页残留勾选不会改变结果范围。</p>
-        <div class="provenance" id="result-provenance" hidden></div>
+        <section class="card hub" aria-labelledby="hub-runs-title">
+          <h3 id="hub-runs-title">这个算例的运行</h3>
+          <div class="ch">每条都标明出处：模型版本 · 参数 · 在哪里跑 · 引擎。以这个算例为基础的研究也列在这里。</div>
+          <div id="hub-runs" class="hub-runs"></div>
+        </section>
+        <section class="card hub" aria-labelledby="hub-summary-title">
+          <h3 id="hub-summary-title">评估摘要</h3>
+          <div id="hub-summary"></div>
+        </section>
+        <section class="card hub" aria-labelledby="hub-next-title">
+          <h3 id="hub-next-title">下一步：问题在哪？</h3>
+          <div class="ch">选一个，下面会说明去哪、产出什么。推荐项附理由。</div>
+          <div id="hub-routes"></div>
+        </section>
         <div class="result-kpis" id="result-kpis"></div>
         <div class="card">
           <div class="result-card-head">

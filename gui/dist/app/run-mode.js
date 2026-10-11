@@ -112,29 +112,6 @@ export function runModeSnapshot({ version, target, engine, readiness }) {
 
 const short = sha => String(sha ?? '').slice(0, 8);
 
-/**
- * 结果的出处标签（`produced-by.json`）：这批结果是哪一版、哪个引擎、在哪里跑出来的。
- * 没有记录（旧版应用跑的）返回空表。
- */
-export function provenanceChips(record) {
-  if (!record || typeof record !== 'object') return [];
-  const version = record.version ?? {};
-  const chips = [];
-  if (version.kind === 'workspace') {
-    chips.push({ key: 'version', text: `修改版：${version.name}`, title: `提交 ${short(version.head)}，基于 ${short(version.base_commit)}`, accent: true });
-  } else {
-    chips.push({ key: 'version', text: '官方版', title: version.colm_cli ? `colm-cli ${version.colm_cli}` : '' });
-  }
-  chips.push({ key: 'engine', text: engineLabel(record.engine), title: `前处理：${record.preprocessors === 'fortran' ? 'Fortran' : 'Rust'}` });
-  chips.push({ key: 'target', text: record.location?.kind === 'server' ? '服务器' : '本机', title: '' });
-  if (record.kernel?.identity) chips.push({ key: 'kernel', text: `内核 ${record.kernel.identity}`, title: String(record.kernel.dir ?? '') });
-  if (record.ok === false) chips.push({ key: 'failed', text: '这次运行失败', title: String(record.error ?? ''), warn: true });
-  if (Number.isFinite(record.finished)) {
-    chips.push({ key: 'time', text: new Date(record.finished * 1000).toLocaleString(), title: '运行结束时间' });
-  }
-  return chips;
-}
-
 /** 结果是不是用当前选中的运行方式跑出来的；不是就提示（例如刚换了版本还没重跑）。 */
 export function provenanceMismatch(record, { version, engine }) {
   if (!record?.version) return null;

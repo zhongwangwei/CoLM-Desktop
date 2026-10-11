@@ -2786,6 +2786,34 @@ const ZH_EN = [
   ["在服务器的调度系统里排队", "Queued in the server scheduler"],
   ["服务器上正在准备（编译引擎、建研究）", "Preparing on the server (building the engine, creating the Study)"],
   ["已取回服务器上的研究结果", "Fetched the Study results from the server"],
+  // 结果页汇总点（results-hub.js、index.html）
+  ["还没开始", "Not started"],
+  ["需要确认", "Needs review"],
+  ["本算例的参数", "This case's parameters"],
+  ["率定参数", "Calibrated parameters"],
+  ["研究参数", "Study parameters"],
+  ["源码之后又改过", "Source changed since"],
+  ["参数不对", "Parameters are off"],
+  ["差得远，但过程看起来是对的", "Far from observations, but the processes look right"],
+  ["在参数范围内找最贴近观测的一组；多个站点率定出的参数差别大时，可以让网络按地点特征给参数。产出：带新参数的算例，回到运行方式里重跑。", "Find the parameter set closest to observations; when calibrated parameters differ a lot between sites, let a network set parameters from site features. Produces a case with new parameters to rerun from Run mode."],
+  ["过程或结构不对", "A process or the structure is wrong"],
+  ["率定之后偏差还在，或某个过程系统性地偏", "The bias survives calibration, or one process is systematically off"],
+  ["改代码产出一个新的修改版（只改 Rust 引擎、只改 Fortran，或两边都改）；也可以先用网络替换一个过程量试试。改完在运行方式里选它重跑。", "Changing code produces a new modified version (Rust engine only, Fortran only, or both); or first try replacing one process quantity with a network. Then select it in Run mode and rerun."],
+  ["想知道稳不稳", "How robust is it"],
+  ["在参数范围内抽样，看输出怎么变。产出：敏感参数排序与输出区间；敏感参数可以带进参数率定。", "Sample within parameter ranges and see how outputs change. Produces a ranking of sensitive parameters and output ranges; sensitive parameters can be carried into calibration."],
+  ["公平比较", "Fair comparison"],
+  ["改了代码，新版本真的更好吗", "Changed the code: is the new version really better"],
+  ["两个版本在同样的率定预算下各自率定，再在验证期上比较最优结果，排除“只是参数没调”的影响。", "Both versions are calibrated with the same budget and their best results are compared on the validation period, ruling out “the parameters just weren't tuned”."],
+  ["这个算例还没有运行记录。", "This case has no runs yet."],
+  ["当前结果", "Current results"],
+  ["去模型评估", "Go to model evaluation"],
+  ["还没有和观测比过。先做模型评估，这里会写出哪个变量吻合、哪里偏。", "Not compared with observations yet. Run the model evaluation first; this will then say which variables match and where they are off."],
+  ["这个算例的运行", "Runs of this case"],
+  ["每条都标明出处：模型版本 · 参数 · 在哪里跑 · 引擎。以这个算例为基础的研究也列在这里。", "Each entry shows where it came from: model version · parameters · location · engine. Studies based on this case are listed too."],
+  ["评估摘要", "Evaluation summary"],
+  ["下一步：问题在哪？", "Next: where is the problem?"],
+  ["选一个，下面会说明去哪、产出什么。推荐项附理由。", "Pick one to see where it leads and what it produces. The recommended one comes with a reason."],
+  ["推荐理由：", "Why: "],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2831,6 +2859,17 @@ export function translateZh(text, target = 'en') {
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
     .replace(/^请在修改版 (\S+) 里改代码：(.*)$/, (m, name) => `Please change the code in modified version ${name}: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:`)
     .replace(/^修改版：(.+)$/, 'Modified version: $1')
+    .replace(/^(\S+) 个 MPI 进程$/, '$1 MPI ranks')
+    .replace(/^最优 (\S+) · 目标 (\S+)$/, 'best $1 · objective $2')
+    .replace(/^(.+)：系统偏高（平均偏差 (\S+?)(?: (\S+))?，NSE (\S+)）$/, (m, v, b, u, n) => `${v}: systematically high (mean bias ${b}${u ? ` ${u}` : ''}, NSE ${n})`)
+    .replace(/^(.+)：系统偏低（平均偏差 (\S+?)(?: (\S+))?，NSE (\S+)）$/, (m, v, b, u, n) => `${v}: systematically low (mean bias ${b}${u ? ` ${u}` : ''}, NSE ${n})`)
+    .replace(/^(.+)：与观测基本吻合（NSE (\S+)）$/, '$1: matches the observations (NSE $2)')
+    .replace(/^(.+)：变化过程对不上（NSE (\S+)），不是整体偏高或偏低$/, '$1: the time course does not match (NSE $2); not an overall offset')
+    .replace(/^这批结果来自修改版 (\S+)；要下“新版本更好”的结论，先在同样的率定预算下和官方版公平比较。$/, 'These results come from modified version $1; before concluding the new version is better, compare it fairly with the official version under the same calibration budget.')
+    .replace(/^指标尚可（最差的是 (.+)，NSE (\S+)）；看看结果对参数稳不稳。$/, 'The metrics are acceptable (the worst is $1, NSE $2); check how robust the results are to parameters.')
+    .replace(/^(.+) 的 NSE 在率定之后仍只有 (\S+)，更像过程或结构本身的问题，而不是参数没调好。$/, 'After calibration $1 still has an NSE of only $2, which points to a process or structure problem rather than untuned parameters.')
+    .replace(/^(.+) 的 NSE 只有 (\S+)，还没率定过；先看是不是参数没调好。$/, '$1 has an NSE of only $2 and has not been calibrated; first check whether the parameters are simply untuned.')
+    .replace(/^率定参数 · 研究 (\S+) 成员 (\S+)$/, 'Calibrated parameters · Study $1 member $2')
     .replace(/^在服务器 (\S+) 上跑完，结果已取回（成员的模拟输出留在服务器上）$/, 'Finished on server $1; results fetched (member outputs stay on the server)')
     .replace(/^在服务器 (\S+) 上运行（作业 (\S+)）；跑完会自动取回结果$/, 'Running on server $1 (job $2); results are fetched automatically when it finishes')
     .replace(/^服务器上的研究失败（退出码 (\S+)）$/, 'The Study failed on the server (exit code $1)')

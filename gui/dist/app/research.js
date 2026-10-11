@@ -28,12 +28,6 @@ export const STUDIES = [
     note: '网络每步替换一个过程量（目前是土壤水分胁迫 β）。' },
 ];
 
-/** 结果页“下一步”里研究之外的两条去向：改代码（过程或结构不对），以及改完之后的公平比较。 */
-export const NEXT_ROUTES = [
-  { when: '参数怎么调都不对，像是过程或结构的问题', title: '改代码（新建修改版）', step: 'code' },
-  { when: '改了代码，想公平地比较新旧两个版本', title: '比较两个版本', step: 'result-tuning' },
-];
-
 /** NSE 低于它就推荐参数率定。 */
 export const NSE_THRESHOLD = 0.5;
 
@@ -183,50 +177,6 @@ export function renderOverview() {
   renderReadiness(STUDIES.find(s => s.id === picked));
 }
 
-/** 结果页评估之后的“下一步”：推荐的那条放最前面并标出原因，其余三条作为可选的去向。 */
-export function renderNextSteps() {
-  const card = $('result-next');
-  if (!card) return;
-  const recommended = recommend(selectedRows());
-  if (!recommended) { card.hidden = true; return; }
-  card.hidden = false;
-  const reason = {
-    tuning: () => `${rowLabel(recommended.row)} 的 NSE 为 ${nseValue(recommended.row)}，偏低`,
-    uq: () => `最差的 NSE 为 ${nseValue(recommended.row)}，指标尚可；看看结果稳不稳`,
-  };
-  const others = {
-    tuning: '想让模拟更贴近观测',
-    uq: '想知道结果对哪些参数敏感',
-    learn: '多个站点率定出的参数差别大',
-    process: '某个过程有系统偏差（如干旱期蒸散偏低），像是公式问题',
-  };
-  const line = (study, text, top) => {
-    const row = element('div', 'next-step' + (top ? ' recommended' : ''));
-    if (top) row.append(element('span', 'research-badge', t('推荐')));
-    row.append(element('span', '', `${t(text)} →`));
-    const link = element('button', 'link-btn', t(STUDIES.find(s => s.id === study).title));
-    link.type = 'button';
-    link.onclick = () => go(STUDIES.find(s => s.id === study).step);
-    row.append(link);
-    return row;
-  };
-  const rows = [line(recommended.study, reason[recommended.study](), true)];
-  for (const study of ['tuning', 'uq', 'process', 'learn']) {
-    if (study !== recommended.study) rows.push(line(study, others[study], false));
-  }
-  // 改代码与公平比较：不是研究，但同样从这里出发。
-  for (const route of NEXT_ROUTES) {
-    const row = element('div', 'next-step');
-    row.append(element('span', '', `${t(route.when)} →`));
-    const link = element('button', 'link-btn', t(route.title));
-    link.type = 'button';
-    link.onclick = () => go(route.step);
-    row.append(link);
-    rows.push(row);
-  }
-  $('result-next-list').replaceChildren(...rows);
-}
-
 async function refreshProcessBlock() {
   try {
     processBlock = await processSlotBlocked();
@@ -241,9 +191,7 @@ addEventListener('colm:step', () => {
     renderOverview();
     refreshProcessBlock();
   }
-  if (state.step === 'result-evaluation') renderNextSteps();
 });
 addEventListener('colm:metrics', () => {
-  renderNextSteps();
   if (state.step === 'research') renderOverview();
 });

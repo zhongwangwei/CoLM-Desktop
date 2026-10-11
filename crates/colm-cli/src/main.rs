@@ -21,6 +21,7 @@
 //! colm-cli version-check --name N --kernel <目录> [--engine rust|fortran] [--preprocessors rust|fortran]
 //!                    [--root DIR]                  # 修改版能不能跑：就绪清单（JSON）
 //! colm-cli produced-by <算例目录>                  # 最近一次运行的出处（JSON；没有就是 null）
+//! colm-cli case-runs <算例目录>                    # 这个算例的运行历史与以它为基础的研究（结果页）
 //! colm-cli metrics   <算例目录> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
 //!                    [--json 1] [--corrected 1]
 //!                    [--summary-only 1] [--pairs-var Rnet ...] [--max-points N]
@@ -51,6 +52,7 @@
 //! 1 遍，而预热期是从窗口头上扣的（输出因此少一年）。经纬度与地类读自站点
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
+mod case_runs;
 mod fingerprint;
 mod flux_diagnostics;
 mod history_subset;
@@ -293,6 +295,13 @@ fn main() -> Result<()> {
                 &opts.need("--kernel")?,
             )?;
             println!("{}", serde_json::to_string(&readiness)?);
+        }
+        "case-runs" => {
+            let value = case_runs::summary(
+                &opts.positional_case()?,
+                &provenance::workspace_root(opts.get("--workspace-root")),
+            )?;
+            println!("{}", serde_json::to_string(&value)?);
         }
         "produced-by" => {
             let record = provenance::read(&opts.positional_case()?)?;

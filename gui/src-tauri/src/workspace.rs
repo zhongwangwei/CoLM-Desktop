@@ -266,10 +266,12 @@ fn produced_by_args(case: &str) -> Result<Vec<String>, String> {
     Ok(args("produced-by", &[case]))
 }
 
-/// 算例最近一次运行的出处（`out/<名>/produced-by.json`）；没跑过返回 null。
+/// 结果页：这个算例的运行历史、以它为基础的研究、它是不是从某个研究另存出来的。
 #[tauri::command]
-pub async fn read_produced_by(case: String) -> Result<Value, String> {
-    cli_json(produced_by_args(&case)?, None).await
+pub async fn case_runs(case: String) -> Result<Value, String> {
+    let mut command = produced_by_args(&case)?;
+    command[0] = "case-runs".into();
+    cli_json(command, None).await
 }
 
 /// 导出补丁：把工作区相对基线的全部改动写成一个 `.patch` 文件（D 级）。

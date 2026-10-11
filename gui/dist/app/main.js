@@ -24,6 +24,7 @@ import './workspace.js';
 import './run-mode-view.js';
 import './resources.js';
 import './version-compare.js';
+import './results-hub.js';
 import './research.js';
 
 initI18n();

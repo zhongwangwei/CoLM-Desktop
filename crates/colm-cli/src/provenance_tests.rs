@@ -51,6 +51,10 @@ fn an_official_run_records_its_version_engine_and_kernel() {
     assert_eq!(value["kernel"]["colm_git_sha"], "f59ffdce");
     assert!(case.join("out/demo").join(FILE).is_file());
     assert!(!case.join("out/demo").join(format!("{FILE}.tmp")).exists());
+    // 每次运行都追加进运行历史（结果页列出这个算例的全部运行）。
+    write(&record(&case, &kernel, &version), false, Some("again"));
+    let history = std::fs::read_to_string(case.join(crate::case_runs::HISTORY)).unwrap();
+    assert_eq!(history.lines().count(), 2);
 }
 
 #[test]

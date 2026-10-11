@@ -13,7 +13,7 @@ const moduleUrl = name => pathToFileURL(join(temp, 'app', name)).href;
 const { state } = await import(moduleUrl('state.js'));
 const {
   OFFICIAL, modelVersion, versionLabel, runModeBlocker, readinessRows, touchesText,
-  contextChips, runModeSnapshot, provenanceChips, provenanceMismatch,
+  contextChips, runModeSnapshot, provenanceMismatch,
 } = await import(moduleUrl('run-mode.js'));
 
 // 没选过就是官方版。
@@ -72,27 +72,12 @@ assert.equal(snap.readiness.length, 3);
 assert.deepEqual(runModeSnapshot({ version: OFFICIAL, readiness: notBuilt }).readiness, []);
 assert.equal(runModeSnapshot({}).ready, true);
 
-// 出处标签。
-assert.deepEqual(provenanceChips(null), []);
+// 结果与当前选择不一致时的提示。
 const official = {
   ok: true, engine: 'rust', preprocessors: 'rust', location: { kind: 'local' },
   version: { kind: 'official', colm_cli: '0.3.0' }, kernel: { identity: 'default@f59ffdce', dir: '/k' }, finished: 1,
 };
-assert.deepEqual(provenanceChips(official).map(c => c.key), ['version', 'engine', 'target', 'kernel', 'time']);
-assert.equal(provenanceChips(official)[0].text, '官方版');
-const modified = {
-  ...official, ok: false, error: 'stage colm failed', engine: 'fortran',
-  version: { kind: 'workspace', name: 'snow', head: '0123456789abcdef', base_commit: 'fedcba9876543210' },
-};
-const chips = provenanceChips(modified);
-assert.equal(chips[0].text, '修改版：snow');
-assert.equal(chips[0].title, '提交 01234567，基于 fedcba98');
-assert.ok(chips[0].accent);
-assert.equal(chips[1].text, 'Fortran 内核');
-assert.ok(chips.find(c => c.key === 'failed')?.warn);
-assert.equal(provenanceChips({ ...official, location: { kind: 'server' } }).find(c => c.key === 'target').text, '服务器');
-assert.equal(provenanceChips(official).find(c => c.key === 'target').text, '本机');
-
+const modified = { ...official, engine: 'fortran', version: { kind: 'workspace', name: 'snow', head: '0123456789abcdef' } };
 assert.equal(provenanceMismatch(official, { version: OFFICIAL, engine: 'rust' }), null);
 assert.equal(provenanceMismatch(official, { version: 'snow', engine: 'rust' }), '这批结果是用官方版跑的，当前选的是修改版：snow');
 assert.equal(provenanceMismatch(modified, { version: 'snow', engine: 'rust' }), '这批结果是用Fortran 内核跑的，当前选的是Rust 引擎');

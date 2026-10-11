@@ -116,6 +116,7 @@ pub(crate) fn write_value(case: &Path, record: &Value) {
         let tmp = dir.join(format!("{FILE}.tmp"));
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, dir.join(FILE))?;
+        crate::case_runs::append(case, record)?;
         Ok(())
     })();
     if let Err(e) = result {

@@ -11,7 +11,7 @@ import { go } from './shell.js';
 import { openWorkspaces } from './workspace.js';
 import {
   OFFICIAL, modelVersion, versionLabel, targetLabel, engineLabel, touchesText, readinessRows, contextChips,
-  provenanceChips, provenanceMismatch, runModeBlocker,
+  runModeBlocker,
 } from './run-mode.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
@@ -19,7 +19,6 @@ const STORE_KEY = 'colm.modelVersion';
 
 let workspaces = [];
 let checkSeq = 0;
-let provenanceSeq = 0;
 
 const runTarget = () => $('run-target')?.value || 'local';
 
@@ -180,40 +179,6 @@ function renderAll() {
   renderContextBar();
 }
 
-// ---- 结果页的出处 -------------------------------------------------------------------------------
-
-export async function refreshProvenance() {
-  const box = $('result-provenance');
-  const dir = state.selected?.dir;
-  if (!box) return;
-  if (!dir || !hasBackend) { box.hidden = true; return; }
-  const seq = ++provenanceSeq;
-  let record = null;
-  try {
-    record = await invoke('read_produced_by', { case: dir });
-  } catch {
-    record = null;
-  }
-  if (seq !== provenanceSeq) return;
-  state.provenance = { ...(state.provenance ?? {}), [dir]: record };
-  const chips = provenanceChips(record);
-  box.hidden = false;
-  if (!chips.length) {
-    box.replaceChildren(el('span', { className: 'muted mini', textContent: t('这批结果没有出处记录（由旧版应用运行）。') }));
-    return;
-  }
-  box.replaceChildren(
-    el('span', { className: 'provenance-label', textContent: t('出处') }),
-    ...chips.map(chip => el('span', {
-      className: `provenance-chip${chip.accent ? ' provenance-modified' : ''}${chip.warn ? ' provenance-warn' : ''}`,
-      title: t(chip.title || ''),
-      textContent: t(chip.text),
-    })),
-  );
-  const mismatch = provenanceMismatch(record, { version: modelVersion(), engine: modelEngine() });
-  if (mismatch) box.append(el('p', { className: 'warn mini', textContent: `${t(mismatch)}${t('；要对比请按当前运行方式重跑。')}` }));
-}
-
 // ---- 接线 -------------------------------------------------------------------------------------
 
 function wire() {
@@ -242,7 +207,6 @@ function wire() {
   addEventListener('colm:step', () => {
     if (state.step === 'run-mode') refreshVersions().catch(status);
     else renderAll();
-    if (state.step?.startsWith('result-')) refreshProvenance().catch(() => {});
   });
   addEventListener('colm:language', renderAll);
   refreshVersions().catch(status);

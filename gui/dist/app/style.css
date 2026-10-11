@@ -989,3 +989,28 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .study-version { margin: 0 0 var(--s-sm); color: var(--muted); flex-basis: 100%; }
 .version-compare { margin-top: var(--s-lg); padding-top: var(--s-md); border-top: 1px solid var(--border-soft); }
 .version-compare h4 { margin: 0 0 4px; }
+/* 结果页汇总点（results-hub.js）：这个算例的运行、评估摘要、下一步。 */
+.hub-runs { display: grid; gap: 6px; }
+.hub-run { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px;
+  padding: 8px 10px; border: 1px solid var(--border-soft); border-radius: var(--r-sm); }
+.hub-current { border-color: var(--accent); }
+.hub-study { background: var(--surface); }
+.hub-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.hub-chip { font-size: 12px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); }
+.hub-modified { background: var(--accent-weak); color: var(--accent-ink); font-weight: 600; }
+.hub-flag { background: var(--warn-bg); color: var(--warn); }
+.hub-now { background: var(--accent); color: var(--accent-text); }
+.hub-status { background: transparent; border: 1px solid var(--border-soft); }
+.hub-bullets { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+.hub-bullets .hub-bad { color: var(--text); }
+.hub-bullets .hub-bad::marker { color: var(--warn); }
+.hub-bullets .hub-ok::marker { color: var(--pass); }
+.hub-routes { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; }
+.hub-route { display: grid; gap: 4px; text-align: left; padding: 12px; border-radius: var(--r-md); cursor: pointer;
+  border: 2px solid var(--border-soft); background: var(--elevated); color: var(--text); font: inherit; }
+.hub-route:hover { border-color: var(--border); }
+.hub-route.on { border-color: var(--accent); background: var(--accent-weak); }
+.hub-route-title { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.hub-detail { margin-top: 12px; padding: 12px; border-radius: var(--r-md); background: var(--surface); }
+.hub-detail p { margin: 0 0 8px; }
+.hub-reason { font-weight: 600; }
