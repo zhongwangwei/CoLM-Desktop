@@ -2992,6 +2992,13 @@ const ZH_EN = [
   ["版本详情", "Version details"],
   ["看得到：", "Can see: "],
   ["当前没有可见页面数据", "No page data is currently visible"],
+  // 计算资源：解除中断的提交记录（resources.js）
+  ["解除中断的提交记录…", "Clear interrupted submission records…"],
+  ["清理锁", "cleanup lock"],
+  ["中断的提交记录", "Interrupted submission records"],
+  ["已解除中断的提交记录", "Cleared interrupted submission records"],
+  ["只删除一小时以前中断的提交记录与清理锁；正在进行的提交与服务器上的作业、数据都不受影响。", "Only removes submission records and a cleanup lock interrupted more than an hour ago; submissions in progress, server jobs and data are not affected."],
+  ["确认解除？", "Clear them?"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {

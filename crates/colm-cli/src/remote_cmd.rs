@@ -13,6 +13,7 @@
 //!                        [--model-version <修改版>]   # 用修改版的源码编，内核身份记为 ws-<名>-<提交>
 //!                        [调度选项同 remote-run]    在服务器上编 Fortran 内核（R4），登记在 <根>/kernels/<预设>-<标识>
 //! colm-cli remote-kernels --host H --root R         列出服务器上的内核
+//! colm-cli remote-engine-recover --host H --root R [--older-than 秒]   清掉中断的提交记录与清理锁（只挡清理）
 //! colm-cli remote-dist  --host H --root R [--targets x86_64,aarch64] [--out 目录]
 //! colm-cli remote-fetch  <case> [--vars a,b] [--from YYYY-MM] [--to YYYY-MM] [--compress N]
 //!                         [--overwrite-newer 1]   # 本机结果比这次远程运行新时也覆盖（默认拒绝）
@@ -1352,6 +1353,22 @@ pub(super) fn cmd_engines(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// `remote-engine-recover`：清掉中断留下的提交记录与清理锁（超过 `--older-than` 秒，默认一小时，至少 10 分钟）。
+/// 只由人在计算资源页确认后调用；它们只挡引擎清理，不挡提交。
+pub(super) fn cmd_engine_recover(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = root_of(opts)?;
+    let older_than: u64 = opts
+        .get("--older-than")
+        .map(|v| v.parse())
+        .transpose()
+        .context("--older-than must be a whole number of seconds")?
+        .unwrap_or(3600);
+    let result = colm_remote::engine_inventory::recover(&ssh, &root, older_than)?;
+    println!("{result}");
+    Ok(())
+}
+
 pub(super) fn cmd_engine_clean(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let root = root_of(opts)?;
@@ -1375,7 +1392,7 @@ pub(super) fn cmd_engine_clean(opts: &Opts) -> Result<()> {
             .any(|v| v["snapshot"].as_str() == Some(&snapshot)),
         "engine cleanup refused: snapshot matches an existing source version"
     );
-    let mut lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+    let mut lock = colm_remote::engine_inventory::LifecycleLock::acquire_exclusive(&ssh, &root)?;
     let result = lock.clean(&snapshot);
     // A failed removal may have been interrupted; keep the lock in that case.
     let result = result?;

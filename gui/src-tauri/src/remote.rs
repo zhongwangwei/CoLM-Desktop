@@ -511,6 +511,18 @@ pub async fn remote_engine_clean(
     .await
 }
 
+/// Explicit human-confirmed removal of submission records and a cleanup lock left behind by interrupted
+/// operations (older than an hour). They only block engine cleanup; deliberately absent from assistant tools.
+#[tauri::command]
+pub async fn remote_engine_recover(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
+    ssh_cli_json(
+        engine_resource_args("remote-engine-recover", &server, None)?,
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await
+}
+
 /// `remote-run` 的命令行参数。预览（`--dry-run 1`）与真正提交用同一份，所以用户看到的就是要提交的。
 /// 引擎与 MPI 进程数（只有 Fortran 引擎用进程数）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -192,6 +192,25 @@ function serverCard(server) {
       return;
     }
     for (const reason of inventory.cleanup_blockers ?? []) engines.append(el('p', { className: 'mini warn', textContent: `${t('清理保护')}：${reason}` }));
+    // 中断的提交（或清理）留下的记录：只挡清理，不挡提交。超过一小时的可以由人确认后清掉。
+    const stale = (inventory.leases ?? []).filter(lease => lease.age_s >= 3600);
+    if (stale.length || (inventory.cleanup_blockers ?? []).some(reason => /cleanup in progress or interrupted/.test(reason))) {
+      const recover = button('解除中断的提交记录…', async () => {
+        if (busy) return;
+        if (!(await appConfirm(`${t('只删除一小时以前中断的提交记录与清理锁；正在进行的提交与服务器上的作业、数据都不受影响。')}\n${server.host}: ${server.root}\n${t('确认解除？')}`))) return;
+        busy = true;
+        recover.disabled = true;
+        try {
+          const result = await invoke('remote_engine_recover', { server });
+          show([`${t('已解除中断的提交记录')}：${(result.removed_leases ?? []).length}${result.removed_lock ? ` · ${t('清理锁')}` : ''}`]);
+          renderEngines(await invoke('remote_engines', { server }));
+        } catch (error) { fail(error); }
+        finally { busy = false; recover.disabled = false; }
+      });
+      engines.append(el('div', { className: 'resource-engine mini' }, [
+        el('span', { textContent: `${t('中断的提交记录')}：${stale.length}` }), recover,
+      ]));
+    }
     for (const engine of inventory.engines ?? []) {
       const reasons = [...(inventory.cleanup_blockers ?? []), ...(engine.protected_reasons ?? [])];
       const clean = button('清理这个快照…', async () => {

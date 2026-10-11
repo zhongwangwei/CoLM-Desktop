@@ -154,7 +154,11 @@ export function go(id) {
   if (!step || (step.show && !step.show())) { setStatus(`当前配置没有这一步：${id}`); return; }
   const why = step.need();
   if (why) { setStatus(why); return; }
-  state.liveCollapsed = step.page !== 'run';
+  // 日志栏只在“运行”这一步默认展开；助手停靠在右侧、窗口又不够宽时也收起，免得主栏被挤到三分之一。
+  // 右上角 ▥ 随时可以打开。
+  const assistantOpen = !!document.querySelector?.('.app')?.classList.contains('assistant-open');
+  const roomy = (globalThis.innerWidth ?? 1920) >= 1600;
+  state.liveCollapsed = !(id === 'run' && (!assistantOpen || roomy));
   state.step = id;
   globalThis.dispatchEvent?.(new Event('colm:step'));
   const group = WORKFLOW.find(g => g.steps.includes(step));

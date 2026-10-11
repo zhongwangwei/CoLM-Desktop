@@ -338,6 +338,7 @@ fn main() -> Result<()> {
         "remote-probe" => remote_cmd::cmd_probe(&opts)?,
         "remote-engines" => remote_cmd::cmd_engines(&opts)?,
         "remote-engine-clean" => remote_cmd::cmd_engine_clean(&opts)?,
+        "remote-engine-recover" => remote_cmd::cmd_engine_recover(&opts)?,
         "remote-run" => remote_cmd::cmd_run(&opts)?,
         "remote-study-run" => remote_cmd::remote_study::cmd_run(&opts)?,
         "remote-study-status" => remote_cmd::remote_study::cmd_status(&opts)?,

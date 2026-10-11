@@ -184,6 +184,7 @@ pub fn run() {
             remote_probe,
             remote_engines,
             remote_engine_clean,
+            remote_engine_recover,
             remote_run,
             remote_study_run,
             remote_study_status,

@@ -4,29 +4,62 @@ import os
 import re
 import stat
 import sys
+import time
 
-root, action, snapshot, token = sys.argv[1:5]
+given, action, snapshot, token = sys.argv[1:5]
+if not given.startswith('/') or given == '/' or any(p in ('.', '..', '') for p in given.split('/')[1:]):
+    raise ValueError('unsafe engine resource root')
+# Symlinks above the root are normal on servers ($HOME, /scratch, /data); resolve them once and only refuse
+# symlinks inside the root, where they could widen what cleanup removes.
+if action == 'acquire':
+    os.makedirs(given, exist_ok=True)
+root = os.path.realpath(given)
 
 
 def safe(path):
-    if not path.startswith('/') or path == '/' or any(p in ('.', '..', '') for p in path.split('/')[1:]):
+    if path == given or path.startswith(given + '/'):
+        path = root + path[len(given):]
+    if not path.startswith('/') or any(p in ('.', '..', '') for p in path.split('/')[1:]):
         raise ValueError('unsafe engine resource path')
-    current = '/'
-    for part in path.split('/')[1:]:
-        current = os.path.join(current, part)
+    if path != root and not path.startswith(root + '/'):
+        raise ValueError('path is outside the engine resource root: ' + path)
+    current = root
+    for part in path[len(root):].split('/')[1:]:
+        current = current + '/' + part
         if os.path.lexists(current) and stat.S_ISLNK(os.lstat(current).st_mode):
             raise ValueError('symbolic links are not allowed: ' + current)
     return path
 
 
-safe(root)
-lock = root + '/.engine-lifecycle-lock'
-safe(lock)
+lock = safe(root + '/.engine-lifecycle-lock')
+leases_dir = safe(root + '/.engine-leases')
+
+
+def leases():
+    """Submissions in progress, or interrupted before they could remove their record."""
+    if not os.path.isdir(leases_dir):
+        return []
+    now = time.time()
+    out = []
+    for name in sorted(os.listdir(leases_dir)):
+        path = safe(leases_dir + '/' + name)
+        out.append({'id': name, 'age_s': int(now - os.lstat(path).st_mtime)})
+    return out
+
+
+def lease_text(items):
+    return ', '.join('%s (%d min)' % (item['id'][:12], item['age_s'] // 60) for item in items)
+
+
 if action == 'acquire':
-    os.makedirs(root, exist_ok=True)
     os.mkdir(lock)
     with open(lock + '/owner', 'x') as out:
         out.write(token)
+    active = leases()
+    if active:
+        os.unlink(lock + '/owner')
+        os.rmdir(lock)
+        raise ValueError('submissions are in progress or were interrupted: ' + lease_text(active))
     print('{}')
     sys.exit(0)
 if action in ('release', 'clean'):
@@ -39,12 +72,37 @@ if action == 'release':
     os.rmdir(lock)
     print('{}')
     sys.exit(0)
+if action == 'recover':
+    # Human-confirmed: drop submission records and a cleanup lock left behind longer than `token` seconds.
+    max_age = int(token)
+    if max_age < 600:
+        raise ValueError('refusing to recover records younger than 10 minutes')
+    removed, kept = [], []
+    for item in leases():
+        if item['age_s'] >= max_age:
+            os.unlink(safe(leases_dir + '/' + item['id']))
+            removed.append(item['id'])
+        else:
+            kept.append(item['id'])
+    lock_removed = False
+    if os.path.isdir(lock) and time.time() - os.lstat(lock).st_mtime >= max_age:
+        for name in os.listdir(lock):
+            os.unlink(safe(lock + '/' + name))
+        os.rmdir(lock)
+        lock_removed = True
+    print(json.dumps({'removed_leases': removed, 'kept_leases': kept, 'removed_lock': lock_removed}))
+    sys.exit(0)
 if action not in ('list', 'clean'):
     raise ValueError('unknown engine resource operation')
 if action == 'clean' and not re.fullmatch('[0-9a-f]{16}', snapshot):
     raise ValueError('invalid engine snapshot')
 
 blockers = []
+active_leases = leases()
+if active_leases:
+    blockers.append('Submissions in progress or interrupted: ' + lease_text(active_leases))
+if action == 'list' and os.path.isdir(lock):
+    blockers.append('Engine cleanup in progress or interrupted (lock since %d min)' % (int(time.time() - os.lstat(lock).st_mtime) // 60))
 references = {}
 study_roots = set()
 jobs = safe(root + '/jobs')
@@ -111,4 +169,4 @@ if action == 'clean':
     shutil.rmtree(target)
     print(json.dumps({'removed': snapshot}))
 else:
-    print(json.dumps({'engines': engines, 'cleanup_blockers': blockers}))
+    print(json.dumps({'engines': engines, 'cleanup_blockers': blockers, 'leases': active_leases}))

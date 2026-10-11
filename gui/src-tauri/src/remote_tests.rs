@@ -456,4 +456,14 @@ fn engine_resource_commands_validate_snapshot_and_preserve_connection() {
     for bad in ["../x", "", "pre-0123456789abcdef", "0123456789abcdef;rm"] {
         assert!(engine_resource_args("remote-engine-clean", &server, Some(bad)).is_err());
     }
+    assert_eq!(
+        engine_resource_args("remote-engine-recover", &server, None).unwrap(),
+        [
+            "remote-engine-recover",
+            "--host",
+            "legacy",
+            "--root",
+            "/data/colm"
+        ]
+    );
 }

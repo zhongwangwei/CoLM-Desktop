@@ -107,6 +107,30 @@ assert.match(text(card), /cleanup lock removal failed/);
 assert.match(text(card), /引擎清单读取失败/);
 assert.equal(nodes(card).some(child => child.textContent === '清理这个快照…'), false);
 
+// Interrupted submission records only block cleanup; an hour-old record can be cleared after confirmation.
+{
+  const stuck = { engines: [], cleanup_blockers: ['Submissions in progress or interrupted: abc (120 min)'], leases: [{ id: 'abc', age_s: 7200 }, { id: 'new', age_s: 30 }] };
+  const recoverCalls = [];
+  globalThis.resourceInvoke = async (name, args) => {
+    recoverCalls.push(name);
+    if (name === 'remote_probe') return { cpus: 8, os: 'Linux', schedulers: [], maps: [] };
+    if (name === 'remote_engines') return recoverCalls.includes('remote_engine_recover') ? { engines: [], cleanup_blockers: [], leases: [] } : stuck;
+    if (name === 'remote_engine_recover') return { removed_leases: ['abc'], kept_leases: ['new'], removed_lock: false };
+    throw new Error(name);
+  };
+  const stuckCard = resources.serverCard({ ...server, host: 'stuck' });
+  await findButton(stuckCard, '检查连接').onclick();
+  assert.match(text(stuckCard), /中断的提交记录：1/);
+  globalThis.resourceConfirm = async () => false;
+  await findButton(stuckCard, '解除中断的提交记录…').onclick();
+  assert.equal(recoverCalls.includes('remote_engine_recover'), false, 'cancel removes nothing');
+  globalThis.resourceConfirm = async prompt => { assert.match(prompt, /一小时以前/); return true; };
+  await findButton(stuckCard, '解除中断的提交记录…').onclick();
+  assert.ok(recoverCalls.includes('remote_engine_recover'));
+  assert.match(text(stuckCard), /已解除中断的提交记录：1/);
+  assert.equal(findButton(stuckCard, '解除中断的提交记录…'), undefined);
+}
+
 // An inventory read failure must not turn a successful connection into a failed probe.
 globalThis.resourceInvoke = async name => { if (name === 'remote_probe') return {cpus: 16}; throw new Error('inventory unavailable'); };
 await probeButton.onclick();
