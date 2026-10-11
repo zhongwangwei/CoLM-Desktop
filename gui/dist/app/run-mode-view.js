@@ -152,6 +152,7 @@ function renderRunLine() {
 export function renderContextBar() {
   const bar = $('context-bar');
   if (!bar) return;
+  const focused = document.activeElement?.id;
   const cases = state.batch?.length ?? 0;
   const chips = contextChips({
     caseName: state.selected?.name,
@@ -162,15 +163,28 @@ export function renderContextBar() {
   });
   const why = blocker();
   bar.replaceChildren(...chips.map(chip => {
-    const button = el('button', { type: 'button', className: `context-chip context-${chip.key}`, title: t(chip.key === 'case' ? '当前算例' : '在“运行方式”里修改') }, [
-      el('span', { className: 'context-label', textContent: t(chip.label) }),
-      el('span', { className: 'context-value', textContent: t(chip.value) }),
-    ]);
-    if (chip.key === 'version' && modelVersion() !== OFFICIAL) button.classList.add('context-modified');
-    button.onclick = () => go(chip.key === 'case' ? 'basic-files' : 'run-mode');
-    return button;
+    const label = el('span', { className: 'context-label', textContent: t(chip.label) });
+    if (chip.key === 'case') return el('button', {
+      type: 'button', className: 'context-chip context-case',
+      title: state.selected?.dir || $('casename')?.value || t('当前算例'),
+      onclick: () => go('basic-files'),
+    }, [label, el('span', { className: 'context-value', textContent: t(chip.value) })]);
+    const source = $({ version: 'model-version', target: 'run-target', engine: 'model-engine' }[chip.key]);
+    const select = el('select', { id: `context-select-${chip.key}`, className: 'context-select', value: source?.value || '', title: t(chip.label) });
+    select.setAttribute('aria-label', t(chip.label));
+    for (const option of source?.options ?? []) select.append(new Option(option.textContent, option.value, false, option.selected));
+    select.value = source?.value || '';
+    select.disabled = !!source?.disabled;
+    select.onchange = () => {
+      source.value = select.value;
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    return el('label', {
+      className: `context-chip context-${chip.key}${chip.key === 'version' && modelVersion() !== OFFICIAL ? ' context-modified' : ''}`,
+    }, [label, select]);
   }));
   if (why) bar.append(el('span', { className: 'context-warn', title: t(why), textContent: t('还不能运行') }));
+  if (focused?.startsWith('context-select-')) $(focused)?.focus({ preventScroll: true });
 }
 
 function renderAll() {

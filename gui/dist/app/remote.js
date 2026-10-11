@@ -112,6 +112,7 @@ function renderTargets() {
 function syncTarget() {
   const remote = runTarget() !== 'local';
   state.runTarget = runTarget();
+  globalThis.dispatchEvent?.(new CustomEvent('colm:context'));
   $('manage-servers').textContent = t(remote ? '修改这台服务器…' : '管理服务器…');
   const preview = $('preview-job');
   if (preview) preview.hidden = !remote;

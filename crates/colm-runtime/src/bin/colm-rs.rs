@@ -2639,8 +2639,11 @@ fn lulcc_land_tracers(
     if require_reference || any_reference {
         for (state, &patch_type) in states.iter().zip(new_patch_type) {
             let soil_or_wetland = patch_type == 0 || patch_type == 2;
+            // Replacing the negated comparison with <= changes NaN handling.
+            #[allow(clippy::nonminimal_bool)]
+            let reference_allowed = !(state.aquifer_ref_water > 0.0 && !soil_or_wetland);
             ensure!(
-                !(state.aquifer_ref_water > 0.0 && !soil_or_wetland),
+                reference_allowed,
                 "LULCC cannot transfer isotope aquifer reference to special patch"
             );
             ensure!(

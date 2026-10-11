@@ -413,9 +413,8 @@ pub fn validate_case_parameter_activity(
     let cropland = landtype == if usgs { 7 } else { 12 };
     let soil_hydrology =
         !single || (!glacier && (!waterbody || logical(&doc, "DEF_USE_Dynamic_Lake")));
-    let biological = !single
-        || (!waterbody && !wetland && !urban_land && !glacier && !(crop && cropland))
-        || (crop && cropland);
+    let biological =
+        !single || (!waterbody && !wetland && !urban_land && !glacier) || (crop && cropland);
     let urban = logical(&doc, "DEF_URBAN_RUN");
     let medlyn = logical(&doc, "DEF_USE_MEDLYNST");
     let wue = logical(&doc, "DEF_USE_WUEST");

@@ -921,13 +921,18 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .remote-auth-row[hidden] { display: none; }
 
 /* ---------------- 运行方式：上下文条、版本卡、就绪清单、结果出处 ---------------- */
-/* 上下文条贴在工作区顶部，滚动时不走：算例 · 版本 · 位置 · 引擎。 */
+/* 四项设置在共用顶栏里，控件复用运行方式页的状态。 */
 .context-bar {
-  position: sticky; top: calc(-1 * var(--s-xl)); z-index: 5;
-  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-sm) var(--s-md);
-  margin: calc(-1 * var(--s-xl)) calc(-1 * (var(--s-xl) + 4px)) var(--s-lg);
-  padding: var(--s-md) calc(var(--s-xl) + 4px);
-  background: var(--bg); border-bottom: 1px solid var(--border-soft);
+  display: flex; align-items: center; gap: 4px; flex: 1; min-width: 0;
+}
+.context-select { color: inherit; background: var(--surface); border: 0; max-width: 160px; min-width: 0; font: inherit; }
+.top .context-chip { min-width: 0; }
+.top .context-value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
+.top .grow { display: none; }
+@media (max-width: 1100px) {
+  .top .context-label, .top .brand .dim, .top .sep { display: none; }
+  .context-select { max-width: 115px; }
+  .top { gap: 4px; }
 }
 .context-chip {
   display: inline-flex; align-items: baseline; gap: 6px; max-width: 100%;

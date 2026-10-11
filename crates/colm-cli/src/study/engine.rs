@@ -388,7 +388,7 @@ pub(super) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
     )?;
     for entry in fs::read_dir(study_root.join("samples"))? {
         let path = entry?.path();
-        if path == sample_file || !path.extension().is_some_and(|extension| extension == "csv") {
+        if path == sample_file || path.extension().is_none_or(|extension| extension != "csv") {
             continue;
         }
         if !matches!(manifest.spec.method, StudyMethod::DifferentialEvolution) {

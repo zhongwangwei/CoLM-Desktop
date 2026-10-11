@@ -4062,7 +4062,7 @@ fn parse_spatial_lct(args: &[String]) -> Result<SpatialLctArgs> {
         "--lai-8day-dir and --monthly-vegetation-year are mutually exclusive"
     );
     ensure!(
-        eight_day_lai_dir.is_some() == !eight_day_lai_years.is_empty(),
+        eight_day_lai_dir.is_some() != eight_day_lai_years.is_empty(),
         "--lai-8day-dir requires one or more --lai-8day-year values"
     );
     let land_cover = land_cover.context("spatial-lct requires --land-cover igbp or usgs")?;

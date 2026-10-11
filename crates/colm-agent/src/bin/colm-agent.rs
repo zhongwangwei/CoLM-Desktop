@@ -454,7 +454,7 @@ static UI_REQUESTS: AtomicU64 = AtomicU64::new(0);
 fn frontend_timeout(action: &str, args: &Value) -> Duration {
     // Allow the terminal bridge's 30-minute transfer plus a password prompt.
     let long_commit = action == "commit"
-        && matches!(
+        && (matches!(
             args["target"].as_str(),
             Some(
                 "create-case"
@@ -471,11 +471,9 @@ fn frontend_timeout(action: &str, args: &Value) -> Duration {
                     | "uq-retry"
                     | "hybrid-fit-run"
             )
-        )
-        || action == "commit"
-            && args["target"]
-                .as_str()
-                .is_some_and(|target| target.starts_with("hybrid-climate-"));
+        ) || args["target"]
+            .as_str()
+            .is_some_and(|target| target.starts_with("hybrid-climate-")));
     let long_analysis = action == "click"
         && matches!(
             args["target"].as_str(),

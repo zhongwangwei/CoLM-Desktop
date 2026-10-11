@@ -575,11 +575,11 @@ impl MethaneParameters {
             "microbial parameters must be >= 0".into(),
         );
         check(
-            !(m.use_microbial_flux_override && !m.use_microbial_pools),
+            !m.use_microbial_flux_override || m.use_microbial_pools,
             "use_microbial_flux_override requires use_microbial_pools.".into(),
         );
         check(
-            !(m.use_microbial_dormancy && !m.use_microbial_pools),
+            !m.use_microbial_dormancy || m.use_microbial_pools,
             "use_microbial_dormancy requires use_microbial_pools.".into(),
         );
         check(

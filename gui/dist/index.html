@@ -22,8 +22,9 @@
   <header class="top">
     <div class="brand"><img class="brand-icon" src="assets/colm-icon.png" alt=""><span>CoLM <span class="dim">Desktop</span></span></div>
     <div class="sep"></div>
-    <input class="proj-name" id="casename" readonly value="还没有算例" title="当前算例">
+    <input class="proj-name" id="casename" hidden readonly value="还没有算例" title="当前算例">
     <button class="btn-ghost" id="homeBtn" title="重新选择空间、次网格与物理配置">返回首页</button>
+    <div class="context-bar" id="context-bar" role="status" aria-label="当前运行方式"></div>
     <div class="grow"></div>
     <div class="seg" id="langSeg" aria-label="界面语言">
       <button class="on" data-lang="zh" aria-pressed="true">中文</button>
@@ -49,7 +50,6 @@
   </nav>
 
   <main class="work" id="work">
-    <div class="context-bar" id="context-bar" role="status" aria-label="当前运行方式"></div>
 
     <!-- ① 前处理：站点数据与强迫场共享一份产物状态；左栏子步骤负责切换。 -->
     <section class="page" data-step="prep" hidden>

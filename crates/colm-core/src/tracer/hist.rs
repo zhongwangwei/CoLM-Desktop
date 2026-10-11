@@ -807,7 +807,7 @@ impl GridCell {
 
     /// 三维 `f_trc_conc_soisno_*` 的一层贡献（映射初值是 spval：不合格的层不入图）。
     pub fn add_layer(&mut self, mass: f64, water: f64, area: f64, patch_ok: bool) {
-        if !patch_ok || !(water > TRC_TINY && mass != SPVAL) {
+        if !(patch_ok && water > TRC_TINY && mass != SPVAL) {
             return;
         }
         pset_add(&mut self.mass, mass, area);

@@ -151,9 +151,9 @@ pub fn request_body(config: &ProviderConfig, messages: &[Message], tools: &[Valu
             body["thinking"] = json!({"type":if thinking {"enabled"} else {"disabled"}});
         }
     }
-    if (config.thinking != Some(false) || glm_53)
-        && (!matches!(provider_id(config), "glm" | "qwen") || glm_53)
-        && !(provider_id(config) == "kimi" && !config.model.contains("k3"))
+    if (glm_53
+        || (config.thinking != Some(false) && !matches!(provider_id(config), "glm" | "qwen")))
+        && (provider_id(config) != "kimi" || config.model.contains("k3"))
     {
         if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             body["reasoning_effort"] = json!(effort);

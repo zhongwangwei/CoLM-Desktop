@@ -999,11 +999,11 @@ impl<'a> VisibilityContext<'a> {
     }
 
     fn natural_pft_land(&self) -> bool {
-        !self.waterbody()
-            && !self.wetland()
-            && !self.urban_land()
-            && !self.glacier()
-            && !(self.crop && self.cropland())
+        !(self.waterbody()
+            || self.wetland()
+            || self.urban_land()
+            || self.glacier()
+            || self.crop && self.cropland())
     }
 
     fn biological_land(&self) -> bool {

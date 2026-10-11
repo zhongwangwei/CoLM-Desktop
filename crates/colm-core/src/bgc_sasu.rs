@@ -454,6 +454,7 @@ pub fn cn_sasu(s: &mut BgcState, p: &BgcPhysics, sw: BgcSwitches) -> Result<()> 
                 let n_high = cap_n / s.patch.decomp0_npools_vr[at] > 100.0 && cap_n > 1.0e3;
                 // 上游条件是 `(c_high .or. n_high) .or. k == i_cwd .and. (c_high .or. n_high)`
                 // （`.and.` 先于 `.or.`），后一半被前一半蕴含，照抄形状。
+                #[allow(clippy::overly_complex_bool_expr)] // Preserve the upstream condition above.
                 if (c_high || n_high) || (k == cwd && (c_high || n_high)) {
                     soil_c[at] = s.patch.decomp_cpools_vr[j + k * nl_full];
                     soil_n[at] = s.patch.decomp_npools_vr[j + k * nl_full];
