@@ -90,6 +90,7 @@ export function jobSummary(job) {
 async function loadConfig() {
   config = await invoke('remote_config').catch(() => ({ servers: [] }));
   config.servers ??= [];
+  state.remoteServers = structuredClone(config.servers);
   renderTargets();
   return config;
 }

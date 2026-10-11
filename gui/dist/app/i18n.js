@@ -1432,6 +1432,19 @@ const ZH_EN = [
   ['步', 'step'],
   ['下一步：', 'Next: '],
   ['下一步', 'Next'],
+  ['为本研究选择模型版本、运行位置和引擎。', 'Choose the model version, location and engine for this study.'],
+  ['研究使用自己的运行设置；开始后固定版本，续跑时保持一致。', 'This study has its own run settings. Its version is pinned at the first run and retained on resume.'],
+  ['返回第 6 页生成任务后即可开始。', 'Return to page 6 to generate the task before starting.'],
+  ['训练 AI 模型只能用 Rust 引擎；请检查本研究的运行方式。', 'AI model training requires the Rust engine; check this study’s run settings.'],
+  ['AI 学习参数和替换过程只能使用 Rust 引擎，本研究已锁定。', 'AI parameter learning and process replacement require Rust; this study’s engine is locked.'],
+  ['旧研究未记录运行位置和引擎，请核对后继续', 'This older study did not record its location and engine; verify them before continuing'],
+  ['预计时间未知（暂无基准实测）', 'Estimated time unknown (no benchmark yet)'],
+  ['磁盘需求未知（暂无基准产物大小）', 'Disk use unknown (no baseline output size yet)'],
+  ['研究已提交到服务器，请刷新状态或等待结果取回。', 'The study was submitted to the server; refresh its status or wait for the results.'],
+  ['4 · 运行方式', '4 · Run mode'],
+  ['本研究独立选择模型版本、运行位置和引擎，初始值来自顶部设置。', 'This study chooses its own model version, location and engine, initially copied from the header.'],
+  ['已有研究使用固定快照，锁定的运行设置不能更改。', 'An existing study uses a pinned snapshot; its locked run settings cannot be changed.'],
+  ['多个研究运行设置不一致，请分别继续', 'These studies have different run settings; resume them separately'],
   ['← 上一步', '← Back'],
   ['当前算例', 'Current case'],
   ['深色 / 浅色', 'Dark / light'],
@@ -2945,6 +2958,11 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    .replace(/^参数 (\d+) · 站点 (\d+) · 候选 (\d+) · 成员×站点 (\d+) · 阶段运行 (\d+) · 并发 (\d+) · (.*)$/, 'Parameters $1 · sites $2 · candidates $3 · member-site tasks $4 · stage runs $5 · parallel jobs $6 · $7')
+    .replace(/^预计约 (\d+) 分钟（按基准耗时估计）$/, 'Estimated: about $1 min (baseline estimate)')
+    .replace(/^可同时 (\d+) 个成员/, 'Concurrent capacity: $1 members')
+    .replace(/^同时 (\d+) 个成员/, 'Concurrent members: $1')
+    .replace(/约 (\d+) 分钟（按基准耗时估计）/g, 'about $1 min (baseline estimate)')
     .replace(/^结果校验失败：(.*)$/, 'Result validation failed: $1')
     // 运行日志的阶段小标题（`sidecar.rs` 的 stage_heading）。
     .replace(/^──── 制作地表数据（(\w+)）────$/, '──── Surface data ($1) ────')

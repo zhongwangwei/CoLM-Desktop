@@ -1113,7 +1113,11 @@
             </section>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再生成分析任务。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="3" hidden>
+          <h3>4 · 运行方式</h3><p class="mini muted">本研究独立选择模型版本、运行位置和引擎，初始值来自顶部设置。</p>
+          <div id="uq-run-mode"></div><p id="uq-run-mode-status" class="mini" role="status"></p>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="4" hidden><h3>5 · 预算确认</h3><div class="ch">候选数会放大为“成员 × 站点 × 三个运行阶段”；先核对规模，再生成分析任务。</div><div id="uq-budget" class="study-budget">选择参数后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="1" hidden><h3>2 · 输出变量</h3><div class="ch">只显示当前配置计划写出的标量 history 变量；已有结果时会用实际文件再次核对。</div><div id="uq-outputs" class="evaluation-variable-grid"><div class="result-empty">选择不确定性包络要统计的 history 变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="2" hidden>
           <h3>3 · 参数范围</h3>
@@ -1126,8 +1130,8 @@
           <div id="uq-params" class="evaluation-variable-grid"><div class="result-empty">读取后显示可采样的专家参数。</div></div>
           <label class="check study-range-confirm"><input id="uq-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
         </div>
-        <div class="card study-actions study-wizard-step" data-study-wizard="uq" data-study-step="4" hidden>
-          <h3>5 · 生成分析任务</h3>
+        <div class="card study-actions study-wizard-step" data-study-wizard="uq" data-study-step="5" hidden>
+          <h3>6 · 生成分析任务</h3>
           <div class="ch">把前四页的设计冻结成可复现的运行清单。这里只准备目录和成员，不会启动 CoLM，也不会修改原算例。</div>
           <div class="study-prepare-grid">
             <div><strong>冻结输入</strong><span>记录基础算例、参数范围、输出变量和当前内核指纹。</span></div>
@@ -1139,8 +1143,8 @@
             <button class="btn-next" id="uq-create">生成分析任务</button>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="5" hidden>
-          <h3>6 · 开始计算与监控</h3>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="6" hidden>
+          <h3>7 · 开始计算与监控</h3>
           <div class="ch">开始后会先运行基准成员，再运行参数成员。进度会自动更新；“暂停”只停止派发新成员，不会强杀正在计算的成员。</div>
           <div class="study-launch-panel">
             <div><strong id="uq-run-heading">等待生成分析任务</strong><span id="uq-run-state" aria-live="polite">完成第 5 页后即可开始计算。</span></div>
@@ -1162,7 +1166,7 @@
           <div id="uq-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始计算后会自动显示。</div></details></div>
           <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="uq-preview" class="report-preview">尚未生成分析任务。</pre></details>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="6" hidden><h3>7 · 查看结果</h3><div id="uq-results" class="study-results"><div class="result-empty">计算完成后显示分位数包络、参数重要性和成员表。</div></div></div>
+        <div class="card study-wizard-step" data-study-wizard="uq" data-study-step="7" hidden><h3>8 · 查看结果</h3><div id="uq-results" class="study-results"><div class="result-empty">计算完成后显示分位数包络、参数重要性和成员表。</div></div></div>
         <div class="study-wizard-foot"><button class="btn-ghost" id="uq-step-prev">← 上一步</button><span class="study-wizard-note" id="uq-step-note"></span><button class="btn-next" id="uq-step-next">下一步 →</button></div>
       </div>
 
@@ -1300,7 +1304,11 @@
             </section>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden><h3>4 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点独立率定还会乘以站点数。预算页用于在真正生成任务前确认运行规模。</div><div class="study-scale-guide"><p><strong>预算公式：</strong>大致运行次数 =（1 个基准成员 + 种群 ×（代数 + 1））× 目标站点数。并行数只能缩短墙钟时间，不能减少总运行次数；spin-up 会叠加到每个成员。</p></div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="3" hidden>
+          <h3>4 · 运行方式</h3><p class="mini muted">本研究独立选择模型版本、运行位置和引擎，初始值来自顶部设置。</p>
+          <div id="tune-run-mode"></div><p id="tune-run-mode-status" class="mini" role="status"></p>
+        </div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden><h3>5 · 预算确认</h3><div class="ch">总候选数约为种群 ×（代数 + 1）；多站点独立率定还会乘以站点数。预算页用于在真正生成任务前确认运行规模。</div><div class="study-scale-guide"><p><strong>预算公式：</strong>大致运行次数 =（1 个基准成员 + 种群 ×（代数 + 1））× 目标站点数。并行数只能缩短墙钟时间，不能减少总运行次数；spin-up 会叠加到每个成员。</p></div><div id="tune-budget" class="study-budget">选择参数和目标后显示。</div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="1" hidden><h3>2 · 目标变量</h3><div class="ch">软件同时检查模型计划输出和观测文件；不可用目标会说明缺少哪一侧。只有模型 history 与观测在校准窗口内达到最少配对数的变量，才会进入目标函数。</div><div class="study-scale-guide"><p><strong>目标权重：</strong>权重决定多个目标如何合成为一个总分。权重大表示优化器更重视该变量；权重必须大于 0，不参与请取消勾选。正式结果需说明使用了哪些目标、权重和有效配对数。</p></div><div id="tune-targets" class="evaluation-variable-grid"><div class="result-empty">读取后显示带观测文件的可评估变量。</div></div></div>
         <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="2" hidden>
           <h3>3 · 参数范围</h3>
@@ -1318,8 +1326,8 @@
           </div>
           <label class="check study-range-confirm"><input id="tune-range-confirm" type="checkbox"> 我已检查并负责这些采样范围</label>
         </div>
-        <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="4" hidden>
-          <h3>5 · 生成率定任务</h3>
+        <div class="card study-actions study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden>
+          <h3>6 · 生成率定任务</h3>
           <div class="ch">把目标函数、参数范围、校准/验证窗口和搜索预算冻结成可复现的率定任务。这里只准备成员，不开始搜索。</div>
           <div class="study-prepare-grid">
             <div><strong>冻结证据</strong><span>记录基础算例、观测文件、目标函数和当前内核指纹。</span></div>
@@ -1331,8 +1339,8 @@
             <button class="btn-next" id="tune-create">生成率定任务</button>
           </div>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="5" hidden>
-          <h3>6 · 开始搜索与监控</h3>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden>
+          <h3>7 · 开始搜索与监控</h3>
           <div class="ch">开始后会运行基准成员和候选成员，并按代更新搜索结果。进度会自动更新；暂停只停止派发新成员。</div>
           <div class="study-launch-panel">
             <div><strong id="tune-run-heading">等待生成率定任务</strong><span id="tune-run-state" aria-live="polite">完成第 5 页后即可开始参数搜索。</span></div>
@@ -1354,7 +1362,7 @@
           <div id="tune-study-view" class="study-view"><details class="study-technical study-event-log" open><summary>实时运行日志</summary><div class="study-log" aria-live="polite">尚无运行日志；开始搜索后会自动显示。</div></details></div>
           <details class="study-technical"><summary>任务清单与技术详情</summary><pre id="tune-preview" class="report-preview">尚未生成率定任务。</pre></details>
         </div>
-        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="6" hidden><h3>7 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div>
+        <div class="card study-wizard-step" data-study-wizard="tuning" data-study-step="7" hidden><h3>8 · 查看最优结果</h3><div class="ch">先比较校准期和验证期：如果校准明显变好但验证变差，通常表示过拟合、目标窗口太短或参数范围过宽。最佳方案默认只读展示；点击另存会创建新算例，不覆盖原算例。</div><div class="result-tools result-tools-wide"><button class="btn-ghost" id="tune-apply-best" disabled>将最佳方案另存为新算例</button></div><div id="tune-results" class="study-results"><div class="result-empty">搜索完成后显示目标函数、最佳候选和成员表。</div></div>
           <section class="version-compare" id="version-compare-card" aria-labelledby="version-compare-title">
           <h4 id="version-compare-title">比较两个版本</h4>
           <div class="ch">新结构是否真的更好？两个模型版本用同样的设置（参数、预算、种子、率定期与验证期）各自率定，再在验证期上比较最优结果，排除“只是参数没调”的影响。第二个率定任务会按上面这个任务的设置自动建好。</div>

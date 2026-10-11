@@ -41,7 +41,12 @@ assert.equal(de.deCandidateLimit, 60);
 assert.equal(de.memberSiteTasks, 122); // S × (C + 1)
 assert.equal(de.totalStageRuns, 366);
 assert.deepEqual(de.stageRuns, { mksrfdata: 122, mkinidata: 122, colm: 122 });
-assert.equal(de.estimatedSeconds, 1220);
+assert.equal(de.estimatedSeconds, 300);
+for (const baselineSeconds of [null, undefined, 0, -1, NaN, Infinity]) {
+  assert.equal(studyBudget({ baselineSeconds }).estimatedSeconds, null, 'missing or invalid history is not a zero-second estimate');
+}
+assert.equal(studyBudget({ candidates: 7, jobs: 3, siteCount: 2, baselineSeconds: 10 }).estimatedSeconds, 60, 'partial last batch rounds up');
+assert.equal(studyBudget({ candidates: 7, jobs: Infinity, baselineSeconds: 10 }).estimatedSeconds, 70);
 assert.equal(de.candidateLimitExceeded, false);
 assert.equal(studyBudget({ method: 'de', population: 1000, generations: 1 }).candidateLimitExceeded, true);
 assert.equal(studyBudget({ method: 'oat', paramCount: 2, siteCount: 3, candidates: 7 }).memberSiteTasks, 24);

@@ -27,7 +27,7 @@ function serverChoice(server) {
 }
 
 /** Selection belongs to the caller; clicks follow its existing change path. */
-export function renderRunModeCards(container, { versions = [], servers = [], selection, onChange, lockEngine = null }) {
+export function renderRunModeCards(container, { versions = [], servers = [], selection, onChange, lockEngine = null, targetNotes = {}, disabled = false }) {
   const active = document.activeElement;
   const focusedId = active && container.contains(active) ? active.id : null;
   const cpus = Number(globalThis.navigator?.hardwareConcurrency);
@@ -62,12 +62,14 @@ export function renderRunModeCards(container, { versions = [], servers = [], sel
       button.id = `${container.id}-choice-${key}-${index}`;
       button.dataset.value = choice.value;
       button.setAttribute('aria-pressed', String(selection[key] === choice.value));
-      button.disabled = key === 'engine' && !!lockEngine && choice.value !== lockEngine;
+      const locked = key === 'engine' && !!lockEngine && choice.value !== lockEngine;
+      button.disabled = disabled || locked;
       button.append(element('strong', 'run-mode-card-title', choice.title));
       if (choice.detail) button.append(element('span', 'run-mode-card-detail', choice.detail));
       if (choice.badge) button.append(element('span', 'run-mode-card-badge', choice.badge));
-      if (button.disabled) button.append(element('span', 'run-mode-card-detail', t('此研究已锁定引擎，不能切换')));
-      button.onclick = () => { if (!button.disabled) onChange(key, choice.value); };
+      if (key === 'target' && targetNotes[choice.value]) button.append(element('span', 'run-mode-card-detail', targetNotes[choice.value]));
+      if (locked) button.append(element('span', 'run-mode-card-detail', t('此研究已锁定引擎，不能切换')));
+      button.onclick = () => { if (!button.disabled) return onChange(key, choice.value); };
       group.append(button);
       if (button.id === focusedId && !button.disabled) button.focus({ preventScroll: true });
     });

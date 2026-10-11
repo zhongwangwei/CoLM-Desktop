@@ -202,6 +202,7 @@ remote.wire();
 await new Promise(resolve => setImmediate(resolve));
 remote.fillDialog('legacy');
 const serversCopy = remote.configuredServers();
+assert.deepEqual(state.remoteServers, serversCopy, 'research reads the same configured servers without importing remote UI');
 serversCopy[0].host = 'changed';
 assert.equal(remote.configuredServers()[0].host, 'legacy');
 assert.equal(fields['remote-auth'].value, 'config');

@@ -28,7 +28,9 @@ export function studyBudget({
   const candidateCount = candidates == null ? suggested : Math.max(0, Math.trunc(Number(candidates) || 0));
   const memberSiteTasks = sites * (candidateCount + 1);
   const stageRuns = Object.fromEntries(STUDY_STAGES.map(stage => [stage, memberSiteTasks]));
-  const seconds = Number(baselineSeconds);
+  const seconds = baselineSeconds == null ? NaN : Number(baselineSeconds);
+  const concurrency = Number(jobs);
+  const parallel = Number.isFinite(concurrency) ? Math.max(1, Math.trunc(concurrency)) : 1;
   return {
     method: algo || 'lhs',
     paramCount: k,
@@ -41,8 +43,9 @@ export function studyBudget({
     memberSiteTasks,
     stageRuns,
     totalStageRuns: memberSiteTasks * STUDY_STAGES.length,
-    jobs: Math.max(1, Math.trunc(Number(jobs) || 1)),
-    estimatedSeconds: Number.isFinite(seconds) ? memberSiteTasks * seconds : null,
+    jobs: parallel,
+    estimatedSeconds: Number.isFinite(seconds) && seconds > 0 && Number.isSafeInteger(candidateCount)
+      ? Math.ceil(candidateCount / parallel) * seconds * sites : null,
   };
 }
 

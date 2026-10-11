@@ -72,6 +72,14 @@ try {
   assert.match(words(group('engine').children[1]),/已锁定引擎/);
   assert.equal(group('engine').children[0].attributes['aria-pressed'],'true');
   assert.equal(container.children.length,3,'rerender must reuse existing groups');
+  options.targetNotes = {local: '约 2 分钟 · 同时 4 个成员'};
+  options.disabled = true;
+  renderRunModeCards(container, options);
+  assert.match(words(group('target').children[0]), /约 2 分钟 · 同时 4 个成员/);
+  assert.doesNotMatch(words(group('target').children[0]), /已锁定引擎/);
+  group('version').children[0].click();
+  assert.equal(calls.length,3,'busy cards cannot change any selection');
+  options.disabled = false;
   servers[0].host = 'changed'; renderRunModeCards(container,options);
   assert.match(words(group('target').children[1]),/没测过/,'modified config invalidates probe facts');
   assert.doesNotMatch(words(group('target').children[1]),/64|slurm/);

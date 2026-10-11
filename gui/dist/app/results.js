@@ -13,6 +13,8 @@ import { language, translateZh } from './i18n.js';
 import { catalogLabel, fieldLabel } from './param-presentation.js';
 import { modelEngine } from './engine.js';
 import { modelVersion, runModeBlocker, studyVersionText } from './run-mode.js';
+import { renderRunModeCards } from './run-mode-cards.js';
+import { cachedProbe } from './remote-probe-cache.js';
 import { serverStudyText, studyTarget, submitStudies, watchServerStudy } from './remote-study.js';
 import { renderTuneHybridWeights, tuneHybridSection, wireTuneHybrid } from './hybrid.js';
 import { aggregateStudy, aggregateStudyStatuses, bestTuningSummary, studyBadge, MAX_STUDY_CANDIDATES, paginate, percentageWindow, replaceScopedStudyDirs, scopedStudyDirs, studyActionState, studyBudget, studySiteId, studyWarnings } from './study-model.js';
@@ -20,6 +22,8 @@ import {
   LruCache, METRIC_META, boundedMap, envelopeDiagnostics, finite, metricKey, ranking, resultCases,
   rowsToCsv, seriesKey, seriesStats, sortedImportanceRows,
 } from './result-model.js';
+
+const configuredServers = () => structuredClone(state.remoteServers ?? []);
 
 const COMMON_VARIABLES = {
   f_rnet: ['净辐射 Rnet', 'W/m²', '能量'],
@@ -1464,6 +1468,8 @@ async function prepareActivePane(strict = false) {
     const scopeKey = studyScopeKey();
     const isCurrent = () => token === activePaneRequest && state.step === step && studyScopeKey() === scopeKey;
     renderStudyWizard(kind);
+    await prepareStudyRunMode(kind);
+    if (!isCurrent()) return;
     try {
       await loadStudyParams(isCurrent);
       if (!isCurrent()) return;
@@ -1612,14 +1618,15 @@ const studyWizardPages = { uq: 0, tuning: 0 };
 const studyAsyncRequests = { params: 0, outputs: 0, targets: 0 };
 const studyRefreshRequests = { uq: 0, tuning: 0 };
 const studyWizardTitles = {
-  uq: ['方法与预热', '输出变量', '参数范围', '预算确认', '生成分析任务', '开始计算与监控', '查看结果'],
-  tuning: ['目标与搜索', '目标变量', '参数范围', '预算确认', '生成率定任务', '开始搜索与监控', '查看最优结果'],
+  uq: ['方法与预热', '输出变量', '参数范围', '运行方式', '预算确认', '生成分析任务', '开始计算与监控', '查看结果'],
+  tuning: ['目标与搜索', '目标变量', '参数范围', '运行方式', '预算确认', '生成率定任务', '开始搜索与监控', '查看最优结果'],
 };
 const studyWizardHelp = {
   uq: [
     ['先明确要评估哪些参数假设会让哪些输出发生多大变化，再选择方法、预热、样本数、随机种子和并行数。', '设计决定成员如何覆盖参数空间、计算成本与可重复性；站点固定共享参数，分析使用每个站点预热后实际写出的全部 history。结果是给定范围内的有限样本情景分位带，不是自动校准或统计置信区间。'],
     ['从当前配置预计写出的标量 history 中，选择要形成不确定性包络的输出。', '只分析与科学问题相关且各站点可用的变量，可避免无效运行和无法比较的结果。'],
     ['选择参与扰动的参数，填写有限采样上下界与线性/对数尺度，并确认范围责任。', '参数范围就是不确定性假设；过宽会产生非物理解，过窄则会低估结果敏感性。'],
+    ['为本研究选择模型版本、运行位置和引擎。', '研究使用自己的运行设置；开始后固定版本，续跑时保持一致。'],
     ['汇总参数数、候选数、站点数、运行阶段和并发，预览本次分析的计算规模。', '在生成任务前看清任务量，便于控制计算时间、磁盘占用和样本预算。'],
     ['冻结基础算例、内核、参数范围和输出变量，生成可复现的成员目录与任务清单。', '生成任务只准备文件，不运行模型；把准备和计算分开可先确认方案并保护原算例。'],
     ['设置本次同时运行数，启动计算并查看基准成员、参数成员的实时进度、失败原因和运行日志。', '并行数只影响耗时和资源占用，不改变科学结果；状态与日志会自动更新。'],
@@ -1629,6 +1636,7 @@ const studyWizardHelp = {
     ['选择目标指标、最少有效配对数、站点组织方式、模型预热、校准/验证时段、种群、代数、随机种子和并行数。', '这些设置共同定义优化问题、初始状态、数据证据门槛和搜索成本；生成时先检查观测覆盖，运行时先用基准成员复核真实模型—观测配对数，通过后才派发候选；验证期独立检验参数泛化能力。'],
     ['对照模型计划输出与观测文件，选择参与目标函数的变量并设置权重。', '目标与权重决定优化器在不同过程间如何取舍；缺测或不可评估变量不能当作零误差。'],
     ['选择当前物理方案真正读取的参数，填写有限范围和采样尺度，并确认范围责任。', '有效且物理合理的搜索边界能减少无效候选，避免优化器找到数值上好但不可解释的解。'],
+    ['为本研究选择模型版本、运行位置和引擎。', '研究使用自己的运行设置；开始后固定版本，续跑时保持一致。'],
     ['预览种群 ×（代数 + 1）形成的候选数，以及多站点和三阶段带来的总运行量。', '率定成本会快速放大；预算预览帮助在搜索充分性与可用算力之间做取舍。'],
     ['冻结输入、观测、目标函数和内核，生成可复现的率定成员与任务清单。', '生成任务只准备搜索问题；冻结与复制保证候选可复现，并保护原算例不被覆盖。'],
     ['设置本次同时运行数，启动搜索并跟踪基准成员、候选成员、校准与验证状态和运行日志。', '并行数只影响耗时和资源占用，不改变搜索定义；状态与日志会自动更新。'],
@@ -1743,11 +1751,11 @@ function renderStudyActions(kind) {
   const heading = $(`${prefix}-run-heading`);
   const detail = $(`${prefix}-run-state`);
   const current = studyRunning[kind] ? 'Running' : summary.status;
-  if (tuning) for (const step of document.querySelectorAll('[data-study-wizard="tuning"]')) {
-    if (Number(step.dataset.studyStep) < 5) step.inert = current === 'Running';
+  for (const step of document.querySelectorAll(`[data-study-wizard="${kind}"]`)) {
+    if (Number(step.dataset.studyStep) < 6) step.inert = current === 'Running';
   }
   const copy = !hasTask
-    ? ['尚未生成任务', '返回第 5 页生成任务后即可开始。', tuning ? '开始参数搜索' : '开始计算']
+    ? ['尚未生成任务', '返回第 6 页生成任务后即可开始。', tuning ? '开始参数搜索' : '开始计算']
     : current === 'Ready'
       ? ['任务已准备，可以开始', tuning ? '点击“开始参数搜索”后，将运行基准成员并逐代搜索候选参数。' : '点击“开始计算”后，将先运行基准成员，再运行参数成员。', tuning ? '开始参数搜索' : '开始计算']
       : current === 'Running'
@@ -1866,12 +1874,13 @@ function studyWizardIssue(kind, page) {
   }
   if (page === 2) {
     try {
-      if (!selectedStudyParams(`${prefix}-params`).length) return '至少选择一个参数并填写有限范围';
+      if (!selectedStudyParams(`${prefix}-params`).length && !(tuning && tuneHybridSection())) return '至少选择一个参数并填写有限范围';
     } catch (error) { return error?.message || String(error); }
     if (!$(`${prefix}-range-confirm`)?.checked) return '检查范围后勾选责任确认';
   }
-  if (page === 4 && !activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。';
-  if (page === 5) {
+  if (page === 3) return studyRunModeIssue(kind);
+  if (page === 5 && !activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。';
+  if (page === 6) {
     if (!activeStudyDirs(kind).length) return kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。';
     if (!studyResultsReady(studyViews[kind])) {
       return kind === 'tuning'
@@ -1909,6 +1918,7 @@ function renderStudyWizard(kind) {
 function setStudyWizardPage(kind, page) {
   studyWizardPages[kind] = page;
   renderStudyWizard(kind);
+  if (page === 3) prepareStudyRunMode(kind).catch(status);
   document.querySelector(`[data-study-wizard="${kind}"][data-study-step="${page}"]`)?.scrollIntoView({ block: 'start' });
 }
 
@@ -1917,10 +1927,172 @@ const studyJobInputs = kind => {
   return [$(`${prefix}-jobs`), $(`${prefix}-run-jobs`)].filter(Boolean);
 };
 
+const studyRunModeScopes = { uq: new Map(), tuning: new Map() };
+let savedStudyRunModes = {};
+try { savedStudyRunModes = JSON.parse(localStorage.getItem('colm.studyRunModes') || '{}'); } catch {}
+if (!savedStudyRunModes || Array.isArray(savedStudyRunModes) || typeof savedStudyRunModes !== 'object') savedStudyRunModes = {};
+
+function studyRunMode(kind) {
+  const scope = studyScopeKey();
+  if (!studyRunModeScopes[kind].has(scope)) studyRunModeScopes[kind].set(scope, {
+    selection: { version: modelVersion(), target: studyTarget(), engine: modelEngine() },
+    versions: [], readiness: null, error: '', request: 0, locked: [], baselineSeconds: null,
+  });
+  const mode = studyRunModeScopes[kind].get(scope);
+  if (kind === 'tuning' && $('tune-hybrid-on')?.checked && !mode.locked.includes('engine') && mode.selection.engine !== 'rust') {
+    mode.selection.engine = 'rust'; mode.readiness = null; mode.request++;
+  }
+  return mode;
+}
+
+function studyRunModeIssue(kind) {
+  const mode = studyRunMode(kind);
+  if (mode.error) return mode.error;
+  if (kind === 'tuning' && $('tune-hybrid-on')?.checked && mode.selection.engine !== 'rust') return '训练 AI 模型只能用 Rust 引擎；请检查本研究的运行方式。';
+  if (mode.locked.includes('version')) return '';
+  return runModeBlocker({ ...mode.selection, readiness: mode.readiness }) || '';
+}
+
+function studyLocationJobs(kind, target) {
+  if (target === 'local') return Math.max(1, Math.min(studyCpuCapacity, Number($('cpu-workers')?.value) || 1));
+  const server = configuredServers().find(server => server.host === target);
+  const cpus = Number(server?.cpus) || Number(cachedProbe(server)?.probe?.cpus) || 1;
+  return Math.max(1, Math.floor(cpus / Math.max(1, Number(server?.threads) || 1)));
+}
+
+function studyRuntimeNotes(kind) {
+  const mode = studyRunMode(kind);
+  let params = 0;
+  try { params = selectedStudyParams(kind === 'tuning' ? 'tune-params' : 'uq-params').length; } catch {}
+  return Object.fromEntries(['local', ...configuredServers().map(server => server.host)].map(target => {
+    const jobs = target === mode.selection.target ? studyJobCount(kind) : studyLocationJobs(kind, target);
+    const budget = studyBudget({ method: kind === 'tuning' ? 'de' : $('uq-method')?.value,
+      paramCount: params, siteCount: studyScope().length, population: Number($('tune-pop')?.value),
+      generations: Number($('tune-gen')?.value), candidates: kind === 'uq' && $('uq-method')?.value === 'lhs' ? Number($('uq-count')?.value) : null, jobs,
+      baselineSeconds: mode.baselineSeconds });
+    const minutes = budget.estimatedSeconds == null ? null : Math.max(1, Math.ceil(budget.estimatedSeconds / 60));
+    return [target, language() === 'en' ? `Up to ${jobs} concurrent members${minutes === null ? '' : ` · about ${minutes} min (baseline estimate)`}`
+      : `可同时 ${jobs} 个成员${minutes === null ? '' : ` · 约 ${minutes} 分钟（按基准耗时估计）`}`];
+  }));
+}
+
+function renderStudyRunMode(kind) {
+  const prefix = kind === 'tuning' ? 'tune' : 'uq';
+  const host = $(`${prefix}-run-mode`);
+  if (!host) return;
+  const mode = studyRunMode(kind), scope = studyScopeKey();
+  const lockEngine = kind === 'tuning' && $('tune-hybrid-on')?.checked ? 'rust' : null;
+  renderRunModeCards(host, { versions: mode.versions, servers: configuredServers(), selection: mode.selection,
+    lockEngine, disabled: studyRunning[kind] || studyCreating[kind], targetNotes: studyRuntimeNotes(kind),
+    onChange: async (key, value) => {
+      if (scope !== studyScopeKey() || studyRunning[kind] || studyCreating[kind] || mode.locked.includes(key)) return;
+      if (lockEngine && key === 'engine' && value !== lockEngine) return;
+      mode.visited = true; mode.selection[key] = value; mode.readiness = null;
+      await prepareStudyRunMode(kind);
+      if (scope !== studyScopeKey()) throw new Error('任务上下文已变化，请重新检查。');
+      renderStudyBudget(kind);
+    },
+  });
+  for (const key of mode.locked) for (const button of host.querySelectorAll(`[data-run-choice="${key}"] button`)) button.disabled = true;
+  $(`${prefix}-run-mode-status`).textContent = [
+    lockEngine ? dialogText('AI 学习参数和替换过程只能使用 Rust 引擎，本研究已锁定。') : '',
+    mode.locked.length ? dialogText('已有研究使用固定快照，锁定的运行设置不能更改。') : '',
+    mode.warning ? dialogText(mode.warning) : '', dialogText(studyRunModeIssue(kind)),
+  ].filter(Boolean).join('\n');
+}
+
+async function checkStudyRunMode(kind) {
+  const mode = studyRunMode(kind), scope = studyScopeKey(), request = ++mode.request;
+  const selection = { ...mode.selection }, kernel = currentKernel();
+  mode.error = '';
+  try {
+    const readiness = selection.version === 'official' || mode.locked.includes('version') ? null
+      : await invoke('version_check', { name: selection.version, kernel, engine: selection.engine });
+    if (scope !== studyScopeKey() || request !== mode.request) return;
+    mode.readiness = readiness;
+  } catch (error) {
+    if (scope !== studyScopeKey() || request !== mode.request) return;
+    mode.error = String(error?.message || error);
+  }
+}
+
+async function prepareStudyRunMode(kind) {
+  const mode = studyRunMode(kind), scope = studyScopeKey();
+  if (!mode.visited) {
+    mode.selection = { version: modelVersion(), target: studyTarget(), engine: kind === 'tuning' && $('tune-hybrid-on')?.checked ? 'rust' : modelEngine() };
+    mode.visited = true;
+  }
+  const request = ++mode.request;
+  const dirs = activeStudyDirs(kind);
+  const isCurrent = () => scope === studyScopeKey() && request === mode.request;
+  renderStudyRunMode(kind);
+  try {
+    const [versions, histories, envelopes] = await Promise.all([
+      invoke('workspace_list'),
+      Promise.all(studyScope().map(async c => { try { return await invoke('case_runs', { case: c.dir }); } catch { return null; } })),
+      Promise.all(dirs.map(async dir => ({ dir, envelope: JSON.parse(await invoke('study_status', { studyDir: dir })) }))),
+    ]);
+    if (!isCurrent()) return;
+    mode.versions = versions?.workspaces ?? [];
+    mode.warning = ''; mode.locked = []; mode.remotePending = false;
+    const draft = { ...mode.selection };
+    let fixed = null;
+    for (const {dir,envelope} of envelopes) {
+      const stored = savedStudyRunModes[dir];
+      mode.selection = { ...draft };
+      mode.locked = [];
+      const remote = envelope.remote;
+      const started = Object.values(envelope.state?.tasks ?? {}).some(task => !['pending','materialized'].includes(String(task.status).toLowerCase()));
+      if ((started || envelope.model_version || remote) && stored && ['rust','fortran'].includes(stored.engine) && typeof stored.target === 'string' && typeof stored.version === 'string') {
+        Object.assign(mode.selection, stored); mode.locked = ['version','target','engine'];
+      }
+      if (remote?.host) {
+        mode.remotePending ||= !remote.fetched_at;
+        mode.selection.target = remote.host;
+        if (['rust','fortran'].includes(remote.provenance?.engine)) mode.selection.engine = remote.provenance.engine;
+        mode.locked = ['version','target','engine'];
+      }
+      const pinnedVersion = envelope.model_version?.name || (remote?.provenance?.version?.kind === 'workspace' ? remote.provenance.version.name : null);
+      if (pinnedVersion) { mode.selection.version = pinnedVersion; if (!mode.locked.includes('version')) mode.locked.push('version'); }
+      else if (started || remote) { mode.selection.version = 'official'; if (!mode.locked.includes('version')) mode.locked.push('version'); }
+      if (started && !stored && !remote) {
+        mode.selection.target = 'local';
+        mode.warning = '旧研究未记录运行位置和引擎，请核对后继续';
+      }
+      if (mode.locked.length) {
+        if (fixed && JSON.stringify(fixed.selection) !== JSON.stringify(mode.selection)) {
+          mode.error = '多个研究运行设置不一致，请分别继续';
+          renderStudyRunMode(kind); renderStudyWizard(kind); return;
+        }
+        fixed = { selection: { ...mode.selection }, locked: [...mode.locked] };
+      }
+    }
+    if (fixed) { mode.selection = fixed.selection; mode.locked = fixed.locked; }
+    if (mode.selection.version !== 'official' && mode.locked.includes('version') && !mode.versions.some(ws => ws.name === mode.selection.version)) mode.versions.push({name:mode.selection.version});
+    const elapsed = histories.flatMap(history => history?.runs ?? []).filter(run => run.ok === true && (run.stage == null || ['all','colm'].includes(run.stage))
+      && run.started != null && run.finished != null && Number.isFinite(Number(run.started)) && Number.isFinite(Number(run.finished)) && Number(run.finished) > Number(run.started))
+      .sort((a,b) => Number(b.finished) - Number(a.finished)).map(run => Number(run.finished) - Number(run.started)).find(seconds => Number.isFinite(seconds) && seconds > 0);
+    mode.baselineSeconds = elapsed ?? null;
+    await checkStudyRunMode(kind);
+    if (scope !== studyScopeKey()) return;
+    renderStudyRunMode(kind); renderStudyWizard(kind);
+  } catch (error) {
+    if (!isCurrent()) return;
+    mode.error = String(error?.message || error); renderStudyRunMode(kind); renderStudyWizard(kind);
+  }
+}
+
+function rememberStudyRunMode(dir, selection) {
+  savedStudyRunModes[dir] = { ...selection };
+  try { localStorage.setItem('colm.studyRunModes', JSON.stringify(savedStudyRunModes)); } catch {}
+}
+
 function studyJobCount(kind) {
   const inputs = studyJobInputs(kind);
-  const jobs = Math.max(1, Math.min(studyCpuCapacity, Math.trunc(Number(inputs[0]?.value)) || 1));
-  for (const input of inputs) { input.max = String(studyCpuCapacity); input.value = String(jobs); }
+  const target = studyRunModeScopes[kind].get(studyScopeKey())?.selection.target || studyTarget();
+  const capacity = target === 'local' ? studyCpuCapacity : studyLocationJobs(kind, target);
+  const jobs = Math.max(1, Math.min(capacity, Math.trunc(Number(inputs[0]?.value)) || 1));
+  for (const input of inputs) { input.max = String(capacity); input.value = String(jobs); }
   return jobs;
 }
 
@@ -2305,10 +2477,12 @@ function renderStudyBudget(kind) {
   try { paramCount = selectedStudyParams(tuning ? 'tune-params' : 'uq-params').length; } catch {}
   const siteCount = studyScope().length;
   const budget = tuning
-    ? studyBudget({ method: 'de', paramCount, siteCount, population: Number($('tune-pop')?.value), generations: Number($('tune-gen')?.value), jobs: studyJobCount('tuning') })
-    : studyBudget({ method: $('uq-method')?.value, paramCount, siteCount, candidates: $('uq-method')?.value === 'lhs' ? Number($('uq-count')?.value) : null, jobs: studyJobCount('uq') });
+    ? studyBudget({ method: 'de', paramCount, siteCount, population: Number($('tune-pop')?.value), generations: Number($('tune-gen')?.value), jobs: studyJobCount('tuning'), baselineSeconds: studyRunMode(kind).baselineSeconds })
+    : studyBudget({ method: $('uq-method')?.value, paramCount, siteCount, candidates: $('uq-method')?.value === 'lhs' ? Number($('uq-count')?.value) : null, jobs: studyJobCount('uq'), baselineSeconds: studyRunMode(kind).baselineSeconds });
   if (tuning) renderTuneHybridWeights(Number($('tune-pop')?.value));
-  host.textContent = `参数 ${paramCount} · 站点 ${siteCount} · 候选 ${budget.candidateCount} · 成员×站点 ${budget.memberSiteTasks} · 阶段运行 ${budget.totalStageRuns} · 并发 ${budget.jobs} · 预计时间未知（暂无基准实测） · 磁盘需求未知（暂无基准产物大小）`;
+  const estimate = budget.estimatedSeconds == null ? '预计时间未知（暂无基准实测）' : `预计约 ${Math.max(1, Math.ceil(budget.estimatedSeconds / 60))} 分钟（按基准耗时估计）`;
+  host.textContent = `参数 ${paramCount} · 站点 ${siteCount} · 候选 ${budget.candidateCount} · 成员×站点 ${budget.memberSiteTasks} · 阶段运行 ${budget.totalStageRuns} · 并发 ${budget.jobs} · ${estimate} · 磁盘需求未知（暂无基准产物大小）`;
+  renderStudyRunMode(kind);
   renderStudyReadiness(kind);
 }
 
@@ -2422,7 +2596,7 @@ function studySpec(kind, cases, independent = false) {
   const parameters = selectedStudyParams(tuning ? 'tune-params' : 'uq-params');
   const hybrid = tuning ? tuneHybridSection() : null;
   if (!parameters.length && !hybrid) throw new Error('请至少勾选一个参数，并填写有限的最小/最大值。');
-  if (hybrid && modelEngine() !== 'rust') throw new Error('训练 AI 模型只能用 Rust 引擎；请在运行页把“模拟引擎”换成 Rust 引擎。');
+  if (hybrid && studyRunMode(kind).selection.engine !== 'rust') throw new Error('训练 AI 模型只能用 Rust 引擎；请检查本研究的运行方式。');
   if (!$(tuning ? 'tune-range-confirm' : 'uq-range-confirm')?.checked) throw new Error('请确认采样范围由用户负责。');
   if (tuning) {
     const targets = [...document.querySelectorAll('[data-tune-target]:checked')]
@@ -2502,9 +2676,14 @@ async function createStudy(kind, strict = false) {
       ? '率定设计已修改，请重新生成率定任务。' : '分析设计已修改，请重新生成分析任务。');
   };
   studyCreating[kind] = true;
+  renderStudyRunMode(kind);
   const create = $(kind === 'tuning' ? 'tune-create' : 'uq-create');
   if (create) { create.disabled = true; create.textContent = dialogText('正在生成任务…'); }
   try {
+    await prepareStudyRunMode(kind);
+    ensureCurrent();
+    const modeIssue = studyRunModeIssue(kind);
+    if (modeIssue) throw new Error(dialogText(modeIssue));
     await loadStudyParams(isCurrent);
     ensureCurrent();
     if (kind === 'tuning') await renderTuningTargets(isCurrent); else await renderStudyOutputs(isCurrent);
@@ -2549,10 +2728,11 @@ async function createStudy(kind, strict = false) {
     if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
     await refreshStudy(kind, strict);
     if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
-    setStudyWizardPage(kind, 5);
+    setStudyWizardPage(kind, 6);
     status(kind === 'tuning' ? '参数率定任务已生成。' : '不确定性分析任务已生成。');
   } finally {
     studyCreating[kind] = false;
+    renderStudyRunMode(kind);
     renderStudyReadiness(kind);
   }
 }
@@ -3116,55 +3296,56 @@ async function runStudy(kind, strict = false) {
   if (!dirs.length) { if (strict === true) throw new Error(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); return status(kind === 'tuning' ? '请先生成率定任务。' : '请先生成分析任务。'); }
   if (!kernel) { if (strict === true) throw new Error('请先选择内核。'); return status('请先选择内核。'); }
   if (studyRunning[kind]) { if (strict === true) throw new Error(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); return status(kind === 'tuning' ? '参数率定任务正在运行。' : '不确定性分析任务正在运行。'); }
-  // 运行方式里的模型版本：研究第一次运行时拍快照，之后续跑、重试沿用研究自己固定的版本（研究在本机跑）。
-  const version = modelVersion();
-  const versionArgs = {};
-  for (const dir of dirs) versionArgs[dir] = await studyVersionArg(dir, version);
-  const target = studyTarget();
-  if (Object.values(versionArgs).some(Boolean)) {
-    const versionBlocked = runModeBlocker({ version, target, readiness: state.versionReadiness, engine: modelEngine() });
-    if (versionBlocked) { if (strict === true) throw new Error(dialogText(versionBlocked)); return status(dialogText(versionBlocked)); }
-  }
-  // 运行位置是服务器：研究交给它（同一份设定在那里重建并运行），跑完自动取回。
-  if (target !== 'local') {
-    const warnings = await submitStudies(dirs, {
-      host: target, kernel, engine: modelEngine(), jobs: studyJobCount(kind), versionFor: async dir => versionArgs[dir],
-    });
-    for (const dir of dirs) watchServerStudy(dir, () => refreshStudy(kind));
-    await refreshStudy(kind, strict);
-    status([dialogText(`研究已交给服务器 ${target}；跑完会自动取回结果。`), ...(warnings ?? [])].join('\n'));
-    return;
-  }
   const isCurrent = studyMutationGuard(kind, dirs, kernel);
-  const jobs = studyJobCount(kind);
   studyRunning[kind] = true;
-  renderStudyActions(kind);
-  setStudyWizardPage(kind, 5);
+  renderStudyActions(kind); renderStudyRunMode(kind);
   try {
+    await prepareStudyRunMode(kind);
+    ensureStudyMutationCurrent(kind, isCurrent);
+    const mode = studyRunMode(kind);
+    const { version, target, engine } = { ...mode.selection };
+    const issue = mode.remotePending ? '研究已提交到服务器，请刷新状态或等待结果取回。' : studyRunModeIssue(kind);
+    if (issue) { if (strict === true) throw new Error(dialogText(issue)); return status(dialogText(issue)); }
+    if (kind === 'tuning' && tuneHybridSection() && engine !== 'rust') throw new Error('训练 AI 模型只能用 Rust 引擎；请检查本研究的运行方式。');
+    const versionArgs = {};
+    for (const dir of dirs) {
+      versionArgs[dir] = await studyVersionArg(dir, version);
+      ensureStudyMutationCurrent(kind, isCurrent);
+    }
+    const jobs = studyJobCount(kind);
+    setStudyWizardPage(kind, 6);
+    if (target !== 'local') {
+      const warnings = [];
+      for (const dir of dirs) {
+        ensureStudyMutationCurrent(kind, isCurrent);
+        rememberStudyRunMode(dir, {version,target,engine});
+        warnings.push(...await submitStudies([dir], { host: target, kernel, engine, jobs, versionFor: async () => versionArgs[dir] }));
+        watchServerStudy(dir, () => refreshStudy(kind));
+      }
+      ensureStudyMutationCurrent(kind, isCurrent);
+      await refreshStudy(kind, strict);
+      status([dialogText(`研究已交给服务器 ${target}；跑完会自动取回结果。`), ...warnings].join('\n'));
+      return;
+    }
     const perStudyJobs = dirs.length === 1 ? jobs : 1;
     const results = await boundedMap(dirs, Math.min(jobs, dirs.length), async dir => {
       ensureStudyMutationCurrent(kind, isCurrent);
-      return {
-        dir,
-        out: await invoke('study_run', {
-          studyDir: dir, kernel, stream: true, jobs: perStudyJobs, retryFailed: false,
-          engine: modelEngine(), modelVersion: versionArgs[dir],
-        }),
-      };
+      rememberStudyRunMode(dir, {version,target,engine});
+      return { dir, out: await invoke('study_run', {
+        studyDir: dir, kernel, stream: true, jobs: perStudyJobs, retryFailed: false,
+        engine, modelVersion: versionArgs[dir],
+      }) };
     });
     if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
     await refreshStudy(kind, strict);
     if (!isCurrent()) { if (strict === true) throw new Error('任务上下文已变化，请重新检查。'); return; }
-    setPreview(kind, results.filter(result => result.ok)
-      .map(result => `${result.value.dir}\n${result.value.out}`).join('\n\n'));
+    setPreview(kind, results.filter(result => result.ok).map(result => `${result.value.dir}\n${result.value.out}`).join('\n\n'));
     const failed = results.filter(result => !result.ok);
-    if (failed.length) throw new Error(failed
-      .map(result => `${dirs[result.index]}: ${result.error}`).join('\n'));
+    if (failed.length) throw new Error(failed.map(result => `${dirs[result.index]}: ${result.error}`).join('\n'));
     status(kind === 'tuning' ? '参数搜索完成。' : '不确定性分析计算完成。');
   } finally {
     studyRunning[kind] = false;
-    renderStudyActions(kind);
-    renderStudyWizard(kind);
+    renderStudyActions(kind); renderStudyRunMode(kind); renderStudyWizard(kind);
   }
 }
 
@@ -3311,6 +3492,7 @@ bindStudyJobInputs('tuning');
 wireTuneHybrid(() => {
   invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。');
   renderStudyBudget('tuning');
+  prepareStudyRunMode('tuning').catch(status);
 });
 if ($('tune-site-mode')) $('tune-site-mode').onchange = async () => { invalidateActiveStudy('tuning', '率定设计已修改，请重新生成率定任务。'); await renderTuningTargets(); };
 if ($('tune-validation')) $('tune-validation').onchange = () => {
@@ -3428,6 +3610,7 @@ export const resultsGuide = {
     const kind = step === 'result-tuning' ? 'tuning' : step === 'result-uncertainty' ? 'uq' : null;
     if (kind) {
       const prefix = kind === 'tuning' ? 'tune' : 'uq';
+      for (const button of $(`${prefix}-run-mode`)?.querySelectorAll('button') ?? []) add(button.id, 'click', () => button.onclick());
       for (const [suffix, tier, run] of [
         ['refresh-params', 'click', () => prepareActivePane(true)],
         ['spinup-apply', 'commit', () => applyStudySpinup(kind, true)],
@@ -3456,7 +3639,7 @@ export const resultsGuide = {
       case: activeCase()?.dir ?? null,
       ...(kind ? { study: { kind, page: studyWizardPages[kind] + 1, issue: studyWizardIssue(kind, studyWizardPages[kind]),
         directories: activeStudyDirs(kind), status: aggregateStudy(studyViews[kind] || {}).status,
-        budget: $(`${prefix}-budget`)?.textContent || '', running: studyRunning[kind] } } : {}),
+        run_mode: { ...studyRunMode(kind).selection }, budget: $(`${prefix}-budget`)?.textContent || '', running: studyRunning[kind] } } : {}),
       metrics: state.resultMetrics.slice(0, 30).map(stripMetricPairs),
       metrics_truncated: state.resultMetrics.length > 30,
       failures: state.resultFailures.slice(0, 20),

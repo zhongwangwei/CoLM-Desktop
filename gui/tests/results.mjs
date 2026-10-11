@@ -198,7 +198,7 @@ for (const control of [
 for (const kind of ['uq', 'tuning']) {
   const steps = [...html.matchAll(new RegExp(`data-study-wizard="${kind}" data-study-step="(\\d+)"`, 'g'))]
     .map(match => Number(match[1])).sort((a, b) => a - b);
-  if (steps.join(',') !== '0,1,2,3,4,5,6') throw new Error(`${kind} must remain a seven-page guided analysis workflow`);
+  if (steps.join(',') !== '0,1,2,3,4,5,6,7') throw new Error(`${kind} must remain a eight-page guided analysis workflow`);
 }
 for (const text of ['尚未运行过基准算例也可以配置', '尚未运行过原算例也可以准备', '先设计，再准备任务，最后开始计算', '先设计，再准备任务，最后开始搜索']) {
   if (!html.includes(text)) throw new Error(`Study guidance is missing: ${text}`);
@@ -211,14 +211,14 @@ for (const text of [
 ]) {
   if (!html.includes(text)) throw new Error(`uncertainty design guidance is missing: ${text}`);
 }
-for (const text of ['5 · 生成分析任务', '6 · 开始计算与监控', '生成分析任务', '开始计算', '手动刷新', '导出分析记录']) {
+for (const text of ['6 · 生成分析任务', '7 · 开始计算与监控', '生成分析任务', '开始计算', '手动刷新', '导出分析记录']) {
   if (!html.includes(text)) throw new Error(`analysis task flow is missing: ${text}`);
 }
 for (const [kind, jobs, runJobs] of [['uq', 'uq-jobs', 'uq-run-jobs'], ['tuning', 'tune-jobs', 'tune-run-jobs']]) {
   const page1 = html.indexOf(`data-study-wizard="${kind}" data-study-step="0"`);
   const nextPage = html.indexOf(`data-study-wizard="${kind}"`, page1 + 1);
-  const page6 = html.indexOf(`data-study-wizard="${kind}" data-study-step="5"`);
-  const page7 = html.indexOf(`data-study-wizard="${kind}" data-study-step="6"`);
+  const page6 = html.indexOf(`data-study-wizard="${kind}" data-study-step="6"`);
+  const page7 = html.indexOf(`data-study-wizard="${kind}" data-study-step="7"`);
   const designControl = html.indexOf(`id="${jobs}"`);
   const runControl = html.indexOf(`id="${runJobs}"`);
   if (designControl < page1 || designControl > nextPage || runControl < page6 || runControl > page7
@@ -403,7 +403,7 @@ for (const delayedStage of ['metadata', 'metadata-design', 'outputs', 'outputs-d
   ) + '\ncreateStudy;', {
     studyScope: () => [{ dir: '/cases/site' }], studyScopeKey: () => scope,
     parentDir: () => '/cases', $: () => ({}), dialogText: value => value,
-    studyCreating: creating,
+    studyCreating: creating, renderStudyRunMode(){}, prepareStudyRunMode:async()=>{}, studyRunModeIssue:()=>'',
     loadStudyParams: () => delayedStage.startsWith('metadata') ? delay() : Promise.resolve(),
     renderStudyOutputs: () => delayedStage.startsWith('outputs') ? delay() : Promise.resolve(), studyPlans: plans,
     studyDesignKeys: () => plans().map(plan => plan.specJson), stableStudySpecKey: value => value,
@@ -651,7 +651,7 @@ if (!resultUi.includes('function studyWizardIssue(kind, page)')
     || !resultUi.includes('const studyWizardHelp =')
     || !resultUi.includes("$(`${prefix}-step-do`).textContent = dialogText(help[0])")
     || !resultUi.includes("$(`${prefix}-step-why`).textContent = dialogText(help[1])")
-    || !resultUi.includes('setStudyWizardPage(kind, 5)')
+    || !resultUi.includes('setStudyWizardPage(kind, 6)')
     || !resultUi.includes('function renderStudyActions(kind)')
     || !resultUi.includes('studyActionState(summary.status, hasTask, studyRunning[kind])')
     || !resultUi.includes("$(`${prefix}-step-prev`).onclick")
@@ -947,6 +947,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
   const messages = [];
   const runStudy = runInNewContext(resultUi.slice(resultUi.indexOf('async function runStudy('), resultUi.indexOf('\nasync function retryStudy(')) + '\nrunStudy;', {
     spatialStudyReason: () => '', aggregateStudy: () => ({status:'Ready'}), studyViews:{uq:{}}, activeStudyDirs:()=>['/s/a'], currentKernel:()=>'/k', studyRunning:{uq:false},
+    studyMutationGuard:()=>()=>true, ensureStudyMutationCurrent(){}, renderStudyActions(){}, renderStudyRunMode(){}, renderStudyWizard(){}, setStudyWizardPage(){}, prepareStudyRunMode:async()=>{}, studyRunMode:()=>({selection:{version:'snow',target:'server',engine:'rust'}}), studyRunModeIssue:()=>'', rememberStudyRunMode(){},
     modelVersion:()=> 'snow', studyVersionArg:async()=> 'snow', studyTarget:()=> 'server', runModeBlocker:()=>null, state:{}, modelEngine:()=> 'rust', studyJobCount:()=>2,
     submitStudies:async()=> ['ledger-warning'], watchServerStudy:()=>{}, refreshStudy:async()=>messages.push('refresh'), status:text=>messages.push(text), dialogText:x=>x,
   });
@@ -972,6 +973,7 @@ console.log('results: scope, Study controls, bounded loading, PDF, and nine pane
     studyScopeKey: () => 'scope', activeStudyDirs: () => ['/studies/a', '/studies/b'], currentKernel: () => '/kernel',
     aggregateStudy: () => ({ status: 'Ready' }), studyViews: { uq: {} }, status() {}, renderStudyReadiness() {},
     studyRunning: { uq: false }, studyJobCount: () => 1, renderStudyActions() {}, setStudyWizardPage() {},
+    renderStudyRunMode(){}, prepareStudyRunMode:async()=>{}, studyRunMode:()=>({selection:{version:'snow',target:'local',engine:'fortran'}}), studyRunModeIssue:()=>'', rememberStudyRunMode(){},
     boundedMap: async (items, _limit, fn) => {
       const out = [];
       for (const item of items) {
@@ -1120,3 +1122,123 @@ for (const action of ['retry', 'resume']) {
     if (switchScope ? !caught?.message.includes('分析设计已修改') : caught) throw new Error(`unexpected ${action} result: ${caught}`);
   }
 }
+
+// Study run modes are scoped drafts; independent of later header changes and guarded across async reads.
+{
+  const assert = (await import('node:assert/strict')).default;
+  const { studyBudget } = await import(moduleUrl('study-model.js'));
+  let scope = 'scope-a', header = {version:'official',target:'local',engine:'fortran'};
+  let dirs = [], envelope = {}, deferChecks = false;
+  const checks = [], cardOptions = {}, pendingChecks = [];
+  const controls = Object.fromEntries(['uq-run-mode','tune-run-mode','uq-run-mode-status','tune-run-mode-status',
+    'uq-jobs','uq-run-jobs','cpu-workers','tune-pop','tune-gen','uq-method','uq-count','tune-hybrid-on'].map(id=>[id,{id,value:'',checked:false,querySelectorAll:()=>[]} ]));
+  Object.assign(controls['uq-jobs'],{value:'16'});controls['cpu-workers'].value='2';
+  controls['tune-pop'].value='4';controls['tune-gen'].value='1';controls['uq-method'].value='oat';controls['uq-count'].value='999';
+  const busy = {uq:false,tuning:false};
+  const api = runInNewContext(resultUi.slice(resultUi.indexOf('const studyRunModeScopes ='), resultUi.indexOf('\nfunction bindStudyJobInputs(')) +
+    '\n({studyRunMode,prepareStudyRunMode,checkStudyRunMode,renderStudyRunMode,studyRuntimeNotes,studyJobCount,rememberStudyRunMode});', {
+    localStorage:{getItem:()=>null,setItem(){}}, $:id=>controls[id], studyScopeKey:()=>scope,
+    modelVersion:()=>header.version, modelEngine:()=>header.engine, studyTarget:()=>header.target,
+    activeStudyDirs:()=>dirs, currentKernel:()=>'/kernel', studyScope:()=>[{dir:'/c/one'},{dir:'/c/two'}],
+    studyRunning:busy, studyCreating:{uq:false,tuning:false}, studyCpuCapacity:4, studyJobInputs:()=>[controls['uq-jobs'],controls['uq-run-jobs']],
+    configuredServers:()=>[{host:'server',cpus:64,threads:2}], cachedProbe:()=>null,
+    selectedStudyParams:()=>[{},{}], studyBudget, language:()=> 'zh', dialogText:x=>x,
+    runModeBlocker:({version,readiness})=>version==='official'?'':!readiness?'pending':readiness.ready?'':'blocked',
+    renderStudyWizard(){},renderStudyBudget(){},renderRunModeCards:(container,options)=>{cardOptions[container.id]=options;},
+    invoke:async(command,args)=> {
+      if(command==='workspace_list')return{workspaces:[{name:'snow'}]};
+      if(command==='case_runs')return{runs:[{ok:true,stage:'colm',started:null,finished:9999999},{ok:false,stage:'all',started:0,finished:1000},{ok:true,stage:'mksrfdata',started:0,finished:500}, {ok:true,stage:'colm',started:20,finished:80}]};
+      if(command==='study_status')return JSON.stringify(envelope);
+      if(command==='version_check'){checks.push(args);if(deferChecks)return new Promise(resolve=>pendingChecks.push(resolve));return{name:args.name,ready:true};}
+      throw new Error(command);
+    },
+  });
+  // Merely wiring the parallel control must not freeze the header defaults.
+  api.studyJobCount('uq');header={version:'snow',target:'server',engine:'fortran'};
+  await api.prepareStudyRunMode('uq');
+  assert.deepEqual(JSON.parse(JSON.stringify(api.studyRunMode('uq').selection)),header);
+  assert.deepEqual(JSON.parse(JSON.stringify(checks.at(-1))),{name:'snow',kernel:'/kernel',engine:'fortran'});
+  header={version:'official',target:'local',engine:'rust'};
+  assert.equal(api.studyRunMode('uq').selection.target,'server');
+  controls['uq-jobs'].value='16';assert.equal(api.studyJobCount('uq'),16,'server jobs are not limited by local CPU count');
+  assert.equal(api.studyRunMode('uq').baselineSeconds,60,'only positive successful all/colm runs supply estimates');
+  assert.match(api.studyRuntimeNotes('uq').local,/可同时 2 个成员 · 约 4 分钟/,'OAT estimate must ignore LHS count');
+  await api.prepareStudyRunMode('tuning');
+  assert.match(api.studyRuntimeNotes('tuning').local,/约 4 分钟/,'DE estimate must use population and generations');
+  assert.equal(api.studyRunMode('tuning').selection.target,'local','UQ choices do not leak into tuning');
+  await cardOptions['uq-run-mode'].onChange('engine','rust');
+  assert.equal(api.studyRunMode('uq').selection.engine,'rust');
+  assert.equal(header.engine,'rust');
+  busy.uq=true;api.renderStudyRunMode('uq');assert.equal(cardOptions['uq-run-mode'].disabled,true);
+  await cardOptions['uq-run-mode'].onChange('target','local');assert.equal(api.studyRunMode('uq').selection.target,'server');busy.uq=false;
+  // An old check cannot overwrite a newer engine/version selection.
+  deferChecks=true;const mode=api.studyRunMode('uq');mode.selection.version='old';const old=api.checkStudyRunMode('uq');
+  mode.selection.version='new';const newer=api.checkStudyRunMode('uq');
+  pendingChecks[1]({name:'new',ready:true});await newer;pendingChecks[0]({name:'old',ready:false});await old;
+  assert.equal(mode.readiness.name,'new');deferChecks=false;
+  // New scope defaults afresh; returning to an old scope retains its own draft.
+  scope='scope-b';await api.prepareStudyRunMode('uq');assert.equal(api.studyRunMode('uq').selection.target,'local');
+  scope='scope-a';assert.equal(api.studyRunMode('uq').selection.target,'server');
+  controls['tune-hybrid-on'].checked=true;assert.equal(api.studyRunMode('tuning').selection.engine,'rust');
+  api.renderStudyRunMode('tuning');assert.equal(cardOptions['tune-run-mode'].lockEngine,'rust');
+  // Persisted remote records are authoritative and cannot be rebound through a card callback.
+  dirs=['/study'];envelope={model_version:{name:'pinned'},remote:{host:'server',provenance:{engine:'fortran'},fetched_at:123},state:{tasks:{one:{status:'succeeded'}}}};
+  await api.prepareStudyRunMode('uq');assert.equal(mode.selection.version,'pinned');assert.equal(mode.selection.engine,'fortran');
+  await cardOptions['uq-run-mode'].onChange('version','official');assert.equal(mode.selection.version,'pinned');
+  envelope={remote:{host:'server',provenance:{engine:'rust',version:{kind:'workspace',name:'remote-pinned'}},fetched_at:123}};
+  await api.prepareStudyRunMode('uq');assert.equal(mode.selection.version,'remote-pinned');
+  dirs=['/one','/two'];
+  let envelopeRead=0;
+  const pinnedVersion={get name(){return ++envelopeRead===1?'version-a':'version-b';}};
+  envelope={model_version:pinnedVersion};
+  await api.prepareStudyRunMode('uq');
+  assert.match(mode.error,/多个研究运行设置不一致/);
+  dirs=['/study'];
+  scope='legacy';envelope={state:{tasks:{one:{status:'succeeded'}}}};await api.prepareStudyRunMode('uq');
+  assert.match(api.studyRunMode('uq').warning,/旧研究未记录/);
+  assert.equal(api.studyRunMode('uq').selection.version,'official');
+}
+console.log('results: independent Study run modes, cached estimates, remote capacity, locks and stale checks passed');
+
+// Remote submissions become busy before the first await and capture their own engine/target.
+{
+  const assert=(await import('node:assert/strict')).default;
+  let finishPreparation, finishSubmit, submissions=0;
+  const running={uq:false};
+  const selection={version:'official',target:'server',engine:'fortran'};
+  const run=runInNewContext(resultUi.slice(resultUi.indexOf('async function runStudy('),resultUi.indexOf('\nasync function retryStudy('))+'\nrunStudy;',{
+    spatialStudyReason:()=>'',aggregateStudy:()=>({status:'Ready'}),studyViews:{uq:{}},activeStudyDirs:()=>['/study'],currentKernel:()=>'/kernel',
+    studyRunning:running,studyMutationGuard:()=>()=>true,ensureStudyMutationCurrent(){},renderStudyActions(){},renderStudyRunMode(){},renderStudyWizard(){},
+    prepareStudyRunMode:()=>new Promise(resolve=>{finishPreparation=resolve;}),studyRunMode:()=>({selection}),studyRunModeIssue:()=>'',
+    studyVersionArg:async()=>null,studyJobCount:()=>8,setStudyWizardPage(){},rememberStudyRunMode(){},
+    submitStudies:async(dirs,options)=>{submissions++;assert.equal(options.engine,'fortran');assert.equal(options.host,'server');return new Promise(resolve=>{finishSubmit=resolve;});},
+    watchServerStudy(){},refreshStudy:async()=>{},status(){},dialogText:x=>x,
+  });
+  const pending=run('uq');assert.equal(running.uq,true);
+  await run('uq');assert.equal(submissions,0);
+  finishPreparation();for(let n=0;!finishSubmit&&n<10;n++)await Promise.resolve();
+  assert.equal(submissions,1);await run('uq');assert.equal(submissions,1);
+  selection.engine='rust';selection.target='local';finishSubmit([]);await pending;
+  assert.equal(running.uq,false);
+}
+console.log('results: remote submission busy guard and captured settings passed');
+
+// Assistant choice actions await the same visible card handler; starting remains approval-gated.
+{
+  const assert=(await import('node:assert/strict')).default;
+  let finishChoice, finished=false, clicks=0;
+  const choice={id:'uq-run-mode-choice-version-1',disabled:false,closest:()=>null,onclick:()=>{clicks++;return new Promise(resolve=>{finishChoice=resolve;});}};
+  const runButton={id:'uq-run',disabled:false,closest:()=>null};
+  const pane={contains:()=>true};
+  const guide=runInNewContext(resultUi.slice(resultUi.indexOf('export const resultsGuide =')).replace('export const resultsGuide','const resultsGuide')+'\nresultsGuide;',{
+    state:{step:'result-uncertainty'},document:{querySelector:()=>pane},activeCase:()=>({dir:'/case'}),
+    $:id=>id==='uq-run-mode'?{querySelectorAll:()=>[choice]}:id===choice.id?choice:id==='uq-run'?runButton:null,
+    runStudy:async()=>{},
+  });
+  const actions=guide.actions();
+  assert.equal(actions[choice.id].kind,'click');assert.equal(actions['uq-run'].kind,'commit');
+  const pending=actions[choice.id].run().then(()=>{finished=true;});await Promise.resolve();
+  assert.equal(finished,false);assert.equal(clicks,1);finishChoice();await pending;assert.equal(finished,true);
+  choice.disabled=true;await assert.rejects(actions[choice.id].run(),/当前页面不能执行/);
+}
+console.log('results: assistant Study choices await visible handlers and preserve run approval');
