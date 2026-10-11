@@ -61,6 +61,16 @@ for (const id of ['result-uncertainty', 'result-tuning']) {
 if (!stepFor('result-export').need()?.includes('至少一个算例')) {
   throw new Error('result-export must still require a completed result');
 }
+const navigationDocument = globalThis.document;
+globalThis.document = {getElementById: () => null};
+state.modelVersion = 'snow';
+if (!nextOf('run-mode').need()?.includes('还在检查')) throw new Error('Next must block a pending version check');
+state.versionReadiness = {name:'snow',ready:false,items:[{blocking:true,message:'test blocker'}]};
+if (!nextOf('run-mode').need()?.includes('test blocker')) throw new Error('Next and assistant must share the run-mode blocker');
+state.versionReadiness = {name:'snow',ready:true,items:[]};
+if (nextOf('run-mode').need() !== null) throw new Error('ready version must unlock Next');
+state.modelVersion = 'official'; state.versionReadiness = null;
+if (navigationDocument) globalThis.document = navigationDocument; else delete globalThis.document;
 state.selected.has_history = true;
 if (nextOf('result-diagnostics')?.id !== 'result-export') {
   throw new Error('optional Study branches must not become required Next steps');

@@ -7,8 +7,10 @@ import { $, status, baseName } from './ui.js';
 import { language, translateZh } from './i18n.js';
 import { modelEngine } from './engine.js';
 import { kernelForSubgrid } from './kernel.js';
-import { go } from './shell.js';
+import { go, renderSteps } from './shell.js';
 import { openWorkspaces } from './workspace.js';
+import { configuredServers } from './remote.js';
+import { renderRunModeCards } from './run-mode-cards.js';
 import {
   OFFICIAL, modelVersion, versionLabel, targetLabel, engineLabel, touchesText, readinessRows, contextChips,
   runModeBlocker,
@@ -101,7 +103,8 @@ function renderVersionCard() {
   const version = modelVersion();
   if (version === OFFICIAL) {
     card.hidden = true;
-    list.hidden = true;
+    list.hidden = false;
+    list.replaceChildren(el('li', { className: 'readiness-ok', textContent: t('✓ 使用随软件发布的官方版') }));
     return;
   }
   const ws = workspaces.find(w => w.name === version);
@@ -188,9 +191,28 @@ export function renderContextBar() {
 }
 
 function renderAll() {
+  const cards = $('run-mode-choices');
+  if (cards) renderRunModeCards(cards, {
+    versions: workspaces, servers: configuredServers(),
+    selection: { version: modelVersion(), target: runTarget(), engine: modelEngine() },
+    onChange(key, value) {
+      const source = $({ version: 'model-version', target: 'run-target', engine: 'model-engine' }[key]);
+      if (!source || source.disabled || ![...source.options].some(option => option.value === value)) return;
+      source.value = value;
+      source.dispatchEvent(new Event('change', { bubbles: true }));
+    },
+  });
+  const next = $('run-mode-next');
+  if (next) {
+    const why = blocker();
+    next.disabled = !!why;
+    next.title = why ? t(why) : '';
+    next.textContent = t(why ? '先处理上面的 ✕ 项' : '下一步：输出与运行 →');
+  }
   renderVersionCard();
   renderRunLine();
   renderContextBar();
+  renderSteps(false);
 }
 
 // ---- 接线 -------------------------------------------------------------------------------------
@@ -205,6 +227,7 @@ function wire() {
     checkVersion();
   };
   $('manage-versions')?.addEventListener('click', openWorkspaces);
+  $('run-mode-next')?.addEventListener('click', () => { if (!blocker()) go('run'); });
   $('model-engine')?.addEventListener('change', () => checkVersion());
   $('run-target')?.addEventListener('change', renderAll);
   // 改代码页里新建、删除、重新编译或改了代码：版本列表与检查结果都要重来。
@@ -217,7 +240,8 @@ function wire() {
   });
   addEventListener('colm:kernels', () => checkVersion());
   addEventListener('colm:wizard', () => checkVersion());
-  addEventListener('colm:context', renderContextBar);
+  addEventListener('colm:context', renderAll);
+  addEventListener('colm:probe', renderAll);
   addEventListener('colm:step', () => {
     if (state.step === 'run-mode') refreshVersions().catch(status);
     else renderAll();

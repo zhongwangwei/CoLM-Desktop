@@ -10,6 +10,7 @@ import { language, translateZh } from './i18n.js';
 import { go } from './shell.js';
 import { openServerDialog, probeLines, kernelLines, runTarget } from './remote.js';
 import { OFFICIAL, modelVersion, versionLabel } from './run-mode.js';
+import { recordProbe } from './remote-probe-cache.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 
@@ -100,7 +101,14 @@ function serverCard(server) {
       button('设为运行位置', () => useTarget(server.host), 'run-btn'),
       button('检查连接', async () => {
         show([t('正在连接…')], 'muted');
-        try { show(probeLines(await invoke('remote_probe', { server }))); } catch (error) { fail(error); }
+        try {
+          const probe = await invoke('remote_probe', { server });
+          recordProbe(server, probe);
+          show(probeLines(probe));
+        } catch (error) {
+          recordProbe(server, null, error);
+          fail(error);
+        }
       }),
       button('查看内核', async () => {
         show([t('正在读取…')], 'muted');

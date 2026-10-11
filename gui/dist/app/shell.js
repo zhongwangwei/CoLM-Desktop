@@ -3,8 +3,10 @@
 import { state } from './state.js';
 import { $ } from './ui.js';
 import { language, translateZh } from './i18n.js';
+import { modelVersion, runModeBlocker } from './run-mode.js';
 
 const ready = () => (state.selected ? null : '先在文件与目录建一个算例');
+const runReady = () => ready() ?? runModeBlocker({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: $('model-engine')?.value || 'rust', readiness: state.versionReadiness });
 const available = id => () => state.availableFlows.has(id);
 // 过程步骤在建例前要保持可见，让用户知道后续流程；此时 `need` 会把它们
 // 灰置。建例后才按当前站点/内核的真实可用分栏收窄。
@@ -53,7 +55,7 @@ export const WORKFLOW = [
     { id: 'run-mode', page: 'run', t: '运行方式', d: '版本 × 在哪里 × 引擎', need: ready },
   ] },
   { n: 4, t: '运行', d: '输出、阶段与日志', steps: [
-    { id: 'run', page: 'run', t: '运行', d: '输出、阶段与日志', need: ready },
+    { id: 'run', page: 'run', t: '运行', d: '输出、阶段与日志', need: runReady },
   ] },
   // 结果是枢纽：所有流程的结果都汇到这里，“下一步”从这里分流（results-hub.js）。
   { n: 5, key: 'results', collapsible: true, t: '结果与评估', d: '枢纽：对比与下一步', steps: [
@@ -135,7 +137,7 @@ export function renderNextButtons() {
       b.onclick = () => go(prev.id);
       foot.appendChild(b);
     }
-    if (next) {
+    if (next && here?.id !== 'run-mode') {
       const why = next.need();
       const b = document.createElement('button');
       b.className = 'btn-next';
@@ -167,7 +169,16 @@ export function go(id) {
   globalThis.dispatchEvent?.(new CustomEvent('colm:step', { detail: id }));
 }
 
-export function renderSteps() {
+function appendStepText(node, title, detail, detailClass = 'd') {
+  for (const [className, text] of [['t', title], [detailClass, detail]]) {
+    const span = document.createElement('span');
+    span.className = className;
+    span.textContent = text;
+    node.appendChild(span);
+  }
+}
+
+export function renderSteps(notifyContext = true) {
   const box = $('steps');
   box.textContent = '';
   let section = 'workflow';
@@ -197,8 +208,11 @@ export function renderSteps() {
     const d = document.createElement(group.collapsible ? 'summary' : 'div');
     d.className = 'step flow-head' + (active ? ' current' : '');
     if (why) d.setAttribute('aria-disabled', 'true');
-    d.innerHTML = `<span class="num">${group.n}</span><span class="step-copy">
-      <span class="t">${group.t}</span><span class="d">${why ?? group.d}</span></span>`;
+    const num = document.createElement('span');
+    num.className = 'num'; num.textContent = group.n;
+    const copy = document.createElement('span'); copy.className = 'step-copy';
+    appendStepText(copy, group.t, why ?? group.d);
+    d.appendChild(num); d.appendChild(copy);
     if (!group.collapsible) d.onclick = () => go(steps[0].id);
     block.appendChild(d);
     if (group.collapsible) {
@@ -209,7 +223,7 @@ export function renderSteps() {
         const child = document.createElement('div');
         child.className = 'substep' + (state.step === s.id ? ' active' : '');
         if (childWhy) child.setAttribute('aria-disabled', 'true');
-        child.innerHTML = `<span class="t">${s.t}</span><span class="d">${childWhy ?? s.d}</span>`;
+        appendStepText(child, s.t, childWhy ?? s.d);
         child.onclick = () => go(s.id);
         children.appendChild(child);
       }
@@ -248,7 +262,7 @@ export function renderSteps() {
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();
   // 上下文条（算例 · 版本 · 位置 · 引擎）跟着同一份状态刷新。
-  globalThis.dispatchEvent?.(new Event('colm:context'));
+  if (notifyContext) globalThis.dispatchEvent?.(new Event('colm:context'));
 }
 
 /** 研究那一段：可选的子标题加平铺的条目，右侧是状态（`badge`）或说明。 */
@@ -268,7 +282,7 @@ function renderList(group, steps) {
     const row = document.createElement('div');
     row.className = 'substep' + (state.step === s.id ? ' active' : '');
     if (why) row.setAttribute('aria-disabled', 'true');
-    row.innerHTML = `<span class="t">${s.t}</span><span class="d${badge && !why ? ' badge-line' : ''}">${why ?? badge ?? s.d}</span>`;
+    appendStepText(row, s.t, why ?? badge ?? s.d, badge && !why ? 'd badge-line' : 'd');
     row.onclick = () => go(s.id);
     block.appendChild(row);
   }

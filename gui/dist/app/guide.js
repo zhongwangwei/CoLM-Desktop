@@ -46,8 +46,11 @@ const DRAFT_FIELDS = {
     'spatial-forcing', 'spatial-start', 'spatial-end', 'spatial-timestep', 'spatial-root', 'spatial-name',
   ],
   'basic-timing': ['tm-years', 'tm-repeat'],
-  run: ['model-engine', 'cpu-workers', 'mpi-ranks', 'case-threads', 'force'],
+  'run-mode': ['cpu-workers', 'mpi-ranks', 'case-threads'],
+  run: ['force'],
 };
+// Header choices use the same change handlers as manual interaction.
+const CONTEXT_FIELDS = ['context-select-version', 'context-select-target', 'context-select-engine'];
 /** 配置向导里的输入（空间范围、同位素、溶质）。 */
 const GATE_FIELDS = [
   'spatial-west', 'spatial-east', 'spatial-south', 'spatial-north', 'spatial-dlon', 'spatial-dlat',
@@ -205,7 +208,7 @@ export function uiState() {
     case: state.selected?.dir ?? null,
     model: state.wizard ? { domain: state.domain, subgrid: state.subgrid, physics: state.wizard.physics } : null,
     steps: steps(),
-    fields: [...draftFields(DRAFT_FIELDS[state.step] ?? []),
+    fields: [...draftFields([...CONTEXT_FIELDS, ...(DRAFT_FIELDS[state.step] ?? [])]),
       ...taskFields().map(el => ({ ...describeControl(el.id, el, false), label: labelFor(el) })), ...tableFields()],
     sites: siteList(),
     buttons: [...buttons(CLICKS, 'click'), ...buttons(COMMITS, 'commit'),
@@ -252,8 +255,9 @@ function assign(el, raw, notify = true) {
 async function fill(fields) {
   const done = [];
   for (const { field, value } of fields ?? []) {
-    const allowed = new Set(screen() === 'setup-wizard' ? GATE_FIELDS
-      : [...(DRAFT_FIELDS[state.step] ?? []), ...taskFields().map(el => el.id)]);
+    const where = screen();
+    const allowed = new Set(where === 'setup-wizard' ? GATE_FIELDS
+      : where === 'workbench' ? [...CONTEXT_FIELDS, ...(DRAFT_FIELDS[state.step] ?? []), ...taskFields().map(el => el.id)] : []);
     const el = allowed.has(field) ? $(field) : null;
     if (!el || !shown(el)) {
       const saves = tableRows().some(row => row.dataset.parameterKey === field);

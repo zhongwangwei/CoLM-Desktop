@@ -12,6 +12,7 @@ import { invalidateResultCase } from './results.js';
 import { setRunning } from './shell.js';
 import { modelEngine } from './engine.js';
 import { modelVersion, OFFICIAL } from './run-mode.js';
+import { recordProbe } from './remote-probe-cache.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 const POLL_MS = 10_000;
@@ -91,6 +92,10 @@ async function loadConfig() {
   config.servers ??= [];
   renderTargets();
   return config;
+}
+
+export function configuredServers() {
+  return structuredClone(config.servers);
 }
 
 /** 运行位置：'local' 或服务器名。 */
@@ -270,13 +275,15 @@ async function testConnection() {
   $('remote-test').disabled = $('remote-save').disabled = true;
   const revision = dialogRevision;
   const box = $('remote-probe-result');
+  let server;
   box.className = 'remote-probe mini muted';
   box.textContent = t('正在连接…');
   try {
-    const server = formServer();
+    server = formServer();
     await setPassword(server);
     if (revision !== dialogRevision) return;
     const probe = await invoke('remote_probe', { server });
+    recordProbe(server, probe);
     if (revision !== dialogRevision) return;
     $('remote-queue-list').replaceChildren(...(probe.queues ?? []).map(q => new Option(q, q)));
     box.replaceChildren(...probeLines(probe).map(line => Object.assign(document.createElement('div'), { textContent: line })));
@@ -286,6 +293,7 @@ async function testConnection() {
     box.className = `remote-probe mini ${probe.problems?.length ? '' : 'assistant-key-ok'}`;
     box.prepend(Object.assign(document.createElement('div'), { textContent: probe.problems?.length ? t('连上了，但还缺：') : `✓ ${t('连接正常，可以运行')}` }));
   } catch (error) {
+    if (server) recordProbe(server, null, error);
     if (revision !== dialogRevision) return;
     box.className = 'remote-probe mini assistant-fail';
     box.textContent = String(error?.message || error);

@@ -735,55 +735,38 @@
       <div class="flow-pane" data-flow-pane="run-mode">
         <div class="work-head"><span class="kicker">第 3 步 · 运行方式</span></div>
         <h1>运行方式</h1>
-        <p class="sub">每次运行 = 算例 × 模型版本 × 运行方式（在哪里跑、用哪个引擎）。这里选好之后，运行页、结果页和 AI 助手都按它来。</p>
-
-        <div class="card">
-          <h3>模型版本</h3>
-          <div class="ch">官方版是应用自带的 CoLM。修改版是你在“改代码”（开发工作区）里改过的一份，跑的是它自己编出的引擎与内核；官方版不受影响。</div>
-          <div class="run-parallel-setting">
-            <div>
-              <label for="model-version">用哪一版</label>
-              <span id="model-version-note">新建的修改版会自动出现在这里，不用另外登记。</span>
-            </div>
-            <select class="select" id="model-version"><option value="official">官方版</option></select>
-            <button class="btn-ghost" type="button" id="manage-versions">改代码…</button>
-          </div>
-          <div class="version-card" id="version-card" hidden></div>
-          <ul class="readiness" id="version-readiness" hidden></ul>
-        </div>
-
-        <div class="card">
-          <h3>在哪里跑、用哪个引擎</h3>
-          <div class="ch">并行设置跟着引擎与算例类型变化，只显示用得上的那几项。</div>
-          <div class="run-parallel-setting" id="run-target-setting">
-            <div>
-              <label for="run-target">运行位置</label>
-              <span>本机，或一台已配置的服务器：经你自己的 ssh 连接，在服务器上编译并运行，跑完自动把结果取回本机。修改版在服务器上用它自己的源码编。</span>
-            </div>
-            <select class="select" id="run-target"><option value="local">本机</option></select>
-            <button class="btn-ghost" type="button" id="manage-servers">管理服务器…</button>
-            <button class="btn-ghost" type="button" id="open-resources">计算资源…</button>
+        <p class="sub">这三项和顶部的上下文条是同一份设置：在这里改，上面跟着变。</p>
+        <div id="run-mode-choices">
+          <section class="card run-choice-group">
+            <div class="run-choice-head"><h3>用哪个模型版本</h3><button class="btn-ghost" type="button" id="manage-versions">去改代码 →</button></div>
+            <div class="run-choice-grid" data-run-choice="version"></div>
+            <p class="muted mini" id="model-version-note">新建的修改版会自动出现在这里，不用另外登记。</p>
+          </section>
+          <section class="card run-choice-group">
+            <div class="run-choice-head"><h3>在哪里跑</h3><button class="btn-ghost" type="button" id="open-resources">管理计算资源 →</button></div>
+            <div class="run-choice-grid" data-run-choice="target"></div>
             <button class="btn-ghost" type="button" id="preview-job" hidden>预览作业脚本</button>
-          </div>
+          </section>
+          <section class="card run-choice-group">
+            <h3>用哪个引擎</h3>
+            <div class="run-choice-grid" data-run-choice="engine"></div>
+            <p class="warn mini" id="hybrid-engine-warning" hidden>本次有装了 AI 模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型。</p>
+          </section>
+        </div>
+        <select id="model-version" hidden aria-hidden="true" tabindex="-1"><option value="official">官方版</option></select>
+        <select id="run-target" hidden aria-hidden="true" tabindex="-1"><option value="local">本机</option></select>
+        <select id="model-engine" hidden aria-hidden="true" tabindex="-1"><option value="rust" selected>Rust 引擎（默认）</option><option value="fortran">Fortran 内核</option></select>
+        <button type="button" id="manage-servers" hidden>管理服务器…</button>
+        <div class="card">
+          <h3>并行设置</h3>
           <div class="run-parallel-setting" id="workers-setting">
             <div>
-              <label for="cpu-workers">批量并行算例数</label>
+              <label for="cpu-workers">同时运行的算例数</label>
               <span>仅在同时运行多个算例时生效；同时运行的算例数会按每算例的 MPI 进程数（Fortran）或线程数（Rust）自动限额。</span>
             </div>
             <input class="input" id="cpu-workers" type="number" min="1" step="1" value="2">
             <span class="muted mini" id="cpu-capacity"></span>
           </div>
-          <div class="run-parallel-setting">
-            <div>
-              <label for="model-engine">模拟引擎</label>
-              <span>只影响 colm 模拟阶段。Rust 引擎在一个进程内多线程运行站点、经纬度网格、非结构网格与流域网格算例（共享内存并行，线程数取 CPU 核数），与 Fortran 内核逐位一致；需要多进程 MPI 时选 Fortran 内核。不支持的组合会在运行前提示。</span>
-            </div>
-            <select class="select" id="model-engine">
-              <option value="rust" selected>Rust 引擎（默认）</option>
-              <option value="fortran">Fortran 内核</option>
-            </select>
-          </div>
-          <p class="warn mini" id="hybrid-engine-warning" hidden>本次有装了 AI 模型的算例，Fortran 内核运行不了它们。请把“模拟引擎”换成 Rust 引擎，或在“研究 → AI 混合建模”里移除模型。</p>
           <div class="run-parallel-setting" id="mpi-setting">
             <div>
               <label for="mpi-ranks">每个算例的 MPI 进程数</label>
@@ -800,6 +783,12 @@
             <input class="input" id="case-threads" type="number" min="1" step="1" placeholder="自动">
             <span class="muted mini" id="threads-capacity"></span>
           </div>
+        </div>
+        <div class="card">
+          <h3>准备情况</h3>
+          <div class="version-card" id="version-card" hidden></div>
+          <ul class="readiness" id="version-readiness" hidden></ul>
+          <button class="btn-next" type="button" id="run-mode-next">下一步：输出与运行 →</button>
         </div>
       </div>
 

@@ -295,5 +295,71 @@ try {
   finishDraft(); await drafting;
   el('task-draft').onchange = async () => {throw new Error('draft option loading failed');};
   await assert.rejects(drive('fill',{fields:[{field:'task-draft',value:'45'}]}),/draft option loading failed/);
+  state.step = 'run-mode';
+  const contextFields = ['context-select-version', 'context-select-target', 'context-select-engine'];
+  const canonicalFields = ['model-version', 'run-target', 'model-engine'];
+  const parallelFields = ['cpu-workers', 'mpi-ranks', 'case-threads'];
+  for (const [index, id] of contextFields.entries()) {
+    const control = el(id), source = el(canonicalFields[index]);
+    control.tagName = 'SELECT'; control.value = 'first';
+    control.options = [{value:'first',textContent:'First'}, {value:'second',textContent:'Second'}];
+    source.hidden = true;
+    let forwarded = 0, handlerCalls = 0, finishChange;
+    source.dispatchEvent = event => { assert.equal(event.type,'change'); assert.equal(event.bubbles,true); forwarded++; };
+    control.dispatchEvent = event => control[`on${event.type}`]?.(event);
+    control.onchange = async () => {
+      handlerCalls++;
+      source.value = control.value;
+      source.dispatchEvent(new Event('change',{bubbles:true}));
+      await new Promise(resolve => {finishChange=resolve;});
+    };
+    let complete = false;
+    const changing = drive('fill',{fields:[{field:id,value:'Second'}]}).then(()=>{complete=true;});
+    await Promise.resolve(); await Promise.resolve();
+    assert.equal(complete,false,'context fill must await its existing handler');
+    finishChange(); await changing;
+    assert.equal(handlerCalls,1,'property handler must run exactly once');
+    assert.equal(forwarded,1,'canonical choice must receive exactly one change');
+    assert.equal(source.value,'second');
+    await assert.rejects(drive('fill',{fields:[{field:id,value:'invalid'}]}),/not an option/);
+    assert.equal(control.value,'second'); assert.equal(handlerCalls,1);
+    for (const [flag, error] of [['hidden',/not a draft field/],['disabled',/disabled/],['readOnly',/read-only/]]) {
+      control[flag] = true;
+      if (flag === 'hidden') assert.ok(!guide.uiState().fields.some(f=>f.name===id));
+      await assert.rejects(drive('fill',{fields:[{field:id,value:'first'}]}),error);
+      control[flag] = false;
+    }
+    assert.equal(handlerCalls,1,'rejected requests must not trigger changes');
+    // Canonical controls stay inaccessible even if a future layout makes them visible.
+    source.hidden = false;
+    await assert.rejects(drive('fill',{fields:[{field:source.id,value:'first'}]}),/not a draft field/);
+    assert.ok(!guide.uiState().fields.some(f=>f.name===source.id));
+    source.hidden = true;
+  }
+  const modeFields = guide.uiState().fields.map(f=>f.name);
+  for (const id of [...contextFields,...parallelFields]) assert.ok(modeFields.includes(id));
+  assert.ok(!modeFields.includes('force'));
+  await drive('fill',{fields:parallelFields.map(field=>({field,value:'2'}))});
+  await assert.rejects(drive('commit',{target:'run-all'}),/not.*page|not available/);
+  state.step = 'run';
+  const runFields = guide.uiState().fields.map(f=>f.name);
+  assert.ok(runFields.includes('force'));
+  for (const id of parallelFields) {
+    assert.ok(!runFields.includes(id));
+    await assert.rejects(drive('fill',{fields:[{field:id,value:'3'}]}),/not a draft field/);
+  }
+  let runCalls = 0;
+  globalThis.testRun = async () => {runCalls++;};
+  await assert.rejects(drive('click',{target:'run-all'}),/ui_commit/);
+  await assert.rejects(drive('fill',{fields:[{field:'run-all',value:'true'}]}),/not a draft field/);
+  assert.equal(runCalls,0,'draft and click operations must not bypass run approval');
+  for (const gate of ['loadinggate','launchgate','domaingate']) {
+    el(gate).hidden = false;
+    assert.notEqual(guide.uiState().screen,'workbench');
+    for (const field of contextFields) {
+      await assert.rejects(drive('fill',{fields:[{field,value:'first'}]}),/not a draft field/);
+    }
+    el(gate).hidden = true;
+  }
   console.log('guide: detailed failure, example isolation, awaited creation, reuse and incomplete-result checks passed');
 } finally { await rm(temp, {recursive:true, force:true}); }

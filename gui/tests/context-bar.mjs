@@ -8,10 +8,16 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-context-'));
 await cp(new URL('dist/app', root), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}');
 class Element {
-  constructor(props = {}) { Object.assign(this, { children: [], options: [], value: '', listeners: {} }, props); }
+  constructor(props = {}) { Object.assign(this, { children: [], dataset: {}, options: [], value: '', listeners: {} }, props); }
   append(...children) { this.children.push(...children); this.options = this.children.filter(c => c instanceof Option); }
   appendChild(child) { this.append(child); }
   replaceChildren(...children) { this.children = []; this.append(...children); }
+  contains(node) { return this === node || this.children.some(child => child.contains?.(node)); }
+  querySelector(selector) {
+    const key = selector.match(/data-run-choice="([^"]+)"/)?.[1];
+    return this.children.find(child => key && child.dataset?.runChoice === key)
+      ?? this.children.map(child => child.querySelector?.(selector)).find(Boolean) ?? null;
+  }
   focus() { document.activeElement = this; }
   setAttribute(key, value) { this[key] = value; }
   addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
@@ -20,7 +26,7 @@ class Element {
 globalThis.Option = class extends Element {
   constructor(text, value, _default, selected = false) { super({ textContent: text, value, selected }); }
 };
-const elements = Object.fromEntries(['context-bar', 'model-version', 'run-target', 'model-engine', 'casename'].map(id => [id, new Element()]));
+const elements = Object.fromEntries(['context-bar', 'model-version', 'run-target', 'model-engine', 'casename', 'run-mode-choices', 'run-mode-next'].map(id => [id, new Element()]));
 elements['run-target'].append(new Option('本机', 'local'), new Option('srv', 'srv'));
 elements['run-target'].value = 'local';
 elements['model-engine'].append(new Option('Rust', 'rust'), new Option('Fortran', 'fortran'));
@@ -30,17 +36,18 @@ globalThis.addEventListener = () => {};
 globalThis.localStorage = { getItem: () => null, setItem() {} };
 for (const [name, body] of Object.entries({
   'ui.js': 'export const $ = id => globalThis.contextElements[id] ?? globalThis.contextElements["context-bar"].children.flatMap(c => c.children).find(c => c.id === id); export const status = () => {}; export const baseName = p => p;',
-  'ipc.js': 'export const hasBackend = false; export const invoke = async () => ({});',
+  'ipc.js': 'export const hasBackend = true; export const invoke = async cmd => cmd === "workspace_list" ? { workspaces: [{name:"snow",touches:{engine:true},lights:{compile:"pass",tests:"pass"}}] } : {name:"snow",ready:true,items:[]};',
   'i18n.js': 'export const language = () => "zh"; export const translateZh = s => s;',
   'engine.js': 'export const modelEngine = () => globalThis.contextElements["model-engine"].value;',
-  'kernel.js': 'export const kernelForSubgrid = () => null;',
-  'shell.js': 'export const go = () => {};',
+  'kernel.js': 'export const kernelForSubgrid = () => ({dir:"/kernel"});',
+  'shell.js': 'export const go = () => {}; export const renderSteps = () => {};',
+  'remote.js': 'export const configuredServers = () => [{host:"srv"}];',
   'workspace.js': 'export const openWorkspaces = () => {};',
 })) await writeFile(join(temp, 'app', name), body);
 globalThis.contextElements = elements;
 const view = await import(pathToFileURL(join(temp, 'app/run-mode-view.js')));
 const { state } = await import(pathToFileURL(join(temp, 'app/state.js')));
-elements['model-version'].append(new Option('snow', 'snow'));
+await view.refreshVersions();
 view.renderContextBar();
 assert.equal(elements['context-bar'].children.length, 4);
 const headerVersion = elements['context-bar'].children[1].children[1];
@@ -64,6 +71,22 @@ assert.equal(bubbled, true, 'delegated engine warnings must see the underlying s
 const headerTarget = elements['context-bar'].children[2].children[1];
 headerTarget.value = 'srv'; headerTarget.dispatchEvent(new Event('change'));
 assert.equal(elements['run-target'].value, 'srv');
+const cards = elements['run-mode-choices'];
+const group = key => cards.querySelector(`[data-run-choice="${key}"]`);
+group('version').children[1].onclick();
+assert.equal(elements['model-version'].value, 'snow');
+assert.equal(state.modelVersion, 'snow');
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(elements['context-bar'].children[1].children[1].value, 'snow');
+assert.equal(group('version').children[1]['aria-pressed'], 'true');
+group('target').children[0].onclick();
+assert.equal(elements['run-target'].value, 'local');
+assert.equal(elements['context-bar'].children[2].children[1].value, 'local');
+group('engine').children[0].onclick();
+assert.equal(elements['model-engine'].value, 'rust');
+await new Promise(resolve => setImmediate(resolve));
+assert.equal(elements['context-bar'].children[3].children[1].value, 'rust');
+assert.equal(elements['run-mode-next'].disabled, false);
 const html = await readFile(new URL('dist/index.html', root), 'utf8');
 assert.ok(html.slice(html.indexOf('<header'), html.indexOf('</header>')).includes('id="context-bar"'));
 assert.equal((html.match(/id="context-bar"/g) ?? []).length, 1);

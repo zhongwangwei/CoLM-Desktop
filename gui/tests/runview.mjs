@@ -85,12 +85,25 @@ if ((html.match(/id="cpu-workers"/g) || []).length !== 1
     || runModeStart < 0
     || !runModePane.includes('id="cpu-workers"')
     || !runModePane.includes('id="cpu-capacity"')
-    || !runModePane.includes('批量并行算例数')
+    || !runModePane.includes('同时运行的算例数')
     || !runModePane.includes('id="model-version"')
     || !runModePane.includes('id="run-target"')
     || !runModePane.includes('id="model-engine"')) {
   throw new Error('version, location, engine and batch parallelism must be configured once, in the Step 3 run-mode pane');
 }
+for (const key of ['version', 'target', 'engine']) {
+  if (!runModePane.includes(`data-run-choice="${key}"`)) throw new Error(`missing ${key} cards`);
+}
+for (const id of ['model-version', 'run-target', 'model-engine']) {
+  if ((html.match(new RegExp(`id="${id}"`, 'g')) ?? []).length !== 1
+      || !new RegExp(`<select[^>]*id="${id}"[^>]*hidden`).test(runModePane)) throw new Error(`${id} must stay a unique hidden source`);
+}
+const runModeView = await readFile(join(root, 'dist', 'app', 'run-mode-view.js'), 'utf8');
+if (!runModeView.includes("source.dispatchEvent(new Event('change', { bubbles: true }))")
+    || !runModeView.includes('next.disabled = !!why')) throw new Error('card changes must forward to canonical controls and blockers must disable Next');
+const shellJs = await readFile(join(root, 'dist', 'app', 'shell.js'), 'utf8');
+if (shellJs.includes('innerHTML =') && /\$\{(?:why|childWhy)/.test(shellJs)) throw new Error('navigation blockers must be text, not HTML');
+if (!runModeView.includes('renderSteps(false)') || !shellJs.includes('if (notifyContext)')) throw new Error('readiness must refresh the sidebar without an event loop');
 const runnerJs = await readFile(join(root, 'dist', 'app', 'runner.js'), 'utf8');
 if (!runnerJs.includes('const spatialDefaultRanks = Math.min(8, cpuCapacity);')
     || !runnerJs.includes("else if (!mpiRanksCustomized) $('mpi-ranks').value = String(spatialDefaultRanks);")) {

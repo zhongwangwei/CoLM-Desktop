@@ -21,6 +21,9 @@ for (const [name, body] of Object.entries({
 // Expose internal actions only in the temporary test copy.
 await writeFile(join(temp, 'app', 'remote.js'), (await readFile(join(temp, 'app', 'remote.js'), 'utf8')) + '\nexport { resumeJobs, refreshJob, fetchJob, renderJobs, jobs, formServer, fillDialog, closeDialog, testConnection, saveServer, syncAuth, clearPassword, wire };\n');
 const remote = await import(pathToFileURL(join(temp, 'app', 'remote.js')).href);
+const probeStorage = new Map();
+globalThis.localStorage = { getItem: key => probeStorage.get(key), setItem: (key, value) => probeStorage.set(key, value) };
+const { cachedProbe } = await import(pathToFileURL(join(temp, 'app', 'remote-probe-cache.js')).href);
 
 assert.deepEqual(
   remote.parseMaps(' /Volumes/Data/Data/PLUMBER2s = /media/zhwei/data02/zhwei/training2026/PLUMBER2s \n\n/Users/me/raw=/data/raw\n'),
@@ -198,6 +201,9 @@ globalThis.remoteInvoke = async (name, args) => {
 remote.wire();
 await new Promise(resolve => setImmediate(resolve));
 remote.fillDialog('legacy');
+const serversCopy = remote.configuredServers();
+serversCopy[0].host = 'changed';
+assert.equal(remote.configuredServers()[0].host, 'legacy');
 assert.equal(fields['remote-auth'].value, 'config');
 assert.equal(fields['remote-username'].value, '');
 assert.equal(fields['remote-port'].value, '');
@@ -224,6 +230,7 @@ assert.deepEqual(authCalls[0].args, { host: 'legacy', username: 'alice', port: 2
 assert.equal(authCalls[1].args.server.auth, 'password');
 assert.equal(JSON.stringify(authCalls[1]).includes('example-test-secret'), false);
 assert.equal(fields['remote-password'].value, '');
+assert.equal(cachedProbe(remote.formServer()).probe.hostname, 'server');
 authCalls.length = 0;
 await remote.testConnection();
 assert.deepEqual(authCalls.map(c => c.name), ['remote_probe'], 'empty password preserves the backend session credential');
@@ -257,6 +264,7 @@ let probeCount = 0;
 globalThis.remoteInvoke = async name => {
   if (name === 'remote_probe') { probeCount++; return new Promise(resolve => { finishProbe = resolve; }); }
 };
+const pendingServer = remote.formServer();
 const pendingProbe = remote.testConnection();
 await new Promise(resolve => setImmediate(resolve));
 await remote.testConnection();
@@ -267,6 +275,12 @@ fields['remote-probe-result'].textContent = 'new profile';
 finishProbe({ hostname: 'stale-server', os: 'Linux', arch: 'x86_64' });
 await pendingProbe;
 assert.equal(fields['remote-probe-result'].textContent, 'new profile');
+assert.equal(cachedProbe(pendingServer).probe.hostname, 'stale-server', 'completed stale dialog request stays bound to captured server');
+remote.fillDialog('legacy');
+globalThis.remoteInvoke = async () => { throw new Error('connection failed'); };
+await remote.testConnection();
+assert.equal(cachedProbe(pendingServer).probe, null);
+assert.equal(cachedProbe(pendingServer).error, 'probe_failed');
 console.log('remote: authentication modes, scoped session secrets, legacy profiles and stale probes');
 
 let finishPicker;
