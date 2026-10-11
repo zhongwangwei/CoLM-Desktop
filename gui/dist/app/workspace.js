@@ -105,6 +105,8 @@ function storageSet(key, value) {
 // ---- 页面 ------------------------------------------------------------------------------------
 
 let creating = false;
+let createStep = 0;
+let createMethod = 'ai';
 let versions = [];
 let detailName = null;
 let detailTab = 'modify';
@@ -126,12 +128,79 @@ function renderBaseChoices() {
   const keep = select.value;
   select.replaceChildren(new Option(t('官方版（应用自带的 CoLM）'), ''));
   for (const ws of versions) select.appendChild(new Option(`${t('修改版')}：${ws.name}`, ws.name));
-  select.value = [...select.options].some(o => o.value === keep) ? keep : '';
+  if (keep && !versions.some(ws => ws.name === keep)) select.appendChild(new Option(keep, keep));
+  select.value = keep;
+  renderCreateWizard();
+}
+
+function renderCreateWizard() {
+  if (!$('workspace-base-cards')) return;
+  for (let index = 0; index < 3; index++) {
+    $(`workspace-create-step-${index}`).hidden = index !== createStep;
+    $('workspace-create-progress').children[index].setAttribute('aria-current', index === createStep ? 'step' : 'false');
+  }
+  $('workspace-create-prev').disabled = creating || createStep === 0;
+  $('workspace-create-next').hidden = createStep === 2;
+  $('workspace-create').hidden = createStep !== 2;
+  $('workspace-other-source').hidden = !!$('workspace-base').value;
+  const choices = (container, items, selected, choose) => {
+    const focused = document.activeElement?.id;
+    container.replaceChildren(...items.map(([value, title, help], index) => {
+      const control = button(title, () => { if (!creating) choose(value); }, creating);
+      control.id = `${container.id}-${index}`;
+      control.className = 'run-mode-card';
+      control.setAttribute('aria-pressed', String(value === selected));
+      control.append(el('span', { className: 'run-mode-card-detail', textContent: t(help) }));
+      return control;
+    }));
+    if (focused) [...container.children].find(control => control.id === focused)?.focus();
+  };
+  choices($('workspace-base-cards'), [
+    ['', '官方版', '从发布的 CoLM 2024 开始'],
+    ...versions.map(ws => [ws.name, ws.name,
+      ws.lights?.compile === 'pass' && ws.lights?.tests === 'pass' && !Object.values(ws.lights ?? {}).includes('fail')
+        ? '在已有修改上继续改 · 测试已通过' : '复制一份，分出另一个方向']),
+  ], $('workspace-base').value, value => { $('workspace-base').value = value; renderCreateWizard(); });
+  choices($('workspace-method-cards'), [
+    ['ai', '让 AI 助手改', '助手会知道当前版本；每次改代码前都会请你确认'],
+    ['editor', '用我的编辑器打开', '创建后显示源码路径，用自己的编辑器修改'],
+    ['patch', '导入补丁文件', '创建后选择 .diff 或 .patch 文件'],
+  ], createMethod, value => { createMethod = value; renderCreateWizard(); });
+}
+
+function validateCreateStep() {
+  const name = $('workspace-name').value.trim();
+  const note = $('workspace-note')?.value.trim() || '';
+  let error = '';
+  if ($('workspace-base').value && !versions.some(ws => ws.name === $('workspace-base').value)) error = '起点版本已不存在，请重新选择';
+  if (createStep >= 1 && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,39}$/.test(name)) error = '名称须为 1–40 个字母、数字、下划线或短横线，并以字母或数字开头';
+  if (createStep >= 1 && note.length > 500) error = '目的不能超过 500 字';
+  $('workspace-create-status').textContent = t(error);
+  $('workspace-create-status').className = error ? 'mini assistant-fail' : 'mini';
+  return !error;
+}
+
+function moveCreateStep(delta) {
+  if (creating || (delta > 0 && !validateCreateStep())) return;
+  createStep = Math.max(0, Math.min(2, createStep + delta));
+  renderCreateWizard();
+}
+
+function openCreateWizard() {
+  if (creating) return;
+  closeDetail();
+  detailVisibility(true);
+  $('workspace-create-form').hidden = false;
+  createStep = 0;
+  $('workspace-create-status').textContent = '';
+  renderCreateWizard();
 }
 
 async function createWorkspace(event) {
   event.preventDefault();
-  if (creating || !$('workspace-create-form').reportValidity()) return;
+  if (creating) return;
+  if (createStep < 2) { moveCreateStep(1); return; }
+  if (!validateCreateStep()) return;
   const name = $('workspace-name').value.trim();
   const base = $('workspace-base')?.value || null;
   const note = $('workspace-note')?.value.trim() || null;
@@ -139,12 +208,13 @@ async function createWorkspace(event) {
   const rev = base ? null : ($('workspace-rev').value.trim() || null);
   const message = $('workspace-create-status');
   const submit = $('workspace-create');
-  const fields = ['workspace-name', 'workspace-note', 'workspace-base', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create'];
+  const fields = ['workspace-name', 'workspace-note', 'workspace-base', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create', 'workspace-create-next', 'workspace-create-prev', 'workspace-create-back'];
   creating = true;
   for (const id of fields) if ($(id)) $(id).disabled = true;
+  renderCreateWizard();
   submit.textContent = t('正在创建…');
   message.className = 'mini';
-  message.textContent = t('正在复制源码，创建完成后会显示在下方。');
+  message.textContent = t('正在复制源码，创建完成后进入版本详情。');
   try {
     const result = await invoke('workspace_create', { name, source, rev, base, note });
     message.textContent = `${t('已创建修改版')} ${name}：${result?.dir ?? ''}。${t('下一步：改代码，然后编译 Rust 引擎。')}`;
@@ -152,13 +222,21 @@ async function createWorkspace(event) {
     if ($('workspace-note')) $('workspace-note').value = '';
     await refresh();
     versionsChanged();
+    const opened = await showDetail(name);
+    if (opened) {
+      if (createMethod === 'ai') askAssistant(name);
+      else if (createMethod === 'editor') $('workspace-source-path').hidden = false;
+      else await importPatch(name);
+    }
+    createStep = 0;
   } catch (error) {
     message.className = 'mini assistant-fail';
     message.textContent = String(error?.message || error);
   } finally {
     creating = false;
     for (const id of fields) if ($(id)) $(id).disabled = false;
-    submit.textContent = t('新建修改版');
+    submit.textContent = t('建好并开始修改 →');
+    renderCreateWizard();
   }
 }
 
@@ -292,7 +370,7 @@ function render(workspaces) {
   if (!workspaces.length) {
     list.append(Object.assign(document.createElement('p'), {
       className: 'muted',
-      textContent: t('还没有修改版。在下方填写名称和目的，点击“新建修改版”。'),
+      textContent: t('还没有修改版。点击“新建修改版”，选择起点并填写名称和目的。'),
     }));
     return;
   }
@@ -489,7 +567,8 @@ function remotePanel(name, host = null) {
 
 function detailVisibility(open) {
   $('workspace-list').hidden = open;
-  if ($('workspace-create-form')) $('workspace-create-form').hidden = open;
+  if ($('workspace-create-form')) $('workspace-create-form').hidden = true;
+  if ($('workspace-new')) $('workspace-new').hidden = open;
   const page = $('workspace-list').parentElement;
   const title = page?.querySelector('h1');
   const intro = page?.querySelector('.sub');
@@ -497,6 +576,9 @@ function detailVisibility(open) {
   if (intro) intro.hidden = open;
   const official = page?.querySelector('.ws-official');
   if (official) official.hidden = open;
+  const legend = page?.querySelector('.ws-legend');
+  if (legend) legend.hidden = open;
+  if ($('workspace-refresh')?.parentElement) $('workspace-refresh').parentElement.hidden = open;
 }
 
 function closeDetail() {
@@ -570,7 +652,7 @@ async function showDetail(name, tab = 'modify') {
     }
     box.append(tabs, ...panels.map(([, , panel]) => panel));
     const [modify, checks, compare, studies] = panels.map(([, , panel]) => panel);
-    const source = el('p', { className: 'mini', hidden: true, textContent: d.dir ? `${d.dir}/src` : t('源码路径不可用') });
+    const source = el('p', { id: 'workspace-source-path', className: 'mini', hidden: true, textContent: d.dir ? `${d.dir}/src` : t('源码路径不可用') });
     modify.append(el('div', { className: 'pill-row' }, [
       button('在右侧让助手改', () => askAssistant(name)),
       button('用我的编辑器打开', () => { source.hidden = false; }),
@@ -651,6 +733,7 @@ async function showDetail(name, tab = 'modify') {
         .catch(error => parent.append(el('p', { className: 'assistant-fail', textContent: String(error?.message || error) })));
     }
     choose(detailTab);
+    return true;
   } catch (error) {
     if (request !== detailRequest) return;
     box.replaceChildren(button('← 改代码', closeDetail), el('p', { role: 'status', className: 'assistant-fail', textContent: String(error?.message || error) }));
@@ -711,10 +794,11 @@ function wire() {
   if (!hasBackend || !$('workspace-list')) return;
   $('research-workspaces-btn')?.addEventListener('click', openWorkspaces);
   $('workspace-create-form').onsubmit = createWorkspace;
-  $('workspace-base')?.addEventListener('change', () => {
-    const other = $('workspace-other-source');
-    if (other) other.hidden = !!$('workspace-base').value;
-  });
+  $('workspace-new').onclick = openCreateWizard;
+  $('workspace-create-back').onclick = () => { if (!creating) closeDetail(); };
+  $('workspace-create-prev').onclick = () => moveCreateStep(-1);
+  $('workspace-create-next').onclick = () => moveCreateStep(1);
+  $('workspace-base')?.addEventListener('change', renderCreateWizard);
   $('workspace-source-browse').onclick = async () => {
     try {
       const path = await invoke('pick_folder', { key: 'workspace-source' });

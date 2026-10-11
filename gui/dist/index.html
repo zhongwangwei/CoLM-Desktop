@@ -480,23 +480,15 @@
       </div>
       <div id="workspace-list"></div>
 
-      <form id="workspace-create-form" class="card" aria-labelledby="workspace-create-title">
-        <h3 id="workspace-create-title">新建修改版</h3>
-        <div class="field">
-          <label for="workspace-base">从哪一版开始</label>
-          <select class="select" id="workspace-base"><option value="">官方版（应用自带的 CoLM）</option></select>
-          <p class="mini muted">选一个修改版就是在它的改动上接着改（复制一份，原来那个不受影响）。</p>
-        </div>
-        <div class="field">
-          <label for="workspace-name">名称</label>
-          <input class="input" id="workspace-name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="例如 snow-albedo" aria-describedby="workspace-name-help">
-          <p class="mini muted" id="workspace-name-help">使用字母、数字、下划线或短横线，以字母或数字开头。</p>
-        </div>
-        <div class="field">
-          <label for="workspace-note">想改什么、为什么</label>
-          <textarea class="input" id="workspace-note" rows="2" maxlength="500" placeholder="例如：老化雪的近红外反照率下调 5%，看能否改善春季感热偏高"></textarea>
-          <p class="mini muted">这句话会写进这个版本跑出的每个结果里，几个月后回头看也知道它是什么。</p>
-        </div>
+      <button class="run-btn" type="button" id="workspace-new">新建修改版</button>
+      <form id="workspace-create-form" class="card ws-create-wizard" aria-labelledby="workspace-create-title" novalidate hidden>
+        <button class="btn-ghost" type="button" id="workspace-create-back">← 改进模型 · 改代码</button>
+        <h1 id="workspace-create-title">新建修改版</h1>
+        <p class="mini muted">它会得到一份独立的源码。官方版和别的版本都不受影响。</p>
+        <ol class="ws-create-progress" id="workspace-create-progress"><li>起点</li><li>名称与目的</li><li>怎么改</li></ol>
+        <section id="workspace-create-step-0" aria-label="起点">
+          <select id="workspace-base" hidden><option value="">官方版（应用自带的 CoLM）</option></select>
+          <div class="run-choice-grid" id="workspace-base-cards"></div>
         <details id="workspace-other-source">
           <summary class="mini">从其他源码或版本开始（可选）</summary>
           <div class="field">
@@ -512,7 +504,28 @@
           </div>
           <p class="mini muted">从仓库创建时只复制已提交的代码，未提交的修改不会带入。</p>
         </details>
-        <button class="run-btn" type="submit" id="workspace-create">新建修改版</button>
+        </section>
+        <section id="workspace-create-step-1" aria-label="名称与目的" hidden>
+        <div class="field">
+          <label for="workspace-name">名称</label>
+          <input class="input" id="workspace-name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="例如 snow-albedo" aria-describedby="workspace-name-help">
+          <p class="mini muted" id="workspace-name-help">使用字母、数字、下划线或短横线，以字母或数字开头。</p>
+        </div>
+        <div class="field">
+          <label for="workspace-note">想改什么、为什么</label>
+          <textarea class="input" id="workspace-note" rows="2" maxlength="500" placeholder="例如：老化雪的近红外反照率下调 5%，看能否改善春季感热偏高"></textarea>
+          <p class="mini muted">这句话会写进这个版本跑出的每个结果里，几个月后回头看也知道它是什么。</p>
+        </div>
+        </section>
+        <section id="workspace-create-step-2" aria-label="怎么改" hidden>
+          <div class="run-choice-grid" id="workspace-method-cards"></div>
+          <p class="mini muted">之后随时可以换方式。改动涉及 Rust 引擎、Fortran 内核还是两者，会自动识别并显示在版本卡上。</p>
+        </section>
+        <div class="pill-row">
+          <button class="btn-ghost" type="button" id="workspace-create-prev">上一步</button>
+          <button class="run-btn" type="button" id="workspace-create-next">下一步</button>
+          <button class="run-btn" type="submit" id="workspace-create" hidden>建好并开始修改 →</button>
+        </div>
         <p class="mini" id="workspace-create-status" role="status" aria-live="polite"></p>
       </form>
 

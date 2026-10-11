@@ -171,6 +171,7 @@ details[open] > summary.flow-head::after { transform: rotate(90deg); }
 .run-btn { padding: 8px 20px; border: 0; border-radius: var(--r-sm); background: var(--pass);
            color: var(--pass-text); font-weight: 650; box-shadow: var(--shadow); }
 .pill-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.pill-row[hidden] { display: none; }
 .run-parallel-setting { display: grid; grid-template-columns: minmax(240px, 1fr) 84px minmax(180px, auto); gap: 12px; align-items: center; margin-top: 14px; padding: 12px; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); }
 /* `display:grid` 会盖掉 `[hidden]`：按引擎/算例类型隐藏的并行设置必须真的消失。 */
 .run-parallel-setting[hidden] { display: none; }
@@ -1065,3 +1066,11 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-detail-header > :first-child { grid-column:1 / -1; justify-self:start; }
 .ws-detail-header > p { grid-column:1; margin:0; }
 .ws-detail-header > :last-child { grid-column:2; grid-row:2 / 4; align-self:start; }
+
+/* New model version: three short steps, using the existing choice cards. */
+.ws-create-progress { display:flex; gap:var(--s-lg); padding:0; list-style:none; counter-reset:ws-step; }
+.ws-create-progress li { counter-increment:ws-step; color:var(--muted); }
+.ws-create-progress li::before { content:counter(ws-step) " · "; }
+.ws-create-progress [aria-current="step"] { color:var(--accent); font-weight:600; }
+.ws-create-wizard section { margin:var(--s-lg) 0; }
+.ws-create-wizard .run-mode-card { text-align:left; }

@@ -17,7 +17,7 @@ for (const [name, body] of Object.entries({
   'shell.js': 'export const go = step => { globalThis.workspaceStep = step; };',
 })) await writeFile(join(temp, 'app', name), body);
 await writeFile(join(temp, 'app', 'workspace.js'),
-  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace, remotePanel, showDetail, render };\n');
+  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace, remotePanel, showDetail, render, openCreateWizard, moveCreateStep, renderBaseChoices };\n');
 const workspace = await import(pathToFileURL(join(temp, 'app', 'workspace.js')).href);
 const kernel = await import(pathToFileURL(join(temp, 'app', 'kernel.js')).href);
 const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
@@ -81,55 +81,7 @@ for (const forbidden of ['workspace_adopt', 'workspace_delete', 'workspace_expor
   assert.ok(!assistant.includes(forbidden), `${forbidden} must not be reachable from the assistant panel code`);
 }
 
-// Direct creation: invalid input does not call IPC; one pending submit, then retry after failure.
-const elements = Object.fromEntries(['workspace-create-form', 'workspace-name', 'workspace-source', 'workspace-rev',
-  'workspace-source-browse', 'workspace-create', 'workspace-create-status', 'workspace-list']
-  .map(id => [id, { value: '', disabled: false, textContent: '', className: '', replaceChildren() {}, append() {} }]));
-globalThis.workspaceElements = elements;
-globalThis.document = { documentElement: { lang: 'zh' }, createElement: () => ({}) };
-elements['workspace-name'].value = 'experiment';
-elements['workspace-create-form'].reportValidity = () => false;
-const calls = [];
-globalThis.workspaceInvoke = async (...args) => { calls.push(args); return {}; };
-await workspace.createWorkspace({ preventDefault() {} });
-assert.equal(calls.length, 0);
-elements['workspace-create-form'].reportValidity = () => true;
-let rejectCreation;
-globalThis.workspaceInvoke = (...args) => {
-  calls.push(args);
-  return new Promise((_, reject) => { rejectCreation = reject; });
-};
-const pending = workspace.createWorkspace({ preventDefault() {} });
-assert.deepEqual(calls[0], ['workspace_create', { name: 'experiment', source: null, rev: null, base: null, note: null }]);
-assert.equal(elements['workspace-create'].disabled, true);
-await workspace.createWorkspace({ preventDefault() {} });
-assert.equal(calls.length, 1);
-rejectCreation(new Error('source unavailable'));
-await pending;
-assert.equal(elements['workspace-create'].disabled, false);
-assert.equal(elements['workspace-name'].value, 'experiment');
-assert.equal(elements['workspace-create-status'].textContent, 'source unavailable');
-elements['workspace-source'].value = '/path with spaces/repo';
-elements['workspace-rev'].value = ' feature/soil ';
-globalThis.workspaceInvoke = async (...args) => {
-  calls.push(args);
-  return args[0] === 'workspace_create' ? { dir: '/workspaces/experiment' } : {};
-};
-await workspace.createWorkspace({ preventDefault() {} });
-assert.deepEqual(calls[1], ['workspace_create', { name: 'experiment', source: '/path with spaces/repo', rev: 'feature/soil', base: null, note: null }]);
-assert.deepEqual(calls.slice(2).map(call => call[0]), ['workspace_list']);
-assert.match(elements['workspace-create-status'].textContent, /已创建修改版 experiment.*\/workspaces\/experiment/);
-// 从另一个修改版开始、写了目的：来源与提交号不再传（以父版本为准）。
-elements['workspace-base'] = { value: 'beta', disabled: false };
-elements['workspace-note'] = { value: '  lower snow albedo ', disabled: false };
-elements['workspace-name'].value = 'snow';
-await workspace.createWorkspace({ preventDefault() {} });
-assert.deepEqual(calls.at(-2), ['workspace_create', { name: 'snow', source: null, rev: null, base: 'beta', note: 'lower snow albedo' }]);
-delete elements['workspace-base'];
-delete elements['workspace-note'];
-assert.equal(elements['workspace-create'].disabled, false);
-console.log('workspace: lights, version cards, legacy migration, kernel matching and wiring ok');
-
+globalThis.document = { documentElement: { lang: 'zh' } };
 // Remote workflows retain failures/stale evidence and never adopt a remote binary.
 assert.deepEqual(workspace.remoteRequest('verify', ' default ', '/data/case one', 'colm-core'), {
   action: 'verify', preset: 'default', kind: 'refactor', package: 'colm-core', case: '/data/case one',
@@ -140,7 +92,9 @@ assert.match(workspace.remoteJobText({ id: 'j1', host: 'server', state: 'failed'
 class Element {
   constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {}; this.value = ''; this.disabled = false; this.isConnected = false; this.hidden = false; }
   append(...items) { this.children.push(...items); for (const item of items) if (item) item.parentElement = this; if (this.tag === 'select' && !this.value) this.value = items[0]?.value ?? ''; }
-  replaceChildren(...items) { this.children = items; }
+  replaceChildren(...items) { this.children = []; this.append(...items); }
+  appendChild(item) { this.append(item); return item; }
+  get options() { return this.children; }
   setAttribute(name, value) { this.attributes[name] = value; }
   querySelector(selector) {
     const match = item => selector.startsWith('.') ? item.className?.split(' ').includes(selector.slice(1))
@@ -289,7 +243,7 @@ await findButton(detailBox,'去运行方式').onclick(); assert.equal(globalThis
 await findButton(detailBox,'比较两个版本').onclick(); assert.equal(globalThis.workspaceStep,'result-tuning');
 assert.ok(detailBox.querySelector('details').querySelectorAll('button').some(item=>item.textContent==='删除这个修改版…'));
 await findButton(detailBox,'← 改代码').onclick();
-assert.equal(list.hidden,false); assert.equal(createForm.hidden,false); assert.equal(page.querySelector('#workspace-detail'),null);
+assert.equal(list.hidden,false); assert.equal(createForm.hidden,true); assert.equal(page.querySelector('#workspace-detail'),null);
 console.log('workspace: four tabs, cached check locations, file diff, confirmed undo and study snapshots passed');
 
 // Choosing a configured check location uses that exact host and keeps other hosts' jobs out.
@@ -320,3 +274,93 @@ assert.match(allText(page.querySelector('#workspace-detail')),/workspace removed
 await findButton(page.querySelector('#workspace-detail'),'← 改代码').onclick();
 assert.equal(list.hidden,false);
 console.log('workspace: selected remote host, scoped jobs and detail failure recovery passed');
+
+// Creation wizard preserves drafts across steps and performs only the selected follow-up.
+globalThis.Option = class extends Element { constructor(text,value) {super('option');this.textContent=text;this.value=value;} };
+const wizardIds = ['workspace-new','workspace-create-progress','workspace-base','workspace-base-cards','workspace-method-cards',
+  'workspace-create-step-0','workspace-create-step-1','workspace-create-step-2','workspace-other-source',
+  'workspace-name','workspace-note','workspace-source','workspace-rev','workspace-source-browse',
+  'workspace-create','workspace-create-next','workspace-create-prev','workspace-create-back','workspace-create-status'];
+for (const id of wizardIds) {const node = new Element(id==='workspace-base'?'select':'div');node.id=id;createForm.append(node);}
+page.querySelector('#workspace-create-progress').append(new Element('li'),new Element('li'),new Element('li'));
+const field = id=>page.querySelector(`#${id}`);
+const creationCalls = [], events = [];
+globalThis.CustomEvent = class {constructor(type,options){this.type=type;this.detail=options?.detail;}};
+globalThis.dispatchEvent = event=>events.push(event);
+let createFailure = false, releaseCreate;
+globalThis.workspaceInvoke = async (command,args) => {
+  creationCalls.push([command,args]);
+  if (command==='workspace_list') return {workspaces:[{name:'parent',lights:{compile:'pass',tests:'pass'}}]};
+  if (command==='workspace_create') {
+    if (createFailure) throw new Error('cannot create source');
+    if (releaseCreate === 'pending') await new Promise(resolve=>{releaseCreate=resolve;});
+    return {dir:`/ws/${args.name}`};
+  }
+  if (command==='workspace_status') return {workspace:{name:args.name},dir:`/ws/${args.name}`,changed_files:[],studies:[]};
+  if (command==='pick_file') return null;
+  throw new Error(`unexpected ${command}`);
+};
+await workspace.renderBaseChoices();
+workspace.openCreateWizard();
+assert.equal(createForm.hidden,false);
+assert.equal(field('workspace-create-step-0').hidden,false);
+workspace.moveCreateStep(1);
+assert.equal(field('workspace-create-step-1').hidden,false);
+for (const name of ['', '-invalid', 'bad/name', '中', 'x'.repeat(41)]) {
+  field('workspace-name').value=name;
+  workspace.moveCreateStep(1);
+  assert.equal(field('workspace-create-step-1').hidden,false);
+  assert.match(field('workspace-create-status').textContent,/名称/);
+}
+field('workspace-name').value='snow_2024'; field('workspace-note').value='x'.repeat(501);
+workspace.moveCreateStep(1); assert.match(field('workspace-create-status').textContent,/500/);
+field('workspace-note').value='snow goal';
+workspace.moveCreateStep(1); assert.equal(field('workspace-create-step-2').hidden,false);
+workspace.moveCreateStep(-1); assert.equal(field('workspace-name').value,'snow_2024');
+workspace.moveCreateStep(-1); field('workspace-source').value='/source tree'; field('workspace-rev').value='main';
+workspace.moveCreateStep(1); workspace.moveCreateStep(1);
+field('workspace-base').value='removed-version';
+const beforeInvalidBase=creationCalls.length;
+await workspace.createWorkspace({preventDefault(){}});
+assert.equal(creationCalls.length,beforeInvalidBase);
+assert.match(field('workspace-create-status').textContent,/起点版本已不存在/);
+field('workspace-base').value='';
+createFailure=true;
+await workspace.createWorkspace({preventDefault(){}});
+assert.match(field('workspace-create-status').textContent,/cannot create source/);
+assert.equal(field('workspace-create-step-2').hidden,false);
+assert.equal(field('workspace-name').value,'snow_2024');
+createFailure=false; releaseCreate='pending';
+const creatingVersion=workspace.createWorkspace({preventDefault(){}});
+await Promise.resolve();
+const count=creationCalls.filter(([command])=>command==='workspace_create').length;
+await workspace.createWorkspace({preventDefault(){}});
+workspace.moveCreateStep(-1);
+assert.equal(field('workspace-create-step-2').hidden,false);
+assert.equal(creationCalls.filter(([command])=>command==='workspace_create').length,count);
+assert.ok(field('workspace-method-cards').children.every(control=>control.disabled));
+releaseCreate(); await creatingVersion;
+assert.deepEqual(creationCalls.find(([command])=>command==='workspace_create')[1],{name:'snow_2024',source:'/source tree',rev:'main',base:null,note:'snow goal'});
+assert.match(events.find(event=>event.type==='colm:assistant-prompt').detail,/snow_2024/);
+assert.ok(page.querySelector('#workspace-detail'));
+assert.equal(createForm.hidden,true);
+// Parent card suppresses stale external source/revision, editor method shows the resulting path.
+workspace.openCreateWizard();
+const parentCard=field('workspace-base-cards').children.find(control=>control.textContent==='parent');
+assert.ok(parentCard); parentCard.onclick();
+assert.equal(field('workspace-other-source').hidden,true);
+workspace.moveCreateStep(1); field('workspace-name').value='editor-version';field('workspace-note').value='new purpose';
+workspace.moveCreateStep(1);
+field('workspace-method-cards').children[1].onclick();
+releaseCreate=null;
+await workspace.createWorkspace({preventDefault(){}});
+assert.deepEqual(creationCalls.filter(([command])=>command==='workspace_create').at(-1)[1],{name:'editor-version',base:'parent',source:null,rev:null,note:'new purpose'});
+assert.equal(page.querySelector('#workspace-source-path').hidden,false);
+assert.equal(page.querySelector('#workspace-source-path').textContent,'/ws/editor-version/src');
+workspace.openCreateWizard();workspace.moveCreateStep(1);field('workspace-name').value='patch-version';workspace.moveCreateStep(1);
+field('workspace-method-cards').children[2].onclick();
+await workspace.createWorkspace({preventDefault(){}});
+assert.equal(creationCalls.filter(([command])=>command==='pick_file').length,1);
+assert.equal(events.filter(event=>event.type==='colm:assistant-prompt').length,1,'editor/patch methods must not send assistant prompts');
+assert.equal(field('workspace-create').disabled,false);
+console.log('workspace: three-step creation validation, back/next, failure retry, busy guard and selected follow-up passed');
