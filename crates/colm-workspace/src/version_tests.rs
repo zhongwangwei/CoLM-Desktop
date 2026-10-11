@@ -137,3 +137,44 @@ fn a_fortran_change_needs_its_own_kernel_of_the_same_preset() {
     let r = check(&ws_root, "demo", "rust", "rust", &kernel).unwrap();
     assert!(codes(&r).contains(&("engine_mismatch", false)));
 }
+
+/// 从另一个修改版分出来的版本：改动范围相对官方源码算，父版本改过的 Fortran 不能漏。
+#[test]
+fn a_derived_version_counts_its_parents_changes_from_the_official_source() {
+    let root = temp("version-derived");
+    let repo = root.join("source");
+    source_repo(&repo);
+    let kernel = official_kernel(&root);
+    let ws_root = root.join("ws");
+    let parent = Workspace::create(&ws_root, "parent", repo.to_str().unwrap(), None).unwrap();
+    edit_and_commit(&parent, "vendor/CoLM202X/main/MOD_Demo.F90");
+    let mut child =
+        Workspace::create(&ws_root, "child", parent.src().to_str().unwrap(), None).unwrap();
+    child
+        .update(|info| {
+            info.based_on = Some("parent".into());
+            info.root_commit = Some(parent.official_base().to_owned());
+            info.note = "try a Rust-only tweak on top".into();
+        })
+        .unwrap();
+    edit_and_commit(&child, "crates/colm-core/src/demo.rs");
+    mark_engine_built(&mut child);
+
+    let r = check(&ws_root, "child", "rust", "rust", &kernel).unwrap();
+    assert_eq!(
+        r.touches,
+        Touches {
+            engine: true,
+            kernel: true
+        }
+    );
+    assert!(codes(&r).contains(&("kernel_built", true)), "{:?}", r.items);
+    assert_eq!(r.based_on.as_deref(), Some("parent"));
+    assert_eq!(r.note, "try a Rust-only tweak on top");
+    let summary = child.summary().unwrap();
+    assert!(summary.touches.kernel && summary.touches.engine);
+    assert_eq!(
+        summary.commits, 1,
+        "commits still count from the parent's head"
+    );
+}

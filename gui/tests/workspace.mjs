@@ -1,5 +1,5 @@
-// 开发工作区面板（workspace.js）的纯函数：状态灯文字、可采纳的内核、采纳过的内核在匹配表里的样子，
-// 以及 kernel.js 只在采纳之后才让实验内核参与匹配。
+// 改代码页（workspace.js）的纯函数：状态灯文字、版本卡、旧版“启用实验内核”迁移成默认版本，
+// 以及 kernel.js 只在正式内核里匹配（修改版由 `colm-cli run --model-version` 自己取内核）。
 import assert from 'node:assert/strict';
 import { cp, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -30,52 +30,45 @@ assert.equal(
   '编译 通过 · 测试 需要重测（之后又改过代码） · 两版一致 不通过 · 与原版对比 还没测',
 );
 
-// 只显示这个工作区的实验内核。
-const registered = [
-  { workspace: 'emis', preset: 'default', head: 'h1', dir: '/ws/emis/kernels/default', macros: ['SinglePoint', 'LULC_IGBP'], label: '实验内核：emis（未审阅）· default' },
-  { workspace: 'other', preset: 'default', head: 'h2', dir: '/ws/other/kernels/default', macros: ['SinglePoint', 'LULC_IGBP'], label: 'x' },
-];
-assert.deepEqual(workspace.adoptableKernels(registered, 'emis').map(k => k.dir), ['/ws/emis/kernels/default']);
-assert.deepEqual(workspace.adoptableKernels(registered, 'nobody'), []);
-assert.deepEqual(workspace.adoptableKernels(undefined, 'emis'), []);
-
-// 匹配表里的条目：和 list_kernels 同形，另带 experimental 标记，且标明未审阅。
-const entry = workspace.kernelEntry(registered[0]);
-assert.equal(entry.preset, 'default');
-assert.deepEqual(entry.macros, ['SinglePoint', 'LULC_IGBP']);
-assert.deepEqual(entry.experimental, { workspace: 'emis', label: registered[0].label, head: 'h1', reviewed: false });
-
-// 工作区又有了新提交（head 变了）：采纳过的内核不再算数。
-assert.equal(workspace.stillRegistered([entry], registered).length, 1);
-assert.equal(workspace.stillRegistered([entry], [{ ...registered[0], head: 'h9' }]).length, 0);
-assert.equal(workspace.stillRegistered([entry], []).length, 0);
-assert.deepEqual(workspace.stillRegistered(undefined, registered), []);
 assert.equal(workspace.commitLine({ short: 'abc1234', subject: 'ws: emg 0.95' }), 'abc1234 · emg 0.95');
 // 每项检查都有一句白话说明。
 assert.deepEqual(Object.keys(workspace.LIGHT_HELP).sort(), ['compile', 'parity', 'regression', 'tests']);
-// 正在使用的内核：只看这个工作区的。
-assert.deepEqual(workspace.adoptedFrom([entry], 'emis').map(k => k.preset), ['default']);
-assert.deepEqual(workspace.adoptedFrom([entry], 'other'), []);
-assert.deepEqual(workspace.adoptedFrom(undefined, 'emis'), []);
 
-// 内核匹配：没采纳过时只看正式内核（行为不变）；采纳后同预设的实验内核排在前面。
+// 版本卡：从哪来、改了几次、改了哪边。
+assert.equal(
+  workspace.versionFacts({ origin: '/repo/CoLM-Desktop', commits: 2, touches: { engine: true, kernel: false } }),
+  '基于 CoLM-Desktop · 改了 2 次 · 改了 Rust 引擎',
+);
+assert.equal(
+  workspace.versionFacts({ origin: '/x/src', based_on: 'beta', commits: 0, touches: { engine: true, kernel: true }, dirty: true }),
+  '基于修改版 beta · 改了 0 次 · 改了 Rust 引擎和 Fortran 内核 · 有未保存的改动',
+);
+assert.match(workspace.versionFacts({ origin: 'app', commits: 1 }), /没改会影响计算结果的代码/);
+assert.deepEqual(workspace.LOCAL_CHECKS.map(([id]) => id), ['build-engine', 'build-kernel', 'test-drift', 'test-cargo', 'parity']);
+
+// 旧版“启用实验内核”：只在还没选过版本时迁移成默认的模型版本。
+const legacy = [{ preset: 'default', experimental: { workspace: 'emis', head: 'h1' } }];
+assert.equal(workspace.migratedVersion(legacy, null), 'emis');
+assert.equal(workspace.migratedVersion(legacy, 'official'), null);
+assert.equal(workspace.migratedVersion([{ preset: 'default' }], null), null);
+assert.equal(workspace.migratedVersion(undefined, null), null);
+
+// 内核匹配只看正式内核；旧的 adoptedKernels 不再参与。
 const official = { preset: 'default', dir: '/app/kernels/default', macros: ['SinglePoint', 'LULC_IGBP'] };
 state.kernels = [official, { preset: 'usgs', dir: '/app/kernels/usgs', macros: ['SinglePoint', 'LULC_USGS'] }];
 state.wizard = { grid: 'site' };
-state.adoptedKernels = [];
+state.adoptedKernels = [{ preset: 'default', dir: '/ws/emis/kernels/default', macros: ['SinglePoint', 'LULC_IGBP'], experimental: { workspace: 'emis' } }];
 assert.equal(kernel.kernelForSubgrid('IGBP', { grid: 'site' }).dir, '/app/kernels/default');
-state.adoptedKernels = [entry];
-assert.equal(kernel.kernelForSubgrid('IGBP', { grid: 'site' }).dir, '/ws/emis/kernels/default', 'the adopted experimental kernel wins');
-assert.equal(kernel.kernelForSubgrid('USGS', { grid: 'site' }).dir, '/app/kernels/usgs', 'other presets are untouched');
-state.adoptedKernels = undefined;
-assert.equal(kernel.kernelForSubgrid('IGBP', { grid: 'site' }).dir, '/app/kernels/default');
+assert.equal(kernel.kernelForSubgrid('USGS', { grid: 'site' }).dir, '/app/kernels/usgs');
 
-// 接线：按钮和对话框都在页面里，助手面板头有入口；D 级操作没有出现在助手的工具里。
+// 接线：改代码是一张页面（不再是助手里的对话框）；D 级操作没有出现在助手的工具里。
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
-for (const id of ['workspace-dialog', 'workspace-list', 'workspace-refresh', 'workspace-close', 'assistant-workspaces-btn',
-  'research-workspaces-btn', 'workspace-create-form', 'workspace-name', 'workspace-source', 'workspace-rev', 'workspace-create', 'workspace-create-status']) {
+assert.ok(html.includes('data-step="code"'));
+for (const id of ['workspace-list', 'workspace-refresh', 'research-workspaces-btn', 'workspace-create-form', 'workspace-name',
+  'workspace-note', 'workspace-base', 'workspace-source', 'workspace-rev', 'workspace-create', 'workspace-create-status']) {
   assert.ok(html.includes(`id="${id}"`), id);
 }
+for (const gone of ['workspace-dialog', 'assistant-workspaces-btn']) assert.ok(!html.includes(`id="${gone}"`), gone);
 assert.match(html, /id="workspace-name"[^>]*required[^>]*maxlength="40"/);
 assert.match(html, /从仓库创建时只复制已提交的代码，未提交的修改不会带入/);
 assert.match(html, /id="workspace-create-status"[^>]*aria-live="polite"/);
@@ -105,7 +98,7 @@ globalThis.workspaceInvoke = (...args) => {
   return new Promise((_, reject) => { rejectCreation = reject; });
 };
 const pending = workspace.createWorkspace({ preventDefault() {} });
-assert.deepEqual(calls[0], ['workspace_create', { name: 'experiment', source: null, rev: null }]);
+assert.deepEqual(calls[0], ['workspace_create', { name: 'experiment', source: null, rev: null, base: null, note: null }]);
 assert.equal(elements['workspace-create'].disabled, true);
 await workspace.createWorkspace({ preventDefault() {} });
 assert.equal(calls.length, 1);
@@ -121,11 +114,19 @@ globalThis.workspaceInvoke = async (...args) => {
   return args[0] === 'workspace_create' ? { dir: '/workspaces/experiment' } : {};
 };
 await workspace.createWorkspace({ preventDefault() {} });
-assert.deepEqual(calls[1], ['workspace_create', { name: 'experiment', source: '/path with spaces/repo', rev: 'feature/soil' }]);
-assert.deepEqual(calls.slice(2).map(call => call[0]).sort(), ['workspace_kernels', 'workspace_list']);
-assert.match(elements['workspace-create-status'].textContent, /已创建工作区 experiment.*\/workspaces\/experiment/);
+assert.deepEqual(calls[1], ['workspace_create', { name: 'experiment', source: '/path with spaces/repo', rev: 'feature/soil', base: null, note: null }]);
+assert.deepEqual(calls.slice(2).map(call => call[0]), ['workspace_list']);
+assert.match(elements['workspace-create-status'].textContent, /已创建修改版 experiment.*\/workspaces\/experiment/);
+// 从另一个修改版开始、写了目的：来源与提交号不再传（以父版本为准）。
+elements['workspace-base'] = { value: 'beta', disabled: false };
+elements['workspace-note'] = { value: '  lower snow albedo ', disabled: false };
+elements['workspace-name'].value = 'snow';
+await workspace.createWorkspace({ preventDefault() {} });
+assert.deepEqual(calls.at(-2), ['workspace_create', { name: 'snow', source: null, rev: null, base: 'beta', note: 'lower snow albedo' }]);
+delete elements['workspace-base'];
+delete elements['workspace-note'];
 assert.equal(elements['workspace-create'].disabled, false);
-console.log('workspace: lights, adoption, kernel matching and wiring ok');
+console.log('workspace: lights, version cards, legacy migration, kernel matching and wiring ok');
 
 // Remote workflows retain failures/stale evidence and never adopt a remote binary.
 assert.deepEqual(workspace.remoteRequest('verify', ' default ', '/data/case one', 'colm-core'), {

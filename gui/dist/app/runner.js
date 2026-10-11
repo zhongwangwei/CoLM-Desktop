@@ -14,7 +14,7 @@ import { modelEngine } from './engine.js';
 import { fortranBlockedCases } from './hybrid.js';
 import { language, translateZh } from './i18n.js';
 import { runTarget, remoteRun } from './remote.js';
-import { OFFICIAL, modelVersion, runModeBlocker } from './run-mode.js';
+import { modelVersion, runModeBlocker } from './run-mode.js';
 
 // 单点内核不启 MPI；空间算例默认最多使用八个 MPI rank。
 // Rust 引擎只跑单进程（`colm-cli` 预检对它要求 `--ranks 1`），在进程内用多线程并行，所以 rank 数只对 Fortran 内核生效。
@@ -380,8 +380,8 @@ async function startRun(stage) {
   if (runTarget() !== 'local') {
     return await remoteRun(stage, dirs, stage !== null || $('force').checked);
   }
-  // 修改版按正式内核的预设去取它自己的内核（`colm-cli run --model-version`），启用过的实验内核不混进来。
-  const kernel = version === OFFICIAL ? $('kernel').value : (kernelForSubgrid(undefined, undefined, { official: true })?.dir ?? $('kernel').value);
+  // 修改版按这个正式内核的预设去取它自己的内核（`colm-cli run --model-version`）。
+  const kernel = $('kernel').value;
   const runId = resetRunView(dirs);
   renderCases();
   const force = stage !== null || $('force').checked;

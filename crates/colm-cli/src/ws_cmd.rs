@@ -1,7 +1,8 @@
 //! `colm-cli ws-*`：开发工作区（docs/design-ai-assistant.md 第 4–6 节）。助手的 C 级工具和 GUI 的工作区面板都调它们。
 //!
 //! ```text
-//! colm-cli ws-create   --name N --from <app|本地仓库|地址|源码包> [--rev R] [--root DIR]
+//! colm-cli ws-create   --name N --from <app|ws:修改版|本地仓库|地址|源码包> [--rev R] [--note 目的] [--root DIR]
+//! colm-cli ws-note     --name N --note 目的            # 改这个修改版的一句目的
 //! colm-cli ws-list     [--root DIR]
 //! colm-cli ws-status   --name N [--root DIR]
 //! colm-cli ws-search   (--name N | --source DIR) --pattern RE [--glob G]
@@ -152,18 +153,37 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
         }
         "ws-create" => {
             let from = opts.need_str("--from")?;
-            let from = if from == "app" {
-                super::remote_cmd::workspace_source()?.display().to_string()
-            } else {
-                from
+            // `ws:NAME`：从另一个修改版分出来（克隆它的 src，带着它全部已提交的改动）。
+            let parent = match from.strip_prefix("ws:") {
+                Some(name) => Some(Workspace::open(&root(opts), name)?),
+                None => None,
             };
-            let workspace = Workspace::create(
+            let from = match (&parent, from.as_str()) {
+                (Some(parent), _) => parent.src().display().to_string(),
+                (None, "app") => super::remote_cmd::workspace_source()?.display().to_string(),
+                (None, _) => from,
+            };
+            let mut workspace = Workspace::create(
                 &root(opts),
                 &opts.need_str("--name")?,
                 &from,
                 opts.get("--rev").as_deref(),
             )?;
+            let note = opts.get("--note").unwrap_or_default();
+            workspace.update(|info| {
+                info.note = note.trim().to_owned();
+                if let Some(parent) = &parent {
+                    info.based_on = Some(parent.info.name.clone());
+                    info.root_commit = Some(parent.official_base().to_owned());
+                }
+            })?;
             print(json!({ "workspace": workspace.info, "dir": workspace.dir }));
+        }
+        "ws-note" => {
+            let mut workspace = open(opts)?;
+            let note = opts.need_str("--note")?;
+            workspace.update(|info| info.note = note.trim().to_owned())?;
+            print(json!({ "workspace": workspace.info }));
         }
         "ws-list" => print(json!({ "workspaces": Workspace::list(&root(opts))? })),
         "ws-status" => {
@@ -172,6 +192,7 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             let head = workspace.head()?;
             print(json!({
                 "workspace": workspace.info,
+                "dir": workspace.dir,
                 "head": head,
                 "lights": workspace.info.gates.lights_for(&head, workspace.parity_needed()?),
                 "parity_needed": workspace.parity_needed()?,

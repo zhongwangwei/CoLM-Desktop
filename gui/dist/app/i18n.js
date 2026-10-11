@@ -2675,6 +2675,60 @@ const ZH_EN = [
   ["在哪里跑、用哪个引擎", "Where and with which engine"],
   ["并行设置跟着引擎与算例类型变化，只显示用得上的那几项。", "Parallel settings follow the engine and the case type; only the ones that apply are shown."],
   ["预热在第 1 步“基本设定”，版本、位置与引擎在上一步“运行方式”。", "Spin-up is in step 1 “Basic setup”; version, location and engine are in the previous step “Run mode”."],
+  // 改代码页与改进模型（workspace.js、shell.js、index.html）
+  ["改进模型", "Improve the model"],
+  ["改进模型总览", "Improve the model: overview"],
+  ["调参数还是改代码", "Tune parameters or change code"],
+  ["改代码", "Change code"],
+  ["新建、修改、编译与检查", "Create, change, build and check"],
+  ["编出这个版本自己的 colm-cli、colm-rs 与两个前处理；运行这个版本前必须做", "Builds this version's own colm-cli, colm-rs and the two preprocessors; required before running this version"],
+  ["改了 Fortran 时要做；用 Fortran 内核跑也要做", "Needed when Fortran changed, and to run on the Fortran kernel"],
+  ["测试：参数表同步", "Test: parameter tables in sync"],
+  ["Fortran 与 Rust 里的参数表、字段表有没有漂移", "Whether the parameter and field tables in Fortran and Rust have drifted apart"],
+  ["测试：Rust 单元测试", "Test: Rust unit tests"],
+  ["跑一个包的 cargo 测试（默认 colm-core）", "Runs the cargo tests of one package (colm-core by default)"],
+  ["用当前算例分别以改后的 Fortran 与 Rust 跑，逐位对比", "Runs the current case with the changed Fortran and the changed Rust and compares them bit for bit"],
+  ["官方版（应用自带的 CoLM）", "Official version (the CoLM shipped with the app)"],
+  ["新建修改版", "New modified version"],
+  ["请在修改版 NAME 里改代码：先读相关源码，说明打算怎么改、影响 Rust 引擎还是 Fortran 内核，等我确认后再打补丁。我想改的是：", "Please change the code in modified version NAME: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:"],
+  ["这个版本想改什么、为什么？（一句话，会写进它跑出的每个结果）", "What does this version change, and why? (One sentence; it is recorded with every result it produces)"],
+  ["这次改动的说明（会记进改动记录）", "Describe this change (recorded in the change history)"],
+  ["在本机编译和检查", "Build and check on this computer"],
+  ["两版一致要先选一个算例", "The two-version check needs a case first"],
+  ["在受限环境里运行（不能联网、只能写这个版本的文件夹）。编译与测试都记在当前提交名下；之后再改代码，灯会变成“需要重测”。", "Runs in a restricted environment (no network, writes only to this version's folder). Builds and tests are recorded against the current commit; after further code changes the light turns to “needs retesting”."],
+  ["还没有修改版。在下方填写名称和目的，点击“新建修改版”。", "No modified versions yet. Enter a name and purpose below and click “New modified version”."],
+  ["运行方式里选的就是它", "Selected in the run mode"],
+  ["还没写目的", "No purpose written yet"],
+  ["用它运行 →", "Run with it →"],
+  ["让助手改", "Ask the assistant to change it"],
+  ["导入补丁…", "Import a patch…"],
+  ["写目的…", "Write the purpose…"],
+  ["改动记录、改了哪些文件、源码在哪个文件夹（可以用自己的编辑器打开）", "Change history, changed files, and the source folder (open it in your own editor)"],
+  ["删除这个修改版…", "Delete this modified version…"],
+  ["删除整个副本，包括编出的程序和测试报告，不能恢复；运行方式里选着它的会改回官方版。", "Deletes the whole copy, including built programs and test reports, and cannot be undone; a run mode that selects it falls back to the official version."],
+  ["源码所在的文件夹（可以用自己的编辑器打开，改完提交后回到这里检查）", "Source folder (open it in your own editor; commit, then come back here to check)"],
+  ["已创建修改版", "Created modified version"],
+  ["下一步：改代码，然后编译 Rust 引擎。", "Next: change the code, then build the Rust engine."],
+  ["基于修改版", "Based on modified version"],
+  ["删除修改版", "Delete modified version"],
+  ["进行中…编译可能要几分钟", "In progress… a build can take a few minutes"],
+  ["内核预设", "Kernel preset"],
+  ["已导入补丁", "Patch imported"],
+  ["参数怎么调都不对、像是过程或结构的问题时：新建一个修改版，改 Fortran 或 Rust 源码、编译、检查，再在“运行方式”里选它重跑，与官方版对比。", "When no parameter setting fixes it and it looks like a process or structure problem: create a modified version, change the Fortran or Rust source, build and check it, then select it in “Run mode”, rerun and compare with the official version."],
+  ["改进模型 · 改代码", "Improve the model · Change code"],
+  ["改代码会产出一个新的修改版：一份独立的 CoLM 源码，你或 AI 助手在里面改 Fortran 和 Rust、编译、检查。官方版和别的版本都不受影响。编好之后在“运行方式”里选它，跑的就是它自己的程序。", "Changing code produces a new modified version: a separate copy of the CoLM source in which you or the AI assistant change the Fortran and Rust code, build and check it. The official version and other versions are not affected. Once built, select it in “Run mode” and runs use its own programs."],
+  ["应用自带的 CoLM，不可修改；Rust 引擎与 Fortran 内核都已就绪", "The CoLM shipped with the app; cannot be changed; its Rust engine and Fortran kernels are ready"],
+  ["从哪一版开始", "Start from"],
+  ["选一个修改版就是在它的改动上接着改（复制一份，原来那个不受影响）。", "Choosing a modified version continues from its changes (a copy is made; the original is not affected)."],
+  ["名称", "Name"],
+  ["想改什么、为什么", "What to change, and why"],
+  ["这句话会写进这个版本跑出的每个结果里，几个月后回头看也知道它是什么。", "This sentence is recorded with every result from this version, so you still know what it is months later."],
+  ["从其他源码或版本开始（可选）", "Start from other source or revision (optional)"],
+  ["例如 snow-albedo", "e.g. snow-albedo"],
+  ["例如：老化雪的近红外反照率下调 5%，看能否改善春季感热偏高", "e.g. lower the near-infrared albedo of aged snow by 5% to see whether it reduces the spring sensible-heat bias"],
+  ["调参数，还是改代码？", "Tune parameters, or change code?"],
+  ["两种手段平级：调参数与网络不碰代码，产出新算例；改代码产出新的模型版本。做完都回到工作流第 3 步“运行方式”重跑，在结果页对比。", "Two equal routes: tuning parameters and networks leaves the code alone and produces new cases; changing code produces a new model version. Either way, rerun from workflow step 3 “Run mode” and compare in Results."],
+  ["调参数与网络", "Tune parameters and networks"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -2718,6 +2772,7 @@ export function translateZh(text, target = 'en') {
     .replace(/^已把拟合的模型装到 (\d+) 个算例$/, 'Installed the fitted model into $1 cases')
     .replace(/^思考：默认（(\S+)）$/, 'Think: default ($1)')
     .replace(/^思考：([A-Za-z0-9_-]+)$/, 'Think: $1')
+    .replace(/^请在修改版 (\S+) 里改代码：(.*)$/, (m, name) => `Please change the code in modified version ${name}: read the relevant source first, say how you plan to change it and whether it affects the Rust engine or the Fortran kernel, and wait for my confirmation before patching. What I want to change is:`)
     .replace(/^修改版：(.+)$/, 'Modified version: $1')
     .replace(/^修改版 (\S+) 目前只能在本机运行：请把运行位置换成本机，或把模型版本换回官方版$/, 'Modified version $1 can only run on this computer for now: set the location to this computer, or switch back to the official version')
     .replace(/^还在检查修改版 (\S+) 能不能运行，请稍候再试$/, 'Still checking whether modified version $1 can run; try again in a moment')

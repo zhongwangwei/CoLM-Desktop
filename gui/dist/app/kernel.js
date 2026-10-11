@@ -6,16 +6,15 @@ const GRID_MACROS = { latlon: 'GRIDBASED', unstructured: 'UNSTRUCTURED', catchme
 
 /** USGS 与 CROP 仍需要不同编译产物；PFT/PC 是 IGBP 分类内的运行时结构。 */
 /**
- * `official` 为真时只在正式内核里找：选了修改版时由 `colm-cli run --model-version` 按这个正式内核的预设去取修改版
- * 自己的内核（改过 Fortran 时），启用过的实验内核不能混进来。
+ * 只在正式内核里找。选了修改版时由 `colm-cli run --model-version` 按这个正式内核的预设去取修改版自己的内核
+ * （改过 Fortran 时）；旧版“启用实验内核”已并入模型版本，不再参与匹配。
  */
-export function kernelForSubgrid(subgrid = state.subgrid ?? state.wizard?.subgrid, opts = state.wizard, { official = false } = {}) {
+export function kernelForSubgrid(subgrid = state.subgrid ?? state.wizard?.subgrid, opts = state.wizard) {
   const want = subgrid === 'USGS' ? 'LULC_USGS' : 'LULC_IGBP';
   const grid = opts && Object.hasOwn(opts, 'grid') ? opts.grid : (state.wizard?.grid ?? state.grid);
   const wantGrid = GRID_MACROS[grid] ?? 'SinglePoint';
   const wantCrop = !!(opts?.crop ?? opts?.physics?.crop);
-  // 采纳过的实验内核排在前面（“设为默认”）；没采纳过就只有正式内核，行为不变。
-  const pool = official ? [...state.kernels] : [...(state.adoptedKernels ?? []), ...state.kernels];
+  const pool = state.kernels ?? [];
   const matches = pool.filter(k => k.macros?.includes(wantGrid)
     && k.macros?.includes(want) && !!k.macros?.includes('CROP') === wantCrop);
   const preferred = wantCrop ? 'crop' : (subgrid === 'USGS' ? 'usgs' : 'default');

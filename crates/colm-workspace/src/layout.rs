@@ -73,6 +73,16 @@ pub struct Info {
     pub gates: Gates,
     #[serde(default)]
     pub adopted: Vec<Adoption>,
+    /// 作为“修改版”时的一句目的（想改什么、为什么），写进这个版本跑出的每个结果的出处。
+    #[serde(default)]
+    pub note: String,
+    /// 从哪个修改版分出来的（`ws-create --from ws:NAME`）；从官方源码建的为空。
+    #[serde(default)]
+    pub based_on: Option<String>,
+    /// 官方源码的那个提交。从另一个修改版分出来时 `base_commit` 是父版本的提交，而“改了 Rust 还是 Fortran”
+    /// 要相对官方版算，否则父版本改过的 Fortran 会被漏掉。为空时就是 `base_commit`。
+    #[serde(default)]
+    pub root_commit: Option<String>,
 }
 
 pub fn now() -> u64 {
@@ -99,6 +109,10 @@ pub struct Summary {
     pub dirty: bool,
     pub lights: crate::gates::Lights,
     pub created_at: u64,
+    pub note: String,
+    pub based_on: Option<String>,
+    /// 相对官方版改了哪边。
+    pub touches: crate::version::Touches,
 }
 
 impl Workspace {
@@ -235,10 +249,26 @@ impl Workspace {
                 branch,
                 gates: Gates::default(),
                 adopted: Vec::new(),
+                note: String::new(),
+                based_on: None,
+                root_commit: None,
             },
         };
         workspace.save()?;
         Ok(workspace)
+    }
+
+    /// 官方源码的提交：改动范围、要不要自己的内核都相对它算（见 [`Info::root_commit`]）。
+    pub fn official_base(&self) -> &str {
+        self.info
+            .root_commit
+            .as_deref()
+            .unwrap_or(&self.info.base_commit)
+    }
+
+    /// 相对官方源码改了哪些文件。
+    pub fn changes_from_official(&self) -> Result<Vec<git::FileChange>> {
+        git::changed_files(&self.src(), self.official_base())
     }
 
     /// 相对基线的改动里，有没有会影响计算结果的代码（决定“两版一致”要不要做）。
@@ -261,6 +291,13 @@ impl Workspace {
             lights: self.info.gates.lights_for(&head, self.parity_needed()?),
             head,
             created_at: self.info.created_at,
+            note: self.info.note.clone(),
+            based_on: self.info.based_on.clone(),
+            touches: crate::version::touches(
+                self.changes_from_official()?
+                    .iter()
+                    .map(|f| f.path.as_str()),
+            ),
         })
     }
 

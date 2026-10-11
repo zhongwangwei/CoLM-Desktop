@@ -66,6 +66,8 @@ fn version_value(version: &Version) -> Value {
             "head": r.head,
             "base_commit": r.base_commit,
             "origin": r.origin,
+            "note": r.note,
+            "based_on": r.based_on,
             "touches": r.touches,
         }),
     }

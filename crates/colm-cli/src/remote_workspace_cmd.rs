@@ -883,6 +883,9 @@ mod tests {
                 branch: "main".into(),
                 gates: Default::default(),
                 adopted: vec![],
+                note: String::new(),
+                based_on: None,
+                root_commit: None,
             },
         };
         ws.save().unwrap();

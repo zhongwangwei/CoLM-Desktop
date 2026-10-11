@@ -39,7 +39,7 @@ function storedVersion() {
 
 /** 选了修改版时交给 `version_check` 的正式内核（决定预设）。 */
 export function officialKernelDir() {
-  return kernelForSubgrid(undefined, undefined, { official: true })?.dir ?? '';
+  return kernelForSubgrid()?.dir ?? '';
 }
 
 // ---- 版本列表与检查 ---------------------------------------------------------------------------
@@ -228,8 +228,14 @@ function wire() {
   $('manage-versions')?.addEventListener('click', openWorkspaces);
   $('model-engine')?.addEventListener('change', () => checkVersion());
   $('run-target')?.addEventListener('change', renderAll);
-  // 工作区面板关上时，修改版可能新建、删除或重新编译过。
-  $('workspace-dialog')?.addEventListener('close', () => refreshVersions().catch(status));
+  // 改代码页里新建、删除、重新编译或改了代码：版本列表与检查结果都要重来。
+  addEventListener('colm:versions', () => refreshVersions().catch(status));
+  // 改代码页的“用它运行”：选中这个版本，去运行方式。
+  addEventListener('colm:use-version', event => {
+    state.modelVersion = event.detail || OFFICIAL;
+    storeVersion();
+    go('run-mode');
+  });
   addEventListener('colm:kernels', () => checkVersion());
   addEventListener('colm:wizard', () => checkVersion());
   addEventListener('colm:context', renderContextBar);

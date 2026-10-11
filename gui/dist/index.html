@@ -437,14 +437,10 @@
 
     <!-- ④ 运行 -->
     <section class="page" data-step="research" hidden>
-      <div class="work-head"><span class="kicker">研究</span></div>
-      <h1>你想回答什么问题？</h1>
-      <p class="sub">研究都从一个算例出发，产出新的算例；新算例回到工作流里运行，在结果页与原算例比较。</p>
-      <div class="card">
-        <h3>修改模型源码</h3>
-        <p class="mini">新建开发工作区，在源码副本里修改、编译和验证模型。</p>
-        <button class="btn-ghost" type="button" id="research-workspaces-btn">打开开发工作区</button>
-      </div>
+      <div class="work-head"><span class="kicker">改进模型</span></div>
+      <h1>调参数，还是改代码？</h1>
+      <p class="sub">两种手段平级：调参数与网络不碰代码，产出新算例；改代码产出新的模型版本。做完都回到工作流第 3 步“运行方式”重跑，在结果页对比。</p>
+      <h2 class="research-path">调参数与网络</h2>
       <div class="card research-base">
         <h3>基于算例</h3>
         <div id="research-case" class="ch"></div>
@@ -461,11 +457,77 @@
           <div class="domain-cards research-cards" id="research-ai"></div>
         </div>
       </div>
+      <h2 class="research-path">改代码</h2>
+      <div class="card">
+        <p class="mini">参数怎么调都不对、像是过程或结构的问题时：新建一个修改版，改 Fortran 或 Rust 源码、编译、检查，再在“运行方式”里选它重跑，与官方版对比。</p>
+        <button class="btn-ghost" type="button" id="research-workspaces-btn">去改代码</button>
+      </div>
       <div class="card" id="research-readiness">
         <h3 id="research-readiness-title">准备情况</h3>
         <div id="research-readiness-list" class="readiness-list"></div>
         <div class="pill-row" id="research-readiness-actions"></div>
       </div>
+    </section>
+
+    <!-- 改进模型 · 改代码：模型版本（修改版 = 一份源码副本，开发工作区）。 -->
+    <section class="page" data-step="code" hidden>
+      <div class="work-head"><span class="kicker">改进模型 · 改代码</span></div>
+      <h1>模型版本</h1>
+      <p class="sub">改代码会产出一个新的修改版：一份独立的 CoLM 源码，你或 AI 助手在里面改 Fortran 和 Rust、编译、检查。官方版和别的版本都不受影响。编好之后在“运行方式”里选它，跑的就是它自己的程序。</p>
+
+      <div class="card ws-official">
+        <div class="ws-head"><b>官方版</b><span class="muted mini">应用自带的 CoLM，不可修改；Rust 引擎与 Fortran 内核都已就绪</span></div>
+      </div>
+      <div id="workspace-list"></div>
+
+      <form id="workspace-create-form" class="card" aria-labelledby="workspace-create-title">
+        <h3 id="workspace-create-title">新建修改版</h3>
+        <div class="field">
+          <label for="workspace-base">从哪一版开始</label>
+          <select class="select" id="workspace-base"><option value="">官方版（应用自带的 CoLM）</option></select>
+          <p class="mini muted">选一个修改版就是在它的改动上接着改（复制一份，原来那个不受影响）。</p>
+        </div>
+        <div class="field">
+          <label for="workspace-name">名称</label>
+          <input class="input" id="workspace-name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="例如 snow-albedo" aria-describedby="workspace-name-help">
+          <p class="mini muted" id="workspace-name-help">使用字母、数字、下划线或短横线，以字母或数字开头。</p>
+        </div>
+        <div class="field">
+          <label for="workspace-note">想改什么、为什么</label>
+          <textarea class="input" id="workspace-note" rows="2" maxlength="500" placeholder="例如：老化雪的近红外反照率下调 5%，看能否改善春季感热偏高"></textarea>
+          <p class="mini muted">这句话会写进这个版本跑出的每个结果里，几个月后回头看也知道它是什么。</p>
+        </div>
+        <details id="workspace-other-source">
+          <summary class="mini">从其他源码或版本开始（可选）</summary>
+          <div class="field">
+            <label for="workspace-source">源码目录或源码包的完整路径</label>
+            <div class="browse">
+              <input class="input" id="workspace-source" placeholder="留空使用当前应用源码">
+              <button class="btn-ghost" type="button" id="workspace-source-browse">选择目录…</button>
+            </div>
+          </div>
+          <div class="field">
+            <label for="workspace-rev">分支、标签或提交号</label>
+            <input class="input" id="workspace-rev" placeholder="留空使用来源的当前提交">
+          </div>
+          <p class="mini muted">从仓库创建时只复制已提交的代码，未提交的修改不会带入。</p>
+        </details>
+        <button class="run-btn" type="submit" id="workspace-create">新建修改版</button>
+        <p class="mini" id="workspace-create-status" role="status" aria-live="polite"></p>
+      </form>
+
+      <details class="ws-legend">
+        <summary class="mini">四项检查是什么意思？</summary>
+        <ul class="mini">
+          <li><b>编译</b>：改过的代码能不能编出 Rust 引擎和 Fortran 内核。</li>
+          <li><b>测试</b>：自动测试是否通过，包括 Fortran 和 Rust 里的参数表是否同步。</li>
+          <li><b>两版一致</b>：同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。只在改了会影响计算结果的代码（Fortran 上游、Rust 引擎的计算部分或依赖版本）时需要；只改 AI 推理、界面、助手这类代码时显示灰色的“不需要”。</li>
+          <li><b>与原版对比</b>：和改之前的正式版本比：结果可以变，但不能出现 NaN，水量和能量闭合不能变差。</li>
+          <li>绿色是通过，红色是不通过，黄色是“需要重测”——检查之后又改过代码，原来的结果不算数了；灰色是还没测，或这次不需要。</li>
+        </ul>
+        <p class="muted mini">编译和测试在受限环境里运行（不能联网、只能写这个工作区的文件夹）。这能防止误改别处的文件，但不是防恶意代码的安全措施。</p>
+      </details>
+      <div class="pill-row"><button class="btn-ghost" type="button" id="workspace-refresh">刷新</button></div>
     </section>
 
     <section class="page" data-step="hybrid" hidden>
@@ -1265,7 +1327,6 @@
       <div class="grow"></div>
       <button class="btn-ghost" type="button" id="assistant-new">新对话</button>
       <button class="btn-ghost" type="button" id="assistant-history-btn">历史</button>
-      <button class="btn-ghost" type="button" id="assistant-workspaces-btn" title="新建工作区、修改源码和验证模型">开发工作区</button>
       <button class="btn-ghost" type="button" id="assistant-settings-btn">设置</button>
       <button class="icon-btn" type="button" id="assistant-close" title="关闭">×</button>
     </div>
@@ -1481,54 +1542,6 @@
     <button class="btn-ghost" type="button" id="remote-test">测试连接</button>
     <button class="btn-ghost" type="button" id="remote-close">取消</button>
     <button class="run-btn" type="button" id="remote-save">保存</button>
-  </div>
-</dialog>
-
-<dialog id="workspace-dialog" class="app-dialog workspace-dialog" aria-labelledby="workspace-title">
-  <h3 id="workspace-title">开发工作区</h3>
-  <p class="mini">开发工作区是一份 CoLM 源码的副本，用来试改代码。你或 AI 助手在副本里改 Fortran 和 Rust 代码、编译、跑测试，再和正式版本对比结果。你正在用的应用和正式内核都不会被改动，除非你在这里点“启用这个内核”。启用、导出、撤回、删除只能由你在这里操作，助手做不了。</p>
-  <p class="mini">打开工作区的“在服务器上编译和验证”，可选择服务器并查看远程任务。</p>
-  <form id="workspace-create-form" class="card" aria-labelledby="workspace-create-title">
-    <h3 id="workspace-create-title">新建工作区</h3>
-    <div class="field">
-      <label for="workspace-name">工作区名称</label>
-      <input class="input" id="workspace-name" required maxlength="40" pattern="[A-Za-z0-9][A-Za-z0-9_-]*" placeholder="例如 soil-water-fix" aria-describedby="workspace-name-help">
-      <p class="mini muted" id="workspace-name-help">使用字母、数字、下划线或短横线，以字母或数字开头。</p>
-    </div>
-    <p class="mini">默认使用当前应用的源码。创建后可让助手在这个工作区里改代码、编译和验证。</p>
-    <details>
-      <summary class="mini">选择其他源码或版本（可选）</summary>
-      <div class="field">
-        <label for="workspace-source">源码目录或源码包的完整路径</label>
-        <div class="browse">
-          <input class="input" id="workspace-source" placeholder="留空使用当前应用源码">
-          <button class="btn-ghost" type="button" id="workspace-source-browse">选择目录…</button>
-        </div>
-      </div>
-      <div class="field">
-        <label for="workspace-rev">分支、标签或提交号</label>
-        <input class="input" id="workspace-rev" placeholder="留空使用来源的当前提交">
-      </div>
-    </details>
-    <p class="mini muted">从仓库创建时只复制已提交的代码，未提交的修改不会带入。</p>
-    <button class="run-btn" type="submit" id="workspace-create">新建工作区</button>
-    <p class="mini" id="workspace-create-status" role="status" aria-live="polite"></p>
-  </form>
-  <details class="ws-legend">
-    <summary class="mini">四项检查是什么意思？</summary>
-    <ul class="mini">
-      <li><b>编译</b>：改过的代码能不能编出 Rust 引擎和 Fortran 内核。</li>
-      <li><b>测试</b>：自动测试是否通过，包括 Fortran 和 Rust 里的参数表是否同步。</li>
-      <li><b>两版一致</b>：同一个算例，改后的 Fortran 和改后的 Rust 算出的结果是否完全一样。只在改了会影响计算结果的代码（Fortran 上游、Rust 引擎的计算部分或依赖版本）时需要；只改 AI 推理、界面、助手这类代码时显示灰色的“不需要”。</li>
-      <li><b>与原版对比</b>：和改之前的正式版本比：结果可以变，但不能出现 NaN，水量和能量闭合不能变差。</li>
-      <li>绿色是通过，红色是不通过，黄色是“需要重测”——检查之后又改过代码，原来的结果不算数了；灰色是还没测，或这次不需要。</li>
-    </ul>
-    <p class="muted mini">编译和测试在受限环境里运行（不能联网、只能写这个工作区的文件夹）。这能防止误改别处的文件，但不是防恶意代码的安全措施。</p>
-  </details>
-  <div id="workspace-list"></div>
-  <div class="assistant-approval-actions">
-    <button class="btn-ghost" type="button" id="workspace-refresh">刷新</button>
-    <button class="run-btn" type="button" id="workspace-close">关闭</button>
   </div>
 </dialog>
 

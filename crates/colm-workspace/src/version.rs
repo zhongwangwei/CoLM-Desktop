@@ -61,6 +61,9 @@ pub struct Readiness {
     pub head: String,
     pub base_commit: String,
     pub origin: String,
+    /// 这个版本的目的（见 `Info::note`）。
+    pub note: String,
+    pub based_on: Option<String>,
     pub touches: Touches,
     /// 能跑吗（没有任何阻塞项）。
     pub ready: bool,
@@ -100,7 +103,7 @@ pub fn check(
     let head = workspace.head()?;
     let src = workspace.src();
     let dirty = crate::git::is_dirty(&src)?;
-    let changed = crate::git::changed_files(&src, &workspace.info.base_commit)?;
+    let changed = workspace.changes_from_official()?;
     let touches = touches(changed.iter().map(|c| c.path.as_str()));
     let gates = &workspace.info.gates;
     let short = &head[..head.len().min(8)];
@@ -203,6 +206,8 @@ pub fn check(
         head,
         base_commit: workspace.info.base_commit.clone(),
         origin: workspace.info.origin.clone(),
+        note: workspace.info.note.clone(),
+        based_on: workspace.info.based_on.clone(),
         touches,
         ready,
         items,

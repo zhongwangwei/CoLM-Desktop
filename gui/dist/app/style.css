@@ -858,8 +858,7 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .hybrid-train-list li + li { margin-top: 4px; }
 
 /* 开发工作区面板 */
-.workspace-dialog { width: min(760px, 94vw); }
-.ws-card { border: 1px solid var(--line, #d0d4da); border-radius: 8px; padding: 10px 12px; margin: 8px 0; }
+.ws-card { border: 1px solid var(--border); border-radius: var(--r-md); padding: 12px 14px; margin: 10px 0; background: var(--elevated); }
 .ws-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
 .ws-lights { display: flex; gap: 14px; flex-wrap: wrap; margin: 6px 0; }
 .ws-light-dot { font-size: 14px; }
@@ -876,7 +875,7 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .ws-detail-title { font-weight: 650; margin-top: 6px; }
 .ws-legend { margin: 6px 0 4px; }
 .ws-legend ul { margin: 4px 0; padding-left: 18px; }
-.ws-detail { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--line, #d0d4da); }
+.ws-detail { margin-top: 8px; padding-top: 6px; border-top: 1px dashed var(--border); }
 
 /* ---- 研究（research.js）：左栏的第二段、总览页与结果页的“下一步” ---- */
 .rail h4.rail-section { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border); }
@@ -970,3 +969,14 @@ body.assistant-open:has(.gate:not(.loading-gate):not([hidden])) .assistant {
 .provenance-warn { background: var(--fail-bg); color: var(--fail); }
 /* 上面几块都有自己的 display，`hidden` 要压过它们。 */
 .version-card[hidden], .readiness[hidden], .provenance[hidden] { display: none; }
+
+/* 改代码页：官方版一行、版本卡上的目的与主要操作、本机检查。 */
+.ws-official { padding: 12px 14px; }
+.ws-note { margin: 4px 0 0; color: var(--text); }
+.ws-primary { margin: 8px 0 2px; gap: 8px; }
+.ws-check-options { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 6px 0; }
+.ws-check-options .input { width: auto; }
+.ws-check-list { display: grid; gap: 6px; }
+.ws-checks p[role="status"] { white-space: pre-wrap; }
+@media (max-width: 640px) { .ws-action { grid-template-columns: 1fr; } }
+.research-path { font-size: 15px; margin: var(--s-xl) 0 var(--s-md); }

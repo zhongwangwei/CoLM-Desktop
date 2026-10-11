@@ -1,17 +1,21 @@
-//! 开发工作区面板（docs/design-ai-assistant.md 第 5、8 节）：助手改 CoLM 源码、编译、测试、对照的地方。
-//! 实际工作都由 `colm-cli ws-*` 做；这里提供新建、状态和采纳、导出补丁、回滚、删除。
+//! 改代码（模型版本）页：每个修改版是一份 CoLM 源码副本（开发工作区，docs/design-ai-assistant.md 第 5、8 节）。
+//! 实际工作都由 `colm-cli ws-*` 做；这里提供新建（从官方版或另一个修改版）、版本卡、本机检查、远程检查，
+//! 以及导出补丁、撤回、删除。修改版不用登记或“启用”：建好、编好之后在“运行方式”里选它就用它自己的程序跑。
 //!
-//! 这四个按钮是 **D 级**：只在这里有入口，助手的工具里没有对应的工具，模型调不到。
+//! 导出、撤回、删除是 **D 级**：只在这里有入口，助手的工具里没有对应的工具，模型调不到。
 //!
-//! 只依赖 ipc/state/ui/i18n。kernel.js 读 `state.adoptedKernels`（采纳过的实验内核），反过来不依赖本模块。
+//! 只依赖 ipc/state/ui/i18n/shell。和 run-mode-view.js 之间用事件联系（`colm:use-version`、`colm:versions`），不互相导入。
 
 import { invoke, hasBackend } from './ipc.js';
 import { state } from './state.js';
 import { $, status, appConfirm, appPrompt, baseName } from './ui.js';
 import { language, translateZh } from './i18n.js';
+import { go } from './shell.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
-const STORE_KEY = 'colm.adoptedKernels';
+/** 旧版“启用实验内核”的记录：迁移成默认的模型版本后删掉。 */
+const LEGACY_ADOPTED_KEY = 'colm.adoptedKernels';
+const VERSION_KEY = 'colm.modelVersion';
 
 // ---- 纯函数（tests/workspace.mjs）--------------------------------------------------------------
 
@@ -46,85 +50,109 @@ export function lightsSummary(lights) {
     .join(' · ');
 }
 
-/** 这个工作区有没有可采纳的实验内核。 */
-export function adoptableKernels(kernels, workspace) {
-  return (kernels ?? []).filter(k => k.workspace === workspace);
-}
-
-/** 实验内核在匹配用的内核表里的样子（和 `list_kernels` 的条目同形，另带 `experimental` 标记）。 */
-export function kernelEntry(experimental) {
-  return {
-    preset: experimental.preset,
-    dir: experimental.dir,
-    generator_args: experimental.generator_args ?? '',
-    macros: experimental.macros ?? [],
-    colm_git_sha: experimental.colm_git_sha ?? '',
-    platform: experimental.platform ?? '',
-    experimental: { workspace: experimental.workspace, label: experimental.label, head: experimental.head, reviewed: false },
-  };
-}
-
-/** 采纳过的内核里，只留下仍然登记着的（工作区又有了新提交、门槛作废了的要去掉）。 */
-export function stillRegistered(adopted, registered) {
-  return (adopted ?? []).filter(a =>
-    (registered ?? []).some(k => k.workspace === a.experimental?.workspace && k.preset === a.preset && k.head === a.experimental?.head));
-}
-
 /** 改动记录里一行：编号 · 说明（去掉工作区自动加的 `ws: ` 前缀）。 */
 export function commitLine(commit) {
   return `${commit.short} · ${String(commit.subject ?? '').replace(/^ws: /, '')}`;
 }
 
-/** 这个工作区的内核是否正在使用（启用过、且仍登记着）。 */
-export function adoptedFrom(adopted, workspace) {
-  return (adopted ?? []).filter(k => k.experimental?.workspace === workspace);
+/** 版本卡第二行：从哪来、改了几次、改了哪边、有没有没提交的改动。 */
+export function versionFacts(ws) {
+  const touches = ws.touches ?? {};
+  const where = touches.engine && touches.kernel ? '改了 Rust 引擎和 Fortran 内核'
+    : touches.engine ? '改了 Rust 引擎'
+      : touches.kernel ? '改了 Fortran 内核'
+        : '没改会影响计算结果的代码';
+  return [
+    ws.based_on ? `${t('基于修改版')} ${ws.based_on}` : `${t('基于')} ${baseName(ws.origin)}`,
+    `${t('改了')} ${ws.commits} ${t('次')}`,
+    t(where),
+    ws.dirty ? t('有未保存的改动') : null,
+  ].filter(Boolean).join(' · ');
 }
 
-function loadStored() {
-  try {
-    return JSON.parse(localStorage.getItem(STORE_KEY) ?? '[]');
-  } catch {
-    return [];
-  }
+/** 旧版“启用实验内核”迁移成默认的模型版本：只在还没选过版本时生效，返回要设成的版本名或 null。 */
+export function migratedVersion(adopted, chosen) {
+  if (chosen) return null;
+  const name = (adopted ?? []).find(k => k?.experimental?.workspace)?.experimental.workspace;
+  return name ?? null;
 }
 
-function storeAdopted() {
+/** 本机检查按钮：动作、按钮文字、说明。 */
+export const LOCAL_CHECKS = [
+  ['build-engine', '编译 Rust 引擎', '编出这个版本自己的 colm-cli、colm-rs 与两个前处理；运行这个版本前必须做'],
+  ['build-kernel', '编译 Fortran 内核', '改了 Fortran 时要做；用 Fortran 内核跑也要做'],
+  ['test-drift', '测试：参数表同步', 'Fortran 与 Rust 里的参数表、字段表有没有漂移'],
+  ['test-cargo', '测试：Rust 单元测试', '跑一个包的 cargo 测试（默认 colm-core）'],
+  ['parity', '两版一致', '用当前算例分别以改后的 Fortran 与 Rust 跑，逐位对比'],
+];
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch { return null; }
+}
+
+function storageSet(key, value) {
   try {
-    localStorage.setItem(STORE_KEY, JSON.stringify(state.adoptedKernels ?? []));
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
   } catch {
     // 存不了不影响本次使用。
   }
 }
 
-// ---- 面板 ------------------------------------------------------------------------------------
+// ---- 页面 ------------------------------------------------------------------------------------
 
-let registered = [];
 let creating = false;
+let versions = [];
+
+function el(tag, props = {}, children = []) {
+  const node = Object.assign(document.createElement(tag), props);
+  node.append(...children);
+  return node;
+}
+
+function versionsChanged() {
+  globalThis.dispatchEvent?.(new Event('colm:versions'));
+}
+
+function renderBaseChoices() {
+  const select = $('workspace-base');
+  if (!select?.replaceChildren) return;
+  const keep = select.value;
+  select.replaceChildren(new Option(t('官方版（应用自带的 CoLM）'), ''));
+  for (const ws of versions) select.appendChild(new Option(`${t('修改版')}：${ws.name}`, ws.name));
+  select.value = [...select.options].some(o => o.value === keep) ? keep : '';
+}
 
 async function createWorkspace(event) {
   event.preventDefault();
   if (creating || !$('workspace-create-form').reportValidity()) return;
   const name = $('workspace-name').value.trim();
-  const source = $('workspace-source').value.trim() || null;
-  const rev = $('workspace-rev').value.trim() || null;
+  const base = $('workspace-base')?.value || null;
+  const note = $('workspace-note')?.value.trim() || null;
+  const source = base ? null : ($('workspace-source').value.trim() || null);
+  const rev = base ? null : ($('workspace-rev').value.trim() || null);
   const message = $('workspace-create-status');
   const submit = $('workspace-create');
+  const fields = ['workspace-name', 'workspace-note', 'workspace-base', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create'];
   creating = true;
-  for (const id of ['workspace-name', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create']) $(id).disabled = true;
+  for (const id of fields) if ($(id)) $(id).disabled = true;
   submit.textContent = t('正在创建…');
   message.className = 'mini';
   message.textContent = t('正在复制源码，创建完成后会显示在下方。');
   try {
-    const result = await invoke('workspace_create', { name, source, rev });
-    message.textContent = `${t('已创建工作区')} ${name} · ${t('位置')}：${result.dir}。${t('下一步：让助手在这个工作区里修改代码、编译和验证。')}`;
+    const result = await invoke('workspace_create', { name, source, rev, base, note });
+    message.textContent = `${t('已创建修改版')} ${name}：${result?.dir ?? ''}。${t('下一步：改代码，然后编译 Rust 引擎。')}`;
+    $('workspace-name').value = '';
+    if ($('workspace-note')) $('workspace-note').value = '';
     await refresh();
+    versionsChanged();
   } catch (error) {
     message.className = 'mini assistant-fail';
     message.textContent = String(error?.message || error);
   } finally {
     creating = false;
-    for (const id of ['workspace-name', 'workspace-source', 'workspace-rev', 'workspace-source-browse', 'workspace-create']) $(id).disabled = false;
-    submit.textContent = t('新建工作区');
+    for (const id of fields) if ($(id)) $(id).disabled = false;
+    submit.textContent = t('新建修改版');
   }
 }
 
@@ -132,12 +160,10 @@ async function refresh() {
   const list = $('workspace-list');
   list.replaceChildren(Object.assign(document.createElement('p'), { className: 'muted mini', textContent: t('正在读取…') }));
   try {
-    const [workspaces, kernels] = await Promise.all([invoke('workspace_list'), invoke('workspace_kernels')]);
-    registered = kernels?.kernels ?? [];
-    // 门槛作废了的采纳过的内核不再参与匹配。
-    state.adoptedKernels = stillRegistered(state.adoptedKernels, registered);
-    storeAdopted();
-    render(workspaces?.workspaces ?? []);
+    const workspaces = await invoke('workspace_list');
+    versions = workspaces?.workspaces ?? [];
+    renderBaseChoices();
+    render(versions);
   } catch (error) {
     list.replaceChildren(Object.assign(document.createElement('p'), { className: 'assistant-fail', textContent: String(error?.message || error) }));
   }
@@ -169,13 +195,97 @@ function action(text, help, onclick, disabled = false, why = '') {
   return row;
 }
 
+/** 在“运行方式”里选这个版本并过去。 */
+function useVersion(name) {
+  globalThis.dispatchEvent?.(new CustomEvent('colm:use-version', { detail: name }));
+}
+
+/** 打开助手，把一句关于这个版本的请求填进输入框（不自动发送）。 */
+function askAssistant(name) {
+  globalThis.dispatchEvent?.(new CustomEvent('colm:assistant-prompt', {
+    detail: `请在修改版 ${name} 里改代码：先读相关源码，说明打算怎么改、影响 Rust 引擎还是 Fortran 内核，等我确认后再打补丁。我想改的是：`,
+  }));
+}
+
+async function editNote(ws) {
+  const note = await appPrompt(t('这个版本想改什么、为什么？（一句话，会写进它跑出的每个结果）'), ws.note ?? '');
+  if (note === null || note === undefined) return;
+  try {
+    await invoke('workspace_note', { name: ws.name, note });
+    await refresh();
+  } catch (error) {
+    status(error);
+  }
+}
+
+async function importPatch(name) {
+  try {
+    const file = await invoke('pick_file', { key: 'workspace-patch' });
+    if (!file) return;
+    const message = await appPrompt(t('这次改动的说明（会记进改动记录）'), baseName(file));
+    if (!message) return;
+    await invoke('workspace_import_patch', { name, file, message });
+    status(`${t('已导入补丁')}：${baseName(file)}`);
+    await refresh();
+    versionsChanged();
+  } catch (error) {
+    status(error);
+  }
+}
+
+/** 本机检查（编译、测试、两版一致）：一个版本同时只跑一项，结果写在下面。 */
+function checksPanel(ws) {
+  const panel = el('details', { className: 'ws-detail ws-checks' }, [el('summary', { textContent: t('在本机编译和检查') })]);
+  const preset = el('input', { className: 'input', value: 'default', required: true, size: 12 });
+  const pkg = el('input', { className: 'input', value: 'colm-core', size: 14 });
+  const out = el('p', { className: 'mini', role: 'status' });
+  const options = el('div', { className: 'ws-check-options mini' }, [
+    el('label', { className: 'muted', textContent: t('内核预设') }), preset,
+    el('label', { className: 'muted', textContent: t('测试包') }), pkg,
+  ]);
+  const rows = el('div', { className: 'ws-check-list' });
+  let busy = false;
+  for (const [id, label, help] of LOCAL_CHECKS) {
+    rows.append(action(label, help, async () => {
+      if (busy) return;
+      const caseDir = state.selected?.dir;
+      if (id === 'parity' && !caseDir) { out.className = 'mini assistant-fail'; out.textContent = t('两版一致要先选一个算例'); return; }
+      busy = true;
+      for (const b of rows.querySelectorAll?.('button') ?? []) b.disabled = true;
+      out.className = 'mini';
+      out.textContent = `${t(label)}：${t('进行中…编译可能要几分钟')}`;
+      try {
+        const result = await invoke('workspace_check', {
+          name: ws.name, action: id, preset: preset.value.trim() || 'default', package: pkg.value.trim() || null, case: id === 'parity' ? caseDir : null,
+        });
+        const ok = result?.ok ?? result?.outcome?.ok ?? true;
+        out.className = ok ? 'mini' : 'mini assistant-fail';
+        out.textContent = `${t(label)}：${t(ok ? '通过' : '不通过')}${result?.first_difference ? ` · ${result.first_difference}` : ''}${result?.tail && !ok ? `\n${String(result.tail).slice(-1200)}` : ''}`;
+      } catch (error) {
+        out.className = 'mini assistant-fail';
+        out.textContent = `${t(label)}：${String(error?.message || error)}`;
+      } finally {
+        busy = false;
+        for (const b of rows.querySelectorAll?.('button') ?? []) b.disabled = false;
+        await refresh();
+        versionsChanged();
+      }
+    }));
+  }
+  panel.append(
+    el('p', { className: 'mini muted', textContent: t('在受限环境里运行（不能联网、只能写这个版本的文件夹）。编译与测试都记在当前提交名下；之后再改代码，灯会变成“需要重测”。') }),
+    options, rows, out,
+  );
+  return panel;
+}
+
 function render(workspaces) {
   const list = $('workspace-list');
   list.replaceChildren();
   if (!workspaces.length) {
     list.append(Object.assign(document.createElement('p'), {
       className: 'muted',
-      textContent: t('还没有开发工作区。在上方填写名称，点击“新建工作区”。'),
+      textContent: t('还没有修改版。在下方填写名称和目的，点击“新建修改版”。'),
     }));
     return;
   }
@@ -184,39 +294,33 @@ function render(workspaces) {
     card.className = 'ws-card';
     const head = document.createElement('div');
     head.className = 'ws-head';
-    const inUse = adoptedFrom(state.adoptedKernels, ws.name);
+    const inUse = (state.modelVersion ?? storageGet(VERSION_KEY)) === ws.name;
     head.append(
       Object.assign(document.createElement('b'), { textContent: ws.name }),
-      Object.assign(document.createElement('span'), {
-        className: 'muted mini',
-        textContent: `${t('基于')} ${baseName(ws.origin)} · ${t('改了')} ${ws.commits} ${t('次')}${ws.dirty ? ` · ${t('有未保存的改动')}` : ''}`,
-      }),
+      Object.assign(document.createElement('span'), { className: 'muted mini', textContent: versionFacts(ws) }),
     );
-    if (inUse.length) {
-      head.append(Object.assign(document.createElement('span'), {
-        className: 'ws-in-use', textContent: `${t('正在使用这个内核')}：${inUse.map(k => k.preset).join(', ')}`,
-      }));
-    }
+    if (inUse) head.append(Object.assign(document.createElement('span'), { className: 'ws-in-use', textContent: t('运行方式里选的就是它') }));
+    const note = el('p', { className: 'ws-note mini', textContent: ws.note ? `“${ws.note}”` : t('还没写目的') });
     const lights = document.createElement('div');
     lights.className = 'ws-lights';
     for (const [key, name] of Object.entries(LIGHT_NAMES)) lights.append(lightDot(key, name, ws.lights?.[key]));
+    const primary = el('div', { className: 'pill-row ws-primary' }, [
+      Object.assign(button('用它运行 →', () => useVersion(ws.name)), { className: 'run-btn' }),
+      button('让助手改', () => askAssistant(ws.name)),
+      button('导入补丁…', () => importPatch(ws.name)),
+      button('写目的…', () => editNote(ws)),
+    ]);
     const actions = document.createElement('div');
     actions.className = 'ws-actions';
-    const kernels = adoptableKernels(registered, ws.name);
-    const preset = kernels[0]?.preset ?? 'default';
     actions.append(
-      action('查看改动', '改动记录、改了哪些文件、在什么环境里编译和测试', () => showDetail(ws.name, card)),
-      inUse.length
-        ? action('停用这个内核', '改回正式内核；工作区本身不动，之后还能再启用', () => unadopt(ws.name))
-        : action('启用这个内核', `以后用 Fortran 内核跑 ${preset} 预设的算例时，改用这个工作区编出的内核。正式内核不会被删除或覆盖，随时可以停用；应用自带的 Rust 引擎不受影响。`,
-          () => adopt(ws.name, kernels), !kernels.length, '编译和测试要在最新的改动上通过、与原版对比没有不通过，才能启用'),
+      action('查看改动', '改动记录、改了哪些文件、源码在哪个文件夹（可以用自己的编辑器打开）', () => showDetail(ws.name, card)),
       action('导出改动…', '把全部改动存成一个 .patch 文本文件：可以发给别人，或在你自己的仓库里用 git apply 应用后再提交 PR。不会自动上传到 GitHub。',
         () => exportPatch(ws.name), ws.commits === 0, '还没有改动'),
       action('撤回改动…', '退回到之前的某一次改动，或最初的状态；之后的改动被丢弃，需要重新编译和测试。',
         () => revert(ws.name), ws.commits === 0, '还没有改动'),
-      action('删除工作区…', '删除整个副本，包括编出的内核和测试报告，不能恢复；正在使用的内核会一起停用。', () => remove(ws.name)),
+      action('删除这个修改版…', '删除整个副本，包括编出的程序和测试报告，不能恢复；运行方式里选着它的会改回官方版。', () => remove(ws.name)),
     );
-    card.append(head, lights, actions, remotePanel(ws.name));
+    card.append(head, note, lights, primary, checksPanel(ws), remotePanel(ws.name), actions);
     list.append(card);
   }
 }
@@ -351,7 +455,7 @@ function remotePanel(name) {
       }
       jobs.replaceChildren(...entries);
       if (!entries.length) jobs.append(Object.assign(document.createElement('p'), { className: 'mini muted', textContent: t('还没有远程任务') }));
-      if (pending && panel.open && panel.isConnected) timer = setTimeout(() => { if (panel.open && panel.isConnected && $('workspace-dialog')?.open && !busy) loadJobs(true); }, 5000);
+      if (pending && panel.open && panel.isConnected) timer = setTimeout(() => { if (panel.open && panel.isConnected && state.step === 'code' && !busy) loadJobs(true); }, 5000);
     } catch (error) { errorText(error); }
   }
   panel.addEventListener('toggle', async () => {
@@ -403,6 +507,7 @@ async function showDetail(name, card) {
     ]);
     section('和最初的状态相比，改了哪些文件', (d.changed_files ?? []).map(f => `${f.path}  +${f.added} −${f.removed}`));
     section('已经编好的内核', [(d.built_kernels ?? []).join(', ') || t('还没有')]);
+    section('源码所在的文件夹（可以用自己的编辑器打开，改完提交后回到这里检查）', d.dir ? [`${d.dir}/src`] : []);
     section('编译和测试的运行环境', [d.sandbox?.network_blocked
       ? t('受限环境：不能联网，只能写这个工作区的文件夹')
       : `${t('没有限制环境')}（${d.sandbox?.note ?? ''}）`]);
@@ -410,34 +515,6 @@ async function showDetail(name, card) {
     box.textContent = String(error?.message || error);
   }
   card.append(box);
-}
-
-async function adopt(name, kernels) {
-  const entry = kernels[0];
-  if (!entry) return;
-  const ok = await appConfirm(
-    `${t('启用工作区')} ${name} ${t('编出的内核')}（${entry.preset}）？${t('以后用 Fortran 内核跑这个预设的算例时会用它。它是没经过审阅的实验内核；用它跑出的结果会记下内核身份，不会和正式结果混在一起。正式内核不会被删除，随时可以停用。')}`,
-    { okText: t('启用') },
-  );
-  if (!ok) return;
-  try {
-    await invoke('workspace_adopt', { name, preset: entry.preset });
-    const adopted = (state.adoptedKernels ?? []).filter(k => !(k.experimental?.workspace === name && k.preset === entry.preset));
-    adopted.push(kernelEntry(entry));
-    state.adoptedKernels = adopted;
-    storeAdopted();
-    status(`${t('已启用')} ${entry.label}`);
-    refresh();
-  } catch (error) {
-    status(error);
-  }
-}
-
-function unadopt(name) {
-  state.adoptedKernels = (state.adoptedKernels ?? []).filter(k => k.experimental?.workspace !== name);
-  storeAdopted();
-  status(`${t('已停用工作区的内核，改回正式内核')}：${name}`);
-  refresh();
 }
 
 async function exportPatch(name) {
@@ -459,35 +536,44 @@ async function revert(name) {
     if (!picked) return;
     await invoke('workspace_revert', { name, commit: picked.trim().split(/\s+/)[0] });
     status(`${t('已撤回工作区的改动')}：${name}`);
-    refresh();
+    await refresh();
+    versionsChanged();
   } catch (error) {
     status(error);
   }
 }
 
 async function remove(name) {
-  if (!(await appConfirm(`${t('删除工作区')} ${name}？${t('它的源码副本、编译产物和报告都会被删掉，无法恢复。')}`, { okText: t('删除') }))) return;
+  if (!(await appConfirm(`${t('删除修改版')} ${name}？${t('它的源码副本、编译产物和报告都会被删掉，无法恢复。')}`, { okText: t('删除') }))) return;
   try {
     await invoke('workspace_delete', { name });
-    state.adoptedKernels = (state.adoptedKernels ?? []).filter(k => k.experimental?.workspace !== name);
-    storeAdopted();
-    refresh();
+    await refresh();
+    versionsChanged();
   } catch (error) {
     status(error);
   }
 }
 
+
+/** 去“改代码”页（左栏“改进模型”下）。 */
 export function openWorkspaces() {
-  $('workspace-dialog').showModal();
-  refresh();
+  go('code');
 }
 
 function wire() {
-  state.adoptedKernels = loadStored();
-  if (!hasBackend || !$('workspace-dialog')) return;
-  $('assistant-workspaces-btn')?.addEventListener('click', openWorkspaces);
+  // 旧版“启用实验内核”迁移成默认的模型版本（只在还没选过版本时），之后不再参与内核匹配。
+  let legacy = [];
+  try { legacy = JSON.parse(storageGet(LEGACY_ADOPTED_KEY) ?? '[]'); } catch { legacy = []; }
+  const migrated = migratedVersion(legacy, storageGet(VERSION_KEY));
+  if (migrated) storageSet(VERSION_KEY, migrated);
+  storageSet(LEGACY_ADOPTED_KEY, null);
+  if (!hasBackend || !$('workspace-list')) return;
   $('research-workspaces-btn')?.addEventListener('click', openWorkspaces);
   $('workspace-create-form').onsubmit = createWorkspace;
+  $('workspace-base')?.addEventListener('change', () => {
+    const other = $('workspace-other-source');
+    if (other) other.hidden = !!$('workspace-base').value;
+  });
   $('workspace-source-browse').onclick = async () => {
     try {
       const path = await invoke('pick_folder', { key: 'workspace-source' });
@@ -496,14 +582,8 @@ function wire() {
       $('workspace-create-status').textContent = String(error?.message || error);
     }
   };
-  $('workspace-close').onclick = () => $('workspace-dialog').close();
   $('workspace-refresh').onclick = () => refresh();
-  // 启动时核一遍：采纳过的内核若门槛作废了，就不再参与匹配。
-  invoke('workspace_kernels').then(k => {
-    registered = k?.kernels ?? [];
-    state.adoptedKernels = stillRegistered(state.adoptedKernels, registered);
-    storeAdopted();
-  }).catch(() => {});
+  addEventListener('colm:step', () => { if (state.step === 'code') refresh(); });
 }
 
 wire();

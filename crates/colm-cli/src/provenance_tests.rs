@@ -99,6 +99,8 @@ fn a_version_run_hands_the_same_run_to_the_versions_own_cli() {
         head: "abc".into(),
         base_commit: "def".into(),
         origin: "app".into(),
+        note: String::new(),
+        based_on: None,
         touches: colm_workspace::version::Touches {
             engine: true,
             kernel: false,

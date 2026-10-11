@@ -64,10 +64,11 @@ export const WORKFLOW = [
   { n: 5, t: '报告与导出', d: '保存分析结果', steps: [
     { id: 'result-export', page: 'result', t: '报告与导出', d: '保存分析结果', need: resultsReady },
   ] },
-  // 研究：从一个算例出发、产出更好的算例；都是可选的，“下一步”不经过它们。
+  // 改进模型：两种手段平级——调参数与网络（研究：从一个算例出发、产出新算例）与改代码（产出新的模型版本）。
+  // 都是可选的，“下一步”不经过它们；产物回到工作流第 3 步“运行方式”里重跑。
   // 左栏画成平铺的列表（不编号）；`badge` 是右侧的状态（运行中、完成），由各自的模块写进 state.studyBadges。
   { section: 'research', key: 'research-home', list: true, steps: [
-    { id: 'research', page: 'research', t: '研究总览', d: '你想回答什么问题', need: () => null, optional: true },
+    { id: 'research', page: 'research', t: '改进模型总览', d: '调参数还是改代码', need: () => null, optional: true },
   ] },
   { section: 'research', key: 'research-classic', list: true, t: '经典方法', steps: [
     { id: 'result-tuning', page: 'result', t: '参数率定', d: '找最贴近观测的参数', need: studyReady, optional: true, badge: () => state.studyBadges?.tuning },
@@ -78,6 +79,10 @@ export const WORKFLOW = [
   { section: 'research', key: 'research-ai', list: true, t: 'AI 混合建模', steps: [
     { id: 'hybrid-learn', page: 'hybrid', t: 'AI 学习参数', d: '按地点特征预测参数', need: () => null, optional: true },
     { id: 'hybrid-process', page: 'hybrid', t: 'AI 替换过程', d: '用网络替代物理公式', need: () => null, optional: true },
+  ] },
+  // 改代码：模型版本（workspace.js）。不需要先建算例。
+  { section: 'research', key: 'research-code', list: true, t: '改代码', steps: [
+    { id: 'code', page: 'code', t: '模型版本', d: '新建、修改、编译与检查', need: () => null, optional: true },
   ] },
 ];
 export const STEPS = WORKFLOW.flatMap(group => group.steps);
@@ -164,7 +169,7 @@ export function renderSteps() {
       section = group.section;
       const head = document.createElement('h4');
       head.className = 'rail-section';
-      head.textContent = '研究';
+      head.textContent = '改进模型';
       box.appendChild(head);
     }
     if (group.list) { box.appendChild(renderList(group, steps)); continue; }

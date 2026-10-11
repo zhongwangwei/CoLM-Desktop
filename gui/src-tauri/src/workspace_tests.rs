@@ -139,3 +139,71 @@ fn version_checks_and_provenance_reads_validate_before_the_command_line() {
     assert_eq!(produced_by_args(case).unwrap(), ["produced-by", case]);
     assert!(produced_by_args("relative/case").is_err());
 }
+
+#[test]
+fn a_new_version_can_start_from_another_version_and_carry_a_purpose() {
+    assert_eq!(
+        version_create_args(
+            "snow",
+            Some("beta"),
+            Some("  lower aged-snow NIR albedo  "),
+            None,
+            None
+        )
+        .unwrap(),
+        [
+            "ws-create",
+            "--name",
+            "snow",
+            "--from",
+            "ws:beta",
+            "--note",
+            "lower aged-snow NIR albedo"
+        ]
+    );
+    assert_eq!(
+        version_create_args("snow", Some(" "), Some(""), None, None).unwrap(),
+        ["ws-create", "--name", "snow", "--from", "app"]
+    );
+    assert!(version_create_args("snow", Some("../x"), None, None, None).is_err());
+    assert!(version_create_args("snow", None, Some(&"x".repeat(501)), None, None).is_err());
+}
+
+#[test]
+fn local_checks_map_to_fixed_commands() {
+    assert_eq!(
+        check_args("snow", "build-engine", None, None, None).unwrap(),
+        ["ws-build-engine", "--name", "snow"]
+    );
+    assert_eq!(
+        check_args("snow", "build-kernel", Some("usgs"), None, None).unwrap(),
+        ["ws-build-kernel", "--name", "snow", "--preset", "usgs"]
+    );
+    assert_eq!(
+        check_args("snow", "test-cargo", None, None, None).unwrap()[6],
+        "colm-core"
+    );
+    assert_eq!(
+        check_args("snow", "test-drift", None, None, None).unwrap()[4],
+        "drift"
+    );
+    let case = std::env::temp_dir().join("case");
+    let case = case.to_str().unwrap();
+    assert_eq!(
+        check_args("snow", "parity", None, None, Some(case)).unwrap(),
+        [
+            "ws-parity",
+            "--name",
+            "snow",
+            "--case",
+            case,
+            "--preset",
+            "default"
+        ]
+    );
+    assert!(check_args("snow", "parity", None, None, None).is_err());
+    assert!(check_args("snow", "parity", None, None, Some("rel/case")).is_err());
+    assert!(check_args("snow", "build-kernel", Some("../x"), None, None).is_err());
+    assert!(check_args("snow", "test-cargo", None, Some("a b"), None).is_err());
+    assert!(check_args("snow", "rm", None, None, None).is_err());
+}
