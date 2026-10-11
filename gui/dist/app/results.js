@@ -3127,12 +3127,12 @@ async function runStudy(kind, strict = false) {
   }
   // 运行位置是服务器：研究交给它（同一份设定在那里重建并运行），跑完自动取回。
   if (target !== 'local') {
-    await submitStudies(dirs, {
+    const warnings = await submitStudies(dirs, {
       host: target, kernel, engine: modelEngine(), jobs: studyJobCount(kind), versionFor: async dir => versionArgs[dir],
     });
     for (const dir of dirs) watchServerStudy(dir, () => refreshStudy(kind));
-    status(dialogText(`研究已交给服务器 ${target}；跑完会自动取回结果。`));
     await refreshStudy(kind, strict);
+    status([dialogText(`研究已交给服务器 ${target}；跑完会自动取回结果。`), ...(warnings ?? [])].join('\n'));
     return;
   }
   const isCurrent = studyMutationGuard(kind, dirs, kernel);

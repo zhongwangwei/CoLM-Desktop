@@ -35,11 +35,14 @@ export function serverProgressText(answer) {
 
 /** 把这些研究交给服务器 `host`。`versionFor(dir)` 给每个研究这次带的模型版本（已固定的为 null）。 */
 export async function submitStudies(dirs, { host, kernel, engine, jobs, versionFor }) {
+  const warnings = [];
   for (const dir of dirs) {
-    await invoke('remote_study_run', {
+    const submitted = await invoke('remote_study_run', {
       studyDir: dir, host, kernel, engine, jobs, modelVersion: await versionFor(dir),
     });
+    if (submitted?.ledger_warning) warnings.push(`${t('研究已提交，但版本记录未写入')}：${dir}: ${submitted.ledger_warning}`);
   }
+  return warnings;
 }
 
 /** 定时查这个研究，跑完取回并调用 `onFetched`；同一个研究只查一份。 */

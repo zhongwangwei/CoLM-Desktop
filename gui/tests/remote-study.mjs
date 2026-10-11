@@ -11,7 +11,7 @@ await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 for (const [name, body] of Object.entries({
   'ipc.js': 'export const invoke = async (...a) => globalThis.fakeInvoke(...a); export const listen = async () => {}; export const hasBackend = true;',
-  'ui.js': 'export const $ = id => globalThis.fakeNodes?.[id] ?? null; export const status = () => {};',
+  'ui.js': 'export const $ = id => globalThis.fakeNodes?.[id] ?? null; export const status = text => globalThis.statusMessages?.push(text);',
 })) await writeFile(join(temp, 'app', name), body);
 const remote = await import(pathToFileURL(join(temp, 'app', 'remote-study.js')).href);
 
@@ -35,6 +35,11 @@ assert.deepEqual(calls, [
   ['remote_study_run', { studyDir: '/s/a', host: 'c1', kernel: '/k', engine: 'rust', jobs: 2, modelVersion: 'snow' }],
   ['remote_study_run', { studyDir: '/s/b', host: 'c1', kernel: '/k', engine: 'rust', jobs: 2, modelVersion: null }],
 ]);
+
+globalThis.statusMessages = [];
+globalThis.fakeInvoke = async () => ({ledger_warning:'disk full'});
+const warnings = await remote.submitStudies(['/s/a'], {host:'c1',kernel:'/k',engine:'rust',jobs:2,versionFor:async()=> 'snow'});
+assert.match(warnings[0], /研究已提交，但版本记录未写入.*disk full/);
 
 // 等到跑完：先运行中，再结束（退出码 0）→ 取回。
 let polls = 0;

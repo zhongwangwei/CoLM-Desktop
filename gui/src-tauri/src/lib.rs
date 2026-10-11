@@ -199,6 +199,8 @@ pub fn run() {
             workspace::workspace_note,
             workspace::workspace_check,
             workspace::workspace_import_patch,
+            workspace::workspace_diff,
+            workspace::workspace_revert_file,
             workspace::case_runs,
             remote_build_kernel,
             remote_status,

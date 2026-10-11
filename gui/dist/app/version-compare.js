@@ -123,14 +123,15 @@ async function runSide(dir, version, label) {
   show([`${t('正在率定')} ${label}（${t(versionLabel(version))}）…`], 'muted');
   const target = studyTarget();
   if (target !== 'local') {
+    let warnings = [];
     // 服务器上跑：交过去，等它跑完、取回（研究的状态与结果移植进本机这个研究）。
     if (!envelope.remote?.host) {
-      await submitStudies([dir], {
+      warnings = await submitStudies([dir], {
         host: target, kernel: $('kernel').value, engine: modelEngine(), jobs: null, versionFor: d => studyVersionArg(d, version),
       });
     }
     await awaitServerStudy(dir, { onProgress: text => show([`${label}：${t(text)}`], 'muted') });
-    return;
+    return warnings;
   }
   await invoke('study_run', {
     studyDir: dir, kernel: $('kernel').value, stream: true, jobs: null, retryFailed: false,
@@ -176,10 +177,12 @@ async function compareVersions() {
       studyB = await invoke('study_clone', { studyDir: studyA });
       savePair(studyA, studyB);
     }
-    await runSide(studyA, versionA, 'A');
-    await runSide(studyB, versionB, 'B');
+    const warningsA = await runSide(studyA, versionA, 'A');
+    const warningsB = await runSide(studyB, versionB, 'B');
     await refreshTuningStudy().catch(() => {});
-    renderResult(await invoke('study_compare', { a: studyA, b: studyB }));
+    const comparison = await invoke('study_compare', { a: studyA, b: studyB });
+    comparison.notes = [...(comparison.notes ?? []), ...(warningsA ?? []), ...(warningsB ?? [])];
+    renderResult(comparison);
   } catch (error) {
     show([String(error?.message || error)], 'assistant-fail');
   } finally {

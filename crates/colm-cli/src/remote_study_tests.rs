@@ -78,3 +78,43 @@ fn only_studies_inside_a_project_can_be_sent() {
     assert_eq!(project_of(study).unwrap(), Path::new("/p"));
     assert!(project_of(Path::new("/p/studies/s-1")).is_err());
 }
+
+#[test]
+fn submitted_study_ledger_uses_captured_version_and_real_local_directory() {
+    let root =
+        std::env::temp_dir().join(format!("colm-remote-study-ledger-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let source = root.join("source");
+    std::fs::create_dir_all(&source).unwrap();
+    colm_workspace::git::run(&source, &["init", "-q"]).unwrap();
+    colm_workspace::git::set_identity(&source).unwrap();
+    std::fs::write(source.join("README"), "initial").unwrap();
+    colm_workspace::git::run(&source, &["add", "."]).unwrap();
+    colm_workspace::git::run(&source, &["commit", "-qm", "initial"]).unwrap();
+    let ws =
+        colm_workspace::Workspace::create(&root.join("ws"), "snow", source.to_str().unwrap(), None)
+            .unwrap();
+    let study = root.join("local-study");
+    std::fs::create_dir(&study).unwrap();
+    let version = super::super::RemoteVersion {
+        name: "snow".into(),
+        head: ws.head().unwrap(),
+        src: ws.src(),
+        touches: colm_workspace::version::Touches {
+            engine: true,
+            kernel: false,
+        },
+        value: json!({}),
+    };
+    record_version_use(None, &study, "local-id", "7920ts", 10).unwrap();
+    assert!(!ws.dir.join("studies.jsonl").exists());
+    std::fs::write(ws.src().join("README"), "later").unwrap();
+    colm_workspace::git::run(&ws.src(), &["commit", "-qam", "later"]).unwrap();
+    record_version_use(Some(&version), &study, "local-id", "7920ts", 10).unwrap();
+    let rows = colm_workspace::studies::list(&ws).unwrap();
+    assert_eq!(rows[0].dir, study.canonicalize().unwrap());
+    assert_eq!(rows[0].head, version.head);
+    assert_eq!(rows[0].location, "7920ts");
+    assert!(!rows[0].current);
+    let _ = std::fs::remove_dir_all(root);
+}

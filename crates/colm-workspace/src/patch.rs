@@ -187,6 +187,173 @@ pub fn apply(workspace: &Workspace, diff: &str, message: &str) -> Result<Applied
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct FileDiff {
+    pub diff: String,
+    pub truncated: bool,
+}
+
+fn checked_changed_file(workspace: &Workspace, path: &str) -> Result<()> {
+    check_path(path)?;
+    ensure!(
+        path.as_bytes().get(1) != Some(&b':') && !path.eq_ignore_ascii_case("oracle/golden"),
+        "invalid file path"
+    );
+    ensure!(
+        workspace
+            .changes_from_official()?
+            .iter()
+            .any(|file| file.path == path),
+        "the path is not in this workspace's changed files"
+    );
+    let mut current = workspace.src();
+    for part in path.split('/') {
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => ensure!(
+                !meta.file_type().is_symlink(),
+                "symbolic links are not supported"
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    // Also reject deleted links and links in the version we would restore.
+    for rev in [workspace.official_base(), "HEAD"] {
+        let entry = git::run(
+            &workspace.src(),
+            &["--literal-pathspecs", "ls-tree", "-z", rev, "--", path],
+        )?;
+        ensure!(
+            rev != "HEAD" || !entry.is_empty() || !workspace.src().join(path).exists(),
+            "an untracked file occupies the restore path"
+        );
+        ensure!(
+            entry.is_empty() || entry.starts_with("100644 ") || entry.starts_with("100755 "),
+            "only regular files can be compared or restored"
+        );
+    }
+    Ok(())
+}
+
+/// Read one committed file's changes against the original official version.
+pub fn diff_file(workspace: &Workspace, path: &str) -> Result<FileDiff> {
+    use std::process::{Command, Stdio};
+    checked_changed_file(workspace, path)?;
+    let child = Command::new("git")
+        .arg("-C")
+        .arg(workspace.src())
+        .args([
+            "--literal-pathspecs",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-color",
+            workspace.official_base(),
+            "HEAD",
+            "--",
+            path,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    read_diff_output(child)
+}
+
+fn read_diff_output(mut child: std::process::Child) -> Result<FileDiff> {
+    use std::io::Read;
+    let mut stderr = child.stderr.take().context("missing diff errors")?;
+    let errors = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        stderr.by_ref().take(16 * 1024).read_to_end(&mut bytes)?;
+        // Drain the rest without retaining it, so verbose failures cannot block Git.
+        std::io::copy(&mut stderr, &mut std::io::sink())?;
+        Ok(bytes)
+    });
+    let mut stdout = child.stdout.take().context("missing diff output")?;
+    let mut bytes = Vec::new();
+    let read = stdout
+        .by_ref()
+        .take((MAX_PATCH_BYTES + 1) as u64)
+        .read_to_end(&mut bytes);
+    let truncated = bytes.len() > MAX_PATCH_BYTES;
+    let stopped =
+        (truncated || read.is_err()) && child.try_wait()?.is_none() && child.kill().is_ok();
+    let status = child.wait()?;
+    let stderr = errors
+        .join()
+        .map_err(|_| anyhow::anyhow!("cannot read git diff errors"))??;
+    read.context("cannot read git diff output")?;
+    // A normal nonzero exit is a real failure, even if stdout reached the limit.
+    #[cfg(unix)]
+    let stopped = {
+        use std::os::unix::process::ExitStatusExt;
+        stopped && status.signal() == Some(9)
+    };
+    ensure!(
+        status.success() || (truncated && stopped),
+        "git diff failed ({status}): {}",
+        String::from_utf8_lossy(&stderr).trim()
+    );
+    let mut diff = String::from_utf8_lossy(&bytes).into_owned();
+    let mut limit = diff.len().min(MAX_PATCH_BYTES);
+    while !diff.is_char_boundary(limit) {
+        limit -= 1;
+    }
+    let truncated = truncated || diff.len() > limit;
+    diff.truncate(limit);
+    Ok(FileDiff { diff, truncated })
+}
+
+/// Restore only the selected file, preserving history with one new commit.
+pub fn revert_file(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
+    let message = message.trim();
+    ensure!(
+        !message.is_empty() && message.len() <= 200 && !message.contains(['\n', '\r', '\0']),
+        "the commit message must be one short line (at most 200 bytes)"
+    );
+    let src = workspace.src();
+    ensure!(
+        !git::is_dirty(&src)?,
+        "the workspace has uncommitted changes; commit or revert them first"
+    );
+    checked_changed_file(workspace, path)?;
+    git::run(
+        &src,
+        &[
+            "--literal-pathspecs",
+            "restore",
+            "--source",
+            workspace.official_base(),
+            "--staged",
+            "--worktree",
+            "--",
+            path,
+        ],
+    )?;
+    git::run(
+        &src,
+        &[
+            "--literal-pathspecs",
+            "commit",
+            "-q",
+            "--only",
+            "-m",
+            &format!("ws: {message}"),
+            "--",
+            path,
+        ],
+    )?;
+    let commit = git::head(&src)?;
+    Ok(Applied {
+        short: git::short(&src, &commit)?,
+        commit,
+        files: vec![path.to_owned()],
+    })
+}
+
 /// 撤回到某个提交（只能撤回到工作区自己的提交里：基线提交或之后的）。之后的提交被丢弃。
 pub fn revert_to(workspace: &Workspace, commit: &str) -> Result<String> {
     ensure!(

@@ -337,9 +337,22 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         study_dir.join(RECORD),
         serde_json::to_string_pretty(&record)?,
     )?;
+    // Submission has already succeeded: ledger failure must not invite a duplicate submission.
+    let ledger_warning = record_version_use(
+        version.as_ref(),
+        &study_dir,
+        &manifest.id,
+        &ssh.host,
+        record.submitted_at,
+    )
+    .err()
+    .map(|error| {
+        format!("job submitted, but workspace study ledger could not be updated: {error:#}")
+    });
     println!(
         "{}",
         json!({
+            "ledger_warning": ledger_warning,
             "job": id,
             "host": ssh.host,
             "remote_project": remote_project,
@@ -350,6 +363,32 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         })
     );
     Ok(())
+}
+
+fn record_version_use(
+    version: Option<&super::RemoteVersion>,
+    study_dir: &Path,
+    study_id: &str,
+    host: &str,
+    submitted_at: u64,
+) -> Result<()> {
+    let Some(version) = version else {
+        return Ok(());
+    };
+    let workspace_root = version
+        .src
+        .parent()
+        .and_then(Path::parent)
+        .context("workspace source has no workspace root")?;
+    let workspace = colm_workspace::Workspace::open(workspace_root, &version.name)?;
+    colm_workspace::studies::append(
+        &workspace,
+        study_dir,
+        study_id,
+        &version.head,
+        host,
+        submitted_at,
+    )
 }
 
 fn job_dir(record: &StudyRecord) -> String {

@@ -191,3 +191,156 @@ fn protected_paths_cannot_be_reached_through_another_spelling() {
     assert!(check_path("crates/colm-core/src/lib.rs").is_ok());
     assert!(check_path("oracle/scripts/build_kernel.sh").is_ok());
 }
+
+#[test]
+fn file_restore_is_literal_and_preserves_other_changes() {
+    let (root, ws) = fresh("single-file");
+    let odd = ":(glob)* tab\tline\n.rs";
+    std::fs::write(ws.src().join(odd), "new\n").unwrap();
+    git::run(&ws.src(), &["add", "-A"]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "new file"]).unwrap();
+    apply(&ws, FORTRAN_DIFF, "other file").unwrap();
+    assert!(ws
+        .changes_from_official()
+        .unwrap()
+        .iter()
+        .any(|f| f.path == odd));
+    assert!(diff_file(&ws, odd).unwrap().diff.contains("+new"));
+    let count = git::commits_since(&ws.src(), ws.official_base())
+        .unwrap()
+        .len();
+    revert_file(&ws, odd, "restore new file").unwrap();
+    assert!(!ws.src().join(odd).exists());
+    assert!(
+        std::fs::read_to_string(ws.src().join("vendor/CoLM202X/main/MOD_Demo.F90"))
+            .unwrap()
+            .contains("k = 3.0")
+    );
+    assert_eq!(
+        git::commits_since(&ws.src(), ws.official_base())
+            .unwrap()
+            .len(),
+        count + 1
+    );
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn restore_deleted_file_and_inherited_changes_against_official() {
+    let (root, mut ws) = fresh("restore-deleted");
+    let file = "vendor/CoLM202X/main/MOD_Demo.F90";
+    apply(&ws, FORTRAN_DIFF, "parent change").unwrap();
+    let official = ws.info.base_commit.clone();
+    let parent = ws.head().unwrap();
+    ws.update(|info| {
+        info.root_commit = Some(official);
+        info.base_commit = parent;
+    })
+    .unwrap();
+    assert!(diff_file(&ws, file).unwrap().diff.contains("k = 2.0"));
+    git::run(&ws.src(), &["rm", "--", file]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "delete"]).unwrap();
+    revert_file(&ws, file, "restore official").unwrap();
+    assert!(std::fs::read_to_string(ws.src().join(file))
+        .unwrap()
+        .contains("k = 2.0"));
+    assert!(ws.changes_from_official().unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn invalid_or_dirty_file_restore_changes_nothing() {
+    let (root, ws) = fresh("restore-denied");
+    apply(&ws, FORTRAN_DIFF, "change").unwrap();
+    let head = ws.head().unwrap();
+    for path in [
+        "../x",
+        "/tmp/x",
+        "a\\b",
+        "a\0b",
+        ".git/config",
+        "oracle/golden/x",
+        "C:/x",
+        "absent",
+        "vendor",
+    ] {
+        assert!(diff_file(&ws, path).is_err(), "{path:?}");
+        assert!(revert_file(&ws, path, "restore").is_err(), "{path:?}");
+    }
+    let file = "vendor/CoLM202X/main/MOD_Demo.F90";
+    for message in ["", "a\nb", "a\rb", "a\0b"] {
+        assert!(revert_file(&ws, file, message).is_err());
+    }
+    std::fs::write(ws.src().join("uncommitted"), "keep").unwrap();
+    assert!(revert_file(&ws, file, "restore").is_err());
+    assert_eq!(ws.head().unwrap(), head);
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("uncommitted")).unwrap(),
+        "keep"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn file_actions_reject_symlink_files_and_parents() {
+    let (root, ws) = fresh("restore-symlink");
+    std::os::unix::fs::symlink("/tmp", ws.src().join("link")).unwrap();
+    git::run(&ws.src(), &["add", "link"]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "link"]).unwrap();
+    assert!(diff_file(&ws, "link").is_err());
+    assert!(revert_file(&ws, "link", "restore").is_err());
+    apply(&ws, FORTRAN_DIFF, "change").unwrap();
+    std::fs::remove_dir_all(ws.src().join("vendor")).unwrap();
+    std::os::unix::fs::symlink("/tmp", ws.src().join("vendor")).unwrap();
+    assert!(diff_file(&ws, "vendor/CoLM202X/main/MOD_Demo.F90").is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn diff_output_is_bounded_and_binary_is_described() {
+    let (root, ws) = fresh("bounded-diff");
+    std::fs::write(ws.src().join("large"), "line\n".repeat(MAX_PATCH_BYTES)).unwrap();
+    std::fs::write(ws.src().join("binary"), [0, 1, 2]).unwrap();
+    git::run(&ws.src(), &["add", "-A"]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "fixtures"]).unwrap();
+    let diff = diff_file(&ws, "large").unwrap();
+    assert!(diff.truncated);
+    assert!(diff.diff.len() <= MAX_PATCH_BYTES);
+    assert!(diff_file(&ws, "binary")
+        .unwrap()
+        .diff
+        .contains("Binary files"));
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn renamed_files_are_separate_literal_changes() {
+    let (root, ws) = fresh("rename-file");
+    let original = "vendor/CoLM202X/main/MOD_Demo.F90";
+    let renamed = "renamed file\t\n.F90";
+    git::run(&ws.src(), &["mv", "--", original, renamed]).unwrap();
+    git::run(&ws.src(), &["commit", "-qm", "rename"]).unwrap();
+    let files = ws.changes_from_official().unwrap();
+    assert_eq!(files.len(), 2);
+    assert!(files.iter().any(|f| f.path == original));
+    assert!(files.iter().any(|f| f.path == renamed));
+    revert_file(&ws, original, "restore original").unwrap();
+    assert!(ws.src().join(original).is_file());
+    assert!(ws.src().join(renamed).is_file());
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[cfg(unix)]
+#[test]
+fn diff_failure_retains_bounded_stderr_without_blocking() {
+    use std::process::{Command, Stdio};
+    let child = Command::new("sh")
+        .args(["-c", "printf 'original diff error: invalid config\\n' >&2; i=0; while [ $i -lt 2000 ]; do printf 'more diagnostic details\\n' >&2; i=$((i+1)); done; exit 17"])
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let error = read_diff_output(child).unwrap_err().to_string();
+    assert!(error.contains("original diff error: invalid config"));
+    assert!(error.contains("17"));
+    assert!(error.len() < 17 * 1024);
+}

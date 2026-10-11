@@ -942,6 +942,18 @@ if (!capability.includes('core:webview:allow-print')) {
 
 console.log('results: scope, Study controls, bounded loading, PDF, and nine panes are present');
 
+// Submission warnings must survive the refresh and final success status.
+{
+  const messages = [];
+  const runStudy = runInNewContext(resultUi.slice(resultUi.indexOf('async function runStudy('), resultUi.indexOf('\nasync function retryStudy(')) + '\nrunStudy;', {
+    spatialStudyReason: () => '', aggregateStudy: () => ({status:'Ready'}), studyViews:{uq:{}}, activeStudyDirs:()=>['/s/a'], currentKernel:()=>'/k', studyRunning:{uq:false},
+    modelVersion:()=> 'snow', studyVersionArg:async()=> 'snow', studyTarget:()=> 'server', runModeBlocker:()=>null, state:{}, modelEngine:()=> 'rust', studyJobCount:()=>2,
+    submitStudies:async()=> ['ledger-warning'], watchServerStudy:()=>{}, refreshStudy:async()=>messages.push('refresh'), status:text=>messages.push(text), dialogText:x=>x,
+  });
+  await runStudy('uq');
+  if (messages[0] !== 'refresh' || !messages.at(-1).includes('ledger-warning') || !messages.at(-1).includes('研究已交给服务器')) throw new Error('submitted job warnings must appear in the final status after refresh');
+}
+
 // Delayed Study mutations must re-check the current non-spatial scope before each mutating IPC.
 {
   const helper = resultUi.slice(

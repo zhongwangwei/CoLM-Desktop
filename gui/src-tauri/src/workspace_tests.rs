@@ -207,3 +207,41 @@ fn local_checks_map_to_fixed_commands() {
     assert!(check_args("snow", "test-cargo", None, Some("a b"), None).is_err());
     assert!(check_args("snow", "rm", None, None, None).is_err());
 }
+
+#[test]
+fn single_file_commands_validate_paths_and_messages() {
+    assert_eq!(
+        file_args("demo", "a tab\tline\n.rs", None).unwrap(),
+        ["ws-diff", "--name", "demo", "--path", "a tab\tline\n.rs"]
+    );
+    assert_eq!(
+        file_args("demo", "x.rs", Some("restore")).unwrap(),
+        [
+            "ws-revert-file",
+            "--name",
+            "demo",
+            "--path",
+            "x.rs",
+            "--message",
+            "restore"
+        ]
+    );
+    for path in [
+        "",
+        "/x",
+        "../x",
+        "a/../x",
+        "a\\b",
+        "C:/x",
+        "a\0b",
+        ".git/config",
+        "Oracle/Golden/a",
+        "oracle/golden",
+        "a//b",
+    ] {
+        assert!(file_args("demo", path, None).is_err(), "{path:?}");
+    }
+    for message in ["", "a\nb", "a\rb", "a\0b", &"x".repeat(201)] {
+        assert!(file_args("demo", "x", Some(message)).is_err());
+    }
+}

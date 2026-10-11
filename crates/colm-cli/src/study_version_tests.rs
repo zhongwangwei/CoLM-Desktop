@@ -205,3 +205,40 @@ fn a_pinned_study_runs_with_the_snapshot_cli() {
         "study-run /study --stream 1 --kernel /k/default by-parent=1"
     );
 }
+
+#[test]
+fn resuming_a_pin_repairs_its_ledger_without_changing_the_captured_commit() {
+    let root = temp("ledger-resume");
+    let source = root.join("source");
+    std::fs::create_dir(&source).unwrap();
+    colm_workspace::git::run(&source, &["init", "-q"]).unwrap();
+    colm_workspace::git::set_identity(&source).unwrap();
+    std::fs::write(source.join("README"), "initial").unwrap();
+    colm_workspace::git::run(&source, &["add", "."]).unwrap();
+    colm_workspace::git::run(&source, &["commit", "-qm", "initial"]).unwrap();
+    let ws_root = root.join("workspaces");
+    let ws = colm_workspace::Workspace::create(&ws_root, "snow", source.to_str().unwrap(), None)
+        .unwrap();
+    let study = root.join("study");
+    std::fs::create_dir(&study).unwrap();
+    let official = root.join("kernel");
+    let mut ready = readiness(&root, official.clone());
+    ready.head = ws.head().unwrap();
+    let saved = pin(&study, &ready, &official).unwrap();
+    for _ in 0..2 {
+        ensure(&study, Some("snow"), &ws_root, "rust", "rust", &official).unwrap();
+    }
+    let rows = colm_workspace::studies::list(&ws).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].head, saved.head);
+    assert!(rows[0].current);
+    std::fs::write(ws.src().join("README"), "later").unwrap();
+    colm_workspace::git::run(&ws.src(), &["commit", "-qam", "later"]).unwrap();
+    std::fs::remove_file(ws.dir.join("studies.jsonl")).unwrap();
+    assert!(ensure(&study, Some("other"), &ws_root, "rust", "rust", &official).is_err());
+    assert!(!ws.dir.join("studies.jsonl").exists());
+    ensure(&study, None, &ws_root, "rust", "rust", &official).unwrap();
+    let rows = colm_workspace::studies::list(&ws).unwrap();
+    assert_eq!(rows[0].head, saved.head);
+    assert!(!rows[0].current);
+}

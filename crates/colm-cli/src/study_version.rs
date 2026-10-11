@@ -133,7 +133,7 @@ pub(crate) fn ensure(
     official_kernel: &Path,
 ) -> Result<Option<Pinned>> {
     let requested = requested.filter(|name| !name.is_empty());
-    match (pinned(study_dir)?, requested) {
+    let result = match (pinned(study_dir)?, requested) {
         (Some(pinned), Some(name)) if name != pinned.name => bail!(
             "this Study was started with model version {}; it cannot switch to {name}. Create a new Study for another version",
             pinned.name
@@ -155,7 +155,30 @@ pub(crate) fn ensure(
             )?;
             pin(study_dir, &readiness, official_kernel).map(Some)
         }
+    }?;
+    if let Some(pinned) = &result {
+        // A successful pin remains usable even if its history needs repair on the next run.
+        if let Err(error) = record_pin(study_dir, workspace_root, pinned) {
+            eprintln!("warning: study snapshot is saved, but its workspace ledger could not be updated: {error:#}");
+        }
     }
+    Ok(result)
+}
+
+fn record_pin(study_dir: &Path, workspace_root: &Path, pinned: &Pinned) -> Result<()> {
+    let workspace = colm_workspace::Workspace::open(workspace_root, &pinned.name)?;
+    let id = study_dir
+        .file_name()
+        .context("study directory has no name")?
+        .to_string_lossy();
+    colm_workspace::studies::append(
+        &workspace,
+        study_dir,
+        &id,
+        &pinned.head,
+        "local",
+        pinned.pinned_unix.max(0) as u64,
+    )
 }
 
 /// 交给快照里的 `colm-cli` 跑这个研究。`args` 是去掉了版本与内核参数的 `study-run` 原参数（不含子命令）。

@@ -11,6 +11,9 @@ import { state } from './state.js';
 import { $, status, appConfirm, appPrompt, baseName } from './ui.js';
 import { language, translateZh } from './i18n.js';
 import { go } from './shell.js';
+import { configuredServers } from './remote.js';
+import { cachedProbe } from './remote-probe-cache.js';
+import { touchesText } from './run-mode.js';
 
 const t = text => (language() === 'en' ? translateZh(text) : text);
 /** 旧版“启用实验内核”的记录：迁移成默认的模型版本后删掉。 */
@@ -103,6 +106,9 @@ function storageSet(key, value) {
 
 let creating = false;
 let versions = [];
+let detailName = null;
+let detailTab = 'modify';
+let detailRequest = 0;
 
 function el(tag, props = {}, children = []) {
   const node = Object.assign(document.createElement(tag), props);
@@ -164,6 +170,7 @@ async function refresh() {
     versions = workspaces?.workspaces ?? [];
     renderBaseChoices();
     render(versions);
+    if (detailName) await showDetail(detailName, detailTab);
   } catch (error) {
     list.replaceChildren(Object.assign(document.createElement('p'), { className: 'assistant-fail', textContent: String(error?.message || error) }));
   }
@@ -296,7 +303,7 @@ function render(workspaces) {
     head.className = 'ws-head';
     const inUse = (state.modelVersion ?? storageGet(VERSION_KEY)) === ws.name;
     head.append(
-      Object.assign(document.createElement('b'), { textContent: ws.name }),
+      button(ws.name, () => showDetail(ws.name)),
       Object.assign(document.createElement('span'), { className: 'muted mini', textContent: versionFacts(ws) }),
     );
     if (inUse) head.append(Object.assign(document.createElement('span'), { className: 'ws-in-use', textContent: t('运行方式里选的就是它') }));
@@ -306,21 +313,9 @@ function render(workspaces) {
     for (const [key, name] of Object.entries(LIGHT_NAMES)) lights.append(lightDot(key, name, ws.lights?.[key]));
     const primary = el('div', { className: 'pill-row ws-primary' }, [
       Object.assign(button('用它运行 →', () => useVersion(ws.name)), { className: 'run-btn' }),
-      button('让助手改', () => askAssistant(ws.name)),
-      button('导入补丁…', () => importPatch(ws.name)),
-      button('写目的…', () => editNote(ws)),
+      button('查看详情', () => showDetail(ws.name)),
     ]);
-    const actions = document.createElement('div');
-    actions.className = 'ws-actions';
-    actions.append(
-      action('查看改动', '改动记录、改了哪些文件、源码在哪个文件夹（可以用自己的编辑器打开）', () => showDetail(ws.name, card)),
-      action('导出改动…', '把全部改动存成一个 .patch 文本文件：可以发给别人，或在你自己的仓库里用 git apply 应用后再提交 PR。不会自动上传到 GitHub。',
-        () => exportPatch(ws.name), ws.commits === 0, '还没有改动'),
-      action('撤回改动…', '退回到之前的某一次改动，或最初的状态；之后的改动被丢弃，需要重新编译和测试。',
-        () => revert(ws.name), ws.commits === 0, '还没有改动'),
-      action('删除这个修改版…', '删除整个副本，包括编出的程序和测试报告，不能恢复；运行方式里选着它的会改回官方版。', () => remove(ws.name)),
-    );
-    card.append(head, note, lights, primary, checksPanel(ws), remotePanel(ws.name), actions);
+    card.append(head, note, lights, primary);
     list.append(card);
   }
 }
@@ -372,7 +367,7 @@ export function remoteEvidenceText(evidence) {
   return lines.join('\n');
 }
 
-function remotePanel(name) {
+function remotePanel(name, host = null) {
   const panel = document.createElement('details');
   panel.className = 'ws-detail';
   panel.append(Object.assign(document.createElement('summary'), { textContent: t('在服务器上编译和验证') }));
@@ -434,6 +429,7 @@ function remotePanel(name) {
       const entries = [];
       let pending = false;
       for (const record of result.jobs ?? []) {
+        if (host && record.host !== host) continue;
         let job = record;
         let live;
         let failure;
@@ -462,9 +458,10 @@ function remotePanel(name) {
     if (!panel.open) { clearTimeout(timer); return; }
     if (!loaded) {
       try {
-        const config = await invoke('remote_config');
+        const config = host ? { servers: configuredServers() } : await invoke('remote_config');
         for (const entry of config.servers ?? []) server.append(Object.assign(document.createElement('option'), { value: entry.host, textContent: entry.host }));
-        submit.disabled = !(config.servers ?? []).length;
+        if (host) { server.value = host; server.disabled = true; }
+        submit.disabled = !server.value;
         if (submit.disabled) message.textContent = t('请先在服务器设置中添加服务器');
         loaded = true;
       } catch (error) { errorText(error); }
@@ -490,31 +487,174 @@ function remotePanel(name) {
   return panel;
 }
 
-async function showDetail(name, card) {
-  card.querySelector('.ws-local-detail')?.remove();
-  const box = Object.assign(document.createElement('div'), { className: 'ws-detail ws-local-detail mini' });
+function detailVisibility(open) {
+  $('workspace-list').hidden = open;
+  if ($('workspace-create-form')) $('workspace-create-form').hidden = open;
+  const page = $('workspace-list').parentElement;
+  const title = page?.querySelector('h1');
+  const intro = page?.querySelector('.sub');
+  if (title) title.hidden = open;
+  if (intro) intro.hidden = open;
+  const official = page?.querySelector('.ws-official');
+  if (official) official.hidden = open;
+}
+
+function closeDetail() {
+  detailName = null;
+  detailRequest++;
+  $('workspace-detail')?.remove();
+  detailVisibility(false);
+}
+
+function studyRows(studies) {
+  if (!studies?.length) return [el('p', { className: 'muted mini', textContent: t('还没有研究用过这个版本') })];
+  return studies.map(study => {
+    const time = Number(study.pinned_unix);
+    const when = study.pinned_unix != null && Number.isFinite(time) ? new Date(time * 1000).toLocaleString(language() === 'en' ? 'en-US' : 'zh-CN') : '';
+    return el('div', { className: 'ws-study-row mini' }, [
+      el('b', { textContent: study.id || baseName(study.dir) }),
+      el('p', { textContent: [study.location === 'local' ? t('本机') : study.location, when, String(study.head ?? '').slice(0, 8)].filter(Boolean).join(' · ') }),
+      el('p', { textContent: t(study.current ? '✓ 快照仍是当前代码' : '! 之后又改过') }),
+      el('p', { className: 'muted', textContent: study.dir }),
+    ]);
+  });
+}
+
+async function showDetail(name, tab = 'modify') {
+  const request = ++detailRequest;
+  detailName = name;
+  detailTab = typeof tab === 'string' ? tab : 'modify';
+  let box = $('workspace-detail');
+  if (!box) {
+    box = el('div', { id: 'workspace-detail', className: 'ws-detail' });
+    $('workspace-list').after(box);
+  }
+  detailVisibility(true);
+  box.replaceChildren(el('p', { role: 'status', textContent: t('正在读取…') }));
   try {
     const d = await invoke('workspace_status', { name });
-    const section = (title, lines) => {
-      if (!lines.length) return;
-      box.append(Object.assign(document.createElement('div'), { className: 'ws-detail-title', textContent: t(title) }));
-      box.append(...lines.map(text => Object.assign(document.createElement('div'), { textContent: text })));
+    if (request !== detailRequest) return;
+    const listed = versions.find(ws => ws.name === name) ?? {};
+    const ws = { ...listed, ...d.workspace, name, commits: d.commits?.length ?? listed.commits,
+      lights: d.lights ?? listed.lights, touches: d.touches ?? { engine: (d.changed_files ?? []).some(file => file.touches?.engine), kernel: (d.changed_files ?? []).some(file => file.touches?.kernel) } };
+    box.replaceChildren(el('div', { className: 'ws-detail-header' }, [
+      button('← 改代码', closeDetail), el('h1', { textContent: name }),
+      el('p', { className: 'mini', textContent: `${ws.note || t('还没写目的')} · ${ws.based_on ? `${t('基于修改版')} ${ws.based_on}` : t('基于官方版')}` }),
+      button('用它运行 →', () => useVersion(name)),
+    ]));
+    const tabs = el('div', { className: 'ws-detail-tabs', role: 'tablist' });
+    const panels = [];
+    const choose = key => {
+      detailTab = key;
+      for (const [id, control, panel] of panels) {
+        control.setAttribute('aria-selected', String(id === key));
+        control.tabIndex = id === key ? 0 : -1;
+        panel.hidden = id !== key;
+      }
     };
-    const base = (d.workspace?.base_commit ?? '').slice(0, 8);
-    section('改动记录（最新的在最上面）', [
-      ...(d.commits ?? []).map(commitLine),
-      `${base} · ${t('最初的状态（从正式版本复制来时）')}`,
-    ]);
-    section('和最初的状态相比，改了哪些文件', (d.changed_files ?? []).map(f => `${f.path}  +${f.added} −${f.removed}`));
-    section('已经编好的内核', [(d.built_kernels ?? []).join(', ') || t('还没有')]);
-    section('源码所在的文件夹（可以用自己的编辑器打开，改完提交后回到这里检查）', d.dir ? [`${d.dir}/src`] : []);
-    section('编译和测试的运行环境', [d.sandbox?.network_blocked
-      ? t('受限环境：不能联网，只能写这个工作区的文件夹')
-      : `${t('没有限制环境')}（${d.sandbox?.note ?? ''}）`]);
+    for (const [key, label] of [['modify','修改'], ['checks','检查'], ['compare','对比'], ['studies','用到它的研究']]) {
+      const control = button(label, () => choose(key));
+      control.id = `workspace-tab-${key}`;
+      control.setAttribute('role', 'tab');
+      control.setAttribute('aria-controls', `workspace-panel-${key}`);
+      const panel = el('section', { id: `workspace-panel-${key}`, className: 'ws-detail-panel', role: 'tabpanel' });
+      panel.setAttribute('aria-labelledby', control.id);
+      control.onkeydown = event => {
+        const index = panels.findIndex(([id]) => id === key);
+        const next = event.key === 'Home' ? 0 : event.key === 'End' ? panels.length - 1
+          : event.key === 'ArrowRight' ? (index + 1) % panels.length : event.key === 'ArrowLeft' ? (index + panels.length - 1) % panels.length : -1;
+        if (next < 0) return;
+        event.preventDefault(); choose(panels[next][0]); panels[next][1].focus();
+      };
+      tabs.append(control); panels.push([key, control, panel]);
+    }
+    box.append(tabs, ...panels.map(([, , panel]) => panel));
+    const [modify, checks, compare, studies] = panels.map(([, , panel]) => panel);
+    const source = el('p', { className: 'mini', hidden: true, textContent: d.dir ? `${d.dir}/src` : t('源码路径不可用') });
+    modify.append(el('div', { className: 'pill-row' }, [
+      button('在右侧让助手改', () => askAssistant(name)),
+      button('用我的编辑器打开', () => { source.hidden = false; }),
+      button('导入补丁文件…', () => importPatch(name)), button('写目的…', () => editNote(ws)),
+    ]), source, el('h3', { textContent: `${t('相对官方版的改动')} · ${(d.changed_files ?? []).length} ${t('个文件')}` }));
+    for (const file of d.changed_files ?? []) {
+      const output = el('pre', { className: 'mini ws-file-diff', hidden: true, role: 'status' });
+      const row = el('div', { className: 'ws-file-row' });
+      const kind = file.touches?.kernel ? 'Fortran 内核' : file.touches?.engine ? 'Rust 引擎' : '其他改动';
+      const diff = button('看差异', async () => {
+        diff.disabled = true; output.hidden = false; output.textContent = t('正在读取…');
+        try {
+          const result = await invoke('workspace_diff', { name, path: file.path });
+          output.textContent = `${result.diff}${result.truncated ? `\n${t('差异过长，已截断')}` : ''}`;
+        } catch (error) { output.textContent = String(error?.message || error); }
+        finally { diff.disabled = false; }
+      });
+      const undo = button('撤销这处', async () => {
+        if (undo.disabled) return;
+        undo.disabled = true;
+        try {
+          if (!(await appConfirm(`${t('恢复这个文件到官方基线并记录一次提交？')}\n${file.path}`, { okText: t('撤销这处') }))) return;
+          await invoke('workspace_revert_file', { name, path: file.path, message: 'Restore file to official baseline' });
+          await refresh(); versionsChanged();
+        } catch (error) { output.hidden = false; output.textContent = String(error?.message || error); }
+        finally { undo.disabled = false; }
+      });
+      row.append(el('code', { textContent: file.path }), el('span', { className: 'mini muted', textContent: `${t(kind)} · +${file.added ?? '—'} −${file.removed ?? '—'}` }), diff, undo, output);
+      modify.append(row);
+    }
+    modify.append(el('p', { className: 'mini muted', textContent: t('用编辑器修改后，请先提交或撤销改动，再检查和运行。研究首次运行时会固定所用版本。') }));
+    const more = el('details', { className: 'ws-detail' }, [el('summary', { textContent: t('更多') })]);
+    more.append(
+      action('导出改动…', '把全部改动存成一个 .patch 文本文件：可以发给别人，或在你自己的仓库里用 git apply 应用后再提交 PR。不会自动上传到 GitHub。', () => exportPatch(name), ws.commits === 0, '还没有改动'),
+      action('撤回改动…', '退回到之前的某一次改动，或最初的状态；之后的改动被丢弃，需要重新编译和测试。', () => revert(name), ws.commits === 0, '还没有改动'),
+      action('删除这个修改版…', '删除整个副本，包括编出的程序和测试报告，不能恢复；运行方式里选着它的会改回官方版。', () => remove(name)),
+    );
+    modify.append(more);
+    checks.append(el('h3', { textContent: t('在哪里检查') }));
+    const locations = el('div', { className: 'run-choice-grid ws-check-targets' });
+    const checkBody = el('div');
+    const servers = configuredServers();
+    const targetButtons = [];
+    const checkPanels = new Map();
+    const localEvidence = el('div');
+    const selectTarget = host => {
+      for (const [target, control] of targetButtons) control.setAttribute('aria-pressed', String(target === host));
+      if (!checkPanels.has(host)) {
+        const panel = host === 'local' ? checksPanel(ws) : remotePanel(name, host);
+        if (host === 'local') panel.open = true;
+        checkPanels.set(host, panel);
+      }
+      localEvidence.hidden = host !== 'local';
+      checkBody.replaceChildren(checkPanels.get(host));
+    };
+    for (const [host, label] of [['local',t('本机')], ...servers.map(server => {
+      const cached = cachedProbe(server);
+      return [server.host, `${server.host} · ${t(!cached ? '没测过' : cached.error ? '连接失败（上次测试）' : '在线（上次测试）')}`];
+    })]) {
+      const control = button(label, () => selectTarget(host)); control.className = 'run-mode-card';
+      targetButtons.push([host, control]); locations.append(control);
+    }
+    checks.append(locations, el('p', { className: 'mini', textContent: t(ws.touches?.engine && ws.touches?.kernel
+      ? 'Rust 引擎与 Fortran 内核都改了，两边都要编译' : touchesText(ws.touches)) }));
+    for (const [key, label] of Object.entries(LIGHT_NAMES)) localEvidence.append(el('div', { className: 'ws-action' }, [
+      lightDot(key, label, ws.lights?.[key]), el('p', { className: 'mini muted', textContent: t(LIGHT_HELP[key]) }),
+    ]));
+    checks.append(localEvidence, checkBody); selectTarget('local');
+    compare.append(el('h3', { textContent: t('快速对比') }), el('p', { textContent: t('同一个算例、同一组参数，只换模型版本各跑一次。先保留已有结果，再到运行方式选择父版本或官方版。') }),
+      button('去运行方式', () => go('run-mode')),
+      el('h3', { textContent: t('公平比较（研究）') }), el('p', { textContent: t('按相同参数范围、预算和站点分别率定两个版本，再比较验证期表现。') }),
+      button('比较两个版本', () => { go('result-tuning'); $('version-compare-card')?.scrollIntoView({ block: 'center' }); }));
+    studies.append(...studyRows(d.studies));
+    if (ws.based_on) {
+      const parent = el('div', {}, [el('h3', { textContent: `${t('父版本的研究')} · ${ws.based_on}` })]);
+      studies.append(parent);
+      invoke('workspace_status', { name: ws.based_on }).then(result => parent.append(...studyRows(result.studies)))
+        .catch(error => parent.append(el('p', { className: 'assistant-fail', textContent: String(error?.message || error) })));
+    }
+    choose(detailTab);
   } catch (error) {
-    box.textContent = String(error?.message || error);
+    if (request !== detailRequest) return;
+    box.replaceChildren(button('← 改代码', closeDetail), el('p', { role: 'status', className: 'assistant-fail', textContent: String(error?.message || error) }));
   }
-  card.append(box);
 }
 
 async function exportPatch(name) {
@@ -547,6 +687,7 @@ async function remove(name) {
   if (!(await appConfirm(`${t('删除修改版')} ${name}？${t('它的源码副本、编译产物和报告都会被删掉，无法恢复。')}`, { okText: t('删除') }))) return;
   try {
     await invoke('workspace_delete', { name });
+    if (detailName === name) closeDetail();
     await refresh();
     versionsChanged();
   } catch (error) {

@@ -360,10 +360,10 @@ fn write_info(dir: &Path, info: &Info) -> Result<()> {
 }
 
 /// `workspace.json` 的锁文件：独占创建，用完删除；超过一分钟的当作崩溃留下的残余清掉。
-struct InfoLock(PathBuf);
+pub(crate) struct InfoLock(PathBuf);
 
 impl InfoLock {
-    fn acquire(dir: &Path) -> Result<Self> {
+    pub(crate) fn acquire(dir: &Path) -> Result<Self> {
         let path = dir.join("workspace.lock");
         let started = std::time::Instant::now();
         loop {

@@ -197,7 +197,11 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
                 "lights": workspace.info.gates.lights_for(&head, workspace.parity_needed()?),
                 "parity_needed": workspace.parity_needed()?,
                 "commits": colm_workspace::git::commits_since(&src, &workspace.info.base_commit)?,
-                "changed_files": colm_workspace::git::changed_files(&src, &workspace.info.base_commit)?,
+                "changed_files": workspace.changes_from_official()?.into_iter().map(|file| json!({
+                    "touches": colm_workspace::version::touches([file.path.as_str()]),
+                    "path": file.path, "added": file.added, "removed": file.removed,
+                })).collect::<Vec<_>>(),
+                "studies": colm_workspace::studies::list(&workspace)?,
                 "dirty": colm_workspace::git::is_dirty(&src)?,
                 "built_kernels": kernels::built_presets(&workspace),
                 "sandbox": colm_workspace::sandbox::detect(),
@@ -239,6 +243,15 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
                 &opts.need_str("--message")?
             )?));
         }
+        "ws-diff" => print(json!(patch::diff_file(
+            &open(opts)?,
+            &opts.need_str("--path")?
+        )?)),
+        "ws-revert-file" => print(json!(patch::revert_file(
+            &open(opts)?,
+            &opts.need_str("--path")?,
+            &opts.need_str("--message")?
+        )?)),
         "ws-revert" => {
             let workspace = open(opts)?;
             let now = patch::revert_to(&workspace, &opts.need_str("--commit")?)?;

@@ -230,6 +230,54 @@ pub async fn workspace_status(name: String) -> Result<Value, String> {
     cli_json(args("ws-status", &["--name", &name]), None).await
 }
 
+fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    let lower = path.to_ascii_lowercase();
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.contains(['\\', '\0'])
+        || path.split('/').any(|part| {
+            part.is_empty() || part == "." || part == ".." || part.eq_ignore_ascii_case(".git")
+        })
+        || lower.starts_with("oracle/golden/")
+        || lower == "oracle/golden"
+        || path.as_bytes().get(1) == Some(&b':')
+    {
+        return Err("文件路径须为工作区内未受保护的相对路径".into());
+    }
+    let mut command = args(
+        if message.is_some() {
+            "ws-revert-file"
+        } else {
+            "ws-diff"
+        },
+        &["--name", name, "--path", path],
+    );
+    if let Some(message) = message {
+        let message = message.trim();
+        if message.is_empty() || message.len() > 200 || message.contains(['\n', '\r', '\0']) {
+            return Err("撤销说明须为一行非空文字，最多 200 字节".into());
+        }
+        command.extend(["--message".into(), message.into()]);
+    }
+    Ok(command)
+}
+
+#[tauri::command]
+pub async fn workspace_diff(name: String, path: String) -> Result<Value, String> {
+    cli_json(file_args(&name, &path, None)?, None).await
+}
+
+/// Human-confirmed single-file restore; not exposed as an assistant tool.
+#[tauri::command]
+pub async fn workspace_revert_file(
+    name: String,
+    path: String,
+    message: String,
+) -> Result<Value, String> {
+    cli_json(file_args(&name, &path, Some(&message))?, None).await
+}
+
 fn version_check_args(
     name: &str,
     kernel: &str,

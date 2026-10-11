@@ -11,11 +11,13 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-workspace-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 for (const [name, body] of Object.entries({
   'ipc.js': 'export const invoke = async (...args) => globalThis.workspaceInvoke ? globalThis.workspaceInvoke(...args) : ({}); export const listen = async () => {}; export const hasBackend = false;',
-  'ui.js': 'export const $ = id => globalThis.workspaceElements?.[id] ?? null; export const status = () => {}; export const baseName = p => String(p).split("/").pop(); export const appConfirm = async () => true; export const appPrompt = async () => null;',
+  'ui.js': 'export const $ = id => globalThis.workspaceElements?.[id] ?? null; export const status = () => {}; export const baseName = p => String(p).split("/").pop(); export const appConfirm = async (...args) => globalThis.workspaceConfirm ? globalThis.workspaceConfirm(...args) : true; export const appPrompt = async () => null;',
   'state.js': 'export const state = { kernels: [] };',
+  'remote.js': 'export const configuredServers = () => globalThis.workspaceServers ?? [];',
+  'shell.js': 'export const go = step => { globalThis.workspaceStep = step; };',
 })) await writeFile(join(temp, 'app', name), body);
 await writeFile(join(temp, 'app', 'workspace.js'),
-  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace, remotePanel, showDetail };\n');
+  (await readFile(join(temp, 'app', 'workspace.js'), 'utf8')) + '\nexport { createWorkspace, remotePanel, showDetail, render };\n');
 const workspace = await import(pathToFileURL(join(temp, 'app', 'workspace.js')).href);
 const kernel = await import(pathToFileURL(join(temp, 'app', 'kernel.js')).href);
 const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
@@ -136,10 +138,19 @@ assert.throws(() => workspace.remoteRequest('verify', 'default', 'relative', 'co
 assert.throws(() => workspace.remoteRequest('test', 'default', '', '--bad package'));
 assert.match(workspace.remoteJobText({ id: 'j1', host: 'server', state: 'failed', commit: 'abcdef012', stale: true }), /失败.*abcdef01.*需要重测/);
 class Element {
-  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.value = ''; this.disabled = false; this.isConnected = false; }
-  append(...items) { this.children.push(...items); if (this.tag === 'select' && !this.value) this.value = items[0]?.value ?? ''; }
+  constructor(tag) { this.tag = tag; this.children = []; this.listeners = {}; this.attributes = {}; this.value = ''; this.disabled = false; this.isConnected = false; this.hidden = false; }
+  append(...items) { this.children.push(...items); for (const item of items) if (item) item.parentElement = this; if (this.tag === 'select' && !this.value) this.value = items[0]?.value ?? ''; }
   replaceChildren(...items) { this.children = items; }
-  setAttribute() {}
+  setAttribute(name, value) { this.attributes[name] = value; }
+  querySelector(selector) {
+    const match = item => selector.startsWith('.') ? item.className?.split(' ').includes(selector.slice(1))
+      : selector.startsWith('#') ? item.id === selector.slice(1) : item.tag === selector;
+    return this.children.find(match) ?? this.children.map(item => item.querySelector?.(selector)).find(Boolean) ?? null;
+  }
+  querySelectorAll(selector) { return this.children.flatMap(item => [...(item.tag === selector ? [item] : []), ...(item.querySelectorAll?.(selector) ?? [])]); }
+  after(item) { const at = this.parentElement.children.indexOf(this); this.parentElement.children.splice(at+1,0,item); item.parentElement = this.parentElement; }
+  remove() { this.parentElement.children = this.parentElement.children.filter(item=>item!==this); }
+  focus() { document.activeElement = this; }
   addEventListener(event, fn) { this.listeners[event] = fn; }
   reportValidity() { return true; }
 }
@@ -186,16 +197,6 @@ await submitting;
 assert.equal(message.textContent, 'connection interrupted after launch', 'ambiguous submission retains actionable failure');
 assert.equal(form.children.at(-1).disabled, false);
 
-const card = new Element('div');
-card.append(panel);
-card.querySelector = selector => {
-  assert.equal(selector, '.ws-local-detail', 'local history must not remove remote controls');
-  return undefined;
-};
-globalThis.workspaceInvoke = async () => ({ workspace: { base_commit: 'base' }, commits: [], changed_files: [] });
-await workspace.showDetail('experiment', card);
-assert.equal(card.children[0], panel, 'remote controls survive local detail opening');
-assert.match(card.children[1].className, /ws-local-detail/);
 
 const evidence = { commit: 'candidate', base_commit: 'baseline', stale: true, execution_succeeded: false,
   gates: { candidate: { engine: { ok: true, commit: 'candidate' }, kernels: { default: { ok: true, commit: 'candidate' } },
@@ -221,3 +222,101 @@ assert.match(freshPanel.children[5].textContent, /远程验证证据.*job-1/);
 assert.match(freshPanel.children[5].textContent, /closure degraded/);
 await freshPanel.children[3].onclick();
 assert.match(freshPanel.children[5].textContent, /closure degraded/, 'refresh keeps fetched evidence separate from job rows');
+
+// Four-tab detail uses visible UI actions and confirms per-file mutations.
+const page = new Element('section');
+const list = new Element('div'); list.id = 'workspace-list';
+const createForm = new Element('form'); createForm.id = 'workspace-create-form';
+const officialCard = new Element('div'); officialCard.className = 'ws-official';
+page.append(officialCard,list,createForm);
+globalThis.workspaceElements = new Proxy({}, {get:(_,id)=>page.querySelector(`#${String(id)}`)});
+globalThis.document.createTextNode = textContent=>({textContent});
+globalThis.workspaceServers = [{host:'7920ts',root:'/data/colm'}];
+const detailCalls = [];
+let confirm = false;
+globalThis.workspaceConfirm = async () => confirm;
+const detail = {
+  workspace:{name:'experiment',note:'snow test',based_on:'parent'}, dir:'/ws/experiment',
+  lights:{compile:'pass',tests:'stale',parity:'not_needed'},
+  commits:[{short:'abc123',subject:'snow'}],
+  changed_files:[{path:'vendor/CoLM202X/Snow.F90',added:6,removed:2,touches:{kernel:true}},
+    {path:'crates/colm-core/src/snow.rs',added:3,removed:1,touches:{engine:true}},
+    {path:'docs/note.md',added:1,removed:0,touches:{}}],
+  studies:[{dir:'/study/one',id:'study-1',head:'123456789',location:'7920ts',pinned_unix:1700000000,current:false}],
+};
+globalThis.workspaceInvoke = async (command,args) => {
+  detailCalls.push([command,args]);
+  if (command === 'workspace_status') return args.name === 'parent' ? {studies:[]} : detail;
+  if (command === 'workspace_diff') return {diff:'<script>literal diff</script>',truncated:true};
+  if (command === 'workspace_list') return {workspaces:[{name:'experiment',commits:1}]};
+  if (command === 'workspace_revert_file') return {commit:'new'};
+  throw new Error(`unexpected ${command}`);
+};
+workspace.render([{name:'experiment',commits:1}]);
+const findButton = (root, label)=>root.querySelectorAll('button').find(item=>item.textContent===label);
+await findButton(list,'experiment').onclick();
+assert.equal(list.hidden,true); assert.equal(createForm.hidden,true);
+let detailBox = page.querySelector('#workspace-detail');
+const allText = node => [node.textContent ?? '',...node.children?.map(allText) ?? []].join(' ');
+assert.match(allText(detailBox),/snow test.*parent/);
+const tabs = detailBox.querySelector('.ws-detail-tabs').children;
+assert.deepEqual(tabs.map(tab=>tab.textContent),['修改','检查','对比','用到它的研究']);
+assert.equal(tabs[0].attributes['aria-selected'],'true');
+assert.equal(detailBox.querySelector('#workspace-panel-modify').hidden,false);
+assert.equal(detailBox.querySelector('#workspace-panel-checks').hidden,true);
+tabs[0].onkeydown({key:'ArrowRight',preventDefault(){}});
+assert.equal(tabs[1].attributes['aria-selected'],'true');
+assert.equal(document.activeElement,tabs[1]);
+assert.equal(detailBox.querySelector('#workspace-panel-checks').hidden,false);
+assert.ok(detailCalls.every(([command])=>!['remote_config','remote_probe','workspace_remote'].includes(command)),'detail rendering never starts SSH');
+assert.match(allText(detailBox),/相对官方版的改动.*Fortran 内核.*Rust 引擎.*其他改动/);
+assert.match(allText(detailBox),/study-1.*7920ts.*之后又改过/);
+await Promise.resolve(); await Promise.resolve();
+assert.match(allText(detailBox),/父版本的研究.*还没有研究用过这个版本/);
+await findButton(detailBox,'看差异').onclick();
+assert.deepEqual(detailCalls.at(-1),['workspace_diff',{name:'experiment',path:'vendor/CoLM202X/Snow.F90'}]);
+assert.match(allText(detailBox),/<script>literal diff<\/script>.*已截断/s);
+await findButton(detailBox,'撤销这处').onclick();
+assert.ok(!detailCalls.some(([command])=>command==='workspace_revert_file'),'cancel confirmation must not mutate');
+confirm = true;
+await findButton(detailBox,'撤销这处').onclick();
+assert.equal(detailCalls.filter(([command])=>command==='workspace_revert_file').length,1);
+assert.deepEqual(detailCalls.find(([command])=>command==='workspace_revert_file')[1],{name:'experiment',path:'vendor/CoLM202X/Snow.F90',message:'Restore file to official baseline'});
+detailBox = page.querySelector('#workspace-detail');
+await findButton(detailBox,'用我的编辑器打开').onclick();
+assert.ok(detailBox.querySelector('#workspace-panel-modify').children.some(item=>item.textContent==='/ws/experiment/src'&&!item.hidden));
+await findButton(detailBox,'去运行方式').onclick(); assert.equal(globalThis.workspaceStep,'run-mode');
+await findButton(detailBox,'比较两个版本').onclick(); assert.equal(globalThis.workspaceStep,'result-tuning');
+assert.ok(detailBox.querySelector('details').querySelectorAll('button').some(item=>item.textContent==='删除这个修改版…'));
+await findButton(detailBox,'← 改代码').onclick();
+assert.equal(list.hidden,false); assert.equal(createForm.hidden,false); assert.equal(page.querySelector('#workspace-detail'),null);
+console.log('workspace: four tabs, cached check locations, file diff, confirmed undo and study snapshots passed');
+
+// Choosing a configured check location uses that exact host and keeps other hosts' jobs out.
+const selectedRemoteCalls = [];
+globalThis.workspaceInvoke = async (command,args) => {
+  selectedRemoteCalls.push([command,args]);
+  if (command !== 'workspace_remote') throw new Error(`unexpected ${command}`);
+  if (args.operation === 'list') return {jobs:[{id:'other',host:'other-server',state:'finished'}]};
+  if (args.operation === 'submit') return {job:{id:'new',host:args.host,state:'queued'}};
+  throw new Error(`unexpected ${args.operation}`);
+};
+const selectedPanel = workspace.remotePanel('experiment','7920ts');
+selectedPanel.open = true;
+await selectedPanel.listeners.toggle();
+const selectedForm = selectedPanel.children[1];
+assert.equal(selectedForm.children[0].children[0].value,'7920ts');
+assert.equal(selectedForm.children[0].children[0].disabled,true);
+assert.ok(!allText(selectedPanel).includes('other-server'));
+selectedForm.children[2].children[0].value = '/data/case';
+await selectedForm.onsubmit({preventDefault(){}});
+assert.equal(selectedRemoteCalls.find(([,args])=>args.operation==='submit')[1].host,'7920ts');
+assert.ok(selectedRemoteCalls.every(([command])=>command==='workspace_remote'),'configured location avoids remote_config and probes');
+
+// Detail-read errors keep a working way back to the list.
+globalThis.workspaceInvoke = async () => {throw new Error('workspace removed');};
+await workspace.showDetail('missing');
+assert.match(allText(page.querySelector('#workspace-detail')),/workspace removed/);
+await findButton(page.querySelector('#workspace-detail'),'← 改代码').onclick();
+assert.equal(list.hidden,false);
+console.log('workspace: selected remote host, scoped jobs and detail failure recovery passed');

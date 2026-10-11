@@ -7,6 +7,12 @@ use anyhow::{bail, Context, Result};
 
 /// 在 `dir` 里运行 git，返回 stdout（去掉结尾换行）；失败时带上 stderr。
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
+    Ok(String::from_utf8_lossy(&run_bytes(dir, args)?)
+        .trim_end_matches(['\n', '\r'])
+        .to_owned())
+}
+
+fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -23,9 +29,7 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
             String::from_utf8_lossy(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .trim_end_matches(['\n', '\r'])
-        .to_owned())
+    Ok(output.stdout)
 }
 
 /// 同上，但把 stdin 交给 git（`git apply` 读补丁）。
@@ -114,11 +118,24 @@ pub fn commits_since(dir: &Path, base: &str) -> Result<Vec<Commit>> {
 
 /// `base..HEAD` 改动的文件与增删行数。
 pub fn changed_files(dir: &Path, base: &str) -> Result<Vec<FileChange>> {
-    let text = run(dir, &["diff", "--numstat", base, "HEAD"])?;
+    let bytes = run_bytes(
+        dir,
+        &[
+            "diff",
+            "--no-renames",
+            "--numstat",
+            "-z",
+            base,
+            "HEAD",
+            "--",
+        ],
+    )?;
+    let text = String::from_utf8(bytes).context("changed file paths must be UTF-8")?;
     Ok(text
-        .lines()
+        .split('\0')
+        .filter(|line| !line.is_empty())
         .filter_map(|line| {
-            let mut parts = line.split('\t');
+            let mut parts = line.splitn(3, '\t');
             let added = parts.next()?;
             let removed = parts.next()?;
             Some(FileChange {
