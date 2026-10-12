@@ -10,11 +10,12 @@ const temp = await mkdtemp(join(tmpdir(), 'colm-results-hub-'));
 await cp(join(root, 'dist', 'app'), join(temp, 'app'), { recursive: true });
 await writeFile(join(temp, 'package.json'), '{"type":"module"}\n');
 for (const [name, body] of Object.entries({
-  'ipc.js': 'export const invoke = async () => ({}); export const listen = async () => {}; export const hasBackend = false;',
+  'ipc.js': 'export const invoke = (...args) => globalThis.hubInvoke(...args); export const listen = async () => {}; export const hasBackend = true;',
   'ui.js': 'export const $ = () => null; export const status = () => {};',
   'shell.js': 'export const go = () => {};',
 })) await writeFile(join(temp, 'app', name), body);
 globalThis.addEventListener = () => {};
+globalThis.hubInvoke = async () => ({});
 const hub = await import(pathToFileURL(join(temp, 'app', 'results-hub.js')).href);
 
 const summary = {
@@ -58,6 +59,50 @@ assert.equal(hub.recommendRoute([{ label_zh: '潜热', nse: 0.8 }], official).ro
 assert.equal(hub.recommendRoute([], official), null);
 assert.deepEqual(hub.ROUTES.map(r => r.id), ['params', 'process', 'robust', 'compare']);
 assert.deepEqual(hub.ROUTES.flatMap(r => r.actions.map(a => a[1])), ['result-tuning', 'hybrid-learn', 'code', 'hybrid-process', 'result-uncertainty', 'result-tuning']);
+
+// Result context must remain independent of the parameter edit target.
+const { state } = await import(pathToFileURL(join(temp, 'app', 'state.js')).href);
+state.selected = { dir: '/parameter-case' };
+state.resultCaseDir = '/result-b';
+state.step = 'result-evaluation';
+state.resultMetrics = [{ case_dir: '/parameter-case', name: 'Qle', bias: 99 }, { case_dir: '/result-b', name: 'Qle', bias: 2 }];
+assert.deepEqual(hub.currentRows(), [state.resultMetrics[1]]);
+state.step = 'result-overview';
+state.resultOverviewMetric = null;
+assert.deepEqual(hub.currentRows(), [], 'old evaluation metrics are not displayed as current plot facts');
+state.resultOverviewMetric = state.resultMetrics[1];
+assert.deepEqual(hub.currentRows(), [state.resultMetrics[1]]);
+state.resultOverviewMetric = state.resultMetrics[0];
+assert.deepEqual(hub.currentRows(), [], 'facts cannot belong to another case');
+state.resultCaseDir = null;
+assert.deepEqual(hub.currentRows(), []);
+assert.match(hub.metricSentence({ name: 'Qle', bias: 2, nse: null }).text, /NSE 无法计算/);
+
+// A late provenance read cannot restore a cleared or different result case.
+const calls = [];
+const deferred = new Map();
+globalThis.hubInvoke = (command, { case: dir }) => {
+  assert.equal(command, 'case_runs'); calls.push(dir);
+  return new Promise(resolve => deferred.set(dir, resolve));
+};
+state.resultCaseDir = '/result-b';
+const oldRead = hub.refreshHub();
+state.resultCaseDir = null;
+await hub.refreshHub();
+deferred.get('/result-b')({ runs: [{ id: 'old-b' }] });
+await oldRead;
+assert.equal(state.provenance?.['/result-b'], undefined);
+state.resultCaseDir = '/result-b';
+const bRead = hub.refreshHub();
+state.resultCaseDir = '/result-c';
+const cRead = hub.refreshHub();
+deferred.get('/result-c')({ runs: [{ id: 'current-c' }] });
+await cRead;
+deferred.get('/result-b')({ runs: [{ id: 'late-b' }] });
+await bRead;
+assert.equal(state.provenance['/result-c'].id, 'current-c');
+assert.equal(state.provenance['/result-b'], undefined);
+assert.ok(calls.every(dir => dir !== '/parameter-case'));
 
 const html = await readFile(join(root, 'dist', 'index.html'), 'utf8');
 for (const id of ['hub-runs', 'hub-summary', 'hub-routes', 'result-next-list']) assert.ok(html.includes(`id="${id}"`), id);

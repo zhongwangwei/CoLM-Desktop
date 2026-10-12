@@ -856,28 +856,48 @@
 
     <!-- ⑤ 结果 -->
     <section class="page" data-step="result" hidden>
-      <div class="flow-pane" data-flow-pane="result-overview">
-        <div class="work-head"><span class="kicker">第 5 步 · 结果与评估</span></div>
-        <h1>结果与评估</h1>
-        <p class="sub">所有流程（工作流、研究、修改版、服务器）的结果都汇到这里对比，再从这里决定下一步。本次创建的所有算例集中在下方。</p>
-        <section class="card hub" aria-labelledby="hub-runs-title">
-          <h3 id="hub-runs-title">这个算例的运行</h3>
-          <div class="ch">每条都标明出处：模型版本 · 参数 · 在哪里跑 · 引擎。以这个算例为基础的研究也列在这里。</div>
-          <div id="hub-runs" class="hub-runs"></div>
+      <div class="flow-pane results-overview" data-flow-pane="result-overview">
+        <div class="results-heading">
+          <div><h1>结果与评估</h1><p class="sub">查看模拟与观测的差异，再决定下一步。</p></div>
+          <button class="btn-ghost" id="hub-open-records" type="button">查看运行记录</button>
+        </div>
+        <div class="results-context">
+          <label for="hub-case">算例 <select class="select result-case-select" id="hub-case" data-result-case></select></label>
+          <span class="muted mini" id="hub-period"></span>
+          <div class="hub-chips" id="hub-provenance" aria-label="当前结果的出处"></div>
+        </div>
+        <section class="results-facts" aria-labelledby="hub-summary-title">
+          <div class="results-facts-icon" aria-hidden="true">i</div>
+          <div><h3 id="hub-summary-title">已确认的评估现象</h3><div id="hub-summary"></div></div>
         </section>
-        <section class="card hub" aria-labelledby="hub-summary-title">
-          <h3 id="hub-summary-title">评估摘要</h3>
-          <div id="hub-summary"></div>
+        <section class="card results-plot" aria-labelledby="hub-chart-title">
+          <div class="result-card-head">
+            <h3 id="hub-chart-title">模拟与观测</h3>
+            <div class="result-tools">
+              <label for="hub-variable">变量 <select class="select" id="hub-variable"></select></label>
+              <button class="btn-ghost" id="hub-plot-button" type="button">显示 / 刷新图形</button>
+              <button class="btn-ghost" id="hub-open-evaluation" type="button">模型评估</button>
+            </div>
+          </div>
+          <p class="muted mini" id="hub-chart-status" role="status" aria-live="polite">选择有结果的算例后显示图形。</p>
+          <div id="hub-chart" class="result-chart-host"></div>
+          <div id="hub-metrics" class="hub-metric-grid"></div>
         </section>
-        <section class="card hub" aria-labelledby="hub-next-title">
-          <h3 id="hub-next-title">下一步：问题在哪？</h3>
-          <div class="ch">选一个，下面会说明去哪、产出什么。推荐项附理由。</div>
+        <section class="card hub results-next" aria-labelledby="hub-next-title">
+          <div class="result-card-head"><h3 id="hub-next-title">下一步可以做什么</h3><button class="btn-ghost" id="hub-open-diagnostics" type="button">过程诊断</button></div>
+          <p class="muted mini">候选原因需要进一步验证。</p>
           <div id="hub-routes"></div>
         </section>
-        <div class="result-kpis" id="result-kpis"></div>
-        <div class="card">
+        <details class="card hub-records fold-card" id="hub-records">
+          <summary id="hub-runs-title">运行记录与研究</summary>
+          <p class="muted mini">每条记录保留模型版本、参数来源、运行位置与引擎。</p>
+          <div id="hub-runs" class="hub-runs"></div>
+        </details>
+        <details class="card fold-card hub-case-index">
+          <summary>本次算例状态</summary>
+          <div class="result-kpis" id="result-kpis"></div>
           <div class="result-card-head">
-            <div><h3>算例状态</h3><div class="ch">点击已完成算例进入时间序列；失败算例可返回日志定位原因。</div></div>
+            <p class="muted mini">点击已完成算例进入时间序列；失败算例可返回日志定位原因。</p>
             <div class="result-tools">
               <input class="input" id="result-case-search" aria-label="搜索算例" placeholder="搜索算例…">
               <select class="select" id="result-status-filter" aria-label="筛选结果状态">
@@ -891,7 +911,7 @@
             </div>
           </div>
           <div class="result-matrix" id="result-case-matrix"></div>
-        </div>
+        </details>
         <div class="card" id="result-overview-notes" hidden></div>
       </div>
 

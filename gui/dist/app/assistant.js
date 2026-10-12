@@ -1256,7 +1256,7 @@ function restorePanel() {
   try { panelPreference = localStorage.getItem(OPEN_KEY); } catch {}
   togglePanel(defaultPanelOpen(innerWidth, panelPreference), { remember: false, focus: false });
 }
-const DEFAULT_WIDTH = 440;
+const DEFAULT_WIDTH = 320;
 
 function setAssistantWidth(width) {
   const rail = document.querySelector('.rail')?.getBoundingClientRect().width || 250;

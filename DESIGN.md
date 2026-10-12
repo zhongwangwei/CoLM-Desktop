@@ -2,7 +2,7 @@
 
 ## Source of truth
 - Status: Active
-- Last refreshed: 2026-10-10
+- Last refreshed: 2026-10-12
 - Primary product surfaces: CoLM Desktop 单点算例向导、运行工作台、结果分析、不确定性分析、参数调优
 - Evidence reviewed: `docs/design.md`, `docs/design-gui3.md`, `docs/design-gate.md`, `docs/design-prep.md`, `gui/dist/index.html`, `gui/dist/app/results.js`, `gui/dist/app/style.css`
 
@@ -37,7 +37,7 @@
 - Tradeoffs: 保留现有 7 页与原生 HTML/JS，避免引入新框架；将“开始计算”和监控放在同页以便长任务控制。
 
 ## Visual language
-- Color: 复用现有主题变量；通过 accent/pass/warn 表达主操作、完成和风险。
+- Color: 复用现有主题变量；主色 #0B7F86、浅青绿 #E6F5F3、深蓝正文 #152A43、浅灰背景 #F6F8FA；深色使用深蓝底和浅青绿。通过 accent/pass/warn 表达主操作、完成和风险。
 - Typography: 复用现有系统字体；主操作标题清晰，说明文字保持短句。
 - Spacing/layout rhythm: 复用卡片和 8/10/12/14px 间距；运行页使用一块主启动卡和一块监控卡。
 - Shape/radius/elevation: 复用 `--r-sm`, `--r-md`, `--border`, `--elevated`。
@@ -128,3 +128,15 @@
 - Main action: full verification (build candidate/baseline, tests, regression and parity); build-only and package tests remain explicit alternatives. The case field is an absolute server path; no automatic data upload.
 - Jobs survive application restart. Show host, source commit/hash, state, stale evidence, phase/logs, and report location. Refresh live tasks while the panel is open; keep failed jobs and connection errors visible. Cancel and fetch act on the saved job connection.
 - Remote reports stay separate from local acceptance lights and kernel adoption. Fetching a failed report means download completed, never verification passed.
+
+## Results overview visual refresh
+- Decision (2026-10-12): 先落地一个真实结果总览，建立视觉标准；研究、计算资源和历史记录的导航重组仍为待确认方案，不在此阶段伪装成已实现。
+- References: 用户认可的示意图保存于 `docs/design-references/results-workbench.png` 和 `research-resources-history.png`；图内数字、日期与状态是示意数据。
+- Hierarchy: 算例/实际时段与运行出处 → 已确认评估现象 → 模拟/观测曲线与真实指标 → 下一步研究操作 → 可展开的运行/研究记录与本次算例索引。原有分析与研究入口保留。
+- State contract: 参数编辑 selected 与结果 resultCaseDir 分离；总览出处、事实和图表绑定当前已校验结果算例及图变量，异步切算例/页面/观测设置不能回填旧响应。
+- Science: 复用内置 history/metrics/series 及有界缓存，图形最多 2400 点；缺观测仅画真实模拟或显示空态，未计算/无法计算的指标不造数值。低指标不确认为参数或结构原因。
+- Components: 复用现有 CSS tokens、case selector、details、uPlot 和图形生命周期；无新框架/图标库。模型线青绿、观测线灰色并带不同线形与明确图例。
+- Responsive: 结果主区自适应，rail 220px，助手默认 320px并保留用户保存宽度/开关；960/1240/1440px检查浅深主题、中英文、控件换行和无横向裁切。
+- Verification: 有意义的 JS 回归覆盖真实响应展示、空态、metric/plot上下文和迟到响应；实际数据及原生桌面截图核验视觉效果。仅原生 Mac 打包在已授权本机执行，重 Cargo 检查仍走 T7920。
+- [ ] User: 确认首个真实结果页后再推广其布局到其他页面。
+- [ ] Future history: 确定统一历史事件和会话索引的范围，本阶段不新增历史后端。

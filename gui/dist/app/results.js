@@ -105,6 +105,7 @@ let batchEvaluationCatalogs = [];
 let batchEvaluationCatalogFailures = [];
 let comparisonController = null;
 let activeSeriesRequest = 0;
+let activeOverviewRequest = 0;
 let activeMetricRequest = 0;
 let activeMetricChartRequest = 0;
 let activePaneRequest = 0;
@@ -356,6 +357,7 @@ function setResultCase(dir) {
   }
   syncResultCaseSelects();
   syncObservation();
+  globalThis.dispatchEvent?.(new Event('colm:result-case'));
   return prepareActivePane();
 }
 
@@ -398,7 +400,7 @@ async function validateHistoryCases(cases = allCurrent(), refresh = true) {
   entries.forEach(entry => { entry.promise = work; });
   await Promise.all([...existing, work]);
   if (!refresh) return;
-  if (['result-data', 'result-series', 'result-evaluation', 'result-comparison'].includes(state.step)) {
+  if (['result-overview', 'result-data', 'result-series', 'result-evaluation', 'result-comparison'].includes(state.step)) {
     await prepareActivePane();
   } else {
     syncResultCaseSelects();
@@ -441,6 +443,7 @@ async function loadEvaluationCatalog(c, obs = observationFor(c)) {
 }
 
 function resetEvaluationResults(message = '') {
+  state.resultOverviewMetric = null;
   currentMetricRows = [];
   currentComparisonSummary = null;
   state.resultMetrics = [];
@@ -718,10 +721,17 @@ const chartResize = typeof ResizeObserver === 'undefined' ? null : new ResizeObs
 function makeChart(host, options, data, height = 230) {
   destroyChart(host);
   const width = Math.max(320, Math.floor(host.clientWidth || host.parentElement?.clientWidth || 640));
+  const dark = document.documentElement.dataset.theme === 'dark';
+  const stroke = dark ? '#acbbcf' : '#53657a';
+  const grid = dark ? '#27384e' : '#e6ecf3';
   const chart = new uPlot({
     width, height,
     tzDate: ts => uPlot.tzDate(new Date(ts * 1000), 'Etc/UTC'),
     ...options,
+    axes: (options.axes ?? [{}, {}]).map(axis => ({
+      ...axis, stroke: axis.stroke ?? stroke,
+      grid: { stroke: grid, ...axis.grid }, ticks: { stroke: grid, ...axis.ticks },
+    })),
   }, data, host);
   chart.height = height;
   charts.set(host, chart);
@@ -732,11 +742,142 @@ function makeChart(host, options, data, height = 230) {
 function chartColors() {
   const dark = document.documentElement.dataset.theme === 'dark';
   return {
-    model: dark ? '#8fd3a6' : '#1e6b3a',
-    obs: dark ? '#e0a45e' : '#a5610d',
+    model: dark ? '#5DD5CD' : '#138F96',
+    obs: dark ? '#B3BDCE' : '#66758B',
     residual: dark ? '#8fb9ed' : '#1f6feb',
     guide: dark ? '#7d8590' : '#a8afb8',
   };
+}
+
+function overviewMetrics(row = null) {
+  const host = $('hub-metrics');
+  if (!host) return;
+  host.textContent = '';
+  for (const [label, value] of [
+    ['平均偏差 Bias', metricText(row?.bias, 2, true)],
+    ['均方根误差 RMSE', metricText(row?.rmse, 2)],
+    ['有效配对数', Number.isFinite(row?.n) ? String(row.n) : '—'],
+  ]) {
+    const card = node('div', 'hub-metric');
+    card.append(node('span', 'hub-metric-label', dialogText(label)), node('strong', 'hub-metric-value', value));
+    if (row?.units && label !== '有效配对数') card.appendChild(node('span', 'hub-metric-unit', row.units));
+    host.appendChild(card);
+  }
+}
+
+async function plotOverview(strict = false) {
+  const host = $('hub-chart');
+  if (!host || state.step !== 'result-overview') {
+    if (strict === true) throw new Error('当前页面不能执行此操作，请重新读取界面。');
+    return;
+  }
+  const token = ++activeOverviewRequest;
+  const c = activeCase();
+  const obs = c ? observationFor(c) : '';
+  const spinup = Number($('spinup').value) || 0;
+  const corrected = $('corrected').checked;
+  const select = $('hub-variable');
+  let variable = select.value;
+  const isCurrent = () => token === activeOverviewRequest && state.step === 'result-overview'
+    && activeCase()?.dir === c?.dir && (!c || observationFor(c) === obs)
+    && (Number($('spinup').value) || 0) === spinup && $('corrected').checked === corrected
+    && select.value === variable;
+  destroyChart(host);
+  overviewMetrics();
+  state.resultOverviewMetric = null;
+  globalThis.dispatchEvent?.(new Event('colm:metrics'));
+  $('hub-period').textContent = '—';
+  $('hub-plot-button').disabled = true;
+  $('hub-chart-status').textContent = dialogText(c ? '正在读取真实模拟结果…' : '请选择已有可用结果的算例。');
+  if (!c) {
+    select.textContent = ''; select.disabled = true;
+    if (strict === true) throw new Error(dialogText('请选择已有可用结果的算例。'));
+    return;
+  }
+  try {
+    const catalog = await loadCatalog(c);
+    if (!isCurrent()) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
+    const variables = catalog.variables.filter(v => v.kind === 'series' && v.name !== 'time');
+    select.textContent = '';
+    const common = variables.filter(item => Object.hasOwn(COMMON_VARIABLES, item.name));
+    const advanced = variables.filter(item => !Object.hasOwn(COMMON_VARIABLES, item.name));
+    for (const [label, items] of [['常用变量', common], ['其他模拟变量', advanced]]) {
+      if (!items.length) continue;
+      const group = document.createElement('optgroup');
+      group.label = dialogText(label);
+      for (const item of items) {
+        const option = node('option', '', dialogText(variableMeta(item.name, item.units).label));
+        option.value = item.name;
+        group.appendChild(option);
+      }
+      select.appendChild(group);
+    }
+    variable = variables.some(v => v.name === variable) ? variable
+      : variables.find(v => v.name === 'f_lfevpa')?.name ?? variables[0]?.name ?? '';
+    select.value = variable;
+    select.disabled = !variable;
+    $('hub-period').textContent = `${utcText(catalog.start)} — ${utcText(catalog.end)} UTC`;
+    if (!variable) {
+      $('hub-chart-status').textContent = dialogText('当前结果没有可绘制的时间序列变量。');
+      if (strict === true) throw new Error($('hub-chart-status').textContent);
+      return;
+    }
+    const meta = variableMeta(variable, variables.find(v => v.name === variable)?.units);
+    let row = null;
+    let observationIssue = '';
+    if (obs) {
+      try {
+        const available = await loadEvaluationCatalog(c, obs);
+        if (!isCurrent()) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
+        const target = available.find(v => v.available && v.model_var === variable);
+        if (target) {
+          const rows = await getMetrics(c, obs, spinup, corrected, false, [target.name], 2400);
+          if (!isCurrent()) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
+          row = rows.find(v => v.name === target.name && v.n > 0 && v.time?.length
+            && v.model?.length === v.time.length && v.obs?.length === v.time.length) ?? null;
+        }
+        if (!row) observationIssue = dialogText('当前变量没有有效观测配对，仅显示模拟结果。');
+      } catch (error) {
+        if (!isCurrent()) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
+        observationIssue = `${dialogText('观测评估失败，仅显示模拟结果。')} ${String(error)}`;
+      }
+    } else observationIssue = dialogText('尚未配置观测文件，仅显示模拟结果。');
+    const colors = chartColors();
+    if (row) {
+      makeChart(host, {
+        series: [{ label: dialogText('时间') }, { label: 'CoLM', stroke: colors.model, width: 1.5 },
+          { label: dialogText('观测'), stroke: colors.obs, width: 1.3 }],
+        axes: [{}, { label: row.units }],
+      }, [row.time, row.model, row.obs], 220);
+      overviewMetrics(row);
+      state.resultMetrics = state.resultMetrics.filter(item => item.case_dir !== c.dir || item.name !== row.name);
+      state.resultOverviewMetric = { site: c.name, case_dir: c.dir, ...stripMetricPairs(row) };
+      state.resultMetrics.push(state.resultOverviewMetric);
+      globalThis.dispatchEvent?.(new Event('colm:metrics'));
+      $('hub-chart-status').textContent = `${dialogText('真实模型与观测配对')} · ${row.n} ${dialogText('有效配对数')} · ${row.time.length}/${row.pair_source_n ?? row.time.length} ${dialogText('图形点')}`;
+    } else {
+      const data = await getSeries(c, variable);
+      if (!isCurrent()) { if (strict === true) throw new Error('结果上下文已变化，请重新检查。'); return; }
+      const values = data.vars?.[variable];
+      if (!data.time?.length || values?.length !== data.time.length || !values.some(Number.isFinite)) {
+        $('hub-chart-status').textContent = dialogText('当前变量没有有效模拟数据。');
+        if (strict === true) throw new Error($('hub-chart-status').textContent);
+        return;
+      }
+      makeChart(host, {
+        series: [{ label: dialogText('时间') }, { label: 'CoLM', stroke: colors.model, width: 1.5 }],
+        axes: [{}, { label: meta.units }],
+      }, [data.time, values], 220);
+      $('hub-chart-status').textContent = observationIssue;
+    }
+  } catch (error) {
+    if (isCurrent()) {
+      $('hub-chart-status').textContent = String(error);
+    }
+    if (strict === true) throw error;
+  } finally {
+    if (isCurrent()) $('hub-plot-button').disabled = !select.value;
+  }
 }
 
 async function plotSeries(strict = false) {
@@ -1419,6 +1560,8 @@ export async function markResultsStale(dirs) {
 }
 
 export function invalidateResultCase(dir) {
+  activeOverviewRequest += 1;
+  if (state.resultOverviewMetric?.case_dir === dir) state.resultOverviewMetric = null;
   catalogCache.delete(dir);
   historyHealth.delete(dir);
   evaluationCatalogCache.deleteWhere(key => key.startsWith(`${dir}\u001f`));
@@ -1455,6 +1598,7 @@ async function prepareActivePane(strict = false) {
   renderOverview();
   syncResultCaseSelects();
   syncObservation();
+  globalThis.dispatchEvent?.(new Event('colm:result-case'));
   // 两类 Study 是基本设定后的独立分支，不要求原算例先有 history。
   // 因此必须在 `activeCase()`（只返回已完成结果）这个早退之前准备页面。
   if (step === 'result-uncertainty' || step === 'result-tuning') {
@@ -1489,6 +1633,8 @@ async function prepareActivePane(strict = false) {
     }
     return;
   }
+  // Reading a page may display an empty state; an explicit plot action is strict.
+  if (step === 'result-overview') { await plotOverview(); return; }
   const c = activeCase();
   const isCurrent = () => token === activePaneRequest && state.step === step && activeCase()?.dir === c?.dir;
   if (!c) { updateButtons(); return; }
@@ -1533,6 +1679,8 @@ $('result-refresh').onclick = async () => {
 $('result-variable-search').oninput = renderDataBrowser;
 $('result-variable-kind').onchange = renderDataBrowser;
 $('plot').onclick = plotSeries;
+if ($('hub-plot-button')) $('hub-plot-button').onclick = () => plotOverview();
+if ($('hub-variable')) $('hub-variable').onchange = () => plotOverview();
 $('series-reset').onclick = async () => {
   const c = activeCase(); if (!c) return;
   const catalog = await loadCatalog(c);
@@ -1587,6 +1735,8 @@ $('export-copy').onclick = async () => { await copyText(reportText); status('报
 $('export-download').onclick = () => downloadText(reportText, `colm-results-${new Date().toISOString().slice(0, 10)}.${reportExtension}`);
 
 addEventListener('colm:step', event => {
+  activeOverviewRequest += 1;
+  if (state.step !== 'result-overview') state.resultOverviewMetric = null;
   // Hidden result panes must not retain uPlot instances or ResizeObserver targets.
   for (const pane of document.querySelectorAll('[data-flow-pane^="result-"][hidden]')) destroyChartsInside(pane);
   if (event.detail?.startsWith('result-')) prepareActivePane();
@@ -1597,6 +1747,7 @@ addEventListener('colm:language', () => {
   if (state.step.startsWith('result-')) refreshVars();
 });
 addEventListener('colm:theme', () => {
+  if (state.step === 'result-overview') plotOverview();
   if (state.step === 'result-series' && charts.has($('charts'))) plotSeries();
   if (state.step === 'result-evaluation' && currentComparisonSummary) drawComparison(currentComparisonSummary);
 });
@@ -3533,6 +3684,7 @@ export const resultsGuide = {
   prepare: () => prepareActivePane(true),
   async changed(el) {
     if (Object.hasOwn(el.dataset, 'resultCase')) await prepareActivePane(true);
+    else if (el.id === 'hub-variable') await plotOverview(true);
     else if (el.id === 'obs') await refreshCurrentEvaluationCatalog(true);
     else if (['result-variable-search', 'result-variable-kind'].includes(el.id)) await renderDataBrowser(true);
   },
@@ -3576,6 +3728,7 @@ export const resultsGuide = {
     };
     add('result-refresh', 'click', async () => { allCurrent().forEach(c => invalidateResultCase(c.dir)); await prepareActivePane(true); });
     add('plot', 'click', () => plotSeries(true));
+    add('hub-plot-button', 'click', () => plotOverview(true));
     add('series-reset', 'click', async () => {
       const c = activeCase(); if (!c) throw new Error('请选择有结果的算例。');
       const catalog = await loadCatalog(c);

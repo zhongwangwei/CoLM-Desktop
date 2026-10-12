@@ -79,6 +79,7 @@ export function studyRows(summary) {
 export function metricSentence(row) {
   const label = row.label_zh || row.name;
   const nse = fixed(row.nse);
+  if (!Number.isFinite(row.nse)) return { level: 'unknown', text: `${label}：平均偏差 ${fixed(row.bias)}${row.units ? ` ${row.units}` : ''}，NSE 无法计算。` };
   const threshold = 0.2 * (Number.isFinite(row.obs_sd) && row.obs_sd > 0 ? row.obs_sd : Math.abs(row.obs_mean) || 1);
   const units = row.units ? ` ${row.units}` : '';
   if (Number.isFinite(row.bias) && row.bias > threshold) return { level: 'bad', text: `${label}：系统偏高（平均偏差 +${fixed(row.bias)}${units}，NSE ${nse}）` };
@@ -89,17 +90,17 @@ export function metricSentence(row) {
 
 export const ROUTES = [
   {
-    id: 'params', title: '参数不对', sub: '差得远，但过程看起来是对的',
+    id: 'params', title: '检查参数', sub: '差得远，但过程看起来是对的',
     detail: '在参数范围内找最贴近观测的一组；多个站点率定出的参数差别大时，可以让网络按地点特征给参数。产出：带新参数的算例，回到运行方式里重跑。',
     actions: [['参数率定', 'result-tuning'], ['AI 学习参数', 'hybrid-learn']],
   },
   {
-    id: 'process', title: '过程或结构不对', sub: '率定之后偏差还在，或某个过程系统性地偏',
+    id: 'process', title: '检查过程', sub: '率定之后偏差还在，或某个过程系统性地偏',
     detail: '改代码产出一个新的修改版（只改 Rust 引擎、只改 Fortran，或两边都改）；也可以先用网络替换一个过程量试试。改完在运行方式里选它重跑。',
     actions: [['新建修改版', 'code'], ['AI 替换过程', 'hybrid-process']],
   },
   {
-    id: 'robust', title: '想知道稳不稳', sub: '结果对哪些参数敏感、误差有多大',
+    id: 'robust', title: '检查稳健性', sub: '结果对哪些参数敏感、误差有多大',
     detail: '在参数范围内抽样，看输出怎么变。产出：敏感参数排序与输出区间；敏感参数可以带进参数率定。',
     actions: [['不确定性分析', 'result-uncertainty']],
   },
@@ -128,9 +129,9 @@ export function recommendRoute(rows, summary) {
   const calibrated = summary?.derived_from?.kind === 'tuning'
     || (summary?.studies ?? []).some(s => s.kind === 'tuning' && /^completed/.test(String(s.status ?? '')));
   if (calibrated) {
-    return { route: 'process', reason: `${label} 的 NSE 在率定之后仍只有 ${fixed(worst.nse)}，更像过程或结构本身的问题，而不是参数没调好。` };
+    return { route: 'process', reason: `${label} 的 NSE 在率定之后仍只有 ${fixed(worst.nse)}，建议设计过程对照实验；指标本身不能确认原因。` };
   }
-  return { route: 'params', reason: `${label} 的 NSE 只有 ${fixed(worst.nse)}，还没率定过；先看是不是参数没调好。` };
+  return { route: 'params', reason: `${label} 的 NSE 只有 ${fixed(worst.nse)}，还没率定过；建议检查参数范围与敏感性，原因仍需验证。` };
 }
 
 // ---- 页面 ------------------------------------------------------------------------------------
@@ -151,15 +152,25 @@ function chip(text, extra = '') {
   return el('span', `hub-chip${extra ? ` ${extra}` : ''}`, text);
 }
 
-function currentRows() {
-  const dir = state.selected?.dir;
-  return (state.resultMetrics ?? []).filter(row => !dir || row.case_dir === dir);
+export function currentRows() {
+  const dir = state.resultCaseDir;
+  if (!dir) return [];
+  if (state.step === 'result-overview') {
+    const row = state.resultOverviewMetric;
+    return row?.case_dir === dir ? [row] : [];
+  }
+  return (state.resultMetrics ?? []).filter(row => row.case_dir === dir);
 }
 
 function renderRuns(summary) {
   const box = $('hub-runs');
   if (!box) return;
   const runs = runRows(summary);
+  const provenance = $('hub-provenance');
+  if (provenance) provenance.replaceChildren(...(runs[0] ? [
+    ...runs[0].chips.map((text, i) => chip(text, i === 0 ? 'hub-modified' : '')),
+    ...runs[0].flags.map(text => chip(text, 'hub-flag')),
+  ] : [el('span', 'muted mini', '暂无运行出处记录')]));
   const studies = studyRows(summary);
   if (!runs.length && !studies.length) {
     box.replaceChildren(el('p', 'muted mini', '这个算例还没有运行记录。'));
@@ -224,8 +235,10 @@ export function renderRoutes(container, summary = lastSummary) {
   }));
   const route = ROUTES.find(r => r.id === active);
   const detail = el('div', 'hub-detail', '', [
-    ...(recommended?.route === active ? [el('p', 'hub-reason', '', [el('span', '', '推荐理由：'), el('span', '', recommended.reason)])] : []),
-    el('p', 'mini', route.detail),
+    el('details', '', '', [el('summary', '', '查看方法说明与依据'),
+      ...(recommended?.route === active ? [el('p', 'hub-reason', '', [el('span', '', '推荐理由：'), el('span', '', recommended.reason)])] : []),
+      el('p', 'mini', route.detail),
+    ]),
     el('div', 'pill-row', '', route.actions.map(([label, step], i) => {
       const button = el('button', i === 0 ? 'run-btn' : 'btn-ghost', `${label} →`);
       button.type = 'button';
@@ -249,17 +262,19 @@ function renderAll() {
 
 /** 读这个算例的运行与研究，然后重画。 */
 export async function refreshHub() {
-  const dir = state.selected?.dir;
-  if (!dir || !hasBackend) { lastSummary = null; renderAll(); return; }
   const seq = ++summarySeq;
+  const dir = state.resultCaseDir;
+  lastSummary = null;
+  renderAll();
+  if (!dir || !hasBackend) { lastSummary = null; renderAll(); return; }
   try {
     const summary = await invoke('case_runs', { case: dir });
-    if (seq !== summarySeq) return;
+    if (seq !== summarySeq || state.resultCaseDir !== dir) return;
     lastSummary = summary;
     // 助手读出处用最近一次运行。
     state.provenance = { ...(state.provenance ?? {}), [dir]: summary?.runs?.[0] ?? null };
   } catch {
-    if (seq !== summarySeq) return;
+    if (seq !== summarySeq || state.resultCaseDir !== dir) return;
     lastSummary = null;
   }
   renderAll();
@@ -270,8 +285,17 @@ function wire() {
   addEventListener('colm:step', () => {
     if (state.step === 'result-overview' || state.step === 'result-evaluation') refreshHub();
   });
+  addEventListener('colm:result-case', () => { picked = null; refreshHub(); });
   addEventListener('colm:metrics', renderAll);
   addEventListener('colm:language', renderAll);
+  for (const [id, step] of [['hub-open-evaluation', 'result-evaluation'], ['hub-open-diagnostics', 'result-diagnostics']]) {
+    if ($(id)) $(id).onclick = () => go(step);
+  }
+  if ($('hub-open-records')) $('hub-open-records').onclick = () => {
+    const records = $('hub-records');
+    records.open = true;
+    records.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+  };
 }
 
 wire();

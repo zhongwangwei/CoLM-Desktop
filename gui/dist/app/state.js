@@ -117,6 +117,7 @@ export const state = {
   histOnlyOn: false,
   /** 结果工作台的当前站点。与参数页 `selected` 分开，切图不能改变批量编辑目标。 */
   resultCaseDir: null,
+  resultOverviewMetric: null, // Only the metric belonging to the displayed overview chart.
   /** 结果总览中主动选入分析范围的站点；空集合表示本次全部已完成算例。 */
   resultSelection: new Set(),
   resultSelectionTouched: false,

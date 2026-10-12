@@ -85,6 +85,7 @@ const example = { dir: '/pending', name: 'pending', has_history: true };
 const raceState = { step: 'result-series' };
 const raceControls = { 'series-from': { value: '' }, 'series-to': { value: '' } };
 const raceContext = {
+  globalThis: { dispatchEvent: () => {} }, Event: class {},
   state: raceState, activePaneRequest: 0, historyHealth, catalogCache, hasBackend: true,
   allCurrent: () => [example], navigator: { hardwareConcurrency: 2 },
   invoke: async () => { historyReads++; return new Promise(resolve => { finishHistory = resolve; }); },
@@ -123,3 +124,26 @@ historyHealth.clear();
 raceContext.invoke = async () => { throw new Error('corrupt history'); };
 await assert.rejects(race.prepareActivePane(true), /结果校验失败.*corrupt history/);
 console.log('results guide: awaited actions, strict failures, pending-history reuse and refresh readiness passed');
+
+// The overview assistant bridge waits for the real read, propagates failure, and rejects departed contexts.
+state.step = 'result-overview';
+context.$ = id => id === 'hub-plot-button' ? button : null;
+let overviewFinished = false;
+context.plotOverview = async strict => { assert.equal(strict, true); await new Promise(resolve => { release = resolve; }); overviewFinished = true; };
+const overviewAction = guide.actions()['hub-plot-button'];
+const overviewPending = overviewAction.run();
+assert.equal(overviewFinished, false);
+release(); await overviewPending;
+assert.equal(overviewFinished, true);
+overviewFinished = false;
+const variablePending = guide.changed({id:'hub-variable',dataset:{}});
+assert.equal(overviewFinished, false);
+release(); await variablePending;
+assert.equal(overviewFinished, true);
+context.plotOverview = async strict => { assert.equal(strict, true); throw problem; };
+await assert.rejects(overviewAction.run(), error => error === problem);
+await assert.rejects(guide.changed({id:'hub-variable',dataset:{}}), error => error === problem);
+context.plotOverview = async () => new Promise(resolve => { release = resolve; });
+const departed = overviewAction.run();
+state.step = 'result-evaluation'; release();
+await assert.rejects(departed, /分析上下文已变化/);

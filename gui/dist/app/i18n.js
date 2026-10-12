@@ -2999,6 +2999,39 @@ const ZH_EN = [
   ["已解除中断的提交记录", "Cleared interrupted submission records"],
   ["只删除一小时以前中断的提交记录与清理锁；正在进行的提交与服务器上的作业、数据都不受影响。", "Only removes submission records and a cleanup lock interrupted more than an hour ago; submissions in progress, server jobs and data are not affected."],
   ["确认解除？", "Clear them?"],
+  ["查看模拟与观测的差异，再决定下一步。", "Review differences between simulations and observations, then choose the next step."],
+  ["查看运行记录", "View run records"],
+  ["当前结果的出处", "Source of the current results"],
+  ["已确认的评估现象", "Observed evaluation findings"],
+  ["选择有结果的算例后显示图形。", "Select a case with results to display the chart."],
+  ["下一步可以做什么", "What you can do next"],
+  ["候选原因需要进一步验证。", "Possible causes require further verification."],
+  ["运行记录与研究", "Runs and research"],
+  ["每条记录保留模型版本、参数来源、运行位置与引擎。", "Each record retains the model version, parameter source, location and engine."],
+  ["本次算例状态", "Current case status"],
+  ["检查参数", "Check parameters"],
+  ["检查过程", "Check processes"],
+  ["检查稳健性", "Check robustness"],
+  ["暂无运行出处记录", "No run provenance record available"],
+  ["查看方法说明与依据", "View method details and evidence"],
+  ["平均偏差 Bias", "Mean bias"],
+  ["均方根误差 RMSE", "Root mean square error (RMSE)"],
+  ["有效配对数", "Valid pairs"],
+  ["正在读取真实模拟结果…", "Reading simulation results…"],
+  ["请选择已有可用结果的算例。", "Select a case with available results."],
+  ["当前结果没有可绘制的时间序列变量。", "These results contain no plottable time-series variables."],
+  ["当前变量没有有效观测配对，仅显示模拟结果。", "No valid observation pairs for this variable; displaying simulations only."],
+  ["观测评估失败，仅显示模拟结果。", "Observation evaluation failed; displaying simulations only."],
+  ["尚未配置观测文件，仅显示模拟结果。", "No observation file configured; displaying simulations only."],
+  ["当前变量没有有效模拟数据。", "This variable contains no valid simulation data."],
+  ["真实模型与观测配对", "Model and observation pairs"],
+  ["图形点", "plotted points"],
+  ["NSE 无法计算。", "NSE is unavailable."],
+  ["建议设计过程对照实验；指标本身不能确认原因。", "Consider a controlled process experiment; metrics alone cannot establish causes."],
+  ["建议检查参数范围与敏感性，原因仍需验证。", "Check parameter ranges and sensitivity; causes still require verification."],
+  ["模拟与观测", "Simulation and observations"],
+  ["常用变量", "Common variables"],
+  ["其他模拟变量", "Other simulation variables"],
 ].sort((a, b) => b[0].length - a[0].length);
 
 export function translateZh(text, target = 'en') {
@@ -3010,6 +3043,9 @@ export function translateZh(text, target = 'en') {
   if (!out) return value;
   const source = out;
   out = out
+    .replace(/^(.+) 的 NSE 在率定之后仍只有 (\S+)，建议设计过程对照实验；指标本身不能确认原因。$/, '$1 still has an NSE of $2 after calibration; consider a controlled process experiment. Metrics alone cannot establish causes.')
+    .replace(/^(.+) 的 NSE 只有 (\S+)，还没率定过；建议检查参数范围与敏感性，原因仍需验证。$/, '$1 has an NSE of $2 and has not been calibrated; check parameter ranges and sensitivity. Causes still require verification.')
+    .replace(/^(.+)：平均偏差 (.+)$/, '$1: mean bias $2')
     .replace(/^参数 (\d+) · 站点 (\d+) · 候选 (\d+) · 成员×站点 (\d+) · 阶段运行 (\d+) · 并发 (\d+) · (.*)$/, 'Parameters $1 · sites $2 · candidates $3 · member-site tasks $4 · stage runs $5 · parallel jobs $6 · $7')
     .replace(/^预计约 (\d+) 分钟（按基准耗时估计）$/, 'Estimated: about $1 min (baseline estimate)')
     .replace(/^可同时 (\d+) 个成员/, 'Concurrent capacity: $1 members')
