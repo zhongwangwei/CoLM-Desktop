@@ -56,6 +56,7 @@ export function sessionFromProfile(p) {
 /** 首页（全屏）还开着时状态栏被它挡住，错误要写在首页上。 */
 function report(message) {
   setStatus(message);
+  if (!$('launchgate')?.hidden && $('home-status')) $('home-status').textContent = message;
   if (!$('domaingate').hidden) $('gateinfo').textContent = message;
 }
 

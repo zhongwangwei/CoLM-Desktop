@@ -572,13 +572,6 @@ async function buildKernel() {
 
 function wire() {
   if (!hasBackend || !$('run-target')) return;
-  $('serverRunCard').onclick = async () => {
-    const host = await openServerDialog();
-    if (!host) return;
-    $('launchgate').hidden = true;
-    const { showDomainGate } = await import('./domain.js');
-    showDomainGate();
-  };
   $('run-target').addEventListener('change', syncTarget);
   $('preview-job').onclick = () => previewJob();
   $('remote-preview-close').onclick = () => $('remote-preview-dialog').close();

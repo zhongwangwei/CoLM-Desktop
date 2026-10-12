@@ -96,8 +96,10 @@ try {
   pauseSelect = undefined;
   invokeFailure = 'open_case';
   await assert.rejects(openExistingCase(entry.dir,'run',{strict:true}),/failed open_case/);
+  el('launchgate').hidden=false;
   await openExistingCase(entry.dir);
   assert.match(globalThis.status,/failed open_case/);
+  assert.match(el('home-status').textContent,/failed open_case/);
   console.log('case-actions: strict spatial/open completion, errors, stale context and input clearing passed');
 } finally {
   await rm(temp,{recursive:true,force:true});

@@ -17,6 +17,7 @@ import './prep-examples.js';
 import './validation.js';
 import './spatial.js';
 import './opencase.js';
+import './homepage.js';
 import './assistant.js';
 import './guide.js';
 import './remote.js';

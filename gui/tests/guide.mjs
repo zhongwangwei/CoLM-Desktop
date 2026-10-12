@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { cp, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, writeFile, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -12,6 +12,7 @@ for (const [name, code] of Object.entries({
   'params.js': 'export const renderFields = () => globalThis.testRenderFields();',
   'results.js': 'export const refreshVars = () => {}; export const markResultsStale = () => {}; export const resultsGuide={fields:()=>globalThis.taskFields??[], actions:()=>globalThis.taskActions??{},state:()=>({source:"built-in",phase:"ready"})};',
   'hybrid.js': 'export const hybridGuide={fields:()=>globalThis.taskFields??[],actions:()=>globalThis.taskActions??{},state:()=>({source:"built-in",mode:"learn"})};',
+  'homepage.js': 'export const homeGuide={fields:()=>[],actions:()=>globalThis.homeActions??{},state:()=>({busy:false}),openCase:dir=>globalThis.testOpen(dir,"basic-files",{strict:true})}; export const showHome=()=>{globalThis.document.getElementById("launchgate").hidden=false;};',
   'shell.js': `import { state } from './state.js'; import { $ } from './ui.js';
     export const renderSteps = () => {}; export const setStatus = s => { $('status').textContent = String(s); };
     export const go = step => { state.step = step; };
@@ -146,6 +147,27 @@ try {
   assert.equal(state.pickedSite, null, 'failed example scans cannot leave a stale selected site');
   assert.deepEqual(state.sites, []);
   assert.equal(el('use-example').disabled, false);
+  // A late example installation or site scan cannot overwrite a newer workflow.
+  const originalInvoke = globalThis.testInvoke;
+  let releaseInstall;
+  globalThis.testInvoke = (command,args) => command === 'install_example'
+    ? new Promise(resolve => { releaseInstall = resolve; }) : originalInvoke(command,args);
+  const previousDir = el('sitedir').value;
+  const pendingInstall = sites.loadExample();
+  state.wizard = {physics:{}};
+  releaseInstall({sitedir:'/late/sites',forcingdir:'/late/forcing',root:'/late/root'});
+  await assert.rejects(pendingInstall, /工作流已变化/);
+  assert.equal(el('sitedir').value, previousDir);
+  let releaseScan;
+  globalThis.testInvoke = (command,args) => command === 'scan_sites'
+    ? new Promise(resolve => { releaseScan = resolve; }) : originalInvoke(command,args);
+  const currentSites = state.sites = [site];
+  const scanning = sites.scanPreparedSites(null, {strict:true});
+  state.wizard = {physics:{urban:true}};
+  releaseScan({sites:[{...site,name:'late'}]});
+  await assert.rejects(scanning, /工作流已变化/);
+  assert.equal(state.sites, currentSites);
+  globalThis.testInvoke = originalInvoke;
   // Exercise the real parameter loader's catches, rather than only its caller's stub.
   await cp(new URL('../dist/app/params.js', import.meta.url), join(temp, 'app', 'params-real.js'));
   await writeFile(join(temp, 'app', 'histvars.js'), 'export const renderHistVars = () => {};');
@@ -353,5 +375,33 @@ try {
     }
     el(gate).hidden = true;
   }
+  // Home actions expose current buttons, respect approval, and cannot operate the covered workbench.
+  el('launchgate').hidden = false; state.step = 'run';
+  let homeClicks = 0, finishExample;
+  globalThis.homeActions = {
+    'new-case': {element:el('home-new-case'),kind:'click',run:async()=>{homeClicks++;}},
+    'example:CN-Cng': {element:el('home-example-CN-Cng'),kind:'commit',run:()=>new Promise(resolve=>{finishExample=resolve;})},
+  };
+  const homepage = guide.uiState();
+  assert.equal(homepage.screen, 'launch');
+  assert.deepEqual(homepage.buttons.map(button=>button.name), ['new-case','example:CN-Cng']);
+  const prompt = await readFile(new URL('../../crates/colm-agent/src/prompt.md', import.meta.url), 'utf8');
+  assert.match(prompt, /For a new case: new-case →/);
+  assert.match(prompt, /ui_commit\("example:<site name>"\)/);
+  assert.ok(!prompt.includes('local-run →'), 'assistant prompt must use the current homepage actions');
+  await assert.rejects(drive('click',{target:'example:CN-Cng'}), /ui_commit/);
+  await assert.rejects(drive('commit',{target:'run-all'}), /not a commit button/);
+  await assert.rejects(drive('click',{target:'next-step'}), /not a button/);
+  await assert.rejects(drive('click',{target:'scan'}), /not a button/);
+  state.step = 'basic-files';
+  await assert.rejects(drive('click',{target:'site:CN-Cng'}), /not a button/);
+  await drive('click',{target:'new-case'}); assert.equal(homeClicks,1);
+  el('home-new-case').disabled = true;
+  await assert.rejects(drive('click',{target:'new-case'}), /disabled/);
+  let homeCompleted = false;
+  const example = drive('commit',{target:'example:CN-Cng'}).then(result=>{homeCompleted=true;return result;});
+  await Promise.resolve(); assert.equal(homeCompleted,false);
+  finishExample({started:false}); assert.equal((await example).started,false);
+  el('launchgate').hidden = true;
   console.log('guide: detailed failure, example isolation, awaited creation, reuse and incomplete-result checks passed');
 } finally { await rm(temp, {recursive:true, force:true}); }

@@ -839,6 +839,16 @@ const visible = el => !!el && !el.closest?.('[hidden]') && (!el.getClientRects |
 const visibleText = el => visible(el) ? String(el.innerText ?? el.textContent ?? '').trim().slice(0, 2000) : '';
 
 function currentView() {
+  const overlay = ['loadinggate', 'launchgate', 'domaingate'].find(id => visible($(id)));
+  if (overlay) {
+    const flow = overlay === 'launchgate' ? 'home' : overlay === 'domaingate' ? 'setup-wizard' : 'loading';
+    const pageName = visibleText($(overlay === 'launchgate' ? 'home-title' : overlay === 'domaingate' ? 'gatetitle' : 'loading-status'));
+    const details = (overlay === 'launchgate' ? ['home-status', 'home-recent-list'] : overlay === 'domaingate' ? ['gatesub', 'gateinfo'] : ['loading-status'])
+      .map(id => visibleText($(id))).filter(Boolean);
+    return { step: flow, flow, caseDir: null, details, snapshot: {
+      header: false, runMode: false, pageName, metrics: 0, study: [], versionDetail: [], checks: [],
+    } };
+  }
   const page = document.querySelector('.page:not([hidden])');
   const step = page?.dataset.step;
   const caseDir = state.step?.startsWith('result-') ? state.resultCaseDir || state.selected?.dir : state.selected?.dir;
@@ -892,11 +902,11 @@ function watchVisibleContext() {
     scheduled = true;
     queueMicrotask(() => { scheduled = false; refreshVisibleContext(); });
   };
-  for (const event of ['colm:step', 'colm:context', 'colm:metrics', 'colm:versions']) addEventListener(event, refresh);
+  for (const event of ['colm:step', 'colm:context', 'colm:metrics', 'colm:versions', 'colm:home']) addEventListener(event, refresh);
   // Observe only the work area and header, never assistant output.
   if (globalThis.MutationObserver) {
     const observer = new MutationObserver(refresh);
-    for (const root of [$('work'), $('context-bar')].filter(Boolean)) {
+    for (const root of [$('work'), $('context-bar'), $('launchgate'), $('domaingate'), $('loadinggate')].filter(Boolean)) {
       observer.observe(root, { subtree: true, childList: true, characterData: true, attributes: true,
         attributeFilter: ['hidden', 'aria-pressed', 'aria-selected', 'open'] });
       root.addEventListener('change', refresh);

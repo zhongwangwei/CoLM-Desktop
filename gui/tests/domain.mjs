@@ -31,11 +31,13 @@ class El {
 
 const ids = Object.fromEntries([
   'gatetitle', 'gatesub', 'gateinfo', 'gatecards', 'gatefoot', 'domaingate',
-  'loadinggate', 'launchgate', 'localRunCard', 'steps', 'status', 'estSite', 'casename', 'kernel', 'homeBtn',
+  'loadinggate', 'launchgate', 'steps', 'status', 'estSite', 'casename', 'kernel', 'homeBtn',
 ].map(id => [id, new El()]));
 
+const nested = (node, id) => node.id === id ? node : node.children.map(child => nested(child, id)).find(Boolean);
+
 globalThis.document = {
-  getElementById: id => ids[id] ?? new El(),
+  getElementById: id => ids[id] ?? nested(ids.gatecards, id) ?? new El(),
   createElement: tag => new El(tag),
   querySelectorAll: () => [],
 };
@@ -56,10 +58,6 @@ if (ids.loadinggate.hidden || !ids.launchgate.hidden || !ids.domaingate.hidden) 
 showLaunchGate();
 if (!ids.loadinggate.hidden || ids.launchgate.hidden) {
   throw new Error('ready application must replace the loading page with the launcher');
-}
-ids.localRunCard.onclick();
-if (!ids.launchgate.hidden || ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') {
-  throw new Error('local run did not enter the existing model wizard');
 }
 const { showDomainGate, wizardFields, wizardFieldNames } = await import(moduleUrl('domain.js'));
 const { state } = await import(moduleUrl('state.js'));
@@ -95,8 +93,8 @@ if (kernelForSubgrid('PC', { physics: { crop: true } })?.dir !== '/crop-real') {
   throw new Error('crop wizard must resolve to the CROP-enabled kernel');
 }
 
-const cards = () => ids.gatecards.children;
-const card = label => cards().find(c => c.children[0]?.textContent === label);
+const cards = () => ids.gatecards.children.filter(c => c.tagName === 'BUTTON');
+const card = label => findNode(ids.gatecards, c => c.children[0]?.textContent === label);
 const nodeText = node => [node.textContent, ...node.children.flatMap(nodeText)].join(' ');
 const foot = label => ids.gatefoot.children.find(b => b.textContent.includes(label));
 const choose = label => {
@@ -105,7 +103,7 @@ const choose = label => {
   if (c.disabled) throw new Error(`${label} unexpectedly disabled`);
   c.onclick();
 };
-const next = () => foot('下一步').onclick();
+const next = () => (foot('下一步') ?? foot('进入工作台')).onclick();
 const previous = () => foot('上一步').onclick();
 const findNode = (root, predicate) => predicate(root) ? root
   : root.children.map(child => findNode(child, predicate)).find(Boolean);
@@ -251,8 +249,9 @@ choose('URBAN');
 if (card('LULCC').getAttribute('aria-disabled') !== 'true') {
   throw new Error('LULCC must be blocked for SinglePoint/site runs');
 }
-next();
-if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('page 5 missing');
+const advanced = findNode(ids.gatecards, c => c.id === 'gate-advanced');
+if (!advanced || advanced.open) throw new Error('optional checks must start folded on the final physics page');
+advanced.open = true;
 if (!card('SrfdataDiag') || card('SrfdataDiag').getAttribute('aria-disabled') !== 'true') {
   throw new Error('SinglePoint surface-data diagnostics must stay visible but disabled');
 }
@@ -261,10 +260,8 @@ next();
 
 if (!ids.domaingate.hidden) throw new Error('wizard did not finish');
 if (state.step !== 'basic-files') throw new Error(`wizard finished at ${state.step}, not basic-files`);
-ids.homeBtn.onclick();
-if (ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') {
-  throw new Error('home button did not reopen the wizard at page 1');
-}
+showDomainGate();
+if (ids.domaingate.hidden || ids.gatetitle.textContent !== '这次要跑什么？') throw new Error('new-case wizard did not reopen at page 1');
 if (state.wizard.soil !== 'campbell' || 'profile' in state.wizard) {
   throw new Error(`wrong wizard state: ${JSON.stringify(state.wizard)}`);
 }
@@ -474,8 +471,7 @@ if (card('湿地蓄水（wetwat）').getAttribute('aria-selected') !== 'true') t
 previous(); previous(); previous(); previous();
 if (card('LULCC').getAttribute('aria-disabled') !== 'true') throw new Error('LULCC must be blocked while isotopes are selected');
 next(); next(); next(); next();
-next();
-if (ids.gatetitle.textContent !== '要打开调试吗？') throw new Error('methane page did not continue to debug');
+if (!findNode(ids.gatecards, c => c.id === 'gate-advanced')) throw new Error('optional checks must appear on the final methane page');
 next();
 if (state.wizard.tracer !== 'methane,isotope,solute') throw new Error(`wrong tracer state: ${JSON.stringify(state.wizard)}`);
 const methaneFields = Object.fromEntries(wizardFields().map(x => [x.path, x.value]));
@@ -595,7 +591,7 @@ if (kernelForSubgrid('IGBP', { grid: 'catchment' })?.dir !== '/catchment-real') 
   throw new Error('watershed grid did not select the CATCHMENT kernel');
 }
 
-console.log('gate: domain/grid cards, five site pages, constraints, finish state, and namelist fields resolve');
+console.log('gate: domain/grid cards, four site pages with folded optional checks, constraints, finish state, and namelist fields resolve');
 
 const { go } = await import(moduleUrl('shell.js'));
 state.domain = 'region';
@@ -670,7 +666,7 @@ if (!/picked\.grid === 'unstructured' \? 'unstructured' : picked\.domain/.test(
     fs.readFileSync(new URL(`../dist/${name}`, import.meta.url), 'utf8'));
   const [open, domainSrc, html] = await Promise.all([read('app/opencase.js'), read('app/domain.js'), read('index.html')]);
   if (!/id="open-case"/.test(html)) throw new Error('the files page offers to open an existing case');
-  if (!/new Event\('colm:open-case'\)/.test(domainSrc)) throw new Error('the start gate offers to open an existing case');
+  if (!/id="home-open-case"/.test(html)) throw new Error('the homepage offers to open an existing case');
   if (!/export function startSession\(config\)/.test(domainSrc)) throw new Error('the wizard and opened cases share startSession');
   if (!/startSession\(sessionFromProfile\(opened\.profile\)\)/.test(open)) throw new Error('an opened case starts a session from its profile');
   if (!/k\.preset === opened\.profile\.kernel_preset/.test(open)) throw new Error('an opened case returns to the kernel it last ran with');

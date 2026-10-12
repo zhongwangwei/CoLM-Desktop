@@ -348,6 +348,7 @@ async function ensureCase(s) {
 
 /** 扫一个 Sitedata 目录。`selectFile` 来自前处理交接；普通手工扫描留空。 */
 export async function scanPreparedSites(selectFile = null, { strict = false } = {}) {
+  const wizard = state.wizard;
   const dir = $('sitedir').value.trim();
   if (!dir) {
     status('要先填 Sitedata 目录');
@@ -363,6 +364,10 @@ export async function scanPreparedSites(selectFile = null, { strict = false } = 
     const r = await invoke('scan_sites', {
       dir, forcingDir: forcingDir || null, quick: true,
     });
+    if (state.wizard !== wizard) {
+      if (strict) throw new Error('工作流已变化，请重新扫描站点');
+      return null;
+    }
     if ($('sitedir').value.trim() !== dir || $('forcingdir').value.trim() !== forcingDir) {
       siteScanPending = true;
       if (strict) throw new Error('站点目录已变化，请重新核对输入');
@@ -395,14 +400,14 @@ export async function scanPreparedSites(selectFile = null, { strict = false } = 
     renderSteps();
     return state.pickedSite;
   } catch (e) {
-    if ($('sitedir').value.trim() === dir && $('forcingdir').value.trim() === forcingDir) {
+    if (state.wizard === wizard && $('sitedir').value.trim() === dir && $('forcingdir').value.trim() === forcingDir) {
       state.sites = [];
       state.picked.clear();
       state.pickedSite = null;
       renderSites();
       renderSteps();
       status(e);
-    } else siteScanPending = true;
+    } else if (state.wizard === wizard) siteScanPending = true;
     if (strict) throw e;
     return null;
   }
@@ -589,9 +594,11 @@ $('pick-none').onclick = () => { state.picked.clear(); renderSites(); };
  *  所以要先复制出来 —— 否则建算例时会拿到一个权限错误，
  *  而错误信息里看不出问题出在"那是安装目录"。 */
 export async function loadExample() {
+  const wizard = state.wizard;
   $('use-example').disabled = true;
   try {
     const e = await invoke('install_example');
+    if (state.wizard !== wizard) throw new Error('示例加载期间工作流已变化，请重新选择示例');
     $('sitedir').value = e.sitedir;
     $('forcingdir').value = e.forcingdir;
     if (!$('root').value.trim()) $('root').value = e.root;

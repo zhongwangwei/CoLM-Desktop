@@ -23,7 +23,7 @@
     <div class="brand"><img class="brand-icon" src="assets/colm-icon.png" alt=""><span>CoLM <span class="dim">Desktop</span></span></div>
     <div class="sep"></div>
     <input class="proj-name" id="casename" hidden readonly value="还没有算例" title="当前算例">
-    <button class="btn-ghost" id="homeBtn" title="重新选择空间、次网格与物理配置">返回首页</button>
+    <button class="btn-ghost" id="homeBtn" title="返回首页">返回首页</button>
     <div class="context-bar" id="context-bar" role="status" aria-label="当前算例"></div>
     <button class="btn-ghost" id="assistantToggle" data-assistant-toggle title="打开 / 关闭 AI 助手" aria-pressed="false">AI 助手</button>
     <details class="top-settings" id="view-settings">
@@ -1716,7 +1716,7 @@
   </form>
 </dialog>
 
-<!-- 完整工作台就绪后才显示运行入口；服务器入口保留但明确不可用。 -->
+<!-- 完整工作台就绪后显示任务首页；计算位置在运行方式页选择。 -->
 <div id="launchgate" class="gate launch-gate" hidden>
   <div class="gate-tools">
     <button class="btn-ghost" type="button" data-assistant-toggle>AI 助手</button>
@@ -1727,21 +1727,39 @@
   </div>
   <div class="gate-panel launch-panel">
     <div class="launch-brand"><img src="assets/colm-icon.png" alt=""><span>CoLM Desktop</span></div>
-    <h1>选择运行方式</h1>
-    <p class="muted">先选择计算资源：在本机运行，或经你自己的 ssh 放到服务器上运行。</p>
-    <p class="beta-note">测试版（Beta）：功能仍在快速迭代，当前可能存在较多已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。</p>
-    <div class="domain-cards launch-mode-cards" aria-label="运行方式">
-      <button class="domain-card launch-mode-card" id="localRunCard" type="button">
-        <span class="dt">本地运行</span>
-        <span class="dd">在本机创建算例、运行 CoLM 内核并查看结果。</span>
-        <span class="launch-action">进入本地工作台 →</span>
+    <h1 id="home-title">从这里开始</h1>
+    <p class="muted">新建一个算例，继续已有工作，或用内置示例熟悉流程。</p>
+    <div class="domain-cards home-actions" aria-label="开始任务">
+      <button class="domain-card home-action" id="home-new-case" type="button">
+        <span class="dt">新建算例</span>
+        <span class="dd">使用自己的数据，选择模拟范围和模型方案。</span>
+        <span class="launch-action">开始配置 →</span>
       </button>
-      <button class="domain-card launch-mode-card" id="serverRunCard" type="button">
-        <span class="dt">服务器运行</span>
-        <span class="dd">在本机建算例，放到你的服务器上用 Rust 引擎运行，跑完自动取回结果。</span>
-        <span class="launch-action">设置服务器 →</span>
+      <button class="domain-card home-action" id="home-open-case" type="button">
+        <span class="dt">打开已有算例</span>
+        <span class="dd">从算例文件恢复设置，直接回到工作台。</span>
+        <span class="launch-action">选择算例目录 →</span>
+      </button>
+      <button class="domain-card home-action" id="home-show-examples" type="button" aria-expanded="false" aria-controls="home-examples">
+        <span class="dt">试用内置示例</span>
+        <span class="dd">从草地、甲烷、城市或农田示例开始。</span>
+        <span class="launch-action">查看四个示例 →</span>
       </button>
     </div>
+    <p id="home-status" class="mini" role="status" aria-live="polite"></p>
+    <button class="btn-ghost" id="home-resume" type="button" hidden>继续当前任务 →</button>
+    <section class="home-section" id="home-examples" aria-labelledby="home-examples-title" hidden>
+      <h2 id="home-examples-title">选择一个示例</h2>
+      <p class="muted mini">只准备数据和配置；核对输入后再创建算例，不会自动开始计算。</p>
+      <div class="home-example-list" id="home-example-list"></div>
+    </section>
+    <section class="home-section" aria-labelledby="home-recent-title">
+      <h2 id="home-recent-title">上次项目里的算例</h2>
+      <p class="muted mini home-path no-i18n" id="home-recent-root"></p>
+      <div class="home-recent-list" id="home-recent-list"></div>
+      <p class="muted mini" id="home-recent-empty">暂无可继续的算例，可先新建或打开。</p>
+    </section>
+    <p class="muted mini home-beta">测试版 · 正式研究前请独立核验结果。</p>
   </div>
 </div>
 

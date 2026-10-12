@@ -186,7 +186,7 @@ function field(value = '') {
 }
 globalThis.Option = function(text, value) { return { text, value }; };
 globalThis.addEventListener = () => {};
-const authIds = ['run-target', 'manage-servers', 'serverRunCard', 'preview-job', 'remote-preview-close',
+const authIds = ['run-target', 'manage-servers', 'preview-job', 'remote-preview-close',
   'remote-which', 'remote-host', 'remote-username', 'remote-port', 'remote-auth', 'remote-identity',
   'remote-password', 'remote-password-note', 'remote-key-row', 'remote-password-row', 'remote-pick-key',
   'remote-root', 'remote-maps', 'remote-threads', 'remote-scheduler', 'remote-partition', 'remote-account',

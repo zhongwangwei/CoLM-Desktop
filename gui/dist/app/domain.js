@@ -1,4 +1,4 @@
-//! 进门向导。顺序按约束方向排：空间 → 计算网格 → 次网格 → 土壤 → 物理 → 示踪剂 → 调试。
+//! 新建配置。按约束选择空间、网格、土壤、物理与示踪剂；可选调试折叠在最后一页。
 //!
 //! 回退保留无关选择，改上游时只清掉已经失效的下游值。USGS 由向导
 //! 自动匹配专用编译产物；CROP 需要 CROP-enabled 内核。
@@ -94,7 +94,7 @@ const pages = () => [
   'subgrid', 'soil', 'physics', ...(picked.physics.tracer ? ['tracer'] : []),
   ...(hasTracer(picked, 'isotope') ? ['isotope'] : []),
   ...(hasTracer(picked, 'solute') ? ['solute'] : []),
-  ...(hasTracer(picked, 'methane') ? ['methane'] : []), 'debug',
+  ...(hasTracer(picked, 'methane') ? ['methane'] : []),
 ];
 const pageIndex = page => pages().indexOf(page);
 const pageNumber = page => pageIndex(page) + 1;
@@ -166,13 +166,13 @@ function render() {
     solute: ['溶质浓度怎么设？', '给出土壤与地下水的初始浓度和降水浓度。'],
     isotope: ['水同位素怎么算？', '选择是否分馏，并给出含水层混合水量。'],
     methane: ['甲烷淹水范围怎么算？', '决定湿地与土壤的淹水比例从哪来；动态湿地会随方案自动打开或关闭。'],
-    debug: ['要打开调试吗？', '可全部不选；这些开关只增加检查与日志，不改变页间约束。'],
   }[page];
   $('gatetitle').textContent = copy[0];
   $('gatesub').textContent = `第 ${pageIdx + 1}/${list.length} 页 · ${copy[1]}`;
   $('gateinfo').textContent = pageInfo(page);
 
   const box = $('gatecards');
+  const advancedOpen = $('gate-advanced')?.open ?? false;
   box.textContent = '';
   if (page === 'domain') renderCards(DOMAINS, picked.domain, chooseDomain);
   if (page === 'grid') renderCards(GRIDS, picked.grid, chooseGrid);
@@ -201,7 +201,20 @@ function render() {
     }
     renderCards(METHANE_MODES, picked.methaneMode, chooseMethaneMode, methaneModeBlock);
   }
-  if (page === 'debug') renderCards(DEBUG, picked.debug, toggleDebug, null, true);
+  if (pageIdx === list.length - 1) {
+    const advanced = document.createElement('details');
+    advanced.id = 'gate-advanced';
+    advanced.className = 'card gate-advanced';
+    advanced.open = advancedOpen;
+    const summary = document.createElement('summary');
+    summary.dataset.gate = 'advanced';
+    summary.textContent = '检查与日志选项（可选）';
+    const choices = document.createElement('div');
+    choices.className = 'domain-cards';
+    advanced.append(summary, choices);
+    renderCards(DEBUG, picked.debug, toggleDebug, null, true, choices);
+    box.append(advanced);
+  }
   renderFoot();
 }
 
@@ -221,7 +234,6 @@ function pageInfo(page) {
   if (page === 'methane') return 'ⓘ 建例后仍可在专家模式「示踪剂」页改；改方案时动态湿地会一并改';
   if (page === 'isotope') return 'ⓘ 同位素强迫文件与参数文件建例时自动写入算例目录；含水层混合水量建例后可在「示踪剂」页改';
   if (page === 'solute') return 'ⓘ 浓度写进算例目录的 standard_chloride_parameter.nml；建例后可在专家模式「过程参数」页改';
-  if (page === 'debug') return 'ⓘ 打开调试会让日志明显增多，常规运行可全部关闭';
   return '';
 }
 
@@ -388,8 +400,7 @@ function spatialIssue() {
   return null;
 }
 
-function renderCards(items, selected, choose, blocker = null, multi = false) {
-  const box = $('gatecards');
+function renderCards(items, selected, choose, blocker = null, multi = false, box = $('gatecards')) {
   for (const item of items) {
     const on = multi ? !!selected[item.id] : selected === item.id;
     box.appendChild(card(item, on, choose, blocker?.(item), multi));
@@ -701,14 +712,13 @@ function tracerBlock(item) {
 function renderFoot() {
   const foot = $('gatefoot');
   foot.textContent = '';
+  const cancel = document.createElement('button');
+  cancel.className = 'btn-ghost';
+  cancel.dataset.gate = 'cancel';
+  cancel.textContent = '返回首页';
+  cancel.onclick = () => globalThis.dispatchEvent?.(new Event('colm:home'));
+  foot.appendChild(cancel);
   if (pageIdx > 0) {
-    const cancel = document.createElement('button');
-    cancel.className = 'btn-ghost';
-    cancel.dataset.gate = 'cancel';
-    cancel.textContent = '取消';
-    cancel.onclick = () => { pageIdx = 0; picked = emptyPicked(); render(); };
-    foot.appendChild(cancel);
-
     const prev = document.createElement('button');
     prev.className = 'btn-ghost';
     prev.dataset.gate = 'back';
@@ -725,15 +735,6 @@ function renderFoot() {
     back.onclick = () => { $('domaingate').hidden = true; };
     foot.appendChild(back);
   }
-  if (pageIdx === 0) {
-    // 不走向导：直接打开磁盘上已有的算例（`opencase.js` 接这个事件）。
-    const open = document.createElement('button');
-    open.className = 'btn-ghost';
-    open.textContent = '打开已有算例…';
-    open.onclick = () => globalThis.dispatchEvent?.(new Event('colm:open-case'));
-    foot.appendChild(open);
-  }
-
   const list = pages();
   const page = list[pageIdx];
   const required = {
@@ -745,7 +746,7 @@ function renderFoot() {
   const next = document.createElement('button');
   next.className = 'btn-next';
   next.dataset.gate = pageIdx === list.length - 1 ? 'finish' : 'next';
-  next.textContent = '下一步 →';
+  next.textContent = pageIdx === list.length - 1 ? '进入工作台 →' : '下一步 →';
   next.disabled = (Object.hasOwn(required, page) && !required[page]) || (page === 'spatial' && !!spatialIssue());
   next.onclick = () => {
     if (pageIdx === list.length - 1) finish();
@@ -774,6 +775,7 @@ export function startSession(config) {
   state.resultSelectionTouched = false;
   state.resultObsOverrides.clear();
   state.resultMetrics = [];
+  state.resultOverviewMetric = null;
   state.resultFailures = [];
   // 评估变量按本次模型的可用变量重新勾选（甲烷会话要有 FCH4），不能沿用上一次会话的勾选。
   state.evaluationVariables = new Set();
@@ -962,5 +964,3 @@ export function wizardFieldNames() {
 globalThis.addEventListener?.('colm:kernels', () => {
   if (!$('domaingate').hidden) render();
 });
-
-$('homeBtn').onclick = showDomainGate;

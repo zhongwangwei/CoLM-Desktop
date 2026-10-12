@@ -193,11 +193,11 @@ if ((html.match(/data-lang="zh"/g) ?? []).length !== 3
     || (html.match(/data-lang="en"/g) ?? []).length !== 3) {
   throw new Error('language switch must exist in the header, launch page, and model wizard');
 }
-const serverCard = html.match(/<button class="domain-card launch-mode-card" id="serverRunCard"[\s\S]*?<\/button>/)?.[0] ?? '';
-// 服务器运行（R1）已开放：卡片可点，入口是“设置服务器”。
-if (serverCard.includes('disabled') || !serverCard.includes('设置服务器 →')) {
-  throw new Error('server run must be enabled and lead to the server setup');
+const home = html.slice(html.indexOf('id="launchgate"'), html.indexOf('id="domaingate"'));
+for (const id of ['home-new-case','home-open-case','home-show-examples','home-recent-list']) {
+  if (!home.includes(`id="${id}"`)) throw new Error(`homepage entry missing: ${id}`);
 }
+if (html.includes('id="serverRunCard"') || html.includes('id="localRunCard"')) throw new Error('compute location belongs to the run-mode page');
 if (!html.includes('assets/colm-icon.png') || !html.includes('id="modeSeg"')) {
   throw new Error('project icon or expert-mode entry is missing');
 }

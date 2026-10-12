@@ -611,13 +611,24 @@ console.log('assistant: project paths and per-message configuration refresh ok')
   view = assistant.currentView(); assert.match(view.details.join('\n'), /测试 不通过/);
   detail.hidden = true; nodes.get('context-bar').hidden = true;
   view = assistant.currentView(); assert.equal(view.snapshot.versionDetail.length, 0); assert.equal(view.snapshot.header, false);
+  // A covering homepage or model wizard hides the old workbench from the assistant snapshot.
+  nodes.set('launchgate', shown()); nodes.set('home-title', shown('从这里开始'));
+  nodes.set('home-status', shown('正在打开算例…'));
+  view = assistant.currentView();
+  assert.equal(view.flow,'home'); assert.equal(view.caseDir,null);
+  assert.equal(view.snapshot.header,false); assert.equal(view.snapshot.metrics,0);
+  assert.equal(view.snapshot.versionDetail.length,0); assert.match(view.details.join('\n'), /正在打开/);
+  nodes.get('launchgate').hidden = true;
+  nodes.set('domaingate', shown()); nodes.set('gatetitle',shown('这次要跑什么？'));
+  assert.equal(assistant.currentView().flow,'setup-wizard');
+  nodes.get('domaingate').hidden = true;
   // Observer never watches assistant output, and async page mutations refresh the same label.
   const watched = []; const callbacks = []; let changed;
   globalThis.MutationObserver = class { constructor(callback) { changed = callback; } observe(root) { watched.push(root); } };
   globalThis.addEventListener = (name, callback) => callbacks.push([name, callback]);
-  for (const id of ['work', 'context-bar']) nodes.get(id).addEventListener = () => {};
+  for (const id of ['work', 'context-bar','launchgate','domaingate']) nodes.get(id).addEventListener = () => {};
   assistant.watchVisibleContext();
-  assert.deepEqual(watched, [nodes.get('work'), nodes.get('context-bar')]);
+  assert.deepEqual(watched, [nodes.get('work'), nodes.get('context-bar'),nodes.get('launchgate'),nodes.get('domaingate')]);
   detail.hidden = false; changed(); await Promise.resolve();
   assert.match(nodes.get('assistant-visible-context').textContent, /版本详情/);
   assert.ok(callbacks.some(([name]) => name === 'colm:step'));

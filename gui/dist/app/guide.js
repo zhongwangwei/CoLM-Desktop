@@ -17,12 +17,14 @@ import { runRequested, cancelRequested } from './runner.js';
 import { invoke } from './ipc.js';
 import { resultsGuide } from './results.js';
 import { hybridGuide } from './hybrid.js';
+import { homeGuide, showHome } from './homepage.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const text = el => (el?.textContent ?? '').replace(/\s+/g, ' ').trim();
 const shown = el => !!el && !el.closest('[hidden]') && el.getClientRects().length > 0;
 
 function taskGuide() {
+  if (screen() === 'launch') return homeGuide;
   if (screen() !== 'workbench') return null;
   if (state.step?.startsWith('result-')) return resultsGuide;
   if (['hybrid-learn', 'hybrid-process'].includes(state.step)) return hybridGuide;
@@ -35,6 +37,7 @@ function taskFields() {
 
 function taskActions() {
   const actions = taskGuide()?.actions() ?? {};
+  if (screen() === 'workbench') actions.home = { element: $('homeBtn'), kind: 'click', run: showHome };
   if (screen() === 'workbench' && state.step === 'run-mode') {
     for (const card of document.querySelectorAll('#run-mode-choices .run-mode-card')) {
       actions[card.id] = { element: card, kind: 'click', run: async () => { await card.onclick(); } };
@@ -165,14 +168,14 @@ function steps() {
 
 function wizardState() {
   const gate = $('domaingate');
-  const choices = [...gate.querySelectorAll('#gatecards [data-choice]')].map(card => {
+  const choices = [...gate.querySelectorAll('#gatecards [data-choice]')].filter(shown).map(card => {
     const choice = { name: `choice:${card.dataset.choice}`, label: text(card.querySelector('.dt')) };
     if (card.getAttribute('aria-selected') === 'true' || card.getAttribute('aria-pressed') === 'true') choice.selected = true;
     const why = text(card.querySelector('.dwhy'));
     if (why) choice.blocked = why;
     return choice;
   });
-  const controls = [...gate.querySelectorAll('[data-gate]')].map(b => ({
+  const controls = [...gate.querySelectorAll('[data-gate]')].filter(shown).map(b => ({
     name: `wizard-${b.dataset.gate}`,
     label: text(b),
     kind: 'click',
@@ -198,10 +201,9 @@ export function uiState() {
   if (where === 'launch') {
     return {
       screen: where,
-      buttons: [
-        { name: 'local-run', label: text($('localRunCard')?.querySelector('.dt')), kind: 'click', enabled: true },
-        { name: 'server-run', label: text($('serverRunCard')?.querySelector('.dt')), kind: 'click', enabled: !$('serverRunCard')?.disabled },
-      ],
+      buttons: Object.entries(taskActions()).map(([name, action]) => ({ name, label: text(action.element), kind: action.kind, enabled: !action.element.disabled })),
+      status: text($('home-status')) || undefined,
+      task: homeGuide.state(),
     };
   }
   if (where === 'setup-wizard') return { screen: where, wizard: wizardState(), status };
@@ -316,15 +318,12 @@ async function openCase(dir, step = 'basic-files') {
 }
 
 async function click(target) {
-  if (target.startsWith('open-case:')) {
-    await openCase(target.slice('open-case:'.length).trim());
-    return;
-  }
   const where = screen();
-  if (where === 'launch') {
-    if (target === 'local-run') { $('localRunCard').click(); await sleep(100); return; }
-    // 服务器设置要用户自己填（主机、目录、路径对应）：打开对话框，交给用户。
-    if (target === 'server-run') { $('serverRunCard').click(); await sleep(300); return; }
+  if (target.startsWith('open-case:')) {
+    if (where === 'launch') await homeGuide.openCase(target.slice('open-case:'.length).trim());
+    else if (where === 'workbench') await openCase(target.slice('open-case:'.length).trim());
+    else throw new Error(`${target} is not available on this screen; read ui_state`);
+    return;
   }
   if (where === 'setup-wizard') {
     const gate = $('domaingate');
@@ -332,23 +331,23 @@ async function click(target) {
     const el = choice
       ? gate.querySelector(`#gatecards [data-choice="${CSS.escape(choice)}"]`)
       : gate.querySelector(`[data-gate="${CSS.escape(target.replace(/^wizard-/, ''))}"]`);
-    if (!el) throw new Error(`${target} is not on this wizard page; read ui_state`);
+    if (!el || !shown(el)) throw new Error(`${target} is not on this wizard page; read ui_state`);
     if (el.disabled) throw new Error(`${target} is not available: ${text(el.querySelector('.dwhy')) || 'disabled'}`);
     el.click();
     await sleep(100);
     return;
   }
-  if (target.startsWith('site:') && state.step === 'basic-files') {
+  if (where === 'workbench' && target.startsWith('site:') && state.step === 'basic-files') {
     const site = (state.sites ?? []).find(s => s.name === target.slice(5));
     if (!site) throw new Error(`${target.slice(5)} is not in the scanned site list`);
     pickSite(site);
     return;
   }
-  if (target === 'scan' && state.step === 'basic-files') {
+  if (where === 'workbench' && target === 'scan' && state.step === 'basic-files') {
     await scanPreparedSites(null, { strict: true });
     return;
   }
-  if (target === 'next-step') {
+  if (where === 'workbench' && target === 'next-step') {
     const next = nextOf(state.step);
     if (!next) throw new Error('there is no next page in this workflow');
     const blocked = next.need();
@@ -367,6 +366,7 @@ async function click(target) {
     if (state.step !== step) await taskGuide()?.prepare?.();
     return;
   }
+  if (where !== 'workbench') throw new Error(`${target} is not a button on this page; read ui_state`);
   const el = CLICKS[state.step]?.[target]?.();
   if (el && shown(el)) { el.click(); await sleep(200); return; }
   if (COMMITS[state.step]?.[target]) throw new Error(`${target} saves or runs something; use ui_commit`);
@@ -381,6 +381,7 @@ async function commit(target) {
     const outcome = await task.run();
     return { ...outcome, pressed: target };
   }
+  if (screen() !== 'workbench') throw new Error(`${target} is not a commit button on this page; read ui_state`);
   const el = COMMITS[state.step]?.[target]?.();
   if (!el || !shown(el)) {
     throw new Error(CLICKS[state.step]?.[target] || target.startsWith('site:')
@@ -442,7 +443,7 @@ async function perform(action, args) {
       await click(String(args.target ?? ''));
       return uiState();
     case 'commit': {
-      if (screen() !== 'workbench') throw new Error('nothing to commit on this screen');
+      if (!['workbench', 'launch'].includes(screen())) throw new Error('nothing to commit on this screen');
       const outcome = await commit(String(args.target ?? ''));
       return { ...outcome, page: uiState() };
     }

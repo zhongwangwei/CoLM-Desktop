@@ -545,12 +545,31 @@ body.resizing-live { user-select: none; }
 .gate-tools { position: fixed; z-index: 1; top: var(--s-lg); right: var(--s-lg); display: flex; gap: 8px; align-items: center; }
 .gate-panel { width: 100%; max-width: 760px; margin: auto; padding: var(--s-xl); text-align: center; }
 .gate-panel h2 { margin: 0 0 6px; font-size: 20px; }
-.launch-panel { max-width: 720px; }
-.launch-panel h1 { margin: 10px 0 4px; font-size: 25px; }
+.launch-panel { max-width: 1040px; padding-top: 72px; padding-bottom: 40px; }
+.launch-panel h1 { margin: 20px 0 8px; font-size: 32px; }
 .launch-brand { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 750; }
 .launch-brand img { width: 40px; height: 40px; border-radius: 10px; box-shadow: var(--shadow); }
-.launch-mode-cards { margin-top: var(--s-lg); }
-.launch-mode-card { width: min(310px, 100%); min-height: 126px; }
+.launch-panel .home-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-top: 32px; }
+.launch-panel .home-action { width: auto; min-width: 0; min-height: 156px; gap: 12px; padding: 22px; }
+.home-action:first-child { border-color: var(--accent); background: var(--accent-weak); }
+.home-section { text-align: left; margin-top: 32px; }
+.home-section[hidden] { display: none; }
+.home-section h2 { font-size: 16px; margin: 0; }
+.home-example-list, .home-recent-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.launch-panel .home-example { width: auto; min-width: 0; }
+.home-recent-case { display: flex; flex-direction: column; gap: 4px; min-width: 0; text-align: left; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--elevated); }
+.home-recent-case:hover { border-color: var(--accent); }
+.home-path, .home-recent-case span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-beta { margin-top: 28px; }
+#home-status { color: var(--warn); white-space: pre-wrap; }
+#home-status:empty { margin: 0; }
+#home-resume { margin-top: 16px; }
+.gate-advanced { width: 100%; text-align: left; margin: 8px 0 0; }
+.gate-advanced > summary { cursor: pointer; font-weight: 600; }
+.gate-advanced .domain-cards { margin-top: 16px; }
+@media (max-width: 1050px) { .launch-panel .home-actions { grid-template-columns: 1fr; } .launch-panel .home-action { min-height: 118px; } }
+@media (max-width: 620px) { .home-example-list, .home-recent-list { grid-template-columns: 1fr; } }
 .launch-action { margin-top: auto; color: var(--accent); font-size: 12px; font-weight: 700; }
 /* 第一、二页都有四张卡片；窄窗口下换行而不是溢出 gate-panel。 */
 .domain-cards { display: flex; flex-wrap: wrap; gap: var(--s-lg); margin-top: var(--s-xl);
