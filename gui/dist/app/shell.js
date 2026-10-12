@@ -265,7 +265,7 @@ export function renderSteps(notifyContext = true) {
   // 步骤条与「下一步」按钮是**同一份状态**推出来的，必须一起刷新。
   // 分开刷新的结果是：左栏已经亮了，页底那个按钮还写着「先去扫描」。实测踩过。
   renderNextButtons();
-  // 上下文条（算例 · 版本 · 位置 · 引擎）跟着同一份状态刷新。
+  // 顶栏算例跟着同一份状态刷新。
   if (notifyContext) globalThis.dispatchEvent?.(new Event('colm:context'));
 }
 

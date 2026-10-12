@@ -32,7 +32,7 @@ class El {
   dispatchEvent() {}
   getClientRects() { return [1]; }
   closest() { return this.hidden ? this : null; }
-  getAttribute() { return null; }
+  getAttribute(name) { return this[name] ?? null; }
   setAttribute() {}
   replaceChildren(...children) { this.children = children; }
   appendChild(child) { this.children.push(child); return child; }
@@ -51,10 +51,10 @@ globalThis.window = globalThis;
 globalThis.addEventListener = () => {};
 globalThis.dispatchEvent = () => {};
 globalThis.CustomEvent = class { constructor(type, options) { Object.assign(this, {type}, options); } };
-let parameterRows = [];
+let parameterRows = [], runModeCards = [];
 globalThis.document = {
   getElementById:el, createElement:tag => { const e = new El(); e.tagName = tag.toUpperCase(); return e; },
-  createTextNode:text => ({textContent:text}), querySelectorAll:selector => selector.includes('data-parameter-key') ? parameterRows : [],
+  createTextNode:text => ({textContent:text}), querySelectorAll:selector => selector.includes('data-parameter-key') ? parameterRows : selector === '#run-mode-choices .run-mode-card' ? runModeCards : [],
   querySelector: selector => selector === '#makecase .btn-next' ? el('makecase').querySelector('button') : null,
 };
 el('loadinggate').hidden = true; el('launchgate').hidden = true; el('domaingate').hidden = true;
@@ -299,51 +299,43 @@ try {
   const contextFields = ['context-select-version', 'context-select-target', 'context-select-engine'];
   const canonicalFields = ['model-version', 'run-target', 'model-engine'];
   const parallelFields = ['cpu-workers', 'mpi-ranks', 'case-threads'];
-  for (const [index, id] of contextFields.entries()) {
-    const control = el(id), source = el(canonicalFields[index]);
-    control.tagName = 'SELECT'; control.value = 'first';
-    control.options = [{value:'first',textContent:'First'}, {value:'second',textContent:'Second'}];
-    source.hidden = true;
-    let forwarded = 0, handlerCalls = 0, finishChange;
-    source.dispatchEvent = event => { assert.equal(event.type,'change'); assert.equal(event.bubbles,true); forwarded++; };
-    control.dispatchEvent = event => control[`on${event.type}`]?.(event);
-    control.onchange = async () => {
-      handlerCalls++;
-      source.value = control.value;
-      source.dispatchEvent(new Event('change',{bubbles:true}));
-      await new Promise(resolve => {finishChange=resolve;});
-    };
+  runModeCards = canonicalFields.map((field, index) => el(`run-mode-choices-choice-${['version','target','engine'][index]}-0`));
+  for (const [index, card] of runModeCards.entries()) {
+    const source = el(canonicalFields[index]); source.hidden = true;
+    card.tagName = 'BUTTON'; card.textContent = `Choice ${index}`;
+    card['aria-pressed'] = 'true';
+    let calls = 0, finishChange;
+    card.onclick = async () => { calls++; source.value = 'chosen'; await new Promise(resolve => { finishChange = resolve; }); };
+    assert.ok(guide.uiState().buttons.some(button => button.name === card.id && button.kind === 'click'));
+    assert.equal(guide.uiState().buttons.find(button => button.name === card.id).selected, true);
     let complete = false;
-    const changing = drive('fill',{fields:[{field:id,value:'Second'}]}).then(()=>{complete=true;});
-    await Promise.resolve(); await Promise.resolve();
-    assert.equal(complete,false,'context fill must await its existing handler');
+    const changing = drive('click', {target:card.id}).then(() => { complete = true; });
+    await Promise.resolve(); assert.equal(complete, false, 'card action waits for its manual handler');
     finishChange(); await changing;
-    assert.equal(handlerCalls,1,'property handler must run exactly once');
-    assert.equal(forwarded,1,'canonical choice must receive exactly one change');
-    assert.equal(source.value,'second');
-    await assert.rejects(drive('fill',{fields:[{field:id,value:'invalid'}]}),/not an option/);
-    assert.equal(control.value,'second'); assert.equal(handlerCalls,1);
-    for (const [flag, error] of [['hidden',/not a draft field/],['disabled',/disabled/],['readOnly',/read-only/]]) {
-      control[flag] = true;
-      if (flag === 'hidden') assert.ok(!guide.uiState().fields.some(f=>f.name===id));
-      await assert.rejects(drive('fill',{fields:[{field:id,value:'first'}]}),error);
-      control[flag] = false;
-    }
-    assert.equal(handlerCalls,1,'rejected requests must not trigger changes');
-    // Canonical controls stay inaccessible even if a future layout makes them visible.
+    assert.equal(calls, 1); assert.equal(source.value, 'chosen');
+    card.disabled = true;
+    await assert.rejects(drive('click', {target:card.id}), /disabled/); card.disabled = false;
+    card.hidden = true;
+    assert.ok(!guide.uiState().buttons.some(button => button.name === card.id));
+    await assert.rejects(drive('click', {target:card.id}), /not a button/); card.hidden = false;
+    await assert.rejects(drive('commit', {target:card.id}), /does not save/);
+    assert.equal(calls, 1, 'rejected requests never select a card');
     source.hidden = false;
-    await assert.rejects(drive('fill',{fields:[{field:source.id,value:'first'}]}),/not a draft field/);
-    assert.ok(!guide.uiState().fields.some(f=>f.name===source.id));
+    await assert.rejects(drive('fill', {fields:[{field:source.id,value:'other'}]}), /not a draft field/);
     source.hidden = true;
+    await assert.rejects(drive('fill', {fields:[{field:contextFields[index],value:'other'}]}), /not a draft field/);
   }
   const modeFields = guide.uiState().fields.map(f=>f.name);
-  for (const id of [...contextFields,...parallelFields]) assert.ok(modeFields.includes(id));
+  for (const id of parallelFields) assert.ok(modeFields.includes(id));
+  for (const id of contextFields) assert.ok(!modeFields.includes(id));
   assert.ok(!modeFields.includes('force'));
   await drive('fill',{fields:parallelFields.map(field=>({field,value:'2'}))});
   await assert.rejects(drive('commit',{target:'run-all'}),/not.*page|not available/);
   state.step = 'run';
   const runFields = guide.uiState().fields.map(f=>f.name);
   assert.ok(runFields.includes('force'));
+  assert.ok(!guide.uiState().buttons.some(button => runModeCards.some(card => card.id === button.name)));
+  await assert.rejects(drive('click', {target:runModeCards[0].id}), /not a button/);
   for (const id of parallelFields) {
     assert.ok(!runFields.includes(id));
     await assert.rejects(drive('fill',{fields:[{field:id,value:'3'}]}),/not a draft field/);

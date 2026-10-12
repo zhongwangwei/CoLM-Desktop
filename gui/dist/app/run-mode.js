@@ -83,20 +83,17 @@ export function touchesText(touches) {
 }
 
 /**
- * 上下文条的四段：算例 · 版本 · 位置 · 引擎。每页都显示，助手也读它。
+ * 顶栏只显示当前算例，运行方式在对应页面选择。
  * `cases` 是本次作用的算例个数，`caseName` 是当前算例名。
  */
-export function contextChips({ caseName, cases = 0, version, target, engine }) {
+export function contextChips({ caseName, cases = 0 }) {
   const caseText = cases > 1 ? `${caseName ?? '—'} 等 ${cases} 个` : (caseName ?? '还没有算例');
   return [
     { key: 'case', label: '算例', value: caseText },
-    { key: 'version', label: '版本', value: versionLabel(version) },
-    { key: 'target', label: '位置', value: targetLabel(target) },
-    { key: 'engine', label: '引擎', value: engineLabel(engine) },
   ];
 }
 
-/** 给助手的运行方式快照（与上下文条同源）。 */
+/** 给助手的运行方式快照（与运行方式页同源）。 */
 export function runModeSnapshot({ version, target, engine, readiness }) {
   return {
     version: version || OFFICIAL,

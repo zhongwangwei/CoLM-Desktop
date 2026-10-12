@@ -24,19 +24,35 @@
     <div class="sep"></div>
     <input class="proj-name" id="casename" hidden readonly value="还没有算例" title="当前算例">
     <button class="btn-ghost" id="homeBtn" title="重新选择空间、次网格与物理配置">返回首页</button>
-    <div class="context-bar" id="context-bar" role="status" aria-label="当前运行方式"></div>
-    <div class="grow"></div>
-    <div class="seg" id="langSeg" aria-label="界面语言">
-      <button class="on" data-lang="zh" aria-pressed="true">中文</button>
-      <button data-lang="en" aria-pressed="false">EN</button>
-    </div>
-    <div class="seg" id="modeSeg" aria-label="参数模式">
-      <button class="on" data-mode="normal" aria-pressed="true">常规</button>
-      <button data-mode="expert" aria-pressed="false">专家</button>
-    </div>
+    <div class="context-bar" id="context-bar" role="status" aria-label="当前算例"></div>
     <button class="btn-ghost" id="assistantToggle" data-assistant-toggle title="打开 / 关闭 AI 助手" aria-pressed="false">AI 助手</button>
-    <button class="icon-btn" id="liveToggle" title="显示 / 隐藏运行日志与进度">▥</button>
-    <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
+    <details class="top-settings" id="view-settings">
+      <summary class="btn-ghost">界面设置</summary>
+      <div class="top-settings-panel">
+        <div class="top-setting-row">
+          <span>语言</span>
+          <div class="seg" id="langSeg" aria-label="界面语言">
+            <button class="on" data-lang="zh" aria-pressed="true">中文</button>
+            <button data-lang="en" aria-pressed="false">EN</button>
+          </div>
+        </div>
+        <div class="top-setting-row">
+          <span>参数模式</span>
+          <div class="seg" id="modeSeg" aria-label="参数模式">
+            <button class="on" data-mode="normal" aria-pressed="true">常规</button>
+            <button data-mode="expert" aria-pressed="false">专家</button>
+          </div>
+        </div>
+        <div class="top-setting-row">
+          <span>运行日志</span>
+          <button class="icon-btn" id="liveToggle" title="显示 / 隐藏运行日志与进度">▥</button>
+        </div>
+        <div class="top-setting-row">
+          <span>主题</span>
+          <button class="icon-btn" id="themeBtn" title="深色 / 浅色">🌙</button>
+        </div>
+      </div>
+    </details>
   </header>
 
   <!-- 左栏是一条流水线，不是几个并排的盒子：有数据 → 造算例 → 配参数 → 跑 → 看结果。 -->
@@ -609,7 +625,7 @@
         <div class="flow-return">↺ 产出回流：新算例、新版本自动出现在第 3 步，重跑后在结果页对比</div>
         <div class="flow-side">
           <button type="button" class="flow-node" data-go="resources"><b>计算资源</b><span>本机与服务器：第 3 步和研究都从这里选在哪里跑</span></button>
-          <div class="flow-node flow-static"><b>AI 助手 · 每一页都能打开</b><span>读顶部上下文条（算例 · 版本 · 位置 · 引擎）和当前页，帮你判断下一步并代为执行，每一步都经你确认。</span></div>
+          <div class="flow-node flow-static"><b>AI 助手 · 每一页都能打开</b><span>结合当前算例和可见页面，帮你判断下一步；涉及写入或运行时按审批设置确认。</span></div>
         </div>
       </div>
     </section>
@@ -749,7 +765,7 @@
       <div class="flow-pane" data-flow-pane="run-mode">
         <div class="work-head"><span class="kicker">第 3 步 · 运行方式</span></div>
         <h1>运行方式</h1>
-        <p class="sub">这三项和顶部的上下文条是同一份设置：在这里改，上面跟着变。</p>
+        <p class="sub">在这里选择模型版本、计算位置和引擎；开始运行前会再次显示本次设置。</p>
         <div id="run-mode-choices">
           <section class="card run-choice-group">
             <div class="run-choice-head"><h3>用哪个模型版本</h3><button class="btn-ghost" type="button" id="manage-versions">去改代码 →</button></div>

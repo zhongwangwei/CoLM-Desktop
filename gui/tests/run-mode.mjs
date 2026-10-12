@@ -55,14 +55,14 @@ assert.equal(touchesText({ engine: true, kernel: true }), '改了 Rust 引擎和
 assert.equal(touchesText({ engine: false, kernel: true }), '改了 Fortran 内核');
 assert.equal(touchesText({ engine: false, kernel: false }), '没改会影响计算结果的代码');
 
-// 上下文条：算例 · 版本 · 位置 · 引擎。
+// 顶栏只显示当前算例。
 assert.deepEqual(
   contextChips({ caseName: 'CN-Cng', cases: 3, version: 'snow', target: 'srv', engine: 'fortran' }).map(c => c.value),
-  ['CN-Cng 等 3 个', '修改版：snow', '服务器：srv', 'Fortran 内核'],
+  ['CN-Cng 等 3 个'],
 );
 assert.deepEqual(
   contextChips({ version: OFFICIAL, engine: 'rust' }).map(c => c.value),
-  ['还没有算例', '官方版', '本机', 'Rust 引擎'],
+  ['还没有算例'],
 );
 
 // 给助手的快照：检查清单只在它属于当前版本时附上。

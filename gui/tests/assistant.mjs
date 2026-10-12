@@ -78,7 +78,7 @@ assert.equal(assistant.viewContext({ step: 'run', flow: 'run' }), 'page: run');
   assert.ok(assistant.pageDetails('result-tuning', { badges: { tuning: '运行中 3/9' } })
     .includes('calibration Study status: 运行中 3/9'));
   assert.ok(assistant.pageDetails('hybrid-process')[0].includes('process replacement'));
-  // 上下文条（版本 · 位置 · 引擎）每页都告诉助手；检查清单只在运行相关的页上附上。
+  // 运行方式快照来自可见运行方式页；检查清单只在运行相关的页上附上。
   const runMode = { version: 'snow', target: 'local', engine: 'rust', ready: false, readiness: [{ kind: 'block', text: 'engine not built' }] };
   const onRunMode = assistant.pageDetails('run-mode', { runMode });
   assert.equal(onRunMode[0], 'run mode: model version modified version (development workspace) snow; location local; engine rust; NOT ready to run');
@@ -581,7 +581,16 @@ console.log('assistant: project paths and per-message configuration refresh ok')
   let view = assistant.currentView();
   assert.equal(view.caseDir, '/p/current');
   assert.equal(view.snapshot.pageName, '参数率定', 'skip the hidden overview heading on result subpages');
+  assert.doesNotMatch(view.details.join('\n'), /official release; location local; engine fortran/, 'case-only header does not expose hidden run choices');
+  assert.equal(view.snapshot.runMode, false);
+  nodes.set('run-mode-choices', shown()); state.step = 'run-mode';
+  view = assistant.currentView(); assert.equal(view.snapshot.runMode, true);
   assert.match(view.details.join('\n'), /official release; location local; engine fortran/);
+  nodes.get('run-mode-choices').hidden = true;
+  nodes.set('run-mode-line', shown()); state.step = 'run';
+  assert.equal(assistant.currentView().snapshot.runMode, true);
+  nodes.get('run-mode-line').hidden = true; state.step = 'result-tuning';
+  view = assistant.currentView();
   assert.match(view.details.join('\n'), /研究版本 snow/);
   assert.match(view.details.join('\n'), /7920ts/);
   assistant.refreshVisibleContext(view);

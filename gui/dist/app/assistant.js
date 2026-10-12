@@ -37,7 +37,7 @@ const fixed = (value, digits) => (Number.isFinite(value) ? Number(value).toFixed
 export function pageDetails(flow, { metrics = [], badges = {}, batch = 0, runMode = null, provenance = null } = {}) {
   const lines = [];
   if (batch > 1) lines.push(`cases in this batch: ${batch}`);
-  // 上下文条（算例 · 版本 · 位置 · 引擎）：每页都附上，助手据此知道“这次按哪一版、在哪里、用哪个引擎跑”。
+  // 运行配置仅由实际可见的运行方式卡片或运行页确认行提供。
   if (runMode) {
     const version = runMode.version === 'official' ? 'official release' : `modified version (development workspace) ${runMode.version}`;
     lines.push(`run mode: model version ${version}; location ${runMode.target}; engine ${runMode.engine}${runMode.ready ? '' : '; NOT ready to run'}`);
@@ -856,14 +856,15 @@ function currentView() {
   const checks = [visibleText($('version-readiness')),
     detail ? visibleText(detail.querySelector('#workspace-panel-checks')) : ''].filter(Boolean);
   const pageName = page ? [...page.querySelectorAll('h1')].map(visibleText).find(Boolean) || state.step || step || '' : '';
-  const snapshot = { header: visible($('context-bar')), pageName, metrics: metrics.length, study, versionDetail, checks };
+  const snapshot = { header: visible($('context-bar')), runMode: visible($('run-mode-choices')) || visible($('run-mode-line')),
+    pageName, metrics: metrics.length, study, versionDetail, checks };
   return {
     step, flow: state.step, caseDir, snapshot,
     variable: (state.step === 'result-series' || state.step === 'result-diagnostics') ? $('var')?.value : null,
     kernel: $('kernel')?.value, root: $('root')?.value?.trim(),
     details: [...pageDetails(state.step, {
       metrics, badges: prefix && study.length ? { [prefix === 'tune' ? 'tuning' : 'uq']: state.studyBadges?.[prefix === 'tune' ? 'tuning' : 'uq'] } : {}, batch: state.batch?.length ?? 0,
-      runMode: snapshot.header ? runModeSnapshot({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: modelEngine(), readiness: state.versionReadiness }) : null,
+      runMode: snapshot.runMode ? runModeSnapshot({ version: modelVersion(), target: $('run-target')?.value || 'local', engine: modelEngine(), readiness: state.versionReadiness }) : null,
       provenance: caseDir ? state.provenance?.[caseDir] : null,
     }), ...study.map(text => `visible Study page: ${text}`), ...versionDetail.map(text => `visible version detail: ${text}`),
       ...checks.map(text => `visible checks: ${text}`)],
@@ -871,7 +872,7 @@ function currentView() {
 }
 
 export function visibleContextText(snapshot = {}) {
-  const items = [snapshot.header && t('上下文条'), snapshot.pageName && `${t('本页')} ${snapshot.pageName}`,
+  const items = [snapshot.header && t('当前算例'), snapshot.runMode && t('运行方式'), snapshot.pageName && `${t('本页')} ${snapshot.pageName}`,
     snapshot.metrics > 0 && t('评估指标'), snapshot.study?.length && t('研究设置与状态'),
     snapshot.versionDetail?.length && t('版本详情'), snapshot.checks?.length && t('检查结果')].filter(Boolean);
   return `${t('看得到：')}${items.join(' · ') || t('当前没有可见页面数据')}`;

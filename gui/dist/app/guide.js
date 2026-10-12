@@ -34,7 +34,13 @@ function taskFields() {
 }
 
 function taskActions() {
-  return Object.fromEntries(Object.entries(taskGuide()?.actions() ?? {})
+  const actions = taskGuide()?.actions() ?? {};
+  if (screen() === 'workbench' && state.step === 'run-mode') {
+    for (const card of document.querySelectorAll('#run-mode-choices .run-mode-card')) {
+      actions[card.id] = { element: card, kind: 'click', run: async () => { await card.onclick(); } };
+    }
+  }
+  return Object.fromEntries(Object.entries(actions)
     .filter(([, action]) => shown(action.element)));
 }
 
@@ -49,8 +55,6 @@ const DRAFT_FIELDS = {
   'run-mode': ['cpu-workers', 'mpi-ranks', 'case-threads'],
   run: ['force'],
 };
-// Header choices use the same change handlers as manual interaction.
-const CONTEXT_FIELDS = ['context-select-version', 'context-select-target', 'context-select-engine'];
 /** 配置向导里的输入（空间范围、同位素、溶质）。 */
 const GATE_FIELDS = [
   'spatial-west', 'spatial-east', 'spatial-south', 'spatial-north', 'spatial-dlon', 'spatial-dlat',
@@ -208,12 +212,13 @@ export function uiState() {
     case: state.selected?.dir ?? null,
     model: state.wizard ? { domain: state.domain, subgrid: state.subgrid, physics: state.wizard.physics } : null,
     steps: steps(),
-    fields: [...draftFields([...CONTEXT_FIELDS, ...(DRAFT_FIELDS[state.step] ?? [])]),
+    fields: [...draftFields(DRAFT_FIELDS[state.step] ?? []),
       ...taskFields().map(el => ({ ...describeControl(el.id, el, false), label: labelFor(el) })), ...tableFields()],
     sites: siteList(),
     buttons: [...buttons(CLICKS, 'click'), ...buttons(COMMITS, 'commit'),
       ...Object.entries(taskActions()).map(([name, action]) => ({
         name, label: text(action.element), kind: action.kind, enabled: !action.element.disabled,
+        ...(action.element.getAttribute('aria-pressed') === 'true' ? { selected: true } : {}),
       })),
       ...(next ? [{ name: 'next-step', label: `下一步：${next.t}`, kind: 'click', enabled: !next.need() }] : [])],
     status,
@@ -257,7 +262,7 @@ async function fill(fields) {
   for (const { field, value } of fields ?? []) {
     const where = screen();
     const allowed = new Set(where === 'setup-wizard' ? GATE_FIELDS
-      : where === 'workbench' ? [...CONTEXT_FIELDS, ...(DRAFT_FIELDS[state.step] ?? []), ...taskFields().map(el => el.id)] : []);
+      : where === 'workbench' ? [...(DRAFT_FIELDS[state.step] ?? []), ...taskFields().map(el => el.id)] : []);
     const el = allowed.has(field) ? $(field) : null;
     if (!el || !shown(el)) {
       const saves = tableRows().some(row => row.dataset.parameterKey === field);
