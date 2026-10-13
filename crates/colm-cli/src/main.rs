@@ -990,7 +990,11 @@ fn validated_case_name(name: String) -> Result<String> {
 
 fn normalize_output_dir(case_nml: &Path, raw: &str) -> PathBuf {
     let trimmed = raw.trim_end_matches(['/', '\\']);
-    let raw = if trimmed.is_empty() { raw } else { trimmed };
+    let raw = if trimmed.is_empty() || Path::new(raw).parent().is_none() {
+        raw
+    } else {
+        trimmed
+    };
     let path = Path::new(raw);
     let joined = if path.is_absolute() {
         path.to_path_buf()
