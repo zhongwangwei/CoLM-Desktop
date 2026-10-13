@@ -5,11 +5,12 @@ mod materialize;
 mod registry;
 mod validation;
 pub use equivalence::{is_noop, minimize_physics, same_effect};
+pub use materialize::case_process_references;
 pub use registry::Registry;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-pub use validation::{is_model_field, validate_overlay};
+pub use validation::{is_model_field, model_overlay, validate_overlay};
 
 pub const SCHEMA: u32 = 1;
 pub const BINDING_FILE: &str = "model-binding.json";
@@ -139,6 +140,8 @@ pub struct CaseData {
     pub source_case: PathBuf,
     pub original_case_sha256: String,
     pub fields: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub process_file_bindings: BTreeMap<String, String>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

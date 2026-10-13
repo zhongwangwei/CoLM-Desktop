@@ -6,6 +6,7 @@ import { bilingual } from '../../lib/bilingual';
 import * as setup from './scientific-setup';
 import { modelSettingValue } from '../cases/model-settings';
 import type { ConfigurationSource, ConfigurationResult } from './configuration-options';
+import { caseOptionOverlay, caseOptionPatch, type CaseOptionPatch } from './configuration-options';
 import type { Overlay, KernelEntry } from '../../lib/types';
 import type { ModelField } from './model';
 import type { UiAction, UiField } from '../../lib/guide';
@@ -39,11 +40,11 @@ function harness() {
     source: { kind: 'draft', id: 'd1', generation: 3, overlay } as ConfigurationSource,
     overlay,
     fields,
-    environment: { domain: 'single', grid: 'single' } as setup.SetupEnvironment,
+    environment: { subgrid: 'PFT', domain: 'single', grid: 'single' } as setup.SetupEnvironment,
     includeSubgrid: true,
     disabled: false,
     onChange: (o: Overlay) => changes.push(o),
-    onRequest: undefined as undefined | ((r: setup.SetupRequest) => void),
+    onCaseChange: undefined as undefined | ((patch: CaseOptionPatch) => void | Promise<void>),
   };
   const requests: { args: Record<string, unknown>; resolve: (r: ConfigurationResult) => void }[] =
       [],
@@ -56,6 +57,8 @@ function harness() {
     contract: Contract;
   const context = {
     ...setup,
+    caseOptionOverlay,
+    caseOptionPatch,
     modelSettingValue,
     bilingual,
     React: {
@@ -177,17 +180,22 @@ test('old query and old guide callback cannot write after draft/source changes',
   c = await early.resolve(1);
   assert.equal(c.status, 'pending_source_verification');
 });
-test('frozen cards are readonly unless explicitly connected to modification request', async () => {
+test('frozen model cards write case fields directly and leave the selected revision unchanged', async () => {
   const h = harness();
   h.props.source = { kind: 'frozen', version: { id: 'official', revision: 5 } };
   h.render();
   let c = await h.resolve();
   assert.ok(c.fields.every((f) => f.disabled));
-  h.props.onRequest = (r) => h.forward.push(r);
+  const patches: CaseOptionPatch[] = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
   c = h.render();
   const before = structuredClone(h.props.overlay);
-  c.fields.find((f) => f.id === 'setup-subgrid')!.set('PC');
-  assert.deepEqual(h.forward, [{ id: 'subgrid', value: 'PC' }]);
+  await c.fields.find((f) => f.id === 'setup-soil')!.set('vG');
+  assert.deepEqual(patches, [
+    { DEF_USE_Campbell_SOIL_MODEL: '.false.', DEF_USE_VariablySaturatedFlow: '.true.' },
+  ]);
   assert.deepEqual(h.props.overlay, before);
   assert.equal(h.changes.length, 0);
 });

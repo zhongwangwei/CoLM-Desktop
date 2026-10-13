@@ -20,8 +20,8 @@ pub(crate) fn query(
         return Err("model registry is not initialized".into());
     }
     let registry = Registry::open(root).map_err(|e| e.to_string())?;
-    let (identity, overlay, roots) = resolve(&registry, source)?;
-    let assets = read_assets(&overlay, &roots)?;
+    let (identity, stored_overlay, roots) = resolve(&registry, source)?;
+    let assets = read_assets(&stored_overlay, &roots)?;
     let case = case_dir.filter(|p| !p.trim().is_empty()).map(PathBuf::from);
     let mut doc = match case.as_ref() {
         Some(dir) => colm_namelist::parse(
@@ -37,26 +37,15 @@ pub(crate) fn query(
                 "caseValues cannot override model or derived field: {key}"
             ));
         }
-        let value = match field.kind {
-            colm_schema::FieldKind::Character { len } => {
-                if raw.len() > len {
-                    return Err(format!("{key}: character value too long"));
-                }
-                NmlValue::Str(raw)
-            }
-            _ => parse_value(&raw)?,
-        };
-        let valid = match field.kind {
-            colm_schema::FieldKind::Logical => matches!(value, NmlValue::Bool(_)),
-            colm_schema::FieldKind::Integer => matches!(value, NmlValue::Int(_)),
-            colm_schema::FieldKind::Real => value.as_f64().is_some_and(f64::is_finite),
-            colm_schema::FieldKind::Character { .. } => true,
-        };
-        if !valid {
-            return Err(format!("{key}: invalid value type"));
-        }
+        let value = super::typed(&key, &raw)?;
         put(&mut doc, field.name, &value.to_string())?;
     }
+    if let Some(value) = colm_model::case_process_references(&stored_overlay, &doc, case.as_deref())
+        .map_err(|e| e.to_string())?
+    {
+        put(&mut doc, "DEF_TRACER_PARAM_FILES", &value.to_string())?;
+    }
+    let overlay = colm_model::model_overlay(&stored_overlay);
     for path in doc.paths() {
         if colm_model::is_model_field(&path) {
             doc.remove(&path).map_err(|e| e.to_string())?;
@@ -511,9 +500,11 @@ mod tests {
     };
 
     fn fixture() -> (PathBuf, Registry, ModelDraft) {
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let root = std::env::temp_dir().join(format!(
-            "colm-configuration-{}-{}",
+            "colm-configuration-{}-{}-{}",
             std::process::id(),
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -578,25 +569,30 @@ mod tests {
         assert_eq!(field(&result, "DEF_TRACER_TYPES")["mode"], "editable");
         assert_eq!(field(&result, "DEF_TRACER_TYPES")["pending"], true);
         assert!(field(&result, "DEF_USE_TRACER")["effective_value"].is_null());
-        let mut overlay = Overlay::default();
-        overlay
-            .physics
-            .insert("DEF_USE_TRACER".into(), ".false.".into());
-        overlay
-            .physics
-            .insert("DEF_USE_BGC".into(), ".false.".into());
-        let result = query(&root, source(&draft, overlay), None, None, None, None).unwrap();
+        let values = BTreeMap::from([
+            ("DEF_USE_TRACER".into(), ".false.".into()),
+            ("DEF_USE_BGC".into(), ".false.".into()),
+        ]);
+        let result = query(
+            &root,
+            source(&draft, Overlay::default()),
+            None,
+            None,
+            None,
+            Some(values),
+        )
+        .unwrap();
         assert_eq!(field(&result, "DEF_TRACER_TYPES")["mode"], "disabled");
         assert_eq!(field(&result, "DEF_USE_FIRE")["mode"], "disabled");
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn source_case_model_values_are_not_inherited_or_written_and_case_values_are_typed() {
+    fn source_case_processes_are_inherited_and_case_values_are_typed() {
         let (root, _, draft) = fixture();
         let case = root.join("source");
         std::fs::create_dir(&case).unwrap();
-        let original="&nl_colm\nDEF_USE_BGC = .true.\nDEF_USE_CN_INIT = .false.\nDEF_file_cn_init = 'old.nc'\n/\n";
+        let original="&nl_colm\nDEF_USE_BGC = .true.\nDEF_BALL_BERRY_GRADM=12.\nDEF_USE_CN_INIT = .false.\nDEF_file_cn_init = 'old.nc'\n/\n";
         std::fs::write(case.join("case.nml"), original).unwrap();
         let values = BTreeMap::from([
             ("DEF_USE_CN_INIT".into(), ".true.".into()),
@@ -611,7 +607,8 @@ mod tests {
             Some(values),
         )
         .unwrap();
-        assert!(field(&result, "DEF_USE_BGC")["configured_value"].is_null());
+        assert_eq!(field(&result, "DEF_USE_BGC")["configured_value"], ".true.");
+        assert!(field(&result, "DEF_BALL_BERRY_GRADM")["configured_value"].is_null());
         assert_eq!(
             field(&result, "DEF_USE_CN_INIT")["configured_value"],
             ".true."
@@ -624,7 +621,7 @@ mod tests {
             std::fs::read_to_string(case.join("case.nml")).unwrap(),
             original
         );
-        let invalid = BTreeMap::from([("DEF_USE_BGC".into(), ".true.".into())]);
+        let invalid = BTreeMap::from([("DEF_BALL_BERRY_GRADM".into(), "12.".into())]);
         assert!(query(
             &root,
             source(&draft, Overlay::default()),
@@ -636,6 +633,366 @@ mod tests {
         .unwrap_err()
         .contains("cannot override"));
         assert!(!root.join("runs").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn vegetation_scheme_comes_from_case_and_unsaved_case_values() {
+        let (root, _, draft) = fixture();
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        let original = "&nl_colm\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\nDEF_SUBGRID_SCHEME='PFT'\n/\n";
+        std::fs::write(case.join("case.nml"), original).unwrap();
+        let values = || {
+            BTreeMap::from([
+                ("DEF_USE_LCT".into(), ".false.".into()),
+                ("DEF_USE_PFT".into(), ".false.".into()),
+                ("DEF_USE_PC".into(), ".true.".into()),
+                ("DEF_SUBGRID_SCHEME".into(), "PC".into()),
+            ])
+        };
+        for (kind, changed, expected_mode) in [
+            ("pft", false, "editable"),
+            ("pc-pft", false, "disabled"),
+            ("pft", true, "disabled"),
+            ("pc-pft", true, "editable"),
+        ] {
+            let result = query(
+                &root,
+                source(&draft, Overlay::default()),
+                case.to_str(),
+                None,
+                Some(PftSelection {
+                    kind: kind.into(),
+                    index: 1,
+                }),
+                changed.then(values),
+            )
+            .unwrap();
+            assert_eq!(
+                field(&result, "DEF_USE_PFT")["configured_value"],
+                if changed { ".false." } else { ".true." }
+            );
+            assert_eq!(
+                field(&result, "DEF_SUBGRID_SCHEME")["configured_value"],
+                if changed { "'PC'" } else { "'PFT'" }
+            );
+            let parameter = result["pft_parameters"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["name"] == "DEF_PFT_VMAX25")
+                .unwrap();
+            assert_eq!(parameter["mode"], expected_mode);
+        }
+        assert_eq!(
+            std::fs::read_to_string(case.join("case.nml")).unwrap(),
+            original
+        );
+        assert!(draft.overlay.physics.is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn case_scheme_save_preserves_classification_when_switching_to_pft() {
+        let (root, _, _) = fixture();
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        std::fs::write(case.join("case.nml"), "&nl_colm\nDEF_CASE_NAME='case'\n/\n").unwrap();
+        crate::project::record_case(
+            case.to_str().unwrap(),
+            &crate::project::CaseRecord {
+                mode: Some("urban-igbp".into()),
+                domain: Some("watershed".into()),
+                shapefile: Some("watershed.shp".into()),
+            },
+        );
+        for scheme in ["IGBP", "USGS", "PFT", "PC"] {
+            let fields = [
+                ("DEF_SUBGRID_SCHEME", scheme.to_owned()),
+                (
+                    "DEF_USE_LCT",
+                    format!(".{}.", matches!(scheme, "IGBP" | "USGS")),
+                ),
+                ("DEF_USE_PFT", format!(".{}.", scheme == "PFT")),
+                ("DEF_USE_PC", format!(".{}.", scheme == "PC")),
+            ]
+            .into_iter()
+            .map(|(path, value)| FieldChange {
+                path: path.into(),
+                value,
+            })
+            .collect();
+            super::super::set_fields_with_context(
+                vec![case.to_string_lossy().into_owned()],
+                fields,
+                None,
+                None,
+            )
+            .unwrap();
+            let opened = crate::project::open_case(case.to_string_lossy().into_owned()).unwrap();
+            assert_eq!(opened.profile.subgrid, scheme);
+            assert_eq!(
+                opened.profile.classification,
+                if scheme == "IGBP" { "IGBP" } else { "USGS" }
+            );
+            assert_eq!(opened.profile.domain_kind.as_deref(), Some("watershed"));
+            assert_eq!(opened.profile.shapefile.as_deref(), Some("watershed.shp"));
+        }
+        let metadata: Value =
+            serde_json::from_slice(&std::fs::read(case.join(".colm-desktop.json")).unwrap())
+                .unwrap();
+        assert_eq!(metadata["mode"], "urban-usgs");
+        let before = std::fs::read(case.join("case.nml")).unwrap();
+        std::fs::write(case.join(".colm-desktop.json"), "invalid").unwrap();
+        assert!(super::super::set_fields_with_context(
+            vec![case.to_string_lossy().into_owned()],
+            vec![FieldChange {
+                path: "DEF_SUBGRID_SCHEME".into(),
+                value: "IGBP".into()
+            }],
+            None,
+            None,
+        )
+        .is_err());
+        assert_eq!(std::fs::read(case.join("case.nml")).unwrap(), before);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn case_scheme_edits_validate_parameter_scopes_before_saving_and_repair_mismatches() {
+        for (kind, matching, incompatible) in [("pft", "PFT", "PC"), ("pc-pft", "PC", "PFT")] {
+            let (root, registry, mut draft) = fixture();
+            let case = root.join("case");
+            std::fs::create_dir(&case).unwrap();
+            let fields = |scheme: &str| {
+                vec![
+                    ("DEF_USE_LCT".into(), NmlValue::Bool(false)),
+                    ("DEF_USE_PFT".into(), NmlValue::Bool(scheme == "PFT")),
+                    ("DEF_USE_PC".into(), NmlValue::Bool(scheme == "PC")),
+                    ("DEF_SUBGRID_SCHEME".into(), NmlValue::Str(scheme.into())),
+                ]
+            };
+            let case_text = |scheme: &str| {
+                format!(
+                "&nl_colm\nDEF_CASE_NAME='case'\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.{}.\nDEF_USE_PC=.{}.\nDEF_SUBGRID_SCHEME='{scheme}'\n/\n",
+                scheme == "PFT", scheme == "PC",
+            )
+            };
+            std::fs::write(case.join("case.nml"), case_text(matching)).unwrap();
+            std::fs::write(case.join(".colm-desktop.json"), r#"{"mode":"usgs"}"#).unwrap();
+            draft.overlay.parameters.push(ParameterOverrideRecord {
+                parameter_id: format!("{kind}:DEF_PFT_VMAX25"),
+                raw_key: "DEF_PFT_VMAX25".into(),
+                scope_instance: ParameterScopeInstance {
+                    kind: kind.into(),
+                    scheme: None,
+                    index: Some(1),
+                    type_name: None,
+                    process_file: None,
+                },
+                value: "40.".into(),
+                expected_old_value: None,
+                unit: None,
+            });
+            let generation = draft.generation;
+            let draft = registry.save_draft(draft, generation).unwrap();
+            let frozen = registry.freeze(&draft.id, &case).unwrap();
+            let before = std::fs::read(case.join("case.nml")).unwrap();
+            let metadata = std::fs::read(case.join(".colm-desktop.json")).unwrap();
+            let rejected = root.join("rejected");
+            assert!(registry
+                .materialize_run_with_case_fields(
+                    &frozen.version,
+                    &case,
+                    &rejected,
+                    "reject-scheme",
+                    &fields(incompatible),
+                )
+                .unwrap_err()
+                .to_string()
+                .contains("requires runtime"));
+            assert!(!rejected.exists());
+            assert_eq!(std::fs::read(case.join("case.nml")).unwrap(), before);
+            assert_eq!(
+                std::fs::read(case.join(".colm-desktop.json")).unwrap(),
+                metadata
+            );
+
+            std::fs::write(case.join("case.nml"), case_text(incompatible)).unwrap();
+            assert!(registry
+                .materialize_run(
+                    &frozen.version,
+                    &case,
+                    &root.join("old-context"),
+                    "old-context"
+                )
+                .is_err());
+            let preview = registry
+                .materialize_run_with_case_fields(
+                    &frozen.version,
+                    &case,
+                    &root.join("repaired-preview"),
+                    "repair-scheme",
+                    &fields(matching),
+                )
+                .unwrap();
+            let edits = fields(matching)
+                .into_iter()
+                .map(|(path, value)| FieldChange {
+                    path,
+                    value: match value {
+                        NmlValue::Str(value) => value,
+                        _ => value.to_string(),
+                    },
+                })
+                .collect();
+            super::super::set_fields_with_context(
+                vec![case.to_string_lossy().into_owned()],
+                edits,
+                None,
+                Some(&[preview.run_case.to_string_lossy().into_owned()]),
+            )
+            .unwrap();
+            registry
+                .materialize_run(
+                    &frozen.version,
+                    &case,
+                    &root.join("saved-context"),
+                    "saved-context",
+                )
+                .unwrap();
+            assert_eq!(
+                std::fs::read(case.join(".colm-desktop.json")).unwrap(),
+                metadata
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn case_process_patch_and_clear_are_atomic_and_validate_candidate_contract() {
+        let (root, registry, draft) = fixture();
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        let original = "&nl_colm\nDEF_CASE_NAME='case'\nDEF_USE_LCT=.true.\nDEF_USE_PFT=.false.\nDEF_USE_PC=.false.\nDEF_USE_BGC=.false.\nDEF_USE_TRACER=.false.\nDEF_TRACER_PARAM_FILES='old.nml'\nDEF_TUNING_CROP_PLANTING_DAY=120\n/\n";
+        std::fs::write(case.join("case.nml"), original).unwrap();
+        let frozen = registry.freeze(&draft.id, &case).unwrap();
+        let remove = vec![
+            "DEF_TUNING_CROP_PLANTING_DAY".into(),
+            "DEF_TRACER_PARAM_FILES".into(),
+        ];
+        let rejected = vec![("DEF_USE_BGC".into(), NmlValue::Bool(true))];
+        let preview = registry
+            .materialize_run_with_case_changes(
+                &frozen.version,
+                &case,
+                &root.join("invalid"),
+                "invalid-process",
+                &rejected,
+                &remove,
+            )
+            .unwrap();
+        let error = super::super::set_fields_with_changes(
+            vec![case.to_string_lossy().into_owned()],
+            vec![FieldChange {
+                path: "DEF_USE_BGC".into(),
+                value: ".true.".into(),
+            }],
+            &remove,
+            None,
+            Some(&[preview.run_case.to_string_lossy().into_owned()]),
+        )
+        .unwrap_err();
+        assert!(error.contains("DEF_USE_BGC"));
+        assert_eq!(
+            std::fs::read_to_string(case.join("case.nml")).unwrap(),
+            original
+        );
+        let candidate = vec![("DEF_USE_BGC".into(), NmlValue::Bool(false))];
+        let preview = registry
+            .materialize_run_with_case_changes(
+                &frozen.version,
+                &case,
+                &root.join("valid"),
+                "valid-process",
+                &candidate,
+                &remove,
+            )
+            .unwrap();
+        let preview_doc = colm_namelist::parse(
+            &std::fs::read_to_string(preview.run_case.join("case.nml")).unwrap(),
+        )
+        .unwrap();
+        assert!(preview_doc.get(&remove[0]).is_none());
+        super::super::set_fields_with_changes(
+            vec![case.to_string_lossy().into_owned()],
+            vec![FieldChange {
+                path: "DEF_USE_BGC".into(),
+                value: ".false.".into(),
+            }],
+            &remove,
+            None,
+            Some(&[preview.run_case.to_string_lossy().into_owned()]),
+        )
+        .unwrap();
+        let saved =
+            colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml")).unwrap()).unwrap();
+        assert!(saved.get(&remove[0]).is_none());
+        assert_eq!(
+            saved.get("DEF_TRACER_PARAM_FILES"),
+            Some(&NmlValue::Str(String::new()))
+        );
+        assert_eq!(saved.get("DEF_USE_BGC"), Some(&NmlValue::Bool(false)));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn configuration_remaps_verified_process_assets_and_keeps_new_case_references() {
+        let (root, registry, mut draft) = fixture();
+        let case = root.join("source");
+        let stage = root.join("stage");
+        std::fs::create_dir_all(case.join("process")).unwrap();
+        std::fs::create_dir_all(stage.join("process")).unwrap();
+        let bytes = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='wetwat'\n/\n";
+        std::fs::write(case.join("process/source.nml"), bytes).unwrap();
+        std::fs::write(stage.join("process/frozen.nml"), bytes).unwrap();
+        let original =
+            "&nl_colm\nDEF_TRACER_NAMES='CH4'\nDEF_TRACER_PARAM_FILES='process/source.nml'\n/\n";
+        std::fs::write(case.join("case.nml"), original).unwrap();
+        draft.overlay.process_files.push(Asset {
+            relative_path: "process/frozen.nml".into(),
+            sha256: colm_kernel::sha256_hex(bytes),
+        });
+        let generation = draft.generation;
+        let draft = registry.save_draft(draft, generation).unwrap();
+        let frozen = registry.freeze(&draft.id, &stage).unwrap();
+        let source = || ConfigurationSource::Frozen {
+            version: frozen.version.clone(),
+        };
+        let result = query(&root, source(), case.to_str(), None, None, None).unwrap();
+        assert_eq!(
+            field(&result, "DEF_TRACER_PARAM_FILES")["configured_value"],
+            "'process/frozen.nml'"
+        );
+        assert_eq!(result["process_files"][0]["active_methane_asset"], true);
+        let edited = BTreeMap::from([("DEF_TRACER_PARAM_FILES".into(), "custom.nml".into())]);
+        let result = query(&root, source(), case.to_str(), None, None, Some(edited)).unwrap();
+        assert_eq!(
+            field(&result, "DEF_TRACER_PARAM_FILES")["configured_value"],
+            "'custom.nml'"
+        );
+        assert_eq!(result["process_files"][0]["active_methane_asset"], false);
+        assert_eq!(
+            std::fs::read_to_string(case.join("case.nml")).unwrap(),
+            original
+        );
+        let frozen_asset = root
+            .join("versions")
+            .join(&frozen.version.id)
+            .join(frozen.version.revision.to_string())
+            .join("process/frozen.nml");
+        assert_eq!(std::fs::read(frozen_asset).unwrap(), bytes);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -915,16 +1272,19 @@ mod tests {
         )
         .unwrap();
         std::fs::write(source.join("fresh-soil.nc"), b"fixture").unwrap();
-        let original="&nl_colm\nDEF_CASE_NAME='original'\nDEF_dir_runtime='runtime'\nDEF_USE_SoilInit=.false.\n/\n";
+        let original="&nl_colm\nDEF_CASE_NAME='original'\nDEF_dir_runtime='runtime'\nDEF_USE_SoilInit=.false.\nDEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_USE_PC=.false.\n/\n";
         std::fs::write(source.join("case.nml"), original).unwrap();
         let stale = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='hybrid'\n/\n";
         let frozen_asset = b"&nl_colm_methane_parameter\nDEF_METHANE%inundation_mode='wetwat'\n/\n";
-        std::fs::write(source.join("process/ch4.nml"), stale).unwrap();
+        std::fs::write(source.join("process/source-ch4.nml"), stale).unwrap();
         std::fs::write(stage.join("process/ch4.nml"), frozen_asset).unwrap();
+        let source_alias = source
+            .join("process/source-ch4.nml")
+            .to_string_lossy()
+            .into_owned();
+        let reference = format!("'{source_alias}'");
+        let mut case_doc = colm_namelist::parse(original).unwrap();
         for (key, value) in [
-            ("DEF_USE_LCT", ".false."),
-            ("DEF_USE_PFT", ".true."),
-            ("DEF_USE_PC", ".false."),
             ("DEF_USE_BGC", ".true."),
             ("DEF_USE_TRACER", ".true."),
             ("DEF_USE_Campbell_SOIL_MODEL", ".false."),
@@ -932,13 +1292,20 @@ mod tests {
             ("DEF_TRACER_NAMES", "'CH4'"),
             ("DEF_TRACER_TYPES", "'gas'"),
             ("DEF_TRACER_NUM", "1"),
-            ("DEF_TRACER_PARAM_FILES", "'process/ch4.nml'"),
+            ("DEF_TRACER_PARAM_FILES", reference.as_str()),
             ("DEF_USE_Dynamic_Wetland", ".false."),
             ("DEF_USE_NITRIF", ".false."),
             ("DEF_USE_FIRE", ".false."),
         ] {
-            draft.overlay.physics.insert(key.into(), value.into());
+            case_doc
+                .insert(key, parse_value(value).unwrap(), "nl_colm")
+                .unwrap();
         }
+        std::fs::write(source.join("case.nml"), case_doc.to_string()).unwrap();
+        std::fs::write(source.join(colm_model::CASE_DATA_FILE), serde_json::to_vec(&json!({
+            "schema": 1, "source_case": source, "original_case_sha256": "a".repeat(64), "fields": {},
+            "process_file_bindings": { (source_alias.clone()): "process/ch4.nml" }
+        })).unwrap()).unwrap();
         draft.overlay.process_files.push(Asset {
             relative_path: "process/ch4.nml".into(),
             sha256: colm_kernel::sha256_hex(frozen_asset),
@@ -960,6 +1327,10 @@ mod tests {
         .unwrap();
         let context = vec![preview.to_string_lossy().into_owned()];
         let changes = vec![
+            FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: source_alias,
+            },
             FieldChange {
                 path: "DEF_CASE_NAME".into(),
                 value: "updated".into(),
@@ -988,7 +1359,7 @@ mod tests {
             "'fresh-soil.nc'"
         );
         assert_eq!(
-            std::fs::read(source.join("process/ch4.nml")).unwrap(),
+            std::fs::read(source.join("process/source-ch4.nml")).unwrap(),
             stale
         );
         assert_eq!(
@@ -1010,7 +1381,7 @@ mod tests {
             before_revision
         );
         // A model-only process file also resolves after removing the obsolete source file.
-        std::fs::remove_file(source.join("process/ch4.nml")).unwrap();
+        std::fs::remove_file(source.join("process/source-ch4.nml")).unwrap();
         super::super::set_fields_with_context(
             vec![source.to_string_lossy().into_owned()],
             vec![FieldChange {

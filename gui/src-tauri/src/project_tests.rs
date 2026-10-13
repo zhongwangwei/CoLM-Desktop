@@ -178,14 +178,40 @@ fn classification_survives_pft_and_pc_runtime_structure() {
         let text = format!("&nl_colm\n DEF_USE_{structure}=.true.\n/\n");
         let ran = case_profile(&text, false, Some(stages), Some("igbp")).unwrap();
         assert_eq!(ran.subgrid, structure);
-        assert_eq!(ran.classification, "USGS");
-        assert_eq!(ran.classification_source, "kernel");
+        assert_eq!(ran.classification, "IGBP");
+        assert_eq!(ran.classification_source, "creation");
         let created = case_profile(&text, false, None, Some("usgs")).unwrap();
         assert_eq!(created.classification, "USGS");
         assert_eq!(created.classification_source, "creation");
     }
     let legacy = case_profile("&nl_colm\n/\n", false, None, None).unwrap();
     assert_eq!(legacy.classification_source, "legacy-default");
+}
+
+#[test]
+fn selected_case_scheme_takes_precedence_over_prior_kernel_classification() {
+    let stages = r#"{"colm":{"kernel":"preset=usgs;macros=SinglePoint,LULC_USGS"}}"#;
+    for scheme in ["IGBP", "USGS", "PFT", "PC"] {
+        let text = format!(
+            "&nl_colm\n DEF_SUBGRID_SCHEME='{scheme}'\n DEF_USE_LCT=.{}.\n DEF_USE_PFT=.{}.\n DEF_USE_PC=.{}.\n/\n",
+            matches!(scheme, "IGBP" | "USGS"), scheme == "PFT", scheme == "PC",
+        );
+        let profile = case_profile(&text, false, Some(stages), Some("usgs")).unwrap();
+        assert_eq!(profile.subgrid, scheme);
+        assert_eq!(
+            profile.classification,
+            if scheme == "IGBP" { "IGBP" } else { "USGS" }
+        );
+        assert_eq!(
+            profile.classification_source,
+            if matches!(scheme, "IGBP" | "USGS") {
+                "case"
+            } else {
+                "creation"
+            }
+        );
+        assert_eq!(profile.kernel_preset.as_deref(), Some("usgs"));
+    }
 }
 
 #[test]
@@ -223,10 +249,10 @@ fn a_never_run_case_recovers_usgs_and_crop_from_creation() {
             .subgrid,
         "IGBP"
     );
-    // 跑过的以上次内核为准。
+    // 算例分类选择优先于上次内核；内核仍提供作物能力。
     let stages = r#"{"colm":{"kernel":"preset=crop;macros=SinglePoint,LULC_IGBP,CROP"}}"#;
     let ran = case_profile(lct, false, Some(stages), Some("usgs")).unwrap();
-    assert_eq!(ran.subgrid, "IGBP");
+    assert_eq!(ran.subgrid, "USGS");
     assert!(ran.crop);
 }
 

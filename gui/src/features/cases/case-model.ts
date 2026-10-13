@@ -11,27 +11,9 @@ export interface SchemaField {
   values: string[];
   section: string;
 }
-// Only data/time/output belong to a case. Model parameters and physics stay in revisions.
+// Case fields are filtered against model_fields by each caller.
 export function isCaseField(field: SchemaField): boolean {
-  return (
-    !field.derived &&
-    !!field.group &&
-    !/^DEF_USE_(USGS|IGBP)$/.test(field.name) &&
-    ((field.kind.startsWith('Character') && /file|dir|path|namelist/i.test(field.name)) ||
-      [
-        '时间与预热',
-        '初始场',
-        '输出与重启',
-        '输出变量',
-        '调试与诊断',
-        '强迫场',
-        '地表数据',
-        '网格与并行',
-      ].includes(field.section) ||
-      /^(SITE_|USE_SITE_|DEF_(forcing|dir_(rawdata|runtime|existing_srfdata)|timestep|domain|GRIDBASED|CatchmentMesh|file_mesh))/.test(
-        field.name,
-      ))
-  );
+  return !field.derived && !!field.group && !/^DEF_USE_(USGS|IGBP)$/.test(field.name);
 }
 export function requiredNumber(value: string, label: string): number {
   if (!value.trim() || !Number.isFinite(Number(value)))
@@ -51,16 +33,13 @@ export function versionMode(
   classification?: 'IGBP' | 'USGS',
 ): string {
   const enabled = (key: string) => /^(true|\.true\.|1)$/i.test(physics[key] ?? '');
-  const sub =
-    classification === 'USGS'
-      ? 'usgs'
-      : enabled('DEF_USE_PFT')
-        ? 'pft'
-        : enabled('DEF_USE_PC')
-          ? 'pc'
-          : classification === undefined && enabled('DEF_USE_USGS')
-            ? 'usgs'
-            : 'igbp';
+  const sub = enabled('DEF_USE_PFT')
+    ? 'pft'
+    : enabled('DEF_USE_PC')
+      ? 'pc'
+      : classification === 'USGS' || (classification === undefined && enabled('DEF_USE_USGS'))
+        ? 'usgs'
+        : 'igbp';
   return enabled('DEF_URBAN_RUN') ? `urban-${sub}` : sub;
 }
 export function displayLiteral(value: string): string {
@@ -73,11 +52,11 @@ export function siteVersionMismatch(
   const enabled = (key: string) => /^(true|\.true\.|1)$/i.test(physics[key] ?? '');
   if (site.crop !== cropEnabled(physics))
     return bilingual(
-      '站点作物类型与当前版本 CROP 配置不符',
-      "The site's crop type does not match this version's CROP configuration",
+      '站点作物类型与当前算例 CROP 配置不符',
+      "The site's crop type does not match this case's CROP configuration",
     );
   if (site.urban !== enabled('DEF_URBAN_RUN'))
-    return bilingual('站点城市类型与当前版本配置不符', 'Urban configuration mismatch');
+    return bilingual('站点城市类型与当前算例配置不符', 'Urban configuration mismatch');
   return null;
 }
 export function preparedDestination(directory: string, source: string): string {
@@ -85,12 +64,15 @@ export function preparedDestination(directory: string, source: string): string {
   return `${directory.replace(/[\\/]$/, '')}/${stem}_colm.nc`;
 }
 
-export function effectiveModelFields(overlay?: {
-  physics: Record<string, string>;
-  parameters: { raw_key: string; value: string; scope_instance: { kind: string } }[];
-}): Record<string, string> {
+export function effectiveModelFields(
+  overlay?: {
+    physics: Record<string, string>;
+    parameters: { raw_key: string; value: string; scope_instance: { kind: string } }[];
+  },
+  modelFields?: readonly Pick<SchemaField, 'name'>[],
+): Record<string, string> {
   if (!overlay) return {};
-  return {
+  const values = {
     ...overlay.physics,
     ...Object.fromEntries(
       overlay.parameters
@@ -98,7 +80,38 @@ export function effectiveModelFields(overlay?: {
         .map((p) => [p.raw_key, p.value]),
     ),
   };
+  return modelFields
+    ? Object.fromEntries(
+        Object.entries(values).filter(([key]) =>
+          modelFields.some((field) => field.name.toLowerCase() === key.toLowerCase()),
+        ),
+      )
+    : values;
 }
 export function cropEnabled(fields: Record<string, string>): boolean {
   return Object.keys(fields).some((key) => key.toUpperCase() === 'DEF_TUNING_CROP_PLANTING_DAY');
+}
+
+export function casePreparationOptions(
+  profile?: { classification?: 'IGBP' | 'USGS'; subgrid?: string; urban?: boolean; crop?: boolean },
+  seed?: { form: Record<string, string>; caseValues?: Record<string, string> } | null,
+) {
+  const classification = seed
+    ? seed.form.landcover === 'USGS'
+      ? 'USGS'
+      : 'IGBP'
+    : (profile?.classification ?? (profile?.subgrid === 'USGS' ? 'USGS' : 'IGBP'));
+  const subgrid = (
+    seed ? (seed.form.subgrid ?? classification) : (profile?.subgrid ?? classification)
+  ).toUpperCase();
+  const scheme =
+    subgrid === 'PFT' || subgrid === 'PC' ? subgrid.toLowerCase() : classification.toLowerCase();
+  const urban = seed
+    ? /^(true|\.true\.|1)$/i.test(seed.caseValues?.DEF_URBAN_RUN ?? '')
+    : profile?.urban === true;
+  return {
+    mode: urban ? `urban-${scheme}` : scheme,
+    crop: seed ? cropEnabled(seed.caseValues ?? {}) : profile?.crop === true,
+    classification,
+  };
 }

@@ -43,6 +43,10 @@ function harness() {
     derived: false,
   }));
   const props = {
+    onCaseChange: undefined as
+      undefined | ((patch: helpers.CaseOptionPatch) => void | Promise<void>),
+    caseValues: undefined as Record<string, string> | undefined,
+    subgrid: undefined as string | undefined,
     source: { kind: 'draft', id: 'd1', generation: 0, overlay } as helpers.ConfigurationSource,
     overlay,
     fields,
@@ -488,4 +492,77 @@ test('core runoff enum appears as choice cards while the visible guide shares th
   field.set('2');
   assert.equal(p.changes[0].physics.DEF_Runoff_SCHEME, '2');
   assert.throws(() => field.set('99'));
+});
+
+test('same-kernel scheme changes reload BGC tracer and PFT context and invalidate prior replies', async () => {
+  const h = harness();
+  h.props.subgrid = 'IGBP';
+  h.render();
+  await h.settle();
+  const old = h.requests.at(-1)!;
+  h.props.subgrid = 'PFT';
+  h.render();
+  const pft = h.requests.at(-1)!;
+  assert.notEqual(pft, old);
+  assert.equal((pft.args.caseValues as Record<string, string>).DEF_USE_PFT, '.true.');
+  h.props.subgrid = 'PC';
+  h.render();
+  const pc = h.requests.at(-1)!;
+  assert.notEqual(pc, pft);
+  assert.equal((pc.args.caseValues as Record<string, string>).DEF_USE_PC, '.true.');
+  assert.deepEqual(pc.args.source, pft.args.source);
+  assert.equal(pc.args.kernelDir, pft.args.kernelDir);
+  pft.resolve({ ...h.response(), warnings: ['STALE PFT RESULT'] });
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  h.render();
+  assert.ok(!JSON.stringify(h.nodes).includes('STALE PFT RESULT'));
+  await h.settle();
+  assert.ok(!JSON.stringify(h.nodes).includes('STALE PFT RESULT'));
+});
+
+test('frozen model process options persist an atomic case patch without editing the revision', async () => {
+  const h = harness(),
+    patches: helpers.CaseOptionPatch[] = [];
+  h.props.source = { kind: 'frozen', version: { id: 'official', revision: 1 } };
+  h.props.caseValues = {
+    DEF_USE_BGC: '.true.',
+    DEF_USE_MEDLYNST: '.false.',
+    DEF_USE_WUEST: '.true.',
+  };
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  const original = structuredClone(h.props.overlay);
+  h.render();
+  const c = await h.settle();
+  c.fields.find((f) => f.id === 'configuration-stomatal-scheme')!.set('MEDLYN');
+  for (let i = 0; i < 8; i++) await Promise.resolve();
+  assert.deepEqual(patches, [{ DEF_USE_MEDLYNST: '.true.', DEF_USE_WUEST: '.false.' }]);
+  assert.equal(h.changes.length, 0);
+  assert.deepEqual(h.props.overlay, original);
+});
+test('case option failure and readonly source gates preserve the selected revision', async () => {
+  const h = harness();
+  h.props.source = { kind: 'frozen', version: { id: 'official', revision: 1 } };
+  h.props.caseValues = { DEF_USE_BGC: '.true.' };
+  h.props.onCaseChange = async () => {
+    throw new Error('case save rejected');
+  };
+  const original = structuredClone(h.props.overlay);
+  h.render();
+  let c = await h.settle();
+  c.fields.find((f) => f.id === 'configuration-stomatal-scheme')!.set('MEDLYN');
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  c = h.render();
+  assert.match(c.status, /case save rejected/);
+  assert.deepEqual(h.props.overlay, original);
+  assert.equal(h.changes.length, 0);
+  h.props.subgrid = 'PC';
+  h.render();
+  const response = h.response();
+  response.fields.find((f) => f.name === 'DEF_USE_MEDLYNST')!.mode = 'readonly';
+  h.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  c = h.render();
+  assert.equal(c.fields.find((f) => f.id === 'configuration-stomatal-scheme')!.disabled, true);
 });

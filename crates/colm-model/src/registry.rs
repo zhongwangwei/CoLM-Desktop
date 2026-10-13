@@ -96,7 +96,7 @@ impl Registry {
         );
         validation::code(&frozen.code)?;
         validation::applicability(&frozen.applicability)?;
-        validate_overlay(&frozen.overlay)?;
+        validate_overlay(&model_overlay(&frozen.overlay))?;
         ensure!(
             digest_json(&frozen.overlay)? == frozen.overlay_sha256
                 && revision_fingerprint(&frozen)? == frozen.fingerprint,
@@ -156,7 +156,9 @@ impl Registry {
     }
     pub fn draft(&self, id: &str) -> Result<ModelDraft> {
         validation::identifier(id)?;
-        let draft: ModelDraft = read_json(&self.root.join("drafts").join(format!("{id}.json")))?;
+        let mut draft: ModelDraft =
+            read_json(&self.root.join("drafts").join(format!("{id}.json")))?;
+        draft.overlay = model_overlay(&draft.overlay);
         ensure!(draft.id == id, "draft identity mismatch");
         self.validate_draft(&draft)?;
         Ok(draft)
@@ -173,7 +175,7 @@ impl Registry {
         let parent = self.get(&draft.parent)?;
         let changes = draft.overlay;
         check_expected_values(&changes, &parent.overlay)?;
-        draft.overlay = parent.overlay;
+        draft.overlay = model_overlay(&parent.overlay);
         for record in changes.parameters {
             if record.scope_instance.kind == "case-scalar" {
                 draft
@@ -448,7 +450,7 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
 pub(crate) fn digest_json<T: Serialize>(value: &T) -> Result<String> {
     Ok(digest(&serde_json::to_vec(value)?))
 }
-fn revision_fingerprint(r: &FrozenRevision) -> Result<String> {
+pub(crate) fn revision_fingerprint(r: &FrozenRevision) -> Result<String> {
     digest_json(&(
         r.schema,
         &r.version.id,

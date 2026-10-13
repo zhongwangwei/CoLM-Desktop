@@ -23,7 +23,8 @@ import type { ConfigurationField } from '../versions/configuration-options';
 import ProcessDataGroups from './ProcessDataGroups';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
-import type { SetupRequest } from '../versions/scientific-setup';
+import { caseSchemeFields, type SimulationMode } from './model-settings';
+import type { CaseOptionPatch } from '../versions/configuration-options';
 import RunPanel from '../runs/RunPanel';
 import ResultsPage from '../results/ResultsPage';
 import HistoryPage from '../history/HistoryPage';
@@ -48,12 +49,15 @@ export default function CasesPage() {
     [advanced, setAdvanced] = useState(state.expert);
   const [dataOpened, setDataOpened] = useState<Record<string, boolean>>({}),
     [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
-    [optionError, setOptionError] = useState('');
+    [optionError, setOptionError] = useState(''),
+    [explicitValues, setExplicitValues] = useState<Record<string, string>>({}),
+    [modelKeys, setModelKeys] = useState<SchemaField[]>([]);
   const epoch = useRef({ active: false }),
     lock = useRef(false),
     versionId = state.versionRef.id,
     revision = state.versionRef.revision,
     overlay = state.version?.overlay;
+  const physics = { ...effectiveModelFields(overlay, modelKeys), ...explicitValues };
   const [modelContext, setModelContext] = useState<{
     dir: string;
     id: string;
@@ -91,6 +95,51 @@ export default function CasesPage() {
   useEffect(() => {
     update({ simulationReturn: null });
   }, [update]);
+  async function changeCaseOptions(patch: CaseOptionPatch) {
+    if (!dir || editingDisabled || dirty) return;
+    await work(async () => {
+      const target = dir,
+        request = epoch.current;
+      await invoke('case_data_save', {
+        dirs: [target],
+        fields: Object.entries(patch)
+          .filter(([, value]) => value !== null)
+          .map(([path, value]) => ({ path, value })),
+        removeFields: Object.keys(patch).filter((key) => patch[key] === null),
+        modelRevision: state.versionRef,
+        kernelDir: configurationKernel?.dir ?? null,
+      });
+      const context = await invoke<{
+        entry: { dir: string };
+        profile: NonNullable<typeof modelContext>['profile'];
+      }>('model_case_context', { dir: target, modelRevision: state.versionRef });
+      if (request.active && epoch.current === request) {
+        setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
+        if (state.selectedCase?.entry.dir === target)
+          update({
+            selectedCase: {
+              ...state.selectedCase,
+              profile: { ...state.selectedCase.profile, ...context.profile },
+            },
+          });
+        const apply = (old: Record<string, string>) => {
+          const next = { ...old };
+          for (const [key, value] of Object.entries(patch)) {
+            if (value === null) delete next[key];
+            else next[key] = value;
+          }
+          return next;
+        };
+        setValues(apply);
+        setSaved(apply);
+        setExplicitValues(apply);
+        setError('');
+      }
+    });
+  }
+  function selectMode(mode: SimulationMode) {
+    return changeCaseOptions(caseSchemeFields(mode));
+  }
   function discard() {
     setValues({ ...saved });
     setDateDraft({});
@@ -102,6 +151,7 @@ export default function CasesPage() {
     const versionRef = { id: versionId, revision };
     setSchema([]);
     setValues({});
+    setExplicitValues({});
     setSaved({});
     setDateDraft({});
     setContextReason({});
@@ -133,7 +183,7 @@ export default function CasesPage() {
       if (!request.active) return;
       setModelContext({ dir: dir!, id: versionId, revision, profile: context.profile });
       const preview = context.entry.dir,
-        kernel = compatibleKernel(state.kernels, context.profile, effectiveModelFields(overlay));
+        kernel = compatibleKernel(state.kernels, context.profile);
       const [all, text, sourceText, modelFields] = await Promise.all([
         invoke<SchemaField[]>('describe_fields', {}),
         invoke<string>('read_text', { path: `${preview}/case.nml` }),
@@ -166,9 +216,15 @@ export default function CasesPage() {
         fields.map((f) => [f.name, actual[f.name] ?? displayLiteral(f.default)]),
       );
       if (!request.active) return;
+      setModelKeys(modelFields);
       setSchema(fields);
       setValues(v);
       setSaved(v);
+      setExplicitValues(
+        Object.fromEntries(
+          Object.entries(actual).filter(([key]) => fields.some((f) => f.name === key)),
+        ),
+      );
       setContextReason(
         Object.fromEntries([
           ...modes.filter((m) => m.reason).map((m) => [m.name, m.reason!]),
@@ -198,12 +254,13 @@ export default function CasesPage() {
     };
   }, [dir, versionId, revision, state.kernels, overlay, notify]);
   const configurationKernel = effectiveProfile
-    ? compatibleKernel(state.kernels, effectiveProfile, effectiveModelFields(overlay))
+    ? compatibleKernel(state.kernels, effectiveProfile, physics)
     : undefined;
   const dataPatch = Object.fromEntries(
     Object.entries(values).filter(
       ([key, value]) =>
-        value !== saved[key] &&
+        (value !== saved[key] ||
+          ['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC', 'DEF_SUBGRID_SCHEME'].includes(key)) &&
         (value !== '' || schema.find((f) => f.name === key)?.kind.startsWith('Character')),
     ),
   );
@@ -228,7 +285,7 @@ export default function CasesPage() {
     return () => {
       current = false;
     };
-  }, [dataRequest, dir, schema.length]);
+  }, [dataRequest, dir, schema.length, explicitValues]);
   const start = dateDraft.start ?? caseDate(values, 'start'),
     end = dateDraft.end ?? caseDate(values, 'end'),
     spinup = dateDraft.spinup ?? caseDate(values, 'spinup');
@@ -279,17 +336,17 @@ export default function CasesPage() {
         fields,
         kernelDir:
           (effectiveProfile
-            ? compatibleKernel(
-                state.kernels,
-                effectiveProfile,
-                effectiveModelFields(state.version?.overlay),
-              )
+            ? compatibleKernel(state.kernels, effectiveProfile, physics)
             : undefined
           )?.dir ?? null,
         modelRevision: state.versionRef,
       });
       if (id.active && epoch.current === id) {
         setSaved({ ...values });
+        setExplicitValues((old) => ({
+          ...old,
+          ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
+        }));
         setDateDraft({});
         setError('');
         notify(t('算例设置已保存', 'Case settings saved'));
@@ -317,18 +374,17 @@ export default function CasesPage() {
     MONTHLY: t('每月', 'Monthly'),
     YEARLY: t('每年', 'Yearly'),
   };
-  const physics = effectiveModelFields(overlay),
-    dataGroups =
-      state.caseTab === 'settings' && step === 3
-        ? processDataSections
-            .map(([id, zh, english, parent]) => ({
-              id,
-              title: t(zh, english),
-              fields: schema.filter((f) => processDataGroupId(f) === id),
-              open: dataOpened[id] ?? /^(true|\.true\.)$/i.test(physics[parent] ?? ''),
-            }))
-            .filter((group) => group.fields.length)
-        : [];
+  const dataGroups =
+    state.caseTab === 'settings' && step === 3
+      ? processDataSections
+          .map(([id, zh, english, parent]) => ({
+            id,
+            title: t(zh, english),
+            fields: schema.filter((f) => processDataGroupId(f) === id),
+            open: dataOpened[id] ?? /^(true|\.true\.)$/i.test(physics[parent] ?? ''),
+          }))
+          .filter((group) => group.fields.length)
+      : [];
   const groupFields = dataGroups.flatMap((group) => group.fields),
     shown = [
       ...simulationFields(schema, step, advanced).filter((f) => !groupFields.includes(f)),
@@ -378,9 +434,9 @@ export default function CasesPage() {
     await save();
     setStep((step + 1) as SimulationStep);
   }
-  function editModel(setup?: SetupRequest) {
-    update({ simulationReturn: { route: 'case', step: 2, ...(setup ? { setup } : {}) } });
-    return navigate('versions');
+  function openResearch() {
+    update({ simulationReturn: { route: 'case', step: 2 } });
+    return navigate('research');
   }
   const datePrefixes: ('start' | 'end' | 'spinup')[] =
     step === 3 ? ['start', 'end'] : step === 4 ? ['spinup'] : [];
@@ -753,35 +809,28 @@ export default function CasesPage() {
                 classification={effectiveProfile?.classification}
                 kernel={
                   effectiveProfile
-                    ? compatibleKernel(
-                        state.kernels,
-                        effectiveProfile,
-                        effectiveModelFields(state.version?.overlay),
-                      )
+                    ? compatibleKernel(state.kernels, effectiveProfile, physics)
                     : undefined
                 }
+                onModeChange={(mode) => {
+                  void selectMode(mode).catch(() => {});
+                }}
                 setupEnvironment={{
+                  subgrid: effectiveProfile?.subgrid,
+                  caseValues: explicitValues,
                   domain: effectiveProfile?.grid ? 'region' : effectiveProfile ? 'site' : null,
                   grid: effectiveProfile?.grid,
                   classification: effectiveProfile?.classification,
                   kernel: effectiveProfile
-                    ? compatibleKernel(
-                        state.kernels,
-                        effectiveProfile,
-                        effectiveModelFields(state.version?.overlay),
-                      )
+                    ? compatibleKernel(state.kernels, effectiveProfile, physics)
                     : undefined,
                   cropKernel: effectiveProfile
-                    ? compatibleKernel(
-                        state.kernels,
-                        { ...effectiveProfile, crop: true },
-                        effectiveModelFields(state.version?.overlay),
-                      )
+                    ? compatibleKernel(state.kernels, { ...effectiveProfile, crop: true }, physics)
                     : undefined,
                 }}
-                onSetupRequest={(request) => editModel(request)}
+                onCaseChange={changeCaseOptions}
                 disabled={editingDisabled || dirty}
-                onEdit={() => editModel()}
+                onEdit={() => openResearch()}
               />
               {dirty && (
                 <p className="field-hint">

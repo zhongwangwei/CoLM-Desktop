@@ -4074,6 +4074,19 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
             })
         }
         K::Character { len } => {
+            if matches!(
+                f.name,
+                "DEF_TRACER_MRAT"
+                    | "DEF_TRACER_REF_RATIO"
+                    | "DEF_TRACER_INIT_DELTA"
+                    | "DEF_TRACER_REACTIVE_DECAY_RATE"
+            ) && !bare.trim().is_empty()
+                && !bare
+                    .split(',')
+                    .all(|number| parse_real(number.trim()).is_some_and(f64::is_finite))
+            {
+                return Err(format!("{path}: tracer values must be finite numbers"));
+            }
             if f.name.eq_ignore_ascii_case("DEF_CASE_NAME") {
                 crate::project::validate_case_name(raw.trim_matches(|c| c == '\'' || c == '"'))?;
             }
@@ -4414,7 +4427,17 @@ fn set_fields_with_context(
     kernel_dir: Option<String>,
     contexts: Option<&[String]>,
 ) -> Result<BatchWrite, String> {
-    if fields.is_empty() {
+    set_fields_with_changes(dirs, fields, &[], kernel_dir, contexts)
+}
+
+fn set_fields_with_changes(
+    dirs: Vec<String>,
+    fields: Vec<FieldChange>,
+    remove_fields: &[String],
+    kernel_dir: Option<String>,
+    contexts: Option<&[String]>,
+) -> Result<BatchWrite, String> {
+    if fields.is_empty() && remove_fields.is_empty() {
         return Err("没有要保存的字段".into());
     }
     let kernel = kernel_facts(kernel_dir.as_deref())?;
@@ -4432,6 +4455,25 @@ fn set_fields_with_context(
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;
         }
+        for key in remove_fields {
+            if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                put(&mut doc, key, colm_namelist::Value::Str(String::new()))?;
+            } else {
+                doc.remove(key).map_err(|e| format!("{d}: {e}"))?;
+            }
+        }
+        if fields
+            .iter()
+            .any(|field| field.path.eq_ignore_ascii_case("DEF_SUBGRID_SCHEME"))
+        {
+            let scheme = character(&doc, "DEF_SUBGRID_SCHEME").to_ascii_uppercase();
+            if matches!(scheme.as_str(), "IGBP" | "USGS") {
+                extra.push(crate::project::stage_case_classification(
+                    std::path::Path::new(&d),
+                    &scheme,
+                )?);
+            }
+        }
         if !history.is_empty() {
             extra.push(stage_history_file(
                 &mut doc,
@@ -4448,8 +4490,19 @@ fn set_fields_with_context(
                 .map_err(|e| e.to_string())?;
             let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
             for field in &fields {
+                // The candidate preview already resolves aliases to the selected frozen assets.
+                if field.path.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                    continue;
+                }
                 put(&mut overlay, &field.path, typed(&field.path, &field.value)?)
                     .map_err(|e| e.to_string())?;
+            }
+            for key in remove_fields {
+                if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                    put(&mut overlay, key, colm_namelist::Value::Str(String::new()))?;
+                } else {
+                    overlay.remove(key).map_err(|e| format!("{d}: {e}"))?;
+                }
             }
             effective = overlay;
             &effective
@@ -4800,6 +4853,7 @@ pub async fn case_data_save(
     dirs: Vec<String>,
     fields: Vec<FieldChange>,
     kernel_dir: Option<String>,
+    remove_fields: Option<Vec<String>>,
     model_revision: Option<colm_model::VersionRef>,
 ) -> Result<BatchWrite, String> {
     if let Some(field) = fields.iter().find(|f| colm_model::is_model_field(&f.path)) {
@@ -4808,18 +4862,41 @@ pub async fn case_data_save(
             field.path
         ));
     }
+    let remove_fields = remove_fields.unwrap_or_default();
+    for key in &remove_fields {
+        let field = colm_schema::find(key).ok_or_else(|| format!("unknown case field: {key}"))?;
+        if field.group != Some("nl_colm") || colm_model::is_model_field(key) {
+            return Err(format!("{key} is not a removable case field"));
+        }
+        if fields
+            .iter()
+            .any(|field| field.path.eq_ignore_ascii_case(key))
+        {
+            return Err(format!("{key} cannot be set and removed together"));
+        }
+    }
+    let case_fields = fields
+        .iter()
+        .filter(|field| !field.path.starts_with("DEF_hist_vars%"))
+        .map(|field| Ok((field.path.clone(), typed(&field.path, &field.value)?)))
+        .collect::<Result<Vec<_>, String>>()?;
     let before = read_all(&dirs)?;
     let mut contexts = Vec::new();
     let result = async {
         for dir in &dirs {
-            let context =
-                crate::model::model_case_context(dir.clone(), model_revision.clone()).await?;
+            let context = crate::model::model_case_context_with_fields(
+                dir.clone(),
+                model_revision.clone(),
+                &case_fields,
+                &remove_fields,
+            )
+            .await?;
             contexts.push(context.entry.dir);
         }
         if read_all(&dirs)? != before {
             return Err("case data changed while validating; reload before saving".into());
         }
-        set_fields_with_context(dirs, fields, kernel_dir, Some(&contexts))
+        set_fields_with_changes(dirs, fields, &remove_fields, kernel_dir, Some(&contexts))
     }
     .await;
     for context in contexts {

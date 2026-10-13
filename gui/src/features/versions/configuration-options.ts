@@ -382,75 +382,16 @@ export function setProcessOption(
   descriptor: Descriptor,
   value: string,
   file: string,
-  context: ConfigurationField[],
   shape?: string,
-  activeMethaneAsset?: boolean | null,
 ): Overlay {
-  let next = setScopedOption(overlay, descriptor, value, 0, file, shape);
-  if (
-    activeMethaneAsset === true &&
-    descriptor.raw_key.toLowerCase() === 'def_methane%inundation_mode'
-  ) {
-    const rawMode = unquote(value).toLowerCase();
-    const mode =
-      (
-        {
-          'dynamic-wtd': 'dynamic_wtd',
-          dh_all_thr05: 'hybrid',
-          dyn_routing_hybrid: 'hybrid',
-          giems: 'satellite',
-        } as Record<string, string>
-      )[rawMode] ?? rawMode;
-    if (['routing', 'hybrid'].includes(mode))
-      for (const key of ['DEF_USE_GridRiverLakeFlow', 'DEF_USE_SinglePoint']) {
-        const v = context.find((f) => f.name === key)?.configured_value?.toLowerCase();
-        if (
-          (key === 'DEF_USE_GridRiverLakeFlow' && v === '.false.') ||
-          (key === 'DEF_USE_SinglePoint' && v === '.true.')
-        )
-          throw new Error(
-            bilingual('河道淹水需要空间模式和河湖过程', 'Routing needs a spatial case and rivers'),
-          );
-      }
-    next = patchPhysics(next, {
-      DEF_USE_Dynamic_Wetland: ['dynamic_wtd', 'hybrid'].includes(mode) ? '.true.' : '.false.',
-    });
-  }
-  return next;
+  return setScopedOption(overlay, descriptor, value, 0, file, shape);
 }
-
 export function resetProcessOption(
   overlay: Overlay,
   descriptor: Descriptor,
   file: string,
-  original: string | null,
-  context: ConfigurationField[],
-  shape?: string,
-  activeMethaneAsset?: boolean | null,
 ): Overlay {
-  const reset = resetScopedOption(overlay, descriptor, 0, file);
-  if (
-    activeMethaneAsset !== true ||
-    descriptor.raw_key.toLowerCase() !== 'def_methane%inundation_mode'
-  )
-    return reset;
-  if (original === null)
-    throw new Error(
-      bilingual(
-        '资产未明确淹水模式，无法安全恢复联动开关',
-        'Asset has no explicit inundation mode',
-      ),
-    );
-  const linked = setProcessOption(
-    reset,
-    descriptor,
-    original,
-    file,
-    context,
-    shape,
-    activeMethaneAsset,
-  );
-  return resetScopedOption(linked, descriptor, 0, file);
+  return resetScopedOption(overlay, descriptor, 0, file);
 }
 
 export const tracerFamilies = [
@@ -469,6 +410,7 @@ export const tracerFamilies = [
 ] as const;
 export type TracerFamily = (typeof tracerFamilies)[number]['id'];
 export type FamilyContext = {
+  subgrid?: string;
   kernelMacros?: readonly string[] | null;
   caseScope?: 'site' | 'spatial' | 'unknown' | null;
 };
@@ -535,14 +477,9 @@ export function tracerFamilyState(
   else if (!macros) pending.push(['算例范围与内核待核对', 'Case scope and kernel pending']);
   if (family === 'methane') {
     need('DEF_USE_BGC', true, '甲烷需要 BGC', 'Methane requires BGC');
-    if (
-      flag('DEF_USE_LCT') === true ||
-      (flag('DEF_USE_PFT') === true && flag('DEF_USE_PC') === true) ||
-      (flag('DEF_USE_PFT') === false && flag('DEF_USE_PC') === false)
-    )
-      reasons.push([bilingual('甲烷需要 PFT', 'PC'), 'Methane requires PFT / PC']);
-    else if (['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC'].some((key) => flag(key) === null))
-      pending.push(['PFT / PC 结构待确认', 'PFT / PC structure pending']);
+    if (context.subgrid && !['PFT', 'PC'].includes(context.subgrid.toUpperCase()))
+      reasons.push(['甲烷需要 PFT / PC', 'Methane requires PFT / PC']);
+    else if (!context.subgrid) pending.push(['PFT / PC 结构待确认', 'PFT / PC structure pending']);
   }
   if (family === 'isotope')
     need(
@@ -583,4 +520,47 @@ export function setStomatalScheme(overlay: Overlay, fields: ModelField[], scheme
     DEF_USE_MEDLYNST: scheme === 'MEDLYN' ? '.true.' : '.false.',
     DEF_USE_WUEST: scheme === 'WUE' ? '.true.' : '.false.',
   });
+}
+
+export type CaseOptionPatch = Record<string, string | null>;
+export function caseOptionOverlay(
+  overlay: Overlay,
+  fields: readonly ModelField[],
+  caseValues: Record<string, string> | null | undefined,
+  context: readonly ConfigurationField[] = [],
+): Overlay {
+  const names = new Set(fields.map((field) => field.name.toLowerCase()));
+  const explicit = Object.fromEntries(
+    context
+      .filter((field) => names.has(field.name.toLowerCase()) && field.configured_value !== null)
+      .map((field) => [field.name, field.configured_value!]),
+  );
+  const physics = {
+    ...Object.fromEntries(
+      Object.entries(overlay.physics).filter(([key]) => !names.has(key.toLowerCase())),
+    ),
+    ...explicit,
+    ...Object.fromEntries(
+      Object.entries(caseValues ?? {}).filter(([key]) => names.has(key.toLowerCase())),
+    ),
+  };
+  return {
+    ...overlay,
+    physics,
+    parameters: overlay.parameters.filter(
+      (record) =>
+        record.scope_instance.kind !== 'case-scalar' || !names.has(record.raw_key.toLowerCase()),
+    ),
+  };
+}
+export function caseOptionPatch(
+  before: Overlay,
+  after: Overlay,
+  fields: readonly ModelField[],
+): CaseOptionPatch {
+  return Object.fromEntries(
+    fields
+      .filter((field) => before.physics[field.name] !== after.physics[field.name])
+      .map((field) => [field.name, after.physics[field.name] ?? null]),
+  );
 }

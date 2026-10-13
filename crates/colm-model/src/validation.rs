@@ -116,55 +116,37 @@ fn validate_date(s: &str) -> Result<()> {
     );
     Ok(())
 }
-/// Model controls only; site, data, periods, initialization and output stay case-owned.
-pub fn is_model_field(key: &str) -> bool {
-    if colm_case::pft::is_override_path(key) {
-        return true;
-    }
-    let Some(f) = colm_schema::find(key) else {
-        return false;
+/// Historical revisions keep their stored identity, but case settings no longer override cases.
+pub fn model_overlay(overlay: &Overlay) -> Overlay {
+    let mut overlay = overlay.clone();
+    let is_case_control = |key: &str| {
+        colm_schema::find(key).is_some_and(|f| f.group.is_some()) && !is_model_field(key)
     };
-    if f.group.is_none() {
-        return false;
-    }
-    if matches!(
-        f.name.to_ascii_uppercase().as_str(),
-        "DEF_LC_YEAR" | "DEF_LAI_START_YEAR"
-    ) {
-        return false;
-    }
-    let lower = f.name.to_ascii_lowercase();
-    if matches!(f.kind, colm_schema::FieldKind::Character { .. })
-        && lower != "def_tracer_param_files"
-        && (lower.contains("file") || lower.contains("dir") || lower.contains("path"))
-    {
-        return false;
-    }
-    // Surface datasets/year remain case-owned; these controls select model structure.
-    if matches!(
-        f.name.to_ascii_uppercase().as_str(),
-        "DEF_USE_LCT"
-            | "DEF_USE_PFT"
-            | "DEF_USE_PC"
-            | "DEF_SOLO_PFT"
-            | "DEF_FAST_PC"
-            | "DEF_PC_CROP_SPLIT"
-            | "DEF_SUBGRID_SCHEME"
-            | "DEF_SOILPAR_UPS_FIT"
-            | "DEF_SOIL_REFL_SCHEME"
-            | "DEF_LULCC_SCHEME"
-            | "DEF_USE_LULCC"
-            | "DEF_HIGHRESURBAN_ALBEDO"
-    ) {
+    overlay.physics.retain(|key, _| !is_case_control(key));
+    overlay.parameters.retain(|record| {
+        record.scope_instance.kind != "case-scalar" || !is_case_control(&record.raw_key)
+    });
+    overlay
+}
+
+/// Only actual coefficients belong to a model; selecting existing schemes is case configuration.
+pub fn is_model_field(key: &str) -> bool {
+    if colm_case::pft::is_parameter(key) || colm_case::land_cover::is_parameter(key) {
         return true;
     }
-    matches!(
-        colm_case::parameters::field_section(f.name, f.group),
-        Some("水热过程" | "生态与生地化" | "示踪剂" | "城市" | "河道与水库" | "数据同化")
-    ) && !matches!(
-        f.name.to_ascii_uppercase().as_str(),
-        "DEF_DIR_RUNTIME" | "DEF_DIR_RAWDATA"
-    )
+    if colm_case::tuning::find(key)
+        .ok()
+        .flatten()
+        .is_some_and(|p| p.supports_continuous_sampling())
+    {
+        return true;
+    }
+    colm_schema::find(key).is_some_and(|field| {
+        field.group.is_some()
+            && (field.name.starts_with("DEF_TRACER_")
+                && matches!(field.kind, colm_schema::FieldKind::Real)
+                || field.name == "DEF_GridRiverLake_FloodInfiltMax")
+    })
 }
 
 pub(crate) fn literal(text: &str) -> Result<Value> {

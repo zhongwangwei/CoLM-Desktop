@@ -142,17 +142,6 @@ export function versionDepth(v: FrozenRevision, all: FrozenRevision[]) {
 
 export const foundationControls = [
   {
-    id: 'subgrid',
-    zh: '植被组织方式',
-    en: 'Vegetation structure',
-    keys: ['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC'],
-    choices: [
-      ['LCT', 'LCT · 地类', 'LCT · land-cover classes'],
-      ['PFT', 'PFT · 植被功能型', 'PFT · plant functional types'],
-      ['PC', 'PC · 群落', 'PC · plant communities'],
-    ],
-  },
-  {
     id: 'soil',
     zh: '土壤水力方案',
     en: 'Soil hydraulic scheme',
@@ -222,7 +211,10 @@ export function setFoundation(
   fields: ModelField[],
   id: string,
   value: string,
+  subgrid?: string,
 ) {
+  if (id === 'subgrid')
+    throw new Error(bilingual('植被方案属于算例', 'Vegetation scheme belongs to the case'));
   const control = foundationControls.find((c) => c.id === id);
   if (
     !control ||
@@ -231,19 +223,12 @@ export function setFoundation(
   )
     throw new Error(bilingual('该基础结构不可修改', 'Foundation control is not writable'));
   const patch: Record<string, string> =
-    id === 'subgrid'
-      ? Object.fromEntries(
-          ['LCT', 'PFT', 'PC'].map((name) => [
-            `DEF_USE_${name}`,
-            name === value ? '.true.' : '.false.',
-          ]),
-        )
-      : id === 'soil'
-        ? {
-            DEF_USE_Campbell_SOIL_MODEL: value === 'Campbell' ? '.true.' : '.false.',
-            ...(value === 'vG' ? { DEF_USE_VariablySaturatedFlow: '.true.' } : {}),
-          }
-        : { [id]: value };
+    id === 'soil'
+      ? {
+          DEF_USE_Campbell_SOIL_MODEL: value === 'Campbell' ? '.true.' : '.false.',
+          ...(value === 'vG' ? { DEF_USE_VariablySaturatedFlow: '.true.' } : {}),
+        }
+      : { [id]: value };
   if (
     parameters.some((r) =>
       Object.keys(patch).some((k) => k.toLowerCase() === r.raw_key.toLowerCase()),
@@ -252,21 +237,7 @@ export function setFoundation(
     throw new Error(
       bilingual('请先移除同名参数覆盖', 'Remove the conflicting parameter override first'),
     );
-  const bgc =
-    physicsValue(physics, 'DEF_USE_BGC') ??
-    parameters
-      .find((r) => r.raw_key.toLowerCase() === 'def_use_bgc')
-      ?.value.trim()
-      .toLowerCase();
-  if (id === 'subgrid' && value === 'LCT' && bgc === '.true.')
-    throw new Error(
-      bilingual('BGC 需要 PFT 或 PC；请先明确关闭 BGC', 'Disable BGC before choosing LCT'),
-    );
-  if (
-    id === 'DEF_USE_BGC' &&
-    value === '.true.' &&
-    !['PFT', 'PC'].includes(foundationValue(physics, 'subgrid', parameters))
-  )
+  if (id === 'DEF_USE_BGC' && value === '.true.' && !['PFT', 'PC'].includes(subgrid ?? ''))
     throw new Error(
       bilingual('请先明确选择 PFT 或 PC，再开启 BGC', 'Select PFT or PC before enabling BGC'),
     );

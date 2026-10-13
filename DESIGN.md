@@ -23,7 +23,7 @@
 
 ## Information architecture
 - 官方模型启动时载入作为可选来源；项目首页必须由用户明确选择版本，才解锁下方操作。选择在本次软件会话保留，重启重新选择。没有额外版本选择页、顶部流程条或启动分流页。窗口顶框仅保留品牌、AI 助手和语言按钮。
-- 模型决定怎么算：冻结源码、参数、物理过程和网络。算例决定地点、时段、数据及输出。每次运行使用独立副本，绑定完整修订和实际程序、输入、机器身份。
+- 模型决定怎么算：冻结源码、参数、过程实现和网络。算例决定现成方案与过程开关、地点、时段、数据及输出。每次运行使用独立副本，绑定完整修订和实际程序、输入、机器身份。
 - 项目首页按用户最新示意图：标题“开始你的研究”，三张并排入口卡“新建模拟 / 打开项目 / 直接查看结果”，CN-Cng 内置示例横卡，最近项目列表；目录、模型管理和数据准备不在首页展开成表单。主线：新建/试示例或打开算例 → 检查数据与时段 → 本机或服务器运行 → 内置结果分析。缺少同条件来源结果时提示缺基准，不自动追加计算。
 - 左栏按用户 2026-10-12 提供的示意图统一：项目、模拟、结果、研究、历史记录；计算资源和设置固定在底部。统一使用线性图标、青绿色整行选中样式。当前模型、新建算例、算例列表与准备数据收进项目页；主题、专家模式和帮助收进设置。
 - 算例：设置、运行记录、结果。版本：源码、参数、物理、网络与修订。研究：率定、不确定性、学习参数、替代过程；验证后的产物存为模型版本。
@@ -213,7 +213,7 @@
 ## Scientific configuration dependency order (2026-10-13)
 - User requirement: expose IGBP/USGS and complete model schemes before data-dependent options; keep the five-step flow but move science configuration to step 2. Detailed field ownership and dependencies are recorded in `docs/simulation-configuration-order.md`.
 - Classification: IGBP (17) and USGS (24) are compile-time capabilities selected through the existing case creation mode, independently of runtime LCT/PFT/PC. New cases select classification explicitly; existing cases show their actual kernel/creation identity. Installed kernel availability does not prove version or input compatibility.
-- Foundation: version drafts expose atomic LCT/PFT/PC, Campbell/vG, BGC, urban and tracer controls before other process options. Read explicit physics and case-scalar overrides; unspecified values belong to the frozen source and remain unconfirmed. Frozen revisions stay immutable. The unused DEF_SUBGRID_SCHEME remains an explained read-only reference.
+- Foundation: case setup owns atomic LCT/PFT/PC and land classification; case setup exposes Campbell/vG, BGC, urban and tracer controls before other process options. Read explicit physics and case-scalar overrides; unspecified values belong to the frozen source and remain unconfirmed. Frozen revisions stay immutable. DEF_SUBGRID_SCHEME is a case-owned scheme label; runtime vegetation selection uses the explicit case flags.
 - Coverage: reuse all model_fields and parameter_catalog records, including scoped and read-only references. Display scope, units, activation, source and reference-default labels; do not convert blocked datasets or source-derived fields into editable controls.
 - Integrity: previews preserve source-case classification, crop input and domain while using the new materialized runtime structure. Local and final remote kernel gates check compile classification/crop separately from actual runtime structure and parameter scopes. Scientific applicability remains pending real checks; reference metadata never proves effective values.
 - Code validation: 163 frontend tests, lint/type/IPC/build; 13 model tests and 375 serial CLI tests on T7920; 14 profile and 1 real materialization-preview tests on cached Mac backend; independent code/architecture reviews passed. Parallel CLI has 8 HDF/read-related failures retained in round 685. Linux GUI blocked by missing Wayland development library. Native package exception approval and new UI screenshot validation remain pending; round 683/684 evidence applies only to those packages.
@@ -231,8 +231,8 @@
 
 ### Four land-cover and vegetation entries (2026-10-13)
 - Restore the old IGBP, USGS, PFT and PC entry cards in model step 2. IGBP/USGS represent LCT with a classification; PFT/PC represent vegetation structure and retain a separate IGBP/USGS data-source choice. Reuse the existing choice cards and responsive grid.
-- Cross-structure selection returns through the model draft workflow. Deriving the requested structure writes the complete mutually exclusive LCT/PFT/PC controls; saving and freezing binds it to the model revision. Do not mutate a frozen revision, use template-only mode as evidence, or silently disable BGC/CROP.
-- Same-structure selection stays on the setup page. Preserve classification, dates, paths and other case edits across the editor round trip. Existing cases display their actual structure and remain read-only at these cards.
+- Vegetation scheme selection writes the complete mutually exclusive LCT/PFT/PC controls directly to the case and keeps the selected model revision. Do not silently disable BGC/CROP; check their prerequisites against case-owned schemes.
+- Same-structure selection stays on the setup page. Preserve classification, dates, paths and other case edits across the editor round trip. Existing cases save scheme choices directly; data and kernel compatibility remain separate checks.
 - Regression evidence and final native screenshots are recorded in implementation-verification round 688; prior round 687 delivered the source-bound Mac package for the conditional options.
 
 
@@ -244,7 +244,14 @@
 - Detailed options keep their typed numeric/list editors and real input/output checks. Core runoff, fractionation, methane modes, and stomatal choices use cards; no parallel save protocol or new dependencies. Current source/catalog data are references until version, actual kernel and inputs are checked.
 - Acceptance evidence belongs to implementation-verification round689 and .omx/reports/scientific-setup-cards-2026-10-13; layout screenshots do not replace a scientific simulation.
 
-### Usable PFT/PC selection (2026-10-13)
-- Existing-case structure cards request the same model-version change while keeping actual land classification and running/unsaved locks. The active structure needs no repeated derivation.
-- A simulation structure request pre-fills version metadata and exposes one primary Apply and continue action above the general editor. Use the existing create/query/apply/save/freeze protocol; update the selected revision and return only after successful freeze. Failure retains the original revision and editable draft; retry reuses that draft.
-- Actual plant composition, domain/classification/kernel compatibility and source binding still use existing backend checks. Do not mark a card applied before a frozen revision exists. Evidence in implementation-verification round690.
+### Case-owned vegetation schemes (2026-10-13 user override)
+- IGBP, USGS, PFT and PC all belong to the case. Selection writes case fields directly without deriving, saving or freezing a model revision. Process implementations, parameter overrides, code and AI networks remain model-owned.
+- DEF_USE_LCT, DEF_USE_PFT, DEF_USE_PC and DEF_SUBGRID_SCHEME are excluded from model controls and migration overlays. Historical revisions retain their original bytes and fingerprints; effective overlays omit former scheme controls, and derived drafts do not inherit them.
+- Prerequisites and PFT/PC parameter scopes use explicit case controls. Missing, conflicting or incompatible controls fail validation rather than silently dropping parameter overrides. Surface data and compiled classification still require independent checks.
+- The model editor return action stays at the top and is blocked only by unsaved edits. Saved drafts may remain unfrozen while the simulation continues with its original selected revision.
+
+## 算例与研究的版本边界（2026-10-13）
+
+- 用户决定：没有修改参数或过程实现的配置都属于算例。植被、土壤水力、BGC、河湖、城市、作物、示踪定义及其他现成方案直接保存算例，不派生、保存或冻结模型版本。
+- 实际参数值、过程文件内容、源码和 AI 网络在研究中修改，研究成果保存为新版本；模拟页面通过“研究与参数调整”进入这一流程。
+- 兼容性从实际算例值、所选版本参数及内核读取。旧版本中的算例控制项保留原始字节及哈希，但不再覆盖算例，派生草稿不继承这些控制项。

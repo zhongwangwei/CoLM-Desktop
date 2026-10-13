@@ -148,6 +148,32 @@ pub(crate) fn record_case(dir: &str, record: &CaseRecord) {
     }
 }
 
+pub(crate) fn stage_case_classification(
+    dir: &Path,
+    scheme: &str,
+) -> Result<(PathBuf, String), String> {
+    let path = dir.join(PROFILE_FILE);
+    let mut record: CaseRecord = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CaseRecord::default(),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    let prefix = if record
+        .mode
+        .as_deref()
+        .is_some_and(|mode| mode.starts_with("urban-"))
+    {
+        "urban-"
+    } else {
+        ""
+    };
+    record.mode = Some(format!("{prefix}{}", scheme.to_ascii_lowercase()));
+    Ok((
+        path,
+        serde_json::to_string(&record).map_err(|e| e.to_string())?,
+    ))
+}
+
 fn recorded_case(dir: &Path) -> CaseRecord {
     std::fs::read_to_string(dir.join(PROFILE_FILE))
         .ok()
@@ -209,8 +235,8 @@ fn real_input_dir(dir: String) -> String {
     }
 }
 
-/// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，LCT 再看上次内核（没跑过就看建例
-/// 时的记录 `mode`）是不是 USGS；作物看上次内核的 CROP 宏或建例写入的播种日字段（`DEF_USE_CROP`
+/// 反推规则：网格看哪种网格字段写了；次网格看 `DEF_USE_PFT/PC`，分类优先算例显式选择、
+/// 建例记录，最后回退上次内核；作物看内核 CROP 宏或建例播种日字段（`DEF_USE_CROP`
 /// 只是宏的只读反映，建例时不写）；甲烷看示踪物名单；河湖汇流只对经纬度与非结构网格有意义（缺省开）。
 pub(crate) fn case_profile(
     text: &str,
@@ -259,10 +285,18 @@ pub(crate) fn case_profile(
             .as_deref()
             .is_some_and(|m| m.split(',').any(|x| x == name))
     };
-    let usgs = if macros.is_some() {
-        has_macro("LULC_USGS")
+    let selected_scheme = character(&doc, "DEF_SUBGRID_SCHEME").to_ascii_uppercase();
+    let selected_classification = match selected_scheme.as_str() {
+        "USGS" => Some(true),
+        "IGBP" => Some(false),
+        _ => None,
+    };
+    let usgs = if let Some(usgs) = selected_classification {
+        usgs
+    } else if let Some(mode) = mode {
+        mode.ends_with("usgs")
     } else {
-        mode.is_some_and(|m| m.ends_with("usgs"))
+        has_macro("LULC_USGS")
     };
     let crop = has_macro("CROP") || has("DEF_TUNING_CROP_PLANTING_DAY");
     let subgrid = if logical(&doc, "DEF_USE_PFT") {
@@ -318,10 +352,12 @@ pub(crate) fn case_profile(
         spatial,
         grid,
         classification: if usgs { "USGS" } else { "IGBP" },
-        classification_source: if macros.is_some() {
-            "kernel"
+        classification_source: if selected_classification.is_some() {
+            "case"
         } else if mode.is_some() {
             "creation"
+        } else if macros.is_some() {
+            "kernel"
         } else {
             "legacy-default"
         },

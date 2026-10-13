@@ -394,6 +394,10 @@ export const commandContract = {
       "required": false,
       "rust_type": "Option<String>"
     },
+    "removeFields": {
+      "required": false,
+      "rust_type": "Option<Vec<String>>"
+    },
     "modelRevision": {
       "required": false,
       "rust_type": "Option<colm_model::VersionRef>"

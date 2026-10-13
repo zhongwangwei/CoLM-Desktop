@@ -199,168 +199,19 @@ test('model settings guide exposes classification only with a callback and catal
     ['simulation-parameter-query', 'simulation-parameter-scope'],
   );
   result = render(false, true);
-  assert.equal(
-    result.actions.some((action) => action.id.startsWith('simulation-classification-')),
-    false,
-  );
-  assert.ok(result.actions.every((action) => action.enabled === false));
-  assert.ok(result.fields.every((field) => field.disabled));
+  assert.ok(result.fields.every((f) => f.disabled));
+  assert.ok(result.actions.every((a) => a.enabled === false));
+  assert.ok(!result.actions.some((a) => a.id.startsWith('simulation-classification-')));
 });
-
-test('simulation scheme keeps vegetation structure separate from its land-cover classification', async () => {
-  const { simulationMode } = await import('./model-settings');
+test('case vegetation selection ignores stale version flags', async () => {
+  const { simulationMode, caseSchemeFields } = await import('./model-settings');
   assert.equal(simulationMode(), undefined);
-  assert.equal(simulationMode(undefined, 'USGS', 'PFT'), 'PFT');
-  assert.equal(simulationMode(overlay, 'USGS'), 'PFT');
+  assert.equal(simulationMode(overlay, 'USGS'), 'USGS');
   assert.equal(simulationMode(overlay, 'IGBP', 'PC'), 'PC');
-  assert.equal(simulationMode({ ...overlay, physics: { DEF_USE_PC: '.true.' } }, 'USGS'), 'PC');
-  assert.equal(simulationMode({ ...overlay, physics: { DEF_USE_PFT: '.false.' } }, 'USGS'), 'USGS');
-  assert.equal(
-    simulationMode(
-      { ...overlay, physics: { DEF_USE_PFT: '.true.', DEF_USE_PC: '.true.' } },
-      'IGBP',
-    ),
-    undefined,
-  );
-  assert.equal(simulationMode(undefined, undefined, 'USGS'), 'USGS');
-});
-
-test('four scheme cards share existing-case modification requests while retaining classification and write locks', async () => {
-  const { readFileSync } = await import('node:fs'),
-    { default: ts } = await import('typescript'),
-    helpers = await import('./model-settings');
-  const source = readFileSync(new URL('./ModelSettings.tsx', import.meta.url), 'utf8')
-    .replace(/^import\b[\s\S]*?;$/gm, '')
-    .replace('export default function', 'function');
-  const code = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
-  }).outputText;
-  type Element = { type: unknown; props: Record<string, unknown>; children: unknown[] };
-  let cursor = 0,
-    contract: {
-      actions: { id: string; enabled?: boolean; run: () => void }[];
-      details: { classification: string; simulation_mode: string };
-    };
-  const slots: unknown[] = [[], [], '', false, false, '', ''];
-  const context = {
-    ...helpers,
-    setupHandledKeys: [],
-    React: {
-      createElement: (
-        type: unknown,
-        props: Record<string, unknown>,
-        ...children: unknown[]
-      ): Element => ({ type, props: props ?? {}, children }),
-    },
-    ...Object.fromEntries(
-      [
-        'ScientificSetupCards',
-        'ConfigurationOptions',
-        'Advanced',
-        'Button',
-        'Card',
-        'Field',
-        'Input',
-        'Notice',
-        'Select',
-      ].map((name) => [name, name]),
-    ),
-    parameterKey: () => '',
-    useApp: () => ({ state: { language: 'zh', kernels: [] } }),
-    useEffect: () => {},
-    useState: (initial: unknown) => [slots[cursor++] ?? initial, () => {}],
-    usePageContract: (value: typeof contract) => {
-      contract = value;
-    },
-  };
-  const Component = new Function(...Object.keys(context), `${code};return ModelSettings;`)(
-    ...Object.values(context),
-  );
-  const version = {
-    name: 'official',
-    version: { id: 'official', revision: 1 },
-    code: { source_sha256: 'abc' },
-    overlay: { physics: { DEF_USE_PFT: '.true.' }, parameters: [], process_files: [] },
-  };
-  const original = JSON.stringify(version),
-    modes: string[] = [],
-    classifications: string[] = [],
-    requests: { id: string; value: string }[] = [];
-  const flatten = (node: unknown): Element[] =>
-    Array.isArray(node)
-      ? node.flatMap(flatten)
-      : node && typeof node === 'object' && 'children' in node
-        ? [node as Element, ...flatten((node as Element).children)]
-        : [];
-  const render = (editable: boolean, request = false, disabled = false) => {
-    cursor = 0;
-    const tree = Component({
-      version,
-      disabled,
-      ...(request
-        ? { onSetupRequest: (v: { id: string; value: string }) => requests.push(v) }
-        : {}),
-      classification: 'USGS',
-      profile: { subgrid: 'PFT' },
-      onEdit: () => {},
-      ...(editable
-        ? {
-            onModeChange: (value: string) => modes.push(value),
-            onClassificationChange: (value: string) => classifications.push(value),
-          }
-        : {}),
-    });
-    return { nodes: flatten(tree), contract };
-  };
-  let result = render(true);
-  const cards = result.nodes.filter((node) => node.props.className === 'simulation-choice-card');
-  assert.equal(cards.length, 4);
-  assert.deepEqual(
-    cards.map((node) => node.props['aria-pressed']),
-    [false, false, true, false],
-  );
-  assert.equal(result.contract.details.classification, 'USGS');
-  assert.equal(result.contract.details.simulation_mode, 'PFT');
-  for (const id of [
-    'simulation-mode-igbp',
-    'simulation-mode-usgs',
-    'simulation-mode-pft',
-    'simulation-mode-pc',
-  ])
-    result.contract.actions.find((action) => action.id === id)!.run();
-  assert.deepEqual(modes, ['IGBP', 'USGS', 'PFT', 'PC']);
-  result.contract.actions.find((action) => action.id === 'simulation-classification-igbp')!.run();
-  assert.deepEqual(classifications, ['IGBP']);
-  (cards[3].props.onClick as () => void)();
-  assert.equal(modes.at(-1), 'PC');
-  assert.equal(JSON.stringify(version), original);
-  result = render(false);
-  assert.ok(
-    result.nodes
-      .filter((node) => node.props.className === 'simulation-choice-card')
-      .every((node) => node.props.disabled),
-  );
-  assert.equal(
-    result.contract.actions.some((action) => /simulation-(mode|classification)-/.test(action.id)),
-    false,
-  );
-  result = render(false, true);
-  const existing = result.nodes.filter((node) => node.props.className === 'simulation-choice-card');
-  assert.equal(existing[0].props.disabled, true, 'existing classification cannot be changed');
-  assert.equal(existing[1].props.disabled, false, 'current USGS classification can return to LCT');
-  assert.equal(existing[3].props.disabled, false);
-  (existing[3].props.onClick as () => void)();
-  assert.deepEqual(requests, [{ id: 'subgrid', value: 'PC' }]);
-  result.contract.actions.find((a) => a.id === 'simulation-mode-pft')!.run();
-  assert.equal(requests.length, 1, 'already selected structure needs no new version');
-  result.contract.actions.find((a) => a.id === 'simulation-mode-usgs')!.run();
-  assert.deepEqual(requests.at(-1), { id: 'subgrid', value: 'LCT' });
-  assert.equal(JSON.stringify(version), original);
-  result = render(false, true, true);
-  assert.ok(
-    result.nodes
-      .filter((node) => node.props.className === 'simulation-choice-card')
-      .every((node) => node.props.disabled),
-  );
-  assert.ok(result.contract.actions.every((a) => a.enabled === false));
+  for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const) {
+    const fields = caseSchemeFields(mode);
+    assert.equal(fields.DEF_SUBGRID_SCHEME, mode);
+    assert.equal(Object.values(fields).filter((v) => v === '.true.').length, 1);
+    assert.equal(fields[`DEF_USE_${mode === 'IGBP' || mode === 'USGS' ? 'LCT' : mode}`], '.true.');
+  }
 });

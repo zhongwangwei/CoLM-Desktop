@@ -33006,3 +33006,16 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 首轮PR CI已证实Windows两个文件名回归和磁盘/UNC前缀归一化通过，随后CLI暴露三个问题：产物身份key使用反斜杠；服务端POSIX脚本的读文件fixture在Windows执行；Windows临时目录的RUNNER~1短名称与canonical长名称比较不同。补修产物key使用平台无关的正斜杠，POSIX文件访问fixture限Unix执行并新增全平台服务端source拒绝契约测试；Windows输出路径解析最近存在的祖先再附不存在后缀，保留真实错目录拒绝。定向provenance 5/5、knowledge_reader 2/2、output_dir 3/3以及CLI Clippy/格式检查通过，新的GitHub原生验收仍待完成。
 
 第二轮Windows原生CLI确认短路径与新产物key测试通过，剩余旧根路径fixture及artifact复用读取端未同步。根路径fixture现使用平台绝对根；artifact读取端先匹配正斜杠key并兼容旧native key，保留SHA256不一致拒绝。新增/已有upstream artifact两项定向测试通过，CLI Clippy通过。本轮未将任何待运行的GitHub检查记为成功。
+
+
+## 算例选择不派生版本（2026-10-13 用户最终决定）
+
+没有修改参数或过程实现的设置均归算例：四种植被描述、土壤水力、气孔、BGC、河湖汇流、城市、作物种植设置、示踪定义等现成选项直接写算例。实际系数、地类/PFT参数、过程文件内容、源码和AI网络在研究中调整并保存为版本。删除模拟的应用方案/派生/冻结流程，参数入口进入研究。
+
+保留历史修订原始字节和哈希，运行及派生只使用真实模型参数覆盖。迁移保留原过程文件与冻结资产映射；保存验证使用完整候选物化文档，避免重写别名撤销映射。清除示踪文件关联持久写显式空值，避免旧版本恢复引用。示踪CSV有限数值、作用域兼容、原子保存及编译内核能力校验保留。
+
+先在当前工作区完成19项模型与17项配置回归，252项前端测试及build/lint；独立审查发现并关闭四项问题。完整macOS包构建退出0，6sidecars与23项身份验证通过。原生点击PFT及van Genuchten后仍在模拟配置、修订保持Official r7，无应用方案/冻结提示；仅临时表单核对，未创建或运行算例。临时名称已清除。
+
+为遵守直接合并main要求，随后在干净29c84e46主线语义移植；保留主线双语、版本树、about、equivalence/dedup、migrate_case_to/bind_new_case和CLI源码快照/Study功能。主线前端256项测试、build/typecheck/lint及format检查通过，Rust最终验证另记。
+
+主线最终模型完整25/25测试通过；GUI定向36/36与CLI内核1/1通过。独立最终移植审查APPROVE，无遗留阻断。主线等价比较忽略旧算例控制项，并正确解析Fortran默认Real的_r8后缀，实际系数恢复默认可复用官方版本。未执行新的完整科学运行。

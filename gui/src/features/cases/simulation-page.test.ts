@@ -5,6 +5,7 @@ import ts from 'typescript';
 import * as caseModel from './case-model';
 import * as simulation from './simulation-model';
 import * as modelSettings from './model-settings';
+import { compatibleKernel, type KernelChoice } from '../runs/run-model';
 import type { UiField, UiAction } from '../../lib/guide';
 import { pageExecutionContext, publicUiResult, waitForContract } from '../../lib/utils';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
@@ -51,6 +52,8 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
+    modelFields?: caseModel.SchemaField[];
+    kernels?: KernelChoice[];
     schema?: caseModel.SchemaField[];
     configuration?: (args: Record<string, unknown>) => Promise<unknown>;
   } = {},
@@ -67,7 +70,7 @@ function page(
     busy: false,
     version: model,
     versionRef: model.version,
-    kernels: [],
+    kernels: options.kernels ?? [],
     running: {},
     caseTab: 'settings',
     selectedCase: { entry: { dir: '/project/site', name: 'site' }, profile: {} },
@@ -99,7 +102,7 @@ function page(
     ...modelSettings,
     fieldLabel,
     optionLabel,
-    compatibleKernel: () => null,
+    compatibleKernel,
     React: {
       createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => {
         const element = { type, props: props ?? {}, children };
@@ -180,7 +183,7 @@ function page(
         case 'model_configuration':
           return options.configuration ? options.configuration(args) : { fields: [] };
         case 'model_fields':
-          return [];
+          return options.modelFields ?? [];
         case 'scan_sites':
           return { sites: scannedSites };
         case 'pick_file':
@@ -196,6 +199,7 @@ function page(
           if (failCreate) throw new Error('creation failed');
           return {};
         case 'case_data_save':
+          if (failCreate) throw new Error('save failed');
           return {};
         default:
           throw new Error(`Unexpected IPC: ${command}`);
@@ -426,12 +430,12 @@ test('data step rejects scanned forcing overflow and failed creation never opens
   assert.deepEqual(p.opened, []);
   assert.ok(!p.calls.some((call) => /run_start|run_case|submit/.test(call.command)));
 });
-test('model editor round trip retains form, scanned sites, option edits and the model second step', async () => {
+test('research entry round trip retains form, scanned sites, option edits and the model second step', async () => {
   const option = { DEF_HIST_FREQ: 'DAILY' },
     p = page('NewCasePage', { form, sites: [site], caseValues: option, step: 2 });
   await p.mount();
   (p.element('ModelSettings').props.onEdit as () => unknown)();
-  assert.deepEqual(p.routes, ['versions']);
+  assert.deepEqual(p.routes, ['research']);
   const seed = p.state.newCaseSeed as {
     form: typeof form;
     sites: unknown[];
@@ -440,7 +444,7 @@ test('model editor round trip retains form, scanned sites, option edits and the 
   };
   assert.equal(seed.form.start, form.start);
   assert.deepEqual(seed.sites, [site]);
-  assert.deepEqual(seed.caseValues, option);
+  assert.deepEqual(seed.caseValues, { ...option, ...modelSettings.caseSchemeFields('IGBP') });
   assert.equal(seed.step, 2);
   let c = await p.remount();
   assert.equal(c.details.step, 2);
@@ -697,7 +701,7 @@ test('clearing spatial timestep restores the required automatic 1800 seconds wit
   );
 });
 
-test('model round trips preserve explicit own-data disclosure rather than inferring it from bundled directories', async () => {
+test('research round trips preserve explicit own-data disclosure rather than inferring it from bundled directories', async () => {
   const p = page('NewCasePage', {
     form: { ...form, sitedir: '/bundled/sites', forcingdir: '/bundled/forcing' },
     sites: [site],
@@ -733,8 +737,18 @@ test('model round trips preserve explicit own-data disclosure rather than inferr
 
 test('USGS classification survives model editing and creates the chosen template without fake physics switches', async () => {
   for (const urban of [false, true]) {
-    const p = page('NewCasePage', { form, sites: [{ ...site, urban }], step: 2 });
-    if (urban) Object.assign(p.state.version.overlay.physics, { DEF_URBAN_RUN: '.true.' });
+    const p = page(
+      'NewCasePage',
+      {
+        form,
+        sites: [{ ...site, urban }],
+        step: 2,
+        caseValues: urban ? { DEF_URBAN_RUN: '.true.' } : {},
+      },
+      [site],
+      initialValues,
+      { schema: [...schema, { ...field('DEF_URBAN_RUN', '城市', '.false.'), kind: 'Logical' }] },
+    );
     await p.mount();
     assert.equal(p.element('ModelSettings').props.classification, 'IGBP');
     (p.element('ModelSettings').props.onClassificationChange as (value: string) => void)('USGS');
@@ -757,7 +771,7 @@ test('USGS classification survives model editing and creates the chosen template
       !fields.some((f) => ['DEF_USE_USGS', 'DEF_USE_IGBP'].includes(f.path)),
       'classification must not fabricate unsupported compile switches',
     );
-    assert.deepEqual(p.state.version.overlay.physics, urban ? { DEF_URBAN_RUN: '.true.' } : {});
+    assert.deepEqual(p.state.version.overlay.physics, {});
   }
 });
 test('existing case returns from version editing to the model second step before visiting data', async () => {
@@ -765,7 +779,7 @@ test('existing case returns from version editing to the model second step before
   await p.mount();
   await p.click('case-step-2');
   (p.element('ModelSettings').props.onEdit as () => void)();
-  assert.deepEqual(p.routes, ['versions']);
+  assert.deepEqual(p.routes, ['research']);
   assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 2 });
   const returned = await p.remount();
   assert.equal(returned.details.simulation_step, 2);
@@ -789,6 +803,9 @@ test('existing case can reach its data step to repair dates after first reviewin
 
 const processSchema = [
   ...schema,
+  ...['DEF_USE_BGC', 'DEF_USE_TRACER', 'DEF_USE_GridRiverLakeFlow', 'DEF_URBAN_RUN'].map(
+    (name) => ({ ...field(name, '地表数据', '.false.'), kind: 'Logical' }),
+  ),
   { ...field('DEF_USE_CN_INIT', '初始场', '.false.'), kind: 'Logical' },
   { ...field('DEF_file_cn_init', '初始场', 'null'), kind: 'Character' },
   { ...field('DEF_UnitCatchment_file', '河道与水库', 'null'), kind: 'Character' },
@@ -896,10 +913,23 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     const p = page(
       name,
       name === 'NewCasePage'
-        ? { form, sites: [site], step: 3, caseValues: { DEF_file_cn_init: '/retained-cn.nc' } }
+        ? {
+            form,
+            sites: [site],
+            step: 3,
+            caseValues: {
+              ...Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.'])),
+              DEF_file_cn_init: '/retained-cn.nc',
+            },
+          }
         : undefined,
       [site],
-      { ...initialValues, DEF_USE_CN_INIT: '.false.', DEF_file_cn_init: '/retained-cn.nc' },
+      {
+        ...initialValues,
+        ...Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.'])),
+        DEF_USE_CN_INIT: '.false.',
+        DEF_file_cn_init: '/retained-cn.nc',
+      },
       {
         schema: processSchema,
         configuration: async (args) =>
@@ -911,10 +941,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
           ),
       },
     );
-    Object.assign(
-      p.state.version.overlay.physics,
-      Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.'])),
-    );
+
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
@@ -969,15 +996,16 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     const waiting: { args: Record<string, unknown>; resolve: (value: unknown) => void }[] = [];
     const p = page(
       name,
-      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      name === 'NewCasePage'
+        ? { form, sites: [site], step: 3, caseValues: { DEF_USE_BGC: '.true.' } }
+        : undefined,
       [site],
-      initialValues,
+      { ...initialValues, DEF_USE_BGC: '.true.' },
       {
         schema: processSchema,
         configuration: (args) => new Promise((resolve) => waiting.push({ args, resolve })),
       },
     );
-    Object.assign(p.state.version.overlay.physics, { DEF_USE_BGC: '.true.' });
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
@@ -1035,10 +1063,10 @@ test('existing case run and result tabs never expose settings-only process data 
   }
 });
 
-for (const mode of ['PFT', 'PC'] as const)
-  test(`${mode} entry requests a frozen model change while preserving case inputs and classification`, async () => {
+for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
+  test(`${mode} selection saves directly to the new case without a model revision`, async () => {
     const p = page('NewCasePage', {
-      form: { ...form, landcover: 'USGS' },
+      form,
       sites: [site],
       caseValues: { DEF_HIST_FREQ: 'DAILY' },
       step: 2,
@@ -1046,89 +1074,382 @@ for (const mode of ['PFT', 'PC'] as const)
     await p.mount();
     (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
     p.render();
-    assert.deepEqual(p.routes, ['versions']);
-    assert.deepEqual(p.state.simulationReturn, { route: 'new-case', step: 2, subgrid: mode });
-    const seed = p.state.newCaseSeed as { form: typeof form; caseValues: Record<string, string> };
-    assert.equal(seed.form.landcover, 'USGS');
-    assert.equal(seed.form.start, form.start);
-    assert.equal(seed.caseValues.DEF_HIST_FREQ, 'DAILY');
-    assert.deepEqual(
-      p.state.version.overlay.physics,
-      {},
-      'entry cannot mutate the frozen model or merely change the case template',
-    );
-    assert.ok(!p.calls.some((c) => c.command === 'new_case' || c.command === 'model_create'));
-    Object.assign(p.state.version.overlay.physics, {
-      DEF_USE_LCT: '.false.',
-      DEF_USE_PFT: mode === 'PFT' ? '.true.' : '.false.',
-      DEF_USE_PC: mode === 'PC' ? '.true.' : '.false.',
-    });
-    await p.remount();
+    assert.deepEqual(p.routes, []);
     assert.equal(p.element('ModelSettings').props.mode, mode);
-    assert.equal(p.element('ModelSettings').props.classification, 'USGS');
-    (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
-    assert.equal(p.routes.length, 1, 'same structure needs no repeated editor round trip');
+    assert.deepEqual(p.state.version.overlay.physics, {});
     await p.click('new-next');
     await p.click('new-next');
     await p.click('new-next');
     await p.click('new-create');
     const request = p.calls.find((c) => c.command === 'new_case');
     assert.ok(request);
-    assert.equal(request.args.mode, 'usgs', 'USGS kernel identity must survive PFT/PC structure');
+    assert.equal(request.args.mode, mode.toLowerCase());
     const fields = request.args.fields as { path: string; value: string }[];
-    assert.equal(fields.find((f) => f.path === `DEF_USE_${mode}`)?.value, '.true.');
+    assert.equal(fields.find((f) => f.path === 'DEF_SUBGRID_SCHEME')?.value, mode);
+    assert.ok(!p.calls.some((c) => c.command === 'model_create'));
   });
-test('choosing a land-class card from PFT requests LCT without silently disabling BGC', async () => {
-  const p = page('NewCasePage', { form, sites: [site], step: 2 });
-  Object.assign(p.state.version.overlay.physics, {
-    DEF_USE_LCT: '.false.',
-    DEF_USE_PFT: '.true.',
-    DEF_USE_PC: '.false.',
-    DEF_USE_BGC: '.true.',
-  });
+test('case scheme changes preserve explicit model physics and never derive versions', async () => {
+  const p = page('NewCasePage', { form: { ...form, subgrid: 'PFT' }, sites: [site], step: 2 });
+  Object.assign(p.state.version.overlay.physics, { DEF_USE_BGC: '.true.' });
   await p.mount();
   (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('USGS');
   p.render();
-  assert.deepEqual(p.state.simulationReturn, { route: 'new-case', step: 2, subgrid: 'LCT' });
-  assert.equal((p.state.newCaseSeed as { form: typeof form }).form.landcover, 'USGS');
+  assert.deepEqual(p.routes, []);
+  assert.equal(p.element('ModelSettings').props.mode, 'USGS');
   assert.equal((p.state.version.overlay.physics as Record<string, string>).DEF_USE_BGC, '.true.');
-  assert.equal((p.state.version.overlay.physics as Record<string, string>).DEF_USE_PFT, '.true.');
 });
 
-test('a soil-card request carries the ordered setup intent and preserves the complete pending case form', async () => {
-  const p = page('NewCasePage', { form: { ...form, landcover: 'USGS' }, sites: [site], step: 2 });
+test('new-case setup edits stay in the case and preserve inputs without visiting versions', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, landcover: 'USGS' }, sites: [site], step: 2 },
+    [site],
+    initialValues,
+    {
+      schema: [
+        ...schema,
+        ...['DEF_USE_Campbell_SOIL_MODEL', 'DEF_USE_VariablySaturatedFlow'].map((name) => ({
+          ...field(name, '水热过程', '.false.'),
+          kind: 'Logical',
+        })),
+      ],
+    },
+  );
   await p.mount();
   const model = p.element('ModelSettings');
-  assert.equal((model.props.setupEnvironment as { domain: string }).domain, 'site');
-  (model.props.onSetupRequest as (request: { id: string; value: string }) => void)({
-    id: 'soil',
-    value: 'vG',
-  });
+  const patch = { DEF_USE_Campbell_SOIL_MODEL: '.false.', DEF_USE_VariablySaturatedFlow: '.true.' };
+  (model.props.onCaseChange as (p: object) => void)(patch);
   p.render();
-  assert.deepEqual(p.state.simulationReturn, {
-    route: 'new-case',
-    step: 2,
-    setup: { id: 'soil', value: 'vG' },
-  });
-  assert.deepEqual(p.routes, ['versions']);
-  assert.equal((p.state.newCaseSeed as { form: typeof form }).form.landcover, 'USGS');
+  assert.deepEqual(p.routes, []);
   assert.deepEqual(p.state.version.overlay.physics, {});
+  assert.equal(
+    (p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> })
+      .caseValues.DEF_USE_Campbell_SOIL_MODEL,
+    '.false.',
+  );
 });
-test('existing case setup-card request goes through its model revision without saving case data', async () => {
+test('existing case options save atomically and clear explicit crop settings without a model revision', async () => {
   const p = page('CasesPage');
   await p.mount();
   await p.click('case-step-2');
-  (
-    p.element('ModelSettings').props.onSetupRequest as (request: {
-      id: string;
-      value: string;
-    }) => void
-  )({ id: 'soil', value: 'vG' });
-  assert.deepEqual(p.state.simulationReturn, {
-    route: 'case',
-    step: 2,
-    setup: { id: 'soil', value: 'vG' },
+  const patch = {
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_USE_VariablySaturatedFlow: '.true.',
+    DEF_TUNING_CROP_PLANTING_DAY: null,
+  };
+  await (p.element('ModelSettings').props.onCaseChange as (p: object) => Promise<void>)(patch);
+  await p.settle();
+  const saved = p.calls.find((c) => c.command === 'case_data_save')!;
+  assert.deepEqual(saved.args.fields, [
+    { path: 'DEF_USE_Campbell_SOIL_MODEL', value: '.false.' },
+    { path: 'DEF_USE_VariablySaturatedFlow', value: '.true.' },
+  ]);
+  assert.deepEqual(saved.args.removeFields, ['DEF_TUNING_CROP_PLANTING_DAY']);
+  assert.deepEqual(p.routes, []);
+  assert.equal(p.guard(), null);
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+
+for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
+  test(`existing case ${mode} selection writes case fields without deriving a revision`, async () => {
+    const p = page('CasesPage');
+    await p.mount();
+    await p.click('case-step-2');
+    (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
+    await p.settle();
+    const saved = p.calls.find((c) => c.command === 'case_data_save');
+    assert.ok(saved);
+    assert.deepEqual(
+      saved.args.fields,
+      Object.entries(modelSettings.caseSchemeFields(mode)).map(([path, value]) => ({
+        path,
+        value,
+      })),
+    );
+    assert.deepEqual(p.routes, []);
+    assert.deepEqual(p.state.version.overlay.physics, {});
+    assert.equal(p.guard(), null);
+    assert.ok(!p.calls.some((c) => c.command === 'model_create'));
   });
-  assert.deepEqual(p.routes, ['versions']);
-  assert.ok(!p.calls.some((c) => c.command === 'case_data_save'));
+test('failed case scheme save leaves saved case state and selected version intact', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.click('case-step-2');
+  p.fail();
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('PC');
+  await p.settle();
+  assert.equal(p.guard(), null);
+  assert.deepEqual(p.state.version.overlay.physics, {});
+  assert.ok(!p.calls.some((c) => c.command === 'model_create'));
+  assert.match(JSON.stringify(p.elements), /save failed/);
+});
+
+for (const mode of ['PFT', 'PC'] as const)
+  test(`new ${mode} uses the supported IGBP data source when switching from USGS`, async () => {
+    const p = page('NewCasePage', { form: { ...form, landcover: 'USGS' }, sites: [site], step: 2 });
+    await p.mount();
+    (p.element('ModelSettings').props.onModeChange as (value: string) => void)(mode);
+    p.render();
+    assert.equal(p.element('ModelSettings').props.classification, 'IGBP');
+    assert.equal(p.element('ModelSettings').props.onClassificationChange, undefined);
+    assert.equal(
+      (p.element('ModelSettings').props.setupEnvironment as { subgrid: string }).subgrid,
+      mode,
+    );
+  });
+
+test('same-kernel case scheme changes requery process conditions with the saved scheme', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.click('case-step-2');
+  for (const mode of ['IGBP', 'PFT', 'PC', 'USGS']) {
+    const before = p.calls.filter((c) => c.command === 'model_configuration').length;
+    (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
+    await p.settle();
+    const queries = p.calls.filter((c) => c.command === 'model_configuration');
+    assert.ok(queries.length > before);
+    assert.equal(
+      (queries.at(-1)!.args.caseValues as Record<string, string>).DEF_SUBGRID_SCHEME,
+      mode,
+    );
+    assert.equal(queries.at(-1)!.args.kernelDir, null);
+    assert.equal(p.guard(), null);
+  }
+});
+
+for (const subgrid of ['PFT', 'PC'])
+  test(`restored ${subgrid} draft uses IGBP while preserving the other pending inputs`, async () => {
+    const restored = {
+        ...form,
+        subgrid,
+        landcover: 'USGS',
+        name: 'restored vegetation',
+        start: '2001-02-01',
+      },
+      options = { DEF_HIST_FREQ: 'DAILY' };
+    const p = page('NewCasePage', {
+      form: restored,
+      sites: [site],
+      caseValues: options,
+      step: 2,
+      ownData: true,
+    });
+    await p.mount();
+    const model = p.element('ModelSettings');
+    assert.equal(model.props.mode, subgrid);
+    assert.equal(model.props.classification, 'IGBP');
+    assert.equal(model.props.onClassificationChange, undefined);
+    (model.props.onEdit as () => void)();
+    p.render();
+    const seed = p.state.newCaseSeed as {
+      form: typeof restored;
+      sites: unknown[];
+      caseValues: Record<string, string>;
+      step: number;
+      ownData: boolean;
+    };
+    assert.deepEqual(seed.form, {
+      ...restored,
+      landcover: 'IGBP',
+      sitedir: '',
+      forcingdir: '',
+      west: '',
+      east: '',
+      south: '',
+      north: '',
+      dlon: '',
+      dlat: '',
+      mesh: '',
+      catchment: '',
+      shapefile: '',
+      forcing: '',
+    });
+    assert.deepEqual(seed.sites, [site]);
+    assert.equal(seed.caseValues.DEF_HIST_FREQ, 'DAILY');
+    assert.equal(seed.step, 2);
+    assert.equal(seed.ownData, true);
+  });
+
+test('same-kernel process saves refresh case-data prerequisite queries and preserve source settings', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.click('case-step-2');
+  for (const value of ['.true.', '.false.']) {
+    const before = p.calls.filter((c) => c.command === 'model_configuration').length;
+    await (p.element('ModelSettings').props.onCaseChange as (patch: object) => Promise<void>)({
+      DEF_USE_BGC: value,
+    });
+    await p.settle();
+    assert.ok(p.calls.filter((c) => c.command === 'model_configuration').length > before);
+    assert.equal(
+      (p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> })
+        .caseValues.DEF_USE_BGC,
+      value,
+    );
+  }
+  assert.deepEqual(p.routes, []);
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} research entry never derives a model revision`, async () => {
+    const p = page(name, name === 'NewCasePage' ? { form, sites: [site], step: 2 } : undefined);
+    await p.mount();
+    if (name === 'CasesPage') await p.click('case-step-2');
+    (p.element('ModelSettings').props.onEdit as () => void)();
+    assert.deepEqual(p.routes, ['research']);
+    assert.ok(
+      !p.calls.some(
+        (call) =>
+          call.command === 'model_create' ||
+          call.command === 'model_save_draft' ||
+          call.command === 'model_freeze',
+      ),
+    );
+  });
+
+const setupSchema = [
+  ...schema,
+  { ...field('DEF_URBAN_RUN', '城市', '.false.'), kind: 'Logical' },
+  { ...field('DEF_USE_BGC', '生态与生地化', '.false.'), kind: 'Logical' },
+  field('DEF_TUNING_CROP_PLANTING_DAY', '生态与生地化', '0'),
+];
+const setupKernels = [
+  { dir: '/kernel/default', preset: 'default', macros: ['SinglePoint', 'LULC_IGBP'] },
+  { dir: '/kernel/crop', preset: 'crop', macros: ['SinglePoint', 'LULC_IGBP', 'CROP'] },
+];
+test('case urban switch controls station compatibility and urban creation mode without changing model parameters', async () => {
+  const urban = { ...site, name: 'urban', urban: true };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [urban, site], step: 2 },
+    [urban, site],
+    initialValues,
+    {
+      schema: setupSchema,
+      kernels: setupKernels,
+      modelFields: [field('DEF_TUNING_CSOILC', '生态与生地化')],
+    },
+  );
+  Object.assign(p.state.version.overlay.physics, { DEF_TUNING_CSOILC: '0.7' });
+  await p.mount();
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_URBAN_RUN: '.true.',
+  });
+  p.render();
+  await p.click('new-next');
+  const c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-select-urban')!.enabled, true);
+  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, false);
+  await p.click('new-select-urban');
+  await p.click('new-next');
+  await p.click('new-next');
+  await p.click('new-create');
+  const create = p.calls.find((c) => c.command === 'new_case')!;
+  assert.equal(create.args.mode, 'urban-igbp');
+  const sent = create.args.fields as { path: string; value: string }[];
+  assert.equal(sent.filter((f) => f.path === 'DEF_URBAN_RUN').length, 1);
+  assert.equal(sent.find((f) => f.path === 'DEF_URBAN_RUN')!.value, '.true.');
+  assert.equal(sent.filter((f) => f.path === 'DEF_TUNING_CSOILC').length, 1);
+  assert.deepEqual(p.state.version.overlay.physics, { DEF_TUNING_CSOILC: '0.7' });
+});
+test('case crop planting selects the crop kernel and station; clearing it returns to the default kernel', async () => {
+  const crop = { ...site, name: 'crop', crop: true };
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, subgrid: 'PFT' }, sites: [crop, site], step: 2 },
+    [crop, site],
+    initialValues,
+    { schema: setupSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_USE_BGC: '.true.',
+    DEF_TUNING_CROP_PLANTING_DAY: '120',
+  });
+  p.render();
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/crop');
+  await p.click('new-next');
+  const c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-select-crop')!.enabled, true);
+  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, false);
+  await p.click('new-previous');
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_TUNING_CROP_PLANTING_DAY: null,
+  });
+  p.render();
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+test('case BGC selection requires runtime input even when the model revision has no process switches', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, runtime: '', subgrid: 'PFT' }, sites: [site], step: 2 },
+    [site],
+    initialValues,
+    { schema: setupSchema },
+  );
+  await p.mount();
+  (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
+    DEF_USE_BGC: '.true.',
+  });
+  p.render();
+  await p.click('new-next');
+  await assert.rejects(() => p.click('new-next'), /Runtime/);
+  assert.ok(!p.calls.some((c) => c.command === 'new_case'));
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+
+test('legacy version switches cannot activate urban crop BGC or a vegetation scheme in a new case', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 2 }, [site], initialValues, {
+    schema: setupSchema,
+    kernels: setupKernels,
+    modelFields: [field('DEF_TUNING_CSOILC', '生态与生地化')],
+  });
+  const legacy = {
+    DEF_URBAN_RUN: '.true.',
+    DEF_USE_BGC: '.true.',
+    DEF_TUNING_CROP_PLANTING_DAY: '0',
+    DEF_USE_PC: '.true.',
+    DEF_TUNING_CSOILC: '0.7',
+  };
+  Object.assign(p.state.version.overlay.physics, legacy);
+  await p.mount();
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
+  await p.click('new-next');
+  assert.equal(p.render().actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
+  await p.click('new-next');
+  await p.click('new-next');
+  await p.click('new-create');
+  const args = p.calls.find((c) => c.command === 'new_case')!.args;
+  assert.equal(args.mode, 'igbp');
+  const fields = args.fields as { path: string; value: string }[];
+  assert.ok(
+    !fields.some((f) =>
+      ['DEF_URBAN_RUN', 'DEF_USE_BGC', 'DEF_TUNING_CROP_PLANTING_DAY'].includes(f.path),
+    ),
+  );
+  assert.equal(fields.find((f) => f.path === 'DEF_TUNING_CSOILC')!.value, '0.7');
+  assert.deepEqual(p.state.version.overlay.physics, legacy);
+});
+test('existing case ignores schema planting-day zero and stale crop flags when the field is absent', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    schema: setupSchema,
+    kernels: setupKernels,
+  });
+  Object.assign(p.state.version.overlay.physics, {
+    DEF_TUNING_CROP_PLANTING_DAY: '120',
+    DEF_USE_BGC: '.true.',
+    DEF_URBAN_RUN: '.true.',
+  });
+  await p.mount();
+  await p.click('case-step-2');
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
+  const actual = (
+    p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
+  ).caseValues;
+  assert.equal(actual.DEF_TUNING_CROP_PLANTING_DAY, undefined);
+  assert.equal(actual.DEF_USE_BGC, undefined);
+  assert.equal(actual.DEF_URBAN_RUN, undefined);
 });

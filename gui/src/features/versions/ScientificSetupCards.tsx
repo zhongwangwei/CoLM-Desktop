@@ -7,7 +7,13 @@ import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import type { Overlay } from '../../lib/types';
 import type { ModelField } from './model';
 import { modelSettingValue } from '../cases/model-settings';
-import type { ConfigurationSource, ConfigurationResult } from './configuration-options';
+import {
+  caseOptionOverlay,
+  caseOptionPatch,
+  type CaseOptionPatch,
+  type ConfigurationSource,
+  type ConfigurationResult,
+} from './configuration-options';
 import {
   applySetupRequest,
   setupChoices,
@@ -23,7 +29,7 @@ type Props = {
   includeSubgrid?: boolean;
   disabled?: boolean;
   onChange?: (overlay: Overlay) => void;
-  onRequest?: (request: SetupRequest) => void;
+  onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
   requested?: SetupRequest;
 };
 export default function ScientificSetupCards({
@@ -35,7 +41,7 @@ export default function ScientificSetupCards({
   includeSubgrid = true,
   disabled = false,
   onChange,
-  onRequest,
+  onCaseChange,
   requested,
 }: Props) {
   const { state } = useApp(),
@@ -43,7 +49,8 @@ export default function ScientificSetupCards({
   const [loaded, setLoaded] = useState<{ key: string; result: ConfigurationResult } | null>(null),
     [error, setError] = useState(''),
     [cropInput, setCropInput] = useState<{ key: string; value: string } | null>(null),
-    [cropRequested, setCropRequested] = useState<string | null>(null);
+    [cropRequested, setCropRequested] = useState<string | null>(null),
+    [saving, setSaving] = useState(false);
   const key = JSON.stringify({
       source: source.kind === 'draft' ? { ...source, overlay } : source,
       environment,
@@ -64,7 +71,7 @@ export default function ScientificSetupCards({
       caseDir: data.caseDir,
       kernelDir: data.environment.kernel?.dir ?? null,
       pftSelection: null,
-      caseValues: null,
+      caseValues: data.environment.caseValues ?? null,
     })
       .then((result) => {
         if (live) {
@@ -81,10 +88,14 @@ export default function ScientificSetupCards({
   }, [key]);
   const result = loaded?.key === key ? loaded.result : null,
     busy = !result,
-    locked = disabled || busy || (source.kind === 'draft' ? !onChange : !onRequest);
+    locked =
+      disabled || busy || saving || (!onCaseChange && (source.kind !== 'draft' || !onChange));
+  const effective = onCaseChange
+    ? caseOptionOverlay(overlay, fields, environment.caseValues, result?.fields)
+    : overlay;
   writeLocked.current = locked;
   const choices = setupChoices(
-    overlay,
+    effective,
     fields,
     environment,
     result?.fields,
@@ -97,7 +108,7 @@ export default function ScientificSetupCards({
   const planting =
     cropInput?.key === key
       ? cropInput.value
-      : (modelSettingValue(overlay, 'DEF_TUNING_CROP_PLANTING_DAY') ?? '');
+      : (modelSettingValue(effective, 'DEF_TUNING_CROP_PLANTING_DAY') ?? '');
   const guideFields: UiField[] = [],
     actions: UiAction[] = [];
   function write(request: SetupRequest) {
@@ -112,10 +123,22 @@ export default function ScientificSetupCards({
         .find((c) => c.id === request.id)
         ?.choices.find((c) => c.value === requestedValue)?.reason;
       if (reason) throw new Error(reason);
-      const next = applySetupRequest(overlay, fields, request, environment, result ?? undefined);
-      if (source.kind === 'frozen') onRequest!(request);
-      else if (request.id === 'crop' && request.value === '.true.') setCropRequested(key);
-      else onChange!(next);
+      const next = applySetupRequest(effective, fields, request, environment, result ?? undefined);
+      if (request.id === 'crop' && request.value === '.true.') setCropRequested(key);
+      else if (onCaseChange) {
+        writeLocked.current = true;
+        setSaving(true);
+        return Promise.resolve(onCaseChange(caseOptionPatch(effective, next, fields)))
+          .then(() => setError(''))
+          .catch((e) => {
+            setError(String(e));
+            throw e;
+          })
+          .finally(() => {
+            setSaving(false);
+            writeLocked.current = false;
+          });
+      } else onChange!(next);
       setError('');
     } catch (e) {
       setError(String(e));
@@ -124,9 +147,9 @@ export default function ScientificSetupCards({
   }
   function invoke(request: SetupRequest) {
     try {
-      write(request);
+      void Promise.resolve(write(request)).catch(() => {});
     } catch {
-      /* Keep the last valid configuration and show the reason. */
+      /* Error remains visible. */
     }
   }
   const cards = choices.map((control, index) => {
@@ -240,14 +263,12 @@ export default function ScientificSetupCards({
   return (
     <div className="scientific-setup">
       {error && <Notice tone="error">{error}</Notice>}
-      {source.kind === 'frozen' && (
+      {onCaseChange && (
         <p>
-          {onRequest
-            ? t(
-                '选择新方案将建立修改版；当前版本保持不变。',
-                'Selecting a new option creates a modified version; the current version is preserved.',
-              )
-            : t('当前为冻结版本，仅查看。', 'Frozen version: read only.')}
+          {t(
+            '方案与过程设置直接保存在当前算例中。',
+            'Schemes and process settings are saved directly in this case.',
+          )}
         </p>
       )}
       {!busy && result && !result.context_complete && (

@@ -22,6 +22,7 @@ const fields = setupHandledKeys.map(
 );
 const kernel = { dir: '/kernel', macros: ['GRIDBASED', 'GridRiverLakeFlow'] } as KernelEntry;
 const environment: SetupEnvironment = {
+  subgrid: 'PFT',
   domain: 'regional',
   grid: 'latlon',
   classification: 'IGBP',
@@ -51,7 +52,6 @@ test('ordered setup exposes every foundation and never fills frozen catalog defa
   assert.deepEqual(
     options.map((c) => c.id),
     [
-      'subgrid',
       'soil',
       'DEF_USE_VariablySaturatedFlow',
       'DEF_USE_GridRiverLakeFlow',
@@ -65,18 +65,17 @@ test('ordered setup exposes every foundation and never fills frozen catalog defa
   );
   assert.equal(options[0].value, '');
   assert.equal(options[0].pending, true);
-  assert.match(options[6].choices[0].reason, /PFT/);
+  assert.match(options[5].choices[0].reason, /PFT/);
 });
 test('upstream edits reject active incompatible children without changing the original', () => {
   let o = apply(overlay(), 'DEF_USE_BGC', '.true.');
   o = apply(o, 'crop', '0');
   const before = structuredClone(o);
   assert.throws(() => apply(o, 'DEF_USE_BGC', '.false.'), /crop/);
-  assert.throws(() => apply(o, 'subgrid', 'LCT'), /BGC/);
+  assert.throws(() => apply(o, 'subgrid', 'LCT'), /Unknown/);
   assert.deepEqual(o, before);
   o = apply(o, 'crop', '.false.');
   o = apply(o, 'DEF_USE_BGC', '.false.');
-  assert.equal(apply(o, 'subgrid', 'LCT').physics.DEF_USE_LCT, '.true.');
   let tracer = apply(overlay(), 'DEF_USE_TRACER', '.true.');
   assert.throws(() => apply(tracer, 'soil', 'Campbell'), /tracers/);
   assert.throws(() => apply(tracer, 'DEF_URBAN_RUN', '.true.'), /tracers/);
@@ -160,7 +159,6 @@ test('floodplain feedback and VG dependencies cannot silently be invalidated', (
   assert.throws(() => apply(o, 'DEF_USE_VariablySaturatedFlow', '.false.'), /Campbell/);
   o.physics.DEF_GridRiverLake_FloodFeedback = '.true.';
   for (const [id, value] of [
-    ['subgrid', 'PFT'],
     ['DEF_URBAN_RUN', '.true.'],
     ['DEF_USE_LULCC', '.true.'],
     ['DEF_USE_GridRiverLakeFlow', '.false.'],

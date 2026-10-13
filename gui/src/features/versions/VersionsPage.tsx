@@ -16,44 +16,20 @@ import {
 } from './model';
 import CodeWorkspace from './CodeWorkspace';
 import ConfigurationOptions from './ConfigurationOptions';
-import ScientificSetupCards from './ScientificSetupCards';
-import type { ConfigurationResult } from './configuration-options';
-import {
-  applySetupRequest,
-  setupChoices,
-  setupHandledKeys,
-  type SetupEnvironment,
-} from './scientific-setup';
+import { setupHandledKeys, type SetupEnvironment } from './scientific-setup';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
-import { schemeVersionName } from './version-tree';
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
-  const requestedSubgrid = state.simulationReturn?.subgrid,
-    requestedSetup =
-      state.simulationReturn?.setup ??
-      (requestedSubgrid ? { id: 'subgrid', value: requestedSubgrid } : undefined),
-    requestedStructure = requestedSetup?.id === 'subgrid' ? requestedSetup.value : undefined;
   const [draft, setDraft] = useState<ModelDraft | null>(null),
     [drafts, setDrafts] = useState<ModelDraft[]>([]),
     [catalog, setCatalog] = useState<Descriptor[]>([]),
     [fields, setFields] = useState<ModelField[]>([]),
-    [name, setName] = useState(
-      requestedStructure
-        ? schemeVersionName(state.version?.name ?? 'CoLM', requestedStructure)
-        : '',
-    ),
-    [note, setNote] = useState(
-      requestedStructure
-        ? t(
-            `为当前模拟选择 ${requestedStructure} 植被组织方式`,
-            `Choose ${requestedStructure} vegetation structure for this simulation`,
-          )
-        : '',
-    ),
+    [name, setName] = useState(''),
+    [note, setNote] = useState(''),
     [workspace, setWorkspace] = useState(''),
     [parameter, setParameter] = useState(''),
     [value, setValue] = useState(''),
@@ -75,8 +51,8 @@ export default function VersionsPage() {
     shown = draft ?? selected,
     editable = !!draft && draft.id !== 'official';
   useEffect(() => {
-    if (requestedStructure) document.querySelector('.main-pane')?.scrollTo({ top: 0 });
-  }, [requestedStructure]);
+    if (state.simulationReturn) document.querySelector('.main-pane')?.scrollTo({ top: 0 });
+  }, [state.simulationReturn]);
   const [codeBusy, setCodeBusy] = useState(false),
     codeBusyNow = useRef(false);
   const dirtyNow = useRef(dirty);
@@ -253,9 +229,11 @@ export default function VersionsPage() {
   const configurationKernel = compatibleKernel(
     state.kernels,
     configurationProfile,
-    effectiveModelFields(shown?.overlay),
+    effectiveModelFields(shown?.overlay, fields),
   );
   const setupEnvironment: SetupEnvironment = {
+    subgrid: setup?.subgrid ?? setup?.landcover ?? state.selectedCase?.profile.subgrid,
+    caseValues: setup ? state.newCaseSeed?.caseValues : undefined,
     domain:
       setup?.kind ??
       (state.selectedCase?.profile.spatial === false
@@ -269,15 +247,9 @@ export default function VersionsPage() {
     cropKernel: compatibleKernel(
       state.kernels,
       { ...configurationProfile, crop: true },
-      effectiveModelFields(shown?.overlay),
+      effectiveModelFields(shown?.overlay, fields),
     ),
   };
-  const requestedControl =
-    shown && requestedSetup
-      ? setupChoices(shown.overlay, fields, setupEnvironment).find(
-          (c) => c.id === requestedSetup.id,
-        )
-      : undefined;
   const allowed = catalog.filter(
     (d) =>
       d.raw_key.toUpperCase() !== 'DEF_SUBGRID_SCHEME' &&
@@ -357,29 +329,6 @@ export default function VersionsPage() {
       setDirty(false);
     }
   }
-  async function configureRequested(target: ModelDraft) {
-    if (!requestedSetup) return target;
-    const context = await invokeJson<ConfigurationResult>('model_configuration', {
-      source: {
-        kind: 'draft',
-        id: target.id,
-        generation: target.generation,
-        overlay: target.overlay,
-      },
-      caseDir: configurationCase,
-      kernelDir: configurationKernel?.dir ?? null,
-      pftSelection: null,
-      caseValues: null,
-    });
-    const overlay = applySetupRequest(
-      target.overlay,
-      fields,
-      requestedSetup,
-      setupEnvironment,
-      context,
-    );
-    return overlay === target.overlay ? target : { ...target, overlay };
-  }
   async function deriveVersion() {
     if (!selected) return null;
     const d = await invokeJson<ModelDraft>('model_create', {
@@ -391,33 +340,8 @@ export default function VersionsPage() {
     setAssetRoot('');
     setDraft(d);
     setDirty(false);
-    let next: ModelDraft | null;
-    try {
-      next = await configureRequested(d);
-      if (next !== d) edit(next);
-    } catch (e) {
-      next = null;
-      setError(
-        t(
-          `修改版已创建。${String(e)}；请在当前草稿按顺序处理前提后完成配置。`,
-          `Draft created. ${String(e)}; resolve prerequisites in this draft to complete setup.`,
-        ),
-      );
-    }
     setDrafts(await invokeJson('model_drafts'));
-    return next;
-  }
-  async function applyStructureAndReturn() {
-    const target = draft ? await configureRequested(draft) : await deriveVersion();
-    if (!target) return;
-    edit(target);
-    await freeze(target, true);
-    document.querySelector('.main-pane')?.scrollTo({ top: 0 });
-    lock.current = false;
-    if (!returnToSimulation())
-      throw new Error(
-        t('已应用方案，请返回模拟配置。', 'Scheme applied; return to simulation setup.'),
-      );
+    return d;
   }
   const guideFields: UiField[] = [
     {
@@ -447,14 +371,7 @@ export default function VersionsPage() {
       id: 'version-create',
       label: t('派生新版本', 'Derive version'),
       kind: 'commit',
-      enabled:
-        !busy &&
-        !codeBusy &&
-        !dirty &&
-        !!name &&
-        !!note &&
-        !!selected &&
-        (!requestedSetup || fields.length > 0),
+      enabled: !busy && !codeBusy && !dirty && !!name && !!note && !!selected,
       run: () => execute(deriveVersion),
     },
     ...state.versions.map((v) => ({
@@ -472,25 +389,12 @@ export default function VersionsPage() {
       run: () => execute(() => loadDraft(d.id)),
     })),
   ];
-  if (requestedStructure)
-    guideActions.push({
-      id: 'version-apply-simulation-structure',
-      label: t(`应用 ${requestedStructure} 并继续`, `Apply ${requestedStructure} and continue`),
-      kind: 'commit',
-      enabled:
-        !busy &&
-        !codeBusy &&
-        !!selected &&
-        fields.length > 0 &&
-        (!!draft || (!!name.trim() && !!note.trim())),
-      run: () => execute(applyStructureAndReturn),
-    });
   if (state.simulationReturn)
     guideActions.push({
       id: 'version-return-simulation',
       label: t('返回模拟配置', 'Return to simulation setup'),
       kind: 'click',
-      enabled: !busy && !codeBusy && !dirty && !draft,
+      enabled: !busy && !codeBusy && !dirty,
       run: returnToSimulation,
     });
   if (shown) {
@@ -760,66 +664,14 @@ export default function VersionsPage() {
 
   return (
     <div className="page-stack">
-      <h1>{t('模型版本', 'Model versions')}</h1>
-      {requestedSetup && (
-        <Notice>
-          {requestedStructure
-            ? t(
-                `已选择 ${requestedStructure}。点击“应用 ${requestedStructure} 并继续”，即可保存并返回模拟配置。`,
-                `Selected ${requestedStructure}. Apply and continue to save it and return to simulation setup.`,
-              )
-            : t(
-                `按植被、土壤水力、水文、生态和示踪的顺序配置。本次调整：${requestedControl?.zh ?? '模型结构'}。派生修改版后完成选择，保存、冻结并返回模拟配置。`,
-                `Configure vegetation, soil hydraulics, hydrology, ecology and tracers in order. Requested choice: ${requestedControl?.en ?? 'model structure'}. Derive a version, complete the choices, save and freeze, then return to simulation setup.`,
-              )}
-        </Notice>
-      )}
-      {requestedStructure && (
-        <Card
-          title={t(
-            `应用 ${requestedStructure} 植被方案`,
-            `Apply ${requestedStructure} vegetation structure`,
-          )}
-          description={t(
-            '自动建立修改版、保存所选结构并返回模拟配置。名称与说明已填写，可在下方修改。',
-            'Create a modified version, save the structure and return to setup. The name and notes are filled in and can be edited below.',
-          )}
-        >
-          <p>
-            {t('来源', 'Parent')}: {selected?.name} · r{selected?.version.revision}
-          </p>
-          <Button
-            variant="primary"
-            disabled={
-              !guideActions.find((a) => a.id === 'version-apply-simulation-structure')?.enabled
-            }
-            onClick={() => run(applyStructureAndReturn)}
-          >
-            {t(`应用 ${requestedStructure} 并继续`, `Apply ${requestedStructure} and continue`)}
-          </Button>
-          <p className="muted">
-            {t(
-              '站点植被数据仍在下一步检查；不会生成或猜测植被组成。',
-              'Vegetation data are checked in the next step; no composition is invented.',
-            )}
-          </p>
-        </Card>
-      )}
       {state.simulationReturn && (
         <div className="button-row">
-          <Button disabled={busy || codeBusy || dirty || !!draft} onClick={returnToSimulation}>
-            {t('返回模拟配置', 'Return to simulation setup')}
+          <Button disabled={busy || codeBusy || dirty} onClick={returnToSimulation}>
+            {t('← 返回模拟配置', '← Return to simulation setup')}
           </Button>
-          {draft && (
-            <span className="muted">
-              {t(
-                '冻结草稿或选择已有修订后返回。',
-                'Freeze the draft or select an existing revision before returning.',
-              )}
-            </span>
-          )}
         </div>
       )}
+      <h1>{t('模型版本', 'Model versions')}</h1>
       {error && <Notice tone="error">{error}</Notice>}
       <div className="form-grid">
         <Card title={t('版本树与修订', 'Version tree and revisions')}>
@@ -1035,28 +887,6 @@ export default function VersionsPage() {
               </Field>
             </Advanced>
           </Card>
-          <Card title={t('按顺序配置模型', 'Configure the model in order')}>
-            <ScientificSetupCards
-              source={
-                draft
-                  ? {
-                      kind: 'draft',
-                      id: draft.id,
-                      generation: draft.generation,
-                      overlay: draft.overlay,
-                    }
-                  : { kind: 'frozen', version: selected!.version }
-              }
-              overlay={shown.overlay}
-              fields={fields}
-              caseDir={configurationCase}
-              environment={setupEnvironment}
-              includeSubgrid
-              requested={requestedSetup}
-              disabled={busy || codeBusy}
-              onChange={editable ? (overlay) => edit({ ...draft!, overlay }) : undefined}
-            />
-          </Card>
           <Card
             title={t('按过程配置后续选项', 'Configure process options')}
             description={t(
@@ -1065,6 +895,8 @@ export default function VersionsPage() {
             )}
           >
             <ConfigurationOptions
+              subgrid={setupEnvironment.subgrid}
+              caseValues={setupEnvironment.caseValues}
               excludeKeys={setupHandledKeys}
               source={
                 draft

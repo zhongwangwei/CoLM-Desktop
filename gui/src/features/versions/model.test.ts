@@ -25,20 +25,8 @@ import { foundationControls, foundationValue, setFoundation, type ModelField } f
 const foundationFields = foundationControls
   .flatMap((c) => c.keys)
   .map((name) => ({ name, derived: false }) as ModelField);
-test('foundation selection updates exactly one vegetation structure atomically', () => {
-  const before = { DEF_USE_LCT: '.true.', keep: '1' };
-  const next = setFoundation(before, [], foundationFields, 'subgrid', 'PC');
-  assert.deepEqual(next, {
-    DEF_USE_LCT: '.false.',
-    DEF_USE_PFT: '.false.',
-    DEF_USE_PC: '.true.',
-    keep: '1',
-  });
-  assert.deepEqual(before, { DEF_USE_LCT: '.true.', keep: '1' });
-  assert.equal(foundationValue(next, 'subgrid'), 'PC');
-  assert.equal(foundationValue({}, 'subgrid'), '');
-  assert.equal(foundationValue({ DEF_USE_PFT: '.true.' }, 'subgrid'), '');
-  assert.throws(() => setFoundation(before, [], foundationFields, 'DEF_SUBGRID_SCHEME', 'PFT'));
+test('model foundation cannot change the case vegetation scheme', () => {
+  assert.throws(() => setFoundation({}, [], foundationFields, 'subgrid', 'PC'), /case/);
 });
 test('vG enables variably saturated flow and preserves unrelated physics', () => {
   const next = setFoundation({ keep: '1' }, [], foundationFields, 'soil', 'vG');
@@ -60,7 +48,7 @@ test('foundation controls read explicit case-scalar parameter overrides', () => 
   })) as Parameters<typeof foundationValue>[2];
   assert.equal(foundationValue({}, 'subgrid', parameters), 'PFT');
   assert.equal(
-    setFoundation({}, parameters!, foundationFields, 'DEF_USE_BGC', '.true.').DEF_USE_BGC,
+    setFoundation({}, parameters!, foundationFields, 'DEF_USE_BGC', '.true.', 'PFT').DEF_USE_BGC,
     '.true.',
   );
   const soil = [
@@ -77,38 +65,22 @@ test('foundation controls read explicit case-scalar parameter overrides', () => 
   ] as Parameters<typeof foundationValue>[2];
   assert.equal(foundationValue({}, 'soil', soil), 'vG');
 });
-test('BGC dependencies and parameter conflicts are rejected without mutations', () => {
-  const initial = setFoundation({}, [], foundationFields, 'subgrid', 'PFT');
-  const bgc = setFoundation(initial, [], foundationFields, 'DEF_USE_BGC', '.true.');
-  assert.throws(() => setFoundation(bgc, [], foundationFields, 'subgrid', 'LCT'), /BGC/);
-  assert.equal(bgc.DEF_USE_PFT, '.true.');
-  assert.throws(() => setFoundation({}, [], foundationFields, 'DEF_USE_BGC', '.true.'), /PFT/);
-  const record = { raw_key: 'def_use_lct', value: '.false.' } as never;
+test('BGC uses case scheme rather than stale version flags', () => {
+  const physics = { DEF_USE_PFT: '.true.' };
   assert.throws(
-    () => setFoundation({}, [record], foundationFields, 'subgrid', 'PC'),
+    () => setFoundation(physics, [], foundationFields, 'DEF_USE_BGC', '.true.', 'IGBP'),
+    /PFT/,
+  );
+  assert.throws(() => setFoundation(physics, [], foundationFields, 'DEF_USE_BGC', '.true.'), /PFT/);
+  assert.equal(
+    setFoundation({}, [], foundationFields, 'DEF_USE_BGC', '.true.', 'PC').DEF_USE_BGC,
+    '.true.',
+  );
+  assert.deepEqual(physics, { DEF_USE_PFT: '.true.' });
+  const record = { raw_key: 'DEF_USE_BGC', value: '.false.' } as never;
+  assert.throws(
+    () => setFoundation({}, [record], foundationFields, 'DEF_USE_BGC', '.true.', 'PFT'),
     /conflicting/,
-  );
-  assert.throws(
-    () =>
-      setFoundation(
-        {},
-        [{ raw_key: 'DEF_USE_BGC', value: '.true.' } as never],
-        foundationFields,
-        'subgrid',
-        'LCT',
-      ),
-    /BGC/,
-  );
-  assert.throws(
-    () =>
-      setFoundation(
-        {},
-        [],
-        foundationFields.filter((f) => f.name !== 'DEF_USE_PC'),
-        'subgrid',
-        'PC',
-      ),
-    /writable/,
   );
   assert.throws(
     () =>

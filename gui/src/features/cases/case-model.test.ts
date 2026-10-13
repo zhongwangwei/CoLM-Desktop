@@ -22,9 +22,9 @@ const field = (name: string, section: string): SchemaField => ({
   values: [],
 });
 describe('case data boundary', () => {
-  it('keeps parameters and process switches in model versions', () => {
-    assert.equal(isCaseField(field('DEF_USE_BGC', '生态与生地化')), false);
-    assert.equal(isCaseField(field('DEF_TUNING_CSOILC', '生态与生地化')), false);
+  it('admits process switches while model-field filtering owns the parameter boundary', () => {
+    assert.equal(isCaseField(field('DEF_USE_BGC', '生态与生地化')), true);
+    assert.equal(isCaseField(field('DEF_TUNING_CSOILC', '生态与生地化')), true);
     assert.equal(isCaseField(field('DEF_file_SoilInit', '初始场')), true);
     assert.equal(isCaseField(field('DEF_simulation_time%spinup_year', '时间与预热')), true);
   });

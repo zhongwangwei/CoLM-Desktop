@@ -4,13 +4,7 @@ import { invoke } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
-import {
-  requiredNumber,
-  versionMode,
-  preparedDestination,
-  effectiveModelFields,
-  cropEnabled,
-} from './case-model';
+import { requiredNumber, preparedDestination, casePreparationOptions } from './case-model';
 interface Slot {
   index: number;
   meaning: string;
@@ -85,6 +79,7 @@ export default function PreparationPage() {
     [result, setResult] = useState<unknown>(null),
     [error, setError] = useState('');
   const lock = useRef(false);
+  const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   const num = (k: string) => requiredNumber(form[k], k);
   const optional = (k: string) => (form[k].trim() ? num(k) : null);
@@ -206,8 +201,8 @@ export default function PreparationPage() {
           lat: num('lat'),
           landtype: optional('landtype'),
           rawdata: form.rawdata || null,
-          mode: versionMode(effectiveModelFields(state.version?.overlay)),
-          crop: cropEnabled(effectiveModelFields(state.version?.overlay)),
+          mode: preparation.mode,
+          crop: preparation.crop,
         });
       if (mode === 'era5')
         return invoke('download_era5land', {
@@ -248,11 +243,7 @@ export default function PreparationPage() {
             latitude: optional('lat'),
             longitude: optional('lon'),
             step_seconds: optional('step_seconds'),
-            land_cover_scheme: versionMode(effectiveModelFields(state.version?.overlay)).includes(
-              'usgs',
-            )
-              ? 'usgs'
-              : 'igbp',
+            land_cover_scheme: preparation.classification.toLowerCase(),
             heights: heights(),
           },
         });

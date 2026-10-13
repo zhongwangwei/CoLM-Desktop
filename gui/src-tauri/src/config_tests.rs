@@ -133,6 +133,27 @@ fn a_value_of_the_wrong_type_is_refused_before_it_reaches_the_file() {
 }
 
 #[test]
+fn tracer_case_csv_values_reject_nonfinite_and_malformed_numbers() {
+    for field in [
+        "DEF_TRACER_MRAT",
+        "DEF_TRACER_REF_RATIO",
+        "DEF_TRACER_INIT_DELTA",
+        "DEF_TRACER_REACTIVE_DECAY_RATE",
+    ] {
+        assert!(!colm_model::is_model_field(field));
+        let input = format!("&nl_colm\n{field}=''\n/\n");
+        for invalid in ["NaN", "1,inf", "1,,2", "1,unknown"] {
+            assert!(set_field(input.clone(), field.into(), invalid.into())
+                .unwrap_err()
+                .contains("finite numbers"));
+        }
+        for valid in ["", "1", "1.0,-2.5,1D-3"] {
+            set_field(input.clone(), field.into(), valid.into()).unwrap();
+        }
+    }
+}
+
+#[test]
 fn a_real_keeps_the_spelling_it_was_given() {
     // 1800. 与 1800.0 与 1.8e3 在 Fortran 里等价，但往返要还原用户写的那种，
     // 否则每次保存都改写一遍用户没动过的写法。

@@ -1038,58 +1038,9 @@ pub(crate) fn check_kernel(
     kernel: &colm_kernel::Kernel,
 ) -> Result<()> {
     let has = |key: &str| kernel.manifest.macros.iter().any(|m| m == key);
-    for (field, macro_name) in [
-        ("DEF_USE_CROP", "CROP"),
-        ("DEF_USE_USGS", "LULC_USGS"),
-        ("DEF_USE_IGBP", "LULC_IGBP"),
-    ] {
-        if let Some((_, value)) = frozen
-            .overlay
-            .physics
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(field))
-        {
-            ensure!(
-                has(macro_name) == value.eq_ignore_ascii_case(".true."),
-                "{field} disagrees with selected kernel {macro_name}"
-            );
-        }
-    }
-    // Unspecified values belong to the frozen source, whose defaults may differ.
-    let mut structure = Vec::new();
-    let mut declared = 0;
-    for field in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
-        let value = frozen
-            .overlay
-            .physics
-            .iter()
-            .find(|(key, _)| key.eq_ignore_ascii_case(field))
-            .map(|(_, value)| value)
-            .or_else(|| {
-                frozen
-                    .overlay
-                    .parameters
-                    .iter()
-                    .find(|record| {
-                        record.scope_instance.kind == "case-scalar"
-                            && record.raw_key.eq_ignore_ascii_case(field)
-                    })
-                    .map(|record| &record.value)
-            });
-        if let Some(value) = value {
-            declared += 1;
-            match value.to_ascii_lowercase().as_str() {
-                ".true." => structure.push(field),
-                ".false." => {}
-                _ => anyhow::bail!("{field} must be logical"),
-            }
-        }
-    }
-    ensure!(
-        structure.len() <= 1 && (declared < 3 || structure.len() == 1),
-        "exactly one of DEF_USE_LCT, DEF_USE_PFT, and DEF_USE_PC must be true"
-    );
-    for parameter in &frozen.overlay.parameters {
+    let overlay = colm_model::model_overlay(&frozen.overlay);
+    // Runtime vegetation selection is validated against the case during materialization.
+    for parameter in &overlay.parameters {
         if let Some(scheme) = &parameter.scope_instance.scheme {
             ensure!(
                 has(&format!("LULC_{scheme}")),
@@ -1098,8 +1049,6 @@ pub(crate) fn check_kernel(
             );
         }
         match parameter.scope_instance.kind.as_str() {
-            "pft" => ensure!(declared == 3 && structure.as_slice() == ["DEF_USE_PFT"], "PFT parameter requires explicit LCT/PFT/PC switches selecting DEF_USE_PFT"),
-            "pc-pft" => ensure!(declared == 3 && structure.as_slice() == ["DEF_USE_PC"], "PC parameter requires explicit LCT/PFT/PC switches selecting DEF_USE_PC"),
             "land-cover-class" => ensure!(has("SinglePoint"), "land-cover scalar overrides require a SinglePoint kernel; regional multi-class application is unsupported"),
             _ => {}
         }
@@ -2313,7 +2262,7 @@ mod runtime_kernel_tests {
     use super::*;
 
     #[test]
-    fn runtime_pft_and_pc_require_matching_structure_not_removed_macros() {
+    fn runtime_pft_and_pc_check_kernel_capabilities_without_case_owned_switches() {
         let root = std::env::temp_dir().join(unique_id());
         let store = colm_model::Registry::open(root.join("registry")).unwrap();
         let mut frozen = store
@@ -2333,12 +2282,8 @@ mod runtime_kernel_tests {
             }))
             .unwrap(),
         };
-        for (kind, field) in [("pft", "DEF_USE_PFT"), ("pc-pft", "DEF_USE_PC")] {
+        for kind in ["pft", "pc-pft"] {
             frozen.overlay = colm_model::Overlay::default();
-            for key in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
-                frozen.overlay.physics.insert(key.into(), ".false.".into());
-            }
-            frozen.overlay.physics.insert(field.into(), ".true.".into());
             frozen
                 .overlay
                 .parameters
@@ -2381,84 +2326,16 @@ mod runtime_kernel_tests {
                 kernel.manifest.macros.pop();
             }
             frozen.overlay.parameters[0].scope_instance.index = Some(0);
-            let physics = frozen.overlay.physics.clone();
-            // Both mixed storage and all case-scalar storage describe the same structure.
-            for key in [
-                field,
-                "DEF_USE_LCT",
-                if field == "DEF_USE_PFT" {
-                    "DEF_USE_PC"
-                } else {
-                    "DEF_USE_PFT"
-                },
-            ] {
-                let value = frozen.overlay.physics.remove(key).unwrap();
-                frozen
-                    .overlay
-                    .parameters
-                    .push(colm_model::ParameterOverrideRecord {
-                        parameter_id: colm_case::parameters::find(key).unwrap().id.clone(),
-                        raw_key: key.to_ascii_lowercase(),
-                        scope_instance: colm_model::ParameterScopeInstance {
-                            kind: "case-scalar".into(),
-                            scheme: None,
-                            index: None,
-                            type_name: None,
-                            process_file: None,
-                        },
-                        value,
-                        expected_old_value: None,
-                        unit: None,
-                    });
-                check_kernel(&frozen, &kernel).unwrap();
-            }
-            frozen
-                .overlay
-                .parameters
-                .iter_mut()
-                .find(|record| record.raw_key.eq_ignore_ascii_case("DEF_USE_LCT"))
-                .unwrap()
-                .value = ".true.".into();
-            assert!(
-                check_kernel(&frozen, &kernel).is_err(),
-                "case-scalar conflict must reject"
-            );
-            frozen
-                .overlay
-                .parameters
-                .retain(|record| record.scope_instance.kind != "case-scalar");
-            frozen.overlay.physics = physics;
-            frozen
-                .overlay
-                .physics
-                .insert("DEF_USE_LCT".into(), ".true.".into());
-            assert!(check_kernel(&frozen, &kernel).is_err());
-            frozen.overlay.physics.clear();
-            assert!(
-                check_kernel(&frozen, &kernel).is_err(),
-                "LCT defaults do not enable PFT parameters"
-            );
-            frozen
-                .overlay
-                .physics
-                .insert("DEF_SUBGRID_SCHEME".into(), "'PC'".into());
-            assert!(
-                check_kernel(&frozen, &kernel).is_err(),
-                "legacy strings cannot prove runtime structure"
-            );
+            assert!(frozen.overlay.physics.is_empty());
+            check_kernel(&frozen, &kernel).unwrap();
         }
         frozen.overlay = colm_model::Overlay::default();
-        for field in ["DEF_USE_CROP", "DEF_USE_USGS"] {
+        for field in ["DEF_USE_CROP", "DEF_USE_USGS", "DEF_USE_IGBP"] {
             frozen.overlay.physics.insert(field.into(), ".true.".into());
-            assert!(check_kernel(&frozen, &kernel).is_err());
-            frozen.overlay.physics.clear();
         }
-        frozen
-            .overlay
-            .physics
-            .insert("DEF_USE_IGBP".into(), ".true.".into());
+        check_kernel(&frozen, &kernel).unwrap();
         kernel.manifest.macros = vec!["LULC_USGS".into()];
-        assert!(check_kernel(&frozen, &kernel).is_err());
+        check_kernel(&frozen, &kernel).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 }

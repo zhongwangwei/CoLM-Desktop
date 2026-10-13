@@ -107,6 +107,7 @@ export function simulationFields(
   if (step === 2 || step === 5) return [];
   return schema.filter(
     (f) =>
+      !['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC', 'DEF_SUBGRID_SCHEME'].includes(f.name) &&
       simulationFieldStep(f) === step &&
       !/^DEF_simulation_time%(start|end|spinup)_(year|month|day)$/.test(f.name) &&
       (advanced || (step === 4 ? primaryOutputFields : primaryDataFields).includes(f.name)),

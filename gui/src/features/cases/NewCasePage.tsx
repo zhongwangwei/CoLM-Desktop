@@ -32,8 +32,8 @@ import { compatibleKernel } from '../runs/run-model';
 import ProcessDataGroups from './ProcessDataGroups';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
-import { simulationMode, type SimulationMode } from './model-settings';
-import type { SetupRequest } from '../versions/scientific-setup';
+import { simulationMode, caseSchemeFields, type SimulationMode } from './model-settings';
+import type { CaseOptionPatch } from '../versions/configuration-options';
 export default function NewCasePage() {
   const { state, update, openCase, navigate } = useApp(),
     en = state.language === 'en',
@@ -66,10 +66,12 @@ export default function NewCasePage() {
     forcing: '',
     timestep: '1800',
     ...seed?.form,
+    ...(['PFT', 'PC'].includes(seed?.form.subgrid ?? '') ? { landcover: 'IGBP' } : {}),
   });
   const [caseValues, setCaseValues] = useState<Record<string, string>>(seed?.caseValues ?? {}),
     [schema, setSchema] = useState<SchemaField[]>([]),
-    [schemaReady, setSchemaReady] = useState(false);
+    [schemaReady, setSchemaReady] = useState(false),
+    [modelFields, setModelFields] = useState<SchemaField[]>([]);
   const [sites, setSites] = useState<Site[]>(seed?.sites ?? []),
     [step, setStep] = useState<SimulationStep>(seed?.step ?? 1),
     [hint, setHint] = useState(''),
@@ -83,7 +85,13 @@ export default function NewCasePage() {
   const lock = useRef(false),
     sequence = useRef(0),
     alive = useRef(true),
-    physics = effectiveModelFields(state.version?.overlay),
+    physics = {
+      ...effectiveModelFields(state.version?.overlay, modelFields),
+      ...caseValues,
+      ...caseSchemeFields(
+        simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid)!,
+      ),
+    },
     selected = sites.find((s) => s.site_file === form.site);
   useEffect(() => {
     alive.current = true;
@@ -102,12 +110,17 @@ export default function NewCasePage() {
       .then(([all, model]) => {
         if (!current) return;
         const supplied = [
+          'DEF_USE_LCT',
+          'DEF_USE_PFT',
+          'DEF_USE_PC',
+          'DEF_SUBGRID_SCHEME',
           'SITE_fsitedata',
           'DEF_forcing_namelist',
           'DEF_dir_rawdata',
           'DEF_dir_runtime',
           'DEF_dir_output',
         ];
+        setModelFields(model);
         setSchema(
           all
             .filter(isCaseField)
@@ -137,6 +150,9 @@ export default function NewCasePage() {
     physics,
   );
   const dataPatch = {
+    ...caseSchemeFields(
+      simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid)!,
+    ),
     ...Object.fromEntries(
       Object.entries(caseValues).filter(
         ([key, value]) =>
@@ -307,28 +323,38 @@ export default function NewCasePage() {
     setError('');
     setStep((step + 1) as SimulationStep);
   }
-  function editModel(subgrid?: 'LCT' | 'PFT' | 'PC', nextForm = form, setup?: SetupRequest) {
+  function openResearch() {
     update({
-      newCaseSeed: { form: nextForm, sites, caseValues, step: 2, ownData },
-      simulationReturn: {
-        route: 'new-case',
+      newCaseSeed: {
+        form,
+        sites,
+        caseValues: {
+          ...caseValues,
+          ...caseSchemeFields(
+            simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid)!,
+          ),
+        },
         step: 2,
-        ...(subgrid ? { subgrid } : {}),
-        ...(setup ? { setup } : {}),
+        ownData,
       },
+      simulationReturn: { route: 'new-case', step: 2 },
     });
-    return navigate('versions');
+    return navigate('research');
+  }
+  function changeCaseOptions(patch: CaseOptionPatch) {
+    setError('');
+    setCaseValues((old) => {
+      const next = { ...old };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value === null) delete next[key];
+        else next[key] = value;
+      }
+      return next;
+    });
   }
   function selectMode(mode: SimulationMode) {
-    const current = simulationMode(state.version?.overlay, form.landcover as 'IGBP' | 'USGS');
-    if (mode === 'PFT' || mode === 'PC') {
-      if (current !== mode) editModel(mode);
-      return;
-    }
-    const nextForm = { ...form, landcover: mode };
-    setForm(nextForm);
+    setForm({ ...form, subgrid: mode, landcover: mode === 'USGS' ? 'USGS' : 'IGBP' });
     setError('');
-    if (current === 'PFT' || current === 'PC') editModel('LCT', nextForm);
   }
   const editedOptions = Object.entries(caseValues).filter(
     ([name, value]) =>
@@ -355,7 +381,12 @@ export default function NewCasePage() {
           }
         : { 'DEF_simulation_time%spinup_year': '0' };
       const fields = [
-          ...physicsFields(physics),
+          ...physicsFields(effectiveModelFields(state.version?.overlay, modelFields)),
+          ...physicsFields(
+            caseSchemeFields(
+              simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid)!,
+            ),
+          ),
           ...changed,
           ...Object.entries(spinup).map(([path, value]) => ({ path, value })),
         ],
@@ -942,10 +973,12 @@ export default function NewCasePage() {
           version={state.version}
           disabled={!enabled}
           classification={form.landcover as 'IGBP' | 'USGS'}
-          mode={simulationMode(state.version?.overlay, form.landcover as 'IGBP' | 'USGS')}
+          mode={simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid)}
           onModeChange={selectMode}
           kernel={configurationKernel}
           setupEnvironment={{
+            subgrid: simulationMode(undefined, form.landcover as 'IGBP' | 'USGS', form.subgrid),
+            caseValues: dataPatch,
             domain: form.kind,
             grid: form.kind === 'site' ? null : form.grid,
             classification: form.landcover as 'IGBP' | 'USGS',
@@ -960,9 +993,13 @@ export default function NewCasePage() {
               physics,
             ),
           }}
-          onSetupRequest={(request) => editModel(undefined, form, request)}
-          onClassificationChange={(value) => set('landcover', value)}
-          onEdit={() => editModel()}
+          onCaseChange={changeCaseOptions}
+          onClassificationChange={
+            form.subgrid === 'PFT' || form.subgrid === 'PC'
+              ? undefined
+              : (value) => set('landcover', value)
+          }
+          onEdit={() => openResearch()}
         />
       )}
       {step === 4 && (

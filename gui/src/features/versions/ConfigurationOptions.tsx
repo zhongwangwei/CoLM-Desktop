@@ -6,10 +6,19 @@ import { invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
 import type { Overlay } from '../../lib/types';
-import { modelSettingGroups, modelSettingGroup, modelSettingValue } from '../cases/model-settings';
+import {
+  modelSettingGroups,
+  modelSettingGroup,
+  modelSettingValue,
+  simulationMode,
+  caseSchemeFields,
+} from '../cases/model-settings';
 import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
+  caseOptionOverlay,
+  caseOptionPatch,
+  type CaseOptionPatch,
   tracerFamilies,
   tracerFamilyState,
   appendTracerFamily,
@@ -32,6 +41,8 @@ import {
   type FamilyContext,
 } from './configuration-options';
 type Props = {
+  onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
+  subgrid?: string;
   excludeKeys?: readonly string[];
   kernelMacros?: FamilyContext['kernelMacros'];
   caseScope?: FamilyContext['caseScope'];
@@ -55,13 +66,14 @@ const empty: ConfigurationResult = {
   context_complete: false,
 };
 export default function ConfigurationOptions({
+  subgrid,
   excludeKeys = [],
   kernelMacros,
   caseScope,
   groupPrefix = 'configuration',
   caseValues = null,
   source,
-  overlay,
+  overlay: sourceOverlay,
   fields,
   catalog,
   caseDir = null,
@@ -69,6 +81,7 @@ export default function ConfigurationOptions({
   disabled = false,
   onChange,
   onImportProcess,
+  onCaseChange,
 }: Props) {
   const { state } = useApp(),
     lang = state.language,
@@ -86,7 +99,8 @@ export default function ConfigurationOptions({
     [tracerInput, setTracerInput] = useState<{
       key: string;
       rows: ReturnType<typeof tracerRows>;
-    } | null>(null);
+    } | null>(null),
+    [saving, setSaving] = useState(false);
   const pftOpen = opened.pft ?? false;
   const selection =
     pftOpen &&
@@ -96,13 +110,18 @@ export default function ConfigurationOptions({
     Number(pftIndex) <= 78
       ? { kind: pftKind, index: Number(pftIndex) }
       : null;
+  const scheme = simulationMode(undefined, undefined, subgrid);
+  const queryValues = scheme ? { ...caseSchemeFields(scheme), ...caseValues } : caseValues;
   const request = JSON.stringify({
-    source: source.kind === 'draft' ? { ...source, overlay } : source,
+    source: source.kind === 'draft' ? { ...source, overlay: sourceOverlay } : source,
     caseDir,
     kernelDir,
     pftSelection: selection,
-    caseValues,
+    caseValues: queryValues,
   });
+  const overlay = onCaseChange
+    ? caseOptionOverlay(sourceOverlay, fields, queryValues, loaded === request ? result.fields : [])
+    : sourceOverlay;
   const sourceKey = JSON.stringify(
     source.kind === 'draft'
       ? { kind: source.kind, id: source.id, generation: source.generation }
@@ -141,7 +160,8 @@ export default function ConfigurationOptions({
   const tracers = tracerInput?.key === sourceKey ? tracerInput.rows : null;
   const setTracers = (rows: ReturnType<typeof tracerRows> | null) =>
     setTracerInput(rows ? { key: sourceKey, rows } : null);
-  const current = useRef(request);
+  const current = useRef(request),
+    savingNow = useRef(false);
   current.current = request;
   useEffect(() => {
     let live = true;
@@ -164,16 +184,28 @@ export default function ConfigurationOptions({
     };
   }, [request]);
   const ready = loaded === request,
-    locked = disabled || source.kind !== 'draft' || !onChange || importing;
+    locked =
+      disabled || saving || (!onCaseChange && (source.kind !== 'draft' || !onChange)) || importing;
   const values = ready ? result : empty;
   const controls: UiField[] = [],
     actions: UiAction[] = [];
   function write(change: () => Overlay) {
-    if (locked || current.current !== request)
+    if (locked || savingNow.current || current.current !== request)
       throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
     try {
       const next = change();
-      onChange!(next);
+      if (onCaseChange) {
+        savingNow.current = true;
+        setSaving(true);
+        void Promise.resolve()
+          .then(() => onCaseChange(caseOptionPatch(overlay, next, fields)))
+          .then(() => setError(''))
+          .catch((e) => setError(String(e)))
+          .finally(() => {
+            savingNow.current = false;
+            setSaving(false);
+          });
+      } else onChange!(next);
       setError('');
     } catch (e) {
       setError(String(e));
@@ -305,7 +337,7 @@ export default function ConfigurationOptions({
   function row(field: ModelField) {
     const context = values.fields.find((f) => f.name === field.name),
       value = modelSettingValue(overlay, field.name) ?? context?.configured_value ?? '';
-    const inactive = context?.mode === 'disabled',
+    const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive,
       id = `configuration-${field.name}`;
     actions.push({
@@ -364,8 +396,10 @@ export default function ConfigurationOptions({
       : '';
     const unavailable =
       !ready ||
-      stomatalFields.some(
-        (name) => values.fields.find((f) => f.name === name)?.mode === 'disabled',
+      stomatalFields.some((name) =>
+        ['disabled', 'readonly', 'read-only'].includes(
+          values.fields.find((f) => f.name === name)?.mode ?? '',
+        ),
       );
     const options = [
       ['BALL_BERRY', 'Ball–Berry'],
@@ -498,8 +532,11 @@ export default function ConfigurationOptions({
     !locked &&
     ready &&
     tracerFields.length > 0 &&
-    values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode !== 'disabled';
+    !['disabled', 'readonly', 'read-only'].includes(
+      values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode ?? '',
+    );
   const familyContext: FamilyContext = {
+    subgrid,
     kernelMacros:
       kernelMacros ?? state.kernels?.find((item) => item.dir === kernelDir)?.macros ?? null,
     caseScope,
@@ -772,19 +809,9 @@ export default function ConfigurationOptions({
                 (d) => d.id === entry.descriptor_id && d.storage === 'process-parameter-file',
               ),
               id = `configuration-process-${asset.file}-${entry.path}`,
-              cannot = !ready || !asset.verified || !entry.editable || !descriptor;
-            const reset = () =>
-              write(() =>
-                resetProcessOption(
-                  overlay,
-                  descriptor!,
-                  asset.file,
-                  entry.asset_value,
-                  values.fields,
-                  entry.kind,
-                  asset.active_methane_asset,
-                ),
-              );
+              cannot =
+                !!onCaseChange || !ready || !asset.verified || !entry.editable || !descriptor;
+            const reset = () => write(() => resetProcessOption(overlay, descriptor!, asset.file));
             actions.push({
               id: `${id}-reset`,
               label: `${fieldLabel(entry.path, lang)} · ${t('恢复资产原值', 'Restore asset value')}`,
@@ -805,17 +832,7 @@ export default function ConfigurationOptions({
                   entry.options,
                   cannot,
                   (v) =>
-                    write(() =>
-                      setProcessOption(
-                        overlay,
-                        descriptor!,
-                        v,
-                        asset.file,
-                        values.fields,
-                        entry.kind,
-                        asset.active_methane_asset,
-                      ),
-                    ),
+                    write(() => setProcessOption(overlay, descriptor!, v, asset.file, entry.kind)),
                   entry.path,
                 )}
                 <small>
@@ -850,13 +867,13 @@ export default function ConfigurationOptions({
           d.storage === (pftKind === 'pft' ? 'pft-override' : 'pc-pft-override'),
       ),
       id = `configuration-${pftKind}-${pftIndex}-${entry.name}`,
-      cannot = !ready || entry.mode !== 'editable' || !descriptor || !selection;
+      cannot = !!onCaseChange || !ready || entry.mode !== 'editable' || !descriptor || !selection;
     const reset = () => write(() => resetScopedOption(overlay, descriptor!, Number(pftIndex), ''));
     actions.push({
       id: `${id}-reset`,
       label: `${entry.name} · ${t('移除覆盖', 'Remove override')}`,
       kind: 'click',
-      enabled: !locked && !!descriptor && !!selection,
+      enabled: !onCaseChange && !locked && !!descriptor && !!selection,
       run: () => {
         if (!descriptor || !selection) throw new Error('PFT parameter is unavailable');
         reset();
@@ -880,7 +897,7 @@ export default function ConfigurationOptions({
           {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
         </small>
         <Button
-          disabled={locked || !descriptor || !selection}
+          disabled={!!onCaseChange || locked || !descriptor || !selection}
           onClick={() => {
             try {
               reset();

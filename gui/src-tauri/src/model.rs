@@ -253,6 +253,15 @@ pub async fn model_case_context(
     dir: String,
     model_revision: Option<VersionRef>,
 ) -> Result<crate::project::OpenedCase, String> {
+    model_case_context_with_fields(dir, model_revision, &[], &[]).await
+}
+
+pub(crate) async fn model_case_context_with_fields(
+    dir: String,
+    model_revision: Option<VersionRef>,
+    case_fields: &[(String, colm_namelist::Value)],
+    remove_fields: &[String],
+) -> Result<crate::project::OpenedCase, String> {
     let source = crate::project::open_case(dir.clone())?;
     let version = match model_revision {
         Some(v) => v,
@@ -270,7 +279,14 @@ pub async fn model_case_context(
             .as_nanos()
     );
     let run = registry
-        .materialize_run(&version, Path::new(&dir), &parent.join(&id), &id)
+        .materialize_run_with_case_changes(
+            &version,
+            Path::new(&dir),
+            &parent.join(&id),
+            &id,
+            case_fields,
+            remove_fields,
+        )
         .map_err(|e| e.to_string())?;
     open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
 }
@@ -386,7 +402,7 @@ pub async fn model_attach_network(
 mod tests {
     use super::*;
     #[test]
-    fn model_preview_keeps_usgs_classification_and_new_runtime_structure() {
+    fn model_preview_keeps_case_owned_classification_and_runtime_structure() {
         let directory = std::env::temp_dir().join(format!(
             "colm-preview-classification-{}-{}",
             std::process::id(),
@@ -410,7 +426,6 @@ mod tests {
                 shapefile: Some("/input/watershed.shp".into()),
             },
         );
-        let source = crate::project::open_case(source_dir.display().to_string()).unwrap();
         let registry = Registry::open(directory.join("registry")).unwrap();
         let official = registry
             .install_official(colm_model::CodeRef {
@@ -421,21 +436,17 @@ mod tests {
             })
             .unwrap();
         for structure in ["PFT", "PC"] {
-            let mut overlay = colm_model::Overlay::default();
-            overlay
-                .physics
-                .insert("DEF_USE_BGC".into(), ".true.".into());
-            for choice in ["LCT", "PFT", "PC"] {
-                overlay.physics.insert(
-                    format!("DEF_USE_{choice}"),
-                    if structure == choice {
-                        ".true."
-                    } else {
-                        ".false."
-                    }
-                    .into(),
-                );
-            }
+            let overlay = colm_model::Overlay::default();
+            std::fs::write(
+                source_dir.join("case.nml"),
+                format!(
+                    "&nl_colm\n DEF_CASE_NAME='source'\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.{}.\n DEF_USE_PC=.{}.\n DEF_TUNING_CROP_PLANTING_DAY=120\n/\n",
+                    structure == "PFT",
+                    structure == "PC",
+                ),
+            )
+            .unwrap();
+            let source = crate::project::open_case(source_dir.display().to_string()).unwrap();
             let draft = registry
                 .create_draft(ModelDraft {
                     id: structure.to_lowercase(),
@@ -563,7 +574,8 @@ pub(crate) fn creation_fields(
     let Some(revision) = revision else {
         return Ok(fields);
     };
-    let frozen = model_get(revision.id.clone(), revision.revision)?;
+    let mut frozen = model_get(revision.id.clone(), revision.revision)?;
+    frozen.overlay = colm_model::model_overlay(&frozen.overlay);
     fields.retain(|field| !colm_model::is_model_field(&field.path));
     fields.extend(
         frozen

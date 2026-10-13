@@ -732,3 +732,63 @@ test('result time-window changes clear sampled curves while observation edits pr
   assert.equal(curve, null);
   assert.equal(key, '');
 });
+
+test('preparation sends only active case or pending case settings to native data generation', async () => {
+  const { casePreparationOptions } = await import('./case-model');
+  const legacy = {
+    physics: { DEF_URBAN_RUN: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '0', DEF_USE_PC: '.true.' },
+    parameters: [],
+  };
+  const calls: { command: string; args: Record<string, unknown> }[] = [];
+  const state = {
+    version: { overlay: legacy },
+    selectedCase: {
+      profile: { classification: 'USGS' as const, subgrid: 'USGS', urban: false, crop: false },
+    },
+  };
+  const run = async (preparation: ReturnType<typeof casePreparationOptions>, mode: string) => {
+    const execute = callback(prep, 'execute', {
+      work: async (fn: () => Promise<unknown>) => fn(),
+      state,
+      preparation,
+      mode,
+      form: { dst: '/new-data.nc', rawdata: '/raw' },
+      num: () => 1,
+      optional: () => null,
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        calls.push({ command, args });
+        return [];
+      },
+      probe: {},
+      choices: () => [],
+      heights: () => null,
+      setImported: () => {},
+    });
+    await execute();
+    return calls.at(-1)!;
+  };
+  let call = await run(casePreparationOptions(state.selectedCase.profile), 'site');
+  assert.equal(call.args.mode, 'usgs');
+  assert.equal(call.args.crop, false);
+  call = await run(
+    casePreparationOptions(state.selectedCase.profile, {
+      form: { subgrid: 'PFT', landcover: 'IGBP' },
+      caseValues: { DEF_TUNING_CROP_PLANTING_DAY: '120' },
+    }),
+    'site',
+  );
+  assert.equal(call.args.mode, 'pft');
+  assert.equal(call.args.crop, true);
+  call = await run(
+    casePreparationOptions(
+      { classification: 'IGBP', subgrid: 'PFT', urban: true, crop: true },
+      { form: { landcover: 'USGS' } },
+    ),
+    'site',
+  );
+  assert.equal(call.args.mode, 'usgs');
+  assert.equal(call.args.crop, false);
+  call = await run(casePreparationOptions(state.selectedCase.profile), 'table');
+  assert.equal((call.args.options as { land_cover_scheme: string }).land_cover_scheme, 'usgs');
+  assert.equal(legacy.physics.DEF_USE_PC, '.true.');
+});

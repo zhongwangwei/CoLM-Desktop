@@ -17,7 +17,6 @@ import {
   setTracerRows,
   tracerKeys,
   fieldLiteral,
-  type ConfigurationField,
 } from './configuration-options';
 const empty = (): Overlay => ({ physics: {}, parameters: [], process_files: [] });
 const field = (name: string, kind = 'logical'): ModelField => ({
@@ -113,7 +112,7 @@ test('process and PFT overrides keep file/kind/index identity and reset only the
   next = resetScopedOption(next, p, 1, '');
   assert.equal(next.parameters.find((r) => r.scope_instance.index === 2)?.value, '5.');
 });
-test('methane mode updates wetland atomically and restores asset value without retaining an override', () => {
+test('methane research edits update only the process parameter and reset it without case switches', () => {
   const d = descriptor(
     'process:mode',
     'DEF_METHANE%inundation_mode',
@@ -122,17 +121,14 @@ test('methane mode updates wetland atomically and restores asset value without r
   );
   const overlay = empty();
   overlay.process_files = [{ relative_path: 'CH4.nml', sha256: 'a' }];
-  let next = setProcessOption(overlay, d, 'hybrid', 'CH4.nml', [], undefined, true);
-  assert.equal(next.physics.DEF_USE_Dynamic_Wetland, '.true.');
-  const context = [
-    { name: 'DEF_USE_GridRiverLakeFlow', configured_value: '.false.' },
-  ] as ConfigurationField[];
-  assert.throws(() => setProcessOption(overlay, d, 'routing', 'CH4.nml', context, undefined, true));
+  let next = setProcessOption(overlay, d, 'hybrid', 'CH4.nml', undefined);
+  assert.equal(next.physics.DEF_USE_Dynamic_Wetland, undefined);
+  assert.equal(setProcessOption(overlay, d, 'routing', 'CH4.nml', undefined).parameters.length, 1);
   assert.equal(overlay.parameters.length, 0);
-  next = resetProcessOption(next, d, 'CH4.nml', "'wetwat'", [], undefined, true);
+  next = resetProcessOption(next, d, 'CH4.nml');
   assert.equal(next.parameters.length, 0);
-  assert.equal(next.physics.DEF_USE_Dynamic_Wetland, '.false.');
-  assert.throws(() => resetProcessOption(next, d, 'CH4.nml', null, [], undefined, true));
+  assert.equal(next.physics.DEF_USE_Dynamic_Wetland, undefined);
+  assert.equal(resetProcessOption(next, d, 'CH4.nml').parameters.length, 0);
 });
 test('tracer table applies aligned definitions once and invalid partial input does not mutate the draft', () => {
   const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
@@ -181,24 +177,24 @@ test('process arrays retain numeric and character list types, per-element bounds
   );
   const overlay = empty();
   overlay.process_files = [{ relative_path: 'forcing.nml', sha256: 'a' }];
-  let next = setProcessOption(overlay, d, '21600, 21600', 'forcing.nml', [], 'list');
+  let next = setProcessOption(overlay, d, '21600, 21600', 'forcing.nml', 'list');
   assert.equal(next.parameters[0].value, '21600, 21600');
   next.parameters[0].expected_old_value = '3600, 3600';
-  next = setProcessOption(next, d, '1800., 1800.', 'forcing.nml', [], 'list');
+  next = setProcessOption(next, d, '1800., 1800.', 'forcing.nml', 'list');
   assert.equal(next.parameters[0].expected_old_value, '3600, 3600');
-  next = setProcessOption(next, role, "'TAIR', 'WIND'", 'forcing.nml', [], 'list');
+  next = setProcessOption(next, role, "'TAIR', 'WIND'", 'forcing.nml', 'list');
   assert.equal(next.parameters[1].value, "'TAIR', 'WIND'");
-  next = setProcessOption(next, role, "'O''Brien', 'a,b'", 'forcing.nml', [], 'list');
+  next = setProcessOption(next, role, "'O''Brien', 'a,b'", 'forcing.nml', 'list');
   assert.equal(next.parameters[1].value, "'O''Brien', 'a,b'");
   for (const value of ['21600, Infinity', '21600, -1', '21600,', ''])
-    assert.throws(() => setProcessOption(next, d, value, 'forcing.nml', [], 'list'));
-  assert.throws(() => setProcessOption(next, role, "'TAIR, 'WIND'", 'forcing.nml', [], 'list'));
-  next = resetProcessOption(next, d, 'forcing.nml', '3600, 3600', [], 'list');
+    assert.throws(() => setProcessOption(next, d, value, 'forcing.nml', 'list'));
+  assert.throws(() => setProcessOption(next, role, "'TAIR, 'WIND'", 'forcing.nml', 'list'));
+  next = resetProcessOption(next, d, 'forcing.nml');
   assert.equal(next.parameters.length, 1);
   assert.equal(next.parameters[0].raw_key, 'DEF_forcing%forcing_role');
   assert.equal(overlay.parameters.length, 0);
 });
-test('methane legacy mode aliases restore the asset and the same wetland/routing requirements', () => {
+test('methane legacy mode aliases restore only the research asset parameter', () => {
   const d = descriptor(
     'process:mode',
     'DEF_METHANE%inundation_mode',
@@ -208,15 +204,13 @@ test('methane legacy mode aliases restore the asset and the same wetland/routing
   const overlay = empty();
   overlay.process_files = [{ relative_path: 'CH4.nml', sha256: 'a' }];
   for (const mode of ['dynamic-wtd', 'dh_all_thr05', 'dyn_routing_hybrid']) {
-    const result = resetProcessOption(overlay, d, 'CH4.nml', `'${mode}'`, [], undefined, true);
-    assert.equal(result.physics.DEF_USE_Dynamic_Wetland, '.true.');
+    const edited = setProcessOption(overlay, d, mode, 'CH4.nml');
+    assert.equal(edited.parameters[0].value, `'${mode}'`);
+    assert.deepEqual(edited.physics, {});
+    const result = resetProcessOption(edited, d, 'CH4.nml');
+    assert.deepEqual(result.physics, {});
     assert.equal(result.parameters.length, 0);
   }
-  const context = [
-    { name: 'DEF_USE_GridRiverLakeFlow', configured_value: '.false.' },
-  ] as ConfigurationField[];
-  for (const mode of ['dh_all_thr05', 'dyn_routing_hybrid'])
-    assert.throws(() => resetProcessOption(overlay, d, 'CH4.nml', mode, context, undefined, true));
 });
 test('tracer files resolve keyed and positional mappings and preserve untouched original serialization', () => {
   const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
@@ -280,7 +274,7 @@ test('tracer numeric metadata accepts Fortran exponents and rejects invalid fini
   }
   assert.deepEqual(overlay, empty());
 });
-test('only the confirmed active methane asset may change global wetland state on edit or reset', () => {
+test('active and inactive methane research assets preserve all case-owned wetland switches', () => {
   const d = descriptor(
       'process:mode',
       'DEF_METHANE%inundation_mode',
@@ -293,41 +287,14 @@ test('only the confirmed active methane asset may change global wetland state on
     { relative_path: 'unused.nml', sha256: 'b' },
   ];
   overlay.physics.DEF_USE_Dynamic_Wetland = '.false.';
-  const disabledRiver = [
-    { name: 'DEF_USE_GridRiverLakeFlow', configured_value: '.false.' },
-  ] as ConfigurationField[];
-  for (const activity of [false, null, undefined]) {
-    const edited = setProcessOption(
-      overlay,
-      d,
-      'hybrid',
-      'unused.nml',
-      disabledRiver,
-      undefined,
-      activity,
-    );
+  for (const file of ['active.nml', 'unused.nml']) {
+    const edited = setProcessOption(overlay, d, 'hybrid', file);
     assert.equal(edited.physics.DEF_USE_Dynamic_Wetland, '.false.');
-    assert.equal(edited.parameters[0].scope_instance.process_file, 'unused.nml');
-    const reset = resetProcessOption(
-      edited,
-      d,
-      'unused.nml',
-      "'dynamic-wtd'",
-      disabledRiver,
-      undefined,
-      activity,
-    );
+    assert.equal(edited.parameters[0].scope_instance.process_file, file);
+    const reset = resetProcessOption(edited, d, file);
     assert.equal(reset.physics.DEF_USE_Dynamic_Wetland, '.false.');
     assert.equal(reset.parameters.length, 0);
   }
-  assert.throws(() =>
-    setProcessOption(overlay, d, 'hybrid', 'active.nml', disabledRiver, undefined, true),
-  );
-  assert.equal(
-    setProcessOption(overlay, d, 'hybrid', 'active.nml', [], undefined, true).physics
-      .DEF_USE_Dynamic_Wetland,
-    '.true.',
-  );
 });
 
 test('generic groups exclude indexed catalog scopes while retaining ordinary scalar fields', () => {
@@ -392,7 +359,11 @@ test('family prerequisites distinguish explicit conflicts from unresolved condit
     DEF_USE_LULCC: '.false.',
     DEF_USE_GridRiverLakeFlow: '.true.',
   };
-  const context = { kernelMacros: ['GridRiverLakeFlow'], caseScope: 'spatial' as const };
+  const context = {
+    subgrid: 'PFT',
+    kernelMacros: ['GridRiverLakeFlow'],
+    caseScope: 'spatial' as const,
+  };
   assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'ready');
   assert.equal(tracerFamilyState(overlay, 'sediment', context).status, 'ready');
   assert.equal(
@@ -437,7 +408,7 @@ test('appending a family preserves a custom type already stored by the chosen so
   assert.throws(() => setTracerRows(empty(), fields, rows));
 });
 
-test('methane requires a fully explicit exclusive PFT or PC selection before marking prerequisites ready', () => {
+test('methane requires an explicit case scheme and ignores version scheme flags', () => {
   const overlay = empty();
   overlay.physics = {
     DEF_USE_TRACER: '.true.',
@@ -448,16 +419,10 @@ test('methane requires a fully explicit exclusive PFT or PC selection before mar
   };
   const context = { kernelMacros: ['SinglePoint'], caseScope: 'site' as const };
   assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'pending');
-  overlay.physics.DEF_USE_LCT = '.false.';
-  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'pending');
-  overlay.physics.DEF_USE_PC = '.false.';
-  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'ready');
-  overlay.physics.DEF_USE_PC = '.true.';
-  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'blocked');
-  overlay.physics.DEF_USE_PFT = '.false.';
-  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'ready');
-  overlay.physics.DEF_USE_LCT = '.true.';
-  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'blocked');
+  for (const subgrid of ['IGBP', 'USGS'])
+    assert.equal(tracerFamilyState(overlay, 'methane', { ...context, subgrid }).status, 'blocked');
+  for (const subgrid of ['PFT', 'PC'])
+    assert.equal(tracerFamilyState(overlay, 'methane', { ...context, subgrid }).status, 'ready');
 });
 test('a saved METHANE alias prevents a second methane family row', () => {
   const rows = [
@@ -472,4 +437,28 @@ test('a saved METHANE alias prevents a second methane family row', () => {
     },
   ];
   assert.deepEqual(appendTracerFamily(rows, 'methane'), rows);
+});
+
+test('case options override stale model switches without promoting defaults or editing parameters', async () => {
+  const { caseOptionOverlay, caseOptionPatch } = await import('./configuration-options');
+  const original = empty();
+  original.physics = { DEF_USE_BGC: '.true.', DEF_TUNING_CSOILC: '2' };
+  const fields = [field('DEF_USE_BGC'), field('DEF_USE_TRACER')];
+  const effective = caseOptionOverlay(original, fields, { DEF_USE_BGC: '.false.' }, [
+    {
+      name: 'DEF_USE_TRACER',
+      configured_value: null,
+      built_in_default: '.true.',
+      mode: 'editable',
+      allowed_values: [],
+      pending: true,
+    },
+  ]);
+  assert.equal(effective.physics.DEF_USE_BGC, '.false.');
+  assert.equal(effective.physics.DEF_USE_TRACER, undefined);
+  assert.equal(effective.physics.DEF_TUNING_CSOILC, '2');
+  assert.deepEqual(caseOptionPatch(effective, resetModelOption(effective, 'DEF_USE_BGC'), fields), {
+    DEF_USE_BGC: null,
+  });
+  assert.equal(original.physics.DEF_USE_BGC, '.true.');
 });

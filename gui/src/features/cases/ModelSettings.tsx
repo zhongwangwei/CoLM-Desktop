@@ -6,12 +6,9 @@ import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import type { FrozenRevision, KernelEntry } from '../../lib/types';
 import ConfigurationOptions from '../versions/ConfigurationOptions';
 import ScientificSetupCards from '../versions/ScientificSetupCards';
-import {
-  setupHandledKeys,
-  type SetupEnvironment,
-  type SetupRequest,
-} from '../versions/scientific-setup';
-import type { SchemaField } from './case-model';
+import { setupHandledKeys, type SetupEnvironment } from '../versions/scientific-setup';
+import { isCaseField, type SchemaField } from './case-model';
+import type { CaseOptionPatch } from '../versions/configuration-options';
 import {
   filterModelParameters,
   modelParameterEditable,
@@ -22,7 +19,7 @@ import {
 import { parameterKey } from '../versions/model';
 type Props = {
   setupEnvironment?: SetupEnvironment;
-  onSetupRequest?: (request: SetupRequest) => void;
+  onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
   version: FrozenRevision | null;
   onEdit: () => void;
   disabled?: boolean;
@@ -53,7 +50,7 @@ export default function ModelSettings({
   kernel,
   caseDir = null,
   setupEnvironment,
-  onSetupRequest,
+  onCaseChange,
 }: Props) {
   const { state } = useApp(),
     en = state.language === 'en',
@@ -64,7 +61,8 @@ export default function ModelSettings({
     [loading, setLoading] = useState(true),
     [catalogOpen, setCatalogOpen] = useState(false),
     [query, setQuery] = useState(''),
-    [scope, setScope] = useState('');
+    [scope, setScope] = useState(''),
+    [modelFields, setModelFields] = useState<SchemaField[]>([]);
   useEffect(() => {
     let live = true;
     Promise.all([
@@ -74,8 +72,14 @@ export default function ModelSettings({
     ])
       .then(([models, all, parameters]) => {
         if (live) {
+          setModelFields(models);
           setFields(
-            models.map((field) => ({ ...all.find((item) => item.name === field.name), ...field })),
+            all
+              .filter(isCaseField)
+              .filter(
+                (field) =>
+                  !models.some((model) => model.name.toLowerCase() === field.name.toLowerCase()),
+              ),
           );
           setCatalog(parameters);
         }
@@ -105,21 +109,16 @@ export default function ModelSettings({
         ? `simulation-mode-${value.toLowerCase()}`
         : `simulation-classification-${value.toLowerCase()}`;
   const modeAvailable = (value: SimulationMode) =>
-    !!onModeChange ||
-    ((value === 'PFT' || value === 'PC' || value === facts) && !!onSetupRequest) ||
-    ((value === 'IGBP' || value === 'USGS') && !!onClassificationChange);
+    !!onModeChange || ((value === 'IGBP' || value === 'USGS') && !!onClassificationChange);
   const changeMode = (value: SimulationMode) => {
     if (disabled || !modeAvailable(value)) return;
     if (onModeChange) onModeChange(value);
-    else if (onSetupRequest && (value === 'PFT' || value === 'PC' || value === facts)) {
-      if (value === selectedMode) return;
-      onSetupRequest({ id: 'subgrid', value: value === 'PFT' || value === 'PC' ? value : 'LCT' });
-    } else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
+    else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
   const actions: UiAction[] = [
     {
       id: 'simulation-model-edit',
-      label: t('调整参数与方案', 'Adjust parameters and schemes'),
+      label: t('研究与参数调整', 'Research and parameter adjustment'),
       kind: 'click',
       enabled: !disabled && !!version,
       run: onEdit,
@@ -178,7 +177,7 @@ export default function ModelSettings({
         ]
       : [];
   usePageContract({
-    title: t('模型方案', 'Model settings'),
+    title: t('算例方案', 'Case settings'),
     step: 'simulation-model',
     fields: guideFields,
     actions,
@@ -195,7 +194,7 @@ export default function ModelSettings({
 
   return (
     <Card
-      title={t('模型方案与参数', 'Model schemes and parameters')}
+      title={t('算例方案与模型参数', 'Case schemes and model parameters')}
       description={t(
         '先确认基础结构，再检查各过程方案与参数。',
         'Confirm the basic structure, then review process schemes and parameters.',
@@ -230,10 +229,7 @@ export default function ModelSettings({
             </span>
             <small>
               {value === 'PFT' || value === 'PC'
-                ? t(
-                    '需匹配模型版本与植被数据',
-                    'Requires matching model version and vegetation data',
-                  )
+                ? t('需匹配站点植被数据', 'Requires matching vegetation data')
                 : state.kernels.some((item) => item.macros.includes(`LULC_${value}`))
                   ? t('本机已有此分类内核', 'A kernel for this classification is installed')
                   : t('本机尚无此分类内核', 'No local kernel for this classification')}
@@ -256,12 +252,25 @@ export default function ModelSettings({
               </Button>
             ))}
           </div>
+          {!onClassificationChange && (
+            <p className="muted">
+              {caseDir
+                ? t(
+                    '保留算例现有的地类数据来源。',
+                    'The existing case classification is preserved.',
+                  )
+                : t(
+                    '新建 PFT / PC 算例使用 IGBP 地类数据。',
+                    'New PFT / PC cases use IGBP land-cover data.',
+                  )}
+            </p>
+          )}
         </Field>
       )}
       <p className="muted">
         {t(
-          '植被结构的调整通过版本草稿保存，不修改冻结版本。地类数据来源决定候选内核；版本、内核与输入的兼容性仍需检查。',
-          'Vegetation structure changes are saved in a version draft without modifying the frozen version. Land-cover classification selects candidate kernels; version, kernel and input compatibility still require checks.',
+          '四种方案均保存在算例中；选择后无需派生模型版本。地类数据来源决定候选内核，输入数据仍需匹配所选方案。',
+          'All four schemes are case settings; selecting one requires no model revision. Land-cover classification selects candidate kernels, and input data must match the scheme.',
         )}
         {!selectedMode && t(' 当前方案尚未确认。', ' Current scheme is unconfirmed.')}
       </p>
@@ -272,7 +281,7 @@ export default function ModelSettings({
               {version.name} · r{version.version.revision}
             </strong>
             <Button disabled={disabled} onClick={onEdit}>
-              {t('调整参数与方案', 'Adjust parameters and schemes')}
+              {t('研究与参数调整', 'Research and parameter adjustment')}
             </Button>
           </div>
           <Notice>
@@ -285,11 +294,16 @@ export default function ModelSettings({
             source={{ kind: 'frozen', version: version.version }}
             overlay={version.overlay}
             fields={fields}
-            environment={setupEnvironment ?? { classification: facts, kernel }}
+            environment={{
+              ...setupEnvironment,
+              classification: facts,
+              kernel,
+              subgrid: selectedMode,
+            }}
             caseDir={caseDir}
             includeSubgrid={false}
             disabled={disabled || loading}
-            onRequest={onSetupRequest}
+            onCaseChange={onCaseChange}
           />
           {error && <Notice tone="error">{error}</Notice>}
           {loading && (
@@ -298,6 +312,9 @@ export default function ModelSettings({
           {ready && (
             <>
               <ConfigurationOptions
+                subgrid={selectedMode}
+                caseValues={setupEnvironment?.caseValues}
+                onCaseChange={onCaseChange}
                 excludeKeys={setupHandledKeys}
                 groupPrefix="simulation-model"
                 source={{ kind: 'frozen', version: version.version }}
@@ -362,7 +379,7 @@ export default function ModelSettings({
                       {parameter.section} · {parameter.scope} · {parameter.unit ?? '—'}
                     </p>
                     <p>
-                      {modelParameterEditable(parameter, fields)
+                      {modelParameterEditable(parameter, modelFields)
                         ? t('可在版本草稿中调整', 'Editable in a version draft')
                         : `${t('本页仅查看；算例设置在相应步骤调整', 'Read here; case settings belong to their setup steps')} · ${parameter.visibility}`}
                     </p>

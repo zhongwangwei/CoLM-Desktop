@@ -7,6 +7,100 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Resolve case-selected parameter files to verified frozen assets without overriding the selection.
+pub fn case_process_references(
+    overlay: &Overlay,
+    doc: &Document,
+    source_case: Option<&Path>,
+) -> Result<Option<Value>> {
+    let legacy = overlay
+        .physics
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
+        .map(|(_, value)| value.as_str())
+        .or_else(|| {
+            overlay
+                .parameters
+                .iter()
+                .find(|r| {
+                    r.scope_instance.kind == "case-scalar"
+                        && r.raw_key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES")
+                })
+                .map(|r| r.value.as_str())
+        });
+    let fallback = legacy.map(validation::literal).transpose()?;
+    if let Some(Value::Str(raw)) = &fallback {
+        for path in colm_namelist::tracer_files::param_file_paths(raw)? {
+            validation::relative(&path)?;
+            ensure!(
+                overlay
+                    .process_files
+                    .iter()
+                    .any(|asset| asset.relative_path == path),
+                "legacy process reference lacks frozen asset: {path}"
+            );
+        }
+    }
+    let selected = doc.get("DEF_TRACER_PARAM_FILES").or(fallback.as_ref());
+    let Some(value) = selected else {
+        return Ok(None);
+    };
+    let Value::Str(raw) = value else {
+        anyhow::bail!("DEF_TRACER_PARAM_FILES must be a string")
+    };
+    let data: Option<CaseData> = source_case
+        .filter(|dir| dir.join(CASE_DATA_FILE).exists())
+        .map(|dir| read_json(&dir.join(CASE_DATA_FILE)))
+        .transpose()?;
+    let mut bindings = data
+        .as_ref()
+        .map(|data| data.process_file_bindings.clone())
+        .unwrap_or_default();
+    // Older sidecars lack bindings; their unchanged original namelist identifies the old mapping.
+    if let (Some(data), Some(dir), Some(Value::Str(old))) = (&data, source_case, &fallback) {
+        if bindings.is_empty()
+            && digest(&fs::read(dir.join("case.nml"))?) == data.original_case_sha256
+        {
+            let actual = colm_namelist::tracer_files::param_file_paths(raw)?;
+            let frozen = colm_namelist::tracer_files::param_file_paths(old)?;
+            if actual.len() == frozen.len() {
+                bindings.extend(actual.into_iter().zip(frozen));
+            }
+        }
+    }
+    let rewritten = colm_namelist::tracer_files::rewrite_param_files(raw, |path| {
+        if overlay
+            .process_files
+            .iter()
+            .any(|asset| asset.relative_path == path)
+        {
+            return Ok(path.to_owned());
+        }
+        if let Some(target) = bindings.get(path).filter(|target| {
+            overlay
+                .process_files
+                .iter()
+                .any(|asset| asset.relative_path == **target)
+        }) {
+            return Ok(target.clone());
+        }
+        if let Some(dir) = source_case {
+            if let Ok(bytes) = fs::read(dir.join(path)) {
+                let hash = digest(&bytes);
+                if let Some(asset) = overlay
+                    .process_files
+                    .iter()
+                    .find(|asset| asset.sha256 == hash)
+                {
+                    return Ok(asset.relative_path.clone());
+                }
+            }
+        }
+        Ok(path.to_owned())
+    })?;
+    Ok(Some(Value::Str(rewritten)))
+}
+
 impl Registry {
     /// Migrate by adding sidecars only. All original files remain byte-for-byte intact.
     pub fn migrate_case(&self, case: &Path, code: CodeRef) -> Result<CaseBinding> {
@@ -59,6 +153,7 @@ impl Registry {
         let mut overlay = Overlay::default();
         let mut fields = BTreeMap::new();
         let mut model_fields = Vec::new();
+        let mut process_file_bindings = BTreeMap::new();
         let usgs = matches!(doc.get("DEF_USE_USGS"), Some(Value::Bool(true)));
         let scheme = if usgs { "USGS" } else { "IGBP" };
         let pft_kind = if matches!(doc.get("DEF_USE_PC"), Some(Value::Bool(true))) {
@@ -128,7 +223,7 @@ impl Registry {
         fs::create_dir(&stage).context("another case migration is active")?;
         let result = (|| {
             if let Some(Value::Str(raw)) = doc.get("DEF_TRACER_PARAM_FILES") {
-                let rewritten = colm_namelist::tracer_files::rewrite_param_files(raw, |file| {
+                colm_namelist::tracer_files::rewrite_param_files(raw, |file| {
                     let bytes = fs::read(case.join(file))?;
                     colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
                     let sha256 = digest(&bytes);
@@ -144,14 +239,9 @@ impl Registry {
                             sha256,
                         });
                     }
+                    process_file_bindings.insert(file.to_owned(), relative_path.clone());
                     Ok(relative_path)
                 })?;
-                if !rewritten.is_empty() {
-                    overlay.physics.insert(
-                        "DEF_TRACER_PARAM_FILES".into(),
-                        Value::Str(rewritten).to_string(),
-                    );
-                }
             }
             if case.join("hybrid.toml").exists() {
                 colm_hybrid::HybridConfig::load(&case.join("hybrid.toml"))?;
@@ -234,6 +324,7 @@ impl Registry {
                 source_case: case.clone(),
                 original_case_sha256: original_case_sha256.clone(),
                 fields,
+                process_file_bindings,
             };
             if case.join(CASE_DATA_FILE).exists() {
                 let old: CaseData = read_json(&case.join(CASE_DATA_FILE))?;
@@ -284,8 +375,39 @@ impl Registry {
         run_case: &Path,
         operation_id: &str,
     ) -> Result<MaterializedRun> {
+        self.materialize_run_with_case_fields(version, source_case, run_case, operation_id, &[])
+    }
+    /// Validate a proposed case edit against the model before changing the source case.
+    pub fn materialize_run_with_case_fields(
+        &self,
+        version: &VersionRef,
+        source_case: &Path,
+        run_case: &Path,
+        operation_id: &str,
+        case_fields: &[(String, Value)],
+    ) -> Result<MaterializedRun> {
+        self.materialize_run_with_case_changes(
+            version,
+            source_case,
+            run_case,
+            operation_id,
+            case_fields,
+            &[],
+        )
+    }
+    pub fn materialize_run_with_case_changes(
+        &self,
+        version: &VersionRef,
+        source_case: &Path,
+        run_case: &Path,
+        operation_id: &str,
+        case_fields: &[(String, Value)],
+        remove_fields: &[String],
+    ) -> Result<MaterializedRun> {
         validation::identifier(operation_id)?;
-        let frozen = self.get(version)?;
+        let mut frozen = self.get(version)?;
+        let original_overlay = frozen.overlay.clone();
+        frozen.overlay = model_overlay(&frozen.overlay);
         let source = source_case.canonicalize()?;
         ensure!(!run_case.exists(), "run destination already exists");
         let parent = run_case
@@ -303,6 +425,36 @@ impl Registry {
             copy_case(&source, &destination, &mut inputs)?;
             let original = fs::read(destination.join("case.nml"))?;
             let mut doc = colm_namelist::parse(std::str::from_utf8(&original)?)?;
+            for key in remove_fields {
+                ensure!(
+                    !is_model_field(key)
+                        && colm_schema::find(key).is_some_and(|field| field.group.is_some()),
+                    "{key} is not a writable case field"
+                );
+                if key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+                    // An explicit empty selection prevents old revisions from restoring references.
+                    put(&mut doc, key, Value::Str(String::new()))?;
+                } else {
+                    doc.remove(key)?;
+                }
+            }
+            for (key, value) in case_fields {
+                ensure!(
+                    !is_model_field(key),
+                    "{key} belongs to the model, not case data"
+                );
+                put(&mut doc, key, value.clone())?;
+            }
+            if !remove_fields
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
+            {
+                if let Some(value) =
+                    case_process_references(&original_overlay, &doc, Some(&source))?
+                {
+                    put(&mut doc, "DEF_TRACER_PARAM_FILES", value)?;
+                }
+            }
             // Remove all recognized model controls, including later edits to legacy cases.
             // Unknown fields remain intact and are never guessed to belong to the model.
             for key in doc.paths() {
@@ -326,7 +478,7 @@ impl Registry {
             for (key, value) in &frozen.overlay.physics {
                 put(&mut doc, key, schema_value(key, value)?)?;
             }
-            // Structure controls can also be scalar parameter records; resolve them before scopes.
+            // Apply model scalar parameters before validating case-dependent scopes.
             for record in frozen
                 .overlay
                 .parameters

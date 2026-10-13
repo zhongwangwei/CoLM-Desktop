@@ -401,3 +401,43 @@ test('model manager selection and successful freezing record the chosen frozen r
     chosenVersion: model.version,
   });
 });
+
+test('bundled example is not rejected by case switches retained in a legacy frozen revision', async () => {
+  const site = {
+    name: 'CN-Cng',
+    urban: false,
+    crop: false,
+    site_file: '/site.nc',
+    met_file: '/met.nc',
+    start: '2000-01-01',
+    end: '2001-01-01',
+  };
+  const state = {
+    root: '/project',
+    version: {
+      overlay: { physics: { DEF_URBAN_RUN: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '0' } },
+    },
+  };
+  const updates: unknown[] = [],
+    routes: string[] = [];
+  const example = expression('example', {
+    state,
+    work: async (fn: () => Promise<unknown>) => fn(),
+    invoke: async (command: string) =>
+      command === 'install_example'
+        ? { sitedir: '/sites', forcingdir: '/forcing', root: '/examples', runtimedir: '/runtime' }
+        : { sites: [site] },
+    active: { current: true },
+    lock: { current: true },
+    update: (value: unknown) => updates.push(value),
+    navigate: (route: string) => {
+      routes.push(route);
+      return true;
+    },
+    t: (zh: string) => zh,
+  });
+  await example();
+  assert.deepEqual(routes, ['new-case']);
+  assert.equal(updates.length, 1);
+  assert.equal(state.version.overlay.physics.DEF_URBAN_RUN, '.true.');
+});

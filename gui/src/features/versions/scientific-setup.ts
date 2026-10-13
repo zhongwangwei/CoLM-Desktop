@@ -13,6 +13,8 @@ import {
 export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files'>;
 export type SetupRequest = { id: string; value: string };
 export type SetupEnvironment = {
+  subgrid?: string;
+  caseValues?: Record<string, string>;
   domain?: string | null;
   grid?: string | null;
   classification?: 'IGBP' | 'USGS';
@@ -36,7 +38,6 @@ const extra = [
   ],
 }));
 const order = [
-  'subgrid',
   'soil',
   'DEF_USE_VariablySaturatedFlow',
   'DEF_USE_GridRiverLakeFlow',
@@ -65,7 +66,7 @@ export function setupChoices(
       ?.trim()
       .toLowerCase();
   const on = (key: string) => value(key) === '.true.';
-  const subgrid = foundationValue(overlay.physics, 'subgrid', overlay.parameters),
+  const subgrid = environment.subgrid?.toUpperCase() ?? '',
     soil = foundationValue(overlay.physics, 'soil', overlay.parameters);
   const list = (key: string) =>
     unquote(value(key) ?? '')
@@ -100,10 +101,7 @@ export function setupChoices(
     )
       return bilingual('当前版本没有可写字段', 'No writable field in this version');
     if (on('DEF_USE_TRACER') && id !== 'DEF_USE_TRACER') {
-      if (
-        methane &&
-        ((id === 'DEF_USE_BGC' && v === '.false.') || (id === 'subgrid' && v === 'LCT'))
-      )
+      if (methane && id === 'DEF_USE_BGC' && v === '.false.')
         return bilingual(
           '请先关闭甲烷示踪或修改 CH4 定义',
           'Disable methane tracers or change the CH4 definition first',
@@ -133,8 +131,7 @@ export function setupChoices(
     }
     if (
       on('DEF_GridRiverLake_FloodFeedback') &&
-      ((id === 'subgrid' && v !== 'LCT') ||
-        (id === 'DEF_URBAN_RUN' && v === '.true.') ||
+      ((id === 'DEF_URBAN_RUN' && v === '.true.') ||
         (id === 'DEF_USE_LULCC' && v === '.true.') ||
         (['DEF_USE_GridRiverLakeFlow', 'DEF_USE_VariablySaturatedFlow'].includes(id) &&
           v === '.false.'))
@@ -171,8 +168,6 @@ export function setupChoices(
           bilingual('当前源码或内核不支持修改', 'Current source or kernel disallows this option')
         );
     }
-    if (id === 'subgrid' && v === 'LCT' && (on('DEF_USE_BGC') || crop || compiledCrop))
-      return bilingual('请先关闭 BGC 和作物过程', 'Disable BGC and crop first');
     if (id === 'soil' && v === 'Campbell' && on('DEF_USE_TRACER'))
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
     if (
@@ -367,6 +362,13 @@ export function applySetupRequest(
   return {
     ...overlay,
     parameters,
-    physics: setFoundation(physics, parameters, fields, request.id, request.value),
+    physics: setFoundation(
+      physics,
+      parameters,
+      fields,
+      request.id,
+      request.value,
+      environment.subgrid,
+    ),
   };
 }

@@ -6,7 +6,7 @@ import { usePageContract, type UiAction } from '../../lib/guide';
 import { Button, Dialog, Notice } from '../../components/ui';
 import './project-version.css';
 import NavIcon from '../../components/NavIcon';
-import { effectiveModelFields, siteVersionMismatch, type Site } from '../cases/case-model';
+import type { Site } from '../cases/case-model';
 import type { CaseEntry, FrozenRevision } from '../../lib/types';
 import {
   RECENT_PROJECTS_KEY,
@@ -159,8 +159,6 @@ export default function ProjectPage() {
           site?.problem ||
             t('CN-Cng 示例输入不完整。', 'The CN-Cng example inputs are incomplete.'),
         );
-      const mismatch = siteVersionMismatch(site, effectiveModelFields(state.version?.overlay));
-      if (mismatch) throw new Error(mismatch);
       update({
         newCaseSeed: {
           form: {

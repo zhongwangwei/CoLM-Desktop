@@ -21,9 +21,6 @@ export const modelSettingGroups = [
   ['other', '其他模型选项', 'Other model options'],
 ] as const;
 export const basicModelFields = [
-  ['DEF_USE_LCT', 'LCT 地类结构', 'LCT structure'],
-  ['DEF_USE_PFT', 'PFT 植被功能型', 'PFT structure'],
-  ['DEF_USE_PC', 'PC 植物群落', 'PC structure'],
   [
     'DEF_USE_Campbell_SOIL_MODEL',
     'Campbell 土壤模型（关闭为 vG）',
@@ -128,22 +125,20 @@ export function filterModelParameters(
 
 export type SimulationMode = 'IGBP' | 'USGS' | 'PFT' | 'PC';
 export function simulationMode(
-  overlay?: Overlay,
+  _overlay?: Overlay,
   classification?: 'IGBP' | 'USGS',
   subgrid?: string,
 ): SimulationMode | undefined {
   const actual = subgrid?.toUpperCase();
-  if (actual === 'PFT' || actual === 'PC') return actual;
-  const enabled = (name: string) =>
-    overlay
-      ? ['true', '.true.', 't', '1'].includes(
-          modelSettingValue(overlay, name)?.trim().toLowerCase() ?? '',
-        )
-      : false;
-  const pft = enabled('DEF_USE_PFT'),
-    pc = enabled('DEF_USE_PC');
-  if (pft && pc) return undefined;
-  if (pc) return 'PC';
-  if (pft) return 'PFT';
-  return classification ?? (actual === 'IGBP' || actual === 'USGS' ? actual : undefined);
+  return actual === 'PFT' || actual === 'PC'
+    ? actual
+    : (classification ?? (actual === 'IGBP' || actual === 'USGS' ? actual : undefined));
+}
+export function caseSchemeFields(mode: SimulationMode): Record<string, string> {
+  return {
+    DEF_USE_LCT: mode === 'IGBP' || mode === 'USGS' ? '.true.' : '.false.',
+    DEF_USE_PFT: mode === 'PFT' ? '.true.' : '.false.',
+    DEF_USE_PC: mode === 'PC' ? '.true.' : '.false.',
+    DEF_SUBGRID_SCHEME: mode,
+  };
 }

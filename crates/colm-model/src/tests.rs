@@ -55,6 +55,18 @@ fn draft(parent: VersionRef) -> ModelDraft {
     }
 }
 
+fn case_with(tmp: &Temp, name: &str, extra: &str) -> PathBuf {
+    let path = tmp.0.join(name);
+    fs::create_dir(&path).unwrap();
+    fs::write(
+        path.join("case.nml"),
+        format!("&nl_colm\n DEF_CASE_NAME = '{name}'\n SITE_fsitedata = 'site.nc'\n{extra}/\n"),
+    )
+    .unwrap();
+    fs::write(path.join("site.nc"), b"fixture dataset").unwrap();
+    path
+}
+
 #[test]
 fn official_read_only_optimistic_save_and_immutable_freeze() {
     let tmp = Temp::new();
@@ -145,7 +157,6 @@ fn migration_is_lossless_idempotent_and_reversible_and_run_is_isolated() {
     assert_eq!(
         doc.get("SITE_fsitedata"),
         Some(&colm_namelist::Value::Str(
-            // Migration resolves the case directory (macOS temp dirs live behind /var → /private/var).
             case.canonicalize()
                 .unwrap()
                 .join("site.nc")
@@ -291,21 +302,41 @@ fn pft_and_land_cover_scope_cannot_be_silently_dropped() {
 }
 
 #[test]
-fn surface_model_controls_are_frozen_but_data_and_kernel_derivations_are_not_writable() {
+fn coefficients_are_frozen_but_all_scheme_controls_are_case_owned() {
     for key in [
-        "DEF_USE_PFT",
-        "DEF_USE_PC",
-        "DEF_SUBGRID_SCHEME",
-        "DEF_SOIL_REFL_SCHEME",
+        "DEF_TUNING_CSOILC",
+        "DEF_LC_VMAX25",
+        "DEF_PFT_VMAX25(1)",
+        "DEF_GridRiverLake_FloodInfiltMax",
     ] {
         assert!(is_model_field(key), "{key}");
     }
     for key in [
+        "DEF_USE_LCT",
+        "DEF_USE_PFT",
+        "DEF_USE_PC",
+        "DEF_SUBGRID_SCHEME",
         "DEF_USE_USGS",
         "DEF_USE_IGBP",
         "DEF_LC_YEAR",
         "DEF_LAI_START_YEAR",
         "SITE_fsitedata",
+        "DEF_SOIL_REFL_SCHEME",
+        "DEF_USE_Campbell_SOIL_MODEL",
+        "DEF_USE_VariablySaturatedFlow",
+        "DEF_USE_BGC",
+        "DEF_URBAN_RUN",
+        "DEF_USE_TRACER",
+        "DEF_USE_GridRiverLakeFlow",
+        "DEF_USE_LULCC",
+        "DEF_TUNING_CROP_PLANTING_DAY",
+        "DEF_TRACER_NAMES",
+        "DEF_TRACER_MRAT",
+        "DEF_TRACER_PARAM_FILES",
+        "DEF_SOLO_PFT",
+        "DEF_FAST_PC",
+        "DEF_PC_CROP_SPLIT",
+        "DEF_GRIDBASED_ROUTING_MAX_DT",
     ] {
         assert!(!is_model_field(key), "{key}");
     }
@@ -317,10 +348,23 @@ fn surface_model_controls_are_frozen_but_data_and_kernel_derivations_are_not_wri
         .replace("/\n", " DEF_SOIL_REFL_SCHEME = 1\n/\n");
     fs::write(case.join("case.nml"), &original).unwrap();
     let migrated = reg.migrate_case(&case, code()).unwrap();
-    assert_eq!(
-        reg.get(&migrated.version).unwrap().overlay.physics["DEF_SOIL_REFL_SCHEME"],
-        "1"
-    );
+    assert!(!reg
+        .get(&migrated.version)
+        .unwrap()
+        .overlay
+        .physics
+        .contains_key("DEF_SOIL_REFL_SCHEME"));
+    let run = reg
+        .materialize_run(
+            &migrated.version,
+            &case,
+            &tmp.0.join("surface-run"),
+            "surface",
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(doc.get("DEF_SOIL_REFL_SCHEME").unwrap().as_f64(), Some(1.0));
     assert_eq!(fs::read_to_string(case.join("case.nml")).unwrap(), original);
 }
 
@@ -395,7 +439,7 @@ fn expected_old_value_rejects_stale_parameter_edits() {
 }
 
 #[test]
-fn tracer_numeric_columns_reject_silent_default_substitution_in_both_storages() {
+fn tracer_definition_columns_are_not_writable_model_parameters() {
     for key in [
         "DEF_TRACER_MRAT",
         "DEF_TRACER_REF_RATIO",
@@ -405,7 +449,7 @@ fn tracer_numeric_columns_reject_silent_default_substitution_in_both_storages() 
         for raw in ["''", "'1d-3, -2.5, 18'"] {
             let mut overlay = Overlay::default();
             overlay.physics.insert(key.into(), raw.into());
-            validate_overlay(&overlay).unwrap();
+            assert!(validate_overlay(&overlay).is_err());
         }
         for raw in ["'abc'", "'NaN'", "'Infinity'", "'18,abc'", "'1,,2'"] {
             let mut overlay = Overlay::default();
@@ -432,7 +476,7 @@ fn tracer_numeric_columns_reject_silent_default_substitution_in_both_storages() 
 }
 
 #[test]
-fn scalar_tracer_file_mapping_requires_the_same_frozen_assets_as_physics() {
+fn tracer_file_references_are_case_choices_while_assets_remain_frozen() {
     let key = "DEF_TRACER_PARAM_FILES";
     let mut overlay = Overlay::default();
     overlay.parameters.push(ParameterOverrideRecord {
@@ -454,9 +498,27 @@ fn scalar_tracer_file_mapping_requires_the_same_frozen_assets_as_physics() {
         relative_path: "process/CH4.nml".into(),
         sha256: "a".repeat(64),
     });
-    validate_overlay(&overlay).unwrap();
+    assert!(validate_overlay(&overlay).is_err());
+    let empty = colm_namelist::parse("").unwrap();
+    assert_eq!(
+        case_process_references(&overlay, &empty, None).unwrap(),
+        Some(colm_namelist::Value::Str("CH4:process/CH4.nml".into()))
+    );
+    let selected =
+        colm_namelist::parse("&nl_colm\nDEF_TRACER_PARAM_FILES='other.nml'\n/\n").unwrap();
+    assert_eq!(
+        case_process_references(&overlay, &selected, None).unwrap(),
+        Some(colm_namelist::Value::Str("other.nml".into()))
+    );
+    let cleared = colm_namelist::parse("&nl_colm\nDEF_TRACER_PARAM_FILES=''\n/\n").unwrap();
+    let reloaded = colm_namelist::parse(&cleared.to_string()).unwrap();
+    assert_eq!(
+        case_process_references(&overlay, &reloaded, None).unwrap(),
+        Some(colm_namelist::Value::Str(String::new()))
+    );
     overlay.parameters[0].value = "'CH4:../outside.nml'".into();
     assert!(validate_overlay(&overlay).is_err());
+    assert!(case_process_references(&overlay, &empty, None).is_err());
 }
 
 #[test]
@@ -497,43 +559,49 @@ fn runtime_structure_controls_pft_parameter_materialization() {
     for (kind, field) in [("pft", "DEF_USE_PFT"), ("pc-pft", "DEF_USE_PC")] {
         for mode in [
             "matching",
-            "scalar-first",
-            "scalar-last",
             "opposite",
             "lct",
             "conflicting",
             "legacy",
+            "invalid",
         ] {
             let tmp = Temp::new();
             let reg = tmp.registry();
             let case = tmp.case();
             let official = reg.install_official(code()).unwrap();
             let mut d = draft(official.version);
-            if mode != "lct" && mode != "legacy" {
-                for field in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
-                    d.overlay.physics.insert(field.into(), ".false.".into());
-                }
-                let selected = if mode == "opposite" {
-                    if field == "DEF_USE_PFT" {
-                        "DEF_USE_PC"
-                    } else {
-                        "DEF_USE_PFT"
-                    }
-                } else {
-                    field
-                };
-                d.overlay.physics.insert(selected.into(), ".true.".into());
-            }
-            if mode == "conflicting" {
-                d.overlay
-                    .physics
-                    .insert("DEF_USE_LCT".into(), ".true.".into());
-            }
+            let mut doc =
+                colm_namelist::parse(&fs::read_to_string(case.join("case.nml")).unwrap()).unwrap();
             if mode == "legacy" {
-                d.overlay
-                    .physics
-                    .insert("DEF_SUBGRID_SCHEME".into(), "'PC'".into());
+                doc.insert(
+                    "DEF_SUBGRID_SCHEME",
+                    colm_namelist::Value::Str("PC".into()),
+                    "nl_colm",
+                )
+                .unwrap();
+            } else {
+                let selected = match mode {
+                    "opposite" if field == "DEF_USE_PFT" => "DEF_USE_PC",
+                    "opposite" => "DEF_USE_PFT",
+                    "lct" => "DEF_USE_LCT",
+                    _ => field,
+                };
+                for key in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
+                    doc.insert(
+                        key,
+                        colm_namelist::Value::Bool(
+                            key == selected || (mode == "conflicting" && key == "DEF_USE_LCT"),
+                        ),
+                        "nl_colm",
+                    )
+                    .unwrap();
+                }
+                if mode == "invalid" {
+                    doc.insert(field, colm_namelist::Value::Int(1), "nl_colm")
+                        .unwrap();
+                }
             }
+            fs::write(case.join("case.nml"), doc.to_string()).unwrap();
             d.overlay.parameters.push(ParameterOverrideRecord {
                 parameter_id: format!("{kind}:DEF_PFT_VMAX25"),
                 raw_key: "DEF_PFT_VMAX25".into(),
@@ -548,35 +616,11 @@ fn runtime_structure_controls_pft_parameter_materialization() {
                 expected_old_value: None,
                 unit: None,
             });
-            if mode.starts_with("scalar-") {
-                for (field, value) in std::mem::take(&mut d.overlay.physics) {
-                    let descriptor = colm_case::parameters::find(&field).unwrap();
-                    let record = ParameterOverrideRecord {
-                        parameter_id: descriptor.id.clone(),
-                        raw_key: field,
-                        scope_instance: ParameterScopeInstance {
-                            kind: "case-scalar".into(),
-                            scheme: None,
-                            index: None,
-                            type_name: None,
-                            process_file: None,
-                        },
-                        value,
-                        expected_old_value: None,
-                        unit: None,
-                    };
-                    if mode == "scalar-first" {
-                        d.overlay.parameters.insert(0, record);
-                    } else {
-                        d.overlay.parameters.push(record);
-                    }
-                }
-            }
             reg.create_draft(d).unwrap();
             let frozen = reg.freeze("experiment", &tmp.0).unwrap();
             let result =
                 reg.materialize_run(&frozen.version, &case, &tmp.0.join("run"), "runtime-scope");
-            if mode == "matching" || mode.starts_with("scalar-") {
+            if mode == "matching" {
                 let run = result.unwrap();
                 let doc = colm_namelist::parse(
                     &fs::read_to_string(run.run_case.join("case.nml")).unwrap(),
@@ -595,18 +639,6 @@ fn runtime_structure_controls_pft_parameter_materialization() {
             }
         }
     }
-}
-
-fn case_with(tmp: &Temp, name: &str, extra: &str) -> PathBuf {
-    let path = tmp.0.join(name);
-    fs::create_dir(&path).unwrap();
-    fs::write(
-        path.join("case.nml"),
-        format!("&nl_colm\n DEF_CASE_NAME = '{name}'\n SITE_fsitedata = 'site.nc'\n{extra}/\n"),
-    )
-    .unwrap();
-    fs::write(path.join("site.nc"), b"fixture dataset").unwrap();
-    path
 }
 
 #[test]
@@ -629,11 +661,11 @@ fn cases_whose_switches_change_nothing_bind_to_official_without_new_versions() {
 fn identical_model_changes_in_two_cases_share_one_version() {
     let tmp = Temp::new();
     let reg = tmp.registry();
-    let a = case_with(&tmp, "a", " DEF_USE_BGC = .true.\n");
+    let a = case_with(&tmp, "a", " DEF_TUNING_CSOILC = 0.008\n");
     let b = case_with(
         &tmp,
         "b",
-        " DEF_USE_BGC = .true.\n DEF_USE_FERT = .false.\n DEF_USE_CROP = .false.\n",
+        " DEF_TUNING_CSOILC = 0.008\n DEF_USE_FERT = .false.\n DEF_USE_CROP = .false.\n",
     );
     let first = reg.migrate_case(&a, code()).unwrap().version;
     let second = reg.migrate_case(&b, code()).unwrap().version;
@@ -651,16 +683,16 @@ fn freezing_an_existing_configuration_returns_that_version_and_drops_the_draft()
     pc.id = "pc".into();
     pc.overlay
         .physics
-        .insert("DEF_USE_PC".into(), ".true.".into());
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
     reg.create_draft(pc).unwrap();
     let pc = reg.freeze("pc", &tmp.0).unwrap();
-    // Choosing PFT and then PC again from the PC version derives the same configuration.
+    // Repeating the same coefficient change reuses the existing revision.
     let mut again = draft(pc.version.clone());
     again.id = "pc-again".into();
     again
         .overlay
         .physics
-        .insert("DEF_USE_PC".into(), ".true.".into());
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
     reg.create_draft(again).unwrap();
     assert_eq!(reg.freeze("pc-again", &tmp.0).unwrap().version, pc.version);
     assert!(reg.drafts().unwrap().iter().all(|d| d.id != "pc-again"));
@@ -669,7 +701,7 @@ fn freezing_an_existing_configuration_returns_that_version_and_drops_the_draft()
     back.id = "back".into();
     back.overlay
         .physics
-        .insert("DEF_USE_PC".into(), ".false.".into());
+        .insert("DEF_TUNING_CSOILC".into(), "0.004".into());
     reg.create_draft(back).unwrap();
     assert_eq!(
         reg.freeze("back", &tmp.0).unwrap().version,
@@ -711,4 +743,285 @@ fn forced_off_rules_match_colm() {
             "{parent} off no longer forces {child} off in MOD_Namelist.F90"
         );
     }
+}
+
+#[test]
+fn clearing_legacy_process_references_survives_reload_and_materialization() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let text = fs::read_to_string(case.join("case.nml"))
+        .unwrap()
+        .replace("/\n", " DEF_TRACER_PARAM_FILES = 'process.nml'\n/\n");
+    fs::write(case.join("case.nml"), text).unwrap();
+    fs::write(case.join("process.nml"), "&nl_colm_methane_parameter\n/\n").unwrap();
+    let binding = reg.migrate_case(&case, code()).unwrap();
+    let mut frozen = reg.get(&binding.version).unwrap();
+    frozen.overlay.physics.insert(
+        "DEF_TRACER_PARAM_FILES".into(),
+        format!("'{}'", frozen.overlay.process_files[0].relative_path),
+    );
+    frozen.overlay_sha256 = crate::registry::digest_json(&frozen.overlay).unwrap();
+    frozen.fingerprint = crate::registry::revision_fingerprint(&frozen).unwrap();
+    crate::registry::write_json(
+        &reg.revision_dir(&binding.version)
+            .unwrap()
+            .join("revision.json"),
+        &frozen,
+    )
+    .unwrap();
+    let cleared = reg
+        .materialize_run_with_case_changes(
+            &binding.version,
+            &case,
+            &tmp.0.join("cleared"),
+            "clear-reference",
+            &[],
+            &["DEF_TRACER_PARAM_FILES".into()],
+        )
+        .unwrap();
+    let reloaded = reg
+        .materialize_run(
+            &binding.version,
+            &cleared.run_case,
+            &tmp.0.join("reloaded"),
+            "reload-reference",
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(reloaded.run_case.join("case.nml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        doc.get("DEF_TRACER_PARAM_FILES"),
+        Some(&colm_namelist::Value::Str(String::new()))
+    );
+    assert_eq!(reg.get(&binding.version).unwrap(), frozen);
+}
+
+#[test]
+fn migration_keeps_each_vegetation_scheme_in_case_data_and_runs_follow_case_edits() {
+    for (scheme, field) in [
+        ("IGBP", "DEF_USE_LCT"),
+        ("USGS", "DEF_USE_LCT"),
+        ("PFT", "DEF_USE_PFT"),
+        ("PC", "DEF_USE_PC"),
+    ] {
+        let tmp = Temp::new();
+        let reg = tmp.registry();
+        let case = tmp.case();
+        let mut doc =
+            colm_namelist::parse(&fs::read_to_string(case.join("case.nml")).unwrap()).unwrap();
+        for key in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
+            doc.insert(key, colm_namelist::Value::Bool(key == field), "nl_colm")
+                .unwrap();
+        }
+        doc.insert(
+            "DEF_SUBGRID_SCHEME",
+            colm_namelist::Value::Str(scheme.into()),
+            "nl_colm",
+        )
+        .unwrap();
+        let original = doc.to_string();
+        fs::write(case.join("case.nml"), &original).unwrap();
+        let binding = reg.migrate_case(&case, code()).unwrap();
+        let frozen = reg.get(&binding.version).unwrap();
+        let data: CaseData =
+            serde_json::from_slice(&fs::read(case.join(CASE_DATA_FILE)).unwrap()).unwrap();
+        for key in [
+            "DEF_USE_LCT",
+            "DEF_USE_PFT",
+            "DEF_USE_PC",
+            "DEF_SUBGRID_SCHEME",
+        ] {
+            assert!(
+                data.fields.keys().any(|k| k.eq_ignore_ascii_case(key)),
+                "{scheme}: {key}"
+            );
+            assert!(!frozen
+                .overlay
+                .physics
+                .keys()
+                .any(|k| k.eq_ignore_ascii_case(key)));
+            assert!(!binding
+                .model_fields
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(key)));
+        }
+        assert_eq!(fs::read_to_string(case.join("case.nml")).unwrap(), original);
+        // Selecting a different case scheme keeps the exact same revision.
+        for key in ["DEF_USE_LCT", "DEF_USE_PFT", "DEF_USE_PC"] {
+            doc.insert(
+                key,
+                colm_namelist::Value::Bool(key == "DEF_USE_PC"),
+                "nl_colm",
+            )
+            .unwrap();
+        }
+        fs::write(case.join("case.nml"), doc.to_string()).unwrap();
+        let run = reg
+            .materialize_run(&binding.version, &case, &tmp.0.join("run"), "scheme-edit")
+            .unwrap();
+        let output =
+            colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            output.get("DEF_USE_PC"),
+            Some(&colm_namelist::Value::Bool(true))
+        );
+        assert_eq!(
+            reg.migrate_case(&case, code()).unwrap().version,
+            binding.version
+        );
+    }
+}
+
+#[test]
+fn historical_scheme_overlays_remain_readable_without_overriding_cases() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let case = tmp.case();
+    let d = reg.create_draft(draft(official.version)).unwrap();
+    let mut frozen = reg.freeze(&d.id, &tmp.0).unwrap();
+    for (key, value) in [
+        ("DEF_USE_LCT", ".false."),
+        ("DEF_USE_PFT", ".true."),
+        ("DEF_USE_PC", ".false."),
+        ("DEF_SUBGRID_SCHEME", "'PFT'"),
+        ("DEF_USE_BGC", ".true."),
+        ("DEF_USE_Campbell_SOIL_MODEL", ".false."),
+        ("DEF_USE_VariablySaturatedFlow", ".true."),
+    ] {
+        frozen.overlay.physics.insert(key.into(), value.into());
+    }
+    // Recreate an authentic old revision, then leave its bytes and identity intact.
+    frozen.overlay_sha256 = crate::registry::digest_json(&frozen.overlay).unwrap();
+    frozen.fingerprint = crate::registry::revision_fingerprint(&frozen).unwrap();
+    let path = reg
+        .revision_dir(&frozen.version)
+        .unwrap()
+        .join("revision.json");
+    crate::registry::write_json(&path, &frozen).unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(reg.get(&frozen.version).unwrap(), frozen);
+    let run = reg
+        .materialize_run(&frozen.version, &case, &tmp.0.join("run"), "old-scheme")
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert!(doc.get("DEF_USE_PFT").is_none());
+    assert!(doc.get("DEF_USE_BGC").is_none());
+    assert!(doc.get("DEF_USE_Campbell_SOIL_MODEL").is_none());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    let mut child = draft(frozen.version);
+    child.id = "child".into();
+    let child = reg.create_draft(child).unwrap();
+    assert!(child.overlay.physics.is_empty());
+    // Drafts saved before the ownership change can be reopened and saved safely.
+    let mut legacy_draft = child.clone();
+    legacy_draft
+        .overlay
+        .physics
+        .insert("DEF_USE_PC".into(), ".true.".into());
+    let draft_path = reg.root.join("drafts").join("child.json");
+    crate::registry::write_json(&draft_path, &legacy_draft).unwrap();
+    let reopened = reg.draft("child").unwrap();
+    assert!(reopened.overlay.physics.is_empty());
+    let saved = reg.save_draft(reopened, 1).unwrap();
+    assert_eq!(saved.generation, 2);
+    let mut forbidden = saved;
+    forbidden
+        .overlay
+        .physics
+        .insert("DEF_USE_PFT".into(), ".true.".into());
+    assert!(reg.save_draft(forbidden, 2).is_err());
+}
+
+#[test]
+fn case_process_controls_can_change_or_clear_without_a_new_revision() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let official = reg.install_official(code()).unwrap();
+    let patches = vec![
+        (
+            "DEF_USE_Campbell_SOIL_MODEL".into(),
+            colm_namelist::Value::Bool(false),
+        ),
+        (
+            "DEF_USE_VariablySaturatedFlow".into(),
+            colm_namelist::Value::Bool(true),
+        ),
+        ("DEF_USE_BGC".into(), colm_namelist::Value::Bool(true)),
+        (
+            "DEF_TUNING_CROP_PLANTING_DAY".into(),
+            crate::validation::literal("120.0").unwrap(),
+        ),
+    ];
+    let run = reg
+        .materialize_run_with_case_changes(
+            &official.version,
+            &case,
+            &tmp.0.join("run"),
+            "controls",
+            &patches,
+            &[],
+        )
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get("DEF_USE_Campbell_SOIL_MODEL"),
+        Some(&colm_namelist::Value::Bool(false))
+    );
+    assert_eq!(
+        doc.get("DEF_USE_BGC"),
+        Some(&colm_namelist::Value::Bool(true))
+    );
+    assert!(
+        doc.get("DEF_TUNING_CROP_PLANTING_DAY").is_some(),
+        "the explicit planting setting remains a case field"
+    );
+    let clear = reg
+        .materialize_run_with_case_changes(
+            &official.version,
+            &run.run_case,
+            &tmp.0.join("cleared"),
+            "clear",
+            &[],
+            &["DEF_TUNING_CROP_PLANTING_DAY".into()],
+        )
+        .unwrap();
+    let doc = colm_namelist::parse(&fs::read_to_string(clear.run_case.join("case.nml")).unwrap())
+        .unwrap();
+    assert!(doc.get("DEF_TUNING_CROP_PLANTING_DAY").is_none());
+    assert_eq!(reg.list().unwrap().len(), 1);
+    assert_eq!(reg.get(&official.version).unwrap(), official);
+    assert!(reg
+        .materialize_run_with_case_changes(
+            &official.version,
+            &case,
+            &tmp.0.join("bad"),
+            "bad",
+            &[],
+            &["DEF_TUNING_CSOILC".into()]
+        )
+        .is_err());
+}
+
+#[test]
+fn model_equivalence_ignores_historical_case_controls_but_keeps_coefficients() {
+    let mut legacy = Overlay::default();
+    legacy.physics.insert("DEF_USE_PC".into(), ".true.".into());
+    legacy.physics.insert("DEF_USE_BGC".into(), ".true.".into());
+    assert!(is_noop(&legacy));
+    legacy
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.008".into());
+    assert!(!is_noop(&legacy));
+    let mut current = Overlay::default();
+    current
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.008".into());
+    assert!(same_effect(&legacy, &current));
 }

@@ -40,7 +40,9 @@ fn default_value(key: &str) -> Option<Value> {
     match field.default {
         colm_schema::Default::Logical(b) => Some(Value::Bool(b)),
         colm_schema::Default::Integer(i) => Some(Value::Int(i)),
-        colm_schema::Default::Real(text) => crate::validation::literal(text).ok(),
+        colm_schema::Default::Real(text) => {
+            crate::validation::literal(text.split('_').next()?).ok()
+        }
         colm_schema::Default::Str(s) => Some(Value::Str(s.to_owned())),
         colm_schema::Default::Array(_) => None,
     }
@@ -122,8 +124,8 @@ pub fn minimize_physics(physics: &BTreeMap<String, String>) -> BTreeMap<String, 
 
 /// Whether two overlays make CoLM compute the same thing.
 pub fn same_effect(a: &Overlay, b: &Overlay) -> bool {
-    let mut a = a.clone();
-    let mut b = b.clone();
+    let mut a = crate::model_overlay(a);
+    let mut b = crate::model_overlay(b);
     crate::registry::normalize_overlay(&mut a);
     crate::registry::normalize_overlay(&mut b);
     a.parameters == b.parameters
