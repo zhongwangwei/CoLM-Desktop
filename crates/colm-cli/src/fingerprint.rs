@@ -715,6 +715,7 @@ fn is_comparison_physics(key: &str) -> bool {
 pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
+    let self_contained_roots = simple_site_roots_unused(&nml, &doc)?;
     let mut out = FullInputIdentity {
         schema: 1,
         algorithm: "sha256-full-v1".into(),
@@ -846,7 +847,19 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                 .filter(|raw| !raw.is_empty() && !raw.eq_ignore_ascii_case("null"))
             {
                 let path = resolve(case, raw);
-                if !path.exists() && declared_root_unused(&nml, &doc, &lower)? {
+                if self_contained_roots && is_global_data_root(&lower) {
+                    // Schema 1 still records full SHA-256 payloads. This versioned
+                    // projection marker prevents comparison with older root inventories.
+                    out.data_settings
+                        .insert("root_usage_policy".into(), "self-contained-lct-v1".into());
+                    out.data_settings
+                        .insert(format!("unused:{lower}"), "true".into());
+                    continue;
+                }
+                if !path.exists()
+                    && lower != "def_dir_runtime"
+                    && declared_root_unused(&nml, &doc, &lower)?
+                {
                     out.data_settings
                         .insert(format!("unused:{lower}"), "true".into());
                     continue;
@@ -952,10 +965,16 @@ pub(crate) fn full_input_guard(
         .collect::<Result<_>>()?;
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
+    let self_contained_roots = identity
+        .data_settings
+        .get("root_usage_policy")
+        .is_some_and(|policy| policy == "self-contained-lct-v1")
+        && simple_site_roots_unused(&nml, &doc)?;
     let mut directories = BTreeMap::new();
     for key in doc.paths() {
         let lower = key.to_ascii_lowercase();
-        if !looks_like_config_path(&key)
+        if (self_contained_roots && is_global_data_root(&lower))
+            || !looks_like_config_path(&key)
             || lower.starts_with("def_hist")
             || lower.starts_with("def_wrst")
             || matches!(
@@ -1198,7 +1217,55 @@ pub(crate) fn same_data_payloads(a: &FullInputIdentity, b: &FullInputIdentity) -
         && b.schema == 1
         && a.algorithm == "sha256-full-v1"
         && b.algorithm == a.algorithm
+        && a.data_settings.get("root_usage_policy") == b.data_settings.get("root_usage_policy")
         && data(a) == data(b)
+}
+
+fn is_global_data_root(field: &str) -> bool {
+    matches!(field, "def_dir_rawdata" | "def_dir_runtime")
+}
+
+/// Deliberately narrow proof for existing roots: SinglePoint LCT/Campbell with
+/// all surface inputs supplied by the site and no extra runtime-data consumer.
+/// Keep this shared by full hashing and the during-run directory guard.
+fn simple_site_roots_unused(nml: &Path, doc: &colm_namelist::Document) -> Result<bool> {
+    use colm_namelist::Value;
+    let logical = |name: &str| match doc.get(name) {
+        Some(Value::Bool(value)) => Some(*value),
+        None => match colm_schema::find(name).map(|field| field.default) {
+            Some(colm_schema::Default::Logical(value)) => Some(value),
+            None => Some(false),
+            _ => None,
+        },
+        _ => None,
+    };
+    let integer = |name: &str| match doc.get(name) {
+        Some(Value::Int(value)) => Some(*value),
+        None => match colm_schema::find(name).map(|field| field.default) {
+            Some(colm_schema::Default::Integer(value)) => Some(value),
+            _ => None,
+        },
+        _ => None,
+    };
+    // The surface parser resolves relative paths against its process CWD; until
+    // that contract changes, do not use its audit to exempt a case-relative site.
+    if !doc.get("SITE_fsitedata").and_then(string_value).is_some_and(|path| Path::new(path).is_absolute())
+        || colm_case::is_spatial_case(nml)?
+        || logical("DEF_USE_Campbell_SOIL_MODEL") != Some(true)
+        || logical("DEF_USE_LCT") != Some(true)
+        || !matches!(integer("DEF_Runoff_SCHEME"), Some(0 | 2 | 3))
+        || !matches!(integer("DEF_Interception_scheme"), Some(1..=7))
+        || ["DEF_USE_PFT", "DEF_USE_PC", "DEF_USE_BGC", "DEF_USE_TRACER",
+            "DEF_URBAN_RUN", "DEF_USE_CROP", "DEF_METHANE", "DEF_USE_OZONESTRESS",
+            "DEF_USE_OZONEDATA", "DEF_USE_SNICAR", "DEF_USE_LULCC", "DEF_Aerosol_Readin",
+            "DEF_USE_IRRIGATION", "DEF_USE_BEDROCK"].iter().any(|key| logical(key) != Some(false))
+        // SinglePoint undefines GridRiverLakeFlow in define.h. Still fail closed
+        // for an explicitly requested routing setting rather than assuming it inert.
+        || doc.get("DEF_USE_GridRiverLakeFlow").is_some_and(|value| !matches!(value, Value::Bool(false)))
+    {
+        return Ok(false);
+    }
+    declared_root_unused(nml, doc, "def_dir_rawdata")
 }
 
 fn declared_root_unused(nml: &Path, doc: &colm_namelist::Document, field: &str) -> Result<bool> {
@@ -1209,18 +1276,6 @@ fn declared_root_unused(nml: &Path, doc: &colm_namelist::Document, field: &str) 
             Some(colm_schema::Default::Logical(true))
         ),
     };
-    if field == "def_dir_runtime" {
-        return Ok(![
-            "DEF_USE_BGC",
-            "DEF_USE_SNICAR",
-            "DEF_USE_OZONEDATA",
-            "DEF_URBAN_RUN",
-            "DEF_USE_CROP",
-            "DEF_METHANE",
-        ]
-        .iter()
-        .any(|key| enabled(key)));
-    }
     if field != "def_dir_rawdata" {
         return Ok(false);
     }
@@ -1265,6 +1320,7 @@ fn declared_root_unused(nml: &Path, doc: &colm_namelist::Document, field: &str) 
             && (!matches!(s.mode, SiteMode::Pft | SiteMode::Pc) || s.use_site_pctpfts)
             && (!s.crop_enabled || s.use_site_pctcrop);
         if !supplied
+            || s.colm2024_interception
             || !colm_srfdata::site::audit_with_lai_frequency(
                 &s.source,
                 s.mode,
@@ -1434,6 +1490,153 @@ mod full_identity_tests {
             before.files["case:def_dir_rawdata/soil.nc"].sha256,
             after.files["case:def_dir_rawdata/soil.nc"].sha256
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn self_contained_lct_skips_existing_unused_roots_but_keeps_payload_guards() {
+        let _netcdf_guard = crate::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!(
+            "colm-simple-root-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(root.join("raw")).unwrap();
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        let site = root.join("site.nc");
+        self_contained_site(&site, Some(8.0));
+        std::fs::write(root.join("raw/soil.nc"), b"soil A").unwrap();
+        std::fs::write(root.join("raw/bedrock.nc"), b"bedrock A").unwrap();
+        std::fs::write(root.join("runtime/params.nc"), b"params A").unwrap();
+        std::fs::write(root.join("forcing.nc"), b"forcing A").unwrap();
+        std::fs::write(
+            root.join("forcing.nml"),
+            "&nl_colm_forcing\nDEF_dir_forcing='.'\nforcing%fprefix(1)='forcing.nc'\n/\n",
+        )
+        .unwrap();
+        let base = format!("&nl_colm\nDEF_CASE_NAME='simple'\nSITE_fsitedata='{}'\nUSE_SITE_landtype=.TRUE.\nDEF_dir_output='{}'\nDEF_dir_rawdata='raw'\nDEF_dir_runtime='runtime'\nDEF_USE_Campbell_SOIL_MODEL=.TRUE.\nDEF_Aerosol_Readin=.FALSE.\n", site.display(), root.join("out").display());
+        let nml = root.join("case.nml");
+        for classification in ["IGBP_classification", "USGS_classification"] {
+            self_contained_site(&site, Some(8.0));
+            std::fs::write(
+                &nml,
+                format!(
+                    "{base}DEF_SUBGRID_SCHEME='{}'\n/\n",
+                    classification.trim_end_matches("_classification")
+                ),
+            )
+            .unwrap();
+            let identity = full_inputs(&root).unwrap();
+            assert_eq!(
+                identity.data_settings["root_usage_policy"],
+                "self-contained-lct-v1"
+            );
+            assert!(!identity
+                .files
+                .keys()
+                .any(|key| key.starts_with("case:def_dir_rawdata")
+                    || key.starts_with("case:def_dir_runtime")));
+            let mut legacy = identity.clone();
+            legacy.data_settings.remove("root_usage_policy");
+            assert!(!same_data_payloads(&legacy, &identity));
+            assert!(!same_payloads(&legacy, &identity));
+            let guard = full_input_guard(&root, &identity).unwrap();
+            assert!(guard.directories.is_empty());
+            std::fs::write(root.join("raw/soil.nc"), b"soil B").unwrap();
+            std::fs::write(root.join("runtime/params.nc"), b"params B").unwrap();
+            assert_eq!(guard, full_input_guard(&root, &identity).unwrap());
+            assert_eq!(
+                identity.data_sha256,
+                full_inputs(&root).unwrap().data_sha256
+            );
+            std::fs::write(root.join("forcing.nc"), b"forcing changed").unwrap();
+            assert_ne!(guard, full_input_guard(&root, &identity).unwrap());
+            assert_ne!(
+                identity.data_sha256,
+                full_inputs(&root).unwrap().data_sha256
+            );
+            std::fs::write(root.join("forcing.nc"), b"forcing A").unwrap();
+            self_contained_site(&site, Some(7.0));
+            assert_ne!(
+                identity.data_sha256,
+                full_inputs(&root).unwrap().data_sha256
+            );
+        }
+        self_contained_site(&site, Some(8.0));
+        for candidate in [
+            base.replace("DEF_USE_Campbell_SOIL_MODEL=.TRUE.\n", ""),
+            base.replace("DEF_Aerosol_Readin=.FALSE.\n", ""),
+            base.replace(&site.display().to_string(), "site.nc"),
+            format!("{base}DEF_Runoff_SCHEME='unknown'\n"),
+            format!("{base}DEF_GRIDBASED_lon_res=1.0\n"),
+        ] {
+            std::fs::write(&nml, format!("{candidate}/\n")).unwrap();
+            let doc = colm_namelist::parse(&std::fs::read_to_string(&nml).unwrap()).unwrap();
+            assert!(!simple_site_roots_unused(&nml, &doc).unwrap());
+        }
+        for setting in [
+            "DEF_Runoff_SCHEME=1",
+            "DEF_Interception_scheme=8",
+            "DEF_USE_BGC=.TRUE.",
+            "DEF_USE_TRACER=.TRUE.",
+            "DEF_URBAN_RUN=.TRUE.",
+            "DEF_USE_CROP=.TRUE.",
+            "DEF_METHANE=.TRUE.",
+            "DEF_USE_OZONESTRESS=.TRUE.",
+            "DEF_USE_OZONEDATA=.TRUE.",
+            "DEF_USE_SNICAR=.TRUE.",
+            "DEF_USE_LULCC=.TRUE.",
+            "DEF_USE_GridRiverLakeFlow=.TRUE.",
+            "DEF_USE_PFT=.TRUE.",
+            "DEF_USE_PC=.TRUE.",
+            "USE_SITE_soilparameters=.FALSE.",
+            "DEF_USE_BEDROCK=.TRUE.",
+        ] {
+            std::fs::write(&nml, format!("{base}{setting}\n/\n")).unwrap();
+            let identity = full_inputs(&root).unwrap();
+            assert!(
+                !identity.data_settings.contains_key("root_usage_policy"),
+                "{setting}"
+            );
+            assert!(
+                identity.files.contains_key("case:def_dir_rawdata/soil.nc"),
+                "{setting}"
+            );
+            assert!(
+                identity
+                    .files
+                    .contains_key("case:def_dir_runtime/params.nc"),
+                "{setting}"
+            );
+            let guard = full_input_guard(&root, &identity).unwrap();
+            assert_eq!(guard.directories.len(), 2, "{setting}");
+            if setting == "DEF_USE_BEDROCK=.TRUE." {
+                std::fs::write(root.join("raw/bedrock.nc"), b"bedrock B").unwrap();
+                assert_ne!(guard, full_input_guard(&root, &identity).unwrap());
+                assert_ne!(
+                    identity.files["case:def_dir_rawdata/bedrock.nc"].sha256,
+                    full_inputs(&root).unwrap().files["case:def_dir_rawdata/bedrock.nc"].sha256
+                );
+            }
+            std::fs::write(root.join("runtime/added.nc"), b"new").unwrap();
+            assert_ne!(
+                guard,
+                full_input_guard(&root, &identity).unwrap(),
+                "{setting}"
+            );
+            assert_ne!(
+                identity.data_sha256,
+                full_inputs(&root).unwrap().data_sha256,
+                "{setting}"
+            );
+            std::fs::remove_file(root.join("runtime/added.nc")).unwrap();
+        }
+        std::fs::write(&nml, format!("{base}DEF_Runoff_SCHEME=1\n/\n")).unwrap();
+        std::fs::remove_dir_all(root.join("runtime")).unwrap();
+        assert!(full_inputs(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("case:def_dir_runtime"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
