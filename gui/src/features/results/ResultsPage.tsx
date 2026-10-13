@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import uPlot from 'uplot';
+import { timeTicks } from './time-ticks';
 import 'uplot/dist/uPlot.min.css';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
@@ -97,7 +98,7 @@ export function ScienceChart({
           })),
         ],
         axes: [
-          { stroke: theme === 'dark' ? '#b8c7d9' : '#475569' },
+          { stroke: theme === 'dark' ? '#b8c7d9' : '#475569', values: timeTicks },
           { stroke: theme === 'dark' ? '#b8c7d9' : '#475569' },
         ],
       },
