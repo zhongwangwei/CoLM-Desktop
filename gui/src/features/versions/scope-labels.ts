@@ -1,5 +1,5 @@
 // Labels from the existing land-cover helper and CoLM PFT catalog.
-export const IGBP: [number,string,string][] = [
+export const IGBP: [number, string, string][] = [
   [1, '常绿针叶林', 'Evergreen Needleleaf Forests'],
   [2, '常绿阔叶林', 'Evergreen Broadleaf Forests'],
   [3, '落叶针叶林', 'Deciduous Needleleaf Forests'],
@@ -18,7 +18,7 @@ export const IGBP: [number,string,string][] = [
   [16, '裸地或稀疏植被', 'Barren or Sparsely Vegetated'],
   [17, '水体', 'Water Bodies'],
 ];
-export const USGS: [number,string,string][] = [
+export const USGS: [number, string, string][] = [
   [1, '城市与建成区', 'Urban and Built-Up Land'],
   [2, '旱作农田与牧场', 'Dryland Cropland and Pasture'],
   [3, '灌溉农田与牧场', 'Irrigated Cropland and Pasture'],
@@ -44,400 +44,84 @@ export const USGS: [number,string,string][] = [
   [23, '裸地苔原', 'Bare Ground Tundra'],
   [24, '冰雪', 'Snow or Ice'],
 ];
-export const PFT: [number,string,string][] = [
-  [
-    0,
-    "非植被",
-    "not vegetated"
-  ],
-  [
-    1,
-    "温带常绿针叶树",
-    "needleleaf evergreen temperate tree"
-  ],
-  [
-    2,
-    "寒带常绿针叶树",
-    "needleleaf evergreen boreal tree"
-  ],
-  [
-    3,
-    "寒带落叶针叶树",
-    "needleleaf deciduous boreal tree"
-  ],
-  [
-    4,
-    "热带常绿阔叶树",
-    "broadleaf evergreen tropical tree"
-  ],
-  [
-    5,
-    "温带常绿阔叶树",
-    "broadleaf evergreen temperate tree"
-  ],
-  [
-    6,
-    "热带落叶阔叶树",
-    "broadleaf deciduous tropical tree"
-  ],
-  [
-    7,
-    "温带落叶阔叶树",
-    "broadleaf deciduous temperate tree"
-  ],
-  [
-    8,
-    "寒带落叶阔叶树",
-    "broadleaf deciduous boreal tree"
-  ],
-  [
-    9,
-    "常绿阔叶灌木",
-    "broadleaf evergreen shrub"
-  ],
-  [
-    10,
-    "温带落叶阔叶灌木",
-    "broadleaf deciduous temperate shrub"
-  ],
-  [
-    11,
-    "寒带落叶阔叶灌木",
-    "broadleaf deciduous boreal shrub"
-  ],
-  [
-    12,
-    "C3 北极草",
-    "c3 arctic grass"
-  ],
-  [
-    13,
-    "C3 非北极草",
-    "c3 non-arctic grass"
-  ],
-  [
-    14,
-    "C4 草",
-    "c4 grass"
-  ],
-  [
-    15,
-    "C3 作物",
-    "c3 crop"
-  ],
-  [
-    16,
-    "灌溉 C3",
-    "c3 irrigated"
-  ],
-  [
-    17,
-    "温带玉米",
-    "temperate corn"
-  ],
-  [
-    18,
-    "灌溉温带玉米",
-    "irrigated temperate corn"
-  ],
-  [
-    19,
-    "春小麦",
-    "spring wheat"
-  ],
-  [
-    20,
-    "灌溉春小麦",
-    "irrigated spring wheat"
-  ],
-  [
-    21,
-    "冬小麦",
-    "winter wheat"
-  ],
-  [
-    22,
-    "灌溉冬小麦",
-    "irrigated winter wheat"
-  ],
-  [
-    23,
-    "温带大豆",
-    "temperate soybean"
-  ],
-  [
-    24,
-    "灌溉温带大豆",
-    "irrigated temperate soybean"
-  ],
-  [
-    25,
-    "大麦",
-    "barley"
-  ],
-  [
-    26,
-    "灌溉大麦",
-    "irrigated barley"
-  ],
-  [
-    27,
-    "冬大麦",
-    "winter barley"
-  ],
-  [
-    28,
-    "灌溉冬大麦",
-    "irrigated winter barley"
-  ],
-  [
-    29,
-    "黑麦",
-    "rye"
-  ],
-  [
-    30,
-    "灌溉黑麦",
-    "irrigated rye"
-  ],
-  [
-    31,
-    "冬黑麦",
-    "winter rye"
-  ],
-  [
-    32,
-    "灌溉冬黑麦",
-    "irrigated winter rye"
-  ],
-  [
-    33,
-    "木薯",
-    "cassava"
-  ],
-  [
-    34,
-    "灌溉木薯",
-    "irrigated cassava"
-  ],
-  [
-    35,
-    "柑橘",
-    "citrus"
-  ],
-  [
-    36,
-    "灌溉柑橘",
-    "irrigated citrus"
-  ],
-  [
-    37,
-    "可可",
-    "cocoa"
-  ],
-  [
-    38,
-    "灌溉可可",
-    "irrigated cocoa"
-  ],
-  [
-    39,
-    "咖啡",
-    "coffee"
-  ],
-  [
-    40,
-    "灌溉咖啡",
-    "irrigated coffee"
-  ],
-  [
-    41,
-    "棉花",
-    "cotton"
-  ],
-  [
-    42,
-    "灌溉棉花",
-    "irrigated cotton"
-  ],
-  [
-    43,
-    "椰枣",
-    "datepalm"
-  ],
-  [
-    44,
-    "灌溉椰枣",
-    "irrigated datepalm"
-  ],
-  [
-    45,
-    "饲草",
-    "foddergrass"
-  ],
-  [
-    46,
-    "灌溉饲草",
-    "irrigated foddergrass"
-  ],
-  [
-    47,
-    "葡萄",
-    "grapes"
-  ],
-  [
-    48,
-    "灌溉葡萄",
-    "irrigated grapes"
-  ],
-  [
-    49,
-    "花生",
-    "groundnuts"
-  ],
-  [
-    50,
-    "灌溉花生",
-    "irrigated groundnuts"
-  ],
-  [
-    51,
-    "小米",
-    "millet"
-  ],
-  [
-    52,
-    "灌溉小米",
-    "irrigated millet"
-  ],
-  [
-    53,
-    "油棕",
-    "oilpalm"
-  ],
-  [
-    54,
-    "灌溉油棕",
-    "irrigated oilpalm"
-  ],
-  [
-    55,
-    "马铃薯",
-    "potatoes"
-  ],
-  [
-    56,
-    "灌溉马铃薯",
-    "irrigated potatoes"
-  ],
-  [
-    57,
-    "豆类",
-    "pulses"
-  ],
-  [
-    58,
-    "灌溉豆类",
-    "irrigated pulses"
-  ],
-  [
-    59,
-    "油菜",
-    "rapeseed"
-  ],
-  [
-    60,
-    "灌溉油菜",
-    "irrigated rapeseed"
-  ],
-  [
-    61,
-    "水稻",
-    "rice"
-  ],
-  [
-    62,
-    "灌溉水稻",
-    "irrigated rice"
-  ],
-  [
-    63,
-    "高粱",
-    "sorghum"
-  ],
-  [
-    64,
-    "灌溉高粱",
-    "irrigated sorghum"
-  ],
-  [
-    65,
-    "甜菜",
-    "sugarbeet"
-  ],
-  [
-    66,
-    "灌溉甜菜",
-    "irrigated sugarbeet"
-  ],
-  [
-    67,
-    "甘蔗",
-    "sugarcane"
-  ],
-  [
-    68,
-    "灌溉甘蔗",
-    "irrigated sugarcane"
-  ],
-  [
-    69,
-    "向日葵",
-    "sunflower"
-  ],
-  [
-    70,
-    "灌溉向日葵",
-    "irrigated sunflower"
-  ],
-  [
-    71,
-    "芒草",
-    "miscanthus"
-  ],
-  [
-    72,
-    "灌溉芒草",
-    "irrigated miscanthus"
-  ],
-  [
-    73,
-    "柳枝稷",
-    "switchgrass"
-  ],
-  [
-    74,
-    "灌溉柳枝稷",
-    "irrigated switchgrass"
-  ],
-  [
-    75,
-    "热带玉米",
-    "tropical corn"
-  ],
-  [
-    76,
-    "灌溉热带玉米",
-    "irrigated tropical corn"
-  ],
-  [
-    77,
-    "热带大豆",
-    "tropical soybean"
-  ],
-  [
-    78,
-    "灌溉热带大豆",
-    "irrigated tropical soybean"
-  ]
+export const PFT: [number, string, string][] = [
+  [0, '非植被', 'not vegetated'],
+  [1, '温带常绿针叶树', 'needleleaf evergreen temperate tree'],
+  [2, '寒带常绿针叶树', 'needleleaf evergreen boreal tree'],
+  [3, '寒带落叶针叶树', 'needleleaf deciduous boreal tree'],
+  [4, '热带常绿阔叶树', 'broadleaf evergreen tropical tree'],
+  [5, '温带常绿阔叶树', 'broadleaf evergreen temperate tree'],
+  [6, '热带落叶阔叶树', 'broadleaf deciduous tropical tree'],
+  [7, '温带落叶阔叶树', 'broadleaf deciduous temperate tree'],
+  [8, '寒带落叶阔叶树', 'broadleaf deciduous boreal tree'],
+  [9, '常绿阔叶灌木', 'broadleaf evergreen shrub'],
+  [10, '温带落叶阔叶灌木', 'broadleaf deciduous temperate shrub'],
+  [11, '寒带落叶阔叶灌木', 'broadleaf deciduous boreal shrub'],
+  [12, 'C3 北极草', 'c3 arctic grass'],
+  [13, 'C3 非北极草', 'c3 non-arctic grass'],
+  [14, 'C4 草', 'c4 grass'],
+  [15, 'C3 作物', 'c3 crop'],
+  [16, '灌溉 C3', 'c3 irrigated'],
+  [17, '温带玉米', 'temperate corn'],
+  [18, '灌溉温带玉米', 'irrigated temperate corn'],
+  [19, '春小麦', 'spring wheat'],
+  [20, '灌溉春小麦', 'irrigated spring wheat'],
+  [21, '冬小麦', 'winter wheat'],
+  [22, '灌溉冬小麦', 'irrigated winter wheat'],
+  [23, '温带大豆', 'temperate soybean'],
+  [24, '灌溉温带大豆', 'irrigated temperate soybean'],
+  [25, '大麦', 'barley'],
+  [26, '灌溉大麦', 'irrigated barley'],
+  [27, '冬大麦', 'winter barley'],
+  [28, '灌溉冬大麦', 'irrigated winter barley'],
+  [29, '黑麦', 'rye'],
+  [30, '灌溉黑麦', 'irrigated rye'],
+  [31, '冬黑麦', 'winter rye'],
+  [32, '灌溉冬黑麦', 'irrigated winter rye'],
+  [33, '木薯', 'cassava'],
+  [34, '灌溉木薯', 'irrigated cassava'],
+  [35, '柑橘', 'citrus'],
+  [36, '灌溉柑橘', 'irrigated citrus'],
+  [37, '可可', 'cocoa'],
+  [38, '灌溉可可', 'irrigated cocoa'],
+  [39, '咖啡', 'coffee'],
+  [40, '灌溉咖啡', 'irrigated coffee'],
+  [41, '棉花', 'cotton'],
+  [42, '灌溉棉花', 'irrigated cotton'],
+  [43, '椰枣', 'datepalm'],
+  [44, '灌溉椰枣', 'irrigated datepalm'],
+  [45, '饲草', 'foddergrass'],
+  [46, '灌溉饲草', 'irrigated foddergrass'],
+  [47, '葡萄', 'grapes'],
+  [48, '灌溉葡萄', 'irrigated grapes'],
+  [49, '花生', 'groundnuts'],
+  [50, '灌溉花生', 'irrigated groundnuts'],
+  [51, '小米', 'millet'],
+  [52, '灌溉小米', 'irrigated millet'],
+  [53, '油棕', 'oilpalm'],
+  [54, '灌溉油棕', 'irrigated oilpalm'],
+  [55, '马铃薯', 'potatoes'],
+  [56, '灌溉马铃薯', 'irrigated potatoes'],
+  [57, '豆类', 'pulses'],
+  [58, '灌溉豆类', 'irrigated pulses'],
+  [59, '油菜', 'rapeseed'],
+  [60, '灌溉油菜', 'irrigated rapeseed'],
+  [61, '水稻', 'rice'],
+  [62, '灌溉水稻', 'irrigated rice'],
+  [63, '高粱', 'sorghum'],
+  [64, '灌溉高粱', 'irrigated sorghum'],
+  [65, '甜菜', 'sugarbeet'],
+  [66, '灌溉甜菜', 'irrigated sugarbeet'],
+  [67, '甘蔗', 'sugarcane'],
+  [68, '灌溉甘蔗', 'irrigated sugarcane'],
+  [69, '向日葵', 'sunflower'],
+  [70, '灌溉向日葵', 'irrigated sunflower'],
+  [71, '芒草', 'miscanthus'],
+  [72, '灌溉芒草', 'irrigated miscanthus'],
+  [73, '柳枝稷', 'switchgrass'],
+  [74, '灌溉柳枝稷', 'irrigated switchgrass'],
+  [75, '热带玉米', 'tropical corn'],
+  [76, '灌溉热带玉米', 'irrigated tropical corn'],
+  [77, '热带大豆', 'tropical soybean'],
+  [78, '灌溉热带大豆', 'irrigated tropical soybean'],
 ];

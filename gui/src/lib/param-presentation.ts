@@ -30,15 +30,27 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   USE_SITE_htop: pair('从站点文件读取植被高度', 'Read canopy height from site file'),
   USE_SITE_LAI: pair('从站点文件读取叶面积指数', 'Read leaf-area index from site file'),
   USE_SITE_lakedepth: pair('从站点文件读取湖泊深度', 'Read lake depth from site file'),
-  USE_SITE_soilreflectance: pair('从站点文件读取土壤反射率', 'Read soil reflectance from site file'),
+  USE_SITE_soilreflectance: pair(
+    '从站点文件读取土壤反射率',
+    'Read soil reflectance from site file',
+  ),
   USE_SITE_soilparameters: pair('从站点文件读取土壤参数', 'Read soil parameters from site file'),
   USE_SITE_dbedrock: pair('从站点文件读取基岩深度', 'Read bedrock depth from site file'),
   USE_SITE_topography: pair('从站点文件读取地形', 'Read topography from site file'),
   USE_SITE_urban_geometry: pair('从站点文件读取城市几何参数', 'Read urban geometry from site file'),
   USE_SITE_urban_ecology: pair('从站点文件读取城市生态参数', 'Read urban ecology from site file'),
-  USE_SITE_urban_radiation: pair('从站点文件读取城市辐射参数', 'Read urban radiation from site file'),
-  USE_SITE_urban_thermal: pair('从站点文件读取城市热力参数', 'Read urban thermal parameters from site file'),
-  USE_SITE_urban_human: pair('从站点文件读取城市人为活动参数', 'Read urban human-activity parameters from site file'),
+  USE_SITE_urban_radiation: pair(
+    '从站点文件读取城市辐射参数',
+    'Read urban radiation from site file',
+  ),
+  USE_SITE_urban_thermal: pair(
+    '从站点文件读取城市热力参数',
+    'Read urban thermal parameters from site file',
+  ),
+  USE_SITE_urban_human: pair(
+    '从站点文件读取城市人为活动参数',
+    'Read urban human-activity parameters from site file',
+  ),
   USE_SITE_HistWriteBack: pair('站点输出回写', 'Write site history back'),
   USE_SITE_ForcingReadAhead: pair('强迫场预读', 'Read forcing ahead'),
 
@@ -107,7 +119,10 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_LC_SAI0: pair('茎面积指数', 'Stem-area index'),
   DEF_LC_Z0MR: pair('粗糙度长度与冠层高度之比', 'Roughness-length to canopy-height ratio'),
   DEF_LC_DISPLAR: pair('零平面位移与冠层高度之比', 'Displacement-height to canopy-height ratio'),
-  DEF_LC_SQRTDI: pair('叶片特征尺寸倒平方根（m⁻⁰·⁵）', 'Inverse square root of leaf dimension (m⁻⁰·⁵)'),
+  DEF_LC_SQRTDI: pair(
+    '叶片特征尺寸倒平方根（m⁻⁰·⁵）',
+    'Inverse square root of leaf dimension (m⁻⁰·⁵)',
+  ),
   DEF_LC_CHIL: pair('叶倾角分布参数', 'Leaf-angle distribution parameter'),
   DEF_LC_RHOL_VIS: pair('绿叶可见光反射率', 'Green-leaf visible reflectance'),
   DEF_LC_RHOL_NIR: pair('绿叶近红外反射率', 'Green-leaf near-infrared reflectance'),
@@ -117,7 +132,10 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_LC_TAUL_NIR: pair('绿叶近红外透射率', 'Green-leaf near-infrared transmittance'),
   DEF_LC_TAUS_VIS: pair('枯叶可见光透射率', 'Dead-leaf visible transmittance'),
   DEF_LC_TAUS_NIR: pair('枯叶近红外透射率', 'Dead-leaf near-infrared transmittance'),
-  DEF_LC_VMAX25: pair('25 ℃ 最大羧化速率（μmol m⁻² s⁻¹）', 'Maximum carboxylation at 25 °C (μmol m⁻² s⁻¹)'),
+  DEF_LC_VMAX25: pair(
+    '25 ℃ 最大羧化速率（μmol m⁻² s⁻¹）',
+    'Maximum carboxylation at 25 °C (μmol m⁻² s⁻¹)',
+  ),
   DEF_LC_EFFCON: pair('光合量子效率', 'Photosynthetic quantum efficiency'),
   DEF_LC_C3C4: pair('光合途径', 'Photosynthetic pathway'),
   DEF_LC_RESPCP: pair('叶片呼吸比例', 'Leaf-respiration fraction'),
@@ -135,38 +153,86 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_LC_KMAX_SHA: pair('阴叶最大导水率', 'Maximum shaded-leaf conductance'),
   DEF_LC_KMAX_XYL: pair('木质部最大导水率', 'Maximum xylem conductance'),
   DEF_LC_KMAX_ROOT: pair('根系最大导水率', 'Maximum root conductance'),
-  DEF_LC_PSI50_SUN: pair('阳叶 50% 失导水势（mm H₂O）', 'Sunlit-leaf water potential at 50% loss (mm H₂O)'),
-  DEF_LC_PSI50_SHA: pair('阴叶 50% 失导水势（mm H₂O）', 'Shaded-leaf water potential at 50% loss (mm H₂O)'),
-  DEF_LC_PSI50_XYL: pair('木质部 50% 失导水势（mm H₂O）', 'Xylem water potential at 50% loss (mm H₂O)'),
-  DEF_LC_PSI50_ROOT: pair('根系 50% 失导水势（mm H₂O）', 'Root water potential at 50% loss (mm H₂O)'),
+  DEF_LC_PSI50_SUN: pair(
+    '阳叶 50% 失导水势（mm H₂O）',
+    'Sunlit-leaf water potential at 50% loss (mm H₂O)',
+  ),
+  DEF_LC_PSI50_SHA: pair(
+    '阴叶 50% 失导水势（mm H₂O）',
+    'Shaded-leaf water potential at 50% loss (mm H₂O)',
+  ),
+  DEF_LC_PSI50_XYL: pair(
+    '木质部 50% 失导水势（mm H₂O）',
+    'Xylem water potential at 50% loss (mm H₂O)',
+  ),
+  DEF_LC_PSI50_ROOT: pair(
+    '根系 50% 失导水势（mm H₂O）',
+    'Root water potential at 50% loss (mm H₂O)',
+  ),
   DEF_LC_CK: pair('水力脆弱性曲线形状参数', 'Hydraulic vulnerability-curve shape'),
   DEF_TUNING_ZLND: pair('土壤空气动力粗糙长度（m）', 'Soil aerodynamic roughness length (m)'),
   DEF_TUNING_ZSNO: pair('雪面空气动力粗糙长度（m）', 'Snow aerodynamic roughness length (m)'),
   DEF_TUNING_CSOILC: pair('冠层下土壤拖曳系数', 'Below-canopy soil drag coefficient'),
   DEF_TUNING_DEWMX: pair('冠层最大露水储量（mm）', 'Maximum canopy dew storage (mm)'),
-  DEF_TUNING_CAPR: pair('首层土温到地表温度调节因子', 'First-layer-to-surface temperature tuning factor'),
+  DEF_TUNING_CAPR: pair(
+    '首层土温到地表温度调节因子',
+    'First-layer-to-surface temperature tuning factor',
+  ),
   DEF_TUNING_CNFAC: pair('Crank–Nicolson 权重', 'Crank–Nicolson weighting factor'),
   DEF_TUNING_SSI: pair('积雪不可排水饱和度比例', 'Irreducible snow-water saturation fraction'),
   DEF_TUNING_WIMP: pair('土壤不透水孔隙率阈值', 'Impermeable-soil porosity threshold'),
   DEF_TUNING_PONDMX: pair('最大地表积水深度（mm）', 'Maximum ponding depth (mm)'),
-  DEF_TUNING_SMPMAX: pair('Simple VIC 萎蔫土壤基质势（mm）', 'Simple VIC wilting matric potential (mm)'),
+  DEF_TUNING_SMPMAX: pair(
+    'Simple VIC 萎蔫土壤基质势（mm）',
+    'Simple VIC wilting matric potential (mm)',
+  ),
   DEF_TUNING_SMPMIN: pair('土壤基质势下限（mm）', 'Soil matric-potential lower limit (mm)'),
-  DEF_TUNING_SMPMAX_HR: pair('异养呼吸土壤水势上限（mm）', 'Heterotrophic-respiration soil-potential upper limit (mm)'),
-  DEF_TUNING_SMPMIN_HR: pair('异养呼吸土壤水势下限（mm）', 'Heterotrophic-respiration soil-potential lower limit (mm)'),
+  DEF_TUNING_SMPMAX_HR: pair(
+    '异养呼吸土壤水势上限（mm）',
+    'Heterotrophic-respiration soil-potential upper limit (mm)',
+  ),
+  DEF_TUNING_SMPMIN_HR: pair(
+    '异养呼吸土壤水势下限（mm）',
+    'Heterotrophic-respiration soil-potential lower limit (mm)',
+  ),
   DEF_TUNING_TRSMX0: pair('最大蒸腾速率（mm s⁻¹）', 'Maximum transpiration rate (mm s⁻¹)'),
-  DEF_TUNING_WETWATMAX: pair('湿地最大地表水储量（mm）', 'Maximum wetland surface-water storage (mm)'),
-  DEF_TUNING_SOIL_ICE_IMPEDANCE: pair('冻结土壤导水阻抗指数', 'Frozen-soil hydraulic impedance exponent'),
-  DEF_TUNING_TOPMOD_DECAY: pair('TOPMODEL 地下水位衰减系数（m⁻¹）', 'TOPMODEL water-table decay coefficient (m⁻¹)'),
+  DEF_TUNING_WETWATMAX: pair(
+    '湿地最大地表水储量（mm）',
+    'Maximum wetland surface-water storage (mm)',
+  ),
+  DEF_TUNING_SOIL_ICE_IMPEDANCE: pair(
+    '冻结土壤导水阻抗指数',
+    'Frozen-soil hydraulic impedance exponent',
+  ),
+  DEF_TUNING_TOPMOD_DECAY: pair(
+    'TOPMODEL 地下水位衰减系数（m⁻¹）',
+    'TOPMODEL water-table decay coefficient (m⁻¹)',
+  ),
   DEF_TUNING_SIMPLE_VIC_DS: pair('Simple VIC 基流比例 Ds', 'Simple VIC baseflow fraction Ds'),
   DEF_TUNING_SIMPLE_VIC_WS: pair('Simple VIC 基流阈值 Ws', 'Simple VIC baseflow threshold Ws'),
   DEF_TUNING_SNOW_COVER_EXPONENT: pair('积雪覆盖密度指数', 'Snow-cover density exponent'),
-  DEF_TUNING_IRRIGATION_START_SEC: pair('当地灌溉开始时刻（当天秒数）', 'Local irrigation start time (second of day)'),
-  DEF_TUNING_IRRIGATION_DURATION_SEC: pair('每日灌溉持续时间（s）', 'Daily irrigation duration (s)'),
-  DEF_TUNING_IRRIGATION_MAX_DEPTH: pair('灌溉土壤最大深度（m）', 'Maximum irrigated soil depth (m)'),
+  DEF_TUNING_IRRIGATION_START_SEC: pair(
+    '当地灌溉开始时刻（当天秒数）',
+    'Local irrigation start time (second of day)',
+  ),
+  DEF_TUNING_IRRIGATION_DURATION_SEC: pair(
+    '每日灌溉持续时间（s）',
+    'Daily irrigation duration (s)',
+  ),
+  DEF_TUNING_IRRIGATION_MAX_DEPTH: pair(
+    '灌溉土壤最大深度（m）',
+    'Maximum irrigated soil depth (m)',
+  ),
   DEF_TUNING_IRRIGATION_THRESHOLD_FRACTION: pair('灌溉触发阈值比例', 'Irrigation trigger fraction'),
-  DEF_TUNING_IRRIGATION_SUPPLY_FRACTION: pair('灌溉缺水补给比例', 'Irrigation deficit supply fraction'),
+  DEF_TUNING_IRRIGATION_SUPPLY_FRACTION: pair(
+    '灌溉缺水补给比例',
+    'Irrigation deficit supply fraction',
+  ),
   DEF_TUNING_IRRIGATION_MIN_CPHASE: pair('灌溉起始作物阶段', 'First irrigated crop phase'),
-  DEF_TUNING_IRRIGATION_MAX_CPHASE: pair('灌溉结束作物阶段（不含）', 'Exclusive last irrigated crop phase'),
+  DEF_TUNING_IRRIGATION_MAX_CPHASE: pair(
+    '灌溉结束作物阶段（不含）',
+    'Exclusive last irrigated crop phase',
+  ),
   DEF_TUNING_IRRIGATION_PONDMX: pair('稻田最大积水深度（mm）', 'Maximum paddy ponding depth (mm)'),
   DEF_TUNING_CROP_PLANTING_DAY: pair('作物种植日（年内日序）', 'Crop planting day (day of year)'),
   DEF_PH_CROOT_LATERAL_LENGTH: pair('粗根横向长度（m）', 'Coarse-root lateral length (m)'),
@@ -178,10 +244,16 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_PH_KRMAX: pair('最大根径向导度', 'Maximum root radial conductivity'),
   DEF_OZONE_KO3: pair('臭氧气孔阻力系数', 'Ozone stomatal-resistance coefficient'),
   DEF_DS_TEMP_LAPSE_RATE: pair('气温递减率（K m⁻¹）', 'Temperature lapse rate (K m⁻¹)'),
-  DEF_DS_LONGWAVE_LAPSE_RATE: pair('冰川长波辐射递减率（W m⁻² m⁻¹）', 'Glacier longwave lapse rate (W m⁻² m⁻¹)'),
+  DEF_DS_LONGWAVE_LAPSE_RATE: pair(
+    '冰川长波辐射递减率（W m⁻² m⁻¹）',
+    'Glacier longwave lapse rate (W m⁻² m⁻¹)',
+  ),
   DEF_DS_LONGWAVE_LIMIT: pair('长波降尺度修正上限', 'Longwave downscaling correction limit'),
   DEF_DS_SHORTWAVE_LIMIT: pair('完整降尺度短波修正上限', 'Full-mode shortwave correction limit'),
-  DEF_DS_SHORTWAVE_SIMPLE_LIMIT: pair('简化降尺度短波修正上限', 'Simple-mode shortwave correction limit'),
+  DEF_DS_SHORTWAVE_SIMPLE_LIMIT: pair(
+    '简化降尺度短波修正上限',
+    'Simple-mode shortwave correction limit',
+  ),
   DEF_USE_SASU: pair('启用半解析预热', 'Enable semi-analytic spin-up'),
   DEF_USE_DiagMatrix: pair('输出生地化诊断矩阵', 'Output biogeochemical diagnostic matrix'),
   DEF_USE_PN: pair('启用脉冲加氮预热', 'Enable punctuated-N spin-up'),
@@ -202,11 +274,20 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_HighResUrban_albedo: pair('城市高光谱反照率', 'Hyperspectral urban albedo'),
 
   DEF_USE_Forcing_Downscaling: pair('完整地形强迫降尺度', 'Full topographic forcing downscaling'),
-  DEF_USE_Forcing_Downscaling_Simple: pair('简化地形强迫降尺度', 'Simple topographic forcing downscaling'),
-  DEF_DS_HiresTopographyDataDir: pair('高分辨率地形数据目录', 'High-resolution topography directory'),
+  DEF_USE_Forcing_Downscaling_Simple: pair(
+    '简化地形强迫降尺度',
+    'Simple topographic forcing downscaling',
+  ),
+  DEF_DS_HiresTopographyDataDir: pair(
+    '高分辨率地形数据目录',
+    'High-resolution topography directory',
+  ),
   DEF_DS_precipitation_adjust_scheme: pair('降水降尺度方案', 'Precipitation-downscaling scheme'),
   DEF_DS_longwave_adjust_scheme: pair('长波辐射降尺度方案', 'Longwave-downscaling scheme'),
-  DEF_USE_ClimForcing_for_Spinup: pair('预热期循环使用气候态强迫', 'Use climatological forcing for spin-up'),
+  DEF_USE_ClimForcing_for_Spinup: pair(
+    '预热期循环使用气候态强迫',
+    'Use climatological forcing for spin-up',
+  ),
   DEF_USE_CBL_HEIGHT: pair('读取边界层高度', 'Read boundary-layer height'),
 
   DEF_USE_TRACER: pair('启用示踪剂', 'Enable tracers'),
@@ -229,17 +310,26 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'DEF_METHANE%only_wetland': pair('仅在湿地计算甲烷', 'Compute methane only on wetlands'),
   'DEF_METHANE%use_spatial_ph': pair('使用空间土壤 pH', 'Use spatial soil pH'),
   'DEF_METHANE%q10methane': pair('甲烷温度敏感性 Q10', 'Methane temperature sensitivity Q10'),
-  'DEF_METHANE%use_biome_f_methane': pair('按生物群系设置甲烷产率', 'Use biome-specific methane yield'),
+  'DEF_METHANE%use_biome_f_methane': pair(
+    '按生物群系设置甲烷产率',
+    'Use biome-specific methane yield',
+  ),
   'DEF_METHANE%f_methane': pair('甲烷产率系数', 'Methane production-yield factor'),
   'DEF_METHANE%write_ch4_history': pair('输出甲烷历史变量', 'Write methane history variables'),
   'DEF_METHANE%ch4_history_vars': pair('甲烷历史变量集合', 'Methane history-variable set'),
-  'DEF_METHANE%use_transient_atm_methane': pair('使用瞬变大气甲烷浓度', 'Use transient atmospheric methane'),
+  'DEF_METHANE%use_transient_atm_methane': pair(
+    '使用瞬变大气甲烷浓度',
+    'Use transient atmospheric methane',
+  ),
   'DEF_METHANE%atm_methane_file': pair('大气甲烷浓度文件', 'Atmospheric methane file'),
   'DEF_METHANE%atm_methane_file_units': pair('大气甲烷浓度单位', 'Atmospheric methane units'),
 
   DEF_USE_GridRiverLakeFlow: pair('开启河湖汇流', 'Enable river-lake routing'),
   DEF_Reservoir_Method: pair('水库调度方案', 'Reservoir-operation scheme'),
-  DEF_ReservoirPara_file: pair('水库参数文件（留空读单元流域文件）', 'Reservoir-parameter file (blank: unit-catchment file)'),
+  DEF_ReservoirPara_file: pair(
+    '水库参数文件（留空读单元流域文件）',
+    'Reservoir-parameter file (blank: unit-catchment file)',
+  ),
   DEF_USE_EstimatedRiverDepth: pair('估算河道深度', 'Estimate river depth'),
   DEF_USE_LEVEE: pair('启用堤防过程', 'Enable levees'),
   DEF_USE_BIFURCATION: pair('启用分汊河道', 'Enable river bifurcation'),
@@ -301,7 +391,10 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'DEF_forcing%CBL_vname': pair('边界层高度变量名', 'Boundary-layer height variable'),
   'DEF_forcing%CBL_tintalgo': pair('边界层高度插值方法', 'Boundary-layer height interpolation'),
   'DEF_forcing%CBL_dtime': pair('边界层高度时间间隔（秒）', 'Boundary-layer height time step (s)'),
-  'DEF_forcing%CBL_offset': pair('边界层高度时间偏移（秒）', 'Boundary-layer height time offset (s)'),
+  'DEF_forcing%CBL_offset': pair(
+    '边界层高度时间偏移（秒）',
+    'Boundary-layer height time offset (s)',
+  ),
   'DEF_TRACER%unit_kind': pair('浓度单位类型', 'Concentration unit kind'),
   'DEF_TRACER%mol_weight': pair('摩尔质量（g/mol）', 'Molar mass (g/mol)'),
   'DEF_TRACER%ref_ratio': pair('参考同位素比', 'Reference isotope ratio'),
@@ -313,7 +406,10 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'DEF_TRACER%reactive_decay_rate': pair('反应衰减速率', 'Reactive decay rate'),
   'DEF_TRACER%charge': pair('离子电荷', 'Ionic charge'),
   'DEF_METHANE%f_methane_tropical_peat': pair('甲烷产率：热带泥炭地', 'CH4 yield: tropical peat'),
-  'DEF_METHANE%f_methane_tropical_floodplain': pair('甲烷产率：热带洪泛区', 'CH4 yield: tropical floodplain'),
+  'DEF_METHANE%f_methane_tropical_floodplain': pair(
+    '甲烷产率：热带洪泛区',
+    'CH4 yield: tropical floodplain',
+  ),
   'DEF_METHANE%f_methane_floodplain': pair('甲烷产率：洪泛土壤', 'CH4 yield: flooded soil'),
   'DEF_METHANE%f_methane_temperate_marsh': pair('甲烷产率：温带沼泽', 'CH4 yield: temperate marsh'),
   'DEF_METHANE%f_methane_boreal_fen': pair('甲烷产率：北方矿养泥炭', 'CH4 yield: boreal fen'),
@@ -321,22 +417,55 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'DEF_METHANE%f_methane_rice_paddy': pair('甲烷产率：稻田', 'CH4 yield: rice paddy'),
   'DEF_METHANE%f_methane_upland_soil': pair('甲烷产率：旱地土壤', 'CH4 yield: upland soil'),
   'DEF_METHANE%use_biome_redoxlag': pair('按生物群系设置氧化还原滞后', 'Biome-specific redox lag'),
-  'DEF_METHANE%redoxlag_tropical_peat': pair('氧化还原滞后：热带泥炭地（天）', 'Redox lag: tropical peat (days)'),
-  'DEF_METHANE%redoxlag_tropical_floodplain': pair('氧化还原滞后：热带洪泛区（天）', 'Redox lag: tropical floodplain (days)'),
-  'DEF_METHANE%redoxlag_temperate_marsh': pair('氧化还原滞后：温带沼泽（天）', 'Redox lag: temperate marsh (days)'),
-  'DEF_METHANE%redoxlag_boreal_fen': pair('氧化还原滞后：北方矿养泥炭（天）', 'Redox lag: boreal fen (days)'),
-  'DEF_METHANE%redoxlag_boreal_bog': pair('氧化还原滞后：北方雨养泥炭（天）', 'Redox lag: boreal bog (days)'),
-  'DEF_METHANE%redoxlag_rice_paddy': pair('氧化还原滞后：稻田（天）', 'Redox lag: rice paddy (days)'),
-  'DEF_METHANE%redoxlag_upland_soil': pair('氧化还原滞后：旱地土壤（天）', 'Redox lag: upland soil (days)'),
+  'DEF_METHANE%redoxlag_tropical_peat': pair(
+    '氧化还原滞后：热带泥炭地（天）',
+    'Redox lag: tropical peat (days)',
+  ),
+  'DEF_METHANE%redoxlag_tropical_floodplain': pair(
+    '氧化还原滞后：热带洪泛区（天）',
+    'Redox lag: tropical floodplain (days)',
+  ),
+  'DEF_METHANE%redoxlag_temperate_marsh': pair(
+    '氧化还原滞后：温带沼泽（天）',
+    'Redox lag: temperate marsh (days)',
+  ),
+  'DEF_METHANE%redoxlag_boreal_fen': pair(
+    '氧化还原滞后：北方矿养泥炭（天）',
+    'Redox lag: boreal fen (days)',
+  ),
+  'DEF_METHANE%redoxlag_boreal_bog': pair(
+    '氧化还原滞后：北方雨养泥炭（天）',
+    'Redox lag: boreal bog (days)',
+  ),
+  'DEF_METHANE%redoxlag_rice_paddy': pair(
+    '氧化还原滞后：稻田（天）',
+    'Redox lag: rice paddy (days)',
+  ),
+  'DEF_METHANE%redoxlag_upland_soil': pair(
+    '氧化还原滞后：旱地土壤（天）',
+    'Redox lag: upland soil (days)',
+  ),
   'DEF_METHANE%redoxlag': pair('氧化还原滞后（天）', 'Redox lag (days)'),
-  'DEF_METHANE%redoxlag_vertical': pair('新变干土层的产甲烷抑制滞后（天）', 'Vertical redox lag (days)'),
+  'DEF_METHANE%redoxlag_vertical': pair(
+    '新变干土层的产甲烷抑制滞后（天）',
+    'Vertical redox lag (days)',
+  ),
   'DEF_METHANE%use_vertical_redoxlag': pair('启用垂向氧化还原滞后', 'Enable vertical redox lag'),
   'DEF_METHANE%z0_methane_prod': pair('产甲烷深度衰减尺度（m）', 'Production depth e-folding (m)'),
-  'DEF_METHANE%q10methane_base': pair('产甲烷 Q10 参考温度（K）', 'Production Q10 reference temperature (K)'),
-  'DEF_METHANE%q10lakebase': pair('湖泊产甲烷参考温度（K）', 'Lake production reference temperature (K)'),
+  'DEF_METHANE%q10methane_base': pair(
+    '产甲烷 Q10 参考温度（K）',
+    'Production Q10 reference temperature (K)',
+  ),
+  'DEF_METHANE%q10lakebase': pair(
+    '湖泊产甲烷参考温度（K）',
+    'Lake production reference temperature (K)',
+  ),
   'DEF_METHANE%cnscalefactor': pair('碳氮分解缩放系数', 'CN decomposition scale factor'),
   'DEF_METHANE%mino2lim': pair('厌氧分解最小比例', 'Minimum anaerobic decomposition fraction'),
-  'DEF_METHANE%lake_decomp_fact': pair('湖泊沉积物分解速率（1/s）', 'Lake decomposition rate (1/s)'),
+  'DEF_METHANE%lake_decomp_fact': pair(
+    '湖泊沉积物分解速率（1/s）',
+    'Lake decomposition rate (1/s)',
+  ),
   'DEF_METHANE%pHmax': pair('产甲烷 pH 上限', 'Maximum pH for production'),
   'DEF_METHANE%pHmin': pair('产甲烷 pH 下限', 'Minimum pH for production'),
   'DEF_METHANE%usephfact': pair('产甲烷考虑 pH 影响', 'Apply pH factor to production'),
@@ -344,93 +473,231 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   'DEF_METHANE%om_frac_sf': pair('有机质比例缩放系数', 'Organic-matter fraction scale factor'),
   'DEF_METHANE%allowlakeprod': pair('允许湖泊产甲烷', 'Allow lake production'),
   'DEF_METHANE%replenishlakec': pair('补充湖泊沉积物碳', 'Replenish lake sediment carbon'),
-  'DEF_METHANE%anoxia': pair('缺氧同时限制异养呼吸', 'Anoxia also limits heterotrophic respiration'),
-  'DEF_METHANE%anoxicmicrosites': pair('考虑地下水位以上的缺氧微区', 'Anoxic microsites above the water table'),
-  'DEF_METHANE%methane_rmcnlim': pair('计算产甲烷时去掉氮与水分限制', 'Remove N and moisture limits for production'),
-  'DEF_METHANE%methane_frzout': pair('冻结排出（已停用，须为关）', 'Freeze-out (retired, must be off)'),
-  'DEF_METHANE%methane_offline': pair('离线甲烷（仅支持离线）', 'Offline methane (only offline supported)'),
-  'DEF_METHANE%use_nitrif_denitrif': pair('使用硝化反硝化的氧消耗', 'Use nitrification/denitrification O2 demand'),
-  'DEF_METHANE%bgc_anoxia_limits_decomp': pair('BGC 已按缺氧限制分解', 'BGC already limits decomposition by anoxia'),
+  'DEF_METHANE%anoxia': pair(
+    '缺氧同时限制异养呼吸',
+    'Anoxia also limits heterotrophic respiration',
+  ),
+  'DEF_METHANE%anoxicmicrosites': pair(
+    '考虑地下水位以上的缺氧微区',
+    'Anoxic microsites above the water table',
+  ),
+  'DEF_METHANE%methane_rmcnlim': pair(
+    '计算产甲烷时去掉氮与水分限制',
+    'Remove N and moisture limits for production',
+  ),
+  'DEF_METHANE%methane_frzout': pair(
+    '冻结排出（已停用，须为关）',
+    'Freeze-out (retired, must be off)',
+  ),
+  'DEF_METHANE%methane_offline': pair(
+    '离线甲烷（仅支持离线）',
+    'Offline methane (only offline supported)',
+  ),
+  'DEF_METHANE%use_nitrif_denitrif': pair(
+    '使用硝化反硝化的氧消耗',
+    'Use nitrification/denitrification O2 demand',
+  ),
+  'DEF_METHANE%bgc_anoxia_limits_decomp': pair(
+    'BGC 已按缺氧限制分解',
+    'BGC already limits decomposition by anoxia',
+  ),
   'DEF_METHANE%use_ch4_sif': pair('启用季节性淹水因子', 'Enable seasonal inundation factor'),
   'DEF_METHANE%rice_drain_window_days': pair('稻田排水后余效天数', 'Rice post-drain window (days)'),
   'DEF_METHANE%rice_substrate_boost': pair('稻田底物增强系数', 'Rice substrate boost'),
-  'DEF_METHANE%vmax_methane_oxid': pair('甲烷最大氧化速率（饱和层）', 'Max CH4 oxidation rate (saturated)'),
-  'DEF_METHANE%vmax_oxid_unsat': pair('甲烷最大氧化速率（非饱和层）', 'Max CH4 oxidation rate (unsaturated)'),
-  'DEF_METHANE%k_m': pair('氧化半饱和常数：甲烷（饱和层）', 'Oxidation half-saturation: CH4 (saturated)'),
-  'DEF_METHANE%k_m_unsat': pair('氧化半饱和常数：甲烷（非饱和层）', 'Oxidation half-saturation: CH4 (unsaturated)'),
+  'DEF_METHANE%vmax_methane_oxid': pair(
+    '甲烷最大氧化速率（饱和层）',
+    'Max CH4 oxidation rate (saturated)',
+  ),
+  'DEF_METHANE%vmax_oxid_unsat': pair(
+    '甲烷最大氧化速率（非饱和层）',
+    'Max CH4 oxidation rate (unsaturated)',
+  ),
+  'DEF_METHANE%k_m': pair(
+    '氧化半饱和常数：甲烷（饱和层）',
+    'Oxidation half-saturation: CH4 (saturated)',
+  ),
+  'DEF_METHANE%k_m_unsat': pair(
+    '氧化半饱和常数：甲烷（非饱和层）',
+    'Oxidation half-saturation: CH4 (unsaturated)',
+  ),
   'DEF_METHANE%k_m_o2': pair('氧化半饱和常数：氧气', 'Oxidation half-saturation: O2'),
   'DEF_METHANE%q10_methane_oxid': pair('甲烷氧化 Q10', 'CH4 oxidation Q10'),
   'DEF_METHANE%lake_oxid_scale': pair('湖泊氧化缩放系数', 'Lake oxidation scale'),
   'DEF_METHANE%lake_k_m_o2': pair('湖泊氧化半饱和常数：氧气', 'Lake oxidation half-saturation: O2'),
   'DEF_METHANE%lake_vmax_methane_oxid': pair('湖泊甲烷最大氧化速率', 'Lake max CH4 oxidation rate'),
-  'DEF_METHANE%lake_oxic_sediment_depth': pair('湖泊沉积物有氧层厚度（m）', 'Lake oxic sediment depth (m)'),
+  'DEF_METHANE%lake_oxic_sediment_depth': pair(
+    '湖泊沉积物有氧层厚度（m）',
+    'Lake oxic sediment depth (m)',
+  ),
   'DEF_METHANE%use_microbial_pools': pair('启用微生物生物量库', 'Enable microbial biomass pools'),
-  'DEF_METHANE%use_microbial_flux_override': pair('用微生物模型改写通量', 'Microbial model overrides fluxes'),
+  'DEF_METHANE%use_microbial_flux_override': pair(
+    '用微生物模型改写通量',
+    'Microbial model overrides fluxes',
+  ),
   'DEF_METHANE%use_microbial_dormancy': pair('启用微生物休眠', 'Enable microbial dormancy'),
   'DEF_METHANE%B_init_methanogen': pair('产甲烷菌初始生物量', 'Initial methanogen biomass'),
   'DEF_METHANE%B_init_methanotroph': pair('甲烷氧化菌初始生物量', 'Initial methanotroph biomass'),
   'DEF_METHANE%B_min_methanogen': pair('产甲烷菌最小生物量', 'Minimum methanogen biomass'),
   'DEF_METHANE%B_min_methanotroph': pair('甲烷氧化菌最小生物量', 'Minimum methanotroph biomass'),
-  'DEF_METHANE%B_max_fraction_methanogen': pair('产甲烷菌生物量上限（占有机碳比例）', 'Methanogen biomass cap (fraction of SOC)'),
-  'DEF_METHANE%B_max_fraction_methanotroph': pair('甲烷氧化菌生物量上限（占有机碳比例）', 'Methanotroph biomass cap (fraction of SOC)'),
+  'DEF_METHANE%B_max_fraction_methanogen': pair(
+    '产甲烷菌生物量上限（占有机碳比例）',
+    'Methanogen biomass cap (fraction of SOC)',
+  ),
+  'DEF_METHANE%B_max_fraction_methanotroph': pair(
+    '甲烷氧化菌生物量上限（占有机碳比例）',
+    'Methanotroph biomass cap (fraction of SOC)',
+  ),
   'DEF_METHANE%mu_max_methanogen': pair('产甲烷菌最大生长速率', 'Methanogen max growth rate'),
   'DEF_METHANE%mu_max_methanotroph': pair('甲烷氧化菌最大生长速率', 'Methanotroph max growth rate'),
   'DEF_METHANE%gamma_methanogen': pair('产甲烷菌死亡速率', 'Methanogen mortality rate'),
   'DEF_METHANE%gamma_methanotroph': pair('甲烷氧化菌死亡速率', 'Methanotroph mortality rate'),
-  'DEF_METHANE%gamma_microbial_dormant': pair('休眠微生物死亡速率', 'Dormant microbial mortality rate'),
-  'DEF_METHANE%gamma_microbial_freeze': pair('冻结期微生物死亡速率', 'Frozen microbial mortality rate'),
-  'DEF_METHANE%K_substrate_methanogen_pool': pair('产甲烷底物半饱和常数（mol C/m³）', 'Methanogen substrate half-saturation (mol C/m³)'),
-  'DEF_METHANE%K_inh_O2_methanogen': pair('氧对产甲烷菌的抑制常数', 'O2 inhibition constant for methanogens'),
+  'DEF_METHANE%gamma_microbial_dormant': pair(
+    '休眠微生物死亡速率',
+    'Dormant microbial mortality rate',
+  ),
+  'DEF_METHANE%gamma_microbial_freeze': pair(
+    '冻结期微生物死亡速率',
+    'Frozen microbial mortality rate',
+  ),
+  'DEF_METHANE%K_substrate_methanogen_pool': pair(
+    '产甲烷底物半饱和常数（mol C/m³）',
+    'Methanogen substrate half-saturation (mol C/m³)',
+  ),
+  'DEF_METHANE%K_inh_O2_methanogen': pair(
+    '氧对产甲烷菌的抑制常数',
+    'O2 inhibition constant for methanogens',
+  ),
   'DEF_METHANE%kappa_m_methanogen': pair('产甲烷菌维持系数', 'Methanogen maintenance coefficient'),
-  'DEF_METHANE%kappa_m_methanotroph': pair('甲烷氧化菌维持系数', 'Methanotroph maintenance coefficient'),
-  'DEF_METHANE%max_microbe_prod_multiplier': pair('微生物产量最大倍数', 'Max microbial production multiplier'),
+  'DEF_METHANE%kappa_m_methanotroph': pair(
+    '甲烷氧化菌维持系数',
+    'Methanotroph maintenance coefficient',
+  ),
+  'DEF_METHANE%max_microbe_prod_multiplier': pair(
+    '微生物产量最大倍数',
+    'Max microbial production multiplier',
+  ),
   'DEF_METHANE%q10_microbe_growth': pair('微生物生长 Q10', 'Microbial growth Q10'),
   'DEF_METHANE%T_ref_microbe': pair('微生物参考温度（K）', 'Microbial reference temperature (K)'),
   'DEF_METHANE%dormancy_rate_active': pair('进入休眠速率', 'Dormancy entry rate'),
   'DEF_METHANE%dormancy_rate_revive': pair('休眠复苏速率', 'Dormancy revival rate'),
-  'DEF_METHANE%dormancy_threshold_methanogen_fS': pair('产甲烷菌休眠阈值：底物', 'Methanogen dormancy threshold: substrate'),
-  'DEF_METHANE%dormancy_threshold_methanogen_fO2': pair('产甲烷菌休眠阈值：氧气', 'Methanogen dormancy threshold: O2'),
-  'DEF_METHANE%dormancy_threshold_methanotroph_fS': pair('甲烷氧化菌休眠阈值：底物', 'Methanotroph dormancy threshold: substrate'),
-  'DEF_METHANE%dormancy_threshold_methanotroph_fO2': pair('甲烷氧化菌休眠阈值：氧气', 'Methanotroph dormancy threshold: O2'),
+  'DEF_METHANE%dormancy_threshold_methanogen_fS': pair(
+    '产甲烷菌休眠阈值：底物',
+    'Methanogen dormancy threshold: substrate',
+  ),
+  'DEF_METHANE%dormancy_threshold_methanogen_fO2': pair(
+    '产甲烷菌休眠阈值：氧气',
+    'Methanogen dormancy threshold: O2',
+  ),
+  'DEF_METHANE%dormancy_threshold_methanotroph_fS': pair(
+    '甲烷氧化菌休眠阈值：底物',
+    'Methanotroph dormancy threshold: substrate',
+  ),
+  'DEF_METHANE%dormancy_threshold_methanotroph_fO2': pair(
+    '甲烷氧化菌休眠阈值：氧气',
+    'Methanotroph dormancy threshold: O2',
+  ),
   'DEF_METHANE%vgc_max': pair('冒泡气体体积比例尺度', 'Ebullition gas-volume scale'),
   'DEF_METHANE%bubble_f': pair('气泡中甲烷含量', 'CH4 fraction in bubbles'),
-  'DEF_METHANE%nongrassporosratio': pair('非禾草与禾草根孔隙度比', 'Non-grass to grass root porosity ratio'),
+  'DEF_METHANE%nongrassporosratio': pair(
+    '非禾草与禾草根孔隙度比',
+    'Non-grass to grass root porosity ratio',
+  ),
   'DEF_METHANE%poros_tiller': pair('禾草分蘖孔隙度', 'Grass tiller porosity'),
-  'DEF_METHANE%unsat_aere_ratio': pair('非淹水通气组织孔隙度比例', 'Unsaturated aerenchyma porosity ratio'),
+  'DEF_METHANE%unsat_aere_ratio': pair(
+    '非淹水通气组织孔隙度比例',
+    'Unsaturated aerenchyma porosity ratio',
+  ),
   'DEF_METHANE%porosmin': pair('通气组织最小孔隙度', 'Minimum aerenchyma porosity'),
   'DEF_METHANE%aere_radius': pair('通气组织半径（m）', 'Aerenchyma radius (m)'),
   'DEF_METHANE%rob': pair('根倾斜度（根长/垂直深度）', 'Root obliquity (length/depth)'),
   'DEF_METHANE%tiller_C': pair('每个分蘖的碳（g C）', 'Carbon per tiller (g C)'),
-  'DEF_METHANE%aereoxid': pair('通气组织根际氧化比例', 'Rhizosphere oxidation fraction in aerenchyma'),
-  'DEF_METHANE%use_aereoxid_prog': pair('通气组织氧化比例按模型计算', 'Prognostic aerenchyma oxidation'),
+  'DEF_METHANE%aereoxid': pair(
+    '通气组织根际氧化比例',
+    'Rhizosphere oxidation fraction in aerenchyma',
+  ),
+  'DEF_METHANE%use_aereoxid_prog': pair(
+    '通气组织氧化比例按模型计算',
+    'Prognostic aerenchyma oxidation',
+  ),
   'DEF_METHANE%transpirationloss': pair('蒸腾带走甲烷', 'CH4 loss through transpiration'),
-  'DEF_METHANE%satpow': pair('饱和土壤溶质扩散的孔隙度指数', 'Porosity exponent for saturated diffusion'),
-  'DEF_METHANE%capthick': pair('地表积水视为不透气的最小厚度（mm）', 'Min impermeable ponding depth (mm)'),
+  'DEF_METHANE%satpow': pair(
+    '饱和土壤溶质扩散的孔隙度指数',
+    'Porosity exponent for saturated diffusion',
+  ),
+  'DEF_METHANE%capthick': pair(
+    '地表积水视为不透气的最小厚度（mm）',
+    'Min impermeable ponding depth (mm)',
+  ),
   'DEF_METHANE%lake_liqdiff_scale': pair('湖泊甲烷液相扩散缩放', 'Lake CH4 liquid-diffusion scale'),
-  'DEF_METHANE%lake_o2_liqdiff_scale': pair('湖泊氧气液相扩散缩放', 'Lake O2 liquid-diffusion scale'),
-  'DEF_METHANE%grnd_methane_cond_default': pair('地表甲烷导度缺省值', 'Default ground CH4 conductance'),
+  'DEF_METHANE%lake_o2_liqdiff_scale': pair(
+    '湖泊氧气液相扩散缩放',
+    'Lake O2 liquid-diffusion scale',
+  ),
+  'DEF_METHANE%grnd_methane_cond_default': pair(
+    '地表甲烷导度缺省值',
+    'Default ground CH4 conductance',
+  ),
   'DEF_METHANE%smp_crit': pair('临界土壤基质势（mm）', 'Critical soil matric potential (mm)'),
-  'DEF_METHANE%atm_methane': pair('大气甲烷混合比（mol/mol）', 'Atmospheric CH4 mixing ratio (mol/mol)'),
-  'DEF_METHANE%wtd_inflection': pair('湿地淹水 S 曲线拐点水位（m）', 'Wetland inundation inflection depth (m)'),
-  'DEF_METHANE%wtd_steepness': pair('湿地淹水 S 曲线宽度（m）', 'Wetland inundation S-curve width (m)'),
-  'DEF_METHANE%wtd_inflection_soil': pair('土壤淹水 S 曲线拐点水位（m）', 'Soil inundation inflection depth (m)'),
-  'DEF_METHANE%wtd_steepness_soil': pair('土壤淹水 S 曲线宽度（m）', 'Soil inundation S-curve width (m)'),
+  'DEF_METHANE%atm_methane': pair(
+    '大气甲烷混合比（mol/mol）',
+    'Atmospheric CH4 mixing ratio (mol/mol)',
+  ),
+  'DEF_METHANE%wtd_inflection': pair(
+    '湿地淹水 S 曲线拐点水位（m）',
+    'Wetland inundation inflection depth (m)',
+  ),
+  'DEF_METHANE%wtd_steepness': pair(
+    '湿地淹水 S 曲线宽度（m）',
+    'Wetland inundation S-curve width (m)',
+  ),
+  'DEF_METHANE%wtd_inflection_soil': pair(
+    '土壤淹水 S 曲线拐点水位（m）',
+    'Soil inundation inflection depth (m)',
+  ),
+  'DEF_METHANE%wtd_steepness_soil': pair(
+    '土壤淹水 S 曲线宽度（m）',
+    'Soil inundation S-curve width (m)',
+  ),
   'DEF_METHANE%use_routing_for_soil': pair('土壤淹水取河网洪泛', 'Soil inundation from routing'),
-  'DEF_METHANE%hybrid_soil_threshold': pair('混合方案土壤淹水阈值', 'Hybrid soil inundation threshold'),
-  'DEF_METHANE%enable_wetwat_finundated_override': pair('按湿地蓄水改写淹水比例', 'Override inundation from wetland storage'),
-  'DEF_METHANE%wetland_dry_unsat_branch': pair('湿地非饱和分支用干土柱', 'Dry column for wetland unsaturated branch'),
-  'DEF_METHANE%host_water_tolerance': pair('淹水与土壤水分歧容差（孔隙比例）', 'Host-water disagreement tolerance (pore fraction)'),
+  'DEF_METHANE%hybrid_soil_threshold': pair(
+    '混合方案土壤淹水阈值',
+    'Hybrid soil inundation threshold',
+  ),
+  'DEF_METHANE%enable_wetwat_finundated_override': pair(
+    '按湿地蓄水改写淹水比例',
+    'Override inundation from wetland storage',
+  ),
+  'DEF_METHANE%wetland_dry_unsat_branch': pair(
+    '湿地非饱和分支用干土柱',
+    'Dry column for wetland unsaturated branch',
+  ),
+  'DEF_METHANE%host_water_tolerance': pair(
+    '淹水与土壤水分歧容差（孔隙比例）',
+    'Host-water disagreement tolerance (pore fraction)',
+  ),
   'DEF_METHANE_hydrology%vdcf': pair('淹水参数 vdcf', 'Inundation parameter vdcf'),
   'DEF_METHANE_hydrology%slopebeta': pair('淹水坡度参数 β', 'Inundation slope parameter beta'),
   'DEF_METHANE_hydrology%slopemax': pair('淹水最大坡度', 'Inundation maximum slope'),
   'DEF_METHANE_hydrology%pc': pair('淹水临界比例', 'Inundation critical fraction'),
-  'DEF_METHANE%numerical_correction_fatal_threshold': pair('数值修正停机阈值', 'Numerical-correction abort threshold'),
+  'DEF_METHANE%numerical_correction_fatal_threshold': pair(
+    '数值修正停机阈值',
+    'Numerical-correction abort threshold',
+  ),
   'DEF_METHANE%lake_zero_depth_fatal': pair('湖深为零时停机', 'Abort on zero lake depth'),
   'DEF_METHANE%lake_restart_debug': pair('湖泊续跑诊断输出', 'Lake restart diagnostics'),
   'DEF_METHANE%lake_restart_debug_year': pair('湖泊续跑诊断：年', 'Lake restart diagnostics: year'),
-  'DEF_METHANE%lake_restart_debug_start_doy': pair('湖泊续跑诊断：起始日序', 'Lake restart diagnostics: start day'),
-  'DEF_METHANE%lake_restart_debug_end_doy': pair('湖泊续跑诊断：结束日序', 'Lake restart diagnostics: end day'),
-  'DEF_METHANE%lake_restart_debug_sec': pair('湖泊续跑诊断：秒', 'Lake restart diagnostics: second'),
+  'DEF_METHANE%lake_restart_debug_start_doy': pair(
+    '湖泊续跑诊断：起始日序',
+    'Lake restart diagnostics: start day',
+  ),
+  'DEF_METHANE%lake_restart_debug_end_doy': pair(
+    '湖泊续跑诊断：结束日序',
+    'Lake restart diagnostics: end day',
+  ),
+  'DEF_METHANE%lake_restart_debug_sec': pair(
+    '湖泊续跑诊断：秒',
+    'Lake restart diagnostics: second',
+  ),
   'DEF_SEDIMENT%nsed': pair('泥沙粒径组数', 'Number of sediment classes'),
   'DEF_SEDIMENT%grain_diameter': pair('颗粒直径（m）', 'Grain diameter (m)'),
   'DEF_SEDIMENT%grain_density': pair('颗粒密度（kg/m³）', 'Grain density (kg/m³)'),
@@ -470,8 +737,14 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_dir_runtime: pair('运行时数据目录（Runtime）', 'Runtime data directory (Runtime)'),
   DEF_dir_landdata: pair('地表数据目录', 'Land data directory'),
   DEF_dir_existing_srfdata: pair('已有地表数据目录', 'Existing surface-data directory'),
-  USE_srfdata_from_larger_region: pair('从更大区域的地表数据裁取', 'Crop surface data from a larger region'),
-  USE_srfdata_from_3D_gridded_data: pair('从三维网格地表数据生成', 'Build from 3-D gridded surface data'),
+  USE_srfdata_from_larger_region: pair(
+    '从更大区域的地表数据裁取',
+    'Crop surface data from a larger region',
+  ),
+  USE_srfdata_from_3D_gridded_data: pair(
+    '从三维网格地表数据生成',
+    'Build from 3-D gridded surface data',
+  ),
   USE_zip_for_aggregation: pair('聚合时读取压缩包', 'Read zipped data during aggregation'),
   DEF_USE_DOMINANT_PATCHTYPE: pair('每格只保留主导地类', 'Keep only the dominant patch type'),
   DEF_USE_SOILPAR_UPS_FIT: pair('土壤参数用升尺度拟合', 'Upscaled fit for soil parameters'),
@@ -499,18 +772,33 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_UnitCatchment_file: pair('单元流域河网文件', 'Unit-catchment river-network file'),
   DEF_UnitCatchment_regional: pair('裁剪区域单元流域', 'Regional unit-catchment subset'),
   DEF_GRIDBASED_ROUTING_MAX_DT: pair('河湖汇流最大子步长（秒）', 'Maximum routing sub-step (s)'),
-  DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT: pair('按动量方程限制汇流子步长', 'Limit routing sub-step by momentum'),
+  DEF_GRIDBASED_ROUTING_MOMENTUM_DT_LIMIT: pair(
+    '按动量方程限制汇流子步长',
+    'Limit routing sub-step by momentum',
+  ),
   DEF_GridRiverLake_FloodFeedback: pair('漫滩回馈陆面', 'Floodplain feedback to land'),
-  DEF_GridRiverLake_FloodplainStorageFix: pair('修正漫滩蓄量曲线', 'Corrected floodplain-storage curve'),
-  DEF_GridRiverLake_FloodInfiltMax: pair('漫滩最大入渗率（mm/天）', 'Maximum floodplain infiltration (mm/day)'),
+  DEF_GridRiverLake_FloodplainStorageFix: pair(
+    '修正漫滩蓄量曲线',
+    'Corrected floodplain-storage curve',
+  ),
+  DEF_GridRiverLake_FloodInfiltMax: pair(
+    '漫滩最大入渗率（mm/天）',
+    'Maximum floodplain infiltration (mm/day)',
+  ),
   DEF_CaMa_Namelist: pair('CaMa-Flood 配置文件', 'CaMa-Flood namelist'),
   DEF_CaMa_Restart_file: pair('CaMa-Flood 重启文件', 'CaMa-Flood restart file'),
   DEF_CaMa_FloodFeedback: pair('CaMa-Flood 漫滩回馈陆面', 'CaMa-Flood feedback to land'),
   DEF_CaMa_StrictDomain: pair('CaMa-Flood 严格限定模拟范围', 'CaMa-Flood strict domain'),
   DEF_Optimize_Baseflow: pair('预热期优化基流参数', 'Optimise baseflow during spin-up'),
   DEF_HISTORY_IN_VECTOR: pair('按网格单元向量输出历史', 'Write history as element vectors'),
-  DEF_HIST_grid_as_model_mesh: pair('历史输出网格取模型网格', 'History grid follows the model mesh'),
-  DEF_HIST_grid_as_forcing: pair('历史输出网格取强迫场网格', 'History grid follows the forcing grid'),
+  DEF_HIST_grid_as_model_mesh: pair(
+    '历史输出网格取模型网格',
+    'History grid follows the model mesh',
+  ),
+  DEF_HIST_grid_as_forcing: pair(
+    '历史输出网格取强迫场网格',
+    'History grid follows the forcing grid',
+  ),
   DEF_HIST_mode: pair('历史文件组织方式', 'History file layout'),
   DEF_HIST_WriteBack: pair('历史输出回写（后台写盘）', 'History write-back'),
   DEF_URBAN_ONLY: pair('只输出城市 patch', 'Output urban patches only'),
@@ -522,23 +810,59 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_DA_SM_SMAP: pair('同化 SMAP 亮温', 'Assimilate SMAP brightness temperature'),
   DEF_DA_SM_FY: pair('同化风云 3D 亮温', 'Assimilate FY-3D brightness temperature'),
   DEF_DA_SM_SYNOP: pair('同化站点土壤水分', 'Assimilate in-situ soil moisture'),
-  DEF_TRACER_ICE_SUPERSAT_SLOPE: pair('示踪剂：冰面过饱和斜率', 'Tracer: ice-supersaturation slope'),
-  DEF_TRACER_CG_RELHUM_MAX: pair('示踪剂：Craig–Gordon 相对湿度上限', 'Tracer: Craig–Gordon RH cap'),
+  DEF_TRACER_ICE_SUPERSAT_SLOPE: pair(
+    '示踪剂：冰面过饱和斜率',
+    'Tracer: ice-supersaturation slope',
+  ),
+  DEF_TRACER_CG_RELHUM_MAX: pair(
+    '示踪剂：Craig–Gordon 相对湿度上限',
+    'Tracer: Craig–Gordon RH cap',
+  ),
   DEF_TRACER_SUBL_SKIN_MM: pair('示踪剂：升华表层厚度（mm）', 'Tracer: sublimation skin (mm)'),
-  DEF_TRACER_CANOPY_EQUILIBRATION: pair('示踪剂：冠层水平衡交换比例', 'Tracer: canopy-water equilibration'),
-  DEF_TRACER_SNOWMELT_EQUILIBRATION: pair('示踪剂：融雪平衡交换比例', 'Tracer: snowmelt equilibration'),
-  DEF_TRACER_NSS_LEAF_WATER_PER_LAI: pair('示踪剂：非稳态叶片水量（每单位 LAI）', 'Tracer: non-steady leaf water per LAI'),
-  DEF_TRACER_NSS_LEAF_PATH_LENGTH: pair('示踪剂：非稳态叶片扩散路径长度', 'Tracer: non-steady leaf path length'),
-  DEF_TRACER_NSS_LEAF_RB: pair('示踪剂：非稳态叶片边界层阻抗', 'Tracer: non-steady leaf boundary resistance'),
-  DEF_TRACER_AQUIFER_MIXING_WATER_MM: pair('示踪剂：含水层混合水量（mm）', 'Tracer: aquifer mixing water (mm)'),
-  DEF_TRACER_BALANCE_ABORT_NBAD: pair('示踪剂：质量平衡超差停机次数', 'Tracer: balance-failure abort count'),
-  DEF_TRACER_RESID_ABORT_NBAD: pair('示踪剂：残差超差停机次数', 'Tracer: residual-failure abort count'),
-  DEF_TRACER_LULCC_ABORT_NBAD: pair('示踪剂：LULCC 迁移超差停机次数', 'Tracer: LULCC-failure abort count'),
+  DEF_TRACER_CANOPY_EQUILIBRATION: pair(
+    '示踪剂：冠层水平衡交换比例',
+    'Tracer: canopy-water equilibration',
+  ),
+  DEF_TRACER_SNOWMELT_EQUILIBRATION: pair(
+    '示踪剂：融雪平衡交换比例',
+    'Tracer: snowmelt equilibration',
+  ),
+  DEF_TRACER_NSS_LEAF_WATER_PER_LAI: pair(
+    '示踪剂：非稳态叶片水量（每单位 LAI）',
+    'Tracer: non-steady leaf water per LAI',
+  ),
+  DEF_TRACER_NSS_LEAF_PATH_LENGTH: pair(
+    '示踪剂：非稳态叶片扩散路径长度',
+    'Tracer: non-steady leaf path length',
+  ),
+  DEF_TRACER_NSS_LEAF_RB: pair(
+    '示踪剂：非稳态叶片边界层阻抗',
+    'Tracer: non-steady leaf boundary resistance',
+  ),
+  DEF_TRACER_AQUIFER_MIXING_WATER_MM: pair(
+    '示踪剂：含水层混合水量（mm）',
+    'Tracer: aquifer mixing water (mm)',
+  ),
+  DEF_TRACER_BALANCE_ABORT_NBAD: pair(
+    '示踪剂：质量平衡超差停机次数',
+    'Tracer: balance-failure abort count',
+  ),
+  DEF_TRACER_RESID_ABORT_NBAD: pair(
+    '示踪剂：残差超差停机次数',
+    'Tracer: residual-failure abort count',
+  ),
+  DEF_TRACER_LULCC_ABORT_NBAD: pair(
+    '示踪剂：LULCC 迁移超差停机次数',
+    'Tracer: LULCC-failure abort count',
+  ),
   DEF_TRACER_MRAT: pair('示踪剂：摩尔质量比', 'Tracer: molar-mass ratios'),
   DEF_TRACER_REF_RATIO: pair('示踪剂：参考同位素比', 'Tracer: reference ratios'),
   DEF_TRACER_INIT_DELTA: pair('示踪剂：初始 δ 值', 'Tracer: initial delta values'),
   DEF_TRACER_REACTIVE_DECAY_RATE: pair('示踪剂：反应衰减速率', 'Tracer: reactive decay rates'),
-  DEF_TRACER_SOIL_INIT_VARS: pair('示踪剂：土壤初始场变量名', 'Tracer: soil initial-state variables'),
+  DEF_TRACER_SOIL_INIT_VARS: pair(
+    '示踪剂：土壤初始场变量名',
+    'Tracer: soil initial-state variables',
+  ),
 
   DEF_DA_obsdir: pair('同化观测目录', 'Assimilation-observation directory'),
   DEF_DA_TWS: pair('同化陆地总储水量', 'Assimilate terrestrial water storage'),
@@ -565,21 +889,29 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
 });
 
 const EXPERT_ONLY_FIELDS = new Set([
-  'DEF_BALL_BERRY_GRADM', 'DEF_BALL_BERRY_BINTER',
-  'DEF_MEDLYN_G1', 'DEF_MEDLYN_G0', 'DEF_WUE_LAMBDA',
-  'DEF_OZONE_KO3', 'DEF_DS_TEMP_LAPSE_RATE',
-  'DEF_DS_LONGWAVE_LAPSE_RATE', 'DEF_DS_LONGWAVE_LIMIT', 'DEF_DS_SHORTWAVE_LIMIT',
+  'DEF_BALL_BERRY_GRADM',
+  'DEF_BALL_BERRY_BINTER',
+  'DEF_MEDLYN_G1',
+  'DEF_MEDLYN_G0',
+  'DEF_WUE_LAMBDA',
+  'DEF_OZONE_KO3',
+  'DEF_DS_TEMP_LAPSE_RATE',
+  'DEF_DS_LONGWAVE_LAPSE_RATE',
+  'DEF_DS_LONGWAVE_LIMIT',
+  'DEF_DS_SHORTWAVE_LIMIT',
   'DEF_DS_SHORTWAVE_SIMPLE_LIMIT',
 ]);
 
 /** 已人工命名且不是校准系数的字段是普通用户常用项。 */
 export function isCommonField(path: string) {
   if (path.startsWith('DEF_LC_')) return false;
-  return Object.hasOwn(LABELS, path)
-    && !path.startsWith('DEF_TUNING_')
-    && !path.startsWith('DEF_PH_')
-    && !path.startsWith('DEF_LC_')
-    && !EXPERT_ONLY_FIELDS.has(path);
+  return (
+    Object.hasOwn(LABELS, path) &&
+    !path.startsWith('DEF_TUNING_') &&
+    !path.startsWith('DEF_PH_') &&
+    !path.startsWith('DEF_LC_') &&
+    !EXPERT_ONLY_FIELDS.has(path)
+  );
 }
 
 const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Object.freeze({
@@ -655,8 +987,14 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
     wetwat: pair('湿地蓄水 / wetwat（任何内核可用）', 'Wetland storage / wetwat (any kernel)'),
     satellite: pair('卫星湿地面积 / GIEMS', 'Satellite wetland area / GIEMS'),
     routing: pair('河网洪泛比例（需要河湖汇流）', 'River-routing flood fraction (needs routing)'),
-    dynamic_wtd: pair('动态地下水位（自动打开动态湿地）', 'Dynamic water table (turns dynamic wetland on)'),
-    hybrid: pair('动态地下水位 + 河网洪泛（自动打开动态湿地）', 'Dynamic water table + routing (turns dynamic wetland on)'),
+    dynamic_wtd: pair(
+      '动态地下水位（自动打开动态湿地）',
+      'Dynamic water table (turns dynamic wetland on)',
+    ),
+    hybrid: pair(
+      '动态地下水位 + 河网洪泛（自动打开动态湿地）',
+      'Dynamic water table + routing (turns dynamic wetland on)',
+    ),
   },
   'DEF_METHANE%ch4_history_vars': {
     core: pair('核心变量', 'Core variables'),
@@ -673,7 +1011,10 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   DEF_precip_phase_discrimination_scheme: {
     I: pair('湿球温度经验方案（Wang / Behrangi）', 'Wet-bulb empirical scheme (Wang / Behrangi)'),
     II: pair('气温线性阈值方案', 'Air-temperature linear-threshold scheme'),
-    III: pair('湿空气能量平衡方案（Harder–Pomeroy）', 'Psychrometric energy-balance scheme (Harder–Pomeroy)'),
+    III: pair(
+      '湿空气能量平衡方案（Harder–Pomeroy）',
+      'Psychrometric energy-balance scheme (Harder–Pomeroy)',
+    ),
   },
   DEF_SSP: {
     off: pair('关闭（保持 2022 年末浓度）', 'Off (hold the late-2022 concentration)'),
@@ -684,7 +1025,10 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   },
   DEF_IRRIGATION_ALLOCATION: {
     1: pair('不限供水，完全满足灌溉需求', 'Unlimited supply; meet the full demand'),
-    2: pair('依次使用本地储水、河库和地下水', 'Use local storage, river/reservoir, then groundwater'),
+    2: pair(
+      '依次使用本地储水、河库和地下水',
+      'Use local storage, river/reservoir, then groundwater',
+    ),
     3: pair('按比例分配地表水与地下水', 'Split demand between surface water and groundwater'),
   },
   DEF_RSTFAC: {
@@ -718,30 +1062,40 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   },
   DEF_WRST_FREQ: {
     none: pair('不写重启文件', 'Do not write restart files'),
-    TIMESTEP: pair('每个时间步', 'Every time step'), HOURLY: pair('每小时', 'Hourly'),
-    DAILY: pair('每天', 'Daily'), MONTHLY: pair('每月', 'Monthly'), YEARLY: pair('每年', 'Yearly'),
+    TIMESTEP: pair('每个时间步', 'Every time step'),
+    HOURLY: pair('每小时', 'Hourly'),
+    DAILY: pair('每天', 'Daily'),
+    MONTHLY: pair('每月', 'Monthly'),
+    YEARLY: pair('每年', 'Yearly'),
   },
   DEF_HIST_FREQ: {
     none: pair('不写历史结果', 'Do not write history output'),
-    TIMESTEP: pair('每个时间步', 'Every time step'), HOURLY: pair('每小时', 'Hourly'),
-    DAILY: pair('每天', 'Daily'), MONTHLY: pair('每月', 'Monthly'), YEARLY: pair('每年', 'Yearly'),
+    TIMESTEP: pair('每个时间步', 'Every time step'),
+    HOURLY: pair('每小时', 'Hourly'),
+    DAILY: pair('每天', 'Daily'),
+    MONTHLY: pair('每月', 'Monthly'),
+    YEARLY: pair('每年', 'Yearly'),
   },
   DEF_HIST_groupby: {
-    DAY: pair('每天一个文件', 'One file per day'), MONTH: pair('每月一个文件', 'One file per month'),
+    DAY: pair('每天一个文件', 'One file per day'),
+    MONTH: pair('每月一个文件', 'One file per month'),
     YEAR: pair('每年一个文件', 'One file per year'),
   },
   DEF_Forcing_Interp_Method: {
-    arealweight: pair('面积权重', 'Area-weighted'), bilinear: pair('双线性插值', 'Bilinear'),
+    arealweight: pair('面积权重', 'Area-weighted'),
+    bilinear: pair('双线性插值', 'Bilinear'),
   },
   DEF_TRACER_KINETIC_SCHEME: {
     CAPPA2003: pair('Cappa 等（2003）', 'Cappa et al. (2003)'),
     MERLIVAT1978: pair('Merlivat（1978）', 'Merlivat (1978)'),
   },
   DEF_TRACER_OPEN_WATER_KINETIC: {
-    EXPONENT: pair('指数形式', 'Exponent form'), MJ79: pair('Merlivat–Jouzel（1979）简写', 'Merlivat–Jouzel (1979), short form'),
+    EXPONENT: pair('指数形式', 'Exponent form'),
+    MJ79: pair('Merlivat–Jouzel（1979）简写', 'Merlivat–Jouzel (1979), short form'),
   },
   DEF_TRACER_SOIL_KINETIC: {
-    EXPONENT: pair('指数形式', 'Exponent form'), RESISTANCE: pair('阻力形式', 'Resistance form'),
+    EXPONENT: pair('指数形式', 'Exponent form'),
+    RESISTANCE: pair('阻力形式', 'Resistance form'),
   },
   DEF_USE_Campbell_SOIL_MODEL: {
     '.true.': pair('Campbell（1974）', 'Campbell (1974)'),
@@ -782,7 +1136,10 @@ export function fieldOptions(path: string) {
 
 /** 参数目录条目的界面名。PFT/PC 参数的目录名是 `colm-case::pft` 里写好的正式名字；其余条目的
  *  目录名只是把 CoLM 键拆成单词，界面名一律取 [`fieldLabel`]。 */
-export function catalogLabel(item: {label_en?:string;label_zh?:string;scope?:string;raw_key?:string;name?:string}, lang = 'zh') {
+export function catalogLabel(
+  item: { label_en?: string; label_zh?: string; scope?: string; raw_key?: string; name?: string },
+  lang = 'zh',
+) {
   const own = lang === 'en' ? item?.label_en : item?.label_zh;
   const pft = item?.scope === 'pft-type' || item?.scope === 'pc-pft-component';
   if (pft && own) return own;

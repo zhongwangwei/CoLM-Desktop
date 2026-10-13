@@ -10,30 +10,33 @@
     "lint": "eslint src",
     "test": "node ../scripts/check-gui.mjs --self-test && node ../scripts/test-react.mjs",
     "test:legacy": "node ../scripts/test-gui.mjs",
-    "contract": "python3 ../scripts/generate-gui-contract.py"
+    "contract": "python3 ../scripts/generate-gui-contract.py",
+    "format": "prettier --write src",
+    "format:check": "prettier --check src"
   },
   "dependencies": {
-    "react": "19.3.0",
-    "react-dom": "19.3.0",
-    "uplot": "1.6.32",
-    "radix-ui": "1.8.0",
     "class-variance-authority": "0.7.1",
     "clsx": "2.1.1",
-    "tailwind-merge": "3.7.0"
+    "radix-ui": "1.8.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tailwind-merge": "3.7.0",
+    "uplot": "1.6.32"
   },
   "devDependencies": {
-    "vite": "8.3.4",
-    "@vitejs/plugin-react": "6.1.2",
-    "typescript": "6.0.3",
+    "@eslint/js": "10.0.1",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/node": "26.6.5",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
-    "@types/node": "26.6.5",
-    "tailwindcss": "4.3.3",
-    "@tailwindcss/vite": "4.3.3",
+    "@vitejs/plugin-react": "6.1.2",
     "eslint": "10.12.0",
-    "@eslint/js": "10.0.1",
-    "typescript-eslint": "8.71.1",
     "eslint-plugin-react-hooks": "7.1.1",
-    "tsx": "4.23.15"
+    "prettier": "3.9.10",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.23.15",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.71.1",
+    "vite": "8.3.4"
   }
 }

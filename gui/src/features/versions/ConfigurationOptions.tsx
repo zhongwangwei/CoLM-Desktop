@@ -1,109 +1,1085 @@
-import {useEffect,useRef,useState} from 'react';
-import {Advanced,Button,Card,Field,Input,Notice,Select} from '../../components/ui';
-import {useApp} from '../../lib/app-state';
-import {invokeJson} from '../../lib/ipc';
-import {usePageContract,type UiField,type UiAction} from '../../lib/guide';
-import {fieldLabel,optionLabel} from '../../lib/param-presentation';
-import type {Overlay} from '../../lib/types';
-import {modelSettingGroups,modelSettingGroup,modelSettingValue} from '../cases/model-settings';
-import type {Descriptor,ModelField} from './model';
-import {PFT} from './scope-labels';
-import {tracerFamilies,tracerFamilyState,appendTracerFamily,setStomatalScheme,groupedField,unquote,setModelOption,resetModelOption,setScopedOption,resetScopedOption,setProcessOption,resetProcessOption,tracerTypes,tracerLabels,tracerColumns,tracerRows,setTracerRows,type ConfigurationSource,type ConfigurationResult,type FamilyContext} from './configuration-options';
-type Props={excludeKeys?:readonly string[];kernelMacros?:FamilyContext['kernelMacros'];caseScope?:FamilyContext['caseScope'];groupPrefix?:string;caseValues?:Record<string,string>|null;source:ConfigurationSource;overlay:Overlay;fields:ModelField[];catalog:Descriptor[];caseDir?:string|null;kernelDir?:string|null;disabled?:boolean;onChange?:(overlay:Overlay)=>void;onImportProcess?:(relativePath:string)=>Promise<void>};
-const empty:ConfigurationResult={fields:[],process_files:[],pft_parameters:[],warnings:[],context_complete:false};
-export default function ConfigurationOptions({excludeKeys=[],kernelMacros,caseScope,groupPrefix='configuration',caseValues=null,source,overlay,fields,catalog,caseDir=null,kernelDir=null,disabled=false,onChange,onImportProcess}:Props){
- const {state}=useApp(),lang=state.language,en=lang==='en',t=(zh:string,english:string)=>en?english:zh;
- const [result,setResult]=useState(empty),[error,setError]=useState(''),[loaded,setLoaded]=useState(''),[opened,setOpened]=useState<Record<string,boolean>>({}),[inputs,setInputs]=useState<Record<string,string>>({}),[pftKind,setPftKind]=useState('pft'),[pftIndex,setPftIndex]=useState(''),[processName,setProcessName]=useState(''),[importing,setImporting]=useState(false),[tracerInput,setTracerInput]=useState<{key:string;rows:ReturnType<typeof tracerRows>}|null>(null);
- const pftOpen=opened.pft??false;
- const selection=pftOpen&&/^\d+$/.test(pftIndex)&&Number.isInteger(Number(pftIndex))&&Number(pftIndex)>=0&&Number(pftIndex)<=78?{kind:pftKind,index:Number(pftIndex)}:null;
- const request=JSON.stringify({source:source.kind==='draft'?{...source,overlay}:source,caseDir,kernelDir,pftSelection:selection,caseValues});
- const sourceKey=JSON.stringify(source.kind==='draft'?{kind:source.kind,id:source.id,generation:source.generation}:source);
- const parentValues=Object.fromEntries(Object.entries({ecology:'DEF_USE_BGC',tracer:'DEF_USE_TRACER',river:'DEF_USE_GridRiverLakeFlow',urban:'DEF_URBAN_RUN',subgrid:'DEF_USE_LULCC'}).map(([id,name])=>[id,modelSettingValue(overlay,name)?.trim().toLowerCase()==='.true.']));
- const parentSignature=JSON.stringify({sourceKey,parentValues});
- const [seenParents,setSeenParents]=useState(parentSignature);
- const rising:string[]=[];
- if(seenParents!==parentSignature){
-  const previous=JSON.parse(seenParents) as {sourceKey:string;parentValues:Record<string,boolean>};
-  if(previous.sourceKey===sourceKey)for(const [id,enabled] of Object.entries(parentValues))if(enabled&&!previous.parentValues[id])rising.push(id);
-  if(rising.length)setOpened(before=>({...before,...Object.fromEntries(rising.map(id=>[`${sourceKey}:${id}`,true]))}));
-  setSeenParents(parentSignature);
- }
- const tracers=tracerInput?.key===sourceKey?tracerInput.rows:null;
- const setTracers=(rows:ReturnType<typeof tracerRows>|null)=>setTracerInput(rows?{key:sourceKey,rows}:null);
- const current=useRef(request);current.current=request;
- useEffect(()=>{let live=true;invokeJson<ConfigurationResult>('model_configuration',JSON.parse(request)).then(data=>{if(live){setResult(data);setLoaded(request);setError('');}}).catch(e=>{if(live){setLoaded('');setError(String(e));}});return()=>{live=false;};},[request]);
- const ready=loaded===request,locked=disabled||source.kind!=='draft'||!onChange||importing;
- const values=ready?result:empty;
- const controls:UiField[]=[],actions:UiAction[]=[];
- function write(change:()=>Overlay){if(locked||current.current!==request)throw new Error('当前配置不可修改 / Configuration is locked or stale');try{const next=change();onChange!(next);setError('');}catch(e){setError(String(e));throw e;}}
- function uiWrite(change:()=>Overlay){try{write(change);}catch{/* Keep draft and invalid input for correction. */}}
- function open(id:string){return rising.includes(id)||Boolean(opened[`${sourceKey}:${id}`]??parentValues[id]);}
- function local(id:string,value:string){setInputs(previous=>({...previous,[`${sourceKey}:${id}`]:value}));}
- function editor(id:string,label:string,value:string,kind:string,options:string[],cannot:boolean,change:(v:string)=>void,rawKey=id.replace(/^configuration-/,'')){
-  const choices=kind==='list'?[]:kind.toLowerCase()==='logical'?['.true.','.false.']:options;
-  const cardChoice=['DEF_METHANE%inundation_mode','DEF_TRACER_USE_FRACTIONATION','DEF_Runoff_SCHEME','DEF_URBAN_type_scheme'].includes(rawKey)&&choices.length>0&&choices.length<=5;
-  const displayValue=kind==='list'?value:unquote(value),shown=inputs[`${sourceKey}:${id}`]??displayValue,select=choices.length>0;
-  const setter=(v:string)=>{if(cannot||locked)throw new Error('此字段不可编辑 / Field is locked');if(choices.length&&!choices.some(option=>unquote(option)===v))throw new Error('请选择可用值 / Choose an available value');local(id,v);change(v);setInputs(previous=>{const next={...previous};delete next[`${sourceKey}:${id}`];return next;});};
-  controls.push({id,label,value:shown,type:select?'choice':'text',options:choices.map(v=>({value:unquote(v),label:optionLabel(rawKey,v,lang)})),disabled:cannot||locked,set:setter});
-  return <Field key={id} label={label}>{cardChoice?<div className="simulation-choice-grid">{choices.map(v=><Button key={v} className="simulation-choice-card" variant={shown===unquote(v)?'primary':'secondary'} aria-pressed={shown===unquote(v)} disabled={cannot||locked} onClick={()=>{try{setter(unquote(v));}catch{/* Preserve invalid input and draft. */}}}>{optionLabel(rawKey,v,lang)}</Button>)}{!shown&&<p className="muted">{t('未明确选择','Not explicitly selected')}</p>}</div>:select?<Select disabled={cannot||locked} value={shown} onChange={e=>{try{setter(e.target.value);}catch{/* Error remains visible. */}}}><option value="">{t('未明确设置','Not explicitly set')}</option>{!choices.some(v=>unquote(v)===shown)&&shown&&<option value={shown}>{shown}</option>}{choices.map(v=><option key={v} value={unquote(v)}>{optionLabel(rawKey,v,lang)}</option>)}</Select>:<Input disabled={cannot||locked} value={shown} onChange={e=>local(id,e.target.value)} onBlur={e=>{if(!cannot&&!locked&&e.target.value!==displayValue)try{setter(e.target.value);}catch{/* Error remains visible. */}}}/>}</Field>;
- }
- function row(field:ModelField){
-  const context=values.fields.find(f=>f.name===field.name),value=modelSettingValue(overlay,field.name)??context?.configured_value??'';
-  const inactive=context?.mode==='disabled',cannot=!ready||!!inactive,id=`configuration-${field.name}`;
-  actions.push({id:`${id}-reset`,label:`${fieldLabel(field.name,lang)} · ${t('移除覆盖','Remove override')}`,kind:'click',enabled:!locked&&value!=='',visible:value!=='',run:()=>write(()=>resetModelOption(overlay,field.name))});
-  return <div className="model-setting-row" key={field.name}>{editor(id,fieldLabel(field.name,lang),value,field.kind,context?.allowed_values.length?context.allowed_values:field.values,cannot,v=>write(()=>setModelOption(overlay,fields,field.name,v)))}<small>{field.name} · {(context?.pending?t('适用性待核对','Applicability pending'):context?.reason)||t('适用性待核对','Applicability pending')} · {t('目录参考','Catalog reference')}: {field.default||'—'}</small>{value!==''&&<Button disabled={locked} onClick={()=>uiWrite(()=>resetModelOption(overlay,field.name))}>{t('移除覆盖','Remove override')}</Button>}</div>;
- }
- const stomatalFields=['DEF_USE_MEDLYNST','DEF_USE_WUEST'];
- const showStomatal=stomatalFields.every(name=>fields.some(f=>f.name===name&&!f.derived));
- function stomatal(){
-  if(!showStomatal)return null;
-  const flags=stomatalFields.map(name=>modelSettingValue(overlay,name)?.trim().toLowerCase());
-  const selected=flags.every(v=>v==='.true.'||v==='.false.')?(flags[0]==='.true.'&&flags[1]==='.true.'?'':flags[0]==='.true.'?'MEDLYN':flags[1]==='.true.'?'WUE':'BALL_BERRY'):'';
-  const unavailable=!ready||stomatalFields.some(name=>values.fields.find(f=>f.name===name)?.mode==='disabled');
-  const options=[['BALL_BERRY','Ball–Berry'],['MEDLYN','Medlyn'],['WUE',t('水分利用效率 WUE','Water-use efficiency WUE')]];
-  const set=(value:string)=>{if(unavailable)throw new Error('Stomatal scheme unavailable');write(()=>setStomatalScheme(overlay,fields,value));};
-  controls.push({id:'configuration-stomatal-scheme',label:t('气孔导度方案','Stomatal scheme'),type:'choice',value:selected,options:options.map(([value,label])=>({value,label})),disabled:locked||unavailable,set});
-  const reset=()=>write(()=>stomatalFields.reduce((next,name)=>resetModelOption(next,name),overlay));
-  actions.push({id:'configuration-stomatal-reset',label:t('移除气孔方案覆盖','Remove stomatal overrides'),kind:'click',enabled:!locked,run:reset});
-  return <div className="model-setting-row"><h3>{t('气孔导度方案','Stomatal scheme')}</h3><div className="simulation-choice-grid">{options.map(([value,label])=><Button key={value} className="simulation-choice-card" aria-pressed={selected===value} variant={selected===value?'primary':'secondary'} disabled={locked||unavailable} onClick={()=>{try{set(value);}catch{/* Preserve draft. */}}}>{label}</Button>)}</div>{!selected&&<p className="muted">{t('未明确选择或已有开关冲突，请核对。','Not explicitly selected, or existing switches conflict; check the configuration.')}</p>}<Button disabled={locked} onClick={()=>{try{reset();}catch{/* Preserve draft. */}}}>{t('移除覆盖','Remove override')}</Button></div>;
- }
- const orderedGroups=['subgrid','soil','water','river','ecology','urban','tracer','assimilation','other'].map(id=>modelSettingGroups.find(g=>g[0]===id)!);
- const groups=orderedGroups.map(([id,zh,english])=>{const rows=fields.filter(field=>!excludeKeys.includes(field.name)&&groupedField(field,catalog)).filter(f=>modelSettingGroup(f)===id&&!(showStomatal&&stomatalFields.includes(f.name)));actions.push({id:`${groupPrefix}-group-${id}`,label:t(zh,english),kind:'click',enabled:!disabled,run:()=>{if(disabled)throw new Error('Configuration is locked');setOpened(previous=>({...previous,[`${sourceKey}:${id}`]:!open(id)}));}});return <Advanced key={id} title={`${t(zh,english)} · ${rows.length}`} open={open(id)} onOpenChange={value=>{if(!disabled)setOpened(previous=>({...previous,[`${sourceKey}:${id}`]:value}));}}>{id==='ecology'&&open(id)&&stomatal()}{open(id)&&rows.map(row)}</Advanced>;});
- let storedTracers:ReturnType<typeof tracerRows>,tracerError='';
- try{storedTracers=tracerRows(overlay);}catch(e){storedTracers=tracerRows(resetModelOption(overlay,'DEF_TRACER_PARAM_FILES'));tracerError=String(e);}
- const tracerOpen=open('tracer'),table=tracers??storedTracers,tracerFields=fields.filter(f=>f.name.startsWith('DEF_TRACER_'));
- const tracerTooLarge=Number(modelSettingValue(overlay,'DEF_TRACER_NUM')??'0')>100;
- const tracerReady=!tracerTooLarge&&!locked&&ready&&tracerFields.length>0&&values.fields.find(f=>f.name==='DEF_TRACER_NAMES')?.mode!=='disabled';
- const familyContext:FamilyContext={kernelMacros:kernelMacros??state.kernels?.find(item=>item.dir===kernelDir)?.macros??null,caseScope};
- const familyVisible=tracerOpen&&modelSettingValue(overlay,'DEF_USE_TRACER')?.trim().toLowerCase()==='.true.';
- const familyCards=familyVisible&&<Card title={t('先选择要追踪的物质','Choose tracer families')} description={t('只预填名称和类型，保留已有与自定义条目。请核对并完善数值列、导入及关联过程文件，再应用定义；此操作不启动计算。','Only names and types are prefilled; existing and custom rows are retained. Complete numeric metadata and import/link process files before applying. No simulation starts here.')}><div className="simulation-choice-grid">{tracerFamilies.map(family=>{
-  const availability=tracerFamilyState(overlay,family.id,familyContext),next=appendTracerFamily(table,family.id),already=next.length===table.length,blocked=!tracerReady||availability.status==='blocked'||already;
-  const add=()=>{if(!familyVisible||blocked||current.current!==request)throw new Error('Family is unavailable or already present');setTracers(next);};
-  actions.push({id:`configuration-family-${family.id}`,label:t(family.zh,family.en),kind:'click',enabled:!blocked,run:add});
-  return <Button key={family.id} className="simulation-choice-card" variant={already?'primary':'secondary'} aria-pressed={already} disabled={blocked} onClick={add}><strong>{t(family.zh,family.en)}</strong><span>{family.rows.map(([name])=>name).join(' / ')}</span><small>{already?t('已在定义表中','Already in the table'):availability.status==='blocked'?t('先解决依赖冲突','Resolve prerequisites first'):availability.status==='pending'?t('可以预填；适用性待核对','Can prefill; applicability pending'):t('预填到定义表','Prefill definition table')}</small>{availability.reasons.map(([zh,english])=><small key={zh}>{t(zh,english)}</small>)}</Button>;
- })}</div><p className="muted">{t('预填后尚未保存；可在应用前用“移除末行”撤回新增行。关闭示踪开关不会删除已有定义。','Prefilled rows are not saved. Use Remove last row before applying to undo added rows. Turning tracers off preserves saved definitions.')}</p></Card>;
- const tracerTable=tracerOpen&&<Card title={t('示踪物定义（每行对应同一个示踪物）','Tracer definitions (aligned rows)')} description={t('名称、类型和可选参数列按行对应；留空整列保留内核解释，不自动填目录默认值。过程文件须先导入到当前版本。','Names, types and optional columns are aligned by row. Empty columns are not filled with catalog defaults. Import process files into this version first.')}>{tracerError&&<Notice tone="error">{tracerError} · {modelSettingValue(overlay,'DEF_TRACER_PARAM_FILES')}</Notice>}{tracerTooLarge&&<Notice tone="warning">{t('超过100个示踪物的定义仅展示前100项，请通过原始字段编辑；此表不会覆盖完整定义。','Over 100 tracers: only the first 100 are shown. Edit the raw fields; this table cannot replace the full definition.')}</Notice>}<div className="table-scroll"><table><thead><tr>{tracerColumns.map(c=><th key={c}>{t(...tracerLabels[c])}</th>)}</tr></thead><tbody>{table.map((row,index)=><tr key={index}>{tracerColumns.map(column=>{const id=`configuration-tracer-${index}-${column}`,set=(value:string)=>{if(!tracerReady)throw new Error('Tracer editor is locked');setTracers(table.map((r,i)=>i===index?{...r,[column]:value}:r));};controls.push({id,label:`${index+1} ${t(...tracerLabels[column])}`,value:row[column],type:column==='TYPES'?'choice':'text',options:column==='TYPES'?tracerTypes.map(([value,zh,english])=>({value,label:t(zh,english)})):undefined,disabled:!tracerReady,set});return <td key={column}>{column==='TYPES'?<Select disabled={!tracerReady} aria-label={`${index+1} ${t(...tracerLabels[column])}`} value={row[column]} onChange={e=>set(e.target.value)}><option value="">{t('选择类型','Choose type')}</option>{row[column]&&!tracerTypes.some(([kind])=>kind===row[column])&&<option value={row[column]}>{row[column]} · {t('当前源码类型待核对','Source type pending')}</option>}{tracerTypes.map(([value,zh,english])=><option value={value} key={value}>{t(zh,english)}</option>)}</Select>:<Input disabled={!tracerReady} aria-label={`${index+1} ${column}`} value={row[column]} onChange={e=>set(e.target.value)}/>}</td>;})}</tr>)}</tbody></table></div><div className="button-row"><Button disabled={!tracerReady} onClick={()=>setTracers([...table,Object.fromEntries(tracerColumns.map(c=>[c,''])) as typeof table[number]])}>{t('增加示踪物','Add tracer')}</Button><Button disabled={!tracerReady||!table.length} onClick={()=>setTracers(table.slice(0,-1))}>{t('移除末行','Remove last row')}</Button><Button disabled={!tracerReady||tracers===null} onClick={()=>{try{write(()=>setTracerRows(overlay,fields,table));setTracers(null);}catch{/* Preserve incomplete table. */}}}>{t('应用示踪物定义','Apply tracer definitions')}</Button></div><p>{t('示踪物数量','Tracer count')} (DEF_TRACER_NUM): {table.length}</p><p>{t('尚未应用的表格修改不会写入草稿。','Table changes are not written to the draft until applied.')}</p></Card>;
- actions.push({id:'configuration-tracers-add',label:t('增加示踪物','Add tracer'),kind:'click',visible:tracerOpen,enabled:tracerReady,run:()=>{if(!tracerReady||!tracerOpen)throw new Error('Tracer editor is locked');setTracers([...table,Object.fromEntries(tracerColumns.map(c=>[c,''])) as typeof table[number]]);}},{id:'configuration-tracers-remove',label:t('移除末行','Remove last row'),kind:'click',visible:tracerOpen,enabled:tracerReady&&table.length>0,run:()=>{if(!tracerReady||!tracerOpen||!table.length)throw new Error('Tracer editor is locked');setTracers(table.slice(0,-1));}},{id:'configuration-tracers-apply',label:t('应用示踪物定义','Apply tracer definitions'),kind:'click',visible:tracerOpen,enabled:tracerOpen&&tracerReady&&tracers!==null,run:()=>{if(!tracerOpen||!tracerReady||tracers===null)throw new Error('Tracer table is unavailable');write(()=>setTracerRows(overlay,fields,table));setTracers(null);}});
- const assets=values.process_files.map(asset=>{
-  const isOpen=opened[`${sourceKey}:${asset.file}`]??tracerOpen;
-  actions.push({id:`configuration-asset-${asset.file}`,label:asset.file,kind:'click',enabled:!disabled,run:()=>{if(disabled)throw new Error('Configuration is locked');setOpened(previous=>({...previous,[`${sourceKey}:${asset.file}`]:!isOpen}));}});
-  return <Advanced key={asset.file} title={`${asset.title} · ${asset.file} · ${asset.active_methane_asset===true?t('当前 CH4','Current CH4'):asset.active_methane_asset===false?t('CH4 未采用','Not used by CH4'):t('是否被 CH4 采用待核对','CH4 usage pending')}`} open={isOpen} onOpenChange={value=>{if(!disabled)setOpened(previous=>({...previous,[`${sourceKey}:${asset.file}`]:value}));}}>{isOpen&&asset.entries.map(entry=>{
-   const descriptor=catalog.find(d=>d.id===entry.descriptor_id&&d.storage==='process-parameter-file'),id=`configuration-process-${asset.file}-${entry.path}`,cannot=!ready||!asset.verified||!entry.editable||!descriptor;
-   const reset=()=>write(()=>resetProcessOption(overlay,descriptor!,asset.file,entry.asset_value,values.fields,entry.kind,asset.active_methane_asset));
-   actions.push({id:`${id}-reset`,label:`${fieldLabel(entry.path,lang)} · ${t('恢复资产原值','Restore asset value')}`,kind:'click',enabled:!locked&&!cannot,run:()=>{if(cannot)throw new Error('Process parameter is unavailable');reset();}});
-   return <div className="model-setting-row" key={entry.path}>{editor(id,fieldLabel(entry.path,lang),entry.unset?'':entry.value,entry.kind,entry.options,cannot,v=>write(()=>setProcessOption(overlay,descriptor!,v,asset.file,values.fields,entry.kind,asset.active_methane_asset)),entry.path)}<small>{entry.path} · {entry.pending?t('适用性待核对','Applicability pending'):t('已核对目录条件','Catalog conditions checked')} · {entry.doc} · {t('目录参考','Catalog reference')}: {entry.default||'—'}</small><Button disabled={locked||cannot} onClick={()=>{try{reset();}catch{/* Preserve draft. */}}}>{t('恢复资产原值','Restore asset value')}</Button></div>;
-  })}</Advanced>;
- });
- const indexed=(pftOpen?values.pft_parameters:[]).map(entry=>{
-  const descriptor=catalog.find(d=>d.id===entry.parameter_id&&d.storage===(pftKind==='pft'?'pft-override':'pc-pft-override')),id=`configuration-${pftKind}-${pftIndex}-${entry.name}`,cannot=!ready||entry.mode!=='editable'||!descriptor||!selection;
-  const reset=()=>write(()=>resetScopedOption(overlay,descriptor!,Number(pftIndex),''));
-  actions.push({id:`${id}-reset`,label:`${entry.name} · ${t('移除覆盖','Remove override')}`,kind:'click',enabled:!locked&&!!descriptor&&!!selection,run:()=>{if(!descriptor||!selection)throw new Error('PFT parameter is unavailable');reset();}});
-  return <div className="model-setting-row" key={id}>{editor(id,en?entry.label_en:entry.label_zh,entry.configured_value??'',entry.kind,entry.allowed_values,cannot,v=>write(()=>setScopedOption(overlay,descriptor!,v,Number(pftIndex),'')),entry.name)}<small>{entry.scope_label} · {entry.unit??'—'} · {entry.reason||t('待按冻结源码核对','Pending frozen-source verification')} · {t('目录参考','Catalog reference')}: {entry.default??'—'}</small><Button disabled={locked||!descriptor||!selection} onClick={()=>{try{reset();}catch{/* Preserve draft. */}}}>{t('移除覆盖','Remove override')}</Button></div>;
- });
- async function importProcess(){if(locked||!onImportProcess||!processName.trim())throw new Error('Process import is unavailable');setImporting(true);try{await onImportProcess(processName.trim());setError('');}catch(e){setError(String(e));throw e;}finally{setImporting(false);}}
- if(onImportProcess){controls.push({id:'configuration-process-file',label:t('版本中的相对文件名','Relative filename in version'),type:'text',value:processName,disabled:locked,set:value=>{if(locked)throw new Error('Configuration is locked');setProcessName(value);}});actions.push({id:'configuration-process-import',label:t('选择并导入过程文件','Choose and import process file'),kind:'commit',enabled:!locked&&!!processName.trim(),run:importProcess});}
- actions.push({id:'configuration-pft-toggle',label:t('PFT / PC 索引参数','Indexed PFT / PC parameters'),kind:'click',enabled:!disabled,run:()=>{if(disabled)throw new Error('Configuration is locked');setOpened(previous=>({...previous,pft:!pftOpen}));}});
- if(pftOpen)controls.push({id:'configuration-pft-kind',label:'PFT / PC',type:'choice',value:pftKind,disabled,options:[{value:'pft',label:'PFT'},{value:'pc-pft',label:'PC PFT'}],set:value=>{if(disabled||!['pft','pc-pft'].includes(value))throw new Error('Invalid PFT scope');setPftKind(value);setInputs({});}},{id:'configuration-pft-index',label:t('PFT 索引（0–78）','PFT index (0–78)'),type:'choice',value:pftIndex,disabled,options:PFT.map(([index,zh,english])=>({value:String(index),label:`${index} · ${t(zh,english)}`})),set:value=>{if(disabled||value!==''&&!PFT.some(([index])=>String(index)===value))throw new Error('Invalid PFT index');setPftIndex(value);setInputs({});}});
- usePageContract({title:t('完整模型配置','Complete model configuration'),step:'configuration-options',fields:controls,actions,status:error||(!ready?'loading':'pending_source_verification'),details:{context_complete:values.context_complete,warnings:values.warnings}});
- return <div className="configuration-options"><Notice>{t('配置值与目录默认值分别展示；未确定的条件保留并标为待核对。关闭父开关不会删除子项覆盖。','Configured values and catalog defaults are shown separately. Unknown conditions remain visible and pending. Turning off a parent preserves child overrides.')}</Notice>{error&&<Notice tone="error">{error}</Notice>}{!ready&&<p>{t('正在查询配置条件…','Checking configuration conditions…')}</p>}{groups}{familyCards}{tracerTable}<Card title={t('示踪过程文件','Tracer process files')}>{ready&&!overlay.process_files.length&&<p className="muted">{t('当前版本尚未导入过程参数文件。','This version has no imported process parameter files.')}</p>}{overlay.process_files.map(asset=><p key={asset.relative_path}>{asset.relative_path} · <code>{asset.sha256}</code></p>)}{assets}{onImportProcess&&<div className="form-grid"><Field label={t('版本中的相对文件名','Relative filename in version')}><Input disabled={locked} value={processName} placeholder="CH4.nml" onChange={e=>setProcessName(e.target.value)}/></Field><Button disabled={locked||!processName.trim()} onClick={()=>{void importProcess().catch(()=>{});}}>{t('选择并导入过程文件','Choose and import process file')}</Button></div>}</Card><Advanced title={t('PFT / PC 索引参数','Indexed PFT / PC parameters')} open={pftOpen} onOpenChange={value=>{if(!disabled)setOpened(previous=>({...previous,pft:value}));}}>{pftOpen&&<><div className="form-grid"><Field label="PFT / PC"><Select disabled={disabled} value={pftKind} onChange={e=>{setPftKind(e.target.value);setInputs({});}}><option value="pft">PFT</option><option value="pc-pft">PC PFT</option></Select></Field><Field label={t('PFT 索引（0–78）','PFT index (0–78)')}><Select disabled={disabled} value={pftIndex} onChange={e=>{setPftIndex(e.target.value);setInputs({});}}><option value="">{t('明确选择类型','Choose a type')}</option>{PFT.map(([index,zh,english])=><option value={index} key={index}>{index} · {t(zh,english)}</option>)}</Select></Field></div>{!selection&&<Notice tone="warning">{t('请输入 0–78 的整数索引。','Enter an integer index from 0 to 78.')}</Notice>}{indexed}</>}</Advanced></div>;
+import { useEffect, useRef, useState } from 'react';
+import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { useApp } from '../../lib/app-state';
+import { invokeJson } from '../../lib/ipc';
+import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { fieldLabel, optionLabel } from '../../lib/param-presentation';
+import type { Overlay } from '../../lib/types';
+import { modelSettingGroups, modelSettingGroup, modelSettingValue } from '../cases/model-settings';
+import type { Descriptor, ModelField } from './model';
+import { PFT } from './scope-labels';
+import {
+  tracerFamilies,
+  tracerFamilyState,
+  appendTracerFamily,
+  setStomatalScheme,
+  groupedField,
+  unquote,
+  setModelOption,
+  resetModelOption,
+  setScopedOption,
+  resetScopedOption,
+  setProcessOption,
+  resetProcessOption,
+  tracerTypes,
+  tracerLabels,
+  tracerColumns,
+  tracerRows,
+  setTracerRows,
+  type ConfigurationSource,
+  type ConfigurationResult,
+  type FamilyContext,
+} from './configuration-options';
+type Props = {
+  excludeKeys?: readonly string[];
+  kernelMacros?: FamilyContext['kernelMacros'];
+  caseScope?: FamilyContext['caseScope'];
+  groupPrefix?: string;
+  caseValues?: Record<string, string> | null;
+  source: ConfigurationSource;
+  overlay: Overlay;
+  fields: ModelField[];
+  catalog: Descriptor[];
+  caseDir?: string | null;
+  kernelDir?: string | null;
+  disabled?: boolean;
+  onChange?: (overlay: Overlay) => void;
+  onImportProcess?: (relativePath: string) => Promise<void>;
+};
+const empty: ConfigurationResult = {
+  fields: [],
+  process_files: [],
+  pft_parameters: [],
+  warnings: [],
+  context_complete: false,
+};
+export default function ConfigurationOptions({
+  excludeKeys = [],
+  kernelMacros,
+  caseScope,
+  groupPrefix = 'configuration',
+  caseValues = null,
+  source,
+  overlay,
+  fields,
+  catalog,
+  caseDir = null,
+  kernelDir = null,
+  disabled = false,
+  onChange,
+  onImportProcess,
+}: Props) {
+  const { state } = useApp(),
+    lang = state.language,
+    en = lang === 'en',
+    t = (zh: string, english: string) => (en ? english : zh);
+  const [result, setResult] = useState(empty),
+    [error, setError] = useState(''),
+    [loaded, setLoaded] = useState(''),
+    [opened, setOpened] = useState<Record<string, boolean>>({}),
+    [inputs, setInputs] = useState<Record<string, string>>({}),
+    [pftKind, setPftKind] = useState('pft'),
+    [pftIndex, setPftIndex] = useState(''),
+    [processName, setProcessName] = useState(''),
+    [importing, setImporting] = useState(false),
+    [tracerInput, setTracerInput] = useState<{
+      key: string;
+      rows: ReturnType<typeof tracerRows>;
+    } | null>(null);
+  const pftOpen = opened.pft ?? false;
+  const selection =
+    pftOpen &&
+    /^\d+$/.test(pftIndex) &&
+    Number.isInteger(Number(pftIndex)) &&
+    Number(pftIndex) >= 0 &&
+    Number(pftIndex) <= 78
+      ? { kind: pftKind, index: Number(pftIndex) }
+      : null;
+  const request = JSON.stringify({
+    source: source.kind === 'draft' ? { ...source, overlay } : source,
+    caseDir,
+    kernelDir,
+    pftSelection: selection,
+    caseValues,
+  });
+  const sourceKey = JSON.stringify(
+    source.kind === 'draft'
+      ? { kind: source.kind, id: source.id, generation: source.generation }
+      : source,
+  );
+  const parentValues = Object.fromEntries(
+    Object.entries({
+      ecology: 'DEF_USE_BGC',
+      tracer: 'DEF_USE_TRACER',
+      river: 'DEF_USE_GridRiverLakeFlow',
+      urban: 'DEF_URBAN_RUN',
+      subgrid: 'DEF_USE_LULCC',
+    }).map(([id, name]) => [
+      id,
+      modelSettingValue(overlay, name)?.trim().toLowerCase() === '.true.',
+    ]),
+  );
+  const parentSignature = JSON.stringify({ sourceKey, parentValues });
+  const [seenParents, setSeenParents] = useState(parentSignature);
+  const rising: string[] = [];
+  if (seenParents !== parentSignature) {
+    const previous = JSON.parse(seenParents) as {
+      sourceKey: string;
+      parentValues: Record<string, boolean>;
+    };
+    if (previous.sourceKey === sourceKey)
+      for (const [id, enabled] of Object.entries(parentValues))
+        if (enabled && !previous.parentValues[id]) rising.push(id);
+    if (rising.length)
+      setOpened((before) => ({
+        ...before,
+        ...Object.fromEntries(rising.map((id) => [`${sourceKey}:${id}`, true])),
+      }));
+    setSeenParents(parentSignature);
+  }
+  const tracers = tracerInput?.key === sourceKey ? tracerInput.rows : null;
+  const setTracers = (rows: ReturnType<typeof tracerRows> | null) =>
+    setTracerInput(rows ? { key: sourceKey, rows } : null);
+  const current = useRef(request);
+  current.current = request;
+  useEffect(() => {
+    let live = true;
+    invokeJson<ConfigurationResult>('model_configuration', JSON.parse(request))
+      .then((data) => {
+        if (live) {
+          setResult(data);
+          setLoaded(request);
+          setError('');
+        }
+      })
+      .catch((e) => {
+        if (live) {
+          setLoaded('');
+          setError(String(e));
+        }
+      });
+    return () => {
+      live = false;
+    };
+  }, [request]);
+  const ready = loaded === request,
+    locked = disabled || source.kind !== 'draft' || !onChange || importing;
+  const values = ready ? result : empty;
+  const controls: UiField[] = [],
+    actions: UiAction[] = [];
+  function write(change: () => Overlay) {
+    if (locked || current.current !== request)
+      throw new Error('当前配置不可修改 / Configuration is locked or stale');
+    try {
+      const next = change();
+      onChange!(next);
+      setError('');
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    }
+  }
+  function uiWrite(change: () => Overlay) {
+    try {
+      write(change);
+    } catch {
+      /* Keep draft and invalid input for correction. */
+    }
+  }
+  function open(id: string) {
+    return rising.includes(id) || Boolean(opened[`${sourceKey}:${id}`] ?? parentValues[id]);
+  }
+  function local(id: string, value: string) {
+    setInputs((previous) => ({ ...previous, [`${sourceKey}:${id}`]: value }));
+  }
+  function editor(
+    id: string,
+    label: string,
+    value: string,
+    kind: string,
+    options: string[],
+    cannot: boolean,
+    change: (v: string) => void,
+    rawKey = id.replace(/^configuration-/, ''),
+  ) {
+    const choices =
+      kind === 'list' ? [] : kind.toLowerCase() === 'logical' ? ['.true.', '.false.'] : options;
+    const cardChoice =
+      [
+        'DEF_METHANE%inundation_mode',
+        'DEF_TRACER_USE_FRACTIONATION',
+        'DEF_Runoff_SCHEME',
+        'DEF_URBAN_type_scheme',
+      ].includes(rawKey) &&
+      choices.length > 0 &&
+      choices.length <= 5;
+    const displayValue = kind === 'list' ? value : unquote(value),
+      shown = inputs[`${sourceKey}:${id}`] ?? displayValue,
+      select = choices.length > 0;
+    const setter = (v: string) => {
+      if (cannot || locked) throw new Error('此字段不可编辑 / Field is locked');
+      if (choices.length && !choices.some((option) => unquote(option) === v))
+        throw new Error('请选择可用值 / Choose an available value');
+      local(id, v);
+      change(v);
+      setInputs((previous) => {
+        const next = { ...previous };
+        delete next[`${sourceKey}:${id}`];
+        return next;
+      });
+    };
+    controls.push({
+      id,
+      label,
+      value: shown,
+      type: select ? 'choice' : 'text',
+      options: choices.map((v) => ({ value: unquote(v), label: optionLabel(rawKey, v, lang) })),
+      disabled: cannot || locked,
+      set: setter,
+    });
+    return (
+      <Field key={id} label={label}>
+        {cardChoice ? (
+          <div className="simulation-choice-grid">
+            {choices.map((v) => (
+              <Button
+                key={v}
+                className="simulation-choice-card"
+                variant={shown === unquote(v) ? 'primary' : 'secondary'}
+                aria-pressed={shown === unquote(v)}
+                disabled={cannot || locked}
+                onClick={() => {
+                  try {
+                    setter(unquote(v));
+                  } catch {
+                    /* Preserve invalid input and draft. */
+                  }
+                }}
+              >
+                {optionLabel(rawKey, v, lang)}
+              </Button>
+            ))}
+            {!shown && <p className="muted">{t('未明确选择', 'Not explicitly selected')}</p>}
+          </div>
+        ) : select ? (
+          <Select
+            disabled={cannot || locked}
+            value={shown}
+            onChange={(e) => {
+              try {
+                setter(e.target.value);
+              } catch {
+                /* Error remains visible. */
+              }
+            }}
+          >
+            <option value="">{t('未明确设置', 'Not explicitly set')}</option>
+            {!choices.some((v) => unquote(v) === shown) && shown && (
+              <option value={shown}>{shown}</option>
+            )}
+            {choices.map((v) => (
+              <option key={v} value={unquote(v)}>
+                {optionLabel(rawKey, v, lang)}
+              </option>
+            ))}
+          </Select>
+        ) : (
+          <Input
+            disabled={cannot || locked}
+            value={shown}
+            onChange={(e) => local(id, e.target.value)}
+            onBlur={(e) => {
+              if (!cannot && !locked && e.target.value !== displayValue)
+                try {
+                  setter(e.target.value);
+                } catch {
+                  /* Error remains visible. */
+                }
+            }}
+          />
+        )}
+      </Field>
+    );
+  }
+  function row(field: ModelField) {
+    const context = values.fields.find((f) => f.name === field.name),
+      value = modelSettingValue(overlay, field.name) ?? context?.configured_value ?? '';
+    const inactive = context?.mode === 'disabled',
+      cannot = !ready || !!inactive,
+      id = `configuration-${field.name}`;
+    actions.push({
+      id: `${id}-reset`,
+      label: `${fieldLabel(field.name, lang)} · ${t('移除覆盖', 'Remove override')}`,
+      kind: 'click',
+      enabled: !locked && value !== '',
+      visible: value !== '',
+      run: () => write(() => resetModelOption(overlay, field.name)),
+    });
+    return (
+      <div className="model-setting-row" key={field.name}>
+        {editor(
+          id,
+          fieldLabel(field.name, lang),
+          value,
+          field.kind,
+          context?.allowed_values.length ? context.allowed_values : field.values,
+          cannot,
+          (v) => write(() => setModelOption(overlay, fields, field.name, v)),
+        )}
+        <small>
+          {field.name} ·{' '}
+          {(context?.pending ? t('适用性待核对', 'Applicability pending') : context?.reason) ||
+            t('适用性待核对', 'Applicability pending')}{' '}
+          · {t('目录参考', 'Catalog reference')}: {field.default || '—'}
+        </small>
+        {value !== '' && (
+          <Button
+            disabled={locked}
+            onClick={() => uiWrite(() => resetModelOption(overlay, field.name))}
+          >
+            {t('移除覆盖', 'Remove override')}
+          </Button>
+        )}
+      </div>
+    );
+  }
+  const stomatalFields = ['DEF_USE_MEDLYNST', 'DEF_USE_WUEST'];
+  const showStomatal = stomatalFields.every((name) =>
+    fields.some((f) => f.name === name && !f.derived),
+  );
+  function stomatal() {
+    if (!showStomatal) return null;
+    const flags = stomatalFields.map((name) =>
+      modelSettingValue(overlay, name)?.trim().toLowerCase(),
+    );
+    const selected = flags.every((v) => v === '.true.' || v === '.false.')
+      ? flags[0] === '.true.' && flags[1] === '.true.'
+        ? ''
+        : flags[0] === '.true.'
+          ? 'MEDLYN'
+          : flags[1] === '.true.'
+            ? 'WUE'
+            : 'BALL_BERRY'
+      : '';
+    const unavailable =
+      !ready ||
+      stomatalFields.some(
+        (name) => values.fields.find((f) => f.name === name)?.mode === 'disabled',
+      );
+    const options = [
+      ['BALL_BERRY', 'Ball–Berry'],
+      ['MEDLYN', 'Medlyn'],
+      ['WUE', t('水分利用效率 WUE', 'Water-use efficiency WUE')],
+    ];
+    const set = (value: string) => {
+      if (unavailable) throw new Error('Stomatal scheme unavailable');
+      write(() => setStomatalScheme(overlay, fields, value));
+    };
+    controls.push({
+      id: 'configuration-stomatal-scheme',
+      label: t('气孔导度方案', 'Stomatal scheme'),
+      type: 'choice',
+      value: selected,
+      options: options.map(([value, label]) => ({ value, label })),
+      disabled: locked || unavailable,
+      set,
+    });
+    const reset = () =>
+      write(() => stomatalFields.reduce((next, name) => resetModelOption(next, name), overlay));
+    actions.push({
+      id: 'configuration-stomatal-reset',
+      label: t('移除气孔方案覆盖', 'Remove stomatal overrides'),
+      kind: 'click',
+      enabled: !locked,
+      run: reset,
+    });
+    return (
+      <div className="model-setting-row">
+        <h3>{t('气孔导度方案', 'Stomatal scheme')}</h3>
+        <div className="simulation-choice-grid">
+          {options.map(([value, label]) => (
+            <Button
+              key={value}
+              className="simulation-choice-card"
+              aria-pressed={selected === value}
+              variant={selected === value ? 'primary' : 'secondary'}
+              disabled={locked || unavailable}
+              onClick={() => {
+                try {
+                  set(value);
+                } catch {
+                  /* Preserve draft. */
+                }
+              }}
+            >
+              {label}
+            </Button>
+          ))}
+        </div>
+        {!selected && (
+          <p className="muted">
+            {t(
+              '未明确选择或已有开关冲突，请核对。',
+              'Not explicitly selected, or existing switches conflict; check the configuration.',
+            )}
+          </p>
+        )}
+        <Button
+          disabled={locked}
+          onClick={() => {
+            try {
+              reset();
+            } catch {
+              /* Preserve draft. */
+            }
+          }}
+        >
+          {t('移除覆盖', 'Remove override')}
+        </Button>
+      </div>
+    );
+  }
+  const orderedGroups = [
+    'subgrid',
+    'soil',
+    'water',
+    'river',
+    'ecology',
+    'urban',
+    'tracer',
+    'assimilation',
+    'other',
+  ].map((id) => modelSettingGroups.find((g) => g[0] === id)!);
+  const groups = orderedGroups.map(([id, zh, english]) => {
+    const rows = fields
+      .filter((field) => !excludeKeys.includes(field.name) && groupedField(field, catalog))
+      .filter(
+        (f) => modelSettingGroup(f) === id && !(showStomatal && stomatalFields.includes(f.name)),
+      );
+    actions.push({
+      id: `${groupPrefix}-group-${id}`,
+      label: t(zh, english),
+      kind: 'click',
+      enabled: !disabled,
+      run: () => {
+        if (disabled) throw new Error('Configuration is locked');
+        setOpened((previous) => ({ ...previous, [`${sourceKey}:${id}`]: !open(id) }));
+      },
+    });
+    return (
+      <Advanced
+        key={id}
+        title={`${t(zh, english)} · ${rows.length}`}
+        open={open(id)}
+        onOpenChange={(value) => {
+          if (!disabled) setOpened((previous) => ({ ...previous, [`${sourceKey}:${id}`]: value }));
+        }}
+      >
+        {id === 'ecology' && open(id) && stomatal()}
+        {open(id) && rows.map(row)}
+      </Advanced>
+    );
+  });
+  let storedTracers: ReturnType<typeof tracerRows>,
+    tracerError = '';
+  try {
+    storedTracers = tracerRows(overlay);
+  } catch (e) {
+    storedTracers = tracerRows(resetModelOption(overlay, 'DEF_TRACER_PARAM_FILES'));
+    tracerError = String(e);
+  }
+  const tracerOpen = open('tracer'),
+    table = tracers ?? storedTracers,
+    tracerFields = fields.filter((f) => f.name.startsWith('DEF_TRACER_'));
+  const tracerTooLarge = Number(modelSettingValue(overlay, 'DEF_TRACER_NUM') ?? '0') > 100;
+  const tracerReady =
+    !tracerTooLarge &&
+    !locked &&
+    ready &&
+    tracerFields.length > 0 &&
+    values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode !== 'disabled';
+  const familyContext: FamilyContext = {
+    kernelMacros:
+      kernelMacros ?? state.kernels?.find((item) => item.dir === kernelDir)?.macros ?? null,
+    caseScope,
+  };
+  const familyVisible =
+    tracerOpen && modelSettingValue(overlay, 'DEF_USE_TRACER')?.trim().toLowerCase() === '.true.';
+  const familyCards = familyVisible && (
+    <Card
+      title={t('先选择要追踪的物质', 'Choose tracer families')}
+      description={t(
+        '只预填名称和类型，保留已有与自定义条目。请核对并完善数值列、导入及关联过程文件，再应用定义；此操作不启动计算。',
+        'Only names and types are prefilled; existing and custom rows are retained. Complete numeric metadata and import/link process files before applying. No simulation starts here.',
+      )}
+    >
+      <div className="simulation-choice-grid">
+        {tracerFamilies.map((family) => {
+          const availability = tracerFamilyState(overlay, family.id, familyContext),
+            next = appendTracerFamily(table, family.id),
+            already = next.length === table.length,
+            blocked = !tracerReady || availability.status === 'blocked' || already;
+          const add = () => {
+            if (!familyVisible || blocked || current.current !== request)
+              throw new Error('Family is unavailable or already present');
+            setTracers(next);
+          };
+          actions.push({
+            id: `configuration-family-${family.id}`,
+            label: t(family.zh, family.en),
+            kind: 'click',
+            enabled: !blocked,
+            run: add,
+          });
+          return (
+            <Button
+              key={family.id}
+              className="simulation-choice-card"
+              variant={already ? 'primary' : 'secondary'}
+              aria-pressed={already}
+              disabled={blocked}
+              onClick={add}
+            >
+              <strong>{t(family.zh, family.en)}</strong>
+              <span>{family.rows.map(([name]) => name).join(' / ')}</span>
+              <small>
+                {already
+                  ? t('已在定义表中', 'Already in the table')
+                  : availability.status === 'blocked'
+                    ? t('先解决依赖冲突', 'Resolve prerequisites first')
+                    : availability.status === 'pending'
+                      ? t('可以预填；适用性待核对', 'Can prefill; applicability pending')
+                      : t('预填到定义表', 'Prefill definition table')}
+              </small>
+              {availability.reasons.map(([zh, english]) => (
+                <small key={zh}>{t(zh, english)}</small>
+              ))}
+            </Button>
+          );
+        })}
+      </div>
+      <p className="muted">
+        {t(
+          '预填后尚未保存；可在应用前用“移除末行”撤回新增行。关闭示踪开关不会删除已有定义。',
+          'Prefilled rows are not saved. Use Remove last row before applying to undo added rows. Turning tracers off preserves saved definitions.',
+        )}
+      </p>
+    </Card>
+  );
+  const tracerTable = tracerOpen && (
+    <Card
+      title={t('示踪物定义（每行对应同一个示踪物）', 'Tracer definitions (aligned rows)')}
+      description={t(
+        '名称、类型和可选参数列按行对应；留空整列保留内核解释，不自动填目录默认值。过程文件须先导入到当前版本。',
+        'Names, types and optional columns are aligned by row. Empty columns are not filled with catalog defaults. Import process files into this version first.',
+      )}
+    >
+      {tracerError && (
+        <Notice tone="error">
+          {tracerError} · {modelSettingValue(overlay, 'DEF_TRACER_PARAM_FILES')}
+        </Notice>
+      )}
+      {tracerTooLarge && (
+        <Notice tone="warning">
+          {t(
+            '超过100个示踪物的定义仅展示前100项，请通过原始字段编辑；此表不会覆盖完整定义。',
+            'Over 100 tracers: only the first 100 are shown. Edit the raw fields; this table cannot replace the full definition.',
+          )}
+        </Notice>
+      )}
+      <div className="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              {tracerColumns.map((c) => (
+                <th key={c}>{t(...tracerLabels[c])}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {table.map((row, index) => (
+              <tr key={index}>
+                {tracerColumns.map((column) => {
+                  const id = `configuration-tracer-${index}-${column}`,
+                    set = (value: string) => {
+                      if (!tracerReady) throw new Error('Tracer editor is locked');
+                      setTracers(
+                        table.map((r, i) => (i === index ? { ...r, [column]: value } : r)),
+                      );
+                    };
+                  controls.push({
+                    id,
+                    label: `${index + 1} ${t(...tracerLabels[column])}`,
+                    value: row[column],
+                    type: column === 'TYPES' ? 'choice' : 'text',
+                    options:
+                      column === 'TYPES'
+                        ? tracerTypes.map(([value, zh, english]) => ({
+                            value,
+                            label: t(zh, english),
+                          }))
+                        : undefined,
+                    disabled: !tracerReady,
+                    set,
+                  });
+                  return (
+                    <td key={column}>
+                      {column === 'TYPES' ? (
+                        <Select
+                          disabled={!tracerReady}
+                          aria-label={`${index + 1} ${t(...tracerLabels[column])}`}
+                          value={row[column]}
+                          onChange={(e) => set(e.target.value)}
+                        >
+                          <option value="">{t('选择类型', 'Choose type')}</option>
+                          {row[column] && !tracerTypes.some(([kind]) => kind === row[column]) && (
+                            <option value={row[column]}>
+                              {row[column]} · {t('当前源码类型待核对', 'Source type pending')}
+                            </option>
+                          )}
+                          {tracerTypes.map(([value, zh, english]) => (
+                            <option value={value} key={value}>
+                              {t(zh, english)}
+                            </option>
+                          ))}
+                        </Select>
+                      ) : (
+                        <Input
+                          disabled={!tracerReady}
+                          aria-label={`${index + 1} ${column}`}
+                          value={row[column]}
+                          onChange={(e) => set(e.target.value)}
+                        />
+                      )}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="button-row">
+        <Button
+          disabled={!tracerReady}
+          onClick={() =>
+            setTracers([
+              ...table,
+              Object.fromEntries(tracerColumns.map((c) => [c, ''])) as (typeof table)[number],
+            ])
+          }
+        >
+          {t('增加示踪物', 'Add tracer')}
+        </Button>
+        <Button
+          disabled={!tracerReady || !table.length}
+          onClick={() => setTracers(table.slice(0, -1))}
+        >
+          {t('移除末行', 'Remove last row')}
+        </Button>
+        <Button
+          disabled={!tracerReady || tracers === null}
+          onClick={() => {
+            try {
+              write(() => setTracerRows(overlay, fields, table));
+              setTracers(null);
+            } catch {
+              /* Preserve incomplete table. */
+            }
+          }}
+        >
+          {t('应用示踪物定义', 'Apply tracer definitions')}
+        </Button>
+      </div>
+      <p>
+        {t('示踪物数量', 'Tracer count')} (DEF_TRACER_NUM): {table.length}
+      </p>
+      <p>
+        {t(
+          '尚未应用的表格修改不会写入草稿。',
+          'Table changes are not written to the draft until applied.',
+        )}
+      </p>
+    </Card>
+  );
+  actions.push(
+    {
+      id: 'configuration-tracers-add',
+      label: t('增加示踪物', 'Add tracer'),
+      kind: 'click',
+      visible: tracerOpen,
+      enabled: tracerReady,
+      run: () => {
+        if (!tracerReady || !tracerOpen) throw new Error('Tracer editor is locked');
+        setTracers([
+          ...table,
+          Object.fromEntries(tracerColumns.map((c) => [c, ''])) as (typeof table)[number],
+        ]);
+      },
+    },
+    {
+      id: 'configuration-tracers-remove',
+      label: t('移除末行', 'Remove last row'),
+      kind: 'click',
+      visible: tracerOpen,
+      enabled: tracerReady && table.length > 0,
+      run: () => {
+        if (!tracerReady || !tracerOpen || !table.length)
+          throw new Error('Tracer editor is locked');
+        setTracers(table.slice(0, -1));
+      },
+    },
+    {
+      id: 'configuration-tracers-apply',
+      label: t('应用示踪物定义', 'Apply tracer definitions'),
+      kind: 'click',
+      visible: tracerOpen,
+      enabled: tracerOpen && tracerReady && tracers !== null,
+      run: () => {
+        if (!tracerOpen || !tracerReady || tracers === null)
+          throw new Error('Tracer table is unavailable');
+        write(() => setTracerRows(overlay, fields, table));
+        setTracers(null);
+      },
+    },
+  );
+  const assets = values.process_files.map((asset) => {
+    const isOpen = opened[`${sourceKey}:${asset.file}`] ?? tracerOpen;
+    actions.push({
+      id: `configuration-asset-${asset.file}`,
+      label: asset.file,
+      kind: 'click',
+      enabled: !disabled,
+      run: () => {
+        if (disabled) throw new Error('Configuration is locked');
+        setOpened((previous) => ({ ...previous, [`${sourceKey}:${asset.file}`]: !isOpen }));
+      },
+    });
+    return (
+      <Advanced
+        key={asset.file}
+        title={`${asset.title} · ${asset.file} · ${asset.active_methane_asset === true ? t('当前 CH4', 'Current CH4') : asset.active_methane_asset === false ? t('CH4 未采用', 'Not used by CH4') : t('是否被 CH4 采用待核对', 'CH4 usage pending')}`}
+        open={isOpen}
+        onOpenChange={(value) => {
+          if (!disabled)
+            setOpened((previous) => ({ ...previous, [`${sourceKey}:${asset.file}`]: value }));
+        }}
+      >
+        {isOpen &&
+          asset.entries.map((entry) => {
+            const descriptor = catalog.find(
+                (d) => d.id === entry.descriptor_id && d.storage === 'process-parameter-file',
+              ),
+              id = `configuration-process-${asset.file}-${entry.path}`,
+              cannot = !ready || !asset.verified || !entry.editable || !descriptor;
+            const reset = () =>
+              write(() =>
+                resetProcessOption(
+                  overlay,
+                  descriptor!,
+                  asset.file,
+                  entry.asset_value,
+                  values.fields,
+                  entry.kind,
+                  asset.active_methane_asset,
+                ),
+              );
+            actions.push({
+              id: `${id}-reset`,
+              label: `${fieldLabel(entry.path, lang)} · ${t('恢复资产原值', 'Restore asset value')}`,
+              kind: 'click',
+              enabled: !locked && !cannot,
+              run: () => {
+                if (cannot) throw new Error('Process parameter is unavailable');
+                reset();
+              },
+            });
+            return (
+              <div className="model-setting-row" key={entry.path}>
+                {editor(
+                  id,
+                  fieldLabel(entry.path, lang),
+                  entry.unset ? '' : entry.value,
+                  entry.kind,
+                  entry.options,
+                  cannot,
+                  (v) =>
+                    write(() =>
+                      setProcessOption(
+                        overlay,
+                        descriptor!,
+                        v,
+                        asset.file,
+                        values.fields,
+                        entry.kind,
+                        asset.active_methane_asset,
+                      ),
+                    ),
+                  entry.path,
+                )}
+                <small>
+                  {entry.path} ·{' '}
+                  {entry.pending
+                    ? t('适用性待核对', 'Applicability pending')
+                    : t('已核对目录条件', 'Catalog conditions checked')}{' '}
+                  · {entry.doc} · {t('目录参考', 'Catalog reference')}: {entry.default || '—'}
+                </small>
+                <Button
+                  disabled={locked || cannot}
+                  onClick={() => {
+                    try {
+                      reset();
+                    } catch {
+                      /* Preserve draft. */
+                    }
+                  }}
+                >
+                  {t('恢复资产原值', 'Restore asset value')}
+                </Button>
+              </div>
+            );
+          })}
+      </Advanced>
+    );
+  });
+  const indexed = (pftOpen ? values.pft_parameters : []).map((entry) => {
+    const descriptor = catalog.find(
+        (d) =>
+          d.id === entry.parameter_id &&
+          d.storage === (pftKind === 'pft' ? 'pft-override' : 'pc-pft-override'),
+      ),
+      id = `configuration-${pftKind}-${pftIndex}-${entry.name}`,
+      cannot = !ready || entry.mode !== 'editable' || !descriptor || !selection;
+    const reset = () => write(() => resetScopedOption(overlay, descriptor!, Number(pftIndex), ''));
+    actions.push({
+      id: `${id}-reset`,
+      label: `${entry.name} · ${t('移除覆盖', 'Remove override')}`,
+      kind: 'click',
+      enabled: !locked && !!descriptor && !!selection,
+      run: () => {
+        if (!descriptor || !selection) throw new Error('PFT parameter is unavailable');
+        reset();
+      },
+    });
+    return (
+      <div className="model-setting-row" key={id}>
+        {editor(
+          id,
+          en ? entry.label_en : entry.label_zh,
+          entry.configured_value ?? '',
+          entry.kind,
+          entry.allowed_values,
+          cannot,
+          (v) => write(() => setScopedOption(overlay, descriptor!, v, Number(pftIndex), '')),
+          entry.name,
+        )}
+        <small>
+          {entry.scope_label} · {entry.unit ?? '—'} ·{' '}
+          {entry.reason || t('待按冻结源码核对', 'Pending frozen-source verification')} ·{' '}
+          {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
+        </small>
+        <Button
+          disabled={locked || !descriptor || !selection}
+          onClick={() => {
+            try {
+              reset();
+            } catch {
+              /* Preserve draft. */
+            }
+          }}
+        >
+          {t('移除覆盖', 'Remove override')}
+        </Button>
+      </div>
+    );
+  });
+  async function importProcess() {
+    if (locked || !onImportProcess || !processName.trim())
+      throw new Error('Process import is unavailable');
+    setImporting(true);
+    try {
+      await onImportProcess(processName.trim());
+      setError('');
+    } catch (e) {
+      setError(String(e));
+      throw e;
+    } finally {
+      setImporting(false);
+    }
+  }
+  if (onImportProcess) {
+    controls.push({
+      id: 'configuration-process-file',
+      label: t('版本中的相对文件名', 'Relative filename in version'),
+      type: 'text',
+      value: processName,
+      disabled: locked,
+      set: (value) => {
+        if (locked) throw new Error('Configuration is locked');
+        setProcessName(value);
+      },
+    });
+    actions.push({
+      id: 'configuration-process-import',
+      label: t('选择并导入过程文件', 'Choose and import process file'),
+      kind: 'commit',
+      enabled: !locked && !!processName.trim(),
+      run: importProcess,
+    });
+  }
+  actions.push({
+    id: 'configuration-pft-toggle',
+    label: t('PFT / PC 索引参数', 'Indexed PFT / PC parameters'),
+    kind: 'click',
+    enabled: !disabled,
+    run: () => {
+      if (disabled) throw new Error('Configuration is locked');
+      setOpened((previous) => ({ ...previous, pft: !pftOpen }));
+    },
+  });
+  if (pftOpen)
+    controls.push(
+      {
+        id: 'configuration-pft-kind',
+        label: 'PFT / PC',
+        type: 'choice',
+        value: pftKind,
+        disabled,
+        options: [
+          { value: 'pft', label: 'PFT' },
+          { value: 'pc-pft', label: 'PC PFT' },
+        ],
+        set: (value) => {
+          if (disabled || !['pft', 'pc-pft'].includes(value)) throw new Error('Invalid PFT scope');
+          setPftKind(value);
+          setInputs({});
+        },
+      },
+      {
+        id: 'configuration-pft-index',
+        label: t('PFT 索引（0–78）', 'PFT index (0–78)'),
+        type: 'choice',
+        value: pftIndex,
+        disabled,
+        options: PFT.map(([index, zh, english]) => ({
+          value: String(index),
+          label: `${index} · ${t(zh, english)}`,
+        })),
+        set: (value) => {
+          if (disabled || (value !== '' && !PFT.some(([index]) => String(index) === value)))
+            throw new Error('Invalid PFT index');
+          setPftIndex(value);
+          setInputs({});
+        },
+      },
+    );
+  usePageContract({
+    title: t('完整模型配置', 'Complete model configuration'),
+    step: 'configuration-options',
+    fields: controls,
+    actions,
+    status: error || (!ready ? 'loading' : 'pending_source_verification'),
+    details: { context_complete: values.context_complete, warnings: values.warnings },
+  });
+  return (
+    <div className="configuration-options">
+      <Notice>
+        {t(
+          '配置值与目录默认值分别展示；未确定的条件保留并标为待核对。关闭父开关不会删除子项覆盖。',
+          'Configured values and catalog defaults are shown separately. Unknown conditions remain visible and pending. Turning off a parent preserves child overrides.',
+        )}
+      </Notice>
+      {error && <Notice tone="error">{error}</Notice>}
+      {!ready && <p>{t('正在查询配置条件…', 'Checking configuration conditions…')}</p>}
+      {groups}
+      {familyCards}
+      {tracerTable}
+      <Card title={t('示踪过程文件', 'Tracer process files')}>
+        {ready && !overlay.process_files.length && (
+          <p className="muted">
+            {t(
+              '当前版本尚未导入过程参数文件。',
+              'This version has no imported process parameter files.',
+            )}
+          </p>
+        )}
+        {overlay.process_files.map((asset) => (
+          <p key={asset.relative_path}>
+            {asset.relative_path} · <code>{asset.sha256}</code>
+          </p>
+        ))}
+        {assets}
+        {onImportProcess && (
+          <div className="form-grid">
+            <Field label={t('版本中的相对文件名', 'Relative filename in version')}>
+              <Input
+                disabled={locked}
+                value={processName}
+                placeholder="CH4.nml"
+                onChange={(e) => setProcessName(e.target.value)}
+              />
+            </Field>
+            <Button
+              disabled={locked || !processName.trim()}
+              onClick={() => {
+                void importProcess().catch(() => {});
+              }}
+            >
+              {t('选择并导入过程文件', 'Choose and import process file')}
+            </Button>
+          </div>
+        )}
+      </Card>
+      <Advanced
+        title={t('PFT / PC 索引参数', 'Indexed PFT / PC parameters')}
+        open={pftOpen}
+        onOpenChange={(value) => {
+          if (!disabled) setOpened((previous) => ({ ...previous, pft: value }));
+        }}
+      >
+        {pftOpen && (
+          <>
+            <div className="form-grid">
+              <Field label="PFT / PC">
+                <Select
+                  disabled={disabled}
+                  value={pftKind}
+                  onChange={(e) => {
+                    setPftKind(e.target.value);
+                    setInputs({});
+                  }}
+                >
+                  <option value="pft">PFT</option>
+                  <option value="pc-pft">PC PFT</option>
+                </Select>
+              </Field>
+              <Field label={t('PFT 索引（0–78）', 'PFT index (0–78)')}>
+                <Select
+                  disabled={disabled}
+                  value={pftIndex}
+                  onChange={(e) => {
+                    setPftIndex(e.target.value);
+                    setInputs({});
+                  }}
+                >
+                  <option value="">{t('明确选择类型', 'Choose a type')}</option>
+                  {PFT.map(([index, zh, english]) => (
+                    <option value={index} key={index}>
+                      {index} · {t(zh, english)}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            {!selection && (
+              <Notice tone="warning">
+                {t('请输入 0–78 的整数索引。', 'Enter an integer index from 0 to 78.')}
+              </Notice>
+            )}
+            {indexed}
+          </>
+        )}
+      </Advanced>
+    </div>
+  );
 }

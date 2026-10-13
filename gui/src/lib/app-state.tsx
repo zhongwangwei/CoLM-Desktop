@@ -1,30 +1,296 @@
-import {createContext,useContext,useCallback,useEffect,useLayoutEffect,useRef,useState,type ReactNode} from 'react';
-import {invoke,invokeJson,listen,hasBackend,bindRunningTargets} from './ipc';
-import {applyRunEvent} from './run-events';
-import {navigationBlock,type NavigationGuard,type NavigationTarget} from './navigation-guard';
-import type {AppState,AppPatch,CaseEntry,FrozenRevision,OpenedCase,KernelEntry,Route,VersionRef} from './types';
-const initial:AppState={route:'project',caseTab:'settings',selectedCase:null,cases:[],kernels:[],kernelDir:null,version:null,versionRef:{id:'official',revision:1},chosenVersion:null,versions:[],root:'',newCaseSeed:null,simulationReturn:null,expert:false,language:localStorage.getItem('colm-ui-language')==='en'?'en':'zh',theme:localStorage.getItem('colm-ui-theme')==='dark'?'dark':'light',assistantOpen:localStorage.getItem('colm-ui-assistant')!=='false',assistantSettingsOpen:false,running:{},notices:[],busy:false};
-type AppContextValue={state:AppState;update:(patch:AppPatch)=>void;navigate:(route:Route,tab?:AppState['caseTab'])=>boolean;registerNavigationGuard:(guard:NavigationGuard)=>()=>void;notify:(message:string,error?:boolean)=>void;refreshCases:()=>Promise<void>;openCase:(dir:string)=>Promise<OpenedCase>;refreshVersions:()=>Promise<void>};
-const Context=createContext<AppContextValue|null>(null);
-export const useApp=()=>{const value=useContext(Context);if(!value)throw new Error('AppProvider is missing');return value;};
-export function useNavigationGuard(guard:NavigationGuard){const {registerNavigationGuard}=useApp();const latest=useRef(guard);latest.current=guard;useLayoutEffect(()=>registerNavigationGuard(()=>latest.current()),[registerNavigationGuard]);}
-export function AppProvider({children}:{children:ReactNode}){
- const [state,setState]=useState(initial);const current=useRef(state);current.current=state;const openEpoch=useRef(0);const pendingOpen=useRef<number|null>(null);const guards=useRef(new Set<NavigationGuard>());
- const update=useCallback((patch:AppPatch)=>setState(old=>{const next={...old,...(typeof patch==='function'?patch(old):patch)};current.current=next;return next;}),[]);
- const notify=useCallback((message:string)=>update(old=>({notices:old.notices.at(-1)===message?old.notices:[...old.notices.slice(-4),message]})),[update]);
- const registerNavigationGuard=useCallback((guard:NavigationGuard)=>{guards.current.add(guard);return()=>{guards.current.delete(guard);};},[]);
- const blocked=useCallback((target:NavigationTarget)=>navigationBlock({route:current.current.route,caseDir:current.current.selectedCase?.entry.dir},target,guards.current),[]);
- const navigate=useCallback((route:Route,tab?:AppState['caseTab'])=>{const reason=blocked({route});if(reason){notify(reason);return false;}openEpoch.current++;const cancelled=pendingOpen.current!==null;pendingOpen.current=null;update({route,...(tab?{caseTab:tab}:{}),...(cancelled?{busy:false}:{})});return true;},[blocked,notify,update]);
- const refreshCases=useCallback(async()=>{const root=current.current.root;if(!root){update({cases:[]});return;}const cases=await invoke<CaseEntry[]>('list_cases',{root});if(current.current.root===root)update({cases});},[update]);
- const refreshVersions=useCallback(async()=>{const versions=await invokeJson<FrozenRevision[]>('model_list');const ref=current.current.versionRef;const version=versions.find(v=>v.version.id===ref.id&&v.version.revision===ref.revision)??versions.filter(v=>v.version.id==='official').sort((a,b)=>b.version.revision-a.version.revision)[0]??null;update({versions,version,...(version?{versionRef:version.version}:{})});},[update]);
- const openCase=useCallback(async(dir:string)=>{if(!dir)throw new Error('请选择算例目录 / Select a case directory.');const reason=blocked({route:'case',caseDir:dir,reload:true});if(reason)throw new Error(reason);const epoch=++openEpoch.current;pendingOpen.current=epoch;update({busy:true});try{const opened=await invoke<OpenedCase>('open_case',{dir});const binding=await invokeJson<{version:VersionRef}>('model_migrate_case',{dir});const selectedVersion=current.current.versionRef;const version=await invokeJson<FrozenRevision>('model_get',{...selectedVersion});const cases=await invoke<CaseEntry[]>('list_cases',{root:opened.root});if(epoch!==openEpoch.current)throw new Error('打开期间页面已变化，请重新打开 / The page changed while opening the case.');const normalized={...opened,dir:opened.entry.dir,name:opened.entry.name,binding};update({selectedCase:normalized,root:opened.root,cases,version,versionRef:selectedVersion,route:'case',caseTab:'settings'});await invoke('save_recent',{key:'root',value:opened.root});return normalized;}finally{if(pendingOpen.current===epoch){pendingOpen.current=null;update({busy:false});}}},[blocked,update]);
- useEffect(()=>{document.documentElement.lang=state.language==='en'?'en':'zh-CN';document.documentElement.dataset.theme=state.theme;localStorage.setItem('colm-ui-language',state.language);localStorage.setItem('colm-ui-theme',state.theme);localStorage.setItem('colm-ui-assistant',String(state.assistantOpen));},[state.language,state.theme,state.assistantOpen]);
- useEffect(()=>{let alive=true;const identity=openEpoch;const unlisten:(()=>void)[]=[];bindRunningTargets(()=>new Set(Object.entries(current.current.running).filter(([,run])=>run.running).map(([dir])=>dir)));if(!hasBackend()){notify('请使用桌面软件执行模型操作；浏览器仅能查看界面。 / Model operations require the desktop application.');return()=>{alive=false;bindRunningTargets(()=>new Set());};}
-  async function boot(){update({busy:true});try{await invoke('backend_ready');const [kernels,recent,versions]=await Promise.all([invoke<KernelEntry[]>('list_kernels'),invoke<Record<string,string>>('load_recent'),invokeJson<FrozenRevision[]>('model_list')]);if(!alive)return;const official=versions.filter(v=>v.version.id==='official').sort((a,b)=>b.version.revision-a.version.revision)[0];const root=recent.root??'';let cases:CaseEntry[]=[];if(root){try{cases=await invoke<CaseEntry[]>('list_cases',{root});}catch(error){if(alive)notify(String(error));}}if(alive)update({kernels,kernelDir:kernels.find(k=>k.preset==='default')?.dir??kernels[0]?.dir??null,root,cases,versions,version:official??null,...(official?{versionRef:official.version}:{})});}catch(error){if(alive)notify(String(error));}finally{if(alive)update({busy:false});}}
-  void boot();
-  const events=['run://started','run://stage','run://progress','run://lines','run://done'] as const;
-  for(const event of events)void listen<Record<string,unknown>>(event,payload=>{if(!alive)return;const dir=typeof payload.source_case==='string'?payload.source_case:typeof payload.case==='string'?payload.case:'';if(!dir)return;update(old=>{const next=applyRunEvent(old.running[dir],event,payload);return next?{running:{...old.running,[dir]:next}}:{};});}).then(stop=>{if(alive)unlisten.push(stop);else stop();});
-  return ()=>{alive=false;identity.current++;for(const stop of unlisten)stop();bindRunningTargets(()=>new Set());};
- },[notify,update]);
- return <Context.Provider value={{state,update,navigate,registerNavigationGuard,notify,refreshCases,openCase,refreshVersions}}>{children}</Context.Provider>;
+import {
+  createContext,
+  useContext,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { invoke, invokeJson, listen, hasBackend, bindRunningTargets } from './ipc';
+import { applyRunEvent } from './run-events';
+import { navigationBlock, type NavigationGuard, type NavigationTarget } from './navigation-guard';
+import type {
+  AppState,
+  AppPatch,
+  CaseEntry,
+  FrozenRevision,
+  OpenedCase,
+  KernelEntry,
+  Route,
+  VersionRef,
+} from './types';
+const initial: AppState = {
+  route: 'project',
+  caseTab: 'settings',
+  selectedCase: null,
+  cases: [],
+  kernels: [],
+  kernelDir: null,
+  version: null,
+  versionRef: { id: 'official', revision: 1 },
+  chosenVersion: null,
+  versions: [],
+  root: '',
+  newCaseSeed: null,
+  simulationReturn: null,
+  expert: false,
+  language: localStorage.getItem('colm-ui-language') === 'en' ? 'en' : 'zh',
+  theme: localStorage.getItem('colm-ui-theme') === 'dark' ? 'dark' : 'light',
+  assistantOpen: localStorage.getItem('colm-ui-assistant') !== 'false',
+  assistantSettingsOpen: false,
+  running: {},
+  notices: [],
+  busy: false,
+};
+type AppContextValue = {
+  state: AppState;
+  update: (patch: AppPatch) => void;
+  navigate: (route: Route, tab?: AppState['caseTab']) => boolean;
+  registerNavigationGuard: (guard: NavigationGuard) => () => void;
+  notify: (message: string, error?: boolean) => void;
+  refreshCases: () => Promise<void>;
+  openCase: (dir: string) => Promise<OpenedCase>;
+  refreshVersions: () => Promise<void>;
+};
+const Context = createContext<AppContextValue | null>(null);
+export const useApp = () => {
+  const value = useContext(Context);
+  if (!value) throw new Error('AppProvider is missing');
+  return value;
+};
+export function useNavigationGuard(guard: NavigationGuard) {
+  const { registerNavigationGuard } = useApp();
+  const latest = useRef(guard);
+  latest.current = guard;
+  useLayoutEffect(() => registerNavigationGuard(() => latest.current()), [registerNavigationGuard]);
+}
+export function AppProvider({ children }: { children: ReactNode }) {
+  const [state, setState] = useState(initial);
+  const current = useRef(state);
+  current.current = state;
+  const openEpoch = useRef(0);
+  const pendingOpen = useRef<number | null>(null);
+  const guards = useRef(new Set<NavigationGuard>());
+  const update = useCallback(
+    (patch: AppPatch) =>
+      setState((old) => {
+        const next = { ...old, ...(typeof patch === 'function' ? patch(old) : patch) };
+        current.current = next;
+        return next;
+      }),
+    [],
+  );
+  const notify = useCallback(
+    (message: string) =>
+      update((old) => ({
+        notices: old.notices.at(-1) === message ? old.notices : [...old.notices.slice(-4), message],
+      })),
+    [update],
+  );
+  const registerNavigationGuard = useCallback((guard: NavigationGuard) => {
+    guards.current.add(guard);
+    return () => {
+      guards.current.delete(guard);
+    };
+  }, []);
+  const blocked = useCallback(
+    (target: NavigationTarget) =>
+      navigationBlock(
+        { route: current.current.route, caseDir: current.current.selectedCase?.entry.dir },
+        target,
+        guards.current,
+      ),
+    [],
+  );
+  const navigate = useCallback(
+    (route: Route, tab?: AppState['caseTab']) => {
+      const reason = blocked({ route });
+      if (reason) {
+        notify(reason);
+        return false;
+      }
+      openEpoch.current++;
+      const cancelled = pendingOpen.current !== null;
+      pendingOpen.current = null;
+      update({ route, ...(tab ? { caseTab: tab } : {}), ...(cancelled ? { busy: false } : {}) });
+      return true;
+    },
+    [blocked, notify, update],
+  );
+  const refreshCases = useCallback(async () => {
+    const root = current.current.root;
+    if (!root) {
+      update({ cases: [] });
+      return;
+    }
+    const cases = await invoke<CaseEntry[]>('list_cases', { root });
+    if (current.current.root === root) update({ cases });
+  }, [update]);
+  const refreshVersions = useCallback(async () => {
+    const versions = await invokeJson<FrozenRevision[]>('model_list');
+    const ref = current.current.versionRef;
+    const version =
+      versions.find((v) => v.version.id === ref.id && v.version.revision === ref.revision) ??
+      versions
+        .filter((v) => v.version.id === 'official')
+        .sort((a, b) => b.version.revision - a.version.revision)[0] ??
+      null;
+    update({ versions, version, ...(version ? { versionRef: version.version } : {}) });
+  }, [update]);
+  const openCase = useCallback(
+    async (dir: string) => {
+      if (!dir) throw new Error('请选择算例目录 / Select a case directory.');
+      const reason = blocked({ route: 'case', caseDir: dir, reload: true });
+      if (reason) throw new Error(reason);
+      const epoch = ++openEpoch.current;
+      pendingOpen.current = epoch;
+      update({ busy: true });
+      try {
+        const opened = await invoke<OpenedCase>('open_case', { dir });
+        const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', { dir });
+        const selectedVersion = current.current.versionRef;
+        const version = await invokeJson<FrozenRevision>('model_get', { ...selectedVersion });
+        const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
+        if (epoch !== openEpoch.current)
+          throw new Error(
+            '打开期间页面已变化，请重新打开 / The page changed while opening the case.',
+          );
+        const normalized = { ...opened, dir: opened.entry.dir, name: opened.entry.name, binding };
+        update({
+          selectedCase: normalized,
+          root: opened.root,
+          cases,
+          version,
+          versionRef: selectedVersion,
+          route: 'case',
+          caseTab: 'settings',
+        });
+        await invoke('save_recent', { key: 'root', value: opened.root });
+        return normalized;
+      } finally {
+        if (pendingOpen.current === epoch) {
+          pendingOpen.current = null;
+          update({ busy: false });
+        }
+      }
+    },
+    [blocked, update],
+  );
+  useEffect(() => {
+    document.documentElement.lang = state.language === 'en' ? 'en' : 'zh-CN';
+    document.documentElement.dataset.theme = state.theme;
+    localStorage.setItem('colm-ui-language', state.language);
+    localStorage.setItem('colm-ui-theme', state.theme);
+    localStorage.setItem('colm-ui-assistant', String(state.assistantOpen));
+  }, [state.language, state.theme, state.assistantOpen]);
+  useEffect(() => {
+    let alive = true;
+    const identity = openEpoch;
+    const unlisten: (() => void)[] = [];
+    bindRunningTargets(
+      () =>
+        new Set(
+          Object.entries(current.current.running)
+            .filter(([, run]) => run.running)
+            .map(([dir]) => dir),
+        ),
+    );
+    if (!hasBackend()) {
+      notify(
+        '请使用桌面软件执行模型操作；浏览器仅能查看界面。 / Model operations require the desktop application.',
+      );
+      return () => {
+        alive = false;
+        bindRunningTargets(() => new Set());
+      };
+    }
+    async function boot() {
+      update({ busy: true });
+      try {
+        await invoke('backend_ready');
+        const [kernels, recent, versions] = await Promise.all([
+          invoke<KernelEntry[]>('list_kernels'),
+          invoke<Record<string, string>>('load_recent'),
+          invokeJson<FrozenRevision[]>('model_list'),
+        ]);
+        if (!alive) return;
+        const official = versions
+          .filter((v) => v.version.id === 'official')
+          .sort((a, b) => b.version.revision - a.version.revision)[0];
+        const root = recent.root ?? '';
+        let cases: CaseEntry[] = [];
+        if (root) {
+          try {
+            cases = await invoke<CaseEntry[]>('list_cases', { root });
+          } catch (error) {
+            if (alive) notify(String(error));
+          }
+        }
+        if (alive)
+          update({
+            kernels,
+            kernelDir: kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
+            root,
+            cases,
+            versions,
+            version: official ?? null,
+            ...(official ? { versionRef: official.version } : {}),
+          });
+      } catch (error) {
+        if (alive) notify(String(error));
+      } finally {
+        if (alive) update({ busy: false });
+      }
+    }
+    void boot();
+    const events = [
+      'run://started',
+      'run://stage',
+      'run://progress',
+      'run://lines',
+      'run://done',
+    ] as const;
+    for (const event of events)
+      void listen<Record<string, unknown>>(event, (payload) => {
+        if (!alive) return;
+        const dir =
+          typeof payload.source_case === 'string'
+            ? payload.source_case
+            : typeof payload.case === 'string'
+              ? payload.case
+              : '';
+        if (!dir) return;
+        update((old) => {
+          const next = applyRunEvent(old.running[dir], event, payload);
+          return next ? { running: { ...old.running, [dir]: next } } : {};
+        });
+      }).then((stop) => {
+        if (alive) unlisten.push(stop);
+        else stop();
+      });
+    return () => {
+      alive = false;
+      identity.current++;
+      for (const stop of unlisten) stop();
+      bindRunningTargets(() => new Set());
+    };
+  }, [notify, update]);
+  return (
+    <Context.Provider
+      value={{
+        state,
+        update,
+        navigate,
+        registerNavigationGuard,
+        notify,
+        refreshCases,
+        openCase,
+        refreshVersions,
+      }}
+    >
+      {children}
+    </Context.Provider>
+  );
 }
