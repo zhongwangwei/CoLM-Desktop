@@ -745,3 +745,68 @@ fn switched_off_routing_expects_no_gridriver_restart() {
             .is_none()
     );
 }
+
+#[test]
+fn bundled_crop_creation_materializes_its_declared_unused_rawdata_root() {
+    let _netcdf_guard = super::netcdf_test_guard();
+    let root = std::env::temp_dir().join(format!(
+        "colm-crop-declared-roots-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+    let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let site = examples.join("Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc");
+    let met = examples.join("Forcing/US-Ne3_2002-2003_FLUXNET2015_CROP_Met.nc");
+    let runtime = examples.join("Runtime");
+    let args = [
+        "--site",
+        site.to_str().unwrap(),
+        "--met",
+        met.to_str().unwrap(),
+        "--out",
+        root.to_str().unwrap(),
+        "--mode",
+        "pft",
+        "--crop",
+        "true",
+        "--runtime",
+        runtime.to_str().unwrap(),
+        "--start",
+        "2003-04-29",
+        "--end",
+        "2003-05-02",
+        "--spinup-years",
+        "0",
+        "--spinup-repeat",
+        "0",
+    ]
+    .map(String::from);
+    super::cmd_new(&super::Opts::parse(&args).unwrap()).unwrap();
+    let nml = std::fs::read_to_string(root.join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&nml).unwrap();
+    let Some(colm_namelist::Value::Str(raw)) = doc.get("DEF_dir_rawdata") else {
+        panic!("missing rawdata root");
+    };
+    let raw = PathBuf::from(raw);
+    assert!(
+        raw.is_dir(),
+        "new case declares a missing directory: {}",
+        raw.display()
+    );
+    assert_eq!(
+        std::fs::read_dir(&raw).unwrap().count(),
+        0,
+        "no fabricated scientific data"
+    );
+    let before = super::fingerprint::full_inputs(&root).unwrap();
+    let guard = super::fingerprint::full_input_guard(&root, &before).unwrap();
+    std::fs::write(raw.join("new-input.nc"), "identity fixture").unwrap();
+    let after = super::fingerprint::full_inputs(&root).unwrap();
+    assert_ne!(before.data_sha256, after.data_sha256);
+    assert_ne!(
+        guard,
+        super::fingerprint::full_input_guard(&root, &after).unwrap()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

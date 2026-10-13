@@ -1841,8 +1841,8 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             &layout.site_nc(),
             mode,
         )?);
-    // 全球栅格目录。自包含站点一个字节都不读它，因此未传 rawdata 时故意指向
-    // 不存在的目录；需要外部地类、LAI/SAI 或土壤变量的站点已由上面的审计
+    // 全球栅格目录。自包含站点不读全球栅格；未传 rawdata 时使用算例内
+    // 的空目录，让完整输入身份和目录变化守卫有真实对象可记录。需要外部地类、LAI/SAI 或土壤变量的站点已由上面的审计
     // 强制要求 `--rawdata`，这里必须原样保留该路径。
     //
     // **城市算例现在也一样。** 两张预抽表合起来盖住了 mksrfdata 会去开的
@@ -1900,6 +1900,15 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
         let run = configured_or_unused(o.get("--runtime"), &out.join("runtime_unused/"));
         (raw, run)
     };
+
+    // Only materialize case-owned defaults. Never create or repair a caller's
+    // explicitly configured data root, and never fabricate scientific payloads.
+    for (option, directory) in [("--rawdata", &dirs.0), ("--runtime", &dirs.1)] {
+        if o.get(option).is_none() {
+            std::fs::create_dir_all(directory)
+                .with_context(|| format!("cannot create case data root {directory}"))?;
+        }
+    }
 
     let spec = CaseSpec {
         name: name.clone(),
