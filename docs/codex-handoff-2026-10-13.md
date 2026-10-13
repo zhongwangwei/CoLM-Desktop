@@ -8,7 +8,10 @@
 
 ```bash
 cd ~/Desktop/Github/CoLM-Desktop
-git diff --stat aba780ff          # 应该没有输出：工作目录与快照一致
+# 用临时索引把未跟踪文件也算进来比较，不碰真实索引。没有输出才说明和快照一致。
+T=$(mktemp -t colm-idx); cp .git/index "$T"
+GIT_INDEX_FILE="$T" git add -A && GIT_INDEX_FILE="$T" git diff --cached --stat aba780ff
+rm -f "$T"
 ```
 
 **确认没有差异之后**再执行：
@@ -18,7 +21,7 @@ git checkout -f main
 git clean -fd -e .omx -e kernels  # 删掉快照里已入库的未跟踪副本；保留 .omx 记录和 kernels
 ```
 
-如果 `git diff --stat aba780ff` 有输出，说明有快照之后的新改动：不要丢弃，先停下来问用户。
+如果上面的比较有输出，说明有快照之后的新改动：不要丢弃，先停下来问用户。
 
 ## 2. 这次改了的规则，接着做时要遵守
 
