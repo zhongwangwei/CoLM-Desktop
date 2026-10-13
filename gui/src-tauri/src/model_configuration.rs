@@ -333,6 +333,9 @@ fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'sta
         "DEF_file_SnowInit" => Some("DEF_USE_SnowInit"),
         "DEF_file_cn_init" => Some("DEF_USE_CN_INIT"),
         "DEF_file_WaterTable" => Some("DEF_USE_WaterTableInit"),
+        "DEF_TRACER_KINETIC_SCHEME"
+        | "DEF_TRACER_OPEN_WATER_KINETIC"
+        | "DEF_TRACER_SOIL_KINETIC" => Some("DEF_TRACER_USE_FRACTIONATION"),
         "DEF_TRACER_SOIL_INIT_FILE" | "DEF_TRACER_SOIL_INIT_VARS" => {
             Some("DEF_TRACER_USE_SOIL_INIT")
         }
@@ -628,6 +631,12 @@ mod tests {
             ("DEF_USE_OZONEDATA", "DEF_USE_OZONESTRESS"),
             ("DEF_file_Ozone", "DEF_USE_OZONEDATA"),
             ("DEF_TRACER_SOIL_INIT_FILE", "DEF_TRACER_USE_SOIL_INIT"),
+            ("DEF_TRACER_KINETIC_SCHEME", "DEF_TRACER_USE_FRACTIONATION"),
+            (
+                "DEF_TRACER_OPEN_WATER_KINETIC",
+                "DEF_TRACER_USE_FRACTIONATION",
+            ),
+            ("DEF_TRACER_SOIL_KINETIC", "DEF_TRACER_USE_FRACTIONATION"),
             ("DEF_file_cn_init", "DEF_USE_CN_INIT"),
             ("DEF_USE_FIRE", "DEF_USE_BGC"),
             ("DEF_FERT_SOURCE", "DEF_USE_FERT"),
