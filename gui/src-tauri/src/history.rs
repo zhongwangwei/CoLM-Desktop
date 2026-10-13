@@ -14,10 +14,26 @@ pub struct HistoryFilter {
     to: Option<i64>,
     limit: Option<u64>,
     offset: Option<u64>,
+    /// Also list routine bookkeeping (autosaved settings, draft saves, case binding checks).
+    include_routine: Option<bool>,
 }
+/// Recorded for audit, but not what a user means by "what did I do": shown on request only.
+const ROUTINE_KINDS: &[&str] = &[
+    "case-config-save",
+    "model-save-draft",
+    "model-migrate-case",
+    "remote-status",
+    "remote-study-status",
+];
 impl From<HistoryFilter> for Query {
     fn from(f: HistoryFilter) -> Self {
+        let exclude_kinds = if f.kind.is_none() && f.include_routine != Some(true) {
+            ROUTINE_KINDS.iter().map(|k| (*k).to_owned()).collect()
+        } else {
+            Vec::new()
+        };
         Self {
+            exclude_kinds,
             kind: f.kind,
             case_path: f.case_path,
             version_id: f.version_id,

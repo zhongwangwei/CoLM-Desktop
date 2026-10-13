@@ -265,12 +265,15 @@ fn legacy_import_deduplicates_provenance_and_reports_invalid_lines() {
 fn remote_submission_never_infers_completion_and_gate_import_is_honest() {
     let dir = Temp::new();
     let h = ledger();
-    let remote=dir.file("remote.json",&json!({"job":"123","host":"7920","submitted_at":20,"provenance":{"ok":true},"ssh_auth":{"password":"private"}}));
+    let remote=dir.file("remote.json",&json!({"job":"123","host":"7920","submitted_at":20,"provenance":{"ok":true},"ssh_auth":{"password":"pw-7f3c-never-stored"}}));
     h.import_file(remote, ImportKind::RemoteRun, None).unwrap();
     let op = &h.query(&Query::default()).unwrap().items[0];
     assert!(op.needs_reconciliation);
     assert_eq!(op.latest.status, "needs_reconciliation");
-    assert!(!serde_json::to_string(op).unwrap().contains("private"));
+    // A distinctive value: temp paths on macOS contain "/private", so a word would collide.
+    assert!(!serde_json::to_string(op)
+        .unwrap()
+        .contains("pw-7f3c-never-stored"));
     let gates=dir.file("gates.json",&json!({"engine":{"ok":false,"at":10,"commit":"a"},"tests":{"core":{"ok":true,"at":12,"commit":"b"}}}));
     assert_eq!(
         h.import_file(&gates, ImportKind::Gates, None)
@@ -338,7 +341,9 @@ fn command_credentials_in_urls_and_shell_are_not_stored() {
         "https://server/input?temperature=273.15".into(),
     ];
     command.sanitize().unwrap();
-    assert_eq!(command.argv[0], "[REDACTED URL]");
+    // The token is removed whether the whole URL or only its value is redacted.
+    assert!(!command.argv[0].contains("xyz"), "{}", command.argv[0]);
+    assert!(command.argv[0].contains("[REDACTED"), "{}", command.argv[0]);
     assert_eq!(command.argv[1], "https://server/input?temperature=273.15");
 }
 

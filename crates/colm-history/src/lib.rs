@@ -142,6 +142,8 @@ pub struct Query {
     pub from_ms: Option<i64>,
     pub to_ms: Option<i64>,
     pub needs_reconciliation: Option<bool>,
+    /// Kinds left out of the listing (routine bookkeeping such as autosaves).
+    pub exclude_kinds: Vec<String>,
     pub offset: u64,
     pub limit: u64,
     pub ascending: bool,
@@ -160,6 +162,7 @@ impl Default for Query {
             from_ms: None,
             to_ms: None,
             needs_reconciliation: None,
+            exclude_kinds: Vec::new(),
             offset: 0,
             limit: 100,
             ascending: false,
@@ -540,6 +543,13 @@ fn filter(connection: &Connection, q: &Query) -> Result<(String, Vec<rusqlite::t
             "json_extract(payload,'$.case_path') IN ({placeholders})"
         ));
         values.extend(paths.into_iter().map(Sql::Text));
+    }
+    if !q.exclude_kinds.is_empty() {
+        let placeholders = vec!["?"; q.exclude_kinds.len()].join(",");
+        clauses.push(format!(
+            "json_extract(payload,'$.kind') NOT IN ({placeholders})"
+        ));
+        values.extend(q.exclude_kinds.iter().cloned().map(Sql::Text));
     }
     if let Some(value) = &q.search {
         clauses.push("instr(lower(payload),lower(?))>0".into());

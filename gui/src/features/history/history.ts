@@ -8,6 +8,8 @@ export type Filter = {
   status: string;
   from: string;
   to: string;
+  /** '1' also lists routine bookkeeping (autosaves, draft saves, binding checks). */
+  includeRoutine: string;
 };
 export const emptyFilter: Filter = {
   query: '',
@@ -18,28 +20,38 @@ export const emptyFilter: Filter = {
   status: '',
   from: '',
   to: '',
+  includeRoutine: '',
 };
 export function historyFilter(filter: Filter, offset = 0, limit = 30) {
-  const result: Record<string, string | number> = { offset, limit };
+  const result: Record<string, string | number | boolean> = { offset, limit };
   for (const [key, value] of Object.entries(filter)) {
     if (!value) continue;
-    if (key === 'from' || key === 'to') {
+    if (key === 'includeRoutine') {
+      result.includeRoutine = value === '1';
+    } else if (key === 'from' || key === 'to') {
       const time = new Date(value).getTime();
       if (!Number.isFinite(time)) throw new Error('Invalid date');
       result[key] = time;
     } else result[key] = value;
   }
   if (typeof result.from === 'number' && typeof result.to === 'number' && result.from > result.to)
-    throw new Error('开始时间晚于结束时间 / Start is after end');
+    throw new Error('Start is after end');
   return result;
+}
+/** Dates follow the app language, not the operating system's locale. */
+function appLocale() {
+  const lang = globalThis.document?.documentElement?.lang;
+  return lang === 'en' ? 'en-GB' : 'zh-CN';
 }
 export function dayGroups(items: HistoryOperation[]) {
   const groups = new Map<string, HistoryOperation[]>();
   for (const item of items) {
     const day =
       item.time_ms == null
-        ? '未知日期 / Unknown date'
-        : new Date(item.time_ms).toLocaleDateString();
+        ? appLocale() === 'zh-CN'
+          ? '未知日期'
+          : 'Unknown date'
+        : new Date(item.time_ms).toLocaleDateString(appLocale());
     groups.set(day, [...(groups.get(day) ?? []), item]);
   }
   return [...groups];
@@ -208,7 +220,8 @@ export function historySections(detail: HistoryDetail): HistorySection[] {
       en,
       value: text(value),
     }),
-    time = (value: number | null) => (value == null ? null : new Date(value).toLocaleString());
+    time = (value: number | null) =>
+      value == null ? null : new Date(value).toLocaleString(appLocale());
   const inputRows = Object.entries(object(run.inputs))
     .slice(0, 24)
     .map(([name, hash]) => row(name, name, hash));
@@ -359,7 +372,8 @@ export function historyEvents(detail: HistoryDetail): HistoryRow[][] {
       {
         zh: '时间',
         en: 'Time',
-        value: typeof e.time_ms === 'number' ? new Date(e.time_ms).toLocaleString() : null,
+        value:
+          typeof e.time_ms === 'number' ? new Date(e.time_ms).toLocaleString(appLocale()) : null,
       },
       { zh: '阶段', en: 'Phase', value: text(e.phase) },
       { zh: '状态', en: 'Status', value: text(e.status) },
@@ -382,15 +396,65 @@ export function scopedHistoryFilter(filter: Filter, casePath?: string): Filter {
 export function historyKindLabel(kind: string, en = false): string {
   const labels: Record<string, [string, string]> = {
     run: ['运行', 'Run'],
-    'remote-run': ['远程运行', 'Remote run'],
+    'remote-run': ['服务器运行', 'Server run'],
+    remote_run: ['服务器运行', 'Server run'],
+    'remote-status': ['查看服务器作业', 'Server job status'],
+    'remote-study-status': ['查看服务器研究', 'Server study status'],
+    'remote-cancel': ['取消服务器作业', 'Cancel server job'],
+    server: ['服务器', 'Server'],
     study: ['研究', 'Research'],
+    'study-create': ['新建研究', 'New study'],
+    'study-run': ['运行研究', 'Run study'],
+    'study-clone': ['复制研究', 'Copy study'],
+    'study-pause': ['暂停研究', 'Pause study'],
+    'study-resume': ['继续研究', 'Resume study'],
+    'study-cancel': ['取消研究', 'Cancel study'],
+    'study-retry': ['重试研究', 'Retry study'],
+    'study-export': ['导出研究', 'Export study'],
+    'study-apply': ['采用研究结果', 'Apply study result'],
+    'study-save-version': ['研究结果存为版本', 'Save study as version'],
     version: ['版本修改', 'Version change'],
+    'model-create': ['新建版本', 'New version'],
+    'model-save-draft': ['保存版本草稿', 'Save version draft'],
+    'model-freeze': ['存为版本', 'Save version'],
+    'model-migrate-case': ['绑定算例版本', 'Bind case to version'],
+    'model-attach-network': ['添加 AI 网络', 'Attach AI network'],
+    'model-import-process': ['导入过程参数文件', 'Import process file'],
     case: ['算例修改', 'Case change'],
+    'case-config-save': ['保存算例设置', 'Save case settings'],
+    new: ['新建算例', 'New case'],
+    'site-new': ['新建站点算例', 'New site case'],
+    'spatial-new': ['新建区域算例', 'New regional case'],
+    'mesh-new': ['新建网格算例', 'New mesh case'],
+    'hybrid-fit': ['训练 AI 网络', 'Train AI network'],
+    'hybrid-install': ['安装 AI 网络', 'Install AI network'],
+    'hybrid-remove': ['移除 AI 网络', 'Remove AI network'],
+    'hybrid-climate': ['AI 网络气候统计', 'AI network climatology'],
+    'forcing-convert': ['转换强迫场', 'Convert forcing'],
+    'forcing-table-convert': ['转换强迫场表格', 'Convert forcing table'],
+    'forcing-repair': ['修补强迫场', 'Repair forcing'],
+    'era5land-download': ['下载 ERA5-Land', 'Download ERA5-Land'],
+    'observation-table-convert': ['转换观测表格', 'Convert observation table'],
+    'history-replay': ['按记录重跑', 'Rerun from record'],
+    'history-compare': ['对比两次运行', 'Compare runs'],
+    'ws-create': ['新建代码工作区', 'New code workspace'],
+    'ws-note': ['修改版本说明', 'Edit version note'],
+    'ws-build-engine': ['编译引擎', 'Build engine'],
+    'ws-build-kernel': ['编译内核', 'Build kernel'],
+    'ws-test': ['运行测试', 'Run tests'],
+    'ws-parity': ['新旧对照', 'Parity check'],
+    'ws-patch': ['应用补丁', 'Apply patch'],
+    'ws-revert-file': ['撤销文件改动', 'Revert file'],
+    'ws-export': ['导出改动', 'Export changes'],
     check: ['检查', 'Check'],
     build: ['编译', 'Build'],
     assistant: ['助手', 'Assistant'],
+    assistant_ui: ['助手操作', 'Assistant action'],
+    assistant_key: ['助手密钥设置', 'Assistant key setting'],
   };
-  return labels[kind]?.[en ? 1 : 0] ?? kind;
+  const label = labels[kind];
+  if (label) return label[en ? 1 : 0];
+  return en ? kind.replace(/[-_]/g, ' ') : kind;
 }
 export function historyStatusLabel(status: string, en = false): string {
   const labels: Record<string, [string, string]> = {

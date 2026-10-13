@@ -54,6 +54,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   const { state, openCase, update, navigate } = useApp();
   const en = state.language === 'en';
   const t = (zh: string, enText: string) => (en ? enText : zh);
+  const locale = en ? 'en-GB' : 'zh-CN';
   const [filter, setFilter] = useState<Filter>({ ...emptyFilter, casePath: casePath ?? '' }),
     [applied, setApplied] = useState<Filter>(filter),
     [offset, setOffset] = useState(0),
@@ -158,7 +159,11 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   }
   const run = (fn: () => Promise<void>) => void action(fn).catch(() => {});
   function search() {
-    historyFilter(effectiveFilter);
+    try {
+      historyFilter(effectiveFilter);
+    } catch {
+      throw new Error(t('开始时间晚于结束时间', 'The start is after the end'));
+    }
     setOffset(0);
     setDetail(null);
     setApplied(effectiveFilter);
@@ -284,6 +289,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     status: t('状态', 'Status'),
     from: t('开始时间', 'From'),
     to: t('结束时间', 'To'),
+    includeRoutine: t('显示例行记录（填 1）', 'Show routine records (1)'),
   };
   const guideFields: UiField[] = Object.entries(effectiveFilter)
     .filter(([key]) => ['query', 'kind', 'status'].includes(key) || filtersOpen)
@@ -625,6 +631,25 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 </Field>
               ))}
             </div>
+            <label className="history-routine">
+              <input
+                type="checkbox"
+                disabled={busy}
+                checked={effectiveFilter.includeRoutine === '1'}
+                onChange={(e) =>
+                  setFilter((f) =>
+                    scopedHistoryFilter(
+                      { ...f, includeRoutine: e.target.checked ? '1' : '' },
+                      casePath,
+                    ),
+                  )
+                }
+              />
+              {t(
+                '也显示例行记录（自动保存的设置、版本草稿、打开算例时的版本绑定）',
+                'Also show routine records (autosaved settings, version drafts, case binding on open)',
+              )}
+            </label>
           </Advanced>
         </form>
         {casePath && (
@@ -683,9 +708,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                         '—'
                       ) : (
                         <time dateTime={new Date(item.time_ms).toISOString()}>
-                          {new Date(item.time_ms).toLocaleDateString()}
+                          {new Date(item.time_ms).toLocaleDateString(locale)}
                           <br />
-                          {new Date(item.time_ms).toLocaleTimeString([], {
+                          {new Date(item.time_ms).toLocaleTimeString(locale, {
                             hour: '2-digit',
                             minute: '2-digit',
                           })}
@@ -696,7 +721,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     <td className="history-object" title={item.case_path ?? item.operation_id}>
                       <strong>{historyObject(item)}</strong>
                       <small>
-                        {item.phase} ·{' '}
                         {item.host ??
                           (item.location === 'remote'
                             ? t('远程', 'Remote')
@@ -791,7 +815,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     value:
                       detail.operation.started_ms == null
                         ? null
-                        : new Date(detail.operation.started_ms).toLocaleString(),
+                        : new Date(detail.operation.started_ms).toLocaleString(locale),
                   },
                   {
                     zh: '结束',
@@ -799,7 +823,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     value:
                       detail.operation.finished_ms == null
                         ? null
-                        : new Date(detail.operation.finished_ms).toLocaleString(),
+                        : new Date(detail.operation.finished_ms).toLocaleString(locale),
                   },
                   { zh: '操作标识', en: 'Operation ID', value: detail.operation.operation_id },
                 ]}
