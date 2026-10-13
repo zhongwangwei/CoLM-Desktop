@@ -121,6 +121,7 @@ export type RunState = {
   running: boolean;
   case: string;
   run_case?: string;
+  requested_stage?: string | null;
   logs: string[];
   progress?: Record<string, unknown>;
   stages: Record<string, string>;

@@ -497,6 +497,7 @@ export default function NewCasePage() {
     dataGroups =
       step === 3
         ? processDataSections
+            .filter(([, , , parent]) => /^(true|\.true\.)$/i.test(physics[parent] ?? ''))
             .map(([id, zh, english, parent]) => ({
               id,
               title: t(zh, english),
@@ -505,7 +506,7 @@ export default function NewCasePage() {
             }))
             .filter((group) => group.fields.length)
         : [];
-  const groupFields = dataGroups.flatMap((group) => group.fields),
+  const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
     options = [
       ...simulationFields(schema, step, advanced).filter((f) => !groupFields.includes(f)),
       ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),

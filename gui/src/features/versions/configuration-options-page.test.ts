@@ -29,6 +29,8 @@ function harness() {
     ['DEF_USE_GridRiverLakeFlow', '河道与水库'],
     ['DEF_USE_RESERVOIR', '河道与水库'],
     ['DEF_USE_TRACER', '示踪剂'],
+    ['DEF_URBAN_RUN', '城市'],
+    ['DEF_URBAN_type_scheme', '城市'],
     ...helpers.tracerKeys.map((k) => [k, '示踪剂']),
   ].map(([name, section]) => ({
     name,
@@ -565,4 +567,43 @@ test('case option failure and readonly source gates preserve the selected revisi
   for (let i = 0; i < 5; i++) await Promise.resolve();
   c = h.render();
   assert.equal(c.fields.find((f) => f.id === 'configuration-stomatal-scheme')!.disabled, true);
+});
+
+test('simulation hides inactive process details and files without erasing retained settings', async () => {
+  const p = harness();
+  p.props.source = { kind: 'frozen', version: { id: 'official', revision: 1 } };
+  p.props.onCaseChange = () => {};
+  p.props.subgrid = 'IGBP';
+  const original = JSON.stringify(p.props.overlay);
+  for (const value of [undefined, '.false.', '.true.', '.false.']) {
+    p.props.caseValues = Object.fromEntries(
+      ['DEF_USE_BGC', 'DEF_USE_TRACER', 'DEF_USE_GridRiverLakeFlow', 'DEF_URBAN_RUN'].flatMap(
+        (name) => (value ? [[name, value]] : []),
+      ),
+    );
+    p.render();
+    const response = p.response();
+    response.fields = response.fields.map((field) => ({ ...field, configured_value: null }));
+    p.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const c = p.render();
+    for (const group of ['river', 'urban', 'tracer']) {
+      const available = value === '.true.';
+      assert.equal(
+        c.actions.some((a) => a.id === `configuration-group-${group}`),
+        available,
+      );
+    }
+    assert.equal(
+      p.nodes.some((n) => n.type === 'Card' && n.props.title === '示踪过程文件'),
+      value === '.true.',
+    );
+    assert.equal(
+      c.fields.some((f) => f.id === 'configuration-DEF_USE_NITRIF_DENITRIF'),
+      value === '.true.',
+    );
+    assert.ok(!c.actions.some((a) => a.id === 'configuration-pft-toggle'));
+  }
+  assert.equal(JSON.stringify(p.props.overlay), original);
+  assert.equal(p.changes.length, 0);
 });

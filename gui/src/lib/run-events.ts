@@ -41,6 +41,8 @@ export function applyRunEvent(
     next.stages = { ...next.stages, [payload.stage]: String(payload.state) };
   if (event === 'run://progress') next.progress = payload;
   if (event === 'run://done') {
+    next.requested_stage =
+      typeof payload.requested_stage === 'string' ? payload.requested_stage : null;
     next.running = false;
     next.status = payload.cancelled
       ? 'cancelled'

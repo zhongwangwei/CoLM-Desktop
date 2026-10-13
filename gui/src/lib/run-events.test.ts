@@ -2,6 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { applyRunEvent } from './run-events';
 
+test('completion retains its requested stage', () => {
+  const run = {
+    case: '/case',
+    run_id: 'run',
+    status: 'running',
+    running: true,
+    logs: [],
+    stages: {},
+  };
+  const done = applyRunEvent(run, 'run://done', {
+    case: '/case',
+    run_id: 'run',
+    requested_stage: 'mksrfdata',
+    code: 0,
+  })!;
+  assert.equal(done.requested_stage, 'mksrfdata');
+  assert.equal(done.status, 'succeeded');
+});
+
 test('source case retains its run while pages change, and old events cannot finish its replacement', () => {
   const first = applyRunEvent(undefined, 'run://started', {
     case: '/source',

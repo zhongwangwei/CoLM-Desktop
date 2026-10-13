@@ -4,7 +4,7 @@ import { timeTicks } from './time-ticks';
 import 'uplot/dist/uPlot.min.css';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
-import { openPage, usePageContract, type UiAction, type UiField } from '../../lib/guide';
+import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../components/ui';
 import {
   boundedMap,
@@ -31,6 +31,7 @@ import {
   overviewRunLocation,
 } from './result-overview';
 import NavIcon from '../../components/NavIcon';
+import { defaultObservation } from './default-observation';
 import './results-page.css';
 type Catalog = {
   files: number;
@@ -125,7 +126,7 @@ export default function ResultsPage({
   casePath?: string;
   onBack?: () => void;
 }) {
-  const { state } = useApp();
+  const { state, navigate } = useApp();
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const caseDir = casePath || state.selectedCase?.dir || '';
@@ -150,9 +151,19 @@ export default function ResultsPage({
   const [tab, setTab] = useState<(typeof tabs)[number]>('overview');
   const [runs, setRuns] = useState<Run[]>([]);
   const [source, setSource] = useState('');
+  const completedRunCase =
+    state.running?.[caseDir]?.status === 'succeeded' ? state.running[caseDir]?.run_case : undefined;
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [variable, setVariable] = useState('');
   const [obs, setObs] = useState('');
+  const observationEdited = useRef(false);
+  const automaticObservation = useRef('');
+  const automaticEvaluation = useRef('');
+  const automaticEvaluator = useRef<() => void>(() => {});
+  const chooseObservation = (path: string) => {
+    observationEdited.current = true;
+    setObs(path);
+  };
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [spinup, setSpinup] = useState('0');
@@ -190,6 +201,9 @@ export default function ResultsPage({
     setMetrics([]);
     setDiagnostic(null);
     setObs('');
+    observationEdited.current = false;
+    automaticObservation.current = '';
+    automaticEvaluation.current = '';
     setFrom('');
     setTo('');
     setSpinup('0');
@@ -198,14 +212,24 @@ export default function ResultsPage({
     setError('');
     let cancelled = false;
     if (!caseDir) return;
+    void defaultObservation(caseDir)
+      .then((path) => {
+        if (!cancelled && !observationEdited.current && path) {
+          automaticObservation.current = path;
+          setObs(path);
+        }
+      })
+      .catch(() => {});
     void invokeJson<Run[]>('model_case_runs', { dir: caseDir })
       .then((data) => {
         if (!cancelled) {
           setRuns(data);
           setSource(
-            data.find(
-              (r) => r.run_case && r.version?.id === versionId && r.version?.revision === revision,
-            )?.run_case ||
+            data.find((r) => r.run_case === completedRunCase)?.run_case ||
+              data.find(
+                (r) =>
+                  r.run_case && r.version?.id === versionId && r.version?.revision === revision,
+              )?.run_case ||
               data.find((r) => r.run_case)?.run_case ||
               '',
           );
@@ -218,7 +242,7 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [caseDir, versionId, revision]);
+  }, [caseDir, versionId, revision, completedRunCase]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
@@ -427,6 +451,21 @@ export default function ResultsPage({
       }
       return rows;
     });
+  automaticEvaluator.current = () => run(evaluate);
+  useEffect(() => {
+    if (
+      busy ||
+      !source ||
+      catalogKey !== source ||
+      !obs ||
+      observationEdited.current ||
+      automaticObservation.current !== obs ||
+      automaticEvaluation.current === selectionKey
+    )
+      return;
+    automaticEvaluation.current = selectionKey;
+    automaticEvaluator.current();
+  }, [busy, source, catalogKey, obs, selectionKey]);
   const diagnose = () =>
     task(async (current) => {
       setDiagnostic(null);
@@ -656,7 +695,7 @@ export default function ResultsPage({
       value: obs,
       type: 'text',
       disabled: busy,
-      set: setObs,
+      set: chooseObservation,
     });
   if (!runChooser && tab === 'comparison')
     fields.push({
@@ -707,21 +746,35 @@ export default function ResultsPage({
       ? [
           {
             id: 'result-closure',
+            enabled: !busy,
             label: tr('诊断偏差', 'Diagnose deviations'),
             kind: 'click' as const,
             run: () => setTab('diagnostics'),
           },
           {
-            id: 'result-tuning',
-            label: tr('参数率定', 'Parameter calibration'),
+            id: 'result-improve',
+            enabled: !busy,
+            label: tr('模型改进', 'Improve model'),
             kind: 'click' as const,
-            run: () => openPage('result-tuning'),
+            run: () => navigate('research'),
+          },
+        ]
+      : []),
+    ...(tab !== 'overview'
+      ? [
+          {
+            id: 'result-overview',
+            enabled: !busy,
+            label: tr('返回结果总览', 'Back to results overview'),
+            kind: 'click' as const,
+            run: () => setTab('overview'),
           },
           {
-            id: 'result-uncertainty',
-            label: tr('检查稳健性', 'Check robustness'),
+            id: 'result-improve',
+            enabled: !busy,
+            label: tr('模型改进', 'Improve model'),
             kind: 'click' as const,
-            run: () => openPage('result-uncertainty'),
+            run: () => navigate('research'),
           },
         ]
       : []),
@@ -844,7 +897,7 @@ export default function ResultsPage({
                 key: 'result-observations',
                 filter: 'nc',
               });
-              if (file) setObs(file);
+              if (file) chooseObservation(file);
               return file;
             },
           },
@@ -868,12 +921,9 @@ export default function ResultsPage({
                 },
                 ...actions
                   .filter((action) =>
-                    [
-                      'result-closure',
-                      'result-tuning',
-                      'result-uncertainty',
-                      'export-full-series-csv',
-                    ].includes(action.id),
+                    ['result-closure', 'result-improve', 'export-full-series-csv'].includes(
+                      action.id,
+                    ),
                   )
                   .map((action) => ({ ...action, enabled: action.enabled !== false && !busy })),
               ]
@@ -1116,9 +1166,7 @@ export default function ResultsPage({
             </div>
             <div>
               {actions
-                .filter((action) =>
-                  ['result-closure', 'result-tuning', 'result-uncertainty'].includes(action.id),
-                )
+                .filter((action) => ['result-closure', 'result-improve'].includes(action.id))
                 .map((action, index) => (
                   <Button
                     key={action.id}
@@ -1134,6 +1182,16 @@ export default function ResultsPage({
         </section>
       )}
       <footer className="results-secondary">
+        {tab !== 'overview' && (
+          <>
+            <Button variant="ghost" disabled={busy} onClick={() => setTab('overview')}>
+              {tr('← 返回结果总览', '← Back to results overview')}
+            </Button>
+            <Button disabled={busy} onClick={() => navigate('research')}>
+              {tr('模型改进', 'Improve model')}
+            </Button>
+          </>
+        )}
         <Field label={tr('更多分析与导出', 'More analyses and exports')}>
           <Select
             value={tab}
@@ -1226,7 +1284,11 @@ export default function ResultsPage({
         {error && <Notice tone="error">{error}</Notice>}
         <Field label={tr('观测文件', 'Observation file')}>
           <div className="browse-input">
-            <Input value={obs} disabled={busy} onChange={(event) => setObs(event.target.value)} />
+            <Input
+              value={obs}
+              disabled={busy}
+              onChange={(event) => chooseObservation(event.target.value)}
+            />
             <Button
               disabled={busy}
               onClick={() =>
@@ -1235,7 +1297,7 @@ export default function ResultsPage({
                     key: 'result-observations',
                     filter: 'nc',
                   });
-                  if (file) setObs(file);
+                  if (file) chooseObservation(file);
                   return file;
                 })
               }
@@ -1454,7 +1516,7 @@ export default function ResultsPage({
                 onChange={(e) => {
                   epoch.current++;
                   setMetrics([]);
-                  setObs(e.target.value);
+                  chooseObservation(e.target.value);
                 }}
               />
             </Field>
@@ -1497,11 +1559,13 @@ export default function ResultsPage({
               </label>
             </div>
           )}
-          {actions.map((a) => (
-            <Button key={a.id} disabled={!a.enabled} onClick={() => run(async () => a.run())}>
-              {a.label}
-            </Button>
-          ))}
+          {actions
+            .filter((a) => a.id !== 'result-overview' && a.id !== 'result-improve')
+            .map((a) => (
+              <Button key={a.id} disabled={!a.enabled} onClick={() => run(async () => a.run())}>
+                {a.label}
+              </Button>
+            ))}
           {tab === 'diagnostics' && (
             <p>
               {tr(

@@ -34,7 +34,7 @@ export default function RunPanel({
   summary?: { name: string; period: string };
   onBack?: () => void;
 }) {
-  const { state, notify, update } = useApp();
+  const { state, notify, update, navigate } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [host, setHost] = useState(''),
@@ -55,7 +55,9 @@ export default function RunPanel({
     [monitor, setMonitor] = useState(false);
   const lock = useRef(false),
     alive = useRef(true),
-    latest = useRef(state.running);
+    latest = useRef(state.running),
+    currentCase = useRef(casePath);
+  currentCase.current = casePath;
   latest.current = state.running;
   const persisted = state.running[casePath];
   const kernelMatches =
@@ -66,8 +68,18 @@ export default function RunPanel({
       effectiveModelFields(state.version?.overlay),
     );
   const pending = busy || recovering || !!persisted?.running;
+  const completed =
+    persisted?.status === 'succeeded' &&
+    !persisted.running &&
+    persisted.requested_stage !== 'mksrfdata' &&
+    persisted.requested_stage !== 'mkinidata';
   const view = restoreRunView(persisted, casePath),
     remotePermissions = remoteRunPermissions(remote);
+  const resultsBlocked =
+    pending ||
+    disabled ||
+    monitor ||
+    (persisted?.location === 'remote' && !persisted.run_case && !remotePermissions.fetch);
   useEffect(() => {
     let current = true;
     alive.current = true;
@@ -91,7 +103,7 @@ export default function RunPanel({
     const known = latest.current[casePath]?.progress?.remote;
     if (known) setRemote(known);
     invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
-      .then((record) => {
+      .then(async (record) => {
         if (!current || !alive.current) return;
         setRemote(record);
         if (record)
@@ -116,6 +128,46 @@ export default function RunPanel({
                   },
                 },
           );
+        else {
+          const runs = await invokeJson<
+            {
+              status: string;
+              needs_reconciliation?: boolean;
+              operation_id?: string;
+              run_case?: string;
+              provenance?: { ok?: boolean; stage?: string | null };
+            }[]
+          >('model_case_runs', { dir: casePath });
+          if (!current || !alive.current) return;
+          const last = runs[0];
+          if (
+            last?.run_case &&
+            last.provenance?.ok === true &&
+            !last.needs_reconciliation &&
+            ['succeeded', 'completed'].includes(last.status)
+          )
+            update((old) =>
+              old.running[casePath]
+                ? {}
+                : {
+                    running: {
+                      ...old.running,
+                      [casePath]: {
+                        case: casePath,
+                        location: 'local',
+                        run_id: last.operation_id,
+                        operation_id: last.operation_id,
+                        run_case: last.run_case,
+                        requested_stage: last.provenance?.stage,
+                        status: 'succeeded',
+                        running: false,
+                        logs: [],
+                        stages: {},
+                      },
+                    },
+                  },
+            );
+        }
       })
       .catch((e) => {
         if (current) notify(String(e), true);
@@ -199,6 +251,7 @@ export default function RunPanel({
             running: true,
             logs: [],
             stages: {},
+            requested_stage: stage || null,
             ...(host ? { progress: { host } } : {}),
           } satisfies RunState,
         ]),
@@ -285,6 +338,10 @@ export default function RunPanel({
           ? { case: casePath, host: null, all: false, overwriteNewer: false }
           : { case: casePath },
       );
+      const fetchedCase =
+        command === 'remote_fetch' && typeof result.run_case === 'string'
+          ? result.run_case
+          : undefined;
       if (command === 'remote_cancel' || command === 'remote_fetch')
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: casePath });
       const merged = reconcileRemoteRun(remote, result);
@@ -294,6 +351,8 @@ export default function RunPanel({
         if (previous?.run_id !== expectedRunId) return {};
         const status = result.status as
           { state?: string; exit_code?: number; log_tail?: string } | undefined;
+        const provenance = (result.record as { provenance?: { stage?: string | null } } | undefined)
+          ?.provenance;
         const entry: RunState = {
           ...(previous ?? {
             case: casePath,
@@ -303,6 +362,8 @@ export default function RunPanel({
             stages: {},
           }),
           location: 'remote',
+          ...(fetchedCase ? { run_case: fetchedCase } : {}),
+          ...(provenance && 'stage' in provenance ? { requested_stage: provenance.stage } : {}),
           progress: { ...previous?.progress, remote: merged },
         };
         if (status) {
@@ -340,6 +401,21 @@ export default function RunPanel({
       notify(String(e), true);
       throw e;
     }
+  }
+  async function viewResults() {
+    if (!completed || resultsBlocked || lock.current) return;
+    if (persisted?.location === 'remote' && !persisted.run_case) {
+      const fetched = await remoteAction('remote_fetch');
+      const stage = (fetched as { record?: { provenance?: { stage?: string } } } | undefined)
+        ?.record?.provenance?.stage;
+      if (stage === 'mksrfdata' || stage === 'mkinidata') return;
+    }
+    if (
+      alive.current &&
+      currentCase.current === casePath &&
+      latest.current[casePath]?.run_id === persisted?.run_id
+    )
+      navigate('case', 'results');
   }
 
   const fields: UiField[] = [
@@ -449,6 +525,13 @@ export default function RunPanel({
       details: { run: view, remote, error: persisted?.error },
       fields,
       actions: [
+        {
+          id: 'run-view-results',
+          label: t('下一步：查看结果', 'Next: view results'),
+          kind: 'click',
+          enabled: !!completed && !resultsBlocked,
+          run: viewResults,
+        },
         {
           id: 'run-submit',
           label: t('开始运行', 'Start run'),
@@ -662,7 +745,7 @@ export default function RunPanel({
             </Button>
           )}
           <Button
-            variant="primary"
+            variant={completed ? 'secondary' : 'primary'}
             disabled={
               disabled || pending || !kernelMatches || (!!host && remoteSubmissionBlocked(remote))
             }
@@ -674,6 +757,15 @@ export default function RunPanel({
                 ? t('运行中…', 'Running…')
                 : t('开始运行', 'Start run')}
           </Button>
+          {completed && (
+            <Button
+              variant="primary"
+              disabled={resultsBlocked}
+              onClick={() => void viewResults().catch((e) => notify(String(e), true))}
+            >
+              {t('下一步：查看结果', 'Next: view results')}
+            </Button>
+          )}
         </div>
       </footer>
       {view && (

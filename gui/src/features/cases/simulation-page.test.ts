@@ -814,7 +814,11 @@ const processSchema = [
 ];
 for (const name of ['NewCasePage', 'CasesPage'] as const)
   test(`${name} queries applicability using the exact frozen revision and current unsaved case data`, async () => {
-    const draft = { DEF_USE_CN_INIT: '.true.', DEF_file_cn_init: '/unsaved-cn.nc' };
+    const draft = {
+      DEF_USE_BGC: '.true.',
+      DEF_USE_CN_INIT: '.true.',
+      DEF_file_cn_init: '/unsaved-cn.nc',
+    };
     const p = page(
       name,
       name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: draft } : undefined,
@@ -830,7 +834,6 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
         p.calls.filter((call) => call.command === 'model_configuration').at(-1)?.args.caseValues,
         {},
       );
-      await p.click('case-data-group-bgc');
       await guideFor(p).fill('case-DEF_file_cn_init', '/changed-cn.nc');
       await p.settle();
     }
@@ -872,11 +875,12 @@ const dataGroups = [
 ] as const;
 for (const name of ['NewCasePage', 'CasesPage'] as const)
   test(`${name} shows process data only in opened groups and retains edits when groups close`, async () => {
+    const enabled = Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.']));
     const p = page(
       name,
-      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: enabled } : undefined,
       [site],
-      initialValues,
+      { ...initialValues, ...enabled },
       { schema: processSchema },
     );
     await p.mount();
@@ -888,6 +892,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
         p.render().actions.some((a) => a.id === `${groupPrefix}${id}`),
         'each data group remains discoverable',
       );
+      await p.click(`${groupPrefix}${id}`);
       assert.ok(
         !p.render().fields.some((f) => f.id === `${prefix}${fieldName}`),
         'closed groups do not expose invisible controls',
@@ -1051,7 +1056,13 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
   });
 test('existing case run and result tabs never expose settings-only process data actions', async () => {
-  const p = page('CasesPage', undefined, [site], initialValues, { schema: processSchema });
+  const p = page(
+    'CasesPage',
+    undefined,
+    [site],
+    { ...initialValues, DEF_USE_BGC: '.true.' },
+    { schema: processSchema },
+  );
   await p.mount();
   await p.click('case-step-3');
   assert.ok(p.render().actions.some((a) => a.id === 'case-data-group-bgc'));
@@ -1453,3 +1464,33 @@ test('existing case ignores schema planting-day zero and stale crop flags when t
   assert.equal(actual.DEF_USE_BGC, undefined);
   assert.equal(actual.DEF_URBAN_RUN, undefined);
 });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} hides inactive and unspecified process inputs even in advanced settings`, async () => {
+    for (const parentValue of [undefined, '.false.']) {
+      const retained = Object.fromEntries(
+        dataGroups.flatMap(([, parent, child]) => [
+          [child, '/retained.nc'],
+          ...(parentValue ? [[parent, parentValue]] : []),
+        ]),
+      );
+      const p = page(
+        name,
+        name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: retained } : undefined,
+        [site],
+        { ...initialValues, ...retained },
+        { schema: processSchema },
+      );
+      p.state.expert = true;
+      await p.mount();
+      if (name === 'CasesPage') await p.click('case-step-3');
+      const contract = p.render();
+      assert.ok(!contract.actions.some((a) => a.id.includes('data-group-')));
+      for (const [, , child] of dataGroups)
+        assert.ok(!contract.fields.some((f) => f.id.endsWith(child)));
+      assert.equal(
+        p.calls.some((call) => call.command === 'case_data_save'),
+        false,
+      );
+    }
+  });

@@ -101,7 +101,8 @@ export default function ConfigurationOptions({
       rows: ReturnType<typeof tracerRows>;
     } | null>(null),
     [saving, setSaving] = useState(false);
-  const pftOpen = opened.pft ?? false;
+  const pftVisible = !onCaseChange || ['PFT', 'PC'].includes(subgrid ?? '');
+  const pftOpen = pftVisible && (opened.pft ?? false);
   const selection =
     pftOpen &&
     /^\d+$/.test(pftIndex) &&
@@ -485,12 +486,27 @@ export default function ConfigurationOptions({
     'assimilation',
     'other',
   ].map((id) => modelSettingGroups.find((g) => g[0] === id)!);
+  const caseProcessVisible = (id: string) => !onCaseChange || parentValues[id] === true;
   const groups = orderedGroups.map(([id, zh, english]) => {
+    if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
       .filter((field) => !excludeKeys.includes(field.name) && groupedField(field, catalog))
+      .filter(() => id !== 'ecology' || caseProcessVisible(id))
+      .filter(
+        (field) =>
+          !onCaseChange ||
+          (field.name === 'DEF_SOLO_PFT'
+            ? subgrid === 'PFT'
+            : ['DEF_FAST_PC', 'DEF_PC_CROP_SPLIT'].includes(field.name)
+              ? subgrid === 'PC'
+              : field.name === 'DEF_LULCC_SCHEME'
+                ? parentValues.subgrid === true
+                : true),
+      )
       .filter(
         (f) => modelSettingGroup(f) === id && !(showStomatal && stomatalFields.includes(f.name)),
       );
+    if (onCaseChange && !rows.length && !['ecology', 'tracer'].includes(id)) return null;
     actions.push({
       id: `${groupPrefix}-group-${id}`,
       label: t(zh, english),
@@ -523,7 +539,7 @@ export default function ConfigurationOptions({
     storedTracers = tracerRows(resetModelOption(overlay, 'DEF_TRACER_PARAM_FILES'));
     tracerError = String(e);
   }
-  const tracerOpen = open('tracer'),
+  const tracerOpen = caseProcessVisible('tracer') && open('tracer'),
     table = tracers ?? storedTracers,
     tracerFields = fields.filter((f) => f.name.startsWith('DEF_TRACER_'));
   const tracerTooLarge = Number(modelSettingValue(overlay, 'DEF_TRACER_NUM') ?? '0') > 100;
@@ -781,7 +797,7 @@ export default function ConfigurationOptions({
       },
     },
   );
-  const assets = values.process_files.map((asset) => {
+  const assets = (caseProcessVisible('tracer') ? values.process_files : []).map((asset) => {
     const isOpen = opened[`${sourceKey}:${asset.file}`] ?? tracerOpen;
     actions.push({
       id: `configuration-asset-${asset.file}`,
@@ -945,16 +961,17 @@ export default function ConfigurationOptions({
       run: importProcess,
     });
   }
-  actions.push({
-    id: 'configuration-pft-toggle',
-    label: t('PFT / PC 索引参数', 'Indexed PFT / PC parameters'),
-    kind: 'click',
-    enabled: !disabled,
-    run: () => {
-      if (disabled) throw new Error('Configuration is locked');
-      setOpened((previous) => ({ ...previous, pft: !pftOpen }));
-    },
-  });
+  if (pftVisible)
+    actions.push({
+      id: 'configuration-pft-toggle',
+      label: t('PFT / PC 索引参数', 'Indexed PFT / PC parameters'),
+      kind: 'click',
+      enabled: !disabled,
+      run: () => {
+        if (disabled) throw new Error('Configuration is locked');
+        setOpened((previous) => ({ ...previous, pft: !pftOpen }));
+      },
+    });
   if (pftOpen)
     controls.push(
       {
@@ -1003,8 +1020,8 @@ export default function ConfigurationOptions({
     <div className="configuration-options">
       <Notice>
         {t(
-          '配置值与目录默认值分别展示；未确定的条件保留并标为待核对。关闭父开关不会删除子项覆盖。',
-          'Configured values and catalog defaults are shown separately. Unknown conditions remain visible and pending. Turning off a parent preserves child overrides.',
+          '配置值与目录默认值分别展示；启用过程后显示相关配置。关闭过程保留已有设置。',
+          'Configured values and catalog defaults are shown separately. Enable a process to see its settings. Disabling it preserves saved values.',
         )}
       </Notice>
       {error && <Notice tone="error">{error}</Notice>}
@@ -1012,92 +1029,96 @@ export default function ConfigurationOptions({
       {groups}
       {familyCards}
       {tracerTable}
-      <Card title={t('示踪过程文件', 'Tracer process files')}>
-        {ready && !overlay.process_files.length && (
-          <p className="muted">
-            {t(
-              '当前版本尚未导入过程参数文件。',
-              'This version has no imported process parameter files.',
-            )}
-          </p>
-        )}
-        {overlay.process_files.map((asset) => (
-          <p key={asset.relative_path}>
-            {asset.relative_path} · <code>{asset.sha256}</code>
-          </p>
-        ))}
-        {assets}
-        {onImportProcess && (
-          <div className="form-grid">
-            <Field label={t('版本中的相对文件名', 'Relative filename in version')}>
-              <Input
-                disabled={locked}
-                value={processName}
-                placeholder="CH4.nml"
-                onChange={(e) => setProcessName(e.target.value)}
-              />
-            </Field>
-            <Button
-              disabled={locked || !processName.trim()}
-              onClick={() => {
-                void importProcess().catch(() => {});
-              }}
-            >
-              {t('选择并导入过程文件', 'Choose and import process file')}
-            </Button>
-          </div>
-        )}
-      </Card>
-      <Advanced
-        title={t('PFT / PC 索引参数', 'Indexed PFT / PC parameters')}
-        open={pftOpen}
-        onOpenChange={(value) => {
-          if (!disabled) setOpened((previous) => ({ ...previous, pft: value }));
-        }}
-      >
-        {pftOpen && (
-          <>
+      {caseProcessVisible('tracer') && (
+        <Card title={t('示踪过程文件', 'Tracer process files')}>
+          {ready && !overlay.process_files.length && (
+            <p className="muted">
+              {t(
+                '当前版本尚未导入过程参数文件。',
+                'This version has no imported process parameter files.',
+              )}
+            </p>
+          )}
+          {overlay.process_files.map((asset) => (
+            <p key={asset.relative_path}>
+              {asset.relative_path} · <code>{asset.sha256}</code>
+            </p>
+          ))}
+          {assets}
+          {onImportProcess && (
             <div className="form-grid">
-              <Field label="PFT / PC">
-                <Select
-                  disabled={disabled}
-                  value={pftKind}
-                  onChange={(e) => {
-                    setPftKind(e.target.value);
-                    setInputs({});
-                  }}
-                >
-                  <option value="pft">PFT</option>
-                  <option value="pc-pft">PC PFT</option>
-                </Select>
+              <Field label={t('版本中的相对文件名', 'Relative filename in version')}>
+                <Input
+                  disabled={locked}
+                  value={processName}
+                  placeholder="CH4.nml"
+                  onChange={(e) => setProcessName(e.target.value)}
+                />
               </Field>
-              <Field label={t('PFT 索引（0–78）', 'PFT index (0–78)')}>
-                <Select
-                  disabled={disabled}
-                  value={pftIndex}
-                  onChange={(e) => {
-                    setPftIndex(e.target.value);
-                    setInputs({});
-                  }}
-                >
-                  <option value="">{t('明确选择类型', 'Choose a type')}</option>
-                  {PFT.map(([index, zh, english]) => (
-                    <option value={index} key={index}>
-                      {index} · {t(zh, english)}
-                    </option>
-                  ))}
-                </Select>
-              </Field>
+              <Button
+                disabled={locked || !processName.trim()}
+                onClick={() => {
+                  void importProcess().catch(() => {});
+                }}
+              >
+                {t('选择并导入过程文件', 'Choose and import process file')}
+              </Button>
             </div>
-            {!selection && (
-              <Notice tone="warning">
-                {t('请输入 0–78 的整数索引。', 'Enter an integer index from 0 to 78.')}
-              </Notice>
-            )}
-            {indexed}
-          </>
-        )}
-      </Advanced>
+          )}
+        </Card>
+      )}
+      {pftVisible && (
+        <Advanced
+          title={t('PFT / PC 索引参数', 'Indexed PFT / PC parameters')}
+          open={pftOpen}
+          onOpenChange={(value) => {
+            if (!disabled) setOpened((previous) => ({ ...previous, pft: value }));
+          }}
+        >
+          {pftOpen && (
+            <>
+              <div className="form-grid">
+                <Field label="PFT / PC">
+                  <Select
+                    disabled={disabled}
+                    value={pftKind}
+                    onChange={(e) => {
+                      setPftKind(e.target.value);
+                      setInputs({});
+                    }}
+                  >
+                    <option value="pft">PFT</option>
+                    <option value="pc-pft">PC PFT</option>
+                  </Select>
+                </Field>
+                <Field label={t('PFT 索引（0–78）', 'PFT index (0–78)')}>
+                  <Select
+                    disabled={disabled}
+                    value={pftIndex}
+                    onChange={(e) => {
+                      setPftIndex(e.target.value);
+                      setInputs({});
+                    }}
+                  >
+                    <option value="">{t('明确选择类型', 'Choose a type')}</option>
+                    {PFT.map(([index, zh, english]) => (
+                      <option value={index} key={index}>
+                        {index} · {t(zh, english)}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              {!selection && (
+                <Notice tone="warning">
+                  {t('请输入 0–78 的整数索引。', 'Enter an integer index from 0 to 78.')}
+                </Notice>
+              )}
+              {indexed}
+            </>
+          )}
+        </Advanced>
+      )}
     </div>
   );
 }

@@ -464,28 +464,36 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
   );
 });
 
-test('overview navigation uses the page transition inside the current UI action', async () => {
-  const steps: string[] = [],
+test('result navigation opens research and returns diagnostics to overview', async () => {
+  const destinations: string[] = [],
     noop = () => {};
-  const actions = callback('../results/ResultsPage.tsx', 'actions', {
-    tab: 'overview',
-    source: '',
-    variable: '',
-    obs: '',
-    busy: false,
-    series: null,
-    plot: noop,
-    exportFullSeries: noop,
-    evaluate: noop,
-    setTab: noop,
-    tr: (zh: string) => zh,
-    openPage: async (step: string) => {
-      steps.push(step);
-    },
-  }) as unknown as { id: string; run: () => Promise<unknown> }[];
-  await actions.find((action) => action.id === 'result-tuning')!.run();
-  await actions.find((action) => action.id === 'result-uncertainty')!.run();
-  assert.deepEqual(steps, ['result-tuning', 'result-uncertainty']);
+  for (const tab of ['overview', 'diagnostics']) {
+    const actions = callback('../results/ResultsPage.tsx', 'actions', {
+      tab,
+      source: '',
+      variable: '',
+      obs: '',
+      busy: false,
+      series: null,
+      catalog: null,
+      plot: noop,
+      exportFullSeries: noop,
+      evaluate: noop,
+      diagnose: noop,
+      setTab: (step: string) => destinations.push(step),
+      tr: (zh: string) => zh,
+      navigate: (page: string) => destinations.push(page),
+    }) as unknown as { id: string; enabled?: boolean; run: () => Promise<unknown> }[];
+    const improve = actions.find((action) => action.id === 'result-improve')!;
+    assert.equal(improve.enabled, true);
+    await improve.run();
+    if (tab === 'diagnostics') {
+      const back = actions.find((action) => action.id === 'result-overview')!;
+      assert.equal(back.enabled, true);
+      await back.run();
+    }
+  }
+  assert.deepEqual(destinations, ['research', 'research', 'overview']);
 });
 
 test('overview contract exposes optional evaluation conditions only while advanced settings are visible', () => {
@@ -524,7 +532,7 @@ test('overview contract exposes optional evaluation conditions only while advanc
     setFrom: noop,
     setTo: noop,
     setVariable: noop,
-    setObs: noop,
+    chooseObservation: noop,
     setSpinup: noop,
     setCorrected: noop,
     setComparison: noop,
