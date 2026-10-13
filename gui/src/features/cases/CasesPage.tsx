@@ -389,14 +389,14 @@ export default function CasesPage() {
   };
   const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
   const dataGroups =
-    state.caseTab === 'settings' && step === 3
+    state.caseTab === 'settings' && step === 3 && advanced
       ? processDataSections
           .filter(([, , , parent]) => /^(true|\.true\.)$/i.test(physics[parent] ?? ''))
-          .map(([id, zh, english, parent]) => ({
+          .map(([id, zh, english]) => ({
             id,
             title: t(zh, english),
             fields: visibleSchema.filter((f) => processDataGroupId(f) === id),
-            open: dataOpened[id] ?? /^(true|\.true\.)$/i.test(physics[parent] ?? ''),
+            open: dataOpened[id] ?? false,
           }))
           .filter((group) => group.fields.length)
       : [];
@@ -720,7 +720,19 @@ export default function CasesPage() {
   const outputBasic = basic.filter((f) => !f.name.startsWith('DEF_simulation_time%'));
   const more = () => (
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
-      {advanced && <div className="form-grid">{extras.map(render)}</div>}
+      {advanced && (
+        <>
+          <div className="form-grid">{extras.map(render)}</div>
+          {step === 3 && (
+            <ProcessDataGroups
+              groups={dataGroups}
+              onToggle={(id, open) => setDataOpened((previous) => ({ ...previous, [id]: open }))}
+              render={render}
+              disabled={editingDisabled}
+            />
+          )}
+        </>
+      )}
     </Advanced>
   );
   return (
@@ -815,12 +827,7 @@ export default function CasesPage() {
                 )}
               </p>
               <div className="form-grid">{basic.map(render)}</div>
-              <ProcessDataGroups
-                groups={dataGroups}
-                onToggle={(id, open) => setDataOpened((previous) => ({ ...previous, [id]: open }))}
-                render={render}
-                disabled={editingDisabled}
-              />
+
               {more()}
             </Card>
           )}

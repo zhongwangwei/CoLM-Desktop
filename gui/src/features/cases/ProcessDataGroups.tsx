@@ -18,7 +18,7 @@ export default function ProcessDataGroups({
       {groups.map((group) => (
         <Advanced
           key={group.id}
-          title={`${group.title} · ${group.fields.length}`}
+          title={group.title}
           open={group.open}
           onOpenChange={(open) => {
             if (!disabled) onToggle(group.id, open);

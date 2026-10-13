@@ -841,6 +841,8 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
         p.calls.filter((call) => call.command === 'model_configuration').at(-1)?.args.caseValues,
         {},
       );
+      p.set('case-advanced', 'true');
+      await p.click('case-data-group-bgc');
       await guideFor(p).fill('case-DEF_file_cn_init', '/changed-cn.nc');
       await p.settle();
     }
@@ -894,12 +896,21 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     if (name === 'CasesPage') await p.click('case-step-3');
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-',
       groupPrefix = name === 'NewCasePage' ? 'new-data-group-' : 'case-data-group-';
+    assert.ok(!p.render().actions.some((a) => a.id.startsWith(groupPrefix)));
+    assert.ok(!p.render().fields.some((f) => dataGroups.some(([, , key]) => f.id.endsWith(key))));
+    assert.ok(!p.elements.some((e) => e.type === 'ProcessDataGroups'));
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     for (const [id, , fieldName] of dataGroups) {
+      assert.equal(
+        (p.element('ProcessDataGroups').props.groups as { id: string; open: boolean }[]).find(
+          (group) => group.id === id,
+        )?.open,
+        false,
+      );
       assert.ok(
         p.render().actions.some((a) => a.id === `${groupPrefix}${id}`),
         'each data group remains discoverable',
       );
-      await p.click(`${groupPrefix}${id}`);
       assert.ok(
         !p.render().fields.some((f) => f.id === `${prefix}${fieldName}`),
         'closed groups do not expose invisible controls',
@@ -907,6 +918,10 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       await p.click(`${groupPrefix}${id}`);
       assert.ok(p.render().fields.some((f) => f.id === `${prefix}${fieldName}`));
     }
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'false');
+    assert.ok(!p.render().actions.some((a) => a.id.startsWith(groupPrefix)));
+    assert.ok(!p.render().fields.some((f) => dataGroups.some(([, , key]) => f.id.endsWith(key))));
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     await guideFor(p).fill(`${prefix}DEF_file_cn_init`, '/keep-cn.nc');
     await p.settle();
     await p.click(`${groupPrefix}bgc`);
@@ -921,7 +936,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
   });
 for (const name of ['NewCasePage', 'CasesPage'] as const)
-  test(`${name} opens enabled parent groups by default and recomputes CN input gates before saving`, async () => {
+  test(`${name} opens enabled parent groups from more settings and recomputes CN input gates before saving`, async () => {
     const p = page(
       name,
       name === 'NewCasePage'
@@ -956,6 +971,9 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
 
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    for (const [id] of dataGroups)
+      await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-${id}`);
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
     for (const [, , fieldName] of dataGroups)
       assert.equal(
@@ -1010,6 +1028,8 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-bgc`);
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
     assert.ok(waiting.length);
     waiting.at(-1)!.resolve(cnSnapshot());
@@ -1062,6 +1082,7 @@ test('existing case run and result tabs never expose settings-only process data 
   );
   await p.mount();
   await p.click('case-step-3');
+  p.set('case-advanced', 'true');
   assert.ok(p.render().actions.some((a) => a.id === 'case-data-group-bgc'));
   for (const tab of ['runs', 'results']) {
     await p.click(`case-tab-${tab}`);
@@ -1536,6 +1557,8 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     p.state.expert = true;
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-bgc`);
     const controls = p.render().fields;
     for (const key of children) assert.ok(!controls.some((f) => f.id.endsWith(key)), key);
     for (const key of ['UNKNOWN_DATA', 'READONLY_DATA', 'DEF_USE_CN_INIT'])
