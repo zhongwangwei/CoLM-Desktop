@@ -32993,3 +32993,12 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 - 缓存仓库建好后用 `git add -A -f` 把复制进来的文件都加入索引，并当场核对摘要。
 
 实测用打包出来的 release `colm-cli` 在临时 registry 里验证（`/private/tmp/claude-501/freeze-e2e.sh`）：`model-list` → `model-create` → `model-freeze` 全部通过。没有改动的草稿冻结后返回 `official@1`；带 PC 方案的草稿第一次冻结生成新版本，第二次同样的改动复用同一个版本，registry 里只有 `official` 和这一个版本。修复前同一脚本报 “official source changed while freezing”。colm-cli 375 项、`study_cli_tuning` 21 项、colm-remote 57 项测试通过，clippy 干净。
+
+
+## Windows CI 修复：合法测试文件名与输出目录前缀（2026-10-13）
+
+最新 main `eb1fc9ae` 的 CI run 38353934358 只有 Windows Rust 测试失败：`colm-workspace` 两项回归用冒号、星号、制表符或换行构造文件名，Windows 创建/改名在调用被测逻辑前已失败（InvalidFilename / git mv Invalid argument）。修复仅为 Windows 换用空格和方括号的合法特殊文件名，Unix 保留原 pathspec magic 与控制字符覆盖，不跳过回归或放宽断言。
+
+同一提交的 windows-kernel run 38353934354 在真实 CN-Cng 流程初始化前失败：配置中的普通 `D:\...\out` 与 canonicalize 得到的 `\\?\D:\...\out` 被误判为自定义目录。输出目录前缀归一化必须在目录尚不存在时也生效，且保留不同输出目录拒绝。
+
+修复将 Windows VerbatimDisk/VerbatimUNC 前缀标准化为普通磁盘/UNC 前缀，只统一路径拼写，不允许不同目录。新增磁盘/UNC等价、双向实际输出目录校验、目录尚不存在及不同目录拒绝回归。本地定向 `colm-workspace` patch 测试 15/15、CLI output_dir 测试 3/3通过；两包相关 Clippy、格式和diff检查通过。Windows专属分支与完整端到端仍待本PR的GitHub Windows runner验证。

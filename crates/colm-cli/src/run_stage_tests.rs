@@ -62,6 +62,52 @@ fn test_directory(label: &str) -> PathBuf {
     path
 }
 
+#[cfg(windows)]
+#[test]
+fn output_dir_normalization_matches_windows_verbatim_prefixes() {
+    for (plain, verbatim) in [
+        (r"D:\cases\probe-case", r"\\?\D:\cases\probe-case"),
+        (
+            r"\\server\share\probe-case",
+            r"\\?\UNC\server\share\probe-case",
+        ),
+    ] {
+        let case_nml = Path::new(verbatim).join("case.nml");
+        let expected = normalize_output_dir(&case_nml, &format!(r"{verbatim}\out"));
+        for raw in [format!(r"{plain}\out"), "out/".into(), "./out".into()] {
+            assert_eq!(normalize_output_dir(&case_nml, &raw), expected);
+        }
+        assert_ne!(
+            normalize_output_dir(&case_nml, &format!(r"{plain}\elsewhere")),
+            expected
+        );
+    }
+}
+
+#[test]
+fn cli_output_dir_accepts_canonical_case_paths_before_output_exists() {
+    let root = test_directory("canonical-output-dir");
+    #[cfg(not(windows))]
+    let root = root.canonicalize().unwrap();
+    let canonical = root.canonicalize().unwrap();
+    let case_nml = canonical.join("case.nml");
+    assert!(!root.join("out").exists());
+    for (actual, expected) in [(&root, &canonical), (&canonical, &root)] {
+        std::fs::write(
+            &case_nml,
+            format!(
+                "&nl_colm\nDEF_dir_output = '{}'\n/\n",
+                actual.join("out").display()
+            ),
+        )
+        .unwrap();
+        ensure_cli_output_dir(&case_nml, &expected.join("out")).unwrap();
+        let error = ensure_cli_output_dir(&case_nml, &expected.join("elsewhere")).unwrap_err();
+        assert!(error.to_string().contains("custom output"), "{error}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn only_the_three_real_kernel_stages_are_accepted() {
     assert_eq!(requested_run_stage(None).unwrap(), None);

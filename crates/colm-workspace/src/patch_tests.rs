@@ -195,7 +195,12 @@ fn protected_paths_cannot_be_reached_through_another_spelling() {
 #[test]
 fn file_restore_is_literal_and_preserves_other_changes() {
     let (root, ws) = fresh("single-file");
-    let odd = ":(glob)* tab\tline\n.rs";
+    // Windows forbids pathspec-magic punctuation and control characters in filenames.
+    let odd = if cfg!(windows) {
+        "literal [ab] file.rs"
+    } else {
+        ":(glob)* tab\tline\n.rs"
+    };
     std::fs::write(ws.src().join(odd), "new\n").unwrap();
     git::run(&ws.src(), &["add", "-A"]).unwrap();
     git::run(&ws.src(), &["commit", "-qm", "new file"]).unwrap();
@@ -319,7 +324,11 @@ fn diff_output_is_bounded_and_binary_is_described() {
 fn renamed_files_are_separate_literal_changes() {
     let (root, ws) = fresh("rename-file");
     let original = "vendor/CoLM202X/main/MOD_Demo.F90";
-    let renamed = "renamed file\t\n.F90";
+    let renamed = if cfg!(windows) {
+        "renamed [ab] file.F90"
+    } else {
+        "renamed file\t\n.F90"
+    };
     git::run(&ws.src(), &["mv", "--", original, renamed]).unwrap();
     git::run(&ws.src(), &["commit", "-qm", "rename"]).unwrap();
     let files = ws.changes_from_official().unwrap();
