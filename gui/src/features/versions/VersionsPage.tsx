@@ -28,6 +28,7 @@ import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
+import { schemeVersionName } from './version-tree';
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
@@ -41,7 +42,9 @@ export default function VersionsPage() {
     [catalog, setCatalog] = useState<Descriptor[]>([]),
     [fields, setFields] = useState<ModelField[]>([]),
     [name, setName] = useState(
-      requestedStructure ? `${state.version?.name ?? 'CoLM'} · ${requestedStructure}` : '',
+      requestedStructure
+        ? schemeVersionName(state.version?.name ?? 'CoLM', requestedStructure)
+        : '',
     ),
     [note, setNote] = useState(
       requestedStructure

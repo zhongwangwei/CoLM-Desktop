@@ -10,10 +10,31 @@ use std::path::{Path, PathBuf};
 impl Registry {
     /// Migrate by adding sidecars only. All original files remain byte-for-byte intact.
     pub fn migrate_case(&self, case: &Path, code: CodeRef) -> Result<CaseBinding> {
+        self.migrate_case_to(case, code, None)
+    }
+    /// Like [`Self::migrate_case`], but bind the case to `target` instead of deriving a version
+    /// from its namelist: a new case created for a chosen version, or a Study member that belongs
+    /// to its Study's pinned revision. No draft or revision is created.
+    pub fn migrate_case_to(
+        &self,
+        case: &Path,
+        code: CodeRef,
+        target: Option<VersionRef>,
+    ) -> Result<CaseBinding> {
         let case = case.canonicalize()?;
         let _migration_lock = MigrationLock::acquire(&case)?;
         if case.join(BINDING_FILE).exists() {
             let binding: CaseBinding = read_json(&case.join(BINDING_FILE))?;
+            if target.as_ref().is_some_and(|t| *t != binding.version) {
+                // Rebinding an already migrated case: keep its data sidecar, replace the version.
+                self.get(target.as_ref().context("target")?)?;
+                let rebound = CaseBinding {
+                    version: target.clone().context("target")?,
+                    ..binding
+                };
+                write_json(&case.join(BINDING_FILE), &rebound)?;
+                return Ok(rebound);
+            }
             ensure!(binding.schema == SCHEMA, "unsupported case binding schema");
             self.get(&binding.version)?;
             let data: CaseData = read_json(&case.join(CASE_DATA_FILE))?;
@@ -171,33 +192,42 @@ impl Registry {
                     assets,
                 });
             }
+            // Spellings that do not change what CoLM runs are not a modification.
+            overlay.physics = crate::equivalence::minimize_physics(&overlay.physics);
             crate::registry::normalize_overlay(&mut overlay);
             validate_overlay(&overlay)?;
-            let identity = digest_json(&(&code, &overlay, digest(&original)))?;
-            let id = format!("migrated-{}", &identity[..24]);
-            let draft_file = self.root.join("drafts").join(format!("{id}.json"));
-            if draft_file.exists() {
-                let existing = self.draft(&id)?;
-                ensure!(
-                    existing.code == code && existing.overlay == overlay,
-                    "previous migration draft was edited; refusing to bind changed configuration"
-                );
+            let version = if let Some(target) = target {
+                self.get(&target)?;
+                target
+            } else if code.kind == CodeKind::Official && crate::equivalence::is_noop(&overlay) {
+                official.version.clone()
             } else {
-                self.create_draft(ModelDraft {
-                    id: id.clone(),
-                    name: colm_case::case_name(&case.join("case.nml"))
-                        .unwrap_or_else(|_| "Migrated case".into()),
-                    note: "Preserved model configuration imported from an existing case".into(),
-                    parent: official.version,
-                    code,
-                    overlay,
-                    applicability: Applicability::default(),
-                    generation: 0,
-                    derived_from: Some(format!("case:{}", digest(&original))),
-                    created_unix: 0,
-                })?;
-            }
-            let frozen = self.freeze(&id, &stage)?;
+                let identity = digest_json(&(&code, &overlay, digest(&original)))?;
+                let id = format!("migrated-{}", &identity[..24]);
+                let draft_file = self.root.join("drafts").join(format!("{id}.json"));
+                if draft_file.exists() {
+                    let existing = self.draft(&id)?;
+                    ensure!(
+                        existing.code == code && existing.overlay == overlay,
+                        "previous migration draft was edited; refusing to bind changed configuration"
+                    );
+                } else {
+                    self.create_draft(ModelDraft {
+                        id: id.clone(),
+                        name: colm_case::case_name(&case.join("case.nml"))
+                            .unwrap_or_else(|_| "Migrated case".into()),
+                        note: "Preserved model configuration imported from an existing case".into(),
+                        parent: official.version,
+                        code,
+                        overlay,
+                        applicability: Applicability::default(),
+                        generation: 0,
+                        derived_from: Some(format!("case:{}", digest(&original))),
+                        created_unix: 0,
+                    })?;
+                }
+                self.freeze(&id, &stage)?.version
+            };
             let original_case_sha256 = digest(&original);
             let data = CaseData {
                 schema: SCHEMA,
@@ -216,7 +246,7 @@ impl Registry {
             }
             let binding = CaseBinding {
                 schema: SCHEMA,
-                version: frozen.version,
+                version,
                 original_case_sha256,
                 migrated_unix: now()?,
                 model_fields,

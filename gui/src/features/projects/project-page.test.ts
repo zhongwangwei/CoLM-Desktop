@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { choosableVersions, latestOfficial } from '../versions/version-tree';
 
 function choose(context: Record<string, unknown>) {
   const path = new URL('./ProjectPage.tsx', import.meta.url),
@@ -130,6 +131,7 @@ test('project contract exposes only version dialog actions while the dialog is o
     chosen: string[] = [];
   const versionActions = expression('versionActions', {
     state: { versions: [model] },
+    versionRows: [{ version: model, depth: 0 }],
     versionKey: (value: typeof model) => JSON.stringify(value.version),
     versionEnabled: true,
     chooseVersion: async (key: string) => chosen.push(key),
@@ -264,6 +266,8 @@ function home() {
     },
     recentProjectRoots: () => [],
     rememberProject: (_roots: unknown, root: string) => [root],
+    choosableVersions,
+    latestOfficial,
     projectName: (root: string) => root,
     invokeJson: async (command: string, args: unknown) => {
       calls.push({ command, args });
@@ -303,7 +307,7 @@ function home() {
     },
   };
 }
-test('boot model does not unlock project tasks; explicit choice unlocks them for this app session', async () => {
+test('the loaded official model is usable at once; choosing another version is optional', async () => {
   const page = home(),
     tasks = [
       'project-new-simulation',
@@ -315,47 +319,31 @@ test('boot model does not unlock project tasks; explicit choice unlocks them for
     ];
   let contract = page.render();
   for (const id of tasks)
-    assert.equal(contract.actions.find((action) => action.id === id)?.enabled, false, id);
-  assert.equal(
-    contract.actions.find((action) => action.id === 'project-model')?.enabled,
-    true,
-    'the first-stage modified-model entry stays available',
-  );
+    assert.equal(contract.actions.find((action) => action.id === id)?.enabled, true, id);
   await page.click('project-existing');
   await page.click('project-version-close');
   contract = page.render();
   for (const id of tasks)
     assert.equal(
       contract.actions.find((action) => action.id === id)?.enabled,
-      false,
-      'cancel is not a selection',
+      true,
+      'closing the chooser keeps the current model',
     );
-  contract = await page.click('project-official');
-  assert.deepEqual(page.state.chosenVersion, page.model.version);
-  for (const id of tasks)
-    assert.equal(contract.actions.find((action) => action.id === id)?.enabled, true, id);
   await page.click('project-new-simulation');
   assert.deepEqual(page.routes, ['new-case']);
-  contract = page.remount();
-  for (const id of tasks)
-    assert.equal(
-      contract.actions.find((action) => action.id === id)?.enabled,
-      true,
-      'returning home retains the choice',
-    );
   page.state.versionRef = { id: 'official', revision: 5 };
-  page.state.version = { ...page.model, version: page.state.versionRef };
   contract = page.render();
   for (const id of tasks)
     assert.equal(
       contract.actions.find((action) => action.id === id)?.enabled,
       false,
-      'a different loaded revision is not the chosen model',
+      'tasks wait while the selected revision is still being read',
     );
 });
-test('a failed version read leaves the project locked and the version modal open', async () => {
+test('a failed version read keeps the current model and leaves the version modal open', async () => {
   const page = home();
   page.render();
+  const before = page.state.versionRef;
   await page.click('project-existing');
   page.fail();
   await assert.rejects(
@@ -363,13 +351,13 @@ test('a failed version read leaves the project locked and the version modal open
     /model read failed/,
   );
   let contract = page.render();
-  assert.equal(page.state.chosenVersion, null);
+  assert.deepEqual(page.state.versionRef, before);
   assert.ok(contract.actions.some((action) => action.id === 'project-version-close'));
   await page.click('project-version-close');
   contract = page.render();
   assert.equal(
     contract.actions.find((action) => action.id === 'project-new-simulation')?.enabled,
-    false,
+    true,
   );
 });
 test('model manager selection and successful freezing record the chosen frozen revision', async () => {

@@ -5,6 +5,7 @@ import ts from 'typescript';
 import * as model from './model';
 import * as setup from './scientific-setup';
 import { researchVersion } from './research-version';
+import { schemeVersionName } from './version-tree';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
@@ -60,6 +61,7 @@ function page(
     ...setup,
     ScientificSetupCards: 'ScientificSetupCards',
     researchVersion,
+    schemeVersionName,
     compatibleKernel,
     effectiveModelFields,
     ConfigurationOptions: 'ConfigurationOptions',

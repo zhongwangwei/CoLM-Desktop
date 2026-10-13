@@ -145,7 +145,12 @@ fn migration_is_lossless_idempotent_and_reversible_and_run_is_isolated() {
     assert_eq!(
         doc.get("SITE_fsitedata"),
         Some(&colm_namelist::Value::Str(
-            case.join("site.nc").to_string_lossy().into_owned()
+            // Migration resolves the case directory (macOS temp dirs live behind /var → /private/var).
+            case.canonicalize()
+                .unwrap()
+                .join("site.nc")
+                .to_string_lossy()
+                .into_owned()
         ))
     );
     assert!(
@@ -589,5 +594,121 @@ fn runtime_structure_controls_pft_parameter_materialization() {
                 );
             }
         }
+    }
+}
+
+fn case_with(tmp: &Temp, name: &str, extra: &str) -> PathBuf {
+    let path = tmp.0.join(name);
+    fs::create_dir(&path).unwrap();
+    fs::write(
+        path.join("case.nml"),
+        format!("&nl_colm\n DEF_CASE_NAME = '{name}'\n SITE_fsitedata = 'site.nc'\n{extra}/\n"),
+    )
+    .unwrap();
+    fs::write(path.join("site.nc"), b"fixture dataset").unwrap();
+    path
+}
+
+#[test]
+fn cases_whose_switches_change_nothing_bind_to_official_without_new_versions() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    // What the case generator writes: switches CoLM forces off anyway, plus a default value.
+    let case = case_with(
+        &tmp,
+        "plain",
+        " DEF_USE_FERT = .false.\n DEF_USE_CNSOYFIXN = .false.\n DEF_USE_NITRIF = .false.\n DEF_Aerosol_Readin = .false.\n DEF_USE_BGC = .false.\n",
+    );
+    let binding = reg.migrate_case(&case, code()).unwrap();
+    assert_eq!(binding.version.id, "official");
+    assert_eq!(reg.list().unwrap().len(), 1, "no migrated version");
+    assert!(reg.drafts().unwrap().is_empty(), "no migration draft");
+}
+
+#[test]
+fn identical_model_changes_in_two_cases_share_one_version() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let a = case_with(&tmp, "a", " DEF_USE_BGC = .true.\n");
+    let b = case_with(
+        &tmp,
+        "b",
+        " DEF_USE_BGC = .true.\n DEF_USE_FERT = .false.\n DEF_USE_CROP = .false.\n",
+    );
+    let first = reg.migrate_case(&a, code()).unwrap().version;
+    let second = reg.migrate_case(&b, code()).unwrap().version;
+    assert_ne!(first.id, "official");
+    assert_eq!(first, second);
+    assert_eq!(reg.list().unwrap().len(), 2);
+}
+
+#[test]
+fn freezing_an_existing_configuration_returns_that_version_and_drops_the_draft() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut pc = draft(official.version.clone());
+    pc.id = "pc".into();
+    pc.overlay
+        .physics
+        .insert("DEF_USE_PC".into(), ".true.".into());
+    reg.create_draft(pc).unwrap();
+    let pc = reg.freeze("pc", &tmp.0).unwrap();
+    // Choosing PFT and then PC again from the PC version derives the same configuration.
+    let mut again = draft(pc.version.clone());
+    again.id = "pc-again".into();
+    again
+        .overlay
+        .physics
+        .insert("DEF_USE_PC".into(), ".true.".into());
+    reg.create_draft(again).unwrap();
+    assert_eq!(reg.freeze("pc-again", &tmp.0).unwrap().version, pc.version);
+    assert!(reg.drafts().unwrap().iter().all(|d| d.id != "pc-again"));
+    // Undoing every change is the official model itself.
+    let mut back = draft(pc.version.clone());
+    back.id = "back".into();
+    back.overlay
+        .physics
+        .insert("DEF_USE_PC".into(), ".false.".into());
+    reg.create_draft(back).unwrap();
+    assert_eq!(
+        reg.freeze("back", &tmp.0).unwrap().version,
+        official.version
+    );
+}
+
+#[test]
+fn a_case_can_be_bound_to_a_chosen_version_without_deriving_one() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let case = case_with(&tmp, "member", " DEF_USE_BGC = .true.\n");
+    let binding = reg
+        .migrate_case_to(&case, code(), Some(official.version.clone()))
+        .unwrap();
+    assert_eq!(binding.version, official.version);
+    assert_eq!(reg.list().unwrap().len(), 1);
+    assert!(reg.drafts().unwrap().is_empty());
+}
+
+#[test]
+fn forced_off_rules_match_colm() {
+    // Compare without blanks: the Fortran spells both `IF (.not. X) THEN` and `IF(.not. X)THEN`.
+    let source: String = include_str!("../../../vendor/CoLM202X/share/MOD_Namelist.F90")
+        .to_ascii_uppercase()
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
+    for (parent, child) in crate::equivalence::FORCED_OFF {
+        let guard = format!("IF(.NOT.{parent})THEN");
+        let assignment = format!("{child}=.FALSE.");
+        let found = source.match_indices(&guard).any(|(start, _)| {
+            let block = &source[start..(start + 1500).min(source.len())];
+            block.contains(&assignment)
+        });
+        assert!(
+            found,
+            "{parent} off no longer forces {child} off in MOD_Namelist.F90"
+        );
     }
 }

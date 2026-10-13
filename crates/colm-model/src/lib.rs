@@ -1,8 +1,10 @@
 //! Immutable model revisions, case migration and isolated run materialization.
 //! No engine, NetCDF, GUI, or remote-execution dependency is required.
+mod equivalence;
 mod materialize;
 mod registry;
 mod validation;
+pub use equivalence::{is_noop, minimize_physics, same_effect};
 pub use registry::Registry;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

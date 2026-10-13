@@ -175,7 +175,12 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
                     .filter(|v| *v != "official"),
             )?;
             cache_code(opts, &source)?;
-            serde_json::to_value(store.migrate_case(&opts.positional_case()?, source)?)?
+            let case = opts.positional_case()?;
+            let target = match selected(opts)? {
+                Some(target) => Some(target),
+                None => study_member_revision(&case)?,
+            };
+            serde_json::to_value(store.migrate_case_to(&case, source, target)?)?
         }
         "model-rollback" => {
             store.rollback_migration(&opts.positional_case()?)?;
@@ -2388,4 +2393,28 @@ mod runtime_kernel_tests {
         assert!(check_kernel(&frozen, &kernel).is_err());
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// A Study member (`<project>/.colm/studies/<id>/members/<member>/<site>`) belongs to its Study's
+/// pinned revision. Its namelist carries sampled parameter values, so deriving a version from it
+/// would put one version per member into the library.
+pub(crate) fn study_member_revision(case: &std::path::Path) -> Result<Option<VersionRef>> {
+    let case = case.canonicalize().unwrap_or_else(|_| case.to_path_buf());
+    let study = case.ancestors().find(|dir| {
+        dir.parent()
+            .is_some_and(|p| p.file_name().is_some_and(|n| n == "studies"))
+            && dir
+                .parent()
+                .and_then(std::path::Path::parent)
+                .is_some_and(|p| p.file_name().is_some_and(|n| n == ".colm"))
+    });
+    let Some(study) = study else {
+        return Ok(None);
+    };
+    if !case.starts_with(study.join("members")) {
+        return Ok(None);
+    }
+    Ok(crate::study_version::pinned(study)?
+        .and_then(|pin| pin.model_revision)
+        .map(|revision| revision.version))
 }

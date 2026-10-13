@@ -317,16 +317,23 @@ pub(crate) async fn bind_new_case(dir: &str, version: Option<VersionRef>) -> Res
         return Ok(());
     };
     model_get(version.id.clone(), version.revision)?;
-    let mut binding = model_migrate_case(dir.to_owned()).await?;
-    binding.version = version;
-    let path = Path::new(dir).join(colm_model::BINDING_FILE);
-    let temporary = path.with_extension("json.tmp");
-    std::fs::write(
-        &temporary,
-        serde_json::to_vec_pretty(&binding).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(temporary, path).map_err(|e| e.to_string())
+    // Bind straight to the chosen revision: migrating first would derive a version from the
+    // generated namelist only to throw it away.
+    decode::<CaseBinding>(
+        cli(vec![
+            "model-migrate-case".into(),
+            dir.to_owned(),
+            "--model-id".into(),
+            version.id.clone(),
+            "--model-revision".into(),
+            version.revision.to_string(),
+        ])
+        .await?,
+    )?;
+    colm_history::History::open_default()
+        .and_then(|h| h.import_case(dir))
+        .map_err(|e| format!("case binding succeeded, but importing its history failed: {e}"))?;
+    Ok(())
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]

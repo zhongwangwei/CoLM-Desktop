@@ -301,6 +301,23 @@ impl Registry {
         {
             return Ok(existing.clone());
         }
+        // A configuration that already exists (in effect) is that version, whatever its draft
+        // was called: re-choosing a scheme must not mint another revision. The unused draft goes.
+        if versions.is_empty() {
+            if let Some(existing) = self.list()?.into_iter().find(|v| {
+                crate::equivalence::same_model(
+                    &frozen.code,
+                    &frozen.overlay,
+                    &frozen.applicability,
+                    &v.code,
+                    &v.overlay,
+                    &v.applicability,
+                )
+            }) {
+                let _ = fs::remove_file(self.root.join("drafts").join(format!("{id}.json")));
+                return Ok(existing);
+            }
+        }
         // Existing immutable revisions are the fallback for inherited assets.
         let mut inherited = versions
             .iter()

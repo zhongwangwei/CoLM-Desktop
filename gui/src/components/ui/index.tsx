@@ -124,6 +124,8 @@ export function Dialog({
   children: ReactNode;
 }) {
   const id = useId();
+  const { state } = useApp();
+  const closeLabel = state.language === 'en' ? 'Close' : '关闭';
   return (
     <RadixDialog.Root open={open} onOpenChange={onOpenChange}>
       <RadixDialog.Portal>
@@ -136,7 +138,7 @@ export function Dialog({
           {description && <RadixDialog.Description id={id}>{description}</RadixDialog.Description>}
           {children}
           <RadixDialog.Close asChild>
-            <Button variant="ghost">关闭 / Close</Button>
+            <Button variant="ghost">{closeLabel}</Button>
           </RadixDialog.Close>
         </RadixDialog.Content>
       </RadixDialog.Portal>

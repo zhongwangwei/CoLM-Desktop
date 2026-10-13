@@ -1,3 +1,4 @@
+import { choosableVersions, latestOfficial } from '../versions/version-tree';
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
@@ -64,17 +65,14 @@ export default function ProjectPage() {
     }
   }
   const shownRoots = state.root ? rememberProject(roots, state.root) : roots;
-  const official = state.versions
-    .filter((version) => version.version.id === 'official')
-    .sort((a, b) => b.version.revision - a.version.revision)[0];
+  const official = latestOfficial(state.versions);
+  const versionRows = choosableVersions(state.versions);
   const modelReady =
     !!state.version &&
     state.version.version.id === state.versionRef.id &&
     state.version.version.revision === state.versionRef.revision;
-  const modelChosen =
-    modelReady &&
-    state.chosenVersion?.id === state.versionRef.id &&
-    state.chosenVersion?.revision === state.versionRef.revision;
+  // The official model is selected by default; choosing a version is optional, not a gate.
+  const modelChosen = modelReady;
   const officialSelected =
     modelChosen &&
     state.versionRef.id === 'official' &&
@@ -292,7 +290,7 @@ export default function ProjectPage() {
       : []),
   ];
   const versionActions: UiAction[] = [
-    ...state.versions.map((version) => ({
+    ...versionRows.map(({ version }) => ({
       id: `project-version:${versionKey(version)}`,
       label: `${version.name} · r${version.version.revision}`,
       kind: 'click' as const,
@@ -319,7 +317,7 @@ export default function ProjectPage() {
     modal: versionChooser,
     status: busy
       ? 'working'
-      : error || (modelChosen ? 'ready' : t('请先选择模型版本', 'Choose a model first')),
+      : error || (modelChosen ? 'ready' : t('正在读取模型版本', 'Loading the model version')),
     fields: [],
     actions: versionChooser ? versionActions : chooser ? chooserActions : actions,
   });
@@ -405,17 +403,17 @@ export default function ProjectPage() {
         aria-label={t('选择模型版本', 'Choose a model revision')}
       >
         <div className="project-version-heading">
-          <h2>{t('先选择模型版本', 'Choose a model first')}</h2>
+          <h2>{t('模型版本', 'Model version')}</h2>
           <p className={modelChosen ? 'project-chosen-model' : 'project-choice-pending'}>
             {modelChosen
-              ? `${t('已选择', 'Selected')}: ${state.version!.name} · r${state.versionRef.revision}`
-              : t('尚未选择', 'No model selected')}
+              ? `${t('当前', 'Current')}: ${state.version!.version.id === 'official' ? t('官方版', 'Official') : state.version!.name}`
+              : t('正在读取…', 'Loading…')}
           </p>
         </div>
         <p className="project-version-hint">
           {t(
-            '选定模型版本后，再开始下方操作。',
-            'Select a model revision to enable the actions below.',
+            '默认使用官方版。要用自己改过的版本，在这里换。',
+            'The official model is used by default. Switch here to use a modified version.',
           )}
         </p>
         <div className="project-actions">
@@ -476,24 +474,29 @@ export default function ProjectPage() {
         {error && <Notice tone="error">{error}</Notice>}
         {busy && <Notice>{t('正在读取版本…', 'Loading the revision…')}</Notice>}
         <div className="project-version-list">
-          {state.versions.length ? (
-            state.versions.map((version) => (
+          {versionRows.length ? (
+            versionRows.map(({ version, depth }) => (
               <Button
                 key={versionKey(version)}
                 className="project-version-option"
                 variant="ghost"
+                style={{ paddingLeft: `${1 + depth * 1.5}rem` }}
                 disabled={!versionEnabled}
-                aria-pressed={
-                  modelChosen && versionKey(version) === JSON.stringify(state.versionRef)
-                }
+                aria-pressed={versionKey(version) === JSON.stringify(state.versionRef)}
                 onClick={() => void chooseVersion(versionKey(version)).catch(() => {})}
               >
                 <span>
-                  <strong>{version.name}</strong>
-                  <span>r{version.version.revision}</span>
+                  <strong>
+                    {version.version.id === 'official' ? t('官方版', 'Official') : version.name}
+                  </strong>
+                  <span className="muted">
+                    {version.version.id === 'official'
+                      ? t('随软件提供，不能修改', 'Bundled with the app; read-only')
+                      : version.note}
+                  </span>
                 </span>
                 <span>
-                  {modelChosen && versionKey(version) === JSON.stringify(state.versionRef)
+                  {versionKey(version) === JSON.stringify(state.versionRef)
                     ? t('当前选择', 'Selected')
                     : '›'}
                 </span>
@@ -509,14 +512,14 @@ export default function ProjectPage() {
         aria-label={t('选择操作', 'Choose an action')}
       >
         <div className="project-task-heading">
-          <h2>{t('再选择操作', 'Then choose an action')}</h2>
+          <h2>{t('开始', 'Start')}</h2>
           <p>
             {modelChosen
               ? t(
                   '使用已选版本开始或继续研究。',
                   'Start or continue your research with this revision.',
                 )
-              : t('请先在上方选择模型版本。', 'Choose a model revision above first.')}
+              : t('正在读取模型版本…', 'Loading the model version…')}
           </p>
         </div>
         <div className="project-actions">
