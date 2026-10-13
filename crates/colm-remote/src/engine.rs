@@ -740,7 +740,14 @@ pub fn pack_source(snapshot: &Snapshot, out: &Path) -> Result<()> {
     if let Some(parent) = out.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let list = std::env::temp_dir().join(format!("colm-pack-{}.txt", std::process::id()));
+    // One list per call: two packs in the same process (two engines prepared at once) must not
+    // read each other's file list.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let list = std::env::temp_dir().join(format!(
+        "colm-pack-{}-{}.txt",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     std::fs::write(&list, files.join("\n") + "\n")?;
     let status = Command::new("tar")
         .env("COPYFILE_DISABLE", "1")

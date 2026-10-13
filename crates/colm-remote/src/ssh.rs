@@ -127,7 +127,13 @@ impl Ssh {
 
     /// 把 `base` 下的一长串文件传上去：清单经临时文件交给 `tar -T`，不受命令行长度限制。
     pub fn upload_list(&self, base: &Path, files: &[String], remote_dir: &str) -> Result<()> {
-        let list = std::env::temp_dir().join(format!("colm-upload-{}.txt", std::process::id()));
+        // One list per upload: concurrent uploads in one process must not share it.
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let list = std::env::temp_dir().join(format!(
+            "colm-upload-{}-{}.txt",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::write(&list, files.join("\n") + "\n")?;
         let result = self.upload_with(
             Command::new("tar")

@@ -58,7 +58,6 @@ jobs:
         with:
           components: clippy, rustfmt
 
-      # 缓存尤其重要：没有它每个作业都要重新从源码编译 HDF5 与 netcdf-c。
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -68,9 +67,11 @@ jobs:
         working-directory: gui
         run: |
           npm ci
+          npm run format:check
           npm run lint
           npm test
           npm run build
+      # 缓存尤其重要：没有它每个作业都要重新从源码编译 HDF5 与 netcdf-c。
       - uses: Swatinem/rust-cache@v2
 
       # netcdf 是本方案最大的依赖风险点，所以三平台都编一次 —— 为的是让
@@ -216,6 +217,7 @@ jobs:
         working-directory: gui
         run: |
           npm ci
+          npm run format:check
           npm run lint
           npm test
           npm run build
