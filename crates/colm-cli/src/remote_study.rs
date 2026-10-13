@@ -578,15 +578,39 @@ fn remote_study_root(ssh: &Ssh, record: &StudyRecord) -> Result<Option<String>> 
         return Ok(None);
     }
     ensure!(
-        root.starts_with(&format!("{}/.colm/studies/", record.remote_project))
-            && !root.contains(char::is_control)
-            && Path::new(root).components().all(|part| matches!(
-                part,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )),
+        study_under_project(root, &project_spellings(ssh, record)?),
         "remote Study root differs from its submitted project"
     );
     Ok(Some(root.to_owned()))
+}
+
+/// The submitted project and its real path on the server. `study-create` prints the real path, so a
+/// symlinked server root (a linked data disk, or macOS `/var` → `/private/var`) names the same Study
+/// in two spellings; both are accepted, and nothing outside the project is.
+fn project_spellings(ssh: &Ssh, record: &StudyRecord) -> Result<Vec<String>> {
+    let real = ssh.run_ok(&format!(
+        "cd -- {} && pwd -P",
+        quote(&record.remote_project)
+    ))?;
+    let real = real.trim().lines().last().unwrap_or_default().to_owned();
+    let mut spellings = vec![record.remote_project.clone()];
+    if real.starts_with('/') && !real.contains(char::is_control) && real != record.remote_project {
+        spellings.push(real);
+    }
+    Ok(spellings)
+}
+
+fn study_under_project(root: &str, projects: &[String]) -> bool {
+    projects
+        .iter()
+        .any(|project| root.starts_with(&format!("{project}/.colm/studies/")))
+        && !root.contains(char::is_control)
+        && Path::new(root).components().all(|part| {
+            matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
 }
 
 fn remote_study_status(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
@@ -600,7 +624,11 @@ fn remote_study_status(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Res
         .context("cannot read the server's study-status output")
 }
 
-fn comparison_command(record: &StudyRecord, study_root: &str) -> Result<String> {
+fn comparison_command(
+    record: &StudyRecord,
+    study_root: &str,
+    projects: &[String],
+) -> Result<String> {
     check_study_location(
         &record.host,
         &record.root,
@@ -609,12 +637,7 @@ fn comparison_command(record: &StudyRecord, study_root: &str) -> Result<String> 
     )?;
     job::check_id(&record.engine)?;
     ensure!(
-        study_root.starts_with(&format!("{}/.colm/studies/", record.remote_project))
-            && !study_root.contains(char::is_control)
-            && Path::new(study_root).components().all(|part| matches!(
-                part,
-                std::path::Component::RootDir | std::path::Component::Normal(_)
-            )),
+        study_under_project(study_root, projects),
         "comparison Study root differs from its submitted project"
     );
     Ok(format!(
@@ -629,7 +652,8 @@ fn comparison_command(record: &StudyRecord, study_root: &str) -> Result<String> 
 }
 
 fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
-    let output = ssh.run_ok(&comparison_command(record, study_root)?)?;
+    let projects = project_spellings(ssh, record)?;
+    let output = ssh.run_ok(&comparison_command(record, study_root, &projects)?)?;
     serde_json::from_str(
         output
             .trim()
@@ -666,14 +690,16 @@ fn verified_evidence(
             && evidence["best_member"] == serde_json::to_value(&remote_state.best_member)?,
         "remote comparison member identity differs from its checkpoint"
     );
+    // Compare as typed states: the transplant drops server-only fields (`process`), which the
+    // local checkpoint serializes as null.
+    let fetched: study::state::StudyState = serde_json::from_value(transplant_state(
+        evidence["state"].clone(),
+        &manifest.id,
+        remote_root,
+        Path::new(&manifest.root),
+    ))?;
     ensure!(
-        serde_json::to_value(local_state)?
-            == transplant_state(
-                evidence["state"].clone(),
-                &manifest.id,
-                remote_root,
-                Path::new(&manifest.root)
-            ),
+        serde_json::to_value(local_state)? == serde_json::to_value(&fetched)?,
         "remote Study state changed since fetch; fetch the verified results before comparing"
     );
     let local_model = serde_json::to_value(

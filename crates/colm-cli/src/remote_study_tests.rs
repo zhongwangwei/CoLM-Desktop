@@ -63,11 +63,26 @@ fn pending_and_comparison_paths_stay_within_the_bound_job() {
         "engine":"abc123", "submitted_at":1, "scheduler":"bare", "provenance":{}
     }))
     .unwrap();
-    let command = comparison_command(&record, "/data/colm/s/abc/.colm/studies/s1").unwrap();
+    let command = comparison_command(
+        &record,
+        "/data/colm/s/abc/.colm/studies/s1",
+        &[record.remote_project.clone()],
+    )
+    .unwrap();
     assert!(command.contains("'/data/colm/engine/abc123/bin/colm-cli' study-verify-comparison '/data/colm/s/abc/.colm/studies/s1'"));
     assert!(!command.contains("study-run"));
-    assert!(comparison_command(&record, "/other/studies/s1").is_err());
-    assert!(comparison_command(&record, "/data/colm/s/abc/.colm/studies/../../outside").is_err());
+    assert!(comparison_command(
+        &record,
+        "/other/studies/s1",
+        &[record.remote_project.clone()]
+    )
+    .is_err());
+    assert!(comparison_command(
+        &record,
+        "/data/colm/s/abc/.colm/studies/../../outside",
+        &[record.remote_project.clone()]
+    )
+    .is_err());
 }
 
 #[test]
