@@ -781,3 +781,39 @@ fn corrupt_jsonl_import_keeps_all_prior_rows_out_of_the_ledger() {
     assert!(history.import_file(file, ImportKind::Runs, None).is_err());
     assert_eq!(history.query(&Query::default()).unwrap().total, 0);
 }
+
+#[test]
+fn concurrent_first_open_preserves_every_audit_event() {
+    let temp = Temp::new();
+    for round in 0..8 {
+        let path = temp.0.join(format!("concurrent-{round}.sqlite3"));
+        let barrier = std::sync::Barrier::new(12);
+        let results = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..12)
+                .map(|_| {
+                    scope.spawn(|| {
+                        barrier.wait();
+                        let history = History::open(&path)?;
+                        history.append(&Event::start("parallel-audit"))?;
+                        Ok::<_, anyhow::Error>(())
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        for result in results {
+            result.unwrap();
+        }
+        assert_eq!(
+            History::open(&path)
+                .unwrap()
+                .query(&Query::default())
+                .unwrap()
+                .total,
+            12
+        );
+    }
+}

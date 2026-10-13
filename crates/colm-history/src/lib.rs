@@ -232,7 +232,22 @@ impl History {
         }
         let connection = Connection::open(path).context("open operation ledger")?;
         connection.busy_timeout(Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
+        // Concurrent first opens can race while upgrading the journal lock; SQLite
+        // may return BUSY here without invoking its busy handler.
+        let started = std::time::Instant::now();
+        loop {
+            match connection.execute_batch("PRAGMA journal_mode=WAL;") {
+                Ok(()) => break,
+                Err(error)
+                    if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+                        && started.elapsed() < Duration::from_secs(5) =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => return Err(error).context("enable operation ledger WAL"),
+            }
+        }
+        connection.execute_batch("PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS history_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
                 operation_id TEXT NOT NULL, payload TEXT NOT NULL CHECK(json_valid(payload)));
