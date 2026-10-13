@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import type { Site } from '../../lib/types';
 export type { Site } from '../../lib/types';
 export interface SchemaField {
@@ -39,7 +40,7 @@ export function requiredNumber(value: string, label: string): number {
 }
 export function caseDirectory(root: string, name: string): string {
   if (!root.trim() || !name.trim() || /[\\/]|^\.{1,2}$/.test(name))
-    throw new Error('请填写根目录和有效算例名 / root and valid case name required');
+    throw new Error(bilingual('请填写根目录和有效算例名', 'root and valid case name required'));
   return `${root.replace(/[\\/]$/, '')}/${name.trim()}`;
 }
 export function physicsFields(physics: Record<string, string> = {}) {
@@ -71,9 +72,12 @@ export function siteVersionMismatch(
 ): string | null {
   const enabled = (key: string) => /^(true|\.true\.|1)$/i.test(physics[key] ?? '');
   if (site.crop !== cropEnabled(physics))
-    return '站点作物类型与当前版本 CROP 配置不符 / Crop configuration mismatch';
+    return bilingual(
+      '站点作物类型与当前版本 CROP 配置不符',
+      "The site's crop type does not match this version's CROP configuration",
+    );
   if (site.urban !== enabled('DEF_URBAN_RUN'))
-    return '站点城市类型与当前版本配置不符 / Urban configuration mismatch';
+    return bilingual('站点城市类型与当前版本配置不符', 'Urban configuration mismatch');
   return null;
 }
 export function preparedDestination(directory: string, source: string): string {

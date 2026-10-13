@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
@@ -169,7 +170,7 @@ export default function ConfigurationOptions({
     actions: UiAction[] = [];
   function write(change: () => Overlay) {
     if (locked || current.current !== request)
-      throw new Error('当前配置不可修改 / Configuration is locked or stale');
+      throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
     try {
       const next = change();
       onChange!(next);
@@ -217,9 +218,9 @@ export default function ConfigurationOptions({
       shown = inputs[`${sourceKey}:${id}`] ?? displayValue,
       select = choices.length > 0;
     const setter = (v: string) => {
-      if (cannot || locked) throw new Error('此字段不可编辑 / Field is locked');
+      if (cannot || locked) throw new Error(bilingual('此字段不可编辑', 'Field is locked'));
       if (choices.length && !choices.some((option) => unquote(option) === v))
-        throw new Error('请选择可用值 / Choose an available value');
+        throw new Error(bilingual('请选择可用值', 'Choose an available value'));
       local(id, v);
       change(v);
       setInputs((previous) => {

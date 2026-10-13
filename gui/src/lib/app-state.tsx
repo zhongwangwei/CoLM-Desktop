@@ -1,3 +1,4 @@
+import { bilingual } from './bilingual';
 import {
   createContext,
   useContext,
@@ -141,7 +142,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [update]);
   const openCase = useCallback(
     async (dir: string) => {
-      if (!dir) throw new Error('请选择算例目录 / Select a case directory.');
+      if (!dir) throw new Error(bilingual('请选择算例目录', 'Select a case directory.'));
       const reason = blocked({ route: 'case', caseDir: dir, reload: true });
       if (reason) throw new Error(reason);
       const epoch = ++openEpoch.current;
@@ -155,7 +156,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
         if (epoch !== openEpoch.current)
           throw new Error(
-            '打开期间页面已变化，请重新打开 / The page changed while opening the case.',
+            bilingual('打开期间页面已变化，请重新打开', 'The page changed while opening the case.'),
           );
         const normalized = { ...opened, dir: opened.entry.dir, name: opened.entry.name, binding };
         update({
@@ -199,7 +200,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     );
     if (!hasBackend()) {
       notify(
-        '请使用桌面软件执行模型操作；浏览器仅能查看界面。 / Model operations require the desktop application.',
+        bilingual(
+          '请使用桌面软件执行模型操作；浏览器仅能查看界面。',
+          'Model operations require the desktop application.',
+        ),
       );
       return () => {
         alive = false;

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
@@ -197,7 +198,7 @@ export default function PreparationPage() {
   }
   async function execute() {
     return work(async () => {
-      if (!form.dst) throw new Error('请选择独立的输出路径 / Output path required');
+      if (!form.dst) throw new Error(bilingual('请选择独立的输出路径', 'Output path required'));
       if (mode === 'site')
         return invoke('make_site', {
           out: form.dst,
@@ -216,7 +217,7 @@ export default function PreparationPage() {
           start: form.start,
           end: form.end,
         });
-      if (!probe) throw new Error('先检查输入并确认字段 / Inspect the input first');
+      if (!probe) throw new Error(bilingual('先检查输入并确认字段', 'Inspect the input first'));
       if (mode === 'observation')
         return invoke('convert_observation_table', {
           src: form.src,
@@ -303,15 +304,15 @@ export default function PreparationPage() {
     });
   }
   const labels: Record<string, string> = {
-    src: '原始输入文件 / Source',
-    dst: '独立输出路径 / Destination',
-    lon: '经度 / Longitude',
-    lat: '纬度 / Latitude',
-    landtype: '地类编号 / Land class',
+    src: bilingual('原始输入文件', 'Source'),
+    dst: bilingual('独立输出路径', 'Destination'),
+    lon: bilingual('经度', 'Longitude'),
+    lat: bilingual('纬度', 'Latitude'),
+    landtype: bilingual('地类编号', 'Land class'),
     rawdata: 'Rawdata 目录',
-    time_column: '时间列 / Time column',
-    site_column: '站点列 / Site column',
-    site_name: '单站名称 / Site name',
+    time_column: bilingual('时间列', 'Time column'),
+    site_column: bilingual('站点列', 'Site column'),
+    site_name: bilingual('单站名称', 'Site name'),
     latitude_column: '纬度列',
     longitude_column: '经度列',
     landtype_column: '地类列',
@@ -363,16 +364,16 @@ export default function PreparationPage() {
   const fields: UiField[] = [
     {
       id: 'prep-mode',
-      label: '准备任务 / Task',
+      label: bilingual('准备任务', 'Task'),
       value: mode,
       type: 'choice',
       options: [
         ['netcdf', 'NetCDF 强迫场'],
-        ['table', '表格强迫场 / CSV'],
-        ['site', '制作站点 / Site'],
-        ['gaps', '修复缺测 / Gaps'],
+        ['table', bilingual('表格强迫场', 'CSV')],
+        ['site', bilingual('制作站点', 'Site')],
+        ['gaps', bilingual('修复缺测', 'Gaps')],
         ['era5', '下载 ERA5-Land'],
-        ['observation', '转换观测 / Observations'],
+        ['observation', bilingual('转换观测', 'Observations')],
       ].map(([value, label]) => ({ value, label })),
       disabled: busy,
       set: changeMode,
@@ -425,7 +426,7 @@ export default function PreparationPage() {
   ];
   fields.push({
     id: 'prep-advanced',
-    label: '高级 / Advanced',
+    label: bilingual('高级', 'Advanced'),
     value: String(advanced),
     type: 'switch',
     set: (v) => setAdvanced(v === 'true'),
@@ -441,7 +442,7 @@ export default function PreparationPage() {
     });
   const canInspect = !['site', 'era5'].includes(mode);
   usePageContract({
-    title: '输入数据准备 / Prepare inputs',
+    title: bilingual('输入数据准备', 'Prepare inputs'),
     step: 'preparation',
     status: busy ? 'busy' : error || 'ready',
     details: { probe, result, error, imported },
@@ -449,7 +450,7 @@ export default function PreparationPage() {
     actions: [
       {
         id: 'prep-new-case',
-        label: '用于新算例 / New case',
+        label: bilingual('用于新算例', 'New case'),
         kind: 'click',
         enabled: !busy,
         run: () => navigate('new-case'),
@@ -471,7 +472,7 @@ export default function PreparationPage() {
         ? [
             {
               id: 'prep-inspect',
-              label: '检查输入 / Inspect',
+              label: bilingual('检查输入', 'Inspect'),
               kind: 'click' as const,
               enabled: !busy && !!form.src,
               run: inspect,
@@ -480,7 +481,7 @@ export default function PreparationPage() {
         : []),
       {
         id: 'prep-execute',
-        label: '生成数据 / Generate',
+        label: bilingual('生成数据', 'Generate'),
         kind: 'commit',
         enabled: !busy && !!form.dst && (!canInspect || !!probe),
         run: execute,
@@ -496,7 +497,7 @@ export default function PreparationPage() {
         ? [
             {
               id: 'prep-gaps',
-              label: '检查缺测 / Inspect gaps',
+              label: bilingual('检查缺测', 'Inspect gaps'),
               kind: 'click' as const,
               enabled: !busy && !!probe,
               run: () =>

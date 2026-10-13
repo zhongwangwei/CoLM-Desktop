@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { caseDirectory, siteVersionMismatch, type SchemaField, type Site } from './case-model';
 
 export type SimulationStep = 1 | 2 | 3 | 4 | 5;
@@ -27,7 +28,7 @@ export function caseDatePatch(
   value: string,
   prefix: 'start' | 'end' | 'spinup',
 ): Record<string, string> {
-  if (!validDate(value)) throw new Error('请输入有效日期 / Enter a valid date');
+  if (!validDate(value)) throw new Error(bilingual('请输入有效日期', 'Enter a valid date'));
   return Object.fromEntries(
     ['year', 'month', 'day'].map((part, i) => [
       `DEF_simulation_time%${prefix}_${part}`,

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import type { HistoryOperation } from '../../lib/types';
 export type Filter = {
   query: string;
@@ -127,7 +128,7 @@ export type ComparisonInput = {
 export function comparisonArgs(a: string, b: string, input: ComparisonInput) {
   if (!a || !b || a === b) throw new Error('Select two different recorded runs');
   if (!input.obs.trim() || !input.variable.trim())
-    throw new Error('真实观测与变量必填 / Observations and variable required');
+    throw new Error(bilingual('真实观测与变量必填', 'Observations and variable required'));
   const time = (value: string) => {
     if (!value) return null;
     if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(value))

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 export interface ApiProfile {
   base_url: string;
   model: string;
@@ -69,7 +70,7 @@ export const API_PROVIDERS = [
   },
   {
     id: 'glm',
-    name: '智谱 / GLM',
+    name: bilingual('智谱', 'GLM'),
     base_url: 'https://open.bigmodel.cn/api/paas/v4',
     model: 'glm-5.3',
     models: ['glm-5.3', 'glm-5.3-flash', 'glm-5.3-flashx'],
@@ -91,7 +92,7 @@ export const API_PROVIDERS = [
   },
   {
     id: 'qwen',
-    name: '阿里云 / Qwen',
+    name: bilingual('阿里云', 'Qwen'),
     base_url: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
     model: 'qwen3.8-flash',
     models: ['qwen3.8-max', 'qwen3.8-flash'],

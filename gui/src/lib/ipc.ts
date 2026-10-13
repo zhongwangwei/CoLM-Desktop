@@ -1,3 +1,4 @@
+import { bilingual } from './bilingual';
 import { commandContract, type Command } from './command-contract';
 export type IpcCommand = Command;
 type Tauri = {
@@ -38,13 +39,18 @@ export async function invoke<T = unknown>(
   args: Record<string, unknown> = {},
 ): Promise<T> {
   if (!hasBackend())
-    throw new Error('请在桌面软件中执行此操作 / This operation requires the desktop backend.');
+    throw new Error(
+      bilingual('请在桌面软件中执行此操作', 'This operation requires the desktop backend.'),
+    );
   if (caseWrites.has(command)) {
     const dirs = Array.isArray(args.dirs) ? args.dirs : [];
     const busy = dirs.filter((dir) => typeof dir === 'string' && runningTargets().has(dir));
     if (busy.length)
       throw new Error(
-        '算例正在运行，暂时不能修改其配置 / The case is running; its configuration cannot be changed.',
+        bilingual(
+          '算例正在运行，暂时不能修改其配置',
+          'The case is running; its configuration cannot be changed.',
+        ),
       );
   }
   const signature: Record<string, { required: boolean }> | undefined =

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import type { Overlay, VersionRef } from '../../lib/types';
 import {
   foundationControls,
@@ -110,15 +111,16 @@ export const unquote = (value: string) => {
 export function fieldLiteral(field: Pick<ModelField, 'kind' | 'values'>, input: string) {
   const kind = field.kind.toLowerCase(),
     raw = input.trim();
-  if (/[\r\n]/.test(input)) throw new Error('值不能包含换行 / Newlines are not allowed');
+  if (/[\r\n]/.test(input))
+    throw new Error(bilingual('值不能包含换行', 'Newlines are not allowed'));
   if (kind === 'logical' && !['.true.', '.false.'].includes(raw.toLowerCase()))
-    throw new Error('请选择开启或关闭 / Choose on or off');
+    throw new Error(bilingual('请选择开启或关闭', 'Choose on or off'));
   if (kind === 'integer' && !/^[+-]?\d+$/.test(raw))
-    throw new Error('请输入整数 / Enter an integer');
+    throw new Error(bilingual('请输入整数', 'Enter an integer'));
   if (kind === 'real' && (raw === '' || fortranNumberInputValue(raw) === null))
-    throw new Error('请输入有限数值 / Enter a finite number');
+    throw new Error(bilingual('请输入有限数值', 'Enter a finite number'));
   if (field.values.length && !field.values.some((v) => unquote(v) === unquote(raw)))
-    throw new Error('请选择目录支持的值 / Choose a supported value');
+    throw new Error(bilingual('请选择目录支持的值', 'Choose a supported value'));
   return kind.startsWith('character') || kind === 'string'
     ? `'${unquote(input).replace(/'/g, "''")}'`
     : raw;
@@ -152,7 +154,7 @@ export function setModelOption(
   input: string,
 ): Overlay {
   const field = fields.find((f) => f.name === name && !f.derived);
-  if (!field) throw new Error('字段不可编辑 / Field is not writable');
+  if (!field) throw new Error(bilingual('字段不可编辑', 'Field is not writable'));
   const value = fieldLiteral(field, input),
     patch: Record<string, string> = { [name]: value };
   const pairs: Record<string, string> = {
@@ -163,7 +165,7 @@ export function setModelOption(
   };
   if (value.toLowerCase() === '.true.' && pairs[name]) {
     if (!fields.some((f) => f.name === pairs[name] && !f.derived))
-      throw new Error('配对开关不可编辑 / Paired switch is not writable');
+      throw new Error(bilingual('配对开关不可编辑', 'Paired switch is not writable'));
     patch[pairs[name]] = '.false.';
   }
   return patchPhysics(overlay, patch);
@@ -191,7 +193,7 @@ export function tracerFileFor(raw: string, name: string, index: number): string 
       keyed = colon >= 0 && !/^[a-z]:\\/i.test(token);
     if (keyed) {
       if (!token.slice(0, colon).trim() || !token.slice(colon + 1).trim())
-        throw new Error('示踪文件映射无效 / Invalid tracer file mapping');
+        throw new Error(bilingual('示踪文件映射无效', 'Invalid tracer file mapping'));
       if (token.slice(0, colon).trim().toLowerCase() === name.toLowerCase())
         return token.slice(colon + 1).trim();
     } else if (positional++ === index) return token;
@@ -226,7 +228,7 @@ export function setTracerRows(
   fields: ModelField[],
   rows: ReturnType<typeof tracerRows>,
 ): Overlay {
-  if (rows.length > 100) throw new Error('示踪物数量过多 / Too many tracers');
+  if (rows.length > 100) throw new Error(bilingual('示踪物数量过多', 'Too many tracers'));
   const existing = tracerRows(resetModelOption(overlay, 'DEF_TRACER_PARAM_FILES'));
   const required = ['NAMES', 'TYPES'] as const;
   for (const row of rows) {
@@ -237,11 +239,13 @@ export function setTracerRows(
           previous.NAMES.toLowerCase() === row.NAMES.toLowerCase() && previous.TYPES === row.TYPES,
       )
     )
-      throw new Error('请选择有效示踪物类型 / Choose a valid tracer type');
+      throw new Error(bilingual('请选择有效示踪物类型', 'Choose a valid tracer type'));
     for (const key of required)
-      if (!row[key].trim()) throw new Error('每行需要名称和类型 / Each row needs a name and type');
+      if (!row[key].trim())
+        throw new Error(bilingual('每行需要名称和类型', 'Each row needs a name and type'));
     for (const value of Object.values(row))
-      if (/[,;\r\n]/.test(value)) throw new Error('每个单元格只能有一个值 / One value per cell');
+      if (/[,;\r\n]/.test(value))
+        throw new Error(bilingual('每个单元格只能有一个值', 'One value per cell'));
   }
   for (const column of tracerColumns.slice(2, -1)) {
     const populated = rows.filter((row) => row[column].trim()).length;
@@ -253,7 +257,7 @@ export function setTracerRows(
       if (row[column].trim() && fortranNumberInputValue(row[column]) === null)
         throw new Error(`${column}: 请输入有限 Fortran 数值 / Enter a finite Fortran number`);
   if (new Set(rows.map((row) => row.NAMES.toLowerCase())).size !== rows.length)
-    throw new Error('示踪物名称不能重复 / Tracer names must be unique');
+    throw new Error(bilingual('示踪物名称不能重复', 'Tracer names must be unique'));
   let next = overlay;
   let sameFiles = false;
   try {
@@ -310,18 +314,18 @@ export function processListValues(raw: string): string[] {
       quote = char;
       value += char;
     } else if (char === ',') {
-      if (!value.trim()) throw new Error('列表元素不能为空 / Empty list element');
+      if (!value.trim()) throw new Error(bilingual('列表元素不能为空', 'Empty list element'));
       values.push(value.trim());
       value = '';
       closedQuote = false;
     } else {
       if (closedQuote && char.trim())
-        throw new Error('引号后有无效字符 / Unexpected text after quoted value');
+        throw new Error(bilingual('引号后有无效字符', 'Unexpected text after quoted value'));
       value += char;
     }
   }
-  if (quote) throw new Error('引号未闭合 / Unterminated quote');
-  if (!value.trim()) throw new Error('列表元素不能为空 / Empty list element');
+  if (quote) throw new Error(bilingual('引号未闭合', 'Unterminated quote'));
+  if (!value.trim()) throw new Error(bilingual('列表元素不能为空', 'Empty list element'));
   values.push(value.trim());
   return values;
 }
@@ -333,12 +337,13 @@ export function setScopedOption(
   file: string,
   shape?: string,
 ): Overlay {
-  if (descriptor.storage === 'read-only') throw new Error('此参数只读 / Read-only parameter');
+  if (descriptor.storage === 'read-only')
+    throw new Error(bilingual('此参数只读', 'Read-only parameter'));
   if (
     descriptor.storage === 'process-parameter-file' &&
     !overlay.process_files.some((asset) => asset.relative_path === file)
   )
-    throw new Error('过程资产不存在 / Process asset missing');
+    throw new Error(bilingual('过程资产不存在', 'Process asset missing'));
   const items = (shape === 'list' ? processListValues(value) : [value]).map((item) =>
     fieldLiteral(
       { kind: descriptor.value_kind, values: descriptor.validation.allowed_values },
@@ -352,9 +357,9 @@ export function setScopedOption(
         minimum = descriptor.validation.min,
         maximum = descriptor.validation.max;
       if (minimum !== null && n < Number(fortranNumberInputValue(minimum)))
-        throw new Error('低于参数下限 / Below parameter minimum');
+        throw new Error(bilingual('低于参数下限', 'Below parameter minimum'));
       if (maximum !== null && n > Number(fortranNumberInputValue(maximum)))
-        throw new Error('高于参数上限 / Above parameter maximum');
+        throw new Error(bilingual('高于参数上限', 'Above parameter maximum'));
     }
   }
   const record = makeRecord(descriptor, items.join(', '), index, file);
@@ -404,7 +409,7 @@ export function setProcessOption(
           (key === 'DEF_USE_SinglePoint' && v === '.true.')
         )
           throw new Error(
-            '河道淹水需要空间模式和河湖过程 / Routing needs a spatial case and rivers',
+            bilingual('河道淹水需要空间模式和河湖过程', 'Routing needs a spatial case and rivers'),
           );
       }
     next = patchPhysics(next, {
@@ -431,7 +436,10 @@ export function resetProcessOption(
     return reset;
   if (original === null)
     throw new Error(
-      '资产未明确淹水模式，无法安全恢复联动开关 / Asset has no explicit inundation mode',
+      bilingual(
+        '资产未明确淹水模式，无法安全恢复联动开关',
+        'Asset has no explicit inundation mode',
+      ),
     );
   const linked = setProcessOption(
     reset,
@@ -532,7 +540,7 @@ export function tracerFamilyState(
       (flag('DEF_USE_PFT') === true && flag('DEF_USE_PC') === true) ||
       (flag('DEF_USE_PFT') === false && flag('DEF_USE_PC') === false)
     )
-      reasons.push(['甲烷需要 PFT / PC', 'Methane requires PFT / PC']);
+      reasons.push([bilingual('甲烷需要 PFT', 'PC'), 'Methane requires PFT / PC']);
     else if (['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC'].some((key) => flag(key) === null))
       pending.push(['PFT / PC 结构待确认', 'PFT / PC structure pending']);
   }

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import type { FrozenRevision, ParameterOverride } from '../../lib/types';
 export type Descriptor = {
   id: string;
@@ -228,7 +229,7 @@ export function setFoundation(
     !control.choices.some((c) => c[0] === value) ||
     !control.keys.every((key) => fields.some((f) => f.name === key && !f.derived))
   )
-    throw new Error('该基础结构不可修改 / Foundation control is not writable');
+    throw new Error(bilingual('该基础结构不可修改', 'Foundation control is not writable'));
   const patch: Record<string, string> =
     id === 'subgrid'
       ? Object.fromEntries(
@@ -248,7 +249,9 @@ export function setFoundation(
       Object.keys(patch).some((k) => k.toLowerCase() === r.raw_key.toLowerCase()),
     )
   )
-    throw new Error('请先移除同名参数覆盖 / Remove the conflicting parameter override first');
+    throw new Error(
+      bilingual('请先移除同名参数覆盖', 'Remove the conflicting parameter override first'),
+    );
   const bgc =
     physicsValue(physics, 'DEF_USE_BGC') ??
     parameters
@@ -256,13 +259,17 @@ export function setFoundation(
       ?.value.trim()
       .toLowerCase();
   if (id === 'subgrid' && value === 'LCT' && bgc === '.true.')
-    throw new Error('BGC 需要 PFT 或 PC；请先明确关闭 BGC / Disable BGC before choosing LCT');
+    throw new Error(
+      bilingual('BGC 需要 PFT 或 PC；请先明确关闭 BGC', 'Disable BGC before choosing LCT'),
+    );
   if (
     id === 'DEF_USE_BGC' &&
     value === '.true.' &&
     !['PFT', 'PC'].includes(foundationValue(physics, 'subgrid', parameters))
   )
-    throw new Error('请先明确选择 PFT 或 PC，再开启 BGC / Select PFT or PC before enabling BGC');
+    throw new Error(
+      bilingual('请先明确选择 PFT 或 PC，再开启 BGC', 'Select PFT or PC before enabling BGC'),
+    );
   const next = { ...physics };
   for (const [key, v] of Object.entries(patch)) {
     for (const old of Object.keys(next))

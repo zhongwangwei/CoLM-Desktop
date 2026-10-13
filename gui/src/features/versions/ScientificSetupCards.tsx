@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { Button, Card, Field, Input, Notice } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
@@ -101,7 +102,7 @@ export default function ScientificSetupCards({
     actions: UiAction[] = [];
   function write(request: SetupRequest) {
     if (locked || writeLocked.current || current.current !== key)
-      throw new Error('配置不可修改或已切换 / Configuration is locked or stale');
+      throw new Error(bilingual('配置不可修改或已切换', 'Configuration is locked or stale'));
     try {
       const requestedValue =
         request.id === 'crop' && !['.true.', '.false.'].includes(request.value)
@@ -166,16 +167,13 @@ export default function ScientificSetupCards({
               onClick={() => invoke({ id: control.id, value: choice.value })}
             >
               <strong>{t(choice.zh, choice.en)}</strong>
-              <small>{choice.reason || t('选择此方案', 'Select this option')}</small>
+              {choice.reason && <small>{choice.reason}</small>}
             </Button>
           ))}
         </div>
-        {(control.pending || !result?.context_complete) && (
+        {control.pending && result?.context_complete && (
           <p className="muted">
-            {t(
-              '待核对：尚未完整确认当前源码与运行环境。',
-              'Pending: source and execution context are not fully verified.',
-            )}
+            {t('这一项的前提还在核对。', 'The prerequisites of this item are still being checked.')}
           </p>
         )}
         {control.id === 'crop' && (
@@ -251,6 +249,14 @@ export default function ScientificSetupCards({
               )
             : t('当前为冻结版本，仅查看。', 'Frozen version: read only.')}
         </p>
+      )}
+      {!busy && result && !result.context_complete && (
+        <Notice tone="warning">
+          {t(
+            '还没核对完当前版本的源码和运行环境，下面的选项先按已知的前提显示。',
+            'The source and run environment of this version are not fully checked yet; options below follow the known prerequisites.',
+          )}
+        </Notice>
       )}
       {cards}
     </div>

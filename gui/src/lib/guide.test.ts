@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { bilingual } from './bilingual';
 import {
   assistantPanelWidth,
   pageExecutionContext,
@@ -91,8 +92,9 @@ test('the actual guide isolates modal controls from parent pages and restores na
     'publicUiResult',
     'waitForContract',
     'requestAnimationFrame',
+    'bilingual',
     `${js};return {pages,guideState,drive,openPage,bind:value=>{app=value;}};`,
-  )(pageExecutionContext, publicUiResult, waitForContract, (fn: () => void) => fn());
+  )(pageExecutionContext, publicUiResult, waitForContract, (fn: () => void) => fn(), bilingual);
   const shell = Symbol(),
     parent = Symbol(),
     modal = Symbol();

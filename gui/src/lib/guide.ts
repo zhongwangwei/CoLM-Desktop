@@ -1,3 +1,4 @@
+import { bilingual } from './bilingual';
 import { useLayoutEffect, useRef } from 'react';
 import { useApp } from './app-state';
 import type { AppState, Route } from './types';
@@ -181,13 +182,18 @@ function finishedState() {
 export async function openPage(step: string) {
   if (!app) throw new Error('The interface is not ready.');
   if (pageContracts().some((page) => page.modal))
-    throw new Error('请先关闭当前对话框，再切换页面 / Close the current dialog before navigating.');
+    throw new Error(
+      bilingual('请先关闭当前对话框，再切换页面', 'Close the current dialog before navigating.'),
+    );
   const target =
     pageAliases[step] ?? (routes.includes(step as Route) ? { route: step as Route } : null);
   if (!target) throw new Error(`${step} is not an available page; read ui_state`);
   if (!app.navigate(target.route, target.tab))
     throw new Error(
-      '请先保存或放弃当前修改，再切换页面 / Save or discard current edits before navigating.',
+      bilingual(
+        '请先保存或放弃当前修改，再切换页面',
+        'Save or discard current edits before navigating.',
+      ),
     );
   await rendered();
   await waitForContract(

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
@@ -170,15 +171,19 @@ export default function RunPanel({
   }
   async function run() {
     await action(async () => {
-      if (recovering) throw new Error('正在恢复运行记录 / Restoring run records');
-      if (disabled) throw new Error('请先保存算例设置 / Save case settings first');
+      if (recovering) throw new Error(bilingual('正在恢复运行记录', 'Restoring run records'));
+      if (disabled) throw new Error(bilingual('请先保存算例设置', 'Save case settings first'));
       const targets = host ? [casePath] : [...new Set([casePath, ...batch])];
       if (targets.some((dir) => latest.current[dir]?.running))
-        throw new Error('算例已经在运行或等待核对 / A selected case is already running');
+        throw new Error(
+          bilingual('算例已经在运行或等待核对', 'A selected case is already running'),
+        );
       if (host && remoteSubmissionBlocked(remote))
-        throw new Error('已有服务器作业：先核对终态，不重复提交 / Check existing job first');
+        throw new Error(
+          bilingual('已有服务器作业：先核对终态，不重复提交', 'Check existing job first'),
+        );
       if (!kernelMatches)
-        throw new Error('请选择与当前模型匹配的内核 / Select a compatible kernel');
+        throw new Error(bilingual('请选择与当前模型匹配的内核', 'Select a compatible kernel'));
       const nums = [ranks, threads, workers].map(Number);
       if (nums.some((n) => !Number.isInteger(n) || n < 1))
         throw new Error('进程、线程与并发数须为正整数');
@@ -265,9 +270,11 @@ export default function RunPanel({
   async function remoteAction(command: 'remote_status' | 'remote_cancel' | 'remote_fetch') {
     if (lock.current || monitor) return;
     if (command === 'remote_cancel' && !remotePermissions.cancel)
-      throw new Error('先核对服务器任务身份与运行状态 / Reconcile job identity and state first');
+      throw new Error(
+        bilingual('先核对服务器任务身份与运行状态', 'Reconcile job identity and state first'),
+      );
     if (command === 'remote_fetch' && !remotePermissions.fetch)
-      throw new Error('先核对服务器任务的真实终态 / Confirm terminal state first');
+      throw new Error(bilingual('先核对服务器任务的真实终态', 'Confirm terminal state first'));
     lock.current = true;
     setMonitor(true);
     const expectedRunId = latest.current[casePath]?.run_id;
@@ -338,12 +345,12 @@ export default function RunPanel({
   const fields: UiField[] = [
     {
       id: 'run-host',
-      label: '运行位置 / Machine',
+      label: bilingual('运行位置', 'Machine'),
       type: 'choice' as const,
       value: host,
       disabled: pending,
       options: [
-        { value: '', label: '本机 / Local' },
+        { value: '', label: bilingual('本机', 'Local') },
         ...servers.map((s) => ({ value: s.host, label: s.host })),
       ],
       set: setHost,
@@ -352,7 +359,7 @@ export default function RunPanel({
       ? [
           {
             id: 'run-kernel',
-            label: '内核 / Kernel',
+            label: bilingual('内核', 'Kernel'),
             type: 'choice' as const,
             value: kernel,
             options: state.kernels.map((k) => ({ value: k.dir, label: k.preset })),
@@ -360,7 +367,7 @@ export default function RunPanel({
           },
           {
             id: 'run-engine',
-            label: '引擎 / Engine',
+            label: bilingual('引擎', 'Engine'),
             type: 'choice' as const,
             value: engine,
             options: ['rust', 'fortran'].map((value) => ({ value, label: value })),
@@ -368,7 +375,7 @@ export default function RunPanel({
           },
           {
             id: 'run-preprocessors',
-            label: '前处理引擎 / Preprocessors',
+            label: bilingual('前处理引擎', 'Preprocessors'),
             type: 'choice' as const,
             value: preprocessors,
             options: ['rust', 'fortran'].map((value) => ({ value, label: value })),
@@ -376,11 +383,11 @@ export default function RunPanel({
           },
           {
             id: 'run-stage',
-            label: '阶段 / Stage',
+            label: bilingual('阶段', 'Stage'),
             type: 'choice' as const,
             value: stage,
             options: [
-              { value: '', label: '全部 / All' },
+              { value: '', label: bilingual('全部', 'All') },
               ...['mksrfdata', 'mkinidata', 'colm'].map((value) => ({ value, label: value })),
             ],
             set: setStage,
@@ -388,8 +395,8 @@ export default function RunPanel({
           ...(
             [
               ['ranks', 'MPI 进程', ranks, setRanks],
-              ['threads', '线程 / Threads', threads, setThreads],
-              ['workers', '并发算例 / Workers', workers, setWorkers],
+              ['threads', bilingual('线程', 'Threads'), threads, setThreads],
+              ['workers', bilingual('并发算例', 'Workers'), workers, setWorkers],
             ] as const
           ).map(([id, label, value, set]) => ({
             id: `run-${id}`,
@@ -400,7 +407,7 @@ export default function RunPanel({
           })),
           {
             id: 'run-force',
-            label: '重新运行全部阶段 / Force',
+            label: bilingual('重新运行全部阶段', 'Force'),
             value: String(force),
             type: 'switch' as const,
             set: (v: string) => setForce(v === 'true'),
@@ -434,7 +441,7 @@ export default function RunPanel({
     );
   usePageContract(
     {
-      title: '运行 / Run',
+      title: bilingual('运行', 'Run'),
       step: 'run',
       kernelDir: effectiveProfile ? kernel || null : null,
       preprocessors,
@@ -452,7 +459,7 @@ export default function RunPanel({
         },
         {
           id: 'run-cancel',
-          label: '停止本机运行 / Stop',
+          label: bilingual('停止本机运行', 'Stop'),
           kind: 'commit',
           enabled: !!persisted?.running && persisted.location === 'local',
           run: cancel,
@@ -461,21 +468,21 @@ export default function RunPanel({
           ? [
               {
                 id: 'remote-status',
-                label: '核对服务器状态 / Check',
+                label: bilingual('核对服务器状态', 'Check'),
                 kind: 'click' as const,
                 enabled: !monitor,
                 run: () => remoteAction('remote_status'),
               },
               {
                 id: 'remote-cancel',
-                label: '取消服务器任务 / Cancel',
+                label: bilingual('取消服务器任务', 'Cancel'),
                 kind: 'commit' as const,
                 enabled: !monitor && remotePermissions.cancel,
                 run: () => remoteAction('remote_cancel'),
               },
               {
                 id: 'remote-fetch',
-                label: '取回结果 / Fetch',
+                label: bilingual('取回结果', 'Fetch'),
                 kind: 'commit' as const,
                 enabled: !monitor && remotePermissions.fetch,
                 run: () => remoteAction('remote_fetch'),

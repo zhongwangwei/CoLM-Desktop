@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { bilingual } from '../../lib/bilingual';
 import * as setup from './scientific-setup';
 import { modelSettingValue } from '../cases/model-settings';
 import type { ConfigurationSource, ConfigurationResult } from './configuration-options';
@@ -56,6 +57,7 @@ function harness() {
   const context = {
     ...setup,
     modelSettingValue,
+    bilingual,
     React: {
       createElement: (type: string, p: Record<string, unknown>, ...children: unknown[]) => {
         const node = { type, props: p ?? {}, children };
