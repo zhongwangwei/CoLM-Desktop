@@ -109,8 +109,10 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
         std::fs::read_to_string(root.join("gui/src-tauri/Cargo.toml")).expect("GUI Cargo.toml");
     let backend =
         std::fs::read_to_string(root.join("gui/src-tauri/src/lib.rs")).expect("GUI backend");
-    let html = std::fs::read_to_string(root.join("gui/dist/index.html")).expect("index.html");
-    let frontend = std::fs::read_to_string(root.join("gui/dist/app/main.js")).expect("main.js");
+    // The shipped frontend is the React app (tauri.conf.json `frontendDist: ../build`).
+    let about = std::fs::read_to_string(root.join("gui/src/components/AboutDialog.tsx"))
+        .expect("AboutDialog.tsx");
+    let shell = std::fs::read_to_string(root.join("gui/src/App.tsx")).expect("App.tsx");
     assert!(workspace.contains("[workspace.package]\nversion = \"0.3.0-beta.3\""));
     assert!(gui.contains("version = \"0.3.0-beta.3\""));
     assert!(
@@ -120,13 +122,13 @@ fn about_dialog_carries_the_release_version_and_maintainer_signature() {
         "系统 About 会吞掉 Credits，菜单必须打开软件自己的 About"
     );
     assert!(
-        html.contains("id=\"aboutDialog\"")
-            && html.contains("Zhongwang Wei (魏忠旺)")
-            && html.contains("weizhw6@mail.sysu.edu.cn")
-            && html.matches("class=\"beta-note\"").count() == 2
-            && html.contains("正式科研使用前务必独立核验结果")
-            && frontend.contains("listen('colm-about'")
-            && frontend.contains("showModal()"),
+        about.contains("Zhongwang Wei (魏忠旺)")
+            && about.contains("weizhw6@mail.sysu.edu.cn")
+            && about.contains("CoLM LSM Development Team")
+            && about.contains("正式科研使用前务必独立核验结果")
+            && about.contains("listen<string>('colm-about'")
+            && shell.contains("<AboutDialog")
+            && shell.contains("betaNote("),
         "自定义 About 必须实际渲染维护者、团队、邮箱和版本"
     );
 }

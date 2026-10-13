@@ -1501,3 +1501,40 @@ table input {
 .scientific-setup .card > .muted {
   margin-bottom: 0;
 }
+
+.about-card {
+  display: grid;
+  justify-items: center;
+  gap: 0.6rem;
+  text-align: center;
+}
+.about-logo {
+  width: 64px;
+  height: 64px;
+}
+.beta-note {
+  margin: 0;
+  padding: 0.6rem 0.8rem;
+  border-radius: 8px;
+  background: var(--warning-surface, #fbefd9);
+  color: var(--warning-text, #7a4410);
+  font-size: 0.85rem;
+  text-align: left;
+}
+.about-signature {
+  display: grid;
+  gap: 0.15rem;
+}
+.about-contact {
+  margin-top: 0.4rem;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.beta-badge {
+  justify-self: start;
+  padding: 0 0.4rem;
+  border-radius: 999px;
+  background: var(--warning-surface, #fbefd9);
+  color: var(--warning-text, #7a4410);
+  font-size: 0.75rem;
+}

@@ -3,6 +3,7 @@ import { assistantPanelWidth } from './lib/utils';
 import { useApp } from './lib/app-state';
 import { activeNavigation, navigation } from './lib/navigation';
 import NavIcon from './components/NavIcon';
+import AboutDialog, { betaNote } from './components/AboutDialog';
 import appManifest from '../package.json';
 import { GuideBinding, usePageContract } from './lib/guide';
 import { Button, Notice } from './components/ui';
@@ -127,6 +128,7 @@ export default function App() {
   return (
     <>
       <GuideBinding />
+      <AboutDialog fallbackVersion={appManifest.version} />
       <div
         className={`desktop-shell ${state.assistantOpen ? 'assistant-visible' : ''}`}
         style={{ '--assistant-width': `${assistantWidth}px` } as CSSProperties}
@@ -157,9 +159,10 @@ export default function App() {
           <nav className="sidebar-links">{navigation.slice(0, 5).map(navButton)}</nav>
           <div className="sidebar-bottom">
             <nav className="sidebar-links">{navigation.slice(5).map(navButton)}</nav>
-            <div className="app-version">
+            <div className="app-version" title={betaNote(en)}>
               <span>CoLM Desktop</span>
               <span>v{appManifest.version}</span>
+              <span className="beta-badge">{tr('测试版', 'Beta')}</span>
             </div>
           </div>
         </aside>

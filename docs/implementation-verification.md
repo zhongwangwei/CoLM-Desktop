@@ -32934,3 +32934,56 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 **实际原生证据**：初版690已分别点击PFT/PC→首要应用操作→创建/保存/冻结→自动返回第二步；实际对应冻结id model-25426-1791857339032132000@1、model-25687-1791857451347721000@1。用bundled CLI只读取应用真实registry，确认三开关互斥、源码身份和原Official r5空覆盖不变，证据actual-frozen-structure.json；不只凭卡片选中颜色判断完成。打开用户已有CN-Cng的第二步，确认PFT/PC可用、分类保持/不能直接改其他分类。独立视觉PFT操作及选中态pass_native_layout；初版PC图不足的限制保留。修复主区滚动后最终包已重启，用户正在实际操作新的PC模型，后续没有强制重导航。最终滚动修正的进入/返回顶部由回归确认，未在用户操作期间强行补独立PC首屏截图。
 
 **记录与边界**：.omx/reports/pft-pc-apply-2026-10-13保存前后回归、两次原生构建、真实冻结修订、身份、DMG报告；截图.omx/verification/ui-rebuild/pft-apply-ready-native.png、pc-apply-ready-native.png、pft-applied-native.png、pc-applied-native.png、pft-pc-existing-enabled-native.png及pft-pc-user-selected-final-native.png，最后一图只是用户当前滚动区域，不宣称它显示PC卡。未触发新的PFT/PC科学模拟、数据造假、付费API、Windows/Linux或完整R1–R9验收，原缺口继续保留。未合并推送main；本段完成记录在打包后追加工作区，不声称其自身包含在该安装盘文档中。
+
+
+## 第 691 轮：审查 Codex 的 React 重组（第 678–690 轮）并修复（2026-10-13）
+
+**做法**：Codex 的改动未提交，在 worktree 分支 `claude/ui-fixes` 上先固定为快照提交 `aba780ff`，再逐项修。没有改动 Codex 的工作目录。界面以 `.omx/verification/ui-rebuild/` 下的原生截图为准；本机真实 registry 和 history 只读检查。
+
+**审查发现（按严重程度）**：
+
+1. **版本泛滥**。本机 registry 里，来回点击土地覆盖卡片产生了 5 个冻结版本（`Official CoLM · PFT`、`· PFT · PC`、`· PC`、`· PC · LCT`、`· PC · LCT · PC`）。另外每个算例迁移都会生成一个以算例命名的“修改版”，因为版本 ID 里拼进了 `case.nml` 的哈希。`CN-Cng` 版的覆盖层只有 `DEF_Aerosol_Readin`、`DEF_USE_FERT`、`DEF_USE_NITRIF`、`DEF_USE_CNSOYFIXN` 这几个 `.false.`：它们不等于 Fortran 默认值，但在 SNICAR、CROP、BGC 关闭时，CoLM 在 `MOD_Namelist.F90` 里会强制把它们改成 `.false.`，所以实际上什么都没改。研究成员目录 `m000005` 也被迁移成了一个版本。“已有版本”弹窗还把官方版 r1–r4（开发时每次重编产生的修订）平铺给用户选。
+2. **红测试**（Codex 记录中写的是通过）：
+   - `study_cli_tuning` 中服务器研究的测试：服务器写回的是实际路径（`/private/var/...`），记录里存的是带符号链接的拼写，于是报 "remote Study root differs from its submitted project"。修掉之后又出现 "remote Study state changed since fetch"：本地检查点序列化时带 `"process": null`，移植服务器状态时把该字段删了，两边按 JSON 直接比较。这就是第 678 轮在 T7920 上一直没解决的 20/21。
+   - colm-history 两项：一项断言写错（token 已脱敏，只是没换掉整个 URL）；另一项把 "private" 当密码，和 macOS 临时路径 `/private` 撞上。都不是泄露。
+   - colm-model 迁移测试：迁移会规范化路径，断言用的却是原路径。
+   - colm-remote 时好时坏：`pack_source` 的文件清单只用进程号命名，同一进程里两次打包会互相覆盖。真实应用同时准备两个引擎时也会出这个问题；`ssh.rs` 的上传清单同理。
+3. **代码不可维护**：React 源码写成压缩格式，单行最长 5558 字符。约 146 个提示是“中文 / English”混排的单个字符串，中文界面里也会显示英文。
+4. **界面问题**：
+   - 首页必须先“选版本”才解锁操作，与已采纳的修订“官方版默认选中，不增加必经版本选择页”相反；
+   - 每张方案卡片都重复“待核对：尚未完整确认当前源码与运行环境”；
+   - 历史记录直接显示内部类型代号和英文 phase，日期跟随系统 locale（实际显示成美式格式）；165 条里有 100 条是 `case-config-save`；
+   - 图表时间轴在中文界面里显示 `12pm`。
+
+用户说明：顶栏那一行（CoLM Desktop · AI 助手 · English）和新建模拟的 5 步流程是用户自己要的，不算问题。
+
+**修复（提交顺序）**：
+
+- `0f92d33e`：用 Prettier 3.9.10 格式化前端（`.prettierrc.json`，生成的 `command-contract.ts` 不参与），React 源码约 7800 行展开为 3 万行；8 个读源码的测试改成能识别多行 import 和格式化后的写法。CI 增加 `npm run format:check`。
+- `103bdb65`：远程研究接受服务器实际路径和提交时路径这两种拼写，但都必须在提交的项目之内（`project_spellings`、`study_under_project`），保留“别的研究目录不改写”这条约束；取回后的状态按 `StudyState` 类型比较。
+- `db02cf6e`：版本按 CoLM 实际生效的配置来定义。
+  - 新增 `colm-model/src/equivalence.rs`：`FORCED_OFF` 收录从 `MOD_Namelist.F90` 提取的 12 条“父开关关闭时子开关强制关闭”规则，测试会重新读 Fortran 核对；`minimize_physics` 去掉不改变结果的条目。
+  - 迁移：没有实际差异的算例直接绑到官方版，不生成草稿和版本；新增 `migrate_case_to`，新建算例直接绑到所选版本，研究成员绑到研究固定的修订。
+  - `freeze`：配置和已有版本在效果上相同时，直接返回那个版本并删除草稿。
+  - 前端：`version-tree.ts` 每个版本只列最新修订、按来源成树；方案名里旧的方案后缀被替换而不是追加；首页去掉门槛，官方版默认可用。
+- `43127326`：历史记录默认隐藏例行记录（`case-config-save`、`model-save-draft`、`model-migrate-case`、远程状态查询），可勾选显示（colm-history `Query.exclude_kinds`）；所有类型都有中英文名；日期跟随应用语言。
+- `0e025261`：新增 `bilingual()`（`lib/bilingual.ts`，读 `<html lang>`），145 处混排字符串只显示当前语言；“待核对”在卡片上方只显示一次。React 测试统一在英文环境下跑（`scripts/react-test-language.mjs`）。
+- `0f8a0604`：每次打包、每次上传各用自己的文件清单。
+- `8d45cb39`：结果图时间轴改为 24 小时制 UTC 时间，日期用 ISO 格式（`time-ticks.ts`）。
+- `关于对话框`：React 界面没有监听 `colm-about`，系统菜单里的“关于 CoLM”点了没有反应，测试版警告也没了。xtask 的 `style_layout` 检查还在看旧的 `gui/dist`，所以没发现。新增 `components/AboutDialog.tsx`（维护者署名、团队、邮箱、版本、测试版警告），侧栏版本号旁加了“测试版”标记；检查改为看 React 源码。
+
+**实测证据**（worktree，分支 `claude/ui-fixes`）：
+- `cargo fmt --all -- --check` 和 GUI 工作区 fmt 都干净；两个工作区 `cargo clippy --all-targets -- -D warnings` 都干净。
+- `cargo test --workspace --no-fail-fast -- --test-threads=1`：2543 项通过、14 项失败。修完关于对话框后，`xtask --test style_layout` 4/4 通过。其余 13 项都是数据缺失：`colm-forcing` 的 `met.rs` 和 `real_forcing.rs` 报 “PLUMBER2 forcing not found”，`colm-srfdata` 的 `raster.rs` 和 `real_sites.rs` 报 “rawdata not found … set COLM_RAWDATA”。本轮 `/Volumes/Data` 没有挂载，这些测试文件自第 674 轮以来也没有改过。
+- 分项：
+  - `study_cli_tuning` 21/21；colm-cli 单元测试 375；colm-model 20（新增 5）；colm-history 21；GUI 后端 290；
+  - colm-remote 连跑 5 次，每次 57/57（修复前 3 次里有 2 次失败）。
+- 前端：
+  - `npm test` 240 项通过（新增版本树、方案命名、时间轴测试）；
+  - `typecheck`、`lint`、`format:check`、`vite build` 都通过；
+  - 旧前端脚本 33/33 通过；`xtask check-gui` 162 个命令契约通过。
+
+**没做的**：
+- 没有重新打 Mac 原生包，也没做原生界面验收：这次会话没有电脑控制工具，界面改动只靠组件测试验证。
+- 本机 registry 里已有的 8 个多余版本（5 个方案点击链、3 个算例迁移版本）和对应草稿没有清理：这是用户数据，要用户确认后再删。
+- shadcn/ui 仍是手写的薄封装；物理依赖规则仍然写死在前端 `scientific-setup.ts`。这两项都是结构性改动，留到下一轮。
