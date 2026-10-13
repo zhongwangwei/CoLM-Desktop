@@ -812,12 +812,29 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
             let source = crate::remote_cmd::app_source_dir()?;
             let target = stage.join("source");
             std::fs::create_dir_all(&target)?;
-            for item in colm_remote::engine::SNAPSHOT_PATHS
+            let paths: Vec<&str> = colm_remote::engine::SNAPSHOT_PATHS
                 .iter()
                 .chain(colm_remote::engine::PACK_EXTRA_PATHS.iter())
-            {
-                if std::fs::symlink_metadata(source.join(item)).is_ok() {
-                    copy_source_path(&source, Path::new(item), &target.join(item))?;
+                .copied()
+                .collect();
+            if source.join(".git").exists() {
+                // A checkout's identity covers only the files git would package; ignored build
+                // output (kernel builds leave .py and .bld/ under vendor/) must not be copied.
+                for file in colm_remote::engine::git_files(&source, &paths)? {
+                    let relative = Path::new(&file);
+                    if std::fs::symlink_metadata(source.join(relative)).is_err() {
+                        continue;
+                    }
+                    if let Some(parent) = target.join(relative).parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    copy_source_path(&source, relative, &target.join(relative))?;
+                }
+            } else {
+                for item in &paths {
+                    if std::fs::symlink_metadata(source.join(item)).is_ok() {
+                        copy_source_path(&source, Path::new(item), &target.join(item))?;
+                    }
                 }
             }
             ensure!(
@@ -828,15 +845,35 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
                 colm_remote::engine::Source::Tarball(path) => {
                     std::fs::copy(path, stage.join("source.tar.gz"))?;
                 }
-                colm_remote::engine::Source::Checkout(_) => ensure!(
-                    std::process::Command::new("git")
-                        .arg("init")
-                        .arg(&target)
-                        .output()?
-                        .status
-                        .success(),
-                    "cannot initialize cached source index"
-                ),
+                colm_remote::engine::Source::Checkout(_) => {
+                    ensure!(
+                        std::process::Command::new("git")
+                            .arg("init")
+                            .arg(&target)
+                            .output()?
+                            .status
+                            .success(),
+                        "cannot initialize cached source index"
+                    );
+                    // Index every copied file, even ones a nested .gitignore would skip: the copy
+                    // already is the checkout's file set, and the digest of a git tree only counts
+                    // files git lists.
+                    ensure!(
+                        std::process::Command::new("git")
+                            .arg("-C")
+                            .arg(&target)
+                            .args(["add", "-A", "-f", "--", "."])
+                            .output()?
+                            .status
+                            .success(),
+                        "cannot index cached source"
+                    );
+                    ensure!(
+                        crate::remote_cmd::source_content_sha256(&target)?
+                            == code_ref.source_sha256,
+                        "cached official source index differs from its checkout"
+                    );
+                }
             }
             std::fs::create_dir_all(stage.join("bin"))?;
             let bin = std::env::current_exe()?

@@ -322,7 +322,8 @@ pub struct Snapshot {
     pub files: Vec<String>,
 }
 
-fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
+/// Files of a checkout under `paths`: tracked plus not-yet-added, never ignored scratch output.
+pub fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo)

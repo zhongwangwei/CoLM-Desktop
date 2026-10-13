@@ -32987,3 +32987,9 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 - 没有重新打 Mac 原生包，也没做原生界面验收：这次会话没有电脑控制工具，界面改动只靠组件测试验证。
 - 本机 registry 里已有的 8 个多余版本（5 个方案点击链、3 个算例迁移版本）和对应草稿没有清理：这是用户数据，要用户确认后再删。
 - shadcn/ui 仍是手写的薄封装；物理依赖规则仍然写死在前端 `scientific-setup.ts`。这两项都是结构性改动，留到下一轮。
+
+**第 691 轮补记：原生应用里冻结报 “official source changed while freezing”**。用户在新包里冻结版本时报错。原因是官方源码的摘要与冻结时复制的文件范围不一致：在 git 检出里，摘要只算 git 会打包的文件，而冻结复制的是整个目录，把编译内核时留在 `vendor/CoLM202X` 下、被 git 忽略的 `.py` 文件和 `.bld/` 也带了进去。这种情况只出现在开发检出里，安装包里没有这些文件，所以 Codex 的验收没有碰到。修掉这一处后，冻结又卡在 “cached official source changed”：缓存目录执行 `git init` 之后再算摘要，git 会按 `vendor` 自带的 `.gitignore` 把部分已复制的文件排除掉。修复：
+- 冻结时只复制 `engine::git_files` 列出的文件；
+- 缓存仓库建好后用 `git add -A -f` 把复制进来的文件都加入索引，并当场核对摘要。
+
+实测用打包出来的 release `colm-cli` 在临时 registry 里验证（`/private/tmp/claude-501/freeze-e2e.sh`）：`model-list` → `model-create` → `model-freeze` 全部通过。没有改动的草稿冻结后返回 `official@1`；带 PC 方案的草稿第一次冻结生成新版本，第二次同样的改动复用同一个版本，registry 里只有 `official` 和这一个版本。修复前同一脚本报 “official source changed while freezing”。colm-cli 375 项、`study_cli_tuning` 21 项、colm-remote 57 项测试通过，clippy 干净。
