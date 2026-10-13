@@ -3958,3 +3958,32 @@ fn case_data_validation_uses_selected_model_and_keeps_source_on_error() {
         selected
     );
 }
+
+#[test]
+fn process_parent_switches_remain_editable_while_their_children_follow_them() {
+    for (parent, child) in [
+        ("DEF_URBAN_RUN", "DEF_URBAN_type_scheme"),
+        ("DEF_USE_TRACER", "DEF_TRACER_NUM"),
+    ] {
+        for enabled in [false, true] {
+            let states = runtime_states(
+                &format!("&nl_colm\n{parent}=.{enabled}.\n/\n"),
+                &["SinglePoint", "LULC_IGBP", "URBAN_MODEL"],
+            );
+            assert_eq!(
+                mode(&states, parent),
+                &FieldMode::Editable,
+                "{parent}={enabled}"
+            );
+            assert_eq!(
+                mode(&states, child),
+                if enabled {
+                    &FieldMode::Editable
+                } else {
+                    &FieldMode::Hidden
+                },
+                "{child}"
+            );
+        }
+    }
+}

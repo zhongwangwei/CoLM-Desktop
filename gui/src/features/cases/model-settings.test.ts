@@ -137,10 +137,16 @@ test('model settings guide exposes classification only with a callback and catal
       fields: { id: string; disabled?: boolean }[];
     };
   const slots: unknown[] = [[], [], '', false, false, '', ''];
+  const nodes: { props: Record<string, unknown>; children: unknown[] }[] = [];
   const context = {
     ...helpers,
     setupHandledKeys: [],
-    React: { createElement: () => null },
+    React: {
+      createElement: (_type: unknown, props: Record<string, unknown>, ...children: unknown[]) => {
+        nodes.push({ props: props ?? {}, children });
+        return null;
+      },
+    },
     ScientificSetupCards: () => {},
     ConfigurationOptions: () => {},
     Advanced: () => {},
@@ -177,10 +183,12 @@ test('model settings guide exposes classification only with a callback and catal
     overlay: { physics: {}, parameters: [], process_files: [] },
   };
   const choices: string[] = [];
-  const render = (callback = true, disabled = false) => {
+  const render = (callback = true, disabled = false, extra: Record<string, unknown> = {}) => {
     cursor = 0;
+    nodes.length = 0;
     Component({
       version,
+      ...extra,
       onEdit: () => {},
       disabled,
       ...(callback ? { onClassificationChange: (value: string) => choices.push(value) } : {}),
@@ -202,6 +210,36 @@ test('model settings guide exposes classification only with a callback and catal
   assert.ok(result.fields.every((f) => f.disabled));
   assert.ok(result.actions.every((a) => a.enabled === false));
   assert.ok(!result.actions.some((a) => a.id.startsWith('simulation-classification-')));
+  for (const mode of ['PFT', 'PC']) {
+    render(false, false, { mode, classification: 'IGBP' });
+    const selected = nodes.filter(
+      (node) =>
+        node.props['aria-pressed'] !== undefined &&
+        node.children.length === 1 &&
+        ['IGBP', 'USGS'].includes(String(node.children[0])),
+    );
+    assert.deepEqual(
+      selected.map((node) => [node.children[0], node.props['aria-pressed'], node.props.disabled]),
+      [
+        ['IGBP', true, true],
+        ['USGS', false, true],
+      ],
+    );
+    render(false, false, { mode, classification: 'USGS', caseDir: '/existing-case' });
+    const existing = nodes.filter(
+      (node) =>
+        node.props['aria-pressed'] !== undefined &&
+        node.children.length === 1 &&
+        ['IGBP', 'USGS'].includes(String(node.children[0])),
+    );
+    assert.deepEqual(
+      existing.map((node) => [node.children[0], node.props['aria-pressed']]),
+      [
+        ['IGBP', false],
+        ['USGS', true],
+      ],
+    );
+  }
 });
 test('case vegetation selection ignores stale version flags', async () => {
   const { simulationMode, caseSchemeFields } = await import('./model-settings');

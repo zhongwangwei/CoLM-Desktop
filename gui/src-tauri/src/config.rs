@@ -2486,7 +2486,7 @@ fn field_runtime_state(
         );
     }
 
-    if field_section(name, field.group) == Some("城市") && !c.urban {
+    if name != "DEF_URBAN_RUN" && field_section(name, field.group) == Some("城市") && !c.urban {
         return hidden("需要先启用城市模型");
     }
     if name == "DEF_URBAN_type_scheme" && !c.ncar_urban {
@@ -2508,7 +2508,8 @@ fn field_runtime_state(
     {
         return hidden("城市模式会自动关闭这个过程");
     }
-    if field_section(name, field.group) == Some("示踪剂") && !c.tracer {
+    if name != "DEF_USE_TRACER" && field_section(name, field.group) == Some("示踪剂") && !c.tracer
+    {
         return hidden("需要先启用 TRACER");
     }
     if c.tracer

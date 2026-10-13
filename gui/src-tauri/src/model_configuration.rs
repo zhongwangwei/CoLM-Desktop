@@ -687,6 +687,35 @@ mod tests {
     }
 
     #[test]
+    fn process_parent_switches_are_not_disabled_by_their_own_gate() {
+        let (root, _, draft) = fixture();
+        for (parent, child) in [
+            ("DEF_URBAN_RUN", "DEF_URBAN_type_scheme"),
+            ("DEF_USE_TRACER", "DEF_TRACER_NUM"),
+        ] {
+            for enabled in [false, true] {
+                let result = query(
+                    &root,
+                    source(&draft, Overlay::default()),
+                    None,
+                    None,
+                    None,
+                    Some(BTreeMap::from([(parent.into(), format!(".{enabled}."))])),
+                )
+                .unwrap();
+                assert_eq!(field(&result, parent)["mode"], "editable", "{parent}");
+                assert!(field(&result, parent).get("parent_gate").is_none());
+                assert_eq!(field(&result, child)["parent_gate_enabled"], enabled);
+                assert_eq!(
+                    field(&result, child)["mode"],
+                    if enabled { "editable" } else { "disabled" }
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn crop_defaults_match_the_shared_creation_recipe_without_mutating_the_case() {
         let (root, _, draft) = fixture();
         let result = query(
