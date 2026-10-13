@@ -1485,8 +1485,10 @@ mod tests {
 
     #[test]
     fn configure_preserves_selected_revision_and_missing_frozen_docs() {
-        let context = json!({"model":{"version":{"id":"old-model","revision":1},"code":{"source_sha256":"a".repeat(64)}},"model_root":"/models","source_dir":"/frozen/source","docs_dir":null,"source_case":"/project/case"});
-        let message: Inbound = serde_json::from_value(json!({"type":"configure","provider":{"base_url":"https://example.invalid/v1","model":"offline"},"project_root":"/project","docs_root":"/current/app/docs","model_context":context})).unwrap();
+        // `/models` has a root but is not absolute on Windows; build real absolute paths.
+        let abs = |path: &str| std::env::temp_dir().join(path).display().to_string();
+        let context = json!({"model":{"version":{"id":"old-model","revision":1},"code":{"source_sha256":"a".repeat(64)}},"model_root":abs("models"),"source_dir":abs("frozen/source"),"docs_dir":null,"source_case":abs("project/case")});
+        let message: Inbound = serde_json::from_value(json!({"type":"configure","provider":{"base_url":"https://example.invalid/v1","model":"offline"},"project_root":abs("project"),"docs_root":abs("current/app/docs"),"model_context":context})).unwrap();
         let Inbound::Configure {
             model_context: Some(model),
             ..
