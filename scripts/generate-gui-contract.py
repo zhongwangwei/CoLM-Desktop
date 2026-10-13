@@ -16,13 +16,13 @@ def split_top(text):
 def camel(name):
     head,*tail=name.split('_'); return head+''.join(p.title() for p in tail)
 
-lib=(ROOT/'gui/src-tauri/src/lib.rs').read_text()
+lib=(ROOT/'gui/src-tauri/src/lib.rs').read_text(encoding='utf-8')
 handler=re.search(r'generate_handler!\[([\s\S]*?)\]',lib)
 if not handler:raise SystemExit('No Tauri command registration found.')
 registered={name.strip().split('::')[-1] for name in handler.group(1).split(',') if name.strip()}
 commands={}
 for path in sorted((ROOT/'gui/src-tauri/src').glob('*.rs')):
-    source=path.read_text()
+    source=path.read_text(encoding='utf-8')
     source=re.sub(r'^\s*//[^\n]*', '', source, flags=re.M)
     for match in re.finditer(r'^\s*#\[tauri::command(?:\([^\]]*\))?\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(',source,re.M):
         if match.group(1) not in registered:continue
@@ -47,9 +47,9 @@ text+='export type CommandArgs<C extends Command> = {[K in keyof typeof commandC
 parser=argparse.ArgumentParser()
 parser.add_argument('--check',action='store_true')
 if parser.parse_args().check:
-    if not out.is_file() or out.read_text()!=text:
+    if not out.is_file() or out.read_text(encoding='utf-8')!=text:
         raise SystemExit('GUI contract is stale: run npm run contract in gui/.')
     print(f'Verified {len(commands)} Tauri command contracts.')
 else:
-    out.write_text(text)
+    out.write_text(text, encoding='utf-8', newline='\n')
     print(f'Generated {len(commands)} Tauri command contracts.')
