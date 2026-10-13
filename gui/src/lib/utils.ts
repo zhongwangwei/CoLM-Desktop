@@ -1,16 +1,34 @@
+import { hasBackend, invoke } from './ipc';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 export const cn = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
 export const errorText = (error: unknown) =>
   error instanceof Error ? error.message : String(error);
-export const download = (name: string, text: string, type = 'text/plain') => {
+export async function download(name: string, text: string, type = 'text/plain') {
+  if (hasBackend()) {
+    const path = await invoke<string | null>('export_text_file', {
+      suggestedName: name,
+      content: text,
+      mimeType: type,
+    });
+    return {
+      status: path === null ? ('cancelled' as const) : ('saved' as const),
+      filename: name,
+      mime_type: type,
+      path,
+    };
+  }
   const url = URL.createObjectURL(new Blob([text], { type }));
   const link = document.createElement('a');
   link.href = url;
   link.download = name;
-  link.click();
-  URL.revokeObjectURL(url);
-};
+  try {
+    link.click();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+  return { status: 'download_requested' as const, filename: name, mime_type: type };
+}
 
 export async function waitForContract(
   ready: () => boolean,

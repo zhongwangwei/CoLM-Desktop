@@ -4040,3 +4040,17 @@ fn path_placeholder_tokens_and_quoted_literals_follow_the_form_contract() {
     }
     assert!(typed("DEF_TRACER_KINETIC_SCHEME", "'not-a-scheme'").is_err());
 }
+
+#[test]
+fn atomic_replacement_failure_does_not_remove_the_existing_destination() {
+    let dir = batch("atomic-replace", &[NML_A]).remove(0);
+    let target = std::path::Path::new(&dir).join("case.nml");
+    let missing = std::path::Path::new(&dir).join("missing-staged-file");
+    assert!(replace_file_atomic(&missing, &target).is_err());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), NML_A);
+    let staged = std::path::Path::new(&dir).join("staged-file");
+    std::fs::write(&staged, "replacement").unwrap();
+    replace_file_atomic(&staged, &target).unwrap();
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "replacement");
+    assert!(!staged.exists());
+}

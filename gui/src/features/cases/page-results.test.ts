@@ -269,6 +269,7 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
       return { status: 'download_requested', filename: args[0], mime_type: args[2] };
     },
     setExportNotice: noop,
+    exportMessage: callback(page, 'exportMessage', { tr: (zh: string) => zh }),
     tr: (zh: string) => zh,
   };
   const result = (await callback(page, 'exportFullSeries', context)()) as Record<string, unknown>;
@@ -361,6 +362,7 @@ test('Results report formats retain summary metrics and route native PDF through
     en: true,
     reportFile,
     setExportNotice: noop,
+    exportMessage: callback(page, 'exportMessage', { tr: (zh: string) => zh }),
     tr: (zh: string) => zh,
     download: (...args: unknown[]) => {
       downloads.push(args);

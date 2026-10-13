@@ -3862,19 +3862,51 @@ fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, St
     let result = write_files_atomic_untracked(done);
     crate::history::finish(&event, result, "succeeded")
 }
+// std::fs::rename already replaces an existing file on Windows via
+// MoveFileExW(MOVEFILE_REPLACE_EXISTING). Never unlink the destination first:
+// a failed rename must leave the previous file reachable.
+fn replace_file_atomic(staged: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
+    std::fs::rename(staged, target)
+}
+
+/// Save a chooser-selected export without exposing a partial replacement.
+pub(crate) fn write_export_text_atomic(
+    path: &std::path::Path,
+    content: String,
+) -> Result<(), String> {
+    if path.exists() {
+        return write_files_atomic_untracked(&[(path.to_path_buf(), content)]).map(|_| ());
+    }
+    use std::io::Write as _;
+    static EXPORT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .ok_or("导出目标没有文件名")?
+        .to_string_lossy();
+    let staged = path.with_file_name(format!(
+        ".{name}.export-{}-{}",
+        std::process::id(),
+        EXPORT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let result = (|| -> std::io::Result<()> {
+        file.write_all(content.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        replace_file_atomic(&staged, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    result.map_err(|error| format!("{}: {error}", path.display()))
+}
+
 fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
     use std::io::Write as _;
-
-    fn replace(staged: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
-        #[cfg(windows)]
-        if target.exists() {
-            // ponytail: std has no ReplaceFileW; same-directory remove+rename avoids
-            // partial contents. Add a Windows syscall wrapper only if crash recovery
-            // during this tiny rename window becomes a measured requirement.
-            std::fs::remove_file(target)?;
-        }
-        std::fs::rename(staged, target)
-    }
 
     // ponytail: edits are user-driven and rare; split this global lock only if measured contention appears.
     static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -3942,9 +3974,9 @@ fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result
         staged.push(temporary);
     }
     for (index, ((path, _), temporary)) in changed.iter().zip(staged.iter()).enumerate() {
-        if let Err(error) = replace(temporary, path) {
+        if let Err(error) = replace_file_atomic(temporary, path) {
             for ((prior, _), backup) in changed.iter().zip(backups.iter()).take(index + 1) {
-                let _ = replace(backup, prior);
+                let _ = replace_file_atomic(backup, prior);
             }
             for path in staged.iter().chain(backups.iter()) {
                 let _ = std::fs::remove_file(path);

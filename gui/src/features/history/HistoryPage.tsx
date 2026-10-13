@@ -141,14 +141,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       id.active = false;
     };
   }, [applied, offset, casePath]);
-  async function action(fn: () => Promise<void>) {
+  async function action<T>(fn: () => Promise<T>) {
     if (lock.current) return;
     lock.current = true;
     setBusy(true);
     setError('');
     const id = epoch.current;
     try {
-      await fn();
+      return await fn();
     } catch (e) {
       if (id.active && id === epoch.current) setError(String(e));
       throw e;
@@ -157,7 +157,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       if (id.active && id === epoch.current) setBusy(false);
     }
   }
-  const run = (fn: () => Promise<void>) => void action(fn).catch(() => {});
+  const run = (fn: () => Promise<unknown>) => void action(fn).catch(() => {});
   function search() {
     try {
       historyFilter(effectiveFilter);
@@ -185,14 +185,18 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       filter: historyFilter(scopedHistoryFilter(applied, casePath), 0, Number.MAX_SAFE_INTEGER),
       format,
     });
-    download(content, `colm-history.${format}`, format === 'csv' ? 'text/csv' : 'application/json');
+    return await download(
+      content,
+      `colm-history.${format}`,
+      format === 'csv' ? 'text/csv' : 'application/json',
+    );
   }
   const openPath = detail ? historyPath(detail) : null,
     references = detail ? historyReferences(detail) : [];
-  function exportRecord() {
+  async function exportRecord() {
     if (!detail) return;
     const record = historyRecordExport(detail);
-    download(record.content, record.name, record.type);
+    return await download(record.content, record.name, record.type);
   }
   async function openVersion() {
     if (!detail?.operation.version_id || !detail.operation.revision) return;
@@ -365,7 +369,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         label: t('导出本条记录 JSON', 'Export this record JSON'),
         kind: 'commit',
         enabled: !busy,
-        run: exportRecord,
+        run: () => action(exportRecord),
       },
       ...references.map((reference, index) => ({
         id: `history-reference-${index}`,
@@ -882,7 +886,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     {t('按记录设置重跑', 'Replay recorded settings')}
                   </Button>
                 )}
-                <Button disabled={busy} onClick={exportRecord}>
+                <Button disabled={busy} onClick={() => run(exportRecord)}>
                   {t('导出本条记录 JSON', 'Export this record JSON')}
                 </Button>
               </div>

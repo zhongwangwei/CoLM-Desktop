@@ -114,7 +114,7 @@ export default function VersionsPage() {
       live = false;
     };
   }, [draft?.id, state.versionRef.id]);
-  async function execute(fn: () => Promise<unknown>) {
+  async function execute<T>(fn: () => Promise<T>) {
     if (codeBusyNow.current)
       throw new Error(t('代码工作区操作进行中', 'A code workspace operation is in progress'));
     if (lock.current) return;
@@ -123,7 +123,7 @@ export default function VersionsPage() {
     setError('');
     const token = epoch.current;
     try {
-      await fn();
+      return await fn();
     } catch (e) {
       if (token.active && token === epoch.current) setError(String(e));
       throw e;
@@ -407,13 +407,16 @@ export default function VersionsPage() {
       },
       {
         id: 'version-export-parameters',
+        enabled: !busy && !codeBusy,
         label: t('导出参数 JSON', 'Export parameters JSON'),
         kind: 'click',
         run: () =>
-          download(
-            JSON.stringify({ records: shown.overlay.parameters }, null, 2),
-            'model-parameters.json',
-            'application/json',
+          execute(() =>
+            download(
+              JSON.stringify({ records: shown.overlay.parameters }, null, 2),
+              'model-parameters.json',
+              'application/json',
+            ),
           ),
       },
       {
@@ -1048,11 +1051,14 @@ export default function VersionsPage() {
               </>
             )}
             <Button
+              disabled={busy || codeBusy}
               onClick={() =>
-                download(
-                  JSON.stringify({ records: shown.overlay.parameters }, null, 2),
-                  'model-parameters.json',
-                  'application/json',
+                run(() =>
+                  download(
+                    JSON.stringify({ records: shown.overlay.parameters }, null, 2),
+                    'model-parameters.json',
+                    'application/json',
+                  ),
                 )
               }
             >

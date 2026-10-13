@@ -1,3 +1,4 @@
+import { download as exportText } from '../../lib/utils';
 import { bilingual } from '../../lib/bilingual';
 import type { HistoryOperation } from '../../lib/types';
 export type Filter = {
@@ -58,12 +59,7 @@ export function dayGroups(items: HistoryOperation[]) {
   return [...groups];
 }
 export function download(content: string, name: string, type: string) {
-  const url = URL.createObjectURL(new Blob([content], { type }));
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = name;
-  link.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return exportText(name, content, type);
 }
 
 export function canReplay(operation: HistoryOperation) {

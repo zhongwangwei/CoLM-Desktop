@@ -1,3 +1,4 @@
+import { download as exportText } from '../../lib/utils';
 export interface SeriesData {
   time: number[];
   vars: Record<string, (number | null)[]>;
@@ -72,13 +73,7 @@ export async function boundedMap<T, R>(
   return output;
 }
 export function download(name: string, text: string, type = 'application/json') {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
-  return { status: 'download_requested' as const, filename: name, mime_type: type };
+  return exportText(name, text, type);
 }
 
 export interface ResultMetric {

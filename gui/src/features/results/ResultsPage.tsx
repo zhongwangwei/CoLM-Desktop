@@ -531,8 +531,17 @@ export default function ResultsPage({
       });
       if (current()) setMetrics(rows.flat());
     });
+  function exportMessage(result: Awaited<ReturnType<typeof download>>) {
+    if (result.status === 'cancelled') return tr('已取消导出。', 'Export cancelled.');
+    if (result.status === 'saved') return tr('已保存到：', 'Saved to: ') + result.path;
+    return tr(
+      '已请求下载；请在下载位置检查文件。',
+      'Download requested. Check the download location.',
+    );
+  }
   const exportFullSeries = () =>
     task(async (current) => {
+      setExportNotice('');
       if (!source || !variable) throw new Error('Select a recorded run and variable');
       const data = await readSeries(variable, null);
       const text = fullSeriesCsv(data, variable);
@@ -541,13 +550,8 @@ export default function ResultsPage({
         /[<>:"/\\|?*\p{Cc}]/gu,
         '_',
       );
-      const result = download(name, text, 'text/csv;charset=utf-8');
-      setExportNotice(
-        tr(
-          '已请求下载完整 CSV；请在下载位置检查文件。',
-          'Full CSV download requested. Check the download location.',
-        ),
-      );
+      const result = await download(name, text, 'text/csv;charset=utf-8');
+      if (current()) setExportNotice(exportMessage(result));
       return { ...result, n: data.n, source_n: data.source_n, downsampled: false };
     });
   function reportData(): ResultReport {
@@ -573,6 +577,7 @@ export default function ResultsPage({
   }
   const report = () =>
     task(async (current) => {
+      setExportNotice('');
       if (!catalog) throw new Error('Load a recorded result before exporting');
       const data = reportData();
       if (reportFormat === 'pdf') {
@@ -591,14 +596,8 @@ export default function ResultsPage({
         return result;
       }
       const file = reportFile(data, reportFormat, en);
-      const result = download(file.filename, file.text, file.mime_type);
-      if (current())
-        setExportNotice(
-          tr(
-            '已请求下载报告；请在下载位置检查文件。',
-            'Report download requested. Check the download location.',
-          ),
-        );
+      const result = await download(file.filename, file.text, file.mime_type);
+      if (current()) setExportNotice(exportMessage(result));
       return result;
     });
   function chooseRecordedRun(path: string) {
@@ -842,7 +841,16 @@ export default function ResultsPage({
             label: tr('导出显示数据（抽样 JSON）', 'Export displayed data (sampled JSON)'),
             kind: 'commit' as const,
             enabled: !busy,
-            run: () => download('series-sampled.json', JSON.stringify({ source, ...series })),
+            run: () =>
+              task(async (current) => {
+                setExportNotice('');
+                const result = await download(
+                  'series-sampled.json',
+                  JSON.stringify({ source, ...series }),
+                );
+                if (current()) setExportNotice(exportMessage(result));
+                return result;
+              }),
           },
         ]
       : []),

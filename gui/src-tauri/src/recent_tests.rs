@@ -17,3 +17,65 @@ fn an_empty_value_does_not_erase_the_remembered_one() {
         Some("/data/Sitedata")
     );
 }
+
+#[test]
+fn text_export_rejects_path_suggestions_and_limits_filters() {
+    for name in [
+        "",
+        ".",
+        "..",
+        "../report.csv",
+        "/tmp/report.csv",
+        "C:\\report.csv",
+        "nested/report.csv",
+        "bad\nname.csv",
+    ] {
+        assert!(text_export_filter(name, "text/csv").is_err(), "{name}");
+    }
+    for (mime, extension) in [
+        ("text/csv;charset=utf-8", "csv"),
+        ("application/json", "json"),
+        ("text/markdown;charset=utf-8", "md"),
+        ("text/html", "html"),
+        ("text/plain", "txt"),
+    ] {
+        assert_eq!(text_export_filter("结果", mime).unwrap(), extension);
+    }
+    assert!(text_export_filter("report.pdf", "application/pdf").is_err());
+}
+
+#[test]
+fn text_export_cancel_and_atomic_save_preserve_existing_data_on_failure() {
+    assert_eq!(finish_text_export(None, "cancelled".into()).unwrap(), None);
+    let root = std::env::temp_dir().join(format!(
+        "colm-text-export-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("O'Brien-结果.csv");
+    assert_eq!(
+        finish_text_export(Some(path.clone()), "时间,值\n1,2\n".into()).unwrap(),
+        Some(path.display().to_string())
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), "时间,值\n1,2\n".as_bytes());
+    finish_text_export(Some(path.clone()), "replacement".into()).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+    let original = std::fs::metadata(&path).unwrap().permissions();
+    let mut readonly = original.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&path, readonly).unwrap();
+    assert!(finish_text_export(Some(path.clone()), "must not replace".into()).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+    assert!(finish_text_export(Some(root.join("missing/report.csv")), "fail".into()).is_err());
+    assert_eq!(
+        std::fs::read_dir(&root).unwrap().count(),
+        1,
+        "no staged files remain"
+    );
+    std::fs::set_permissions(&path, original).unwrap();
+    std::fs::remove_dir_all(root).unwrap();
+}

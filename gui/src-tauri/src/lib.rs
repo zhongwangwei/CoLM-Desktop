@@ -271,6 +271,7 @@ pub fn run() {
             save_recent,
             pick_folder,
             pick_file,
+            export_text_file,
             print_report,
         ])
         .build(tauri::generate_context!())

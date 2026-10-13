@@ -875,6 +875,20 @@ export const commandContract = {
       "rust_type": "Option<String>"
     }
   },
+  "export_text_file": {
+    "suggestedName": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "content": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "mimeType": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "remote_set_password": {
     "host": {
       "required": true,

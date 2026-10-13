@@ -104,3 +104,61 @@ pub async fn pick_file(
     }
     d.pick_file().await.map(|h| h.path().display().to_string())
 }
+
+fn text_export_filter(suggested_name: &str, mime_type: &str) -> Result<&'static str, String> {
+    if suggested_name.is_empty()
+        || suggested_name.trim() != suggested_name
+        || matches!(suggested_name, "." | "..")
+        || suggested_name
+            .chars()
+            .any(|c| c.is_control() || "/\\:<>\"|?*".contains(c))
+    {
+        return Err("导出文件名必须是单个文件名，不能包含路径".into());
+    }
+    match mime_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "text/csv" => Ok("csv"),
+        "application/json" => Ok("json"),
+        "text/markdown" => Ok("md"),
+        "text/html" => Ok("html"),
+        "text/plain" => Ok("txt"),
+        _ => Err(format!("不支持的文本导出类型：{mime_type}")),
+    }
+}
+
+fn finish_text_export(
+    selected: Option<std::path::PathBuf>,
+    content: String,
+) -> Result<Option<String>, String> {
+    let Some(path) = selected else {
+        return Ok(None);
+    };
+    crate::config::write_export_text_atomic(&path, content)?;
+    Ok(Some(path.display().to_string()))
+}
+
+/// Native save authorization avoids WebKit's sandboxed anchor-download path.
+#[tauri::command]
+pub async fn export_text_file(
+    suggested_name: String,
+    content: String,
+    mime_type: String,
+) -> Result<Option<String>, String> {
+    let extension = text_export_filter(&suggested_name, &mime_type)?;
+    let selected = rfd::AsyncFileDialog::new()
+        .set_title("导出文件")
+        .set_file_name(suggested_name)
+        .add_filter(extension.to_ascii_uppercase(), &[extension])
+        .save_file()
+        .await
+        .map(|file| file.path().to_path_buf());
+    tauri::async_runtime::spawn_blocking(move || finish_text_export(selected, content))
+        .await
+        .map_err(|error| error.to_string())?
+}
