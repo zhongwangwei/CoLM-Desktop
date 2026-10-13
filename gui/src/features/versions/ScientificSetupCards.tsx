@@ -49,7 +49,6 @@ export default function ScientificSetupCards({
   const [loaded, setLoaded] = useState<{ key: string; result: ConfigurationResult } | null>(null),
     [error, setError] = useState(''),
     [cropInput, setCropInput] = useState<{ key: string; value: string } | null>(null),
-    [cropRequested, setCropRequested] = useState<string | null>(null),
     [saving, setSaving] = useState(false);
   const key = JSON.stringify({
       source: source.kind === 'draft' ? { ...source, overlay } : source,
@@ -102,7 +101,6 @@ export default function ScientificSetupCards({
     result ?? undefined,
   ).filter((c) => includeSubgrid || c.id !== 'subgrid');
   const cropOpen =
-    cropRequested === key ||
     (requested?.id === 'crop' && requested.value === '.true.') ||
     choices.find((c) => c.id === 'crop')?.value === '.true.';
   const planting =
@@ -124,8 +122,7 @@ export default function ScientificSetupCards({
         ?.choices.find((c) => c.value === requestedValue)?.reason;
       if (reason) throw new Error(reason);
       const next = applySetupRequest(effective, fields, request, environment, result ?? undefined);
-      if (request.id === 'crop' && request.value === '.true.') setCropRequested(key);
-      else if (onCaseChange) {
+      if (onCaseChange) {
         writeLocked.current = true;
         setSaving(true);
         return Promise.resolve(onCaseChange(caseOptionPatch(effective, next, fields)))
@@ -203,8 +200,8 @@ export default function ScientificSetupCards({
           <p className="muted">
             {environment.cropKernel?.macros.includes('CROP')
               ? t(
-                  '已有 CROP 候选内核；需明确填写种植日后启用。',
-                  'A CROP kernel is available; enter a planting day to enable crop.',
+                  '已有 CROP 内核；开启时使用标准算例默认配置，种植日可随后调整。',
+                  'A CROP kernel is available. Enabling uses standard case defaults; the planting day remains adjustable.',
                 )
               : t('尚未确认 CROP 候选内核。', 'CROP kernel capability is not yet confirmed.')}
           </p>

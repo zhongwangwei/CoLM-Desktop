@@ -13,7 +13,7 @@ CN-Cng 可直接跑完整流程；AT-Neu 用于甲烷建例与评估，运行 BG
 | `Observation/CN-Cng_2008-2009_FLUXNET2015_Flux.nc` | 通量观测，用来算指标 |
 | `Sitedata/AT-Neu_2010-2012_FLUXNET-CH4_site.nc` | 甲烷站点属性 |
 | `Forcing/AT-Neu_2010-2012_FLUXNET-CH4_Met.nc` | 半小时强迫场，三年 |
-| `Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc` | 含 `FCH4_f_ann` 的甲烷通量观测 |
+| `Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc` | 完整水热、碳和甲烷观测（含 `FCH4_f_ann`） |
 | `Forcingnml/AT-Neu.nml` | AT-Neu 的风、温、湿观测高度 |
 | `Sitedata/US-Ne3_2002-2003_FLUXNET2015_CROP_site.nc` | US-Ne3 农田属性与 CFT 信息 |
 | `Forcing/US-Ne3_2002-2003_FLUXNET2015_CROP_Met.nc` | US-Ne3 小时强迫场，两年 |
@@ -26,8 +26,8 @@ CN-Cng 就是黄金回归用的那个站点（`oracle/cases/CN-Cng/`）。示例
 的是同一份数据 —— 示例跑不通，回归测试会先一步红。
 
 AT-Neu 同时有完整的 PLUMBER2 站点属性和 FLUXNET-CH4 半小时
-甲烷通量；强迫场与观测只取 2010–2012，观测文件仅保留甲烷
-评估所需变量，以控制安装包大小。
+甲烷通量；强迫场与观测只取 2010–2012。观测保留水热、碳和甲烷变量，
+未开启甲烷的普通模拟也能评估 Qh、Qle、Rnet 等水热通量。
 
 US-Ne3 来自已有 CoLM CROP 单点样例。分发版保留 2002–2003 两年强迫，
 默认按雨养农田运行，并通过单点种植日覆盖值避免依赖全球作物管理图。
@@ -66,10 +66,28 @@ CN-Cng 装完就能跑通建算例 → 三段运行 → 与观测比对的完整
 
 ## 文件动过什么
 
-数据文件都用 netCDF deflate 无损压缩；AT-Neu 观测只保留时间、位置、
-`FCH4` / `FCH4_f` / `FCH4_f_ann` 及其 QC，数值未改动。AT-Neu 站点属性来自
+数据文件都用 netCDF deflate 无损压缩；AT-Neu 完整观测的原始变量数值未改动。
+其恢复来源和文件哈希记录在 `AT-Neu-observation-provenance.json`。AT-Neu 站点属性来自
 PLUMBER2，强迫场与甲烷观测来自 FLUXNET-CH4 2010–2012 半小时产品。
 
 US-Ne3 使用 CROP 内核、BGC 与 PFT/PC；默认关闭施肥和灌溉，并设置
 `DEF_TUNING_CROP_PLANTING_DAY=120`。`Runtime/` 中仅保留该示例运行所需的
 年氮沉降与十层硝化输入。
+
+## 重建 AT-Neu 完整观测
+
+用已有完整 FLUXNET-CH4 数据文件执行（开发环境需要 numpy 和 netCDF4）：
+
+```sh
+python scripts/restore-at-neu-observations.py --source /path/to/FLUXNET-CH4/Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc
+```
+
+脚本校验全部 52,608 个时间点和已发行甲烷数组一致，再恢复完整原始变量。
+`Qh/Qle/Rnet` 等原始列对应产品的 `H/LE/NETRAD`，带 `_F` 的插补列保持独立；
+分类字段 `*_qc=0` 仅表示原始列存在有效数值，`3` 表示缺失，**不表示新增仪器质量检验**。
+规则依据 [FLUXNET-CH4 官方变量说明](https://fluxnet.org/data/fluxnet-ch4-community-product/data-variables/)。
+
+此次只扩充观测，保留已发行强迫场和观测的数值时钟、时区标记以及甲烷数组。
+源文件的 `UTC_OFFSET=1` 与已发行示例的 `UTC_OFFSET=0` 不一致，源偏移量在输出和
+来源清单中保留；本次没有重新解释或平移既有模拟时间，时区标签的历史差异仍需单独核查。
+安装程序只自动升级哈希与旧发行文件完全一致的观测副本，保留用户修改的文件。

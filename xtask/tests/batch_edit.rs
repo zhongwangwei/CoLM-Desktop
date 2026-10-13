@@ -199,14 +199,14 @@ fn the_installer_carries_a_runnable_example() {
         "示例列表没有按自然站 / 城市站配置过滤"
     );
 
-    // 三个站点仍要小到能塞进安装包。
+    // 四个站点保留完整观测（含 AT-Neu 水热），仍限制安装包的数据体积。
     let bytes: u64 = ["Sitedata", "Forcing", "Observation"]
         .iter()
         .flat_map(|d| std::fs::read_dir(root().join("examples").join(d)).unwrap())
         .map(|e| e.unwrap().metadata().unwrap().len())
         .sum();
     assert!(
-        bytes < 10 * 1024 * 1024,
+        bytes < 16 * 1024 * 1024,
         "示例数据 {} MB，太大了 —— 重新 nccopy -d 5 压一遍",
         bytes / 1048576
     );

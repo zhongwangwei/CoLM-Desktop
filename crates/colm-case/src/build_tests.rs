@@ -521,3 +521,22 @@ fn a_latlon_case_writes_history_on_the_model_grid() {
         assert_eq!(value(name), value("DEF_GRIDBASED_lon_res"), "{name}");
     }
 }
+
+#[test]
+fn crop_defaults_preserve_the_cli_creation_recipe() {
+    let actual: Vec<_> = crop_defaults()
+        .into_iter()
+        .map(|(name, value)| (name, value.to_string()))
+        .collect();
+    let expected = [
+        ("DEF_USE_BGC", ".true."),
+        ("DEF_USE_LAIFEEDBACK", ".true."),
+        ("DEF_USE_FERT", ".false."),
+        ("DEF_USE_CNSOYFIXN", ".false."),
+        ("DEF_USE_IRRIGATION", ".false."),
+        ("DEF_Aerosol_Readin", ".false."),
+        ("DEF_TUNING_CROP_PLANTING_DAY", "120"),
+    ]
+    .map(|(name, value)| (name.to_string(), value.to_string()));
+    assert_eq!(actual, expected);
+}

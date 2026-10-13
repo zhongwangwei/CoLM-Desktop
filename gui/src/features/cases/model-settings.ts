@@ -16,7 +16,7 @@ export const modelSettingGroups = [
   ['ecology', '生态与生地化', 'Ecology and biogeochemistry'],
   ['tracer', '示踪剂', 'Tracers'],
   ['urban', '城市', 'Urban'],
-  ['river', '河道与水库', 'Rivers and reservoirs'],
+  ['river', '河湖流与水库', 'River–lake flow and reservoirs'],
   ['assimilation', '数据同化', 'Data assimilation'],
   ['other', '其他模型选项', 'Other model options'],
 ] as const;

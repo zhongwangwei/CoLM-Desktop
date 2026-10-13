@@ -77,6 +77,18 @@ export function casePeriodText(values: Record<string, string>): string {
 export function scannedForcing(site: Site | undefined, met: string): boolean {
   return !!site?.met_file && site.met_file === met && !!site.start && !!site.end && !site.problem;
 }
+export function caseRangeKeys(grid?: string | null): string[] {
+  if (!grid) return ['SITE_fsitedata', 'SITE_lon_location', 'SITE_lat_location'];
+  const bounds = ['DEF_domain%edgew', 'DEF_domain%edgee', 'DEF_domain%edges', 'DEF_domain%edgen'];
+  return [
+    ...bounds,
+    ...(grid === 'latlon'
+      ? ['DEF_GRIDBASED_lon_res', 'DEF_GRIDBASED_lat_res']
+      : grid === 'catchment'
+        ? ['DEF_CatchmentMesh_data']
+        : ['DEF_file_mesh']),
+  ];
+}
 export const primaryDataFields = [
   'SITE_fsitedata',
   'DEF_forcing_namelist',

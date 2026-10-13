@@ -458,6 +458,23 @@ pub fn fields(s: &CaseSpec) -> Result<Vec<(String, Value)>> {
     Ok(out)
 }
 
+/// Default case overrides used when creating a CROP case.
+/// Keep this ordered recipe shared by CLI creation and GUI configuration.
+pub fn crop_defaults() -> Vec<(String, Value)> {
+    Vec::from([
+        ("DEF_USE_BGC".into(), Value::Bool(true)),
+        ("DEF_USE_LAIFEEDBACK".into(), Value::Bool(true)),
+        ("DEF_USE_FERT".into(), Value::Bool(false)),
+        ("DEF_USE_CNSOYFIXN".into(), Value::Bool(false)),
+        ("DEF_USE_IRRIGATION".into(), Value::Bool(false)),
+        ("DEF_Aerosol_Readin".into(), Value::Bool(false)),
+        (
+            "DEF_TUNING_CROP_PLANTING_DAY".into(),
+            Value::Real { text: "120".into() },
+        ),
+    ])
+}
+
 /// USGS 的「城市与建成区」。
 pub const URBAN_LANDTYPE_USGS: i32 = 1;
 /// IGBP/PFT/PC 的「城市与建成区」。

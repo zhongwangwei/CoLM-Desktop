@@ -53,6 +53,7 @@ export type ProcessEntry = {
   pending: boolean;
 };
 export type ConfigurationResult = {
+  crop_defaults?: Record<string, string>;
   fields: ConfigurationField[];
   process_files: {
     file: string;

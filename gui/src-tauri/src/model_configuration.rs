@@ -130,8 +130,12 @@ pub(crate) fn query(
         fields.push(state);
     }
     let pft = pft_parameters(&overlay, selection, &doc, kernel.as_ref().map(|_| &have))?;
+    let crop_defaults: BTreeMap<_, _> = colm_case::crop_defaults()
+        .into_iter()
+        .map(|(name, value)| (name, value.to_string()))
+        .collect();
     Ok(
-        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,
+        json!({"identity":identity,"fields":fields,"process_files":files,"pft_parameters":pft,"crop_defaults":crop_defaults,
         "context_complete":false,"warnings":["当前目录用于发现配置；未读取所选冻结源码的默认值，最终适用性仍需运行前检查。"]}),
     )
 }
@@ -679,6 +683,31 @@ mod tests {
                 .as_bool()
                 .unwrap());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn crop_defaults_match_the_shared_creation_recipe_without_mutating_the_case() {
+        let (root, _, draft) = fixture();
+        let result = query(
+            &root,
+            source(&draft, Overlay::default()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let expected: BTreeMap<_, _> = colm_case::crop_defaults()
+            .into_iter()
+            .map(|(name, value)| (name, value.to_string()))
+            .collect();
+        assert_eq!(result["crop_defaults"], json!(expected));
+        assert_eq!(
+            result["crop_defaults"]["DEF_TUNING_CROP_PLANTING_DAY"],
+            "120"
+        );
+        assert!(field(&result, "DEF_USE_BGC")["configured_value"].is_null());
         std::fs::remove_dir_all(root).unwrap();
     }
 

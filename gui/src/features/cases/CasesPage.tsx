@@ -12,6 +12,7 @@ import {
   caseSpinupValid,
   casePeriodText,
   simulationFields,
+  caseRangeKeys,
   simulationSteps,
   processDataSections,
   processDataGroupId,
@@ -341,7 +342,19 @@ export default function CasesPage() {
           )?.dir ?? null,
         modelRevision: state.versionRef,
       });
+      const context = await invoke<{ profile: NonNullable<typeof modelContext>['profile'] }>(
+        'model_case_context',
+        { dir: target, modelRevision: state.versionRef },
+      );
       if (id.active && epoch.current === id) {
+        setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
+        if (state.selectedCase?.entry.dir === target)
+          update({
+            selectedCase: {
+              ...state.selectedCase,
+              profile: { ...state.selectedCase.profile, ...context.profile },
+            },
+          });
         setSaved({ ...values });
         setExplicitValues((old) => ({
           ...old,
@@ -387,9 +400,15 @@ export default function CasesPage() {
           }))
           .filter((group) => group.fields.length)
       : [];
+  const rangeKeys = caseRangeKeys(effectiveProfile?.grid ?? state.selectedCase?.profile.grid);
+  const rangeFields =
+    step === 1 ? visibleSchema.filter((field) => rangeKeys.includes(field.name)) : [];
   const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
     shown = [
-      ...simulationFields(visibleSchema, step, advanced).filter((f) => !groupFields.includes(f)),
+      ...rangeFields,
+      ...simulationFields(visibleSchema, step, advanced).filter(
+        (f) => !groupFields.includes(f) && !rangeFields.includes(f),
+      ),
       ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),
     ];
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
@@ -769,10 +788,11 @@ export default function CasesPage() {
               </div>
               <p className="muted">
                 {t(
-                  '已有算例的范围与网格由输入资料确定；如需更换模拟范围，请新建模拟。',
-                  'The case inputs define its range and mesh. Create a new simulation to change the range.',
+                  '可修改当前范围与网格配置。更换站点或网格后，请在下一步匹配对应数据；旧运行结果仍保留。',
+                  'Edit the current range and grid settings, then match the corresponding inputs in the next step. Existing run results are preserved.',
                 )}
               </p>
+              <div className="form-grid">{rangeFields.map(render)}</div>
               {more()}
             </Card>
           )}

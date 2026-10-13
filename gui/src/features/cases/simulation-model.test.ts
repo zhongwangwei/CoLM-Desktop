@@ -10,6 +10,7 @@ import {
   newCaseProblem,
   newCaseRangeProblem,
   simulationFields,
+  caseRangeKeys,
   simulationSteps,
   processDataGroupId,
   processDataSections,
@@ -256,4 +257,12 @@ test('process input groups retain their domain-specific fields without absorbing
     ['DEF_HIST_FREQ', '输出与重启', null],
   ] as const)
     assert.equal(processDataGroupId(field(name, section)), group, name);
+});
+
+test('case range controls match site and spatial inputs', () => {
+  assert.deepEqual(caseRangeKeys(), ['SITE_fsitedata', 'SITE_lon_location', 'SITE_lat_location']);
+  assert.ok(caseRangeKeys('latlon').includes('DEF_GRIDBASED_lon_res'));
+  assert.ok(caseRangeKeys('catchment').includes('DEF_CatchmentMesh_data'));
+  assert.ok(caseRangeKeys('unstructured').includes('DEF_file_mesh'));
+  assert.ok(!caseRangeKeys('latlon').includes('SITE_fsitedata'));
 });

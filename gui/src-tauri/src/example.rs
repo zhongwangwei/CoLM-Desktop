@@ -108,6 +108,12 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
     .iter()
     .all(|path| dest.join(path).is_file());
     copy_tree(&src, &dest)?;
+    let observation = "Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc";
+    let upgraded = upgrade_unmodified_file(
+        &src.join(observation),
+        &dest.join(observation),
+        "5fe0b835e74a9d18d251ff8aba7b736579506927dac54a31d29131d69cfc9785",
+    )?;
     let root = cases_root(&app)?;
     std::fs::create_dir_all(&root).map_err(|e| format!("{}: {e}", root.display()))?;
     Ok(Example {
@@ -115,8 +121,30 @@ pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
         forcingdir: dest.join("Forcing").display().to_string(),
         root: root.display().to_string(),
         runtimedir: dest.join("Runtime").display().to_string(),
-        already,
+        already: already && !upgraded,
     })
+}
+
+/// Upgrade only a byte-identical previous release; preserve user-edited observations.
+fn upgrade_unmodified_file(src: &Path, dest: &Path, previous_sha256: &str) -> Result<bool, String> {
+    if !src.is_file() || !dest.is_file() {
+        return Ok(false);
+    }
+    let previous = std::fs::read(dest).map_err(|error| error.to_string())?;
+    if colm_kernel::sha256_hex(&previous) != previous_sha256 {
+        return Ok(false);
+    }
+    let replacement = std::fs::read(src).map_err(|error| error.to_string())?;
+    if replacement == previous {
+        return Ok(false);
+    }
+    let staged = dest.with_extension(format!("nc.upgrade-{}", std::process::id()));
+    std::fs::write(&staged, replacement).map_err(|error| error.to_string())?;
+    if let Err(error) = std::fs::rename(&staged, dest) {
+        let _ = std::fs::remove_file(&staged);
+        return Err(format!("{}: {error}", dest.display()));
+    }
+    Ok(true)
 }
 
 /// 递归复制。只有三个目录九个文件，不引第三方 crate。

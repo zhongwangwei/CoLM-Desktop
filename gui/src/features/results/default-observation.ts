@@ -16,6 +16,8 @@ const absolute = (path: string, base: string) =>
 export async function defaultObservation(caseDir: string, call: typeof invoke = invoke) {
   const opened = await call<OpenedCase>('open_case', { dir: caseDir });
   if (opened.profile.spatial) return '';
+  // Install release dataset corrections while preserving user-edited examples.
+  await call('install_example', {}).catch(() => {});
   const forcingNamelist = opened.profile.inputs.forcing_namelist;
   if (typeof forcingNamelist !== 'string' || !forcingNamelist) return '';
   const path = absolute(forcingNamelist, caseDir);

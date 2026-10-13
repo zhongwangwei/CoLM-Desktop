@@ -119,6 +119,7 @@ function harness() {
     return contract;
   }
   const response: ConfigurationResult = {
+    crop_defaults: { DEF_TUNING_CROP_PLANTING_DAY: '120' },
     fields: [],
     process_files: [],
     pft_parameters: [],
@@ -200,23 +201,23 @@ test('frozen model cards write case fields directly and leave the selected revis
   assert.equal(h.changes.length, 0);
 });
 
-test('crop card starts unspecified and requires explicit planting-day input before changing overlay', async () => {
+test('crop card enables immediately using standard case defaults and permits later planting edits', async () => {
   const h = harness();
   h.props.overlay.physics.DEF_USE_BGC = '.true.';
   h.props.fields.find((f) => f.name === 'DEF_TUNING_CROP_PLANTING_DAY')!.kind = 'integer';
   h.props.environment.cropKernel = { dir: '/crop', macros: ['CROP'] } as KernelEntry;
   h.render();
   let c = await h.resolve();
-  assert.equal(c.fields.find((f) => f.id === 'setup-crop')!.value, '');
   c.fields.find((f) => f.id === 'setup-crop')!.set('.true.');
-  c = h.render();
-  assert.equal(h.changes.length, 0);
-  assert.equal(c.fields.find((f) => f.id === 'setup-crop-planting-day')!.value, '');
-  assert.equal(c.actions.find((a) => a.id === 'setup-crop-apply')!.enabled, false);
-  c.fields.find((f) => f.id === 'setup-crop-planting-day')!.set('120');
+  assert.equal(h.changes[0].physics.DEF_TUNING_CROP_PLANTING_DAY, '120');
+  h.props.overlay = h.changes[0];
+  h.render();
+  c = await h.resolve();
+  assert.equal(c.fields.find((f) => f.id === 'setup-crop-planting-day')!.value, '120');
+  c.fields.find((f) => f.id === 'setup-crop-planting-day')!.set('125');
   c = h.render();
   c.actions.find((a) => a.id === 'setup-crop-apply')!.run();
-  assert.equal(h.changes[0].physics.DEF_TUNING_CROP_PLANTING_DAY, '120');
+  assert.equal(h.changes.at(-1)!.physics.DEF_TUNING_CROP_PLANTING_DAY, '125');
 });
 
 test('visible river options and guide enforce the same verified methane-mode gate', async () => {

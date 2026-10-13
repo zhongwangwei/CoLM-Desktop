@@ -75,3 +75,39 @@ fn copying_the_tree_keeps_the_layout_that_scanning_depends_on() {
         "new example"
     );
 }
+
+#[test]
+fn observation_upgrade_replaces_only_an_unmodified_previous_release() {
+    let root = std::env::temp_dir().join(format!("colm-example-upgrade-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let src = root.join("source.nc");
+    let dest = root.join("installed.nc");
+    std::fs::write(&src, b"complete observations").unwrap();
+    std::fs::write(&dest, b"old methane subset").unwrap();
+    let previous = colm_kernel::sha256_hex(b"old methane subset");
+    assert!(super::upgrade_unmodified_file(&src, &dest, &previous).unwrap());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"complete observations");
+    assert!(!super::upgrade_unmodified_file(&src, &dest, &previous).unwrap());
+    std::fs::write(&dest, b"user observations").unwrap();
+    assert!(!super::upgrade_unmodified_file(&src, &dest, &previous).unwrap());
+    assert_eq!(std::fs::read(&dest).unwrap(), b"user observations");
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundled_complete_observation_matches_its_provenance() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("AT-Neu-observation-provenance.json")).unwrap(),
+    )
+    .unwrap();
+    let bytes =
+        std::fs::read(root.join("Observation/AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc")).unwrap();
+    assert_eq!(
+        colm_kernel::sha256_hex(&bytes),
+        manifest["output_sha256"].as_str().unwrap()
+    );
+    assert!(manifest["raw_counts"]["Qle"].as_u64().unwrap() > 20_000);
+    assert!(manifest["raw_counts"]["Qh"].as_u64().unwrap() > 20_000);
+    assert_eq!(manifest["records"], 52_608);
+}

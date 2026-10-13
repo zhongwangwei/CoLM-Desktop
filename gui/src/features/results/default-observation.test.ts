@@ -17,6 +17,7 @@ function fixture({
   const calls: { command: string; args: Record<string, unknown> }[] = [];
   const call = (async (command: string, args: Record<string, unknown>) => {
     calls.push({ command, args });
+    if (command === 'install_example') return {};
     if (command === 'open_case')
       return { profile: { spatial, inputs: { forcing_namelist: '/cases/custom/forcing.nml' } } };
     if (command === 'read_text') return 'forcing namelist';
@@ -37,6 +38,7 @@ test('default observations follow the original forcing file even after renaming 
     await defaultObservation('/cases/my-renamed-case', call),
     '/data/Observation/CN-Cng_2010_Flux.nc',
   );
+  assert.ok(calls.some((call) => call.command === 'install_example'));
   assert.deepEqual(calls.at(-1)?.args, {
     dir: '/data/Sitedata',
     forcingDir: '/data/Forcing',

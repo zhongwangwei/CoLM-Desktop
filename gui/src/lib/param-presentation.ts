@@ -973,7 +973,7 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
   },
   DEF_Reservoir_Method: {
     0: pair('关闭水库调度', 'Disable reservoir operation'),
-    1: pair('CaMa-Flood 改进水库调度', 'Improved CaMa-Flood reservoir operation'),
+    1: pair('河湖流改进水库调度', 'Improved river–lake reservoir operation'),
   },
   DEF_wetland_finundation_scheme: {
     1: pair('湿地类型 / wetwat', 'Wetland type / wetwat'),

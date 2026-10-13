@@ -81,7 +81,8 @@ export default function NewCasePage() {
     [ownData, setOwnData] = useState(seed?.ownData ?? false);
   const [dataOpened, setDataOpened] = useState<Record<string, boolean>>({}),
     [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
-    [optionError, setOptionError] = useState('');
+    [optionError, setOptionError] = useState(''),
+    [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
   const lock = useRef(false),
     sequence = useRef(0),
     alive = useRef(true),
@@ -176,9 +177,15 @@ export default function NewCasePage() {
     let current = true;
     if (!schemaReady || !state.version) return;
     setOptionError('');
-    void invoke<{ fields: ConfigurationField[] }>('model_configuration', JSON.parse(dataRequest))
+    void invoke<{ fields: ConfigurationField[]; crop_defaults?: Record<string, string> }>(
+      'model_configuration',
+      JSON.parse(dataRequest),
+    )
       .then((result) => {
-        if (current) setOptionStates(result.fields);
+        if (current) {
+          setOptionStates(result.fields);
+          setCropDefaults(result.crop_defaults ?? {});
+        }
       })
       .catch((e) => {
         if (current) setOptionError(String(e));
@@ -265,6 +272,7 @@ export default function NewCasePage() {
       const found = await scan(x.sitedir, x.forcingdir);
       if (!alive.current) return;
       const s = found.sites.find((site) => site.name === 'CN-Cng');
+      if (s) selectSite(s.site_file, found.sites);
       setForm((f) => ({
         ...f,
         sitedir: x.sitedir,
@@ -284,8 +292,46 @@ export default function NewCasePage() {
       return { sites: found.sites.map((s) => s.name) };
     });
   }
-  function selectSite(path: string) {
-    set('site', path);
+  function selectSite(path: string, availableSites = sites) {
+    const site = availableSites.find((item) => item.site_file === path);
+    if (!site || site.problem) return;
+    if (site.crop && !cropDefaults.DEF_TUNING_CROP_PLANTING_DAY) {
+      setError(t('正在读取作物默认配置，请稍后选择。', 'Wait for crop defaults to load.'));
+      return;
+    }
+    setError('');
+    setForm((previous) => ({
+      ...previous,
+      site: path,
+      name: site.name,
+      met: site.met_file ?? '',
+      start: site.start ?? '',
+      end: site.end ?? '',
+    }));
+    setCaseValues((previous) => {
+      const next: Record<string, string> = {
+        ...previous,
+        DEF_URBAN_RUN: site.urban ? '.true.' : '.false.',
+      };
+      if (site.crop) {
+        for (const [key, value] of Object.entries(cropDefaults)) next[key] = previous[key] ?? value;
+        Object.assign(next, {
+          DEF_USE_BGC: '.true.',
+          DEF_USE_LULCC: '.false.',
+          DEF_URBAN_RUN: '.false.',
+        });
+      } else {
+        delete next.DEF_TUNING_CROP_PLANTING_DAY;
+        if (site.urban) Object.assign(next, { DEF_USE_BGC: '.false.', DEF_USE_TRACER: '.false.' });
+      }
+      return next;
+    });
+    if (site.crop || site.urban)
+      setForm((previous) => ({
+        ...previous,
+        subgrid: site.crop ? 'PFT' : 'IGBP',
+        landcover: 'IGBP',
+      }));
   }
   const folderKeys = ['root', 'sitedir', 'forcingdir', 'rawdata', 'runtime'],
     fileKeys = ['site', 'met', 'mesh', 'catchment', 'shapefile', 'forcing'];
@@ -724,7 +770,7 @@ export default function NewCasePage() {
             id: `new-select-${s.name}`,
             label: s.name,
             kind: 'click' as const,
-            enabled: enabled && !s.problem && !siteVersionMismatch(s, physics),
+            enabled: enabled && !s.problem,
             run: () => selectSite(s.site_file),
           })),
         ]
@@ -928,7 +974,7 @@ export default function NewCasePage() {
               {sites.length > 0 && (
                 <div className="simulation-site-list">
                   {sites.map((s) => {
-                    const issue = s.problem ?? siteVersionMismatch(s, physics);
+                    const issue = s.problem;
                     return (
                       <Button
                         key={s.site_file}

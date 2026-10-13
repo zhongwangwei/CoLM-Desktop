@@ -17,8 +17,8 @@ mod result_state;
 pub mod tuning;
 
 pub use build::{
-    fields, spatial_fields, spinup_cutoff, spinup_fields, CaseSpec, Dirs, SpatialBounds,
-    SpatialCaseSpec, SpatialGrid, Spinup, Window,
+    crop_defaults, fields, spatial_fields, spinup_cutoff, spinup_fields, CaseSpec, Dirs,
+    SpatialBounds, SpatialCaseSpec, SpatialGrid, Spinup, Window,
 };
 pub use layout::{case_name, is_spatial_case, render, validate_case_name, Layout};
 pub use minimal::{is_default, required};

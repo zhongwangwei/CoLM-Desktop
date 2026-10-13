@@ -2068,30 +2068,7 @@ fn configured_or_unused(configured: Option<String>, unused: &Path) -> String {
 }
 
 fn add_crop_fields(fields: &mut Vec<(String, colm_namelist::Value)>) {
-    fields.extend([
-        ("DEF_USE_BGC".into(), colm_namelist::Value::Bool(true)),
-        (
-            "DEF_USE_LAIFEEDBACK".into(),
-            colm_namelist::Value::Bool(true),
-        ),
-        ("DEF_USE_FERT".into(), colm_namelist::Value::Bool(false)),
-        (
-            "DEF_USE_CNSOYFIXN".into(),
-            colm_namelist::Value::Bool(false),
-        ),
-        (
-            "DEF_USE_IRRIGATION".into(),
-            colm_namelist::Value::Bool(false),
-        ),
-        (
-            "DEF_Aerosol_Readin".into(),
-            colm_namelist::Value::Bool(false),
-        ),
-        (
-            "DEF_TUNING_CROP_PLANTING_DAY".into(),
-            colm_namelist::Value::Real { text: "120".into() },
-        ),
-    ]);
+    fields.extend(colm_case::crop_defaults());
 }
 
 fn add_inactive_process_fields(fields: &mut Vec<(String, colm_namelist::Value)>) {

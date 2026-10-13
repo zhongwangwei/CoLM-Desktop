@@ -107,9 +107,19 @@ test('case scalar foundations migrate precisely and preserve unrelated child par
   assert.equal(o.parameters.length, 2);
   assert.equal(apply(next, 'DEF_USE_BGC', '.false.').parameters[0].value, '.true.');
 });
-test('crop requires explicit day and verified candidate macro; off preserves other crop values', () => {
+test('crop accepts standard defaults and verified candidate macro; off preserves other crop values', () => {
   let o = apply(overlay(), 'DEF_USE_BGC', '.true.');
-  assert.equal(apply(o, 'crop', '.true.'), o);
+  assert.throws(() => apply(o, 'crop', '.true.'), /defaults/);
+  assert.equal(
+    applySetupRequest(
+      o,
+      fields,
+      { id: 'crop', value: '.true.' },
+      { ...environment, domain: 'single' },
+      { fields: [], process_files: [], crop_defaults: { DEF_TUNING_CROP_PLANTING_DAY: '120' } },
+    ).physics.DEF_TUNING_CROP_PLANTING_DAY,
+    '120',
+  );
   assert.throws(() => apply(o, 'crop', '120'), /spatial/);
   assert.throws(() => apply(o, 'crop', '367', { ...environment, domain: 'single' }));
   assert.throws(() => apply(o, 'crop', '0', { ...environment, cropKernel: undefined }), /Pending/);

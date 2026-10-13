@@ -183,7 +183,12 @@ function page(
         case 'describe_fields':
           return options.schema ?? schema;
         case 'model_configuration':
-          return options.configuration ? options.configuration(args) : { fields: [] };
+          return options.configuration
+            ? options.configuration(args)
+            : {
+                fields: [],
+                crop_defaults: { DEF_TUNING_CROP_PLANTING_DAY: '120', DEF_USE_BGC: '.true.' },
+              };
         case 'model_fields':
           return options.modelFields ?? [];
         case 'scan_sites':
@@ -1343,7 +1348,7 @@ test('case urban switch controls station compatibility and urban creation mode w
   await p.click('new-next');
   const c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-select-urban')!.enabled, true);
-  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, false);
+  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
   await p.click('new-select-urban');
   await p.click('new-next');
   await p.click('new-next');
@@ -1376,7 +1381,7 @@ test('case crop planting selects the crop kernel and station; clearing it return
   await p.click('new-next');
   const c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-select-crop')!.enabled, true);
-  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, false);
+  assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
   await p.click('new-previous');
   (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
     DEF_TUNING_CROP_PLANTING_DAY: null,
@@ -1580,3 +1585,124 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       assert.ok(controls.some((f) => f.id.endsWith('AUXILIARY_DATA')));
     }
   });
+
+test('selecting an urban station configures its case automatically and keeps ordinary stations selectable', async () => {
+  const urban = {
+    ...site,
+    name: 'AU-Preston',
+    site_file: '/urban/site.nc',
+    met_file: '/urban/met.nc',
+    urban: true,
+  };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [urban, site], step: 3 },
+    [urban, site],
+    initialValues,
+    { schema: setupSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  assert.equal(p.render().actions.find((a) => a.id === 'new-select-AU-Preston')!.enabled, true);
+  await p.click('new-select-AU-Preston');
+  await p.click('new-previous');
+  let settings = p.element('ModelSettings');
+  assert.equal(
+    (settings.props.setupEnvironment as { caseValues: Record<string, string> }).caseValues
+      .DEF_URBAN_RUN,
+    '.true.',
+  );
+  assert.equal(
+    (settings.props.setupEnvironment as { caseValues: Record<string, string> }).caseValues
+      .DEF_USE_BGC,
+    '.false.',
+  );
+  assert.equal((settings.props.kernel as KernelChoice).dir, '/kernel/default');
+  await p.click('new-next');
+  assert.equal(p.render().actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
+  await p.click('new-select-CN-Cng');
+  await p.click('new-previous');
+  settings = p.element('ModelSettings');
+  assert.equal(
+    (settings.props.setupEnvironment as { caseValues: Record<string, string> }).caseValues
+      .DEF_URBAN_RUN,
+    '.false.',
+  );
+  assert.deepEqual(p.state.version.overlay.physics, {});
+  assert.ok(!p.calls.some((c) => c.command === 'model_create'));
+});
+
+test('selecting a crop example uses backend defaults and matches PFT BGC and a CROP kernel', async () => {
+  const crop = {
+    ...site,
+    name: 'US-Ne3',
+    site_file: '/crop/site.nc',
+    met_file: '/crop/met.nc',
+    crop: true,
+  };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [crop, site], step: 3 },
+    [crop, site],
+    initialValues,
+    { schema: setupSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  assert.equal(p.render().actions.find((a) => a.id === 'new-select-US-Ne3')!.enabled, true);
+  await p.click('new-select-US-Ne3');
+  await p.click('new-previous');
+  const setup = p.element('ModelSettings').props;
+  assert.equal(setup.mode, 'PFT');
+  assert.equal((setup.kernel as KernelChoice).dir, '/kernel/crop');
+  const fields = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
+  assert.equal(fields.DEF_USE_BGC, '.true.');
+  assert.equal(fields.DEF_URBAN_RUN, '.false.');
+  assert.equal(fields.DEF_TUNING_CROP_PLANTING_DAY, '120');
+  await p.click('new-next');
+  await p.click('new-next');
+  await p.click('new-next');
+  await p.click('new-create');
+  const create = p.calls.find((c) => c.command === 'new_case')!;
+  assert.equal(create.args.mode, 'pft');
+  assert.equal(create.args.site, '/crop/site.nc');
+  assert.equal(create.args.met, '/crop/met.nc');
+  assert.equal(
+    (create.args.fields as { path: string; value: string }[]).find(
+      (f) => f.path === 'DEF_TUNING_CROP_PLANTING_DAY',
+    )?.value,
+    '120',
+  );
+  assert.ok(!p.calls.some((c) => c.command === 'model_create'));
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+
+test('existing case range fields are editable and save only the case before refreshing context', async () => {
+  const rangeValues = {
+    SITE_fsitedata: '/site.nc',
+    SITE_lon_location: '11.3',
+    SITE_lat_location: '47.1',
+  };
+  const p = page(
+    'CasesPage',
+    undefined,
+    [site],
+    { ...initialValues, ...rangeValues },
+    {
+      schema: [
+        ...schema,
+        ...Object.entries(rangeValues).map(([name, value]) => field(name, '单点站点', value)),
+      ],
+    },
+  );
+  await p.mount();
+  const before = await p.click('case-step-1');
+  for (const key of Object.keys(rangeValues))
+    assert.ok(before.fields.find((item) => item.id === `case-${key}`));
+  p.set('case-SITE_lon_location', '12.5');
+  await p.click('case-save');
+  assert.deepEqual(
+    [...p.calls].reverse().find((call) => call.command === 'case_data_save')!.args.fields,
+    [{ path: 'SITE_lon_location', value: '12.5' }],
+  );
+  assert.equal(p.calls.at(-1)!.command, 'model_case_context');
+  assert.ok(!p.calls.some((call) => call.command === 'model_create'));
+});

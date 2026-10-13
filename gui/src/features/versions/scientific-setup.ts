@@ -10,7 +10,7 @@ import {
   type ConfigurationField,
   type ConfigurationResult,
 } from './configuration-options';
-export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files'>;
+export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files' | 'crop_defaults'>;
 export type SetupRequest = { id: string; value: string };
 export type SetupEnvironment = {
   subgrid?: string;
@@ -333,7 +333,21 @@ export function applySetupRequest(
   if (candidate.reason) throw new Error(candidate.reason);
   if (request.id === 'crop') {
     if (value === '.false.') return resetModelOption(overlay, planting);
-    if (request.value === '.true.') return overlay;
+    if (request.value === '.true.') {
+      if (!context?.crop_defaults?.[planting])
+        throw new Error(bilingual('作物默认配置尚未读取', 'Crop defaults have not loaded'));
+      let next = overlay;
+      for (const [key, defaultValue] of Object.entries(context.crop_defaults)) {
+        const current = modelSettingValue(overlay, key);
+        next = setModelOption(
+          next,
+          fields,
+          key,
+          current ?? (key === planting && !isSite(environment) ? '0' : defaultValue),
+        );
+      }
+      return next;
+    }
     if (
       !/^\d+$/.test(request.value) ||
       Number(request.value) > 366 ||

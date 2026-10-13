@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "source_file": "AT-Neu_2010-2012_FLUXNET-CH4_Flux.nc",
+  "source_sha256": "8029b5bd7e04abca3c415a5b0ddb075aa6c35e193fc5d9e89e19fe8743a53583",
+  "forcing_sha256": "f3de0c46194f53fe193e0bbebba7fbed34af50bb02b8dde7cce06222593e4f5a",
+  "variable_policy": "https://fluxnet.org/data/fluxnet-ch4-community-product/data-variables/",
+  "time_policy": "Preserve the already distributed observation/forcing numeric clock and time metadata; no timestamp shift.",
+  "qc_policy": "0 denotes a present finite raw (non-_F) observation, 3 denotes missing. This is a measured/missing classification, not a new instrument quality test.",
+  "source_utc_offset": 1.0,
+  "distributed_utc_offset": 0.0,
+  "records": 52608,
+  "existing_methane_arrays_unchanged": [
+    "FCH4",
+    "FCH4_f",
+    "FCH4_f_ann",
+    "FCH4_f_ann_qc"
+  ],
+  "raw_counts": {
+    "Qle": 22352,
+    "Qh": 22920,
+    "NEE": 22476,
+    "Ustar": 42715,
+    "Rnet": 52398,
+    "SWup": 52455,
+    "LWup": 52432,
+    "Qg": 52416,
+    "SWdown": 52455,
+    "LWdown": 52432
+  },
+  "output_sha256": "d2277c816230e07d541a5e8ddc27aa43aa10ca2fb4e179d533d9da701a5a25c6",
+  "output_bytes": 5015398
+}
