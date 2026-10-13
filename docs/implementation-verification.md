@@ -33019,3 +33019,6 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 为遵守直接合并main要求，随后在干净29c84e46主线语义移植；保留主线双语、版本树、about、equivalence/dedup、migrate_case_to/bind_new_case和CLI源码快照/Study功能。主线前端256项测试、build/typecheck/lint及format检查通过，Rust最终验证另记。
 
 主线最终模型完整25/25测试通过；GUI定向36/36与CLI内核1/1通过。独立最终移植审查APPROVE，无遗留阻断。主线等价比较忽略旧算例控制项，并正确解析Fortran默认Real的_r8后缀，实际系数恢复默认可复用官方版本。未执行新的完整科学运行。
+
+
+de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误复用模型字段归属，以及远程内核测试旧版本开关fixture。修复将数据比较投影与存储所有权解耦；完整配置身份、全部输入文件哈希和评估时段/输出采样仍保留。远程测试使用真实USGS地类系数和CROP PFT参数验证实际内核能力，旧算例标志不再决定版本要求。新增/定向指纹9项和远程内核1项通过，CLI Clippy（tests，-D warnings）、格式与独立复审通过。

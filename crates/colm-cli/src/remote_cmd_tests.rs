@@ -888,6 +888,28 @@ fn actual_remote_manifest_rejects_classification_crop_and_unknown_metadata() {
         .physics
         .insert("DEF_USE_USGS".into(), ".true.".into());
     let mut metadata = serde_json::json!({"schema":1,"preset":"same-preset","platform":"Linux-x86_64","colm_git_sha":"fixture","generator_args":"","macros":["SinglePoint","LULC_IGBP"],"built_with":"fixture","netcdf_c":"","netcdf_fortran":"","hdf5":"","sha256":{}});
+    // Historical case selectors cannot dictate a model's remote kernel requirements.
+    check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).unwrap();
+    revision
+        .overlay
+        .parameters
+        .push(colm_model::ParameterOverrideRecord {
+            parameter_id: colm_case::parameters::find("DEF_LC_VMAX25")
+                .unwrap()
+                .id
+                .clone(),
+            raw_key: "DEF_LC_VMAX25".into(),
+            scope_instance: colm_model::ParameterScopeInstance {
+                kind: "land-cover-class".into(),
+                scheme: Some("USGS".into()),
+                index: Some(1),
+                type_name: None,
+                process_file: None,
+            },
+            value: "40".into(),
+            expected_old_value: None,
+            unit: None,
+        });
     assert!(
         check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).is_err()
     );
@@ -895,8 +917,21 @@ fn actual_remote_manifest_rejects_classification_crop_and_unknown_metadata() {
     check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).unwrap();
     revision
         .overlay
-        .physics
-        .insert("DEF_USE_CROP".into(), ".true.".into());
+        .parameters
+        .push(colm_model::ParameterOverrideRecord {
+            parameter_id: "pft:DEF_PFT_VMAX25".into(),
+            raw_key: "DEF_PFT_VMAX25".into(),
+            scope_instance: colm_model::ParameterScopeInstance {
+                kind: "pft".into(),
+                scheme: None,
+                index: Some(16),
+                type_name: None,
+                process_file: None,
+            },
+            value: "40".into(),
+            expected_old_value: None,
+            unit: None,
+        });
     assert!(
         check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).is_err()
     );

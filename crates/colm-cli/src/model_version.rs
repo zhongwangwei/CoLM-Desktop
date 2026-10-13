@@ -1048,9 +1048,8 @@ pub(crate) fn check_kernel(
                 parameter.parameter_id
             );
         }
-        match parameter.scope_instance.kind.as_str() {
-            "land-cover-class" => ensure!(has("SinglePoint"), "land-cover scalar overrides require a SinglePoint kernel; regional multi-class application is unsupported"),
-            _ => {}
+        if parameter.scope_instance.kind == "land-cover-class" {
+            ensure!(has("SinglePoint"), "land-cover scalar overrides require a SinglePoint kernel; regional multi-class application is unsupported");
         }
         if matches!(parameter.scope_instance.kind.as_str(), "pft" | "pc-pft")
             && parameter

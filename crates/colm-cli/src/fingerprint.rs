@@ -677,6 +677,38 @@ impl FullInputIdentity {
     }
 }
 
+// Comparison identity describes data and evaluation conditions, independently of whether
+// experimental physics choices are stored in the case or in a model revision.
+fn is_comparison_physics(key: &str) -> bool {
+    if colm_model::is_model_field(key) {
+        return true;
+    }
+    let Some(field) = colm_schema::find(key).filter(|field| field.group.is_some()) else {
+        return false;
+    };
+    if matches!(field.name, "DEF_LC_YEAR" | "DEF_LAI_START_YEAR") {
+        return false;
+    }
+    matches!(
+        field.name,
+        "DEF_USE_LCT"
+            | "DEF_USE_PFT"
+            | "DEF_USE_PC"
+            | "DEF_SUBGRID_SCHEME"
+            | "DEF_SOLO_PFT"
+            | "DEF_FAST_PC"
+            | "DEF_PC_CROP_SPLIT"
+            | "DEF_SOILPAR_UPS_FIT"
+            | "DEF_SOIL_REFL_SCHEME"
+            | "DEF_LULCC_SCHEME"
+            | "DEF_USE_LULCC"
+            | "DEF_HIGHRESURBAN_ALBEDO"
+    ) || matches!(
+        colm_case::parameters::field_section(field.name, field.group),
+        Some("水热过程" | "生态与生地化" | "示踪剂" | "城市" | "河道与水库" | "数据同化")
+    )
+}
+
 /// Resolve explicit payloads, forcing-prefix matches and declared data roots.
 /// Directory scans are conservative: every regular file is hashed, with stable
 /// membership checked before and after; no metadata-only or sampled shortcuts.
@@ -833,7 +865,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                     );
                 }
             }
-        } else if !colm_model::is_model_field(&key) {
+        } else if !is_comparison_physics(&key) {
             out.data_settings.insert(lower, value.to_string());
         }
     }
@@ -1496,6 +1528,35 @@ mod full_identity_tests {
             first.data_sha256, parameters.data_sha256,
             "model structure may be compared under the same data conditions"
         );
+        for (field, value) in [
+            ("DEF_USE_PC", ".true."),
+            ("DEF_SUBGRID_SCHEME", "'PC'"),
+            ("DEF_USE_BGC", ".true."),
+            ("DEF_USE_MEDLYNST", ".true."),
+            ("DEF_USE_TRACER", ".true."),
+            ("DEF_TUNING_CSOILC", "0.008"),
+        ] {
+            let modified = case.replace("/\n", &format!(" {field}={value}\n/\n"));
+            std::fs::write(root.join("case.nml"), modified).unwrap();
+            assert_eq!(
+                first.data_sha256,
+                full_inputs(&root).unwrap().data_sha256,
+                "{field} changes the experiment, not its data conditions"
+            );
+        }
+        for (field, value) in [
+            ("DEF_LC_YEAR", "2000"),
+            ("DEF_LAI_START_YEAR", "2000"),
+            ("DEF_simulation_time%timestep", "900"),
+        ] {
+            let modified = case.replace("/\n", &format!(" {field}={value}\n/\n"));
+            std::fs::write(root.join("case.nml"), modified).unwrap();
+            assert_ne!(
+                first.data_sha256,
+                full_inputs(&root).unwrap().data_sha256,
+                "{field} changes data selection or evaluation conditions"
+            );
+        }
         std::fs::write(root.join("case.nml"), case.replace("'DAY'", "'HOUR'")).unwrap();
         assert_ne!(
             first.data_sha256,
