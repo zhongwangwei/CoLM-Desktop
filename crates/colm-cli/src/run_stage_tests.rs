@@ -62,6 +62,55 @@ fn test_directory(label: &str) -> PathBuf {
     path
 }
 
+#[cfg(windows)]
+#[test]
+fn output_dir_normalization_matches_windows_verbatim_prefixes() {
+    for (plain, verbatim) in [
+        (r"D:\cases\probe-case", r"\\?\D:\cases\probe-case"),
+        (
+            r"\\server\share\probe-case",
+            r"\\?\UNC\server\share\probe-case",
+        ),
+    ] {
+        // Test UNC syntax without probing a fictitious network share.
+        let expected = normalize_path_components(&Path::new(verbatim).join("out"));
+        assert_eq!(
+            normalize_path_components(&Path::new(plain).join("out")),
+            expected
+        );
+        assert_ne!(
+            normalize_path_components(&Path::new(plain).join("elsewhere")),
+            expected
+        );
+    }
+}
+
+#[test]
+fn cli_output_dir_accepts_canonical_case_paths_before_output_exists() {
+    let root = test_directory("canonical-output-dir");
+    #[cfg(not(windows))]
+    let root = root.canonicalize().unwrap();
+    let canonical = root.canonicalize().unwrap();
+    let case_nml = canonical.join("case.nml");
+    for suffix in [Path::new("out"), Path::new("missing").join("out").as_path()] {
+        assert!(!root.join(suffix).exists());
+        for (actual, expected) in [(&root, &canonical), (&canonical, &root)] {
+            std::fs::write(
+                &case_nml,
+                format!(
+                    "&nl_colm\nDEF_dir_output = '{}'\n/\n",
+                    actual.join(suffix).display()
+                ),
+            )
+            .unwrap();
+            ensure_cli_output_dir(&case_nml, &expected.join(suffix)).unwrap();
+            let error = ensure_cli_output_dir(&case_nml, &expected.join("elsewhere")).unwrap_err();
+            assert!(error.to_string().contains("custom output"), "{error}");
+        }
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn only_the_three_real_kernel_stages_are_accepted() {
     assert_eq!(requested_run_stage(None).unwrap(), None);

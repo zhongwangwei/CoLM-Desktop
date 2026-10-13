@@ -86,18 +86,17 @@ fn metric_pairing_rejects_mismatched_lengths_before_pairing() {
 
 #[test]
 fn output_dir_normalization_handles_root_current_dir_and_trailing_slashes() {
-    let case_nml = PathBuf::from("/tmp/case/case.nml");
+    let (case_nml, root) = if cfg!(windows) {
+        (PathBuf::from(r"X:\colm-case\case.nml"), r"X:\")
+    } else {
+        (PathBuf::from("/tmp/case/case.nml"), "/")
+    };
+    let expected = case_nml.parent().unwrap().join("out");
+    assert_eq!(super::normalize_output_dir(&case_nml, "out/"), expected);
+    assert_eq!(super::normalize_output_dir(&case_nml, "./out"), expected);
     assert_eq!(
-        super::normalize_output_dir(&case_nml, "out/"),
-        PathBuf::from("/tmp/case/out")
-    );
-    assert_eq!(
-        super::normalize_output_dir(&case_nml, "./out"),
-        PathBuf::from("/tmp/case/out")
-    );
-    assert_eq!(
-        super::normalize_output_dir(&case_nml, "/"),
-        PathBuf::from("/")
+        super::normalize_output_dir(&case_nml, root),
+        PathBuf::from(root)
     );
 }
 #[test]

@@ -615,8 +615,10 @@ fn verified_artifact_copy(
         ensure!(count > 0, "upstream artifact directory is empty");
     } else {
         let relative = from.strip_prefix(root)?.to_string_lossy();
+        let portable = relative.replace(std::path::MAIN_SEPARATOR, "/");
         let expected = hashes
-            .get(relative.as_ref())
+            .get(&portable)
+            .or_else(|| hashes.get(relative.as_ref()))
             .context("upstream artifact content identity is missing")?;
         ensure!(
             crate::fingerprint::full_file(from, "artifact")?.sha256 == *expected,
@@ -1959,6 +1961,35 @@ mod native_path_tests {
 #[cfg(test)]
 mod upstream_artifact_tests {
     use super::*;
+    #[test]
+    fn artifact_copy_accepts_portable_and_legacy_native_hash_keys() {
+        let root = std::env::temp_dir().join(format!("colm-artifact-keys-{}", unique_id()));
+        std::fs::create_dir_all(root.join("landdata")).unwrap();
+        let source = root.join("landdata/source.nc");
+        std::fs::write(&source, b"surface").unwrap();
+        let digest = crate::fingerprint::full_file(&source, "artifact")
+            .unwrap()
+            .sha256;
+        let native = source
+            .strip_prefix(&root)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let portable = native.replace(std::path::MAIN_SEPARATOR, "/");
+        for key in [portable, native] {
+            let hashes = std::collections::BTreeMap::from([(key, digest.clone())]);
+            let destination = root.join("copy.nc");
+            verified_artifact_copy(&root, &source, &destination, &hashes).unwrap();
+            assert_eq!(std::fs::read(&destination).unwrap(), b"surface");
+        }
+        let invalid =
+            std::collections::BTreeMap::from([("landdata/source.nc".into(), "0".repeat(64))]);
+        assert!(
+            verified_artifact_copy(&root, &source, &root.join("invalid.nc"), &invalid).is_err()
+        );
+        assert!(!root.join("invalid.nc").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn sibling_run_reuses_only_verified_independent_upstream_copies() {
         let root = std::env::temp_dir().join(unique_id());

@@ -783,6 +783,19 @@ mod tests {
             .unwrap()
     }
     #[test]
+    fn knowledge_reader_requires_a_posix_server_source() {
+        for source in ["relative", "/", "/../root", r"C:\source"] {
+            let output =
+                read_knowledge_fixture(json!({"source":source,"query":"physics","paths":[]}));
+            assert!(!output.status.success(), "{source}");
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("invalid server source directory")
+            );
+        }
+    }
+    // This script runs on the POSIX server and requires openat/O_NOFOLLOW/O_DIRECTORY.
+    #[cfg(unix)]
+    #[test]
     fn knowledge_reader_hashes_current_bytes_and_rejects_escapes() {
         let dir = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "colm-knowledge-{}-{}",

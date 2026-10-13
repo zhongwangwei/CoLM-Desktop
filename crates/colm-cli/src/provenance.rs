@@ -299,7 +299,7 @@ pub(crate) fn output_identities(root: &Path) -> Result<std::collections::BTreeMa
                         .path()
                         .strip_prefix(root)?
                         .to_string_lossy()
-                        .into_owned(),
+                        .replace(std::path::MAIN_SEPARATOR, "/"),
                     format!("{:x}", hash.finalize()),
                 );
             }

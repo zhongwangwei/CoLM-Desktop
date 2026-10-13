@@ -1000,6 +1000,14 @@ fn normalize_output_dir(case_nml: &Path, raw: &str) -> PathBuf {
             .unwrap_or_else(|| Path::new("."))
             .join(path)
     };
+    #[cfg(windows)]
+    for ancestor in joined.ancestors() {
+        if let Ok(canonical) = ancestor.canonicalize() {
+            // Resolve short names such as RUNNER~1 even before `out` is created.
+            let suffix = joined.strip_prefix(ancestor).expect("ancestor is a prefix");
+            return normalize_path_components(&canonical.join(suffix));
+        }
+    }
     normalize_path_components(&joined)
 }
 
@@ -1007,6 +1015,21 @@ fn normalize_path_components(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
+            // The case root may be canonicalized before its output directory exists.
+            #[cfg(windows)]
+            std::path::Component::Prefix(prefix) => match prefix.kind() {
+                std::path::Prefix::VerbatimDisk(drive) => {
+                    out.push(format!("{}:", char::from(drive)));
+                }
+                std::path::Prefix::VerbatimUNC(server, share) => {
+                    let mut unc = std::ffi::OsString::from(r"\\");
+                    unc.push(server);
+                    unc.push(r"\");
+                    unc.push(share);
+                    out.push(unc);
+                }
+                _ => out.push(prefix.as_os_str()),
+            },
             std::path::Component::CurDir => {}
             std::path::Component::ParentDir => out.push(".."),
             other => out.push(other.as_os_str()),
