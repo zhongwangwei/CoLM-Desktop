@@ -89,24 +89,32 @@ fn string_nulls_from_the_model_count_as_missing() {
 fn driving_the_window_replaces_background_case_and_study_actions() {
     let names = |registry: &Registry| -> Vec<&str> { registry.tools().map(|t| t.name()).collect() };
     let plain = Registry::standard_with(false, false);
-    for name in ["create_case", "create_study", "run_study", "study_control"] {
+    for name in [
+        "create_case",
+        "create_study",
+        "run_study",
+        "study_control",
+        "run_case",
+        "set_case_fields",
+    ] {
         assert!(names(&plain).contains(&name));
     }
     assert!(!names(&plain).contains(&"ui_state"));
     let window = Registry::standard_with(true, true);
-    for name in ["create_case", "create_study", "run_study", "study_control"] {
+    for name in [
+        "create_case",
+        "create_study",
+        "run_study",
+        "study_control",
+        "run_case",
+        "set_case_fields",
+    ] {
         assert!(!names(&window).contains(&name));
     }
     let remote = Registry::standard_for(false, false, true);
     assert!(names(&remote).contains(&"run_study"));
     assert!(!names(&remote).contains(&"ui_state"));
-    for tool in [
-        "ui_state",
-        "ui_commit",
-        "web_search",
-        "run_case",
-        "set_case_fields",
-    ] {
+    for tool in ["ui_state", "ui_commit", "web_search"] {
         assert!(names(&window).contains(&tool), "{tool}");
     }
 }
@@ -128,4 +136,33 @@ fn basic_file_tools_are_shared_by_builtin_and_mcp_registries() {
             assert_eq!(tool.tier(), tier, "{name}");
         }
     }
+}
+
+#[test]
+fn current_page_kernel_clears_or_replaces_startup_default_without_a_model() {
+    struct Window(Value);
+    impl ui::UiBridge for Window {
+        fn request(&self, action: &str, _: Value) -> Result<Value> {
+            assert_eq!(action, "state");
+            Ok(self.0.clone())
+        }
+    }
+    let state = |kernel: Value| ToolContext {
+        kernel_dir: Some(std::env::temp_dir().join("boot")),
+        ui: Some(ui::UiHandle(Arc::new(Window(
+            json!({"kernelDir":kernel,"preprocessors":"rust"}),
+        )))),
+        ..ToolContext::default()
+    };
+    assert!(state(Value::Null)
+        .selected_context()
+        .unwrap()
+        .kernel_dir
+        .is_none());
+    let actual = std::env::temp_dir().join("crop");
+    assert_eq!(
+        state(json!(actual)).selected_context().unwrap().kernel_dir,
+        Some(actual)
+    );
+    assert!(state(json!("relative/kernel")).selected_context().is_err());
 }

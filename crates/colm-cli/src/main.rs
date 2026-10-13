@@ -53,11 +53,14 @@
 //! 文件，时间步长读自强迫场文件 —— 这三样都不问用户。
 
 mod case_runs;
+mod energy_summary;
 mod fingerprint;
 mod flux_diagnostics;
+mod history_cmd;
 mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
+mod model_version;
 mod observation_table;
 mod provenance;
 mod remote_cmd;
@@ -106,6 +109,7 @@ usage:
                    [--engine rust|fortran]
                    [--highres-params <dir>] [--soil-hyper-albedo-dir <dir>]
                    [--model-version official|<workspace>] [--workspace-root <dir>]
+                   [--model-id ID --model-revision N --model-root DIR]
                    # --model-version 用一个工作区（修改版）自己编出的程序跑；跑完写 out/<名>/produced-by.json
                    # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
@@ -117,9 +121,17 @@ usage:
                    # HYPERSPECTRAL PFT/PC：--highres-params 包含 fsds/、
                    # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
                    # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
+  colm-cli model-list|get|create|draft|save-draft|freeze|migrate-case|rollback|make-run|attach-network
+                   --model-root DIR [--model-id ID --model-revision N] [--json JSON|-]
+                   # create JSON: {name,note,parent:{id,revision},workspace?}; save-draft: ModelDraft + --expected-generation N
+                   # freeze: --model-id ID --asset-root DIR; migrate-case/rollback: <case-dir>
+                   # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
+  colm-cli study-save-version <study-dir> --member best|ID --name NAME --model-root DIR [--note TEXT]
   colm-cli version-check --name N --kernel <dir> [--engine rust|fortran]
                    [--preprocessors rust|fortran] [--root <dir>]
   colm-cli produced-by <case-dir>
+  colm-cli full-input-identity <case-dir>
+                   # 只读核验配置与全部科学输入的完整 SHA256 内容身份（JSON）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -186,6 +198,10 @@ usage:
   colm-cli study-apply <study-dir> --member <id|best> --out <dir> [--name N]
                    # 将指定成员参数写入新的独立算例
   colm-cli study-result <study-dir> --path <result.json>
+  colm-cli study-verified-side <study-dir>
+                   # 只读返回单侧研究的版本、成绩与已核对的完整输入证据（schema 1 JSON）
+  colm-cli study-verify-comparison <study-dir>
+                   # 只读核验本地研究证据，供远程比较检查使用（schema 1 JSON）
                    # 读取并校验单个成员结果
   colm-cli all     --site <site.nc> --out <dir> --kernel <dir> [--obs <Flux.nc>] [--name N]
                    [--start Y-M-D] [--end Y-M-D] [--spinup N]
@@ -247,12 +263,71 @@ fn main() -> Result<()> {
         print!("{USAGE}");
         std::process::exit(2);
     };
-    if cmd.starts_with("remote-") {
+    if cmd.starts_with("remote-") || matches!(cmd.as_str(), "history-replay" | "run-replay") {
         colm_remote::auth::initialize_from_stdin()?;
     }
-    let opts = Opts::parse(&args[1..])?;
-    match cmd.as_str() {
+    let mut opts = Opts::parse(&args[1..])?;
+    if opts.get("--model-root").is_none() {
+        let database = opts
+            .get("--history-db")
+            .map(PathBuf::from)
+            .map(Ok)
+            .unwrap_or_else(colm_history::default_db_path)?;
+        let root = database
+            .parent()
+            .context("history database has no parent directory")?
+            .join("models");
+        opts.flags
+            .push(("--model-root".into(), root.to_string_lossy().into_owned()));
+    }
+    let flags = opts.flags.iter().cloned().collect();
+    let audit = if std::env::var("COLM_AUDIT_BY_PARENT").as_deref() == Ok("1") {
+        None
+    } else {
+        history_cmd::begin(cmd, &opts.positional, &flags)?
+    };
+    if opts.get("--operation-id").is_none() {
+        if let Some(token) = &audit {
+            opts.flags
+                .push(("--operation-id".into(), token.operation_id().into()));
+        }
+    }
+    let result = execute(cmd, &opts);
+    if let Some(token) = audit {
+        if let Err(error) = history_cmd::finish(token, &result) {
+            if result.is_ok() {
+                return Err(error).context("action completed, but its history completion could not be saved; verify its result before retrying");
+            }
+            eprintln!("warning: cannot record operation completion: {error:#}");
+        }
+    }
+    result
+}
+
+fn execute(cmd: &str, opts: &Opts) -> Result<()> {
+    if history_cmd::dispatch(cmd, &opts.positional, &opts.flags.iter().cloned().collect())? {
+        return Ok(());
+    }
+    match cmd {
         "help" | "-h" | "--help" => print!("{USAGE}"),
+        "energy-summary" => println!(
+            "{}",
+            serde_json::to_string(&energy_summary::run(
+                &opts.positional_case()?,
+                opts.get("--from")
+                    .map(|v| v.parse::<i64>())
+                    .transpose()
+                    .context("invalid energy summary start")?,
+                opts.get("--to")
+                    .map(|v| v.parse::<i64>())
+                    .transpose()
+                    .context("invalid energy summary end")?
+            )?)?
+        ),
+        "full-input-identity" => println!(
+            "{}",
+            serde_json::to_string(&fingerprint::full_inputs(&opts.positional_case()?)?)?
+        ),
         "scan" => {
             cmd_scan(
                 &opts.need("--dir")?,
@@ -262,7 +337,7 @@ fn main() -> Result<()> {
             )?;
         }
         "site-new" => {
-            cmd_site_new(&opts)?;
+            cmd_site_new(opts)?;
         }
         "site-pfts" => {
             let site = opts.positional_at(0, "a site.nc file")?;
@@ -282,11 +357,30 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&components)?);
         }
         "new" => {
-            let case = cmd_new(&opts)?;
+            let case = cmd_new(opts)?;
             println!("case ready: {}", case.display());
         }
-        "run" => run_with_provenance(&opts)?,
+        "model-list"
+        | "model-get"
+        | "model-create"
+        | "model-draft"
+        | "model-save-draft"
+        | "model-freeze"
+        | "model-migrate-case"
+        | "model-rollback"
+        | "model-hybrid-check"
+        | "model-source-context"
+        | "model-preview-context"
+        | "model-make-run"
+        | "model-attach-network"
+        | "model-import-process" => model_version::cmd(cmd, opts)?,
+        "run" => run_with_provenance(opts)?,
+        "run-replay" => println!("{}", model_version::replay(opts)?),
         "version-check" => {
+            if model_version::selected(opts)?.is_some() {
+                println!("{}", model_version::readiness(opts)?);
+                return Ok(());
+            }
             let readiness = colm_workspace::version::check(
                 &provenance::workspace_root(opts.get("--root")),
                 &opts.need_str("--name")?,
@@ -331,31 +425,36 @@ fn main() -> Result<()> {
                 to: opts.get("--to").map(|v| v.parse()).transpose()?,
             })?;
         }
-        "hybrid-install" => hybrid_cmd::cmd_hybrid_install(&opts)?,
-        "hybrid-check" => hybrid_cmd::cmd_hybrid_check(&opts)?,
-        "hybrid-info" => hybrid_cmd::cmd_hybrid_info(&opts)?,
-        "remote-workspace" => remote_workspace_cmd::run(&opts)?,
-        "remote-probe" => remote_cmd::cmd_probe(&opts)?,
-        "remote-engines" => remote_cmd::cmd_engines(&opts)?,
-        "remote-engine-clean" => remote_cmd::cmd_engine_clean(&opts)?,
-        "remote-engine-recover" => remote_cmd::cmd_engine_recover(&opts)?,
-        "remote-run" => remote_cmd::cmd_run(&opts)?,
-        "remote-study-run" => remote_cmd::remote_study::cmd_run(&opts)?,
-        "remote-study-status" => remote_cmd::remote_study::cmd_status(&opts)?,
-        "remote-study-fetch" => remote_cmd::remote_study::cmd_fetch(&opts)?,
-        "remote-dist" => remote_cmd::cmd_dist(&opts)?,
-        "remote-kernel" => remote_cmd::cmd_kernel(&opts)?,
-        "remote-kernels" => remote_cmd::cmd_kernels(&opts)?,
-        "engine-pack" => remote_cmd::cmd_pack(&opts)?,
-        "history-subset" => history_subset::cmd_history_subset(&opts)?,
-        command if command.starts_with("ws-") => ws_cmd::dispatch(command, &opts)?,
-        "remote-status" => remote_cmd::cmd_status(&opts)?,
-        "remote-cancel" => remote_cmd::cmd_cancel(&opts)?,
-        "remote-fetch" => remote_cmd::cmd_fetch(&opts)?,
-        "hybrid-climate" => hybrid_cmd::cmd_hybrid_climate(&opts)?,
-        "hybrid-fit" => hybrid_fit::cmd_hybrid_fit(&opts)?,
-        "hybrid-studies" => hybrid_fit::cmd_hybrid_studies(&opts)?,
-        "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(&opts)?,
+        "hybrid-install" => hybrid_cmd::cmd_hybrid_install(opts)?,
+        "hybrid-check" => hybrid_cmd::cmd_hybrid_check(opts)?,
+        "hybrid-info" => hybrid_cmd::cmd_hybrid_info(opts)?,
+        "remote-workspace" => remote_workspace_cmd::run(opts)?,
+        "remote-probe" => remote_cmd::cmd_probe(opts)?,
+        "remote-engines" => remote_cmd::cmd_engines(opts)?,
+        "remote-engine-clean" => remote_cmd::cmd_engine_clean(opts)?,
+        "remote-engine-recover" => remote_cmd::cmd_engine_recover(opts)?,
+        "remote-run" => remote_cmd::cmd_run(opts)?,
+        "remote-study-run" => remote_cmd::remote_study::cmd_run(opts)?,
+        "remote-study-cancel" => remote_cmd::remote_study::cmd_cancel(opts)?,
+        "remote-study-status" => remote_cmd::remote_study::cmd_status(opts)?,
+        "remote-study-fetch" => remote_cmd::remote_study::cmd_fetch(opts)?,
+        "remote-dist" => remote_cmd::cmd_dist(opts)?,
+        "remote-kernel" => remote_cmd::cmd_kernel(opts)?,
+        "remote-kernels" => remote_cmd::cmd_kernels(opts)?,
+        "engine-pack" => remote_cmd::cmd_pack(opts)?,
+        "history-subset" => history_subset::cmd_history_subset(opts)?,
+        command if command.starts_with("ws-") => ws_cmd::dispatch(command, opts)?,
+        "remote-status" => remote_cmd::cmd_status(opts)?,
+        "remote-cancel" => remote_cmd::cmd_cancel(opts)?,
+        "remote-fetch" => remote_cmd::cmd_fetch(opts)?,
+        "verify-completed-outputs" => println!(
+            "{}",
+            remote_cmd::verify_completed_outputs(&opts.positional_case()?)?
+        ),
+        "hybrid-climate" => hybrid_cmd::cmd_hybrid_climate(opts)?,
+        "hybrid-fit" => hybrid_fit::cmd_hybrid_fit(opts)?,
+        "hybrid-studies" => hybrid_fit::cmd_hybrid_studies(opts)?,
+        "hybrid-remove" => hybrid_cmd::cmd_hybrid_remove(opts)?,
         "evaluation-catalog" => {
             cmd_evaluation_catalog(&opts.positional_case()?, &opts.need("--obs")?)?;
         }
@@ -387,11 +486,42 @@ fn main() -> Result<()> {
                 Some(path) => PathBuf::from(path),
                 None => opts.positional_at(1, "a Study spec file")?,
             };
-            study::runner::preflight_create(&case_root, &spec_file)?;
+            let prepared = study::model::prepare_create(opts, &case_root, &spec_file)?;
+            let (input_root, input_spec) = prepared
+                .as_ref()
+                .map(|p| (&p.case_root, &p.spec_file))
+                .unwrap_or((&case_root, &spec_file));
+            study::runner::preflight_create(input_root, input_spec)?;
             if cmd == "study-preflight" {
                 println!("ok");
             } else {
-                let manifest = study::engine::create(&case_root, &spec_file)?;
+                let manifest = match &prepared {
+                    Some(p) => p.create(&case_root)?,
+                    None => study::engine::create(&case_root, &spec_file)?,
+                };
+                if let Some(prepared) = &prepared {
+                    if let Err(error) = study_version::pin_revision(
+                        Path::new(&manifest.root),
+                        &prepared.revision,
+                        &prepared.registry_root,
+                        opts,
+                    ) {
+                        let _ = std::fs::remove_dir_all(&manifest.root);
+                        let _ = std::fs::remove_dir_all(&prepared.case_root);
+                        return Err(error);
+                    }
+                }
+                let identity = if let Some(path) = opts.get("--frozen-study-model") {
+                    study::model::adopt_remote(&manifest, Path::new(&path))
+                } else if prepared.is_none() {
+                    study::model::capture_inputs(&manifest)
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = identity {
+                    let _ = std::fs::remove_dir_all(&manifest.root);
+                    return Err(error);
+                }
                 println!("{}", manifest.root);
             }
         }
@@ -408,6 +538,7 @@ fn main() -> Result<()> {
                 model_version: Option<study_version::Pinned>,
                 /// 交给服务器跑过的记录（`remote-study-run`）；没有为空。
                 remote: Option<serde_json::Value>,
+                remote_pending: Option<serde_json::Value>,
             }
             let study_dir = opts.positional_case()?;
             println!(
@@ -420,6 +551,7 @@ fn main() -> Result<()> {
                     results: study::runner::result_files(&study_dir)?,
                     events: study::runner::event_log_tail(&study_dir, 300)?,
                     model_version: study_version::pinned(&study_dir)?,
+                    remote_pending: remote_cmd::remote_study::pending_status(&study_dir)?,
                     remote: std::fs::read_to_string(
                         study_dir.join(remote_cmd::remote_study::RECORD),
                     )
@@ -434,6 +566,20 @@ fn main() -> Result<()> {
                 })?
             );
         }
+        "study-verified-side" => {
+            let side = study_version::verified_side(&opts.positional_case()?)?;
+            ensure!(
+                side["schema"] == 1,
+                "unsupported verified Study side schema"
+            );
+            println!("{}", serde_json::to_string(&side)?);
+        }
+        "study-verify-comparison" => println!(
+            "{}",
+            serde_json::to_string(&study_version::local_comparison_evidence(
+                &opts.positional_case()?
+            )?)?
+        ),
         "study-result" => print!(
             "{}",
             study::runner::read_result(
@@ -444,6 +590,7 @@ fn main() -> Result<()> {
         "study-run" => {
             let study_dir = opts.positional_case()?;
             let manifest = study::engine::status(&study_dir)?;
+            study_version::validate_revision_request(&study_dir, opts)?;
             let kernel = opts
                 .get("--kernel")
                 .or_else(|| manifest.spec.kernel_dir.clone())
@@ -453,7 +600,7 @@ fn main() -> Result<()> {
                 let engine = requested_engine(opts.get("--engine").as_deref())?;
                 let preprocessors =
                     requested_preprocessors(opts.get("--preprocessors").as_deref())?;
-                if let Some(pinned) = study_version::ensure(
+                if let Some(mut pinned) = study_version::ensure(
                     &study_dir,
                     opts.get("--model-version").as_deref(),
                     &provenance::workspace_root(opts.get("--workspace-root")),
@@ -461,7 +608,21 @@ fn main() -> Result<()> {
                     preprocessors.as_str(),
                     Path::new(&kernel),
                 )? {
-                    let own = ["--model-version", "--workspace-root", "--kernel"];
+                    study_version::validate_pinned(
+                        &mut pinned,
+                        opts,
+                        Path::new(&kernel),
+                        engine.as_str(),
+                        preprocessors.as_str(),
+                    )?;
+                    let own = [
+                        "--model-version",
+                        "--workspace-root",
+                        "--kernel",
+                        "--model-root",
+                        "--model-id",
+                        "--model-revision",
+                    ];
                     let mut args: Vec<String> = opts.positional.clone();
                     for (flag, value) in &opts.flags {
                         if !own.contains(&flag.as_str()) {
@@ -469,9 +630,7 @@ fn main() -> Result<()> {
                         }
                     }
                     let code = study_version::delegate(&pinned, &args)?;
-                    if code != 0 {
-                        std::process::exit(code);
-                    }
+                    ensure!(code == 0, "study program exited with status {code}");
                     return Ok(());
                 }
             }
@@ -525,6 +684,14 @@ fn main() -> Result<()> {
             &opts.positional_case()?,
             opts.get("--include-review").is_some(),
         )?,
+        "study-save-version" => println!(
+            "{}",
+            serde_json::to_string(&study::runner::save_version(
+                &opts.positional_case()?,
+                &opts.get("--member").unwrap_or_else(|| "best".into()),
+                opts
+            )?)?
+        ),
         "study-apply" => cmd_study_apply(
             &opts.positional_case()?,
             &opts.need_str("--member")?,
@@ -535,7 +702,7 @@ fn main() -> Result<()> {
             cmd_study_apply_preview(&opts.positional_case()?, &opts.need_str("--member")?)?
         }
         "all" => {
-            let case = cmd_new(&opts)?;
+            let case = cmd_new(opts)?;
             cmd_run(
                 &case,
                 &opts.need("--kernel")?,
@@ -578,7 +745,7 @@ fn main() -> Result<()> {
             }
         }
         "observation-table-convert" => {
-            let opts2 = observation_convert_options(&opts)?;
+            let opts2 = observation_convert_options(opts)?;
             let result = observation_table::convert(
                 &opts.positional_at(0, "an observation CSV/TXT file")?,
                 &opts.positional_at(1, "an Observation destination directory")?,
@@ -613,7 +780,7 @@ fn main() -> Result<()> {
             cmd_forcing_table_convert(
                 &opts.positional_at(0, "a CSV/TXT forcing file")?,
                 &opts.positional_at(1, "a forcing destination directory")?,
-                &opts,
+                opts,
             )?;
         }
         "netcdf-probe" => {
@@ -622,10 +789,10 @@ fn main() -> Result<()> {
                 opts.get("--json").is_some(),
             )?;
         }
-        "mesh-new" => cmd_mesh_new(&opts)?,
-        "spatial-preflight" => cmd_spatial_preflight(&opts)?,
+        "mesh-new" => cmd_mesh_new(opts)?,
+        "spatial-preflight" => cmd_spatial_preflight(opts)?,
         "spatial-new" => {
-            let case = cmd_spatial_new(&opts)?;
+            let case = cmd_spatial_new(opts)?;
             println!("case ready: {}", case.display());
         }
         "forcing-convert" => {
@@ -638,14 +805,14 @@ fn main() -> Result<()> {
         }
         "forcing-gap-probe" => {
             let src = opts.positional_at(0, "a source forcing file")?;
-            let plan = forcing_repair_plan(&src, &opts)?;
+            let plan = forcing_repair_plan(&src, opts)?;
             let summary = colm_forcing::diagnose_file(&src, &plan)?;
             print_repair_summary(&summary, opts.get("--json").is_some())?;
         }
         "forcing-repair" => {
             let src = opts.positional_at(0, "a source forcing file")?;
             let dst = opts.positional_at(1, "a repaired destination file")?;
-            let plan = forcing_repair_plan(&src, &opts)?;
+            let plan = forcing_repair_plan(&src, opts)?;
             let summary = colm_forcing::repair_file(&src, &dst, &plan)?;
             if opts.get("--json").is_some() {
                 print_repair_summary(&summary, true)?;
@@ -664,8 +831,7 @@ fn main() -> Result<()> {
             )?;
         }
         other => {
-            eprintln!("unknown command: {other}\n{USAGE}");
-            std::process::exit(2);
+            bail!("unknown command: {other}\n{USAGE}");
         }
     }
     Ok(())
@@ -2590,6 +2756,10 @@ enum RunNotice<'a> {
 
 /// `run`：按 `--model-version` 选官方版或一个修改版跑，跑完（成败都）写出处。
 fn run_with_provenance(opts: &Opts) -> Result<()> {
+    if let Some((prepared, run)) = model_version::prepare(opts)? {
+        eprintln!("model run {}: {}", run.operation_id, run.run_case.display());
+        return run_with_provenance(&prepared);
+    }
     let case = opts.positional_case()?;
     let kernel = opts.need("--kernel")?;
     let stage = requested_run_stage(opts.get("--stage").as_deref())?;
@@ -2609,49 +2779,119 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
             &kernel,
         )?)),
     };
-    let result = match &version {
-        provenance::Version::Official => cmd_run(
-            &case,
-            &kernel,
-            opts.get("--stream").is_some(),
-            force,
-            stage,
-            ranks,
-            preprocessors,
-            engine,
-            opts.get("--highres-params").as_deref().map(Path::new),
-            opts.get("--soil-hyper-albedo-dir")
-                .as_deref()
-                .map(Path::new),
-        ),
-        provenance::Version::Workspace(readiness) => {
-            // 交给版本自己的 colm-cli：参数原样转过去，只换掉内核、去掉只有外层认的几项。
-            let own = [
-                "--model-version",
-                "--workspace-root",
-                "--kernel",
-                "--location",
-            ];
-            let mut args: Vec<String> = opts.positional.clone();
-            for (flag, value) in &opts.flags {
-                if !own.contains(&flag.as_str()) {
-                    args.extend([flag.clone(), value.clone()]);
-                }
-            }
-            match provenance::delegate(readiness, &args) {
-                Ok(0) => Ok(()),
-                Ok(code) => Err(anyhow::anyhow!(
-                    "model version {} exited with status {code}",
-                    readiness.name
-                )),
-                Err(e) => Err(e),
-            }
-        }
+    let execution_cli = match (&version, opts.get("--frozen-model-cli")) {
+        (_, Some(cli)) => PathBuf::from(cli),
+        (provenance::Version::Workspace(readiness), None) => readiness.cli.clone(),
+        (provenance::Version::Official, None) => std::env::current_exe()?,
     };
+    let execution_programs = provenance::program_identities(&execution_cli)?;
     let used_kernel = match &version {
         provenance::Version::Workspace(readiness) => readiness.kernel.clone(),
         provenance::Version::Official => kernel.clone(),
     };
+    let kernel_programs = provenance::kernel_program_identities(
+        &used_kernel,
+        engine.as_str(),
+        preprocessors.as_str(),
+    )?;
+    let full_before = if case.join(colm_model::RUN_MANIFEST).is_file()
+        && std::env::var_os("COLM_PROVENANCE_BY_PARENT").is_none()
+    {
+        model_version::execution_path(&case)?;
+        let identity = fingerprint::full_inputs(&case)?;
+        let expected = case.join("replay-input-identity.json");
+        if expected.is_file() {
+            let expected: serde_json::Value = serde_json::from_slice(&std::fs::read(expected)?)?;
+            let captured: fingerprint::FullInputIdentity =
+                serde_json::from_value(expected["full_input_identity"].clone())?;
+            ensure!(
+                fingerprint::same_payloads(&identity, &captured),
+                "replay scientific inputs changed"
+            );
+            let actual_kernel = Kernel::open_manifest(&used_kernel)?;
+            ensure!(
+                serde_json::to_value(&actual_kernel.manifest.sha256)?
+                    == expected["kernel_program_sha256"],
+                "replay kernel changed"
+            );
+            for (program, hash) in &actual_kernel.manifest.sha256 {
+                let path = used_kernel.join(colm_kernel::program_file(program));
+                if path.is_file() {
+                    ensure!(
+                        fingerprint::sha256_file(&path)? == *hash,
+                        "replay kernel executable changed"
+                    );
+                }
+            }
+            let programs: std::collections::BTreeMap<String, String> =
+                serde_json::from_value(expected["execution_program_sha256"].clone())?;
+            ensure!(!programs.is_empty(), "replay program identities missing");
+            ensure!(
+                programs == execution_programs,
+                "replay execution programs changed"
+            );
+        }
+        std::fs::write(
+            case.join("full-input-identity.json"),
+            serde_json::to_vec_pretty(&identity)?,
+        )?;
+        Some(identity)
+    } else {
+        None
+    };
+    let input_guard = full_before
+        .as_ref()
+        .map(|identity| fingerprint::full_input_guard(&case, identity))
+        .transpose()?;
+    let had_full_input_identity = full_before.is_some();
+    if let Some(identity) = full_before.as_ref().filter(|_| !force || stage.is_some()) {
+        model_version::restore_upstream_artifacts(
+            &case,
+            identity,
+            &execution_programs,
+            &used_kernel,
+            engine.as_str(),
+            preprocessors.as_str(),
+            &location,
+        )?;
+    }
+    let result = (|| -> Result<()> {
+        if full_before.is_some() {
+            let prerequisites = required_upstream_stages(stage);
+            if !prerequisites.is_empty() {
+                std::fs::write(
+                    case.join("execution-prerequisites.json"),
+                    serde_json::to_vec(
+                        &prerequisites
+                            .iter()
+                            .map(|s| s.program())
+                            .collect::<Vec<_>>(),
+                    )?,
+                )?;
+            }
+            let upstream_opts = Opts {
+                positional: opts.positional.clone(),
+                flags: opts
+                    .flags
+                    .iter()
+                    .filter(|(flag, _)| flag != "--force")
+                    .cloned()
+                    .collect(),
+            };
+            for upstream in prerequisites {
+                eprintln!(
+                    "checking required upstream stage {} before {}",
+                    upstream.program(),
+                    stage.expect("requested stage").program()
+                );
+                execute_selected_run(&upstream_opts, &version, Some(upstream))?;
+            }
+        }
+        execute_selected_run(opts, &version, stage)
+    })();
+    let execution_ok = result.is_ok();
+    let execution_error = result.as_ref().err().map(|error| format!("{error:#}"));
+    let mut verification_errors = Vec::new();
     let stage_name = stage.map(|s| s.program());
     let record = provenance::Record {
         case: &case,
@@ -2664,10 +2904,171 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
         location: &location,
         version: &version,
         started,
+        execution_program_sha256: Some(&execution_programs),
+    };
+    let result = if let Some(mut before) = full_before {
+        let was_complete = before.complete;
+        let guard_check = input_guard
+            .as_ref()
+            .context("input execution guard is missing")
+            .and_then(|guard| fingerprint::verify_input_guard(&case, &before, guard));
+        let unchanged = fingerprint::full_inputs(&case)
+            .map(|after| after == before)
+            .unwrap_or(false);
+        if !unchanged || guard_check.is_err() {
+            let reason = guard_check
+                .err()
+                .map(|error| format!("{error:#}"))
+                .unwrap_or_else(|| {
+                    "input contents or dependency inventory changed during execution".into()
+                });
+            before.invalidate(&reason);
+            verification_errors.push(reason);
+        }
+        std::fs::write(
+            case.join("full-input-identity.json"),
+            serde_json::to_vec_pretty(&before)?,
+        )?;
+        if was_complete && !before.complete && result.is_ok() {
+            Err(anyhow::anyhow!(
+                "inputs changed during execution; the completed result is not reproducible"
+            ))
+        } else {
+            result
+        }
+    } else {
+        result
+    };
+    let result = if provenance::program_identities(&execution_cli)
+        .is_ok_and(|after| after == execution_programs)
+    {
+        result
+    } else {
+        verification_errors.push("execution programs changed during the run".into());
+        Err(anyhow::anyhow!(
+            "execution programs changed during the run; result is not reproducible"
+        ))
+    };
+    let result = if provenance::kernel_program_identities(
+        &used_kernel,
+        engine.as_str(),
+        preprocessors.as_str(),
+    )
+    .is_ok_and(|after| after == kernel_programs)
+    {
+        result
+    } else {
+        verification_errors.push("kernel programs changed during the run".into());
+        Err(anyhow::anyhow!(
+            "kernel programs changed during the run; result is not reproducible"
+        ))
     };
     let error = result.as_ref().err().map(|e| format!("{e:#}"));
-    provenance::write(&record, result.is_ok(), error.as_deref());
+    if std::env::var_os("COLM_PROVENANCE_BY_PARENT").is_none() {
+        let mut provenance = provenance::value(&record, result.is_ok(), error.as_deref());
+        provenance["execution_ok"] = serde_json::json!(execution_ok);
+        provenance["execution_error"] = serde_json::json!(execution_error);
+        provenance["verification"] = serde_json::json!({
+            "status":if !verification_errors.is_empty() {"rejected"} else if had_full_input_identity {"passed"} else {"unavailable"},
+            "errors":verification_errors,
+        });
+        provenance::write_value(&case, &provenance);
+    }
     result
+}
+
+fn required_upstream_stages(stage: Option<Stage>) -> Vec<Stage> {
+    match stage {
+        Some(Stage::MkIniData) => vec![Stage::MkSrfData],
+        Some(Stage::Colm) => vec![Stage::MkSrfData, Stage::MkIniData],
+        _ => vec![],
+    }
+}
+
+fn execute_selected_run(
+    opts: &Opts,
+    version: &provenance::Version,
+    stage: Option<Stage>,
+) -> Result<()> {
+    let case = opts.positional_case()?;
+    let kernel = opts.need("--kernel")?;
+    let ranks = opts.count("--ranks", 1)? as usize;
+    let preprocessors = requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+    let engine = requested_engine(opts.get("--engine").as_deref())?;
+    let force = opts.get("--force").is_some();
+    let frozen_cli = opts.get("--frozen-model-cli");
+    if let Some(cli) = frozen_cli {
+        let mut command = std::process::Command::new(cli);
+        command.arg("run").args(&opts.positional);
+        for (flag, value) in &opts.flags {
+            if !matches!(
+                flag.as_str(),
+                "--frozen-model-cli" | "--frozen-model-source" | "--stage"
+            ) {
+                command.args([flag, value]);
+            }
+        }
+        if let Some(stage) = stage {
+            command.args(["--stage", stage.program()]);
+        }
+        command
+            .env("COLM_PROVENANCE_BY_PARENT", "1")
+            .env("COLM_AUDIT_BY_PARENT", "1");
+        command
+            .status()
+            .context("cannot run frozen official program")
+            .and_then(|status| {
+                ensure!(
+                    status.success(),
+                    "frozen official program exited with {status}"
+                );
+                Ok(())
+            })
+    } else {
+        match version {
+            provenance::Version::Official => cmd_run(
+                &case,
+                &kernel,
+                opts.get("--stream").is_some(),
+                force,
+                stage,
+                ranks,
+                preprocessors,
+                engine,
+                opts.get("--highres-params").as_deref().map(Path::new),
+                opts.get("--soil-hyper-albedo-dir")
+                    .as_deref()
+                    .map(Path::new),
+            ),
+            provenance::Version::Workspace(readiness) => {
+                // 交给版本自己的 colm-cli：参数原样转过去，只换掉内核、去掉只有外层认的几项。
+                let own = [
+                    "--model-version",
+                    "--workspace-root",
+                    "--kernel",
+                    "--location",
+                    "--stage",
+                ];
+                let mut args: Vec<String> = opts.positional.clone();
+                for (flag, value) in &opts.flags {
+                    if !own.contains(&flag.as_str()) {
+                        args.extend([flag.clone(), value.clone()]);
+                    }
+                }
+                if let Some(stage) = stage {
+                    args.extend(["--stage".into(), stage.program().into()]);
+                }
+                match provenance::delegate(readiness, &args) {
+                    Ok(0) => Ok(()),
+                    Ok(code) => Err(anyhow::anyhow!(
+                        "model version {} exited with status {code}",
+                        readiness.name
+                    )),
+                    Err(e) => Err(e),
+                }
+            }
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2722,7 +3123,7 @@ fn run_case(
     // （见那里的注释），这一半当时漏了。
     // `absolute` 而不是 `canonicalize`：Windows 上后者返回 `\\?\C:\...`，
     // 而工作目录与 namelist 路径都要交给子进程 —— 那种形式两边都不认。
-    let case = &colm_kernel::manifest::absolute(case)
+    let case = &model_version::execution_path(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
     // 引擎与前处理都用 Rust 时三个 Fortran 二进制不会被执行，只要清单（宏与身份）：远程服务器上
     // 只放清单就能跑（第 637 轮）。

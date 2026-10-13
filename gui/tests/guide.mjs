@@ -386,8 +386,8 @@ try {
   assert.equal(homepage.screen, 'launch');
   assert.deepEqual(homepage.buttons.map(button=>button.name), ['new-case','example:CN-Cng']);
   const prompt = await readFile(new URL('../../crates/colm-agent/src/prompt.md', import.meta.url), 'utf8');
-  assert.match(prompt, /For a new case: new-case →/);
-  assert.match(prompt, /ui_commit\("example:<site name>"\)/);
+  assert.match(prompt, /open new-case and fill its visible fields/);
+  assert.match(prompt, /visible example installation action/);
   assert.ok(!prompt.includes('local-run →'), 'assistant prompt must use the current homepage actions');
   await assert.rejects(drive('click',{target:'example:CN-Cng'}), /ui_commit/);
   await assert.rejects(drive('commit',{target:'run-all'}), /not a commit button/);

@@ -480,3 +480,17 @@ fn rust_model_engine_needs_an_lct_kernel() {
     let error = rust_model_land_cover(&kernel).unwrap_err().to_string();
     assert!(error.contains("--engine fortran"), "{error}");
 }
+
+#[test]
+fn isolated_single_stage_runs_check_their_required_upstream_stages() {
+    assert!(required_upstream_stages(None).is_empty());
+    assert!(required_upstream_stages(Some(Stage::MkSrfData)).is_empty());
+    assert_eq!(
+        required_upstream_stages(Some(Stage::MkIniData)),
+        [Stage::MkSrfData]
+    );
+    assert_eq!(
+        required_upstream_stages(Some(Stage::Colm)),
+        [Stage::MkSrfData, Stage::MkIniData]
+    );
+}

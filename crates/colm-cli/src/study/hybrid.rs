@@ -99,15 +99,13 @@ pub fn write_member_files(
     Ok(())
 }
 
-/// 续跑时核对已物化的成员：有权重就要有能加载（sha256 对得上）的 `hybrid.toml`，没有就不能有。
+/// 续跑时核对训练权重，或由固定模型基准带入的网络及其内容指纹。
 pub fn verify_member_files(destination: &Path, parameters: &BTreeMap<String, f64>) -> Result<()> {
     let config = destination.join("hybrid.toml");
     if weights(parameters)?.is_empty() {
-        ensure!(
-            !config.exists(),
-            "Study member {} has a hybrid.toml but no hybrid weights",
-            destination.display()
-        );
+        if config.exists() {
+            super::model::verify_frozen_hybrid(destination)?;
+        }
         return Ok(());
     }
     colm_hybrid::HybridConfig::load(&config).with_context(|| {

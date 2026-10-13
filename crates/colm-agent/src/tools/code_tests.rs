@@ -1,6 +1,145 @@
 use super::*;
 use crate::tools::Registry;
 
+#[cfg(unix)]
+#[test]
+fn frozen_source_defaults_and_knowledge_never_fall_back_to_current_code_or_documents() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!(
+        "colm-selected-code-{}",
+        crate::bridge::random_hex(16)
+    ));
+    let source = root.join("frozen");
+    std::fs::create_dir_all(source.join("crates")).unwrap();
+    std::fs::write(source.join("crates/x.rs"), "old frozen formula\n").unwrap();
+    let app_docs = root.join("current-docs");
+    std::fs::create_dir(&app_docs).unwrap();
+    std::fs::write(app_docs.join("guide.md"), "energy current-only assertion\n").unwrap();
+    let model =
+        json!({"version":{"id":"soil","revision":1},"code":{"source_sha256":"a".repeat(64)}});
+    std::fs::write(
+        root.join("source-response.json"),
+        serde_json::to_vec(&json!({"model":model,"source_dir":source,"docs_dir":null})).unwrap(),
+    )
+    .unwrap();
+    let cli = root.join("cli");
+    std::fs::write(&cli, format!(r#"#!/bin/sh
+fixture=$(dirname "$0")
+case "$1" in
+ model-source-context) cat "$fixture/source-response.json" ;;
+ ws-source-info) printf '{{"source":"%s","content_sha256":"{}","revision":"old","dirty":false}}\n' "$3" ;;
+ ws-search|ws-read|ws-symbols) printf '{{"argv":"%s"}}\n' "$*" ;;
+ *) exit 1 ;;
+esac
+"#, "a".repeat(64))).unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ctx = ToolContext {
+        cli,
+        docs_root: Some(app_docs),
+        model_context: Some(crate::tools::ModelContext {
+            model: model.clone(),
+            model_root: root.join("models"),
+            source_dir: source.clone(),
+            docs_dir: None,
+            source_case: None,
+        }),
+        ..ToolContext::default()
+    };
+    let frozen = SearchCode
+        .call(&json!({"name":null,"pattern":"formula","glob":null}), &ctx)
+        .unwrap();
+    assert!(frozen["argv"]
+        .as_str()
+        .unwrap()
+        .starts_with(&format!("ws-search --source {}", source.display())));
+    assert_eq!(frozen["source_context"]["version"]["revision"], 1);
+    let mutable = SearchCode
+        .call(
+            &json!({"name":"soil-development","pattern":"formula","glob":null}),
+            &ctx,
+        )
+        .unwrap();
+    assert!(mutable["argv"]
+        .as_str()
+        .unwrap()
+        .contains("--name soil-development"));
+    assert_eq!(mutable["source_context"]["kind"], "mutable_workspace");
+    let docs = registry()
+        .find("search_docs")
+        .unwrap()
+        .call(&json!({"name":null,"query":"energy"}), &ctx)
+        .unwrap();
+    assert_eq!(docs["documentation_status"], "missing");
+    assert!(docs["matches"].as_array().unwrap().is_empty());
+    assert_eq!(docs["scope"]["kind"], "model");
+    assert_eq!(docs["scope"]["name"], "soil@1");
+    let snapshot =
+        crate::tools::read::knowledge::snapshot(&ctx, &docs["scope"], &["crates/x.rs".into()])
+            .unwrap();
+    assert_eq!(
+        snapshot["sources"][0]["sha256"],
+        crate::tools::read::knowledge::digest(b"old frozen formula\n")
+    );
+    assert!(crate::tools::read::knowledge::snapshot(
+        &ctx,
+        &json!({"kind":"app","name":null,"source":null,"host":null}),
+        &[]
+    )
+    .is_err());
+    struct Selection(Value);
+    impl crate::tools::ui::UiBridge for Selection {
+        fn request(&self, action: &str, _: Value) -> Result<Value> {
+            assert_eq!(action, "state");
+            Ok(self.0.clone())
+        }
+    }
+    let mut new_model = model.clone();
+    new_model["version"]["revision"] = json!(2);
+    std::fs::write(
+        root.join("source-response.json"),
+        serde_json::to_vec(&json!({"model":new_model,"source_dir":source,"docs_dir":null}))
+            .unwrap(),
+    )
+    .unwrap();
+    let mut live = ctx.clone();
+    live.kernel_dir = Some(root.join("boot-default"));
+    live.ui = Some(crate::tools::ui::UiHandle(std::sync::Arc::new(Selection(
+        json!({"busy":false,"model":{"id":"soil","revision":2},"case":{"dir":root.join("new-case")},"kernelDir":root.join("actual-usgs"),"preprocessors":"fortran"}),
+    ))));
+    let rebound = live.selected_context().unwrap();
+    assert_eq!(rebound.kernel_dir, Some(root.join("actual-usgs")));
+    assert_eq!(rebound.preprocessors.as_deref(), Some("fortran"));
+    assert_eq!(
+        rebound.model_context.as_ref().unwrap().model["version"]["revision"],
+        2
+    );
+    assert_eq!(
+        rebound.model_context.as_ref().unwrap().source_case,
+        Some(root.join("new-case"))
+    );
+    assert_eq!(
+        ctx.model_context.as_ref().unwrap().model["version"]["revision"],
+        1
+    );
+    let rebound_docs = registry()
+        .find("search_docs")
+        .unwrap()
+        .call(&json!({"name":null,"query":"energy"}), &live)
+        .unwrap();
+    assert_eq!(rebound_docs["scope"]["name"], "soil@2");
+    let mut tampered = model;
+    tampered["code"]["source_sha256"] = json!("b".repeat(64));
+    std::fs::write(
+        root.join("source-response.json"),
+        serde_json::to_vec(&json!({"model":tampered,"source_dir":source,"docs_dir":null})).unwrap(),
+    )
+    .unwrap();
+    assert!(SearchCode
+        .call(&json!({"name":null,"pattern":"formula","glob":null}), &ctx)
+        .is_err());
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn registry() -> Registry {
     Registry::standard()
 }
@@ -226,8 +365,14 @@ use std::path::{Path, PathBuf};
 /// 读代码的三个工具：`name` 可空，空就读应用自己的源码（`--source app`），给了就读那个工作区。
 #[test]
 fn reading_code_without_a_workspace_reads_the_application_source() {
-    assert_eq!(source_cli(&json!({ "name": null })), ["--source", "app"]);
-    assert_eq!(source_cli(&json!({ "name": "demo" })), ["--name", "demo"]);
+    assert_eq!(
+        source_cli(&json!({ "name": null }), &ToolContext::default()).unwrap(),
+        ["--source", "app"]
+    );
+    assert_eq!(
+        source_cli(&json!({ "name": "demo" }), &ToolContext::default()).unwrap(),
+        ["--name", "demo"]
+    );
     let registry = registry();
     for name in ["search_code", "read_file", "list_symbols"] {
         let schema = registry.find(name).unwrap().parameters();

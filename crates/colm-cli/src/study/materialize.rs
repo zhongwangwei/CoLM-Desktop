@@ -64,6 +64,7 @@ pub fn member_case(
     )?;
     copy_process_parameters(&mut document, &baseline, &destination)?;
     copy_hybrid_climate(&baseline, &destination)?;
+    super::model::copy_frozen_hybrid(&baseline, &destination)?;
 
     let mut case_scalars = Vec::new();
     // 混合网络的权重不进 namelist，由 `super::hybrid::write_member_files` 写成模型文件。

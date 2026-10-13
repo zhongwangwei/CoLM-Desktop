@@ -228,31 +228,33 @@ pub fn execute_tool(
         }
     };
     let summary = tool.summary(&args);
-    let preapproved = tool.tier().needs_approval()
+    let tier = tool.tier_for(&args);
+    let session_allowance = tool.session_allowance_for(&args);
+    let preapproved = tier.needs_approval()
         && !tool.requires_explicit_approval()
         && !approver.recovery_requires_approval()
-        && tool.session_allowance()
-        && approver.preapproved(&call.name, tool.tier());
+        && session_allowance
+        && approver.preapproved(&call.name, tier);
     emit(Outbound::ToolCall {
         id: call.id.clone(),
         name: call.name.clone(),
         arguments: call.arguments.clone(),
-        tier: tool.tier(),
+        tier,
         summary: summary.clone(),
         preapproved,
     });
     if cancel.load(Ordering::SeqCst) {
         return "error: cancelled before execution; inspect existing state before retrying".into();
     }
-    if tool.tier().needs_approval() && !preapproved {
+    if tier.needs_approval() && !preapproved {
         let request = Outbound::ApprovalRequest {
             id: call.id.clone(),
             name: call.name.clone(),
-            tier: tool.tier(),
+            tier,
             summary,
             arguments: call.arguments.clone(),
             explicit_only: tool.requires_explicit_approval()
-                || !tool.session_allowance()
+                || !session_allowance
                 || approver.recovery_requires_approval(),
         };
         emit(request.clone());
@@ -261,7 +263,7 @@ pub fn execute_tool(
         }
         let decision = approver.decide(&request);
         if decision == Decision::ApproveForSession
-            && tool.session_allowance()
+            && session_allowance
             && !approver.recovery_requires_approval()
         {
             approver.remember(&call.name);

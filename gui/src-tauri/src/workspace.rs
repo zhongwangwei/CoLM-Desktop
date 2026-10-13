@@ -307,21 +307,6 @@ pub async fn version_check(
     cli_json(version_check_args(&name, &kernel, engine.as_deref())?, None).await
 }
 
-fn produced_by_args(case: &str) -> Result<Vec<String>, String> {
-    if case.contains('\0') || !PathBuf::from(case).is_absolute() {
-        return Err("算例目录须为绝对路径".into());
-    }
-    Ok(args("produced-by", &[case]))
-}
-
-/// 结果页：这个算例的运行历史、以它为基础的研究、它是不是从某个研究另存出来的。
-#[tauri::command]
-pub async fn case_runs(case: String) -> Result<Value, String> {
-    let mut command = produced_by_args(&case)?;
-    command[0] = "case-runs".into();
-    cli_json(command, None).await
-}
-
 /// 导出补丁：把工作区相对基线的全部改动写成一个 `.patch` 文件（D 级）。
 #[tauri::command]
 pub async fn workspace_export(name: String, out: String) -> Result<Value, String> {

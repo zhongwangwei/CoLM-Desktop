@@ -434,6 +434,197 @@ fn fetched_results_record_the_server_jobs_outcome() {
     assert!(fetched_provenance(&submitted, None)["ok"].is_null());
 }
 
+fn completed_output_fixture(label: &str) -> PendingFixture {
+    let (fixture, _) = PendingFixture::new(label);
+    let out = fixture.0.join("out/fixture");
+    std::fs::create_dir_all(out.join("history")).unwrap();
+    std::fs::write(
+        out.join("history/fixture_hist_2004.nc"),
+        vec![b'A'; 3 * 1024 * 1024],
+    )
+    .unwrap();
+    crate::provenance::write_value(
+        &fixture.0,
+        &json!({"schema":1,"ok":true,"model_run":{"revision":1},"execution_snapshot":"0123456789abcdef"}),
+    );
+    fixture
+}
+
+#[test]
+fn completed_outputs_reject_same_size_middle_tampering_without_resealing() {
+    use std::io::{Seek, SeekFrom, Write};
+    let fixture = completed_output_fixture("completed-tamper");
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    let file = fixture.0.join("out/fixture/history/fixture_hist_2004.nc");
+    let mut output = std::fs::OpenOptions::new().write(true).open(&file).unwrap();
+    output.seek(SeekFrom::Start(1_500_000)).unwrap();
+    output.write_all(b"B").unwrap();
+    drop(output);
+    assert!(verify_completed_outputs(&fixture.0)
+        .unwrap_err()
+        .to_string()
+        .contains("original completed output hashes"));
+    assert_eq!(
+        crate::provenance::read(&fixture.0).unwrap().unwrap(),
+        proof["provenance"]
+    );
+    assert_eq!(std::fs::metadata(file).unwrap().len(), 3 * 1024 * 1024);
+}
+
+#[test]
+fn completed_outputs_reject_missing_extra_and_symlink_history_members() {
+    let fixture = completed_output_fixture("completed-members");
+    let history = fixture.0.join("out/fixture/history");
+    let original = history.join("fixture_hist_2004.nc");
+    let saved = fixture.0.join("original.nc");
+    std::fs::rename(&original, &saved).unwrap();
+    assert!(verify_completed_outputs(&fixture.0).is_err());
+    std::fs::rename(&saved, &original).unwrap();
+    std::fs::write(history.join("extra.nc"), b"extra").unwrap();
+    assert!(verify_completed_outputs(&fixture.0).is_err());
+    std::fs::remove_file(history.join("extra.nc")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&original, history.join("unrecorded-link.nc")).unwrap();
+        assert!(verify_completed_outputs(&fixture.0)
+            .unwrap_err()
+            .to_string()
+            .contains("symlink"));
+        std::fs::remove_file(history.join("unrecorded-link.nc")).unwrap();
+        std::fs::rename(&original, &saved).unwrap();
+        std::os::unix::fs::symlink(&saved, &original).unwrap();
+        assert!(verify_completed_outputs(&fixture.0)
+            .unwrap_err()
+            .to_string()
+            .contains("symlink"));
+    }
+}
+
+#[test]
+fn staged_fetch_requires_the_original_complete_history_table() {
+    let fixture = completed_output_fixture("staged-completion");
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    let expected = recorded_history_hashes(&proof["provenance"]).unwrap();
+    let stage = FetchStage::new(&fixture.0).unwrap();
+    let history = stage.0.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let name = "fixture_hist_2004.nc";
+    std::fs::copy(
+        fixture.0.join("out/fixture/history").join(name),
+        history.join(name),
+    )
+    .unwrap();
+    verify_history_hashes(&history, &expected).unwrap();
+    std::fs::write(history.join(name), b"modified during transfer").unwrap();
+    assert!(verify_history_hashes(&history, &expected).is_err());
+    // A transfer failure leaves the old result and its original provenance intact.
+    assert_eq!(
+        verify_completed_outputs(&fixture.0).unwrap()["provenance"],
+        proof["provenance"]
+    );
+}
+
+#[test]
+fn transient_output_changes_are_detected_even_when_completed_bytes_are_restored() {
+    let fixture = completed_output_fixture("completed-restored");
+    let before = verify_completed_outputs(&fixture.0).unwrap();
+    let path = fixture.0.join("out/fixture/history/fixture_hist_2004.nc");
+    let bytes = std::fs::read(&path).unwrap();
+    std::fs::write(&path, b"different output read during fetch").unwrap();
+    std::fs::write(&path, bytes).unwrap();
+    let after = verify_completed_outputs(&fixture.0).unwrap();
+    assert_eq!(before["history_sha256"], after["history_sha256"]);
+    assert_ne!(before["history_inventory"], after["history_inventory"]);
+    assert_ne!(before, after);
+}
+
+#[test]
+fn partial_and_legacy_fetches_preserve_execution_success_but_cannot_rank() {
+    let fixture = completed_output_fixture("uncertified-fetch");
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    let submitted = json!({"schema":1,"location":{"kind":"server"}});
+    for (proof, partial) in [(Some(&proof), true), (None, false)] {
+        let mut fetched =
+            fetched_provenance(&submitted, Some(job::State::Finished { exit_code: 0 }));
+        fetch_certification(&mut fetched, proof, partial);
+        assert_eq!(fetched["execution_ok"], true);
+        assert_eq!(fetched["ok"], false);
+        assert_eq!(fetched["output_verification"]["status"], "unavailable");
+        if let Some(proof) = proof {
+            assert_eq!(
+                fetched["remote_execution_provenance"]["output_sha256"],
+                proof["provenance"]["output_sha256"]
+            );
+        }
+        let inputs = crate::fingerprint::FullInputIdentity::unavailable("fixture");
+        assert!(verify_recorded_inputs(&fixture.0, &fetched, &inputs)
+            .unwrap_err()
+            .to_string()
+            .contains("partial or lacks"));
+    }
+    let mut fetched = fetched_provenance(&submitted, Some(job::State::Finished { exit_code: 0 }));
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["ok"], true);
+    let mut failed_proof = proof;
+    failed_proof["provenance"]["ok"] = json!(false);
+    fetch_certification(&mut fetched, Some(&failed_proof), false);
+    assert_eq!(fetched["ok"], false);
+}
+
+#[test]
+fn only_an_old_cli_without_the_verifier_can_return_unverified_diagnostics() {
+    let failed = |code, message: &str| colm_remote::ssh::Output {
+        success: false,
+        code,
+        stdout: String::new(),
+        stderr: message.into(),
+    };
+    assert!(parse_output_verification(failed(
+        Some(1),
+        "Error: unknown command: verify-completed-outputs\nusage"
+    ))
+    .unwrap()
+    .is_none());
+    for (code, message) in [
+        (
+            Some(1),
+            "Error: history differs from original completed output hashes",
+        ),
+        (Some(255), "Permission denied"),
+        (
+            Some(255),
+            "Error: unknown command: verify-completed-outputs",
+        ),
+        (Some(1), "unknown command: other-command"),
+    ] {
+        assert!(parse_output_verification(failed(code, message)).is_err());
+    }
+    let fixture = completed_output_fixture("proof-parser");
+    let mut proof = verify_completed_outputs(&fixture.0).unwrap();
+    proof["history_sha256"]["history/fixture_hist_2004.nc"] = json!("b".repeat(64));
+    assert!(parse_output_verification(colm_remote::ssh::Output {
+        success: true,
+        code: Some(0),
+        stdout: proof.to_string(),
+        stderr: String::new()
+    })
+    .is_err());
+    assert!(recorded_history_hashes(
+        &json!({"output_sha256":{"../history/escape.nc":"a".repeat(64)}})
+    )
+    .is_err());
+    assert_eq!(
+        recorded_history_hashes(
+            &json!({"output_sha256":{"history\\fixture_hist_2004.nc":"a".repeat(64)}})
+        )
+        .unwrap(),
+        recorded_history_hashes(
+            &json!({"output_sha256":{"history/fixture_hist_2004.nc":"a".repeat(64)}})
+        )
+        .unwrap()
+    );
+}
+
 /// `--model-version`：源码要干净；出处里带着版本、提交与改动范围。
 #[test]
 fn a_remote_model_version_must_be_committed_and_carries_its_provenance() {
@@ -500,4 +691,282 @@ fn successful_cleanup_preserves_removed_fact_when_unlock_fails() {
         .unwrap()
         .contains("SSH disconnected"));
     assert!(cleanup_result(json!({"refused":["referenced"]}), Ok(())).is_err());
+}
+
+struct PendingFixture(PathBuf);
+impl PendingFixture {
+    fn new(label: &str) -> (Self, PendingRun) {
+        let path = std::env::temp_dir().join(format!(
+            "colm-pending-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(
+            path.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'fixture'\n/\n",
+        )
+        .unwrap();
+        let path = path.canonicalize().unwrap();
+        let pending = PendingRun {
+            schema: 1,
+            source_case: path.clone(),
+            run_case: path.clone(),
+            record: Record {
+                ssh_auth: None,
+                host: "test-server".into(),
+                root: "/data/colm".into(),
+                job: "run-original-operation".into(),
+                remote_case: "/data/colm/cases/fixture-one".into(),
+                case_name: "fixture".into(),
+                engine: "0123456789abcdef".into(),
+                submitted_at: 1,
+                scheduler: "bare".into(),
+                scheduler_id: None,
+                provenance: Some(json!({"operation_id":"original-operation"})),
+            },
+        };
+        (Self(path), pending)
+    }
+    fn retry(&self) -> Opts {
+        Opts {
+            positional: vec![self.0.to_string_lossy().into_owned()],
+            flags: vec![
+                ("--operation-id".into(), "new-operation".into()),
+                ("--model-id".into(), "new-model".into()),
+                ("--model-revision".into(), "2".into()),
+            ],
+        }
+    }
+}
+impl Drop for PendingFixture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn ssh_success_response_loss_survives_restart_and_blocks_a_new_model_run() {
+    let (fixture, pending) = PendingFixture::new("response-loss");
+    let submissions = std::cell::Cell::new(0);
+    let failed: Result<()> = submit_with_intent(&pending, || {
+        // The server accepted the launch, then the SSH response was lost.
+        submissions.set(submissions.get() + 1);
+        Err(anyhow::anyhow!(
+            "SSH connection lost after remote acceptance"
+        ))
+    });
+    assert!(failed.is_err());
+    let reopened = read_pending(&fixture.0).unwrap().unwrap();
+    assert_eq!(reopened.record.job, pending.record.job);
+    assert_eq!(reopened.record.provenance, pending.record.provenance);
+    assert!(cmd_run(&fixture.retry())
+        .unwrap_err()
+        .to_string()
+        .contains("unresolved outcome"));
+    assert!(submit_with_intent(&pending, || {
+        submissions.set(submissions.get() + 1);
+        Ok(())
+    })
+    .is_err());
+    assert_eq!(submissions.get(), 1);
+    assert!(read_record(&fixture.0).is_err());
+}
+
+#[test]
+fn local_record_failure_retains_the_original_job_until_reconciliation() {
+    let (fixture, pending) = PendingFixture::new("record-failure");
+    let submissions = std::cell::Cell::new(0);
+    submit_with_intent(&pending, || {
+        submissions.set(submissions.get() + 1);
+        Ok(())
+    })
+    .unwrap();
+    // A completed SSH submission must stay reserved when the final local write fails.
+    std::fs::create_dir(fixture.0.join(RECORD)).unwrap();
+    assert!(finish_pending(&pending, &pending.record).is_err());
+    assert!(cmd_run(&fixture.retry())
+        .unwrap_err()
+        .to_string()
+        .contains("unresolved outcome"));
+    assert_eq!(submissions.get(), 1);
+    assert_eq!(
+        read_pending(&fixture.0).unwrap().unwrap().record.job,
+        pending.record.job
+    );
+    std::fs::remove_dir(fixture.0.join(RECORD)).unwrap();
+    finish_pending(&pending, &pending.record).unwrap();
+    assert!(read_pending(&fixture.0).unwrap().is_none());
+    assert_eq!(read_record(&fixture.0).unwrap().job, pending.record.job);
+}
+
+#[cfg(unix)]
+#[test]
+fn pending_status_rejects_a_server_script_for_another_case_or_operation() {
+    let (fixture, mut pending) = PendingFixture::new("identity");
+    pending.record.root = fixture.0.to_string_lossy().into_owned();
+    pending.record.remote_case = format!("{}/cases/fixture", pending.record.root);
+    let dir = PathBuf::from(job::job_dir(&pending.record.root, &pending.record.job));
+    std::fs::create_dir_all(&dir).unwrap();
+    let correct=format!("# colm-engine-snapshot: {}\n# colm-run-case: {}\n# colm-operation-id: original-operation\n",pending.record.engine,serde_json::to_string(&pending.record.remote_case).unwrap());
+    std::fs::write(dir.join("script.sh"), &correct).unwrap();
+    std::fs::write(dir.join("pid"), "123\n").unwrap();
+    let run = || {
+        Command::new("bash")
+            .arg("-c")
+            .arg(pending_identity_script(&pending).unwrap())
+            .output()
+            .unwrap()
+    };
+    assert!(run().status.success());
+    std::fs::write(
+        dir.join("script.sh"),
+        correct.replace("original-operation", "different-operation"),
+    )
+    .unwrap();
+    assert!(!run().status.success());
+    std::fs::write(
+        dir.join("script.sh"),
+        correct.replace("fixture\"", "different\""),
+    )
+    .unwrap();
+    assert!(!run().status.success());
+}
+
+#[test]
+fn packaged_sources_take_precedence_over_an_enclosing_checkout() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-package-source-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("crates/colm-cli")).unwrap();
+    std::fs::write(root.join("Cargo.lock"), "version = 3").unwrap();
+    let executable = root.join("Example.app/Contents/MacOS");
+    let resource = root.join("Example.app/Contents/Resources/engine");
+    std::fs::create_dir_all(&executable).unwrap();
+    std::fs::create_dir_all(&resource).unwrap();
+    let archive = resource.join("colm-src.tar.gz");
+    std::fs::write(&archive, b"selection fixture").unwrap();
+    assert!(
+        matches!(engine_source_at(&executable, std::slice::from_ref(&resource)).unwrap(), Source::Tarball(path) if path == archive)
+    );
+    std::fs::remove_file(&archive).unwrap();
+    assert!(
+        matches!(engine_source_at(&executable, &[resource]).unwrap(), Source::Checkout(path) if path == root)
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn actual_remote_manifest_rejects_classification_crop_and_unknown_metadata() {
+    let root = std::env::temp_dir().join(format!(
+        "remote-kernel-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let registry = colm_model::Registry::open(&root).unwrap();
+    let mut revision = registry
+        .install_official(colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    revision
+        .overlay
+        .physics
+        .insert("DEF_USE_USGS".into(), ".true.".into());
+    let mut metadata = serde_json::json!({"schema":1,"preset":"same-preset","platform":"Linux-x86_64","colm_git_sha":"fixture","generator_args":"","macros":["SinglePoint","LULC_IGBP"],"built_with":"fixture","netcdf_c":"","netcdf_fortran":"","hdf5":"","sha256":{}});
+    assert!(
+        check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).is_err()
+    );
+    metadata["macros"] = serde_json::json!(["SinglePoint", "LULC_USGS"]);
+    check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).unwrap();
+    revision
+        .overlay
+        .physics
+        .insert("DEF_USE_CROP".into(), ".true.".into());
+    assert!(
+        check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).is_err()
+    );
+    metadata["macros"] = serde_json::json!(["SinglePoint", "LULC_USGS", "CROP"]);
+    check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).unwrap();
+    for macros in [
+        serde_json::json!([]),
+        serde_json::json!(["LULC_IGBP", "LULC_USGS"]),
+    ] {
+        metadata["macros"] = macros;
+        assert!(
+            check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision)
+                .is_err()
+        );
+    }
+    assert!(check_remote_kernel_manifest("{}", "/server/kernel", &revision).is_err());
+    metadata["schema"] = serde_json::json!(999);
+    assert!(
+        check_remote_kernel_manifest(&metadata.to_string(), "/server/kernel", &revision).is_err()
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn remote_materialized_run_recovers_verified_revision_without_selection_flags() {
+    let root = std::env::temp_dir().join(format!(
+        "remote-revision-check-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let registry = colm_model::Registry::open(root.join("registry")).unwrap();
+    let revision = registry
+        .install_official(colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        })
+        .unwrap();
+    let case = root.join("case");
+    std::fs::create_dir_all(&case).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_dir_output='out'\n/\n",
+    )
+    .unwrap();
+    assert!(materialized_revision(&case).unwrap().is_none());
+    std::fs::create_dir_all(registry.root().join("runs")).unwrap();
+    let run = registry
+        .materialize_run(
+            &revision.version,
+            &case,
+            &registry.root().join("runs/op"),
+            "op",
+        )
+        .unwrap();
+    assert_eq!(
+        materialized_revision(&run.run_case).unwrap(),
+        Some(revision)
+    );
+    let mut corrupt = run.clone();
+    corrupt.overlay_sha256 = "b".repeat(64);
+    std::fs::write(
+        run.run_case.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&corrupt).unwrap(),
+    )
+    .unwrap();
+    assert!(materialized_revision(&run.run_case).is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }

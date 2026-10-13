@@ -327,6 +327,9 @@ impl Tool for SetCaseFields {
         )
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        if ctx.model_context.is_some() {
+            bail!("selected frozen model parameters belong to its revision; edit through the model page and commit a new revision, not the original case");
+        }
         let dir = case_dir(ctx, args)?;
         let path = dir.join("case.nml");
         let text = std::fs::read_to_string(&path)?;
@@ -390,6 +393,9 @@ impl Tool for RunCase {
         )
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        if ctx.model_context.is_some() {
+            bail!("selected frozen models require the run page or model-run with the complete revision; legacy run_case cannot run the original case");
+        }
         let dir = case_dir(ctx, args)?.display().to_string();
         let kernel = kernel(ctx)?;
         let mut cli = vec!["run", dir.as_str(), "--kernel", kernel.as_str()];

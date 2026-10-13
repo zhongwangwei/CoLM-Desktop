@@ -172,6 +172,23 @@ fn an_opened_site_case_reads_usgs_and_methane_from_the_last_run() {
 }
 
 #[test]
+fn classification_survives_pft_and_pc_runtime_structure() {
+    let stages = r#"{"colm":{"kernel":"preset=usgs;macros=SinglePoint,LULC_USGS"}}"#;
+    for structure in ["PFT", "PC"] {
+        let text = format!("&nl_colm\n DEF_USE_{structure}=.true.\n/\n");
+        let ran = case_profile(&text, false, Some(stages), Some("igbp")).unwrap();
+        assert_eq!(ran.subgrid, structure);
+        assert_eq!(ran.classification, "USGS");
+        assert_eq!(ran.classification_source, "kernel");
+        let created = case_profile(&text, false, None, Some("usgs")).unwrap();
+        assert_eq!(created.classification, "USGS");
+        assert_eq!(created.classification_source, "creation");
+    }
+    let legacy = case_profile("&nl_colm\n/\n", false, None, None).unwrap();
+    assert_eq!(legacy.classification_source, "legacy-default");
+}
+
+#[test]
 fn opening_a_directory_without_case_nml_is_refused() {
     let root = tmp("open-none");
     assert!(open_case(root.to_string_lossy().into_owned()).is_err());

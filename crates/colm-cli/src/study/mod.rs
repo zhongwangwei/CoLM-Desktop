@@ -7,6 +7,7 @@ pub mod export;
 pub mod generation;
 pub mod hybrid;
 pub mod materialize;
+pub mod model;
 pub mod runner;
 pub mod sample;
 pub mod science;

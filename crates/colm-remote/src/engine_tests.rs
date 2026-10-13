@@ -1,5 +1,164 @@
 use super::*;
 
+#[cfg(unix)]
+fn linked_source_fixture(label: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "colm-source-links-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    for (path, bytes) in [
+        ("Cargo.toml", "[workspace]\n"),
+        ("Cargo.lock", "lock\n"),
+        ("vendor/CoLM202X/Makefile", "include include/Makeoptions\n"),
+        ("vendor/CoLM202X/include/Makeoptions.github", "FF=mpif90\n"),
+        (
+            "vendor/CoLM202X/include/Makeoptions.alternative",
+            "FF=mpif90\n",
+        ),
+        (
+            "vendor/CoLM202X/run/scripts/batch.github.config",
+            "queue=short\n",
+        ),
+        (
+            "vendor/CoLM202X/run/scripts/machine-github.config",
+            "compiler=gnu\n",
+        ),
+        (".github/workflows/build.yml", "compiler: gnu\n"),
+    ] {
+        let file = root.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, bytes).unwrap();
+    }
+    for (path, target) in [
+        ("vendor/CoLM202X/include/Makeoptions", "Makeoptions.github"),
+        (
+            "vendor/CoLM202X/run/scripts/batch.config",
+            "batch.github.config",
+        ),
+        (
+            "vendor/CoLM202X/run/scripts/machine.config",
+            "machine-github.config",
+        ),
+    ] {
+        std::os::unix::fs::symlink(target, root.join(path)).unwrap();
+    }
+    root
+}
+
+#[cfg(unix)]
+#[test]
+fn real_colm_link_layout_has_one_identity_in_checkout_and_extracted_source() {
+    let root = linked_source_fixture("archive");
+    let git = |args: &[&str]| {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success())
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    let identity = source_content_sha256(&root).unwrap();
+    std::fs::write(root.join(".gitignore"), "oracle/work/\n").unwrap();
+    std::fs::create_dir_all(root.join("oracle/work")).unwrap();
+    std::fs::write(root.join("oracle/work/stages.json"), "{\"generated\":true}").unwrap();
+    assert_eq!(source_content_sha256(&root).unwrap(), identity);
+    let snapshot = snapshot(&Source::Checkout(root.clone())).unwrap();
+    let archive = root.join("source.tar.gz");
+    pack_source(&snapshot, &archive).unwrap();
+    assert_eq!(tarball_content_id(&archive).unwrap(), snapshot.id);
+    let extracted = root.join("extracted");
+    std::fs::create_dir(&extracted).unwrap();
+    assert!(Command::new("tar")
+        .args(["-xzf"])
+        .arg(&archive)
+        .arg("-C")
+        .arg(&extracted)
+        .status()
+        .unwrap()
+        .success());
+    assert_eq!(source_content_sha256(&extracted).unwrap(), identity);
+    for path in [
+        "vendor/CoLM202X/include/Makeoptions",
+        "vendor/CoLM202X/run/scripts/batch.config",
+        "vendor/CoLM202X/run/scripts/machine.config",
+    ] {
+        assert_eq!(
+            std::fs::read_link(root.join(path)).unwrap(),
+            std::fs::read_link(extracted.join(path)).unwrap()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_configuration_content_and_link_selection_both_change_source_identity() {
+    let root = linked_source_fixture("changes");
+    let before = source_content_sha256(&root).unwrap();
+    let target = root.join("vendor/CoLM202X/include/Makeoptions.github");
+    std::fs::write(&target, "FF=gfortran\n").unwrap();
+    assert_ne!(source_content_sha256(&root).unwrap(), before);
+    std::fs::write(target, "FF=mpif90\n").unwrap();
+    assert_eq!(source_content_sha256(&root).unwrap(), before);
+    let link = root.join("vendor/CoLM202X/include/Makeoptions");
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("Makeoptions.alternative", &link).unwrap();
+    assert_ne!(
+        source_content_sha256(&root).unwrap(),
+        before,
+        "retargeting to equal bytes still changes compilation provenance"
+    );
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink("Makeoptions.github", &link).unwrap();
+    std::fs::write(
+        root.join(".github/workflows/build.yml"),
+        "compiler: clang\n",
+    )
+    .unwrap();
+    assert_ne!(
+        source_content_sha256(&root).unwrap(),
+        before,
+        "build configuration is part of source identity"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn unsafe_source_links_fail_before_their_contents_can_enter_a_snapshot() {
+    let root = linked_source_fixture("unsafe");
+    let bad = root.join("vendor/CoLM202X/bad.rs");
+    let outside = root.with_extension("outside.rs");
+    std::fs::write(&outside, "external").unwrap();
+    for target in [
+        outside.clone(),
+        PathBuf::from("../../../").join(outside.file_name().unwrap()),
+        PathBuf::from("missing.rs"),
+        PathBuf::from("include"),
+        PathBuf::from("bad.rs"),
+    ] {
+        std::os::unix::fs::symlink(&target, &bad).unwrap();
+        assert!(source_content_sha256(&root).is_err(), "{target:?}");
+        assert!(content_id(&root, &["vendor/CoLM202X/bad.rs".into()]).is_err());
+        std::fs::remove_file(&bad).unwrap();
+    }
+    let internal = root.join("vendor/CoLM202X/include/Makeoptions.github");
+    std::os::unix::fs::symlink(internal, &bad).unwrap();
+    assert!(
+        source_content_sha256(&root).is_err(),
+        "absolute links are rejected even if their target is internal"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+    std::fs::remove_file(outside).unwrap();
+}
+
 #[test]
 fn snapshot_ids_follow_content_not_time() {
     let dir = std::env::temp_dir().join(format!("colm-remote-id-{}", std::process::id()));

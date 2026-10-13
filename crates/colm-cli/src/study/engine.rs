@@ -186,13 +186,8 @@ pub(super) fn ensure_supported_study_manifest(
             .with_context(|| format!("cannot inspect Study kernel {}", kernel_dir))?;
         ensure_supported_study_inputs(&[], &kernel.manifest.macros)?;
     }
-    let case_root = Path::new(&manifest.root)
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .context("Study directory is not under <case-root>/.colm/studies")?;
     for site in &manifest.spec.base_cases {
-        reject_spatial_study_case(&case_root.join(site))?;
+        reject_spatial_study_case(&super::model::base_case(manifest, site)?)?;
     }
     Ok(())
 }
@@ -209,8 +204,26 @@ fn reject_spatial_study_case(case: &Path) -> Result<()> {
 }
 
 pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
+    create_with_baselines(case_root, spec_file, None)
+}
+
+pub(crate) fn create_from_baselines(
+    case_root: &Path,
+    spec_file: &Path,
+    baselines: &Path,
+) -> Result<Manifest> {
+    create_with_baselines(case_root, spec_file, Some(baselines))
+}
+
+fn create_with_baselines(
+    case_root: &Path,
+    spec_file: &Path,
+    baselines: Option<&Path>,
+) -> Result<Manifest> {
     let case_root = colm_kernel::manifest::absolute(case_root)
         .with_context(|| format!("cannot resolve {}", case_root.display()))?;
+    let baselines = baselines.map(colm_kernel::manifest::absolute).transpose()?;
+    let baselines = baselines.as_deref();
     let mut spec = spec::read_spec(spec_file)?;
     spec::validate_spec(&spec)?;
     if let Some(kernel) = &spec.kernel_dir {
@@ -229,7 +242,7 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
                 .into_owned(),
         );
     }
-    let base_cases = base_cases(&case_root, &spec)?;
+    let base_cases = base_cases(baselines.unwrap_or(&case_root), &spec)?;
     spec.base_cases = base_cases
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -252,6 +265,9 @@ pub fn create(case_root: &Path, spec_file: &Path) -> Result<Manifest> {
     fs::create_dir_all(&studies_root)?;
     let (id, root) = create_unique_study_dir(&studies_root, &spec)?;
     let result = (|| {
+        if let Some(baselines) = baselines {
+            super::model::write_inputs(&root, baselines)?;
+        }
         fs::create_dir_all(root.join("samples"))?;
         let sample_file = write_samples(&root, &spec, &members)?;
         materialize(&root, &spec, &base_cases, &members)?;
@@ -400,14 +416,9 @@ pub(crate) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
         super::generation::verify_generation_hash(&path)?;
     }
 
-    let case_root = study_root
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .context("Study directory is not under <case-root>/.colm/studies")?;
     let fingerprint_kernel = manifest.spec.kernel_dir.as_deref().unwrap_or_default();
     for (site, expected) in &manifest.provenance.base_case_fingerprints {
-        let case_nml = case_root.join(site).join("case.nml");
+        let case_nml = super::model::base_case(manifest, site)?.join("case.nml");
         let fingerprint = crate::fingerprint::compute("colm", &case_nml, fingerprint_kernel)?;
         verify_hash(
             &format!("base case {site}"),
@@ -982,7 +993,7 @@ fn materialize(
     Ok(())
 }
 
-fn normalize_observations(
+pub(crate) fn normalize_observations(
     case_root: &Path,
     base_cases: &[PathBuf],
     spec: &mut StudySpec,
@@ -1201,6 +1212,82 @@ mod tests {
         fs::write(d.join("caseA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
         fs::write(d.join("caseA/site.nc"), b"site").unwrap();
         d
+    }
+
+    #[test]
+    fn model_baseline_is_frozen_before_sampling_and_original_case_is_untouched() {
+        let root = temp("frozen-overlay");
+        let store = colm_model::Registry::open(root.join("models")).unwrap();
+        let code = colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        };
+        let official = store.install_official(code.clone()).unwrap();
+        let original = fs::read(root.join("caseA/case.nml")).unwrap();
+        let mut overlay = colm_model::Overlay::default();
+        overlay
+            .parameters
+            .push(colm_model::ParameterOverrideRecord {
+                parameter_id: "case:DEF_TUNING_CNFAC".into(),
+                raw_key: "DEF_TUNING_CNFAC".into(),
+                scope_instance: colm_model::ParameterScopeInstance {
+                    kind: "case-scalar".into(),
+                    scheme: None,
+                    index: None,
+                    type_name: None,
+                    process_file: None,
+                },
+                value: "0.7".into(),
+                expected_old_value: None,
+                unit: None,
+            });
+        // Use the catalog's stable identifier, not its display field name.
+        overlay.parameters[0].parameter_id = colm_case::parameters::all()
+            .iter()
+            .find(|p| p.raw_key == "DEF_TUNING_CNFAC")
+            .unwrap()
+            .id
+            .clone();
+        store
+            .create_draft(colm_model::ModelDraft {
+                id: "selected".into(),
+                name: "Selected".into(),
+                note: "Verify the selected parameter baseline is frozen before sampling".into(),
+                parent: official.version,
+                code,
+                overlay,
+                applicability: Default::default(),
+                generation: 0,
+                derived_from: None,
+                created_unix: 0,
+            })
+            .unwrap();
+        let revision = store.freeze("selected", &root).unwrap();
+        let baselines = root.join("frozen");
+        fs::create_dir_all(&baselines).unwrap();
+        store
+            .materialize_run(
+                &revision.version,
+                &root.join("caseA"),
+                &baselines.join("caseA"),
+                "study-test",
+            )
+            .unwrap();
+        let manifest = create_from_baselines(&root, &spec(&root), &baselines).unwrap();
+        let baseline = manifest.members.iter().find(|m| m.baseline).unwrap();
+        assert_eq!(baseline.parameters["DEF_TUNING_CNFAC"], 0.7);
+        assert_eq!(fs::read(root.join("caseA/case.nml")).unwrap(), original);
+        fs::write(root.join("caseA/case.nml"), "edited after creation").unwrap();
+        verify_frozen_inputs(&manifest).unwrap();
+        fs::write(
+            baselines.join("caseA/case.nml"),
+            "corrupted frozen baseline",
+        )
+        .unwrap();
+        assert!(verify_frozen_inputs(&manifest).is_err());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

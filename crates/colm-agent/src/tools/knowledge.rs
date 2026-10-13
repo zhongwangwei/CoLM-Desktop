@@ -224,27 +224,52 @@ pub(crate) fn local_source(
     let mut args = vec!["ws-source-info".to_owned()];
     match name {
         Some(name) => args.extend(["--name".into(), name.into()]),
-        None => args.extend(["--source".into(), "app".into()]),
+        None => {
+            if let Some(model) = &ctx.model_context {
+                model.verify_source(ctx)?;
+                args.extend(["--source".into(), model.source_dir.display().to_string()]);
+            } else {
+                args.extend(["--source".into(), "app".into()]);
+            }
+        }
     }
     if let Some(root) = &ctx.workspace_root {
         args.extend(["--root".into(), root.display().to_string()]);
     }
-    let info = ctx.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let mut info = ctx.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
     let source = PathBuf::from(
         info["source"]
             .as_str()
             .context("source directory is unknown")?,
     );
     ensure!(source.is_absolute(), "source directory must be absolute");
-    let scope = json!({"kind":if name.is_some() {"workspace"} else {"app"},"name":name,"host":null,"source":source});
+    let scope = if name.is_none() {
+        if let Some(model) = &ctx.model_context {
+            ensure!(
+                info["content_sha256"] == model.model["code"]["source_sha256"],
+                "selected frozen source bytes changed"
+            );
+            ensure!(
+                source == model.source_dir,
+                "selected frozen source directory changed"
+            );
+            info["selected_model"] = model.model["version"].clone();
+            json!({"kind":"model","name":format!("{}@{}",model.model["version"]["id"].as_str().unwrap(),model.model["version"]["revision"].as_u64().unwrap()),"host":null,"source":source})
+        } else {
+            json!({"kind":"app","name":null,"host":null,"source":source})
+        }
+    } else {
+        json!({"kind":"workspace","name":name,"host":null,"source":source})
+    };
     Ok((scope, info))
 }
 
 pub(crate) fn bound_paths(ctx: &super::super::ToolContext) -> Result<Vec<String>> {
-    let docs = ctx
-        .docs_root
-        .as_ref()
-        .context("no documentation directory is configured")?;
+    let docs = match &ctx.model_context {
+        Some(model) => model.docs_dir.as_ref(),
+        None => ctx.docs_root.as_ref(),
+    }
+    .context("no documentation snapshot for the selected source is configured")?;
     let manifest: Value =
         serde_json::from_slice(&read(&docs.join("knowledge-sources.json"), 1024 * 1024)?)?;
     ensure!(manifest["schema"] == 1, "unknown knowledge binding schema");
@@ -321,14 +346,18 @@ pub(crate) fn snapshot(
         return Ok(result);
     }
     ensure!(
-        scope["kind"] == "app" || scope["kind"] == "workspace",
+        scope["kind"] == "app" || scope["kind"] == "workspace" || scope["kind"] == "model",
         "unknown knowledge scope"
     );
     ensure!(
-        (scope["kind"] == "workspace") == name.is_some(),
+        (scope["kind"] == "workspace" || scope["kind"] == "model") == name.is_some(),
         "workspace scope requires its name; app scope has no name"
     );
-    let (resolved, info) = local_source(ctx, name)?;
+    let (resolved, info) = local_source(ctx, if scope["kind"] == "model" { None } else { name })?;
+    ensure!(
+        resolved["kind"] == scope["kind"] && resolved["name"] == scope["name"],
+        "knowledge scope differs from the selected source"
+    );
     if let Some(source) = scope["source"].as_str() {
         ensure!(
             resolved["source"] == source,
@@ -354,6 +383,12 @@ pub(crate) fn snapshot(
         sources.push(json!({"path":relative,"sha256":digest(&bytes),"from_line":1,
             "excerpt_truncated":excerpt.len()<lines.len() || lines.iter().any(|line| line.chars().count()>200),
             "lines":excerpt,"total_lines":lines.len()}));
+    }
+    if scope["kind"] == "model" {
+        ctx.model_context
+            .as_ref()
+            .context("selected model context unavailable")?
+            .verify_source(ctx)?;
     }
     Ok(
         json!({"scope":resolved,"revision":info["revision"],"dirty":info["dirty"],"sources":sources}),

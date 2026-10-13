@@ -27,7 +27,8 @@ fn slurm_spec() -> Spec {
 #[test]
 fn job_scripts_detach_record_and_report() {
     let script = submit_script("/data/colm/", "j-1", "echo hi > out.txt", &Spec::bare()).unwrap();
-    assert!(script.contains("mkdir -p '/data/colm/jobs/j-1'"));
+    assert!(script.contains("mkdir -p '/data/colm/jobs'"));
+    assert!(script.contains("mkdir '/data/colm/jobs/j-1' ||"));
     assert!(script.contains("setsid nohup ./script.sh > log 2>&1 < /dev/null &"));
     assert!(script.contains("echo hi > out.txt") && script.contains("echo $? > exit_code"));
     assert!(!script.contains("#SBATCH"));
@@ -255,6 +256,25 @@ fn slurm_job_goes_queued_running_finished() {
 
 #[cfg(unix)]
 #[test]
+fn retrying_a_reserved_job_never_launches_it_twice() {
+    let sb = Sandbox::new("duplicate-submit");
+    let spec = slurm_spec();
+    let script = submit_script(&sb.work(), "once", "echo run", &spec).unwrap();
+    let (_, error, success) = sb.run(&script);
+    assert!(success, "{error}");
+    let original = std::fs::read(sb.job_dir("once").join("script.sh")).unwrap();
+    let (_, error, success) =
+        sb.run(&submit_script(&sb.work(), "once", "echo changed", &spec).unwrap());
+    assert!(!success);
+    assert!(error.contains("job identity already exists"));
+    assert_eq!(
+        std::fs::read(sb.job_dir("once").join("script.sh")).unwrap(),
+        original
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn slurm_job_the_scheduler_killed_is_lost_with_its_reason() {
     let sb = Sandbox::new("slurm-lost");
     let spec = slurm_spec();
@@ -271,7 +291,7 @@ fn slurm_job_the_scheduler_killed_is_lost_with_its_reason() {
 
 #[cfg(unix)]
 #[test]
-fn slurm_cancel_asks_the_scheduler_and_leaves_an_exit_code() {
+fn slurm_cancel_acceptance_does_not_forge_a_terminal_state() {
     let sb = Sandbox::new("slurm-cancel");
     let spec = slurm_spec();
     assert!(
@@ -281,10 +301,14 @@ fn slurm_cancel_asks_the_scheduler_and_leaves_an_exit_code() {
     sb.set("slurm_state", "PENDING\n");
     let (out, err, ok) = sb.run(&cancel_script(&sb.work(), "j-3"));
     assert!(ok, "{err}");
-    assert!(out.contains("cancelled"));
+    assert!(out.contains("cancellation_requested"));
     assert_eq!(sb.read("cancelled").trim(), "4242");
+    assert!(!sb.job_dir("j-3").join("exit_code").exists());
+    assert_eq!(sb.status("j-3").state, State::Queued);
+    sb.set("slurm_state", "RUNNING\n");
+    assert_eq!(sb.status("j-3").state, State::Running);
     sb.unset("slurm_state");
-    assert_eq!(sb.status("j-3").state, State::Finished { exit_code: 143 });
+    assert_eq!(sb.status("j-3").state, State::Lost);
 }
 
 #[cfg(unix)]
@@ -327,6 +351,7 @@ fn pbs_job_states_and_cancel() {
 
     assert!(sb.run(&cancel_script(&sb.work(), "j-5")).2);
     assert_eq!(sb.read("cancelled").trim(), "777.pbsserver");
+    assert!(!sb.job_dir("j-5").join("exit_code").exists());
 }
 
 #[cfg(unix)]
@@ -354,6 +379,7 @@ fn lsf_job_states_and_cancel() {
 
     assert!(sb.run(&cancel_script(&sb.work(), "j-6")).2);
     assert_eq!(sb.read("cancelled").trim(), "555");
+    assert!(!sb.job_dir("j-6").join("exit_code").exists());
 }
 
 #[test]
@@ -414,4 +440,17 @@ fn engine_markers_accept_source_and_prebuilt_and_refuse_injection() {
     ] {
         assert!(engine_body(id, "true").is_err());
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_bare_pid_cannot_cancel_an_unrelated_process() {
+    let sb = Sandbox::new("stale-bare-pid");
+    let dir = sb.job_dir("stale");
+    std::fs::create_dir_all(&dir).unwrap();
+    // Our test process cannot be this job's session leader with this job's cwd.
+    std::fs::write(dir.join("pid"), std::process::id().to_string()).unwrap();
+    let (_, error, ok) = sb.run(&format!("set -e\n{}", cancel_script(&sb.work(), "stale")));
+    assert!(!ok && error.contains("job process"), "{error}");
+    assert!(!dir.join("exit_code").exists());
 }

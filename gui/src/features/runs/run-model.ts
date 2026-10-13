@@ -1,0 +1,38 @@
+import {cropEnabled} from '../cases/case-model';
+import type {RunState} from '../../lib/types';
+export interface RunView {runId:string;casePath:string;status:string;lines:string[];stage?:string;step?:number;total?:number}
+export interface KernelChoice {dir:string;preset:string;macros:string[]}
+export function compatibleKernel<T extends KernelChoice>(kernels:T[],profile:{grid?:string|null;classification?:'IGBP'|'USGS';subgrid?:string;crop?:boolean},physics:Record<string,string>={}):T|undefined {
+ const grid=({latlon:'GRIDBASED',unstructured:'UNSTRUCTURED',catchment:'CATCHMENT'} as Record<string,string>)[profile.grid??'']??'SinglePoint';
+ const land=(profile.classification??(profile.subgrid==='USGS'?'USGS':'IGBP'))==='USGS'?'LULC_USGS':'LULC_IGBP';
+ const crop=profile.crop??cropEnabled(physics);
+ const matching=kernels.filter(k=>k.macros.includes(grid)&&k.macros.includes(land)&&k.macros.includes('CROP')===crop);
+ return matching.find(k=>k.preset===(crop?'crop':land==='LULC_USGS'?'usgs':'default'))??matching[0];
+}
+export function remoteSubmissionBlocked(record:unknown):boolean {
+ if(record==null)return false;
+ return !remoteRunPermissions(record).terminal;
+}
+
+export function remoteRunPermissions(value:unknown){
+ const data=value&&typeof value==='object'?value as Record<string,unknown>:{};
+ const record=data.record&&typeof data.record==='object'?data.record as Record<string,unknown>:data;
+ const status=data.status&&typeof data.status==='object'?data.status as Record<string,unknown>:{};
+ const pending=Boolean(data.pending||data.needs_reconciliation);
+ const confirmed=!pending&&data.record!==null&&typeof record.host==='string'&&typeof record.job==='string';
+ const terminal=confirmed&&status.state==='finished'&&Number.isInteger(status.exit_code);
+ return {pending,terminal,cancel:confirmed&&['queued','running'].includes(String(status.state)),fetch:terminal};
+}
+
+export function reconcileRemoteRun(previous:unknown,result:Record<string,unknown>){
+ const confirmed=Boolean(result.record&&typeof result.record==='object');
+ return {...(previous&&typeof previous==='object'?previous:{}),...result,...(confirmed?{pending:result.pending??false,needs_reconciliation:false}:{})};
+}
+
+export function restoreRunView(record:RunState|undefined,casePath:string):RunView|null {
+ if(!record)return null;
+ return {runId:record.run_id??record.operation_id??'',casePath,status:record.status,lines:record.logs,stage:typeof record.progress?.stage==='string'?record.progress.stage:undefined,step:typeof record.progress?.step==='number'?record.progress.step:undefined,total:typeof record.progress?.total_steps==='number'?record.progress.total_steps:undefined};
+}
+export function settleRuns(records:Record<string,RunState>,targets:string[],runId:string,success:boolean):Record<string,RunState> {
+ return {...records,...Object.fromEntries(targets.filter(dir=>records[dir]?.run_id===runId&&records[dir].running).map(dir=>[dir,{...records[dir],running:false,status:success?'succeeded':'failed'}]))};
+}

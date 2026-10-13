@@ -458,6 +458,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         }
     }
     super::engine::verify_frozen_inputs(&manifest)?;
+    super::model::verify_if_captured(&manifest)?;
     let checkpoint_dir = study_dir.join("checkpoints/state");
     let mut state = super::checkpoint::load_latest::<StudyState>(&checkpoint_dir)?
         .map(|loaded| loaded.payload)
@@ -940,6 +941,25 @@ fn remove_path_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn study_task_is_current(
+    manifest: &Manifest,
+    task: &super::state::TaskState,
+    kernel_id: &str,
+    rust_identities: &crate::RustPreprocessorIdentities,
+) -> bool {
+    crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities).unwrap_or(false)
+        && (!Path::new(&manifest.root)
+            .join(super::model::IDENTITY_FILE)
+            .is_file()
+            || verify_task_evidence(
+                manifest,
+                &task.member,
+                &task.site,
+                Path::new(&task.case_dir),
+            )
+            .is_ok())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_members(
     study_dir: &Path,
@@ -982,8 +1002,7 @@ fn run_members(
     {
         for task in state.tasks.values_mut() {
             let stale_success = task.status == TaskStatus::Succeeded
-                && !crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities)
-                    .unwrap_or(false);
+                && !study_task_is_current(manifest, task, kernel_id, rust_identities);
             if stale_success
                 && !retryable_task(
                     manifest,
@@ -1012,8 +1031,7 @@ fn run_members(
             continue;
         }
         let stale_success = task.status == TaskStatus::Succeeded
-            && !crate::case_is_current(Path::new(&task.case_dir), kernel_id, rust_identities)
-                .unwrap_or(false);
+            && !study_task_is_current(manifest, task, kernel_id, rust_identities);
         let waiting_for_tuning_baseline = manifest.spec.kind == StudyKind::Tuning
             && !baseline_tasks_succeeded(manifest, state)
             && task.member != "m000000";
@@ -1085,69 +1103,73 @@ fn run_members(
                 let event_member = member.clone();
                 let event_site = site.clone();
                 let mut last_task_log_emit = None;
-                let result = crate::run_case(
-                    &case_dir,
-                    &kernel_dir,
-                    stream,
-                    false,
-                    None,
-                    1,
-                    preprocessors,
-                    engine,
-                    None,
-                    None,
-                    true,
-                    &mut |notice| {
-                        let event = match notice {
-                            RunNotice::StageBegin(stage) => WorkerEvent::Notice {
-                                member: event_member.clone(),
-                                site: event_site.clone(),
-                                kind: "stage_started".into(),
-                                stage: stage.into(),
-                                line: None,
-                                ok: None,
-                            },
-                            RunNotice::StageSkipped(stage) => WorkerEvent::Notice {
-                                member: event_member.clone(),
-                                site: event_site.clone(),
-                                kind: "stage_skipped".into(),
-                                stage: stage.into(),
-                                line: None,
-                                ok: Some(true),
-                            },
-                            RunNotice::Log { stage, line } => {
-                                // The complete member log is already on disk. Sampling here,
-                                // before the unbounded scheduler channel, prevents parallel
-                                // CoLM chatter from exhausting memory while preserving live logs.
-                                if line.trim().is_empty()
-                                    || !should_emit_task_log(
-                                        &mut last_task_log_emit,
-                                        Instant::now(),
-                                    )
-                                {
-                                    return;
-                                }
-                                WorkerEvent::Notice {
+                let execution = begin_execution(manifest, &site, &case_dir);
+                let result = execution.and_then(|identity| {
+                    crate::run_case(
+                        &case_dir,
+                        &kernel_dir,
+                        stream,
+                        false,
+                        None,
+                        1,
+                        preprocessors,
+                        engine,
+                        None,
+                        None,
+                        true,
+                        &mut |notice| {
+                            let event = match notice {
+                                RunNotice::StageBegin(stage) => WorkerEvent::Notice {
                                     member: event_member.clone(),
                                     site: event_site.clone(),
-                                    kind: "task_log".into(),
+                                    kind: "stage_started".into(),
                                     stage: stage.into(),
-                                    line: Some(line.into()),
+                                    line: None,
                                     ok: None,
+                                },
+                                RunNotice::StageSkipped(stage) => WorkerEvent::Notice {
+                                    member: event_member.clone(),
+                                    site: event_site.clone(),
+                                    kind: "stage_skipped".into(),
+                                    stage: stage.into(),
+                                    line: None,
+                                    ok: Some(true),
+                                },
+                                RunNotice::Log { stage, line } => {
+                                    // The complete member log is already on disk. Sampling here,
+                                    // before the unbounded scheduler channel, prevents parallel
+                                    // CoLM chatter from exhausting memory while preserving live logs.
+                                    if line.trim().is_empty()
+                                        || !should_emit_task_log(
+                                            &mut last_task_log_emit,
+                                            Instant::now(),
+                                        )
+                                    {
+                                        return;
+                                    }
+                                    WorkerEvent::Notice {
+                                        member: event_member.clone(),
+                                        site: event_site.clone(),
+                                        kind: "task_log".into(),
+                                        stage: stage.into(),
+                                        line: Some(line.into()),
+                                        ok: None,
+                                    }
                                 }
-                            }
-                            RunNotice::StageDone { stage, ok } => WorkerEvent::Notice {
-                                member: event_member.clone(),
-                                site: event_site.clone(),
-                                kind: "stage_done".into(),
-                                stage: stage.into(),
-                                line: None,
-                                ok: Some(ok),
-                            },
-                        };
-                        let _ = event_tx.send(event);
-                    },
-                );
+                                RunNotice::StageDone { stage, ok } => WorkerEvent::Notice {
+                                    member: event_member.clone(),
+                                    site: event_site.clone(),
+                                    kind: "stage_done".into(),
+                                    stage: stage.into(),
+                                    line: None,
+                                    ok: Some(ok),
+                                },
+                            };
+                            let _ = event_tx.send(event);
+                        },
+                    )?;
+                    finish_execution(&case_dir, identity)
+                });
                 let _ = tx.send(WorkerEvent::Finished {
                     member,
                     site,
@@ -1284,7 +1306,339 @@ fn finish_task(
     Ok(())
 }
 
+const EXECUTION_IDENTITY_FILE: &str = "study-execution-identity.json";
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct ExecutionIdentity {
+    schema: u32,
+    inputs: crate::fingerprint::FullInputIdentity,
+    observation: Option<crate::fingerprint::FullInputFile>,
+    #[serde(default)]
+    file_stats: BTreeMap<PathBuf, String>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EvaluationIdentity {
+    schema: u32,
+    execution: ExecutionIdentity,
+    outputs: BTreeMap<String, crate::fingerprint::FullInputFile>,
+    result: crate::fingerprint::FullInputFile,
+}
+
+fn input_file_stats<'a>(
+    files: impl IntoIterator<Item = &'a crate::fingerprint::FullInputFile>,
+) -> Result<BTreeMap<PathBuf, String>> {
+    files
+        .into_iter()
+        .map(|file| {
+            Ok((
+                file.path.clone(),
+                crate::fingerprint::stable_file_identity(&fs::metadata(&file.path)?),
+            ))
+        })
+        .collect()
+}
+
+fn actual_execution(manifest: &Manifest, site: &str, case: &Path) -> Result<ExecutionIdentity> {
+    let inputs = crate::fingerprint::full_inputs(case)?;
+    let observation = manifest
+        .spec
+        .observations
+        .get(site)
+        .map(|path| crate::fingerprint::full_file(Path::new(path), "observation"))
+        .transpose()?;
+    let file_stats = input_file_stats(inputs.files.values().chain(observation.iter()))?;
+    Ok(ExecutionIdentity {
+        schema: 1,
+        inputs,
+        observation,
+        file_stats,
+    })
+}
+
+fn begin_execution(
+    manifest: &Manifest,
+    site: &str,
+    case: &Path,
+) -> Result<Option<ExecutionIdentity>> {
+    if !Path::new(&manifest.root)
+        .join(super::model::IDENTITY_FILE)
+        .is_file()
+    {
+        return Ok(None);
+    }
+    let path = case.join(EXECUTION_IDENTITY_FILE);
+    match fs::remove_file(path) {
+        Ok(()) => (),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    // Sampled legacy stage marks cannot certify a new full-content execution.
+    crate::fingerprint::save(case, &BTreeMap::new())?;
+    let identity = actual_execution(manifest, site, case)?;
+    let creation: super::model::StudyInputIdentity = serde_json::from_slice(&fs::read(
+        Path::new(&manifest.root).join(super::model::IDENTITY_FILE),
+    )?)?;
+    let baseline = creation
+        .base_cases
+        .get(site)
+        .context("Study site has no creation input identity")?;
+    anyhow::ensure!(
+        baseline.complete
+            && identity.inputs.complete
+            && baseline.data_sha256.is_some()
+            && baseline.data_sha256 == identity.inputs.data_sha256,
+        "Study member data differs from its frozen baseline"
+    );
+    anyhow::ensure!(
+        identity.observation == creation.observations.get(site).cloned(),
+        "Study observations changed since creation"
+    );
+    Ok(Some(identity))
+}
+
+fn finish_execution(case: &Path, expected: Option<ExecutionIdentity>) -> Result<()> {
+    if let Some(expected) = expected {
+        anyhow::ensure!(
+            expected.inputs == crate::fingerprint::full_inputs(case)?,
+            "Study scientific inputs changed during execution"
+        );
+        if let Some(observation) = &expected.observation {
+            anyhow::ensure!(
+                *observation == crate::fingerprint::full_file(&observation.path, "observation")?,
+                "Study observations changed during execution"
+            );
+        }
+        anyhow::ensure!(
+            expected.file_stats
+                == input_file_stats(
+                    expected
+                        .inputs
+                        .files
+                        .values()
+                        .chain(expected.observation.iter())
+                )?,
+            "Study input files changed during execution, including a restored payload"
+        );
+        write_json(&case.join(EXECUTION_IDENTITY_FILE), &expected)?;
+    }
+    Ok(())
+}
+
+fn history_identity(case: &Path) -> Result<BTreeMap<String, crate::fingerprint::FullInputFile>> {
+    let layout = Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let files = crate::history_files(&layout.out().join(&name))?;
+    files
+        .into_iter()
+        .map(|path| {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .context("invalid history filename")?
+                .to_owned();
+            Ok((name, crate::fingerprint::full_file(&path, "output")?))
+        })
+        .collect()
+}
+
+type EvaluationEvidence = (
+    ExecutionIdentity,
+    BTreeMap<String, crate::fingerprint::FullInputFile>,
+    BTreeMap<PathBuf, String>,
+);
+
+fn before_evaluation(
+    manifest: &Manifest,
+    site: &str,
+    case: &Path,
+) -> Result<Option<EvaluationEvidence>> {
+    if !Path::new(&manifest.root)
+        .join(super::model::IDENTITY_FILE)
+        .is_file()
+    {
+        return Ok(None);
+    }
+    let expected: ExecutionIdentity = serde_json::from_slice(
+        &fs::read(case.join(EXECUTION_IDENTITY_FILE))
+            .context("Study task has no completed full-input execution evidence")?,
+    )?;
+    anyhow::ensure!(
+        expected.schema == 1 && expected == actual_execution(manifest, site, case)?,
+        "Study task inputs or observations changed before evaluation"
+    );
+    let outputs = history_identity(case)?;
+    let output_stats = input_file_stats(outputs.values())?;
+    Ok(Some((expected, outputs, output_stats)))
+}
+
+fn evaluation_identity_path(manifest: &Manifest, member: &str, site: &str) -> PathBuf {
+    Path::new(&manifest.root)
+        .join("results/provenance")
+        .join(member)
+        .join(format!("{site}.json"))
+}
+
+/// A cached objective is usable only while its full inputs, observations and raw outputs still match.
+pub(crate) fn verify_member_evidence(
+    manifest: &Manifest,
+    state: &StudyState,
+    member: &str,
+) -> Result<()> {
+    for site in &manifest.spec.base_cases {
+        let task = state
+            .tasks
+            .get(&super::state::task_id(member, site))
+            .context("Study member has no task")?;
+        anyhow::ensure!(
+            task.status == TaskStatus::Succeeded,
+            "Study member task did not succeed"
+        );
+        let expected = Path::new(&manifest.root)
+            .join("members")
+            .join(member)
+            .join(site);
+        anyhow::ensure!(
+            expected.canonicalize()? == Path::new(&task.case_dir).canonicalize()?,
+            "Study task directory differs from its frozen member location"
+        );
+        verify_task_evidence(manifest, member, site, Path::new(&task.case_dir))?;
+    }
+    let mut recalculated = state.clone();
+    refresh_candidates(
+        manifest,
+        &super::generation::load_members(manifest)?,
+        &mut recalculated,
+    )?;
+    let recorded = state
+        .candidates
+        .get(member)
+        .context("Study member has no recorded candidate objective")?;
+    let actual = recalculated
+        .candidates
+        .get(member)
+        .context("Study member objective cannot be recalculated")?;
+    anyhow::ensure!(
+        recorded.feasible
+            && actual.feasible
+            && recorded.calibration == actual.calibration
+            && recorded.validation == actual.validation,
+        "Study candidate score differs from its verified evaluation results"
+    );
+    Ok(())
+}
+
+/// Stat guards span the whole comparison; every payload is still fully hashed by the verifier.
+pub(crate) fn evidence_file_snapshot(
+    manifest: &Manifest,
+    state: &StudyState,
+    members: &[&str],
+) -> Result<BTreeMap<PathBuf, String>> {
+    let root = Path::new(&manifest.root);
+    let identity_path = root.join(super::model::IDENTITY_FILE);
+    let inputs: super::model::StudyInputIdentity =
+        serde_json::from_slice(&fs::read(&identity_path)?)?;
+    let mut paths = BTreeSet::from([identity_path, root.join("manifest.json")]);
+    if root.join(crate::study_version::FILE).is_file() {
+        paths.insert(root.join(crate::study_version::FILE));
+    }
+    for file in inputs
+        .base_cases
+        .values()
+        .flat_map(|input| input.files.values())
+        .chain(inputs.observations.values())
+    {
+        paths.insert(file.path.clone());
+    }
+    for member in members {
+        for site in &manifest.spec.base_cases {
+            let task = state
+                .tasks
+                .get(&super::state::task_id(member, site))
+                .context("Study member has no task")?;
+            let proof_path = evaluation_identity_path(manifest, member, site);
+            let proof: EvaluationIdentity = serde_json::from_slice(&fs::read(&proof_path)?)?;
+            paths.insert(proof_path);
+            paths.insert(task_result_path(manifest, member, site));
+            for file in proof
+                .execution
+                .inputs
+                .files
+                .values()
+                .chain(proof.execution.observation.iter())
+            {
+                paths.insert(file.path.clone());
+            }
+            let layout = Layout::new(Path::new(&task.case_dir));
+            let name = colm_case::case_name(&layout.case_nml())?;
+            paths.extend(crate::history_files(&layout.out().join(&name))?);
+        }
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let metadata = fs::metadata(&path)?;
+            anyhow::ensure!(
+                metadata.is_file(),
+                "Study proof dependency is not a regular file"
+            );
+            Ok((path, crate::fingerprint::stable_file_identity(&metadata)))
+        })
+        .collect()
+}
+
+fn verify_task_evidence(manifest: &Manifest, member: &str, site: &str, case: &Path) -> Result<()> {
+    let evidence: EvaluationIdentity = serde_json::from_slice(
+        &fs::read(evaluation_identity_path(manifest, member, site))
+            .context("Study member lacks full-content evaluation evidence")?,
+    )?;
+    anyhow::ensure!(
+        evidence.schema == 1,
+        "unsupported Study evaluation identity schema"
+    );
+    let actual = actual_execution(manifest, site, case)?;
+    anyhow::ensure!(
+        crate::fingerprint::same_payloads(&evidence.execution.inputs, &actual.inputs),
+        "Study member scientific inputs changed after evaluation"
+    );
+    let same_observation = match (&evidence.execution.observation, &actual.observation) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.sha256 == b.sha256 && a.bytes == b.bytes,
+        _ => false,
+    };
+    anyhow::ensure!(
+        same_observation,
+        "Study member observations changed after evaluation"
+    );
+    let actual_outputs = history_identity(case)?;
+    anyhow::ensure!(
+        same_file_contents(&evidence.outputs, &actual_outputs),
+        "Study raw history output changed after evaluation"
+    );
+    let result =
+        crate::fingerprint::full_file(&task_result_path(manifest, member, site), "evaluation")?;
+    anyhow::ensure!(
+        result.sha256 == evidence.result.sha256 && result.bytes == evidence.result.bytes,
+        "Study evaluation result changed after it was computed"
+    );
+    read_task_result(manifest, member, site)?;
+    Ok(())
+}
+
+fn same_file_contents(
+    a: &BTreeMap<String, crate::fingerprint::FullInputFile>,
+    b: &BTreeMap<String, crate::fingerprint::FullInputFile>,
+) -> bool {
+    !a.is_empty()
+        && a.len() == b.len()
+        && a.iter().all(|(name, left)| {
+            b.get(name)
+                .is_some_and(|right| left.sha256 == right.sha256 && left.bytes == right.bytes)
+        })
+}
+
 fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> Result<TaskResult> {
+    let evidence = before_evaluation(manifest, site, case)?;
     let mut result = TaskResult {
         member: member.into(),
         site: site.into(),
@@ -1368,7 +1722,29 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
             }
         }
     }
-    write_json(&task_result_path(manifest, member, site), &result)?;
+    let result_path = task_result_path(manifest, member, site);
+    write_json(&result_path, &result)?;
+    if let Some((execution, outputs, output_stats)) = evidence {
+        anyhow::ensure!(
+            execution == actual_execution(manifest, site, case)?,
+            "Study inputs or observations changed during evaluation"
+        );
+        anyhow::ensure!(
+            outputs == history_identity(case)?,
+            "Study history outputs changed during evaluation"
+        );
+        anyhow::ensure!(
+            output_stats == input_file_stats(outputs.values())?,
+            "Study history output files changed during evaluation, including a restored payload"
+        );
+        let evidence = EvaluationIdentity {
+            schema: 1,
+            execution,
+            outputs,
+            result: crate::fingerprint::full_file(&result_path, "evaluation")?,
+        };
+        write_json(&evaluation_identity_path(manifest, member, site), &evidence)?;
+    }
     Ok(result)
 }
 
@@ -2542,7 +2918,6 @@ pub fn apply(
     super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let member = resolve_apply_member(&study_dir, &manifest, member_id)?;
-    let case_root = study_case_root(&manifest)?;
     let values = member
         .parameters
         .iter()
@@ -2613,7 +2988,7 @@ pub fn apply(
             .zip(&destinations)
             .zip(&staged)
         {
-            let baseline = case_root.join(site);
+            let baseline = super::model::base_case(&manifest, site)?;
             let before = sha256(&fs::read(baseline.join("case.nml"))?);
             let case_name = if manifest.spec.base_cases.len() == 1 {
                 name.map(str::to_string)
@@ -2705,10 +3080,9 @@ pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPrevi
     super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let member = resolve_apply_member(study_dir, &manifest, member_id)?;
-    let case_root = study_case_root(&manifest)?;
     let mut rows = Vec::new();
     for site in &manifest.spec.base_cases {
-        let file = case_root.join(site).join("case.nml");
+        let file = super::model::base_case(&manifest, site)?.join("case.nml");
         let document = colm_namelist::parse(&fs::read_to_string(&file)?)?;
         let weights = member
             .parameters
@@ -2718,8 +3092,7 @@ pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPrevi
         if let (Some(hybrid), true) = (&manifest.spec.hybrid, weights > 0) {
             rows.push(ApplyPreviewRow {
                 site: site.clone(),
-                file: case_root
-                    .join(site)
+                file: super::model::base_case(&manifest, site)?
                     .join("hybrid.toml")
                     .to_string_lossy()
                     .into_owned(),
@@ -3065,6 +3438,146 @@ fn unix_now() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Export an evaluated member as a model revision without editing its source cases.
+pub(crate) fn save_version(
+    study_dir: &Path,
+    member_id: &str,
+    opts: &crate::Opts,
+) -> Result<colm_model::FrozenRevision> {
+    let study_dir = colm_kernel::manifest::absolute(study_dir)?;
+    clear_stale_run_lock(&study_dir)?;
+    let _lock = StudyRunLock::acquire(&study_dir)?;
+    let manifest = super::engine::status(&study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
+    super::engine::verify_frozen_inputs(&manifest)?;
+    let member = resolve_apply_member(&study_dir, &manifest, member_id)?;
+    let input_identity = super::model::verified_inputs(&manifest)?;
+    let evidence_state =
+        status_state(&study_dir)?.context("Study has no evaluated member state")?;
+    verify_member_evidence(&manifest, &evidence_state, &member.id)?;
+    let store = crate::model_version::registry(opts)?;
+    let pin = crate::study_version::pinned(&study_dir)?;
+    if pin.as_ref().is_some_and(|p| p.model_revision.is_none()) {
+        bail!("legacy workspace Study has no frozen model revision; create a Study with a model revision before saving a model version");
+    }
+    let pinned = pin.and_then(|p| p.model_revision);
+    let requested = crate::model_version::selected(opts)?;
+    if let (Some(pinned), Some(requested)) = (&pinned, &requested) {
+        if pinned.version != *requested {
+            bail!("cannot export a Study against another model revision");
+        }
+    }
+    let parent = match pinned {
+        Some(revision) => revision,
+        None => match requested {
+            Some(version) => store.get(&version)?,
+            None => store.install_official(crate::model_version::code(opts, None)?)?,
+        },
+    };
+    let first = manifest
+        .spec
+        .base_cases
+        .first()
+        .context("Study has no base cases")?;
+    let staging = store.root().join(format!(
+        ".study-export-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    let values = member
+        .parameters
+        .iter()
+        .map(|(name, value)| (name.clone(), *value))
+        .collect::<Vec<_>>();
+    let result = (|| -> Result<colm_model::FrozenRevision> {
+        super::materialize::member_case(
+            &super::model::base_case(&manifest, first)?,
+            &staging,
+            "model-export",
+            "calibrated",
+            &values,
+        )?;
+        super::hybrid::write_member_files(&staging, &manifest.spec, &member.parameters)?;
+        let binding = store.migrate_case(&staging, parent.code.clone())?;
+        let migrated = store.get(&binding.version)?;
+        let id = format!(
+            "study-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        let metrics =
+            status_state(&study_dir)?.and_then(|state| state.candidates.get(&member.id).cloned());
+        let note = serde_json::json!({
+            "note": opts.get("--note").unwrap_or_default(),
+            "study": study_dir, "member": member.id,
+            "sites": manifest.spec.base_cases, "targets": manifest.spec.targets,
+            "metrics": metrics,
+            "input_provenance": {
+                "manifest": study_dir.join(super::model::IDENTITY_FILE),
+                "manifest_sha256": crate::fingerprint::full_file(&study_dir.join(super::model::IDENTITY_FILE), "provenance")?.sha256,
+                "data_sha256": input_identity.base_cases.iter().map(|(site, identity)| (site, &identity.data_sha256)).collect::<BTreeMap<_, _>>(),
+                "observation_sha256": input_identity.observations.iter().map(|(site, file)| (site, &file.sha256)).collect::<BTreeMap<_, _>>(),
+            },
+        })
+        .to_string();
+        let calibration = manifest
+            .spec
+            .targets
+            .iter()
+            .map(|t| (t.from, t.to))
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let validation = manifest
+            .spec
+            .targets
+            .iter()
+            .filter_map(|t| Some((t.validation_from?, t.validation_to?)))
+            .reduce(|a, b| (a.0.min(b.0), a.1.max(b.1)));
+        let period = |p: (i64, i64)| colm_model::Period {
+            start: crate::unix_date(p.0),
+            end: crate::unix_date(p.1),
+        };
+        store.create_draft(colm_model::ModelDraft {
+            id: id.clone(),
+            name: opts.need_str("--name")?,
+            note,
+            parent: parent.version,
+            code: parent.code,
+            overlay: migrated.overlay,
+            applicability: colm_model::Applicability {
+                sites: manifest.spec.base_cases.clone(),
+                calibration: calibration.map(period),
+                validation: validation.map(period),
+                ..Default::default()
+            },
+            generation: 0,
+            created_unix: 0,
+            derived_from: Some(format!(
+                "study:{}/member:{}",
+                study_dir.display(),
+                member.id
+            )),
+        })?;
+        store.freeze(
+            &id,
+            &store
+                .root()
+                .join("versions")
+                .join(&binding.version.id)
+                .join(binding.version.revision.to_string()),
+        )
+    })();
+    if staging.exists() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -5530,6 +6043,78 @@ esac
             .to_string_lossy()
             .starts_with(".colm-study-apply-")));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn evaluation_evidence_rejects_changed_raw_history_and_observations() {
+        let root = std::env::temp_dir().join(format!(
+            "study-evidence-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let case = root.join("caseA");
+        let study = root.join(".colm/studies/identity");
+        fs::create_dir_all(case.join("out/caseA/history")).unwrap();
+        fs::create_dir_all(&study).unwrap();
+        fs::write(case.join("case.nml"), "&nl_colm\nDEF_CASE_NAME='caseA'\nSITE_fsitedata='site.nc'\nDEF_forcing_namelist='forcing.nml'\n/\n").unwrap();
+        fs::write(
+            case.join("forcing.nml"),
+            "&nl_colm_forcing\nDEF_dir_forcing='.'\nDEF_forcing_fprefix='forcing.nc'\n/\n",
+        )
+        .unwrap();
+        fs::write(case.join("site.nc"), b"site").unwrap();
+        fs::write(case.join("forcing.nc"), b"forcing").unwrap();
+        fs::write(root.join("obs.nc"), b"observations").unwrap();
+        let history = case.join("out/caseA/history/caseA_hist_2000-01.nc");
+        let mut bytes = vec![0_u8; 256 * 1024];
+        fs::write(&history, &bytes).unwrap();
+        let manifest: Manifest = serde_json::from_value(serde_json::json!({
+            "schema_version":1,"id":"identity","root":study,"created_unix":0,
+            "spec":{"kind":"uncertainty","method":"oat","base_cases":["caseA"],"parameters":[],"outputs":["f_tref"],"observations":{"caseA":root.join("obs.nc")}},
+            "members":[],
+        })).unwrap();
+        let result = TaskResult {
+            member: "m1".into(),
+            site: "caseA".into(),
+            outputs: Vec::new(),
+            calibration: Vec::new(),
+            validation: Vec::new(),
+            validation_errors: Vec::new(),
+        };
+        let result_path = task_result_path(&manifest, "m1", "caseA");
+        write_json(&result_path, &result).unwrap();
+        let proof = EvaluationIdentity {
+            schema: 1,
+            execution: actual_execution(&manifest, "caseA", &case).unwrap(),
+            outputs: history_identity(&case).unwrap(),
+            result: crate::fingerprint::full_file(&result_path, "evaluation").unwrap(),
+        };
+        write_json(&evaluation_identity_path(&manifest, "m1", "caseA"), &proof).unwrap();
+        verify_task_evidence(&manifest, "m1", "caseA", &case).unwrap();
+        let execution = actual_execution(&manifest, "caseA", &case).unwrap();
+        fs::write(case.join("forcing.nc"), b"temporary forcing change").unwrap();
+        fs::write(case.join("forcing.nc"), b"forcing").unwrap();
+        assert!(finish_execution(&case, Some(execution))
+            .unwrap_err()
+            .to_string()
+            .contains("restored payload"));
+        bytes[128 * 1024] = 1;
+        fs::write(&history, &bytes).unwrap();
+        assert!(verify_task_evidence(&manifest, "m1", "caseA", &case)
+            .unwrap_err()
+            .to_string()
+            .contains("history output changed"));
+        bytes[128 * 1024] = 0;
+        fs::write(&history, &bytes).unwrap();
+        fs::write(root.join("obs.nc"), b"other values").unwrap();
+        assert!(verify_task_evidence(&manifest, "m1", "caseA", &case)
+            .unwrap_err()
+            .to_string()
+            .contains("observations changed"));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

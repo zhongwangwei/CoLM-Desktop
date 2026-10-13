@@ -771,9 +771,45 @@ fn stage_headings_name_the_step_in_plain_words() {
 #[test]
 fn hybrid_commands_forward_case_kernel_and_install_options() {
     assert_eq!(
-        hybrid_check_args("/case".into(), "/kernel".into()),
+        hybrid_check_args("/case".into(), "/kernel".into(), None, None).unwrap(),
         ["hybrid-check", "/case", "--kernel", "/kernel"]
     );
+    let revision = colm_model::VersionRef {
+        id: "old-workspace".into(),
+        revision: 1,
+    };
+    let selected = hybrid_check_args(
+        "/case".into(),
+        "/kernel".into(),
+        Some(&revision),
+        Some("fortran"),
+    )
+    .unwrap();
+    assert_eq!(
+        &selected[..4],
+        ["model-hybrid-check", "/case", "--kernel", "/kernel"]
+    );
+    assert!(selected
+        .windows(4)
+        .any(|flags| flags == ["--model-id", "old-workspace", "--model-revision", "1"]));
+    assert!(selected.ends_with(&["--preprocessors".into(), "fortran".into()]));
+    assert!(hybrid_check_args(
+        "/case".into(),
+        "/kernel".into(),
+        Some(&revision),
+        Some("app")
+    )
+    .is_err());
+    assert!(hybrid_check_args(
+        "/case".into(),
+        "/kernel".into(),
+        Some(&colm_model::VersionRef {
+            id: "old-workspace".into(),
+            revision: 0
+        }),
+        None
+    )
+    .is_err());
     assert_eq!(
         hybrid_climate_args("/case".into(), "/kernel".into()),
         ["hybrid-climate", "/case", "--kernel", "/kernel"]
@@ -897,4 +933,107 @@ fn study_runs_only_name_a_modified_version() {
     assert!(validate_model_version(Some("snow")).is_ok());
     assert!(validate_model_version(Some("official")).is_ok());
     assert!(validate_model_version(Some("../x")).is_err());
+}
+
+#[test]
+fn explicit_preprocessor_preserves_default_and_rejects_unknown_backend() {
+    let mut args = vec!["run".to_string()];
+    super::add_preprocessors(&mut args, None).unwrap();
+    assert_eq!(args, ["run"]);
+    super::add_preprocessors(&mut args, Some("fortran")).unwrap();
+    assert_eq!(args, ["run", "--preprocessors", "fortran"]);
+    let previous = args.clone();
+    assert!(super::add_preprocessors(&mut args, Some("shell-command")).is_err());
+    assert_eq!(args, previous);
+}
+
+#[test]
+fn crop_detection_accepts_case_insensitive_frozen_parameter_keys() {
+    assert!(super::is_crop_case(&[crate::config::FieldChange {
+        path: "def_tuning_crop_planting_day".into(),
+        value: "120".into(),
+    }]));
+}
+fn verified_comparison_fixture(version: &str, observation_sha: &str) -> VerifiedStudySide {
+    serde_json::from_value(serde_json::json!({
+        "schema":1,
+        "side":{"study":"/project/.colm/studies/a","version":version,"head":null,"status":"completed","best_member":"candidate","calibration":2.0,"validation":1.0,"baseline_calibration":3.0,"baseline_validation":2.0},
+        "spec":{"kernel_dir":"/local/kernel","observations":{"site":"/local/obs.nc"},"base_cases":["site"],"parameters":["p"],"seed":1,"targets":["Qle"]},
+        "input_identity":{"schema":1,"base_cases":{"site":{"schema":1,"algorithm":"sha256-full-v1","complete":true,"data_sha256":"11".repeat(32),"data_settings":{"period":"same"},"unresolved":[],"files":{"data":{"path":"/local/input.nc","sha256":"11".repeat(32),"category":"data","bytes":100},"model":{"path":"/local/model.nml","sha256":version,"category":"model","bytes":100}}}},"observations":{"site":{"path":"/local/obs.nc","sha256":observation_sha,"bytes":100,"category":"observation"}}},
+        "verified":true,"notes":[]
+    })).unwrap()
+}
+
+#[test]
+fn study_comparison_allows_relocated_data_and_different_model_parameters() {
+    let a = verified_comparison_fixture("version-a", &"aa".repeat(32));
+    let mut b = verified_comparison_fixture("version-b", &"aa".repeat(32));
+    b.spec["kernel_dir"] = serde_json::json!("/server/kernel");
+    b.spec["observations"]["site"] = serde_json::json!("/server/obs.nc");
+    b.input_identity.as_mut().unwrap()["base_cases"]["site"]["files"]["data"]["path"] =
+        serde_json::json!("/server/input.nc");
+    b.input_identity.as_mut().unwrap()["observations"]["site"]["path"] =
+        serde_json::json!("/server/obs.nc");
+    b.side.validation = Some(2.0);
+    let result = compare_verified_study_sides(a, b).unwrap();
+    assert_eq!(result["same_design"], true);
+    assert_eq!(result["same_inputs"], true);
+    assert_eq!(result["better"], "a");
+    assert_eq!(result["period"], "validation");
+}
+
+#[test]
+fn study_comparison_never_ranks_changed_or_unverified_evidence() {
+    for change in [
+        "observation",
+        "data",
+        "settings",
+        "partial",
+        "unverified",
+        "design",
+    ] {
+        let a = verified_comparison_fixture("version-a", &"aa".repeat(32));
+        let mut b = verified_comparison_fixture("version-b", &"aa".repeat(32));
+        match change {
+            "observation" => {
+                b.input_identity.as_mut().unwrap()["observations"]["site"]["sha256"] =
+                    serde_json::json!("bb".repeat(32))
+            }
+            "data" => {
+                b.input_identity.as_mut().unwrap()["base_cases"]["site"]["data_sha256"] =
+                    serde_json::json!("bb".repeat(32))
+            }
+            "settings" => {
+                b.input_identity.as_mut().unwrap()["base_cases"]["site"]["data_settings"]
+                    ["period"] = serde_json::json!("different")
+            }
+            "partial" => {
+                b.input_identity.as_mut().unwrap()["base_cases"]["site"]["complete"] =
+                    serde_json::json!(false)
+            }
+            "unverified" => b.verified = false,
+            "design" => b.spec["seed"] = serde_json::json!(2),
+            _ => unreachable!(),
+        }
+        b.side.validation = Some(2.0);
+        let result = compare_verified_study_sides(a, b).unwrap();
+        assert!(result["better"].is_null(), "{change}: {result}");
+    }
+}
+
+#[test]
+fn study_comparison_uses_only_finite_scores_and_labels_missing_validation() {
+    let mut a = verified_comparison_fixture("version-a", &"aa".repeat(32));
+    let mut b = verified_comparison_fixture("version-b", &"aa".repeat(32));
+    a.side.validation = None;
+    b.side.validation = None;
+    a.side.calibration = Some(f64::INFINITY);
+    let result = compare_verified_study_sides(a, b).unwrap();
+    assert!(result["better"].is_null());
+    assert_eq!(result["period"], "calibration");
+    assert!(result["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("independent validation")));
 }

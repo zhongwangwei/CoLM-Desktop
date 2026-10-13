@@ -3,24 +3,22 @@
 //! Tauri 的 `bundle.externalBin` 要求文件名带**目标三元组**后缀
 //! （`colm-cli-aarch64-apple-darwin`），打包时它按当前目标去找。
 //!
-//! 这一步用 xtask 做而不是 Node 脚本：EarthMesh 用 Node 是因为它本来就有
-//! 前端工具链，本项目一处都没有，不该为一个拷贝动作引入第二套工具链。
-//!
-//! **不做「先拷成临时副本再跑」那个变通。** EarthMesh 需要它是因为它的静态
-//! netcdf 二进制在源码树里运行会被 SIGKILL；本项目实测没有这个问题 ——
-//! `target/debug/colm-cli` 直接跑正常，动态依赖只剩 `libiconv` 与 `libSystem`
-//! 两个系统库。复现不出来的问题不该先写变通。
+//! 源码与程序摘要一起暂存，拒绝把尚未编译的编辑声明为已运行版本。
 
-use std::path::Path;
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
 pub fn stage(root: &Path) -> Result<()> {
     let triple = host_triple()?;
+    let source_before = colm_remote::engine::source_content_sha256(root)?;
     println!("building desktop sidecars --release for {triple}");
     // `cargo build -p A -p B --bin x` selects only the named binaries, not
     // every default binary from A and B.  Build each required sidecar directly.
+    let mut built = Vec::new();
     for (package, binary) in [
         ("colm-cli", "colm-cli"),
         ("colm-srfdata", "mksrfdata-rs"),
@@ -29,44 +27,117 @@ pub fn stage(root: &Path) -> Result<()> {
         ("colm-agent", "colm-agent"),
         ("colm-agent", "colm-mcp"),
     ] {
-        let status = Command::new("cargo")
-            .args(["build", "--release", "-p", package, "--bin", binary])
-            .current_dir(root)
-            .status()
-            .context("cannot run cargo")?;
-        if !status.success() {
-            bail!("cargo build -p {package} --bin {binary} failed");
-        }
+        built.push((binary, build_sidecar(root, package, binary)?));
     }
+
+    if colm_remote::engine::source_content_sha256(root)? != source_before {
+        bail!("engine source changed during compilation; rebuild before staging");
+    }
+    let bin_dir = built[0].1.parent().context("built CLI has no parent")?;
+    if built.iter().any(|(_, path)| path.parent() != Some(bin_dir)) {
+        bail!("desktop sidecars must be built into the same program directory");
+    }
+    write_build_stamp(bin_dir, &source_before)?;
 
     let ext = if cfg!(windows) { ".exe" } else { "" };
     let dir = root.join("gui/src-tauri/binaries");
     std::fs::create_dir_all(&dir)?;
-    for name in [
-        "colm-cli",
-        "mksrfdata-rs",
-        "mkinidata-rs",
-        "colm-rs",
-        "colm-agent",
-        "colm-mcp",
-    ] {
-        let src = root.join("target/release").join(format!("{name}{ext}"));
+    for (name, src) in &built {
         if !src.is_file() {
             bail!("built but {} is missing", src.display());
         }
         let dst = dir.join(format!("{name}-{triple}{ext}"));
-        std::fs::copy(&src, &dst).with_context(|| format!("cannot copy to {}", dst.display()))?;
+        std::fs::copy(src, &dst).with_context(|| format!("cannot copy to {}", dst.display()))?;
         let size = std::fs::metadata(&dst)?.len();
         println!("staged {} ({:.1} MB)", dst.display(), size as f64 / 1e6);
     }
-    pack_engine_source(root, ext)
+    std::fs::copy(
+        bin_dir.join("colm-build-source.json"),
+        dir.join("colm-build-source.json"),
+    )?;
+    pack_engine_source(root, &built[0].1)?;
+    if colm_remote::engine::source_content_sha256(root)? != source_before {
+        bail!("engine source changed during staging; rebuild before packaging");
+    }
+    Ok(())
+}
+
+fn built_executable(message: &serde_json::Value, binary: &str) -> Option<PathBuf> {
+    (message["reason"] == "compiler-artifact"
+        && message["target"]["name"] == binary
+        && message["target"]["kind"]
+            .as_array()?
+            .iter()
+            .any(|kind| kind == "bin"))
+    .then(|| message["executable"].as_str().map(PathBuf::from))
+    .flatten()
+}
+
+fn build_sidecar(root: &Path, package: &str, binary: &str) -> Result<PathBuf> {
+    let mut child = Command::new("cargo")
+        .args([
+            "build",
+            "--release",
+            "-p",
+            package,
+            "--bin",
+            binary,
+            "--message-format=json-render-diagnostics",
+        ])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .spawn()
+        .context("cannot run cargo")?;
+    let stdout = child.stdout.take().context("cargo stdout is missing")?;
+    let mut executable = None;
+    for line in BufReader::new(stdout).lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error.into());
+            }
+        };
+        if let Ok(message) = serde_json::from_str(&line) {
+            if let Some(path) = built_executable(&message, binary) {
+                executable = Some(path);
+            }
+        }
+    }
+    if !child.wait()?.success() {
+        bail!("cargo build -p {package} --bin {binary} failed");
+    }
+    executable.context("Cargo did not report the executable it built")
+}
+
+fn write_build_stamp(dir: &Path, source_sha256: &str) -> Result<()> {
+    let ext = if cfg!(windows) { ".exe" } else { "" };
+    let mut programs = serde_json::Map::new();
+    for (_, name) in colm_remote::engine::BINARIES {
+        let mut file = std::fs::File::open(dir.join(format!("{name}{ext}")))?;
+        let mut hasher = Sha256::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        programs.insert(name.into(), format!("{:x}", hasher.finalize()).into());
+    }
+    let stamp =
+        serde_json::json!({"schema":1,"source_sha256":source_sha256,"program_sha256":programs});
+    let temp = dir.join(format!(".colm-build-source-{}.json", std::process::id()));
+    std::fs::write(&temp, serde_json::to_vec_pretty(&stamp)?)?;
+    let destination = dir.join("colm-build-source.json");
+    // Windows rename cannot replace an existing destination; an absent stamp rejects registration safely.
+    if cfg!(windows) && destination.exists() {
+        std::fs::remove_file(&destination)?;
+    }
+    std::fs::rename(temp, destination)?;
+    Ok(())
 }
 
 /// 远程运行要把引擎源码传到服务器上编：安装包里没有仓库，所以把源码快照打成 `colm-src.tar.gz` 随包附带
 ///（`colm-cli` 在资源目录的 `engine/` 里找它）。预编的 Linux 引擎由发布流水线另放进同一个目录。
-fn pack_engine_source(root: &Path, ext: &str) -> Result<()> {
+fn pack_engine_source(root: &Path, cli: &Path) -> Result<()> {
     let out = root.join("gui/src-tauri/engine/colm-src.tar.gz");
-    let status = Command::new(root.join("target/release").join(format!("colm-cli{ext}")))
+    let status = Command::new(cli)
         .arg("engine-pack")
         .arg("--out")
         .arg(&out)
@@ -168,6 +239,54 @@ fn host_triple() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cargo_artifact_path_wins_over_an_old_default_target_binary() {
+        let message = serde_json::json!({"reason":"compiler-artifact","target":{"name":"colm-cli","kind":["bin"]},"executable":"/custom-target/release/colm-cli"});
+        assert_eq!(
+            built_executable(&message, "colm-cli"),
+            Some(PathBuf::from("/custom-target/release/colm-cli"))
+        );
+        assert_eq!(built_executable(&message, "colm-rs"), None);
+        assert_eq!(
+            built_executable(
+                &serde_json::json!({"reason":"compiler-message"}),
+                "colm-cli"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn stamp_binds_every_model_program_and_requires_all_four() {
+        let root = std::env::temp_dir().join(format!("colm-build-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let ext = if cfg!(windows) { ".exe" } else { "" };
+        assert!(write_build_stamp(&root, &"a".repeat(64)).is_err());
+        for (_, name) in colm_remote::engine::BINARIES {
+            std::fs::write(root.join(format!("{name}{ext}")), name).unwrap();
+        }
+        write_build_stamp(&root, &"a".repeat(64)).unwrap();
+        let stamp: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("colm-build-source.json")).unwrap())
+                .unwrap();
+        assert_eq!(stamp["source_sha256"], "a".repeat(64));
+        assert_eq!(stamp["program_sha256"].as_object().unwrap().len(), 4);
+        assert_eq!(
+            stamp["program_sha256"]["colm-cli"],
+            format!("{:x}", Sha256::digest(b"colm-cli"))
+        );
+        std::fs::write(root.join(format!("colm-rs{ext}")), "changed program").unwrap();
+        write_build_stamp(&root, &"b".repeat(64)).unwrap();
+        let changed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("colm-build-source.json")).unwrap())
+                .unwrap();
+        assert_ne!(
+            stamp["program_sha256"]["colm-rs"],
+            changed["program_sha256"]["colm-rs"]
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn bundled_docs_use_snapshot_bytes_and_missing_docs_preserve_previous_stage() {

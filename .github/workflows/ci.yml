@@ -59,6 +59,18 @@ jobs:
           components: clippy, rustfmt
 
       # 缓存尤其重要：没有它每个作业都要重新从源码编译 HDF5 与 netcdf-c。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install and verify React frontend
+        working-directory: gui
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
       - uses: Swatinem/rust-cache@v2
 
       # netcdf 是本方案最大的依赖风险点，所以三平台都编一次 —— 为的是让
@@ -195,6 +207,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install and verify React frontend
+        working-directory: gui
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: gui/src-tauri

@@ -13,7 +13,9 @@ mod assistant;
 mod config;
 mod example;
 mod forcing;
+mod history;
 mod histvars;
+mod model;
 mod observation;
 mod project;
 mod recent;
@@ -27,7 +29,9 @@ use assistant::*;
 use config::*;
 use example::*;
 use forcing::*;
+use history::*;
 use histvars::*;
+use model::*;
 use observation::*;
 use project::*;
 use recent::*;
@@ -139,6 +143,29 @@ pub fn run() {
             run_batch,
             cancel_runs,
             history_catalog,
+            model_list,
+            model_drafts,
+            model_fields,
+            open_path,
+            model_get,
+            model_create,
+            model_draft,
+            model_save_draft,
+            model_freeze,
+            model_migrate_case,
+            model_case_runs,
+            model_case_context,
+            model_configuration,
+            model_attach_network,
+            model_import_process,
+            model_refresh_code,
+            case_data_save,
+            history_list,
+            history_detail,
+            history_export,
+            history_replay,
+            history_compare,
+            study_save_version,
             study_parameter_contexts,
             study_clone,
             study_compare,
@@ -188,6 +215,7 @@ pub fn run() {
             remote_run,
             remote_study_run,
             remote_study_status,
+            remote_study_cancel,
             remote_study_fetch,
             remote_preview,
             remote_kernels,
@@ -204,7 +232,7 @@ pub fn run() {
             workspace::workspace_import_patch,
             workspace::workspace_diff,
             workspace::workspace_revert_file,
-            workspace::case_runs,
+            model::case_runs,
             remote_build_kernel,
             remote_status,
             remote_job_record,
@@ -215,6 +243,7 @@ pub fn run() {
             hybrid_install,
             hybrid_remove,
             series,
+            energy_summary,
             evaluation_catalog,
             evaluation_plan,
             metrics,

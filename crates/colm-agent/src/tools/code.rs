@@ -4,7 +4,7 @@
 //! 读代码、搜索、对比不用审批；改文件（补丁、撤回）、建工作区**每次都问**，不提供“本会话都允许”；编译、测试、
 //! 运行、对齐检查按会话批一次。把实验内核设为默认、导出补丁、删除工作区是 D 级：只有界面上的按钮，没有工具。
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use super::{object, opt_str, req_str, Tier, Tool, ToolContext};
@@ -41,19 +41,31 @@ fn name_arg() -> Value {
     string("workspace name (see workspace_list)")
 }
 
-/// 读代码工具的 `name`：可空。空就读应用自己正在运行的那份源码（`colm-cli ws-* --source app`），不必先建工作区。
+/// Default reads follow the trusted frozen model; named workspaces are separate mutable sources.
 fn source_arg() -> Value {
     nullable(
         "string",
-        "workspace name (see workspace_list), or null to read the application's own source: the version that is running, read-only",
+        "workspace name to inspect mutable development code, or null for the selected frozen model (application source when no model is configured)",
     )
 }
 
 /// `--name N` 或 `--source app`。
-fn source_cli(args: &Value) -> [&str; 2] {
+fn source_cli<'a>(args: &'a Value, ctx: &'a ToolContext) -> Result<[&'a str; 2]> {
     match opt_str(args, "name") {
-        Some(name) => ["--name", name],
-        None => ["--source", "app"],
+        Some(name) => Ok(["--name", name]),
+        None => match &ctx.model_context {
+            Some(model) => {
+                model.verify_source(ctx)?;
+                Ok([
+                    "--source",
+                    model
+                        .source_dir
+                        .to_str()
+                        .context("source path is not UTF-8")?,
+                ])
+            }
+            None => Ok(["--source", "app"]),
+        },
     }
 }
 
@@ -81,7 +93,18 @@ fn ws(ctx: &ToolContext, command: &str, args: &[&str], long: bool) -> Result<Val
             anyhow::anyhow!("{command} did not print JSON ({e}): {}", done.stdout_tail)
         })
     } else {
-        ctx.cli_json(&refs)
+        let mut value = ctx.cli_json(&refs)?;
+        if matches!(command, "ws-search" | "ws-read" | "ws-symbols") {
+            if args.first() == Some(&"--source") {
+                if let Some(model) = &ctx.model_context {
+                    model.verify_source(ctx)?;
+                    value["source_context"] = json!({"kind":"frozen_model","version":model.model["version"],"code":model.model["code"],"source":model.source_dir});
+                }
+            } else {
+                value["source_context"] = json!({"kind":"mutable_workspace","name":args.get(1),"selected_model_applies":false});
+            }
+        }
+        Ok(value)
     }
 }
 
@@ -174,7 +197,7 @@ impl Tool for SearchCode {
         "search_code"
     }
     fn description(&self) -> &'static str {
-        "Search the CoLM sources with an extended regular expression (git grep): the Fortran upstream under vendor/CoLM202X, the Rust engine under crates/, the GUI under gui/ and the docs. With name null it searches the application's own source (the version that is running); with a workspace name, that workspace. Returns path, line and text of up to 200 hits; `glob` limits the paths, e.g. *.F90 or crates/colm-core/*."
+        "Search the CoLM sources with an extended regular expression (git grep): the Fortran upstream under vendor/CoLM202X, the Rust engine under crates/, the GUI under gui/ and the docs. With name null it searches the verified selected model snapshot (application source without a selection); an explicit workspace name searches mutable development code separately. Returns path, line and text of up to 200 hits; `glob` limits the paths, e.g. *.F90 or crates/colm-core/*."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -187,7 +210,9 @@ impl Tool for SearchCode {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        let mut cli = source_cli(args).to_vec();
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
+        let mut cli = source_cli(args, ctx)?.to_vec();
         cli.extend(["--pattern", req_str(args, "pattern")?]);
         if let Some(glob) = opt_str(args, "glob") {
             cli.extend(["--glob", glob]);
@@ -202,7 +227,7 @@ impl Tool for ReadFile {
         "read_file"
     }
     fn description(&self) -> &'static str {
-        "Read lines of a text file of the CoLM sources (path relative to the repository root), with line numbers: the application's own source when name is null, or a workspace's copy. At most 400 lines per call; give from_line and to_line (1-based, inclusive)."
+        "Read lines of a text file of the CoLM sources (path relative to the repository root), with line numbers: the verified selected model snapshot when name is null (application source without a selection), or an explicitly named mutable workspace. At most 400 lines per call; give from_line and to_line (1-based, inclusive)."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -216,9 +241,11 @@ impl Tool for ReadFile {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let from = args["from_line"].as_u64().map(|n| n.to_string());
         let to = args["to_line"].as_u64().map(|n| n.to_string());
-        let mut cli = source_cli(args).to_vec();
+        let mut cli = source_cli(args, ctx)?.to_vec();
         cli.extend(["--path", req_str(args, "path")?]);
         if let Some(from) = &from {
             cli.extend(["--from", from.as_str()]);
@@ -247,7 +274,9 @@ impl Tool for ListSymbols {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
-        let mut cli = source_cli(args).to_vec();
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
+        let mut cli = source_cli(args, ctx)?.to_vec();
         cli.extend(["--path", req_str(args, "path")?]);
         ws(ctx, "ws-symbols", &cli, false)
     }

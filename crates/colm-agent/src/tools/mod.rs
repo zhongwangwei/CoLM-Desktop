@@ -52,6 +52,8 @@ pub struct ToolContext {
     pub cli: PathBuf,
     /// 当前内核目录（`hybrid-check` 等要它）。
     pub kernel_dir: Option<PathBuf>,
+    /// Actual page preprocessing choice, refreshed through the trusted UI bridge.
+    pub preprocessors: Option<String>,
     /// 可搜索的项目文档目录（开发工作区或源码仓库的 `docs/`）。
     pub docs_root: Option<PathBuf>,
     /// 这一轮的取消标志：长命令（运行算例、Study）轮询它，被取消时结束整个进程组。
@@ -66,6 +68,90 @@ pub struct ToolContext {
     pub experience: Option<crate::experience::Store>,
     /// Version-scoped generated knowledge, separate from installed reviewed documents.
     pub knowledge_root: Option<PathBuf>,
+    /// Trusted by Configure, never inferred from conversational UI JSON.
+    pub model_context: Option<ModelContext>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelContext {
+    pub model: Value,
+    pub model_root: PathBuf,
+    pub source_dir: PathBuf,
+    pub docs_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub source_case: Option<PathBuf>,
+}
+
+impl ModelContext {
+    pub fn validate(&self) -> Result<()> {
+        let id = self.model["version"]["id"]
+            .as_str()
+            .context("model id missing")?;
+        if id.is_empty() || self.model["version"]["revision"].as_u64().unwrap_or(0) == 0 {
+            bail!("model context requires a complete frozen revision");
+        }
+        if !self.model_root.is_absolute()
+            || !self.source_dir.is_absolute()
+            || self.docs_dir.as_ref().is_some_and(|p| !p.is_absolute())
+            || self.source_case.as_ref().is_some_and(|p| !p.is_absolute())
+        {
+            bail!("model context paths must be absolute");
+        }
+        let hash = self.model["code"]["source_sha256"]
+            .as_str()
+            .context("model source hash missing")?;
+        if hash.len() != 64
+            || !hash
+                .bytes()
+                .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+        {
+            bail!("model context requires exact source SHA256");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn args(&self, command: &str) -> Result<Vec<String>> {
+        self.validate()?;
+        Ok(vec![
+            command.into(),
+            "--model-root".into(),
+            self.model_root.display().to_string(),
+            "--model-id".into(),
+            self.model["version"]["id"].as_str().unwrap().into(),
+            "--model-revision".into(),
+            self.model["version"]["revision"]
+                .as_u64()
+                .unwrap()
+                .to_string(),
+        ])
+    }
+
+    pub(crate) fn verify_source(&self, ctx: &ToolContext) -> Result<()> {
+        let args = self.args("model-source-context")?;
+        let actual = ctx.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        if actual["model"] != self.model
+            || actual["source_dir"].as_str().map(PathBuf::from) != Some(self.source_dir.clone())
+            || actual["docs_dir"].as_str().map(PathBuf::from) != self.docs_dir
+        {
+            bail!("selected frozen model source identity changed; refresh its context");
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct EffectiveCase {
+    pub original: PathBuf,
+    pub dir: PathBuf,
+    cleanup: Option<PathBuf>,
+}
+
+impl Drop for EffectiveCase {
+    fn drop(&mut self) {
+        if let Some(path) = &self.cleanup {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
 }
 
 /// 长命令的结果：是否成功、输出末尾。
@@ -82,6 +168,109 @@ fn tail_lines(text: &str, lines: usize) -> String {
 }
 
 impl ToolContext {
+    /// UI actions may change selection within this turn; only the trusted bridge can refresh it.
+    pub(crate) fn selected_context(&self) -> Result<Self> {
+        let mut context = self.clone();
+        let Some(window) = &self.ui else {
+            return Ok(context);
+        };
+        let state = window.0.request("state", json!({}))?;
+        if state["busy"].as_bool() == Some(true) {
+            bail!("the interface is changing selection; wait for its operation to finish");
+        }
+        if let Some(value) = state.get("kernelDir") {
+            context.kernel_dir = match value {
+                Value::Null => None,
+                Value::String(path) if !path.is_empty() && Path::new(path).is_absolute() => {
+                    Some(path.into())
+                }
+                _ => bail!("current UI kernel directory must be absolute or null"),
+            };
+        }
+        if let Some(value) = state.get("preprocessors") {
+            context.preprocessors = match value.as_str() {
+                Some("rust" | "fortran") => value.as_str().map(str::to_owned),
+                None if value.is_null() => None,
+                _ => bail!("current UI preprocessors must be rust or fortran"),
+            };
+        }
+        let Some(model) = &self.model_context else {
+            return Ok(context);
+        };
+        let id = state["model"]["id"]
+            .as_str()
+            .context("selected UI model is unavailable")?;
+        let revision = state["model"]["revision"]
+            .as_u64()
+            .filter(|r| *r > 0)
+            .context("selected UI model revision is unavailable")?;
+        let mut selected = model.clone();
+        selected.source_case = state["case"]["dir"].as_str().map(PathBuf::from);
+        let version = json!({"id":id,"revision":revision});
+        if version != selected.model["version"] {
+            selected.model["version"] = version.clone();
+            let args = selected.args("model-source-context")?;
+            let actual = self.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+            if actual["model"]["version"] != version {
+                bail!("current UI model identity changed during resolution");
+            }
+            selected.model = actual["model"].clone();
+            selected.source_dir = PathBuf::from(
+                actual["source_dir"]
+                    .as_str()
+                    .context("frozen source directory missing")?,
+            );
+            selected.docs_dir = actual["docs_dir"].as_str().map(PathBuf::from);
+        }
+        selected.validate()?;
+        context.model_context = Some(selected);
+        Ok(context)
+    }
+
+    /// Refresh only configuration; outputs and run state stay on their original case paths.
+    pub(crate) fn effective_case(&self, original: &Path) -> Result<EffectiveCase> {
+        let Some(model) = &self.model_context else {
+            return Ok(EffectiveCase {
+                original: original.into(),
+                dir: original.into(),
+                cleanup: None,
+            });
+        };
+        let parent = model.model_root.join("assistant-previews");
+        std::fs::create_dir_all(&parent)?;
+        if std::fs::symlink_metadata(&parent)?.file_type().is_symlink() {
+            bail!("unsafe assistant preview directory");
+        }
+        let owned = parent.join(crate::bridge::random_hex(32));
+        std::fs::create_dir(&owned)?;
+        let mut preview = EffectiveCase {
+            original: original.into(),
+            dir: owned.join("case"),
+            cleanup: Some(owned),
+        };
+        let mut args = model.args("model-preview-context")?;
+        args.extend([
+            original.display().to_string(),
+            "--out".into(),
+            preview.dir.display().to_string(),
+            "--operation-id".into(),
+            format!("assistant-preview-{}", crate::bridge::random_hex(16)),
+        ]);
+        let result = self.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        let actual = PathBuf::from(
+            result["effective_case"]
+                .as_str()
+                .context("effective case missing")?,
+        )
+        .canonicalize()?;
+        if actual != preview.dir.canonicalize()?
+            || result["run"]["version"] != model.model["version"]
+        {
+            bail!("effective case model or private directory mismatch");
+        }
+        preview.dir = actual;
+        Ok(preview)
+    }
     pub(crate) fn note_failure(&self, name: &str, id: &str, kind: &str) {
         if let Some(store) = &self.experience {
             if let Err(error) = store.note_failure(self, name, id, kind) {
@@ -103,6 +292,7 @@ impl ToolContext {
     /// 调 `colm-cli`，返回 stdout；失败时把 stderr 原样带出（它比我们能编的更具体）。
     pub fn cli(&self, args: &[&str]) -> Result<String> {
         let output = Command::new(&self.cli)
+            .env("COLM_OPERATION_INITIATOR", "assistant")
             .args(args)
             .output()
             .with_context(|| format!("cannot start {}", self.cli.display()))?;
@@ -120,6 +310,7 @@ impl ToolContext {
     pub fn cli_long(&self, args: &[&str]) -> Result<Finished> {
         let mut command = Command::new(&self.cli);
         command
+            .env("COLM_OPERATION_INITIATOR", "assistant")
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -197,9 +388,16 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> &'static str;
     fn parameters(&self) -> Value;
     fn tier(&self) -> Tier;
+    /// UI commits share a tool name but may execute different approval tiers.
+    fn tier_for(&self, _args: &Value) -> Tier {
+        self.tier()
+    }
     /// 能不能让用户选“本会话都允许”。补丁、撤回、建工作区这类改动源码的操作必须每次都问，返回 false。
     fn session_allowance(&self) -> bool {
         true
+    }
+    fn session_allowance_for(&self, _args: &Value) -> bool {
+        self.session_allowance()
     }
     /// Destructive or restorative actions always require a fresh decision, even in Auto mode.
     fn requires_explicit_approval(&self) -> bool {
@@ -267,7 +465,12 @@ impl Registry {
             registry.tools.retain(|tool| {
                 !matches!(
                     tool.name(),
-                    "create_case" | "create_study" | "run_study" | "study_control"
+                    "create_case"
+                        | "create_study"
+                        | "run_study"
+                        | "study_control"
+                        | "run_case"
+                        | "set_case_fields"
                 )
             });
             registry.tools.extend(ui::tools());

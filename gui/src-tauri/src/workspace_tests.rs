@@ -133,11 +133,6 @@ fn version_checks_and_provenance_reads_validate_before_the_command_line() {
     assert!(version_check_args("../x", kernel, None).is_err());
     assert!(version_check_args("snow", "kernels/default", None).is_err());
     assert!(version_check_args("snow", kernel, Some("auto")).is_err());
-
-    let case = std::env::temp_dir().join("case");
-    let case = case.to_str().unwrap();
-    assert_eq!(produced_by_args(case).unwrap(), ["produced-by", case]);
-    assert!(produced_by_args("relative/case").is_err());
 }
 
 #[test]

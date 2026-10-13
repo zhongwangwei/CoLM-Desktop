@@ -250,7 +250,6 @@ pub(crate) fn read_sample_file(path: &Path) -> Result<Vec<MemberPlan>> {
 
 fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()> {
     let root = Path::new(&manifest.root);
-    let case_root = study_case_root(root)?;
     for member in members {
         for site in &manifest.spec.base_cases {
             let destination = root.join("members").join(&member.id).join(site);
@@ -264,7 +263,7 @@ fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()
                 .map(|(name, value)| (name.clone(), *value))
                 .collect::<Vec<_>>();
             super::materialize::member_case(
-                &case_root.join(site),
+                &super::model::base_case(manifest, site)?,
                 &destination,
                 &member.id,
                 site,
@@ -317,15 +316,6 @@ fn verify_materialized_member(destination: &Path, member: &MemberPlan) -> Result
         }
     }
     Ok(())
-}
-
-fn study_case_root(study_root: &Path) -> Result<PathBuf> {
-    let case_root = study_root
-        .parent()
-        .and_then(Path::parent)
-        .and_then(Path::parent)
-        .context("Study directory is not under <case-root>/.colm/studies")?;
-    Ok(case_root.to_path_buf())
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {

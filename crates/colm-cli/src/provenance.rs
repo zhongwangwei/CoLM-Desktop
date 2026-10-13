@@ -38,6 +38,7 @@ pub(crate) struct Record<'a> {
     pub location: &'a str,
     pub version: &'a Version,
     pub started: u64,
+    pub execution_program_sha256: Option<&'a std::collections::BTreeMap<String, String>>,
 }
 
 fn kernel_identity(kernel: &Path) -> Value {
@@ -79,7 +80,7 @@ fn version_value(version: &Version) -> Value {
 
 /// 出处记录本身（不含写盘），测试直接看它。
 pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value {
-    json!({
+    let mut value = json!({
         "schema": 1,
         "ok": ok,
         "error": error,
@@ -93,11 +94,87 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
         "force": record.force,
         "location": { "kind": record.location },
         "kernel": kernel_identity(record.kernel),
-    })
+    });
+    if let Ok(snapshot) = std::env::var("COLM_EXECUTION_SNAPSHOT") {
+        value["execution_snapshot"] = json!(snapshot);
+    }
+    if let Some(hashes) = record.execution_program_sha256 {
+        value["execution_program_sha256"] = json!(hashes);
+    } else if let Ok(cli) = std::env::current_exe() {
+        match program_identities(&cli) {
+            Ok(hashes) => value["execution_program_sha256"] = json!(hashes),
+            Err(error) => value["execution_program_identity_error"] = json!(error.to_string()),
+        }
+    }
+    if let Ok(kernel) = colm_kernel::Kernel::open_manifest(record.kernel) {
+        if let Ok(inputs) = crate::fingerprint::compute(
+            "colm",
+            &record.case.join("case.nml"),
+            &kernel.manifest.stage_fingerprint_identity(),
+        ) {
+            value["input_fingerprint"] = serde_json::to_value(inputs).unwrap_or(Value::Null);
+        }
+        value["kernel"]["program_sha256"] = json!(kernel.manifest.sha256);
+    }
+    if let Err(error) = crate::model_version::attach(record.case, &mut value) {
+        value["model_identity_error"] = json!(error.to_string());
+    }
+    value
+}
+
+/// Hash the actual selected executable family, including a delegated frozen CLI.
+pub(crate) fn program_identities(cli: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let bin = cli.parent().context("program directory is missing")?;
+    let mut hashes = std::collections::BTreeMap::new();
+    hashes.insert(
+        "colm-cli".into(),
+        crate::fingerprint::full_file(cli, "program")?.sha256,
+    );
+    for name in ["colm-rs", "mksrfdata-rs", "mkinidata-rs"] {
+        let path = bin.join(if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        });
+        if path.exists() {
+            hashes.insert(
+                name.into(),
+                crate::fingerprint::full_file(&path, "program")?.sha256,
+            );
+        }
+    }
+    Ok(hashes)
+}
+
+pub(crate) fn kernel_program_identities(
+    kernel: &Path,
+    engine: &str,
+    preprocessors: &str,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let manifest = colm_kernel::Kernel::open_manifest(kernel)?;
+    let mut hashes = std::collections::BTreeMap::new();
+    for name in ["mksrfdata", "mkinidata", "colm"] {
+        if (name == "colm" && engine != "fortran") || (name != "colm" && preprocessors != "fortran")
+        {
+            continue;
+        }
+        let hash = crate::fingerprint::full_file(
+            &kernel.join(colm_kernel::program_file(name)),
+            "program",
+        )?
+        .sha256;
+        anyhow::ensure!(
+            manifest.manifest.sha256.get(name) == Some(&hash),
+            "kernel program differs from its captured manifest: {name}"
+        );
+        hashes.insert(name.into(), hash);
+    }
+    Ok(hashes)
 }
 
 /// 写 `out/<算例名>/produced-by.json`。尽力而为：算例名都读不出来（多半是在更早的地方就失败了）时不写，
 /// 写不了只警告，不改变这次运行的成败。
+#[cfg(test)]
 pub(crate) fn write(record: &Record<'_>, ok: bool, error: Option<&str>) {
     if std::env::var_os(DELEGATED_ENV).is_some() {
         return;
@@ -112,11 +189,16 @@ pub(crate) fn write_value(case: &Path, record: &Value) {
         let name = colm_case::case_name(&layout.case_nml())?;
         let dir = layout.out().join(name);
         std::fs::create_dir_all(&dir)?;
-        let text = serde_json::to_string_pretty(record)?;
+        let mut record = record.clone();
+        match output_identities(&dir) {
+            Ok(identities) => record["output_sha256"] = json!(identities),
+            Err(error) => record["output_identity_error"] = json!(error.to_string()),
+        }
+        let text = serde_json::to_string_pretty(&record)?;
         let tmp = dir.join(format!("{FILE}.tmp"));
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, dir.join(FILE))?;
-        crate::case_runs::append(case, record)?;
+        crate::case_runs::append(case, &record)?;
         Ok(())
     })();
     if let Err(e) = result {
@@ -175,6 +257,7 @@ pub(crate) fn delegate(readiness: &Readiness, args: &[String]) -> Result<i32> {
         .arg("--kernel")
         .arg(&readiness.kernel)
         .env(DELEGATED_ENV, "1")
+        .env("COLM_AUDIT_BY_PARENT", "1")
         .status()
         .with_context(|| format!("cannot start {}", readiness.cli.display()))?;
     Ok(status.code().unwrap_or(1))
@@ -183,3 +266,47 @@ pub(crate) fn delegate(readiness: &Readiness, args: &[String]) -> Result<i32> {
 #[cfg(test)]
 #[path = "provenance_tests.rs"]
 mod provenance_tests;
+
+pub(crate) fn output_identities(root: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        out: &mut std::collections::BTreeMap<String, String>,
+    ) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                continue;
+            }
+            if kind.is_dir() {
+                visit(root, &entry.path(), out)?;
+            } else if entry.path().extension().is_some_and(|ext| ext == "nc") {
+                let mut file = std::fs::File::open(entry.path())?;
+                let mut hash = Sha256::new();
+                let mut bytes = vec![0u8; 1024 * 1024];
+                loop {
+                    let count = file.read(&mut bytes)?;
+                    if count == 0 {
+                        break;
+                    }
+                    hash.update(&bytes[..count]);
+                }
+                out.insert(
+                    entry
+                        .path()
+                        .strip_prefix(root)?
+                        .to_string_lossy()
+                        .into_owned(),
+                    format!("{:x}", hash.finalize()),
+                );
+            }
+        }
+        Ok(())
+    }
+    let mut out = std::collections::BTreeMap::new();
+    visit(root, root, &mut out)?;
+    Ok(out)
+}

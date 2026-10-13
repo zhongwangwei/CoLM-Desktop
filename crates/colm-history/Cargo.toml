@@ -1,0 +1,18 @@
+[package]
+name = "colm-history"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+# Newer upstream releases require Rust 1.88; retain workspace Rust 1.85.1 support.
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+[lints]
+workspace = true

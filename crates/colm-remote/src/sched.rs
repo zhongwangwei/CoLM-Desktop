@@ -333,10 +333,10 @@ lsf)
 esac
 "#;
 
-/// 取消脚本里调度器的那一段：先让调度器去结束，再留一个退出码，免得状态一直停在“丢失”。
+/// Submit cancellation; scheduler acceptance is not proof of termination.
 pub const CANCEL: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
 [ -f exit_code ] && { echo finished; exit 0; }
-ID=$(cat sched_id 2>/dev/null)
+ID=$(cat sched_id 2>/dev/null || true)
 case "$S" in
 slurm) scancel "$ID" || exit $? ;;
 pbs) qdel "$ID" || exit $? ;;
@@ -344,18 +344,29 @@ lsf) bkill "$ID" || exit $? ;;
 bare)
   P=$(cat pid) || exit 1
   case "$P" in ''|*[!0-9]*|0|1) echo "invalid job pid" >&2; exit 1;; esac
-  kill -TERM -- -"$P" 2>/dev/null || kill -TERM "$P" 2>/dev/null || exit 1
+  START=$(sed 's/.*) //' "/proc/$P/stat" | awk '{print $20}')
+  [ -n "$START" ] || { echo "job process start identity missing" >&2; exit 1; }
+  [ "$(ps -o uid= -p "$P" | tr -d ' ')" = "$(id -u)" ] || { echo "job process owner changed" >&2; exit 1; }
+  [ "$(readlink "/proc/$P/cwd")" = "$(pwd -P)" ] || { echo "job process directory changed" >&2; exit 1; }
+  [ "$(ps -o sid= -p "$P" | tr -d ' ')" = "$P" ] || { echo "job process session changed" >&2; exit 1; }
+  tr '\000' '\n' < "/proc/$P/cmdline" | grep -Fxq -- './script.sh' || { echo "job process command changed" >&2; exit 1; }
+  [ "$(sed 's/.*) //' "/proc/$P/stat" | awk '{print $20}')" = "$START" ] || { echo "job process was replaced" >&2; exit 1; }
+  kill -TERM -- -"$P" 2>/dev/null || exit 1
   sleep 2
-  if kill -0 "$P" 2>/dev/null; then
-    kill -KILL -- -"$P" 2>/dev/null || kill -KILL "$P" 2>/dev/null || exit 1
+  if kill -0 -- -"$P" 2>/dev/null; then
+    # A vanished group leader cannot be re-authenticated for escalation.
+    [ "$(sed 's/.*) //' "/proc/$P/stat" | awk '{print $20}')" = "$START" ] &&
+      [ "$(readlink "/proc/$P/cwd")" = "$(pwd -P)" ] &&
+      [ "$(ps -o sid= -p "$P" | tr -d ' ')" = "$P" ] || { echo "job identity changed during cancellation" >&2; exit 1; }
+    kill -KILL -- -"$P" 2>/dev/null || exit 1
     sleep 1
-    if kill -0 "$P" 2>/dev/null; then echo "job still exists" >&2; exit 1; fi
-  fi ;;
+    if kill -0 -- -"$P" 2>/dev/null; then echo "job group still exists" >&2; exit 1; fi
+  fi
+  [ -f exit_code ] || echo 143 > exit_code ;;
 *) echo "unknown scheduler: $S" >&2; exit 1 ;;
 
 esac
-[ -f exit_code ] || echo 143 > exit_code
-echo cancelled
+echo cancellation_requested
 "#;
 
 #[cfg(test)]

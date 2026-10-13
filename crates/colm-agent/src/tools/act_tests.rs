@@ -107,3 +107,35 @@ fn running_needs_a_kernel_and_a_real_case() {
         .is_err());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bound_models_cannot_use_legacy_original_case_writes_or_runs() {
+    let dir = temp_case("frozen-guard", " DEF_USE_PC = .false.\n");
+    let before = std::fs::read(dir.join("case.nml")).unwrap();
+    let ctx = ToolContext {
+        model_context: Some(super::super::ModelContext {
+            model: json!({"version":{"id":"old","revision":1},"code":{"source_sha256":"a".repeat(64)}}),
+            model_root: dir.join("models"),
+            source_dir: dir.clone(),
+            docs_dir: None,
+            source_case: Some(dir.clone()),
+        }),
+        ..ToolContext::default()
+    };
+    let error = SetCaseFields
+        .call(
+            &json!({"case":dir,"fields":[{"name":"DEF_USE_PC","value":"true"}]}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("frozen model parameters"));
+    assert_eq!(std::fs::read(dir.join("case.nml")).unwrap(), before);
+    let error = RunCase
+        .call(
+            &json!({"case":dir,"stage":null,"engine":null,"force":false}),
+            &ctx,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("complete revision"));
+    std::fs::remove_dir_all(dir).unwrap();
+}

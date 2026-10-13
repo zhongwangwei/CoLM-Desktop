@@ -35,6 +35,10 @@ pub(crate) struct Pinned {
     /// 用哪个内核：改过 Fortran 时是快照里的那份，否则是正式内核。
     pub kernel: PathBuf,
     pub pinned_unix: i64,
+    #[serde(default)]
+    pub model_revision: Option<colm_model::FrozenRevision>,
+    #[serde(default)]
+    pub model_root: Option<PathBuf>,
 }
 
 fn exe(name: &str) -> String {
@@ -117,6 +121,8 @@ fn pin(
         cli: bin.join(exe("colm-cli")),
         kernel,
         pinned_unix: crate::provenance::now() as i64,
+        model_revision: None,
+        model_root: None,
     };
     std::fs::write(study_dir.join(FILE), serde_json::to_string_pretty(&pinned)?)?;
     Ok(pinned)
@@ -156,7 +162,7 @@ pub(crate) fn ensure(
             pin(study_dir, &readiness, official_kernel).map(Some)
         }
     }?;
-    if let Some(pinned) = &result {
+    if let Some(pinned) = result.as_ref().filter(|p| p.model_revision.is_none()) {
         // A successful pin remains usable even if its history needs repair on the next run.
         if let Err(error) = record_pin(study_dir, workspace_root, pinned) {
             eprintln!("warning: study snapshot is saved, but its workspace ledger could not be updated: {error:#}");
@@ -189,13 +195,14 @@ pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
         .arg("--kernel")
         .arg(&pinned.kernel)
         .env(DELEGATED_ENV, "1")
+        .env("COLM_AUDIT_BY_PARENT", "1")
         .status()
         .with_context(|| format!("cannot start {}", pinned.cli.display()))?;
     Ok(status.code().unwrap_or(1))
 }
 
 /// 两个研究里最优成员的成绩（`study-compare`，“比较两个版本”）。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct Side {
     pub study: String,
     pub version: String,
@@ -247,7 +254,10 @@ fn comparison_version(study_dir: &Path) -> Result<(String, Option<String>)> {
 
 fn side(study_dir: &Path) -> Result<(Side, study::spec::StudySpec)> {
     let manifest = study::engine::status(study_dir)?;
-    let state = study::runner::status_state(study_dir)?;
+    let state = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )?
+    .map(|loaded| loaded.payload);
     let (version, head) = comparison_version(study_dir)?;
     let best = state.as_ref().and_then(|s| s.best_member.clone());
     let candidate = |member: &str| {
@@ -285,11 +295,16 @@ fn side(study_dir: &Path) -> Result<(Side, study::spec::StudySpec)> {
 }
 
 /// 两份设定除了内核目录之外是否一致（公平比较的前提：同样的参数、预算、种子、目标与时段）。
-fn same_design(a: &study::spec::StudySpec, b: &study::spec::StudySpec) -> Result<bool> {
+pub(crate) fn same_design(a: &study::spec::StudySpec, b: &study::spec::StudySpec) -> Result<bool> {
     let strip = |spec: &study::spec::StudySpec| -> Result<serde_json::Value> {
         let mut value = serde_json::to_value(spec)?;
         if let Some(map) = value.as_object_mut() {
             map.remove("kernel_dir");
+            // Paths relocate across hosts; observation contents are checked separately.
+            map.insert(
+                "observations".into(),
+                serde_json::to_value(spec.observations.keys().collect::<Vec<_>>())?,
+            );
         }
         Ok(value)
     };
@@ -301,7 +316,238 @@ pub(crate) fn compare(a: &Path, b: &Path) -> Result<serde_json::Value> {
     let (left, left_spec) = side(a)?;
     let (right, right_spec) = side(b)?;
     let same = same_design(&left_spec, &right_spec)?;
-    Ok(verdict(left, right, same))
+    let inputs = comparison_inputs(a).and_then(|left_inputs| {
+        comparison_inputs(b)
+            .map(|right_inputs| study::model::same_conditions(&left_inputs, &right_inputs))
+    });
+    let inputs = inputs.and_then(|same_inputs| {
+        anyhow::ensure!(
+            left == side(a)?.0 && right == side(b)?.0,
+            "Study comparison scores or model identity changed during verification"
+        );
+        Ok(same_inputs)
+    });
+    let verified = inputs.is_ok();
+    let same_inputs = inputs.as_ref().is_ok_and(|same| *same);
+    let mut result = verdict(left, right, same);
+    if !same_inputs {
+        result["better"] = serde_json::Value::Null;
+    }
+    result["same_design"] = serde_json::json!(same);
+    result["same_inputs"] = serde_json::json!(same_inputs);
+    result["inputs_verified"] = serde_json::json!(verified);
+    let notes = result["notes"]
+        .as_array_mut()
+        .expect("verdict notes is an array");
+    match inputs {
+        Err(error) => notes.push(serde_json::json!(format!("full-content inputs, observations and outputs could not be verified: {error:#}; no version winner is reported"))),
+        Ok(false) => notes.push(serde_json::json!("the Studies use different scientific input or observation contents; no version winner is reported")),
+        Ok(true) => (),
+    }
+    Ok(result)
+}
+
+/// Each side is verified in its own process so SSH credentials cannot cross host boundaries.
+pub(crate) fn verified_side(study_dir: &Path) -> Result<serde_json::Value> {
+    let (side, spec) = side(study_dir)?;
+    let verification = comparison_inputs(study_dir).and_then(|identity| {
+        anyhow::ensure!(
+            side == self::side(study_dir)?.0,
+            "Study score or model identity changed during side verification"
+        );
+        Ok(identity)
+    });
+    let (inputs, verified, notes) = match verification {
+        Ok(identity) => (Some(identity), true, Vec::new()),
+        Err(error) => (
+            None,
+            false,
+            vec![format!(
+                "full-content scientific evidence could not be verified: {error:#}"
+            )],
+        ),
+    };
+    Ok(serde_json::json!({
+        "schema":1,
+        "side":side,
+        "spec":spec,
+        "input_identity":inputs,
+        "verified":verified,
+        "notes":notes,
+    }))
+}
+
+fn comparison_inputs(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+    let record = study_dir.join(crate::remote_cmd::remote_study::RECORD);
+    match std::fs::symlink_metadata(&record) {
+        Ok(_) => return crate::remote_cmd::remote_study::verified_comparison(study_dir),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error).context("cannot inspect Study remote submission"),
+    }
+    local_comparison_inputs(study_dir)
+}
+
+fn local_comparison_inputs(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+    let manifest = study::engine::status(study_dir)?;
+    let state = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )?
+    .context("Study has no state")?
+    .payload;
+    anyhow::ensure!(
+        state.schema_version == 1 && state.study_id == manifest.id,
+        "Study state identity changed"
+    );
+    anyhow::ensure!(
+        !matches!(
+            state.status,
+            study::state::StudyStatus::Running
+                | study::state::StudyStatus::Ready
+                | study::state::StudyStatus::NeedsReview
+        ),
+        "Study is not in a verified finished state"
+    );
+    let best = state
+        .best_member
+        .as_deref()
+        .context("Study has no best member")?;
+    let baseline = manifest
+        .members
+        .iter()
+        .find(|member| member.baseline)
+        .context("Study has no baseline member")?;
+    let members = if baseline.id == best {
+        vec![best]
+    } else {
+        vec![best, baseline.id.as_str()]
+    };
+    let before = study::runner::evidence_file_snapshot(&manifest, &state, &members)?;
+    study::engine::verify_frozen_inputs(&manifest)?;
+    let inputs = study::model::verified_inputs(&manifest)?;
+    for member in &members {
+        study::runner::verify_member_evidence(&manifest, &state, member)?;
+    }
+    anyhow::ensure!(
+        before == study::runner::evidence_file_snapshot(&manifest, &state, &members)?,
+        "Study comparison inputs or outputs changed during verification"
+    );
+    Ok(inputs)
+}
+
+/// Executed by the bound remote job's CLI, never accepted as a frontend assertion.
+pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::Value> {
+    let state = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )?
+    .context("Study has no verified state")?
+    .payload;
+    let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&state)?);
+    let manifest = study::engine::status(study_dir)?;
+    let best = state
+        .best_member
+        .as_deref()
+        .context("Study has no best member")?;
+    let baseline = manifest
+        .members
+        .iter()
+        .find(|member| member.baseline)
+        .context("Study has no baseline")?;
+    let members = vec![best, baseline.id.as_str()];
+    let files_before = study::runner::evidence_file_snapshot(&manifest, &state, &members)?;
+    let inputs = local_comparison_inputs(study_dir)?;
+    let results_sha256 = comparison_results_sha256(study_dir)?;
+    let after = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )?
+    .context("Study state disappeared during comparison")?
+    .payload;
+    anyhow::ensure!(
+        state_sha256 == colm_kernel::sha256_hex(&serde_json::to_vec(&after)?),
+        "Study state changed during comparison verification"
+    );
+    anyhow::ensure!(
+        inputs == study::model::verified_inputs(&manifest)?,
+        "Study scientific inputs changed during comparison verification"
+    );
+    anyhow::ensure!(
+        files_before == study::runner::evidence_file_snapshot(&manifest, &after, &members)?,
+        "Study raw outputs or evaluation evidence changed during comparison verification"
+    );
+    let pin = pinned(study_dir)?;
+    let revision = pin.as_ref().and_then(|pin| pin.model_revision.as_ref());
+    Ok(serde_json::json!({
+        "schema":1,
+        "study_id":manifest.id,
+        "root":manifest.root,
+        "spec":manifest.spec,
+        "model_revision":revision,
+        "pinned":pin,
+        "best_member":state.best_member,
+        "state_sha256":state_sha256,
+        "state":state,
+        "input_identity":inputs,
+        "results_sha256":results_sha256,
+    }))
+}
+
+pub(crate) fn comparison_results_sha256(
+    study_dir: &Path,
+) -> Result<std::collections::BTreeMap<String, String>> {
+    fn paths(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            let path = entry.path();
+            if kind.is_dir() {
+                paths(root, &path, files)?;
+            } else {
+                anyhow::ensure!(kind.is_file(), "Study results contain a non-regular file");
+                files.push(path.strip_prefix(root)?.to_path_buf());
+            }
+        }
+        Ok(())
+    }
+    let root = study_dir.join("results");
+    let mut before = Vec::new();
+    paths(&root, &root, &mut before)?;
+    before.sort();
+    let before_stats = before
+        .iter()
+        .map(|relative| {
+            Ok((
+                relative.clone(),
+                crate::fingerprint::stable_file_identity(&std::fs::metadata(root.join(relative))?),
+            ))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+    let hashes = before
+        .iter()
+        .map(|relative| {
+            let key = relative
+                .to_str()
+                .context("Study result path is not UTF-8")?
+                .replace('\\', "/");
+            let file = crate::fingerprint::full_file(&root.join(relative), "result")?;
+            Ok((key, file.sha256))
+        })
+        .collect::<Result<_>>()?;
+    let mut after = Vec::new();
+    paths(&root, &root, &mut after)?;
+    after.sort();
+    let after_stats = after
+        .iter()
+        .map(|relative| {
+            Ok((
+                relative.clone(),
+                crate::fingerprint::stable_file_identity(&std::fs::metadata(root.join(relative))?),
+            ))
+        })
+        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
+    anyhow::ensure!(
+        before == after && before_stats == after_stats,
+        "Study results changed during comparison verification"
+    );
+    Ok(hashes)
 }
 
 /// 两边成绩的判定（目标值越小越好，与率定的目标函数一致）。
@@ -323,12 +569,14 @@ pub(crate) fn verdict(left: Side, right: Side, same: bool) -> serde_json::Value 
         (left.calibration, right.calibration)
     };
     let better = match (l, r) {
+        _ if !same => None,
+        (Some(l), Some(r)) if !l.is_finite() || !r.is_finite() => None,
         (Some(l), Some(r)) if (l - r).abs() <= 1e-12 * l.abs().max(r.abs()).max(1.0) => Some("tie"),
         (Some(l), Some(r)) if l < r => Some("a"),
         (Some(_), Some(_)) => Some("b"),
         _ => None,
     };
-    if better.is_none() {
+    if same && better.is_none() {
         notes.push("at least one Study has no best member yet".to_owned());
     }
     serde_json::json!({
@@ -369,11 +617,189 @@ pub(crate) fn clone_study(study_dir: &Path) -> Result<PathBuf> {
         crate::provenance::now()
     ));
     std::fs::write(&spec_file, serde_json::to_string_pretty(&manifest.spec)?)?;
-    let created = study::engine::create(&case_root, &spec_file);
+    let model_pin = pinned(&study_dir)?.filter(|p| p.model_revision.is_some());
+    let created = (|| {
+        if model_pin.is_some() {
+            study::engine::verify_frozen_inputs(&manifest)?;
+            study::model::verified_inputs(&manifest)?;
+            let first = manifest
+                .spec
+                .base_cases
+                .first()
+                .context("Study has no base cases")?;
+            let baseline = study::model::base_case(&manifest, first)?;
+            study::engine::create_from_baselines(
+                &case_root,
+                &spec_file,
+                baseline.parent().context("baseline directory")?,
+            )
+        } else {
+            study::engine::create(&case_root, &spec_file)
+        }
+    })();
     let _ = std::fs::remove_file(&spec_file);
-    Ok(PathBuf::from(created?.root))
+    let created = PathBuf::from(created?.root);
+    let finalization = (|| -> Result<()> {
+        if let Some(mut pin) = model_pin {
+            let source = study_dir.join("version");
+            let target = created.join("version");
+            if source.is_dir() {
+                copy_dir(&source, &target)?;
+            }
+            if let Ok(relative) = pin.kernel.strip_prefix(&source) {
+                pin.kernel = target.join(relative);
+            }
+            if let Ok(relative) = pin.cli.strip_prefix(&source) {
+                pin.cli = target.join(relative);
+            }
+            std::fs::write(created.join(FILE), serde_json::to_vec_pretty(&pin)?)?;
+        }
+        study::model::capture_inputs(&study::engine::status(&created)?)?;
+        Ok(())
+    })();
+    if let Err(error) = finalization {
+        let _ = std::fs::remove_dir_all(&created);
+        return Err(error);
+    }
+    Ok(created)
 }
 
 #[cfg(test)]
 #[path = "study_version_tests.rs"]
 mod study_version_tests;
+
+pub(crate) fn pin_revision(
+    study_dir: &Path,
+    revision: &colm_model::FrozenRevision,
+    model_root: &Path,
+    opts: &crate::Opts,
+) -> Result<Pinned> {
+    crate::model_version::verify_code(opts, &revision.code)?;
+    crate::model_version::cache_code(opts, &revision.code)?;
+    let manifest = study::engine::status(study_dir)?;
+    let kernel = opts
+        .get("--kernel")
+        .or(manifest.spec.kernel_dir)
+        .map(PathBuf::from)
+        .unwrap_or_default();
+    let kernel = if kernel.is_dir() {
+        let target = study_dir.join("version/kernel");
+        copy_dir(&kernel, &target)?;
+        target
+    } else {
+        kernel
+    };
+    let cached = crate::model_version::cached_options(opts, &revision.code)?;
+    let (cli, touches) = if let Some(name) = revision.code.workspace.as_deref() {
+        let flags = cached.as_ref().unwrap_or(opts);
+        let workspace = colm_workspace::Workspace::open(
+            &crate::provenance::workspace_root(flags.get("--workspace-root")),
+            name,
+        )?;
+        let changed = workspace.changes_from_official()?;
+        (
+            workspace.bin().join(exe("colm-cli")),
+            colm_workspace::version::touches(changed.iter().map(|c| c.path.as_str())),
+        )
+    } else {
+        (
+            crate::model_version::cached_official_cli(opts, &revision.code)?,
+            colm_workspace::version::Touches {
+                engine: false,
+                kernel: false,
+            },
+        )
+    };
+    let pinned = Pinned {
+        name: revision.version.id.clone(),
+        head: revision
+            .code
+            .commit
+            .clone()
+            .unwrap_or_else(|| revision.code.source_sha256.clone()),
+        base_commit: revision.code.commit.clone().unwrap_or_default(),
+        note: revision.note.clone(),
+        based_on: revision.parent.as_ref().map(|p| p.id.clone()),
+        touches,
+        cli,
+        kernel,
+        pinned_unix: crate::provenance::now() as i64,
+        model_revision: Some(revision.clone()),
+        model_root: Some(model_root.to_owned()),
+    };
+    std::fs::write(study_dir.join(FILE), serde_json::to_vec_pretty(&pinned)?)?;
+    Ok(pinned)
+}
+
+pub(crate) fn validate_revision_request(study: &Path, opts: &crate::Opts) -> Result<()> {
+    if let Some(requested) = crate::model_version::selected(opts)? {
+        let pinned = pinned(study)?.and_then(|p| p.model_revision).context(
+            "this Study has no frozen model revision; create a Study with the selected revision",
+        )?;
+        anyhow::ensure!(
+            pinned.version == requested,
+            "Study is locked to another model revision"
+        );
+    }
+    Ok(())
+}
+fn revision_options(pinned: &Pinned, opts: &crate::Opts) -> Result<crate::Opts> {
+    let mut flags = opts
+        .flags
+        .iter()
+        .filter(|(k, _)| k != "--model-root")
+        .cloned()
+        .collect::<Vec<_>>();
+    flags.push((
+        "--model-root".into(),
+        pinned
+            .model_root
+            .as_ref()
+            .context("pinned revision has no registry")?
+            .to_string_lossy()
+            .into_owned(),
+    ));
+    Ok(crate::Opts {
+        flags,
+        positional: opts.positional.clone(),
+    })
+}
+pub(crate) fn validate_pinned(
+    pinned: &mut Pinned,
+    opts: &crate::Opts,
+    kernel: &Path,
+    engine: &str,
+    preprocessors: &str,
+) -> Result<()> {
+    let Some(revision) = &pinned.model_revision else {
+        return Ok(());
+    };
+    let options = revision_options(pinned, opts)?;
+    crate::model_version::verify_code(&options, &revision.code)?;
+    anyhow::ensure!(
+        revision.overlay.hybrid.is_none() || engine == "rust",
+        "hybrid model revisions require Rust"
+    );
+    let kernel = if pinned.kernel.as_os_str().is_empty() {
+        kernel
+    } else {
+        &pinned.kernel
+    };
+    crate::model_version::check_kernel(revision, &colm_kernel::Kernel::open_manifest(kernel)?)?;
+    let used = if let Some(name) = &revision.code.workspace {
+        let cached = crate::model_version::cached_options(&options, &revision.code)?
+            .context("missing frozen workspace")?;
+        crate::provenance::resolve(
+            &crate::provenance::workspace_root(cached.get("--workspace-root")),
+            name,
+            engine,
+            preprocessors,
+            kernel,
+        )?
+        .kernel
+    } else {
+        kernel.to_owned()
+    };
+    pinned.kernel = used;
+    Ok(())
+}

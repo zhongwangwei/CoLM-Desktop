@@ -899,7 +899,7 @@ pub fn audit(
     )
 }
 
-fn audit_with_lai_frequency(
+pub fn audit_with_lai_frequency(
     file: &Path,
     mode: SiteMode,
     rawdata: Option<&Path>,

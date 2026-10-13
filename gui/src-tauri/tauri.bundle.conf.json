@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
+    "beforeBuildCommand": "npm run build && cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
   },
   "bundle": {
     "active": true,
@@ -17,7 +17,8 @@
       "../../kernels": "kernels",
       "../../examples": "examples",
       "engine": "engine",
-      "engine/docs": "docs"
+      "engine/docs": "docs",
+      "binaries/colm-build-source.json": "colm-build-source.json"
     }
   }
 }

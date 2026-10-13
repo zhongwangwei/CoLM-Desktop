@@ -228,6 +228,7 @@ impl RunProcesses {
 fn sidecar_command(program: impl AsRef<OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     colm_kernel::run::no_console(&mut command);
+    command.env("COLM_AUDIT_BY_PARENT", "1");
     command
 }
 
@@ -768,6 +769,8 @@ pub async fn run_case(
     engine: Option<String>,
     threads: Option<usize>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -784,6 +787,8 @@ pub async fn run_case(
             engine,
             threads,
             model_version,
+            model_revision,
+            preprocessors,
         )
     })
     .await
@@ -998,6 +1003,8 @@ pub async fn run_batch(
     engine: Option<String>,
     threads: Option<usize>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -1015,6 +1022,8 @@ pub async fn run_batch(
             engine,
             threads,
             model_version,
+            model_revision,
+            preprocessors,
         )
     })
     .await
@@ -1036,6 +1045,8 @@ fn run_batch_blocking(
     engine: Option<String>,
     threads: Option<usize>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
     validate_engine(engine.as_deref())?;
@@ -1060,6 +1071,8 @@ fn run_batch_blocking(
     let mut workers = Vec::with_capacity(width);
     for _ in 0..width {
         let version = model_version.clone();
+        let revision = model_revision.clone();
+        let preprocessors = preprocessors.clone();
         let (a, r, k, q, ok, requested_stage, p, e) = (
             app.clone(),
             run_id.clone(),
@@ -1091,6 +1104,8 @@ fn run_batch_blocking(
                     e.as_deref(),
                     Some(threads),
                     version.as_deref(),
+                    revision.as_ref(),
+                    preprocessors.as_deref(),
                 )
             }));
             match outcome {
@@ -1161,6 +1176,8 @@ fn run_case_blocking(
     engine: Option<String>,
     threads: Option<usize>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<i32, String> {
     if threads == Some(0) {
         return Err("threads must be at least 1".into());
@@ -1178,6 +1195,8 @@ fn run_case_blocking(
         engine.as_deref(),
         threads,
         model_version.as_deref(),
+        model_revision.as_ref(),
+        preprocessors.as_deref(),
     )
 }
 
@@ -1195,6 +1214,8 @@ fn run_one(
     engine: Option<&str>,
     threads: Option<usize>,
     model_version: Option<&str>,
+    model_revision: Option<&colm_model::VersionRef>,
+    preprocessors: Option<&str>,
 ) -> Result<i32, String> {
     if processes.take_cancelled(case)? {
         let _ = app.emit(
@@ -1218,56 +1239,71 @@ fn run_one(
     if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
         cmd.env("RAYON_NUM_THREADS", threads.to_string());
     }
-    let args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
-    let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            let _ = processes.forget(case);
-            format!("cannot start {}: {e}", cli.display())
-        })?;
-    remember_process(processes, case, &mut child)?;
-    let (out, err_pipe) = take_process_pipes(&mut child, processes, case)?;
-    let _ = app.emit(
-        "run://started",
-        serde_json::json!({ "run_id": run_id, "case": case }),
-    );
-    let reader = pump(app, run_id, case, out);
-    let errs = drain_stderr(err_pipe);
-    let (status, cancelled) = wait_process(&mut child, processes, case)?;
-    let (total, dropped, _) = reader.join().map_err(|_| "reader thread panicked")?;
-    let err = errs.join().map_err(|_| "stderr thread panicked")?;
-    let code = status.code().unwrap_or(-1);
-    if !err.is_empty() {
+    let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
+    crate::model::options(&mut args, model_revision)?;
+    add_preprocessors(&mut args, preprocessors)?;
+    let mut event = crate::history::command_start(&args)?;
+    if let Some(event) = &mut event {
+        event.detail["run_id"] = serde_json::json!(run_id);
+        args.extend(["--operation-id".into(), event.operation_id.clone()]);
+    }
+    let result = (|| {
+        let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
+            .args(args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| {
+                let _ = processes.forget(case);
+                format!("cannot start {}: {e}", cli.display())
+            })?;
+        remember_process(processes, case, &mut child)?;
+        let (out, err_pipe) = take_process_pipes(&mut child, processes, case)?;
         let _ = app.emit(
-            "run://lines",
-            Lines {
+            "run://started",
+            serde_json::json!({ "run_id": run_id, "case": case, "source_case":case,"operation_id":event.as_ref().map(|event|&event.operation_id) }),
+        );
+        let reader = pump(app, run_id, case, out);
+        let errs = drain_stderr(err_pipe);
+        let (status, cancelled) = wait_process(&mut child, processes, case)?;
+        let (total, dropped, _) = reader.join().map_err(|_| "reader thread panicked")?;
+        let err = errs.join().map_err(|_| "stderr thread panicked")?;
+        let code = status.code().unwrap_or(-1);
+        if !err.is_empty() {
+            let _ = app.emit(
+                "run://lines",
+                Lines {
+                    run_id: run_id.to_string(),
+                    case: case.to_string(),
+                    lines: err.clone(),
+                },
+            );
+        }
+        let _ = app.emit(
+            "run://done",
+            Done {
                 run_id: run_id.to_string(),
                 case: case.to_string(),
-                lines: err.clone(),
+                requested_stage: stage.map(str::to_string),
+                code,
+                total,
+                dropped,
+                reason: if cancelled {
+                    Some("运行已取消".into())
+                } else {
+                    (code != 0).then(|| failure_reason(&err)).flatten()
+                },
+                cancelled,
             },
         );
-    }
-    let _ = app.emit(
-        "run://done",
-        Done {
-            run_id: run_id.to_string(),
-            case: case.to_string(),
-            requested_stage: stage.map(str::to_string),
-            code,
-            total,
-            dropped,
-            reason: if cancelled {
-                Some("运行已取消".into())
-            } else {
-                (code != 0).then(|| failure_reason(&err)).flatten()
-            },
-            cancelled,
-        },
-    );
-    Ok(code)
+        Ok(code)
+    })();
+    let status = match &result {
+        Ok(0) => "succeeded",
+        Ok(-1) => "cancelled",
+        _ => "failed",
+    };
+    crate::history::command_finish(event.as_ref(), result, status)
 }
 
 /// 新建一个算例。sidecar 会补齐站点文件、生成强迫场与算例 namelist。
@@ -1301,7 +1337,9 @@ pub async fn new_case(
     mode: Option<String>,
     // 进门向导选出的运行时初值。只在新建时写；已有算例绝不能被启动向导覆盖。
     fields: Vec<crate::config::FieldChange>,
+    model_revision: Option<colm_model::VersionRef>,
 ) -> Result<String, String> {
+    let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     validate_bgc_runtime(runtime.as_deref(), &fields)?;
     let recorded_mode = mode.clone();
     let case_dir = out.clone();
@@ -1365,6 +1403,7 @@ pub async fn new_case(
             ..Default::default()
         },
     );
+    crate::model::bind_new_case(&case_dir, model_revision).await?;
     Ok(output)
 }
 
@@ -1430,7 +1469,9 @@ pub async fn new_spatial_case(
     timestep: f64,
     mode: String,
     fields: Vec<crate::config::FieldChange>,
+    model_revision: Option<colm_model::VersionRef>,
 ) -> Result<String, String> {
+    let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     let request = SpatialCaseRequest {
         domain,
         grid_kind,
@@ -1631,6 +1672,7 @@ pub async fn new_spatial_case(
     let output = capture_async(args).await.map_err(cleanup)?;
     crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
     crate::project::record_case(&request.out, &recorded);
+    crate::model::bind_new_case(&request.out, model_revision).await?;
     Ok(output)
 }
 
@@ -1648,9 +1690,11 @@ fn existing_unstructured_mesh(
 }
 
 fn is_crop_case(fields: &[crate::config::FieldChange]) -> bool {
-    fields
-        .iter()
-        .any(|field| field.path == "DEF_TUNING_CROP_PLANTING_DAY")
+    fields.iter().any(|field| {
+        field
+            .path
+            .eq_ignore_ascii_case("DEF_TUNING_CROP_PLANTING_DAY")
+    })
 }
 
 fn validate_bgc_runtime(
@@ -1849,6 +1893,22 @@ pub async fn series(
         if let Some(value) = value {
             args.push(flag.into());
             args.push(value);
+        }
+    }
+    capture_async(args).await
+}
+
+/// 全量能量通量统计与同一数据的绘图样本；窗口进程不读取 NetCDF。
+#[tauri::command]
+pub async fn energy_summary(
+    case: String,
+    from: Option<i64>,
+    to: Option<i64>,
+) -> Result<String, String> {
+    let mut args = vec!["energy-summary".to_string(), case];
+    for (flag, value) in [("--from", from), ("--to", to)] {
+        if let Some(value) = value {
+            args.extend([flag.into(), value.to_string()]);
         }
     }
     capture_async(args).await
@@ -2152,39 +2212,259 @@ pub async fn study_clone(study_dir: String) -> Result<String, String> {
 
 /// 比较两个版本：两个研究最优成员的率定期与验证期成绩。
 #[tauri::command]
-pub async fn study_compare(a: String, b: String) -> Result<serde_json::Value, String> {
+pub async fn study_compare(
+    app: tauri::AppHandle,
+    a: String,
+    b: String,
+) -> Result<serde_json::Value, String> {
     for dir in [&a, &b] {
         if dir.contains('\0') || !PathBuf::from(dir).is_absolute() {
             return Err("研究目录须为绝对路径".into());
         }
     }
-    let out = capture_async(vec!["study-compare".into(), a, b]).await?;
-    serde_json::from_str(out.trim()).map_err(|e| format!("cannot read study-compare output: {e}"))
+    let mut event = crate::history::start(
+        "study-compare",
+        Some(&a),
+        serde_json::json!({"action":"study-compare","a":a,"b":b}),
+    )?;
+    let result = async {
+        let left = verified_study_side(&app, &a).await?;
+        let right = verified_study_side(&app, &b).await?;
+        compare_verified_study_sides(left, right)
+    }
+    .await;
+    if let Ok(value) = &result {
+        event.detail["comparison"] = serde_json::json!({"same_design":value["same_design"],"same_inputs":value["same_inputs"],"inputs_verified":value["inputs_verified"],"better":value["better"],"period":value["period"]});
+    }
+    crate::history::finish(&event, result, "succeeded")
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct StudyComparisonSide {
+    study: String,
+    version: String,
+    head: Option<String>,
+    status: String,
+    best_member: Option<String>,
+    calibration: Option<f64>,
+    validation: Option<f64>,
+    baseline_calibration: Option<f64>,
+    baseline_validation: Option<f64>,
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerifiedStudySide {
+    schema: u32,
+    side: StudyComparisonSide,
+    spec: serde_json::Value,
+    input_identity: Option<serde_json::Value>,
+    verified: bool,
+    notes: Vec<String>,
+}
+
+async fn verified_study_side(
+    app: &tauri::AppHandle,
+    dir: &str,
+) -> Result<VerifiedStudySide, String> {
+    let canonical =
+        std::fs::canonicalize(dir).map_err(|e| format!("cannot open Study for comparison: {e}"))?;
+    let dir = canonical.to_str().ok_or("Study path is not UTF-8")?;
+    let config = crate::remote::remote_config(app.clone());
+    let mut recorded_remote = false;
+    for file in [".colm-remote-study.json", ".colm-remote-study-pending.json"] {
+        match std::fs::symlink_metadata(PathBuf::from(dir).join(file)) {
+            Ok(_) => {
+                recorded_remote = true;
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(format!("cannot inspect Study connection binding: {error}")),
+        }
+    }
+    let server = if recorded_remote {
+        Some(crate::remote::study_server(&config, dir)?)
+    } else {
+        None
+    };
+    // Separate sidecars keep each captured SSH connection out of the other side's auth state.
+    let value = crate::remote::ssh_cli_json(
+        vec!["study-verified-side".into(), dir.into()],
+        crate::remote::resource_dir(app),
+        server.as_ref(),
+    )
+    .await?;
+    let side: VerifiedStudySide =
+        serde_json::from_value(value).map_err(|e| format!("invalid verified Study side: {e}"))?;
+    if side.schema != 1 {
+        return Err("unsupported verified Study side schema".into());
+    }
+    if !side.spec.is_object() || side.side.study != dir {
+        return Err("verified Study side does not match the requested Study".into());
+    }
+    Ok(side)
+}
+
+fn same_study_inputs(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    if a["schema"] != 1 || b["schema"] != 1 {
+        return false;
+    }
+    let (Some(left), Some(right), Some(left_obs), Some(right_obs)) = (
+        a["base_cases"].as_object(),
+        b["base_cases"].as_object(),
+        a["observations"].as_object(),
+        b["observations"].as_object(),
+    ) else {
+        return false;
+    };
+    let sha = |value: &serde_json::Value| {
+        value
+            .as_str()
+            .is_some_and(|value| value.len() == 64 && value.bytes().all(|c| c.is_ascii_hexdigit()))
+    };
+    !left.is_empty()
+        && left.len() == right.len()
+        && left_obs.len() == right_obs.len()
+        && left.iter().all(|(site, a)| {
+            right.get(site).is_some_and(|b| {
+                a["schema"] == 1
+                    && b["schema"] == 1
+                    && a["complete"] == true
+                    && b["complete"] == true
+                    && a["algorithm"] == "sha256-full-v1"
+                    && b["algorithm"] == a["algorithm"]
+                    && sha(&a["data_sha256"])
+                    && a["data_sha256"] == b["data_sha256"]
+                    && a["data_settings"].is_object()
+                    && a["data_settings"] == b["data_settings"]
+                    && a["unresolved"].as_array().is_some_and(Vec::is_empty)
+                    && b["unresolved"].as_array().is_some_and(Vec::is_empty)
+            })
+        })
+        && left_obs.iter().all(|(site, a)| {
+            right_obs.get(site).is_some_and(|b| {
+                sha(&a["sha256"])
+                    && a["sha256"] == b["sha256"]
+                    && a["bytes"].as_u64().is_some()
+                    && a["bytes"] == b["bytes"]
+            })
+        })
+}
+
+fn comparison_design(spec: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let mut value = spec.clone();
+    let map = value
+        .as_object_mut()
+        .ok_or("Study design must be an object")?;
+    map.remove("kernel_dir");
+    let observations = map
+        .get("observations")
+        .and_then(serde_json::Value::as_object)
+        .ok_or("Study design has no observation mapping")?;
+    let mut sites = observations.keys().cloned().collect::<Vec<_>>();
+    sites.sort();
+    map.insert("observations".into(), serde_json::json!(sites));
+    Ok(value)
+}
+
+fn compare_verified_study_sides(
+    left: VerifiedStudySide,
+    right: VerifiedStudySide,
+) -> Result<serde_json::Value, String> {
+    if left.schema != 1 || right.schema != 1 {
+        return Err("unsupported verified Study side schema".into());
+    }
+    let same_design = comparison_design(&left.spec)? == comparison_design(&right.spec)?;
+    let inputs_verified = left.verified
+        && right.verified
+        && left
+            .input_identity
+            .as_ref()
+            .zip(right.input_identity.as_ref())
+            .is_some_and(|(a, b)| same_study_inputs(a, a) && same_study_inputs(b, b));
+    let same_inputs = inputs_verified
+        && left
+            .input_identity
+            .as_ref()
+            .zip(right.input_identity.as_ref())
+            .is_some_and(|(a, b)| same_study_inputs(a, b));
+    let mut notes = left.notes;
+    notes.extend(right.notes);
+    if !same_design {
+        notes.push("the Studies differ in parameters, budget, seed, targets or periods; no version winner is reported".into());
+    }
+    if !inputs_verified {
+        notes.push("full scientific input, observation and output identities could not be verified; no version winner is reported".into());
+    } else if !same_inputs {
+        notes.push("the Studies use different scientific input or observation contents; no version winner is reported".into());
+    }
+    if left.side.version == right.side.version {
+        notes.push("both Studies use the same model version".into());
+    }
+    let has_validation = left.side.validation.is_some() && right.side.validation.is_some();
+    if !has_validation {
+        notes.push("no validation score on both sides; comparison uses the calibration period and does not establish independent validation improvement".into());
+    }
+    let (a, b) = if has_validation {
+        (left.side.validation, right.side.validation)
+    } else {
+        (left.side.calibration, right.side.calibration)
+    };
+    let better = match (a, b) {
+        (Some(a), Some(b)) if same_design && same_inputs && a.is_finite() && b.is_finite() => {
+            Some(if (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0) {
+                "tie"
+            } else if a < b {
+                "a"
+            } else {
+                "b"
+            })
+        }
+        _ => None,
+    };
+    if same_design && same_inputs && better.is_none() {
+        notes.push("at least one Study has no finite best-member score".into());
+    }
+    Ok(
+        serde_json::json!({"a":left.side,"b":right.side,"same_design":same_design,"same_inputs":same_inputs,"inputs_verified":inputs_verified,"period":if has_validation { "validation" } else { "calibration" },"better":better,"notes":notes}),
+    )
 }
 
 #[tauri::command]
-pub async fn study_create_json(case_root: String, spec_json: String) -> Result<String, String> {
-    capture_study_spec("study-create", case_root, spec_json).await
+pub async fn study_create_json(
+    case_root: String,
+    spec_json: String,
+    model_revision: Option<colm_model::VersionRef>,
+) -> Result<String, String> {
+    capture_study_spec("study-create", case_root, spec_json, model_revision).await
 }
 
 #[tauri::command]
-pub async fn study_preflight_json(case_root: String, spec_json: String) -> Result<String, String> {
-    capture_study_spec("study-preflight", case_root, spec_json).await
+pub async fn study_preflight_json(
+    case_root: String,
+    spec_json: String,
+    model_revision: Option<colm_model::VersionRef>,
+) -> Result<String, String> {
+    capture_study_spec("study-preflight", case_root, spec_json, model_revision).await
 }
 
 async fn capture_study_spec(
     command: &str,
     case_root: String,
     spec_json: String,
+    model_revision: Option<colm_model::VersionRef>,
 ) -> Result<String, String> {
     let path = write_temp_study_spec(&spec_json)?;
-    let result = capture_async(vec![
+    let mut args = vec![
         command.to_string(),
         case_root,
         "--spec".into(),
         path.display().to_string(),
-    ])
-    .await;
+    ];
+    let result = match crate::model::options(&mut args, model_revision.as_ref()) {
+        Ok(()) => capture_async(args).await,
+        Err(error) => Err(error),
+    };
     let _ = std::fs::remove_file(path);
     result
 }
@@ -2239,16 +2519,18 @@ pub async fn study_run(
     retry_failed: Option<bool>,
     engine: Option<String>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
 ) -> Result<String, String> {
     validate_engine(engine.as_deref())?;
     validate_model_version(model_version.as_deref())?;
     let key = study_process_key(&study_dir);
-    processes.prepare(std::slice::from_ref(&key))?;
     let mut args = study_run_args(study_dir, kernel, stream, jobs, retry_failed, engine);
     // 研究第一次给修改版时拍快照，之后续跑沿用（`colm-cli study-run --model-version`）；官方版不加参数。
     if let Some(version) = model_version.filter(|v| v != "official") {
         args.extend(["--model-version".into(), version]);
     }
+    crate::model::options(&mut args, model_revision.as_ref())?;
+    processes.prepare(std::slice::from_ref(&key))?;
     let processes = processes.inner().clone();
     tauri::async_runtime::spawn_blocking(move || study_run_blocking(app, processes, args))
         .await
@@ -2319,6 +2601,19 @@ fn append_study_event(study_dir: &str, payload: &serde_json::Value) {
 }
 
 fn study_run_blocking(
+    app: tauri::AppHandle,
+    processes: RunProcesses,
+    args: Vec<String>,
+) -> Result<String, String> {
+    let mut args = args;
+    let event = crate::history::command_start(&args)?;
+    if let Some(event) = &event {
+        args.extend(["--operation-id".into(), event.operation_id.clone()]);
+    }
+    let result = study_run_untracked(app, processes, args);
+    crate::history::command_finish(event.as_ref(), result, "succeeded")
+}
+fn study_run_untracked(
     app: tauri::AppHandle,
     processes: RunProcesses,
     args: Vec<String>,
@@ -2505,17 +2800,48 @@ pub async fn hybrid_info(case: String) -> Result<String, String> {
 
 /// 在算例上空跑模型（不模拟），JSON：各插槽的行数与特征、输出的范围。
 #[tauri::command]
-pub async fn hybrid_check(case: String, kernel_dir: String) -> Result<String, String> {
-    capture_async(hybrid_check_args(case, kernel_dir)).await
+pub async fn hybrid_check(
+    case: String,
+    kernel_dir: String,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
+) -> Result<String, String> {
+    capture_async(hybrid_check_args(
+        case,
+        kernel_dir,
+        model_revision.as_ref(),
+        preprocessors.as_deref(),
+    )?)
+    .await
 }
 
-fn hybrid_check_args(case: String, kernel_dir: String) -> Vec<String> {
-    vec![
-        "hybrid-check".to_string(),
+fn hybrid_check_args(
+    case: String,
+    kernel_dir: String,
+    model_revision: Option<&colm_model::VersionRef>,
+    preprocessors: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut args = vec![
+        if model_revision.is_some() {
+            "model-hybrid-check"
+        } else {
+            "hybrid-check"
+        }
+        .to_string(),
         case,
         "--kernel".into(),
         kernel_dir,
-    ]
+    ];
+    if model_revision.is_some() {
+        crate::model::options(&mut args, model_revision)?;
+        if let Some(value) = preprocessors {
+            if !matches!(value, "rust" | "fortran") {
+                return Err("preprocessors must be rust or fortran".into());
+            }
+            args.extend(["--preprocessors".into(), value.into()]);
+        }
+    }
+    Ok(args)
 }
 
 /// 把同一个模型装到每个算例上。参数名用 `dirs`：`ipc.js` 据此拦下正在运行的算例。
@@ -2738,6 +3064,19 @@ pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
 ///
 /// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
 pub(crate) fn capture(args: &[String]) -> Result<String, String> {
+    let mut args = args.to_vec();
+    if !args.iter().any(|a| a == "--history-db") {
+        crate::model::options(&mut args, None)?;
+    }
+    let mut event = crate::history::command_start(&args)?;
+    if let Some(event) = &event {
+        args.extend(["--operation-id".into(), event.operation_id.clone()]);
+    }
+    let result = capture_untracked(&args);
+    let status = crate::history::capture_audit_status(event.as_mut(), &result);
+    crate::history::command_finish(event.as_ref(), result, status)
+}
+fn capture_untracked(args: &[String]) -> Result<String, String> {
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
     let out = cmd
@@ -2754,3 +3093,15 @@ pub(crate) fn capture(args: &[String]) -> Result<String, String> {
 #[cfg(test)]
 #[path = "sidecar_tests.rs"]
 mod sidecar_tests;
+
+/// Preserve the CLI's default while rejecting misspelled explicit selections.
+pub(crate) fn add_preprocessors(args: &mut Vec<String>, value: Option<&str>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some("rust" | "fortran") => {
+            args.extend(["--preprocessors".into(), value.unwrap().into()]);
+            Ok(())
+        }
+        Some(_) => Err("preprocessors must be rust or fortran".into()),
+    }
+}

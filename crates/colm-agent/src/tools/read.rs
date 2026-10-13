@@ -162,7 +162,11 @@ impl Tool for ReadCaseConfig {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let current = ctx.selected_context()?;
+        let ctx = &current;
         let dir = case_dir(ctx, args, "case")?;
+        let effective = ctx.effective_case(&dir)?;
+        let dir = &effective.dir;
         let names: Vec<String> = args["names"]
             .as_array()
             .map(|a| {
@@ -183,7 +187,11 @@ impl Tool for ReadCaseConfig {
         let case = read_document(&dir.join("case.nml"))?;
         let mut files = vec![("case.nml".to_owned(), case.clone())];
         if let Some(colm_namelist::Value::Str(forcing)) = case.get("DEF_forcing_namelist") {
-            let path = ctx.resolve(forcing);
+            let path = if Path::new(forcing).is_absolute() {
+                PathBuf::from(forcing)
+            } else {
+                dir.join(forcing)
+            };
             if let Ok(document) = read_document(&path) {
                 files.push(("forcing.nml".to_owned(), document));
             }
@@ -201,7 +209,20 @@ impl Tool for ReadCaseConfig {
             }
             out.insert(file.clone(), fields);
         }
-        Ok(json!({ "case": dir.display().to_string(), "fields": out, "mode": land_mode(&case) }))
+        let overrides = ctx
+            .model_context
+            .as_ref()
+            .and_then(|model| model.model["overlay"]["parameters"].as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter(|row| row["raw_key"].as_str().is_some_and(wanted))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            });
+        Ok(
+            json!({ "case": effective.original, "fields": out, "mode": land_mode(&case),
+            "model_version":ctx.model_context.as_ref().map(|model| &model.model["version"]),"model_overrides":overrides }),
+        )
     }
 }
 
@@ -224,6 +245,8 @@ impl Tool for ExplainParameter {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let name = req_str(args, "name")?;
         let descriptor = colm_case::parameters::find(name).map(|d| {
             json!({
@@ -242,7 +265,7 @@ impl Tool for ExplainParameter {
             })
         });
         if descriptor.is_none() && field.is_none() {
-            bail!("{name} is neither a namelist field nor a catalogued parameter. Read get_case_config for an existing case or search_code to discover exact field names; do not guess aliases. Spin-up uses DEF_simulation_time%spinup_year/month/day/sec/repeat; spinup_year is a cutoff year, not a duration. In the window, use basic-timing controls tm-years/tm-repeat to edit the duration.");
+            bail!("{name} is neither a namelist field nor a catalogued parameter. Read read_case_config for an existing case or search_code to discover exact field names; do not guess aliases. Spin-up uses DEF_simulation_time%spinup_year/month/day/sec/repeat; spinup_year is a cutoff year, not a duration. Use the visible case settings returned by ui_state to edit spin-up.");
         }
         let parameter = colm_case::parameters::find(name);
         let key = parameter.map_or(name, |p| p.raw_key.as_str());
@@ -251,11 +274,35 @@ impl Tool for ExplainParameter {
             "status": "unknown", "reason": "no case supplied",
             "calibration_eligible_for_case": null,
         });
-        if opt_str(args, "case").is_some() {
-            let dir = case_dir(ctx, args, "case")?;
+        let supplied = opt_str(args, "case")
+            .map(|path| ctx.resolve(path))
+            .or_else(|| {
+                ctx.model_context
+                    .as_ref()
+                    .and_then(|model| model.source_case.clone())
+            });
+        if let Some(original) = supplied {
+            let original = if original.ends_with("case.nml") {
+                original
+                    .parent()
+                    .context("case has no parent")?
+                    .to_path_buf()
+            } else {
+                original
+            };
+            let effective = ctx.effective_case(&original)?;
+            let dir = &effective.dir;
             let document = read_document(&dir.join("case.nml"))?;
             current = document.get(key).map(ToString::to_string);
-            applicability = parameter_applicability(ctx, &dir, &document, key)?;
+            applicability = parameter_applicability(ctx, dir, &document, key)?;
+            if let Some(model) = &ctx.model_context {
+                let application = ctx.cli_json(&["ws-source-info", "--source", "app"]).ok();
+                if application.as_ref().map(|source| &source["content_sha256"])
+                    != Some(&model.model["code"]["source_sha256"])
+                {
+                    applicability = json!({"status":"unknown","reason":"app catalogue/activity validator does not establish applicability in this frozen source; inspect the selected source with search_code/read_file","calibration_eligible_for_case":null});
+                }
+            }
             if applicability["status"] == "active" {
                 applicability["calibration_eligible_for_case"] =
                     json!(parameter.map(|p| p.calibration_eligible));
@@ -265,7 +312,10 @@ impl Tool for ExplainParameter {
         }
         Ok(
             json!({ "parameter": descriptor, "field": field, "current_value": current,
-            "applicability": applicability }),
+            "applicability": applicability,"catalog_source":"application_package",
+            "model_version":ctx.model_context.as_ref().map(|model| &model.model["version"]),
+            "model_overrides":ctx.model_context.as_ref().and_then(|model| model.model["overlay"]["parameters"].as_array())
+                .map(|rows| rows.iter().filter(|row| row["raw_key"].as_str().is_some_and(|raw|raw.eq_ignore_ascii_case(key))).cloned().collect::<Vec<_>>()) }),
         )
     }
 }
@@ -716,8 +766,16 @@ impl Tool for HybridInfo {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let dir = case_dir(ctx, args, "case")?;
-        ctx.cli_json(&["hybrid-info", &dir.display().to_string()])
+        let effective = ctx.effective_case(&dir)?;
+        let mut result = ctx.cli_json(&["hybrid-info", &effective.dir.display().to_string()])?;
+        result["model_version"] = json!(ctx
+            .model_context
+            .as_ref()
+            .map(|model| &model.model["version"]));
+        Ok(result)
     }
 }
 
@@ -737,11 +795,25 @@ impl Tool for HybridCheck {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let dir = case_dir(ctx, args, "case")?;
         let kernel = ctx
             .kernel_dir
             .as_ref()
             .context("no kernel is selected; choose one in Basic setup")?;
+        if let Some(model) = &ctx.model_context {
+            let mut args = model.args("model-hybrid-check")?;
+            args.extend([
+                dir.display().to_string(),
+                "--kernel".into(),
+                kernel.display().to_string(),
+            ]);
+            if let Some(preprocessors) = &ctx.preprocessors {
+                args.extend(["--preprocessors".into(), preprocessors.clone()]);
+            }
+            return ctx.cli_json(&args.iter().map(String::as_str).collect::<Vec<_>>());
+        }
         ctx.cli_json(&[
             "hybrid-check",
             &dir.display().to_string(),
@@ -758,31 +830,51 @@ impl Tool for SearchDocs {
         "search_docs"
     }
     fn description(&self) -> &'static str {
-        "Search documentation and generated knowledge for the app (name=null) or a development workspace. Checks actual source hashes, withholds obsolete assertions and returns fresh source evidence. On changed or uncovered topics inspect source then automatically rewrite a scoped card with knowledge_update; AI drafts are never scientific validation. Use remote_workspace_knowledge for server edits."
+        "Search preserved documentation and generated knowledge for the selected frozen model (name=null; app without a selection), or explicitly named mutable development code. Missing frozen documents never fall back to current app documents. Checks source hashes and withholds obsolete assertions. Use exact returned scope for knowledge_update; AI drafts are not scientific validation. Use remote_workspace_knowledge for server edits."
     }
     fn parameters(&self) -> Value {
         object(
-            json!({ "query": string("case-insensitive text to find"), "name": nullable_string("development workspace name, or null for application source") }),
+            json!({ "query": string("case-insensitive text to find"), "name": nullable_string("mutable development workspace name, or null for selected frozen model source") }),
         )
     }
     fn tier(&self) -> Tier {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let query = req_str(args, "query")?.to_lowercase();
         if query.len() > 1024 {
             bail!("documentation query exceeds 1024 bytes");
         }
-        let root = ctx
-            .docs_root
-            .as_ref()
-            .context("no documentation directory is configured")?;
         let name = opt_str(args, "name");
-        let provenance = documentation_provenance(ctx, name);
-        let bindings = knowledge::Bindings::load(root, &provenance["knowledge_source"]);
+        let mut provenance = documentation_provenance(ctx, name)?;
+        let root = if name.is_some() {
+            provenance["knowledge_source"]["source"]
+                .as_str()
+                .map(|source| Path::new(source).join("docs"))
+        } else {
+            match &ctx.model_context {
+                Some(model) => model.docs_dir.clone(),
+                None => ctx.docs_root.clone(),
+            }
+        };
+        provenance["docs_root"] = json!(root);
+        let scope = provenance["scope"].clone();
+        let drafts = if ctx.knowledge_root.is_some() {
+            super::knowledge_drafts::search(ctx, &scope, &query)?
+        } else {
+            Vec::new()
+        };
+        let Some(root) = root.filter(|root| root.is_dir()) else {
+            return Ok(
+                json!({"query":query,"matches":[],"knowledge_checks":{},"drafts":drafts,"scope":scope,"provenance":provenance,"documentation_status":"missing","reason":"No documentation snapshot is available for this selected source. Current application documents are not evidence for this frozen model; inspect its source with search_code/read_file."}),
+            );
+        };
+        let bindings = knowledge::Bindings::load(&root, &provenance["knowledge_source"]);
         let mut knowledge_checks = BTreeMap::new();
         let mut hits = Vec::new();
-        let mut files: Vec<PathBuf> = std::fs::read_dir(root)
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&root)
             .with_context(|| format!("cannot read {}", root.display()))?
             .flatten()
             .map(|e| e.path())
@@ -822,12 +914,6 @@ impl Tool for SearchDocs {
                 }
             }
         }
-        let scope = &provenance["scope"];
-        let drafts = if ctx.knowledge_root.is_some() {
-            super::knowledge_drafts::search(ctx, scope, &query)?
-        } else {
-            Vec::new()
-        };
         for check in knowledge_checks.values_mut() {
             for source in check["source_checks"].as_array_mut().into_iter().flatten() {
                 if !source["next_tool"].is_null() {
@@ -867,18 +953,24 @@ impl Tool for SearchDocs {
     }
 }
 
-fn documentation_provenance(ctx: &ToolContext, name: Option<&str>) -> Value {
-    let (scope, source) = knowledge::local_source(ctx, name).unwrap_or_else(|error| (
+fn documentation_provenance(ctx: &ToolContext, name: Option<&str>) -> Result<Value> {
+    let resolved = knowledge::local_source(ctx, name);
+    let (scope, source) = if ctx.model_context.is_some() && name.is_none() {
+        resolved?
+    } else {
+        resolved.unwrap_or_else(|error| (
         json!({"kind":if name.is_some() {"workspace"} else {"app"},"name":name,"host":null,"source":null}),
         json!({"version_status":"unknown","revision":null,"tag":null,"dirty":null,"reason":error.to_string()})
-    ));
-    json!({
+    ))
+    };
+    Ok(json!({
         "agent_package_version": env!("CARGO_PKG_VERSION"),
         "docs_root": ctx.docs_root,
-        "application_source": if name.is_none() {source.clone()} else {Value::Null},
+        "application_source": if name.is_none() && ctx.model_context.is_none() {source.clone()} else {Value::Null},
+        "selected_model":if name.is_none() {ctx.model_context.as_ref().map(|model| &model.model["version"])} else {None},
         "knowledge_source":source,"scope":scope,
-        "verification": "Use search_code/read_file with the same workspace name (null for app). Documentation and package version alone do not establish the selected simulation kernel revision.",
-    })
+        "verification": "Use search_code/read_file with the same source choice (null for selected frozen model; explicitly named workspaces are mutable). Documents and package version alone do not establish runtime sensitivity or applicability.",
+    }))
 }
 
 struct EnvironmentDoctor;

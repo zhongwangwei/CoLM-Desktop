@@ -50,6 +50,7 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
             name,
         });
     }
+    crate::history::import_project_metadata(&root)?;
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -60,6 +61,9 @@ pub struct CaseProfile {
     pub spatial: bool,
     /// `latlon` / `unstructured` / `catchment`；站点为 `None`。
     pub grid: Option<&'static str>,
+    /// 地表分类独立于 PFT/PC 结构，避免结构覆盖 USGS 的内核身份。
+    pub classification: &'static str,
+    pub classification_source: &'static str,
     /// `IGBP` / `USGS` / `PFT` / `PC`。
     pub subgrid: &'static str,
     /// `vg` / `campbell`。
@@ -313,6 +317,14 @@ pub(crate) fn case_profile(
     Ok(CaseProfile {
         spatial,
         grid,
+        classification: if usgs { "USGS" } else { "IGBP" },
+        classification_source: if macros.is_some() {
+            "kernel"
+        } else if mode.is_some() {
+            "creation"
+        } else {
+            "legacy-default"
+        },
         subgrid,
         soil: if logical(&doc, "DEF_USE_Campbell_SOIL_MODEL") {
             "campbell"
@@ -417,3 +429,23 @@ pub fn read_text(path: String) -> Result<String, String> {
 #[cfg(test)]
 #[path = "project_tests.rs"]
 mod project_tests;
+
+/// Open an existing local artifact with its platform-associated application.
+#[tauri::command]
+pub fn open_path(path: String) -> Result<(), String> {
+    let path = std::path::Path::new(&path)
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(target_os = "linux")]
+    let mut command = std::process::Command::new("xdg-open");
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer.exe");
+    let status = command.arg(path).status().map_err(|e| e.to_string())?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("could not open artifact: {status}"))
+    }
+}

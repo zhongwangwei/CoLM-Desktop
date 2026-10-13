@@ -19,7 +19,7 @@ pub(super) fn tools() -> Vec<Box<dyn Tool>> {
 
 fn scope_schema() -> Value {
     object(
-        json!({"kind":{"type":"string","enum":["app","workspace","remote"]},"name":{"type":["string","null"]},"host":{"type":["string","null"]},"source":{"type":["string","null"]}}),
+        json!({"kind":{"type":"string","enum":["app","workspace","model","remote"]},"name":{"type":["string","null"]},"host":{"type":["string","null"]},"source":{"type":["string","null"]}}),
     )
 }
 struct KnowledgeSources;
@@ -39,6 +39,8 @@ impl Tool for KnowledgeSources {
         Tier::Read
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let values = args["paths"].as_array().context("paths must be an array")?;
         ensure!(
             (1..=16).contains(&values.len()),
@@ -90,6 +92,8 @@ impl Tool for KnowledgeUpdate {
         )
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
+        let selected = ctx.selected_context()?;
+        let ctx = &selected;
         let root = ctx
             .knowledge_root
             .as_deref()

@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "model_configuration.rs"]
+pub(crate) mod model_configuration;
+
 /// 把源码 namelist 字段放进用户看得懂的功能分组。
 ///
 /// 返回 `None` 不是「其他」：测试要求当前 CoLM 源码里一个都不能剩。
@@ -24,7 +27,10 @@ pub(crate) fn field_section(name: &str, group: Option<&str>) -> Option<&'static 
 /// 找错了 sidecar 也看不出来 —— 实测就发生过：Tauri 把 sidecar 放进
 /// `Contents/MacOS/`，而当时的代码找的是 `Contents/Resources/`。
 #[tauri::command]
-pub fn backend_ready() -> String {
+pub async fn backend_ready(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || crate::history::bootstrap(&app))
+        .await
+        .map_err(|e| e.to_string())??;
     let msg = format!(
         "backend reachable — {} configuration fields known",
         colm_schema::all().len()
@@ -34,7 +40,7 @@ pub fn backend_ready() -> String {
         "colm-desktop: the page reached the backend; {msg}; colm-cli resolved to {}",
         cli.display()
     );
-    msg
+    Ok(msg)
 }
 
 /// 前端把话说到 stderr。**这是这台机器上 GUI 唯一可靠的观察通道** ——
@@ -1315,6 +1321,15 @@ fn validate_runtime_contract(
     case_dir: &std::path::Path,
     kernel: Option<KernelFacts>,
 ) -> Result<(), String> {
+    validate_runtime_contract_at(doc, case_dir, case_dir, kernel)
+}
+
+fn validate_runtime_contract_at(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    model_asset_dir: &std::path::Path,
+    kernel: Option<KernelFacts>,
+) -> Result<(), String> {
     validate_expert_tuning(
         doc,
         colm_schema::all()
@@ -1505,7 +1520,7 @@ fn validate_runtime_contract(
         }
     }
     // 甲烷淹没方案与动态湿地、河湖汇流必须一致（`configure_methane_inundation_mode` 不一致就停机）。
-    if let Some(mode) = methane_mode(doc, case_dir) {
+    if let Some(mode) = methane_mode(doc, model_asset_dir) {
         let (_, dynamic, river) = methane_mode_facts(&mode).ok_or_else(|| {
             format!(
                 "甲烷淹没方案 {mode} 不认识；可选 wetwat、satellite、routing、dynamic_wtd、hybrid"
@@ -3383,6 +3398,14 @@ fn process_code_defaults() -> Vec<ProcessCodeDefault> {
 fn process_entries(path: &std::path::Path, file_id: String) -> Result<ProcessParamFile, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let doc = colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", path.display()))?;
+    process_entries_document(&doc, file_id)
+}
+
+fn process_entries_document(
+    doc: &colm_namelist::Document,
+    file_id: String,
+) -> Result<ProcessParamFile, String> {
+    let path = std::path::Path::new(&file_id);
     let name = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -3830,6 +3853,15 @@ pub fn reset_process_parameter_field_batch(
 }
 
 fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    let event = crate::history::start(
+        "case-config-save",
+        None,
+        serde_json::json!({"paths": done.iter().map(|(path, _)| path).collect::<Vec<_>>()}),
+    )?;
+    let result = write_files_atomic_untracked(done);
+    crate::history::finish(&event, result, "succeeded")
+}
+fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
     use std::io::Write as _;
 
     fn replace(staged: &std::path::Path, target: &std::path::Path) -> std::io::Result<()> {
@@ -4373,6 +4405,15 @@ pub fn set_fields_batch(
     fields: Vec<FieldChange>,
     kernel_dir: Option<String>,
 ) -> Result<BatchWrite, String> {
+    set_fields_with_context(dirs, fields, kernel_dir, None)
+}
+
+fn set_fields_with_context(
+    dirs: Vec<String>,
+    fields: Vec<FieldChange>,
+    kernel_dir: Option<String>,
+    contexts: Option<&[String]>,
+) -> Result<BatchWrite, String> {
     if fields.is_empty() {
         return Err("没有要保存的字段".into());
     }
@@ -4385,7 +4426,7 @@ pub fn set_fields_batch(
     let all = read_all(&dirs)?;
     let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
     let mut extra: Vec<(std::path::PathBuf, String)> = Vec::new();
-    for (d, text) in all {
+    for (index, (d, text)) in all.into_iter().enumerate() {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
@@ -4398,9 +4439,33 @@ pub fn set_fields_batch(
                 &history,
             )?);
         }
-        validate_runtime_contract(&doc, std::path::Path::new(&d), kernel)
-            .map_err(|e| format!("{d}: {e}"))?;
-        validate_changed_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
+        let effective;
+        let validation = if let Some(contexts) = contexts {
+            let context = contexts
+                .get(index)
+                .ok_or("missing model validation context")?;
+            let text = std::fs::read_to_string(std::path::Path::new(context).join("case.nml"))
+                .map_err(|e| e.to_string())?;
+            let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+            for field in &fields {
+                put(&mut overlay, &field.path, typed(&field.path, &field.value)?)
+                    .map_err(|e| e.to_string())?;
+            }
+            effective = overlay;
+            &effective
+        } else {
+            &doc
+        };
+        // Model process files belong to the preview; newly edited data paths belong to the source.
+        let model_dir = contexts.and_then(|dirs| dirs.get(index)).unwrap_or(&d);
+        validate_runtime_contract_at(
+            validation,
+            std::path::Path::new(&d),
+            std::path::Path::new(model_dir),
+            kernel,
+        )
+        .map_err(|e| format!("{d}: {e}"))?;
+        validate_changed_fields(validation, &fields).map_err(|e| format!("{d}: {e}"))?;
         done.push((d, doc.to_string()));
     }
     if extra.is_empty() {
@@ -4727,4 +4792,38 @@ pub fn set_spinup(
         done.push((d, doc.to_string()));
     }
     write_all(&done)
+}
+
+/// Save only case-owned fields, validating against the selected immutable model.
+#[tauri::command]
+pub async fn case_data_save(
+    dirs: Vec<String>,
+    fields: Vec<FieldChange>,
+    kernel_dir: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+) -> Result<BatchWrite, String> {
+    if let Some(field) = fields.iter().find(|f| colm_model::is_model_field(&f.path)) {
+        return Err(format!(
+            "{} belongs to a model draft, not case data",
+            field.path
+        ));
+    }
+    let before = read_all(&dirs)?;
+    let mut contexts = Vec::new();
+    let result = async {
+        for dir in &dirs {
+            let context =
+                crate::model::model_case_context(dir.clone(), model_revision.clone()).await?;
+            contexts.push(context.entry.dir);
+        }
+        if read_all(&dirs)? != before {
+            return Err("case data changed while validating; reload before saving".into());
+        }
+        set_fields_with_context(dirs, fields, kernel_dir, Some(&contexts))
+    }
+    .await;
+    for context in contexts {
+        let _ = std::fs::remove_dir_all(context);
+    }
+    result
 }

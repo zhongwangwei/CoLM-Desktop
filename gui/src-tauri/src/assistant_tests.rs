@@ -1,6 +1,72 @@
 use super::*;
 
 #[test]
+fn ui_request_ids_are_scoped_to_the_live_assistant_process() {
+    let mut pending = PendingUiRequests {
+        generation: 7,
+        ..Default::default()
+    };
+    let mut first = json!({"type":"ui_request","id":"ui-1","action":"state"});
+    register_ui_request(&mut pending, 7, &mut first).unwrap();
+    assert_eq!(first["id"], "7:ui-1");
+    let mut duplicate = json!({"id":"ui-1","action":"state"});
+    assert!(register_ui_request(&mut pending, 7, &mut duplicate).is_err());
+    pending.generation = 8;
+    pending.requests.clear();
+    let mut second = json!({"id":"ui-1","action":"state"});
+    assert!(register_ui_request(&mut pending, 7, &mut second).is_err());
+    register_ui_request(&mut pending, 8, &mut second).unwrap();
+    assert!(pending.requests.remove("7:ui-1").is_none());
+    assert_eq!(
+        pending.requests.remove("8:ui-1").unwrap().original_id,
+        "ui-1"
+    );
+    assert!(pending.requests.remove("8:ui-1").is_none());
+}
+
+#[test]
+fn stopping_invalidates_outstanding_ui_requests_even_without_a_child() {
+    let process = AssistantProcess::default();
+    {
+        let mut pending = process.ui_requests.lock().unwrap();
+        let mut request = json!({"id":"ui-1","action":"state"});
+        register_ui_request(&mut pending, 0, &mut request).unwrap();
+        let mut approval = json!({"id":"call-1","type":"approval_request"});
+        register_approval_request(&mut pending, 0, &mut approval).unwrap();
+    }
+    process.stop();
+    let pending = process.ui_requests.lock().unwrap();
+    assert_eq!(pending.generation, 1);
+    assert!(pending.requests.is_empty());
+    assert!(pending.approvals.is_empty());
+}
+
+#[test]
+fn an_old_approval_or_response_cannot_reach_the_restarted_child() {
+    let process = AssistantProcess::default();
+    {
+        let mut pending = process.ui_requests.lock().unwrap();
+        let mut first = json!({"id":"call-1"});
+        register_approval_request(&mut pending, 0, &mut first).unwrap();
+        let mut duplicate = json!({"id":"call-1"});
+        assert!(register_approval_request(&mut pending, 0, &mut duplicate).is_err());
+    }
+    process.stop();
+    {
+        let mut pending = process.ui_requests.lock().unwrap();
+        let mut second = json!({"id":"call-1"});
+        register_approval_request(&mut pending, 1, &mut second).unwrap();
+        assert_eq!(second["id"], "1:call-1");
+        assert!(pending.approvals.remove("0:call-1").is_none());
+        assert_eq!(pending.approvals.remove("1:call-1"), Some("call-1".into()));
+    }
+    assert_eq!(
+        send_in_generation(&process, Some(0), &json!({})).unwrap_err(),
+        "stale assistant response"
+    );
+}
+
+#[test]
 fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     let settings = AssistantSettings::default();
     assert_eq!(settings.base_url, "https://api.deepseek.com");
@@ -97,7 +163,7 @@ fn settings_default_to_deepseek_and_only_accept_https_or_loopback() {
     let mut open_code = external("opencode", Some("deepseek/deepseek-flash"), Some("high"));
     open_code.backend = "opencode".into();
     assert!(validate_settings(&open_code).is_ok());
-    let configure = configure_message(&open_code, "/project", None, None);
+    let configure = configure_message(&open_code, "/project", None, None, None);
     assert_eq!(configure["backend"], "opencode");
     assert_eq!(configure["external"]["model"], "deepseek/deepseek-flash");
     for (effort, ok) in [
@@ -127,7 +193,7 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
         model: "claude-sonnet-5-5".into(),
         api_format: "anthropic".into(),
         reasoning_effort: Some("xhigh".into()),
-        api_options: json!({"temperature":0.2}),
+        api_options: json!({"temperature":1}),
         timeout_seconds: 60,
         max_output_tokens: 8192,
         ..AssistantSettings::default()
@@ -141,13 +207,13 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
         serde_json::from_value::<AssistantSettings>(serialized).unwrap(),
         settings
     );
-    let message = configure_message(&settings, "/p", None, None);
+    let message = configure_message(&settings, "/p", None, None, None);
     for (key, value) in [
         ("provider_id", json!("anthropic")),
         ("api_format", json!("anthropic")),
         ("max_output_tokens", json!(8192)),
         ("timeout_seconds", json!(60)),
-        ("api_options", json!({"temperature":0.2})),
+        ("api_options", json!({"temperature":1})),
     ] {
         assert_eq!(message["provider"][key], value);
     }
@@ -173,6 +239,231 @@ fn api_profiles_round_trip_and_reject_unsafe_overrides() {
     assert!(validate_settings(&invalid).is_err());
     settings.api_format = "unknown".into();
     assert!(validate_settings(&settings).is_err());
+}
+
+#[test]
+fn active_api_settings_reject_invalid_known_model_thinking_without_rewriting_old_profiles() {
+    for (provider, model, format, thinking, effort, options, valid) in [
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            "chat_completions",
+            None,
+            Some("minimal"),
+            json!({}),
+            false,
+        ),
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            "chat_completions",
+            None,
+            Some("low"),
+            json!({}),
+            true,
+        ),
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            "chat_completions",
+            None,
+            None,
+            json!({"reasoning_effort":"minimal"}),
+            false,
+        ),
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            "chat_completions",
+            None,
+            None,
+            json!({"extra_body":{"google":{"thinking_config":{"thinking_level":"minimal"}}}}),
+            false,
+        ),
+        (
+            "qwen",
+            "qwen3.8-flash",
+            "chat_completions",
+            None,
+            Some("medium"),
+            json!({}),
+            true,
+        ),
+        (
+            "qwen",
+            "qwen3.8-flash",
+            "chat_completions",
+            Some(false),
+            None,
+            json!({}),
+            true,
+        ),
+        (
+            "qwen",
+            "qwen3.8-flash",
+            "chat_completions",
+            None,
+            Some("low"),
+            json!({"thinking_budget":4096}),
+            false,
+        ),
+        (
+            "openai",
+            "gpt-6.1-sol",
+            "responses",
+            Some(false),
+            None,
+            json!({}),
+            false,
+        ),
+        (
+            "openai",
+            "gpt-6.1-sol",
+            "responses",
+            None,
+            None,
+            json!({"reasoning":{"effort":"none"}}),
+            false,
+        ),
+        (
+            "openai",
+            "gpt-6.1-sol",
+            "responses",
+            None,
+            Some("high"),
+            json!({}),
+            true,
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            "anthropic",
+            Some(false),
+            None,
+            json!({}),
+            false,
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            "anthropic",
+            None,
+            Some("low"),
+            json!({"thinking":{"type":"between_tools"}}),
+            true,
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            "anthropic",
+            None,
+            Some("max"),
+            json!({"thinking":{"type":"between_tools"}}),
+            false,
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            "anthropic",
+            None,
+            None,
+            json!({"thinking":{"type":"disabled"}}),
+            false,
+        ),
+        (
+            "glm",
+            "glm-5.3",
+            "chat_completions",
+            Some(false),
+            None,
+            json!({}),
+            false,
+        ),
+        (
+            "kimi",
+            "kimi-k3",
+            "chat_completions",
+            Some(false),
+            None,
+            json!({}),
+            false,
+        ),
+        (
+            "openai",
+            "future-model",
+            "responses",
+            Some(false),
+            Some("future_effort"),
+            json!({}),
+            true,
+        ),
+    ] {
+        let settings = AssistantSettings {
+            provider_id: provider.into(),
+            model: model.into(),
+            api_format: format.into(),
+            thinking,
+            reasoning_effort: effort.map(str::to_owned),
+            api_options: options,
+            ..AssistantSettings::default()
+        };
+        assert_eq!(
+            validate_settings(&settings).is_ok(),
+            valid,
+            "{model}: {settings:?}"
+        );
+    }
+    let old = AssistantSettings {
+        provider_id: "openai".into(),
+        model: "gpt-6.1-sol".into(),
+        api_format: "responses".into(),
+        thinking: Some(false),
+        ..AssistantSettings::default()
+    };
+    let mut settings = AssistantSettings::default();
+    settings
+        .api_profiles
+        .insert("openai".into(), old.api_profile());
+    assert!(validate_settings(&settings).is_ok());
+    assert_eq!(settings.api_profiles["openai"].thinking, Some(false));
+    let external = AssistantSettings {
+        backend: "claude_code".into(),
+        ..old
+    };
+    assert!(validate_settings(&external).is_ok());
+}
+
+#[test]
+fn known_model_sampling_options_are_checked_while_custom_models_keep_explicit_options() {
+    let mut settings = AssistantSettings {
+        provider_id: "openai".into(),
+        model: "gpt-6.1-sol".into(),
+        api_format: "responses".into(),
+        ..AssistantSettings::default()
+    };
+    for key in ["temperature", "top_p", "top_logprobs", "logprobs"] {
+        settings.api_options = json!({key:1});
+        assert!(validate_settings(&settings).is_err(), "{key}");
+    }
+    settings.provider_id = "anthropic".into();
+    settings.model = "claude-sonnet-5-5".into();
+    settings.api_format = "anthropic".into();
+    settings.api_options = json!({"temperature":0.2});
+    assert!(validate_settings(&settings).is_err());
+    settings.api_options = json!({"temperature":1});
+    assert!(validate_settings(&settings).is_ok());
+    for (choice, valid) in [
+        ("auto", true),
+        ("none", true),
+        ("any", false),
+        ("tool", false),
+    ] {
+        settings.api_options = json!({"tool_choice":{"type":choice}});
+        assert_eq!(validate_settings(&settings).is_ok(), valid, "{choice}");
+    }
+    settings.model = "future-model".into();
+    settings.api_options = json!({"temperature":0.2,"tool_choice":{"type":"any"}});
+    assert!(validate_settings(&settings).is_ok());
 }
 
 #[test]
@@ -202,7 +493,7 @@ fn configure_messages_match_the_agent_protocol_and_carry_no_key() {
         .into(),
         ..AssistantSettings::default()
     };
-    let message = configure_message(&settings, "/p", Some("/k"), None);
+    let message = configure_message(&settings, "/p", Some("/k"), None, None);
     assert_eq!(message["type"], "configure");
     assert_eq!(message["provider"]["model"], "deepseek-flash");
     assert_eq!(message["provider"]["thinking"], false);
@@ -240,6 +531,8 @@ mod colm_agent_protocol {
             kernel_dir: Option<String>,
             #[serde(default)]
             docs_root: Option<String>,
+            #[serde(default)]
+            model_context: Option<serde_json::Value>,
             #[serde(default)]
             approval: Option<String>,
             #[serde(default)]
@@ -309,4 +602,24 @@ fn packaged_docs_take_precedence_over_a_checkout_in_the_working_directory() {
         Some(resources.join("docs"))
     );
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn selected_model_configure_carries_native_identity_without_rebinding_to_app_docs() {
+    let context = json!({"model":{"version":{"id":"soil-process","revision":1},"code":{"source_sha256":"a".repeat(64)}},"model_root":"/private/models","source_dir":"/private/frozen-source","docs_dir":null,"source_case":"/project/site"});
+    let message = configure_message(
+        &AssistantSettings::default(),
+        "/project",
+        None,
+        Some("/application/docs"),
+        Some(&context),
+    );
+    assert_eq!(message["model_context"], context);
+    assert_eq!(
+        message["model_context"]["docs_dir"],
+        serde_json::Value::Null
+    );
+    let parsed: colm_agent_protocol::Inbound = serde_json::from_value(message).unwrap();
+    let colm_agent_protocol::Inbound::Configure { model_context, .. } = parsed;
+    assert_eq!(model_context, Some(context));
 }

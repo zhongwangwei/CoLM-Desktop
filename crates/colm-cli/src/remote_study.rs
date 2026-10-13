@@ -34,6 +34,98 @@ use crate::Opts;
 
 /// 本机研究目录里的提交记录。
 pub(crate) const RECORD: &str = ".colm-remote-study.json";
+pub(crate) const PENDING: &str = ".colm-remote-study-pending.json";
+
+/// Submission intent survives an interrupted SSH response. Only status reads may use it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingStudy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ssh_auth: Option<colm_remote::auth::Connection>,
+    host: String,
+    root: String,
+    job: String,
+    remote_project: String,
+    #[serde(default)]
+    engine: Option<String>,
+    #[serde(default)]
+    provenance: Value,
+}
+
+fn check_study_location(host: &str, root: &str, job: &str, project: &str) -> Result<()> {
+    ensure!(
+        !host.is_empty()
+            && !host.starts_with('-')
+            && !host.contains(|c: char| c.is_whitespace() || c.is_control()),
+        "invalid recorded SSH host"
+    );
+    job::check_id(job)?;
+    ensure!(
+        root.starts_with('/')
+            && root != "/"
+            && !root.contains(|c: char| c.is_whitespace() || c.is_control())
+            && Path::new(root).components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "invalid recorded remote root"
+    );
+    ensure!(
+        project.starts_with(&format!("{root}/s/"))
+            && !project.contains(char::is_control)
+            && Path::new(project).components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "Study project is outside its recorded remote root"
+    );
+    Ok(())
+}
+
+fn read_pending(study_dir: &Path) -> Result<PendingStudy> {
+    let pending: PendingStudy = serde_json::from_slice(&std::fs::read(study_dir.join(PENDING))?)
+        .context("cannot parse pending remote Study submission")?;
+    check_study_location(
+        &pending.host,
+        &pending.root,
+        &pending.job,
+        &pending.remote_project,
+    )?;
+    if let Some(engine) = &pending.engine {
+        job::check_id(engine)?;
+    }
+    Ok(pending)
+}
+
+pub(crate) fn pending_status(study_dir: &Path) -> Result<Option<Value>> {
+    if study_dir.join(RECORD).exists() || !study_dir.join(PENDING).exists() {
+        return Ok(None);
+    }
+    let pending = read_pending(study_dir)?;
+    Ok(Some(json!({
+        "host": pending.host, "root": pending.root, "job": pending.job,
+        "remote_project": pending.remote_project, "needs_reconciliation": true,
+    })))
+}
+
+fn pending_identity_script(pending: &PendingStudy) -> Result<String> {
+    check_study_location(
+        &pending.host,
+        &pending.root,
+        &pending.job,
+        &pending.remote_project,
+    )?;
+    let marker = format!(
+        "# colm-study-root: {}",
+        serde_json::to_string(&pending.remote_project)?
+    );
+    let engine = pending.engine.as_ref().map_or(String::new(), |engine| {
+        format!("grep -Fqx -- {} script.sh || {{ echo 'engine snapshot identity changed' >&2; exit 1; }}\n", quote(&format!("# colm-engine-snapshot: {engine}")))
+    });
+    Ok(format!(
+        "set -e\ncd {dir}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'pending Study job has no regular script' >&2; exit 1; }}\ngrep -Fqx -- {marker} script.sh || {{ echo 'Study project identity changed' >&2; exit 1; }}\n{engine}",
+        dir = quote(&job::job_dir(&pending.root, &pending.job)), marker = quote(&marker),
+    ))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StudyRecord {
@@ -64,6 +156,13 @@ pub(crate) fn read_record(study_dir: &Path) -> Result<StudyRecord> {
         )
     })?;
     let record: StudyRecord = serde_json::from_str(&text)?;
+    check_study_location(
+        &record.host,
+        &record.root,
+        &record.job,
+        &record.remote_project,
+    )?;
+    job::check_id(&record.engine)?;
     colm_remote::auth::check_connection(record.ssh_auth.as_ref())?;
     Ok(record)
 }
@@ -143,8 +242,16 @@ pub(crate) fn study_job_body(
 pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
     let manifest = study::engine::status(&study_dir)?;
+    let _submission_lock = study::runner::StudyRunLock::acquire(&study_dir)?;
     not_started(&study_dir)?;
-    let project = project_of(&study_dir)?;
+    study::engine::verify_frozen_inputs(&manifest)?;
+    let execution = study::model::execution_options(&study_dir, opts)?;
+    let opts = &execution;
+    let _project = project_of(&study_dir)?;
+    if opts.get("--dry-run").as_deref() != Some("1") {
+        ensure!(!study_dir.join(RECORD).exists(), "this Study already has a remote submission; inspect its status or fetch it instead of submitting again");
+        ensure!(!study_dir.join(PENDING).exists(), "remote Study submission outcome is uncertain; inspect the recorded job before submitting again");
+    }
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let root = root_of(opts)?;
     let plan = RunPlan::from_opts(opts)?;
@@ -197,12 +304,19 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         let mut bytes = 0;
         for base in &manifest.spec.base_cases {
             let staged = stage_case(
-                &project.join(base),
+                &study::model::base_case(&manifest, base)?,
                 &staging.join(base),
                 &format!("{remote_project}/{base}"),
                 &maps,
                 upload_unmapped,
             )?;
+            let run_file = staging.join(base).join(colm_model::RUN_MANIFEST);
+            if run_file.is_file() {
+                let mut run: colm_model::MaterializedRun =
+                    serde_json::from_slice(&std::fs::read(&run_file)?)?;
+                run.run_case = PathBuf::from(format!("{remote_project}/{base}"));
+                std::fs::write(run_file, serde_json::to_vec_pretty(&run)?)?;
+            }
             unmapped.extend(staged.unmapped);
             remote_inputs.extend(staged.remote_inputs);
             bytes += staged.bytes;
@@ -242,12 +356,22 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest_text))
     };
+    if let Some(revision) =
+        crate::study_version::pinned(&study_dir)?.and_then(|pin| pin.model_revision)
+    {
+        if fortran {
+            crate::remote_cmd::check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
+        } else {
+            crate::model_version::check_kernel(&revision, &local_kernel)?;
+        }
+    }
     spec["kernel_dir"] = json!(remote_kernel);
     std::fs::write(
         staging.join("spec.json"),
         serde_json::to_string_pretty(&spec)?,
     )?;
-    let body = study_job_body(
+    let revision_path = study::model::stage_revision(&study_dir, &staging)?;
+    let mut body = study_job_body(
         &root,
         engine.id(),
         &remote_project,
@@ -257,6 +381,17 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         &plan.engine,
         &plan.preprocessors,
     );
+    if let Some(path) = revision_path {
+        let argument = quote(&format!("{remote_project}/{}", path.display()));
+        body = body.replace(
+            " > study_create.out",
+            &format!(" --frozen-study-model {argument} > study_create.out"),
+        );
+        body = body.replace(
+            "RAYON_NUM_THREADS=",
+            "COLM_STUDY_BY_PARENT=1 RAYON_NUM_THREADS=",
+        );
+    }
     let job_spec = Spec {
         scheduler,
         resources,
@@ -293,6 +428,26 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
             );
         }
     }
+    let id = format!("study-{}-{}", now(), short_hash(&manifest.id));
+    // Keep an intent after an uncertain transport result; a retry must never submit a second job.
+    let pending = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(study_dir.join(PENDING))?;
+    let operation_id = opts.get("--operation-id");
+    serde_json::to_writer(
+        &pending,
+        &PendingStudy {
+            ssh_auth: colm_remote::auth::current_connection(),
+            host: ssh.host.clone(),
+            root: root.clone(),
+            job: id.clone(),
+            remote_project: remote_project.clone(),
+            engine: Some(engine.id().to_owned()),
+            provenance: json!({"operation_id":operation_id}),
+        },
+    )?;
+    pending.sync_all()?;
     let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
     let (engine_uploaded, id, submitted) = engine_lock.run(|| {
     let engine_uploaded = engine.upload(&ssh, &root)?;
@@ -309,9 +464,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         .collect();
     ssh.upload(&staging, &entries, &remote_project)?;
     let _ = std::fs::remove_dir_all(&staging);
-    let id = format!("study-{}-{}", now(), short_hash(&manifest.id));
     let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
-        Ok((engine_uploaded, id, submitted))
+        Ok((engine_uploaded, id.clone(), submitted))
     })?;
     let record = StudyRecord {
         ssh_auth: colm_remote::auth::current_connection(),
@@ -325,6 +479,8 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
         scheduler_id: submitted.scheduler_id.clone(),
         provenance: json!({
             "schema": 1,
+            "operation_id": operation_id,
+            "model_revision": crate::study_version::pinned(&study_dir)?.and_then(|pin| pin.model_revision),
             "started": now(),
             "version": match &version {
                 Some(version) => version.value.clone(),
@@ -344,6 +500,9 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     )
     .err()
     .map(|e| format!("Job {id} submitted, but local record could not be saved: {e}"));
+    if record_warning.is_none() {
+        let _ = std::fs::remove_file(study_dir.join(PENDING));
+    }
     let lock_warning = engine_lock.finish_submitted(&id);
     // Submission has already succeeded: ledger failure must not invite a duplicate submission.
     let ledger_warning = record_version_use(
@@ -385,6 +544,9 @@ fn record_version_use(
     let Some(version) = version else {
         return Ok(());
     };
+    if version.name == "official" {
+        return Ok(());
+    }
     let workspace_root = version
         .src
         .parent()
@@ -412,7 +574,19 @@ fn remote_study_root(ssh: &Ssh, record: &StudyRecord) -> Result<Option<String>> 
         quote(&format!("{}/study_root", job_dir(record)))
     ))?;
     let root = text.trim();
-    Ok((!root.is_empty() && root.starts_with('/')).then(|| root.to_owned()))
+    if root.is_empty() {
+        return Ok(None);
+    }
+    ensure!(
+        root.starts_with(&format!("{}/.colm/studies/", record.remote_project))
+            && !root.contains(char::is_control)
+            && Path::new(root).components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "remote Study root differs from its submitted project"
+    );
+    Ok(Some(root.to_owned()))
 }
 
 fn remote_study_status(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
@@ -426,11 +600,171 @@ fn remote_study_status(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Res
         .context("cannot read the server's study-status output")
 }
 
+fn comparison_command(record: &StudyRecord, study_root: &str) -> Result<String> {
+    check_study_location(
+        &record.host,
+        &record.root,
+        &record.job,
+        &record.remote_project,
+    )?;
+    job::check_id(&record.engine)?;
+    ensure!(
+        study_root.starts_with(&format!("{}/.colm/studies/", record.remote_project))
+            && !study_root.contains(char::is_control)
+            && Path::new(study_root).components().all(|part| matches!(
+                part,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "comparison Study root differs from its submitted project"
+    );
+    Ok(format!(
+        "{identity}\nCOLM_AUDIT_BY_PARENT=1 {cli} study-verify-comparison {study}\n",
+        identity = cancel_identity_script(record)?,
+        cli = quote(&format!(
+            "{}/bin/colm-cli",
+            engine::engine_dir(&record.root, &record.engine)
+        )),
+        study = quote(study_root),
+    ))
+}
+
+fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
+    let output = ssh.run_ok(&comparison_command(record, study_root)?)?;
+    serde_json::from_str(
+        output
+            .trim()
+            .lines()
+            .last()
+            .context("server returned no comparison proof")?,
+    )
+    .context("server CLI does not provide readable full-content Study comparison evidence")
+}
+
+fn verified_evidence(
+    manifest: &study::spec::Manifest,
+    record: &StudyRecord,
+    remote_root: &str,
+    local_state: &study::state::StudyState,
+    evidence: &Value,
+) -> Result<study::model::StudyInputIdentity> {
+    ensure!(
+        evidence["schema"] == 1,
+        "unsupported remote comparison evidence schema"
+    );
+    ensure!(
+        evidence["root"].as_str() == Some(remote_root),
+        "remote comparison evidence came from another Study"
+    );
+    let remote_state: study::state::StudyState = serde_json::from_value(evidence["state"].clone())?;
+    let state_sha256 = colm_kernel::sha256_hex(&serde_json::to_vec(&remote_state)?);
+    ensure!(
+        evidence["state_sha256"].as_str() == Some(state_sha256.as_str()),
+        "remote comparison state hash does not match its evidence"
+    );
+    ensure!(
+        evidence["study_id"].as_str() == Some(remote_state.study_id.as_str())
+            && evidence["best_member"] == serde_json::to_value(&remote_state.best_member)?,
+        "remote comparison member identity differs from its checkpoint"
+    );
+    ensure!(
+        serde_json::to_value(local_state)?
+            == transplant_state(
+                evidence["state"].clone(),
+                &manifest.id,
+                remote_root,
+                Path::new(&manifest.root)
+            ),
+        "remote Study state changed since fetch; fetch the verified results before comparing"
+    );
+    let local_model = serde_json::to_value(
+        crate::study_version::pinned(Path::new(&manifest.root))?.and_then(|pin| pin.model_revision),
+    )?;
+    ensure_model_identity(
+        &local_model,
+        &record.provenance["model_revision"],
+        &evidence["model_revision"],
+    )?;
+    let remote_spec: study::spec::StudySpec = serde_json::from_value(evidence["spec"].clone())?;
+    ensure!(
+        crate::study_version::same_design(&manifest.spec, &remote_spec)?,
+        "server comparison design differs from the frozen local Study"
+    );
+    let local = study::model::verified_inputs(manifest)?;
+    let remote: study::model::StudyInputIdentity =
+        serde_json::from_value(evidence["input_identity"].clone())?;
+    ensure!(
+        study::model::same_conditions(&local, &remote),
+        "server scientific input or observation contents differ from the frozen local Study"
+    );
+    Ok(local)
+}
+
+fn verify_result_tree(root: &Path, expected: &Value) -> Result<()> {
+    let expected: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(expected.clone())?;
+    ensure!(
+        !expected.is_empty(),
+        "server comparison evidence contains no evaluation results"
+    );
+    let actual = crate::study_version::comparison_results_sha256(
+        root.parent().context("results have no Study parent")?,
+    )?;
+    ensure!(
+        actual == expected,
+        "fetched result bytes differ from the freshly verified server results"
+    );
+    Ok(())
+}
+
+/// Reverify raw server outputs for every comparison, using the recorded job's fixed CLI.
+pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::StudyInputIdentity> {
+    let manifest = study::engine::status(study_dir)?;
+    study::engine::verify_frozen_inputs(&manifest)?;
+    let record = read_record(study_dir)?;
+    ensure!(
+        record.fetched_at.is_some(),
+        "remote Study has not been fetched"
+    );
+    let ssh = Ssh::new(&record.host)?;
+    ssh.run_ok(&cancel_identity_script(&record)?)?;
+    let status = job::status(&ssh, &record.root, &record.job, 1)?;
+    ensure!(
+        matches!(status.state, job::State::Finished { exit_code: 0 }),
+        "remote Study job did not finish successfully"
+    );
+    let remote_root = remote_study_root(&ssh, &record)?.context("remote job has no Study root")?;
+    let evidence = server_comparison_evidence(&ssh, &record, &remote_root)?;
+    let state = study::checkpoint::load_latest::<study::state::StudyState>(
+        &study_dir.join("checkpoints/state"),
+    )?
+    .context("Study has no fetched checkpoint")?
+    .payload;
+    let identity = verified_evidence(&manifest, &record, &remote_root, &state, &evidence)?;
+    verify_result_tree(&study_dir.join("results"), &evidence["results_sha256"])?;
+    Ok(identity)
+}
+
 /// `remote-study-status`：作业状态，加上服务器上研究的进度（建好之后）。
 pub(crate) fn cmd_status(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    if !study_dir.join(RECORD).exists() {
+        let pending = read_pending(&study_dir)?;
+        colm_remote::auth::check_connection(pending.ssh_auth.as_ref())?;
+        let ssh = Ssh::new(&pending.host)?;
+        // A saved intent may precede actual submission. Never run or submit it here.
+        ssh.run_ok(&pending_identity_script(&pending)?)?;
+        let status = job::status(&ssh, &pending.root, &pending.job, 40)?;
+        let outcome = json!({"job":pending.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished{..}),"status":status});
+        crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
+        println!(
+            "{}",
+            json!({"record":Value::Null,"pending":pending_status(&study_dir)?,"status":status,"study":Value::Null})
+        );
+        return Ok(());
+    }
     let record = read_record(&study_dir)?;
     let ssh = Ssh::new(&record.host)?;
+    ssh.run_ok(&cancel_identity_script(&record)?)?;
     let status = job::status(&ssh, &record.root, &record.job, 40)?;
     let progress = match remote_study_root(&ssh, &record)? {
         Some(root) => remote_study_status(&ssh, &record, &root).ok().map(|value| {
@@ -444,11 +778,134 @@ pub(crate) fn cmd_status(opts: &Opts) -> Result<()> {
         }),
         None => None,
     };
+    let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished{..}),"status":status});
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
+    let mut public_record = serde_json::to_value(&record)?;
+    public_record
+        .as_object_mut()
+        .context("record is not an object")?
+        .remove("ssh_auth");
     println!(
         "{}",
-        json!({ "record": record, "status": status, "study": progress })
+        json!({ "record": public_record, "status": status, "study": progress })
     );
     Ok(())
+}
+
+/// Cancel only the job named by this Study's captured connection and submission record.
+pub(crate) fn cmd_cancel(opts: &Opts) -> Result<()> {
+    let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    let _lock = study::runner::StudyRunLock::acquire(&study_dir)?;
+    study::engine::status(&study_dir)?;
+    let record = read_record(&study_dir)?;
+    let identity = cancel_identity_script(&record)?;
+    let ssh = Ssh::new(&record.host)?;
+    let result = cancel_job(&ssh, &record.root, &record.job, &identity)?;
+    crate::history_cmd::observe_remote_outcome(&result);
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
+    println!("{result}");
+    Ok(())
+}
+
+pub(super) fn cancel_job(ssh: &Ssh, root: &str, id: &str, identity: &str) -> Result<Value> {
+    let mut lease = colm_remote::engine_inventory::LifecycleLock::acquire(ssh, root)?;
+    let before = lease.run(|| {
+        ssh.run_ok(identity)?;
+        job::status(ssh, root, id, 20)
+    })?;
+    if matches!(before.state, job::State::Finished { .. }) {
+        lease.finish()?;
+        return Ok(cancellation_result(id, false, Some(&before), None, None));
+    }
+    if !matches!(before.state, job::State::Queued | job::State::Running) {
+        lease.finish()?;
+        bail!("remote Study job identity is not live; inspect its status before cancelling");
+    }
+    let requested = lease.run(|| {
+        ssh.run_ok(&format!(
+            "{identity}\n{cancel}",
+            cancel = job::cancel_script(root, id),
+        ))?;
+        Ok(())
+    });
+    let accepted = requested.is_ok();
+    let cancel_error = requested.err().map(|error| format!("{error:#}"));
+    let observed = job::status(ssh, root, id, 20);
+    let status_error = observed.as_ref().err().map(|error| format!("{error:#}"));
+    let mut result = cancellation_result(
+        id,
+        accepted,
+        observed.as_ref().ok(),
+        cancel_error,
+        status_error,
+    );
+    // Unknown SSH outcomes leave the existing lease for explicit recovery.
+    if accepted {
+        if let Err(error) = lease.finish() {
+            result["lock_warning"] = json!(format!("{error:#}"));
+        }
+    }
+    Ok(result)
+}
+
+fn cancellation_result(
+    job: &str,
+    accepted: bool,
+    status: Option<&job::Status>,
+    cancel_error: Option<String>,
+    status_error: Option<String>,
+) -> Value {
+    let outcome = if cancel_error.is_some() || status_error.is_some() {
+        "uncertain"
+    } else if accepted {
+        "cancel_requested"
+    } else {
+        "already_finished"
+    };
+    json!({
+        "job": job, "outcome": outcome, "request_accepted": accepted,
+        "terminal": status.is_some_and(|status| matches!(status.state, job::State::Finished { .. })),
+        "status": status, "cancel_error": cancel_error, "status_error": status_error,
+    })
+}
+
+fn cancel_identity_script(record: &StudyRecord) -> Result<String> {
+    job::check_id(&record.job)?;
+    ensure!(
+        record.root.starts_with('/')
+            && record.root != "/"
+            && !record.root.contains(char::is_whitespace),
+        "invalid recorded remote root"
+    );
+    ensure!(
+        record
+            .remote_project
+            .starts_with(&format!("{}/s/", record.root)),
+        "Study project is outside its recorded remote root"
+    );
+    ensure!(
+        matches!(record.scheduler.as_str(), "bare" | "slurm" | "pbs" | "lsf"),
+        "invalid recorded scheduler"
+    );
+    let engine_marker = format!("# colm-engine-snapshot: {}", record.engine);
+    let study_marker = format!(
+        "# colm-study-root: {}",
+        serde_json::to_string(&record.remote_project)?
+    );
+    let scheduler_id = if record.scheduler == "bare" {
+        String::new()
+    } else {
+        let expected = record
+            .scheduler_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .context("recorded scheduler job ID is missing")?;
+        format!("[ \"$(cat sched_id)\" = {} ] || {{ echo 'scheduler job identity changed' >&2; exit 1; }}\n", quote(expected))
+    };
+    Ok(format!(
+        "set -e\ncd {dir}\ngrep -Fqx -- {engine} script.sh || {{ echo 'engine snapshot identity changed' >&2; exit 1; }}\ngrep -Fqx -- {study} script.sh || {{ echo 'Study project identity changed' >&2; exit 1; }}\n[ \"$(cat scheduler 2>/dev/null || echo bare)\" = {scheduler} ] || {{ echo 'scheduler identity changed' >&2; exit 1; }}\n{scheduler_id}",
+        dir = quote(&job::job_dir(&record.root, &record.job)), engine = quote(&engine_marker), study = quote(&study_marker), scheduler = quote(&record.scheduler),
+    ))
 }
 
 /// 服务器上的成员与本机的一一对应吗（编号、是否基线、参数值）。
@@ -476,12 +933,11 @@ pub(crate) fn transplant_state(
     local_root: &Path,
 ) -> Value {
     state["study_id"] = json!(local_id);
-    let local = local_root.to_string_lossy();
     if let Some(tasks) = state["tasks"].as_object_mut() {
         for task in tasks.values_mut() {
             if let Some(dir) = task["case_dir"].as_str() {
-                if let Some(rest) = dir.strip_prefix(remote_root) {
-                    task["case_dir"] = json!(format!("{local}{rest}"));
+                if let Ok(rest) = Path::new(dir).strip_prefix(remote_root) {
+                    task["case_dir"] = json!(local_root.join(rest));
                 }
             }
             if let Some(task) = task.as_object_mut() {
@@ -787,6 +1243,7 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     study::engine::verify_frozen_inputs(&manifest)?;
     let mut record = read_record(&study_dir)?;
     let ssh = Ssh::new(&record.host)?;
+    ssh.run_ok(&cancel_identity_script(&record)?)?;
     let status = job::status(&ssh, &record.root, &record.job, 20)?;
     let exit_code = match status.state {
         job::State::Finished { exit_code } => exit_code,
@@ -795,6 +1252,14 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let remote_root = remote_study_root(&ssh, &record)?
         .context("the server job did not create the Study; see its log")?;
     let remote = remote_study_status(&ssh, &record, &remote_root)?;
+    let local_model = serde_json::to_value(
+        crate::study_version::pinned(&study_dir)?.and_then(|pin| pin.model_revision),
+    )?;
+    ensure_model_identity(
+        &local_model,
+        &record.provenance["model_revision"],
+        &remote["model_version"]["model_revision"],
+    )?;
     ensure!(
         same_members(&manifest.members, &remote["manifest"]["members"])?,
         "the Study built on the server has different members from this one (spec or base cases changed); nothing was fetched"
@@ -826,6 +1291,27 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     if study_dir.join("results").exists() {
         regular_tree_files(&study_dir.join("results"), false)?;
     }
+    // Verification runs on the recorded server against raw outputs, never on downloaded metrics alone.
+    let comparison = if exit_code == 0 {
+        server_comparison_evidence(&ssh, &record, &remote_root).and_then(|evidence| {
+            verified_evidence(&manifest, &record, &remote_root, &typed, &evidence)?;
+            verify_result_tree(&tmp.join("results"), &evidence["results_sha256"])?;
+            Ok(evidence)
+        })
+    } else {
+        Err(anyhow::anyhow!(
+            "server job failed with exit code {exit_code}; only diagnostic results were fetched"
+        ))
+    };
+    if exit_code == 0 && !local_model.is_null() {
+        comparison.as_ref().map_err(|error| {
+            anyhow::anyhow!(
+                "remote scientific outputs were not verified; nothing was installed: {error:#}"
+            )
+        })?;
+    }
+    let scientific_verified = comparison.is_ok();
+    let verification_error = comparison.as_ref().err().map(|error| format!("{error:#}"));
     for (name, bytes) in regular_tree_files(&study_dir.join("checkpoints/state"), true)? {
         let path = tmp.join("checkpoints/state").join(name);
         std::fs::create_dir_all(path.parent().context("checkpoint has no parent")?)?;
@@ -833,16 +1319,23 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     }
     study::checkpoint::write_next(&tmp.join("checkpoints/state"), &typed)?;
     record.fetched_at = Some(now());
-    record.provenance["ok"] = json!(exit_code == 0);
+    record.provenance["ok"] = json!(exit_code == 0 && scientific_verified);
+    record.provenance["exit_code"] = json!(exit_code);
+    record.provenance["scientific_verified"] = json!(scientific_verified);
+    record.provenance["verification_error"] = json!(verification_error);
     record.provenance["finished"] = json!(now());
     std::fs::write(tmp.join(RECORD), serde_json::to_string_pretty(&record)?)?;
     install_fetched_study(&study_dir, &tmp)?;
     let _ = std::fs::remove_dir_all(&tmp);
+    let outcome = json!({"job":record.job,"outcome":"observed","terminal":true,"status":status});
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
     println!(
         "{}",
         json!({
             "fetched": true,
             "exit_code": exit_code,
+            "scientific_verified": scientific_verified,
+            "verification_error": verification_error,
             "status": typed.status,
             "best_member": typed.best_member,
             "remote_study": remote_root,
@@ -854,3 +1347,67 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
 #[cfg(test)]
 #[path = "remote_study_tests.rs"]
 mod remote_study_tests;
+
+fn ensure_model_identity(local: &Value, submitted: &Value, remote: &Value) -> Result<()> {
+    ensure!(
+        local == submitted && local == remote,
+        "remote Study model revision differs from its frozen submission; nothing was fetched"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod model_revision_tests {
+    use super::*;
+
+    #[test]
+    fn cancellation_acceptance_and_observed_termination_are_distinct() {
+        let running = job::parse_status("state=running\n---log---\n");
+        let accepted = cancellation_result("study-one", true, Some(&running), None, None);
+        assert_eq!(accepted["request_accepted"], true);
+        assert_eq!(accepted["terminal"], false);
+        assert_eq!(accepted["outcome"], "cancel_requested");
+        let uncertain = cancellation_result(
+            "study-one",
+            false,
+            Some(&running),
+            Some("SSH disconnected".into()),
+            None,
+        );
+        assert_eq!(uncertain["terminal"], false);
+        assert_eq!(uncertain["outcome"], "uncertain");
+        let finished = job::parse_status("state=finished 143\n---log---\n");
+        assert_eq!(
+            cancellation_result("study-one", false, Some(&finished), None, None)["terminal"],
+            true
+        );
+    }
+
+    #[test]
+    fn cancellation_script_binds_the_study_engine_and_scheduler_identity() {
+        let mut record: StudyRecord = serde_json::from_value(json!({
+            "host":"server", "root":"/data/colm", "job":"study-1",
+            "remote_project":"/data/colm/s/abc", "engine":"0123456789abcdef",
+            "submitted_at":1, "scheduler":"slurm", "scheduler_id":"4242", "provenance":{}
+        }))
+        .unwrap();
+        let script = cancel_identity_script(&record).unwrap();
+        assert!(script.contains("# colm-engine-snapshot: 0123456789abcdef"));
+        assert!(script.contains("# colm-study-root: \"/data/colm/s/abc\""));
+        assert!(script.contains("$(cat sched_id)\" = '4242'"));
+        record.scheduler_id = None;
+        assert!(cancel_identity_script(&record).is_err());
+        record.job = "../other".into();
+        assert!(cancel_identity_script(&record).is_err());
+    }
+
+    #[test]
+    fn fetch_rejects_changed_revision_even_when_members_match() {
+        let selected = json!({"version":{"id":"snow","revision":1},"fingerprint":"old"});
+        let changed = json!({"version":{"id":"snow","revision":1},"fingerprint":"new"});
+        ensure_model_identity(&selected, &selected, &selected).unwrap();
+        assert!(ensure_model_identity(&selected, &selected, &changed).is_err());
+        assert!(ensure_model_identity(&selected, &Value::Null, &selected).is_err());
+        ensure_model_identity(&Value::Null, &Value::Null, &Value::Null).unwrap();
+    }
+}

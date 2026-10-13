@@ -1,6 +1,34 @@
 use super::*;
 
 #[test]
+fn pending_study_status_uses_its_configured_connection_after_restart() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-gui-pending-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(".colm-remote-study-pending.json"), json!({"host":"server","root":"/data/colm","job":"study-1","remote_project":"/data/colm/s/abc"}).to_string()).unwrap();
+    let server:Server = serde_json::from_value(json!({"host":"server","root":"/data/colm","username":"researcher","auth":"password","port":2222})).unwrap();
+    let config = RemoteConfig {
+        servers: vec![server.clone()],
+    };
+    let recovered = study_server(&config, root.to_str().unwrap()).unwrap();
+    assert_eq!(recovered.host, server.host);
+    assert_eq!(recovered.username, server.username);
+    assert_eq!(recovered.auth, "password");
+    assert_eq!(recovered.port, 2222);
+    assert!(study_server(&RemoteConfig::default(), root.to_str().unwrap()).is_err());
+    // A broken formal record cannot fall back to an intent for another identity.
+    std::fs::write(root.join(".colm-remote-study.json"), b"broken").unwrap();
+    assert!(study_server(&config, root.to_str().unwrap()).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn ssh_aliases_are_read_without_wildcards_or_duplicates() {
     let text = "Host macpro\n  Hostname 1.2.3.4\nHost 7920 7920land\n  User zhwei\nHost *\n  ServerAliveInterval 30\nHost tms1? !bad\nhost 7920land\n";
     assert_eq!(ssh_aliases(text), ["macpro", "7920", "7920land"]);
@@ -367,10 +395,237 @@ fn job_identity_can_be_recovered_without_credentials() {
     )
     .unwrap();
     let identity = remote_job_record(case.clone()).unwrap().unwrap();
-    assert_eq!(identity, json!({"host":"c1","job":"run-1"}));
+    assert_eq!(identity["host"], "c1");
+    assert_eq!(identity["job"], "run-1");
+    assert_eq!(identity["pending"], false);
     assert!(!identity.to_string().contains("never-return"));
     std::fs::write(&record, "broken").unwrap();
     assert!(remote_job_record(case).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_source_pending_run_outranks_old_records_and_exposes_only_status_recovery() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-run-intent-{}",
+        colm_history::Event::start("test").operation_id
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    std::fs::write(dir.join("case.nml"), "&nl_colm\n/\n").unwrap();
+    std::fs::write(
+        dir.join(".colm-remote.json"),
+        json!({"host":"old-server","job":"old-completed"}).to_string(),
+    )
+    .unwrap();
+    let intent = json!({"schema":1,"source_case":dir,"run_case":dir,"host":"server","root":"/data/colm","job":"new-uncertain","engine":"engine","remote_case":"/data/colm/cases/a","provenance":{"operation_id":"original-op"},"ssh_auth":{"host":"server","username":"alice","port":2222,"auth":"password","identity_file":""}});
+    std::fs::write(dir.join(".colm-remote-pending.json"), intent.to_string()).unwrap();
+    let mut configured: Server = serde_json::from_value(
+        json!({"host":"server","root":"/data/changed","username":"bob","port":22,"auth":"config"}),
+    )
+    .unwrap();
+    configured.fetch_vars = "f_rnet".into();
+    let config = RemoteConfig {
+        servers: vec![configured],
+    };
+    let case = dir.display().to_string();
+    let record = remote_job_record(case.clone()).unwrap().unwrap();
+    assert_eq!(record["job"], "new-uncertain");
+    assert_eq!(record["pending"], true);
+    assert_eq!(record["operation_id"], "original-op");
+    assert!(record.get("ssh_auth").is_none());
+    let recovered = command_server(&config, &["remote-status".into(), case.clone()])
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            recovered.username.as_str(),
+            recovered.port,
+            recovered.auth.as_str()
+        ),
+        ("alice", 2222, "password")
+    );
+    assert_eq!(recovered.root, "/data/colm");
+    for action in ["remote-fetch", "remote-cancel"] {
+        assert!(command_server(&config, &[action.into(), case.clone()]).is_err());
+    }
+    let mut wrong = intent;
+    wrong["source_case"] = json!(dir.join("another"));
+    std::fs::write(dir.join(".colm-remote-pending.json"), wrong.to_string()).unwrap();
+    assert!(remote_job_record(case).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+fn run_identity_fixture(
+    source: &std::path::Path,
+    run_case: &std::path::Path,
+    operation: &str,
+) -> colm_model::MaterializedRun {
+    colm_model::MaterializedRun {
+        schema: 1,
+        operation_id: operation.into(),
+        source_case: source.into(),
+        run_case: run_case.into(),
+        version: colm_model::VersionRef {
+            id: "model".into(),
+            revision: 1,
+        },
+        code: colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: "a".repeat(64),
+        },
+        case_sha256: "a".repeat(64),
+        effective_nml_sha256: "b".repeat(64),
+        overlay_sha256: "c".repeat(64),
+        revision_fingerprint: "d".repeat(64),
+        artifact_paths: vec![],
+        inputs: Default::default(),
+    }
+}
+
+#[test]
+fn frozen_run_paths_recover_the_source_intent_and_reject_changed_manifests() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-copy-intent-{}",
+        colm_history::Event::start("test").operation_id
+    ));
+    std::fs::create_dir_all(dir.join("source")).unwrap();
+    std::fs::create_dir_all(dir.join("copy")).unwrap();
+    let source = dir.join("source").canonicalize().unwrap();
+    let copy = dir.join("copy").canonicalize().unwrap();
+    std::fs::write(source.join("case.nml"), "&nl_colm\n/\n").unwrap();
+    let mut run = run_identity_fixture(&source, &copy, "op");
+    std::fs::write(
+        copy.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&run).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        copy.join(".colm-remote.json"),
+        json!({"host":"old-server","job":"old"}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(source.join(".colm-remote-pending.json"),json!({"schema":1,"source_case":source,"run_case":copy,"host":"server","root":"/data/colm","job":"new","engine":"engine","remote_case":"/data/colm/cases/a","provenance":{"operation_id":"op"}}).to_string()).unwrap();
+    let (record, pending, target) = run_record(copy.to_str().unwrap()).unwrap().unwrap();
+    assert!(pending);
+    assert_eq!(record["job"], "new");
+    assert_eq!(target, source.display().to_string());
+    run.run_case = source.clone();
+    std::fs::write(
+        copy.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec(&run).unwrap(),
+    )
+    .unwrap();
+    assert!(run_record(copy.to_str().unwrap()).is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn source_run_lookup_prefers_an_unfinished_operation_over_a_newer_completed_copy() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-recorded-copy-{}",
+        colm_history::Event::start("test").operation_id
+    ));
+    for name in ["source", "pending", "completed"] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+    }
+    let source = dir.join("source").canonicalize().unwrap();
+    std::fs::write(source.join("case.nml"), "&nl_colm\n/\n").unwrap();
+    let history = colm_history::History::open(dir.join("history.sqlite3")).unwrap();
+    for (name, time, phase, status) in [
+        (
+            "pending",
+            10,
+            colm_history::EventPhase::Status,
+            "needs_reconciliation",
+        ),
+        (
+            "completed",
+            20,
+            colm_history::EventPhase::Finished,
+            "succeeded",
+        ),
+    ] {
+        let mut event = colm_history::Event::start("run");
+        event.time_ms = Some(time);
+        event.phase = phase;
+        event.status = status.into();
+        event.case_path = Some(source.display().to_string());
+        event.location = Some("remote".into());
+        let copy = dir.join(name).canonicalize().unwrap();
+        let run = run_identity_fixture(&source, &copy, &event.operation_id);
+        std::fs::write(
+            copy.join(colm_model::RUN_MANIFEST),
+            serde_json::to_vec(&run).unwrap(),
+        )
+        .unwrap();
+        event.detail = json!({"action":"remote-run","model_run":run,"remote_record":{"host":"server","root":"/data/colm","job":name,"engine":"engine","remote_case":format!("/data/colm/cases/{name}")}});
+        history.append(&event).unwrap();
+    }
+    let (copy, unresolved) = recorded_run_case(&history, &source).unwrap().unwrap();
+    assert!(unresolved);
+    assert_eq!(copy, dir.join("pending").canonicalize().unwrap());
+    let mut run: Value =
+        serde_json::from_slice(&std::fs::read(copy.join(colm_model::RUN_MANIFEST)).unwrap())
+            .unwrap();
+    run["operation_id"] = json!("different");
+    std::fs::write(copy.join(colm_model::RUN_MANIFEST), run.to_string()).unwrap();
+    assert!(recorded_run_case(&history, &source).is_err());
+    drop(history);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_presubmit_materialized_copy_without_a_job_never_hides_a_real_completed_run() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-presubmit-copy-{}",
+        colm_history::Event::start("test").operation_id
+    ));
+    for name in ["source", "ghost", "completed"] {
+        std::fs::create_dir_all(dir.join(name)).unwrap();
+    }
+    let source = dir.join("source").canonicalize().unwrap();
+    std::fs::write(source.join("case.nml"), "&nl_colm\n/\n").unwrap();
+    let history = colm_history::History::open(dir.join("history.sqlite3")).unwrap();
+    for (name, time, phase, status) in [
+        (
+            "completed",
+            10,
+            colm_history::EventPhase::Finished,
+            "succeeded",
+        ),
+        (
+            "ghost",
+            20,
+            colm_history::EventPhase::Status,
+            "needs_reconciliation",
+        ),
+    ] {
+        let mut event = colm_history::Event::start("run");
+        event.time_ms = Some(time);
+        event.phase = phase;
+        event.status = status.into();
+        event.case_path = Some(source.display().to_string());
+        event.location = Some("remote".into());
+        let copy = dir.join(name).canonicalize().unwrap();
+        let run = run_identity_fixture(&source, &copy, &event.operation_id);
+        event.detail = json!({"action":"remote-run","model_run":run});
+        if name == "completed" {
+            std::fs::write(
+                copy.join(colm_model::RUN_MANIFEST),
+                serde_json::to_vec(&run).unwrap(),
+            )
+            .unwrap();
+            event.detail["remote_record"] = json!({"host":"server","root":"/data/colm","job":"completed-job","engine":"engine","remote_case":"/data/colm/cases/a"});
+        }
+        history.append(&event).unwrap();
+    }
+    let (copy, unresolved) = recorded_run_case(&history, &source).unwrap().unwrap();
+    assert!(!unresolved);
+    assert_eq!(copy, dir.join("completed").canonicalize().unwrap());
+    drop(history);
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -465,5 +720,39 @@ fn engine_resource_commands_validate_snapshot_and_preserve_connection() {
             "--root",
             "/data/colm"
         ]
+    );
+}
+
+#[test]
+fn remote_study_cancel_audit_does_not_claim_a_running_job_finished() {
+    let requested = Ok(serde_json::json!({"request_accepted":true,"terminal":false}));
+    assert_eq!(
+        super::audit_result_status(false, true, &requested),
+        "cancel_requested"
+    );
+    let uncertain = Ok(
+        serde_json::json!({"request_accepted":false,"terminal":false,"cancel_error":"connection lost"}),
+    );
+    assert_eq!(
+        super::audit_result_status(false, true, &uncertain),
+        "cancel_uncertain"
+    );
+    let finished = Ok(serde_json::json!({"request_accepted":false,"terminal":true}));
+    assert_eq!(
+        super::audit_result_status(false, true, &finished),
+        "terminal_confirmed"
+    );
+}
+
+#[test]
+fn uncertain_remote_transport_does_not_finalize_submission_or_cancellation() {
+    let lost = Err("SSH connection lost after sending request".to_string());
+    assert_eq!(
+        super::audit_result_status(true, false, &lost),
+        "submission_uncertain"
+    );
+    assert_eq!(
+        super::audit_result_status(false, true, &lost),
+        "cancel_uncertain"
     );
 }

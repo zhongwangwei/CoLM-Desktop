@@ -330,12 +330,174 @@ fn command_server(config: &RemoteConfig, args: &[String]) -> Result<Option<Serve
     let Some(case) = args.get(1) else {
         return Ok(None);
     };
-    let path = PathBuf::from(case).join(".colm-remote.json");
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some((record, pending, _)) = run_record(case)? else {
         return Ok(None);
     };
-    let record: Value = serde_json::from_str(&text).map_err(|_| "远程作业记录不合法")?;
+    if pending
+        && args
+            .first()
+            .is_some_and(|command| matches!(command.as_str(), "remote-fetch" | "remote-cancel"))
+    {
+        return Err("远程提交尚未确认，请先核对原作业状态；确认前不能取消或取回".into());
+    }
     server_from_record(config, &record).map(Some)
+}
+
+fn run_source(case: &str) -> Result<PathBuf, String> {
+    let case = PathBuf::from(case)
+        .canonicalize()
+        .map_err(|e| format!("无法打开算例目录：{e}"))?;
+    let manifest = case.join(colm_model::RUN_MANIFEST);
+    let bytes = match std::fs::read(&manifest) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(case),
+        Err(error) => return Err(format!("读取模型运行身份失败：{error}")),
+    };
+    let run: colm_model::MaterializedRun =
+        serde_json::from_slice(&bytes).map_err(|_| "模型运行身份不合法")?;
+    if run.run_case.canonicalize().map_err(|e| e.to_string())? != case {
+        return Err("模型运行目录与记录身份不一致".into());
+    }
+    let source = run.source_case.canonicalize().map_err(|e| e.to_string())?;
+    if !source.join("case.nml").is_file() {
+        return Err("模型运行的原算例不可用".into());
+    }
+    Ok(source)
+}
+
+/// The source intent takes precedence even when an older completed record still exists.
+fn run_record(case: &str) -> Result<Option<(Value, bool, String)>, String> {
+    let source = run_source(case)?;
+    let pending = source.join(".colm-remote-pending.json");
+    match std::fs::read(&pending) {
+        Ok(bytes) => {
+            let record: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "远程提交意图不完整，请核对原作业后再运行")?;
+            if record["schema"] != 1
+                || record["source_case"].as_str() != source.to_str()
+                || !record["run_case"]
+                    .as_str()
+                    .is_some_and(|p| std::path::Path::new(p).is_absolute())
+                || record["provenance"]["operation_id"]
+                    .as_str()
+                    .is_none_or(str::is_empty)
+            {
+                return Err("远程提交意图与原算例身份不一致".into());
+            }
+            let connection = server_from_record(&RemoteConfig::default(), &record)?;
+            validate(&RemoteConfig {
+                servers: vec![connection],
+            })?;
+            if !["job", "engine", "remote_case"].iter().all(|key| {
+                record[*key]
+                    .as_str()
+                    .is_some_and(|value| !value.is_empty() && !value.contains(char::is_control))
+            }) {
+                return Err("远程提交意图缺少完整作业身份".into());
+            }
+            return Ok(Some((record, true, source.display().to_string())));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(format!("读取远程提交意图失败：{error}")),
+    }
+    let mut target = PathBuf::from(case);
+    let mut path = target.join(".colm-remote.json");
+    if target.canonicalize().map_err(|e| e.to_string())? == source {
+        let history = colm_history::History::open_default().map_err(|error| error.to_string())?;
+        if let Some((recorded, unresolved)) = recorded_run_case(&history, &source)? {
+            if unresolved || !path.try_exists().map_err(|error| error.to_string())? {
+                target = recorded;
+                path = target.join(".colm-remote.json");
+                if !path.try_exists().map_err(|error| error.to_string())? {
+                    return Err("历史中仍有原远程作业，但它的身份文件已缺失；请恢复原记录后核对，不能重新提交".into());
+                }
+            }
+        }
+    }
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取远程作业记录失败：{error}")),
+    };
+    let record = serde_json::from_slice(&bytes).map_err(|_| "远程作业记录不合法")?;
+    Ok(Some((record, false, target.display().to_string())))
+}
+
+fn recorded_run_case(
+    history: &colm_history::History,
+    source: &std::path::Path,
+) -> Result<Option<(PathBuf, bool)>, String> {
+    let mut query = colm_history::Query {
+        case_path: Some(source.display().to_string()),
+        limit: 1000,
+        ..Default::default()
+    };
+    let mut completed = None;
+    loop {
+        let page = history.query(&query).map_err(|error| error.to_string())?;
+        let count = page.items.len() as u64;
+        for operation in page.items {
+            let event = &operation.latest;
+            if !matches!(event.kind.as_str(), "run" | "remote-run" | "history-replay")
+                || event.location.as_deref() != Some("remote")
+            {
+                continue;
+            }
+            let binding = &event.detail["remote_record"];
+            if !["host", "root", "job", "engine", "remote_case"]
+                .iter()
+                .all(|key| {
+                    binding[*key]
+                        .as_str()
+                        .is_some_and(|value| !value.is_empty())
+                })
+            {
+                // A materialized copy can exist before submission; it is not a remote job.
+                continue;
+            }
+            let Some(value) = event.detail.get("model_run") else {
+                continue;
+            };
+            let run: colm_model::MaterializedRun =
+                serde_json::from_value(value.clone()).map_err(|_| "历史中的模型运行身份不合法")?;
+            if run.operation_id != event.operation_id
+                || run.source_case.canonicalize().map_err(|e| e.to_string())? != source
+            {
+                return Err("历史中的模型运行与原算例身份不一致".into());
+            }
+            if run.run_case == source {
+                continue;
+            }
+            if operation.needs_reconciliation {
+                return verified_run_case(&run).map(|case| Some((case, true)));
+            }
+            if completed.is_none() {
+                completed = Some(run);
+            }
+        }
+        query.offset += count;
+        if count == 0 || query.offset >= page.total {
+            break;
+        }
+    }
+    completed
+        .map(|run| verified_run_case(&run).map(|case| (case, false)))
+        .transpose()
+}
+
+fn verified_run_case(run: &colm_model::MaterializedRun) -> Result<PathBuf, String> {
+    let actual: colm_model::MaterializedRun = serde_json::from_slice(
+        &std::fs::read(run.run_case.join(colm_model::RUN_MANIFEST))
+            .map_err(|e| format!("原模型运行身份文件不可用：{e}"))?,
+    )
+    .map_err(|_| "原模型运行身份文件不合法")?;
+    if serde_json::to_value(&actual).map_err(|e| e.to_string())?
+        != serde_json::to_value(run).map_err(|e| e.to_string())?
+        || actual.run_case.canonicalize().map_err(|e| e.to_string())? != run.run_case
+    {
+        return Err("原模型运行身份已变化".into());
+    }
+    Ok(run.run_case.clone())
 }
 
 pub(crate) fn server_from_record(config: &RemoteConfig, record: &Value) -> Result<Server, String> {
@@ -385,6 +547,54 @@ pub(crate) async fn cli_json(
 
 /// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
 pub(crate) async fn ssh_cli_json(
+    mut args: Vec<String>,
+    resources: Option<PathBuf>,
+    server: Option<&Server>,
+) -> Result<Value, String> {
+    if !args.iter().any(|a| a == "--history-db") {
+        crate::model::options(&mut args, None)?;
+    }
+    let mut event = crate::history::command_start(&args)?;
+    let study_cancel = args
+        .first()
+        .is_some_and(|command| matches!(command.as_str(), "remote-study-cancel" | "remote-cancel"));
+    let submitted = matches!(
+        args.first().map(String::as_str),
+        Some("remote-run" | "remote-study-run" | "remote-build-kernel")
+    );
+    if let Some(event) = &event {
+        args.extend(["--operation-id".into(), event.operation_id.clone()]);
+    }
+    let result = ssh_cli_json_untracked(args, resources, server).await;
+    if let (Some(event), Ok(value)) = (&mut event, &result) {
+        crate::history::observe_remote_response(event, value);
+    }
+    let status = audit_result_status(submitted, study_cancel, &result);
+    crate::history::command_finish(event.as_ref(), result, status)
+}
+fn audit_result_status(
+    submitted: bool,
+    study_cancel: bool,
+    result: &Result<Value, String>,
+) -> &'static str {
+    if submitted {
+        if result.is_ok() {
+            "submitted"
+        } else {
+            "submission_uncertain"
+        }
+    } else if study_cancel {
+        match result {
+            Ok(value) if value["terminal"] == true => "terminal_confirmed",
+            Ok(value) if value["request_accepted"] == true => "cancel_requested",
+            Ok(_) => "cancel_uncertain",
+            Err(_) => "cancel_uncertain",
+        }
+    } else {
+        "succeeded"
+    }
+}
+async fn ssh_cli_json_untracked(
     args: Vec<String>,
     resources: Option<PathBuf>,
     server: Option<&Server>,
@@ -396,7 +606,7 @@ pub(crate) async fn ssh_cli_json(
         .map(str::to_owned);
     let payload = payload.map(|p| p.to_string());
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
-    command.args(&args);
+    command.args(&args).env("COLM_AUDIT_BY_PARENT", "1");
     if payload.is_some() {
         command
             .env("COLM_SSH_AUTH_STDIN", "1")
@@ -682,6 +892,8 @@ pub async fn remote_run(
     engine: Option<String>,
     ranks: Option<u32>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<Value, String> {
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
@@ -691,12 +903,10 @@ pub async fn remote_run(
         ranks,
         model_version,
     };
-    ssh_cli_json(
-        run_args(&server, case, kernel, stage, force, false, &engine),
-        resources,
-        Some(&server),
-    )
-    .await
+    let mut args = run_args(&server, case, kernel, stage, force, false, &engine);
+    crate::model::options(&mut args, model_revision.as_ref())?;
+    crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
+    ssh_cli_json(args, resources, Some(&server)).await
 }
 
 /// 服务器上有哪些内核（完整的 Fortran 内核才能给 Fortran 引擎用）。
@@ -756,6 +966,8 @@ pub async fn remote_preview(
     engine: Option<String>,
     ranks: Option<u32>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<Value, String> {
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
@@ -765,37 +977,38 @@ pub async fn remote_preview(
         ranks,
         model_version,
     };
-    ssh_cli_json(
-        run_args(&server, case, kernel, stage, force, true, &engine),
-        resources,
-        Some(&server),
-    )
-    .await
+    let mut args = run_args(&server, case, kernel, stage, force, true, &engine);
+    crate::model::options(&mut args, model_revision.as_ref())?;
+    crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
+    ssh_cli_json(args, resources, Some(&server)).await
 }
 
 /// Recover job identity before connecting, so a missing session password stays visible.
 #[tauri::command]
 pub fn remote_job_record(case: String) -> Result<Option<Value>, String> {
-    let path = PathBuf::from(case).join(".colm-remote.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(format!("读取远程作业记录失败：{error}")),
+    let Some((record, pending, target)) = run_record(&case)? else {
+        return Ok(None);
     };
-    let record: Value = serde_json::from_str(&text).map_err(|_| "远程作业记录不合法")?;
     let host = record["host"].as_str().ok_or("远程作业记录缺少主机")?;
     let job = record["job"].as_str().ok_or("远程作业记录缺少作业编号")?;
-    Ok(Some(json!({"host":host,"job":job})))
+    Ok(Some(
+        json!({"host":host,"job":job,"pending":pending,"needs_reconciliation":pending,
+        "source_case":run_source(&case)?,"run_case":record.get("run_case").cloned().unwrap_or(json!(target)),
+        "operation_id":record["provenance"]["operation_id"]}),
+    ))
 }
 
 /// 远程作业的状态，加上从日志末尾解析出的阶段与进度（和本机运行同一套解析）。
 #[tauri::command]
 pub async fn remote_status(app: tauri::AppHandle, case: String) -> Result<Value, String> {
     let server = command_server(&remote_config(app), &["remote-status".into(), case.clone()])?;
+    let target = run_record(&case)?
+        .map(|(_, _, target)| target)
+        .unwrap_or_else(|| case.clone());
     let mut answer = ssh_cli_json(
         vec![
             "remote-status".into(),
-            case.clone(),
+            target.clone(),
             "--lines".into(),
             "200".into(),
         ],
@@ -808,7 +1021,7 @@ pub async fn remote_status(app: tauri::AppHandle, case: String) -> Result<Value,
         .unwrap_or_default()
         .to_owned();
     let (stages, progress) = crate::sidecar::parse_log(&log);
-    let total_steps = crate::config::read_timing(vec![case])
+    let total_steps = crate::config::read_timing(vec![target])
         .ok()
         .map(|t| t.total_steps);
     answer["stages"] = json!(stages);
@@ -820,7 +1033,10 @@ pub async fn remote_status(app: tauri::AppHandle, case: String) -> Result<Value,
 
 #[tauri::command]
 pub async fn remote_cancel(app: tauri::AppHandle, case: String) -> Result<Value, String> {
-    let args = vec!["remote-cancel".into(), case];
+    let target = run_record(&case)?
+        .map(|(_, _, target)| target)
+        .unwrap_or_else(|| case.clone());
+    let args = vec!["remote-cancel".into(), target];
     let server = command_server(&remote_config(app), &args)?;
     ssh_cli_json(args, None, server.as_ref()).await
 }
@@ -858,10 +1074,13 @@ pub async fn remote_fetch(
 ) -> Result<Value, String> {
     // Authentication follows the persisted job host, never the UI selection.
     let server = command_server(&remote_config(app), &["remote-fetch".into(), case.clone()])?;
+    let target = run_record(&case)?
+        .map(|(_, _, target)| target)
+        .unwrap_or(case);
     let _ = host;
     ssh_cli_json(
         fetch_args(
-            case,
+            target,
             server.as_ref(),
             all.unwrap_or(false),
             overwrite_newer.unwrap_or(false),
@@ -901,10 +1120,35 @@ pub(crate) fn study_args(
 }
 
 /// 研究交给了哪台服务器（研究目录里的 `.colm-remote-study.json`）。
-fn study_server(config: &RemoteConfig, study: &str) -> Result<Server, String> {
-    let path = PathBuf::from(study).join(".colm-remote-study.json");
-    let text = std::fs::read_to_string(path).map_err(|_| "这个研究没有交给服务器跑过")?;
+pub(crate) fn study_server(config: &RemoteConfig, study: &str) -> Result<Server, String> {
+    let directory = PathBuf::from(study);
+    let (text, pending) = match std::fs::read_to_string(directory.join(".colm-remote-study.json")) {
+        Ok(text) => (text, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (
+            std::fs::read_to_string(directory.join(".colm-remote-study-pending.json"))
+                .map_err(|_| "这个研究没有服务器提交记录")?,
+            true,
+        ),
+        Err(_) => return Err("无法读取服务器研究记录".into()),
+    };
     let record: Value = serde_json::from_str(&text).map_err(|_| "服务器研究记录不合法")?;
+    if pending && record.get("ssh_auth").is_none_or(Value::is_null) {
+        // Older intents contain only an SSH alias; reuse its configured credentials for this read.
+        let host = record["host"].as_str().ok_or("待核对研究记录缺少主机")?;
+        let root = record["root"]
+            .as_str()
+            .ok_or("待核对研究记录缺少工作目录")?;
+        let server = config
+            .servers
+            .iter()
+            .find(|s| s.host == host && s.root == root)
+            .cloned()
+            .ok_or("请恢复待核对研究的服务器连接设置")?;
+        validate(&RemoteConfig {
+            servers: vec![server.clone()],
+        })?;
+        return Ok(server);
+    }
     server_from_record(config, &record)
 }
 
@@ -917,6 +1161,8 @@ fn absolute_study(study: &str) -> Result<(), String> {
 
 /// 把研究交给服务器：同一份设定在那里重建并运行。
 #[tauri::command]
+// These are the command's named IPC fields, shared with the CLI.
+#[allow(clippy::too_many_arguments)]
 pub async fn remote_study_run(
     app: tauri::AppHandle,
     study_dir: String,
@@ -925,6 +1171,8 @@ pub async fn remote_study_run(
     engine: Option<String>,
     jobs: Option<usize>,
     model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
 ) -> Result<Value, String> {
     absolute_study(&study_dir)?;
     model_version_args(model_version.as_deref())?;
@@ -935,12 +1183,10 @@ pub async fn remote_study_run(
         ranks: None,
         model_version,
     };
-    ssh_cli_json(
-        study_args(&server, study_dir, kernel, &engine, jobs),
-        resources,
-        Some(&server),
-    )
-    .await
+    let mut args = study_args(&server, study_dir, kernel, &engine, jobs);
+    crate::model::options(&mut args, model_revision.as_ref())?;
+    crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
+    ssh_cli_json(args, resources, Some(&server)).await
 }
 
 /// 服务器上研究的作业状态与进度。
@@ -966,6 +1212,22 @@ pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Res
     let server = study_server(&remote_config(app), &study_dir)?;
     ssh_cli_json(
         vec!["remote-study-fetch".into(), study_dir],
+        None,
+        Some(&server),
+    )
+    .await
+}
+
+/// Request cancellation of the recorded server job; status remains authoritative.
+#[tauri::command]
+pub async fn remote_study_cancel(
+    app: tauri::AppHandle,
+    study_dir: String,
+) -> Result<Value, String> {
+    absolute_study(&study_dir)?;
+    let server = study_server(&remote_config(app), &study_dir)?;
+    ssh_cli_json(
+        vec!["remote-study-cancel".into(), study_dir],
         None,
         Some(&server),
     )

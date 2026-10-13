@@ -149,7 +149,10 @@ fn two_versions_are_compared_on_the_validation_period_when_both_have_it() {
         side("snow", Some(0.3), Some(0.3)),
         false,
     );
-    assert_eq!(v["better"], "tie");
+    assert!(
+        v["better"].is_null(),
+        "different study designs cannot produce a winner or tie"
+    );
     let notes: Vec<&str> = v["notes"]
         .as_array()
         .unwrap()
@@ -185,6 +188,8 @@ fn a_pinned_study_runs_with_the_snapshot_cli() {
     .unwrap();
     std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
     let pinned = Pinned {
+        model_revision: None,
+        model_root: None,
         name: "snow".into(),
         head: "abc".into(),
         base_commit: "def".into(),
@@ -343,4 +348,63 @@ fn captured_versions_from_different_password_servers_compare_without_credentials
     }
     assert_eq!(colm_remote::auth::current_connection(), original_auth);
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn identical_specs_without_full_input_and_output_evidence_report_no_winner() {
+    let root = temp("compare-legacy-evidence");
+    let spec: study::spec::StudySpec = serde_json::from_value(serde_json::json!({
+        "kind":"uncertainty","method":"oat","base_cases":["caseA"],
+        "parameters":[{"name":"DEF_TUNING_CNFAC","sample_min":0.2,"sample_max":0.8}],"outputs":["f_tref"],
+    })).unwrap();
+    for name in ["a", "b"] {
+        let dir = root.join(name);
+        std::fs::create_dir_all(dir.join("samples")).unwrap();
+        std::fs::write(dir.join("samples/design.csv"), "member,DEF_TUNING_CNFAC\n").unwrap();
+        let manifest = study::spec::Manifest {
+            schema_version: 1,
+            id: name.into(),
+            root: dir.to_string_lossy().into_owned(),
+            created_unix: 0,
+            spec: spec.clone(),
+            members: Vec::new(),
+            provenance: Default::default(),
+        };
+        std::fs::write(
+            dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        let mut state = study::state::StudyState::new(name.into(), []).unwrap();
+        state.status = study::state::StudyStatus::Completed;
+        state.best_member = Some("m000001".into());
+        state.best_objective = Some(if name == "a" { 0.1 } else { 0.2 });
+        study::checkpoint::write_next(&dir.join("checkpoints/state"), &state).unwrap();
+    }
+    let result = compare(&root.join("a"), &root.join("b")).unwrap();
+    assert_eq!(result["same_design"], true);
+    assert!(result["better"].is_null());
+    assert_eq!(result["inputs_verified"], false);
+    assert!(result["notes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|note| note.as_str().unwrap().contains("could not be verified")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn same_design_compares_observation_contents_separately_from_their_host_paths() {
+    let left: study::spec::StudySpec = serde_json::from_value(serde_json::json!({
+        "kind":"uncertainty","method":"oat","base_cases":["caseA"],
+        "parameters":[],"observations":{"caseA":"/local/obs.nc"},"outputs":["f_tref"],
+    }))
+    .unwrap();
+    let mut right = left.clone();
+    right
+        .observations
+        .insert("caseA".into(), "/server/obs.nc".into());
+    assert!(same_design(&left, &right).unwrap());
+    right.observations.clear();
+    assert!(!same_design(&left, &right).unwrap());
 }

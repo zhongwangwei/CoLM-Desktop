@@ -769,3 +769,98 @@ fn a_checkpoint_failure_cancel_stops_before_approval_or_action() {
     assert!(result.contains("cancelled before execution"));
     assert_eq!(approver.1, 0);
 }
+
+#[test]
+fn code_page_commits_require_fresh_decisions_despite_auto_or_remembered_ui_commit() {
+    struct Automatic(usize);
+    impl Approver for Automatic {
+        fn preapproved(&self, _: &str, _: Tier) -> bool {
+            true
+        }
+        fn decide(&mut self, request: &Outbound) -> Decision {
+            assert!(matches!(
+                request,
+                Outbound::ApprovalRequest {
+                    tier: Tier::Code,
+                    explicit_only: true,
+                    ..
+                }
+            ));
+            self.0 += 1;
+            Decision::ApproveForSession
+        }
+        fn remember(&mut self, _: &str) {
+            panic!("code page commits must never remember ui_commit");
+        }
+    }
+    struct Window;
+    impl crate::tools::ui::UiBridge for Window {
+        fn request(&self, action: &str, _: Value) -> Result<Value> {
+            assert_eq!(action, "commit");
+            Ok(serde_json::json!({"ok":true}))
+        }
+    }
+    let registry = Registry::standard_for(false, true, false);
+    let context = ToolContext {
+        ui: Some(crate::tools::ui::UiHandle(std::sync::Arc::new(Window))),
+        ..ToolContext::default()
+    };
+    let mut approver = Automatic(0);
+    let mut events = Vec::new();
+    let targets = [
+        "workspace-create",
+        "workspace-patch",
+        "workspace-check",
+        "workspace-export",
+        "resource-build-7920l",
+        "resource-workspace-submit-7920l",
+    ];
+    for target in targets {
+        let result = execute_tool(
+            &registry,
+            &context,
+            &call(
+                target,
+                "ui_commit",
+                &serde_json::json!({"target":target,"purpose":"check"}).to_string(),
+            ),
+            &mut |event| events.push(event),
+            &mut approver,
+            &AtomicBool::new(false),
+        );
+        assert!(result.contains("true"));
+    }
+    assert_eq!(approver.0, targets.len());
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(
+                event,
+                Outbound::ToolCall {
+                    tier: Tier::Code,
+                    preapproved: false,
+                    ..
+                }
+            ))
+            .count(),
+        targets.len()
+    );
+    let result = execute_tool(
+        &registry,
+        &context,
+        &call(
+            "run",
+            "ui_commit",
+            r#"{"target":"run-submit","purpose":"run"}"#,
+        ),
+        &mut |_| {},
+        &mut approver,
+        &AtomicBool::new(false),
+    );
+    assert!(result.contains("true"));
+    assert_eq!(
+        approver.0,
+        targets.len(),
+        "ordinary Act commits still honor Auto"
+    );
+}

@@ -136,6 +136,18 @@ jobs:
         run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+      - name: Install and verify React frontend
+        working-directory: gui
+        run: |
+          npm ci
+          npm run lint
+          npm test
+          npm run build
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: gui/src-tauri

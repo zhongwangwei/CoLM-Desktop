@@ -87,7 +87,8 @@ pub fn submit_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<St
         sched::PATH_PRELUDE
     };
     Ok(format!(
-        "set -e\n{prelude}mkdir -p {dir}\ncd {dir}\ncat > script.sh <<'COLM_JOB_EOF'\n{script}COLM_JOB_EOF\nchmod +x script.sh\n{launch}",
+        "set -e\n{prelude}mkdir -p {jobs}\nmkdir {dir} || {{ echo 'job identity already exists; inspect its status instead of resubmitting' >&2; exit 1; }}\ncd {dir}\ncat > script.sh <<'COLM_JOB_EOF'\n{script}COLM_JOB_EOF\nchmod +x script.sh\n{launch}",
+        jobs = quote(&format!("{}/jobs",root.trim_end_matches('/'))),
         launch = sched::launch(spec.scheduler),
     ))
 }

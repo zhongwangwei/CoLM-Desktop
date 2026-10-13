@@ -270,6 +270,18 @@ pub(crate) fn stage_case(
     upload_unmapped: bool,
 ) -> Result<Staged> {
     let mut staged = Staged::default();
+    let mut effective_maps = maps.to_vec();
+    let alias = crate::model_version::execution_path(case)?;
+    if alias != case {
+        effective_maps.insert(
+            0,
+            Mapping {
+                local: alias.to_string_lossy().into_owned(),
+                remote: remote_case.into(),
+            },
+        );
+    }
+    let maps = effective_maps.as_slice();
     std::fs::create_dir_all(staging)?;
     for entry in
         std::fs::read_dir(case).with_context(|| format!("cannot read {}", case.display()))?
@@ -309,6 +321,7 @@ pub(crate) fn stage_case(
 
 /// 本机算例的提交记录。
 pub(crate) const RECORD: &str = ".colm-remote.json";
+pub(crate) const PENDING: &str = ".colm-remote-pending.json";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
@@ -336,11 +349,201 @@ fn bare() -> String {
     "bare".into()
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PendingRun {
+    schema: u32,
+    source_case: PathBuf,
+    run_case: PathBuf,
+    #[serde(flatten)]
+    record: Record,
+}
+
+fn check_record(record: &Record) -> Result<()> {
+    ensure!(
+        !record.host.is_empty()
+            && !record.host.starts_with('-')
+            && !record
+                .host
+                .contains(|c: char| c.is_whitespace() || c.is_control()),
+        "invalid recorded SSH host"
+    );
+    job::check_id(&record.job)?;
+    job::check_id(&record.engine)?;
+    colm_case::validate_case_name(&record.case_name)?;
+    ensure!(
+        record.root.starts_with('/')
+            && record.root != "/"
+            && !record.root.contains(char::is_whitespace)
+            && Path::new(&record.root).components().all(|c| matches!(
+                c,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )),
+        "invalid recorded remote root"
+    );
+    ensure!(
+        record
+            .remote_case
+            .starts_with(&format!("{}/cases/", trim_slash(&record.root)))
+            && !record.remote_case.contains(char::is_control)
+            && Path::new(&record.remote_case)
+                .components()
+                .all(|c| matches!(
+                    c,
+                    std::path::Component::RootDir | std::path::Component::Normal(_)
+                )),
+        "remote case is outside its recorded root"
+    );
+    Ok(())
+}
+
+fn source_case(case: &Path) -> Result<PathBuf> {
+    let case = case.canonicalize()?;
+    if case.join(colm_model::RUN_MANIFEST).is_file() {
+        let run: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(case.join(colm_model::RUN_MANIFEST))?)?;
+        ensure!(
+            run.run_case.canonicalize()? == case,
+            "model run path changed"
+        );
+        let source = run.source_case.canonicalize()?;
+        ensure!(
+            source.join("case.nml").is_file(),
+            "model source case is missing"
+        );
+        Ok(source)
+    } else {
+        Ok(case)
+    }
+}
+
+fn read_pending(case: &Path) -> Result<Option<PendingRun>> {
+    let source = source_case(case)?;
+    let bytes = match std::fs::read(source.join(PENDING)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error).context("cannot read remote submission intent"),
+    };
+    let pending: PendingRun = serde_json::from_slice(&bytes)
+        .context("remote submission intent is incomplete; inspect it before any new submission")?;
+    ensure!(
+        pending.schema == 1 && pending.source_case == source,
+        "remote submission intent belongs to another source case"
+    );
+    ensure!(
+        pending.run_case.is_absolute(),
+        "pending run path must be absolute"
+    );
+    check_record(&pending.record)?;
+    Ok(Some(pending))
+}
+
+pub(crate) fn pending_record(case: &Path) -> Result<Option<serde_json::Value>> {
+    Ok(read_pending(case)?.map(serde_json::to_value).transpose()?)
+}
+
+fn sync_directory(directory: &Path) -> Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(directory)?.sync_all()?;
+    let _ = directory;
+    Ok(())
+}
+
+fn reserve_pending(pending: &PendingRun) -> Result<()> {
+    use std::io::Write;
+    check_record(&pending.record)?;
+    ensure!(
+        pending.source_case == source_case(&pending.run_case)?,
+        "pending source case changed"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(pending.source_case.join(PENDING))
+        .context("an earlier remote submission must be reconciled before retrying")?;
+    file.write_all(&serde_json::to_vec_pretty(pending)?)?;
+    file.sync_all()?;
+    sync_directory(&pending.source_case)
+}
+
+fn submit_with_intent<T>(pending: &PendingRun, submit: impl FnOnce() -> Result<T>) -> Result<T> {
+    reserve_pending(pending)?;
+    // Every failure keeps this reservation, including loss of the SSH success response.
+    submit()
+}
+
+fn atomic_record(case: &Path, record: &Record) -> Result<()> {
+    use std::io::Write;
+    let temporary = case.join(format!(
+        "{RECORD}.{}-{}.tmp",
+        record.job,
+        std::process::id()
+    ));
+    let result = (|| -> Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&serde_json::to_vec_pretty(record)?)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, case.join(RECORD))?;
+        sync_directory(case)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result
+}
+
+fn finish_pending(pending: &PendingRun, record: &Record) -> Result<()> {
+    ensure!(
+        record.job == pending.record.job
+            && record.remote_case == pending.record.remote_case
+            && record.host == pending.record.host
+            && record.root == pending.record.root
+            && record.engine == pending.record.engine,
+        "submission result differs from saved intent"
+    );
+    atomic_record(&pending.run_case, record)?;
+    if pending.source_case != pending.run_case {
+        atomic_record(&pending.source_case, record)?;
+    }
+    std::fs::remove_file(pending.source_case.join(PENDING))?;
+    sync_directory(&pending.source_case)
+}
+
+fn refuse_pending(opts: &Opts) -> Result<()> {
+    if opts.get("--dry-run").as_deref() == Some("1") {
+        return Ok(());
+    }
+    let source = source_case(&opts.positional_case()?)?;
+    if let Some(pending) = read_pending(&source)? {
+        bail!("remote submission {} on {} has an unresolved outcome; use remote-status {} before any new run", pending.record.job, pending.record.host, source.display());
+    }
+    crate::history_cmd::refuse_unresolved_remote_submission(opts, &source)?;
+    if let Ok(record) = read_record(&source) {
+        if record
+            .provenance
+            .as_ref()
+            .and_then(|value| value["operation_id"].as_str())
+            == opts.get("--operation-id").as_deref()
+            && opts.get("--operation-id").is_some()
+        {
+            bail!("this operation already submitted job {}; inspect its status instead of submitting again", record.job);
+        }
+    }
+    Ok(())
+}
+
 fn read_record(case: &Path) -> Result<Record> {
+    ensure!(
+        read_pending(case)?.is_none(),
+        "remote submission is pending; inspect remote-status before fetching or cancelling"
+    );
     let path = case.join(RECORD);
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("{} has not been run remotely (no {RECORD})", case.display()))?;
     let record: Record = serde_json::from_str(&text)?;
+    check_record(&record)?;
     colm_remote::auth::check_connection(record.ssh_auth.as_ref())?;
     Ok(record)
 }
@@ -368,11 +571,16 @@ fn root_of(opts: &Opts) -> Result<String> {
 /// 引擎源码：开发环境里是这个仓库，安装包里是随应用附带的 `colm-src.tar.gz`。
 pub(super) fn engine_source() -> Result<Source> {
     let dir = exe_dir()?;
-    if let Some(source) = Source::find_checkout(&dir) {
-        return Ok(source);
-    }
-    if let Some(tarball) = engine::bundled_source(&engine::resource_dirs(&dir)) {
+    engine_source_at(&dir, &engine::resource_dirs(&dir))
+}
+
+fn engine_source_at(dir: &Path, resources: &[PathBuf]) -> Result<Source> {
+    // A packaged app must use its own source, even when launched inside a checkout.
+    if let Some(tarball) = engine::bundled_source(resources) {
         return Ok(Source::Tarball(tarball));
+    }
+    if let Some(source) = Source::find_checkout(dir) {
+        return Ok(source);
     }
     bail!("the engine sources were not found next to colm-cli; this build cannot run remotely")
 }
@@ -402,6 +610,18 @@ impl RemoteVersion {
 }
 
 pub(crate) fn remote_version(opts: &Opts) -> Result<Option<RemoteVersion>> {
+    if let Some(source) = opts.get("--frozen-model-source") {
+        return Ok(Some(RemoteVersion {
+            name: "official".into(),
+            head: String::new(),
+            src: PathBuf::from(source),
+            touches: colm_workspace::version::Touches {
+                engine: false,
+                kernel: false,
+            },
+            value: super::provenance::official_version_value(),
+        }));
+    }
     let name = match opts.get("--model-version") {
         None => return Ok(None),
         Some(name) if name == "official" => return Ok(None),
@@ -440,6 +660,7 @@ pub(crate) fn remote_version(opts: &Opts) -> Result<Option<RemoteVersion>> {
 /// 这次的引擎源码：修改版用它自己的 `src/`，官方版用应用的源码。
 fn source_for(version: Option<&RemoteVersion>) -> Result<Source> {
     match version {
+        Some(version) if version.src.is_file() => Ok(Source::Tarball(version.src.clone())),
         Some(version) => Ok(Source::Checkout(version.src.clone())),
         None => engine_source(),
     }
@@ -448,103 +669,7 @@ fn source_for(version: Option<&RemoteVersion>) -> Result<Source> {
 /// Source identity excludes Git metadata, bulk datasets and generated build/cache directories.
 /// The same relative-path/byte stream is used for checkouts and extracted packages.
 pub(crate) fn source_content_sha256(root: &Path) -> Result<String> {
-    fn collect(root: &Path, relative: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
-        let path = root.join(relative);
-        let meta = match std::fs::symlink_metadata(&path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => return Err(error.into()),
-        };
-        ensure!(
-            !meta.file_type().is_symlink(),
-            "source symlink is not supported: {}",
-            path.display()
-        );
-        if meta.is_dir() {
-            for entry in std::fs::read_dir(&path)? {
-                let entry = entry?;
-                let name = entry.file_name();
-                if matches!(
-                    name.to_str(),
-                    Some("target" | ".git" | "node_modules" | "__pycache__" | "cache" | ".cache")
-                ) {
-                    continue;
-                }
-                collect(root, &relative.join(name), files)?;
-            }
-        } else if meta.is_file() {
-            let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            let ext = path
-                .extension()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if matches!(name, "Cargo.lock" | "Makefile" | "CMakeLists.txt")
-                || matches!(
-                    ext.as_str(),
-                    "rs" | "f"
-                        | "f90"
-                        | "f95"
-                        | "for"
-                        | "c"
-                        | "h"
-                        | "cpp"
-                        | "hpp"
-                        | "py"
-                        | "sh"
-                        | "ps1"
-                        | "js"
-                        | "mjs"
-                        | "ts"
-                        | "json"
-                        | "toml"
-                        | "mk"
-                        | "cmake"
-                )
-            {
-                files.push(relative.to_owned());
-            }
-        }
-        Ok(())
-    }
-    ensure!(
-        !std::fs::symlink_metadata(root)?.file_type().is_symlink(),
-        "source root cannot be a symlink"
-    );
-    ensure!(
-        root.join("Cargo.toml").is_file(),
-        "source has no Cargo.toml"
-    );
-    let mut files = Vec::new();
-    for path in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "crates",
-        "vendor",
-        "xtask",
-        "scripts",
-    ] {
-        collect(root, Path::new(path), &mut files)?;
-    }
-    files.sort();
-    let mut hasher = Sha256::new();
-    for file in files {
-        let bytes = std::fs::read(root.join(&file))?;
-        let normalized = file
-            .components()
-            .map(|part| {
-                part.as_os_str()
-                    .to_str()
-                    .context("source path is not UTF-8")
-            })
-            .collect::<Result<Vec<_>>>()?
-            .join("/");
-        hasher.update(normalized.as_bytes());
-        hasher.update([0]);
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-    }
-    Ok(format!("{:x}", hasher.finalize()))
+    colm_remote::engine::source_content_sha256(root)
 }
 
 fn file_sha256(path: &Path) -> Result<String> {
@@ -1062,6 +1187,77 @@ fn resolve_remote_kernel(
     Ok(dir)
 }
 
+/// Validate the execution host's selected manifest, never the local preset proxy.
+pub(super) fn check_selected_remote_kernel(
+    ssh: &Ssh,
+    remote_kernel: &str,
+    revision: &colm_model::FrozenRevision,
+) -> Result<()> {
+    let text = ssh.run_ok(&format!(
+        "cat -- {}",
+        quote(&format!("{remote_kernel}/manifest.json"))
+    ))?;
+    check_remote_kernel_manifest(&text, remote_kernel, revision)
+}
+
+pub(crate) fn check_remote_kernel_manifest(
+    text: &str,
+    dir: &str,
+    revision: &colm_model::FrozenRevision,
+) -> Result<()> {
+    let manifest: colm_kernel::manifest::Manifest =
+        serde_json::from_str(text).context("cannot parse actual remote kernel manifest")?;
+    ensure!(
+        manifest.schema == colm_kernel::manifest::SCHEMA,
+        "unsupported remote kernel manifest schema"
+    );
+    ensure!(
+        manifest
+            .macros
+            .iter()
+            .filter(|name| matches!(name.as_str(), "LULC_IGBP" | "LULC_USGS"))
+            .count()
+            == 1,
+        "remote kernel must declare exactly one land-cover classification"
+    );
+    crate::model_version::check_kernel(
+        revision,
+        &colm_kernel::Kernel {
+            dir: PathBuf::from(dir),
+            manifest,
+        },
+    )
+}
+
+fn materialized_revision(case: &Path) -> Result<Option<colm_model::FrozenRevision>> {
+    if !case.join(colm_model::RUN_MANIFEST).is_file() {
+        return Ok(None);
+    }
+    let case = case.canonicalize()?;
+    let run: colm_model::MaterializedRun =
+        serde_json::from_slice(&std::fs::read(case.join(colm_model::RUN_MANIFEST))?)?;
+    ensure!(
+        run.run_case.canonicalize()? == case,
+        "model run belongs to another case"
+    );
+    let registry = case
+        .parent()
+        .and_then(Path::parent)
+        .context("model run has no registry")?;
+    ensure!(
+        registry.join("versions").is_dir(),
+        "model run registry missing"
+    );
+    let revision = colm_model::Registry::open(registry)?.get(&run.version)?;
+    ensure!(
+        revision.code == run.code
+            && revision.fingerprint == run.revision_fingerprint
+            && revision.overlay_sha256 == run.overlay_sha256,
+        "materialized model revision identity changed"
+    );
+    Ok(Some(revision))
+}
+
 /// 作业体：先确保引擎编好，再跑三段。
 #[allow(clippy::too_many_arguments)]
 fn job_body(
@@ -1075,7 +1271,8 @@ fn job_body(
     opts: &Opts,
 ) -> Result<String> {
     let mut run = format!(
-        "RAYON_NUM_THREADS={threads} {bin}/colm-cli run {case} --kernel {kernel} --stream 1 --engine {engine} --preprocessors {pre}",
+        "COLM_AUDIT_BY_PARENT=1 COLM_EXECUTION_SNAPSHOT={snapshot} RAYON_NUM_THREADS={threads} {bin}/colm-cli run {case} --kernel {kernel} --stream 1 --engine {engine} --preprocessors {pre}",
+        snapshot = quote(engine_id),
         bin = quote(&format!("{}/bin", engine::engine_dir(root, engine_id))),
         case = quote(remote_case),
         kernel = quote(remote_kernel),
@@ -1254,6 +1451,12 @@ fn inventory_versions(opts: &Opts) -> (Vec<serde_json::Value>, Vec<String>) {
     if let Err(error) = result {
         blockers.push(format!("Cannot verify workspace source snapshots: {error}"));
     }
+    if opts.get("--model-root").is_some() {
+        match crate::model_version::protected_snapshots(opts) {
+            Ok(entries) => versions.extend(entries),
+            Err(error) => blockers.push(format!("Cannot verify frozen model references: {error}")),
+        }
+    }
     (versions, blockers)
 }
 
@@ -1402,6 +1605,15 @@ pub(super) fn cmd_engine_clean(opts: &Opts) -> Result<()> {
 }
 
 pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
+    refuse_pending(opts)?;
+    if let Some((prepared, run)) = crate::model_version::prepare(opts)? {
+        ensure!(
+            opts.get("--upload-unmapped").as_deref() != Some("1"),
+            "model revision runs require mapped server datasets; bulk upload is not allowed"
+        );
+        let _ = run;
+        return cmd_run(&prepared);
+    }
     let case = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let root = root_of(opts)?;
@@ -1455,6 +1667,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     );
 
     // 1. 算例副本：在本机暂存、改写路径，对应不上的先报出来。
+    let local_configuration = crate::fingerprint::configuration_identity(&case)?;
     let staging =
         std::env::temp_dir().join(format!("colm-remote-{}-{}", case_name, std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
@@ -1472,6 +1685,33 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
             list.join(", ")
         );
     }
+
+    let remote_model_run = if case.join(colm_model::RUN_MANIFEST).is_file() {
+        let mut run: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(case.join(colm_model::RUN_MANIFEST))?)?;
+        run.run_case = PathBuf::from(&remote_case);
+        for path in &mut run.artifact_paths {
+            *path = PathBuf::from(&remote_case).join(
+                path.strip_prefix(&case)
+                    .context("model artifact escapes run case")?,
+            );
+        }
+        run.effective_nml_sha256 =
+            colm_kernel::sha256_hex(&std::fs::read(staging.join("case.nml"))?);
+        for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
+            if run.inputs.contains_key(&format!("execution-option:{flag}")) {
+                bail!("remote spectral data options require an explicit server input mapping");
+            }
+        }
+        std::fs::write(
+            staging.join(colm_model::RUN_MANIFEST),
+            serde_json::to_vec_pretty(&run)?,
+        )?;
+        let _ = std::fs::remove_file(staging.join("full-input-identity.json"));
+        Some(serde_json::to_value(run)?)
+    } else {
+        None
+    };
 
     // 2. 核对服务器上的数据在场。
     if !staged.remote_inputs.is_empty() {
@@ -1494,6 +1734,9 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     // 3. 引擎源码、内核清单、算例副本上传。
     let version = remote_version(opts)?;
     let engine = choose_engine(opts, &ssh, &root, version.as_ref())?;
+    if let Some(expected) = opts.get("--expected-engine") {
+        ensure!(engine.id() == expected, "replay source snapshot changed");
+    }
     let fortran = plan.engine == "fortran";
     let manifest = match &local_kernel {
         Some((dir, _)) => std::fs::read_to_string(dir.join("manifest.json"))?,
@@ -1504,6 +1747,13 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest))
     };
+    if let Some(revision) = materialized_revision(&case)? {
+        if fortran {
+            check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
+        } else {
+            check_remote_kernel_manifest(&manifest, &remote_kernel, &revision)?;
+        }
+    }
     if dry_run {
         let _ = std::fs::remove_dir_all(&staging);
         let body = job_body(
@@ -1535,28 +1785,8 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         );
         return Ok(());
     }
-    let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
-    let (engine_uploaded, id, submitted) = engine_lock.run(|| {
-    let engine_uploaded = engine.upload(&ssh, &root)?;
-    if !fortran {
-        ssh.run_ok(&format!(
-            "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest}\nCOLM_MANIFEST_EOF\n",
-            dir = quote(&remote_kernel)
-        ))?;
-    }
-    let entries: Vec<String> = std::fs::read_dir(&staging)?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect();
-    ssh.upload(&staging, &entries, &remote_case)?;
-    let _ = std::fs::remove_dir_all(&staging);
-
-    // 4. 提交作业：先确保引擎编好，再跑。
-    let id = format!(
-        "{}-{}",
-        now(),
-        short_hash(&format!("{}{}", case.display(), now()))
-    );
-    let body = job_body(
+    let id = format!("run-{}", opts.need_str("--operation-id")?);
+    let raw_body = job_body(
         &root,
         engine.id(),
         &remote_case,
@@ -1571,11 +1801,14 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         resources,
         name: sched::job_name(&case_name),
     };
-    let submitted = job::submit(&ssh, &root, &id, &body, &spec, engine.id())?;
-        Ok((engine_uploaded, id, submitted))
-    })?;
-    let provenance = json!({
+    let body = format!(
+        "# colm-run-case: {}\n# colm-operation-id: {}\n{raw_body}",
+        serde_json::to_string(&remote_case)?,
+        opts.need_str("--operation-id")?
+    );
+    let mut provenance = json!({
         "schema": 1,
+        "operation_id": opts.get("--operation-id"),
         "started": now(),
         "version": match &version {
             Some(version) => version.value.clone(),
@@ -1593,54 +1826,173 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         },
         "engine_snapshot": engine.id(),
     });
+    crate::model_version::attach(&case, &mut provenance)?;
+    provenance["local_configuration_sha256"] = serde_json::to_value(&local_configuration)?;
+    provenance["remote_model_run"] = serde_json::to_value(remote_model_run)?;
+    provenance["remote_options"] = serde_json::to_value(
+        opts.flags
+            .iter()
+            .filter(|(key, _)| replay_remote_flag(key))
+            .cloned()
+            .collect::<Vec<_>>(),
+    )?;
+    provenance["replay_kernel"] =
+        serde_json::to_value(local_kernel.as_ref().map(|(path, _)| path))?;
     let record = Record {
         ssh_auth: colm_remote::auth::current_connection(),
         host: ssh.host.clone(),
-        root,
+        root: root.clone(),
         job: id.clone(),
         remote_case: remote_case.clone(),
         case_name,
         engine: engine.id().to_owned(),
         submitted_at: now(),
-        scheduler: submitted.scheduler.to_owned(),
-        scheduler_id: submitted.scheduler_id.clone(),
+        scheduler: scheduler.name().to_owned(),
+        scheduler_id: None,
         provenance: Some(provenance),
     };
-    let record_warning = std::fs::write(case.join(RECORD), serde_json::to_string_pretty(&record)?)
+    let pending = PendingRun {
+        schema: 1,
+        source_case: source_case(&case)?,
+        run_case: case.clone(),
+        record: record.clone(),
+    };
+    let (engine_lock, engine_uploaded, submitted) = submit_with_intent(&pending, || {
+        crate::history_cmd::observe_remote_outcome(
+            &json!({"job":id,"outcome":"uncertain","terminal":false,"remote_record":pending}),
+        );
+        crate::history_cmd::record_remote_intent(
+            opts,
+            &serde_json::to_value(&pending)?,
+            &pending.source_case,
+        )?;
+        let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+        let (engine_uploaded, submitted) = engine_lock.run(|| {
+    let engine_uploaded = engine.upload(&ssh, &root)?;
+    if !fortran {
+        ssh.run_ok(&format!(
+            "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest}\nCOLM_MANIFEST_EOF\n",
+            dir = quote(&remote_kernel)
+        ))?;
+    }
+    let entries: Vec<String> = std::fs::read_dir(&staging)?
+        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect();
+    ssh.upload(&staging, &entries, &remote_case)?;
+    let _ = std::fs::remove_dir_all(&staging);
+
+    // 4. 提交作业：先确保引擎编好，再跑。
+    ensure!(crate::fingerprint::configuration_identity(&case)? == local_configuration, "local frozen configuration changed during remote staging");
+    let submitted = job::submit(&ssh, &root, &id, &body, &spec, engine.id())?;
+        Ok((engine_uploaded, submitted))
+    })?;
+        Ok((engine_lock, engine_uploaded, submitted))
+    })?;
+    let mut record = record;
+    record.scheduler = submitted.scheduler.to_owned();
+    record.scheduler_id = submitted.scheduler_id.clone();
+    let record_warning = finish_pending(&pending, &record)
         .err()
         .map(|e| format!("Job {id} submitted, but local record could not be saved: {e}"));
     let lock_warning = engine_lock.finish_submitted(&id);
+    crate::history_cmd::observe_remote_outcome(
+        &json!({"job":id,"outcome":"submitted","terminal":false,"remote_record":record}),
+    );
+    if opts.get("--quiet-submit-json").is_none() {
+        println!(
+            "{}",
+            json!({
+                "job": id,
+                "pid": submitted.pid,
+                "scheduler": submitted.scheduler,
+                "scheduler_id": submitted.scheduler_id,
+                "host": ssh.host,
+                "remote_case": remote_case,
+                "engine": engine.id(),
+                "engine_kind": engine.kind(),
+                "engine_uploaded": engine_uploaded,
+                "case_bytes": staged.bytes,
+                "record_warning": record_warning,
+                "lock_warning": lock_warning,
+                "remote_inputs": staged.remote_inputs,
+                "uploaded_extra": staged.uploaded_extra,
+            })
+        );
+    }
+    Ok(())
+}
+
+fn pending_identity_script(pending: &PendingRun) -> Result<String> {
+    check_record(&pending.record)?;
+    let operation = pending
+        .record
+        .provenance
+        .as_ref()
+        .and_then(|value| value["operation_id"].as_str())
+        .context("pending submission has no operation identity")?;
+    job::check_id(operation)?;
+    let markers = [
+        format!("# colm-engine-snapshot: {}", pending.record.engine),
+        format!(
+            "# colm-run-case: {}",
+            serde_json::to_string(&pending.record.remote_case)?
+        ),
+        format!("# colm-operation-id: {operation}"),
+    ];
+    let checks = markers.iter().map(|marker| format!("grep -Fqx -- {} script.sh || {{ echo 'pending job identity changed' >&2; exit 1; }}", quote(marker))).collect::<Vec<_>>().join("\n");
+    Ok(format!("set -e\ncd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\n[ \"$S\" = {scheduler} ] || {{ echo 'pending scheduler identity changed' >&2; exit 1; }}\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler)))
+}
+
+fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<()> {
+    colm_remote::auth::check_connection(pending.record.ssh_auth.as_ref())?;
+    let ssh = Ssh::new(&pending.record.host)?;
+    let identity = ssh.run_ok(&pending_identity_script(&pending)?)?;
+    let verified = identity.lines().next() == Some("identity=verified");
+    let status = if verified {
+        job::status(&ssh, &pending.record.root, &pending.record.job, lines)?
+    } else {
+        job::Status {
+            state: job::State::Unknown,
+            phase: None,
+            detail: Some("submission has no complete server identity; do not resubmit".into()),
+            log_tail: String::new(),
+        }
+    };
+    let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":matches!(status.state,job::State::Finished{..}),"status":status});
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
+    let mut record = pending.record.clone();
+    if verified && record.scheduler != "bare" {
+        record.scheduler_id = identity.lines().nth(1).map(str::to_owned);
+    }
+    let record_warning = if verified {
+        finish_pending(&pending, &record)
+            .err()
+            .map(|error| error.to_string())
+    } else {
+        None
+    };
+    let unresolved = !verified || record_warning.is_some();
     println!(
         "{}",
-        json!({
-            "job": id,
-            "pid": submitted.pid,
-            "scheduler": submitted.scheduler,
-            "scheduler_id": submitted.scheduler_id,
-            "host": ssh.host,
-            "remote_case": remote_case,
-            "engine": engine.id(),
-            "engine_kind": engine.kind(),
-            "engine_uploaded": engine_uploaded,
-            "case_bytes": staged.bytes,
-            "record_warning": record_warning,
-            "lock_warning": lock_warning,
-            "remote_inputs": staged.remote_inputs,
-            "uploaded_extra": staged.uploaded_extra,
-        })
+        json!({"record":if unresolved {serde_json::Value::Null}else{serde_json::to_value(&record)?},"pending":if unresolved {json!({"host":record.host,"root":record.root,"job":record.job,"remote_case":record.remote_case,"source_case":pending.source_case,"run_case":pending.run_case,"needs_reconciliation":true})}else{serde_json::Value::Null},"status":status,"record_warning":record_warning})
     );
     Ok(())
 }
 
 pub(super) fn cmd_status(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
-    let record = read_record(&case)?;
     let lines: usize = opts
         .get("--lines")
         .map(|l| l.parse())
         .transpose()?
         .unwrap_or(60);
+    if let Some(pending) = read_pending(&case)? {
+        return cmd_pending_status(opts, pending, lines);
+    }
+    let record = read_record(&case)?;
     let status = job::status(&Ssh::new(&record.host)?, &record.root, &record.job, lines)?;
+    let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished {..}),"status":status});
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
     println!("{}", json!({ "record": record, "status": status }));
     Ok(())
 }
@@ -1648,8 +2000,22 @@ pub(super) fn cmd_status(opts: &Opts) -> Result<()> {
 pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
     let record = read_record(&case)?;
-    job::cancel(&Ssh::new(&record.host)?, &record.root, &record.job)?;
-    println!("{}", json!({ "cancelled": record.job }));
+    job::check_id(&record.job)?;
+    let ssh = Ssh::new(&record.host)?;
+    let marker = quote(&format!("# colm-engine-snapshot: {}", record.engine));
+    let mut identity = format!("set -e\ncd {}\ngrep -Fqx -- {marker} script.sh || {{ echo 'engine identity changed' >&2; exit 1; }}\n[ \"$(cat scheduler 2>/dev/null || echo bare)\" = {} ] || {{ echo 'scheduler identity changed' >&2; exit 1; }}\n", quote(&job::job_dir(&record.root, &record.job)), quote(&record.scheduler));
+    if record.scheduler != "bare" {
+        let id = record
+            .scheduler_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .context("recorded scheduler job ID is missing")?;
+        identity.push_str(&format!("[ \"$(cat sched_id)\" = {} ] || {{ echo 'scheduler job identity changed' >&2; exit 1; }}\n", quote(id)));
+    }
+    let result = remote_study::cancel_job(&ssh, &record.root, &record.job, &identity)?;
+    crate::history_cmd::observe_remote_outcome(&result);
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
+    println!("{result}");
     Ok(())
 }
 
@@ -1695,9 +2061,247 @@ pub(crate) fn refuse_to_overwrite_newer(
     Ok(())
 }
 
+type OutputHashes = std::collections::BTreeMap<String, String>;
+
+fn recorded_history_hashes(provenance: &serde_json::Value) -> Result<OutputHashes> {
+    let outputs = provenance["output_sha256"]
+        .as_object()
+        .context("completion has no original output hashes")?;
+    let mut history = OutputHashes::new();
+    for (name, hash) in outputs {
+        let name = name.replace('\\', "/");
+        ensure!(
+            Path::new(&name)
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_))),
+            "invalid recorded output path: {name}"
+        );
+        let hash = hash.as_str().context("invalid recorded output hash")?;
+        ensure!(
+            hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "invalid recorded output hash: {name}"
+        );
+        if name.starts_with("history/") && Path::new(&name).extension().is_some_and(|v| v == "nc") {
+            ensure!(
+                history.insert(name.clone(), hash.to_owned()).is_none(),
+                "duplicate recorded history path: {name}"
+            );
+        }
+    }
+    ensure!(
+        !history.is_empty(),
+        "completion has no original history hashes"
+    );
+    Ok(history)
+}
+
+fn history_inventory(root: &Path) -> Result<std::collections::BTreeMap<PathBuf, String>> {
+    fn visit(
+        root: &Path,
+        path: &Path,
+        out: &mut std::collections::BTreeMap<PathBuf, String>,
+    ) -> Result<()> {
+        let metadata = std::fs::symlink_metadata(path)?;
+        ensure!(
+            !metadata.file_type().is_symlink() && (metadata.is_dir() || metadata.is_file()),
+            "history contains a symlink or special file: {}",
+            path.display()
+        );
+        out.insert(
+            path.strip_prefix(root)?.to_path_buf(),
+            crate::fingerprint::stable_file_identity(&metadata),
+        );
+        if metadata.is_dir() {
+            for entry in std::fs::read_dir(path)? {
+                visit(root, &entry?.path(), out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut inventory = std::collections::BTreeMap::new();
+    visit(root, root, &mut inventory)?;
+    Ok(inventory)
+}
+
+fn verify_history_hashes(root: &Path, expected: &OutputHashes) -> Result<()> {
+    let before = history_inventory(root)?;
+    let actual: OutputHashes = crate::provenance::output_identities(root)?
+        .into_iter()
+        .map(|(name, hash)| (format!("history/{}", name.replace('\\', "/")), hash))
+        .collect();
+    ensure!(
+        before == history_inventory(root)?,
+        "history changed during output verification"
+    );
+    ensure!(
+        &actual == expected,
+        "history differs from original completed output hashes"
+    );
+    Ok(())
+}
+
+/// Read-only proof from the CLI bound to the job's source snapshot.
+pub(crate) fn verify_completed_outputs(case: &Path) -> Result<serde_json::Value> {
+    let layout = colm_case::Layout::new(case);
+    let name = colm_case::case_name(&layout.case_nml())?;
+    let out = layout.out().join(&name);
+    let path = out.join(crate::provenance::FILE);
+    let before = std::fs::symlink_metadata(&path)?;
+    ensure!(
+        before.is_file() && !before.file_type().is_symlink(),
+        "completion provenance is not a regular file"
+    );
+    let identity = crate::fingerprint::stable_file_identity(&before);
+    let digest = crate::fingerprint::full_file(&path, "provenance")?.sha256;
+    let provenance: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
+    let hashes = recorded_history_hashes(&provenance)?;
+    let inventory = history_inventory(&out.join("history"))?;
+    verify_history_hashes(&out.join("history"), &hashes)?;
+    ensure!(
+        identity == crate::fingerprint::stable_file_identity(&std::fs::symlink_metadata(&path)?)
+            && digest == crate::fingerprint::full_file(&path, "provenance")?.sha256,
+        "completion provenance changed during output verification"
+    );
+    ensure!(
+        inventory == history_inventory(&out.join("history"))?,
+        "history changed during completion verification"
+    );
+    Ok(
+        json!({"schema":1,"case_name":name,"provenance":provenance,"history_sha256":hashes,"history_inventory":inventory,"provenance_identity":identity}),
+    )
+}
+
+fn parse_output_verification(
+    output: colm_remote::ssh::Output,
+) -> Result<Option<serde_json::Value>> {
+    if !output.success {
+        // An old CLI can provide diagnostic downloads, never scientific certification.
+        if output.code == Some(1)
+            && output.stderr.lines().any(|line| {
+                line.trim().strip_prefix("Error: ").unwrap_or(line.trim())
+                    == "unknown command: verify-completed-outputs"
+            })
+        {
+            return Ok(None);
+        }
+        bail!(
+            "server completed-output verification failed: {}",
+            output.stderr.trim()
+        );
+    }
+    let proof: serde_json::Value = serde_json::from_str(output.stdout.trim())
+        .context("invalid server completed-output proof")?;
+    ensure!(proof["schema"] == 1, "unsupported completed-output proof");
+    ensure!(
+        proof["history_inventory"].is_object() && proof["provenance_identity"].is_string(),
+        "server proof has no stable output identities"
+    );
+    let hashes: OutputHashes = serde_json::from_value(proof["history_sha256"].clone())?;
+    ensure!(
+        hashes == recorded_history_hashes(&proof["provenance"])?,
+        "server proof differs from original completion hashes"
+    );
+    Ok(Some(proof))
+}
+
+fn remote_output_verification(ssh: &Ssh, record: &Record) -> Result<Option<serde_json::Value>> {
+    let cli = format!(
+        "{}/bin/colm-cli",
+        engine::engine_dir(&record.root, &record.engine)
+    );
+    let proof = parse_output_verification(ssh.run(&format!(
+        "COLM_AUDIT_BY_PARENT=1 {} verify-completed-outputs {}",
+        quote(&cli),
+        quote(&record.remote_case)
+    ))?)?;
+    if let Some(proof) = &proof {
+        ensure!(
+            proof["case_name"].as_str() == Some(record.case_name.as_str()),
+            "server proof belongs to another case"
+        );
+        let submitted = record
+            .provenance
+            .as_ref()
+            .context("remote submission provenance is missing")?;
+        let remote = &proof["provenance"];
+        ensure!(
+            submitted["remote_model_run"].is_object()
+                && remote["model_run"] == submitted["remote_model_run"],
+            "server model identity differs from submitted revision"
+        );
+        ensure!(
+            remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
+            "server source snapshot differs from submitted engine"
+        );
+        let full: crate::fingerprint::FullInputIdentity =
+            serde_json::from_value(remote["full_input_identity"].clone())?;
+        ensure!(
+            full.complete && full.algorithm == "sha256-full-v1",
+            "server input content identity is incomplete"
+        );
+    }
+    Ok(proof)
+}
+
+struct FetchStage(PathBuf);
+impl FetchStage {
+    fn new(case: &Path) -> Result<Self> {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let path = case.join(format!(".fetch-{}-{suffix}", std::process::id()));
+        std::fs::create_dir(&path)?;
+        Ok(Self(path))
+    }
+}
+impl Drop for FetchStage {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn fetch_certification(
+    fetched: &mut serde_json::Value,
+    proof: Option<&serde_json::Value>,
+    partial: bool,
+) {
+    fetched["execution_ok"] = fetched["ok"].clone();
+    fetched["execution_error"] = fetched["error"].clone();
+    if let Some(proof) = proof {
+        let remote = &proof["provenance"];
+        for field in [
+            "full_input_identity",
+            "input_fingerprint",
+            "kernel",
+            "execution_program_sha256",
+            "execution_snapshot",
+        ] {
+            fetched[field] = remote[field].clone();
+        }
+        fetched["remote_execution_provenance"] = remote.clone();
+    }
+    let reason = if partial {
+        Some("partial history is derived data, not the original completed output")
+    } else if proof.is_none() {
+        Some("the bound server CLI cannot verify original completed outputs")
+    } else {
+        None
+    };
+    let verified = reason.is_none();
+    fetched["output_verification"] = json!({"status":if verified {"passed"} else {"unavailable"},"partial":partial,"reason":reason});
+    if let Some(reason) = reason {
+        fetched["ok"] = json!(false);
+        fetched["error"] = json!(reason);
+    } else if proof.is_some_and(|p| p["provenance"]["ok"] != true) {
+        fetched["ok"] = json!(false);
+        fetched["error"] = json!("server execution provenance is not successful");
+    }
+}
+
 pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let case = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
     let record = read_record(&case)?;
+    let case = crate::model_version::recorded_run_case(&case, record.provenance.as_ref())?;
     refuse_to_overwrite_newer(
         newest_local_history(&case, &record.case_name),
         record.submitted_at,
@@ -1725,10 +2329,18 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
         record.case_name
     );
 
+    let proof = remote_output_verification(&ssh, &record)?;
+    let stage = FetchStage::new(&case)?;
+    let staged_history = stage.0.join(&history);
     let mut subset = serde_json::Value::Null;
+    let mut subset_files = 0;
     if partial {
         // 先在服务器上裁剪，之后 history 目录不整个取，只取裁出来的文件。
-        let tmp = format!("{}/.fetch-subset", record.remote_case);
+        let tmp = format!(
+            "{}/{}-subset",
+            record.remote_case,
+            stage.0.file_name().unwrap().to_string_lossy()
+        );
         let bin = format!(
             "{}/bin/colm-cli",
             engine::engine_dir(&record.root, &record.engine)
@@ -1763,39 +2375,243 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
                 "{e}\n(the engine that ran this case may be too old to subset history; run the case again, or fetch everything by leaving out --vars/--from/--to)"
             )
         })?;
-        subset = serde_json::from_str(out.trim().lines().last().unwrap_or("{}"))
-            .unwrap_or(serde_json::Value::Null);
+        subset = serde_json::from_str(out.trim().lines().last().unwrap_or("{}"))?;
         let files = ssh.run_ok(&format!("ls -1 {}", quote(&tmp)))?;
         let files: Vec<String> = files.lines().map(str::to_owned).collect();
         ensure!(!files.is_empty(), "the server produced no subset files");
+        ensure!(
+            files.iter().all(|name| !name.starts_with('-')
+                && Path::new(name).components().count() == 1
+                && Path::new(name)
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+                && Path::new(name).extension().is_some_and(|v| v == "nc")),
+            "invalid subset filename"
+        );
+        subset_files = files.len();
         entries.retain(|e| e != &history);
-        ssh.download(&record.remote_case, &entries, &case)?;
-        ssh.download(&tmp, &files, &case.join(&history))?;
+        ssh.download(&record.remote_case, &entries, &stage.0)?;
+        ssh.download(&tmp, &files, &staged_history)?;
         let _ = ssh.run_ok(&format!("rm -rf {}", quote(&tmp)));
+        history_inventory(&staged_history)?;
+    } else {
+        ssh.download(&record.remote_case, &entries, &stage.0)?;
+        if let Some(proof) = &proof {
+            verify_history_hashes(
+                &staged_history,
+                &recorded_history_hashes(&proof["provenance"])?,
+            )?;
+        } else {
+            history_inventory(&staged_history)?;
+        }
+    }
+    if let Some(proof) = &proof {
+        ensure!(
+            remote_output_verification(&ssh, &record)?.as_ref() == Some(proof),
+            "server completion changed during fetch"
+        );
+    }
+    refuse_to_overwrite_newer(
+        newest_local_history(&case, &record.case_name),
+        record.submitted_at,
+        opts.get("--overwrite-newer").is_some_and(|v| v == "1"),
+    )?;
+    if partial && case.join(&history).exists() {
+        history_inventory(&case.join(&history))?;
+    }
+    // Invalidate existing certification before publishing any replacement bytes.
+    let mut fetched = fetched_provenance(
+        record
+            .provenance
+            .as_ref()
+            .unwrap_or(&json!({"schema":1,"location":{"kind":"server","host":record.host}})),
+        job::status(&ssh, &record.root, &record.job, 0)
+            .ok()
+            .map(|s| s.state),
+    );
+    fetch_certification(&mut fetched, proof.as_ref(), partial);
+    let mut publishing = fetched.clone();
+    publishing["ok"] = json!(false);
+    publishing["error"] = json!("fetch publication is not complete");
+    publishing["output_verification"] =
+        json!({"status":"unavailable","reason":"fetch publication is not complete"});
+    super::provenance::write_value(&case, &publishing);
+    ensure!(
+        super::provenance::read(&case)?.is_some_and(|p| p["ok"] == false),
+        "cannot invalidate previous output certification"
+    );
+    if partial {
+        std::fs::create_dir_all(case.join(&history))?;
+        for entry in std::fs::read_dir(&staged_history)? {
+            let entry = entry?;
+            std::fs::rename(entry.path(), case.join(&history).join(entry.file_name()))?;
+        }
         std::fs::write(
             case.join(FETCH_MARK),
             serde_json::to_string_pretty(&json!({
                 "vars": vars,
                 "from": from,
                 "to": to,
-                "files": files.len(),
+                "files": subset_files,
                 "fetched_at": now(),
+                "scientific_verified": false,
+                "original_history_sha256": proof.as_ref().map(|p| &p["history_sha256"]),
             }))?,
         )?;
     } else {
-        ssh.download(&record.remote_case, &entries, &case)?;
+        let destination = case.join(&history);
+        std::fs::create_dir_all(destination.parent().context("history parent is missing")?)?;
+        let backup = stage.0.join("previous-history");
+        let had_previous = destination.exists();
+        if had_previous {
+            std::fs::rename(&destination, &backup)?;
+        }
+        if let Err(error) = std::fs::rename(&staged_history, &destination) {
+            if had_previous {
+                if let Err(restore) = std::fs::rename(&backup, &destination) {
+                    // Keep the only intact copy if the filesystem refuses rollback.
+                    std::mem::forget(stage);
+                    bail!("cannot restore previous history after fetch failure ({error}; {restore}); original data remain at {}", backup.display());
+                }
+            }
+            return Err(error.into());
+        }
         let _ = std::fs::remove_file(case.join(FETCH_MARK));
     }
-    colm_case::clear_results_stale(&case)?;
-    if let Some(provenance) = &record.provenance {
-        let state = job::status(&ssh, &record.root, &record.job, 0).map(|s| s.state);
-        super::provenance::write_value(&case, &fetched_provenance(provenance, state.ok()));
+    for name in ["mksrfdata.log", "mkinidata.log", "colm.log"] {
+        let path = stage.0.join(name);
+        if path.is_file() {
+            std::fs::rename(path, case.join(name))?;
+        }
     }
+    let publication_inventory = history_inventory(&case.join(&history))?;
+    if !partial {
+        if let Some(proof) = &proof {
+            verify_history_hashes(
+                &case.join(&history),
+                &recorded_history_hashes(&proof["provenance"])?,
+            )?;
+        }
+    }
+    super::provenance::write_value(&case, &fetched);
+    let publication = (|| -> Result<()> {
+        ensure!(
+            publication_inventory == history_inventory(&case.join(&history))?,
+            "history changed during fetch publication"
+        );
+        let written =
+            super::provenance::read(&case)?.context("fetched provenance was not recorded")?;
+        ensure!(
+            written["ok"] == fetched["ok"]
+                && written["output_verification"] == fetched["output_verification"]
+                && written["remote_execution_provenance"] == fetched["remote_execution_provenance"],
+            "fetched output certification was not recorded"
+        );
+        if !partial {
+            if let Some(proof) = &proof {
+                let expected = recorded_history_hashes(&proof["provenance"])?;
+                ensure!(
+                    recorded_history_hashes(&written)? == expected,
+                    "published output hashes differ from original completed outputs"
+                );
+            }
+        }
+        Ok(())
+    })();
+    if let Err(error) = publication {
+        publishing["error"] = json!(error.to_string());
+        super::provenance::write_value(&case, &publishing);
+        return Err(error);
+    }
+    if fetched["ok"] == true {
+        colm_case::clear_results_stale(&case)?;
+    }
+    let status = job::status(&ssh, &record.root, &record.job, 0)?;
+    let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished {..}),"status":status});
+    crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
     let files = std::fs::read_dir(case.join(&history))?.count();
     println!(
         "{}",
-        json!({ "fetched": entries, "history_files": files, "partial": partial, "subset": subset })
+        json!({ "fetched": entries, "history_files": files, "partial": partial, "subset": subset, "run_case": case, "output_verification":fetched["output_verification"] })
     );
+    Ok(())
+}
+
+/// Re-hash inputs where the run executed; local/server path mappings are not content differences.
+pub(crate) fn verify_recorded_inputs(
+    case: &Path,
+    provenance: &serde_json::Value,
+    recorded: &crate::fingerprint::FullInputIdentity,
+) -> Result<()> {
+    ensure!(
+        provenance["output_verification"]["status"] == "passed"
+            && provenance["output_verification"]["partial"] == false
+            && !case.join(FETCH_MARK).exists(),
+        "remote output is partial or lacks original-output verification"
+    );
+    let local: std::collections::BTreeMap<String, String> =
+        serde_json::from_value(provenance["local_configuration_sha256"].clone())
+            .context("submitted local configuration identity is missing")?;
+    ensure!(
+        crate::fingerprint::configuration_identity(case)? == local,
+        "local frozen configuration changed since remote submission"
+    );
+    let record = read_record(case)?;
+    let expected = record
+        .provenance
+        .as_ref()
+        .context("remote submission provenance is missing")?;
+    ensure!(
+        provenance["remote_model_run"] == expected["remote_model_run"]
+            && provenance["engine_snapshot"] == expected["engine_snapshot"],
+        "remote submission identity changed"
+    );
+    let ssh = Ssh::new(&record.host)?;
+    let proof = remote_output_verification(&ssh, &record)?
+        .context("bound server CLI cannot verify original outputs")?;
+    let remote = &proof["provenance"];
+    ensure!(
+        *remote == provenance["remote_execution_provenance"],
+        "server completion provenance changed since fetch"
+    );
+    verify_history_hashes(
+        &colm_case::Layout::new(case)
+            .out()
+            .join(&record.case_name)
+            .join("history"),
+        &recorded_history_hashes(remote)?,
+    )?;
+    let server_recorded: crate::fingerprint::FullInputIdentity =
+        serde_json::from_value(remote["full_input_identity"].clone())?;
+    ensure!(
+        &server_recorded == recorded,
+        "server input provenance changed since fetch"
+    );
+    let cli = format!(
+        "{}/bin/colm-cli",
+        engine::engine_dir(&record.root, &record.engine)
+    );
+    let actual: crate::fingerprint::FullInputIdentity =
+        serde_json::from_str(&ssh.run_ok(&format!(
+            "COLM_AUDIT_BY_PARENT=1 {} full-input-identity {}",
+            quote(&cli),
+            quote(&record.remote_case)
+        ))?)?;
+    ensure!(
+        &actual == recorded,
+        "server scientific inputs or frozen configuration changed since the run"
+    );
+    ensure!(
+        remote_output_verification(&ssh, &record)?.as_ref() == Some(&proof),
+        "server outputs changed during scientific input verification"
+    );
+    verify_history_hashes(
+        &colm_case::Layout::new(case)
+            .out()
+            .join(&record.case_name)
+            .join("history"),
+        &recorded_history_hashes(remote)?,
+    )?;
     Ok(())
 }
 
@@ -1826,3 +2642,71 @@ pub(crate) mod remote_study;
 #[cfg(test)]
 #[path = "remote_cmd_tests.rs"]
 mod remote_cmd_tests;
+
+fn replay_remote_flag(flag: &str) -> bool {
+    matches!(
+        flag,
+        "--host"
+            | "--root"
+            | "--servers"
+            | "--server"
+            | "--map"
+            | "--scheduler"
+            | "--threads"
+            | "--cpus"
+            | "--mem-gb"
+            | "--nodes"
+            | "--walltime"
+            | "--queue"
+            | "--partition"
+            | "--account"
+            | "--launcher"
+            | "--preset"
+            | "--remote-kernel"
+    )
+}
+pub(crate) fn replay_remote(
+    old_case: &Path,
+    prepared: &Opts,
+    provenance: &serde_json::Value,
+) -> Result<serde_json::Value> {
+    let previous = read_record(old_case)?;
+    ensure!(
+        previous
+            .provenance
+            .as_ref()
+            .and_then(|v| v["model_run"].get("operation_id"))
+            == provenance["model_run"].get("operation_id"),
+        "remote replay record does not match captured operation"
+    );
+    let supplied: Vec<(String, String)> =
+        serde_json::from_value(provenance["remote_options"].clone())
+            .context("remote replay options were not captured")?;
+    ensure!(
+        supplied.iter().all(|(key, _)| replay_remote_flag(key)),
+        "invalid captured remote options"
+    );
+    let mut opts = Opts {
+        positional: prepared.positional.clone(),
+        flags: prepared.flags.clone(),
+    };
+    opts.flags.extend(supplied);
+    opts.flags
+        .push(("--expected-engine".into(), previous.engine.clone()));
+    opts.flags.push(("--quiet-submit-json".into(), "1".into()));
+    let case = prepared.positional_case()?;
+    std::fs::write(
+        case.join("replay-input-identity.json"),
+        serde_json::to_vec(&json!({
+            "full_input_identity":provenance["full_input_identity"],
+            "kernel_program_sha256":provenance["kernel"]["program_sha256"],
+            "execution_program_sha256":provenance["execution_program_sha256"]
+        }))?,
+    )?;
+    cmd_run(&opts)?;
+    let submitted = read_record(&case)?;
+    crate::history_cmd::observe_remote_outcome(
+        &json!({"job":submitted.job,"outcome":"submitted","terminal":false,"remote_record":submitted}),
+    );
+    Ok(json!({"job":submitted.job,"host":submitted.host,"status":"submitted"}))
+}

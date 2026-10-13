@@ -13,6 +13,8 @@ publish.workspace = true
 # 指纹要读算例 namelist 的字段值（fingerprint.rs）。
 colm-namelist = { path = "../colm-namelist" }
 colm-case = { path = "../colm-case" }
+colm-model = { path = "../colm-model" }
+colm-history = { path = "../colm-history" }
 colm-forcing = { path = "../colm-forcing" }
 colm-hist = { path = "../colm-hist", features = ["io"] }
 colm-kernel = { path = "../colm-kernel" }

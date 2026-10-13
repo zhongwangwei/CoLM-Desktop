@@ -1,5 +1,80 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn selected_model_configuration_refreshes_after_edits_without_redirecting_run_status() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("effective-model");
+    let original = case(&root, "A", " DEF_USE_PFT=.false.\n SITE_lat=1.0\n");
+    std::fs::write(original.join("run.out"), "original run log").unwrap();
+    let cli = root.join("cli");
+    std::fs::write(
+        &cli,
+        r#"#!/bin/sh
+[ "$1" = model-preview-context ] || exit 1
+shift
+while [ "$#" -gt 0 ]; do
+ case "$1" in
+ --model-root|--model-id|--model-revision|--operation-id) shift ;;
+ --out) out="$2"; shift ;;
+ *) src="$1" ;;
+ esac
+ shift
+done
+mkdir -p "$out"
+sed 's/DEF_USE_PFT=.false./DEF_USE_PFT=.true./' "$src/case.nml" > "$out/case.nml"
+printf '{"effective_case":"%s","run":{"version":{"id":"modified","revision":1}}}\n' "$out"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ctx = ToolContext {
+        project_root: root.clone(),
+        cli,
+        model_context: Some(crate::tools::ModelContext {
+            model: json!({"version":{"id":"modified","revision":1},"code":{"source_sha256":"a".repeat(64)},"overlay":{"parameters":[]}}),
+            model_root: root.join("models"),
+            source_dir: root.join("source"),
+            docs_dir: None,
+            source_case: Some(original.clone()),
+        }),
+        ..ToolContext::default()
+    };
+    let read = || {
+        ReadCaseConfig
+            .call(&json!({"case":"A","names":null,"filter":null}), &ctx)
+            .unwrap()
+    };
+    assert_eq!(read()["fields"]["case.nml"]["DEF_USE_PFT"], ".true.");
+    std::fs::write(
+        original.join("case.nml"),
+        "&nl_colm\n DEF_USE_PFT=.false.\n SITE_lat=42.0\n/\n",
+    )
+    .unwrap();
+    let fresh = read();
+    assert_eq!(
+        fresh["fields"]["case.nml"]["SITE_lat"]
+            .as_str()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap(),
+        42.0
+    );
+    assert_eq!(fresh["model_version"]["revision"], 1);
+    assert!(std::fs::read_to_string(original.join("case.nml"))
+        .unwrap()
+        .contains("DEF_USE_PFT=.false."));
+    let status = RunStatus.call(&json!({"case":"A"}), &ctx).unwrap();
+    assert_eq!(status["log_tails"]["run.out"], "original run log");
+    assert_eq!(
+        std::fs::read_dir(root.join("models/assistant-previews"))
+            .unwrap()
+            .count(),
+        0
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn temp(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("colm-agent-{label}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -263,9 +338,9 @@ fn guessed_spinup_parameter_is_rejected_with_real_controls() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("neither a namelist field"));
-    assert!(error.contains("get_case_config"));
+    assert!(error.contains("read_case_config"));
     assert!(error.contains("cutoff year, not a duration"));
-    assert!(error.contains("tm-years/tm-repeat"));
+    assert!(error.contains("visible case settings returned by ui_state"));
     let actual = ExplainParameter
         .call(
             &json!({"name":"DEF_simulation_time%spinup_year","case":null}),
@@ -280,8 +355,8 @@ fn guessed_spinup_parameter_is_rejected_with_real_controls() {
 fn knowledge_search_checks_the_selected_workspace_and_withholds_unknown_cards() {
     use std::os::unix::fs::PermissionsExt;
     let root = temp("knowledge-workspace");
-    let docs = root.join("docs");
     let source = root.join("workspace-source");
+    let docs = source.join("docs");
     std::fs::create_dir_all(&docs).unwrap();
     std::fs::create_dir_all(source.join("crates/core")).unwrap();
     let path = "crates/core/flux.rs";
@@ -324,5 +399,54 @@ fn knowledge_search_checks_the_selected_workspace_and_withholds_unknown_cards() 
     assert!(!unknown["matches"][0]["context"]
         .to_string()
         .contains("Old formula"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn hybrid_checks_dispatch_original_case_to_selected_frozen_runtime() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = temp("frozen-hybrid");
+    let original = case(&root, "A", " DEF_USE_PFT=.false.\n");
+    let before = std::fs::read(original.join("case.nml")).unwrap();
+    let cli = root.join("cli");
+    std::fs::write(
+        &cli,
+        r#"#!/bin/sh
+[ "$1" = model-hybrid-check ] || exit 1
+printf '{"argv":"%s"}\n' "$*"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let ctx = ToolContext {
+        cli,
+        project_root: root.clone(),
+        kernel_dir: Some(root.join("actual-kernel")),
+        preprocessors: Some("fortran".into()),
+        model_context: Some(crate::tools::ModelContext {
+            model: json!({"version":{"id":"old-workspace","revision":1},"code":{"source_sha256":"b".repeat(64)}}),
+            model_root: root.join("models"),
+            source_dir: root.join("frozen-source"),
+            docs_dir: None,
+            source_case: Some(original.clone()),
+        }),
+        ..ToolContext::default()
+    };
+    let result = HybridCheck.call(&json!({"case":"A"}), &ctx).unwrap();
+    let argv = result["argv"].as_str().unwrap();
+    assert!(argv.starts_with("model-hybrid-check --model-root "));
+    assert!(argv.contains("--model-id old-workspace --model-revision 1"));
+    assert!(argv.contains(&format!(
+        "{} --kernel {}",
+        original.display(),
+        root.join("actual-kernel").display()
+    )));
+    assert!(argv.ends_with("--preprocessors fortran"));
+    assert_eq!(std::fs::read(original.join("case.nml")).unwrap(), before);
+    assert!(
+        !root.join("models/assistant-previews").exists(),
+        "fixed CLI owns its isolated preview"
+    );
     std::fs::remove_dir_all(root).unwrap();
 }

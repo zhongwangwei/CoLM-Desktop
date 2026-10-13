@@ -257,7 +257,31 @@ fn write_case(root: &Path, site: &str) {
         format!("&nl_colm\n DEF_CASE_NAME = '{site}'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.5\n/\n"),
     )
     .unwrap();
-    fs::write(dir.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_forcing(&dir);
+}
+
+fn write_forcing(case: &Path) {
+    // Project-owned data outlives member materialization, cloning and remote fetches.
+    let data = case.join("forcing-data");
+    fs::create_dir_all(&data).unwrap();
+    let mut file = netcdf::create(data.join("forcing.nc")).unwrap();
+    file.add_dimension("time", 2).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+        .unwrap();
+    time.put_values(&[0.0, 1800.0], ..).unwrap();
+    let mut temperature = file.add_variable::<f64>("Tair", &["time"]).unwrap();
+    temperature.put_attribute("units", "K").unwrap();
+    temperature.put_values(&[280.0, 281.0], ..).unwrap();
+    file.close().unwrap();
+    fs::write(
+        case.join("forcing.nml"),
+        format!(
+            "&nl_colm_forcing\n DEF_dir_forcing = '{}'\n forcing%fprefix(1) = 'forcing.nc'\n/\n",
+            data.canonicalize().unwrap().display()
+        ),
+    )
+    .unwrap();
 }
 
 fn write_obs(path: &Path, good_pairs: usize) {
@@ -1054,7 +1078,7 @@ fn parameter_study(
         "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
     )
     .unwrap();
-    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_forcing(&root.join("siteA"));
     write_obs_values(&root.join("siteA-obs.nc"), &values);
     let spec = root.join("param-study.json");
     fs::write(
@@ -1094,7 +1118,7 @@ fn tuning_prefers_parameter_dependent_candidate_over_baseline() {
         "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
     )
     .unwrap();
-    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_forcing(&root.join("siteA"));
     write_obs_values(&root.join("siteA-obs.nc"), &values);
     let spec = root.join("param-tuning.json");
     fs::write(
@@ -1183,7 +1207,7 @@ fn tuning_validation_failure_warns_without_breaking_calibration_selection() {
         "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
     )
     .unwrap();
-    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_forcing(&root.join("siteA"));
     write_obs_values(&root.join("siteA-obs.nc"), &observation);
     let spec = root.join("validation-warning.json");
     fs::write(
@@ -1253,7 +1277,7 @@ fn retry_failed_does_not_reopen_closed_de_generation() {
         "&nl_colm\n DEF_CASE_NAME = 'siteA'\n DEF_dir_output = 'out'\n DEF_forcing_namelist = 'forcing.nml'\n DEF_LC_YEAR = 2010\n DEF_TUNING_CNFAC = 0.4\n/\n",
     )
     .unwrap();
-    fs::write(root.join("siteA/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+    write_forcing(&root.join("siteA"));
     write_obs_values(&root.join("siteA-obs.nc"), &values);
     let spec = root.join("closed-retry.json");
     fs::write(
@@ -1907,6 +1931,9 @@ fn two_model_versions_are_calibrated_with_the_same_design_and_compared() {
     .to_string();
     let study_b = run_ok(&["study-clone", &study_a]).trim().to_string();
     assert_ne!(study_a, study_b);
+    for study in [&study_a, &study_b] {
+        assert!(Path::new(study).join("study-input-identity.json").is_file());
+    }
     let ws_root = fake_version(&root, "snow");
     let common = [
         "--kernel",
@@ -1959,10 +1986,17 @@ fn two_model_versions_are_calibrated_with_the_same_design_and_compared() {
     let compared: Value =
         serde_json::from_str(&run_ok(&["study-compare", &study_a, &study_b])).unwrap();
     assert_eq!(compared["same_design"], true, "{compared}");
+    assert_eq!(compared["inputs_verified"], true, "{compared}");
+    assert_eq!(compared["same_inputs"], true, "{compared}");
     assert_eq!(compared["a"]["version"], "official");
     assert_eq!(compared["b"]["version"], "snow");
     assert_eq!(compared["period"], "validation", "{compared}");
     assert_eq!(compared["better"], "tie", "{compared}");
+    fs::remove_file(root.join("siteA-obs.nc")).unwrap();
+    let missing_input: Value =
+        serde_json::from_str(&run_ok(&["study-compare", &study_a, &study_b])).unwrap();
+    assert_eq!(missing_input["inputs_verified"], false, "{missing_input}");
+    assert!(missing_input["better"].is_null(), "{missing_input}");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -1991,10 +2025,11 @@ fn fake_server(root: &Path) -> (PathBuf, String) {
     (server, path)
 }
 
-fn run_with_path(path: &str, args: &[&str]) -> String {
+fn run_with_path(path: &str, resources: &Path, args: &[&str]) -> String {
     let output = Command::new(bin())
         .args(args)
         .env("PATH", path)
+        .env("COLM_RESOURCE_DIR", resources)
         .output()
         .unwrap();
     assert!(
@@ -2012,6 +2047,16 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
     use std::os::unix::fs::PermissionsExt;
     let _guard = netcdf_lock();
     let root = temp_root("remote-study");
+    // The test binary can live outside the checkout when CARGO_TARGET_DIR is set.
+    let resources = root.join("resources");
+    let source = colm_remote::engine::Source::Checkout(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap(),
+    );
+    let snapshot = colm_remote::engine::snapshot(&source).unwrap();
+    colm_remote::engine::pack_source(&snapshot, &resources.join("colm-src.tar.gz")).unwrap();
     let kernel = fake_kernel(&root, None);
     for site in ["siteA", "siteB"] {
         write_case(&root, site);
@@ -2062,8 +2107,14 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
     let mut dry = vec!["remote-study-run", study.as_str()];
     dry.extend(common);
     dry.extend(["--dry-run", "1"]);
-    let preview: Value =
-        serde_json::from_str(run_with_path(&path, &dry).trim().lines().last().unwrap()).unwrap();
+    let preview: Value = serde_json::from_str(
+        run_with_path(&path, &resources, &dry)
+            .trim()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
     let engine = preview["engine"].as_str().unwrap().to_owned();
     assert!(preview["spec"]["kernel_dir"]
         .as_str()
@@ -2087,14 +2138,16 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
 
     let mut submit = vec!["remote-study-run", study.as_str()];
     submit.extend(common);
-    let submitted: Value = serde_json::from_str(run_with_path(&path, &submit).trim()).unwrap();
+    let submitted: Value =
+        serde_json::from_str(run_with_path(&path, &resources, &submit).trim()).unwrap();
     assert_eq!(submitted["engine"], engine.as_str());
     // 本机研究已交给服务器：本机不能再从头跑它（防止两边各跑一份）。
     let started = Instant::now();
     let finished = loop {
-        let status: Value =
-            serde_json::from_str(run_with_path(&path, &["remote-study-status", &study]).trim())
-                .unwrap();
+        let status: Value = serde_json::from_str(
+            run_with_path(&path, &resources, &["remote-study-status", &study]).trim(),
+        )
+        .unwrap();
         if status["status"]["state"] == "finished" {
             break status;
         }
@@ -2107,8 +2160,10 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
     assert_eq!(finished["status"]["exit_code"], 0, "{finished}");
     assert_eq!(finished["study"]["status"], "completed", "{finished}");
 
-    let fetched: Value =
-        serde_json::from_str(run_with_path(&path, &["remote-study-fetch", &study]).trim()).unwrap();
+    let fetched: Value = serde_json::from_str(
+        run_with_path(&path, &resources, &["remote-study-fetch", &study]).trim(),
+    )
+    .unwrap();
     assert_eq!(fetched["fetched"], true);
     let local = status_json(&study).unwrap();
     assert_eq!(local["state"]["status"], "completed", "{local}");
@@ -2130,8 +2185,15 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
         "--preprocessors",
         "fortran",
     ]);
-    let compared: Value = serde_json::from_str(&run_ok(&["study-compare", &study, &twin])).unwrap();
+    let compared: Value = serde_json::from_str(&run_with_path(
+        &path,
+        &resources,
+        &["study-compare", &study, &twin],
+    ))
+    .unwrap();
     assert_eq!(compared["same_design"], true, "{compared}");
+    assert_eq!(compared["inputs_verified"], true, "{compared}");
+    assert_eq!(compared["same_inputs"], true, "{compared}");
     assert_eq!(compared["better"], "tie", "{compared}");
     assert_eq!(
         compared["a"]["best_member"], compared["b"]["best_member"],
@@ -2143,6 +2205,7 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
     let output = Command::new(bin())
         .args(&again)
         .env("PATH", &path)
+        .env("COLM_RESOURCE_DIR", &resources)
         .output()
         .unwrap();
     assert!(!output.status.success());

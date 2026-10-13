@@ -31,6 +31,8 @@ serde_json = "1"
 colm-namelist = { path = "../../crates/colm-namelist" }
 colm-schema = { path = "../../crates/colm-schema" }
 colm-case = { path = "../../crates/colm-case" }
+colm-model = { path = "../../crates/colm-model" }
+colm-history = { path = "../../crates/colm-history" }
 # 校验内核目录（清单 + 三个二进制的 sha256）。它自己 0 个 netcdf 依赖，
 # 拖不进 HDF5 —— 上面那份依赖节点数清单里 colm-kernel 正是 0。
 colm-kernel = { path = "../../crates/colm-kernel" }
@@ -42,8 +44,7 @@ colm-hist = { path = "../../crates/colm-hist" }
 colm-core = { path = "../../crates/colm-core" }
 # 原生的文件/文件夹选择器。**路径不该让人手打** —— 一个 Sitedata 目录
 # 的绝对路径打错一个字符，报错会出现在完全无关的地方。
-# 用 rfd 而不是 tauri-plugin-dialog：后者的 JS 侧要走 npm 包，
-# 而本项目的前端**无 npm**（design.md §4.2）。rfd 正是那个插件底下用的东西。
+# 沿用 rfd 原生选择器，React 通过已有 IPC 获取选择结果。
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "async-std"] }
 
 # **自己就是一个 workspace 根。** 这一行把 429 个 Tauri 依赖挡在引擎

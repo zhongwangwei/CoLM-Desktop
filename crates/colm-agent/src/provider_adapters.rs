@@ -19,6 +19,12 @@ pub(super) fn provider_id(c: &ProviderConfig) -> &str {
     }
     match service_host(c) {
         "api.deepseek.com" => "deepseek",
+        "api.openai.com" => "openai",
+        "api.anthropic.com" => "anthropic",
+        "api.x.ai" | "us.api.x.ai" => "grok",
+        "open.bigmodel.cn" | "api.z.ai" => "glm",
+        "generativelanguage.googleapis.com" => "gemini",
+        "api.moonshot.cn" | "api.moonshot.ai" => "kimi",
         host if is_qwen_host(host) => "qwen",
         _ => "custom",
     }
@@ -106,7 +112,8 @@ pub(super) fn chat_message(c: &ProviderConfig, message: &Message) -> Value {
     let mut value = message.to_api();
     if let Message::Assistant { provider_state, .. } = message {
         let saved = state(c, provider_state);
-        let compatible_reasoning = matches!(provider_id(c), "deepseek" | "kimi" | "glm")
+        let compatible_reasoning = (matches!(provider_id(c), "deepseek" | "kimi" | "glm")
+            || qwen_38(c))
             && ((provider_state.is_none() && provider_id(c) == "deepseek") || saved.is_some());
         if !compatible_reasoning {
             value.as_object_mut().unwrap().remove("reasoning_content");
@@ -172,7 +179,12 @@ pub(super) fn native_body(
         body["tools"] = tools.iter().map(|t| {
             let f=&t["function"];
             if c.api_format == ApiFormat::Responses { json!({"type":"function","name":f["name"],"description":f["description"],"parameters":f["parameters"],"strict":c.strict}) }
-            else { json!({"name":f["name"],"description":f["description"],"input_schema":f["parameters"]}) }
+            else {
+                let mut tool = json!({"name":f["name"],"description":f["description"],"input_schema":f["parameters"]});
+                if let Some(strict) = f.get("strict") { tool["strict"] = strict.clone(); }
+                else if c.strict { tool["strict"] = json!(true); }
+                tool
+            }
         }).collect();
     }
     if c.api_format == ApiFormat::Responses {
@@ -195,7 +207,122 @@ pub(super) fn native_body(
         }
     }
     merge_options(&mut body, &c.api_options);
+    validate_reasoning(c, &body)?;
     Ok(body)
+}
+
+fn validate_reasoning(c: &ProviderConfig, body: &Value) -> Result<()> {
+    let provider = provider_id(c);
+    let sol = provider == "openai" && c.model == "gpt-6.1-sol";
+    let sonnet = provider == "anthropic" && c.model == "claude-sonnet-5-5";
+    let gemini =
+        provider == "gemini" && matches!(c.model.as_str(), "gemini-3.7-flash" | "gemini-3.8-flash");
+    let glm = provider == "glm"
+        && matches!(
+            c.model.as_str(),
+            "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx"
+        );
+    let kimi = provider == "kimi" && c.model == "kimi-k3";
+    if (sol || sonnet || gemini || glm || kimi || (qwen_38(c) && c.model == "qwen3.8-2.4t-a95b"))
+        && c.thinking == Some(false)
+    {
+        bail!(
+            "{} cannot disable thinking; choose provider default or a supported reasoning effort",
+            c.model
+        );
+    }
+    if sol && c.api_format != ApiFormat::Responses {
+        bail!("gpt-6.1-sol requires the Responses API for assistant tool calls");
+    }
+    if sol
+        && ["temperature", "top_p", "top_logprobs", "logprobs"]
+            .iter()
+            .any(|key| body.get(*key).is_some())
+    {
+        bail!("gpt-6.1-sol does not support sampling parameters with reasoning; remove temperature, top_p and logprobs options");
+    }
+    if sonnet && c.api_format != ApiFormat::Anthropic {
+        bail!("claude-sonnet-5-5 requires the Anthropic Messages API");
+    }
+    let efforts: &[&str] = if sol || sonnet {
+        &["low", "medium", "high", "xhigh", "max"]
+    } else if gemini {
+        &["low", "medium", "high"]
+    } else if glm || kimi {
+        &["low", "high", "max"]
+    } else if qwen_38(c) {
+        &["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        return Ok(());
+    };
+    let effort = if c.api_format == ApiFormat::Anthropic {
+        &body["output_config"]["effort"]
+    } else if c.api_format == ApiFormat::Responses {
+        &body["reasoning"]["effort"]
+    } else {
+        &body["reasoning_effort"]
+    };
+    for configured in [c.reasoning_effort.as_deref(), effort.as_str()]
+        .into_iter()
+        .flatten()
+    {
+        if !efforts.contains(&configured) {
+            bail!(
+                "{} does not support reasoning effort {configured:?}; use {}",
+                c.model,
+                efforts.join(", ")
+            );
+        }
+    }
+    if !effort.is_null() && !effort.is_string() {
+        bail!("reasoning effort must be a string");
+    }
+    let thinking = body["thinking"]["type"].as_str();
+    if sonnet {
+        if body.get("tool_choice").is_some()
+            && !matches!(body["tool_choice"]["type"].as_str(), Some("auto" | "none"))
+        {
+            bail!("claude-sonnet-5-5 supports only tool_choice auto or none; any and forced tool selection are not supported");
+        }
+        if body
+            .get("temperature")
+            .is_some_and(|value| value.as_f64() != Some(1.0))
+        {
+            bail!("claude-sonnet-5-5 only accepts the default temperature; omit it or use 1");
+        }
+        if thinking.is_some_and(|mode| !matches!(mode, "adaptive" | "between_tools")) {
+            bail!("claude-sonnet-5-5 supports adaptive or between_tools thinking; disabled is not supported");
+        }
+        if thinking == Some("between_tools") && matches!(effort.as_str(), Some("xhigh" | "max")) {
+            bail!("claude-sonnet-5-5 between_tools supports only low, medium or high effort");
+        }
+    } else if (glm || kimi) && thinking == Some("disabled") {
+        bail!("{} cannot disable thinking", c.model);
+    }
+    if gemini {
+        let config = body["extra_body"]["google"]
+            .get("thinking_config")
+            .or_else(|| body["google"].get("thinking_config"));
+        if let Some(level) = config.and_then(|config| config.get("thinking_level")) {
+            if !matches!(level.as_str(), Some("low" | "medium" | "high")) {
+                bail!("{} supports thinking_level low, medium or high", c.model);
+            }
+        }
+    }
+    if qwen_38(c) {
+        if !effort.is_null() && body.get("thinking_budget").is_some() {
+            bail!("Qwen 3.8 reasoning_effort and thinking_budget cannot be set together");
+        }
+        if c.model == "qwen3.8-2.4t-a95b"
+            && (effort.as_str() == Some("none") || body["enable_thinking"] == false)
+        {
+            bail!("qwen3.8-2.4t-a95b cannot disable thinking");
+        }
+        if c.thinking == Some(false) && effort.as_str() != Some("none") {
+            bail!("Qwen 3.8 thinking=false conflicts with the explicit reasoning effort; use none to disable thinking");
+        }
+    }
+    Ok(())
 }
 
 fn validate(c: &ProviderConfig) -> Result<()> {
@@ -299,6 +426,7 @@ pub(super) fn complete_http(
     } else {
         native_body(c, messages, tools)?
     };
+    validate_reasoning(c, &body)?;
     let response = request.send_json(body).map_err(transport_error)?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {

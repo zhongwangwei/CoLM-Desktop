@@ -24,6 +24,7 @@ fn record<'a>(case: &'a Path, kernel: &'a Path, version: &'a Version) -> Record<
         location: "local",
         version,
         started: 10,
+        execution_program_sha256: None,
     }
 }
 
@@ -123,4 +124,62 @@ fn a_version_run_hands_the_same_run_to_the_versions_own_cli() {
         std::fs::read_to_string(&log).unwrap().trim(),
         "run /case --stream 1 --engine rust --kernel /k/default by-parent=1"
     );
+}
+
+#[test]
+fn output_content_identity_changes_even_when_filename_and_length_do_not() {
+    let root = case_dir("output-content");
+    std::fs::create_dir(root.join("history")).unwrap();
+    std::fs::write(root.join("history/result.nc"), b"first").unwrap();
+    let before = output_identities(&root).unwrap();
+    std::fs::write(root.join("history/result.nc"), b"other").unwrap();
+    let after = output_identities(&root).unwrap();
+    assert_ne!(before["history/result.nc"], after["history/result.nc"]);
+    assert_eq!(
+        before.len(),
+        1,
+        "configuration files are not scientific outputs"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn frozen_child_program_identity_is_not_the_current_package_identity() {
+    let case = case_dir("frozen-programs");
+    let current = case.join("current-bin");
+    let frozen = case.join("frozen-bin");
+    let program = |name: &str| {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        }
+    };
+    for (dir, bytes) in [
+        (&current, b"current".as_slice()),
+        (&frozen, b"frozen".as_slice()),
+    ] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::write(dir.join(program("colm-cli")), bytes).unwrap();
+        std::fs::write(dir.join(program("colm-rs")), bytes).unwrap();
+    }
+    let hashes = program_identities(&frozen.join(program("colm-cli"))).unwrap();
+    assert_ne!(
+        hashes,
+        program_identities(&current.join(program("colm-cli"))).unwrap()
+    );
+    let version = Version::Official;
+    let mut record = record(&case, &current, &version);
+    record.execution_program_sha256 = Some(&hashes);
+    let value = value(&record, true, None);
+    assert_eq!(
+        value["execution_program_sha256"]["colm-rs"],
+        hashes["colm-rs"]
+    );
+    std::fs::write(frozen.join(program("colm-rs")), b"mutated").unwrap();
+    assert_ne!(
+        hashes,
+        program_identities(&frozen.join(program("colm-cli"))).unwrap()
+    );
+    std::fs::remove_dir_all(case).unwrap();
 }

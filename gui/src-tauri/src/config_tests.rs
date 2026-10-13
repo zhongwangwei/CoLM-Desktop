@@ -3910,3 +3910,30 @@ fn land_class_overrides_on_urban_sites_are_fortran_only() {
     assert!(matches!(state.mode, FieldMode::Editable));
     assert!(state.reason.is_none());
 }
+
+#[test]
+fn case_data_validation_uses_selected_model_and_keeps_source_on_error() {
+    let original = "&nl_colm\n DEF_CASE_NAME = 'data'\n DEF_USE_LCT = .true.\n DEF_USE_LULCC = .false.\n DEF_simulation_time%start_year = 1995\n/\n";
+    let selected = original.replace(".false.", ".true.");
+    let source = batch("model-data-source", &[original]).remove(0);
+    let context = batch("model-data-context", &[&selected]).remove(0);
+    let error = super::set_fields_with_context(
+        vec![source.clone()],
+        vec![FieldChange {
+            path: "DEF_simulation_time%start_year".into(),
+            value: "1997".into(),
+        }],
+        None,
+        Some(std::slice::from_ref(&context)),
+    )
+    .unwrap_err();
+    assert!(error.contains("1997"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&source).join("case.nml")).unwrap(),
+        original
+    );
+    assert_eq!(
+        std::fs::read_to_string(std::path::Path::new(&context).join("case.nml")).unwrap(),
+        selected
+    );
+}

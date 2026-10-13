@@ -4,7 +4,10 @@
   "version": "0.3.0-beta.3",
   "identifier": "edu.sysu.colm.desktop",
   "build": {
-    "frontendDist": "../dist"
+    "frontendDist": "../build",
+    "devUrl": "http://127.0.0.1:18820",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
   },
   "app": {
     "withGlobalTauri": true,

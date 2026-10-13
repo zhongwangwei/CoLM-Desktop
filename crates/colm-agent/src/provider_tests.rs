@@ -386,15 +386,304 @@ fn glm_53_forces_thinking_and_maps_effort_while_older_glm_keeps_switch() {
     let mut c = native_config(ApiFormat::ChatCompletions);
     c.provider_id = "glm".into();
     c.model = "glm-5.3".into();
-    c.thinking = Some(false);
     c.reasoning_effort = Some("max".into());
     let body = request_body(&c, &[], &[]);
     assert!(body.get("thinking").is_none());
     assert_eq!(body["reasoning_effort"], "max");
+    c.thinking = Some(false);
+    assert!(OpenAiCompatible::new(c.clone())
+        .complete(&[], &[], &mut |_| {})
+        .unwrap_err()
+        .to_string()
+        .contains("cannot disable thinking"));
     c.model = "glm-4.7".into();
     let body = request_body(&c, &[], &[]);
     assert_eq!(body["thinking"]["type"], "disabled");
     assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn qwen_38_sends_effort_and_an_explicit_off_switch() {
+    let mut c = native_config(ApiFormat::ChatCompletions);
+    c.provider_id = "qwen".into();
+    c.model = "qwen3.8-flash".into();
+    for effort in ["low", "medium", "xhigh"] {
+        c.reasoning_effort = Some(effort.into());
+        let body = request_body(&c, &[], &[]);
+        assert_eq!(body["reasoning_effort"], effort);
+        assert!(body.get("enable_thinking").is_none());
+    }
+    c.thinking = Some(false);
+    c.reasoning_effort = None;
+    assert_eq!(request_body(&c, &[], &[])["reasoning_effort"], "none");
+    c.model = "qwen-plus".into();
+    let body = request_body(&c, &[], &[]);
+    assert_eq!(body["enable_thinking"], false);
+    assert!(body.get("reasoning_effort").is_none());
+}
+
+#[test]
+fn qwen_preserved_reasoning_is_bound_to_the_actual_provider_model_and_url() {
+    let mut c = native_config(ApiFormat::ChatCompletions);
+    c.provider_id = "qwen".into();
+    c.model = "qwen3.8-flash".into();
+    let wire = stream(&[
+        json!({"choices":[{"delta":{"reasoning_content":"check the source"}}]}),
+        json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"t1","function":{"name":"inspect","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
+    ]) + "data: [DONE]\n\n";
+    let turn = adapters::parse_stream(&c, wire.as_bytes(), &mut |_| {}).unwrap();
+    let message = turn.message();
+    let body = request_body(&c, std::slice::from_ref(&message), &[]);
+    assert_eq!(body["messages"][0]["reasoning_content"], "check the source");
+    assert_eq!(body["messages"][0]["tool_calls"][0]["id"], "t1");
+    let mut foreign = c.clone();
+    foreign.model = "other-model".into();
+    assert!(
+        request_body(&foreign, std::slice::from_ref(&message), &[])["messages"][0]
+            .get("reasoning_content")
+            .is_none()
+    );
+    foreign = c.clone();
+    foreign.base_url = "https://other.example/v1".into();
+    assert!(
+        request_body(&foreign, std::slice::from_ref(&message), &[])["messages"][0]
+            .get("reasoning_content")
+            .is_none()
+    );
+    foreign = c.clone();
+    foreign.provider_id = "custom".into();
+    assert!(request_body(&foreign, &[message], &[])["messages"][0]
+        .get("reasoning_content")
+        .is_none());
+}
+
+#[test]
+fn known_invalid_thinking_settings_fail_before_any_http_request() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    for (provider, model, format, thinking, effort, options, expected) in [
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            ApiFormat::ChatCompletions,
+            None,
+            Some("minimal"),
+            json!({}),
+            "minimal",
+        ),
+        (
+            "gemini",
+            "gemini-3.8-flash",
+            ApiFormat::ChatCompletions,
+            None,
+            None,
+            json!({"reasoning_effort":"minimal"}),
+            "minimal",
+        ),
+        (
+            "qwen",
+            "qwen3.8-flash",
+            ApiFormat::ChatCompletions,
+            None,
+            Some("low"),
+            json!({"thinking_budget":4096}),
+            "cannot be set together",
+        ),
+        (
+            "qwen",
+            "qwen3.8-flash",
+            ApiFormat::ChatCompletions,
+            Some(false),
+            None,
+            json!({"reasoning_effort":"high"}),
+            "conflicts",
+        ),
+        (
+            "openai",
+            "gpt-6.1-sol",
+            ApiFormat::Responses,
+            Some(false),
+            None,
+            json!({}),
+            "cannot disable thinking",
+        ),
+        (
+            "openai",
+            "gpt-6.1-sol",
+            ApiFormat::Responses,
+            None,
+            None,
+            json!({"reasoning":{"effort":"none"}}),
+            "none",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            ApiFormat::Anthropic,
+            Some(false),
+            None,
+            json!({}),
+            "cannot disable thinking",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            ApiFormat::Anthropic,
+            None,
+            None,
+            json!({"thinking":{"type":"disabled"}}),
+            "disabled",
+        ),
+        (
+            "anthropic",
+            "claude-sonnet-5-5",
+            ApiFormat::Anthropic,
+            None,
+            Some("max"),
+            json!({"thinking":{"type":"between_tools"}}),
+            "between_tools",
+        ),
+        (
+            "glm",
+            "glm-5.3",
+            ApiFormat::ChatCompletions,
+            Some(false),
+            None,
+            json!({}),
+            "cannot disable thinking",
+        ),
+        (
+            "kimi",
+            "kimi-k3",
+            ApiFormat::ChatCompletions,
+            Some(false),
+            None,
+            json!({}),
+            "cannot disable thinking",
+        ),
+    ] {
+        let mut c = native_config(format);
+        c.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        c.provider_id = provider.into();
+        c.model = model.into();
+        c.thinking = thinking;
+        c.reasoning_effort = effort.map(str::to_owned);
+        c.api_options = options;
+        let error = OpenAiCompatible::new(c)
+            .complete(&[], &[], &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{model}: {error}");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+}
+
+#[test]
+fn sonnet_between_tools_is_an_explicit_expert_option_and_unknown_models_keep_their_settings() {
+    let mut c = native_config(ApiFormat::Anthropic);
+    c.provider_id = "anthropic".into();
+    c.model = "claude-sonnet-5-5".into();
+    c.reasoning_effort = Some("low".into());
+    c.api_options = json!({"thinking":{"type":"between_tools"}});
+    let body = adapters::native_body(&c, &[], &[]).unwrap();
+    assert_eq!(body["thinking"]["type"], "between_tools");
+    assert_eq!(body["output_config"]["effort"], "low");
+    c.api_options = json!({"temperature":0.2});
+    assert!(adapters::native_body(&c, &[], &[])
+        .unwrap_err()
+        .to_string()
+        .contains("temperature"));
+    c.api_options = json!({"temperature":1});
+    assert!(adapters::native_body(&c, &[], &[]).is_ok());
+    c.model = "future-model".into();
+    c.reasoning_effort = Some("future_effort".into());
+    c.api_options = json!({});
+    assert_eq!(
+        adapters::native_body(&c, &[], &[]).unwrap()["output_config"]["effort"],
+        "future_effort"
+    );
+    c.provider_id = "openai".into();
+    c.model = "gpt-6.1-sol".into();
+    c.api_format = ApiFormat::Responses;
+    c.reasoning_effort = None;
+    c.api_options = json!({"temperature":1});
+    assert!(adapters::native_body(&c, &[], &[])
+        .unwrap_err()
+        .to_string()
+        .contains("sampling parameters"));
+}
+
+#[test]
+fn anthropic_tools_keep_the_requested_strict_flag_and_input_schema() {
+    let mut c = native_config(ApiFormat::Anthropic);
+    for (strict, configured, expected) in [
+        (Some(true), false, Some(true)),
+        (Some(false), true, Some(false)),
+        (None, true, Some(true)),
+        (None, false, None),
+    ] {
+        c.strict = configured;
+        let mut tool = json!({"type":"function","function":{"name":"inspect","description":"Inspect a case","parameters":{"type":"object","properties":{},"required":[],"additionalProperties":false}}});
+        if let Some(strict) = strict {
+            tool["function"]["strict"] = json!(strict);
+        }
+        let body = adapters::native_body(&c, &[], &[tool.clone()]).unwrap();
+        assert_eq!(body["tools"][0]["strict"].as_bool(), expected);
+        assert_eq!(
+            body["tools"][0]["input_schema"],
+            tool["function"]["parameters"]
+        );
+        assert_eq!(body["tools"][0]["name"], "inspect");
+    }
+}
+
+#[test]
+fn sonnet_forced_tool_selection_is_rejected_before_http_but_custom_models_are_unchanged() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let tools = [
+        json!({"type":"function","function":{"name":"inspect","description":"Inspect","parameters":{"type":"object","properties":{}}}}),
+    ];
+    let mut c = native_config(ApiFormat::Anthropic);
+    c.provider_id = "anthropic".into();
+    c.model = "claude-sonnet-5-5".into();
+    c.base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    for choice in [
+        json!({"type":"any"}),
+        json!({"type":"tool","name":"inspect"}),
+        json!("required"),
+    ] {
+        c.api_options = json!({"tool_choice":choice});
+        let error = OpenAiCompatible::new(c.clone())
+            .complete(&[], &tools, &mut |_| {})
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("tool_choice auto or none"), "{error}");
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        let summary = adapters::native_body(&c, &[], &[]).unwrap();
+        assert!(summary.get("tool_choice").is_none());
+        let mut unknown = c.clone();
+        unknown.model = "custom-model".into();
+        assert_eq!(
+            adapters::native_body(&unknown, &[], &tools).unwrap()["tool_choice"],
+            choice
+        );
+    }
+    for choice in ["auto", "none"] {
+        c.api_options = json!({"tool_choice":{"type":choice}});
+        assert_eq!(
+            adapters::native_body(&c, &[], &tools).unwrap()["tool_choice"]["type"],
+            choice
+        );
+    }
 }
 
 #[test]

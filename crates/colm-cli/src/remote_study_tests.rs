@@ -1,6 +1,106 @@
 use super::*;
 
 #[test]
+fn pending_submission_reappears_after_restart_without_exposing_authentication() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-pending-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(PENDING), json!({
+        "host":"7920ts", "root":"/data/colm", "job":"study-1",
+        "remote_project":"/data/colm/s/abc", "engine":"abc123",
+        "ssh_auth":{"host":"7920ts","username":"private-user","port":22,"auth":"key","identity_file":"/private/key"},
+        "password":"never-show-this", "provenance":{"operation_id":"study-op"}
+    }).to_string()).unwrap();
+    let value = pending_status(&root).unwrap().unwrap();
+    assert_eq!(value["job"], "study-1");
+    assert_eq!(value["needs_reconciliation"], true);
+    let shown = value.to_string();
+    for secret in [
+        "ssh_auth",
+        "private-user",
+        "/private/key",
+        "never-show-this",
+    ] {
+        assert!(!shown.contains(secret));
+    }
+    let pending = read_pending(&root).unwrap();
+    let script = pending_identity_script(&pending).unwrap();
+    assert!(script.contains("# colm-study-root:"));
+    assert!(script.contains("# colm-engine-snapshot: abc123"));
+    assert!(!script.contains("study-run"));
+    assert!(!script.contains("nohup"));
+    // A complete record is authoritative even if deleting its old intent was interrupted.
+    std::fs::write(root.join(RECORD), "{}").unwrap();
+    assert!(pending_status(&root).unwrap().is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pending_and_comparison_paths_stay_within_the_bound_job() {
+    let mut pending = PendingStudy {
+        ssh_auth: None,
+        host: "server".into(),
+        root: "/data/colm".into(),
+        job: "study-1".into(),
+        remote_project: "/data/colm/s/abc".into(),
+        engine: None,
+        provenance: Value::Null,
+    };
+    pending_identity_script(&pending).unwrap();
+    pending.remote_project = "/data/colm/s/../other".into();
+    assert!(pending_identity_script(&pending).is_err());
+    pending.remote_project = "/data/colm/s/abc".into();
+    pending.job = "../other".into();
+    assert!(pending_identity_script(&pending).is_err());
+    let record: StudyRecord = serde_json::from_value(json!({
+        "host":"server", "root":"/data/colm", "job":"study-1", "remote_project":"/data/colm/s/abc",
+        "engine":"abc123", "submitted_at":1, "scheduler":"bare", "provenance":{}
+    }))
+    .unwrap();
+    let command = comparison_command(&record, "/data/colm/s/abc/.colm/studies/s1").unwrap();
+    assert!(command.contains("'/data/colm/engine/abc123/bin/colm-cli' study-verify-comparison '/data/colm/s/abc/.colm/studies/s1'"));
+    assert!(!command.contains("study-run"));
+    assert!(comparison_command(&record, "/other/studies/s1").is_err());
+    assert!(comparison_command(&record, "/data/colm/s/abc/.colm/studies/../../outside").is_err());
+}
+
+#[test]
+fn fetched_metrics_must_equal_the_fresh_full_content_server_proof() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-result-proof-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("results/provenance")).unwrap();
+    std::fs::write(root.join("results/metrics.json"), b"real-evaluation-bytes").unwrap();
+    std::fs::write(
+        root.join("results/provenance/member.json"),
+        b"full-identity-bytes",
+    )
+    .unwrap();
+    let expected =
+        serde_json::to_value(crate::study_version::comparison_results_sha256(&root).unwrap())
+            .unwrap();
+    verify_result_tree(&root.join("results"), &expected).unwrap();
+    std::fs::write(
+        root.join("results/metrics.json"),
+        b"changed-evaluation-bytes",
+    )
+    .unwrap();
+    assert!(verify_result_tree(&root.join("results"), &expected).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn observations_keep_their_site_so_same_named_files_do_not_collide() {
     assert_eq!(
         remote_observation_name("siteA", "/data/obs/Flux.nc"),
@@ -58,7 +158,8 @@ fn the_server_state_is_rewritten_to_this_study() {
         "study_id": "s-remote",
         "tasks": {
             "m1/siteA": { "member": "m1", "site": "siteA", "case_dir": "/srv/p/.colm/studies/s-remote/members/m1/siteA", "status": "succeeded", "process": { "pid": 9 } },
-            "m2/siteA": { "member": "m2", "site": "siteA", "case_dir": "/elsewhere/m2", "status": "failed" }
+            "m2/siteA": { "member": "m2", "site": "siteA", "case_dir": "/elsewhere/m2", "status": "failed" },
+            "m3/siteA": { "member": "m3", "site": "siteA", "case_dir": "/srv/p/.colm/studies/s-remote-other/members/m3/siteA", "status": "failed" }
         }
     });
     let local = Path::new("/Users/me/p/.colm/studies/s-local");
@@ -66,10 +167,14 @@ fn the_server_state_is_rewritten_to_this_study() {
     assert_eq!(moved["study_id"], "s-local");
     assert_eq!(
         moved["tasks"]["m1/siteA"]["case_dir"],
-        "/Users/me/p/.colm/studies/s-local/members/m1/siteA"
+        json!(local.join("members/m1/siteA"))
     );
     assert!(moved["tasks"]["m1/siteA"].get("process").is_none());
     assert_eq!(moved["tasks"]["m2/siteA"]["case_dir"], "/elsewhere/m2");
+    assert_eq!(
+        moved["tasks"]["m3/siteA"]["case_dir"],
+        "/srv/p/.colm/studies/s-remote-other/members/m3/siteA"
+    );
 }
 
 #[test]

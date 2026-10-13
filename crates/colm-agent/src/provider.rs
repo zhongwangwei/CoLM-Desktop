@@ -122,6 +122,19 @@ pub trait Provider: Send + Sync {
     ) -> Result<Turn>;
 }
 
+fn qwen_38(config: &ProviderConfig) -> bool {
+    provider_id(config) == "qwen"
+        && matches!(
+            config.model.as_str(),
+            "qwen3.8-max"
+                | "qwen3.8-max-0902"
+                | "qwen3.8-flash"
+                | "qwen3.8-2.4t-a95b"
+                | "qwen3.8-27b"
+                | "qwen3.8-omni-flash"
+        )
+}
+
 /// 请求体。`tools` 已是 OpenAI 的 `{type: function, function: {...}}` 形状。
 pub fn request_body(config: &ProviderConfig, messages: &[Message], tools: &[Value]) -> Value {
     let mut body = json!({
@@ -142,7 +155,13 @@ pub fn request_body(config: &ProviderConfig, messages: &[Message], tools: &[Valu
         body["thinking"] = json!({ "type": if thinking { "enabled" } else { "disabled" } });
     }
     if provider_id(config) == "qwen" {
-        if let Some(thinking) = config.thinking {
+        if qwen_38(config) && config.thinking == Some(false) {
+            body["reasoning_effort"] = json!("none");
+        } else if qwen_38(config) {
+            if let Some(effort) = &config.reasoning_effort {
+                body["reasoning_effort"] = json!(effort);
+            }
+        } else if let Some(thinking) = config.thinking {
             body["enable_thinking"] = json!(thinking);
         }
     }

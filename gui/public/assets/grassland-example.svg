@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120">
+  <defs><linearGradient id="sky" x2="0" y2="1"><stop stop-color="#b7dfe9"/><stop offset="1" stop-color="#eef5e8"/></linearGradient><linearGradient id="grass" x2="0" y2="1"><stop stop-color="#7fa958"/><stop offset="1" stop-color="#bdd183"/></linearGradient></defs>
+  <path fill="url(#sky)" d="M0 0h240v120H0z"/>
+  <path fill="#6c8c87" d="M0 65 45 35l37 22 36-36 60 36 29-19 33 25v57H0z"/>
+  <path fill="#51775b" d="M0 83 56 52l46 18 51-22 87 38v34H0z"/>
+  <path fill="url(#grass)" d="M0 93c46-30 85-3 135-17 46-13 77-4 105 7v37H0z"/>
+  <path stroke="#e0dfae" stroke-width="4" fill="none" d="M176 120c-4-21-47-20-33-35"/>
+</svg>

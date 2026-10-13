@@ -90,7 +90,7 @@ impl Tool for UiFill {
         "ui_fill"
     }
     fn description(&self) -> &'static str {
-        "Fill draft fields on the current page of the application window, exactly as typing or choosing them would (field names from ui_state whose `saves` is false: directories, spin-up years, run options). The filled fields are highlighted for the user. Nothing is saved until a commit button is pressed. Fields that save immediately are refused; use ui_set for those. Returns what was set and the page state afterwards."
+        "Fill draft fields on the current page of the application window, exactly as typing or choosing them would (field names from ui_state whose `saves` is false: directories, spin-up years, run options). Nothing is saved until a commit button is pressed. Fields that save immediately are refused; use ui_set for those. Returns what was set and the page state afterwards."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -138,7 +138,7 @@ impl Tool for UiSet {
         "ui_set"
     }
     fn description(&self) -> &'static str {
-        "Change fields that are saved into the case as soon as they change (ui_state lists them with `saves: true`, e.g. the parameter tables on the site, surface, initial, forcing, process and output pages). Needs the user's approval. Use the allowed values ui_state lists. Returns the saved values and the page state afterwards."
+        "Change visible fields explicitly marked `saves: true` by ui_state. Most case and model controls are drafts: use ui_fill and their visible commit action instead. Needs the user's approval. Use the allowed values ui_state lists and inspect the saved outcome."
     }
     fn parameters(&self) -> Value {
         UiFill.parameters()
@@ -164,7 +164,7 @@ impl Tool for UiClick {
         "ui_click"
     }
     fn description(&self) -> &'static str {
-        "Press a button or choose an item in the application window that does not save or run anything (e.g. scan a directory, select a site, pick a choice card, 'next-step' to advance exactly one visible workflow page, or 'open-case:<case directory>' to open an existing case on its first setup page). The application refuses buttons that save or run; use ui_commit for those. Returns the page state afterwards."
+        "Press a visible button or choose an item listed by ui_state whose kind is click, such as selecting a tab/site, scanning inputs or opening a case. There is no numbered wizard. Saving, installing, building and running require a commit action. Returns the actual outcome and page state."
     }
     fn parameters(&self) -> Value {
         object(json!({
@@ -184,6 +184,16 @@ impl Tool for UiClick {
 
 pub struct UiCommit;
 
+fn code_commit(args: &Value) -> bool {
+    args["target"].as_str().is_some_and(|target| {
+        matches!(
+            target,
+            "workspace-create" | "workspace-patch" | "workspace-check" | "workspace-export"
+        ) || target.starts_with("resource-build-")
+            || target.starts_with("resource-workspace-submit-")
+    })
+}
+
 impl Tool for UiCommit {
     fn name(&self) -> &'static str {
         "ui_commit"
@@ -199,6 +209,16 @@ impl Tool for UiCommit {
     }
     fn tier(&self) -> Tier {
         Tier::Act
+    }
+    fn tier_for(&self, args: &Value) -> Tier {
+        if code_commit(args) {
+            Tier::Code
+        } else {
+            Tier::Act
+        }
+    }
+    fn session_allowance_for(&self, args: &Value) -> bool {
+        !code_commit(args)
     }
     fn summary(&self, args: &Value) -> String {
         format!(

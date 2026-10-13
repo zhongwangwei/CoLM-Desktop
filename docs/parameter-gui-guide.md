@@ -1,33 +1,43 @@
 # GUI parameter discovery guide
 
-Use the search box at the top of **过程参数** to find parameters by Chinese label, English label, raw CoLM key, or aliases such as `vcmax`, `vmax25`, `D50`, `P50`, `g1`, and `beta`.
+Open **版本库 / Model versions** from the sidebar or click the current model. The official frozen revision is selected by default. Derive a draft with a name and purpose to edit its **参数 / Parameters** block; case Settings contains data, time and output fields, not model parameters.
 
-Rows show scope, inherited/explicit state, effective value, and provenance. Scientific parameters remain discoverable outside expert mode; expert-only process parameters are visible but locked until expert mode is enabled.
+Search the parameter catalog by Chinese/English label or parameter ID, which includes the CoLM key. Selecting a parameter shows its description, units, activation conditions and bounds. The value input starts from the catalog default; **应用参数到草稿 / Apply parameter to draft** adds an explicit override. Merely selecting a parameter does not change the model. Values use CoLM namelist literals.
 
 For `Vcmax`:
 
-- LCT mode shows `DEF_LC_VMAX25` for the current IGBP/USGS land-cover table.
-- PFT mode shows `DEF_PFT_VMAX25` for the selected PFT slot.
-- PC mode shows the selected PFT component and, when different, both normal PFT and current PC defaults.
+- LCT overrides identify `DEF_LC_VMAX25`, the IGBP/USGS scheme and land-class index.
+- PFT overrides identify `DEF_PFT_VMAX25` and the selected PFT index.
+- PC overrides retain a separate PC/PFT scope rather than becoming ordinary PFT overrides.
+
+## Conditional process options
+
+Simulation step 2 and version drafts share the grouped scientific configuration query. Enabling BGC, river-lake routing or TRACER expands its child group; turning it off retains overrides and explains unavailable options. Case-owned initialization and process data remain in step 3. The query binds the exact frozen revision or current draft generation and overlay; missing frozen defaults remain pending, not inferred from the current catalog.
+
+The tracer table applies aligned definitions together. Numeric columns reject nonfinite values; existing keyed or positional process-file mappings retain their meaning. Real imported process assets have a separate editor, including typed arrays. Only the active CH4 file links its inundation mode to dynamic wetland, and restoring an asset respects legacy mode aliases. Indexed PFT/PC parameters require an explicit scope and index and show known kernel/process limits. See [the configuration order and condition matrix](simulation-configuration-order.md).
 
 ## IGBP and USGS
 
-In LCT mode the ecology page shows an LCT context card with the classification scheme, numeric class, bilingual class name, default source, and explicit-override state. Batch scope can be the current site, all selected sites, or sites with the same current scheme and class. A mixed batch is marked mixed; an IGBP integer index is never copied into USGS.
+Choose the parameter for the required scheme, then its bilingual land-class label and index. The stored override includes its scheme and index; the same integer in IGBP and USGS is not interchangeable. Model revisions can be reused across cases, but an override acts only in its applicable class/process context. Record intended sites and land classes under applicability.
 
 ## PFT and PC
 
-The single-type view edits one actual site PFT/CFT slot. The comparison matrix shows only PFTs present in the selected sites, loads one parameter subgroup at a time, and can apply one row to selected PFT columns in one atomic request. These controls are rendered only in Expert mode. PC mode keeps the `pc-pft:` scope and PC default branch separate from ordinary `pft:` defaults. Sites without the target component are not modified.
+Choose the target PFT index explicitly. Parameter ID plus scope identifies an override, so different PFT indices remain separate records. PC keeps its `pc-pft` scope separate from ordinary `pft`. For process-file parameters, import the required process asset into the draft and select its frozen relative path before applying an override.
 
 ## Built-in, explicit, and effective values
 
-Each editable row identifies its scope and shows the built-in/context default, explicit override state, current effective value, and provenance. **Use built-in** deletes the override. It does not write the displayed default back into the configuration.
+The Parameters list contains explicit overrides and their scope. **移除覆盖 / Remove override** deletes that override record, leaving the underlying code or process asset to supply the value; it does not write the displayed catalog default into the case. Physics overrides have a separate **重置 / Reset** action. Do not cover the same key in both blocks: reset the existing override first.
+
+**保存草稿 / Save draft** persists editable state. **冻结修订 / Freeze revision** creates a read-only revision containing code identity, parameter/physics overlays and assets. Later edits create another revision; an existing run keeps its original revision. Unsaved changes must be saved or discarded before leaving, and **放弃本地修改 / Discard local edits** reloads the saved draft without overwriting it.
 
 ## Import and export
 
-**Export explicit overrides** omits inherited defaults. **Import overrides** always previews compatibility and affected files, then requires confirmation and the unchanged preview version token. Catalog/kernel mismatches and cross-scheme or PFT/PC scope mismatches fail closed.
+**导出参数 JSON / Export parameters JSON** exports the displayed revision/draft's override records, excluding inherited defaults. **导入参数 JSON / Import parameters JSON** reads an array or `{ "records": [...] }`, validates parameter IDs, model-field eligibility, duplicate records and scope identity, then merges into the local draft. Save and freeze separately; import does not write original case files.
 
-Under the hood import is two-phase: `preview_import_parameter_overrides` validates the catalog version, the current scheme/scope, the current explicit values and the target files; `apply_import_parameter_overrides` requires the preview version token and writes every changed file atomically. Process parameters only ever write case-local parameter files.
+Import process assets before records that refer to them. IGBP/USGS and PFT/PC mismatches or missing assets are rejected. Revision materialization checks applicability and compatible programs/kernels before execution. Runtime overrides do not require recompilation when compatible; compile-time switches still require the corresponding kernel. AI networks require Rust.
 
 ## Study selection
 
-The uncertainty/tuning selector queries the same contextual catalog as manual editing. It offers an LCT parameter only when all selected cases share the exact IGBP/USGS class, and a PFT/PC dimension only when every selected case contains that component. The generated spec stores `parameter_id` and `scope_instance`; different PFT slots remain different dimensions. No layer-scoped field is offered until the catalog has a reviewed layer write strategy and hard bounds.
+Open **研究 / Research** for calibration or uncertainty analysis and load the parameters applicable to the selected cases and frozen revision. The contextual catalog offers an LCT parameter only when selected cases share the required IGBP/USGS class, and a PFT/PC dimension only when each case has that component. Specs retain `parameter_id` and `scope_instance`; different indices remain different dimensions. Layer fields require a reviewed write strategy and bounds.
+
+Review sampling limits, observations, budget and calibration/validation periods before preflight and execution. Save a selected completed member or trained network as a new model version, then select that version for a comparable run. Entering Research from an open version draft first saves and freezes that draft; it does not silently use its parent.

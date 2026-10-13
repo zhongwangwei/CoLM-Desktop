@@ -7,7 +7,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -17,12 +17,83 @@ use tauri::{Emitter, Manager};
 #[derive(Default)]
 pub struct AssistantProcess {
     inner: Mutex<Option<(Child, ChildStdin)>>,
+    ui_requests: Arc<Mutex<PendingUiRequests>>,
+}
+
+#[derive(Default)]
+struct PendingUiRequests {
+    generation: u64,
+    requests: std::collections::BTreeMap<String, PendingUiRequest>,
+    approvals: std::collections::BTreeMap<String, String>,
+}
+
+fn register_approval_request(
+    pending: &mut PendingUiRequests,
+    generation: u64,
+    value: &mut Value,
+) -> Result<(), String> {
+    if pending.generation != generation {
+        return Err("stale assistant process".into());
+    }
+    let original = value["id"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 160 && !id.contains(char::is_control))
+        .ok_or("invalid approval identity")?
+        .to_owned();
+    let scoped = format!("{generation}:{original}");
+    if pending.approvals.contains_key(&scoped) || pending.approvals.len() >= 128 {
+        return Err("duplicate or excessive approval requests".into());
+    }
+    pending.approvals.insert(scoped.clone(), original);
+    value["id"] = json!(scoped);
+    Ok(())
+}
+
+struct PendingUiRequest {
+    original_id: String,
+    audit: Option<colm_history::Event>,
+}
+
+fn register_ui_request(
+    pending: &mut PendingUiRequests,
+    generation: u64,
+    value: &mut Value,
+) -> Result<(), String> {
+    if generation != pending.generation {
+        return Err("stale assistant process".into());
+    }
+    let original_id = value["id"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or("UI request has no ID")?
+        .to_owned();
+    let id = format!("{generation}:{original_id}");
+    if pending.requests.contains_key(&id) || pending.requests.len() >= 128 {
+        return Err("duplicate or excessive pending UI requests".into());
+    }
+    let action = value["action"].as_str().ok_or("UI request has no action")?;
+    let target = if action == "workspace_remote" {
+        value["args"]["operation"].as_str()
+    } else {
+        value["args"]["target"].as_str()
+    };
+    let audit = crate::history::assistant_ui_start(&id, action, target)?;
+    pending
+        .requests
+        .insert(id.clone(), PendingUiRequest { original_id, audit });
+    value["id"] = json!(id);
+    Ok(())
 }
 
 impl AssistantProcess {
     /// 应用退出时结束它（stdin 一关它就会自己退出）。
     pub fn stop(&self) {
         if let Ok(mut guard) = self.inner.lock() {
+            if let Ok(mut pending) = self.ui_requests.lock() {
+                pending.generation = pending.generation.wrapping_add(1);
+                pending.requests.clear();
+                pending.approvals.clear();
+            }
             if let Some((mut child, stdin)) = guard.take() {
                 drop(stdin);
                 let _ = child.kill();
@@ -292,6 +363,161 @@ fn validate_api_profile(profile: &ApiProfile) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_api_reasoning(profile: &ApiProfile, provider: &str) -> Result<(), String> {
+    let url = tauri::Url::parse(&profile.base_url).map_err(|_| "服务地址不是有效的网址")?;
+    let provider = if provider.is_empty() {
+        match url.host_str() {
+            Some("api.openai.com") => "openai",
+            Some("api.anthropic.com") => "anthropic",
+            Some("generativelanguage.googleapis.com") => "gemini",
+            Some("open.bigmodel.cn" | "api.z.ai") => "glm",
+            Some("api.moonshot.cn" | "api.moonshot.ai") => "kimi",
+            Some(host)
+                if host == "dashscope.aliyuncs.com"
+                    || host == "dashscope-intl.aliyuncs.com"
+                    || host.ends_with(".dashscope.aliyuncs.com")
+                    || host.ends_with(".maas.aliyuncs.com") =>
+            {
+                "qwen"
+            }
+            _ => "custom",
+        }
+    } else {
+        provider
+    };
+    let model = profile.model.as_str();
+    let sol = provider == "openai" && model == "gpt-6.1-sol";
+    let sonnet = provider == "anthropic" && model == "claude-sonnet-5-5";
+    let gemini = provider == "gemini" && matches!(model, "gemini-3.7-flash" | "gemini-3.8-flash");
+    let glm = provider == "glm" && matches!(model, "glm-5.3" | "glm-5.3-flash" | "glm-5.3-flashx");
+    let kimi = provider == "kimi" && model == "kimi-k3";
+    let qwen = provider == "qwen"
+        && matches!(
+            model,
+            "qwen3.8-max"
+                | "qwen3.8-max-0902"
+                | "qwen3.8-flash"
+                | "qwen3.8-2.4t-a95b"
+                | "qwen3.8-27b"
+                | "qwen3.8-omni-flash"
+        );
+    if (sol || sonnet || gemini || glm || kimi || (qwen && model == "qwen3.8-2.4t-a95b"))
+        && profile.thinking == Some(false)
+    {
+        return Err(format!(
+            "{model} 不支持关闭思考，请改用服务默认或支持的思考强度"
+        ));
+    }
+    if sol && profile.api_format != "responses" {
+        return Err("gpt-6.1-sol 的助手工具调用须使用 Responses 接口".into());
+    }
+    if sol
+        && ["temperature", "top_p", "top_logprobs", "logprobs"]
+            .iter()
+            .any(|key| profile.api_options.get(*key).is_some())
+    {
+        return Err(
+            "gpt-6.1-sol 的思考模式不支持 temperature、top_p 或 logprobs 等采样选项，请移除".into(),
+        );
+    }
+    if sonnet && profile.api_format != "anthropic" {
+        return Err("claude-sonnet-5-5 须使用 Anthropic Messages 接口".into());
+    }
+    let efforts: &[&str] = if sol || sonnet {
+        &["low", "medium", "high", "xhigh", "max"]
+    } else if gemini {
+        &["low", "medium", "high"]
+    } else if glm || kimi {
+        &["low", "high", "max"]
+    } else if qwen {
+        &["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    } else {
+        return Ok(());
+    };
+    let extra_effort = match profile.api_format.as_str() {
+        "responses" => &profile.api_options["reasoning"]["effort"],
+        "anthropic" => &profile.api_options["output_config"]["effort"],
+        _ => &profile.api_options["reasoning_effort"],
+    };
+    if !extra_effort.is_null() && !extra_effort.is_string() {
+        return Err("额外参数的思考强度须为字符串".into());
+    }
+    for effort in [profile.reasoning_effort.as_deref(), extra_effort.as_str()]
+        .into_iter()
+        .flatten()
+    {
+        if !efforts.contains(&effort) {
+            return Err(format!(
+                "{model} 不支持思考强度 {effort:?}；可用：{}",
+                efforts.join("、")
+            ));
+        }
+    }
+    let effective_effort = extra_effort
+        .as_str()
+        .or(profile.reasoning_effort.as_deref());
+    let thinking = profile.api_options["thinking"]["type"].as_str();
+    if sonnet {
+        if profile.api_options.get("tool_choice").is_some()
+            && !matches!(
+                profile.api_options["tool_choice"]["type"].as_str(),
+                Some("auto" | "none")
+            )
+        {
+            return Err(
+                "Claude Sonnet 5.5 的 tool_choice 仅支持 auto 或 none，不支持 any 或强制指定工具"
+                    .into(),
+            );
+        }
+        if profile
+            .api_options
+            .get("temperature")
+            .is_some_and(|value| value.as_f64() != Some(1.0))
+        {
+            return Err("Claude Sonnet 5.5 仅接受默认温度，请省略 temperature 或设为 1".into());
+        }
+        if thinking.is_some_and(|mode| !matches!(mode, "adaptive" | "between_tools")) {
+            return Err(
+                "Claude Sonnet 5.5 仅支持 adaptive 或 between_tools，不能使用 disabled".into(),
+            );
+        }
+        if thinking == Some("between_tools") && matches!(effective_effort, Some("xhigh" | "max")) {
+            return Err("Claude Sonnet 5.5 的 between_tools 仅支持 low、medium、high".into());
+        }
+    } else if (glm || kimi) && thinking == Some("disabled") {
+        return Err(format!("{model} 不支持关闭思考"));
+    }
+    if gemini {
+        let config = profile.api_options["extra_body"]["google"]
+            .get("thinking_config")
+            .or_else(|| profile.api_options["google"].get("thinking_config"));
+        if let Some(level) = config.and_then(|config| config.get("thinking_level")) {
+            if !matches!(level.as_str(), Some("low" | "medium" | "high")) {
+                return Err(format!(
+                    "{model} 的 thinking_level 仅支持 low、medium、high"
+                ));
+            }
+        }
+    }
+    if qwen {
+        let sends_effort = profile.thinking == Some(false) || effective_effort.is_some();
+        if sends_effort && profile.api_options.get("thinking_budget").is_some() {
+            return Err("Qwen 3.8 的 reasoning_effort 不能与 thinking_budget 同时设置".into());
+        }
+        if profile.thinking == Some(false)
+            && extra_effort.as_str().is_some_and(|effort| effort != "none")
+        {
+            return Err("Qwen 3.8 关闭思考与额外思考强度冲突；关闭请用 none".into());
+        }
+        if model == "qwen3.8-2.4t-a95b"
+            && (effective_effort == Some("none") || profile.api_options["enable_thinking"] == false)
+        {
+            return Err("qwen3.8-2.4t-a95b 不支持关闭思考".into());
+        }
+    }
+    Ok(())
+}
+
 /// Claude Code 的 `--effort` 可选值（Claude Code 2.1.293）；Codex 的可选值随模型而定，由 `model/list` 给出。
 const CLAUDE_EFFORTS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
 
@@ -329,6 +555,9 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     }
     if !BACKENDS.contains(&settings.backend.as_str()) {
         return Err(format!("后端只能是 {}", BACKENDS.join("、")));
+    }
+    if settings.backend == "builtin" {
+        validate_api_reasoning(&settings.api_profile(), &settings.provider_id)?;
     }
     if !matches!(settings.approval.as_str(), "ask" | "auto") {
         return Err("审批方式只能是 ask 或 auto".into());
@@ -397,11 +626,42 @@ pub fn assistant_save_settings(
 ) -> Result<(), String> {
     validate_settings(&settings)?;
     let path = settings_path(&app)?;
-    std::fs::write(
+    let event = crate::history::start(
+        "assistant_settings",
+        None,
+        json!({
+            "backend":settings.backend,"api_format":settings.api_format,"model":settings.model,
+            "approval":settings.approval,
+        }),
+    )?;
+    let result = std::fs::write(
         &path,
         serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
     )
-    .map_err(|e| format!("{}: {e}", path.display()))
+    .map_err(|e| format!("{}: {e}", path.display()));
+    finish_assistant_action(&event, result)
+}
+
+fn finish_assistant_action(
+    event: &colm_history::Event,
+    result: Result<(), String>,
+) -> Result<(), String> {
+    let mut end = event.next(
+        colm_history::EventPhase::Finished,
+        if result.is_ok() {
+            "succeeded"
+        } else {
+            "failed"
+        },
+    );
+    // Transport errors may contain secrets; the UI gets the original error, the ledger only its presence.
+    if result.is_err() {
+        end.detail["error_present"] = json!(true);
+    }
+    colm_history::History::open_default()
+        .and_then(|history| history.append(&end))
+        .map_err(|e| format!("assistant action outcome could not be recorded: {e}"))?;
+    result
 }
 
 fn key_command(
@@ -523,10 +783,23 @@ pub fn assistant_ui_result(
     ok: bool,
     result: Value,
 ) -> Result<(), String> {
-    send(
+    let (generation, request) = {
+        let mut pending = process.ui_requests.lock().map_err(|e| e.to_string())?;
+        let request = pending
+            .requests
+            .remove(&id)
+            .ok_or("unregistered or already answered UI request")?;
+        (pending.generation, request)
+    };
+    send_in_generation(
         &process,
-        &json!({ "type": "ui_result", "id": id, "ok": ok, "result": result }),
-    )
+        Some(generation),
+        &json!({ "type": "ui_result", "id": request.original_id, "ok": ok, "result": result }),
+    )?;
+    if let Some(event) = request.audit {
+        crate::history::assistant_ui_finish(&event, ok, &result)?;
+    }
+    Ok(())
 }
 
 /// 让正在运行的助手续接一个历史会话。
@@ -550,8 +823,10 @@ pub async fn assistant_set_key(
     if key.trim().is_empty() {
         return Err("Key 是空的".into());
     }
+    validate_api_address(&base_url)?;
     let mut command = key_command(&app, "--set-key", &base_url)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let event = crate::history::start("assistant_key", None, json!({"action":"set"}))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
@@ -572,13 +847,17 @@ pub async fn assistant_set_key(
         }
     })
     .await
-    .map_err(|e| e.to_string())??;
-    process.stop();
-    Ok(())
+    .map_err(|e| e.to_string())
+    .and_then(|result| result);
+    if result.is_ok() {
+        process.stop();
+    }
+    finish_assistant_action(&event, result)
 }
 
 #[tauri::command]
 pub async fn assistant_has_key(app: tauri::AppHandle, base_url: String) -> Result<bool, String> {
+    validate_api_address(&base_url)?;
     let mut command = key_command(&app, "--has-key", &base_url)?;
     tauri::async_runtime::spawn_blocking(move || {
         let output = command
@@ -599,8 +878,10 @@ pub async fn assistant_delete_key(
     process: tauri::State<'_, AssistantProcess>,
     base_url: String,
 ) -> Result<(), String> {
+    validate_api_address(&base_url)?;
     let mut command = key_command(&app, "--delete-key", &base_url)?;
-    tauri::async_runtime::spawn_blocking(move || {
+    let event = crate::history::start("assistant_key", None, json!({"action":"delete"}))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let output = command.output().map_err(|e| e.to_string())?;
         if output.status.success() {
             Ok(())
@@ -609,9 +890,12 @@ pub async fn assistant_delete_key(
         }
     })
     .await
-    .map_err(|e| e.to_string())??;
-    process.stop();
-    Ok(())
+    .map_err(|e| e.to_string())
+    .and_then(|result| result);
+    if result.is_ok() {
+        process.stop();
+    }
+    finish_assistant_action(&event, result)
 }
 
 /// Refresh through the sidecar so the saved API key never enters the WebView.
@@ -645,7 +929,26 @@ pub async fn assistant_api_models(
 
 /// 发一行给 `colm-agent`。
 fn send(process: &AssistantProcess, message: &Value) -> Result<(), String> {
+    send_in_generation(process, None, message)
+}
+
+fn send_in_generation(
+    process: &AssistantProcess,
+    generation: Option<u64>,
+    message: &Value,
+) -> Result<(), String> {
     let mut guard = process.inner.lock().map_err(|e| e.to_string())?;
+    if let Some(generation) = generation {
+        if process
+            .ui_requests
+            .lock()
+            .map_err(|e| e.to_string())?
+            .generation
+            != generation
+        {
+            return Err("stale assistant response".into());
+        }
+    }
     let (_, stdin) = guard.as_mut().ok_or("助手还没有启动")?;
     writeln!(stdin, "{message}").map_err(|e| format!("助手进程已退出：{e}"))?;
     stdin.flush().map_err(|e| e.to_string())
@@ -657,6 +960,7 @@ pub(crate) fn configure_message(
     project_root: &str,
     kernel_dir: Option<&str>,
     docs_root: Option<&str>,
+    model_context: Option<&Value>,
 ) -> Value {
     json!({
         "type": "configure",
@@ -681,20 +985,27 @@ pub(crate) fn configure_message(
         "project_root": project_root,
         "kernel_dir": kernel_dir,
         "docs_root": docs_root,
+        "model_context": model_context,
     })
 }
 
 /// 启动（或重新配置）助手。进程不在就起一个，并把它的每行输出作为 `assistant://event` 发给前端。
 #[tauri::command]
-pub fn assistant_start(
+pub async fn assistant_start(
     app: tauri::AppHandle,
     process: tauri::State<'_, AssistantProcess>,
     project_root: String,
     kernel_dir: Option<String>,
     resume: Option<String>,
+    case_dir: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
 ) -> Result<(), String> {
     let settings = assistant_settings(app.clone());
     validate_settings(&settings)?;
+    let model_context = match model_revision {
+        Some(version) => Some(crate::model::assistant_context(version, case_dir.as_deref()).await?),
+        None => None,
+    };
     {
         let mut guard = process.inner.lock().map_err(|e| e.to_string())?;
         let alive = guard
@@ -719,12 +1030,75 @@ pub fn assistant_start(
             let stdin = child.stdin.take().ok_or("no stdin")?;
             let stdout = child.stdout.take().ok_or("no stdout")?;
             let stderr = child.stderr.take().ok_or("no stderr")?;
+            let ui_requests = Arc::clone(&process.ui_requests);
+            let generation = {
+                let mut pending = ui_requests.lock().map_err(|e| e.to_string())?;
+                pending.generation = pending.generation.wrapping_add(1);
+                pending.requests.clear();
+                pending.approvals.clear();
+                pending.generation
+            };
             let events = app.clone();
             std::thread::spawn(move || {
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
-                    let _ = events.emit("assistant://event", line);
+                    let mut value = serde_json::from_str::<Value>(&line).ok();
+                    let result = {
+                        let Ok(mut pending) = ui_requests.lock() else {
+                            break;
+                        };
+                        if pending.generation != generation {
+                            break;
+                        }
+                        match value.as_mut() {
+                            Some(value) if value["type"] == "ui_request" => {
+                                register_ui_request(&mut pending, generation, value)
+                            }
+                            Some(value) if value["type"] == "approval_request" => {
+                                register_approval_request(&mut pending, generation, value)
+                            }
+                            Some(value)
+                                if value["type"] == "tool_call"
+                                    || value["type"] == "tool_result" =>
+                            {
+                                if let Some(id) = value["id"].as_str() {
+                                    let id = format!("{generation}:{id}");
+                                    if value["type"] == "tool_result" {
+                                        pending.approvals.remove(&id);
+                                    }
+                                    value["id"] = json!(id);
+                                }
+                                Ok(())
+                            }
+                            _ => Ok(()),
+                        }
+                    };
+                    if let Err(error) = result {
+                        if let Some(value) = value {
+                            let response = if value["type"] == "approval_request" {
+                                json!({"type":"approval_decision","id":value["id"],"approve":false,"remember":false,"note":error})
+                            } else {
+                                json!({"type":"ui_result","id":value["id"],"ok":false,"result":error})
+                            };
+                            let _ = send_in_generation(
+                                &events.state::<AssistantProcess>(),
+                                Some(generation),
+                                &response,
+                            );
+                        }
+                        continue;
+                    }
+                    let _ = events.emit(
+                        "assistant://event",
+                        value.map_or(line, |value| value.to_string()),
+                    );
                 }
-                let _ = events.emit("assistant://event", json!({ "type": "exited" }).to_string());
+                if ui_requests
+                    .lock()
+                    .is_ok_and(|pending| pending.generation == generation)
+                {
+                    let _ =
+                        events.emit("assistant://event", json!({ "type": "exited" }).to_string());
+                }
             });
             std::thread::spawn(move || {
                 for line in BufReader::new(stderr).lines().map_while(Result::ok) {
@@ -750,6 +1124,7 @@ pub fn assistant_start(
             &project_root,
             kernel_dir.as_deref(),
             docs.as_deref(),
+            model_context.as_ref(),
         ),
     )?;
     // 续接界面上正显示的那段历史（重启进程后也接得上）。
@@ -782,16 +1157,31 @@ pub fn assistant_approve(
     note: Option<String>,
     remember: Option<bool>,
 ) -> Result<(), String> {
-    send(
+    let (generation, original_id) = {
+        let mut pending = process.ui_requests.lock().map_err(|e| e.to_string())?;
+        let original = pending
+            .approvals
+            .remove(&id)
+            .ok_or("unregistered or already answered approval request")?;
+        (pending.generation, original)
+    };
+    let event = crate::history::start(
+        "assistant_approval",
+        None,
+        json!({"request_id":id,"approve":approve,"remember":remember.unwrap_or(false)}),
+    )?;
+    let result = send_in_generation(
         &process,
+        Some(generation),
         &json!({
             "type": "approval_decision",
-            "id": id,
+            "id": original_id,
             "approve": approve,
             "note": note,
             "remember": remember.unwrap_or(false),
         }),
-    )
+    );
+    finish_assistant_action(&event, result)
 }
 
 #[tauri::command]

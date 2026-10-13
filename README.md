@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="gui/dist/assets/colm-icon.png" width="96" alt="CoLM Desktop 图标">
+  <img src="gui/public/assets/colm-icon.png" width="96" alt="CoLM Desktop 图标">
 </p>
 
 <h1 align="center">CoLM Desktop</h1>
@@ -44,7 +44,9 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 
 pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI 继续可用，详见 [终端助手使用说明](docs/terminal-assistant.md)。
 
-## 0.3.0-beta.3 的主要变化
+## 0.3.0-beta.3 的主要变化（发布记录）
+
+本节保留已发布版本的界面说明；当前源码的入口见下文「使用流程」。
 
 - **河湖汇流可选**：首页"还要打开哪些过程？"里与 BGC 并列的"河湖汇流"卡片决定是否计算河道（新 namelist 开关 `DEF_USE_GridRiverLakeFlow`）。不选时不建河网、不汇流，也不出现"河道与水库"页；陆面结果不变。卡片会按流域边界、区域或非结构 mesh 提醒它们与河网的单元流域可能不一致。
 - **区域河网不再拉进无关河系**：只在打开分汊时才沿分汊通道合并河系；河道 unitcat 输出截到模拟范围，与陆面 history 逐格对齐。新建经纬度网格算例的历史输出分辨率跟模拟网格一致。
@@ -71,9 +73,9 @@ pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI �
 
 | 能力 | 说明 |
 |---|---|
-| 引导式建模 | 通过空间结构、地类、次网格和物理配置卡片确定模型约束 |
-| 站点与算例管理 | 扫描站点目录、自动匹配强迫场与观测、批量创建当前会话算例 |
-| 约束感知参数界面 | 统一目录搜索、常用/专家分层、IGBP/USGS/PFT/PC 作用域、稀疏覆盖与安全导入导出 |
+| 模型版本与算例 | 版本管理代码、参数、物理配置和网络；算例管理地点、输入、时段与输出，运行使用独立副本 |
+| 站点与算例管理 | 扫描站点目录与匹配输入，打开已有算例，或从内置示例创建独立算例 |
+| 参数覆盖 | 在版本库搜索目录，记录 IGBP/USGS/PFT/PC 与过程文件作用域，保存稀疏覆盖并导入导出 |
 | CSV/TXT 多站点前处理 | 自动识别逗号、制表符、分号或空白长表，按站点拆分并统一生成标准单站 NetCDF；可同步批量生成站点文件 |
 | 强迫场缺测修复 | 短缺口按变量物理含义插值；长缺口换算至 UTC 后匹配 ERA5-Land 最近格点，并基于重叠观测进行偏差订正与逐时 QC 留痕 |
 | Rust 模拟引擎 | 地表数据、初始场与主循环全部由 Rust 实现，覆盖 LCT / PFT / PC、BGC、作物、城市、湖泊、臭氧、示踪剂、LULCC、网格河道/水库汇流与流域侧向流 |
@@ -81,25 +83,28 @@ pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI �
 | 并行 | 单进程共享内存多线程（patch 推进与大河系汇流按单元并行），线程数由 `RAYON_NUM_THREADS` 控制，默认取全部逻辑核 |
 | 多站点并发 | 并发运行独立算例并自动平分 CPU 核；逐站点显示进度、阶段和日志 |
 | 分阶段运行 | 可分别运行 `mksrfdata`、`mkinidata`、`colm`，也可一键运行全部阶段 |
-| 结果分析工作台 | 七个分栏覆盖总览、变量目录、时间序列、可选变量评估、多站点排名、过程诊断及 PDF/HTML/CSV/JSON/Markdown 导出 |
-| 中英文界面 | 首页与主工作流均可切换中文/English，保留常规与专家模式入口 |
+| 结果分析工作台 | 数据目录、时序、观测评估、多站比较、闭合诊断与报告；按真实运行出处读取结果 |
+| 中英文界面 | 顶框切换中文/English 和 AI 助手，设置中调整主题与专家选项 |
 
-当前配置体系覆盖 IGBP / USGS、LCT / PFT / PC、水热、BGC、作物、城市、河道与示踪剂过程；GUI 会根据站点/空间模式与过程约束自动隐藏不适用的参数。经纬度网格（含按 Shapefile 圈定的流域范围）配河湖汇流时，水库调度、LULCC 与示踪剂都可用；水库参数缺省读单元流域文件 `DEF_UnitCatchment_file` 自带的 GRanD 表。流域网格（`DEF_CatchmentMesh_data`）上支持水库调度，LULCC、示踪剂与向量历史尚未覆盖；这类组合会在运行前明确提示，不会等前处理跑完才失败。
+当前配置体系覆盖 IGBP / USGS、LCT / PFT / PC、水热、BGC、作物、城市、河道与示踪剂过程；版本中的覆盖记录保留地类、PFT 与过程作用域，物化和运行前检查它们与当前算例及内核是否兼容。经纬度网格（含按 Shapefile 圈定的流域范围）配河湖汇流时，水库调度、LULCC 与示踪剂都可用；水库参数缺省读单元流域文件 `DEF_UnitCatchment_file` 自带的 GRanD 表。流域网格（`DEF_CatchmentMesh_data`）上支持水库调度，LULCC、示踪剂与向量历史尚未覆盖；这类组合会在运行前明确提示，不会等前处理跑完才失败。
 参数目录与操作说明见 [`docs/parameter-catalog.md`](docs/parameter-catalog.md)、[`docs/parameter-gui-guide.md`](docs/parameter-gui-guide.md) 和 [`docs/parameter-default-preservation.md`](docs/parameter-default-preservation.md)。上游代码中发现并已在本仓库修复的缺陷记录在 [`docs/upstream-bugs.md`](docs/upstream-bugs.md)。
 
 ## 使用流程
 
-1. **选择模拟类型**：在启动卡片中选择站点、地类、次网格和物理过程。
-2. **准备自己的数据（可选）**：可选择单站 NetCDF，或包含单站/多站的 CSV、TXT、TSV；表格按站点拆分并归一到 UTC 后逐站诊断。短缺口直接插值，长缺口可下载或复用 ERA5-Land 缓存，经重叠期订正后生成不覆盖原始数据的标准文件。使用内置示例时可跳过。
-3. **设置文件与目录**：选择准备好的 `Sitedata` 与 `Forcing` 目录，指定算例根目录。
-4. **创建算例**：扫描站点并勾选一个或多个站点，自动匹配强迫场与观测文件。
-5. **检查基本设定**：配置预热、地表数据、初始场、强迫场和并行选项。
-6. **配置过程参数**：只处理当前模型约束下实际生效的过程。
-7. **选择输出并运行**：按阶段或全部运行，查看每个站点的实时进度和日志。
-8. **分析结果**：浏览实际 history 变量与维度，按站点绘图、缩放和导出完整 CSV。
-9. **评估与诊断**：从净辐射、能量通量、摩擦速度、GPP、生态系统呼吸和 NEE 等可用观测中勾选评估内容，计算 RMSE、MAE、Bias、R²、Pearson r、NSE、KGE 及其分量，比较多个站点并导出报告或 PDF。
+以下说明对应当前 React 源码界面。打开后直接进入项目首页，先明确选择模型版本；未选择时，下方新建、打开、结果、示例和最近项目入口灰色不可选。左栏依次为项目、模拟、结果、研究、历史记录，底部为计算资源和设置。版本选择在独立浅色区，下方「再选择操作」提供新建模拟、打开项目、直接查看结果，另有 CN-Cng 内置示例和最近项目；顶框放 AI 助手与语言按钮，没有额外启动页或顶部流程栏。
 
-结果工作台只纳入本次任务创建的算例，不会混入算例根目录中的旧结果。长序列和模型—观测配对图按需保极值降采样；指标仍使用完整样本。多站点评估采用有上限的并发池，单个站点缺观测或失败不会中断其余站点。
+1. **先选版本，再打开或试一个算例**：在上方独立版本区点击官方版，或在已有版本弹窗中选择准确修订，才会解锁下方操作。选择在本次软件会话内保留，返回首页无需重选；重启重新选择。「＋ 新建修改版」可先进入管理，选择或冻结修订后再开始任务。在「项目 → 打开项目」选择包含算例的目录，或点「新建模拟 → 自带 4 个示例」，选站点、名称、输出目录与时段，再创建。空间算例在新建页选择区域、流域或全球范围及输入网格。
+2. **准备自己的数据（可选）**：「项目 → 准备输入数据」支持单站 NetCDF 或单站/多站 CSV、TXT、TSV。短缺口插值、长缺口 ERA5-Land 订正及 UTC 归一沿用已有流程；生成标准文件，不覆盖原始数据。
+3. **修改模型（需要时）**：点「项目 → ＋ 新建修改版」，从已冻结修订派生草稿。参数、物理方案、AI 网络和代码分四块管理。保存草稿可继续编辑；冻结生成不可变修订，后续修改形成新修订。站点、地类及率定/验证时段在适用范围中记录。进入研究时，当前草稿先保存并冻结。
+4. **配置模拟**：按「范围与网格 → 模型结构与方案 → 数据与时段 → 预热与输出 → 检查与运行」五步完成。新建页用卡片选择单点、流域、区域、全球及空间网格；开始与结束日期同行，输入 `YYYY-MM-DD`（如 `2001-01-01`）。第二步先选择 IGBP/USGS 分类，再查看模型结构、参数与物理方案，点击「调整参数与方案」进入版本管理，选择或冻结新修订后返回，保留待建配置。河湖汇流、BGC、TRACER 的后续选项按条件展开，真实过程文件与 PFT/PC 索引参数有独立入口；条件不明时保留待核对状态。第三步按过程确定数据与时段，第四步设置步长、预热截止、输出与重启，更多配置保留初始条件、强迫处理、诊断和实际内核可写的输出变量。冻结模型不能原地修改；已有算例的日内秒数保留，离页前保存或放弃本地修改。
+5. **检查资源并运行**：「计算资源」顶部卡片选择本机或已登记服务器，下面编辑所选连接的地址、账号和 SSH 配置/密钥/密码；数据目录与高级维护按需展开。点击检查连接，分别查看此次连接、可用引擎快照和对应路径的真实状态；修改连接设置后须重新检查。该页选择只控制资源详情，计算位置仍在「模拟 → 检查并运行」选择。每次运行物化「模型修订 × 算例数据」的独立副本，记录实际出处与内容身份。
+6. **分析真实结果**：左栏「结果」自动读取已记录运行的模拟曲线；「比较其他运行」弹窗切换记录，「评估设置」弹窗选择观测并更新指标。总览依次展示实际出处、评估摘要、曲线与偏差/RMSE/有效配对数、下一步；目录、时序、观测评估、多站比较、闭合诊断和报告从页尾进入。图形可降采样，指标使用完整数据；来源版本有同输入、时段和评估条件的真实结果才进行来源对比，缺少基准不会自动追加计算。
+7. **开展研究并保存成果**：左栏「研究」先展示参数率定、不确定性、AI 参数学习、AI 过程替换和修改源码五张方法卡，再进入对应工作台。核对站点、观测、范围、训练/验证时段和预算，先预检再创建/运行；完成后将选定成员或训练网络存为模型版本，再选择该版本运行与比较。网络仅支持 Rust，引擎或编译期开关的变化仍需适用程序与内核。
+8. **追溯操作**：「历史记录」以记录表和详情呈现操作，筛选运行、研究、版本、资源及助手操作，查看对象、状态、用时、来源和文件引用，导出单条或完整记录。中断或提交未确认的任务先核对真实进程/服务器作业，不自动重跑。
+
+结果页支持完整时序 CSV，以及 JSON、CSV、Markdown、HTML 报告；PDF 使用系统打印窗口，选择“另存为 PDF”。下载或打印请求不代表文件已经保存。
+
+点窗口顶部「AI 助手」展开右侧面板，拖动面板左边缘可调整宽度，在「设置」选择 API 服务或本机 Codex、Claude Code、OpenCode。API 可登记 Key、发现或填写模型，配置服务地址与模型支持的思考程度；高级协议及预算选项在专家设置中。重启默认新对话，可恢复会话历史，输入框用 ↑/↓ 选择历史输入；底部仅保留模型与思考程度，服务地址和后端放在设置中；示例建议先填入消息，发送后才执行。助手的数据分析、率定与 AI 任务使用对应的可见页面，并按操作审批规则执行。
 
 ### 推荐的数据目录
 
@@ -115,7 +120,7 @@ data-root/
     └── <site>_Flux.nc
 ```
 
-选择 `Sitedata` 后，界面会自动更新强迫场目录和可用性；也可以在基本设定中显式选择其他目录。
+在新建算例页填写 `Sitedata` 与 `Forcing` 目录后扫描站点；选中站点会带入匹配的强迫场与覆盖时段。已有算例的数据路径在「算例 → 设置」修改。
 
 ## 从源码运行
 
@@ -123,6 +128,8 @@ data-root/
 
 - Rust **1.85.1** 或更新版本
 - Git
+- Node.js **24**（与 CI 一致）及 npm
+- Tauri 2 CLI（`cargo tauri`）
 - 当前平台的 [Tauri 2 系统依赖](https://v2.tauri.app/start/prerequisites/)
 - 运行算例所需的内核目录（安装包已自带；从源码运行时的生成方法见文末注）
 
@@ -131,10 +138,18 @@ data-root/
 ```bash
 git clone https://github.com/zhongwangwei/CoLM-Desktop.git
 cd CoLM-Desktop
-cargo run --manifest-path gui/src-tauri/Cargo.toml
+npm --prefix gui ci
+npm --prefix gui run build
+cargo run -p xtask -- stage-sidecar
+cd gui
+cargo tauri dev
 ```
 
-启动日志会报告 WebView 是否到达后端、解析到的 `colm-cli` 路径以及可用内核数量。程序默认直接进入卡片选择首页。
+`cargo tauri dev` 启动 Vite 开发服务和原生窗口；sidecar 暂存步骤编译配套 CLI、引擎与助手，并绑定源码/程序摘要。修改 Rust 源码后重新暂存，避免把旧程序当成新源码的执行结果。只打开浏览器预览没有原生模型和助手后端。
+
+要使用构建后的前端而不运行 Vite，在 `gui/` 执行 `cargo tauri build --no-bundle`，再运行构建输出中的原生程序（默认 `src-tauri/target/release/colm-desktop-gui`，Windows 加 `.exe`）。此命令按配置重建前端；构建目录可随 Cargo 配置变化。
+
+启动日志报告 WebView 与后端连接、解析到的 `colm-cli` 路径和可用内核。启动后的模型、算例和助手入口与上面的工作台流程一致。
 
 ### 命令行工作流
 
@@ -178,7 +193,7 @@ cargo run -p colm-cli -- series /path/to/cases/site-name \
 ## 架构
 
 ```text
-Static HTML/CSS/JS GUI
+React + TypeScript GUI (Vite)
           │ Tauri IPC
           ▼
 Rust window backend ──► colm-cli sidecar ──► mksrfdata-rs / mkinidata-rs / colm-rs
@@ -190,7 +205,10 @@ Rust window backend ──► colm-cli sidecar ──► mksrfdata-rs / mkinidat
 
 | 模块 | 职责 |
 |---|---|
+| `gui/src` | React 页面、模型/算例上下文、图表与助手页面契约 |
 | `gui/src-tauri` | Tauri 窗口、文件选择、IPC、批量任务与事件转发 |
+| `crates/colm-model` | 模型草稿、不可变修订、稀疏覆盖和运行副本 |
+| `crates/colm-history` | SQLite 操作台账、旧记录导入与证据引用 |
 | `crates/colm-cli` | GUI 与命令行共用的唯一编排入口 |
 | `crates/colm-case` | 算例目录与 namelist 生成 |
 | `crates/colm-namelist` | 保留格式的 CoLM namelist 读写 |
@@ -215,9 +233,12 @@ cargo test --workspace --lib --bins
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all --check
 
-# 静态 GUI 接口与行为测试
+# React 类型、接口与行为检查
+npm --prefix gui ci
+npm --prefix gui run lint
+npm --prefix gui test
+npm --prefix gui run build
 cargo run -q -p xtask -- check-gui
-for test in gui/tests/*.mjs; do node "$test"; done
 
 # Tauri 后端
 cargo test --manifest-path gui/src-tauri/Cargo.toml
@@ -244,10 +265,12 @@ CI 在 macOS、Windows 和 Linux 上编译并测试整个 Rust 工作区（含 R
 `main` 上出现尚未发布的新版本号（或推送 `v*` 标签）时，`.github/workflows/release.yml` 自动为 macOS（Apple Silicon / Intel）、Windows 和 Linux 构建安装包，检查 sidecar 与示例数据随包分发后发布。本地打包：
 
 ```bash
-cargo run -p xtask -- stage-sidecar
-cd gui/src-tauri
-cargo tauri build --config tauri.bundle.conf.json
+npm --prefix gui ci
+cd gui
+cargo tauri build --config src-tauri/tauri.bundle.conf.json
 ```
+
+打包配置会重建 React 前端和配套 sidecar，并携带对应源码版本的文档；发布记录不代替当前源码的完整构建和远程验收。
 
 ## 开发与维护
 

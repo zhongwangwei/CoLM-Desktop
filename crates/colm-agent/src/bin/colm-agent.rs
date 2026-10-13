@@ -470,14 +470,50 @@ fn frontend_timeout(action: &str, args: &Value) -> Duration {
                     | "tune-retry"
                     | "uq-retry"
                     | "hybrid-fit-run"
+                    | "run-submit"
+                    | "study-create"
+                    | "study-run"
+                    | "study-resume"
+                    | "study-retry"
+                    | "study-export"
+                    | "remote-study-fetch"
+                    | "remote-fetch"
+                    | "hybrid-fit"
+                    | "hybrid-climate"
+                    | "new-create"
+                    | "new-example"
+                    | "workspace-create"
+                    | "workspace-check"
+                    | "workspace-export"
+                    | "prep-execute"
+                    | "export-full-series-csv"
+                    | "export-report"
             )
-        ) || args["target"]
-            .as_str()
-            .is_some_and(|target| target.starts_with("hybrid-climate-")));
+        ) || args["target"].as_str().is_some_and(|target| {
+            target.starts_with("hybrid-climate-")
+                || target.starts_with("prep-finish-")
+                || target.starts_with("resource-build-")
+                || target.starts_with("resource-workspace-submit-")
+                || (target.starts_with("resource-") && target.contains("-fetch-"))
+        }));
     let long_analysis = action == "click"
         && matches!(
             args["target"].as_str(),
-            Some("eval-all" | "evaluate" | "diagnose")
+            Some(
+                "eval-all"
+                    | "evaluate"
+                    | "diagnose"
+                    | "evaluate-observations"
+                    | "compare-sites"
+                    | "diagnose-closure"
+                    | "plot-series"
+                    | "hybrid-check"
+                    | "load-parameter-contexts"
+                    | "study-preflight"
+                    | "new-scan"
+                    | "prep-inspect"
+                    | "prep-gaps"
+            )
         );
     Duration::from_secs(
         if action == "workspace_remote" || long_commit || long_analysis {
@@ -623,6 +659,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 project_root,
                 kernel_dir,
                 docs_root,
+                model_context,
                 approval,
                 web_search,
                 ui,
@@ -630,6 +667,15 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 backend,
                 external: choice,
             } => {
+                if let Some(error) = model_context
+                    .as_ref()
+                    .and_then(|model| model.validate().err())
+                {
+                    emitter.emit(Outbound::Error {
+                        message: format!("invalid selected model context: {error:#}"),
+                    });
+                    continue;
+                }
                 let model = display_model(backend, &provider.model, &choice);
                 *settings.lock().unwrap() = Some(Settings {
                     provider: *provider,
@@ -637,6 +683,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         project_root: PathBuf::from(project_root),
                         cli: cli.clone(),
                         kernel_dir: kernel_dir.filter(|k| !k.is_empty()).map(PathBuf::from),
+                        preprocessors: None,
                         docs_root: docs_root.filter(|d| !d.is_empty()).map(PathBuf::from),
                         cancel: None,
                         web: None,
@@ -644,6 +691,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         workspace_root: None,
                         experience: None,
                         knowledge_root: data_dir.as_ref().map(|root| root.join("knowledge")),
+                        model_context: model_context.map(|context| *context),
                     },
                     approval,
                     web_search: web_search && backend != BackendKind::Opencode,
@@ -1323,14 +1371,49 @@ mod tests {
             "uq-retry",
             "hybrid-fit-run",
             "hybrid-climate-0",
+            "run-submit",
+            "study-create",
+            "study-run",
+            "study-resume",
+            "study-retry",
+            "study-export",
+            "hybrid-fit",
+            "hybrid-climate",
+            "new-create",
+            "new-example",
+            "workspace-create",
+            "workspace-check",
+            "workspace-export",
+            "remote-fetch",
+            "remote-study-fetch",
+            "resource-build-7920l",
+            "resource-workspace-submit-7920l",
+            "resource-study-fetch-/a/study",
+            "prep-execute",
+            "export-full-series-csv",
+            "export-report",
+            "prep-finish-0",
+            "prep-finish-12",
         ] {
             assert!(
                 frontend_timeout("commit", &json!({"target":target})) > Duration::from_secs(1800)
             );
         }
-        assert!(
-            frontend_timeout("click", &json!({"target":"eval-all"})) > Duration::from_secs(1800)
-        );
+        for target in [
+            "eval-all",
+            "evaluate-observations",
+            "compare-sites",
+            "diagnose-closure",
+            "hybrid-check",
+            "study-preflight",
+            "new-scan",
+            "prep-inspect",
+            "prep-gaps",
+        ] {
+            assert!(
+                frontend_timeout("click", &json!({"target":target})) > Duration::from_secs(1800)
+            );
+        }
         assert_eq!(
             frontend_timeout("commit", &json!({"target":"apply-spinup"})),
             Duration::from_secs(120)
@@ -1398,5 +1481,24 @@ mod tests {
         let empty = PathBuf::new();
         assert!(external_launch_cwd(&empty).unwrap().is_dir());
         assert!(empty.as_os_str().is_empty());
+    }
+
+    #[test]
+    fn configure_preserves_selected_revision_and_missing_frozen_docs() {
+        let context = json!({"model":{"version":{"id":"old-model","revision":1},"code":{"source_sha256":"a".repeat(64)}},"model_root":"/models","source_dir":"/frozen/source","docs_dir":null,"source_case":"/project/case"});
+        let message: Inbound = serde_json::from_value(json!({"type":"configure","provider":{"base_url":"https://example.invalid/v1","model":"offline"},"project_root":"/project","docs_root":"/current/app/docs","model_context":context})).unwrap();
+        let Inbound::Configure {
+            model_context: Some(model),
+            ..
+        } = message
+        else {
+            panic!("selected context missing")
+        };
+        assert!(model.validate().is_ok());
+        assert_eq!(model.model["version"]["revision"], 1);
+        assert!(model.docs_dir.is_none());
+        let mut invalid = model;
+        invalid.source_dir = PathBuf::from("relative/source");
+        assert!(invalid.validate().is_err());
     }
 }

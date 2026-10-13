@@ -29,6 +29,8 @@ pub enum Inbound {
         #[serde(default)]
         docs_root: Option<String>,
         #[serde(default)]
+        model_context: Option<Box<crate::tools::ModelContext>>,
+        #[serde(default)]
         approval: ApprovalPolicy,
         /// 联网（`web_search` 走 DeepSeek 原生搜索，用 DeepSeek 的 Key；`fetch_url` 读网页）。
         #[serde(default)]

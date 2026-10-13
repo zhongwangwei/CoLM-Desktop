@@ -1,0 +1,14 @@
+import {describe,it} from 'node:test';
+import assert from 'node:assert/strict';
+import {calibrationWindows,candidateBudget,fitValidation,networkSpec,networkDefaults,parameterSpec,studyPermissions,type ParameterContext} from './study';
+const parameter:ParameterContext={name:'TEST',id:'test',label_en:'test',label_zh:'test',scope:'pft',scope_instance:{kind:'pft-type',index:2,scheme:'PFT'},default:1,min:0,max:10,min_inclusive:false,max_inclusive:true,scale:'linear'};
+describe('study contracts',()=>{
+ it('does not equate missing validation with a passed gate',()=>{assert.equal(fitValidation({validation:null}),null);assert.equal(fitValidation({validation:{passed:false}}),false);assert.equal(fitValidation({validation:{passed:true}}),true);});
+ it('retains exact parameter scope and refuses invalid scientific ranges',()=>{assert.deepEqual(parameterSpec(parameter,'1','3','log').scope_instance,parameter.scope_instance);assert.throws(()=>parameterSpec(parameter,'0','3','linear'));assert.throws(()=>parameterSpec(parameter,'','3','linear'));assert.throws(()=>parameterSpec(parameter,'1','11','linear'));});
+ it('rejects training/validation leakage',()=>{assert.throws(()=>calibrationWindows('2020-01-01T00:00','2020-03-01T00:00','2020-02-01T00:00','2020-04-01T00:00'));assert.equal(calibrationWindows('2020-01-01T00:00','2020-03-01T00:00','2020-03-01T00:00','2020-04-01T00:00').to,1583020800);});
+ it('budgets baseline and every stage for every site',()=>{assert.deepEqual(candidateBudget('tuning','',2,0,8,4,3),{candidates:40,tasks:123,stageRuns:369});assert.throws(()=>candidateBudget('tuning','',2,0,100,20,3));});
+ it('resumes only paused studies and exposes failure retry',()=>{assert.equal(studyPermissions('Paused').resume,true);assert.equal(studyPermissions('Running').resume,false);assert.equal(studyPermissions('CompletedWithFailures').retry,true);});
+ it('uses actual hybrid network serialization and process slot',()=>{assert.deepEqual(networkSpec('soil_stress','beta_physics, root_saturation','beta','0.5','2','linear',true),{slot:'soil_stress',features:['beta_physics','root_saturation'],outputs:[{name:'beta',range:[0.5,2],transform:'sigmoid',relative:true}],hidden:[]});assert.throws(()=>networkSpec('soil_stress','beta_physics','other','0.5','2','4',true));assert.throws(()=>networkSpec('pft','pftclass','DEF_LC_VMAX25','10','150','linear',false));});
+});
+
+it('switching network slots starts with compatible complete defaults',()=>{for(const slot of ['pft','land_class','soil_stress']){const d=networkDefaults(slot);assert.doesNotThrow(()=>networkSpec(d.slot,d.features,d.output,d.lower,d.upper,'linear',d.relative));}assert.equal(networkDefaults('land_class').output,'DEF_LC_VMAX25');assert.equal(networkDefaults('soil_stress').relative,false);assert.throws(()=>networkSpec('soil_stress','beta_physics','beta','0','2','linear',false));assert.throws(()=>networkSpec('soil_stress','beta_physics','beta','-1','2','linear',true));});
