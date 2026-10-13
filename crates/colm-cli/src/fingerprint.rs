@@ -75,6 +75,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let doc = colm_namelist::parse(&text)?;
+    let self_contained_roots = simple_site_roots_unused(case_nml, &doc)?;
     // CoLM 的缺省值是 .TRUE.；只有显式设为 false 才需跟踪本地日期的月、日、秒。
     let greenwich = !matches!(
         doc.get("DEF_simulation_time%greenwich"),
@@ -172,6 +173,12 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
                     );
                 }
             }
+            continue;
+        }
+        if self_contained_roots && is_global_data_root(&p.to_ascii_lowercase()) {
+            // The same proof governs full identities and stage reuse. Recording a
+            // new input marker invalidates stages produced by the old projection.
+            inputs.insert("root_usage_policy".into(), "self-contained-lct-v1".into());
             continue;
         }
         let path = resolve(case_dir, raw);
@@ -1542,9 +1549,36 @@ mod full_identity_tests {
             assert!(!same_payloads(&legacy, &identity));
             let guard = full_input_guard(&root, &identity).unwrap();
             assert!(guard.directories.is_empty());
+            let stages = ["mksrfdata", "mkinidata", "colm"];
+            let stage_fingerprints =
+                stages.map(|stage| compute(stage, &nml, "default@test").unwrap());
+            for fingerprint in &stage_fingerprints {
+                assert_eq!(
+                    fingerprint.inputs["root_usage_policy"],
+                    "self-contained-lct-v1"
+                );
+                assert!(!fingerprint
+                    .files
+                    .keys()
+                    .any(|path| path.contains("/raw") || path.contains("/runtime")));
+                let mut old = Fingerprint {
+                    inputs: fingerprint.inputs.clone(),
+                    site_sha256: fingerprint.site_sha256.clone(),
+                    files: fingerprint.files.clone(),
+                    kernel: fingerprint.kernel.clone(),
+                };
+                old.inputs.remove("root_usage_policy");
+                assert!(first_difference(&old, fingerprint).is_some());
+            }
             std::fs::write(root.join("raw/soil.nc"), b"soil B").unwrap();
             std::fs::write(root.join("runtime/params.nc"), b"params B").unwrap();
             assert_eq!(guard, full_input_guard(&root, &identity).unwrap());
+            for (stage, before) in stages.iter().zip(&stage_fingerprints) {
+                assert_eq!(
+                    first_difference(before, &compute(stage, &nml, "default@test").unwrap()),
+                    None
+                );
+            }
             assert_eq!(
                 identity.data_sha256,
                 full_inputs(&root).unwrap().data_sha256
@@ -1618,7 +1652,18 @@ mod full_identity_tests {
                     full_inputs(&root).unwrap().files["case:def_dir_rawdata/bedrock.nc"].sha256
                 );
             }
+            let stages = ["mksrfdata", "mkinidata", "colm"];
+            let stage_fingerprints =
+                stages.map(|stage| compute(stage, &nml, "default@test").unwrap());
             std::fs::write(root.join("runtime/added.nc"), b"new").unwrap();
+            for (stage, before) in stages.iter().zip(&stage_fingerprints) {
+                assert!(!before.inputs.contains_key("root_usage_policy"));
+                assert!(
+                    first_difference(before, &compute(stage, &nml, "default@test").unwrap())
+                        .is_some(),
+                    "{setting}: {stage}"
+                );
+            }
             assert_ne!(
                 guard,
                 full_input_guard(&root, &identity).unwrap(),
