@@ -41,6 +41,7 @@ function harness() {
     overlay,
     fields,
     environment: { subgrid: 'PFT', domain: 'single', grid: 'single' } as setup.SetupEnvironment,
+    onOpenSettings: undefined as undefined | ((id: string) => void),
     includeSubgrid: true,
     disabled: false,
     onChange: (o: Overlay) => changes.push(o),
@@ -266,4 +267,66 @@ test('visible river options and guide enforce the same verified methane-mode gat
       assert.equal(h.changes.length, 0);
     }
   }
+});
+
+test('simulation opens settings only after a successful user enable despite the expected caseValues refresh', async () => {
+  const h = harness(),
+    opened: string[] = [];
+  h.props.source = { kind: 'frozen', version: { id: 'official', revision: 1 } };
+  h.props.environment.caseValues = { DEF_USE_BGC: '.false.' };
+  h.props.onOpenSettings = (id) => opened.push(id);
+  let finish!: () => void;
+  h.props.onCaseChange = (patch) => {
+    h.props.environment = {
+      ...h.props.environment,
+      caseValues: { ...h.props.environment.caseValues, ...patch } as Record<string, string>,
+    };
+    h.render();
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  };
+  h.render();
+  let c = await h.resolve();
+  assert.deepEqual(opened, []);
+  const pending = c.fields.find((f) => f.id === 'setup-DEF_USE_BGC')!.set('.true.');
+  assert.deepEqual(opened, []);
+  finish();
+  await pending;
+  assert.deepEqual(opened, ['DEF_USE_BGC']);
+  c = await h.resolve();
+  assert.ok(c.actions.some((a) => a.id === 'setup-DEF_USE_BGC-settings'));
+  const disabling = c.fields.find((f) => f.id === 'setup-DEF_USE_BGC')!.set('.false.');
+  finish();
+  await disabling;
+  assert.deepEqual(opened, ['DEF_USE_BGC']);
+  await h.resolve();
+  h.props.onCaseChange = async () => {
+    throw new Error('save failed');
+  };
+  c = h.render();
+  await assert.rejects(
+    Promise.resolve(c.fields.find((f) => f.id === 'setup-DEF_USE_BGC')!.set('.true.')),
+    /save failed/,
+  );
+  assert.equal(opened.length, 1);
+});
+test('an enable reply for a previous case never opens settings in the new case', async () => {
+  const h = harness(),
+    opened: string[] = [];
+  h.props.environment.caseValues = { DEF_USE_BGC: '.false.' };
+  h.props.onOpenSettings = (id) => opened.push(id);
+  let finish!: () => void;
+  h.props.onCaseChange = () =>
+    new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  h.render();
+  const c = await h.resolve();
+  const pending = c.fields.find((f) => f.id === 'setup-DEF_USE_BGC')!.set('.true.');
+  h.props.caseDir = '/case/b';
+  h.render();
+  finish();
+  await pending;
+  assert.deepEqual(opened, []);
 });

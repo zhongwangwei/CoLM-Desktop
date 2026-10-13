@@ -12,6 +12,8 @@ import {
   modelSettingValue,
   simulationMode,
   caseSchemeFields,
+  processSettingOwner,
+  simulationOptionField,
 } from '../cases/model-settings';
 import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
@@ -42,6 +44,11 @@ import {
   type FamilyContext,
 } from './configuration-options';
 type Props = {
+  process?: string;
+  hideProcesses?: boolean;
+  modalActions?: UiAction[];
+  onReady?: (ready: boolean) => void;
+  removedCaseKeys?: readonly string[];
   onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
   subgrid?: string;
   excludeKeys?: readonly string[];
@@ -67,6 +74,11 @@ const empty: ConfigurationResult = {
   context_complete: false,
 };
 export default function ConfigurationOptions({
+  process,
+  hideProcesses = false,
+  modalActions,
+  onReady,
+  removedCaseKeys = [],
   subgrid,
   excludeKeys = [],
   kernelMacros,
@@ -102,7 +114,7 @@ export default function ConfigurationOptions({
       rows: ReturnType<typeof tracerRows>;
     } | null>(null),
     [saving, setSaving] = useState(false);
-  const pftVisible = !onCaseChange || ['PFT', 'PC'].includes(subgrid ?? '');
+  const pftVisible = !process && (!onCaseChange || ['PFT', 'PC'].includes(subgrid ?? ''));
   const pftOpen = pftVisible && (opened.pft ?? false);
   const selection =
     pftOpen &&
@@ -122,7 +134,17 @@ export default function ConfigurationOptions({
     caseValues: queryValues,
   });
   const overlay = onCaseChange
-    ? caseOptionOverlay(sourceOverlay, fields, queryValues, loaded === request ? result.fields : [])
+    ? removedCaseKeys.reduce(
+        (next, key) => resetModelOption(next, key),
+        caseOptionOverlay(
+          sourceOverlay,
+          fields,
+          queryValues,
+          loaded === request
+            ? result.fields.filter((field) => !removedCaseKeys.includes(field.name))
+            : [],
+        ),
+      )
     : sourceOverlay;
   const sourceKey = JSON.stringify(
     source.kind === 'draft'
@@ -163,7 +185,8 @@ export default function ConfigurationOptions({
   const setTracers = (rows: ReturnType<typeof tracerRows> | null) =>
     setTracerInput(rows ? { key: sourceKey, rows } : null);
   const current = useRef(request),
-    savingNow = useRef(false);
+    savingNow = useRef(false),
+    writable = useRef(false);
   current.current = request;
   useEffect(() => {
     let live = true;
@@ -188,15 +211,37 @@ export default function ConfigurationOptions({
   const ready = loaded === request,
     locked =
       disabled || saving || (!onCaseChange && (source.kind !== 'draft' || !onChange)) || importing;
-  const values = ready ? result : empty;
+  writable.current = !locked;
+  useEffect(() => {
+    onReady?.(ready && !error && tracers === null);
+  }, [ready, error, tracers, onReady]);
+  const values = ready
+    ? {
+        ...result,
+        fields: result.fields.map((field) => ({
+          ...field,
+          ...(removedCaseKeys.includes(field.name) ? { configured_value: null } : {}),
+          ...(removedCaseKeys.includes(field.parent_gate ?? '')
+            ? { parent_gate_enabled: false }
+            : {}),
+        })),
+      }
+    : empty;
+  const included = (field: ModelField) =>
+    process
+      ? processSettingOwner(field, values.fields) === process
+      : !hideProcesses ||
+        (simulationOptionField(field, values.fields) && !processSettingOwner(field, values.fields));
   const controls: UiField[] = [],
     actions: UiAction[] = [];
   function write(change: () => Overlay) {
-    if (locked || savingNow.current || current.current !== request)
+    if (locked || !writable.current || savingNow.current || current.current !== request)
       throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
     try {
       const next = change();
-      if (onCaseChange) {
+      if (onCaseChange && modalActions) {
+        onCaseChange(caseOptionPatch(overlay, next, fields));
+      } else if (onCaseChange) {
         savingNow.current = true;
         setSaving(true);
         void Promise.resolve()
@@ -222,7 +267,9 @@ export default function ConfigurationOptions({
     }
   }
   function open(id: string) {
-    return rising.includes(id) || Boolean(opened[`${sourceKey}:${id}`] ?? parentValues[id]);
+    return (
+      !!process || rising.includes(id) || Boolean(opened[`${sourceKey}:${id}`] ?? parentValues[id])
+    );
   }
   function local(id: string, value: string) {
     setInputs((previous) => ({ ...previous, [`${sourceKey}:${id}`]: value }));
@@ -322,7 +369,15 @@ export default function ConfigurationOptions({
           <Input
             disabled={cannot || locked}
             value={shown}
-            onChange={(e) => local(id, e.target.value)}
+            onChange={(e) => {
+              if (!modalActions) local(id, e.target.value);
+              else
+                try {
+                  setter(e.target.value);
+                } catch (e) {
+                  setError(String(e));
+                }
+            }}
             onBlur={(e) => {
               if (!cannot && !locked && e.target.value !== displayValue)
                 try {
@@ -338,7 +393,9 @@ export default function ConfigurationOptions({
   }
   function row(field: ModelField) {
     const context = values.fields.find((f) => f.name === field.name),
-      value = modelSettingValue(overlay, field.name) ?? context?.configured_value ?? '';
+      value = removedCaseKeys.includes(field.name)
+        ? ''
+        : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? '');
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive,
       id = `configuration-${field.name}`;
@@ -380,7 +437,7 @@ export default function ConfigurationOptions({
   }
   const stomatalFields = ['DEF_USE_MEDLYNST', 'DEF_USE_WUEST'];
   const showStomatal = stomatalFields.every((name) =>
-    fields.some((f) => f.name === name && !f.derived),
+    fields.some((f) => f.name === name && !f.derived && included(f)),
   );
   function stomatal() {
     if (!showStomatal) return null;
@@ -487,13 +544,24 @@ export default function ConfigurationOptions({
     'assimilation',
     'other',
   ].map((id) => modelSettingGroups.find((g) => g[0] === id)!);
-  const caseProcessVisible = (id: string) => !onCaseChange || parentValues[id] === true;
+  const caseProcessVisible = (id: string) =>
+    (!hideProcesses || !['ecology', 'tracer', 'river', 'urban'].includes(id)) &&
+    (!process || id !== 'tracer' || process === 'DEF_USE_TRACER') &&
+    (!onCaseChange || parentValues[id] === true);
   const groups = orderedGroups.map(([id, zh, english]) => {
     if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
-      .filter((field) => !excludeKeys.includes(field.name) && groupedField(field, catalog))
+      .filter(
+        (field) =>
+          included(field) && !excludeKeys.includes(field.name) && groupedField(field, catalog),
+      )
       .filter((field) => !onCaseChange || caseFieldVisible(field.name, values.fields))
-      .filter(() => id !== 'ecology' || caseProcessVisible(id))
+      .filter(
+        (field) =>
+          !onCaseChange ||
+          processSettingOwner(field, values.fields) !== 'DEF_USE_BGC' ||
+          parentValues.ecology,
+      )
       .filter(
         (field) =>
           !onCaseChange ||
@@ -508,7 +576,20 @@ export default function ConfigurationOptions({
       .filter(
         (f) => modelSettingGroup(f) === id && !(showStomatal && stomatalFields.includes(f.name)),
       );
-    if (onCaseChange && !rows.length && !['ecology', 'tracer'].includes(id)) return null;
+    if (
+      onCaseChange &&
+      !rows.length &&
+      !(id === 'ecology' && showStomatal) &&
+      !(id === 'tracer' && caseProcessVisible(id))
+    )
+      return null;
+    if (process)
+      return (
+        <Card key={id} title={t(zh, english)}>
+          {id === 'ecology' && stomatal()}
+          {rows.map(row)}
+        </Card>
+      );
     actions.push({
       id: `${groupPrefix}-group-${id}`,
       label: t(zh, english),
@@ -1013,8 +1094,9 @@ export default function ConfigurationOptions({
   usePageContract({
     title: t('完整模型配置', 'Complete model configuration'),
     step: 'configuration-options',
+    modal: !!modalActions,
     fields: controls,
-    actions,
+    actions: [...actions, ...(modalActions ?? [])],
     status: error || (!ready ? 'loading' : 'pending_source_verification'),
     details: { context_complete: values.context_complete, warnings: values.warnings },
   });
@@ -1031,6 +1113,14 @@ export default function ConfigurationOptions({
       {groups}
       {familyCards}
       {tracerTable}
+      {modalActions && tracers !== null && (
+        <Notice>
+          {t(
+            '请先应用示踪物定义，再保存设置。',
+            'Apply tracer definitions before saving settings.',
+          )}
+        </Notice>
+      )}
       {caseProcessVisible('tracer') && (
         <Card title={t('示踪过程文件', 'Tracer process files')}>
           {ready && !overlay.process_files.length && (

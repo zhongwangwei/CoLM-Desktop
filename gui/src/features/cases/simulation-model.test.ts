@@ -12,8 +12,6 @@ import {
   simulationFields,
   caseRangeKeys,
   simulationSteps,
-  processDataGroupId,
-  processDataSections,
   spinupProblem,
   validDate,
 } from './simulation-model';
@@ -237,26 +235,6 @@ test('existing spinup cutoff respects actual seconds and moved simulation dates'
     true,
     'same end date remains valid before its actual end seconds',
   );
-});
-
-test('process input groups retain their domain-specific fields without absorbing ordinary case data', () => {
-  const field = (name: string, section: string) => ({ name, section }) as SchemaField;
-  assert.deepEqual(
-    processDataSections.map(([id]) => id),
-    ['bgc', 'river', 'tracer', 'urban'],
-  );
-  for (const [name, section, group] of [
-    ['DEF_USE_CN_INIT', '初始场', 'bgc'],
-    ['DEF_file_cn_init', '初始场', 'bgc'],
-    ['DEF_file_ndep', '强迫场', 'bgc'],
-    ['DEF_UnitCatchment_file', '河道与水库', 'river'],
-    ['DEF_TRACER_SOIL_INIT_FILE', '初始场', 'tracer'],
-    ['DEF_file_GIEMS', '初始场', 'tracer'],
-    ['DEF_URBAN_type_scheme', '地表数据', 'urban'],
-    ['DEF_dir_rawdata', '地表数据', null],
-    ['DEF_HIST_FREQ', '输出与重启', null],
-  ] as const)
-    assert.equal(processDataGroupId(field(name, section)), group, name);
 });
 
 test('case range controls match site and spatial inputs', () => {

@@ -31,6 +31,8 @@ type Props = {
   onChange?: (overlay: Overlay) => void;
   onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
   requested?: SetupRequest;
+  onOpenSettings?: (id: string) => void;
+  hasSettings?: (id: string) => boolean;
 };
 export default function ScientificSetupCards({
   caseDir = null,
@@ -43,6 +45,8 @@ export default function ScientificSetupCards({
   onChange,
   onCaseChange,
   requested,
+  onOpenSettings,
+  hasSettings = () => true,
 }: Props) {
   const { state } = useApp(),
     t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
@@ -58,6 +62,12 @@ export default function ScientificSetupCards({
     current = useRef(key),
     writeLocked = useRef(true);
   current.current = key;
+  const identity = JSON.stringify({
+    caseDir,
+    source: source.kind === 'frozen' ? source : { id: source.id, generation: source.generation },
+  });
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
   useEffect(() => {
     let live = true;
     const data = JSON.parse(key) as {
@@ -126,7 +136,17 @@ export default function ScientificSetupCards({
         writeLocked.current = true;
         setSaving(true);
         return Promise.resolve(onCaseChange(caseOptionPatch(effective, next, fields)))
-          .then(() => setError(''))
+          .then(() => {
+            setError('');
+            const previous = choices.find((choice) => choice.id === request.id)?.value;
+            if (
+              currentIdentity.current === identity &&
+              request.value !== '.false.' &&
+              previous !== requestedValue &&
+              hasSettings(request.id)
+            )
+              onOpenSettings?.(request.id);
+          })
           .catch((e) => {
             setError(String(e));
             throw e;
@@ -150,6 +170,19 @@ export default function ScientificSetupCards({
     }
   }
   const cards = choices.map((control, index) => {
+    const settingsAvailable =
+      !!onOpenSettings && hasSettings(control.id) && !!control.value && control.value !== '.false.';
+    if (settingsAvailable)
+      actions.push({
+        id: `setup-${control.id}-settings`,
+        label: t('设置', 'Settings'),
+        kind: 'click',
+        enabled: !locked,
+        run: () => {
+          if (locked || writeLocked.current) throw new Error('Configuration is locked');
+          onOpenSettings!(control.id);
+        },
+      });
     const label = `${index + (includeSubgrid ? 1 : 2)}. ${t(control.zh, control.en)}`;
     const available = control.choices.filter((c) => !c.reason);
     guideFields.push({
@@ -191,6 +224,11 @@ export default function ScientificSetupCards({
             </Button>
           ))}
         </div>
+        {settingsAvailable && (
+          <Button disabled={locked} onClick={() => onOpenSettings!(control.id)}>
+            {t('设置', 'Settings')}
+          </Button>
+        )}
         {control.pending && result?.context_complete && (
           <p className="muted">
             {t('这一项的前提还在核对。', 'The prerequisites of this item are still being checked.')}
@@ -206,7 +244,7 @@ export default function ScientificSetupCards({
               : t('尚未确认 CROP 候选内核。', 'CROP kernel capability is not yet confirmed.')}
           </p>
         )}
-        {control.id === 'crop' && cropOpen && (
+        {control.id === 'crop' && cropOpen && !onOpenSettings && (
           <Field
             label={t('种植日（单点 0–366，空间模拟 0）', 'Planting day (site 0–366, spatial 0)')}
           >
@@ -227,7 +265,7 @@ export default function ScientificSetupCards({
       </Card>
     );
   });
-  if (cropOpen) {
+  if (cropOpen && !onOpenSettings) {
     guideFields.push({
       id: 'setup-crop-planting-day',
       label: t('种植日', 'Planting day'),

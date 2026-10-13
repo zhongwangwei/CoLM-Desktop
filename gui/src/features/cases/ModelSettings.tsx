@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { useEffect, useRef, useState } from 'react';
+import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { invoke } from '../../lib/ipc';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
@@ -11,6 +11,7 @@ import { isCaseField, type SchemaField } from './case-model';
 import type { CaseOptionPatch } from '../versions/configuration-options';
 import {
   filterModelParameters,
+  processSettingOwner,
   modelParameterEditable,
   simulationMode,
   type SimulationMode,
@@ -62,7 +63,17 @@ export default function ModelSettings({
     [catalogOpen, setCatalogOpen] = useState(false),
     [query, setQuery] = useState(''),
     [scope, setScope] = useState(''),
-    [modelFields, setModelFields] = useState<SchemaField[]>([]);
+    [modelFields, setModelFields] = useState<SchemaField[]>([]),
+    [settings, setSettings] = useState<{ id: string; identity: string } | null>(null);
+  const identity = JSON.stringify({
+    caseDir,
+    version: version?.version,
+    mode,
+    kernel: kernel?.dir,
+    domain: setupEnvironment?.domain,
+  });
+  const currentIdentity = useRef(identity);
+  currentIdentity.current = identity;
   useEffect(() => {
     let live = true;
     Promise.all([
@@ -304,6 +315,19 @@ export default function ModelSettings({
             includeSubgrid={false}
             disabled={disabled || loading}
             onCaseChange={onCaseChange}
+            hasSettings={(id) =>
+              fields.some(
+                (field) =>
+                  processSettingOwner(field) === id &&
+                  (!setupHandledKeys.includes(field.name) ||
+                    field.name === 'DEF_TUNING_CROP_PLANTING_DAY'),
+              )
+            }
+            onOpenSettings={
+              onCaseChange
+                ? (id) => setSettings({ id, identity: currentIdentity.current })
+                : undefined
+            }
           />
           {error && <Notice tone="error">{error}</Notice>}
           {loading && (
@@ -316,6 +340,7 @@ export default function ModelSettings({
                 caseValues={setupEnvironment?.caseValues}
                 onCaseChange={onCaseChange}
                 excludeKeys={setupHandledKeys}
+                hideProcesses={!!onCaseChange}
                 groupPrefix="simulation-model"
                 source={{ kind: 'frozen', version: version.version }}
                 overlay={version.overlay}
@@ -335,10 +360,26 @@ export default function ModelSettings({
               />
               <p className="muted">
                 {t(
-                  '过程所需输入、初始化和数据文件在第三步按过程配置。',
-                  'Configure process inputs, initialization and data files in step 3.',
+                  '开启过程后可在对应卡片的设置中调整初始化、输入数据和过程选项。',
+                  'Use Settings on each enabled process to adjust initialization, inputs and process options.',
                 )}
               </p>
+              {settings?.identity === identity && onCaseChange && (
+                <ProcessSettingsDialog
+                  key={`${identity}:${settings.id}`}
+                  process={settings.id}
+                  fields={fields}
+                  catalog={catalog}
+                  version={version}
+                  caseDir={caseDir}
+                  kernel={kernel}
+                  subgrid={selectedMode}
+                  environment={setupEnvironment}
+                  disabled={disabled}
+                  onSave={onCaseChange}
+                  onClose={() => setSettings(null)}
+                />
+              )}
               <Advanced
                 title={`${t('完整参数目录', 'Full parameter catalog')} · ${catalog.length}`}
                 open={catalogOpen}
@@ -433,5 +474,156 @@ export default function ModelSettings({
         <Notice tone="warning">{t('请先选择模型版本。', 'Select a model version first.')}</Notice>
       )}
     </Card>
+  );
+}
+
+function ProcessSettingsDialog({
+  process,
+  fields,
+  catalog,
+  version,
+  caseDir,
+  kernel,
+  subgrid,
+  environment,
+  disabled,
+  onSave,
+  onClose,
+}: {
+  process: string;
+  fields: SchemaField[];
+  catalog: ModelParameter[];
+  version: FrozenRevision;
+  caseDir: string | null;
+  kernel?: KernelEntry;
+  subgrid?: SimulationMode;
+  environment?: SetupEnvironment;
+  disabled: boolean;
+  onSave: (patch: CaseOptionPatch) => void | Promise<void>;
+  onClose: () => void;
+}) {
+  const { state } = useApp(),
+    t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
+  const [patch, setPatch] = useState<CaseOptionPatch>({}),
+    [saving, setSaving] = useState(false),
+    [ready, setReady] = useState(false),
+    [error, setError] = useState('');
+  const live = useRef(true),
+    savingNow = useRef(false),
+    draft = useRef<CaseOptionPatch>({}),
+    lockedNow = useRef(disabled);
+  lockedNow.current = disabled;
+  const titles: Record<string, [string, string]> = {
+    DEF_USE_BGC: ['BGC 设置', 'BGC settings'],
+    DEF_USE_TRACER: ['示踪设置', 'Tracer settings'],
+    DEF_USE_GridRiverLakeFlow: ['河湖流与水库设置', 'River and reservoir settings'],
+    DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
+    DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
+    crop: ['作物设置', 'Crop settings'],
+    DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
+    soil: ['土壤设置', 'Soil settings'],
+    DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
+  };
+  const title = titles[process] ?? ['过程设置', 'Process settings'];
+  useEffect(() => {
+    live.current = true;
+    return () => {
+      live.current = false;
+    };
+  }, []);
+  const values = { ...environment?.caseValues };
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete values[key];
+    else values[key] = value;
+  }
+  const close = () => {
+    if (!savingNow.current) onClose();
+  };
+  const save = async () => {
+    if (disabled || lockedNow.current || !ready || savingNow.current || !live.current)
+      throw new Error('Configuration is locked');
+    savingNow.current = true;
+    setSaving(true);
+    try {
+      if (Object.keys(draft.current).length) await onSave(draft.current);
+      if (live.current) onClose();
+    } catch (e) {
+      if (live.current) setError(String(e));
+    } finally {
+      if (live.current) {
+        savingNow.current = false;
+        setSaving(false);
+      }
+    }
+  };
+  const actions: UiAction[] = [
+    {
+      id: 'process-settings-save',
+      label: t('保存设置', 'Save settings'),
+      kind: 'click',
+      enabled: ready && !disabled && !saving,
+      run: save,
+    },
+    {
+      id: 'process-settings-cancel',
+      label: t('取消', 'Cancel'),
+      kind: 'click',
+      enabled: !saving,
+      run: close,
+    },
+  ];
+  return (
+    <Dialog
+      title={t(...title)}
+      open
+      onOpenChange={(open) => {
+        if (!open) close();
+      }}
+      description={t(
+        '修改暂存在此窗口，保存后生效。取消不会更改已开启的过程。',
+        'Changes stay in this window until saved. Cancel keeps the enabled process unchanged.',
+      )}
+    >
+      {error && <Notice tone="error">{error}</Notice>}
+      <ConfigurationOptions
+        process={process}
+        modalActions={actions}
+        onReady={setReady}
+        source={{ kind: 'frozen', version: version.version }}
+        overlay={version.overlay}
+        fields={fields}
+        catalog={catalog}
+        caseDir={caseDir}
+        kernelDir={kernel?.dir}
+        kernelMacros={kernel?.macros}
+        caseScope={
+          environment?.domain === 'site' ? 'site' : environment?.domain ? 'spatial' : 'unknown'
+        }
+        subgrid={subgrid}
+        caseValues={values}
+        removedCaseKeys={Object.keys(patch).filter((key) => patch[key] === null)}
+        disabled={disabled || saving}
+        excludeKeys={setupHandledKeys.filter((key) => key !== 'DEF_TUNING_CROP_PLANTING_DAY')}
+        onCaseChange={(change) => {
+          if (!live.current || lockedNow.current || savingNow.current)
+            throw new Error('Configuration is locked');
+          draft.current = { ...draft.current, ...change };
+          setPatch(draft.current);
+        }}
+      />
+      <div className="button-row">
+        <Button
+          disabled={!ready || disabled || saving}
+          onClick={() => {
+            void save();
+          }}
+        >
+          {t('保存设置', 'Save settings')}
+        </Button>
+        <Button disabled={saving} onClick={close}>
+          {t('取消', 'Cancel')}
+        </Button>
+      </div>
+    </Dialog>
   );
 }

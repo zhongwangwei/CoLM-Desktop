@@ -21,15 +21,13 @@ import {
   scannedForcing,
   simulationFields,
   simulationSteps,
-  processDataSections,
-  processDataGroupId,
   spinupProblem,
   type SimulationStep,
 } from './simulation-model';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import { compatibleKernel } from '../runs/run-model';
-import ProcessDataGroups from './ProcessDataGroups';
+import { simulationOptionField } from './model-settings';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import { simulationMode, caseSchemeFields, type SimulationMode } from './model-settings';
@@ -79,8 +77,7 @@ export default function NewCasePage() {
     [busy, setBusy] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
     [ownData, setOwnData] = useState(seed?.ownData ?? false);
-  const [dataOpened, setDataOpened] = useState<Record<string, boolean>>({}),
-    [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
+  const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
   const lock = useRef(false),
@@ -540,23 +537,10 @@ export default function NewCasePage() {
           ? ['spinup_end']
           : [];
   const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
-  const enabled = !busy && !state.busy,
-    dataGroups =
-      step === 3 && advanced
-        ? processDataSections
-            .filter(([, , , parent]) => /^(true|\.true\.)$/i.test(physics[parent] ?? ''))
-            .map(([id, zh, english]) => ({
-              id,
-              title: t(zh, english),
-              fields: visibleSchema.filter((f) => processDataGroupId(f) === id),
-              open: dataOpened[id] ?? false,
-            }))
-            .filter((group) => group.fields.length)
-        : [];
-  const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
+  const enabled = !busy && !state.busy;
+  const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
     options = [
       ...simulationFields(visibleSchema, step, advanced).filter((f) => !groupFields.includes(f)),
-      ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),
     ],
     basicOptions = simulationFields(visibleSchema, step, false).filter(
       (f) => !groupFields.includes(f),
@@ -680,13 +664,6 @@ export default function NewCasePage() {
       },
     });
   const actions: UiAction[] = [
-    ...dataGroups.map((group) => ({
-      id: `new-data-group-${group.id}`,
-      label: group.title,
-      kind: 'click' as const,
-      enabled,
-      run: () => setDataOpened((previous) => ({ ...previous, [group.id]: !group.open })),
-    })),
     ...simulationSteps.slice(0, step - 1).map((label, i) => ({
       id: `new-step-${i + 1}`,
       label: label[en ? 1 : 0],
@@ -867,14 +844,6 @@ export default function NewCasePage() {
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
       {advanced && (
         <>
-          {step === 3 && (
-            <ProcessDataGroups
-              groups={dataGroups}
-              onToggle={(id, open) => setDataOpened((previous) => ({ ...previous, [id]: open }))}
-              render={renderOption}
-              disabled={!enabled}
-            />
-          )}
           <div className="form-grid">{extraOptions.map(renderOption)}</div>
         </>
       )}

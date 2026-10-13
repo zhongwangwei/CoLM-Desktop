@@ -9,7 +9,7 @@ import { PFT } from './scope-labels';
 import type { Overlay } from '../../lib/types';
 import type { UiAction, UiField } from '../../lib/guide';
 import type { ModelField, Descriptor } from './model';
-type Contract = { fields: UiField[]; actions: UiAction[]; status: string };
+type Contract = { modal?: boolean; fields: UiField[]; actions: UiAction[]; status: string };
 function harness() {
   const overlay: Overlay = {
     physics: {
@@ -45,6 +45,11 @@ function harness() {
     derived: false,
   }));
   const props = {
+    process: undefined as string | undefined,
+    hideProcesses: false,
+    modalActions: undefined as UiAction[] | undefined,
+    removedCaseKeys: [] as string[],
+    onReady: undefined as ((ready: boolean) => void) | undefined,
     onCaseChange: undefined as
       undefined | ((patch: helpers.CaseOptionPatch) => void | Promise<void>),
     caseValues: undefined as Record<string, string> | undefined,
@@ -658,4 +663,109 @@ test('simulation details honor backend parent gate even when applicability remai
       enabled === true,
     );
   }
+});
+
+test('focused simulation editor stages the final typed value and explicit reset while preserving modal guide scope', async () => {
+  const h = harness(),
+    patches: helpers.CaseOptionPatch[] = [];
+  h.props.process = 'DEF_URBAN_RUN';
+  h.props.modalActions = [{ id: 'save-dialog', label: 'Save', kind: 'click', run: () => {} }];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  h.props.caseValues = { DEF_URBAN_RUN: '.true.', DEF_URBAN_type_scheme: '1' };
+  const field = h.props.fields.find((f) => f.name === 'DEF_URBAN_type_scheme')!;
+  field.kind = 'integer';
+  field.values = [];
+  h.render();
+  h.requests.at(-1)!.resolve(h.response());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let c = h.render();
+  assert.equal(c.modal, true);
+  assert.ok(c.actions.some((a) => a.id === 'save-dialog'));
+  assert.ok(!c.fields.some((f) => f.id.includes('tracer') || f.id.includes('stomatal')));
+  const input = h.nodes.find((n) => n.type === 'Input' && n.props.value === '1')!;
+  (input.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: '2' } });
+  assert.deepEqual(patches.at(-1), { DEF_URBAN_type_scheme: '2' });
+  c = h.render();
+  await c.actions.find((a) => a.id === 'configuration-DEF_URBAN_type_scheme-reset')!.run();
+  assert.deepEqual(patches.at(-1), { DEF_URBAN_type_scheme: null });
+  h.props.removedCaseKeys = ['DEF_URBAN_type_scheme'];
+  assert.equal(
+    h.render().fields.find((f) => f.id === 'configuration-DEF_URBAN_type_scheme')?.value,
+    '',
+  );
+});
+test('modal save readiness rejects invalid text and unapplied tracer definitions', async () => {
+  const h = harness();
+  let ready = false;
+  h.props.process = 'DEF_USE_TRACER';
+  h.props.modalActions = [];
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = { DEF_USE_TRACER: '.true.' };
+  h.render();
+  h.requests.at(-1)!.resolve(h.response());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let c = h.render();
+  assert.equal(ready, true);
+  await c.actions.find((a) => a.id === 'configuration-tracers-add')!.run();
+  c = h.render();
+  assert.equal(ready, false);
+  assert.ok(
+    h.nodes.some((n) => n.type === 'Notice' && JSON.stringify(n.children).includes('先应用')),
+  );
+  await c.actions.find((a) => a.id === 'configuration-tracers-remove')!.run();
+  h.render();
+  // Even an empty pending table must be applied explicitly before Save.
+  assert.equal(ready, false);
+  const urban = harness();
+  urban.props.process = 'DEF_URBAN_RUN';
+  urban.props.modalActions = [];
+  urban.props.onReady = (value) => {
+    ready = value;
+  };
+  urban.props.onCaseChange = () => {};
+  urban.props.caseValues = { DEF_URBAN_RUN: '.true.', DEF_URBAN_type_scheme: '1' };
+  urban.props.fields.find((f) => f.name === 'DEF_URBAN_type_scheme')!.kind = 'integer';
+  urban.render();
+  urban.requests.at(-1)!.resolve(urban.response());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  urban.render();
+  assert.equal(ready, true);
+  const input = urban.nodes.find((n) => n.type === 'Input' && n.props.value === '1')!;
+  (input.props.onChange as (e: { target: { value: string } }) => void)({
+    target: { value: 'invalid' },
+  });
+  urban.render();
+  assert.equal(ready, false);
+});
+
+test('ordinary simulation options keep independent ecology and stomatal choices accessible with BGC off', async () => {
+  const h = harness();
+  h.props.hideProcesses = true;
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = { DEF_USE_BGC: '.false.' };
+  for (const name of ['DEF_USE_SNICAR', 'DEF_USE_PROSPECT', 'DEF_LC_YEAR'])
+    h.props.fields.push({
+      name,
+      section: '生态与生地化',
+      kind: 'logical',
+      default: '.false.',
+      values: [],
+      derived: false,
+    });
+  h.render();
+  h.requests.at(-1)!.resolve(h.response());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  let c = h.render();
+  await c.actions.find((a) => a.id === 'configuration-group-ecology')!.run();
+  c = h.render();
+  for (const name of ['DEF_USE_SNICAR', 'DEF_USE_PROSPECT'])
+    assert.ok(c.fields.some((f) => f.id === `configuration-${name}`));
+  assert.ok(c.fields.some((f) => f.id === 'configuration-stomatal-scheme'));
+  for (const name of ['DEF_LC_YEAR', 'DEF_USE_NITRIF_DENITRIF'])
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
 });

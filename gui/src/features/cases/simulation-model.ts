@@ -243,24 +243,3 @@ export function newCaseProblem(
   }
   return null;
 }
-
-export const processDataSections = [
-  ['bgc', 'BGC 初始化与氮沉降', 'BGC initialization and nitrogen deposition', 'DEF_USE_BGC'],
-  ['river', '河网与水库输入', 'River and reservoir inputs', 'DEF_USE_GridRiverLakeFlow'],
-  ['tracer', '示踪初始化与驱动数据', 'Tracer initialization and driving data', 'DEF_USE_TRACER'],
-  ['urban', '城市输入数据', 'Urban input data', 'DEF_URBAN_RUN'],
-] as const;
-export function processDataGroupId(field: SchemaField): string | null {
-  const name = field.name.toUpperCase();
-  if (
-    name === 'DEF_USE_CN_INIT' ||
-    name === 'DEF_FILE_CN_INIT' ||
-    name.includes('NDEP') ||
-    field.section === '生态与生地化'
-  )
-    return 'bgc';
-  if (name.startsWith('DEF_TRACER_') || name === 'DEF_FILE_GIEMS' || field.section === '示踪剂')
-    return 'tracer';
-  if (name.includes('URBAN') || field.section === '城市') return 'urban';
-  return field.section === '河道与水库' ? 'river' : null;
-}

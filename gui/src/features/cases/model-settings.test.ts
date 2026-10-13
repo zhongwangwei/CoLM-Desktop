@@ -159,6 +159,11 @@ test('model settings guide exposes classification only with a callback and catal
     parameterKey: () => '',
     useApp: () => ({ state: { language: 'zh', kernels: [] } }),
     useEffect: () => {},
+    useRef: (value: unknown) => {
+      const key = cursor++;
+      if (!(key in slots)) slots[key] = { current: value };
+      return slots[key];
+    },
     useState: (initial: unknown) => {
       const key = cursor++;
       if (!(key in slots)) slots[key] = initial;
@@ -252,4 +257,24 @@ test('case vegetation selection ignores stale version flags', async () => {
     assert.equal(Object.values(fields).filter((v) => v === '.true.').length, 1);
     assert.equal(fields[`DEF_USE_${mode === 'IGBP' || mode === 'USGS' ? 'LCT' : mode}`], '.true.');
   }
+});
+
+test('process ownership follows parent gates and leaves independent schemes and normal data accessible', async () => {
+  const { processSettingOwner, simulationOptionField } = await import('./model-settings');
+  const field = (name: string, section = '生态与生地化') => ({ name, section });
+  for (const name of ['DEF_LC_YEAR', 'DEF_CO2SCENARIO'])
+    assert.equal(simulationOptionField(field(name)), false);
+  for (const name of ['DEF_USE_SNICAR', 'DEF_USE_PROSPECT', 'DEF_USE_MEDLYNST', 'DEF_USE_WUEST']) {
+    assert.equal(processSettingOwner(field(name)), null);
+    assert.equal(simulationOptionField(field(name)), true);
+  }
+  assert.equal(simulationOptionField(field('DEF_dir_forcing', '大气强迫')), false);
+  assert.equal(processSettingOwner(field('DEF_file_cn_init', '初始场')), 'DEF_USE_BGC');
+  assert.equal(
+    processSettingOwner(field('DEF_FERT_SOURCE'), [
+      { name: 'DEF_FERT_SOURCE', parent_gate: 'DEF_USE_FERT' },
+      { name: 'DEF_USE_FERT', parent_gate: 'DEF_USE_CROP' },
+    ]),
+    'crop',
+  );
 });

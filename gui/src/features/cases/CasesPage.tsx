@@ -14,14 +14,12 @@ import {
   simulationFields,
   caseRangeKeys,
   simulationSteps,
-  processDataSections,
-  processDataGroupId,
   validDate,
   type SimulationStep,
 } from './simulation-model';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
-import ProcessDataGroups from './ProcessDataGroups';
+import { simulationOptionField } from './model-settings';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import { caseSchemeFields, type SimulationMode } from './model-settings';
@@ -48,8 +46,7 @@ export default function CasesPage() {
     [saved, setSaved] = useState<Record<string, string>>({}),
     [busy, setBusy] = useState(false),
     [advanced, setAdvanced] = useState(state.expert);
-  const [dataOpened, setDataOpened] = useState<Record<string, boolean>>({}),
-    [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
+  const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [explicitValues, setExplicitValues] = useState<Record<string, string>>({}),
     [modelKeys, setModelKeys] = useState<SchemaField[]>([]);
@@ -97,7 +94,8 @@ export default function CasesPage() {
     update({ simulationReturn: null });
   }, [update]);
   async function changeCaseOptions(patch: CaseOptionPatch) {
-    if (!dir || editingDisabled || dirty) return;
+    if (!dir || editingDisabled || dirty || lock.current)
+      throw new Error(t('请先保存或放弃当前修改。', 'Save or discard current edits first.'));
     await work(async () => {
       const target = dir,
         request = epoch.current;
@@ -158,7 +156,6 @@ export default function CasesPage() {
     setContextReason({});
     setDisabledFields([]);
     setModelContext(null);
-    setDataOpened({});
     setOptionStates([]);
     setError('');
     if (!dir) {
@@ -388,28 +385,15 @@ export default function CasesPage() {
     YEARLY: t('每年', 'Yearly'),
   };
   const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
-  const dataGroups =
-    state.caseTab === 'settings' && step === 3 && advanced
-      ? processDataSections
-          .filter(([, , , parent]) => /^(true|\.true\.)$/i.test(physics[parent] ?? ''))
-          .map(([id, zh, english]) => ({
-            id,
-            title: t(zh, english),
-            fields: visibleSchema.filter((f) => processDataGroupId(f) === id),
-            open: dataOpened[id] ?? false,
-          }))
-          .filter((group) => group.fields.length)
-      : [];
   const rangeKeys = caseRangeKeys(effectiveProfile?.grid ?? state.selectedCase?.profile.grid);
   const rangeFields =
     step === 1 ? visibleSchema.filter((field) => rangeKeys.includes(field.name)) : [];
-  const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
+  const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
     shown = [
       ...rangeFields,
       ...simulationFields(visibleSchema, step, advanced).filter(
         (f) => !groupFields.includes(f) && !rangeFields.includes(f),
       ),
-      ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),
     ];
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
     optionDisabled = (name: string) =>
@@ -560,13 +544,6 @@ export default function CasesPage() {
                   : t('返回模拟', 'Back to simulation'),
             kind: 'click' as const,
             run: () => update({ caseTab: tab }),
-          })),
-          ...dataGroups.map((group) => ({
-            id: `case-data-group-${group.id}`,
-            label: group.title,
-            kind: 'click' as const,
-            enabled: !editingDisabled,
-            run: () => setDataOpened((previous) => ({ ...previous, [group.id]: !group.open })),
           })),
           ...(dirty
             ? [
@@ -722,14 +699,6 @@ export default function CasesPage() {
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
       {advanced && (
         <>
-          {step === 3 && (
-            <ProcessDataGroups
-              groups={dataGroups}
-              onToggle={(id, open) => setDataOpened((previous) => ({ ...previous, [id]: open }))}
-              render={render}
-              disabled={editingDisabled}
-            />
-          )}
           <div className="form-grid">{extras.map(render)}</div>
         </>
       )}

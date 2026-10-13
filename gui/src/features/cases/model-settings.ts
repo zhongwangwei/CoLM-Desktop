@@ -142,3 +142,68 @@ export function caseSchemeFields(mode: SimulationMode): Record<string, string> {
     DEF_SUBGRID_SCHEME: mode,
   };
 }
+
+// Follow the backend's parent metadata before falling back to existing schema sections.
+export function processSettingOwner(
+  field: Pick<SchemaField, 'name' | 'section'>,
+  context: readonly { name: string; parent_gate?: string | null }[] = [],
+): string | null {
+  const roots: Record<string, string> = {
+    DEF_USE_BGC: 'DEF_USE_BGC',
+    DEF_USE_TRACER: 'DEF_USE_TRACER',
+    DEF_URBAN_RUN: 'DEF_URBAN_RUN',
+    DEF_USE_CROP: 'crop',
+    DEF_USE_GRIDRIVERLAKEFLOW: 'DEF_USE_GridRiverLakeFlow',
+    DEF_UNITCATCHMENT_REGIONAL: 'DEF_UnitCatchment_regional',
+    DEF_USE_LULCC: 'DEF_USE_LULCC',
+    DEF_USE_VARIABLYSATURATEDFLOW: 'DEF_USE_VariablySaturatedFlow',
+  };
+  let name = field.name.toUpperCase();
+  const seen = new Set<string>();
+  while (!seen.has(name)) {
+    if (roots[name]) return roots[name];
+    seen.add(name);
+    const parent = context.find((entry) => entry.name.toUpperCase() === name)?.parent_gate;
+    if (!parent) break;
+    name = parent.toUpperCase();
+  }
+  if (/CROP|FERT|IRRIGATION|CNSOYFIXN/.test(field.name.toUpperCase())) return 'crop';
+  if (/^DEF_TRACER_|^DEF_FILE_GIEMS$/.test(field.name.toUpperCase())) return 'DEF_USE_TRACER';
+  if (field.name.toUpperCase().includes('URBAN')) return 'DEF_URBAN_RUN';
+  if (
+    [
+      'DEF_USE_CN_INIT',
+      'DEF_FILE_CN_INIT',
+      'DEF_USE_LAIFEEDBACK',
+      'DEF_USE_NOSTRESSNITROGEN',
+      'DEF_USE_SASU',
+      'DEF_USE_DIAGMATRIX',
+      'DEF_USE_PN',
+      'DEF_USE_NITRIF',
+      'DEF_USE_FIRE',
+    ].includes(field.name.toUpperCase()) ||
+    /NDEP|^DEF_USE_NITRIF/.test(field.name.toUpperCase())
+  )
+    return 'DEF_USE_BGC';
+  if (field.name === 'DEF_LULCC_SCHEME') return 'DEF_USE_LULCC';
+  return (
+    (
+      {
+        tracer: 'DEF_USE_TRACER',
+        urban: 'DEF_URBAN_RUN',
+        river: 'DEF_USE_GridRiverLakeFlow',
+        soil: 'soil',
+      } as Record<string, string>
+    )[modelSettingGroup(field)] ??
+    (/NDEP|DEF_USE_CN_INIT|DEF_file_cn_init/.test(field.name) ? 'DEF_USE_BGC' : null)
+  );
+}
+
+export function simulationOptionField(
+  field: Pick<SchemaField, 'name' | 'section'>,
+  context: readonly { name: string; parent_gate?: string | null }[] = [],
+): boolean {
+  if (processSettingOwner(field, context)) return true;
+  if (['DEF_LC_YEAR', 'DEF_CO2SCENARIO'].includes(field.name)) return false;
+  return ['soil', 'water', 'ecology', 'subgrid', 'assimilation'].includes(modelSettingGroup(field));
+}

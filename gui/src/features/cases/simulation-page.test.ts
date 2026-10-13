@@ -122,7 +122,6 @@ function page(
         'Advanced',
         'Notice',
         'SimulationSteps',
-        'ProcessDataGroups',
         'ModelSettings',
         'RunPanel',
         'ResultsPage',
@@ -842,8 +841,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
         {},
       );
       p.set('case-advanced', 'true');
-      await p.click('case-data-group-bgc');
-      await guideFor(p).fill('case-DEF_file_cn_init', '/changed-cn.nc');
+      await guideFor(p).fill('case-DEF_dir_existing_srfdata', '/changed-cn.nc');
       await p.settle();
     }
     const request = p.calls.filter((call) => call.command === 'model_configuration').at(-1);
@@ -861,21 +859,6 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
   });
 
-function cnSnapshot(mode = 'enabled', reason: string | null = null) {
-  return {
-    fields: [
-      {
-        name: 'DEF_file_cn_init',
-        mode,
-        configured_value: '/retained-cn.nc',
-        status: 'configured',
-        pending: false,
-        reason,
-        allowed_values: [],
-      },
-    ],
-  };
-}
 const dataGroups = [
   ['bgc', 'DEF_USE_BGC', 'DEF_file_cn_init'],
   ['river', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_file'],
@@ -883,194 +866,39 @@ const dataGroups = [
   ['urban', 'DEF_URBAN_RUN', 'DEF_URBAN_type_scheme'],
 ] as const;
 for (const name of ['NewCasePage', 'CasesPage'] as const)
-  test(`${name} shows process data only in opened groups and retains edits when groups close`, async () => {
-    const enabled = Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.']));
+  test(`${name} keeps process settings out of data-step fields and guide actions without deleting values`, async () => {
+    const retained = Object.fromEntries(
+      dataGroups.flatMap(([, parent, child]) => [
+        [parent, '.true.'],
+        [child, '/retained.nc'],
+      ]),
+    );
     const p = page(
       name,
-      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: enabled } : undefined,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: retained } : undefined,
       [site],
-      { ...initialValues, ...enabled },
+      { ...initialValues, ...retained },
       { schema: processSchema },
     );
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
-    const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-',
-      groupPrefix = name === 'NewCasePage' ? 'new-data-group-' : 'case-data-group-';
-    assert.ok(!p.render().actions.some((a) => a.id.startsWith(groupPrefix)));
-    assert.ok(!p.render().fields.some((f) => dataGroups.some(([, , key]) => f.id.endsWith(key))));
-    assert.ok(!p.elements.some((e) => e.type === 'ProcessDataGroups'));
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
-    for (const [id, , fieldName] of dataGroups) {
-      assert.equal(
-        (p.element('ProcessDataGroups').props.groups as { id: string; open: boolean }[]).find(
-          (group) => group.id === id,
-        )?.open,
-        false,
-      );
-      assert.ok(
-        p.render().actions.some((a) => a.id === `${groupPrefix}${id}`),
-        'each data group remains discoverable',
-      );
-      assert.ok(
-        !p.render().fields.some((f) => f.id === `${prefix}${fieldName}`),
-        'closed groups do not expose invisible controls',
-      );
-      await p.click(`${groupPrefix}${id}`);
-      assert.ok(p.render().fields.some((f) => f.id === `${prefix}${fieldName}`));
-    }
-    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'false');
-    assert.ok(!p.render().actions.some((a) => a.id.startsWith(groupPrefix)));
-    assert.ok(!p.render().fields.some((f) => dataGroups.some(([, , key]) => f.id.endsWith(key))));
-    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
-    await guideFor(p).fill(`${prefix}DEF_file_cn_init`, '/keep-cn.nc');
-    await p.settle();
-    await p.click(`${groupPrefix}bgc`);
-    await assert.rejects(
-      guideFor(p).fill(`${prefix}DEF_file_cn_init`, '/hidden-change.nc'),
-      /unique visible control/,
-    );
-    await p.click(`${groupPrefix}bgc`);
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.value,
-      '/keep-cn.nc',
-    );
-  });
-for (const name of ['NewCasePage', 'CasesPage'] as const)
-  test(`${name} opens enabled parent groups from more settings and recomputes CN input gates before saving`, async () => {
-    const p = page(
-      name,
-      name === 'NewCasePage'
-        ? {
-            form,
-            sites: [site],
-            step: 3,
-            caseValues: {
-              ...Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.'])),
-              DEF_file_cn_init: '/retained-cn.nc',
-            },
-          }
-        : undefined,
-      [site],
-      {
-        ...initialValues,
-        ...Object.fromEntries(dataGroups.map(([, parent]) => [parent, '.true.'])),
-        DEF_USE_CN_INIT: '.false.',
-        DEF_file_cn_init: '/retained-cn.nc',
-      },
-      {
-        schema: processSchema,
-        configuration: async (args) =>
-          cnSnapshot(
-            (args.caseValues as Record<string, string>).DEF_USE_CN_INIT === '.true.'
-              ? 'enabled'
-              : 'disabled',
-            'CN initial state is off',
-          ),
-      },
-    );
-
-    await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
-    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
-    for (const [id] of dataGroups)
-      await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-${id}`);
-    const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
-    for (const [, , fieldName] of dataGroups)
-      assert.equal(
-        p.render().fields.some((f) => f.id === `${prefix}${fieldName}`),
-        fieldName !== 'DEF_file_cn_init',
-      );
-    await assert.rejects(
-      guideFor(p).fill(`${prefix}DEF_file_cn_init`, '/blocked.nc'),
-      /unique visible control/,
-    );
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
-    await p.settle();
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.disabled,
-      false,
-    );
-    assert.equal(
-      (
-        p.calls.filter((c) => c.command === 'model_configuration').at(-1)?.args
-          .caseValues as Record<string, string>
-      ).DEF_USE_CN_INIT,
-      '.true.',
-    );
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.false.');
-    await p.settle();
-    assert.ok(!p.render().fields.some((f) => f.id === `${prefix}DEF_file_cn_init`));
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
-    await p.settle();
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.value,
-      '/retained-cn.nc',
-    );
+    const contract = p.render();
+    assert.ok(!contract.actions.some((a) => a.id.includes('data-group-')));
     assert.ok(
-      !p.calls.some((c) => c.command === 'case_data_save' || c.command === 'new_case'),
-      'conditions update without saving or creating',
+      !contract.fields.some((f) =>
+        dataGroups.some(([, parent, child]) => f.id.endsWith(parent) || f.id.endsWith(child)),
+      ),
     );
-  });
-for (const name of ['NewCasePage', 'CasesPage'] as const)
-  test(`${name} discards delayed condition replies after newer unsaved inputs and version changes`, async () => {
-    const waiting: { args: Record<string, unknown>; resolve: (value: unknown) => void }[] = [];
-    const p = page(
-      name,
-      name === 'NewCasePage'
-        ? { form, sites: [site], step: 3, caseValues: { DEF_USE_BGC: '.true.' } }
-        : undefined,
-      [site],
-      { ...initialValues, DEF_USE_BGC: '.true.' },
-      {
-        schema: processSchema,
-        configuration: (args) => new Promise((resolve) => waiting.push({ args, resolve })),
-      },
-    );
-    await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
-    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
-    await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-bgc`);
-    const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
-    assert.ok(waiting.length);
-    waiting.at(-1)!.resolve(cnSnapshot());
-    await p.settle();
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
-    await p.settle();
-    const older = waiting.at(-1)!;
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.false.');
-    await p.settle();
-    const newer = waiting.at(-1)!;
-    assert.notEqual(older, newer);
-    newer.resolve(cnSnapshot('readonly', 'latest inputs are read-only'));
-    await p.settle();
-    older.resolve(cnSnapshot('enabled'));
-    await p.settle();
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.disabled,
-      true,
-      'late enabled reply cannot undo current readonly input gate',
-    );
-    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
-    await p.settle();
-    const oldVersion = waiting.at(-1)!;
-    p.state.versionRef = { id: 'official', revision: 5 };
-    p.state.version = { ...p.state.version, version: p.state.versionRef };
-    p.render();
-    await p.settle();
-    const currentVersion = waiting.at(-1)!;
-    assert.equal(
-      (currentVersion.args.source as { version: { revision: number } }).version.revision,
-      5,
-    );
-    currentVersion.resolve(cnSnapshot('disabled', 'current revision disallows CN'));
-    await p.settle();
-    oldVersion.resolve(cnSnapshot('enabled'));
-    await p.settle();
-    assert.equal(
-      p.render().fields.some((f) => f.id === `${prefix}DEF_file_cn_init`),
-      false,
-      'old revision cannot replace the current revision gate',
-    );
+    assert.ok(contract.fields.some((f) => f.id.endsWith('DEF_dir_existing_srfdata')));
+    assert.ok(!p.elements.some((e) => e.type === 'ProcessDataGroups'));
+    assert.ok(!p.calls.some((call) => call.command === 'case_data_save'));
+    await p.click(name === 'NewCasePage' ? 'new-step-2' : 'case-step-2');
+    const environment = p.element('ModelSettings').props.setupEnvironment as {
+      caseValues: Record<string, string>;
+    };
+    for (const [, , child] of dataGroups)
+      assert.equal(environment.caseValues[child], '/retained.nc');
   });
 test('existing case run and result tabs never expose settings-only process data actions', async () => {
   const p = page(
@@ -1083,7 +911,7 @@ test('existing case run and result tabs never expose settings-only process data 
   await p.mount();
   await p.click('case-step-3');
   p.set('case-advanced', 'true');
-  assert.ok(p.render().actions.some((a) => a.id === 'case-data-group-bgc'));
+  assert.ok(!p.render().actions.some((a) => a.id === 'case-data-group-bgc'));
   for (const tab of ['runs', 'results']) {
     await p.click(`case-tab-${tab}`);
     assert.ok(!p.render().actions.some((a) => a.id.startsWith('case-data-group-')));
@@ -1558,10 +1386,9 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     await p.mount();
     if (name === 'CasesPage') await p.click('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
-    await p.click(`${name === 'NewCasePage' ? 'new' : 'case'}-data-group-bgc`);
     const controls = p.render().fields;
     for (const key of children) assert.ok(!controls.some((f) => f.id.endsWith(key)), key);
-    for (const key of ['UNKNOWN_DATA', 'READONLY_DATA', 'DEF_USE_CN_INIT'])
+    for (const key of ['UNKNOWN_DATA', 'READONLY_DATA'])
       assert.ok(
         controls.some((f) => f.id.endsWith(key)),
         key,
