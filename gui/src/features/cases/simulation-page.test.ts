@@ -53,6 +53,7 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
+    histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
     kernels?: KernelChoice[];
     schema?: caseModel.SchemaField[];
@@ -200,6 +201,8 @@ function page(
           return scannedSites[0]?.site_file ?? null;
         case 'model_case_context':
           return { entry: { dir: '/preview/site' }, profile: {} };
+        case 'hist_vars':
+          return options.histories ?? [];
         case 'read_text':
           return '';
         case 'read_case':
@@ -1744,3 +1747,36 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     assert.ok(p.elements.some((e) => e.type === 'Input' && e.props.value === path));
     assert.ok(!p.elements.some((e) => e.type === 'Select' && e.props.value === path));
   });
+
+test('crop and nitrogen history fields stay in Step 4 output selection with their existing kernel gates', async () => {
+  const names = ['cropprod1c', 'fertnitro_corn', 'ndep_to_sminn'];
+  const histories = names.map((name) => ({
+    name,
+    on: true,
+    writable: name !== 'fertnitro_corn',
+    settable: name !== 'fertnitro_corn',
+  }));
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    kernels: setupKernels,
+    histories,
+    schema: [
+      ...schema,
+      ...names.map((name) => ({
+        ...field(`DEF_hist_vars%${name}`, '输出变量', '.true.'),
+        kind: 'Logical',
+        group: 'nl_colm_history',
+      })),
+    ],
+  });
+  await p.mount();
+  await p.click('case-step-4');
+  p.set('case-advanced', 'true');
+  const c = p.render();
+  for (const name of names) {
+    const output = c.fields.find((f) => f.id === `case-DEF_hist_vars%${name}`);
+    assert.ok(output, name);
+    assert.equal(output.value, '.true.');
+    assert.equal(output.disabled, name === 'fertnitro_corn');
+  }
+  assert.ok(p.calls.some((call) => call.command === 'hist_vars'));
+});

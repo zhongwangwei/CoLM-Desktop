@@ -1,3 +1,4 @@
+import { simulationFieldStep } from './simulation-model';
 import type { Overlay } from '../../lib/types';
 import type { SchemaField } from './case-model';
 import type { Descriptor } from '../versions/model';
@@ -148,6 +149,7 @@ export function processSettingOwner(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): string | null {
+  if (simulationFieldStep(field) === 4) return null;
   const roots: Record<string, string> = {
     DEF_USE_BGC: 'DEF_USE_BGC',
     DEF_USE_TRACER: 'DEF_USE_TRACER',
@@ -203,6 +205,7 @@ export function simulationOptionField(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): boolean {
+  if (simulationFieldStep(field) === 4) return false;
   if (processSettingOwner(field, context)) return true;
   if (['DEF_LC_YEAR', 'DEF_CO2SCENARIO'].includes(field.name)) return false;
   return ['soil', 'water', 'ecology', 'subgrid', 'assimilation'].includes(modelSettingGroup(field));

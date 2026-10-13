@@ -884,3 +884,32 @@ test('river file placeholders are free text in both the actual editor and guide 
   await control.set(path);
   assert.deepEqual(patches, [{ [name]: "'/Volumes/Data/CoLMruntime/river/O''Brien network.nc'" }]);
 });
+
+for (const [process, input, output, kind, initial] of [
+  ['crop', 'DEF_TUNING_CROP_PLANTING_DAY', 'DEF_hist_vars%cropprod1c', 'integer', '120'],
+  ['crop', 'DEF_USE_FERT', 'DEF_hist_vars%fertnitro_corn', 'logical', '.false.'],
+  ['DEF_USE_BGC', 'DEF_file_cn_init', 'DEF_hist_vars%ndep_to_sminn', 'character', 'null'],
+] as const)
+  test(`${process} settings retain ${input} but leave ${output} in output settings`, async () => {
+    const h = harness();
+    h.props.process = process;
+    h.props.modalActions = [];
+    h.props.onCaseChange = () => {};
+    h.props.caseValues = { DEF_USE_BGC: '.true.', DEF_USE_FERT: '.false.' };
+    h.props.fields.push(
+      { name: input, section: '生态与生地化', kind, default: initial, values: [], derived: false },
+      {
+        name: output,
+        section: '输出变量',
+        kind: 'logical',
+        default: '.true.',
+        values: [],
+        derived: false,
+      },
+    );
+    h.render();
+    const c = await h.settle();
+    assert.ok(c.fields.some((f) => f.id === `configuration-${input}`));
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${output}`));
+    assert.ok(!h.nodes.some((n) => n.type === 'Field' && JSON.stringify(n.props).includes(output)));
+  });

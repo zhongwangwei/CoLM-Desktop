@@ -105,7 +105,7 @@ export const primaryOutputFields = [
   'DEF_HIST_groupby',
   'DEF_WRST_FREQ',
 ];
-export function simulationFieldStep(field: SchemaField): 1 | 3 | 4 {
+export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>): 1 | 3 | 4 {
   if (field.section === '网格与并行' || /^DEF_domain%/.test(field.name)) return 1;
   if (field.name.startsWith('DEF_simulation_time%'))
     return /%(start|end)_(year|month|day|sec)$/.test(field.name) ? 3 : 4;
