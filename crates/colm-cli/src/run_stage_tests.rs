@@ -72,13 +72,14 @@ fn output_dir_normalization_matches_windows_verbatim_prefixes() {
             r"\\?\UNC\server\share\probe-case",
         ),
     ] {
-        let case_nml = Path::new(verbatim).join("case.nml");
-        let expected = normalize_output_dir(&case_nml, &format!(r"{verbatim}\out"));
-        for raw in [format!(r"{plain}\out"), "out/".into(), "./out".into()] {
-            assert_eq!(normalize_output_dir(&case_nml, &raw), expected);
-        }
+        // Test UNC syntax without probing a fictitious network share.
+        let expected = normalize_path_components(&Path::new(verbatim).join("out"));
+        assert_eq!(
+            normalize_path_components(&Path::new(plain).join("out")),
+            expected
+        );
         assert_ne!(
-            normalize_output_dir(&case_nml, &format!(r"{plain}\elsewhere")),
+            normalize_path_components(&Path::new(plain).join("elsewhere")),
             expected
         );
     }
@@ -91,19 +92,21 @@ fn cli_output_dir_accepts_canonical_case_paths_before_output_exists() {
     let root = root.canonicalize().unwrap();
     let canonical = root.canonicalize().unwrap();
     let case_nml = canonical.join("case.nml");
-    assert!(!root.join("out").exists());
-    for (actual, expected) in [(&root, &canonical), (&canonical, &root)] {
-        std::fs::write(
-            &case_nml,
-            format!(
-                "&nl_colm\nDEF_dir_output = '{}'\n/\n",
-                actual.join("out").display()
-            ),
-        )
-        .unwrap();
-        ensure_cli_output_dir(&case_nml, &expected.join("out")).unwrap();
-        let error = ensure_cli_output_dir(&case_nml, &expected.join("elsewhere")).unwrap_err();
-        assert!(error.to_string().contains("custom output"), "{error}");
+    for suffix in [Path::new("out"), Path::new("missing").join("out").as_path()] {
+        assert!(!root.join(suffix).exists());
+        for (actual, expected) in [(&root, &canonical), (&canonical, &root)] {
+            std::fs::write(
+                &case_nml,
+                format!(
+                    "&nl_colm\nDEF_dir_output = '{}'\n/\n",
+                    actual.join(suffix).display()
+                ),
+            )
+            .unwrap();
+            ensure_cli_output_dir(&case_nml, &expected.join(suffix)).unwrap();
+            let error = ensure_cli_output_dir(&case_nml, &expected.join("elsewhere")).unwrap_err();
+            assert!(error.to_string().contains("custom output"), "{error}");
+        }
     }
     std::fs::remove_dir_all(root).unwrap();
 }

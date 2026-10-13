@@ -33002,3 +33002,5 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 同一提交的 windows-kernel run 38353934354 在真实 CN-Cng 流程初始化前失败：配置中的普通 `D:\...\out` 与 canonicalize 得到的 `\\?\D:\...\out` 被误判为自定义目录。输出目录前缀归一化必须在目录尚不存在时也生效，且保留不同输出目录拒绝。
 
 修复将 Windows VerbatimDisk/VerbatimUNC 前缀标准化为普通磁盘/UNC 前缀，只统一路径拼写，不允许不同目录。新增磁盘/UNC等价、双向实际输出目录校验、目录尚不存在及不同目录拒绝回归。本地定向 `colm-workspace` patch 测试 15/15、CLI output_dir 测试 3/3通过；两包相关 Clippy、格式和diff检查通过。Windows专属分支与完整端到端仍待本PR的GitHub Windows runner验证。
+
+首轮PR CI已证实Windows两个文件名回归和磁盘/UNC前缀归一化通过，随后CLI暴露三个问题：产物身份key使用反斜杠；服务端POSIX脚本的读文件fixture在Windows执行；Windows临时目录的RUNNER~1短名称与canonical长名称比较不同。补修产物key使用平台无关的正斜杠，POSIX文件访问fixture限Unix执行并新增全平台服务端source拒绝契约测试；Windows输出路径解析最近存在的祖先再附不存在后缀，保留真实错目录拒绝。定向provenance 5/5、knowledge_reader 2/2、output_dir 3/3以及CLI Clippy/格式检查通过，新的GitHub原生验收仍待完成。
