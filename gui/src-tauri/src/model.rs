@@ -328,15 +328,19 @@ pub async fn study_save_version(
     )
 }
 
-pub(crate) async fn bind_new_case(dir: &str, version: Option<VersionRef>) -> Result<(), String> {
+pub(crate) async fn bind_new_case(
+    dir: &str,
+    version: Option<VersionRef>,
+    creation: &crate::sidecar::CaseCreation,
+) -> Result<(), String> {
     let Some(version) = version else {
         return Ok(());
     };
     model_get(version.id.clone(), version.revision)?;
     // Bind straight to the chosen revision: migrating first would derive a version from the
     // generated namelist only to throw it away.
-    decode::<CaseBinding>(
-        cli(vec![
+    let output = creation
+        .capture(vec![
             "model-migrate-case".into(),
             dir.to_owned(),
             "--model-id".into(),
@@ -344,8 +348,10 @@ pub(crate) async fn bind_new_case(dir: &str, version: Option<VersionRef>) -> Res
             "--model-revision".into(),
             version.revision.to_string(),
         ])
-        .await?,
-    )?;
+        .await?;
+    let _: CaseBinding =
+        serde_json::from_str(output.trim()).map_err(|e| format!("invalid case binding: {e}"))?;
+    creation.check()?;
     colm_history::History::open_default()
         .and_then(|h| h.import_case(dir))
         .map_err(|e| format!("case binding succeeded, but importing its history failed: {e}"))?;

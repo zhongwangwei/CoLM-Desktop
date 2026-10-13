@@ -1121,6 +1121,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "case_creation_cancel": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "cancel_runs": {
     "cases": {
       "required": false,

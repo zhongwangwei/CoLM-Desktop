@@ -75,12 +75,15 @@ export default function NewCasePage() {
     [hint, setHint] = useState(''),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
+    [creationDir, setCreationDir] = useState<string | null>(null),
+    [cancellingCreation, setCancellingCreation] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
     [ownData, setOwnData] = useState(seed?.ownData ?? false);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
-  const lock = useRef(false),
+  const creation = useRef<{ dir: string; cancelRequested: boolean } | null>(null),
+    lock = useRef(false),
     sequence = useRef(0),
     alive = useRef(true),
     physics = {
@@ -434,54 +437,92 @@ export default function NewCasePage() {
           ...Object.entries(spinup).map(([path, value]) => ({ path, value })),
         ],
         mode = versionMode(physics, form.landcover as 'IGBP' | 'USGS');
-      if (form.kind === 'site')
-        await invoke('new_case', {
-          site: form.site,
-          out,
-          name: form.name,
-          start: form.start,
-          end: form.end,
-          rawdata: form.rawdata || null,
-          runtime: form.runtime || null,
-          met: form.met,
-          mode,
-          fields,
-          modelRevision: revision,
-        });
-      else {
-        const number = (k: string) => requiredNumber(form[k], k),
-          bounds = form.kind === 'region' && form.grid === 'latlon';
-        await invoke('new_spatial_case', {
-          domain: form.kind,
-          gridKind: form.grid,
-          shapefile: form.shapefile || null,
-          west: bounds ? number('west') : null,
-          east: bounds ? number('east') : null,
-          south: bounds ? number('south') : null,
-          north: bounds ? number('north') : null,
-          dlon: form.grid === 'latlon' ? number('dlon') : null,
-          dlat: form.grid === 'latlon' ? number('dlat') : null,
-          meshFile: form.mesh || null,
-          catchmentFile: form.catchment || null,
-          out,
-          name: form.name,
-          forcing: form.forcing,
-          forcingDataset: null,
-          forcingDir: null,
-          rawdata: form.rawdata,
-          runtime: form.runtime,
-          start: form.start,
-          end: form.end,
-          timestep: number('timestep'),
-          mode,
-          fields,
-          modelRevision: revision,
-        });
+      const job = { dir: out, cancelRequested: false };
+      creation.current = job;
+      setCreationDir(out);
+      setCancellingCreation(false);
+      try {
+        if (form.kind === 'site')
+          await invoke('new_case', {
+            site: form.site,
+            out,
+            name: form.name,
+            start: form.start,
+            end: form.end,
+            rawdata: form.rawdata || null,
+            runtime: form.runtime || null,
+            met: form.met,
+            mode,
+            fields,
+            modelRevision: revision,
+          });
+        else {
+          const number = (k: string) => requiredNumber(form[k], k),
+            bounds = form.kind === 'region' && form.grid === 'latlon';
+          await invoke('new_spatial_case', {
+            domain: form.kind,
+            gridKind: form.grid,
+            shapefile: form.shapefile || null,
+            west: bounds ? number('west') : null,
+            east: bounds ? number('east') : null,
+            south: bounds ? number('south') : null,
+            north: bounds ? number('north') : null,
+            dlon: form.grid === 'latlon' ? number('dlon') : null,
+            dlat: form.grid === 'latlon' ? number('dlat') : null,
+            meshFile: form.mesh || null,
+            catchmentFile: form.catchment || null,
+            out,
+            name: form.name,
+            forcing: form.forcing,
+            forcingDataset: null,
+            forcingDir: null,
+            rawdata: form.rawdata,
+            runtime: form.runtime,
+            start: form.start,
+            end: form.end,
+            timestep: number('timestep'),
+            mode,
+            fields,
+            modelRevision: revision,
+          });
+        }
+      } finally {
+        if (creation.current === job) {
+          creation.current = null;
+          if (alive.current) {
+            setCreationDir(null);
+            setCancellingCreation(false);
+          }
+        }
       }
       update({ root: form.root, versionRef: revision });
       lock.current = false;
       return await openCase(out);
     });
+  }
+  async function cancelCreation() {
+    const job = creation.current;
+    if (!alive.current || !job || job.cancelRequested)
+      throw new Error(t('当前没有可取消的创建任务。', 'No creation can be cancelled now.'));
+    job.cancelRequested = true;
+    setCancellingCreation(true);
+    try {
+      const cancelled = await invoke<number>('case_creation_cancel', { dir: job.dir });
+      if (!cancelled && creation.current === job)
+        throw new Error(
+          t(
+            '尚未取消创建，请等待当前任务结束或重试取消。',
+            'Creation was not cancelled. Wait for it to finish or retry cancellation.',
+          ),
+        );
+    } catch (e) {
+      if (alive.current && creation.current === job) {
+        job.cancelRequested = false;
+        setCancellingCreation(false);
+        setError(String(e));
+      }
+      throw e;
+    }
   }
   const labels: Record<string, string> = {
     root: t('保存到项目目录', 'Project folder'),
@@ -666,6 +707,17 @@ export default function NewCasePage() {
       },
     });
   const actions: UiAction[] = [
+    ...(creationDir
+      ? [
+          {
+            id: 'new-cancel-creation',
+            label: t('取消创建', 'Cancel creation'),
+            kind: 'click' as const,
+            enabled: !cancellingCreation,
+            run: cancelCreation,
+          },
+        ]
+      : []),
     ...simulationSteps.slice(0, step - 1).map((label, i) => ({
       id: `new-step-${i + 1}`,
       label: label[en ? 1 : 0],
@@ -878,7 +930,18 @@ export default function NewCasePage() {
       />
       {error && <Notice tone="error">{error}</Notice>}
       {optionError && <Notice tone="warning">{optionError}</Notice>}
-      {busy && <Notice>{t('正在处理，请稍候…', 'Working, please wait…')}</Notice>}
+      {busy && (
+        <Notice>
+          {cancellingCreation
+            ? t('正在取消创建，请等待清理完成…', 'Cancelling creation; waiting for cleanup…')
+            : t('正在处理，请稍候…', 'Working, please wait…')}
+        </Notice>
+      )}
+      {creationDir && (
+        <Button disabled={cancellingCreation} onClick={() => void cancelCreation().catch(() => {})}>
+          {t('取消创建', 'Cancel creation')}
+        </Button>
+      )}
       {step === 1 && (
         <Card title={t('范围与网格', 'Range and grid')}>
           <section className="simulation-choice-group">

@@ -54,6 +54,262 @@ pub struct RunProcesses {
     inner: Arc<Mutex<RunProcessState>>,
 }
 
+/// Creation has its own registry so canceling runs never cancels a draft being created.
+#[derive(Default, Clone)]
+pub struct CaseCreations(RunProcesses);
+
+const CASE_CREATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+fn creation_key(dir: &str) -> Result<String, String> {
+    let mut ancestor = std::path::absolute(dir).map_err(|e| e.to_string())?;
+    let mut missing = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(mut path) => {
+                for tail in missing.into_iter().rev() {
+                    path.push(tail);
+                }
+                return Ok(path.to_string_lossy().into_owned());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(
+                    ancestor
+                        .file_name()
+                        .ok_or_else(|| format!("cannot resolve creation directory: {dir}"))?
+                        .to_os_string(),
+                );
+                if !ancestor.pop() {
+                    return Err(error.to_string());
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn case_creation_cancel(
+    creations: tauri::State<'_, CaseCreations>,
+    dir: String,
+) -> Result<usize, String> {
+    let processes = creations.0.clone();
+    let key = creation_key(&dir)?;
+    tauri::async_runtime::spawn_blocking(move || processes.cancel(Some(vec![key])))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+impl CaseCreations {
+    pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
+        self.0.cancel(None)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct CaseCreation(Arc<CreationState>);
+
+struct CreationState {
+    processes: RunProcesses,
+    key: String,
+    fresh: bool,
+    deadline: Instant,
+    complete: std::sync::atomic::AtomicBool,
+    writers_reaped: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for CreationState {
+    fn drop(&mut self) {
+        if self.fresh
+            && !self.complete.load(Ordering::SeqCst)
+            && self.writers_reaped.load(Ordering::SeqCst)
+        {
+            let _ = std::fs::remove_dir_all(&self.key);
+        }
+        if self.writers_reaped.load(Ordering::SeqCst) {
+            let _ = self.processes.forget(&self.key);
+        }
+    }
+}
+
+impl CaseCreation {
+    fn begin(creations: &CaseCreations, dir: &str, timeout: Duration) -> Result<Self, String> {
+        let key = creation_key(dir)?;
+        creations.0.prepare(std::slice::from_ref(&key))?;
+        // The reserved key prevents another creator from claiming this output while
+        // its existence is checked and until cleanup has finished.
+        let fresh = !std::path::Path::new(&key).exists();
+        Ok(Self(Arc::new(CreationState {
+            fresh,
+            processes: creations.0.clone(),
+            key,
+            deadline: Instant::now() + timeout,
+            complete: std::sync::atomic::AtomicBool::new(false),
+            writers_reaped: std::sync::atomic::AtomicBool::new(true),
+        })))
+    }
+    fn validate_destination(&self, require_fresh: bool) -> Result<(), String> {
+        let path = std::path::Path::new(&self.0.key);
+        if require_fresh && !self.0.fresh {
+            return Err(format!(
+                "case directory already exists; choose a new case name: {}",
+                path.display()
+            ));
+        }
+        if path.join("case.nml").exists() {
+            return Err(format!(
+                "{} 里已经有一个算例，换一个算例名或根目录再建",
+                path.display()
+            ));
+        }
+        Ok(())
+    }
+    pub(crate) fn check(&self) -> Result<(), String> {
+        let state = self
+            .0
+            .processes
+            .inner
+            .lock()
+            .map_err(|_| "creation registry poisoned")?;
+        if state.cancelled.contains(&self.0.key) {
+            return Err("算例创建已取消".into());
+        }
+        if Instant::now() >= self.0.deadline {
+            return Err("算例创建超时；请检查系统文件访问授权和数据路径后重试".into());
+        }
+        Ok(())
+    }
+    fn complete(&self) -> Result<(), String> {
+        self.check()?;
+        let mut state = self
+            .0
+            .processes
+            .inner
+            .lock()
+            .map_err(|_| "creation registry poisoned")?;
+        if state.cancelled.contains(&self.0.key) {
+            return Err("算例创建已取消".into());
+        }
+        state.pending.remove(&self.0.key);
+        self.0.complete.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    fn failure(&self, error: String) -> String {
+        if !self.0.writers_reaped.load(Ordering::SeqCst) {
+            return format!("{error}; 创建进程未停止，禁止同目录重建，请查看进程/权限");
+        }
+        if self.0.fresh {
+            if let Err(cleanup) = std::fs::remove_dir_all(&self.0.key) {
+                if cleanup.kind() != std::io::ErrorKind::NotFound {
+                    return format!("{error}; 无法清理未完成算例 {}: {cleanup}", self.0.key);
+                }
+            }
+        }
+        error
+    }
+    fn finish(&self, result: Result<String, String>) -> Result<String, String> {
+        result
+            .and_then(|output| self.complete().map(|_| output))
+            .map_err(|error| self.failure(error))
+    }
+    pub(crate) async fn capture(&self, args: Vec<String>) -> Result<String, String> {
+        self.check()?;
+        let creation = self.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            capture_with(&args, |args| {
+                let mut command = sidecar_command(resolve_cli());
+                command.args(args);
+                creation.capture_command(&mut command)
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    fn remember_child(&self, pid: u32) -> Result<(), String> {
+        let mut state = self
+            .0
+            .processes
+            .inner
+            .lock()
+            .map_err(|_| "creation registry poisoned")?;
+        if state.pids.contains_key(&self.0.key) {
+            return Err("creation already has an active child".into());
+        }
+        // Cancellation can win before registration. Keep the PID visible so a failed
+        // termination can be retried; check() will stop the newly registered child.
+        state.pids.insert(self.0.key.clone(), pid);
+        state.pending.remove(&self.0.key);
+        Ok(())
+    }
+    fn capture_command(&self, command: &mut std::process::Command) -> Result<String, String> {
+        use std::io::Read;
+        self.check()?;
+        let mut child = colm_kernel::run::top_level_sidecar(command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        self.0.writers_reaped.store(false, Ordering::SeqCst);
+        let mut stdout = child.stdout.take().expect("piped stdout");
+        let mut stderr = child.stderr.take().expect("piped stderr");
+        let output = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stdout.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let errors = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            stderr.read_to_end(&mut bytes).map(|_| bytes)
+        });
+        let outcome: Result<std::process::ExitStatus, String> = (|| {
+            self.remember_child(child.id())?;
+            loop {
+                self.check()?;
+                if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+                    return Ok(status);
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        })();
+        // Reap before returning or allowing the outer guard to clean the case directory.
+        if outcome.is_err() && child.try_wait().map_err(|e| e.to_string())?.is_none() {
+            terminate_process_tree(child.id())
+                .map_err(|error| format!("无法终止创建进程 {}: {error}", child.id()))?;
+        }
+        let waited = child.wait().map_err(|e| e.to_string());
+        // A helper must not outlive the creation command and keep its pipes open.
+        #[cfg(unix)]
+        if process_group_alive(child.id()) {
+            terminate_process_tree(child.id())
+                .map_err(|error| format!("无法终止创建子进程组 {}: {error}", child.id()))?;
+        }
+        waited?;
+        self.0.writers_reaped.store(true, Ordering::SeqCst);
+        {
+            let mut state = self
+                .0
+                .processes
+                .inner
+                .lock()
+                .map_err(|_| "creation registry poisoned")?;
+            state.pids.remove(&self.0.key);
+            state.pending.insert(self.0.key.clone());
+        }
+        let stdout = output
+            .join()
+            .map_err(|_| "creation stdout reader panicked")?
+            .map_err(|e| e.to_string())?;
+        let stderr = errors
+            .join()
+            .map_err(|_| "creation stderr reader panicked")?
+            .map_err(|e| e.to_string())?;
+        let status = outcome?;
+        self.check()?;
+        if !status.success() {
+            return Err(String::from_utf8_lossy(&stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
+}
+
 #[derive(Default)]
 struct RunProcessState {
     pids: HashMap<String, u32>,
@@ -1317,6 +1573,7 @@ fn run_one(
 // 那层静态检查比这条 lint 值钱。
 #[allow(clippy::too_many_arguments)]
 pub async fn new_case(
+    creations: tauri::State<'_, CaseCreations>,
     site: String,
     out: String,
     name: Option<String>,
@@ -1343,7 +1600,6 @@ pub async fn new_case(
     validate_bgc_runtime(runtime.as_deref(), &fields)?;
     let recorded_mode = mode.clone();
     let case_dir = out.clone();
-    let case_existed = PathBuf::from(&case_dir).exists();
     // 目录里已经有一个算例（例如名字不同、`list_cases` 里显示成别的名字）：`colm-cli new` 会在它上面
     // 重写 case.nml，把别人的算例改掉。
     if PathBuf::from(&case_dir).join("case.nml").is_file() {
@@ -1351,60 +1607,52 @@ pub async fn new_case(
             "{case_dir} 里已经有一个算例，换一个算例名或根目录再建"
         ));
     }
-    let mut args = vec![
-        "new".to_string(),
-        "--site".into(),
-        site,
-        "--out".into(),
-        out,
-    ];
-    for (flag, v) in [
-        ("--name", name),
-        ("--start", start),
-        ("--end", end),
-        ("--rawdata", rawdata),
-        ("--runtime", runtime),
-        ("--met", met),
-        ("--mode", mode),
-    ] {
-        if let Some(v) = v {
-            if !v.trim().is_empty() {
-                args.push(flag.into());
-                args.push(v);
+    let creation = CaseCreation::begin(&creations, &case_dir, CASE_CREATION_TIMEOUT)?;
+    let result = async {
+        creation.validate_destination(false)?;
+        let mut args = vec![
+            "new".to_string(),
+            "--site".into(),
+            site,
+            "--out".into(),
+            out,
+        ];
+        for (flag, v) in [
+            ("--name", name),
+            ("--start", start),
+            ("--end", end),
+            ("--rawdata", rawdata),
+            ("--runtime", runtime),
+            ("--met", met),
+            ("--mode", mode),
+        ] {
+            if let Some(v) = v {
+                if !v.trim().is_empty() {
+                    args.push(flag.into());
+                    args.push(v);
+                }
             }
         }
-    }
-    if is_crop_case(&fields) {
-        args.push("--crop".into());
-        args.push("1".into());
-    }
-    let output = match capture_async(args.clone()).await {
-        Ok(output) => output,
-        Err(error) => {
-            // `colm-cli new` creates the case directory before it validates the
-            // complete site/forcing contract. A failed preflight must not leave a
-            // ghost case that later appears runnable in the GUI.
-            if !case_existed {
-                let _ = std::fs::remove_dir_all(&case_dir);
-            }
-            return Err(error);
+        if is_crop_case(&fields) {
+            args.push("--crop".into());
+            args.push("1".into());
         }
-    };
-    if let Err(error) = crate::config::apply_fields(&case_dir, &fields) {
-        if !case_existed {
-            let _ = std::fs::remove_dir_all(&case_dir);
-        }
-        return Err(error);
+        let output = creation.capture(args).await?;
+        creation.check()?;
+        crate::config::apply_fields(&case_dir, &fields)?;
+        crate::project::record_case(
+            &case_dir,
+            &crate::project::CaseRecord {
+                mode: recorded_mode,
+                ..Default::default()
+            },
+        );
+        creation.check()?;
+        crate::model::bind_new_case(&case_dir, model_revision, &creation).await?;
+        Ok(output)
     }
-    crate::project::record_case(
-        &case_dir,
-        &crate::project::CaseRecord {
-            mode: recorded_mode,
-            ..Default::default()
-        },
-    );
-    crate::model::bind_new_case(&case_dir, model_revision).await?;
-    Ok(output)
+    .await;
+    creation.finish(result)
 }
 
 struct SpatialCaseRequest {
@@ -1446,6 +1694,7 @@ pub fn forcing_datasets() -> Vec<String> {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn new_spatial_case(
+    creations: tauri::State<'_, CaseCreations>,
     domain: String,
     grid_kind: String,
     shapefile: Option<String>,
@@ -1514,166 +1763,172 @@ pub async fn new_spatial_case(
             case_dir.display()
         ));
     }
-    std::fs::create_dir_all(&case_dir)
-        .map_err(|e| format!("cannot create {}: {e}", case_dir.display()))?;
-    let cleanup = |error: String| {
-        let _ = std::fs::remove_dir_all(&case_dir);
-        error
-    };
-    let existing_mesh = existing_unstructured_mesh(&request.grid_kind, request.mesh_file.clone())
-        .map_err(cleanup)?;
-    let mesh = if let Some(mesh) = existing_mesh {
-        mesh
-    } else if request.grid_kind == "catchment" {
-        request
-            .catchment_file
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| cleanup("catchmentFile is required".into()))?
-    } else {
-        let dlon = request
-            .dlon
-            .ok_or_else(|| cleanup("dlon is required".into()))?;
-        let dlat = request
-            .dlat
-            .ok_or_else(|| cleanup("dlat is required".into()))?;
-        let (nlon, nlat) = grid_dimensions(dlon, dlat).map_err(cleanup)?;
-        let mesh = case_dir.join("mesh.nc").to_string_lossy().into_owned();
+    let creation = CaseCreation::begin(&creations, &request.out, CASE_CREATION_TIMEOUT)?;
+    let result = async {
+        creation.validate_destination(true)?;
+        std::fs::create_dir_all(&case_dir)
+            .map_err(|e| format!("cannot create {}: {e}", case_dir.display()))?;
+        let cleanup = |error: String| creation.failure(error);
+        let existing_mesh =
+            existing_unstructured_mesh(&request.grid_kind, request.mesh_file.clone())
+                .map_err(cleanup)?;
+        let mesh = if let Some(mesh) = existing_mesh {
+            mesh
+        } else if request.grid_kind == "catchment" {
+            request
+                .catchment_file
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| cleanup("catchmentFile is required".into()))?
+        } else {
+            let dlon = request
+                .dlon
+                .ok_or_else(|| cleanup("dlon is required".into()))?;
+            let dlat = request
+                .dlat
+                .ok_or_else(|| cleanup("dlat is required".into()))?;
+            let (nlon, nlat) = grid_dimensions(dlon, dlat).map_err(cleanup)?;
+            let mesh = case_dir.join("mesh.nc").to_string_lossy().into_owned();
+            let mut args = vec![
+                "mesh-new".into(),
+                "--out".into(),
+                mesh.clone(),
+                "--grid-kind".into(),
+                request.grid_kind.clone(),
+                "--nlon".into(),
+                nlon.to_string(),
+                "--nlat".into(),
+                nlat.to_string(),
+            ];
+            // 不传非海洋 mask：`DEF_LANDONLY`（缺省开）已按 RawData 的地表覆盖剔除海洋，上游的
+            // `MOD_MeshFilter` 也是可选的。`colm-cli mesh-new --non-ocean-mask` 留给命令行的高级用法。
+            match request.domain.as_str() {
+                "watershed" => {
+                    let shp = request
+                        .shapefile
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| cleanup("shapefile is required".into()))?;
+                    args.extend(["--shp".into(), shp]);
+                }
+                "region" => {
+                    for (flag, value) in [
+                        ("--west", request.west),
+                        ("--east", request.east),
+                        ("--south", request.south),
+                        ("--north", request.north),
+                    ] {
+                        args.extend([
+                            flag.into(),
+                            value
+                                .ok_or_else(|| cleanup(format!("{flag} is required")))?
+                                .to_string(),
+                        ]);
+                    }
+                }
+                "global" => {}
+                _ => unreachable!(),
+            }
+            creation.capture(args).await.map_err(cleanup)?;
+            mesh
+        };
+        let manifest = case_dir
+            .join("spatial-input.manifest.json")
+            .to_string_lossy()
+            .into_owned();
+        creation
+            .capture(vec![
+                "spatial-preflight".into(),
+                "--grid-kind".into(),
+                request.grid_kind.clone(),
+                "--input".into(),
+                mesh.clone(),
+                "--out".into(),
+                manifest,
+            ])
+            .await
+            .map_err(cleanup)?;
+        // 强迫场：选了标准数据集就按模板写出 `<case>/forcing.nml`；否则用用户给的 namelist。
+        let forcing = match request
+            .forcing_dataset
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(dataset) => {
+                let dir = request
+                    .forcing_dir
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| cleanup("forcingDir is required with forcingDataset".into()))?;
+                if !std::path::Path::new(dir).is_dir() {
+                    return Err(cleanup(format!(
+                        "the forcing data directory does not exist: {dir}"
+                    )));
+                }
+                let text = colm_case::forcing_templates::render_forcing_namelist(dataset, dir)
+                    .map_err(|e| cleanup(format!("{e:#}")))?;
+                let path = case_dir.join("forcing.nml");
+                std::fs::write(&path, text)
+                    .map_err(|e| cleanup(format!("cannot write {}: {e}", path.display())))?;
+                path.to_string_lossy().into_owned()
+            }
+            None => request
+                .forcing
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    cleanup("choose a forcing dataset or an existing forcing namelist".into())
+                })?,
+        };
+        let recorded = crate::project::CaseRecord {
+            mode: Some(request.mode.clone()),
+            domain: Some(request.domain.clone()),
+            shapefile: request.shapefile.clone(),
+        };
         let mut args = vec![
-            "mesh-new".into(),
-            "--out".into(),
-            mesh.clone(),
+            "spatial-new".into(),
             "--grid-kind".into(),
             request.grid_kind.clone(),
-            "--nlon".into(),
-            nlon.to_string(),
-            "--nlat".into(),
-            nlat.to_string(),
+            "--mesh".into(),
+            mesh,
+            "--out".into(),
+            request.out.clone(),
+            "--name".into(),
+            request.name,
+            "--forcing".into(),
+            forcing,
+            "--rawdata".into(),
+            request.rawdata,
+            "--runtime".into(),
+            request.runtime,
+            "--start".into(),
+            request.start,
+            "--end".into(),
+            request.end,
+            "--timestep".into(),
+            request.timestep.to_string(),
+            "--mode".into(),
+            request.mode,
         ];
-        // 不传非海洋 mask：`DEF_LANDONLY`（缺省开）已按 RawData 的地表覆盖剔除海洋，上游的
-        // `MOD_MeshFilter` 也是可选的。`colm-cli mesh-new --non-ocean-mask` 留给命令行的高级用法。
-        match request.domain.as_str() {
-            "watershed" => {
-                let shp = request
-                    .shapefile
-                    .clone()
-                    .filter(|value| !value.trim().is_empty())
-                    .ok_or_else(|| cleanup("shapefile is required".into()))?;
-                args.extend(["--shp".into(), shp]);
-            }
-            "region" => {
-                for (flag, value) in [
-                    ("--west", request.west),
-                    ("--east", request.east),
-                    ("--south", request.south),
-                    ("--north", request.north),
-                ] {
-                    args.extend([
-                        flag.into(),
-                        value
-                            .ok_or_else(|| cleanup(format!("{flag} is required")))?
-                            .to_string(),
-                    ]);
-                }
-            }
-            "global" => {}
-            _ => unreachable!(),
+        if request.grid_kind == "latlon" {
+            args.extend([
+                "--dlon".into(),
+                request.dlon.expect("validated above").to_string(),
+                "--dlat".into(),
+                request.dlat.expect("validated above").to_string(),
+            ]);
         }
-        capture_async(args).await.map_err(cleanup)?;
-        mesh
-    };
-    let manifest = case_dir
-        .join("spatial-input.manifest.json")
-        .to_string_lossy()
-        .into_owned();
-    capture_async(vec![
-        "spatial-preflight".into(),
-        "--grid-kind".into(),
-        request.grid_kind.clone(),
-        "--input".into(),
-        mesh.clone(),
-        "--out".into(),
-        manifest,
-    ])
-    .await
-    .map_err(cleanup)?;
-    // 强迫场：选了标准数据集就按模板写出 `<case>/forcing.nml`；否则用用户给的 namelist。
-    let forcing = match request
-        .forcing_dataset
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(dataset) => {
-            let dir = request
-                .forcing_dir
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| cleanup("forcingDir is required with forcingDataset".into()))?;
-            if !std::path::Path::new(dir).is_dir() {
-                return Err(cleanup(format!(
-                    "the forcing data directory does not exist: {dir}"
-                )));
-            }
-            let text = colm_case::forcing_templates::render_forcing_namelist(dataset, dir)
-                .map_err(|e| cleanup(format!("{e:#}")))?;
-            let path = case_dir.join("forcing.nml");
-            std::fs::write(&path, text)
-                .map_err(|e| cleanup(format!("cannot write {}: {e}", path.display())))?;
-            path.to_string_lossy().into_owned()
-        }
-        None => request
-            .forcing
-            .clone()
-            .filter(|value| !value.trim().is_empty())
-            .ok_or_else(|| {
-                cleanup("choose a forcing dataset or an existing forcing namelist".into())
-            })?,
-    };
-    let recorded = crate::project::CaseRecord {
-        mode: Some(request.mode.clone()),
-        domain: Some(request.domain.clone()),
-        shapefile: request.shapefile.clone(),
-    };
-    let mut args = vec![
-        "spatial-new".into(),
-        "--grid-kind".into(),
-        request.grid_kind.clone(),
-        "--mesh".into(),
-        mesh,
-        "--out".into(),
-        request.out.clone(),
-        "--name".into(),
-        request.name,
-        "--forcing".into(),
-        forcing,
-        "--rawdata".into(),
-        request.rawdata,
-        "--runtime".into(),
-        request.runtime,
-        "--start".into(),
-        request.start,
-        "--end".into(),
-        request.end,
-        "--timestep".into(),
-        request.timestep.to_string(),
-        "--mode".into(),
-        request.mode,
-    ];
-    if request.grid_kind == "latlon" {
-        args.extend([
-            "--dlon".into(),
-            request.dlon.expect("validated above").to_string(),
-            "--dlat".into(),
-            request.dlat.expect("validated above").to_string(),
-        ]);
+        let output = creation.capture(args).await.map_err(cleanup)?;
+        crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
+        crate::project::record_case(&request.out, &recorded);
+        creation.check()?;
+        crate::model::bind_new_case(&request.out, model_revision, &creation).await?;
+        Ok(output)
     }
-    let output = capture_async(args).await.map_err(cleanup)?;
-    crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
-    crate::project::record_case(&request.out, &recorded);
-    crate::model::bind_new_case(&request.out, model_revision).await?;
-    Ok(output)
+    .await;
+    creation.finish(result)
 }
 
 fn existing_unstructured_mesh(
@@ -3064,6 +3319,13 @@ pub(crate) async fn capture_async(args: Vec<String>) -> Result<String, String> {
 ///
 /// 用于短命令（`new` / `series`）；跑模型那种长命令走 `run_case` 的流式路径。
 pub(crate) fn capture(args: &[String]) -> Result<String, String> {
+    capture_with(args, capture_untracked)
+}
+
+fn capture_with(
+    args: &[String],
+    execute: impl FnOnce(&[String]) -> Result<String, String>,
+) -> Result<String, String> {
     let mut args = args.to_vec();
     if !args.iter().any(|a| a == "--history-db") {
         crate::model::options(&mut args, None)?;
@@ -3072,7 +3334,7 @@ pub(crate) fn capture(args: &[String]) -> Result<String, String> {
     if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
-    let result = capture_untracked(&args);
+    let result = execute(&args);
     let status = crate::history::capture_audit_status(event.as_mut(), &result);
     crate::history::command_finish(event.as_ref(), result, status)
 }

@@ -92,10 +92,18 @@ pub fn run() {
                 {
                     eprintln!("failed to stop every run while closing: {error}");
                 }
+                if let Err(error) = window
+                    .app_handle()
+                    .state::<CaseCreations>()
+                    .cancel_on_shutdown()
+                {
+                    eprintln!("failed to stop case creation while closing: {error}");
+                }
                 window.app_handle().state::<AssistantProcess>().stop();
             }
         })
         .manage(RunProcesses::default())
+        .manage(CaseCreations::default())
         .manage(AssistantProcess::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
@@ -142,6 +150,7 @@ pub fn run() {
             run_case,
             run_batch,
             cancel_runs,
+            case_creation_cancel,
             history_catalog,
             model_list,
             model_drafts,
@@ -271,6 +280,9 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
+                if let Err(error) = app.state::<CaseCreations>().cancel_on_shutdown() {
+                    eprintln!("failed to stop case creation while exiting: {error}");
+                }
                 if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
                     eprintln!("failed to stop every run while exiting: {error}");
                 }

@@ -57,6 +57,9 @@ function page(
     kernels?: KernelChoice[];
     schema?: caseModel.SchemaField[];
     configuration?: (args: Record<string, unknown>) => Promise<unknown>;
+    create?: (args: Record<string, unknown>) => Promise<unknown>;
+    cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
+    scan?: () => Promise<unknown>;
   } = {},
 ) {
   const model = {
@@ -191,7 +194,7 @@ function page(
         case 'model_fields':
           return options.modelFields ?? [];
         case 'scan_sites':
-          return { sites: scannedSites };
+          return options.scan ? options.scan() : { sites: scannedSites };
         case 'pick_file':
           return scannedSites[0]?.site_file ?? null;
         case 'model_case_context':
@@ -202,8 +205,11 @@ function page(
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));
         case 'new_spatial_case':
         case 'new_case':
+          if (options.create) return options.create(args);
           if (failCreate) throw new Error('creation failed');
           return {};
+        case 'case_creation_cancel':
+          return options.cancelCreation?.(args) ?? 0;
         case 'case_data_save':
           if (failCreate) throw new Error('save failed');
           return {};
@@ -1555,4 +1561,154 @@ test('existing case range fields are editable and save only the case before refr
   );
   assert.equal(p.calls.at(-1)!.command, 'model_case_context');
   assert.ok(!p.calls.some((call) => call.command === 'model_create'));
+});
+
+test('new case cancellation waits for backend creation cleanup and retains the full form for retry', async () => {
+  let finish!: (error: Error) => void, acknowledge!: (count: number) => void;
+  let attempts = 0;
+  const p = page(
+    'NewCasePage',
+    { form, sites: [site], step: 5, caseValues: { DEF_HIST_FREQ: 'DAILY' } },
+    [site],
+    initialValues,
+    {
+      create: async () => {
+        if (attempts++ === 0)
+          return new Promise((_resolve, reject) => {
+            finish = reject;
+          });
+        return {};
+      },
+      cancelCreation: () =>
+        new Promise((resolve) => {
+          acknowledge = resolve;
+        }),
+    },
+  );
+  await p.mount();
+  assert.ok(!p.render().actions.some((a) => a.id === 'new-cancel-creation'));
+  const pending = p.click('new-create');
+  const rejected = assert.rejects(pending, /cancelled after cleanup/);
+  let c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-create')?.enabled, false);
+  const cancel = p.click('new-cancel-creation');
+  assert.deepEqual(p.calls.find((call) => call.command === 'case_creation_cancel')?.args, {
+    dir: '/project/CN-Cng',
+  });
+  c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-cancel-creation')?.enabled, false);
+  acknowledge(1);
+  await cancel;
+  c = p.render();
+  assert.equal(c.status, 'busy');
+  assert.equal(c.actions.find((a) => a.id === 'new-create')?.enabled, false);
+  assert.deepEqual(p.opened, []);
+  finish(new Error('cancelled after cleanup'));
+  await rejected;
+  c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-create')?.enabled, true);
+  assert.ok(!c.actions.some((a) => a.id === 'new-cancel-creation'));
+  assert.equal(c.details.step, 5);
+  await p.click('new-create');
+  const requests = p.calls.filter((call) => call.command === 'new_case');
+  assert.deepEqual(
+    requests[1].args,
+    requests[0].args,
+    'retry retains all dates, files and option values',
+  );
+  assert.deepEqual(p.opened, ['/project/CN-Cng']);
+});
+test('failed or unmatched creation cancellation cannot unlock the form while the backend is still working', async () => {
+  for (const count of [null, 0]) {
+    let finish!: (value: unknown) => void;
+    const p = page('NewCasePage', { form, sites: [site], step: 5 }, [site], initialValues, {
+      create: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+      cancelCreation: async () => {
+        if (count === null) throw new Error('cancel failed');
+        return count;
+      },
+    });
+    await p.mount();
+    const pending = p.click('new-create');
+    p.render();
+    await assert.rejects(
+      p.click('new-cancel-creation'),
+      count === null ? /cancel failed/ : /未取消/,
+    );
+    const c = p.render();
+    assert.equal(c.status, 'busy');
+    assert.equal(c.actions.find((a) => a.id === 'new-create')?.enabled, false);
+    assert.equal(c.actions.find((a) => a.id === 'new-cancel-creation')?.enabled, true);
+    assert.ok(p.elements.some((e) => e.type === 'Notice' && e.props.tone === 'error'));
+    finish({});
+    await pending;
+    assert.deepEqual(p.opened, ['/project/CN-Cng']);
+  }
+});
+
+test('site scanning never offers the creation cancellation action', async () => {
+  let finish!: (value: unknown) => void;
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, sitedir: '/sites' }, sites: [site], step: 3, ownData: true },
+    [site],
+    initialValues,
+    {
+      scan: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    },
+  );
+  await p.mount();
+  const pending = p.click('new-scan');
+  const c = p.render();
+  assert.equal(c.status, 'busy');
+  assert.ok(!c.actions.some((a) => a.id === 'new-cancel-creation'));
+  assert.ok(!p.elements.some((e) => e.type === 'Button' && e.children.includes('取消创建')));
+  finish({ sites: [site] });
+  await pending;
+  assert.ok(!p.calls.some((call) => call.command === 'case_creation_cancel'));
+});
+test('spatial creation cancellation targets its own output directory', async () => {
+  let finish!: (error: Error) => void;
+  const p = page(
+    'NewCasePage',
+    {
+      form: {
+        ...form,
+        name: 'spatial',
+        kind: 'global',
+        dlon: '1',
+        dlat: '1',
+        forcing: '/forcing.nml',
+      },
+      step: 5,
+    },
+    [site],
+    initialValues,
+    {
+      create: () =>
+        new Promise((_resolve, reject) => {
+          finish = reject;
+        }),
+      cancelCreation: async () => 1,
+    },
+  );
+  await p.mount();
+  const pending = p.click('new-create');
+  const rejected = assert.rejects(pending, /cancelled/);
+  p.render();
+  await p.click('new-cancel-creation');
+  assert.deepEqual(p.calls.find((call) => call.command === 'case_creation_cancel')?.args, {
+    dir: '/project/spatial',
+  });
+  assert.ok(p.calls.some((call) => call.command === 'new_spatial_case'));
+  assert.equal(p.render().status, 'busy');
+  finish(new Error('cancelled'));
+  await rejected;
+  assert.deepEqual(p.opened, []);
 });

@@ -1037,3 +1037,314 @@ fn study_comparison_uses_only_finite_scores_and_labels_missing_validation() {
         .iter()
         .any(|note| note.as_str().unwrap().contains("independent validation")));
 }
+
+#[cfg(unix)]
+fn creation_test_dir(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "colm-create-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_timeout_reaps_writers_before_removing_fresh_case() {
+    let dir = creation_test_dir("timeout");
+    let creations = CaseCreations::default();
+    let creation = CaseCreation::begin(
+        &creations,
+        dir.to_str().unwrap(),
+        Duration::from_millis(150),
+    )
+    .unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    let mut command = std::process::Command::new("sh");
+    command.current_dir(&dir).args([
+        "-c",
+        "echo $$ > pid; (sleep 30; echo late > late-write) & wait",
+    ]);
+    let error = creation.capture_command(&mut command).unwrap_err();
+    assert!(error.contains("超时"), "{error}");
+    let pid: u32 = std::fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!process_group_alive(pid));
+    assert!(!dir.join("late-write").exists());
+    drop(creation);
+    assert!(!dir.exists());
+    assert!(creations.0.inner.lock().unwrap().pending.is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_cancel_stops_only_its_own_process_and_blocks_later_stages() {
+    let dir = creation_test_dir("cancel");
+    let creations = CaseCreations::default();
+    let runs = RunProcesses::default();
+    runs.prepare(&["unrelated-run".into()]).unwrap();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(10)).unwrap();
+    assert!(
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(10)).is_err()
+    );
+    std::fs::create_dir(&dir).unwrap();
+    let worker = creation.clone();
+    let handle = std::thread::spawn(move || {
+        worker.capture_command(std::process::Command::new("sh").args(["-c", "sleep 30 & wait"]))
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while creations.0.running_pid(&creation.0.key).unwrap().is_none() {
+        assert!(Instant::now() < deadline, "child did not start");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        creations
+            .0
+            .cancel(Some(vec![creation.0.key.clone()]))
+            .unwrap(),
+        1
+    );
+    assert!(handle.join().unwrap().unwrap_err().contains("取消"));
+    assert!(runs.inner.lock().unwrap().pending.contains("unrelated-run"));
+    assert!(creation
+        .capture_command(std::process::Command::new("sh").args(["-c", "exit 0"]))
+        .unwrap_err()
+        .contains("取消"));
+    drop(creation);
+    assert!(!dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_completion_keeps_outputs_and_failure_preserves_existing_directory() {
+    let dir = creation_test_dir("success");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    for _ in 0..2 {
+        let output = creation
+            .capture_command(
+                std::process::Command::new("sh")
+                    .args(["-c", "printf result; printf diagnostic >&2"]),
+            )
+            .unwrap();
+        assert_eq!(output, "result");
+    }
+    creation.complete().unwrap();
+    drop(creation);
+    assert!(dir.exists());
+    std::fs::write(dir.join("existing"), "keep").unwrap();
+    let existing =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    assert!(existing
+        .capture_command(std::process::Command::new("sh").args(["-c", "echo failure >&2; exit 1"]))
+        .unwrap_err()
+        .contains("failure"));
+    drop(existing);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("existing")).unwrap(),
+        "keep"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_cancel_between_steps_does_not_spawn_the_next_writer() {
+    let dir = creation_test_dir("between");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    creation
+        .capture_command(std::process::Command::new("sh").args(["-c", "exit 0"]))
+        .unwrap();
+    assert_eq!(
+        creations
+            .0
+            .cancel(Some(vec![creation.0.key.clone()]))
+            .unwrap(),
+        1
+    );
+    let mut command = std::process::Command::new("sh");
+    command
+        .current_dir(&dir)
+        .args(["-c", "echo unexpected > late-write"]);
+    assert!(creation
+        .capture_command(&mut command)
+        .unwrap_err()
+        .contains("取消"));
+    assert!(!dir.join("late-write").exists());
+    drop(creation);
+    assert!(!dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_drains_both_pipes_and_reaps_leftover_children() {
+    let dir = creation_test_dir("pipes");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    std::fs::create_dir(&dir).unwrap();
+    let mut command = std::process::Command::new("sh");
+    command.current_dir(&dir).args(["-c", "echo $$ > pid; i=0; while [ $i -lt 10000 ]; do printf abcdefgh; printf ijklmnop >&2; i=$((i + 1)); done; sleep 30 & exit 0"]);
+    let stdout = creation.capture_command(&mut command).unwrap();
+    assert_eq!(stdout.len(), 80000);
+    let pid: u32 = std::fs::read_to_string(dir.join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!process_group_alive(pid));
+    drop(creation);
+    assert!(!dir.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_aliases_share_one_reservation_and_cancellation_key() {
+    let root = creation_test_dir("aliases");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    let link = root.join("alias");
+    std::os::unix::fs::symlink(&root, &link).unwrap();
+    let dir = root.join("new");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    for alias in [root.join("sub/../new"), link.join("new")] {
+        assert_eq!(
+            creation_key(alias.to_str().unwrap()).unwrap(),
+            creation.0.key
+        );
+        assert!(
+            CaseCreation::begin(&creations, alias.to_str().unwrap(), Duration::from_secs(5))
+                .is_err()
+        );
+    }
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("case.nml"), "owned").unwrap();
+    let worker = creation.clone();
+    let handle = std::thread::spawn(move || {
+        worker.capture_command(std::process::Command::new("sh").args(["-c", "sleep 30 & wait"]))
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while creations.0.running_pid(&creation.0.key).unwrap().is_none() {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(
+        creations
+            .0
+            .cancel(Some(vec![
+                creation_key(link.join("new").to_str().unwrap()).unwrap()
+            ]))
+            .unwrap(),
+        1
+    );
+    assert!(handle.join().unwrap().unwrap_err().contains("取消"));
+    assert!(creation.finish(Err("cancelled".into())).is_err());
+    drop(creation);
+    assert!(!dir.exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_reports_cleanup_failure_and_keeps_unreaped_writer_registered() {
+    let dir = creation_test_dir("cleanup-error");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    // A file at the output path makes directory cleanup fail on every platform/user.
+    std::fs::write(&dir, "keep").unwrap();
+    let error = creation.finish(Err("cancelled".into())).unwrap_err();
+    assert!(error.contains("cancelled") && error.contains("无法清理"));
+    creation.0.writers_reaped.store(false, Ordering::SeqCst);
+    let key = creation.0.key.clone();
+    let error = creation
+        .finish(Err("termination failed".into()))
+        .unwrap_err();
+    assert!(error.contains("创建进程未停止") && error.contains("禁止同目录重建"));
+    drop(creation);
+    assert!(creations.0.inner.lock().unwrap().pending.contains(&key));
+    assert!(dir.is_file());
+    std::fs::remove_file(dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_cancellation_before_pid_registration_keeps_the_writer_addressable() {
+    let dir = creation_test_dir("spawn-race");
+    let creations = CaseCreations::default();
+    let creation =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    let mut child = colm_kernel::run::top_level_sidecar(&mut std::process::Command::new("sh"))
+        .args(["-c", "sleep 30 & wait"])
+        .spawn()
+        .unwrap();
+    assert_eq!(
+        creations
+            .0
+            .cancel(Some(vec![creation.0.key.clone()]))
+            .unwrap(),
+        1
+    );
+    creation.remember_child(child.id()).unwrap();
+    assert_eq!(
+        creations.0.running_pid(&creation.0.key).unwrap(),
+        Some(child.id())
+    );
+    assert!(creation.check().unwrap_err().contains("取消"));
+    assert!(
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).is_err()
+    );
+    // A later cancellation can still target the child after the registration race.
+    assert_eq!(
+        creations
+            .0
+            .cancel(Some(vec![creation.0.key.clone()]))
+            .unwrap(),
+        1
+    );
+    child.wait().unwrap();
+    assert!(!process_group_alive(child.id()));
+}
+
+#[cfg(unix)]
+#[test]
+fn creation_rechecks_destination_after_reserving_it() {
+    let dir = creation_test_dir("completed-before-reservation");
+    let creations = CaseCreations::default();
+    // A second request can pass its initial check before the first request completes.
+    assert!(!dir.exists());
+    let first =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("case.nml"), "first case").unwrap();
+    first.finish(Ok(String::new())).unwrap();
+    drop(first);
+    let second =
+        CaseCreation::begin(&creations, dir.to_str().unwrap(), Duration::from_secs(5)).unwrap();
+    assert!(second
+        .validate_destination(false)
+        .unwrap_err()
+        .contains("已经有一个算例"));
+    assert!(second
+        .validate_destination(true)
+        .unwrap_err()
+        .contains("already exists"));
+    drop(second);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("case.nml")).unwrap(),
+        "first case"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
