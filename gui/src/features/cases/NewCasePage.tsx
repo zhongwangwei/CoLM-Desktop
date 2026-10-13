@@ -536,7 +536,9 @@ export default function NewCasePage() {
         : step === 4
           ? ['spinup_end']
           : [];
-  const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
+  const visibleSchema = schema.filter((field) =>
+    caseFieldVisible(field.name, optionStates, caseValues),
+  );
   const enabled = !busy && !state.busy;
   const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
     options = [

@@ -769,3 +769,87 @@ test('ordinary simulation options keep independent ecology and stomatal choices 
   for (const name of ['DEF_LC_YEAR', 'DEF_USE_NITRIF_DENITRIF'])
     assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
 });
+
+test('simulation fractionation children stay hidden while queries are pending and preserve saved values', async () => {
+  const h = harness();
+  const parent = 'DEF_TRACER_USE_FRACTIONATION';
+  const children = [
+    'DEF_TRACER_KINETIC_SCHEME',
+    'DEF_TRACER_OPEN_WATER_KINETIC',
+    'DEF_TRACER_SOIL_KINETIC',
+  ];
+  const schemes: Record<string, string[]> = {
+    DEF_TRACER_KINETIC_SCHEME: ['MERLIVAT1978', 'CAPPA2003'],
+    DEF_TRACER_OPEN_WATER_KINETIC: ['MJ79', 'EXPONENT'],
+    DEF_TRACER_SOIL_KINETIC: ['RESISTANCE', 'EXPONENT'],
+  };
+  for (const name of [parent, ...children])
+    h.props.fields.push({
+      name,
+      section: '示踪剂',
+      kind: name === parent ? 'logical' : 'character',
+      default: name === parent ? '.false.' : schemes[name][0],
+      values: schemes[name] ?? [],
+      derived: false,
+    });
+  h.props.process = 'DEF_USE_TRACER';
+  h.props.onCaseChange = () => assert.fail('visibility changes must not save');
+  h.props.caseValues = {
+    DEF_USE_TRACER: '.true.',
+    [parent]: '.false.',
+    ...Object.fromEntries(children.map((name) => [name, `'${schemes[name][0]}'`])),
+  };
+  const retained = JSON.stringify(h.props.caseValues);
+  let c = h.render();
+  for (const name of children)
+    assert.ok(
+      !c.fields.some((f) => f.id === `configuration-${name}`),
+      `${name} must stay hidden before the query returns`,
+    );
+  assert.ok(
+    !h.nodes.some(
+      (n) => n.type === 'small' && JSON.stringify(n.children).includes('DEF_TRACER_KINETIC_SCHEME'),
+    ),
+  );
+  h.props.caseValues = { ...h.props.caseValues, [parent]: '.true.' };
+  h.render();
+  const response = h.response();
+  response.fields = response.fields.map((f) =>
+    children.includes(f.name) ? { ...f, parent_gate: parent, parent_gate_enabled: true } : f,
+  );
+  h.requests.at(-1)!.resolve(response);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  c = h.render();
+  for (const name of children)
+    assert.equal(c.fields.find((f) => f.id === `configuration-${name}`)?.value, schemes[name][0]);
+  h.props.caseValues = { ...h.props.caseValues, [parent]: '.false.' };
+  c = h.render();
+  for (const name of children)
+    assert.ok(
+      !c.fields.some((f) => f.id === `configuration-${name}`),
+      `${name} must immediately hide before the new query returns`,
+    );
+  assert.equal(JSON.stringify(h.props.caseValues), retained);
+  assert.ok(
+    c.fields.some((f) => f.id === `configuration-${parent}`),
+    'the parent switch stays available',
+  );
+  h.requests.at(-1)!.resolve(response); // contradictory metadata cannot override the current explicit off choice
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  c = h.render();
+  for (const name of children) {
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
+    assert.ok(
+      !h.nodes.some(
+        (node) => node.type === 'small' && JSON.stringify(node.children).includes(name),
+      ),
+    );
+  }
+  h.props.onCaseChange = undefined;
+  c = h.render();
+  for (const name of children)
+    assert.ok(
+      c.fields.some((f) => f.id === `configuration-${name}`),
+      'research editor keeps its existing visibility',
+    );
+});

@@ -24,7 +24,28 @@ export type ConfigurationField = {
   parent_gate_enabled?: boolean;
   built_in_default?: string | null;
 };
-export function caseFieldVisible(name: string, fields: readonly ConfigurationField[]): boolean {
+const fractionationChildren = new Set([
+  'DEF_TRACER_KINETIC_SCHEME',
+  'DEF_TRACER_OPEN_WATER_KINETIC',
+  'DEF_TRACER_SOIL_KINETIC',
+]);
+export function caseFieldVisible(
+  name: string,
+  fields: readonly ConfigurationField[],
+  currentValues?: Readonly<Record<string, string>>,
+): boolean {
+  const currentValue = (key: string) =>
+    Object.entries(currentValues ?? {}).find(
+      ([name]) => name.toLowerCase() === key.toLowerCase(),
+    )?.[1];
+  const enabled = (value: string | undefined) => /^(true|\.true\.)$/i.test(value?.trim() ?? '');
+  // These controls must not flash back while the next applicability query is loading.
+  if (
+    currentValues &&
+    fractionationChildren.has(name.toUpperCase()) &&
+    !enabled(currentValue('DEF_TRACER_USE_FRACTIONATION'))
+  )
+    return false;
   let field = fields.find((item) => item.name.toLowerCase() === name.toLowerCase());
   if (field?.mode === 'disabled' && field.pending === false) return false;
   const visited = new Set<string>([name.toLowerCase()]);

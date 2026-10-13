@@ -384,7 +384,9 @@ export default function CasesPage() {
     MONTHLY: t('每月', 'Monthly'),
     YEARLY: t('每年', 'Yearly'),
   };
-  const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
+  const visibleSchema = schema.filter((field) =>
+    caseFieldVisible(field.name, optionStates, { ...explicitValues, ...dataPatch }),
+  );
   const rangeKeys = caseRangeKeys(effectiveProfile?.grid ?? state.selectedCase?.profile.grid);
   const rangeFields =
     step === 1 ? visibleSchema.filter((field) => rangeKeys.includes(field.name)) : [];

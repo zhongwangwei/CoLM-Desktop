@@ -496,3 +496,43 @@ test('case child visibility follows ancestor gates without treating readonly par
   fields[0].parent_gate_enabled = true;
   assert.equal(caseFieldVisible('FILE', fields), false, 'cyclic metadata cannot recurse forever');
 });
+
+test('fractionation visibility requires current explicit activation without guessing unrelated unknown fields', () => {
+  const parent = 'DEF_TRACER_USE_FRACTIONATION';
+  const children = [
+    'DEF_TRACER_KINETIC_SCHEME',
+    'DEF_TRACER_OPEN_WATER_KINETIC',
+    'DEF_TRACER_SOIL_KINETIC',
+  ];
+  for (const child of children) {
+    const metadata: ConfigurationField[] = [
+      {
+        name: child,
+        mode: 'editable',
+        pending: true,
+        configured_value: 'saved',
+        allowed_values: [],
+        parent_gate: parent,
+        parent_gate_enabled: true,
+      },
+    ];
+    for (const value of [undefined, '.false.', 'unknown']) {
+      const values: Record<string, string> = value === undefined ? {} : { [parent]: value };
+      assert.equal(caseFieldVisible(child, [], values), false);
+      assert.equal(caseFieldVisible(child, metadata, values), false);
+    }
+    assert.equal(caseFieldVisible(child, metadata, { [parent]: '.true.' }), true);
+    metadata[0].parent_gate_enabled = false;
+    assert.equal(caseFieldVisible(child, metadata, { [parent]: '.true.' }), false);
+  }
+  assert.equal(caseFieldVisible('UNKNOWN_DATA', [], {}), true);
+  assert.equal(
+    caseFieldVisible(children[0].toLowerCase(), [], { [parent.toLowerCase()]: '.TRUE.' }),
+    true,
+  );
+  assert.equal(
+    caseFieldVisible(children[0], []),
+    true,
+    'callers without simulation case state retain existing behavior',
+  );
+});

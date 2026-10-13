@@ -555,7 +555,9 @@ export default function ConfigurationOptions({
         (field) =>
           included(field) && !excludeKeys.includes(field.name) && groupedField(field, catalog),
       )
-      .filter((field) => !onCaseChange || caseFieldVisible(field.name, values.fields))
+      .filter(
+        (field) => !onCaseChange || caseFieldVisible(field.name, values.fields, overlay.physics),
+      )
       .filter(
         (field) =>
           !onCaseChange ||
