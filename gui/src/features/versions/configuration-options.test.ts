@@ -536,3 +536,67 @@ test('fractionation visibility requires current explicit activation without gues
     'callers without simulation case state retain existing behavior',
   );
 });
+
+test('path placeholders accept actual filenames while scientific enums remain closed', () => {
+  for (const name of [
+    'DEF_UnitCatchment_file',
+    'DEF_file_cn_init',
+    'DEF_TRACER_SOIL_INIT_FILE',
+    'DEF_dir_forcing',
+  ]) {
+    const field = { name, kind: 'Character { len: 256 }', values: ['', 'NONE', 'NULL'] };
+    assert.equal(
+      fieldLiteral(field, "/Volumes/Data/O'Brien data.nc"),
+      "'/Volumes/Data/O''Brien data.nc'",
+    );
+    assert.throws(() => fieldLiteral(field, 'bad\npath'), /Newlines|换行/);
+  }
+  assert.throws(
+    () =>
+      fieldLiteral(
+        {
+          name: 'DEF_TRACER_KINETIC_SCHEME',
+          kind: 'Character',
+          values: ['MERLIVAT1978', 'CAPPA2003'],
+        },
+        '/a/file.nc',
+      ),
+    /supported|支持/,
+  );
+  assert.throws(
+    () =>
+      fieldLiteral(
+        { name: 'DEF_PROCESS_MODE', kind: 'Character', values: ['NONE', 'NULL'] },
+        '/a/file.nc',
+      ),
+    /supported|支持/,
+  );
+});
+
+test('path placeholder contract recognizes complete name tokens and paired quoted sentinels', () => {
+  const values = [" ' NONE ' ", ' " null " ', "'  '"];
+  for (const name of [
+    'DEF_namelist_forcing',
+    'DEF_INIT%FiLe',
+    'DEF_PATH%initial',
+    'DEF_dir_forcing',
+  ])
+    assert.equal(
+      fieldLiteral({ name, kind: 'Character', values }, '/data/input.nc'),
+      "'/data/input.nc'",
+    );
+  for (const name of ['DEF_profile', 'DEF_direction', 'DEF_filepath', 'DEF_namelistmode'])
+    assert.throws(
+      () => fieldLiteral({ name, kind: 'Character', values }, '/data/input.nc'),
+      /supported|支持/,
+    );
+  for (const invalid of ['\'NULL"', 'NOT_NULL'])
+    assert.throws(
+      () =>
+        fieldLiteral(
+          { name: 'DEF_file_input', kind: 'Character', values: [invalid] },
+          '/data/input.nc',
+        ),
+      /supported|支持/,
+    );
+});

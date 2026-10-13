@@ -24,7 +24,7 @@ import {
   spinupProblem,
   type SimulationStep,
 } from './simulation-model';
-import { fieldLabel, optionLabel } from '../../lib/param-presentation';
+import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import { compatibleKernel } from '../runs/run-model';
 import { simulationOptionField } from './model-settings';
@@ -670,8 +670,11 @@ export default function NewCasePage() {
         id: `new-option-${f.name}`,
         label: optionLabels[f.name] || fieldLabel(f.name, state.language),
         value: caseValues[f.name] ?? '',
-        type: f.kind === 'Logical' || f.values.length ? ('choice' as const) : ('text' as const),
-        ...(f.kind === 'Logical' || f.values.length
+        type:
+          f.kind === 'Logical' || fieldInputOptions(f.name, f.kind, f.values).length
+            ? ('choice' as const)
+            : ('text' as const),
+        ...(f.kind === 'Logical' || fieldInputOptions(f.name, f.kind, f.values).length
           ? {
               options: [
                 { value: '', label: autoLabel },
@@ -859,7 +862,7 @@ export default function NewCasePage() {
           <option value=".true.">{t('开启', 'On')}</option>
           <option value=".false.">{t('关闭', 'Off')}</option>
         </Select>
-      ) : f.values.length ? (
+      ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
           value={caseValues[f.name] ?? ''}
           disabled={!enabled || optionDisabled(f.name)}

@@ -9,7 +9,7 @@ import {
   type ModelField,
 } from './model';
 import { modelSettingValue } from '../cases/model-settings';
-import { fortranNumberInputValue } from '../../lib/param-presentation';
+import { fieldInputOptions, fortranNumberInputValue } from '../../lib/param-presentation';
 export type ConfigurationSource =
   | { kind: 'frozen'; version: VersionRef }
   | { kind: 'draft'; id: string; generation: number; overlay: Overlay };
@@ -146,7 +146,10 @@ export const unquote = (value: string) => {
     ? text.slice(1, -1).replace(text[0] === "'" ? /''/g : /""/g, text[0])
     : text;
 };
-export function fieldLiteral(field: Pick<ModelField, 'kind' | 'values'>, input: string) {
+export function fieldLiteral(
+  field: Pick<ModelField, 'kind' | 'values'> & Partial<Pick<ModelField, 'name'>>,
+  input: string,
+) {
   const kind = field.kind.toLowerCase(),
     raw = input.trim();
   if (/[\r\n]/.test(input))
@@ -157,7 +160,8 @@ export function fieldLiteral(field: Pick<ModelField, 'kind' | 'values'>, input: 
     throw new Error(bilingual('请输入整数', 'Enter an integer'));
   if (kind === 'real' && (raw === '' || fortranNumberInputValue(raw) === null))
     throw new Error(bilingual('请输入有限数值', 'Enter a finite number'));
-  if (field.values.length && !field.values.some((v) => unquote(v) === unquote(raw)))
+  const choices = fieldInputOptions(field.name ?? '', field.kind, field.values);
+  if (choices.length && !choices.some((v) => unquote(v) === unquote(raw)))
     throw new Error(bilingual('请选择目录支持的值', 'Choose a supported value'));
   return kind.startsWith('character') || kind === 'string'
     ? `'${unquote(input).replace(/'/g, "''")}'`

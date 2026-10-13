@@ -3987,3 +3987,56 @@ fn process_parent_switches_remain_editable_while_their_children_follow_them() {
         }
     }
 }
+
+#[test]
+fn placeholder_path_options_accept_a_real_path_without_relaxing_scientific_enums() {
+    let dir = batch("unitcatchment-path", &[NML_A]).remove(0);
+    let path = std::path::Path::new(&dir).join("O'Brien-not-yet-provided-unit-catchment.nc");
+    assert!(!path.exists());
+    set_batch(
+        vec![dir.clone()],
+        "DEF_UnitCatchment_file".into(),
+        format!("'{}'", path.display().to_string().replace('\'', "''")),
+    )
+    .unwrap();
+    let text = std::fs::read_to_string(std::path::Path::new(&dir).join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&text).unwrap();
+    assert_eq!(
+        doc.get("DEF_UnitCatchment_file"),
+        Some(&colm_namelist::Value::Str(path.display().to_string()))
+    );
+    for value in ["", "NONE", "NULL"] {
+        assert!(typed("DEF_UnitCatchment_file", value).is_ok());
+    }
+    assert!(typed("DEF_TRACER_KINETIC_SCHEME", "not-a-scheme").is_err());
+    assert!(typed("DEF_Runoff_SCHEME", "99").is_err());
+}
+
+#[test]
+fn path_placeholder_tokens_and_quoted_literals_follow_the_form_contract() {
+    let placeholders = ["", "  NONE  ", " 'null' ", "\" NULL \""];
+    for name in [
+        "DEF_UnitCatchment_file",
+        "DEF_group%PATH",
+        "DEF_dir_runtime",
+        "DEF_forcing_namelist",
+    ] {
+        assert!(path_placeholder_options(name, &placeholders));
+    }
+    assert!(!path_placeholder_options("DEF_profile", &placeholders));
+    assert!(!path_placeholder_options(
+        "DEF_file",
+        &["NULL", "science-option"]
+    ));
+    for (raw, expected) in [
+        ("'O''Brien.nc'", "O'Brien.nc"),
+        ("O'Brien.nc", "O'Brien.nc"),
+        ("\"double\"\"quote.nc\"", "double\"quote.nc"),
+    ] {
+        assert_eq!(
+            typed("DEF_UnitCatchment_file", raw).unwrap(),
+            colm_namelist::Value::Str(expected.into())
+        );
+    }
+    assert!(typed("DEF_TRACER_KINETIC_SCHEME", "'not-a-scheme'").is_err());
+}

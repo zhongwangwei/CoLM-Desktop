@@ -9,7 +9,7 @@ import * as modelSettings from './model-settings';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
 import type { UiField, UiAction } from '../../lib/guide';
 import { pageExecutionContext, publicUiResult, waitForContract } from '../../lib/utils';
-import { fieldLabel, optionLabel } from '../../lib/param-presentation';
+import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 
 const field = (name: string, section = '时间与预热', value = '0'): caseModel.SchemaField => ({
   name,
@@ -105,6 +105,7 @@ function page(
     caseFieldVisible,
     ...simulation,
     ...modelSettings,
+    fieldInputOptions,
     fieldLabel,
     optionLabel,
     compatibleKernel,
@@ -1712,3 +1713,34 @@ test('spatial creation cancellation targets its own output directory', async () 
   await rejected;
   assert.deepEqual(p.opened, []);
 });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} renders optional initial-state file placeholders as editable paths in the page and guide`, async () => {
+    const key = 'DEF_file_SoilInit',
+      path = '/Volumes/Data/CoLMruntime/initial/soil state.nc';
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      [site],
+      initialValues,
+      {
+        schema: [
+          ...schema,
+          {
+            ...field(key, '初始场', 'null'),
+            kind: 'Character { len: 256 }',
+            values: ['', 'NONE', 'NULL'],
+          },
+        ],
+      },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.click('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    const id = `${name === 'NewCasePage' ? 'new-option-' : 'case-'}${key}`;
+    assert.equal(p.render().fields.find((f) => f.id === id)?.type, 'text');
+    await guideFor(p).fill(id, path);
+    assert.equal(p.render().fields.find((f) => f.id === id)?.value, path);
+    assert.ok(p.elements.some((e) => e.type === 'Input' && e.props.value === path));
+    assert.ok(!p.elements.some((e) => e.type === 'Select' && e.props.value === path));
+  });

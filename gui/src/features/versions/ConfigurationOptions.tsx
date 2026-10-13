@@ -4,7 +4,7 @@ import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../comp
 import { useApp } from '../../lib/app-state';
 import { invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import { fieldLabel, optionLabel } from '../../lib/param-presentation';
+import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import type { Overlay } from '../../lib/types';
 import {
   modelSettingGroups,
@@ -285,7 +285,11 @@ export default function ConfigurationOptions({
     rawKey = id.replace(/^configuration-/, ''),
   ) {
     const choices =
-      kind === 'list' ? [] : kind.toLowerCase() === 'logical' ? ['.true.', '.false.'] : options;
+      kind === 'list'
+        ? []
+        : kind.toLowerCase() === 'logical'
+          ? ['.true.', '.false.']
+          : fieldInputOptions(rawKey, kind, options);
     const cardChoice =
       [
         'DEF_METHANE%inundation_mode',

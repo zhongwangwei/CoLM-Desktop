@@ -4032,6 +4032,23 @@ pub fn set_field(text: String, path: String, value: String) -> Result<String, St
     Ok(doc.to_string())
 }
 
+fn path_placeholder_options(name: &str, values: &[&str]) -> bool {
+    name.split(['_', '%']).any(|token| {
+        ["file", "dir", "path", "namelist"]
+            .iter()
+            .any(|kind| token.eq_ignore_ascii_case(kind))
+    }) && values.iter().all(|value| {
+        let value = value.trim();
+        let value = value
+            .strip_prefix('\'')
+            .and_then(|s| s.strip_suffix('\''))
+            .or_else(|| value.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
+            .unwrap_or(value)
+            .trim();
+        value.is_empty() || value.eq_ignore_ascii_case("none") || value.eq_ignore_ascii_case("null")
+    })
+}
+
 /// 按 schema 声明的类型把字符串变成 `Value`。
 ///
 /// schema 不认识的字段一律当字符串 —— 让它写出去，由 CoLM 去表态。
@@ -4043,8 +4060,33 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
     let Some(f) = colm_schema::find(path) else {
         return Ok(Value::Str(s.to_string()));
     };
-    let bare = s.trim_matches(|c| c == '\'' || c == '"');
-    if !f.values.is_empty() && !f.values.iter().any(|v| v.eq_ignore_ascii_case(bare)) {
+    let quoted = s.len() >= 2
+        && ((s.starts_with('\'') && s.ends_with('\'')) || (s.starts_with('"') && s.ends_with('"')));
+    let decoded;
+    let bare = if matches!(f.kind, K::Character { .. }) {
+        if quoted {
+            let literal = colm_namelist::parse(&format!("&literal\nvalue={s}\n/\n"))
+                .map_err(|error| format!("{path}: invalid character literal: {error}"))?;
+            let Some(Value::Str(value)) = literal.get("value") else {
+                return Err(format!("{path}: expected one character literal"));
+            };
+            if literal.paths().len() != 1 {
+                return Err(format!("{path}: expected one character literal"));
+            }
+            decoded = value.clone();
+            decoded.as_str()
+        } else {
+            s
+        }
+    } else {
+        s.trim_matches(|c| c == '\'' || c == '"')
+    };
+    let path_placeholders =
+        matches!(f.kind, K::Character { .. }) && path_placeholder_options(f.name, f.values);
+    if !path_placeholders
+        && !f.values.is_empty()
+        && !f.values.iter().any(|v| v.eq_ignore_ascii_case(bare))
+    {
         return Err(format!(
             "{path} only accepts {}; {raw:?} is invalid",
             f.values.join(", ")
@@ -4089,7 +4131,7 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
                 return Err(format!("{path}: tracer values must be finite numbers"));
             }
             if f.name.eq_ignore_ascii_case("DEF_CASE_NAME") {
-                crate::project::validate_case_name(raw.trim_matches(|c| c == '\'' || c == '"'))?;
+                crate::project::validate_case_name(if quoted { bare } else { raw })?;
             }
             if bare.len() > len {
                 return Err(format!(

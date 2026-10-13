@@ -853,3 +853,34 @@ test('simulation fractionation children stay hidden while queries are pending an
       'research editor keeps its existing visibility',
     );
 });
+
+test('river file placeholders are free text in both the actual editor and guide and persist a quoted path', async () => {
+  const h = harness(),
+    patches: helpers.CaseOptionPatch[] = [];
+  const name = 'DEF_UnitCatchment_file';
+  h.props.fields.push({
+    name,
+    kind: 'Character { len: 256 }',
+    section: '河道与水库',
+    default: 'null',
+    values: ['', 'NONE', 'NULL'],
+    derived: false,
+  });
+  h.props.process = 'DEF_USE_GridRiverLakeFlow';
+  h.props.modalActions = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  h.props.caseValues = { DEF_USE_GridRiverLakeFlow: '.true.', [name]: "'null'" };
+  h.render();
+  h.requests.at(-1)!.resolve(h.response());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const c = h.render(),
+    control = c.fields.find((f) => f.id === `configuration-${name}`)!;
+  assert.equal(control.type, 'text');
+  assert.ok(h.nodes.some((n) => n.type === 'Input' && n.props.value === 'null'));
+  assert.ok(!h.nodes.some((n) => n.type === 'Select' && n.props.value === 'null'));
+  const path = "/Volumes/Data/CoLMruntime/river/O'Brien network.nc";
+  await control.set(path);
+  assert.deepEqual(patches, [{ [name]: "'/Volumes/Data/CoLMruntime/river/O''Brien network.nc'" }]);
+});

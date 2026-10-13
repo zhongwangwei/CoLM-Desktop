@@ -17,7 +17,7 @@ import {
   validDate,
   type SimulationStep,
 } from './simulation-model';
-import { fieldLabel, optionLabel } from '../../lib/param-presentation';
+import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import { simulationOptionField } from './model-settings';
 import SimulationSteps from './SimulationSteps';
@@ -467,8 +467,11 @@ export default function CasesPage() {
             id: `case-${f.name}`,
             label: labels[f.name] || fieldLabel(f.name, state.language),
             value: values[f.name] ?? '',
-            type: f.kind === 'Logical' || f.values.length ? ('choice' as const) : ('text' as const),
-            ...(f.kind === 'Logical' || f.values.length
+            type:
+              f.kind === 'Logical' || fieldInputOptions(f.name, f.kind, f.values).length
+                ? ('choice' as const)
+                : ('text' as const),
+            ...(f.kind === 'Logical' || fieldInputOptions(f.name, f.kind, f.values).length
               ? {
                   options: (f.kind === 'Logical'
                     ? ['.true.', '.false.']
@@ -644,7 +647,7 @@ export default function CasesPage() {
           <option value=".true.">{t('开启', 'On')}</option>
           <option value=".false.">{t('关闭', 'Off')}</option>
         </Select>
-      ) : f.values.length ? (
+      ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
           value={values[f.name] ?? ''}
           disabled={editingDisabled || optionDisabled(f.name)}

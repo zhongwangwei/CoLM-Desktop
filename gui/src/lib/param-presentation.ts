@@ -1173,3 +1173,21 @@ export function optionLabel(path: string, value: string, lang = 'zh') {
 export function technicalFieldHint(path: string, lang = 'zh') {
   return lang === 'en' ? `CoLM key: ${path}` : `CoLM 配置键：${path}`;
 }
+
+// Optional path sentinels describe absence; they are not a closed list of filenames.
+export function fieldInputOptions(name: string, kind: string, values: string[]): string[] {
+  const character = kind.toLowerCase().startsWith('character') || kind.toLowerCase() === 'string';
+  const path = name.split(/[_%]/).some((token) => /^(file|dir|path|namelist)$/i.test(token));
+  return character &&
+    path &&
+    values.every((value) =>
+      /^(?:none|null)?$/i.test(
+        value
+          .trim()
+          .replace(/^(['"])([\s\S]*)\1$/, '$2')
+          .trim(),
+      ),
+    )
+    ? []
+    : values;
+}
