@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import type { Overlay } from '../../lib/types';
 import type { Descriptor, ModelField } from './model';
 import {
+  caseFieldVisible,
+  type ConfigurationField,
   tracerFamilyState,
   appendTracerFamily,
   setStomatalScheme,
@@ -461,4 +463,36 @@ test('case options override stale model switches without promoting defaults or e
     DEF_USE_BGC: null,
   });
   assert.equal(original.physics.DEF_USE_BGC, '.true.');
+});
+
+test('case child visibility follows ancestor gates without treating readonly parents as off', () => {
+  const gate = (
+    name: string,
+    parent_gate?: string,
+    parent_gate_enabled?: boolean,
+  ): ConfigurationField => ({
+    name,
+    parent_gate,
+    parent_gate_enabled,
+    mode: 'editable',
+    pending: true,
+    configured_value: null,
+    allowed_values: [],
+  });
+  const fields = [gate('SNICAR'), gate('AEROSOL', 'SNICAR', false), gate('FILE', 'AEROSOL', true)];
+  const before = JSON.stringify(fields);
+  assert.equal(caseFieldVisible('FILE', fields), false);
+  assert.equal(JSON.stringify(fields), before);
+  fields[1].parent_gate_enabled = true;
+  assert.equal(caseFieldVisible('file', fields), true);
+  fields[0] = { ...fields[0], mode: 'disabled', pending: false };
+  assert.equal(
+    caseFieldVisible('FILE', fields),
+    true,
+    'derived readonly parent is not a disabled gate',
+  );
+  assert.equal(caseFieldVisible('UNKNOWN', fields), true);
+  fields[0].parent_gate = 'FILE';
+  fields[0].parent_gate_enabled = true;
+  assert.equal(caseFieldVisible('FILE', fields), false, 'cyclic metadata cannot recurse forever');
 });

@@ -19,7 +19,7 @@ import {
   type SimulationStep,
 } from './simulation-model';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
-import type { ConfigurationField } from '../versions/configuration-options';
+import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import ProcessDataGroups from './ProcessDataGroups';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
@@ -374,6 +374,7 @@ export default function CasesPage() {
     MONTHLY: t('每月', 'Monthly'),
     YEARLY: t('每年', 'Yearly'),
   };
+  const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
   const dataGroups =
     state.caseTab === 'settings' && step === 3
       ? processDataSections
@@ -381,14 +382,14 @@ export default function CasesPage() {
           .map(([id, zh, english, parent]) => ({
             id,
             title: t(zh, english),
-            fields: schema.filter((f) => processDataGroupId(f) === id),
+            fields: visibleSchema.filter((f) => processDataGroupId(f) === id),
             open: dataOpened[id] ?? /^(true|\.true\.)$/i.test(physics[parent] ?? ''),
           }))
           .filter((group) => group.fields.length)
       : [];
   const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
     shown = [
-      ...simulationFields(schema, step, advanced).filter((f) => !groupFields.includes(f)),
+      ...simulationFields(visibleSchema, step, advanced).filter((f) => !groupFields.includes(f)),
       ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),
     ];
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
@@ -692,7 +693,9 @@ export default function CasesPage() {
       />
     </Field>
   );
-  const basic = simulationFields(schema, step, false).filter((f) => !groupFields.includes(f)),
+  const basic = simulationFields(visibleSchema, step, false).filter(
+      (f) => !groupFields.includes(f),
+    ),
     extras = shown.filter((f) => !basic.includes(f) && !groupFields.includes(f));
   const timeBasic = basic.filter((f) => f.name.startsWith('DEF_simulation_time%'));
   const outputBasic = basic.filter((f) => !f.name.startsWith('DEF_simulation_time%'));

@@ -20,8 +20,24 @@ export type ConfigurationField = {
   configured_value: string | null;
   allowed_values: string[];
   pending: boolean;
+  parent_gate?: string | null;
+  parent_gate_enabled?: boolean;
   built_in_default?: string | null;
 };
+export function caseFieldVisible(name: string, fields: readonly ConfigurationField[]): boolean {
+  let field = fields.find((item) => item.name.toLowerCase() === name.toLowerCase());
+  if (field?.mode === 'disabled' && field.pending === false) return false;
+  const visited = new Set<string>([name.toLowerCase()]);
+  while (field?.parent_gate) {
+    if (field.parent_gate_enabled !== true) return false;
+    const parent = field.parent_gate.toLowerCase();
+    if (visited.has(parent)) return false;
+    visited.add(parent);
+    field = fields.find((item) => item.name.toLowerCase() === parent);
+  }
+  return true;
+}
+
 export type ProcessEntry = {
   path: string;
   group: string;

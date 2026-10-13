@@ -462,6 +462,17 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
     0,
     'late response cannot overwrite metrics or the overview binding',
   );
+  assert.deepEqual(
+    await callback(page, 'evaluate', {
+      ...context,
+      invokeJson: async (command: string) => {
+        assert.equal(command, 'evaluation_catalog', 'no metrics query without shared variables');
+        return [{ name: 'FCH4', available: false, missing_model: ['f_methane_surf_flux_tot'] }];
+      },
+    })(),
+    [],
+  );
+  assert.deepEqual(published.at(-1), { key: 'verified-selection', rows: [] });
 });
 
 test('result navigation opens research and returns diagnostics to overview', async () => {

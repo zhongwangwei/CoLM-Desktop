@@ -27,7 +27,7 @@ import {
   type SimulationStep,
 } from './simulation-model';
 import { fieldLabel, optionLabel } from '../../lib/param-presentation';
-import type { ConfigurationField } from '../versions/configuration-options';
+import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import { compatibleKernel } from '../runs/run-model';
 import ProcessDataGroups from './ProcessDataGroups';
 import SimulationSteps from './SimulationSteps';
@@ -493,6 +493,7 @@ export default function NewCasePage() {
         : step === 4
           ? ['spinup_end']
           : [];
+  const visibleSchema = schema.filter((field) => caseFieldVisible(field.name, optionStates));
   const enabled = !busy && !state.busy,
     dataGroups =
       step === 3
@@ -501,17 +502,19 @@ export default function NewCasePage() {
             .map(([id, zh, english, parent]) => ({
               id,
               title: t(zh, english),
-              fields: schema.filter((f) => processDataGroupId(f) === id),
+              fields: visibleSchema.filter((f) => processDataGroupId(f) === id),
               open: dataOpened[id] ?? /^(true|\.true\.)$/i.test(physics[parent] ?? ''),
             }))
             .filter((group) => group.fields.length)
         : [];
   const groupFields = schema.filter((field) => processDataGroupId(field) !== null),
     options = [
-      ...simulationFields(schema, step, advanced).filter((f) => !groupFields.includes(f)),
+      ...simulationFields(visibleSchema, step, advanced).filter((f) => !groupFields.includes(f)),
       ...dataGroups.filter((group) => group.open).flatMap((group) => group.fields),
     ],
-    basicOptions = simulationFields(schema, step, false).filter((f) => !groupFields.includes(f));
+    basicOptions = simulationFields(visibleSchema, step, false).filter(
+      (f) => !groupFields.includes(f),
+    );
   const optionState = (name: string) => optionStates.find((field) => field.name === name),
     optionDisabled = (name: string) =>
       optionState(name)?.mode === 'disabled' || optionState(name)?.mode === 'readonly';

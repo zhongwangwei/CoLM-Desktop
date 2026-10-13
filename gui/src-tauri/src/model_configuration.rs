@@ -118,6 +118,15 @@ pub(crate) fn query(
         if !known {
             state["reason"] = json!("适用条件待按所选源码、算例和内核核对；目录默认值仅供参考");
         }
+        if let Some(parent) = parent_gate(field, candidate_reason) {
+            state["parent_gate"] = json!(parent);
+            state["parent_gate_enabled"] = json!(if parent == "DEF_USE_CROP" {
+                // CROP is a read-only compile capability, not a writable case switch.
+                have.contains("CROP")
+            } else {
+                matches!(doc.get(parent), Some(NmlValue::Bool(true)))
+            });
+        }
         fields.push(state);
     }
     let pft = pft_parameters(&overlay, selection, &doc, kernel.as_ref().map(|_| &have))?;
@@ -288,7 +297,11 @@ fn confirmed_gate(
     {
         return true;
     }
-    let switch = match reason {
+    gate_switch(reason).is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
+}
+
+fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
+    match reason {
         Some("河湖流已关闭") => Some("DEF_USE_GridRiverLakeFlow"),
         Some("需要先启用 TRACER") => Some("DEF_USE_TRACER"),
         Some("需要先启用城市模型") => Some("DEF_URBAN_RUN"),
@@ -302,8 +315,62 @@ fn confirmed_gate(
         Some("需要先启用基岩过程") => Some("DEF_USE_BEDROCK"),
         Some("仅漫滩回馈陆面时使用") => Some("DEF_GridRiverLake_FloodFeedback"),
         _ => None,
+    }
+}
+
+// Presentation dependencies stay available even when runtime rules return no disabling reason.
+// An absent parent is deliberately not treated as an enabled catalog default.
+fn parent_gate(field: &colm_schema::Field, reason: Option<&str>) -> Option<&'static str> {
+    let name = field.name;
+    let parent = match name {
+        "DEF_Aerosol_Readin" | "DEF_file_snowoptics" | "DEF_file_snowaging" => {
+            Some("DEF_USE_SNICAR")
+        }
+        "DEF_Aerosol_Clim" => Some("DEF_Aerosol_Readin"),
+        "DEF_USE_OZONEDATA" | "DEF_OZONE_KO3" => Some("DEF_USE_OZONESTRESS"),
+        "DEF_file_Ozone" => Some("DEF_USE_OZONEDATA"),
+        "DEF_file_SoilInit" => Some("DEF_USE_SoilInit"),
+        "DEF_file_SnowInit" => Some("DEF_USE_SnowInit"),
+        "DEF_file_cn_init" => Some("DEF_USE_CN_INIT"),
+        "DEF_file_WaterTable" => Some("DEF_USE_WaterTableInit"),
+        "DEF_TRACER_SOIL_INIT_FILE" | "DEF_TRACER_SOIL_INIT_VARS" => {
+            Some("DEF_TRACER_USE_SOIL_INIT")
+        }
+        "DEF_FERT_SOURCE" => Some("DEF_USE_FERT"),
+        "DEF_IRRIGATION_ALLOCATION" => Some("DEF_USE_IRRIGATION"),
+        "DEF_USE_FERT"
+        | "DEF_USE_CNSOYFIXN"
+        | "DEF_USE_IRRIGATION"
+        | "USE_SITE_pctcrop"
+        | "DEF_TUNING_CROP_PLANTING_DAY" => Some("DEF_USE_CROP"),
+        "DEF_USE_CN_INIT"
+        | "DEF_USE_LAIFEEDBACK"
+        | "DEF_NDEP_FREQUENCY"
+        | "DEF_USE_NOSTRESSNITROGEN"
+        | "DEF_USE_SASU"
+        | "DEF_USE_DiagMatrix"
+        | "DEF_USE_PN"
+        | "DEF_USE_NITRIF"
+        | "DEF_USE_FIRE"
+        | "DEF_TUNING_SMPMAX_HR"
+        | "DEF_TUNING_SMPMIN_HR" => Some("DEF_USE_BGC"),
+        "DEF_LULCC_SCHEME" => Some("DEF_USE_LULCC"),
+        "DEF_LAI_START_YEAR" | "DEF_LAI_END_YEAR" => Some("DEF_LAI_CHANGE_YEARLY"),
+        "USE_SITE_dbedrock" => Some("DEF_USE_BEDROCK"),
+        "DEF_MEDLYN_G1" | "DEF_MEDLYN_G0" => Some("DEF_USE_MEDLYNST"),
+        "DEF_WUE_LAMBDA" => Some("DEF_USE_WUEST"),
+        "DEF_PC_CROP_SPLIT" => Some("DEF_USE_PC"),
+        "DEF_GridRiverLake_FloodInfiltMax" => Some("DEF_GridRiverLake_FloodFeedback"),
+        _ if name.starts_with("DEF_TUNING_IRRIGATION_") => Some("DEF_USE_IRRIGATION"),
+        _ if name.starts_with("DEF_PH_") || colm_case::land_cover::needs_plant_hydraulics(name) => {
+            Some("DEF_USE_PLANTHYDRAULICS")
+        }
+        _ if name.starts_with("DEF_GridRiverLake_") => Some("DEF_USE_GridRiverLakeFlow"),
+        _ if field_section(name, field.group) == Some("示踪剂") => Some("DEF_USE_TRACER"),
+        _ if field_section(name, field.group) == Some("城市") => Some("DEF_URBAN_RUN"),
+        _ => gate_switch(reason),
     };
-    switch.is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
+    parent.filter(|parent| !parent.eq_ignore_ascii_case(name))
 }
 
 fn process_files(
@@ -548,6 +615,109 @@ mod tests {
             .iter()
             .find(|f| f["name"] == name)
             .unwrap()
+    }
+
+    #[test]
+    fn parent_visibility_requires_explicit_selection_and_survives_enabled_state() {
+        let (root, _, draft) = fixture();
+        let pairs = [
+            ("DEF_Aerosol_Readin", "DEF_USE_SNICAR"),
+            ("DEF_file_snowoptics", "DEF_USE_SNICAR"),
+            ("DEF_file_snowaging", "DEF_USE_SNICAR"),
+            ("DEF_Aerosol_Clim", "DEF_Aerosol_Readin"),
+            ("DEF_USE_OZONEDATA", "DEF_USE_OZONESTRESS"),
+            ("DEF_file_Ozone", "DEF_USE_OZONEDATA"),
+            ("DEF_TRACER_SOIL_INIT_FILE", "DEF_TRACER_USE_SOIL_INIT"),
+            ("DEF_file_cn_init", "DEF_USE_CN_INIT"),
+            ("DEF_USE_FIRE", "DEF_USE_BGC"),
+            ("DEF_FERT_SOURCE", "DEF_USE_FERT"),
+            ("DEF_IRRIGATION_ALLOCATION", "DEF_USE_IRRIGATION"),
+            ("DEF_MEDLYN_G1", "DEF_USE_MEDLYNST"),
+        ];
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        for selected in [None, Some(".false."), Some(".true.")] {
+            let entries = selected
+                .map(|raw| {
+                    pairs
+                        .iter()
+                        .map(|(_, parent)| format!("{parent}={raw}\n"))
+                        .collect::<String>()
+                })
+                .unwrap_or_default();
+            std::fs::write(case.join("case.nml"), format!("&nl_colm\n{entries}/\n")).unwrap();
+            let result = query(
+                &root,
+                source(&draft, Overlay::default()),
+                case.to_str(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            for (child, parent) in pairs {
+                assert_eq!(field(&result, child)["parent_gate"], parent, "{child}");
+                assert_eq!(
+                    field(&result, child)["parent_gate_enabled"],
+                    selected == Some(".true."),
+                    "{child}"
+                );
+            }
+            assert!(field(&result, "DEF_USE_SNICAR")
+                .get("parent_gate")
+                .is_none());
+            assert!(field(&result, "DEF_USE_SNICAR")["pending"]
+                .as_bool()
+                .unwrap());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn crop_parent_visibility_uses_selected_kernel_capability() {
+        let (root, _, draft) = fixture();
+        let kernel = root.join("kernel");
+        std::fs::create_dir(&kernel).unwrap();
+        for crop in [false, true] {
+            let mut macros = vec!["LULC_IGBP"];
+            if crop {
+                macros.push("CROP");
+            }
+            let manifest = json!({"schema":1,"preset":"crop-test","platform":std::env::consts::OS,
+                "colm_git_sha":"test","generator_args":"","build_profile":"debug",
+                "macros":macros,"built_with":"test","netcdf_c":"test","netcdf_fortran":"test",
+                "hdf5":"","sha256":{}});
+            std::fs::write(
+                kernel.join("manifest.json"),
+                serde_json::to_vec(&manifest).unwrap(),
+            )
+            .unwrap();
+            let result = query(
+                &root,
+                source(&draft, Overlay::default()),
+                None,
+                kernel.to_str(),
+                None,
+                None,
+            )
+            .unwrap();
+            assert!(field(&result, "DEF_USE_CROP")["configured_value"].is_null());
+            for child in [
+                "DEF_USE_FERT",
+                "DEF_USE_CNSOYFIXN",
+                "DEF_USE_IRRIGATION",
+                "USE_SITE_pctcrop",
+                "DEF_TUNING_CROP_PLANTING_DAY",
+            ] {
+                assert_eq!(field(&result, child)["parent_gate"], "DEF_USE_CROP");
+                assert_eq!(
+                    field(&result, child)["parent_gate_enabled"],
+                    crop,
+                    "{child}"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

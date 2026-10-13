@@ -607,3 +607,55 @@ test('simulation hides inactive process details and files without erasing retain
   assert.equal(JSON.stringify(p.props.overlay), original);
   assert.equal(p.changes.length, 0);
 });
+
+test('simulation hides confirmed disabled child fields but retains readonly options', async () => {
+  const p = harness();
+  p.props.onCaseChange = () => {};
+  p.props.caseValues = {
+    DEF_USE_BGC: '.true.',
+    DEF_USE_TRACER: '.true.',
+    DEF_USE_GridRiverLakeFlow: '.true.',
+  };
+  p.render();
+  const response = p.response();
+  response.fields = response.fields.map((field) => ({
+    ...field,
+    mode:
+      field.name === 'DEF_USE_NITRIF_DENITRIF'
+        ? 'disabled'
+        : field.name === 'DEF_USE_RESERVOIR'
+          ? 'readonly'
+          : field.mode,
+    pending: false,
+  }));
+  p.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const c = p.render();
+  assert.ok(!c.fields.some((f) => f.id === 'configuration-DEF_USE_NITRIF_DENITRIF'));
+  assert.ok(c.fields.some((f) => f.id === 'configuration-DEF_USE_RESERVOIR'));
+  assert.equal(p.changes.length, 0);
+});
+
+test('simulation details honor backend parent gate even when applicability remains pending', async () => {
+  for (const enabled of [undefined, false, true]) {
+    const p = harness();
+    p.props.onCaseChange = () => {};
+    p.props.caseValues = { DEF_USE_BGC: '.true.' };
+    p.render();
+    const response = p.response();
+    response.fields = response.fields.map((f) => ({
+      ...f,
+      mode: 'editable',
+      pending: true,
+      ...(f.name === 'DEF_USE_NITRIF_DENITRIF'
+        ? { parent_gate: 'DEF_USE_BGC', parent_gate_enabled: enabled }
+        : {}),
+    }));
+    p.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    assert.equal(
+      p.render().fields.some((f) => f.id === 'configuration-DEF_USE_NITRIF_DENITRIF'),
+      enabled === true,
+    );
+  }
+});

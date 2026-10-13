@@ -16,6 +16,7 @@ import {
 import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
+  caseFieldVisible,
   caseOptionOverlay,
   caseOptionPatch,
   type CaseOptionPatch,
@@ -491,6 +492,7 @@ export default function ConfigurationOptions({
     if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
       .filter((field) => !excludeKeys.includes(field.name) && groupedField(field, catalog))
+      .filter((field) => !onCaseChange || caseFieldVisible(field.name, values.fields))
       .filter(() => id !== 'ecology' || caseProcessVisible(id))
       .filter(
         (field) =>

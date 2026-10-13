@@ -433,7 +433,13 @@ export default function ResultsPage({
       if (!current()) return;
       setEvaluation(available);
       const names = available.filter((v) => v.available).map((v) => v.name);
-      if (!names.length) throw new Error(tr('没有可配对变量', 'No paired variables'));
+      if (!names.length) {
+        const rows: Metric[] = [];
+        setMetrics(rows);
+        setSingleEvaluation({ key: selectionKey, rows });
+        setSettingsOpen(false);
+        return rows;
+      }
       const rows = await invokeJson<Metric[]>('metrics', {
         case: source,
         obs,
@@ -958,6 +964,8 @@ export default function ResultsPage({
   const variableInfo = catalog?.variables.find((item) => item.name === variable);
   const finding = overviewFinding(selectedMetric, variable, en);
   const validPairs = !!selectedMetric && selectedMetric.n > 0;
+  const noSharedVariables =
+    singleEvaluation?.key === selectionKey && !singleEvaluation.rows.length && !!obs;
   return (
     <div className="page-stack results-page">
       <header className="results-heading">
@@ -1007,6 +1015,14 @@ export default function ResultsPage({
         </Notice>
       )}
       {error && !settingsOpen && <Notice tone="error">{error}</Notice>}
+      {noSharedVariables && (
+        <Notice>
+          {tr(
+            '观测数据已载入，但本次模拟输出与观测没有共同变量。请在模型改进中检查过程和输出设置。',
+            'Observations are loaded, but this run has no shared output variables. Check process and output settings under Improve model.',
+          )}
+        </Notice>
+      )}
       {exportNotice && <Notice>{exportNotice}</Notice>}
       {!source && (
         <Notice>
@@ -1041,7 +1057,9 @@ export default function ResultsPage({
                 <strong>
                   {validPairs
                     ? tr('有效观测已匹配', 'Valid observations matched')
-                    : tr('等待观测评估', 'Observation evaluation pending')}
+                    : noSharedVariables
+                      ? tr('没有共同评估变量', 'No shared evaluation variables')
+                      : tr('等待观测评估', 'Observation evaluation pending')}
                 </strong>
                 <p>
                   {validPairs
@@ -1049,10 +1067,15 @@ export default function ResultsPage({
                         `基于 ${selectedMetric!.n} 组实际有效配对。`,
                         `${selectedMetric!.n} actual valid pairs.`,
                       )
-                    : tr(
-                        '选择观测后，再判断模拟与观测的差异。',
-                        'Select observations to evaluate the differences.',
-                      )}
+                    : noSharedVariables
+                      ? tr(
+                          '观测文件已载入，当前无法计算配对指标。',
+                          'The observation file is loaded; paired metrics are unavailable.',
+                        )
+                      : tr(
+                          '选择观测后，再判断模拟与观测的差异。',
+                          'Select observations to evaluate the differences.',
+                        )}
                 </p>
               </div>
             </div>

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as caseModel from './case-model';
+import { caseFieldVisible } from '../versions/configuration-options';
 import * as simulation from './simulation-model';
 import * as modelSettings from './model-settings';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
@@ -98,6 +99,7 @@ function page(
   };
   const context = {
     ...caseModel,
+    caseFieldVisible,
     ...simulation,
     ...modelSettings,
     fieldLabel,
@@ -951,22 +953,13 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     if (name === 'CasesPage') await p.click('case-step-3');
     const prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
     for (const [, , fieldName] of dataGroups)
-      assert.ok(p.render().fields.some((f) => f.id === `${prefix}${fieldName}`));
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.disabled,
-      true,
-    );
+      assert.equal(
+        p.render().fields.some((f) => f.id === `${prefix}${fieldName}`),
+        fieldName !== 'DEF_file_cn_init',
+      );
     await assert.rejects(
       guideFor(p).fill(`${prefix}DEF_file_cn_init`, '/blocked.nc'),
-      /cannot be changed/,
-    );
-    const render = p.element('ProcessDataGroups').props.render as (
-      field: caseModel.SchemaField,
-    ) => Element;
-    const displayed = render(processSchema.find((f) => f.name === 'DEF_file_cn_init')!);
-    assert.ok(
-      JSON.stringify(displayed.props).includes('CN initial state is off'),
-      'disabled reason is shown next to the retained field',
+      /unique visible control/,
     );
     await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
     await p.settle();
@@ -983,13 +976,12 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
     await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.false.');
     await p.settle();
+    assert.ok(!p.render().fields.some((f) => f.id === `${prefix}DEF_file_cn_init`));
+    await guideFor(p).fill(`${prefix}DEF_USE_CN_INIT`, '.true.');
+    await p.settle();
     assert.equal(
       p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.value,
       '/retained-cn.nc',
-    );
-    assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.disabled,
-      true,
     );
     assert.ok(
       !p.calls.some((c) => c.command === 'case_data_save' || c.command === 'new_case'),
@@ -1050,8 +1042,8 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     oldVersion.resolve(cnSnapshot('enabled'));
     await p.settle();
     assert.equal(
-      p.render().fields.find((f) => f.id === `${prefix}DEF_file_cn_init`)?.disabled,
-      true,
+      p.render().fields.some((f) => f.id === `${prefix}DEF_file_cn_init`),
+      false,
       'old revision cannot replace the current revision gate',
     );
   });
@@ -1492,5 +1484,99 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
         p.calls.some((call) => call.command === 'case_data_save'),
         false,
       );
+    }
+  });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} hides confirmed inactive child inputs while keeping unknown and readonly data`, async () => {
+    const children = [
+      'DEF_USE_IRRIGATION',
+      'DEF_USE_FERT',
+      'DEF_TUNING_CROP_PLANTING_DAY',
+      'DEF_file_cn_init',
+      'DEF_file_Ozone',
+      'DEF_Aerosol_Clim',
+      'DEF_TRACER_SOIL_INIT_FILE',
+    ];
+    const values = {
+      ...initialValues,
+      DEF_USE_BGC: '.true.',
+      DEF_USE_TRACER: '.true.',
+      ...Object.fromEntries(children.map((key) => [key, 'retained'])),
+    };
+    const extra = [
+      'DEF_USE_BGC',
+      'DEF_USE_TRACER',
+      'UNKNOWN_DATA',
+      'READONLY_DATA',
+      'DEF_USE_CN_INIT',
+      ...children,
+    ].map((key) => field(key, '地表数据', ''));
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: values } : undefined,
+      [site],
+      values,
+      {
+        schema: [...schema, ...extra],
+        configuration: async () => ({
+          fields: [
+            ...children.map((key) => ({ name: key, mode: 'disabled', pending: false })),
+            { name: 'UNKNOWN_DATA', mode: 'disabled', pending: true },
+            { name: 'READONLY_DATA', mode: 'readonly', pending: false },
+          ],
+        }),
+      },
+    );
+    p.state.expert = true;
+    await p.mount();
+    if (name === 'CasesPage') await p.click('case-step-3');
+    const controls = p.render().fields;
+    for (const key of children) assert.ok(!controls.some((f) => f.id.endsWith(key)), key);
+    for (const key of ['UNKNOWN_DATA', 'READONLY_DATA', 'DEF_USE_CN_INIT'])
+      assert.ok(
+        controls.some((f) => f.id.endsWith(key)),
+        key,
+      );
+    assert.ok(!p.calls.some((c) => c.command === 'case_data_save' || c.command === 'new_case'));
+  });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} uses backend parent gates without hiding independent unknown fields`, async () => {
+    for (const enabled of [undefined, false, true]) {
+      const p = page(
+        name,
+        name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+        [site],
+        initialValues,
+        {
+          schema: [
+            ...schema,
+            field('CHILD_DATA', '地表数据', ''),
+            field('AUXILIARY_DATA', '地表数据', ''),
+          ],
+          configuration: async () => ({
+            fields: [
+              {
+                name: 'CHILD_DATA',
+                mode: 'editable',
+                pending: true,
+                parent_gate: 'EXISTING_PROCESS_SWITCH',
+                parent_gate_enabled: enabled,
+              },
+              { name: 'AUXILIARY_DATA', mode: 'editable', pending: true },
+            ],
+          }),
+        },
+      );
+      p.state.expert = true;
+      await p.mount();
+      if (name === 'CasesPage') await p.click('case-step-3');
+      const controls = p.render().fields;
+      assert.equal(
+        controls.some((f) => f.id.endsWith('CHILD_DATA') && !f.id.endsWith('AUXILIARY_DATA')),
+        enabled === true,
+      );
+      assert.ok(controls.some((f) => f.id.endsWith('AUXILIARY_DATA')));
     }
   });
