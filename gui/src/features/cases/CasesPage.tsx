@@ -722,7 +722,6 @@ export default function CasesPage() {
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
       {advanced && (
         <>
-          <div className="form-grid">{extras.map(render)}</div>
           {step === 3 && (
             <ProcessDataGroups
               groups={dataGroups}
@@ -731,6 +730,7 @@ export default function CasesPage() {
               disabled={editingDisabled}
             />
           )}
+          <div className="form-grid">{extras.map(render)}</div>
         </>
       )}
     </Advanced>

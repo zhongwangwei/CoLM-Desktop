@@ -867,7 +867,6 @@ export default function NewCasePage() {
     <Advanced open={advanced} onOpenChange={setAdvanced} title={t('更多配置', 'More settings')}>
       {advanced && (
         <>
-          <div className="form-grid">{extraOptions.map(renderOption)}</div>
           {step === 3 && (
             <ProcessDataGroups
               groups={dataGroups}
@@ -876,6 +875,7 @@ export default function NewCasePage() {
               disabled={!enabled}
             />
           )}
+          <div className="form-grid">{extraOptions.map(renderOption)}</div>
         </>
       )}
     </Advanced>
