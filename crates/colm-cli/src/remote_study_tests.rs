@@ -66,7 +66,7 @@ fn pending_and_comparison_paths_stay_within_the_bound_job() {
     let command = comparison_command(
         &record,
         "/data/colm/s/abc/.colm/studies/s1",
-        &[record.remote_project.clone()],
+        std::slice::from_ref(&record.remote_project),
     )
     .unwrap();
     assert!(command.contains("'/data/colm/engine/abc123/bin/colm-cli' study-verify-comparison '/data/colm/s/abc/.colm/studies/s1'"));
@@ -74,13 +74,13 @@ fn pending_and_comparison_paths_stay_within_the_bound_job() {
     assert!(comparison_command(
         &record,
         "/other/studies/s1",
-        &[record.remote_project.clone()]
+        std::slice::from_ref(&record.remote_project)
     )
     .is_err());
     assert!(comparison_command(
         &record,
         "/data/colm/s/abc/.colm/studies/../../outside",
-        &[record.remote_project.clone()]
+        std::slice::from_ref(&record.remote_project)
     )
     .is_err());
 }
