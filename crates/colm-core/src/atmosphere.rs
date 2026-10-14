@@ -479,16 +479,23 @@ fn orbital_declination(calendar_day: f64) -> f64 {
     let mean_anomaly = mean_longitude - 4.92251015;
     let sine = fortran_sin(mean_anomaly);
     // `lamb = lambm + eccen*(2*sinl + eccen*(1.25*sin(2*lmm) + eccen*((13/12)*sin(3*lmm) - 0.25*sinl)))`
-    // 这一串里的三个 `eccen*X + Y` gfortran 在 `-O2`（`-ffp-contract=fast` 是
-    // GCC 默认）下**收缩成 FMA**，而最里层的 `(13/12)*sin(3*lmm) - 0.25*sinl`
-    // **没有**收缩。逐位量过：六组网格中心 × 40 天 × 48 个半步 = 11520 个
-    // `orb_coszen` 取值里，写成纯乘加有 15 个差 1 ULP，只把最里层写成 FMA 同样
-    // 15 个，按下面这样写 **0 个**。`f_solvd`/`f_xy_solarin` 是 tier1/tier0，
-    // 差 1 ULP 就是红条，所以这几处必须照抄编译器的收缩选择。
-    let level_inner = (13.0 / 12.0) * fortran_sin(3.0 * mean_anomaly) - 0.25 * sine;
-    let level_1 = eccentricity.contract(level_inner, 1.25 * fortran_sin(2.0 * mean_anomaly));
-    let level_2 = eccentricity.contract(level_1, 2.0 * sine);
-    let lambda = eccentricity.contract(level_2, mean_longitude);
+    // gfortran `-O2`（`-ffp-contract=fast` 是 GCC 默认）的收缩选择照抄**内核反汇编**
+    // （Homebrew GCC 16.1.0，`kernels/default/colm.x` 的 `___mod_orbcoszen_MOD_orb_coszen`）：
+    //
+    // ```text
+    // fnmsub d0, sin3, 13/12, 0.25*sinl   ; inner = sin3*(13/12) - 0.25*sinl
+    // fmadd  d0, sin2, 1.25, eccen*inner   ; 收缩的是 1.25*sin2，不是 eccen*inner
+    // fmadd  d0, sinl, 2.0,  eccen*l1      ; 收缩的是 2*sinl
+    // fmadd  d0, l2,   eccen, lambm
+    // ```
+    //
+    // 早先按"三个 `eccen*X + Y` 收缩、最里层不收缩"写，在 11520 个取值上 0 差，但扫一年全部
+    // 半小时 × 6 个网格中心（105408 个）有 3 个差 1 ULP；AU-Preston 2000-02-23 01:30 UTC
+    // 就撞上一个，`f_solvd` 等四个波段与 `f_rnet` 跟着差 1 ULP（第 692 轮）。按上面写法 0 个。
+    let level_inner = fortran_sin(3.0 * mean_anomaly).contract(13.0 / 12.0, -(0.25 * sine));
+    let level_1 = fortran_sin(2.0 * mean_anomaly).contract(1.25, eccentricity * level_inner);
+    let level_2 = sine.contract(2.0, eccentricity * level_1);
+    let lambda = level_2.contract(eccentricity, mean_longitude);
     fortran_asin(fortran_sin(0.409214646) * fortran_sin(lambda))
 }
 

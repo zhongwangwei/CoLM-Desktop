@@ -33056,7 +33056,7 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
 | 保存为新模型版本 → 算例绑定 → 运行 | 运行副本里 `DEF_TUNING_ZLND = 5.0e-3`，与 m000005 一致 |
 | 修复后重启应用 | 已有算例自动绑到 official@3；首页“最近的项目”可回到算例 |
 
-**修掉的缺陷**（第 1–3 条第一段，第 4–5 条第二段）：
+**修掉的缺陷**（第 1–3 条第一段，第 4–6 条第二段）：
 
 1. **Fortran 引擎读强迫场路径少了 `/`**（`colm-model/src/materialize.rs`）。物化运行副本时，`rewrite_case_paths` 用 `canonicalize()` 规范化路径，目录结尾的 `/` 被去掉。Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)` 直接拼接，于是得到 `.../ForcingCN-Cng_...nc`，colm 阶段 `STOP 1`。Rust 用路径拼接，所以没暴露。修法：原值带结尾分隔符时保留。新测试 `materialized_directory_fields_keep_their_trailing_separator`，修复前失败。
 2. **GUI 参数率定预检全部失败**：报 `unknown field process_file`。参数目录的作用域来自 `colm_model::ParameterScopeInstance`，带 `process_file`，读出来恒为 null；研究规格的 `study::spec::ParameterScopeInstance` 没有这个字段，而且 `deny_unknown_fields`。前端 `study.ts` 原样转发。修法：`parameterSpec` 只带研究规格认识的四个字段，`process_file` 非空时明确报错。新增前端测试，修复前失败。
@@ -33064,8 +33064,12 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
 
 4. **城市单点漏读 `Snowf`**（`colm-forcing/src/point.rs`、`colm-runtime`）。AU-Preston 完整窗口的首个分叉二分到 1994-06-27 21:00–21:30 UTC 这一步：这一步 `a_prc`/`a_prl` 的 Rust 值为 0，Fortran 为 1.10e-8/2.19e-8，正好 1:2。强迫文件里这一刻 `Rainf = 0`、`Snowf = 3.2868e-8`，是窗口内一次微量降雪。上游 `MOD_Forcing.F90` 的 POINT 分支在 `DEF_URBAN_RUN` 下，降水槽变量名为 `Rainf` 时会加上 `Snowf`；逐时读与整段预读两条路径都这样做，文件里没有 `Snowf` 就停机。Rust 一直只读 `Rainf`。第 658 轮的 2003–2004 窗口没有降雪，所以没有暴露。修法：新增 `load_point_forcing_with_options(…, urban_snowfall)`，`PointRuntimeConfig.urban_snowfall` 取自 `DEF_URBAN_RUN`；缺 `Snowf` 时报错，与上游一致。新测试 `urban_point_runs_add_snowfall_to_rainfall_like_upstream`。
    - 复现窗口（1994-06-01 重启 → 06-28）：修后 history 146 个变量、6/27 与 6/28 的重启全部逐位一致。
-   - GUI 完整 12 年窗口重跑（official@5）：146 组重启全部逐位一致，landdata 一致；history 144 份中只有 `2000-02` 一份的 **2000-02-23 01:30 UTC 一个小时记录**，`f_solvd/solvi/solnd/srvi/rnet/fsenl` 等 14 个诊断量差 ≤ 2.8e-14（1 ULP 级），其后状态完全相同。这一时刻 `SWdown = 287.87`；POINT 走 `MOD_Forcing.F90:600-640` 的太阳高度角与云量拆分。根因待逐步打印该段中间量后确认，复现包仍在 `tmp/au-preston-1994-06/`（`run.sh` 已修为覆盖旧结果）。
+   - GUI 完整 12 年窗口重跑（official@5）：146 组重启全部逐位一致；history 只剩 2000-02-23 01:30 UTC 一个小时记录有 14 个诊断量差 1 ULP，由第 6 条修掉。
 5. **作物卡片点“关闭”永远显示“未指定”**（`scientific-setup.ts`）。作物没有 namelist 开关，开不开由内核与种植日决定，未开启就是实际生效的状态。改为未开启时显示“已选择: 关闭”。原断言空串的测试改为 `.false.`，并新增“开启 → 关闭”的回归测试。
+
+6. **`orb_coszen` 的 `lamb` 收缩方式与 gfortran 16.1 不一致**（`colm-core/src/atmosphere.rs`）。用 2000-02-01 的重启起跑到 23 日 02:00，就复现了 AU-Preston 剩下的那个 1 ULP。在 `calday = 54.0625`、网格中心 (-37.5, 145.5) 处，独立编译的 vendored `MOD_OrbCoszen.F90`（内核同款 `-O2 -fdefault-real-8` 选项）与 Rust 逐个比对中间量：`lambm`、`lmm`、`sinl` 相同，`lamb` 差 1 ULP。反汇编 `kernels/default/colm.x` 的 `___mod_orbcoszen_MOD_orb_coszen` 看到的收缩方式是：最内层 `fnmsub`（`sin3·13/12 − 0.25·sinl` **收缩**），中间两层收缩的是 `1.25·sin2` 与 `2·sinl`，而不是 `eccen·X`，最外层 `fma(l2, eccen, lambm)`。这与原注释记载的写法（当时 11520 个取值 0 差）不同。按反汇编改写后，扫一年全部半小时 × 6 个网格中心共 105408 个 `orb_coszen` 值：旧写法 3 个差 1 ULP，新写法 0 个。这 3 个点钉进 `orbital_geometry_matches_current_fortran`，修前失败。
+   - 修后经 GUI 用 Rust 重跑全部算例，对纯 Fortran 结果**全部逐位一致**：CN-Cng（history 24/3048）、US-Ne3（24/8400）、owndata（6/762）、AT-Neu（37/4699，两个引擎都重跑）、**AU-Preston 完整 12 年窗口（144/21024，146 组重启）**；地表数据与全部重启都相同。
+   - 引擎 `--lib --bins` 2423 项、四张生成表 drift、namelist 往返、`oracle --test histmap`、clippy、fmt 全部通过。
 
 **补测（第 692 轮第二段）**：
 - 导出：e2e 驱动新增两个仅测试用的旁路——`POST /pick` 预置下一次文件/目录选择，`COLM_E2E_SAVE_DIR` 让导出直接写目录，不弹原生保存面板。结果页“导出完整 CSV”“导出完整时序 CSV”“导出显示数据（JSON）”“导出报告”、历史记录“导出 CSV/JSON”六个按钮都写出了文件。CN-Cng 的 `f_lfevpa` CSV 共 17544 行，与 24 份 history 的值逐位相同。导出文件名用的是 64 位运行哈希。
@@ -33076,6 +33080,7 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
 **新发现、未修**：
 
 - **选内置站点会静默覆盖第 2 步的选择**：第 2 步明确选了“城市过程 → 关闭”，第 3 步选 AU-Preston 后又变回“开启”，没有任何提示（与“内置站点保留原始默认值”相关）。
+- **首页选的模型版本不随算例保存**：首页“当前版本”选了 `atneu-zlnd` 后，AT-Neu 用该版本运行；应用重启后选择回到官方版，算例的 `model-binding.json` 一直是 official，再运行就静默用官方版，界面没有提示。这是“版本跟应用走还是跟算例走”的设计问题，待定。
 - 界面小问题：
   - 多处直接显示原始 JSON 或内部哈希：多运行比较的 Site 列是 `models/runs/<64 位哈希>`；数据目录的 Shape 列；率定参数行的作用域；版本描述是整段 provenance；研究失败原因只出现在一段 JSON 提示里，状态仍显示 `ready`；历史记录里“新建算例”的对象是哈希。
   - 运行选择框不标引擎。

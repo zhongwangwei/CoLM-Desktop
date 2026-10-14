@@ -153,6 +153,24 @@ fn orbital_geometry_matches_current_fortran() {
             expected
         );
     }
+    // `lamb` 的收缩照抄内核反汇编（第 692 轮）：一年全部半小时 × 6 个网格中心的扫描里，
+    // 旧写法只有这三个点差 1 ULP（第一个就是 AU-Preston 2000-02-23 01:30 UTC）。
+    for (calday, longitude_degrees, latitude_degrees, expected) in [
+        (54.0625, 145.5, -37.5, 0x3feb_e478_ddab_7bb9_u64),
+        (54.0625, -179.5, -89.5, 0x3fc7_b37c_f241_6f47),
+        (79.395_833_333_333_33, -179.5, -89.5, 0x3f45_57c4_ec6d_c257),
+    ] {
+        assert_eq!(
+            orbital_cosine_zenith(
+                calday,
+                crate::grid_radians(longitude_degrees),
+                crate::grid_radians(latitude_degrees),
+            )
+            .to_bits(),
+            expected,
+            "calday {calday}"
+        );
+    }
     // This later-year angle exposes rounding hidden by the integer-day case.
     assert!(
         (orbital_cosine_zenith(200.125, -3.13, 0.01) - 0.655_922_567_920_138_4).abs() < 1.0e-15
