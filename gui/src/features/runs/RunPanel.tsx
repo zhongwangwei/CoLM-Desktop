@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
-import type { RunState } from '../../lib/types';
+import type { RunState, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
 import {
@@ -261,6 +261,19 @@ export default function RunPanel({
       let submitted = false;
       try {
         const revision = state.versionRef;
+        // 用哪个版本运行就把算例绑到哪个版本，重启后仍用它（`model-binding.json`）。
+        for (const dir of targets) {
+          const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+            dir,
+            target: revision,
+          });
+          if (dir === state.selectedCase?.dir)
+            update((old) =>
+              old.selectedCase?.dir === dir
+                ? { selectedCase: { ...old.selectedCase, binding } }
+                : {},
+            );
+        }
         if (host) {
           submitted = true;
           patchRun(targets, runId, { status: 'submitting' });

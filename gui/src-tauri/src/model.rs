@@ -168,9 +168,23 @@ pub async fn model_freeze(
     }
     decode(cli(args).await?)
 }
+/// `target` 给出时把算例绑到这个版本（已迁移的算例就是改绑）：界面上为算例选的版本
+/// 要跟着算例走，重启后仍是它（第 692 轮：原先只是应用级选择，重启后静默回到官方版）。
 #[tauri::command]
-pub async fn model_migrate_case(dir: String) -> Result<CaseBinding, String> {
-    let binding = decode(cli(vec!["model-migrate-case".into(), dir.clone()]).await?)?;
+pub async fn model_migrate_case(
+    dir: String,
+    target: Option<VersionRef>,
+) -> Result<CaseBinding, String> {
+    let mut args = vec!["model-migrate-case".to_string(), dir.clone()];
+    if let Some(target) = target {
+        args.extend([
+            "--model-id".into(),
+            target.id,
+            "--model-revision".into(),
+            target.revision.to_string(),
+        ]);
+    }
+    let binding = decode(cli(args).await?)?;
     colm_history::History::open_default()
         .and_then(|h| h.import_case(&dir))
         .map_err(|e| format!("case migration succeeded, but importing its history failed: {e}"))?;
@@ -265,7 +279,7 @@ pub(crate) async fn model_case_context_with_fields(
     let source = crate::project::open_case(dir.clone())?;
     let version = match model_revision {
         Some(v) => v,
-        None => model_migrate_case(dir.clone()).await?.version,
+        None => model_migrate_case(dir.clone(), None).await?.version,
     };
     let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
     let parent = root()?.join("previews");

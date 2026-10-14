@@ -674,6 +674,10 @@ export const commandContract = {
     "dir": {
       "required": true,
       "rust_type": "String"
+    },
+    "target": {
+      "required": false,
+      "rust_type": "Option<VersionRef>"
     }
   },
   "model_case_runs": {

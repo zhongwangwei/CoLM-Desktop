@@ -33056,7 +33056,7 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
 | 保存为新模型版本 → 算例绑定 → 运行 | 运行副本里 `DEF_TUNING_ZLND = 5.0e-3`，与 m000005 一致 |
 | 修复后重启应用 | 已有算例自动绑到 official@3；首页“最近的项目”可回到算例 |
 
-**修掉的缺陷**（第 1–3 条第一段，第 4–6 条第二段）：
+**修掉的缺陷**（第 1–3 条第一段，第 4–7 条第二段）：
 
 1. **Fortran 引擎读强迫场路径少了 `/`**（`colm-model/src/materialize.rs`）。物化运行副本时，`rewrite_case_paths` 用 `canonicalize()` 规范化路径，目录结尾的 `/` 被去掉。Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)` 直接拼接，于是得到 `.../ForcingCN-Cng_...nc`，colm 阶段 `STOP 1`。Rust 用路径拼接，所以没暴露。修法：原值带结尾分隔符时保留。新测试 `materialized_directory_fields_keep_their_trailing_separator`，修复前失败。
 2. **GUI 参数率定预检全部失败**：报 `unknown field process_file`。参数目录的作用域来自 `colm_model::ParameterScopeInstance`，带 `process_file`，读出来恒为 null；研究规格的 `study::spec::ParameterScopeInstance` 没有这个字段，而且 `deny_unknown_fields`。前端 `study.ts` 原样转发。修法：`parameterSpec` 只带研究规格认识的四个字段，`process_file` 非空时明确报错。新增前端测试，修复前失败。
@@ -33071,16 +33071,22 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
    - 修后经 GUI 用 Rust 重跑全部算例，对纯 Fortran 结果**全部逐位一致**：CN-Cng（history 24/3048）、US-Ne3（24/8400）、owndata（6/762）、AT-Neu（37/4699，两个引擎都重跑）、**AU-Preston 完整 12 年窗口（144/21024，146 组重启）**；地表数据与全部重启都相同。
    - 引擎 `--lib --bins` 2423 项、四张生成表 drift、namelist 往返、`oracle --test histmap`、clippy、fmt 全部通过。
 
+7. **模型版本跟算例走**（用户选定的设计）。原先首页选的版本只是应用级状态，重启后静默回到官方版，算例的 `model-binding.json` 也从未更新。改为：
+   - GUI 命令 `model_migrate_case` 增加可选 `target`，对应 CLI 已有的改绑；
+   - 运行前把算例绑定到本次所用版本；
+   - 打开算例时，绑定为非官方版本就用它；绑定为官方版时，用用户明确选的 `chosenVersion`，没有则用最新官方版。官方版的修订号只随源码更新递增，不算用户选择。
+   原生窗口实测：首页选 `atneu-zlnd` → 打开 AT-Neu → 运行 → 绑定写成 `study-…@1`；重启后 AT-Neu 仍是 `atneu-zlnd · r1`，CN-Cng 和 US-Ne3 是 `Official r6`，没有串味。第一版实现曾让旧的 `official@2` 绑定盖过用户的选择，也曾让上一个算例的版本串到下一个算例，都在实测中发现并改掉。
+
 **补测（第 692 轮第二段）**：
 - 导出：e2e 驱动新增两个仅测试用的旁路——`POST /pick` 预置下一次文件/目录选择，`COLM_E2E_SAVE_DIR` 让导出直接写目录，不弹原生保存面板。结果页“导出完整 CSV”“导出完整时序 CSV”“导出显示数据（JSON）”“导出报告”、历史记录“导出 CSV/JSON”六个按钮都写出了文件。CN-Cng 的 `f_lfevpa` CSV 共 17544 行，与 24 份 history 的值逐位相同。导出文件名用的是 64 位运行哈希。
 - “使用自己的数据”：选站点目录与强迫目录 → 扫描出 4 站 → 选 CN-Cng → 自定义 2008-01-01—07-01、预热截止 02-01 重复 1 次、日输出 → 创建 → 运行。纯 Rust 与纯 Fortran 逐位一致（history 6/762、landdata、全部重启）。发现：第 1 步填的模拟名在第 3 步选站点后被静默改成站点名，于是与已有算例重名；应用拒绝覆盖，提示清楚。
 - 修复后：引擎 `cargo test --workspace --lib --bins -- --test-threads=1` 2423 通过 0 失败；colm-forcing 150、colm-cli 381、`study_cli_tuning` 21、colm-model 26 通过；前端 `npm test` 311 通过；fmt、clippy 干净。
-- 远程（T7920）与 AI 助手：本机 `7920land` 能连，配置在用户的 `remote.json`/`assistant.json` 里，但隔离 HOME 需要接入用户的 SSH 密钥与助手密钥，这一步被权限策略拦下，需要用户授权，本轮没测。`7920ts`、`7920mp` 拒绝连接。
+- **AI 助手**（经用户授权，测试 HOME 以软链接临时使用其助手密钥，测完删除）：DeepSeek 后端往返正常。不许调工具时，它把 `DEF_HIST_FREQ` 答成“秒数”，但自己标了“未验证”；允许调工具后调用 `explain_parameter` 与 `search_code`，答出正确的可选值 TIMESTEP/HOURLY/DAILY/MONTHLY/YEARLY/none，并引用冻结的 Official r6 源码行号。
+- **远程 7920land**（同样授权，临时链接 `~/.ssh`，测完删除）：GUI“检查连接”通过，SSH 成功，服务器上有 14 个 Rust 引擎快照；“输入目录映射 1 项待确认”，原因是映射的本地端 `/Volumes/Data` 未挂载。用 CN-Cng 远程运行时停在提交前：报“这些输入在本机、没有服务器路径；请添加路径映射（或允许上传文件）”。示例数据（26 MB）已传到服务器新目录 `/media/zhwei/data02/zhwei/colm-desktop/e2e-data-20261015/`，哈希核对一致；但在 GUI 里配置目录映射这一步被会话权限策略拦下，远程运行没有跑完。发现两点：GUI 从不传 `--upload-unmapped`，报错里“允许上传文件”这条路在界面上不存在；即使有，CLI 也只上传文件、不上传目录，内置示例有三项是目录（Runtime/、Forcing/、rawdata_unused/）。
 
 **新发现、未修**：
 
 - **选内置站点会静默覆盖第 2 步的选择**：第 2 步明确选了“城市过程 → 关闭”，第 3 步选 AU-Preston 后又变回“开启”，没有任何提示（与“内置站点保留原始默认值”相关）。
-- **首页选的模型版本不随算例保存**：首页“当前版本”选了 `atneu-zlnd` 后，AT-Neu 用该版本运行；应用重启后选择回到官方版，算例的 `model-binding.json` 一直是 official，再运行就静默用官方版，界面没有提示。这是“版本跟应用走还是跟算例走”的设计问题，待定。
 - 界面小问题：
   - 多处直接显示原始 JSON 或内部哈希：多运行比较的 Site 列是 `models/runs/<64 位哈希>`；数据目录的 Shape 列；率定参数行的作用域；版本描述是整段 provenance；研究失败原因只出现在一段 JSON 提示里，状态仍显示 `ready`；历史记录里“新建算例”的对象是哈希。
   - 运行选择框不标引擎。
@@ -33092,5 +33098,5 @@ de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误
 - 撤回一条误判：方案切换“很慢”是测试脚本等待已禁用按钮造成的；实测一次切换约 1 s。
 
 **本轮没做的**：
-- 空间算例（latlon/unstructured 内核编了）、PLUMBER2 黄金回归和 13 项依赖外部数据的测试都需要 `/Volumes/Data`，本轮没有挂载，没测。远程 T7920 与 AI 助手需要用户授权使用其密钥，也没测。
+- 空间算例（latlon/unstructured 内核编了）、PLUMBER2 黄金回归和 13 项依赖外部数据的测试都需要 `/Volumes/Data`，本轮始终没有挂载（`mount` 中没有；`/Volumes/Wei1` 对本进程是 Operation not permitted），没测。远程运行卡在目录映射的配置权限上。
 - 没打 DMG。
