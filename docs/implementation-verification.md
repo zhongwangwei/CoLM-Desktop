@@ -33022,3 +33022,70 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 
 
 de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误复用模型字段归属，以及远程内核测试旧版本开关fixture。修复将数据比较投影与存储所有权解耦；完整配置身份、全部输入文件哈希和评估时段/输出采样仍保留。远程测试使用真实USGS地类系数和CROP PFT参数验证实际内核能力，旧算例标志不再决定版本要求。新增/定向指纹9项和远程内核1项通过，CLI Clippy（tests，-D warnings）、格式与独立复审通过。
+
+
+## 第 692 轮：全量编译与从 GUI 起的全链条测试（2026-10-15）
+
+**做法**：worktree `claude/full-compile-test-2a8124`（基于 `85a96e79`），全新 target 目录全部重编。GUI 端到端在**真实原生窗口**里做，不靠组件测试。
+
+- 原生窗口怎么驱动：本机 `osascript` 没有辅助功能权限（`-1728`），macOS 上 Tauri 也没有 WebDriver。新增 `gui/src-tauri/src/e2e_driver.rs`（feature `e2e-driver`，默认不编）：设了 `COLM_E2E_PORT` 才在 127.0.0.1 开端口，收到 JS 用 `webview.eval` 在真实 WKWebView 里执行，结果经事件 `e2e://result` 回传；客户端 `scripts/gui-e2e.py`。否决了 MockRuntime 方案：69 处命令写死了 Wry 的 `tauri::AppHandle`，且测的不是真窗口。正式包用 `nm`/`strings` 核对过没有驱动代码。
+- 用隔离 `HOME`（`/private/tmp/claude-501/ce2e`）跑，`~/CoLM-cases` 与 `Application Support` 都不碰真实数据。`screencapture -l` 会弹系统屏幕录制授权框，之后只读 DOM，不截屏。
+
+**编译**（全部 exit 0）：
+- 五套内核 `default usgs crop latlon unstructured`，各 140–163 s，`colm_git_sha = f59ffdce`。
+- 引擎 workspace `cargo build --workspace --all-targets` 65 s；`xtask stage-sidecar` 六个 release sidecar 324 s。
+- 原生包 `cargo tauri build --config tauri.bundle.conf.json --bundles app` 231 s；包内 colm-cli 与 staged 逐字节相同。
+
+**闸门**：
+- 引擎：fmt、clippy `-D warnings` 干净；`cargo test --workspace --no-fail-fast -- --test-threads=1` 2557 通过、13 失败、25 忽略。13 项全部是数据缺失：`colm-forcing` 的 `met`/`real_forcing` 找不到 PLUMBER2，`colm-srfdata` 的 `raster`/`real_sites` 找不到 rawdata（`/Volumes/Data` 未挂载，本机没有别的副本）。
+- GUI 后端：fmt、clippy（默认与 `e2e-driver` 两种 feature）干净，318 通过。
+- 前端：`npm test` 309（修复后 310）、typecheck、lint、format:check、build、旧脚本 33/33；`xtask check-gui` 164 条命令契约。
+
+**GUI 全链条**（每一步都在原生窗口里点）：
+
+| 路径 | 结果 |
+|---|---|
+| 首页 → 打开示例 → 5 步向导 → 创建 → 运行（CN-Cng 2008–2009，Rust 三段） | 27 s 完成；结果页 Qle bias 17.4、RMSE 56.3 W/m²，15881 对 |
+| 同算例改 Fortran 引擎 + Fortran 前处理 | **失败**，见缺陷 1；修后 42 s 完成 |
+| CN-Cng 纯 Fortran 对纯 Rust（同为 official@2） | history 24 文件 3048 变量、全部重启、landdata 逐位一致 |
+| 新建模拟 US-Ne3（PFT + BGC + CROP 内核，2002–2003） | Rust 35 s、Fortran 121 s；history 24/8400、landdata 47、26 组重启逐位一致 |
+| 新建模拟 AT-Neu（2010–2012） | Rust 20 s、Fortran 46 s；history 37/4699、全部重启逐位一致 |
+| 新建模拟 AU-Preston（城市，默认窗口 1992-12-31—2004-11-28） | Rust 87 s、Fortran 195 s；修前不一致（缺陷 4），修后全部 146 组重启逐位一致，history 只剩一个小时记录差 1 ULP，见下 |
+| 结果页 7 个视图、多运行比较、诊断偏差、历史记录、计算资源、设置 | 都能打开，没有 JS 错误或未处理的 Promise 拒绝 |
+| 研究：参数率定 AT-Neu Qle，`DEF_TUNING_ZLND ∈ [0.005, 0.05]`，DE 4×1 | **两处阻断**，见缺陷 3、4；修后 81 s 完成，9 个成员都可行，最优 m000005 训练 0.7064、验证 0.6481（基准 0.7148/0.6529） |
+| 保存为新模型版本 → 算例绑定 → 运行 | 运行副本里 `DEF_TUNING_ZLND = 5.0e-3`，与 m000005 一致 |
+| 修复后重启应用 | 已有算例自动绑到 official@3；首页“最近的项目”可回到算例 |
+
+**修掉的缺陷**（第 1–3 条第一段，第 4–5 条第二段）：
+
+1. **Fortran 引擎读强迫场路径少了 `/`**（`colm-model/src/materialize.rs`）。物化运行副本时，`rewrite_case_paths` 用 `canonicalize()` 规范化路径，目录结尾的 `/` 被去掉。Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)` 直接拼接，于是得到 `.../ForcingCN-Cng_...nc`，colm 阶段 `STOP 1`。Rust 用路径拼接，所以没暴露。修法：原值带结尾分隔符时保留。新测试 `materialized_directory_fields_keep_their_trailing_separator`，修复前失败。
+2. **GUI 参数率定预检全部失败**：报 `unknown field process_file`。参数目录的作用域来自 `colm_model::ParameterScopeInstance`，带 `process_file`，读出来恒为 null；研究规格的 `study::spec::ParameterScopeInstance` 没有这个字段，而且 `deny_unknown_fields`。前端 `study.ts` 原样转发。修法：`parameterSpec` 只带研究规格认识的四个字段，`process_file` 非空时明确报错。新增前端测试，修复前失败。
+3. **固定了模型修订的研究一启动就失败**：报 `Study was created for kernel <包内>/kernels/default, not <研究>/version/kernel`。`pin_revision` 把内核复制到 `version/kernel`，再带着这份副本委托运行，运行器却只按路径比较。修法：抽出 `ensure_frozen_kernel_dir`，额外放行研究自己记录的那份副本（必须在研究目录内）；内容仍由 manifest 身份与 `Kernel::open` 的 sha256 校验把关。新增单测。注意：修复前创建的研究固定的是旧修订的 `colm-cli`，委托执行时仍走旧逻辑，要重建研究。
+
+4. **城市单点漏读 `Snowf`**（`colm-forcing/src/point.rs`、`colm-runtime`）。AU-Preston 完整窗口的首个分叉二分到 1994-06-27 21:00–21:30 UTC 这一步：这一步 `a_prc`/`a_prl` 的 Rust 值为 0，Fortran 为 1.10e-8/2.19e-8，正好 1:2。强迫文件里这一刻 `Rainf = 0`、`Snowf = 3.2868e-8`，是窗口内一次微量降雪。上游 `MOD_Forcing.F90` 的 POINT 分支在 `DEF_URBAN_RUN` 下，降水槽变量名为 `Rainf` 时会加上 `Snowf`；逐时读与整段预读两条路径都这样做，文件里没有 `Snowf` 就停机。Rust 一直只读 `Rainf`。第 658 轮的 2003–2004 窗口没有降雪，所以没有暴露。修法：新增 `load_point_forcing_with_options(…, urban_snowfall)`，`PointRuntimeConfig.urban_snowfall` 取自 `DEF_URBAN_RUN`；缺 `Snowf` 时报错，与上游一致。新测试 `urban_point_runs_add_snowfall_to_rainfall_like_upstream`。
+   - 复现窗口（1994-06-01 重启 → 06-28）：修后 history 146 个变量、6/27 与 6/28 的重启全部逐位一致。
+   - GUI 完整 12 年窗口重跑（official@5）：146 组重启全部逐位一致，landdata 一致；history 144 份中只有 `2000-02` 一份的 **2000-02-23 01:30 UTC 一个小时记录**，`f_solvd/solvi/solnd/srvi/rnet/fsenl` 等 14 个诊断量差 ≤ 2.8e-14（1 ULP 级），其后状态完全相同。这一时刻 `SWdown = 287.87`；POINT 走 `MOD_Forcing.F90:600-640` 的太阳高度角与云量拆分。根因待逐步打印该段中间量后确认，复现包仍在 `tmp/au-preston-1994-06/`（`run.sh` 已修为覆盖旧结果）。
+5. **作物卡片点“关闭”永远显示“未指定”**（`scientific-setup.ts`）。作物没有 namelist 开关，开不开由内核与种植日决定，未开启就是实际生效的状态。改为未开启时显示“已选择: 关闭”。原断言空串的测试改为 `.false.`，并新增“开启 → 关闭”的回归测试。
+
+**补测（第 692 轮第二段）**：
+- 导出：e2e 驱动新增两个仅测试用的旁路——`POST /pick` 预置下一次文件/目录选择，`COLM_E2E_SAVE_DIR` 让导出直接写目录，不弹原生保存面板。结果页“导出完整 CSV”“导出完整时序 CSV”“导出显示数据（JSON）”“导出报告”、历史记录“导出 CSV/JSON”六个按钮都写出了文件。CN-Cng 的 `f_lfevpa` CSV 共 17544 行，与 24 份 history 的值逐位相同。导出文件名用的是 64 位运行哈希。
+- “使用自己的数据”：选站点目录与强迫目录 → 扫描出 4 站 → 选 CN-Cng → 自定义 2008-01-01—07-01、预热截止 02-01 重复 1 次、日输出 → 创建 → 运行。纯 Rust 与纯 Fortran 逐位一致（history 6/762、landdata、全部重启）。发现：第 1 步填的模拟名在第 3 步选站点后被静默改成站点名，于是与已有算例重名；应用拒绝覆盖，提示清楚。
+- 修复后：引擎 `cargo test --workspace --lib --bins -- --test-threads=1` 2423 通过 0 失败；colm-forcing 150、colm-cli 381、`study_cli_tuning` 21、colm-model 26 通过；前端 `npm test` 311 通过；fmt、clippy 干净。
+- 远程（T7920）与 AI 助手：本机 `7920land` 能连，配置在用户的 `remote.json`/`assistant.json` 里，但隔离 HOME 需要接入用户的 SSH 密钥与助手密钥，这一步被权限策略拦下，需要用户授权，本轮没测。`7920ts`、`7920mp` 拒绝连接。
+
+**新发现、未修**：
+
+- **选内置站点会静默覆盖第 2 步的选择**：第 2 步明确选了“城市过程 → 关闭”，第 3 步选 AU-Preston 后又变回“开启”，没有任何提示（与“内置站点保留原始默认值”相关）。
+- 界面小问题：
+  - 多处直接显示原始 JSON 或内部哈希：多运行比较的 Site 列是 `models/runs/<64 位哈希>`；数据目录的 Shape 列；率定参数行的作用域；版本描述是整段 provenance；研究失败原因只出现在一段 JSON 提示里，状态仍显示 `ready`；历史记录里“新建算例”的对象是哈希。
+  - 运行选择框不标引擎。
+  - 跑完 Fortran 后，运行页摘要回到“本机 · Rust”。
+  - 保存版本后顶部通知写成“研究任务已创建”。
+  - 计算资源页写“8 CPU”，本机是 16 个逻辑核。
+  - 内置示例在过长的 HOME 下，`SITE_fsitedata` 超过 256 字符时直接露出英文原始报错。
+- 观察：结果页加载 2 年逐时序列后，WebContent 进程常驻约 2.2 GB。没有拆分原因。
+- 撤回一条误判：方案切换“很慢”是测试脚本等待已禁用按钮造成的；实测一次切换约 1 s。
+
+**本轮没做的**：
+- 空间算例（latlon/unstructured 内核编了）、PLUMBER2 黄金回归和 13 项依赖外部数据的测试都需要 `/Volumes/Data`，本轮没有挂载，没测。远程 T7920 与 AI 助手需要用户授权使用其密钥，也没测。
+- 没打 DMG。

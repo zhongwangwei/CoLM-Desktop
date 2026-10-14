@@ -61,6 +61,10 @@ mod recent_tests;
 /// 起始目录用上次记住的那个：选路径这件事十有八九是在同一棵树里换个位置。
 #[tauri::command]
 pub async fn pick_folder(app: tauri::AppHandle, key: String) -> Option<String> {
+    #[cfg(feature = "e2e-driver")]
+    if let Some(path) = crate::e2e_driver::take_pick() {
+        return Some(path);
+    }
     let start = load_recent(app).get(&key).cloned();
     let mut d = rfd::AsyncFileDialog::new();
     if let Some(s) = start.filter(|s| std::path::Path::new(s).is_dir()) {
@@ -78,6 +82,10 @@ pub async fn pick_file(
     key: String,
     filter: Option<String>,
 ) -> Option<String> {
+    #[cfg(feature = "e2e-driver")]
+    if let Some(path) = crate::e2e_driver::take_pick() {
+        return Some(path);
+    }
     // 起始目录取上次那个**值所在的目录** —— 记住的是文件路径时，
     // 直接当目录用会打不开。
     let start = load_recent(app).get(&key).cloned().and_then(|s| {
@@ -151,6 +159,15 @@ pub async fn export_text_file(
     mime_type: String,
 ) -> Result<Option<String>, String> {
     let extension = text_export_filter(&suggested_name, &mime_type)?;
+    #[cfg(feature = "e2e-driver")]
+    if let Some(dir) = crate::e2e_driver::save_dir() {
+        let path = dir.join(&suggested_name);
+        return tauri::async_runtime::spawn_blocking(move || {
+            finish_text_export(Some(path), content)
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    }
     let selected = rfd::AsyncFileDialog::new()
         .set_title("导出文件")
         .set_file_name(suggested_name)

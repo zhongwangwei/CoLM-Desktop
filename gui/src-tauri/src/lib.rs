@@ -11,6 +11,8 @@
 
 mod assistant;
 mod config;
+#[cfg(feature = "e2e-driver")]
+mod e2e_driver;
 mod example;
 mod forcing;
 mod history;
@@ -50,7 +52,13 @@ fn print_report(window: tauri::WebviewWindow) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(feature = "e2e-driver")]
+    let builder = builder.setup(|app| {
+        e2e_driver::start(app.handle());
+        Ok(())
+    });
+    builder
         .menu(|app| {
             use tauri::menu::{Menu, MenuItem};
 
