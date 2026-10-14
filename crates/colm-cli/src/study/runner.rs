@@ -379,6 +379,34 @@ pub fn read_result(study_dir: &Path, relative: &Path) -> Result<String> {
     fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))
 }
 
+/// 运行用的内核目录必须是建研究时冻结的那一份。
+///
+/// 例外：固定了模型修订的研究（`study_version::pin_revision`）会把那份内核复制到
+/// `version/kernel`，再带着这份副本委托给固定的 `colm-cli`。只比路径的话，这类研究
+/// 一启动就报 "Study was created for kernel …"（实测：GUI 里新建的参数率定全部如此）。
+/// 内容由上面的 manifest 身份检查与 `Kernel::open` 的 sha256 校验把关，这里只放行
+/// 研究自己记录的那份副本，别的目录照旧拒绝。
+fn ensure_frozen_kernel_dir(study_dir: &Path, frozen: &Path, kernel_dir: &Path) -> Result<()> {
+    let frozen = colm_kernel::manifest::absolute(frozen)?;
+    let kernel_dir = &colm_kernel::manifest::absolute(kernel_dir)?;
+    if frozen == *kernel_dir {
+        return Ok(());
+    }
+    let pinned_copy = crate::study_version::pinned(study_dir)?
+        .map(|pin| colm_kernel::manifest::absolute(&pin.kernel))
+        .transpose()?;
+    if pinned_copy.as_deref() == Some(kernel_dir)
+        && kernel_dir.starts_with(colm_kernel::manifest::absolute(study_dir)?)
+    {
+        return Ok(());
+    }
+    bail!(
+        "Study was created for kernel {}, not {}",
+        frozen.display(),
+        kernel_dir.display()
+    );
+}
+
 pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
     let _run_lock = StudyRunLock::acquire(&study_dir)?;
@@ -448,14 +476,7 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
         );
     }
     if let Some(frozen) = manifest.spec.kernel_dir.as_deref() {
-        let frozen = colm_kernel::manifest::absolute(Path::new(frozen))?;
-        if frozen != kernel_dir {
-            bail!(
-                "Study was created for kernel {}, not {}",
-                frozen.display(),
-                kernel_dir.display()
-            );
-        }
+        ensure_frozen_kernel_dir(&study_dir, Path::new(frozen), &kernel_dir)?;
     }
     super::engine::verify_frozen_inputs(&manifest)?;
     super::model::verify_if_captured(&manifest)?;
@@ -3583,6 +3604,37 @@ pub(crate) fn save_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_studys_own_kernel_copy_is_accepted_but_other_dirs_are_not() {
+        let root = std::env::temp_dir().join(format!("colm-frozen-kernel-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let study = root.join("study");
+        let frozen = root.join("kernels/default");
+        let copy = study.join("version/kernel");
+        let other = root.join("elsewhere/default");
+        for dir in [&frozen, &copy, &other] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        ensure_frozen_kernel_dir(&study, &frozen, &frozen).unwrap();
+        // 没有固定版本时，副本路径同样不算。
+        assert!(ensure_frozen_kernel_dir(&study, &frozen, &copy).is_err());
+        fs::write(
+            study.join(crate::study_version::FILE),
+            serde_json::json!({
+                "name": "official", "head": "h", "base_commit": "",
+                "touches": {"engine": false, "kernel": false},
+                "cli": study.join("version/bin/colm-cli"),
+                "kernel": copy, "pinned_unix": 0
+            })
+            .to_string(),
+        )
+        .unwrap();
+        ensure_frozen_kernel_dir(&study, &frozen, &copy).unwrap();
+        let error = ensure_frozen_kernel_dir(&study, &frozen, &other).unwrap_err();
+        assert!(format!("{error:#}").contains("Study was created for kernel"));
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn task_logs_are_sampled_before_entering_the_scheduler_channel() {

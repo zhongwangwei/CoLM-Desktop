@@ -2,7 +2,13 @@ export interface ParameterContext {
   name: string;
   id: string;
   scope: string;
-  scope_instance: { kind: string; scheme?: string; index?: number; type_name?: string };
+  scope_instance: {
+    kind: string;
+    scheme?: string | null;
+    index?: number | null;
+    type_name?: string | null;
+    process_file?: string | null;
+  };
   label_zh: string;
   label_en: string;
   default: number;
@@ -37,10 +43,19 @@ export function parameterSpec(
     max === row.sentinel
   )
     throw new Error(`${row.name}: outside physical bounds or sentinel`);
+  // 参数目录的作用域来自 colm-model（多一个 process_file，读出来恒为 null），
+  // 研究规格的作用域没有这个字段且拒绝未知字段：原样转发时预检报
+  // `unknown field process_file`（实测：GUI 参数率定预检全部失败）。只带研究规格认识的字段。
+  const { kind, scheme, index, type_name, process_file } = row.scope_instance;
+  if (process_file != null)
+    throw new Error(`${row.name}: process-file parameters cannot be sampled by a study`);
+  const scope_instance = Object.fromEntries(
+    Object.entries({ kind, scheme, index, type_name }).filter(([, v]) => v != null),
+  );
   return {
     name: row.name,
     parameter_id: row.id,
-    scope_instance: row.scope_instance,
+    scope_instance,
     sample_min: min,
     sample_max: max,
     scale,

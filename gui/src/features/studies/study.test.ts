@@ -39,6 +39,31 @@ describe('study contracts', () => {
     assert.throws(() => parameterSpec(parameter, '', '3', 'linear'));
     assert.throws(() => parameterSpec(parameter, '1', '11', 'linear'));
   });
+  it('sends only the study scope fields that the study spec accepts', () => {
+    const catalogRow: ParameterContext = {
+      ...parameter,
+      scope_instance: {
+        kind: 'case-scalar',
+        scheme: null,
+        index: null,
+        type_name: null,
+        process_file: null,
+      },
+    };
+    assert.deepEqual(parameterSpec(catalogRow, '1', '3', 'linear').scope_instance, {
+      kind: 'case-scalar',
+    });
+    assert.throws(
+      () =>
+        parameterSpec(
+          { ...catalogRow, scope_instance: { kind: 'case-scalar', process_file: 'x.csv' } },
+          '1',
+          '3',
+          'linear',
+        ),
+      /process-file/,
+    );
+  });
   it('rejects training/validation leakage', () => {
     assert.throws(() =>
       calibrationWindows(
