@@ -187,8 +187,25 @@ test('confirmed backend disabled gates block activation, but allow explicit reco
   assert.equal(c.choices[1].reason, '');
   assert.equal(
     setupChoices(overlay(), fields, environment).find((c) => c.id === 'crop')!.value,
-    '',
+    '.false.',
   );
+});
+
+test('crop shows off when no planting day is set, including after choosing off', () => {
+  const env = { ...environment, domain: 'single' };
+  const context = {
+    fields: [],
+    process_files: [],
+    crop_defaults: { DEF_TUNING_CROP_PLANTING_DAY: '120' },
+  };
+  const value = (o: Overlay) =>
+    setupChoices(o, fields, env, [], context).find((c) => c.id === 'crop')!.value;
+  let o = apply(overlay(), 'DEF_USE_BGC', '.true.');
+  assert.equal(value(o), '.false.');
+  o = applySetupRequest(o, fields, { id: 'crop', value: '.true.' }, env, context);
+  assert.equal(value(o), '.true.');
+  o = applySetupRequest(o, fields, { id: 'crop', value: '.false.' }, env, context);
+  assert.equal(value(o), '.false.');
 });
 
 test('active tracer providers protect BGC, routing and LULCC upstream changes', () => {

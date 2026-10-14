@@ -300,11 +300,13 @@ export function setupChoices(
   }
   return controls.map((c) => ({
     ...c,
+    // 作物没有 namelist 开关（开不开由内核与种植日决定），未开启就是实际生效的“关闭”。
+    // 原先返回空串，卡片永远停在“未指定”，点“关闭”也无处记录（第 692 轮原生界面实测）。
     value:
       c.id === 'crop'
         ? crop
           ? '.true.'
-          : ''
+          : '.false.'
         : foundationValue(overlay.physics, c.id, overlay.parameters),
     pending: c.keys.some(
       (k) =>
