@@ -5802,9 +5802,10 @@ fn point_hybrid_climate(
     case_dir: &Path,
 ) -> Result<()> {
     use colm_runtime::hybrid_climate::{ClimateAccumulator, ClimateSample};
-    let series = colm_forcing::load_point_forcing_with_boundary_layer(
+    let series = colm_forcing::load_point_forcing_with_options(
         &config.forcing_file,
         config.boundary_layer.as_ref(),
+        config.urban_snowfall,
     )?;
     let site_radians = config.site_radians.unwrap_or((
         colm_core::site_radians(config.longitude_degrees),

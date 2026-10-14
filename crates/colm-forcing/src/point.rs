@@ -329,6 +329,21 @@ pub fn load_point_forcing_with_boundary_layer(
     path: impl AsRef<Path>,
     boundary_layer: Option<&BoundaryLayerSource>,
 ) -> Result<PointForcingSeries> {
+    load_point_forcing_with_options(path, boundary_layer, false)
+}
+
+/// 同 [`load_point_forcing_with_boundary_layer`]；`urban_snowfall` 对应 `DEF_URBAN_RUN`。
+///
+/// 上游 `MOD_Forcing.F90` 的 POINT 分支在城市运行时，降水槽位名为 `Rainf` 就把同时刻的
+/// `Snowf` 加进去（两条读法 `ncio_read_site_time` 与 `ncio_read_period_serial` 都是），
+/// 文件里没有 `Snowf` 时上游读失败停机。Urban-PLUMBER 正是把降水拆成这两个变量。
+/// 实测 AU-Preston 完整窗口：1994-06-27 21:00 有一条 `Snowf = 3.29e-8`、`Rainf = 0`，
+/// Rust 漏读后从这一步起与 Fortran 分叉（第 692 轮）。
+pub fn load_point_forcing_with_options(
+    path: impl AsRef<Path>,
+    boundary_layer: Option<&BoundaryLayerSource>,
+    urban_snowfall: bool,
+) -> Result<PointForcingSeries> {
     let path = path.as_ref();
     let summary = summarize(path)?;
     let problems = check_series(&summary, None);
@@ -371,7 +386,7 @@ pub fn load_point_forcing_with_boundary_layer(
         &pressure,
         summary.step_seconds,
     )?;
-    let precipitation = slot_values(
+    let mut precipitation = slot_values(
         &file,
         path,
         resolved.vname[3],
@@ -379,6 +394,25 @@ pub fn load_point_forcing_with_boundary_layer(
         summary.steps,
         summary.step_seconds,
     )?;
+    if urban_snowfall && resolved.vname[3] == Some("Rainf") {
+        let snowfall = slot_values(
+            &file,
+            path,
+            Some("Snowf"),
+            4,
+            summary.steps,
+            summary.step_seconds,
+        )
+        .with_context(|| {
+            format!(
+                "{}: an urban POINT run adds Snowf to Rainf, as MOD_Forcing.F90 does",
+                path.display()
+            )
+        })?;
+        for (rain, snow) in precipitation.iter_mut().zip(snowfall) {
+            *rain += snow;
+        }
+    }
     let eastward_wind = match resolved.vname[4] {
         Some(name) => slot_values(
             &file,

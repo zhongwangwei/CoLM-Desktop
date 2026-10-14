@@ -45,8 +45,9 @@ pub use high_res::{
 };
 pub use met::summarize;
 pub use point::{
-    load_point_forcing, load_point_forcing_with_boundary_layer, observation_heights,
-    BoundaryLayerSource, ObservationHeights, PointForcingFrame, PointForcingSeries,
+    load_point_forcing, load_point_forcing_with_boundary_layer, load_point_forcing_with_options,
+    observation_heights, BoundaryLayerSource, ObservationHeights, PointForcingFrame,
+    PointForcingSeries,
 };
 pub use render::{render, ForcingSpec};
 pub use slots::{resolve, resolve_with, Resolved, SLOTS};
