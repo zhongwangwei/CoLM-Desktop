@@ -410,6 +410,43 @@ fn forcing_configuration_is_frozen_and_its_data_reference_remains_read_only() {
 }
 
 #[test]
+fn materialized_directory_fields_keep_their_trailing_separator() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let data = tmp.0.join("Forcing");
+    fs::create_dir_all(&data).unwrap();
+    let text = fs::read_to_string(case.join("case.nml"))
+        .unwrap()
+        .replace("/\n", " DEF_forcing_namelist = 'forcing.nml'\n/\n");
+    fs::write(case.join("case.nml"), text).unwrap();
+    fs::write(
+        case.join("forcing.nml"),
+        format!(
+            "&nl_colm_forcing\n DEF_dir_forcing = '{}/'\n DEF_forcing%fprefix(1) = 'met.nc'\n/\n",
+            data.display()
+        ),
+    )
+    .unwrap();
+    let official = reg.install_official(code()).unwrap();
+    let run = reg
+        .materialize_run(&official.version, &case, &tmp.0.join("run"), "slash")
+        .unwrap();
+    let forcing =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("forcing.nml")).unwrap())
+            .unwrap();
+    let expected = format!(
+        "{}{}",
+        data.canonicalize().unwrap().display(),
+        std::path::MAIN_SEPARATOR
+    );
+    assert_eq!(
+        forcing.get("DEF_dir_forcing"),
+        Some(&colm_namelist::Value::Str(expected))
+    );
+}
+
+#[test]
 fn expected_old_value_rejects_stale_parameter_edits() {
     let tmp = Temp::new();
     let reg = tmp.registry();
