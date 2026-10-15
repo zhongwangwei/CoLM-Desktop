@@ -145,10 +145,53 @@ export default function CasesPage() {
         setValues(apply);
         setSaved(apply);
         setExplicitValues(apply);
+        await refreshHistory(context, request);
+        if (!request.active || epoch.current !== request) return;
         setError('');
         if (closed.length) notify(autoClosedText(closed, en));
       }
     });
+  }
+  async function refreshHistory(
+    context: { entry: { dir: string }; profile: NonNullable<typeof modelContext>['profile'] },
+    request: { active: boolean },
+  ) {
+    const kernel = compatibleKernel(state.kernels, context.profile);
+    const text = kernel
+      ? await invoke<string>('read_text', { path: `${context.entry.dir}/case.nml` })
+      : '';
+    const histories = kernel
+      ? await invoke<
+          {
+            name: string;
+            writable: boolean | null;
+            blocked_by?: string;
+            settable: boolean;
+            long_name?: string | null;
+          }[]
+        >('hist_vars', { text, kernelDir: kernel.dir, dir: context.entry.dir })
+      : [];
+    if (!request.active || epoch.current !== request) return;
+    setHistoryVars(
+      histories.map((h) => ({
+        name: h.name,
+        settable: h.settable && h.writable !== false,
+        longName: h.long_name,
+        reason: h.blocked_by,
+      })),
+    );
+    setContextReason(
+      Object.fromEntries(
+        histories
+          .filter((h) => h.blocked_by)
+          .map((h) => [`DEF_hist_vars%${h.name}`, h.blocked_by!]),
+      ),
+    );
+    setDisabledFields(
+      histories
+        .filter((h) => !h.settable || h.writable === false)
+        .map((h) => `DEF_hist_vars%${h.name}`),
+    );
   }
   function selectMode(mode: SimulationMode) {
     return changeCaseOptions(caseSchemeFields(mode));
@@ -362,10 +405,10 @@ export default function CasesPage() {
           )?.dir ?? null,
         modelRevision: state.versionRef,
       });
-      const context = await invoke<{ profile: NonNullable<typeof modelContext>['profile'] }>(
-        'model_case_context',
-        { dir: target, modelRevision: state.versionRef },
-      );
+      const context = await invoke<{
+        entry: { dir: string };
+        profile: NonNullable<typeof modelContext>['profile'];
+      }>('model_case_context', { dir: target, modelRevision: state.versionRef });
       if (id.active && epoch.current === id) {
         setModelContext({ dir: target, id: versionId, revision, profile: context.profile });
         if (state.selectedCase?.entry.dir === target)
@@ -381,6 +424,8 @@ export default function CasesPage() {
           ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
         }));
         setDateDraft({});
+        await refreshHistory(context, id);
+        if (!id.active || epoch.current !== id) return;
         setError('');
         notify(t('算例设置已保存', 'Case settings saved'));
       }

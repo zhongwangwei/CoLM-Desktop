@@ -34,13 +34,17 @@ interface Probe {
   longitude_column?: string;
   landtype_column?: string;
   utc_offset_column?: string;
-  variables?: {
-    name: string;
-    label: string;
-    column?: string;
-    qc_column?: string;
-    requires_qc: boolean;
-  }[];
+  columns?: { name: string }[];
+  variables?: (
+    | string
+    | {
+        name: string;
+        label: string;
+        column?: string;
+        qc_column?: string;
+        requires_qc: boolean;
+      }
+  )[];
 }
 let currentLang = 'zh';
 const t = (zh: string, enText: string) => (currentLang === 'en' ? enText : zh);
@@ -81,6 +85,11 @@ export default function PreparationPage() {
     [result, setResult] = useState<unknown>(null),
     [error, setError] = useState('');
   const lock = useRef(false);
+  const observationVariables = (probe?.variables ?? []).filter((v) => typeof v !== 'string');
+  const sourceNames = [
+    ...(probe?.variables ?? []).filter((v): v is string => typeof v === 'string'),
+    ...(probe?.columns ?? []).map((v) => v.name),
+  ];
   const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
   const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
   const num = (k: string) => requiredNumber(form[k], k);
@@ -138,12 +147,16 @@ export default function PreparationPage() {
         { path: form.src },
       );
       setProbe(p);
+      const hasSnow =
+        (p.variables ?? []).includes('Snowf') ||
+        (p.columns ?? []).some((column) => column.name === 'Snowf');
       setSlots(
         (p.slots ?? []).map((s) => ({
           ...s,
           name: s.guessed ?? s.column ?? '',
           units: s.units ?? '',
-          also_add: [],
+          also_add:
+            s.index === 4 && (s.guessed ?? s.column) === 'Rainf' && hasSnow ? ['Snowf'] : [],
         })),
       );
       setForm((f) => ({
@@ -180,7 +193,16 @@ export default function PreparationPage() {
       );
     return slots
       .filter((s) => s.name)
-      .map((s) => ({ index: s.index, name: s.name, units: s.units, also_add: s.also_add }));
+      .map((s) => ({
+        index: s.index,
+        name: s.name,
+        units: s.units,
+        also_add: [
+          ...new Set(
+            s.also_add.map((name) => name.trim()).filter((name) => name && name !== s.name),
+          ),
+        ],
+      }));
   }
   function heights() {
     const v = ['height_v', 'height_t', 'height_q'].map((k) => optional(k));
@@ -235,7 +257,7 @@ export default function PreparationPage() {
             time_column: form.time_column,
             site_column: form.site_column || null,
             site_name: form.site_name || null,
-            variables: (probe.variables ?? [])
+            variables: observationVariables
               .filter((v) => v.column)
               .map((v) => ({ name: v.name, column: v.column, qc_column: v.qc_column || null })),
           },
@@ -403,18 +425,29 @@ export default function PreparationPage() {
       },
     })),
     ...slots.flatMap((s, i) =>
-      ['name', 'units'].map((key) => ({
+      (s.index === 4 ? ['name', 'units', 'also_add'] : ['name', 'units']).map((key) => ({
         id: `prep-slot-${s.index}-${key}`,
-        label: `${s.meaning} ${key === 'name' ? t('变量名', 'Variable') : t('单位', 'Units')}`,
-        value: String(s[key as 'name' | 'units'] ?? ''),
+        label: `${s.meaning} ${key === 'name' ? t('变量名', 'Variable') : key === 'units' ? t('单位', 'Units') : t('附加降水分量（逗号分隔）', 'Additional precipitation components (comma-separated)')}`,
+        value: key === 'also_add' ? s.also_add.join(',') : String(s[key as 'name' | 'units'] ?? ''),
         type: 'text' as const,
         disabled: busy,
         set: (v: string) =>
-          setSlots((all) => all.map((x, j) => (i === j ? { ...x, [key]: v } : x))),
+          setSlots((all) =>
+            all.map((x, j) =>
+              i !== j
+                ? x
+                : key === 'also_add'
+                  ? {
+                      ...x,
+                      also_add: v.split(','),
+                    }
+                  : { ...x, [key]: v, ...(key === 'name' ? { also_add: [] } : {}) },
+            ),
+          ),
       })),
     ),
     ...(mode === 'observation'
-      ? (probe?.variables ?? []).flatMap((v, i) =>
+      ? observationVariables.flatMap((v, i) =>
           ['column', 'qc_column'].map((key) => ({
             id: `prep-obs-${i}-${key}`,
             label: `${v.label} ${key === 'column' ? t('数据列', 'Data column') : t('质控列', 'QC column')}`,
@@ -426,7 +459,9 @@ export default function PreparationPage() {
                 p
                   ? {
                       ...p,
-                      variables: p.variables?.map((x, j) => (i === j ? { ...x, [key]: value } : x)),
+                      variables: observationVariables.map((x, j) =>
+                        i === j ? { ...x, [key]: value } : x,
+                      ),
                     }
                   : p,
               ),
@@ -563,6 +598,14 @@ export default function PreparationPage() {
           <Button disabled={busy || !form.src} onClick={() => void inspect().catch(() => {})}>
             {t('检查输入', 'Inspect input')}
           </Button>
+        )}
+        {sourceNames.includes('Rainf') && sourceNames.includes('Snowf') && (
+          <Notice>
+            {t(
+              '检测到 Rainf 与 Snowf：主变量为 Rainf 时已预选 Snowf 合成总降水，请核对附加分量后生成。已有总降水变量时请留空，避免重复累加。附加分量须在源文件中声明单位，转换时统一单位后累加。',
+              'Rainf and Snowf detected: Snowf is preselected when the primary variable is Rainf. Verify the additional components before generating total precipitation. Leave additions empty for an existing total. Additional components must declare their units in the source; conversion aligns units before summing.',
+            )}
+          </Notice>
         )}
         {slots.length > 0 && (
           <div className="form-grid">

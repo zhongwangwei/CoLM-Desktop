@@ -232,13 +232,20 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
     Ok(())
 }
 
+fn read_remote_config(path: &std::path::Path) -> Result<RemoteConfig, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RemoteConfig::default());
+        }
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    serde_json::from_str(&text).map_err(|error| format!("{}: {error}", path.display()))
+}
+
 #[tauri::command]
-pub fn remote_config(app: tauri::AppHandle) -> RemoteConfig {
-    config_path(&app)
-        .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+pub fn remote_config(app: tauri::AppHandle) -> Result<RemoteConfig, String> {
+    read_remote_config(&config_path(&app)?)
 }
 
 #[tauri::command]
@@ -547,9 +554,18 @@ pub(crate) async fn cli_json(
 
 /// 调 `colm-cli`，取最后一行 JSON；失败时把 stderr 的末尾作为错误。
 pub(crate) async fn ssh_cli_json(
+    args: Vec<String>,
+    resources: Option<PathBuf>,
+    server: Option<&Server>,
+) -> Result<Value, String> {
+    ssh_cli_json_for_run(args, resources, server, None).await
+}
+
+async fn ssh_cli_json_for_run(
     mut args: Vec<String>,
     resources: Option<PathBuf>,
     server: Option<&Server>,
+    run: Option<(&tauri::AppHandle, &str, &str)>,
 ) -> Result<Value, String> {
     if !args.iter().any(|a| a == "--history-db") {
         crate::model::options(&mut args, None)?;
@@ -565,7 +581,23 @@ pub(crate) async fn ssh_cli_json(
     if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
-    let result = ssh_cli_json_untracked(args, resources, server).await;
+    let result = async {
+        if let (Some((app, run_id, case)), Some(event)) = (run, &mut event) {
+            event.detail["run_id"] = json!(run_id);
+            tauri::Emitter::emit(
+                app,
+                "run://started",
+                &json!({
+                    "run_id": run_id, "case": case, "source_case": case,
+                    "operation_id": event.operation_id, "location": "remote",
+                }),
+            )
+            .map_err(|error| error.to_string())?;
+        }
+
+        ssh_cli_json_untracked(args, resources, server).await
+    }
+    .await;
     if let (Some(event), Ok(value)) = (&mut event, &result) {
         crate::history::observe_remote_response(event, value);
     }
@@ -873,7 +905,7 @@ pub(crate) fn scheduler_args(server: &Server) -> Vec<String> {
 }
 
 fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
-    remote_config(app)
+    remote_config(app)?
         .servers
         .into_iter()
         .find(|s| s.host == host)
@@ -884,6 +916,7 @@ fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
 #[allow(clippy::too_many_arguments)]
 pub async fn remote_run(
     app: tauri::AppHandle,
+    run_id: Option<String>,
     case: String,
     host: String,
     kernel: String,
@@ -895,18 +928,27 @@ pub async fn remote_run(
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
 ) -> Result<Value, String> {
+    if let Some(run_id) = &run_id {
+        crate::sidecar::validate_run_id(run_id)?;
+    }
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
-    let server = server_for(app, &host)?;
+    let server = server_for(app.clone(), &host)?;
     let engine = Engine {
         engine,
         ranks,
         model_version,
     };
-    let mut args = run_args(&server, case, kernel, stage, force, false, &engine);
+    let mut args = run_args(&server, case.clone(), kernel, stage, force, false, &engine);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
-    ssh_cli_json(args, resources, Some(&server)).await
+    ssh_cli_json_for_run(
+        args,
+        resources,
+        Some(&server),
+        run_id.as_deref().map(|id| (&app, id, case.as_str())),
+    )
+    .await
 }
 
 /// 服务器上有哪些内核（完整的 Fortran 内核才能给 Fortran 引擎用）。
@@ -1001,7 +1043,10 @@ pub fn remote_job_record(case: String) -> Result<Option<Value>, String> {
 /// 远程作业的状态，加上从日志末尾解析出的阶段与进度（和本机运行同一套解析）。
 #[tauri::command]
 pub async fn remote_status(app: tauri::AppHandle, case: String) -> Result<Value, String> {
-    let server = command_server(&remote_config(app), &["remote-status".into(), case.clone()])?;
+    let server = command_server(
+        &remote_config(app)?,
+        &["remote-status".into(), case.clone()],
+    )?;
     let target = run_record(&case)?
         .map(|(_, _, target)| target)
         .unwrap_or_else(|| case.clone());
@@ -1037,7 +1082,7 @@ pub async fn remote_cancel(app: tauri::AppHandle, case: String) -> Result<Value,
         .map(|(_, _, target)| target)
         .unwrap_or_else(|| case.clone());
     let args = vec!["remote-cancel".into(), target];
-    let server = command_server(&remote_config(app), &args)?;
+    let server = command_server(&remote_config(app)?, &args)?;
     ssh_cli_json(args, None, server.as_ref()).await
 }
 
@@ -1073,7 +1118,7 @@ pub async fn remote_fetch(
     overwrite_newer: Option<bool>,
 ) -> Result<Value, String> {
     // Authentication follows the persisted job host, never the UI selection.
-    let server = command_server(&remote_config(app), &["remote-fetch".into(), case.clone()])?;
+    let server = command_server(&remote_config(app)?, &["remote-fetch".into(), case.clone()])?;
     let target = run_record(&case)?
         .map(|(_, _, target)| target)
         .unwrap_or(case);
@@ -1196,7 +1241,7 @@ pub async fn remote_study_status(
     study_dir: String,
 ) -> Result<Value, String> {
     absolute_study(&study_dir)?;
-    let server = study_server(&remote_config(app), &study_dir)?;
+    let server = study_server(&remote_config(app)?, &study_dir)?;
     ssh_cli_json(
         vec!["remote-study-status".into(), study_dir],
         None,
@@ -1209,7 +1254,7 @@ pub async fn remote_study_status(
 #[tauri::command]
 pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Result<Value, String> {
     absolute_study(&study_dir)?;
-    let server = study_server(&remote_config(app), &study_dir)?;
+    let server = study_server(&remote_config(app)?, &study_dir)?;
     ssh_cli_json(
         vec!["remote-study-fetch".into(), study_dir],
         None,
@@ -1225,7 +1270,7 @@ pub async fn remote_study_cancel(
     study_dir: String,
 ) -> Result<Value, String> {
     absolute_study(&study_dir)?;
-    let server = study_server(&remote_config(app), &study_dir)?;
+    let server = study_server(&remote_config(app)?, &study_dir)?;
     ssh_cli_json(
         vec!["remote-study-cancel".into(), study_dir],
         None,

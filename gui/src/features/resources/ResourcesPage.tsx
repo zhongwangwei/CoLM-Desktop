@@ -34,6 +34,8 @@ export default function ResourcesPage() {
     [maintenance, setMaintenance] = useState(false),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
+    [configLoaded, setConfigLoaded] = useState(false),
+    [historyErrors, setHistoryErrors] = useState<string[]>([]),
     [output, setOutput] = useState<Record<string, unknown>>({}),
     [records, setRecords] = useState<{ dir: string; record: unknown; kind: 'case' | 'study' }[]>(
       [],
@@ -89,6 +91,7 @@ export default function ResourcesPage() {
     setMaintenance(false);
   }
   function addServer() {
+    if (!configLoaded) return;
     if (navigationReason()) {
       setError(navigationReason()!);
       return;
@@ -117,8 +120,23 @@ export default function ResourcesPage() {
   }
   const refresh = useCallback(async () => {
     const token = epoch.current;
-    const [config, hosts, rows, histories] = await Promise.all([
-      invokeJson<{ servers: Server[] }>('remote_config'),
+    setConfigLoaded(false);
+    const config = await invokeJson<{ servers: Server[] }>('remote_config');
+    if (!token.active || token !== epoch.current) return;
+    setServers(config.servers);
+    setConfigLoaded(true);
+    if (!initialized.current) {
+      initialized.current = true;
+      const first = config.servers[0];
+      if (first) {
+        setSelected(`server:${first.host}`);
+        setOriginal(first.host);
+        setEditor(structuredClone(first));
+        setBaseline(JSON.stringify(first));
+      }
+    }
+    const errors: string[] = [];
+    const [hosts, rows, histories] = await Promise.all([
       invokeJson<string[]>('remote_ssh_hosts'),
       Promise.all(
         state.cases.map(async (c) => ({
@@ -131,7 +149,10 @@ export default function ResourcesPage() {
       ),
       Promise.all(
         state.cases.map((c) =>
-          invokeJson<{ studies?: { dir: string }[] }>('case_runs', { case: c.dir }),
+          invokeJson<{ studies?: { dir: string }[] }>('case_runs', { case: c.dir }).catch((e) => {
+            errors.push(`${c.dir}: ${String(e)}`);
+            return { studies: [] };
+          }),
         ),
       ),
     ]);
@@ -151,18 +172,8 @@ export default function ResourcesPage() {
       }),
     );
     if (token.active && token === epoch.current) {
-      setServers(config.servers);
       setAliases(hosts);
-      if (!initialized.current) {
-        initialized.current = true;
-        const first = config.servers[0];
-        if (first) {
-          setSelected(`server:${first.host}`);
-          setOriginal(first.host);
-          setEditor(structuredClone(first));
-          setBaseline(JSON.stringify(first));
-        }
-      }
+      setHistoryErrors(errors);
       setRecords([...rows, ...studies].filter((r) => r.record));
       setOutput((current) => {
         const next = { ...current };
@@ -237,6 +248,13 @@ export default function ResourcesPage() {
   }
   async function save() {
     if (!editor) return;
+    if (!configLoaded)
+      throw new Error(
+        t(
+          '服务器配置尚未成功加载，请先刷新。',
+          'Load the server configuration successfully before saving.',
+        ),
+      );
     if (password)
       throw new Error(
         t('请先登记密码，或清空密码后保存。', 'Register or clear the password before saving.'),
@@ -499,7 +517,7 @@ export default function ResourcesPage() {
       id: 'resource-new',
       label: t('添加服务器', 'Add server'),
       kind: 'click',
-      enabled: !busy && !dirty,
+      enabled: configLoaded && !busy && !dirty,
       run: addServer,
     },
     {
@@ -570,7 +588,7 @@ export default function ResourcesPage() {
           id: 'resource-save',
           label: t('保存连接设置', 'Save connection'),
           kind: 'commit',
-          enabled: !busy && !password,
+          enabled: configLoaded && !busy && !password,
           run: () => execute('save', save),
         },
         {
@@ -727,6 +745,7 @@ export default function ResourcesPage() {
     details: {
       selected,
       dirty,
+      historyErrors,
       check,
       ...(checkDetails && checkEvidence ? { checkEvidence } : {}),
       local: selected === 'local' ? output.local : undefined,
@@ -804,6 +823,11 @@ export default function ResourcesPage() {
       </header>
       {busy && <Notice>{t('操作进行中…', 'Operation in progress…')}</Notice>}
       {error && <Notice tone="error">{error}</Notice>}
+      {historyErrors.map((message) => (
+        <Notice key={message} tone="error">
+          {message}
+        </Notice>
+      ))}
       <div className="resources-selector">
         <Button
           className={`resource-choice ${selected === 'local' ? 'selected' : ''}`}

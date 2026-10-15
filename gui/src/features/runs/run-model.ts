@@ -82,6 +82,41 @@ export function reconcileRemoteRun(previous: unknown, result: Record<string, unk
   };
 }
 
+export function matchesRemoteRun(run: RunState | undefined, result: unknown): boolean {
+  if (!run || run.location !== 'remote') return false;
+  const record = (value: unknown): Record<string, unknown> => {
+    if (!value || typeof value !== 'object') return {};
+    const data = value as Record<string, unknown>;
+    return data.record && typeof data.record === 'object'
+      ? (data.record as Record<string, unknown>)
+      : data;
+  };
+  const previous = record(run.progress?.remote);
+  const next = record(result);
+  const operation =
+    next.operation_id ?? (next.provenance as { operation_id?: string } | undefined)?.operation_id;
+  const expectedOperation =
+    run.operation_id ??
+    previous.operation_id ??
+    (previous.provenance as { operation_id?: string } | undefined)?.operation_id;
+  if (operation && expectedOperation && operation !== expectedOperation) return false;
+  if (typeof previous.job !== 'string') {
+    return (
+      typeof run.operation_id === 'string' &&
+      operation === run.operation_id &&
+      typeof next.job === 'string' &&
+      typeof next.host === 'string' &&
+      next.host === run.progress?.host
+    );
+  }
+  return (
+    typeof previous.host === 'string' &&
+    typeof previous.job === 'string' &&
+    previous.host === next.host &&
+    previous.job === next.job
+  );
+}
+
 export function restoreRunView(record: RunState | undefined, casePath: string): RunView | null {
   if (!record) return null;
   return {

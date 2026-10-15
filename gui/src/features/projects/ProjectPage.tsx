@@ -116,19 +116,16 @@ export default function ProjectPage() {
       return root ? await loadProject(root) : { cancelled: true };
     });
   async function chooseCase(dir: string, tab: 'settings' | 'results') {
-    const opened = await work(() => openCase(dir));
+    const opened = await work(() => openCase(dir, tab));
     setChooser(null);
-    navigate('case', tab);
     return opened;
   }
   const otherResults = () =>
     work(async () => {
       const dir = await invoke<string | null>('pick_folder', { key: 'project-results-case' });
       if (!dir) return { cancelled: true };
-      const opened = await openCase(dir);
+      const opened = await openCase(dir, 'results');
       setChooser(null);
-      lock.current = false;
-      navigate('case', 'results');
       return opened;
     });
   function viewResults() {

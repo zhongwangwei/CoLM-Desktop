@@ -345,13 +345,13 @@ impl RunProcesses {
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
-        state.pending.remove(key);
         if state.cancelled.contains(key) {
             return Ok(false);
         }
         if state.pids.contains_key(key) {
             return Err(format!("{key} is already running"));
         }
+        state.pending.remove(key);
         state.pids.insert(key.to_string(), pid);
         Ok(true)
     }
@@ -361,8 +361,11 @@ impl RunProcesses {
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
-        state.pending.remove(key);
-        Ok(state.cancelled.remove(key))
+        let cancelled = state.cancelled.remove(key);
+        if cancelled {
+            state.pending.remove(key);
+        }
+        Ok(cancelled)
     }
 
     fn forget(&self, key: &str) -> Result<bool, String> {
@@ -952,7 +955,7 @@ fn validate_run_stage(stage: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn validate_run_id(run_id: &str) -> Result<(), String> {
+pub(crate) fn validate_run_id(run_id: &str) -> Result<(), String> {
     (!run_id.trim().is_empty())
         .then_some(())
         .ok_or_else(|| "run_id must not be empty".to_string())
@@ -1210,6 +1213,24 @@ fn batch_width(requested: usize, available: usize, ranks_per_case: usize) -> usi
     requested.clamp(1, (available / ranks_per_case.max(1)).max(1))
 }
 
+// Stages run sequentially, so reserve their largest CPU demand.
+fn batch_cpu_budget(
+    stage: Option<&str>,
+    engine: Option<&str>,
+    preprocessors: Option<&str>,
+    mpi_ranks: usize,
+    threads: Option<usize>,
+) -> usize {
+    let model = stage.is_none() || stage == Some("colm");
+    let preprocessing = stage != Some("colm");
+    let rust = (model && engine.unwrap_or("rust") == "rust")
+        || (preprocessing && preprocessors.unwrap_or("rust") == "rust");
+    let fortran =
+        (model && engine == Some("fortran")) || (preprocessing && preprocessors == Some("fortran"));
+    let rust_threads = if rust { threads.unwrap_or(1) } else { 1 };
+    rust_threads.max(if fortran { mpi_ranks } else { 1 })
+}
+
 /// 批量里每个算例给 Rust 引擎的线程数（`RAYON_NUM_THREADS`）：同时跑的算例平分 CPU 核。
 ///
 /// `colm-rs` 默认取全部逻辑核；同时跑 `width` 个算例时不限的话，每个都开满核，
@@ -1323,10 +1344,25 @@ fn run_batch_blocking(
     let available = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1);
+    // run_one preserves an inherited Rayon setting over the GUI thread count.
+    let threads = std::env::var_os("RAYON_NUM_THREADS")
+        .map(|value| {
+            value
+                .to_str()
+                .and_then(|value| value.parse::<usize>().ok())
+                .filter(|value| *value > 0)
+                .unwrap_or(available)
+        })
+        .or(threads);
     let total = cases.len();
     processes.prepare(&cases)?;
-    // Rust 引擎给了每算例线程数时按线程数限额并行算例数；没给就平分 CPU 核。
-    let per_case = threads.unwrap_or(mpi_ranks);
+    let per_case = batch_cpu_budget(
+        stage.as_deref(),
+        engine.as_deref(),
+        preprocessors.as_deref(),
+        mpi_ranks,
+        threads,
+    );
     let width = batch_width(max_concurrent, available, per_case).min(total.max(1));
     let threads = threads.unwrap_or_else(|| threads_per_case(available, width));
     let queue = Arc::new(Mutex::new(VecDeque::from(cases)));
@@ -1502,10 +1538,16 @@ fn run_one(
     if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
         cmd.env("RAYON_NUM_THREADS", threads.to_string());
     }
-    let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
-    crate::model::options(&mut args, model_revision)?;
-    add_preprocessors(&mut args, preprocessors)?;
-    let mut event = crate::history::command_start(&args)?;
+    let prepared = (|| {
+        let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
+        crate::model::options(&mut args, model_revision)?;
+        add_preprocessors(&mut args, preprocessors)?;
+        let event = crate::history::command_start(&args)?;
+        Ok::<_, String>((args, event))
+    })();
+    let (mut args, mut event) = prepared.inspect_err(|_| {
+        let _ = processes.forget(case);
+    })?;
     if let Some(event) = &mut event {
         event.detail["run_id"] = serde_json::json!(run_id);
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
@@ -2590,7 +2632,7 @@ async fn verified_study_side(
     let canonical =
         std::fs::canonicalize(dir).map_err(|e| format!("cannot open Study for comparison: {e}"))?;
     let dir = canonical.to_str().ok_or("Study path is not UTF-8")?;
-    let config = crate::remote::remote_config(app.clone());
+    let config = crate::remote::remote_config(app.clone())?;
     let mut recorded_remote = false;
     for file in [".colm-remote-study.json", ".colm-remote-study-pending.json"] {
         match std::fs::symlink_metadata(PathBuf::from(dir).join(file)) {
@@ -2926,7 +2968,11 @@ fn study_run_blocking(
     args: Vec<String>,
 ) -> Result<String, String> {
     let mut args = args;
-    let event = crate::history::command_start(&args)?;
+    let event = crate::history::command_start(&args).inspect_err(|_| {
+        if let Some(dir) = args.get(1) {
+            let _ = processes.forget(&study_process_key(dir));
+        }
+    })?;
     if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }

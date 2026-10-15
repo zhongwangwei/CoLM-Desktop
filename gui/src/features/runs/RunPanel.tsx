@@ -11,6 +11,7 @@ import {
   remoteSubmissionBlocked,
   remoteRunPermissions,
   reconcileRemoteRun,
+  matchesRemoteRun,
   restoreRunView,
   settleRuns,
 } from './run-model';
@@ -312,6 +313,7 @@ export default function RunPanel({
           submitted = true;
           patchRun(prepared, runId, { status: 'submitting' });
           const result = await invokeJson<Record<string, unknown>>('remote_run', {
+            runId,
             case: casePath,
             host,
             kernel,
@@ -399,7 +401,7 @@ export default function RunPanel({
       if (alive.current) setRemote(merged);
       update((old) => {
         const previous = old.running[casePath];
-        if (previous?.run_id !== expectedRunId) return {};
+        if (previous?.run_id !== expectedRunId || !matchesRemoteRun(previous, result)) return {};
         const status = result.status as
           { state?: string; exit_code?: number; log_tail?: string } | undefined;
         const provenance = (result.record as { provenance?: { stage?: string | null } } | undefined)

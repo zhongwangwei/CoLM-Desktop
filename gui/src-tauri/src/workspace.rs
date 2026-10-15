@@ -411,7 +411,7 @@ pub async fn workspace_remote(
         return cli_json(command, None).await;
     }
     let resources = crate::remote::resource_dir(&app);
-    let config = crate::remote::remote_config(app);
+    let config = crate::remote::remote_config(app)?;
     let server = if operation == "submit" || operation == "knowledge" {
         let host = host.as_deref().ok_or("请选择服务器")?;
         let server = config

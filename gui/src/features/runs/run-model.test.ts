@@ -1,10 +1,11 @@
-import { describe, it } from 'node:test';
+import test, { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { RunState } from '../../lib/types';
 import {
   remoteSubmissionBlocked,
   remoteRunPermissions,
   reconcileRemoteRun,
+  matchesRemoteRun,
   compatibleKernel,
   restoreRunView,
   settleRuns,
@@ -152,4 +153,80 @@ it('keeps USGS classification independent of PFT and PC structure', () => {
     undefined,
     'no compatible USGS kernel must not silently become IGBP',
   );
+});
+
+describe('remote monitor ownership', () => {
+  const remote = { host: 'server', job: 'old', provenance: { operation_id: 'remote-op' } };
+  const status = { record: remote, status: { state: 'finished', exit_code: 1 } };
+  it('keeps newer local status, logs and output separate from an old remote job', () => {
+    assert.equal(
+      matchesRemoteRun({ ...run, location: 'local', operation_id: 'local-op' }, status),
+      false,
+    );
+  });
+  it('rejects another remote job, host or operation even with the same UI run ID', () => {
+    const current: RunState = {
+      ...run,
+      location: 'remote',
+      operation_id: 'remote-op',
+      progress: { remote },
+    };
+    assert.equal(matchesRemoteRun(current, status), true);
+    for (const record of [
+      { ...remote, job: 'new' },
+      { ...remote, host: 'other' },
+      { ...remote, provenance: { operation_id: 'other-op' } },
+    ])
+      assert.equal(matchesRemoteRun(current, { ...status, record }), false);
+  });
+  it('matches recovered wrapped records and flat submission records without operation metadata', () => {
+    assert.equal(
+      matchesRemoteRun({ ...run, location: 'remote', progress: { remote: status } }, status),
+      true,
+    );
+    assert.equal(
+      matchesRemoteRun({ ...run, location: 'remote', progress: { remote } }, status),
+      true,
+    );
+  });
+  it('checks the recovered operation identity when the run has no operation field', () => {
+    assert.equal(
+      matchesRemoteRun(
+        {
+          ...run,
+          location: 'remote',
+          progress: { remote: { ...remote, operation_id: 'different' } },
+        },
+        status,
+      ),
+      false,
+    );
+  });
+  it('does not apply unidentified or missing records', () => {
+    assert.equal(matchesRemoteRun(undefined, status), false);
+    assert.equal(matchesRemoteRun({ ...run, location: 'remote' }, status), false);
+    assert.equal(
+      matchesRemoteRun({ ...run, location: 'remote', progress: { remote } }, { record: null }),
+      false,
+    );
+  });
+});
+
+test('identityless remote recovery requires the exact started operation and host', () => {
+  const current: RunState = {
+    ...run,
+    location: 'remote',
+    status: 'unknown',
+    operation_id: 'started',
+    progress: { host: 'server' },
+  };
+  const record = { host: 'server', job: 'job', provenance: { operation_id: 'started' } };
+  assert.equal(matchesRemoteRun(current, { record }), true);
+  assert.equal(matchesRemoteRun({ ...current, operation_id: undefined }, { record }), false);
+  assert.equal(
+    matchesRemoteRun(current, { record: { ...record, provenance: { operation_id: 'old' } } }),
+    false,
+  );
+  assert.equal(matchesRemoteRun(current, { record: { ...record, host: 'other' } }), false);
+  assert.equal(matchesRemoteRun({ ...current, location: 'local' }, { record }), false);
 });

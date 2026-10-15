@@ -1,16 +1,28 @@
 import { invoke } from '../../lib/ipc';
 import type { OpenedCase, Site } from '../../lib/types';
 
-const normalize = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/, '');
-const parent = (path: string) => normalize(path).replace(/\/[^/]*$/, '');
+const normalize = (path: string) => {
+  const slashes = path.replace(/\\/g, '/');
+  if (/^(?:\/|[A-Za-z]:\/)\/*$/.test(slashes)) return slashes.replace(/\/+$/, '/');
+  return slashes.replace(/\/+$/, '');
+};
+const parent = (path: string) => {
+  const normalized = normalize(path);
+  if (/^(?:\/|[A-Za-z]:\/|\/\/[^/]+\/[^/]+)$/.test(normalized)) return normalized;
+  return normalize(normalized.slice(0, normalized.lastIndexOf('/') + 1));
+};
 const unquote = (value: string) => {
   const quote = value[0];
   return (quote === "'" || quote === '"') && value.endsWith(quote)
     ? value.slice(1, -1).replaceAll(quote + quote, quote)
     : value;
 };
-const absolute = (path: string, base: string) =>
-  /^(?:\/|[A-Za-z]:[\\/])/.test(path) ? normalize(path) : `${normalize(base)}/${path}`;
+const absolute = (path: string, base: string) => {
+  const normalized = normalize(path);
+  if (/^(?:\/|[A-Za-z]:\/)/.test(normalized)) return normalized;
+  const directory = normalize(base);
+  return normalize(`${directory}${directory.endsWith('/') ? '' : '/'}${normalized}`);
+};
 
 /** Reuse the scanner's verified dataset pairing; case names may be user-defined. */
 export async function defaultObservation(caseDir: string, call: typeof invoke = invoke) {
@@ -28,10 +40,10 @@ export async function defaultObservation(caseDir: string, call: typeof invoke = 
   const directory = value('DEF_dir_forcing');
   const file = value('DEF_forcing%fprefix(1)');
   if (!directory || !file) return '';
-  const forcingDir = absolute(directory, parent(path));
+  const forcingDir = absolute(directory, caseDir);
   const forcingFile = absolute(file, forcingDir);
   const found = await call<{ sites: Site[] }>('scan_sites', {
-    dir: `${parent(forcingDir)}/Sitedata`,
+    dir: absolute('Sitedata', parent(forcingDir)),
     forcingDir,
     quick: true,
   });

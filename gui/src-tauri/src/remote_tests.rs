@@ -756,3 +756,32 @@ fn uncertain_remote_transport_does_not_finalize_submission_or_cancellation() {
         "cancel_uncertain"
     );
 }
+
+#[test]
+fn remote_config_only_defaults_when_the_file_is_missing() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-remote-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("remote.json");
+    assert!(read_remote_config(&path).unwrap().servers.is_empty());
+    std::fs::write(&path, b"{broken").unwrap();
+    assert!(read_remote_config(&path)
+        .unwrap_err()
+        .contains("remote.json"));
+    assert_eq!(std::fs::read(&path).unwrap(), b"{broken");
+    std::fs::write(
+        &path,
+        br#"{"servers":[{"host":"saved","root":"/data/colm"}]}"#,
+    )
+    .unwrap();
+    assert_eq!(read_remote_config(&path).unwrap().servers[0].host, "saved");
+    // A directory at the config path is an I/O error, not a new installation.
+    assert!(read_remote_config(&root).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}

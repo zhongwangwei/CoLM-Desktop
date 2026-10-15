@@ -74,7 +74,7 @@ function opening(chosenVersion: VersionRef | null = null) {
   }).outputText;
   const openCase = new Function(...Object.keys(context), `${code}; return callback;`)(
     ...Object.values(context),
-  ) as (dir: string) => Promise<{ binding: { version: VersionRef } }>;
+  ) as (dir: string, tab?: 'settings' | 'results') => Promise<{ binding: { version: VersionRef } }>;
   return { openCase, current, reads, official, soil };
 }
 
@@ -86,6 +86,12 @@ test('openCase respects an explicitly chosen revision over a saved custom bindin
   assert.deepEqual(app.current.current.versionRef, chosen);
   assert.deepEqual(opened.binding.version, app.soil);
   assert.equal(app.current.current.busy, false);
+});
+
+test('openCase enters the requested tab as part of the same navigation', async () => {
+  const app = opening();
+  await app.openCase('/soil', 'results');
+  assert.equal((app.current.current as unknown as { caseTab: string }).caseTab, 'results');
 });
 
 test('openCase restores saved custom bindings without making them an explicit choice', async () => {

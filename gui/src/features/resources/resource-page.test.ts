@@ -7,7 +7,11 @@ import { remoteRunPermissions, reconcileRemoteRun } from '../runs/run-model';
 import type { UiAction, UiField } from '../../lib/guide';
 
 type Contract = { fields: UiField[]; actions: UiAction[]; details: unknown };
-function harness(records: Record<string, unknown> = {}, hosts = ['7920land', '7920mp']) {
+function harness(
+  records: Record<string, unknown> = {},
+  hosts = ['7920land', '7920mp'],
+  failures: { config?: boolean; history?: string } = {},
+) {
   const source = readFileSync(new URL('./ResourcesPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -26,12 +30,14 @@ function harness(records: Record<string, unknown> = {}, hosts = ['7920land', '79
     calls.push({ command, args });
     switch (command) {
       case 'remote_config':
+        if (failures.config) throw new Error('Unreadable server configuration');
         return { servers };
       case 'remote_ssh_hosts':
         return ['7920land', '7920mp'];
       case 'remote_job_record':
         return records[String(args?.case)] ?? null;
       case 'case_runs':
+        if (failures.history === args?.case) throw new Error('Case directory was deleted');
         return { studies: [] };
       case 'remote_probe':
         if (failProbe) throw new Error('SSH unavailable');
@@ -403,4 +409,42 @@ test('failed checks retain readable error evidence only when their details are v
   );
   contract = await page.action('resource-check-details');
   assert.ok(!('checkEvidence' in (contract.details as object)));
+});
+
+test('a deleted case reports its history error without losing saved servers on the next save', async () => {
+  const page = harness({ '/deleted': null }, undefined, { history: '/deleted' });
+  const contract = await page.ready();
+  assert.deepEqual((contract.details as { historyErrors: string[] }).historyErrors, [
+    '/deleted: Error: Case directory was deleted',
+  ]);
+  assert.ok(contract.actions.some((action) => action.id === 'resource-select-server-7920land'));
+  assert.ok(contract.actions.some((action) => action.id === 'resource-select-server-7920mp'));
+  await page.action('resource-new');
+  page.fill('resource-host', 'new-host');
+  await page.action('resource-save');
+  const saved = page.calls.find((call) => call.command === 'remote_save_config');
+  assert.deepEqual(
+    (saved?.args?.config as { servers: resource.Server[] }).servers.map((server) => server.host),
+    ['7920land', '7920mp', 'new-host'],
+  );
+});
+
+test('failed configuration loads disable adding and saving, including after a successful load', async () => {
+  const failures = { config: true };
+  const page = harness({}, undefined, failures);
+  let contract = await page.ready();
+  const add = contract.actions.find((action) => action.id === 'resource-new')!;
+  assert.equal(add.enabled, false);
+  await add.run();
+  assert.ok(!page.render().actions.some((action) => action.id === 'resource-save'));
+  failures.config = false;
+  await page.action('resource-refresh');
+  failures.config = true;
+  await assert.rejects(page.action('resource-refresh'), /Unreadable server configuration/);
+  page.render();
+  contract = page.fill('resource-username', 'changed');
+  const save = contract.actions.find((action) => action.id === 'resource-save')!;
+  assert.equal(save.enabled, false);
+  await assert.rejects(async () => await save.run(), /服务器配置尚未成功加载/);
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
 });

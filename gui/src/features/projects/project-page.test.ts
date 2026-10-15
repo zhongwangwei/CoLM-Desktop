@@ -89,6 +89,35 @@ function expression(name: string, context: Record<string, unknown>, page = './Pr
   }).outputText;
   return new Function(...Object.keys(context), `${code};return value;`)(...Object.values(context));
 }
+
+test('opening a case does not navigate again after a late completion', async () => {
+  let release!: () => void;
+  const completion = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let route = 'project';
+  const opened: unknown[] = [];
+  const chooseCase = expression('chooseCase', {
+    work: (fn: () => unknown) => fn(),
+    openCase: async (dir: string, tab: string) => {
+      opened.push([dir, tab]);
+      route = 'case';
+      await completion;
+      return { dir };
+    },
+    setChooser: () => {},
+    navigate: (next: string) => {
+      route = next;
+    },
+  });
+  const pending = chooseCase('/project/site', 'results');
+  assert.equal(route, 'case');
+  route = 'research';
+  release();
+  await pending;
+  assert.equal(route, 'research');
+  assert.deepEqual(opened, [['/project/site', 'results']]);
+});
 test('version modal closes only after a successful frozen revision read', async () => {
   const model = { version: { id: 'soil', revision: 4 }, name: 'Soil experiment' },
     events: string[] = [];

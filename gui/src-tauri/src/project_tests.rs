@@ -70,6 +70,46 @@ fn a_case_without_a_history_file_is_marked_as_not_run() {
 }
 
 #[test]
+fn history_lookup_honors_custom_output_roots_and_stale_markers() {
+    let root = tmp("custom-output-history");
+    for (folder, output) in [
+        ("relative", "../relative-results".to_string()),
+        (
+            "absolute",
+            root.join("absolute-results").to_string_lossy().into_owned(),
+        ),
+    ] {
+        let case = make_case(&root, folder, "site");
+        std::fs::write(
+            case.join("case.nml"),
+            format!("&nl_colm\n DEF_CASE_NAME='site'\n DEF_dir_output='{output}'\n/\n"),
+        )
+        .unwrap();
+        let history = case.join(&output).join("site/history");
+        std::fs::create_dir_all(&history).unwrap();
+        std::fs::write(history.join("site_hist_2003-01.nc"), b"fixture").unwrap();
+        assert!(history_of(&case, "site").is_some(), "{output}");
+        assert!(
+            list_cases(root.to_string_lossy().into_owned())
+                .unwrap()
+                .iter()
+                .find(|entry| entry.dir == case.to_string_lossy())
+                .unwrap()
+                .has_history
+        );
+        mark_results_stale(vec![case.to_string_lossy().into_owned()]).unwrap();
+        assert!(
+            !list_cases(root.to_string_lossy().into_owned())
+                .unwrap()
+                .iter()
+                .find(|entry| entry.dir == case.to_string_lossy())
+                .unwrap()
+                .has_history
+        );
+    }
+}
+
+#[test]
 fn a_path_like_case_name_cannot_escape_history_lookup() {
     let root = tmp("escaped-history");
     make_case(&root, "case", "../escape");

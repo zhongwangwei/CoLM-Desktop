@@ -475,8 +475,6 @@ export default function ResultsPage({
   const diagnose = () =>
     task(async (current) => {
       setDiagnostic(null);
-      setSeries(null);
-      setSeriesKey('');
       const data = await invokeJson<EnergyDiagnostic>('energy_summary', {
         case: source,
         ...windowArgs(),
@@ -484,7 +482,6 @@ export default function ResultsPage({
       fullEnergyStats(data);
       if (current()) {
         setDiagnostic(data);
-        setSeries(data.series);
       }
     });
   const compare = () =>
@@ -746,6 +743,7 @@ export default function ResultsPage({
       disabled: busy,
       set: (value) => setReportFormat(value as ReportFormat),
     });
+  const displayedSeries = tab === 'diagnostics' ? diagnostic?.series : series;
   const actions: UiAction[] = [
     ...(tab === 'overview'
       ? [
@@ -834,7 +832,7 @@ export default function ResultsPage({
           },
         ]
       : []),
-    ...((tab === 'series' || tab === 'diagnostics') && series
+    ...((tab === 'series' || tab === 'diagnostics') && displayedSeries
       ? [
           {
             id: 'export-series-data',
@@ -846,7 +844,7 @@ export default function ResultsPage({
                 setExportNotice('');
                 const result = await download(
                   'series-sampled.json',
-                  JSON.stringify({ source, ...series }),
+                  JSON.stringify({ source, ...displayedSeries }),
                 );
                 if (current()) setExportNotice(exportMessage(result));
                 return result;
@@ -968,7 +966,9 @@ export default function ResultsPage({
       },
     },
   });
-  const chart = series && ([series.time, ...Object.values(series.vars)] as uPlot.AlignedData);
+  const chart =
+    displayedSeries &&
+    ([displayedSeries.time, ...Object.values(displayedSeries.vars)] as uPlot.AlignedData);
   const variableInfo = catalog?.variables.find((item) => item.name === variable);
   const finding = overviewFinding(selectedMetric, variable, en);
   const validPairs = !!selectedMetric && selectedMetric.n > 0;
@@ -1625,9 +1625,14 @@ export default function ResultsPage({
           )}
           {chart && (tab === 'series' || tab === 'diagnostics') && (
             <>
-              <ScienceChart data={chart} labels={Object.keys(series!.vars)} theme={state.theme} />
+              <ScienceChart
+                data={chart}
+                labels={Object.keys(displayedSeries!.vars)}
+                theme={state.theme}
+              />
               <p>
-                {series!.n}/{series!.source_n} points {series!.downsampled ? '(sampled)' : ''}
+                {displayedSeries!.n}/{displayedSeries!.source_n} points{' '}
+                {displayedSeries!.downsampled ? '(sampled)' : ''}
               </p>
             </>
           )}
