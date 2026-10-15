@@ -1,5 +1,50 @@
 use super::*;
 
+#[test]
+fn nested_forcing_inventory_follows_the_case_working_directory() {
+    let root = temp_dir("nested-forcing");
+    std::fs::create_dir_all(root.join("met")).unwrap();
+    std::fs::create_dir_all(root.join("config/met")).unwrap();
+    let actual = root.join("met/x_2003_01.nc");
+    let decoy = root.join("config/met/x_2003_01.nc");
+    std::fs::write(&actual, b"actual forcing").unwrap();
+    std::fs::write(&decoy, b"wrong forcing").unwrap();
+    std::fs::write(
+        root.join("case.nml"),
+        "&nl_colm\n DEF_forcing_namelist = 'config/forcing.nml'\n/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("config/forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing = 'met/'\n DEF_forcing%fprefix(1) = 'x_'\n/\n",
+    )
+    .unwrap();
+    let identity = full_inputs(&root).unwrap();
+    let payloads: Vec<_> = identity
+        .files
+        .values()
+        .filter(|f| f.category == "data")
+        .collect();
+    assert_eq!(payloads.len(), 1);
+    assert_eq!(payloads[0].path, actual);
+    assert_eq!(
+        payloads[0].sha256,
+        full_file(&actual, "data").unwrap().sha256
+    );
+    let sampled = compute("colm", &root.join("case.nml"), "k").unwrap();
+    assert!(sampled
+        .files
+        .contains_key(actual.canonicalize().unwrap().to_str().unwrap()));
+    assert!(!sampled
+        .files
+        .contains_key(decoy.canonicalize().unwrap().to_str().unwrap()));
+    let guard = full_input_guard(&root, &identity).unwrap();
+    let matches = guard.forcing_prefixes.get(&root.join("met/x_")).unwrap();
+    assert!(matches.contains_key(&actual));
+    assert!(!matches.contains_key(&decoy));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_inventory_names_the_broken_input_link() {

@@ -224,11 +224,8 @@ fn copy_named_namelist(
     let text = std::fs::read_to_string(&source)
         .with_context(|| format!("cannot read {}", source.display()))?;
     let mut copied = colm_namelist::parse(&text)?;
-    // Nested namelists resolve their data relative to their own original directory.
-    absolutize_existing_paths(
-        &mut copied,
-        source.parent().context("namelist has no parent")?,
-    )?;
+    // Both runtimes resolve relative data paths from the case working directory.
+    absolutize_existing_paths(&mut copied, baseline)?;
     std::fs::write(&target, copied.to_string())
         .with_context(|| format!("cannot write {}", target.display()))?;
     document.set(field, Value::Str(target.to_string_lossy().into_owned()))
@@ -378,7 +375,9 @@ mod tests {
         let member = root.join("member");
         let config = baseline.join("config");
         std::fs::create_dir_all(config.join("met/subdir")).unwrap();
-        std::fs::write(config.join("met/subdir/met.nc"), b"forcing").unwrap();
+        std::fs::write(config.join("met/subdir/met.nc"), b"wrong nested data").unwrap();
+        std::fs::create_dir_all(baseline.join("met/subdir")).unwrap();
+        std::fs::write(baseline.join("met/subdir/met.nc"), b"forcing").unwrap();
         let forcing = "&nl_colm_forcing\n DEF_dir_forcing='met/'\n DEF_forcing%fprefix(1)='subdir/met.nc'\n DEF_forcing%CBL_fprefix='subdir/cbl.nc'\n/\n";
         let history = "&nl_colm_history\n DEF_history_data='missing/history.nc'\n/\n";
         std::fs::write(config.join("forcing.nml"), forcing).unwrap();
@@ -390,12 +389,12 @@ mod tests {
         .unwrap();
 
         let member = member_case(&baseline, &member, "m1", "site", &[]).unwrap();
-        let config = colm_kernel::manifest::absolute(&config).unwrap();
+        let baseline = colm_kernel::manifest::absolute(&baseline).unwrap();
         let copied =
             colm_namelist::parse(&std::fs::read_to_string(member.join("forcing.nml")).unwrap())
                 .unwrap();
         let dir = string_path(&copied, "DEF_dir_forcing").unwrap();
-        assert_eq!(Path::new(&dir), config.join("met"));
+        assert_eq!(Path::new(&dir), baseline.join("met"));
         assert!(dir.ends_with(std::path::MAIN_SEPARATOR));
         assert_eq!(
             string_path(&copied, "DEF_forcing%fprefix(1)").as_deref(),
@@ -415,7 +414,7 @@ mod tests {
                 .unwrap();
         assert_eq!(
             Path::new(&string_path(&copied, "DEF_history_data").unwrap()),
-            config.join("missing/history.nc")
+            baseline.join("missing/history.nc")
         );
         assert_eq!(
             std::fs::read_to_string(config.join("forcing.nml")).unwrap(),

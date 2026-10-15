@@ -410,6 +410,48 @@ fn forcing_configuration_is_frozen_and_its_data_reference_remains_read_only() {
 }
 
 #[test]
+fn materialized_nested_namelist_uses_case_working_directory() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    fs::create_dir_all(case.join("met/subdir")).unwrap();
+    fs::create_dir_all(case.join("config/met/subdir")).unwrap();
+    fs::write(case.join("met/subdir/met.nc"), b"actual forcing").unwrap();
+    fs::write(case.join("config/met/subdir/met.nc"), b"wrong nested data").unwrap();
+    let text = fs::read_to_string(case.join("case.nml"))
+        .unwrap()
+        .replace("/\n", " DEF_forcing_namelist = 'config/forcing.nml'\n/\n");
+    fs::write(case.join("case.nml"), text).unwrap();
+    fs::write(
+        case.join("config/forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='met/'\n DEF_forcing%fprefix(1)='subdir/met.nc'\n/\n",
+    )
+    .unwrap();
+    let official = reg.install_official(code()).unwrap();
+    let run = reg
+        .materialize_run(&official.version, &case, &tmp.0.join("run"), "nested")
+        .unwrap();
+    let forcing =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("forcing.nml")).unwrap())
+            .unwrap();
+    let Some(colm_namelist::Value::Str(directory)) = forcing.get("DEF_dir_forcing") else {
+        panic!("missing forcing directory");
+    };
+    let Some(colm_namelist::Value::Str(prefix)) = forcing.get("DEF_forcing%fprefix(1)") else {
+        panic!("missing forcing prefix");
+    };
+    assert_eq!(prefix, "subdir/met.nc");
+    assert_eq!(
+        std::path::Path::new(directory),
+        case.join("met").canonicalize().unwrap()
+    );
+    assert_eq!(
+        fs::read(format!("{directory}{prefix}")).unwrap(),
+        b"actual forcing"
+    );
+}
+
+#[test]
 fn materialized_directory_fields_keep_their_trailing_separator() {
     let tmp = Temp::new();
     let reg = tmp.registry();

@@ -575,11 +575,8 @@ impl Registry {
                         let bytes = fs::read(&path)?;
                         inputs.insert(path.to_string_lossy().into_owned(), digest(&bytes));
                         let mut config = colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
-                        rewrite_case_paths(
-                            &mut config,
-                            path.parent().context("namelist parent")?,
-                            &destination,
-                        )?;
+                        // Runtime paths are relative to the case cwd, even for nested namelists.
+                        rewrite_case_paths(&mut config, &source, &destination)?;
                         fs::write(destination.join(fallback), config.to_string())?;
                         doc.set(
                             field,

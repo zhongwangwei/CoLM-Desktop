@@ -1930,7 +1930,7 @@ pub(crate) fn restore_execution_path(case: &Path) -> Result<()> {
 /// Native CoLM invokes unquoted mkdir and uses 256-byte path buffers. Keep the
 /// registry identity canonical while handing native programs a stable short view.
 pub(crate) fn execution_path(case: &Path) -> Result<PathBuf> {
-    let canonical = case.canonicalize()?;
+    let canonical = colm_kernel::manifest::absolute(case)?;
     if !canonical.join(colm_model::RUN_MANIFEST).is_file()
         || (!canonical.to_string_lossy().contains(char::is_whitespace)
             && canonical.to_string_lossy().len() < 80)
@@ -2200,7 +2200,20 @@ mod upstream_artifact_tests {
                 serde_json::to_vec(&run).unwrap(),
             )
             .unwrap();
+            #[cfg(windows)]
+            let original_manifest = std::fs::read(case.join(colm_model::RUN_MANIFEST)).unwrap();
             prepare_native_paths(&mut run).unwrap();
+            #[cfg(windows)]
+            {
+                let native = execution_path(&case).unwrap();
+                assert_eq!(native, colm_kernel::manifest::absolute(&case).unwrap());
+                assert!(!native.to_string_lossy().starts_with(r"\\?\"));
+                assert_eq!(std::fs::read_to_string(case.join("case.nml")).unwrap(), nml);
+                assert_eq!(
+                    std::fs::read(case.join(colm_model::RUN_MANIFEST)).unwrap(),
+                    original_manifest
+                );
+            }
         }
         let old = runs.join("old");
         let new = runs.join("new");

@@ -112,7 +112,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         .unwrap_or_else(|| case_dir.join("forcing.nml"));
     if stage == "colm" {
         record_file(&mut files, forcing.clone(), FileKind::SmallConfig);
-        record_forcing_inventory(&mut files, &forcing);
+        record_forcing_inventory(&mut files, &forcing, case_dir);
     }
     // mksrfdata 按 CH4 参数文件里的两个开关决定要不要生成湖泊土壤碳与空间 pH，mkinidata 再读
     // 湖泊土壤碳（`MOD_Initialize.F90` 的 `lake_soilc_patches.nc`）。参数文件的其它内容不影响这两段，
@@ -448,7 +448,7 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn record_forcing_inventory(out: &mut BTreeMap<String, String>, forcing_nml: &Path) {
+fn record_forcing_inventory(out: &mut BTreeMap<String, String>, forcing_nml: &Path, case: &Path) {
     let Ok(text) = std::fs::read_to_string(forcing_nml) else {
         return;
     };
@@ -458,7 +458,7 @@ fn record_forcing_inventory(out: &mut BTreeMap<String, String>, forcing_nml: &Pa
     let base = doc
         .get("DEF_dir_forcing")
         .and_then(string_value)
-        .map(|raw| resolve(forcing_nml.parent().unwrap_or_else(|| Path::new(".")), raw));
+        .map(|raw| resolve(case, raw));
     let Some(base) = base else {
         return;
     };
@@ -745,7 +745,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
     let force_base = force
         .get("DEF_dir_forcing")
         .and_then(string_value)
-        .map(|raw| resolve(forcing.parent().unwrap_or(case), raw));
+        .map(|raw| resolve(case, raw));
     for key in force.paths() {
         let Some(value) = force.get(&key) else {
             continue;
@@ -1024,7 +1024,7 @@ pub(crate) fn full_input_guard(
     let base = force
         .get("DEF_dir_forcing")
         .and_then(string_value)
-        .map(|raw| resolve(forcing.parent().unwrap_or(case), raw));
+        .map(|raw| resolve(case, raw));
     let mut forcing_prefixes = BTreeMap::new();
     if let Some(base) = base {
         for key in force
