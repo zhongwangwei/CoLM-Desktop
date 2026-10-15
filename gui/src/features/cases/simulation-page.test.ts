@@ -1175,7 +1175,6 @@ for (const subgrid of ['PFT', 'PC'])
     };
     assert.deepEqual(seed.form, {
       ...restored,
-      kernel: '',
       landcover: 'IGBP',
       sitedir: '',
       forcingdir: '',
@@ -1244,6 +1243,36 @@ const setupKernels = [
   { dir: '/kernel/default', preset: 'default', macros: ['SinglePoint', 'LULC_IGBP'] },
   { dir: '/kernel/crop', preset: 'crop', macros: ['SinglePoint', 'LULC_IGBP', 'CROP'] },
 ];
+test('Fortran preset shows the actual automatic match without an editable preset field', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, engine: 'fortran' }, sites: [site], step: 1 },
+    [site],
+    initialValues,
+    { schema: setupSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  const preset = () => {
+    const field = p.elements.find(
+      (element) => element.type === 'Field' && element.props.label === '匹配内核预设',
+    );
+    assert.ok(field);
+    const input = field.children[0] as Element;
+    assert.equal(input.type, 'Input');
+    assert.equal(input.props.readOnly, true);
+    assert.equal(input.props.onChange, undefined);
+    assert.ok(!p.render().fields.some((field) => field.id === 'new-kernel'));
+    return input.props.value;
+  };
+  assert.equal(preset(), 'default');
+  await p.goto('new-step-4');
+  assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).preset, 'default');
+  await p.goto('new-step-1');
+  p.state.kernels = [];
+  p.render();
+  assert.match(String(preset()), /未找到匹配预设/);
+});
+
 test('case urban switch controls station compatibility and urban creation mode without changing model parameters', async () => {
   const urban = { ...site, name: 'urban', urban: true };
   const p = page(

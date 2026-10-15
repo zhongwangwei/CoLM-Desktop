@@ -50,16 +50,12 @@ pub(crate) fn code(opts: &Opts, workspace: Option<&str>) -> Result<CodeRef> {
     })
 }
 pub(crate) fn verify_code(opts: &Opts, expected: &CodeRef) -> Result<()> {
-    if expected.kind == CodeKind::Official {
-        let dir = cache_dir(opts, expected)?;
-        if dir.join("code.json").exists() {
-            if cached_options(opts, expected).is_ok() {
-                return Ok(());
-            }
-            let _ = std::fs::remove_dir_all(&dir);
-        }
+    if expected.kind == CodeKind::Official && cache_dir(opts, expected)?.join("code.json").exists()
+    {
+        cached_options(opts, expected)?;
+        return Ok(());
     }
-    if let Ok(Some(cached)) = cached_options(opts, expected) {
+    if let Some(cached) = cached_options(opts, expected)? {
         let actual = code(&cached, expected.workspace.as_deref())?;
         ensure!(&actual == expected, "cached model source identity mismatch");
         return Ok(());
@@ -779,16 +775,15 @@ fn verify_build_stamp(bin: &Path, source_sha256: &str) -> Result<PathBuf> {
 pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
     let dest = cache_dir(opts, code_ref)?;
     if dest.join("code.json").exists() {
-        if cached_options(opts, code_ref).is_ok() {
-            return Ok(());
-        }
-        let _ = std::fs::remove_dir_all(&dest);
+        cached_options(opts, code_ref)?;
+        return Ok(());
     }
     ensure!(
         code(opts, code_ref.workspace.as_deref())? == *code_ref,
         "source no longer matches draft"
     );
-    let stage = dest.with_file_name(format!(".{}-{}", code_ref.source_sha256, unique_id()));
+    // Reduce nested Git path lengths on Windows.
+    let stage = dest.with_file_name(format!(".{}", unique_id()));
     std::fs::create_dir_all(&stage)?;
     let result = (|| -> Result<()> {
         if let Some(name) = &code_ref.workspace {
@@ -798,13 +793,16 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
             )?;
             let target = stage.join("workspaces").join(name);
             std::fs::create_dir_all(&target)?;
-            let status = std::process::Command::new("git")
+            let output = std::process::Command::new("git")
                 .args(["clone", "--local", "--no-hardlinks"])
                 .arg(ws.src())
                 .arg(target.join("src"))
-                .output()?
-                .status;
-            ensure!(status.success(), "cannot freeze source checkout");
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "cannot freeze source checkout: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
             for folder in ["bin", "kernels"] {
                 if ws.dir.join(folder).exists() {
                     copy_tree(&ws.dir.join(folder), &target.join(folder))?;
@@ -1018,6 +1016,43 @@ mod tests {
             })
         );
     }
+    #[test]
+    fn invalid_frozen_cache_is_preserved() {
+        let root = std::env::temp_dir().join(unique_id());
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![("--model-root".into(), root.to_string_lossy().into_owned())],
+        };
+        for kind in [CodeKind::Official, CodeKind::Workspace] {
+            let code_ref = CodeRef {
+                workspace: (kind == CodeKind::Workspace).then(|| "missing-workspace".into()),
+                kind,
+                commit: None,
+                source_sha256: "0".repeat(64),
+            };
+            let dest = cache_dir(&opts, &code_ref).unwrap();
+            std::fs::create_dir_all(&dest).unwrap();
+            let identity = serde_json::to_vec(&code_ref).unwrap();
+            std::fs::write(dest.join("code.json"), &identity).unwrap();
+            std::fs::write(dest.join("source.tar.gz"), b"frozen source").unwrap();
+            // A missing program must not erase an old revision that cannot be rebuilt.
+            std::fs::write(
+                dest.join("artifacts.json"),
+                br#"{"bin/missing":"checksum"}"#,
+            )
+            .unwrap();
+            for operation in [verify_code, cache_code] {
+                assert!(operation(&opts, &code_ref).is_err());
+                assert_eq!(std::fs::read(dest.join("code.json")).unwrap(), identity);
+                assert_eq!(
+                    std::fs::read(dest.join("source.tar.gz")).unwrap(),
+                    b"frozen source"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn cache_code_overwrites_existing_non_empty_dest_directory() {
         let root = std::env::temp_dir().join(unique_id());

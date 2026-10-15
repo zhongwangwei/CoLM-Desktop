@@ -97,7 +97,6 @@ export default function NewCasePage() {
   const [form, setForm] = useState<Record<string, string>>({
     // 计算核心、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
     engine: '',
-    kernel: '',
     root: initialRoot,
     name: initialName,
     kind: '',
@@ -663,7 +662,6 @@ export default function NewCasePage() {
   }
   const labels: Record<string, string> = {
     engine: t('计算核心', 'Computation core'),
-    kernel: t('内核预设', 'Kernel preset'),
     root: t('保存到项目目录', 'Project folder'),
     output: t('模拟输出路径', 'Simulation output path'),
     name: t('模拟名称', 'Simulation name'),
@@ -790,20 +788,6 @@ export default function NewCasePage() {
       disabled: !enabled,
       set: (v) => set('engine', v),
     });
-    if (form.engine === 'fortran') {
-      fields.push({
-        id: 'new-kernel',
-        label: labels.kernel,
-        value: form.kernel,
-        type: 'choice',
-        options: [
-          { value: '', label: t('自动匹配', 'Auto-matched') },
-          ...state.kernels.map((k) => ({ value: k.dir, label: k.preset })),
-        ],
-        disabled: !enabled,
-        set: (v) => set('kernel', v),
-      });
-    }
   }
   if (step === 2) {
     fields.push({
@@ -1179,31 +1163,21 @@ export default function NewCasePage() {
           {form.engine === 'fortran' && (
             <Field
               label={t('匹配内核预设', 'Matched kernel preset')}
-              hint={
-                configurationKernel?.preset
-                  ? `preset: ${configurationKernel.preset}`
-                  : t(
-                      '未找到匹配预设，可在版本管理中编译',
-                      'No matching preset, compile in Model Versions',
-                    )
-              }
+              hint={t(
+                '根据模拟范围、土地覆盖与作物设置自动匹配。',
+                'Automatically matched to the domain, land cover and crop settings.',
+              )}
             >
-              <Select
-                disabled={!enabled || !state.kernels.length}
-                value={form.kernel || configurationKernel?.dir || ''}
-                onChange={(e) => set('kernel', e.target.value)}
-              >
-                <option value="">
-                  {configurationKernel
-                    ? `${configurationKernel.preset} (${t('自动匹配', 'Auto-matched')})`
-                    : t('请选择内核预设', 'Select kernel preset')}
-                </option>
-                {state.kernels.map((k) => (
-                  <option key={k.dir} value={k.dir}>
-                    {k.preset}
-                  </option>
-                ))}
-              </Select>
+              <Input
+                readOnly
+                value={
+                  configurationKernel?.preset ??
+                  t(
+                    '未找到匹配预设，可在版本管理中编译',
+                    'No matching preset, compile in Model Versions',
+                  )
+                }
+              />
             </Field>
           )}
           <div className="form-grid">{['root', 'name'].map(render)}</div>
