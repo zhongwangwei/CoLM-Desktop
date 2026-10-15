@@ -795,8 +795,10 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
             std::fs::create_dir_all(&target)?;
             let output = std::process::Command::new("git")
                 .args(["clone", "--local", "--no-hardlinks"])
-                .arg(ws.src())
-                .arg(target.join("src"))
+                .arg(std::path::absolute(ws.src())?)
+                // Git for Windows rejects verbatim absolute clone destinations.
+                .arg("src")
+                .current_dir(&target)
                 .output()?;
             ensure!(
                 output.status.success(),
