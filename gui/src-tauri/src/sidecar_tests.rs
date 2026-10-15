@@ -1348,3 +1348,27 @@ fn creation_rechecks_destination_after_reserving_it() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn redirect_output_dir_creates_symlink_to_target() {
+    let temp = std::env::temp_dir().join(format!("colm-redirect-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temp);
+    let case_dir = temp.join("demo_case");
+    let target_dir = temp.join("external_output");
+    std::fs::create_dir_all(&case_dir).unwrap();
+    std::fs::create_dir_all(case_dir.join("out")).unwrap();
+
+    redirect_output_dir(
+        case_dir.to_str().unwrap().into(),
+        target_dir.to_str().unwrap().into(),
+    )
+    .unwrap();
+
+    assert!(case_dir.join("out").is_symlink());
+    std::fs::write(case_dir.join("out").join("test.txt"), "hello").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(target_dir.join("test.txt")).unwrap(),
+        "hello"
+    );
+    let _ = std::fs::remove_dir_all(&temp);
+}

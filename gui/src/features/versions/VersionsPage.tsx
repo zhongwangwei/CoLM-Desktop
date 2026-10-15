@@ -670,8 +670,23 @@ export default function VersionsPage() {
       {state.simulationReturn && (
         <div className="button-row">
           <Button disabled={busy || codeBusy || dirty} onClick={returnToSimulation}>
-            {t('← 返回模拟配置', '← Return to simulation setup')}
+            ← {t('返回模拟配置', 'Back to simulation setup')}
           </Button>
+          {dirty ? (
+            <span className="muted">
+              {t(
+                '有未保存的修改：先保存草稿或放弃修改。',
+                'Unsaved edits: save the draft or discard them first.',
+              )}
+            </span>
+          ) : draft ? (
+            <span className="muted">
+              {t(
+                '草稿已保存在版本库里，以后可以接着改；返回后模拟仍用原来的版本。',
+                'The draft stays saved in the version library; the simulation keeps its current version.',
+              )}
+            </span>
+          ) : null}
         </div>
       )}
       <h1>{t('模型版本', 'Model versions')}</h1>

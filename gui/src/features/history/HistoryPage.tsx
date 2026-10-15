@@ -7,6 +7,8 @@ import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../comp
 import {
   historyKindLabel,
   historyStatusLabel,
+  historyPhaseLabel,
+  appLocale,
   historyObject,
   scopedHistoryFilter,
   download,
@@ -54,7 +56,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   const { state, openCase, update, navigate } = useApp();
   const en = state.language === 'en';
   const t = (zh: string, enText: string) => (en ? enText : zh);
-  const locale = en ? 'en-GB' : 'zh-CN';
   const [filter, setFilter] = useState<Filter>({ ...emptyFilter, casePath: casePath ?? '' }),
     [applied, setApplied] = useState<Filter>(filter),
     [offset, setOffset] = useState(0),
@@ -293,15 +294,20 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     status: t('状态', 'Status'),
     from: t('开始时间', 'From'),
     to: t('结束时间', 'To'),
-    includeRoutine: t('显示例行记录（填 1）', 'Show routine records (1)'),
+    includeRoutine: t('显示自动例行记录', 'Show routine records'),
   };
   const guideFields: UiField[] = Object.entries(effectiveFilter)
     .filter(([key]) => ['query', 'kind', 'status'].includes(key) || filtersOpen)
     .map(([key, value]) => ({
       id: `history-${key}`,
       label: labels[key as keyof Filter],
-      value,
-      type: key === 'kind' || key === 'status' ? 'choice' : 'text',
+      value: String(value ?? ''),
+      type:
+        key === 'kind' || key === 'status'
+          ? 'choice'
+          : key === 'includeRoutine'
+            ? 'switch'
+            : 'text',
       options:
         key === 'kind'
           ? kindOptions.map((value) => ({
@@ -316,7 +322,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             : undefined,
       disabled: busy,
       readOnly: key === 'casePath' && !!casePath,
-      set: (v) => setFilter((f) => scopedHistoryFilter({ ...f, [key]: v }, casePath)),
+      set: (v) =>
+        setFilter((f) =>
+          scopedHistoryFilter(
+            { ...f, [key]: key === 'includeRoutine' ? v === 'true' : v },
+            casePath,
+          ),
+        ),
     }));
   const guideActions: UiAction[] = [
     {
@@ -639,13 +651,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
               <input
                 type="checkbox"
                 disabled={busy}
-                checked={effectiveFilter.includeRoutine === '1'}
+                checked={Boolean(effectiveFilter.includeRoutine)}
                 onChange={(e) =>
                   setFilter((f) =>
-                    scopedHistoryFilter(
-                      { ...f, includeRoutine: e.target.checked ? '1' : '' },
-                      casePath,
-                    ),
+                    scopedHistoryFilter({ ...f, includeRoutine: e.target.checked }, casePath),
                   )
                 }
               />
@@ -712,9 +721,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                         '—'
                       ) : (
                         <time dateTime={new Date(item.time_ms).toISOString()}>
-                          {new Date(item.time_ms).toLocaleDateString(locale)}
+                          {new Date(item.time_ms).toLocaleDateString(appLocale(en))}
                           <br />
-                          {new Date(item.time_ms).toLocaleTimeString(locale, {
+                          {new Date(item.time_ms).toLocaleTimeString(appLocale(en), {
                             hour: '2-digit',
                             minute: '2-digit',
                           })}
@@ -725,6 +734,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     <td className="history-object" title={item.case_path ?? item.operation_id}>
                       <strong>{historyObject(item)}</strong>
                       <small>
+                        {historyPhaseLabel(item.phase, en)} ·{' '}
                         {item.host ??
                           (item.location === 'remote'
                             ? t('远程', 'Remote')
@@ -819,7 +829,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     value:
                       detail.operation.started_ms == null
                         ? null
-                        : new Date(detail.operation.started_ms).toLocaleString(locale),
+                        : new Date(detail.operation.started_ms).toLocaleString(appLocale(en)),
                   },
                   {
                     zh: '结束',
@@ -827,7 +837,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     value:
                       detail.operation.finished_ms == null
                         ? null
-                        : new Date(detail.operation.finished_ms).toLocaleString(locale),
+                        : new Date(detail.operation.finished_ms).toLocaleString(appLocale(en)),
                   },
                   { zh: '操作标识', en: 'Operation ID', value: detail.operation.operation_id },
                 ]}
@@ -904,7 +914,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 onOpenChange={setDetailsOpen}
               >
                 <div className="card-grid">
-                  {historySections(detail).map((section) => (
+                  {historySections(detail, en).map((section) => (
                     <Card key={section.en} title={t(section.zh, section.en)}>
                       <DetailRows rows={section.rows} en={en} />
                       {section.en === 'Source provenance' &&
@@ -1051,7 +1061,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 ))}
                 <h3>{t('事件', 'Events')}</h3>
                 <div>
-                  {historyEvents(detail).map((rows, index) => (
+                  {historyEvents(detail, en).map((rows, index) => (
                     <Card key={index} title={`${t('事件', 'Event')} ${index + 1}`}>
                       <DetailRows rows={rows} en={en} />
                     </Card>

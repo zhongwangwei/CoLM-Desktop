@@ -1,4 +1,3 @@
-import { bilingual } from '../../lib/bilingual';
 import { useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
@@ -43,8 +42,11 @@ interface Probe {
     requires_qc: boolean;
   }[];
 }
+let currentLang = 'zh';
+const t = (zh: string, enText: string) => (currentLang === 'en' ? enText : zh);
 export default function PreparationPage() {
   const { state, notify, navigate } = useApp();
+  currentLang = state.language;
   const [imported, setImported] = useState<Imported[]>([]),
     [mode, setMode] = useState('netcdf'),
     [form, setForm] = useState<Record<string, string>>({
@@ -170,7 +172,12 @@ export default function PreparationPage() {
   function choices() {
     const missing = slots.filter((s) => !s.optional && (!s.name || !s.units));
     if (missing.length)
-      throw new Error(`请确认变量与单位：${missing.map((s) => s.meaning).join('、')}`);
+      throw new Error(
+        t(
+          `请确认变量与单位：${missing.map((s) => s.meaning).join('、')}`,
+          `Confirm variables and units: ${missing.map((s) => s.meaning).join(', ')}`,
+        ),
+      );
     return slots
       .filter((s) => s.name)
       .map((s) => ({ index: s.index, name: s.name, units: s.units, also_add: s.also_add }));
@@ -178,7 +185,13 @@ export default function PreparationPage() {
   function heights() {
     const v = ['height_v', 'height_t', 'height_q'].map((k) => optional(k));
     if (v.every((x) => x === null)) return null;
-    if (v.some((x) => x === null || x <= 0)) throw new Error('三项观测高度须一同填写正数');
+    if (v.some((x) => x === null || x <= 0))
+      throw new Error(
+        t(
+          '三项观测高度须一同填写正数',
+          'All three observation heights must be positive numbers together',
+        ),
+      );
     return v;
   }
   function gapOptions() {
@@ -193,7 +206,7 @@ export default function PreparationPage() {
   }
   async function execute() {
     return work(async () => {
-      if (!form.dst) throw new Error(bilingual('请选择独立的输出路径', 'Output path required'));
+      if (!form.dst) throw new Error(t('请选择独立的输出路径', 'Destination path required'));
       if (mode === 'site')
         return invoke('make_site', {
           out: form.dst,
@@ -212,7 +225,8 @@ export default function PreparationPage() {
           start: form.start,
           end: form.end,
         });
-      if (!probe) throw new Error(bilingual('先检查输入并确认字段', 'Inspect the input first'));
+      if (!probe)
+        throw new Error(t('先检查输入并确认字段', 'Inspect input and confirm fields first'));
       if (mode === 'observation')
         return invoke('convert_observation_table', {
           src: form.src,
@@ -289,35 +303,40 @@ export default function PreparationPage() {
         },
       });
       if (report.unresolved)
-        throw new Error(`仍有 ${report.unresolved} 个缺测；请提供 ERA5 后重试`);
+        throw new Error(
+          t(
+            `仍有 ${report.unresolved} 个缺测；请提供 ERA5 后重试`,
+            `${report.unresolved} gaps remain; provide ERA5 and retry`,
+          ),
+        );
       setImported((items) => items.filter((x) => x.staged_path !== item.staged_path));
       return { path: item.final_path, ...report };
     });
   }
   const labels: Record<string, string> = {
-    src: bilingual('原始输入文件', 'Source'),
-    dst: bilingual('独立输出路径', 'Destination'),
-    lon: bilingual('经度', 'Longitude'),
-    lat: bilingual('纬度', 'Latitude'),
-    landtype: bilingual('地类编号', 'Land class'),
-    rawdata: 'Rawdata 目录',
-    time_column: bilingual('时间列', 'Time column'),
-    site_column: bilingual('站点列', 'Site column'),
-    site_name: bilingual('单站名称', 'Site name'),
-    latitude_column: '纬度列',
-    longitude_column: '经度列',
-    landtype_column: '地类列',
-    utc_offset_column: '时区列',
-    utc_offset: 'UTC 偏移（小时）',
-    step_seconds: '时间步长（秒）',
-    era5: 'ERA5 辅助文件',
-    short_gap: '短缺测最大步数',
-    min_overlap: '最少重叠步数',
-    start: '开始日期',
-    end: '结束日期',
-    height_v: '风速观测高度（m）',
-    height_t: '温度观测高度（m）',
-    height_q: '湿度观测高度（m）',
+    src: t('原始输入文件', 'Source file'),
+    dst: t('独立输出路径', 'Destination path'),
+    lon: t('经度', 'Longitude'),
+    lat: t('纬度', 'Latitude'),
+    landtype: t('地类编号', 'Land class'),
+    rawdata: t('Rawdata 目录', 'Rawdata directory'),
+    time_column: t('时间列', 'Time column'),
+    site_column: t('站点列', 'Site column'),
+    site_name: t('单站名称', 'Site name'),
+    latitude_column: t('纬度列', 'Latitude column'),
+    longitude_column: t('经度列', 'Longitude column'),
+    landtype_column: t('地类列', 'Land class column'),
+    utc_offset_column: t('时区列', 'UTC offset column'),
+    utc_offset: t('UTC 偏移（小时）', 'UTC offset (hours)'),
+    step_seconds: t('时间步长（秒）', 'Time step (seconds)'),
+    era5: t('ERA5 辅助文件', 'ERA5 auxiliary file'),
+    short_gap: t('短缺测最大步数', 'Max short-gap steps'),
+    min_overlap: t('最少重叠步数', 'Min overlap steps'),
+    start: t('开始日期', 'Start date'),
+    end: t('结束日期', 'End date'),
+    height_v: t('风速观测高度（m）', 'Wind measurement height (m)'),
+    height_t: t('温度观测高度（m）', 'Temperature measurement height (m)'),
+    height_q: t('湿度观测高度（m）', 'Humidity measurement height (m)'),
   };
   const basic =
     mode === 'site'
@@ -355,16 +374,16 @@ export default function PreparationPage() {
   const fields: UiField[] = [
     {
       id: 'prep-mode',
-      label: bilingual('准备任务', 'Task'),
+      label: t('准备任务', 'Preparation task'),
       value: mode,
       type: 'choice',
       options: [
-        ['netcdf', 'NetCDF 强迫场'],
-        ['table', bilingual('表格强迫场', 'CSV')],
-        ['site', bilingual('制作站点', 'Site')],
-        ['gaps', bilingual('修复缺测', 'Gaps')],
-        ['era5', '下载 ERA5-Land'],
-        ['observation', bilingual('转换观测', 'Observations')],
+        ['netcdf', t('NetCDF 强迫场', 'NetCDF forcing')],
+        ['table', t('表格强迫场（CSV）', 'Tabular forcing (CSV)')],
+        ['site', t('制作站点', 'Create site')],
+        ['gaps', t('修复缺测', 'Gap-filling')],
+        ['era5', t('下载 ERA5-Land', 'Download ERA5-Land')],
+        ['observation', t('转换观测', 'Convert observations')],
       ].map(([value, label]) => ({ value, label })),
       disabled: busy,
       set: changeMode,
@@ -386,7 +405,7 @@ export default function PreparationPage() {
     ...slots.flatMap((s, i) =>
       ['name', 'units'].map((key) => ({
         id: `prep-slot-${s.index}-${key}`,
-        label: `${s.meaning} ${key}`,
+        label: `${s.meaning} ${key === 'name' ? t('变量名', 'Variable') : t('单位', 'Units')}`,
         value: String(s[key as 'name' | 'units'] ?? ''),
         type: 'text' as const,
         disabled: busy,
@@ -398,7 +417,7 @@ export default function PreparationPage() {
       ? (probe?.variables ?? []).flatMap((v, i) =>
           ['column', 'qc_column'].map((key) => ({
             id: `prep-obs-${i}-${key}`,
-            label: `${v.label} ${key}`,
+            label: `${v.label} ${key === 'column' ? t('数据列', 'Data column') : t('质控列', 'QC column')}`,
             value: v[key as 'column' | 'qc_column'] ?? '',
             type: 'text' as const,
             disabled: busy,
@@ -417,7 +436,7 @@ export default function PreparationPage() {
   ];
   fields.push({
     id: 'prep-advanced',
-    label: bilingual('高级', 'Advanced'),
+    label: t('高级设置', 'Advanced settings'),
     value: String(advanced),
     type: 'switch',
     set: (v) => setAdvanced(v === 'true'),
@@ -425,7 +444,7 @@ export default function PreparationPage() {
   if (imported.length)
     fields.push({
       id: 'prep-batch-era5',
-      label: 'ERA5 辅助文件',
+      label: t('ERA5 辅助文件', 'ERA5 auxiliary file'),
       value: form.era5,
       type: 'text',
       disabled: busy,
@@ -433,7 +452,7 @@ export default function PreparationPage() {
     });
   const canInspect = !['site', 'era5'].includes(mode);
   usePageContract({
-    title: bilingual('输入数据准备', 'Prepare inputs'),
+    title: t('准备输入数据', 'Prepare inputs'),
     step: 'preparation',
     status: busy ? 'busy' : error || 'ready',
     details: { probe, result, error, imported },
@@ -441,7 +460,7 @@ export default function PreparationPage() {
     actions: [
       {
         id: 'prep-new-case',
-        label: bilingual('用于新算例', 'New case'),
+        label: t('用于新算例', 'Use for new case'),
         kind: 'click',
         enabled: !busy,
         run: () => navigate('new-case'),
@@ -454,7 +473,7 @@ export default function PreparationPage() {
         )
         .map((k) => ({
           id: `prep-pick-${k}`,
-          label: `选择 ${labels[k]}`,
+          label: t(`选择 ${labels[k]}`, `Choose ${labels[k]}`),
           kind: 'click' as const,
           enabled: !busy,
           run: () => pick(k),
@@ -463,7 +482,7 @@ export default function PreparationPage() {
         ? [
             {
               id: 'prep-inspect',
-              label: bilingual('检查输入', 'Inspect'),
+              label: t('检查输入', 'Inspect input'),
               kind: 'click' as const,
               enabled: !busy && !!form.src,
               run: inspect,
@@ -472,14 +491,14 @@ export default function PreparationPage() {
         : []),
       {
         id: 'prep-execute',
-        label: bilingual('生成数据', 'Generate'),
+        label: t('生成数据', 'Generate data'),
         kind: 'commit',
         enabled: !busy && !!form.dst && (!canInspect || !!probe),
         run: execute,
       },
       ...imported.map((item, i) => ({
         id: `prep-finish-${i}`,
-        label: `修复并完成 ${item.site}`,
+        label: t(`修复并完成 ${item.site}`, `Fix and finalize ${item.site}`),
         kind: 'commit' as const,
         enabled: !busy,
         run: () => finish(item),
@@ -488,7 +507,7 @@ export default function PreparationPage() {
         ? [
             {
               id: 'prep-gaps',
-              label: bilingual('检查缺测', 'Inspect gaps'),
+              label: t('检查缺测', 'Inspect gaps'),
               kind: 'click' as const,
               enabled: !busy && !!probe,
               run: () =>
@@ -520,17 +539,19 @@ export default function PreparationPage() {
       {(['prep-src', 'prep-rawdata'].includes(f.id) ||
         (f.id === 'prep-dst' && ['table', 'observation'].includes(mode))) && (
         <Button disabled={busy} onClick={() => void pick(f.id.slice(5)).catch(() => {})}>
-          选择 / Browse
+          {t('选择…', 'Browse…')}
         </Button>
       )}
     </Field>
   );
   return (
     <div className="page-stack">
-      <h1>准备输入数据 / Prepare inputs</h1>
+      <h1>{t('准备输入数据', 'Prepare inputs')}</h1>
       <Notice>
-        原始文件保留。先检查，再确认变量与单位，最后写入独立输出路径。ERA5 下载需要本机配置的 CDS
-        凭据。
+        {t(
+          '原始文件保留。先检查，再确认变量与单位，最后写入独立输出路径。ERA5 下载需要本机配置的 CDS 凭据。',
+          'Source files are preserved. Inspect first, verify variables and units, then write to an isolated destination. ERA5 download requires CDS credentials configured locally.',
+        )}
       </Notice>
       <Card>
         <div className="form-grid">
@@ -540,7 +561,7 @@ export default function PreparationPage() {
         </div>
         {canInspect && (
           <Button disabled={busy || !form.src} onClick={() => void inspect().catch(() => {})}>
-            检查输入 / Inspect
+            {t('检查输入', 'Inspect input')}
           </Button>
         )}
         {slots.length > 0 && (
@@ -553,7 +574,11 @@ export default function PreparationPage() {
             {fields.filter((f) => f.id.startsWith('prep-obs-')).map(render)}
           </div>
         )}
-        <Advanced open={advanced} onOpenChange={setAdvanced} title="高级 / Advanced">
+        <Advanced
+          open={advanced}
+          onOpenChange={setAdvanced}
+          title={t('高级设置', 'Advanced settings')}
+        >
           <div className="form-grid">
             {fields.filter((f) => extra.some((k) => f.id === `prep-${k}`)).map(render)}
           </div>
@@ -572,7 +597,7 @@ export default function PreparationPage() {
                 ).catch(() => {})
               }
             >
-              检查缺测 / Check gaps
+              {t('检查缺测', 'Check gaps')}
             </Button>
           )}
           <Button
@@ -580,19 +605,27 @@ export default function PreparationPage() {
             disabled={busy || !form.dst || (canInspect && !probe)}
             onClick={() => void execute().catch(() => {})}
           >
-            生成数据 / Generate
+            {t('生成数据', 'Generate data')}
           </Button>
           <Button disabled={busy} onClick={() => navigate('new-case')}>
-            用于新算例 / New case
+            {t('用于新算例', 'Use for new case')}
           </Button>
         </div>
       </Card>
       {imported.length > 0 && (
-        <Card title="表格已拆分：检查并完成各站强迫场">
+        <Card
+          title={t(
+            '表格已拆分：检查并完成各站强迫场',
+            'Table split: inspect and finalize forcing for each site',
+          )}
+        >
           <Notice>
-            这些是暂存文件。修复后才写入最终强迫场路径；需要站点文件时选择“制作站点”。
+            {t(
+              '这些是暂存文件。修复后才写入最终强迫场路径；需要站点文件时选择“制作站点”。',
+              'These are staged files. Fix gaps before writing to the final forcing path; choose "Create site" if site files are needed.',
+            )}
           </Notice>
-          <Field label="ERA5 辅助文件">
+          <Field label={t('ERA5 辅助文件', 'ERA5 auxiliary file')}>
             <Input value={form.era5} onChange={(e) => set('era5', e.target.value)} />
           </Field>
           {imported.map((item) => (
@@ -601,14 +634,14 @@ export default function PreparationPage() {
                 {item.site} · {item.staged_path}
               </span>
               <Button disabled={busy} onClick={() => void finish(item).catch(() => {})}>
-                修复并完成 / Finalize
+                {t('修复并完成', 'Finalize')}
               </Button>
             </div>
           ))}
         </Card>
       )}
       {result != null && (
-        <Card title="实际处理结果 / Result">
+        <Card title={t('实际处理结果', 'Processing result')}>
           <pre>{JSON.stringify(result, null, 2)}</pre>
         </Card>
       )}

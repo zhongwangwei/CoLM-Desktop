@@ -6,6 +6,7 @@ import * as caseModel from './case-model';
 import { caseFieldVisible } from '../versions/configuration-options';
 import * as simulation from './simulation-model';
 import * as modelSettings from './model-settings';
+import * as historyVariables from './history-variables';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
 import type { UiField, UiAction } from '../../lib/guide';
 import { pageExecutionContext, publicUiResult, waitForContract } from '../../lib/utils';
@@ -106,6 +107,7 @@ function page(
     caseFieldVisible,
     ...simulation,
     ...modelSettings,
+    ...historyVariables,
     fieldInputOptions,
     fieldLabel,
     optionLabel,
@@ -131,6 +133,7 @@ function page(
         'RunPanel',
         'ResultsPage',
         'HistoryPage',
+        'HistoryVariablesCard',
       ].map((key) => [key, key]),
     ),
     useApp: () => ({
@@ -259,6 +262,33 @@ function page(
     target.set(value);
     return render();
   }
+  // 已在目标步骤时不再点击（步骤导航只列出当前步骤之前的步骤）。
+  async function goto(id: string) {
+    const target = Number(id.split('-').pop());
+    const current = Number(
+      (contract.details as { step?: number; simulation_step?: number } | undefined)?.step ??
+        (contract.details as { simulation_step?: number } | undefined)?.simulation_step,
+    );
+    if (current === target) return render();
+    if (contract.actions.some((item) => item.id === id)) return click(id);
+    for (
+      let i = 0;
+      i < 6 &&
+      Number(
+        (contract.details as { step?: number; simulation_step?: number })?.step ??
+          (contract.details as { simulation_step?: number })?.simulation_step,
+      ) < target;
+      i++
+    ) {
+      const next = contract.actions.find(
+        (item) => item.id === 'new-next' || item.id === 'case-next',
+      );
+      if (!next || next.enabled === false) break;
+      await next.run();
+      render();
+    }
+    return render();
+  }
   async function click(id: string) {
     const target = contract.actions.find((item) => item.id === id);
     assert.ok(target, `visible action ${id}`);
@@ -289,6 +319,7 @@ function page(
     settle,
     set,
     click,
+    goto,
     element,
     remount,
     guard: () => guard(),
@@ -297,11 +328,23 @@ function page(
     },
   };
 }
+// 向导要求下一步前显式选择的项：未齐时“下一步”置灰，并在页面契约里说明缺什么。
+function blocked(
+  p: { render: () => { actions: { id: string; enabled?: boolean }[]; details?: unknown } },
+  id: string,
+  reason: RegExp,
+) {
+  const c = p.render();
+  assert.equal(c.actions.find((a) => a.id === id)?.enabled, false, `${id} disabled`);
+  assert.match(String((c.details as { blocker?: string }).blocker), reason);
+}
 const form = {
+  engine: 'rust',
   root: '/project',
   name: 'CN-Cng',
   kind: 'site',
   landcover: 'IGBP',
+  subgrid: 'IGBP',
   site: '/site.nc',
   met: '/forcing.nc',
   start: '2001-01-01',
@@ -342,7 +385,7 @@ test('selecting a station defaults to its entire forcing period and subsequent m
   assert.equal(c.fields.find((f) => f.id === 'new-met')?.value, other.met_file);
   p.set('new-start', '2001-01-01');
   p.set('new-end', '2001-12-31');
-  c = p.set('new-root', '/another-project');
+  c = p.set('new-runtime', '/another-runtime');
   assert.deepEqual(c.details.period, { start: '2001-01-01', end: '2001-12-31' });
 });
 test('station file picking and assistant filling use the same full coverage as station cards', async () => {
@@ -401,28 +444,40 @@ test('rescanning selected forcing fills its full new coverage and does not borro
   assert.equal(c.fields.find((f) => f.id === 'new-met')?.value, '/custom.nc');
 });
 
-test('five-step creation defers dates until data, exposes model settings, and sends only edited case options', async () => {
+test('five-step creation gates each step, chooses the scheme after data, and sends only edited case options', async () => {
   const p = page('NewCasePage');
   await p.mount();
+  blocked(p, 'new-next', /计算核心/);
+  p.set('new-engine', 'rust');
+  blocked(p, 'new-next', /名称/);
   p.set('new-name', 'CN-Cng');
+  p.set('new-root', '');
+  blocked(p, 'new-next', /项目目录/);
+  p.set('new-root', '/project');
   let c = await p.click('new-next');
   assert.equal(c.details.step, 2);
-  assert.equal(typeof p.element('ModelSettings').props.onEdit, 'function');
+  blocked(p, 'new-next', /范围/);
+  p.set('new-kind', 'site');
   c = await p.click('new-next');
-  assert.equal(c.details.step, 3, 'model setup does not require dates before the data step');
-  await assert.rejects(p.click('new-next'), /时段/);
-  assert.equal(p.render().details.step, 3);
+  assert.equal(c.details.step, 3);
+  blocked(p, 'new-next', /时段/);
   for (const [key, value] of Object.entries(form))
     if (p.render().fields.some((f) => f.id === `new-${key}`)) p.set(`new-${key}`, value);
   c = await p.click('new-next');
   assert.equal(c.details.step, 4);
-  p.set('new-option-DEF_HIST_FREQ', 'DAILY');
+  assert.equal(typeof p.element('ModelSettings').props.onEdit, 'function');
+  assert.equal(p.element('ModelSettings').props.mode, undefined, 'no scheme is preselected');
+  blocked(p, 'new-next', /方案/);
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('IGBP');
+  p.render();
   c = await p.click('new-next');
   assert.equal(c.details.step, 5);
-  assert.equal(c.actions.find((a) => a.id === 'new-create')?.kind, 'commit');
+  p.set('new-option-DEF_HIST_FREQ', 'DAILY');
+  assert.equal(p.render().actions.find((a) => a.id === 'new-create')?.kind, 'commit');
   await p.click('new-create');
   const request = p.calls.find((call) => call.command === 'new_case');
   assert.ok(request);
+  assert.equal(request.args.engine, 'rust');
   const fields = request.args.fields as { path: string; value: string }[];
   assert.deepEqual(
     fields.filter((f) =>
@@ -437,7 +492,7 @@ test('data step rejects scanned forcing overflow and failed creation never opens
   const p = page('NewCasePage', { form, sites: [site], step: 3 });
   await p.mount();
   p.set('new-end', '2003-01-01');
-  await assert.rejects(p.click('new-next'), /覆盖/);
+  blocked(p, 'new-next', /覆盖/);
   p.set('new-end', '2001-12-31');
   await p.click('new-next');
   await p.click('new-next');
@@ -448,7 +503,7 @@ test('data step rejects scanned forcing overflow and failed creation never opens
 });
 test('research entry round trip retains form, scanned sites, option edits and the model second step', async () => {
   const option = { DEF_HIST_FREQ: 'DAILY' },
-    p = page('NewCasePage', { form, sites: [site], caseValues: option, step: 2 });
+    p = page('NewCasePage', { form, sites: [site], caseValues: option, step: 4 });
   await p.mount();
   (p.element('ModelSettings').props.onEdit as () => unknown)();
   assert.deepEqual(p.routes, ['research']);
@@ -461,17 +516,16 @@ test('research entry round trip retains form, scanned sites, option edits and th
   assert.equal(seed.form.start, form.start);
   assert.deepEqual(seed.sites, [site]);
   assert.deepEqual(seed.caseValues, { ...option, ...modelSettings.caseSchemeFields('IGBP') });
-  assert.equal(seed.step, 2);
+  assert.equal(seed.step, 4);
   let c = await p.remount();
-  assert.equal(c.details.step, 2);
-  await p.click('new-next');
+  assert.equal(c.details.step, 4);
   c = await p.click('new-next');
   assert.equal(c.fields.find((f) => f.id === 'new-option-DEF_HIST_FREQ')?.value, 'DAILY');
 });
 test('typing 2001 dates keeps partial input visible, blocks save, and preserves seconds and spinup', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-3');
+  await p.goto('case-step-3');
   for (const partial of [
     '2',
     '20',
@@ -506,9 +560,9 @@ test('typing 2001 dates keeps partial input visible, blocks save, and preserves 
 test('dirty case options disable model adjustment and running until saved or discarded', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-4');
+  await p.goto('case-step-5');
   p.set('case-DEF_HIST_FREQ', 'DAILY');
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   assert.equal(p.element('ModelSettings').props.disabled, true);
   assert.ok(p.guard());
   assert.equal(p.element('RunPanel').props.disabled, true);
@@ -536,26 +590,34 @@ test('data options exposed to the assistant are rendered and editable in the dat
     '/custom/surface',
   );
 });
-test('creation preserves explicitly edited spinup seconds instead of resetting them to midnight', async () => {
+test('spin-up is set in the data step by start, end and repetitions without the ambiguous cutoff second', async () => {
   const p = page('NewCasePage', {
-    form: { ...form, spinup_end: '2001-06-01' },
-    sites: [site],
-    step: 4,
+    form: { ...form, spinup_end: '2002-01-01', end: '2002-06-30' },
+    sites: [{ ...site, end: '2002-12-31' }],
+    step: 3,
   });
   await p.mount();
   p.set('new-advanced', 'true');
-  p.set('new-option-DEF_simulation_time%spinup_sec', '3600');
+  assert.ok(
+    !p.render().fields.some((f) => f.id === 'new-option-DEF_simulation_time%spinup_sec'),
+    'spinup seconds are no longer a separate option',
+  );
+  assert.ok(
+    p.elements.some((e) => e.type === 'Input' && e.props.readOnly && e.props.value === form.start),
+    'the spin-up start is shown read-only as the simulation start',
+  );
+  p.set('new-option-DEF_simulation_time%spinup_repeat', '3');
+  await p.click('new-next');
   await p.click('new-next');
   await p.click('new-create');
   const request = p.calls.find((c) => c.command === 'new_case');
   assert.ok(request);
   const fields = request.args.fields as { path: string; value: string }[];
-  const seconds = fields.filter((f) => f.path === 'DEF_simulation_time%spinup_sec');
-  assert.ok(seconds.length);
-  assert.ok(
-    seconds.every((f) => f.value === '3600'),
-    'every sent spinup seconds value must retain the user edit',
-  );
+  const value = (path: string) => fields.filter((f) => f.path === path).map((f) => f.value);
+  assert.deepEqual(value('DEF_simulation_time%spinup_year'), ['2002']);
+  assert.deepEqual(value('DEF_simulation_time%spinup_month'), ['1']);
+  assert.deepEqual(value('DEF_simulation_time%spinup_sec'), ['0']);
+  assert.deepEqual(value('DEF_simulation_time%spinup_repeat'), ['3']);
 });
 
 function guideFor(p: ReturnType<typeof page>) {
@@ -593,7 +655,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
   test(`${name} accepts assistant text and numeric edits, and restricts logical values through the real guide driver`, async () => {
     const p = page(name, name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined);
     await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
+    if (name === 'CasesPage') await p.goto('case-step-3');
     const guide = guideFor(p),
       prefix = name === 'NewCasePage' ? 'new-option-' : 'case-';
     await guide.fill(`${prefix}DEF_dir_existing_srfdata`, '/custom surface/path');
@@ -601,8 +663,13 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       p.render().fields.find((f) => f.id === `${prefix}DEF_dir_existing_srfdata`)?.value,
       '/custom surface/path',
     );
-    if (name === 'NewCasePage') await p.click('new-next');
-    else await p.click('case-save');
+    if (name === 'NewCasePage') {
+      await p.click('new-next');
+      await p.click('new-next');
+    } else {
+      await p.click('case-save');
+      await p.goto('case-step-5');
+    }
     await guide.fill(`${prefix}DEF_simulation_time%timestep`, '900');
     assert.equal(
       p.render().fields.find((f) => f.id === `${prefix}DEF_simulation_time%timestep`)?.value,
@@ -625,7 +692,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
 test('existing case refuses spinup cutoff outside its period and clearing it saves only the disabled year', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-4');
+  await p.goto('case-step-3');
   p.set('case-spinup-date', '2030-01-01');
   await assert.rejects(p.click('case-save'), /预热|Spinup/i);
   assert.equal(p.calls.filter((call) => call.command === 'case_data_save').length, 0);
@@ -634,12 +701,12 @@ test('existing case refuses spinup cutoff outside its period and clearing it sav
   const request = p.calls.find((call) => call.command === 'case_data_save');
   assert.ok(request);
   assert.deepEqual(request.args.fields, [{ path: 'DEF_simulation_time%spinup_year', value: '0' }]);
-  assert.equal(p.render().details.simulation_step, 5);
+  assert.equal(p.render().details.simulation_step, 4);
 });
 test('moving simulation start beyond the existing spinup cutoff refuses to save unchanged invalid spinup', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-3');
+  await p.goto('case-step-3');
   p.set('case-start-date', '2001-08-01');
   await assert.rejects(p.click('case-save'), /预热|Spinup/i);
   assert.equal(p.calls.filter((call) => call.command === 'case_data_save').length, 0);
@@ -651,7 +718,7 @@ test('new output defaults stay automatic and clearing an edited frequency remove
   const p = page('NewCasePage', {
     form,
     sites: [site],
-    step: 4,
+    step: 5,
     caseValues: { DEF_dir_output: '/old/unmanaged/output' },
   });
   const c = await p.mount();
@@ -664,7 +731,6 @@ test('new output defaults stay automatic and clearing an edited frequency remove
   await guide.fill('new-option-DEF_HIST_FREQ', 'DAILY');
   await guide.fill('new-option-DEF_HIST_FREQ', '');
   assert.equal(p.render().fields.find((f) => f.id === 'new-option-DEF_HIST_FREQ')?.value, '');
-  await p.click('new-next');
   await p.click('new-create');
   const request = p.calls.find((call) => call.command === 'new_case');
   assert.ok(request);
@@ -674,38 +740,31 @@ test('new output defaults stay automatic and clearing an edited frequency remove
     'automatic defaults and stale output overrides are not submitted',
   );
 });
-for (const name of ['NewCasePage', 'CasesPage'] as const)
-  test(`${name} shows the managed output directory and refuses assistant changes`, async () => {
-    const p = page(
-      name,
-      name === 'NewCasePage'
-        ? { form: { ...form, name: '  CN-Cng  ' }, sites: [site], step: 4 }
-        : undefined,
-    );
-    await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-4');
-    const id = name === 'NewCasePage' ? 'new-output-directory' : 'case-DEF_dir_output',
-      expected = name === 'NewCasePage' ? '/project/CN-Cng/out' : '/project/site/out';
-    const output = p.render().fields.find((f) => f.id === id);
-    assert.ok(output);
-    assert.equal(output.value, expected);
-    assert.equal(output.disabled, true);
-    const input = p.elements.find((e) => e.type === 'Input' && e.props.value === expected);
-    assert.ok(input);
-    assert.equal(input.props.readOnly, true);
-    await assert.rejects(guideFor(p).fill(id, '/external/output'), /cannot be changed/);
-    assert.equal(p.render().fields.find((f) => f.id === id)?.value, expected);
-  });
+test('the managed output directory stays inside the case and refuses assistant changes', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.goto('case-step-1');
+  const id = 'case-DEF_dir_output',
+    expected = '/project/site/out';
+  const output = p.render().fields.find((f) => f.id === id);
+  assert.ok(output);
+  assert.equal(output.value, expected);
+  assert.equal(output.disabled, true);
+  const input = p.elements.find((e) => e.type === 'Input' && e.props.value === expected);
+  assert.ok(input);
+  assert.equal(input.props.readOnly, true);
+  await assert.rejects(guideFor(p).fill(id, '/external/output'), /cannot be changed/);
+  assert.equal(p.render().fields.find((f) => f.id === id)?.value, expected);
+});
 test('clearing spatial timestep restores the required automatic 1800 seconds without a case override', async () => {
   const p = page('NewCasePage', {
     form: { ...form, kind: 'global', dlon: '1', dlat: '1', forcing: '/forcing.nml' },
-    step: 4,
+    step: 5,
   });
   await p.mount();
   const guide = guideFor(p);
   await guide.fill('new-option-DEF_simulation_time%timestep', '900');
   await guide.fill('new-option-DEF_simulation_time%timestep', '');
-  await p.click('new-next');
   await p.click('new-create');
   const request = p.calls.find((call) => call.command === 'new_spatial_case');
   assert.ok(request);
@@ -728,22 +787,22 @@ test('research round trips preserve explicit own-data disclosure rather than inf
     !contract.fields.some((f) => f.id === 'new-sitedir'),
     'bundled directories do not open the own-data section',
   );
-  await p.click('new-previous');
+  await p.click('new-next');
   (p.element('ModelSettings').props.onEdit as () => unknown)();
   assert.equal((p.state.newCaseSeed as { ownData: boolean }).ownData, false);
   await p.remount();
-  contract = await p.click('new-next');
+  contract = await p.click('new-previous');
   assert.ok(
     !contract.fields.some((f) => f.id === 'new-sitedir'),
     'returning from model settings keeps bundled data collapsed',
   );
   contract = await p.click('new-own-data');
   assert.equal(contract.fields.find((f) => f.id === 'new-sitedir')?.value, '/bundled/sites');
-  await p.click('new-previous');
+  await p.click('new-next');
   (p.element('ModelSettings').props.onEdit as () => unknown)();
   assert.equal((p.state.newCaseSeed as { ownData: boolean }).ownData, true);
   await p.remount();
-  contract = await p.click('new-next');
+  contract = await p.click('new-previous');
   assert.equal(
     contract.fields.find((f) => f.id === 'new-sitedir')?.value,
     '/bundled/sites',
@@ -758,7 +817,7 @@ test('USGS classification survives model editing and creates the chosen template
       {
         form,
         sites: [{ ...site, urban }],
-        step: 2,
+        step: 4,
         caseValues: urban ? { DEF_URBAN_RUN: '.true.' } : {},
       },
       [site],
@@ -770,13 +829,11 @@ test('USGS classification survives model editing and creates the chosen template
     (p.element('ModelSettings').props.onClassificationChange as (value: string) => void)('USGS');
     assert.equal(p.render().details.classification, 'USGS');
     (p.element('ModelSettings').props.onEdit as () => void)();
-    assert.deepEqual(p.state.simulationReturn, { route: 'new-case', step: 2 });
+    assert.deepEqual(p.state.simulationReturn, { route: 'new-case', step: 4 });
     assert.equal((p.state.newCaseSeed as { form: { landcover: string } }).form.landcover, 'USGS');
     const returned = await p.remount();
-    assert.equal(returned.details.step, 2);
+    assert.equal(returned.details.step, 4);
     assert.equal(p.element('ModelSettings').props.classification, 'USGS');
-    await p.click('new-next');
-    await p.click('new-next');
     await p.click('new-next');
     await p.click('new-create');
     const request = p.calls.find((call) => call.command === 'new_case');
@@ -790,17 +847,17 @@ test('USGS classification survives model editing and creates the chosen template
     assert.deepEqual(p.state.version.overlay.physics, {});
   }
 });
-test('existing case returns from version editing to the model second step before visiting data', async () => {
+test('existing case returns from version editing to the model step after the data step', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   (p.element('ModelSettings').props.onEdit as () => void)();
   assert.deepEqual(p.routes, ['research']);
-  assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 2 });
+  assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 4 });
   const returned = await p.remount();
-  assert.equal(returned.details.simulation_step, 2);
+  assert.equal(returned.details.simulation_step, 4);
   assert.ok(p.element('ModelSettings'));
-  const data = await p.click('case-next');
+  const data = await p.click('case-previous');
   assert.equal(data.details.simulation_step, 3);
   assert.ok(data.fields.some((field) => field.id === 'case-start-date'));
 });
@@ -810,8 +867,8 @@ test('existing case can reach its data step to repair dates after first reviewin
     'DEF_simulation_time%start_year': '',
   });
   await p.mount();
-  await p.click('case-step-2');
-  const data = await p.click('case-next');
+  await p.goto('case-step-4');
+  const data = await p.click('case-previous');
   assert.equal(data.details.simulation_step, 3);
   await assert.rejects(p.click('case-next'), /时段/);
   assert.equal(p.render().details.simulation_step, 3);
@@ -844,7 +901,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
     await p.mount();
     if (name === 'CasesPage') {
-      await p.click('case-step-3');
+      await p.goto('case-step-3');
       await p.settle();
       assert.deepEqual(
         p.calls.filter((call) => call.command === 'model_configuration').at(-1)?.args.caseValues,
@@ -885,13 +942,16 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
     const p = page(
       name,
-      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: retained } : undefined,
+      // 保留的配置开着城市过程：数据步骤会核对站点类型，所以这里用城市站。
+      name === 'NewCasePage'
+        ? { form, sites: [{ ...site, urban: true }], step: 3, caseValues: retained }
+        : undefined,
       [site],
       { ...initialValues, ...retained },
       { schema: processSchema },
     );
     await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
+    if (name === 'CasesPage') await p.goto('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     const contract = p.render();
     assert.ok(!contract.actions.some((a) => a.id.includes('data-group-')));
@@ -903,7 +963,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     assert.ok(contract.fields.some((f) => f.id.endsWith('DEF_dir_existing_srfdata')));
     assert.ok(!p.elements.some((e) => e.type === 'ProcessDataGroups'));
     assert.ok(!p.calls.some((call) => call.command === 'case_data_save'));
-    await p.click(name === 'NewCasePage' ? 'new-step-2' : 'case-step-2');
+    await p.goto(name === 'NewCasePage' ? 'new-step-4' : 'case-step-4');
     const environment = p.element('ModelSettings').props.setupEnvironment as {
       caseValues: Record<string, string>;
     };
@@ -919,7 +979,7 @@ test('existing case run and result tabs never expose settings-only process data 
     { schema: processSchema },
   );
   await p.mount();
-  await p.click('case-step-3');
+  await p.goto('case-step-3');
   p.set('case-advanced', 'true');
   assert.ok(!p.render().actions.some((a) => a.id === 'case-data-group-bgc'));
   for (const tab of ['runs', 'results']) {
@@ -936,7 +996,7 @@ for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
       form,
       sites: [site],
       caseValues: { DEF_HIST_FREQ: 'DAILY' },
-      step: 2,
+      step: 4,
     });
     await p.mount();
     (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
@@ -944,8 +1004,6 @@ for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
     assert.deepEqual(p.routes, []);
     assert.equal(p.element('ModelSettings').props.mode, mode);
     assert.deepEqual(p.state.version.overlay.physics, {});
-    await p.click('new-next');
-    await p.click('new-next');
     await p.click('new-next');
     await p.click('new-create');
     const request = p.calls.find((c) => c.command === 'new_case');
@@ -956,7 +1014,7 @@ for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
     assert.ok(!p.calls.some((c) => c.command === 'model_create'));
   });
 test('case scheme changes preserve explicit model physics and never derive versions', async () => {
-  const p = page('NewCasePage', { form: { ...form, subgrid: 'PFT' }, sites: [site], step: 2 });
+  const p = page('NewCasePage', { form: { ...form, subgrid: 'PFT' }, sites: [site], step: 4 });
   Object.assign(p.state.version.overlay.physics, { DEF_USE_BGC: '.true.' });
   await p.mount();
   (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('USGS');
@@ -969,7 +1027,7 @@ test('case scheme changes preserve explicit model physics and never derive versi
 test('new-case setup edits stay in the case and preserve inputs without visiting versions', async () => {
   const p = page(
     'NewCasePage',
-    { form: { ...form, landcover: 'USGS' }, sites: [site], step: 2 },
+    { form: { ...form, landcover: 'USGS' }, sites: [site], step: 4 },
     [site],
     initialValues,
     {
@@ -998,7 +1056,7 @@ test('new-case setup edits stay in the case and preserve inputs without visiting
 test('existing case options save atomically and clear explicit crop settings without a model revision', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   const patch = {
     DEF_USE_Campbell_SOIL_MODEL: '.false.',
     DEF_USE_VariablySaturatedFlow: '.true.',
@@ -1021,7 +1079,7 @@ for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
   test(`existing case ${mode} selection writes case fields without deriving a revision`, async () => {
     const p = page('CasesPage');
     await p.mount();
-    await p.click('case-step-2');
+    await p.goto('case-step-4');
     (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
     await p.settle();
     const saved = p.calls.find((c) => c.command === 'case_data_save');
@@ -1041,7 +1099,7 @@ for (const mode of ['IGBP', 'USGS', 'PFT', 'PC'] as const)
 test('failed case scheme save leaves saved case state and selected version intact', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   p.fail();
   (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('PC');
   await p.settle();
@@ -1053,7 +1111,7 @@ test('failed case scheme save leaves saved case state and selected version intac
 
 for (const mode of ['PFT', 'PC'] as const)
   test(`new ${mode} uses the supported IGBP data source when switching from USGS`, async () => {
-    const p = page('NewCasePage', { form: { ...form, landcover: 'USGS' }, sites: [site], step: 2 });
+    const p = page('NewCasePage', { form: { ...form, landcover: 'USGS' }, sites: [site], step: 4 });
     await p.mount();
     (p.element('ModelSettings').props.onModeChange as (value: string) => void)(mode);
     p.render();
@@ -1068,7 +1126,7 @@ for (const mode of ['PFT', 'PC'] as const)
 test('same-kernel case scheme changes requery process conditions with the saved scheme', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   for (const mode of ['IGBP', 'PFT', 'PC', 'USGS']) {
     const before = p.calls.filter((c) => c.command === 'model_configuration').length;
     (p.element('ModelSettings').props.onModeChange as (mode: string) => void)(mode);
@@ -1098,7 +1156,7 @@ for (const subgrid of ['PFT', 'PC'])
       form: restored,
       sites: [site],
       caseValues: options,
-      step: 2,
+      step: 4,
       ownData: true,
     });
     await p.mount();
@@ -1117,6 +1175,7 @@ for (const subgrid of ['PFT', 'PC'])
     };
     assert.deepEqual(seed.form, {
       ...restored,
+      kernel: '',
       landcover: 'IGBP',
       sitedir: '',
       forcingdir: '',
@@ -1133,14 +1192,14 @@ for (const subgrid of ['PFT', 'PC'])
     });
     assert.deepEqual(seed.sites, [site]);
     assert.equal(seed.caseValues.DEF_HIST_FREQ, 'DAILY');
-    assert.equal(seed.step, 2);
+    assert.equal(seed.step, 4);
     assert.equal(seed.ownData, true);
   });
 
 test('same-kernel process saves refresh case-data prerequisite queries and preserve source settings', async () => {
   const p = page('CasesPage');
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   for (const value of ['.true.', '.false.']) {
     const before = p.calls.filter((c) => c.command === 'model_configuration').length;
     await (p.element('ModelSettings').props.onCaseChange as (patch: object) => Promise<void>)({
@@ -1160,9 +1219,9 @@ test('same-kernel process saves refresh case-data prerequisite queries and prese
 
 for (const name of ['NewCasePage', 'CasesPage'] as const)
   test(`${name} research entry never derives a model revision`, async () => {
-    const p = page(name, name === 'NewCasePage' ? { form, sites: [site], step: 2 } : undefined);
+    const p = page(name, name === 'NewCasePage' ? { form, sites: [site], step: 4 } : undefined);
     await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-2');
+    if (name === 'CasesPage') await p.goto('case-step-4');
     (p.element('ModelSettings').props.onEdit as () => void)();
     assert.deepEqual(p.routes, ['research']);
     assert.ok(
@@ -1189,7 +1248,7 @@ test('case urban switch controls station compatibility and urban creation mode w
   const urban = { ...site, name: 'urban', urban: true };
   const p = page(
     'NewCasePage',
-    { form, sites: [urban, site], step: 2 },
+    { form, sites: [urban, site], step: 4 },
     [urban, site],
     initialValues,
     {
@@ -1204,7 +1263,7 @@ test('case urban switch controls station compatibility and urban creation mode w
     DEF_URBAN_RUN: '.true.',
   });
   p.render();
-  await p.click('new-next');
+  await p.click('new-previous');
   const c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-select-urban')!.enabled, true);
   assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
@@ -1224,7 +1283,7 @@ test('case crop planting selects the crop kernel and station; clearing it return
   const crop = { ...site, name: 'crop', crop: true };
   const p = page(
     'NewCasePage',
-    { form: { ...form, subgrid: 'PFT' }, sites: [crop, site], step: 2 },
+    { form: { ...form, subgrid: 'PFT' }, sites: [crop, site], step: 4 },
     [crop, site],
     initialValues,
     { schema: setupSchema, kernels: setupKernels },
@@ -1237,11 +1296,13 @@ test('case crop planting selects the crop kernel and station; clearing it return
   });
   p.render();
   assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/crop');
-  await p.click('new-next');
+  await p.click('new-previous');
   const c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-select-crop')!.enabled, true);
   assert.equal(c.actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
-  await p.click('new-previous');
+  // 作物配置需要作物站点：选中作物站后数据步骤才放行，回到模型步骤。
+  await p.click('new-select-crop');
+  await p.click('new-next');
   (p.element('ModelSettings').props.onCaseChange as (patch: object) => void)({
     DEF_TUNING_CROP_PLANTING_DAY: null,
   });
@@ -1252,7 +1313,7 @@ test('case crop planting selects the crop kernel and station; clearing it return
 test('case BGC selection requires runtime input even when the model revision has no process switches', async () => {
   const p = page(
     'NewCasePage',
-    { form: { ...form, runtime: '', subgrid: 'PFT' }, sites: [site], step: 2 },
+    { form: { ...form, runtime: '', subgrid: 'PFT' }, sites: [site], step: 4 },
     [site],
     initialValues,
     { schema: setupSchema },
@@ -1262,14 +1323,14 @@ test('case BGC selection requires runtime input even when the model revision has
     DEF_USE_BGC: '.true.',
   });
   p.render();
-  await p.click('new-next');
-  await assert.rejects(() => p.click('new-next'), /Runtime/);
+  await p.click('new-previous');
+  blocked(p, 'new-next', /Runtime/);
   assert.ok(!p.calls.some((c) => c.command === 'new_case'));
   assert.deepEqual(p.state.version.overlay.physics, {});
 });
 
 test('legacy version switches cannot activate urban crop BGC or a vegetation scheme in a new case', async () => {
-  const p = page('NewCasePage', { form, sites: [site], step: 2 }, [site], initialValues, {
+  const p = page('NewCasePage', { form, sites: [site], step: 4 }, [site], initialValues, {
     schema: setupSchema,
     kernels: setupKernels,
     modelFields: [field('DEF_TUNING_CSOILC', '生态与生地化')],
@@ -1284,7 +1345,7 @@ test('legacy version switches cannot activate urban crop BGC or a vegetation sch
   Object.assign(p.state.version.overlay.physics, legacy);
   await p.mount();
   assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
-  await p.click('new-next');
+  await p.click('new-previous');
   assert.equal(p.render().actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
   await p.click('new-next');
   await p.click('new-next');
@@ -1311,7 +1372,7 @@ test('existing case ignores schema planting-day zero and stale crop flags when t
     DEF_URBAN_RUN: '.true.',
   });
   await p.mount();
-  await p.click('case-step-2');
+  await p.goto('case-step-4');
   assert.equal((p.element('ModelSettings').props.kernel as KernelChoice).dir, '/kernel/default');
   const actual = (
     p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
@@ -1339,7 +1400,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       );
       p.state.expert = true;
       await p.mount();
-      if (name === 'CasesPage') await p.click('case-step-3');
+      if (name === 'CasesPage') await p.goto('case-step-3');
       const contract = p.render();
       assert.ok(!contract.actions.some((a) => a.id.includes('data-group-')));
       for (const [, , child] of dataGroups)
@@ -1394,7 +1455,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     );
     p.state.expert = true;
     await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
+    if (name === 'CasesPage') await p.goto('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     const controls = p.render().fields;
     for (const key of children) assert.ok(!controls.some((f) => f.id.endsWith(key)), key);
@@ -1436,7 +1497,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       );
       p.state.expert = true;
       await p.mount();
-      if (name === 'CasesPage') await p.click('case-step-3');
+      if (name === 'CasesPage') await p.goto('case-step-3');
       const controls = p.render().fields;
       assert.equal(
         controls.some((f) => f.id.endsWith('CHILD_DATA') && !f.id.endsWith('AUXILIARY_DATA')),
@@ -1464,7 +1525,7 @@ test('selecting an urban station configures its case automatically and keeps ord
   await p.mount();
   assert.equal(p.render().actions.find((a) => a.id === 'new-select-AU-Preston')!.enabled, true);
   await p.click('new-select-AU-Preston');
-  await p.click('new-previous');
+  await p.click('new-next');
   let settings = p.element('ModelSettings');
   assert.equal(
     (settings.props.setupEnvironment as { caseValues: Record<string, string> }).caseValues
@@ -1477,10 +1538,10 @@ test('selecting an urban station configures its case automatically and keeps ord
     '.false.',
   );
   assert.equal((settings.props.kernel as KernelChoice).dir, '/kernel/default');
-  await p.click('new-next');
+  await p.click('new-previous');
   assert.equal(p.render().actions.find((a) => a.id === 'new-select-CN-Cng')!.enabled, true);
   await p.click('new-select-CN-Cng');
-  await p.click('new-previous');
+  await p.click('new-next');
   settings = p.element('ModelSettings');
   assert.equal(
     (settings.props.setupEnvironment as { caseValues: Record<string, string> }).caseValues
@@ -1509,7 +1570,7 @@ test('selecting a crop example uses backend defaults and matches PFT BGC and a C
   await p.mount();
   assert.equal(p.render().actions.find((a) => a.id === 'new-select-US-Ne3')!.enabled, true);
   await p.click('new-select-US-Ne3');
-  await p.click('new-previous');
+  await p.click('new-next');
   const setup = p.element('ModelSettings').props;
   assert.equal(setup.mode, 'PFT');
   assert.equal((setup.kernel as KernelChoice).dir, '/kernel/crop');
@@ -1517,8 +1578,6 @@ test('selecting a crop example uses backend defaults and matches PFT BGC and a C
   assert.equal(fields.DEF_USE_BGC, '.true.');
   assert.equal(fields.DEF_URBAN_RUN, '.false.');
   assert.equal(fields.DEF_TUNING_CROP_PLANTING_DAY, '120');
-  await p.click('new-next');
-  await p.click('new-next');
   await p.click('new-next');
   await p.click('new-create');
   const create = p.calls.find((c) => c.command === 'new_case')!;
@@ -1554,7 +1613,7 @@ test('existing case range fields are editable and save only the case before refr
     },
   );
   await p.mount();
-  const before = await p.click('case-step-1');
+  const before = await p.goto('case-step-2');
   for (const key of Object.keys(rangeValues))
     assert.ok(before.fields.find((item) => item.id === `case-${key}`));
   p.set('case-SITE_lon_location', '12.5');
@@ -1738,7 +1797,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       },
     );
     await p.mount();
-    if (name === 'CasesPage') await p.click('case-step-3');
+    if (name === 'CasesPage') await p.goto('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     const id = `${name === 'NewCasePage' ? 'new-option-' : 'case-'}${key}`;
     assert.equal(p.render().fields.find((f) => f.id === id)?.type, 'text');
@@ -1769,7 +1828,7 @@ test('crop and nitrogen history fields stay in Step 4 output selection with thei
     ],
   });
   await p.mount();
-  await p.click('case-step-4');
+  await p.goto('case-step-5');
   p.set('case-advanced', 'true');
   const c = p.render();
   for (const name of names) {
@@ -1779,4 +1838,123 @@ test('crop and nitrogen history fields stay in Step 4 output selection with thei
     assert.equal(output.disabled, name === 'fertnitro_corn');
   }
   assert.ok(p.calls.some((call) => call.command === 'hist_vars'));
+});
+
+test('switching the new case to a land-cover class closes BGC and says why', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, subgrid: 'PFT' },
+      sites: [site],
+      caseValues: { DEF_USE_BGC: '.true.' },
+      step: 4,
+    },
+    [site],
+    initialValues,
+    { schema: setupSchema },
+  );
+  await p.mount();
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('IGBP');
+  p.render();
+  assert.equal(
+    (p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> })
+      .caseValues.DEF_USE_BGC,
+    '.false.',
+  );
+  assert.ok(
+    p.elements.some(
+      (e) => e.type === 'Notice' && String(e.children).includes('生物地球化学（BGC）'),
+    ),
+  );
+});
+
+test('the auto-close notice stays with the step that caused it', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, subgrid: 'PFT' },
+      sites: [site],
+      caseValues: { DEF_USE_BGC: '.true.' },
+      step: 4,
+    },
+    [site],
+    initialValues,
+    { schema: setupSchema },
+  );
+  await p.mount();
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('IGBP');
+  p.render();
+  const notice = () =>
+    p.elements.some((e) => e.type === 'Notice' && String(e.children).includes('已自动关闭'));
+  assert.ok(notice());
+  await p.click('new-previous');
+  assert.equal(p.render().details.step, 3);
+  assert.ok(!notice(), 'the notice does not follow the user to another step');
+});
+
+test('NewCasePage unifies project folder and case name in step 1 keeping outputs together', async () => {
+  const p = page('NewCasePage', { form: { ...form, name: 'CN-Cng' } });
+  await p.mount();
+  assert.ok(p.render().fields.some((f) => f.id === 'new-root'));
+  assert.ok(p.render().fields.some((f) => f.id === 'new-name'));
+  assert.ok(
+    !p.render().fields.some((f) => f.id === 'new-output'),
+    'separate output path is merged into case directory',
+  );
+});
+
+test('next button is strictly disabled when required settings are missing', async () => {
+  const p = page('NewCasePage');
+  await p.mount();
+  const findNextButton = () =>
+    p.elements.find(
+      (e) =>
+        e.type === 'Button' &&
+        e.props.variant === 'primary' &&
+        (e.children as unknown[]).some((c) => typeof c === 'string' && c.includes('下一步')),
+    );
+  assert.equal(findNextButton()?.props.disabled, true);
+  p.set('new-name', 'CN-Cng');
+  // 计算核心不预选：选定之前“下一步”仍置灰。
+  assert.equal(findNextButton()?.props.disabled, true);
+  p.set('new-engine', 'rust');
+  assert.equal(findNextButton()?.props.disabled, false);
+  p.set('new-root', '');
+  assert.equal(findNextButton()?.props.disabled, true);
+  p.set('new-root', '/project');
+  assert.equal(findNextButton()?.props.disabled, false);
+  p.set('new-engine', '');
+  assert.equal(findNextButton()?.props.disabled, true);
+  p.set('new-engine', 'rust');
+  assert.equal(findNextButton()?.props.disabled, false);
+});
+
+test('choosing an ordinary station never preselects a land-cover scheme', async () => {
+  const p = page('NewCasePage', {
+    form: { ...form, subgrid: '', landcover: '' },
+    sites: [site],
+    step: 3,
+  });
+  await p.mount();
+  await p.click('new-select-CN-Cng');
+  const c = await p.click('new-next');
+  assert.equal(c.details.step, 4);
+  assert.equal(p.element('ModelSettings').props.mode, undefined);
+  blocked(p, 'new-next', /方案/);
+});
+
+test('output variables chosen while creating a case are written with it', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 5 });
+  await p.mount();
+  (p.element('HistoryVariablesCard').props.onChange as (patch: object) => void)({
+    'DEF_hist_vars%fsena': '.true.',
+    'DEF_hist_vars%leafc': '.false.',
+  });
+  p.render();
+  await p.click('new-create');
+  const request = p.calls.find((call) => call.command === 'new_case');
+  assert.ok(request);
+  const fields = request.args.fields as { path: string; value: string }[];
+  assert.equal(fields.find((f) => f.path === 'DEF_hist_vars%fsena')?.value, '.true.');
+  assert.equal(fields.find((f) => f.path === 'DEF_hist_vars%leafc')?.value, '.false.');
 });

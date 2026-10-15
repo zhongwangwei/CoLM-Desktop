@@ -11,6 +11,7 @@ import {
   caseOptionOverlay,
   caseOptionPatch,
   type CaseOptionPatch,
+  type ConfigurationField,
   type ConfigurationSource,
   type ConfigurationResult,
 } from './configuration-options';
@@ -32,7 +33,7 @@ type Props = {
   onCaseChange?: (patch: CaseOptionPatch) => void | Promise<void>;
   requested?: SetupRequest;
   onOpenSettings?: (id: string) => void;
-  hasSettings?: (id: string) => boolean;
+  hasSettings?: (id: string, states?: ConfigurationField[]) => boolean;
 };
 export default function ScientificSetupCards({
   caseDir = null,
@@ -50,6 +51,8 @@ export default function ScientificSetupCards({
 }: Props) {
   const { state } = useApp(),
     t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
+  // 只影响选项判定，不进入查询键：开关算例写入不应让后端查询结果过期。
+  const choiceEnvironment = onCaseChange ? { ...environment, autoClose: true } : environment;
   const [loaded, setLoaded] = useState<{ key: string; result: ConfigurationResult } | null>(null),
     [error, setError] = useState(''),
     [cropInput, setCropInput] = useState<{ key: string; value: string } | null>(null),
@@ -106,7 +109,7 @@ export default function ScientificSetupCards({
   const choices = setupChoices(
     effective,
     fields,
-    environment,
+    choiceEnvironment,
     result?.fields,
     result ?? undefined,
   ).filter((c) => includeSubgrid || c.id !== 'subgrid');
@@ -131,7 +134,13 @@ export default function ScientificSetupCards({
         .find((c) => c.id === request.id)
         ?.choices.find((c) => c.value === requestedValue)?.reason;
       if (reason) throw new Error(reason);
-      const next = applySetupRequest(effective, fields, request, environment, result ?? undefined);
+      const next = applySetupRequest(
+        effective,
+        fields,
+        request,
+        choiceEnvironment,
+        result ?? undefined,
+      );
       if (onCaseChange) {
         writeLocked.current = true;
         setSaving(true);
@@ -143,7 +152,7 @@ export default function ScientificSetupCards({
               currentIdentity.current === identity &&
               request.value !== '.false.' &&
               previous !== requestedValue &&
-              hasSettings(request.id)
+              hasSettings(request.id, result?.fields)
             )
               onOpenSettings?.(request.id);
           })
@@ -171,7 +180,10 @@ export default function ScientificSetupCards({
   }
   const cards = choices.map((control, index) => {
     const settingsAvailable =
-      !!onOpenSettings && hasSettings(control.id) && !!control.value && control.value !== '.false.';
+      !!onOpenSettings &&
+      hasSettings(control.id, result?.fields) &&
+      !!control.value &&
+      control.value !== '.false.';
     if (settingsAvailable)
       actions.push({
         id: `setup-${control.id}-settings`,

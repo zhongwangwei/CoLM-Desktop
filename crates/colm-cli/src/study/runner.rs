@@ -3083,7 +3083,7 @@ pub fn apply(
     }
     let existed = output.exists();
     if existed {
-        fs::remove_dir(&output)?;
+        fs::remove_dir_all(&output)?;
     }
     if let Err(error) = fs::rename(&stage, &output) {
         if existed {

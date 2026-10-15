@@ -278,3 +278,100 @@ test('process ownership follows parent gates and leaves independent schemes and 
     'crop',
   );
 });
+
+test('scheme popups hold only scheme-exclusive inputs; binary schemes have no settings', async () => {
+  const { processSettingOwner, schemeHasSettings, simulationOptionField } =
+    await import('./model-settings');
+  const field = (name: string, section: string) => ({ name, section });
+  // 土壤水力方案是二选一，土壤反照率是通用地表参数，不能塞进它的弹窗。
+  assert.equal(processSettingOwner(field('DEF_SOIL_REFL_SCHEME', '地表数据')), null);
+  assert.equal(simulationOptionField(field('DEF_SOIL_REFL_SCHEME', '地表数据')), true);
+  assert.equal(processSettingOwner(field('DEF_PC_CROP_SPLIT', '地表数据')), 'PC');
+  assert.equal(processSettingOwner(field('DEF_FAST_PC', '地表数据')), 'PC');
+  assert.equal(processSettingOwner(field('DEF_SOLO_PFT', '地表数据')), 'PFT');
+  const fields = ['DEF_SOLO_PFT', 'DEF_FAST_PC', 'DEF_PC_CROP_SPLIT'].map((name) => ({ name }));
+  for (const scheme of ['IGBP', 'USGS', undefined])
+    assert.equal(schemeHasSettings(scheme, fields, 'region'), false);
+  assert.equal(schemeHasSettings('PFT', fields, 'region'), true);
+  // SinglePoint 不读 DEF_SOLO_PFT，单点 PFT 没有专属参数就不弹窗。
+  assert.equal(schemeHasSettings('PFT', fields, 'site'), false);
+  assert.equal(schemeHasSettings('PC', fields, 'site'), true);
+  assert.equal(
+    schemeHasSettings('PC', fields, 'site', [
+      { name: 'DEF_PC_CROP_SPLIT', mode: 'disabled', pending: false },
+    ]),
+    false,
+  );
+});
+
+test('upstream choices close processes they invalidate, and the newest side of an exclusive pair wins', async () => {
+  const { exclusionPatch } = await import('./model-settings');
+  const on = '.true.',
+    off = '.false.';
+  // 改成 IGBP 结构：BGC 失去 PFT/PC 前提，作物随 BGC 一起关闭。
+  let r = exclusionPatch(
+    { DEF_USE_BGC: on, DEF_TUNING_CROP_PLANTING_DAY: '120' },
+    { DEF_USE_LCT: on, DEF_USE_PFT: off, DEF_USE_PC: off, DEF_SUBGRID_SCHEME: 'IGBP' },
+    { subgrid: 'IGBP', domain: 'site' },
+  );
+  assert.equal(r.patch.DEF_USE_BGC, off);
+  assert.equal(r.patch.DEF_TUNING_CROP_PLANTING_DAY, null);
+  assert.deepEqual(
+    r.closed.map((c) => c.key),
+    ['DEF_USE_BGC', 'DEF_TUNING_CROP_PLANTING_DAY'],
+  );
+  // CROP 内核要求 BGC：不靠自动关闭作物来掩盖内核冲突。
+  r = exclusionPatch(
+    { DEF_USE_BGC: on },
+    { DEF_USE_BGC: off },
+    { subgrid: 'PFT', compiledCrop: true },
+  );
+  assert.deepEqual(r.closed, []);
+  // 选择 Campbell 关闭示踪；关闭变饱和流同样关闭示踪。
+  r = exclusionPatch(
+    { DEF_USE_TRACER: on },
+    { DEF_USE_Campbell_SOIL_MODEL: on },
+    { subgrid: 'PFT' },
+  );
+  assert.equal(r.patch.DEF_USE_TRACER, off);
+  r = exclusionPatch({ DEF_USE_TRACER: on }, { DEF_USE_VariablySaturatedFlow: off }, {});
+  assert.equal(r.patch.DEF_USE_TRACER, off);
+  // 单点城市与 BGC：本次选择的一方保留。
+  r = exclusionPatch(
+    { DEF_URBAN_RUN: on },
+    { DEF_USE_BGC: on },
+    { subgrid: 'PFT', domain: 'site' },
+  );
+  assert.deepEqual(r.patch, { DEF_USE_BGC: on, DEF_URBAN_RUN: off });
+  r = exclusionPatch(
+    { DEF_USE_BGC: on },
+    { DEF_URBAN_RUN: on },
+    { subgrid: 'PFT', domain: 'site' },
+  );
+  assert.deepEqual(r.patch, { DEF_URBAN_RUN: on, DEF_USE_BGC: off });
+  // 改成单点范围：河湖汇流、区域汇流、LULCC 都失去前提。
+  r = exclusionPatch(
+    { DEF_USE_GridRiverLakeFlow: on, DEF_UnitCatchment_regional: on, DEF_USE_LULCC: on },
+    {},
+    { domain: 'site' },
+  );
+  assert.deepEqual(r.closed.map((c) => c.key).sort(), [
+    'DEF_USE_GridRiverLakeFlow',
+    'DEF_USE_LULCC',
+    'DEF_UnitCatchment_regional',
+  ]);
+  // USGS 不支持 LULCC。
+  r = exclusionPatch(
+    { DEF_USE_LULCC: on },
+    {},
+    { domain: 'region', grid: 'latlon', classification: 'USGS' },
+  );
+  assert.equal(r.patch.DEF_USE_LULCC, off);
+  // 没有冲突时不动用户的配置。
+  r = exclusionPatch(
+    { DEF_USE_BGC: on },
+    { DEF_USE_PFT: on },
+    { subgrid: 'PFT', domain: 'region', grid: 'latlon' },
+  );
+  assert.deepEqual(r, { patch: { DEF_USE_PFT: on }, closed: [] });
+});

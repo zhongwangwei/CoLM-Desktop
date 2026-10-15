@@ -46,6 +46,7 @@ function dialog() {
     Button: 'Button',
     Notice: 'Notice',
     setupHandledKeys: ['DEF_USE_BGC', 'DEF_TUNING_CROP_PLANTING_DAY'],
+    spatialOnlySchemeKeys: ['DEF_SOLO_PFT', 'DEF_FAST_PC'],
     useApp: () => ({ state: { language: 'zh' } }),
     useState: (initial: unknown) => {
       const i = cursor++;

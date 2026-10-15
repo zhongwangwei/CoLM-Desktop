@@ -2020,7 +2020,10 @@ fn fake_server(root: &Path) -> (PathBuf, String) {
         std::env::var("PATH").unwrap_or_default()
     );
     // 服务器根目录要短：服务器上研究成员的重启文件路径受 CoLM 的 256 字节限制（macOS 的临时目录很长）。
-    let server = PathBuf::from("/tmp").join(format!("cs{}", std::process::id()));
+    let server = Path::new("/tmp")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("/tmp"))
+        .join(format!("cs{}", std::process::id()));
     let _ = fs::remove_dir_all(&server);
     (server, path)
 }

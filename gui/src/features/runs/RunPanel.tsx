@@ -41,7 +41,9 @@ export default function RunPanel({
     [servers, setServers] = useState<{ host: string }[]>([]),
     [kernel, setKernel] = useState(''),
     [preprocessors, setPreprocessors] = useState('rust'),
-    [engine, setEngine] = useState('rust'),
+    [engine, setEngine] = useState<string>(
+      (state.selectedCase?.profile?.engine as string) || 'rust',
+    ),
     [stage, setStage] = useState(''),
     [ranks, setRanks] = useState('1'),
     [threads, setThreads] = useState('1'),
@@ -238,7 +240,12 @@ export default function RunPanel({
         throw new Error(bilingual('请选择与当前模型匹配的内核', 'Select a compatible kernel'));
       const nums = [ranks, threads, workers].map(Number);
       if (nums.some((n) => !Number.isInteger(n) || n < 1))
-        throw new Error('进程、线程与并发数须为正整数');
+        throw new Error(
+          t(
+            '进程、线程与并发数须为正整数',
+            'Process, thread and worker counts must be positive integers',
+          ),
+        );
       const runId = crypto.randomUUID();
       const initial = Object.fromEntries(
         targets.map((dir) => [
@@ -408,7 +415,12 @@ export default function RunPanel({
             .map(([dir]) => dir)
         : [casePath];
       const count = await invoke<number>('cancel_runs', { cases: targets });
-      notify(`已向 ${count} 个进程发送停止请求；等待真实退出 / Stop requested`);
+      notify(
+        t(
+          `已向 ${count} 个进程发送停止请求；等待真实退出`,
+          `Stop requested for ${count} processes; waiting for exit`,
+        ),
+      );
       return { stop_requested: count, terminal: false };
     } catch (e) {
       notify(String(e), true);
@@ -602,9 +614,9 @@ export default function RunPanel({
       ) : f.type === 'switch' ? (
         <Input
           type="checkbox"
-          checked={force}
-          disabled={pending}
-          onChange={(e) => setForce(e.target.checked)}
+          checked={f.value === 'true'}
+          disabled={pending || f.disabled}
+          onChange={(e) => f.set(String(e.target.checked))}
         />
       ) : (
         <Input

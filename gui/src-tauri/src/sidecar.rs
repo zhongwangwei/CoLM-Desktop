@@ -829,10 +829,17 @@ fn cli_candidates(sibling_dir: Option<PathBuf>) -> Vec<PathBuf> {
     // 界面却还在用几小时前的 debug 版（实测助手因此缺了新加的工具）。
     let mut workspace = workspace.to_vec();
     workspace.sort_by_key(|path| {
-        std::cmp::Reverse(
-            std::fs::metadata(path)
-                .and_then(|meta| meta.modified())
-                .ok(),
+        let has_stamp = path
+            .parent()
+            .map(|dir| dir.join("colm-build-source.json").is_file())
+            .unwrap_or(false);
+        (
+            !has_stamp,
+            std::cmp::Reverse(
+                std::fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok(),
+            ),
         )
     });
     if cfg!(debug_assertions) {
@@ -1595,6 +1602,7 @@ pub async fn new_case(
     // 进门向导选出的运行时初值。只在新建时写；已有算例绝不能被启动向导覆盖。
     fields: Vec<crate::config::FieldChange>,
     model_revision: Option<colm_model::VersionRef>,
+    engine: Option<String>,
 ) -> Result<String, String> {
     let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     validate_bgc_runtime(runtime.as_deref(), &fields)?;
@@ -1613,7 +1621,7 @@ pub async fn new_case(
         let mut args = vec![
             "new".to_string(),
             "--site".into(),
-            site,
+            site.clone(),
             "--out".into(),
             out,
         ];
@@ -1640,13 +1648,20 @@ pub async fn new_case(
         let output = creation.capture(args).await?;
         creation.check()?;
         crate::config::apply_fields(&case_dir, &fields)?;
-        crate::project::record_case(
-            &case_dir,
-            &crate::project::CaseRecord {
-                mode: recorded_mode,
-                ..Default::default()
-            },
-        );
+        // 记下所选计算核心与站点；同目录约定下的观测文件作为结果页的默认对照。
+        let mut record = crate::project::CaseRecord {
+            mode: recorded_mode,
+            engine,
+            site: Some(site.clone()),
+            ..Default::default()
+        };
+        record.obs_file =
+            crate::project::case_default_observation(std::path::Path::new(&case_dir), &record)
+                .or_else(|| {
+                    crate::project::sibling(std::path::Path::new(&site), "Observation", 1)
+                        .map(|p| p.display().to_string())
+                });
+        crate::project::record_case(&case_dir, &record);
         creation.check()?;
         crate::model::bind_new_case(&case_dir, model_revision, &creation).await?;
         Ok(output)
@@ -1691,6 +1706,53 @@ pub fn forcing_datasets() -> Vec<String> {
         .collect()
 }
 
+/// 重定向算例的输出目录至外部自定义路径（通过软链接连接 `<case>/out`）。
+#[tauri::command]
+pub fn redirect_output_dir(case_dir: String, target_dir: String) -> Result<(), String> {
+    let case_path = PathBuf::from(&case_dir);
+    let out_link = case_path.join("out");
+    let target_path = PathBuf::from(&target_dir);
+
+    let out_canonical = out_link.canonicalize().unwrap_or_else(|_| out_link.clone());
+    let target_canonical = target_path
+        .canonicalize()
+        .unwrap_or_else(|_| target_path.clone());
+    if out_canonical == target_canonical {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(&target_path)
+        .map_err(|e| format!("无法创建输出目录 {}: {e}", target_path.display()))?;
+
+    if out_link.is_symlink() {
+        #[cfg(unix)]
+        let _ = std::fs::remove_file(&out_link);
+        #[cfg(windows)]
+        let _ = std::fs::remove_dir(&out_link);
+    } else if out_link.is_dir() {
+        let is_empty = std::fs::read_dir(&out_link)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if is_empty {
+            let _ = std::fs::remove_dir(&out_link);
+        } else {
+            return Err(format!(
+                "默认输出目录 {} 已存在且非空，未做链接",
+                out_link.display()
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&target_path, &out_link)
+        .map_err(|e| format!("无法创建输出目录软链接至 {}: {e}", target_path.display()))?;
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&target_path, &out_link)
+        .map_err(|e| format!("无法创建输出目录软链接至 {}: {e}", target_path.display()))?;
+
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn new_spatial_case(
@@ -1719,6 +1781,7 @@ pub async fn new_spatial_case(
     mode: String,
     fields: Vec<crate::config::FieldChange>,
     model_revision: Option<colm_model::VersionRef>,
+    engine: Option<String>,
 ) -> Result<String, String> {
     let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     let request = SpatialCaseRequest {
@@ -1886,6 +1949,8 @@ pub async fn new_spatial_case(
             mode: Some(request.mode.clone()),
             domain: Some(request.domain.clone()),
             shapefile: request.shapefile.clone(),
+            engine,
+            ..Default::default()
         };
         let mut args = vec![
             "spatial-new".into(),

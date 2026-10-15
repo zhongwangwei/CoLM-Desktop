@@ -444,6 +444,8 @@ mod tests {
                 mode: Some("usgs".into()),
                 domain: Some("watershed".into()),
                 shapefile: Some("/input/watershed.shp".into()),
+                engine: None,
+                ..Default::default()
             },
         );
         let registry = Registry::open(directory.join("registry")).unwrap();

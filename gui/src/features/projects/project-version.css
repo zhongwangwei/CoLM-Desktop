@@ -1,5 +1,5 @@
 .project-version-section {
-  padding: 18px;
+  padding: 20px 22px;
   border: 1px solid var(--border);
   border-left: 4px solid var(--accent);
   border-radius: 8px;
@@ -40,6 +40,30 @@
   color: var(--muted);
   margin: 0 0 14px;
 }
+
+/* 开始模块 - 卡片边框化统一 */
+.project-task-section {
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-bottom: 26px;
+  box-shadow: 0 2px 7px #10243a04;
+}
+.project-task-section .project-actions {
+  margin-bottom: 0;
+  gap: 14px;
+}
+.project-task-section .project-action {
+  background: var(--background) !important;
+  border: 1px solid var(--border) !important;
+}
+.project-task-section .project-action:hover {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+}
+
 .project-task-heading {
   display: flex;
   align-items: baseline;
@@ -106,8 +130,11 @@
   background: var(--accent-soft) !important;
 }
 @container (max-width:570px) {
-  .project-version-section {
-    padding: 12px;
+  .project-version-section,
+  .project-task-section,
+  .project-scenarios-section,
+  .project-readiness-section {
+    padding: 14px 12px;
     margin-bottom: 20px;
   }
   .project-task-heading {
@@ -116,5 +143,181 @@
   .project-version-section .project-action {
     padding: 14px 10px !important;
     min-height: 118px;
+  }
+}
+
+/* 科研场景与模板卡片 - 卡片边框化统一 */
+.project-scenarios-section {
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-top: 0;
+  margin-bottom: 26px;
+  box-shadow: 0 2px 7px #10243a04;
+}
+.project-scenario-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.project-scenario-card {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+.project-scenario-card:hover {
+  border-color: var(--accent);
+  background: var(--surface);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
+}
+.project-scenario-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.project-scenario-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--elevated);
+  color: var(--foreground);
+}
+.project-scenario-badge.primary {
+  background: var(--accent);
+  color: #fff;
+}
+.project-scenario-tag {
+  font-size: 12px;
+  color: var(--muted);
+}
+.project-scenario-card h3 {
+  font-size: 16px;
+  font-weight: 650;
+  margin: 0 0 8px;
+  color: var(--foreground);
+}
+.project-scenario-card p {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--muted);
+  margin: 0 0 18px;
+  flex: 1;
+}
+.project-scenario-footer {
+  display: flex;
+  justify-content: flex-start;
+  align-items: center;
+  margin-top: auto;
+}
+.project-scenario-footer .button {
+  font-size: 13px;
+}
+
+/* 运行环境与数据看板 - 卡片边框化统一 */
+.project-readiness-section {
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--accent);
+  border-radius: 8px;
+  background: var(--surface);
+  margin-top: 0;
+  margin-bottom: 26px;
+  box-shadow: 0 2px 7px #10243a04;
+}
+.project-readiness-card {
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.readiness-item {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.status-indicator {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.status-indicator.online {
+  background: #10b981;
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.2);
+}
+.status-indicator.active {
+  background: var(--accent);
+  box-shadow: 0 0 0 3px rgba(11, 127, 134, 0.2);
+}
+.readiness-info {
+  flex: 1;
+  min-width: 0;
+}
+.readiness-info strong {
+  display: block;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+.readiness-info span {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+}
+.readiness-actions {
+  flex-shrink: 0;
+}
+.readiness-actions .button {
+  font-size: 12px;
+}
+.readiness-recents {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--elevated);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.readiness-recent-chip {
+  padding: 2px 10px !important;
+  font-size: 12px !important;
+  height: auto !important;
+  border-radius: 4px;
+  border: 1px solid var(--border) !important;
+  background: var(--surface) !important;
+}
+.readiness-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+  margin-top: 4px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.readiness-footer .button {
+  font-size: 12px;
+}
+
+@container (max-width: 680px) {
+  .project-scenario-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -19,7 +19,9 @@ import {
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
-import { simulationOptionField } from './model-settings';
+import { autoClosedText, exclusionPatch, simulationOptionField } from './model-settings';
+import HistoryVariablesCard from './HistoryVariablesCard';
+import { historyKey, historyPreset, type HistoryVariable } from './history-variables';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import { caseSchemeFields, type SimulationMode } from './model-settings';
@@ -33,7 +35,9 @@ export default function CasesPage() {
     t = (zh: string, english: string) => (en ? english : zh),
     dir = state.selectedCase?.entry.dir;
   const [step, setStep] = useState<SimulationStep>(
-      state.simulationReturn?.route === 'case' ? 2 : 5,
+      state.simulationReturn?.route === 'case'
+        ? ((state.simulationReturn.step as SimulationStep) ?? 4)
+        : 5,
     ),
     [error, setError] = useState('');
   const [dateDraft, setDateDraft] = useState<Partial<Record<'start' | 'end' | 'spinup', string>>>(
@@ -41,6 +45,7 @@ export default function CasesPage() {
   );
   const [contextReason, setContextReason] = useState<Record<string, string>>({}),
     [disabledFields, setDisabledFields] = useState<string[]>([]),
+    [historyVars, setHistoryVars] = useState<HistoryVariable[]>([]),
     [schema, setSchema] = useState<SchemaField[]>([]),
     [values, setValues] = useState<Record<string, string>>({}),
     [saved, setSaved] = useState<Record<string, string>>({}),
@@ -93,9 +98,17 @@ export default function CasesPage() {
   useEffect(() => {
     update({ simulationReturn: null });
   }, [update]);
-  async function changeCaseOptions(patch: CaseOptionPatch) {
+  async function changeCaseOptions(requested: CaseOptionPatch) {
     if (!dir || editingDisabled || dirty || lock.current)
       throw new Error(t('请先保存或放弃当前修改。', 'Save or discard current edits first.'));
+    // 上游选择否定了已开启过程的物理前提时，同一次保存里一并关闭它。
+    const { patch, closed } = exclusionPatch({ ...physics, ...values }, requested, {
+      subgrid: effectiveProfile?.subgrid,
+      classification: effectiveProfile?.classification,
+      domain: effectiveProfile ? (effectiveProfile.grid ? 'region' : 'site') : null,
+      grid: effectiveProfile?.grid ?? null,
+      compiledCrop: configurationKernel?.macros.includes('CROP') === true,
+    });
     await work(async () => {
       const target = dir,
         request = epoch.current;
@@ -133,6 +146,7 @@ export default function CasesPage() {
         setSaved(apply);
         setExplicitValues(apply);
         setError('');
+        if (closed.length) notify(autoClosedText(closed, en));
       }
     });
   }
@@ -202,6 +216,7 @@ export default function CasesPage() {
               writable: boolean | null;
               blocked_by?: string;
               settable: boolean;
+              long_name?: string | null;
             }[]
           >('hist_vars', { text, kernelDir: kernel.dir, dir: preview })
         : [];
@@ -230,6 +245,14 @@ export default function CasesPage() {
             .filter((h) => h.blocked_by)
             .map((h) => [`DEF_hist_vars%${h.name}`, h.blocked_by!]),
         ]),
+      );
+      setHistoryVars(
+        histories.map((h) => ({
+          name: h.name,
+          settable: h.settable && h.writable !== false,
+          longName: h.long_name,
+          reason: h.blocked_by,
+        })),
       );
       setDisabledFields([
         ...modes
@@ -296,11 +319,11 @@ export default function CasesPage() {
         'Choose a period whose end time is after its start.',
       );
     if (spinup && !validDate(spinup))
-      return t('请输入有效的预热截止日期。', 'Enter a valid spinup cutoff.');
+      return t('请输入有效的预热结束日期。', 'Enter a valid spin-up end date.');
     if (!caseSpinupValid(values))
       return t(
-        '预热截止时刻须晚于开始时刻、早于结束时刻。',
-        'The spinup cutoff must be after the start and before the end.',
+        '预热结束日期须晚于开始日期、早于结束日期。',
+        'The spin-up end must be after the start and before the end.',
       );
     return null;
   }
@@ -371,11 +394,10 @@ export default function CasesPage() {
     DEF_dir_runtime: t('Runtime 数据目录', 'Runtime data folder'),
     DEF_dir_output: t('算例输出目录', 'Case output folder'),
     DEF_HIST_FREQ: t('输出间隔', 'Output interval'),
-    DEF_HIST_groupby: t('输出文件分组', 'Output file grouping'),
     DEF_WRST_FREQ: t('重启文件间隔', 'Restart interval'),
     'DEF_simulation_time%timestep': t('时间步长（秒）', 'Time step (seconds)'),
     'DEF_simulation_time%greenwich': t('使用 UTC 时间', 'Use UTC time'),
-    'DEF_simulation_time%spinup_repeat': t('预热重复次数', 'Spinup repetitions'),
+    'DEF_simulation_time%spinup_repeat': t('预热循环重复次数', 'Spin-up repetitions'),
   };
   const outputLabels: Record<string, string> = {
     TIMESTEP: t('每个时间步', 'Every time step'),
@@ -384,16 +406,20 @@ export default function CasesPage() {
     MONTHLY: t('每月', 'Monthly'),
     YEARLY: t('每年', 'Yearly'),
   };
+  const engine: string =
+    typeof state.selectedCase?.profile?.engine === 'string'
+      ? state.selectedCase.profile.engine
+      : 'rust';
   const visibleSchema = schema.filter((field) =>
     caseFieldVisible(field.name, optionStates, { ...explicitValues, ...dataPatch }),
   );
   const rangeKeys = caseRangeKeys(effectiveProfile?.grid ?? state.selectedCase?.profile.grid);
   const rangeFields =
-    step === 1 ? visibleSchema.filter((field) => rangeKeys.includes(field.name)) : [];
+    step === 2 ? visibleSchema.filter((field) => rangeKeys.includes(field.name)) : [];
   const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
     shown = [
       ...rangeFields,
-      ...simulationFields(visibleSchema, step, advanced).filter(
+      ...simulationFields(visibleSchema, step, advanced, engine).filter(
         (f) => !groupFields.includes(f) && !rangeFields.includes(f),
       ),
     ];
@@ -442,11 +468,10 @@ export default function CasesPage() {
     setStep((step + 1) as SimulationStep);
   }
   function openResearch() {
-    update({ simulationReturn: { route: 'case', step: 2 } });
+    update({ simulationReturn: { route: 'case', step: 4 } });
     return navigate('research');
   }
-  const datePrefixes: ('start' | 'end' | 'spinup')[] =
-    step === 3 ? ['start', 'end'] : step === 4 ? ['spinup'] : [];
+  const datePrefixes: ('start' | 'end' | 'spinup')[] = step === 3 ? ['start', 'end', 'spinup'] : [];
   const fields: UiField[] =
     dir && state.caseTab === 'settings'
       ? [
@@ -457,7 +482,7 @@ export default function CasesPage() {
                 ? t('开始日期', 'Start date')
                 : prefix === 'end'
                   ? t('结束日期', 'End date')
-                  : t('预热截止日期（留空不预热）', 'Spinup cutoff (blank disables spinup)'),
+                  : t('预热结束日期（留空不预热）', 'Spin-up end (blank disables spin-up)'),
             value: prefix === 'start' ? start : prefix === 'end' ? end : spinup,
             type: 'text' as const,
             disabled: dateDisabled(prefix),
@@ -478,7 +503,7 @@ export default function CasesPage() {
                     : optionState(f.name)?.allowed_values.length
                       ? optionState(f.name)!.allowed_values
                       : f.values
-                  ).map((value) => ({
+                  ).map((value: string) => ({
                     value,
                     label:
                       f.kind === 'Logical'
@@ -494,7 +519,37 @@ export default function CasesPage() {
           })),
         ]
       : [];
-  if (dir && state.caseTab === 'settings' && [1, 3, 4].includes(step))
+  if (dir && state.caseTab === 'settings' && step === 5)
+    fields.push(
+      ...historyVars.map((v) => ({
+        id: `case-${historyKey(v.name)}`,
+        label: v.longName ? `${v.name} · ${v.longName}` : v.name,
+        value: values[historyKey(v.name)] ?? '',
+        type: 'choice' as const,
+        options: ['.true.', '.false.'].map((value) => ({
+          value,
+          label: t(value === '.true.' ? '输出' : '不输出', value === '.true.' ? 'On' : 'Off'),
+        })),
+        disabled: editingDisabled || !v.settable,
+        set: (value: string) => setValues((x) => ({ ...x, [historyKey(v.name)]: value })),
+      })),
+    );
+  if (dir && state.caseTab === 'settings' && step === 1) {
+    fields.push({
+      id: 'case-DEF_dir_output',
+      label: labels.DEF_dir_output,
+      value: values['DEF_dir_output'] ?? (dir ? `${dir}/out` : ''),
+      type: 'text' as const,
+      disabled: true,
+      set: () => {},
+    });
+  }
+  if (
+    dir &&
+    state.caseTab === 'settings' &&
+    [2, 3, 5].includes(step) &&
+    (step !== 2 || engine === 'fortran')
+  )
     fields.push({
       id: 'case-advanced',
       label: t('更多配置', 'More settings'),
@@ -560,6 +615,21 @@ export default function CasesPage() {
                   run: discard,
                 },
               ]
+            : []),
+          ...(state.caseTab === 'settings' && step === 5 && historyVars.length
+            ? (
+                [
+                  ['core', t('仅核心变量', 'Core variables only')],
+                  ['all', t('一键全部开启', 'Enable all')],
+                  ['none', t('一键全部清除', 'Clear all')],
+                ] as const
+              ).map(([preset, label]) => ({
+                id: `case-history-${preset}`,
+                label,
+                kind: 'click' as const,
+                enabled: !editingDisabled,
+                run: () => setValues((x) => ({ ...x, ...historyPreset(historyVars, preset) })),
+              }))
             : []),
           ...(state.caseTab === 'settings'
             ? [
@@ -681,7 +751,7 @@ export default function CasesPage() {
           ? t('开始日期', 'Start date')
           : prefix === 'end'
             ? t('结束日期', 'End date')
-            : t('预热截止日期（留空不预热）', 'Spinup cutoff (blank disables spinup)')
+            : t('预热结束日期（留空不预热）', 'Spin-up end (blank disables spin-up)')
       }
     >
       <Input
@@ -694,7 +764,7 @@ export default function CasesPage() {
       />
     </Field>
   );
-  const basic = simulationFields(visibleSchema, step, false).filter(
+  const basic = simulationFields(visibleSchema, step, false, engine).filter(
       (f) => !groupFields.includes(f),
     ),
     extras = shown.filter((f) => !basic.includes(f) && !groupFields.includes(f));
@@ -762,6 +832,43 @@ export default function CasesPage() {
             </Notice>
           )}
           {step === 1 && (
+            <Card
+              title={t('总的设定', 'General setup')}
+              description={t(
+                '查看算例的基础设置：计算核心、算例保存路径与输出目录。',
+                'Check general case settings: calculation engine, case directory, and output directory.',
+              )}
+            >
+              <div className="simulation-site-summary">
+                <strong>{state.selectedCase?.entry.name}</strong>
+                <span>
+                  {t('计算核心：', 'Engine: ')}
+                  {engine === 'fortran' ? 'Fortran' : 'Rust'}
+                </span>
+              </div>
+              <div className="form-grid">
+                <Field label={t('算例路径', 'Case directory')}>
+                  <Input readOnly value={dir ?? ''} />
+                </Field>
+                <Field
+                  label={t('输出目录', 'Output directory')}
+                  hint={t(
+                    '模拟产生的结果文件存放路径',
+                    'Path where simulation output files are stored',
+                  )}
+                >
+                  <Input readOnly value={values['DEF_dir_output'] ?? (dir ? `${dir}/out` : '')} />
+                </Field>
+              </div>
+              <p className="muted">
+                {t(
+                  '已有算例的基础配置由建例时确定；如需更换计算核心或算例目录，请新建模拟。',
+                  'General settings are set when creating the case. Create a new simulation to change the engine or directory.',
+                )}
+              </p>
+            </Card>
+          )}
+          {step === 2 && (
             <Card title={t('范围与网格', 'Range and grid')}>
               <div className="simulation-site-summary">
                 <strong>{state.selectedCase?.entry.name}</strong>
@@ -786,8 +893,8 @@ export default function CasesPage() {
             <Card
               title={t('数据与时段', 'Data and period')}
               description={t(
-                '确认数据路径、模拟时段与初始条件。',
-                'Check data paths, the simulation period and initial conditions.',
+                '确认数据路径与模拟起止时段。',
+                'Check data paths and simulation period.',
               )}
             >
               <div className="simulation-dates">
@@ -800,12 +907,48 @@ export default function CasesPage() {
                   'Use YYYY-MM-DD, e.g. 2001-01-01. The end is a cutoff; existing time-of-day seconds are preserved.',
                 )}
               </p>
-              <div className="form-grid">{basic.map(render)}</div>
-
+              <div
+                className="simulation-spinup-box"
+                style={{
+                  marginTop: '1.25rem',
+                  padding: '1rem',
+                  borderRadius: 'var(--r-md)',
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
+                }}
+              >
+                <div>
+                  <strong style={{ fontSize: '14px' }}>
+                    {t('模型预热（Spin-up）设定', 'Model Spin-up Settings')}
+                  </strong>
+                  <p className="muted" style={{ margin: '2px 0 0', fontSize: '12px' }}>
+                    {t(
+                      '让土壤温湿与碳库等慢变量先趋于平衡。模型从开始日期跑到预热结束日期（当日 00:00 截止），重置时间后重复指定次数，再进入正式模拟；结束日期留空不预热。',
+                      'Let slow pools reach equilibrium. The model runs from the start to the spin-up end (00:00 that day), resets and repeats the given number of times, then starts the formal run; leave the end blank to disable spin-up.',
+                    )}
+                  </p>
+                </div>
+                <div className="form-grid" style={{ marginTop: '12px' }}>
+                  <Field
+                    label={t('预热起始日期', 'Spin-up start')}
+                    hint={t(
+                      'CoLM 预热总是从模拟开始日期起算',
+                      'CoLM spin-up always starts at the simulation start',
+                    )}
+                  >
+                    <Input readOnly value={start} />
+                  </Field>
+                  {renderDate('spinup')}
+                  {timeBasic.filter((f) => f.name.endsWith('spinup_repeat')).map(render)}
+                </div>
+              </div>
+              <div className="form-grid" style={{ marginTop: '1rem' }}>
+                {basic.filter((f) => !f.name.startsWith('DEF_simulation_time%')).map(render)}
+              </div>
               {more()}
             </Card>
           )}
-          {step === 2 && (
+          {step === 4 && (
             <>
               <ModelSettings
                 version={state.version}
@@ -847,30 +990,32 @@ export default function CasesPage() {
               )}
             </>
           )}
-          {step === 4 && (
-            <Card
-              title={t('预热与输出', 'Spinup and output')}
-              description={t(
-                '设置时间步长、预热截止和输出。更多配置中包含重启、诊断及当前内核可写的输出变量。',
-                'Set time steps, spinup and output. More settings include restart, diagnostics and output variables available in the current kernel.',
-              )}
-            >
-              <h3 className="simulation-subheading">{t('时间与预热', 'Time and spinup')}</h3>
-              <div className="form-grid">
-                {timeBasic.filter((f) => !f.name.endsWith('spinup_repeat')).map(render)}
-                {renderDate('spinup')}
-                {timeBasic.filter((f) => f.name.endsWith('spinup_repeat')).map(render)}
-              </div>
-              <h3 className="simulation-subheading">{t('输出设置', 'Output settings')}</h3>
-              <div className="form-grid">{outputBasic.map(render)}</div>
-              <p className="field-hint">
-                {t(
-                  '预热截止是实际日历日期，留空关闭预热；重复次数只作用于预热时段。',
-                  'The spinup cutoff is a calendar date; blank disables spinup. Repetitions apply only to spinup.',
+          {step === 5 && (
+            <>
+              <Card
+                title={t('时间步长与输出', 'Time step and output')}
+                description={t(
+                  '设置时间步长、输出频率与输出变量；预热在“数据与时段”中设置。更多配置中包含重启与诊断。',
+                  'Set the time step, output frequency and variables; spin-up is set under Data and period. More settings include restart and diagnostics.',
                 )}
-              </p>
-              {more()}
-            </Card>
+              >
+                <div className="form-grid">
+                  {timeBasic.filter((f) => !f.name.endsWith('spinup_repeat')).map(render)}
+                </div>
+                <h3 className="simulation-subheading">{t('输出设置', 'Output settings')}</h3>
+                <div className="form-grid">{outputBasic.map(render)}</div>
+                {more()}
+              </Card>
+              {historyVars.length > 0 && (
+                <HistoryVariablesCard
+                  variables={historyVars}
+                  values={values}
+                  disabled={editingDisabled}
+                  en={en}
+                  onChange={(patch) => setValues((x) => ({ ...x, ...patch }))}
+                />
+              )}
+            </>
           )}
           {step < 5 && (
             <footer className="simulation-footer">
@@ -886,7 +1031,9 @@ export default function CasesPage() {
               )}
               <Button
                 variant="primary"
-                disabled={editingDisabled || !schema.length}
+                disabled={
+                  editingDisabled || !schema.length || (step >= 3 && periodProblem() !== null)
+                }
                 onClick={() => {
                   if (dirty) void saveAndContinue().catch(() => {});
                   else
@@ -918,7 +1065,7 @@ export default function CasesPage() {
           {step === 5 && dirty && (
             <Button
               variant="primary"
-              disabled={editingDisabled}
+              disabled={editingDisabled || periodProblem() !== null}
               onClick={() => void save().catch(() => {})}
             >
               {t('保存设置', 'Save settings')}
