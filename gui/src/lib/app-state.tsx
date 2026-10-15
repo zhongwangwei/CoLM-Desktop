@@ -151,9 +151,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         const opened = await invoke<OpenedCase>('open_case', { dir });
         const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', { dir });
-        // 版本跟算例走：算例绑在非官方版本（用户选过的修改版）上时，打开它就用这个版本，
-        // 重启后也一样。官方版的修订号只随源码更新递增、不是用户的选择，这时用用户明确选的
-        // 版本，没有就用最新官方版；运行时再把实际所用版本写回算例。
+        // 优先使用用户明确选择的版本；没有明确选择时恢复算例的修改版绑定，否则用最新官方版。
+        // 运行时再把实际所用版本写回算例。
         const bound =
           binding.version.id !== 'official' &&
           current.current.versions.some(
@@ -165,9 +164,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const latestOfficial = current.current.versions
           .filter((v) => v.version.id === 'official')
           .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
-        const selectedVersion = bound
-          ? binding.version
-          : (current.current.chosenVersion ?? latestOfficial ?? current.current.versionRef);
+        const selectedVersion =
+          current.current.chosenVersion ??
+          (bound ? binding.version : (latestOfficial ?? current.current.versionRef));
         const version = await invokeJson<FrozenRevision>('model_get', { ...selectedVersion });
         const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
         if (epoch !== openEpoch.current)

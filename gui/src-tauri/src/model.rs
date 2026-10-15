@@ -184,11 +184,11 @@ pub async fn model_migrate_case(
             target.revision.to_string(),
         ]);
     }
-    let binding = decode(cli(args).await?)?;
+    // Import failures must not leave a changed binding on a case that cannot start.
     colm_history::History::open_default()
         .and_then(|h| h.import_case(&dir))
-        .map_err(|e| format!("case migration succeeded, but importing its history failed: {e}"))?;
-    Ok(binding)
+        .map_err(|e| format!("cannot import case history before migration: {e}"))?;
+    decode(cli(args).await?)
 }
 #[tauri::command]
 pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
@@ -421,6 +421,65 @@ pub async fn model_attach_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn migration_import_failure_preserves_binding() {
+        if let Some(dir) = std::env::var_os("COLM_TEST_MIGRATION_CASE") {
+            let dir = PathBuf::from(dir);
+            let binding = std::fs::read(dir.join(colm_model::BINDING_FILE)).unwrap();
+            let error = tauri::async_runtime::block_on(model_migrate_case(
+                dir.display().to_string(),
+                Some(VersionRef {
+                    id: "chosen".into(),
+                    revision: 2,
+                }),
+            ))
+            .unwrap_err();
+            assert!(
+                error.starts_with("cannot import case history before migration:"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(dir.join(colm_model::BINDING_FILE)).unwrap(),
+                binding
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "colm-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".colm")).unwrap();
+        std::fs::write(dir.join("case.nml"), "&nl_colm\n/\n").unwrap();
+        std::fs::write(
+            dir.join(colm_model::BINDING_FILE),
+            br#"{"version":{"id":"old","revision":1}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".colm/runs.jsonl"), "not JSON\n").unwrap();
+        // Isolate the history database without changing the parent test process environment.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::tests::migration_import_failure_preserves_binding",
+                "--nocapture",
+            ])
+            .env("COLM_TEST_MIGRATION_CASE", &dir)
+            .env("COLM_HISTORY_DB", dir.join("history.sqlite"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
     #[test]
     fn model_preview_keeps_case_owned_classification_and_runtime_structure() {
         let directory = std::env::temp_dir().join(format!(

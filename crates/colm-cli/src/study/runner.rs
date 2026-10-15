@@ -3081,18 +3081,27 @@ pub fn apply(
         let _ = fs::remove_dir_all(&stage);
         return Err(error);
     }
+    publish_applied_cases(&stage, &output)?;
+    Ok(destinations)
+}
+
+fn publish_applied_cases(stage: &Path, output: &Path) -> Result<()> {
     let existed = output.exists();
     if existed {
-        fs::remove_dir_all(&output)?;
-    }
-    if let Err(error) = fs::rename(&stage, &output) {
-        if existed {
-            let _ = fs::create_dir(&output);
+        // Another study may have populated the destination during staging.
+        if let Err(error) = fs::remove_dir(output) {
+            let _ = fs::remove_dir_all(stage);
+            return Err(error).with_context(|| format!("cannot publish {}", output.display()));
         }
-        let _ = fs::remove_dir_all(&stage);
+    }
+    if let Err(error) = fs::rename(stage, output) {
+        if existed {
+            let _ = fs::create_dir(output);
+        }
+        let _ = fs::remove_dir_all(stage);
         return Err(error).with_context(|| format!("cannot publish {}", output.display()));
     }
-    Ok(destinations)
+    Ok(())
 }
 
 pub fn apply_preview(study_dir: &Path, member_id: &str) -> Result<Vec<ApplyPreviewRow>> {
@@ -6167,6 +6176,26 @@ esac
             .to_string()
             .contains("observations changed"));
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn apply_publish_preserves_destination_populated_during_staging() {
+        let (root, study) = preview_fixture();
+        let output = root.join("applied");
+        std::fs::create_dir(&output).unwrap();
+        assert!(output.read_dir().unwrap().next().is_none());
+
+        let stage = root.join("staged");
+        apply(&study, "m000001", &stage, Some("a")).unwrap();
+        let published = output.join("case.nml");
+        std::fs::write(&published, b"first published case").unwrap();
+
+        let error = publish_applied_cases(&stage, &output).unwrap_err();
+        assert!(error.to_string().contains("cannot publish"), "{error}");
+        assert_eq!(std::fs::read(&published).unwrap(), b"first published case");
+        assert_eq!(output.read_dir().unwrap().count(), 1);
+        assert!(!stage.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

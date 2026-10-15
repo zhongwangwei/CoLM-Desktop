@@ -1,4 +1,13 @@
-import { useId, useState, type ComponentProps, type ReactNode } from 'react';
+import {
+  Children,
+  Fragment,
+  cloneElement,
+  isValidElement,
+  useId,
+  useState,
+  type ComponentProps,
+  type ReactNode,
+} from 'react';
 import { Slot, Dialog as RadixDialog } from 'radix-ui';
 import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
@@ -61,10 +70,42 @@ export function Field({
   children: ReactNode;
   hint?: ReactNode;
 }) {
+  const generatedId = useId();
+  let controlId: string | undefined;
+  const associate = (nodes: ReactNode): ReactNode =>
+    Children.map(nodes, (child) => {
+      if (controlId || !isValidElement<{ id?: string; type?: string; children?: ReactNode }>(child))
+        return child;
+      const input = child.type === Input || child.type === 'input';
+      if (
+        (input &&
+          !['hidden', 'button', 'submit', 'reset', 'image'].includes(child.props.type ?? 'text')) ||
+        child.type === Select ||
+        child.type === 'select' ||
+        child.type === 'textarea'
+      ) {
+        controlId = child.props.id || generatedId;
+        return cloneElement(child, { id: controlId });
+      }
+      // Traverse layout wrappers, leaving independently labelled controls and components alone.
+      if (
+        child.type === Fragment ||
+        (typeof child.type === 'string' && child.type !== 'label' && child.type !== 'button')
+      )
+        return cloneElement(child, { children: associate(child.props.children) });
+      return child;
+    });
+  const content = associate(children);
   return (
     <div className="field">
-      <span className="field-label">{label}</span>
-      {children}
+      {controlId ? (
+        <label className="field-label" htmlFor={controlId}>
+          {label}
+        </label>
+      ) : (
+        <span className="field-label">{label}</span>
+      )}
+      {content}
       {hint && <span className="field-hint">{hint}</span>}
     </div>
   );

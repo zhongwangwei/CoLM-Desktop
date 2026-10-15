@@ -6,12 +6,17 @@ import ts from 'typescript';
 import type { RunState } from '../../lib/types';
 const require = createRequire(import.meta.url);
 type Element = { type: string; props: Record<string, unknown>; children: unknown[] };
-function render(record?: RunState, history: unknown[] = [], remoteStage?: string) {
+function render(
+  record?: RunState,
+  history: unknown[] = [],
+  remoteStage?: string,
+  otherRuns: Record<string, RunState> = {},
+) {
   const effects: (() => void)[] = [];
   const state = {
     language: 'zh',
     expert: false,
-    running: (record ? { '/case': record } : {}) as Record<string, RunState>,
+    running: { ...otherRuns, ...(record ? { '/case': record } : {}) } as Record<string, RunState>,
     kernels: [],
     cases: [],
     version: null,
@@ -99,6 +104,7 @@ function render(record?: RunState, history: unknown[] = [], remoteStage?: string
   visit(tree);
   return {
     next: elements.find((el) => el.type === 'Button' && el.children.includes('下一步：查看结果')),
+    stop: elements.find((el) => el.type === 'Button' && el.children.includes('停止运行')),
     routes,
     calls,
     state,
@@ -208,4 +214,15 @@ test('remote reconciliation restores preprocessing stage before showing results'
   assert.equal(page.state.running['/case'].requested_stage, 'mkinidata');
   assert.deepEqual(page.routes, []);
   assert.equal(render(page.state.running['/case']).next, undefined);
+});
+
+test('Stop remains visible when the primary batch case failed but another member is running', () => {
+  const primary = { ...success, status: 'failed', running: false };
+  const member = { ...success, case: '/other', status: 'running', running: true };
+  assert.ok(render(primary, [], undefined, { '/other': member }).stop);
+  assert.equal(render(primary).stop, undefined);
+  assert.equal(
+    render(primary, [], undefined, { '/other': { ...member, run_id: 'unrelated' } }).stop,
+    undefined,
+  );
 });

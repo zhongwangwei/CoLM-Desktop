@@ -58,10 +58,14 @@ export default function RunPanel({
   const lock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
-    currentCase = useRef(casePath);
+    currentCase = useRef(casePath),
+    cancelledRun = useRef<string | null>(null);
   currentCase.current = casePath;
   latest.current = state.running;
   const persisted = state.running[casePath];
+  const canCancel =
+    persisted?.location === 'local' &&
+    Object.values(state.running).some((run) => run.run_id === persisted.run_id && run.running);
   const kernelMatches =
     !!effectiveProfile &&
     !!compatibleKernel(
@@ -247,6 +251,7 @@ export default function RunPanel({
           ),
         );
       const runId = crypto.randomUUID();
+      cancelledRun.current = null;
       const initial = Object.fromEntries(
         targets.map((dir) => [
           dir,
@@ -266,24 +271,46 @@ export default function RunPanel({
       latest.current = { ...latest.current, ...initial };
       update((old) => ({ running: { ...old.running, ...initial } }));
       let submitted = false;
+      const prepared: string[] = [];
+      const preparationCancelled = () => {
+        if (cancelledRun.current !== runId) return false;
+        patchRun(
+          targets.filter((dir) => latest.current[dir]?.running),
+          runId,
+          {
+            status: 'cancelled',
+            running: false,
+          },
+        );
+        return true;
+      };
       try {
         const revision = state.versionRef;
         // 用哪个版本运行就把算例绑到哪个版本，重启后仍用它（`model-binding.json`）。
         for (const dir of targets) {
-          const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
-            dir,
-            target: revision,
-          });
-          if (dir === state.selectedCase?.dir)
-            update((old) =>
-              old.selectedCase?.dir === dir
-                ? { selectedCase: { ...old.selectedCase, binding } }
-                : {},
-            );
+          if (preparationCancelled()) return { cancelled: true };
+          try {
+            const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+              dir,
+              target: revision,
+            });
+            if (dir === state.selectedCase?.dir)
+              update((old) =>
+                old.selectedCase?.dir === dir
+                  ? { selectedCase: { ...old.selectedCase, binding } }
+                  : {},
+              );
+            prepared.push(dir);
+          } catch (error) {
+            patchRun([dir], runId, { status: 'failed', running: false, error: String(error) });
+            notify(String(error), true);
+          }
+          if (preparationCancelled()) return { cancelled: true };
         }
+        if (!prepared.length) return { succeeded: 0, failed: targets.length };
         if (host) {
           submitted = true;
-          patchRun(targets, runId, { status: 'submitting' });
+          patchRun(prepared, runId, { status: 'submitting' });
           const result = await invokeJson<Record<string, unknown>>('remote_run', {
             case: casePath,
             host,
@@ -296,11 +323,11 @@ export default function RunPanel({
             modelVersion: null,
             modelRevision: revision,
           });
-          patchRun(targets, runId, { status: 'submitted', progress: { host, remote: result } });
+          patchRun(prepared, runId, { status: 'submitted', progress: { host, remote: result } });
           if (alive.current) setRemote(result);
           return result;
         }
-        patchRun(targets, runId, { status: 'starting' });
+        patchRun(prepared, runId, { status: 'starting' });
         submitted = true;
         const args = {
           runId,
@@ -318,22 +345,26 @@ export default function RunPanel({
           targets.length > 1
             ? await invoke<{ failed: number; succeeded: number }>('run_batch', {
                 ...args,
-                cases: targets,
+                cases: prepared,
                 maxConcurrent: nums[2],
               })
-            : await invoke<number>('run_case', { ...args, case: casePath });
+            : await invoke<number>('run_case', { ...args, case: prepared[0] });
         const ok =
           typeof result === 'number'
             ? result === 0
-            : result.failed === 0 && result.succeeded === targets.length;
-        update((old) => ({ running: settleRuns(old.running, targets, runId, ok) }));
+            : result.failed === 0 && result.succeeded === prepared.length;
+        update((old) => ({ running: settleRuns(old.running, prepared, runId, ok) }));
         return result;
       } catch (error) {
-        patchRun(targets, runId, {
-          status: host && submitted ? 'unknown' : 'failed',
-          running: !!host && submitted,
-          error: String(error),
-        });
+        patchRun(
+          targets.filter((dir) => latest.current[dir]?.running),
+          runId,
+          {
+            status: host && submitted ? 'unknown' : 'failed',
+            running: !!host && submitted,
+            error: String(error),
+          },
+        );
         if (host && submitted && alive.current)
           setRemote({ status: { state: 'unknown' }, error: String(error) });
         throw error;
@@ -409,6 +440,7 @@ export default function RunPanel({
   async function cancel() {
     try {
       const id = latest.current[casePath]?.run_id;
+      if (id) cancelledRun.current = id;
       const targets = id
         ? Object.entries(latest.current)
             .filter(([, run]) => run.run_id === id && run.running)
@@ -569,7 +601,7 @@ export default function RunPanel({
           id: 'run-cancel',
           label: bilingual('停止本机运行', 'Stop'),
           kind: 'commit',
-          enabled: !!persisted?.running && persisted.location === 'local',
+          enabled: canCancel,
           run: cancel,
         },
         ...(remote
@@ -764,7 +796,7 @@ export default function RunPanel({
           <span />
         )}
         <div className="actions">
-          {!!persisted?.running && persisted.location === 'local' && (
+          {canCancel && (
             <Button variant="danger" onClick={() => void cancel().catch(() => {})}>
               {t('停止运行', 'Stop run')}
             </Button>
