@@ -2200,18 +2200,19 @@ mod upstream_artifact_tests {
                 serde_json::to_vec(&run).unwrap(),
             )
             .unwrap();
-            #[cfg(windows)]
-            let original_manifest = std::fs::read(case.join(colm_model::RUN_MANIFEST)).unwrap();
             prepare_native_paths(&mut run).unwrap();
             #[cfg(windows)]
             {
                 let native = execution_path(&case).unwrap();
                 assert_eq!(native, colm_kernel::manifest::absolute(&case).unwrap());
                 assert!(!native.to_string_lossy().starts_with(r"\\?\"));
-                assert_eq!(std::fs::read_to_string(case.join("case.nml")).unwrap(), nml);
+                let prepared_nml = std::fs::read(case.join("case.nml")).unwrap();
+                let prepared_manifest = std::fs::read(case.join(colm_model::RUN_MANIFEST)).unwrap();
+                restore_execution_path(&case).unwrap();
+                assert_eq!(std::fs::read(case.join("case.nml")).unwrap(), prepared_nml);
                 assert_eq!(
                     std::fs::read(case.join(colm_model::RUN_MANIFEST)).unwrap(),
-                    original_manifest
+                    prepared_manifest
                 );
             }
         }
