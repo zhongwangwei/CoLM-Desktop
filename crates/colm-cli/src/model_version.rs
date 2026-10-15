@@ -481,6 +481,7 @@ pub(crate) fn restore_upstream_artifacts(
                 crate::fingerprint::same_data_payloads(inputs, &recorded),
                 "upstream complete scientific inputs differ"
             );
+            restore_execution_path(&candidate)?;
             for file in recorded.files.values().filter(|f| f.category != "data") {
                 ensure!(
                     crate::fingerprint::full_file(&file.path, &file.category)? == *file,
@@ -1910,6 +1911,22 @@ mod draft_asset_tests {
     }
 }
 
+/// Recreate disposable native path aliases without changing frozen configuration hashes.
+pub(crate) fn restore_execution_path(case: &Path) -> Result<()> {
+    let manifest = case.join(colm_model::RUN_MANIFEST);
+    if !manifest.is_file() {
+        return Ok(());
+    }
+    let run: colm_model::MaterializedRun = serde_json::from_slice(&std::fs::read(&manifest)?)
+        .with_context(|| format!("cannot read frozen run manifest {}", manifest.display()))?;
+    ensure!(
+        run.schema == 1 && run.run_case.canonicalize()? == case.canonicalize()?,
+        "frozen run manifest does not identify its own case"
+    );
+    execution_path(case)?;
+    Ok(())
+}
+
 /// Native CoLM invokes unquoted mkdir and uses 256-byte path buffers. Keep the
 /// registry identity canonical while handing native programs a stable short view.
 pub(crate) fn execution_path(case: &Path) -> Result<PathBuf> {
@@ -1924,8 +1941,10 @@ pub(crate) fn execution_path(case: &Path) -> Result<PathBuf> {
     {
         let digest = colm_kernel::sha256_hex(canonical.to_string_lossy().as_bytes());
         let alias = PathBuf::from(format!("/tmp/colm-run-{}", &digest[..24]));
-        if std::fs::symlink_metadata(&alias).is_err() {
-            std::os::unix::fs::symlink(&canonical, &alias)?;
+        match std::os::unix::fs::symlink(&canonical, &alias) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
         }
         ensure!(
             alias.canonicalize()? == canonical,
@@ -2003,6 +2022,88 @@ fn check_case_scopes(
 mod native_path_tests {
     use super::*;
     #[test]
+    fn frozen_input_identity_recovers_deleted_alias_without_rewriting_configuration() {
+        let fixture_root = std::env::temp_dir().join(unique_id());
+        let root = fixture_root.join("Library/Application Support/models/runs/operation");
+        std::fs::create_dir_all(&root).unwrap();
+        let root = root.canonicalize().unwrap();
+        let nml = format!(
+            "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_forcing_namelist='{}/forcing.nml'\n DEF_dir_output='{}/out'\n/\n",
+            root.display(),
+            root.display()
+        );
+        std::fs::write(root.join("case.nml"), &nml).unwrap();
+        std::fs::write(
+            root.join("forcing.nml"),
+            "&nl_colm_forcing\n DEF_dir_forcing='.'\n forcing%fprefix(1)='forcing.nc'\n/\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("forcing.nc"), b"driver payload").unwrap();
+        let mut run = colm_model::MaterializedRun {
+            schema: 1,
+            operation_id: "operation".into(),
+            source_case: fixture_root.join("source"),
+            run_case: root.clone(),
+            version: VersionRef {
+                id: "official".into(),
+                revision: 1,
+            },
+            code: CodeRef {
+                kind: CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            },
+            case_sha256: colm_kernel::sha256_hex(nml.as_bytes()),
+            effective_nml_sha256: colm_kernel::sha256_hex(nml.as_bytes()),
+            overlay_sha256: "b".repeat(64),
+            revision_fingerprint: "c".repeat(64),
+            artifact_paths: vec![],
+            inputs: Default::default(),
+        };
+        std::fs::write(
+            root.join(colm_model::RUN_MANIFEST),
+            serde_json::to_vec(&run).unwrap(),
+        )
+        .unwrap();
+        prepare_native_paths(&mut run).unwrap();
+        let alias = execution_path(&root).unwrap();
+        let saved = ["case.nml", "forcing.nml", colm_model::RUN_MANIFEST]
+            .map(|name| (name, std::fs::read(root.join(name)).unwrap()));
+        let expected = crate::fingerprint::full_inputs(&root).unwrap();
+        assert!(expected.complete);
+        for _ in 0..2 {
+            std::fs::remove_file(&alias).unwrap();
+            assert_eq!(crate::fingerprint::full_inputs(&root).unwrap(), expected);
+            assert_eq!(alias.canonicalize().unwrap(), root);
+            for (name, bytes) in &saved {
+                assert_eq!(&std::fs::read(root.join(name)).unwrap(), bytes);
+            }
+        }
+        std::fs::remove_file(&alias).unwrap();
+        let foreign = fixture_root.join("foreign");
+        std::fs::create_dir(&foreign).unwrap();
+        std::os::unix::fs::symlink(&foreign, &alias).unwrap();
+        assert!(restore_execution_path(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("another run"));
+        assert_eq!(
+            alias.canonicalize().unwrap(),
+            foreign.canonicalize().unwrap()
+        );
+        std::fs::remove_file(alias).unwrap();
+        std::fs::remove_dir_all(fixture_root).unwrap();
+    }
+
+    #[test]
+    fn ordinary_case_does_not_require_or_create_execution_alias() {
+        let missing = std::env::temp_dir().join(unique_id());
+        restore_execution_path(&missing).unwrap();
+        assert!(!missing.exists());
+    }
+
+    #[test]
     fn application_support_run_uses_short_no_space_execution_path() {
         let fixture_root = std::env::temp_dir().join(unique_id());
         let root = fixture_root.join("Library/Application Support/models/runs/operation");
@@ -2054,22 +2155,25 @@ mod upstream_artifact_tests {
     #[test]
     fn sibling_run_reuses_only_verified_independent_upstream_copies() {
         let root = std::env::temp_dir().join(unique_id());
-        let runs = root.join("runs");
+        let runs = root.join("Library/Application Support/runs");
         let kernel = root.join("kernel");
         std::fs::create_dir_all(&kernel).unwrap();
         std::fs::write(kernel.join("manifest.json"), r#"{"schema":1,"preset":"default","platform":"Darwin-arm64","colm_git_sha":"f59ffdce","generator_args":"SinglePoint","macros":["SinglePoint"],"built_with":"gfortran","netcdf_c":"","netcdf_fortran":"","hdf5":"","sha256":{}}"#).unwrap();
         for id in ["old", "new"] {
             let case = runs.join(id);
             std::fs::create_dir_all(&case).unwrap();
-            let nml = "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_forcing_namelist='forcing.nml'\n/\n";
-            std::fs::write(case.join("case.nml"), nml).unwrap();
+            let nml = format!(
+                "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_forcing_namelist='{}/forcing.nml'\n/\n",
+                case.display()
+            );
+            std::fs::write(case.join("case.nml"), &nml).unwrap();
             std::fs::write(
                 case.join("forcing.nml"),
                 "&nl_colm_forcing\n DEF_dir_forcing='.'\n forcing%fprefix(1)='forcing.nc'\n/\n",
             )
             .unwrap();
             std::fs::write(case.join("forcing.nc"), b"same driver").unwrap();
-            let run = colm_model::MaterializedRun {
+            let mut run = colm_model::MaterializedRun {
                 schema: 1,
                 operation_id: id.into(),
                 source_case: root.join("source"),
@@ -2096,6 +2200,7 @@ mod upstream_artifact_tests {
                 serde_json::to_vec(&run).unwrap(),
             )
             .unwrap();
+            prepare_native_paths(&mut run).unwrap();
         }
         let old = runs.join("old");
         let new = runs.join("new");
@@ -2145,6 +2250,8 @@ mod upstream_artifact_tests {
             None,
         );
         let current_inputs = crate::fingerprint::full_inputs(&new).unwrap();
+        #[cfg(unix)]
+        std::fs::remove_file(execution_path(&old).unwrap()).unwrap();
         restore_upstream_artifacts(
             &new,
             &current_inputs,

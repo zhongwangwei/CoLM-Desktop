@@ -129,6 +129,27 @@ MODULE MOD_NetCDFSerial
 
 CONTAINS
 
+   SUBROUTINE ncio_initialize ()
+      USE, INTRINSIC :: iso_c_binding, ONLY: c_int
+      USE, INTRINSIC :: ieee_exceptions
+      IMPLICIT NONE
+      TYPE(ieee_status_type) :: saved_status
+      INTEGER(c_int) :: status
+      INTERFACE
+         FUNCTION nc_initialize () BIND(C, name="nc_initialize") RESULT(code)
+            IMPORT :: c_int
+            INTEGER(c_int) :: code
+         END FUNCTION nc_initialize
+      END INTERFACE
+
+      ! HDF5 probes native floating types during initialization; restore physics traps afterwards.
+      CALL ieee_get_status (saved_status)
+      CALL ieee_set_halting_mode (ieee_all, .false.)
+      status = nc_initialize ()
+      CALL ieee_set_status (saved_status)
+      CALL nccheck (status)
+   END SUBROUTINE ncio_initialize
+
    ! ----
    SUBROUTINE nccheck (status, trace)
 

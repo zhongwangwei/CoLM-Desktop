@@ -14,6 +14,7 @@ PROGRAM CoLM
 !            2014-2024
 !-----------------------------------------------------------------------------
 
+   USE MOD_NetCDFSerial, ONLY: ncio_initialize
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist
@@ -186,6 +187,7 @@ PROGRAM CoLM
 
       CALL getarg (1, nlfile)
 
+      CALL ncio_initialize ()
       CALL read_namelist (nlfile)
 
 #ifndef SinglePoint

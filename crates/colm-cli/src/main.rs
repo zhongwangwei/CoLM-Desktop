@@ -923,7 +923,11 @@ impl Opts {
 
     fn positional_case(&self) -> Result<PathBuf> {
         match self.positional.first() {
-            Some(p) => Ok(PathBuf::from(p)),
+            Some(p) => {
+                let case = PathBuf::from(p);
+                model_version::restore_execution_path(&case)?;
+                Ok(case)
+            }
             None => bail!("a case directory is required\n{USAGE}"),
         }
     }

@@ -1,4 +1,24 @@
 use super::*;
+
+#[cfg(unix)]
+#[test]
+fn directory_inventory_names_the_broken_input_link() {
+    let root = temp_dir("broken-input-link");
+    let link = root.join("global_CFT_surface_data.nc");
+    std::os::unix::fs::symlink(root.join("missing-data.nc"), &link).unwrap();
+    let error = directory_inventory(&root).unwrap_err();
+    assert!(
+        error.to_string().contains(&link.display().to_string()),
+        "{error:#}"
+    );
+    assert!(
+        error
+            .to_string()
+            .contains("cannot resolve scientific input"),
+        "{error:#}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);

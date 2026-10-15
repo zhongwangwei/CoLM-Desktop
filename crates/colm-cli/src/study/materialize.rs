@@ -160,7 +160,9 @@ fn absolutize_existing_paths(
 ) -> Result<()> {
     let paths = document.paths();
     for field in paths {
-        if field.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
+        if field.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES")
+            || field.to_ascii_lowercase().contains("fprefix")
+        {
             continue;
         }
         let Some(Value::Str(raw)) = document.get(&field) else {
@@ -178,7 +180,12 @@ fn absolutize_existing_paths(
         }
         let candidate = baseline.join(candidate);
         let absolute = colm_kernel::manifest::absolute(&candidate).unwrap_or(candidate);
-        document.set(&field, Value::Str(absolute.to_string_lossy().into_owned()))?;
+        let mut absolute = absolute.to_string_lossy().into_owned();
+        // Fortran concatenates the forcing directory and prefix without a separator.
+        if raw.ends_with(['/', '\\']) && !absolute.ends_with(std::path::MAIN_SEPARATOR) {
+            absolute.push(std::path::MAIN_SEPARATOR);
+        }
+        document.set(&field, Value::Str(absolute))?;
     }
     Ok(())
 }
@@ -214,8 +221,16 @@ fn copy_named_namelist(
         return Ok(());
     }
     let target = destination.join(target_name);
-    std::fs::copy(&source, &target)
-        .with_context(|| format!("cannot copy {} to {}", source.display(), target.display()))?;
+    let text = std::fs::read_to_string(&source)
+        .with_context(|| format!("cannot read {}", source.display()))?;
+    let mut copied = colm_namelist::parse(&text)?;
+    // Nested namelists resolve their data relative to their own original directory.
+    absolutize_existing_paths(
+        &mut copied,
+        source.parent().context("namelist has no parent")?,
+    )?;
+    std::fs::write(&target, copied.to_string())
+        .with_context(|| format!("cannot write {}", target.display()))?;
     document.set(field, Value::Str(target.to_string_lossy().into_owned()))
 }
 
@@ -350,6 +365,67 @@ mod tests {
         assert!(member.join("standard_ch4_parameter.nml").is_file());
         assert!(member.join("unused_parameter.nml").is_file());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn copied_nested_namelists_keep_original_data_paths_and_forcing_prefixes() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-member-nested-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let baseline = root.join("base");
+        let member = root.join("member");
+        let config = baseline.join("config");
+        std::fs::create_dir_all(config.join("met/subdir")).unwrap();
+        std::fs::write(config.join("met/subdir/met.nc"), b"forcing").unwrap();
+        let forcing = "&nl_colm_forcing\n DEF_dir_forcing='met/'\n DEF_forcing%fprefix(1)='subdir/met.nc'\n DEF_forcing%CBL_fprefix='subdir/cbl.nc'\n/\n";
+        let history = "&nl_colm_history\n DEF_history_data='missing/history.nc'\n/\n";
+        std::fs::write(config.join("forcing.nml"), forcing).unwrap();
+        std::fs::write(config.join("history.nml"), history).unwrap();
+        std::fs::write(
+            baseline.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME='base'\n DEF_dir_output='out'\n DEF_forcing_namelist='config/forcing.nml'\n DEF_HIST_vars_namelist='config/history.nml'\n/\n",
+        )
+        .unwrap();
+
+        let member = member_case(&baseline, &member, "m1", "site", &[]).unwrap();
+        let config = colm_kernel::manifest::absolute(&config).unwrap();
+        let copied =
+            colm_namelist::parse(&std::fs::read_to_string(member.join("forcing.nml")).unwrap())
+                .unwrap();
+        let dir = string_path(&copied, "DEF_dir_forcing").unwrap();
+        assert_eq!(Path::new(&dir), config.join("met"));
+        assert!(dir.ends_with(std::path::MAIN_SEPARATOR));
+        assert_eq!(
+            string_path(&copied, "DEF_forcing%fprefix(1)").as_deref(),
+            Some("subdir/met.nc")
+        );
+        assert_eq!(
+            string_path(&copied, "DEF_forcing%CBL_fprefix").as_deref(),
+            Some("subdir/cbl.nc")
+        );
+        // Exercise the native concatenation contract, not just the rewritten string.
+        assert_eq!(
+            std::fs::read(format!("{dir}subdir/met.nc")).unwrap(),
+            b"forcing"
+        );
+        let copied =
+            colm_namelist::parse(&std::fs::read_to_string(member.join("history.nml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            Path::new(&string_path(&copied, "DEF_history_data").unwrap()),
+            config.join("missing/history.nc")
+        );
+        assert_eq!(
+            std::fs::read_to_string(config.join("forcing.nml")).unwrap(),
+            forcing
+        );
+        assert_eq!(
+            std::fs::read_to_string(config.join("history.nml")).unwrap(),
+            history
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

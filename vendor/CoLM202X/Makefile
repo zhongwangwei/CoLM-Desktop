@@ -859,3 +859,6 @@ MOD_prospect_DB.o: MOD_dataSpec_PDB.o MOD_tav_abs.o
 MOD_tav_abs.o: MOD_dataSpec_PDB.o
 POST_Vector2Grid.o: MOD_Vector2Grid.o
 # <<< end of generated Fortran module prerequisites <<<
+
+# Initialize NetCDF before the first input read in each kernel program.
+MKSRFDATA.o CoLMINI.o CoLM.o: MOD_NetCDFSerial.o

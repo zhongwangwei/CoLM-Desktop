@@ -72,6 +72,7 @@ fn initial_time_input(path: &str) -> bool {
 }
 
 pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint> {
+    crate::model_version::restore_execution_path(case_nml.parent().unwrap_or(Path::new(".")))?;
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let doc = colm_namelist::parse(&text)?;
@@ -720,6 +721,7 @@ fn is_comparison_physics(key: &str) -> bool {
 /// Directory scans are conservative: every regular file is hashed, with stable
 /// membership checked before and after; no metadata-only or sampled shortcuts.
 pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
+    crate::model_version::restore_execution_path(case)?;
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
     let self_contained_roots = simple_site_roots_unused(&nml, &doc)?;
@@ -1105,8 +1107,11 @@ fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
         out: &mut BTreeMap<PathBuf, String>,
     ) -> Result<()> {
         let path = root.join(relative);
-        let canonical = path.canonicalize()?;
-        let metadata = std::fs::metadata(&path)?;
+        let canonical = path
+            .canonicalize()
+            .with_context(|| format!("cannot resolve scientific input {}", path.display()))?;
+        let metadata = std::fs::metadata(&path)
+            .with_context(|| format!("cannot inspect scientific input {}", path.display()))?;
         out.insert(relative.to_path_buf(), stable_file_identity(&metadata));
         if metadata.is_dir() {
             anyhow::ensure!(
@@ -1115,8 +1120,16 @@ fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
                 path.display()
             );
             active.push(canonical);
-            for entry in std::fs::read_dir(&path)? {
-                visit(root, &relative.join(entry?.file_name()), active, out)?;
+            for entry in std::fs::read_dir(&path).with_context(|| {
+                format!("cannot list scientific input directory {}", path.display())
+            })? {
+                let entry = entry.with_context(|| {
+                    format!(
+                        "cannot read scientific input directory entry in {}",
+                        path.display()
+                    )
+                })?;
+                visit(root, &relative.join(entry.file_name()), active, out)?;
             }
             active.pop();
         } else {
@@ -1155,6 +1168,7 @@ fn full_directory(out: &mut FullInputIdentity, role: &str, root: &Path) -> Resul
 
 /// Frozen local configuration is checked separately from server-side datasets.
 pub(crate) fn configuration_identity(case: &Path) -> Result<BTreeMap<String, String>> {
+    crate::model_version::restore_execution_path(case)?;
     let case = case.canonicalize()?;
     let doc = colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml"))?)?;
     let forcing = doc
