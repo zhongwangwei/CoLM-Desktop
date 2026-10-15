@@ -97,7 +97,7 @@ fn the_frontend_does_not_assume_forward_slashes() {
 #[test]
 fn the_kernel_creates_directories_without_cmd_expansion() {
     let sh = read("oracle/scripts/build_kernel.sh");
-    assert!(sh.contains("tar -h --exclude=.git -cf - ."));
+    assert!(sh.contains("tar -h --exclude=.git"));
     assert!(
         !sh.contains("has upstream changed?"),
         "obsolete mkdir rewrite must be removed"

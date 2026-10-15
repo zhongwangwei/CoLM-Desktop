@@ -575,15 +575,12 @@ impl Registry {
                         let bytes = fs::read(&path)?;
                         inputs.insert(path.to_string_lossy().into_owned(), digest(&bytes));
                         let mut config = colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
-                        rewrite_case_paths(
-                            &mut config,
-                            path.parent().context("namelist parent")?,
-                            &destination,
-                        )?;
+                        // Runtime paths are relative to the case cwd, even for nested namelists.
+                        rewrite_case_paths(&mut config, &source, &destination)?;
                         fs::write(destination.join(fallback), config.to_string())?;
                         doc.set(
                             field,
-                            Value::Str(destination.join(fallback).to_string_lossy().into_owned()),
+                            Value::Str(namelist_path(&destination.join(fallback))),
                         )?;
                     }
                 }
@@ -737,7 +734,7 @@ fn rewrite_case_paths(doc: &mut Document, source: &Path, destination: &Path) -> 
                     doc.set(
                         &key,
                         Value::Str(with_trailing_separator(
-                            path.canonicalize()?.to_string_lossy().into_owned(),
+                            namelist_path(&path.canonicalize()?),
                             trailing,
                         )),
                     )?;
@@ -750,12 +747,36 @@ fn rewrite_case_paths(doc: &mut Document, source: &Path, destination: &Path) -> 
         doc.set(
             "DEF_dir_output",
             Value::Str(with_trailing_separator(
-                destination.join("out").to_string_lossy().into_owned(),
+                namelist_path(&destination.join("out")),
                 trailing,
             )),
         )?;
     }
     Ok(())
+}
+
+// Native Fortran concatenates directory/prefix strings; verbatim Windows paths reject '/' suffixes.
+fn namelist_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    #[cfg(windows)]
+    if let Some(rest) = text.strip_prefix(r"\\?\") {
+        return match rest.strip_prefix(r"UNC\") {
+            Some(unc) => format!(r"\\{unc}"),
+            None => rest.to_owned(),
+        };
+    }
+    text.into_owned()
+}
+
+#[cfg(all(test, windows))]
+#[test]
+fn namelist_paths_accept_native_forcing_suffixes() {
+    assert_eq!(namelist_path(Path::new(r"\\?\C:\data\met")), r"C:\data\met");
+    assert_eq!(
+        namelist_path(Path::new(r"\\?\UNC\server\share\met")),
+        r"\\server\share\met"
+    );
+    assert_eq!(namelist_path(Path::new(r"C:\data\met")), r"C:\data\met");
 }
 
 /// 规范化会去掉目录结尾的分隔符，而 Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)`

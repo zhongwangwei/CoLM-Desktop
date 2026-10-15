@@ -1,6 +1,7 @@
 use super::*;
 use crate::registry::digest;
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -154,15 +155,12 @@ fn migration_is_lossless_idempotent_and_reversible_and_run_is_isolated() {
         colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
     assert_eq!(doc.get("DEF_TUNING_CSOILC").unwrap().as_f64(), Some(0.008));
     assert_eq!(doc.get("UNKNOWN_LEGACY").unwrap().as_f64(), Some(42.0));
+    let Some(colm_namelist::Value::Str(site)) = doc.get("SITE_fsitedata") else {
+        panic!("missing site path");
+    };
     assert_eq!(
-        doc.get("SITE_fsitedata"),
-        Some(&colm_namelist::Value::Str(
-            case.canonicalize()
-                .unwrap()
-                .join("site.nc")
-                .to_string_lossy()
-                .into_owned()
-        ))
+        Path::new(site).canonicalize().unwrap(),
+        case.join("site.nc").canonicalize().unwrap()
     );
     assert!(
         !run.run_case.join("site.nc").exists(),
@@ -388,24 +386,65 @@ fn forcing_configuration_is_frozen_and_its_data_reference_remains_read_only() {
         .unwrap();
     let doc =
         colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    let Some(colm_namelist::Value::Str(path)) = doc.get("DEF_forcing_namelist") else {
+        panic!("missing forcing namelist");
+    };
     assert_eq!(
-        doc.get("DEF_forcing_namelist"),
-        Some(&colm_namelist::Value::Str(
-            run.run_case
-                .join("forcing.nml")
-                .to_string_lossy()
-                .into_owned()
-        ))
+        Path::new(path).canonicalize().unwrap(),
+        run.run_case.join("forcing.nml").canonicalize().unwrap()
     );
     let before = fs::read(run.run_case.join("forcing.nml")).unwrap();
     fs::write(case.join("forcing.nml"), "changed").unwrap();
     assert_eq!(before, fs::read(run.run_case.join("forcing.nml")).unwrap());
     let forcing = colm_namelist::parse(std::str::from_utf8(&before).unwrap()).unwrap();
+    let Some(colm_namelist::Value::Str(directory)) = forcing.get("DEF_forcing%dir") else {
+        panic!("missing forcing directory");
+    };
     assert_eq!(
-        forcing.get("DEF_forcing%dir"),
-        Some(&colm_namelist::Value::Str(
-            case.canonicalize().unwrap().to_string_lossy().into_owned()
-        ))
+        Path::new(directory).canonicalize().unwrap(),
+        case.canonicalize().unwrap()
+    );
+}
+
+#[test]
+fn materialized_nested_namelist_uses_case_working_directory() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    fs::create_dir_all(case.join("met/subdir")).unwrap();
+    fs::create_dir_all(case.join("config/met/subdir")).unwrap();
+    fs::write(case.join("met/subdir/met.nc"), b"actual forcing").unwrap();
+    fs::write(case.join("config/met/subdir/met.nc"), b"wrong nested data").unwrap();
+    let text = fs::read_to_string(case.join("case.nml"))
+        .unwrap()
+        .replace("/\n", " DEF_forcing_namelist = 'config/forcing.nml'\n/\n");
+    fs::write(case.join("case.nml"), text).unwrap();
+    fs::write(
+        case.join("config/forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='met/'\n DEF_forcing%fprefix(1)='subdir/met.nc'\n/\n",
+    )
+    .unwrap();
+    let official = reg.install_official(code()).unwrap();
+    let run = reg
+        .materialize_run(&official.version, &case, &tmp.0.join("run"), "nested")
+        .unwrap();
+    let forcing =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("forcing.nml")).unwrap())
+            .unwrap();
+    let Some(colm_namelist::Value::Str(directory)) = forcing.get("DEF_dir_forcing") else {
+        panic!("missing forcing directory");
+    };
+    let Some(colm_namelist::Value::Str(prefix)) = forcing.get("DEF_forcing%fprefix(1)") else {
+        panic!("missing forcing prefix");
+    };
+    assert_eq!(prefix, "subdir/met.nc");
+    assert_eq!(
+        std::path::Path::new(directory).canonicalize().unwrap(),
+        case.join("met").canonicalize().unwrap()
+    );
+    assert_eq!(
+        fs::read(format!("{directory}{prefix}")).unwrap(),
+        b"actual forcing"
     );
 }
 
@@ -435,14 +474,13 @@ fn materialized_directory_fields_keep_their_trailing_separator() {
     let forcing =
         colm_namelist::parse(&fs::read_to_string(run.run_case.join("forcing.nml")).unwrap())
             .unwrap();
-    let expected = format!(
-        "{}{}",
-        data.canonicalize().unwrap().display(),
-        std::path::MAIN_SEPARATOR
-    );
+    let Some(colm_namelist::Value::Str(directory)) = forcing.get("DEF_dir_forcing") else {
+        panic!("missing forcing directory");
+    };
+    assert!(directory.ends_with(std::path::MAIN_SEPARATOR));
     assert_eq!(
-        forcing.get("DEF_dir_forcing"),
-        Some(&colm_namelist::Value::Str(expected))
+        Path::new(directory).canonicalize().unwrap(),
+        data.canonicalize().unwrap()
     );
 }
 

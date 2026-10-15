@@ -115,7 +115,11 @@ rm -rf "$BUILD"
 # 每次都从头拷：构建会往树里写 `.o`、`.mod` 与生成的 `include/define.h`，
 # 直接在 `vendor/` 里编会污染入库的源码。
 mkdir -p "$BUILD"
-(cd "$SRC" && tar -h --exclude=.git -cf - .) | (cd "$BUILD" && tar -xf -)
+# Developer checkouts can contain ignored products from another architecture.
+(cd "$SRC" && tar -h --exclude=.git --exclude=.bld --exclude=lib \
+  --exclude='*.o' --exclude='*.mod' --exclude='*.smod' --exclude='*.a' \
+  --exclude='*.so' --exclude='*.so.*' --exclude='*.dylib' --exclude='*.dll' \
+  --exclude='*.x' --exclude='*.exe' -cf - .) | (cd "$BUILD" && tar -xf -)
 trap 'rm -rf "$BUILD"' EXIT
 
 cd "$BUILD"

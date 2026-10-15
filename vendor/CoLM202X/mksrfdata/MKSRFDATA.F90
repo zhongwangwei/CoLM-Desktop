@@ -49,6 +49,7 @@ PROGRAM MKSRFDATA
 !
 !=======================================================================
 
+   USE MOD_NetCDFSerial, ONLY: ncio_initialize
    USE MOD_Precision
    USE MOD_SPMD_Task
    USE MOD_Namelist
@@ -114,6 +115,7 @@ PROGRAM MKSRFDATA
 
       CALL getarg(1, nlfile)
 
+      CALL ncio_initialize ()
       CALL read_namelist (nlfile)
 
       CALL initimetype (DEF_simulation_time%greenwich)

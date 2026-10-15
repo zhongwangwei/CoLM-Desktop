@@ -17,6 +17,7 @@ PROGRAM CoLMINI
 !  Revised by Yongjiu Dai Februay 2014
 !=======================================================================
 
+   USE MOD_NetCDFSerial, ONLY: ncio_initialize
    USE MOD_Precision
    USE MOD_Namelist
    USE MOD_SPMD_Task
@@ -80,6 +81,7 @@ PROGRAM CoLMINI
 
       ! ----------------------------------------------------------------------
       CALL getarg (1, nlfile)
+      CALL ncio_initialize ()
       CALL read_namelist (nlfile)
 
       DEF_PIO_groupsize = 2

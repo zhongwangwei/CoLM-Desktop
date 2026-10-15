@@ -11,10 +11,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the kernel compiler
-        run: sudo apt-get update && sudo apt-get install -y gfortran
+        run: sudo apt-get update && sudo apt-get install -y gfortran libnetcdff-dev libnetcdf-dev
       - name: Check literal filesystem paths
         run: |
           python3 oracle/scripts/test_kernel_filesystem.py
+          python3 oracle/scripts/test_kernel_source_copy.py
+          python3 oracle/scripts/test_netcdf_initialization.py
           python3 oracle/scripts/test_longitude_normalization.py
           python3 oracle/scripts/test_physics_audit.py
           python3 oracle/scripts/test_cama_finite.py
