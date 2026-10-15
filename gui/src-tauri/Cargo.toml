@@ -15,6 +15,10 @@ publish = false
 name = "colm_desktop_gui_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 端到端测试驱动（src/e2e_driver.rs）。默认关闭，发布包不带。
+[features]
+e2e-driver = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

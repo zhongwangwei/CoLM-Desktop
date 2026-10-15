@@ -141,6 +141,7 @@ fn pack_engine_source(root: &Path, cli: &Path) -> Result<()> {
         .arg("engine-pack")
         .arg("--out")
         .arg(&out)
+        .env("COLM_AUDIT_BY_PARENT", "1")
         .status()
         .context("cannot run colm-cli engine-pack")?;
     if !status.success() {

@@ -80,6 +80,9 @@ pub struct PointRuntimeConfig {
     pub observation_height_mode: colm_core::ObservationHeightMode,
     /// `DEF_USE_CBL_HEIGHT`：第 9 个强迫变量的文件（`DEF_forcing%CBL_fprefix`）、变量名与插值方式。
     pub boundary_layer: Option<colm_forcing::BoundaryLayerSource>,
+    /// `DEF_URBAN_RUN`：城市单点把强迫文件的 `Snowf` 并入 `Rainf` 槽，见
+    /// [`colm_forcing::load_point_forcing_with_options`]。
+    pub urban_snowfall: bool,
 }
 
 /// One fully prepared POINT forcing record for a `CoLM.F90` loop pass.
@@ -293,9 +296,10 @@ impl PointRuntime {
                 config.lai_update_schedule,
             )?
             .with_restart_frequency(config.restart_frequency),
-            forcing: colm_forcing::load_point_forcing_with_boundary_layer(
+            forcing: colm_forcing::load_point_forcing_with_options(
                 &config.forcing_file,
                 config.boundary_layer.as_ref(),
+                config.urban_snowfall,
             )?,
             greenwich: config.greenwich,
             longitude_degrees: config.longitude_degrees,
@@ -1725,6 +1729,7 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         humidity_height_m,
         observation_height_mode,
         boundary_layer,
+        urban_snowfall: physics::logical(&case, "DEF_URBAN_RUN")?,
     })
 }
 

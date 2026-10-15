@@ -674,6 +674,10 @@ export const commandContract = {
     "dir": {
       "required": true,
       "rust_type": "String"
+    },
+    "target": {
+      "required": false,
+      "rust_type": "Option<VersionRef>"
     }
   },
   "model_case_runs": {
@@ -1288,9 +1292,23 @@ export const commandContract = {
     "modelRevision": {
       "required": false,
       "rust_type": "Option<colm_model::VersionRef>"
+    },
+    "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "forcing_datasets": {},
+  "redirect_output_dir": {
+    "caseDir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "targetDir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "new_spatial_case": {
     "domain": {
       "required": true,
@@ -1387,6 +1405,10 @@ export const commandContract = {
     "modelRevision": {
       "required": false,
       "rust_type": "Option<colm_model::VersionRef>"
+    },
+    "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "metrics": {

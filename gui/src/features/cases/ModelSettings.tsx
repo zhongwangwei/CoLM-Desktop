@@ -8,12 +8,17 @@ import ConfigurationOptions from '../versions/ConfigurationOptions';
 import ScientificSetupCards from '../versions/ScientificSetupCards';
 import { setupHandledKeys, type SetupEnvironment } from '../versions/scientific-setup';
 import { isCaseField, type SchemaField } from './case-model';
-import type { CaseOptionPatch } from '../versions/configuration-options';
+import { caseFieldVisible, type CaseOptionPatch } from '../versions/configuration-options';
 import {
   filterModelParameters,
+  modelSettingValue,
   processSettingOwner,
   modelParameterEditable,
+  schemeFlagKeys,
+  schemeHasSettings,
+  settingAvailable,
   simulationMode,
+  spatialOnlySchemeKeys,
   type SimulationMode,
   type ModelParameter,
 } from './model-settings';
@@ -111,8 +116,48 @@ export default function ModelSettings({
   const facts =
     classification ??
     (profile?.subgrid === 'USGS' ? 'USGS' : profile?.subgrid === 'IGBP' ? 'IGBP' : undefined);
-  const selectedMode = mode ?? simulationMode(version?.overlay, facts, profile?.subgrid),
+  const selectedMode =
+      onModeChange && !caseDir
+        ? mode
+        : (mode ?? simulationMode(version?.overlay, facts, profile?.subgrid)),
     vegetationMode = selectedMode === 'PFT' || selectedMode === 'PC';
+  // 方案切换后组件身份随之变化；等新方案渲染出来再打开它的专属弹窗。
+  const [pendingScheme, setPendingScheme] = useState<SimulationMode | null>(null);
+  const schemeSettings = (value: SimulationMode | undefined) =>
+    schemeHasSettings(
+      value,
+      fields,
+      setupEnvironment?.domain ?? (caseDir ? (profile?.grid ? 'region' : 'site') : null),
+    );
+  const pendingReady = !!pendingScheme && selectedMode === pendingScheme && !loading,
+    pendingOpens = pendingReady && schemeSettings(pendingScheme);
+  useEffect(() => {
+    if (!pendingReady || !pendingScheme) return;
+    setPendingScheme(null);
+    if (pendingOpens) setSettings({ id: pendingScheme, identity: currentIdentity.current });
+  }, [pendingReady, pendingOpens, pendingScheme]);
+  // 卡片上说明当前方案的专属状态；未写入的开关按 CoLM 默认显示（DEF_FAST_PC 默认开启）。
+  const caseValue = (key: string) =>
+    setupEnvironment?.caseValues?.[key]?.trim().toLowerCase() ??
+    modelSettingValue(version?.overlay ?? { physics: {}, parameters: [], process_files: [] }, key)
+      ?.trim()
+      .toLowerCase();
+  const schemeDetail = (value: SimulationMode) => {
+    const site = ['site', 'single'].includes(setupEnvironment?.domain ?? '');
+    if (selectedMode === value && value === 'PC' && !site)
+      return caseValue('DEF_FAST_PC') === '.false.'
+        ? t('标准植物群落 · 可在专属设置中修改', 'Standard PC · adjustable in settings')
+        : t('快速植物群落（Fast PC）· 可在专属设置中修改', 'Fast PC · adjustable in settings');
+    if (selectedMode === value && value === 'PFT' && !site)
+      return caseValue('DEF_SOLO_PFT') === '.true.'
+        ? t('单一 PFT 模式 · 可在专属设置中修改', 'Solo PFT · adjustable in settings')
+        : t('多 PFT 镶嵌 · 可在专属设置中修改', 'Mosaic PFT · adjustable in settings');
+    if (value === 'PFT' || value === 'PC')
+      return t('需匹配站点植被数据', 'Requires matching vegetation data');
+    return state.kernels.some((item) => item.macros.includes(`LULC_${value}`))
+      ? t('本机已有此分类内核 · 点选即生效', 'Kernel installed · applies on click')
+      : t('本机尚无此分类内核', 'No local kernel for this classification');
+  };
   const modeActionId = (value: SimulationMode) =>
     value === 'PFT' || value === 'PC'
       ? `simulation-mode-${value.toLowerCase()}`
@@ -123,6 +168,7 @@ export default function ModelSettings({
     !!onModeChange || ((value === 'IGBP' || value === 'USGS') && !!onClassificationChange);
   const changeMode = (value: SimulationMode) => {
     if (disabled || !modeAvailable(value)) return;
+    if (onCaseChange && value !== selectedMode && schemeSettings(value)) setPendingScheme(value);
     if (onModeChange) onModeChange(value);
     else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
@@ -154,6 +200,14 @@ export default function ModelSettings({
         enabled: !disabled,
         run: () => onClassificationChange(value),
       });
+  if (onCaseChange && vegetationMode && schemeSettings(selectedMode))
+    actions.push({
+      id: 'simulation-scheme-settings',
+      label: t(`${selectedMode} 专属设置`, `${selectedMode} settings`),
+      kind: 'click',
+      enabled: !disabled && ready,
+      run: () => setSettings({ id: selectedMode!, identity: currentIdentity.current }),
+    });
   if (ready)
     actions.push({
       id: 'simulation-parameter-catalog-toggle',
@@ -238,16 +292,28 @@ export default function ModelSettings({
                     ? t('植被功能型结构', 'Plant functional types')
                     : t('植物群落结构', 'Plant communities')}
             </span>
-            <small>
-              {value === 'PFT' || value === 'PC'
-                ? t('需匹配站点植被数据', 'Requires matching vegetation data')
-                : state.kernels.some((item) => item.macros.includes(`LULC_${value}`))
-                  ? t('本机已有此分类内核', 'A kernel for this classification is installed')
-                  : t('本机尚无此分类内核', 'No local kernel for this classification')}
-            </small>
+            <small>{schemeDetail(value)}</small>
           </Button>
         ))}
       </div>
+      {!selectedMode && (
+        <Notice tone="warning">
+          {t(
+            '请先选择一种下垫面 / 植被方案；未选择前不能进入下一步。',
+            'Choose a land-cover / vegetation scheme before continuing.',
+          )}
+        </Notice>
+      )}
+      {onCaseChange && vegetationMode && schemeSettings(selectedMode) && (
+        <div className="button-row">
+          <Button
+            disabled={disabled || loading}
+            onClick={() => setSettings({ id: selectedMode!, identity: currentIdentity.current })}
+          >
+            {t(`${selectedMode} 专属设置`, `${selectedMode} settings`)}
+          </Button>
+        </div>
+      )}
       {vegetationMode && (
         <Field label={t('地类数据来源', 'Land-cover data classification')}>
           <div className="button-row">
@@ -315,12 +381,26 @@ export default function ModelSettings({
             includeSubgrid={false}
             disabled={disabled || loading}
             onCaseChange={onCaseChange}
-            hasSettings={(id) =>
+            hasSettings={(id, states) =>
+              // 只有该过程独有、且在当前算例条件下可用的二级参数才值得弹窗；
+              // 纯二选一的过程（土壤水力方案、变饱和流、区域汇流）点选即生效。
+              id === 'DEF_USE_TRACER' ||
               fields.some(
                 (field) =>
-                  processSettingOwner(field) === id &&
+                  processSettingOwner(field, states) === id &&
                   (!setupHandledKeys.includes(field.name) ||
-                    field.name === 'DEF_TUNING_CROP_PLANTING_DAY'),
+                    field.name === 'DEF_TUNING_CROP_PLANTING_DAY') &&
+                  settingAvailable(field.name, states) &&
+                  (!states?.length ||
+                    caseFieldVisible(
+                      field.name,
+                      states.map((state) =>
+                        state.parent_gate?.toLowerCase() ===
+                        (id === 'crop' ? 'def_use_crop' : id.toLowerCase())
+                          ? { ...state, parent_gate_enabled: true }
+                          : state,
+                      ),
+                    )),
               )
             }
             onOpenSettings={
@@ -339,7 +419,7 @@ export default function ModelSettings({
                 subgrid={selectedMode}
                 caseValues={setupEnvironment?.caseValues}
                 onCaseChange={onCaseChange}
-                excludeKeys={setupHandledKeys}
+                excludeKeys={[...setupHandledKeys, ...schemeFlagKeys]}
                 hideProcesses={!!onCaseChange}
                 groupPrefix="simulation-model"
                 source={{ kind: 'frozen', version: version.version }}
@@ -523,6 +603,8 @@ function ProcessSettingsDialog({
     DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
     soil: ['土壤设置', 'Soil settings'],
     DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
+    PFT: ['PFT 植被功能型设置', 'PFT settings'],
+    PC: ['PC 植物群落设置', 'PC settings'],
   };
   const title = titles[process] ?? ['过程设置', 'Process settings'];
   useEffect(() => {
@@ -603,7 +685,11 @@ function ProcessSettingsDialog({
         caseValues={values}
         removedCaseKeys={Object.keys(patch).filter((key) => patch[key] === null)}
         disabled={disabled || saving}
-        excludeKeys={setupHandledKeys.filter((key) => key !== 'DEF_TUNING_CROP_PLANTING_DAY')}
+        excludeKeys={[
+          ...setupHandledKeys.filter((key) => key !== 'DEF_TUNING_CROP_PLANTING_DAY'),
+          // SinglePoint 不读这些方案项；单点弹窗里出现只会制造“已生效”的假象。
+          ...(['site', 'single'].includes(environment?.domain ?? '') ? spatialOnlySchemeKeys : []),
+        ]}
         onCaseChange={(change) => {
           if (!live.current || lockedNow.current || savingNow.current)
             throw new Error('Configuration is locked');

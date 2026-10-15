@@ -782,7 +782,8 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
         code(opts, code_ref.workspace.as_deref())? == *code_ref,
         "source no longer matches draft"
     );
-    let stage = dest.with_file_name(format!(".{}-{}", code_ref.source_sha256, unique_id()));
+    // Reduce nested Git path lengths on Windows.
+    let stage = dest.with_file_name(format!(".{}", unique_id()));
     std::fs::create_dir_all(&stage)?;
     let result = (|| -> Result<()> {
         if let Some(name) = &code_ref.workspace {
@@ -792,13 +793,18 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
             )?;
             let target = stage.join("workspaces").join(name);
             std::fs::create_dir_all(&target)?;
-            let status = std::process::Command::new("git")
+            let output = std::process::Command::new("git")
                 .args(["clone", "--local", "--no-hardlinks"])
-                .arg(ws.src())
-                .arg(target.join("src"))
-                .output()?
-                .status;
-            ensure!(status.success(), "cannot freeze source checkout");
+                .arg(std::path::absolute(ws.src())?)
+                // Git for Windows rejects verbatim absolute clone destinations.
+                .arg("src")
+                .current_dir(&target)
+                .output()?;
+            ensure!(
+                output.status.success(),
+                "cannot freeze source checkout: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
             for folder in ["bin", "kernels"] {
                 if ws.dir.join(folder).exists() {
                     copy_tree(&ws.dir.join(folder), &target.join(folder))?;
@@ -919,6 +925,9 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
         }
         std::fs::write(stage.join("artifacts.json"), serde_json::to_vec(&programs)?)?;
         std::fs::write(stage.join("code.json"), serde_json::to_vec(code_ref)?)?;
+        if dest.exists() {
+            std::fs::remove_dir_all(&dest)?;
+        }
         std::fs::rename(&stage, &dest)?;
         Ok(())
     })();
@@ -1008,6 +1017,110 @@ mod tests {
                 revision: 2
             })
         );
+    }
+    #[test]
+    fn invalid_frozen_cache_is_preserved() {
+        let root = std::env::temp_dir().join(unique_id());
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![("--model-root".into(), root.to_string_lossy().into_owned())],
+        };
+        for kind in [CodeKind::Official, CodeKind::Workspace] {
+            let code_ref = CodeRef {
+                workspace: (kind == CodeKind::Workspace).then(|| "missing-workspace".into()),
+                kind,
+                commit: None,
+                source_sha256: "0".repeat(64),
+            };
+            let dest = cache_dir(&opts, &code_ref).unwrap();
+            std::fs::create_dir_all(&dest).unwrap();
+            let identity = serde_json::to_vec(&code_ref).unwrap();
+            std::fs::write(dest.join("code.json"), &identity).unwrap();
+            std::fs::write(dest.join("source.tar.gz"), b"frozen source").unwrap();
+            // A missing program must not erase an old revision that cannot be rebuilt.
+            std::fs::write(
+                dest.join("artifacts.json"),
+                br#"{"bin/missing":"checksum"}"#,
+            )
+            .unwrap();
+            for operation in [verify_code, cache_code] {
+                assert!(operation(&opts, &code_ref).is_err());
+                assert_eq!(std::fs::read(dest.join("code.json")).unwrap(), identity);
+                assert_eq!(
+                    std::fs::read(dest.join("source.tar.gz")).unwrap(),
+                    b"frozen source"
+                );
+            }
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cache_code_overwrites_existing_non_empty_dest_directory() {
+        let root = std::env::temp_dir().join(unique_id());
+        let ws_root = root.join("workspaces");
+        std::fs::create_dir_all(&ws_root).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(repo.join("crates/test")).unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        std::fs::write(repo.join("crates/test/lib.rs"), "pub fn test() {}\n").unwrap();
+        let _ = std::process::Command::new("git")
+            .args(["init", "-q", "-b", "main"])
+            .current_dir(&repo)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test.com",
+                "add",
+                ".",
+            ])
+            .current_dir(&repo)
+            .status();
+        let _ = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@test.com",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .current_dir(&repo)
+            .status();
+
+        let _ws = colm_workspace::Workspace::create(&ws_root, "demo", repo.to_str().unwrap(), None)
+            .unwrap();
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![
+                (
+                    "--model-root".into(),
+                    root.join("models").to_string_lossy().into_owned(),
+                ),
+                (
+                    "--workspace-root".into(),
+                    ws_root.to_string_lossy().into_owned(),
+                ),
+            ],
+        };
+        let code_ref = code(&opts, Some("demo")).unwrap();
+        let dest = cache_dir(&opts, &code_ref).unwrap();
+
+        // Simulate an interrupted run leaving a non-empty directory at dest:
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("corrupted.bin"), b"leftover data").unwrap();
+
+        // cache_code must succeed and replace dest cleanly
+        cache_code(&opts, &code_ref).unwrap();
+        assert!(dest.join("code.json").is_file());
+        assert!(!dest.join("corrupted.bin").exists());
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 

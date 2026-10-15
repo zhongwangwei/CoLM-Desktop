@@ -1141,7 +1141,7 @@ export default function ResourcesPage() {
             <div className="resource-task" key={dir}>
               <div className="resource-task-row">
                 <span className="resource-task-name">
-                  <strong>{dir.split('/').filter(Boolean).at(-1) ?? dir}</strong>
+                  <strong>{dir.split(/[\\/]/).filter(Boolean).at(-1) ?? dir}</strong>
                   <small>
                     {info.host ?? t('主机未记录', 'Host not recorded')} ·{' '}
                     {info.job ?? t('身份未确认', 'Unconfirmed identity')} ·{' '}

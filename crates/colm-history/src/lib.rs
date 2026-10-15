@@ -176,6 +176,9 @@ pub struct Page {
 }
 
 pub fn default_db_path() -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("COLM_HISTORY_DB").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(path));
+    }
     let env_path = |key| {
         std::env::var_os(key)
             .filter(|v| !v.is_empty())

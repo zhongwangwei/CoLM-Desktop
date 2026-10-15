@@ -20,6 +20,8 @@ export type SetupEnvironment = {
   classification?: 'IGBP' | 'USGS';
   kernel?: KernelEntry;
   cropKernel?: KernelEntry;
+  // 算例页面会把被上游选择否定的过程自动关闭（见 exclusionPatch），这些选择因此不必先置灰。
+  autoClose?: boolean;
 };
 const planting = 'DEF_TUNING_CROP_PLANTING_DAY';
 const isSite = (environment: SetupEnvironment) =>
@@ -146,14 +148,23 @@ export function setupChoices(
         'van Genuchten 必须开启变饱和流；请先改用 Campbell',
         'van Genuchten requires variably saturated flow; choose Campbell first',
       );
-    if (v === '.false.' && id === 'DEF_USE_BGC' && (crop || compiledCrop))
+    if (
+      v === '.false.' &&
+      id === 'DEF_USE_BGC' &&
+      (compiledCrop || (crop && !environment.autoClose))
+    )
       return compiledCrop
         ? bilingual(
             '当前 CROP 内核要求 BGC；请先切换非作物内核',
             'Current CROP kernel requires BGC; switch to a non-crop kernel first',
           )
         : bilingual('请先关闭作物过程', 'Disable crop first');
-    if (v === '.false.' && id === 'DEF_USE_VariablySaturatedFlow' && on('DEF_USE_TRACER'))
+    if (
+      v === '.false.' &&
+      id === 'DEF_USE_VariablySaturatedFlow' &&
+      on('DEF_USE_TRACER') &&
+      !environment.autoClose
+    )
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
     if (v === '.false.') return '';
     if (id !== 'crop') {
@@ -168,7 +179,7 @@ export function setupChoices(
           bilingual('当前源码或内核不支持修改', 'Current source or kernel disallows this option')
         );
     }
-    if (id === 'soil' && v === 'Campbell' && on('DEF_USE_TRACER'))
+    if (id === 'soil' && v === 'Campbell' && on('DEF_USE_TRACER') && !environment.autoClose)
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
     if (
       isSite(environment) &&
@@ -300,11 +311,13 @@ export function setupChoices(
   }
   return controls.map((c) => ({
     ...c,
+    // 作物没有 namelist 开关（开不开由内核与种植日决定），未开启就是实际生效的“关闭”。
+    // 原先返回空串，卡片永远停在“未指定”，点“关闭”也无处记录（第 692 轮原生界面实测）。
     value:
       c.id === 'crop'
         ? crop
           ? '.true.'
-          : ''
+          : '.false.'
         : foundationValue(overlay.physics, c.id, overlay.parameters),
     pending: c.keys.some(
       (k) =>

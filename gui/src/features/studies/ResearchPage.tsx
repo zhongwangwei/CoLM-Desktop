@@ -1398,6 +1398,11 @@ export default function ResearchPage() {
     !launching && !unresolvedRemote,
   );
   const hasStudy = !!studyDir && !!envelope;
+  function returnToSimulation() {
+    const target = state.simulationReturn;
+    if (!target) return;
+    return navigate(target.route, target.route === 'case' ? 'settings' : undefined);
+  }
   const homeActions = [
     lifecycleActions[0],
     ...(hasStudy
@@ -1407,6 +1412,15 @@ export default function ResearchPage() {
             tr('查看进度', 'View progress'),
             () => setWorkbench(true),
             !launching,
+          ),
+        ]
+      : []),
+    ...(state.simulationReturn
+      ? [
+          action(
+            'research-return-simulation',
+            tr('← 返回模拟配置', '← Back to simulation setup'),
+            returnToSimulation,
           ),
         ]
       : []),
@@ -1542,6 +1556,13 @@ export default function ResearchPage() {
   if (!workbench)
     return (
       <div className="research-home">
+        {state.simulationReturn && (
+          <div className="button-row">
+            <Button onClick={returnToSimulation}>
+              ← {tr('返回模拟配置', 'Back to simulation setup')}
+            </Button>
+          </div>
+        )}
         <header className="research-heading">
           <div>
             <h1>{tr('研究与模型改进', 'Research and model improvement')}</h1>
@@ -1647,6 +1668,13 @@ export default function ResearchPage() {
     );
   return (
     <div className="research-workbench space-y-5">
+      {state.simulationReturn && (
+        <div className="button-row">
+          <Button onClick={returnToSimulation}>
+            ← {tr('返回模拟配置', 'Back to simulation setup')}
+          </Button>
+        </div>
+      )}
       <header className="research-heading">
         <div>
           <h1>{en ? methodTitle.en : methodTitle.zh}</h1>

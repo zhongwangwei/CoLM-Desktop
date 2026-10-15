@@ -339,7 +339,14 @@ impl Registry {
         let dest = self.revision_dir(&frozen.version)?;
         let parent = dest.parent().context("revision parent")?;
         fs::create_dir_all(parent)?;
-        let stage = parent.join(format!(".stage-{}", std::process::id()));
+        let stage = parent.join(format!(
+            ".stage-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
         fs::create_dir(&stage)
             .context("unfinished revision staging directory; inspect before recovering")?;
         let result = (|| {

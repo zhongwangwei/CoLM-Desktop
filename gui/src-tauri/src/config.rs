@@ -4279,6 +4279,9 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
             .iter()
             .any(|name| field.path.eq_ignore_ascii_case(name))
     });
+    let (history, fields): (Vec<_>, Vec<_>) = fields
+        .into_iter()
+        .partition(|field| field.path.starts_with("DEF_hist_vars%"));
     let param = |name: &str| {
         param_fields
             .iter()
@@ -4288,6 +4291,12 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
     for field in &fields {
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
+    }
+    if !history.is_empty() {
+        let (hist_path, hist_text) =
+            stage_history_file(&mut doc, std::path::Path::new(dir), &history)?;
+        std::fs::write(&hist_path, hist_text)
+            .map_err(|e| format!("{}: {e}", hist_path.display()))?;
     }
     stage_tracer_parameters(
         dir,

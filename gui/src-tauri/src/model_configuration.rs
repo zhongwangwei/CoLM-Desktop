@@ -297,7 +297,17 @@ fn confirmed_gate(
             || matches!(
                 reason,
                 Some("当前内核未编入河湖汇流") | Some("当前内核未编入网格河湖汇流")
-            ) && !have.contains("GridRiverLakeFlow"))
+            ) && !have.contains("GridRiverLakeFlow")
+            // SinglePoint 是编译期执行路径：内核一旦确定为单点，这些字段在建例前就可确认无用，
+            // 不必等算例存在（否则新建单点时“更多配置”会列出区域聚合、区域历史网格等无效项）。
+            || have.contains("SinglePoint")
+                && matches!(
+                    reason,
+                    Some("SinglePoint 执行路径不会使用这个字段")
+                        | Some("SinglePoint 普通历史文件不使用此压缩设置")
+                )
+            || matches!(reason, Some("只有非结构网格内核写向量历史"))
+                && !have.contains("UNSTRUCTURED"))
     {
         return true;
     }
@@ -942,6 +952,8 @@ mod tests {
                 mode: Some("urban-igbp".into()),
                 domain: Some("watershed".into()),
                 shapefile: Some("watershed.shp".into()),
+                engine: None,
+                ..Default::default()
             },
         );
         for scheme in ["IGBP", "USGS", "PFT", "PC"] {
@@ -1753,5 +1765,23 @@ mod tests {
         let single = BTreeSet::from(["SinglePoint", "LULC_IGBP"]);
         let known = modes(process_files(&overlay, &assets, &doc, &single, true, true).unwrap());
         assert_eq!(known, json!(["wetwat", "satellite"]));
+    }
+
+    #[test]
+    fn single_point_kernel_confirms_unused_fields_before_the_case_exists() {
+        let doc = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+        let field = colm_schema::find("DEF_HIST_mode").unwrap();
+        let reason = Some("SinglePoint 执行路径不会使用这个字段");
+        let single = BTreeSet::from(["SinglePoint", "LULC_IGBP"]);
+        assert!(confirmed_gate(field, &doc, &single, true, reason));
+        // 没有内核或内核不是单点时，这条理由不能定论。
+        assert!(!confirmed_gate(field, &doc, &single, false, reason));
+        let spatial = BTreeSet::from(["GRIDBASED", "LULC_IGBP"]);
+        assert!(!confirmed_gate(field, &doc, &spatial, true, reason));
+        let vector = colm_schema::find("DEF_HISTORY_IN_VECTOR").unwrap();
+        let reason = Some("只有非结构网格内核写向量历史");
+        assert!(confirmed_gate(vector, &doc, &single, true, reason));
+        let unstructured = BTreeSet::from(["UNSTRUCTURED", "LULC_IGBP"]);
+        assert!(!confirmed_gate(vector, &doc, &unstructured, true, reason));
     }
 }

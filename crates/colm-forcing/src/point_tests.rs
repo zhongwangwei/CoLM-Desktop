@@ -310,3 +310,58 @@ fn boundary_layer_height_comes_from_its_own_file() {
     let error = load_point_forcing_with_boundary_layer(&main, Some(&shifted)).unwrap_err();
     assert!(format!("{error:#}").contains("time axis"), "{error:#}");
 }
+
+/// Urban-PLUMBER 把降水拆成 `Rainf` 与 `Snowf`。上游城市单点把两者相加进降水槽位
+/// （`MOD_Forcing.F90` 的 POINT 分支），非城市运行只读 `Rainf`。漏掉这一条时 AU-Preston
+/// 完整窗口在 1994-06-27 的一次微量降雪处与 Fortran 分叉（第 692 轮）。
+fn urban_point_file(dir: &Path, snowfall: bool) -> PathBuf {
+    let path = dir.join("point.nc");
+    let mut file = netcdf::create(&path).unwrap();
+    file.add_dimension("time", 2).unwrap();
+    file.add_dimension("y", 1).unwrap();
+    file.add_dimension("x", 1).unwrap();
+    let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+    time.put_attribute("units", "seconds since 2008-01-01 00:00:00")
+        .unwrap();
+    time.put_values(&[0.0, 1800.0], netcdf::Extents::All)
+        .unwrap();
+    put(&mut file, "Tair", "K", &[270.0, 271.0]);
+    put(&mut file, "Qair", "kg/kg", &[0.003, 0.003]);
+    put(&mut file, "PSurf", "Pa", &[100000.0, 100000.0]);
+    put(&mut file, "Rainf", "kg/m2/s", &[0.0, 1.0e-5]);
+    if snowfall {
+        put(
+            &mut file,
+            "Snowf",
+            "kg/m2/s",
+            &[3.286784533429454e-08, 2.0e-6],
+        );
+    }
+    put(&mut file, "Wind_E", "m/s", &[1.0, 1.0]);
+    put(&mut file, "Wind_N", "m/s", &[1.0, 1.0]);
+    put(&mut file, "SWdown", "W/m2", &[0.0, 10.0]);
+    put(&mut file, "LWdown", "W/m2", &[300.0, 300.0]);
+    path
+}
+
+#[test]
+fn urban_point_runs_add_snowfall_to_rainfall_like_upstream() {
+    let path = urban_point_file(&temp_dir("urban-snow"), true);
+    let rain_only = load_point_forcing_with_options(&path, None, false).unwrap();
+    let urban = load_point_forcing_with_options(&path, None, true).unwrap();
+    assert_eq!(rain_only.frame(0).unwrap().precipitation_kg_m2_s, 0.0);
+    assert_eq!(
+        urban.frame(0).unwrap().precipitation_kg_m2_s,
+        0.0 + 3.286784533429454e-08
+    );
+    assert_eq!(
+        urban.frame(1).unwrap().precipitation_kg_m2_s,
+        1.0e-5 + 2.0e-6
+    );
+
+    // 城市运行但文件没有 `Snowf`：上游读失败停机，这里同样报错，不悄悄只用 `Rainf`。
+    let missing = urban_point_file(&temp_dir("urban-snow-missing"), false);
+    assert!(load_point_forcing_with_options(&missing, None, false).is_ok());
+    let error = load_point_forcing_with_options(&missing, None, true).unwrap_err();
+    assert!(format!("{error:#}").contains("adds Snowf to Rainf"));
+}

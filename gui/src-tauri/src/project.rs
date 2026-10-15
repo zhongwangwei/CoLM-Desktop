@@ -102,6 +102,10 @@ pub struct CaseProfile {
     pub shapefile: Option<String>,
     /// 甲烷算例 CH4 参数文件里的淹没方案（`DEF_METHANE%inundation_mode`）。
     pub methane_mode: Option<String>,
+    /// 建例时选择的计算核心（rust / fortran）。
+    pub engine: Option<String>,
+    /// 自动匹配的观测文件（内置示例或数据集里的 Flux/clean_observations 观测文件）。
+    pub obs_file: Option<String>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -139,6 +143,12 @@ pub struct CaseRecord {
     pub domain: Option<String>,
     #[serde(default)]
     pub shapefile: Option<String>,
+    #[serde(default)]
+    pub engine: Option<String>,
+    #[serde(default)]
+    pub site: Option<String>,
+    #[serde(default)]
+    pub obs_file: Option<String>,
 }
 
 /// 建例成功后写下记录。写不出来不影响建例。
@@ -174,6 +184,146 @@ pub(crate) fn stage_case_classification(
     ))
 }
 
+pub(crate) fn companion_flux_from_met(met_file: &str) -> Option<String> {
+    for (_site_suffix, met_suffix, flux_suffix) in [
+        ("_site.nc", "_Met.nc", "_Flux.nc"),
+        (
+            "_site_v1.nc",
+            "_metforcing_v1.nc",
+            "_clean_observations_v1.nc",
+        ),
+    ] {
+        if let Some(stem) = met_file.strip_suffix(met_suffix) {
+            return Some(format!("{stem}{flux_suffix}"));
+        }
+    }
+    None
+}
+
+pub(crate) fn sibling(site: &Path, dir: &str, which: usize) -> Option<PathBuf> {
+    companion_name(site, which).and_then(|name| {
+        let p = site.parent()?.parent()?.join(dir).join(name);
+        p.is_file().then_some(p)
+    })
+}
+
+pub(crate) fn companion_name(site: &Path, which: usize) -> Option<String> {
+    let name = site.file_name()?.to_str()?;
+    for (site_suffix, met, flux) in [
+        ("_site.nc", "_Met.nc", "_Flux.nc"),
+        (
+            "_site_v1.nc",
+            "_metforcing_v1.nc",
+            "_clean_observations_v1.nc",
+        ),
+    ] {
+        if let Some(stem) = name.strip_suffix(site_suffix) {
+            return Some(format!("{stem}{}", if which == 0 { met } else { flux }));
+        }
+    }
+    None
+}
+
+pub fn case_default_observation(case_dir: &Path, record: &CaseRecord) -> Option<String> {
+    if let Some(obs) = &record.obs_file {
+        if Path::new(obs).is_file() {
+            return Some(obs.clone());
+        }
+    }
+    if let Some(site) = &record.site {
+        let site_p = Path::new(site);
+        if let Some(obs) = sibling(site_p, "Observation", 1) {
+            if obs.is_file() {
+                return Some(obs.display().to_string());
+            }
+        }
+    }
+
+    let forcing_nml = case_dir.join("forcing.nml");
+    if let Ok(content) = std::fs::read_to_string(&forcing_nml) {
+        if let Ok(doc) = colm_namelist::parse(&content) {
+            let dir_val = doc.get("DEF_dir_forcing").and_then(|v| match v {
+                colm_namelist::Value::Str(s) => Some(s.clone()),
+                _ => None,
+            });
+            let file_val = doc.get("DEF_forcing%fprefix(1)").and_then(|v| match v {
+                colm_namelist::Value::Str(s) => Some(s.clone()),
+                _ => None,
+            });
+            if let (Some(f_dir), Some(f_file)) = (dir_val, file_val) {
+                if let Some(flux_name) = companion_flux_from_met(&f_file) {
+                    let obs_path = Path::new(&f_dir)
+                        .parent()
+                        .map(|p| p.join("Observation").join(&flux_name));
+                    if let Some(p) = obs_path {
+                        if p.is_file() {
+                            return Some(p.display().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut candidate_dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(p) = std::env::var("COLM_EXAMPLES") {
+        candidate_dirs.push(PathBuf::from(p).join("Observation"));
+    }
+    candidate_dirs
+        .push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/Observation"));
+    if let Ok(home) = std::env::var("HOME") {
+        candidate_dirs.push(
+            PathBuf::from(&home)
+                .join("Library/Application Support/rw.81052.CoLM Desktop/examples/Observation"),
+        );
+        candidate_dirs.push(
+            PathBuf::from(&home)
+                .join("Library/Application Support/CoLM Desktop/examples/Observation"),
+        );
+        candidate_dirs.push(
+            PathBuf::from(&home).join(".local/share/rw.81052.CoLM Desktop/examples/Observation"),
+        );
+    }
+
+    let case_name = case_dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    for obs_dir in candidate_dirs {
+        if !obs_dir.is_dir() {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(&obs_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() {
+                    continue;
+                }
+                let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if fname.starts_with('.') || !fname.ends_with(".nc") {
+                    continue;
+                }
+                let stem = fname.split('_').next().unwrap_or("");
+                if !stem.is_empty()
+                    && (case_name == stem
+                        || case_name.starts_with(&format!("{stem}-"))
+                        || case_name.starts_with(&format!("{stem}_")))
+                {
+                    return Some(path.display().to_string());
+                }
+            }
+        }
+    }
+
+    let site_nc = case_dir.join("site.nc");
+    if site_nc.is_file() {
+        if let Some(obs) = sibling(&site_nc, "Observation", 1) {
+            if obs.is_file() {
+                return Some(obs.display().to_string());
+            }
+        }
+    }
+
+    None
+}
+
 fn recorded_case(dir: &Path) -> CaseRecord {
     std::fs::read_to_string(dir.join(PROFILE_FILE))
         .ok()
@@ -207,8 +357,10 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
         stages.as_deref(),
         record.mode.as_deref(),
     )?;
+    profile.obs_file = case_default_observation(&dir, &record);
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
+    profile.engine = record.engine;
     let doc = colm_namelist::parse(&text).ok();
     profile.methane_mode = doc
         .as_ref()
@@ -414,6 +566,8 @@ pub(crate) fn case_profile(
         domain_kind: None,
         shapefile: None,
         methane_mode: None,
+        engine: None,
+        obs_file: None,
     })
 }
 

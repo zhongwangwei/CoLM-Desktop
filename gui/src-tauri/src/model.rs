@@ -168,13 +168,27 @@ pub async fn model_freeze(
     }
     decode(cli(args).await?)
 }
+/// `target` 给出时把算例绑到这个版本（已迁移的算例就是改绑）：界面上为算例选的版本
+/// 要跟着算例走，重启后仍是它（第 692 轮：原先只是应用级选择，重启后静默回到官方版）。
 #[tauri::command]
-pub async fn model_migrate_case(dir: String) -> Result<CaseBinding, String> {
-    let binding = decode(cli(vec!["model-migrate-case".into(), dir.clone()]).await?)?;
+pub async fn model_migrate_case(
+    dir: String,
+    target: Option<VersionRef>,
+) -> Result<CaseBinding, String> {
+    let mut args = vec!["model-migrate-case".to_string(), dir.clone()];
+    if let Some(target) = target {
+        args.extend([
+            "--model-id".into(),
+            target.id,
+            "--model-revision".into(),
+            target.revision.to_string(),
+        ]);
+    }
+    // Import failures must not leave a changed binding on a case that cannot start.
     colm_history::History::open_default()
         .and_then(|h| h.import_case(&dir))
-        .map_err(|e| format!("case migration succeeded, but importing its history failed: {e}"))?;
-    Ok(binding)
+        .map_err(|e| format!("cannot import case history before migration: {e}"))?;
+    decode(cli(args).await?)
 }
 #[tauri::command]
 pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
@@ -265,7 +279,7 @@ pub(crate) async fn model_case_context_with_fields(
     let source = crate::project::open_case(dir.clone())?;
     let version = match model_revision {
         Some(v) => v,
-        None => model_migrate_case(dir.clone()).await?.version,
+        None => model_migrate_case(dir.clone(), None).await?.version,
     };
     let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
     let parent = root()?.join("previews");
@@ -408,6 +422,65 @@ pub async fn model_attach_network(
 mod tests {
     use super::*;
     #[test]
+    fn migration_import_failure_preserves_binding() {
+        if let Some(dir) = std::env::var_os("COLM_TEST_MIGRATION_CASE") {
+            let dir = PathBuf::from(dir);
+            let binding = std::fs::read(dir.join(colm_model::BINDING_FILE)).unwrap();
+            let error = tauri::async_runtime::block_on(model_migrate_case(
+                dir.display().to_string(),
+                Some(VersionRef {
+                    id: "chosen".into(),
+                    revision: 2,
+                }),
+            ))
+            .unwrap_err();
+            assert!(
+                error.starts_with("cannot import case history before migration:"),
+                "{error}"
+            );
+            assert_eq!(
+                std::fs::read(dir.join(colm_model::BINDING_FILE)).unwrap(),
+                binding
+            );
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!(
+            "colm-migration-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(dir.join(".colm")).unwrap();
+        std::fs::write(dir.join("case.nml"), "&nl_colm\n/\n").unwrap();
+        std::fs::write(
+            dir.join(colm_model::BINDING_FILE),
+            br#"{"version":{"id":"old","revision":1}}"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join(".colm/runs.jsonl"), "not JSON\n").unwrap();
+        // Isolate the history database without changing the parent test process environment.
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "model::tests::migration_import_failure_preserves_binding",
+                "--nocapture",
+            ])
+            .env("COLM_TEST_MIGRATION_CASE", &dir)
+            .env("COLM_HISTORY_DB", dir.join("history.sqlite"))
+            .output()
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn model_preview_keeps_case_owned_classification_and_runtime_structure() {
         let directory = std::env::temp_dir().join(format!(
             "colm-preview-classification-{}-{}",
@@ -430,6 +503,8 @@ mod tests {
                 mode: Some("usgs".into()),
                 domain: Some("watershed".into()),
                 shapefile: Some("/input/watershed.shp".into()),
+                engine: None,
+                ..Default::default()
             },
         );
         let registry = Registry::open(directory.join("registry")).unwrap();

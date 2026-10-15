@@ -264,6 +264,8 @@ fn the_creation_record_round_trips() {
         mode: Some("usgs".into()),
         domain: Some("watershed".into()),
         shapefile: Some("/d/basin.shp".into()),
+        engine: None,
+        ..Default::default()
     };
     record_case(&dir.to_string_lossy(), &record);
     assert_eq!(recorded_case(&dir), record);
@@ -286,4 +288,29 @@ fn opened_meshes_keep_their_files_and_no_implied_global_domain() {
     let catch = "&nl_colm\n DEF_CASE_NAME = 'c'\n DEF_CatchmentMesh_data = '/d/basins.nc'\n/\n";
     let p = case_profile(catch, true, None, None).expect("profile");
     assert_eq!(p.catchment_file.as_deref(), Some("/d/basins.nc"));
+}
+
+#[test]
+fn default_observation_matches_site_and_forcing() {
+    let root = tmp("default-obs");
+    let dir = make_case(&root, "obs-case", "CN-Cng");
+    let data_root = root.join("dataset");
+    let forcing_dir = data_root.join("Forcing");
+    let obs_dir = data_root.join("Observation");
+    std::fs::create_dir_all(&forcing_dir).unwrap();
+    std::fs::create_dir_all(&obs_dir).unwrap();
+    let obs_file = obs_dir.join("CN-Cng_2008-2009_FLUXNET2015_Flux.nc");
+    std::fs::write(&obs_file, b"netcdf").unwrap();
+
+    let forcing_nml = format!(
+        "&nl_colm_forcing\n DEF_dir_forcing = '{}'\n DEF_forcing%fprefix(1) = 'CN-Cng_2008-2009_FLUXNET2015_Met.nc'\n/\n",
+        forcing_dir.display()
+    );
+    std::fs::write(dir.join("forcing.nml"), forcing_nml).unwrap();
+
+    let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
+    assert_eq!(
+        opened.profile.obs_file.as_deref(),
+        Some(obs_file.to_str().unwrap())
+    );
 }

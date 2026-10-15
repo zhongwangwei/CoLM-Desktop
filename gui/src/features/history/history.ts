@@ -10,8 +10,7 @@ export type Filter = {
   status: string;
   from: string;
   to: string;
-  /** '1' also lists routine bookkeeping (autosaves, draft saves, binding checks). */
-  includeRoutine: string;
+  includeRoutine?: boolean;
 };
 export const emptyFilter: Filter = {
   query: '',
@@ -22,38 +21,34 @@ export const emptyFilter: Filter = {
   status: '',
   from: '',
   to: '',
-  includeRoutine: '',
+  includeRoutine: false,
 };
+export const appLocale = (en = false) => (en ? 'en-US' : 'zh-CN');
 export function historyFilter(filter: Filter, offset = 0, limit = 30) {
   const result: Record<string, string | number | boolean> = { offset, limit };
   for (const [key, value] of Object.entries(filter)) {
-    if (!value) continue;
-    if (key === 'includeRoutine') {
-      result.includeRoutine = value === '1';
-    } else if (key === 'from' || key === 'to') {
-      const time = new Date(value).getTime();
+    if (value === undefined || value === '' || value === null) continue;
+    if (key === 'from' || key === 'to') {
+      const time = new Date(value as string).getTime();
       if (!Number.isFinite(time)) throw new Error('Invalid date');
       result[key] = time;
+    } else if (key === 'includeRoutine') {
+      if (value) result.includeRoutine = true;
     } else result[key] = value;
   }
   if (typeof result.from === 'number' && typeof result.to === 'number' && result.from > result.to)
     throw new Error('Start is after end');
   return result;
 }
-/** Dates follow the app language, not the operating system's locale. */
-function appLocale() {
-  const lang = globalThis.document?.documentElement?.lang;
-  return lang === 'en' ? 'en-GB' : 'zh-CN';
-}
-export function dayGroups(items: HistoryOperation[]) {
+export function dayGroups(items: HistoryOperation[], en = false) {
   const groups = new Map<string, HistoryOperation[]>();
   for (const item of items) {
     const day =
       item.time_ms == null
-        ? appLocale() === 'zh-CN'
-          ? '未知日期'
-          : 'Unknown date'
-        : new Date(item.time_ms).toLocaleDateString(appLocale());
+        ? en
+          ? 'Unknown date'
+          : '未知日期'
+        : new Date(item.time_ms).toLocaleDateString(appLocale(en));
     groups.set(day, [...(groups.get(day) ?? []), item]);
   }
   return [...groups];
@@ -195,7 +190,7 @@ function historyEvidence(detail: HistoryDetail) {
     detail.operation.detail,
   ) as Record<string, unknown>;
 }
-export function historySections(detail: HistoryDetail): HistorySection[] {
+export function historySections(detail: HistoryDetail, en = false): HistorySection[] {
   const operation = detail.operation,
     evidence = historyEvidence(detail),
     provenance = object(evidence.provenance),
@@ -212,13 +207,13 @@ export function historySections(detail: HistoryDetail): HistorySection[] {
         .reverse()
         .map((e) => object(e).command)
         .find((c) => c && typeof c === 'object');
-  const row = (zh: string, en: string, value: unknown): HistoryRow => ({
+  const row = (zh: string, enText: string, value: unknown): HistoryRow => ({
       zh,
-      en,
+      en: enText,
       value: text(value),
     }),
     time = (value: number | null) =>
-      value == null ? null : new Date(value).toLocaleString(appLocale());
+      value == null ? null : new Date(value).toLocaleString(appLocale(en));
   const inputRows = Object.entries(object(run.inputs))
     .slice(0, 24)
     .map(([name, hash]) => row(name, name, hash));
@@ -229,7 +224,7 @@ export function historySections(detail: HistoryDetail): HistorySection[] {
       rows: [
         row('类型', 'Kind', operation.kind),
         row('状态', 'Status', operation.status),
-        row('阶段', 'Phase', operation.phase),
+        row('阶段', 'Phase', historyPhaseLabel(operation.phase, en)),
         row('退出码', 'Exit code', status.exit_code ?? evidence.exit_code),
         row('开始时间', 'Started', time(operation.started_ms)),
         row('结束时间', 'Finished', time(operation.finished_ms)),
@@ -361,7 +356,7 @@ export function historyReferences(
     for (const path of run.artifact_paths.slice(0, 24)) add('产物', 'Artifact', path);
   return references;
 }
-export function historyEvents(detail: HistoryDetail): HistoryRow[][] {
+export function historyEvents(detail: HistoryDetail, en = false): HistoryRow[][] {
   return detail.events.map((event) => {
     const e = object(event),
       evidence = object(e.detail);
@@ -370,10 +365,10 @@ export function historyEvents(detail: HistoryDetail): HistoryRow[][] {
         zh: '时间',
         en: 'Time',
         value:
-          typeof e.time_ms === 'number' ? new Date(e.time_ms).toLocaleString(appLocale()) : null,
+          typeof e.time_ms === 'number' ? new Date(e.time_ms).toLocaleString(appLocale(en)) : null,
       },
-      { zh: '阶段', en: 'Phase', value: text(e.phase) },
-      { zh: '状态', en: 'Status', value: text(e.status) },
+      { zh: '阶段', en: 'Phase', value: historyPhaseLabel(text(e.phase) ?? '', en) },
+      { zh: '状态', en: 'Status', value: historyStatusLabel(text(e.status) ?? '', en) },
       { zh: '操作', en: 'Action', value: text(evidence.action ?? e.kind) },
       { zh: '错误', en: 'Error', value: text(evidence.error) },
     ];
@@ -463,6 +458,20 @@ export function historyStatusLabel(status: string, en = false): string {
     unknown: ['未知', 'Unknown'],
   };
   return labels[status]?.[en ? 1 : 0] ?? status;
+}
+export function historyPhaseLabel(phase?: string | null, en = false): string {
+  if (!phase) return '';
+  const labels: Record<string, [string, string]> = {
+    started: ['已启动', 'Started'],
+    status: ['状态更新', 'Status update'],
+    finished: ['已结束', 'Finished'],
+    imported: ['已导入', 'Imported'],
+    mksrfdata: ['地表数据', 'Surface data'],
+    mkinidata: ['初始条件', 'Initial conditions'],
+    colm: ['主模型计算', 'Simulation'],
+    submit: ['已提交', 'Submitted'],
+  };
+  return labels[phase.toLowerCase()]?.[en ? 1 : 0] ?? phase;
 }
 export function historyObject(operation: HistoryOperation): string {
   return (

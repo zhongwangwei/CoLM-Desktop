@@ -9,6 +9,7 @@ import {
   scannedForcing,
   newCaseProblem,
   newCaseRangeProblem,
+  newCaseGeneralProblem,
   simulationFields,
   caseRangeKeys,
   simulationSteps,
@@ -17,9 +18,11 @@ import {
 } from './simulation-model';
 import type { SchemaField, Site } from './case-model';
 const form = {
+  engine: 'rust',
   root: '/project',
   name: 'CN-Cng',
   kind: 'site',
+  landcover: 'IGBP',
   site: '/site.nc',
   met: '/met.nc',
   start: '2008-01-01',
@@ -48,11 +51,11 @@ test('dates reject calendar errors and edit only the selected date without reset
   assert.equal(caseDate({}, 'end'), '');
 });
 test('review rejects missing input, impossible dates, incompatible model and forcing coverage', () => {
-  assert.equal(newCaseProblem(form, 2, undefined, {}), null);
-  assert.equal(newCaseProblem({ ...form, end: form.start }, 1, undefined, {}), null);
-  assert.ok(newCaseProblem({ ...form, end: '2007-12-31' }, 1, undefined, {}));
-  assert.ok(newCaseProblem({ ...form, met: '' }, 2, undefined, {}));
-  assert.ok(newCaseProblem(form, 2, undefined, { DEF_USE_BGC: '.true.' }));
+  assert.equal(newCaseProblem(form, 3, undefined, {}), null);
+  assert.equal(newCaseProblem({ ...form, end: form.start }, 3, undefined, {}), null);
+  assert.ok(newCaseProblem({ ...form, end: '2007-12-31' }, 3, undefined, {}));
+  assert.ok(newCaseProblem({ ...form, met: '' }, 3, undefined, {}));
+  assert.ok(newCaseProblem(form, 3, undefined, { DEF_USE_BGC: '.true.' }));
   const site = {
     site_file: form.site,
     met_file: form.met,
@@ -62,12 +65,19 @@ test('review rejects missing input, impossible dates, incompatible model and for
     end: '2008-01-10',
     problem: null,
   } as Site;
-  assert.ok(newCaseProblem(form, 2, site, {}));
-  assert.ok(newCaseProblem(form, 2, { ...site, end: form.end, crop: true }, {}));
-  assert.equal(newCaseProblem(form, 2, { ...site, end: form.end }, {}), null);
+  assert.ok(newCaseProblem(form, 3, site, {}));
+  assert.ok(newCaseProblem(form, 3, { ...site, end: form.end, crop: true }, {}));
+  assert.equal(newCaseProblem(form, 3, { ...site, end: form.end }, {}), null);
   assert.equal(scannedForcing(site, form.met), true);
   assert.equal(scannedForcing(site, '/other.nc'), false);
-  assert.equal(newCaseProblem({ ...form, met: '/other.nc' }, 2, site, {}), null);
+  assert.equal(newCaseProblem({ ...form, met: '/other.nc' }, 3, site, {}), null);
+});
+test('general setup enforces engine, root, and name', () => {
+  assert.equal(newCaseGeneralProblem(form), null);
+  assert.ok(newCaseGeneralProblem({ ...form, engine: '' }));
+  assert.ok(newCaseGeneralProblem({ ...form, root: '' }));
+  assert.ok(newCaseGeneralProblem({ ...form, name: '' }));
+  assert.ok(newCaseGeneralProblem({ ...form, name: '..' }));
 });
 test('existing intra-day and midnight windows compare their actual seconds', () => {
   const values = {
@@ -105,8 +115,8 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
     forcing: '/forcing.nml',
     timestep: '1800',
   };
-  assert.equal(newCaseProblem(spatial, 2, undefined, {}), null);
-  assert.equal(newCaseProblem({ ...spatial, west: '170', east: '-170' }, 2, undefined, {}), null);
+  assert.equal(newCaseProblem(spatial, 3, undefined, {}), null);
+  assert.equal(newCaseProblem({ ...spatial, west: '170', east: '-170' }, 3, undefined, {}), null);
   assert.equal(
     newCaseProblem(
       {
@@ -118,7 +128,7 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
         south: '',
         north: '',
       },
-      2,
+      3,
       undefined,
       {},
     ),
@@ -135,7 +145,7 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
         south: '',
         north: '',
       },
-      2,
+      3,
       undefined,
       {},
     ),
@@ -152,7 +162,7 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
     { kind: 'watershed', shapefile: '' },
   ];
   for (const change of changes)
-    assert.ok(newCaseProblem({ ...spatial, ...change }, 2, undefined, {}));
+    assert.ok(newCaseProblem({ ...spatial, ...change }, 3, undefined, {}));
 });
 test('five steps expose data, model and output separately without dropping advanced fields', () => {
   const field = (name: string, section: string) => ({ name, section }) as SchemaField;
@@ -166,39 +176,43 @@ test('five steps expose data, model and output separately without dropping advan
     field('DEF_Forcing_Interp_Method', '强迫场'),
     field('DEF_USE_RangeCheck', '调试与诊断'),
     field('DEF_nx_blocks', '网格与并行'),
+    field('DEF_domain%latlon_dlon', '网格与并行'),
   ];
   assert.deepEqual(
     simulationSteps.map((step) => step[0]),
-    ['范围与网格', '模型结构与方案', '数据与时段', '预热与输出', '检查与运行'],
+    ['总的设定', '范围与网格', '数据与时段', '模型结构与方案', '检查与运行'],
   );
   assert.deepEqual(simulationFields(schema, 1, false), []);
+  assert.deepEqual(simulationFields(schema, 1, true), []);
+  assert.deepEqual(simulationFields(schema, 2, true, 'rust'), []);
   assert.deepEqual(
-    simulationFields(schema, 1, true).map((f) => f.name),
-    ['DEF_nx_blocks'],
+    simulationFields(schema, 2, true, 'fortran').map((f) => f.name),
+    ['DEF_domain%latlon_dlon'],
   );
+  // 预热（起止与重复次数）与模拟时段同在“数据与时段”这一步。
   assert.deepEqual(
     simulationFields(schema, 3, false).map((f) => f.name),
-    ['DEF_forcing_namelist'],
+    ['DEF_simulation_time%spinup_repeat', 'DEF_forcing_namelist'],
   );
   assert.deepEqual(
     simulationFields(schema, 3, true).map((f) => f.name),
-    ['DEF_simulation_time%start_sec', 'DEF_forcing_namelist', 'DEF_Forcing_Interp_Method'],
-  );
-  assert.deepEqual(
-    simulationFields(schema, 4, false).map((f) => f.name),
-    ['DEF_simulation_time%spinup_repeat', 'DEF_HIST_FREQ'],
-  );
-  assert.deepEqual(
-    simulationFields(schema, 4, true).map((f) => f.name),
     [
+      'DEF_simulation_time%start_sec',
       'DEF_simulation_time%spinup_repeat',
-      'DEF_HIST_FREQ',
-      'DEF_hist_vars%tref',
-      'DEF_USE_RangeCheck',
+      'DEF_forcing_namelist',
+      'DEF_Forcing_Interp_Method',
     ],
   );
-  assert.deepEqual(simulationFields(schema, 2, true), []);
-  assert.deepEqual(simulationFields(schema, 5, true), []);
+  assert.deepEqual(simulationFields(schema, 4, true), []);
+  assert.deepEqual(
+    simulationFields(schema, 5, false).map((f) => f.name),
+    ['DEF_HIST_FREQ'],
+  );
+  assert.deepEqual(
+    simulationFields(schema, 5, true).map((f) => f.name),
+    // 历史开关交给输出变量卡片，不再混在“更多配置”的通用字段里。
+    ['DEF_HIST_FREQ', 'DEF_USE_RangeCheck'],
+  );
 });
 test('range selection can precede dates; years stay exact and spinup uses a cutoff', () => {
   assert.equal(newCaseRangeProblem({ ...form, start: '', end: '' }), null);

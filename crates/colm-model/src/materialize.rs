@@ -733,21 +733,40 @@ fn rewrite_case_paths(doc: &mut Document, source: &Path, destination: &Path) -> 
                     } else {
                         path
                     };
+                    let trailing = text.ends_with(['/', '\\']);
                     doc.set(
                         &key,
-                        Value::Str(path.canonicalize()?.to_string_lossy().into_owned()),
+                        Value::Str(with_trailing_separator(
+                            path.canonicalize()?.to_string_lossy().into_owned(),
+                            trailing,
+                        )),
                     )?;
                 }
             }
         }
     }
-    if doc.get("DEF_dir_output").is_some() {
+    if let Some(value) = doc.get("DEF_dir_output") {
+        let trailing = matches!(value, Value::Str(text) if text.ends_with(['/', '\\']));
         doc.set(
             "DEF_dir_output",
-            Value::Str(destination.join("out").to_string_lossy().into_owned()),
+            Value::Str(with_trailing_separator(
+                destination.join("out").to_string_lossy().into_owned(),
+                trailing,
+            )),
         )?;
     }
     Ok(())
+}
+
+/// 规范化会去掉目录结尾的分隔符，而 Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)`
+/// 直接拼接（`MOD_UserSpecifiedForcing.F90`），少了它就拼出 `.../ForcingCN-Cng_...nc`。
+/// 实测：GUI 里用 Fortran 引擎跑内置 CN-Cng 在 colm 阶段 `STOP 1`；Rust 用路径拼接所以没暴露。
+/// 原值带结尾分隔符时原样保留。
+fn with_trailing_separator(mut path: String, trailing: bool) -> String {
+    if trailing && !path.ends_with(std::path::MAIN_SEPARATOR) {
+        path.push(std::path::MAIN_SEPARATOR);
+    }
+    path
 }
 
 struct MigrationLock(PathBuf);

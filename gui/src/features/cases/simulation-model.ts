@@ -3,10 +3,10 @@ import { caseDirectory, siteVersionMismatch, type SchemaField, type Site } from 
 
 export type SimulationStep = 1 | 2 | 3 | 4 | 5;
 export const simulationSteps = [
+  ['总的设定', 'General setup'],
   ['范围与网格', 'Range and grid'],
-  ['模型结构与方案', 'Model structure and schemes'],
   ['数据与时段', 'Data and period'],
-  ['预热与输出', 'Spinup and output'],
+  ['模型结构与方案', 'Model structure and schemes'],
   ['检查与运行', 'Review and run'],
 ] as const;
 export function validDate(value: string): boolean {
@@ -95,43 +95,76 @@ export const primaryDataFields = [
   'DEF_dir_rawdata',
   'DEF_dir_runtime',
   'DEF_dir_existing_srfdata',
+  // 预热与模拟时段同属“数据与时段”这一步，不在输出步骤重复出现。
+  'DEF_simulation_time%spinup_repeat',
 ];
 export const primaryOutputFields = [
   'DEF_simulation_time%timestep',
   'DEF_simulation_time%greenwich',
-  'DEF_simulation_time%spinup_repeat',
-  'DEF_dir_output',
   'DEF_HIST_FREQ',
-  'DEF_HIST_groupby',
   'DEF_WRST_FREQ',
 ];
-export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>): 1 | 3 | 4 {
-  if (field.section === '网格与并行' || /^DEF_domain%/.test(field.name)) return 1;
+export const legacyMpiFields = [
+  'DEF_nx_blocks',
+  'DEF_ny_blocks',
+  'DEF_PIO_groupsize',
+  'DEF_nIO_eq_nBlock',
+  'DEF_BlockInfoFile',
+];
+export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>): 2 | 3 | 5 {
+  if (field.section === '网格与并行' || /^DEF_domain%/.test(field.name)) return 2;
   if (field.name.startsWith('DEF_simulation_time%'))
-    return /%(start|end)_(year|month|day|sec)$/.test(field.name) ? 3 : 4;
-  return ['输出与重启', '输出变量', '调试与诊断'].includes(field.section) ? 4 : 3;
+    return /%(start|end|spinup)_/.test(field.name) ? 3 : 5;
+  return ['输出与重启', '输出变量', '调试与诊断'].includes(field.section) ? 5 : 3;
 }
 export function simulationFields(
   schema: SchemaField[],
   step: SimulationStep,
   advanced: boolean,
+  engine: string = 'rust',
 ): SchemaField[] {
-  if (step === 2 || step === 5) return [];
+  if (step === 1 || step === 4) return [];
+  if (step === 2) {
+    if (engine === 'rust' || !advanced) return [];
+    return schema.filter((f) => simulationFieldStep(f) === 2 && !legacyMpiFields.includes(f.name));
+  }
   return schema.filter(
     (f) =>
-      !['DEF_USE_LCT', 'DEF_USE_PFT', 'DEF_USE_PC', 'DEF_SUBGRID_SCHEME'].includes(f.name) &&
+      ![
+        'DEF_USE_LCT',
+        'DEF_USE_PFT',
+        'DEF_USE_PC',
+        'DEF_SUBGRID_SCHEME',
+        'DEF_dir_output',
+      ].includes(f.name) &&
       simulationFieldStep(f) === step &&
+      !legacyMpiFields.includes(f.name) &&
       !/^DEF_simulation_time%(start|end|spinup)_(year|month|day)$/.test(f.name) &&
-      (advanced || (step === 4 ? primaryOutputFields : primaryDataFields).includes(f.name)),
+      // 预热只以日期界定；“预热截止秒”含义易混，不再单独暴露。
+      f.name !== 'DEF_simulation_time%spinup_sec' &&
+      // 历史开关由输出变量卡片管理；“默认输出历史变量”这一同步规则与卡片选择重复。
+      // DEF_HIST_mode 不在此处屏蔽：单点由后端隐藏，只有空间 Fortran 引擎才真有 'block' 可选。
+      !['DEF_HIST_vars_out_default', 'DEF_HIST_vars_namelist'].includes(f.name) &&
+      !f.name.startsWith('DEF_hist_vars%') &&
+      (advanced || (step === 5 ? primaryOutputFields : primaryDataFields).includes(f.name)),
   );
 }
-export function newCaseRangeProblem(form: Record<string, string>, en = false): string | null {
+export function newCaseGeneralProblem(form: Record<string, string>, en = false): string | null {
   const t = (zh: string, english: string) => (en ? english : zh);
+  if (!form.engine?.trim() || !['rust', 'fortran'].includes(form.engine))
+    return t('请选择计算核心。', 'Choose a computation core.');
+  if (!form.root?.trim())
+    return t('请选择保存模拟的项目目录。', 'Choose a project folder for this simulation.');
+  if (!form.name?.trim()) return t('请填写模拟名称。', 'Enter a simulation name.');
   try {
-    caseDirectory(form.root || '.', form.name);
+    caseDirectory(form.root, form.name);
   } catch {
     return t('请填写有效的模拟名称。', 'Enter a valid simulation name.');
   }
+  return null;
+}
+export function newCaseRangeProblem(form: Record<string, string>, en = false): string | null {
+  const t = (zh: string, english: string) => (en ? english : zh);
   if (
     !['site', 'region', 'watershed', 'global'].includes(form.kind) ||
     (form.kind !== 'site' && !['latlon', 'unstructured', 'catchment'].includes(form.grid))
@@ -192,54 +225,69 @@ export function spinupProblem(
 }
 export function newCaseProblem(
   form: Record<string, string>,
-  step: 1 | 2,
+  step: SimulationStep,
   site: Site | undefined,
   physics: Record<string, string>,
   en = false,
 ): string | null {
   const t = (zh: string, english: string) => (en ? english : zh);
+  const generalProblem = newCaseGeneralProblem(form, en);
+  if (generalProblem) return generalProblem;
+  if (step === 1) return null;
   const rangeProblem = newCaseRangeProblem(form, en);
   if (rangeProblem) return rangeProblem;
-  if (!validDate(form.start) || !validDate(form.end) || form.end < form.start)
-    return t(
-      '请填写有效时段，结束日期不能早于开始日期。',
-      'Choose valid dates with the end on or after the start.',
-    );
-  if (step === 1) return null;
-  if (!form.root.trim())
-    return t('请选择保存模拟的项目目录。', 'Choose a project folder for this simulation.');
-  if (form.kind === 'site') {
-    if (!form.site || !form.met)
-      return t('请选择站点文件与强迫场文件。', 'Choose the site and forcing files.');
-    if (site?.problem && site.met_file === form.met) return site.problem;
-    const mismatch = site ? siteVersionMismatch(site, physics) : null;
-    if (mismatch) return mismatch;
-    if (
-      site &&
-      scannedForcing(site, form.met) &&
-      (form.start < site.start! || form.end > site.end!)
-    )
+  if (step === 2) return null;
+  if (step >= 3) {
+    if (!validDate(form.start) || !validDate(form.end) || form.end < form.start)
       return t(
-        '模拟时段超出已扫描的强迫场覆盖。',
-        'The period exceeds the scanned forcing coverage.',
+        '请填写有效时段，结束日期不能早于开始日期。',
+        'Choose valid dates with the end on or after the start.',
       );
-    if (/^(true|\.true\.|1)$/i.test(physics.DEF_USE_BGC ?? '') && !form.runtime)
-      return t(
-        '当前模型需要 Runtime 数据目录，请展开高级配置。',
-        'This model requires runtime data; open Advanced settings.',
-      );
-  } else {
-    if (!form.rawdata || !form.runtime || !form.forcing)
-      return t(
-        '请提供地表数据、Runtime 数据与强迫场配置。',
-        'Provide surface data, runtime data and forcing configuration.',
-      );
-    if (
-      !form.timestep?.trim() ||
-      !Number.isFinite(Number(form.timestep)) ||
-      Number(form.timestep) <= 0
-    )
-      return t('时间步长须为正数。', 'The time step must be positive.');
+    if (form.kind === 'site') {
+      if (!form.site || !form.met)
+        return t('请选择站点文件与强迫场文件。', 'Choose the site and forcing files.');
+      if (site?.problem && site.met_file === form.met) return site.problem;
+      const mismatch = site ? siteVersionMismatch(site, physics) : null;
+      if (mismatch) return mismatch;
+      if (
+        site &&
+        scannedForcing(site, form.met) &&
+        (form.start < site.start! || form.end > site.end!)
+      )
+        return t(
+          '模拟时段超出已扫描的强迫场覆盖。',
+          'The period exceeds the scanned forcing coverage.',
+        );
+      if (/^(true|\.true\.|1)$/i.test(physics.DEF_USE_BGC ?? '') && !form.runtime)
+        return t(
+          '当前模型需要 Runtime 数据目录，请展开高级配置。',
+          'This model requires runtime data; open Advanced settings.',
+        );
+    } else {
+      if (!form.rawdata || !form.runtime || !form.forcing)
+        return t(
+          '请提供地表数据、Runtime 数据与强迫场配置。',
+          'Provide surface data, runtime data and forcing configuration.',
+        );
+      if (
+        !form.timestep?.trim() ||
+        !Number.isFinite(Number(form.timestep)) ||
+        Number(form.timestep) <= 0
+      )
+        return t('时间步长须为正数。', 'The time step must be positive.');
+    }
   }
-  return null;
+  if (step === 3) return null;
+  if (step >= 4) {
+    if (!['IGBP', 'USGS'].includes(form.landcover))
+      return t('请选择 IGBP 或 USGS 地表分类。', 'Choose IGBP or USGS land-cover classification.');
+  }
+  if (step === 4) return null;
+  return spinupProblem(
+    form.start,
+    form.end,
+    form.spinup_end,
+    physics['DEF_simulation_time%spinup_repeat'] ?? '1',
+    en,
+  );
 }

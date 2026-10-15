@@ -33022,3 +33022,291 @@ T7920 恢复连接（`7920ts`、`7920mp` 都通）。`remote-probe`：Ubuntu 26.
 
 
 de42a287新CI完整CLI测试376项通过、2项失败：数据比较指纹错误复用模型字段归属，以及远程内核测试旧版本开关fixture。修复将数据比较投影与存储所有权解耦；完整配置身份、全部输入文件哈希和评估时段/输出采样仍保留。远程测试使用真实USGS地类系数和CROP PFT参数验证实际内核能力，旧算例标志不再决定版本要求。新增/定向指纹9项和远程内核1项通过，CLI Clippy（tests，-D warnings）、格式与独立复审通过。
+
+
+## 第 692 轮：全量编译与从 GUI 起的全链条测试（2026-10-15）
+
+**做法**：worktree `claude/full-compile-test-2a8124`（基于 `85a96e79`），全新 target 目录全部重编。GUI 端到端在**真实原生窗口**里做，不靠组件测试。
+
+- 原生窗口怎么驱动：本机 `osascript` 没有辅助功能权限（`-1728`），macOS 上 Tauri 也没有 WebDriver。新增 `gui/src-tauri/src/e2e_driver.rs`（feature `e2e-driver`，默认不编）：设了 `COLM_E2E_PORT` 才在 127.0.0.1 开端口，收到 JS 用 `webview.eval` 在真实 WKWebView 里执行，结果经事件 `e2e://result` 回传；客户端 `scripts/gui-e2e.py`。否决了 MockRuntime 方案：69 处命令写死了 Wry 的 `tauri::AppHandle`，且测的不是真窗口。正式包用 `nm`/`strings` 核对过没有驱动代码。
+- 用隔离 `HOME`（`/private/tmp/claude-501/ce2e`）跑，`~/CoLM-cases` 与 `Application Support` 都不碰真实数据。`screencapture -l` 会弹系统屏幕录制授权框，之后只读 DOM，不截屏。
+
+**编译**（全部 exit 0）：
+- 五套内核 `default usgs crop latlon unstructured`，各 140–163 s，`colm_git_sha = f59ffdce`。
+- 引擎 workspace `cargo build --workspace --all-targets` 65 s；`xtask stage-sidecar` 六个 release sidecar 324 s。
+- 原生包 `cargo tauri build --config tauri.bundle.conf.json --bundles app` 231 s；包内 colm-cli 与 staged 逐字节相同。
+
+**闸门**：
+- 引擎：fmt、clippy `-D warnings` 干净；`cargo test --workspace --no-fail-fast -- --test-threads=1` 2557 通过、13 失败、25 忽略。13 项全部是数据缺失：`colm-forcing` 的 `met`/`real_forcing` 找不到 PLUMBER2，`colm-srfdata` 的 `raster`/`real_sites` 找不到 rawdata（`/Volumes/Data` 未挂载，本机没有别的副本）。
+- GUI 后端：fmt、clippy（默认与 `e2e-driver` 两种 feature）干净，318 通过。
+- 前端：`npm test` 309（修复后 310）、typecheck、lint、format:check、build、旧脚本 33/33；`xtask check-gui` 164 条命令契约。
+
+**GUI 全链条**（每一步都在原生窗口里点）：
+
+| 路径 | 结果 |
+|---|---|
+| 首页 → 打开示例 → 5 步向导 → 创建 → 运行（CN-Cng 2008–2009，Rust 三段） | 27 s 完成；结果页 Qle bias 17.4、RMSE 56.3 W/m²，15881 对 |
+| 同算例改 Fortran 引擎 + Fortran 前处理 | **失败**，见缺陷 1；修后 42 s 完成 |
+| CN-Cng 纯 Fortran 对纯 Rust（同为 official@2） | history 24 文件 3048 变量、全部重启、landdata 逐位一致 |
+| 新建模拟 US-Ne3（PFT + BGC + CROP 内核，2002–2003） | Rust 35 s、Fortran 121 s；history 24/8400、landdata 47、26 组重启逐位一致 |
+| 新建模拟 AT-Neu（2010–2012） | Rust 20 s、Fortran 46 s；history 37/4699、全部重启逐位一致 |
+| 新建模拟 AU-Preston（城市，默认窗口 1992-12-31—2004-11-28） | Rust 87 s、Fortran 195 s；修前不一致（缺陷 4），修后全部 146 组重启逐位一致，history 只剩一个小时记录差 1 ULP，见下 |
+| 结果页 7 个视图、多运行比较、诊断偏差、历史记录、计算资源、设置 | 都能打开，没有 JS 错误或未处理的 Promise 拒绝 |
+| 研究：参数率定 AT-Neu Qle，`DEF_TUNING_ZLND ∈ [0.005, 0.05]`，DE 4×1 | **两处阻断**，见缺陷 3、4；修后 81 s 完成，9 个成员都可行，最优 m000005 训练 0.7064、验证 0.6481（基准 0.7148/0.6529） |
+| 保存为新模型版本 → 算例绑定 → 运行 | 运行副本里 `DEF_TUNING_ZLND = 5.0e-3`，与 m000005 一致 |
+| 修复后重启应用 | 已有算例自动绑到 official@3；首页“最近的项目”可回到算例 |
+
+**修掉的缺陷**（第 1–3 条第一段，第 4–7 条第二段）：
+
+1. **Fortran 引擎读强迫场路径少了 `/`**（`colm-model/src/materialize.rs`）。物化运行副本时，`rewrite_case_paths` 用 `canonicalize()` 规范化路径，目录结尾的 `/` 被去掉。Fortran 是 `trim(DEF_dir_forcing)//trim(fprefix)` 直接拼接，于是得到 `.../ForcingCN-Cng_...nc`，colm 阶段 `STOP 1`。Rust 用路径拼接，所以没暴露。修法：原值带结尾分隔符时保留。新测试 `materialized_directory_fields_keep_their_trailing_separator`，修复前失败。
+2. **GUI 参数率定预检全部失败**：报 `unknown field process_file`。参数目录的作用域来自 `colm_model::ParameterScopeInstance`，带 `process_file`，读出来恒为 null；研究规格的 `study::spec::ParameterScopeInstance` 没有这个字段，而且 `deny_unknown_fields`。前端 `study.ts` 原样转发。修法：`parameterSpec` 只带研究规格认识的四个字段，`process_file` 非空时明确报错。新增前端测试，修复前失败。
+3. **固定了模型修订的研究一启动就失败**：报 `Study was created for kernel <包内>/kernels/default, not <研究>/version/kernel`。`pin_revision` 把内核复制到 `version/kernel`，再带着这份副本委托运行，运行器却只按路径比较。修法：抽出 `ensure_frozen_kernel_dir`，额外放行研究自己记录的那份副本（必须在研究目录内）；内容仍由 manifest 身份与 `Kernel::open` 的 sha256 校验把关。新增单测。注意：修复前创建的研究固定的是旧修订的 `colm-cli`，委托执行时仍走旧逻辑，要重建研究。
+
+4. **城市单点漏读 `Snowf`**（`colm-forcing/src/point.rs`、`colm-runtime`）。AU-Preston 完整窗口的首个分叉二分到 1994-06-27 21:00–21:30 UTC 这一步：这一步 `a_prc`/`a_prl` 的 Rust 值为 0，Fortran 为 1.10e-8/2.19e-8，正好 1:2。强迫文件里这一刻 `Rainf = 0`、`Snowf = 3.2868e-8`，是窗口内一次微量降雪。上游 `MOD_Forcing.F90` 的 POINT 分支在 `DEF_URBAN_RUN` 下，降水槽变量名为 `Rainf` 时会加上 `Snowf`；逐时读与整段预读两条路径都这样做，文件里没有 `Snowf` 就停机。Rust 一直只读 `Rainf`。第 658 轮的 2003–2004 窗口没有降雪，所以没有暴露。修法：新增 `load_point_forcing_with_options(…, urban_snowfall)`，`PointRuntimeConfig.urban_snowfall` 取自 `DEF_URBAN_RUN`；缺 `Snowf` 时报错，与上游一致。新测试 `urban_point_runs_add_snowfall_to_rainfall_like_upstream`。
+   - 复现窗口（1994-06-01 重启 → 06-28）：修后 history 146 个变量、6/27 与 6/28 的重启全部逐位一致。
+   - GUI 完整 12 年窗口重跑（official@5）：146 组重启全部逐位一致；history 只剩 2000-02-23 01:30 UTC 一个小时记录有 14 个诊断量差 1 ULP，由第 6 条修掉。
+5. **作物卡片点“关闭”永远显示“未指定”**（`scientific-setup.ts`）。作物没有 namelist 开关，开不开由内核与种植日决定，未开启就是实际生效的状态。改为未开启时显示“已选择: 关闭”。原断言空串的测试改为 `.false.`，并新增“开启 → 关闭”的回归测试。
+
+6. **`orb_coszen` 的 `lamb` 收缩方式与 gfortran 16.1 不一致**（`colm-core/src/atmosphere.rs`）。用 2000-02-01 的重启起跑到 23 日 02:00，就复现了 AU-Preston 剩下的那个 1 ULP。在 `calday = 54.0625`、网格中心 (-37.5, 145.5) 处，独立编译的 vendored `MOD_OrbCoszen.F90`（内核同款 `-O2 -fdefault-real-8` 选项）与 Rust 逐个比对中间量：`lambm`、`lmm`、`sinl` 相同，`lamb` 差 1 ULP。反汇编 `kernels/default/colm.x` 的 `___mod_orbcoszen_MOD_orb_coszen` 看到的收缩方式是：最内层 `fnmsub`（`sin3·13/12 − 0.25·sinl` **收缩**），中间两层收缩的是 `1.25·sin2` 与 `2·sinl`，而不是 `eccen·X`，最外层 `fma(l2, eccen, lambm)`。这与原注释记载的写法（当时 11520 个取值 0 差）不同。按反汇编改写后，扫一年全部半小时 × 6 个网格中心共 105408 个 `orb_coszen` 值：旧写法 3 个差 1 ULP，新写法 0 个。这 3 个点钉进 `orbital_geometry_matches_current_fortran`，修前失败。
+   - 修后经 GUI 用 Rust 重跑全部算例，对纯 Fortran 结果**全部逐位一致**：CN-Cng（history 24/3048）、US-Ne3（24/8400）、owndata（6/762）、AT-Neu（37/4699，两个引擎都重跑）、**AU-Preston 完整 12 年窗口（144/21024，146 组重启）**；地表数据与全部重启都相同。
+   - 引擎 `--lib --bins` 2423 项、四张生成表 drift、namelist 往返、`oracle --test histmap`、clippy、fmt 全部通过。
+
+7. **模型版本跟算例走**（用户选定的设计）。原先首页选的版本只是应用级状态，重启后静默回到官方版，算例的 `model-binding.json` 也从未更新。改为：
+   - GUI 命令 `model_migrate_case` 增加可选 `target`，对应 CLI 已有的改绑；
+   - 运行前把算例绑定到本次所用版本；
+   - 打开算例时，绑定为非官方版本就用它；绑定为官方版时，用用户明确选的 `chosenVersion`，没有则用最新官方版。官方版的修订号只随源码更新递增，不算用户选择。
+   原生窗口实测：首页选 `atneu-zlnd` → 打开 AT-Neu → 运行 → 绑定写成 `study-…@1`；重启后 AT-Neu 仍是 `atneu-zlnd · r1`，CN-Cng 和 US-Ne3 是 `Official r6`，没有串味。第一版实现曾让旧的 `official@2` 绑定盖过用户的选择，也曾让上一个算例的版本串到下一个算例，都在实测中发现并改掉。
+
+**补测（第 692 轮第二段）**：
+- 导出：e2e 驱动新增两个仅测试用的旁路——`POST /pick` 预置下一次文件/目录选择，`COLM_E2E_SAVE_DIR` 让导出直接写目录，不弹原生保存面板。结果页“导出完整 CSV”“导出完整时序 CSV”“导出显示数据（JSON）”“导出报告”、历史记录“导出 CSV/JSON”六个按钮都写出了文件。CN-Cng 的 `f_lfevpa` CSV 共 17544 行，与 24 份 history 的值逐位相同。导出文件名用的是 64 位运行哈希。
+- “使用自己的数据”：选站点目录与强迫目录 → 扫描出 4 站 → 选 CN-Cng → 自定义 2008-01-01—07-01、预热截止 02-01 重复 1 次、日输出 → 创建 → 运行。纯 Rust 与纯 Fortran 逐位一致（history 6/762、landdata、全部重启）。发现：第 1 步填的模拟名在第 3 步选站点后被静默改成站点名，于是与已有算例重名；应用拒绝覆盖，提示清楚。
+- 修复后：引擎 `cargo test --workspace --lib --bins -- --test-threads=1` 2423 通过 0 失败；colm-forcing 150、colm-cli 381、`study_cli_tuning` 21、colm-model 26 通过；前端 `npm test` 311 通过；fmt、clippy 干净。
+- **AI 助手**（经用户授权，测试 HOME 以软链接临时使用其助手密钥，测完删除）：DeepSeek 后端往返正常。不许调工具时，它把 `DEF_HIST_FREQ` 答成“秒数”，但自己标了“未验证”；允许调工具后调用 `explain_parameter` 与 `search_code`，答出正确的可选值 TIMESTEP/HOURLY/DAILY/MONTHLY/YEARLY/none，并引用冻结的 Official r6 源码行号。
+- **远程 7920land**（同样授权，临时链接 `~/.ssh`，测完删除）：GUI“检查连接”通过，SSH 成功，服务器上有 14 个 Rust 引擎快照；“输入目录映射 1 项待确认”，原因是映射的本地端 `/Volumes/Data` 未挂载。用 CN-Cng 远程运行时停在提交前：报“这些输入在本机、没有服务器路径；请添加路径映射（或允许上传文件）”。示例数据（26 MB）已传到服务器新目录 `/media/zhwei/data02/zhwei/colm-desktop/e2e-data-20261015/`，哈希核对一致；但在 GUI 里配置目录映射这一步被会话权限策略拦下，远程运行没有跑完。发现两点：GUI 从不传 `--upload-unmapped`，报错里“允许上传文件”这条路在界面上不存在；即使有，CLI 也只上传文件、不上传目录，内置示例有三项是目录（Runtime/、Forcing/、rawdata_unused/）。
+
+**新发现、未修**：
+
+- **选内置站点会静默覆盖第 2 步的选择**：第 2 步明确选了“城市过程 → 关闭”，第 3 步选 AU-Preston 后又变回“开启”，没有任何提示（与“内置站点保留原始默认值”相关）。
+- 界面小问题：
+  - 多处直接显示原始 JSON 或内部哈希：多运行比较的 Site 列是 `models/runs/<64 位哈希>`；数据目录的 Shape 列；率定参数行的作用域；版本描述是整段 provenance；研究失败原因只出现在一段 JSON 提示里，状态仍显示 `ready`；历史记录里“新建算例”的对象是哈希。
+  - 运行选择框不标引擎。
+  - 跑完 Fortran 后，运行页摘要回到“本机 · Rust”。
+  - 保存版本后顶部通知写成“研究任务已创建”。
+  - 计算资源页写“8 CPU”，本机是 16 个逻辑核。
+  - 内置示例在过长的 HOME 下，`SITE_fsitedata` 超过 256 字符时直接露出英文原始报错。
+- 观察：结果页加载 2 年逐时序列后，WebContent 进程常驻约 2.2 GB。没有拆分原因。
+- 撤回一条误判：方案切换“很慢”是测试脚本等待已禁用按钮造成的；实测一次切换约 1 s。
+
+**本轮没做的**：
+- 空间算例（latlon/unstructured 内核编了）、PLUMBER2 黄金回归和 13 项依赖外部数据的测试都需要 `/Volumes/Data`，本轮始终没有挂载（`mount` 中没有；`/Volumes/Wei1` 对本进程是 Operation not permitted），没测。远程运行卡在目录映射的配置权限上。
+- 没打 DMG。
+
+## 第 693 轮：向导前置校验、方案专属弹窗与物理互斥联动（2026-10-15，前端检查与原生窗口复验完成）
+
+用户要求按“前置校验置灰 / 仅专属参数弹窗 / 物理互斥联动”重整新建模拟与算例配置。
+
+- **第一步必填**：算例名称、项目目录（从第三步提前到第一步）、模拟范围、网格类型都不再预选；任一未完成，“下一步”置灰，按钮上方直接写出缺哪一项（页面契约 `details.blocker` 同步给助手）。后续步骤同样以 `problem(step)` 为准置灰，而不是点了再报错。
+- **方案卡片无默认**：IGBP/USGS/PFT/PC 初始全未选中（此前默认 IGBP）。实测各过程弹窗的实际字段（用 `colm_case::parameters::field_section` 导出 939 个字段的分组，再按 `processSettingOwner` 归属）发现两处“通用参数进了方案弹窗”：土壤水力方案的窗口里只有 `DEF_SOIL_REFL_SCHEME`（土壤反照率，通用地表参数）；`DEF_PC_CROP_SPLIT` 因名字含 CROP 被归进作物窗口，实际是 PC 结构专属（后端父开关为 `DEF_USE_PC`）。修正后土壤水力方案无弹窗；PFT/PC 只在确有可用专属项时弹窗，IGBP/USGS、变饱和流、区域汇流点选即生效。弹窗是否出现改为按 `model_configuration` 结果判断字段在当前条件下是否可用，不再只看字段是否存在（否则会出现空弹窗）。
+- **互斥联动**：新增 `exclusionPatch`，在算例写入路径（新建向导与已有算例共用）里把被上游选择否定的过程一并关闭，并以提示列出“已自动关闭：X（原因）”。为此放开了三处原本要求“先关闭 X”的置灰：选择 Campbell、关闭变饱和流（自动关闭示踪）、关闭 BGC（自动关闭非 CROP 内核下的作物）。CROP 内核要求 BGC 的情况仍置灰，不用自动关闭掩盖内核冲突。版本草稿路径（无 `onCaseChange`）保持原置灰行为。
+- **预热**：显示预热起始（只读，等于模拟开始；CoLM 预热总从开始日期起算）、预热结束日期、循环重复次数；移除 `DEF_simulation_time%spinup_sec` 选项，新建时固定写 0（结束日 00:00 截止，与后端 `config.rs` 步数计算一致）。
+- **输出变量**：此前历史开关以 586 个下拉框混在“更多配置”里。新增输出变量面板：核心变量 32 个（辐射、潜热、显热、地表热通量、GPP、LAI、土壤温湿度、径流、积雪、近地面气象），全部变量为 `hist_vars` 给出的当前内核与配置下可写的全集；“仅核心变量 / 一键全部开启 / 一键全部清除”只改可写开关。`DEF_HIST_vars_out_default`（默认同步规则）不再单独展示。`DEF_HIST_mode` 保留：单点已由后端隐藏，空间 Rust 只写 `one`（后端标为未移植），但空间 Fortran 确有 `block`，不能删。
+
+验证（2026-10-15，本机）：`npm run typecheck`、`npm run lint`（0 warning）、`npx prettier --check src`、`npm test`（316 通过，0 失败，含新增方案弹窗归属、互斥联动、预热写入与输出变量预设测试）、`npm run build` 均通过。原生窗口复验（`cargo tauri dev --features e2e-driver`，隔离 `HOME=/private/tmp/claude-501/cw1`，`COLM_CLI` 指向 `cargo run -p xtask -- stage-sidecar` 产出的带源码戳 release 版；debug 版 `colm-cli` 旁没有 `colm-build-source.json`，官方版本登记会报 “build/source stamp is missing”）：
+
+- 第一步：空表单“下一步”置灰，提示依次为“请填写算例名称 → 请选择保存算例的项目目录 → 请选择模拟范围”；选“区域”后提示“请选择网格类型”，选经纬度网格后“请填写有效的经纬度范围”；选“单点”后可继续。
+- 第二步：四张方案卡片 `aria-pressed` 全为 false，提示“请选择一种下垫面 / 植被方案”。单点下点 IGBP、PFT 均无弹窗；点 PC 弹出“PC 植物群落设置”。**实测发现并修复**：单点 PC 弹窗里仍列出 `DEF_FAST_PC`（SinglePoint 不读），现按单点排除 `DEF_SOLO_PFT`/`DEF_FAST_PC`，复验后只剩 `DEF_PC_CROP_SPLIT`。土壤水力方案卡片无“设置”按钮。开启 BGC 弹出 BGC 设置；此时城市“开启”置灰并写明“单点城市过程与 BGC 不能同开”。再切 IGBP，页面提示“已自动关闭：生物地球化学（BGC）（BGC 需要 PFT 或 PC 植被结构）”，BGC 卡片变为“已选择: 关闭”。
+- 第三、四步：内置示例填齐后“下一步”才可用；第四步显示“时间步长 / 预热（Spin-up）/ 输出设置”，预热起始只读为 2008-01-01，“更多配置”里没有预热截止秒和默认输出历史变量。**实测发现并修复**：单点新建时“更多配置”仍有“历史文件组织方式”（建例前后端拿不到 SinglePoint 上下文），现于单点新建时隐藏。
+- 创建后 `case.nml` 写入 `spinup_year=2008, spinup_month=6, spinup_day=1, spinup_sec=0`；重复次数保持默认 1 未写出，检查页显示“2008-01-01 — 2008-06-01 × 1”。
+- 算例第四步输出变量面板：“仅核心变量 · 31”（32 个核心中 31 个在该内核可写）、“一键全部开启 · 178”、全部清除后 0/178 且清除按钮置灰。保存核心预设后 `history.nml` 写入 138 个 `.false.`，回读为“已选 31 / 178”，勾选的正好是这 31 个核心变量。**实测发现并修复**：写不出的 408 个变量原先显示为勾选（配置默认开），现不再给勾选框。
+- 并行复验会话（分支 `claude/wizard-refactor-native-verify`，复制的是修复前的快照）另报两点，均已在本工作树修复并在窗口复验：
+  - “已自动关闭”提示离开第二步后仍残留：改为提示只在触发它的那一步显示；新增前端测试。
+  - 新建单点算例时仍列出单点用不到的字段：根因在后端 `confirmed_gate`，“SinglePoint 执行路径不会使用这个字段”等理由只在算例存在后才算定论，而建例前内核已确定为 SinglePoint，同样可确认。现在内核含 `SinglePoint` 时直接确认这些理由；“只有非结构网格内核写向量历史”在内核不含 `UNSTRUCTURED` 时同样确认。窗口复验：第三步不再出现已有地表资料目录、从更大区域裁取、三维网格生成、只保留陆地、主导地类、升尺度拟合、聚合压缩包、地表数据压缩级别、强迫场插值方法；第四步不再出现地表数据诊断、按网格单元向量输出、历史输出网格与分辨率、历史回写、历史文件压缩级别。新增 Rust 单元测试；`cargo test -- --test-threads=1`（gui/src-tauri）319 通过，`npm test` 317 通过。
+
+
+## 第 691 轮：四种植被方案归算例（2026-10-13）
+
+**用户决定**：IGBP、USGS、PFT、PC 都归算例，在模拟第二步直接选择、直接保存，不为方案派生或冻结模型版本。模型版本继续保存物理过程、参数及 AI 网络。
+
+**实现**：`colm-model::is_model_field` 排除 `DEF_USE_LCT/PFT/PC` 和 `DEF_SUBGRID_SCHEME`。迁移把四字段留在算例数据，运行物化保留算例最新方案。历史冻结修订保持原文件与指纹校验，使用有效覆盖层时去掉旧方案；旧草稿可继续打开，派生草稿不继承旧方案。前端删除应用方案派生流程；模型页顶部返回按钮允许已保存、未冻结草稿返回。BGC、作物、示踪和 PFT/PC 参数适用性从算例方案读取。
+
+**分类来源**：IGBP/USGS 标签随算例保存，分类元数据与 namelist 原子写入；切 PFT/PC 保留已有算例分类、范围和 Shapefile。新建 PFT/PC 使用现有 CLI 的 IGBP 生成能力，界面显示只读来源说明，不虚构 USGS-PFT/PC 新建能力。配置保存不代表已重建站点数据，真实输入/内核兼容检查仍保留。
+
+**复审修复**：独立审查发现两项缺陷后补回归：候选方案保存前用同一个运行物化路径检验模型 PFT/PC 参数作用域，不兼容时不写原 namelist 或元数据，已经错配的算例也能用匹配候选修复；同版本同内核下查询请求携带当前四字段，使保存后的适用条件刷新，迟到响应不能覆盖新方案。
+
+**本地验证**：`cargo test -p colm-model --lib --offline --locked` 17/17；`cargo clippy -p colm-model --lib --tests --offline --locked -- -D warnings` 通过。GUI 后端定向 model_configuration 15/15、model::tests 3/3、project_tests 15/15，CLI runtime_kernel_tests 1/1，均用热缓存定向执行。前端 `npm test` 238/238；`npm run build`（TypeScript、162 IPC 合约及 Vite）与 `npm run lint` 通过。相关 Rust 文件格式及 `git diff --check` 通过。
+
+**验证边界**：T7920 提交尝试两次均在 SSH 建连阶段返回 `Connection closed by 192.168.50.29 port 22`，未收到任务 ID，未声称远端任务成功。没有运行全工作区重型构建/完整科学模拟，也没有重新打包或执行原生 GUI 点击验收。工作区已有大量其他未提交、未跟踪实现；本轮未提交或推送，避免把其他工作误并入这次改动。
+
+
+## Windows CI 修复：合法测试文件名与输出目录前缀（2026-10-13）
+
+最新 main `eb1fc9ae` 的 CI run 38353934358 只有 Windows Rust 测试失败：`colm-workspace` 两项回归用冒号、星号、制表符或换行构造文件名，Windows 创建/改名在调用被测逻辑前已失败（InvalidFilename / git mv Invalid argument）。修复仅为 Windows 换用空格和方括号的合法特殊文件名，Unix 保留原 pathspec magic 与控制字符覆盖，不跳过回归或放宽断言。
+
+同一提交的 windows-kernel run 38353934354 在真实 CN-Cng 流程初始化前失败：配置中的普通 `D:\...\out` 与 canonicalize 得到的 `\\?\D:\...\out` 被误判为自定义目录。输出目录前缀归一化必须在目录尚不存在时也生效，且保留不同输出目录拒绝。
+
+修复将 Windows VerbatimDisk/VerbatimUNC 前缀标准化为普通磁盘/UNC 前缀，只统一路径拼写，不允许不同目录。新增磁盘/UNC等价、双向实际输出目录校验、目录尚不存在及不同目录拒绝回归。本地定向 `colm-workspace` patch 测试 15/15、CLI output_dir 测试 3/3通过；两包相关 Clippy、格式和diff检查通过。Windows专属分支与完整端到端仍待本PR的GitHub Windows runner验证。
+
+首轮PR CI已证实Windows两个文件名回归和磁盘/UNC前缀归一化通过，随后CLI暴露三个问题：产物身份key使用反斜杠；服务端POSIX脚本的读文件fixture在Windows执行；Windows临时目录的RUNNER~1短名称与canonical长名称比较不同。补修产物key使用平台无关的正斜杠，POSIX文件访问fixture限Unix执行并新增全平台服务端source拒绝契约测试；Windows输出路径解析最近存在的祖先再附不存在后缀，保留真实错目录拒绝。定向provenance 5/5、knowledge_reader 2/2、output_dir 3/3以及CLI Clippy/格式检查通过，新的GitHub原生验收仍待完成。
+
+
+独立修复分支 `codex/windows-ci-fixes`，PR #23：https://github.com/zhongwangwei/CoLM-Desktop/pull/23 。对应源码补丁已逐hunk通过git apply --check后同步当前工作区；其余未提交界面工作保持原样。
+
+
+## 算例与研究的统一边界（2026-10-13）
+
+用户进一步决定：没有修改参数或过程实现的配置均归算例，只有研究中的修改生成新版本。土壤水力、BGC、汇流、城市、作物种植设置、示踪定义及其他现成选项直接写算例；实际模型系数、地类/PFT参数、过程文件内容、源码和AI网络仍冻结于版本。模拟中的参数入口转到研究，过程文件参数仅查看。
+
+历史修订保持存储字节及哈希，用有效参数覆盖时过滤旧算例控制项，派生草稿不继承旧控制项。迁移保存原过程文件与冻结资产的绑定，算例选择仍决定关联文件。候选保存先物化最新算例选项，再原子保存；校验不再次覆盖已映射的冻结文件引用。明确清除旧示踪关联写空字符串，避免下次查询/运行恢复旧版本引用。
+
+独立审查发现并修复CH4参数修改注入算例开关、旧关联删除恢复、候选重复覆盖冻结引用三项问题。模型19/19测试及Clippy通过，科学配置后端17/17回归通过；模型上下文、CSV有限数值、CLI内核门槛的此前定向检查继续有效。完整科学过程组合尚未执行，前端与原生包最终结果另记录。
+
+Windows main CI修复已合并：f8e07e48及29c84e46。GitHub run 38361734789和完整Windows内核/端到端run 38361734814全部成功。当前工作区包含大量历史未提交实现，本段算例边界修改尚未提交或推送，不与CI修复的合并事实混淆。
+
+前端最终252/252测试、TypeScript/162 IPC合约生产构建及ESLint通过。数据准备、示例预检查、新建和已有算例的模式/内核判断已统一使用实际参数白名单及当前显式算例值；新建seed不继承旧算例方案。尚未声称完成原生打包。
+
+
+## 全面编译与全链条端到端测试（2026-10-15）
+
+按用户指令完成全软件全量编译及从 GUI 起始的全链条测试与实测缺陷复盘：
+
+**全面编译完成证据**：
+1. **React 前端**：`npm run build`（经 `check-gui.mjs` 静态守门、`tsc --noEmit`、`vite build`），181 个模块全部构建，成功产出 `gui/build/`。
+2. **Release Sidecars 暂存**：`cargo run -p xtask -- stage-sidecar`，成功编译并暂存全部 6 个 release 程序（`colm-cli` 18.8 MB、`mksrfdata-rs` 8.3 MB、`mkinidata-rs` 8.7 MB、`colm-rs` 29.0 MB、`colm-agent` 6.5 MB、`colm-mcp` 2.8 MB）及引擎快照包 `colm-src.tar.gz`（16.1 MB）至 `gui/src-tauri/binaries/` 与 `engine/`。
+3. **原生桌面包构建**：`cargo tauri build --config tauri.bundle.conf.json` 顺利打包 `CoLM Desktop.app`（188 MB，`Contents/MacOS/` 下 7 个核心与 Sidecar 二进制完整）及 DMG 安装盘（`CoLM Desktop_0.3.0-beta.3_aarch64.dmg`）。
+4. **根工作区全目标构建**：`cargo build --workspace --all-targets` 全部 targets 编译完成。
+5. **代码规范与检查**：两个 Cargo workspace 的 `cargo clippy --workspace --all-targets -- -D warnings` 与 `cargo fmt --all --check` 全部 0 warning / 0 diff 通过（修复了 `model_version.rs` 格式偏差）。
+
+**从 GUI 开始的全链条测试证据**：
+1. **GUI IPC 与事件契约**：`scripts/check-gui.mjs` 全绿，162 个 Tauri 命令全部对齐，115 个静态调用无未注册/无参数遗漏，所有前端声明事件后端均有对应 emitter。
+2. **GUI 单元测试**：`npm test` 251/251 项 React 页面/状态流回归测试通过；`npm run test:legacy` 33/33 项全通过。
+3. **GUI 窗口进程后端**：`cargo test --manifest-path gui/src-tauri/Cargo.toml` 297/297 全部通过。
+4. **引擎各包单元测试**：
+   - `colm-agent`：197/197 全部通过。
+   - `colm-kernel`：46/46 全部通过。
+   - 核心纯计算与支持包（`colm-lapack`, `colm-model`, `colm-namelist`, `colm-schema`, `colm-history`, `colm-workspace`, `oracle`, `xtask`）：全部通过。
+   - NetCDF 共享状态包（串行执行）：`colm-cli` 379/379、`colm-init` 204/204（181 lib + 23 bin）、`colm-srfdata` 322/322（273 lib + 49 bin）全部通过。
+   - 研究与参数调优全集成测试：`study_cli_tuning` 21/21 全部通过。
+5. **缺陷复盘与修复**：
+   - **macOS `/tmp` 软链问题**：`study_cli_tuning` 中 `fake_server` 原写 `/tmp`，在 macOS 下 `study-create` 经 `absolute()` 解析为 `/private/tmp`，导致 `remote_study_root` 校验 `starts_with` 报 `remote Study root differs from its submitted project`。修复为在 `fake_server` 中预先规范化 `/tmp` 路径。
+   - **Serde 序列化对称性缺陷**：`verified_evidence` 中比较 `local_state` 与 `transplant_state(...)` 时，`transplant_state` 移除了 `"process"` key，而 `local_state: StudyState` 序列化时带 `"process": null`，导致 JSON 键比对失败并报 `remote Study state changed since fetch` 伪阳性。修复为先将 `transplant_state` 反序列化为标准的 `StudyState` 再比对，两端 Serde 序列化语义完全对称，测试顺利通过。
+6. **科学漂移与黄金断言**：`drift_co2`, `drift_landcover`, `drift_schema`, `drift_histmap`, `golden_run`, `roundtrip`, `judge`, `histmap`, `tier-check`, `golden-compare` 全部通过；7 个 Python 内核守门测试全部 PASS。
+7. **端到端科学算例闭环**：
+   - 调用打包的生产 Sidecar `gui/src-tauri/target/release/bundle/macos/CoLM Desktop.app/Contents/MacOS/colm-cli all`，对 CN-Cng 站点进行 3 天真实模拟（涵盖 `mksrfdata`、`mkinidata`、`colm` 以及与实际 FLUXNET 观测数据的指标计算），分别使用 Fortran 引擎与纯 Rust 引擎（`colm-rs` + `mksrfdata-rs` + `mkinidata-rs`）完成端到端全链路闭环，两套引擎输出指标逐位对应（Rnet R²=0.983，SWup R²=0.988 等）。
+
+
+## 模拟流程与新建向导五步重构与淘汰参数精简（2026-10-15）
+
+按魏老师指导对新建模拟向导与算例设置 5 步流程进行体系化重构，并对 MPI / IO 架构进行事实复核与参数精简：
+
+### 1. 业务逻辑与 5 步流程重塑
+原向导缺乏总览层，且输出目录无法自定义。重构后两端（新建模拟向导 `NewCasePage` 与已有算例设置 `CasesPage`）统一定义为以下 5 步：
+- **Step 1: 总的设定（General setup）**
+  - 计算核心选择：Rust 引擎（现代、纯内存、快速前处理） vs Fortran 官方内核。
+  - 保存目录（Project folder）：选择保存算例的目标项目根路径。
+  - **模拟输出路径（Simulation output path）**：紧跟在保存目录之后、位于模拟名称正前一行。默认联动 `${root}/${name}/out`，支持独立输入与文件浏览器选取外部路径。
+  - 模拟名称（Simulation name）：算例文件夹名称，联动计算默认输出路径。
+  - Fortran 模式下可在此处补充内核预设匹配。
+- **Step 2: 范围与网格（Range and grid）**
+  - 范围类型：单点（site）、流域（watershed）、区域（region）、全球（global）。
+  - 网格类型：经纬度规则网格（latlon）、非结构网格（unstructured）、汇水区网格（catchment），以及经纬边界与分辨率约束。
+- **Step 3: 模型结构与方案（Model structure and schemes）**
+  - 集成 `ModelSettings` 组件，覆盖地表覆被分类（IGBP / USGS）、次网格方案（PFT / PC）、以及过程开关与参数资产。
+  - 点击“在研究中调整”时进入 Research 页面，并在完成后准确返回 Step 3。
+- **Step 4: 数据与时段（Data and period）**
+  - 模拟起止日期（YYYY-MM-DD，结束日期为截止时刻）。
+  - 站点/强迫场/地表数据/Runtime 数据路径。
+  - 展开过程数据分组（BGC、River、Tracer、Urban）。
+- **Step 5: 检查与运行（Review and run）**
+  - 时间步长、UTC 时间、预热截止日期（留空关闭）与预热重复次数。
+  - 历史输出间隔（DEF_HIST_FREQ）、文件分组（DEF_HIST_groupby）、重启文件间隔（DEF_WRST_FREQ）以及可写输出变量与诊断。
+  - NewCasePage：参数检查核对面板与“创建算例”按钮（提交校验并在成功后跳转至算例）。
+  - CasesPage：保存按钮及 `RunPanel` 启动器（显示算例摘要、运行位置、引擎、日志监视与作业控制）。
+
+### 2. MPI / IO 架构确认与历史淘汰字段剔除
+- **事实复核**：CoLM-Desktop 已全面采用扁平 SPMD 并行架构（`FLAT_SPMD`），由 MPI_COMM_WORLD 平铺所有进程，各进程负责局部网格或条带计算，不再使用原旧版 CoLM202X 的主-从（Master-IO-Worker）分块与专用 IO 进程机制。
+- **参数剥离**：在 `simulation-model.ts` 中将旧式分块与 PIO 字段加入 `legacyMpiFields` 白名单：
+  `DEF_nx_blocks`, `DEF_ny_blocks`, `DEF_PIO_groupsize`, `DEF_nIO_eq_nBlock`, `DEF_BlockInfoFile`。
+  这些字段已从向导和高级配置（`simulationFields`）中彻底过滤移除，避免对用户造成干扰。
+- **引擎隔离**：选择 Rust 引擎时，屏蔽 Fortran 底层细节与复杂网格编译选项；仅在选 Fortran 官方内核且展开高级设置时，展示 Fortran 特有的网格配置。
+
+### 3. 外部输出路径重定向机制
+- 底层 `colm-cli` 具有严格的一致性防御检查，要求 `DEF_dir_output == <case_dir>/out`。
+- 为满足用户自由选择输出路径的需求，我们在 Tauri 后端新增并注册了命令 `redirect_output_dir(caseDir, targetDir)`。
+- 当用户在新建模拟时指定了外部目标输出路径时，在算例成功创建后自动将 `<caseDir>/out` 指向用户选择的实际外部绝对目录（建立软链接映射）。
+- **优势**：既保持底层 CLI、Namelist 与相对路径的 100% 规范兼容，又实现了计算结果真实写入用户选定的外部磁盘/目录，且 `RunPanel`、`HistoryPage`、`ResultsPage` 的读取展示无缝透明工作。
+
+### 4. 验证与回归测试
+- **Tauri 后端**：新增 `CaseRecord` / `CaseProfile` 的 `engine: Option<String>` 字段支持及 `redirect_output_dir` 核心命令，`cargo test --manifest-path gui/src-tauri/Cargo.toml` 全部 298 项单元测试通过。
+- **IPC 契约**：运行 `npm run contract`，重新生成并校验 163 个 Tauri 命令契约全部一致。
+- **前端测试**：`npm test` 251/251 项 React 全页面及模型交互测试全部通过（包含 `simulation-page.test.ts` 56/56 项及 `simulation-model.test.ts` 8/8 项）。
+- **前端编译**：`npm run build`（`check-gui.mjs` + `tsc --noEmit` + `vite build`）0 错误通过。
+- **工作区代码**：`cargo fmt --all --check` 与 `cargo check --workspace` 均 0 警告通过。
+
+### 5. 路径统一管理与界面收敛（根据用户反馈）
+- **需求与设计**：用户反馈将“保存到项目目录”和“模拟输出路径”合并，统一归集在算例目录内，避免多路径割裂带来的认知和维护负担。
+- **改动实施**：
+  - `NewCasePage.tsx` Step 1：移除独立的 `output` 输入框与拾取按钮，Step 1 仅保留计算核心选择、保存到项目目录（`root`）和模拟名称（`name`）。
+  - 输出路径自动内聚在 `<root>/<name>/out` 下，并以友好的提示告知用户“算例配置与模拟结果将统一保存在该算例目录下（输出结果存放在 out/ 子目录）”。
+  - Step 5 核对摘要：将原分散的“保存位置”与“输出位置”合并显示为“保存位置：`<root>/<name>`（输出在 out/）”。
+
+### 6. 计算核心卡片网格布局与顶端对齐修复
+- **问题根源**：
+  1. `simulation-choices` 默认采用 `repeat(3, minmax(0, 1fr))` 三列布局，而“计算核心”仅有 Rust 与 Fortran 两个选项，导致两张卡片被强行塞入前 2/3 区域，右侧留下 1/3 空白，整体被挤压在左侧。
+  2. `.simulation-choice-card` 此前使用了 `justify-content: center`，由于两张卡片说明文字行数不同（Rust 说明较长，Fortran 说明较短），导致两张卡片的标题 `strong` 被垂直居中到不同的高度，视觉上参差错位。
+- **改动实施**：
+  - 新增专用样式 `.simulation-choices.engine-choices`，采用 `repeat(2, minmax(0, 1fr))` 双列对称排布（响应式下折叠为单列），左右卡片各占 50% 均分整行，间隙调整为 16px。
+  - 将 `.simulation-choice-card` 的垂直对齐调整为 `justify-content: flex-start`，`strong` 与 `span` 均设为 `display: block; width: 100%`，确保两张卡片的标题水平顶端严格对齐，说明文字整齐排布。
+  - 将 Fortran 匹配内核预设下拉框直接吸纳进计算核心组内，仅在选择 Fortran 时展开，层次更清晰。
+  - 全套构建与单元测试通过，桌面端应用重新编译拉起。
+
+
+
+## 第 694 轮：以用户在主检出中的向导版本为基础合并第 693 轮修正（2026-10-15，前端/后端检查与原生窗口复验完成）
+
+用户在主检出 `~/Desktop/Github/CoLM-Desktop`（分支 `codex/ui-redesign`，未提交，最后修改 19:20）里另有一版向导（Codex 编写）：五步为 总的设定 → 范围与网格 → 数据与时段 → 模型结构与方案 → 检查与运行，带计算核心选择、科研场景首页、输出变量卡片等。按用户要求以那一版为基础合并，并按第 693 轮的结论修正其中的错误。主检出未改动，合并在本工作树完成。
+
+**合并方法与踩坑**：先把主检出的 209 个未提交文件快照到 scratchpad，再逐文件三方合并。
+- **合并基点**：以 `aba780ff`（Codex 快照）为基点会产生 35 个冲突文件；实测那一版多数文件分叉自 `de42a287`，于是逐文件选与那一版差异最小的 `main` 历史版本作基点，冲突降到 21 个文件。
+- **试过又放弃的过滤器**：曾试图自动过滤“那一版中与 main 历史相同的旧行”，结果因重新缩进的代码被误判而丢失整段（例如 `newCaseProblem` 的站点校验）。最后全部按原文合并，旧代码只做标记、逐处人工判定。
+- **陈旧回退**：有两类。
+  - 那一版比 main 旧的地方被当成“修改”：`bilingual` 退回“中 / En”混排串、vG 不再连带变饱和流、`migrate_case_to` 退回 `migrate_case`、每张卡片重复“待核对”、测试的 import 剥离正则。
+  - main 之后新增、那一版没有的内容被当成“删除”：`study_member_revision` 等。
+  这两类都已恢复为 main。
+
+**保留的那一版设计**：
+- 五步顺序。
+- 第一步的计算核心（引擎写入算例记录，运行页按算例初始化）。
+- 首页科研场景卡片。
+- 数据页站点徽标。
+- 历史记录的阶段/状态中文标签与例行记录勾选框。
+- 数据准备页随界面语言的 `t()`。
+- `Field` 由 `<label>` 改为 `<div>`（避免点文字误触第一个按钮）。
+- 计算核心卡片双列样式。
+- 后端：
+  - 缓存损坏时清目录重建、暂存目录名加时间戳。
+  - `COLM_HISTORY_DB`。
+  - Windows 路径分隔。
+  - 新建时写入历史变量文件。
+
+**修正的那一版错误**：
+- **手写弹窗引用不存在的字段**：`ModelSettings` 的 9 个手写弹窗里有 7 个 namelist 字段在 CoLM 中不存在——`DEF_file_ndep`、`DEF_file_river`、`DEF_file_reservoir`、`DEF_file_tracer_init`、`DEF_file_tracer_forcing`、`DEF_file_urban_data`、`DEF_urban_type`。
+- **弹窗混入非专属参数**：IGBP/USGS 弹窗只有通用的 `DEF_USE_DOMINANT_PATCHTYPE`；BGC 弹窗混入作物种植日。
+- **默认值显示错**：`DEF_FAST_PC` 未设置时显示为“标准群落”（CoLM 默认开启）。
+- 以上统一改用 schema 驱动的过程弹窗（第 693 轮），方案卡片保留那一版的状态说明。
+- **方案被预选**：“使用内置示例”与点选普通站点会把方案设成 IGBP。现在普通站点不替用户选方案；作物站、城市站改走 main 的 `selectSite`（后端作物默认，城市同时关闭 BGC）。那一版原先把种植日写死为 120，城市站也不关 BGC。
+- **输出目录**：只在手改名称时跟随；点选站点改名后，创建时会调用 `redirect_output_dir`，把 `out` 链接到旧名字目录。现在输出固定为 `<算例>/out`，不再重定向。上方第 5、3 节关于“外部输出路径重定向”的描述以此为准。
+- **新建时选的输出变量被丢弃**：只提交 schema 内字段，而 `DEF_hist_vars%` 不在 schema 里。另外那一版靠 `DEF_HIST_vars_out_default` 实现全开/全清（即“默认同步规则”）。现在逐个显式写入，推荐核心量补上 `gpp`；已有算例按 `hist_vars` 标出写不出的变量。
+- **已有算例预热重复出现**：第三步与第五步各有一份，现只保留在第三步。所有 `spinup_*` 字段都归入数据步骤，契约字段只在开启预热时出现。
+- **被去掉的 main 功能**：已有算例的范围编辑、区域单元汇流开关、自动评估都已恢复。那一版新增的“变饱和流仅支持 van Genuchten”无法核实来源，未采纳。
+- **结果页**：自动评估与 main 重复（会请求两次），恢复为 main。
+
+**验证（本机）**：
+- 前端：`npx tsc --noEmit`、`npx eslint src`（0 问题）、`npx prettier --check src`、`npm test`（321 通过，0 失败；含新增“普通站点不预选方案”“新建时输出变量随算例写出”两条回归测试）、`npm run build`。
+- Rust：`cargo fmt --check`（工作区与 gui/src-tauri），colm-model / colm-history / colm-remote / xtask 全部通过；`cargo test -p colm-cli -- --test-threads=1` 382 + 21（服务器研究）通过；`gui/src-tauri` `cargo test -- --test-threads=1` 321 通过。
+- 原生窗口（`cargo tauri dev --features e2e-driver`，隔离 HOME，`stage-sidecar` 后的带戳 `colm-cli`）：
+  - 第 1 步依次提示计算核心 → 项目目录 → 名称。
+  - 第 2 步提示范围。
+  - 第 3 步内置示例后开启预热，默认结束日期为次年 1 月 1 日，起始只读。
+  - 第 4 步四张卡片均未选中、下一步置灰；单点 PC 弹窗只含 `DEF_PC_CROP_SPLIT`；开 BGC 时城市置灰；切 IGBP 自动关闭 BGC 并提示。
+  - 第 5 步输出变量卡片推荐 40 / 全部 586；选推荐后创建，`history.nml` 写入 40 个 `.true.`、546 个 `.false.`，`case.nml` 写入 `spinup_year=2009, spinup_month=1, spinup_day=1, spinup_sec=0, spinup_repeat=1`。
+  - 已有算例第五步显示推荐 39 / 全部 178、另有 408 个写不出，第五步不再有预热；第三步有预热框。
