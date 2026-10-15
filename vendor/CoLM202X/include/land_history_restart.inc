@@ -6734,7 +6734,12 @@
                IF (trim(actual_dim)/=trim(expected_dim(j))) valid=.false.
                IF (j==1 .and. rank>1 .and. length/=n1) valid=.false.
                IF (j==2 .and. rank>2 .and. length/=n2) valid=.false.
+#ifdef FLAT_SPMD
+               ! The file holds every rank's slice; vlen is rank-local in flat mode.
+               IF (j==rank .and. length/=sum(pixelset%vecgs%vcnt(:,iblk,jblk))) valid=.false.
+#else
                IF (j==rank .and. length/=pixelset%vecgs%vlen(iblk,jblk)) valid=.false.
+#endif
             ENDDO
          ENDIF
          IF (allocated(dimids)) deallocate(dimids)
