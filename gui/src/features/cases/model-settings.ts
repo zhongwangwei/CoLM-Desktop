@@ -1,4 +1,9 @@
-import { simulationFieldStep } from './simulation-model';
+import {
+  simulationFieldStep,
+  isSiteConfiguration,
+  isForcingScheme,
+  legacyMpiFields,
+} from './simulation-model';
 import type { Overlay } from '../../lib/types';
 import type { SchemaField } from './case-model';
 import type { Descriptor } from '../versions/model';
@@ -19,6 +24,8 @@ export const modelSettingGroups = [
   ['urban', '城市', 'Urban'],
   ['river', '河湖流与水库', 'River–lake flow and reservoirs'],
   ['assimilation', '数据同化', 'Data assimilation'],
+  ['site', '单点数据来源', 'Single-point data sources'],
+  ['forcing', '强迫场处理', 'Forcing processing'],
   ['other', '其他模型选项', 'Other model options'],
 ] as const;
 export const basicModelFields = [
@@ -37,7 +44,14 @@ export const basicModelFields = [
 ] as const;
 export function modelSettingGroup(field: Pick<SchemaField, 'name' | 'section'>): string {
   const name = field.name.toUpperCase();
+  if (isSiteConfiguration(field.name)) return 'site';
+  if (isForcingScheme(field.name)) return 'forcing';
   if (name === 'DEF_VEG_SNOW') return 'water';
+  if (
+    /^DEF_LAI_/.test(name) ||
+    ['DEF_LANDONLY', 'DEF_USE_DOMINANT_PATCHTYPE', 'DEF_HIGHRESVEG'].includes(name)
+  )
+    return 'subgrid';
   if (
     [
       'DEF_USE_LCT',
@@ -59,6 +73,7 @@ export function modelSettingGroup(field: Pick<SchemaField, 'name' | 'section'>):
       'DEF_USE_SOILPAR_UPS_FIT',
       'DEF_RSS_SCHEME',
       'DEF_SOIL_REFL_SCHEME',
+      'DEF_HIGHRESSOIL',
     ].includes(name)
   )
     return 'soil';
@@ -152,8 +167,13 @@ export function processSettingOwner(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): string | null {
-  if (simulationFieldStep(field) === 5 || field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO')
+  if (
+    [1, 2, 5].includes(simulationFieldStep(field)) ||
+    field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO'
+  )
     return null;
+  if (isSiteConfiguration(field.name)) return 'site';
+  if (isForcingScheme(field.name)) return 'forcing';
   const roots: Record<string, string> = {
     DEF_USE_SOILPAR_UPS_FIT: 'soil',
     DEF_USE_BGC: 'DEF_USE_BGC',
@@ -213,10 +233,11 @@ export function simulationOptionField(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): boolean {
-  if (field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO') return true;
-  if (simulationFieldStep(field) === 5) return false;
+  const step = simulationFieldStep(field);
+  if (step === 4) return true;
+  if (step !== 3) return false;
   if (processSettingOwner(field, context)) return true;
-  if (['DEF_LC_YEAR', 'DEF_CO2SCENARIO'].includes(field.name)) return false;
+  if (field.name === 'DEF_LC_YEAR') return false;
   return ['soil', 'water', 'ecology', 'subgrid', 'assimilation'].includes(modelSettingGroup(field));
 }
 
@@ -478,4 +499,65 @@ export function autoClosedText(closed: readonly AutoClosed[], en: boolean): stri
           .map((item) => (en ? `${item.en} (${item.reasonEn})` : `${item.zh}（${item.reasonZh}）`))
           .join(en ? '; ' : '；')
     : '';
+}
+
+export function parameterLocation(
+  parameter: Descriptor,
+  modelFields: readonly Pick<SchemaField, 'name'>[],
+  en = false,
+): string {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  if (parameter.visibility === 'read-only-context')
+    return t('只读上下文（自动管理）', 'Read-only context (managed automatically)');
+  if (parameter.scope === 'land-cover-class')
+    return t('模型版本 → 地类参数', 'Model version → land-cover parameters');
+  if (['pft-type', 'pc-pft-component'].includes(parameter.scope))
+    return t('模型版本 → 按植物类型调整参数', 'Model version → parameters by plant type');
+  if (parameter.storage === 'process-parameter-file')
+    return t('模型版本 → 过程文件参数', 'Model version → process-file parameters');
+  if (modelParameterEditable(parameter, modelFields))
+    return t('模型版本 → 模型系数', 'Model version → model coefficients');
+  if (legacyMpiFields.includes(parameter.raw_key))
+    return t(
+      '范围与网格 → 并行布局（向导不单独编辑）',
+      'Range and grid → parallel layout (not edited in the wizard)',
+    );
+  if (parameter.raw_key === 'DEF_simulation_time%spinup_sec')
+    return t(
+      '数据与时段 → 随预热日期管理（不单独编辑）',
+      'Data and period → managed with spin-up dates (not edited separately)',
+    );
+  if (parameter.raw_key === 'DEF_dir_output')
+    return t('总的设定 → 自动生成输出路径', 'General setup → generated output directory');
+  const field = { name: parameter.raw_key, section: parameter.section };
+  const step = simulationOptionField(field) ? 4 : simulationFieldStep(field);
+  const labels = [
+    t('总的设定', 'General setup'),
+    t('范围与网格', 'Range and grid'),
+    t('数据与时段', 'Data and period'),
+    t('模型结构与方案', 'Model structure and schemes'),
+    t('检查与运行', 'Review and run'),
+  ];
+  const process = processSettingOwner(field);
+  const owners: Record<string, string> = {
+    site: t('单点专属设置', 'Single-point settings'),
+    forcing: t('强迫场处理', 'Forcing processing'),
+    DEF_USE_BGC: 'BGC',
+    crop: t('作物设置', 'Crop settings'),
+    DEF_URBAN_RUN: t('城市设置', 'Urban settings'),
+    DEF_USE_TRACER: t('示踪设置', 'Tracer settings'),
+    DEF_USE_LULCC: t('土地覆盖变化设置', 'Land-cover change settings'),
+    DEF_USE_GridRiverLakeFlow: t('汇流设置（按网格类型）', 'Routing settings (by grid type)'),
+    soil: t('土壤水力设置', 'Soil hydraulic settings'),
+    PFT: t('PFT 专属设置', 'PFT settings'),
+    PC: t('PC 专属设置', 'PC settings'),
+    DEF_USE_VariablySaturatedFlow: t('变饱和流设置', 'Variably saturated flow settings'),
+  };
+  return labels[step - 1] + (owners[process ?? ''] ? ' → ' + owners[process!] : '');
+}
+
+export function configurationReason(reason?: string | null): string | undefined {
+  return reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考'
+    ? undefined
+    : (reason ?? undefined);
 }

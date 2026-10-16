@@ -7,6 +7,7 @@ import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import type { Overlay } from '../../lib/types';
 import {
+  configurationReason,
   modelSettingGroups,
   modelSettingGroup,
   modelSettingValue,
@@ -256,20 +257,13 @@ export default function ConfigurationOptions({
     'DEF_Reservoir_Method',
   ];
   const catchmentRouting = kernelMacros?.includes('CATCHMENT') === true;
-  const lulccLaiFields = [
-    'DEF_LAI_MONTHLY',
-    'DEF_LAI_CHANGE_YEARLY',
-    'DEF_LAI_START_YEAR',
-    'DEF_LAI_END_YEAR',
-  ];
   const groupForField = (field: ModelField) =>
     catchmentRouting && catchmentRoutingFields.includes(field.name)
       ? 'water'
       : modelSettingGroup(field);
   const included = (field: ModelField) =>
     process
-      ? processSettingOwner(field, values.fields) === process ||
-        (process === 'DEF_USE_LULCC' && lulccLaiFields.includes(field.name))
+      ? processSettingOwner(field, values.fields) === process
       : !hideProcesses ||
         (catchmentRouting && catchmentRoutingFields.includes(field.name)) ||
         (simulationOptionField(field, values.fields) && !processSettingOwner(field, values.fields));
@@ -500,10 +494,7 @@ export default function ConfigurationOptions({
         enabled: !cannot && !locked && !pickingFile,
         run: pickFile,
       });
-    const reason =
-      context?.reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考'
-        ? null
-        : context?.reason;
+    const reason = configurationReason(context?.reason);
     const resistanceReason = forcedResistance
       ? t(
           'LCT + van Genuchten 时模型固定关闭；切换后恢复自定义值或默认 SL14（1）',
@@ -675,6 +666,8 @@ export default function ConfigurationOptions({
     );
   }
   const orderedGroups = [
+    'site',
+    'forcing',
     'subgrid',
     'soil',
     'water',

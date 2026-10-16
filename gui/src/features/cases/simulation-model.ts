@@ -78,7 +78,7 @@ export function scannedForcing(site: Site | undefined, met: string): boolean {
   return !!site?.met_file && site.met_file === met && !!site.start && !!site.end && !site.problem;
 }
 export function caseRangeKeys(grid?: string | null): string[] {
-  if (!grid) return ['SITE_fsitedata', 'SITE_lon_location', 'SITE_lat_location'];
+  if (!grid) return ['SITE_lon_location', 'SITE_lat_location'];
   const bounds = ['DEF_domain%edgew', 'DEF_domain%edgee', 'DEF_domain%edges', 'DEF_domain%edgen'];
   return [
     ...bounds,
@@ -111,11 +111,57 @@ export const legacyMpiFields = [
   'DEF_nIO_eq_nBlock',
   'DEF_BlockInfoFile',
 ];
-export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>): 2 | 3 | 5 {
+export function isSiteConfiguration(name: string): boolean {
+  const key = name.toUpperCase();
+  return (
+    /^(SITE_|USE_SITE_)/.test(key) &&
+    ![
+      'SITE_FSITEDATA',
+      'SITE_LON_LOCATION',
+      'SITE_LAT_LOCATION',
+      'USE_SITE_HISTWRITEBACK',
+      'USE_SITE_FORCINGREADAHEAD',
+    ].includes(key)
+  );
+}
+export function isForcingScheme(name: string): boolean {
+  return (
+    /^(DEF_DS_|DEF_FORCING%CBL_)/i.test(name) ||
+    [
+      'DEF_FORCING_INTERP_METHOD',
+      'DEF_USE_CBL_HEIGHT',
+      'DEF_USE_FORCING_DOWNSCALING',
+      'DEF_USE_FORCING_DOWNSCALING_SIMPLE',
+    ].includes(name.toUpperCase())
+  );
+}
+export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>): SimulationStep {
+  const name = field.name.toUpperCase();
+  if (name === 'DEF_CASE_NAME') return 1;
+  if (name === 'USE_SITE_HISTWRITEBACK') return 5;
+  if (['DEF_LC_YEAR', 'USE_SITE_FORCINGREADAHEAD'].includes(name)) return 3;
+  if (['SITE_lon_location', 'SITE_lat_location'].includes(field.name)) return 2;
   if (field.section === '网格与并行' || /^DEF_domain%/.test(field.name)) return 2;
   if (field.name.startsWith('DEF_simulation_time%'))
     return /%(start|end|spinup)_/.test(field.name) ? 3 : 5;
-  return ['输出与重启', '输出变量', '调试与诊断'].includes(field.section) ? 5 : 3;
+  if (['输出与重启', '输出变量', '调试与诊断'].includes(field.section)) return 5;
+  if (isSiteConfiguration(field.name) || isForcingScheme(field.name)) return 4;
+  if (
+    ['水热过程', '生态与生地化', '河道与水库', '数据同化', '示踪剂', '城市'].includes(field.section)
+  )
+    return 4;
+  if (
+    /^DEF_LAI_/i.test(field.name) ||
+    [
+      'DEF_LANDONLY',
+      'DEF_USE_DOMINANT_PATCHTYPE',
+      'DEF_HIGHRESSOIL',
+      'DEF_HIGHRESVEG',
+      'DEF_HIGHRESURBAN_ALBEDO',
+    ].includes(field.name.toUpperCase())
+  )
+    return 4;
+  return 3;
 }
 export function simulationFields(
   schema: SchemaField[],

@@ -29,7 +29,7 @@ import {
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import { compatibleKernel } from '../runs/run-model';
-import { simulationOptionField } from './model-settings';
+import { configurationReason, simulationOptionField } from './model-settings';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import {
@@ -1019,7 +1019,7 @@ export default function NewCasePage() {
     <Field
       key={f.name}
       label={optionLabels[f.name] || fieldLabel(f.name, state.language)}
-      hint={optionState(f.name)?.reason ?? (advanced ? f.name : undefined)}
+      hint={configurationReason(optionState(f.name)?.reason) ?? (advanced ? f.name : undefined)}
     >
       {f.kind === 'Logical' ? (
         <Select

@@ -15,6 +15,7 @@ import {
 } from '../versions/configuration-options';
 import {
   filterModelParameters,
+  parameterLocation,
   modelSettingValue,
   processSettingOwner,
   modelParameterEditable,
@@ -176,6 +177,19 @@ export default function ModelSettings({
     if (onModeChange) onModeChange(value);
     else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
+  const supplementarySettings = [
+    { id: 'site', label: t('单点专属设置', 'Single-point settings') },
+    { id: 'forcing', label: t('强迫场处理', 'Forcing processing') },
+  ].filter(
+    ({ id }) =>
+      onCaseChange &&
+      (id !== 'site' || ['site', 'single'].includes(setupEnvironment?.domain ?? '')) &&
+      fields.some((field) => processSettingOwner(field) === id),
+  );
+  const openSupplementarySettings = (id: string) => {
+    if (disabled || !ready) return;
+    setSettings({ id, identity: currentIdentity.current });
+  };
   const actions: UiAction[] = [
     {
       id: 'simulation-model-edit',
@@ -211,6 +225,14 @@ export default function ModelSettings({
       kind: 'click',
       enabled: !disabled && ready,
       run: () => setSettings({ id: selectedMode!, identity: currentIdentity.current }),
+    });
+  for (const { id, label } of supplementarySettings)
+    actions.push({
+      id: `simulation-${id}-settings`,
+      label,
+      kind: 'click',
+      enabled: !disabled && ready,
+      run: () => openSupplementarySettings(id),
     });
   if (ready)
     actions.push({
@@ -419,6 +441,19 @@ export default function ModelSettings({
           )}
           {ready && (
             <>
+              {!!supplementarySettings.length && (
+                <div className="button-row">
+                  {supplementarySettings.map(({ id, label }) => (
+                    <Button
+                      key={id}
+                      disabled={disabled || !ready}
+                      onClick={() => openSupplementarySettings(id)}
+                    >
+                      {label}
+                    </Button>
+                  ))}
+                </div>
+              )}
               <ConfigurationOptions
                 subgrid={selectedMode}
                 caseValues={setupEnvironment?.caseValues}
@@ -434,7 +469,7 @@ export default function ModelSettings({
                 kernelDir={kernel?.dir ?? null}
                 kernelMacros={kernel?.macros}
                 caseScope={
-                  setupEnvironment?.domain === 'site'
+                  ['site', 'single'].includes(setupEnvironment?.domain ?? '')
                     ? 'site'
                     : setupEnvironment?.domain
                       ? 'spatial'
@@ -502,6 +537,10 @@ export default function ModelSettings({
                     </strong>
                     <p>
                       {parameter.section} · {parameter.scope} · {parameter.unit ?? '—'}
+                    </p>
+                    <p>
+                      {t('设置位置', 'Settings location')}:{' '}
+                      {parameterLocation(parameter, modelFields, en)}
                     </p>
                     <p>
                       {modelParameterEditable(parameter, modelFields)
@@ -604,6 +643,8 @@ function ProcessSettingsDialog({
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
     crop: ['作物设置', 'Crop settings'],
+    site: ['单点专属设置', 'Single-point settings'],
+    forcing: ['强迫场处理', 'Forcing processing'],
     DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
     soil: ['土壤水力方案设置', 'Soil hydraulic settings'],
     DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
@@ -676,8 +717,8 @@ function ProcessSettingsDialog({
         if (!open) close();
       }}
       description={t(
-        '修改暂存在此窗口，保存后生效。取消不会更改已开启的过程。',
-        'Changes stay in this window until saved. Cancel keeps the enabled process unchanged.',
+        '修改暂存在此窗口，保存后生效。取消不会更改原有设置。',
+        'Changes stay in this window until saved. Cancel keeps the existing settings unchanged.',
       )}
     >
       {error && <Notice tone="error">{error}</Notice>}
@@ -686,6 +727,22 @@ function ProcessSettingsDialog({
           {t(
             '碳氮初始场默认使用运行数据目录中的 cnsteadystate.nc；启用后会保存完整路径。也可指定其他已有文件。请先设置运行数据目录或填写文件路径。',
             'The carbon/nitrogen initial state defaults to cnsteadystate.nc in the runtime data directory. Enabling it saves the resolved path; an existing custom file can also be used. Set the runtime directory or enter a file path.',
+          )}
+        </Notice>
+      )}
+      {process === 'site' && (
+        <Notice>
+          {t(
+            '设置单点地表类型及站点数据的使用方式；仅适用于单点模拟。',
+            'Configure the single-point surface type and use of site data; applies only to single-point simulations.',
+          )}
+        </Notice>
+      )}
+      {process === 'forcing' && (
+        <Notice>
+          {t(
+            '设置强迫场插值、边界层高度和降尺度处理。相关选项与数据目录一起保存后生效。',
+            'Configure forcing interpolation, boundary-layer height and downscaling. Related options and data directories are applied together when saved.',
           )}
         </Notice>
       )}
@@ -708,8 +765,8 @@ function ProcessSettingsDialog({
       {process === 'DEF_USE_LULCC' && (
         <Notice>
           {t(
-            '土地覆盖变化仅支持空间模拟，要求月尺度、逐年变化的 LAI，并关闭区域单元汇流。年度土地覆盖文件从地表数据目录读取。LAI 起止年控制 LAI 数据读取范围，不代表土地覆盖数据也覆盖这些年份；土地覆盖数据与模拟时段仍需匹配。',
-            'Land-cover change requires a spatial simulation, monthly LAI changing by year, and regional unit routing off. Annual land-cover files come from the land-data directory. LAI start/end years control LAI reads and do not guarantee land-cover data coverage; land-cover inputs must also match the simulation period.',
+            '土地覆盖变化仅支持空间模拟，要求月尺度、逐年变化的 LAI，并关闭区域单元汇流。年度土地覆盖文件从地表数据目录读取。LAI 选项与起止年在下方“次网格与植被”中设置；月尺度和逐年变化由土地覆盖变化自动启用。LAI 起止年控制 LAI 数据读取范围，不代表土地覆盖数据也覆盖这些年份；土地覆盖数据与模拟时段仍需匹配。',
+            'Land-cover change requires a spatial simulation, monthly LAI changing by year, and regional unit routing off. Annual land-cover files come from the land-data directory. LAI options and years are configured under Subgrid and vegetation below; monthly and yearly-changing LAI are enabled automatically. LAI start/end years control LAI reads and do not guarantee land-cover data coverage; land-cover inputs must also match the simulation period.',
           )}
         </Notice>
       )}
