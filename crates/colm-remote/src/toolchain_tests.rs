@@ -1,8 +1,6 @@
-use super::*;
-
 #[cfg(unix)]
 mod shell {
-    use super::*;
+    use super::super::*;
     use std::{
         fs,
         process::Command,
