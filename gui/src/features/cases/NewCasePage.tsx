@@ -24,6 +24,7 @@ import {
   scannedForcing,
   simulationFields,
   isSiteConfiguration,
+  isForcingScheme,
   simulationSteps,
   spinupProblem,
   type SimulationStep,
@@ -825,7 +826,7 @@ export default function NewCasePage() {
   const autoLabel = t('沿用算例默认', 'Use case defaults');
   const optionValue = (f: SchemaField) =>
     caseValues[f.name] ??
-    (isSiteConfiguration(f.name)
+    (isSiteConfiguration(f.name) || isForcingScheme(f.name)
       ? displayLiteral(optionState(f.name)?.built_in_default ?? f.default)
       : '');
   const optionLabels: Record<string, string> = {

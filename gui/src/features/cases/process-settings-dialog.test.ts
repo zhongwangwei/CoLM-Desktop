@@ -210,23 +210,3 @@ test('CN default uses the latest enable and runtime edits and preserves explicit
   await custom.action('save').run();
   assert.deepEqual(custom.saved, []);
 });
-
-for (const [process, changes] of [
-  ['forcing', { DEF_USE_Forcing_Downscaling: '.true.', DEF_DS_topo: "'/data/topography'" }],
-] as const) {
-  test(`${process} popup saves related changes atomically and cancel discards them`, async () => {
-    const h = dialog();
-    h.props.process = process;
-    const editor = h.ready();
-    for (const [key, value] of Object.entries(changes)) editor.onCaseChange({ [key]: value });
-    assert.deepEqual(h.saved, []);
-    await h.action('save').run();
-    assert.deepEqual(h.saved, [changes]);
-    assert.equal(h.closed, 1);
-    const cancelled = dialog();
-    cancelled.props.process = process;
-    cancelled.ready().onCaseChange(changes);
-    await cancelled.action('cancel').run();
-    assert.deepEqual(cancelled.saved, []);
-  });
-}

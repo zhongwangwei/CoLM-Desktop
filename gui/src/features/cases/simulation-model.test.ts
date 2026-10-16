@@ -196,7 +196,12 @@ test('five steps expose data, model and output separately without dropping advan
   );
   assert.deepEqual(
     simulationFields(schema, 3, true).map((f) => f.name),
-    ['DEF_simulation_time%start_sec', 'DEF_simulation_time%spinup_repeat', 'DEF_forcing_namelist'],
+    [
+      'DEF_simulation_time%start_sec',
+      'DEF_simulation_time%spinup_repeat',
+      'DEF_forcing_namelist',
+      'DEF_Forcing_Interp_Method',
+    ],
   );
   assert.deepEqual(simulationFields(schema, 4, true), []);
   assert.deepEqual(
@@ -266,7 +271,7 @@ test('general identity and range coordinates stay separate from model source set
     ['USE_SITE_urban_geometry', '城市', 3],
     ['USE_SITE_HistWriteBack', '输出与重启', 5],
     ['USE_SITE_ForcingReadAhead', '站点', 3],
-    ['DEF_Forcing_Interp_Method', '强迫场', 4],
+    ['DEF_Forcing_Interp_Method', '强迫场', 3],
     ['DEF_LAI_MONTHLY', '地表数据', 4],
     ['DEF_LC_YEAR', '地表数据', 3],
   ] as const)

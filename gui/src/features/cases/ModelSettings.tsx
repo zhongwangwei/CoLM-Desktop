@@ -173,13 +173,6 @@ export default function ModelSettings({
     if (onModeChange) onModeChange(value);
     else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
-  const supplementarySettings = [
-    { id: 'forcing', label: t('强迫场处理', 'Forcing processing') },
-  ].filter(({ id }) => onCaseChange && fields.some((field) => processSettingOwner(field) === id));
-  const openSupplementarySettings = (id: string) => {
-    if (disabled || !ready) return;
-    setSettings({ id, identity: currentIdentity.current });
-  };
   const actions: UiAction[] = [
     {
       id: 'simulation-model-edit',
@@ -215,14 +208,6 @@ export default function ModelSettings({
       kind: 'click',
       enabled: !disabled && ready,
       run: () => setSettings({ id: selectedMode!, identity: currentIdentity.current }),
-    });
-  for (const { id, label } of supplementarySettings)
-    actions.push({
-      id: `simulation-${id}-settings`,
-      label,
-      kind: 'click',
-      enabled: !disabled && ready,
-      run: () => openSupplementarySettings(id),
     });
   if (ready)
     actions.push({
@@ -419,19 +404,6 @@ export default function ModelSettings({
           )}
           {ready && (
             <>
-              {!!supplementarySettings.length && (
-                <div className="button-row">
-                  {supplementarySettings.map(({ id, label }) => (
-                    <Button
-                      key={id}
-                      disabled={disabled || !ready}
-                      onClick={() => openSupplementarySettings(id)}
-                    >
-                      {label}
-                    </Button>
-                  ))}
-                </div>
-              )}
               <ConfigurationOptions
                 engine={setupEnvironment?.engine}
                 subgrid={selectedMode}
@@ -622,7 +594,6 @@ function ProcessSettingsDialog({
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
     crop: ['作物设置', 'Crop settings'],
-    forcing: ['强迫场处理', 'Forcing processing'],
     DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
     DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
     PFT: ['PFT 植被功能型设置', 'PFT settings'],
@@ -704,14 +675,6 @@ function ProcessSettingsDialog({
           {t(
             '碳氮初始场默认使用运行数据目录中的 cnsteadystate.nc；启用后会保存完整路径。也可指定其他已有文件。请先设置运行数据目录或填写文件路径。',
             'The carbon/nitrogen initial state defaults to cnsteadystate.nc in the runtime data directory. Enabling it saves the resolved path; an existing custom file can also be used. Set the runtime directory or enter a file path.',
-          )}
-        </Notice>
-      )}
-      {process === 'forcing' && (
-        <Notice>
-          {t(
-            '设置强迫场插值、边界层高度和降尺度处理。相关选项与数据目录一起保存后生效。',
-            'Configure forcing interpolation, boundary-layer height and downscaling. Related options and data directories are applied together when saved.',
           )}
         </Notice>
       )}
