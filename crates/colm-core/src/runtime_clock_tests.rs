@@ -224,3 +224,72 @@ fn clock_matches_colms_restart_cadence_spinup_gate_and_final_write() {
     assert_eq!(final_only.len(), 1);
     assert!(final_only[0].write_restart);
 }
+
+#[test]
+fn replay_keeps_the_eleventh_first_year_after_ten_warmups() {
+    let start = time(2008, 1, 0);
+    let cutoff = time(2008, 1, 7_200);
+    for end in [cutoff, time(2008, 1, 14_400)] {
+        let mut clock = RuntimeClock::new(start, end, cutoff, 3600.0, 10)
+            .unwrap()
+            .with_restart_frequency(RestartFrequency::Timestep)
+            .with_spinup_replay(true)
+            .unwrap();
+        let steps: Vec<_> = std::iter::from_fn(|| clock.next_step()).collect();
+        assert_eq!(steps.len(), 20 + end.seconds as usize / 3600);
+        assert!(steps[..20]
+            .iter()
+            .all(|step| step.is_spinup && !step.write_restart));
+        assert_eq!(steps[20].forcing_time, start);
+        assert_eq!(steps[20].spinup_cycle, 11);
+        assert!(steps[20..]
+            .iter()
+            .all(|step| !step.is_spinup && step.write_restart));
+        assert!(steps
+            .iter()
+            .enumerate()
+            .all(|(i, step)| step.index == i + 1));
+        assert_eq!(steps.last().unwrap().end_time, end);
+    }
+}
+
+#[test]
+fn replay_rejects_an_empty_or_unreachable_warmup_interval() {
+    let start = time(2008, 1, 0);
+    let end = time(2008, 1, 7200);
+    for cutoff in [start, time(2008, 1, 10800)] {
+        assert!(RuntimeClock::new(start, end, cutoff, 3600.0, 10)
+            .unwrap()
+            .with_spinup_replay(true)
+            .is_err());
+    }
+}
+
+#[test]
+fn replay_preserves_a_complete_leap_first_year_in_the_formal_pass() {
+    let start = time(2008, 1, 0);
+    let mut clock = RuntimeClock::new(start, time(2010, 1, 0), time(2009, 1, 0), 3600.0, 10)
+        .unwrap()
+        .with_spinup_replay(true)
+        .unwrap();
+    let mut warmup_steps = 0;
+    let mut formal_first_year_steps = 0;
+    let mut formal_steps = 0;
+    while let Some(step) = clock.next_step() {
+        if step.is_spinup {
+            warmup_steps += 1;
+        } else {
+            assert_eq!(step.spinup_cycle, 11);
+            if formal_steps == 0 {
+                assert_eq!(step.forcing_time, start);
+            }
+            formal_steps += 1;
+            if step.forcing_time.year == 2008 {
+                formal_first_year_steps += 1;
+            }
+        }
+    }
+    assert_eq!(warmup_steps, 10 * 366 * 24);
+    assert_eq!(formal_first_year_steps, 366 * 24);
+    assert_eq!(formal_steps, (366 + 365) * 24);
+}

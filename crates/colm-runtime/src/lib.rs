@@ -50,6 +50,7 @@ pub struct PointRuntimeConfig {
     pub spinup_until: CalendarTime,
     pub timestep_seconds: f64,
     pub spinup_repeats: usize,
+    pub spinup_replay: bool,
     pub lai_update_schedule: LaiUpdateSchedule,
     pub restart_frequency: RestartFrequency,
     /// `DEF_SSP`：未来 CO2 情景。它只影响 2022 年之后的年份。
@@ -147,7 +148,11 @@ impl PointRuntimeConfig {
         open_history_session(
             HistoryWindowSpec {
                 start: self.start,
-                spinup_until: self.spinup_until,
+                spinup_until: if self.spinup_replay {
+                    self.start
+                } else {
+                    self.spinup_until
+                },
                 end: self.end,
                 timestep_seconds: self.timestep_seconds,
                 frequency: self.history_frequency,
@@ -266,6 +271,7 @@ pub struct DownscaledPointRuntimeStep {
 #[derive(Debug, Clone)]
 pub struct PointRuntime {
     clock: RuntimeClock,
+    spinup_replay: bool,
     forcing: PointForcingSeries,
     greenwich: bool,
     longitude_degrees: f64,
@@ -295,7 +301,9 @@ impl PointRuntime {
                 config.spinup_repeats,
                 config.lai_update_schedule,
             )?
-            .with_restart_frequency(config.restart_frequency),
+            .with_restart_frequency(config.restart_frequency)
+            .with_spinup_replay(config.spinup_replay)?,
+            spinup_replay: config.spinup_replay,
             forcing: colm_forcing::load_point_forcing_with_options(
                 &config.forcing_file,
                 config.boundary_layer.as_ref(),
@@ -565,7 +573,18 @@ impl PointRuntime {
         );
         let downscaling = self.downscaling.clone();
         let site = (self.greenwich, self.longitude_degrees);
+        let replay = self.spinup_replay;
+        let mut previous_cycle = 1;
         let steps = self.run_with_state(states, |step, states| {
+            if replay && step.clock.spinup_cycle != previous_cycle {
+                for (template, state) in templates.iter().zip(states.iter_mut()) {
+                    template.refresh_monthly_leaf_area_index(step.clock.forcing_time, state)?;
+                    if let Some(bgc) = &template.bgc {
+                        bgc.refresh_replay_sources(step.clock.forcing_time, state)?;
+                    }
+                }
+            }
+            previous_cycle = step.clock.spinup_cycle;
             let step = Self::downscaled_step(downscaling.as_ref(), site, step, states)?;
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             // `CoLMDRIVER` 先推进全部 patch，`hist_out` 再逐 patch 累加（`CoLM.F90:512-537`）。
@@ -723,7 +742,18 @@ impl PointRuntime {
         );
         let downscaling = self.downscaling.clone();
         let site = (self.greenwich, self.longitude_degrees);
+        let replay = self.spinup_replay;
+        let mut previous_cycle = 1;
         let steps = self.run_with_state(states, |step, states| {
+            if replay && step.clock.spinup_cycle != previous_cycle {
+                for (template, state) in templates.iter().zip(states.iter_mut()) {
+                    template.refresh_monthly_leaf_area_index(step.clock.forcing_time, state)?;
+                    if let Some(bgc) = &template.bgc {
+                        bgc.refresh_replay_sources(step.clock.forcing_time, state)?;
+                    }
+                }
+            }
+            previous_cycle = step.clock.spinup_cycle;
             let step = Self::downscaled_step(downscaling.as_ref(), site, step, states)?;
             let binding = lct_binding(step, greenwich_time, longitude_radians, co2_scenario)?;
             let mut outputs = Vec::with_capacity(templates.len());
@@ -1696,6 +1726,9 @@ pub fn read_point_runtime_config(case_namelist: impl AsRef<Path>) -> Result<Poin
         start,
         end: simulation_date(&case, "end")?,
         spinup_until,
+        spinup_replay: colm_case::spinup_replay_enabled(
+            case_namelist.parent().unwrap_or(Path::new(".")),
+        )? && required_integer(&case, "DEF_simulation_time%spinup_year")? > 0,
         timestep_seconds: required_real(&case, "DEF_simulation_time%timestep")?,
         spinup_repeats: usize::try_from(required_integer(
             &case,
@@ -2005,6 +2038,27 @@ mod tests {
             ),
         )
         .unwrap();
+    }
+
+    #[test]
+    fn disabled_spinup_ignores_replay_but_still_validates_the_file() {
+        let root = directory("disabled-spinup-replay");
+        let case = root.join("case.nml");
+        write_case_window(&case, &root.join("forcing.nml"), "/unused/", "POINT", 3600);
+        std::fs::write(
+            root.join("spinup.nml"),
+            "&nl_colm_spinup\n replay_start=.true.\n /\n",
+        )
+        .unwrap();
+        let config = read_point_runtime_config(&case).unwrap();
+        assert!(!config.spinup_replay);
+        assert_eq!(config.spinup_until, config.start);
+        std::fs::write(
+            root.join("spinup.nml"),
+            "&nl_colm_spinup\n replay_start='invalid'\n /\n",
+        )
+        .unwrap();
+        assert!(read_point_runtime_config(&case).is_err());
     }
 
     #[test]
@@ -2480,6 +2534,146 @@ mod tests {
             .get_values::<i32, _>(..)
             .unwrap();
         // 三条记录，标签与黄金文件的头三个值逐位相同。
+        assert_eq!(times, vec![56_802_270, 56_802_330, 56_802_390]);
+        assert_eq!(session.remaining(), 0);
+    }
+
+    #[test]
+    fn replay_warmups_retain_state_and_write_the_complete_formal_window() {
+        let root = directory("history-replay-run");
+        let case = root.join("case.nml");
+        let forcing_namelist = root.join("forcing.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        let source_dir = format!("{}/", source.display());
+        // 00:00 → 03:00，1800 s 一步：六步，HOURLY 下三条记录。
+        write_case_window(&case, &forcing_namelist, &source_dir, "POINT", 3 * 3600);
+        with_history(&case, "hourly", "MONTH");
+        let fixture = colm_init::fixtures::SyntheticRestart::write(root.join("restart")).unwrap();
+        let template = assembled_template(&fixture);
+        let mut config = read_point_runtime_config(&case).unwrap();
+        config.spinup_replay = true;
+        config.spinup_until = config.end;
+        config.spinup_repeats = 10;
+        let mut counter_runtime = PointRuntime::open(config.clone()).unwrap();
+        let mut counter = 0usize;
+        let mut formal_counter = None;
+        counter_runtime
+            .run_with_state(&mut counter, |step, count| {
+                if !step.clock.is_spinup && formal_counter.is_none() {
+                    formal_counter = Some(*count);
+                    assert_eq!(step.clock.spinup_cycle, 11);
+                    assert_eq!(step.clock.forcing_time, config.start);
+                }
+                *count += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(formal_counter, Some(60));
+        assert_eq!(counter, 66);
+        assert_eq!(
+            config.history_frequency,
+            colm_hist::schedule::HistoryFrequency::Hourly
+        );
+        assert_eq!(
+            config.history_grouping,
+            colm_hist::schedule::HistoryGrouping::Month
+        );
+        let mut session = config.history_session(root.join("out"), "CN-Cng").unwrap();
+
+        let mut runtime = PointRuntime::open(config).unwrap();
+        let mut state = template.state();
+        let outcome = runtime
+            .run_restart_standard_lct_with_history(&template, &mut state, &mut session, |_, _| {
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(outcome.steps, 66);
+        assert_eq!(outcome.files.len(), 1);
+        assert_eq!(
+            outcome.files[0].file_name().unwrap(),
+            "CN-Cng_hist_2008-01.nc"
+        );
+        let file = netcdf::open(&outcome.files[0]).unwrap();
+        let times = file
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
+        // 三条记录，标签与黄金文件的头三个值逐位相同。
+        assert_eq!(times, vec![56_802_270, 56_802_330, 56_802_390]);
+        assert_eq!(session.remaining(), 0);
+    }
+
+    #[test]
+    fn replay_snow_dispatch_writes_only_the_complete_formal_window() {
+        let root = directory("history-snow-replay");
+        let case = root.join("case.nml");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/Forcing");
+        write_case_window(
+            &case,
+            &root.join("forcing.nml"),
+            &format!("{}/", source.display()),
+            "POINT",
+            10800,
+        );
+        with_history(&case, "hourly", "MONTH");
+        let fixture = colm_init::fixtures::SyntheticRestart::write_with_snow(
+            root.join("restart"),
+            colm_init::fixtures::SyntheticSnow {
+                depth_m: 0.15,
+                water_equivalent_kg_m2: 45.0,
+                ground_snow_fraction: 1.0,
+                temperature_k: 268.0,
+            },
+        )
+        .unwrap();
+        let template = crate::assembly::assemble_standard_lct_snow_template(
+            &crate::assembly::RestartStateFiles {
+                constant: fixture.constant.block.clone(),
+                time: fixture.time.block.clone(),
+            },
+            1,
+            land_physics(),
+        )
+        .unwrap();
+        let mut config = read_point_runtime_config(&case).unwrap();
+        config.spinup_replay = true;
+        config.spinup_until = config.end;
+        config.spinup_repeats = 10;
+        let mut session = config.history_session(root.join("out"), "CN-Cng").unwrap();
+        let mut runtime = PointRuntime::open(config).unwrap();
+        let mut states = vec![template.snow_state()];
+        let initial = states[0].snow.water_equivalent_kg_m2;
+        let mut last_warmup_snow = None;
+        let mut formal_steps = 0;
+        let outcome = runtime
+            .run_restart_standard_lct_snow_with_history(
+                std::slice::from_ref(&template),
+                &mut states,
+                &mut session,
+                |step, states, _| {
+                    let snow = states[0].snow.water_equivalent_kg_m2;
+                    assert!(snow.is_finite());
+                    if step.clock.is_spinup {
+                        last_warmup_snow = Some(snow);
+                    } else {
+                        formal_steps += 1;
+                        assert_eq!(step.clock.spinup_cycle, 11);
+                    }
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(outcome.steps, 66);
+        assert_eq!(formal_steps, 6);
+        assert_ne!(last_warmup_snow.unwrap(), initial);
+        assert_eq!(outcome.files.len(), 1);
+        let file = netcdf::open(&outcome.files[0]).unwrap();
+        let times = file
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
         assert_eq!(times, vec![56_802_270, 56_802_330, 56_802_390]);
         assert_eq!(session.remaining(), 0);
     }

@@ -14,6 +14,7 @@ pub mod minimal;
 pub mod parameters;
 pub mod pft;
 mod result_state;
+mod spinup_replay;
 pub mod tuning;
 
 pub use build::{
@@ -23,6 +24,7 @@ pub use build::{
 pub use layout::{case_name, is_spatial_case, render, validate_case_name, Layout};
 pub use minimal::{is_default, required};
 pub use result_state::{clear_results_stale, mark_results_stale, results_are_stale};
+pub use spinup_replay::spinup_replay_enabled;
 
 #[cfg(test)]
 mod land_cover_tests;

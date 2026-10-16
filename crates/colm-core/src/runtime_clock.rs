@@ -90,6 +90,7 @@ pub struct RuntimeClock {
     timestep_seconds: f64,
     spinup_repeats: usize,
     spinup_cycle: usize,
+    replay_start: bool,
     is_spinup: bool,
     index: usize,
     lai_schedule: LaiUpdateSchedule,
@@ -149,6 +150,7 @@ impl RuntimeClock {
             timestep_seconds,
             spinup_repeats,
             spinup_cycle: 1,
+            replay_start: false,
             is_spinup: before(start, spinup_until),
             index: 1,
             lai_schedule,
@@ -163,6 +165,18 @@ impl RuntimeClock {
     pub fn with_restart_frequency(mut self, restart_frequency: RestartFrequency) -> Self {
         self.restart_frequency = restart_frequency;
         self
+    }
+
+    /// Replays the entire requested window after the configured warmup passes.
+    pub fn with_spinup_replay(mut self, enabled: bool) -> Result<Self> {
+        if enabled {
+            ensure!(
+                before(self.start, self.spinup_until) && !before(self.end, self.spinup_until),
+                "spinup replay requires start < spinup cutoff <= end"
+            );
+        }
+        self.replay_start = enabled;
+        Ok(self)
     }
 
     /// 上游的 `deltim`：本步的秒数，**保留 namelist 的实数**而不是推进日历用的取整值。
@@ -202,14 +216,19 @@ impl RuntimeClock {
             update_lai,
             update_albedo: true,
             update_sst: false,
-            write_restart: restart_due(
-                self.restart_frequency,
-                end_time,
-                self.elapsed_step_seconds,
-                next_elapsed,
-                self.spinup_until,
-                self.end,
-            ),
+            write_restart: (!self.replay_start || !self.is_spinup)
+                && restart_due(
+                    self.restart_frequency,
+                    end_time,
+                    self.elapsed_step_seconds,
+                    next_elapsed,
+                    if self.replay_start {
+                        self.start
+                    } else {
+                        self.spinup_until
+                    },
+                    self.end,
+                ),
         };
         self.current = step.end_time;
         self.elapsed = next_elapsed;
@@ -221,6 +240,11 @@ impl RuntimeClock {
                 self.elapsed = self.start;
             } else {
                 self.is_spinup = false;
+                if self.replay_start {
+                    self.spinup_cycle += 1;
+                    self.current = self.start;
+                    self.elapsed = self.start;
+                }
             }
         }
         self.index += 1;

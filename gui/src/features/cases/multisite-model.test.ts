@@ -115,7 +115,7 @@ test('first-year validation requires a complete year and bounded integer repetit
   assert.throws(() => firstYearCutoff('2001-02-30'));
   for (const repeat of ['', '0', '-1', '1.5', '2147483648', 'Infinity'])
     assert.throws(() => planMultiSites({ ...base, repeat }));
-  for (const end of ['2001-12-31', '2002-01-01'])
+  for (const end of ['2001-12-31'])
     assert.throws(() => planMultiSites({ ...base, drafts: [{ ...base.drafts[0], end }] }));
 });
 
@@ -162,4 +162,18 @@ test('shared irrigation remains enabled only for PFT station structures', () => 
     assert.equal(farm.fields.DEF_USE_IRRIGATION, subgrid === 'PC' ? '.false.' : '.true.');
   }
   assert.equal(physics.DEF_USE_IRRIGATION, '.true.');
+});
+
+test('first-year replay accepts exactly one source year but per-site cutoff remains strict', () => {
+  const draft = { ...base.drafts[0], end: '2002-01-01' };
+  const [plan] = planMultiSites({ ...base, drafts: [draft] });
+  assert.equal(plan.form.start, '2001-01-01');
+  assert.equal(plan.form.end, plan.form.spinup_end);
+  assert.throws(() =>
+    planMultiSites({ ...base, mode: 'per-site', drafts: [{ ...draft, spinup_end: draft.end }] }),
+  );
+  assert.throws(
+    () => planMultiSites({ ...base, form: { ...base.form, engine: 'fortran' } }),
+    /Rust/,
+  );
 });

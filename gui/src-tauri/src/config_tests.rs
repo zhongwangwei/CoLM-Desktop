@@ -9,7 +9,7 @@ fn set_batches(dirs: Vec<String>, fields: Vec<FieldChange>) -> Result<BatchWrite
 }
 
 fn set_test_spinup(dirs: Vec<String>, years: u32, repeat: u32) -> Result<BatchWrite, String> {
-    super::set_spinup(dirs, years, repeat, None)
+    super::set_spinup(dirs, years, repeat, None, None)
 }
 
 const SAMPLE: &str = "\
@@ -4078,4 +4078,70 @@ fn vic_parameter_file_follows_scalar_or_grid_mode() {
             }
         );
     }
+}
+
+#[test]
+fn replay_spinup_retains_the_first_formal_year_and_counts_extra_cycles() {
+    let dirs = batch("spinup-replay", &[NML_A]);
+    super::set_spinup(dirs.clone(), 1, 10, None, Some(true)).unwrap();
+    let timing = super::read_timing(dirs.clone()).unwrap();
+    assert_eq!(timing.output_start, timing.start);
+    let text = std::fs::read_to_string(std::path::Path::new(&dirs[0]).join("case.nml")).unwrap();
+    let doc = colm_namelist::parse(&text).unwrap();
+    let legacy = super::one_timing(&doc);
+    assert!(timing.total_steps > legacy.5);
+    // Changing the repetition count preserves the saved replay mode.
+    super::set_spinup(dirs.clone(), 1, 2, None, None).unwrap();
+    assert_eq!(
+        super::read_timing(dirs.clone()).unwrap().output_start,
+        timing.start
+    );
+    super::set_spinup(dirs.clone(), 0, 0, None, None).unwrap();
+    assert!(!colm_case::spinup_replay_enabled(std::path::Path::new(&dirs[0])).unwrap());
+}
+
+#[test]
+fn replay_spinup_allows_a_single_year_of_forcing() {
+    let dirs = batch(
+        "spinup-replay-one-year",
+        &["&nl_colm
+ DEF_simulation_time%start_year=2002
+ DEF_simulation_time%start_month=1
+ DEF_simulation_time%start_day=1
+ DEF_simulation_time%end_year=2003
+ DEF_simulation_time%end_month=1
+ DEF_simulation_time%end_day=1
+ DEF_simulation_time%timestep=3600.
+/
+"],
+    );
+    super::set_spinup(dirs.clone(), 1, 10, None, Some(true)).unwrap();
+    let timing = super::read_timing(dirs.clone()).unwrap();
+    assert_eq!(timing.output_start, "2002-01-01");
+    assert_eq!(timing.total_steps, 365 * 24 * 11);
+    let err = super::set_spinup(dirs, 2, 10, None, Some(true)).unwrap_err();
+    assert!(err.contains("预热截止时间"));
+}
+
+#[test]
+fn creating_optional_configuration_is_staged_before_replacing_existing_files() {
+    let dirs = batch("optional-config-stage-failure", &[NML_A]);
+    let root = std::path::Path::new(&dirs[0]);
+    let original = std::fs::read_to_string(root.join("case.nml")).unwrap();
+    let result = super::write_files_atomic_untracked(&[
+        (root.join("case.nml"), "replacement".into()),
+        (root.join("spinup.nml"), "replay".into()),
+        (root.join("missing").join("other.nml"), "failure".into()),
+    ]);
+    assert!(result.is_err());
+    assert_eq!(
+        std::fs::read_to_string(root.join("case.nml")).unwrap(),
+        original
+    );
+    assert!(!root.join("spinup.nml").exists());
+    assert!(std::fs::read_dir(root).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with('.')));
 }

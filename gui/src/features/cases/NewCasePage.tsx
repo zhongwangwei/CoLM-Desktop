@@ -720,6 +720,7 @@ export default function NewCasePage() {
               dirs: [out],
               years: 1,
               repeat: Number(multiSiteRepeat),
+              replayStart: true,
               kernelDir: null,
             });
         } catch (error) {
@@ -1939,9 +1940,18 @@ export default function NewCasePage() {
             {multiSite && (
               <Notice>
                 {t(
-                  '每个站点在当前项目下保存为独立算例。城市与作物站点分别采用相应过程设置；正式输出从各站预热截止后开始。',
-                  'Each site is saved as a separate case under this project. Urban and crop sites use their respective processes; production output starts after each spinup cutoff.',
+                  '每个站点在当前项目下保存为独立算例，城市与作物站点分别采用相应过程设置。',
+                  'Each site is saved as a separate case under this project. Urban and crop sites use their respective processes. ',
                 )}
+                {multiSiteMode === 'first-year'
+                  ? t(
+                      '首年预热完成后，从原始起始日期重新开始正式模拟，输出包含第一年。',
+                      'After first-year spinup, formal simulation restarts at the original start date and includes the first year in output.',
+                    )
+                  : t(
+                      '正式输出从各站预热截止日期开始；未启用预热的站点从起始日期开始。',
+                      'Formal output starts at each spinup cutoff, or the start date for sites without spinup.',
+                    )}
               </Notice>
             )}
             <Notice>

@@ -74,7 +74,10 @@ export default function MultiSiteSettings({
     name: t('算例名称', 'Case name'),
     start: t('起始日期（包含预热）', 'Start date (including spinup)'),
     end: t('结束日期', 'End date'),
-    spinup_end: t('预热结束 / 正式模拟开始', 'Spinup end / formal simulation start'),
+    spinup_end:
+      mode === 'first-year'
+        ? t('首年预热截止日期', 'First-year spinup cutoff')
+        : t('预热结束 / 正式模拟开始', 'Spinup end / formal simulation start'),
     spinup_repeat: t('预热重复次数', 'Spinup repetitions'),
   };
   const rows = drafts.map((draft) => {
@@ -255,8 +258,8 @@ export default function MultiSiteSettings({
           </Field>
           <Notice>
             {t(
-              '各站从所选起始日期开始，将第一年强迫场重复 N 次；正式输出从下一周年日期开始，不保留预热第一年的历史输出。',
-              'Each site repeats its first year of forcing N times from the selected start date. Formal output begins on the next anniversary; the first spinup year is not retained in history output.',
+              '各站将第一年强迫场预热 N 次，之后从原始起始日期重新开始完整的正式模拟，输出包含第一年。此模式使用 Rust 计算核心。',
+              'Each site warms up using its first year of forcing N times, then restarts the full formal simulation at the original start date. Output includes the first year. This mode uses the Rust engine.',
             )}
           </Notice>
         </>

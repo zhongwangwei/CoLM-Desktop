@@ -260,12 +260,17 @@ export function spinupProblem(
   cutoff: string,
   repeat: string,
   en = false,
+  replayStart = false,
 ): string | null {
   if (!cutoff) return null;
-  if (!validDate(cutoff) || cutoff <= start || cutoff >= end)
-    return en
-      ? 'Spinup cutoff must be after the start and before the end.'
-      : '预热截止日期须晚于开始日期、早于结束日期。';
+  if (!validDate(cutoff) || cutoff <= start || (replayStart ? cutoff > end : cutoff >= end))
+    return replayStart
+      ? en
+        ? 'The first spinup year must fit within the simulation period.'
+        : '模拟时段须覆盖完整的第一年预热。'
+      : en
+        ? 'Spinup cutoff must be after the start and before the end.'
+        : '预热截止日期须晚于开始日期、早于结束日期。';
   if (!/^\d+$/.test(repeat) || Number(repeat) < 1)
     return en ? 'Spinup repetitions must be a positive integer.' : '预热重复次数须为正整数。';
   return null;
@@ -276,6 +281,7 @@ export function newCaseProblem(
   site: Site | undefined,
   physics: Record<string, string>,
   en = false,
+  replayStart = false,
 ): string | null {
   const t = (zh: string, english: string) => (en ? english : zh);
   const generalProblem = newCaseGeneralProblem(form, en);
@@ -336,5 +342,6 @@ export function newCaseProblem(
     form.spinup_end,
     physics['DEF_simulation_time%spinup_repeat'] ?? '1',
     en,
+    replayStart,
   );
 }

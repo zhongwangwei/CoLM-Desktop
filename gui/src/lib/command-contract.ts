@@ -379,6 +379,10 @@ export const commandContract = {
     "kernelDir": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "replayStart": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "case_data_save": {
