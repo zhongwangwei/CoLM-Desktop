@@ -244,7 +244,11 @@ pub async fn remote_create_case(
     let fields: Vec<crate::config::FieldChange> =
         serde_json::from_value(request.get("fields").cloned().unwrap_or(json!([])))
             .map_err(|e| e.to_string())?;
-    let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
+    let mut fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
+    crate::sidecar::preserve_generated_forcing(
+        text(&request, "forcing_dataset").as_deref(),
+        &mut fields,
+    );
     request["fields"] = json!(fields
         .iter()
         .map(|f| json!({"path":f.path,"value":f.value}))
@@ -525,5 +529,28 @@ mod tests {
         assert_ne!(a, cache_paths(base, "one", "/projects/b/site-a").unwrap().0);
         assert!(cache_paths(base, "one", "/projects/../a").is_err());
         assert!(cache_paths(base, "one", "relative/a").is_err());
+    }
+    #[test]
+    fn publication_includes_owned_forcing_with_relative_reference() {
+        let dir = std::env::temp_dir().join(format!("remote-owned-forcing-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _cleanup = PreviewCleanup(dir.clone());
+        std::fs::write(
+            dir.join("case.nml"),
+            "&nl_colm\n DEF_forcing_namelist='forcing.nml'\n/\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("forcing.nml"), "&nl_colm_forcing\n DEF_dir_forcing='/server/data/'\n DEF_forcing%dataset='CUSTOM'\n/\n").unwrap();
+        let files = publish_files(&dir, "/server/case").unwrap();
+        let case = colm_namelist::parse(&files["case.nml"]).unwrap();
+        assert_eq!(
+            case.get("DEF_forcing_namelist"),
+            Some(&colm_namelist::Value::Str("forcing.nml".into()))
+        );
+        let forcing = colm_namelist::parse(&files["forcing.nml"]).unwrap();
+        assert_eq!(
+            forcing.get("DEF_dir_forcing"),
+            Some(&colm_namelist::Value::Str("/server/data/".into()))
+        );
     }
 }

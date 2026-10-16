@@ -1542,3 +1542,20 @@ mod server_case_routing_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[tauri::command]
+pub async fn probe_forcing_directory(
+    app: tauri::AppHandle,
+    path: String,
+    host: Option<String>,
+) -> Result<Value, String> {
+    let mut args = vec!["forcing-directory-probe".into(), "--path".into(), path];
+    let server = host
+        .as_deref()
+        .map(|host| server_for(app.clone(), host))
+        .transpose()?;
+    if let Some(server) = &server {
+        args.extend(["--host".into(), server.host.clone()]);
+    }
+    ssh_cli_json(args, resource_dir(&app), server.as_ref()).await
+}

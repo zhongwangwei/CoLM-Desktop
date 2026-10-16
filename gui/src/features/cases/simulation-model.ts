@@ -317,11 +317,24 @@ export function newCaseProblem(
           'This model requires runtime data; open Advanced settings.',
         );
     } else {
-      if (!form.rawdata || !form.runtime || !form.forcing)
+      if (!form.rawdata || !form.runtime)
         return t(
-          '请提供地表数据、Runtime 数据与强迫场配置。',
-          'Provide surface data, runtime data and forcing configuration.',
+          '请提供地表数据与 Runtime 数据目录。',
+          'Provide surface data and runtime directories.',
         );
+      const configurationFile =
+        form.forcing_mode === 'config' || (!form.forcing_mode && !!form.forcing);
+      if (
+        configurationFile
+          ? !form.forcing?.trim()
+          : !form.spatial_forcingdir?.trim() || !form.forcing_dataset
+      )
+        return configurationFile
+          ? t('请选择强迫场配置文件。', 'Choose a forcing configuration file.')
+          : t(
+              '请选择强迫场数据路径，并识别或确认数据集。',
+              'Choose the forcing data path and identify or confirm its dataset.',
+            );
       if (
         !form.timestep?.trim() ||
         !Number.isFinite(Number(form.timestep)) ||

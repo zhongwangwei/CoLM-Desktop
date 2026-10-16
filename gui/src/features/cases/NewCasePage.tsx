@@ -60,6 +60,7 @@ import type { CaseEntry } from '../../lib/types';
 import RunLocationSettings from '../runs/RunLocationSettings';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
+import SpatialForcingFields, { type ForcingLayoutProbe } from './SpatialForcingFields';
 
 function isMethaneSite(site: Site) {
   return (
@@ -153,6 +154,9 @@ export default function NewCasePage() {
     catchment: '',
     shapefile: '',
     forcing: '',
+    forcing_mode: seed?.form?.forcing ? 'config' : 'directory',
+    spatial_forcingdir: '',
+    forcing_dataset: '',
     timestep: '1800',
     run_threads: '',
     run_ranks: '1',
@@ -164,6 +168,28 @@ export default function NewCasePage() {
   });
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
+  const [forcingDatasets, setForcingDatasets] = useState<string[]>([]);
+  const [forcingCatalogError, setForcingCatalogError] = useState('');
+  const forcingSequence = useRef(0);
+  const [forcingProbe, setForcingProbe] = useState<ForcingLayoutProbe | null>(null);
+  const templateForcing = form.kind !== 'site' && form.forcing_mode !== 'config';
+  useEffect(() => {
+    if (!templateForcing || !form.kind) return;
+    let current = true;
+    void invoke<string[]>('forcing_datasets')
+      .then((datasets) => {
+        if (current) {
+          setForcingDatasets(datasets);
+          setForcingCatalogError('');
+        }
+      })
+      .catch((error) => {
+        if (current) setForcingCatalogError(String(error));
+      });
+    return () => {
+      current = false;
+    };
+  }, [templateForcing, form.kind]);
   const resourceServer = servers?.find((server) => server.host === form.host);
   const runSettings = {
     host: form.host,
@@ -361,7 +387,9 @@ export default function NewCasePage() {
     ...(form.site ? { SITE_fsitedata: form.site } : {}),
     ...(form.rawdata ? { DEF_dir_rawdata: form.rawdata } : {}),
     ...(form.runtime ? { DEF_dir_runtime: form.runtime } : {}),
-    ...(form.kind !== 'site' && form.forcing ? { DEF_forcing_namelist: form.forcing } : {}),
+    ...(form.kind !== 'site' && !templateForcing && form.forcing
+      ? { DEF_forcing_namelist: form.forcing }
+      : {}),
     ...regionalRoutingPatch(physics, form.kind, form.grid),
   };
   const dataRequest = JSON.stringify({
@@ -425,6 +453,10 @@ export default function NewCasePage() {
   }
   const set = (k: string, v: string) => {
     setError('');
+    if (['host', 'spatial_forcingdir', 'forcing_mode', 'kind'].includes(k) && v !== form[k]) {
+      ++forcingSequence.current;
+      setForcingProbe(null);
+    }
     if (k === 'host' && v !== form.host) {
       ++sequence.current;
       exampleValues.current = {};
@@ -457,6 +489,8 @@ export default function NewCasePage() {
         catchment: '',
         shapefile: '',
         forcing: '',
+        spatial_forcingdir: '',
+        forcing_dataset: '',
       }));
       return;
     }
@@ -473,6 +507,7 @@ export default function NewCasePage() {
       const next: Record<string, string> = {
         ...f,
         [k]: v,
+        ...(k === 'spatial_forcingdir' && v !== f[k] ? { forcing_dataset: '' } : {}),
         ...(s
           ? {
               name: f.name || s.name,
@@ -485,6 +520,32 @@ export default function NewCasePage() {
       return next;
     });
   };
+
+  async function detectForcing(path = form.spatial_forcingdir) {
+    const request = ++forcingSequence.current;
+    if (!path.trim()) {
+      setForcingProbe(null);
+      return;
+    }
+    setForcingProbe({ status: 'loading', candidates: [] });
+    try {
+      const result = await invoke<{ path: string; candidates: string[]; truncated: boolean }>(
+        'probe_forcing_directory',
+        { path, host: form.host || null },
+      );
+      if (!alive.current || request !== forcingSequence.current) return;
+      setForcingProbe({ status: 'done', ...result });
+      if (result.candidates.length === 1 && !result.truncated)
+        setForm((old) =>
+          old.spatial_forcingdir === path && !old.forcing_dataset
+            ? { ...old, forcing_dataset: result.candidates[0] }
+            : old,
+        );
+    } catch (error) {
+      if (alive.current && request === forcingSequence.current)
+        setForcingProbe({ status: 'error', candidates: [], error: String(error) });
+    }
+  }
 
   function setOption(name: string, value: string) {
     setError('');
@@ -740,7 +801,7 @@ export default function NewCasePage() {
   function adaptAndSelectSite(s: Site) {
     selectSite(s.site_file);
   }
-  const folderKeys = ['root', 'sitedir', 'forcingdir', 'rawdata', 'runtime'],
+  const folderKeys = ['root', 'sitedir', 'forcingdir', 'spatial_forcingdir', 'rawdata', 'runtime'],
     fileKeys = ['site', 'met', 'mesh', 'catchment', 'shapefile', 'forcing'];
   async function pick(k: string) {
     return work(async () => {
@@ -749,7 +810,10 @@ export default function NewCasePage() {
         : folderKeys.includes(k)
           ? await invoke<string | null>('pick_folder', { key: `new-${k}` })
           : await invoke<string | null>('pick_file', { key: `new-${k}`, filter: null });
-      if (path) set(k, path);
+      if (path) {
+        set(k, path);
+        if (k === 'spatial_forcingdir') await detectForcing(path);
+      }
       return { path, cancelled: !path };
     });
   }
@@ -1129,7 +1193,9 @@ export default function NewCasePage() {
           ...changed,
           ...physicsFields(regionalRoutingPatch(physics, form.kind, form.grid)),
           ...Object.entries(spinup).map(([path, value]) => ({ path, value })),
-        ],
+        ].filter(
+          (field) => !templateForcing || field.path.toLowerCase() !== 'def_forcing_namelist',
+        ),
         mode = versionMode(physics, classification);
       const job = { dir: out, cancelRequested: false };
       creation.current = job;
@@ -1170,9 +1236,9 @@ export default function NewCasePage() {
             catchmentFile: form.catchment || null,
             out,
             name: form.name,
-            forcing: form.forcing,
-            forcingDataset: null,
-            forcingDir: null,
+            forcing: templateForcing ? '' : form.forcing,
+            forcingDataset: templateForcing ? form.forcing_dataset : null,
+            forcingDir: templateForcing ? form.spatial_forcingdir : null,
             rawdata: form.rawdata,
             runtime: form.runtime,
             start: form.start,
@@ -1253,6 +1319,8 @@ export default function NewCasePage() {
     catchment: t('汇水区网格文件', 'Catchment file'),
     shapefile: t('流域边界文件', 'Watershed boundary'),
     forcing: t('强迫场配置文件', 'Forcing configuration'),
+    spatial_forcingdir: t('强迫场数据路径', 'Forcing data path'),
+    forcing_dataset: t('强迫场数据集', 'Forcing dataset'),
   };
   const rangeKeys = [
     ...(form.kind === 'region' && form.grid === 'latlon' ? ['west', 'east', 'south', 'north'] : []),
@@ -1269,7 +1337,7 @@ export default function NewCasePage() {
     ? ['rawdata', 'runtime']
     : form.kind === 'site'
       ? ['site', 'met', 'rawdata', 'runtime']
-      : ['rawdata', 'runtime', 'forcing'];
+      : ['rawdata', 'runtime', templateForcing ? 'spatial_forcingdir' : 'forcing'];
   const keys =
     step === 1
       ? ['root', 'name']
@@ -1350,8 +1418,35 @@ export default function NewCasePage() {
     value: form[k],
     type: 'text',
     disabled: !enabled,
-    set: (v) => set(k, v),
+    set: (v) => {
+      set(k, v);
+      if (k === 'spatial_forcingdir') void detectForcing(v);
+    },
   }));
+  if (step === 3 && form.kind !== 'site') {
+    fields.push({
+      id: 'new-forcing-mode',
+      label: t('强迫场配置方式', 'Forcing setup'),
+      type: 'choice',
+      value: form.forcing_mode,
+      disabled: !enabled,
+      options: [
+        { value: 'directory', label: t('从数据路径自动配置', 'Configure from data path') },
+        { value: 'config', label: t('使用已有配置文件', 'Use an existing configuration') },
+      ],
+      set: (value) => set('forcing_mode', value),
+    });
+    if (templateForcing)
+      fields.push({
+        id: 'new-forcing-dataset',
+        label: labels.forcing_dataset,
+        type: 'choice',
+        value: form.forcing_dataset,
+        options: forcingDatasets.map((value) => ({ value, label: value })),
+        disabled: !enabled,
+        set: (value) => set('forcing_dataset', value),
+      });
+  }
   const resourceFields: UiField[] = [
     {
       id: 'new-run-threads',
@@ -1526,6 +1621,18 @@ export default function NewCasePage() {
   }
 
   const actions: UiAction[] = [
+    ...(step === 3 && templateForcing
+      ? [
+          {
+            id: 'new-detect-forcing',
+            label: t('识别数据集', 'Identify dataset'),
+            kind: 'click' as const,
+            enabled:
+              enabled && !!form.spatial_forcingdir.trim() && forcingProbe?.status !== 'loading',
+            run: () => detectForcing(),
+          },
+        ]
+      : []),
     ...(step === 1
       ? [
           {
@@ -1694,6 +1801,7 @@ export default function NewCasePage() {
         ? { domain: form.kind, ...(form.kind !== 'site' ? { grid: form.grid } : {}) }
         : {}),
       ...(step >= 3 ? { period: { start: form.start, end: form.end } } : {}),
+      ...(step === 3 && templateForcing ? { forcing: forcingProbe } : {}),
       ...(step >= 4 ? { classification: form.landcover } : {}),
       ...(step === 5 ? { name: form.name, input_check: 'performed_when_creating' } : {}),
     },
@@ -1708,6 +1816,7 @@ export default function NewCasePage() {
           placeholder={['start', 'end', 'spinup_end'].includes(k) ? 'YYYY-MM-DD' : undefined}
           maxLength={['start', 'end', 'spinup_end'].includes(k) ? 10 : undefined}
           onChange={(e) => set(k, e.target.value)}
+          onBlur={k === 'spatial_forcingdir' ? () => void detectForcing() : undefined}
         />
         {(folderKeys.includes(k) || fileKeys.includes(k)) && (
           <Button
@@ -2305,9 +2414,41 @@ export default function NewCasePage() {
             </>
           )}
           <div className="form-grid" style={{ marginTop: '1rem' }}>
-            {dataKeys.map(render)}
+            {form.kind !== 'site' && (
+              <Field label={t('强迫场配置方式', 'Forcing setup')}>
+                <Select
+                  disabled={!enabled}
+                  value={form.forcing_mode}
+                  onChange={(event) => set('forcing_mode', event.target.value)}
+                >
+                  <option value="directory">
+                    {t('从数据路径自动配置', 'Configure from data path')}
+                  </option>
+                  <option value="config">
+                    {t('使用已有配置文件', 'Use an existing configuration')}
+                  </option>
+                </Select>
+              </Field>
+            )}
+            {dataKeys.filter((key) => key !== 'spatial_forcingdir').map(render)}
             {basicOptions.filter((f) => !f.name.endsWith('spinup_repeat')).map(renderOption)}
           </div>
+          {templateForcing && (
+            <SpatialForcingFields
+              directory={form.spatial_forcingdir}
+              dataset={form.forcing_dataset}
+              datasets={forcingDatasets}
+              probe={forcingProbe}
+              catalogError={forcingCatalogError}
+              disabled={!enabled}
+              en={en}
+              onDirectoryChange={(value) => set('spatial_forcingdir', value)}
+              onDirectoryBlur={() => void detectForcing()}
+              onPick={() => void pick('spatial_forcingdir').catch(() => {})}
+              onDatasetChange={(value) => set('forcing_dataset', value)}
+              onDetect={() => void detectForcing()}
+            />
+          )}
 
           {moreOptions()}
         </Card>

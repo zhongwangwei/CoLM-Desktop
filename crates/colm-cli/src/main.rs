@@ -58,6 +58,7 @@ mod case_runs;
 mod energy_summary;
 mod fingerprint;
 mod flux_diagnostics;
+mod forcing_directory;
 mod history_cleanup;
 mod history_cmd;
 mod history_subset;
@@ -444,6 +445,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-case-sync" => remote_cmd::remote_cases::cmd(opts, "sync")?,
         "remote-case-abort" => remote_cmd::remote_cases::cmd(opts, "abort")?,
         "remote-browse" => remote_files::run(opts)?,
+        "forcing-directory-probe" => forcing_directory::run(opts)?,
         "remote-mkdir" => remote_files::mkdir(opts)?,
         "remote-history-cleanup" => history_cleanup::run(opts)?,
         "remote-check-paths" => remote_files::check_paths(opts)?,
