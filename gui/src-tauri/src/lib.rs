@@ -233,6 +233,7 @@ pub fn run() {
             remote_scan_sites,
             remote_create_case,
             remote_browse,
+            remote_mkdir,
             remote_engines,
             remote_engine_clean,
             remote_engine_recover,

@@ -2,18 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { newServer } from '../features/resources/resource';
+import type { Server } from '../lib/types';
 
 type Node = {
   type: string;
   props: {
     disabled?: boolean;
+    placeholder?: string;
     onClick: () => void;
     onChange: (event: { target: { value: string } }) => void;
     onSubmit: (event: { preventDefault: () => void }) => void;
   };
   children: unknown[];
 };
-function harness(directory = false) {
+function harness(directory = false, server?: Server) {
   const source = readFileSync(new URL('./RemotePathBrowser.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -26,6 +29,7 @@ function harness(directory = false) {
     effectCursor = 0;
   const pending: (() => void)[] = [];
   const requests: {
+    command: string;
     args: Record<string, unknown>;
     resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
@@ -65,8 +69,8 @@ function harness(directory = false) {
         });
       }
     },
-    invoke: (_: string, args: Record<string, unknown>) =>
-      new Promise((resolve, reject) => requests.push({ args, resolve, reject })),
+    invoke: (command: string, args: Record<string, unknown>) =>
+      new Promise((resolve, reject) => requests.push({ command, args, resolve, reject })),
   };
   const Browser = new Function(...Object.keys(env), `${code}; return Browser;`)(
     ...Object.values(env),
@@ -74,6 +78,7 @@ function harness(directory = false) {
   let tree: Node;
   const props = {
     host: 'server',
+    server,
     directory,
     en: true,
     onSelect: (path: string) => selected.push(path),
@@ -121,6 +126,20 @@ function harness(directory = false) {
       .props.onSubmit({ preventDefault() {} });
     render();
   }
+  function createFolder(name: string) {
+    if (
+      !nodes(tree).some((node) => node.type === 'input' && node.props.placeholder === 'Folder name')
+    )
+      click('New folder');
+    nodes(tree)
+      .find((node) => node.type === 'input' && node.props.placeholder === 'Folder name')!
+      .props.onChange({ target: { value: name } });
+    render();
+    nodes(tree)
+      .filter((node) => node.type === 'form')[1]
+      .props.onSubmit({ preventDefault() {} });
+    render();
+  }
   render();
   return {
     requests,
@@ -128,12 +147,20 @@ function harness(directory = false) {
     click,
     settle,
     go,
+    createFolder,
     text: () => text(tree),
     render,
     props,
     unmount: () => effects.forEach((effect) => effect.cleanup?.()),
   };
 }
+
+test('folder browsing carries an unsaved connection without requiring its work directory', () => {
+  const server = { ...newServer(), host: 'server', username: 'researcher' };
+  const view = harness(true, server);
+  assert.deepEqual(view.requests[0].args, { host: 'server', path: null, server });
+  assert.equal(server.root, '');
+});
 const listing = {
   path: '/data',
   parent: '/',
@@ -142,6 +169,46 @@ const listing = {
     { name: 'site.nc', path: '/data/site.nc', directory: false },
   ],
 };
+
+test('new folders use the displayed server directory and open the created folder', async () => {
+  const server = { ...newServer(), host: 'server' };
+  const view = harness(true, server);
+  view.requests[0].resolve(listing);
+  await view.settle();
+  view.createFolder('project');
+  assert.equal(view.requests[1].command, 'remote_mkdir');
+  assert.deepEqual(view.requests[1].args, {
+    host: 'server',
+    path: '/data',
+    name: 'project',
+    server,
+  });
+  view.requests[1].resolve({ path: '/data/project' });
+  await view.settle();
+  assert.equal(view.requests[2].command, 'remote_browse');
+  assert.equal(view.requests[2].args.path, '/data/project');
+  view.requests[2].resolve({ path: '/data/project', parent: '/data', entries: [] });
+  await view.settle();
+  view.click('Select this folder');
+  assert.deepEqual(view.selected, ['/data/project']);
+});
+
+test('folder creation errors retain the parent and allow a corrected name', async () => {
+  const view = harness(true);
+  view.requests[0].resolve(listing);
+  await view.settle();
+  view.createFolder('exists');
+  view.requests[1].reject(new Error('Folder already exists'));
+  await view.settle();
+  assert.match(view.text(), /Folder already exists/);
+  view.createFolder('new-name');
+  assert.equal(view.requests[2].args.path, '/data');
+  assert.equal(view.requests[2].args.name, 'new-name');
+  view.unmount();
+  view.requests[2].resolve({ path: '/data/new-name' });
+  await view.settle();
+  assert.equal(view.requests.length, 3, 'closed dialogs cannot navigate after creation');
+});
 
 test('remote file browser loads, navigates folders and selects files', async () => {
   const view = harness();

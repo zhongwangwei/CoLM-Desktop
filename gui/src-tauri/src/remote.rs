@@ -720,24 +720,68 @@ pub async fn remote_browse(
     app: tauri::AppHandle,
     host: String,
     path: Option<String>,
+    server: Option<Server>,
 ) -> Result<Value, String> {
-    let server = server_for(app.clone(), &host)?;
+    let server = match server {
+        Some(server) => server,
+        None => server_for(app.clone(), &host)?,
+    };
+    let args = browse_args(&server, &host, path)?;
+    ssh_cli_json(args, resource_dir(&app), Some(&server)).await
+}
+
+fn browse_args(server: &Server, host: &str, path: Option<String>) -> Result<Vec<String>, String> {
+    if server.host != host {
+        return Err("浏览目录的服务器必须与当前连接一致".into());
+    }
+    validate_connection(server)?;
     let path = path.unwrap_or_default();
     if !path.is_empty() && (!path.starts_with('/') || path.chars().any(char::is_control)) {
         return Err("Expected an absolute server path without control characters".into());
     }
-    ssh_cli_json(
-        vec![
-            "remote-browse".into(),
-            "--host".into(),
-            server.host.clone(),
-            "--path".into(),
-            path,
-        ],
-        resource_dir(&app),
-        Some(&server),
-    )
-    .await
+    Ok(vec![
+        "remote-browse".into(),
+        "--host".into(),
+        server.host.clone(),
+        "--path".into(),
+        path,
+    ])
+}
+
+#[tauri::command]
+pub async fn remote_mkdir(
+    app: tauri::AppHandle,
+    host: String,
+    path: String,
+    name: String,
+    server: Option<Server>,
+) -> Result<Value, String> {
+    let server = match server {
+        Some(server) => server,
+        None => server_for(app.clone(), &host)?,
+    };
+    let args = mkdir_args(&server, &host, path, name)?;
+    ssh_cli_json(args, resource_dir(&app), Some(&server)).await
+}
+
+fn mkdir_args(
+    server: &Server,
+    host: &str,
+    path: String,
+    name: String,
+) -> Result<Vec<String>, String> {
+    if path.is_empty()
+        || name.is_empty()
+        || [".", ".."].contains(&name.as_str())
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
+        return Err("请选择父目录并输入单一文件夹名称，不能包含路径分隔符或控制字符".into());
+    }
+    let mut args = browse_args(server, host, Some(path))?;
+    args[0] = "remote-mkdir".into();
+    args.extend(["--name".into(), name]);
+    Ok(args)
 }
 
 #[tauri::command]

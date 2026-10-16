@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, Dialog, Field, Input, Notice } from './ui';
 import { invoke } from '../lib/ipc';
+import type { Server } from '../lib/types';
 
 type Listing = {
   path: string;
@@ -11,6 +12,7 @@ type Listing = {
 };
 type Props = {
   host: string;
+  server?: Server;
   initialPath?: string;
   directory: boolean;
   en: boolean;
@@ -19,39 +21,69 @@ type Props = {
 };
 
 export default function RemotePathBrowser(props: Props) {
-  return <Browser key={`${props.host}\n${props.initialPath ?? ''}`} {...props} />;
+  return (
+    <Browser
+      key={`${props.host}\n${props.initialPath ?? ''}\n${JSON.stringify(props.server ?? null)}`}
+      {...props}
+    />
+  );
 }
 
-function Browser({ host, initialPath, directory, en, onSelect, onClose }: Props) {
+function Browser({ host, server, initialPath, directory, en, onSelect, onClose }: Props) {
   const [address, setAddress] = useState(initialPath ?? '');
-  const [request, setRequest] = useState({ path: initialPath || null });
+  const [request, setRequest] = useState<{ path: string | null; name?: string }>({
+    path: initialPath || null,
+  });
+  const [newFolder, setNewFolder] = useState<string | null>(null);
   const [result, setResult] = useState<{ request: typeof request; listing: Listing } | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
-  const listing = result?.request === request ? result.listing : null;
+  const listing =
+    result &&
+    (result.request === request ||
+      (request.name !== undefined && result.listing.path === request.path))
+      ? result.listing
+      : null;
+  const creating = loading && request.name !== undefined;
   useEffect(() => {
     let alive = true;
     setLoading(true);
     setError('');
-    void invoke<Listing>('remote_browse', { host, path: request.path }).then(
-      (value) => {
+    const failed = (reason: unknown) => {
+      if (!alive) return;
+      setError(String(reason));
+      setLoading(false);
+    };
+    const args = {
+      host,
+      path: request.path,
+      ...(server ? { server } : {}),
+    };
+    if (request.name !== undefined) {
+      void invoke<{ path: string }>('remote_mkdir', { ...args, name: request.name }).then(
+        (value) => {
+          if (!alive) return;
+          setNewFolder(null);
+          setAddress(value.path);
+          setRequest({ path: value.path });
+        },
+        failed,
+      );
+    } else {
+      void invoke<Listing>('remote_browse', args).then((value) => {
         if (!alive) return;
         setResult({ request, listing: value });
         setAddress(value.path);
         setLoading(false);
-      },
-      (reason: unknown) => {
-        if (!alive) return;
-        setError(String(reason));
-        setLoading(false);
-      },
-    );
+      }, failed);
+    }
     return () => {
       alive = false;
     };
-  }, [host, request]);
+  }, [host, server, request]);
   const browse = (path: string | null) => {
     setError('');
+    setNewFolder(null);
     setLoading(true);
     setRequest({ path });
   };
@@ -72,19 +104,64 @@ function Browser({ host, initialPath, directory, en, onSelect, onClose }: Props)
       >
         <Field label={en ? 'Server path' : '服务器路径'}>
           <Input
+            disabled={creating}
             value={address}
             onChange={(event) => setAddress(event.target.value)}
             placeholder={en ? 'Home directory' : '用户主目录'}
           />
         </Field>
         <div className="actions">
-          <Button type="submit">{en ? 'Go' : '前往'}</Button>
+          <Button type="submit" disabled={creating}>
+            {en ? 'Go' : '前往'}
+          </Button>
           <Button disabled={!listing?.parent || loading} onClick={() => browse(listing!.parent)}>
             {en ? 'Up' : '上一级'}
           </Button>
-          <Button onClick={() => browse(null)}>{en ? 'Home' : '主目录'}</Button>
+          <Button disabled={creating} onClick={() => browse(null)}>
+            {en ? 'Home' : '主目录'}
+          </Button>
+          <Button
+            disabled={!listing || loading || newFolder !== null}
+            onClick={() => setNewFolder('')}
+          >
+            {en ? 'New folder' : '新建文件夹'}
+          </Button>
         </div>
       </form>
+      {newFolder !== null && listing && (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (loading || !newFolder.trim()) return;
+            setLoading(true);
+            setRequest({ path: listing.path, name: newFolder.trim() });
+          }}
+        >
+          <Field label={en ? 'New folder name' : '新文件夹名称'}>
+            <Input
+              autoFocus
+              disabled={creating}
+              placeholder={en ? 'Folder name' : '文件夹名称'}
+              value={newFolder}
+              onChange={(event) => setNewFolder(event.target.value)}
+            />
+          </Field>
+          <div className="actions">
+            <Button type="submit" disabled={loading || !newFolder.trim()}>
+              {en ? 'Create folder' : '创建'}
+            </Button>
+            <Button
+              disabled={creating}
+              onClick={() => {
+                setNewFolder(null);
+                setError('');
+              }}
+            >
+              {en ? 'Cancel' : '取消'}
+            </Button>
+          </div>
+        </form>
+      )}
       {error && <Notice tone="error">{error}</Notice>}
       {loading && <p role="status">{en ? 'Loading…' : '正在加载…'}</p>}
       {listing && !loading && (

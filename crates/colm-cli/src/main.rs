@@ -30,6 +30,7 @@
 //! colm-cli history-catalog <算例目录>
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli study-parameters
+//! colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
@@ -175,6 +176,8 @@ usage:
                    [--max-points N] [--out series.json]
   colm-cli study-parameters
                    # 输出可采样专家参数元数据
+  colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
+                   # 独占创建一个文件夹，不覆盖已有路径、不创建父目录
   colm-cli study-preflight <case-root> --spec study.json
                    # 只校验 Study，不创建目录
   colm-cli study-create <case-root> --spec study.json
@@ -437,6 +440,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-case-sync" => remote_cmd::remote_cases::cmd(opts, "sync")?,
         "remote-case-abort" => remote_cmd::remote_cases::cmd(opts, "abort")?,
         "remote-browse" => remote_files::run(opts)?,
+        "remote-mkdir" => remote_files::mkdir(opts)?,
         "remote-check-paths" => remote_files::check_paths(opts)?,
         "remote-engines" => remote_cmd::cmd_engines(opts)?,
         "remote-engine-clean" => remote_cmd::cmd_engine_clean(opts)?,

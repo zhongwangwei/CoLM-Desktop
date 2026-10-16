@@ -28,6 +28,12 @@ function harness(
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
+  let browser: {
+    server: resource.Server;
+    directory: boolean;
+    onSelect: (path: string) => void;
+    onClose: () => void;
+  } | null = null;
   const ipc = async (command: string, args?: Record<string, unknown>) => {
     calls.push({ command, args });
     switch (command) {
@@ -65,7 +71,13 @@ function harness(
     ...resource,
     remoteRunPermissions,
     reconcileRemoteRun,
-    React: { createElement: () => null },
+    React: {
+      createElement: (type: string, props: typeof browser) => {
+        if (type === 'remote-browser') browser = props;
+        return null;
+      },
+    },
+    RemotePathBrowser: 'remote-browser',
     Advanced: () => {},
     Button: () => {},
     Card: () => {},
@@ -159,6 +171,7 @@ function harness(
     failProbe: () => {
       failProbe = true;
     },
+    browser: () => browser,
   };
 }
 
@@ -198,6 +211,48 @@ test('resource selection is page-local and dirty drafts block switching and navi
   assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
 });
 
+test('server work directory picker uses the unsaved host and only fills its draft', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-new');
+  page.fill('resource-host', 'tms17l');
+  await page.action('resource-browse-root');
+  const browser = page.browser();
+  assert.ok(browser);
+  assert.equal(browser.server.host, 'tms17l');
+  assert.equal(browser.server.root, '');
+  assert.equal(browser.directory, true);
+  assert.ok(page.guard());
+  browser.onSelect('/server/projects');
+  const contract = page.render();
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-root')?.value,
+    '/server/projects',
+  );
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+});
+
+test('new server keeps optional local path mappings collapsed and empty', async () => {
+  const page = harness();
+  await page.ready();
+  let contract = await page.action('resource-new');
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-directories-toggle'));
+  contract = await page.action('resource-advanced-toggle');
+  assert.ok(!contract.fields.some((field) => field.id.includes('map-')));
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-add-map'));
+  assert.equal(
+    contract.actions.find((action) => action.id === 'resource-directories-toggle')?.label,
+    '本地路径映射（可选）',
+  );
+  page.fill('resource-host', 'tms17l');
+  await page.action('resource-browse-root');
+  assert.deepEqual(page.browser()?.server.maps, []);
+  page.browser()?.onClose();
+  contract = await page.action('resource-directories-toggle');
+  assert.ok(contract.actions.some((action) => action.id === 'resource-add-map'));
+  assert.ok(!contract.fields.some((field) => field.id.includes('map-')));
+});
+
 test('only visible configuration fields and selected maintenance actions enter the contract', async () => {
   const page = harness();
   let contract = await page.ready();
@@ -206,6 +261,7 @@ test('only visible configuration fields and selected maintenance actions enter t
     ['resource-host', 'resource-username', 'resource-root', 'resource-auth'],
   );
   assert.ok(!contract.actions.some((action) => action.id === 'resource-build'));
+  await page.action('resource-advanced-toggle');
   contract = await page.action('resource-directories-toggle');
   assert.ok(contract.fields.some((field) => field.id === 'resource-root'));
   await page.action('resource-add-map');
@@ -372,6 +428,7 @@ test('password registration stays native-session-only and revokes connection evi
 test('busy operations block navigation even before React rerenders the busy state', () => {
   const lock = { current: true };
   const reason = callback('navigationReason', {
+    rootBrowser: null,
     busy: false,
     lock,
     dirty: false,
