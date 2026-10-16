@@ -184,7 +184,7 @@ class Driver:
         self.request('/pick', str(value))
         self.js('const el=field('+json.dumps(names)+'); const b=$("button",el.closest(".field")); '
                 'if(!b||b.disabled)throw Error("Browse unavailable"); b.click(); return true;')
-        self.wait('return field('+json.dumps(names)+').value==='+json.dumps(str(value))+';')
+        self.wait('try{return field('+json.dumps(names)+').value==='+json.dumps(str(value))+';}catch{return false;}')
 
 
 def run(args):
@@ -223,7 +223,7 @@ def run(args):
         driver.wait('return !!window.__TAURI__?.core?.invoke && buttons().length>0;')
         driver.js(OBSERVE)
         checkpoint('00-ready')
-        driver.press('新建模拟', 'New simulation')
+        driver.press('＋ 新建模拟', '+ New simulation', '新建模拟', 'New simulation')
         driver.wait('return !!$$(".field-label").find(e=>["模拟名称","Simulation name"].includes(txt(e)));')
         driver.press('Rust 引擎（推荐）', 'Rust engine (recommended)')
         driver.pick(['保存到项目目录', 'Project folder'], Path(args.project_root).resolve())
@@ -278,9 +278,15 @@ def run(args):
             assert actual == expected, f'Resource choice lost: {labels}'
         deadline = time.monotonic()+args.timeout
         samples = []
+        captured_progress = False
         while time.monotonic() < deadline:
             observed = driver.js('return {events:window.__multisiteQA.events,view:snapshot()};')
             samples.append({'at': time.time(), 'stations': observed['view']['stations']})
+            if not captured_progress and sum(bool(station['active'] and station['progress']) for station in observed['view']['stations']) >= 2:
+                driver.js('$(".simulation-monitor").scrollIntoView({block:"start"});return true;')
+                time.sleep(.2)
+                checkpoint('06a-concurrent-progress')
+                captured_progress = True
             done = [e for e in observed['events'] if e['event']=='run://done' and e['payload'].get('source_case', e['payload'].get('case')) in directories]
             if any(e['payload'].get('code') != 0 or e['payload'].get('cancelled') for e in done):
                 raise AssertionError('A station failed; see captured scientific events/logs')
