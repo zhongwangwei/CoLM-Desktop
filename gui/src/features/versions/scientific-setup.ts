@@ -67,9 +67,23 @@ export function setupChoices(
     )
       ?.trim()
       .toLowerCase();
+  const displayValue = (key: string) =>
+    value(key) ??
+    (
+      queryFields.find((f) => f.name.toLowerCase() === key.toLowerCase())?.built_in_default ??
+      fields.find((f) => f.name.toLowerCase() === key.toLowerCase())?.default
+    )
+      ?.trim()
+      .toLowerCase();
   const on = (key: string) => value(key) === '.true.';
   const subgrid = environment.subgrid?.toUpperCase() ?? '',
-    soil = foundationValue(overlay.physics, 'soil', overlay.parameters);
+    soil = foundationValue(overlay.physics, 'soil', overlay.parameters),
+    displayedSoil =
+      displayValue('DEF_USE_Campbell_SOIL_MODEL') === '.true.'
+        ? 'Campbell'
+        : displayValue('DEF_USE_Campbell_SOIL_MODEL') === '.false.'
+          ? 'vG'
+          : '';
   const list = (key: string) =>
     unquote(value(key) ?? '')
       .split(',')
@@ -139,11 +153,7 @@ export function setupChoices(
           v === '.false.'))
     )
       return bilingual('请先关闭漫滩回馈', 'Disable floodplain feedback first');
-    if (
-      v === '.false.' &&
-      id === 'DEF_USE_VariablySaturatedFlow' &&
-      value('DEF_USE_Campbell_SOIL_MODEL') === '.false.'
-    )
+    if (v === '.false.' && id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG')
       return bilingual(
         'van Genuchten 必须开启变饱和流；请先改用 Campbell',
         'van Genuchten requires variably saturated flow; choose Campbell first',
@@ -318,7 +328,12 @@ export function setupChoices(
         ? crop
           ? '.true.'
           : '.false.'
-        : foundationValue(overlay.physics, c.id, overlay.parameters),
+        : c.id === 'soil'
+          ? displayedSoil
+          : c.id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG'
+            ? '.true.'
+            : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
+    inherited: c.id !== 'crop' && c.keys.every((key) => value(key) === undefined),
     pending: c.keys.some(
       (k) =>
         !queryFields.find((f) => f.name === k) || queryFields.find((f) => f.name === k)?.pending,
