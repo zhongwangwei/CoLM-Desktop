@@ -27,7 +27,13 @@ export default function ProjectPage() {
     [versionChooser, setVersionChooser] = useState(false);
   const createdBatch = !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
     savedView = state.projectView?.root === state.root ? state.projectView : undefined,
-    page = state.projectCasesOpen ? (createdBatch ? 'batch' : 'cases') : savedView?.page,
+    page = state.projectCasesOpen
+      ? createdBatch
+        ? 'batch'
+        : 'cases'
+      : savedView?.home
+        ? undefined
+        : savedView?.page,
     chooser = page === 'results' ? 'results' : page ? 'simulation' : null,
     batchPage = page === 'batch',
     batchFromCreation = createdBatch || (batchPage && !!savedView?.fromCreation);

@@ -811,7 +811,7 @@ export default function RunPanel({
           },
         ]
       : []),
-    ...(advanced
+    ...(advanced && !batchCases
       ? [
           {
             id: 'run-kernel',
@@ -858,14 +858,15 @@ export default function RunPanel({
         ]
       : []),
   ].map((f) => ({ ...f, disabled: pending || ('disabled' in f && f.disabled === true) }));
-  fields.push({
-    id: 'run-advanced',
-    label: t('高级配置', 'Advanced settings'),
-    value: String(advanced),
-    type: 'switch',
-    disabled: pending,
-    set: (v) => setAdvanced(v === 'true'),
-  });
+  if (!batchCases)
+    fields.push({
+      id: 'run-advanced',
+      label: t('高级配置', 'Advanced settings'),
+      value: String(advanced),
+      type: 'switch',
+      disabled: pending,
+      set: (v) => setAdvanced(v === 'true'),
+    });
   usePageContract(
     {
       title: batchCases ? t('批量运行', 'Batch run') : bilingual('运行', 'Run'),
@@ -1067,8 +1068,12 @@ export default function RunPanel({
       {!kernelMatches && (
         <Notice tone="warning">
           {t(
-            '没有与当前模型匹配的内核。可在高级配置中选择，或在模型版本页检查。',
-            'Select a compatible kernel in Advanced settings, or check Model versions.',
+            batchCases
+              ? '没有与当前模型匹配的内核，请在模型版本页检查。'
+              : '没有与当前模型匹配的内核。可在高级配置中选择，或在模型版本页检查。',
+            batchCases
+              ? 'No compatible kernel. Check Model versions.'
+              : 'Select a compatible kernel in Advanced settings, or check Model versions.',
           )}
         </Notice>
       )}
@@ -1089,28 +1094,30 @@ export default function RunPanel({
           )}
         </Notice>
       )}
-      <Advanced
-        open={advanced}
-        onOpenChange={setAdvanced}
-        title={t('高级配置（引擎与计算阶段）', 'Advanced settings (engine and stages)')}
-      >
-        <div className="form-grid">
-          {fields
-            .slice(1)
-            .filter(
-              (f) =>
-                ![
-                  'run-advanced',
-                  'run-ranks',
-                  'run-threads',
-                  'run-workers',
-                  'run-cpus',
-                  'run-scheduler',
-                ].includes(f.id),
-            )
-            .map(render)}
-        </div>
-      </Advanced>
+      {!batchCases && (
+        <Advanced
+          open={advanced}
+          onOpenChange={setAdvanced}
+          title={t('高级配置（引擎与计算阶段）', 'Advanced settings (engine and stages)')}
+        >
+          <div className="form-grid">
+            {fields
+              .slice(1)
+              .filter(
+                (f) =>
+                  ![
+                    'run-advanced',
+                    'run-ranks',
+                    'run-threads',
+                    'run-workers',
+                    'run-cpus',
+                    'run-scheduler',
+                  ].includes(f.id),
+              )
+              .map(render)}
+          </div>
+        </Advanced>
+      )}
       <footer className="simulation-footer">
         {onBack ? (
           <Button disabled={pending} onClick={back}>
