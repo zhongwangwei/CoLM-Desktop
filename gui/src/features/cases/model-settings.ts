@@ -175,7 +175,6 @@ export function processSettingOwner(
   if (isSiteConfiguration(field.name)) return 'site';
   if (isForcingScheme(field.name)) return 'forcing';
   const roots: Record<string, string> = {
-    DEF_USE_SOILPAR_UPS_FIT: 'soil',
     DEF_USE_BGC: 'DEF_USE_BGC',
     DEF_USE_TRACER: 'DEF_USE_TRACER',
     DEF_URBAN_RUN: 'DEF_URBAN_RUN',
@@ -548,7 +547,6 @@ export function parameterLocation(
     DEF_USE_TRACER: t('示踪设置', 'Tracer settings'),
     DEF_USE_LULCC: t('土地覆盖变化设置', 'Land-cover change settings'),
     DEF_USE_GridRiverLakeFlow: t('汇流设置（按网格类型）', 'Routing settings (by grid type)'),
-    soil: t('土壤水力设置', 'Soil hydraulic settings'),
     PFT: t('PFT 专属设置', 'PFT settings'),
     PC: t('PC 专属设置', 'PC settings'),
     DEF_USE_VariablySaturatedFlow: t('变饱和流设置', 'Variably saturated flow settings'),

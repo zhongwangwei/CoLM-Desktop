@@ -130,10 +130,21 @@ export default function ScientificSetupCards({
         request.id === 'crop' && !['.true.', '.false.'].includes(request.value)
           ? '.true.'
           : request.value;
-      const reason = choices
-        .find((c) => c.id === request.id)
-        ?.choices.find((c) => c.value === requestedValue)?.reason;
+      const choice = choices.find((c) => c.id === request.id);
+      const reason = choice?.choices.find((c) => c.value === requestedValue)?.reason;
       if (reason) throw new Error(reason);
+      const previous = choice?.value;
+      if (
+        onCaseChange &&
+        onOpenSettings &&
+        request.value !== '.false.' &&
+        previous === request.value &&
+        !choice?.inherited &&
+        hasSettings(request.id, result?.fields)
+      ) {
+        onOpenSettings(request.id);
+        return;
+      }
       const next = applySetupRequest(
         effective,
         fields,
@@ -147,11 +158,10 @@ export default function ScientificSetupCards({
         return Promise.resolve(onCaseChange(caseOptionPatch(effective, next, fields)))
           .then(() => {
             setError('');
-            const previous = choices.find((choice) => choice.id === request.id)?.value;
             if (
               currentIdentity.current === identity &&
               request.value !== '.false.' &&
-              previous !== requestedValue &&
+              (previous !== requestedValue || choice?.inherited) &&
               hasSettings(request.id, result?.fields)
             )
               onOpenSettings?.(request.id);
@@ -183,17 +193,15 @@ export default function ScientificSetupCards({
       !!onOpenSettings &&
       hasSettings(control.id, result?.fields) &&
       !!control.value &&
-      control.value !== '.false.';
+      control.value !== '.false.' &&
+      !control.choices.find((choice) => choice.value === control.value)?.reason;
     if (settingsAvailable)
       actions.push({
         id: `setup-${control.id}-settings`,
         label: t('设置', 'Settings'),
         kind: 'click',
         enabled: !locked,
-        run: () => {
-          if (locked || writeLocked.current) throw new Error('Configuration is locked');
-          onOpenSettings!(control.id);
-        },
+        run: () => write({ id: control.id, value: control.value! }),
       });
     const label = `${index + (includeSubgrid ? 1 : 2)}. ${t(control.zh, control.en)}`;
     const available = control.choices.filter((c) => !c.reason);
@@ -237,13 +245,33 @@ export default function ScientificSetupCards({
           ))}
         </div>
         {settingsAvailable && (
-          <Button disabled={locked} onClick={() => onOpenSettings!(control.id)}>
+          <Button
+            disabled={locked}
+            onClick={() => invoke({ id: control.id, value: control.value! })}
+          >
             {t('设置', 'Settings')}
           </Button>
         )}
         {control.pending && result?.context_complete && (
           <p className="muted">
             {t('这一项的前提还在核对。', 'The prerequisites of this item are still being checked.')}
+          </p>
+        )}
+        {control.id === 'soil' && (
+          <p className="muted">
+            {control.value === 'Campbell'
+              ? t(
+                  'Campbell 的 b、ψs 来自逐层土壤数据。',
+                  'Campbell b and ψs come from soil-layer data.',
+                )
+              : t(
+                  'van Genuchten 的 α、n、L、θr 来自逐层土壤数据。',
+                  'van Genuchten α, n, L and θr come from soil-layer data.',
+                )}
+            {t(
+              '共用选项在下方“土壤方案”中设置。',
+              'Shared options are configured under Soil schemes below.',
+            )}
           </p>
         )}
         {control.id === 'crop' && (

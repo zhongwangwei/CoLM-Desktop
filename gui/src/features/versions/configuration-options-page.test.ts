@@ -54,6 +54,7 @@ function harness() {
       undefined | ((patch: helpers.CaseOptionPatch) => void | Promise<void>),
     caseValues: undefined as Record<string, string> | undefined,
     subgrid: undefined as string | undefined,
+    caseScope: undefined as 'site' | 'spatial' | 'unknown' | undefined,
     kernelMacros: undefined as readonly string[] | undefined,
     source: { kind: 'draft', id: 'd1', generation: 0, overlay } as helpers.ConfigurationSource,
     overlay,
@@ -935,11 +936,11 @@ for (const [process, input, output, kind, initial] of [
     assert.ok(!h.nodes.some((n) => n.type === 'Field' && JSON.stringify(n.props).includes(output)));
   });
 
-test('hydraulic settings retain only fitting and respect applicability', async () => {
-  for (const hidden of [undefined, 'DEF_USE_SOILPAR_UPS_FIT']) {
+test('common soil settings expose fitting only for spatial simulations', async () => {
+  for (const scope of ['site', 'spatial'] as const) {
     const h = harness(),
       patches: helpers.CaseOptionPatch[] = [];
-    h.props.process = 'soil';
+    h.props.caseScope = scope;
     h.props.modalActions = [];
     h.props.onCaseChange = (patch) => {
       patches.push(patch);
@@ -947,7 +948,7 @@ test('hydraulic settings retain only fitting and respect applicability', async (
     h.props.caseValues = {};
     for (const [name, kind, initial] of [
       ['DEF_USE_SOILPAR_UPS_FIT', 'logical', '.false.'],
-      ['DEF_RSS_SCHEME', 'integer', '0'],
+      ['DEF_RSS_SCHEME', 'integer', '1'],
     ])
       h.props.fields.push({
         name,
@@ -958,27 +959,15 @@ test('hydraulic settings retain only fitting and respect applicability', async (
         derived: false,
       });
     h.render();
-    const response = h.response();
-    response.fields = response.fields.map((f) => ({
-      ...f,
-      pending: false,
-      mode: f.name === hidden ? 'disabled' : 'editable',
-    }));
-    h.requests.at(-1)!.resolve(response);
-    for (let i = 0; i < 5; i++) await Promise.resolve();
-    const c = h.render();
-    for (const [name, value] of [
-      ['DEF_USE_SOILPAR_UPS_FIT', '.true.'],
-      ['DEF_RSS_SCHEME', '1'],
-    ]) {
-      const field = c.fields.find((f) => f.id === `configuration-${name}`);
-      if (name === hidden) assert.equal(field, undefined);
-      else if (name === 'DEF_RSS_SCHEME') assert.equal(field, undefined);
-      else {
-        assert.ok(field, name);
-        await field.set(value);
-        assert.equal(patches.at(-1)?.[name], value);
-      }
+    let c = await h.settle();
+    c.actions.find((a) => a.id === 'configuration-group-soil')!.run();
+    c = h.render();
+    assert.ok(c.fields.some((f) => f.id === 'configuration-DEF_RSS_SCHEME'));
+    const fitting = c.fields.find((f) => f.id === 'configuration-DEF_USE_SOILPAR_UPS_FIT');
+    assert.equal(!!fitting, scope === 'spatial');
+    if (fitting) {
+      await fitting.set('.true.');
+      assert.equal(patches.at(-1)?.DEF_USE_SOILPAR_UPS_FIT, '.true.');
     }
   }
 });

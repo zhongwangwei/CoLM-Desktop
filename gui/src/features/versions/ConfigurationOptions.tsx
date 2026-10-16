@@ -687,7 +687,10 @@ export default function ConfigurationOptions({
     const rows = fields
       .filter(
         (field) =>
-          included(field) && !excludeKeys.includes(field.name) && groupedField(field, catalog),
+          included(field) &&
+          !excludeKeys.includes(field.name) &&
+          groupedField(field, catalog) &&
+          !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
       .filter(
         (field) =>

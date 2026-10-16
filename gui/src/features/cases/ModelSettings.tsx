@@ -8,11 +8,7 @@ import ConfigurationOptions from '../versions/ConfigurationOptions';
 import ScientificSetupCards from '../versions/ScientificSetupCards';
 import { setupHandledKeys, type SetupEnvironment } from '../versions/scientific-setup';
 import { isCaseField, type SchemaField } from './case-model';
-import {
-  caseFieldVisible,
-  cnInitialStatePatch,
-  type CaseOptionPatch,
-} from '../versions/configuration-options';
+import { cnInitialStatePatch, type CaseOptionPatch } from '../versions/configuration-options';
 import {
   filterModelParameters,
   parameterLocation,
@@ -408,25 +404,13 @@ export default function ModelSettings({
             disabled={disabled || loading}
             onCaseChange={onCaseChange}
             hasSettings={(id, states) =>
-              // 土壤设置同时解释强制条件和参数来源，即使当前没有可编辑项也保留入口。
-              id === 'soil' ||
               id === 'DEF_USE_TRACER' ||
               fields.some(
                 (field) =>
                   processSettingOwner(field, states) === id &&
                   (!setupHandledKeys.includes(field.name) ||
                     field.name === 'DEF_TUNING_CROP_PLANTING_DAY') &&
-                  settingAvailable(field.name, states) &&
-                  (!states?.length ||
-                    caseFieldVisible(
-                      field.name,
-                      states.map((state) =>
-                        state.parent_gate?.toLowerCase() ===
-                        (id === 'crop' ? 'def_use_crop' : id.toLowerCase())
-                          ? { ...state, parent_gate_enabled: true }
-                          : state,
-                      ),
-                    )),
+                  settingAvailable(field.name, states),
               )
             }
             onOpenSettings={
@@ -646,7 +630,6 @@ function ProcessSettingsDialog({
     site: ['单点专属设置', 'Single-point settings'],
     forcing: ['强迫场处理', 'Forcing processing'],
     DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
-    soil: ['土壤水力方案设置', 'Soil hydraulic settings'],
     DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
     PFT: ['PFT 植被功能型设置', 'PFT settings'],
     PC: ['PC 植物群落设置', 'PC settings'],
@@ -770,22 +753,6 @@ function ProcessSettingsDialog({
           )}
         </Notice>
       )}
-      {process === 'soil' && (
-        <Notice>
-          <p>
-            {t(
-              'Campbell 的 b、ψs 和 van Genuchten 的 α、n、L、θr 等曲线参数来自逐层土壤数据；此处只调整关联选项。',
-              'Campbell b and ψs, and van Genuchten α, n, L and θr come from soil data for each layer; this window edits related options only.',
-            )}
-          </p>
-          <p>
-            {t(
-              'Campbell 的变饱和流可在对应过程卡片中调整；van Genuchten 始终启用变饱和流。土壤表面阻抗在下方“土壤方案”中设置。土壤参数升尺度拟合仅用于区域地表数据构建，单点不使用。',
-              'For Campbell, adjust variably saturated flow on its process card; van Genuchten always enables it. Soil-surface resistance is configured below under Soil schemes. Soil-parameter upscaling fit is used only when building spatial surface data, not at single points.',
-            )}
-          </p>
-        </Notice>
-      )}
       <ConfigurationOptions
         process={process}
         modalActions={actions}
@@ -813,9 +780,7 @@ function ProcessSettingsDialog({
         excludeKeys={[
           ...setupHandledKeys.filter((key) => key !== 'DEF_TUNING_CROP_PLANTING_DAY'),
           // SinglePoint 不读这些方案项；单点弹窗里出现只会制造“已生效”的假象。
-          ...(['site', 'single'].includes(environment?.domain ?? '')
-            ? [...spatialOnlySchemeKeys, 'DEF_USE_SOILPAR_UPS_FIT']
-            : []),
+          ...(['site', 'single'].includes(environment?.domain ?? '') ? spatialOnlySchemeKeys : []),
         ]}
         onCaseChange={(change) => {
           if (!live.current || lockedNow.current || savingNow.current)

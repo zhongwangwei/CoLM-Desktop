@@ -174,23 +174,8 @@ test('process dialog completes unchanged without empty save and stays open on fa
   await assert.rejects(Promise.resolve(h.action('save').run()), /locked/);
 });
 
-test('soil dialog explains parameter sources and excludes spatial fitting at single points', () => {
-  const h = dialog();
-  h.props.process = 'soil';
-  for (const domain of ['site', 'single', 'region']) {
-    h.props.environment.domain = domain;
-    const child = h.render();
-    assert.equal(child.excludeKeys.includes('DEF_USE_SOILPAR_UPS_FIT'), domain !== 'region');
-    const text = h.nodes.flatMap((node) => node.children).join(' ');
-    assert.match(text, /土壤数据/);
-    assert.match(text, /van Genuchten/);
-    assert.match(text, /变饱和流/);
-    assert.match(text, /土壤表面阻抗在下方/);
-  }
-});
-
 test('all process settings use save and cancel without the redundant close button', () => {
-  for (const process of ['PC', 'PFT', 'soil', 'DEF_USE_BGC', 'DEF_USE_TRACER', 'crop']) {
+  for (const process of ['PC', 'PFT', 'DEF_USE_BGC', 'DEF_USE_TRACER', 'crop']) {
     const h = dialog();
     h.props.process = process;
     h.render();
