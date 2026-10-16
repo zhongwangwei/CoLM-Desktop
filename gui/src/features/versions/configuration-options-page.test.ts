@@ -54,6 +54,7 @@ function harness() {
       undefined | ((patch: helpers.CaseOptionPatch) => void | Promise<void>),
     caseValues: undefined as Record<string, string> | undefined,
     subgrid: undefined as string | undefined,
+    kernelMacros: undefined as readonly string[] | undefined,
     source: { kind: 'draft', id: 'd1', generation: 0, overlay } as helpers.ConfigurationSource,
     overlay,
     fields,
@@ -64,6 +65,12 @@ function harness() {
       changes.push(next);
     },
   };
+  const picks: {
+    command: string;
+    args: Record<string, unknown>;
+    resolve: (value: string | null) => void;
+    reject: (reason: Error) => void;
+  }[] = [];
   const changes: Overlay[] = [],
     requests: {
       command: string;
@@ -122,6 +129,10 @@ function harness() {
         });
       }
     },
+    invoke: (command: string, args: Record<string, unknown>) =>
+      new Promise<string | null>((resolve, reject) =>
+        picks.push({ command, args, resolve, reject }),
+      ),
     invokeJson: (command: string, args: Record<string, unknown>) =>
       new Promise<helpers.ConfigurationResult>((resolve) =>
         requests.push({ command, args, resolve }),
@@ -163,7 +174,17 @@ function harness() {
     for (let i = 0; i < 5; i++) await Promise.resolve();
     return render();
   }
-  return { render, settle, props, requests, changes, response, nodes };
+  return {
+    render,
+    settle,
+    props,
+    requests,
+    changes,
+    response,
+    nodes,
+    picks,
+    unmount: () => effects.forEach((effect) => effect.cleanup?.()),
+  };
 }
 test('actual editor and guide expose conditional groups, retain inactive fields, and lock frozen/busy writes', async () => {
   const p = harness();
@@ -1122,4 +1143,181 @@ test('PFT restore is hidden for inherited values and shown for configured values
   c = h.render();
   assert.equal(c.actions.find((a) => a.id === id)!.visible, true);
   assert.match(c.actions.find((a) => a.id === id)!.label, /恢复默认/);
+});
+
+function cnFileHarness() {
+  const h = harness();
+  h.props.process = 'DEF_USE_BGC';
+  h.props.fields.push({
+    name: 'DEF_file_cn_init',
+    section: '生态与生地化',
+    kind: 'character',
+    default: "'null'",
+    values: [],
+    derived: false,
+  });
+  h.props.overlay.physics.DEF_USE_CN_INIT = '.true.';
+  return h;
+}
+const browseId = 'configuration-DEF_file_cn_init-browse';
+test('CN file picker stages a quoted path, cancels without edits and reports errors', async () => {
+  const h = cnFileHarness();
+  const patches: helpers.CaseOptionPatch[] = [];
+  h.props.modalActions = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  h.render();
+  let c = await h.settle();
+  const action = c.actions.find((a) => a.id === browseId)!;
+  const pending = action.run();
+  assert.deepEqual(h.picks[0].args, { key: 'DEF_file_cn_init', filter: null });
+  assert.equal(h.picks[0].command, 'pick_file');
+  c = h.render();
+  assert.equal(c.actions.find((a) => a.id === browseId)!.enabled, false);
+  await assert.rejects(async () => action.run());
+  h.picks[0].resolve("/data/O'Brien/cn.nc");
+  await pending;
+  assert.equal(patches[0].DEF_file_cn_init, "'/data/O''Brien/cn.nc'");
+  c = h.render();
+  let next = c.actions.find((a) => a.id === browseId)!.run();
+  h.picks.at(-1)!.resolve(null);
+  await next;
+  assert.equal(patches.length, 1);
+  c = h.render();
+  next = c.actions.find((a) => a.id === browseId)!.run();
+  h.picks.at(-1)!.reject(new Error('file dialog unavailable'));
+  await next;
+  h.render();
+  assert.match(JSON.stringify(h.nodes), /file dialog unavailable/);
+  assert.equal(patches.length, 1);
+});
+test('CN picker drops responses after source changes, locking, or dialog unmount', async () => {
+  for (const mutation of ['source', 'locked', 'unmount']) {
+    const h = cnFileHarness();
+    h.render();
+    const c = await h.settle();
+    const pending = c.actions.find((a) => a.id === browseId)!.run();
+    if (mutation === 'source')
+      h.props.source = { kind: 'draft', id: 'new-source', generation: 0, overlay: h.props.overlay };
+    if (mutation === 'locked') h.props.disabled = true;
+    if (mutation === 'unmount') h.unmount();
+    else h.render();
+    h.picks[0].resolve('/data/cn.nc');
+    await pending;
+    assert.equal(h.changes.length, 0, mutation);
+  }
+});
+test('scalar rows omit generic applicability disclaimers but retain concrete reasons', async () => {
+  const h = harness();
+  h.render();
+  const result = h.response();
+  result.fields.forEach((field) => {
+    if (field.mode !== 'disabled')
+      field.reason = '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考';
+  });
+  h.requests.at(-1)!.resolve(result);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  h.render();
+  const content = JSON.stringify(
+    h.nodes.filter((node) => node.props.className === 'model-setting-row'),
+  );
+  assert.doesNotMatch(content, /适用性待核对|适用条件待按所选源码/);
+  assert.match(content, /disabled evidence/);
+});
+test('ordinary case configuration hides research-only indexed parameters for every subgrid', async () => {
+  for (const subgrid of ['IGBP', 'PFT', 'PC']) {
+    const h = harness();
+    h.props.onCaseChange = () => {};
+    h.props.subgrid = subgrid;
+    h.render();
+    const c = await h.settle();
+    assert.ok(!c.actions.some((action) => action.id === 'configuration-pft-toggle'));
+  }
+});
+test('vegetation snow immediately follows the restricted canopy interception selector', async () => {
+  const h = harness();
+  for (const [name, kind, value] of [
+    ['DEF_VEG_SNOW', 'logical', '.false.'],
+    ['DEF_Runoff_SCHEME', 'integer', '1'],
+    ['DEF_Interception_scheme', 'integer', '1'],
+  ])
+    h.props.fields.push({
+      name,
+      kind,
+      section: '水热过程',
+      default: value,
+      values: name === 'DEF_Interception_scheme' ? ['1', '2', '3', '4', '5', '6', '7', '8'] : [],
+      derived: false,
+    });
+  h.render();
+  let c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-group-water')!.run();
+  c = h.render();
+  const index = c.fields.findIndex((field) => field.id === 'configuration-DEF_Interception_scheme');
+  assert.ok(index >= 0);
+  assert.equal(c.fields[index + 1].id, 'configuration-DEF_VEG_SNOW');
+  assert.deepEqual(
+    c.fields[index].options?.map((option) => option.value),
+    ['1', '8'],
+  );
+});
+test('research plant scope follows PFT or PC and known noncrop kernels exclude crop types', async () => {
+  const h = harness();
+  h.props.subgrid = 'PFT';
+  h.render();
+  let c = await h.settle();
+  c.actions.find((a) => a.id === 'configuration-pft-toggle')!.run();
+  c = h.render();
+  assert.ok(!c.fields.some((f) => f.id === 'configuration-pft-kind'));
+  const types = c.fields.find((f) => f.id === 'configuration-pft-index')!;
+  assert.equal(types.options?.length, 79);
+  types.set('78');
+  h.render();
+  assert.deepEqual(h.requests.at(-1)!.args.pftSelection, { kind: 'pft', index: 78 });
+  h.props.subgrid = 'PC';
+  h.render();
+  assert.deepEqual(h.requests.at(-1)!.args.pftSelection, { kind: 'pc-pft', index: 78 });
+  h.props.kernelMacros = [];
+  c = h.render();
+  assert.equal(h.requests.at(-1)!.args.pftSelection, null);
+  const restricted = c.fields.find((f) => f.id === 'configuration-pft-index')!;
+  assert.equal(restricted.value, '');
+  assert.equal(restricted.options?.length, 16);
+  assert.throws(() => restricted.set('16'));
+  const select = h.nodes.find((n) => n.type === 'Select' && n.props.value === '');
+  assert.ok(select);
+  h.props.kernelMacros = ['CROP'];
+  c = h.render();
+  assert.equal(c.fields.find((f) => f.id === 'configuration-pft-index')!.options?.length, 79);
+  for (const scheme of ['IGBP', 'USGS']) {
+    h.props.subgrid = scheme;
+    c = h.render();
+    assert.ok(!c.actions.some((a) => a.id === 'configuration-pft-toggle'));
+    assert.equal(h.requests.at(-1)!.args.pftSelection, null);
+  }
+});
+
+test('CN picker replaces an uncommitted text draft in the research editor', async () => {
+  const h = cnFileHarness();
+  h.render();
+  await h.settle();
+  const input = h.nodes.find((node) => node.type === 'Input')!;
+  (input.props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: 'unsaved.nc' },
+  });
+  let c = h.render();
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-DEF_file_cn_init')!.value,
+    'unsaved.nc',
+  );
+  const pending = c.actions.find((action) => action.id === browseId)!.run();
+  h.picks[0].resolve('/data/selected.nc');
+  await pending;
+  h.render();
+  c = await h.settle();
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-DEF_file_cn_init')!.value,
+    '/data/selected.nc',
+  );
 });

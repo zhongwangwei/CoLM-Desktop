@@ -2,7 +2,7 @@ import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
-import { invokeJson } from '../../lib/ipc';
+import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import type { Overlay } from '../../lib/types';
@@ -105,26 +105,29 @@ export default function ConfigurationOptions({
     [loaded, setLoaded] = useState(''),
     [opened, setOpened] = useState<Record<string, boolean>>({}),
     [inputs, setInputs] = useState<Record<string, string>>({}),
-    [pftKind, setPftKind] = useState('pft'),
-    [pftIndex, setPftIndex] = useState(''),
+    [selectedPftKind, setPftKind] = useState('pft'),
+    [selectedPftIndex, setPftIndex] = useState(''),
     [processName, setProcessName] = useState(''),
     [importing, setImporting] = useState(false),
     [tracerInput, setTracerInput] = useState<{
       key: string;
       rows: ReturnType<typeof tracerRows>;
     } | null>(null),
-    [saving, setSaving] = useState(false);
-  const pftVisible = !process && (!onCaseChange || ['PFT', 'PC'].includes(subgrid ?? ''));
-  const pftOpen = pftVisible && (opened.pft ?? false);
-  const selection =
-    pftOpen &&
-    /^\d+$/.test(pftIndex) &&
-    Number.isInteger(Number(pftIndex)) &&
-    Number(pftIndex) >= 0 &&
-    Number(pftIndex) <= 78
-      ? { kind: pftKind, index: Number(pftIndex) }
-      : null;
+    [saving, setSaving] = useState(false),
+    [pickingFile, setPickingFile] = useState(false);
   const scheme = simulationMode(undefined, undefined, subgrid);
+  const fixedPftKind = scheme === 'PFT' ? 'pft' : scheme === 'PC' ? 'pc-pft' : null;
+  const pftKind = fixedPftKind ?? selectedPftKind;
+  const pftChoices = PFT.filter(
+    ([index]) =>
+      !kernelMacros || kernelMacros.some((macro) => macro.toUpperCase() === 'CROP') || index <= 15,
+  );
+  const pftIndex = pftChoices.some(([index]) => String(index) === selectedPftIndex)
+    ? selectedPftIndex
+    : '';
+  const pftVisible = !process && !onCaseChange && (!scheme || !!fixedPftKind);
+  const pftOpen = pftVisible && (opened.pft ?? false);
+  const selection = pftOpen && pftIndex !== '' ? { kind: pftKind, index: Number(pftIndex) } : null;
   const queryValues = scheme ? { ...caseSchemeFields(scheme), ...caseValues } : caseValues;
   const request = JSON.stringify({
     source: source.kind === 'draft' ? { ...source, overlay: sourceOverlay } : source,
@@ -186,7 +189,15 @@ export default function ConfigurationOptions({
     setTracerInput(rows ? { key: sourceKey, rows } : null);
   const current = useRef(request),
     savingNow = useRef(false),
-    writable = useRef(false);
+    writable = useRef(false),
+    mounted = useRef(true),
+    pickingNow = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   current.current = request;
   useEffect(() => {
     let live = true;
@@ -213,8 +224,8 @@ export default function ConfigurationOptions({
       disabled || saving || (!onCaseChange && (source.kind !== 'draft' || !onChange)) || importing;
   writable.current = !locked;
   useEffect(() => {
-    onReady?.(ready && !error && tracers === null);
-  }, [ready, error, tracers, onReady]);
+    onReady?.(ready && !error && tracers === null && !pickingFile);
+  }, [ready, error, tracers, pickingFile, onReady]);
   const values = ready
     ? {
         ...result,
@@ -416,6 +427,47 @@ export default function ConfigurationOptions({
       visible: overridden,
       run: () => write(() => resetModelOption(overlay, field.name)),
     });
+    async function pickFile() {
+      if (
+        cannot ||
+        locked ||
+        !writable.current ||
+        pickingNow.current ||
+        !mounted.current ||
+        current.current !== request
+      )
+        throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
+      pickingNow.current = true;
+      setPickingFile(true);
+      try {
+        const path = await invoke<string | null>('pick_file', { key: field.name, filter: null });
+        if (path && mounted.current && writable.current && current.current === request) {
+          write(() => setModelOption(overlay, fields, field.name, path));
+          setInputs((previous) => {
+            const next = { ...previous };
+            delete next[`${sourceKey}:${id}`];
+            return next;
+          });
+        }
+      } catch (e) {
+        if (mounted.current && current.current === request) setError(String(e));
+      } finally {
+        pickingNow.current = false;
+        if (mounted.current) setPickingFile(false);
+      }
+    }
+    if (cnInitialFile)
+      actions.push({
+        id: `${id}-browse`,
+        label: t('选择碳氮初始场文件', 'Choose carbon/nitrogen initial-state file'),
+        kind: 'click',
+        enabled: !cannot && !locked && !pickingFile,
+        run: pickFile,
+      });
+    const reason =
+      context?.reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考'
+        ? null
+        : context?.reason;
     return (
       <div className="model-setting-row" key={field.name}>
         {editor(
@@ -428,10 +480,7 @@ export default function ConfigurationOptions({
           (v) => write(() => setModelOption(overlay, fields, field.name, v)),
         )}
         <small>
-          {field.name} ·{' '}
-          {(context?.pending ? t('适用性待核对', 'Applicability pending') : context?.reason) ||
-            t('适用性待核对', 'Applicability pending')}{' '}
-          · {t('默认值', 'Default')}:{' '}
+          {field.name} · {reason && <>{reason} · </>} {t('默认值', 'Default')}:{' '}
           {cnInitialFile
             ? t(
                 '运行数据目录下的 cnsteadystate.nc',
@@ -439,6 +488,16 @@ export default function ConfigurationOptions({
               )
             : defaultValue || '—'}
         </small>
+        {cnInitialFile && (
+          <Button
+            disabled={cannot || locked || pickingFile}
+            onClick={() => {
+              void pickFile().catch(() => {});
+            }}
+          >
+            {t('选择文件', 'Choose file')}
+          </Button>
+        )}
         {overridden && (
           <Button
             disabled={locked}
@@ -612,6 +671,17 @@ export default function ConfigurationOptions({
       .filter(
         (f) => modelSettingGroup(f) === id && !(showStomatal && stomatalFields.includes(f.name)),
       );
+    if (id === 'water') {
+      const snow = rows.findIndex((field) => field.name === 'DEF_VEG_SNOW');
+      if (snow >= 0 && rows.some((field) => field.name === 'DEF_Interception_scheme')) {
+        const [field] = rows.splice(snow, 1);
+        rows.splice(
+          rows.findIndex((item) => item.name === 'DEF_Interception_scheme') + 1,
+          0,
+          field,
+        );
+      }
+    }
     if (
       onCaseChange &&
       !rows.length &&
@@ -1087,7 +1157,7 @@ export default function ConfigurationOptions({
   if (pftVisible)
     actions.push({
       id: 'configuration-pft-toggle',
-      label: t('PFT / PC 索引参数', 'Indexed PFT / PC parameters'),
+      label: t('按植物类型调整参数', 'Adjust parameters by plant type'),
       kind: 'click',
       enabled: !disabled,
       run: () => {
@@ -1095,42 +1165,42 @@ export default function ConfigurationOptions({
         setOpened((previous) => ({ ...previous, pft: !pftOpen }));
       },
     });
+  if (pftOpen && !fixedPftKind)
+    controls.push({
+      id: 'configuration-pft-kind',
+      label: 'PFT / PC',
+      type: 'choice',
+      value: pftKind,
+      disabled,
+      options: [
+        { value: 'pft', label: 'PFT' },
+        { value: 'pc-pft', label: 'PC PFT' },
+      ],
+      set: (value) => {
+        if (disabled || fixedPftKind || !['pft', 'pc-pft'].includes(value))
+          throw new Error('Invalid PFT scope');
+        setPftKind(value);
+        setInputs({});
+      },
+    });
   if (pftOpen)
-    controls.push(
-      {
-        id: 'configuration-pft-kind',
-        label: 'PFT / PC',
-        type: 'choice',
-        value: pftKind,
-        disabled,
-        options: [
-          { value: 'pft', label: 'PFT' },
-          { value: 'pc-pft', label: 'PC PFT' },
-        ],
-        set: (value) => {
-          if (disabled || !['pft', 'pc-pft'].includes(value)) throw new Error('Invalid PFT scope');
-          setPftKind(value);
-          setInputs({});
-        },
+    controls.push({
+      id: 'configuration-pft-index',
+      label: t('植物类型', 'Plant type'),
+      type: 'choice',
+      value: pftIndex,
+      disabled,
+      options: pftChoices.map(([index, zh, english]) => ({
+        value: String(index),
+        label: `${index} · ${t(zh, english)}`,
+      })),
+      set: (value) => {
+        if (disabled || (value !== '' && !pftChoices.some(([index]) => String(index) === value)))
+          throw new Error('Invalid PFT index');
+        setPftIndex(value);
+        setInputs({});
       },
-      {
-        id: 'configuration-pft-index',
-        label: t('PFT 索引（0–78）', 'PFT index (0–78)'),
-        type: 'choice',
-        value: pftIndex,
-        disabled,
-        options: PFT.map(([index, zh, english]) => ({
-          value: String(index),
-          label: `${index} · ${t(zh, english)}`,
-        })),
-        set: (value) => {
-          if (disabled || (value !== '' && !PFT.some(([index]) => String(index) === value)))
-            throw new Error('Invalid PFT index');
-          setPftIndex(value);
-          setInputs({});
-        },
-      },
-    );
+    });
   usePageContract({
     title: t('完整模型配置', 'Complete model configuration'),
     step: 'configuration-options',
@@ -1201,7 +1271,7 @@ export default function ConfigurationOptions({
       )}
       {pftVisible && (
         <Advanced
-          title={t('PFT / PC 索引参数', 'Indexed PFT / PC parameters')}
+          title={t('按植物类型调整参数', 'Adjust parameters by plant type')}
           open={pftOpen}
           onOpenChange={(value) => {
             if (!disabled) setOpened((previous) => ({ ...previous, pft: value }));
@@ -1209,21 +1279,29 @@ export default function ConfigurationOptions({
         >
           {pftOpen && (
             <>
+              <p>
+                {t(
+                  'PC 参数按群落内的 PFT 组分设置；类型索引与 PFT 共用。',
+                  'PC parameters apply to PFT components within a community and share the PFT type indices.',
+                )}
+              </p>
               <div className="form-grid">
-                <Field label="PFT / PC">
-                  <Select
-                    disabled={disabled}
-                    value={pftKind}
-                    onChange={(e) => {
-                      setPftKind(e.target.value);
-                      setInputs({});
-                    }}
-                  >
-                    <option value="pft">PFT</option>
-                    <option value="pc-pft">PC PFT</option>
-                  </Select>
-                </Field>
-                <Field label={t('PFT 索引（0–78）', 'PFT index (0–78)')}>
+                {!fixedPftKind && (
+                  <Field label="PFT / PC">
+                    <Select
+                      disabled={disabled}
+                      value={pftKind}
+                      onChange={(e) => {
+                        setPftKind(e.target.value);
+                        setInputs({});
+                      }}
+                    >
+                      <option value="pft">PFT</option>
+                      <option value="pc-pft">PC PFT</option>
+                    </Select>
+                  </Field>
+                )}
+                <Field label={t('植物类型', 'Plant type')}>
                   <Select
                     disabled={disabled}
                     value={pftIndex}
@@ -1233,7 +1311,7 @@ export default function ConfigurationOptions({
                     }}
                   >
                     <option value="">{t('明确选择类型', 'Choose a type')}</option>
-                    {PFT.map(([index, zh, english]) => (
+                    {pftChoices.map(([index, zh, english]) => (
                       <option value={index} key={index}>
                         {index} · {t(zh, english)}
                       </option>
@@ -1243,7 +1321,10 @@ export default function ConfigurationOptions({
               </div>
               {!selection && (
                 <Notice tone="warning">
-                  {t('请输入 0–78 的整数索引。', 'Enter an integer index from 0 to 78.')}
+                  {t(
+                    '请选择当前内核支持的植物类型。',
+                    'Choose a plant type supported by the current kernel.',
+                  )}
                 </Notice>
               )}
               {indexed}

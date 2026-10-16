@@ -621,3 +621,14 @@ test('CN runtime defaults preserve quoting and platform paths without inventing 
   assert.deepEqual(cnInitialStatePatch(empty(), { DEF_USE_CN_INIT: '.true.' }, {}), {});
   assert.deepEqual(cnInitialStatePatch(empty(), {}, {}), {});
 });
+
+test('interception editing offers only CoLM schemes 1 and 8', () => {
+  const field = {
+    name: 'DEF_Interception_scheme',
+    kind: 'integer',
+    values: ['1', '2', '3', '4', '5', '6', '7', '8'],
+  };
+  assert.equal(fieldLiteral(field, '1'), '1');
+  assert.equal(fieldLiteral(field, '8'), '8');
+  assert.throws(() => fieldLiteral(field, '2'), /supported/);
+});

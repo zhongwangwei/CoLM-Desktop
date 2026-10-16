@@ -435,3 +435,7 @@ test('regional routing follows domain and active river prerequisites automatical
     '.false.',
   );
 });
+
+test('vegetation snow belongs to hydrothermal settings', () => {
+  assert.equal(modelSettingGroup({ name: 'DEF_VEG_SNOW', section: '生态与生地化' }), 'water');
+});
