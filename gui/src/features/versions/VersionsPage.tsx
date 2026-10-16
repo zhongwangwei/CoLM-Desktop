@@ -232,6 +232,7 @@ export default function VersionsPage() {
     effectiveModelFields(shown?.overlay, fields),
   );
   const setupEnvironment: SetupEnvironment = {
+    engine: setup?.engine ?? state.selectedCase?.profile.engine,
     subgrid: setup?.subgrid ?? setup?.landcover ?? state.selectedCase?.profile.subgrid,
     caseValues: setup ? state.newCaseSeed?.caseValues : undefined,
     domain:
@@ -913,6 +914,7 @@ export default function VersionsPage() {
             )}
           >
             <ConfigurationOptions
+              engine={setupEnvironment.engine}
               subgrid={setupEnvironment.subgrid}
               caseValues={setupEnvironment.caseValues}
               excludeKeys={setupHandledKeys}

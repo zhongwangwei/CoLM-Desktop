@@ -46,6 +46,15 @@ export function caseFieldVisible(
     !enabled(currentValue('DEF_TRACER_USE_FRACTIONATION'))
   )
     return false;
+  if (['DEF_VIC_OPT', 'DEF_FILE_VIC_PARA', 'DEF_FILE_VIC_OPT'].includes(name.toUpperCase())) {
+    const effective = (key: string) =>
+      currentValue(key) ??
+      fields.find((field) => field.name.toLowerCase() === key.toLowerCase())?.built_in_default;
+    if (effective('DEF_Runoff_SCHEME')?.trim() !== '1') return false;
+    const grid = enabled(effective('DEF_VIC_OPT') ?? '.false.');
+    if (name.toUpperCase() === 'DEF_FILE_VIC_PARA' && grid) return false;
+    if (name.toUpperCase() === 'DEF_FILE_VIC_OPT' && !grid) return false;
+  }
   let field = fields.find((item) => item.name.toLowerCase() === name.toLowerCase());
   if (field?.mode === 'disabled' && field.pending === false) return false;
   const visited = new Set<string>([name.toLowerCase()]);
@@ -565,6 +574,15 @@ export function setStomatalScheme(overlay: Overlay, fields: ModelField[], scheme
 }
 
 export type CaseOptionPatch = Record<string, string | null>;
+
+export function vicParameterDefault(name: string, runtime: string): string {
+  const directory = unquote(runtime).trim();
+  if (/^(null|none)?$/i.test(directory)) return '';
+  // Preserve the upstream filename concatenation used by the initializer.
+  return name === 'DEF_file_VIC_OPT'
+    ? directory + 'vic/vic_para.nc'
+    : directory.replace(/\/+$/, '') + '/vic/vic_para.txt';
+}
 
 export function cnInitialStatePatch(
   overlay: Overlay,

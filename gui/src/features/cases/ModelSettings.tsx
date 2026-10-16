@@ -439,6 +439,7 @@ export default function ModelSettings({
                 </div>
               )}
               <ConfigurationOptions
+                engine={setupEnvironment?.engine}
                 subgrid={selectedMode}
                 caseValues={setupEnvironment?.caseValues}
                 onCaseChange={onCaseChange}

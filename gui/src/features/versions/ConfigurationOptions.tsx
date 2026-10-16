@@ -20,6 +20,7 @@ import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
   caseFieldVisible,
+  vicParameterDefault,
   caseOptionOverlay,
   caseOptionPatch,
   type CaseOptionPatch,
@@ -45,6 +46,7 @@ import {
   type FamilyContext,
 } from './configuration-options';
 type Props = {
+  engine?: string;
   process?: string;
   hideProcesses?: boolean;
   modalActions?: UiAction[];
@@ -75,6 +77,7 @@ const empty: ConfigurationResult = {
   context_complete: false,
 };
 export default function ConfigurationOptions({
+  engine,
   process,
   hideProcesses = false,
   modalActions,
@@ -442,9 +445,19 @@ export default function ConfigurationOptions({
       defaultValue = forcedResistance ? '0' : (context?.built_in_default ?? field.default ?? ''),
       cnInitialFile = field.name === 'DEF_file_cn_init',
       urbanAlbedoFile = field.name === 'DEF_HighResUrban_albedo',
-      fileInput = cnInitialFile || urbanAlbedoFile,
+      vicFile = ['DEF_file_VIC_para', 'DEF_file_VIC_OPT'].includes(field.name),
+      vicDefault = vicFile
+        ? vicParameterDefault(
+            field.name,
+            modelSettingValue(overlay, 'DEF_dir_runtime') ??
+              values.fields.find((entry) => entry.name === 'DEF_dir_runtime')?.configured_value ??
+              values.fields.find((entry) => entry.name === 'DEF_dir_runtime')?.built_in_default ??
+              '',
+          )
+        : '',
+      fileInput = cnInitialFile || urbanAlbedoFile || vicFile,
       rawValue = forcedResistance ? '0' : (configured ?? defaultValue),
-      value = fileInput && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? '' : rawValue,
+      value = fileInput && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? vicDefault : rawValue,
       overridden = !forcedResistance && configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive || forcedResistance,
@@ -486,6 +499,22 @@ export default function ConfigurationOptions({
         if (mounted.current) setPickingFile(false);
       }
     }
+    function restoreDefault() {
+      write(() => resetModelOption(overlay, field.name));
+      setInputs((previous) => {
+        const next = { ...previous };
+        delete next[`${sourceKey}:${id}`];
+        return next;
+      });
+    }
+    if (vicFile)
+      actions.push({
+        id: `${id}-preset`,
+        label: `${t('使用预设路径', 'Use preset path')} · ${fieldLabel(field.name, lang)}`,
+        kind: 'click',
+        enabled: !cannot && !locked && !!vicDefault,
+        run: restoreDefault,
+      });
     if (fileInput)
       actions.push({
         id: `${id}-browse`,
@@ -515,18 +544,34 @@ export default function ConfigurationOptions({
         <small>
           {field.name} · {(resistanceReason || reason) && <>{resistanceReason || reason} · </>}{' '}
           {t('默认值', 'Default')}:{' '}
-          {cnInitialFile
-            ? t(
-                '运行数据目录下的 cnsteadystate.nc',
-                'cnsteadystate.nc in the runtime data directory',
-              )
-            : urbanAlbedoFile && /^(null|none)?$/i.test(unquote(defaultValue).trim())
+          {vicFile
+            ? vicDefault || t('请先设置运行数据目录', 'Set the runtime data directory first')
+            : cnInitialFile
               ? t(
-                  '未提供默认文件，请选择城市高光谱反照率 NetCDF 文件',
-                  'No default file; choose an urban hyperspectral albedo NetCDF file',
+                  '运行数据目录下的 cnsteadystate.nc',
+                  'cnsteadystate.nc in the runtime data directory',
                 )
-              : defaultValue || '—'}
+              : urbanAlbedoFile && /^(null|none)?$/i.test(unquote(defaultValue).trim())
+                ? t(
+                    '未提供默认文件，请选择城市高光谱反照率 NetCDF 文件',
+                    'No default file; choose an urban hyperspectral albedo NetCDF file',
+                  )
+                : defaultValue || '—'}
         </small>
+        {vicFile && (
+          <Button
+            disabled={cannot || locked || !vicDefault}
+            onClick={() => {
+              try {
+                restoreDefault();
+              } catch {
+                /* Keep the error visible. */
+              }
+            }}
+          >
+            {t('使用预设路径', 'Use preset path')}
+          </Button>
+        )}
         {fileInput && (
           <Button
             disabled={cannot || locked || pickingFile}
@@ -537,7 +582,7 @@ export default function ConfigurationOptions({
             {t('选择文件', 'Choose file')}
           </Button>
         )}
-        {overridden && (
+        {overridden && !vicFile && (
           <Button
             disabled={locked}
             onClick={() => uiWrite(() => resetModelOption(overlay, field.name))}
@@ -688,13 +733,17 @@ export default function ConfigurationOptions({
       .filter(
         (field) =>
           included(field) &&
+          !(
+            engine === 'fortran' && ['DEF_file_VIC_para', 'DEF_file_VIC_OPT'].includes(field.name)
+          ) &&
           !excludeKeys.includes(field.name) &&
           groupedField(field, catalog) &&
           !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
       .filter(
         (field) =>
-          !onCaseChange ||
+          (!onCaseChange &&
+            !['DEF_VIC_OPT', 'DEF_file_VIC_para', 'DEF_file_VIC_OPT'].includes(field.name)) ||
           (field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff) ||
           caseFieldVisible(field.name, values.fields, overlay.physics),
       )

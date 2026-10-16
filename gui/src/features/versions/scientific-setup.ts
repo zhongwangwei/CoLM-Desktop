@@ -13,6 +13,7 @@ import {
 export type SetupContext = Pick<ConfigurationResult, 'fields' | 'process_files' | 'crop_defaults'>;
 export type SetupRequest = { id: string; value: string };
 export type SetupEnvironment = {
+  engine?: string;
   subgrid?: string;
   caseValues?: Record<string, string>;
   domain?: string | null;

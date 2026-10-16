@@ -1023,6 +1023,7 @@ export default function CasesPage() {
                   void selectMode(mode).catch(() => {});
                 }}
                 setupEnvironment={{
+                  engine,
                   subgrid: effectiveProfile?.subgrid,
                   caseValues: explicitValues,
                   domain: caseSimulationDomain(effectiveProfile),

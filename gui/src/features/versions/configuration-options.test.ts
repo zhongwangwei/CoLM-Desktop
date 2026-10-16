@@ -5,6 +5,7 @@ import type { Descriptor, ModelField } from './model';
 import {
   caseFieldVisible,
   cnInitialStatePatch,
+  vicParameterDefault,
   type ConfigurationField,
   tracerFamilyState,
   appendTracerFamily,
@@ -631,4 +632,23 @@ test('interception editing offers only CoLM schemes 1 and 8', () => {
   assert.equal(fieldLiteral(field, '1'), '1');
   assert.equal(fieldLiteral(field, '8'), '8');
   assert.throws(() => fieldLiteral(field, '2'), /supported/);
+});
+
+test('VIC file defaults preserve the runtime convention and missing-data sentinels', () => {
+  assert.equal(vicParameterDefault('DEF_file_VIC_para', "'/runtime'"), '/runtime/vic/vic_para.txt');
+  assert.equal(vicParameterDefault('DEF_file_VIC_OPT', "'/runtime/'"), '/runtime/vic/vic_para.nc');
+  for (const value of ['', "'null'", 'NONE'])
+    assert.equal(vicParameterDefault('DEF_file_VIC_para', value), '');
+});
+
+test('VIC controls follow runoff and parameter source even while applicability is loading', () => {
+  for (const runoff of [undefined, '0', '2', '3'])
+    for (const name of ['DEF_VIC_OPT', 'DEF_file_VIC_para', 'DEF_file_VIC_OPT'])
+      assert.equal(caseFieldVisible(name, [], runoff ? { DEF_Runoff_SCHEME: runoff } : {}), false);
+  for (const grid of [false, true]) {
+    const values = { DEF_Runoff_SCHEME: '1', DEF_VIC_OPT: grid ? '.true.' : '.false.' };
+    assert.equal(caseFieldVisible('DEF_VIC_OPT', [], values), true);
+    assert.equal(caseFieldVisible('DEF_file_VIC_para', [], values), !grid);
+    assert.equal(caseFieldVisible('DEF_file_VIC_OPT', [], values), grid);
+  }
 });
