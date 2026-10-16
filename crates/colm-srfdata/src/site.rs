@@ -322,13 +322,10 @@ pub fn single_point_surface_run_from_namelist_with_subgrid(
     let source = PathBuf::from(required_namelist_string(&document, "SITE_fsitedata")?);
     let urban = namelist_bool(&document, "DEF_URBAN_RUN", false)?;
     let subgrid = surface_subgrid_from_document(&document, subgrid_fallback)?;
-    ensure!(
-        !urban || subgrid == SurfaceSubgrid::Lct,
-        "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
-    );
     if crop_enabled && subgrid == SurfaceSubgrid::Lct {
         bail!("CROP surface data requires DEF_USE_PFT or DEF_USE_PC");
     }
+    // Urban patches use their own canopy even when the landscape selects PFT or PC.
     let mode = if urban {
         if crop_enabled {
             bail!("CROP surface data is incompatible with DEF_URBAN_RUN");

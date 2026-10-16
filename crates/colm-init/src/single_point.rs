@@ -3444,10 +3444,6 @@ fn reject_unsupported_cold_start_features(
             || subgrid == SinglePointSubgrid::Pft,
         "DEF_USE_IRRIGATION requires DEF_USE_PFT = .true. in the Rust single-point initializer"
     );
-    ensure!(
-        !optional_bool_or(document, "DEF_URBAN_RUN", false)? || subgrid == SinglePointSubgrid::Lct,
-        "DEF_URBAN_RUN requires DEF_USE_LCT = .true."
-    );
     // `DEF_SPLIT_SOILSNOW` 不在这里拦：上游 `mkinidata` 根本不读它（`IniTimeVar` 与
     // 它调用的 `snowfraction`/`snow_ini`/`albland` 都不分支），实测 AT-Neu 打开与关闭
     // 两份 Fortran 冷启动重启逐位相同；分裂的土/雪只在运行期起作用（第 406 轮）。
