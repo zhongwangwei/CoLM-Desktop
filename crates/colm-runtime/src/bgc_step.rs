@@ -551,6 +551,12 @@ pub fn lightning_record_due(
     ))
 }
 
+fn replay_lightning_record(begin: colm_core::calendar::CalendarTime) -> usize {
+    // The lightning climatology has 365 days, including in leap-year simulations.
+    ((usize::from(begin.julian_day) - 1) * 8 + (begin.seconds as usize / 10_800 + 1).min(8))
+        .min(2920)
+}
+
 /// `grid%define_by_center`：网格边界取相邻中心的中点，返回包含 `x` 的格子。
 pub(crate) fn containing_cell(centers: &[f64], x: f64, periodic: bool) -> Result<usize> {
     ensure!(!centers.is_empty(), "an empty coordinate axis");
@@ -803,6 +809,36 @@ impl BgcRuntime {
             if let Some(fire) = &self.fire {
                 bgc.patch.hdm_lf[0] = fire.hdm(idate[0])?;
             }
+        }
+        Ok(())
+    }
+
+    /// Reload calendar-dependent inputs after a rewind without resetting evolved pools.
+    pub(crate) fn refresh_replay_sources(
+        &self,
+        begin: colm_core::calendar::CalendarTime,
+        state: &mut StandardLctSnowSoilState,
+    ) -> Result<()> {
+        let bgc = state
+            .bgc
+            .as_deref_mut()
+            .context("a BGC patch needs its BGC state")?;
+        let (year, month) = year_month(begin)?;
+        let (ndep, to_sminn) = if self.ndep.is_monthly() {
+            self.ndep.month(year, month, self.statics.patchclass)?
+        } else {
+            self.ndep.annual(year, self.statics.patchclass)?
+        };
+        bgc.patch.ndep[0] = ndep;
+        bgc.patch_flux.ndep_to_sminn[0] = to_sminn;
+        if let Some(source) = &self.nitrif {
+            let (conc, depth) = source.monthly(month, self.statics.patchclass)?;
+            bgc.patch.tconc_o2_unsat.copy_from_slice(&conc);
+            bgc.patch.to2_decomp_depth_unsat.copy_from_slice(&depth);
+        }
+        if let Some(fire) = &self.fire {
+            bgc.patch.hdm_lf[0] = fire.hdm(year)?;
+            bgc.patch.lnfm[0] = fire.lightning(replay_lightning_record(begin))?;
         }
         Ok(())
     }

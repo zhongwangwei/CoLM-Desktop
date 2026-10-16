@@ -3934,15 +3934,16 @@ fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result
         return Ok(0);
     }
     for (path, _) in &changed {
-        if std::fs::metadata(path)
-            .map_err(|error| format!("{}: {error}", path.display()))?
-            .permissions()
-            .readonly()
-        {
-            return Err(format!("{}: 文件为只读", path.display()));
+        match std::fs::metadata(path) {
+            Ok(metadata) if metadata.permissions().readonly() => {
+                return Err(format!("{}: 文件为只读", path.display()))
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", path.display())),
         }
     }
-    let mut backups = Vec::with_capacity(changed.len());
+    let mut backups: Vec<Option<std::path::PathBuf>> = Vec::with_capacity(changed.len());
     let mut staged = Vec::with_capacity(changed.len());
     for (index, (path, text)) in changed.iter().enumerate() {
         let name = path
@@ -3951,43 +3952,53 @@ fn write_files_atomic_untracked(done: &[(std::path::PathBuf, String)]) -> Result
             .unwrap_or("parameter.nml");
         let backup = path.with_file_name(format!(".{name}.bak-{tag}-{index}"));
         let temporary = path.with_file_name(format!(".{name}.tmp-{tag}-{index}"));
-        if let Err(error) = std::fs::copy(path, &backup) {
-            for backup in &backups {
-                let _ = std::fs::remove_file(backup);
+        let backup = match std::fs::copy(path, &backup) {
+            Ok(_) => Some(backup),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                for path in staged.iter().chain(backups.iter().flatten()) {
+                    let _ = std::fs::remove_file(path);
+                }
+                return Err(format!("{}: {error}", backup.display()));
             }
-            return Err(format!("{}: {error}", backup.display()));
-        }
+        };
         let write = (|| -> std::io::Result<()> {
             let mut file = std::fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;
-            file.set_permissions(std::fs::metadata(path)?.permissions())?;
+            if let Some(backup) = &backup {
+                file.set_permissions(std::fs::metadata(backup)?.permissions())?;
+            }
             file.write_all(text.as_bytes())?;
             file.sync_all()
         })();
+        backups.push(backup);
         if let Err(error) = write {
             let _ = std::fs::remove_file(&temporary);
-            for path in staged.iter().chain(backups.iter()) {
+            for path in staged.iter().chain(backups.iter().flatten()) {
                 let _ = std::fs::remove_file(path);
             }
             return Err(format!("{}: {error}", temporary.display()));
         }
-        backups.push(backup);
         staged.push(temporary);
     }
     for (index, ((path, _), temporary)) in changed.iter().zip(staged.iter()).enumerate() {
         if let Err(error) = replace_file_atomic(temporary, path) {
             for ((prior, _), backup) in changed.iter().zip(backups.iter()).take(index + 1) {
-                let _ = replace_file_atomic(backup, prior);
+                if let Some(backup) = backup {
+                    let _ = replace_file_atomic(backup, prior);
+                } else {
+                    let _ = std::fs::remove_file(prior);
+                }
             }
-            for path in staged.iter().chain(backups.iter()) {
+            for path in staged.iter().chain(backups.iter().flatten()) {
                 let _ = std::fs::remove_file(path);
             }
             return Err(format!("{}: {error}", path.display()));
         }
     }
-    for path in staged.iter().chain(backups.iter()) {
+    for path in staged.iter().chain(backups.iter().flatten()) {
         let _ = std::fs::remove_file(path);
     }
     for parent in changed
@@ -4728,8 +4739,7 @@ pub(crate) fn write_all(done: &[(String, String)]) -> Result<BatchWrite, String>
 /// 一份配置里与「时间与预热」有关的东西，界面直接照着显示。
 ///
 /// **算好了再交出去**，不让前端自己拼：预热截止时刻是起始年月日加上若干年，
-/// 而输出从截止时刻才开始 —— 这两条算错了没人会发现，输出会安安静静地
-/// 少一段。同一份算式在 `colm-case::spinup_fields` 里，两边共用它。
+/// 正式输出起点取决于预热模式，回卷模式保留完整正式时间窗。
 #[derive(serde::Serialize)]
 pub struct Timing {
     /// 这一批有几个算例。
@@ -4743,8 +4753,7 @@ pub struct Timing {
     pub spinup_repeat: u32,
     /// 各算例的预热设置是否一致。
     pub spinup_varies: bool,
-    /// history 从哪天开始。**不等于 start** —— 预热期不写 history
-    /// （`MOD_Hist.F90:235` 在 `itstamp <= ptstamp` 时直接 RETURN）。
+    /// history 的正式起点；回卷预热模式使用原始起始日期。
     pub output_start: String,
     /// CoLM 会打印的 TIMESTEP 总数，含每一轮预热。进度事件里的 `step`
     /// 从 1 单调递增到这个数，所以前端不必再猜百分比。
@@ -4759,9 +4768,13 @@ pub struct Timing {
 pub fn read_timing(dirs: Vec<String>) -> Result<Timing, String> {
     let all = read_all(&dirs)?;
     let mut each = Vec::with_capacity(all.len());
+    let mut replays = Vec::with_capacity(all.len());
     for (d, text) in &all {
         let doc = colm_namelist::parse(text).map_err(|e| format!("{d}: {e:#}"))?;
-        each.push(one_timing(&doc));
+        let replay = colm_case::spinup_replay_enabled(std::path::Path::new(d))
+            .map_err(|e| format!("{d}: {e:#}"))?;
+        replays.push(replay);
+        each.push(one_timing_with_replay(&doc, replay));
     }
     let Some(first) = each.first().cloned() else {
         return Err("没有算例".into());
@@ -4773,14 +4786,23 @@ pub fn read_timing(dirs: Vec<String>) -> Result<Timing, String> {
         end: first.1.clone(),
         spinup_years: first.2,
         spinup_repeat: first.3,
-        spinup_varies: each.iter().any(|t| t.2 != first.2 || t.3 != first.3),
+        spinup_varies: each.iter().any(|t| t.2 != first.2 || t.3 != first.3)
+            || replays.iter().any(|mode| *mode != replays[0]),
         output_start: first.4.clone(),
         total_steps: first.5,
     })
 }
 
 /// 一份配置的 (start, end, 预热年数, 预热遍数, 输出起始日, 总步数)。
+#[cfg(test)]
 fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, String, u64) {
+    one_timing_with_replay(doc, false)
+}
+
+fn one_timing_with_replay(
+    doc: &colm_namelist::Document,
+    replay: bool,
+) -> (String, String, u32, u32, String, u64) {
     let int = |p: &str| -> i64 {
         match doc.get(p) {
             Some(colm_namelist::Value::Int(v)) => *v,
@@ -4845,9 +4867,10 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
             int("DEF_simulation_time%spinup_day"),
             int("DEF_simulation_time%spinup_sec"),
         );
-        // 截止时刻必须落在窗口内才会触发重置。最后一轮不重置，而是从
-        // 截止处继续跑到 end；与 CoLM.F90 的 TIMELOOP 完全同序。
-        if spinup_end < end {
+        // 旧模式最后一轮从截止处继续；回卷模式额外运行完整正式窗口。
+        if replay && spinup_end <= end {
+            steps(start, spinup_end) * repeat as u64 + normal_steps
+        } else if spinup_end < end {
             let spinup_steps = steps(start, spinup_end);
             spinup_steps * repeat as u64 + steps(start + spinup_steps as i64 * step, end)
         } else {
@@ -4861,7 +4884,7 @@ fn one_timing(doc: &colm_namelist::Document) -> (String, String, u32, u32, Strin
         ymd(ey, em, ed),
         if on { (py - sy) as u32 } else { 0 },
         if on { repeat } else { 0 },
-        if on {
+        if on && !replay {
             ymd(
                 py,
                 int("DEF_simulation_time%spinup_month"),
@@ -4886,11 +4909,27 @@ pub fn set_spinup(
     years: u32,
     repeat: u32,
     kernel_dir: Option<String>,
+    replay_start: Option<bool>,
 ) -> Result<BatchWrite, String> {
     let kernel = kernel_facts(kernel_dir.as_deref())?;
     let all = read_all(&dirs)?;
     let mut done = Vec::with_capacity(all.len());
+    let mut replay_files = Vec::new();
     for (d, text) in all {
+        let replay = replay_start.unwrap_or(
+            colm_case::spinup_replay_enabled(std::path::Path::new(&d))
+                .map_err(|e| format!("{d}: {e:#}"))?,
+        );
+        if replay_start.is_some() || (replay && (years == 0 || repeat == 0)) {
+            let enabled = replay && years > 0 && repeat > 0;
+            replay_files.push((
+                std::path::Path::new(&d).join("spinup.nml"),
+                format!(
+                    "&nl_colm_spinup\n replay_start = {}\n/\n",
+                    if enabled { ".true." } else { ".false." }
+                ),
+            ));
+        }
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
         let int = |p: &str| -> i64 {
             match doc.get(p) {
@@ -4917,7 +4956,10 @@ pub fn set_spinup(
             cutoff.2 as i64,
             cutoff.3 as i64,
         );
-        if years > 0 && repeat > 0 && spinup_end >= end_stamp {
+        if years > 0
+            && repeat > 0
+            && (spinup_end > end_stamp || (!replay && spinup_end == end_stamp))
+        {
             return Err(format!(
                 "{d}: 预热截止时间必须早于模拟结束时间；请缩短预热年数或延长模拟窗口"
             ));
@@ -4931,7 +4973,20 @@ pub fn set_spinup(
             .map_err(|e| format!("{d}: {e}"))?;
         done.push((d, doc.to_string()));
     }
-    write_all(&done)
+    let mut files = done
+        .iter()
+        .map(|(dir, text)| (std::path::Path::new(dir).join("case.nml"), text.clone()))
+        .collect::<Vec<_>>();
+    files.extend(replay_files);
+    let changed = write_files_atomic(&files)?;
+    Ok(BatchWrite {
+        written: done.len(),
+        changed,
+        text: done
+            .first()
+            .map(|(_, text)| text.clone())
+            .unwrap_or_default(),
+    })
 }
 
 /// Save only case-owned fields, validating against the selected immutable model.

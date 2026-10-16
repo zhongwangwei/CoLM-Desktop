@@ -111,6 +111,11 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
         .map(|raw| resolve(case_dir, raw))
         .unwrap_or_else(|| case_dir.join("forcing.nml"));
     if stage == "colm" {
+        colm_case::spinup_replay_enabled(case_dir)?;
+        let spinup = case_dir.join("spinup.nml");
+        if spinup.try_exists()? {
+            record_file(&mut files, spinup, FileKind::SmallConfig);
+        }
         record_file(&mut files, forcing.clone(), FileKind::SmallConfig);
         record_forcing_inventory(&mut files, &forcing, case_dir);
     }
@@ -735,6 +740,11 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
         unresolved: Vec::new(),
     };
     out.add("configuration:case".into(), &nml, "configuration");
+    colm_case::spinup_replay_enabled(case)?;
+    let spinup = case.join("spinup.nml");
+    if spinup.try_exists()? {
+        out.add("configuration:spinup".into(), &spinup, "configuration");
+    }
     let forcing = doc
         .get("DEF_forcing_namelist")
         .and_then(string_value)
@@ -1186,6 +1196,14 @@ pub(crate) fn configuration_identity(case: &Path) -> Result<BTreeMap<String, Str
             full_file(&forcing, "configuration")?.sha256,
         ),
     ]);
+    colm_case::spinup_replay_enabled(&case)?;
+    let spinup = case.join("spinup.nml");
+    if spinup.try_exists()? {
+        files.insert(
+            "configuration:spinup".into(),
+            full_file(&spinup, "configuration")?.sha256,
+        );
+    }
     let manifest = case.join(colm_model::RUN_MANIFEST);
     if manifest.is_file() {
         let run: colm_model::MaterializedRun = serde_json::from_slice(&std::fs::read(manifest)?)?;
@@ -1832,6 +1850,46 @@ mod full_identity_tests {
         std::fs::write(root.join("drivers-a.nc"), b"A").unwrap();
         std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='.'\nforcing%fprefix(1)='drivers-'\nforcing%timestep=1800\n/\n").unwrap();
         std::fs::write(root.join("case.nml"), format!("&nl_colm\nDEF_CASE_NAME='demo'\nDEF_forcing_namelist='forcing.nml'\nDEF_HIST_vars_namelist='{}'\nDEF_HIST_FREQ='HOUR'\n/\n", history.display())).unwrap();
+    }
+
+    #[test]
+    fn spinup_replay_configuration_changes_only_run_fingerprints() {
+        let root = std::env::temp_dir().join(format!(
+            "spinup-fingerprint-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let history = root.join("history.nml");
+        std::fs::write(&history, "&nl_history\n/\n").unwrap();
+        small_case(&root, &history);
+        let nml = root.join("case.nml");
+        let replay = root.join("spinup.nml");
+        let legacy = compute("colm", &nml, "test").unwrap();
+        let initial = compute("mkinidata", &nml, "test").unwrap();
+        let surface = compute("mksrfdata", &nml, "test").unwrap();
+        let legacy_full = full_inputs(&root).unwrap();
+        let legacy_config = configuration_identity(&root).unwrap();
+        std::fs::write(&replay, "&nl_colm_spinup\nreplay_start=.true.\n/\n").unwrap();
+        let enabled = compute("colm", &nml, "test").unwrap();
+        assert!(enabled != legacy);
+        assert!(compute("mkinidata", &nml, "test").unwrap() == initial);
+        assert!(compute("mksrfdata", &nml, "test").unwrap() == surface);
+        let full_enabled = full_inputs(&root).unwrap();
+        assert!(full_enabled.files.contains_key("configuration:spinup"));
+        assert_ne!(configuration_identity(&root).unwrap(), legacy_config);
+        std::fs::write(&replay, "&nl_colm_spinup\nreplay_start=.false.\n/\n").unwrap();
+        assert!(compute("colm", &nml, "test").unwrap() != enabled);
+        assert_ne!(full_inputs(&root).unwrap().files, full_enabled.files);
+        std::fs::write(&replay, "&nl_colm_spinup\nreplay_start=1\n/\n").unwrap();
+        assert!(compute("colm", &nml, "test").is_err());
+        assert!(full_inputs(&root).is_err());
+        assert!(configuration_identity(&root).is_err());
+        std::fs::remove_file(&replay).unwrap();
+        assert!(compute("colm", &nml, "test").unwrap() == legacy);
+        assert_eq!(full_inputs(&root).unwrap(), legacy_full);
+        assert_eq!(configuration_identity(&root).unwrap(), legacy_config);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -2285,6 +2285,55 @@ fn rust_model_executable() -> Result<PathBuf> {
     Ok(executable)
 }
 
+/// Check the selected executable, including frozen versions that predate spinup.nml.
+fn preflight_spinup_replay(case: &Path, engine: ModelEngine, cli: &Path) -> Result<()> {
+    if !colm_case::spinup_replay_enabled(case)? {
+        return Ok(());
+    }
+    let path = case.join("case.nml");
+    let source = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let doc = colm_namelist::parse(&source)
+        .with_context(|| format!("cannot parse {}", path.display()))?;
+    match doc.get("DEF_simulation_time%spinup_year") {
+        Some(colm_namelist::Value::Int(0)) => return Ok(()),
+        Some(colm_namelist::Value::Int(_)) | None => {}
+        Some(value) => bail!("DEF_simulation_time%spinup_year must be an integer, got {value}"),
+    }
+    ensure!(
+        engine == ModelEngine::Rust,
+        "spinup replay requires --engine rust; the Fortran engine cannot replay the first year after warmup"
+    );
+    ensure!(
+        !colm_case::is_spatial_case(&case.join("case.nml"))?,
+        "spinup replay currently supports single-point cases only"
+    );
+    let executable = cli
+        .parent()
+        .context("selected colm-cli has no parent directory")?
+        .join(if cfg!(windows) {
+            "colm-rs.exe"
+        } else {
+            "colm-rs"
+        });
+    let output = std::process::Command::new(&executable)
+        .arg("--spinup-replay-capability")
+        .output()
+        .with_context(|| {
+            format!(
+                "cannot verify spinup replay support in {}",
+                executable.display()
+            )
+        })?;
+    ensure!(
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout).trim() == "COLM_SPINUP_REPLAY_V1",
+        "selected model {} does not support spinup replay; rebuild or select an updated model version",
+        executable.display()
+    );
+    Ok(())
+}
+
 /// 在跑前两段**之前**确认 `colm-rs` 接得住这个算例。
 ///
 /// 不做的话，一个 Rust 跑不了的算例（打开了 SNICAR、PFT 内核、湖泊站点……）要等
@@ -3018,6 +3067,12 @@ fn execute_selected_run(
     let engine = requested_engine(opts.get("--engine").as_deref())?;
     let force = opts.get("--force").is_some();
     let frozen_cli = opts.get("--frozen-model-cli");
+    let execution_cli = match (frozen_cli.as_ref(), version) {
+        (Some(cli), _) => PathBuf::from(cli),
+        (None, provenance::Version::Workspace(readiness)) => readiness.cli.clone(),
+        (None, provenance::Version::Official) => std::env::current_exe()?,
+    };
+    preflight_spinup_replay(&case, engine, &execution_cli)?;
     if let Some(cli) = frozen_cli {
         let mut command = std::process::Command::new(cli);
         command.arg("run").args(&opts.positional);
@@ -3146,6 +3201,7 @@ fn run_case(
     // 而工作目录与 namelist 路径都要交给子进程 —— 那种形式两边都不认。
     let case = &model_version::execution_path(case)
         .with_context(|| format!("cannot resolve {}", case.display()))?;
+    preflight_spinup_replay(case, engine, &std::env::current_exe()?)?;
     // 引擎与前处理都用 Rust 时三个 Fortran 二进制不会被执行，只要清单（宏与身份）：远程服务器上
     // 只放清单就能跑（第 637 轮）。
     let kernel = if engine == ModelEngine::Rust && preprocessors == PreprocessorMode::Rust {
@@ -6559,3 +6615,122 @@ mod window_tests;
 #[cfg(test)]
 #[path = "forcing_probe_tests.rs"]
 mod forcing_probe_tests;
+
+#[cfg(test)]
+mod spinup_replay_tests {
+    use super::*;
+
+    fn case_dir() -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "colm-cli-spinup-replay-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("case.nml"), "&nl_colm\n/\n").unwrap();
+        path
+    }
+
+    fn enable(case: &Path) {
+        std::fs::write(
+            case.join("spinup.nml"),
+            "&nl_colm_spinup\nreplay_start=.true.\n/\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn spinup_replay_preserves_legacy_cases_and_rejects_unsupported_modes() {
+        let case = case_dir();
+        let cli = case.join("missing-cli");
+        preflight_spinup_replay(&case, ModelEngine::Fortran, &cli).unwrap();
+        enable(&case);
+        assert!(preflight_spinup_replay(&case, ModelEngine::Fortran, &cli)
+            .unwrap_err()
+            .to_string()
+            .contains("requires --engine rust"));
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\nDEF_file_mesh='mesh.nc'\n/\n",
+        )
+        .unwrap();
+        assert!(preflight_spinup_replay(&case, ModelEngine::Rust, &cli)
+            .unwrap_err()
+            .to_string()
+            .contains("single-point"));
+        std::fs::remove_dir_all(case).unwrap();
+    }
+
+    #[test]
+    fn disabled_spinup_does_not_require_replay_capability_but_still_validates_configuration() {
+        let case = case_dir();
+        let cli = case.join("missing-cli");
+        enable(&case);
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\nDEF_simulation_time%spinup_year=0\n/\n",
+        )
+        .unwrap();
+        preflight_spinup_replay(&case, ModelEngine::Fortran, &cli).unwrap();
+        preflight_spinup_replay(&case, ModelEngine::Rust, &cli).unwrap();
+        std::fs::write(case.join("spinup.nml"), "invalid").unwrap();
+        assert!(preflight_spinup_replay(&case, ModelEngine::Fortran, &cli).is_err());
+        enable(&case);
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\nDEF_simulation_time%spinup_year='0'\n/\n",
+        )
+        .unwrap();
+        assert!(preflight_spinup_replay(&case, ModelEngine::Fortran, &cli)
+            .unwrap_err()
+            .to_string()
+            .contains("must be an integer"));
+        std::fs::remove_dir_all(case).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spinup_replay_checks_selected_frozen_engine_before_delegation() {
+        use std::os::unix::fs::PermissionsExt;
+        let case = case_dir();
+        enable(&case);
+        let cli = case.join("colm-cli");
+        let engine = case.join("colm-rs");
+        let opts = Opts {
+            positional: vec![case.display().to_string()],
+            flags: vec![
+                ("--kernel".into(), case.display().to_string()),
+                ("--frozen-model-cli".into(), cli.display().to_string()),
+            ],
+        };
+        // No CLI executable exists: rejection must happen before delegation.
+        for (script, supported) in [
+            ("#!/bin/sh\nexit 0\n", false),
+            ("#!/bin/sh\necho COLM_SPINUP_REPLAY_V1\nexit 1\n", false),
+            (
+                "#!/bin/sh\n[ \"$1\" = --spinup-replay-capability ] || exit 1\necho COLM_SPINUP_REPLAY_V1\n",
+                true,
+            ),
+        ] {
+            std::fs::write(&engine, script).unwrap();
+            std::fs::set_permissions(&engine, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(
+                preflight_spinup_replay(&case, ModelEngine::Rust, &cli).is_ok(),
+                supported
+            );
+            let error = execute_selected_run(&opts, &provenance::Version::Official, None)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains(if supported {
+                    "cannot run frozen official program"
+                } else {
+                    "does not support spinup replay"
+                }),
+                "{error}"
+            );
+        }
+        std::fs::remove_dir_all(case).unwrap();
+    }
+}

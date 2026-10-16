@@ -239,3 +239,17 @@ fn the_dominant_value_follows_the_largest_part() {
     assert_eq!(empty.dominant(grid).unwrap(), None);
     assert_eq!(Footprint::Cell(3, 4).dominant(grid).unwrap(), Some(34.0));
 }
+
+#[test]
+fn replay_lightning_stays_in_the_climatology_on_leap_december_31() {
+    let time = |julian_day, seconds| colm_core::calendar::CalendarTime {
+        year: 2008,
+        julian_day,
+        seconds,
+    };
+    assert_eq!(replay_lightning_record(time(1, 0)), 1);
+    assert_eq!(replay_lightning_record(time(1, 10800)), 2);
+    assert_eq!(replay_lightning_record(time(365, 84600)), 2920);
+    assert_eq!(replay_lightning_record(time(366, 0)), 2920);
+    assert_eq!(replay_lightning_record(time(366, 84600)), 2920);
+}

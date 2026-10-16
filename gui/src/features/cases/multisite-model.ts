@@ -58,6 +58,8 @@ export function planMultiSites({
     error.name = 'MultiSiteValidationError';
     throw error;
   };
+  if (mode === 'first-year' && form.engine && form.engine !== 'rust')
+    fail('首年重复预热需要 Rust 计算核心。', 'First-year replay spinup requires the Rust engine.');
   if (!drafts.length) fail('请至少选择一个站点。', 'Select at least one site.');
   let root: string;
   try {
@@ -109,7 +111,14 @@ export function planMultiSites({
         'Spinup repetitions must be an integer from 1 to 2147483647.',
         draft.name,
       );
-    const spinupIssue = spinupProblem(draft.start, draft.end, cutoff, repetitions, en);
+    const spinupIssue = spinupProblem(
+      draft.start,
+      draft.end,
+      cutoff,
+      repetitions,
+      en,
+      mode === 'first-year',
+    );
     if (spinupIssue) fail(spinupIssue, spinupIssue, draft.name);
     const classification =
       scanned.urban || scanned.crop ? 'IGBP' : form.landcover || (step === 3 ? 'IGBP' : '');
@@ -186,6 +195,7 @@ export function planMultiSites({
       { ...scanned, start: scanned.start!.slice(0, 10), end: scanned.end!.slice(0, 10) },
       effectivePhysics,
       en,
+      mode === 'first-year',
     );
     if (issue) fail(issue, issue, draft.name);
     return {

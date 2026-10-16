@@ -117,6 +117,7 @@ test('multi-site selection excludes incomplete data and preserves edited names w
 test('shared first-year cutoff is read-only, rejects leap anniversary without crashing, and allows per-site recovery', () => {
   const page = screen();
   page.click('multisite-select-all');
+  assert.ok(page.text.some((value) => value.includes('Output includes the first year')));
   assert.equal(
     page.contract().fields.find((field) => field.id === 'multisite-spinup_end:/a.nc')!.value,
     '2001-01-01',

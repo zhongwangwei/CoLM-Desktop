@@ -2440,7 +2440,13 @@ test('custom multi-site creation uses each station inputs and independently calc
   assert.equal(cutoffs[1]['DEF_simulation_time%spinup_year'], '2006');
   assert.deepEqual(
     p.calls.filter((call) => call.command === 'set_spinup').map((call) => call.args),
-    created.map((call) => ({ dirs: [call.args.out], years: 1, repeat: 3, kernelDir: null })),
+    created.map((call) => ({
+      dirs: [call.args.out],
+      years: 1,
+      repeat: 3,
+      replayStart: true,
+      kernelDir: null,
+    })),
   );
   assert.equal(p.calls.filter((call) => call.command === 'run_case').length, 0);
   assert.equal(p.render().actions.find((action) => action.id === 'new-create')?.enabled, false);

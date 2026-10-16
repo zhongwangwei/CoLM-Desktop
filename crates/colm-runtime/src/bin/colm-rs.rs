@@ -65,6 +65,10 @@ fn main() -> ExitCode {
 const SUCCESS_MARKER: &str = "CoLM Execution Completed.";
 
 fn run() -> Result<()> {
+    if std::env::args().skip(1).collect::<Vec<_>>() == ["--spinup-replay-capability"] {
+        println!("COLM_SPINUP_REPLAY_V1");
+        return Ok(());
+    }
     let arguments = Arguments::parse(std::env::args().skip(1))?;
     let layout = colm_case::Layout::new(&arguments.case_directory);
     let case_nml = layout.case_nml();
@@ -86,6 +90,10 @@ fn run() -> Result<()> {
         _ => None,
     });
     if colm_case::is_spatial_case(&case_nml)? {
+        ensure!(
+            !colm_case::spinup_replay_enabled(&arguments.case_directory)?,
+            "spinup replay is supported only for POINT cases"
+        );
         return run_spatial(&arguments, &layout, &name, &case_nml, hybrid.as_ref());
     }
 
