@@ -2123,7 +2123,9 @@ for (const name of ['NewCasePage', 'CasesPage'] as const) {
     if (name === 'CasesPage') await p.goto('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     const contract = p.render();
-    for (const key of modelKeys.filter(simulation.isSiteConfiguration)) {
+    for (const key of modelKeys.filter(
+      (key) => simulation.isSiteConfiguration(key) || simulation.isForcingScheme(key),
+    )) {
       assert.ok(
         contract.fields.some((f) => f.id.endsWith(key)),
         key,
@@ -2134,7 +2136,9 @@ for (const name of ['NewCasePage', 'CasesPage'] as const) {
       );
     }
     for (const key of [
-      ...modelKeys.filter((key) => !simulation.isSiteConfiguration(key)),
+      ...modelKeys.filter(
+        (key) => !simulation.isSiteConfiguration(key) && !simulation.isForcingScheme(key),
+      ),
       'DEF_case_name',
     ]) {
       assert.ok(!contract.fields.some((f) => f.id.endsWith(key)), key);
@@ -2353,3 +2357,35 @@ test('final case directory preview follows the exact validated creation destinat
     assert.equal(preview().value, '');
   }
 });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const)
+  test(`${name} edits forcing processing in data extras and saves its override`, async () => {
+    const key = 'DEF_USE_Forcing_Downscaling';
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      [site],
+      initialValues,
+      { schema: [...schema, { ...field(key, '强迫场', '.false.'), kind: 'Logical' }] },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    assert.ok(!p.render().fields.some((f) => f.id.endsWith(key)));
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    const control = p.render().fields.find((f) => f.id.endsWith(key))!;
+    assert.equal(control.value, '.false.');
+    p.set(control.id, '.true.');
+    if (name === 'NewCasePage') {
+      await p.goto('new-step-5');
+      await p.click('new-create');
+    } else await p.click('case-save');
+    const request = p.calls.find(
+      (call) => call.command === (name === 'NewCasePage' ? 'new_case' : 'case_data_save'),
+    )!;
+    assert.ok(request);
+    assert.ok(
+      (request.args.fields as { path: string; value: string }[]).some(
+        (f) => f.path === key && f.value === '.true.',
+      ),
+    );
+  });

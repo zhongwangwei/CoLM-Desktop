@@ -263,16 +263,13 @@ test('model settings guide exposes classification only with a callback and catal
       result.actions.some((a) => a.id === 'simulation-site-settings'),
       false,
     );
-    assert.ok(result.actions.some((a) => a.id === 'simulation-forcing-settings'));
+    assert.ok(!result.actions.some((a) => a.id === 'simulation-forcing-settings'));
     result = render(false, true, extra);
-    for (const action of result.actions.filter((a) =>
-      ['simulation-site-settings', 'simulation-forcing-settings'].includes(a.id),
-    )) {
-      assert.equal(action.enabled, false);
-      const before = JSON.stringify(slots);
-      action.run();
-      assert.equal(JSON.stringify(slots), before);
-    }
+    assert.ok(
+      !result.actions.some((a) =>
+        ['simulation-site-settings', 'simulation-forcing-settings'].includes(a.id),
+      ),
+    );
   }
   for (const mode of ['PFT', 'PC']) {
     render(false, false, { mode, classification: 'IGBP' });
@@ -488,7 +485,7 @@ test('hyperspectral urban source remains a general simulation input without urba
   assert.equal(simulationOptionField(field), true);
 });
 
-test('classification keeps site parameters in data and forcing parameters in model settings', async () => {
+test('classification keeps site and forcing parameters in data settings', async () => {
   const { simulationOptionField, processSettingOwner, parameterLocation } =
     await import('./model-settings');
   for (const name of [
@@ -529,8 +526,24 @@ test('classification keeps site parameters in data and forcing parameters in mod
     'DEF_USE_CBL_HEIGHT',
     'DEF_forcing%CBL_fprefix',
     'DEF_DS_HiresTopographyDataDir',
-  ])
-    assert.equal(processSettingOwner({ name, section: '强迫场' }), 'forcing', name);
+  ]) {
+    const field = { name, section: '强迫场' };
+    assert.equal(processSettingOwner(field), null, name);
+    assert.equal(simulationOptionField(field), false, name);
+    assert.match(
+      parameterLocation(
+        {
+          raw_key: name,
+          section: '强迫场',
+          scope: 'case-scalar',
+          storage: 'case-nml',
+          visibility: 'editable-common',
+        } as ModelParameter,
+        [],
+      ),
+      /数据与时段 → 更多配置 → 强迫场处理/,
+    );
+  }
   for (const name of [
     'DEF_dir_runtime',
     'DEF_forcing%dataset',

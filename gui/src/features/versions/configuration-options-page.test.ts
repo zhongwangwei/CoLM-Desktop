@@ -1479,31 +1479,23 @@ test('general soil resistance precedes albedo and follows structure defaults wit
   assert.equal(h.changes.length, 0);
 });
 
-for (const [process, names] of [
-  ['forcing', ['DEF_Forcing_Interp_Method', 'DEF_USE_Forcing_Downscaling', 'DEF_DS_topo']],
-] as const) {
-  test(`${process} settings have a dedicated popup and no duplicate general entry`, async () => {
-    const h = harness();
-    h.props.onCaseChange = () => {};
-    h.props.hideProcesses = true;
-    for (const name of names)
-      h.props.fields.push({
-        name,
-        section: '其他',
-        kind: 'integer',
-        default: '1',
-        values: [],
-        derived: false,
-      });
-    h.render();
-    let c = await h.settle();
-    assert.ok(!c.actions.some((a) => a.id === `configuration-group-${process}`));
-    h.props.process = process;
-    c = h.render();
-    for (const name of names)
-      assert.equal(c.fields.filter((f) => f.id === `configuration-${name}`).length, 1, name);
-  });
-}
+test('forcing processing stays out of general model controls for case editing', async () => {
+  const h = harness();
+  h.props.onCaseChange = () => {};
+  h.props.hideProcesses = true;
+  for (const name of ['DEF_Forcing_Interp_Method', 'DEF_USE_Forcing_Downscaling', 'DEF_DS_topo'])
+    h.props.fields.push({
+      name,
+      section: '强迫场',
+      kind: 'integer',
+      default: '1',
+      values: [],
+      derived: false,
+    });
+  h.render();
+  const c = await h.settle();
+  assert.ok(!c.actions.some((a) => a.id === 'configuration-group-forcing'));
+});
 
 test('VIC files expose preset paths and guarded browsing only for the selected source', async () => {
   for (const grid of [false, true]) {

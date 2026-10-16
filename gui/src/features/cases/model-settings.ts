@@ -173,7 +173,7 @@ export function processSettingOwner(
   )
     return null;
   if (isSiteConfiguration(field.name)) return null;
-  if (isForcingScheme(field.name)) return 'forcing';
+  if (isForcingScheme(field.name)) return null;
   const roots: Record<string, string> = {
     DEF_USE_BGC: 'DEF_USE_BGC',
     DEF_USE_TRACER: 'DEF_USE_TRACER',
@@ -232,7 +232,7 @@ export function simulationOptionField(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): boolean {
-  if (isSiteConfiguration(field.name)) return false;
+  if (isSiteConfiguration(field.name) || isForcingScheme(field.name)) return false;
   const step = simulationFieldStep(field);
   if (step === 4) return true;
   if (step !== 3) return false;
@@ -540,7 +540,6 @@ export function parameterLocation(
   ];
   const process = processSettingOwner(field);
   const owners: Record<string, string> = {
-    forcing: t('强迫场处理', 'Forcing processing'),
     DEF_USE_BGC: 'BGC',
     crop: t('作物设置', 'Crop settings'),
     DEF_URBAN_RUN: t('城市设置', 'Urban settings'),
@@ -551,6 +550,8 @@ export function parameterLocation(
     PC: t('PC 专属设置', 'PC settings'),
     DEF_USE_VariablySaturatedFlow: t('变饱和流设置', 'Variably saturated flow settings'),
   };
+  if (isForcingScheme(field.name))
+    return labels[2] + t(' → 更多配置 → 强迫场处理', ' → More settings → Forcing processing');
   if (isSiteConfiguration(field.name))
     return labels[2] + t(' → 更多配置 → 单点专属设置', ' → More settings → Single-point settings');
   return labels[step - 1] + (owners[process ?? ''] ? ' → ' + owners[process!] : '');
