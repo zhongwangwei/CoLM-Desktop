@@ -43,6 +43,10 @@ fn plain_directory(path: &Path) -> Result<PathBuf, String> {
     let mut ancestor = PathBuf::new();
     for part in path.components() {
         ancestor.push(part);
+        // A Windows drive prefix is not an accessible directory until RootDir is appended.
+        if matches!(part, Component::Prefix(_)) {
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&ancestor).map_err(|e| e.to_string())?;
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err("无法删除经过符号链接或非目录的路径".into());
@@ -104,6 +108,15 @@ fn owned_directory(detail: &OperationDetail) -> Result<PathBuf, String> {
     Ok(target)
 }
 
+fn has_case_depth(path: &Path) -> bool {
+    path.is_absolute()
+        && path
+            .components()
+            .filter(|part| matches!(part, Component::Normal(_)))
+            .count()
+            >= 2
+}
+
 fn case_directory(
     detail: &OperationDetail,
 ) -> Result<(PathBuf, crate::project::CaseRecord), String> {
@@ -129,7 +142,7 @@ fn case_directory(
     {
         return Err("历史记录中的算例目录相互冲突".into());
     }
-    if target.parent().is_none() || target.components().count() < 3 {
+    if !has_case_depth(&target) {
         return Err("不能删除根目录或系统顶层目录".into());
     }
     for protected in [
@@ -718,6 +731,40 @@ mod tests {
     }
 
     #[test]
+    fn case_depth_rejects_root_and_top_level_directories() {
+        #[cfg(unix)]
+        let (root, top, nested) = ("/", "/top", "/top/case");
+        #[cfg(windows)]
+        let (root, top, nested) = (r"C:\", r"C:\top", r"C:\top\case");
+        assert!(!has_case_depth(Path::new(root)));
+        assert!(!has_case_depth(Path::new(top)));
+        assert!(has_case_depth(Path::new(nested)));
+        assert!(!has_case_depth(Path::new("relative/case")));
+        #[cfg(windows)]
+        {
+            assert!(!has_case_depth(Path::new(r"\\?\C:\")));
+            assert!(!has_case_depth(Path::new(r"\\?\C:\top")));
+            assert!(has_case_depth(Path::new(r"\\?\C:\top\case")));
+        }
+    }
+
+    #[test]
+    fn plain_directory_accepts_absolute_and_canonical_paths() {
+        let (root, ledger, _) = fixture();
+        let canonical = root.canonicalize().unwrap();
+        assert_eq!(plain_directory(&root).unwrap(), canonical);
+        assert_eq!(plain_directory(&canonical).unwrap(), canonical);
+        #[cfg(windows)]
+        {
+            let ordinary = canonical.to_str().unwrap().strip_prefix(r"\\?\").unwrap();
+            assert_eq!(plain_directory(Path::new(ordinary)).unwrap(), canonical);
+            assert!(plain_directory(Path::new("C:relative")).is_err());
+        }
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn deletes_only_verified_run_and_preserves_source() {
         let (root, ledger, event) = fixture();
         let detail = ledger.detail(&event.operation_id).unwrap().unwrap();
@@ -731,6 +778,7 @@ mod tests {
             std::fs::read_to_string(root.join("source/input")).unwrap(),
             "keep"
         );
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -750,6 +798,7 @@ mod tests {
                 .removed
         );
         assert!(target.exists());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -765,6 +814,7 @@ mod tests {
         }
         assert!(owned_directory(&detail).is_err());
         assert!(root.join("source/input").exists());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -787,6 +837,7 @@ mod tests {
         detail.events[1].detail["remote_record"] = binding;
         detail.events[1].detail["remote_record"]["job"] = serde_json::json!("different");
         assert!(remote_args(&detail, false, None).is_err());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -825,6 +876,7 @@ mod tests {
         );
         assert!(!source.exists());
         assert_eq!(ledger.query(&Default::default()).unwrap().items.len(), 1);
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -843,6 +895,7 @@ mod tests {
         }
         let error = hide_after_files(&ledger, "missing-id", Some("/already-removed")).unwrap_err();
         assert!(error.contains("已删除") && error.contains("仅删除记录"));
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -882,6 +935,7 @@ mod tests {
             history_path(mirror.join("not-created/run").to_str().unwrap()),
             mirror.join("not-created/run")
         );
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -894,6 +948,7 @@ mod tests {
         ledger.append(&running).unwrap();
         assert_eq!(ledger.query(&Default::default()).unwrap().items.len(), 0);
         assert!(idle_case(&ledger, &root.join("source")).is_err());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -908,6 +963,7 @@ mod tests {
         active.case_path = Some(alias.join("future/run").display().to_string());
         ledger.append(&active).unwrap();
         assert!(idle_case(&ledger, &source).is_err());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -922,6 +978,7 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &target).unwrap();
         assert!(owned_directory(&detail).is_err());
         assert!(outside.join("output").exists());
+        drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
