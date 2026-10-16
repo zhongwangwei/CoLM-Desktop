@@ -28,6 +28,9 @@ function harness(
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
+  let schedulers: unknown = ['slurm'];
+  let unverifiedQsub = false;
+  let pendingProbe: Promise<void> | undefined;
   const menus: { items: { disabled?: boolean; onSelect: () => void }[] }[] = [];
   let browser: {
     server: resource.Server;
@@ -52,9 +55,12 @@ function harness(
         if (failures.history === args?.case) throw new Error('Case directory was deleted');
         return { studies: [] };
       case 'remote_probe':
+        await pendingProbe;
         if (failProbe) throw new Error('SSH unavailable');
         return {
           hostname: 'remote',
+          schedulers,
+          qsub_unverified: unverifiedQsub,
           root_writable: true,
           maps: [],
           ...(!(args?.server as resource.Server)?.root
@@ -179,6 +185,19 @@ function harness(
     failProbe: () => {
       failProbe = true;
     },
+    schedulers: (value: unknown) => {
+      schedulers = value;
+    },
+    unverifiedQsub: () => {
+      unverifiedQsub = true;
+    },
+    pauseProbe: () => {
+      let release!: () => void;
+      pendingProbe = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      return release;
+    },
     browser: () => browser,
     menus: () => menus,
   };
@@ -218,6 +237,123 @@ test('resource selection is page-local and dirty drafts block switching and navi
   contract = await page.action('resource-select-server-7920mp');
   assert.equal((contract.details as { selected: string }).selected, 'server:7920mp');
   assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('scheduler detection is visible beside advanced settings and applies one candidate only to the draft', async () => {
+  for (const scheduler of ['slurm', 'pbs', 'lsf']) {
+    const page = harness();
+    let contract = await page.ready();
+    assert.ok(!contract.actions.some((action) => action.id === 'resource-detect-scheduler'));
+    await page.action('resource-check');
+    await page.action('resource-advanced-toggle');
+    page.schedulers([scheduler]);
+    contract = await page.action('resource-detect-scheduler');
+    assert.equal(
+      contract.fields.find((field) => field.id === 'resource-scheduler')?.value,
+      scheduler,
+    );
+    assert.deepEqual((contract.details as { schedulerDetection: unknown }).schedulerDetection, {
+      configuration: JSON.stringify({ ...page.servers[0], scheduler }),
+      schedulers: [scheduler],
+      unverifiedQsub: false,
+    });
+    assert.equal(
+      (contract.details as { check: { ssh: { state: string } } }).check.ssh.state,
+      'pending',
+    );
+    assert.ok(contract.actions.some((action) => action.id === 'resource-save'));
+    assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+    await page.action('resource-discard');
+    contract = page.contract();
+    assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'auto');
+    assert.equal((contract.details as { schedulerDetection: unknown }).schedulerDetection, null);
+  }
+});
+
+test('ambiguous or absent schedulers retain the manual selection, without falling back to bare', async () => {
+  for (const schedulers of [[], ['slurm', 'pbs']]) {
+    const page = harness();
+    await page.ready();
+    await page.action('resource-advanced-toggle');
+    page.fill('resource-scheduler', 'lsf');
+    page.schedulers(schedulers);
+    const contract = await page.action('resource-detect-scheduler');
+    assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'lsf');
+    assert.deepEqual(
+      (contract.details as { schedulerDetection: { schedulers: string[] } }).schedulerDetection
+        .schedulers,
+      schedulers,
+    );
+    assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+  }
+});
+
+test('an unverified qsub is identified separately from a server without scheduler tools', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-advanced-toggle');
+  page.schedulers([]);
+  page.unverifiedQsub();
+  const contract = await page.action('resource-detect-scheduler');
+  assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'auto');
+  assert.equal(
+    (contract.details as { schedulerDetection: { unverifiedQsub: boolean } }).schedulerDetection
+      .unverifiedQsub,
+    true,
+  );
+});
+
+test('detection works for an unsaved connection without a work root and rejects failed or malformed replies', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-new');
+  await page.action('resource-advanced-toggle');
+  assert.equal(
+    page.contract().actions.find((action) => action.id === 'resource-detect-scheduler')?.enabled,
+    false,
+  );
+  page.fill('resource-host', 'tianhe');
+  let contract = await page.action('resource-detect-scheduler');
+  assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'slurm');
+  assert.equal((page.calls.at(-1)?.args?.server as resource.Server).root, '');
+  for (const invalid of [undefined, null, 'pbs', ['unknown']]) {
+    page.schedulers(invalid);
+    await assert.rejects(page.action('resource-detect-scheduler'), /有效的调度器/);
+    contract = page.render();
+    assert.equal(
+      contract.fields.find((field) => field.id === 'resource-scheduler')?.value,
+      'slurm',
+    );
+    assert.equal((contract.details as { schedulerDetection: unknown }).schedulerDetection, null);
+  }
+  page.failProbe();
+  await assert.rejects(page.action('resource-detect-scheduler'), /SSH unavailable/);
+  contract = page.render();
+  assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'slurm');
+  assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('late scheduler replies cannot overwrite another edited connection or bypass the busy guard', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-advanced-toggle');
+  const release = page.pauseProbe();
+  const pending = page.action('resource-detect-scheduler');
+  let contract = page.render();
+  assert.equal(
+    contract.actions.find((action) => action.id === 'resource-detect-scheduler')?.enabled,
+    false,
+  );
+  assert.match(page.guard()!, /操作进行中/);
+  page.fill('resource-host', 'changed-host');
+  release();
+  contract = await pending;
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-host')?.value,
+    'changed-host',
+  );
+  assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'auto');
+  assert.equal((contract.details as { schedulerDetection: unknown }).schedulerDetection, null);
 });
 
 test('resource context menu deletes only the confirmed connection and preserves another selection', async () => {

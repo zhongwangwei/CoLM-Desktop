@@ -1,5 +1,21 @@
 use super::*;
 
+#[test]
+fn automatic_scheduler_does_not_treat_unverified_qsub_as_a_bare_server() {
+    let mut probe = colm_remote::probe::Probe::default();
+    assert_eq!(detected_scheduler(&probe).unwrap(), Scheduler::Bare);
+    probe.qsub_unverified = true;
+    assert!(detected_scheduler(&probe)
+        .unwrap_err()
+        .to_string()
+        .contains("qsub"));
+    probe.schedulers = vec!["lsf".into()];
+    assert_eq!(detected_scheduler(&probe).unwrap(), Scheduler::Lsf);
+    probe.qsub_unverified = false;
+    probe.schedulers = vec!["pbs".into(), "lsf".into()];
+    assert_eq!(detected_scheduler(&probe).unwrap(), Scheduler::Pbs);
+}
+
 // 映射与算例路径用的是 Unix 本机路径（Windows 上不是绝对路径，`parse_mapping` 会拒绝）。
 #[cfg(unix)]
 fn maps() -> Vec<Mapping> {
