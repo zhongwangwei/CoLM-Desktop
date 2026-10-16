@@ -90,6 +90,8 @@ export type ResourceCheck = {
   checked_at: string;
   probe?: {
     hostname?: string;
+    configuration_error?: string;
+    engine?: 'source' | 'prebuilt';
     problems?: string[];
     root_exists?: boolean;
     root_writable?: boolean;
@@ -104,26 +106,45 @@ export function resourceCheckSummary(server: Server, check?: ResourceCheck, en =
   const t = (zh: string, english: string) => (en ? english : zh);
   const pending: CheckState = { state: 'pending', label: t('尚未检查', 'Not checked') };
   if (!check || check.configuration !== JSON.stringify(server))
-    return { ssh: pending, engine: pending, mapping: pending, checkedAt: null };
+    return { ssh: pending, engine: pending, mapping: pending, directory: pending, checkedAt: null };
   const ssh: CheckState = check.probe_error
     ? { state: 'error', label: t('连接检查失败', 'Connection check failed') }
     : check.probe?.hostname
       ? { state: 'success', label: t('此次连接成功', 'Connected at last check') }
       : pending;
+  const checkedAt = Number.isFinite(Date.parse(check.checked_at)) ? check.checked_at : null;
+  if (check.probe_error || check.probe?.configuration_error) {
+    const blocked: CheckState = {
+      state: 'pending',
+      label: check.probe_error
+        ? t('等待连接成功', 'Waiting for connection')
+        : t('待完善运行配置', 'Complete run configuration'),
+    };
+    return { ssh, engine: blocked, mapping: blocked, directory: blocked, checkedAt };
+  }
   const inventory = check.engines?.engines;
   const ready = Array.isArray(inventory)
     ? inventory.filter((engine) => engine?.ready === true).length
     : 0;
   const engine: CheckState = check.engine_error
     ? { state: 'error', label: t('引擎检查失败', 'Engine check failed') }
-    : Array.isArray(inventory)
+    : inventory?.length === 0 &&
+        (check.probe?.engine === 'source' || check.probe?.engine === 'prebuilt')
       ? {
-          state: ready ? 'success' : 'warning',
-          label: ready
-            ? t(`${ready} 个可用快照`, `${ready} available snapshots`)
-            : t('未找到可用快照', 'No available snapshot'),
+          state: 'success',
+          label:
+            check.probe.engine === 'source'
+              ? t('首次运行自动构建引擎', 'Engine builds automatically on first run')
+              : t('首次运行自动部署引擎', 'Engine deploys automatically on first run'),
         }
-      : pending;
+      : Array.isArray(inventory)
+        ? {
+            state: ready ? 'success' : 'warning',
+            label: ready
+              ? t(`${ready} 个可用快照`, `${ready} available snapshots`)
+              : t('未找到可用快照', 'No available snapshot'),
+          }
+        : pending;
   const maps = Array.isArray(check.probe?.maps) ? check.probe.maps : [];
   const matched = server.maps.filter((map) =>
     maps.some(
@@ -135,26 +156,40 @@ export function resourceCheckSummary(server: Server, check?: ResourceCheck, en =
         checked.remote_exists === true,
     ),
   ).length;
-  const mapping: CheckState = check.probe_error
-    ? { state: 'error', label: t('目录检查失败', 'Path check failed') }
-    : !check.probe
-      ? pending
-      : !server.maps.length
-        ? { state: 'warning', label: t('尚未配置对应目录', 'No directory mapping') }
-        : matched === server.maps.length
-          ? { state: 'success', label: t('对应路径存在', 'Mapped paths exist') }
-          : {
-              state: 'warning',
-              label: t(
-                `${server.maps.length - matched} 项待确认`,
-                `${server.maps.length - matched} mappings need review`,
-              ),
-            };
+  const mapping: CheckState = !check.probe
+    ? pending
+    : !server.maps.length
+      ? {
+          state: 'success',
+          label: t('直接使用服务器路径，无需映射', 'Server paths used directly; no mapping needed'),
+        }
+      : matched === server.maps.length
+        ? { state: 'success', label: t('对应路径存在', 'Mapped paths exist') }
+        : {
+            state: 'warning',
+            label: t(
+              `${server.maps.length - matched} 项待确认`,
+              `${server.maps.length - matched} mappings need review`,
+            ),
+          };
+  const directory: CheckState =
+    check.probe?.root_writable === true
+      ? {
+          state: 'success',
+          label:
+            check.probe.root_exists === false
+              ? t('工作目录可创建', 'Work directory can be created')
+              : t('工作目录可写', 'Work directory is writable'),
+        }
+      : check.probe?.root_writable === false
+        ? { state: 'error', label: t('工作目录不可写', 'Work directory is not writable') }
+        : pending;
   return {
     ssh,
     engine,
     mapping,
-    checkedAt: Number.isFinite(Date.parse(check.checked_at)) ? check.checked_at : null,
+    directory,
+    checkedAt,
   };
 }
 

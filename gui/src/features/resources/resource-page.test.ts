@@ -26,7 +26,7 @@ function harness(
     guard: () => string | null;
   const routes: string[] = [];
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
-  const servers = hosts.map((host) => ({ ...resource.newServer(), host }));
+  const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
   const ipc = async (command: string, args?: Record<string, unknown>) => {
     calls.push({ command, args });
@@ -43,7 +43,14 @@ function harness(
         return { studies: [] };
       case 'remote_probe':
         if (failProbe) throw new Error('SSH unavailable');
-        return { hostname: 'remote', maps: [] };
+        return {
+          hostname: 'remote',
+          root_writable: true,
+          maps: [],
+          ...(!(args?.server as resource.Server)?.root
+            ? { configuration_error: '请填写服务器工作目录' }
+            : {}),
+        };
       case 'remote_engines':
         return { engines: [{ id: 'snapshot', ready: true }] };
       case 'pick_file':
@@ -196,7 +203,7 @@ test('only visible configuration fields and selected maintenance actions enter t
   let contract = await page.ready();
   assert.deepEqual(
     contract.fields.map((field) => field.id),
-    ['resource-host', 'resource-username', 'resource-auth'],
+    ['resource-host', 'resource-username', 'resource-root', 'resource-auth'],
   );
   assert.ok(!contract.actions.some((action) => action.id === 'resource-build'));
   contract = await page.action('resource-directories-toggle');
@@ -204,9 +211,7 @@ test('only visible configuration fields and selected maintenance actions enter t
   await page.action('resource-add-map');
   page.fill('resource-map-0-local', '/data');
   contract = await page.action('resource-directories-toggle');
-  assert.ok(
-    !contract.fields.some((field) => field.id.includes('map-') || field.id === 'resource-root'),
-  );
+  assert.ok(!contract.fields.some((field) => field.id.includes('map-')));
   assert.ok(!contract.actions.some((action) => action.id === 'resource-add-map'));
   await page.action('resource-discard');
   await page.action('resource-select-server-7920mp');
@@ -252,7 +257,23 @@ test('checks aggregate both readonly replies, edits revoke evidence, and native 
   contract = await page.action('resource-check');
   check = (contract.details as { check: ReturnType<typeof resource.resourceCheckSummary> }).check;
   assert.equal(check.ssh.state, 'error');
-  assert.equal(check.engine.state, 'success');
+  assert.equal(check.engine.state, 'pending');
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+});
+
+test('an incomplete server draft still checks SSH without claiming the run settings failed to connect', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-new');
+  page.fill('resource-host', 'tms17l');
+  const contract = await page.action('resource-check');
+  const check = (contract.details as { check: ReturnType<typeof resource.resourceCheckSummary> })
+    .check;
+  assert.equal(check.ssh.state, 'success');
+  assert.equal(check.engine.state, 'pending');
+  assert.equal(check.directory.state, 'pending');
+  assert.equal(check.mapping.state, 'pending');
+  assert.equal(page.calls.filter((call) => call.command === 'remote_engines').length, 0);
   assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
 });
 

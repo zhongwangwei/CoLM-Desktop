@@ -58,10 +58,12 @@ echo "slurm=$(command -v sbatch)"
 echo "pbs=$(command -v qsub)"
 echo "lsf=$(command -v bsub)"
 echo "queues=$( (sinfo -h -o '%P' 2>/dev/null; qstat -Q 2>/dev/null | awk 'NR>2{{print $1}}'; bqueues -w 2>/dev/null | awk 'NR>1{{print $1}}') | tr -d '*' | tr '\n' ' ')"
+if [ -n "$R" ]; then
 echo "root_exists=$([ -d "$R" ] && echo 1)"
 P="$R"; while [ ! -d "$P" ] && [ "$P" != "/" ]; do P=$(dirname "$P"); done
 echo "root_writable=$([ -w "$P" ] && echo 1)"
 echo "root_free_kb=$(df -Pk "$P" 2>/dev/null | awk 'NR==2{{print $4}}')"
+fi
 "#,
         root = quote(root),
         prelude = crate::sched::PATH_PRELUDE,
@@ -124,7 +126,7 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .build_problems
             .push("cmake and a C compiler are needed to build netCDF/HDF5 into the engine".into());
     }
-    if !probe.root_writable {
+    if !root.is_empty() && !probe.root_writable {
         probe.problems.push(format!(
             "the work directory {root} cannot be created or written"
         ));

@@ -38,6 +38,14 @@ slurm=\npbs=\nlsf=\nqueues=\nroot_exists=\nroot_writable=1\nroot_free_kb=2791728
 }
 
 #[test]
+fn connection_only_probe_does_not_require_a_work_directory() {
+    let probe = parse("", "hostname=server\nos=Linux\narch=x86_64\n");
+    assert_eq!(probe.hostname, "server");
+    assert!(probe.problems.is_empty());
+    assert!(script("").contains("if [ -n \"$R\" ]; then\necho \"root_exists="));
+}
+
+#[test]
 fn path_probe_quotes_special_characters_and_uses_numeric_keys() {
     let command = paths_script("/data/root", &["/data/it's here\n$(touch bad)".into()]);
     assert!(command.contains("test -e '/data/it'\\''s here\n$(touch bad)'"));

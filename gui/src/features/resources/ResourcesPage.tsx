@@ -274,26 +274,29 @@ export default function ResourcesPage() {
     if (!editor) return;
     const server = structuredClone(editor),
       configuration = JSON.stringify(server);
-    const [probe, engines] = await Promise.allSettled([
-      invokeJson<ResourceCheck['probe']>('remote_probe', { server }),
-      invokeJson<ResourceCheck['engines']>('remote_engines', { server }),
-    ]);
     const result: ResourceCheck = {
       configuration,
       checked_at: new Date().toISOString(),
-      ...(probe.status === 'fulfilled'
-        ? { probe: probe.value }
-        : { probe_error: String(probe.reason) }),
-      ...(engines.status === 'fulfilled'
-        ? { engines: engines.value }
-        : { engine_error: String(engines.reason) }),
     };
+    try {
+      result.probe = await invokeJson<ResourceCheck['probe']>('remote_probe', { server });
+    } catch (error) {
+      result.probe_error = String(error);
+    }
+    if (result.probe && !result.probe.configuration_error) {
+      try {
+        result.engines = await invokeJson<ResourceCheck['engines']>('remote_engines', { server });
+      } catch (error) {
+        result.engine_error = String(error);
+      }
+    }
     const summary = resourceCheckSummary(server, result, en);
     return {
       ...result,
       ok:
-        [summary.ssh, summary.engine, summary.mapping].every((item) => item.state === 'success') &&
-        !result.probe?.problems?.length,
+        [summary.ssh, summary.engine, summary.directory, summary.mapping].every(
+          (item) => item.state === 'success',
+        ) && !result.probe?.problems?.length,
     };
   }
   async function pickIdentity() {
@@ -372,9 +375,7 @@ export default function ResourcesPage() {
   const guideFields: UiField[] = editor
     ? [
         ...basicFields,
-        ...(directories
-          ? [['root', t('远程工作目录', 'Remote working root')] as [keyof Server, string]]
-          : []),
+        ['root', t('服务器工作目录', 'Server working root')] as [keyof Server, string],
         ...(advanced ? extraFields : []),
       ].map(([key, label]) => ({
         id: `resource-${key}`,
@@ -972,6 +973,7 @@ export default function ResourcesPage() {
               </div>
             </Field>
           )}
+          <div className="resource-wide-field">{field('resource-root')}</div>
           {(dirty || output.save != null || output.credentials != null) && (
             <div className="resource-save-row">
               {actionButton('resource-save')}
@@ -992,7 +994,8 @@ export default function ResourcesPage() {
                   [
                     ['ssh', t('SSH 连接', 'SSH connection')],
                     ['engine', t('Rust 引擎', 'Rust engine')],
-                    ['mapping', t('输入目录映射', 'Input directory mapping')],
+                    ['directory', t('工作目录', 'Working directory')],
+                    ['mapping', t('输入目录映射（可选）', 'Input directory mapping (optional)')],
                   ] as const
                 ).map(([key, label]) => (
                   <div className="resource-status" key={key}>
@@ -1022,6 +1025,19 @@ export default function ResourcesPage() {
               {actionButton('resource-check', true)}
               {actionButton('resource-directories-toggle')}
             </div>
+            {check?.checkedAt &&
+              [
+                checkResult?.probe_error,
+                checkResult?.probe?.configuration_error,
+                checkResult?.engine_error,
+                ...(checkResult?.probe?.problems ?? []),
+              ]
+                .filter(Boolean)
+                .map((message, index) => (
+                  <Notice key={index} tone="warning">
+                    {message}
+                  </Notice>
+                ))}
             {checkEvidence && (
               <Advanced
                 title={t('检查详情', 'Check details')}
@@ -1035,7 +1051,6 @@ export default function ResourcesPage() {
           {directories && (
             <section className="resource-directories">
               <h3>{t('数据目录对应', 'Data directory mapping')}</h3>
-              {field('resource-root')}
               {editor.maps.map((_, i) => (
                 <div className="resource-map" key={i}>
                   {field(`resource-map-${i}-local`)}
