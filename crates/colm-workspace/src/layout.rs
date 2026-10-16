@@ -409,6 +409,11 @@ impl Drop for InfoLock {
 }
 
 fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
+    let source = if local {
+        std::path::absolute(from)?
+    } else {
+        PathBuf::from(from)
+    };
     let mut command = Command::new("git");
     command
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -419,8 +424,10 @@ fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
     }
     let output = command
         .arg("--")
-        .arg(from)
-        .arg(src)
+        .arg(source)
+        // Git for Windows rejects verbatim absolute clone destinations.
+        .arg(src.file_name().context("clone destination has no name")?)
+        .current_dir(src.parent().context("clone destination has no parent")?)
         .output()
         .context("cannot run git (is it installed?)")?;
     if !output.status.success() {

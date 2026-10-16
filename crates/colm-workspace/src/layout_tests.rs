@@ -99,6 +99,32 @@ fn a_workspace_is_cloned_listed_and_deleted() {
 }
 
 #[test]
+fn a_workspace_can_be_cloned_under_a_canonical_root() {
+    let root = temp("canonical-clone");
+    let repo = root.join("source");
+    source_repo(&repo);
+    let canonical = root.canonicalize().unwrap();
+    let ws =
+        Workspace::create(&canonical.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap();
+    assert_eq!(ws.head().unwrap(), git::head(&repo).unwrap());
+    assert!(ws.src().join("crates/colm-core/src/demo.rs").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_relative_local_source_is_resolved_before_changing_clone_directory() {
+    let root = PathBuf::from(format!("colm-ws-relative-clone-{}", std::process::id()));
+    std::fs::create_dir(&root).unwrap();
+    let repo = root.join("source");
+    source_repo(&repo);
+    let ws = Workspace::create(&root.join("ws"), "demo", repo.to_str().unwrap(), None).unwrap();
+    assert_eq!(ws.head().unwrap(), git::head(&repo).unwrap());
+    assert_eq!(ws.info.origin, repo.to_str().unwrap());
+    assert!(ws.src().join("crates/colm-core/src/demo.rs").is_file());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn concurrent_creation_reserves_one_workspace_without_deleting_the_winner() {
     let root = temp("concurrent-create");
     let repo = root.join("source");
