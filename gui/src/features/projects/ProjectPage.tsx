@@ -24,11 +24,16 @@ export default function ProjectPage() {
     [ready, setReady] = useState(!hasBackend()),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [chooser, setChooser] = useState<'simulation' | 'results' | null>(null),
+    [chooser, setChooser] = useState<'simulation' | 'results' | null>(
+      state.projectCasesOpen ? 'simulation' : null,
+    ),
     [versionChooser, setVersionChooser] = useState(false),
     [batchPage, setBatchPage] = useState(false);
   const lock = useRef(false),
     active = useRef(true);
+  useEffect(() => {
+    if (state.projectCasesOpen) update({ projectCasesOpen: false });
+  }, [state.projectCasesOpen, update]);
   useEffect(() => {
     let current = true;
     active.current = true;

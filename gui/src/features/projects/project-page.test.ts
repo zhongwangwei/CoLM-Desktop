@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
+import type { CaseEntry } from '../../lib/types';
 
 function choose(context: Record<string, unknown>) {
   const path = new URL('./ProjectPage.tsx', import.meta.url),
@@ -238,7 +239,8 @@ function home() {
     root: '/project',
     busy: false,
     selectedCase: null,
-    cases: [],
+    cases: [] as CaseEntry[],
+    projectCasesOpen: false,
     versions: [model],
     version: model,
     versionRef: model.version,
@@ -255,13 +257,21 @@ function home() {
     contract: { actions: { id: string; enabled?: boolean; run: () => unknown }[]; status: string },
     fail = false;
   const calls: unknown[] = [],
-    routes: string[] = [];
+    routes: string[] = [],
+    effects: Array<() => unknown> = [],
+    nodes: unknown[] = [];
   const context = {
-    React: { createElement: () => null },
+    React: {
+      createElement: (type: unknown) => {
+        nodes.push(type);
+        return null;
+      },
+    },
     Button: () => {},
     Dialog: () => {},
     Notice: () => {},
     NavIcon: () => {},
+    ProjectBatchRun: 'ProjectBatchRun',
     useApp: () => ({
       state,
       update: (patch: Partial<typeof state>) => Object.assign(state, patch),
@@ -274,7 +284,7 @@ function home() {
       },
     }),
     hasBackend: () => false,
-    useEffect: () => {},
+    useEffect: (effect: () => unknown) => effects.push(effect),
     useRef: (initial: unknown) => {
       const key = cursor++;
       if (!(key in slots)) slots[key] = { current: initial };
@@ -309,7 +319,9 @@ function home() {
   );
   function render() {
     cursor = 0;
+    nodes.length = 0;
     Page();
+    effects.splice(0).forEach((effect) => effect());
     return contract;
   }
   async function click(id: string) {
@@ -328,6 +340,7 @@ function home() {
     model,
     calls,
     routes,
+    nodes,
     render,
     click,
     remount,
@@ -336,6 +349,31 @@ function home() {
     },
   };
 }
+test('a newly created project opens its case list and batch entry once without starting runs', async () => {
+  const page = home();
+  page.state.projectCasesOpen = true;
+  page.state.root = '/project/multi-project';
+  page.state.cases = ['one', 'two'].map((name) => ({
+    name,
+    dir: `/project/multi-project/${name}`,
+    has_history: false,
+    spatial: false,
+  }));
+  let contract = page.render();
+  assert.equal(page.state.projectCasesOpen, false);
+  for (const entry of page.state.cases)
+    assert.ok(contract.actions.some((action) => action.id === `project-case:${entry.dir}`));
+  assert.equal(contract.actions.find((action) => action.id === 'project-batch-run')?.enabled, true);
+  await page.click('project-batch-run');
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.deepEqual(page.calls, []);
+  assert.deepEqual(page.routes, []);
+  contract = page.remount();
+  assert.ok(
+    !contract.actions.some((action) => action.id === 'project-batch-run'),
+    'the request is consumed and later visits retain the project home',
+  );
+});
 test('the loaded official model is usable at once; choosing another version is optional', async () => {
   const page = home(),
     tasks = [

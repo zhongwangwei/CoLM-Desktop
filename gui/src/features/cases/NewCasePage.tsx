@@ -222,6 +222,10 @@ export default function NewCasePage() {
     resolve: (path: string | null) => void;
   } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
+  useEffect(() => {
+    if (!busy && (error || (multiSite && multiResults.length > 0)))
+      document.querySelector('.main-pane')?.scrollTo({ top: 0 });
+  }, [busy, error, multiSite, multiResults]);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
@@ -988,6 +992,17 @@ export default function NewCasePage() {
         }
       }
     }
+    if (
+      !job.cancelRequested &&
+      alive.current &&
+      plans.every((plan) => {
+        const out = caseDirectory(plan.form.root, plan.form.name);
+        return results.some(
+          (result) => (result.remoteDir || result.dir) === out && result.created && !result.error,
+        );
+      })
+    )
+      await openCreatedProject(results, revision);
     return {
       created: results.filter((result) => !result.error).map((result) => result.dir),
       failed: results.filter((result) => result.error),
@@ -1012,19 +1027,41 @@ export default function NewCasePage() {
     setStep(3);
   }
 
-  async function viewCreatedProject() {
-    return work(async () => {
-      const root = form.host
-        ? multiResults.find((result) => result.root)?.root
-        : caseDirectory(form.root, form.name);
-      if (!root)
-        throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
-      const cases = await invoke<CaseEntry[]>('list_cases', { root });
-      await invoke('save_recent', { key: 'root', value: root });
-      update({ root, cases, selectedCase: null, newCaseSeed: null });
-      lock.current = false;
-      return navigate('project');
+  async function openCreatedProject(results: typeof multiResults, revision = state.versionRef) {
+    const successful = results.filter((result) => result.created && !result.error);
+    if (!successful.length)
+      throw new Error(t('尚无创建成功的算例。', 'No cases were created successfully.'));
+    const root = form.host
+      ? successful.find((result) => result.root)?.root
+      : caseDirectory(form.root, form.name);
+    if (!root)
+      throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
+    const cases = await invoke<CaseEntry[]>('list_cases', { root });
+    await invoke('save_recent', { key: 'root', value: root });
+    if (!alive.current) return;
+    update({
+      root,
+      cases,
+      selectedCase: null,
+      newCaseSeed: null,
+      versionRef: revision,
+      projectCasesOpen: true,
     });
+    lock.current = false;
+    if (navigate('project') === false) {
+      update({ projectCasesOpen: false });
+      throw new Error(
+        t(
+          '项目页未能打开，请重试“查看已创建的项目”。',
+          'The project page could not open. Retry View created project.',
+        ),
+      );
+    }
+  }
+
+  async function viewCreatedProject() {
+    if (state.busy) throw new Error(t('请等待当前操作。', 'Wait for the current operation.'));
+    return work(() => openCreatedProject(multiResults));
   }
 
   async function create() {
@@ -1684,6 +1721,55 @@ export default function NewCasePage() {
         }}
       />
       {error && <Notice tone="error">{error}</Notice>}
+      {multiSite && multiResults.length > 0 && (
+        <Card title={t('创建结果', 'Creation results')}>
+          <p role="status">
+            {form.host
+              ? t(
+                  '已完成的算例可在项目页逐个打开并提交到服务器；失败或取消的站点可在此重试。',
+                  'Open completed cases individually from the project page to submit them to the server; retry failed or cancelled stations here.',
+                )
+              : t(
+                  '已完成的算例可以在项目页统一运行；失败或取消的站点可在此重试。',
+                  'Run completed cases together from the project page; retry failed or cancelled stations here.',
+                )}
+          </p>
+          {multiResults.map((result) => (
+            <div key={result.dir}>
+              <p>
+                {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
+              </p>
+              <p className="path">{result.remoteDir || result.dir}</p>
+              {result.error && <Notice tone="error">{result.error}</Notice>}
+            </div>
+          ))}
+          <div className="actions">
+            {!multiResults.some((result) => result.created && result.error) &&
+              siteDrafts.some(
+                (draft) =>
+                  !multiResults.some((result) => result.site === draft.site && result.created),
+              ) && (
+                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
+                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
+                </Button>
+              )}
+            {(multiResults.some((result) => result.error) ||
+              multiResults.length < siteDrafts.length) && (
+              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
+                {t('重试未完成的站点', 'Retry unfinished sites')}
+              </Button>
+            )}
+            {multiResults.some((result) => !result.error) && (
+              <Button
+                disabled={busy || state.busy}
+                onClick={() => void viewCreatedProject().catch(() => {})}
+              >
+                {t('查看已创建的项目', 'View created project')}
+              </Button>
+            )}
+          </div>
+        </Card>
+      )}
       {autoClosed.text && autoClosed.step === step && (
         <Notice tone="warning">{autoClosed.text}</Notice>
       )}
@@ -2341,44 +2427,6 @@ export default function NewCasePage() {
           />
         </>
       )}
-      {multiSite && multiResults.length > 0 && (
-        <Card title={t('创建结果', 'Creation results')}>
-          {multiResults.map((result) => (
-            <div key={result.dir}>
-              <p>
-                {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
-              </p>
-              <p className="path">{result.remoteDir || result.dir}</p>
-              {result.error && <Notice tone="error">{result.error}</Notice>}
-            </div>
-          ))}
-          <div className="actions">
-            {!multiResults.some((result) => result.created && result.error) &&
-              siteDrafts.some(
-                (draft) =>
-                  !multiResults.some((result) => result.site === draft.site && result.created),
-              ) && (
-                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
-                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
-                </Button>
-              )}
-            {(multiResults.some((result) => result.error) ||
-              multiResults.length < siteDrafts.length) && (
-              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
-                {t('重试未完成的站点', 'Retry unfinished sites')}
-              </Button>
-            )}
-            {multiResults.some((result) => !result.error) && (
-              <Button
-                disabled={busy || state.busy}
-                onClick={() => void viewCreatedProject().catch(() => {})}
-              >
-                {t('查看已创建的项目', 'View created project')}
-              </Button>
-            )}
-          </div>
-        </Card>
-      )}
       {blocker && !error && (
         <p className="field-hint simulation-blocker" role="status">
           {blocker}
@@ -2420,7 +2468,14 @@ export default function NewCasePage() {
             title={blocker ?? undefined}
             onClick={() => void create().catch(() => {})}
           >
-            {multiSite ? t('创建所选站点', 'Create selected sites') : t('创建算例', 'Create case')}
+            {multiSite && busy
+              ? t(
+                  `正在创建站点（已处理 ${multiResults.length}/${siteDrafts.length}）`,
+                  `Creating sites (${multiResults.length}/${siteDrafts.length} processed)`,
+                )
+              : multiSite
+                ? t('创建所选站点', 'Create selected sites')
+                : t('创建算例', 'Create case')}
           </Button>
         )}
       </footer>

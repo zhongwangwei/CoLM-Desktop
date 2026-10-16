@@ -161,6 +161,7 @@ export type AppState = {
   chosenVersion: VersionRef | null;
   versions: FrozenRevision[];
   root: string;
+  projectCasesOpen?: boolean;
   newCaseSeed: {
     form: Record<string, string>;
     sites: Site[];

@@ -66,6 +66,8 @@ function page(
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     scan?: () => Promise<unknown>;
+    navigate?: (route: string) => boolean;
+    listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
   } = {},
 ) {
@@ -91,6 +93,7 @@ function page(
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     routes: string[] = [],
     opened: string[] = [],
+    scrolls: unknown[] = [],
     elements: Element[] = [];
   let slots: unknown[] = [],
     cursor = 0,
@@ -104,11 +107,14 @@ function page(
       Object.assign(state, typeof patch === 'function' ? patch(state) : patch),
     notify = () => {};
   const navigate = (route: string) => {
-    if (guard()) return false;
+    if (guard() || options.navigate?.(route) === false) return false;
     routes.push(route);
     return true;
   };
   const context = {
+    document: {
+      querySelector: () => ({ scrollTo: (value: unknown) => scrolls.push(value) }),
+    },
     ...caseModel,
     ...configuration,
     ...simulation,
@@ -244,6 +250,10 @@ function page(
           if (options.create) return options.create(args);
           if (failCreate) throw new Error('creation failed');
           return {};
+        case 'list_cases':
+          return options.listCases?.(args) ?? [];
+        case 'save_recent':
+          return {};
         case 'set_spinup':
           return options.spinup?.(args) ?? {};
         case 'case_creation_cancel':
@@ -344,6 +354,7 @@ function page(
     calls,
     routes,
     opened,
+    scrolls,
     elements,
     render,
     mount,
@@ -2504,12 +2515,14 @@ test('a failed destination does not overwrite or block another station and retry
   await p.mount();
   await p.click('new-create');
   assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  assert.deepEqual(p.routes, []);
   failed = false;
   await p.click('new-multi-retry');
   assert.deepEqual(
     p.calls.filter((call) => call.command === 'new_case').map((call) => call.args.name),
     ['CN-Cng', 'other', 'CN-Cng'],
   );
+  assert.deepEqual(p.routes, ['project']);
 });
 
 test('a spinup write failure retries its settings without recreating the completed case', async () => {
@@ -2540,11 +2553,19 @@ test('cancelling multi-site creation prevents the remaining queue from starting'
   await p.mount();
   const pending = p.click('new-create');
   p.render();
+  assert.match(JSON.stringify(p.elements), /正在创建站点（已处理 0\/2）/);
   await p.click('new-cancel-creation');
   finish();
   await pending;
+  assert.deepEqual(p.routes, []);
   assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 1);
   assert.equal(p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled, true);
+  await p.settle();
+  assert.deepEqual(
+    p.scrolls.at(-1),
+    { top: 0 },
+    'cancelled results must be visible above the long review',
+  );
 });
 
 test('invalid multi-site coverage is rejected before any case is created', async () => {
@@ -3107,4 +3128,109 @@ test('invalid bundled station names cannot escape the simulation container', asy
   assert.equal(p.render().actions.find((action) => action.id === 'new-create')!.enabled, false);
   await assert.rejects(p.click('new-create'));
   assert.ok(!p.calls.some((call) => call.command === 'new_case'));
+});
+
+test('multi-site success opens the created project only after all spinup writes finish', async () => {
+  const cases = [{ dir: '/project/multi-project/CN-Cng', name: 'CN-Cng' }];
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    listCases: async () => cases,
+  });
+  await p.mount();
+  await p.click('new-create');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.state.root, '/project/multi-project');
+  assert.deepEqual((p.state as typeof p.state & { cases: unknown }).cases, cases);
+  assert.equal(p.state.selectedCase, null);
+  assert.equal(p.state.newCaseSeed, null);
+  assert.equal((p.state as typeof p.state & { projectCasesOpen: boolean }).projectCasesOpen, true);
+  assert.deepEqual(p.calls.find((call) => call.command === 'save_recent')?.args, {
+    key: 'root',
+    value: '/project/multi-project',
+  });
+  const listed = p.calls.findIndex((call) => call.command === 'list_cases');
+  assert.ok(
+    p.calls
+      .map((call, index) => (call.command === 'set_spinup' ? index : -1))
+      .every((index) => index < listed),
+  );
+  assert.ok(!p.calls.some((call) => /run_case|run_start|submit/.test(call.command)));
+});
+
+test('failed project loading keeps completed results and manual retry never recreates stations', async () => {
+  let failed = true;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    listCases: async () => {
+      if (failed) throw new Error('project list unavailable');
+      return [];
+    },
+  });
+  await p.mount();
+  await assert.rejects(p.click('new-create'), /project list unavailable/);
+  assert.deepEqual(p.routes, []);
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-project')?.enabled,
+    true,
+  );
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled,
+    false,
+  );
+  const resultIndex = p.elements.findIndex(
+    (element) => element.type === 'Card' && element.props.title === '创建结果',
+  );
+  const reviewIndex = p.elements.findIndex(
+    (element) => element.type === 'Card' && element.props.title !== '创建结果',
+  );
+  assert.ok(resultIndex >= 0 && resultIndex < reviewIndex);
+  failed = false;
+  await p.click('new-multi-project');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  assert.equal(p.calls.filter((call) => call.command === 'set_spinup').length, 2);
+});
+
+test('remote multi-site completion opens the returned local project mirror', async () => {
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, form: { ...multiSeed.form, host: 'compute', root: '/remote/projects' } },
+    multiSites,
+    initialValues,
+    {
+      servers: [runServer],
+      create: async (args) => {
+        const request = args.request as { name: string; out: string };
+        return {
+          dir: `/cache/project/${request.name}`,
+          root: '/cache/project',
+          remote_dir: request.out,
+        };
+      },
+    },
+  );
+  await p.mount();
+  await p.click('new-create');
+  assert.deepEqual(p.calls.find((call) => call.command === 'list_cases')?.args, {
+    root: '/cache/project',
+  });
+  assert.equal(p.state.root, '/cache/project');
+  assert.deepEqual(p.routes, ['project']);
+});
+
+test('refused project navigation reports an error and retries without recreating cases', async () => {
+  let permitted = false;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    navigate: () => permitted,
+  });
+  await p.mount();
+  await assert.rejects(p.click('new-create'), /项目页未能打开/);
+  assert.deepEqual(p.routes, []);
+  assert.equal((p.state as typeof p.state & { projectCasesOpen: boolean }).projectCasesOpen, false);
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-project')?.enabled,
+    true,
+  );
+  permitted = true;
+  await p.click('new-multi-project');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
 });
