@@ -308,38 +308,33 @@ export function setupChoices(
           return bilingual('USGS 不支持土地覆盖变化', 'USGS does not support land-cover change');
         if (value('DEF_USE_BGC') !== '.false.')
           return bilingual('请先明确关闭 BGC', 'Explicitly disable BGC first');
-        if (on('DEF_UnitCatchment_regional'))
-          return bilingual('请先关闭区域单元汇流', 'Disable regional unit-catchment routing first');
-        if (value('DEF_UnitCatchment_regional') !== '.false.')
-          return bilingual(
-            '待核对：请先确认区域单元汇流已关闭',
-            'Pending: confirm regional unit-catchment routing is off',
-          );
       }
     }
     return '';
   }
-  return controls.map((c) => ({
-    ...c,
-    // 作物没有 namelist 开关（开不开由内核与种植日决定），未开启就是实际生效的“关闭”。
-    // 原先返回空串，卡片永远停在“未指定”，点“关闭”也无处记录（第 692 轮原生界面实测）。
-    value:
-      c.id === 'crop'
-        ? crop
-          ? '.true.'
-          : '.false.'
-        : c.id === 'soil'
-          ? displayedSoil
-          : c.id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG'
+  return controls
+    .filter((c) => c.id !== 'DEF_UnitCatchment_regional')
+    .map((c) => ({
+      ...c,
+      // 作物没有 namelist 开关（开不开由内核与种植日决定），未开启就是实际生效的“关闭”。
+      // 原先返回空串，卡片永远停在“未指定”，点“关闭”也无处记录（第 692 轮原生界面实测）。
+      value:
+        c.id === 'crop'
+          ? crop
             ? '.true.'
-            : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
-    inherited: c.id !== 'crop' && c.keys.every((key) => value(key) === undefined),
-    pending: c.keys.some(
-      (k) =>
-        !queryFields.find((f) => f.name === k) || queryFields.find((f) => f.name === k)?.pending,
-    ),
-    choices: c.choices.map(([value, zh, en]) => ({ value, zh, en, reason: reason(c.id, value) })),
-  }));
+            : '.false.'
+          : c.id === 'soil'
+            ? displayedSoil
+            : c.id === 'DEF_USE_VariablySaturatedFlow' && displayedSoil === 'vG'
+              ? '.true.'
+              : foundationValue({ [c.id]: displayValue(c.id) ?? '' }, c.id),
+      inherited: c.id !== 'crop' && c.keys.every((key) => value(key) === undefined),
+      pending: c.keys.some(
+        (k) =>
+          !queryFields.find((f) => f.name === k) || queryFields.find((f) => f.name === k)?.pending,
+      ),
+      choices: c.choices.map(([value, zh, en]) => ({ value, zh, en, reason: reason(c.id, value) })),
+    }));
 }
 export function applySetupRequest(
   overlay: Overlay,
@@ -387,7 +382,16 @@ export function applySetupRequest(
     return setModelOption(overlay, fields, planting, request.value);
   }
   const foundation = foundationControls.find((c) => c.id === request.id);
-  if (!foundation) return setModelOption(overlay, fields, request.id, request.value);
+  if (!foundation) {
+    let next = setModelOption(overlay, fields, request.id, request.value);
+    if (
+      request.id === 'DEF_USE_LULCC' &&
+      request.value === '.true.' &&
+      fields.some((f) => f.name === 'DEF_UnitCatchment_regional' && !f.derived)
+    )
+      next = setModelOption(next, fields, 'DEF_UnitCatchment_regional', '.false.');
+    return next;
+  }
   // Migrate only the keys changed by this atomic control; unrelated scoped values stay intact.
   const keys = (
     request.id === 'soil' && request.value === 'Campbell'

@@ -149,6 +149,8 @@ test('cards and guide share visible controls, exact context, loading and disable
       .map((o) => `setup-${o.id}`),
   );
   assert.equal(h.nodes.filter((n) => n.type === 'Card').length, c.fields.length);
+  assert.ok(!c.fields.some((f) => f.id === 'setup-DEF_UnitCatchment_regional'));
+  assert.ok(!JSON.stringify(h.nodes).includes('Regional unit-catchment routing'));
   c.fields.find((f) => f.id === 'setup-DEF_USE_BGC')!.set('.true.');
   assert.equal(h.changes.length, 1);
   const beforeLock = c.fields[0];
@@ -329,4 +331,22 @@ test('an enable reply for a previous case never opens settings in the new case',
   finish();
   await pending;
   assert.deepEqual(opened, []);
+});
+
+test('vG renders the VSF off button disabled and excludes it from guide choices', async () => {
+  const h = harness();
+  h.props.overlay.physics.DEF_USE_Campbell_SOIL_MODEL = '.false.';
+  h.render();
+  const c = await h.resolve();
+  const vsf = c.fields.find((f) => f.id === 'setup-DEF_USE_VariablySaturatedFlow')!;
+  assert.equal(vsf.value, '.true.');
+  assert.ok(!vsf.options!.some((o) => o.value === '.false.'));
+  assert.throws(() => vsf.set('.false.'), /Campbell/);
+  const off = h.nodes.find(
+    (n) =>
+      n.type === 'Button' &&
+      n.children.some((child) => JSON.stringify(child)?.includes('choose Campbell first')),
+  );
+  assert.ok(off);
+  assert.equal(off.props.disabled, true);
 });

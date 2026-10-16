@@ -1987,3 +1987,49 @@ test('output variables chosen while creating a case are written with it', async 
   assert.equal(fields.find((f) => f.path === 'DEF_hist_vars%fsena')?.value, '.true.');
   assert.equal(fields.find((f) => f.path === 'DEF_hist_vars%leafc')?.value, '.false.');
 });
+
+for (const kind of ['region', 'watershed', 'global'])
+  test(`${kind} creation writes automatic routing after any stale override`, async () => {
+    const p = page(
+      'NewCasePage',
+      {
+        form: {
+          ...form,
+          kind,
+          dlon: '1',
+          dlat: '1',
+          west: '100',
+          east: '102',
+          south: '30',
+          north: '32',
+          shapefile: '/basin.shp',
+          forcing: '/forcing.nml',
+        },
+        step: 5,
+        caseValues: {
+          DEF_USE_GridRiverLakeFlow: '.true.',
+          DEF_USE_LULCC: '.false.',
+          DEF_UnitCatchment_regional: kind === 'global' ? '.true.' : '.false.',
+        },
+      },
+      [site],
+      initialValues,
+      {
+        schema: [
+          ...schema,
+          ...['DEF_USE_GridRiverLakeFlow', 'DEF_USE_LULCC', 'DEF_UnitCatchment_regional'].map(
+            (name) => ({ ...field(name, '河道与水库', '.false.'), kind: 'Logical' }),
+          ),
+        ],
+      },
+    );
+    await p.mount();
+    await p.click('new-create');
+    const request = p.calls.find((call) => call.command === 'new_spatial_case');
+    assert.ok(request);
+    const fields = request.args.fields as { path: string; value: string }[];
+    assert.equal(
+      fields.filter((f) => f.path === 'DEF_UnitCatchment_regional').at(-1)?.value,
+      kind === 'global' ? '.false.' : '.true.',
+    );
+  });

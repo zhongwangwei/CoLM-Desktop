@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
 import { matchesRemoteRun, reconcileRemoteRun, remoteRunPermissions } from '../runs/run-model';
+import { caseSimulationDomain } from './model-settings';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -879,6 +880,7 @@ test('process saves refresh history availability in both directions without rese
       effectiveProfile: {},
       configurationKernel: undefined,
       exclusionPatch: () => ({ patch: { DEF_USE_BGC: String(bgc) }, closed: [] }),
+      caseSimulationDomain,
       work: (fn: () => Promise<unknown>) => fn(),
       epoch,
       state: { versionRef: {}, selectedCase: undefined },

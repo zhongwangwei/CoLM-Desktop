@@ -34,6 +34,7 @@ import ModelSettings from './ModelSettings';
 import {
   autoClosedText,
   exclusionPatch,
+  regionalRoutingPatch,
   schemeFlagKeys,
   simulationMode,
   caseSchemeFields,
@@ -247,6 +248,7 @@ export default function NewCasePage() {
     ...(form.rawdata ? { DEF_dir_rawdata: form.rawdata } : {}),
     ...(form.runtime ? { DEF_dir_runtime: form.runtime } : {}),
     ...(form.kind !== 'site' && form.forcing ? { DEF_forcing_namelist: form.forcing } : {}),
+    ...regionalRoutingPatch(physics, form.kind, form.grid),
   };
   const dataRequest = JSON.stringify({
     source: { kind: 'frozen', version: state.versionRef },
@@ -568,6 +570,7 @@ export default function NewCasePage() {
           ...physicsFields(effectiveModelFields(state.version?.overlay, modelFields)),
           ...physicsFields(schemeFields),
           ...changed,
+          ...physicsFields(regionalRoutingPatch(physics, form.kind, form.grid)),
           ...Object.entries(spinup).map(([path, value]) => ({ path, value })),
         ],
         mode = versionMode(physics, classification);
