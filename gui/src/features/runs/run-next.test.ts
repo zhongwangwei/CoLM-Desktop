@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
-import type { RunState } from '../../lib/types';
+import type { AppState, RunState } from '../../lib/types';
 const require = createRequire(import.meta.url);
 type Element = { type: string; props: Record<string, unknown>; children: unknown[] };
 function render(
@@ -15,6 +15,7 @@ function render(
   savedHost?: string,
   saveError?: string,
   remoteDirectory?: string,
+  onBack?: () => void,
 ) {
   const effects: (() => void)[] = [];
   const state = {
@@ -24,6 +25,8 @@ function render(
       profile: { run_host: savedHost ?? null, remote_directory: remoteDirectory ?? null },
     },
     language: 'zh',
+    root: '/project',
+    projectRunSettings: undefined as AppState['projectRunSettings'],
     expert: false,
     running: { ...otherRuns, ...(record ? { '/case': record } : {}) } as Record<string, RunState>,
     kernels: [],
@@ -41,8 +44,8 @@ function render(
     navigate: (...args: unknown[]) => routes.push(args),
     openCase: async (...args: unknown[]) => routes.push(['openCase', ...args]),
     notify: (error: string) => errors.push(error),
-    update: (patch: (old: typeof state) => Partial<typeof state>) =>
-      Object.assign(state, patch(state)),
+    update: (patch: Partial<typeof state> | ((old: typeof state) => Partial<typeof state>)) =>
+      Object.assign(state, typeof patch === 'function' ? patch(state) : patch),
   };
   const react = {
     useEffect: (effect: () => void) => effects.push(effect),
@@ -112,7 +115,7 @@ function render(
                 ? { bilingual: (zh: string) => zh }
                 : require(name);
   new Function('require', 'exports', 'React', js)(dependencies, exports, react);
-  const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null });
+  const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null, onBack });
   const elements: Element[] = [];
   function visit(value: unknown) {
     if (Array.isArray(value)) {
@@ -127,6 +130,8 @@ function render(
   }
   visit(tree);
   return {
+    elements,
+    back: elements.find((el) => el.type === 'Button' && el.children.includes('上一步')),
     next: elements.find(
       (el) =>
         el.type === 'Button' &&
@@ -160,6 +165,68 @@ const success: RunState = {
   location: 'local',
   run_case: '/run-copy',
 };
+
+test('input validation is explained as a startup action rather than an incomplete checklist', () => {
+  const page = render();
+  const note = page.elements.find(
+    (el) =>
+      el.type === 'p' &&
+      el.children.some(
+        (text) => typeof text === 'string' && text.includes('点击“开始运行”时检查输入文件'),
+      ),
+  );
+  assert.equal(note?.props.className, 'muted');
+  assert.ok(!page.elements.some((el) => el.children.includes('启动时检查实际输入')));
+});
+
+test('batch Back preserves run resources and cannot leave while another local member is active', () => {
+  let returned = 0;
+  const page = render(
+    undefined,
+    [],
+    undefined,
+    {},
+    ['/case', '/other'],
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      returned++;
+    },
+  );
+  assert.ok(page.back);
+  assert.equal(page.back.props.disabled, false);
+  (page.back.props.onClick as () => void)();
+  assert.equal(returned, 1);
+  assert.deepEqual(page.state.projectRunSettings, {
+    root: '/project',
+    cases: ['/case', '/other'],
+    batch: true,
+    host: '',
+    ranks: '1',
+    threads: '1',
+    workers: '1',
+    scheduler: 'auto',
+    cpus: '',
+  });
+  const active = render(
+    { ...success, status: 'failed' },
+    [],
+    undefined,
+    { '/other': { ...success, case: '/other', running: true, status: 'running' } },
+    ['/case', '/other'],
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      returned++;
+    },
+  );
+  assert.equal(active.back?.props.disabled, true);
+  (active.back!.props.onClick as () => void)();
+  assert.equal(returned, 1);
+  assert.equal(active.state.projectRunSettings, undefined);
+});
 test('completed simulation exposes next button and opens its case results', async () => {
   const page = render(success);
   assert.ok(page.next);

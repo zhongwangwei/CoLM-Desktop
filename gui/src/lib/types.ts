@@ -165,6 +165,7 @@ export type AppState = {
   projectRunSettings?: {
     root: string;
     cases: string[];
+    batch?: boolean;
     host: string;
     threads: string;
     ranks: string;

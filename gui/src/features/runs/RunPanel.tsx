@@ -120,7 +120,13 @@ export default function RunPanel({
           effectiveModelFields(state.version?.overlay),
         ),
     );
-  const pending = busy || recovering || !!persisted?.running;
+  const pending =
+    busy ||
+    recovering ||
+    !!persisted?.running ||
+    !!batchCases?.some(
+      (dir) => state.running[dir]?.running && state.running[dir]?.location !== 'remote',
+    );
   const completed =
     persisted?.status === 'succeeded' &&
     !persisted.running &&
@@ -674,6 +680,25 @@ export default function RunPanel({
       )
     : t('下一步：查看结果', 'Next: view results');
 
+  function back() {
+    if (!onBack || pending) return;
+    if (batchCases)
+      update({
+        projectRunSettings: {
+          root: state.root,
+          cases: batchCases,
+          batch: true,
+          host,
+          ranks,
+          threads,
+          workers,
+          scheduler,
+          cpus,
+        },
+      });
+    onBack();
+  }
+
   const fields: UiField[] = [
     {
       id: 'run-host',
@@ -805,6 +830,17 @@ export default function RunPanel({
       details: { run: view, remote, error: persisted?.error },
       fields,
       actions: [
+        ...(onBack
+          ? [
+              {
+                id: 'run-back',
+                label: t('上一步', 'Back'),
+                kind: 'click' as const,
+                enabled: !pending,
+                run: back,
+              },
+            ]
+          : []),
         {
           id: 'run-view-results',
           label: resultsLabel,
@@ -937,12 +973,14 @@ export default function RunPanel({
               ? t('内核已匹配', 'Kernel matched')
               : t('尚无匹配内核', 'No matching kernel')}
           </p>
-          <p className="check-pending">
-            <span>○</span>
-            {t('启动时检查实际输入', 'Inputs checked at startup')}
-          </p>
         </div>
       </div>
+      <p className="muted">
+        {t(
+          '点击“开始运行”时检查输入文件；若有缺失，将显示具体原因。',
+          'Input files are checked when you start the run; missing inputs are reported.',
+        )}
+      </p>
       <div className="run-location">
         {render({
           ...fields[0],
@@ -1021,7 +1059,7 @@ export default function RunPanel({
       </Advanced>
       <footer className="simulation-footer">
         {onBack ? (
-          <Button disabled={pending} onClick={onBack}>
+          <Button disabled={pending} onClick={back}>
             {t('上一步', 'Back')}
           </Button>
         ) : (

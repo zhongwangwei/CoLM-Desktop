@@ -20,7 +20,9 @@ export default function ProjectBatchRun({
     state.projectRunSettings?.root === state.root ? state.projectRunSettings : undefined;
   const fixedSelection = fromCreation && !!handoff;
   const [selected, setSelected] = useState<string[]>(
-    fixedSelection ? handoff.cases : state.cases.map((entry) => entry.dir),
+    handoff && (fixedSelection || handoff.batch)
+      ? handoff.cases
+      : state.cases.map((entry) => entry.dir),
   );
   const [selecting, setSelecting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -126,24 +128,30 @@ export default function ProjectBatchRun({
               : []),
           ]
         : []),
-      {
-        id: 'project-batch-back',
-        label: t('返回算例列表', 'Back to cases'),
-        kind: 'click',
-        enabled: !locked,
-        run: () => {
-          if (!locked) onBack();
-        },
-      },
+      ...(!current?.profiles
+        ? [
+            {
+              id: 'project-batch-back',
+              label: t('返回算例列表', 'Back to cases'),
+              kind: 'click' as const,
+              enabled: !locked,
+              run: () => {
+                if (!locked) onBack();
+              },
+            },
+          ]
+        : []),
     ],
   });
   return (
     <div className="page-stack">
       <div className="page-heading">
         <h1>{t('批量运行', 'Batch run')}</h1>
-        <Button disabled={!!locked} onClick={onBack}>
-          {t('返回算例列表', 'Back to cases')}
-        </Button>
+        {!current?.profiles && (
+          <Button disabled={!!locked} onClick={onBack}>
+            {t('返回算例列表', 'Back to cases')}
+          </Button>
+        )}
       </div>
       <p className="path">{state.root}</p>
       <Notice>
@@ -247,6 +255,9 @@ export default function ProjectBatchRun({
           initialHost={current.profiles[first].run_host || ''}
           initialSettings={handoff}
           onBusyChange={setSubmitting}
+          onBack={() => {
+            if (!locked) onBack();
+          }}
         />
       )}
     </div>

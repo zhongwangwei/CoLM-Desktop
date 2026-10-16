@@ -7,6 +7,7 @@ function screen(
   handoff?: {
     root: string;
     cases: string[];
+    batch?: boolean;
     host: string;
     threads: string;
     ranks: string;
@@ -41,6 +42,7 @@ function screen(
   };
   const requests: { args: unknown; resolve: (value: unknown) => void }[] = [];
   const panels: Record<string, unknown>[] = [];
+  const returns: string[] = [];
   const text: string[] = [];
   const RunPanel = () => {};
   const context = {
@@ -94,7 +96,12 @@ function screen(
     cursor = 0;
     panels.length = 0;
     text.length = 0;
-    Page({ onBack: () => {}, fromCreation });
+    Page({
+      onBack: () => {
+        returns.push('back');
+      },
+      fromCreation,
+    });
   }
   function select(dir: string, checked: boolean) {
     if (!contract.fields.length) adjust();
@@ -114,6 +121,7 @@ function screen(
     state,
     requests,
     panels,
+    returns,
     text,
     render,
     select,
@@ -239,7 +247,30 @@ test('new project handoff selects only created cases and preserves resource choi
   assert.equal(other.requests.length, 2, 'another project uses its own cases');
 });
 
-test('returning to an existing project keeps optional station adjustment available', () => {
+test('returning to an existing project retains the last station selection and optional edits', () => {
+  const page = screen(
+    {
+      root: '/project',
+      cases: ['/b'],
+      batch: true,
+      host: '',
+      threads: '2',
+      ranks: '1',
+      workers: '1',
+      scheduler: 'auto',
+      cpus: '1',
+    },
+    false,
+  );
+  page.render();
+  assert.equal(page.requests.length, 1, 'the previous run selection is preserved');
+  assert.equal(page.fields().length, 0);
+  assert.ok(page.actions().some((action) => action.id === 'project-batch-selection'));
+  page.select('/a', true);
+  assert.equal(page.fields().length, 2);
+});
+
+test('single-case run preferences do not narrow a manually opened project batch', () => {
   const page = screen(
     {
       root: '/project',
@@ -254,11 +285,23 @@ test('returning to an existing project keeps optional station adjustment availab
     false,
   );
   page.render();
-  assert.equal(page.requests.length, 2, 'an existing batch defaults to the current project');
-  assert.equal(page.fields().length, 0);
-  assert.ok(page.actions().some((action) => action.id === 'project-batch-selection'));
-  page.select('/a', false);
-  assert.equal(page.fields().length, 2);
+  assert.equal(page.requests.length, 2);
+});
+
+test('batch run panel receives the guarded Back action', async () => {
+  const page = screen();
+  page.render();
+  for (const request of page.requests) request.resolve({ profile: { grid: 'site' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.render();
+  (page.panels[0].onBusyChange as (value: boolean) => void)(true);
+  page.render();
+  (page.panels[0].onBack as () => void)();
+  assert.deepEqual(page.returns, []);
+  (page.panels[0].onBusyChange as (value: boolean) => void)(false);
+  page.render();
+  (page.panels[0].onBack as () => void)();
+  assert.deepEqual(page.returns, ['back']);
 });
 
 test('ninety selected stations load the run panel without repeating idle status rows', async () => {
