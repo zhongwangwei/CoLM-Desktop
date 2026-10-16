@@ -73,7 +73,11 @@ fn text(request: &Value, key: &str) -> Option<String> {
     request.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-fn cache_paths(cache: &Path, host: &str, remote: &str) -> Result<(PathBuf, PathBuf), String> {
+pub(crate) fn cache_paths(
+    cache: &Path,
+    host: &str,
+    remote: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     if !remote.starts_with('/') || remote.contains('\0') || remote.split('/').any(|v| v == "..") {
         return Err("算例目录必须是服务器上的绝对路径".into());
     }

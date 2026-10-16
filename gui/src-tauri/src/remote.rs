@@ -136,7 +136,7 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("remote.json"))
 }
 
-fn validate_connection(server: &Server) -> Result<(), String> {
+pub(crate) fn validate_connection(server: &Server) -> Result<(), String> {
     let host = server.host.trim();
     if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
         return Err(format!("服务器名不合法：{host:?}"));

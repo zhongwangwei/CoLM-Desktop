@@ -322,6 +322,21 @@ struct RunProcessState {
 }
 
 impl RunProcesses {
+    /// Hold the launch registry while removing generated output, so no GUI run starts mid-delete.
+    pub(crate) fn with_idle<T>(
+        &self,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| "run process registry poisoned")?;
+        if !state.pids.is_empty() || !state.pending.is_empty() {
+            return Err("请等待正在运行或准备中的任务结束后再删除文件夹".into());
+        }
+        action()
+    }
+
     /// Reject a second live process for the same key before starting a run.
     fn prepare(&self, keys: &[String]) -> Result<(), String> {
         let mut state = self
@@ -3487,5 +3502,22 @@ pub(crate) fn add_preprocessors(args: &mut Vec<String>, value: Option<&str>) -> 
             Ok(())
         }
         Some(_) => Err("preprocessors must be rust or fortran".into()),
+    }
+}
+
+#[cfg(test)]
+mod deletion_guard_tests {
+    use super::*;
+
+    #[test]
+    fn deletion_requires_no_pending_or_running_process() {
+        let processes = RunProcesses::default();
+        assert!(processes.with_idle(|| Ok(())).is_ok());
+        processes.prepare(&["case".into()]).unwrap();
+        assert!(processes.with_idle(|| Ok(())).is_err());
+        processes.remember("case", 123).unwrap();
+        assert!(processes.with_idle(|| Ok(())).is_err());
+        processes.forget("case").unwrap();
+        assert!(processes.with_idle(|| Ok(())).is_ok());
     }
 }

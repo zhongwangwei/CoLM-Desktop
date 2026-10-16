@@ -1,6 +1,6 @@
 import { download as exportText } from '../../lib/utils';
 import { bilingual } from '../../lib/bilingual';
-import type { HistoryOperation } from '../../lib/types';
+import type { AppState, CaseEntry, HistoryOperation } from '../../lib/types';
 export type Filter = {
   query: string;
   kind: string;
@@ -483,4 +483,67 @@ export function historyObject(operation: HistoryOperation): string {
     operation.version_id ||
     operation.operation_id
   );
+}
+
+export type HistoryDeletePlan = {
+  casePath: string | null;
+  caseHost: string | null;
+  caseReason: string | null;
+  id: string;
+  path: string | null;
+  host: string | null;
+  reason: string | null;
+};
+export function canDeleteHistory(operation: HistoryOperation): boolean {
+  return (
+    !operation.needs_reconciliation &&
+    ['succeeded', 'failed', 'completed', 'completed_with_failures', 'cancelled'].includes(
+      operation.status,
+    )
+  );
+}
+
+export function historyDirectoryContains(directory: string, candidate: string): boolean {
+  const windows = /^(?:[a-z]:[\\/]|\\\\|\/\/)/i.test(directory);
+  const normalize = (value: string) =>
+    (windows
+      ? value
+          .replace(/\\/g, '/')
+          .toLowerCase()
+          .replace(/^\/\/\?\/unc\//, '//')
+          .replace(/^\/\/\?\//, '')
+      : value
+    ).replace(/\/+$/, '');
+  const root = normalize(directory);
+  const path = normalize(candidate);
+  return path === root || path.startsWith(`${root}/`);
+}
+
+export function historyStateAfterDirectoryDeletion(
+  state: Pick<AppState, 'selectedCase' | 'cases' | 'running'>,
+  path: string,
+  host?: string | null,
+): Pick<AppState, 'selectedCase' | 'cases' | 'running'> {
+  const deletedEntry = (entry: CaseEntry) =>
+    host
+      ? entry.run_host === host &&
+        !!entry.remote_directory &&
+        historyDirectoryContains(path, entry.remote_directory)
+      : historyDirectoryContains(path, entry.dir);
+  const selectedDeleted = !!state.selectedCase && deletedEntry(state.selectedCase.entry);
+  const removedDirs = state.cases.filter(deletedEntry).map((entry) => entry.dir);
+  if (selectedDeleted) removedDirs.push(state.selectedCase!.dir);
+  const removedPath = (value: string) =>
+    host
+      ? removedDirs.some((dir) => historyDirectoryContains(dir, value))
+      : historyDirectoryContains(path, value);
+  return {
+    selectedCase: selectedDeleted ? null : state.selectedCase,
+    cases: state.cases.filter((entry) => !deletedEntry(entry)),
+    running: Object.fromEntries(
+      Object.entries(state.running).filter(
+        ([, value]) => !removedPath(value.case) && !(value.run_case && removedPath(value.run_case)),
+      ),
+    ),
+  };
 }

@@ -3,7 +3,17 @@ import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import type { HistoryOperation } from '../../lib/types';
-import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import {
+  Advanced,
+  Button,
+  Card,
+  ContextMenu,
+  Dialog,
+  Field,
+  Input,
+  Notice,
+  Select,
+} from '../../components/ui';
 import {
   historyKindLabel,
   historyStatusLabel,
@@ -15,6 +25,9 @@ import {
   emptyFilter,
   historyFilter,
   canReplay,
+  canDeleteHistory,
+  historyStateAfterDirectoryDeletion,
+  type HistoryDeletePlan,
   canCompare,
   historyPath,
   recordedRunPath,
@@ -78,6 +91,22 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     [comparisonResult, setComparisonResult] = useState<unknown>(null),
     [busy, setBusy] = useState(false),
     [error, setError] = useState('');
+  const [deletePlan, setDeletePlan] = useState<HistoryDeletePlan | null>(null);
+  const [deletion, setDeletion] = useState<{
+    item: HistoryOperation;
+    files: boolean;
+    wholeCase?: boolean;
+    plan: HistoryDeletePlan | null;
+  } | null>(null);
+  const [deleteName, setDeleteName] = useState('');
+  const deletionPath = deletion?.wholeCase ? deletion.plan?.casePath : deletion?.plan?.path;
+  const directoryName =
+    deletionPath
+      ?.replace(/[\\/]+$/, '')
+      .split(/[\\/]/)
+      .pop() ?? '';
+  const deleteConfirmed = !deletion?.wholeCase || (!!directoryName && deleteName === directoryName);
+  const menuRequest = useRef<object | null>(null);
   const epoch = useRef({ active: false }),
     lock = useRef(false);
   const [filtersOpen, setFiltersOpen] = useState(false),
@@ -119,6 +148,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   useEffect(() => {
     const id = { active: true };
     epoch.current = id;
+    menuRequest.current = null;
+    setDeletePlan(null);
+    setDeletion(null);
     setDetail(null);
     setPage({ items: [], total: 0 });
     setCompare('');
@@ -130,7 +162,11 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       filter: historyFilter(scopedHistoryFilter(applied, casePath), offset),
     })
       .then((p) => {
-        if (id.active && id === epoch.current) setPage(p);
+        if (id.active && id === epoch.current) {
+          if (!p.items.length && offset > 0) {
+            setOffset(Math.max(0, Math.ceil(p.total / 30) - 1) * 30);
+          } else setPage(p);
+        }
       })
       .catch((e) => {
         if (id.active && id === epoch.current) setError(String(e));
@@ -140,6 +176,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       });
     return () => {
       id.active = false;
+      menuRequest.current = null;
     };
   }, [applied, offset, casePath]);
   async function action<T>(fn: () => Promise<T>) {
@@ -180,6 +217,110 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       setComparisonResult(null);
       setResult(null);
     }
+  }
+  function menuChanged(item: HistoryOperation, open: boolean) {
+    const request = {};
+    menuRequest.current = open ? request : null;
+    setDeletePlan(null);
+    if (!open || !canDeleteHistory(item) || busy) return;
+    const token = epoch.current;
+    void invokeJson<HistoryDeletePlan>('history_delete_plan', { id: item.operation_id })
+      .then((plan) => {
+        if (token.active && token === epoch.current && menuRequest.current === request)
+          setDeletePlan(plan);
+      })
+      .catch((e) => {
+        if (token.active && token === epoch.current && menuRequest.current === request)
+          setDeletePlan({
+            id: item.operation_id,
+            path: null,
+            host: null,
+            reason: String(e),
+            casePath: null,
+            caseHost: null,
+            caseReason: String(e),
+          });
+      });
+  }
+  function deleteItems(item: HistoryOperation) {
+    const plan = deletePlan?.id === item.operation_id ? deletePlan : null;
+    const allowed = canDeleteHistory(item);
+    return [
+      {
+        label: t('仅删除记录', 'Delete record only'),
+        danger: true,
+        disabled: busy || !allowed,
+        onSelect: () => {
+          setError('');
+          setDeletion({ item, files: false, plan: null });
+        },
+      },
+      {
+        label: !allowed
+          ? t('运行中或待核对的记录不能删除', 'Active or unreconciled records cannot be deleted')
+          : !plan
+            ? t('正在核对目录…', 'Checking directory…')
+            : plan.path && !plan.reason
+              ? t('删除记录及本次运行目录…', 'Delete record and this run directory…')
+              : plan.reason || t('没有可删除的目录', 'No deletable directory'),
+        danger: true,
+        disabled: busy || !allowed || !plan?.path || !!plan.reason,
+        onSelect: () => {
+          if (plan?.path && !plan.reason) {
+            setError('');
+            setDeletion({ item, files: true, plan });
+          }
+        },
+      },
+      {
+        label: !allowed
+          ? t('运行中或待核对的算例不能删除', 'Active or unreconciled cases cannot be deleted')
+          : !plan
+            ? t('正在核对算例目录…', 'Checking case directory…')
+            : plan.casePath && !plan.caseReason
+              ? t('删除整个算例文件夹…', 'Delete entire case folder…')
+              : plan.caseReason || t('没有可删除的算例目录', 'No deletable case directory'),
+        danger: true,
+        disabled: busy || !allowed || !plan?.casePath || !!plan.caseReason,
+        onSelect: () => {
+          if (plan?.casePath && !plan.caseReason) {
+            setError('');
+            setDeleteName('');
+            setDeletion({ item, files: true, wholeCase: true, plan });
+          }
+        },
+      },
+    ];
+  }
+  async function deleteRecord() {
+    if (!deletion || !deleteConfirmed || (deletion.files && !deletionPath)) return;
+    const target = deletion;
+    const token = epoch.current;
+    const response = await invokeJson<{ removed: boolean; path?: string; host?: string }>(
+      'history_delete',
+      {
+        id: target.item.operation_id,
+        files: target.files,
+        ...(target.files ? { expectedPath: deletionPath } : {}),
+        ...(target.wholeCase ? { wholeCase: true } : {}),
+      },
+    );
+    if (!response.removed)
+      throw new Error(
+        t('记录未删除，请刷新后重试。', 'Record was not deleted. Refresh and retry.'),
+      );
+    if (target.files && response.path) {
+      const path = response.path;
+      update((current) => historyStateAfterDirectoryDeletion(current, path, response.host));
+    }
+    if (!token.active || token !== epoch.current) return;
+    setDeletion(null);
+    setDetail(null);
+    setCompare('');
+    setVariables([]);
+    setComparisonResult(null);
+    setResult(null);
+    setApplied((current) => ({ ...current }));
   }
   async function exportAll(format: 'csv' | 'json') {
     const content = await invoke<string>('history_export', {
@@ -563,6 +704,91 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
 
   return (
     <div className="page-stack history-page">
+      {deletion && (
+        <Dialog
+          open
+          title={
+            deletion.wholeCase
+              ? t('删除整个算例文件夹', 'Delete entire case folder')
+              : deletion.files
+                ? t('删除记录及本次运行目录', 'Delete record and this run directory')
+                : t('仅删除记录', 'Delete record only')
+          }
+          showClose={false}
+          onOpenChange={(open) => {
+            if (!open && !busy) {
+              setDeletion(null);
+              setError('');
+            }
+          }}
+        >
+          <p>
+            {historyObject(deletion.item)} · {deletion.item.operation_id}
+          </p>
+          {deletion.files ? (
+            <>
+              <Notice tone="warning">
+                {deletion.wholeCase
+                  ? t(
+                      '将永久删除整个算例文件夹，包括其中各次运行和全部文件，同时删除本条记录。目录外引用的原始数据不会删除；其他历史记录仍会保留，但其中的目录可能已不存在。',
+                      'Permanently delete the entire case folder, including all runs and files inside it, along with this record. Referenced input data outside this folder will be preserved. Other history records remain, but their directories may no longer exist.',
+                    )
+                  : t(
+                      '将永久删除以下本次运行目录及其中全部文件，同时删除本条记录。目录外引用的原始数据不会删除。',
+                      'Permanently delete this run directory and all its files, along with this record. Referenced input data outside this directory will be preserved.',
+                    )}
+              </Notice>
+              <p>
+                {(deletion.wholeCase ? deletion.plan?.caseHost : deletion.plan?.host) ??
+                  t('本机', 'Local')}
+              </p>
+              <p style={{ overflowWrap: 'anywhere' }}>{deletionPath}</p>
+              {deletion.wholeCase && (
+                <Field
+                  label={t(
+                    `输入算例目录名称“${directoryName}”确认`,
+                    `Type the case folder name “${directoryName}” to confirm`,
+                  )}
+                >
+                  <Input
+                    autoFocus
+                    disabled={busy}
+                    value={deleteName}
+                    aria-label={t('算例目录名称', 'Case folder name')}
+                    onChange={(event) => setDeleteName(event.target.value)}
+                  />
+                </Field>
+              )}
+            </>
+          ) : (
+            <p>
+              {t(
+                '只移除本条历史记录，不删除任何算例、运行结果或输入数据。',
+                'Remove only this history record. Case files, outputs and input data will be preserved.',
+              )}
+            </p>
+          )}
+          {error && <Notice tone="error">{error}</Notice>}
+          <div className="button-row">
+            <Button
+              disabled={busy}
+              onClick={() => {
+                setDeletion(null);
+                setError('');
+              }}
+            >
+              {t('取消', 'Cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              disabled={busy || !deleteConfirmed}
+              onClick={() => run(deleteRecord)}
+            >
+              {busy ? t('正在删除…', 'Deleting…') : t('确认删除', 'Confirm deletion')}
+            </Button>
+          </div>
+        </Dialog>
+      )}
       <header className="history-heading">
         <div>
           <h1>{t('历史记录', 'History')}</h1>
@@ -709,60 +935,66 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
               </thead>
               <tbody>
                 {page.items.map((item) => (
-                  <tr
+                  <ContextMenu
                     key={item.operation_id}
-                    className={
-                      detail?.operation.operation_id === item.operation_id ? 'is-selected' : ''
-                    }
+                    items={deleteItems(item)}
+                    onOpenChange={(open) => menuChanged(item, open)}
                   >
-                    <td>
-                      {item.time_ms == null ? (
-                        '—'
-                      ) : (
-                        <time dateTime={new Date(item.time_ms).toISOString()}>
-                          {new Date(item.time_ms).toLocaleDateString(appLocale(en))}
-                          <br />
-                          {new Date(item.time_ms).toLocaleTimeString(appLocale(en), {
-                            hour: '2-digit',
-                            minute: '2-digit',
-                          })}
-                        </time>
-                      )}
-                    </td>
-                    <td>{historyKindLabel(item.kind, en)}</td>
-                    <td className="history-object" title={item.case_path ?? item.operation_id}>
-                      <strong>{historyObject(item)}</strong>
-                      <small>
-                        {historyPhaseLabel(item.phase, en)} ·{' '}
-                        {item.host ??
-                          (item.location === 'remote'
-                            ? t('远程', 'Remote')
-                            : item.location === 'local'
-                              ? t('本机', 'Local')
-                              : t('位置未记录', 'Location not recorded'))}
-                      </small>
-                    </td>
-                    <td>
-                      <span
-                        className={`history-status history-status-${item.needs_reconciliation ? 'pending' : item.status}`}
-                      >
-                        {item.needs_reconciliation
-                          ? t('待核对', 'Needs reconciliation')
-                          : historyStatusLabel(item.status, en)}
-                      </span>
-                    </td>
-                    <td>
-                      <Button
-                        variant="ghost"
-                        aria-pressed={detail?.operation.operation_id === item.operation_id}
-                        aria-label={`${t('查看记录', 'View record')} ${item.operation_id}`}
-                        disabled={busy}
-                        onClick={() => run(() => show(item.operation_id))}
-                      >
-                        {t('查看', 'View')}
-                      </Button>
-                    </td>
-                  </tr>
+                    <tr
+                      tabIndex={0}
+                      className={
+                        detail?.operation.operation_id === item.operation_id ? 'is-selected' : ''
+                      }
+                    >
+                      <td>
+                        {item.time_ms == null ? (
+                          '—'
+                        ) : (
+                          <time dateTime={new Date(item.time_ms).toISOString()}>
+                            {new Date(item.time_ms).toLocaleDateString(appLocale(en))}
+                            <br />
+                            {new Date(item.time_ms).toLocaleTimeString(appLocale(en), {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                            })}
+                          </time>
+                        )}
+                      </td>
+                      <td>{historyKindLabel(item.kind, en)}</td>
+                      <td className="history-object" title={item.case_path ?? item.operation_id}>
+                        <strong>{historyObject(item)}</strong>
+                        <small>
+                          {historyPhaseLabel(item.phase, en)} ·{' '}
+                          {item.host ??
+                            (item.location === 'remote'
+                              ? t('远程', 'Remote')
+                              : item.location === 'local'
+                                ? t('本机', 'Local')
+                                : t('位置未记录', 'Location not recorded'))}
+                        </small>
+                      </td>
+                      <td>
+                        <span
+                          className={`history-status history-status-${item.needs_reconciliation ? 'pending' : item.status}`}
+                        >
+                          {item.needs_reconciliation
+                            ? t('待核对', 'Needs reconciliation')
+                            : historyStatusLabel(item.status, en)}
+                        </span>
+                      </td>
+                      <td>
+                        <Button
+                          variant="ghost"
+                          aria-pressed={detail?.operation.operation_id === item.operation_id}
+                          aria-label={`${t('查看记录', 'View record')} ${item.operation_id}`}
+                          disabled={busy}
+                          onClick={() => run(() => show(item.operation_id))}
+                        >
+                          {t('查看', 'View')}
+                        </Button>
+                      </td>
+                    </tr>
+                  </ContextMenu>
                 ))}
               </tbody>
             </table>
@@ -886,7 +1118,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     onClick={() =>
                       run(async () =>
                         setResult(
-                          await invokeJson('history_replay', { id: detail.operation.operation_id }),
+                          await invokeJson('history_replay', {
+                            id: detail.operation.operation_id,
+                          }),
                         ),
                       )
                     }

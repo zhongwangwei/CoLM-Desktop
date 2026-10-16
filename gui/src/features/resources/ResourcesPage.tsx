@@ -3,7 +3,17 @@ import { remoteRunPermissions, reconcileRemoteRun } from '../runs/run-model';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import {
+  Advanced,
+  Button,
+  Card,
+  ContextMenu,
+  Dialog,
+  Field,
+  Input,
+  Notice,
+  Select,
+} from '../../components/ui';
 import {
   newServer,
   replaceServer,
@@ -42,7 +52,8 @@ export default function ResourcesPage() {
       [],
     ),
     [taskDetails, setTaskDetails] = useState<Record<string, boolean>>({});
-  const [rootBrowser, setRootBrowser] = useState<Server | null>(null);
+  const [rootBrowser, setRootBrowser] = useState<Server | null>(null),
+    [deletingServer, setDeletingServer] = useState<Server | null>(null);
   const [preset, setPreset] = useState('default'),
     [snapshot, setSnapshot] = useState(''),
     [workspace, setWorkspace] = useState(''),
@@ -56,16 +67,18 @@ export default function ResourcesPage() {
     initialized = useRef(false);
   const dirty = Boolean(editor && (JSON.stringify(editor) !== baseline || password));
   function navigationReason() {
-    return rootBrowser
-      ? t('请先关闭目录选择窗口。', 'Close the folder browser first.')
-      : busy || lock.current
-        ? t('操作进行中，请等待完成。', 'Wait for the current operation to finish.')
-        : dirty
-          ? t(
-              '请先保存连接设置或放弃修改，再切换资源或离开。',
-              'Save the connection or discard edits before switching resources or leaving.',
-            )
-          : null;
+    return deletingServer
+      ? t('请先关闭删除确认窗口。', 'Close the deletion confirmation first.')
+      : rootBrowser
+        ? t('请先关闭目录选择窗口。', 'Close the folder browser first.')
+        : busy || lock.current
+          ? t('操作进行中，请等待完成。', 'Wait for the current operation to finish.')
+          : dirty
+            ? t(
+                '请先保存连接设置或放弃修改，再切换资源或离开。',
+                'Save the connection or discard edits before switching resources or leaving.',
+              )
+            : null;
   }
   useNavigationGuard(navigationReason);
   function clearFeedback() {
@@ -544,6 +557,40 @@ export default function ResourcesPage() {
       run: () => selectResource(server),
     })),
   ];
+  if (deletingServer)
+    guideActions.push({
+      id: 'resource-delete-confirm',
+      label: t('删除连接设置', 'Delete connection settings'),
+      kind: 'commit',
+      enabled: configLoaded && !busy && !dirty,
+      run: () =>
+        execute('delete', async () => {
+          if (!configLoaded)
+            throw new Error(
+              t(
+                '无法读取连接配置，请刷新后重试',
+                'Cannot read connection settings; refresh and retry',
+              ),
+            );
+          if (dirty) throw new Error(t('请先保存或放弃修改', 'Save or discard edits first'));
+          const host = deletingServer.host;
+          if (!servers.some((server) => server.host === host))
+            throw new Error(
+              t('连接已被删除，请刷新', 'Connection was already removed; refresh first'),
+            );
+          const next = servers.filter((server) => server.host !== host);
+          await invoke('remote_save_config', { config: { servers: next } });
+          setServers(next);
+          if (original === host) {
+            setSelected('local');
+            setEditor(null);
+            setOriginal(null);
+            setBaseline('');
+            setPassword('');
+          }
+          setDeletingServer(null);
+        }),
+    });
   if (selected === 'local') {
     guideActions.push({
       id: 'resource-local',
@@ -855,6 +902,39 @@ export default function ResourcesPage() {
           {message}
         </Notice>
       ))}
+      <Dialog
+        open={deletingServer !== null}
+        title={t('删除连接设置', 'Delete connection settings')}
+        onOpenChange={(open) => {
+          if (!open && !busy) setDeletingServer(null);
+        }}
+      >
+        <p>{deletingServer?.host}</p>
+        <p>
+          {t(
+            '仅从软件中删除此连接配置。服务器上的文件和任务会保留。',
+            'Remove this connection from the app. Files and jobs on the server are retained.',
+          )}
+        </p>
+        {error && <Notice tone="error">{error}</Notice>}
+        <div className="actions">
+          <Button disabled={busy} onClick={() => setDeletingServer(null)}>
+            {t('取消', 'Cancel')}
+          </Button>
+          <Button
+            variant="danger"
+            disabled={!configLoaded || busy || dirty}
+            onClick={() => {
+              const control = guideActions.find(
+                (action) => action.id === 'resource-delete-confirm',
+              );
+              if (control?.enabled !== false) void Promise.resolve(control?.run()).catch(() => {});
+            }}
+          >
+            {t('删除连接设置', 'Delete connection settings')}
+          </Button>
+        </div>
+      </Dialog>
       <div className="resources-selector">
         <Button
           className={`resource-choice ${selected === 'local' ? 'selected' : ''}`}
@@ -875,32 +955,48 @@ export default function ResourcesPage() {
           {selected === 'local' && <span className="badge">{t('当前选择', 'Selected')}</span>}
         </Button>
         {servers.map((server) => (
-          <Button
+          <ContextMenu
             key={server.host}
-            className={`resource-choice ${selected === `server:${server.host}` ? 'selected' : ''}`}
-            aria-pressed={selected === `server:${server.host}`}
-            disabled={busy || dirty}
-            onClick={() => selectResource(server)}
+            items={[
+              {
+                label: t('删除连接设置', 'Delete connection settings'),
+                danger: true,
+                disabled: !configLoaded || busy || dirty,
+                onSelect: () => {
+                  if (configLoaded && !busy && !dirty) {
+                    setError('');
+                    setDeletingServer(server);
+                  }
+                },
+              },
+            ]}
           >
-            <span className="resource-device" aria-hidden="true">
-              <NavIcon name="resources" />
-            </span>
-            <span>
-              <strong>{server.host}</strong>
-              <small>
-                {
-                  resourceCheckSummary(
-                    server,
-                    output[`check:server:${server.host}`] as ResourceCheck | undefined,
-                    en,
-                  ).ssh.label
-                }
-              </small>
-            </span>
-            {selected === `server:${server.host}` && (
-              <span className="badge">{t('当前选择', 'Selected')}</span>
-            )}
-          </Button>
+            <Button
+              className={`resource-choice ${selected === `server:${server.host}` ? 'selected' : ''}`}
+              aria-pressed={selected === `server:${server.host}`}
+              disabled={busy || dirty}
+              onClick={() => selectResource(server)}
+            >
+              <span className="resource-device" aria-hidden="true">
+                <NavIcon name="resources" />
+              </span>
+              <span>
+                <strong>{server.host}</strong>
+                <small>
+                  {
+                    resourceCheckSummary(
+                      server,
+                      output[`check:server:${server.host}`] as ResourceCheck | undefined,
+                      en,
+                    ).ssh.label
+                  }
+                </small>
+              </span>
+              {selected === `server:${server.host}` && (
+                <span className="badge">{t('当前选择', 'Selected')}</span>
+              )}
+            </Button>
+          </ContextMenu>
         ))}
       </div>
       {selected === 'local' && (
@@ -1163,33 +1259,6 @@ export default function ResourcesPage() {
                   }}
                 >
                   {t('清理快照', 'Clean snapshot')}
-                </Button>
-                <Button
-                  variant="danger"
-                  disabled={busy || dirty}
-                  onClick={() => {
-                    if (
-                      window.confirm(
-                        t(
-                          `移除服务器设置 ${selectedServer.host}？`,
-                          `Remove server settings ${selectedServer.host}?`,
-                        ),
-                      )
-                    )
-                      run('delete', async () => {
-                        const next = servers.filter(
-                          (server) => server.host !== selectedServer.host,
-                        );
-                        await invoke('remote_save_config', { config: { servers: next } });
-                        setServers(next);
-                        setSelected('local');
-                        setEditor(null);
-                        setOriginal(null);
-                        setBaseline('');
-                      });
-                  }}
-                >
-                  {t('删除设置', 'Delete settings')}
                 </Button>
               </div>
               {output[`maintenance:${selected}`] != null && (

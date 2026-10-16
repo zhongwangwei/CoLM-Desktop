@@ -604,6 +604,30 @@ export const commandContract = {
       "rust_type": "Option<bool>"
     }
   },
+  "history_delete_plan": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "history_delete": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "files": {
+      "required": true,
+      "rust_type": "bool"
+    },
+    "expectedPath": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "wholeCase": {
+      "required": false,
+      "rust_type": "Option<bool>"
+    }
+  },
   "hist_vars": {
     "text": {
       "required": true,

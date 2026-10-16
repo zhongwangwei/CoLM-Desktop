@@ -361,6 +361,34 @@ select.input {
   align-items: center;
   margin: 14px 0;
 }
+.context-menu {
+  min-width: 180px;
+  max-width: min(360px, calc(100vw - 16px));
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  box-shadow: 0 8px 24px #0002;
+  z-index: 100;
+}
+.context-menu-item {
+  overflow-wrap: anywhere;
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 4px;
+  outline: none;
+  cursor: default;
+}
+.context-menu-item[data-highlighted] {
+  background: var(--elevated);
+}
+.context-menu-danger {
+  color: var(--danger);
+}
+.context-menu-item[data-disabled] {
+  color: var(--muted);
+  opacity: 0.6;
+}
 .tabs {
   border-bottom: 1px solid var(--border);
   padding-bottom: 10px;

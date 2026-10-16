@@ -188,6 +188,7 @@ fn assistant_ui_event(
                     | "export-report"
                     | "prep-execute"
                     | "resource-save"
+                    | "resource-delete-confirm"
                     | "workspace-create"
                     | "workspace-patch"
                     | "workspace-check"
@@ -1346,7 +1347,7 @@ fn reconcile_remote_attempt(
     Ok(())
 }
 
-fn binding(event: &Event) -> &serde_json::Value {
+pub(crate) fn binding(event: &Event) -> &serde_json::Value {
     let value = event
         .detail
         .get("remote_record")

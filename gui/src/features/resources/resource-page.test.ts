@@ -10,7 +10,7 @@ type Contract = { fields: UiField[]; actions: UiAction[]; details: unknown };
 function harness(
   records: Record<string, unknown> = {},
   hosts = ['7920land', '7920mp'],
-  failures: { config?: boolean; history?: string } = {},
+  failures: { config?: boolean; history?: string; save?: boolean } = {},
   simulationReturn?: { route: 'new-case' | 'case'; step: 1; resourceHost?: string },
 ) {
   const source = readFileSync(new URL('./ResourcesPage.tsx', import.meta.url), 'utf8')
@@ -28,6 +28,7 @@ function harness(
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
+  const menus: { items: { disabled?: boolean; onSelect: () => void }[] }[] = [];
   let browser: {
     server: resource.Server;
     directory: boolean;
@@ -40,6 +41,9 @@ function harness(
       case 'remote_config':
         if (failures.config) throw new Error('Unreadable server configuration');
         return { servers };
+      case 'remote_save_config':
+        if (failures.save) throw new Error('Cannot save connection settings');
+        return null;
       case 'remote_ssh_hosts':
         return ['7920land', '7920mp'];
       case 'remote_job_record':
@@ -72,12 +76,15 @@ function harness(
     remoteRunPermissions,
     reconcileRemoteRun,
     React: {
-      createElement: (type: string, props: typeof browser) => {
-        if (type === 'remote-browser') browser = props;
+      createElement: (type: string, props: Record<string, unknown>) => {
+        if (type === 'remote-browser') browser = props as typeof browser;
+        if (type === 'context-menu') menus.push(props as (typeof menus)[number]);
         return null;
       },
     },
     RemotePathBrowser: 'remote-browser',
+    ContextMenu: 'context-menu',
+    Dialog: () => {},
     Advanced: () => {},
     Button: () => {},
     Card: () => {},
@@ -137,6 +144,7 @@ function harness(
   );
   function render() {
     cursor = 0;
+    menus.length = 0;
     Page();
     return contract;
   }
@@ -172,6 +180,7 @@ function harness(
       failProbe = true;
     },
     browser: () => browser,
+    menus: () => menus,
   };
 }
 
@@ -209,6 +218,57 @@ test('resource selection is page-local and dirty drafts block switching and navi
   contract = await page.action('resource-select-server-7920mp');
   assert.equal((contract.details as { selected: string }).selected, 'server:7920mp');
   assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('resource context menu deletes only the confirmed connection and preserves another selection', async () => {
+  const page = harness();
+  await page.ready();
+  assert.ok(!page.contract().actions.some((action) => action.id === 'resource-delete-confirm'));
+  page.menus()[1].items[0].onSelect();
+  page.render();
+  assert.match(page.guard()!, /删除确认/);
+  const contract = await page.action('resource-delete-confirm');
+  assert.equal((contract.details as { selected: string }).selected, 'server:7920land');
+  assert.equal(page.menus().length, 1);
+  assert.deepEqual(page.calls.at(-1), {
+    command: 'remote_save_config',
+    args: { config: { servers: [page.servers[0]] } },
+  });
+  assert.equal(page.guard(), null);
+});
+
+test('connection delete failure preserves settings and dirty drafts disable its context menu', async () => {
+  const page = harness({}, undefined, { save: true });
+  await page.ready();
+  page.menus()[0].items[0].onSelect();
+  page.render();
+  await assert.rejects(page.action('resource-delete-confirm'), /Cannot save/);
+  page.render();
+  assert.equal(page.menus().length, 2);
+  assert.ok(page.contract().actions.some((action) => action.id === 'resource-delete-confirm'));
+  page.fill('resource-username', 'edited');
+  assert.ok(page.menus().every((menu) => menu.items[0].disabled));
+  assert.equal(
+    page.contract().actions.find((action) => action.id === 'resource-delete-confirm')?.enabled,
+    false,
+  );
+});
+
+test('failed configuration refresh prevents deletion from overwriting with a stale server list', async () => {
+  const failures = { config: false };
+  const page = harness({}, undefined, failures);
+  await page.ready();
+  page.menus()[0].items[0].onSelect();
+  page.render();
+  failures.config = true;
+  await assert.rejects(page.action('resource-refresh'), /Unreadable/);
+  const contract = page.render();
+  const deletion = contract.actions.find((action) => action.id === 'resource-delete-confirm');
+  assert.ok(deletion);
+  assert.equal(deletion.enabled, false);
+  assert.ok(page.menus().every((menu) => menu.items[0].disabled));
+  await assert.rejects(async () => await deletion.run(), /无法读取连接配置/);
+  assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
 });
 
 test('server work directory picker uses the unsaved host and only fills its draft', async () => {
@@ -428,6 +488,7 @@ test('password registration stays native-session-only and revokes connection evi
 test('busy operations block navigation even before React rerenders the busy state', () => {
   const lock = { current: true };
   const reason = callback('navigationReason', {
+    deletingServer: null,
     rootBrowser: null,
     busy: false,
     lock,

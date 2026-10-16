@@ -4,6 +4,9 @@ import {
   emptyFilter,
   historyFilter,
   canReplay,
+  canDeleteHistory,
+  historyDirectoryContains,
+  historyStateAfterDirectoryDeletion,
   canCompare,
   historyPath,
   comparisonArgs,
@@ -217,4 +220,102 @@ test('history presentation uses real recorded names and preserves unknown vocabu
   assert.equal(historyStatusLabel('succeeded'), '已完成');
   assert.equal(historyKindLabel('future-kind'), 'future-kind');
   assert.equal(historyStatusLabel('future-status'), 'future-status');
+});
+
+test('deletion accepts terminal records only and rejects reconciliation regardless of status', () => {
+  const operation = {
+    status: 'succeeded',
+    needs_reconciliation: false,
+  } as import('../../lib/types').HistoryOperation;
+  for (const status of ['succeeded', 'failed', 'completed', 'completed_with_failures', 'cancelled'])
+    assert.equal(canDeleteHistory({ ...operation, status }), true);
+  for (const status of ['running', 'pending', 'unknown', 'interrupted', ''])
+    assert.equal(canDeleteHistory({ ...operation, status }), false);
+  assert.equal(canDeleteHistory({ ...operation, needs_reconciliation: true }), false);
+});
+
+test('deleted directory matching handles Windows separators and case without broadening Unix paths', () => {
+  assert.equal(historyDirectoryContains('C:\\Runs\\Job\\', 'c:/runs/job'), true);
+  assert.equal(historyDirectoryContains('C:\\Runs\\Job', 'c:\\RUNS\\job\\case'), true);
+  assert.equal(historyDirectoryContains('C:/Runs/Job', 'c:\\runs\\job\\restart'), true);
+  assert.equal(historyDirectoryContains('C:\\Runs\\Job', 'C:\\Runs\\Job2'), false);
+  assert.equal(
+    historyDirectoryContains('\\\\Server\\Share\\Runs', '//server/share/runs/case'),
+    true,
+  );
+  assert.equal(historyDirectoryContains('/Runs/Job', '/runs/job/case'), false);
+  assert.equal(historyDirectoryContains('/Runs/Job/', '/Runs/Job/case'), true);
+  assert.equal(historyDirectoryContains('/Runs/Job', '/Runs/Job2'), false);
+  assert.equal(historyDirectoryContains('/Runs/Job', '/Runs/Job\\case'), false);
+});
+
+test('deleted Windows canonical paths match ordinary drive and UNC paths', () => {
+  assert.equal(
+    historyDirectoryContains(String.raw`\\?\C:\Runs\Job`, String.raw`c:\runs\job\case`),
+    true,
+  );
+  assert.equal(
+    historyDirectoryContains(
+      String.raw`\\?\UNC\Server\Share\Runs`,
+      String.raw`\\server\share\runs\case`,
+    ),
+    true,
+  );
+  assert.equal(historyDirectoryContains('C:/Runs/Job', String.raw`\\?\C:\Runs\Job\case`), true);
+  assert.equal(historyDirectoryContains(String.raw`\\?\C:\Runs\Job`, 'C:/Runs/Job2'), false);
+  assert.equal(
+    historyDirectoryContains(String.raw`\\?\UNC\Server\Share\Runs`, '//server/share/runs2'),
+    false,
+  );
+});
+
+test('remote case deletion clears only matching host mirrors and their run state', () => {
+  const cases = [
+    {
+      dir: '/mirrors/a',
+      name: 'a',
+      has_history: true,
+      spatial: false,
+      run_host: 'server-a',
+      remote_directory: '/cases/site',
+    },
+    {
+      dir: '/mirrors/b',
+      name: 'b',
+      has_history: true,
+      spatial: false,
+      run_host: 'server-b',
+      remote_directory: '/cases/site',
+    },
+    { dir: '/cases/site', name: 'local', has_history: true, spatial: false },
+  ];
+  const state = {
+    selectedCase: { entry: cases[0], dir: cases[0].dir } as import('../../lib/types').OpenedCase,
+    cases,
+    running: Object.fromEntries(
+      cases.map((entry) => [
+        entry.dir,
+        {
+          case: entry.dir,
+          run_case: entry.dir + '/runs/1',
+          status: 'succeeded',
+          running: false,
+          logs: [],
+          stages: {},
+        },
+      ]),
+    ),
+  };
+  const result = historyStateAfterDirectoryDeletion(state, '/cases/site', 'server-a');
+  assert.equal(result.selectedCase, null);
+  assert.deepEqual(result.cases, cases.slice(1));
+  assert.deepEqual(Object.keys(result.running), ['/mirrors/b', '/cases/site']);
+  const otherSelection = {
+    ...state,
+    selectedCase: { entry: cases[1], dir: cases[1].dir } as import('../../lib/types').OpenedCase,
+  };
+  assert.equal(
+    historyStateAfterDirectoryDeletion(otherSelection, '/cases/site', 'server-a').selectedCase,
+    otherSelection.selectedCase,
+  );
 });
