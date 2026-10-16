@@ -989,18 +989,6 @@ export default function ResourcesPage() {
             {field('resource-root')}
             {actionButton('resource-browse-root')}
           </div>
-          {(dirty || output.save != null || output.credentials != null) && (
-            <div className="resource-save-row">
-              {actionButton('resource-save')}
-              {actionButton('resource-discard')}
-              {dirty && <small>{t('有未保存的修改', 'Unsaved changes')}</small>}
-              {['save', 'credentials']
-                .filter((key) => output[key] != null)
-                .map((key) => (
-                  <small key={key}>{String(output[key])}</small>
-                ))}
-            </div>
-          )}
           <section className="resource-checks">
             <h3>{t('连接与环境检查', 'Connection and environment')}</h3>
             <div className="resource-status-grid">
@@ -1036,7 +1024,17 @@ export default function ResourcesPage() {
                 {new Date(check.checkedAt).toLocaleString(en ? 'en-US' : 'zh-CN')}
               </p>
             )}
-            <div className="actions">{actionButton('resource-check', true)}</div>
+            <div className="actions resource-connection-actions">
+              {actionButton('resource-check', !dirty)}
+              {actionButton('resource-save', true)}
+              {actionButton('resource-discard')}
+              {dirty && <small>{t('有未保存的修改', 'Unsaved changes')}</small>}
+              {['save', 'credentials']
+                .filter((key) => output[key] != null)
+                .map((key) => (
+                  <small key={key}>{String(output[key])}</small>
+                ))}
+            </div>
             {check?.checkedAt &&
               [
                 checkResult?.probe_error,
