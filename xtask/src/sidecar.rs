@@ -139,6 +139,8 @@ fn pack_engine_source(root: &Path, cli: &Path) -> Result<()> {
     let out = root.join("gui/src-tauri/engine/colm-src.tar.gz");
     let status = Command::new(cli)
         .arg("engine-pack")
+        .arg("--source")
+        .arg(root)
         .arg("--out")
         .arg(&out)
         .env("COLM_AUDIT_BY_PARENT", "1")
