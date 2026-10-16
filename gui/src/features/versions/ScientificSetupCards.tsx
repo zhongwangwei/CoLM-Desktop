@@ -212,7 +212,7 @@ export default function ScientificSetupCards({
         title={label}
         description={
           control.value
-            ? t('已选择', 'Selected') +
+            ? (control.inherited ? t('默认', 'Default') : t('已选择', 'Selected')) +
               ': ' +
               t(
                 control.choices.find((c) => c.value === control.value)?.zh ?? control.value,

@@ -47,7 +47,7 @@ function overlay(): Overlay {
 }
 const apply = (o: Overlay, id: string, value: string, env = environment) =>
   applySetupRequest(o, fields, { id, value }, env);
-test('ordered setup exposes every foundation and never fills frozen catalog defaults', () => {
+test('ordered setup displays defaults without creating overrides', () => {
   const options = setupChoices({ physics: {}, parameters: [], process_files: [] }, fields, {});
   assert.deepEqual(
     options.map((c) => c.id),
@@ -63,8 +63,23 @@ test('ordered setup exposes every foundation and never fills frozen catalog defa
       'DEF_USE_TRACER',
     ],
   );
-  assert.equal(options[0].value, '');
+  assert.equal(options[0].value, 'vG');
+  assert.equal(options[1].value, '.true.');
+  assert.equal(options[2].value, '.false.');
   assert.equal(options[0].pending, true);
+  assert.equal(options[0].inherited, true);
+  const empty = { physics: {}, parameters: [], process_files: [] };
+  assert.throws(
+    () =>
+      applySetupRequest(
+        empty,
+        fields,
+        { id: 'DEF_USE_VariablySaturatedFlow', value: '.false.' },
+        {},
+      ),
+    /van Genuchten/,
+  );
+  assert.deepEqual(empty.physics, {});
   assert.match(options[5].choices[0].reason, /PFT/);
 });
 test('upstream edits reject active incompatible children without changing the original', () => {
