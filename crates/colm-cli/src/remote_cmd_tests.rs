@@ -1375,6 +1375,57 @@ fn frozen_official_prebuilt_requires_matching_source_and_workspace_still_require
             files: Vec::new(),
         })
     };
+    probe.cc = true;
+    probe.toolchain_installable = true;
+    let auto = Opts::parse(&[]).unwrap();
+    for selected in [&official, &version(false)] {
+        assert!(matches!(
+            engine_for_probe(
+                &auto,
+                "auto",
+                "fixture",
+                &probe,
+                Some(selected),
+                snapshot("bootstrap-fixture")
+            )
+            .unwrap(),
+            Engine::Source(_)
+        ));
+    }
+    assert!(matches!(
+        engine_for_probe(
+            &opts,
+            "auto",
+            "fixture",
+            &probe,
+            Some(&official),
+            snapshot("abc123")
+        )
+        .unwrap(),
+        Engine::Prebuilt(_)
+    ));
+    assert!(engine_for_probe(
+        &auto,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&official),
+        snapshot("bootstrap-fixture")
+    )
+    .is_err());
+    assert!(engine_for_probe(
+        &auto,
+        "auto",
+        "fixture",
+        &probe,
+        Some(&official),
+        Err(anyhow::anyhow!("source unavailable"))
+    )
+    .err()
+    .unwrap()
+    .to_string()
+    .contains("source unavailable"));
+    probe.toolchain_installable = false;
     for mode in ["auto", "prebuilt"] {
         assert!(matches!(
             engine_for_probe(

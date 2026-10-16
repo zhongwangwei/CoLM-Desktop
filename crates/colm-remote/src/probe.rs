@@ -9,7 +9,7 @@ use crate::ssh::{quote, Ssh};
 
 // Non-interactive SSH does not reliably load the user's toolchain PATH.
 pub(crate) const BUILD_PATH_PRELUDE: &str =
-    "export PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin\"\n";
+    "export PATH=\"$PATH:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin:$HOME/.local/share/colm/toolchain/cmake/bin\"\n";
 
 /// 探测结果。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -40,6 +40,8 @@ pub struct Probe {
     pub problems: Vec<String>,
     /// 在这台机器上从源码编引擎缺什么（cargo、cmake、C 编译器）。空表示能编；非空时要有预编包才能用。
     pub build_problems: Vec<String>,
+    /// Missing Rust/CMake can be installed for this user when a source build starts.
+    pub toolchain_installable: bool,
     /// 这次要用的引擎：source（在服务器上编）、prebuilt（传预编包）；调用方判断后填，探测本身不填。
     pub engine: Option<String>,
 }
@@ -48,17 +50,18 @@ pub struct Probe {
 pub fn script(root: &str) -> String {
     format!(
         r#"set +e
-{prelude}{build_path}R={root}
+{prelude}{build_path}{toolchain_requirements}R={root}
+echo "toolchain_installable=$(colm_toolchain_installable 2>/dev/null && echo 1)"
 echo "hostname=$(hostname)"
 echo "os=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -s)"
 echo "arch=$(uname -m)"
 echo "cpus=$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN)"
 echo "memory_kb=$(awk '/MemTotal/{{print $2}}' /proc/meminfo 2>/dev/null)"
 C=$(command -v cargo || ls "$HOME/.cargo/bin/cargo" 2>/dev/null)
-echo "cargo=$([ -n "$C" ] && "$C" --version 2>/dev/null)"
+echo "cargo=$([ -n "$C" ] && rustc --version >/dev/null 2>&1 && "$C" --version 2>/dev/null)"
 echo "gfortran=$(gfortran --version 2>/dev/null | head -1)"
 echo "mpi=$( (command -v mpif90 || command -v mpiifort || command -v mpiifx) 2>/dev/null | head -1)"
-echo "cmake=$(command -v cmake)"
+echo "cmake=$(cmake --version >/dev/null 2>&1 && command -v cmake)"
 echo "cc=$( (command -v cc || command -v gcc) 2>/dev/null | head -1)"
 echo "slurm=$(command -v sbatch)"
 PBS=""; QSUB=$(command -v qsub); QSUB_UNVERIFIED=""
@@ -97,6 +100,7 @@ fi
         root = quote(root),
         prelude = crate::sched::PATH_PRELUDE,
         build_path = BUILD_PATH_PRELUDE,
+        toolchain_requirements = crate::toolchain::requirements_script(),
     )
 }
 
@@ -138,6 +142,7 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .map(|kb| kb / 1024 / 1024),
         problems: Vec::new(),
         build_problems: Vec::new(),
+        toolchain_installable: get("toolchain_installable") == Some("1"),
         engine: None,
     };
     if probe.os.is_empty()
@@ -148,9 +153,9 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .push("the host did not answer like a Linux system".into());
     }
     if probe.cargo.is_none() {
-        probe.build_problems.push(
-            "cargo (Rust) is not installed, so the engine cannot be built on this server".into(),
-        );
+        probe
+            .build_problems
+            .push("cargo (Rust) is not installed; source builds need Rust/Cargo".into());
     }
     if !probe.cmake || !probe.cc {
         probe

@@ -101,6 +101,10 @@ export default function ProjectBatchRun({
     submitting: t('正在提交', 'Submitting'),
   };
   const stageLabels: Record<string, string> = {
+    'preparing the engine': t('准备运行环境', 'Preparing the environment'),
+    'installing Rust/Cargo': t('安装 Rust/Cargo', 'Installing Rust/Cargo'),
+    'installing CMake': t('安装 CMake', 'Installing CMake'),
+    'building the Rust engine': t('编译模型引擎', 'Building the model engine'),
     mksrfdata: t('准备地表数据', 'Surface data'),
     mkinidata: t('准备初始场', 'Initial conditions'),
     colm: t('模型计算', 'Simulation'),

@@ -15,6 +15,7 @@ pub mod kernel;
 pub mod probe;
 pub mod sched;
 pub mod ssh;
+pub mod toolchain;
 pub mod workspace;
 
 pub use ssh::Ssh;

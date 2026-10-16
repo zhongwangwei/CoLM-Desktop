@@ -123,7 +123,7 @@ export function restoreRunView(record: RunState | undefined, casePath: string): 
     | {
         progress?: Record<string, unknown> | null;
         stages?: unknown;
-        status?: { log_tail?: unknown };
+        status?: { log_tail?: unknown; phase?: unknown };
       }
     | undefined;
   const progress = remote ? remote.progress : record.progress;
@@ -140,12 +140,27 @@ export function restoreRunView(record: RunState | undefined, casePath: string): 
         .at(-1)?.[0]
     : undefined;
   const logTail = remote?.status?.log_tail;
+  const phase = remote?.status?.phase;
+  const buildStage =
+    typeof phase === 'string' &&
+    [
+      'preparing the engine',
+      'installing Rust/Cargo',
+      'installing CMake',
+      'building the Rust engine',
+    ].includes(phase)
+      ? phase
+      : undefined;
   return {
     runId: record.run_id ?? record.operation_id ?? '',
     casePath,
     status: record.status,
     lines: typeof logTail === 'string' && logTail ? logTail.split('\n') : record.logs,
-    stage: remote ? remoteStage : typeof progress?.stage === 'string' ? progress.stage : undefined,
+    stage: remote
+      ? (remoteStage ?? buildStage)
+      : typeof progress?.stage === 'string'
+        ? progress.stage
+        : undefined,
     step: typeof progress?.step === 'number' ? progress.step : undefined,
     total: typeof progress?.total_steps === 'number' ? progress.total_steps : undefined,
   };

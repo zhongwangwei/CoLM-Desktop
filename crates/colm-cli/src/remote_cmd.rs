@@ -945,7 +945,7 @@ fn exe_dir() -> Result<PathBuf> {
 /// 选引擎。`--engine-mode`：
 /// - `source`：把源码传上去，在服务器上编（要 cargo、cmake 与 C 编译器）；
 /// - `prebuilt`：传预编包（`--prebuilt 路径`，或应用随附的、缓存里与当前源码一致的那份）；
-/// - `auto`（默认）：服务器能编就从源码编，不能（没有 cargo 等）就用预编包，两样都没有就说明怎么办。
+/// - `auto`（默认）：已有工具时从源码编，否则优先用预编包；没有预编包时自动安装缺少的 Rust/CMake。
 fn choose_engine(
     opts: &Opts,
     ssh: &Ssh,
@@ -977,7 +977,7 @@ fn engine_for_probe(
     // 预编包是官方构建：修改版只能在服务器上从它自己的源码编。
     if let Some(version) = version.filter(|v| v.kind == colm_model::CodeKind::Workspace) {
         ensure!(
-            mode != "prebuilt" && can_build,
+            mode != "prebuilt" && (can_build || probe.toolchain_installable),
             "model version {} has to be built on {} from its own source, which needs cargo, cmake and a C compiler there; \
              a prebuilt engine is the official build and cannot run a modified version",
             version.name,
@@ -1009,6 +1009,7 @@ fn engine_for_probe(
     };
     match prebuilt {
         Some(prebuilt) => Ok(Engine::Prebuilt(prebuilt)),
+        None if mode == "auto" && probe.toolchain_installable => Ok(Engine::Source(snapshot)),
         None => bail!(
             "{} cannot build the engine (cargo, cmake or a C compiler is missing) and no prebuilt engine for {} was found; \
              build one with `colm-cli remote-dist --host <a machine with internet> --root <dir>` or pass --prebuilt <colm-engine-linux-{}.tar.gz>",
@@ -1613,6 +1614,8 @@ pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
         );
         if prebuilt.is_some() {
             probe.engine = Some("prebuilt".into());
+        } else if probe.toolchain_installable {
+            probe.engine = Some("source".into());
         } else {
             let hint = format!(
                 "no prebuilt engine for {} was found; build one with `colm-cli remote-dist` on a machine with internet",

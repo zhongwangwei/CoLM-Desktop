@@ -178,6 +178,18 @@ test('server-native paths and first-run deployment are ready without existing en
   };
   const summary = resourceCheckSummary(server, check);
   assert.deepEqual(summary.engine, { state: 'success', label: '首次运行自动构建引擎' });
+  const installation = {
+    ...check,
+    probe: { ...check.probe, toolchain_installable: true, build_problems: ['cargo missing'] },
+  };
+  assert.deepEqual(resourceCheckSummary(server, installation).engine, {
+    state: 'success',
+    label: '首次运行自动安装工具并构建引擎',
+  });
+  assert.match(
+    resourceCheckSummary(server, installation, true).engine.label,
+    /installs build tools/,
+  );
   assert.deepEqual(summary.mapping, { state: 'success', label: '直接使用服务器路径，无需映射' });
   assert.deepEqual(summary.directory, { state: 'success', label: '工作目录可创建' });
   assert.deepEqual(

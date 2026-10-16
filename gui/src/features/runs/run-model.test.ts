@@ -258,4 +258,21 @@ test('remote view reads parsed status progress, last valid stage and log tail wi
   assert.equal(queued?.step, undefined);
   assert.equal(queued?.total, undefined);
   assert.deepEqual(queued?.lines, ['step 1'], 'local submission diagnostics remain available');
+  for (const phase of [
+    'preparing the engine',
+    'installing Rust/Cargo',
+    'installing CMake',
+    'building the Rust engine',
+  ]) {
+    remoteRun.progress = {
+      remote: { status: { state: 'running', phase }, stages: [], progress: null },
+    };
+    assert.equal(restoreRunView(remoteRun, '/case/a')?.stage, phase);
+  }
+  remoteRun.progress = {
+    remote: { status: { phase: 'installing CMake' }, stages: [['colm', 'begin']] },
+  };
+  assert.equal(restoreRunView(remoteRun, '/case/a')?.stage, 'colm');
+  remoteRun.progress = { remote: { status: { phase: 'unknown text' }, stages: [] } };
+  assert.equal(restoreRunView(remoteRun, '/case/a')?.stage, undefined);
 });
