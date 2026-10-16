@@ -694,6 +694,34 @@ fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member()
 }
 
 #[test]
+fn directory_browsing_accepts_incomplete_run_settings_but_validates_connection_and_path() {
+    let mut server: Server =
+        serde_json::from_str(r#"{"host":"tms17l","root":"","scheduler":"unfinished","threads":0}"#)
+            .unwrap();
+    assert_eq!(
+        browse_args(&server, "tms17l", None).unwrap(),
+        ["remote-browse", "--host", "tms17l", "--path", ""]
+    );
+    assert_eq!(
+        browse_args(&server, "tms17l", Some("/data/work".into())).unwrap()[4],
+        "/data/work"
+    );
+    assert!(validate(&RemoteConfig {
+        servers: vec![server.clone()]
+    })
+    .is_err());
+    assert!(browse_args(&server, "other", None).is_err());
+    for path in ["relative", "/data/\nwork", "/data/\0work"] {
+        assert!(browse_args(&server, "tms17l", Some(path.into())).is_err());
+    }
+    server.auth = "invalid".into();
+    assert!(browse_args(&server, "tms17l", None).is_err());
+    server.auth = "config".into();
+    server.host = "-invalid".into();
+    assert!(browse_args(&server, "-invalid", None).is_err());
+}
+
+#[test]
 fn connection_checks_still_reach_ssh_with_incomplete_run_settings() {
     let mut server: Server = serde_json::from_str(r#"{"host":"tms17l","root":""}"#).unwrap();
     for change in 0..3 {

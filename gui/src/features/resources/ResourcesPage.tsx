@@ -16,6 +16,7 @@ import {
   type ResourceCheck,
 } from './resource';
 import NavIcon from '../../components/NavIcon';
+import RemotePathBrowser from '../../components/RemotePathBrowser';
 import './resources-page.css';
 export default function ResourcesPage() {
   const { state, update, navigate } = useApp(),
@@ -41,6 +42,7 @@ export default function ResourcesPage() {
       [],
     ),
     [taskDetails, setTaskDetails] = useState<Record<string, boolean>>({});
+  const [rootBrowser, setRootBrowser] = useState<Server | null>(null);
   const [preset, setPreset] = useState('default'),
     [snapshot, setSnapshot] = useState(''),
     [workspace, setWorkspace] = useState(''),
@@ -54,14 +56,16 @@ export default function ResourcesPage() {
     initialized = useRef(false);
   const dirty = Boolean(editor && (JSON.stringify(editor) !== baseline || password));
   function navigationReason() {
-    return busy || lock.current
-      ? t('操作进行中，请等待完成。', 'Wait for the current operation to finish.')
-      : dirty
-        ? t(
-            '请先保存连接设置或放弃修改，再切换资源或离开。',
-            'Save the connection or discard edits before switching resources or leaving.',
-          )
-        : null;
+    return rootBrowser
+      ? t('请先关闭目录选择窗口。', 'Close the folder browser first.')
+      : busy || lock.current
+        ? t('操作进行中，请等待完成。', 'Wait for the current operation to finish.')
+        : dirty
+          ? t(
+              '请先保存连接设置或放弃修改，再切换资源或离开。',
+              'Save the connection or discard edits before switching resources or leaving.',
+            )
+          : null;
   }
   useNavigationGuard(navigationReason);
   function clearFeedback() {
@@ -586,6 +590,13 @@ export default function ResourcesPage() {
         enabled: !busy && !!editor.host,
         run: () => execute(`check:${selected}`, checkConnection),
       },
+      {
+        id: 'resource-browse-root',
+        label: t('浏览服务器', 'Browse server'),
+        kind: 'click',
+        enabled: !busy && !!editor.host,
+        run: () => setRootBrowser(structuredClone(editor)),
+      },
     );
     if (dirty)
       guideActions.push(
@@ -973,7 +984,10 @@ export default function ResourcesPage() {
               </div>
             </Field>
           )}
-          <div className="resource-wide-field">{field('resource-root')}</div>
+          <div className="resource-identity">
+            {field('resource-root')}
+            {actionButton('resource-browse-root')}
+          </div>
           {(dirty || output.save != null || output.credentials != null) && (
             <div className="resource-save-row">
               {actionButton('resource-save')}
@@ -1241,6 +1255,27 @@ export default function ResourcesPage() {
           );
         })}
       </Card>
+      {rootBrowser && (
+        <RemotePathBrowser
+          host={rootBrowser.host}
+          server={rootBrowser}
+          initialPath={rootBrowser.root.startsWith('/') ? rootBrowser.root : undefined}
+          directory
+          en={en}
+          onSelect={(path) => {
+            if (JSON.stringify(editor) === JSON.stringify(rootBrowser)) editField('root', path);
+            else
+              setError(
+                t(
+                  '连接设置已改变，请重新选择目录。',
+                  'Connection settings changed; choose the folder again.',
+                ),
+              );
+            setRootBrowser(null);
+          }}
+          onClose={() => setRootBrowser(null)}
+        />
+      )}
       <footer className="resources-footer">
         {actionButton('resource-refresh')}
         <span>

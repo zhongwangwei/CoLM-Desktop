@@ -941,6 +941,10 @@ export const commandContract = {
     "path": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "server": {
+      "required": false,
+      "rust_type": "Option<Server>"
     }
   },
   "remote_probe": {

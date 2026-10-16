@@ -1,25 +1,6 @@
-import type { RunState } from '../../lib/types';
+import type { RunState, Server } from '../../lib/types';
 import { remoteStudyReply, remoteStudyPermissions } from '../studies/remote-study';
-export type Server = {
-  host: string;
-  username: string;
-  port: number;
-  auth: string;
-  identity_file: string;
-  root: string;
-  maps: { local: string; remote: string }[];
-  threads: number;
-  scheduler: string;
-  partition: string;
-  account: string;
-  walltime: string;
-  cpus: number;
-  memory_gb: number;
-  nodes: number;
-  fetch_vars: string;
-  env_script: string;
-  directives: string[];
-};
+export type { Server } from '../../lib/types';
 export const newServer = (): Server => ({
   host: '',
   username: '',

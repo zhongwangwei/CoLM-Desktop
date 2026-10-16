@@ -720,24 +720,32 @@ pub async fn remote_browse(
     app: tauri::AppHandle,
     host: String,
     path: Option<String>,
+    server: Option<Server>,
 ) -> Result<Value, String> {
-    let server = server_for(app.clone(), &host)?;
+    let server = match server {
+        Some(server) => server,
+        None => server_for(app.clone(), &host)?,
+    };
+    let args = browse_args(&server, &host, path)?;
+    ssh_cli_json(args, resource_dir(&app), Some(&server)).await
+}
+
+fn browse_args(server: &Server, host: &str, path: Option<String>) -> Result<Vec<String>, String> {
+    if server.host != host {
+        return Err("浏览目录的服务器必须与当前连接一致".into());
+    }
+    validate_connection(server)?;
     let path = path.unwrap_or_default();
     if !path.is_empty() && (!path.starts_with('/') || path.chars().any(char::is_control)) {
         return Err("Expected an absolute server path without control characters".into());
     }
-    ssh_cli_json(
-        vec![
-            "remote-browse".into(),
-            "--host".into(),
-            server.host.clone(),
-            "--path".into(),
-            path,
-        ],
-        resource_dir(&app),
-        Some(&server),
-    )
-    .await
+    Ok(vec![
+        "remote-browse".into(),
+        "--host".into(),
+        server.host.clone(),
+        "--path".into(),
+        path,
+    ])
 }
 
 #[tauri::command]

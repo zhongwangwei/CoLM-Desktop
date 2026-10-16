@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { newServer } from '../features/resources/resource';
+import type { Server } from '../lib/types';
 
 type Node = {
   type: string;
@@ -13,7 +15,7 @@ type Node = {
   };
   children: unknown[];
 };
-function harness(directory = false) {
+function harness(directory = false, server?: Server) {
   const source = readFileSync(new URL('./RemotePathBrowser.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -74,6 +76,7 @@ function harness(directory = false) {
   let tree: Node;
   const props = {
     host: 'server',
+    server,
     directory,
     en: true,
     onSelect: (path: string) => selected.push(path),
@@ -134,6 +137,13 @@ function harness(directory = false) {
     unmount: () => effects.forEach((effect) => effect.cleanup?.()),
   };
 }
+
+test('folder browsing carries an unsaved connection without requiring its work directory', () => {
+  const server = { ...newServer(), host: 'server', username: 'researcher' };
+  const view = harness(true, server);
+  assert.deepEqual(view.requests[0].args, { host: 'server', path: null, server });
+  assert.equal(server.root, '');
+});
 const listing = {
   path: '/data',
   parent: '/',

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Button, Dialog, Field, Input, Notice } from './ui';
 import { invoke } from '../lib/ipc';
+import type { Server } from '../lib/types';
 
 type Listing = {
   path: string;
@@ -11,6 +12,7 @@ type Listing = {
 };
 type Props = {
   host: string;
+  server?: Server;
   initialPath?: string;
   directory: boolean;
   en: boolean;
@@ -19,10 +21,15 @@ type Props = {
 };
 
 export default function RemotePathBrowser(props: Props) {
-  return <Browser key={`${props.host}\n${props.initialPath ?? ''}`} {...props} />;
+  return (
+    <Browser
+      key={`${props.host}\n${props.initialPath ?? ''}\n${JSON.stringify(props.server ?? null)}`}
+      {...props}
+    />
+  );
 }
 
-function Browser({ host, initialPath, directory, en, onSelect, onClose }: Props) {
+function Browser({ host, server, initialPath, directory, en, onSelect, onClose }: Props) {
   const [address, setAddress] = useState(initialPath ?? '');
   const [request, setRequest] = useState({ path: initialPath || null });
   const [result, setResult] = useState<{ request: typeof request; listing: Listing } | null>(null);
@@ -33,7 +40,11 @@ function Browser({ host, initialPath, directory, en, onSelect, onClose }: Props)
     let alive = true;
     setLoading(true);
     setError('');
-    void invoke<Listing>('remote_browse', { host, path: request.path }).then(
+    void invoke<Listing>('remote_browse', {
+      host,
+      path: request.path,
+      ...(server ? { server } : {}),
+    }).then(
       (value) => {
         if (!alive) return;
         setResult({ request, listing: value });
@@ -49,7 +60,7 @@ function Browser({ host, initialPath, directory, en, onSelect, onClose }: Props)
     return () => {
       alive = false;
     };
-  }, [host, request]);
+  }, [host, server, request]);
   const browse = (path: string | null) => {
     setError('');
     setLoading(true);
