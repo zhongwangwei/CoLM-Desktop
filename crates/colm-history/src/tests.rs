@@ -793,8 +793,10 @@ fn concurrent_first_open_preserves_every_audit_event() {
                 .map(|_| {
                     scope.spawn(|| {
                         barrier.wait();
-                        let history = History::open(&path)?;
-                        history.append(&Event::start("parallel-audit"))?;
+                        let history = History::open(&path).context("concurrent schema setup")?;
+                        history
+                            .append(&Event::start("parallel-audit"))
+                            .context("concurrent audit append")?;
                         Ok::<_, anyhow::Error>(())
                     })
                 })
@@ -816,4 +818,34 @@ fn concurrent_first_open_preserves_every_audit_event() {
             12
         );
     }
+}
+
+#[test]
+fn failed_schema_initialization_does_not_publish_partial_tables() {
+    let temp = Temp::new();
+    let path = temp.0.join("schema-conflict.sqlite3");
+    let connection = Connection::open(&path).unwrap();
+    connection
+        .execute_batch("CREATE VIEW history_operation AS SELECT 1;")
+        .unwrap();
+    let error = History::open(&path)
+        .err()
+        .expect("conflicting schema must fail");
+    assert!(error
+        .to_string()
+        .contains("initialize operation ledger schema"));
+    let table_count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM sqlite_schema WHERE name='history_events'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table_count, 0, "failed setup must roll back its new table");
+    connection
+        .execute_batch("DROP VIEW history_operation;")
+        .unwrap();
+    let history = History::open(&path).unwrap();
+    history.append(&Event::start("after-repair")).unwrap();
+    assert_eq!(history.query(&Query::default()).unwrap().total, 1);
 }
