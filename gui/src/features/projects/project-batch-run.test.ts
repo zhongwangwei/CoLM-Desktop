@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
+import { restoreRunView } from '../runs/run-model';
 
 function screen(
   handoff?: {
@@ -28,7 +29,13 @@ function screen(
     ],
     running: {} as Record<
       string,
-      { running: boolean; status?: string; error?: string; logs?: string[] }
+      {
+        running: boolean;
+        status?: string;
+        error?: string;
+        logs?: string[];
+        progress?: Record<string, unknown>;
+      }
     >,
     versionRef: { id: 'official', revision: 2 },
     version: { name: 'Official' },
@@ -44,19 +51,23 @@ function screen(
   const panels: Record<string, unknown>[] = [];
   const returns: string[] = [];
   const text: string[] = [];
+  const elements: { type: unknown; props: Record<string, unknown>; children: unknown[] }[] = [];
   const RunPanel = () => {};
   const context = {
     React: {
       createElement: (type: unknown, props: Record<string, unknown>, ...children: unknown[]) => {
         text.push(...children.filter((child): child is string => typeof child === 'string'));
         if (type === RunPanel) panels.push(props);
-        return null;
+        const element = { type, props, children };
+        elements.push(element);
+        return element;
       },
     },
     Button: () => {},
     Advanced: () => {},
     Notice: () => {},
     RunPanel,
+    restoreRunView,
     useApp: () => ({ state }),
     usePageContract: (value: typeof contract) => {
       contract = value;
@@ -96,6 +107,7 @@ function screen(
     cursor = 0;
     panels.length = 0;
     text.length = 0;
+    elements.length = 0;
     Page({
       onBack: () => {
         returns.push('back');
@@ -123,6 +135,7 @@ function screen(
     panels,
     returns,
     text,
+    elements,
     render,
     select,
     selectAll,
@@ -352,4 +365,122 @@ test('batch waits for every selected profile and rejects different hosts or engi
     assert.equal(page.panels.length, 0);
     assert.ok(page.text.includes('Select cases with the same run location and engine.'));
   }
+});
+
+test('batch monitor shows each active station progress before waiting and completed stations', () => {
+  const page = screen();
+  page.state.cases = ['Done', 'First', 'Second', 'Waiting', 'Preparing', 'Unknown'].map((name) => ({
+    dir: `/${name}`,
+    name,
+  }));
+  page.state.running = {
+    '/Done': { running: false, status: 'succeeded', logs: ['Done log'] },
+    '/First': {
+      running: true,
+      status: 'running',
+      logs: ['First log'],
+      progress: { stage: 'colm', step: 12, total_steps: 50 },
+    },
+    '/Second': {
+      running: true,
+      status: 'running',
+      logs: ['Second log'],
+      progress: { stage: 'mksrfdata', step: 3, total_steps: 10 },
+    },
+    '/Waiting': { running: true, status: 'queued', logs: [] },
+    '/Preparing': { running: true, status: 'preparing', logs: [] },
+    '/Unknown': { running: true, status: 'unknown', error: 'Connection lost', logs: [] },
+  };
+  page.render();
+  assert.ok(
+    page.text.includes(
+      'Running 2 · Waiting 2 · Completed 1 · Failed 0 · Stopped 0 · Unconfirmed 1',
+    ),
+  );
+  assert.deepEqual(
+    page.elements.filter((el) => el.type === 'article').map((el) => el.props['aria-label']),
+    ['First', 'Second', 'Unknown', 'Waiting', 'Preparing', 'Done'],
+  );
+  assert.deepEqual(
+    page.elements.filter((el) => el.type === 'progress').map((el) => el.props),
+    [
+      { 'aria-label': 'First', value: 12, max: 50 },
+      { 'aria-label': 'Second', value: 3, max: 10 },
+    ],
+  );
+  assert.ok(page.text.includes(' · Simulation'));
+  assert.ok(page.text.includes(' · Surface data'));
+  for (const message of ['First log', 'Second log', 'Done log', 'Connection lost'])
+    assert.ok(page.text.includes(message));
+  const groups = page.elements.filter(
+    (el) => el.type === 'details' && el.children.some((child) => Array.isArray(child)),
+  );
+  assert.equal(groups.length, 2, 'waiting and finished stations are collapsed separately');
+  assert.ok(groups.every((group) => !group.props?.open));
+});
+
+test('remote scheduler queue is not counted as a running station', () => {
+  const page = screen();
+  page.state.running = {
+    '/a': {
+      running: true,
+      status: 'submitted',
+      logs: [],
+      progress: { remote: { status: { state: 'queued' } } },
+    },
+    '/b': {
+      running: true,
+      status: 'submitted',
+      logs: [],
+      progress: { remote: { status: { state: 'running' } } },
+    },
+  };
+  page.render();
+  assert.ok(
+    page.text.includes(
+      'Running 1 · Waiting 1 · Completed 0 · Failed 0 · Stopped 0 · Unconfirmed 0',
+    ),
+  );
+});
+
+test('remote batch cards show actual remote-status stage, numerical progress and logs', () => {
+  const page = screen();
+  page.state.running = {
+    '/a': {
+      running: true,
+      status: 'submitted',
+      logs: [],
+      progress: {
+        remote: {
+          status: { state: 'running', log_tail: 'A server model log' },
+          stages: [
+            ['mksrfdata', 'done'],
+            ['colm', 'begin'],
+          ],
+          progress: { step: 14, date: '2002-01-01', total_steps: 50 },
+        },
+      },
+    },
+    '/b': {
+      running: true,
+      status: 'submitted',
+      logs: [],
+      progress: {
+        remote: {
+          status: { state: 'running', log_tail: 'B server initialization log' },
+          stages: [['mkinidata', 'begin']],
+          progress: null,
+        },
+      },
+    },
+  };
+  page.render();
+  assert.ok(page.text.includes(' · Simulation'));
+  assert.ok(page.text.includes(' · Initial conditions'));
+  assert.ok(page.text.includes('A server model log'));
+  assert.ok(page.text.includes('B server initialization log'));
+  assert.deepEqual(
+    page.elements.filter((el) => el.type === 'progress').map((el) => el.props),
+    [{ 'aria-label': 'A', value: 14, max: 50 }],
+  );
 });

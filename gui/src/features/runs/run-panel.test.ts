@@ -401,3 +401,26 @@ test('explicit reconciliation adopts a confirmed job for an unknown submission w
   assert.equal(p.state.running['/good'].running, false);
   assert.equal(p.state.running['/good'].status, 'succeeded');
 });
+
+test('batch members wait in queue until their own worker starts', async () => {
+  const p = panel({
+    submit: async () => {
+      assert.equal(p.state.running['/good'].status, 'queued');
+      assert.equal(p.state.running['/bad'].status, 'queued');
+      assert.equal(
+        p.state.running['/good'].running,
+        true,
+        'queued work still locks duplicate submission',
+      );
+      const runId = p.state.running['/good'].run_id;
+      p.state.running['/good'] = applyRunEvent(p.state.running['/good'], 'run://started', {
+        run_id: runId,
+        source_case: '/good',
+        location: 'local',
+      })!;
+      assert.equal(p.state.running['/good'].status, 'running');
+      assert.equal(p.state.running['/bad'].status, 'queued');
+    },
+  });
+  await p.run();
+});

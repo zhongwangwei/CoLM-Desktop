@@ -18,6 +18,9 @@ function render(
   onBack?: () => void,
 ) {
   const effects: (() => void)[] = [];
+  const contracts: {
+    details?: { runs?: { run: { casePath: string } | null }[]; run?: unknown };
+  }[] = [];
   const state = {
     selectedCase: {
       dir: '/case',
@@ -103,7 +106,9 @@ function render(
         : name === '../../lib/ipc'
           ? native
           : name === '../../lib/guide'
-            ? { usePageContract: () => {} }
+            ? {
+                usePageContract: (contract: (typeof contracts)[number]) => contracts.push(contract),
+              }
             : name === '../../components/ui'
               ? Object.fromEntries(
                   ['Button', 'Card', 'Field', 'Input', 'Select', 'Advanced', 'Notice'].map((n) => [
@@ -131,6 +136,7 @@ function render(
   visit(tree);
   return {
     elements,
+    contracts,
     back: elements.find((el) => el.type === 'Button' && el.children.includes('上一步')),
     next: elements.find(
       (el) =>
@@ -486,4 +492,36 @@ test('an unknown remote batch job without an identity still offers explicit reco
   assert.ok(page.remoteStatus);
   assert.equal(page.remoteStatus.props.disabled, false);
   assert.equal(page.remoteFetch?.props.disabled, true);
+});
+
+test('batch monitor belongs to the all-stations page while single-case progress remains visible', () => {
+  const running: RunState = {
+    case: '/case',
+    running: true,
+    status: 'running',
+    logs: ['step'],
+    stages: {},
+    progress: { stage: 'colm', step: 1, total_steps: 10 },
+  };
+  const single = render(running);
+  assert.equal(
+    single.elements.filter(
+      (el) => el.type === 'section' && el.props.className === 'simulation-monitor',
+    ).length,
+    1,
+  );
+  const batch = render(running, [], undefined, { '/other': { ...running, case: '/other' } }, [
+    '/case',
+    '/other',
+  ]);
+  assert.deepEqual(
+    batch.contracts[0].details?.runs?.map(({ run }) => run?.casePath),
+    ['/case', '/other'],
+  );
+  assert.equal(
+    batch.elements.filter(
+      (el) => el.type === 'section' && el.props.className === 'simulation-monitor',
+    ).length,
+    0,
+  );
 });

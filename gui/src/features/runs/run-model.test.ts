@@ -230,3 +230,32 @@ test('identityless remote recovery requires the exact started operation and host
   assert.equal(matchesRemoteRun(current, { record: { ...record, host: 'other' } }), false);
   assert.equal(matchesRemoteRun({ ...current, location: 'local' }, { record }), false);
 });
+
+test('remote view reads parsed status progress, last valid stage and log tail without guessing a stage', () => {
+  const remoteRun: RunState = {
+    ...run,
+    location: 'remote',
+    progress: {
+      remote: {
+        status: { state: 'running', log_tail: 'server step 12\nserver step 13' },
+        stages: [['mksrfdata', 'done'], ['mkinidata', 'done'], ['colm', 'begin'], ['malformed']],
+        progress: { step: 13, date: '2002-01-01', total_steps: 100 },
+      },
+    },
+  };
+  assert.deepEqual(restoreRunView(remoteRun, '/case/a'), {
+    runId: 'new',
+    casePath: '/case/a',
+    status: 'running',
+    lines: ['server step 12', 'server step 13'],
+    stage: 'colm',
+    step: 13,
+    total: 100,
+  });
+  remoteRun.progress = { remote: { status: { state: 'queued' }, stages: [], progress: null } };
+  const queued = restoreRunView(remoteRun, '/case/a');
+  assert.equal(queued?.stage, undefined);
+  assert.equal(queued?.step, undefined);
+  assert.equal(queued?.total, undefined);
+  assert.deepEqual(queued?.lines, ['step 1'], 'local submission diagnostics remain available');
+});

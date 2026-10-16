@@ -442,7 +442,7 @@ export default function RunPanel({
           if (alive.current) setRemote(result);
           return result;
         }
-        patchRun(prepared, runId, { status: 'starting' });
+        patchRun(prepared, runId, { status: batchCases ? 'queued' : 'starting' });
         submitted = true;
         const args = {
           runId,
@@ -827,7 +827,15 @@ export default function RunPanel({
       kernelDir: effectiveProfile ? kernel || null : null,
       preprocessors,
       status: pending ? 'busy' : (persisted?.status ?? 'ready'),
-      details: { run: view, remote, error: persisted?.error },
+      details: batchCases
+        ? {
+            runs: batchCases.map((dir) => ({
+              run: restoreRunView(state.running[dir], dir),
+              remote: state.running[dir]?.progress?.remote,
+              error: state.running[dir]?.error,
+            })),
+          }
+        : { run: view, remote, error: persisted?.error },
       fields,
       actions: [
         ...(onBack
@@ -1095,16 +1103,9 @@ export default function RunPanel({
           )}
         </div>
       </footer>
-      {view && (
+      {view && !batchCases && (
         <section className="simulation-monitor" aria-live="polite">
-          <h3>
-            {batchCases
-              ? t(
-                  `运行进度：${state.cases.find((entry) => entry.dir === casePath)?.name ?? casePath}`,
-                  'First case progress',
-                )
-              : t('运行进度', 'Run progress')}
-          </h3>
+          <h3>{t('运行进度', 'Run progress')}</h3>
           <p role="status">
             {statusLabels[view.status] ?? view.status}
             {view.stage ? ` · ${stageLabels[view.stage] ?? view.stage}` : ''}
