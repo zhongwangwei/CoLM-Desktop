@@ -7,6 +7,10 @@ use serde::Serialize;
 
 use crate::ssh::{quote, Ssh};
 
+// Non-interactive SSH does not reliably load the user's toolchain PATH.
+pub(crate) const BUILD_PATH_PRELUDE: &str =
+    "export PATH=\"$PATH:$HOME/.local/bin:$HOME/.cargo/bin\"\n";
+
 /// 探测结果。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct Probe {
@@ -44,7 +48,7 @@ pub struct Probe {
 pub fn script(root: &str) -> String {
     format!(
         r#"set +e
-{prelude}R={root}
+{prelude}{build_path}R={root}
 echo "hostname=$(hostname)"
 echo "os=$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME" || uname -s)"
 echo "arch=$(uname -m)"
@@ -92,6 +96,7 @@ fi
 "#,
         root = quote(root),
         prelude = crate::sched::PATH_PRELUDE,
+        build_path = BUILD_PATH_PRELUDE,
     )
 }
 

@@ -397,6 +397,7 @@ fn remote_kernel(name: &str, sha: &str, modified: u64) -> colm_remote::kernel::R
 
 fn version(touches_kernel: bool) -> RemoteVersion {
     RemoteVersion {
+        kind: colm_model::CodeKind::Workspace,
         name: "snow".into(),
         head: "0123456789abcdef".into(),
         src: PathBuf::from("src"),
@@ -1176,4 +1177,147 @@ fn server_configuration_maps_windows_cache_paths_before_server_path_validation()
         server_place("/data/forcing.nc", case, remote, &aliases).unwrap(),
         Placed::Remote("/data/forcing.nc".into())
     );
+}
+
+#[test]
+fn frozen_official_source_is_not_a_workspace_version() {
+    let opts = Opts::parse(&["--frozen-model-source".into(), "frozen/source".into()]).unwrap();
+    let official = remote_version(&opts).unwrap().unwrap();
+    assert_eq!(official.kind, colm_model::CodeKind::Official);
+    assert_eq!(official.kernel_identity(), "bundled");
+    assert_eq!(official.value["kind"], "official");
+    assert!(
+        matches!(source_for(Some(&official)).unwrap(), Source::Checkout(path) if path == Path::new("frozen/source"))
+    );
+    let conflicting = Opts::parse(&[
+        "--frozen-model-source".into(),
+        "frozen/source".into(),
+        "--model-version".into(),
+        "snow".into(),
+    ])
+    .unwrap();
+    assert!(remote_version(&conflicting).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn frozen_official_prebuilt_requires_matching_source_and_workspace_still_requires_build() {
+    let root =
+        std::env::temp_dir().join(format!("colm-cli-frozen-prebuilt-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("ENGINE"), "source=abc123\narch=x86_64\n").unwrap();
+    let tarball = root.join("engine.tar.gz");
+    assert!(Command::new("tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&root)
+        .arg("ENGINE")
+        .status()
+        .unwrap()
+        .success());
+    let opts = Opts::parse(&[
+        "--frozen-model-source".into(),
+        root.display().to_string(),
+        "--prebuilt".into(),
+        tarball.display().to_string(),
+    ])
+    .unwrap();
+    let official = remote_version(&opts).unwrap().unwrap();
+    let mut probe = colm_remote::probe::Probe {
+        arch: "x86_64".into(),
+        ..Default::default()
+    };
+    let snapshot = |id: &str| {
+        Ok(engine::Snapshot {
+            id: id.into(),
+            source: Source::Checkout(root.clone()),
+            files: Vec::new(),
+        })
+    };
+    for mode in ["auto", "prebuilt"] {
+        assert!(matches!(
+            engine_for_probe(
+                &opts,
+                mode,
+                "fixture",
+                &probe,
+                Some(&official),
+                snapshot("abc123")
+            )
+            .unwrap(),
+            Engine::Prebuilt(_)
+        ));
+        let mismatch = engine_for_probe(
+            &opts,
+            mode,
+            "fixture",
+            &probe,
+            Some(&official),
+            snapshot("different"),
+        )
+        .err()
+        .unwrap();
+        assert!(mismatch.to_string().contains("does not match"));
+        let modified = engine_for_probe(
+            &opts,
+            mode,
+            "fixture",
+            &probe,
+            Some(&version(false)),
+            snapshot("abc123"),
+        )
+        .err()
+        .unwrap();
+        assert!(modified.to_string().contains("own source"));
+    }
+    probe.arch = "aarch64".into();
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&official),
+        snapshot("abc123")
+    )
+    .is_err());
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&official),
+        Err(anyhow::anyhow!("source unavailable"))
+    )
+    .err()
+    .unwrap()
+    .to_string()
+    .contains("source unavailable"));
+    probe.cargo = Some("cargo".into());
+    probe.cmake = true;
+    probe.cc = true;
+    for selected in [&official, &version(false)] {
+        assert!(matches!(
+            engine_for_probe(
+                &opts,
+                "auto",
+                "fixture",
+                &probe,
+                Some(selected),
+                snapshot("abc123")
+            )
+            .unwrap(),
+            Engine::Source(_)
+        ));
+    }
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&version(false)),
+        snapshot("abc123")
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }

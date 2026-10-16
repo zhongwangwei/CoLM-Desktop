@@ -620,7 +620,7 @@ pub fn ensure_script(root: &str, id: &str, jobs: u32) -> String {
         .collect();
     let copies: Vec<String> = BINARIES.iter().map(|(_, b)| b.to_string()).collect();
     format!(
-        r#"E={engine}
+        r#"{build_path}E={engine}
 if [ ! -x "$E/bin/colm-rs" ]; then
   echo "building the Rust engine" >> phase
   exec 9>"$E/.build.lock"
@@ -634,6 +634,7 @@ if [ ! -x "$E/bin/colm-rs" ]; then
   exec 9>&-
 fi
 "#,
+        build_path = crate::probe::BUILD_PATH_PRELUDE,
         packages = packages.join(" "),
         copies = copies.join(" "),
     )
@@ -690,6 +691,41 @@ impl Prebuilt {
             tarball: tarball.to_path_buf(),
         })
     }
+
+    /// Read package provenance without extracting or executing any archive content.
+    pub fn matches_source(&self, arch: &str, snapshot_id: &str) -> Result<bool> {
+        let file = std::fs::File::open(&self.tarball)?;
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let mut metadata = None;
+        for entry in archive.entries()? {
+            let mut entry = entry?;
+            let path = entry.path()?;
+            if path != Path::new("ENGINE") && path != Path::new("./ENGINE") {
+                continue;
+            }
+            ensure!(metadata.is_none(), "duplicate ENGINE metadata");
+            ensure!(
+                entry.header().entry_type().is_file() && entry.size() <= 4096,
+                "ENGINE metadata must be a small regular file"
+            );
+            let mut text = String::new();
+            entry.read_to_string(&mut text)?;
+            metadata = Some(text);
+        }
+        let Some(metadata) = metadata else {
+            return Ok(false);
+        };
+        let mut source = None;
+        let mut target = None;
+        for line in metadata.lines() {
+            if let Some(value) = line.strip_prefix("source=") {
+                ensure!(source.replace(value).is_none(), "duplicate ENGINE source");
+            } else if let Some(value) = line.strip_prefix("arch=") {
+                ensure!(target.replace(value).is_none(), "duplicate ENGINE arch");
+            }
+        }
+        Ok(!snapshot_id.is_empty() && source == Some(snapshot_id) && target == Some(arch))
+    }
 }
 
 /// 安装包里放引擎材料（源码包、预编包）的目录，按优先级：GUI 告诉的资源目录（环境变量
@@ -715,8 +751,10 @@ pub fn bundled_source(dirs: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// 找一个适合 `arch` 的预编包。顺序：
-/// 1. 应用安装包里随附的（与随附的源码同一版本，不核对快照）；
+/// 1. 应用安装包里随附的；
 /// 2. 缓存里与当前源码快照一致的那份（开发时：源码一改，旧包就不再匹配）。
+///
+/// 指定快照时，两种候选都必须包含匹配源码及架构的 ENGINE 元数据。
 pub fn find_prebuilt(arch: &str, snapshot_id: Option<&str>, dirs: &[PathBuf]) -> Option<Prebuilt> {
     let mut candidates: Vec<PathBuf> = dirs.iter().map(|d| d.join(prebuilt_name(arch))).collect();
     if let Some(id) = snapshot_id {
@@ -724,8 +762,26 @@ pub fn find_prebuilt(arch: &str, snapshot_id: Option<&str>, dirs: &[PathBuf]) ->
     }
     candidates
         .into_iter()
-        .find(|p| p.is_file())
-        .and_then(|p| Prebuilt::open(&p).ok())
+        .filter(|p| p.is_file())
+        .filter_map(|p| match Prebuilt::open(&p) {
+            Ok(prebuilt) => Some(prebuilt),
+            Err(error) => {
+                eprintln!("cannot read prebuilt engine {}: {error:#}", p.display());
+                None
+            }
+        })
+        .find(|prebuilt| {
+            snapshot_id.is_none_or(|id| match prebuilt.matches_source(arch, id) {
+                Ok(matches) => matches,
+                Err(error) => {
+                    eprintln!(
+                        "cannot verify prebuilt engine {}: {error:#}",
+                        prebuilt.tarball.display()
+                    );
+                    false
+                }
+            })
+        })
 }
 
 /// 把源码快照打成 `colm-src.tar.gz`（根目录就是仓库根），随安装包附带：没有仓库的机器也能把源码传到服务器上编。

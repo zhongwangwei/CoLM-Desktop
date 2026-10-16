@@ -196,6 +196,7 @@ fn the_checkout_is_found_and_the_build_script_is_locked_and_complete() {
     assert!(!snapshot.files.iter().any(|f| f.starts_with("gui/")));
 
     let script = ensure_script("/data/colm", "abc", 32);
+    assert!(script.starts_with(crate::probe::BUILD_PATH_PRELUDE));
     assert!(script.contains("flock 9"));
     assert!(script.contains("CARGO_TARGET_DIR='/data/colm/target'"));
     assert!(script.contains("--release --locked -j 32"));
@@ -221,6 +222,84 @@ fn the_snapshot_carries_the_linux_build_script() {
         .any(|f| f == "scripts/build-engine-linux.sh"));
 }
 
+fn write_prebuilt_fixture(path: &Path, entries: &[(&str, &str)]) {
+    let file = std::fs::File::create(path).unwrap();
+    let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(gzip);
+    for (name, text) in entries {
+        let mut header = tar::Header::new_gnu();
+        header.set_size(text.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        archive
+            .append_data(&mut header, name, text.as_bytes())
+            .unwrap();
+    }
+    archive.into_inner().unwrap().finish().unwrap();
+}
+
+#[test]
+fn prebuilt_source_metadata_is_required_unambiguous_and_arch_specific() {
+    let dir = std::env::temp_dir().join(format!("colm-pre-metadata-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("engine.tar.gz");
+    for (entries, matches) in [
+        (
+            vec![("./ENGINE", "arch=x86_64\nsource=abc\nglibc=2.17\n")],
+            true,
+        ),
+        (vec![("ENGINE", "arch=x86_64\nsource=other\n")], false),
+        (vec![("ENGINE", "arch=aarch64\nsource=abc\n")], false),
+        (vec![("bin/ENGINE", "arch=x86_64\nsource=abc\n")], false),
+        (vec![("ENGINE", "arch=x86_64\n")], false),
+        (vec![], false),
+    ] {
+        write_prebuilt_fixture(&path, &entries);
+        assert_eq!(
+            Prebuilt::open(&path)
+                .unwrap()
+                .matches_source("x86_64", "abc")
+                .unwrap(),
+            matches
+        );
+    }
+    for entries in [
+        vec![("ENGINE", "arch=x86_64\nsource=abc\nsource=abc\n")],
+        vec![("ENGINE", "arch=x86_64\narch=x86_64\nsource=abc\n")],
+        vec![
+            ("ENGINE", "arch=x86_64\nsource=abc\n"),
+            ("./ENGINE", "arch=x86_64\nsource=abc\n"),
+        ],
+    ] {
+        write_prebuilt_fixture(&path, &entries);
+        assert!(Prebuilt::open(&path)
+            .unwrap()
+            .matches_source("x86_64", "abc")
+            .is_err());
+    }
+    write_prebuilt_fixture(&path, &[("ENGINE", &"a".repeat(4097))]);
+    assert!(Prebuilt::open(&path)
+        .unwrap()
+        .matches_source("x86_64", "abc")
+        .is_err());
+    let file = std::fs::File::create(&path).unwrap();
+    let gzip = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut archive = tar::Builder::new(gzip);
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Symlink);
+    header.set_size(0);
+    header.set_mode(0o777);
+    archive
+        .append_link(&mut header, "ENGINE", "outside-metadata")
+        .unwrap();
+    archive.into_inner().unwrap().finish().unwrap();
+    assert!(Prebuilt::open(&path)
+        .unwrap()
+        .matches_source("x86_64", "abc")
+        .is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
 #[test]
 fn prebuilt_packages_are_found_by_arch_and_identified_by_content() {
     let dir = std::env::temp_dir().join(format!("colm-remote-pre-{}", std::process::id()));
@@ -238,19 +317,39 @@ fn prebuilt_packages_are_found_by_arch_and_identified_by_content() {
     assert!(find_prebuilt("x86_64", Some("abc"), &dirs).is_none());
 
     // 缓存里的包带快照标识：标识对得上才用，源码改了就不匹配。
-    std::fs::write(cache.join(cached_name("x86_64", "abc")), b"engine one").unwrap();
+    write_prebuilt_fixture(
+        &cache.join(cached_name("x86_64", "abc")),
+        &[("ENGINE", "arch=x86_64\nsource=abc\n")],
+    );
     let cached = find_prebuilt("x86_64", Some("abc"), &dirs).unwrap();
     assert!(cached.id.starts_with("pre-") && cached.id.len() == 20);
     assert!(find_prebuilt("x86_64", Some("def"), &dirs).is_none());
     assert!(find_prebuilt("aarch64", Some("abc"), &dirs).is_none());
     assert!(find_prebuilt("x86_64", None, &dirs).is_none());
 
-    // 应用随附的包不核对快照，并且优先于缓存。
-    std::fs::write(
-        exe.join("engine").join(prebuilt_name("x86_64")),
-        b"engine shipped",
-    )
-    .unwrap();
+    // Invalid shipped candidates must not hide a valid cache entry.
+    let shipped_path = exe.join("engine").join(prebuilt_name("x86_64"));
+    for metadata in [
+        "arch=x86_64\nsource=old\n",
+        "arch=aarch64\nsource=abc\n",
+        "",
+    ] {
+        write_prebuilt_fixture(&shipped_path, &[("ENGINE", metadata)]);
+        assert_eq!(
+            find_prebuilt("x86_64", Some("abc"), &dirs).unwrap().id,
+            cached.id
+        );
+    }
+    std::fs::write(&shipped_path, b"damaged archive").unwrap();
+    assert_eq!(
+        find_prebuilt("x86_64", Some("abc"), &dirs).unwrap().id,
+        cached.id
+    );
+    // Matching shipped packages take priority over the cache.
+    write_prebuilt_fixture(
+        &shipped_path,
+        &[("ENGINE", "arch=x86_64\nsource=abc\nbuilt=now\n")],
+    );
     let shipped = find_prebuilt("x86_64", Some("abc"), &dirs).unwrap();
     assert_ne!(shipped.id, cached.id);
     assert_eq!(
@@ -279,7 +378,7 @@ fn prebuilt_packages_are_found_by_arch_and_identified_by_content() {
 
     // 标识只看内容，不看文件名与时间。
     let copy = dir.join("copy.tar.gz");
-    std::fs::write(&copy, b"engine shipped").unwrap();
+    std::fs::copy(&shipped_path, &copy).unwrap();
     assert_eq!(Prebuilt::open(&copy).unwrap().id, shipped.id);
     std::env::remove_var("COLM_ENGINE_CACHE");
     let _ = std::fs::remove_dir_all(&dir);
