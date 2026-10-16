@@ -204,6 +204,7 @@ test('resource and run reconciliation callbacks return the recorded failure to t
     remotePermissions: remoteRunPermissions(remote),
     latest: { current: app.running },
     casePath: '/case',
+    currentCase: { current: '/case' },
     remote,
     invokeJson: async () => evidence,
     alive: { current: true },
@@ -525,6 +526,8 @@ test('overview contract exposes optional evaluation conditions only while advanc
   const noop = () => {};
   const context = {
     tr: (zh: string) => zh,
+    state: { cases: [] },
+    caseDir: '/case',
     en: false,
     source: '/run',
     runs: [],
@@ -630,6 +633,8 @@ test('automatic result preview requires the current catalog and rejects late rep
   });
   const context = {
     tab: 'overview',
+    stationTarget: { current: '/case' },
+    caseDir: '/case',
     source: '/current',
     variable: 'f_lfevpa',
     catalogKey: '/current',

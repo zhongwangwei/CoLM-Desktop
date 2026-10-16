@@ -119,15 +119,35 @@ export function matchesRemoteRun(run: RunState | undefined, result: unknown): bo
 
 export function restoreRunView(record: RunState | undefined, casePath: string): RunView | null {
   if (!record) return null;
+  const remote = record.progress?.remote as
+    | {
+        progress?: Record<string, unknown> | null;
+        stages?: unknown;
+        status?: { log_tail?: unknown };
+      }
+    | undefined;
+  const progress = remote ? remote.progress : record.progress;
+  const remoteStage = Array.isArray(remote?.stages)
+    ? remote.stages
+        .filter(
+          (stage): stage is [string, string] =>
+            Array.isArray(stage) &&
+            stage.length === 2 &&
+            typeof stage[0] === 'string' &&
+            !!stage[0] &&
+            typeof stage[1] === 'string',
+        )
+        .at(-1)?.[0]
+    : undefined;
+  const logTail = remote?.status?.log_tail;
   return {
     runId: record.run_id ?? record.operation_id ?? '',
     casePath,
     status: record.status,
-    lines: record.logs,
-    stage: typeof record.progress?.stage === 'string' ? record.progress.stage : undefined,
-    step: typeof record.progress?.step === 'number' ? record.progress.step : undefined,
-    total:
-      typeof record.progress?.total_steps === 'number' ? record.progress.total_steps : undefined,
+    lines: typeof logTail === 'string' && logTail ? logTail.split('\n') : record.logs,
+    stage: remote ? remoteStage : typeof progress?.stage === 'string' ? progress.stage : undefined,
+    step: typeof progress?.step === 'number' ? progress.step : undefined,
+    total: typeof progress?.total_steps === 'number' ? progress.total_steps : undefined,
   };
 }
 export function settleRuns(

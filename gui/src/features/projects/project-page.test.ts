@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
+import type { AppState, CaseEntry } from '../../lib/types';
 
 function choose(context: Record<string, unknown>) {
   const path = new URL('./ProjectPage.tsx', import.meta.url),
@@ -238,7 +239,10 @@ function home() {
     root: '/project',
     busy: false,
     selectedCase: null,
-    cases: [],
+    cases: [] as CaseEntry[],
+    projectCasesOpen: false,
+    projectView: undefined as AppState['projectView'],
+    projectRunSettings: undefined as AppState['projectRunSettings'],
     versions: [model],
     version: model,
     versionRef: model.version,
@@ -255,13 +259,23 @@ function home() {
     contract: { actions: { id: string; enabled?: boolean; run: () => unknown }[]; status: string },
     fail = false;
   const calls: unknown[] = [],
-    routes: string[] = [];
+    routes: string[] = [],
+    effects: Array<() => unknown> = [],
+    nodes: unknown[] = [],
+    batchProps: Record<string, unknown>[] = [];
   const context = {
-    React: { createElement: () => null },
+    React: {
+      createElement: (type: unknown, props: Record<string, unknown>) => {
+        nodes.push(type);
+        if (type === 'ProjectBatchRun') batchProps.push(props);
+        return null;
+      },
+    },
     Button: () => {},
     Dialog: () => {},
     Notice: () => {},
     NavIcon: () => {},
+    ProjectBatchRun: 'ProjectBatchRun',
     useApp: () => ({
       state,
       update: (patch: Partial<typeof state>) => Object.assign(state, patch),
@@ -274,7 +288,7 @@ function home() {
       },
     }),
     hasBackend: () => false,
-    useEffect: () => {},
+    useEffect: (effect: () => unknown) => effects.push(effect),
     useRef: (initial: unknown) => {
       const key = cursor++;
       if (!(key in slots)) slots[key] = { current: initial };
@@ -309,7 +323,9 @@ function home() {
   );
   function render() {
     cursor = 0;
+    nodes.length = 0;
     Page();
+    effects.splice(0).forEach((effect) => effect());
     return contract;
   }
   async function click(id: string) {
@@ -328,6 +344,8 @@ function home() {
     model,
     calls,
     routes,
+    nodes,
+    batchProps,
     render,
     click,
     remount,
@@ -336,6 +354,78 @@ function home() {
     },
   };
 }
+test('a newly created project opens its case list and batch entry once without starting runs', async () => {
+  const page = home();
+  page.state.projectCasesOpen = true;
+  page.state.root = '/project/multi-project';
+  page.state.cases = ['one', 'two'].map((name) => ({
+    name,
+    dir: `/project/multi-project/${name}`,
+    has_history: false,
+    spatial: false,
+  }));
+  let contract = page.render();
+  assert.equal(page.state.projectCasesOpen, false);
+  for (const entry of page.state.cases)
+    assert.ok(contract.actions.some((action) => action.id === `project-case:${entry.dir}`));
+  assert.equal(contract.actions.find((action) => action.id === 'project-batch-run')?.enabled, true);
+  await page.click('project-batch-run');
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.deepEqual(page.calls, []);
+  assert.deepEqual(page.routes, []);
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'), 'sidebar navigation restores the batch page');
+  (page.batchProps.at(-1)!.onBack as () => void)();
+  contract = page.remount();
+  assert.ok(contract.actions.some((action) => action.id === 'project-batch-run'));
+});
+test('a newly created batch opens resource review without repeating station selection', async () => {
+  const page = home();
+  page.state.root = '/project/multi-project';
+  page.state.projectCasesOpen = true;
+  page.state.cases = [
+    { dir: '/project/multi-project/one', name: 'one', spatial: false, has_history: false },
+  ];
+  page.state.projectRunSettings = {
+    root: page.state.root,
+    cases: ['/project/multi-project/one'],
+    host: '',
+    threads: '2',
+    ranks: '1',
+    workers: '3',
+    scheduler: 'auto',
+    cpus: '2',
+  };
+  page.render();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(page.batchProps.at(-1)?.fromCreation, true);
+  assert.deepEqual(page.calls, []);
+  assert.equal(page.state.projectCasesOpen, false);
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(
+    page.batchProps.at(-1)?.fromCreation,
+    true,
+    'creation selection survives navigation',
+  );
+  (page.batchProps.at(-1)!.onBack as () => void)();
+  page.render();
+  await page.click('project-batch-run');
+  assert.equal(
+    page.batchProps.at(-1)?.fromCreation,
+    false,
+    'manual entry allows optional station adjustments',
+  );
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(page.batchProps.at(-1)?.fromCreation, false);
+  page.state.root = '/other-project';
+  page.remount();
+  assert.ok(
+    !page.nodes.includes('ProjectBatchRun'),
+    'a different project never restores an old batch',
+  );
+});
 test('the loaded official model is usable at once; choosing another version is optional', async () => {
   const page = home(),
     tasks = [

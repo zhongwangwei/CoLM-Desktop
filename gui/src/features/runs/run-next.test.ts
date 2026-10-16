@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import ts from 'typescript';
-import type { RunState } from '../../lib/types';
+import type { AppState, RunState } from '../../lib/types';
 const require = createRequire(import.meta.url);
 type Element = { type: string; props: Record<string, unknown>; children: unknown[] };
 function render(
@@ -15,8 +15,12 @@ function render(
   savedHost?: string,
   saveError?: string,
   remoteDirectory?: string,
+  onBack?: () => void,
 ) {
   const effects: (() => void)[] = [];
+  const contracts: {
+    details?: { runs?: { run: { casePath: string } | null }[]; run?: unknown };
+  }[] = [];
   const state = {
     selectedCase: {
       dir: '/case',
@@ -24,6 +28,8 @@ function render(
       profile: { run_host: savedHost ?? null, remote_directory: remoteDirectory ?? null },
     },
     language: 'zh',
+    root: '/project',
+    projectRunSettings: undefined as AppState['projectRunSettings'],
     expert: false,
     running: { ...otherRuns, ...(record ? { '/case': record } : {}) } as Record<string, RunState>,
     kernels: [],
@@ -35,14 +41,15 @@ function render(
     calls: string[] = [],
     errors: string[] = [],
     hostChanges: unknown[] = [];
+  const invocations: { command: string; args: Record<string, unknown> }[] = [];
   let stateIndex = 0;
   const app = {
     state,
     navigate: (...args: unknown[]) => routes.push(args),
     openCase: async (...args: unknown[]) => routes.push(['openCase', ...args]),
     notify: (error: string) => errors.push(error),
-    update: (patch: (old: typeof state) => Partial<typeof state>) =>
-      Object.assign(state, patch(state)),
+    update: (patch: Partial<typeof state> | ((old: typeof state) => Partial<typeof state>)) =>
+      Object.assign(state, typeof patch === 'function' ? patch(state) : patch),
   };
   const react = {
     useEffect: (effect: () => void) => effects.push(effect),
@@ -71,7 +78,8 @@ function render(
       }
       return { servers: [] };
     },
-    invokeJson: async (command: string) => {
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      invocations.push({ command, args });
       calls.push(command);
       if (command === 'remote_job_record') return null;
       if (command === 'model_case_runs') return history;
@@ -100,7 +108,9 @@ function render(
         : name === '../../lib/ipc'
           ? native
           : name === '../../lib/guide'
-            ? { usePageContract: () => {} }
+            ? {
+                usePageContract: (contract: (typeof contracts)[number]) => contracts.push(contract),
+              }
             : name === '../../components/ui'
               ? Object.fromEntries(
                   ['Button', 'Card', 'Field', 'Input', 'Select', 'Advanced', 'Notice'].map((n) => [
@@ -112,7 +122,7 @@ function render(
                 ? { bilingual: (zh: string) => zh }
                 : require(name);
   new Function('require', 'exports', 'React', js)(dependencies, exports, react);
-  const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null });
+  const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null, onBack });
   const elements: Element[] = [];
   function visit(value: unknown) {
     if (Array.isArray(value)) {
@@ -127,10 +137,13 @@ function render(
   }
   visit(tree);
   return {
+    elements,
+    contracts,
+    back: elements.find((el) => el.type === 'Button' && el.children.includes('上一步')),
     next: elements.find(
       (el) =>
         el.type === 'Button' &&
-        (el.children.includes('下一步：查看结果') || el.children.includes('查看 /case 的结果')),
+        (el.children.includes('下一步：查看结果') || el.children.includes('查看站点结果')),
     ),
     stop: elements.find((el) => el.type === 'Button' && el.children.includes('停止运行')),
     remoteStatus: elements.find(
@@ -143,6 +156,7 @@ function render(
     hostChanges,
     routes,
     calls,
+    invocations,
     state,
     recover: async () => {
       effects[1]();
@@ -160,6 +174,68 @@ const success: RunState = {
   location: 'local',
   run_case: '/run-copy',
 };
+
+test('input validation is explained as a startup action rather than an incomplete checklist', () => {
+  const page = render();
+  const note = page.elements.find(
+    (el) =>
+      el.type === 'p' &&
+      el.children.some(
+        (text) => typeof text === 'string' && text.includes('点击“开始运行”时检查输入文件'),
+      ),
+  );
+  assert.equal(note?.props.className, 'muted');
+  assert.ok(!page.elements.some((el) => el.children.includes('启动时检查实际输入')));
+});
+
+test('batch Back preserves run resources and cannot leave while another local member is active', () => {
+  let returned = 0;
+  const page = render(
+    undefined,
+    [],
+    undefined,
+    {},
+    ['/case', '/other'],
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      returned++;
+    },
+  );
+  assert.ok(page.back);
+  assert.equal(page.back.props.disabled, false);
+  (page.back.props.onClick as () => void)();
+  assert.equal(returned, 1);
+  assert.deepEqual(page.state.projectRunSettings, {
+    root: '/project',
+    cases: ['/case', '/other'],
+    batch: true,
+    host: '',
+    ranks: '1',
+    threads: '1',
+    workers: '1',
+    scheduler: 'auto',
+    cpus: '',
+  });
+  const active = render(
+    { ...success, status: 'failed' },
+    [],
+    undefined,
+    { '/other': { ...success, case: '/other', running: true, status: 'running' } },
+    ['/case', '/other'],
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      returned++;
+    },
+  );
+  assert.equal(active.back?.props.disabled, true);
+  (active.back!.props.onClick as () => void)();
+  assert.equal(returned, 1);
+  assert.equal(active.state.projectRunSettings, undefined);
+});
 test('completed simulation exposes next button and opens its case results', async () => {
   const page = render(success);
   assert.ok(page.next);
@@ -334,9 +410,10 @@ test('run location restores the saved case host, with active job host taking pre
     'saved-server',
   );
   const batch = render(undefined, [], undefined, {}, ['/case'], 'saved-server');
-  assert.equal(batch.location, undefined);
+  assert.equal(batch.location?.props.value, 'saved-server');
+  assert.equal(batch.location?.props.disabled, true);
   batch.effects[3]();
-  assert.deepEqual(batch.hostChanges, ['']);
+  assert.deepEqual(batch.hostChanges, ['saved-server']);
 });
 
 test('changing run location persists the case preference before applying it', async () => {
@@ -387,4 +464,191 @@ test('server-native case keeps its owning host locked in the run panel', async (
   await (page.location!.props.onChange as (e: unknown) => Promise<void>)({ target: { value: '' } });
   assert.deepEqual(page.calls, []);
   assert.equal(page.state.selectedCase.profile.run_host, 'compute');
+});
+
+test('a fresh batch tolerates unrelated active runs without exposing their Stop control', () => {
+  const page = render(
+    undefined,
+    [],
+    undefined,
+    { '/other': { ...success, case: '/other', run_id: 'other-run', running: true } },
+    ['/case'],
+  );
+  assert.equal(page.stop, undefined);
+});
+
+test('an unknown remote batch job without an identity still offers explicit reconciliation', () => {
+  const page = render(
+    {
+      ...success,
+      status: 'unknown',
+      location: 'remote',
+      running: true,
+      progress: { host: 'server' },
+    },
+    [],
+    undefined,
+    {},
+    ['/case'],
+    'server',
+  );
+  assert.ok(page.remoteStatus);
+  assert.equal(page.remoteStatus.props.disabled, false);
+  assert.equal(page.remoteFetch?.props.disabled, true);
+});
+
+test('batch monitor belongs to the all-stations page while single-case progress remains visible', () => {
+  const running: RunState = {
+    case: '/case',
+    running: true,
+    status: 'running',
+    logs: ['step'],
+    stages: {},
+    progress: { stage: 'colm', step: 1, total_steps: 10 },
+  };
+  const single = render(running);
+  assert.equal(
+    single.elements.filter(
+      (el) => el.type === 'section' && el.props.className === 'simulation-monitor',
+    ).length,
+    1,
+  );
+  const batch = render(running, [], undefined, { '/other': { ...running, case: '/other' } }, [
+    '/case',
+    '/other',
+  ]);
+  assert.deepEqual(
+    batch.contracts[0].details?.runs?.map(({ run }) => run?.casePath),
+    ['/case', '/other'],
+  );
+  assert.equal(
+    batch.elements.filter(
+      (el) => el.type === 'section' && el.props.className === 'simulation-monitor',
+    ).length,
+    0,
+  );
+});
+
+test('batch results remain available when the first station fails or another station still runs', async () => {
+  for (const first of [
+    { ...success, status: 'failed' },
+    { ...success, status: 'running', running: true },
+  ]) {
+    const page = render(
+      first,
+      [],
+      undefined,
+      { '/other': { ...success, case: '/other', run_id: 'other' } },
+      ['/case', '/other'],
+    );
+    assert.ok(page.next);
+    assert.equal(page.next.props.disabled, false);
+    await (page.next.props.onClick as () => Promise<void>)();
+    assert.deepEqual(page.routes, [['openCase', '/other', 'results']]);
+  }
+});
+
+test('batch resource preferences are retained without clicking Back', () => {
+  const page = render(undefined, [], undefined, {}, ['/case', '/other']);
+  const save = page.effects.find((effect) => effect.toString().includes('const preferences'));
+  assert.ok(save);
+  save();
+  assert.deepEqual(page.state.projectRunSettings?.cases, ['/case', '/other']);
+  assert.equal(page.state.projectRunSettings?.batch, true);
+  const persisted = page.state.projectRunSettings;
+  save();
+  assert.strictEqual(
+    page.state.projectRunSettings,
+    persisted,
+    'unchanged preferences do not trigger a state-update loop',
+  );
+});
+
+test('batch fetches the successful remote station without using the failed first station job', async () => {
+  const first = { ...success, status: 'failed' };
+  const other: RunState = {
+    ...success,
+    case: '/other',
+    run_id: 'other',
+    location: 'remote',
+    run_case: undefined,
+    progress: {
+      host: 'server',
+      remote: {
+        record: { host: 'server', job: 'job' },
+        status: { state: 'finished', exit_code: 0 },
+      },
+    },
+  };
+  const page = render(first, [], undefined, { '/other': other }, ['/case', '/other']);
+  assert.ok(page.next);
+  assert.equal(page.next.props.disabled, false);
+  (page.next.props.onClick as () => void)();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    page.invocations
+      .filter(({ command }) => command === 'remote_fetch' || command === 'remote_status')
+      .map(({ command, args }) => [command, args.case]),
+    [
+      ['remote_fetch', '/other'],
+      ['remote_status', '/other'],
+    ],
+  );
+  assert.deepEqual(page.routes, [['openCase', '/other', 'results']]);
+  assert.strictEqual(page.state.running['/case'], first);
+  assert.equal(page.state.running['/other'].run_case, '/run-copy');
+});
+
+test('delayed server defaults are not mistaken for automatically saved batch preferences', async () => {
+  const source = ts.createSourceFile(
+    'RunPanel.tsx',
+    readFileSync(new URL('./RunPanel.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let expression = '';
+  function visit(node: ts.Node) {
+    if (
+      ts.isCallExpression(node) &&
+      node.expression.getText(source) === 'useEffect' &&
+      node.arguments[0].getText(source).includes("'remote_config'")
+    )
+      expression = node.arguments[0].getText(source);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  let resolve!: (value: unknown) => void;
+  const changed: unknown[] = [];
+  const context = {
+    hadSavedSettings: { current: false },
+    alive: { current: true },
+    host: 'server',
+    settings: { threads: '1', scheduler: 'auto', cpus: '' },
+    invoke: () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+    setServers: () => {},
+    setThreads: (value: string) => changed.push(value),
+    setScheduler: (value: string) => changed.push(value),
+    setCpus: (value: string) => changed.push(value),
+    notify: () => {},
+  };
+  const js = ts.transpileModule(`const effect = (${expression});`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const effect = new Function(...Object.keys(context), `${js}; return effect;`)(
+    ...Object.values(context),
+  );
+  effect();
+  resolve({ servers: [{ host: 'server', threads: 8, scheduler: 'slurm', cpus: 16 }] });
+  await new Promise<void>((done) => setImmediate(done));
+  assert.deepEqual(changed, ['8', 'slurm', '16']);
+  context.hadSavedSettings.current = true;
+  changed.length = 0;
+  effect();
+  resolve({ servers: [{ host: 'server', threads: 16, scheduler: 'lsf', cpus: 32 }] });
+  await new Promise<void>((done) => setImmediate(done));
+  assert.deepEqual(changed, [], 'genuine saved preferences still win over server defaults');
 });

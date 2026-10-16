@@ -24,11 +24,26 @@ export default function ProjectPage() {
     [ready, setReady] = useState(!hasBackend()),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [chooser, setChooser] = useState<'simulation' | 'results' | null>(null),
-    [versionChooser, setVersionChooser] = useState(false),
-    [batchPage, setBatchPage] = useState(false);
+    [versionChooser, setVersionChooser] = useState(false);
+  const createdBatch = !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
+    savedView = state.projectView?.root === state.root ? state.projectView : undefined,
+    page = state.projectCasesOpen ? (createdBatch ? 'batch' : 'cases') : savedView?.page,
+    chooser = page === 'results' ? 'results' : page ? 'simulation' : null,
+    batchPage = page === 'batch',
+    batchFromCreation = createdBatch || (batchPage && !!savedView?.fromCreation);
   const lock = useRef(false),
     active = useRef(true);
+  useEffect(() => {
+    if (state.projectCasesOpen)
+      update({
+        projectCasesOpen: false,
+        projectView: {
+          root: state.root,
+          page: createdBatch ? 'batch' : 'cases',
+          fromCreation: createdBatch,
+        },
+      });
+  }, [state.projectCasesOpen, state.root, createdBatch, update]);
   useEffect(() => {
     let current = true;
     active.current = true;
@@ -101,6 +116,17 @@ export default function ProjectPage() {
     state.versionRef.revision === official?.version.revision;
   const existingSelected = modelChosen && !officialSelected;
   const versionKey = (version: FrozenRevision) => JSON.stringify(version.version);
+  function setChooser(next: 'simulation' | 'results' | null) {
+    if (!active.current) return;
+    update({
+      projectView: next
+        ? { root: state.root, page: next === 'simulation' ? 'cases' : 'results' }
+        : undefined,
+    });
+  }
+  function openBatch() {
+    update({ projectView: { root: state.root, page: 'batch' } });
+  }
   async function chooseVersion(key: string) {
     return work(async () => {
       const selected = state.versions.find((version) => versionKey(version) === key);
@@ -128,8 +154,12 @@ export default function ProjectPage() {
     await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(next) });
     if (!active.current) return { root, cases };
     setRoots(next);
-    update({ root, cases, ...(root !== state.root ? { selectedCase: null } : {}) });
-    setChooser('simulation');
+    update({
+      root,
+      cases,
+      projectView: { root, page: 'cases' },
+      ...(root !== state.root ? { selectedCase: null } : {}),
+    });
     return { root, cases };
   }
   const browseProject = () =>
@@ -301,7 +331,7 @@ export default function ProjectPage() {
             label: t('批量运行', 'Batch run'),
             kind: 'click' as const,
             enabled: enabled && state.cases.length > 0,
-            run: () => setBatchPage(true),
+            run: openBatch,
           },
           {
             id: 'project-new-simulation',
@@ -348,7 +378,10 @@ export default function ProjectPage() {
     },
     !batchPage,
   );
-  if (batchPage) return <ProjectBatchRun onBack={() => setBatchPage(false)} />;
+  if (batchPage)
+    return (
+      <ProjectBatchRun fromCreation={batchFromCreation} onBack={() => setChooser('simulation')} />
+    );
   if (chooser)
     return (
       <div className="page-stack">
@@ -404,7 +437,7 @@ export default function ProjectPage() {
             {t('选择其他目录', 'Browse another folder')}
           </Button>
           {chooser === 'simulation' && (
-            <Button disabled={!enabled || !state.cases.length} onClick={() => setBatchPage(true)}>
+            <Button disabled={!enabled || !state.cases.length} onClick={openBatch}>
               {t('批量运行', 'Batch run')}
             </Button>
           )}

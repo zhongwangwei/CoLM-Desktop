@@ -93,6 +93,11 @@ export default function CasesPage() {
     update({ simulationReturn: { route: 'case', step: 1, resourceHost: runHost } });
     navigate('resources');
   }
+  function backToSimulation() {
+    if (state.projectView?.root === state.root && state.projectView?.page === 'batch')
+      navigate('project');
+    else update({ caseTab: 'settings' });
+  }
   const [dateDraft, setDateDraft] = useState<Partial<Record<'start' | 'end' | 'spinup', string>>>(
     {},
   );
@@ -728,7 +733,7 @@ export default function CasesPage() {
                   ? t('查看结果', 'View results')
                   : t('返回模拟', 'Back to simulation'),
             kind: 'click' as const,
-            run: () => update({ caseTab: tab }),
+            run: () => (tab === 'settings' ? backToSimulation() : update({ caseTab: tab })),
           })),
           ...(dirty
             ? [
@@ -805,6 +810,7 @@ export default function CasesPage() {
             : []),
         ],
   });
+  if (!dir && state.caseTab === 'results') return <ResultsPage onBack={backToSimulation} />;
   if (!dir)
     return (
       <div className="page-stack simulation-page">
@@ -936,9 +942,7 @@ export default function CasesPage() {
                 </Button>
               </>
             ) : (
-              <Button onClick={() => update({ caseTab: 'settings' })}>
-                {t('返回模拟', 'Back to simulation')}
-              </Button>
+              <Button onClick={backToSimulation}>{t('返回模拟', 'Back to simulation')}</Button>
             )}
           </div>
         </header>
@@ -1236,9 +1240,7 @@ export default function CasesPage() {
         </>
       )}
       {state.caseTab === 'runs' && <HistoryPage casePath={dir} />}{' '}
-      {state.caseTab === 'results' && (
-        <ResultsPage casePath={dir} onBack={() => update({ caseTab: 'settings' })} />
-      )}
+      {state.caseTab === 'results' && <ResultsPage casePath={dir} onBack={backToSimulation} />}
     </div>
   );
 }

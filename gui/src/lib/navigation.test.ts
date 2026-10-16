@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { activeNavigation, navigation } from './navigation';
+import { activeNavigation, navigation, navigationTarget } from './navigation';
 
 test('sidebar groups model/data work under Project and opens real case tabs', () => {
   assert.deepEqual(
@@ -18,4 +18,24 @@ test('sidebar groups model/data work under Project and opens real case tabs', ()
     { id: 'results', zh: '结果', en: 'Results', route: 'case', tab: 'results' },
   );
   assert.equal(activeNavigation({ route: 'resources', caseTab: 'results' }), 'resources');
+});
+
+test('Simulation returns to the current batch after visiting results or another sidebar page', () => {
+  const simulation = navigation.find((item) => item.id === 'simulation')!;
+  const results = navigation.find((item) => item.id === 'results')!;
+  const state = {
+    root: '/multi',
+    projectView: { root: '/multi', page: 'batch' as const },
+  };
+  assert.deepEqual(navigationTarget(simulation, state), { route: 'project' });
+  assert.deepEqual(navigationTarget(results, state), { route: 'case', tab: 'results' });
+  assert.equal(activeNavigation({ ...state, route: 'project', caseTab: 'results' }), 'simulation');
+  assert.deepEqual(navigationTarget(simulation, { ...state, root: '/other' }), {
+    route: 'case',
+    tab: 'settings',
+  });
+  assert.deepEqual(navigationTarget(simulation, { root: '/multi' }), {
+    route: 'case',
+    tab: 'settings',
+  });
 });

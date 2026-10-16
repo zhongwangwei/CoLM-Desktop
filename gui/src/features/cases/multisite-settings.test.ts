@@ -99,6 +99,7 @@ test('multi-site selection excludes incomplete data and preserves edited names w
   page.fill('multisite-select:/bad.nc', 'true');
   assert.equal(page.props.drafts.length, 0);
   page.fill('multisite-select:/a.nc', 'true');
+  page.fill('multisite-mode', 'per-site');
   page.fill('multisite-name:/a.nc', 'renamed');
   page.click('multisite-select-all');
   assert.deepEqual(
@@ -114,22 +115,63 @@ test('multi-site selection excludes incomplete data and preserves edited names w
   assert.equal(page.props.drafts[0].name, 'renamed');
 });
 
-test('shared first-year cutoff is read-only, rejects leap anniversary without crashing, and allows per-site recovery', () => {
+test('shared mode shows station names without details or per-site editable fields', () => {
   const page = screen();
   page.click('multisite-select-all');
+  assert.ok(page.text.includes('A'));
+  assert.ok(page.text.includes('B'));
   assert.ok(page.text.some((value) => value.includes('Output includes the first year')));
-  assert.equal(
-    page.contract().fields.find((field) => field.id === 'multisite-spinup_end:/a.nc')!.value,
-    '2001-01-01',
+  assert.ok(page.text.some((value) => value.includes('Forcing or coverage dates are missing')));
+  assert.ok(
+    !page.text.some((value) => /Natural vegetation|Coverage:|Site:|Forcing:|Save to:/.test(value)),
   );
-  page.fill('multisite-spinup_end:/a.nc', '2002-01-01');
-  assert.equal(page.props.drafts[0].spinup_end, '');
-  page.fill('multisite-start:/a.nc', '2000-02-29');
-  assert.ok(page.text.some((value) => value.includes('No valid anniversary')));
+  assert.ok(!page.text.some((value) => value.includes('/a.nc') || value.includes('/project/run')));
+  assert.ok(
+    !page
+      .contract()
+      .fields.some((field) =>
+        /^multisite-(name|start|end|spinup_end|spinup_repeat):/.test(field.id),
+      ),
+  );
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'multisite-select:/bad.nc')!.disabled,
+    true,
+  );
+});
+
+test('shared mode reports invalid leap anniversary and preserves per-site settings while hidden', () => {
+  const page = screen();
+  page.click('multisite-select-all');
   page.fill('multisite-mode', 'per-site');
+  page.fill('multisite-start:/a.nc', '2000-02-29');
   page.fill('multisite-spinup_end:/a.nc', '2001-03-01');
   page.fill('multisite-spinup_repeat:/a.nc', '7');
-  assert.equal(page.props.drafts[0].spinup_end, '2001-03-01');
+  const edited = structuredClone(page.props.drafts);
+  page.fill('multisite-mode', 'first-year');
+  assert.ok(page.text.some((value) => value.includes('No valid anniversary')));
+  assert.ok(!page.contract().fields.some((field) => field.id === 'multisite-start:/a.nc'));
+  assert.deepEqual(page.props.drafts, edited);
+  page.fill('multisite-mode', 'per-site');
+  assert.ok(!page.text.some((value) => value.includes('No valid anniversary')));
+  assert.equal(
+    page.contract().fields.find((field) => field.id === 'multisite-spinup_end:/a.nc')!.value,
+    '2001-03-01',
+  );
   assert.equal(page.props.drafts[0].spinup_repeat, '7');
   assert.equal(page.props.drafts[1].spinup_end, '');
+});
+
+test('unavailable stations retain their specific error and shared selection remains locked', () => {
+  const page = screen();
+  page.props.sites[2].problem = 'Forcing dates could not be read';
+  page.props.disabled = true;
+  page.render();
+  assert.ok(page.text.includes('Forcing dates could not be read'));
+  page.click('multisite-select-all');
+  page.fill('multisite-select:/a.nc', 'true');
+  page.fill('multisite-mode', 'per-site');
+  page.fill('multisite-repeat', '9');
+  assert.deepEqual(page.props.drafts, []);
+  assert.equal(page.props.mode, 'first-year');
+  assert.equal(page.props.repeat, '3');
 });

@@ -16,7 +16,28 @@ export const navigation = [
   tab?: AppState['caseTab'];
 }[];
 
-export function activeNavigation(state: Pick<AppState, 'route' | 'caseTab'>) {
+export function navigationTarget(
+  item: (typeof navigation)[number],
+  state: Pick<AppState, 'root' | 'projectView'>,
+): { route: Route; tab?: AppState['caseTab'] } {
+  if (
+    item.id === 'simulation' &&
+    state.projectView?.root === state.root &&
+    state.projectView?.page === 'batch'
+  )
+    return { route: 'project' };
+  return { route: item.route, ...('tab' in item ? { tab: item.tab } : {}) };
+}
+
+export function activeNavigation(
+  state: Pick<AppState, 'route' | 'caseTab'> & Partial<Pick<AppState, 'root' | 'projectView'>>,
+) {
+  if (
+    state.route === 'project' &&
+    state.projectView?.root === state.root &&
+    state.projectView?.page === 'batch'
+  )
+    return 'simulation';
   if (state.route === 'case') return state.caseTab === 'results' ? 'results' : 'simulation';
   if (state.route === 'new-case') return 'simulation';
   if (['preparation', 'versions'].includes(state.route)) return 'project';

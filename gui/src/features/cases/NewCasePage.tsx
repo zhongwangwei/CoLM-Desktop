@@ -154,11 +154,25 @@ export default function NewCasePage() {
     shapefile: '',
     forcing: '',
     timestep: '1800',
+    run_threads: '',
+    run_ranks: '1',
+    run_workers: '1',
+    run_scheduler: '',
+    run_cpus: '',
     ...seed?.form,
     ...(['PFT', 'PC'].includes(seed?.form?.subgrid ?? '') ? { landcover: 'IGBP' } : {}),
   });
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
+  const resourceServer = servers?.find((server) => server.host === form.host);
+  const runSettings = {
+    host: form.host,
+    threads: form.run_threads || String(resourceServer?.threads || 1),
+    ranks: form.engine === 'fortran' ? form.run_ranks : '1',
+    workers: form.run_workers,
+    scheduler: form.run_scheduler || resourceServer?.scheduler || 'auto',
+    cpus: form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
+  };
   useEffect(() => {
     let current = true;
     invoke<{ servers: Server[] }>('remote_config', {})
@@ -200,7 +214,8 @@ export default function NewCasePage() {
       return String(e);
     }
   };
-  const [multiSiteEnabled, setMultiSiteEnabled] = useState(seed?.multiSiteEnabled ?? false);
+  const initialMultiSitePreference = useRef(seed?.multiSiteEnabled);
+  const [multiSiteEnabled, setMultiSiteEnabled] = useState(seed?.multiSiteEnabled ?? true);
   const [multiSiteMode, setMultiSiteMode] = useState<MultiSiteMode>(
     seed?.multiSiteMode ?? 'first-year',
   );
@@ -222,6 +237,10 @@ export default function NewCasePage() {
     resolve: (path: string | null) => void;
   } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
+  useEffect(() => {
+    if (!busy && (error || (multiSite && multiResults.length > 0)))
+      document.querySelector('.main-pane')?.scrollTo({ top: 0 });
+  }, [busy, error, multiSite, multiResults]);
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
@@ -414,6 +433,7 @@ export default function NewCasePage() {
       setMultiResults([]);
       setHint('');
       setOwnData(!!v);
+      if (v) setMultiSiteEnabled(initialMultiSitePreference.current ?? true);
       setCaseValues((old) =>
         Object.fromEntries(
           Object.entries(old).filter(
@@ -538,6 +558,7 @@ export default function NewCasePage() {
       }
       return next;
     });
+    setMultiSiteEnabled(initialMultiSitePreference.current ?? true);
     setOwnData(true);
   }
   async function example() {
@@ -771,6 +792,25 @@ export default function NewCasePage() {
       );
     if (at >= 4 && !['IGBP', 'USGS'].includes(form.landcover))
       return t('请选择 IGBP 或 USGS 地表分类。', 'Choose IGBP or USGS land-cover classification.');
+    if (at >= 5) {
+      const counts = [
+        runSettings.threads,
+        runSettings.ranks,
+        ...(multiSite ? [runSettings.workers] : []),
+        ...(form.host ? [runSettings.cpus] : []),
+      ].map(Number);
+      if (
+        counts.some((value) => !Number.isSafeInteger(value) || value < 1) ||
+        Number(runSettings.threads) > 256 ||
+        (form.host && Number(runSettings.cpus) > 1024)
+      )
+        return t(
+          '资源数量须为正整数；线程最多256，服务器每进程CPU最多1024。',
+          'Resource counts must be positive integers; at most 256 threads and 1024 server CPUs per rank.',
+        );
+      if (form.host && !['auto', 'bare', 'slurm', 'pbs', 'lsf'].includes(runSettings.scheduler))
+        return t('请选择受支持的调度系统。', 'Select a supported scheduler.');
+    }
     if (at >= 5 && !multiSite) {
       return (
         newCaseProblem(form, 5, selected, physics, en) ||
@@ -988,6 +1028,17 @@ export default function NewCasePage() {
         }
       }
     }
+    if (
+      !job.cancelRequested &&
+      alive.current &&
+      plans.every((plan) => {
+        const out = caseDirectory(plan.form.root, plan.form.name);
+        return results.some(
+          (result) => (result.remoteDir || result.dir) === out && result.created && !result.error,
+        );
+      })
+    )
+      await openCreatedProject(results, revision);
     return {
       created: results.filter((result) => !result.error).map((result) => result.dir),
       failed: results.filter((result) => result.error),
@@ -1012,19 +1063,42 @@ export default function NewCasePage() {
     setStep(3);
   }
 
-  async function viewCreatedProject() {
-    return work(async () => {
-      const root = form.host
-        ? multiResults.find((result) => result.root)?.root
-        : caseDirectory(form.root, form.name);
-      if (!root)
-        throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
-      const cases = await invoke<CaseEntry[]>('list_cases', { root });
-      await invoke('save_recent', { key: 'root', value: root });
-      update({ root, cases, selectedCase: null, newCaseSeed: null });
-      lock.current = false;
-      return navigate('project');
+  async function openCreatedProject(results: typeof multiResults, revision = state.versionRef) {
+    const successful = results.filter((result) => result.created && !result.error);
+    if (!successful.length)
+      throw new Error(t('尚无创建成功的算例。', 'No cases were created successfully.'));
+    const root = form.host
+      ? successful.find((result) => result.root)?.root
+      : caseDirectory(form.root, form.name);
+    if (!root)
+      throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
+    const cases = await invoke<CaseEntry[]>('list_cases', { root });
+    await invoke('save_recent', { key: 'root', value: root });
+    if (!alive.current) return;
+    update({
+      root,
+      cases,
+      selectedCase: null,
+      newCaseSeed: null,
+      versionRef: revision,
+      projectCasesOpen: true,
+      projectRunSettings: { ...runSettings, root, cases: successful.map((result) => result.dir) },
     });
+    lock.current = false;
+    if (navigate('project') === false) {
+      update({ projectCasesOpen: false });
+      throw new Error(
+        t(
+          '项目页未能打开，请重试“查看已创建的项目”。',
+          'The project page could not open. Retry View created project.',
+        ),
+      );
+    }
+  }
+
+  async function viewCreatedProject() {
+    if (state.busy) throw new Error(t('请等待当前操作。', 'Wait for the current operation.'));
+    return work(() => openCreatedProject(multiResults));
   }
 
   async function create() {
@@ -1120,7 +1194,11 @@ export default function NewCasePage() {
           }
         }
       }
-      update({ root: destination.root, versionRef: revision });
+      update({
+        root: destination.root,
+        versionRef: revision,
+        projectRunSettings: { ...runSettings, root: destination.root, cases: [destination.dir] },
+      });
       lock.current = false;
       return await openCase(destination.dir);
     });
@@ -1274,6 +1352,61 @@ export default function NewCasePage() {
     disabled: !enabled,
     set: (v) => set(k, v),
   }));
+  const resourceFields: UiField[] = [
+    {
+      id: 'new-run-threads',
+      label: t('每个算例的线程数', 'Threads per case'),
+      value: runSettings.threads,
+      type: 'number' as const,
+      set: (value: string) => set('run_threads', value),
+    },
+    ...(form.engine === 'fortran'
+      ? [
+          {
+            id: 'new-run-ranks',
+            label: t('每个算例的 MPI 进程数', 'MPI ranks per case'),
+            value: runSettings.ranks,
+            type: 'number' as const,
+            set: (value: string) => set('run_ranks', value),
+          },
+        ]
+      : []),
+    ...(multiSite
+      ? [
+          {
+            id: 'new-run-workers',
+            label: t('同时运行的站点数', 'Simultaneous stations'),
+            value: runSettings.workers,
+            type: 'number' as const,
+            set: (value: string) => set('run_workers', value),
+          },
+        ]
+      : []),
+    ...(form.host
+      ? [
+          {
+            id: 'new-run-scheduler',
+            label: t('调度系统', 'Scheduler'),
+            value: runSettings.scheduler,
+            type: 'choice' as const,
+            options: [
+              { value: 'auto', label: t('自动识别', 'Detect automatically') },
+              { value: 'bare', label: t('直接运行（不提交调度器）', 'Direct execution') },
+              ...['slurm', 'pbs', 'lsf'].map((value) => ({ value, label: value.toUpperCase() })),
+            ],
+            set: (value: string) => set('run_scheduler', value),
+          },
+          {
+            id: 'new-run-cpus',
+            label: t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
+            value: runSettings.cpus,
+            type: 'number' as const,
+            set: (value: string) => set('run_cpus', value),
+          },
+        ]
+      : []),
+  ].map((field) => ({ ...field, disabled: !enabled }));
+  if (step === 5) fields.push(...resourceFields);
   if (step === 3 && ownData && form.kind === 'site')
     fields.push({
       id: 'new-multi-site',
@@ -1684,6 +1817,55 @@ export default function NewCasePage() {
         }}
       />
       {error && <Notice tone="error">{error}</Notice>}
+      {multiSite && multiResults.length > 0 && (
+        <Card title={t('创建结果', 'Creation results')}>
+          <p role="status">
+            {form.host
+              ? t(
+                  '已完成的算例可在项目页逐个打开并提交到服务器；失败或取消的站点可在此重试。',
+                  'Open completed cases individually from the project page to submit them to the server; retry failed or cancelled stations here.',
+                )
+              : t(
+                  '已完成的算例可以在项目页统一运行；失败或取消的站点可在此重试。',
+                  'Run completed cases together from the project page; retry failed or cancelled stations here.',
+                )}
+          </p>
+          {multiResults.map((result) => (
+            <div key={result.dir}>
+              <p>
+                {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
+              </p>
+              <p className="path">{result.remoteDir || result.dir}</p>
+              {result.error && <Notice tone="error">{result.error}</Notice>}
+            </div>
+          ))}
+          <div className="actions">
+            {!multiResults.some((result) => result.created && result.error) &&
+              siteDrafts.some(
+                (draft) =>
+                  !multiResults.some((result) => result.site === draft.site && result.created),
+              ) && (
+                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
+                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
+                </Button>
+              )}
+            {(multiResults.some((result) => result.error) ||
+              multiResults.length < siteDrafts.length) && (
+              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
+                {t('重试未完成的站点', 'Retry unfinished sites')}
+              </Button>
+            )}
+            {multiResults.some((result) => !result.error) && (
+              <Button
+                disabled={busy || state.busy}
+                onClick={() => void viewCreatedProject().catch(() => {})}
+              >
+                {t('查看已创建的项目', 'View created project')}
+              </Button>
+            )}
+          </div>
+        </Card>
+      )}
       {autoClosed.text && autoClosed.step === step && (
         <Notice tone="warning">{autoClosed.text}</Notice>
       )}
@@ -2175,6 +2357,57 @@ export default function NewCasePage() {
               'Configure time step, spinup and output frequency, review settings, and create case.',
             )}
           >
+            <h3 className="simulation-subheading">{t('运行资源', 'Run resources')}</h3>
+            <p>
+              {t('运行位置：', 'Run location: ')}
+              {form.host || t('本机', 'Local')}
+            </p>
+            <div className="form-grid">
+              {resourceFields.map((field) => (
+                <Field key={field.id} label={field.label}>
+                  {field.type === 'choice' ? (
+                    <Select
+                      value={String(field.value)}
+                      disabled={!enabled}
+                      onChange={(event) => field.set(event.target.value)}
+                    >
+                      {field.options?.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </Select>
+                  ) : (
+                    <Input
+                      type="number"
+                      min="1"
+                      value={String(field.value)}
+                      disabled={!enabled}
+                      onChange={(event) => field.set(event.target.value)}
+                    />
+                  )}
+                </Field>
+              ))}
+            </div>
+            <p className="muted">
+              {multiSite
+                ? t(
+                    '站点并发控制同时运行几个站点；线程和 MPI 进程用于每个站点。本机并发还会按可用 CPU 限制。',
+                    'Station concurrency controls simultaneous sites; threads and MPI ranks apply to each site. Local concurrency also respects available CPUs.',
+                  )
+                : t(
+                    '空间算例使用线程或 MPI 进程并行计算；单点线程也用于前处理。',
+                    'Spatial cases use threads or MPI ranks; site preprocessing can also use threads.',
+                  )}
+            </p>
+            {form.host && (
+              <p className="muted">
+                {t(
+                  '队列分区、账户、时限与内存沿用计算资源设置。修改运行位置请返回第一步；这里不更改服务器连接设置。',
+                  'Partition, account, time and memory use the resource configuration. Return to step 1 to change the run location; connection settings are unchanged here.',
+                )}
+              </p>
+            )}
             <h3 className="simulation-subheading">{t('时间步长与输出', 'Time step and output')}</h3>
             <div className="form-grid">
               {timeOptions
@@ -2255,22 +2488,9 @@ export default function NewCasePage() {
               </div>
             </div>
             {multiSite && (
-              <div>
-                {siteDrafts.map((draft) => (
-                  <p key={draft.site}>
-                    {draft.name}: {draft.start} — {draft.end} ·{' '}
-                    {multiSiteMode === 'first-year'
-                      ? t(`首年重复 ${multiSiteRepeat} 次`, `First year × ${multiSiteRepeat}`)
-                      : draft.spinup_end
-                        ? `${draft.spinup_end} × ${draft.spinup_repeat}`
-                        : t('不预热', 'No spinup')}
-                    <br />
-                    <span className="path">
-                      {finalDirectory}/{draft.name}
-                    </span>
-                  </p>
-                ))}
-              </div>
+              <p>
+                {t(`已选择 ${siteDrafts.length} 个站点`, `${siteDrafts.length} stations selected`)}
+              </p>
             )}
             {multiSite && form.host && (
               <Notice>
@@ -2341,44 +2561,6 @@ export default function NewCasePage() {
           />
         </>
       )}
-      {multiSite && multiResults.length > 0 && (
-        <Card title={t('创建结果', 'Creation results')}>
-          {multiResults.map((result) => (
-            <div key={result.dir}>
-              <p>
-                {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
-              </p>
-              <p className="path">{result.remoteDir || result.dir}</p>
-              {result.error && <Notice tone="error">{result.error}</Notice>}
-            </div>
-          ))}
-          <div className="actions">
-            {!multiResults.some((result) => result.created && result.error) &&
-              siteDrafts.some(
-                (draft) =>
-                  !multiResults.some((result) => result.site === draft.site && result.created),
-              ) && (
-                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
-                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
-                </Button>
-              )}
-            {(multiResults.some((result) => result.error) ||
-              multiResults.length < siteDrafts.length) && (
-              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
-                {t('重试未完成的站点', 'Retry unfinished sites')}
-              </Button>
-            )}
-            {multiResults.some((result) => !result.error) && (
-              <Button
-                disabled={busy || state.busy}
-                onClick={() => void viewCreatedProject().catch(() => {})}
-              >
-                {t('查看已创建的项目', 'View created project')}
-              </Button>
-            )}
-          </div>
-        </Card>
-      )}
       {blocker && !error && (
         <p className="field-hint simulation-blocker" role="status">
           {blocker}
@@ -2420,7 +2602,14 @@ export default function NewCasePage() {
             title={blocker ?? undefined}
             onClick={() => void create().catch(() => {})}
           >
-            {multiSite ? t('创建所选站点', 'Create selected sites') : t('创建算例', 'Create case')}
+            {multiSite && busy
+              ? t(
+                  `正在创建站点（已处理 ${multiResults.length}/${siteDrafts.length}）`,
+                  `Creating sites (${multiResults.length}/${siteDrafts.length} processed)`,
+                )
+              : multiSite
+                ? t('创建所选站点', 'Create selected sites')
+                : t('创建算例', 'Create case')}
           </Button>
         )}
       </footer>

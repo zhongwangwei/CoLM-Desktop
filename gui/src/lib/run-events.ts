@@ -29,16 +29,29 @@ export function applyRunEvent(
       : previous;
   const next: RunState = {
     ...base,
-    location: payload.location === 'remote' ? 'remote' : 'local',
+    location:
+      payload.location === 'remote'
+        ? 'remote'
+        : payload.location === 'local'
+          ? 'local'
+          : (base.location ?? 'local'),
     run_id: runId || previous?.run_id,
     operation_id:
       typeof payload.operation_id === 'string' ? payload.operation_id : base.operation_id,
     run_case: typeof payload.run_case === 'string' ? payload.run_case : base.run_case,
   };
+  if (
+    next.running &&
+    next.location === 'local' &&
+    ['run://started', 'run://stage', 'run://progress'].includes(event)
+  )
+    next.status = 'running';
   if (event === 'run://lines' && Array.isArray(payload.lines))
     next.logs = [...next.logs, ...payload.lines.map(String)].slice(-3000);
-  if (event === 'run://stage' && typeof payload.stage === 'string')
+  if (event === 'run://stage' && typeof payload.stage === 'string') {
     next.stages = { ...next.stages, [payload.stage]: String(payload.state) };
+    next.progress = { ...next.progress, stage: payload.stage };
+  }
   if (event === 'run://progress') next.progress = payload;
   if (event === 'run://done') {
     next.requested_stage =

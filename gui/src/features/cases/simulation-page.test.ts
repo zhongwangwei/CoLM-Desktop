@@ -10,7 +10,7 @@ import * as modelSettings from './model-settings';
 import * as historyVariables from './history-variables';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
 import type { UiField, UiAction } from '../../lib/guide';
-import type { Overlay } from '../../lib/types';
+import type { AppState, Overlay, Server } from '../../lib/types';
 import { pageExecutionContext, publicUiResult, waitForContract } from '../../lib/utils';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 
@@ -57,7 +57,7 @@ function page(
   sourceValues: Record<string, string> = initialValues,
   options: {
     profile?: { grid?: string; domain_kind?: string; run_host?: string; remote_directory?: string };
-    servers?: { host: string; root: string; maps: { local: string; remote: string }[] }[];
+    servers?: (Pick<Server, 'host' | 'root' | 'maps'> & Partial<Server>)[];
     histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
     kernels?: KernelChoice[];
@@ -66,6 +66,8 @@ function page(
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     scan?: () => Promise<unknown>;
+    navigate?: (route: string) => boolean;
+    listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
   } = {},
 ) {
@@ -87,10 +89,13 @@ function page(
     selectedCase: { entry: { dir: '/project/site', name: 'site' }, profile: options.profile ?? {} },
     newCaseSeed: seed ?? null,
     simulationReturn: null as unknown,
+    projectRunSettings: undefined as AppState['projectRunSettings'],
+    projectView: undefined as AppState['projectView'],
   };
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     routes: string[] = [],
     opened: string[] = [],
+    scrolls: unknown[] = [],
     elements: Element[] = [];
   let slots: unknown[] = [],
     cursor = 0,
@@ -104,11 +109,14 @@ function page(
       Object.assign(state, typeof patch === 'function' ? patch(state) : patch),
     notify = () => {};
   const navigate = (route: string) => {
-    if (guard()) return false;
+    if (guard() || options.navigate?.(route) === false) return false;
     routes.push(route);
     return true;
   };
   const context = {
+    document: {
+      querySelector: () => ({ scrollTo: (value: unknown) => scrolls.push(value) }),
+    },
     ...caseModel,
     ...configuration,
     ...simulation,
@@ -244,6 +252,10 @@ function page(
           if (options.create) return options.create(args);
           if (failCreate) throw new Error('creation failed');
           return {};
+        case 'list_cases':
+          return options.listCases?.(args) ?? [];
+        case 'save_recent':
+          return {};
         case 'set_spinup':
           return options.spinup?.(args) ?? {};
         case 'case_creation_cancel':
@@ -344,6 +356,7 @@ function page(
     calls,
     routes,
     opened,
+    scrolls,
     elements,
     render,
     mount,
@@ -400,6 +413,19 @@ const site = {
   problem: null,
 };
 
+test('Results opens the station chooser before a case has been selected', async () => {
+  const p = page('CasesPage');
+  p.state.selectedCase.entry.dir = '';
+  p.state.caseTab = 'results';
+  await p.mount();
+  assert.ok(p.element('ResultsPage'));
+  assert.ok(!p.elements.some((element) => element.type === 'Card'));
+  p.state.projectView = { root: p.state.root, page: 'batch' };
+  p.render();
+  (p.element('ResultsPage').props.onBack as () => void)();
+  assert.deepEqual(p.routes, ['project'], 'results returns to the original batch');
+});
+
 test('selecting a station defaults to its entire forcing period and subsequent manual dates remain editable', async () => {
   const other = {
     ...site,
@@ -447,7 +473,13 @@ test('rescanning selected forcing fills its full new coverage and does not borro
   };
   const p = page(
     'NewCasePage',
-    { form: { ...form, sitedir: '/sites' }, sites: [site], ownData: true, step: 3 },
+    {
+      multiSiteEnabled: false,
+      form: { ...form, sitedir: '/sites' },
+      sites: [site],
+      ownData: true,
+      step: 3,
+    },
     [newer],
   );
   await p.mount();
@@ -462,6 +494,7 @@ test('rescanning selected forcing fills its full new coverage and does not borro
   const custom = page(
     'NewCasePage',
     {
+      multiSiteEnabled: false,
       form: { ...form, sitedir: '/sites', met: '/custom.nc' },
       sites: [site],
       ownData: true,
@@ -809,6 +842,7 @@ test('clearing spatial timestep restores the required automatic 1800 seconds wit
 
 test('research round trips preserve explicit own-data disclosure rather than inferring it from bundled directories', async () => {
   const p = page('NewCasePage', {
+    multiSiteEnabled: false,
     form: { ...form, sitedir: '/bundled/sites', forcingdir: '/bundled/forcing' },
     sites: [site],
     step: 3,
@@ -1225,6 +1259,11 @@ for (const subgrid of ['PFT', 'PC'])
       catchment: '',
       shapefile: '',
       forcing: '',
+      run_threads: '',
+      run_ranks: '1',
+      run_workers: '1',
+      run_scheduler: '',
+      run_cpus: '',
     });
     assert.deepEqual(seed.sites, [site]);
     assert.equal(seed.caseValues.DEF_HIST_FREQ, 'DAILY');
@@ -2259,7 +2298,7 @@ test('existing single-point range renders coordinates once and leaves the site f
 });
 
 test('switching bundled examples to own data clears example bindings but preserves manual values', async () => {
-  const p = page('NewCasePage', { form, step: 3 });
+  const p = page('NewCasePage', { multiSiteEnabled: false, form, step: 3 });
   await p.mount();
   await p.click('new-example');
   p.set('new-runtime', '/custom/runtime');
@@ -2286,7 +2325,7 @@ test('switching bundled examples to own data clears example bindings but preserv
 });
 
 test('research round trips preserve manual overrides while clearing remaining bundled bindings', async () => {
-  const p = page('NewCasePage', { form, step: 3 });
+  const p = page('NewCasePage', { multiSiteEnabled: false, form, step: 3 });
   await p.mount();
   await p.click('new-example');
   p.set('new-runtime', '/custom/runtime');
@@ -2504,12 +2543,14 @@ test('a failed destination does not overwrite or block another station and retry
   await p.mount();
   await p.click('new-create');
   assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  assert.deepEqual(p.routes, []);
   failed = false;
   await p.click('new-multi-retry');
   assert.deepEqual(
     p.calls.filter((call) => call.command === 'new_case').map((call) => call.args.name),
     ['CN-Cng', 'other', 'CN-Cng'],
   );
+  assert.deepEqual(p.routes, ['project']);
 });
 
 test('a spinup write failure retries its settings without recreating the completed case', async () => {
@@ -2540,11 +2581,19 @@ test('cancelling multi-site creation prevents the remaining queue from starting'
   await p.mount();
   const pending = p.click('new-create');
   p.render();
+  assert.match(JSON.stringify(p.elements), /正在创建站点（已处理 0\/2）/);
   await p.click('new-cancel-creation');
   finish();
   await pending;
+  assert.deepEqual(p.routes, []);
   assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 1);
   assert.equal(p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled, true);
+  await p.settle();
+  assert.deepEqual(
+    p.scrolls.at(-1),
+    { top: 0 },
+    'cancelled results must be visible above the long review',
+  );
 });
 
 test('invalid multi-site coverage is rejected before any case is created', async () => {
@@ -2634,7 +2683,7 @@ test('General setup selects run location before paths and preserves it while con
 test('selected resource is persisted during case creation instead of reverting to local', async () => {
   const p = page(
     'NewCasePage',
-    { form: { ...form, host: 'compute' }, sites: [site], step: 5 },
+    { multiSiteEnabled: false, form: { ...form, host: 'compute' }, sites: [site], step: 5 },
     [site],
     initialValues,
     { servers: [runServer] },
@@ -3086,7 +3135,13 @@ test('example installation and switching to own data retain the simulation name'
 test('own-data single station keeps a single-level destination and user name', async () => {
   const p = page(
     'NewCasePage',
-    { form: { ...form, name: 'test' }, ownData: true, sites: [site], step: 5 },
+    {
+      multiSiteEnabled: false,
+      form: { ...form, name: 'test' },
+      ownData: true,
+      sites: [site],
+      step: 5,
+    },
     [site],
   );
   await p.mount();
@@ -3107,4 +3162,208 @@ test('invalid bundled station names cannot escape the simulation container', asy
   assert.equal(p.render().actions.find((action) => action.id === 'new-create')!.enabled, false);
   await assert.rejects(p.click('new-create'));
   assert.ok(!p.calls.some((call) => call.command === 'new_case'));
+});
+
+test('creation review exposes station concurrency and carries resource choices to the run page', async () => {
+  const p = page('NewCasePage', multiSeed, multiSites);
+  await p.mount();
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'new-run-workers')?.label,
+    '同时运行的站点数',
+  );
+  assert.ok(!p.render().fields.some((field) => field.id === 'new-run-ranks'));
+  p.set('new-run-threads', '2');
+  p.set('new-run-workers', '3');
+  await p.click('new-create');
+  assert.equal(p.state.projectRunSettings?.threads, '2');
+  assert.equal(p.state.projectRunSettings?.workers, '3');
+  assert.equal(p.state.projectRunSettings?.cases.length, 2);
+  assert.ok(!p.calls.some((call) => call.command === 'run_batch'));
+});
+
+test('server resource choices inherit configured defaults and reject invalid numbers', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        { host: 'cluster', root: '/work', maps: [], threads: 8, cpus: 4, scheduler: 'slurm' },
+      ],
+    },
+  );
+  await p.mount();
+  assert.equal(p.render().fields.find((field) => field.id === 'new-run-threads')?.value, '8');
+  assert.equal(p.render().fields.find((field) => field.id === 'new-run-cpus')?.value, '4');
+  assert.equal(p.render().fields.find((field) => field.id === 'new-run-scheduler')?.value, 'slurm');
+  assert.ok(!p.render().fields.some((field) => field.id === 'new-run-workers'));
+  for (const invalid of ['0', '-1', '1.5', '257']) {
+    p.set('new-run-threads', invalid);
+    assert.equal(p.render().actions.find((action) => action.id === 'new-create')?.enabled, false);
+  }
+  p.set('new-run-threads', '2');
+  p.set('new-run-scheduler', 'bare');
+  await p.click('new-create');
+  assert.equal(p.state.projectRunSettings?.scheduler, 'bare');
+  assert.equal(p.state.projectRunSettings?.threads, '2');
+});
+
+test('multi-site success opens the created project only after all spinup writes finish', async () => {
+  const cases = [{ dir: '/project/multi-project/CN-Cng', name: 'CN-Cng' }];
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    listCases: async () => cases,
+  });
+  await p.mount();
+  await p.click('new-create');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.state.root, '/project/multi-project');
+  assert.deepEqual((p.state as typeof p.state & { cases: unknown }).cases, cases);
+  assert.equal(p.state.selectedCase, null);
+  assert.equal(p.state.newCaseSeed, null);
+  assert.equal((p.state as typeof p.state & { projectCasesOpen: boolean }).projectCasesOpen, true);
+  assert.deepEqual(p.state.projectRunSettings, {
+    root: '/project/multi-project',
+    cases: multiSites.map((station) => `/project/multi-project/${station.name}`),
+    host: '',
+    threads: '1',
+    ranks: '1',
+    workers: '1',
+    scheduler: 'auto',
+    cpus: '1',
+  });
+  assert.deepEqual(p.calls.find((call) => call.command === 'save_recent')?.args, {
+    key: 'root',
+    value: '/project/multi-project',
+  });
+  const listed = p.calls.findIndex((call) => call.command === 'list_cases');
+  assert.ok(
+    p.calls
+      .map((call, index) => (call.command === 'set_spinup' ? index : -1))
+      .every((index) => index < listed),
+  );
+  assert.ok(!p.calls.some((call) => /run_case|run_start|submit/.test(call.command)));
+});
+
+test('failed project loading keeps completed results and manual retry never recreates stations', async () => {
+  let failed = true;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    listCases: async () => {
+      if (failed) throw new Error('project list unavailable');
+      return [];
+    },
+  });
+  await p.mount();
+  await assert.rejects(p.click('new-create'), /project list unavailable/);
+  assert.deepEqual(p.routes, []);
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-project')?.enabled,
+    true,
+  );
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled,
+    false,
+  );
+  const resultIndex = p.elements.findIndex(
+    (element) => element.type === 'Card' && element.props.title === '创建结果',
+  );
+  const reviewIndex = p.elements.findIndex(
+    (element) => element.type === 'Card' && element.props.title !== '创建结果',
+  );
+  assert.ok(resultIndex >= 0 && resultIndex < reviewIndex);
+  failed = false;
+  await p.click('new-multi-project');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  assert.equal(p.calls.filter((call) => call.command === 'set_spinup').length, 2);
+});
+
+test('remote multi-site completion opens the returned local project mirror', async () => {
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, form: { ...multiSeed.form, host: 'compute', root: '/remote/projects' } },
+    multiSites,
+    initialValues,
+    {
+      servers: [runServer],
+      create: async (args) => {
+        const request = args.request as { name: string; out: string };
+        return {
+          dir: `/cache/project/${request.name}`,
+          root: '/cache/project',
+          remote_dir: request.out,
+        };
+      },
+    },
+  );
+  await p.mount();
+  await p.click('new-create');
+  assert.deepEqual(p.calls.find((call) => call.command === 'list_cases')?.args, {
+    root: '/cache/project',
+  });
+  assert.equal(p.state.root, '/cache/project');
+  assert.deepEqual(p.routes, ['project']);
+});
+
+test('refused project navigation reports an error and retries without recreating cases', async () => {
+  let permitted = false;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    navigate: () => permitted,
+  });
+  await p.mount();
+  await assert.rejects(p.click('new-create'), /项目页未能打开/);
+  assert.deepEqual(p.routes, []);
+  assert.equal((p.state as typeof p.state & { projectCasesOpen: boolean }).projectCasesOpen, false);
+  assert.equal(
+    p.render().actions.find((action) => action.id === 'new-multi-project')?.enabled,
+    true,
+  );
+  permitted = true;
+  await p.click('new-multi-project');
+  assert.deepEqual(p.routes, ['project']);
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+});
+
+for (const preference of [undefined, false, true]) {
+  test(`own-data creation defaults to multiple stations while preserving seed preference ${preference}`, async () => {
+    const p = page(
+      'NewCasePage',
+      {
+        form,
+        sites: [site],
+        ownData: true,
+        step: 3,
+        ...(preference === undefined ? {} : { multiSiteEnabled: preference }),
+      },
+      [site],
+    );
+    await p.mount();
+    assert.equal(
+      p.render().fields.find((field) => field.id === 'new-multi-site')!.value,
+      String(preference ?? true),
+    );
+  });
+}
+
+test('switching bundled data to own data defaults to multiple stations', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 3 }, [site]);
+  await p.mount();
+  await p.click('new-example');
+  await p.click('new-own-data');
+  assert.equal(p.render().fields.find((field) => field.id === 'new-multi-site')!.value, 'true');
+});
+
+test('multi-site confirmation summarizes the count without duplicating per-station details', async () => {
+  const p = page('NewCasePage', multiSeed, multiSites);
+  await p.mount();
+  const text = JSON.stringify(p.elements);
+  assert.match(text, /已选择 2 个站点/);
+  assert.doesNotMatch(text, /2005-03-01|2008-12-31|multi-project\/other/);
+  assert.equal(p.render().actions.find((action) => action.id === 'new-create')!.enabled, true);
 });

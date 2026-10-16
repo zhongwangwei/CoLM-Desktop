@@ -1050,6 +1050,18 @@ export const commandContract = {
       "required": false,
       "rust_type": "Option<u32>"
     },
+    "threads": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "cpus": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "scheduler": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
     "modelVersion": {
       "required": false,
       "rust_type": "Option<String>"
@@ -1111,6 +1123,18 @@ export const commandContract = {
     "ranks": {
       "required": false,
       "rust_type": "Option<u32>"
+    },
+    "threads": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "cpus": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    },
+    "scheduler": {
+      "required": false,
+      "rust_type": "Option<String>"
     },
     "modelVersion": {
       "required": false,
