@@ -69,7 +69,9 @@ export default function CasesPage() {
     };
   }, []);
   const runHost = state.selectedCase?.profile.run_host ?? '';
+  const remoteDirectory = state.selectedCase?.profile.remote_directory;
   async function changeRunHost(host: string) {
+    if (remoteDirectory && host !== runHost) return;
     if (!dir || editingDisabled || dirty || lock.current) return;
     const target = dir;
     await work(async () => {
@@ -644,7 +646,7 @@ export default function CasesPage() {
         { value: '', label: t('本机', 'Local') },
         ...(servers ?? []).map((server) => ({ value: server.host, label: server.host })),
       ],
-      disabled: editingDisabled || dirty || servers === null,
+      disabled: editingDisabled || dirty || servers === null || !!remoteDirectory,
       set: changeRunHost,
     });
     fields.push({
@@ -972,11 +974,22 @@ export default function CasesPage() {
                 host={runHost}
                 servers={servers}
                 disabled={editingDisabled || dirty}
+                serverNative={!!remoteDirectory}
+                locationLocked={!!remoteDirectory}
                 error={resourceError}
                 en={en}
                 onChange={(host) => void changeRunHost(host).catch(() => {})}
                 onConfigure={openResources}
               />
+              {remoteDirectory && (
+                <Notice>
+                  {t(
+                    '此算例的数据和项目位于服务器，运行位置固定；迁移请新建模拟。',
+                    'This case uses server data and a server project directory. Create a new simulation to migrate it.',
+                  )}{' '}
+                  {runHost}: {remoteDirectory}
+                </Notice>
+              )}
               <div className="simulation-site-summary">
                 <strong>{state.selectedCase?.entry.name}</strong>
                 <span>
@@ -987,12 +1000,14 @@ export default function CasesPage() {
               <div className="form-grid">
                 <Field
                   label={
-                    runHost
-                      ? t('本地算例路径', 'Local case directory')
-                      : t('算例路径', 'Case directory')
+                    remoteDirectory
+                      ? t('服务器算例路径', 'Server case directory')
+                      : runHost
+                        ? t('本地算例路径', 'Local case directory')
+                        : t('算例路径', 'Case directory')
                   }
                 >
-                  <Input readOnly value={dir ?? ''} />
+                  <Input readOnly value={remoteDirectory ?? dir ?? ''} />
                 </Field>
                 <Field
                   label={t('输出目录', 'Output directory')}
@@ -1095,6 +1110,7 @@ export default function CasesPage() {
           {step === 4 && (
             <>
               <ModelSettings
+                runHost={remoteDirectory ? runHost : undefined}
                 version={state.version}
                 profile={effectiveProfile ?? undefined}
                 caseDir={dir}

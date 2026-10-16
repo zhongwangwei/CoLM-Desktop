@@ -45,6 +45,8 @@ export default function RunPanel({
     t = (zh: string, english: string) => (en ? english : zh);
   const savedHost =
     state.selectedCase?.dir === casePath ? state.selectedCase.profile?.run_host || '' : '';
+  const serverOwned =
+    state.selectedCase?.dir === casePath && !!state.selectedCase.profile?.remote_directory;
   const recoveringRun = state.running[casePath];
   const restoredHost =
     recoveringRun?.running || recoveringRun?.status === 'unknown'
@@ -504,7 +506,7 @@ export default function RunPanel({
   }
 
   async function changeHost(value: string) {
-    if (pending || batchCases || value === host) return;
+    if (pending || batchCases || serverOwned || value === host) return;
     const dir = casePath;
     try {
       await action(async () => {
@@ -539,7 +541,7 @@ export default function RunPanel({
       label: bilingual('运行位置', 'Machine'),
       type: 'choice' as const,
       value: host,
-      disabled: pending,
+      disabled: pending || serverOwned,
       options: [
         { value: '', label: bilingual('本机', 'Local') },
         ...(host && !servers.some((server) => server.host === host)
@@ -610,7 +612,7 @@ export default function RunPanel({
           },
         ]
       : []),
-  ].map((f) => ({ ...f, disabled: pending }));
+  ].map((f) => ({ ...f, disabled: pending || ('disabled' in f && f.disabled === true) }));
   fields.push({
     id: 'run-advanced',
     label: t('高级配置', 'Advanced settings'),
@@ -683,7 +685,11 @@ export default function RunPanel({
   const render = (f: UiField) => (
     <Field key={f.id} label={f.label}>
       {f.type === 'choice' ? (
-        <Select value={String(f.value)} disabled={pending} onChange={(e) => f.set(e.target.value)}>
+        <Select
+          value={String(f.value)}
+          disabled={!!f.disabled}
+          onChange={(e) => f.set(e.target.value)}
+        >
           {f.options?.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}

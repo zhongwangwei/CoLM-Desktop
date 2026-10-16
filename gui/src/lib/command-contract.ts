@@ -933,6 +933,16 @@ export const commandContract = {
     }
   },
   "remote_ssh_hosts": {},
+  "remote_browse": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "remote_probe": {
     "server": {
       "required": true,
@@ -1155,6 +1165,42 @@ export const commandContract = {
     "studyDir": {
       "required": true,
       "rust_type": "String"
+    }
+  },
+  "remote_scan_sites": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "forcingDir": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "quick": {
+      "required": false,
+      "rust_type": "Option<bool>"
+    },
+    "modelRevision": {
+      "required": false,
+      "rust_type": "Option<colm_model::VersionRef>"
+    }
+  },
+  "remote_create_case": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "request": {
+      "required": true,
+      "rust_type": "Value"
+    },
+    "modelRevision": {
+      "required": false,
+      "rust_type": "Option<colm_model::VersionRef>"
     }
   },
   "case_creation_cancel": {

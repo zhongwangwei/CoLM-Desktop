@@ -132,7 +132,11 @@ impl Drop for CreationState {
 }
 
 impl CaseCreation {
-    fn begin(creations: &CaseCreations, dir: &str, timeout: Duration) -> Result<Self, String> {
+    pub(crate) fn begin(
+        creations: &CaseCreations,
+        dir: &str,
+        timeout: Duration,
+    ) -> Result<Self, String> {
         let key = creation_key(dir)?;
         creations.0.prepare(std::slice::from_ref(&key))?;
         // The reserved key prevents another creator from claiming this output while
@@ -147,7 +151,7 @@ impl CaseCreation {
             writers_reaped: std::sync::atomic::AtomicBool::new(true),
         })))
     }
-    fn validate_destination(&self, require_fresh: bool) -> Result<(), String> {
+    pub(crate) fn validate_destination(&self, require_fresh: bool) -> Result<(), String> {
         let path = std::path::Path::new(&self.0.key);
         if require_fresh && !self.0.fresh {
             return Err(format!(
@@ -206,7 +210,7 @@ impl CaseCreation {
         }
         error
     }
-    fn finish(&self, result: Result<String, String>) -> Result<String, String> {
+    pub(crate) fn finish(&self, result: Result<String, String>) -> Result<String, String> {
         result
             .and_then(|output| self.complete().map(|_| output))
             .map_err(|error| self.failure(error))
@@ -1516,6 +1520,7 @@ fn run_one(
     model_revision: Option<&colm_model::VersionRef>,
     preprocessors: Option<&str>,
 ) -> Result<i32, String> {
+    crate::remote::server_case_args(case, "")?;
     if processes.take_cancelled(case)? {
         let _ = app.emit(
             "run://done",

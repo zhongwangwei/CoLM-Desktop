@@ -9,7 +9,11 @@ export default function RunLocationSettings({
   en,
   onChange,
   onConfigure,
+  serverNative = false,
+  locationLocked = false,
 }: {
+  serverNative?: boolean;
+  locationLocked?: boolean;
   host: string;
   servers: Server[] | null;
   disabled: boolean;
@@ -25,7 +29,7 @@ export default function RunLocationSettings({
       <Field label={t('运行位置', 'Run location')}>
         <Select
           value={host}
-          disabled={disabled || servers === null}
+          disabled={disabled || locationLocked || servers === null}
           onChange={(e) => onChange(e.target.value)}
         >
           <option value="">{t('本机', 'Local')}</option>
@@ -45,12 +49,17 @@ export default function RunLocationSettings({
       {host ? (
         <>
           <p className="muted">
-            {t(
-              '算例配置保存在本机；运行时同步到所选服务器。下方文件选择器浏览本机文件，输入数据通过路径对应引用服务器资料。',
-              'Case configuration is saved locally and synchronized to this server at run time. File pickers browse local files; input path mappings reference server datasets.',
-            )}
+            {serverNative
+              ? t(
+                  '输入数据直接从服务器选择，算例与生成结果保存在下方指定的服务器项目目录。',
+                  'Choose input data directly on the server. Cases and generated results are saved in the server project folder below.',
+                )
+              : t(
+                  '算例配置保存在本机；运行时同步到所选服务器。下方文件选择器浏览本机文件，输入数据通过路径对应引用服务器资料。',
+                  'Case configuration is saved locally and synchronized to this server at run time. File pickers browse local files; input path mappings reference server datasets.',
+                )}
           </p>
-          {server && (
+          {server && !serverNative && (
             <>
               <Field label={t('服务器工作根目录', 'Server working root')}>
                 <Input readOnly value={server.root} />
@@ -95,7 +104,9 @@ export default function RunLocationSettings({
         </p>
       )}
       <Button disabled={disabled} onClick={onConfigure}>
-        {t('配置计算资源与路径对应', 'Configure resources and path mappings')}
+        {serverNative
+          ? t('配置计算资源', 'Configure resources')
+          : t('配置计算资源与路径对应', 'Configure resources and path mappings')}
       </Button>
     </section>
   );

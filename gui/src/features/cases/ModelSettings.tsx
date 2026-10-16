@@ -44,6 +44,7 @@ type Props = {
   };
   kernel?: KernelEntry;
   caseDir?: string | null;
+  runHost?: string;
 };
 export default function ModelSettings({
   version,
@@ -56,6 +57,7 @@ export default function ModelSettings({
   profile,
   kernel,
   caseDir = null,
+  runHost,
   setupEnvironment,
   onCaseChange,
 }: Props) {
@@ -73,6 +75,7 @@ export default function ModelSettings({
     [settings, setSettings] = useState<{ id: string; identity: string } | null>(null);
   const identity = JSON.stringify({
     caseDir,
+    runHost,
     version: version?.version,
     mode,
     kernel: kernel?.dir,
@@ -416,6 +419,7 @@ export default function ModelSettings({
                 overlay={version.overlay}
                 fields={fields}
                 catalog={catalog}
+                runHost={runHost}
                 caseDir={caseDir}
                 kernelDir={kernel?.dir ?? null}
                 kernelMacros={kernel?.macros}
@@ -441,6 +445,7 @@ export default function ModelSettings({
                   fields={fields}
                   catalog={catalog}
                   version={version}
+                  runHost={runHost}
                   caseDir={caseDir}
                   kernel={kernel}
                   subgrid={selectedMode}
@@ -557,6 +562,7 @@ function ProcessSettingsDialog({
   catalog,
   version,
   caseDir,
+  runHost,
   kernel,
   subgrid,
   environment,
@@ -569,6 +575,7 @@ function ProcessSettingsDialog({
   catalog: ModelParameter[];
   version: FrozenRevision;
   caseDir: string | null;
+  runHost?: string;
   kernel?: KernelEntry;
   subgrid?: SimulationMode;
   environment?: SetupEnvironment;
@@ -710,6 +717,7 @@ function ProcessSettingsDialog({
         overlay={version.overlay}
         fields={fields}
         catalog={catalog}
+        runHost={runHost}
         caseDir={caseDir}
         kernelDir={kernel?.dir}
         kernelMacros={kernel?.macros}

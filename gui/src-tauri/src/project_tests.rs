@@ -419,3 +419,38 @@ fn default_observation_matches_site_and_forcing() {
         Some(obs_file.to_str().unwrap())
     );
 }
+
+#[test]
+fn server_case_cannot_change_its_owning_host() {
+    let root = tmp("server-owned-host");
+    let dir = make_case(&root, "site", "CN-Cng");
+    let argument = dir.to_string_lossy().into_owned();
+    let record = CaseRecord {
+        run_host: Some("compute".into()),
+        remote_directory: Some("/server/project/site".into()),
+        ..Default::default()
+    };
+    record_case(&argument, &record).unwrap();
+    let listed = list_cases(root.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(listed[0].run_host.as_deref(), Some("compute"));
+    assert_eq!(
+        listed[0].remote_directory.as_deref(),
+        Some("/server/project/site")
+    );
+    let opened = open_case(argument.clone()).unwrap();
+    assert_eq!(opened.entry.run_host, listed[0].run_host);
+    assert_eq!(opened.entry.remote_directory, listed[0].remote_directory);
+    for host in [None, Some("other".into())] {
+        assert!(set_case_run_host(argument.clone(), host).is_err());
+        assert_eq!(recorded_case(&dir), record);
+    }
+    set_case_run_host(argument.clone(), Some("compute".into())).unwrap();
+    assert_eq!(
+        open_case(argument)
+            .unwrap()
+            .profile
+            .remote_directory
+            .as_deref(),
+        Some("/server/project/site")
+    );
+}

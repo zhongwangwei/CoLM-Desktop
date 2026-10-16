@@ -40,6 +40,8 @@
 //! 官方运行的 `--remote-kernel auto` 不会挑到这种内核。提交记录里带着出处，取回结果时写成本机的
 //! `out/<名字>/produced-by.json`（位置记为这台服务器）。
 
+pub(crate) mod remote_cases;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -138,6 +140,91 @@ pub(crate) fn place(raw: &str, case: &Path, remote_case: &str, maps: &[Mapping])
     }
 }
 
+/// Server-native datasets are never interpreted as paths on this computer.
+fn server_place(raw: &str, case: &Path, remote_case: &str, maps: &[Mapping]) -> Result<Placed> {
+    // Configuration mirrors use native Windows paths, including canonical verbatim prefixes.
+    let native_path = |value: &str| {
+        let value = value.replace('\\', "/");
+        if let Some(rest) = value.strip_prefix("//?/UNC/") {
+            format!("//{rest}")
+        } else {
+            value.strip_prefix("//?/").unwrap_or(&value).to_owned()
+        }
+    };
+    let normalized = native_path(raw);
+    let local_case = native_path(&case.to_string_lossy());
+    let local = std::iter::once((local_case.as_str(), remote_case))
+        .chain(maps.iter().map(|m| (m.local.as_str(), m.remote.as_str())));
+    for (prefix, destination) in local {
+        if let Some(rest) = under(&normalized, trim_slash(&native_path(prefix))) {
+            let remote = format!("{}{rest}", trim_slash(destination));
+            validate_server_path(&remote)?;
+            return Ok(Placed::Remote(remote));
+        }
+    }
+    if raw.starts_with('/') {
+        validate_server_path(raw)?;
+        return Ok(Placed::Remote(raw.to_owned()));
+    }
+    ensure!(
+        !raw.contains('\\') && !raw.contains(':') && !raw.split('/').any(|c| c == ".."),
+        "invalid relative server input path: {raw}"
+    );
+    Ok(place(raw, case, remote_case, maps))
+}
+
+fn validate_server_path(path: &str) -> Result<()> {
+    ensure!(
+        path.starts_with('/')
+            && !path.trim_end_matches('/').is_empty()
+            && !path.contains(|c: char| c.is_control() || c == '\\')
+            && !path.split('/').any(|c| matches!(c, "." | "..")),
+        "invalid absolute server path: {path}"
+    );
+    Ok(())
+}
+
+const CLAIM_SERVER_RUN: &str = r#"
+import json, os, sys
+base, target, claim = sys.argv[1:]
+with open(os.path.join(base, '.colm-desktop-server.json')) as f:
+    owner = json.load(f)
+if owner.get('schema') != 1 or owner.get('remote_directory') != base:
+    raise SystemExit('server project ownership does not match')
+if target != base:
+    runs = os.path.join(base, 'runs')
+    if os.path.islink(runs) or os.path.realpath(os.path.dirname(target)) != os.path.join(os.path.realpath(base), 'runs'):
+        raise SystemExit('server run directory escapes project')
+    if claim == '1':
+        os.makedirs(runs, exist_ok=True)
+        os.mkdir(target)
+    elif os.path.lexists(target):
+        raise SystemExit('server run destination already exists')
+"#;
+
+fn check_server_destination(ssh: &Ssh, base: &str, target: &str, claim: bool) -> Result<()> {
+    ssh.run_ok(&format!(
+        "python3 -c {} {} {} {}",
+        quote(CLAIM_SERVER_RUN),
+        quote(trim_slash(base)),
+        quote(target),
+        if claim { "1" } else { "0" }
+    ))?;
+    Ok(())
+}
+
+fn server_destination(base: &str, operation: Option<&str>) -> Result<String> {
+    validate_server_path(base)?;
+    let base = trim_slash(base);
+    match operation {
+        Some(id) => {
+            job::check_id(id)?;
+            Ok(format!("{base}/runs/{id}"))
+        }
+        None => Ok(base.to_owned()),
+    }
+}
+
 /// 不随算例上传的东西：输出、日志、阶段指纹、结果标记、远程记录。
 fn skipped(name: &str) -> bool {
     name == "out"
@@ -185,6 +272,7 @@ fn looks_like_path(field: &str, raw: &str) -> bool {
 }
 
 /// 改写一个 namelist 文件里的全部路径字段。
+#[allow(clippy::too_many_arguments)]
 fn rewrite_namelist(
     file: &Path,
     case: &Path,
@@ -193,10 +281,18 @@ fn rewrite_namelist(
     upload_unmapped: bool,
     staging: &Path,
     staged: &mut Staged,
+    server_inputs: bool,
 ) -> Result<()> {
     let text =
         std::fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
     let mut document = colm_namelist::parse(&text)?;
+    let place_input = |raw: &str| {
+        if server_inputs {
+            server_place(raw, case, remote_case, maps)
+        } else {
+            Ok(place(raw, case, remote_case, maps))
+        }
+    };
     let paths: Vec<String> = document.paths();
     for field in paths {
         let Some(Value::Str(raw)) = document.get(&field).cloned() else {
@@ -217,12 +313,21 @@ fn rewrite_namelist(
             continue;
         }
         if field.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES") {
-            let rewritten = colm_namelist::tracer_files::rewrite_param_files(trimmed, |path| {
-                match place(path, case, remote_case, maps) {
-                    Placed::Remote(remote) => Ok(remote),
-                    _ => bail!("process parameter file {path} is outside the case and not mapped"),
-                }
-            })?;
+            let rewritten =
+                colm_namelist::tracer_files::rewrite_param_files(
+                    trimmed,
+                    |path| match place_input(path)? {
+                        Placed::Remote(remote) => {
+                            if under(&remote, trim_slash(remote_case)).is_none() {
+                                staged.remote_inputs.push(remote.clone());
+                            }
+                            Ok(remote)
+                        }
+                        _ => bail!(
+                            "process parameter file {path} is outside the case and not mapped"
+                        ),
+                    },
+                )?;
             document.set(&field, Value::Str(rewritten))?;
             continue;
         }
@@ -230,9 +335,9 @@ fn rewrite_namelist(
         if !trimmed.contains(['/', '\\']) {
             continue;
         }
-        match place(trimmed, case, remote_case, maps) {
+        match place_input(trimmed)? {
             Placed::Remote(remote) => {
-                if !remote.starts_with(trim_slash(remote_case)) {
+                if under(&remote, trim_slash(remote_case)).is_none() {
                     staged.remote_inputs.push(remote.clone());
                 }
                 document.set(&field, Value::Str(remote))?;
@@ -269,8 +374,23 @@ pub(crate) fn stage_case(
     maps: &[Mapping],
     upload_unmapped: bool,
 ) -> Result<Staged> {
+    stage_case_inputs(case, staging, remote_case, maps, upload_unmapped, false)
+}
+
+fn stage_case_inputs(
+    case: &Path,
+    staging: &Path,
+    remote_case: &str,
+    maps: &[Mapping],
+    upload_unmapped: bool,
+    server_inputs: bool,
+) -> Result<Staged> {
     let mut staged = Staged::default();
-    let mut effective_maps = maps.to_vec();
+    let mut effective_maps = if server_inputs {
+        Vec::new()
+    } else {
+        maps.to_vec()
+    };
     let alias = crate::model_version::execution_path(case)?;
     if alias != case {
         effective_maps.insert(
@@ -288,7 +408,13 @@ pub(crate) fn stage_case(
     {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if skipped(&name) {
+        if skipped(&name)
+            || (server_inputs
+                && matches!(
+                    name.as_str(),
+                    "runs" | ".colm-desktop.json" | ".colm-desktop-server.json"
+                ))
+        {
             continue;
         }
         staged.bytes += copy_tree(&entry.path(), &staging.join(&name))?;
@@ -312,6 +438,7 @@ pub(crate) fn stage_case(
             upload_unmapped,
             staging,
             &mut staged,
+            server_inputs,
         )?;
     }
     staged.remote_inputs.sort();
@@ -381,9 +508,21 @@ fn check_record(record: &Record) -> Result<()> {
         "invalid recorded remote root"
     );
     ensure!(
-        record
+        (record
             .remote_case
             .starts_with(&format!("{}/cases/", trim_slash(&record.root)))
+            || record
+                .provenance
+                .as_ref()
+                .and_then(|p| p["server_case"].as_str())
+                .is_some_and(|base| {
+                    validate_server_path(base).is_ok()
+                        && (record.remote_case == trim_slash(base)
+                            || record
+                                .remote_case
+                                .strip_prefix(&format!("{}/runs/", trim_slash(base)))
+                                .is_some_and(|id| job::check_id(id).is_ok()))
+                }))
             && !record.remote_case.contains(char::is_control)
             && Path::new(&record.remote_case)
                 .components()
@@ -1606,6 +1745,21 @@ pub(super) fn cmd_engine_clean(opts: &Opts) -> Result<()> {
 
 pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     refuse_pending(opts)?;
+    let source = source_case(&opts.positional_case()?)?;
+    let profile = source.join(".colm-desktop.json");
+    if profile.is_file() {
+        let profile: serde_json::Value = serde_json::from_slice(&std::fs::read(profile)?)?;
+        if let Some(directory) = profile["remote_directory"].as_str() {
+            ensure!(
+                profile["run_host"].as_str() == opts.get("--host").as_deref(),
+                "server-native case belongs to another host"
+            );
+            ensure!(
+                Some(trim_slash(directory)) == opts.get("--server-case").as_deref().map(trim_slash),
+                "server-native case requires its saved server project directory"
+            );
+        }
+    }
     if let Some((prepared, run)) = crate::model_version::prepare(opts)? {
         ensure!(
             opts.get("--upload-unmapped").as_deref() != Some("1"),
@@ -1661,17 +1815,38 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         })
         .context("case.nml has no DEF_CASE_NAME")?;
     colm_case::validate_case_name(&case_name)?;
-    let remote_case = format!(
-        "{root}/cases/{case_name}-{}",
-        short_hash(&case.to_string_lossy())
-    );
+    let server_case = opts.get("--server-case");
+    let remote_case = if let Some(base) = &server_case {
+        let operation = if case.join(colm_model::RUN_MANIFEST).is_file() {
+            Some(
+                case.file_name()
+                    .and_then(|n| n.to_str())
+                    .context("invalid run folder")?,
+            )
+        } else {
+            None
+        };
+        server_destination(base, operation)?
+    } else {
+        format!(
+            "{root}/cases/{case_name}-{}",
+            short_hash(&case.to_string_lossy())
+        )
+    };
 
     // 1. 算例副本：在本机暂存、改写路径，对应不上的先报出来。
     let local_configuration = crate::fingerprint::configuration_identity(&case)?;
     let staging =
         std::env::temp_dir().join(format!("colm-remote-{}-{}", case_name, std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
-    let staged = stage_case(&case, &staging, &remote_case, &maps, upload_unmapped)?;
+    let staged = stage_case_inputs(
+        &case,
+        &staging,
+        &remote_case,
+        &maps,
+        upload_unmapped,
+        server_case.is_some(),
+    )?;
     if !staged.unmapped.is_empty() {
         let _ = std::fs::remove_dir_all(&staging);
         let list: Vec<String> = staged
@@ -1712,6 +1887,10 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         None
     };
+
+    if let Some(base) = &server_case {
+        check_server_destination(&ssh, base, &remote_case, false)?;
+    }
 
     // 2. 核对服务器上的数据在场。
     if !staged.remote_inputs.is_empty() {
@@ -1827,6 +2006,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         "engine_snapshot": engine.id(),
     });
     crate::model_version::attach(&case, &mut provenance)?;
+    provenance["server_case"] = serde_json::to_value(&server_case)?;
     provenance["local_configuration_sha256"] = serde_json::to_value(&local_configuration)?;
     provenance["remote_model_run"] = serde_json::to_value(remote_model_run)?;
     provenance["remote_options"] = serde_json::to_value(
@@ -1878,6 +2058,9 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     let entries: Vec<String> = std::fs::read_dir(&staging)?
         .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
         .collect();
+    if let Some(base) = &server_case {
+        check_server_destination(&ssh, base, &remote_case, true)?;
+    }
     ssh.upload(&staging, &entries, &remote_case)?;
     let _ = std::fs::remove_dir_all(&staging);
 
@@ -2648,6 +2831,7 @@ fn replay_remote_flag(flag: &str) -> bool {
         flag,
         "--host"
             | "--root"
+            | "--server-case"
             | "--servers"
             | "--server"
             | "--map"

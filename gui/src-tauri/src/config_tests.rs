@@ -4145,3 +4145,44 @@ fn creating_optional_configuration_is_staged_before_replacing_existing_files() {
         .to_string_lossy()
         .starts_with('.')));
 }
+
+#[test]
+fn server_case_runtime_checks_keep_server_paths_and_numerical_guards() {
+    let root = std::env::temp_dir().join(format!("colm-server-runtime-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join(".colm-desktop.json"),
+        r#"{"run_host":"compute","remote_directory":"/srv/projects/site"}"#,
+    )
+    .unwrap();
+    let doc = colm_namelist::parse("&nl_colm\n DEF_USE_LCT=.false.\n DEF_USE_PFT=.true.\n DEF_USE_BGC=.true.\n DEF_USE_NITRIF=.false.\n DEF_dir_runtime='/srv/data/runtime'\n DEF_USE_CN_INIT=.true.\n DEF_file_cn_init='runtime/cnsteadystate.nc'\n/\n").unwrap();
+    super::validate_runtime_contract(&doc, &root, None).unwrap();
+    let checks = super::server_runtime_paths(&doc, &root, None).unwrap();
+    let paths: Vec<_> = checks
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["path"].as_str().unwrap())
+        .collect();
+    assert!(paths.contains(&"/srv/projects/site/runtime/cnsteadystate.nc"));
+    assert!(
+        paths.contains(&"/srv/data/runtime/ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc")
+    );
+    let crop_paths = super::runtime_paths(&doc, &root, Some(true)).unwrap();
+    assert!(crop_paths
+        .iter()
+        .any(|(path, _, _)| path.contains("/crop/plantdt-")));
+    let mut invalid = doc.clone();
+    put(
+        &mut invalid,
+        "DEF_NDEP_FREQUENCY",
+        colm_namelist::Value::Int(9),
+    )
+    .unwrap();
+    assert!(super::validate_runtime_contract(&invalid, &root, None)
+        .unwrap_err()
+        .contains("DEF_NDEP_FREQUENCY"));
+    std::fs::remove_file(root.join(".colm-desktop.json")).unwrap();
+    assert!(super::validate_runtime_contract(&doc, &root, None).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}

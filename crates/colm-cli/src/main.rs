@@ -64,6 +64,7 @@ mod model_version;
 mod observation_table;
 mod provenance;
 mod remote_cmd;
+mod remote_files;
 mod remote_workspace_cmd;
 mod study;
 mod study_version;
@@ -430,6 +431,13 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "hybrid-info" => hybrid_cmd::cmd_hybrid_info(opts)?,
         "remote-workspace" => remote_workspace_cmd::run(opts)?,
         "remote-probe" => remote_cmd::cmd_probe(opts)?,
+        "remote-site-scan" => remote_cmd::remote_cases::cmd(opts, "scan")?,
+        "remote-case-create" => remote_cmd::remote_cases::cmd(opts, "create")?,
+        "remote-case-publish" => remote_cmd::remote_cases::cmd(opts, "publish")?,
+        "remote-case-sync" => remote_cmd::remote_cases::cmd(opts, "sync")?,
+        "remote-case-abort" => remote_cmd::remote_cases::cmd(opts, "abort")?,
+        "remote-browse" => remote_files::run(opts)?,
+        "remote-check-paths" => remote_files::check_paths(opts)?,
         "remote-engines" => remote_cmd::cmd_engines(opts)?,
         "remote-engine-clean" => remote_cmd::cmd_engine_clean(opts)?,
         "remote-engine-recover" => remote_cmd::cmd_engine_recover(opts)?,

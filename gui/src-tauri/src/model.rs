@@ -318,6 +318,8 @@ fn open_preview_with_case_identity(
     }
     preview.profile.domain_kind = source.domain_kind.clone();
     preview.profile.shapefile = source.shapefile.clone();
+    preview.profile.run_host = source.run_host.clone();
+    preview.profile.remote_directory = source.remote_directory.clone();
     Ok(preview)
 }
 #[tauri::command]

@@ -13,6 +13,8 @@ pub(crate) fn validate_case_name(name: &str) -> Result<(), String> {
 
 #[derive(Debug, Serialize)]
 pub struct CaseEntry {
+    pub run_host: Option<String>,
+    pub remote_directory: Option<String>,
     pub name: String,
     pub dir: String,
     /// 跑过没有 —— 有 history 文件就算跑过
@@ -41,7 +43,10 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
                     .to_string_lossy()
                     .into_owned()
             });
+        let record = recorded_case(&d);
         out.push(CaseEntry {
+            run_host: record.run_host,
+            remote_directory: record.remote_directory,
             // Keep malformed cases discoverable for repair; Study validation
             // reports their parse errors before any model can be launched.
             spatial: colm_case::is_spatial_case(&d.join("case.nml")).unwrap_or(false),
@@ -106,6 +111,8 @@ pub struct CaseProfile {
     pub engine: Option<String>,
     /// 算例运行的 SSH 主机别名；`None` 使用本机。
     pub run_host: Option<String>,
+    #[serde(default)]
+    pub remote_directory: Option<String>,
     /// 自动匹配的观测文件（内置示例或数据集里的 Flux/clean_observations 观测文件）。
     pub obs_file: Option<String>,
 }
@@ -153,6 +160,8 @@ pub struct CaseRecord {
     pub obs_file: Option<String>,
     #[serde(default)]
     pub run_host: Option<String>,
+    #[serde(default)]
+    pub remote_directory: Option<String>,
 }
 
 #[tauri::command]
@@ -168,6 +177,9 @@ pub fn set_case_run_host(dir: String, host: Option<String>) -> Result<(), String
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => CaseRecord::default(),
         Err(error) => return Err(format!("{}: {error}", path.display())),
     };
+    if record.remote_directory.is_some() && record.run_host != host {
+        return Err("服务器算例不能切换运行位置；请在目标服务器重新创建算例".into());
+    }
     record.run_host = host;
     record_case(&dir.to_string_lossy(), &record)
 }
@@ -394,6 +406,7 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     profile.shapefile = record.shapefile;
     profile.engine = record.engine;
     profile.run_host = record.run_host;
+    profile.remote_directory = record.remote_directory;
     let doc = colm_namelist::parse(&text).ok();
     profile.methane_mode = doc
         .as_ref()
@@ -601,6 +614,7 @@ pub(crate) fn case_profile(
         methane_mode: None,
         engine: None,
         run_host: None,
+        remote_directory: None,
         obs_file: None,
     })
 }

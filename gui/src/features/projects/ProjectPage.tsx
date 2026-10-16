@@ -67,6 +67,26 @@ export default function ProjectPage() {
     }
   }
   const shownRoots = state.root ? rememberProject(roots, state.root) : roots;
+  const projectLocation = (() => {
+    const first = state.cases[0];
+    const parent = (path: string) => {
+      const normalized = path.replace(/\/+$/, '');
+      return normalized.slice(0, normalized.lastIndexOf('/')) || '/';
+    };
+    if (first?.run_host && first.remote_directory?.startsWith('/')) {
+      const directory = parent(first.remote_directory);
+      if (
+        state.cases.every(
+          (entry) =>
+            entry.run_host === first.run_host &&
+            entry.remote_directory?.startsWith('/') &&
+            parent(entry.remote_directory) === directory,
+        )
+      )
+        return `${first.run_host}: ${directory}`;
+    }
+    return state.root;
+  })();
   const official = latestOfficial(state.versions);
   const versionRows = choosableVersions(state.versions);
   const modelReady =
@@ -342,7 +362,7 @@ export default function ProjectPage() {
             {t('返回项目首页', 'Back to project home')}
           </Button>
         </div>
-        <p className="path">{state.root}</p>
+        <p className="path">{projectLocation}</p>
         {error && <Notice tone="error">{error}</Notice>}
         {busy && <Notice>{t('正在打开，请稍候…', 'Opening, please wait…')}</Notice>}
         {!state.cases.length && (
@@ -719,7 +739,7 @@ export default function ProjectPage() {
             <div className="readiness-info">
               <strong>{t('当前工作目录', 'Current working folder')}</strong>
               <span className="path">
-                {state.root ||
+                {projectLocation ||
                   t(
                     '未选择项目目录（新建模拟时将使用默认路径）',
                     'No project folder selected (default path used for new simulations)',

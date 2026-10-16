@@ -50,6 +50,7 @@ import MultiSiteSettings from './MultiSiteSettings';
 import { planMultiSites, type MultiSiteDraft, type MultiSiteMode } from './multisite-model';
 import type { CaseEntry } from '../../lib/types';
 import RunLocationSettings from '../runs/RunLocationSettings';
+import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
 
 function siteInfo(s: Site, t: (zh: string, en: string) => string) {
@@ -176,7 +177,7 @@ export default function NewCasePage() {
     [creationDir, setCreationDir] = useState<string | null>(null),
     [cancellingCreation, setCancellingCreation] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
-    [ownData, setOwnData] = useState(seed?.ownData ?? false),
+    [ownData, setOwnData] = useState(!!seed?.form?.host || (seed?.ownData ?? false)),
     // 自动关闭提示只属于触发它的那一步，离开后不再残留。
     [autoClosed, setAutoClosed] = useState<{ text: string; step: number }>({ text: '', step: 0 });
   const stepProblem = (at: SimulationStep) => {
@@ -193,8 +194,20 @@ export default function NewCasePage() {
   const [multiSiteRepeat, setMultiSiteRepeat] = useState(seed?.multiSiteRepeat ?? '1');
   const [siteDrafts, setSiteDrafts] = useState<MultiSiteDraft[]>(seed?.siteDrafts ?? []);
   const [multiResults, setMultiResults] = useState<
-    Array<{ site: string; name: string; dir: string; created?: boolean; error?: string }>
+    Array<{
+      site: string;
+      name: string;
+      dir: string;
+      remoteDir?: string;
+      root?: string;
+      created?: boolean;
+      error?: string;
+    }>
   >([]);
+  const [remotePicker, setRemotePicker] = useState<{
+    key: string;
+    resolve: (path: string | null) => void;
+  } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
@@ -365,6 +378,40 @@ export default function NewCasePage() {
   }
   const set = (k: string, v: string) => {
     setError('');
+    if (k === 'host' && v !== form.host) {
+      ++sequence.current;
+      exampleValues.current = {};
+      setSites([]);
+      setSiteDrafts([]);
+      setMultiResults([]);
+      setHint('');
+      setOwnData(!!v);
+      setCaseValues((old) =>
+        Object.fromEntries(
+          Object.entries(old).filter(
+            ([key, value]) =>
+              !/(dir_|file_|fsitedata|filename|path)/i.test(key) &&
+              !/^['"]?(\/|[A-Za-z]:[\\/])/.test(value),
+          ),
+        ),
+      );
+      setForm((old) => ({
+        ...old,
+        host: v,
+        root: v ? (servers?.find((server) => server.host === v)?.root ?? '') : (state.root ?? ''),
+        sitedir: '',
+        forcingdir: '',
+        site: '',
+        met: '',
+        rawdata: '',
+        runtime: '',
+        mesh: '',
+        catchment: '',
+        shapefile: '',
+        forcing: '',
+      }));
+      return;
+    }
     delete exampleValues.current[k];
     if (k === 'kind' || k === 'grid')
       reconcile(
@@ -414,11 +461,15 @@ export default function NewCasePage() {
   }
   async function scan(dir = form.sitedir, forcingDir = form.forcingdir) {
     const id = ++sequence.current;
-    const result = await invoke<{ sites: Site[]; hint?: string }>('scan_sites', {
-      dir,
-      forcingDir: forcingDir || null,
-      quick: false,
-    });
+    const result = await invoke<{ sites: Site[]; hint?: string }>(
+      form.host ? 'remote_scan_sites' : 'scan_sites',
+      {
+        ...(form.host ? { host: form.host, modelRevision: state.versionRef } : {}),
+        dir,
+        forcingDir: forcingDir || null,
+        quick: false,
+      },
+    );
     if (alive.current && id === sequence.current) {
       setSites(result.sites);
       setSiteDrafts((drafts) =>
@@ -457,6 +508,7 @@ export default function NewCasePage() {
     setOwnData(true);
   }
   async function example() {
+    if (form.host) throw new Error(t('请从服务器选择数据。', 'Choose data from the server.'));
     return work(async () => {
       setMultiSiteEnabled(false);
       const x = await invoke<{
@@ -557,9 +609,11 @@ export default function NewCasePage() {
     fileKeys = ['site', 'met', 'mesh', 'catchment', 'shapefile', 'forcing'];
   async function pick(k: string) {
     return work(async () => {
-      const path = folderKeys.includes(k)
-        ? await invoke<string | null>('pick_folder', { key: `new-${k}` })
-        : await invoke<string | null>('pick_file', { key: `new-${k}`, filter: null });
+      const path = form.host
+        ? await new Promise<string | null>((resolve) => setRemotePicker({ key: k, resolve }))
+        : folderKeys.includes(k)
+          ? await invoke<string | null>('pick_folder', { key: `new-${k}` })
+          : await invoke<string | null>('pick_file', { key: `new-${k}`, filter: null });
       if (path) set(k, path);
       return { path, cancelled: !path };
     });
@@ -710,6 +764,34 @@ export default function NewCasePage() {
     });
   }
 
+  async function createDestination(
+    command: 'new_case' | 'new_spatial_case',
+    args: Record<string, unknown>,
+  ) {
+    if (!form.host) {
+      await invoke(command, args);
+      return {
+        dir: String(args.out),
+        root: form.root,
+        remote_dir: undefined as string | undefined,
+      };
+    }
+    const modelRevision = args.modelRevision;
+    const request = Object.fromEntries(
+      Object.entries(args)
+        .filter(([key]) => key !== 'modelRevision' && key !== 'runHost')
+        .map(([key, value]) => [
+          key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
+          value,
+        ]),
+    );
+    return invoke<{ dir: string; root: string; remote_dir: string }>('remote_create_case', {
+      host: form.host,
+      modelRevision,
+      request: { ...request, kind: command === 'new_case' ? 'site' : args.domain },
+    });
+  }
+
   async function createMultiSites() {
     const plans = multiPlans(5);
     const revision = state.versionRef;
@@ -721,25 +803,30 @@ export default function NewCasePage() {
       for (const plan of plans) {
         if (job.cancelRequested) break;
         const out = caseDirectory(plan.form.root, plan.form.name);
-        if (results.some((result) => result.dir === out && !result.error)) continue;
+        if (results.some((result) => (result.remoteDir || result.dir) === out && !result.error))
+          continue;
         job.dir = out;
         setCreationDir(out);
-        const prior = results.find((result) => result.dir === out);
+        const prior = results.find((result) => (result.remoteDir || result.dir) === out);
         const result = {
           site: plan.site.site_file,
           name: plan.form.name,
-          dir: out,
+          dir: prior?.dir ?? out,
+          remoteDir: form.host ? out : undefined,
+          root: prior?.root,
           created: prior?.created,
         } as {
           site: string;
           name: string;
           dir: string;
+          remoteDir?: string;
+          root?: string;
           created?: boolean;
           error?: string;
         };
         try {
-          if (!result.created)
-            await invoke('new_case', {
+          if (!result.created) {
+            const destination = await createDestination('new_case', {
               site: plan.form.site,
               out,
               name: plan.form.name,
@@ -753,11 +840,17 @@ export default function NewCasePage() {
               modelRevision: revision,
               engine: form.engine,
               runHost: form.host || null,
+              ...(form.host && multiSiteMode === 'first-year'
+                ? { spinupRepeat: Number(multiSiteRepeat) }
+                : {}),
             });
+            result.dir = destination.dir;
+            result.root = destination.root;
+          }
           result.created = true;
-          if (multiSiteMode === 'first-year')
+          if (multiSiteMode === 'first-year' && !form.host)
             await invoke('set_spinup', {
-              dirs: [out],
+              dirs: [result.dir],
               years: 1,
               repeat: Number(multiSiteRepeat),
               replayStart: true,
@@ -766,7 +859,7 @@ export default function NewCasePage() {
         } catch (error) {
           result.error = String(error);
         }
-        const previous = results.findIndex((item) => item.dir === out);
+        const previous = results.findIndex((item) => (item.remoteDir || item.dir) === out);
         if (previous >= 0) results[previous] = result;
         else results.push(result);
         if (alive.current) setMultiResults([...results]);
@@ -806,7 +899,11 @@ export default function NewCasePage() {
 
   async function viewCreatedProject() {
     return work(async () => {
-      const root = caseDirectory(form.root, form.name);
+      const root = form.host
+        ? multiResults.find((result) => result.root)?.root
+        : caseDirectory(form.root, form.name);
+      if (!root)
+        throw new Error(t('没有成功创建的服务器项目。', 'No server project has been created.'));
       const cases = await invoke<CaseEntry[]>('list_cases', { root });
       await invoke('save_recent', { key: 'root', value: root });
       update({ root, cases, selectedCase: null, newCaseSeed: null });
@@ -849,9 +946,10 @@ export default function NewCasePage() {
       creation.current = job;
       setCreationDir(out);
       setCancellingCreation(false);
+      let destination: { dir: string; root: string };
       try {
         if (form.kind === 'site')
-          await invoke('new_case', {
+          destination = await createDestination('new_case', {
             site: form.site,
             out,
             name: form.name,
@@ -869,7 +967,7 @@ export default function NewCasePage() {
         else {
           const number = (k: string) => requiredNumber(form[k], k),
             bounds = form.kind === 'region' && form.grid === 'latlon';
-          await invoke('new_spatial_case', {
+          destination = await createDestination('new_spatial_case', {
             domain: form.kind,
             gridKind: form.grid,
             shapefile: form.shapefile || null,
@@ -907,9 +1005,9 @@ export default function NewCasePage() {
           }
         }
       }
-      update({ root: form.root, versionRef: revision });
+      update({ root: destination.root, versionRef: revision });
       lock.current = false;
-      return await openCase(out);
+      return await openCase(destination.dir);
     });
   }
   async function cancelCreation() {
@@ -939,7 +1037,7 @@ export default function NewCasePage() {
   const labels: Record<string, string> = {
     engine: t('计算核心', 'Computation core'),
     root: form.host
-      ? t('本地项目保存目录', 'Local project folder')
+      ? t('服务器项目目录', 'Server project folder')
       : t('保存到项目目录', 'Project folder'),
     output: t('模拟输出路径', 'Simulation output path'),
     name: t('模拟名称', 'Simulation name'),
@@ -1227,7 +1325,7 @@ export default function NewCasePage() {
           },
         ]
       : []),
-    ...(creationDir
+    ...(creationDir && !form.host
       ? [
           {
             id: 'new-cancel-creation',
@@ -1292,13 +1390,17 @@ export default function NewCasePage() {
         ]),
     ...(step === 3 && form.kind === 'site'
       ? [
-          {
-            id: 'new-example',
-            label: t('使用内置示例', 'Use bundled examples'),
-            kind: 'commit' as const,
-            enabled,
-            run: example,
-          },
+          ...(!form.host
+            ? [
+                {
+                  id: 'new-example',
+                  label: t('使用内置示例', 'Use bundled examples'),
+                  kind: 'commit' as const,
+                  enabled,
+                  run: example,
+                },
+              ]
+            : []),
           {
             id: 'new-own-data',
             label: t('使用自己的数据', 'Use your data'),
@@ -1478,7 +1580,28 @@ export default function NewCasePage() {
             : t('正在处理，请稍候…', 'Working, please wait…')}
         </Notice>
       )}
-      {creationDir && (
+      {remotePicker && (
+        <RemotePathBrowser
+          host={form.host}
+          initialPath={
+            folderKeys.includes(remotePicker.key)
+              ? form[remotePicker.key] || form.root
+              : form[remotePicker.key]?.slice(0, form[remotePicker.key].lastIndexOf('/')) ||
+                form.root
+          }
+          directory={folderKeys.includes(remotePicker.key)}
+          en={en}
+          onSelect={(path) => {
+            remotePicker.resolve(path);
+            setRemotePicker(null);
+          }}
+          onClose={() => {
+            remotePicker.resolve(null);
+            setRemotePicker(null);
+          }}
+        />
+      )}
+      {creationDir && !form.host && (
         <Button disabled={cancellingCreation} onClick={() => void cancelCreation().catch(() => {})}>
           {t('取消创建', 'Cancel creation')}
         </Button>
@@ -1493,6 +1616,7 @@ export default function NewCasePage() {
         >
           <RunLocationSettings
             host={form.host}
+            serverNative={!!form.host}
             servers={servers}
             disabled={!enabled}
             error={resourceError}
@@ -1629,13 +1753,23 @@ export default function NewCasePage() {
           {form.kind === 'site' && (
             <>
               <div className="actions simulation-source">
-                <Button disabled={!enabled} onClick={() => void example().catch(() => {})}>
-                  {t('使用内置示例', 'Use bundled examples')}
-                </Button>
+                {!form.host && (
+                  <Button disabled={!enabled} onClick={() => void example().catch(() => {})}>
+                    {t('使用内置示例', 'Use bundled examples')}
+                  </Button>
+                )}
                 <Button disabled={!enabled} onClick={selectOwnData}>
                   {t('使用自己的数据', 'Use your data')}
                 </Button>
               </div>
+              {form.host && (
+                <Notice>
+                  {t(
+                    '请选择服务器上已有的输入数据。内置示例仅用于本机。',
+                    'Choose existing server input data. Bundled examples are available locally.',
+                  )}
+                </Notice>
+              )}
               {ownData && (
                 <div className="simulation-own-data">
                   <div className="form-grid">{['sitedir', 'forcingdir'].map(render)}</div>
@@ -1877,6 +2011,7 @@ export default function NewCasePage() {
       )}
       {step === 4 && (
         <ModelSettings
+          runHost={form.host || undefined}
           version={state.version}
           disabled={!enabled}
           classification={classification}
@@ -2092,7 +2227,7 @@ export default function NewCasePage() {
               <p>
                 {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
               </p>
-              <p className="path">{result.dir}</p>
+              <p className="path">{result.remoteDir || result.dir}</p>
               {result.error && <Notice tone="error">{result.error}</Notice>}
             </div>
           ))}

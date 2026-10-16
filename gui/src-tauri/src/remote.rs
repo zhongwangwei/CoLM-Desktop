@@ -688,6 +688,52 @@ async fn ssh_cli_json_untracked(
     .map_err(|e| e.to_string())?
 }
 
+pub(crate) async fn check_server_paths(
+    app: tauri::AppHandle,
+    host: &str,
+    checks: Value,
+) -> Result<(), String> {
+    let server = server_for(app.clone(), host)?;
+    ssh_cli_json(
+        vec![
+            "remote-check-paths".into(),
+            "--host".into(),
+            server.host.clone(),
+            "--checks".into(),
+            checks.to_string(),
+        ],
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remote_browse(
+    app: tauri::AppHandle,
+    host: String,
+    path: Option<String>,
+) -> Result<Value, String> {
+    let server = server_for(app.clone(), &host)?;
+    let path = path.unwrap_or_default();
+    if !path.is_empty() && (!path.starts_with('/') || path.chars().any(char::is_control)) {
+        return Err("Expected an absolute server path without control characters".into());
+    }
+    ssh_cli_json(
+        vec![
+            "remote-browse".into(),
+            "--host".into(),
+            server.host.clone(),
+            "--path".into(),
+            path,
+        ],
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
     validate(&RemoteConfig {
@@ -876,6 +922,54 @@ pub(crate) fn run_args(
     args
 }
 
+/// Recover server ownership from a frozen run's source configuration mirror.
+pub(crate) fn server_case_owner(case: &str) -> Result<Option<(String, String)>, String> {
+    let mut source = PathBuf::from(case);
+    let manifest = source.join(colm_model::RUN_MANIFEST);
+    if manifest.is_file() {
+        let run: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(&manifest).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        source = run.source_case;
+    }
+    let metadata = source.join(".colm-desktop.json");
+    let bytes = match std::fs::read(metadata) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let profile: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+    let Some(directory) = profile["remote_directory"].as_str() else {
+        return Ok(None);
+    };
+    let host = profile["run_host"]
+        .as_str()
+        .filter(|h| {
+            !h.is_empty()
+                && !h.starts_with('-')
+                && !h.contains(|c: char| c.is_whitespace() || c.is_control())
+        })
+        .ok_or("服务器算例缺少有效的所属服务器")?;
+    if !directory.starts_with('/')
+        || directory.trim_end_matches('/').is_empty()
+        || directory.contains(|c: char| c.is_control() || c == '\\')
+        || directory.split('/').any(|part| matches!(part, "." | ".."))
+    {
+        return Err("无效的服务器算例目录".into());
+    }
+    Ok(Some((host.into(), directory.trim_end_matches('/').into())))
+}
+
+pub(crate) fn server_case_args(case: &str, host: &str) -> Result<Vec<String>, String> {
+    let Some((owner, directory)) = server_case_owner(case)? else {
+        return Ok(Vec::new());
+    };
+    if owner != host {
+        return Err("服务器算例只能在创建它的服务器上运行".into());
+    }
+    Ok(vec!["--server-case".into(), directory])
+}
+
 /// 调度与环境的参数（编内核、跑算例共用）。
 pub(crate) fn scheduler_args(server: &Server) -> Vec<String> {
     let mut args: Vec<String> = vec!["--scheduler".into(), server.scheduler.clone()];
@@ -904,12 +998,51 @@ pub(crate) fn scheduler_args(server: &Server) -> Vec<String> {
     args
 }
 
-fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
+pub(crate) fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, String> {
     remote_config(app)?
         .servers
         .into_iter()
         .find(|s| s.host == host)
         .ok_or_else(|| format!("没有配置服务器 {host}"))
+}
+
+async fn validate_server_case_inputs(
+    app: &tauri::AppHandle,
+    case: &str,
+    host: &str,
+    kernel: &str,
+    revision: Option<colm_model::VersionRef>,
+) -> Result<(), String> {
+    if server_case_owner(case)?.is_none() {
+        return Ok(());
+    }
+    let preview = if PathBuf::from(case).join(colm_model::RUN_MANIFEST).is_file() {
+        None
+    } else {
+        Some(
+            crate::model::model_case_context(case.to_owned(), revision)
+                .await?
+                .entry
+                .dir,
+        )
+    };
+    let result = async {
+        let dir = preview.as_deref().unwrap_or(case);
+        let text = std::fs::read_to_string(PathBuf::from(dir).join("case.nml"))
+            .map_err(|error| error.to_string())?;
+        let doc = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+        let checks = crate::config::server_runtime_paths(
+            &doc,
+            std::path::Path::new(case),
+            (!kernel.is_empty()).then_some(kernel),
+        )?;
+        check_server_paths(app.clone(), host, checks).await
+    }
+    .await;
+    if let Some(preview) = preview {
+        let _ = std::fs::remove_dir_all(preview);
+    }
+    result
 }
 
 #[tauri::command]
@@ -939,7 +1072,10 @@ pub async fn remote_run(
         ranks,
         model_version,
     };
+    let server_args = server_case_args(&case, &host)?;
+    validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
     let mut args = run_args(&server, case.clone(), kernel, stage, force, false, &engine);
+    args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
     ssh_cli_json_for_run(
@@ -1013,13 +1149,16 @@ pub async fn remote_preview(
 ) -> Result<Value, String> {
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
-    let server = server_for(app, &host)?;
+    let server = server_for(app.clone(), &host)?;
     let engine = Engine {
         engine,
         ranks,
         model_version,
     };
+    let server_args = server_case_args(&case, &host)?;
+    validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
     let mut args = run_args(&server, case, kernel, stage, force, true, &engine);
+    args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
     ssh_cli_json(args, resources, Some(&server)).await
@@ -1277,4 +1416,35 @@ pub async fn remote_study_cancel(
         Some(&server),
     )
     .await
+}
+
+#[cfg(test)]
+mod server_case_routing_tests {
+    use super::*;
+    #[test]
+    fn server_case_requires_owning_host_and_absolute_project() {
+        let root = std::env::temp_dir().join(format!("colm-server-route-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let case = root.to_string_lossy();
+        std::fs::write(
+            root.join(".colm-desktop.json"),
+            br#"{"run_host":"server","remote_directory":"/data/project/"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            server_case_args(&case, "server").unwrap(),
+            vec!["--server-case", "/data/project"]
+        );
+        assert!(server_case_args(&case, "").is_err());
+        assert!(server_case_args(&case, "other").is_err());
+        std::fs::write(
+            root.join(".colm-desktop.json"),
+            br#"{"run_host":"server","remote_directory":"/data/../other"}"#,
+        )
+        .unwrap();
+        assert!(server_case_args(&case, "server").is_err());
+        std::fs::write(root.join(".colm-desktop.json"), br#"{"run_host":"server"}"#).unwrap();
+        assert!(server_case_args(&case, "server").unwrap().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }

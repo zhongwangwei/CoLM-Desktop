@@ -1005,3 +1005,159 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
     assert!(materialized_revision(&run.run_case).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn server_destination_is_confined_to_project_runs() {
+    assert_eq!(
+        server_destination("/data/My project/", Some("run-123")).unwrap(),
+        "/data/My project/runs/run-123"
+    );
+    assert_eq!(
+        server_destination("/data/project", None).unwrap(),
+        "/data/project"
+    );
+    for bad in [
+        "/",
+        "relative",
+        "/data/../other",
+        "/data/./other",
+        "/data/\nother",
+        "/data\\other",
+    ] {
+        assert!(server_destination(bad, Some("run-123")).is_err(), "{bad}");
+    }
+    assert!(server_destination("/data/project", Some("../escape")).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn server_inputs_ignore_local_existence_and_user_maps() {
+    let root = std::env::temp_dir().join(format!("colm-server-inputs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let case = root.join("mirror");
+    std::fs::create_dir_all(case.join("runs/old")).unwrap();
+    let external = root.join("server-dataset.nc");
+    std::fs::write(&external, b"local file with same name must not be uploaded").unwrap();
+    std::fs::write(case.join("case.nml"), format!("&nl_colm\n DEF_CASE_NAME='demo'\n SITE_fsitedata='{}'\n DEF_forcing_namelist='{}/forcing.nml'\n DEF_dir_output='out/'\n/\n", external.display(), case.display())).unwrap();
+    std::fs::write(
+        case.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='/server/data/'\n/\n",
+    )
+    .unwrap();
+    std::fs::write(case.join("runs/old/huge.nc"), b"do not stage old results").unwrap();
+    let staging = root.join("stage");
+    let maps = vec![Mapping {
+        local: root.to_string_lossy().into_owned(),
+        remote: "/wrong".into(),
+    }];
+    let staged = stage_case_inputs(
+        &case,
+        &staging,
+        "/server/project/runs/new",
+        &maps,
+        false,
+        true,
+    )
+    .unwrap();
+    let doc =
+        colm_namelist::parse(&std::fs::read_to_string(staging.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(
+        doc.get("SITE_fsitedata"),
+        Some(&Value::Str(external.to_string_lossy().into_owned()))
+    );
+    assert_eq!(
+        doc.get("DEF_forcing_namelist"),
+        Some(&Value::Str("/server/project/runs/new/forcing.nml".into()))
+    );
+    assert_eq!(
+        doc.get("DEF_dir_output"),
+        Some(&Value::Str("/server/project/runs/new/out/".into()))
+    );
+    assert!(staged.unmapped.is_empty());
+    assert!(staged
+        .remote_inputs
+        .contains(&external.to_string_lossy().into_owned()));
+    assert!(!staging.join("runs").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn server_destination_claim_rejects_unowned_existing_and_escaped_directories() {
+    let root = std::env::temp_dir().join(format!("colm-server-claim-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(&root).unwrap();
+    let target = root.join("runs/run-1");
+    let execute = |claim: &str| {
+        std::process::Command::new("python3")
+            .args(["-c", CLAIM_SERVER_RUN])
+            .arg(&root)
+            .arg(&target)
+            .arg(claim)
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    };
+    assert!(!execute("0"));
+    std::fs::write(
+        root.join(".colm-desktop-server.json"),
+        serde_json::to_vec(&json!({"schema":1,"remote_directory":root.to_string_lossy()})).unwrap(),
+    )
+    .unwrap();
+    assert!(execute("0"));
+    assert!(!target.exists());
+    assert!(execute("1"));
+    std::fs::write(target.join("keep"), b"original").unwrap();
+    assert!(!execute("1"));
+    assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"original");
+    std::fs::remove_dir_all(root.join("runs")).unwrap();
+    std::os::unix::fs::symlink(&root, root.join("runs")).unwrap();
+    assert!(!execute("0"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn server_configuration_maps_windows_cache_paths_before_server_path_validation() {
+    let case = Path::new(r"\\?\C:\Users\user\case\runs\run-1");
+    let remote = "/data/project/runs/run-1";
+    for path in [
+        r"C:\Users\user\case\runs\run-1\forcing.nml",
+        r"\\?\C:\Users\user\case\runs\run-1\forcing.nml",
+        "C:/Users/user/case/runs/run-1/forcing.nml",
+    ] {
+        assert_eq!(
+            server_place(path, case, remote, &[]).unwrap(),
+            Placed::Remote(format!("{remote}/forcing.nml"))
+        );
+    }
+    let aliases = vec![Mapping {
+        local: r"C:\short-run".into(),
+        remote: remote.into(),
+    }];
+    assert_eq!(
+        server_place(r"C:\short-run\params\", case, remote, &aliases).unwrap(),
+        Placed::Remote(format!("{remote}/params/"))
+    );
+    let unc_case = Path::new(r"\\?\UNC\server\share\case");
+    assert_eq!(
+        server_place(r"\\server\share\case\forcing.nml", unc_case, remote, &[]).unwrap(),
+        Placed::Remote(format!("{remote}/forcing.nml"))
+    );
+    for path in [
+        r"C:\elsewhere\forcing.nc",
+        "C:/elsewhere/forcing.nc",
+        r"/data\forcing.nc",
+        r"C:\short-run\..\escape.nc",
+        r"C:\short-run-other\forcing.nc",
+    ] {
+        assert!(
+            server_place(path, case, remote, &aliases).is_err(),
+            "{path}"
+        );
+    }
+    assert_eq!(
+        server_place("/data/forcing.nc", case, remote, &aliases).unwrap(),
+        Placed::Remote("/data/forcing.nc".into())
+    );
+}

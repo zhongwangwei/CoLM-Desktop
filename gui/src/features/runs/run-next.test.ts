@@ -14,13 +14,14 @@ function render(
   batchCases?: string[],
   savedHost?: string,
   saveError?: string,
+  remoteDirectory?: string,
 ) {
   const effects: (() => void)[] = [];
   const state = {
     selectedCase: {
       dir: '/case',
       entry: { name: '/case' },
-      profile: { run_host: savedHost ?? null },
+      profile: { run_host: savedHost ?? null, remote_directory: remoteDirectory ?? null },
     },
     language: 'zh',
     expert: false,
@@ -369,4 +370,21 @@ test('active local jobs override a saved remote run location', () => {
   page.effects[3]();
   page.effects[4]();
   assert.deepEqual(page.hostChanges, ['']);
+});
+
+test('server-native case keeps its owning host locked in the run panel', async () => {
+  const page = render(
+    undefined,
+    [],
+    undefined,
+    {},
+    undefined,
+    'compute',
+    undefined,
+    '/srv/project/site',
+  );
+  assert.equal(page.location?.props.disabled, true);
+  await (page.location!.props.onChange as (e: unknown) => Promise<void>)({ target: { value: '' } });
+  assert.deepEqual(page.calls, []);
+  assert.equal(page.state.selectedCase.profile.run_host, 'compute');
 });
