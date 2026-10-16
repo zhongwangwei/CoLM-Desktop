@@ -67,6 +67,7 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install and verify React frontend
+        shell: bash
         working-directory: gui
         run: |
           npm ci
@@ -218,6 +219,7 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install and verify React frontend
+        shell: bash
         working-directory: gui
         run: |
           npm ci

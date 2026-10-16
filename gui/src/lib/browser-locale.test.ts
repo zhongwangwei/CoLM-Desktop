@@ -23,7 +23,14 @@ test('valid browser locales are retained without redefining the property', () =>
 });
 
 test('the real chart dependency imports after normalizing WebKit C locale', () => {
-  execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+  execFileSync(
+    process.execPath,
+    [
+      '--import',
+      'tsx',
+      '--input-type=module',
+      '-e',
+      `
     import assert from 'node:assert/strict';
     import { normalizeBrowserLocale } from './src/lib/browser-locale.ts';
     globalThis.window = new EventTarget();
@@ -35,5 +42,8 @@ test('the real chart dependency imports after normalizing WebKit C locale', () =
     normalizeBrowserLocale(navigator);
     const {default: uPlot} = await import('uplot');
     assert.equal(typeof uPlot, 'function');
-  `], { cwd: new URL('../..', import.meta.url), stdio: 'pipe' });
+  `,
+    ],
+    { cwd: new URL('../..', import.meta.url), stdio: 'pipe' },
+  );
 });
