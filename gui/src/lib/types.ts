@@ -159,6 +159,10 @@ export type AppState = {
     step?: 1 | 2 | 3 | 4 | 5;
     ownData?: boolean;
     exampleValues?: Record<string, string>;
+    multiSiteEnabled?: boolean;
+    multiSiteMode?: import('../features/cases/multisite-model').MultiSiteMode;
+    multiSiteRepeat?: string;
+    siteDrafts?: import('../features/cases/multisite-model').MultiSiteDraft[];
   } | null;
   simulationReturn: {
     route: 'new-case' | 'case';
