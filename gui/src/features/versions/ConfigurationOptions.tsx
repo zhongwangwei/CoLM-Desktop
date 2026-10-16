@@ -30,6 +30,7 @@ import {
   tracerFamilyState,
   tracerSetupIssues,
   appendTracerFamily,
+  applyTracerSelection,
   setStomatalScheme,
   groupedField,
   unquote,
@@ -941,13 +942,17 @@ export default function ConfigurationOptions({
           const availability = tracerFamilyState(overlay, family.id, familyContext),
             next = appendTracerFamily(table, family.id),
             already = next.length === table.length,
-            blocked = !tracerReady || already;
+            singlepointSediment =
+              family.id === 'sediment' &&
+              (caseScope === 'site' ||
+                familyContext.kernelMacros?.some((macro) => macro.toLowerCase() === 'singlepoint')),
+            blocked = !tracerReady || already || singlepointSediment;
           const add = () => {
             if (!familyVisible || blocked || current.current !== request)
               throw new Error('Family is unavailable or already present');
             if (stagedTracerModal) {
               try {
-                write(() => setTracerRows(overlay, fields, next));
+                write(() => applyTracerSelection(overlay, fields, next));
                 setTracers(null);
               } catch {
                 setTracers(next);
@@ -972,18 +977,31 @@ export default function ConfigurationOptions({
             >
               <strong>{t(family.zh, family.en)}</strong>
               <span>{family.rows.map(([name]) => name).join(' / ')}</span>
-              <small>
-                {already
-                  ? t('已在定义表中', 'Already in the table')
-                  : availability.status === 'blocked'
-                    ? t(
-                        '可先选择；保存前须解决依赖冲突',
-                        'Can prefill; resolve prerequisites before saving',
-                      )
-                    : availability.status === 'pending'
-                      ? t('可以预填；适用性待核对', 'Can prefill; applicability pending')
-                      : t('预填到定义表', 'Prefill definition table')}
-              </small>
+              {family.id === 'methane' && (
+                <small>{t('选择甲烷会同时启用 BGC', 'Selecting methane also enables BGC')}</small>
+              )}
+              {singlepointSediment && (
+                <small>
+                  {t(
+                    '单点算例不支持河道泥沙，请选择空间算例',
+                    'River sediment requires a spatial case; single-site cases are unsupported',
+                  )}
+                </small>
+              )}
+              {!singlepointSediment && (
+                <small>
+                  {already
+                    ? t('已在定义表中', 'Already in the table')
+                    : availability.status === 'blocked'
+                      ? t(
+                          '可先选择；保存前须解决依赖冲突',
+                          'Can prefill; resolve prerequisites before saving',
+                        )
+                      : availability.status === 'pending'
+                        ? t('可以预填；适用性待核对', 'Can prefill; applicability pending')
+                        : t('预填到定义表', 'Prefill definition table')}
+                </small>
+              )}
               {availability.reasons.map(([zh, english]) => (
                 <small key={zh}>{t(zh, english)}</small>
               ))}
@@ -1148,7 +1166,7 @@ export default function ConfigurationOptions({
           disabled={!tracerReady || tracers === null}
           onClick={() => {
             try {
-              write(() => setTracerRows(overlay, fields, table));
+              write(() => applyTracerSelection(overlay, fields, table));
               setTracers(null);
             } catch {
               /* Preserve incomplete table. */
@@ -1205,7 +1223,7 @@ export default function ConfigurationOptions({
       run: () => {
         if (!tracerOpen || !tracerReady || tracers === null)
           throw new Error('Tracer table is unavailable');
-        write(() => setTracerRows(overlay, fields, table));
+        write(() => applyTracerSelection(overlay, fields, table));
         setTracers(null);
       },
     },

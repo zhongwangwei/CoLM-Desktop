@@ -1818,6 +1818,7 @@ test('malformed tracer file mappings show a repairable error without crashing th
 
 test('focused tracer presets stage one modal patch and become save-ready without Apply', async () => {
   const h = tracerModalHarness();
+  h.props.overlay.physics.DEF_USE_BGC = '.false.';
   const patches: helpers.CaseOptionPatch[] = [];
   h.props.caseValues = { ...h.props.overlay.physics };
   h.props.onCaseChange = (patch) => {
@@ -1833,6 +1834,7 @@ test('focused tracer presets stage one modal patch and become save-ready without
   c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
   assert.equal(patches.length, 1);
   assert.equal(patches[0].DEF_TRACER_NAMES, "'CH4'");
+  assert.equal(patches[0].DEF_USE_BGC, '.true.');
   assert.equal(h.changes.length, 0);
   h.render();
   await h.settle();
@@ -1901,3 +1903,48 @@ test('preset mixed with incomplete numeric columns retains local rows for correc
   assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-MRAT')!.value, '35');
   assert.match(JSON.stringify(h.nodes), /Fill the whole column|填写整列/);
 });
+
+test('nonmodal methane selection enables BGC only when definitions are applied', async () => {
+  const h = tracerModalHarness();
+  h.props.modalActions = undefined;
+  h.props.overlay.physics.DEF_USE_BGC = '.false.';
+  h.render();
+  let c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
+  c = h.render();
+  assert.equal(h.changes.length, 0);
+  assert.equal(h.props.overlay.physics.DEF_USE_BGC, '.false.');
+  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  assert.equal(h.changes.length, 1);
+  assert.equal(h.props.overlay.physics.DEF_USE_BGC, '.true.');
+  assert.equal(helpers.tracerRows(h.props.overlay)[0].NAMES, 'CH4');
+});
+
+for (const site of ['scope', 'macro', 'spatial']) {
+  test(`sediment picker enforces single-site restriction in native and guide controls: ${site}`, async () => {
+    const h = tracerModalHarness();
+    h.props.caseScope = site === 'scope' ? 'site' : 'spatial';
+    h.props.kernelMacros = site === 'macro' ? ['SiNgLePoInT'] : [];
+    h.render();
+    const c = await h.settle();
+    const action = c.actions.find((item) => item.id === 'configuration-family-sediment')!;
+    const button = h.nodes.find(
+      (node) => node.type === 'Button' && node.props.onClick === action.run,
+    )!;
+    assert.ok(button);
+    assert.equal(action.enabled, site === 'spatial');
+    assert.equal(button.props.disabled, site !== 'spatial');
+    if (site !== 'spatial') {
+      assert.throws(() => action.run(), /unavailable/);
+      assert.equal(h.changes.length, 0);
+      assert.match(JSON.stringify(button), /单点算例不支持/);
+      assert.doesNotMatch(JSON.stringify(button), /可先选择|Can prefill/);
+    } else {
+      action.run();
+      assert.equal(
+        h.render().fields.find((field) => field.id === 'configuration-tracer-0-NAMES')!.value,
+        'SEDIMENT',
+      );
+    }
+  });
+}

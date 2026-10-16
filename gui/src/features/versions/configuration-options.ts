@@ -382,6 +382,20 @@ export function setTracerRows(
   }
   return next;
 }
+export function applyTracerSelection(
+  overlay: Overlay,
+  fields: ModelField[],
+  rows: ReturnType<typeof tracerRows>,
+): Overlay {
+  const next = setTracerRows(overlay, fields, rows);
+  return rows.some(
+    (row) =>
+      ['ch4', 'methane'].includes(row.NAMES.trim().toLowerCase()) &&
+      row.TYPES.trim().toLowerCase() === 'gas',
+  )
+    ? setModelOption(next, fields, 'DEF_USE_BGC', '.true.')
+    : next;
+}
 export function processListValues(raw: string): string[] {
   const values: string[] = [];
   let value = '',

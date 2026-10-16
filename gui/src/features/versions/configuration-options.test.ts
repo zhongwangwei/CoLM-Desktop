@@ -11,6 +11,7 @@ import {
   tracerFamilyState,
   tracerSetupIssues,
   appendTracerFamily,
+  applyTracerSelection,
   setStomatalScheme,
   groupedField,
   setModelOption,
@@ -877,4 +878,66 @@ test('verified active methane inundation modes require routing without rejecting
     tracerSetupIssues(overlay, { ...context, processFiles: processFiles('wetwat') }),
     [],
   );
+});
+
+test('applying methane selection enables BGC atomically without changing dry-run validation or unrelated metadata', () => {
+  const fields = [
+    ...tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character')),
+    field('DEF_USE_BGC'),
+  ];
+  const overlay = empty();
+  overlay.physics.DEF_USE_BGC = '.false.';
+  overlay.physics.KEEP = 'saved';
+  const d = descriptor('process:init', 'DEF_TRACER%init_conc');
+  overlay.process_files = [{ relative_path: 'custom.nml', sha256: 'a' }];
+  const saved = setScopedOption(overlay, d, '2.', 0, 'custom.nml');
+  const before = structuredClone(saved);
+  for (const name of ['CH4', 'ch4', 'METHANE', 'Methane']) {
+    const rows = appendTracerFamily([], 'methane').map((row) => ({ ...row, NAMES: name }));
+    assert.equal(setTracerRows(saved, fields, rows).physics.DEF_USE_BGC, '.false.');
+    const next = applyTracerSelection(saved, fields, rows);
+    assert.equal(next.physics.DEF_USE_BGC, '.true.');
+    assert.equal(next.physics.KEEP, 'saved');
+    assert.deepEqual(next.parameters, saved.parameters);
+    assert.deepEqual(next.process_files, saved.process_files);
+  }
+  assert.deepEqual(saved, before);
+  const rows = appendTracerFamily([], 'methane');
+  assert.throws(
+    () =>
+      applyTracerSelection(
+        saved,
+        fields.filter((f) => f.name !== 'DEF_USE_BGC'),
+        rows,
+      ),
+    /not writable/,
+  );
+  assert.throws(
+    () =>
+      applyTracerSelection(
+        saved,
+        fields.map((f) => (f.name === 'DEF_USE_BGC' ? { ...f, derived: true } : f)),
+        rows,
+      ),
+    /not writable/,
+  );
+  assert.deepEqual(saved, before);
+});
+
+test('nonmethane selections retain the existing BGC choice', () => {
+  const fields = tracerKeys.map((k) => field(k, k === 'DEF_TRACER_NUM' ? 'integer' : 'character'));
+  for (const bgc of ['.true.', '.false.']) {
+    const overlay = empty();
+    overlay.physics.DEF_USE_BGC = bgc;
+    for (const family of ['isotope', 'chloride', 'sediment'] as const)
+      assert.equal(
+        applyTracerSelection(overlay, fields, appendTracerFamily([], family)).physics.DEF_USE_BGC,
+        bgc,
+      );
+    const reactive = appendTracerFamily([], 'methane').map((row) => ({
+      ...row,
+      TYPES: 'reactive',
+    }));
+    assert.equal(applyTracerSelection(overlay, fields, reactive).physics.DEF_USE_BGC, bgc);
+  }
 });
