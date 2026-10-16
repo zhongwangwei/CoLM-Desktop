@@ -19,7 +19,11 @@ if [ "$1" = '-G' ]; then
 fi
 [[ "$*" != *'test-only secret'* ]]
 ! env | /usr/bin/grep -q 'test-only secret'
-[[ "$*" == *'StrictHostKeyChecking=yes'* ]]
+if [ "$COLM_TEST_AUTH_MODE" = config ]; then
+  [[ "$*" != *'StrictHostKeyChecking='* ]]
+else
+  [[ "$*" == *'StrictHostKeyChecking=yes'* ]]
+fi
 if [[ "$*" == *'BatchMode=no'* ]]; then
   [[ "$*" == *'ControlPath=none'* ]]
   [[ "$SSH_ASKPASS_REQUIRE" = force ]]
@@ -45,6 +49,7 @@ printf 'hostname=stub\nos=Linux\narch=x86_64\ncargo=cargo\ncmake=cmake\ncc=cc\nr
             .args(["remote-probe", "--host", host, "--root", "/data/colm"])
             .env("PATH", format!("{}:/usr/bin:/bin", dir.display()))
             .env("COLM_SSH_AUTH_STDIN", "1")
+            .env("COLM_TEST_AUTH_MODE", mode)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

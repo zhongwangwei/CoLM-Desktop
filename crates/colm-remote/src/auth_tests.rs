@@ -46,6 +46,7 @@ fn explicit_auth_sets_identity_without_password_in_command() {
     a.apply(&mut command).unwrap();
     let args: Vec<_> = command.get_args().map(|v| v.to_string_lossy()).collect();
     for expected in [
+        "StrictHostKeyChecking=yes",
         "BatchMode=no",
         "ControlPath=none",
         "PreferredAuthentications=password",
@@ -60,7 +61,30 @@ fn explicit_auth_sets_identity_without_password_in_command() {
     let mut command = Command::new("ssh");
     a.apply(&mut command).unwrap();
     assert!(command.get_args().any(|a| a == "BatchMode=yes"));
+    assert!(command.get_args().any(|a| a == "StrictHostKeyChecking=yes"));
     assert!(command.get_envs().all(|(key, _)| key != TOKEN));
+}
+
+#[test]
+fn config_mode_preserves_host_key_policy_from_openssh_config() {
+    let mut command = Command::new("ssh");
+    auth("config").apply(&mut command).unwrap();
+    let args: Vec<_> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect();
+    assert!(args.iter().any(|arg| arg == "BatchMode=yes"));
+    for setting in ["StrictHostKeyChecking", "UserKnownHostsFile", "ProxyJump"] {
+        assert!(
+            !args.iter().any(|arg| arg.starts_with(setting)),
+            "{setting}"
+        );
+    }
+    let mut fallback = Command::new("ssh");
+    configure(&mut fallback).unwrap();
+    assert!(fallback
+        .get_args()
+        .any(|arg| arg == "StrictHostKeyChecking=yes"));
 }
 
 #[test]

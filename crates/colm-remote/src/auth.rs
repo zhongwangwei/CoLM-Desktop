@@ -120,6 +120,9 @@ impl Auth {
     }
 
     fn apply(&self, command: &mut Command) -> Result<()> {
+        if self.auth != "config" {
+            command.args(["-o", "StrictHostKeyChecking=yes"]);
+        }
         if !self.username.is_empty() {
             command.args(["-l", &self.username]);
         }
@@ -210,11 +213,10 @@ pub(crate) fn configure(command: &mut Command) -> Result<()> {
         .env_remove(TOKEN)
         .env_remove("SSH_ASKPASS")
         .env("SSH_ASKPASS_REQUIRE", "never");
-    command.args(["-o", "StrictHostKeyChecking=yes"]);
     if let Some(auth) = AUTH.get() {
         auth.apply(command)?;
     } else {
-        command.args(["-o", "BatchMode=yes"]);
+        command.args(["-o", "StrictHostKeyChecking=yes", "-o", "BatchMode=yes"]);
     }
     Ok(())
 }
