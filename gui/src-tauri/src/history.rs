@@ -44,6 +44,7 @@ impl From<HistoryFilter> for Query {
             to_ms: f.to,
             limit: f.limit.unwrap_or(100),
             offset: f.offset.unwrap_or(0),
+            group_runs: true,
             ..Default::default()
         }
     }
@@ -728,6 +729,35 @@ fn append_outcome(history: &History, start: &Event, end: &Event) -> Result<(), S
 mod tests {
     use super::*;
     #[test]
+    fn command_run_identity_survives_started_and_terminal_records() {
+        for (action, status) in [("run", "cancelled"), ("remote-run", "succeeded")] {
+            let args = vec![action.to_string(), "/case/station".to_string()];
+            let start = command_event(&args, Some("batch-one")).unwrap().unwrap();
+            let dir =
+                std::env::temp_dir().join(format!("colm-batch-history-{}", start.operation_id));
+            let history = History::open(dir.join("history.sqlite3")).unwrap();
+            history.append(&start).unwrap();
+            let recorded = history.detail(&start.operation_id).unwrap().unwrap();
+            assert_eq!(recorded.operation.latest.phase, EventPhase::Started);
+            assert_eq!(recorded.operation.latest.detail["run_id"], "batch-one");
+            let end = start.next(EventPhase::Finished, status);
+            append_outcome(&history, &start, &end).unwrap();
+            let recorded = history.detail(&start.operation_id).unwrap().unwrap();
+            assert_eq!(recorded.operation.event_count, 2);
+            assert_eq!(recorded.operation.latest.status, status);
+            assert_eq!(recorded.operation.latest.detail["run_id"], "batch-one");
+            assert!(command_event(&args, None)
+                .unwrap()
+                .unwrap()
+                .detail
+                .get("run_id")
+                .is_none());
+            assert!(command_event(&args, Some(" ")).is_err());
+            drop(history);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[test]
     fn model_run_manifest_prefers_case_owned_runs_and_retains_legacy_lookup() {
         let mut event = Event::start("run");
         let root = std::env::temp_dir().join(format!("colm-run-manifest-{}", event.operation_id));
@@ -1022,6 +1052,28 @@ mod tests {
 }
 
 pub(crate) fn command_start(args: &[String]) -> Result<Option<Event>, String> {
+    command_start_for_run(args, None)
+}
+
+pub(crate) fn command_start_for_run(
+    args: &[String],
+    run_id: Option<&str>,
+) -> Result<Option<Event>, String> {
+    let Some(event) = command_event(args, run_id)? else {
+        return Ok(None);
+    };
+    History::open_default()
+        .and_then(|h| h.append(&event))
+        .map_err(|e| {
+            format!("operation was not started because its audit record could not be saved: {e}")
+        })?;
+    Ok(Some(event))
+}
+
+fn command_event(args: &[String], run_id: Option<&str>) -> Result<Option<Event>, String> {
+    if let Some(run_id) = run_id {
+        crate::sidecar::validate_run_id(run_id)?;
+    }
     let kind = args.first().map(String::as_str).unwrap_or("");
     if !matches!(
         kind,
@@ -1128,11 +1180,9 @@ pub(crate) fn command_start(args: &[String]) -> Result<Option<Event>, String> {
                 }
             );
     }
-    History::open_default()
-        .and_then(|h| h.append(&event))
-        .map_err(|e| {
-            format!("operation was not started because its audit record could not be saved: {e}")
-        })?;
+    if let Some(run_id) = run_id {
+        event.detail["run_id"] = serde_json::json!(run_id);
+    }
     Ok(Some(event))
 }
 pub(crate) fn command_finish<T>(

@@ -71,7 +71,7 @@ window.addEventListener('unhandledrejection',e=>q.errors.push(String(e.reason)))
 const core=window.__TAURI__.core, original=core.invoke;
 q.originalInvoke=original;
 const observedInvoke=async function(command,args){
-  const observed=['run_batch','run_case','cancel_runs','model_case_runs','history_catalog','series'].includes(command);
+  const observed=['run_batch','run_case','cancel_runs','model_case_runs','history_catalog','history_list','history_detail','series'].includes(command);
   const record={command,args,time:Date.now()};
   if(observed) q.ipc.push(record);
   try {
@@ -156,6 +156,31 @@ def validate_stopped(events, directories, run_id):
         assert done[0]['time'] >= started[0]['time'], f'{directory}: exit preceded start'
         result[directory] = done[0]
     return result
+
+
+def validate_history_groups(page, expected, directories):
+    """A fresh isolated GUI history must paginate runs, never station operations."""
+    assert page['total'] == len(expected), f"History total counts station operations: {page['total']}"
+    assert len(page['items']) == len(expected), 'Expected one visible row per actual run'
+    groups = {}
+    ids = set()
+    for item in page['items']:
+        group = item.get('run_group')
+        assert group and group['run_id'] in expected, 'Missing or unrelated run group'
+        run_id = group['run_id']
+        assert run_id not in groups, 'Duplicate history rows for the same run'
+        assert item['status'] == expected[run_id], 'Incorrect aggregate run status'
+        members = group['members']
+        assert len(members) == len(directories), 'Incorrect station count'
+        assert {m['case_path'] for m in members} == set(directories), 'Wrong group station sources'
+        for member in members:
+            assert member['status'] == expected[run_id], 'Incorrect station terminal status'
+            assert member.get('detail', {}).get('run_id') == run_id, 'Station belongs to another run'
+            assert member['operation_id'] not in ids, 'Station operation repeated across groups'
+            ids.add(member['operation_id'])
+        groups[run_id] = item
+    assert set(groups) == set(expected), 'Missing stopped or restarted run'
+    return groups
 
 
 class Driver:
@@ -370,6 +395,47 @@ def run(args):
             series = [x for x in evidence[cursor:] if x['command']=='series' and x.get('ok') and x['args'].get('case') in run_paths]
             assert series and any(v['finite']>0 for v in series[-1]['result']['variables'].values()), f'{name}: no finite real result series'
             report.setdefault('result_sources', {})[name] = {'runs': sorted(run_paths), 'series': series[-1]}
+        if args.stop_and_return:
+            # UI query only; inspect actual backend replies rather than fabricating history.
+            driver.press('历史记录', 'History', root='$(".sidebar")')
+            driver.fill(['类型', 'Kind'], 'run')
+            history_cursor = driver.js('return window.__multisiteQA.ipc.length;')
+            driver.press('查询', 'Search', root='$(".history-filters")')
+            driver.wait('return window.__multisiteQA.ipc.slice('+str(history_cursor)+').some(x=>x.command==="history_list"&&x.ok&&x.args.filter.kind==="run");')
+            listings = driver.js('return window.__multisiteQA.ipc.slice('+str(history_cursor)+').filter(x=>x.command==="history_list"&&x.ok&&x.args.filter.kind==="run");')
+            groups = validate_history_groups(listings[-1]['result'], {
+                report['stopped_batch']['run_id']: 'cancelled', active_id: 'succeeded'}, directories)
+            driver.wait('return $$(".history-table tbody tr").length===2;')
+            rows = driver.js('return {rows:$$(".history-table tbody tr").map(txt),pagination:txt($(".history-pagination"))};')
+            for run_id in groups:
+                assert sum(run_id in row for row in rows['rows']) == 1, 'Run is not represented by exactly one UI row'
+            assert rows['pagination'].split('/')[1].strip().startswith('2'), 'UI pagination counts stations'
+            checkpoint('09-history-run-rows')
+            group_row = '$$(".history-table tbody tr").find(e=>txt(e).includes('+json.dumps(active_id)+'))'
+            driver.js('press(["查看","View"],'+group_row+');return true;')
+            driver.wait('return txt($(".history-inspector")).includes('+json.dumps(active_id)+');')
+            checkpoint('10-history-group-members')
+            # Choose the second member in actual backend order, not an assumed sort order.
+            member = groups[active_id]['run_group']['members'][1]
+            member_name = Path(member['case_path']).name
+            detail_cursor = driver.js('return window.__multisiteQA.ipc.length;')
+            driver.press(member_name, root='$(".history-inspector")')
+            driver.wait('return window.__multisiteQA.ipc.slice('+str(detail_cursor)+').some(x=>x.command==="history_detail"&&x.ok&&x.args.id==='+json.dumps(member['operation_id'])+');')
+            details = driver.js('return window.__multisiteQA.ipc.slice('+str(detail_cursor)+').filter(x=>x.command==="history_detail"&&x.ok);')
+            operation = details[-1]['result']['operation']
+            assert operation['operation_id'] == member['operation_id'] and operation['case_path'] == member['case_path'], 'Group member opened another station operation'
+            driver.wait('return txt($(".history-inspector")).includes('+json.dumps(member['operation_id'])+')&&txt($(".history-inspector")).includes('+json.dumps(member['case_path'])+');')
+            checkpoint('11-history-station-detail')
+            driver.press('打开算例', 'Open case', root='$(".history-inspector")')
+            driver.press('查看结果', 'View results')
+            driver.wait('return snapshot().selectedStation==='+json.dumps(member['case_path'])+'&&snapshot().charts.some(c=>c.width>0&&c.canvas>0);', args.timeout)
+            evidence = driver.js('return window.__multisiteQA.ipc;')
+            sources = report['result_sources'][member_name]['runs']
+            actual_series = [x for x in evidence[detail_cursor:] if x['command']=='series' and x.get('ok') and x['args'].get('case') in sources]
+            assert actual_series and any(v['finite']>0 for v in actual_series[-1]['result']['variables'].values()), 'History station did not load its own real results'
+            checkpoint('12-history-station-results')
+            report['history_groups'] = {'listing': listings[-1], 'ui': rows,
+                'selected_member': member, 'detail': details[-1], 'series': actual_series[-1]}
         errors = driver.js('return window.__multisiteQA.errors;')
         assert not errors, f'Frontend errors: {errors}'
         report['success'] = True
@@ -434,6 +500,32 @@ def self_test():
             pass
         else:
             raise AssertionError('Stop request or natural completion is not actual cancellation')
+    import copy
+    history = {'total': 2, 'items': [
+        {'status': status, 'run_group': {'run_id': run_id, 'members': [
+            {'operation_id': run_id+path, 'case_path': path, 'status': status, 'detail': {'run_id': run_id}}
+            for path in paths]}}
+        for run_id, status in [('stopped', 'cancelled'), ('restarted', 'succeeded')]]}
+    expected = {'stopped': 'cancelled', 'restarted': 'succeeded'}
+    assert len(validate_history_groups(history, expected, paths)) == 2
+    invalid_histories = []
+    for mutation in ['total', 'duplicate', 'status', 'source', 'run_id']:
+        bad = copy.deepcopy(history)
+        if mutation == 'total': bad['total'] = 4
+        elif mutation == 'duplicate': bad['items'][1] = copy.deepcopy(bad['items'][0])
+        else:
+            member = bad['items'][1]['run_group']['members'][1]
+            if mutation == 'status': member['status'] = 'running'
+            elif mutation == 'source': member['case_path'] = paths[0]
+            else: member['detail']['run_id'] = 'stopped'
+        invalid_histories.append(bad)
+    for bad in invalid_histories:
+        try:
+            validate_history_groups(bad, expected, paths)
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError('Ungrouped, duplicate or cross-run history passed')
     print('PASS: helper loading, input validation, station/stage/completion and real overlap checks (no GUI launched)')
 
 

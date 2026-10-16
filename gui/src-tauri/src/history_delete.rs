@@ -657,7 +657,16 @@ pub async fn history_delete(
     files: bool,
     expected_path: Option<String>,
     whole_case: Option<bool>,
+    group: Option<bool>,
 ) -> Result<DeleteResult, String> {
+    if group.unwrap_or(false) {
+        return tauri::async_runtime::spawn_blocking(move || {
+            let ledger = History::open_default().map_err(|e| e.to_string())?;
+            delete_group_records(&ledger, &id, files, whole_case.unwrap_or(false))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+    }
     let detail = crate::history::history_detail(id.clone())?;
     let whole_case = whole_case.unwrap_or(false);
     let remote_target = is_remote(&detail)
@@ -688,6 +697,23 @@ pub async fn history_delete(
     .map_err(|e| e.to_string())?
 }
 
+fn delete_group_records(
+    ledger: &History,
+    id: &str,
+    files: bool,
+    whole_case: bool,
+) -> Result<DeleteResult, String> {
+    if files || whole_case {
+        return Err("请选择具体站点后删除文件夹；运行分组仅支持删除记录".into());
+    }
+    let removed = ledger.remove_run(id).map_err(|e| e.to_string())?;
+    Ok(DeleteResult {
+        removed,
+        path: None,
+        host: None,
+    })
+}
+
 fn hide_after_files(ledger: &History, id: &str, deleted: Option<&str>) -> Result<bool, String> {
     ledger.remove_operation(id).map_err(|e| match deleted {
         Some(path) => format!("文件夹 {path} 已删除，但历史记录保留；请仅删除记录重试：{e}"),
@@ -699,6 +725,22 @@ fn hide_after_files(ledger: &History, id: &str, deleted: Option<&str>) -> Result
 mod tests {
     use super::*;
     use colm_history::{Event, EventPhase};
+
+    #[test]
+    fn group_deletion_never_accepts_a_filesystem_target() {
+        let (root, ledger, event) = fixture();
+        let before = ledger.query(&colm_history::Query::default()).unwrap().total;
+        for (files, whole_case) in [(true, false), (false, true), (true, true)] {
+            assert!(delete_group_records(&ledger, &event.operation_id, files, whole_case).is_err());
+            assert_eq!(
+                ledger.query(&colm_history::Query::default()).unwrap().total,
+                before
+            );
+            assert!(root.join("source/input").is_file());
+        }
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn fixture() -> (PathBuf, History, Event) {
         let mut event = Event::start("run");

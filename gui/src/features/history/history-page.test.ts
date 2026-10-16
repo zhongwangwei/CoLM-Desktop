@@ -6,7 +6,7 @@ import * as history from './history';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Node = { type: string; props: Record<string, any>; children: unknown[] };
-function harness() {
+function harness(running: Record<string, { running: boolean; run_id: string }> = {}) {
   const source = readFileSync(new URL('./HistoryPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -25,8 +25,13 @@ function harness() {
     resolve: (value: unknown) => void;
     reject: (error: unknown) => void;
   }[] = [];
+  let contract: { actions: { id: string; run: () => unknown }[] };
+  const downloads: { content: string; name: string; type: string }[] = [];
   const env = {
     ...history,
+    download: async (content: string, name: string, type: string) => {
+      downloads.push({ content, name, type });
+    },
     React: {
       createElement: (type: string, props: Node['props'], ...children: unknown[]) => ({
         type,
@@ -48,12 +53,14 @@ function harness() {
       ].map((x) => [x, x]),
     ),
     useApp: () => ({
-      state: { language: 'en' },
+      state: { language: 'en', running },
       update: () => {},
       openCase: () => {},
       navigate: () => true,
     }),
-    usePageContract: () => {},
+    usePageContract: (value: typeof contract) => {
+      contract = value;
+    },
     useState: (initial: unknown) => {
       const i = cursor++;
       if (!(i in slots)) slots[i] = initial;
@@ -123,6 +130,8 @@ function harness() {
   requests.splice(0, requests.length - 1);
   return {
     requests,
+    downloads,
+    guide: () => contract,
     render,
     settle,
     menu,
@@ -269,4 +278,132 @@ test('case ownership rejection disables only whole-case deletion', async () => {
   assert.equal(h.menu().props.items[0].disabled, false);
   assert.equal(h.menu().props.items[1].disabled, false);
   assert.equal(h.menu().props.items[2].disabled, true);
+});
+
+const groupRow = () => ({
+  ...row('a'),
+  case_path: null,
+  run_group: {
+    run_id: 'batch-1',
+    members: [
+      { ...row('a'), case_path: '/project/AT-Neu', detail: {} },
+      { ...row('b'), case_path: '/project/CN-Cng', detail: {} },
+    ],
+  },
+});
+
+test('one run row opens all stations and nonfirst station actions use its real operation', async () => {
+  const h = harness();
+  const group = groupRow();
+  h.requests[0].resolve({ items: [group], total: 1 });
+  await h.settle();
+  assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 1);
+  h.click('View');
+  await h.settle();
+  assert.equal(h.requests.length, 1, 'group view must not load representative station');
+  assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 3);
+  assert.equal(
+    h.nodes().some((n) => n.type === 'Button' && n.children.includes('Replay recorded settings')),
+    false,
+  );
+  h.click('CN-Cng · Completed');
+  assert.equal(h.requests[1].command, 'history_detail');
+  assert.deepEqual(h.requests[1].args, { id: 'b' });
+  h.requests[1].resolve({ operation: group.run_group.members[1], events: [], related: [] });
+  await h.settle();
+  assert.equal(
+    h.nodes().filter((n) => n.type === 'ContextMenu').length,
+    3,
+    'overview stays available',
+  );
+  h.menu(2).props.onOpenChange(true);
+  h.render();
+  assert.equal(h.requests[2].command, 'history_delete_plan');
+  assert.deepEqual(h.requests[2].args, { id: 'b' });
+});
+
+test('group deletion is record only, carries group scope, and refreshes overview', async () => {
+  const h = harness();
+  h.requests[0].resolve({ items: [groupRow()], total: 1 });
+  await h.settle();
+  h.click('View');
+  await h.settle();
+  h.menu().props.onOpenChange(true);
+  h.render();
+  assert.equal(h.requests.length, 1, 'never request representative filesystem plan');
+  assert.equal(h.menu().props.items.length, 1);
+  h.menu().props.items[0].onSelect();
+  h.render();
+  h.click('Confirm deletion');
+  assert.deepEqual(h.requests[1].args, { id: 'a', files: false, group: true });
+  h.requests[1].resolve({ removed: true });
+  await h.settle();
+  assert.equal(h.requests[2].command, 'history_list');
+  assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 0);
+});
+
+test('current GUI run prevents deleting an apparently completed partial group', async () => {
+  const h = harness({ active: { run_id: 'batch-1', running: true } });
+  h.requests[0].resolve({ items: [groupRow()], total: 1 });
+  await h.settle();
+  assert.equal(h.menu().props.items[0].disabled, true);
+  h.menu().props.items[0].onSelect();
+  h.render();
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
+});
+
+test('run export retains all station evidence and filtering clears group actions', async () => {
+  const h = harness();
+  const group = groupRow();
+  h.requests[0].resolve({ items: [group], total: 1 });
+  await h.settle();
+  h.click('View');
+  await h.settle();
+  h.click('Export this run JSON');
+  assert.deepEqual(
+    h.requests.slice(1).map((r) => r.args.id),
+    ['a', 'b'],
+  );
+  group.run_group.members.forEach((member, i) =>
+    h.requests[i + 1].resolve({
+      operation: member,
+      events: [{ evidence: member.operation_id }],
+      related: [],
+    }),
+  );
+  await h.settle();
+  const exported = JSON.parse(h.downloads[0].content);
+  assert.equal(exported.operation.run_group.run_id, 'batch-1');
+  assert.deepEqual(
+    exported.members.map((m: { events: unknown[] }) => m.events),
+    [[{ evidence: 'a' }], [{ evidence: 'b' }]],
+  );
+  h.nodes()
+    .find((n) => n.type === 'form')!
+    .props.onSubmit({ preventDefault() {} });
+  await h.settle();
+  assert.equal(h.requests[3].command, 'history_list');
+  assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 0);
+});
+
+test('assistant details action opens the same group overview without selecting a representative', async () => {
+  const h = harness();
+  h.requests[0].resolve({ items: [groupRow()], total: 1 });
+  await h.settle();
+  await h
+    .guide()
+    .actions.find((action) => action.id === 'history-detail-a')!
+    .run();
+  await h.settle();
+  assert.equal(h.requests.length, 1);
+  assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 3);
+  const selecting = h
+    .guide()
+    .actions.find((action) => action.id === 'history-member-b')!
+    .run();
+  assert.deepEqual(h.requests[1].args, { id: 'b' });
+  h.requests[1].resolve({ operation: groupRow().run_group.members[1], events: [], related: [] });
+  await selecting;
+  await h.settle();
+  assert.ok(h.guide().actions.some((action) => action.id === 'history-export-run'));
 });

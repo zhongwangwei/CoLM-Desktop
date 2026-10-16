@@ -59,6 +59,7 @@ export function download(content: string, name: string, type: string) {
 
 export function canReplay(operation: HistoryOperation) {
   return (
+    !operation.run_group &&
     ['run', 'remote-run'].includes(operation.kind) &&
     !!operation.version_id &&
     !!operation.revision &&
@@ -452,6 +453,7 @@ export function historyStatusLabel(status: string, en = false): string {
   const labels: Record<string, [string, string]> = {
     running: ['运行中', 'Running'],
     succeeded: ['已完成', 'Completed'],
+    completed_with_failures: ['部分失败', 'Partially failed'],
     failed: ['失败', 'Failed'],
     cancelled: ['已取消', 'Cancelled'],
     interrupted: ['已中断', 'Interrupted'],
@@ -473,7 +475,18 @@ export function historyPhaseLabel(phase?: string | null, en = false): string {
   };
   return labels[phase.toLowerCase()]?.[en ? 1 : 0] ?? phase;
 }
-export function historyObject(operation: HistoryOperation): string {
+export function historyObject(operation: HistoryOperation, en = false): string {
+  if (operation.run_group) {
+    const parents = operation.run_group.members.map((member) =>
+      member.case_path?.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]+$/, ''),
+    );
+    const parent = parents[0];
+    return parent && parents.every((value) => value === parent)
+      ? parent.split(/[\\/]/).pop() || (en ? 'Multi-site run' : '多站点运行')
+      : en
+        ? 'Multi-site run'
+        : '多站点运行';
+  }
   return (
     operation.case_id ||
     operation.case_path
@@ -497,6 +510,7 @@ export type HistoryDeletePlan = {
 export function canDeleteHistory(operation: HistoryOperation): boolean {
   return (
     !operation.needs_reconciliation &&
+    (!operation.run_group || operation.run_group.members.every(canDeleteHistory)) &&
     ['succeeded', 'failed', 'completed', 'completed_with_failures', 'cancelled'].includes(
       operation.status,
     )

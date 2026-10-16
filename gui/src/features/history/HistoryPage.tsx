@@ -76,6 +76,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       items: [],
       total: 0,
     }),
+    [group, setGroup] = useState<HistoryOperation | null>(null),
     [detail, setDetail] = useState<Detail | null>(null),
     [compare, setCompare] = useState(''),
     [result, setResult] = useState<unknown>(null),
@@ -152,6 +153,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setDeletePlan(null);
     setDeletion(null);
     setDetail(null);
+    setGroup(null);
     setPage({ items: [], total: 0 });
     setCompare('');
     setVariables([]);
@@ -204,6 +206,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     }
     setOffset(0);
     setDetail(null);
+    setGroup(null);
     setApplied(effectiveFilter);
   }
   async function show(id: string) {
@@ -218,11 +221,28 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       setResult(null);
     }
   }
+  async function showItem(item: HistoryOperation) {
+    setGroup(item.run_group ? item : null);
+    setDetail(null);
+    setResult(null);
+    if (!item.run_group) await show(item.operation_id);
+  }
+  function deleteAllowed(item: HistoryOperation) {
+    return (
+      canDeleteHistory(item) &&
+      !(
+        item.run_group &&
+        Object.values(state.running ?? {}).some(
+          (run) => run.running && run.run_id === item.run_group!.run_id,
+        )
+      )
+    );
+  }
   function menuChanged(item: HistoryOperation, open: boolean) {
     const request = {};
     menuRequest.current = open ? request : null;
     setDeletePlan(null);
-    if (!open || !canDeleteHistory(item) || busy) return;
+    if (!open || item.run_group || !deleteAllowed(item) || busy) return;
     const token = epoch.current;
     void invokeJson<HistoryDeletePlan>('history_delete_plan', { id: item.operation_id })
       .then((plan) => {
@@ -244,7 +264,18 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   }
   function deleteItems(item: HistoryOperation) {
     const plan = deletePlan?.id === item.operation_id ? deletePlan : null;
-    const allowed = canDeleteHistory(item);
+    const allowed = deleteAllowed(item);
+    if (item.run_group)
+      return [
+        {
+          label: t('仅删除记录', 'Delete record only'),
+          danger: true,
+          disabled: busy || !allowed,
+          onSelect: () => {
+            if (deleteAllowed(item)) setDeletion({ item, files: false, plan: null });
+          },
+        },
+      ];
     return [
       {
         label: t('仅删除记录', 'Delete record only'),
@@ -293,7 +324,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     ];
   }
   async function deleteRecord() {
-    if (!deletion || !deleteConfirmed || (deletion.files && !deletionPath)) return;
+    if (
+      !deletion ||
+      !deleteAllowed(deletion.item) ||
+      !deleteConfirmed ||
+      (deletion.files && !deletionPath)
+    )
+      return;
     const target = deletion;
     const token = epoch.current;
     const response = await invokeJson<{ removed: boolean; path?: string; host?: string }>(
@@ -301,6 +338,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       {
         id: target.item.operation_id,
         files: target.files,
+        ...(target.item.run_group ? { group: true } : {}),
         ...(target.files ? { expectedPath: deletionPath } : {}),
         ...(target.wholeCase ? { wholeCase: true } : {}),
       },
@@ -316,6 +354,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     if (!token.active || token !== epoch.current) return;
     setDeletion(null);
     setDetail(null);
+    setGroup(null);
     setCompare('');
     setVariables([]);
     setComparisonResult(null);
@@ -335,6 +374,19 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   }
   const openPath = detail ? historyPath(detail) : null,
     references = detail ? historyReferences(detail) : [];
+  async function exportGroup() {
+    if (!group?.run_group) return;
+    const members = await Promise.all(
+      group.run_group.members.map((member) =>
+        invokeJson<Detail>('history_detail', { id: member.operation_id }),
+      ),
+    );
+    return download(
+      JSON.stringify({ operation: group, members }, null, 2),
+      `colm-history-${group.run_group.run_id.replace(/[^a-zA-Z0-9_-]/g, '_')}.json`,
+      'application/json',
+    );
+  }
   async function exportRecord() {
     if (!detail) return;
     const record = historyRecordExport(detail);
@@ -512,9 +564,27 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       label: `${t('详情', 'Details')} ${item.operation_id}`,
       kind: 'click' as const,
       enabled: !busy,
-      run: () => action(() => show(item.operation_id)),
+      run: () => action(() => showItem(item)),
     })),
   ];
+  if (group?.run_group) {
+    guideActions.push(
+      ...group.run_group.members.map((member) => ({
+        id: `history-member-${member.operation_id}`,
+        label: `${t('站点详情', 'Station details')} ${historyObject(member, en)}`,
+        kind: 'click' as const,
+        enabled: !busy,
+        run: () => action(() => show(member.operation_id)),
+      })),
+      {
+        id: 'history-export-run',
+        label: t('导出本次运行 JSON', 'Export this run JSON'),
+        kind: 'click',
+        enabled: !busy,
+        run: () => action(exportGroup),
+      },
+    );
+  }
   if (detail) {
     guideActions.push(
       {
@@ -543,6 +613,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       options: [
         { value: '', label: '—' },
         ...page.items
+          .flatMap((item) => item.run_group?.members ?? [item])
           .filter((i) => i.operation_id !== detail.operation.operation_id && canCompare(i))
           .map((i) => ({ value: i.operation_id, label: `${i.kind} · ${i.operation_id}` })),
       ],
@@ -723,7 +794,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           }}
         >
           <p>
-            {historyObject(deletion.item)} · {deletion.item.operation_id}
+            {historyObject(deletion.item, en)} · {deletion.item.operation_id}
           </p>
           {deletion.files ? (
             <>
@@ -762,10 +833,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             </>
           ) : (
             <p>
-              {t(
-                '只移除本条历史记录，不删除任何算例、运行结果或输入数据。',
-                'Remove only this history record. Case files, outputs and input data will be preserved.',
-              )}
+              {deletion.item.run_group
+                ? t(
+                    `移除本次运行的全部 ${deletion.item.run_group.members.length} 个站点记录，不删除任何算例、运行结果或输入数据。`,
+                    `Remove all ${deletion.item.run_group.members.length} station records from this run. Case files, outputs and input data will be preserved.`,
+                  )
+                : t(
+                    '只移除本条历史记录，不删除任何算例、运行结果或输入数据。',
+                    'Remove only this history record. Case files, outputs and input data will be preserved.',
+                  )}
             </p>
           )}
           {error && <Notice tone="error">{error}</Notice>}
@@ -781,7 +857,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             </Button>
             <Button
               variant="danger"
-              disabled={busy || !deleteConfirmed}
+              disabled={busy || !deleteConfirmed || !deleteAllowed(deletion.item)}
               onClick={() => run(deleteRecord)}
             >
               {busy ? t('正在删除…', 'Deleting…') : t('确认删除', 'Confirm deletion')}
@@ -943,7 +1019,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     <tr
                       tabIndex={0}
                       className={
-                        detail?.operation.operation_id === item.operation_id ? 'is-selected' : ''
+                        (group ?? detail?.operation)?.operation_id === item.operation_id
+                          ? 'is-selected'
+                          : ''
                       }
                     >
                       <td>
@@ -962,7 +1040,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       </td>
                       <td>{historyKindLabel(item.kind, en)}</td>
                       <td className="history-object" title={item.case_path ?? item.operation_id}>
-                        <strong>{historyObject(item)}</strong>
+                        <strong>{historyObject(item, en)}</strong>
+                        {item.run_group && (
+                          <small>
+                            {item.run_group.members.length} {t('个站点', 'stations')} ·{' '}
+                            {item.run_group.run_id}
+                          </small>
+                        )}
                         <small>
                           {historyPhaseLabel(item.phase, en)} ·{' '}
                           {item.host ??
@@ -985,10 +1069,12 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       <td>
                         <Button
                           variant="ghost"
-                          aria-pressed={detail?.operation.operation_id === item.operation_id}
+                          aria-pressed={
+                            (group ?? detail?.operation)?.operation_id === item.operation_id
+                          }
                           aria-label={`${t('查看记录', 'View record')} ${item.operation_id}`}
                           disabled={busy}
-                          onClick={() => run(() => show(item.operation_id))}
+                          onClick={() => run(() => showItem(item))}
                         >
                           {t('查看', 'View')}
                         </Button>
@@ -1028,9 +1114,46 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           </div>
         </section>
         <aside className="history-inspector" aria-label={t('记录详情', 'Record details')}>
+          {group?.run_group && (
+            <Card title={historyObject(group, en)}>
+              <p>
+                {group.run_group.members.length} {t('个站点', 'stations')} ·{' '}
+                {group.run_group.run_id}
+              </p>
+              <p className="muted">
+                {t(
+                  '选择站点查看详情；右键站点可删除该站点的记录或文件夹。',
+                  'Select a station for details; right-click a station to delete its record or folder.',
+                )}
+              </p>
+              <div className="button-row">
+                {group.run_group.members.map((member) => (
+                  <ContextMenu
+                    key={member.operation_id}
+                    items={deleteItems(member)}
+                    onOpenChange={(open) => menuChanged(member, open)}
+                  >
+                    <Button
+                      disabled={busy}
+                      aria-pressed={detail?.operation.operation_id === member.operation_id}
+                      onClick={() => run(() => show(member.operation_id))}
+                    >
+                      {historyObject(member, en)} ·{' '}
+                      {member.needs_reconciliation
+                        ? t('待核对', 'Needs reconciliation')
+                        : historyStatusLabel(member.status, en)}
+                    </Button>
+                  </ContextMenu>
+                ))}
+              </div>
+              <Button disabled={busy} onClick={() => run(exportGroup)}>
+                {t('导出本次运行 JSON', 'Export this run JSON')}
+              </Button>
+            </Card>
+          )}
           {detail ? (
             <Card title={historyKindLabel(detail.operation.kind, en)}>
-              <h3>{historyObject(detail.operation)}</h3>
+              <h3>{historyObject(detail.operation, en)}</h3>
               <span
                 className={`history-status history-status-${detail.operation.needs_reconciliation ? 'pending' : detail.operation.status}`}
               >
@@ -1197,6 +1320,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   >
                     <option value="">—</option>
                     {page.items
+                      .flatMap((item) => item.run_group?.members ?? [item])
                       .filter(
                         (i) => i.operation_id !== detail.operation.operation_id && canCompare(i),
                       )
@@ -1301,7 +1425,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 </div>
               </Advanced>
             </Card>
-          ) : (
+          ) : !group ? (
             <Card title={t('选择一条记录', 'Select a record')}>
               <p className="muted">
                 {t(
@@ -1310,7 +1434,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 )}
               </p>
             </Card>
-          )}
+          ) : null}
         </aside>
       </div>
     </div>

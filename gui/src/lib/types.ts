@@ -209,6 +209,7 @@ export type AppState = {
 };
 export type AppPatch = Partial<AppState> | ((state: AppState) => Partial<AppState>);
 export type HistoryOperation = {
+  run_group?: { run_id: string; members: HistoryOperation[] };
   operation_id: string;
   event_id: string;
   kind: string;

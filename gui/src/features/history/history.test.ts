@@ -14,6 +14,7 @@ import {
   historySections,
   historyReferences,
   historyRecordExport,
+  historyObject,
 } from './history';
 test('filters preserve pagination and reject reversed dates', () => {
   assert.deepEqual(historyFilter({ ...emptyFilter, casePath: '/a' }, 30), {
@@ -218,6 +219,8 @@ test('history presentation uses real recorded names and preserves unknown vocabu
   assert.equal(historyObject({ ...operation, case_path: null, version_id: null }), 'op-123');
   assert.equal(historyKindLabel('run'), '运行');
   assert.equal(historyStatusLabel('succeeded'), '已完成');
+  assert.equal(historyStatusLabel('completed_with_failures'), '部分失败');
+  assert.equal(historyStatusLabel('completed_with_failures', true), 'Partially failed');
   assert.equal(historyKindLabel('future-kind'), 'future-kind');
   assert.equal(historyStatusLabel('future-status'), 'future-status');
 });
@@ -318,4 +321,33 @@ test('remote case deletion clears only matching host mirrors and their run state
     historyStateAfterDirectoryDeletion(otherSelection, '/cases/site', 'server-a').selectedCase,
     otherSelection.selectedCase,
   );
+});
+
+test('group objects name the common project without enabling representative replay or comparison', () => {
+  const member = {
+    kind: 'run',
+    status: 'succeeded',
+    version_id: 'v',
+    revision: '1',
+    needs_reconciliation: false,
+    case_path: '/projects/Test/AT-Neu',
+  } as import('../../lib/types').HistoryOperation;
+  const group = {
+    ...member,
+    run_group: {
+      run_id: 'batch',
+      members: [member, { ...member, case_path: '/projects/Test/CN-Cng' }],
+    },
+  };
+  assert.equal(historyObject(group), 'Test');
+  assert.equal(canReplay(group), false);
+  assert.equal(canCompare(group), false);
+  assert.equal(canDeleteHistory(group), true);
+  group.run_group.members[1] = {
+    ...member,
+    case_path: '/different/CN-Cng',
+    needs_reconciliation: true,
+  };
+  assert.equal(historyObject(group, true), 'Multi-site run');
+  assert.equal(canDeleteHistory(group), false);
 });

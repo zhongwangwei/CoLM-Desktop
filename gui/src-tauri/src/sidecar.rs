@@ -1536,22 +1536,6 @@ fn run_one(
     preprocessors: Option<&str>,
 ) -> Result<i32, String> {
     crate::remote::server_case_args(case, "")?;
-    if processes.take_cancelled(case)? {
-        let _ = app.emit(
-            "run://done",
-            Done {
-                run_id: run_id.to_string(),
-                case: case.to_string(),
-                requested_stage: stage.map(str::to_string),
-                code: -1,
-                total: 0,
-                dropped: 0,
-                reason: Some("运行已取消".into()),
-                cancelled: true,
-            },
-        );
-        return Ok(-1);
-    }
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
     // 用户自己在环境里设了就听用户的。
@@ -1562,17 +1546,32 @@ fn run_one(
         let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
         crate::model::options(&mut args, model_revision)?;
         add_preprocessors(&mut args, preprocessors)?;
-        let event = crate::history::command_start(&args)?;
+        let event = crate::history::command_start_for_run(&args, Some(run_id))?;
         Ok::<_, String>((args, event))
     })();
-    let (mut args, mut event) = prepared.inspect_err(|_| {
+    let (mut args, event) = prepared.inspect_err(|_| {
         let _ = processes.forget(case);
     })?;
-    if let Some(event) = &mut event {
-        event.detail["run_id"] = serde_json::json!(run_id);
+    if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
     let result = (|| {
+        if processes.take_cancelled(case)? {
+            let _ = app.emit(
+                "run://done",
+                Done {
+                    run_id: run_id.to_string(),
+                    case: case.to_string(),
+                    requested_stage: stage.map(str::to_string),
+                    code: -1,
+                    total: 0,
+                    dropped: 0,
+                    reason: Some("运行已取消".into()),
+                    cancelled: true,
+                },
+            );
+            return Ok(-1);
+        }
         let mut child = colm_kernel::run::top_level_sidecar(&mut cmd)
             .args(args)
             .stdout(std::process::Stdio::piped())
