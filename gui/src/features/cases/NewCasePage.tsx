@@ -1282,7 +1282,7 @@ export default function NewCasePage() {
       ? [
           {
             id: 'new-run-resources',
-            label: t('配置计算资源与路径对应', 'Configure resources and path mappings'),
+            label: t('配置计算资源', 'Configure resources'),
             kind: 'click' as const,
             enabled,
             run: openResources,

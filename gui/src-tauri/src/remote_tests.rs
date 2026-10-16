@@ -722,6 +722,30 @@ fn directory_browsing_accepts_incomplete_run_settings_but_validates_connection_a
 }
 
 #[test]
+fn mkdir_uses_draft_connection_and_rejects_traversal() {
+    let server: Server = serde_json::from_str(r#"{"host":"tms17l","root":""}"#).unwrap();
+    assert_eq!(
+        mkdir_args(&server, "tms17l", "/data".into(), "中文 folder".into()).unwrap(),
+        [
+            "remote-mkdir",
+            "--host",
+            "tms17l",
+            "--path",
+            "/data",
+            "--name",
+            "中文 folder"
+        ]
+    );
+    assert!(mkdir_args(&server, "other", "/data".into(), "folder".into()).is_err());
+    for name in ["", ".", "..", "../outside", "a/b", "a\\b", "a\n"] {
+        assert!(mkdir_args(&server, "tms17l", "/data".into(), name.into()).is_err());
+    }
+    for path in ["", "relative", "/data\n"] {
+        assert!(mkdir_args(&server, "tms17l", path.into(), "folder".into()).is_err());
+    }
+}
+
+#[test]
 fn connection_checks_still_reach_ssh_with_incomplete_run_settings() {
     let mut server: Server = serde_json::from_str(r#"{"host":"tms17l","root":""}"#).unwrap();
     for change in 0..3 {

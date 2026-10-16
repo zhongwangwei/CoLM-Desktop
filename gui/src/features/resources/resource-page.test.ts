@@ -232,6 +232,27 @@ test('server work directory picker uses the unsaved host and only fills its draf
   assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
 });
 
+test('new server keeps optional local path mappings collapsed and empty', async () => {
+  const page = harness();
+  await page.ready();
+  let contract = await page.action('resource-new');
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-directories-toggle'));
+  contract = await page.action('resource-advanced-toggle');
+  assert.ok(!contract.fields.some((field) => field.id.includes('map-')));
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-add-map'));
+  assert.equal(
+    contract.actions.find((action) => action.id === 'resource-directories-toggle')?.label,
+    '本地路径映射（可选）',
+  );
+  page.fill('resource-host', 'tms17l');
+  await page.action('resource-browse-root');
+  assert.deepEqual(page.browser()?.server.maps, []);
+  page.browser()?.onClose();
+  contract = await page.action('resource-directories-toggle');
+  assert.ok(contract.actions.some((action) => action.id === 'resource-add-map'));
+  assert.ok(!contract.fields.some((field) => field.id.includes('map-')));
+});
+
 test('only visible configuration fields and selected maintenance actions enter the contract', async () => {
   const page = harness();
   let contract = await page.ready();
@@ -240,6 +261,7 @@ test('only visible configuration fields and selected maintenance actions enter t
     ['resource-host', 'resource-username', 'resource-root', 'resource-auth'],
   );
   assert.ok(!contract.actions.some((action) => action.id === 'resource-build'));
+  await page.action('resource-advanced-toggle');
   contract = await page.action('resource-directories-toggle');
   assert.ok(contract.fields.some((field) => field.id === 'resource-root'));
   await page.action('resource-add-map');

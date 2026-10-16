@@ -947,6 +947,24 @@ export const commandContract = {
       "rust_type": "Option<Server>"
     }
   },
+  "remote_mkdir": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "server": {
+      "required": false,
+      "rust_type": "Option<Server>"
+    }
+  },
   "remote_probe": {
     "server": {
       "required": true,

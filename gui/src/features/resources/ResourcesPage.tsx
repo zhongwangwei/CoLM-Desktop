@@ -108,7 +108,7 @@ export default function ResourcesPage() {
     setPassword('');
     clearFeedback();
     setCheckDetails(false);
-    setDirectories(true);
+    setDirectories(false);
     setAdvanced(false);
     setMaintenance(false);
   }
@@ -406,7 +406,7 @@ export default function ResourcesPage() {
         type: 'text',
         set: (value) => editField('identity_file', value),
       });
-    if (directories)
+    if (advanced && directories)
       for (const [i, map] of editor.maps.entries())
         for (const key of ['local', 'remote'] as const)
           guideFields.push({
@@ -578,12 +578,6 @@ export default function ResourcesPage() {
         run: () => setAdvanced(!advanced),
       },
       {
-        id: 'resource-directories-toggle',
-        label: t('配置数据目录', 'Configure data directories'),
-        kind: 'click',
-        run: () => setDirectories(!directories),
-      },
-      {
         id: 'resource-check',
         label: t('检查连接', 'Check connection'),
         kind: 'click',
@@ -623,7 +617,14 @@ export default function ResourcesPage() {
         enabled: !busy,
         run: () => execute('pick-identity', pickIdentity),
       });
-    if (directories) {
+    if (advanced)
+      guideActions.push({
+        id: 'resource-directories-toggle',
+        label: t('本地路径映射（可选）', 'Local path mapping (optional)'),
+        kind: 'click',
+        run: () => setDirectories(!directories),
+      });
+    if (advanced && directories) {
       guideActions.push({
         id: 'resource-add-map',
         label: t('添加映射', 'Add mapping'),
@@ -1035,10 +1036,7 @@ export default function ResourcesPage() {
                 {new Date(check.checkedAt).toLocaleString(en ? 'en-US' : 'zh-CN')}
               </p>
             )}
-            <div className="actions">
-              {actionButton('resource-check', true)}
-              {actionButton('resource-directories-toggle')}
-            </div>
+            <div className="actions">{actionButton('resource-check', true)}</div>
             {check?.checkedAt &&
               [
                 checkResult?.probe_error,
@@ -1062,26 +1060,39 @@ export default function ResourcesPage() {
               </Advanced>
             )}
           </section>
-          {directories && (
-            <section className="resource-directories">
-              <h3>{t('数据目录对应', 'Data directory mapping')}</h3>
-              {editor.maps.map((_, i) => (
-                <div className="resource-map" key={i}>
-                  {field(`resource-map-${i}-local`)}
-                  {field(`resource-map-${i}-remote`)}
-                  {actionButton(`resource-remove-map-${i}`)}
-                </div>
-              ))}
-              {actionButton('resource-add-map')}
-              <p className="muted">
-                {t(
-                  '路径存在不代表模型输入已完整；运行前仍需输入检查。',
-                  'Existing paths do not prove complete model inputs; check inputs before running.',
-                )}
-              </p>
-            </section>
-          )}
           <Advanced open={advanced} onOpenChange={setAdvanced}>
+            {advanced && actionButton('resource-directories-toggle')}
+            {advanced && directories && (
+              <section className="resource-directories">
+                <h3>{t('本地路径映射（可选）', 'Local path mapping (optional)')}</h3>
+                <p className="muted">
+                  {t(
+                    '用于把已有本地算例拿到服务器运行。例如，算例里写的是 /Users/.../forcing，服务器上的同一份数据位于 /tera11/.../forcing：将这两个目录配成一组映射，运行时就会把本地路径替换为对应的服务器路径。数据需要已存在于服务器上，映射不会复制或上传数据。',
+                    'Use this to run an existing local case on a server. For example, if the case uses /Users/.../forcing and the same data is already at /tera11/.../forcing on the server, pair these directories to replace the local path at run time. Data must already exist on the server; mapping does not copy or upload it.',
+                  )}
+                </p>
+                <p className="muted">
+                  {t(
+                    '如果直接在服务器创建算例，可在“数据与时段”中浏览选择服务器输入数据，无需设置映射。',
+                    'When creating a case directly on the server, browse server inputs in Data and period; no mapping is needed.',
+                  )}
+                </p>
+                {editor.maps.map((_, i) => (
+                  <div className="resource-map" key={i}>
+                    {field(`resource-map-${i}-local`)}
+                    {field(`resource-map-${i}-remote`)}
+                    {actionButton(`resource-remove-map-${i}`)}
+                  </div>
+                ))}
+                {actionButton('resource-add-map')}
+                <p className="muted">
+                  {t(
+                    '路径存在不代表模型输入已完整；运行前仍需输入检查。',
+                    'Existing paths do not prove complete model inputs; check inputs before running.',
+                  )}
+                </p>
+              </section>
+            )}
             <div className="form-grid">
               {extraFields.map(([key]) => field(`resource-${key}`))}
               {field('resource-scheduler')}

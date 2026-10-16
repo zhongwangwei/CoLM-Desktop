@@ -749,6 +749,42 @@ fn browse_args(server: &Server, host: &str, path: Option<String>) -> Result<Vec<
 }
 
 #[tauri::command]
+pub async fn remote_mkdir(
+    app: tauri::AppHandle,
+    host: String,
+    path: String,
+    name: String,
+    server: Option<Server>,
+) -> Result<Value, String> {
+    let server = match server {
+        Some(server) => server,
+        None => server_for(app.clone(), &host)?,
+    };
+    let args = mkdir_args(&server, &host, path, name)?;
+    ssh_cli_json(args, resource_dir(&app), Some(&server)).await
+}
+
+fn mkdir_args(
+    server: &Server,
+    host: &str,
+    path: String,
+    name: String,
+) -> Result<Vec<String>, String> {
+    if path.is_empty()
+        || name.is_empty()
+        || [".", ".."].contains(&name.as_str())
+        || name.contains(['/', '\\'])
+        || name.chars().any(char::is_control)
+    {
+        return Err("请选择父目录并输入单一文件夹名称，不能包含路径分隔符或控制字符".into());
+    }
+    let mut args = browse_args(server, host, Some(path))?;
+    args[0] = "remote-mkdir".into();
+    args.extend(["--name".into(), name]);
+    Ok(args)
+}
+
+#[tauri::command]
 pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
     let (command, configuration_error) = probe_args(&server)?;
     let mut result = ssh_cli_json(command, resource_dir(&app), Some(&server)).await?;

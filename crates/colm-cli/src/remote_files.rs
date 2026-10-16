@@ -1,4 +1,4 @@
-//! Read-only server filesystem browsing, using the configured SSH transport.
+//! Server filesystem browsing and directory creation, using the configured SSH transport.
 use super::Opts;
 use anyhow::{ensure, Context, Result};
 use colm_remote::ssh::{quote, Ssh};
@@ -41,6 +41,52 @@ fn browse_script(path: &str) -> Result<String> {
         quote(path),
         LIST_DIRECTORY
     ))
+}
+
+const MAKE_DIRECTORY: &str = r#"import json, os, sys, unicodedata
+def safe(text):
+    return not any(unicodedata.category(c) in ('Cc', 'Cs') for c in text)
+try:
+    parent, name = sys.argv[1:]
+    if not os.path.isabs(parent) or not safe(parent):
+        raise ValueError('Expected an absolute server path without control characters')
+    if not name or name in ('.', '..') or '/' in name or '\\' in name or not safe(name):
+        raise ValueError('Expected a single directory name without separators or control characters')
+    path = os.path.join(os.path.normpath(parent), name)
+    os.mkdir(path)
+    print(json.dumps(dict(path=path)))
+except (OSError, ValueError) as error:
+    print('Cannot create server directory: ' + str(error), file=sys.stderr)
+    sys.exit(1)
+"#;
+
+fn mkdir_script(path: &str, name: &str) -> Result<String> {
+    ensure!(
+        path.starts_with('/') && !path.chars().any(char::is_control),
+        "Expected an absolute server path without control characters"
+    );
+    ensure!(
+        !name.is_empty()
+            && ![".", ".."].contains(&name)
+            && !name.contains(['/', '\\'])
+            && !name.chars().any(char::is_control),
+        "Expected a single directory name without separators or control characters"
+    );
+    Ok(format!(
+        "python3 - {} {} <<'COLM_MKDIR_PY'\n{}\nCOLM_MKDIR_PY\n",
+        quote(path),
+        quote(name),
+        MAKE_DIRECTORY
+    ))
+}
+
+pub(super) fn mkdir(opts: &Opts) -> Result<()> {
+    let script = mkdir_script(&opts.need_str("--path")?, &opts.need_str("--name")?)?;
+    let output = Ssh::new(&opts.need_str("--host")?)?.run_ok(&script)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&output).context("Invalid server directory creation result")?;
+    println!("{value}");
+    Ok(())
 }
 
 const CHECK_PATHS: &str = r#"import json, os, stat, sys
@@ -112,6 +158,66 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::process::{Command, Output};
+
+    #[test]
+    fn mkdir_rejects_invalid_names_and_parents() {
+        for name in [
+            "",
+            ".",
+            "..",
+            "../outside",
+            "a/b",
+            "a\\b",
+            "a\n",
+            "a\0",
+            "a\u{85}",
+        ] {
+            assert!(mkdir_script("/data", name).is_err(), "{name:?}");
+        }
+        for path in ["", "relative", "/data\n"] {
+            assert!(mkdir_script(path, "folder").is_err());
+        }
+        assert!(mkdir_script("/data", "中文 folder").is_ok());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn mkdir_quotes_names_and_never_overwrites_or_creates_parents() {
+        let root = std::env::temp_dir().join(format!("colm-mkdir-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let name = "数据 ' $(touch INJECTED) `touch INJECTED` ;";
+        let execute = |parent: &std::path::Path, name: &str| {
+            Command::new("bash")
+                .args(["-c", &mkdir_script(parent.to_str().unwrap(), name).unwrap()])
+                .current_dir(&root)
+                .output()
+                .unwrap()
+        };
+        let output = execute(&root, name);
+        assert!(output.status.success(), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["path"], root.join(name).to_str().unwrap());
+        assert!(root.join(name).is_dir());
+        assert!(!root.join("INJECTED").exists());
+        std::fs::write(root.join("file"), "preserve").unwrap();
+        for (parent, name) in [
+            (&root, name),
+            (&root, "file"),
+            (&root.join("missing"), "child"),
+        ] {
+            let output = execute(parent, name);
+            assert!(!output.status.success());
+            assert!(
+                String::from_utf8_lossy(&output.stderr).contains("Cannot create server directory")
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("file")).unwrap(),
+            "preserve"
+        );
+        assert!(!root.join("missing").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[cfg(unix)]
     fn execute(path: &str) -> Output {
