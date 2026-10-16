@@ -420,7 +420,7 @@ fn prepare_in_case(
         .filter(|(key, _)| {
             !matches!(
                 key.as_str(),
-                "--model-id" | "--model-revision" | "--model-root" | "--operation-id"
+                "--model-id" | "--model-revision" | "--operation-id"
             )
         })
         .cloned()
@@ -2488,6 +2488,7 @@ mod prepared_operation_tests {
         )
         .unwrap();
         let (prepared, run) = prepare(&opts).unwrap().unwrap();
+        assert_eq!(prepared.get("--model-root"), opts.get("--model-root"));
         assert_eq!(run.operation_id, "gui-parent-operation");
         assert_eq!(
             run.run_case,

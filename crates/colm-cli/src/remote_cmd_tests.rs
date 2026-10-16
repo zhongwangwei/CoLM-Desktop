@@ -589,6 +589,94 @@ fn partial_and_legacy_fetches_preserve_execution_success_but_cannot_rank() {
 }
 
 #[test]
+fn legacy_fetch_checks_output_integrity_without_scientific_certification() {
+    let fixture = completed_output_fixture("legacy-diagnostic-fetch");
+    let (_, pending) = PendingFixture::new("legacy-submission");
+    let mut provenance = crate::provenance::read(&fixture.0).unwrap().unwrap();
+    provenance["model_run"] = serde_json::Value::Null;
+    crate::provenance::write_value(&fixture.0, &provenance);
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    verify_submitted_output_identity(&proof, &pending.record).unwrap();
+    let expected = recorded_history_hashes(&proof["provenance"]).unwrap();
+    let stage = FetchStage::new(&fixture.0).unwrap();
+    let history = stage.0.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let name = "fixture_hist_2004.nc";
+    std::fs::copy(
+        fixture.0.join("out/fixture/history").join(name),
+        history.join(name),
+    )
+    .unwrap();
+    verify_history_hashes(&history, &expected).unwrap();
+    assert_eq!(verify_completed_outputs(&fixture.0).unwrap(), proof);
+    let mut fetched = fetched_provenance(
+        pending.record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["execution_ok"], true);
+    assert_eq!(fetched["ok"], false);
+    assert_eq!(fetched["output_verification"]["status"], "unavailable");
+    assert_eq!(fetched["remote_execution_provenance"], proof["provenance"]);
+    for field in ["case_name", "snapshot"] {
+        let mut changed = proof.clone();
+        if field == "case_name" {
+            changed["case_name"] = json!("another-case");
+        } else {
+            changed["provenance"]["execution_snapshot"] = json!("another-snapshot");
+        }
+        assert!(verify_submitted_output_identity(&changed, &pending.record).is_err());
+    }
+    std::fs::write(history.join(name), b"changed during download").unwrap();
+    assert!(verify_history_hashes(&history, &expected).is_err());
+    std::fs::write(
+        fixture.0.join("out/fixture/history").join(name),
+        b"changed after proof",
+    )
+    .unwrap();
+    assert!(verify_completed_outputs(&fixture.0).is_err());
+}
+
+#[test]
+fn model_fetch_never_downgrades_missing_or_mismatched_identity_to_legacy() {
+    let fixture = completed_output_fixture("model-fetch-identity");
+    let (_, pending) = PendingFixture::new("model-submission");
+    let mut record = pending.record;
+    let mut proof = verify_completed_outputs(&fixture.0).unwrap();
+    let model = proof["provenance"]["model_run"].clone();
+    // A model on either side requires matching objects on both sides.
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["remote_model_run"] = model.clone();
+    proof["provenance"]["model_run"] = serde_json::Value::Null;
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    proof["provenance"]["model_run"] = json!({"revision":2});
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    proof["provenance"]["model_run"] = model;
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    let mut inputs = crate::fingerprint::FullInputIdentity::unavailable("fixture");
+    proof["provenance"]["full_input_identity"] = serde_json::to_value(&inputs).unwrap();
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    inputs.complete = true;
+    inputs.unresolved.clear();
+    proof["provenance"]["full_input_identity"] = serde_json::to_value(&inputs).unwrap();
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    let mut fetched = fetched_provenance(
+        record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["ok"], true);
+    assert_eq!(fetched["output_verification"]["status"], "passed");
+    proof["provenance"]["full_input_identity"]["algorithm"] = json!("sampled");
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    for invalid in [json!(false), json!("legacy"), json!([])] {
+        record.provenance.as_mut().unwrap()["remote_model_run"] = invalid.clone();
+        proof["provenance"]["model_run"] = invalid;
+        assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    }
+}
+
+#[test]
 fn only_an_old_cli_without_the_verifier_can_return_unverified_diagnostics() {
     let failed = |code, message: &str| colm_remote::ssh::Output {
         success: false,
@@ -998,7 +1086,7 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_dir_output='out'\n/\n",
     )
     .unwrap();
-    assert!(materialized_revision(&case).unwrap().is_none());
+    assert!(materialized_revision(&case, None).unwrap().is_none());
     std::fs::create_dir_all(registry.root().join("runs")).unwrap();
     let run = registry
         .materialize_run(
@@ -1009,7 +1097,7 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         )
         .unwrap();
     assert_eq!(
-        materialized_revision(&run.run_case).unwrap(),
+        materialized_revision(&run.run_case, None).unwrap(),
         Some(revision)
     );
     let mut corrupt = run.clone();
@@ -1019,8 +1107,60 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         serde_json::to_vec(&corrupt).unwrap(),
     )
     .unwrap();
-    assert!(materialized_revision(&run.run_case).is_err());
+    assert!(materialized_revision(&run.run_case, None).is_err());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn case_owned_remote_run_uses_explicit_registry_without_weakening_identity_checks() {
+    let (fixture, _) = PendingFixture::new("case-owned-revision");
+    let registry = colm_model::Registry::open(fixture.0.join("registry")).unwrap();
+    let code = colm_model::CodeRef {
+        kind: colm_model::CodeKind::Official,
+        workspace: None,
+        commit: None,
+        source_sha256: "a".repeat(64),
+    };
+    let revision = registry.install_official(code.clone()).unwrap();
+    let case = fixture.0.join("case");
+    std::fs::create_dir_all(case.join("runs")).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_dir_output='out'\n/\n",
+    )
+    .unwrap();
+    let run = registry
+        .materialize_run(&revision.version, &case, &case.join("runs/op"), "op")
+        .unwrap();
+    assert!(materialized_revision(&run.run_case, None).is_err());
+    assert_eq!(
+        materialized_revision(&run.run_case, Some(registry.root())).unwrap(),
+        Some(revision)
+    );
+    // A supplied wrong registry must fail, never fall back to another location.
+    let wrong = colm_model::Registry::open(fixture.0.join("wrong-registry")).unwrap();
+    wrong
+        .install_official(colm_model::CodeRef {
+            source_sha256: "b".repeat(64),
+            ..code
+        })
+        .unwrap();
+    assert!(materialized_revision(&run.run_case, Some(wrong.root())).is_err());
+    assert!(materialized_revision(&run.run_case, Some(&fixture.0.join("missing"))).is_err());
+    for field in ["code", "revision_fingerprint", "overlay_sha256"] {
+        let mut corrupt = serde_json::to_value(&run).unwrap();
+        if field == "code" {
+            corrupt[field]["source_sha256"] = json!("c".repeat(64));
+        } else {
+            corrupt[field] = json!("c".repeat(64));
+        }
+        std::fs::write(
+            run.run_case.join(colm_model::RUN_MANIFEST),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(materialized_revision(&run.run_case, Some(registry.root())).is_err());
+    }
 }
 
 #[test]

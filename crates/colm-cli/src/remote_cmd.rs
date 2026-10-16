@@ -1409,7 +1409,10 @@ pub(crate) fn check_remote_kernel_manifest(
     )
 }
 
-fn materialized_revision(case: &Path) -> Result<Option<colm_model::FrozenRevision>> {
+fn materialized_revision(
+    case: &Path,
+    registry: Option<&Path>,
+) -> Result<Option<colm_model::FrozenRevision>> {
     if !case.join(colm_model::RUN_MANIFEST).is_file() {
         return Ok(None);
     }
@@ -1420,9 +1423,8 @@ fn materialized_revision(case: &Path) -> Result<Option<colm_model::FrozenRevisio
         run.run_case.canonicalize()? == case,
         "model run belongs to another case"
     );
-    let registry = case
-        .parent()
-        .and_then(Path::parent)
+    let registry = registry
+        .or_else(|| case.parent().and_then(Path::parent))
         .context("model run has no registry")?;
     ensure!(
         registry.join("versions").is_dir(),
@@ -1985,7 +1987,9 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest))
     };
-    if let Some(revision) = materialized_revision(&case)? {
+    if let Some(revision) =
+        materialized_revision(&case, opts.get("--model-root").as_deref().map(Path::new))?
+    {
         if fortran {
             check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
         } else {
@@ -2457,32 +2461,41 @@ fn remote_output_verification(ssh: &Ssh, record: &Record) -> Result<Option<serde
         quote(&record.remote_case)
     ))?)?;
     if let Some(proof) = &proof {
-        ensure!(
-            proof["case_name"].as_str() == Some(record.case_name.as_str()),
-            "server proof belongs to another case"
-        );
-        let submitted = record
-            .provenance
-            .as_ref()
-            .context("remote submission provenance is missing")?;
-        let remote = &proof["provenance"];
-        ensure!(
-            submitted["remote_model_run"].is_object()
-                && remote["model_run"] == submitted["remote_model_run"],
-            "server model identity differs from submitted revision"
-        );
-        ensure!(
-            remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
-            "server source snapshot differs from submitted engine"
-        );
-        let full: crate::fingerprint::FullInputIdentity =
-            serde_json::from_value(remote["full_input_identity"].clone())?;
-        ensure!(
-            full.complete && full.algorithm == "sha256-full-v1",
-            "server input content identity is incomplete"
-        );
+        verify_submitted_output_identity(proof, record)?;
     }
     Ok(proof)
+}
+
+fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) -> Result<()> {
+    ensure!(
+        proof["case_name"].as_str() == Some(record.case_name.as_str()),
+        "server proof belongs to another case"
+    );
+    let submitted = record
+        .provenance
+        .as_ref()
+        .context("remote submission provenance is missing")?;
+    let remote = &proof["provenance"];
+    ensure!(
+        remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
+        "server source snapshot differs from submitted engine"
+    );
+    // Legacy runs retain output integrity checks, but cannot certify scientific identity.
+    if submitted["remote_model_run"].is_null() && remote["model_run"].is_null() {
+        return Ok(());
+    }
+    ensure!(
+        submitted["remote_model_run"].is_object()
+            && remote["model_run"] == submitted["remote_model_run"],
+        "server model identity differs from submitted revision"
+    );
+    let full: crate::fingerprint::FullInputIdentity =
+        serde_json::from_value(remote["full_input_identity"].clone())?;
+    ensure!(
+        full.complete && full.algorithm == "sha256-full-v1",
+        "server input content identity is incomplete"
+    );
+    Ok(())
 }
 
 struct FetchStage(PathBuf);
@@ -2526,6 +2539,8 @@ fn fetch_certification(
         Some("partial history is derived data, not the original completed output")
     } else if proof.is_none() {
         Some("the bound server CLI cannot verify original completed outputs")
+    } else if proof.is_some_and(|p| !p["provenance"]["model_run"].is_object()) {
+        Some("legacy execution has no frozen model identity for scientific verification")
     } else {
         None
     };

@@ -1025,10 +1025,9 @@ fn normalize_output_dir(case_nml: &Path, raw: &str) -> PathBuf {
             .unwrap_or_else(|| Path::new("."))
             .join(path)
     };
-    #[cfg(windows)]
     for ancestor in joined.ancestors() {
         if let Ok(canonical) = ancestor.canonicalize() {
-            // Resolve short names such as RUNNER~1 even before `out` is created.
+            // Resolve execution symlinks and Windows short names before `out` exists.
             let suffix = joined.strip_prefix(ancestor).expect("ancestor is a prefix");
             return normalize_path_components(&canonical.join(suffix));
         }
