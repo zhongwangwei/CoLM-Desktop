@@ -565,6 +565,31 @@ export function setStomatalScheme(overlay: Overlay, fields: ModelField[], scheme
 }
 
 export type CaseOptionPatch = Record<string, string | null>;
+
+export function cnInitialStatePatch(
+  overlay: Overlay,
+  caseValues: Readonly<Record<string, string>>,
+  patch: CaseOptionPatch,
+): CaseOptionPatch {
+  const value = (name: string) => {
+    const changed = Object.entries(patch).find(([key]) => key.toLowerCase() === name.toLowerCase());
+    if (changed) return changed[1] ?? '';
+    return (
+      Object.entries(caseValues).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1] ??
+      modelSettingValue(overlay, name) ??
+      ''
+    );
+  };
+  const missing = (text: string) => /^(null|none)?$/i.test(unquote(text).trim());
+  if (!/^\.true\.$/i.test(value('DEF_USE_CN_INIT').trim()) || !missing(value('DEF_file_cn_init')))
+    return {};
+  const runtime = unquote(value('DEF_dir_runtime')).trim();
+  if (missing(runtime)) return {};
+  const separator = runtime.includes('\\') && !runtime.includes('/') ? '\\' : '/';
+  const path = runtime.replace(/[\\/]+$/, '') + separator + 'cnsteadystate.nc';
+  return { DEF_file_cn_init: fieldLiteral({ kind: 'character', values: [] }, path) };
+}
+
 export function caseOptionOverlay(
   overlay: Overlay,
   fields: readonly ModelField[],

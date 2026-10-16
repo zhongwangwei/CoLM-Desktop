@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import type { CaseOptionPatch } from '../versions/configuration-options';
+import { cnInitialStatePatch, type CaseOptionPatch } from '../versions/configuration-options';
 import type { UiAction } from '../../lib/guide';
 
 function dialog() {
@@ -26,7 +26,10 @@ function dialog() {
     subgrid: 'PFT',
     environment: {
       domain: 'site',
-      caseValues: { DEF_USE_BGC: '.true.', DEF_file_cn_init: "'original.nc'" },
+      caseValues: { DEF_USE_BGC: '.true.', DEF_file_cn_init: "'original.nc'" } as Record<
+        string,
+        string
+      >,
     },
     disabled: false,
     onSave: async (patch: CaseOptionPatch) => {
@@ -38,6 +41,7 @@ function dialog() {
     },
   };
   const context = {
+    cnInitialStatePatch,
     React: {
       createElement: (type: string, p: Record<string, unknown>, ...children: unknown[]) => {
         nodes.push({ type, props: p, children });
@@ -194,4 +198,30 @@ test('all process settings use save and cancel without the redundant close butto
     assert.ok(h.action('save'));
     assert.ok(h.action('cancel'));
   }
+});
+
+test('CN initial state resolves runtime default for display and persists it even without another edit', async () => {
+  const h = dialog();
+  Object.assign(h.props.environment.caseValues, {
+    DEF_USE_CN_INIT: '.true.',
+    DEF_file_cn_init: "'null'",
+    DEF_dir_runtime: "'/data/runtime/'",
+  });
+  assert.equal(h.ready().caseValues.DEF_file_cn_init, "'/data/runtime/cnsteadystate.nc'");
+  await h.action('save').run();
+  assert.deepEqual(h.saved, [{ DEF_file_cn_init: "'/data/runtime/cnsteadystate.nc'" }]);
+});
+test('CN default uses the latest enable and runtime edits and preserves explicit paths', async () => {
+  const h = dialog();
+  h.props.environment.caseValues.DEF_file_cn_init = "'null'";
+  const child = h.ready();
+  child.onCaseChange({ DEF_USE_CN_INIT: '.true.', DEF_dir_runtime: "'/new runtime'" });
+  await child.modalActions.find((a) => a.id === 'process-settings-save')!.run();
+  assert.equal(h.saved[0].DEF_file_cn_init, "'/new runtime/cnsteadystate.nc'");
+  const custom = dialog();
+  custom.props.environment.caseValues.DEF_USE_CN_INIT = '.true.';
+  custom.props.environment.caseValues.DEF_dir_runtime = "'/runtime'";
+  custom.ready();
+  await custom.action('save').run();
+  assert.deepEqual(custom.saved, []);
 });

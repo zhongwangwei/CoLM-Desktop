@@ -1045,3 +1045,81 @@ test('stomatal defaults select Ball–Berry but conflicting overrides remain unr
   h.props.overlay.physics = { DEF_USE_MEDLYNST: '.true.', DEF_USE_WUEST: '.true.' };
   assert.equal(h.render().fields.find((f) => f.id === 'configuration-stomatal-scheme')!.value, '');
 });
+
+test('CN initial file hides missing sentinels and explains the runtime default while preserving paths', async () => {
+  for (const value of ['null', "'NONE'", '', "'/runtime/custom.nc'"]) {
+    const h = harness();
+    const name = 'DEF_file_cn_init';
+    h.props.process = 'DEF_USE_BGC';
+    h.props.fields.push({
+      name,
+      kind: 'character',
+      section: '生态与生地化',
+      default: 'null',
+      values: [],
+      derived: false,
+    });
+    h.props.overlay.physics[name] = value;
+    h.render();
+    const c = await h.settle();
+    assert.equal(
+      c.fields.find((f) => f.id === `configuration-${name}`)!.value,
+      value.includes('custom.nc') ? '/runtime/custom.nc' : '',
+    );
+    assert.ok(JSON.stringify(h.nodes).includes('cnsteadystate.nc'));
+  }
+});
+
+test('stomatal restore is visible only for an explicit override', async () => {
+  const h = harness();
+  h.props.overlay.physics = {};
+  h.render();
+  await h.settle();
+  h.render()
+    .actions.find((a) => a.id === 'configuration-group-ecology')!
+    .run();
+  let action = h.render().actions.find((a) => a.id === 'configuration-stomatal-reset')!;
+  assert.equal(action.visible, false);
+  assert.equal(action.enabled, false);
+  h.props.overlay.physics.DEF_USE_MEDLYNST = '.true.';
+  action = h.render().actions.find((a) => a.id === 'configuration-stomatal-reset')!;
+  assert.equal(action.visible, true);
+  assert.match(action.label, /恢复默认/);
+});
+
+test('PFT restore is hidden for inherited values and shown for configured values', async () => {
+  const h = harness();
+  h.render();
+  let c = await h.settle();
+  c.actions.find((a) => a.id === 'configuration-pft-toggle')!.run();
+  c = h.render();
+  c.fields.find((f) => f.id === 'configuration-pft-index')!.set('1');
+  h.render();
+  const response = h.response();
+  const entry: helpers.ConfigurationResult['pft_parameters'][number] = {
+    name: 'test_pft',
+    parameter_id: 'pft:test',
+    label_zh: '测试参数',
+    label_en: 'Test parameter',
+    unit: null,
+    kind: 'real',
+    default: '1',
+    value: '1',
+    configured_value: null,
+    scope_kind: 'pft',
+    scope_label: 'PFT 1',
+    allowed_values: [],
+    mode: 'editable',
+    pending: false,
+  };
+  response.pft_parameters = [entry];
+  h.requests.at(-1)!.resolve(response);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  c = h.render();
+  const id = 'configuration-pft-1-test_pft-reset';
+  assert.equal(c.actions.find((a) => a.id === id)!.visible, false);
+  entry.configured_value = '2';
+  c = h.render();
+  assert.equal(c.actions.find((a) => a.id === id)!.visible, true);
+  assert.match(c.actions.find((a) => a.id === id)!.label, /恢复默认/);
+});

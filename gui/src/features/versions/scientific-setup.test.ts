@@ -363,3 +363,33 @@ test('vG automatically enables VSF and disallows off while Campbell permits both
   assert.match(vsf.choices.find((c) => c.value === '.false.')!.reason, /Campbell/);
   assert.throws(() => apply(o, 'DEF_USE_VariablySaturatedFlow', '.false.'), /Campbell/);
 });
+
+test('enabling spatial crop resets a retained site planting day while site crop keeps it', () => {
+  const o = apply(apply(overlay(), 'DEF_USE_BGC', '.true.'), 'crop', '145', {
+    ...environment,
+    domain: 'single',
+  });
+  const context = {
+    fields: [],
+    process_files: [],
+    crop_defaults: { DEF_TUNING_CROP_PLANTING_DAY: '120' },
+  };
+  for (const domain of ['regional', 'watershed', 'global', 'site']) {
+    const next = applySetupRequest(
+      o,
+      fields,
+      { id: 'crop', value: '.true.' },
+      {
+        ...environment,
+        domain,
+      },
+      context,
+    );
+    assert.equal(next.physics.DEF_TUNING_CROP_PLANTING_DAY, domain === 'site' ? '145' : '0');
+    assert.equal(
+      setupChoices(next, fields, { ...environment, domain }).find((c) => c.id === 'crop')!.value,
+      '.true.',
+    );
+  }
+  assert.equal(o.physics.DEF_TUNING_CROP_PLANTING_DAY, '145');
+});

@@ -8,7 +8,11 @@ import ConfigurationOptions from '../versions/ConfigurationOptions';
 import ScientificSetupCards from '../versions/ScientificSetupCards';
 import { setupHandledKeys, type SetupEnvironment } from '../versions/scientific-setup';
 import { isCaseField, type SchemaField } from './case-model';
-import { caseFieldVisible, type CaseOptionPatch } from '../versions/configuration-options';
+import {
+  caseFieldVisible,
+  cnInitialStatePatch,
+  type CaseOptionPatch,
+} from '../versions/configuration-options';
 import {
   filterModelParameters,
   modelSettingValue,
@@ -618,6 +622,9 @@ function ProcessSettingsDialog({
     if (value === null) delete values[key];
     else values[key] = value;
   }
+  const cnDefaults =
+    process === 'DEF_USE_BGC' ? cnInitialStatePatch(version.overlay, values, patch) : {};
+  Object.assign(values, cnDefaults);
   const close = () => {
     if (!savingNow.current) onClose();
   };
@@ -627,7 +634,13 @@ function ProcessSettingsDialog({
     savingNow.current = true;
     setSaving(true);
     try {
-      if (Object.keys(draft.current).length) await onSave(draft.current);
+      const changes = { ...draft.current };
+      if (process === 'DEF_USE_BGC')
+        Object.assign(
+          changes,
+          cnInitialStatePatch(version.overlay, environment?.caseValues ?? {}, changes),
+        );
+      if (Object.keys(changes).length) await onSave(changes);
       if (live.current) onClose();
     } catch (e) {
       if (live.current) setError(String(e));
@@ -668,6 +681,30 @@ function ProcessSettingsDialog({
       )}
     >
       {error && <Notice tone="error">{error}</Notice>}
+      {process === 'DEF_USE_BGC' && (
+        <Notice>
+          {t(
+            '碳氮初始场默认使用运行数据目录中的 cnsteadystate.nc；启用后会保存完整路径。也可指定其他已有文件。请先设置运行数据目录或填写文件路径。',
+            'The carbon/nitrogen initial state defaults to cnsteadystate.nc in the runtime data directory. Enabling it saves the resolved path; an existing custom file can also be used. Set the runtime directory or enter a file path.',
+          )}
+        </Notice>
+      )}
+      {process === 'crop' && (
+        <Notice>
+          <p>
+            {t(
+              '播种日为 0 时读取运行数据；单点新建算例预设为第 120 天，可自行修改。空间模拟使用运行数据中的播种日期。施肥、固氮和灌溉以当前算例设置为准。',
+              'Planting day 0 reads runtime data. New single-point cases start at day 120 and can be edited. Spatial simulations use planting dates from runtime data. Fertilization, nitrogen fixation and irrigation follow the current case settings.',
+            )}
+          </p>
+          <p>
+            {t(
+              '作物文件位于运行数据目录的 crop/ 中：播种日期 plantdt-colm-64cfts-rice2_fillcoast.nc；施肥源 1 为 fertnitro_fillcoast.nc，源 2 为 fertilizer_2015soc.nc；灌溉方式为 surfdata_irrigation_method_96x144.nc，分配方案 3 另需 surfdata_irrigation_allocation.nc。仅启用对应过程时才需要相关文件。',
+              'Crop files are under runtime/crop/: planting dates in plantdt-colm-64cfts-rice2_fillcoast.nc; fertilizer source 1 in fertnitro_fillcoast.nc and source 2 in fertilizer_2015soc.nc; irrigation methods in surfdata_irrigation_method_96x144.nc, with surfdata_irrigation_allocation.nc also needed for allocation scheme 3. Related files are required only when their processes are enabled.',
+            )}
+          </p>
+        </Notice>
+      )}
       {process === 'soil' && (
         <Notice>
           <p>
@@ -696,11 +733,17 @@ function ProcessSettingsDialog({
         kernelDir={kernel?.dir}
         kernelMacros={kernel?.macros}
         caseScope={
-          environment?.domain === 'site' ? 'site' : environment?.domain ? 'spatial' : 'unknown'
+          ['site', 'single'].includes(environment?.domain ?? '')
+            ? 'site'
+            : environment?.domain
+              ? 'spatial'
+              : 'unknown'
         }
         subgrid={subgrid}
         caseValues={values}
-        removedCaseKeys={Object.keys(patch).filter((key) => patch[key] === null)}
+        removedCaseKeys={Object.keys(patch).filter(
+          (key) => patch[key] === null && !(key in cnDefaults),
+        )}
         disabled={disabled || saving}
         excludeKeys={[
           ...setupHandledKeys.filter((key) => key !== 'DEF_TUNING_CROP_PLANTING_DAY'),

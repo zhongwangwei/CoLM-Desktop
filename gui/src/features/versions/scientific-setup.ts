@@ -366,7 +366,7 @@ export function applySetupRequest(
           next,
           fields,
           key,
-          current ?? (key === planting && !isSite(environment) ? '0' : defaultValue),
+          key === planting && !isSite(environment) ? '0' : (current ?? defaultValue),
         );
       }
       return next;

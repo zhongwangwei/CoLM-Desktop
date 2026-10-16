@@ -5,6 +5,7 @@ import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
 import {
   caseDirectory,
+  cropEnabled,
   requiredNumber,
   physicsFields,
   versionMode,
@@ -311,7 +312,13 @@ export default function NewCasePage() {
   }
   const set = (k: string, v: string) => {
     setError('');
-    if (k === 'kind' || k === 'grid') reconcile({}, k === 'kind' ? { domain: v } : { grid: v });
+    if (k === 'kind' || k === 'grid')
+      reconcile(
+        k === 'kind' && v !== 'site' && cropEnabled(physics)
+          ? { DEF_TUNING_CROP_PLANTING_DAY: '0' }
+          : {},
+        k === 'kind' ? { domain: v } : { grid: v },
+      );
     const s = k === 'site' ? sites.find((site) => site.site_file === v) : undefined;
     setForm((f) => {
       const next: Record<string, string> = {
