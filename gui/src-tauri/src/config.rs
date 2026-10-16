@@ -4381,7 +4381,7 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
 }
 
 /// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO、Cl、
-/// SEDIMENT）从上游模板复制到算例目录。
+/// SEDIMENT）仅在缺失时从上游模板生成；已有文件只修改向导明确提交的参数。
 fn stage_tracer_parameters(
     dir: &str,
     fields: &[FieldChange],
@@ -4406,11 +4406,11 @@ fn stage_tracer_parameters(
     }
     if wanted("standard_sediment_parameter.nml") {
         let path = std::path::Path::new(dir).join("standard_sediment_parameter.nml");
-        std::fs::write(
+        stage_tracer_parameter_file(
             &path,
             include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"),
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+            &[],
+        )?;
     }
     let fractionation = fields.iter().any(|field| {
         field.path == "DEF_TRACER_USE_FRACTIONATION"
@@ -4429,10 +4429,124 @@ fn stage_tracer_parameters(
         if wanted(file) {
             let text = isotope_parameter_text(template, fractionation)?;
             let path = std::path::Path::new(dir).join(file);
-            std::fs::write(&path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+            stage_tracer_parameter_file(&path, &text, &[])?;
         }
     }
     Ok(())
+}
+
+/// Prepare defaults in the disposable model preview; commit them with case.nml only after validation.
+fn stage_case_tracer_parameters(
+    dir: &str,
+    context: &str,
+    fields: &[FieldChange],
+) -> Result<Vec<(std::path::PathBuf, String)>, String> {
+    let Some(selection) = fields
+        .iter()
+        .find(|f| f.path.eq_ignore_ascii_case("DEF_TRACER_PARAM_FILES"))
+    else {
+        return Ok(Vec::new());
+    };
+    let text = std::fs::read_to_string(std::path::Path::new(context).join("case.nml"))
+        .map_err(|e| e.to_string())?;
+    let doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+    let effective = character(&doc, "DEF_TRACER_PARAM_FILES");
+    stage_tracer_parameters(
+        context,
+        &[
+            FieldChange {
+                path: "DEF_TRACER_PARAM_FILES".into(),
+                value: effective.clone(),
+            },
+            FieldChange {
+                path: "DEF_TRACER_USE_FRACTIONATION".into(),
+                value: if logical(&doc, "DEF_TRACER_USE_FRACTIONATION") {
+                    ".true."
+                } else {
+                    ".false."
+                }
+                .into(),
+            },
+        ],
+        None,
+        (None, None),
+    )?;
+    let selected =
+        colm_namelist::tracer_files::param_file_paths(selection.value.trim_matches(['\'', '"']))
+            .map_err(|e| e.to_string())?;
+    let resolved =
+        colm_namelist::tracer_files::param_file_paths(&effective).map_err(|e| e.to_string())?;
+    let mut pending = Vec::new();
+    for file in selected {
+        if !matches!(
+            file.as_str(),
+            "standard_ch4_parameter.nml"
+                | "standard_chloride_parameter.nml"
+                | "standard_sediment_parameter.nml"
+                | "standard_O18_parameter.nml"
+                | "standard_HDO_parameter.nml"
+        ) || !resolved.contains(&file)
+        {
+            continue;
+        }
+        let path = std::path::Path::new(dir).join(&file);
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_file() => continue,
+            Ok(_) => return Err(format!("{}: 示踪物参数目标必须是普通文件", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(format!("{}: {error}", path.display())),
+        }
+        let text = std::fs::read_to_string(std::path::Path::new(context).join(file))
+            .map_err(|e| e.to_string())?;
+        pending.push((path, text));
+    }
+    Ok(pending)
+}
+
+fn stage_tracer_parameter_file(
+    path: &std::path::Path,
+    text: &str,
+    changed_fields: &[&str],
+) -> Result<(), String> {
+    use std::io::Write as _;
+    // Exclusive creation also protects a user file or symlink appearing during staging.
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => file
+            .write_all(text.as_bytes())
+            .map_err(|e| format!("{}: {e}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata =
+                std::fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            if !metadata.file_type().is_file() {
+                return Err(format!(
+                    "{}: 示踪物参数目标必须是普通文件，不能是符号链接或目录",
+                    path.display()
+                ));
+            }
+            if changed_fields.is_empty() {
+                return Ok(());
+            }
+            let original =
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let mut doc = colm_namelist::parse(&original)
+                .map_err(|e| format!("{}: {e:#}", path.display()))?;
+            let generated =
+                colm_namelist::parse(text).map_err(|e| format!("内置示踪物参数模板：{e:#}"))?;
+            for name in changed_fields {
+                let value = generated
+                    .get(name)
+                    .ok_or_else(|| format!("内置示踪物参数模板缺少 {name}"))?;
+                doc.set(name, value.clone())
+                    .map_err(|e| format!("{}: {e:#}", path.display()))?;
+            }
+            write_files_atomic_untracked(&[(path.to_path_buf(), doc.to_string())]).map(|_| ())
+        }
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
 }
 
 /// 同位素参数文件。分馏要读 IsoGSM 的同位素降水与水汽，上游模板里那一组强迫原样保留；不分馏时
@@ -4484,11 +4598,20 @@ fn stage_solute_parameter(
         .map_err(|e| format!("内置溶质参数模板：{e:#}"))?;
     }
     let path = std::path::Path::new(dir).join("standard_chloride_parameter.nml");
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
+    let changed_fields = [(SOLUTE_INIT_CONC, init), (SOLUTE_PRECIP_CONC, precip)]
+        .into_iter()
+        .filter_map(|(name, value)| value.map(|_| name))
+        .collect::<Vec<_>>();
+    stage_tracer_parameter_file(&path, &doc.to_string(), &changed_fields)
 }
 
 /// CH4 参数文件：淹没方案取向导所选，关掉稻田与空间 pH（分别要 CROP 稻田与预处理生成的 pH 数据）。
 fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
+    let changed_fields = if mode.is_some() {
+        &[METHANE_MODE][..]
+    } else {
+        &[]
+    };
     let mode = mode
         .unwrap_or("wetwat")
         .trim()
@@ -4520,7 +4643,7 @@ fn stage_ch4_parameter(dir: &str, mode: Option<&str>) -> Result<(), String> {
         text = text.replacen(from, to, 1);
     }
     let path = std::path::Path::new(dir).join("standard_ch4_parameter.nml");
-    std::fs::write(&path, text).map_err(|error| format!("{}: {error}", path.display()))
+    stage_tracer_parameter_file(&path, &text, changed_fields)
 }
 
 /// 把一个字段写进这一批算例的每一份 case.nml。
@@ -4640,6 +4763,7 @@ fn set_fields_with_changes(
             let context = contexts
                 .get(index)
                 .ok_or("missing model validation context")?;
+            extra.extend(stage_case_tracer_parameters(&d, context, &fields)?);
             let text = std::fs::read_to_string(std::path::Path::new(context).join("case.nml"))
                 .map_err(|e| e.to_string())?;
             let mut overlay = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
@@ -5092,6 +5216,7 @@ pub async fn case_data_save(
             .await?;
             let context_dir = context.entry.dir;
             contexts.push(context_dir.clone());
+            stage_case_tracer_parameters(dir, &context_dir, &fields)?;
             if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
                 let text =
                     std::fs::read_to_string(std::path::Path::new(&context_dir).join("case.nml"))

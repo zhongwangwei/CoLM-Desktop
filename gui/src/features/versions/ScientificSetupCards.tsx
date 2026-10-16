@@ -126,6 +126,11 @@ export default function ScientificSetupCards({
     if (locked || writeLocked.current || current.current !== key)
       throw new Error(bilingual('配置不可修改或已切换', 'Configuration is locked or stale'));
     try {
+      if (request.id === 'DEF_USE_TRACER' && request.value === '.true.' && onOpenSettings) {
+        onOpenSettings(request.id);
+        setError('');
+        return;
+      }
       const requestedValue =
         request.id === 'crop' && !['.true.', '.false.'].includes(request.value)
           ? '.true.'
@@ -189,28 +194,36 @@ export default function ScientificSetupCards({
     }
   }
   const cards = choices.map((control, index) => {
+    const tracerSetup = control.id === 'DEF_USE_TRACER' && !!onOpenSettings;
     const settingsAvailable =
       !!onOpenSettings &&
       hasSettings(control.id, result?.fields) &&
-      !!control.value &&
-      control.value !== '.false.' &&
-      !control.choices.find((choice) => choice.value === control.value)?.reason;
+      (tracerSetup ||
+        (!!control.value &&
+          control.value !== '.false.' &&
+          !control.choices.find((choice) => choice.value === control.value)?.reason));
     if (settingsAvailable)
       actions.push({
         id: `setup-${control.id}-settings`,
-        label: t('设置', 'Settings'),
+        label: tracerSetup ? t('选择示踪剂', 'Choose tracers') : t('设置', 'Settings'),
         kind: 'click',
         enabled: !locked,
-        run: () => write({ id: control.id, value: control.value! }),
+        run: () => write({ id: control.id, value: tracerSetup ? '.true.' : control.value! }),
       });
     const label = `${index + (includeSubgrid ? 1 : 2)}. ${t(control.zh, control.en)}`;
-    const available = control.choices.filter((c) => !c.reason);
+    const available = control.choices.filter(
+      (c) => !c.reason || (tracerSetup && c.value === '.true.'),
+    );
     guideFields.push({
       id: `setup-${control.id}`,
       label,
       value: control.value,
       type: 'choice',
-      options: available.map((c) => ({ value: c.value, label: t(c.zh, c.en) })),
+      options: available.map((c) => ({
+        value: c.value,
+        label:
+          tracerSetup && c.value === '.true.' ? t('选择示踪剂', 'Choose tracers') : t(c.zh, c.en),
+      })),
       disabled: locked || !available.length,
       set: (value) => write({ id: control.id, value }),
     });
@@ -236,15 +249,19 @@ export default function ScientificSetupCards({
               className="simulation-choice-card"
               variant={control.value === choice.value ? 'primary' : 'secondary'}
               aria-pressed={control.value === choice.value}
-              disabled={locked || !!choice.reason}
+              disabled={locked || (!!choice.reason && !(tracerSetup && choice.value === '.true.'))}
               onClick={() => invoke({ id: control.id, value: choice.value })}
             >
-              <strong>{t(choice.zh, choice.en)}</strong>
+              <strong>
+                {tracerSetup && choice.value === '.true.'
+                  ? t('选择示踪剂', 'Choose tracers')
+                  : t(choice.zh, choice.en)}
+              </strong>
               {choice.reason && <small>{choice.reason}</small>}
             </Button>
           ))}
         </div>
-        {settingsAvailable && (
+        {settingsAvailable && !tracerSetup && (
           <Button
             disabled={locked}
             onClick={() => invoke({ id: control.id, value: control.value! })}

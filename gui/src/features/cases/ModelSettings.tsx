@@ -585,18 +585,20 @@ function ProcessSettingsDialog({
 }) {
   const { state } = useApp(),
     t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
-  const [patch, setPatch] = useState<CaseOptionPatch>({}),
+  const initialPatch: CaseOptionPatch =
+    process === 'DEF_USE_TRACER' ? { DEF_USE_TRACER: '.true.' } : {};
+  const [patch, setPatch] = useState<CaseOptionPatch>(initialPatch),
     [saving, setSaving] = useState(false),
     [ready, setReady] = useState(false),
     [error, setError] = useState('');
   const live = useRef(true),
     savingNow = useRef(false),
-    draft = useRef<CaseOptionPatch>({}),
+    draft = useRef<CaseOptionPatch>(initialPatch),
     lockedNow = useRef(disabled);
   lockedNow.current = disabled;
   const titles: Record<string, [string, string]> = {
     DEF_USE_BGC: ['BGC 设置', 'BGC settings'],
-    DEF_USE_TRACER: ['示踪设置', 'Tracer settings'],
+    DEF_USE_TRACER: ['选择示踪剂与配置', 'Choose and configure tracers'],
     DEF_USE_GridRiverLakeFlow: ['河湖流与水库设置', 'River and reservoir settings'],
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
@@ -607,6 +609,10 @@ function ProcessSettingsDialog({
     PC: ['PC 植物群落设置', 'PC settings'],
   };
   const title = titles[process] ?? ['过程设置', 'Process settings'];
+  const saveLabel =
+    process === 'DEF_USE_TRACER'
+      ? t('保存并启用示踪', 'Save and enable tracers')
+      : t('保存设置', 'Save settings');
   useEffect(() => {
     live.current = true;
     return () => {
@@ -650,7 +656,7 @@ function ProcessSettingsDialog({
   const actions: UiAction[] = [
     {
       id: 'process-settings-save',
-      label: t('保存设置', 'Save settings'),
+      label: saveLabel,
       kind: 'click',
       enabled: ready && !disabled && !saving,
       run: save,
@@ -677,6 +683,14 @@ function ProcessSettingsDialog({
       )}
     >
       {error && <Notice tone="error">{error}</Notice>}
+      {process === 'DEF_USE_TRACER' && (
+        <Notice>
+          {t(
+            '先选择水同位素、甲烷、氯离子或河道泥沙，并完善相关参数；手工修改定义表后请先应用定义。保存时一起启用示踪，取消不会打开示踪开关或更改已有定义。',
+            'Choose water isotopes, methane, chloride or river sediment and complete their settings. Apply any manual table edits first. Saving enables tracers together; cancelling keeps the switch and existing definitions unchanged.',
+          )}
+        </Notice>
+      )}
       {process === 'DEF_USE_BGC' && (
         <Notice>
           {t(
@@ -711,6 +725,7 @@ function ProcessSettingsDialog({
       )}
       <ConfigurationOptions
         process={process}
+        engine={environment?.engine}
         modalActions={actions}
         onReady={setReady}
         source={{ kind: 'frozen', version: version.version }}
@@ -753,7 +768,7 @@ function ProcessSettingsDialog({
             void save();
           }}
         >
-          {t('保存设置', 'Save settings')}
+          {saveLabel}
         </Button>
         <Button disabled={saving} onClick={close}>
           {t('取消', 'Cancel')}

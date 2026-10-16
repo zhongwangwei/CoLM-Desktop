@@ -449,7 +449,7 @@ test('actual generic groups and guide omit land-class fields that require indexe
   assert.equal(p.changes.length, 0);
 });
 
-test('family cards stage only missing names and types, preserve custom rows and never save on click', async () => {
+test('family cards stage missing names, types and process filenames, preserve custom rows and never save on click', async () => {
   const p = harness();
   p.props.overlay.physics = {
     ...p.props.overlay.physics,
@@ -484,7 +484,7 @@ test('family cards stage only missing names and types, preserve custom rows and 
   };
   p.render();
   c = await p.settle();
-  assert.equal(c.actions.find((a) => a.id === 'configuration-family-isotope')?.enabled, false);
+  assert.equal(c.actions.find((a) => a.id === 'configuration-family-isotope')?.enabled, true);
   p.props.disabled = true;
   c = p.render();
   assert.ok(
@@ -735,7 +735,7 @@ test('modal save readiness rejects invalid text and unapplied tracer definitions
   h.requests.at(-1)!.resolve(h.response());
   await new Promise((resolve) => setTimeout(resolve, 0));
   let c = h.render();
-  assert.equal(ready, true);
+  assert.equal(ready, false);
   await c.actions.find((a) => a.id === 'configuration-tracers-add')!.run();
   c = h.render();
   assert.equal(ready, false);
@@ -1582,3 +1582,269 @@ for (const outcome of ['select', 'cancel', 'switch', 'lock', 'unmount']) {
     if (outcome === 'select') assert.equal(patches[0].DEF_file_cn_init, "'/server/O''Brien/cn.nc'");
   });
 }
+
+function tracerModalHarness() {
+  const h = harness();
+  h.props.process = 'DEF_USE_TRACER';
+  h.props.modalActions = [];
+  h.props.engine = 'rust';
+  h.props.subgrid = 'PFT';
+  h.props.kernelMacros = ['BGC'];
+  h.props.caseScope = 'site';
+  h.props.overlay.physics = {
+    DEF_USE_TRACER: '.true.',
+    DEF_USE_BGC: '.true.',
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_USE_VariablySaturatedFlow: '.true.',
+    DEF_USE_LULCC: '.false.',
+    DEF_URBAN_RUN: '.false.',
+  };
+  return h;
+}
+
+test('tracer process picker remains reachable while off and with unmet prerequisites', async () => {
+  const h = tracerModalHarness();
+  h.props.overlay.physics.DEF_USE_TRACER = '.false.';
+  h.props.overlay.physics.DEF_USE_Campbell_SOIL_MODEL = '.true.';
+  h.props.caseValues = { ...h.props.overlay.physics };
+  h.props.onCaseChange = (patch) => {
+    Object.assign(h.props.caseValues!, patch);
+  };
+  let ready = true;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.render();
+  const result = h.response();
+  result.fields = result.fields.map((field) => ({ ...field, mode: 'disabled' }));
+  h.requests.at(-1)!.resolve(result);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  let c = h.render();
+  const methane = c.actions.find((action) => action.id === 'configuration-family-methane')!;
+  assert.ok(methane);
+  assert.equal(methane.enabled, true);
+  assert.equal(ready, false);
+  methane.run();
+  h.render();
+  c = await h.settle();
+  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-NAMES')?.value, 'CH4');
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')?.value,
+    'standard_ch4_parameter.nml',
+  );
+  assert.equal(h.changes.length, 0);
+  assert.equal(ready, false);
+  assert.match(JSON.stringify(h.nodes), /van Genuchten/);
+});
+
+test('tracer modal cannot save empty, malformed, or unapplied definitions', async () => {
+  const h = tracerModalHarness();
+  let ready = true;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.render();
+  let c = await h.settle();
+  assert.equal(ready, false);
+  c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
+  c = h.render();
+  assert.equal(ready, false);
+  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  h.render();
+  await h.settle();
+  assert.equal(ready, true);
+  h.props.overlay.physics.DEF_TRACER_NAMES = "'CH4,CH4'";
+  h.props.overlay.physics.DEF_TRACER_TYPES = "'gas,gas'";
+  h.props.overlay.physics.DEF_TRACER_NUM = '2';
+  h.render();
+  await h.settle();
+  assert.equal(ready, false);
+  assert.match(JSON.stringify(h.nodes), /unique|重复/);
+});
+
+test('isotope modal retains parameter-file metadata and requires positive aquifer mixing water', async () => {
+  const h = tracerModalHarness();
+  let ready = true;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.props.fields.push({
+    name: 'DEF_TRACER_AQUIFER_MIXING_WATER_MM',
+    section: '示踪剂',
+    kind: 'real',
+    default: '0',
+    values: [],
+    derived: false,
+  });
+  h.render();
+  let c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-family-isotope')!.run();
+  c = h.render();
+  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  h.render();
+  await h.settle();
+  assert.equal(ready, false);
+  assert.match(JSON.stringify(h.nodes), /含水层|aquifer/);
+  assert.equal(helpers.tracerRows(h.props.overlay)[0].MRAT, '');
+  h.render();
+  await h.settle();
+  assert.equal(ready, false);
+  h.props.overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM = '1';
+  h.render();
+  await h.settle();
+  assert.equal(ready, true);
+  h.props.overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM = '-1';
+  h.render();
+  await h.settle();
+  assert.equal(ready, false);
+});
+
+test('tracer modal uses context defaults but explicit dependency conflicts still block saving', async () => {
+  const h = tracerModalHarness();
+  h.props.overlay = helpers.setTracerRows(
+    h.props.overlay,
+    h.props.fields,
+    helpers.appendTracerFamily([], 'methane'),
+  );
+  delete h.props.overlay.physics.DEF_USE_BGC;
+  h.props.fields = h.props.fields.filter((field) => field.name !== 'DEF_USE_BGC');
+  h.props.fields.push({
+    name: 'DEF_USE_BGC',
+    section: '水热过程',
+    kind: 'logical',
+    default: '.false.',
+    values: [],
+    derived: false,
+  });
+  let ready = false;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  const settle = async () => {
+    h.render();
+    const response = h.response();
+    response.fields.find((field) => field.name === 'DEF_USE_BGC')!.built_in_default = '.true.';
+    h.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    h.render();
+  };
+  await settle();
+  assert.equal(ready, true);
+  h.props.overlay.physics.DEF_USE_BGC = '.false.';
+  await settle();
+  assert.equal(ready, false);
+  assert.match(JSON.stringify(h.nodes), /BGC/);
+});
+
+test('malformed tracer file mappings show a repairable error without crashing the modal', async () => {
+  const h = tracerModalHarness();
+  Object.assign(h.props.overlay.physics, {
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'CH4'",
+    DEF_TRACER_TYPES: "'gas'",
+    DEF_TRACER_PARAM_FILES: "'CH4:'",
+  });
+  let ready = true;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.render();
+  let c = await h.settle();
+  assert.equal(ready, false);
+  assert.match(JSON.stringify(h.nodes), /Invalid tracer file mapping|映射无效/);
+  c.fields
+    .find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')!
+    .set('/server/ch4.nml');
+  c = h.render();
+  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  h.render();
+  await h.settle();
+  assert.equal(ready, true);
+  assert.equal(helpers.tracerRows(h.props.overlay)[0].PARAM_FILES, '/server/ch4.nml');
+});
+
+test('focused tracer presets stage one modal patch and become save-ready without Apply', async () => {
+  const h = tracerModalHarness();
+  const patches: helpers.CaseOptionPatch[] = [];
+  h.props.caseValues = { ...h.props.overlay.physics };
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+    Object.assign(h.props.caseValues!, patch);
+  };
+  let ready = false;
+  h.props.onReady = (value) => {
+    ready = value;
+  };
+  h.render();
+  const c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
+  assert.equal(patches.length, 1);
+  assert.equal(patches[0].DEF_TRACER_NAMES, "'CH4'");
+  assert.equal(h.changes.length, 0);
+  h.render();
+  await h.settle();
+  assert.equal(ready, true);
+});
+
+test('focused tracer modal presents species and definitions before general process options', async () => {
+  const h = tracerModalHarness();
+  h.props.caseValues = { ...h.props.overlay.physics };
+  h.props.onCaseChange = () => {};
+  h.render();
+  await h.settle();
+  const sections: unknown[] = [];
+  const visit = (node: unknown) => {
+    if (Array.isArray(node)) node.forEach(visit);
+    else if (node && typeof node === 'object') {
+      const element = node as { type?: string; props?: { title?: unknown }; children?: unknown[] };
+      if (['Card', 'Advanced'].includes(element.type ?? '')) sections.push(element.props?.title);
+      visit(element.children);
+    }
+  };
+  visit(h.nodes.at(-1));
+  assert.deepEqual(sections.slice(0, 2), [
+    '先选择要追踪的物质',
+    '示踪物定义（每行对应同一个示踪物）',
+  ]);
+});
+
+test('individual tracer removal retains all other custom metadata until explicitly applied', async () => {
+  const h = tracerModalHarness();
+  const rows = helpers.appendTracerFamily(helpers.appendTracerFamily([], 'methane'), 'chloride');
+  rows[1].PARAM_FILES = '/server/custom-cl.nml';
+  rows[1].REACTIVE_DECAY_RATE = '0.25';
+  rows[0].REACTIVE_DECAY_RATE = '0';
+  h.props.overlay = helpers.setTracerRows(h.props.overlay, h.props.fields, rows);
+  h.render();
+  let c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-tracer-0-remove')!.run();
+  c = h.render();
+  assert.equal(h.changes.length, 0);
+  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-NAMES')!.value, 'Cl');
+  assert.equal(
+    c.fields.find((field) => field.id === 'configuration-tracer-0-PARAM_FILES')!.value,
+    '/server/custom-cl.nml',
+  );
+  c.actions.find((action) => action.id === 'configuration-tracers-apply')!.run();
+  assert.deepEqual(helpers.tracerRows(h.props.overlay), [rows[1]]);
+});
+
+test('preset mixed with incomplete numeric columns retains local rows for correction', async () => {
+  const h = tracerModalHarness();
+  const rows = helpers.appendTracerFamily([], 'chloride');
+  rows[0].MRAT = '35';
+  h.props.overlay = helpers.setTracerRows(h.props.overlay, h.props.fields, rows);
+  h.props.caseValues = { ...h.props.overlay.physics };
+  const patches: helpers.CaseOptionPatch[] = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  h.render();
+  let c = await h.settle();
+  c.actions.find((action) => action.id === 'configuration-family-methane')!.run();
+  c = h.render();
+  assert.equal(patches.length, 0);
+  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-1-NAMES')!.value, 'CH4');
+  assert.equal(c.fields.find((field) => field.id === 'configuration-tracer-0-MRAT')!.value, '35');
+  assert.match(JSON.stringify(h.nodes), /Fill the whole column|填写整列/);
+});

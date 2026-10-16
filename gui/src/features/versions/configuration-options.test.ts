@@ -8,6 +8,7 @@ import {
   vicParameterDefault,
   type ConfigurationField,
   tracerFamilyState,
+  tracerSetupIssues,
   appendTracerFamily,
   setStomatalScheme,
   groupedField,
@@ -241,7 +242,11 @@ test('tracer files resolve keyed and positional mappings and preserve untouched 
   rows = tracerRows(overlay);
   assert.deepEqual(
     rows.map((row) => row.PARAM_FILES),
-    ['null', 'oxygen.nml'],
+    ['', 'oxygen.nml'],
+  );
+  assert.equal(
+    setTracerRows(overlay, fields, rows).physics.DEF_TRACER_PARAM_FILES,
+    "'null; O18:oxygen.nml'",
   );
   overlay.physics.DEF_TRACER_PARAM_FILES = "'C:\\data\\CH4.nml,oxygen.nml'";
   assert.deepEqual(
@@ -322,7 +327,7 @@ test('generic groups exclude indexed catalog scopes while retaining ordinary sca
   assert.equal(groupedField(field('DEF_USE_NITRIF_DENITRIF'), catalog), true);
 });
 
-test('family presets only add missing names/types without mutating existing or inventing numeric and asset values', () => {
+test('family presets only add missing names/types with built-in files without mutating existing rows or inventing numeric values', () => {
   const rows = [
     {
       NAMES: 'custom',
@@ -340,8 +345,8 @@ test('family presets only add missing names/types without mutating existing or i
   assert.deepEqual(
     result.slice(1).map((r) => [r.NAMES, r.TYPES, r.MRAT, r.PARAM_FILES]),
     [
-      ['H2_18O', 'isotope', '', ''],
-      ['HDO', 'isotope', '', ''],
+      ['H2_18O', 'isotope', '', 'standard_O18_parameter.nml'],
+      ['HDO', 'isotope', '', 'standard_HDO_parameter.nml'],
     ],
   );
   assert.deepEqual(appendTracerFamily(result, 'isotope'), result);
@@ -651,4 +656,187 @@ test('VIC controls follow runoff and parameter source even while applicability i
     assert.equal(caseFieldVisible('DEF_file_VIC_para', [], values), !grid);
     assert.equal(caseFieldVisible('DEF_file_VIC_OPT', [], values), grid);
   }
+});
+
+test('tracer family defaults match VG runtime without requiring an unspecified generic kernel', () => {
+  const overlay = empty();
+  overlay.physics.DEF_USE_TRACER = '.true.';
+  overlay.physics.DEF_USE_VariablySaturatedFlow = '.false.';
+  const defaults = {
+    def_use_campbell_soil_model: '.false.',
+    DEF_URBAN_RUN: '.false.',
+    DEF_USE_BGC: '.true.',
+    DEF_USE_LULCC: '.false.',
+  };
+  const context = { defaults, subgrid: 'PC' };
+  const before = structuredClone(overlay);
+  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'ready');
+  assert.equal(tracerFamilyState(overlay, 'isotope', context).status, 'ready');
+  assert.equal(tracerFamilyState(overlay, 'sediment', context).status, 'pending');
+  assert.equal(
+    tracerFamilyState(overlay, 'methane', {
+      ...context,
+      engine: 'fortran',
+      kernelMacros: ['OPENMP'],
+    }).status,
+    'blocked',
+  );
+  assert.equal(
+    tracerFamilyState(overlay, 'methane', { ...context, engine: 'rust', kernelMacros: ['OPENMP'] })
+      .status,
+    'ready',
+  );
+  assert.deepEqual(overlay, before);
+  overlay.physics.DEF_URBAN_RUN = '.true.';
+  assert.equal(tracerFamilyState(overlay, 'methane', context).status, 'blocked');
+});
+
+test('tracer readiness requires actual species and required metadata while preserving external paths', () => {
+  const overlay = empty();
+  const defaults = {
+    DEF_USE_TRACER: '.true.',
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_URBAN_RUN: '.false.',
+    DEF_USE_BGC: '.true.',
+    DEF_USE_LULCC: '.false.',
+  };
+  const context = { defaults, subgrid: 'PFT', engine: 'rust' };
+  assert.equal(tracerSetupIssues(overlay, context).length, 1);
+  Object.assign(overlay.physics, {
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'CH4'",
+    DEF_TRACER_TYPES: "'gas'",
+    DEF_TRACER_PARAM_FILES: "'CH4:null'",
+  });
+  assert.equal(tracerRows(overlay)[0].PARAM_FILES, '');
+  assert.equal(tracerSetupIssues(overlay, context).length, 1);
+  for (const path of [
+    'standard_ch4_parameter.nml',
+    '/server/input/methane.nml',
+    'process/frozen.nml',
+  ]) {
+    overlay.physics.DEF_TRACER_PARAM_FILES = `'CH4:${path}'`;
+    assert.deepEqual(tracerSetupIssues(overlay, context), []);
+  }
+  overlay.physics.DEF_TRACER_NAMES = "'OTHER'";
+  assert.equal(tracerSetupIssues(overlay, context).length, 1);
+  assert.deepEqual(tracerSetupIssues(overlay, { ...context, engine: 'fortran' }), []);
+  overlay.physics.DEF_TRACER_NAMES = "'HDO'";
+  overlay.physics.DEF_TRACER_TYPES = "'isotope'";
+  overlay.physics.DEF_TRACER_PARAM_FILES = "'none'";
+  for (const value of ['0', '-1', 'NaN', 'Infinity', '']) {
+    overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM = value;
+    assert.equal(tracerSetupIssues(overlay, context).length, 1);
+  }
+  delete overlay.physics.DEF_TRACER_AQUIFER_MIXING_WATER_MM;
+  assert.deepEqual(
+    tracerSetupIssues(overlay, {
+      ...context,
+      defaults: { ...defaults, DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1.d2' },
+    }),
+    [],
+  );
+});
+
+test('all tracer definitions enforce common prerequisites including custom reactive tracers', () => {
+  const overlay = empty();
+  Object.assign(overlay.physics, {
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'custom'",
+    DEF_TRACER_TYPES: "'reactive'",
+  });
+  const defaults = {
+    DEF_USE_TRACER: '.true.',
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_URBAN_RUN: '.false.',
+  };
+  assert.deepEqual(tracerSetupIssues(overlay, { defaults }), []);
+  assert.deepEqual(tracerSetupIssues(overlay, {}), []);
+  for (const key of ['DEF_USE_Campbell_SOIL_MODEL', 'DEF_URBAN_RUN']) {
+    overlay.physics[key] = '.true.';
+    assert.equal(tracerSetupIssues(overlay, { defaults }).length, 1);
+    delete overlay.physics[key];
+  }
+  assert.equal(tracerSetupIssues(overlay, { defaults, kernelMacros: ['CATCHMENT'] }).length, 1);
+  assert.equal(
+    tracerSetupIssues(overlay, { defaults, kernelMacros: ['OPENMP'], engine: 'fortran' }).length,
+    1,
+  );
+  assert.deepEqual(
+    tracerSetupIssues(overlay, { defaults, kernelMacros: ['OPENMP'], engine: 'rust' }),
+    [],
+  );
+});
+
+test('verified active methane inundation modes require routing without rejecting external parameter references', () => {
+  const overlay = empty();
+  Object.assign(overlay.physics, {
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'CH4'",
+    DEF_TRACER_TYPES: "'gas'",
+    DEF_TRACER_PARAM_FILES: "'CH4:/server/input/methane.nml'",
+  });
+  const defaults = {
+    DEF_USE_TRACER: '.true.',
+    DEF_USE_Campbell_SOIL_MODEL: '.false.',
+    DEF_URBAN_RUN: '.false.',
+    DEF_USE_BGC: '.true.',
+    DEF_USE_GridRiverLakeFlow: '.false.',
+  };
+  const context = { defaults, subgrid: 'PFT' };
+  const processFiles = (
+    mode: string,
+    verified = true,
+    active = true,
+  ): NonNullable<import('./configuration-options').FamilyContext['processFiles']> => [
+    {
+      file: 'methane.nml',
+      title: '',
+      section: '',
+      verified,
+      active_methane_asset: active,
+      entries: [
+        {
+          path: 'DEF_METHANE%inundation_mode',
+          value: mode,
+          unset: false,
+          group: 'methane',
+          kind: 'choice',
+          asset_value: mode,
+          default: 'wetwat',
+          options: [],
+          editable: true,
+          descriptor_id: null,
+          pending: false,
+        },
+      ],
+    },
+  ];
+  assert.deepEqual(tracerSetupIssues(overlay, context), []);
+  for (const mode of ['routing', 'hybrid', 'dh_all_thr05', 'dyn_routing_hybrid']) {
+    assert.equal(
+      tracerSetupIssues(overlay, { ...context, processFiles: processFiles(mode) }).length,
+      1,
+    );
+    assert.deepEqual(
+      tracerSetupIssues(overlay, { ...context, processFiles: processFiles(mode, false) }),
+      [],
+    );
+    assert.deepEqual(
+      tracerSetupIssues(overlay, { ...context, processFiles: processFiles(mode, true, false) }),
+      [],
+    );
+    assert.deepEqual(
+      tracerSetupIssues(overlay, {
+        ...context,
+        defaults: { ...defaults, DEF_USE_GridRiverLakeFlow: '.true.' },
+        processFiles: processFiles(mode),
+      }),
+      [],
+    );
+  }
+  assert.deepEqual(
+    tracerSetupIssues(overlay, { ...context, processFiles: processFiles('wetwat') }),
+    [],
+  );
 });

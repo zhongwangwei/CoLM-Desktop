@@ -269,7 +269,9 @@ export function tracerRows(overlay: Overlay) {
       Object.fromEntries(
         tracerColumns.map((c, j) => [
           c,
-          c === 'PARAM_FILES' ? tracerFileFor(files, arrays[0][i] ?? '', i) : (arrays[j][i] ?? ''),
+          c === 'PARAM_FILES'
+            ? tracerFileFor(files, arrays[0][i] ?? '', i).replace(/^(null|none)$/i, '')
+            : (arrays[j][i] ?? ''),
         ]),
       ) as Record<(typeof tracerColumns)[number], string>,
   );
@@ -461,6 +463,9 @@ export const tracerFamilies = [
 ] as const;
 export type TracerFamily = (typeof tracerFamilies)[number]['id'];
 export type FamilyContext = {
+  processFiles?: ConfigurationResult['process_files'];
+  defaults?: Readonly<Record<string, string>>;
+  engine?: string;
   subgrid?: string;
   kernelMacros?: readonly string[] | null;
   caseScope?: 'site' | 'spatial' | 'unknown' | null;
@@ -494,19 +499,32 @@ export function appendTracerFamily(
         REF_RATIO: '',
         INIT_DELTA: '',
         REACTIVE_DECAY_RATE: '',
-        PARAM_FILES: '',
+        PARAM_FILES: {
+          CH4: 'standard_ch4_parameter.nml',
+          H2_18O: 'standard_O18_parameter.nml',
+          HDO: 'standard_HDO_parameter.nml',
+          Cl: 'standard_chloride_parameter.nml',
+          SEDIMENT: 'standard_sediment_parameter.nml',
+        }[NAMES],
       })),
   ];
 }
 export function tracerFamilyState(
   overlay: Overlay,
-  family: TracerFamily,
+  family: TracerFamily | null,
   context: FamilyContext,
 ): { status: 'blocked' | 'pending' | 'ready'; reasons: [string, string][] } {
   const reasons: [string, string][] = [],
     pending: [string, string][] = [];
   const flag = (key: string) => {
-    const v = modelSettingValue(overlay, key)?.trim().toLowerCase();
+    const v = (
+      modelSettingValue(overlay, key) ??
+      Object.entries(context.defaults ?? {}).find(
+        ([name]) => name.toLowerCase() === key.toLowerCase(),
+      )?.[1]
+    )
+      ?.trim()
+      .toLowerCase();
     return v === '.true.' ? true : v === '.false.' ? false : null;
   };
   const need = (key: string, value: boolean, zh: string, en: string) => {
@@ -525,8 +543,33 @@ export function tracerFamilyState(
   const macros = context.kernelMacros?.map((name) => name.toLowerCase()),
     catchment = macros?.includes('catchment');
   if (catchment) reasons.push(['不支持 Catchment 模式', 'Catchment mode is unsupported']);
-  else if (!macros) pending.push(['算例范围与内核待核对', 'Case scope and kernel pending']);
+  if (context.engine === 'fortran' && macros?.includes('openmp'))
+    reasons.push(['OpenMP 内核不支持示踪', 'OpenMP kernels do not support tracers']);
   if (family === 'methane') {
+    const riverModes = ['routing', 'hybrid', 'dh_all_thr05', 'dyn_routing_hybrid'];
+    if (
+      context.processFiles?.some(
+        (file) =>
+          file.verified &&
+          file.active_methane_asset === true &&
+          file.entries.some(
+            (entry) =>
+              entry.path.toLowerCase() === 'def_methane%inundation_mode' &&
+              !entry.unset &&
+              riverModes.includes(
+                unquote(entry.value ?? '')
+                  .trim()
+                  .toLowerCase(),
+              ),
+          ),
+      )
+    )
+      need(
+        'DEF_USE_GridRiverLakeFlow',
+        true,
+        '甲烷 routing/hybrid 淹没方案需要河湖汇流',
+        'Methane routing/hybrid inundation requires river/lake routing',
+      );
     need('DEF_USE_BGC', true, '甲烷需要 BGC', 'Methane requires BGC');
     if (context.subgrid && !['PFT', 'PC'].includes(context.subgrid.toUpperCase()))
       reasons.push(['甲烷需要 PFT / PC', 'Methane requires PFT / PC']);
@@ -558,6 +601,54 @@ export function tracerFamilyState(
     status: reasons.length ? 'blocked' : pending.length ? 'pending' : 'ready',
     reasons: reasons.length ? reasons : pending,
   };
+}
+export function tracerSetupIssues(overlay: Overlay, context: FamilyContext): [string, string][] {
+  const rows = tracerRows(overlay);
+  if (!rows.length) return [['请选择至少一种示踪物', 'Select at least one tracer']];
+  const issues: [string, string][] = [];
+  const families = new Set<TracerFamily | null>([null]);
+  for (const row of rows) {
+    const name = row.NAMES.trim().toLowerCase(),
+      type = row.TYPES.trim().toLowerCase();
+    if (type === 'isotope') families.add('isotope');
+    else if (type === 'solute') families.add('chloride');
+    else if (type === 'gas' && ['ch4', 'methane'].includes(name)) {
+      families.add('methane');
+      if (
+        !unquote(row.PARAM_FILES).trim() ||
+        /^(null|none)$/i.test(unquote(row.PARAM_FILES).trim())
+      )
+        issues.push([
+          '甲烷需要参数文件，可选择内置预设或指定路径',
+          'Methane requires a parameter file: choose a built-in preset or a path',
+        ]);
+    } else if (type === 'particle' && ['sediment', 'sed'].includes(name)) families.add('sediment');
+    else if (context.engine === 'rust' && ['gas', 'particle'].includes(type))
+      issues.push([
+        `${row.NAMES}：当前 Rust 引擎不支持此示踪物`,
+        `${row.NAMES}: this tracer is unsupported by the Rust engine`,
+      ]);
+  }
+  for (const family of families) {
+    const state = tracerFamilyState(overlay, family, context);
+    if (state.status === 'blocked') issues.push(...state.reasons);
+  }
+  if (families.has('isotope')) {
+    const key = 'DEF_TRACER_AQUIFER_MIXING_WATER_MM';
+    const raw =
+      modelSettingValue(overlay, key) ??
+      Object.entries(context.defaults ?? {}).find(
+        ([name]) => name.toLowerCase() === key.toLowerCase(),
+      )?.[1] ??
+      '';
+    const mixing = fortranNumberInputValue(raw);
+    if (mixing === null || !(Number(mixing) > 0))
+      issues.push([
+        '水同位素需要设置大于 0 的地下水混合水量（mm）',
+        'Water isotopes require positive aquifer mixing water (mm)',
+      ]);
+  }
+  return issues.filter(([zh], index) => issues.findIndex(([other]) => zh === other) === index);
 }
 export function setStomatalScheme(overlay: Overlay, fields: ModelField[], scheme: string): Overlay {
   if (!['BALL_BERRY', 'MEDLYN', 'WUE'].includes(scheme)) throw new Error('Invalid stomatal scheme');
