@@ -6368,14 +6368,11 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                         - thickness)
                         .abs()
                         < input.depth_tolerance_mm)
-                // `volume_tolerance` 的余量是刻意的，**上下两侧都要**：
-                // `check_and_update_level` 用的是精确 `.min(vl_s)`，但含水层交换那条
-                // 路上会经 `soil_vliq_from_psi` 的**反解**回来，实测会有 1 ULP 的超出
-                // （`0.48279477020617934` 对 `0.4827947702061793`）。下界同理：CN-Cng
-                // 湿窗与 US-NR1-snow 的牛顿迭代会吐出 `-8.05e-18` 这种量级的负值
-                // （相对该层厚度 27.58 mm 是 3e-19），上游没有任何这类断言，照抄
-                // 必须放行 —— 夹到 0 反而会让下游看到与上游不同的数。
-                && input.liquid_water[layer] >= -input.volume_tolerance
+                // Explicit drying allows a water-depth deficit up to tol_z; convert
+                // it with this layer's thickness before the existing normalization.
+                && input.liquid_water[layer]
+                    >= -input.volume_tolerance.max(input.depth_tolerance_mm / thickness)
+                // Aquifer inversion may exceed porosity by one floating-point ULP.
                 && input.liquid_water[layer] <= input.porosity[layer] + input.volume_tolerance,
             "VSF sublevel layer inputs are invalid: layer={} thickness_mm={thickness:?} \
              porosity={:?} residual_water={:?} psat_mm={:?} ksat_mm_s={:?} \
@@ -6609,9 +6606,10 @@ fn validate_explicit(input: VariableSaturatedExplicitInput<'_>) -> Result<usize>
                     <= thickness
                 && input.liquid_water[layer] >= 0.0
                 && input.liquid_water[layer] <= input.porosity[layer]
-                // 上一子步的含水量是求解器算出来的，舍入可能让它比 0 小一点点（如 -7.5e-18，
-                // 第 535 轮干旱区 LULCC）或比孔隙度大一点点；上游不查，这里两侧都放宽 `tol_v`。
-                && input.previous_liquid_water[layer] >= -input.volume_tolerance
+                // The previous snapshot precedes normalization of the explicit
+                // drying deficit, so it needs the same layer water-depth tolerance.
+                && input.previous_liquid_water[layer]
+                    >= -input.volume_tolerance.max(input.depth_tolerance_mm / thickness)
                 && input.previous_liquid_water[layer]
                     <= input.porosity[layer] + input.volume_tolerance,
             "VSF explicit update layer inputs are invalid at layer {layer} (thickness {thickness}): \
