@@ -12,6 +12,10 @@ function harness(
   hosts = ['7920land', '7920mp'],
   failures: { config?: boolean; history?: string; save?: boolean } = {},
   simulationReturn?: { route: 'new-case' | 'case'; step: 1; resourceHost?: string },
+  scan?: {
+    before: (command: string, args?: Record<string, unknown>) => Promise<void>;
+    studies?: Record<string, { dir: string }[]>;
+  },
 ) {
   const source = readFileSync(new URL('./ResourcesPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
@@ -24,6 +28,7 @@ function harness(
     effected = false,
     contract: Contract,
     guard: () => string | null;
+  let cleanup: (() => void) | undefined;
   const routes: string[] = [];
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
@@ -40,6 +45,7 @@ function harness(
   } | null = null;
   const ipc = async (command: string, args?: Record<string, unknown>) => {
     calls.push({ command, args });
+    await scan?.before(command, args);
     switch (command) {
       case 'remote_config':
         if (failures.config) throw new Error('Unreadable server configuration');
@@ -53,7 +59,9 @@ function harness(
         return records[String(args?.case)] ?? null;
       case 'case_runs':
         if (failures.history === args?.case) throw new Error('Case directory was deleted');
-        return { studies: [] };
+        return { studies: scan?.studies?.[String(args?.case)] ?? [] };
+      case 'study_status':
+        return { remote: { host: hosts[0], job: 'study-job' } };
       case 'remote_probe':
         await pendingProbe;
         if (failProbe) throw new Error('SSH unavailable');
@@ -130,10 +138,10 @@ function harness(
       return slots[key];
     },
     useCallback: (fn: unknown) => fn,
-    useEffect: (fn: () => void) => {
+    useEffect: (fn: () => (() => void) | void) => {
       if (!effected) {
         effected = true;
-        fn();
+        cleanup = fn() || undefined;
       }
     },
     useNavigationGuard: (fn: () => string | null) => {
@@ -174,6 +182,12 @@ function harness(
   }
   return {
     ready,
+    unmount: () => cleanup?.(),
+    restartEffect: () => {
+      cleanup?.();
+      effected = false;
+      return render();
+    },
     action,
     fill,
     render,
@@ -758,4 +772,81 @@ test('configuring a simulation opens its selected resource instead of another se
   );
   await page.ready();
   assert.equal((page.contract().details as { selected: string }).selected, 'server:selected');
+});
+
+test('90-station resource refresh bounds CLI concurrency, keeps every record and serializes overlapping refreshes', async () => {
+  const records = Object.fromEntries(
+    Array.from({ length: 90 }, (_, i) => [
+      `/batch/site-${i}`,
+      { host: '7920land', job: `job-${i}` },
+    ]),
+  );
+  let active = 0;
+  let peak = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let block = true;
+  const page = harness(records, undefined, {}, undefined, {
+    before: async (command) => {
+      if (!['remote_job_record', 'case_runs', 'study_status'].includes(command)) return;
+      active++;
+      peak = Math.max(peak, active);
+      if (block) await blocked;
+      await new Promise((resolve) => setImmediate(resolve));
+      active--;
+    },
+    studies: { '/batch/site-89': Array.from({ length: 90 }, (_, i) => ({ dir: `/study/${i}` })) },
+  });
+  await page.ready();
+  assert.equal(active, 4);
+  // A changed case list restarts the effect while the previous CLI calls still exist.
+  page.restartEffect();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(active, 4);
+  block = false;
+  release();
+  for (
+    let i = 0;
+    i < 1000 && !page.render().actions.find((a) => a.id === 'resource-refresh')?.enabled;
+    i++
+  ) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(page.contract().actions.find((a) => a.id === 'resource-refresh')?.enabled, true);
+  assert.equal(peak, 4);
+  assert.equal(active, 0);
+  const details = page.contract().details as { records: { dir: string }[] };
+  assert.ok(details.records.some((r) => r.dir === '/batch/site-89'));
+  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 90);
+  assert.equal(page.calls.filter((c) => c.command === 'study_status').length, 90);
+  assert.equal(
+    page.calls.filter((c) => c.command === 'study_status').at(-1)?.args?.studyDir,
+    '/study/89',
+  );
+});
+
+test('unmount stops scheduling remaining resource CLI calls', async () => {
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const page = harness(
+    Object.fromEntries(Array.from({ length: 90 }, (_, i) => [`/batch/${i}`, null])),
+    undefined,
+    {},
+    undefined,
+    {
+      before: async (command) => {
+        if (command === 'remote_job_record') await blocked;
+      },
+    },
+  );
+  await page.ready();
+  page.unmount();
+  release();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 4);
+  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 0);
 });
