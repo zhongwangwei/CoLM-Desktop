@@ -149,6 +149,18 @@ export default function ConfigurationOptions({
         ),
       )
     : sourceOverlay;
+  const resistanceForcedOff =
+    ['IGBP', 'USGS'].includes(scheme ?? '') &&
+    (
+      Object.entries(queryValues ?? {}).find(
+        ([key]) => key.toUpperCase() === 'DEF_USE_CAMPBELL_SOIL_MODEL',
+      )?.[1] ??
+      modelSettingValue(overlay, 'DEF_USE_Campbell_SOIL_MODEL') ??
+      fields.find((field) => field.name === 'DEF_USE_Campbell_SOIL_MODEL')?.default ??
+      '.false.'
+    )
+      .trim()
+      .toLowerCase() === '.false.';
   const sourceKey = JSON.stringify(
     source.kind === 'draft'
       ? { kind: source.kind, id: source.id, generation: source.generation }
@@ -329,7 +341,10 @@ export default function ConfigurationOptions({
       choices.length > 0 &&
       choices.length <= 5;
     const displayValue = kind === 'list' ? value : unquote(value),
-      shown = inputs[`${sourceKey}:${id}`] ?? displayValue,
+      shown =
+        rawKey === 'DEF_RSS_SCHEME' && resistanceForcedOff
+          ? displayValue
+          : (inputs[`${sourceKey}:${id}`] ?? displayValue),
       select = choices.length > 0;
     const setter = (v: string) => {
       if (cannot || locked) throw new Error(bilingual('此字段不可编辑', 'Field is locked'));
@@ -429,15 +444,16 @@ export default function ConfigurationOptions({
       configured = removedCaseKeys.includes(field.name)
         ? null
         : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? null),
-      defaultValue = context?.built_in_default ?? field.default ?? '',
+      forcedResistance = field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff,
+      defaultValue = forcedResistance ? '0' : (context?.built_in_default ?? field.default ?? ''),
       cnInitialFile = field.name === 'DEF_file_cn_init',
       urbanAlbedoFile = field.name === 'DEF_HighResUrban_albedo',
       fileInput = cnInitialFile || urbanAlbedoFile,
-      rawValue = configured ?? defaultValue,
+      rawValue = forcedResistance ? '0' : (configured ?? defaultValue),
       value = fileInput && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? '' : rawValue,
-      overridden = configured !== null && configured !== '';
+      overridden = !forcedResistance && configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
-      cannot = !ready || !!inactive,
+      cannot = !ready || !!inactive || forcedResistance,
       id = `configuration-${field.name}`;
     actions.push({
       id: `${id}-reset`,
@@ -488,6 +504,12 @@ export default function ConfigurationOptions({
       context?.reason === '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考'
         ? null
         : context?.reason;
+    const resistanceReason = forcedResistance
+      ? t(
+          'LCT + van Genuchten 时模型固定关闭；切换后恢复自定义值或默认 SL14（1）',
+          'LCT + van Genuchten forces this off; changing schemes restores the custom value or default SL14 (1)',
+        )
+      : null;
     return (
       <div className="model-setting-row" key={field.name}>
         {editor(
@@ -500,7 +522,8 @@ export default function ConfigurationOptions({
           (v) => write(() => setModelOption(overlay, fields, field.name, v)),
         )}
         <small>
-          {field.name} · {reason && <>{reason} · </>} {t('默认值', 'Default')}:{' '}
+          {field.name} · {(resistanceReason || reason) && <>{resistanceReason || reason} · </>}{' '}
+          {t('默认值', 'Default')}:{' '}
           {cnInitialFile
             ? t(
                 '运行数据目录下的 cnsteadystate.nc',
@@ -674,7 +697,10 @@ export default function ConfigurationOptions({
           included(field) && !excludeKeys.includes(field.name) && groupedField(field, catalog),
       )
       .filter(
-        (field) => !onCaseChange || caseFieldVisible(field.name, values.fields, overlay.physics),
+        (field) =>
+          !onCaseChange ||
+          (field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff) ||
+          caseFieldVisible(field.name, values.fields, overlay.physics),
       )
       .filter(
         (field) =>
@@ -694,6 +720,11 @@ export default function ConfigurationOptions({
                 : true),
       )
       .filter((f) => groupForField(f) === id && !(showStomatal && stomatalFields.includes(f.name)));
+    if (id === 'soil') {
+      const order = ['DEF_RSS_SCHEME', 'DEF_SOIL_REFL_SCHEME'];
+      const rank = (name: string) => (order.includes(name) ? order.indexOf(name) : order.length);
+      rows.sort((a, b) => rank(a.name) - rank(b.name));
+    }
     if (id === 'water') {
       const snow = rows.findIndex((field) => field.name === 'DEF_VEG_SNOW');
       if (snow >= 0 && rows.some((field) => field.name === 'DEF_Interception_scheme')) {

@@ -185,7 +185,7 @@ test('soil dialog explains parameter sources and excludes spatial fitting at sin
     assert.match(text, /土壤数据/);
     assert.match(text, /van Genuchten/);
     assert.match(text, /变饱和流/);
-    assert.match(text, /LCT/);
+    assert.match(text, /土壤表面阻抗在下方/);
   }
 });
 

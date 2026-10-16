@@ -935,8 +935,8 @@ for (const [process, input, output, kind, initial] of [
     assert.ok(!h.nodes.some((n) => n.type === 'Field' && JSON.stringify(n.props).includes(output)));
   });
 
-test('soil settings render and save fitting and resistance while respecting applicability', async () => {
-  for (const hidden of [undefined, 'DEF_USE_SOILPAR_UPS_FIT', 'DEF_RSS_SCHEME']) {
+test('hydraulic settings retain only fitting and respect applicability', async () => {
+  for (const hidden of [undefined, 'DEF_USE_SOILPAR_UPS_FIT']) {
     const h = harness(),
       patches: helpers.CaseOptionPatch[] = [];
     h.props.process = 'soil';
@@ -973,6 +973,7 @@ test('soil settings render and save fitting and resistance while respecting appl
     ]) {
       const field = c.fields.find((f) => f.id === `configuration-${name}`);
       if (name === hidden) assert.equal(field, undefined);
+      else if (name === 'DEF_RSS_SCHEME') assert.equal(field, undefined);
       else {
         assert.ok(field, name);
         await field.set(value);
@@ -1027,7 +1028,7 @@ test('process settings display inherited defaults without creating overrides, an
 
 test('context defaults take precedence over catalog defaults without guessing a choice', async () => {
   const h = harness();
-  const name = 'DEF_RSS_SCHEME';
+  const name = 'DEF_SOIL_REFL_SCHEME';
   h.props.fields.push({
     name,
     section: '水热过程',
@@ -1036,7 +1037,7 @@ test('context defaults take precedence over catalog defaults without guessing a 
     values: ['0', '1'],
     derived: false,
   });
-  h.props.process = 'soil';
+  h.props.process = undefined;
   h.props.onCaseChange = () => {};
   h.props.caseValues = {};
   h.render();
@@ -1047,6 +1048,9 @@ test('context defaults take precedence over catalog defaults without guessing a 
   }));
   h.requests.at(-1)!.resolve(response);
   for (let i = 0; i < 5; i++) await Promise.resolve();
+  h.render()
+    .actions.find((a) => a.id === 'configuration-group-soil')!
+    .run();
   assert.equal(h.render().fields.find((f) => f.id === `configuration-${name}`)!.value, '1');
 });
 
@@ -1417,4 +1421,66 @@ test('LULCC settings include associated LAI flags and years', async () => {
       c.fields.some((f) => f.id === `configuration-${name}`),
       name,
     );
+});
+
+test('general soil resistance precedes albedo and follows structure defaults without losing custom values', async () => {
+  const h = harness();
+  h.props.hideProcesses = true;
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = { DEF_USE_Campbell_SOIL_MODEL: '.false.' };
+  for (const name of ['DEF_SOIL_REFL_SCHEME', 'DEF_RSS_SCHEME'])
+    h.props.fields.push({
+      name,
+      section: '水热过程',
+      kind: 'integer',
+      default: name === 'DEF_RSS_SCHEME' ? '1' : '2',
+      values: ['0', '1', '2', '3', '4', '5'],
+      derived: false,
+    });
+  h.render();
+  let c = await h.settle();
+  c.actions.find((a) => a.id === 'configuration-group-soil')!.run();
+  for (const [subgrid, campbell, expected] of [
+    ['IGBP', '.false.', '0'],
+    ['USGS', '.false.', '0'],
+    ['IGBP', '.true.', '1'],
+    ['PFT', '.false.', '1'],
+    ['PC', '.false.', '1'],
+  ]) {
+    h.props.subgrid = subgrid;
+    h.props.caseValues.DEF_USE_Campbell_SOIL_MODEL = campbell;
+    h.render();
+    const response = h.response();
+    response.fields = response.fields.map((f) => ({
+      ...f,
+      pending: false,
+      mode: f.name === 'DEF_RSS_SCHEME' && expected === '0' ? 'disabled' : 'editable',
+    }));
+    h.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    c = h.render();
+    const rss = c.fields.findIndex((f) => f.id === 'configuration-DEF_RSS_SCHEME');
+    assert.ok(rss >= 0);
+    assert.equal(c.fields[rss].value, expected, subgrid + campbell);
+    assert.equal(c.fields[rss].disabled, expected === '0');
+    if (expected === '0') assert.throws(() => c.fields[rss].set('1'));
+    assert.equal(c.fields[rss + 1].id, 'configuration-DEF_SOIL_REFL_SCHEME');
+  }
+  h.props.caseValues.DEF_RSS_SCHEME = '3';
+  for (const [mode, expected] of [
+    ['PFT', '3'],
+    ['IGBP', '0'],
+    ['PC', '3'],
+  ]) {
+    h.props.subgrid = mode;
+    h.render();
+    c = await h.settle();
+    assert.equal(c.fields.find((f) => f.id === 'configuration-DEF_RSS_SCHEME')!.value, expected);
+    assert.equal(h.props.caseValues.DEF_RSS_SCHEME, '3');
+  }
+  h.props.caseValues.DEF_RSS_SCHEME = '0';
+  h.render();
+  c = await h.settle();
+  assert.equal(c.fields.find((f) => f.id === 'configuration-DEF_RSS_SCHEME')!.value, '0');
+  assert.equal(h.changes.length, 0);
 });

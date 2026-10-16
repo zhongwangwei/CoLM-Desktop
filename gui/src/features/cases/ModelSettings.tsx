@@ -723,8 +723,8 @@ function ProcessSettingsDialog({
           </p>
           <p>
             {t(
-              'Campbell 的变饱和流可在对应过程卡片中调整；van Genuchten 始终启用变饱和流。van Genuchten 配合 LCT（IGBP / USGS 植被结构）时，土壤表面阻抗方案固定为 0（关闭）；PFT / PC 不受此限制。土壤参数升尺度拟合仅用于区域地表数据构建，单点不使用。',
-              'For Campbell, adjust variably saturated flow on its process card; van Genuchten always enables it. With van Genuchten and LCT (IGBP / USGS vegetation structure), soil-surface resistance is fixed at 0 (off); PFT / PC retain the option. Soil-parameter upscaling fit is used only when building spatial surface data, not at single points.',
+              'Campbell 的变饱和流可在对应过程卡片中调整；van Genuchten 始终启用变饱和流。土壤表面阻抗在下方“土壤方案”中设置。土壤参数升尺度拟合仅用于区域地表数据构建，单点不使用。',
+              'For Campbell, adjust variably saturated flow on its process card; van Genuchten always enables it. Soil-surface resistance is configured below under Soil schemes. Soil-parameter upscaling fit is used only when building spatial surface data, not at single points.',
             )}
           </p>
         </Notice>
