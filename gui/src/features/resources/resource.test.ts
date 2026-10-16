@@ -145,6 +145,66 @@ test('resource checks require current configuration and separate SSH, engine sna
   assert.equal(resourceCheckSummary(server, { ...check, checked_at: 'invalid' }).checkedAt, null);
 });
 
+test('connection failures and incomplete run configuration leave dependent checks pending', () => {
+  const server = { ...newServer(), host: 'a' };
+  const check: ResourceCheck = {
+    configuration: JSON.stringify(server),
+    checked_at: '2026-10-16T05:00:00Z',
+    probe: { hostname: 'a', configuration_error: 'Work directory required' },
+    engine_error: 'Work directory required',
+  };
+  const incomplete = resourceCheckSummary(server, check);
+  assert.equal(incomplete.ssh.state, 'success');
+  for (const item of [incomplete.engine, incomplete.mapping, incomplete.directory]) {
+    assert.deepEqual(item, { state: 'pending', label: '待完善运行配置' });
+  }
+  const disconnected = resourceCheckSummary(server, {
+    ...check,
+    probe_error: 'Connection refused',
+  });
+  assert.equal(disconnected.ssh.state, 'error');
+  for (const item of [disconnected.engine, disconnected.mapping, disconnected.directory]) {
+    assert.deepEqual(item, { state: 'pending', label: '等待连接成功' });
+  }
+});
+
+test('server-native paths and first-run deployment are ready without existing engine snapshots', () => {
+  const server = { ...newServer(), host: 'a' };
+  const check: ResourceCheck = {
+    configuration: JSON.stringify(server),
+    checked_at: '2026-10-16T05:00:00Z',
+    probe: { hostname: 'a', engine: 'source', root_exists: false, root_writable: true },
+    engines: { engines: [] },
+  };
+  const summary = resourceCheckSummary(server, check);
+  assert.deepEqual(summary.engine, { state: 'success', label: '首次运行自动构建引擎' });
+  assert.deepEqual(summary.mapping, { state: 'success', label: '直接使用服务器路径，无需映射' });
+  assert.deepEqual(summary.directory, { state: 'success', label: '工作目录可创建' });
+  assert.deepEqual(
+    resourceCheckSummary(server, { ...check, probe: { ...check.probe, engine: 'prebuilt' } })
+      .engine,
+    { state: 'success', label: '首次运行自动部署引擎' },
+  );
+  assert.equal(
+    resourceCheckSummary(server, { ...check, engines: undefined }).engine.state,
+    'pending',
+  );
+  assert.equal(
+    resourceCheckSummary(server, { ...check, probe: { ...check.probe, root_writable: false } })
+      .directory.state,
+    'error',
+  );
+  assert.equal(
+    resourceCheckSummary(server, { ...check, probe: { hostname: 'a' } }).directory.state,
+    'pending',
+  );
+  assert.equal(
+    resourceCheckSummary(server, { ...check, probe: { ...check.probe, root_exists: true } })
+      .directory.label,
+    '工作目录可写',
+  );
+});
+
 test('resource task summaries retain pending host identity and require actual remote completion evidence', () => {
   const pending = {
     remote: null,

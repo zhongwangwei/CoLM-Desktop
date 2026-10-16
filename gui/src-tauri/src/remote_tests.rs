@@ -694,6 +694,32 @@ fn a_study_goes_to_the_server_with_the_run_settings_and_one_process_per_member()
 }
 
 #[test]
+fn connection_checks_still_reach_ssh_with_incomplete_run_settings() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"tms17l","root":""}"#).unwrap();
+    for change in 0..3 {
+        if change == 1 {
+            server.root = "/data/colm".into();
+            server.threads = 0;
+        } else if change == 2 {
+            server.threads = 8;
+            server.maps.push(PathMap {
+                local: "relative".into(),
+                remote: "/data".into(),
+            });
+        }
+        let (args, error) = probe_args(&server).unwrap();
+        assert_eq!(args, ["remote-probe", "--host", "tms17l"]);
+        assert!(error.is_some());
+        assert!(validate(&RemoteConfig {
+            servers: vec![server.clone()]
+        })
+        .is_err());
+    }
+    server.host = "-invalid".into();
+    assert!(probe_args(&server).is_err());
+}
+
+#[test]
 fn engine_resource_commands_validate_snapshot_and_preserve_connection() {
     let server: Server = serde_json::from_str(r#"{"host":"legacy","root":"/data/colm"}"#).unwrap();
     assert_eq!(

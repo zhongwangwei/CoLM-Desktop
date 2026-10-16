@@ -1,7 +1,7 @@
 //! 远程运行（docs/design-ai-assistant.md 第 5.3 节，R1）：把一个算例放到服务器上用 Rust 引擎跑，再把结果取回来。
 //!
 //! ```text
-//! colm-cli remote-probe  --host H --root R
+//! colm-cli remote-probe  --host H [--root R]
 //! colm-cli remote-run    <case> --host H --root R --kernel <本机内核目录> [--map 本机前缀=服务器前缀]…
 //!                        [--stage S] [--force 1] [--threads N] [--upload-unmapped 1]
 //!                        [--scheduler auto|bare|slurm|pbs|lsf] [--partition P] [--account A] [--walltime T]
@@ -1539,7 +1539,12 @@ pub(super) fn cmd_probe(opts: &Opts) -> Result<()> {
         .map(|m| parse_mapping(m))
         .collect::<Result<Vec<_>>>()?;
     let paths: Vec<String> = maps.iter().map(|m| m.remote.clone()).collect();
-    let (mut probe, present) = colm_remote::probe::probe_paths(&ssh, &root_of(opts)?, &paths)?;
+    let root = if opts.get("--root").is_some() {
+        root_of(opts)?
+    } else {
+        String::new()
+    };
+    let (mut probe, present) = colm_remote::probe::probe_paths(&ssh, &root, &paths)?;
     // 服务器编不了引擎时，有预编包也能用；两样都没有才算问题。
     if probe.build_problems.is_empty() {
         probe.engine = Some("source".into());

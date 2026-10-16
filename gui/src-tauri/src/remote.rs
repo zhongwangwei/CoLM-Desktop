@@ -136,23 +136,29 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(dir.join("remote.json"))
 }
 
+fn validate_connection(server: &Server) -> Result<(), String> {
+    let host = server.host.trim();
+    if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
+        return Err(format!("服务器名不合法：{host:?}"));
+    }
+    validate_login(&server.username)?;
+    if !["config", "key", "password"].contains(&server.auth.as_str()) {
+        return Err("认证方式只能是 SSH 配置、密钥或密码".into());
+    }
+    if !server.identity_file.is_empty()
+        && (!std::path::Path::new(&server.identity_file).is_absolute()
+            || server.identity_file.contains(['\n', '\r', '\0']))
+    {
+        return Err("密钥文件要是本机的绝对路径".into());
+    }
+    Ok(())
+}
+
 /// 配置校验：别名不能被 ssh 当成选项，目录要是绝对路径且不含空格（CoLM 的路径不许空格）。
 pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
     for server in &config.servers {
+        validate_connection(server)?;
         let host = server.host.trim();
-        if host.is_empty() || host.starts_with('-') || host.contains(char::is_whitespace) {
-            return Err(format!("服务器名不合法：{host:?}"));
-        }
-        validate_login(&server.username)?;
-        if !["config", "key", "password"].contains(&server.auth.as_str()) {
-            return Err("认证方式只能是 SSH 配置、密钥或密码".into());
-        }
-        if !server.identity_file.is_empty()
-            && (!std::path::Path::new(&server.identity_file).is_absolute()
-                || server.identity_file.contains(['\n', '\r', '\0']))
-        {
-            return Err("密钥文件要是本机的绝对路径".into());
-        }
         let root = server.root.trim();
         if !root.starts_with('/') || root == "/" || root.contains(char::is_whitespace) {
             return Err(format!(
@@ -736,14 +742,29 @@ pub async fn remote_browse(
 
 #[tauri::command]
 pub async fn remote_probe(app: tauri::AppHandle, server: Server) -> Result<Value, String> {
-    validate(&RemoteConfig {
-        servers: vec![server.clone()],
-    })?;
-    let mut command = engine_resource_args("remote-probe", &server, None)?;
-    for map in &server.maps {
-        command.extend(["--map".into(), format!("{}={}", map.local, map.remote)]);
+    let (command, configuration_error) = probe_args(&server)?;
+    let mut result = ssh_cli_json(command, resource_dir(&app), Some(&server)).await?;
+    if let Some(error) = configuration_error {
+        result["configuration_error"] = Value::String(error);
     }
-    ssh_cli_json(command, resource_dir(&app), Some(&server)).await
+    Ok(result)
+}
+
+fn probe_args(server: &Server) -> Result<(Vec<String>, Option<String>), String> {
+    validate_connection(server)?;
+    let configuration_error = validate(&RemoteConfig {
+        servers: vec![server.clone()],
+    })
+    .err();
+    let mut command = vec!["remote-probe".into(), "--host".into(), server.host.clone()];
+    // Incomplete run settings must not prevent collecting actual SSH evidence.
+    if configuration_error.is_none() {
+        command.extend(["--root".into(), server.root.clone()]);
+        for map in &server.maps {
+            command.extend(["--map".into(), format!("{}={}", map.local, map.remote)]);
+        }
+    }
+    Ok((command, configuration_error))
 }
 
 fn engine_resource_args(
