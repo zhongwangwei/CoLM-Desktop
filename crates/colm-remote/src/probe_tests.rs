@@ -134,6 +134,8 @@ exit "$result""#,
                 .args(["-c", &script("")])
                 .env("PATH", &self.bin)
                 .env("HOME", &self.root)
+                .env_remove("CARGO_HOME")
+                .env_remove("RUSTUP_HOME")
                 .env("STUBS", &self.root)
                 .output()
                 .unwrap();
