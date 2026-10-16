@@ -622,10 +622,12 @@ pub fn ensure_script(root: &str, id: &str, jobs: u32) -> String {
     format!(
         r#"{build_path}E={engine}
 if [ ! -x "$E/bin/colm-rs" ]; then
-  echo "building the Rust engine" >> phase
   exec 9>"$E/.build.lock"
   flock 9
   if [ ! -x "$E/bin/colm-rs" ]; then
+    {toolchain}
+    echo "building the Rust engine" >> phase
+    echo "building the Rust engine"
     C=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
     (cd "$E/src" && CARGO_TARGET_DIR={target} "$C" build --release --locked -j {jobs} {packages}) || exit 1
     mkdir -p "$E/bin"
@@ -635,6 +637,7 @@ if [ ! -x "$E/bin/colm-rs" ]; then
 fi
 "#,
         build_path = crate::probe::BUILD_PATH_PRELUDE,
+        toolchain = crate::toolchain::install_script(),
         packages = packages.join(" "),
         copies = copies.join(" "),
     )

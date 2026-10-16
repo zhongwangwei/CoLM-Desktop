@@ -75,6 +75,8 @@ export type ResourceCheck = {
     qsub_unverified?: boolean;
     configuration_error?: string;
     engine?: 'source' | 'prebuilt';
+    toolchain_installable?: boolean;
+    build_problems?: string[];
     problems?: string[];
     root_exists?: boolean;
     root_writable?: boolean;
@@ -117,7 +119,12 @@ export function resourceCheckSummary(server: Server, check?: ResourceCheck, en =
           state: 'success',
           label:
             check.probe.engine === 'source'
-              ? t('首次运行自动构建引擎', 'Engine builds automatically on first run')
+              ? check.probe.toolchain_installable && check.probe.build_problems?.length
+                ? t(
+                    '首次运行自动安装工具并构建引擎',
+                    'First run installs build tools and builds the engine',
+                  )
+                : t('首次运行自动构建引擎', 'Engine builds automatically on first run')
               : t('首次运行自动部署引擎', 'Engine deploys automatically on first run'),
         }
       : Array.isArray(inventory)

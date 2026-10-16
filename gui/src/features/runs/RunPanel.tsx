@@ -991,6 +991,10 @@ export default function RunPanel({
     submitting: t('正在提交', 'Submitting'),
   };
   const stageLabels: Record<string, string> = {
+    'preparing the engine': t('准备运行环境', 'Preparing the environment'),
+    'installing Rust/Cargo': t('安装 Rust/Cargo', 'Installing Rust/Cargo'),
+    'installing CMake': t('安装 CMake', 'Installing CMake'),
+    'building the Rust engine': t('编译模型引擎', 'Building the model engine'),
     mksrfdata: t('准备地表数据', 'Surface data'),
     mkinidata: t('准备初始场', 'Initial conditions'),
     colm: t('模型计算', 'Simulation'),
@@ -1093,6 +1097,14 @@ export default function RunPanel({
             'Concurrency includes queued jobs. Keep this window open to submit remaining stations. Closing it leaves submitted jobs running and stops unsent stations.',
           )}
         </Notice>
+      )}
+      {host && (
+        <p className="muted">
+          {t(
+            '首次源码构建若缺少 Rust/Cargo 或 CMake，会从官方下载安装到服务器用户目录，不需要 sudo。需要服务器联网并已有 C 编译器；已有工具直接复用。',
+            'The first source build installs missing Rust/Cargo or CMake from official downloads into your server account, without sudo. Internet access and a C compiler are required; existing tools are reused.',
+          )}
+        </p>
       )}
       {!batchCases && (
         <Advanced

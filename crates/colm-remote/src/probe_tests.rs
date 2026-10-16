@@ -46,6 +46,17 @@ fn connection_only_probe_does_not_require_a_work_directory() {
 }
 
 #[test]
+fn missing_build_tools_can_be_installable_without_becoming_existing_tools() {
+    let probe = parse(
+        "",
+        "hostname=server\nos=Linux\narch=x86_64\ncc=/usr/bin/cc\ntoolchain_installable=1\n",
+    );
+    assert!(probe.toolchain_installable);
+    assert!(probe.cargo.is_none() && !probe.cmake);
+    assert!(!probe.build_problems.is_empty());
+}
+
+#[test]
 fn path_probe_quotes_special_characters_and_uses_numeric_keys() {
     let command = paths_script("/data/root", &["/data/it's here\n$(touch bad)".into()]);
     assert!(command.contains("test -e '/data/it'\\''s here\n$(touch bad)'"));
@@ -87,6 +98,7 @@ mod shell {
                 std::os::unix::fs::symlink(path, sandbox.bin.join(tool)).unwrap();
             }
             sandbox.stub("cargo", "exit 0");
+            sandbox.stub("rustc", "exit 0");
             sandbox.stub("nproc", "echo 4");
             sandbox.stub("qsub", "echo qsub >> \"$STUBS/submitted\"; exit 99");
             // Emulate the bounded timeout command on macOS as well as Linux.
@@ -122,6 +134,8 @@ exit "$result""#,
                 .args(["-c", &script("")])
                 .env("PATH", &self.bin)
                 .env("HOME", &self.root)
+                .env_remove("CARGO_HOME")
+                .env_remove("RUSTUP_HOME")
                 .env("STUBS", &self.root)
                 .output()
                 .unwrap();
@@ -147,7 +161,11 @@ exit "$result""#,
         sandbox.stub("cargo", "echo 'cargo user-toolchain'");
         sandbox.stub("cmake", "exit 0");
         sandbox.stub("cc", "exit 0");
-        for (tool, directory) in [("cargo", ".cargo/bin"), ("cmake", ".local/bin")] {
+        for (tool, directory) in [
+            ("cargo", ".cargo/bin"),
+            ("rustc", ".cargo/bin"),
+            ("cmake", ".local/bin"),
+        ] {
             let directory = sandbox.root.join(directory);
             std::fs::create_dir_all(&directory).unwrap();
             std::fs::rename(sandbox.bin.join(tool), directory.join(tool)).unwrap();
