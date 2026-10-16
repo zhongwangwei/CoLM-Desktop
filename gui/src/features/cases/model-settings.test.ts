@@ -42,6 +42,16 @@ test('keeps scientific groups and unknown fields visible', () => {
   assert.equal(modelSettingGroup({ name: 'DEF_NEW_SCHEME', section: '新增分组' }), 'other');
 });
 
+test('hydraulic settings own soil fitting and resistance but not unrelated soil options', async () => {
+  const { processSettingOwner } = await import('./model-settings');
+  for (const name of ['DEF_USE_SOILPAR_UPS_FIT', 'DEF_RSS_SCHEME']) {
+    const field = { name, section: '水热过程' };
+    assert.equal(modelSettingGroup(field), 'soil');
+    assert.equal(processSettingOwner(field), 'soil');
+  }
+  assert.equal(processSettingOwner({ name: 'DEF_SOIL_REFL_SCHEME', section: '地表数据' }), null);
+});
+
 test('version manager returns to the originating simulation route without dropping the restoration marker', async () => {
   const { readFileSync } = await import('node:fs'),
     { default: ts } = await import('typescript');
@@ -201,6 +211,13 @@ test('model settings guide exposes classification only with a callback and catal
     return contract;
   };
   let result = render();
+  const settings = nodes.find((node) => typeof node.props.hasSettings === 'function')!.props
+    .hasSettings as (id: string) => boolean;
+  assert.equal(
+    settings('soil'),
+    true,
+    'hydraulic settings explain forced options even with no editable fields',
+  );
   assert.deepEqual(result.fields, []);
   result.actions.find((action) => action.id === 'simulation-classification-usgs')!.run();
   assert.deepEqual(choices, ['USGS']);
@@ -283,7 +300,7 @@ test('scheme popups hold only scheme-exclusive inputs; binary schemes have no se
   const { processSettingOwner, schemeHasSettings, simulationOptionField } =
     await import('./model-settings');
   const field = (name: string, section: string) => ({ name, section });
-  // 土壤水力方案是二选一，土壤反照率是通用地表参数，不能塞进它的弹窗。
+  // 土壤反照率是通用地表参数，不归水力方案的关联设置。
   assert.equal(processSettingOwner(field('DEF_SOIL_REFL_SCHEME', '地表数据')), null);
   assert.equal(simulationOptionField(field('DEF_SOIL_REFL_SCHEME', '地表数据')), true);
   assert.equal(processSettingOwner(field('DEF_PC_CROP_SPLIT', '地表数据')), 'PC');

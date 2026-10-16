@@ -55,7 +55,8 @@ export function modelSettingGroup(field: Pick<SchemaField, 'name' | 'section'>):
     [
       'DEF_USE_CAMPBELL_SOIL_MODEL',
       'DEF_USE_VARIABLYSATURATEDFLOW',
-      'DEF_SOILPAR_UPS_FIT',
+      'DEF_USE_SOILPAR_UPS_FIT',
+      'DEF_RSS_SCHEME',
       'DEF_SOIL_REFL_SCHEME',
     ].includes(name)
   )
@@ -152,6 +153,8 @@ export function processSettingOwner(
 ): string | null {
   if (simulationFieldStep(field) === 5) return null;
   const roots: Record<string, string> = {
+    DEF_USE_SOILPAR_UPS_FIT: 'soil',
+    DEF_RSS_SCHEME: 'soil',
     DEF_USE_BGC: 'DEF_USE_BGC',
     DEF_USE_TRACER: 'DEF_USE_TRACER',
     DEF_URBAN_RUN: 'DEF_URBAN_RUN',
@@ -192,7 +195,7 @@ export function processSettingOwner(
   )
     return 'DEF_USE_BGC';
   if (field.name === 'DEF_LULCC_SCHEME') return 'DEF_USE_LULCC';
-  // 土壤水力方案只是 Campbell / vG 二选一，没有专属二级参数；土壤反照率等通用土壤项留在通用设置里。
+  // 土壤反照率等通用土壤项仍留在通用设置里。
   return (
     (
       {

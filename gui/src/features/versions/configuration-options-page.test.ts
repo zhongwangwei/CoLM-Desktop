@@ -913,3 +913,50 @@ for (const [process, input, output, kind, initial] of [
     assert.ok(!c.fields.some((f) => f.id === `configuration-${output}`));
     assert.ok(!h.nodes.some((n) => n.type === 'Field' && JSON.stringify(n.props).includes(output)));
   });
+
+test('soil settings render and save fitting and resistance while respecting applicability', async () => {
+  for (const hidden of [undefined, 'DEF_USE_SOILPAR_UPS_FIT', 'DEF_RSS_SCHEME']) {
+    const h = harness(),
+      patches: helpers.CaseOptionPatch[] = [];
+    h.props.process = 'soil';
+    h.props.modalActions = [];
+    h.props.onCaseChange = (patch) => {
+      patches.push(patch);
+    };
+    h.props.caseValues = {};
+    for (const [name, kind, initial] of [
+      ['DEF_USE_SOILPAR_UPS_FIT', 'logical', '.false.'],
+      ['DEF_RSS_SCHEME', 'integer', '0'],
+    ])
+      h.props.fields.push({
+        name,
+        kind,
+        section: '水热过程',
+        default: initial,
+        values: [],
+        derived: false,
+      });
+    h.render();
+    const response = h.response();
+    response.fields = response.fields.map((f) => ({
+      ...f,
+      pending: false,
+      mode: f.name === hidden ? 'disabled' : 'editable',
+    }));
+    h.requests.at(-1)!.resolve(response);
+    for (let i = 0; i < 5; i++) await Promise.resolve();
+    const c = h.render();
+    for (const [name, value] of [
+      ['DEF_USE_SOILPAR_UPS_FIT', '.true.'],
+      ['DEF_RSS_SCHEME', '1'],
+    ]) {
+      const field = c.fields.find((f) => f.id === `configuration-${name}`);
+      if (name === hidden) assert.equal(field, undefined);
+      else {
+        assert.ok(field, name);
+        await field.set(value);
+        assert.equal(patches.at(-1)?.[name], value);
+      }
+    }
+  }
+});
