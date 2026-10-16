@@ -439,3 +439,10 @@ test('regional routing follows domain and active river prerequisites automatical
 test('vegetation snow belongs to hydrothermal settings', () => {
   assert.equal(modelSettingGroup({ name: 'DEF_VEG_SNOW', section: '生态与生地化' }), 'water');
 });
+
+test('hyperspectral urban source remains a general simulation input without urban processes', async () => {
+  const { processSettingOwner, simulationOptionField } = await import('./model-settings');
+  const field = { name: 'DEF_HighResUrban_albedo', section: '地表数据' };
+  assert.equal(processSettingOwner(field), null);
+  assert.equal(simulationOptionField(field), true);
+});

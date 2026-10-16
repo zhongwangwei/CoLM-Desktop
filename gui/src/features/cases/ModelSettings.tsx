@@ -705,6 +705,14 @@ function ProcessSettingsDialog({
           </p>
         </Notice>
       )}
+      {process === 'DEF_USE_LULCC' && (
+        <Notice>
+          {t(
+            '土地覆盖变化仅支持空间模拟，要求月尺度、逐年变化的 LAI，并关闭区域单元汇流。年度土地覆盖文件从地表数据目录读取。LAI 起止年控制 LAI 数据读取范围，不代表土地覆盖数据也覆盖这些年份；土地覆盖数据与模拟时段仍需匹配。',
+            'Land-cover change requires a spatial simulation, monthly LAI changing by year, and regional unit routing off. Annual land-cover files come from the land-data directory. LAI start/end years control LAI reads and do not guarantee land-cover data coverage; land-cover inputs must also match the simulation period.',
+          )}
+        </Notice>
+      )}
       {process === 'soil' && (
         <Notice>
           <p>
