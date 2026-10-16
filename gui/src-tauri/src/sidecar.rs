@@ -1645,7 +1645,9 @@ pub async fn new_case(
     fields: Vec<crate::config::FieldChange>,
     model_revision: Option<colm_model::VersionRef>,
     engine: Option<String>,
+    run_host: Option<String>,
 ) -> Result<String, String> {
+    let run_host = crate::project::validate_run_host(run_host)?;
     let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     validate_bgc_runtime(runtime.as_deref(), &fields)?;
     let recorded_mode = mode.clone();
@@ -1693,6 +1695,7 @@ pub async fn new_case(
         // 记下所选计算核心与站点；同目录约定下的观测文件作为结果页的默认对照。
         let mut record = crate::project::CaseRecord {
             mode: recorded_mode,
+            run_host,
             engine,
             site: Some(site.clone()),
             ..Default::default()
@@ -1703,7 +1706,7 @@ pub async fn new_case(
                     crate::project::sibling(std::path::Path::new(&site), "Observation", 1)
                         .map(|p| p.display().to_string())
                 });
-        crate::project::record_case(&case_dir, &record);
+        crate::project::record_case(&case_dir, &record)?;
         creation.check()?;
         crate::model::bind_new_case(&case_dir, model_revision, &creation).await?;
         Ok(output)
@@ -1824,7 +1827,9 @@ pub async fn new_spatial_case(
     fields: Vec<crate::config::FieldChange>,
     model_revision: Option<colm_model::VersionRef>,
     engine: Option<String>,
+    run_host: Option<String>,
 ) -> Result<String, String> {
+    let run_host = crate::project::validate_run_host(run_host)?;
     let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
     let request = SpatialCaseRequest {
         domain,
@@ -1989,6 +1994,7 @@ pub async fn new_spatial_case(
         };
         let recorded = crate::project::CaseRecord {
             mode: Some(request.mode.clone()),
+            run_host,
             domain: Some(request.domain.clone()),
             shapefile: request.shapefile.clone(),
             engine,
@@ -2029,7 +2035,7 @@ pub async fn new_spatial_case(
         }
         let output = creation.capture(args).await.map_err(cleanup)?;
         crate::config::apply_fields(&request.out, &request.fields).map_err(cleanup)?;
-        crate::project::record_case(&request.out, &recorded);
+        crate::project::record_case(&request.out, &recorded)?;
         creation.check()?;
         crate::model::bind_new_case(&request.out, model_revision, &creation).await?;
         Ok(output)

@@ -18,7 +18,7 @@ import {
 import NavIcon from '../../components/NavIcon';
 import './resources-page.css';
 export default function ResourcesPage() {
-  const { state, update } = useApp(),
+  const { state, update, navigate } = useApp(),
     en = state.language === 'en',
     t = (a: string, b: string) => (en ? b : a);
   const [servers, setServers] = useState<Server[]>([]),
@@ -127,7 +127,11 @@ export default function ResourcesPage() {
     setConfigLoaded(true);
     if (!initialized.current) {
       initialized.current = true;
-      const first = config.servers[0];
+      const requestedHost = state.simulationReturn?.resourceHost;
+      const first =
+        requestedHost === undefined
+          ? config.servers[0]
+          : config.servers.find((server) => server.host === requestedHost);
       if (first) {
         setSelected(`server:${first.host}`);
         setOriginal(first.host);
@@ -181,7 +185,7 @@ export default function ResourcesPage() {
         return next;
       });
     }
-  }, [state.cases]);
+  }, [state.cases, state.simulationReturn?.resourceHost]);
 
   useEffect(() => {
     const token = { active: true };
@@ -738,6 +742,15 @@ export default function ResourcesPage() {
         });
       }
   }
+  if (state.simulationReturn)
+    guideActions.push({
+      id: 'resource-back-simulation',
+      label: t('返回模拟设置', 'Back to simulation setup'),
+      kind: 'click',
+      enabled: !busy && !dirty,
+      run: () =>
+        navigate(state.simulationReturn!.route === 'new-case' ? 'new-case' : 'case', 'settings'),
+    });
   usePageContract({
     title: t('计算资源', 'Resources'),
     step: 'resources',
@@ -819,6 +832,7 @@ export default function ResourcesPage() {
             )}
           </p>
         </div>
+        {actionButton('resource-back-simulation')}
         {actionButton('resource-new', true)}
       </header>
       {busy && <Notice>{t('操作进行中…', 'Operation in progress…')}</Notice>}

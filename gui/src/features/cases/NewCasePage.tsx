@@ -49,6 +49,8 @@ import HistoryVariablesCard from './HistoryVariablesCard';
 import MultiSiteSettings from './MultiSiteSettings';
 import { planMultiSites, type MultiSiteDraft, type MultiSiteMode } from './multisite-model';
 import type { CaseEntry } from '../../lib/types';
+import RunLocationSettings from '../runs/RunLocationSettings';
+import type { Server } from '../resources/resource';
 
 function siteInfo(s: Site, t: (zh: string, en: string) => string) {
   if (s.urban)
@@ -105,6 +107,7 @@ export default function NewCasePage() {
   const [form, setForm] = useState<Record<string, string>>({
     // 计算核心、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
     engine: '',
+    host: '',
     root: initialRoot,
     name: initialName,
     kind: '',
@@ -140,6 +143,24 @@ export default function NewCasePage() {
   } catch {
     // Incomplete or invalid names have no destination yet.
   }
+  const [servers, setServers] = useState<Server[] | null>(null);
+  const [resourceError, setResourceError] = useState('');
+  useEffect(() => {
+    let current = true;
+    invoke<{ servers: Server[] }>('remote_config', {})
+      .then((config) => {
+        if (current) setServers(config.servers);
+      })
+      .catch((e) => {
+        if (current) {
+          setServers([]);
+          setResourceError(String(e));
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
   const [caseValues, setCaseValues] = useState<Record<string, string>>(seed?.caseValues ?? {}),
     [schema, setSchema] = useState<SchemaField[]>([]),
     [schemaReady, setSchemaReady] = useState(false),
@@ -546,6 +567,14 @@ export default function NewCasePage() {
 
   function problem(at: SimulationStep) {
     if (at >= 1) {
+      if (form.host && !servers?.some((server) => server.host === form.host))
+        return (
+          resourceError ||
+          t(
+            '请等待计算资源读取完成，或重新选择已配置的服务器。',
+            'Wait for resources to load or select a configured server.',
+          )
+        );
       const issue = newCaseGeneralProblem(form, en);
       if (issue) return issue;
     }
@@ -597,7 +626,13 @@ export default function NewCasePage() {
     setError('');
     setStep((step + 1) as SimulationStep);
   }
+  function openResources() {
+    return leaveForConfiguration('resources', step);
+  }
   function openResearch() {
+    return leaveForConfiguration('research', 4);
+  }
+  function leaveForConfiguration(route: 'resources' | 'research', returnStep: SimulationStep) {
     update({
       newCaseSeed: {
         form,
@@ -606,7 +641,7 @@ export default function NewCasePage() {
           ...caseValues,
           ...schemeFields,
         },
-        step: 4,
+        step: returnStep,
         ownData,
         exampleValues: exampleValues.current,
         multiSiteEnabled,
@@ -614,9 +649,13 @@ export default function NewCasePage() {
         multiSiteRepeat,
         siteDrafts,
       },
-      simulationReturn: { route: 'new-case', step: 4 },
+      simulationReturn: {
+        route: 'new-case',
+        step: returnStep,
+        ...(route === 'resources' ? { resourceHost: form.host } : {}),
+      },
     });
-    return navigate('research');
+    return navigate(route);
   }
   function changeCaseOptions(patch: CaseOptionPatch) {
     setError('');
@@ -713,6 +752,7 @@ export default function NewCasePage() {
               fields: physicsFields(plan.fields),
               modelRevision: revision,
               engine: form.engine,
+              runHost: form.host || null,
             });
           result.created = true;
           if (multiSiteMode === 'first-year')
@@ -824,6 +864,7 @@ export default function NewCasePage() {
             fields,
             modelRevision: revision,
             engine: form.engine,
+            runHost: form.host || null,
           });
         else {
           const number = (k: string) => requiredNumber(form[k], k),
@@ -854,6 +895,7 @@ export default function NewCasePage() {
             fields,
             modelRevision: revision,
             engine: form.engine,
+            runHost: form.host || null,
           });
         }
       } finally {
@@ -896,7 +938,9 @@ export default function NewCasePage() {
   }
   const labels: Record<string, string> = {
     engine: t('计算核心', 'Computation core'),
-    root: t('保存到项目目录', 'Project folder'),
+    root: form.host
+      ? t('本地项目保存目录', 'Local project folder')
+      : t('保存到项目目录', 'Project folder'),
     output: t('模拟输出路径', 'Simulation output path'),
     name: t('模拟名称', 'Simulation name'),
     sitedir: t('站点数据目录', 'Site data folder'),
@@ -1038,6 +1082,18 @@ export default function NewCasePage() {
       disabled: true,
       set: () => {},
     });
+    fields.push({
+      id: 'new-run-host',
+      label: t('运行位置', 'Run location'),
+      type: 'choice',
+      value: form.host,
+      options: [
+        { value: '', label: t('本机', 'Local') },
+        ...(servers ?? []).map((server) => ({ value: server.host, label: server.host })),
+      ],
+      disabled: !enabled || servers === null,
+      set: (value) => set('host', value),
+    });
     fields.unshift({
       id: 'new-engine',
       label: labels.engine,
@@ -1124,6 +1180,17 @@ export default function NewCasePage() {
   }
 
   const actions: UiAction[] = [
+    ...(step === 1
+      ? [
+          {
+            id: 'new-run-resources',
+            label: t('配置计算资源与路径对应', 'Configure resources and path mappings'),
+            kind: 'click' as const,
+            enabled,
+            run: openResources,
+          },
+        ]
+      : []),
     ...(multiSite && multiResults.length
       ? [
           {
@@ -1272,6 +1339,7 @@ export default function NewCasePage() {
       model: state.versionRef,
       ...(blocker ? { blocker } : {}),
       engine: form.engine,
+      run_host: form.host || null,
       ...(step >= 2
         ? { domain: form.kind, ...(form.kind !== 'site' ? { grid: form.grid } : {}) }
         : {}),
@@ -1419,10 +1487,19 @@ export default function NewCasePage() {
         <Card
           title={t('总的设定', 'General setup')}
           description={t(
-            '选择计算核心，并设置保存项目目录与模拟名称。',
-            'Choose computation core, project folder, and simulation name.',
+            '先选择运行位置和计算核心，再设置保存路径与模拟名称。',
+            'Choose the run location and computation core before setting paths and simulation name.',
           )}
         >
+          <RunLocationSettings
+            host={form.host}
+            servers={servers}
+            disabled={!enabled}
+            error={resourceError}
+            en={en}
+            onChange={(value) => set('host', value)}
+            onConfigure={openResources}
+          />
           <section className="simulation-choice-group">
             <h3>{t('计算核心', 'Computation core')}</h3>
             <div className="simulation-choices engine-choices">
@@ -1856,6 +1933,8 @@ export default function NewCasePage() {
               <dl>
                 <dt>{t('模拟', 'Simulation')}</dt>
                 <dd>{form.name}</dd>
+                <dt>{t('运行位置', 'Run location')}</dt>
+                <dd>{form.host || t('本机', 'Local')}</dd>
                 <dt>{t('计算核心', 'Computation core')}</dt>
                 <dd>
                   {form.engine === 'rust'
@@ -1936,6 +2015,14 @@ export default function NewCasePage() {
                   </p>
                 ))}
               </div>
+            )}
+            {multiSite && form.host && (
+              <Notice>
+                {t(
+                  '各站点将记住所选服务器，可逐站提交远程运行；项目批量运行目前仅支持本机。',
+                  'Each case retains this server for individual remote runs. Project batch execution currently runs locally only.',
+                )}
+              </Notice>
             )}
             {multiSite && (
               <Notice>

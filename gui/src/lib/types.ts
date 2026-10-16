@@ -86,6 +86,7 @@ export type CaseProfile = {
   tracer?: boolean;
   kernel_preset: string | null;
   engine?: string;
+  run_host?: string | null;
   obs_file?: string | null;
   inputs: {
     site_file?: string;
@@ -166,6 +167,7 @@ export type AppState = {
   } | null;
   simulationReturn: {
     route: 'new-case' | 'case';
+    resourceHost?: string;
     step: 1 | 2 | 3 | 4 | 5;
     subgrid?: 'LCT' | 'PFT' | 'PC';
     setup?: { id: string; value: string };

@@ -12,9 +12,16 @@ function render(
   remoteStage?: string,
   otherRuns: Record<string, RunState> = {},
   batchCases?: string[],
+  savedHost?: string,
+  saveError?: string,
 ) {
   const effects: (() => void)[] = [];
   const state = {
+    selectedCase: {
+      dir: '/case',
+      entry: { name: '/case' },
+      profile: { run_host: savedHost ?? null },
+    },
     language: 'zh',
     expert: false,
     running: { ...otherRuns, ...(record ? { '/case': record } : {}) } as Record<string, RunState>,
@@ -24,22 +31,30 @@ function render(
     versionRef: { id: 'official', revision: 1 },
   };
   const routes: unknown[][] = [],
-    calls: string[] = [];
+    calls: string[] = [],
+    errors: string[] = [],
+    hostChanges: unknown[] = [];
+  let stateIndex = 0;
   const app = {
     state,
     navigate: (...args: unknown[]) => routes.push(args),
     openCase: async (...args: unknown[]) => routes.push(['openCase', ...args]),
-    notify: () => {},
+    notify: (error: string) => errors.push(error),
     update: (patch: (old: typeof state) => Partial<typeof state>) =>
       Object.assign(state, patch(state)),
   };
   const react = {
     useEffect: (effect: () => void) => effects.push(effect),
     // The stored completion has already been reconciled; other boolean defaults are false.
-    useState: (initial: unknown) => [
-      initial === true ? false : initial === null ? (record?.progress?.remote ?? null) : initial,
-      () => {},
-    ],
+    useState: (initial: unknown) => {
+      const index = stateIndex++;
+      return [
+        initial === true ? false : initial === null ? (record?.progress?.remote ?? null) : initial,
+        (value: unknown) => {
+          if (index === 0) hostChanges.push(value);
+        },
+      ];
+    },
     useRef: (current: unknown) => ({ current }),
     createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => ({
       type,
@@ -48,7 +63,13 @@ function render(
     }),
   };
   const native = {
-    invoke: async () => ({ servers: [] }),
+    invoke: async (command: string) => {
+      if (command === 'set_case_run_host') {
+        calls.push(command);
+        if (saveError) throw new Error(saveError);
+      }
+      return { servers: [] };
+    },
     invokeJson: async (command: string) => {
       calls.push(command);
       if (command === 'remote_job_record') return null;
@@ -115,6 +136,10 @@ function render(
       (el) => el.type === 'Button' && el.children.includes('核对服务器状态'),
     ),
     remoteFetch: elements.find((el) => el.type === 'Button' && el.children.includes('取回结果')),
+    location: elements.find((el) => el.type === 'Select'),
+    effects,
+    errors,
+    hostChanges,
     routes,
     calls,
     state,
@@ -266,4 +291,82 @@ test('project batch results open the completed target instead of a previously se
   assert.ok(page.next);
   await (page.next.props.onClick as () => Promise<void>)();
   assert.deepEqual(page.routes, [['openCase', '/case', 'results']]);
+});
+
+test('run location restores the saved case host, with active job host taking precedence', () => {
+  const missing = render(undefined, [], undefined, {}, undefined, 'removed-server').location;
+  assert.ok(
+    missing?.children
+      .flat(Infinity)
+      .some(
+        (child) =>
+          child &&
+          typeof child === 'object' &&
+          (child as Element).type === 'option' &&
+          (child as Element).props.value === 'removed-server',
+      ),
+  );
+  assert.equal(
+    render(undefined, [], undefined, {}, undefined, 'saved-server').location?.props.value,
+    'saved-server',
+  );
+  assert.equal(
+    render(
+      { ...success, running: true, location: 'remote', progress: { host: 'running-server' } },
+      [],
+      undefined,
+      {},
+      undefined,
+      'saved-server',
+    ).location?.props.value,
+    'running-server',
+  );
+  assert.equal(
+    render(
+      { ...success, location: 'remote', progress: { host: 'old-server' } },
+      [],
+      undefined,
+      {},
+      undefined,
+      'saved-server',
+    ).location?.props.value,
+    'saved-server',
+  );
+  const batch = render(undefined, [], undefined, {}, ['/case'], 'saved-server');
+  assert.equal(batch.location, undefined);
+  batch.effects[3]();
+  assert.deepEqual(batch.hostChanges, ['']);
+});
+
+test('changing run location persists the case preference before applying it', async () => {
+  const page = render(undefined, [], undefined, {}, undefined, 'saved-server');
+  await (page.location!.props.onChange as (e: unknown) => Promise<void>)({
+    target: { value: 'new-server' },
+  });
+  assert.deepEqual(page.calls, ['set_case_run_host']);
+  assert.equal(page.state.selectedCase.profile.run_host, 'new-server');
+  assert.deepEqual(page.hostChanges, ['new-server']);
+});
+
+test('failed run location save retains the previous host and reports the error', async () => {
+  const page = render(undefined, [], undefined, {}, undefined, 'saved-server', 'disk unavailable');
+  await (page.location!.props.onChange as (e: unknown) => Promise<void>)({ target: { value: '' } });
+  assert.equal(page.state.selectedCase.profile.run_host, 'saved-server');
+  assert.deepEqual(page.hostChanges, []);
+  assert.match(page.errors[0], /disk unavailable/);
+});
+
+test('active local jobs override a saved remote run location', () => {
+  const page = render(
+    { ...success, running: true, status: 'running', location: 'local' },
+    [],
+    undefined,
+    {},
+    undefined,
+    'saved-server',
+  );
+  assert.equal(page.location?.props.value, '');
+  page.effects[3]();
+  page.effects[4]();
+  assert.deepEqual(page.hostChanges, ['']);
 });

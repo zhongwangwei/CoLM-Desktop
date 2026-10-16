@@ -11,6 +11,7 @@ function harness(
   records: Record<string, unknown> = {},
   hosts = ['7920land', '7920mp'],
   failures: { config?: boolean; history?: string } = {},
+  simulationReturn?: { route: 'new-case' | 'case'; step: 1; resourceHost?: string },
 ) {
   const source = readFileSync(new URL('./ResourcesPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
@@ -23,6 +24,7 @@ function harness(
     effected = false,
     contract: Contract,
     guard: () => string | null;
+  const routes: string[] = [];
   const calls: { command: string; args: Record<string, unknown> | undefined }[] = [];
   const servers = hosts.map((host) => ({ ...resource.newServer(), host }));
   let failProbe = false;
@@ -68,12 +70,17 @@ function harness(
     useApp: () => ({
       state: {
         language: 'zh',
+        simulationReturn,
         cases: Object.keys(records).map((dir) => ({ dir })),
         running: {},
         kernels: [],
         version: null,
       },
       update: () => {},
+      navigate: (route: string) => {
+        routes.push(route);
+        return true;
+      },
     }),
     useState: (initial: unknown) => {
       const key = cursor++;
@@ -138,6 +145,7 @@ function harness(
     fill,
     render,
     calls,
+    routes,
     servers,
     guard: () => guard(),
     contract: () => contract,
@@ -447,4 +455,32 @@ test('failed configuration loads disable adding and saving, including after a su
   assert.equal(save.enabled, false);
   await assert.rejects(async () => await save.run(), /服务器配置尚未成功加载/);
   assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+});
+
+test('resource configuration returns to the pending simulation after saving or discarding edits', async () => {
+  const page = harness({}, ['compute'], {}, { route: 'new-case', step: 1 });
+  await page.ready();
+  await page.action('resource-back-simulation');
+  assert.equal(page.routes.at(-1), 'new-case');
+  page.fill('resource-host', 'changed');
+  assert.equal(
+    page.contract().actions.find((action) => action.id === 'resource-back-simulation')?.enabled,
+    false,
+  );
+  await page.action('resource-discard');
+  assert.equal(
+    page.contract().actions.find((action) => action.id === 'resource-back-simulation')?.enabled,
+    true,
+  );
+});
+
+test('configuring a simulation opens its selected resource instead of another server', async () => {
+  const page = harness(
+    {},
+    ['other', 'selected'],
+    {},
+    { route: 'new-case', step: 1, resourceHost: 'selected' },
+  );
+  await page.ready();
+  assert.equal((page.contract().details as { selected: string }).selected, 'server:selected');
 });

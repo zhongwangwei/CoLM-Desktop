@@ -126,6 +126,7 @@ pub fn run() {
             apply_import_parameter_overrides,
             list_cases,
             open_case,
+            set_case_run_host,
             mark_results_stale,
             list_kernels,
             install_example,
