@@ -31,6 +31,9 @@ export default function ProjectPage() {
     [batchPage, setBatchPage] = useState(
       !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
     );
+  const batchFromCreation = useRef(
+    !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
+  );
   const lock = useRef(false),
     active = useRef(true);
   useEffect(() => {
@@ -108,6 +111,10 @@ export default function ProjectPage() {
     state.versionRef.revision === official?.version.revision;
   const existingSelected = modelChosen && !officialSelected;
   const versionKey = (version: FrozenRevision) => JSON.stringify(version.version);
+  function openBatch() {
+    batchFromCreation.current = false;
+    setBatchPage(true);
+  }
   async function chooseVersion(key: string) {
     return work(async () => {
       const selected = state.versions.find((version) => versionKey(version) === key);
@@ -308,7 +315,7 @@ export default function ProjectPage() {
             label: t('批量运行', 'Batch run'),
             kind: 'click' as const,
             enabled: enabled && state.cases.length > 0,
-            run: () => setBatchPage(true),
+            run: openBatch,
           },
           {
             id: 'project-new-simulation',
@@ -355,7 +362,16 @@ export default function ProjectPage() {
     },
     !batchPage,
   );
-  if (batchPage) return <ProjectBatchRun onBack={() => setBatchPage(false)} />;
+  if (batchPage)
+    return (
+      <ProjectBatchRun
+        fromCreation={batchFromCreation.current}
+        onBack={() => {
+          batchFromCreation.current = false;
+          setBatchPage(false);
+        }}
+      />
+    );
   if (chooser)
     return (
       <div className="page-stack">
@@ -411,7 +427,7 @@ export default function ProjectPage() {
             {t('选择其他目录', 'Browse another folder')}
           </Button>
           {chooser === 'simulation' && (
-            <Button disabled={!enabled || !state.cases.length} onClick={() => setBatchPage(true)}>
+            <Button disabled={!enabled || !state.cases.length} onClick={openBatch}>
               {t('批量运行', 'Batch run')}
             </Button>
           )}

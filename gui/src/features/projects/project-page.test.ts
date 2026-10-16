@@ -260,11 +260,13 @@ function home() {
   const calls: unknown[] = [],
     routes: string[] = [],
     effects: Array<() => unknown> = [],
-    nodes: unknown[] = [];
+    nodes: unknown[] = [],
+    batchProps: Record<string, unknown>[] = [];
   const context = {
     React: {
-      createElement: (type: unknown) => {
+      createElement: (type: unknown, props: Record<string, unknown>) => {
         nodes.push(type);
+        if (type === 'ProjectBatchRun') batchProps.push(props);
         return null;
       },
     },
@@ -342,6 +344,7 @@ function home() {
     calls,
     routes,
     nodes,
+    batchProps,
     render,
     click,
     remount,
@@ -375,10 +378,13 @@ test('a newly created project opens its case list and batch entry once without s
     'the request is consumed and later visits retain the project home',
   );
 });
-test('a newly created batch opens resource review without starting any simulation', () => {
+test('a newly created batch opens resource review without repeating station selection', async () => {
   const page = home();
   page.state.root = '/project/multi-project';
   page.state.projectCasesOpen = true;
+  page.state.cases = [
+    { dir: '/project/multi-project/one', name: 'one', spatial: false, has_history: false },
+  ];
   page.state.projectRunSettings = {
     root: page.state.root,
     cases: ['/project/multi-project/one'],
@@ -391,8 +397,17 @@ test('a newly created batch opens resource review without starting any simulatio
   };
   page.render();
   assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(page.batchProps.at(-1)?.fromCreation, true);
   assert.deepEqual(page.calls, []);
   assert.equal(page.state.projectCasesOpen, false);
+  (page.batchProps.at(-1)!.onBack as () => void)();
+  page.render();
+  await page.click('project-batch-run');
+  assert.equal(
+    page.batchProps.at(-1)?.fromCreation,
+    false,
+    'manual entry allows optional station adjustments',
+  );
   page.remount();
   assert.ok(!page.nodes.includes('ProjectBatchRun'));
 });

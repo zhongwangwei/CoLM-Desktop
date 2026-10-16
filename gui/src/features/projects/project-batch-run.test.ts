@@ -3,16 +3,19 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-function screen(handoff?: {
-  root: string;
-  cases: string[];
-  host: string;
-  threads: string;
-  ranks: string;
-  workers: string;
-  scheduler: string;
-  cpus: string;
-}) {
+function screen(
+  handoff?: {
+    root: string;
+    cases: string[];
+    host: string;
+    threads: string;
+    ranks: string;
+    workers: string;
+    scheduler: string;
+    cpus: string;
+  },
+  fromCreation = !!handoff,
+) {
   const state = {
     language: 'en',
     root: '/project',
@@ -49,6 +52,7 @@ function screen(handoff?: {
       },
     },
     Button: () => {},
+    Advanced: () => {},
     Notice: () => {},
     RunPanel,
     useApp: () => ({ state }),
@@ -90,54 +94,71 @@ function screen(handoff?: {
     cursor = 0;
     panels.length = 0;
     text.length = 0;
-    Page({ onBack: () => {} });
+    Page({ onBack: () => {}, fromCreation });
   }
   function select(dir: string, checked: boolean) {
+    if (!contract.fields.length) adjust();
     contract.fields.find((field) => field.id === `project-batch-case:${dir}`)!.set(String(checked));
     render();
   }
   function selectAll() {
+    if (!contract.fields.length) adjust();
     contract.actions.find((action) => action.id === 'project-batch-select-all')!.run();
     render();
   }
-  return { state, requests, panels, text, render, select, selectAll };
+  function adjust() {
+    contract.actions.find((action) => action.id === 'project-batch-selection')!.run();
+    render();
+  }
+  return {
+    state,
+    requests,
+    panels,
+    text,
+    render,
+    select,
+    selectAll,
+    fields: () => contract.fields,
+    actions: () => contract.actions,
+  };
 }
 
 test('select all loads each station once and respects an active local run', async () => {
   const page = screen();
   page.render();
-  page.select('/a', true);
+  assert.equal(page.requests.length, 2);
+  assert.equal(page.fields().length, 0, 'station editing is optional and initially collapsed');
+  page.select('/b', false);
   page.state.running['/a'] = { running: true };
   page.render();
   page.selectAll();
-  assert.equal(page.requests.length, 1);
+  assert.equal(page.requests.length, 3);
   page.state.running = {};
   page.render();
   page.selectAll();
-  assert.equal(page.requests.length, 3);
+  assert.equal(page.requests.length, 5);
   for (const request of page.requests) request.resolve({ profile: { grid: 'site' } });
   await new Promise<void>((resolve) => setImmediate(resolve));
   page.render();
   assert.deepEqual(page.panels[0].batchCases, ['/a', '/b']);
 });
 
-test('batch execution starts empty and resolves the selected case with the current model', async () => {
+test('existing projects default to all stations and optional edits reject stale context', async () => {
   const page = screen();
   page.render();
-  assert.equal(page.requests.length, 0);
+  assert.equal(page.requests.length, 2);
   assert.equal(page.panels.length, 0);
-  page.select('/a', true);
   assert.deepEqual(page.requests[0].args, {
     dir: '/a',
     modelRevision: { id: 'official', revision: 2 },
   });
   page.select('/a', false);
-  page.select('/b', true);
   page.requests[0].resolve({ profile: { grid: 'stale', crop: true } });
+  page.requests[1].resolve({ profile: { grid: 'stale', crop: true } });
   await new Promise<void>((resolve) => setImmediate(resolve));
   page.render();
   assert.equal(page.panels.length, 0, 'late context from a deselected case cannot run');
-  page.requests[1].resolve({ profile: { grid: 'site', crop: false } });
+  page.requests[2].resolve({ profile: { grid: 'site', crop: false } });
   await new Promise<void>((resolve) => setImmediate(resolve));
   page.render();
   assert.equal(page.panels[0].casePath, '/b');
@@ -156,7 +177,7 @@ test('batch execution starts empty and resolves the selected case with the curre
   page.state.versionRef = { id: 'official', revision: 3 };
   page.render();
   assert.equal(page.panels.length, 0, 'a new model requires a fresh effective profile');
-  assert.deepEqual(page.requests[2].args, {
+  assert.deepEqual(page.requests[3].args, {
     dir: '/b',
     modelRevision: { id: 'official', revision: 3 },
   });
@@ -165,8 +186,6 @@ test('batch execution starts empty and resolves the selected case with the curre
 test('batch results expose each case failure even when the first case succeeds', async () => {
   const page = screen();
   page.render();
-  page.select('/a', true);
-  page.select('/b', true);
   for (const request of page.requests) request.resolve({ profile: { grid: 'site' } });
   await new Promise<void>((resolve) => setImmediate(resolve));
   page.state.running = {
@@ -199,6 +218,15 @@ test('new project handoff selects only created cases and preserves resource choi
   };
   const page = screen(settings);
   page.render();
+  assert.equal(page.fields().length, 0, 'creation selections are not requested again');
+  assert.ok(
+    !page
+      .actions()
+      .some(
+        (action) =>
+          action.id === 'project-batch-selection' || action.id === 'project-batch-select-all',
+      ),
+  );
   assert.equal(page.requests.length, 1);
   page.requests[0].resolve({ profile: { grid: 'site', run_host: 'server', engine: 'rust' } });
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -208,7 +236,29 @@ test('new project handoff selects only created cases and preserves resource choi
   assert.deepEqual(page.panels[0].initialSettings, settings);
   const other = screen({ ...settings, root: '/another-project' });
   other.render();
-  assert.equal(other.requests.length, 0);
+  assert.equal(other.requests.length, 2, 'another project uses its own cases');
+});
+
+test('returning to an existing project keeps optional station adjustment available', () => {
+  const page = screen(
+    {
+      root: '/project',
+      cases: ['/b'],
+      host: '',
+      threads: '2',
+      ranks: '1',
+      workers: '1',
+      scheduler: 'auto',
+      cpus: '1',
+    },
+    false,
+  );
+  page.render();
+  assert.equal(page.requests.length, 2, 'an existing batch defaults to the current project');
+  assert.equal(page.fields().length, 0);
+  assert.ok(page.actions().some((action) => action.id === 'project-batch-selection'));
+  page.select('/a', false);
+  assert.equal(page.fields().length, 2);
 });
 
 test('ninety selected stations load the run panel without repeating idle status rows', async () => {
@@ -238,7 +288,8 @@ test('ninety selected stations load the run panel without repeating idle status 
     name: '90 stations',
     period: 'Each case’s saved period',
   });
-  assert.ok(page.text.includes('90 stations selected'));
+  assert.ok(page.text.includes('Stations to run: 90'));
+  assert.equal(page.fields().length, 0);
   assert.ok(!page.text.includes('Not started'));
 });
 
@@ -246,13 +297,11 @@ test('batch waits for every selected profile and rejects different hosts or engi
   for (const mismatch of [{ run_host: 'another-server' }, { engine: 'fortran' }]) {
     const page = screen();
     page.render();
-    page.select('/a', true);
-    page.select('/b', true);
-    page.requests[1].resolve({ profile: { grid: 'site', run_host: 'server', engine: 'rust' } });
+    page.requests[0].resolve({ profile: { grid: 'site', run_host: 'server', engine: 'rust' } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     page.render();
     assert.equal(page.panels.length, 0);
-    page.requests[2].resolve({
+    page.requests[1].resolve({
       profile: { grid: 'site', run_host: 'server', engine: 'rust', ...mismatch },
     });
     await new Promise<void>((resolve) => setImmediate(resolve));

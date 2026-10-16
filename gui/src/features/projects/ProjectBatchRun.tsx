@@ -1,18 +1,28 @@
 import { useEffect, useState } from 'react';
-import { Button, Notice } from '../../components/ui';
+import { Advanced, Button, Notice } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invoke } from '../../lib/ipc';
 import type { CaseProfile } from '../../lib/types';
 import RunPanel from '../runs/RunPanel';
 
-export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
+export default function ProjectBatchRun({
+  onBack,
+  fromCreation = false,
+}: {
+  onBack: () => void;
+  fromCreation?: boolean;
+}) {
   const { state } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const handoff =
     state.projectRunSettings?.root === state.root ? state.projectRunSettings : undefined;
-  const [selected, setSelected] = useState<string[]>(handoff?.cases ?? []);
+  const fixedSelection = fromCreation && !!handoff;
+  const [selected, setSelected] = useState<string[]>(
+    fixedSelection ? handoff.cases : state.cases.map((entry) => entry.dir),
+  );
+  const [selecting, setSelecting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [context, setContext] = useState<{
     key: string;
@@ -78,24 +88,44 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
   usePageContract({
     title: t('批量运行', 'Batch run'),
     step: 'project-batch-run',
-    fields: state.cases.map((entry) => ({
-      id: `project-batch-case:${entry.dir}`,
-      label: entry.name,
-      type: 'switch' as const,
-      value: String(paths.includes(entry.dir)),
-      disabled: !!locked,
-      set: (value) => select(entry.dir, value === 'true'),
-    })),
+    fields:
+      !fixedSelection && selecting
+        ? state.cases.map((entry) => ({
+            id: `project-batch-case:${entry.dir}`,
+            label: entry.name,
+            type: 'switch' as const,
+            value: String(paths.includes(entry.dir)),
+            disabled: !!locked,
+            set: (value) => select(entry.dir, value === 'true'),
+          }))
+        : [],
     actions: [
-      {
-        id: 'project-batch-select-all',
-        label: t('全选站点', 'Select all stations'),
-        kind: 'click',
-        enabled: !locked,
-        run: () => {
-          if (!locked) setSelected(state.cases.map((entry) => entry.dir));
-        },
-      },
+      ...(!fixedSelection
+        ? [
+            {
+              id: 'project-batch-selection',
+              label: t('调整运行站点（可选）', 'Adjust stations (optional)'),
+              kind: 'click' as const,
+              enabled: !locked,
+              run: () => {
+                if (!locked) setSelecting((value) => !value);
+              },
+            },
+            ...(selecting
+              ? [
+                  {
+                    id: 'project-batch-select-all',
+                    label: t('全选站点', 'Select all stations'),
+                    kind: 'click' as const,
+                    enabled: !locked,
+                    run: () => {
+                      if (!locked) setSelected(state.cases.map((entry) => entry.dir));
+                    },
+                  },
+                ]
+              : []),
+          ]
+        : []),
       {
         id: 'project-batch-back',
         label: t('返回算例列表', 'Back to cases'),
@@ -123,30 +153,42 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
         )}
         {state.version?.name ?? id} · r{revision}
       </Notice>
-      <div className="actions">
-        <Button
-          disabled={!!locked}
-          onClick={() => setSelected(state.cases.map((entry) => entry.dir))}
+      {!fixedSelection && (
+        <Advanced
+          open={selecting}
+          onOpenChange={setSelecting}
+          title={t('调整运行站点（可选）', 'Adjust stations (optional)')}
         >
-          {t('全选站点', 'Select all stations')}
-        </Button>
-      </div>
-      <div className="check-grid">
-        {state.cases.map((entry) => (
-          <label key={entry.dir}>
-            <input
-              type="checkbox"
-              checked={paths.includes(entry.dir)}
-              disabled={!!locked}
-              onChange={(event) => select(entry.dir, event.target.checked)}
-            />
-            {entry.name}
-          </label>
-        ))}
-      </div>
+          {selecting && (
+            <>
+              <div className="actions">
+                <Button
+                  disabled={!!locked}
+                  onClick={() => setSelected(state.cases.map((entry) => entry.dir))}
+                >
+                  {t('全选站点', 'Select all stations')}
+                </Button>
+              </div>
+              <div className="check-grid">
+                {state.cases.map((entry) => (
+                  <label key={entry.dir}>
+                    <input
+                      type="checkbox"
+                      checked={paths.includes(entry.dir)}
+                      disabled={!!locked}
+                      onChange={(event) => select(entry.dir, event.target.checked)}
+                    />
+                    {entry.name}
+                  </label>
+                ))}
+              </div>
+            </>
+          )}
+        </Advanced>
+      )}
       <p>
         {cases.length
-          ? t(`已选择 ${cases.length} 个站点`, `${cases.length} stations selected`)
+          ? t(`运行站点：${cases.length} 个`, `Stations to run: ${cases.length}`)
           : t('请选择要运行的算例。', 'Select cases to run.')}
       </p>
       {cases
