@@ -157,12 +157,6 @@ export default function NewCasePage() {
     ...seed?.form,
     ...(['PFT', 'PC'].includes(seed?.form?.subgrid ?? '') ? { landcover: 'IGBP' } : {}),
   });
-  let finalDirectory = '';
-  try {
-    finalDirectory = caseDirectory(form.root, form.name);
-  } catch {
-    // Incomplete or invalid names have no destination yet.
-  }
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
   useEffect(() => {
@@ -256,6 +250,21 @@ export default function NewCasePage() {
       ...schemeFields,
     },
     selected = sites.find((s) => s.site_file === form.site);
+  const bundledSite = !ownData && !multiSite && form.kind === 'site' ? selected : undefined;
+  let projectDirectory = '',
+    finalDirectory = '',
+    destinationRoot = form.root,
+    destinationError = '';
+  const destinationName = bundledSite?.name ?? form.name;
+  try {
+    projectDirectory = caseDirectory(form.root, form.name);
+    destinationRoot = bundledSite ? projectDirectory : form.root;
+    finalDirectory = bundledSite
+      ? caseDirectory(projectDirectory, bundledSite.name)
+      : projectDirectory;
+  } catch (e) {
+    destinationError = String(e);
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -445,7 +454,12 @@ export default function NewCasePage() {
         ...f,
         [k]: v,
         ...(s
-          ? { name: s.name, met: s.met_file ?? '', start: s.start ?? '', end: s.end ?? '' }
+          ? {
+              name: f.name || s.name,
+              met: s.met_file ?? '',
+              start: s.start ?? '',
+              end: s.end ?? '',
+            }
           : {}),
       };
       return next;
@@ -520,7 +534,7 @@ export default function NewCasePage() {
     setForm((previous) => {
       const next = { ...previous };
       for (const [key, value] of Object.entries(bundled)) {
-        if (next[key] === value) next[key] = '';
+        if (key !== 'name' && next[key] === value) next[key] = '';
       }
       return next;
     });
@@ -559,7 +573,7 @@ export default function NewCasePage() {
         runtime: x.runtimedir,
         ...(s
           ? {
-              name: s.name,
+              name: f.name || s.name,
               site: s.site_file,
               met: s.met_file ?? '',
               start: s.start ?? '',
@@ -663,7 +677,7 @@ export default function NewCasePage() {
     setForm((previous) => ({
       ...previous,
       site: path,
-      name: site.name,
+      name: previous.name || site.name,
       met: site.met_file ?? '',
       start: site.start ?? '',
       end: site.end ?? '',
@@ -738,6 +752,7 @@ export default function NewCasePage() {
       const issue = newCaseRangeProblem(form, en);
       if (issue) return issue;
     }
+    if (at >= 3 && destinationError) return destinationError;
     if (at >= 3 && multiSite) {
       try {
         multiPlans(at >= 5 ? 5 : 3);
@@ -872,7 +887,7 @@ export default function NewCasePage() {
       await invoke(command, args);
       return {
         dir: String(args.out),
-        root: form.root,
+        root: multiSite ? form.root : destinationRoot,
         remote_dir: undefined as string | undefined,
       };
     }
@@ -1024,7 +1039,7 @@ export default function NewCasePage() {
       )
         throw new Error(t('模型与设置尚未读取完成。', 'Wait for model and settings to load.'));
       if (multiSite) return createMultiSites();
-      const out = caseDirectory(form.root, form.name),
+      const out = finalDirectory,
         revision = state.versionRef;
       const changed = editedOptions.map(([path, value]) => ({ path, value }));
       const spinup = form.spinup_end
@@ -1052,7 +1067,7 @@ export default function NewCasePage() {
           destination = await createDestination('new_case', {
             site: form.site,
             out,
-            name: form.name,
+            name: destinationName,
             start: form.start,
             end: form.end,
             rawdata: form.rawdata || null,
@@ -1274,8 +1289,8 @@ export default function NewCasePage() {
   if (step === 1) {
     fields.push({
       id: 'new-case-directory',
-      label: t('最终算例目录', 'Final case directory'),
-      value: finalDirectory,
+      label: t('模拟保存目录', 'Simulation directory'),
+      value: projectDirectory,
       type: 'text',
       disabled: true,
       set: () => {},
@@ -1780,10 +1795,10 @@ export default function NewCasePage() {
             </Field>
           )}
           <div className="form-grid">{['root', 'name'].map(render)}</div>
-          <Field label={t('最终算例目录', 'Final case directory')}>
+          <Field label={t('模拟保存目录', 'Simulation directory')}>
             <Input
               readOnly
-              value={finalDirectory}
+              value={projectDirectory}
               placeholder={t(
                 '填写项目目录与模拟名称后显示',
                 'Choose a project folder and simulation name',
@@ -1850,6 +1865,12 @@ export default function NewCasePage() {
             'Choose data sources and simulation period.',
           )}
         >
+          {bundledSite && finalDirectory && (
+            <p className="path">
+              {t('本站点保存位置：', 'Station directory: ')}
+              {finalDirectory}
+            </p>
+          )}
           {form.kind === 'site' && (
             <>
               <div className="actions simulation-source">

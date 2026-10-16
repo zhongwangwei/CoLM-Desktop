@@ -1723,7 +1723,7 @@ test('new case cancellation waits for backend creation cleanup and retains the f
   assert.equal(c.actions.find((a) => a.id === 'new-create')?.enabled, false);
   const cancel = p.click('new-cancel-creation');
   assert.deepEqual(p.calls.find((call) => call.command === 'case_creation_cancel')?.args, {
-    dir: '/project/CN-Cng',
+    dir: '/project/CN-Cng/CN-Cng',
   });
   c = p.render();
   assert.equal(c.actions.find((a) => a.id === 'new-cancel-creation')?.enabled, false);
@@ -1746,7 +1746,7 @@ test('new case cancellation waits for backend creation cleanup and retains the f
     requests[0].args,
     'retry retains all dates, files and option values',
   );
-  assert.deepEqual(p.opened, ['/project/CN-Cng']);
+  assert.deepEqual(p.opened, ['/project/CN-Cng/CN-Cng']);
 });
 test('failed or unmatched creation cancellation cannot unlock the form while the backend is still working', async () => {
   for (const count of [null, 0]) {
@@ -1775,7 +1775,7 @@ test('failed or unmatched creation cancellation cannot unlock the form while the
     assert.ok(p.elements.some((e) => e.type === 'Notice' && e.props.tone === 'error'));
     finish({});
     await pending;
-    assert.deepEqual(p.opened, ['/project/CN-Cng']);
+    assert.deepEqual(p.opened, ['/project/CN-Cng/CN-Cng']);
   }
 });
 
@@ -3041,4 +3041,70 @@ test('methane example rejects oversized tracer definitions without truncating or
   assert.equal(seed.form.site, form.site);
   assert.equal(seed.form.name, form.name);
   assert.deepEqual(seed.caseValues, { ...caseValues, ...modelSettings.caseSchemeFields('IGBP') });
+});
+
+for (const station of ['AT-Neu', 'CN-Cng']) {
+  test(`bundled ${station} creates inside the user's simulation container`, async () => {
+    const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+    const p = page(
+      'NewCasePage',
+      { form: { ...form, name: 'test' }, sites: [site, methane], step: 3 },
+      [site, methane],
+      initialValues,
+      { schema: methaneSchema, kernels: setupKernels },
+    );
+    await p.mount();
+    await p.click('new-select-AT-Neu');
+    await p.click(`new-select-${station}`);
+    assert.match(JSON.stringify(p.elements), new RegExp(`/project/test/${station}`));
+    await p.click('new-next');
+    await p.click('new-next');
+    assert.equal(p.render().details.name, 'test');
+    await p.click('new-create');
+    const request = p.calls.find((call) => call.command === 'new_case')!;
+    assert.equal(request.args.name, station);
+    assert.equal(request.args.out, `/project/test/${station}`);
+    assert.deepEqual(p.opened, [`/project/test/${station}`]);
+    assert.equal(p.state.root, '/project/test');
+  });
+}
+
+test('example installation and switching to own data retain the simulation name', async () => {
+  const p = page('NewCasePage', { form: { ...form, name: 'test' }, sites: [site], step: 3 }, [
+    site,
+  ]);
+  await p.mount();
+  await p.click('new-example');
+  await p.click('new-own-data');
+  await p.click('new-previous');
+  await p.click('new-previous');
+  await p.click('new-run-resources');
+  const seed = p.state.newCaseSeed as { form: typeof form };
+  assert.equal(seed.form.name, 'test');
+});
+
+test('own-data single station keeps a single-level destination and user name', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, name: 'test' }, ownData: true, sites: [site], step: 5 },
+    [site],
+  );
+  await p.mount();
+  await p.click('new-create');
+  const request = p.calls.find((call) => call.command === 'new_case')!;
+  assert.equal(request.args.name, 'test');
+  assert.equal(request.args.out, '/project/test');
+  assert.deepEqual(p.opened, ['/project/test']);
+  assert.equal(p.state.root, '/project');
+});
+
+test('invalid bundled station names cannot escape the simulation container', async () => {
+  const invalid = { ...site, name: '../escape' };
+  const p = page('NewCasePage', { form: { ...form, name: 'test' }, sites: [invalid], step: 5 }, [
+    invalid,
+  ]);
+  await p.mount();
+  assert.equal(p.render().actions.find((action) => action.id === 'new-create')!.enabled, false);
+  await assert.rejects(p.click('new-create'));
+  assert.ok(!p.calls.some((call) => call.command === 'new_case'));
 });
