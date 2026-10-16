@@ -1477,6 +1477,123 @@ fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
 }
 
 #[test]
+fn urban_subgrids_write_urban_restarts_without_pft_inputs() {
+    use colm_srfdata::site::{
+        fill, materialize_single_point_surface_from_namelist, prepare_urban, skeleton_with_mode,
+        SiteKind, SiteMode,
+    };
+
+    let directory =
+        std::env::temp_dir().join(format!("colm-init-urban-subgrids-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    let skeleton = directory.join("skeleton.nc");
+    let filled = directory.join("filled.nc");
+    let source = directory.join("site.nc");
+    skeleton_with_mode(
+        &skeleton,
+        145.014_495_849_609_38,
+        -37.730_598_449_707_03,
+        Some(6),
+        SiteKind::Urban,
+        SiteMode::Urban,
+        false,
+    )
+    .unwrap();
+    fill(&skeleton, &filled, None, None).unwrap();
+    prepare_urban(&filled, &source).unwrap();
+    {
+        let mut file = netcdf::append(&source).unwrap();
+        // Same measured geometry as the surface writer's AU-Preston fixture.
+        for (name, value) in [
+            ("building_mean_height", 6.4),
+            ("roof_area_fraction", 0.445),
+            ("impervious_area_fraction", 0.62),
+            ("canyon_height_width_ratio", 0.42),
+            ("wall_to_plan_area_ratio", 0.4),
+            ("tree_mean_height", 5.7),
+            ("water_area_fraction", 0.0),
+            ("tree_area_fraction", 0.225),
+            ("resident_population_density", 2940.0),
+        ] {
+            if file.variable(name).is_none() {
+                file.add_variable::<f64>(name, &[]).unwrap();
+            }
+            let mut variable = file.variable_mut(name).unwrap();
+            variable.put_values(&[value], ..).unwrap();
+            variable
+                .put_attribute("source", "AU-Preston test fixture")
+                .unwrap();
+        }
+        file.close().unwrap();
+    }
+
+    let mut reference = None;
+    for (key, expected) in [
+        ("LCT", SinglePointSubgrid::Lct),
+        ("PFT", SinglePointSubgrid::Pft),
+        ("PC", SinglePointSubgrid::Pc),
+    ] {
+        let namelist = directory.join(format!("{key}.nml"));
+        let flags = ["LCT", "PFT", "PC"]
+            .map(|candidate| format!("DEF_USE_{candidate}=.{}.\n", candidate == key))
+            .join("");
+        std::fs::write(&namelist, format!(
+            "&nl_colm\n DEF_CASE_NAME='{key}'\n DEF_dir_output='{}'\n SITE_fsitedata='{}'\n {flags} DEF_URBAN_RUN=.true.\n DEF_URBAN_LUCY=.false.\n DEF_simulation_time%start_year=2005\n /\n",
+            directory.display(), source.display(),
+        )).unwrap();
+        let (surface, _) =
+            materialize_single_point_surface_from_namelist(&namelist, None, false, None).unwrap();
+        assert_eq!(surface.mode, SiteMode::Urban);
+        let run = single_point_cold_start_run_from_namelist(&namelist, None, None).unwrap();
+        assert_eq!(run.subgrid, expected);
+        let file = netcdf::open(&run.static_run.surface).unwrap();
+        for name in ["pfttyp", "pctpfts", "canopy_height_pfts"] {
+            assert!(
+                file.variable(name).is_none(),
+                "urban surface must not require {name}"
+            );
+        }
+        assert!(file.variable("URBAN_TYPE").is_some());
+        drop(file);
+        let constants = write_single_point_constant_restarts(&run).unwrap();
+        let time = write_single_point_cold_time_restarts(&run).unwrap();
+        assert!(constants.pft.is_none());
+        assert!(time.pft.is_none());
+        let snapshots = [
+            run.static_run.surface,
+            constants.common.constants,
+            constants.common.block,
+            constants.urban.unwrap(),
+            time.common.block,
+            time.urban.unwrap(),
+        ]
+        .map(|path| {
+            let file = netcdf::open(path).unwrap();
+            file.variables()
+                .map(|variable| {
+                    (
+                        variable.name(),
+                        variable
+                            .dimensions()
+                            .iter()
+                            .map(|dimension| (dimension.name(), dimension.len()))
+                            .collect::<Vec<_>>(),
+                        variable.get_raw_values(..).unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        if let Some(reference) = &reference {
+            assert_eq!(&snapshots, reference, "urban {key} must match urban LCT");
+        } else {
+            reference = Some(snapshots);
+        }
+    }
+    crate::remove_test_tree(directory);
+}
+
+#[test]
 fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
     let directory =
         std::env::temp_dir().join(format!("colm-init-bgc-namelist-{}", std::process::id()));

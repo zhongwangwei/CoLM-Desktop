@@ -1687,6 +1687,31 @@ fn soil_rawdata_fallback_replaces_disabled_site_profiles() {
 }
 
 #[test]
+fn urban_subgrids_keep_unique_structure_and_crop_validation() {
+    let directory = std::env::temp_dir().join(format!("colm-urban-subgrids-{}", test_suffix()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let namelist = directory.join("case.nml");
+    let case = |flags: &str| {
+        format!(
+        "&nl_colm\n DEF_CASE_NAME='urban'\n DEF_dir_output='{}'\n SITE_fsitedata='unused.nc'\n DEF_URBAN_RUN=.true.\n {flags}\n /\n",
+        directory.display(),
+    )
+    };
+    for key in ["LCT", "PFT", "PC"] {
+        let flags = ["LCT", "PFT", "PC"]
+            .map(|candidate| format!("DEF_USE_{candidate}=.{}.\n", candidate == key))
+            .join("");
+        std::fs::write(&namelist, case(&flags)).unwrap();
+        let run = super::single_point_surface_run_from_namelist(&namelist, None, false).unwrap();
+        assert_eq!(run.mode, SiteMode::Urban);
+        assert!(super::single_point_surface_run_from_namelist(&namelist, None, true).is_err());
+    }
+    std::fs::write(&namelist, case("DEF_USE_LCT=.true.\n DEF_USE_PC=.true.")).unwrap();
+    assert!(super::single_point_surface_run_from_namelist(&namelist, None, false).is_err());
+    crate::remove_test_tree(directory);
+}
+
+#[test]
 fn case_namelist_rejects_ambiguous_lct_classifications_without_an_override() {
     let directory = std::env::temp_dir().join(format!("colm-srfdata-lct-{}", test_suffix()));
     let _ = std::fs::remove_dir_all(&directory);
