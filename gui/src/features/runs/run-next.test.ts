@@ -11,6 +11,7 @@ function render(
   history: unknown[] = [],
   remoteStage?: string,
   otherRuns: Record<string, RunState> = {},
+  batchCases?: string[],
 ) {
   const effects: (() => void)[] = [];
   const state = {
@@ -27,6 +28,7 @@ function render(
   const app = {
     state,
     navigate: (...args: unknown[]) => routes.push(args),
+    openCase: async (...args: unknown[]) => routes.push(['openCase', ...args]),
     notify: () => {},
     update: (patch: (old: typeof state) => Partial<typeof state>) =>
       Object.assign(state, patch(state)),
@@ -88,7 +90,7 @@ function render(
                 ? { bilingual: (zh: string) => zh }
                 : require(name);
   new Function('require', 'exports', 'React', js)(dependencies, exports, react);
-  const tree = exports.default!({ casePath: '/case', effectiveProfile: null });
+  const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null });
   const elements: Element[] = [];
   function visit(value: unknown) {
     if (Array.isArray(value)) {
@@ -103,7 +105,11 @@ function render(
   }
   visit(tree);
   return {
-    next: elements.find((el) => el.type === 'Button' && el.children.includes('下一步：查看结果')),
+    next: elements.find(
+      (el) =>
+        el.type === 'Button' &&
+        (el.children.includes('下一步：查看结果') || el.children.includes('查看 /case 的结果')),
+    ),
     stop: elements.find((el) => el.type === 'Button' && el.children.includes('停止运行')),
     remoteStatus: elements.find(
       (el) => el.type === 'Button' && el.children.includes('核对服务器状态'),
@@ -253,4 +259,11 @@ test('old remote status and fetch cannot replace a newer local result', async ()
     assert.strictEqual(page.state.running['/case'], local);
   }
   assert.deepEqual(page.calls, ['remote_status', 'remote_fetch', 'remote_status']);
+});
+
+test('project batch results open the completed target instead of a previously selected case', async () => {
+  const page = render(success, [], undefined, {}, ['/case', '/other']);
+  assert.ok(page.next);
+  await (page.next.props.onClick as () => Promise<void>)();
+  assert.deepEqual(page.routes, [['openCase', '/case', 'results']]);
 });

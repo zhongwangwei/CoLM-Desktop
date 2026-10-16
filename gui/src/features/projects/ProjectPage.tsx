@@ -5,6 +5,7 @@ import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiAction } from '../../lib/guide';
 import { Button, Dialog, Notice } from '../../components/ui';
 import './project-version.css';
+import ProjectBatchRun from './ProjectBatchRun';
 import NavIcon from '../../components/NavIcon';
 import type { Site } from '../cases/case-model';
 import type { CaseEntry, FrozenRevision } from '../../lib/types';
@@ -24,7 +25,8 @@ export default function ProjectPage() {
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
     [chooser, setChooser] = useState<'simulation' | 'results' | null>(null),
-    [versionChooser, setVersionChooser] = useState(false);
+    [versionChooser, setVersionChooser] = useState(false),
+    [batchPage, setBatchPage] = useState(false);
   const lock = useRef(false),
     active = useRef(true);
   useEffect(() => {
@@ -275,6 +277,13 @@ export default function ProjectPage() {
     ...(chooser === 'simulation'
       ? [
           {
+            id: 'project-batch-run',
+            label: t('批量运行', 'Batch run'),
+            kind: 'click' as const,
+            enabled: enabled && state.cases.length > 0,
+            run: () => setBatchPage(true),
+          },
+          {
             id: 'project-new-simulation',
             label: t('新建模拟', 'New simulation'),
             kind: 'click' as const,
@@ -300,22 +309,26 @@ export default function ProjectPage() {
       run: () => changeVersionChooser(false),
     },
   ];
-  usePageContract({
-    title: versionChooser
-      ? t('选择已有版本', 'Choose an existing version')
-      : chooser === 'results'
-        ? t('选择要分析的算例', 'Choose a case to analyze')
-        : chooser
-          ? t('项目中的算例', 'Cases in this project')
-          : t('项目', 'Project'),
-    step: 'project',
-    modal: versionChooser,
-    status: busy
-      ? 'working'
-      : error || (modelChosen ? 'ready' : t('正在读取模型版本', 'Loading the model version')),
-    fields: [],
-    actions: versionChooser ? versionActions : chooser ? chooserActions : actions,
-  });
+  usePageContract(
+    {
+      title: versionChooser
+        ? t('选择已有版本', 'Choose an existing version')
+        : chooser === 'results'
+          ? t('选择要分析的算例', 'Choose a case to analyze')
+          : chooser
+            ? t('项目中的算例', 'Cases in this project')
+            : t('项目', 'Project'),
+      step: 'project',
+      modal: versionChooser,
+      status: busy
+        ? 'working'
+        : error || (modelChosen ? 'ready' : t('正在读取模型版本', 'Loading the model version')),
+      fields: [],
+      actions: versionChooser ? versionActions : chooser ? chooserActions : actions,
+    },
+    !batchPage,
+  );
+  if (batchPage) return <ProjectBatchRun onBack={() => setBatchPage(false)} />;
   if (chooser)
     return (
       <div className="page-stack">
@@ -370,6 +383,11 @@ export default function ProjectPage() {
           >
             {t('选择其他目录', 'Browse another folder')}
           </Button>
+          {chooser === 'simulation' && (
+            <Button disabled={!enabled || !state.cases.length} onClick={() => setBatchPage(true)}>
+              {t('批量运行', 'Batch run')}
+            </Button>
+          )}
           {chooser === 'simulation' && (
             <Button disabled={!enabled} variant="primary" onClick={newSimulation}>
               {t('新建模拟', 'New simulation')}

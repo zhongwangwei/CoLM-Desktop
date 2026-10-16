@@ -22,6 +22,8 @@ export default function RunPanel({
   active = true,
   summary,
   onBack,
+  batchCases,
+  onBusyChange,
 }: {
   casePath: string;
   effectiveProfile: {
@@ -29,13 +31,16 @@ export default function RunPanel({
     classification?: 'IGBP' | 'USGS';
     subgrid?: string;
     crop?: boolean;
+    engine?: string;
   } | null;
   disabled?: boolean;
   active?: boolean;
   summary?: { name: string; period: string };
   onBack?: () => void;
+  batchCases?: string[];
+  onBusyChange?: (busy: boolean) => void;
 }) {
-  const { state, notify, update, navigate } = useApp();
+  const { state, notify, update, navigate, openCase } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [host, setHost] = useState(''),
@@ -43,7 +48,7 @@ export default function RunPanel({
     [kernel, setKernel] = useState(''),
     [preprocessors, setPreprocessors] = useState('rust'),
     [engine, setEngine] = useState<string>(
-      (state.selectedCase?.profile?.engine as string) || 'rust',
+      (batchCases ? effectiveProfile?.engine : state.selectedCase?.profile?.engine) || 'rust',
     ),
     [stage, setStage] = useState(''),
     [ranks, setRanks] = useState('1'),
@@ -51,7 +56,6 @@ export default function RunPanel({
     [workers, setWorkers] = useState('1'),
     [force, setForce] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
-    [batch, setBatch] = useState<string[]>([]),
     [remote, setRemote] = useState<unknown>(null),
     [recovering, setRecovering] = useState(true),
     [busy, setBusy] = useState(false),
@@ -106,7 +110,6 @@ export default function RunPanel({
     let current = true;
     setRecovering(true);
     setRemote(null);
-    setBatch([]);
     const known = latest.current[casePath]?.progress?.remote;
     if (known) setRemote(known);
     invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
@@ -199,9 +202,13 @@ export default function RunPanel({
   }, [state.kernels, effectiveProfile, state.version]);
   useEffect(() => {
     const progress = persisted?.progress;
-    if (typeof progress?.host === 'string') setHost(progress.host);
+    if (!batchCases && typeof progress?.host === 'string') setHost(progress.host);
     if (progress?.remote) setRemote(progress.remote);
-  }, [persisted?.progress]);
+  }, [persisted?.progress, batchCases]);
+  useEffect(() => {
+    onBusyChange?.(pending);
+    return () => onBusyChange?.(false);
+  }, [pending, onBusyChange]);
   async function action(fn: () => Promise<unknown>) {
     if (lock.current) return;
     lock.current = true;
@@ -232,7 +239,9 @@ export default function RunPanel({
     await action(async () => {
       if (recovering) throw new Error(bilingual('正在恢复运行记录', 'Restoring run records'));
       if (disabled) throw new Error(bilingual('请先保存算例设置', 'Save case settings first'));
-      const targets = host ? [casePath] : [...new Set([casePath, ...batch])];
+      if (batchCases && host) throw new Error(t('批量运行仅支持本机', 'Batch runs are local only'));
+      const targets = [...new Set(batchCases ?? [casePath])];
+      if (!targets.length) throw new Error(t('请选择算例', 'Select a case'));
       if (targets.some((dir) => latest.current[dir]?.running))
         throw new Error(
           bilingual('算例已经在运行或等待核对', 'A selected case is already running'),
@@ -473,9 +482,18 @@ export default function RunPanel({
       alive.current &&
       currentCase.current === casePath &&
       latest.current[casePath]?.run_id === persisted?.run_id
-    )
-      navigate('case', 'results');
+    ) {
+      if (batchCases) await openCase(casePath, 'results');
+      else navigate('case', 'results');
+    }
   }
+
+  const resultsLabel = batchCases
+    ? t(
+        `查看 ${state.cases.find((entry) => entry.dir === casePath)?.name ?? casePath} 的结果`,
+        'View first case results',
+      )
+    : t('下一步：查看结果', 'Next: view results');
 
   const fields: UiField[] = [
     {
@@ -531,7 +549,9 @@ export default function RunPanel({
             [
               ['ranks', 'MPI 进程', ranks, setRanks],
               ['threads', bilingual('线程', 'Threads'), threads, setThreads],
-              ['workers', bilingual('并发算例', 'Workers'), workers, setWorkers],
+              ...(batchCases
+                ? [['workers', bilingual('并发算例', 'Workers'), workers, setWorkers] as const]
+                : []),
             ] as const
           ).map(([id, label, value, set]) => ({
             id: `run-${id}`,
@@ -558,35 +578,19 @@ export default function RunPanel({
     disabled: pending,
     set: (v) => setAdvanced(v === 'true'),
   });
-  if (advanced && !host)
-    fields.push(
-      ...state.cases
-        .filter((c) => c.dir !== casePath)
-        .map((c) => ({
-          id: `run-batch-${c.name}`,
-          label: c.name,
-          value: String(batch.includes(c.dir)),
-          type: 'switch' as const,
-          disabled: pending,
-          set: (v: string) =>
-            setBatch((b) =>
-              v === 'true' ? [...new Set([...b, c.dir])] : b.filter((p) => p !== c.dir),
-            ),
-        })),
-    );
   usePageContract(
     {
-      title: bilingual('运行', 'Run'),
+      title: batchCases ? t('批量运行', 'Batch run') : bilingual('运行', 'Run'),
       step: 'run',
       kernelDir: effectiveProfile ? kernel || null : null,
       preprocessors,
       status: pending ? 'busy' : (persisted?.status ?? 'ready'),
       details: { run: view, remote, error: persisted?.error },
-      fields,
+      fields: batchCases ? fields.filter((field) => field.id !== 'run-host') : fields,
       actions: [
         {
           id: 'run-view-results',
-          label: t('下一步：查看结果', 'Next: view results'),
+          label: resultsLabel,
           kind: 'click',
           enabled: !!completed && !resultsBlocked,
           run: viewResults,
@@ -718,16 +722,18 @@ export default function RunPanel({
           </p>
         </div>
       </div>
-      <div className="run-location">
-        {render({
-          ...fields[0],
-          label: t('运行位置', 'Run location'),
-          options: [
-            { value: '', label: t('本机', 'Local') },
-            ...servers.map((s) => ({ value: s.host, label: s.host })),
-          ],
-        })}
-      </div>
+      {!batchCases && (
+        <div className="run-location">
+          {render({
+            ...fields[0],
+            label: t('运行位置', 'Run location'),
+            options: [
+              { value: '', label: t('本机', 'Local') },
+              ...servers.map((s) => ({ value: s.host, label: s.host })),
+            ],
+          })}
+        </div>
+      )}
       {disabled && (
         <Notice tone="warning">
           {t(
@@ -763,31 +769,9 @@ export default function RunPanel({
         <div className="form-grid">
           {fields
             .slice(1)
-            .filter((f) => f.id !== 'run-advanced' && !f.id.startsWith('run-batch-'))
+            .filter((f) => f.id !== 'run-advanced')
             .map(render)}
         </div>
-        {!host && (
-          <fieldset>
-            <legend>{t('同时运行的其他算例', 'Other cases to run together')}</legend>
-            {state.cases
-              .filter((c) => c.dir !== casePath)
-              .map((c) => (
-                <label key={c.dir}>
-                  <input
-                    type="checkbox"
-                    disabled={pending}
-                    checked={batch.includes(c.dir)}
-                    onChange={(e) =>
-                      setBatch((b) =>
-                        e.target.checked ? [...b, c.dir] : b.filter((p) => p !== c.dir),
-                      )
-                    }
-                  />
-                  {c.name}
-                </label>
-              ))}
-          </fieldset>
-        )}
       </Advanced>
       <footer className="simulation-footer">
         {onBack ? (
@@ -822,7 +806,7 @@ export default function RunPanel({
               disabled={resultsBlocked}
               onClick={() => void viewResults().catch((e) => notify(String(e), true))}
             >
-              {t('下一步：查看结果', 'Next: view results')}
+              {resultsLabel}
             </Button>
           )}
         </div>
