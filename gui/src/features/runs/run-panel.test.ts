@@ -17,6 +17,8 @@ function panel(
     migrate?: (dir: string) => Promise<unknown>;
     submit?: () => Promise<unknown>;
     remote?: boolean;
+    single?: boolean;
+    targets?: string[];
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -80,7 +82,8 @@ function panel(
     alive: { current: true },
     cancelledRun: { current: null as string | null },
     casePath: '/good',
-    batch: ['/bad'],
+    batchCases:
+      options.single || options.remote ? undefined : (options.targets ?? ['/good', '/bad']),
     host: options.remote ? 'server' : '',
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
@@ -222,4 +225,31 @@ test('an uncertain remote submission recovers by its started operation and can f
   assert.equal(p.state.running['/good'].running, false);
   await p.remoteAction('remote_fetch');
   assert.equal(p.state.running['/good'].run_case, '/fetched-run');
+});
+
+test('a single-case page submits only its current case', async () => {
+  const p = panel({ single: true });
+  await p.run();
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'model_migrate_case').map((call) => call.args.dir),
+    ['/good'],
+  );
+  assert.equal(p.calls.find((call) => call.command === 'run_case')?.args.case, '/good');
+  assert.ok(!p.calls.some((call) => call.command === 'run_batch'));
+});
+
+test('project batch submits only the explicitly selected cases', async () => {
+  const p = panel({ targets: ['/bad', '/bad'] });
+  await p.run();
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'model_migrate_case').map((call) => call.args.dir),
+    ['/bad'],
+  );
+  assert.equal(p.calls.find((call) => call.command === 'run_case')?.args.case, '/bad');
+});
+
+test('an empty project selection cannot start a run', async () => {
+  const p = panel({ targets: [] });
+  await assert.rejects(p.run(), /请选择算例/);
+  assert.equal(p.calls.length, 0);
 });
