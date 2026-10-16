@@ -105,7 +105,8 @@
   color: #006b76;
   background: #def4f3;
 }
-.history-status-failed {
+.history-status-failed,
+.history-status-completed_with_failures {
   color: #b42318;
   background: #fff0ed;
 }

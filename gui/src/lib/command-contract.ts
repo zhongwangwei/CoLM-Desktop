@@ -626,6 +626,10 @@ export const commandContract = {
     "wholeCase": {
       "required": false,
       "rust_type": "Option<bool>"
+    },
+    "group": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "hist_vars": {

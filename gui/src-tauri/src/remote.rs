@@ -576,7 +576,7 @@ async fn ssh_cli_json_for_run(
     if !args.iter().any(|a| a == "--history-db") {
         crate::model::options(&mut args, None)?;
     }
-    let mut event = crate::history::command_start(&args)?;
+    let mut event = crate::history::command_start_for_run(&args, run.map(|(_, id, _)| id))?;
     let study_cancel = args
         .first()
         .is_some_and(|command| matches!(command.as_str(), "remote-study-cancel" | "remote-cancel"));
@@ -589,7 +589,6 @@ async fn ssh_cli_json_for_run(
     }
     let result = async {
         if let (Some((app, run_id, case)), Some(event)) = (run, &mut event) {
-            event.detail["run_id"] = json!(run_id);
             tauri::Emitter::emit(
                 app,
                 "run://started",

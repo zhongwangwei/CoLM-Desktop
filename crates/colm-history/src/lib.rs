@@ -1,6 +1,7 @@
 //! Append-only operation ledger, independent of model execution and NetCDF.
 //! Persist the started event before performing work. Use `Event::next` for a full
 //! metadata snapshot; uncertain work must be reconciled by its actual executor.
+mod grouped;
 mod import;
 mod provenance;
 pub use provenance::{capture_provenance, load_provenance};
@@ -121,6 +122,13 @@ pub struct Operation {
     pub event_count: u64,
     /// This is uncertainty, never evidence that a process stopped.
     pub needs_reconciliation: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_group: Option<RunGroup>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunGroup {
+    pub run_id: String,
+    pub members: Vec<Operation>,
 }
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OperationDetail {
@@ -147,6 +155,7 @@ pub struct Query {
     pub offset: u64,
     pub limit: u64,
     pub ascending: bool,
+    pub group_runs: bool,
 }
 impl Default for Query {
     fn default() -> Self {
@@ -166,6 +175,7 @@ impl Default for Query {
             offset: 0,
             limit: 100,
             ascending: false,
+            group_runs: false,
         }
     }
 }
@@ -439,7 +449,7 @@ impl History {
         Ok(page)
     }
 
-    /// Iterate a complete filtered snapshot, keeping at most 1,000 rows in memory.
+    /// Iterate a filtered snapshot in pages of 1,000 entries (plus grouped run members).
     fn visit_export(
         &self,
         query: &Query,
@@ -529,9 +539,20 @@ impl History {
     }
     pub fn export_csv(&self, query: &Query) -> Result<String> {
         let mut out = String::from("operation_id,time_ms,kind,case_id,case_path,version_id,revision,host,location,status,duration_ms,initiator,parent_operation_id,source_reference,needs_reconciliation\r\n");
+        let grouped = query.group_runs && query.case_path.is_none();
+        if grouped {
+            out.truncate(out.len() - 2);
+            out.push_str(",run_id,member_count\r\n");
+        }
         self.visit_export(query, |op| {
+            let run_id = op
+                .run_group
+                .as_ref()
+                .map(|g| g.run_id.clone())
+                .or_else(|| grouped::run_id(&op.latest).map(str::to_owned));
+            let count = op.run_group.as_ref().map_or(1, |g| g.members.len());
             let e = op.latest;
-            let fields = [
+            let mut fields = vec![
                 Some(e.operation_id),
                 e.time_ms.map(|n| n.to_string()),
                 Some(e.kind),
@@ -548,6 +569,9 @@ impl History {
                 e.source_reference,
                 Some(op.needs_reconciliation.to_string()),
             ];
+            if grouped {
+                fields.extend([run_id, Some(count.to_string())]);
+            }
             out.push_str(
                 &fields
                     .into_iter()
@@ -571,6 +595,9 @@ fn query_page(
     values: &[rusqlite::types::Value],
     view: OperationView,
 ) -> Result<Page> {
+    if query.group_runs && query.case_path.is_none() {
+        return grouped::query_page(connection, query, view);
+    }
     let view = view.name();
     let total: u64 = connection.query_row(
         &format!("SELECT count(*) FROM {view} WHERE {filter}"),
@@ -604,6 +631,7 @@ fn read_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
         finished_ms,
         event_count: row.get(3)?,
         needs_reconciliation: row.get(4)?,
+        run_group: None,
     })
 }
 fn filter(
