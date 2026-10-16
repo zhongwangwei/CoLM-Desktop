@@ -347,7 +347,7 @@ pub async fn remote_create_case(
         Ok(local.clone())
     }
     .await;
-    if result.is_err() {
+    if let Err(error) = &result {
         let cleanup = command(
             &app,
             &server,
@@ -362,13 +362,53 @@ pub async fn remote_create_case(
             creation.finish(Ok(local.clone()))?;
             return Err(format!(
                 "{}; 服务器状态未确认，已保留本地配置 {local}；请检查 {remote}: {cleanup}",
-                result.unwrap_err()
+                error
             ));
         }
     }
     creation.finish(result)?;
     std::fs::remove_file(&pending).map_err(|e| format!("算例已创建，但无法清除创建凭据: {e}"))?;
     Ok(json!({"dir":local,"root":root.to_string_lossy(),"remote_dir":remote}))
+}
+
+struct PreviewCleanup(PathBuf);
+impl Drop for PreviewCleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+pub(crate) async fn sync_case(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
+    let Some((host, remote)) = crate::remote::server_case_owner(dir)? else {
+        return Ok(());
+    };
+    let server = crate::remote::server_for(app.clone(), &host)?;
+    let preview = crate::model::model_case_context(dir.to_owned(), None).await?;
+    let preview_dir = PathBuf::from(&preview.entry.dir);
+    let _preview_cleanup = PreviewCleanup(preview_dir.clone());
+    let source_dir = PathBuf::from(dir);
+    let result = async {
+        let dir = preview_dir.as_path();
+        let doc = colm_namelist::parse(
+            &std::fs::read_to_string(dir.join("case.nml")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| e.to_string())?;
+        let checks = crate::config::server_runtime_paths(&doc, &source_dir, None)?;
+        let files = publish_files(dir, &remote)?;
+        command(
+            app,
+            &server,
+            "remote-case-sync",
+            &json!({"out":remote,"files":files,"checks":checks}),
+            None,
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    let cleanup = std::fs::remove_dir_all(&preview_dir)
+        .map_err(|e| format!("无法清理模型预览 {}: {e}", preview_dir.display()));
+    result.and(cleanup)
 }
 
 #[cfg(test)]
@@ -482,44 +522,4 @@ mod tests {
         assert!(cache_paths(base, "one", "/projects/../a").is_err());
         assert!(cache_paths(base, "one", "relative/a").is_err());
     }
-}
-
-struct PreviewCleanup(PathBuf);
-impl Drop for PreviewCleanup {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-pub(crate) async fn sync_case(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
-    let Some((host, remote)) = crate::remote::server_case_owner(dir)? else {
-        return Ok(());
-    };
-    let server = crate::remote::server_for(app.clone(), &host)?;
-    let preview = crate::model::model_case_context(dir.to_owned(), None).await?;
-    let preview_dir = PathBuf::from(&preview.entry.dir);
-    let _preview_cleanup = PreviewCleanup(preview_dir.clone());
-    let source_dir = PathBuf::from(dir);
-    let result = async {
-        let dir = preview_dir.as_path();
-        let doc = colm_namelist::parse(
-            &std::fs::read_to_string(dir.join("case.nml")).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        let checks = crate::config::server_runtime_paths(&doc, &source_dir, None)?;
-        let files = publish_files(dir, &remote)?;
-        command(
-            app,
-            &server,
-            "remote-case-sync",
-            &json!({"out":remote,"files":files,"checks":checks}),
-            None,
-        )
-        .await?;
-        Ok(())
-    }
-    .await;
-    let cleanup = std::fs::remove_dir_all(&preview_dir)
-        .map_err(|e| format!("无法清理模型预览 {}: {e}", preview_dir.display()));
-    result.and(cleanup)
 }
