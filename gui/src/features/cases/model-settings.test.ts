@@ -42,14 +42,17 @@ test('keeps scientific groups and unknown fields visible', () => {
   assert.equal(modelSettingGroup({ name: 'DEF_NEW_SCHEME', section: '新增分组' }), 'other');
 });
 
-test('hydraulic settings own soil fitting and resistance but not unrelated soil options', async () => {
+test('hydraulic settings own soil fitting while surface resistance stays in general soil settings', async () => {
   const { processSettingOwner } = await import('./model-settings');
-  for (const name of ['DEF_USE_SOILPAR_UPS_FIT', 'DEF_RSS_SCHEME']) {
+  for (const name of ['DEF_USE_SOILPAR_UPS_FIT']) {
     const field = { name, section: '水热过程' };
     assert.equal(modelSettingGroup(field), 'soil');
     assert.equal(processSettingOwner(field), 'soil');
   }
-  assert.equal(processSettingOwner({ name: 'DEF_SOIL_REFL_SCHEME', section: '地表数据' }), null);
+  for (const name of ['DEF_RSS_SCHEME', 'DEF_SOIL_REFL_SCHEME']) {
+    assert.equal(modelSettingGroup({ name, section: '地表数据' }), 'soil');
+    assert.equal(processSettingOwner({ name, section: '地表数据' }), null);
+  }
 });
 
 test('version manager returns to the originating simulation route without dropping the restoration marker', async () => {

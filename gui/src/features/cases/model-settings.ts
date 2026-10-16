@@ -156,7 +156,6 @@ export function processSettingOwner(
     return null;
   const roots: Record<string, string> = {
     DEF_USE_SOILPAR_UPS_FIT: 'soil',
-    DEF_RSS_SCHEME: 'soil',
     DEF_USE_BGC: 'DEF_USE_BGC',
     DEF_USE_TRACER: 'DEF_USE_TRACER',
     DEF_URBAN_RUN: 'DEF_URBAN_RUN',
