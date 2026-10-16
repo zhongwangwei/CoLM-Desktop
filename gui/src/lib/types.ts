@@ -162,6 +162,16 @@ export type AppState = {
   versions: FrozenRevision[];
   root: string;
   projectCasesOpen?: boolean;
+  projectRunSettings?: {
+    root: string;
+    cases: string[];
+    host: string;
+    threads: string;
+    ranks: string;
+    workers: string;
+    scheduler: string;
+    cpus: string;
+  };
   newCaseSeed: {
     form: Record<string, string>;
     sites: Site[];

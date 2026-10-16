@@ -1071,6 +1071,30 @@ pub(crate) fn server_for(app: tauri::AppHandle, host: &str) -> Result<Server, St
         .ok_or_else(|| format!("没有配置服务器 {host}"))
 }
 
+fn run_server_overrides(
+    mut server: Server,
+    threads: Option<u32>,
+    cpus: Option<u32>,
+    scheduler: Option<String>,
+) -> Result<Server, String> {
+    if let Some(threads) = threads {
+        server.threads = threads;
+    }
+    if let Some(cpus) = cpus {
+        if cpus == 0 {
+            return Err("本次运行申请的核数必须大于 0 / Run CPUs must be positive".into());
+        }
+        server.cpus = cpus;
+    }
+    if let Some(scheduler) = scheduler {
+        server.scheduler = scheduler;
+    }
+    validate(&RemoteConfig {
+        servers: vec![server.clone()],
+    })?;
+    Ok(server)
+}
+
 async fn validate_server_case_inputs(
     app: &tauri::AppHandle,
     case: &str,
@@ -1122,6 +1146,9 @@ pub async fn remote_run(
     force: bool,
     engine: Option<String>,
     ranks: Option<u32>,
+    threads: Option<u32>,
+    cpus: Option<u32>,
+    scheduler: Option<String>,
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
@@ -1131,7 +1158,7 @@ pub async fn remote_run(
     }
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
-    let server = server_for(app.clone(), &host)?;
+    let server = run_server_overrides(server_for(app.clone(), &host)?, threads, cpus, scheduler)?;
     let engine = Engine {
         engine,
         ranks,
@@ -1208,13 +1235,16 @@ pub async fn remote_preview(
     force: bool,
     engine: Option<String>,
     ranks: Option<u32>,
+    threads: Option<u32>,
+    cpus: Option<u32>,
+    scheduler: Option<String>,
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
 ) -> Result<Value, String> {
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
-    let server = server_for(app.clone(), &host)?;
+    let server = run_server_overrides(server_for(app.clone(), &host)?, threads, cpus, scheduler)?;
     let engine = Engine {
         engine,
         ranks,

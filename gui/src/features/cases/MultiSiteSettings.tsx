@@ -74,20 +74,15 @@ export default function MultiSiteSettings({
     name: t('算例名称', 'Case name'),
     start: t('起始日期（包含预热）', 'Start date (including spinup)'),
     end: t('结束日期', 'End date'),
-    spinup_end:
-      mode === 'first-year'
-        ? t('首年预热截止日期', 'First-year spinup cutoff')
-        : t('预热结束 / 正式模拟开始', 'Spinup end / formal simulation start'),
+    spinup_end: t('预热结束 / 正式模拟开始', 'Spinup end / formal simulation start'),
     spinup_repeat: t('预热重复次数', 'Spinup repetitions'),
   };
   const rows = drafts.map((draft) => {
-    let cutoff = draft.spinup_end,
-      error = '';
+    let error = '';
     if (mode === 'first-year') {
       try {
-        cutoff = firstYearCutoff(draft.start);
+        firstYearCutoff(draft.start);
       } catch {
-        cutoff = '';
         error = t(
           '起始日期没有有效的周年日期，请调整日期或改用分站点配置。',
           'No valid anniversary for this start date. Adjust it or use per-site settings.',
@@ -100,7 +95,7 @@ export default function MultiSiteSettings({
     } catch {
       /* Invalid names are checked before creation. */
     }
-    return { draft, cutoff, error, destination };
+    return { draft, error, destination };
   });
   const fields: UiField[] = [
     {
@@ -136,24 +131,17 @@ export default function MultiSiteSettings({
       disabled: disabled || !available(site),
       set: (value) => select(site, value === 'true'),
     })),
-    ...rows.flatMap(({ draft, cutoff }): UiField[] =>
-      (Object.keys(labels) as (keyof typeof labels)[])
-        .filter((field) => mode === 'per-site' || field !== 'spinup_repeat')
-        .map((field) => ({
-          id: `multisite-${field}:${draft.site}`,
-          label: `${draft.name}: ${labels[field]}`,
-          type: field === 'spinup_repeat' ? 'number' : 'text',
-          value: field === 'spinup_end' ? cutoff : draft[field],
-          disabled: disabled || (field === 'spinup_repeat' && !draft.spinup_end),
-          readOnly: mode === 'first-year' && field === 'spinup_end',
-          set: (value) => {
-            if (
-              !(mode === 'first-year' && field === 'spinup_end') &&
-              !(field === 'spinup_repeat' && !draft.spinup_end)
-            )
-              update(draft.site, field, value);
-          },
-        })),
+    ...(mode === 'per-site' ? rows : []).flatMap(({ draft }): UiField[] =>
+      (Object.keys(labels) as (keyof typeof labels)[]).map((field) => ({
+        id: `multisite-${field}:${draft.site}`,
+        label: `${draft.name}: ${labels[field]}`,
+        type: field === 'spinup_repeat' ? 'number' : 'text',
+        value: draft[field],
+        disabled: disabled || (field === 'spinup_repeat' && !draft.spinup_end),
+        set: (value) => {
+          if (!(field === 'spinup_repeat' && !draft.spinup_end)) update(draft.site, field, value);
+        },
+      })),
     ),
   ];
   usePageContract({
@@ -200,25 +188,8 @@ export default function MultiSiteSettings({
               disabled={disabled || !available(site)}
               onChange={(event) => select(site, event.target.checked)}
             />{' '}
-            {site.name} ·{' '}
-            {site.urban
-              ? t('城市', 'Urban')
-              : site.crop
-                ? t('作物', 'Crop')
-                : t('自然植被', 'Natural vegetation')}
+            {site.name}
           </label>
-          <p className="path">
-            {t('站点：', 'Site: ')}
-            {site.site_file}
-          </p>
-          <p className="path">
-            {t('强迫场：', 'Forcing: ')}
-            {site.met_file || t('缺失', 'Missing')}
-          </p>
-          <p className="muted">
-            {t('数据覆盖：', 'Coverage: ')}
-            {site.start || '—'} → {site.end || '—'}
-          </p>
           {!available(site) && (
             <Notice tone="warning">
               {site.problem ||
@@ -271,7 +242,15 @@ export default function MultiSiteSettings({
           )}
         </Notice>
       )}
-      {rows.map(({ draft, cutoff, error, destination }) => (
+      {mode === 'first-year' &&
+        rows
+          .filter(({ error }) => error)
+          .map(({ draft, error }) => (
+            <Notice key={draft.site} tone="error">
+              {sites.find((site) => site.site_file === draft.site)?.name ?? draft.name}: {error}
+            </Notice>
+          ))}
+      {(mode === 'per-site' ? rows : []).map(({ draft, destination }) => (
         <section className="card" key={draft.site}>
           <h3>{sites.find((site) => site.site_file === draft.site)?.name ?? draft.name}</h3>
           <div className="form-grid">
@@ -288,11 +267,10 @@ export default function MultiSiteSettings({
             <Field label={labels.spinup_end}>
               <Input
                 type="date"
-                value={cutoff}
-                readOnly={mode === 'first-year'}
+                value={draft.spinup_end}
                 disabled={disabled}
                 onChange={(event) => {
-                  if (mode === 'per-site') update(draft.site, 'spinup_end', event.target.value);
+                  update(draft.site, 'spinup_end', event.target.value);
                 }}
               />
             </Field>
@@ -310,7 +288,6 @@ export default function MultiSiteSettings({
               </Field>
             )}
           </div>
-          {error && <Notice tone="error">{error}</Notice>}
           <p className="path">
             {t('保存位置：', 'Save to: ')}
             {destination ||

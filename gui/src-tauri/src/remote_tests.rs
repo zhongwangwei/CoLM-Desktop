@@ -863,3 +863,63 @@ fn remote_config_only_defaults_when_the_file_is_missing() {
     assert!(read_remote_config(&root).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn per_run_resources_override_flags_without_mutating_saved_connection() {
+    let saved: Server = serde_json::from_value(json!({
+        "host":"server", "root":"/data/colm", "threads":2, "cpus":4,
+        "scheduler":"auto", "auth":"config", "username":"researcher", "partition":"cpu"
+    }))
+    .unwrap();
+    let original = saved.clone();
+    let effective =
+        run_server_overrides(saved.clone(), Some(8), Some(12), Some("slurm".into())).unwrap();
+    assert_eq!(saved, original);
+    assert_eq!(effective.auth, saved.auth);
+    assert_eq!(effective.username, saved.username);
+    assert_eq!(effective.partition, saved.partition);
+    for dry_run in [false, true] {
+        let args = run_args(
+            &effective,
+            "/case".into(),
+            "/kernel".into(),
+            None,
+            false,
+            dry_run,
+            &Engine::default(),
+        );
+        for pair in [
+            ["--threads", "8"],
+            ["--cpus", "12"],
+            ["--scheduler", "slurm"],
+        ] {
+            assert!(args.windows(2).any(|window| window == pair));
+        }
+        assert_eq!(args.iter().any(|arg| arg == "--dry-run"), dry_run);
+    }
+    assert_eq!(
+        run_server_overrides(saved.clone(), None, None, None).unwrap(),
+        saved
+    );
+}
+
+#[test]
+fn per_run_resources_reject_invalid_overrides_and_keep_saved_automatic_cpus() {
+    let saved: Server =
+        serde_json::from_value(json!({"host":"server", "root":"/data/colm"})).unwrap();
+    for threads in [0, 257] {
+        assert!(run_server_overrides(saved.clone(), Some(threads), None, None).is_err());
+    }
+    for cpus in [0, 1025] {
+        assert!(run_server_overrides(saved.clone(), None, Some(cpus), None).is_err());
+    }
+    for scheduler in ["", "direct", "invalid", "slurm --other"] {
+        assert!(run_server_overrides(saved.clone(), None, None, Some(scheduler.into())).is_err());
+    }
+    for scheduler in ["auto", "bare", "slurm", "pbs", "lsf"] {
+        let effective =
+            run_server_overrides(saved.clone(), Some(1), None, Some(scheduler.into())).unwrap();
+        assert_eq!(effective.cpus, 0);
+        assert_eq!(effective.scheduler, scheduler);
+    }
+}

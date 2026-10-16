@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
-import type { CaseEntry } from '../../lib/types';
+import type { AppState, CaseEntry } from '../../lib/types';
 
 function choose(context: Record<string, unknown>) {
   const path = new URL('./ProjectPage.tsx', import.meta.url),
@@ -241,6 +241,7 @@ function home() {
     selectedCase: null,
     cases: [] as CaseEntry[],
     projectCasesOpen: false,
+    projectRunSettings: undefined as AppState['projectRunSettings'],
     versions: [model],
     version: model,
     versionRef: model.version,
@@ -373,6 +374,27 @@ test('a newly created project opens its case list and batch entry once without s
     !contract.actions.some((action) => action.id === 'project-batch-run'),
     'the request is consumed and later visits retain the project home',
   );
+});
+test('a newly created batch opens resource review without starting any simulation', () => {
+  const page = home();
+  page.state.root = '/project/multi-project';
+  page.state.projectCasesOpen = true;
+  page.state.projectRunSettings = {
+    root: page.state.root,
+    cases: ['/project/multi-project/one'],
+    host: '',
+    threads: '2',
+    ranks: '1',
+    workers: '3',
+    scheduler: 'auto',
+    cpus: '2',
+  };
+  page.render();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.deepEqual(page.calls, []);
+  assert.equal(page.state.projectCasesOpen, false);
+  page.remount();
+  assert.ok(!page.nodes.includes('ProjectBatchRun'));
 });
 test('the loaded official model is usable at once; choosing another version is optional', async () => {
   const page = home(),

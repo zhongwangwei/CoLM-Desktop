@@ -10,29 +10,56 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
   const { state } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
-  const [selected, setSelected] = useState<string[]>([]);
+  const handoff =
+    state.projectRunSettings?.root === state.root ? state.projectRunSettings : undefined;
+  const [selected, setSelected] = useState<string[]>(handoff?.cases ?? []);
   const [submitting, setSubmitting] = useState(false);
   const [context, setContext] = useState<{
     key: string;
-    profile?: CaseProfile;
+    profiles?: Record<string, CaseProfile>;
     error?: string;
   } | null>(null);
   const cases = state.cases.filter((entry) => selected.includes(entry.dir));
   const paths = cases.map((entry) => entry.dir);
   const first = paths[0];
   const { id, revision } = state.versionRef;
-  const contextKey = JSON.stringify([first, id, revision]);
-  const locked = submitting || state.busy || paths.some((dir) => state.running[dir]?.running);
+  const contextKey = JSON.stringify([paths, id, revision]);
+  const locked =
+    submitting ||
+    state.busy ||
+    paths.some((dir) => state.running[dir]?.running && state.running[dir]?.location !== 'remote');
   const current = context?.key === contextKey ? context : null;
   useEffect(() => {
     let active = true;
     if (first)
-      void invoke<{ profile: CaseProfile }>('model_case_context', {
-        dir: first,
-        modelRevision: { id, revision },
-      }).then(
-        ({ profile }) => {
-          if (active) setContext({ key: contextKey, profile });
+      void Promise.all(
+        (JSON.parse(contextKey)[0] as string[]).map(async (dir) => {
+          const { profile } = await invoke<{ profile: CaseProfile }>('model_case_context', {
+            dir,
+            modelRevision: { id, revision },
+          });
+          return [dir, profile] as const;
+        }),
+      ).then(
+        (entries) => {
+          if (!active) return;
+          const profiles = Object.fromEntries(entries);
+          const firstProfile = profiles[first];
+          const mixed = entries.some(
+            ([, profile]) =>
+              (profile.run_host || '') !== (firstProfile.run_host || '') ||
+              (profile.engine || 'rust') !== (firstProfile.engine || 'rust'),
+          );
+          setContext(
+            mixed
+              ? {
+                  key: contextKey,
+                  error: en
+                    ? 'Select cases with the same run location and engine.'
+                    : '请选择运行位置和引擎相同的算例。',
+                }
+              : { key: contextKey, profiles },
+          );
         },
         (error: unknown) => {
           if (active) setContext({ key: contextKey, error: String(error) });
@@ -41,7 +68,7 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
     return () => {
       active = false;
     };
-  }, [first, id, revision, contextKey]);
+  }, [first, id, revision, contextKey, en]);
   function select(dir: string, checked: boolean) {
     if (locked) return;
     setSelected((previous) =>
@@ -82,8 +109,8 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
       <p className="path">{state.root}</p>
       <Notice>
         {t(
-          '仅在本机运行。所选算例使用各自已保存的设置，并统一应用当前模型版本：',
-          'Local execution only. Each selected case uses its saved settings with the current model revision: ',
+          '所选算例使用各自已保存的设置，并统一应用当前模型版本：',
+          'Each selected case uses its saved settings with the current model revision: ',
         )}
         {state.version?.name ?? id} · r{revision}
       </Notice>
@@ -139,7 +166,7 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
       })}
       {first && !current && <Notice>{t('正在读取算例设置…', 'Loading case settings…')}</Notice>}
       {current?.error && <Notice tone="error">{current.error}</Notice>}
-      {first && current?.profile && (
+      {first && current?.profiles && (
         <RunPanel
           key={contextKey}
           casePath={first}
@@ -148,7 +175,13 @@ export default function ProjectBatchRun({ onBack }: { onBack: () => void }) {
             name: cases.map((entry) => entry.name).join('、'),
             period: t('各算例已保存的时段', 'Each case’s saved period'),
           }}
-          effectiveProfile={{ ...current.profile, grid: current.profile.grid ?? undefined }}
+          effectiveProfile={{
+            ...current.profiles[first],
+            grid: current.profiles[first].grid ?? undefined,
+          }}
+          batchProfiles={current.profiles}
+          initialHost={current.profiles[first].run_host || ''}
+          initialSettings={handoff}
           onBusyChange={setSubmitting}
         />
       )}

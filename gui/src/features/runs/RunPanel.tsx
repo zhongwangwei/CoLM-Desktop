@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
-import type { RunState, VersionRef } from '../../lib/types';
+import { runRemoteBatch } from './remote-batch';
+import type { CaseProfile, RunState, Server, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
 import {
@@ -24,6 +25,9 @@ export default function RunPanel({
   onBack,
   batchCases,
   onBusyChange,
+  initialSettings,
+  initialHost,
+  batchProfiles,
 }: {
   casePath: string;
   effectiveProfile: {
@@ -39,10 +43,22 @@ export default function RunPanel({
   onBack?: () => void;
   batchCases?: string[];
   onBusyChange?: (busy: boolean) => void;
+  initialSettings?: {
+    threads: string;
+    ranks: string;
+    workers: string;
+    scheduler: string;
+    cpus: string;
+  };
+  initialHost?: string;
+  batchProfiles?: Record<string, CaseProfile>;
 }) {
   const { state, notify, update, navigate, openCase } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
+  const settings =
+    initialSettings ??
+    (state.projectRunSettings?.cases.includes(casePath) ? state.projectRunSettings : undefined);
   const savedHost =
     state.selectedCase?.dir === casePath ? state.selectedCase.profile?.run_host || '' : '';
   const serverOwned =
@@ -55,21 +71,30 @@ export default function RunPanel({
         : recoveringRun.progress?.host
       : undefined;
   const [host, setHost] = useState(
-      batchCases ? '' : typeof restoredHost === 'string' ? restoredHost : savedHost,
+      typeof restoredHost === 'string' ? restoredHost : (initialHost ?? savedHost),
     ),
-    [servers, setServers] = useState<{ host: string }[]>([]),
+    [servers, setServers] = useState<Server[]>([]),
     [kernel, setKernel] = useState(''),
     [preprocessors, setPreprocessors] = useState('rust'),
     [engine, setEngine] = useState<string>(
       (batchCases ? effectiveProfile?.engine : state.selectedCase?.profile?.engine) || 'rust',
     ),
     [stage, setStage] = useState(''),
-    [ranks, setRanks] = useState('1'),
-    [threads, setThreads] = useState('1'),
-    [workers, setWorkers] = useState('1'),
+    [ranks, setRanks] = useState(settings?.ranks || '1'),
+    [threads, setThreads] = useState(settings?.threads || '1'),
+    [workers, setWorkers] = useState(settings?.workers || '1'),
+    [scheduler, setScheduler] = useState(settings?.scheduler || 'auto'),
+    [cpus, setCpus] = useState(settings?.cpus || ''),
     [force, setForce] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
-    [remote, setRemote] = useState<unknown>(null),
+    [remote, setRemote] = useState<unknown>(
+      recoveringRun?.location === 'remote' && recoveringRun.status === 'unknown'
+        ? (recoveringRun.progress?.remote ?? {
+            status: { state: 'unknown' },
+            error: recoveringRun.error,
+          })
+        : null,
+    ),
     [recovering, setRecovering] = useState(true),
     [busy, setBusy] = useState(false),
     [monitor, setMonitor] = useState(false);
@@ -82,14 +107,18 @@ export default function RunPanel({
   latest.current = state.running;
   const persisted = state.running[casePath];
   const canCancel =
-    persisted?.location === 'local' &&
+    !!persisted?.run_id &&
+    (persisted?.location === 'local' || !!batchCases) &&
     Object.values(state.running).some((run) => run.run_id === persisted.run_id && run.running);
   const kernelMatches =
     !!effectiveProfile &&
-    !!compatibleKernel(
-      state.kernels.filter((k) => k.dir === kernel),
-      effectiveProfile,
-      effectiveModelFields(state.version?.overlay),
+    [effectiveProfile, ...Object.values(batchProfiles ?? {})].every(
+      (profile) =>
+        !!compatibleKernel(
+          state.kernels.filter((k) => k.dir === kernel),
+          { ...profile, grid: profile.grid ?? undefined },
+          effectiveModelFields(state.version?.overlay),
+        ),
     );
   const pending = busy || recovering || !!persisted?.running;
   const completed =
@@ -107,9 +136,17 @@ export default function RunPanel({
   useEffect(() => {
     let current = true;
     alive.current = true;
-    invoke<{ servers: { host: string }[] }>('remote_config', {})
+    invoke<{ servers: Server[] }>('remote_config', {})
       .then((c) => {
-        if (current) setServers(c.servers);
+        if (current) {
+          setServers(c.servers);
+          const server = c.servers.find((entry) => entry.host === host);
+          if (server && !settings) {
+            setThreads(String(server.threads || 1));
+            setScheduler(server.scheduler || 'auto');
+            setCpus(server.cpus > 0 ? String(server.cpus) : '');
+          }
+        }
       })
       .catch((e) => {
         if (current) notify(String(e), true);
@@ -118,7 +155,7 @@ export default function RunPanel({
       current = false;
       alive.current = false;
     };
-  }, [notify]);
+  }, [notify, host, settings]);
   useEffect(() => {
     let current = true;
     setRecovering(true);
@@ -128,7 +165,16 @@ export default function RunPanel({
     invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
       .then(async (record) => {
         if (!current || !alive.current) return;
-        setRemote(record);
+        const previous = latest.current[casePath];
+        setRemote(
+          record ??
+            (previous?.location === 'remote' && previous.status === 'unknown'
+              ? (previous.progress?.remote ?? {
+                  status: { state: 'unknown' },
+                  error: previous.error,
+                })
+              : null),
+        );
         if (record)
           update((old) =>
             old.running[casePath]
@@ -214,18 +260,17 @@ export default function RunPanel({
     );
   }, [state.kernels, effectiveProfile, state.version]);
   useEffect(() => {
-    if (batchCases) setHost('');
-    else if (typeof restoredHost !== 'string') setHost(savedHost);
-  }, [casePath, savedHost, batchCases, restoredHost]);
+    if (typeof restoredHost !== 'string') setHost(initialHost ?? savedHost);
+  }, [casePath, savedHost, initialHost, restoredHost]);
   useEffect(() => {
     const progress = persisted?.progress;
     if (!batchCases && typeof restoredHost === 'string') setHost(restoredHost);
     if (progress?.remote) setRemote(progress.remote);
   }, [persisted?.progress, batchCases, restoredHost]);
   useEffect(() => {
-    onBusyChange?.(pending);
+    onBusyChange?.(batchCases ? busy || recovering : pending);
     return () => onBusyChange?.(false);
-  }, [pending, onBusyChange]);
+  }, [pending, onBusyChange, batchCases, busy, recovering]);
   async function action(fn: () => Promise<unknown>) {
     if (lock.current) return;
     lock.current = true;
@@ -256,7 +301,6 @@ export default function RunPanel({
     await action(async () => {
       if (recovering) throw new Error(bilingual('正在恢复运行记录', 'Restoring run records'));
       if (disabled) throw new Error(bilingual('请先保存算例设置', 'Save case settings first'));
-      if (batchCases && host) throw new Error(t('批量运行仅支持本机', 'Batch runs are local only'));
       const targets = [...new Set(batchCases ?? [casePath])];
       if (!targets.length) throw new Error(t('请选择算例', 'Select a case'));
       if (targets.some((dir) => latest.current[dir]?.running))
@@ -269,13 +313,21 @@ export default function RunPanel({
         );
       if (!kernelMatches)
         throw new Error(bilingual('请选择与当前模型匹配的内核', 'Select a compatible kernel'));
-      const nums = [ranks, threads, workers].map(Number);
-      if (nums.some((n) => !Number.isInteger(n) || n < 1))
+      const nums = [engine === 'rust' ? '1' : ranks, threads, workers].map(Number);
+      if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
         throw new Error(
           t(
-            '进程、线程与并发数须为正整数',
-            'Process, thread and worker counts must be positive integers',
+            '进程与并发数须为正整数，线程数须为 1–256 的整数',
+            'Ranks and workers must be positive integers; threads must be between 1 and 256',
           ),
+        );
+      if (
+        host &&
+        cpus &&
+        (!Number.isInteger(Number(cpus)) || Number(cpus) < 1 || Number(cpus) > 1024)
+      )
+        throw new Error(
+          t('申请 CPU 数须为 1–1024 的整数', 'Requested CPUs must be an integer from 1 to 1024'),
         );
       const runId = crypto.randomUUID();
       cancelledRun.current = null;
@@ -336,11 +388,8 @@ export default function RunPanel({
         }
         if (!prepared.length) return { succeeded: 0, failed: targets.length };
         if (host) {
-          submitted = true;
-          patchRun(prepared, runId, { status: 'submitting' });
-          const result = await invokeJson<Record<string, unknown>>('remote_run', {
+          const args = {
             runId,
-            case: casePath,
             host,
             kernel,
             stage: stage || null,
@@ -348,8 +397,40 @@ export default function RunPanel({
             engine,
             preprocessors,
             ranks: nums[0],
+            threads: nums[1],
+            cpus: cpus ? Number(cpus) : null,
+            scheduler,
             modelVersion: null,
             modelRevision: revision,
+          };
+          if (batchCases) {
+            await runRemoteBatch({
+              cases: prepared,
+              workers: nums[2],
+              stopped: () => !alive.current || cancelledRun.current === runId,
+              record: (dir) => invokeJson('remote_job_record', { case: dir }),
+              status: (dir) => invokeJson('remote_status', { case: dir }),
+              submit: (dir) => invokeJson('remote_run', { ...args, case: dir }),
+              change: (dir, status, result, error) => {
+                const record =
+                  result ??
+                  (status === 'unknown' ? { status: { state: 'unknown' }, error } : undefined);
+                patchRun([dir], runId, {
+                  status,
+                  running: !['succeeded', 'failed', 'cancelled'].includes(status),
+                  ...(record ? { progress: { host, remote: record } } : {}),
+                  ...(error ? { error } : {}),
+                });
+                if (dir === casePath && record && alive.current) setRemote(record);
+              },
+            });
+            return;
+          }
+          submitted = true;
+          patchRun(prepared, runId, { status: 'submitting' });
+          const result = await invokeJson<Record<string, unknown>>('remote_run', {
+            ...args,
+            case: casePath,
           });
           patchRun(prepared, runId, { status: 'submitted', progress: { host, remote: result } });
           if (alive.current) setRemote(result);
@@ -384,6 +465,7 @@ export default function RunPanel({
         update((old) => ({ running: settleRuns(old.running, prepared, runId, ok) }));
         return result;
       } catch (error) {
+        if (host && batchCases) throw error;
         patchRun(
           targets.filter((dir) => latest.current[dir]?.running),
           runId,
@@ -424,10 +506,33 @@ export default function RunPanel({
       if (command === 'remote_cancel' || command === 'remote_fetch')
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: casePath });
       const merged = reconcileRemoteRun(remote, result);
-      if (alive.current) setRemote(merged);
+      if (alive.current && currentCase.current === casePath) setRemote(merged);
       update((old) => {
         const previous = old.running[casePath];
-        if (previous?.run_id !== expectedRunId || !matchesRemoteRun(previous, result)) return {};
+        const known = previous?.progress?.remote as Record<string, unknown> | undefined;
+        const knownRecord = (known?.record ?? known) as Record<string, unknown> | undefined;
+        const observed = result.record as Record<string, unknown> | undefined;
+        const knownOperation =
+          previous?.operation_id ??
+          knownRecord?.operation_id ??
+          (knownRecord?.provenance as Record<string, unknown> | undefined)?.operation_id;
+        const discovered =
+          currentCase.current === casePath &&
+          command === 'remote_status' &&
+          previous?.location === 'remote' &&
+          previous.status === 'unknown' &&
+          typeof knownRecord?.job !== 'string' &&
+          typeof knownOperation !== 'string' &&
+          typeof observed?.job === 'string' &&
+          typeof observed.host === 'string' &&
+          observed.host === previous.progress?.host &&
+          !result.pending &&
+          !result.needs_reconciliation;
+        if (
+          previous?.run_id !== expectedRunId ||
+          (!matchesRemoteRun(previous, result) && !discovered)
+        )
+          return {};
         const status = result.status as
           { state?: string; exit_code?: number; log_tail?: string } | undefined;
         const provenance = (result.record as { provenance?: { stage?: string | null } } | undefined)
@@ -474,6 +579,40 @@ export default function RunPanel({
             .filter(([, run]) => run.run_id === id && run.running)
             .map(([dir]) => dir)
         : [casePath];
+      if (host && batchCases) {
+        let count = 0;
+        for (const dir of targets) {
+          const record = latest.current[dir]?.progress?.remote;
+          if (!record) continue;
+          try {
+            let result = await invokeJson<Record<string, unknown>>('remote_status', { case: dir });
+            if (!matchesRemoteRun(latest.current[dir], result)) continue;
+            if (remoteRunPermissions(result).cancel) {
+              await invokeJson('remote_cancel', { case: dir });
+              count++;
+              result = await invokeJson('remote_status', { case: dir });
+            }
+            if (!matchesRemoteRun(latest.current[dir], result)) continue;
+            const terminal = remoteRunPermissions(result).terminal;
+            const status = result.status as { exit_code?: number } | undefined;
+            if (id)
+              patchRun([dir], id, {
+                running: !terminal,
+                status: terminal ? (status?.exit_code === 0 ? 'succeeded' : 'failed') : 'unknown',
+                progress: { host, remote: result },
+              });
+          } catch (error) {
+            notify(String(error), true);
+          }
+        }
+        notify(
+          t(
+            `已停止继续提交，并向 ${count} 个服务器作业请求取消；已提交作业须核对终态。`,
+            `Submission stopped; cancellation requested for ${count} jobs. Reconcile submitted jobs before restarting.`,
+          ),
+        );
+        return { stop_requested: count, terminal: false };
+      }
       const count = await invoke<number>('cancel_runs', { cases: targets });
       notify(
         t(
@@ -541,7 +680,7 @@ export default function RunPanel({
       label: bilingual('运行位置', 'Machine'),
       type: 'choice' as const,
       value: host,
-      disabled: pending || serverOwned,
+      disabled: pending || serverOwned || !!batchCases,
       options: [
         { value: '', label: bilingual('本机', 'Local') },
         ...(host && !servers.some((server) => server.host === host)
@@ -551,6 +690,56 @@ export default function RunPanel({
       ],
       set: changeHost,
     },
+    ...[
+      ...(engine === 'fortran'
+        ? [['ranks', t('每个算例的 MPI 进程数', 'MPI ranks per case'), ranks, setRanks] as const]
+        : []),
+      ...(engine === 'rust' || preprocessors === 'rust'
+        ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
+        : []),
+      ...(batchCases
+        ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
+        : []),
+      ...(host
+        ? [
+            [
+              'cpus',
+              t(
+                '每个 MPI 进程申请 CPU 数（空白沿用服务器设置）',
+                'Requested CPUs per MPI rank (blank uses server setting)',
+              ),
+              cpus,
+              setCpus,
+            ] as const,
+          ]
+        : []),
+    ].map(([id, label, value, set]) => ({
+      id: `run-${id}`,
+      label,
+      value,
+      type: 'number' as const,
+      set,
+    })),
+    ...(host
+      ? [
+          {
+            id: 'run-scheduler',
+            label: t('提交方式', 'Submission mode'),
+            type: 'choice' as const,
+            value: scheduler,
+            options: ['auto', 'bare', 'slurm', 'pbs', 'lsf'].map((value) => ({
+              value,
+              label:
+                value === 'bare'
+                  ? t('直接在服务器运行', 'Run directly on server')
+                  : value === 'auto'
+                    ? t('自动识别调度器', 'Detect scheduler')
+                    : value.toUpperCase(),
+            })),
+            set: setScheduler,
+          },
+        ]
+      : []),
     ...(advanced
       ? [
           {
@@ -588,21 +777,6 @@ export default function RunPanel({
             ],
             set: setStage,
           },
-          ...(
-            [
-              ['ranks', 'MPI 进程', ranks, setRanks],
-              ['threads', bilingual('线程', 'Threads'), threads, setThreads],
-              ...(batchCases
-                ? [['workers', bilingual('并发算例', 'Workers'), workers, setWorkers] as const]
-                : []),
-            ] as const
-          ).map(([id, label, value, set]) => ({
-            id: `run-${id}`,
-            label,
-            value,
-            type: 'number' as const,
-            set,
-          })),
           {
             id: 'run-force',
             label: bilingual('重新运行全部阶段', 'Force'),
@@ -629,7 +803,7 @@ export default function RunPanel({
       preprocessors,
       status: pending ? 'busy' : (persisted?.status ?? 'ready'),
       details: { run: view, remote, error: persisted?.error },
-      fields: batchCases ? fields.filter((field) => field.id !== 'run-host') : fields,
+      fields,
       actions: [
         {
           id: 'run-view-results',
@@ -648,7 +822,7 @@ export default function RunPanel({
         },
         {
           id: 'run-cancel',
-          label: bilingual('停止本机运行', 'Stop'),
+          label: bilingual('停止运行', 'Stop'),
           kind: 'commit',
           enabled: canCancel,
           run: cancel,
@@ -769,21 +943,19 @@ export default function RunPanel({
           </p>
         </div>
       </div>
-      {!batchCases && (
-        <div className="run-location">
-          {render({
-            ...fields[0],
-            label: t('运行位置', 'Run location'),
-            options: [
-              { value: '', label: t('本机', 'Local') },
-              ...(host && !servers.some((server) => server.host === host)
-                ? [{ value: host, label: `${host} · ${t('未配置', 'Not configured')}` }]
-                : []),
-              ...servers.map((s) => ({ value: s.host, label: s.host })),
-            ],
-          })}
-        </div>
-      )}
+      <div className="run-location">
+        {render({
+          ...fields[0],
+          label: t('运行位置', 'Run location'),
+          options: [
+            { value: '', label: t('本机', 'Local') },
+            ...(host && !servers.some((server) => server.host === host)
+              ? [{ value: host, label: `${host} · ${t('未配置', 'Not configured')}` }]
+              : []),
+            ...servers.map((s) => ({ value: s.host, label: s.host })),
+          ],
+        })}
+      </div>
       {disabled && (
         <Notice tone="warning">
           {t(
@@ -808,18 +980,42 @@ export default function RunPanel({
           )}
         </Notice>
       )}
+      <div className="form-grid">
+        {fields
+          .filter((field) =>
+            ['run-ranks', 'run-threads', 'run-workers', 'run-cpus', 'run-scheduler'].includes(
+              field.id,
+            ),
+          )
+          .map(render)}
+      </div>
+      {host && batchCases && (
+        <Notice>
+          {t(
+            '同时运行数包含排队中的作业。请保持此窗口打开以继续提交；关闭窗口后已提交作业继续运行，尚未提交的站点停止。',
+            'Concurrency includes queued jobs. Keep this window open to submit remaining stations. Closing it leaves submitted jobs running and stops unsent stations.',
+          )}
+        </Notice>
+      )}
       <Advanced
         open={advanced}
         onOpenChange={setAdvanced}
-        title={t(
-          '高级配置（引擎、线程与计算阶段）',
-          'Advanced settings (engine, threads and stages)',
-        )}
+        title={t('高级配置（引擎与计算阶段）', 'Advanced settings (engine and stages)')}
       >
         <div className="form-grid">
           {fields
             .slice(1)
-            .filter((f) => f.id !== 'run-advanced')
+            .filter(
+              (f) =>
+                ![
+                  'run-advanced',
+                  'run-ranks',
+                  'run-threads',
+                  'run-workers',
+                  'run-cpus',
+                  'run-scheduler',
+                ].includes(f.id),
+            )
             .map(render)}
         </div>
       </Advanced>

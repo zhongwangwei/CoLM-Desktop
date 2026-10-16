@@ -334,9 +334,10 @@ test('run location restores the saved case host, with active job host taking pre
     'saved-server',
   );
   const batch = render(undefined, [], undefined, {}, ['/case'], 'saved-server');
-  assert.equal(batch.location, undefined);
+  assert.equal(batch.location?.props.value, 'saved-server');
+  assert.equal(batch.location?.props.disabled, true);
   batch.effects[3]();
-  assert.deepEqual(batch.hostChanges, ['']);
+  assert.deepEqual(batch.hostChanges, ['saved-server']);
 });
 
 test('changing run location persists the case preference before applying it', async () => {
@@ -387,4 +388,35 @@ test('server-native case keeps its owning host locked in the run panel', async (
   await (page.location!.props.onChange as (e: unknown) => Promise<void>)({ target: { value: '' } });
   assert.deepEqual(page.calls, []);
   assert.equal(page.state.selectedCase.profile.run_host, 'compute');
+});
+
+test('a fresh batch tolerates unrelated active runs without exposing their Stop control', () => {
+  const page = render(
+    undefined,
+    [],
+    undefined,
+    { '/other': { ...success, case: '/other', run_id: 'other-run', running: true } },
+    ['/case'],
+  );
+  assert.equal(page.stop, undefined);
+});
+
+test('an unknown remote batch job without an identity still offers explicit reconciliation', () => {
+  const page = render(
+    {
+      ...success,
+      status: 'unknown',
+      location: 'remote',
+      running: true,
+      progress: { host: 'server' },
+    },
+    [],
+    undefined,
+    {},
+    ['/case'],
+    'server',
+  );
+  assert.ok(page.remoteStatus);
+  assert.equal(page.remoteStatus.props.disabled, false);
+  assert.equal(page.remoteFetch?.props.disabled, true);
 });

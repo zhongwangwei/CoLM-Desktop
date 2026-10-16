@@ -9,6 +9,8 @@ import {
   reconcileRemoteRun,
   matchesRemoteRun,
 } from './run-model';
+import { runRemoteBatch } from './remote-batch';
+import { compatibleKernel } from './run-model';
 import { applyRunEvent } from '../../lib/run-events';
 import type { RunState } from '../../lib/types';
 
@@ -17,6 +19,9 @@ function panel(
     migrate?: (dir: string) => Promise<unknown>;
     submit?: () => Promise<unknown>;
     remote?: boolean;
+    remoteBatch?: boolean;
+    ranks?: string;
+    ipc?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
     single?: boolean;
     targets?: string[];
   } = {},
@@ -48,6 +53,7 @@ function panel(
   const latest = { current: state.running };
   const invoke = async (command: string, args: Record<string, unknown>) => {
     calls.push({ command, args });
+    if (options.ipc) return options.ipc(command, args);
     if (command === 'model_migrate_case') {
       await options.migrate?.(String(args.dir));
       return { version: state.versionRef };
@@ -82,8 +88,11 @@ function panel(
     alive: { current: true },
     cancelledRun: { current: null as string | null },
     casePath: '/good',
+    currentCase: { current: '/good' },
     batchCases:
-      options.single || options.remote ? undefined : (options.targets ?? ['/good', '/bad']),
+      options.single || (options.remote && !options.remoteBatch)
+        ? undefined
+        : (options.targets ?? ['/good', '/bad']),
     host: options.remote ? 'server' : '',
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
@@ -98,8 +107,10 @@ function panel(
     kernel: '/kernel',
     engine: 'rust',
     preprocessors: 'rust',
-    ranks: '1',
+    ranks: options.ranks ?? '1',
     threads: '1',
+    cpus: '',
+    scheduler: 'auto',
     workers: '1',
     stage: '',
     force: false,
@@ -110,6 +121,8 @@ function panel(
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
     settleRuns,
+    runRemoteBatch: (args: Parameters<typeof runRemoteBatch>[0]) =>
+      runRemoteBatch({ ...args, wait: async () => {} }),
     update: (patch: Partial<typeof state> | ((old: typeof state) => Partial<typeof state>)) => {
       Object.assign(state, typeof patch === 'function' ? patch(state) : patch);
       latest.current = state.running;
@@ -252,4 +265,139 @@ test('an empty project selection cannot start a run', async () => {
   const p = panel({ targets: [] });
   await assert.rejects(p.run(), /请选择算例/);
   assert.equal(p.calls.length, 0);
+});
+
+test('remote batch passes resource overrides to each case and tracks separate finished jobs', async () => {
+  const p = panel({
+    remote: true,
+    remoteBatch: true,
+    ranks: '8',
+    ipc: async (command, args) => {
+      if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+      if (command === 'remote_job_record') return null;
+      if (command === 'remote_run') return { host: 'server', job: `job-${args.case}` };
+      if (command === 'remote_status')
+        return {
+          record: { host: 'server', job: `job-${args.case}` },
+          status: { state: 'finished', exit_code: args.case === '/good' ? 0 : 1 },
+        };
+      throw new Error(command);
+    },
+  });
+  await p.run();
+  const submissions = p.calls.filter((call) => call.command === 'remote_run');
+  assert.deepEqual(
+    submissions.map((call) => call.args.case),
+    ['/good', '/bad'],
+  );
+  for (const { args } of submissions) {
+    assert.equal(args.threads, 1);
+    assert.equal(args.ranks, 1);
+    assert.equal(args.scheduler, 'auto');
+    assert.equal(args.cpus, null);
+  }
+  assert.equal(p.state.running['/good'].status, 'succeeded');
+  assert.equal(p.state.running['/bad'].status, 'failed');
+  assert.equal(p.state.running['/bad'].running, false);
+});
+
+test('batch kernel check validates every selected profile', () => {
+  const source = ts.createSourceFile(
+    'RunPanel.tsx',
+    readFileSync(new URL('./RunPanel.tsx', import.meta.url), 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let expression = '';
+  function visit(node: ts.Node) {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'kernelMatches')
+      expression = node.initializer!.getText(source);
+    ts.forEachChild(node, visit);
+  }
+  visit(source);
+  const javascript = ts.transpileModule(`const result = ${expression};`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const evaluate = new Function(
+    'effectiveProfile',
+    'batchProfiles',
+    'state',
+    'kernel',
+    'compatibleKernel',
+    'effectiveModelFields',
+    `${javascript}; return result;`,
+  );
+  const profile = { grid: 'site', classification: 'IGBP', crop: false };
+  const state = {
+    kernels: [{ dir: '/kernel', preset: 'default', macros: ['SinglePoint', 'LULC_IGBP'] }],
+  };
+  assert.equal(
+    evaluate(
+      profile,
+      { a: profile, b: { ...profile, crop: true } },
+      state,
+      '/kernel',
+      compatibleKernel,
+      () => ({}),
+    ),
+    false,
+  );
+  assert.equal(
+    evaluate(profile, { a: profile, b: profile }, state, '/kernel', compatibleKernel, () => ({})),
+    true,
+  );
+});
+
+test('Rust execution ignores ranks left over from a previous Fortran selection', async () => {
+  const p = panel({ single: true, ranks: '8' });
+  await p.run();
+  assert.equal(p.calls.find((call) => call.command === 'run_case')?.args.mpiRanks, 1);
+});
+
+test('remote batch failures retain a reconciliation placeholder without inventing job identity', async () => {
+  for (const failure of ['remote_run', 'remote_job_record']) {
+    const p = panel({
+      remote: true,
+      remoteBatch: true,
+      ipc: async (command) => {
+        if (command === failure) throw new Error('Connection lost');
+        if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+        if (command === 'remote_job_record') return null;
+        throw new Error(command);
+      },
+    });
+    await assert.rejects(p.run(), /Connection lost/);
+    const current = p.state.running['/good'];
+    assert.equal(current.status, 'unknown');
+    assert.equal(current.running, true);
+    assert.deepEqual(current.progress?.remote, {
+      status: { state: 'unknown' },
+      error: 'Error: Connection lost',
+    });
+    assert.equal(p.state.running['/bad'].status, 'cancelled');
+  }
+});
+
+test('explicit reconciliation adopts a confirmed job for an unknown submission with no captured identity', async () => {
+  const p = panel({
+    remote: true,
+    remoteBatch: true,
+    ipc: async (command) => {
+      if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+      if (command === 'remote_job_record') return null;
+      if (command === 'remote_run') throw new Error('Connection lost before identity event');
+      if (command === 'remote_status')
+        return {
+          record: { host: 'server', job: 'discovered-job' },
+          status: { state: 'finished', exit_code: 0 },
+        };
+      throw new Error(command);
+    },
+  });
+  await assert.rejects(p.run(), /Connection lost/);
+  assert.equal(p.state.running['/good'].running, true);
+  await p.remoteAction('remote_status');
+  assert.equal(p.state.running['/good'].running, false);
+  assert.equal(p.state.running['/good'].status, 'succeeded');
 });

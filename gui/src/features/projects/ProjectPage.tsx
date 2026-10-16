@@ -28,7 +28,9 @@ export default function ProjectPage() {
       state.projectCasesOpen ? 'simulation' : null,
     ),
     [versionChooser, setVersionChooser] = useState(false),
-    [batchPage, setBatchPage] = useState(false);
+    [batchPage, setBatchPage] = useState(
+      !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
+    );
   const lock = useRef(false),
     active = useRef(true);
   useEffect(() => {

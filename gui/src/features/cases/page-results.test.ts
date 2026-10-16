@@ -204,6 +204,7 @@ test('resource and run reconciliation callbacks return the recorded failure to t
     remotePermissions: remoteRunPermissions(remote),
     latest: { current: app.running },
     casePath: '/case',
+    currentCase: { current: '/case' },
     remote,
     invokeJson: async () => evidence,
     alive: { current: true },
