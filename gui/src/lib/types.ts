@@ -162,6 +162,11 @@ export type AppState = {
   versions: FrozenRevision[];
   root: string;
   projectCasesOpen?: boolean;
+  projectView?: {
+    root: string;
+    page: 'cases' | 'results' | 'batch';
+    fromCreation?: boolean;
+  };
   projectRunSettings?: {
     root: string;
     cases: string[];

@@ -1,7 +1,7 @@
 import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { assistantPanelWidth } from './lib/utils';
 import { useApp } from './lib/app-state';
-import { activeNavigation, navigation } from './lib/navigation';
+import { activeNavigation, navigation, navigationTarget } from './lib/navigation';
 import NavIcon from './components/NavIcon';
 import appManifest from '../package.json';
 import { GuideBinding, usePageContract } from './lib/guide';
@@ -79,13 +79,17 @@ export default function App() {
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const active = activeNavigation(state);
+  const openNavigation = (item: (typeof navigation)[number]) => {
+    const target = navigationTarget(item, state);
+    return navigate(target.route, target.tab);
+  };
   const navButton = (item: (typeof navigation)[number]) => (
     <Button
       key={item.id}
       className={`nav-button ${active === item.id ? 'active' : ''}`}
       variant="ghost"
       aria-current={active === item.id ? 'page' : undefined}
-      onClick={() => navigate(item.route, 'tab' in item ? item.tab : undefined)}
+      onClick={() => openNavigation(item)}
     >
       <NavIcon name={item.id} />
       {tr(item.zh, item.en)}
@@ -100,7 +104,7 @@ export default function App() {
       id: `nav-${item.id}`,
       label: tr(item.zh, item.en),
       kind: 'click' as const,
-      run: () => navigate(item.route, 'tab' in item ? item.tab : undefined),
+      run: () => openNavigation(item),
     })),
   });
   const content =

@@ -37,7 +37,15 @@ const diagnostic = {
   },
   series: residual,
 };
-function harness() {
+function harness(
+  stations = false,
+  delayedSeries?: Promise<unknown>,
+  openError = '',
+  initialCase = '/case',
+) {
+  let selectedCase = initialCase;
+  const opened: string[] = [];
+  const requests: { command: string; args: Record<string, unknown> }[] = [];
   const source = readFileSync(new URL('./ResultsPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function')
@@ -53,7 +61,9 @@ function harness() {
   let contract: PageContract, tree: Element;
   const same = (a: unknown[] | undefined, b: unknown[]) =>
     a?.length === b.length && a.every((x, i) => Object.is(x, b[i]));
-  const invokeJson = async (command: string) => {
+  const invokeJson = async (command: string, args: Record<string, unknown>) => {
+    requests.push({ command, args });
+    if (command === 'model_case_runs' && args.dir === '/empty') return [];
     if (command === 'model_case_runs')
       return [
         {
@@ -70,7 +80,7 @@ function harness() {
         end: 2,
         variables: [{ name: 'f_lfevpa', kind: 'series', units: 'W/m²', dimensions: [] }],
       };
-    if (command === 'series') return normal;
+    if (command === 'series') return delayedSeries ?? normal;
     if (command === 'energy_summary') return diagnostic;
     throw Error(command);
   };
@@ -98,10 +108,22 @@ function harness() {
         language: 'en',
         theme: 'light',
         versionRef: { id: 'official', revision: 1 },
-        cases: [{ dir: '/case' }],
+        cases: stations
+          ? [
+              { dir: '/case', name: 'First' },
+              { dir: '/empty', name: 'Empty' },
+            ]
+          : [{ dir: '/case' }],
         running: {},
       },
       navigate() {},
+      async openCase(dir: string) {
+        opened.push(dir);
+        if (openError === 'blocked') return null;
+        if (openError) throw new Error(openError);
+        selectedCase = dir;
+        return { dir };
+      },
     }),
     usePageContract: (value: PageContract) => {
       contract = value;
@@ -162,7 +184,7 @@ function harness() {
     for (let n = 0; n < 15; n++) {
       dirty = false;
       cursor = 0;
-      tree = Page({ casePath: '/case' });
+      tree = Page({ casePath: selectedCase });
       const pending = effects;
       effects = [];
       pending.forEach((fn) => fn());
@@ -185,7 +207,19 @@ function harness() {
   return {
     render,
     exports,
+    opened,
+    requests,
+    station: () => contract.fields!.find((field) => field.id === 'result-station'),
+    async chooseStation(dir: string) {
+      contract.fields!.find((field) => field.id === 'result-station')!.set!(dir);
+      await new Promise((resolve) => setImmediate(resolve));
+      await render();
+    },
     charts: () => charts(tree),
+    tree: () => tree,
+    allowSwitch: () => {
+      openError = '';
+    },
     async tab(value: string) {
       contract.fields!.find((f) => f.id === 'result-tab')!.set!(value);
       await render();
@@ -219,4 +253,82 @@ test('energy diagnostics keep residual charts and exports after visiting the ove
   await h.tab('series');
   await h.action('export-series-data');
   assert.deepEqual(JSON.parse(h.exports[1]).vars, normal.vars);
+});
+
+test('project station selector switches cases and removes the previous station charts', async () => {
+  const h = harness(true);
+  await h.render();
+  assert.deepEqual(h.station()?.options, [
+    { value: '/case', label: 'First' },
+    { value: '/empty', label: 'Empty' },
+  ]);
+  assert.ok(h.charts().length);
+  await h.chooseStation('/empty');
+  assert.deepEqual(h.opened, ['/empty']);
+  assert.equal(h.station()?.value, '/empty');
+  assert.deepEqual(h.charts(), []);
+  assert.ok(
+    h.requests.some(
+      (request) => request.command === 'model_case_runs' && request.args.dir === '/empty',
+    ),
+  );
+});
+
+test('delayed series from the previous station cannot populate the new station', async () => {
+  let finish!: (value: unknown) => void;
+  const h = harness(
+    true,
+    new Promise((resolve) => {
+      finish = resolve;
+    }),
+  );
+  await h.render();
+  assert.ok(h.requests.some((request) => request.command === 'series'));
+  await h.chooseStation('/empty');
+  finish(normal);
+  await h.render();
+  assert.deepEqual(h.charts(), []);
+  assert.equal(h.station()?.value, '/empty');
+});
+
+test('a failed station switch reloads the original station instead of leaving a blank page', async () => {
+  const h = harness(true, undefined, 'Cannot read station');
+  await h.render();
+  assert.ok(h.charts().length);
+  await h.chooseStation('/empty');
+  assert.equal(h.station()?.value, '/case');
+  assert.ok(h.charts().length, 'original station data reloads after the failure');
+  assert.ok(
+    h.requests.filter(({ command, args }) => command === 'model_case_runs' && args.dir === '/case')
+      .length >= 2,
+  );
+  assert.ok(JSON.stringify(h.tree()).includes('Cannot read station'));
+  h.allowSwitch();
+  await h.chooseStation('/empty');
+  assert.equal(h.station()?.value, '/empty');
+  assert.ok(!JSON.stringify(h.tree()).includes('Cannot read station'));
+});
+
+test('blocked navigation restores the original station and an unselected single station has a selectable placeholder', async () => {
+  const blocked = harness(true, undefined, 'blocked');
+  await blocked.render();
+  await blocked.chooseStation('/empty');
+  assert.equal(blocked.station()?.value, '/case');
+  assert.ok(blocked.charts().length);
+  const empty = harness(false, undefined, '', '');
+  await empty.render();
+  assert.equal(empty.station()?.value, '');
+  function placeholders(value: unknown): Element[] {
+    if (Array.isArray(value)) return value.flatMap(placeholders);
+    if (!value || typeof value !== 'object') return [];
+    const node = value as Element;
+    return [
+      ...(node.type === 'option' && node.props.value === '' && node.props.disabled ? [node] : []),
+      ...placeholders(node.props?.children),
+    ];
+  }
+  assert.equal(placeholders(empty.tree()).length, 1);
+  await empty.chooseStation('/case');
+  assert.deepEqual(empty.opened, ['/case']);
+  assert.ok(empty.charts().length);
 });

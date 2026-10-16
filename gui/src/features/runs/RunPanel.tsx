@@ -59,6 +59,7 @@ export default function RunPanel({
   const settings =
     initialSettings ??
     (state.projectRunSettings?.cases.includes(casePath) ? state.projectRunSettings : undefined);
+  const hadSavedSettings = useRef(!!settings);
   const savedHost =
     state.selectedCase?.dir === casePath ? state.selectedCase.profile?.run_host || '' : '';
   const serverOwned =
@@ -127,18 +128,27 @@ export default function RunPanel({
     !!batchCases?.some(
       (dir) => state.running[dir]?.running && state.running[dir]?.location !== 'remote',
     );
-  const completed =
-    persisted?.status === 'succeeded' &&
-    !persisted.running &&
-    persisted.requested_stage !== 'mksrfdata' &&
-    persisted.requested_stage !== 'mkinidata';
+  const resultCasePath = (batchCases ?? [casePath]).find((dir) => {
+    const record = state.running[dir];
+    return (
+      record?.status === 'succeeded' &&
+      !record.running &&
+      record.requested_stage !== 'mksrfdata' &&
+      record.requested_stage !== 'mkinidata'
+    );
+  });
+  const resultRun = resultCasePath ? state.running[resultCasePath] : undefined;
+  const completed = !!resultRun;
   const view = restoreRunView(persisted, casePath),
     remotePermissions = remoteRunPermissions(remote);
   const resultsBlocked =
-    pending ||
+    ((!batchCases || !!host) && pending) ||
     disabled ||
     monitor ||
-    (persisted?.location === 'remote' && !persisted.run_case && !remotePermissions.fetch);
+    (resultRun?.location === 'remote' &&
+      !resultRun.run_case &&
+      !remoteRunPermissions(resultCasePath === casePath ? remote : resultRun.progress?.remote)
+        .fetch);
   useEffect(() => {
     let current = true;
     alive.current = true;
@@ -147,7 +157,7 @@ export default function RunPanel({
         if (current) {
           setServers(c.servers);
           const server = c.servers.find((entry) => entry.host === host);
-          if (server && !settings) {
+          if (server && !hadSavedSettings.current) {
             setThreads(String(server.threads || 1));
             setScheduler(server.scheduler || 'auto');
             setCpus(server.cpus > 0 ? String(server.cpus) : '');
@@ -161,7 +171,7 @@ export default function RunPanel({
       current = false;
       alive.current = false;
     };
-  }, [notify, host, settings]);
+  }, [notify, host]);
   useEffect(() => {
     let current = true;
     setRecovering(true);
@@ -487,34 +497,39 @@ export default function RunPanel({
       }
     });
   }
-  async function remoteAction(command: 'remote_status' | 'remote_cancel' | 'remote_fetch') {
+  async function remoteAction(
+    command: 'remote_status' | 'remote_cancel' | 'remote_fetch',
+    target = casePath,
+  ) {
+    const targetRemote = target === casePath ? remote : latest.current[target]?.progress?.remote;
+    const permissions = remoteRunPermissions(targetRemote);
     if (lock.current || monitor) return;
-    if (command === 'remote_cancel' && !remotePermissions.cancel)
+    if (command === 'remote_cancel' && !permissions.cancel)
       throw new Error(
         bilingual('先核对服务器任务身份与运行状态', 'Reconcile job identity and state first'),
       );
-    if (command === 'remote_fetch' && !remotePermissions.fetch)
+    if (command === 'remote_fetch' && !permissions.fetch)
       throw new Error(bilingual('先核对服务器任务的真实终态', 'Confirm terminal state first'));
     lock.current = true;
     setMonitor(true);
-    const expectedRunId = latest.current[casePath]?.run_id;
+    const expectedRunId = latest.current[target]?.run_id;
     try {
       let result = await invokeJson<Record<string, unknown>>(
         command,
         command === 'remote_fetch'
-          ? { case: casePath, host: null, all: false, overwriteNewer: false }
-          : { case: casePath },
+          ? { case: target, host: null, all: false, overwriteNewer: false }
+          : { case: target },
       );
       const fetchedCase =
         command === 'remote_fetch' && typeof result.run_case === 'string'
           ? result.run_case
           : undefined;
       if (command === 'remote_cancel' || command === 'remote_fetch')
-        result = await invokeJson<Record<string, unknown>>('remote_status', { case: casePath });
-      const merged = reconcileRemoteRun(remote, result);
-      if (alive.current && currentCase.current === casePath) setRemote(merged);
+        result = await invokeJson<Record<string, unknown>>('remote_status', { case: target });
+      const merged = reconcileRemoteRun(targetRemote, result);
+      if (alive.current && currentCase.current === target) setRemote(merged);
       update((old) => {
-        const previous = old.running[casePath];
+        const previous = old.running[target];
         const known = previous?.progress?.remote as Record<string, unknown> | undefined;
         const knownRecord = (known?.record ?? known) as Record<string, unknown> | undefined;
         const observed = result.record as Record<string, unknown> | undefined;
@@ -523,7 +538,7 @@ export default function RunPanel({
           knownRecord?.operation_id ??
           (knownRecord?.provenance as Record<string, unknown> | undefined)?.operation_id;
         const discovered =
-          currentCase.current === casePath &&
+          currentCase.current === target &&
           command === 'remote_status' &&
           previous?.location === 'remote' &&
           previous.status === 'unknown' &&
@@ -545,7 +560,7 @@ export default function RunPanel({
           ?.provenance;
         const entry: RunState = {
           ...(previous ?? {
-            case: casePath,
+            case: target,
             status: 'unknown',
             running: true,
             logs: [],
@@ -565,7 +580,7 @@ export default function RunPanel({
             : (status.state ?? 'unknown');
           if (status.log_tail) entry.logs = status.log_tail.split('\n');
         }
-        return { running: { ...old.running, [casePath]: entry } };
+        return { running: { ...old.running, [target]: entry } };
       });
       return merged;
     } catch (e) {
@@ -633,19 +648,20 @@ export default function RunPanel({
     }
   }
   async function viewResults() {
-    if (!completed || resultsBlocked || lock.current) return;
-    if (persisted?.location === 'remote' && !persisted.run_case) {
-      const fetched = await remoteAction('remote_fetch');
+    if (!resultCasePath || resultsBlocked || ((!batchCases || !!host) && lock.current)) return;
+    if (resultRun?.location === 'remote' && !resultRun.run_case) {
+      if (lock.current) return;
+      const fetched = await remoteAction('remote_fetch', resultCasePath);
       const stage = (fetched as { record?: { provenance?: { stage?: string } } } | undefined)
         ?.record?.provenance?.stage;
-      if (stage === 'mksrfdata' || stage === 'mkinidata') return;
+      if (!fetched || stage === 'mksrfdata' || stage === 'mkinidata') return;
     }
     if (
       alive.current &&
       currentCase.current === casePath &&
-      latest.current[casePath]?.run_id === persisted?.run_id
+      latest.current[resultCasePath]?.run_id === resultRun?.run_id
     ) {
-      if (batchCases) await openCase(casePath, 'results');
+      if (batchCases) await openCase(resultCasePath, 'results');
       else navigate('case', 'results');
     }
   }
@@ -674,10 +690,7 @@ export default function RunPanel({
   }
 
   const resultsLabel = batchCases
-    ? t(
-        `查看 ${state.cases.find((entry) => entry.dir === casePath)?.name ?? casePath} 的结果`,
-        'View first case results',
-      )
+    ? t('查看站点结果', 'View station results')
     : t('下一步：查看结果', 'Next: view results');
 
   function back() {
@@ -698,6 +711,39 @@ export default function RunPanel({
       });
     onBack();
   }
+
+  useEffect(() => {
+    if (!batchCases) return;
+    const preferences = {
+      root: state.root,
+      cases: batchCases,
+      batch: true,
+      host,
+      ranks,
+      threads,
+      workers,
+      scheduler,
+      cpus,
+    };
+    if (JSON.stringify(state.projectRunSettings) === JSON.stringify(preferences)) return;
+    update((old) =>
+      old.root !== preferences.root ||
+      JSON.stringify(old.projectRunSettings) === JSON.stringify(preferences)
+        ? {}
+        : { projectRunSettings: preferences },
+    );
+  }, [
+    batchCases,
+    state.root,
+    state.projectRunSettings,
+    host,
+    ranks,
+    threads,
+    workers,
+    scheduler,
+    cpus,
+    update,
+  ]);
 
   const fields: UiField[] = [
     {

@@ -90,6 +90,7 @@ function page(
     newCaseSeed: seed ?? null,
     simulationReturn: null as unknown,
     projectRunSettings: undefined as AppState['projectRunSettings'],
+    projectView: undefined as AppState['projectView'],
   };
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     routes: string[] = [],
@@ -411,6 +412,19 @@ const site = {
   obs_file: null,
   problem: null,
 };
+
+test('Results opens the station chooser before a case has been selected', async () => {
+  const p = page('CasesPage');
+  p.state.selectedCase.entry.dir = '';
+  p.state.caseTab = 'results';
+  await p.mount();
+  assert.ok(p.element('ResultsPage'));
+  assert.ok(!p.elements.some((element) => element.type === 'Card'));
+  p.state.projectView = { root: p.state.root, page: 'batch' };
+  p.render();
+  (p.element('ResultsPage').props.onBack as () => void)();
+  assert.deepEqual(p.routes, ['project'], 'results returns to the original batch');
+});
 
 test('selecting a station defaults to its entire forcing period and subsequent manual dates remain editable', async () => {
   const other = {

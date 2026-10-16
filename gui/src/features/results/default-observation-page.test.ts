@@ -41,6 +41,8 @@ function initialization() {
   const noop = () => {};
   const context = {
     epoch: { current: 0 },
+    stationTarget: { current: '/case' },
+    stationRetry: { attempt: 0, error: '' },
     cache: { current: new Map() },
     caseDir: '/case',
     versionId: 'official',

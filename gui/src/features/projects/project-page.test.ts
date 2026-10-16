@@ -241,6 +241,7 @@ function home() {
     selectedCase: null,
     cases: [] as CaseEntry[],
     projectCasesOpen: false,
+    projectView: undefined as AppState['projectView'],
     projectRunSettings: undefined as AppState['projectRunSettings'],
     versions: [model],
     version: model,
@@ -372,11 +373,11 @@ test('a newly created project opens its case list and batch entry once without s
   assert.ok(page.nodes.includes('ProjectBatchRun'));
   assert.deepEqual(page.calls, []);
   assert.deepEqual(page.routes, []);
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'), 'sidebar navigation restores the batch page');
+  (page.batchProps.at(-1)!.onBack as () => void)();
   contract = page.remount();
-  assert.ok(
-    !contract.actions.some((action) => action.id === 'project-batch-run'),
-    'the request is consumed and later visits retain the project home',
-  );
+  assert.ok(contract.actions.some((action) => action.id === 'project-batch-run'));
 });
 test('a newly created batch opens resource review without repeating station selection', async () => {
   const page = home();
@@ -400,6 +401,13 @@ test('a newly created batch opens resource review without repeating station sele
   assert.equal(page.batchProps.at(-1)?.fromCreation, true);
   assert.deepEqual(page.calls, []);
   assert.equal(page.state.projectCasesOpen, false);
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(
+    page.batchProps.at(-1)?.fromCreation,
+    true,
+    'creation selection survives navigation',
+  );
   (page.batchProps.at(-1)!.onBack as () => void)();
   page.render();
   await page.click('project-batch-run');
@@ -409,7 +417,14 @@ test('a newly created batch opens resource review without repeating station sele
     'manual entry allows optional station adjustments',
   );
   page.remount();
-  assert.ok(!page.nodes.includes('ProjectBatchRun'));
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(page.batchProps.at(-1)?.fromCreation, false);
+  page.state.root = '/other-project';
+  page.remount();
+  assert.ok(
+    !page.nodes.includes('ProjectBatchRun'),
+    'a different project never restores an old batch',
+  );
 });
 test('the loaded official model is usable at once; choosing another version is optional', async () => {
   const page = home(),

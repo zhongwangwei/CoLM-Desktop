@@ -126,13 +126,17 @@ export default function ResultsPage({
   casePath?: string;
   onBack?: () => void;
 }) {
-  const { state, navigate } = useApp();
+  const { state, navigate, openCase } = useApp();
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const caseDir = casePath || state.selectedCase?.dir || '';
   const versionId = state.versionRef.id;
   const revision = state.versionRef.revision;
   const epoch = useRef(0);
+  const stationTarget = useRef(caseDir);
+  const [stationRetry, setStationRetry] = useState(0);
+  const [stationError, setStationError] = useState('');
+  useEffect(() => setStationError(''), [caseDir]);
   const lock = useRef(false);
   const cache = useRef(new Map<string, unknown>());
   const [seriesKey, setSeriesKey] = useState('');
@@ -193,6 +197,7 @@ export default function ResultsPage({
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
+    stationTarget.current = caseDir;
     cache.current.clear();
     setRuns([]);
     setSource('');
@@ -214,7 +219,7 @@ export default function ResultsPage({
     if (!caseDir) return;
     void defaultObservation(caseDir)
       .then((path) => {
-        if (!cancelled && !observationEdited.current && path) {
+        if (!cancelled && stationTarget.current === caseDir && !observationEdited.current && path) {
           automaticObservation.current = path;
           setObs(path);
         }
@@ -222,7 +227,7 @@ export default function ResultsPage({
       .catch(() => {});
     void invokeJson<Run[]>('model_case_runs', { dir: caseDir })
       .then((data) => {
-        if (!cancelled) {
+        if (!cancelled && stationTarget.current === caseDir) {
           setRuns(data);
           setSource(
             data.find((r) => r.run_case === completedRunCase)?.run_case ||
@@ -236,13 +241,13 @@ export default function ResultsPage({
         }
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled && stationTarget.current === caseDir) setError(String(e));
       });
     return () => {
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [caseDir, versionId, revision, completedRunCase]);
+  }, [caseDir, versionId, revision, completedRunCase, stationRetry]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
@@ -257,14 +262,14 @@ export default function ResultsPage({
     if (!source) return;
     void invokeJson<Catalog>('history_catalog', { case: source })
       .then((data) => {
-        if (!cancelled) {
+        if (!cancelled && stationTarget.current === caseDir) {
           setCatalog(data);
           setCatalogKey(source);
           setVariable(overviewVariable(data.variables));
         }
       })
       .catch((e) => {
-        if (!cancelled) setError(String(e));
+        if (!cancelled && stationTarget.current === caseDir) setError(String(e));
       });
     return () => {
       cancelled = true;
@@ -342,14 +347,14 @@ export default function ResultsPage({
           if (result.same_design) return;
         }
       })().catch((error) => {
-        if (!cancelled) setBaselineNote(String(error));
+        if (!cancelled && stationTarget.current === caseDir) setBaselineNote(String(error));
       });
     }, 350);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [runs, source, obs, spinup, from, to, corrected, variable]);
+  }, [runs, source, obs, spinup, from, to, corrected, variable, caseDir]);
   async function task<T>(fn: (current: () => boolean) => Promise<T>): Promise<T> {
     if (lock.current) throw new Error('Operation in progress');
     lock.current = true;
@@ -400,18 +405,18 @@ export default function ResultsPage({
     if (tab !== 'overview' || !source || !variable || catalogKey !== source) return;
     void readSeries(variable)
       .then((data) => {
-        if (!cancelled) {
+        if (!cancelled && stationTarget.current === caseDir) {
           setSeries(data);
           setSeriesKey(selectedSeriesKey);
         }
       })
       .catch((error) => {
-        if (!cancelled) setError(String(error));
+        if (!cancelled && stationTarget.current === caseDir) setError(String(error));
       });
     return () => {
       cancelled = true;
     };
-  }, [readSeries, source, variable, selectedSeriesKey, tab, catalogKey]);
+  }, [readSeries, source, variable, selectedSeriesKey, tab, catalogKey, caseDir]);
   const plot = () =>
     task(async (current) => {
       const data = await readSeries(variable);
@@ -597,6 +602,39 @@ export default function ResultsPage({
       if (current()) setExportNotice(exportMessage(result));
       return result;
     });
+  async function chooseStation(dir: string) {
+    if (lock.current || dir === caseDir) return;
+    if (!state.cases.some((entry) => entry.dir === dir))
+      throw new Error(tr('该站点不在当前项目中', 'This station is not in the current project'));
+    epoch.current++;
+    stationTarget.current = dir;
+    setStationError('');
+    await task(async () => {
+      cache.current.clear();
+      setRuns([]);
+      setSource('');
+      setCatalog(null);
+      setCatalogKey('');
+      setSeries(null);
+      setSeriesKey('');
+      setSingleEvaluation(null);
+      setMetrics([]);
+      setDiagnostic(null);
+      setBaseline(null);
+      setBaselineNote('');
+      setEvaluation([]);
+      setRunChooser(false);
+      try {
+        const opened = await openCase(dir, 'results');
+        if (!opened) throw new Error(tr('未能切换站点', 'Could not switch stations'));
+      } catch (error) {
+        stationTarget.current = caseDir;
+        setStationError(String(error));
+        setStationRetry((previous) => previous + 1);
+        throw error;
+      }
+    });
+  }
   function chooseRecordedRun(path: string) {
     if (!runs.some((run) => run.run_case === path))
       throw new Error(tr('该运行记录不可用', 'This recorded run is unavailable'));
@@ -658,6 +696,24 @@ export default function ResultsPage({
             set: (v) => setTab(v as typeof tab),
           },
         ];
+  if (
+    !runChooser &&
+    !settingsOpen &&
+    state.cases.length > 0 &&
+    (!caseDir || state.cases.length > 1)
+  )
+    fields.unshift({
+      id: 'result-station',
+      label: tr('站点', 'Station'),
+      type: 'choice',
+      value: caseDir,
+      options: state.cases.map((entry) => ({
+        value: entry.dir,
+        label: entry.name || entry.dir.split(/[\\/]/).at(-1) || entry.dir,
+      })),
+      disabled: busy,
+      set: (dir) => run(() => chooseStation(dir)),
+    });
   if (!runChooser && settingsOpen)
     fields.push({
       id: 'result-advanced',
@@ -1014,6 +1070,26 @@ export default function ResultsPage({
           {tr('比较其他运行', 'Compare other runs')}
         </Button>
       </header>
+      {state.cases.length > 0 && (!caseDir || state.cases.length > 1) && (
+        <Field label={tr('站点', 'Station')}>
+          <Select
+            value={caseDir}
+            disabled={busy}
+            onChange={(event) => run(() => chooseStation(event.target.value))}
+          >
+            {!caseDir && (
+              <option value="" disabled>
+                {tr('请选择站点', 'Choose a station')}
+              </option>
+            )}
+            {state.cases.map((entry) => (
+              <option key={entry.dir} value={entry.dir}>
+                {entry.name || entry.dir.split(/[\\/]/).at(-1) || entry.dir}
+              </option>
+            ))}
+          </Select>
+        </Field>
+      )}
       {source && !selectedRun?.version && (
         <Notice>
           {tr(
@@ -1022,6 +1098,7 @@ export default function ResultsPage({
           )}
         </Notice>
       )}
+      {stationError && <Notice tone="error">{stationError}</Notice>}
       {error && !settingsOpen && <Notice tone="error">{error}</Notice>}
       {noSharedVariables && (
         <Notice>
