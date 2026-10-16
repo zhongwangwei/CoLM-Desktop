@@ -247,6 +247,81 @@ fn explicit_vsf_drying_top_layer_limits_the_surface_flux_to_the_ponding() {
 }
 
 #[test]
+fn sublevel_initialization_accepts_roundoff_from_decimal_layer_partition() {
+    let thickness = 6.7;
+    let water_table = 1.541;
+    let wetting_front = thickness - water_table;
+    assert!(wetting_front + water_table > thickness);
+    let model = input(0.0).hydraulic_model[0];
+    let state = initialize_variable_saturated_sublevels(VariableSaturatedSublevelInput {
+        interface_depth_mm: &[0.0, thickness],
+        porosity: &[0.45],
+        residual_water: &[0.05],
+        saturated_potential_mm: &[-100.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.01],
+        hydraulic_model: &[model],
+        upper_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.001,
+        },
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        wetting_front_mm: &[wetting_front],
+        liquid_water: &[0.25],
+        water_table_thickness_mm: &[water_table],
+        ponding_depth_mm: 0.0,
+        volume_tolerance: 1.0e-8,
+        depth_tolerance_mm: 1.0e-8,
+    })
+    .unwrap();
+    assert_eq!(state.saturated, [true]);
+    assert_eq!(state.wetting_front_mm, [0.0]);
+    assert_eq!(state.water_table_thickness_mm, [thickness]);
+    assert_eq!(state.liquid_water, [0.45]);
+}
+
+#[test]
+fn sublevel_validation_reports_the_layer_and_physical_values() {
+    let model = input(0.0).hydraulic_model[0];
+    let error = initialize_variable_saturated_sublevels(VariableSaturatedSublevelInput {
+        interface_depth_mm: &[0.0, 6.7],
+        porosity: &[0.45],
+        residual_water: &[0.05],
+        saturated_potential_mm: &[-100.0],
+        saturated_hydraulic_conductivity_mm_s: &[0.01],
+        hydraulic_model: &[model],
+        upper_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Rainfall,
+            value: 0.001,
+        },
+        lower_boundary: VariableSaturatedBoundary {
+            kind: VariableSaturatedBoundaryKind::Drainage,
+            value: 0.0,
+        },
+        wetting_front_mm: &[5.2],
+        liquid_water: &[0.25],
+        water_table_thickness_mm: &[1.6],
+        ponding_depth_mm: 0.0,
+        volume_tolerance: 1.0e-8,
+        depth_tolerance_mm: 1.0e-8,
+    })
+    .unwrap_err()
+    .to_string();
+    for detail in [
+        "layer=1",
+        "thickness_mm=6.7",
+        "wetting_front_mm=5.2",
+        "water_table_thickness_mm=1.6",
+        "liquid_water=0.25",
+        "depth_tolerance_mm=1e-8",
+    ] {
+        assert!(error.contains(detail), "{error}");
+    }
+}
+
+#[test]
 fn sublevel_initialization_matches_current_fortran() {
     let model = SoilHydraulicModel::VanGenuchten {
         alpha_vgm: 0.02,

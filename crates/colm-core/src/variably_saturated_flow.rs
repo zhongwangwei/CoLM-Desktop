@@ -6360,8 +6360,14 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 && input.saturated_hydraulic_conductivity_mm_s[layer] >= 0.0
                 && (0.0..=thickness).contains(&input.wetting_front_mm[layer])
                 && (0.0..=thickness).contains(&input.water_table_thickness_mm[layer])
-                && input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
+                // The upstream partition update can leave 1 ULP of overlap;
+                // let initialization recognize saturation with the same tolerance.
+                && (input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
                     <= thickness
+                    || (input.wetting_front_mm[layer] + input.water_table_thickness_mm[layer]
+                        - thickness)
+                        .abs()
+                        < input.depth_tolerance_mm)
                 // `volume_tolerance` 的余量是刻意的，**上下两侧都要**：
                 // `check_and_update_level` 用的是精确 `.min(vl_s)`，但含水层交换那条
                 // 路上会经 `soil_vliq_from_psi` 的**反解**回来，实测会有 1 ULP 的超出
@@ -6371,7 +6377,20 @@ fn validate_sublevel(input: VariableSaturatedSublevelInput<'_>) -> Result<usize>
                 // 必须放行 —— 夹到 0 反而会让下游看到与上游不同的数。
                 && input.liquid_water[layer] >= -input.volume_tolerance
                 && input.liquid_water[layer] <= input.porosity[layer] + input.volume_tolerance,
-            "VSF sublevel layer inputs are invalid"
+            "VSF sublevel layer inputs are invalid: layer={} thickness_mm={thickness:?} \
+             porosity={:?} residual_water={:?} psat_mm={:?} ksat_mm_s={:?} \
+             wetting_front_mm={:?} liquid_water={:?} water_table_thickness_mm={:?} \
+             volume_tolerance={:?} depth_tolerance_mm={:?}",
+            layer + 1,
+            input.porosity[layer],
+            input.residual_water[layer],
+            input.saturated_potential_mm[layer],
+            input.saturated_hydraulic_conductivity_mm_s[layer],
+            input.wetting_front_mm[layer],
+            input.liquid_water[layer],
+            input.water_table_thickness_mm[layer],
+            input.volume_tolerance,
+            input.depth_tolerance_mm,
         );
     }
     Ok(layers)
