@@ -397,6 +397,7 @@ fn remote_kernel(name: &str, sha: &str, modified: u64) -> colm_remote::kernel::R
 
 fn version(touches_kernel: bool) -> RemoteVersion {
     RemoteVersion {
+        kind: colm_model::CodeKind::Workspace,
         name: "snow".into(),
         head: "0123456789abcdef".into(),
         src: PathBuf::from("src"),
@@ -585,6 +586,94 @@ fn partial_and_legacy_fetches_preserve_execution_success_but_cannot_rank() {
     failed_proof["provenance"]["ok"] = json!(false);
     fetch_certification(&mut fetched, Some(&failed_proof), false);
     assert_eq!(fetched["ok"], false);
+}
+
+#[test]
+fn legacy_fetch_checks_output_integrity_without_scientific_certification() {
+    let fixture = completed_output_fixture("legacy-diagnostic-fetch");
+    let (_, pending) = PendingFixture::new("legacy-submission");
+    let mut provenance = crate::provenance::read(&fixture.0).unwrap().unwrap();
+    provenance["model_run"] = serde_json::Value::Null;
+    crate::provenance::write_value(&fixture.0, &provenance);
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    verify_submitted_output_identity(&proof, &pending.record).unwrap();
+    let expected = recorded_history_hashes(&proof["provenance"]).unwrap();
+    let stage = FetchStage::new(&fixture.0).unwrap();
+    let history = stage.0.join("history");
+    std::fs::create_dir(&history).unwrap();
+    let name = "fixture_hist_2004.nc";
+    std::fs::copy(
+        fixture.0.join("out/fixture/history").join(name),
+        history.join(name),
+    )
+    .unwrap();
+    verify_history_hashes(&history, &expected).unwrap();
+    assert_eq!(verify_completed_outputs(&fixture.0).unwrap(), proof);
+    let mut fetched = fetched_provenance(
+        pending.record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["execution_ok"], true);
+    assert_eq!(fetched["ok"], false);
+    assert_eq!(fetched["output_verification"]["status"], "unavailable");
+    assert_eq!(fetched["remote_execution_provenance"], proof["provenance"]);
+    for field in ["case_name", "snapshot"] {
+        let mut changed = proof.clone();
+        if field == "case_name" {
+            changed["case_name"] = json!("another-case");
+        } else {
+            changed["provenance"]["execution_snapshot"] = json!("another-snapshot");
+        }
+        assert!(verify_submitted_output_identity(&changed, &pending.record).is_err());
+    }
+    std::fs::write(history.join(name), b"changed during download").unwrap();
+    assert!(verify_history_hashes(&history, &expected).is_err());
+    std::fs::write(
+        fixture.0.join("out/fixture/history").join(name),
+        b"changed after proof",
+    )
+    .unwrap();
+    assert!(verify_completed_outputs(&fixture.0).is_err());
+}
+
+#[test]
+fn model_fetch_never_downgrades_missing_or_mismatched_identity_to_legacy() {
+    let fixture = completed_output_fixture("model-fetch-identity");
+    let (_, pending) = PendingFixture::new("model-submission");
+    let mut record = pending.record;
+    let mut proof = verify_completed_outputs(&fixture.0).unwrap();
+    let model = proof["provenance"]["model_run"].clone();
+    // A model on either side requires matching objects on both sides.
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["remote_model_run"] = model.clone();
+    proof["provenance"]["model_run"] = serde_json::Value::Null;
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    proof["provenance"]["model_run"] = json!({"revision":2});
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    proof["provenance"]["model_run"] = model;
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    let mut inputs = crate::fingerprint::FullInputIdentity::unavailable("fixture");
+    proof["provenance"]["full_input_identity"] = serde_json::to_value(&inputs).unwrap();
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    inputs.complete = true;
+    inputs.unresolved.clear();
+    proof["provenance"]["full_input_identity"] = serde_json::to_value(&inputs).unwrap();
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    let mut fetched = fetched_provenance(
+        record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["ok"], true);
+    assert_eq!(fetched["output_verification"]["status"], "passed");
+    proof["provenance"]["full_input_identity"]["algorithm"] = json!("sampled");
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    for invalid in [json!(false), json!("legacy"), json!([])] {
+        record.provenance.as_mut().unwrap()["remote_model_run"] = invalid.clone();
+        proof["provenance"]["model_run"] = invalid;
+        assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    }
 }
 
 #[test]
@@ -997,7 +1086,7 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_dir_output='out'\n/\n",
     )
     .unwrap();
-    assert!(materialized_revision(&case).unwrap().is_none());
+    assert!(materialized_revision(&case, None).unwrap().is_none());
     std::fs::create_dir_all(registry.root().join("runs")).unwrap();
     let run = registry
         .materialize_run(
@@ -1008,7 +1097,7 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         )
         .unwrap();
     assert_eq!(
-        materialized_revision(&run.run_case).unwrap(),
+        materialized_revision(&run.run_case, None).unwrap(),
         Some(revision)
     );
     let mut corrupt = run.clone();
@@ -1018,8 +1107,60 @@ fn remote_materialized_run_recovers_verified_revision_without_selection_flags() 
         serde_json::to_vec(&corrupt).unwrap(),
     )
     .unwrap();
-    assert!(materialized_revision(&run.run_case).is_err());
+    assert!(materialized_revision(&run.run_case, None).is_err());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn case_owned_remote_run_uses_explicit_registry_without_weakening_identity_checks() {
+    let (fixture, _) = PendingFixture::new("case-owned-revision");
+    let registry = colm_model::Registry::open(fixture.0.join("registry")).unwrap();
+    let code = colm_model::CodeRef {
+        kind: colm_model::CodeKind::Official,
+        workspace: None,
+        commit: None,
+        source_sha256: "a".repeat(64),
+    };
+    let revision = registry.install_official(code.clone()).unwrap();
+    let case = fixture.0.join("case");
+    std::fs::create_dir_all(case.join("runs")).unwrap();
+    std::fs::write(
+        case.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME='demo'\n DEF_dir_output='out'\n/\n",
+    )
+    .unwrap();
+    let run = registry
+        .materialize_run(&revision.version, &case, &case.join("runs/op"), "op")
+        .unwrap();
+    assert!(materialized_revision(&run.run_case, None).is_err());
+    assert_eq!(
+        materialized_revision(&run.run_case, Some(registry.root())).unwrap(),
+        Some(revision)
+    );
+    // A supplied wrong registry must fail, never fall back to another location.
+    let wrong = colm_model::Registry::open(fixture.0.join("wrong-registry")).unwrap();
+    wrong
+        .install_official(colm_model::CodeRef {
+            source_sha256: "b".repeat(64),
+            ..code
+        })
+        .unwrap();
+    assert!(materialized_revision(&run.run_case, Some(wrong.root())).is_err());
+    assert!(materialized_revision(&run.run_case, Some(&fixture.0.join("missing"))).is_err());
+    for field in ["code", "revision_fingerprint", "overlay_sha256"] {
+        let mut corrupt = serde_json::to_value(&run).unwrap();
+        if field == "code" {
+            corrupt[field]["source_sha256"] = json!("c".repeat(64));
+        } else {
+            corrupt[field] = json!("c".repeat(64));
+        }
+        std::fs::write(
+            run.run_case.join(colm_model::RUN_MANIFEST),
+            serde_json::to_vec(&corrupt).unwrap(),
+        )
+        .unwrap();
+        assert!(materialized_revision(&run.run_case, Some(registry.root())).is_err());
+    }
 }
 
 #[test]
@@ -1176,4 +1317,147 @@ fn server_configuration_maps_windows_cache_paths_before_server_path_validation()
         server_place("/data/forcing.nc", case, remote, &aliases).unwrap(),
         Placed::Remote("/data/forcing.nc".into())
     );
+}
+
+#[test]
+fn frozen_official_source_is_not_a_workspace_version() {
+    let opts = Opts::parse(&["--frozen-model-source".into(), "frozen/source".into()]).unwrap();
+    let official = remote_version(&opts).unwrap().unwrap();
+    assert_eq!(official.kind, colm_model::CodeKind::Official);
+    assert_eq!(official.kernel_identity(), "bundled");
+    assert_eq!(official.value["kind"], "official");
+    assert!(
+        matches!(source_for(Some(&official)).unwrap(), Source::Checkout(path) if path == Path::new("frozen/source"))
+    );
+    let conflicting = Opts::parse(&[
+        "--frozen-model-source".into(),
+        "frozen/source".into(),
+        "--model-version".into(),
+        "snow".into(),
+    ])
+    .unwrap();
+    assert!(remote_version(&conflicting).is_err());
+}
+
+#[test]
+#[cfg(unix)]
+fn frozen_official_prebuilt_requires_matching_source_and_workspace_still_requires_build() {
+    let root =
+        std::env::temp_dir().join(format!("colm-cli-frozen-prebuilt-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("ENGINE"), "source=abc123\narch=x86_64\n").unwrap();
+    let tarball = root.join("engine.tar.gz");
+    assert!(Command::new("tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&root)
+        .arg("ENGINE")
+        .status()
+        .unwrap()
+        .success());
+    let opts = Opts::parse(&[
+        "--frozen-model-source".into(),
+        root.display().to_string(),
+        "--prebuilt".into(),
+        tarball.display().to_string(),
+    ])
+    .unwrap();
+    let official = remote_version(&opts).unwrap().unwrap();
+    let mut probe = colm_remote::probe::Probe {
+        arch: "x86_64".into(),
+        ..Default::default()
+    };
+    let snapshot = |id: &str| {
+        Ok(engine::Snapshot {
+            id: id.into(),
+            source: Source::Checkout(root.clone()),
+            files: Vec::new(),
+        })
+    };
+    for mode in ["auto", "prebuilt"] {
+        assert!(matches!(
+            engine_for_probe(
+                &opts,
+                mode,
+                "fixture",
+                &probe,
+                Some(&official),
+                snapshot("abc123")
+            )
+            .unwrap(),
+            Engine::Prebuilt(_)
+        ));
+        let mismatch = engine_for_probe(
+            &opts,
+            mode,
+            "fixture",
+            &probe,
+            Some(&official),
+            snapshot("different"),
+        )
+        .err()
+        .unwrap();
+        assert!(mismatch.to_string().contains("does not match"));
+        let modified = engine_for_probe(
+            &opts,
+            mode,
+            "fixture",
+            &probe,
+            Some(&version(false)),
+            snapshot("abc123"),
+        )
+        .err()
+        .unwrap();
+        assert!(modified.to_string().contains("own source"));
+    }
+    probe.arch = "aarch64".into();
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&official),
+        snapshot("abc123")
+    )
+    .is_err());
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&official),
+        Err(anyhow::anyhow!("source unavailable"))
+    )
+    .err()
+    .unwrap()
+    .to_string()
+    .contains("source unavailable"));
+    probe.cargo = Some("cargo".into());
+    probe.cmake = true;
+    probe.cc = true;
+    for selected in [&official, &version(false)] {
+        assert!(matches!(
+            engine_for_probe(
+                &opts,
+                "auto",
+                "fixture",
+                &probe,
+                Some(selected),
+                snapshot("abc123")
+            )
+            .unwrap(),
+            Engine::Source(_)
+        ));
+    }
+    assert!(engine_for_probe(
+        &opts,
+        "prebuilt",
+        "fixture",
+        &probe,
+        Some(&version(false)),
+        snapshot("abc123")
+    )
+    .is_err());
+    std::fs::remove_dir_all(root).unwrap();
 }

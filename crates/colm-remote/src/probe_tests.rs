@@ -141,6 +141,45 @@ exit "$result""#,
     }
 
     #[test]
+    fn user_installed_build_tools_are_visible_without_a_login_shell() {
+        let sandbox = Sandbox::new();
+        sandbox.scheduler("sbatch");
+        sandbox.stub("cargo", "echo 'cargo user-toolchain'");
+        sandbox.stub("cmake", "exit 0");
+        sandbox.stub("cc", "exit 0");
+        for (tool, directory) in [("cargo", ".cargo/bin"), ("cmake", ".local/bin")] {
+            let directory = sandbox.root.join(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::rename(sandbox.bin.join(tool), directory.join(tool)).unwrap();
+        }
+        let probe = sandbox.probe();
+        assert_eq!(probe.cargo.as_deref(), Some("cargo user-toolchain"));
+        assert!(probe.cmake && probe.cc);
+        assert!(
+            probe.build_problems.is_empty(),
+            "{:?}",
+            probe.build_problems
+        );
+    }
+
+    #[test]
+    fn explicit_build_toolchain_stays_ahead_of_user_fallbacks() {
+        let sandbox = Sandbox::new();
+        sandbox.scheduler("sbatch");
+        sandbox.stub("cargo", "echo 'cargo selected-toolchain'");
+        sandbox.stub("cmake", "exit 0");
+        sandbox.stub("cc", "exit 0");
+        let fallback = sandbox.root.join(".cargo/bin");
+        std::fs::create_dir_all(&fallback).unwrap();
+        let executable = fallback.join("cargo");
+        std::fs::write(&executable, "#!/bin/sh\necho 'cargo fallback-toolchain'\n").unwrap();
+        std::fs::set_permissions(executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let probe = sandbox.probe();
+        assert_eq!(probe.cargo.as_deref(), Some("cargo selected-toolchain"));
+        assert!(probe.build_problems.is_empty());
+    }
+
+    #[test]
     fn lsf_and_slurm_compatibility_wrappers_are_not_pbs() {
         for (submit, expected) in [("bsub", "lsf"), ("sbatch", "slurm")] {
             let sandbox = Sandbox::new();

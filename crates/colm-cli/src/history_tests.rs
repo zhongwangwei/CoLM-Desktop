@@ -89,7 +89,7 @@ fn output_dir_normalization_handles_root_current_dir_and_trailing_slashes() {
     let (case_nml, root) = if cfg!(windows) {
         (PathBuf::from(r"X:\colm-case\case.nml"), r"X:\")
     } else {
-        (PathBuf::from("/tmp/case/case.nml"), "/")
+        (PathBuf::from("/colm-case/case.nml"), "/")
     };
     let expected = case_nml.parent().unwrap().join("out");
     assert_eq!(super::normalize_output_dir(&case_nml, "out/"), expected);
@@ -119,6 +119,36 @@ fn run_rejects_custom_output_dirs_before_using_cli_history_paths() {
     )
     .unwrap();
     super::ensure_cli_output_dir(&case.join("case.nml"), &case.join("out")).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn managed_output_accepts_execution_symlink_but_rejects_a_different_target() {
+    let d = tmp("execution-output-alias");
+    let root = d.parent().unwrap().canonicalize().unwrap();
+    let case = root.join("physical-case");
+    let alias = root.join("execution-alias");
+    let other = root.join("other-case");
+    std::fs::create_dir(&case).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::os::unix::fs::symlink(&case, &alias).unwrap();
+    let namelist = format!(
+        "&nl_colm\n DEF_CASE_NAME='Case'\n DEF_dir_output='{}'\n/\n",
+        case.join("out").display()
+    );
+    std::fs::write(case.join("case.nml"), &namelist).unwrap();
+    for exists in [false, true] {
+        if exists {
+            std::fs::create_dir(case.join("out")).unwrap();
+        }
+        super::ensure_cli_output_dir(&alias.join("case.nml"), &alias.join("out")).unwrap();
+        assert!(super::ensure_cli_output_dir(&alias.join("case.nml"), &other.join("out")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(case.join("case.nml")).unwrap(),
+            namelist
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 #[cfg(unix)]

@@ -217,6 +217,7 @@ fn submitted_study_ledger_uses_captured_version_and_real_local_directory() {
     let study = root.join("local-study");
     std::fs::create_dir(&study).unwrap();
     let version = super::super::RemoteVersion {
+        kind: colm_model::CodeKind::Workspace,
         name: "snow".into(),
         head: ws.head().unwrap(),
         src: ws.src(),

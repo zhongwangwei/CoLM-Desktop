@@ -64,7 +64,8 @@ export default function ResourcesPage() {
     [changeKind, setChangeKind] = useState('refactor');
   const lock = useRef(false),
     epoch = useRef({ active: false }),
-    initialized = useRef(false);
+    initialized = useRef(false),
+    refreshQueue = useRef<Promise<void>>(Promise.resolve());
   const dirty = Boolean(editor && (JSON.stringify(editor) !== baseline || password));
   function navigationReason() {
     return deletingServer
@@ -138,71 +139,87 @@ export default function ResourcesPage() {
   }
   const refresh = useCallback(async () => {
     const token = epoch.current;
-    setConfigLoaded(false);
-    const config = await invokeJson<{ servers: Server[] }>('remote_config');
-    if (!token.active || token !== epoch.current) return;
-    setServers(config.servers);
-    setConfigLoaded(true);
-    if (!initialized.current) {
-      initialized.current = true;
-      const requestedHost = state.simulationReturn?.resourceHost;
-      const first =
-        requestedHost === undefined
-          ? config.servers[0]
-          : config.servers.find((server) => server.host === requestedHost);
-      if (first) {
-        setSelected(`server:${first.host}`);
-        setOriginal(first.host);
-        setEditor(structuredClone(first));
-        setBaseline(JSON.stringify(first));
-      }
-    }
-    const errors: string[] = [];
-    const [hosts, rows, histories] = await Promise.all([
-      invokeJson<string[]>('remote_ssh_hosts'),
-      Promise.all(
-        state.cases.map(async (c) => ({
-          dir: c.dir,
-          kind: 'case' as const,
-          record: await invokeJson('remote_job_record', { case: c.dir }).catch((e) => ({
-            error: String(e),
-          })),
-        })),
-      ),
-      Promise.all(
-        state.cases.map((c) =>
-          invokeJson<{ studies?: { dir: string }[] }>('case_runs', { case: c.dir }).catch((e) => {
-            errors.push(`${c.dir}: ${String(e)}`);
-            return { studies: [] };
+    const pending = refreshQueue.current
+      .catch(() => {})
+      .then(async () => {
+        if (!token.active || token !== epoch.current) return;
+        setConfigLoaded(false);
+        const config = await invokeJson<{ servers: Server[] }>('remote_config');
+        if (!token.active || token !== epoch.current) return;
+        setServers(config.servers);
+        setConfigLoaded(true);
+        if (!initialized.current) {
+          initialized.current = true;
+          const requestedHost = state.simulationReturn?.resourceHost;
+          const first =
+            requestedHost === undefined
+              ? config.servers[0]
+              : config.servers.find((server) => server.host === requestedHost);
+          if (first) {
+            setSelected(`server:${first.host}`);
+            setOriginal(first.host);
+            setEditor(structuredClone(first));
+            setBaseline(JSON.stringify(first));
+          }
+        }
+        const errors: string[] = [];
+        const hosts = await invokeJson<string[]>('remote_ssh_hosts');
+        const rows: { dir: string; record: unknown; kind: 'case' | 'study' }[] = [];
+        const histories: { studies?: { dir: string }[] }[] = [];
+        let nextCase = 0;
+        // Each request starts a CLI process; bound the total even for large station batches.
+        await Promise.all(
+          Array.from({ length: Math.min(4, state.cases.length) }, async () => {
+            while (token.active && token === epoch.current) {
+              const index = nextCase++;
+              const c = state.cases[index];
+              if (!c) return;
+              rows[index] = {
+                dir: c.dir,
+                kind: 'case',
+                record: await invokeJson('remote_job_record', { case: c.dir }).catch((e) => ({
+                  error: String(e),
+                })),
+              };
+              if (!token.active || token !== epoch.current) return;
+              histories[index] = await invokeJson<{ studies?: { dir: string }[] }>('case_runs', {
+                case: c.dir,
+              }).catch((e) => {
+                errors.push(`${c.dir}: ${String(e)}`);
+                return { studies: [] };
+              });
+            }
           }),
-        ),
-      ),
-    ]);
-    const studyDirs = [
-      ...new Set(histories.flatMap((h) => (h.studies ?? []).map((s) => s.dir)).filter(Boolean)),
-    ];
-    const studies = await Promise.all(
-      studyDirs.map(async (dir) => {
-        const record = await invokeJson<{ remote?: unknown }>('study_status', {
-          studyDir: dir,
-        }).catch((e) => ({ remote: true, error: String(e) }));
-        return {
-          dir,
-          kind: 'study' as const,
-          record: studyResourcePermissions(record).exists ? record : null,
-        };
-      }),
-    );
-    if (token.active && token === epoch.current) {
-      setAliases(hosts);
-      setHistoryErrors(errors);
-      setRecords([...rows, ...studies].filter((r) => r.record));
-      setOutput((current) => {
-        const next = { ...current };
-        for (const { dir } of [...rows, ...studies]) delete next[dir];
-        return next;
+        );
+        if (!token.active || token !== epoch.current) return;
+        const studyDirs = [
+          ...new Set(histories.flatMap((h) => (h.studies ?? []).map((s) => s.dir)).filter(Boolean)),
+        ];
+        const studies: typeof rows = [];
+        for (const dir of studyDirs) {
+          if (!token.active || token !== epoch.current) return;
+          const record = await invokeJson<{ remote?: unknown }>('study_status', {
+            studyDir: dir,
+          }).catch((e) => ({ remote: true, error: String(e) }));
+          studies.push({
+            dir,
+            kind: 'study',
+            record: studyResourcePermissions(record).exists ? record : null,
+          });
+        }
+        if (token.active && token === epoch.current) {
+          setAliases(hosts);
+          setHistoryErrors(errors);
+          setRecords([...rows, ...studies].filter((r) => r.record));
+          setOutput((current) => {
+            const next = { ...current };
+            for (const { dir } of [...rows, ...studies]) delete next[dir];
+            return next;
+          });
+        }
       });
-    }
+    refreshQueue.current = pending;
+    return pending;
   }, [state.cases, state.simulationReturn?.resourceHost]);
 
   useEffect(() => {

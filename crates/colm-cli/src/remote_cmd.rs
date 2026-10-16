@@ -731,8 +731,9 @@ pub(crate) fn workspace_source() -> Result<PathBuf> {
     })
 }
 
-/// `--model-version` 选的修改版：它的源码、提交与改动范围。官方版（不给或 `official`）为 `None`。
+/// Explicit source identity, either a frozen official source or a committed workspace.
 pub(crate) struct RemoteVersion {
+    pub kind: colm_model::CodeKind,
     pub name: String,
     pub head: String,
     pub src: PathBuf,
@@ -744,13 +745,24 @@ pub(crate) struct RemoteVersion {
 impl RemoteVersion {
     /// 用这个版本的源码在服务器上编的 Fortran 内核，清单里的 `colm_git_sha` 记成它。
     pub fn kernel_identity(&self) -> String {
-        format!("ws-{}-{}", self.name, &self.head[..self.head.len().min(8)])
+        match self.kind {
+            colm_model::CodeKind::Official => "bundled".into(),
+            colm_model::CodeKind::Workspace => {
+                format!("ws-{}-{}", self.name, &self.head[..self.head.len().min(8)])
+            }
+        }
     }
 }
 
 pub(crate) fn remote_version(opts: &Opts) -> Result<Option<RemoteVersion>> {
     if let Some(source) = opts.get("--frozen-model-source") {
+        ensure!(
+            opts.get("--model-version")
+                .is_none_or(|name| name == "official"),
+            "an official frozen source cannot be combined with a workspace model version"
+        );
         return Ok(Some(RemoteVersion {
+            kind: colm_model::CodeKind::Official,
             name: "official".into(),
             head: String::new(),
             src: PathBuf::from(source),
@@ -788,6 +800,7 @@ pub(crate) fn remote_version(opts: &Opts) -> Result<Option<RemoteVersion>> {
         "touches": touches,
     });
     Ok(Some(RemoteVersion {
+        kind: colm_model::CodeKind::Workspace,
         name,
         head,
         src,
@@ -949,26 +962,48 @@ fn choose_engine(
         return Ok(Engine::Source(source?));
     }
     let probe = colm_remote::probe::probe(ssh, root)?;
+    engine_for_probe(opts, &mode, &ssh.host, &probe, version, source)
+}
+
+fn engine_for_probe(
+    opts: &Opts,
+    mode: &str,
+    host: &str,
+    probe: &colm_remote::probe::Probe,
+    version: Option<&RemoteVersion>,
+    source: Result<engine::Snapshot>,
+) -> Result<Engine> {
     let can_build = probe.cargo.is_some() && probe.cmake && probe.cc;
     // 预编包是官方构建：修改版只能在服务器上从它自己的源码编。
-    if let Some(version) = version {
+    if let Some(version) = version.filter(|v| v.kind == colm_model::CodeKind::Workspace) {
         ensure!(
             mode != "prebuilt" && can_build,
             "model version {} has to be built on {} from its own source, which needs cargo, cmake and a C compiler there; \
              a prebuilt engine is the official build and cannot run a modified version",
             version.name,
-            ssh.host
+            host
         );
         return Ok(Engine::Source(source?));
     }
     if mode == "auto" && can_build {
         return Ok(Engine::Source(source?));
     }
+    // A failed snapshot must not turn an explicit source into an unpinned official engine.
+    let snapshot = source?;
     let prebuilt = match opts.get("--prebuilt") {
-        Some(path) => Some(Prebuilt::open(Path::new(&path))?),
+        Some(path) => {
+            let prebuilt = Prebuilt::open(Path::new(&path))?;
+            ensure!(
+                prebuilt.matches_source(&probe.arch, &snapshot.id)?,
+                "prebuilt engine does not match architecture {} and source snapshot {}",
+                probe.arch,
+                snapshot.id
+            );
+            Some(prebuilt)
+        }
         None => engine::find_prebuilt(
             &probe.arch,
-            source.as_ref().ok().map(|s| s.id.as_str()),
+            Some(&snapshot.id),
             &engine::resource_dirs(&exe_dir()?),
         ),
     };
@@ -977,7 +1012,7 @@ fn choose_engine(
         None => bail!(
             "{} cannot build the engine (cargo, cmake or a C compiler is missing) and no prebuilt engine for {} was found; \
              build one with `colm-cli remote-dist --host <a machine with internet> --root <dir>` or pass --prebuilt <colm-engine-linux-{}.tar.gz>",
-            ssh.host,
+            host,
             probe.arch,
             probe.arch
         ),
@@ -1374,7 +1409,10 @@ pub(crate) fn check_remote_kernel_manifest(
     )
 }
 
-fn materialized_revision(case: &Path) -> Result<Option<colm_model::FrozenRevision>> {
+fn materialized_revision(
+    case: &Path,
+    registry: Option<&Path>,
+) -> Result<Option<colm_model::FrozenRevision>> {
     if !case.join(colm_model::RUN_MANIFEST).is_file() {
         return Ok(None);
     }
@@ -1385,9 +1423,8 @@ fn materialized_revision(case: &Path) -> Result<Option<colm_model::FrozenRevisio
         run.run_case.canonicalize()? == case,
         "model run belongs to another case"
     );
-    let registry = case
-        .parent()
-        .and_then(Path::parent)
+    let registry = registry
+        .or_else(|| case.parent().and_then(Path::parent))
         .context("model run has no registry")?;
     ensure!(
         registry.join("versions").is_dir(),
@@ -1950,7 +1987,9 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
     } else {
         format!("{root}/kernels/{preset}-{}", short_hash(&manifest))
     };
-    if let Some(revision) = materialized_revision(&case)? {
+    if let Some(revision) =
+        materialized_revision(&case, opts.get("--model-root").as_deref().map(Path::new))?
+    {
         if fortran {
             check_selected_remote_kernel(&ssh, &remote_kernel, &revision)?;
         } else {
@@ -2422,32 +2461,41 @@ fn remote_output_verification(ssh: &Ssh, record: &Record) -> Result<Option<serde
         quote(&record.remote_case)
     ))?)?;
     if let Some(proof) = &proof {
-        ensure!(
-            proof["case_name"].as_str() == Some(record.case_name.as_str()),
-            "server proof belongs to another case"
-        );
-        let submitted = record
-            .provenance
-            .as_ref()
-            .context("remote submission provenance is missing")?;
-        let remote = &proof["provenance"];
-        ensure!(
-            submitted["remote_model_run"].is_object()
-                && remote["model_run"] == submitted["remote_model_run"],
-            "server model identity differs from submitted revision"
-        );
-        ensure!(
-            remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
-            "server source snapshot differs from submitted engine"
-        );
-        let full: crate::fingerprint::FullInputIdentity =
-            serde_json::from_value(remote["full_input_identity"].clone())?;
-        ensure!(
-            full.complete && full.algorithm == "sha256-full-v1",
-            "server input content identity is incomplete"
-        );
+        verify_submitted_output_identity(proof, record)?;
     }
     Ok(proof)
+}
+
+fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) -> Result<()> {
+    ensure!(
+        proof["case_name"].as_str() == Some(record.case_name.as_str()),
+        "server proof belongs to another case"
+    );
+    let submitted = record
+        .provenance
+        .as_ref()
+        .context("remote submission provenance is missing")?;
+    let remote = &proof["provenance"];
+    ensure!(
+        remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
+        "server source snapshot differs from submitted engine"
+    );
+    // Legacy runs retain output integrity checks, but cannot certify scientific identity.
+    if submitted["remote_model_run"].is_null() && remote["model_run"].is_null() {
+        return Ok(());
+    }
+    ensure!(
+        submitted["remote_model_run"].is_object()
+            && remote["model_run"] == submitted["remote_model_run"],
+        "server model identity differs from submitted revision"
+    );
+    let full: crate::fingerprint::FullInputIdentity =
+        serde_json::from_value(remote["full_input_identity"].clone())?;
+    ensure!(
+        full.complete && full.algorithm == "sha256-full-v1",
+        "server input content identity is incomplete"
+    );
+    Ok(())
 }
 
 struct FetchStage(PathBuf);
@@ -2491,6 +2539,8 @@ fn fetch_certification(
         Some("partial history is derived data, not the original completed output")
     } else if proof.is_none() {
         Some("the bound server CLI cannot verify original completed outputs")
+    } else if proof.is_some_and(|p| !p["provenance"]["model_run"].is_object()) {
+        Some("legacy execution has no frozen model identity for scientific verification")
     } else {
         None
     };
