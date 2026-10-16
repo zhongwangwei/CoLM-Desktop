@@ -198,6 +198,13 @@ function page(
               };
         case 'model_fields':
           return options.modelFields ?? [];
+        case 'install_example':
+          return {
+            sitedir: '/bundled/sites',
+            forcingdir: '/bundled/forcing',
+            root: '/bundled',
+            runtimedir: '/bundled/runtime',
+          };
         case 'scan_sites':
           return options.scan ? options.scan() : { sites: scannedSites };
         case 'pick_file':
@@ -797,7 +804,12 @@ test('research round trips preserve explicit own-data disclosure rather than inf
     'returning from model settings keeps bundled data collapsed',
   );
   contract = await p.click('new-own-data');
-  assert.equal(contract.fields.find((f) => f.id === 'new-sitedir')?.value, '/bundled/sites');
+  assert.equal(contract.fields.find((f) => f.id === 'new-sitedir')?.value, '');
+  p.set('new-sitedir', '/custom/sites');
+  await p.click('new-scan');
+  await p.click('new-select-CN-Cng');
+  for (const key of ['site', 'met', 'runtime', 'start', 'end'] as const)
+    p.set(`new-${key}`, form[key]);
   await p.click('new-next');
   (p.element('ModelSettings').props.onEdit as () => unknown)();
   assert.equal((p.state.newCaseSeed as { ownData: boolean }).ownData, true);
@@ -805,7 +817,7 @@ test('research round trips preserve explicit own-data disclosure rather than inf
   contract = await p.click('new-previous');
   assert.equal(
     contract.fields.find((f) => f.id === 'new-sitedir')?.value,
-    '/bundled/sites',
+    '/custom/sites',
     'an explicitly opened own-data section remains open after model editing',
   );
 });
@@ -2202,4 +2214,48 @@ test('existing single-point range renders coordinates once and leaves the site f
       ['case-SITE_lon_location', 'case-SITE_lat_location'].includes(f.id),
     ),
   );
+});
+
+test('switching bundled examples to own data clears example bindings but preserves manual values', async () => {
+  const p = page('NewCasePage', { form, step: 3 });
+  await p.mount();
+  await p.click('new-example');
+  p.set('new-runtime', '/custom/runtime');
+  p.set('new-start', '2001-03-01');
+  const contract = await p.click('new-own-data');
+  for (const key of ['sitedir', 'forcingdir', 'site', 'met', 'end']) {
+    assert.equal(contract.fields.find((f) => f.id === `new-${key}`)?.value, '', key);
+  }
+  assert.equal(contract.fields.find((f) => f.id === 'new-runtime')?.value, '/custom/runtime');
+  assert.equal(contract.fields.find((f) => f.id === 'new-start')?.value, '2001-03-01');
+  assert.ok(!contract.actions.some((a) => a.id.startsWith('new-select-')));
+  assert.ok(!p.calls.some((c) => /delete|remove/.test(c.command)));
+  p.set('new-sitedir', '/custom/sites');
+  await p.click('new-scan');
+  await p.click('new-select-CN-Cng');
+  const repeated = await p.click('new-own-data');
+  assert.equal(repeated.fields.find((f) => f.id === 'new-sitedir')?.value, '/custom/sites');
+  assert.equal(repeated.fields.find((f) => f.id === 'new-site')?.value, site.site_file);
+  assert.ok(repeated.actions.some((a) => a.id === 'new-select-CN-Cng'));
+  const bundled = await p.click('new-example');
+  assert.ok(!bundled.fields.some((f) => f.id === 'new-sitedir'));
+  const own = await p.click('new-own-data');
+  assert.equal(own.fields.find((f) => f.id === 'new-runtime')?.value, '');
+});
+
+test('research round trips preserve manual overrides while clearing remaining bundled bindings', async () => {
+  const p = page('NewCasePage', { form, step: 3 });
+  await p.mount();
+  await p.click('new-example');
+  p.set('new-runtime', '/custom/runtime');
+  p.set('new-start', '2001-03-01');
+  await p.click('new-next');
+  (p.element('ModelSettings').props.onEdit as () => unknown)();
+  await p.remount();
+  await p.click('new-previous');
+  const own = await p.click('new-own-data');
+  assert.equal(own.fields.find((f) => f.id === 'new-runtime')?.value, '/custom/runtime');
+  assert.equal(own.fields.find((f) => f.id === 'new-start')?.value, '2001-03-01');
+  assert.equal(own.fields.find((f) => f.id === 'new-site')?.value, '');
+  assert.equal(own.fields.find((f) => f.id === 'new-met')?.value, '');
 });

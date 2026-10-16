@@ -1609,13 +1609,9 @@ fn child_fields_follow_initial_forcing_runoff_and_process_switches() {
         &["SinglePoint", "LULC_IGBP"],
     );
     assert_eq!(mode(&ozone_file, "DEF_file_Ozone"), &FieldMode::Editable);
-    // SoilInit wins over a separate water-table file; VIC parameter paths are
-    // derived from DEF_dir_runtime by MOD_Namelist.
-    for name in [
-        "DEF_file_WaterTable",
-        "DEF_file_VIC_para",
-        "DEF_file_VIC_OPT",
-    ] {
+    // SoilInit wins over a separate water-table file; VIC only exposes its selected input mode.
+    assert_eq!(mode(&on, "DEF_file_VIC_OPT"), &FieldMode::Editable);
+    for name in ["DEF_file_WaterTable", "DEF_file_VIC_para"] {
         assert_eq!(mode(&on, name), &FieldMode::Hidden, "{name}");
     }
 
@@ -4053,4 +4049,33 @@ fn atomic_replacement_failure_does_not_remove_the_existing_destination() {
     replace_file_atomic(&staged, &target).unwrap();
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "replacement");
     assert!(!staged.exists());
+}
+
+#[test]
+fn vic_parameter_file_follows_scalar_or_grid_mode() {
+    for grid in [false, true] {
+        let states = runtime_states(
+            &format!(
+                "&nl_colm\n DEF_Runoff_SCHEME=1\n DEF_VIC_OPT=.{}.\n/\n",
+                grid
+            ),
+            &["SinglePoint", "LULC_IGBP"],
+        );
+        assert_eq!(
+            mode(&states, "DEF_file_VIC_para"),
+            if grid {
+                &FieldMode::Hidden
+            } else {
+                &FieldMode::Editable
+            }
+        );
+        assert_eq!(
+            mode(&states, "DEF_file_VIC_OPT"),
+            if grid {
+                &FieldMode::Editable
+            } else {
+                &FieldMode::Hidden
+            }
+        );
+    }
 }

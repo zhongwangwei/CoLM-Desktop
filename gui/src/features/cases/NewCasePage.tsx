@@ -156,6 +156,16 @@ export default function NewCasePage() {
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
+  const exampleValues = useRef<Record<string, string>>(
+    seed?.ownData
+      ? {}
+      : (seed?.exampleValues ??
+          Object.fromEntries(
+            ['sitedir', 'forcingdir', 'runtime', 'site', 'met', 'name', 'start', 'end'].map(
+              (key) => [key, seed?.form?.[key] ?? ''],
+            ),
+          )),
+  );
   const creation = useRef<{ dir: string; cancelRequested: boolean } | null>(null),
     lock = useRef(false),
     sequence = useRef(0),
@@ -312,6 +322,7 @@ export default function NewCasePage() {
   }
   const set = (k: string, v: string) => {
     setError('');
+    delete exampleValues.current[k];
     if (k === 'kind' || k === 'grid')
       reconcile(
         k === 'kind' && v !== 'site' && cropEnabled(physics)
@@ -382,6 +393,23 @@ export default function NewCasePage() {
     }
     return result;
   }
+  function selectOwnData() {
+    if (ownData || lock.current) return;
+    ++sequence.current;
+    const bundled = exampleValues.current;
+    exampleValues.current = {};
+    setSites([]);
+    setHint('');
+    setError('');
+    setForm((previous) => {
+      const next = { ...previous };
+      for (const [key, value] of Object.entries(bundled)) {
+        if (next[key] === value) next[key] = '';
+      }
+      return next;
+    });
+    setOwnData(true);
+  }
   async function example() {
     return work(async () => {
       const x = await invoke<{
@@ -392,7 +420,18 @@ export default function NewCasePage() {
       }>('install_example', {});
       const found = await scan(x.sitedir, x.forcingdir);
       if (!alive.current) return;
+      setOwnData(false);
       const s = found.sites.find((site) => site.name === 'CN-Cng');
+      exampleValues.current = {
+        sitedir: x.sitedir,
+        forcingdir: x.forcingdir,
+        runtime: x.runtimedir,
+        name: s?.name ?? '',
+        site: s?.site_file ?? '',
+        met: s?.met_file ?? '',
+        start: s?.start ?? '',
+        end: s?.end ?? '',
+      };
       if (s) selectSite(s.site_file, found.sites);
       setForm((f) => ({
         ...f,
@@ -421,6 +460,14 @@ export default function NewCasePage() {
       return;
     }
     setError('');
+    if (!ownData)
+      Object.assign(exampleValues.current, {
+        site: path,
+        name: site.name,
+        met: site.met_file ?? '',
+        start: site.start ?? '',
+        end: site.end ?? '',
+      });
     setForm((previous) => ({
       ...previous,
       site: path,
@@ -528,6 +575,7 @@ export default function NewCasePage() {
         },
         step: 4,
         ownData,
+        exampleValues: exampleValues.current,
       },
       simulationReturn: { route: 'new-case', step: 4 },
     });
@@ -949,7 +997,7 @@ export default function NewCasePage() {
             label: t('使用自己的数据', 'Use your data'),
             kind: 'click' as const,
             enabled,
-            run: () => setOwnData(true),
+            run: selectOwnData,
           },
           ...(ownData
             ? [
@@ -1257,7 +1305,7 @@ export default function NewCasePage() {
                 <Button disabled={!enabled} onClick={() => void example().catch(() => {})}>
                   {t('使用内置示例', 'Use bundled examples')}
                 </Button>
-                <Button disabled={!enabled} onClick={() => setOwnData(true)}>
+                <Button disabled={!enabled} onClick={selectOwnData}>
                   {t('使用自己的数据', 'Use your data')}
                 </Button>
               </div>
@@ -1474,6 +1522,7 @@ export default function NewCasePage() {
           onModeChange={selectMode}
           kernel={configurationKernel}
           setupEnvironment={{
+            engine: form.engine,
             subgrid: mode,
             caseValues: dataPatch,
             domain: form.kind,

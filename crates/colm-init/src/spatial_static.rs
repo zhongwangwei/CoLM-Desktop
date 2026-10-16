@@ -110,10 +110,8 @@ pub enum VicParameterSource<'a> {
     GridFile(&'a Path),
 }
 
-/// VIC 参数文件的路径。上游在 `DEF_Runoff_SCHEME == 1` 时**无条件**改写这两个键
-/// （`MOD_Namelist.F90:1801-1805`）：`DEF_file_VIC_para = trim(DEF_dir_runtime)//'/vic/vic_para.txt'`、
-/// `DEF_file_VIC_OPT = trim(DEF_dir_runtime)//'vic/vic_para.nc'`（后者少一个斜杠，照抄），namelist 里给的值被忽略。
-/// 此前这里优先用 namelist 的值，与上游读到的不是同一个文件（第 425 轮）。
+/// Rust accepts an explicit VIC input; unset paths retain the upstream runtime defaults.
+/// The grid fallback preserves MOD_Namelist's concatenation without an inserted slash.
 pub fn resolve_vic_parameter_file(
     document: &colm_namelist::Document,
     use_grid: bool,
@@ -123,6 +121,17 @@ pub fn resolve_vic_parameter_file(
     } else {
         "DEF_file_VIC_para"
     };
+    match document.get(field) {
+        Some(colm_namelist::Value::Str(value))
+            if !value.trim().is_empty()
+                && !value.trim().eq_ignore_ascii_case("null")
+                && !value.trim().eq_ignore_ascii_case("none") =>
+        {
+            return Ok(PathBuf::from(value.trim()));
+        }
+        Some(colm_namelist::Value::Str(_)) | None => {}
+        Some(_) => anyhow::bail!("{field} must be a quoted string"),
+    }
     match document.get("DEF_dir_runtime") {
         Some(colm_namelist::Value::Str(value))
             if !value.trim().is_empty() && !value.trim().eq_ignore_ascii_case("null") =>

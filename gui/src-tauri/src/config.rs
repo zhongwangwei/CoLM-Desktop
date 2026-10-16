@@ -2361,8 +2361,11 @@ fn field_runtime_state(
     if one_of(&["DEF_VIC_OPT", "DEF_file_VIC_para", "DEF_file_VIC_OPT"]) && c.runoff != 1 {
         return hidden("仅 VIC runoff 使用");
     }
-    if one_of(&["DEF_file_VIC_para", "DEF_file_VIC_OPT"]) {
-        return hidden("CoLM 会从运行时目录派生 VIC 参数文件");
+    if name == "DEF_file_VIC_para" && logical(c.doc, "DEF_VIC_OPT") {
+        return hidden("网格 VIC 模式使用网格参数文件");
+    }
+    if name == "DEF_file_VIC_OPT" && !logical(c.doc, "DEF_VIC_OPT") {
+        return hidden("标量 VIC 模式使用文本参数文件");
     }
     // 只有单点能按站点地表类型判断；区域里总可能有水体与湿地 patch。
     // 流域侧向流强制打开动态湖泊（`colm-rs` 的 catchment 分支），改了也不生效。

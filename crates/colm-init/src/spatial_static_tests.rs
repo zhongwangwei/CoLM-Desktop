@@ -2926,3 +2926,72 @@ fn temp_dir(label: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&path);
     path
 }
+
+#[test]
+fn vic_parameter_path_prefers_the_selected_explicit_input() {
+    for (grid, field) in [(false, "DEF_file_VIC_para"), (true, "DEF_file_VIC_OPT")] {
+        for (literal, expected) in [
+            ("' /custom/vic file.nc '", "/custom/vic file.nc"),
+            ("'O''Brien/vic.txt'", "O'Brien/vic.txt"),
+            ("\"/custom/vic.nc\"", "/custom/vic.nc"),
+        ] {
+            let doc = colm_namelist::parse(&format!("&nl_colm\n {field}={literal}\n/\n")).unwrap();
+            assert_eq!(
+                resolve_vic_parameter_file(&doc, grid).unwrap(),
+                PathBuf::from(expected)
+            );
+        }
+    }
+}
+
+#[test]
+fn vic_parameter_path_unset_values_keep_upstream_defaults() {
+    for grid in [false, true] {
+        let field = if grid {
+            "DEF_file_VIC_OPT"
+        } else {
+            "DEF_file_VIC_para"
+        };
+        for unset in [
+            String::new(),
+            format!("{field}=''"),
+            format!("{field}=' NULL '"),
+            format!("{field}='none'"),
+        ] {
+            for directory in ["/runtime", "/runtime/"] {
+                let doc = colm_namelist::parse(&format!(
+                    "&nl_colm\n DEF_dir_runtime='{directory}'\n {unset}\n/\n"
+                ))
+                .unwrap();
+                let expected = if grid {
+                    format!("{directory}vic/vic_para.nc")
+                } else {
+                    format!("{directory}/vic/vic_para.txt")
+                };
+                assert_eq!(
+                    resolve_vic_parameter_file(&doc, grid).unwrap(),
+                    PathBuf::from(expected)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn vic_parameter_path_rejects_nonstring_inputs_and_missing_runtime() {
+    for (grid, field) in [(false, "DEF_file_VIC_para"), (true, "DEF_file_VIC_OPT")] {
+        let doc = colm_namelist::parse(&format!(
+            "&nl_colm\n {field}=42\n DEF_dir_runtime='/runtime'\n/\n"
+        ))
+        .unwrap();
+        assert!(resolve_vic_parameter_file(&doc, grid)
+            .unwrap_err()
+            .to_string()
+            .contains(&format!("{field} must be a quoted string")));
+        let doc = colm_namelist::parse("&nl_colm\n/\n").unwrap();
+        assert!(resolve_vic_parameter_file(&doc, grid)
+            .unwrap_err()
+            .to_string()
+            .contains("DEF_dir_runtime"));
+    }
+}

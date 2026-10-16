@@ -46,6 +46,7 @@ function harness() {
   }));
   const props = {
     process: undefined as string | undefined,
+    engine: undefined as string | undefined,
     hideProcesses: false,
     modalActions: undefined as UiAction[] | undefined,
     removedCaseKeys: [] as string[],
@@ -1504,3 +1505,53 @@ for (const [process, names] of [
       assert.equal(c.fields.filter((f) => f.id === `configuration-${name}`).length, 1, name);
   });
 }
+
+test('VIC files expose preset paths and guarded browsing only for the selected source', async () => {
+  for (const grid of [false, true]) {
+    const h = harness();
+    const name = grid ? 'DEF_file_VIC_OPT' : 'DEF_file_VIC_para';
+    const other = grid ? 'DEF_file_VIC_para' : 'DEF_file_VIC_OPT';
+    h.props.fields.push(
+      ...[name, other].map((name) => ({
+        name,
+        section: '水热过程',
+        kind: 'character',
+        default: "'null'",
+        values: [],
+        derived: false,
+      })),
+    );
+    h.props.overlay.physics = {
+      DEF_Runoff_SCHEME: '1',
+      DEF_VIC_OPT: grid ? '.true.' : '.false.',
+      DEF_dir_runtime: "'/runtime/'",
+    };
+    h.render();
+    await h.settle();
+    h.render()
+      .actions.find((a) => a.id === 'configuration-group-water')!
+      .run();
+    let c = h.render();
+    assert.equal(
+      c.fields.find((f) => f.id === `configuration-${name}`)!.value,
+      grid ? '/runtime/vic/vic_para.nc' : '/runtime/vic/vic_para.txt',
+    );
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${other}`));
+    const rows = h.nodes.filter((n) => n.props.className === 'model-setting-row');
+    assert.ok(!JSON.stringify(rows).includes('null'));
+    const pick = c.actions.find((a) => a.id === `configuration-${name}-browse`)!.run();
+    h.picks[0].resolve("/data/O'Brien/vic.txt");
+    await pick;
+    assert.equal(h.props.overlay.physics[name], "'/data/O''Brien/vic.txt'");
+    c = h.render();
+    c.actions.find((a) => a.id === `configuration-${name}-preset`)!.run();
+    assert.equal(h.props.overlay.physics[name], undefined);
+    h.props.overlay.physics.DEF_Runoff_SCHEME = '3';
+    c = h.render();
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
+    h.props.overlay.physics.DEF_Runoff_SCHEME = '1';
+    h.props.engine = 'fortran';
+    c = h.render();
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
+  }
+});

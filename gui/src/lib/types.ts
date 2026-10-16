@@ -158,6 +158,7 @@ export type AppState = {
     caseValues?: Record<string, string>;
     step?: 1 | 2 | 3 | 4 | 5;
     ownData?: boolean;
+    exampleValues?: Record<string, string>;
   } | null;
   simulationReturn: {
     route: 'new-case' | 'case';

@@ -40,6 +40,8 @@ function page(
       subgrid?: 'LCT' | 'PFT' | 'PC';
       setup?: setup.SetupRequest;
     } | null,
+    newCaseSeed: undefined as { form: Record<string, string> } | undefined,
+    selectedCase: undefined as { entry: { dir: string }; profile: { engine: string } } | undefined,
     expert: false,
     kernels: [],
   };
@@ -252,4 +254,18 @@ test('saved drafts can return while unsaved model edits keep the return button l
   assert.deepEqual(p.routes, ['new-case']);
   assert.equal(p.state.versionRef.id, 'official');
   assert.ok(!p.calls.some((c) => c.command === 'model_freeze'));
+});
+
+test('research configuration retains the engine of a new or existing simulation', async () => {
+  for (const origin of ['new', 'existing']) {
+    const h = page('LCT');
+    if (origin === 'new') h.state.newCaseSeed = { form: { engine: 'fortran', kind: 'site' } };
+    else {
+      h.state.simulationReturn = { route: 'case', step: 2 };
+      h.state.selectedCase = { entry: { dir: '/case' }, profile: { engine: 'fortran' } };
+    }
+    await h.mount();
+    const config = h.elements.find((e) => e.type === 'ConfigurationOptions')!;
+    assert.equal(config.props.engine, 'fortran');
+  }
 });
