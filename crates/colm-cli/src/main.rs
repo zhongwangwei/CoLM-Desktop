@@ -31,6 +31,7 @@
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli study-parameters
 //! colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
+//! colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --job <作业> --operation <运行> --expected-path <目录> [--whole-case 1] [--delete 1]
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
@@ -57,6 +58,7 @@ mod case_runs;
 mod energy_summary;
 mod fingerprint;
 mod flux_diagnostics;
+mod history_cleanup;
 mod history_cmd;
 mod history_subset;
 mod hybrid_cmd;
@@ -178,6 +180,8 @@ usage:
                    # 输出可采样专家参数元数据
   colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
                    # 独占创建一个文件夹，不覆盖已有路径、不创建父目录
+  colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --job <作业> --operation <运行> --expected-path <目录> [--whole-case 1] [--delete 1]
+                   # 默认预检；只清理身份已核实且已完成的独占服务器运行目录
   colm-cli study-preflight <case-root> --spec study.json
                    # 只校验 Study，不创建目录
   colm-cli study-create <case-root> --spec study.json
@@ -441,6 +445,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-case-abort" => remote_cmd::remote_cases::cmd(opts, "abort")?,
         "remote-browse" => remote_files::run(opts)?,
         "remote-mkdir" => remote_files::mkdir(opts)?,
+        "remote-history-cleanup" => history_cleanup::run(opts)?,
         "remote-check-paths" => remote_files::check_paths(opts)?,
         "remote-engines" => remote_cmd::cmd_engines(opts)?,
         "remote-engine-clean" => remote_cmd::cmd_engine_clean(opts)?,

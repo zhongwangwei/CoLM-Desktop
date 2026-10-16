@@ -221,6 +221,20 @@ fn event_payload(event: &Event) -> Result<(Event, String)> {
     Ok((event, payload))
 }
 
+#[derive(Clone, Copy)]
+enum OperationView {
+    Visible,
+    Audit,
+}
+impl OperationView {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Visible => "history_visible_operations",
+            Self::Audit => "history_operations",
+        }
+    }
+}
+
 pub struct History {
     connection: Connection,
 }
@@ -279,7 +293,12 @@ impl History {
                 CASE WHEN json_extract(e.payload,'$.phase')='finished' THEN 0
                     WHEN json_extract(e.payload,'$.phase')='imported' AND json_extract(e.payload,'$.status')
                         IN ('succeeded','failed','completed','completed_with_failures','cancelled') THEN 0 ELSE 1 END needs_reconciliation
-                FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);")
+                FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);
+            CREATE TABLE IF NOT EXISTS history_removed_operations (
+                operation_id TEXT PRIMARY KEY NOT NULL, removed_ms INTEGER NOT NULL);
+            CREATE VIEW IF NOT EXISTS history_visible_operations AS
+                SELECT * FROM history_operations
+                WHERE operation_id NOT IN (SELECT operation_id FROM history_removed_operations);")
             .context("initialize operation ledger schema")?;
         transaction
             .commit()
@@ -371,12 +390,51 @@ impl History {
         transaction.commit()?;
         Ok(inserted)
     }
+    /// Hide a confirmed terminal operation from user-facing history without deleting events.
+    /// Returns false when already removed; later imports retain the same tombstone.
+    pub fn remove_operation(&self, operation_id: &str) -> Result<bool> {
+        ensure!(!operation_id.is_empty(), "operation ID must be nonempty");
+        let transaction = self.connection.unchecked_transaction()?;
+        // Check terminal state under the same writer lock that records the removal.
+        let inserted = transaction.execute(
+            "INSERT INTO history_removed_operations(operation_id,removed_ms)
+             SELECT operation_id,?2 FROM history_operations WHERE operation_id=?1
+             AND needs_reconciliation=0 AND json_extract(payload,'$.status')
+                 IN ('succeeded','failed','completed','completed_with_failures','cancelled')
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![operation_id, now_ms()],
+        )?;
+        if inserted == 0 {
+            let removed: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_removed_operations WHERE operation_id=?1)",
+                [operation_id],
+                |row| row.get(0),
+            )?;
+            if !removed {
+                let status: Option<String> = transaction.query_row(
+                    "SELECT json_extract(payload,'$.status') FROM history_operations WHERE operation_id=?1",
+                    [operation_id], |row| row.get(0),
+                ).optional()?;
+                let status = status.context("history operation not found")?;
+                anyhow::bail!("cannot remove operation whose completion is unconfirmed (status: {status}); reconcile it first");
+            }
+        }
+        transaction.commit()?;
+        Ok(inserted > 0)
+    }
     pub fn query(&self, query: &Query) -> Result<Page> {
+        self.query_view(query, OperationView::Visible)
+    }
+    /// Include removed operations for executor safety checks and auditing.
+    pub fn query_audit(&self, query: &Query) -> Result<Page> {
+        self.query_view(query, OperationView::Audit)
+    }
+    fn query_view(&self, query: &Query, view: OperationView) -> Result<Page> {
         ensure!(query.limit <= 10000, "history page limit must be <= 10000");
         ensure!(query.offset <= i64::MAX as u64, "history offset too large");
         let transaction = self.connection.unchecked_transaction()?;
-        let (filter, values) = filter(&transaction, query)?;
-        let page = query_page(&transaction, query, &filter, &values)?;
+        let (filter, values) = filter(&transaction, query, view)?;
+        let page = query_page(&transaction, query, &filter, &values, view)?;
         transaction.commit()?;
         Ok(page)
     }
@@ -391,9 +449,15 @@ impl History {
         let mut page_query = query.clone();
         page_query.offset = 0;
         page_query.limit = 1000;
-        let (filter, values) = filter(&transaction, &page_query)?;
+        let (filter, values) = filter(&transaction, &page_query, OperationView::Visible)?;
         let total = loop {
-            let page = query_page(&transaction, &page_query, &filter, &values)?;
+            let page = query_page(
+                &transaction,
+                &page_query,
+                &filter,
+                &values,
+                OperationView::Visible,
+            )?;
             let count = page.items.len() as u64;
             for operation in page.items {
                 visit(operation)?;
@@ -407,7 +471,19 @@ impl History {
         Ok(total)
     }
     pub fn detail(&self, operation_id: &str) -> Result<Option<OperationDetail>> {
-        let operation = self.connection.query_row("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM history_operations WHERE operation_id=?1", [operation_id], read_operation).optional()?;
+        self.detail_view(operation_id, OperationView::Visible)
+    }
+    /// Read retained events and related operations even after removal from the UI.
+    pub fn detail_audit(&self, operation_id: &str) -> Result<Option<OperationDetail>> {
+        self.detail_view(operation_id, OperationView::Audit)
+    }
+    fn detail_view(
+        &self,
+        operation_id: &str,
+        view: OperationView,
+    ) -> Result<Option<OperationDetail>> {
+        let view = view.name();
+        let operation = self.connection.query_row(&format!("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM {view} WHERE operation_id=?1"), [operation_id], read_operation).optional()?;
         let Some(operation) = operation else {
             return Ok(None);
         };
@@ -419,7 +495,7 @@ impl History {
                 serde_json::from_str::<Event>(&r.get::<_, String>(0)?).map_err(json_error)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        let mut stmt = self.connection.prepare("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM history_operations WHERE operation_id != ?1 AND (json_extract(payload,'$.parent_operation_id')=?1 OR operation_id=?2 OR (?2 IS NOT NULL AND json_extract(payload,'$.parent_operation_id')=?2) OR (?3 IS NOT NULL AND json_extract(payload,'$.case_path')=?3)) ORDER BY json_extract(payload,'$.time_ms') DESC LIMIT 100")?;
+        let mut stmt = self.connection.prepare(&format!("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM {view} WHERE operation_id != ?1 AND (json_extract(payload,'$.parent_operation_id')=?1 OR operation_id=?2 OR (?2 IS NOT NULL AND json_extract(payload,'$.parent_operation_id')=?2) OR (?3 IS NOT NULL AND json_extract(payload,'$.case_path')=?3)) ORDER BY json_extract(payload,'$.time_ms') DESC LIMIT 100"))?;
         let related = stmt
             .query_map(
                 params![
@@ -493,14 +569,16 @@ fn query_page(
     query: &Query,
     filter: &str,
     values: &[rusqlite::types::Value],
+    view: OperationView,
 ) -> Result<Page> {
+    let view = view.name();
     let total: u64 = connection.query_row(
-        &format!("SELECT count(*) FROM history_operations WHERE {filter}"),
+        &format!("SELECT count(*) FROM {view} WHERE {filter}"),
         rusqlite::params_from_iter(values),
         |r| r.get(0),
     )?;
     let order = if query.ascending { "ASC" } else { "DESC" };
-    let sql = format!("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM history_operations WHERE {filter} ORDER BY COALESCE(started_ms,json_extract(payload,'$.time_ms')) {order}, operation_id {order} LIMIT {} OFFSET {}", query.limit, query.offset);
+    let sql = format!("SELECT payload,started_ms,finished_ms,event_count,needs_reconciliation FROM {view} WHERE {filter} ORDER BY COALESCE(started_ms,json_extract(payload,'$.time_ms')) {order}, operation_id {order} LIMIT {} OFFSET {}", query.limit, query.offset);
     let mut stmt = connection.prepare(&sql)?;
     let items = stmt
         .query_map(rusqlite::params_from_iter(values), read_operation)?
@@ -528,7 +606,12 @@ fn read_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
         needs_reconciliation: row.get(4)?,
     })
 }
-fn filter(connection: &Connection, q: &Query) -> Result<(String, Vec<rusqlite::types::Value>)> {
+fn filter(
+    connection: &Connection,
+    q: &Query,
+    view: OperationView,
+) -> Result<(String, Vec<rusqlite::types::Value>)> {
+    let view = view.name();
     use rusqlite::types::Value as Sql;
     let mut clauses = vec!["1=1".to_owned()];
     let mut values = vec![];
@@ -552,11 +635,11 @@ fn filter(connection: &Connection, q: &Query) -> Result<(String, Vec<rusqlite::t
                 paths.insert(path.to_owned());
             }
             // Resolve only existing ledger paths; never infer aliases for missing datasets.
-            let mut statement = connection.prepare(
-                "SELECT DISTINCT json_extract(payload,'$.case_path') FROM history_operations \
+            let mut statement = connection.prepare(&format!(
+                "SELECT DISTINCT json_extract(payload,'$.case_path') FROM {view} \
                  WHERE json_extract(payload,'$.case_path') IS NOT NULL \
-                 AND (?1 IS NULL OR json_extract(payload,'$.host')=?1)",
-            )?;
+                 AND (?1 IS NULL OR json_extract(payload,'$.host')=?1)"
+            ))?;
             for stored in statement.query_map([q.host.as_deref()], |row| row.get::<_, String>(0))? {
                 let stored = stored?;
                 if Path::new(&stored)

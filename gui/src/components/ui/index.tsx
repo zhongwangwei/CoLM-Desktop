@@ -7,8 +7,9 @@ import {
   useState,
   type ComponentProps,
   type ReactNode,
+  type ReactElement,
 } from 'react';
-import { Slot, Dialog as RadixDialog } from 'radix-ui';
+import { Slot, Dialog as RadixDialog, ContextMenu as RadixContextMenu } from 'radix-ui';
 import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { useApp } from '../../lib/app-state';
@@ -41,6 +42,35 @@ export function Input({ className, ...props }: ComponentProps<'input'>) {
 }
 export function Select({ className, ...props }: ComponentProps<'select'>) {
   return <select className={cn('input', className)} {...props} />;
+}
+export function ContextMenu({
+  children,
+  items,
+  onOpenChange,
+}: {
+  children: ReactElement;
+  items: { label: string; onSelect: () => void; disabled?: boolean; danger?: boolean }[];
+  onOpenChange?: (open: boolean) => void;
+}) {
+  return (
+    <RadixContextMenu.Root onOpenChange={onOpenChange}>
+      <RadixContextMenu.Trigger asChild>{children}</RadixContextMenu.Trigger>
+      <RadixContextMenu.Portal>
+        <RadixContextMenu.Content className="context-menu" collisionPadding={8}>
+          {items.map((item) => (
+            <RadixContextMenu.Item
+              key={item.label}
+              className={cn('context-menu-item', item.danger && 'context-menu-danger')}
+              disabled={item.disabled}
+              onSelect={item.onSelect}
+            >
+              {item.label}
+            </RadixContextMenu.Item>
+          ))}
+        </RadixContextMenu.Content>
+      </RadixContextMenu.Portal>
+    </RadixContextMenu.Root>
+  );
 }
 export function Card({
   title,

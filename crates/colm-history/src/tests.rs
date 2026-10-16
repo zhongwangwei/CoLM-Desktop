@@ -849,3 +849,195 @@ fn failed_schema_initialization_does_not_publish_partial_tables() {
     history.append(&Event::start("after-repair")).unwrap();
     assert_eq!(history.query(&Query::default()).unwrap().total, 1);
 }
+
+#[test]
+fn removal_persists_without_deleting_events_or_leaking_through_reads() {
+    let dir = Temp::new();
+    let path = dir.0.join("history.db");
+    let history = History::open(&path).unwrap();
+    let mut parent = Event::start("study");
+    parent.case_path = Some("/case".into());
+    history.append(&parent).unwrap();
+    let mut child = Event::start("run");
+    child.parent_operation_id = Some(parent.operation_id.clone());
+    child.case_path = parent.case_path.clone();
+    history.append(&child).unwrap();
+    history
+        .append(&child.next(EventPhase::Finished, "succeeded"))
+        .unwrap();
+    let other = Event::start("run").next(EventPhase::Finished, "failed");
+    history.append(&other).unwrap();
+    assert_eq!(
+        history
+            .detail(&parent.operation_id)
+            .unwrap()
+            .unwrap()
+            .related
+            .len(),
+        1
+    );
+    assert!(history.remove_operation(&child.operation_id).unwrap());
+    assert!(!history.remove_operation(&child.operation_id).unwrap());
+    drop(history);
+    let history = History::open(path).unwrap();
+    assert!(history.detail(&child.operation_id).unwrap().is_none());
+    assert!(history
+        .detail(&parent.operation_id)
+        .unwrap()
+        .unwrap()
+        .related
+        .is_empty());
+    let query = Query {
+        limit: 1,
+        offset: 1,
+        ..Query::default()
+    };
+    let page = history.query(&query).unwrap();
+    assert_eq!(page.total, 2);
+    assert_eq!(page.items.len(), 1);
+    assert!(history.detail(&other.operation_id).unwrap().is_some());
+    let json: Value = serde_json::from_str(&history.export_json(&query).unwrap()).unwrap();
+    assert_eq!(json["total"], 2);
+    assert_eq!(json["items"].as_array().unwrap().len(), 2);
+    for item in json["items"].as_array().unwrap() {
+        assert_ne!(item["operation_id"], child.operation_id);
+    }
+    let csv = history.export_csv(&query).unwrap();
+    assert_eq!(csv.lines().count(), 3);
+    assert!(!csv.contains(&child.operation_id));
+    let count: i64 = history
+        .connection
+        .query_row(
+            "SELECT count(*) FROM history_events WHERE operation_id=?1",
+            [&child.operation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2);
+    assert!(history
+        .connection
+        .execute("DELETE FROM history_events", [])
+        .is_err());
+}
+
+#[test]
+fn removed_import_stays_hidden_after_replay_and_new_generation() {
+    let dir = Temp::new();
+    let history = ledger();
+    let path = dir.file(
+        "state.json",
+        &json!({"study_id":"removed-study","status":"completed"}),
+    );
+    history.import_file(&path, ImportKind::Study, None).unwrap();
+    let operation = history.query(&Query::default()).unwrap().items.remove(0);
+    history
+        .remove_operation(&operation.latest.operation_id)
+        .unwrap();
+    assert_eq!(
+        history
+            .import_file(&path, ImportKind::Study, None)
+            .unwrap()
+            .duplicates,
+        1
+    );
+    dir.file(
+        "state.json",
+        &json!({"study_id":"removed-study","status":"failed"}),
+    );
+    assert_eq!(
+        history
+            .import_file(&path, ImportKind::Study, None)
+            .unwrap()
+            .imported,
+        1
+    );
+    assert_eq!(history.query(&Query::default()).unwrap().total, 0);
+    assert!(history
+        .detail(&operation.latest.operation_id)
+        .unwrap()
+        .is_none());
+    let count: i64 = history
+        .connection
+        .query_row("SELECT count(*) FROM history_events", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 2);
+}
+
+#[test]
+fn removal_rejects_unconfirmed_operations_and_unknown_ids() {
+    let history = ledger();
+    for (phase, status) in [
+        (EventPhase::Started, "running"),
+        (EventPhase::Status, "needs_reconciliation"),
+        (EventPhase::Imported, "unknown"),
+        (EventPhase::Finished, "running"),
+        (EventPhase::Status, "succeeded"),
+    ] {
+        let event = Event::start("run").next(phase, status);
+        history.append(&event).unwrap();
+        assert!(history
+            .remove_operation(&event.operation_id)
+            .unwrap_err()
+            .to_string()
+            .contains("completion is unconfirmed"));
+        assert!(history.detail(&event.operation_id).unwrap().is_some());
+    }
+    assert!(history
+        .remove_operation("unknown-id")
+        .unwrap_err()
+        .to_string()
+        .contains("not found"));
+    assert!(history.remove_operation("").is_err());
+    assert_eq!(history.query(&Query::default()).unwrap().total, 5);
+}
+
+#[test]
+fn audit_retains_hidden_roots_and_new_active_generations() {
+    let history = ledger();
+    let mut study = Event::start("study").next(EventPhase::Imported, "completed");
+    study.host = Some("server".into());
+    study.case_path = Some("/old-root/case".into());
+    study.detail = json!({"source_generation": 1, "root": "/old-root"});
+    history.append(&study).unwrap();
+    history.remove_operation(&study.operation_id).unwrap();
+    let retained = history.detail_audit(&study.operation_id).unwrap().unwrap();
+    assert_eq!(retained.operation.latest.detail["root"], "/old-root");
+    let mut active = study.next(EventPhase::Imported, "running");
+    active.detail["source_generation"] = json!(2);
+    history.append(&active).unwrap();
+    let query = Query {
+        host: Some("server".into()),
+        case_path: Some("/old-root/case".into()),
+        needs_reconciliation: Some(true),
+        ..Query::default()
+    };
+    let audit = history.query_audit(&query).unwrap();
+    assert_eq!(audit.total, 1);
+    assert_eq!(audit.items[0].latest.status, "running");
+    let detail = history.detail_audit(&study.operation_id).unwrap().unwrap();
+    assert_eq!(detail.events.len(), 2);
+    assert!(detail.operation.needs_reconciliation);
+    let mut child = Event::start("run");
+    child.parent_operation_id = Some(study.operation_id.clone());
+    history.append(&child).unwrap();
+    assert_eq!(
+        history
+            .detail_audit(&child.operation_id)
+            .unwrap()
+            .unwrap()
+            .related
+            .len(),
+        1
+    );
+    assert!(history
+        .detail(&child.operation_id)
+        .unwrap()
+        .unwrap()
+        .related
+        .is_empty());
+    assert_eq!(history.query(&query).unwrap().total, 0);
+    assert!(history.detail(&study.operation_id).unwrap().is_none());
+    let export: Value = serde_json::from_str(&history.export_json(&query).unwrap()).unwrap();
+    assert_eq!(export["total"], 0);
+    assert_eq!(history.export_csv(&query).unwrap().lines().count(), 1);
+}

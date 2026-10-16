@@ -16,6 +16,7 @@ mod e2e_driver;
 mod example;
 mod forcing;
 mod history;
+mod history_delete;
 mod histvars;
 mod model;
 mod observation;
@@ -33,6 +34,7 @@ use config::*;
 use example::*;
 use forcing::*;
 use history::*;
+use history_delete::*;
 use histvars::*;
 use model::*;
 use observation::*;
@@ -183,6 +185,8 @@ pub fn run() {
             case_data_save,
             history_list,
             history_detail,
+            history_delete_plan,
+            history_delete,
             history_export,
             history_replay,
             history_compare,
