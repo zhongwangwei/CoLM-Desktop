@@ -55,7 +55,7 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
-    profile?: { grid?: string; domain_kind?: string; run_host?: string };
+    profile?: { grid?: string; domain_kind?: string; run_host?: string; remote_directory?: string };
     servers?: { host: string; root: string; maps: { local: string; remote: string }[] }[];
     histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
@@ -139,6 +139,7 @@ function page(
         'MultiSiteSettings',
         'RunPanel',
         'RunLocationSettings',
+        'RemotePathBrowser',
         'ResultsPage',
         'HistoryPage',
         'HistoryVariablesCard',
@@ -217,6 +218,7 @@ function page(
             root: '/bundled',
             runtimedir: '/bundled/runtime',
           };
+        case 'remote_scan_sites':
         case 'scan_sites':
           return options.scan ? options.scan() : { sites: scannedSites };
         case 'pick_file':
@@ -229,6 +231,13 @@ function page(
           return '';
         case 'read_case':
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));
+        case 'remote_create_case':
+          if (options.create) return options.create(args);
+          return {
+            dir: '/cache/project/site',
+            root: '/cache/project',
+            remote_dir: (args.request as { out: string }).out,
+          };
         case 'new_spatial_case':
         case 'new_case':
           if (options.create) return options.create(args);
@@ -2609,13 +2618,15 @@ test('General setup selects run location before paths and preserves it while con
   });
   await p.mount();
   const c = p.set('new-run-host', 'compute');
-  assert.equal(c.fields.find((f) => f.id === 'new-root')?.label, '本地项目保存目录');
+  assert.equal(c.fields.find((f) => f.id === 'new-root')?.label, '服务器项目目录');
   assert.equal(p.element('RunLocationSettings').props.host, 'compute');
   await p.click('new-run-resources');
   assert.equal(p.routes.at(-1), 'resources');
   const seed = p.state.newCaseSeed as { form: Record<string, string>; step: number };
   assert.equal(seed.form.host, 'compute');
-  assert.equal(seed.form.root, form.root);
+  assert.equal(seed.form.root, runServer.root);
+  assert.equal(seed.form.site, '');
+  assert.equal(seed.form.runtime, '');
   assert.equal(seed.step, 1);
 });
 
@@ -2629,7 +2640,13 @@ test('selected resource is persisted during case creation instead of reverting t
   );
   await p.mount();
   await p.click('new-create');
-  assert.equal(p.calls.find((call) => call.command === 'new_case')?.args.runHost, 'compute');
+  const call = p.calls.find((call) => call.command === 'remote_create_case');
+  assert.equal(call?.args.host, 'compute');
+  assert.equal((call?.args.request as Record<string, unknown>).kind, 'site');
+  assert.equal((call?.args.request as Record<string, unknown>).out, `${form.root}/${form.name}`);
+  assert.deepEqual(p.opened, ['/cache/project/site']);
+  assert.equal(p.state.root, '/cache/project');
+  assert.ok(!p.calls.some((call) => call.command === 'new_case'));
 });
 
 test('a removed run location blocks new creation instead of silently selecting local', async () => {
@@ -2657,4 +2674,118 @@ test('existing General setup saves the target and synchronizes the hidden run pa
   await p.click('case-run-resources');
   assert.equal(p.routes.at(-1), 'resources');
   assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 1, resourceHost: '' });
+});
+
+test('server-native existing cases keep their run location fixed', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { run_host: 'compute', remote_directory: '/server/project/site' },
+    servers: [runServer],
+  });
+  await p.mount();
+  await p.goto('case-step-1');
+  const host = p.render().fields.find((field) => field.id === 'case-run-host')!;
+  assert.equal(host.disabled, true);
+  await host.set('');
+  assert.equal(
+    p.calls.some((call) => call.command === 'set_case_run_host'),
+    false,
+  );
+  assert.equal(p.state.selectedCase.profile.run_host, 'compute');
+});
+
+test('server input pickers return selected paths and scan only the chosen server', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, host: 'compute' }, ownData: true, sites: [site], step: 3 },
+    [site],
+    initialValues,
+    { servers: [runServer] },
+  );
+  await p.mount();
+  assert.ok(!p.render().actions.some((action) => action.id === 'new-example'));
+  const pick = p.click('new-pick-sitedir');
+  p.render();
+  const browser = p.element('RemotePathBrowser');
+  assert.equal(browser.props.host, 'compute');
+  assert.equal(browser.props.directory, true);
+  (browser.props.onSelect as (path: string) => void)('/server/sites');
+  await pick;
+  p.render();
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'new-sitedir')?.value,
+    '/server/sites',
+  );
+  await p.click('new-scan');
+  assert.equal(
+    p.calls.find((call) => call.command === 'remote_scan_sites')?.args.dir,
+    '/server/sites',
+  );
+  assert.ok(
+    !p.calls.some((call) => call.command === 'scan_sites' || call.command === 'pick_folder'),
+  );
+});
+
+test('remote multi-site retries retain server identity and request atomic replay settings', async () => {
+  let failed = true;
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, form: { ...multiSeed.form, host: 'compute' } },
+    multiSites,
+    initialValues,
+    {
+      servers: [runServer],
+      create: async (args) => {
+        const request = args.request as { name: string; out: string; spinup_repeat: number };
+        if (failed && request.name === 'CN-Cng') throw new Error('remote temporary error');
+        return {
+          dir: `/cache/multi-project/${request.name}`,
+          root: '/cache/multi-project',
+          remote_dir: request.out,
+        };
+      },
+    },
+  );
+  await p.mount();
+  await p.click('new-create');
+  failed = false;
+  await p.click('new-multi-retry');
+  const requests = p.calls
+    .filter((call) => call.command === 'remote_create_case')
+    .map((call) => call.args.request as Record<string, unknown>);
+  assert.deepEqual(
+    requests.map((request) => request.name),
+    ['CN-Cng', 'other', 'CN-Cng'],
+  );
+  assert.ok(requests.every((request) => request.spinup_repeat === 3));
+  assert.ok(!p.calls.some((call) => call.command === 'set_spinup' || call.command === 'new_case'));
+});
+
+test('server spatial creation passes server paths and grid settings without local creation', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: {
+        ...form,
+        host: 'compute',
+        kind: 'global',
+        dlon: '1',
+        dlat: '2',
+        forcing: '/server/forcing.nml',
+      },
+      step: 5,
+    },
+    [site],
+    initialValues,
+    { servers: [runServer] },
+  );
+  await p.mount();
+  await p.click('new-create');
+  const request = p.calls.find((call) => call.command === 'remote_create_case')?.args
+    .request as Record<string, unknown>;
+  assert.equal(request.kind, 'global');
+  assert.equal(request.grid_kind, 'latlon');
+  assert.equal(request.dlat, 2);
+  assert.equal(request.forcing, '/server/forcing.nml');
+  assert.ok(!p.calls.some((call) => call.command === 'new_spatial_case'));
+  assert.deepEqual(p.opened, ['/cache/project/site']);
 });

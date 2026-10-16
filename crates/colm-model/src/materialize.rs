@@ -436,6 +436,13 @@ impl Registry {
         let original_overlay = frozen.overlay.clone();
         frozen.overlay = model_overlay(&frozen.overlay);
         let source = source_case.canonicalize()?;
+        let server_inputs = match fs::read(source.join(".colm-desktop.json")) {
+            Ok(bytes) => {
+                serde_json::from_slice::<serde_json::Value>(&bytes)?["remote_directory"].is_string()
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            Err(error) => return Err(error.into()),
+        };
         ensure!(!run_case.exists(), "run destination already exists");
         let parent = run_case
             .parent()
@@ -621,7 +628,7 @@ impl Registry {
                         inputs.insert(path.to_string_lossy().into_owned(), digest(&bytes));
                         let mut config = colm_namelist::parse(std::str::from_utf8(&bytes)?)?;
                         // Runtime paths are relative to the case cwd, even for nested namelists.
-                        rewrite_case_paths(&mut config, &source, &destination)?;
+                        rewrite_case_paths(&mut config, &source, &destination, server_inputs)?;
                         fs::write(destination.join(fallback), config.to_string())?;
                         doc.set(
                             field,
@@ -630,13 +637,13 @@ impl Registry {
                     }
                 }
             }
-            rewrite_case_paths(&mut doc, &source, &destination)?;
+            rewrite_case_paths(&mut doc, &source, &destination, server_inputs)?;
             fs::write(destination.join("case.nml"), doc.to_string())?;
             // Forcing namelist may contain case-local absolute input paths as well.
             let forcing = destination.join("forcing.nml");
             if forcing.exists() {
                 let mut forcing_doc = colm_namelist::parse(&fs::read_to_string(&forcing)?)?;
-                rewrite_case_paths(&mut forcing_doc, &source, &destination)?;
+                rewrite_case_paths(&mut forcing_doc, &source, &destination, server_inputs)?;
                 fs::write(forcing, forcing_doc.to_string())?;
             }
             crate::registry::verify_assets(&frozen.overlay, &revision)?;
@@ -744,10 +751,19 @@ fn copy_case(
     }
     Ok(())
 }
-fn rewrite_case_paths(doc: &mut Document, source: &Path, destination: &Path) -> Result<()> {
+fn rewrite_case_paths(
+    doc: &mut Document,
+    source: &Path,
+    destination: &Path,
+    server_inputs: bool,
+) -> Result<()> {
     for key in doc.paths() {
         if let Some(Value::Str(text)) = doc.get(&key) {
             let lower = key.to_ascii_lowercase();
+            // Server data may coincidentally exist locally; only configuration belongs to this mirror.
+            if server_inputs && !lower.contains("namelist") {
+                continue;
+            }
             let path_field = lower.contains("file")
                 || lower.contains("namelist")
                 || lower.contains("dir")
@@ -849,4 +865,37 @@ impl Drop for MigrationLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+#[cfg(all(test, unix))]
+#[test]
+fn server_data_paths_do_not_follow_local_symlinks() {
+    let root = std::env::temp_dir().join(format!("colm-server-model-paths-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let source = root.join("source");
+    let destination = root.join("run");
+    fs::create_dir_all(&source).unwrap();
+    fs::create_dir_all(&destination).unwrap();
+    fs::write(root.join("actual.nc"), b"data").unwrap();
+    let input = source.join("server-input.nc");
+    std::os::unix::fs::symlink(root.join("actual.nc"), &input).unwrap();
+    fs::write(source.join("forcing.nml"), b"config").unwrap();
+    fs::write(destination.join("forcing.nml"), b"config").unwrap();
+    let mut doc = colm_namelist::parse(&format!("&nl_colm\n SITE_fsitedata='{}'\n DEF_forcing_namelist='forcing.nml'\n DEF_dir_output='out/'\n/\n", input.display())).unwrap();
+    rewrite_case_paths(&mut doc, &source, &destination, true).unwrap();
+    assert_eq!(
+        doc.get("SITE_fsitedata"),
+        Some(&Value::Str(input.to_string_lossy().into_owned()))
+    );
+    assert_eq!(
+        doc.get("DEF_forcing_namelist"),
+        Some(&Value::Str(namelist_path(
+            &destination.join("forcing.nml").canonicalize().unwrap()
+        )))
+    );
+    assert_eq!(
+        doc.get("DEF_dir_output"),
+        Some(&Value::Str(format!("{}/out/", destination.display())))
+    );
+    fs::remove_dir_all(root).unwrap();
 }

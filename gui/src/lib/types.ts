@@ -87,6 +87,7 @@ export type CaseProfile = {
   kernel_preset: string | null;
   engine?: string;
   run_host?: string | null;
+  remote_directory?: string | null;
   obs_file?: string | null;
   inputs: {
     site_file?: string;

@@ -1,3 +1,4 @@
+import RemotePathBrowser from '../../components/RemotePathBrowser';
 import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
@@ -46,6 +47,7 @@ import {
   type FamilyContext,
 } from './configuration-options';
 type Props = {
+  runHost?: string;
   engine?: string;
   process?: string;
   hideProcesses?: boolean;
@@ -77,6 +79,7 @@ const empty: ConfigurationResult = {
   context_complete: false,
 };
 export default function ConfigurationOptions({
+  runHost,
   engine,
   process,
   hideProcesses = false,
@@ -119,6 +122,25 @@ export default function ConfigurationOptions({
     } | null>(null),
     [saving, setSaving] = useState(false),
     [pickingFile, setPickingFile] = useState(false);
+  const [remotePicker, setRemotePicker] = useState<{
+    host: string;
+    initialPath?: string;
+  } | null>(null);
+  const remoteResolve = useRef<((path: string | null) => void) | null>(null);
+  const currentHost = useRef(runHost);
+  currentHost.current = runHost;
+  useEffect(
+    () => () => {
+      remoteResolve.current?.(null);
+    },
+    [],
+  );
+  function closeRemotePicker(path: string | null) {
+    const resolve = remoteResolve.current;
+    remoteResolve.current = null;
+    setRemotePicker(null);
+    resolve?.(path);
+  }
   const scheme = simulationMode(undefined, undefined, subgrid);
   const fixedPftKind = scheme === 'PFT' ? 'pft' : scheme === 'PC' ? 'pc-pft' : null;
   const pftKind = fixedPftKind ?? selectedPftKind;
@@ -477,14 +499,32 @@ export default function ConfigurationOptions({
         !writable.current ||
         pickingNow.current ||
         !mounted.current ||
-        current.current !== request
+        current.current !== request ||
+        currentHost.current !== runHost
       )
         throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
       pickingNow.current = true;
       setPickingFile(true);
       try {
-        const path = await invoke<string | null>('pick_file', { key: field.name, filter: null });
-        if (path && mounted.current && writable.current && current.current === request) {
+        const path = runHost
+          ? await new Promise<string | null>((resolve) => {
+              remoteResolve.current = resolve;
+              const raw = unquote(value);
+              setRemotePicker({
+                host: runHost,
+                initialPath: raw.startsWith('/')
+                  ? raw.slice(0, raw.lastIndexOf('/')) || '/'
+                  : undefined,
+              });
+            })
+          : await invoke<string | null>('pick_file', { key: field.name, filter: null });
+        if (
+          path &&
+          mounted.current &&
+          writable.current &&
+          current.current === request &&
+          currentHost.current === runHost
+        ) {
           write(() => setModelOption(overlay, fields, field.name, path));
           setInputs((previous) => {
             const next = { ...previous };
@@ -1311,6 +1351,16 @@ export default function ConfigurationOptions({
   });
   return (
     <div className="configuration-options">
+      {remotePicker && (
+        <RemotePathBrowser
+          host={remotePicker.host}
+          initialPath={remotePicker.initialPath}
+          directory={false}
+          en={en}
+          onSelect={(path) => closeRemotePicker(path)}
+          onClose={() => closeRemotePicker(null)}
+        />
+      )}
       <Notice>
         {t(
           '未单独设置时显示默认值；修改并保存后覆盖默认值。启用过程后显示相关配置，关闭过程保留已有设置。',

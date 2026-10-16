@@ -951,7 +951,13 @@ impl<'a> VisibilityContext<'a> {
             // 里的伪开关；manifest 是唯一可信来源。
             crop: have.contains("CROP"),
             urban: logical(doc, "DEF_URBAN_RUN"),
-            ncar_urban: ncar_urban_properties(doc, case_dir).is_some_and(|path| path.is_file()),
+            ncar_urban: case_dir.is_some_and(|dir| {
+                crate::remote::server_case_owner(&dir.to_string_lossy())
+                    .ok()
+                    .flatten()
+                    .is_some()
+            }) || ncar_urban_properties(doc, case_dir)
+                .is_some_and(|path| path.is_file()),
             lulcc: logical(doc, "DEF_USE_LULCC"),
             tracer: logical(doc, "DEF_USE_TRACER"),
             isotope_tracer: character(doc, "DEF_TRACER_TYPES")
@@ -1041,35 +1047,131 @@ fn civil_stamp(y: i64, m: i64, d: i64, sec: i64) -> i64 {
     (era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy) * 86_400 + sec
 }
 
-fn active_path(
+fn runtime_paths(
     doc: &colm_namelist::Document,
     case_dir: &std::path::Path,
-    switch: &str,
-    path: &str,
-    want_dir: bool,
-) -> Result<(), String> {
-    if !matches!(doc.get(switch), Some(colm_namelist::Value::Bool(true))) {
-        return Ok(());
-    }
-    let value = character(doc, path);
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("null") {
-        return Err(format!("{switch} 已开启，请选择 {path}"));
-    }
-    let configured = std::path::Path::new(trimmed);
-    let p = if configured.is_absolute() {
-        configured.to_path_buf()
-    } else {
-        case_dir.join(configured)
+    crop: Option<bool>,
+) -> Result<Vec<(String, bool, String)>, String> {
+    let owner = crate::remote::server_case_owner(&case_dir.to_string_lossy())?;
+    let base = owner
+        .as_ref()
+        .map(|(_, directory)| std::path::Path::new(directory))
+        .unwrap_or(case_dir);
+    let resolve = |raw: &str, label: &str| -> Result<String, String> {
+        let raw = raw.trim();
+        if raw.is_empty() || raw.eq_ignore_ascii_case("null") {
+            return Err(format!("请为 {label} 选择数据路径"));
+        }
+        if raw.chars().any(char::is_control) {
+            return Err(format!("{label} 路径不能含控制字符"));
+        }
+        let absolute = if owner.is_some() {
+            raw.starts_with('/')
+        } else {
+            std::path::Path::new(raw).is_absolute()
+        };
+        let path = if absolute {
+            raw.to_owned()
+        } else {
+            if owner.is_some() {
+                format!("{}/{}", base.display(), raw)
+            } else {
+                base.join(raw).to_string_lossy().into_owned()
+            }
+        };
+        Ok(path)
     };
-    let meta = std::fs::metadata(&p).map_err(|e| format!("{path}: {}: {e}", p.display()))?;
-    if want_dir && !meta.is_dir() {
-        return Err(format!("{path}: {} 不是目录", p.display()));
+    let mut paths = Vec::new();
+    for (switch, key, directory, applicable) in [
+        ("DEF_USE_SoilInit", "DEF_file_SoilInit", false, true),
+        ("DEF_USE_SnowInit", "DEF_file_SnowInit", false, true),
+        ("DEF_USE_CN_INIT", "DEF_file_cn_init", false, true),
+        (
+            "DEF_USE_WaterTableInit",
+            "DEF_file_WaterTable",
+            false,
+            !logical(doc, "DEF_USE_SoilInit"),
+        ),
+        (
+            "DEF_USE_Forcing_Downscaling",
+            "DEF_DS_HiresTopographyDataDir",
+            true,
+            true,
+        ),
+        (
+            "DEF_USE_OZONEDATA",
+            "DEF_file_Ozone",
+            false,
+            logical(doc, "DEF_USE_OZONESTRESS"),
+        ),
+    ] {
+        if applicable && logical(doc, switch) {
+            paths.push((
+                resolve(&character(doc, key), key)?,
+                directory,
+                key.to_owned(),
+            ));
+        }
     }
-    if !want_dir && !meta.is_file() {
-        return Err(format!("{path}: {} 不是文件", p.display()));
+    if logical(doc, "DEF_URBAN_RUN") && integer(doc, "DEF_URBAN_type_scheme") == 1 {
+        paths.push((
+            format!(
+                "{}/urban/NCAR_urban_properties.nc",
+                resolve(&character(doc, "DEF_dir_rawdata"), "NCAR 城市分类")?.trim_end_matches('/')
+            ),
+            false,
+            "NCAR 城市分类".into(),
+        ));
     }
-    Ok(())
+    let mut files = bgc_runtime_files(
+        logical(doc, "DEF_USE_BGC"),
+        integer(doc, "DEF_NDEP_FREQUENCY"),
+        logical(doc, "DEF_USE_NITRIF"),
+        logical(doc, "DEF_USE_FIRE"),
+    )?;
+    if crop.unwrap_or_else(|| logical(doc, "DEF_USE_CROP")) {
+        files.extend(
+            crop_runtime_files(
+                real(doc, "DEF_TUNING_CROP_PLANTING_DAY"),
+                logical(doc, "DEF_USE_FERT"),
+                integer(doc, "DEF_FERT_SOURCE"),
+                logical(doc, "DEF_USE_IRRIGATION"),
+                integer(doc, "DEF_IRRIGATION_ALLOCATION"),
+            )
+            .into_iter()
+            .map(|(name, _)| name.to_owned()),
+        );
+    }
+    if !files.is_empty() {
+        let root = resolve(&character(doc, "DEF_dir_runtime"), "BGC/作物 runtime")?;
+        paths.extend(files.into_iter().map(|name| {
+            (
+                format!("{}/{}", root.trim_end_matches('/'), name),
+                false,
+                runtime_file_label(&name).to_owned(),
+            )
+        }));
+    }
+    Ok(paths)
+}
+
+/// Dataset checks use the owning server; numerical and process rules stay in this module.
+pub(crate) fn server_runtime_paths(
+    doc: &colm_namelist::Document,
+    case_dir: &std::path::Path,
+    kernel_dir: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let crop = kernel_facts(kernel_dir)?
+        .map(|facts| facts.crop)
+        .unwrap_or_else(|| {
+            doc.get("DEF_TUNING_CROP_PLANTING_DAY").is_some() || logical(doc, "DEF_USE_CROP")
+        });
+    Ok(serde_json::Value::Array(
+        runtime_paths(doc, case_dir, Some(crop))?
+            .into_iter()
+            .map(|(path, directory, _)| serde_json::json!({ "path": path, "directory": directory }))
+            .collect(),
+    ))
 }
 
 fn is_expert_tuning_name(name: &str) -> bool {
@@ -1381,15 +1483,6 @@ fn validate_runtime_contract_at(
         .split(',')
         .any(|name| matches!(name.trim().to_ascii_uppercase().as_str(), "CH4" | "METHANE"));
     let urban = logical(doc, "DEF_URBAN_RUN");
-    if urban
-        && integer(doc, "DEF_URBAN_type_scheme") == 1
-        && !ncar_urban_properties(doc, Some(case_dir)).is_some_and(|path| path.is_file())
-    {
-        return Err(
-            "NCAR 城市分类需要 DEF_dir_rawdata/urban/NCAR_urban_properties.nc；当前数据只支持 LCZ"
-                .into(),
-        );
-    }
     let single = kernel.map(|facts| facts.single).unwrap_or_else(|| {
         doc.get("SITE_fsitedata").is_some()
             || doc.get("SITE_lon_location").is_some()
@@ -1586,69 +1679,80 @@ fn validate_runtime_contract_at(
         }
     }
 
-    active_path(
-        doc,
-        case_dir,
-        "DEF_USE_SoilInit",
-        "DEF_file_SoilInit",
-        false,
-    )?;
-    active_path(
-        doc,
-        case_dir,
-        "DEF_USE_SnowInit",
-        "DEF_file_SnowInit",
-        false,
-    )?;
-    active_path(doc, case_dir, "DEF_USE_CN_INIT", "DEF_file_cn_init", false)?;
-    if !logical(doc, "DEF_USE_SoilInit") {
-        active_path(
-            doc,
-            case_dir,
-            "DEF_USE_WaterTableInit",
-            "DEF_file_WaterTable",
-            false,
-        )?;
-    }
-    active_path(
-        doc,
-        case_dir,
-        "DEF_USE_Forcing_Downscaling",
-        "DEF_DS_HiresTopographyDataDir",
-        true,
-    )?;
-    if logical(doc, "DEF_USE_OZONESTRESS") {
-        active_path(doc, case_dir, "DEF_USE_OZONEDATA", "DEF_file_Ozone", false)?;
-    }
-    let runtime = character(doc, "DEF_dir_runtime");
-    let runtime = runtime.trim();
-    let runtime = (!runtime.is_empty() && !runtime.eq_ignore_ascii_case("null")).then(|| {
-        let path = std::path::Path::new(runtime);
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            case_dir.join(path)
-        }
-    });
-    validate_bgc_runtime_dir(
-        runtime.as_deref(),
-        bgc,
-        integer(doc, "DEF_NDEP_FREQUENCY"),
-        logical(doc, "DEF_USE_NITRIF"),
-        logical(doc, "DEF_USE_FIRE"),
-    )?;
-    if crop {
-        for (name, label) in crop_runtime_files(
-            real(doc, "DEF_TUNING_CROP_PLANTING_DAY"),
-            logical(doc, "DEF_USE_FERT"),
-            integer(doc, "DEF_FERT_SOURCE"),
-            logical(doc, "DEF_USE_IRRIGATION"),
-            integer(doc, "DEF_IRRIGATION_ALLOCATION"),
-        ) {
-            runtime_file(doc, case_dir, name, label)?;
+    let paths = runtime_paths(doc, case_dir, Some(crop))?;
+    if crate::remote::server_case_owner(&case_dir.to_string_lossy())?.is_none() {
+        for (path, directory, label) in paths {
+            let metadata = std::fs::metadata(&path)
+                .map_err(|error| format!("{label}数据缺失：{path}: {error}"))?;
+            if if directory {
+                !metadata.is_dir()
+            } else {
+                !metadata.is_file()
+            } {
+                return Err(format!(
+                    "{label}: {path} {}",
+                    if directory {
+                        "不是目录"
+                    } else {
+                        "不是文件"
+                    }
+                ));
+            }
         }
     }
     Ok(())
+}
+
+fn runtime_file_label(path: &str) -> &'static str {
+    if path.starts_with("ndep/") {
+        "氮沉降数据"
+    } else if path.starts_with("nitrif/") {
+        "硝化数据"
+    } else if path.starts_with("fire/") {
+        "火灾过程数据"
+    } else if path.starts_with("crop/plantdt-") {
+        "CROP 播种日期"
+    } else {
+        "运行时数据"
+    }
+}
+
+fn bgc_runtime_files(
+    bgc: bool,
+    ndep_frequency: i64,
+    nitrif: bool,
+    fire: bool,
+) -> Result<Vec<String>, String> {
+    if !bgc {
+        return Ok(Vec::new());
+    }
+    let ndep = match ndep_frequency {
+        1 => "ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
+        2 => "ndep/fndep_colm_monthly.nc",
+        _ => return Err("DEF_NDEP_FREQUENCY 只能选择年尺度（1）或月尺度（2）".into()),
+    };
+    let mut files = vec![ndep.to_owned()];
+    if nitrif {
+        for family in ["CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT"] {
+            for layer in 1..=10 {
+                files.push(format!("nitrif/{family}/{family}_l{layer:02}.nc"));
+            }
+        }
+    }
+    if fire {
+        files.extend(
+            [
+                "fire/abm_colm_double_fillcoast.nc",
+                "fire/peatf_colm_360x720_c100428.nc",
+                "fire/gdp_colm_360x720_c100428.nc",
+                "fire/colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc",
+                "fire/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+    }
+    Ok(files)
 }
 
 pub(crate) fn validate_bgc_runtime_dir(
@@ -1658,42 +1762,17 @@ pub(crate) fn validate_bgc_runtime_dir(
     nitrif: bool,
     fire: bool,
 ) -> Result<(), String> {
-    if !bgc {
+    let files = bgc_runtime_files(bgc, ndep_frequency, nitrif, fire)?;
+    if files.is_empty() {
         return Ok(());
     }
     let root =
         root.ok_or("BGC/甲烷算例需要运行时数据目录；请在“基本设定 / 文件与目录”选择 runtime。")?;
-    let ndep = match ndep_frequency {
-        1 => "ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc",
-        2 => "ndep/fndep_colm_monthly.nc",
-        _ => return Err("DEF_NDEP_FREQUENCY 只能选择年尺度（1）或月尺度（2）".into()),
-    };
-    let require = |name: &str, label: &str| {
+    for name in files {
+        let label = runtime_file_label(&name);
         let file = root.join(name);
-        file.is_file()
-            .then_some(())
-            .ok_or_else(|| format!("BGC/甲烷运行时目录缺少{label}：{}", file.display()))
-    };
-    require(ndep, "氮沉降数据")?;
-    if nitrif {
-        for family in ["CONC_O2_UNSAT", "O2_DECOMP_DEPTH_UNSAT"] {
-            for layer in 1..=10 {
-                require(
-                    &format!("nitrif/{family}/{family}_l{layer:02}.nc"),
-                    "硝化数据",
-                )?;
-            }
-        }
-    }
-    if fire {
-        for name in [
-            "fire/abm_colm_double_fillcoast.nc",
-            "fire/peatf_colm_360x720_c100428.nc",
-            "fire/gdp_colm_360x720_c100428.nc",
-            "fire/colmforc.Li_2017_HYDEv3.2_CMIP6_hdm_0.5x0.5_AVHRR_simyr1850-2016_c180202.nc",
-            "fire/clmforc.Li_2012_climo1995-2011.T62.lnfm_Total_c140423.nc",
-        ] {
-            require(name, "火灾过程数据")?;
+        if !file.is_file() {
+            return Err(format!("BGC/甲烷运行时目录缺少{label}：{}", file.display()));
         }
     }
     Ok(())
@@ -1730,29 +1809,6 @@ pub(crate) fn crop_runtime_files(
         }
     }
     files
-}
-
-fn runtime_file(
-    doc: &colm_namelist::Document,
-    case_dir: &std::path::Path,
-    name: &str,
-    label: &str,
-) -> Result<(), String> {
-    let root = character(doc, "DEF_dir_runtime");
-    let root = root.trim();
-    if root.is_empty() || root.eq_ignore_ascii_case("null") {
-        return Err(format!("{label} 已开启，请选择 DEF_dir_runtime"));
-    }
-    let root = std::path::Path::new(root);
-    let file = if root.is_absolute() {
-        root.join(name)
-    } else {
-        case_dir.join(root).join(name)
-    };
-    if !file.is_file() {
-        return Err(format!("{label} 运行时目录缺少数据：{}", file.display()));
-    }
-    Ok(())
 }
 
 fn hidden(reason: &'static str) -> (FieldMode, Option<&'static str>, Vec<&'static str>) {
@@ -4992,6 +5048,7 @@ pub fn set_spinup(
 /// Save only case-owned fields, validating against the selected immutable model.
 #[tauri::command]
 pub async fn case_data_save(
+    app: tauri::AppHandle,
     dirs: Vec<String>,
     fields: Vec<FieldChange>,
     kernel_dir: Option<String>,
@@ -5033,12 +5090,45 @@ pub async fn case_data_save(
                 &remove_fields,
             )
             .await?;
-            contexts.push(context.entry.dir);
+            let context_dir = context.entry.dir;
+            contexts.push(context_dir.clone());
+            if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
+                let text =
+                    std::fs::read_to_string(std::path::Path::new(&context_dir).join("case.nml"))
+                        .map_err(|error| error.to_string())?;
+                let candidate = colm_namelist::parse(&text).map_err(|error| error.to_string())?;
+                crate::remote::check_server_paths(
+                    app.clone(),
+                    &host,
+                    server_runtime_paths(
+                        &candidate,
+                        std::path::Path::new(dir),
+                        kernel_dir.as_deref(),
+                    )?,
+                )
+                .await?;
+            }
         }
         if read_all(&dirs)? != before {
             return Err("case data changed while validating; reload before saving".into());
         }
-        set_fields_with_changes(dirs, fields, &remove_fields, kernel_dir, Some(&contexts))
+        let saved = set_fields_with_changes(
+            dirs.clone(),
+            fields,
+            &remove_fields,
+            kernel_dir,
+            Some(&contexts),
+        )?;
+        for dir in &dirs {
+            if crate::remote::server_case_owner(dir)?.is_some() {
+                crate::remote_cases::sync_case(&app, dir)
+                    .await
+                    .map_err(|error| {
+                        format!("本地配置已保存，服务器同步失败，请重试保存：{error}")
+                    })?;
+            }
+        }
+        Ok(saved)
     }
     .await;
     for context in contexts {

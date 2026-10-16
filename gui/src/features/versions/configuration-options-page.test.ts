@@ -45,6 +45,7 @@ function harness() {
     derived: false,
   }));
   const props = {
+    runHost: undefined as string | undefined,
     process: undefined as string | undefined,
     engine: undefined as string | undefined,
     hideProcesses: false,
@@ -88,6 +89,7 @@ function harness() {
   const nodes: { type: string; props: Record<string, unknown>; children?: unknown[] }[] = [];
   const context = {
     PFT,
+    RemotePathBrowser: 'RemotePathBrowser',
     ...helpers,
     ...settings,
     ...presentation,
@@ -1546,3 +1548,37 @@ test('VIC files expose preset paths and guarded browsing only for the selected s
     assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`));
   }
 });
+
+for (const outcome of ['select', 'cancel', 'switch', 'lock', 'unmount']) {
+  test(`remote configuration file browser preserves ${outcome} guards`, async () => {
+    const h = cnFileHarness();
+    h.props.runHost = 'compute';
+    h.props.modalActions = [];
+    const patches: helpers.CaseOptionPatch[] = [];
+    h.props.onCaseChange = (patch) => {
+      patches.push(patch);
+    };
+    h.render();
+    const c = await h.settle();
+    const pending = c.actions.find((a) => a.id === browseId)!.run();
+    h.render();
+    const picker = h.nodes.find((node) => node.type === 'RemotePathBrowser')!;
+    assert.equal(picker.props.host, 'compute');
+    assert.equal(picker.props.directory, false);
+    assert.equal(h.picks.length, 0);
+    if (outcome === 'switch') {
+      h.props.runHost = 'other';
+      h.render();
+    }
+    if (outcome === 'lock') {
+      h.props.disabled = true;
+      h.render();
+    }
+    if (outcome === 'unmount') h.unmount();
+    else if (outcome === 'cancel') (picker.props.onClose as () => void)();
+    else (picker.props.onSelect as (path: string) => void)("/server/O'Brien/cn.nc");
+    await pending;
+    assert.equal(patches.length, outcome === 'select' ? 1 : 0);
+    if (outcome === 'select') assert.equal(patches[0].DEF_file_cn_init, "'/server/O''Brien/cn.nc'");
+  });
+}

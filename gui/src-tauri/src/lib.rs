@@ -22,6 +22,7 @@ mod observation;
 mod project;
 mod recent;
 mod remote;
+mod remote_cases;
 mod sidecar;
 mod sitedata;
 mod sites;
@@ -38,6 +39,7 @@ use observation::*;
 use project::*;
 use recent::*;
 use remote::*;
+use remote_cases::*;
 use sidecar::*;
 use sitedata::*;
 use sites::*;
@@ -228,6 +230,9 @@ pub fn run() {
             remote_set_password,
             remote_ssh_hosts,
             remote_probe,
+            remote_scan_sites,
+            remote_create_case,
+            remote_browse,
             remote_engines,
             remote_engine_clean,
             remote_engine_recover,
