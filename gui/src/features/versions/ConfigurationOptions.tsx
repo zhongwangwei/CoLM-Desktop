@@ -401,14 +401,16 @@ export default function ConfigurationOptions({
         ? null
         : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? null),
       defaultValue = context?.built_in_default ?? field.default ?? '',
-      value = configured ?? defaultValue,
+      cnInitialFile = field.name === 'DEF_file_cn_init',
+      rawValue = configured ?? defaultValue,
+      value = cnInitialFile && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? '' : rawValue,
       overridden = configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive,
       id = `configuration-${field.name}`;
     actions.push({
       id: `${id}-reset`,
-      label: `${fieldLabel(field.name, lang)} · ${t('移除覆盖', 'Remove override')}`,
+      label: `${fieldLabel(field.name, lang)} · ${t('恢复默认', 'Restore default')}`,
       kind: 'click',
       enabled: !locked && overridden,
       visible: overridden,
@@ -429,14 +431,20 @@ export default function ConfigurationOptions({
           {field.name} ·{' '}
           {(context?.pending ? t('适用性待核对', 'Applicability pending') : context?.reason) ||
             t('适用性待核对', 'Applicability pending')}{' '}
-          · {t('默认值', 'Default')}: {defaultValue || '—'}
+          · {t('默认值', 'Default')}:{' '}
+          {cnInitialFile
+            ? t(
+                '运行数据目录下的 cnsteadystate.nc',
+                'cnsteadystate.nc in the runtime data directory',
+              )
+            : defaultValue || '—'}
         </small>
         {overridden && (
           <Button
             disabled={locked}
             onClick={() => uiWrite(() => resetModelOption(overlay, field.name))}
           >
-            {t('移除覆盖', 'Remove override')}
+            {t('恢复默认', 'Restore default')}
           </Button>
         )}
       </div>
@@ -448,6 +456,12 @@ export default function ConfigurationOptions({
   );
   function stomatal() {
     if (!showStomatal) return null;
+    const overridden = stomatalFields.some(
+      (name) =>
+        !removedCaseKeys.includes(name) &&
+        (modelSettingValue(overlay, name) ??
+          values.fields.find((field) => field.name === name)?.configured_value) != null,
+    );
     const flags = stomatalFields.map((name) => {
       const context = values.fields.find((field) => field.name === name);
       const configured = removedCaseKeys.includes(name)
@@ -499,9 +513,10 @@ export default function ConfigurationOptions({
       write(() => stomatalFields.reduce((next, name) => resetModelOption(next, name), overlay));
     actions.push({
       id: 'configuration-stomatal-reset',
-      label: t('移除气孔方案覆盖', 'Remove stomatal overrides'),
+      label: t('气孔导度方案 · 恢复默认', 'Stomatal scheme · Restore default'),
       kind: 'click',
-      enabled: !locked,
+      enabled: !locked && overridden,
+      visible: overridden,
       run: reset,
     });
     return (
@@ -535,18 +550,20 @@ export default function ConfigurationOptions({
             )}
           </p>
         )}
-        <Button
-          disabled={locked}
-          onClick={() => {
-            try {
-              reset();
-            } catch {
-              /* Preserve draft. */
-            }
-          }}
-        >
-          {t('移除覆盖', 'Remove override')}
-        </Button>
+        {overridden && (
+          <Button
+            disabled={locked}
+            onClick={() => {
+              try {
+                reset();
+              } catch {
+                /* Preserve draft. */
+              }
+            }}
+          >
+            {t('恢复默认', 'Restore default')}
+          </Button>
+        )}
       </div>
     );
   }
@@ -985,13 +1002,15 @@ export default function ConfigurationOptions({
           d.storage === (pftKind === 'pft' ? 'pft-override' : 'pc-pft-override'),
       ),
       id = `configuration-${pftKind}-${pftIndex}-${entry.name}`,
-      cannot = !!onCaseChange || !ready || entry.mode !== 'editable' || !descriptor || !selection;
+      cannot = !!onCaseChange || !ready || entry.mode !== 'editable' || !descriptor || !selection,
+      overridden = entry.configured_value !== null;
     const reset = () => write(() => resetScopedOption(overlay, descriptor!, Number(pftIndex), ''));
     actions.push({
       id: `${id}-reset`,
-      label: `${entry.name} · ${t('移除覆盖', 'Remove override')}`,
+      label: `${entry.name} · ${t('恢复默认', 'Restore default')}`,
       kind: 'click',
-      enabled: !onCaseChange && !locked && !!descriptor && !!selection,
+      enabled: !onCaseChange && !locked && !!descriptor && !!selection && overridden,
+      visible: overridden,
       run: () => {
         if (!descriptor || !selection) throw new Error('PFT parameter is unavailable');
         reset();
@@ -1014,18 +1033,20 @@ export default function ConfigurationOptions({
           {entry.reason || t('待按冻结源码核对', 'Pending frozen-source verification')} ·{' '}
           {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
         </small>
-        <Button
-          disabled={!!onCaseChange || locked || !descriptor || !selection}
-          onClick={() => {
-            try {
-              reset();
-            } catch {
-              /* Preserve draft. */
-            }
-          }}
-        >
-          {t('移除覆盖', 'Remove override')}
-        </Button>
+        {overridden && (
+          <Button
+            disabled={!!onCaseChange || locked || !descriptor || !selection}
+            onClick={() => {
+              try {
+                reset();
+              } catch {
+                /* Preserve draft. */
+              }
+            }}
+          >
+            {t('恢复默认', 'Restore default')}
+          </Button>
+        )}
       </div>
     );
   });

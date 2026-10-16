@@ -4,6 +4,7 @@ import type { Overlay } from '../../lib/types';
 import type { Descriptor, ModelField } from './model';
 import {
   caseFieldVisible,
+  cnInitialStatePatch,
   type ConfigurationField,
   tracerFamilyState,
   appendTracerFamily,
@@ -599,4 +600,24 @@ test('path placeholder contract recognizes complete name tokens and paired quote
         ),
       /supported|支持/,
     );
+});
+
+test('CN runtime defaults preserve quoting and platform paths without inventing missing data', () => {
+  for (const [runtime, expected] of [
+    ["'/data/runtime/'", "'/data/runtime/cnsteadystate.nc'"],
+    ["'/'", "'/cnsteadystate.nc'"],
+    ["'C:\\runtime\\'", "'C:\\runtime\\cnsteadystate.nc'"],
+    ["'data/O''Brien'", "'data/O''Brien/cnsteadystate.nc'"],
+  ]) {
+    const values = {
+      DEF_USE_CN_INIT: '.true.',
+      DEF_dir_runtime: runtime,
+      DEF_file_cn_init: "'null'",
+    };
+    assert.deepEqual(cnInitialStatePatch(empty(), values, {}), { DEF_file_cn_init: expected });
+    assert.deepEqual(cnInitialStatePatch(empty(), values, { DEF_file_cn_init: "'custom.nc'" }), {});
+    assert.deepEqual(cnInitialStatePatch(empty(), values, { DEF_USE_CN_INIT: '.false.' }), {});
+  }
+  assert.deepEqual(cnInitialStatePatch(empty(), { DEF_USE_CN_INIT: '.true.' }, {}), {});
+  assert.deepEqual(cnInitialStatePatch(empty(), {}, {}), {});
 });

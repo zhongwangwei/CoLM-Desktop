@@ -2033,3 +2033,47 @@ for (const kind of ['region', 'watershed', 'global'])
       kind === 'global' ? '.false.' : '.true.',
     );
   });
+
+for (const kind of ['region', 'watershed', 'global'])
+  test(`switching site crop to ${kind} keeps crop enabled and creates with the per-CFT calendar`, async () => {
+    const p = page(
+      'NewCasePage',
+      {
+        form: {
+          ...form,
+          subgrid: 'PFT',
+          dlon: '1',
+          dlat: '1',
+          west: '100',
+          east: '102',
+          south: '30',
+          north: '32',
+          shapefile: '/basin.shp',
+          forcing: '/forcing.nml',
+        },
+        step: 2,
+        caseValues: { DEF_USE_BGC: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '145' },
+      },
+      [site],
+      initialValues,
+      { schema: setupSchema },
+    );
+    await p.mount();
+    p.set('new-kind', kind);
+    await p.settle();
+    await p.goto('new-step-4');
+    const values = (
+      p.element('ModelSettings').props.setupEnvironment as {
+        caseValues: Record<string, string>;
+      }
+    ).caseValues;
+    assert.equal(values.DEF_TUNING_CROP_PLANTING_DAY, '0');
+    assert.equal(caseModel.cropEnabled(values), true);
+    assert.equal(values.DEF_USE_BGC, '.true.');
+    await p.goto('new-step-5');
+    await p.click('new-create');
+    const request = p.calls.find((call) => call.command === 'new_spatial_case');
+    assert.ok(request);
+    const sent = request.args.fields as { path: string; value: string }[];
+    assert.equal(sent.filter((f) => f.path === 'DEF_TUNING_CROP_PLANTING_DAY').at(-1)?.value, '0');
+  });
