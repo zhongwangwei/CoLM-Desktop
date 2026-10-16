@@ -2,6 +2,17 @@
 use colm_model::{CaseBinding, FrozenRevision, ModelDraft, Registry, VersionRef};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+fn preview_id(nanos: u128) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    // macOS clock values can repeat across concurrent case previews.
+    format!(
+        "preview-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    )
+}
 
 pub(crate) fn root() -> Result<PathBuf, String> {
     let db = colm_history::default_db_path().map_err(|e| e.to_string())?;
@@ -284,13 +295,11 @@ pub(crate) async fn model_case_context_with_fields(
     let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
     let parent = root()?.join("previews");
     std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
-    let id = format!(
-        "preview-{}-{}",
-        std::process::id(),
+    let id = preview_id(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
-            .as_nanos()
+            .as_nanos(),
     );
     let run = registry
         .materialize_run_with_case_changes(
@@ -301,7 +310,7 @@ pub(crate) async fn model_case_context_with_fields(
             case_fields,
             remove_fields,
         )
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))?;
     open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
 }
 
@@ -423,6 +432,23 @@ pub async fn model_attach_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_case_previews_with_the_same_clock_tick_have_distinct_directories() {
+        let root = std::env::temp_dir().join(preview_id(0));
+        std::fs::create_dir(&root).unwrap();
+        std::thread::scope(|scope| {
+            for _ in 0..90 {
+                let root = &root;
+                scope.spawn(move || {
+                    let id = preview_id(1234);
+                    std::fs::create_dir(root.join(id)).unwrap();
+                });
+            }
+        });
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 90);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn migration_import_failure_preserves_binding() {
         if let Some(dir) = std::env::var_os("COLM_TEST_MIGRATION_CASE") {

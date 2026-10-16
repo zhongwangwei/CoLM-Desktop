@@ -32,7 +32,10 @@ function screen(handoff?: {
   const slots: unknown[] = [];
   let cursor = 0;
   const effects = new Map<number, { deps: unknown[]; cleanup: () => void }>();
-  let contract: { fields: { id: string; disabled: boolean; set: (v: string) => void }[] };
+  let contract: {
+    fields: { id: string; disabled: boolean; set: (v: string) => void }[];
+    actions: { id: string; enabled: boolean; run: () => void }[];
+  };
   const requests: { args: unknown; resolve: (value: unknown) => void }[] = [];
   const panels: Record<string, unknown>[] = [];
   const text: string[] = [];
@@ -93,8 +96,30 @@ function screen(handoff?: {
     contract.fields.find((field) => field.id === `project-batch-case:${dir}`)!.set(String(checked));
     render();
   }
-  return { state, requests, panels, text, render, select };
+  function selectAll() {
+    contract.actions.find((action) => action.id === 'project-batch-select-all')!.run();
+    render();
+  }
+  return { state, requests, panels, text, render, select, selectAll };
 }
+
+test('select all loads each station once and respects an active local run', async () => {
+  const page = screen();
+  page.render();
+  page.select('/a', true);
+  page.state.running['/a'] = { running: true };
+  page.render();
+  page.selectAll();
+  assert.equal(page.requests.length, 1);
+  page.state.running = {};
+  page.render();
+  page.selectAll();
+  assert.equal(page.requests.length, 3);
+  for (const request of page.requests) request.resolve({ profile: { grid: 'site' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.render();
+  assert.deepEqual(page.panels[0].batchCases, ['/a', '/b']);
+});
 
 test('batch execution starts empty and resolves the selected case with the current model', async () => {
   const page = screen();
@@ -184,6 +209,37 @@ test('new project handoff selects only created cases and preserves resource choi
   const other = screen({ ...settings, root: '/another-project' });
   other.render();
   assert.equal(other.requests.length, 0);
+});
+
+test('ninety selected stations load the run panel without repeating idle status rows', async () => {
+  const cases = Array.from({ length: 90 }, (_, index) => ({
+    dir: `/site-${index}`,
+    name: `Site ${index}`,
+  }));
+  const page = screen({
+    root: '/project',
+    cases: cases.map((entry) => entry.dir),
+    host: '',
+    threads: '1',
+    ranks: '1',
+    workers: '2',
+    scheduler: 'auto',
+    cpus: '1',
+  });
+  page.state.cases = cases;
+  page.render();
+  assert.equal(page.requests.length, 90);
+  for (const request of page.requests) request.resolve({ profile: { grid: 'site', crop: false } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.render();
+  assert.equal(page.panels.length, 1);
+  assert.equal((page.panels[0].batchCases as string[]).length, 90);
+  assert.deepEqual(page.panels[0].summary, {
+    name: '90 stations',
+    period: 'Each case’s saved period',
+  });
+  assert.ok(page.text.includes('90 stations selected'));
+  assert.ok(!page.text.includes('Not started'));
 });
 
 test('batch waits for every selected profile and rejects different hosts or engines', async () => {
