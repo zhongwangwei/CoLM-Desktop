@@ -258,6 +258,46 @@ export function schemeHasSettings(
   );
 }
 
+export function caseSimulationDomain(
+  profile?: {
+    grid?: string | null;
+    domain_kind?: string | null;
+    domain?: readonly number[] | null;
+  } | null,
+): string | null {
+  if (!profile) return null;
+  if (['region', 'watershed', 'global'].includes(profile.domain_kind ?? ''))
+    return profile.domain_kind!;
+  if (!profile.grid) return 'site';
+  const bounds = profile.domain;
+  return bounds?.length === 4 && bounds[1] - bounds[0] >= 360 && bounds[2] <= -90 && bounds[3] >= 90
+    ? 'global'
+    : 'region';
+}
+export function regionalRoutingPatch(
+  values: Readonly<Record<string, string>>,
+  domain?: string | null,
+  grid?: string | null,
+): Record<string, string> {
+  if (!domain || !['site', 'single', 'region', 'regional', 'watershed', 'global'].includes(domain))
+    return {};
+  if (!grid && !['site', 'single'].includes(domain)) return {};
+  const on = (key: string) =>
+    Object.entries(values)
+      .find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1]
+      .trim()
+      .toLowerCase() === '.true.';
+  return {
+    DEF_UnitCatchment_regional:
+      !['site', 'single', 'global'].includes(domain) &&
+      grid !== 'catchment' &&
+      on('DEF_USE_GridRiverLakeFlow') &&
+      !on('DEF_USE_LULCC')
+        ? '.true.'
+        : '.false.',
+  };
+}
+
 export type AutoClosed = {
   key: string;
   zh: string;
@@ -415,6 +455,17 @@ export function exclusionPatch(
         ),
     ].some(Boolean);
     if (!changed) break;
+  }
+  const routing = regionalRoutingPatch(
+    {
+      DEF_USE_GridRiverLakeFlow: read('DEF_USE_GridRiverLakeFlow') ?? '.false.',
+      DEF_USE_LULCC: read('DEF_USE_LULCC') ?? '.false.',
+    },
+    context.domain,
+    context.grid,
+  );
+  for (const [key, value] of Object.entries(routing)) {
+    if (read(key) !== value && (value === '.true.' || read(key) !== undefined)) out[key] = value;
   }
   return { patch: out, closed };
 }

@@ -392,3 +392,46 @@ test('upstream choices close processes they invalidate, and the newest side of a
   );
   assert.deepEqual(r, { patch: { DEF_USE_PFT: on }, closed: [] });
 });
+
+test('regional routing follows domain and active river prerequisites automatically', async () => {
+  const { regionalRoutingPatch, caseSimulationDomain, exclusionPatch } =
+    await import('./model-settings');
+  const river = { DEF_USE_GridRiverLakeFlow: '.true.', DEF_USE_LULCC: '.false.' };
+  for (const domain of ['region', 'regional', 'watershed']) {
+    assert.equal(
+      regionalRoutingPatch(river, domain, 'latlon').DEF_UnitCatchment_regional,
+      '.true.',
+    );
+    assert.equal(
+      regionalRoutingPatch(river, domain, 'unstructured').DEF_UnitCatchment_regional,
+      '.true.',
+    );
+  }
+  for (const [values, domain, grid] of [
+    [river, 'global', 'latlon'],
+    [river, 'site', null],
+    [river, 'region', 'catchment'],
+    [{ ...river, DEF_USE_GridRiverLakeFlow: '.false.' }, 'region', 'latlon'],
+    [{ ...river, DEF_USE_LULCC: '.true.' }, 'region', 'latlon'],
+  ] as const)
+    assert.equal(regionalRoutingPatch(values, domain, grid).DEF_UnitCatchment_regional, '.false.');
+  assert.deepEqual(regionalRoutingPatch(river, null, 'latlon'), {});
+  assert.equal(caseSimulationDomain({ grid: 'latlon', domain_kind: 'global' }), 'global');
+  assert.equal(caseSimulationDomain({ grid: 'latlon', domain: [-180, 180, -90, 90] }), 'global');
+  assert.equal(caseSimulationDomain({ grid: 'latlon', domain_kind: 'watershed' }), 'watershed');
+  assert.equal(caseSimulationDomain({ domain_kind: 'global' }), 'global');
+  assert.equal(caseSimulationDomain({ grid: null }), 'site');
+  assert.equal(
+    exclusionPatch({}, river, { domain: 'region', grid: 'latlon' }).patch
+      .DEF_UnitCatchment_regional,
+    '.true.',
+  );
+  assert.equal(
+    exclusionPatch(
+      { ...river, DEF_UnitCatchment_regional: '.true.' },
+      {},
+      { domain: 'global', grid: 'latlon' },
+    ).patch.DEF_UnitCatchment_regional,
+    '.false.',
+  );
+});

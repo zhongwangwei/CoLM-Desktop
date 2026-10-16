@@ -19,7 +19,12 @@ import {
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
-import { autoClosedText, exclusionPatch, simulationOptionField } from './model-settings';
+import {
+  autoClosedText,
+  exclusionPatch,
+  simulationOptionField,
+  caseSimulationDomain,
+} from './model-settings';
 import HistoryVariablesCard from './HistoryVariablesCard';
 import { historyKey, historyPreset, type HistoryVariable } from './history-variables';
 import SimulationSteps from './SimulationSteps';
@@ -67,6 +72,8 @@ export default function CasesPage() {
     revision: number;
     profile: {
       grid?: string;
+      domain_kind?: string | null;
+      domain?: number[] | null;
       classification?: 'IGBP' | 'USGS';
       subgrid?: string;
       soil?: string;
@@ -105,7 +112,7 @@ export default function CasesPage() {
     const { patch, closed } = exclusionPatch({ ...physics, ...values }, requested, {
       subgrid: effectiveProfile?.subgrid,
       classification: effectiveProfile?.classification,
-      domain: effectiveProfile ? (effectiveProfile.grid ? 'region' : 'site') : null,
+      domain: caseSimulationDomain(effectiveProfile),
       grid: effectiveProfile?.grid ?? null,
       compiledCrop: configurationKernel?.macros.includes('CROP') === true,
     });
@@ -1011,7 +1018,7 @@ export default function CasesPage() {
                 setupEnvironment={{
                   subgrid: effectiveProfile?.subgrid,
                   caseValues: explicitValues,
-                  domain: effectiveProfile?.grid ? 'region' : effectiveProfile ? 'site' : null,
+                  domain: caseSimulationDomain(effectiveProfile),
                   grid: effectiveProfile?.grid,
                   classification: effectiveProfile?.classification,
                   kernel: effectiveProfile

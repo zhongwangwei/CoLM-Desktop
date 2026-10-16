@@ -55,7 +55,6 @@ test('ordered setup displays defaults without creating overrides', () => {
       'soil',
       'DEF_USE_VariablySaturatedFlow',
       'DEF_USE_GridRiverLakeFlow',
-      'DEF_UnitCatchment_regional',
       'DEF_USE_LULCC',
       'DEF_USE_BGC',
       'DEF_URBAN_RUN',
@@ -80,7 +79,7 @@ test('ordered setup displays defaults without creating overrides', () => {
     /van Genuchten/,
   );
   assert.deepEqual(empty.physics, {});
-  assert.match(options[5].choices[0].reason, /PFT/);
+  assert.match(options[4].choices[0].reason, /PFT/);
 });
 test('upstream edits reject active incompatible children without changing the original', () => {
   let o = apply(overlay(), 'DEF_USE_BGC', '.true.');
@@ -161,7 +160,7 @@ test('river, tracer and LULCC honor scenario and capability prerequisites and sc
     apply(o, 'DEF_USE_LULCC', '.true.', { ...environment, classification: 'USGS' }),
   );
   o.physics.DEF_UnitCatchment_regional = '.true.';
-  assert.throws(() => apply(o, 'DEF_USE_LULCC', '.true.'), /regional/);
+  assert.equal(apply(o, 'DEF_USE_LULCC', '.true.').physics.DEF_UnitCatchment_regional, '.false.');
   assert.throws(
     () => applySetupRequest(o, [], { id: 'soil', value: 'vG' }, environment),
     /writable/,
@@ -320,21 +319,47 @@ test('current compiled CROP remains a BGC prerequisite after removing the planti
   );
 });
 
-test('regional routing is reachable before LULCC with explicit off allowed even when river is disabled', () => {
+test('regional routing is hidden and LULCC atomically disables it without a manual prerequisite', () => {
+  assert.ok(setupHandledKeys.includes('DEF_UnitCatchment_regional'));
+  for (const regional of [undefined, '.true.', '.false.']) {
+    const o = overlay();
+    if (regional === undefined) delete o.physics.DEF_UnitCatchment_regional;
+    else o.physics.DEF_UnitCatchment_regional = regional;
+    const before = structuredClone(o);
+    assert.ok(
+      !setupChoices(o, fields, environment).some((c) => c.id === 'DEF_UnitCatchment_regional'),
+    );
+    const next = apply(o, 'DEF_USE_LULCC', '.true.');
+    assert.equal(next.physics.DEF_USE_LULCC, '.true.');
+    assert.equal(next.physics.DEF_UnitCatchment_regional, '.false.');
+    assert.deepEqual(o, before);
+  }
   const o = overlay();
-  o.physics.DEF_USE_LULCC = '.false.';
   delete o.physics.DEF_UnitCatchment_regional;
-  assert.throws(() => apply(o, 'DEF_USE_LULCC', '.true.'), /Pending/);
-  const cleared = apply(o, 'DEF_UnitCatchment_regional', '.false.');
-  assert.equal(apply(cleared, 'DEF_USE_LULCC', '.true.').physics.DEF_USE_LULCC, '.true.');
-  assert.throws(() => apply(o, 'DEF_UnitCatchment_regional', '.true.'), /routing/);
-  o.physics.DEF_USE_GridRiverLakeFlow = '.true.';
+  const next = applySetupRequest(
+    o,
+    fields.filter((f) => f.name !== 'DEF_UnitCatchment_regional'),
+    { id: 'DEF_USE_LULCC', value: '.true.' },
+    environment,
+  );
+  assert.equal(next.physics.DEF_USE_LULCC, '.true.');
+  assert.equal(next.physics.DEF_UnitCatchment_regional, undefined);
+});
+
+test('vG automatically enables VSF and disallows off while Campbell permits both choices', () => {
+  let o = apply(overlay(), 'soil', 'Campbell');
+  o = apply(o, 'DEF_USE_VariablySaturatedFlow', '.false.');
+  assert.equal(o.physics.DEF_USE_VariablySaturatedFlow, '.false.');
   assert.equal(
-    apply(o, 'DEF_UnitCatchment_regional', '.true.').physics.DEF_UnitCatchment_regional,
+    apply(o, 'DEF_USE_VariablySaturatedFlow', '.true.').physics.DEF_USE_VariablySaturatedFlow,
     '.true.',
   );
-  assert.throws(
-    () => apply(o, 'DEF_UnitCatchment_regional', '.true.', { ...environment, domain: 'site' }),
-    /spatial/,
-  );
+  o = apply(o, 'soil', 'vG');
+  assert.equal(o.physics.DEF_USE_VariablySaturatedFlow, '.true.');
+  const vsf = setupChoices(o, fields, environment).find(
+    (c) => c.id === 'DEF_USE_VariablySaturatedFlow',
+  )!;
+  assert.equal(vsf.value, '.true.');
+  assert.match(vsf.choices.find((c) => c.value === '.false.')!.reason, /Campbell/);
+  assert.throws(() => apply(o, 'DEF_USE_VariablySaturatedFlow', '.false.'), /Campbell/);
 });
