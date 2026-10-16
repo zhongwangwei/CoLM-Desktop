@@ -42,16 +42,12 @@ test('keeps scientific groups and unknown fields visible', () => {
   assert.equal(modelSettingGroup({ name: 'DEF_NEW_SCHEME', section: '新增分组' }), 'other');
 });
 
-test('hydraulic settings own soil fitting while surface resistance stays in general soil settings', async () => {
+test('soil fitting, resistance and albedo share the general soil group', async () => {
   const { processSettingOwner } = await import('./model-settings');
-  for (const name of ['DEF_USE_SOILPAR_UPS_FIT']) {
-    const field = { name, section: '水热过程' };
+  for (const name of ['DEF_USE_SOILPAR_UPS_FIT', 'DEF_RSS_SCHEME', 'DEF_SOIL_REFL_SCHEME']) {
+    const field = { name, section: '地表数据' };
     assert.equal(modelSettingGroup(field), 'soil');
-    assert.equal(processSettingOwner(field), 'soil');
-  }
-  for (const name of ['DEF_RSS_SCHEME', 'DEF_SOIL_REFL_SCHEME']) {
-    assert.equal(modelSettingGroup({ name, section: '地表数据' }), 'soil');
-    assert.equal(processSettingOwner({ name, section: '地表数据' }), null);
+    assert.equal(processSettingOwner(field), null);
   }
 });
 
@@ -216,11 +212,7 @@ test('model settings guide exposes classification only with a callback and catal
   let result = render();
   const settings = nodes.find((node) => typeof node.props.hasSettings === 'function')!.props
     .hasSettings as (id: string) => boolean;
-  assert.equal(
-    settings('soil'),
-    true,
-    'hydraulic settings explain forced options even with no editable fields',
-  );
+  assert.equal(settings('soil'), false, 'hydraulic choices have no separate settings dialog');
   assert.deepEqual(result.fields, []);
   result.actions.find((action) => action.id === 'simulation-classification-usgs')!.run();
   assert.deepEqual(choices, ['USGS']);
@@ -235,6 +227,31 @@ test('model settings guide exposes classification only with a callback and catal
   assert.ok(result.fields.every((f) => f.disabled));
   assert.ok(result.actions.every((a) => a.enabled === false));
   assert.ok(!result.actions.some((a) => a.id.startsWith('simulation-classification-')));
+  const processChildren = [
+    ['crop', 'DEF_USE_FERT', '生态与生地化', 'DEF_USE_CROP'],
+    ['DEF_USE_BGC', 'DEF_USE_NITRIF', '生态与生地化', 'DEF_USE_BGC'],
+    ['DEF_USE_LULCC', 'DEF_LULCC_SCHEME', '地表数据', 'DEF_USE_LULCC'],
+    ['DEF_URBAN_RUN', 'DEF_URBAN_type_scheme', '城市', 'DEF_URBAN_RUN'],
+    [
+      'DEF_USE_GridRiverLakeFlow',
+      'DEF_Reservoir_Method',
+      '河道与水库',
+      'DEF_USE_GridRiverLakeFlow',
+    ],
+  ];
+  slots[0] = processChildren.map(([, name, section]) => ({ name, section, derived: false }));
+  render(false, false, { onCaseChange: () => {} });
+  const hasProcessSettings = nodes.find((n) => typeof n.props.hasSettings === 'function')!.props
+    .hasSettings as (id: string, fields: unknown[]) => boolean;
+  const closedParents = processChildren.map(([, name, , parent_gate]) => ({
+    name,
+    mode: 'disabled',
+    pending: false,
+    parent_gate,
+    parent_gate_enabled: false,
+  }));
+  for (const [id] of processChildren) assert.equal(hasProcessSettings(id, closedParents), true, id);
+  assert.equal(hasProcessSettings('soil', closedParents), false);
   slots[0] = [
     { name: 'USE_SITE_LAI', section: '站点', derived: false },
     { name: 'DEF_USE_Forcing_Downscaling', section: '强迫场', derived: false },

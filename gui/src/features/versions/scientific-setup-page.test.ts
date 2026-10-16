@@ -41,6 +41,7 @@ function harness() {
     overlay,
     fields,
     environment: { subgrid: 'PFT', domain: 'single', grid: 'single' } as setup.SetupEnvironment,
+    hasSettings: () => true,
     onOpenSettings: undefined as undefined | ((id: string) => void),
     includeSubgrid: true,
     disabled: false,
@@ -349,4 +350,107 @@ test('vG renders the VSF off button disabled and excludes it from guide choices'
   );
   assert.ok(off);
   assert.equal(off.props.disabled, true);
+});
+
+test('clicking an already enabled process opens settings without saving again', async () => {
+  for (const id of ['DEF_USE_BGC', 'DEF_USE_VariablySaturatedFlow', 'crop']) {
+    const h = harness(),
+      opened: string[] = [],
+      patches: CaseOptionPatch[] = [];
+    Object.assign(h.props.overlay.physics, {
+      DEF_USE_BGC: '.true.',
+      DEF_USE_VariablySaturatedFlow: '.true.',
+      DEF_TUNING_CROP_PLANTING_DAY: '125',
+    });
+    h.props.environment.cropKernel = { dir: '/crop', macros: ['CROP'] } as KernelEntry;
+    h.props.environment.caseValues = { ...h.props.overlay.physics };
+    h.props.onOpenSettings = (value) => opened.push(value);
+    h.props.onCaseChange = (patch) => {
+      patches.push(patch);
+    };
+    h.render();
+    const c = await h.resolve();
+    await c.fields.find((f) => f.id === `setup-${id}`)!.set('.true.');
+    assert.deepEqual(opened, [id]);
+    assert.deepEqual(patches, []);
+    h.props.disabled = true;
+    h.render();
+    assert.throws(() => c.fields.find((f) => f.id === `setup-${id}`)!.set('.true.'));
+    assert.deepEqual(opened, [id]);
+  }
+});
+
+test('controls without settings never open a dialog when selecting or repeating a value', async () => {
+  const h = harness(),
+    opened: string[] = [];
+  h.props.hasSettings = () => false;
+  h.props.onOpenSettings = (id) => opened.push(id);
+  h.props.onCaseChange = () => {};
+  h.render();
+  let c = await h.resolve();
+  await c.fields.find((f) => f.id === 'setup-soil')!.set('Campbell');
+  h.props.overlay.physics.DEF_USE_Campbell_SOIL_MODEL = '.true.';
+  h.props.environment.caseValues = { ...h.props.overlay.physics };
+  h.render();
+  c = await h.resolve();
+  await c.fields.find((f) => f.id === 'setup-soil')!.set('Campbell');
+  assert.deepEqual(opened, []);
+  assert.ok(!c.actions.some((a) => a.id === 'setup-soil-settings'));
+});
+
+test('settings actions from a previous case stay stale after the next case finishes loading', async () => {
+  const h = harness(),
+    opened: string[] = [];
+  h.props.overlay.physics.DEF_USE_BGC = '.true.';
+  h.props.environment.caseValues = { ...h.props.overlay.physics };
+  h.props.onOpenSettings = (id) => opened.push(id);
+  h.props.onCaseChange = () => {};
+  h.render();
+  const c = await h.resolve();
+  const open = c.actions.find((a) => a.id === 'setup-DEF_USE_BGC-settings')!;
+  h.props.caseDir = '/case/b';
+  h.render();
+  await h.resolve();
+  assert.throws(() => open.run(), /stale/);
+  assert.deepEqual(opened, []);
+});
+
+test('an inherited enabled process is persisted before opening either settings entry', async () => {
+  for (const useSettingsButton of [false, true]) {
+    const h = harness(),
+      opened: string[] = [],
+      patches: CaseOptionPatch[] = [];
+    h.props.fields.find((f) => f.name === 'DEF_USE_GridRiverLakeFlow')!.default = '.true.';
+    h.props.environment.domain = 'region';
+    h.props.environment.grid = 'latlon';
+    h.props.environment.kernel = {
+      dir: '/grid',
+      macros: ['GRIDBASED', 'GridRiverLakeFlow'],
+    } as KernelEntry;
+    h.props.onOpenSettings = (id) => {
+      assert.equal(patches.at(-1)?.DEF_USE_GridRiverLakeFlow, '.true.');
+      opened.push(id);
+    };
+    h.props.onCaseChange = (patch) => {
+      patches.push(patch);
+    };
+    h.render();
+    const c = await h.resolve();
+    if (useSettingsButton)
+      await c.actions.find((a) => a.id === 'setup-DEF_USE_GridRiverLakeFlow-settings')!.run();
+    else await c.fields.find((f) => f.id === 'setup-DEF_USE_GridRiverLakeFlow')!.set('.true.');
+    assert.deepEqual(opened, ['DEF_USE_GridRiverLakeFlow']);
+    assert.equal(patches.length, 1);
+  }
+});
+test('an unavailable inherited process does not expose an empty settings entry', async () => {
+  const h = harness();
+  h.props.fields.find((f) => f.name === 'DEF_USE_GridRiverLakeFlow')!.default = '.true.';
+  h.props.onOpenSettings = () => {
+    throw new Error('must not open');
+  };
+  h.props.onCaseChange = () => {};
+  h.render();
+  const c = await h.resolve();
+  assert.ok(!c.actions.some((a) => a.id === 'setup-DEF_USE_GridRiverLakeFlow-settings'));
 });
