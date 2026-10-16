@@ -1394,7 +1394,7 @@ test('catchment lateral flow settings stay accessible without grid river routing
   for (const name of names)
     assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`), name);
 });
-test('LULCC settings include associated LAI flags and years', async () => {
+test('LAI flags and years have one general vegetation entry instead of a duplicate LULCC entry', async () => {
   const h = harness();
   h.props.process = 'DEF_USE_LULCC';
   h.props.onCaseChange = () => {};
@@ -1415,12 +1415,16 @@ test('LULCC settings include associated LAI flags and years', async () => {
       derived: false,
     });
   h.render();
-  const c = await h.settle();
+  let c = await h.settle();
   for (const name of names)
-    assert.ok(
-      c.fields.some((f) => f.id === `configuration-${name}`),
-      name,
-    );
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`), name);
+  h.props.process = undefined;
+  h.props.hideProcesses = true;
+  c = h.render();
+  c.actions.find((a) => a.id === 'configuration-group-subgrid')!.run();
+  c = h.render();
+  for (const name of names)
+    assert.equal(c.fields.filter((f) => f.id === `configuration-${name}`).length, 1, name);
 });
 
 test('general soil resistance precedes albedo and follows structure defaults without losing custom values', async () => {
@@ -1484,3 +1488,30 @@ test('general soil resistance precedes albedo and follows structure defaults wit
   assert.equal(c.fields.find((f) => f.id === 'configuration-DEF_RSS_SCHEME')!.value, '0');
   assert.equal(h.changes.length, 0);
 });
+
+for (const [process, names] of [
+  ['site', ['USE_SITE_soilparameters', 'SITE_landtype']],
+  ['forcing', ['DEF_Forcing_Interp_Method', 'DEF_USE_Forcing_Downscaling', 'DEF_DS_topo']],
+] as const) {
+  test(`${process} settings have a dedicated popup and no duplicate general entry`, async () => {
+    const h = harness();
+    h.props.onCaseChange = () => {};
+    h.props.hideProcesses = true;
+    for (const name of names)
+      h.props.fields.push({
+        name,
+        section: '其他',
+        kind: 'integer',
+        default: '1',
+        values: [],
+        derived: false,
+      });
+    h.render();
+    let c = await h.settle();
+    assert.ok(!c.actions.some((a) => a.id === `configuration-group-${process}`));
+    h.props.process = process;
+    c = h.render();
+    for (const name of names)
+      assert.equal(c.fields.filter((f) => f.id === `configuration-${name}`).length, 1, name);
+  });
+}

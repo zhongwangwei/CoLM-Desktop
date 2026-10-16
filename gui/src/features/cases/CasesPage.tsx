@@ -21,6 +21,7 @@ import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-pres
 import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
 import {
   autoClosedText,
+  configurationReason,
   exclusionPatch,
   simulationOptionField,
   caseSimulationDomain,
@@ -756,7 +757,11 @@ export default function CasesPage() {
     <Field
       key={f.name}
       label={labels[f.name] || fieldLabel(f.name, state.language)}
-      hint={optionState(f.name)?.reason ?? contextReason[f.name] ?? (advanced ? f.name : undefined)}
+      hint={
+        configurationReason(optionState(f.name)?.reason) ??
+        configurationReason(contextReason[f.name]) ??
+        (advanced ? f.name : undefined)
+      }
     >
       {f.name === 'DEF_dir_output' ? (
         <Input readOnly value={values[f.name] ?? ''} />
@@ -819,7 +824,9 @@ export default function CasesPage() {
   const basic = simulationFields(visibleSchema, step, false, engine).filter(
       (f) => !groupFields.includes(f),
     ),
-    extras = shown.filter((f) => !basic.includes(f) && !groupFields.includes(f));
+    extras = shown.filter(
+      (f) => !basic.includes(f) && !groupFields.includes(f) && !rangeFields.includes(f),
+    );
   const timeBasic = basic.filter((f) => f.name.startsWith('DEF_simulation_time%'));
   const outputBasic = basic.filter((f) => !f.name.startsWith('DEF_simulation_time%'));
   const more = () => (

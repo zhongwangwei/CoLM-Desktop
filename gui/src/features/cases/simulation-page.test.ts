@@ -1643,8 +1643,9 @@ test('existing case range fields are editable and save only the case before refr
   );
   await p.mount();
   const before = await p.goto('case-step-2');
-  for (const key of Object.keys(rangeValues))
+  for (const key of ['SITE_lon_location', 'SITE_lat_location'])
     assert.ok(before.fields.find((item) => item.id === `case-${key}`));
+  assert.ok(!before.fields.some((item) => item.id === 'case-SITE_fsitedata'));
   p.set('case-SITE_lon_location', '12.5');
   await p.click('case-save');
   assert.deepEqual(
@@ -2077,3 +2078,128 @@ for (const kind of ['region', 'watershed', 'global'])
     const sent = request.args.fields as { path: string; value: string }[];
     assert.equal(sent.filter((f) => f.path === 'DEF_TUNING_CROP_PLANTING_DAY').at(-1)?.value, '0');
   });
+
+for (const name of ['NewCasePage', 'CasesPage'] as const) {
+  test(`${name} keeps single-point and model schemes out of data while preserving values`, async () => {
+    const modelKeys = [
+      'USE_SITE_soilparameters',
+      'USE_SITE_LAI',
+      'SITE_lakedepth',
+      'DEF_LAI_CHANGE_YEAR',
+      'DEF_LAI_MONTHLY',
+      'DEF_HIGHRESURBAN_ALBEDO',
+      'DEF_forcing_interp_method',
+      'DEF_USE_Forcing_Downscaling',
+    ];
+    const retained = Object.fromEntries(modelKeys.map((key, index) => [key, `kept-${index}`]));
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3, caseValues: retained } : undefined,
+      [site],
+      { ...initialValues, ...retained, SITE_fsitedata: '/site.nc' },
+      {
+        schema: [
+          ...schema,
+          ...modelKeys.map((key) => field(key, '地表数据', '')),
+          field('SITE_fsitedata', '单点模拟', '/site.nc'),
+          field('DEF_case_name', '基础配置', 'site'),
+        ],
+      },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    const contract = p.render();
+    for (const key of [...modelKeys, 'DEF_case_name']) {
+      assert.ok(!contract.fields.some((f) => f.id.endsWith(key)), key);
+      assert.ok(!p.elements.some((e) => e.type === 'Field' && e.props.key === key), key);
+    }
+    assert.ok(contract.fields.some((f) => f.id.endsWith('DEF_dir_existing_srfdata')));
+    assert.ok(
+      contract.fields.some(
+        (f) => f.id === (name === 'NewCasePage' ? 'new-site' : 'case-SITE_fsitedata'),
+      ),
+    );
+    assert.ok(
+      contract.fields.some(
+        (f) => f.id === (name === 'NewCasePage' ? 'new-start' : 'case-start-date'),
+      ),
+    );
+    await p.goto(name === 'NewCasePage' ? 'new-step-4' : 'case-step-4');
+    const environment = p.element('ModelSettings').props.setupEnvironment as {
+      caseValues: Record<string, string>;
+    };
+    for (const key of modelKeys) assert.equal(environment.caseValues[key], retained[key], key);
+    assert.ok(!p.calls.some((call) => call.command === 'case_data_save'));
+  });
+
+  test(`${name} omits generic applicability hints while retaining concrete restrictions`, async () => {
+    const generic = '适用条件待按所选源码、算例和内核核对；目录默认值仅供参考';
+    const reason = 'This input requires an existing surface data directory';
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      [site],
+      initialValues,
+      {
+        schema: [...schema, field('EXTRA_INPUT', '地表数据', '')],
+        configuration: async () => ({
+          fields: [
+            { name: 'DEF_dir_existing_srfdata', mode: 'editable', pending: true, reason: generic },
+            { name: 'EXTRA_INPUT', mode: 'readonly', pending: true, reason },
+          ],
+        }),
+      },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    p.render();
+    assert.ok(!p.elements.some((e) => e.props.hint === generic));
+    assert.ok(p.elements.some((e) => e.props.hint === reason));
+  });
+}
+
+test('existing single-point range renders coordinates once and leaves the site file in data', async () => {
+  const p = page(
+    'CasesPage',
+    undefined,
+    [site],
+    {
+      ...initialValues,
+      SITE_fsitedata: '/site.nc',
+      SITE_lon_location: '116.3',
+      SITE_lat_location: '40.1',
+    },
+    {
+      schema: [
+        ...schema,
+        ...['SITE_fsitedata', 'SITE_lon_location', 'SITE_lat_location'].map((key) =>
+          field(key, '单点模拟', ''),
+        ),
+      ],
+    },
+  );
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-advanced', 'true');
+  await p.goto('case-step-2');
+  let contract = p.render();
+  assert.ok(!contract.fields.some((f) => f.id === 'case-SITE_fsitedata'));
+  for (const key of ['SITE_lon_location', 'SITE_lat_location']) {
+    assert.equal(contract.fields.filter((f) => f.id === `case-${key}`).length, 1);
+    assert.equal(p.elements.filter((e) => e.type === 'Field' && e.props.key === key).length, 1);
+  }
+  await p.goto('case-step-3');
+  contract = p.render();
+  assert.equal(contract.fields.filter((f) => f.id === 'case-SITE_fsitedata').length, 1);
+  assert.equal(
+    p.elements.filter((e) => e.type === 'Field' && e.props.key === 'SITE_fsitedata').length,
+    1,
+  );
+  assert.ok(
+    !contract.fields.some((f) =>
+      ['case-SITE_lon_location', 'case-SITE_lat_location'].includes(f.id),
+    ),
+  );
+});

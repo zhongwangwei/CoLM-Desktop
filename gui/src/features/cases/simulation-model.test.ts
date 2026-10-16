@@ -196,12 +196,7 @@ test('five steps expose data, model and output separately without dropping advan
   );
   assert.deepEqual(
     simulationFields(schema, 3, true).map((f) => f.name),
-    [
-      'DEF_simulation_time%start_sec',
-      'DEF_simulation_time%spinup_repeat',
-      'DEF_forcing_namelist',
-      'DEF_Forcing_Interp_Method',
-    ],
+    ['DEF_simulation_time%start_sec', 'DEF_simulation_time%spinup_repeat', 'DEF_forcing_namelist'],
   );
   assert.deepEqual(simulationFields(schema, 4, true), []);
   assert.deepEqual(
@@ -252,9 +247,28 @@ test('existing spinup cutoff respects actual seconds and moved simulation dates'
 });
 
 test('case range controls match site and spatial inputs', () => {
-  assert.deepEqual(caseRangeKeys(), ['SITE_fsitedata', 'SITE_lon_location', 'SITE_lat_location']);
+  assert.deepEqual(caseRangeKeys(), ['SITE_lon_location', 'SITE_lat_location']);
   assert.ok(caseRangeKeys('latlon').includes('DEF_GRIDBASED_lon_res'));
   assert.ok(caseRangeKeys('catchment').includes('DEF_CatchmentMesh_data'));
   assert.ok(caseRangeKeys('unstructured').includes('DEF_file_mesh'));
   assert.ok(!caseRangeKeys('latlon').includes('SITE_fsitedata'));
+});
+
+test('general identity and range coordinates stay separate from model source settings', async () => {
+  const { simulationFieldStep } = await import('./simulation-model');
+  for (const [name, section, expected] of [
+    ['DEF_CASE_NAME', '算例', 1],
+    ['SITE_lon_location', '站点', 2],
+    ['SITE_lat_location', '站点', 2],
+    ['SITE_fsitedata', '站点', 3],
+    ['USE_SITE_LAI', '站点', 4],
+    ['USE_SITE_pctcrop', '站点', 4],
+    ['USE_SITE_urban_geometry', '城市', 4],
+    ['USE_SITE_HistWriteBack', '输出与重启', 5],
+    ['USE_SITE_ForcingReadAhead', '站点', 3],
+    ['DEF_Forcing_Interp_Method', '强迫场', 4],
+    ['DEF_LAI_MONTHLY', '地表数据', 4],
+    ['DEF_LC_YEAR', '地表数据', 3],
+  ] as const)
+    assert.equal(simulationFieldStep({ name, section }), expected, name);
 });

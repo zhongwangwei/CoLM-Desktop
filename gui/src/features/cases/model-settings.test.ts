@@ -235,6 +235,28 @@ test('model settings guide exposes classification only with a callback and catal
   assert.ok(result.fields.every((f) => f.disabled));
   assert.ok(result.actions.every((a) => a.enabled === false));
   assert.ok(!result.actions.some((a) => a.id.startsWith('simulation-classification-')));
+  slots[0] = [
+    { name: 'USE_SITE_LAI', section: '站点', derived: false },
+    { name: 'DEF_USE_Forcing_Downscaling', section: '强迫场', derived: false },
+  ];
+  for (const domain of ['site', 'region']) {
+    const extra = { setupEnvironment: { domain }, onCaseChange: () => {} };
+    result = render(false, false, extra);
+    assert.equal(
+      result.actions.some((a) => a.id === 'simulation-site-settings'),
+      domain === 'site',
+    );
+    assert.ok(result.actions.some((a) => a.id === 'simulation-forcing-settings'));
+    result = render(false, true, extra);
+    for (const action of result.actions.filter((a) =>
+      ['simulation-site-settings', 'simulation-forcing-settings'].includes(a.id),
+    )) {
+      assert.equal(action.enabled, false);
+      const before = JSON.stringify(slots);
+      action.run();
+      assert.equal(JSON.stringify(slots), before);
+    }
+  }
   for (const mode of ['PFT', 'PC']) {
     render(false, false, { mode, classification: 'IGBP' });
     const selected = nodes.filter(
@@ -282,8 +304,7 @@ test('case vegetation selection ignores stale version flags', async () => {
 test('process ownership follows parent gates and leaves independent schemes and normal data accessible', async () => {
   const { processSettingOwner, simulationOptionField } = await import('./model-settings');
   const field = (name: string, section = '生态与生地化') => ({ name, section });
-  for (const name of ['DEF_LC_YEAR', 'DEF_CO2SCENARIO'])
-    assert.equal(simulationOptionField(field(name)), false);
+  for (const name of ['DEF_LC_YEAR']) assert.equal(simulationOptionField(field(name)), false);
   for (const name of ['DEF_USE_SNICAR', 'DEF_USE_PROSPECT', 'DEF_USE_MEDLYNST', 'DEF_USE_WUEST']) {
     assert.equal(processSettingOwner(field(name)), null);
     assert.equal(simulationOptionField(field(name)), true);
@@ -448,4 +469,58 @@ test('hyperspectral urban source remains a general simulation input without urba
   const field = { name: 'DEF_HighResUrban_albedo', section: '地表数据' };
   assert.equal(processSettingOwner(field), null);
   assert.equal(simulationOptionField(field), true);
+});
+
+test('classification gives site and forcing parameters exclusive model entries', async () => {
+  const { simulationOptionField, processSettingOwner, parameterLocation } =
+    await import('./model-settings');
+  for (const name of [
+    'USE_SITE_LAI',
+    'USE_SITE_pctcrop',
+    'USE_SITE_urban_geometry',
+    'SITE_landtype',
+  ]) {
+    const f = { name, section: '站点' };
+    assert.equal(simulationOptionField(f), true);
+    assert.equal(processSettingOwner(f), 'site');
+  }
+  for (const name of [
+    'DEF_LAI_MONTHLY',
+    'DEF_LAI_CHANGE_YEARLY',
+    'DEF_LAI_START_YEAR',
+    'DEF_LAI_END_YEAR',
+    'DEF_HighResSoil',
+    'DEF_HighResVeg',
+    'DEF_LANDONLY',
+  ])
+    assert.equal(simulationOptionField({ name, section: '地表数据' }), true, name);
+  for (const name of [
+    'DEF_Forcing_Interp_Method',
+    'DEF_USE_CBL_HEIGHT',
+    'DEF_forcing%CBL_fprefix',
+    'DEF_DS_HiresTopographyDataDir',
+  ])
+    assert.equal(processSettingOwner({ name, section: '强迫场' }), 'forcing', name);
+  for (const name of [
+    'DEF_dir_runtime',
+    'DEF_forcing%dataset',
+    'DEF_forcing%tintalgo',
+    'DEF_LC_YEAR',
+    'DEF_USE_SoilInit',
+    'USE_SITE_ForcingReadAhead',
+  ])
+    assert.equal(simulationOptionField({ name, section: '地表数据' }), false, name);
+  assert.equal(simulationOptionField({ name: 'DEF_SSP', section: '生态与生地化' }), true);
+  const p = {
+    raw_key: 'DEF_LAI_START_YEAR',
+    section: '地表数据',
+    scope: 'case-scalar',
+    storage: 'case-nml',
+    visibility: 'editable-common',
+  } as ModelParameter;
+  assert.match(parameterLocation(p, []), /模型结构与方案/);
+  assert.match(
+    parameterLocation({ ...p, scope: 'pft-type', storage: 'pft-override' }, []),
+    /模型版本/,
+  );
 });
