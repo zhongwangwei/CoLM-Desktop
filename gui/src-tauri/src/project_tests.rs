@@ -307,12 +307,77 @@ fn the_creation_record_round_trips() {
         engine: None,
         ..Default::default()
     };
-    record_case(&dir.to_string_lossy(), &record);
+    record_case(&dir.to_string_lossy(), &record).unwrap();
     assert_eq!(recorded_case(&dir), record);
     let opened = open_case(dir.to_string_lossy().into_owned()).expect("opens");
     assert_eq!(opened.profile.domain_kind.as_deref(), Some("watershed"));
     assert_eq!(opened.profile.shapefile.as_deref(), Some("/d/basin.shp"));
     assert_eq!(opened.profile.subgrid, "USGS");
+}
+
+#[test]
+fn run_host_round_trips_and_local_selection_preserves_case_metadata() {
+    let root = tmp("run-host-record");
+    let dir = make_case(&root, "c", "CN-Cng");
+    let dir_arg = dir.to_string_lossy().into_owned();
+    assert_eq!(open_case(dir_arg.clone()).unwrap().profile.run_host, None);
+    let mut record = CaseRecord {
+        mode: Some("usgs".into()),
+        domain: Some("watershed".into()),
+        shapefile: Some("/d/basin.shp".into()),
+        engine: Some("rust".into()),
+        site: Some("/d/site.nc".into()),
+        obs_file: Some("/d/obs.nc".into()),
+        ..Default::default()
+    };
+    record_case(&dir_arg, &record).unwrap();
+    set_case_run_host(dir_arg.clone(), Some("7920l".into())).unwrap();
+    record.run_host = Some("7920l".into());
+    assert_eq!(recorded_case(&dir), record);
+    assert_eq!(
+        open_case(dir_arg.clone())
+            .unwrap()
+            .profile
+            .run_host
+            .as_deref(),
+        Some("7920l")
+    );
+    for host in [Some(String::new()), None] {
+        set_case_run_host(dir_arg.clone(), Some("7920l".into())).unwrap();
+        set_case_run_host(dir_arg.clone(), host).unwrap();
+        record.run_host = None;
+        assert_eq!(recorded_case(&dir), record);
+    }
+}
+
+#[test]
+fn run_host_rejects_invalid_hosts_and_broken_metadata_without_writing() {
+    let root = tmp("run-host-invalid");
+    assert!(set_case_run_host(root.to_string_lossy().into_owned(), None).is_err());
+    assert!(!root.join(PROFILE_FILE).exists());
+    let dir = make_case(&root, "c", "CN-Cng");
+    let dir_arg = dir.to_string_lossy().into_owned();
+    for host in [" ", "host name", "host\nname", "host\0name", "-option"] {
+        assert!(set_case_run_host(dir_arg.clone(), Some(host.into())).is_err());
+        assert!(!dir.join(PROFILE_FILE).exists());
+    }
+    std::fs::write(dir.join(PROFILE_FILE), "{broken").unwrap();
+    assert!(set_case_run_host(dir_arg.clone(), Some("7920l".into())).is_err());
+    assert_eq!(
+        std::fs::read_to_string(dir.join(PROFILE_FILE)).unwrap(),
+        "{broken"
+    );
+    std::fs::remove_file(dir.join(PROFILE_FILE)).unwrap();
+    set_case_run_host(dir_arg, Some("7920l".into())).unwrap();
+    assert_eq!(recorded_case(&dir).run_host.as_deref(), Some("7920l"));
+}
+
+#[test]
+fn creation_record_write_errors_are_returned_to_the_creation_transaction() {
+    let root = tmp("record-write-error");
+    let missing = root.join("missing");
+    assert!(record_case(&missing.to_string_lossy(), &CaseRecord::default()).is_err());
+    assert!(!missing.exists());
 }
 
 #[test]

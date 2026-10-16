@@ -832,6 +832,16 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "set_case_run_host": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "host": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "open_case": {
     "dir": {
       "required": true,
@@ -1304,6 +1314,10 @@ export const commandContract = {
     "engine": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "runHost": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "forcing_datasets": {},
@@ -1415,6 +1429,10 @@ export const commandContract = {
       "rust_type": "Option<colm_model::VersionRef>"
     },
     "engine": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "runHost": {
       "required": false,
       "rust_type": "Option<String>"
     }

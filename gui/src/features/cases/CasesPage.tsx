@@ -34,6 +34,8 @@ import ModelSettings from './ModelSettings';
 import { caseSchemeFields, type SimulationMode } from './model-settings';
 import type { CaseOptionPatch } from '../versions/configuration-options';
 import RunPanel from '../runs/RunPanel';
+import RunLocationSettings from '../runs/RunLocationSettings';
+import type { Server } from '../resources/resource';
 import ResultsPage from '../results/ResultsPage';
 import HistoryPage from '../history/HistoryPage';
 export default function CasesPage() {
@@ -47,6 +49,48 @@ export default function CasesPage() {
         : 5,
     ),
     [error, setError] = useState('');
+  const [runPending, setRunPending] = useState(false);
+  const [servers, setServers] = useState<Server[] | null>(null);
+  const [resourceError, setResourceError] = useState('');
+  useEffect(() => {
+    let current = true;
+    invoke<{ servers: Server[] }>('remote_config', {})
+      .then((config) => {
+        if (current) setServers(config.servers);
+      })
+      .catch((e) => {
+        if (current) {
+          setServers([]);
+          setResourceError(String(e));
+        }
+      });
+    return () => {
+      current = false;
+    };
+  }, []);
+  const runHost = state.selectedCase?.profile.run_host ?? '';
+  async function changeRunHost(host: string) {
+    if (!dir || editingDisabled || dirty || lock.current) return;
+    const target = dir;
+    await work(async () => {
+      await invoke('set_case_run_host', { dir: target, host: host || null });
+      update((old) =>
+        old.selectedCase?.entry.dir === target
+          ? {
+              selectedCase: {
+                ...old.selectedCase,
+                profile: { ...old.selectedCase.profile, run_host: host || null },
+              },
+            }
+          : {},
+      );
+    });
+  }
+  function openResources() {
+    if (editingDisabled || dirty) return;
+    update({ simulationReturn: { route: 'case', step: 1, resourceHost: runHost } });
+    navigate('resources');
+  }
   const [dateDraft, setDateDraft] = useState<Partial<Record<'start' | 'end' | 'spinup', string>>>(
     {},
   );
@@ -363,7 +407,7 @@ export default function CasesPage() {
     end = dateDraft.end ?? caseDate(values, 'end'),
     spinup = dateDraft.spinup ?? caseDate(values, 'spinup');
   const caseRunning = !!(dir && state.running[dir]?.running),
-    editingDisabled = busy || caseRunning;
+    editingDisabled = busy || caseRunning || runPending;
   function periodProblem() {
     if (!validDate(start) || !validDate(end) || !casePeriodValid(values))
       return t(
@@ -592,6 +636,18 @@ export default function CasesPage() {
     );
   if (dir && state.caseTab === 'settings' && step === 1) {
     fields.push({
+      id: 'case-run-host',
+      label: t('运行位置', 'Run location'),
+      type: 'choice',
+      value: runHost,
+      options: [
+        { value: '', label: t('本机', 'Local') },
+        ...(servers ?? []).map((server) => ({ value: server.host, label: server.host })),
+      ],
+      disabled: editingDisabled || dirty || servers === null,
+      set: changeRunHost,
+    });
+    fields.push({
       id: 'case-DEF_dir_output',
       label: labels.DEF_dir_output,
       value: values['DEF_dir_output'] ?? (dir ? `${dir}/out` : ''),
@@ -647,6 +703,17 @@ export default function CasesPage() {
           },
         ]
       : [
+          ...(state.caseTab === 'settings' && step === 1
+            ? [
+                {
+                  id: 'case-run-resources',
+                  label: t('配置计算资源与路径对应', 'Configure resources and path mappings'),
+                  kind: 'click' as const,
+                  enabled: !editingDisabled && !dirty,
+                  run: openResources,
+                },
+              ]
+            : []),
           ...(state.caseTab === 'settings'
             ? (['runs', 'results'] as const)
             : (['settings'] as const)
@@ -897,10 +964,19 @@ export default function CasesPage() {
             <Card
               title={t('总的设定', 'General setup')}
               description={t(
-                '查看算例的基础设置：计算核心、算例保存路径与输出目录。',
-                'Check general case settings: calculation engine, case directory, and output directory.',
+                '选择运行位置，核对计算核心、算例保存路径与输出目录。',
+                'Choose the run location and review the engine, case directory and output directory.',
               )}
             >
+              <RunLocationSettings
+                host={runHost}
+                servers={servers}
+                disabled={editingDisabled || dirty}
+                error={resourceError}
+                en={en}
+                onChange={(host) => void changeRunHost(host).catch(() => {})}
+                onConfigure={openResources}
+              />
               <div className="simulation-site-summary">
                 <strong>{state.selectedCase?.entry.name}</strong>
                 <span>
@@ -909,7 +985,13 @@ export default function CasesPage() {
                 </span>
               </div>
               <div className="form-grid">
-                <Field label={t('算例路径', 'Case directory')}>
+                <Field
+                  label={
+                    runHost
+                      ? t('本地算例路径', 'Local case directory')
+                      : t('算例路径', 'Case directory')
+                  }
+                >
                   <Input readOnly value={dir ?? ''} />
                 </Field>
                 <Field
@@ -1115,6 +1197,7 @@ export default function CasesPage() {
             <RunPanel
               key={dir}
               active={step === 5}
+              onBusyChange={setRunPending}
               casePath={dir}
               effectiveProfile={effectiveProfile}
               disabled={busy || dirty || !!error || !schema.length}

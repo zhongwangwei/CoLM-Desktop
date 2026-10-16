@@ -43,7 +43,18 @@ export default function RunPanel({
   const { state, notify, update, navigate, openCase } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
-  const [host, setHost] = useState(''),
+  const savedHost =
+    state.selectedCase?.dir === casePath ? state.selectedCase.profile?.run_host || '' : '';
+  const recoveringRun = state.running[casePath];
+  const restoredHost =
+    recoveringRun?.running || recoveringRun?.status === 'unknown'
+      ? recoveringRun.location === 'local'
+        ? ''
+        : recoveringRun.progress?.host
+      : undefined;
+  const [host, setHost] = useState(
+      batchCases ? '' : typeof restoredHost === 'string' ? restoredHost : savedHost,
+    ),
     [servers, setServers] = useState<{ host: string }[]>([]),
     [kernel, setKernel] = useState(''),
     [preprocessors, setPreprocessors] = useState('rust'),
@@ -201,10 +212,14 @@ export default function RunPanel({
     );
   }, [state.kernels, effectiveProfile, state.version]);
   useEffect(() => {
+    if (batchCases) setHost('');
+    else if (typeof restoredHost !== 'string') setHost(savedHost);
+  }, [casePath, savedHost, batchCases, restoredHost]);
+  useEffect(() => {
     const progress = persisted?.progress;
-    if (!batchCases && typeof progress?.host === 'string') setHost(progress.host);
+    if (!batchCases && typeof restoredHost === 'string') setHost(restoredHost);
     if (progress?.remote) setRemote(progress.remote);
-  }, [persisted?.progress, batchCases]);
+  }, [persisted?.progress, batchCases, restoredHost]);
   useEffect(() => {
     onBusyChange?.(pending);
     return () => onBusyChange?.(false);
@@ -488,6 +503,29 @@ export default function RunPanel({
     }
   }
 
+  async function changeHost(value: string) {
+    if (pending || batchCases || value === host) return;
+    const dir = casePath;
+    try {
+      await action(async () => {
+        await invoke('set_case_run_host', { dir, host: value || null });
+        update((old) =>
+          old.selectedCase?.dir === dir && old.selectedCase.profile
+            ? {
+                selectedCase: {
+                  ...old.selectedCase,
+                  profile: { ...old.selectedCase.profile, run_host: value || null },
+                },
+              }
+            : {},
+        );
+        if (alive.current && currentCase.current === dir) setHost(value);
+      });
+    } catch {
+      // action reports the failure; keep the previously saved host.
+    }
+  }
+
   const resultsLabel = batchCases
     ? t(
         `查看 ${state.cases.find((entry) => entry.dir === casePath)?.name ?? casePath} 的结果`,
@@ -504,9 +542,12 @@ export default function RunPanel({
       disabled: pending,
       options: [
         { value: '', label: bilingual('本机', 'Local') },
+        ...(host && !servers.some((server) => server.host === host)
+          ? [{ value: host, label: `${host} · ${t('未配置', 'Not configured')}` }]
+          : []),
         ...servers.map((s) => ({ value: s.host, label: s.host })),
       ],
-      set: setHost,
+      set: changeHost,
     },
     ...(advanced
       ? [
@@ -729,6 +770,9 @@ export default function RunPanel({
             label: t('运行位置', 'Run location'),
             options: [
               { value: '', label: t('本机', 'Local') },
+              ...(host && !servers.some((server) => server.host === host)
+                ? [{ value: host, label: `${host} · ${t('未配置', 'Not configured')}` }]
+                : []),
               ...servers.map((s) => ({ value: s.host, label: s.host })),
             ],
           })}

@@ -955,7 +955,8 @@ mod tests {
                 engine: None,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         for scheme in ["IGBP", "USGS", "PFT", "PC"] {
             let fields = [
                 ("DEF_SUBGRID_SCHEME", scheme.to_owned()),

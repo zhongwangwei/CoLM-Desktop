@@ -506,7 +506,8 @@ mod tests {
                 engine: None,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let registry = Registry::open(directory.join("registry")).unwrap();
         let official = registry
             .install_official(colm_model::CodeRef {

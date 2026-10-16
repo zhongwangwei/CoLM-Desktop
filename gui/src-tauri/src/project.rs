@@ -104,6 +104,8 @@ pub struct CaseProfile {
     pub methane_mode: Option<String>,
     /// 建例时选择的计算核心（rust / fortran）。
     pub engine: Option<String>,
+    /// 算例运行的 SSH 主机别名；`None` 使用本机。
+    pub run_host: Option<String>,
     /// 自动匹配的观测文件（内置示例或数据集里的 Flux/clean_observations 观测文件）。
     pub obs_file: Option<String>,
 }
@@ -149,13 +151,43 @@ pub struct CaseRecord {
     pub site: Option<String>,
     #[serde(default)]
     pub obs_file: Option<String>,
+    #[serde(default)]
+    pub run_host: Option<String>,
 }
 
-/// 建例成功后写下记录。写不出来不影响建例。
-pub(crate) fn record_case(dir: &str, record: &CaseRecord) {
-    if let Ok(text) = serde_json::to_string(record) {
-        let _ = std::fs::write(Path::new(dir).join(PROFILE_FILE), text);
+#[tauri::command]
+pub fn set_case_run_host(dir: String, host: Option<String>) -> Result<(), String> {
+    let dir = Path::new(&dir);
+    if !dir.join("case.nml").is_file() {
+        return Err(format!("{} 不是算例目录（没有 case.nml）", dir.display()));
     }
+    let host = validate_run_host(host)?;
+    let path = dir.join(PROFILE_FILE);
+    let mut record: CaseRecord = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => CaseRecord::default(),
+        Err(error) => return Err(format!("{}: {error}", path.display())),
+    };
+    record.run_host = host;
+    record_case(&dir.to_string_lossy(), &record)
+}
+
+pub(crate) fn validate_run_host(host: Option<String>) -> Result<Option<String>, String> {
+    let host = host.filter(|host| !host.is_empty());
+    if host.as_deref().is_some_and(|host| {
+        host.starts_with('-') || host.chars().any(|c| c.is_whitespace() || c.is_control())
+    }) {
+        return Err("运行主机别名不能包含空白或控制字符，也不能以 - 开头".into());
+    }
+    Ok(host)
+}
+
+/// 保存建例记录；失败交由创建事务回滚。
+pub(crate) fn record_case(dir: &str, record: &CaseRecord) -> Result<(), String> {
+    crate::config::write_export_text_atomic(
+        &Path::new(dir).join(PROFILE_FILE),
+        serde_json::to_string(record).map_err(|e| e.to_string())?,
+    )
 }
 
 pub(crate) fn stage_case_classification(
@@ -361,6 +393,7 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
     profile.engine = record.engine;
+    profile.run_host = record.run_host;
     let doc = colm_namelist::parse(&text).ok();
     profile.methane_mode = doc
         .as_ref()
@@ -567,6 +600,7 @@ pub(crate) fn case_profile(
         shapefile: None,
         methane_mode: None,
         engine: None,
+        run_host: None,
         obs_file: None,
     })
 }

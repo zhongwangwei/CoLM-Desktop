@@ -55,7 +55,8 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
-    profile?: { grid?: string; domain_kind?: string };
+    profile?: { grid?: string; domain_kind?: string; run_host?: string };
+    servers?: { host: string; root: string; maps: { local: string; remote: string }[] }[];
     histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
     kernels?: KernelChoice[];
@@ -82,7 +83,7 @@ function page(
     kernels: options.kernels ?? [],
     running: {},
     caseTab: 'settings',
-    selectedCase: { entry: { dir: '/project/site', name: 'site' }, profile: {} },
+    selectedCase: { entry: { dir: '/project/site', name: 'site' }, profile: options.profile ?? {} },
     newCaseSeed: seed ?? null,
     simulationReturn: null as unknown,
   };
@@ -98,7 +99,8 @@ function page(
     failCreate = false;
   let effects: (() => unknown)[] = [],
     registered = new Map<number, { dependencies: unknown[] | undefined; cleanup?: () => void }>();
-  const update = (patch: object) => Object.assign(state, patch),
+  const update = (patch: object | ((old: typeof state) => object)) =>
+      Object.assign(state, typeof patch === 'function' ? patch(state) : patch),
     notify = () => {};
   const navigate = (route: string) => {
     if (guard()) return false;
@@ -136,6 +138,7 @@ function page(
         'ModelSettings',
         'MultiSiteSettings',
         'RunPanel',
+        'RunLocationSettings',
         'ResultsPage',
         'HistoryPage',
         'HistoryVariablesCard',
@@ -192,6 +195,10 @@ function page(
     invoke: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
       switch (command) {
+        case 'remote_config':
+          return { servers: options.servers ?? [] };
+        case 'set_case_run_host':
+          return {};
         case 'describe_fields':
           return options.schema ?? schema;
         case 'model_configuration':
@@ -1194,6 +1201,7 @@ for (const subgrid of ['PFT', 'PC'])
     };
     assert.deepEqual(seed.form, {
       ...restored,
+      host: '',
       landcover: 'IGBP',
       sitedir: '',
       forcingdir: '',
@@ -2587,4 +2595,66 @@ test('a cancellation IPC failure still stops the remaining multi-site queue', as
   finish();
   await pending;
   assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 1);
+});
+
+const runServer = {
+  host: 'compute',
+  root: '/remote/jobs',
+  maps: [{ local: '/surface', remote: '/data/surface' }],
+};
+
+test('General setup selects run location before paths and preserves it while configuring resources', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 1 }, [site], initialValues, {
+    servers: [runServer],
+  });
+  await p.mount();
+  const c = p.set('new-run-host', 'compute');
+  assert.equal(c.fields.find((f) => f.id === 'new-root')?.label, '本地项目保存目录');
+  assert.equal(p.element('RunLocationSettings').props.host, 'compute');
+  await p.click('new-run-resources');
+  assert.equal(p.routes.at(-1), 'resources');
+  const seed = p.state.newCaseSeed as { form: Record<string, string>; step: number };
+  assert.equal(seed.form.host, 'compute');
+  assert.equal(seed.form.root, form.root);
+  assert.equal(seed.step, 1);
+});
+
+test('selected resource is persisted during case creation instead of reverting to local', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, host: 'compute' }, sites: [site], step: 5 },
+    [site],
+    initialValues,
+    { servers: [runServer] },
+  );
+  await p.mount();
+  await p.click('new-create');
+  assert.equal(p.calls.find((call) => call.command === 'new_case')?.args.runHost, 'compute');
+});
+
+test('a removed run location blocks new creation instead of silently selecting local', async () => {
+  const p = page('NewCasePage', { form: { ...form, host: 'missing' }, sites: [site], step: 1 });
+  const c = await p.mount();
+  assert.equal(c.actions.find((action) => action.id === 'new-next')?.enabled, false);
+  assert.equal(c.fields.find((field) => field.id === 'new-run-host')?.value, 'missing');
+});
+
+test('existing General setup saves the target and synchronizes the hidden run panel profile', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { run_host: 'compute' },
+    servers: [runServer],
+  });
+  await p.mount();
+  await p.goto('case-step-1');
+  assert.equal(p.render().fields.find((field) => field.id === 'case-run-host')?.value, 'compute');
+  p.set('case-run-host', '');
+  await p.settle();
+  assert.deepEqual(p.calls.find((call) => call.command === 'set_case_run_host')?.args, {
+    dir: '/project/site',
+    host: null,
+  });
+  assert.equal(p.state.selectedCase.profile.run_host, null);
+  await p.click('case-run-resources');
+  assert.equal(p.routes.at(-1), 'resources');
+  assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 1, resourceHost: '' });
 });
