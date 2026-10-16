@@ -542,3 +542,77 @@ fn remote_replay_submission_is_pending_and_reconciliation_checks_job_binding() {
     wrong_host["host"] = json!("other-host");
     assert!(reconcile_remote_history(&history, &wrong_host, &done, None).is_err());
 }
+
+#[test]
+fn history_finishes_and_authorizes_registered_case_local_and_legacy_runs() {
+    for legacy in [false, true] {
+        let temp = Temp::new();
+        let root = temp.0.join("models");
+        let registry = colm_model::Registry::open(&root).unwrap();
+        let official = registry
+            .install_official(colm_model::CodeRef {
+                kind: colm_model::CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            })
+            .unwrap();
+        let case = temp.0.join("case");
+        std::fs::create_dir(&case).unwrap();
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'fixture'\n DEF_dir_output = 'out'\n/\n",
+        )
+        .unwrap();
+        std::fs::create_dir(root.join("runs")).unwrap();
+        let index = root.join("runs/operation");
+        let run = if legacy {
+            registry
+                .materialize_run(&official.version, &case, &index, "operation")
+                .unwrap()
+        } else {
+            let run = registry
+                .materialize_case_run(&official.version, &case, &case, "operation")
+                .unwrap();
+            std::fs::create_dir(&index).unwrap();
+            std::fs::write(
+                index.join(colm_model::RUN_MANIFEST),
+                serde_json::to_vec(&run).unwrap(),
+            )
+            .unwrap();
+            run
+        };
+        let database = temp.0.join("history.sqlite");
+        let history = History::open(&database).unwrap();
+        let mut initial = Event::start("run");
+        initial.operation_id = "operation".into();
+        history.append(&initial).unwrap();
+        finish(
+            AuditToken {
+                event: initial,
+                database,
+                command: "run".into(),
+                positional: vec![case.to_string_lossy().into_owned()],
+                flags: Flags::from([("--model-root".into(), root.to_string_lossy().into_owned())]),
+            },
+            &Ok(()),
+        )
+        .unwrap();
+        let detail = history.detail("operation").unwrap().unwrap();
+        assert_eq!(
+            event_value(&detail, "model_run").unwrap()["run_case"],
+            json!(run.run_case)
+        );
+        assert_eq!(frozen_run(&detail, &root).unwrap().run_case, run.run_case);
+        if !legacy {
+            let mut changed = run.clone();
+            changed.source_case = temp.0.clone();
+            std::fs::write(
+                index.join(colm_model::RUN_MANIFEST),
+                serde_json::to_vec(&changed).unwrap(),
+            )
+            .unwrap();
+            assert!(frozen_run(&detail, &root).is_err());
+        }
+    }
+}

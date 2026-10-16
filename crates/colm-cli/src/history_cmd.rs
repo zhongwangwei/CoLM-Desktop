@@ -817,12 +817,10 @@ pub(crate) fn finish(token: AuditToken, result: &Result<()>) -> Result<()> {
     event.detail["exit_success"] = json!(result.is_ok());
     // Error text may include credentials from remote tools: store factual failure only.
     let root = model_root(&token.flags)?;
-    let frozen = root.join("runs").join(&event.operation_id);
-    let case = if frozen.join(colm_model::RUN_MANIFEST).is_file() {
-        Some(frozen.clone())
-    } else {
-        token.positional.first().map(PathBuf::from)
-    };
+    let frozen = registered_run(&root, &event.operation_id)?.map(|run| run.run_case);
+    let case = frozen
+        .clone()
+        .or_else(|| token.positional.first().map(PathBuf::from));
     if let Some(case) = case.filter(|p| p.join("case.nml").is_file()) {
         if let Ok(Some(provenance)) = crate::provenance::read(&case) {
             let belongs = provenance.get("operation_id").and_then(Value::as_str)
@@ -870,11 +868,9 @@ pub(crate) fn finish(token: AuditToken, result: &Result<()>) -> Result<()> {
         }
     }
     if token.command.starts_with("remote-") {
-        let base = if frozen.join(colm_model::RUN_MANIFEST).is_file() {
-            Some(frozen.as_path())
-        } else {
-            token.positional.first().map(Path::new)
-        };
+        let base = frozen
+            .as_deref()
+            .or_else(|| token.positional.first().map(Path::new));
         if let Some(base) = base {
             let mut record_path = base.join(if token.command.starts_with("remote-study-") {
                 ".colm-remote-study.json"
@@ -978,6 +974,45 @@ fn event_value<'a>(detail: &'a OperationDetail, key: &str) -> Option<&'a Value> 
         .rev()
         .find_map(|e| e.detail.get(key).filter(|v| !v.is_null()))
 }
+fn registered_run(root: &Path, operation_id: &str) -> Result<Option<colm_model::MaterializedRun>> {
+    validate_id(operation_id)?;
+    let index = root.join("runs").join(operation_id);
+    let manifest = index.join(colm_model::RUN_MANIFEST);
+    if !manifest.is_file() {
+        return Ok(None);
+    }
+    ensure!(
+        !std::fs::symlink_metadata(&index)?.file_type().is_symlink(),
+        "run registration must not be a symlink"
+    );
+    let registered: colm_model::MaterializedRun =
+        serde_json::from_slice(&std::fs::read(manifest)?)?;
+    ensure!(
+        registered.operation_id == operation_id,
+        "run registration belongs to another operation"
+    );
+    let actual = registered.run_case.canonicalize()?;
+    if actual != index.canonicalize()? {
+        let owner = registered.source_case.canonicalize()?;
+        let runs = owner.join("runs");
+        ensure!(
+            !std::fs::symlink_metadata(&runs)?.file_type().is_symlink()
+                && !std::fs::symlink_metadata(&registered.run_case)?
+                    .file_type()
+                    .is_symlink()
+                && actual == runs.join(operation_id),
+            "history cannot authorize a run outside its registered operation directory"
+        );
+    }
+    let disk: colm_model::MaterializedRun =
+        serde_json::from_slice(&std::fs::read(actual.join(colm_model::RUN_MANIFEST))?)?;
+    ensure!(
+        serde_json::to_value(&disk)? == serde_json::to_value(&registered)?,
+        "registered run manifest differs from its execution copy"
+    );
+    Ok(Some(disk))
+}
+
 fn frozen_run(detail: &OperationDetail, root: &Path) -> Result<colm_model::MaterializedRun> {
     ensure!(
         detail
@@ -999,20 +1034,9 @@ fn frozen_run(detail: &OperationDetail, root: &Path) -> Result<colm_model::Mater
         .context("no frozen model run; cannot reproduce this history")?;
     let run: colm_model::MaterializedRun = serde_json::from_value(value.clone())?;
     validate_id(&run.operation_id)?;
-    let actual = run
-        .run_case
-        .canonicalize()
-        .context("frozen run case is missing")?;
-    let runs = root
-        .join("runs")
-        .canonicalize()
-        .context("trusted model runs directory is missing")?;
-    ensure!(
-        actual == runs.join(&run.operation_id),
-        "history cannot authorize a run outside its registered operation directory"
-    );
-    let disk: colm_model::MaterializedRun =
-        serde_json::from_slice(&std::fs::read(actual.join(colm_model::RUN_MANIFEST))?)?;
+    let disk = registered_run(root, &run.operation_id)?
+        .context("trusted model run registration is missing")?;
+    let actual = disk.run_case.canonicalize()?;
     ensure!(
         serde_json::to_value(&disk)? == *value,
         "frozen run manifest differs from recorded history"

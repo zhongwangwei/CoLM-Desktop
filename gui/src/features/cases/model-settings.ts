@@ -172,7 +172,7 @@ export function processSettingOwner(
     field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO'
   )
     return null;
-  if (isSiteConfiguration(field.name)) return 'site';
+  if (isSiteConfiguration(field.name)) return null;
   if (isForcingScheme(field.name)) return 'forcing';
   const roots: Record<string, string> = {
     DEF_USE_BGC: 'DEF_USE_BGC',
@@ -232,6 +232,7 @@ export function simulationOptionField(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): boolean {
+  if (isSiteConfiguration(field.name)) return false;
   const step = simulationFieldStep(field);
   if (step === 4) return true;
   if (step !== 3) return false;
@@ -539,7 +540,6 @@ export function parameterLocation(
   ];
   const process = processSettingOwner(field);
   const owners: Record<string, string> = {
-    site: t('单点专属设置', 'Single-point settings'),
     forcing: t('强迫场处理', 'Forcing processing'),
     DEF_USE_BGC: 'BGC',
     crop: t('作物设置', 'Crop settings'),
@@ -551,6 +551,8 @@ export function parameterLocation(
     PC: t('PC 专属设置', 'PC settings'),
     DEF_USE_VariablySaturatedFlow: t('变饱和流设置', 'Variably saturated flow settings'),
   };
+  if (isSiteConfiguration(field.name))
+    return labels[2] + t(' → 更多配置 → 单点专属设置', ' → More settings → Single-point settings');
   return labels[step - 1] + (owners[process ?? ''] ? ' → ' + owners[process!] : '');
 }
 

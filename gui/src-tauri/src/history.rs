@@ -511,6 +511,33 @@ pub(crate) fn capture_audit_status(
     }
     "submission_uncertain"
 }
+fn model_run_manifest(event: &Event, registry_root: &std::path::Path) -> std::path::PathBuf {
+    let local = event.case_path.as_ref().map(|case| {
+        std::path::Path::new(case)
+            .join("runs")
+            .join(&event.operation_id)
+            .join(colm_model::RUN_MANIFEST)
+    });
+    if let Some(path) = local.filter(|path| path.is_file()) {
+        return path;
+    }
+    let index = registry_root
+        .join("runs")
+        .join(&event.operation_id)
+        .join(colm_model::RUN_MANIFEST);
+    if let Some(run) = std::fs::read(&index)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<colm_model::MaterializedRun>(&bytes).ok())
+        .filter(|run| run.operation_id == event.operation_id)
+    {
+        let actual = run.run_case.join(colm_model::RUN_MANIFEST);
+        if actual.is_file() {
+            return actual;
+        }
+    }
+    index
+}
+
 pub(crate) fn finish<T>(
     event: &Event,
     result: Result<T, String>,
@@ -541,10 +568,7 @@ pub(crate) fn finish<T>(
         end.detail["error"] = serde_json::json!(error);
     }
     if let Ok(root) = crate::model::root() {
-        let manifest = root
-            .join("runs")
-            .join(&event.operation_id)
-            .join(colm_model::RUN_MANIFEST);
+        let manifest = model_run_manifest(event, &root);
         if manifest.is_file() {
             match std::fs::read(&manifest)
                 .map_err(|e| e.to_string())
@@ -702,6 +726,43 @@ fn append_outcome(history: &History, start: &Event, end: &Event) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_run_manifest_prefers_case_owned_runs_and_retains_legacy_lookup() {
+        let mut event = Event::start("run");
+        let root = std::env::temp_dir().join(format!("colm-run-manifest-{}", event.operation_id));
+        let case = root.join("case");
+        let registry = root.join("models");
+        let legacy = registry
+            .join("runs")
+            .join(&event.operation_id)
+            .join(colm_model::RUN_MANIFEST);
+        event.case_path = Some(case.display().to_string());
+        assert_eq!(model_run_manifest(&event, &registry), legacy);
+        let owned = case
+            .join("runs")
+            .join(&event.operation_id)
+            .join(colm_model::RUN_MANIFEST);
+        std::fs::create_dir_all(owned.parent().unwrap()).unwrap();
+        std::fs::write(&owned, b"{}").unwrap();
+        assert_eq!(model_run_manifest(&event, &registry), owned);
+        event.case_path = None;
+        assert_eq!(model_run_manifest(&event, &registry), legacy);
+        let run = serde_json::json!({
+            "schema":1, "operation_id":event.operation_id, "source_case":case,
+            "run_case":owned.parent().unwrap(), "version":{"id":"model","revision":1},
+            "code":{"kind":"official","source_sha256":"a".repeat(64)},
+            "case_sha256":"a".repeat(64), "effective_nml_sha256":"b".repeat(64),
+            "overlay_sha256":"c".repeat(64), "revision_fingerprint":"d".repeat(64),
+            "artifact_paths":[], "inputs":{}
+        });
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, serde_json::to_vec(&run).unwrap()).unwrap();
+        assert_eq!(model_run_manifest(&event, &registry), owned);
+        std::fs::remove_file(&owned).unwrap();
+        assert_eq!(model_run_manifest(&event, &registry), legacy);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn filter_maps_public_names_without_losing_zero_offset() {
         let filter:HistoryFilter=serde_json::from_value(serde_json::json!({"casePath":"/a","versionId":"v","query":"text","from":10,"to":20,"offset":0,"limit":7})).unwrap();

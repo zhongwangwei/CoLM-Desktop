@@ -212,7 +212,6 @@ test('CN default uses the latest enable and runtime edits and preserves explicit
 });
 
 for (const [process, changes] of [
-  ['site', { USE_SITE_soilparameters: '.true.', SITE_landtype: '1' }],
   ['forcing', { DEF_USE_Forcing_Downscaling: '.true.', DEF_DS_topo: "'/data/topography'" }],
 ] as const) {
   test(`${process} popup saves related changes atomically and cancel discards them`, async () => {

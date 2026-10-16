@@ -367,6 +367,33 @@ impl Registry {
         }
         Ok(())
     }
+    /// Keep immutable executions beside their owning case without copying prior runs.
+    pub fn materialize_case_run(
+        &self,
+        version: &VersionRef,
+        source_case: &Path,
+        owning_case: &Path,
+        operation_id: &str,
+    ) -> Result<MaterializedRun> {
+        validation::identifier(operation_id)?;
+        let owner = owning_case.canonicalize()?;
+        let parent = owner.join("runs");
+        if let Ok(metadata) = fs::symlink_metadata(&parent) {
+            ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "case runs must be a regular directory"
+            );
+        } else {
+            fs::create_dir(&parent)?;
+        }
+        self.materialize_run(
+            version,
+            source_case,
+            &parent.join(operation_id),
+            operation_id,
+        )
+    }
+
     /// Caller chooses engine/kernel only after validating this exact frozen code identity.
     pub fn materialize_run(
         &self,
@@ -414,9 +441,27 @@ impl Registry {
             .parent()
             .context("run destination needs a parent")?
             .canonicalize()?;
+        let requested_parent = run_case
+            .parent()
+            .context("run destination needs a parent")?;
+        let requested_parent_location = requested_parent
+            .parent()
+            .context("run parent needs a containing directory")?
+            .canonicalize()?
+            .join(requested_parent.file_name().context("run parent name")?);
+        let local_runs = source.join("runs");
+        let is_case_run = parent == local_runs
+            && !fs::symlink_metadata(requested_parent)?
+                .file_type()
+                .is_symlink()
+            && run_case.file_name() == Some(std::ffi::OsStr::new(operation_id));
         ensure!(
-            !parent.starts_with(&source),
-            "run destination must be outside source case"
+            (!parent.starts_with(&source)
+                && !requested_parent.starts_with(&source)
+                && !requested_parent.starts_with(source_case)
+                && !requested_parent_location.starts_with(&source))
+                || is_case_run,
+            "run destination must be outside source case or exactly case/runs/operation-id"
         );
         let destination = parent.join(run_case.file_name().context("run directory name")?);
         fs::create_dir(&destination)?;

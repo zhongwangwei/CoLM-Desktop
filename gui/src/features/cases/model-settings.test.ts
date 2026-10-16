@@ -261,7 +261,7 @@ test('model settings guide exposes classification only with a callback and catal
     result = render(false, false, extra);
     assert.equal(
       result.actions.some((a) => a.id === 'simulation-site-settings'),
-      domain === 'site',
+      false,
     );
     assert.ok(result.actions.some((a) => a.id === 'simulation-forcing-settings'));
     result = render(false, true, extra);
@@ -488,7 +488,7 @@ test('hyperspectral urban source remains a general simulation input without urba
   assert.equal(simulationOptionField(field), true);
 });
 
-test('classification gives site and forcing parameters exclusive model entries', async () => {
+test('classification keeps site parameters in data and forcing parameters in model settings', async () => {
   const { simulationOptionField, processSettingOwner, parameterLocation } =
     await import('./model-settings');
   for (const name of [
@@ -498,8 +498,21 @@ test('classification gives site and forcing parameters exclusive model entries',
     'SITE_landtype',
   ]) {
     const f = { name, section: '站点' };
-    assert.equal(simulationOptionField(f), true);
-    assert.equal(processSettingOwner(f), 'site');
+    assert.equal(simulationOptionField(f), false);
+    assert.equal(processSettingOwner(f), null);
+    assert.match(
+      parameterLocation(
+        {
+          raw_key: name,
+          section: '站点',
+          scope: 'case-scalar',
+          storage: 'case-nml',
+          visibility: 'editable-common',
+        } as ModelParameter,
+        [],
+      ),
+      /数据与时段 → 更多配置 → 单点专属设置/,
+    );
   }
   for (const name of [
     'DEF_LAI_MONTHLY',

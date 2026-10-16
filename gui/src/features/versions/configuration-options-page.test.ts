@@ -1480,7 +1480,6 @@ test('general soil resistance precedes albedo and follows structure defaults wit
 });
 
 for (const [process, names] of [
-  ['site', ['USE_SITE_soilparameters', 'SITE_landtype']],
   ['forcing', ['DEF_Forcing_Interp_Method', 'DEF_USE_Forcing_Downscaling', 'DEF_DS_topo']],
 ] as const) {
   test(`${process} settings have a dedicated popup and no duplicate general entry`, async () => {

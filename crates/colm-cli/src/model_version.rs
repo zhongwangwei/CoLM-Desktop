@@ -343,6 +343,13 @@ fn source_context(opts: &Opts) -> Result<serde_json::Value> {
 }
 
 pub(crate) fn prepare(opts: &Opts) -> Result<Option<(Opts, colm_model::MaterializedRun)>> {
+    prepare_in_case(opts, None)
+}
+
+fn prepare_in_case(
+    opts: &Opts,
+    owning_case: Option<&Path>,
+) -> Result<Option<(Opts, colm_model::MaterializedRun)>> {
     let Some(version) = selected(opts)? else {
         return Ok(None);
     };
@@ -371,8 +378,14 @@ pub(crate) fn prepare(opts: &Opts) -> Result<Option<(Opts, colm_model::Materiali
     let parent = store.root().join("runs");
     std::fs::create_dir_all(&parent)?;
     let id = opts.get("--operation-id").unwrap_or_else(unique_id);
-    let mut run =
-        store.materialize_run(&version, &opts.positional_case()?, &parent.join(&id), &id)?;
+    ensure!(!parent.join(&id).exists(), "run operation already exists");
+    let source_case = opts.positional_case()?;
+    let mut run = store.materialize_case_run(
+        &version,
+        &source_case,
+        owning_case.unwrap_or(&source_case),
+        &id,
+    )?;
     let artifacts: std::collections::BTreeMap<String, String> = serde_json::from_slice(
         &std::fs::read(cache_dir(opts, &frozen.code)?.join("artifacts.json"))?,
     )?;
@@ -390,6 +403,13 @@ pub(crate) fn prepare(opts: &Opts) -> Result<Option<(Opts, colm_model::Materiali
         serde_json::to_vec_pretty(&run)?,
     )?;
     prepare_native_paths(&mut run)?;
+    // Keep the small registry index for existing history readers; outputs stay with the case.
+    let index = parent.join(&id);
+    std::fs::create_dir(&index)?;
+    std::fs::write(
+        index.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec_pretty(&run)?,
+    )?;
     let execution = cached_options(opts, &frozen.code)?.unwrap_or_else(|| Opts {
         flags: opts.flags.clone(),
         positional: opts.positional.clone(),
@@ -1614,8 +1634,8 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         flags,
         positional: vec![old_case.to_string_lossy().into_owned()],
     };
-    let (prepared, mut new) =
-        prepare(&request)?.context("replay failed to materialize a revision")?;
+    let (prepared, mut new) = prepare_in_case(&request, Some(&old.source_case))?
+        .context("replay failed to materialize a revision")?;
     new.source_case = old.source_case.clone();
     new.inputs.insert(
         "replay-parent-manifest".into(),
@@ -1623,6 +1643,14 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
     );
     std::fs::write(
         new.run_case.join(colm_model::RUN_MANIFEST),
+        serde_json::to_vec_pretty(&new)?,
+    )?;
+    std::fs::write(
+        store
+            .root()
+            .join("runs")
+            .join(&new.operation_id)
+            .join(colm_model::RUN_MANIFEST),
         serde_json::to_vec_pretty(&new)?,
     )?;
     std::fs::write(
@@ -2461,6 +2489,78 @@ mod prepared_operation_tests {
         .unwrap();
         let (prepared, run) = prepare(&opts).unwrap().unwrap();
         assert_eq!(run.operation_id, "gui-parent-operation");
+        assert_eq!(
+            run.run_case,
+            case.canonicalize()
+                .unwrap()
+                .join("runs/gui-parent-operation")
+        );
+        let index = root.join("models/runs/gui-parent-operation");
+        let indexed: colm_model::MaterializedRun =
+            serde_json::from_slice(&std::fs::read(index.join(colm_model::RUN_MANIFEST)).unwrap())
+                .unwrap();
+        assert_eq!(indexed.run_case, run.run_case);
+        assert!(!index.join("case.nml").exists());
+        std::fs::create_dir(run.run_case.join("out")).unwrap();
+        std::fs::write(run.run_case.join("out/old-result.nc"), "previous output").unwrap();
+        let before = std::fs::read(case.join("case.nml")).unwrap();
+        let mut second_opts = Opts {
+            flags: opts.flags.clone(),
+            positional: opts.positional.clone(),
+        };
+        for (flag, value) in &mut second_opts.flags {
+            if flag == "--operation-id" {
+                *value = "second-operation".into();
+            }
+        }
+        let (_, second) = prepare(&second_opts).unwrap().unwrap();
+        assert_eq!(
+            second.run_case,
+            case.canonicalize().unwrap().join("runs/second-operation")
+        );
+        assert!(!second.run_case.join("runs").exists());
+        assert!(!second.run_case.join("out/old-result.nc").exists());
+        assert_eq!(before, std::fs::read(case.join("case.nml")).unwrap());
+        assert!(run.run_case.join("out/old-result.nc").is_file());
+        std::fs::write(
+            case.join("case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'changed'\n/\n",
+        )
+        .unwrap();
+        let mut replay_opts = Opts {
+            flags: opts.flags.clone(),
+            positional: vec![run.run_case.to_string_lossy().into_owned()],
+        };
+        for (flag, value) in &mut replay_opts.flags {
+            if flag == "--operation-id" {
+                *value = "replay-operation".into();
+            }
+        }
+        let (_, replay) = prepare_in_case(&replay_opts, Some(&case)).unwrap().unwrap();
+        assert_eq!(
+            replay.run_case,
+            case.canonicalize().unwrap().join("runs/replay-operation")
+        );
+        let replay_doc = colm_namelist::parse(
+            &std::fs::read_to_string(replay.run_case.join("case.nml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            replay_doc.get("DEF_CASE_NAME"),
+            Some(&colm_namelist::Value::Str("fixture".into()))
+        );
+        assert!(!replay.run_case.join("out/old-result.nc").exists());
+        if let Ok(alias) = execution_path(&replay.run_case) {
+            if alias != replay.run_case {
+                let _ = std::fs::remove_file(alias);
+            }
+        }
+        if let Ok(alias) = execution_path(&second.run_case) {
+            if alias != second.run_case {
+                let _ = std::fs::remove_file(alias);
+            }
+        }
+
         assert_eq!(
             prepared.need_str("--operation-id").unwrap(),
             run.operation_id

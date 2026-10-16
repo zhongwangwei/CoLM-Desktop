@@ -33,8 +33,11 @@ describe('case data boundary', () => {
     assert.equal(requiredNumber('0', 'longitude'), 0);
   });
   it('rejects names escaping the chosen parent', () => {
-    assert.throws(() => caseDirectory('/data', '../other'));
+    for (const name of ['../other', ' .. ', ' station ', '.', 'x:y', 'x\n', '站'.repeat(86)])
+      assert.throws(() => caseDirectory('/data', name), name);
     assert.equal(caseDirectory('/data/', 'station'), '/data/station');
+    assert.equal(caseDirectory('/data///', 'station'), '/data/station');
+    assert.equal(caseDirectory('/', 'station'), '/station');
   });
   it('uses runtime overlay names for model structure', () => {
     assert.equal(versionMode({ DEF_USE_PFT: '.true.' }), 'pft');
