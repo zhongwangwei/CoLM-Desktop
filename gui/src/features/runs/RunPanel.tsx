@@ -813,7 +813,14 @@ export default function RunPanel({
       </footer>
       {view && (
         <section className="simulation-monitor" aria-live="polite">
-          <h3>{t('运行进度', 'Run progress')}</h3>
+          <h3>
+            {batchCases
+              ? t(
+                  `运行进度：${state.cases.find((entry) => entry.dir === casePath)?.name ?? casePath}`,
+                  'First case progress',
+                )
+              : t('运行进度', 'Run progress')}
+          </h3>
           <p role="status">
             {statusLabels[view.status] ?? view.status}
             {view.stage ? ` · ${stageLabels[view.stage] ?? view.stage}` : ''}
