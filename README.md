@@ -247,6 +247,17 @@ cargo clippy --manifest-path gui/src-tauri/Cargo.toml --all-targets -- -D warnin
 
 CI 在 macOS、Windows 和 Linux 上编译并测试整个 Rust 工作区（含 Rust 引擎的物理、主循环、初始场与地表数据各 crate）、GUI 接口、格式与静态分析，并用入库的黄金文件检查数值容差分类与 NetCDF 读写。每一轮与原版的逐位对照（站点、经纬度、非结构与流域网格算例）记录在验证文档中。
 
+真实多站 GUI 验收使用 `scripts/gui-multisite-e2e.py`：先按上文暂存 sidecar，编译带 `e2e-driver,tauri/custom-protocol` 的原生程序，在独立测试环境设置 `COLM_E2E_PORT=18899` 后启动，再运行：
+
+```bash
+python3 scripts/gui-multisite-e2e.py --data-root examples --runtime examples/Runtime \
+  --project-root /absolute/new/test-projects --name multisite \
+  --site CN-Cng,2008-01-01,2009-01-01 --site AT-Neu,2010-01-01,2011-01-01 \
+  --report-dir /absolute/new/gui-evidence --timeout 1800
+```
+
+测试通过真实窗口创建并运行算例，核对两个站点的三阶段执行、实际并发、导航恢复及各自结果曲线；报告保留事件、IPC 来源和界面状态。Linux 无显示器时可在 Xvfb 中运行；仅在测试显示器设置 `COLM_E2E_TEST_DISPLAY=1` 时捕获截图，截图还需人工核验。`gui-linux-private-deps.py` 和 `prepare-private-cargo-vendor.py` 可为隔离计算任务准备私有依赖，不安装系统软件或改写共享目录；输入与输出约定见各脚本说明。
+
 ## 文档
 
 - [设计与总体架构](docs/design.md)

@@ -67,6 +67,7 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install and verify React frontend
+        shell: bash
         working-directory: gui
         run: |
           npm ci
@@ -126,6 +127,7 @@ jobs:
           # Exercise the actual CLI scheduler/DE path, not just test-only reducers.
           # The fake-kernel shell harness runs on Unix; Windows uses unit/native jobs.
           cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1
+          cargo test -p colm-cli --test engine_pack
           cargo test -p oracle --test judge
           cargo test -p oracle --test golden_run
           cargo test -p colm-namelist --test roundtrip
@@ -217,6 +219,7 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install and verify React frontend
+        shell: bash
         working-directory: gui
         run: |
           npm ci

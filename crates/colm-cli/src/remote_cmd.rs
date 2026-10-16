@@ -1522,11 +1522,24 @@ pub(super) fn cmd_dist(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
-/// `colm-cli engine-pack --out FILE`：把引擎源码快照打成 `colm-src.tar.gz`，打包安装包时调用。
+/// `colm-cli engine-pack --source CHECKOUT --out FILE`：打包指定源码，支持仓库外的 Cargo target。
 pub(super) fn cmd_pack(opts: &Opts) -> Result<()> {
     let out = opts.need("--out")?;
-    let Some(source) = Source::find_checkout(&exe_dir()?) else {
-        bail!("engine-pack must run from a build inside the repository");
+    let source = match opts.get("--source") {
+        Some(path) => {
+            let root = std::fs::canonicalize(&path)
+                .with_context(|| format!("cannot read engine source checkout {path}"))?;
+            ensure!(
+                root.join("Cargo.toml").is_file()
+                    && root.join("Cargo.lock").is_file()
+                    && root.join("crates/colm-cli").is_dir(),
+                "--source must name the engine checkout root"
+            );
+            Source::Checkout(root)
+        }
+        None => Source::find_checkout(&exe_dir()?).context(
+            "engine-pack needs --source CHECKOUT when its binary is outside the repository",
+        )?,
     };
     let snapshot = engine::snapshot(&source)?;
     engine::pack_source(&snapshot, &out)?;
