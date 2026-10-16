@@ -821,6 +821,7 @@ test('simulation fractionation children stay hidden while queries are pending an
   h.props.onCaseChange = () => assert.fail('visibility changes must not save');
   h.props.caseValues = {
     DEF_USE_TRACER: '.true.',
+    DEF_TRACER_TYPES: "'isotope'",
     [parent]: '.false.',
     ...Object.fromEntries(children.map((name) => [name, `'${schemes[name][0]}'`])),
   };
@@ -871,12 +872,64 @@ test('simulation fractionation children stay hidden while queries are pending an
     );
   }
   h.props.onCaseChange = undefined;
+  h.props.overlay.physics.DEF_TRACER_TYPES = "'isotope'";
   c = h.render();
   for (const name of children)
     assert.ok(
       c.fields.some((f) => f.id === `configuration-${name}`),
       'research editor keeps its existing visibility',
     );
+});
+
+test('isotope-only controls follow current species before queries or manual table edits are applied', async () => {
+  for (const simulation of [false, true]) {
+    const h = harness();
+    const isotopeFields = [
+      'DEF_TRACER_USE_FRACTIONATION',
+      'DEF_TRACER_AQUIFER_MIXING_WATER_MM',
+      'DEF_TRACER_SOIL_INIT_FILE',
+    ];
+    h.props.fields.push(
+      ...isotopeFields.map((name) => ({
+        name,
+        section: '示踪剂',
+        kind: 'character',
+        default: '',
+        values: [],
+        derived: false,
+      })),
+    );
+    h.props.process = 'DEF_USE_TRACER';
+    if (simulation) h.props.onCaseChange = () => assert.fail('visibility must not save');
+    const saved = {
+      DEF_USE_TRACER: '.true.',
+      DEF_TRACER_NUM: '1',
+      DEF_TRACER_NAMES: "'CH4'",
+      DEF_TRACER_TYPES: "'gas'",
+      DEF_TRACER_USE_FRACTIONATION: '.true.',
+      DEF_TRACER_AQUIFER_MIXING_WATER_MM: '1200',
+      DEF_TRACER_SOIL_INIT_FILE: "'/data/isotope.nc'",
+    };
+    h.props.overlay.physics = { ...h.props.overlay.physics, ...saved };
+    if (simulation) h.props.caseValues = saved;
+    const retained = JSON.stringify(h.props.overlay);
+    let c = h.render();
+    const visible = (name: string) =>
+      c.fields.some((field) => field.id === `configuration-${name}`);
+    for (const name of isotopeFields) assert.equal(visible(name), false);
+    c = await h.settle(); // Incomplete editable metadata must not expose isotope fields for CH4.
+    for (const name of isotopeFields) assert.equal(visible(name), false);
+    c.fields.find((field) => field.id === 'configuration-tracer-0-TYPES')!.set('isotope');
+    c = h.render();
+    for (const name of isotopeFields) assert.equal(visible(name), true);
+    for (const family of ['solute', 'particle', 'gas']) {
+      c.fields.find((field) => field.id === 'configuration-tracer-0-TYPES')!.set(family);
+      c = h.render();
+      for (const name of isotopeFields) assert.equal(visible(name), false);
+    }
+    assert.equal(JSON.stringify(h.props.overlay), retained);
+    assert.equal(h.changes.length, 0);
+  }
 });
 
 test('river file placeholders are free text in both the actual editor and guide and persist a quoted path', async () => {

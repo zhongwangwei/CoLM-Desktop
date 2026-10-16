@@ -4,6 +4,7 @@ import type { Overlay } from '../../lib/types';
 import type { Descriptor, ModelField } from './model';
 import {
   caseFieldVisible,
+  tracerFieldVisible,
   cnInitialStatePatch,
   vicParameterDefault,
   type ConfigurationField,
@@ -504,6 +505,31 @@ test('case child visibility follows ancestor gates without treating readonly par
   assert.equal(caseFieldVisible('FILE', fields), false, 'cyclic metadata cannot recurse forever');
 });
 
+test('isotope fields require an isotope tracer without changing unrelated fields', () => {
+  const names = [
+    'DEF_TRACER_USE_FRACTIONATION',
+    'DEF_TRACER_KINETIC_SCHEME',
+    'DEF_TRACER_SOIL_INIT_FILE',
+  ];
+  for (const types of [undefined, '', "'gas'", "'solute,particle'"])
+    for (const name of names) assert.equal(tracerFieldVisible(name, types), false);
+  for (const types of ["'isotope'", "'gas,isotope'", '"GAS, ISOTOPE"'])
+    for (const name of names) assert.equal(tracerFieldVisible(name.toLowerCase(), types), true);
+  assert.equal(tracerFieldVisible('DEF_TRACER_NUM'), true);
+  assert.equal(tracerFieldVisible('UNKNOWN'), true);
+  const fields: ConfigurationField[] = [
+    {
+      name: 'DEF_TRACER_TYPES',
+      configured_value: "'isotope'",
+      mode: 'editable',
+      pending: true,
+      allowed_values: [],
+    },
+  ];
+  assert.equal(caseFieldVisible(names[0], fields), true);
+  assert.equal(caseFieldVisible(names[0], fields, { def_tracer_types: "'gas'" }), false);
+});
+
 test('fractionation visibility requires current explicit activation without guessing unrelated unknown fields', () => {
   const parent = 'DEF_TRACER_USE_FRACTIONATION';
   const children = [
@@ -524,23 +550,35 @@ test('fractionation visibility requires current explicit activation without gues
       },
     ];
     for (const value of [undefined, '.false.', 'unknown']) {
-      const values: Record<string, string> = value === undefined ? {} : { [parent]: value };
+      const values: Record<string, string> = {
+        DEF_TRACER_TYPES: "'isotope'",
+        ...(value === undefined ? {} : { [parent]: value }),
+      };
       assert.equal(caseFieldVisible(child, [], values), false);
       assert.equal(caseFieldVisible(child, metadata, values), false);
     }
-    assert.equal(caseFieldVisible(child, metadata, { [parent]: '.true.' }), true);
+    assert.equal(
+      caseFieldVisible(child, metadata, { DEF_TRACER_TYPES: "'isotope'", [parent]: '.true.' }),
+      true,
+    );
     metadata[0].parent_gate_enabled = false;
-    assert.equal(caseFieldVisible(child, metadata, { [parent]: '.true.' }), false);
+    assert.equal(
+      caseFieldVisible(child, metadata, { DEF_TRACER_TYPES: "'isotope'", [parent]: '.true.' }),
+      false,
+    );
   }
   assert.equal(caseFieldVisible('UNKNOWN_DATA', [], {}), true);
   assert.equal(
-    caseFieldVisible(children[0].toLowerCase(), [], { [parent.toLowerCase()]: '.TRUE.' }),
+    caseFieldVisible(children[0].toLowerCase(), [], {
+      def_tracer_types: "'isotope'",
+      [parent.toLowerCase()]: '.TRUE.',
+    }),
     true,
   );
   assert.equal(
     caseFieldVisible(children[0], []),
-    true,
-    'callers without simulation case state retain existing behavior',
+    false,
+    'unknown tracer types cannot expose isotope-only options',
   );
 });
 

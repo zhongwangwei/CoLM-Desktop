@@ -29,6 +29,32 @@ const fractionationChildren = new Set([
   'DEF_TRACER_OPEN_WATER_KINETIC',
   'DEF_TRACER_SOIL_KINETIC',
 ]);
+const isotopeFields = new Set([
+  ...fractionationChildren,
+  'DEF_TRACER_USE_FRACTIONATION',
+  'DEF_TRACER_AQUIFER_MIXING_WATER_MM',
+  'DEF_TRACER_ICE_SUPERSAT_SLOPE',
+  'DEF_TRACER_CG_RELHUM_MAX',
+  'DEF_TRACER_SUBL_SKIN_MM',
+  'DEF_TRACER_SOIL_DIFFUSION',
+  'DEF_TRACER_SOIL_VAPOR_DIFFUSION',
+  'DEF_TRACER_CANOPY_EQUILIBRATION',
+  'DEF_TRACER_SNOWMELT_EQUILIBRATION',
+  'DEF_TRACER_NSS_LEAF_WATER_PER_LAI',
+  'DEF_TRACER_NSS_LEAF_PATH_LENGTH',
+  'DEF_TRACER_NSS_LEAF_RB',
+  'DEF_TRACER_USE_SOIL_INIT',
+  'DEF_TRACER_SOIL_INIT_FILE',
+  'DEF_TRACER_SOIL_INIT_VARS',
+]);
+export function tracerFieldVisible(name: string, types?: string): boolean {
+  return (
+    !isotopeFields.has(name.toUpperCase()) ||
+    unquote(types ?? '')
+      .split(',')
+      .some((type) => unquote(type.trim()).toLowerCase() === 'isotope')
+  );
+}
 export function caseFieldVisible(
   name: string,
   fields: readonly ConfigurationField[],
@@ -39,6 +65,16 @@ export function caseFieldVisible(
       ([name]) => name.toLowerCase() === key.toLowerCase(),
     )?.[1];
   const enabled = (value: string | undefined) => /^(true|\.true\.)$/i.test(value?.trim() ?? '');
+  if (
+    !tracerFieldVisible(
+      name,
+      currentValue('DEF_TRACER_TYPES') ??
+        fields.find((field) => field.name.toUpperCase() === 'DEF_TRACER_TYPES')?.configured_value ??
+        fields.find((field) => field.name.toUpperCase() === 'DEF_TRACER_TYPES')?.built_in_default ??
+        undefined,
+    )
+  )
+    return false;
   // These controls must not flash back while the next applicability query is loading.
   if (
     currentValues &&

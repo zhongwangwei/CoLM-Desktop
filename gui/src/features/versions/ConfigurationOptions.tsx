@@ -21,6 +21,7 @@ import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
   caseFieldVisible,
+  tracerFieldVisible,
   vicParameterDefault,
   caseOptionOverlay,
   caseOptionPatch,
@@ -767,6 +768,9 @@ export default function ConfigurationOptions({
     (!onCaseChange ||
       parentValues[id] === true ||
       (id === 'tracer' && process === 'DEF_USE_TRACER'));
+  const currentTracerTypes = tracers
+    ? tracers.map((row) => row.TYPES).join(',')
+    : (modelSettingValue(overlay, 'DEF_TRACER_TYPES') ?? undefined);
   const groups = orderedGroups.map(([id, zh, english]) => {
     if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
@@ -780,12 +784,16 @@ export default function ConfigurationOptions({
           groupedField(field, catalog) &&
           !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
+      .filter((field) => tracerFieldVisible(field.name, currentTracerTypes))
       .filter(
         (field) =>
           (!onCaseChange &&
             !['DEF_VIC_OPT', 'DEF_file_VIC_para', 'DEF_file_VIC_OPT'].includes(field.name)) ||
           (field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff) ||
-          caseFieldVisible(field.name, values.fields, overlay.physics),
+          caseFieldVisible(field.name, values.fields, {
+            ...overlay.physics,
+            ...(currentTracerTypes === undefined ? {} : { DEF_TRACER_TYPES: currentTracerTypes }),
+          }),
       )
       .filter(
         (field) =>
