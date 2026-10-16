@@ -848,6 +848,198 @@ fn methane_wizard_stages_safe_single_point_parameters() {
 }
 
 #[test]
+fn existing_case_tracer_defaults_commit_only_after_candidate_validation() {
+    for (family, kind, filename) in [
+        ("Cl", "solute", "standard_chloride_parameter.nml"),
+        ("CH4", "gas", "standard_ch4_parameter.nml"),
+    ] {
+        let dirs = batch(&format!("existing-tracer-{family}"), &[SAMPLE, SAMPLE]);
+        let source = std::path::Path::new(&dirs[0]);
+        let work = std::path::Path::new(&dirs[1]);
+        let registry = colm_model::Registry::open(work.join("registry")).unwrap();
+        let official = registry
+            .install_official(colm_model::CodeRef {
+                kind: colm_model::CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "a".repeat(64),
+            })
+            .unwrap();
+        let runtime = work.join("runtime");
+        std::fs::create_dir_all(runtime.join("ndep")).unwrap();
+        std::fs::write(
+            runtime.join("ndep/fndep_colm_hist_simyr1849-2006_1.9x2.5_c100428.nc"),
+            [],
+        )
+        .unwrap();
+        let mut fields = [
+            ("DEF_USE_TRACER", ".true."),
+            ("DEF_USE_Campbell_SOIL_MODEL", ".false."),
+            ("DEF_USE_VariablySaturatedFlow", ".true."),
+            ("DEF_TRACER_NUM", "1"),
+            ("DEF_TRACER_NAMES", family),
+            ("DEF_TRACER_TYPES", kind),
+            ("DEF_USE_PFT", ".true."),
+            ("DEF_USE_LCT", ".false."),
+            ("DEF_USE_BGC", ".true."),
+            ("DEF_USE_NITRIF", ".false."),
+        ]
+        .into_iter()
+        .map(|(path, value)| FieldChange {
+            path: path.into(),
+            value: value.into(),
+        })
+        .collect::<Vec<_>>();
+        fields.push(FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: format!("{family}:{filename}"),
+        });
+        fields.push(FieldChange {
+            path: "DEF_dir_runtime".into(),
+            value: runtime.display().to_string(),
+        });
+        let patches = fields
+            .iter()
+            .map(|f| (f.path.clone(), typed(&f.path, &f.value).unwrap()))
+            .collect::<Vec<_>>();
+        let candidate = registry
+            .materialize_run_with_case_changes(
+                &official.version,
+                source,
+                &work.join("preview"),
+                "tracer-preview",
+                &patches,
+                &[],
+            )
+            .unwrap();
+        let contexts = vec![candidate.run_case.display().to_string()];
+        let before = std::fs::read(source.join("case.nml")).unwrap();
+        let mut invalid = fields.clone();
+        invalid.push(FieldChange {
+            path: "DEF_simulation_time%timestep".into(),
+            value: "0.0".into(),
+        });
+        assert!(super::set_fields_with_changes(
+            vec![dirs[0].clone()],
+            invalid,
+            &[],
+            None,
+            Some(&contexts)
+        )
+        .is_err());
+        assert_eq!(std::fs::read(source.join("case.nml")).unwrap(), before);
+        assert!(!source.join(filename).exists());
+        assert!(candidate.run_case.join(filename).is_file());
+        super::set_fields_with_changes(vec![dirs[0].clone()], fields, &[], None, Some(&contexts))
+            .unwrap();
+        assert!(source.join(filename).is_file());
+        let text = std::fs::read_to_string(source.join("case.nml")).unwrap();
+        let doc = colm_namelist::parse(&text).unwrap();
+        super::validate_runtime_contract(&doc, source, None).unwrap();
+        assert_eq!(
+            character(&doc, "DEF_TRACER_PARAM_FILES"),
+            format!("{family}:{filename}")
+        );
+    }
+}
+
+#[test]
+fn tracer_staging_preserves_existing_files_when_adding_a_family() {
+    let dir = batch("tracer-stage-preserve", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let existing = [
+        "standard_ch4_parameter.nml",
+        "standard_O18_parameter.nml",
+        "standard_HDO_parameter.nml",
+        "standard_sediment_parameter.nml",
+    ];
+    for file in existing {
+        std::fs::write(case.join(file), format!("! user-edited {file}\n")).unwrap();
+    }
+    let fields = [FieldChange {
+        path: "DEF_TRACER_PARAM_FILES".into(),
+        value: "CH4:standard_ch4_parameter.nml,H2_18O:standard_O18_parameter.nml,HDO:standard_HDO_parameter.nml,SEDIMENT:standard_sediment_parameter.nml,Cl:standard_chloride_parameter.nml".into(),
+    }];
+    super::stage_tracer_parameters(&dir, &fields, None, (None, None)).unwrap();
+    for file in existing {
+        assert_eq!(
+            std::fs::read_to_string(case.join(file)).unwrap(),
+            format!("! user-edited {file}\n")
+        );
+    }
+    let chloride = case.join("standard_chloride_parameter.nml");
+    assert!(colm_namelist::parse(&std::fs::read_to_string(chloride).unwrap()).is_ok());
+    // A removed default is generated again, while the other files stay untouched.
+    std::fs::remove_file(case.join(existing[0])).unwrap();
+    super::stage_tracer_parameters(&dir, &fields, None, (None, None)).unwrap();
+    assert!(std::fs::read_to_string(case.join(existing[0]))
+        .unwrap()
+        .contains("'wetwat'"));
+}
+
+#[test]
+fn tracer_staging_only_updates_explicit_process_parameters() {
+    let dir = batch("tracer-stage-edits", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let ch4 = case.join("standard_ch4_parameter.nml");
+    let chloride = case.join("standard_chloride_parameter.nml");
+    std::fs::write(&ch4, "&nl_colm_methane_parameter\n! custom methane settings\n DEF_METHANE%inundation_mode = 'wetwat'\n DEF_METHANE%use_spatial_ph = .true.\n/\n").unwrap();
+    std::fs::write(&chloride, format!("&nl_colm_solute_parameter\n! custom chloride settings\n {SOLUTE_INIT_CONC} = 0.2\n {SOLUTE_PRECIP_CONC} = 0.3\n/\n")).unwrap();
+    super::stage_ch4_parameter(&dir, Some("routing")).unwrap();
+    super::stage_solute_parameter(&dir, (Some("0.4"), None)).unwrap();
+    let ch4_text = std::fs::read_to_string(ch4).unwrap();
+    let doc = colm_namelist::parse(&ch4_text).unwrap();
+    assert_eq!(doc.get(METHANE_MODE).unwrap().to_string(), "'routing'");
+    assert!(super::logical(&doc, "DEF_METHANE%use_spatial_ph"));
+    assert!(ch4_text.contains("custom methane settings"));
+    let chloride_text = std::fs::read_to_string(chloride).unwrap();
+    let doc = colm_namelist::parse(&chloride_text).unwrap();
+    assert_eq!(doc.get(SOLUTE_INIT_CONC).unwrap().to_string(), "0.4");
+    assert_eq!(doc.get(SOLUTE_PRECIP_CONC).unwrap().to_string(), "0.3");
+    assert!(chloride_text.contains("custom chloride settings"));
+}
+
+#[test]
+fn tracer_staging_does_not_create_arbitrary_parameter_paths() {
+    let dir = batch("tracer-stage-paths", &[SAMPLE]).remove(0);
+    super::stage_tracer_parameters(
+        &dir,
+        &[FieldChange {
+            path: "DEF_TRACER_PARAM_FILES".into(),
+            value: "CH4:custom.nml,Cl:subdir/standard_chloride_parameter.nml".into(),
+        }],
+        None,
+        (None, None),
+    )
+    .unwrap();
+    let case = std::path::Path::new(&dir);
+    assert!(!case.join("custom.nml").exists());
+    assert!(!case.join("subdir").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn tracer_staging_rejects_symlink_targets_without_writing_external_files() {
+    let dir = batch("tracer-stage-symlink", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir);
+    let target = case.join("user-owned.nml");
+    std::fs::write(&target, "user-owned contents").unwrap();
+    let link = case.join("standard_ch4_parameter.nml");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    for mode in [None, Some("routing")] {
+        let error = super::stage_ch4_parameter(&dir, mode).unwrap_err();
+        assert!(error.contains("符号链接"), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "user-owned contents"
+        );
+    }
+    std::fs::remove_file(&target).unwrap();
+    assert!(super::stage_ch4_parameter(&dir, None).is_err());
+    assert!(!target.exists());
+}
+
+#[test]
 fn expert_process_parameters_are_read_from_case_local_files() {
     let dir = batch("expert-process", &[SAMPLE]).remove(0);
     super::apply_fields(

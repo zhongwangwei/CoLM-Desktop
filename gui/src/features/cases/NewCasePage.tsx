@@ -30,9 +30,17 @@ import {
   type SimulationStep,
 } from './simulation-model';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
-import { caseFieldVisible, type ConfigurationField } from '../versions/configuration-options';
+import {
+  caseFieldVisible,
+  appendTracerFamily,
+  applyTracerSelection,
+  tracerRows,
+  tracerKeys,
+  unquote,
+  type ConfigurationField,
+} from '../versions/configuration-options';
 import { compatibleKernel } from '../runs/run-model';
-import { configurationReason, simulationOptionField } from './model-settings';
+import { configurationReason, simulationOptionField, modelSettingValue } from './model-settings';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import {
@@ -52,6 +60,14 @@ import type { CaseEntry } from '../../lib/types';
 import RunLocationSettings from '../runs/RunLocationSettings';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
+
+function isMethaneSite(site: Site) {
+  return (
+    !site.urban &&
+    !site.crop &&
+    (site.name === 'AT-Neu' || /ch4/i.test(site.obs_file ?? '') || /ch4/i.test(site.site_file))
+  );
+}
 
 function siteInfo(s: Site, t: (zh: string, en: string) => string) {
   if (s.urban)
@@ -74,12 +90,15 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
       ),
       activeHint: t('✓ 当前已选定 · 作物方案已就绪', '✓ Selected · Crop scheme active'),
     };
-  if (s.name === 'AT-Neu' || s.obs_file?.includes('CH4') || s.site_file?.includes('CH4'))
+  if (isMethaneSite(s))
     return {
       badge: t('甲烷 / 示踪', 'Methane / Tracer'),
       desc: t('草地甲烷过程 (FLUXNET-CH4)', 'Grassland methane (FLUXNET-CH4)'),
-      adaptHint: t('点击选择该站点', 'Click to select this station'),
-      activeHint: t('✓ 当前已选定', '✓ Selected'),
+      adaptHint: t(
+        '点击选择：自动开启 BGC 与甲烷示踪，采用 PFT/PC 和 van Genuchten',
+        'Select: enables BGC and methane tracing with PFT/PC and van Genuchten',
+      ),
+      activeHint: t('✓ 当前已选定 · 甲烷过程已配置', '✓ Selected · Methane processes configured'),
     };
   if (s.name === 'CN-Cng')
     return {
@@ -138,12 +157,6 @@ export default function NewCasePage() {
     ...seed?.form,
     ...(['PFT', 'PC'].includes(seed?.form?.subgrid ?? '') ? { landcover: 'IGBP' } : {}),
   });
-  let finalDirectory = '';
-  try {
-    finalDirectory = caseDirectory(form.root, form.name);
-  } catch {
-    // Incomplete or invalid names have no destination yet.
-  }
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
   useEffect(() => {
@@ -237,6 +250,21 @@ export default function NewCasePage() {
       ...schemeFields,
     },
     selected = sites.find((s) => s.site_file === form.site);
+  const bundledSite = !ownData && !multiSite && form.kind === 'site' ? selected : undefined;
+  let projectDirectory = '',
+    finalDirectory = '',
+    destinationRoot = form.root,
+    destinationError = '';
+  const destinationName = bundledSite?.name ?? form.name;
+  try {
+    projectDirectory = caseDirectory(form.root, form.name);
+    destinationRoot = bundledSite ? projectDirectory : form.root;
+    finalDirectory = bundledSite
+      ? caseDirectory(projectDirectory, bundledSite.name)
+      : projectDirectory;
+  } catch (e) {
+    destinationError = String(e);
+  }
 
   useEffect(() => {
     alive.current = true;
@@ -426,7 +454,12 @@ export default function NewCasePage() {
         ...f,
         [k]: v,
         ...(s
-          ? { name: s.name, met: s.met_file ?? '', start: s.start ?? '', end: s.end ?? '' }
+          ? {
+              name: f.name || s.name,
+              met: s.met_file ?? '',
+              start: s.start ?? '',
+              end: s.end ?? '',
+            }
           : {}),
       };
       return next;
@@ -501,7 +534,7 @@ export default function NewCasePage() {
     setForm((previous) => {
       const next = { ...previous };
       for (const [key, value] of Object.entries(bundled)) {
-        if (next[key] === value) next[key] = '';
+        if (key !== 'name' && next[key] === value) next[key] = '';
       }
       return next;
     });
@@ -540,7 +573,7 @@ export default function NewCasePage() {
         runtime: x.runtimedir,
         ...(s
           ? {
-              name: s.name,
+              name: f.name || s.name,
               site: s.site_file,
               met: s.met_file ?? '',
               start: s.start ?? '',
@@ -558,6 +591,80 @@ export default function NewCasePage() {
       setError(t('正在读取作物默认配置，请稍后选择。', 'Wait for crop defaults to load.'));
       return;
     }
+    const methane = isMethaneSite(site);
+    let methaneValues: Record<string, string> | undefined;
+    if (methane) {
+      if (!schemaReady) {
+        setError(
+          t('正在读取甲烷配置字段，请稍后选择。', 'Wait for methane configuration fields to load.'),
+        );
+        return;
+      }
+      try {
+        const inheritedTracers = state.version?.overlay
+          ? Object.fromEntries(
+              tracerKeys.flatMap((key) => {
+                const value = modelSettingValue(state.version!.overlay, key);
+                return value === null ? [] : [[key, value]];
+              }),
+            )
+          : {};
+        const existing = {
+          physics: { ...inheritedTracers, ...caseValues },
+          parameters: [],
+          process_files: [],
+        };
+        if (Number(modelSettingValue(existing, 'DEF_TRACER_NUM') ?? '0') > 100)
+          throw new Error(
+            t(
+              '超过100个示踪物的定义，请先在示踪设置中核对；未更改算例。',
+              'Definitions exceeding 100 tracers must be reviewed in tracer settings; the case was not changed.',
+            ),
+          );
+        const previousRows = tracerRows(existing);
+        const rows = appendTracerFamily(previousRows, 'methane').map((row) =>
+          row.TYPES.toLowerCase() === 'gas' &&
+          /^(ch4|methane)$/i.test(row.NAMES) &&
+          /^(null|none)?$/i.test(unquote(row.PARAM_FILES).trim())
+            ? { ...row, PARAM_FILES: 'standard_ch4_parameter.nml' }
+            : row,
+        );
+        if (
+          !rows.some(
+            (row) => /^(ch4|methane)$/i.test(row.NAMES) && row.TYPES.toLowerCase() === 'gas',
+          )
+        )
+          throw new Error(
+            t(
+              '已有 CH4 定义类型不是 gas，请先在示踪设置中修正。',
+              'The existing CH4 definition is not gas; correct it in tracer settings first.',
+            ),
+          );
+        const generatedMethaneDefault =
+          rows.some(
+            (row) =>
+              row.TYPES.toLowerCase() === 'gas' &&
+              /^(ch4|methane)$/i.test(row.NAMES) &&
+              unquote(row.PARAM_FILES).trim() === 'standard_ch4_parameter.nml',
+          ) &&
+          !state.version?.overlay.process_files.some(
+            (asset) => asset.relative_path === 'standard_ch4_parameter.nml',
+          );
+        methaneValues = {
+          ...applyTracerSelection(existing, schema, rows).physics,
+          ...(generatedMethaneDefault ? { DEF_USE_Dynamic_Wetland: '.false.' } : {}),
+          DEF_USE_BGC: '.true.',
+          DEF_USE_TRACER: '.true.',
+          DEF_USE_Campbell_SOIL_MODEL: '.false.',
+          DEF_USE_VariablySaturatedFlow: '.true.',
+          DEF_URBAN_RUN: '.false.',
+          DEF_USE_LULCC: '.false.',
+        };
+      } catch (e) {
+        setError(String(e));
+        return;
+      }
+    }
     setError('');
     if (!ownData)
       Object.assign(exampleValues.current, {
@@ -570,7 +677,7 @@ export default function NewCasePage() {
     setForm((previous) => ({
       ...previous,
       site: path,
-      name: site.name,
+      name: previous.name || site.name,
       met: site.met_file ?? '',
       start: site.start ?? '',
       end: site.end ?? '',
@@ -578,6 +685,7 @@ export default function NewCasePage() {
     setCaseValues((previous) => {
       const next: Record<string, string> = {
         ...previous,
+        ...methaneValues,
         DEF_URBAN_RUN: site.urban ? '.true.' : '.false.',
       };
       if (site.crop) {
@@ -593,14 +701,20 @@ export default function NewCasePage() {
       }
       return next;
     });
-    if (site.crop || site.urban)
+    if (site.crop || site.urban || methane)
       setForm((previous) => ({
         ...previous,
-        subgrid: site.crop ? 'PFT' : 'IGBP',
+        subgrid: methane
+          ? ['PFT', 'PC'].includes(previous.subgrid)
+            ? previous.subgrid
+            : 'PFT'
+          : site.crop
+            ? 'PFT'
+            : 'IGBP',
         landcover: 'IGBP',
       }));
   }
-  // 作物站、城市站由站点数据决定过程结构（作物：PFT + BGC + 后端作物默认；城市：开启城市、关闭 BGC），
+  // 示例站点按数据用途配置作物、城市或甲烷过程；只修改当前算例草稿。
   // 普通站点只选站点，下垫面方案仍须在第四步明确选择。
   function adaptAndSelectSite(s: Site) {
     selectSite(s.site_file);
@@ -638,6 +752,7 @@ export default function NewCasePage() {
       const issue = newCaseRangeProblem(form, en);
       if (issue) return issue;
     }
+    if (at >= 3 && destinationError) return destinationError;
     if (at >= 3 && multiSite) {
       try {
         multiPlans(at >= 5 ? 5 : 3);
@@ -772,7 +887,7 @@ export default function NewCasePage() {
       await invoke(command, args);
       return {
         dir: String(args.out),
-        root: form.root,
+        root: multiSite ? form.root : destinationRoot,
         remote_dir: undefined as string | undefined,
       };
     }
@@ -924,7 +1039,7 @@ export default function NewCasePage() {
       )
         throw new Error(t('模型与设置尚未读取完成。', 'Wait for model and settings to load.'));
       if (multiSite) return createMultiSites();
-      const out = caseDirectory(form.root, form.name),
+      const out = finalDirectory,
         revision = state.versionRef;
       const changed = editedOptions.map(([path, value]) => ({ path, value }));
       const spinup = form.spinup_end
@@ -952,7 +1067,7 @@ export default function NewCasePage() {
           destination = await createDestination('new_case', {
             site: form.site,
             out,
-            name: form.name,
+            name: destinationName,
             start: form.start,
             end: form.end,
             rawdata: form.rawdata || null,
@@ -1174,8 +1289,8 @@ export default function NewCasePage() {
   if (step === 1) {
     fields.push({
       id: 'new-case-directory',
-      label: t('最终算例目录', 'Final case directory'),
-      value: finalDirectory,
+      label: t('模拟保存目录', 'Simulation directory'),
+      value: projectDirectory,
       type: 'text',
       disabled: true,
       set: () => {},
@@ -1680,10 +1795,10 @@ export default function NewCasePage() {
             </Field>
           )}
           <div className="form-grid">{['root', 'name'].map(render)}</div>
-          <Field label={t('最终算例目录', 'Final case directory')}>
+          <Field label={t('模拟保存目录', 'Simulation directory')}>
             <Input
               readOnly
-              value={finalDirectory}
+              value={projectDirectory}
               placeholder={t(
                 '填写项目目录与模拟名称后显示',
                 'Choose a project folder and simulation name',
@@ -1750,6 +1865,12 @@ export default function NewCasePage() {
             'Choose data sources and simulation period.',
           )}
         >
+          {bundledSite && finalDirectory && (
+            <p className="path">
+              {t('本站点保存位置：', 'Station directory: ')}
+              {finalDirectory}
+            </p>
+          )}
           {form.kind === 'site' && (
             <>
               <div className="actions simulation-source">

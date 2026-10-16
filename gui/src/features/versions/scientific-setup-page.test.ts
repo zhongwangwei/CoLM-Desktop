@@ -205,6 +205,41 @@ test('frozen model cards write case fields directly and leave the selected revis
   assert.equal(h.changes.length, 0);
 });
 
+test('tracer choice opens species configuration before saving, including incompatible saved definitions', async () => {
+  for (const enabled of [false, true]) {
+    const h = harness();
+    h.props.source = { kind: 'frozen', version: { id: 'official', revision: 5 } };
+    h.props.environment.caseValues = {
+      DEF_USE_TRACER: enabled ? '.true.' : '.false.',
+      DEF_USE_Campbell_SOIL_MODEL: '.true.',
+      DEF_URBAN_RUN: '.true.',
+      DEF_TRACER_NAMES: "'CH4'",
+    };
+    const patches: CaseOptionPatch[] = [],
+      opened: string[] = [];
+    h.props.onCaseChange = (patch) => {
+      patches.push(patch);
+    };
+    h.props.onOpenSettings = (id) => {
+      opened.push(id);
+    };
+    h.render();
+    const c = await h.resolve();
+    const tracer = c.fields.find((field) => field.id === 'setup-DEF_USE_TRACER')!;
+    assert.ok(
+      tracer.options!.some((option) => option.value === '.true.' && option.label === '选择示踪剂'),
+    );
+    await tracer.set('.true.');
+    await c.actions.find((action) => action.id === 'setup-DEF_USE_TRACER-settings')!.run();
+    assert.deepEqual(opened, ['DEF_USE_TRACER', 'DEF_USE_TRACER']);
+    assert.deepEqual(patches, []);
+    assert.equal(h.props.environment.caseValues.DEF_USE_TRACER, enabled ? '.true.' : '.false.');
+    h.props.disabled = true;
+    h.render();
+    assert.throws(() => tracer.set('.true.'), /locked|stale|不可修改|已切换/i);
+  }
+});
+
 test('crop card enables immediately using standard case defaults and permits later planting edits', async () => {
   const h = harness();
   h.props.overlay.physics.DEF_USE_BGC = '.true.';

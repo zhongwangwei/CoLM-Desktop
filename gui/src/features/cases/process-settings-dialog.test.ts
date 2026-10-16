@@ -5,7 +5,7 @@ import ts from 'typescript';
 import { cnInitialStatePatch, type CaseOptionPatch } from '../versions/configuration-options';
 import type { UiAction } from '../../lib/guide';
 
-function dialog() {
+function dialog(process = 'DEF_USE_BGC') {
   const nodes: { type: string; props: Record<string, unknown>; children: unknown[] }[] = [],
     slots: unknown[] = [];
   let cursor = 0,
@@ -15,7 +15,7 @@ function dialog() {
   let closed = 0,
     fail = false;
   const props = {
-    process: 'DEF_USE_BGC',
+    process,
     fields: [],
     catalog: [],
     version: {
@@ -138,6 +138,58 @@ test('process dialog stages edits, discards on cancel or escape, and never disab
     assert.equal(h.closed, 1);
     assert.deepEqual(h.saved, []);
   }
+});
+
+test('tracer chooser stages enable intent without changing the saved switch and cancels atomically', async () => {
+  for (const escape of [false, true]) {
+    const h = dialog('DEF_USE_TRACER');
+    h.props.environment.caseValues.DEF_USE_TRACER = '.false.';
+    h.props.environment.caseValues.DEF_USE_BGC = '.false.';
+    const child = h.render();
+    assert.equal(child.caseValues.DEF_USE_TRACER, '.true.');
+    assert.equal(h.action('save').enabled, false);
+    child.onCaseChange({
+      DEF_TRACER_NAMES: "'CH4'",
+      DEF_TRACER_TYPES: "'gas'",
+      DEF_USE_BGC: '.true.',
+    });
+    assert.equal(h.render().caseValues.DEF_USE_BGC, '.true.');
+    assert.deepEqual(h.saved, []);
+    if (escape)
+      (h.nodes.find((n) => n.type === 'Dialog')!.props.onOpenChange as (open: boolean) => void)(
+        false,
+      );
+    else await h.action('cancel').run();
+    assert.equal(h.closed, 1);
+    assert.deepEqual(h.saved, []);
+    assert.equal(h.props.environment.caseValues.DEF_USE_TRACER, '.false.');
+    assert.equal(h.props.environment.caseValues.DEF_USE_BGC, '.false.');
+  }
+});
+
+test('tracer save commits enable and validated definitions together, preserving the draft on failure', async () => {
+  const h = dialog('DEF_USE_TRACER');
+  h.props.environment.caseValues.DEF_USE_TRACER = '.false.';
+  h.props.environment.caseValues.DEF_USE_BGC = '.false.';
+  const changes = {
+    DEF_USE_BGC: '.true.',
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'CH4'",
+    DEF_TRACER_TYPES: "'gas'",
+    DEF_TRACER_PARAM_FILES: "'CH4:standard_ch4_parameter.nml'",
+  };
+  const child = h.ready();
+  child.onCaseChange(changes);
+  h.fail = true;
+  await h.action('save').run();
+  assert.equal(h.closed, 0);
+  assert.deepEqual(h.saved, []);
+  assert.equal(h.render().caseValues.DEF_TRACER_NAMES, "'CH4'");
+  assert.equal(h.props.environment.caseValues.DEF_USE_BGC, '.false.');
+  h.fail = false;
+  await h.action('save').run();
+  assert.deepEqual(h.saved, [{ DEF_USE_TRACER: '.true.', ...changes }]);
+  assert.equal(h.closed, 1);
 });
 test('process dialog saves the latest patch without another render, keeps removals explicit, and supports StrictMode replay', async () => {
   const h = dialog();

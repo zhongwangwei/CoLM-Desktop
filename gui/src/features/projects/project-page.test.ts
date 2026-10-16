@@ -468,6 +468,13 @@ test('bundled example is not rejected by case switches retained in a legacy froz
   await example();
   assert.deepEqual(routes, ['new-case']);
   assert.equal(updates.length, 1);
+  const seed = (updates[0] as { newCaseSeed: { form: Record<string, string> } }).newCaseSeed;
+  assert.equal(
+    seed.form.root,
+    '/project',
+    'bundled input storage must not replace the project folder',
+  );
+  assert.equal(seed.form.name, 'CN-Cng');
   assert.equal(state.version.overlay.physics.DEF_URBAN_RUN, '.true.');
 });
 

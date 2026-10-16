@@ -21,13 +21,16 @@ import type { Descriptor, ModelField } from './model';
 import { PFT } from './scope-labels';
 import {
   caseFieldVisible,
+  tracerFieldVisible,
   vicParameterDefault,
   caseOptionOverlay,
   caseOptionPatch,
   type CaseOptionPatch,
   tracerFamilies,
   tracerFamilyState,
+  tracerSetupIssues,
   appendTracerFamily,
+  applyTracerSelection,
   setStomatalScheme,
   groupedField,
   unquote,
@@ -261,9 +264,6 @@ export default function ConfigurationOptions({
     locked =
       disabled || saving || (!onCaseChange && (source.kind !== 'draft' || !onChange)) || importing;
   writable.current = !locked;
-  useEffect(() => {
-    onReady?.(ready && !error && tracers === null && !pickingFile);
-  }, [ready, error, tracers, pickingFile, onReady]);
   const values = ready
     ? {
         ...result,
@@ -766,7 +766,12 @@ export default function ConfigurationOptions({
   const caseProcessVisible = (id: string) =>
     (!hideProcesses || !['ecology', 'tracer', 'river', 'urban'].includes(id)) &&
     (!process || id !== 'tracer' || process === 'DEF_USE_TRACER') &&
-    (!onCaseChange || parentValues[id] === true);
+    (!onCaseChange ||
+      parentValues[id] === true ||
+      (id === 'tracer' && process === 'DEF_USE_TRACER'));
+  const currentTracerTypes = tracers
+    ? tracers.map((row) => row.TYPES).join(',')
+    : (modelSettingValue(overlay, 'DEF_TRACER_TYPES') ?? undefined);
   const groups = orderedGroups.map(([id, zh, english]) => {
     if (['river', 'urban', 'tracer'].includes(id) && !caseProcessVisible(id)) return null;
     const rows = fields
@@ -780,12 +785,16 @@ export default function ConfigurationOptions({
           groupedField(field, catalog) &&
           !(field.name === 'DEF_USE_SOILPAR_UPS_FIT' && caseScope === 'site'),
       )
+      .filter((field) => tracerFieldVisible(field.name, currentTracerTypes))
       .filter(
         (field) =>
           (!onCaseChange &&
             !['DEF_VIC_OPT', 'DEF_file_VIC_para', 'DEF_file_VIC_OPT'].includes(field.name)) ||
           (field.name === 'DEF_RSS_SCHEME' && resistanceForcedOff) ||
-          caseFieldVisible(field.name, values.fields, overlay.physics),
+          caseFieldVisible(field.name, values.fields, {
+            ...overlay.physics,
+            ...(currentTracerTypes === undefined ? {} : { DEF_TRACER_TYPES: currentTracerTypes }),
+          }),
       )
       .filter(
         (field) =>
@@ -876,23 +885,56 @@ export default function ConfigurationOptions({
     !locked &&
     ready &&
     tracerFields.length > 0 &&
-    !['disabled', 'readonly', 'read-only'].includes(
-      values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode ?? '',
-    );
+    !(
+      process === 'DEF_USE_TRACER'
+        ? ['readonly', 'read-only']
+        : ['disabled', 'readonly', 'read-only']
+    ).includes(values.fields.find((f) => f.name === 'DEF_TRACER_NAMES')?.mode ?? '');
   const familyContext: FamilyContext = {
     subgrid,
+    processFiles: values.process_files,
     kernelMacros:
       kernelMacros ?? state.kernels?.find((item) => item.dir === kernelDir)?.macros ?? null,
     caseScope,
+    engine,
+    defaults: Object.fromEntries([
+      ...fields.map((field) => [field.name.toUpperCase(), field.default]),
+      ...values.fields.flatMap((field) => {
+        const value = field.configured_value ?? field.built_in_default;
+        return value == null ? [] : [[field.name.toUpperCase(), value]];
+      }),
+    ]),
   };
-  const familyVisible =
-    tracerOpen && modelSettingValue(overlay, 'DEF_USE_TRACER')?.trim().toLowerCase() === '.true.';
+  let checkedTracerOverlay = overlay;
+  let definitionError = tracers === null ? tracerError : '';
+  if (!definitionError && !tracerTooLarge && tracerFields.length) {
+    try {
+      checkedTracerOverlay = setTracerRows(overlay, fields, table);
+    } catch (e) {
+      definitionError = String(e);
+    }
+  }
+  const tracerIssues = definitionError
+    ? []
+    : tracerSetupIssues(checkedTracerOverlay, familyContext);
+  const tracerValid = !definitionError && !tracerTooLarge && tracerIssues.length === 0;
+  const canSave =
+    ready &&
+    !error &&
+    tracers === null &&
+    !pickingFile &&
+    (process !== 'DEF_USE_TRACER' || (tracerFields.length > 0 && tracerValid));
+  useEffect(() => {
+    onReady?.(canSave);
+  }, [canSave, onReady]);
+  const stagedTracerModal = process === 'DEF_USE_TRACER' && !!modalActions && !!onCaseChange;
+  const familyVisible = tracerOpen;
   const familyCards = familyVisible && (
     <Card
       title={t('先选择要追踪的物质', 'Choose tracer families')}
       description={t(
-        '只预填名称和类型，保留已有与自定义条目。请核对并完善数值列、导入及关联过程文件，再应用定义；此操作不启动计算。',
-        'Only names and types are prefilled; existing and custom rows are retained. Complete numeric metadata and import/link process files before applying. No simulation starts here.',
+        '选择要追踪的物质，保留已有与自定义条目。预填名称、类型和内置过程文件名；请补齐必需的数值及文件路径，再应用定义。',
+        'Choose what to trace. Existing and custom rows are retained; names, types and built-in process filenames are prefilled. Complete required numeric values and file paths, then apply the definitions.',
       )}
     >
       <div className="simulation-choice-grid">
@@ -900,11 +942,22 @@ export default function ConfigurationOptions({
           const availability = tracerFamilyState(overlay, family.id, familyContext),
             next = appendTracerFamily(table, family.id),
             already = next.length === table.length,
-            blocked = !tracerReady || availability.status === 'blocked' || already;
+            singlepointSediment =
+              family.id === 'sediment' &&
+              (caseScope === 'site' ||
+                familyContext.kernelMacros?.some((macro) => macro.toLowerCase() === 'singlepoint')),
+            blocked = !tracerReady || already || singlepointSediment;
           const add = () => {
             if (!familyVisible || blocked || current.current !== request)
               throw new Error('Family is unavailable or already present');
-            setTracers(next);
+            if (stagedTracerModal) {
+              try {
+                write(() => applyTracerSelection(overlay, fields, next));
+                setTracers(null);
+              } catch {
+                setTracers(next);
+              }
+            } else setTracers(next);
           };
           actions.push({
             id: `configuration-family-${family.id}`,
@@ -924,15 +977,31 @@ export default function ConfigurationOptions({
             >
               <strong>{t(family.zh, family.en)}</strong>
               <span>{family.rows.map(([name]) => name).join(' / ')}</span>
-              <small>
-                {already
-                  ? t('已在定义表中', 'Already in the table')
-                  : availability.status === 'blocked'
-                    ? t('先解决依赖冲突', 'Resolve prerequisites first')
-                    : availability.status === 'pending'
-                      ? t('可以预填；适用性待核对', 'Can prefill; applicability pending')
-                      : t('预填到定义表', 'Prefill definition table')}
-              </small>
+              {family.id === 'methane' && (
+                <small>{t('选择甲烷会同时启用 BGC', 'Selecting methane also enables BGC')}</small>
+              )}
+              {singlepointSediment && (
+                <small>
+                  {t(
+                    '单点算例不支持河道泥沙，请选择空间算例',
+                    'River sediment requires a spatial case; single-site cases are unsupported',
+                  )}
+                </small>
+              )}
+              {!singlepointSediment && (
+                <small>
+                  {already
+                    ? t('已在定义表中', 'Already in the table')
+                    : availability.status === 'blocked'
+                      ? t(
+                          '可先选择；保存前须解决依赖冲突',
+                          'Can prefill; resolve prerequisites before saving',
+                        )
+                      : availability.status === 'pending'
+                        ? t('可以预填；适用性待核对', 'Can prefill; applicability pending')
+                        : t('预填到定义表', 'Prefill definition table')}
+                </small>
+              )}
               {availability.reasons.map(([zh, english]) => (
                 <small key={zh}>{t(zh, english)}</small>
               ))}
@@ -941,26 +1010,47 @@ export default function ConfigurationOptions({
         })}
       </div>
       <p className="muted">
-        {t(
-          '预填后尚未保存；可在应用前用“移除末行”撤回新增行。关闭示踪开关不会删除已有定义。',
-          'Prefilled rows are not saved. Use Remove last row before applying to undo added rows. Turning tracers off preserves saved definitions.',
-        )}
+        {stagedTracerModal
+          ? t(
+              '选择预设后暂存到此弹窗，点击“保存并启用”才保存。手动编辑或移除行后请应用定义；取消弹窗会放弃修改。',
+              'Presets are staged in this dialog until Save and enable. Apply definitions after manual edits or removing rows; cancelling discards changes.',
+            )
+          : t(
+              '预填后尚未保存；编辑或移除行后请应用定义。关闭示踪开关不会删除已有定义。',
+              'Prefilled rows are not saved. Apply definitions after editing or removing rows. Turning tracers off preserves saved definitions.',
+            )}
       </p>
     </Card>
   );
+  function removeTracer(index: number) {
+    if (!tracerReady || !tracerOpen || current.current !== request)
+      throw new Error('Tracer editor is locked or stale');
+    setTracers(table.filter((_, rowIndex) => rowIndex !== index));
+  }
+  if (tracerOpen)
+    table.forEach((row, index) =>
+      actions.push({
+        id: `configuration-tracer-${index}-remove`,
+        label: t(`移除 ${row.NAMES || index + 1}`, `Remove ${row.NAMES || index + 1}`),
+        kind: 'click',
+        enabled: tracerReady,
+        run: () => removeTracer(index),
+      }),
+    );
   const tracerTable = tracerOpen && (
     <Card
       title={t('示踪物定义（每行对应同一个示踪物）', 'Tracer definitions (aligned rows)')}
       description={t(
-        '名称、类型和可选参数列按行对应；留空整列保留内核解释，不自动填目录默认值。过程文件须先导入到当前版本。',
-        'Names, types and optional columns are aligned by row. Empty columns are not filled with catalog defaults. Import process files into this version first.',
+        '每行对应一个示踪物。参数文件可填写内置文件名或运行位置上的有效路径；数值列留空时使用内核及参数文件中的定义；水同位素需设置正的含水层混合水量。',
+        'Each row defines one tracer. Parameter files may use built-in filenames or valid paths on the run host. Empty numeric columns use kernel and parameter-file definitions; water isotopes require positive aquifer mixing water.',
       )}
     >
-      {tracerError && (
-        <Notice tone="error">
-          {tracerError} · {modelSettingValue(overlay, 'DEF_TRACER_PARAM_FILES')}
+      {definitionError && <Notice tone="error">{definitionError}</Notice>}
+      {tracerIssues.map(([zh, english]) => (
+        <Notice key={zh} tone="warning">
+          {t(zh, english)}
         </Notice>
-      )}
+      ))}
       {tracerTooLarge && (
         <Notice tone="warning">
           {t(
@@ -976,6 +1066,7 @@ export default function ConfigurationOptions({
               {tracerColumns.map((c) => (
                 <th key={c}>{t(...tracerLabels[c])}</th>
               ))}
+              <th>{t('操作', 'Actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -1036,6 +1127,18 @@ export default function ConfigurationOptions({
                     </td>
                   );
                 })}
+                <td>
+                  <Button
+                    disabled={!tracerReady}
+                    onClick={() => removeTracer(index)}
+                    aria-label={t(
+                      `移除 ${row.NAMES || index + 1}`,
+                      `Remove ${row.NAMES || index + 1}`,
+                    )}
+                  >
+                    {t('移除', 'Remove')}
+                  </Button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1063,7 +1166,7 @@ export default function ConfigurationOptions({
           disabled={!tracerReady || tracers === null}
           onClick={() => {
             try {
-              write(() => setTracerRows(overlay, fields, table));
+              write(() => applyTracerSelection(overlay, fields, table));
               setTracers(null);
             } catch {
               /* Preserve incomplete table. */
@@ -1120,7 +1223,7 @@ export default function ConfigurationOptions({
       run: () => {
         if (!tracerOpen || !tracerReady || tracers === null)
           throw new Error('Tracer table is unavailable');
-        write(() => setTracerRows(overlay, fields, table));
+        write(() => applyTracerSelection(overlay, fields, table));
         setTracers(null);
       },
     },
@@ -1369,9 +1472,10 @@ export default function ConfigurationOptions({
       </Notice>
       {error && <Notice tone="error">{error}</Notice>}
       {!ready && <p>{t('正在查询配置条件…', 'Checking configuration conditions…')}</p>}
-      {groups}
+      {!stagedTracerModal && groups}
       {familyCards}
       {tracerTable}
+      {stagedTracerModal && groups}
       {modalActions && tracers !== null && (
         <Notice>
           {t(

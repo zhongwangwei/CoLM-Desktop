@@ -415,3 +415,20 @@ test('enabling LULCC atomically enforces monthly and annually changing LAI', () 
   assert.equal(o.physics.DEF_LAI_MONTHLY, '.false.');
   assert.equal(o.physics.DEF_LAI_CHANGE_YEARLY, undefined);
 });
+
+test('tracer eligibility uses displayed defaults and runtime VG semantics without adding overrides', () => {
+  const draft: Overlay = { physics: {}, parameters: [], process_files: [] };
+  const before = structuredClone(draft);
+  const choices = setupChoices(draft, fields, environment);
+  assert.equal(choices.find((c) => c.id === 'soil')?.value, 'vG');
+  assert.equal(choices.find((c) => c.id === 'DEF_USE_VariablySaturatedFlow')?.value, '.true.');
+  assert.equal(choices.find((c) => c.id === 'DEF_USE_TRACER')?.choices[0].reason, '');
+  assert.deepEqual(draft, before);
+  draft.physics.DEF_USE_VariablySaturatedFlow = '.false.';
+  assert.equal(apply(draft, 'DEF_USE_TRACER', '.true.').physics.DEF_USE_TRACER, '.true.');
+  draft.physics.DEF_USE_Campbell_SOIL_MODEL = '.true.';
+  assert.throws(() => apply(draft, 'DEF_USE_TRACER', '.true.'), /van Genuchten/);
+  draft.physics.DEF_USE_Campbell_SOIL_MODEL = '.false.';
+  draft.physics.DEF_URBAN_RUN = '.true.';
+  assert.throws(() => apply(draft, 'DEF_USE_TRACER', '.true.'), /urban/);
+});

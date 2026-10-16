@@ -78,7 +78,6 @@ export function setupChoices(
       .toLowerCase();
   const on = (key: string) => value(key) === '.true.';
   const subgrid = environment.subgrid?.toUpperCase() ?? '',
-    soil = foundationValue(overlay.physics, 'soil', overlay.parameters),
     displayedSoil =
       displayValue('DEF_USE_Campbell_SOIL_MODEL') === '.true.'
         ? 'Campbell'
@@ -237,12 +236,12 @@ export function setupChoices(
     if (id === 'DEF_URBAN_RUN' && on('DEF_USE_TRACER'))
       return bilingual('请先关闭示踪过程', 'Disable tracers first');
     if (id === 'DEF_USE_TRACER') {
-      if (methane && (!on('DEF_USE_BGC') || !['PFT', 'PC'].includes(subgrid)))
+      if (methane && (displayValue('DEF_USE_BGC') !== '.true.' || !['PFT', 'PC'].includes(subgrid)))
         return bilingual(
           '甲烷示踪需要先开启 BGC 并选择 PFT/PC',
           'Methane requires BGC and PFT/PC first',
         );
-      if (isotope && on('DEF_USE_LULCC'))
+      if (isotope && displayValue('DEF_USE_LULCC') === '.true.')
         return bilingual(
           '请先关闭 LULCC 或修改 isotope 类型',
           'Disable LULCC or change isotope type first',
@@ -250,28 +249,33 @@ export function setupChoices(
       if (
         sediment &&
         (isSite(environment) ||
-          !on('DEF_USE_GridRiverLakeFlow') ||
+          displayValue('DEF_USE_GridRiverLakeFlow') !== '.true.' ||
           !environment.kernel?.macros.includes('GridRiverLakeFlow'))
       )
         return bilingual(
           'SEDIMENT 需要空间模式和已开启的河湖内核',
           'SEDIMENT requires a spatial river-capable kernel with routing enabled',
         );
-      if (methane && methaneRiver && !on('DEF_USE_GridRiverLakeFlow'))
+      if (methane && methaneRiver && displayValue('DEF_USE_GridRiverLakeFlow') !== '.true.')
         return bilingual(
           '甲烷 routing/hybrid 需要先开启河湖汇流',
           'Methane routing/hybrid requires river-lake routing first',
         );
-      if (soil !== 'vG')
+      if (displayedSoil !== 'vG')
         return bilingual(
           '请先选择 van Genuchten 和变饱和流',
           'Select van Genuchten and variably saturated flow',
         );
-      if (value('DEF_URBAN_RUN') !== '.false.')
+      if (displayValue('DEF_URBAN_RUN') !== '.false.')
         return bilingual('请先明确关闭城市过程', 'Explicitly disable urban processes first');
       if (!environment.grid && !isSite(environment))
         return bilingual('待核对：请先确定网格', 'Pending: choose grid');
-      if (environment.grid === 'catchment')
+      if (
+        environment.engine === 'fortran' &&
+        environment.kernel?.macros.some((m) => m.toUpperCase() === 'OPENMP')
+      )
+        return bilingual('OpenMP 内核不支持示踪', 'OpenMP kernels do not support tracers');
+      if (environment.grid === 'catchment' || environment.kernel?.macros.includes('CATCHMENT'))
         return bilingual('流域网格不支持示踪', 'Catchment grid does not support tracers');
     }
     if (['DEF_USE_LULCC', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_regional'].includes(id)) {
