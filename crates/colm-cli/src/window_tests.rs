@@ -326,7 +326,7 @@ fn a_relative_runtime_directory_is_made_absolute_before_writing_the_case() {
 }
 
 #[test]
-fn urban_new_stages_lucy_into_an_explicit_runtime_when_missing() {
+fn urban_new_keeps_explicit_runtime_immutable_and_stages_case_owned_defaults() {
     let _netcdf_guard = super::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-cli-urban-runtime-{}-{:?}",
@@ -337,7 +337,7 @@ fn urban_new_stages_lucy_into_an_explicit_runtime_when_missing() {
     let runtime = root.join("Runtime");
     std::fs::create_dir_all(&runtime).unwrap();
     let examples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples");
-    let args = [
+    let mut args = [
         "--site",
         examples
             .join("Sitedata/AU-Preston_site_v1.nc")
@@ -360,12 +360,38 @@ fn urban_new_stages_lucy_into_an_explicit_runtime_when_missing() {
     .collect::<Vec<_>>();
     let opts = super::Opts::parse(&args).unwrap();
 
-    super::cmd_new(&opts).expect("urban case creation");
+    let required = runtime.join(colm_srfdata::urban_runtime::LUCY_RELATIVE);
+    let error = super::cmd_new(&opts).unwrap_err().to_string();
+    assert!(
+        error.contains("explicit --runtime is incomplete"),
+        "{error}"
+    );
+    assert!(error.contains(required.to_str().unwrap()), "{error}");
+    assert!(error.contains("omit --runtime"), "{error}");
+    assert_eq!(std::fs::read_dir(&runtime).unwrap().count(), 0);
 
-    assert!(runtime
-        .join(colm_srfdata::urban_runtime::LUCY_RELATIVE)
-        .is_file());
-    let case = root.join("case");
+    // An explicit custom table must survive case creation byte for byte.
+    std::fs::create_dir_all(required.parent().unwrap()).unwrap();
+    std::fs::write(&required, b"custom urban table").unwrap();
+    args[5] = root.join("custom-case").to_string_lossy().into_owned();
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_new(&opts).expect("urban case with custom runtime");
+    assert_eq!(std::fs::read(&required).unwrap(), b"custom urban table");
+
+    // Omitting --runtime materializes defaults inside the final case directory.
+    args.truncate(args.len() - 2);
+    let case = root.join("builtin-case");
+    args[5] = case.to_string_lossy().into_owned();
+    let opts = super::Opts::parse(&args).unwrap();
+    super::cmd_new(&opts).expect("urban case with built-in runtime");
+    assert_eq!(
+        std::fs::read(
+            case.join("runtime")
+                .join(colm_srfdata::urban_runtime::LUCY_RELATIVE)
+        )
+        .unwrap(),
+        colm_srfdata::urban_runtime::LUCY_RAWDATA
+    );
     assert!(case
         .join("rawdata")
         .join(colm_srfdata::urban_runtime::NCAR_RELATIVE)

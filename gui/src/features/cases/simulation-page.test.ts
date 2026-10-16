@@ -54,6 +54,7 @@ function page(
   scannedSites: caseModel.Site[] = [site],
   sourceValues: Record<string, string> = initialValues,
   options: {
+    profile?: { grid?: string; domain_kind?: string };
     histories?: { name: string; on: boolean; writable: boolean; settable: boolean }[];
     modelFields?: caseModel.SchemaField[];
     kernels?: KernelChoice[];
@@ -210,7 +211,7 @@ function page(
         case 'pick_file':
           return scannedSites[0]?.site_file ?? null;
         case 'model_case_context':
-          return { entry: { dir: '/preview/site' }, profile: {} };
+          return { entry: { dir: '/preview/site' }, profile: options.profile ?? {} };
         case 'hist_vars':
           return options.histories ?? [];
         case 'read_text':
@@ -2092,7 +2093,7 @@ for (const kind of ['region', 'watershed', 'global'])
   });
 
 for (const name of ['NewCasePage', 'CasesPage'] as const) {
-  test(`${name} keeps single-point and model schemes out of data while preserving values`, async () => {
+  test(`${name} keeps single-point settings in data extras and model schemes separate while preserving values`, async () => {
     const modelKeys = [
       'USE_SITE_soilparameters',
       'USE_SITE_LAI',
@@ -2122,7 +2123,20 @@ for (const name of ['NewCasePage', 'CasesPage'] as const) {
     if (name === 'CasesPage') await p.goto('case-step-3');
     p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
     const contract = p.render();
-    for (const key of [...modelKeys, 'DEF_case_name']) {
+    for (const key of modelKeys.filter(simulation.isSiteConfiguration)) {
+      assert.ok(
+        contract.fields.some((f) => f.id.endsWith(key)),
+        key,
+      );
+      assert.ok(
+        p.elements.some((e) => e.type === 'Field' && e.props.key === key),
+        key,
+      );
+    }
+    for (const key of [
+      ...modelKeys.filter((key) => !simulation.isSiteConfiguration(key)),
+      'DEF_case_name',
+    ]) {
       assert.ok(!contract.fields.some((f) => f.id.endsWith(key)), key);
       assert.ok(!p.elements.some((e) => e.type === 'Field' && e.props.key === key), key);
     }
@@ -2258,4 +2272,84 @@ test('research round trips preserve manual overrides while clearing remaining bu
   assert.equal(own.fields.find((f) => f.id === 'new-start')?.value, '2001-03-01');
   assert.equal(own.fields.find((f) => f.id === 'new-site')?.value, '');
   assert.equal(own.fields.find((f) => f.id === 'new-met')?.value, '');
+});
+
+for (const name of ['NewCasePage', 'CasesPage'] as const) {
+  test(`${name} edits single-point data defaults and saves only the selected override`, async () => {
+    const key = 'USE_SITE_soilparameters';
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form, sites: [site], step: 3 } : undefined,
+      [site],
+      initialValues,
+      { schema: [...schema, { ...field(key, '站点', '.true.'), kind: 'Logical' }] },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    assert.ok(
+      !p.render().fields.some((f) => f.id.endsWith(key)),
+      'hidden until More settings opens',
+    );
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    const id = p.render().fields.find((f) => f.id.endsWith(key))!.id;
+    assert.equal(p.render().fields.find((f) => f.id === id)?.value, '.true.');
+    p.set(id, '.false.');
+    if (name === 'NewCasePage') {
+      p.set(id, '');
+      assert.equal(
+        p.render().fields.find((f) => f.id === id)?.value,
+        '.true.',
+        'inherit restores the displayed default',
+      );
+      p.set(id, '.false.');
+      await p.goto('new-step-5');
+      await p.click('new-create');
+    } else await p.click('case-save');
+    const request = p.calls.find(
+      (call) => call.command === (name === 'NewCasePage' ? 'new_case' : 'case_data_save'),
+    )!;
+    assert.ok(request);
+    assert.ok(
+      (request.args.fields as { path: string; value: string }[]).some(
+        (f) => f.path === key && f.value === '.false.',
+      ),
+    );
+  });
+  test(`${name} hides single-point settings from spatial data extras`, async () => {
+    const key = 'USE_SITE_soilparameters';
+    const p = page(
+      name,
+      name === 'NewCasePage' ? { form: { ...form, kind: 'region' }, step: 3 } : undefined,
+      [site],
+      initialValues,
+      {
+        profile: { grid: 'latlon', domain_kind: 'region' },
+        schema: [...schema, field(key, '站点', '.true.')],
+      },
+    );
+    await p.mount();
+    if (name === 'CasesPage') await p.goto('case-step-3');
+    p.set(name === 'NewCasePage' ? 'new-advanced' : 'case-advanced', 'true');
+    assert.ok(!p.render().fields.some((f) => f.id.endsWith(key)));
+    assert.ok(!p.elements.some((e) => e.type === 'Field' && e.props.key === key));
+  });
+}
+
+test('final case directory preview follows the exact validated creation destination', async () => {
+  const p = page('NewCasePage', { form, step: 1 });
+  await p.mount();
+  p.set('new-root', '/projects///');
+  p.set('new-name', 'Station-A');
+  let c = p.render();
+  const preview = () => c.fields.find((f) => f.id === 'new-case-directory')!;
+  assert.equal(preview().value, '/projects/Station-A');
+  assert.equal(preview().disabled, true);
+  p.set('new-name', 'Station-B');
+  c = p.render();
+  assert.equal(preview().value, '/projects/Station-B');
+  for (const name of ['', ' .. ', '../escape', ' name ']) {
+    p.set('new-name', name);
+    c = p.render();
+    assert.equal(preview().value, '');
+  }
 });

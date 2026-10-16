@@ -1884,18 +1884,22 @@ fn cmd_new(o: &Opts) -> Result<PathBuf> {
             ),
         };
         // `LUCY_rawdata.nc` 是张 37 KB 的全局区域参数表，与站点无关。
-        // 即使用户给了 BGC/CROP runtime，里面也未必有 urban 子目录；缺时
-        // 补上内置表，已有自定义表则原样保留。
+        // 只在算例自带 runtime 中铺表；显式输入目录缺表时报告错误，不修改源数据。
         let requested = o.get("--runtime");
         let run = configured_or_unused(requested.clone(), &layout.runtime());
         let dir = Path::new(&run);
-        if requested.is_none()
-            || !dir
-                .join(colm_srfdata::urban_runtime::LUCY_RELATIVE)
-                .is_file()
-        {
+        if requested.is_none() {
             let f = colm_srfdata::urban_runtime::stage(dir)?;
             println!("  runtime: {} written from the built-in copy", f.display());
+        } else {
+            let required = dir.join(colm_srfdata::urban_runtime::LUCY_RELATIVE);
+            if !required.is_file() {
+                bail!(
+                    "explicit --runtime is incomplete for an urban case: required file {} is missing; \
+                     provide a complete runtime directory or omit --runtime to use the case-owned built-in table",
+                    required.display()
+                );
+            }
         }
         let run = slash(dir);
         (raw, run)

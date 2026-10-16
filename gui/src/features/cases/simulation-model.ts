@@ -145,7 +145,8 @@ export function simulationFieldStep(field: Pick<SchemaField, 'name' | 'section'>
   if (field.name.startsWith('DEF_simulation_time%'))
     return /%(start|end|spinup)_/.test(field.name) ? 3 : 5;
   if (['输出与重启', '输出变量', '调试与诊断'].includes(field.section)) return 5;
-  if (isSiteConfiguration(field.name) || isForcingScheme(field.name)) return 4;
+  if (isSiteConfiguration(field.name)) return 3;
+  if (isForcingScheme(field.name)) return 4;
   if (
     ['水热过程', '生态与生地化', '河道与水库', '数据同化', '示踪剂', '城市'].includes(field.section)
   )

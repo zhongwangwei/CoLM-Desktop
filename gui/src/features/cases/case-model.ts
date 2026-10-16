@@ -21,9 +21,15 @@ export function requiredNumber(value: string, label: string): number {
   return Number(value);
 }
 export function caseDirectory(root: string, name: string): string {
-  if (!root.trim() || !name.trim() || /[\\/]|^\.{1,2}$/.test(name))
+  if (
+    !root.trim() ||
+    !name ||
+    name !== name.trim() ||
+    /[\\/:]|^\.{1,2}$|\p{Cc}/u.test(name) ||
+    new TextEncoder().encode(name).length > 256
+  )
     throw new Error(bilingual('请填写根目录和有效算例名', 'root and valid case name required'));
-  return `${root.replace(/[\\/]$/, '')}/${name.trim()}`;
+  return `${root.replace(/[\\/]+$/, '')}/${name.trim()}`;
 }
 export function physicsFields(physics: Record<string, string> = {}) {
   return Object.entries(physics).map(([path, value]) => ({ path, value }));

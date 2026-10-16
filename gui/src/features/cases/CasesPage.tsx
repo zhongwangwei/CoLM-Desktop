@@ -12,6 +12,7 @@ import {
   caseSpinupValid,
   casePeriodText,
   simulationFields,
+  isSiteConfiguration,
   caseRangeKeys,
   simulationSteps,
   validDate,
@@ -463,8 +464,10 @@ export default function CasesPage() {
     typeof state.selectedCase?.profile?.engine === 'string'
       ? state.selectedCase.profile.engine
       : 'rust';
-  const visibleSchema = schema.filter((field) =>
-    caseFieldVisible(field.name, optionStates, { ...explicitValues, ...dataPatch }),
+  const visibleSchema = schema.filter(
+    (field) =>
+      (caseSimulationDomain(effectiveProfile) === 'site' || !isSiteConfiguration(field.name)) &&
+      caseFieldVisible(field.name, optionStates, { ...explicitValues, ...dataPatch }),
   );
   const rangeKeys = caseRangeKeys(effectiveProfile?.grid ?? state.selectedCase?.profile.grid);
   const rangeFields =
@@ -912,8 +915,8 @@ export default function CasesPage() {
                 <Field
                   label={t('输出目录', 'Output directory')}
                   hint={t(
-                    '模拟产生的结果文件存放路径',
-                    'Path where simulation output files are stored',
+                    '直接运行使用此目录；模型版本运行的配置和结果保存在算例目录内 runs/ 下各次运行的子目录中。',
+                    'Direct runs use this directory; model-version runs keep their configurations and outputs in separate run directories under runs/ inside this case.',
                   )}
                 >
                   <Input readOnly value={values['DEF_dir_output'] ?? (dir ? `${dir}/out` : '')} />

@@ -5,6 +5,7 @@ import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
 import {
   caseDirectory,
+  displayLiteral,
   cropEnabled,
   requiredNumber,
   physicsFields,
@@ -22,6 +23,7 @@ import {
   newCaseGeneralProblem,
   scannedForcing,
   simulationFields,
+  isSiteConfiguration,
   simulationSteps,
   spinupProblem,
   type SimulationStep,
@@ -128,6 +130,12 @@ export default function NewCasePage() {
     ...seed?.form,
     ...(['PFT', 'PC'].includes(seed?.form?.subgrid ?? '') ? { landcover: 'IGBP' } : {}),
   });
+  let finalDirectory = '';
+  try {
+    finalDirectory = caseDirectory(form.root, form.name);
+  } catch {
+    // Incomplete or invalid names have no destination yet.
+  }
   const [caseValues, setCaseValues] = useState<Record<string, string>>(seed?.caseValues ?? {}),
     [schema, setSchema] = useState<SchemaField[]>([]),
     [schemaReady, setSchemaReady] = useState(false),
@@ -775,6 +783,7 @@ export default function NewCasePage() {
             : [];
   const visibleSchema = schema.filter(
     (field) =>
+      (form.kind === 'site' || !isSiteConfiguration(field.name)) &&
       caseFieldVisible(field.name, optionStates, caseValues) &&
       // 单点只写单文件历史（'one'）；建例前后端还拿不到 SinglePoint 上下文去隐藏它，这里先挡住。
       !(form.kind === 'site' && field.name === 'DEF_HIST_mode'),
@@ -814,6 +823,11 @@ export default function NewCasePage() {
     ['catchment', t('汇水区网格', 'Catchment'), t('读取汇水区网格文件', 'Use a catchment mesh')],
   ];
   const autoLabel = t('沿用算例默认', 'Use case defaults');
+  const optionValue = (f: SchemaField) =>
+    caseValues[f.name] ??
+    (isSiteConfiguration(f.name)
+      ? displayLiteral(optionState(f.name)?.built_in_default ?? f.default)
+      : '');
   const optionLabels: Record<string, string> = {
     DEF_dir_existing_srfdata: t('已有地表资料目录（可选）', 'Existing surface data (optional)'),
     'DEF_simulation_time%timestep': t('时间步长（秒）', 'Time step (seconds)'),
@@ -834,6 +848,14 @@ export default function NewCasePage() {
     set: (v) => set(k, v),
   }));
   if (step === 1) {
+    fields.push({
+      id: 'new-case-directory',
+      label: t('最终算例目录', 'Final case directory'),
+      value: finalDirectory,
+      type: 'text',
+      disabled: true,
+      set: () => {},
+    });
     fields.unshift({
       id: 'new-engine',
       label: labels.engine,
@@ -885,7 +907,7 @@ export default function NewCasePage() {
           .map((f) => ({
             id: `new-option-${f.name}`,
             label: optionLabels[f.name] || fieldLabel(f.name, state.language),
-            value: caseValues[f.name] ?? '',
+            value: optionValue(f),
             type:
               f.kind === 'Logical' || fieldInputOptions(f.name, f.kind, f.values).length
                 ? ('choice' as const)
@@ -1072,7 +1094,7 @@ export default function NewCasePage() {
       {f.kind === 'Logical' ? (
         <Select
           disabled={!enabled || optionDisabled(f.name)}
-          value={caseValues[f.name] ?? ''}
+          value={optionValue(f)}
           onChange={(e) => setOption(f.name, e.target.value)}
         >
           <option value="">{autoLabel}</option>
@@ -1081,7 +1103,7 @@ export default function NewCasePage() {
         </Select>
       ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
-          value={caseValues[f.name] ?? ''}
+          value={optionValue(f)}
           disabled={!enabled || optionDisabled(f.name)}
           onChange={(e) => setOption(f.name, e.target.value)}
         >
@@ -1097,7 +1119,7 @@ export default function NewCasePage() {
         </Select>
       ) : (
         <Input
-          value={caseValues[f.name] ?? ''}
+          value={optionValue(f)}
           placeholder={
             f.name === 'DEF_simulation_time%timestep'
               ? t('自动（1800 秒）', 'Automatic (1800 seconds)')
@@ -1239,10 +1261,20 @@ export default function NewCasePage() {
             </Field>
           )}
           <div className="form-grid">{['root', 'name'].map(render)}</div>
+          <Field label={t('最终算例目录', 'Final case directory')}>
+            <Input
+              readOnly
+              value={finalDirectory}
+              placeholder={t(
+                '填写项目目录与模拟名称后显示',
+                'Choose a project folder and simulation name',
+              )}
+            />
+          </Field>
           <p className="muted">
             {t(
-              '算例配置与模拟结果将统一保存在该算例目录下（输出结果存放在 out/ 子目录）。',
-              'Case configurations and simulation outputs will be saved together in this case directory (outputs in the out/ subdirectory).',
+              '项目目录与模拟名称组合成最终算例目录。配置、运行记录和结果均保存在这里；每次模型版本运行使用 runs/ 下的独立目录。原始输入数据保留引用。',
+              'The project folder and simulation name form the final case directory. Configurations, run records and outputs stay here; each model-version run uses its own directory under runs/. Original input datasets remain referenced.',
             )}
           </p>
         </Card>
@@ -1605,7 +1637,7 @@ export default function NewCasePage() {
                 </dd>
                 <dt>{t('保存位置', 'Save location')}</dt>
                 <dd className="path">
-                  {form.root}/{form.name} ({t('输出在 out/', 'outputs in out/')})
+                  {finalDirectory} ({t('每次运行保存在 runs/ 下', 'individual runs under runs/')})
                 </dd>
               </dl>
               <div className="simulation-checks">

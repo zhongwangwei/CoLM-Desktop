@@ -174,14 +174,8 @@ export default function ModelSettings({
     else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
   const supplementarySettings = [
-    { id: 'site', label: t('单点专属设置', 'Single-point settings') },
     { id: 'forcing', label: t('强迫场处理', 'Forcing processing') },
-  ].filter(
-    ({ id }) =>
-      onCaseChange &&
-      (id !== 'site' || ['site', 'single'].includes(setupEnvironment?.domain ?? '')) &&
-      fields.some((field) => processSettingOwner(field) === id),
-  );
+  ].filter(({ id }) => onCaseChange && fields.some((field) => processSettingOwner(field) === id));
   const openSupplementarySettings = (id: string) => {
     if (disabled || !ready) return;
     setSettings({ id, identity: currentIdentity.current });
@@ -628,7 +622,6 @@ function ProcessSettingsDialog({
     DEF_UnitCatchment_regional: ['区域汇流设置', 'Regional routing settings'],
     DEF_URBAN_RUN: ['城市设置', 'Urban settings'],
     crop: ['作物设置', 'Crop settings'],
-    site: ['单点专属设置', 'Single-point settings'],
     forcing: ['强迫场处理', 'Forcing processing'],
     DEF_USE_LULCC: ['土地覆盖变化设置', 'Land-cover change settings'],
     DEF_USE_VariablySaturatedFlow: ['变饱和流设置', 'Variably saturated flow settings'],
@@ -711,14 +704,6 @@ function ProcessSettingsDialog({
           {t(
             '碳氮初始场默认使用运行数据目录中的 cnsteadystate.nc；启用后会保存完整路径。也可指定其他已有文件。请先设置运行数据目录或填写文件路径。',
             'The carbon/nitrogen initial state defaults to cnsteadystate.nc in the runtime data directory. Enabling it saves the resolved path; an existing custom file can also be used. Set the runtime directory or enter a file path.',
-          )}
-        </Notice>
-      )}
-      {process === 'site' && (
-        <Notice>
-          {t(
-            '设置单点地表类型及站点数据的使用方式；仅适用于单点模拟。',
-            'Configure the single-point surface type and use of site data; applies only to single-point simulations.',
           )}
         </Notice>
       )}

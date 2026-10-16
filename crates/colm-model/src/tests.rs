@@ -1100,3 +1100,83 @@ fn model_equivalence_ignores_historical_case_controls_but_keeps_coefficients() {
         .insert("DEF_TUNING_CSOILC".into(), "0.008".into());
     assert!(same_effect(&legacy, &current));
 }
+
+#[test]
+fn case_local_runs_are_isolated_and_only_allow_the_reserved_location() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let official = reg.install_official(code()).unwrap();
+    let original = fs::read(case.join("case.nml")).unwrap();
+    let first = reg
+        .materialize_case_run(&official.version, &case, &case, "first")
+        .unwrap();
+    fs::create_dir(first.run_case.join("out")).unwrap();
+    fs::write(first.run_case.join("out/old.nc"), "result").unwrap();
+    let second = reg
+        .materialize_case_run(&official.version, &case, &case, "second")
+        .unwrap();
+    assert_eq!(
+        second.run_case,
+        case.canonicalize().unwrap().join("runs/second")
+    );
+    assert!(!second.run_case.join("runs").exists());
+    assert!(!second.run_case.join("out/old.nc").exists());
+    assert_eq!(original, fs::read(case.join("case.nml")).unwrap());
+    assert!(reg
+        .materialize_case_run(&official.version, &case, &case, "../escape")
+        .is_err());
+    assert!(reg
+        .materialize_run(
+            &official.version,
+            &case,
+            &case.join("arbitrary"),
+            "arbitrary"
+        )
+        .is_err());
+    assert!(reg
+        .materialize_run(&official.version, &case, &case.join("runs/wrong"), "id")
+        .is_err());
+    assert!(reg
+        .materialize_run(
+            &official.version,
+            &case,
+            &first.run_case.join("nested"),
+            "nested"
+        )
+        .is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn case_local_runs_reject_symlink_escape() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let case = tmp.case();
+    let official = reg.install_official(code()).unwrap();
+    let outside = tmp.0.join("outside");
+    fs::create_dir(&outside).unwrap();
+    std::os::unix::fs::symlink(&outside, case.join("runs")).unwrap();
+    assert!(reg
+        .materialize_case_run(&official.version, &case, &case, "escape")
+        .is_err());
+    assert!(reg
+        .materialize_run(
+            &official.version,
+            &case,
+            &case.join("runs/escape"),
+            "escape"
+        )
+        .is_err());
+    assert!(!outside.join("escape").exists());
+    fs::create_dir(outside.join("nested")).unwrap();
+    assert!(reg
+        .materialize_run(
+            &official.version,
+            &case,
+            &case.join("runs/nested/escape"),
+            "escape"
+        )
+        .is_err());
+    assert!(!outside.join("nested/escape").exists());
+}
