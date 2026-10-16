@@ -455,7 +455,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         run: () =>
           action(async () => {
             await openCase(detail.operation.case_path!);
-            navigate('case');
           }),
       });
     if (detail.operation.version_id && detail.operation.revision)
@@ -858,7 +857,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     onClick={() =>
                       run(async () => {
                         await openCase(detail.operation.case_path!);
-                        navigate('case');
                       })
                     }
                   >

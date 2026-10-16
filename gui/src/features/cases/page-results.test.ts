@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
-import { reconcileRemoteRun, remoteRunPermissions } from '../runs/run-model';
+import { matchesRemoteRun, reconcileRemoteRun, remoteRunPermissions } from '../runs/run-model';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -188,6 +188,8 @@ test('resource and run reconciliation callbacks return the recorded failure to t
         case: '/case',
         run_id: 'r1',
         status: 'unknown',
+        location: 'remote',
+        progress: { remote: { host: 'server', job: 'j1' } },
         running: true,
         logs: [],
         stages: {},
@@ -208,6 +210,7 @@ test('resource and run reconciliation callbacks return the recorded failure to t
     setMonitor: noop,
     notify: noop,
     reconcileRemoteRun,
+    matchesRemoteRun,
     remoteRunPermissions,
     update: (fn: (state: typeof app) => Partial<typeof app>) => {
       app = { ...app, ...fn(app) };
@@ -295,6 +298,7 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
     variable: 'f_fsena',
     busy: false,
     series: data,
+    displayedSeries: data,
     plot: noop,
     exportFullSeries: noop,
     download: noop,
@@ -488,6 +492,7 @@ test('result navigation opens research and returns diagnostics to overview', asy
       obs: '',
       busy: false,
       series: null,
+      displayedSeries: null,
       catalog: null,
       plot: noop,
       exportFullSeries: noop,
@@ -524,6 +529,8 @@ test('overview contract exposes optional evaluation conditions only while advanc
     runs: [],
     tabs: ['overview', 'catalog', 'series', 'evaluation', 'comparison', 'diagnostics', 'report'],
     tab: 'overview',
+    series: null,
+    diagnostic: null,
     advanced: false,
     settingsOpen: false,
     runChooser: false,
@@ -812,4 +819,110 @@ test('preparation sends only active case or pending case settings to native data
   call = await run(casePreparationOptions(state.selectedCase.profile), 'table');
   assert.equal((call.args.options as { land_cover_scheme: string }).land_cover_scheme, 'usgs');
   assert.equal(legacy.physics.DEF_USE_PC, '.true.');
+});
+
+test('process saves refresh history availability in both directions without resetting drafts', async () => {
+  for (const bgc of [true, false]) {
+    const request = { active: true },
+      epoch = { current: request };
+    let drafts: Record<string, string> = { 'DEF_hist_vars%ar': '.false.', DEF_other: 'draft' };
+    let histories: unknown[] = [],
+      reasons: Record<string, string> = {},
+      disabled: string[] = [];
+    const context = { entry: { dir: '/new-preview' }, profile: { bgc } };
+    const refreshHistory = callback('./CasesPage.tsx', 'refreshHistory', {
+      epoch,
+      state: { kernels: [{ dir: '/new-kernel' }] },
+      compatibleKernel: (_kernels: unknown, profile: unknown) => {
+        assert.equal(profile, context.profile);
+        return { dir: '/new-kernel' };
+      },
+      invoke: async (name: string, args: Record<string, unknown>) => {
+        if (name === 'read_text') {
+          assert.equal(args.path, '/new-preview/case.nml');
+          return 'effective';
+        }
+        assert.equal(name, 'hist_vars');
+        assert.deepEqual(args, {
+          text: 'effective',
+          kernelDir: '/new-kernel',
+          dir: '/new-preview',
+        });
+        return [
+          {
+            name: 'ar',
+            on: true,
+            settable: true,
+            writable: bgc,
+            blocked_by: bgc ? undefined : 'requires BGC',
+          },
+        ];
+      },
+      setHistoryVars: (v: unknown[]) => {
+        histories = v;
+      },
+      setContextReason: (v: Record<string, string>) => {
+        reasons = v;
+      },
+      setDisabledFields: (v: string[]) => {
+        disabled = v;
+      },
+    });
+    const change = callback('./CasesPage.tsx', 'changeCaseOptions', {
+      dir: '/case',
+      editingDisabled: false,
+      dirty: false,
+      lock: { current: false },
+      t: (_zh: string, en: string) => en,
+      physics: {},
+      values: drafts,
+      effectiveProfile: {},
+      configurationKernel: undefined,
+      exclusionPatch: () => ({ patch: { DEF_USE_BGC: String(bgc) }, closed: [] }),
+      work: (fn: () => Promise<unknown>) => fn(),
+      epoch,
+      state: { versionRef: {}, selectedCase: undefined },
+      versionId: 'official',
+      revision: 1,
+      invoke: async (name: string) => (name === 'model_case_context' ? context : undefined),
+      setModelContext: () => {},
+      setValues: (apply: (old: Record<string, string>) => Record<string, string>) => {
+        drafts = apply(drafts);
+      },
+      setSaved: () => {},
+      setExplicitValues: () => {},
+      setError: () => {},
+      refreshHistory,
+    });
+    await change({ DEF_USE_BGC: String(bgc) });
+    assert.deepEqual(histories, [
+      { name: 'ar', settable: bgc, reason: bgc ? undefined : 'requires BGC', longName: undefined },
+    ]);
+    assert.deepEqual(disabled, bgc ? [] : ['DEF_hist_vars%ar']);
+    assert.deepEqual(reasons, bgc ? {} : { 'DEF_hist_vars%ar': 'requires BGC' });
+    assert.deepEqual(drafts, {
+      'DEF_hist_vars%ar': '.false.',
+      DEF_other: 'draft',
+      DEF_USE_BGC: String(bgc),
+    });
+  }
+});
+
+test('history refresh ignores a response after leaving the case', async () => {
+  const request = { active: true },
+    epoch = { current: request };
+  const refresh = callback('./CasesPage.tsx', 'refreshHistory', {
+    epoch,
+    state: { kernels: [] },
+    compatibleKernel: () => ({ dir: '/kernel' }),
+    invoke: async (name: string) => {
+      if (name === 'read_text') return 'effective';
+      request.active = false;
+      return [];
+    },
+    setHistoryVars: () => assert.fail('stale history update'),
+    setDisabledFields: () => assert.fail('stale disabled update'),
+    setContextReason: () => assert.fail('stale reason update'),
+  });
+  await refresh({ entry: { dir: '/old-preview' }, profile: {} }, request);
 });

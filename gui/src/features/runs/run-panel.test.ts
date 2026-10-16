@@ -2,13 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { settleRuns } from './run-model';
+import {
+  settleRuns,
+  remoteRunPermissions,
+  remoteSubmissionBlocked,
+  reconcileRemoteRun,
+  matchesRemoteRun,
+} from './run-model';
+import { applyRunEvent } from '../../lib/run-events';
 import type { RunState } from '../../lib/types';
 
 function panel(
   options: {
     migrate?: (dir: string) => Promise<unknown>;
     submit?: () => Promise<unknown>;
+    remote?: boolean;
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -23,7 +31,7 @@ function panel(
     if (
       ts.isFunctionDeclaration(node) &&
       node.name &&
-      ['action', 'patchRun', 'run', 'cancel'].includes(node.name.text)
+      ['action', 'patchRun', 'run', 'cancel', 'remoteAction'].includes(node.name.text)
     )
       functions.push(node.getText(source));
     ts.forEachChild(node, visit);
@@ -43,6 +51,25 @@ function panel(
       return { version: state.versionRef };
     }
     if (command === 'cancel_runs') return 0;
+    if (command === 'remote_run') {
+      state.running['/good'] = applyRunEvent(state.running['/good'], 'run://started', {
+        run_id: args.runId,
+        source_case: '/good',
+        operation_id: 'submitted-operation',
+        location: 'remote',
+      })!;
+      throw new Error('connection lost after submission');
+    }
+    if (command === 'remote_status')
+      return {
+        record: {
+          host: 'server',
+          job: 'job-new',
+          provenance: { operation_id: 'submitted-operation' },
+        },
+        status: { state: 'finished', exit_code: 0 },
+      };
+    if (command === 'remote_fetch') return { run_case: '/fetched-run' };
     await options.submit?.();
     return command === 'run_batch' ? { succeeded: (args.cases as string[]).length, failed: 0 } : 0;
   };
@@ -54,7 +81,14 @@ function panel(
     cancelledRun: { current: null as string | null },
     casePath: '/good',
     batch: ['/bad'],
-    host: '',
+    host: options.remote ? 'server' : '',
+    monitor: false,
+    remotePermissions: { cancel: false, fetch: true },
+    setMonitor: () => {},
+    remoteRunPermissions,
+    remoteSubmissionBlocked,
+    reconcileRemoteRun,
+    matchesRemoteRun,
     recovering: false,
     disabled: false,
     kernelMatches: true,
@@ -70,7 +104,6 @@ function panel(
     invokeJson: invoke,
     notify: () => {},
     setBusy: () => {},
-    setRemote: () => {},
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
     settleRuns,
@@ -82,9 +115,14 @@ function panel(
   const code = ts.transpileModule(functions.join('\n'), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const methods = new Function(...Object.keys(context), `${code};return {run,cancel};`)(
-    ...Object.values(context),
-  ) as { run: () => Promise<unknown>; cancel: () => Promise<unknown> };
+  const methods = new Function(
+    ...Object.keys(context),
+    `let remote = null; const setRemote = value => {remote = value}; ${code};return {run,cancel,remoteAction};`,
+  )(...Object.values(context)) as {
+    run: () => Promise<unknown>;
+    cancel: () => Promise<unknown>;
+    remoteAction: (command: string) => Promise<unknown>;
+  };
   return { ...methods, state, calls };
 }
 
@@ -171,4 +209,17 @@ test('stop after the last migration wait still prevents submission and permits a
   await p.run();
   assert.equal(p.calls.filter((call) => call.command === 'run_batch').length, 1);
   assert.ok(Object.values(p.state.running).every((run) => run.status === 'succeeded'));
+});
+
+test('an uncertain remote submission recovers by its started operation and can fetch results', async () => {
+  const p = panel({ remote: true });
+  await assert.rejects(p.run(), /connection lost after submission/);
+  assert.equal(p.state.running['/good'].status, 'unknown');
+  assert.equal(p.state.running['/good'].location, 'remote');
+  assert.equal(p.state.running['/good'].operation_id, 'submitted-operation');
+  await p.remoteAction('remote_status');
+  assert.equal(p.state.running['/good'].status, 'succeeded');
+  assert.equal(p.state.running['/good'].running, false);
+  await p.remoteAction('remote_fetch');
+  assert.equal(p.state.running['/good'].run_case, '/fetched-run');
 });

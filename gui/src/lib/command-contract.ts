@@ -948,6 +948,10 @@ export const commandContract = {
     }
   },
   "remote_run": {
+    "runId": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
     "case": {
       "required": true,
       "rust_type": "String"

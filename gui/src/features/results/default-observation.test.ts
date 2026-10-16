@@ -13,13 +13,14 @@ function fixture({
     },
   ],
   spatial = false,
+  namelist = '/cases/custom/forcing.nml',
 } = {}) {
   const calls: { command: string; args: Record<string, unknown> }[] = [];
   const call = (async (command: string, args: Record<string, unknown>) => {
     calls.push({ command, args });
     if (command === 'install_example') return {};
     if (command === 'open_case')
-      return { profile: { spatial, inputs: { forcing_namelist: '/cases/custom/forcing.nml' } } };
+      return { profile: { spatial, inputs: { forcing_namelist: namelist } } };
     if (command === 'read_text') return 'forcing namelist';
     if (command === 'read_case')
       return [
@@ -80,4 +81,69 @@ test('spatial cases do not load a point observation dataset', async () => {
   const { call, calls } = fixture({ spatial: true });
   assert.equal(await defaultObservation('/cases/grid', call), '');
   assert.equal(calls.length, 1);
+});
+
+test('nested forcing namelists resolve data against the case working directory', async () => {
+  const correct = '/cases/site/Observation/right.nc';
+  const { call, calls } = fixture({
+    namelist: 'config/forcing.nml',
+    dir: 'met/',
+    sites: [
+      {
+        met_file: '/cases/site/config/met/CN-Cng_2010_Met.nc',
+        obs_file: '/cases/site/config/Observation/wrong.nc',
+      },
+      { met_file: '/cases/site/met/CN-Cng_2010_Met.nc', obs_file: correct },
+    ],
+  });
+  assert.equal(await defaultObservation('/cases/site', call), correct);
+  assert.deepEqual(calls.find((call) => call.command === 'read_text')?.args, {
+    path: '/cases/site/config/forcing.nml',
+  });
+  assert.deepEqual(calls.at(-1)?.args, {
+    dir: '/cases/site/Sitedata',
+    forcingDir: '/cases/site/met',
+    quick: true,
+  });
+});
+
+test('UNC forcing directories and namelists stay absolute', async () => {
+  const { call, calls } = fixture({
+    namelist: '\\\\server\\share\\config\\forcing.nml',
+    dir: '\\\\server\\share\\Forcing\\',
+    sites: [
+      {
+        met_file: '\\\\server\\share\\Forcing\\CN-Cng_2010_Met.nc',
+        obs_file: '\\\\server\\share\\Observation\\flux.nc',
+      },
+    ],
+  });
+  assert.equal(
+    await defaultObservation('C:\\cases\\site', call),
+    '\\\\server\\share\\Observation\\flux.nc',
+  );
+  assert.deepEqual(calls.find((call) => call.command === 'read_text')?.args, {
+    path: '//server/share/config/forcing.nml',
+  });
+  assert.deepEqual(calls.at(-1)?.args, {
+    dir: '//server/share/Sitedata',
+    forcingDir: '//server/share/Forcing',
+    quick: true,
+  });
+});
+
+test('filesystem, drive, and UNC share roots remain rooted during dataset scanning', async () => {
+  for (const [dir, root] of [
+    ['/', '/'],
+    ['C:\\', 'C:/'],
+    ['\\\\server\\share\\', '//server/share'],
+  ]) {
+    const base = root.endsWith('/') ? root : `${root}/`;
+    const { call, calls } = fixture({
+      dir,
+      sites: [{ met_file: `${base}CN-Cng_2010_Met.nc`, obs_file: `${base}flux.nc` }],
+    });
+    assert.equal(await defaultObservation('/cases/site', call), `${base}flux.nc`);
+    assert.deepEqual(calls.at(-1)?.args, { dir: `${base}Sitedata`, forcingDir: root, quick: true });
+  }
 });

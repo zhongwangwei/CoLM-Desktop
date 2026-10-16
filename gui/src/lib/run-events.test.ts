@@ -53,3 +53,14 @@ test('source case retains its run while pages change, and old events cannot fini
     null,
   );
 });
+
+test('remote start records its operation without switching location to local', () => {
+  const run = applyRunEvent(undefined, 'run://started', {
+    source_case: '/case',
+    run_id: 'remote',
+    operation_id: 'operation',
+    location: 'remote',
+  });
+  assert.equal(run?.location, 'remote');
+  assert.equal(run?.operation_id, 'operation');
+});

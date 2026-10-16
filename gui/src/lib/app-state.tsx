@@ -52,7 +52,7 @@ type AppContextValue = {
   registerNavigationGuard: (guard: NavigationGuard) => () => void;
   notify: (message: string, error?: boolean) => void;
   refreshCases: () => Promise<void>;
-  openCase: (dir: string) => Promise<OpenedCase>;
+  openCase: (dir: string, tab?: AppState['caseTab']) => Promise<OpenedCase>;
   refreshVersions: () => Promise<void>;
 };
 const Context = createContext<AppContextValue | null>(null);
@@ -141,7 +141,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     update({ versions, version, ...(version ? { versionRef: version.version } : {}) });
   }, [update]);
   const openCase = useCallback(
-    async (dir: string) => {
+    async (dir: string, tab: AppState['caseTab'] = 'settings') => {
       if (!dir) throw new Error(bilingual('请选择算例目录', 'Select a case directory.'));
       const reason = blocked({ route: 'case', caseDir: dir, reload: true });
       if (reason) throw new Error(reason);
@@ -181,7 +181,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           version,
           versionRef: selectedVersion,
           route: 'case',
-          caseTab: 'settings',
+          caseTab: tab,
         });
         await invoke('save_recent', { key: 'root', value: opened.root });
         return normalized;

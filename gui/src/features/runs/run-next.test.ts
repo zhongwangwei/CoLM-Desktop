@@ -105,6 +105,10 @@ function render(
   return {
     next: elements.find((el) => el.type === 'Button' && el.children.includes('下一步：查看结果')),
     stop: elements.find((el) => el.type === 'Button' && el.children.includes('停止运行')),
+    remoteStatus: elements.find(
+      (el) => el.type === 'Button' && el.children.includes('核对服务器状态'),
+    ),
+    remoteFetch: elements.find((el) => el.type === 'Button' && el.children.includes('取回结果')),
     routes,
     calls,
     state,
@@ -225,4 +229,28 @@ test('Stop remains visible when the primary batch case failed but another member
     render(primary, [], undefined, { '/other': { ...member, run_id: 'unrelated' } }).stop,
     undefined,
   );
+});
+
+test('old remote status and fetch cannot replace a newer local result', async () => {
+  const local: RunState = {
+    ...success,
+    operation_id: 'local-operation',
+    logs: ['latest local output'],
+    run_case: '/local-new',
+    progress: {
+      remote: {
+        record: { host: 'server', job: 'job' },
+        status: { state: 'finished', exit_code: 0 },
+      },
+    },
+  };
+  const page = render(local);
+  for (const button of [page.remoteStatus, page.remoteFetch]) {
+    assert.ok(button);
+    assert.equal(button.props.disabled, false);
+    (button.props.onClick as () => void)();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.strictEqual(page.state.running['/case'], local);
+  }
+  assert.deepEqual(page.calls, ['remote_status', 'remote_fetch', 'remote_status']);
 });

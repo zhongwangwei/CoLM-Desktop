@@ -29,7 +29,7 @@ export function applyRunEvent(
       : previous;
   const next: RunState = {
     ...base,
-    location: 'local',
+    location: payload.location === 'remote' ? 'remote' : 'local',
     run_id: runId || previous?.run_id,
     operation_id:
       typeof payload.operation_id === 'string' ? payload.operation_id : base.operation_id,

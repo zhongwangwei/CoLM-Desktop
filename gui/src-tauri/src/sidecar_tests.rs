@@ -1372,3 +1372,58 @@ fn redirect_output_dir_creates_symlink_to_target() {
     );
     let _ = std::fs::remove_dir_all(&temp);
 }
+
+#[test]
+fn startup_keeps_reservation_until_pid_registration() {
+    let processes = RunProcesses::default();
+    let case = "/tmp/starting".to_string();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert!(!processes.take_cancelled(&case).unwrap());
+    assert!(processes.prepare(std::slice::from_ref(&case)).is_err());
+    assert_eq!(processes.cancel(Some(vec![case.clone()])).unwrap(), 1);
+    assert!(!processes.remember(&case, u32::MAX).unwrap());
+    assert!(processes.prepare(std::slice::from_ref(&case)).is_err());
+    assert!(processes.forget(&case).unwrap());
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+}
+
+#[test]
+fn preparation_failure_releases_reservation_for_retry() {
+    let processes = RunProcesses::default();
+    let case = "/tmp/invalid-start".to_string();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert!(!processes.take_cancelled(&case).unwrap());
+    assert!(run_args(&case, "kernel", false, Some("invalid"), 1, None, None).is_err());
+    processes.forget(&case).unwrap();
+    assert_eq!(processes.cancel(Some(vec![case.clone()])).unwrap(), 0);
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert!(!processes.take_cancelled(&case).unwrap());
+}
+
+#[test]
+fn batch_budget_tracks_the_selected_stage_implementations() {
+    let budget = batch_cpu_budget(None, Some("fortran"), Some("rust"), 4, Some(1));
+    assert_eq!(batch_width(8, 8, budget), 2);
+    assert_eq!(
+        batch_cpu_budget(None, Some("fortran"), Some("rust"), 4, Some(6)),
+        6
+    );
+    assert_eq!(
+        batch_cpu_budget(None, Some("rust"), Some("fortran"), 4, Some(1)),
+        4
+    );
+    assert_eq!(
+        batch_cpu_budget(Some("colm"), Some("fortran"), Some("rust"), 4, Some(8)),
+        4
+    );
+    assert_eq!(
+        batch_cpu_budget(Some("mkinidata"), Some("fortran"), Some("rust"), 4, Some(2)),
+        2
+    );
+    assert_eq!(
+        batch_cpu_budget(Some("mksrfdata"), Some("rust"), Some("fortran"), 4, Some(8)),
+        4
+    );
+    assert_eq!(batch_cpu_budget(None, None, None, 4, Some(2)), 2);
+    assert_eq!(batch_cpu_budget(None, None, None, 4, None), 1);
+}

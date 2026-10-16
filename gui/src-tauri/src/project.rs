@@ -590,7 +590,16 @@ pub fn mark_results_stale(dirs: Vec<String>) -> Result<(), String> {
 /// 算例里那个唯一的 `*_hist_*.nc`，没有就是没跑过。
 fn history_of(case: &Path, name: &str) -> Option<PathBuf> {
     validate_case_name(name).ok()?;
-    let dir = case.join("out").join(name).join("history");
+    let text = std::fs::read_to_string(case.join("case.nml")).ok()?;
+    let document = colm_namelist::parse(&text).ok()?;
+    let output = match document.get("DEF_dir_output") {
+        Some(colm_namelist::Value::Str(path)) if !path.trim().is_empty() => {
+            case.join(path.trim_end())
+        }
+        None => case.join("out"),
+        _ => return None,
+    };
+    let dir = output.join(name).join("history");
     let mut h: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
