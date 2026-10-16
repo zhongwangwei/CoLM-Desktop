@@ -6,7 +6,7 @@ import type { CaseOptionPatch } from '../versions/configuration-options';
 import type { UiAction } from '../../lib/guide';
 
 function dialog() {
-  const nodes: { type: string; props: Record<string, unknown> }[] = [],
+  const nodes: { type: string; props: Record<string, unknown>; children: unknown[] }[] = [],
     slots: unknown[] = [];
   let cursor = 0,
     setup: (() => () => void) | undefined,
@@ -24,7 +24,10 @@ function dialog() {
     },
     caseDir: '/case',
     subgrid: 'PFT',
-    environment: { caseValues: { DEF_USE_BGC: '.true.', DEF_file_cn_init: "'original.nc'" } },
+    environment: {
+      domain: 'site',
+      caseValues: { DEF_USE_BGC: '.true.', DEF_file_cn_init: "'original.nc'" },
+    },
     disabled: false,
     onSave: async (patch: CaseOptionPatch) => {
       if (fail) throw new Error('save failed');
@@ -36,8 +39,8 @@ function dialog() {
   };
   const context = {
     React: {
-      createElement: (type: string, p: Record<string, unknown>) => {
-        nodes.push({ type, props: p });
+      createElement: (type: string, p: Record<string, unknown>, ...children: unknown[]) => {
+        nodes.push({ type, props: p, children });
         return null;
       },
     },
@@ -89,6 +92,7 @@ function dialog() {
       modalActions: UiAction[];
       caseValues: Record<string, string>;
       removedCaseKeys: string[];
+      excludeKeys: string[];
     };
   };
   const ready = () => {
@@ -164,4 +168,19 @@ test('process dialog completes unchanged without empty save and stays open on fa
   h.props.disabled = false;
   h.unmount();
   await assert.rejects(Promise.resolve(h.action('save').run()), /locked/);
+});
+
+test('soil dialog explains parameter sources and excludes spatial fitting at single points', () => {
+  const h = dialog();
+  h.props.process = 'soil';
+  for (const domain of ['site', 'single', 'region']) {
+    h.props.environment.domain = domain;
+    const child = h.render();
+    assert.equal(child.excludeKeys.includes('DEF_USE_SOILPAR_UPS_FIT'), domain !== 'region');
+    const text = h.nodes.flatMap((node) => node.children).join(' ');
+    assert.match(text, /土壤数据/);
+    assert.match(text, /van Genuchten/);
+    assert.match(text, /变饱和流/);
+    assert.match(text, /LCT/);
+  }
 });
