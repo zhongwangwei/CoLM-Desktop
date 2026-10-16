@@ -44,6 +44,8 @@ const press = (names, root=document) => {
 const stationSection = name => $$('section').find(e => $('h3',e) && txt($('h3',e))===name);
 const snapshot = () => ({
   text: main(),
+  browserLanguage: navigator.language,
+  documentLanguage: document.documentElement.lang,
   headings: $$('h1,h2,h3,h4').filter(vis).map(txt),
   buttons: buttons(),
   fields: $$('.field-label').filter(vis).map(label => {
@@ -69,7 +71,7 @@ window.addEventListener('unhandledrejection',e=>q.errors.push(String(e.reason)))
 const core=window.__TAURI__.core, original=core.invoke;
 q.originalInvoke=original;
 const observedInvoke=async function(command,args){
-  const observed=['run_batch','run_case','model_case_runs','history_catalog','series'].includes(command);
+  const observed=['run_batch','run_case','cancel_runs','model_case_runs','history_catalog','series'].includes(command);
   const record={command,args,time:Date.now()};
   if(observed) q.ipc.push(record);
   try {
@@ -140,6 +142,20 @@ def validate_events(events, directories, run_id):
     if not overlaps:
         raise AssertionError('No two stations actually overlapped; maxConcurrent alone is not concurrency evidence')
     return {'stations': summary, 'overlap_intervals': overlaps}
+
+
+def validate_stopped(events, directories, run_id):
+    result = {}
+    for directory in directories:
+        own = [e for e in events if e['payload'].get('run_id') == run_id
+               and e['payload'].get('source_case', e['payload'].get('case')) == directory]
+        started = [e for e in own if e['event'] == 'run://started']
+        done = [e for e in own if e['event'] == 'run://done']
+        assert len(started) == 1 and len(done) == 1, f'{directory}: missing actual start/exit'
+        assert done[0]['payload'].get('cancelled') is True, f'{directory}: completed instead of stopping'
+        assert done[0]['time'] >= started[0]['time'], f'{directory}: exit preceded start'
+        result[directory] = done[0]
+    return result
 
 
 class Driver:
@@ -263,9 +279,37 @@ def run(args):
         driver.wait('return !!$$(".field-label").find(e=>["同时运行站点数","Concurrent stations"].includes(txt(e)));', args.timeout)
         driver.fill(['每个算例的线程数', 'Threads per case'], '1')
         driver.fill(['同时运行站点数', 'Concurrent stations'], '2')
+        assert driver.js('return !document.body.innerText.includes("高级配置（引擎与计算阶段）") && !document.body.innerText.includes("Advanced settings (engine and stages)");'), 'Multi-site advanced engine/stages settings remain visible'
         checkpoint('03-resources')
         driver.press('开始运行', 'Start run')
         driver.wait('return window.__multisiteQA.events.some(e=>e.event==="run://started");', args.timeout)
+        if args.stop_and_return:
+            driver.wait('return new Set(window.__multisiteQA.events.filter(e=>e.event==="run://started").map(e=>e.payload.source_case||e.payload.case)).size==='+str(len(names))+' && snapshot().stations.filter(s=>s.active).length==='+str(len(names))+';', args.timeout)
+            initial = driver.js('return window.__multisiteQA.ipc.filter(x=>x.command==="run_batch");')
+            assert len(initial) == 1
+            stopped_id = initial[0]['args']['runId']
+            assert not driver.js('return window.__multisiteQA.events.some(e=>e.event==="run://done");'), 'Stop test was too late'
+            driver.press('停止运行', 'Stop run')
+            driver.wait('return window.__multisiteQA.events.filter(e=>e.event==="run://done"&&e.payload.run_id==='+json.dumps(stopped_id)+').length==='+str(len(names))+';', args.timeout)
+            driver.wait('return window.__multisiteQA.ipc.some(x=>x.command==="run_batch"&&x.args.runId==='+json.dumps(stopped_id)+'&&x.ok);', args.timeout)
+            stopped_events = driver.js('return window.__multisiteQA.events;')
+            report['stopped_batch'] = {'run_id': stopped_id, 'actual_exits': validate_stopped(stopped_events, directories, stopped_id)}
+            driver.wait('return snapshot().stations.every(s=>!s.active)&&$$("button").some(e=>vis(e)&&!e.disabled&&["开始运行","Start run"].includes(txt(e)));')
+            checkpoint('04a-stopped')
+            driver.press('项目', 'Project', root='$(".sidebar")')
+            driver.wait('return !$(".simulation-monitor") && $$("h1").some(e=>/开始你的研究|Start your research/.test(txt(e)));')
+            checkpoint('04b-project-home')
+            driver.press('模拟', 'Simulation', root='$(".sidebar")')
+            driver.wait('return !!$(".simulation-monitor") && snapshot().stations.length==='+str(len(names))+';')
+            restored = checkpoint('04c-restored-stopped-batch')
+            assert {s['name'] for s in restored['stations']} == set(names)
+            assert all(not s['active'] and ('已停止' in s['text'] or 'Stopped' in s['text']) for s in restored['stations']), 'Stopped batch state was lost'
+            assert '高级配置（引擎与计算阶段）' not in restored['text'] and 'Advanced settings (engine and stages)' not in restored['text']
+            driver.press('开始运行', 'Start run')
+            driver.wait('return window.__multisiteQA.ipc.filter(x=>x.command==="run_batch").length===2;', args.timeout)
+        active_submission = driver.js('return window.__multisiteQA.ipc.filter(x=>x.command==="run_batch").at(-1);')
+        active_id = active_submission['args']['runId']
+        driver.wait('return window.__multisiteQA.events.some(e=>e.event==="run://started"&&e.payload.run_id==='+json.dumps(active_id)+');', args.timeout)
         checkpoint('04-started')
         driver.press('历史记录', 'History', root='$(".sidebar")')
         checkpoint('05-history')
@@ -280,7 +324,7 @@ def run(args):
         samples = []
         captured_progress = False
         while time.monotonic() < deadline:
-            observed = driver.js('return {events:window.__multisiteQA.events,view:snapshot()};')
+            observed = driver.js('return {events:window.__multisiteQA.events.filter(e=>e.payload.run_id==='+json.dumps(active_id)+'),view:snapshot()};')
             samples.append({'at': time.time(), 'stations': observed['view']['stations']})
             if not captured_progress and sum(bool(station['active'] and station['progress']) for station in observed['view']['stations']) >= 2:
                 driver.js('$(".simulation-monitor").scrollIntoView({block:"start"});return true;')
@@ -303,7 +347,8 @@ def run(args):
         report['concurrent_dom_evidence'] = {'captured': bool(active_samples), 'samples': active_samples,
             'note': 'Two active station cards captured' if active_samples else 'DOM overlap not captured; timed real events must still prove concurrency'}
         submitted = driver.js('return window.__multisiteQA.ipc.filter(x=>x.command==="run_batch");')
-        assert len(submitted) == 1, 'Expected exactly one real batch submission'
+        assert len(submitted) == (2 if args.stop_and_return else 1), 'Unexpected real batch submission count'
+        submitted = [submitted[-1]]
         report['scientific_events'] = validate_events(observed['events'], directories, submitted[0]['args']['runId'])
         assert set(submitted[0]['args']['cases']) == set(directories), 'Submitted station set differs'
         assert submitted[0]['args']['maxConcurrent'] == 2 and submitted[0]['args']['threads'] == 1, 'Resource settings did not reach the backend'
@@ -378,12 +423,24 @@ def self_test():
             pass
         else:
             raise AssertionError('Missing station/stage/start, serial execution or failed physics must not pass')
+    stopped = station_events(paths[0], 10, 30) + station_events(paths[1], 20, 40)
+    for e in stopped:
+        if e['event'] == 'run://done': e['payload']['cancelled'] = True
+    assert len(validate_stopped(stopped, paths, 'batch')) == 2
+    for invalid in [events, [e for e in stopped if e['event'] != 'run://done'], stopped[:-1]]:
+        try:
+            validate_stopped(invalid, paths, 'batch')
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError('Stop request or natural completion is not actual cancellation')
     print('PASS: helper loading, input validation, station/stage/completion and real overlap checks (no GUI launched)')
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--self-test', action='store_true')
+    parser.add_argument('--stop-and-return', action='store_true', help='Stop the active batch, visit Project home, restore and restart it')
     parser.add_argument('--port', type=int, default=int(os.environ.get('COLM_E2E_PORT', '18899')))
     parser.add_argument('--data-root')
     parser.add_argument('--runtime')

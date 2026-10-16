@@ -16,6 +16,7 @@ function render(
   saveError?: string,
   remoteDirectory?: string,
   onBack?: () => void,
+  expert = false,
 ) {
   const effects: (() => void)[] = [];
   const contracts: {
@@ -30,7 +31,7 @@ function render(
     language: 'zh',
     root: '/project',
     projectRunSettings: undefined as AppState['projectRunSettings'],
-    expert: false,
+    expert,
     running: { ...otherRuns, ...(record ? { '/case': record } : {}) } as Record<string, RunState>,
     kernels: [],
     cases: [],
@@ -57,7 +58,11 @@ function render(
     useState: (initial: unknown) => {
       const index = stateIndex++;
       return [
-        initial === true ? false : initial === null ? (record?.progress?.remote ?? null) : initial,
+        initial === true && !expert
+          ? false
+          : initial === null
+            ? (record?.progress?.remote ?? null)
+            : initial,
         (value: unknown) => {
           if (index === 0) hostChanges.push(value);
         },
@@ -651,4 +656,43 @@ test('delayed server defaults are not mistaken for automatically saved batch pre
   resolve({ servers: [{ host: 'server', threads: 16, scheduler: 'lsf', cpus: 32 }] });
   await new Promise<void>((done) => setImmediate(done));
   assert.deepEqual(changed, [], 'genuine saved preferences still win over server defaults');
+});
+
+test('multi-site review hides engine/stage overrides even in expert mode', () => {
+  for (const expert of [false, true]) {
+    const batch = render(
+      undefined,
+      [],
+      undefined,
+      {},
+      ['/case', '/other'],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      expert,
+    );
+    const contract = batch.contracts[0] as unknown as { fields: { id: string }[] };
+    assert.ok(
+      !batch.elements.some(
+        (el) => el.type === 'Advanced' && el.props.title === '高级配置（引擎与计算阶段）',
+      ),
+    );
+    for (const id of [
+      'run-advanced',
+      'run-kernel',
+      'run-engine',
+      'run-preprocessors',
+      'run-stage',
+      'run-force',
+    ])
+      assert.ok(!contract.fields.some((field) => field.id === id), id);
+    assert.ok(contract.fields.some((field) => field.id === 'run-workers'));
+  }
+  const single = render();
+  assert.ok(
+    single.elements.some(
+      (el) => el.type === 'Advanced' && el.props.title === '高级配置（引擎与计算阶段）',
+    ),
+  );
 });

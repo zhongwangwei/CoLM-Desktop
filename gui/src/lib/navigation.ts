@@ -19,13 +19,15 @@ export const navigation = [
 export function navigationTarget(
   item: (typeof navigation)[number],
   state: Pick<AppState, 'root' | 'projectView'>,
-): { route: Route; tab?: AppState['caseTab'] } {
+): { route: Route; tab?: AppState['caseTab']; projectView?: AppState['projectView'] } {
+  if (item.id === 'project' && state.projectView?.root === state.root)
+    return { route: 'project', projectView: { ...state.projectView, home: true } };
   if (
     item.id === 'simulation' &&
     state.projectView?.root === state.root &&
     state.projectView?.page === 'batch'
   )
-    return { route: 'project' };
+    return { route: 'project', projectView: { ...state.projectView, home: false } };
   return { route: item.route, ...('tab' in item ? { tab: item.tab } : {}) };
 }
 
@@ -35,7 +37,8 @@ export function activeNavigation(
   if (
     state.route === 'project' &&
     state.projectView?.root === state.root &&
-    state.projectView?.page === 'batch'
+    state.projectView?.page === 'batch' &&
+    !state.projectView.home
   )
     return 'simulation';
   if (state.route === 'case') return state.caseTab === 'results' ? 'results' : 'simulation';

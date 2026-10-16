@@ -420,10 +420,11 @@ test('Results opens the station chooser before a case has been selected', async 
   await p.mount();
   assert.ok(p.element('ResultsPage'));
   assert.ok(!p.elements.some((element) => element.type === 'Card'));
-  p.state.projectView = { root: p.state.root, page: 'batch' };
+  p.state.projectView = { root: p.state.root, page: 'batch', home: true };
   p.render();
   (p.element('ResultsPage').props.onBack as () => void)();
   assert.deepEqual(p.routes, ['project'], 'results returns to the original batch');
+  assert.equal(p.state.projectView?.home, false);
 });
 
 test('selecting a station defaults to its entire forcing period and subsequent manual dates remain editable', async () => {

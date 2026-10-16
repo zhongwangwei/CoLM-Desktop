@@ -94,9 +94,9 @@ export default function CasesPage() {
     navigate('resources');
   }
   function backToSimulation() {
-    if (state.projectView?.root === state.root && state.projectView?.page === 'batch')
-      navigate('project');
-    else update({ caseTab: 'settings' });
+    if (state.projectView?.root === state.root && state.projectView?.page === 'batch') {
+      if (navigate('project')) update({ projectView: { ...state.projectView, home: false } });
+    } else update({ caseTab: 'settings' });
   }
   const [dateDraft, setDateDraft] = useState<Partial<Record<'start' | 'end' | 'spinup', string>>>(
     {},

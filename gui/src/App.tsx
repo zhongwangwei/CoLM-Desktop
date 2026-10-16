@@ -81,7 +81,9 @@ export default function App() {
   const active = activeNavigation(state);
   const openNavigation = (item: (typeof navigation)[number]) => {
     const target = navigationTarget(item, state);
-    return navigate(target.route, target.tab);
+    if (!navigate(target.route, target.tab)) return false;
+    if (target.projectView) update({ projectView: target.projectView, projectCasesOpen: false });
+    return true;
   };
   const navButton = (item: (typeof navigation)[number]) => (
     <Button

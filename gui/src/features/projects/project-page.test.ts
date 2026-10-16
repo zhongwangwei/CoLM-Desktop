@@ -591,3 +591,17 @@ test('project location displays shared server project without a selected case', 
   }
   assert.equal(expression('projectLocation', { state: { ...state, cases: [] } }), state.root);
 });
+
+test('explicit project home hides a remembered batch without losing its return settings', () => {
+  const page = home();
+  const view = { root: page.state.root, page: 'batch' as const, fromCreation: true, home: true };
+  page.state.projectView = view;
+  const contract = page.render();
+  assert.ok(!page.nodes.includes('ProjectBatchRun'));
+  assert.ok(contract.actions.some((action) => action.id === 'project-new-simulation'));
+  assert.deepEqual(page.state.projectView, view);
+  page.state.projectView = { ...view, home: false };
+  page.remount();
+  assert.ok(page.nodes.includes('ProjectBatchRun'));
+  assert.equal(page.batchProps.at(-1)?.fromCreation, true);
+});

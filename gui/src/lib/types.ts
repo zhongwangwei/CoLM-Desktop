@@ -165,6 +165,7 @@ export type AppState = {
   projectView?: {
     root: string;
     page: 'cases' | 'results' | 'batch';
+    home?: boolean;
     fromCreation?: boolean;
   };
   projectRunSettings?: {
