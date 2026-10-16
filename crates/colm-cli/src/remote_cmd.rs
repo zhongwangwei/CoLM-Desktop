@@ -176,7 +176,7 @@ fn server_place(raw: &str, case: &Path, remote_case: &str, maps: &[Mapping]) -> 
 fn validate_server_path(path: &str) -> Result<()> {
     ensure!(
         path.starts_with('/')
-            && path.trim_end_matches('/') != ""
+            && !path.trim_end_matches('/').is_empty()
             && !path.contains(|c: char| c.is_control() || c == '\\')
             && !path.split('/').any(|c| matches!(c, "." | "..")),
         "invalid absolute server path: {path}"
@@ -272,6 +272,7 @@ fn looks_like_path(field: &str, raw: &str) -> bool {
 }
 
 /// 改写一个 namelist 文件里的全部路径字段。
+#[allow(clippy::too_many_arguments)]
 fn rewrite_namelist(
     file: &Path,
     case: &Path,
