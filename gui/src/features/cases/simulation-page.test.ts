@@ -3,13 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as caseModel from './case-model';
-import { caseFieldVisible } from '../versions/configuration-options';
+import * as configuration from '../versions/configuration-options';
 import * as simulation from './simulation-model';
 import * as multiSiteModel from './multisite-model';
 import * as modelSettings from './model-settings';
 import * as historyVariables from './history-variables';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
 import type { UiField, UiAction } from '../../lib/guide';
+import type { Overlay } from '../../lib/types';
 import { pageExecutionContext, publicUiResult, waitForContract } from '../../lib/utils';
 import { fieldInputOptions, fieldLabel, optionLabel } from '../../lib/param-presentation';
 
@@ -109,7 +110,7 @@ function page(
   };
   const context = {
     ...caseModel,
-    caseFieldVisible,
+    ...configuration,
     ...simulation,
     ...multiSiteModel,
     ...modelSettings,
@@ -2788,4 +2789,256 @@ test('server spatial creation passes server paths and grid settings without loca
   assert.equal(request.forcing, '/server/forcing.nml');
   assert.ok(!p.calls.some((call) => call.command === 'new_spatial_case'));
   assert.deepEqual(p.opened, ['/cache/project/site']);
+});
+
+const methaneSchema = [
+  ...setupSchema,
+  ...[
+    'DEF_USE_TRACER',
+    'DEF_USE_Campbell_SOIL_MODEL',
+    'DEF_USE_VariablySaturatedFlow',
+    'DEF_USE_LULCC',
+    'DEF_USE_Dynamic_Wetland',
+  ].map((name) => ({ ...field(name, '示踪剂', '.false.'), kind: 'Logical' })),
+  ...configuration.tracerKeys.map((name) => ({
+    ...field(name, '示踪剂', name === 'DEF_TRACER_NUM' ? '0' : "''"),
+    kind: name === 'DEF_TRACER_NUM' ? 'Integer' : 'Character',
+  })),
+];
+for (const marked of ['name', 'site', 'observation']) {
+  test(`methane example selection configures BGC and a valid CH4 tracer from ${marked}`, async () => {
+    const methane = {
+      ...site,
+      name: marked === 'name' ? 'AT-Neu' : 'Methane-site',
+      site_file: marked === 'site' ? '/example/ch4/site.nc' : '/methane/site.nc',
+      obs_file: marked === 'observation' ? '/obs/flux-ch4.nc' : null,
+    };
+    const p = page('NewCasePage', { form, sites: [methane], step: 3 }, [methane], initialValues, {
+      schema: methaneSchema,
+      kernels: setupKernels,
+    });
+    await p.mount();
+    await p.click(`new-select-${methane.name}`);
+    await p.click('new-next');
+    const setup = p.element('ModelSettings').props;
+    assert.equal(setup.mode, 'PFT');
+    const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
+    assert.equal(values.DEF_USE_BGC, '.true.');
+    assert.equal(values.DEF_USE_TRACER, '.true.');
+    assert.equal(values.DEF_USE_Campbell_SOIL_MODEL, '.false.');
+    assert.equal(values.DEF_USE_VariablySaturatedFlow, '.true.');
+    assert.equal(values.DEF_USE_LULCC, '.false.');
+    assert.equal(values.DEF_URBAN_RUN, '.false.');
+    const rows = configuration.tracerRows({ physics: values, parameters: [], process_files: [] });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].NAMES, 'CH4');
+    assert.equal(rows[0].TYPES, 'gas');
+    assert.equal(rows[0].PARAM_FILES, 'standard_ch4_parameter.nml');
+    await p.click('new-next');
+    await p.click('new-create');
+    const created = p.calls.find((call) => call.command === 'new_case')!;
+    assert.ok(created);
+    const written = created.args.fields as { path: string; value: string }[];
+    for (const key of [
+      'DEF_USE_TRACER',
+      'DEF_USE_BGC',
+      'DEF_TRACER_NAMES',
+      'DEF_TRACER_PARAM_FILES',
+    ])
+      assert.equal(written.find((entry) => entry.path === key)?.value, values[key]);
+    assert.deepEqual(p.state.version.overlay.physics, {});
+    assert.ok(!p.calls.some((call) => call.command === 'model_create'));
+  });
+}
+
+test('methane example preserves PC and custom tracer metadata while removing crop leftovers', async () => {
+  const methane = { ...site, name: 'AT-Neu' };
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, subgrid: 'PC' },
+      sites: [methane],
+      step: 3,
+      caseValues: {
+        DEF_TRACER_NUM: '2',
+        DEF_TRACER_NAMES: "'Cl,CH4'",
+        DEF_TRACER_TYPES: "'solute,gas'",
+        DEF_TRACER_PARAM_FILES: "'Cl:/custom/cl.nml,CH4:/custom/ch4.nml'",
+        DEF_TUNING_CROP_PLANTING_DAY: '120',
+        DEF_HIST_FREQ: "'DAILY'",
+      },
+    },
+    [methane],
+    initialValues,
+    { schema: methaneSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click('new-next');
+  const setup = p.element('ModelSettings').props;
+  assert.equal(setup.mode, 'PC');
+  const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
+  assert.equal(values.DEF_TRACER_NUM, '2');
+  assert.equal(values.DEF_TRACER_NAMES, "'Cl,CH4'");
+  assert.equal(values.DEF_TRACER_PARAM_FILES, "'Cl:/custom/cl.nml,CH4:/custom/ch4.nml'");
+  assert.equal(values.DEF_TUNING_CROP_PLANTING_DAY, undefined);
+  assert.equal(values.DEF_HIST_FREQ, "'DAILY'");
+});
+
+test('methane selection with missing tracer schema leaves the original site and settings untouched', async () => {
+  const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [site, methane], step: 3 },
+    [site, methane],
+    initialValues,
+    { schema: setupSchema },
+  );
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click('new-next');
+  const values = (
+    p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
+  ).caseValues;
+  assert.notEqual(values.DEF_USE_TRACER, '.true.');
+  assert.deepEqual(p.state.version.overlay.physics, {});
+});
+
+test('selecting urban after methane disables BGC and tracers while retaining definitions', async () => {
+  const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+  const urban = { ...site, name: 'AU-Preston', site_file: '/urban/site.nc', urban: true };
+  const p = page(
+    'NewCasePage',
+    { form, sites: [methane, urban], step: 3 },
+    [methane, urban],
+    initialValues,
+    { schema: methaneSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click('new-select-AU-Preston');
+  await p.click('new-next');
+  const setup = p.element('ModelSettings').props;
+  assert.equal(setup.mode, 'IGBP');
+  const values = (setup.setupEnvironment as { caseValues: Record<string, string> }).caseValues;
+  assert.equal(values.DEF_USE_BGC, '.false.');
+  assert.equal(values.DEF_USE_TRACER, '.false.');
+  assert.equal(values.DEF_URBAN_RUN, '.true.');
+  assert.equal(values.DEF_TRACER_NAMES, "'CH4'");
+});
+
+test('methane example retains inherited custom tracer scalar metadata without copying unrelated version flags', async () => {
+  const methane = { ...site, name: 'AT-Neu' };
+  const p = page('NewCasePage', { form, sites: [methane], step: 3 }, [methane], initialValues, {
+    schema: methaneSchema,
+    kernels: setupKernels,
+  });
+  const overlay = p.state.version.overlay as Overlay;
+  Object.assign(overlay.physics, {
+    DEF_TRACER_NUM: '1',
+    DEF_TRACER_NAMES: "'Cl'",
+    DEF_TRACER_TYPES: "'solute'",
+    DEF_TRACER_PARAM_FILES: "'CustomCl:/custom/cl.nml'",
+    DEF_UNRELATED_VERSION_FLAG: '.true.',
+  });
+  overlay.parameters.push({
+    parameter_id: 'case:DEF_TRACER_NAMES',
+    raw_key: 'DEF_TRACER_NAMES',
+    scope_instance: { kind: 'case-scalar' },
+    value: "'CustomCl'",
+  });
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click('new-next');
+  const values = (
+    p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
+  ).caseValues;
+  const rows = configuration.tracerRows({ physics: values, parameters: [], process_files: [] });
+  assert.deepEqual(
+    rows.map((row) => [row.NAMES, row.TYPES]),
+    [
+      ['CustomCl', 'solute'],
+      ['CH4', 'gas'],
+    ],
+  );
+  assert.equal(rows[0].PARAM_FILES, '/custom/cl.nml');
+  assert.equal(values.DEF_UNRELATED_VERSION_FLAG, undefined);
+  assert.equal(overlay.physics.DEF_TRACER_NAMES, "'Cl'");
+  assert.equal(overlay.parameters[0].value, "'CustomCl'");
+});
+
+for (const retained of ['new', 'missing-file', 'builtin-file', 'custom-file', 'custom-asset']) {
+  test(`methane wetwat default only clears dynamic wetlands when generated: ${retained}`, async () => {
+    const methane = { ...site, name: 'AT-Neu' };
+    const caseValues = {
+      DEF_USE_Dynamic_Wetland: '.true.',
+      ...(['missing-file', 'builtin-file', 'custom-file'].includes(retained)
+        ? {
+            DEF_TRACER_NUM: '1',
+            DEF_TRACER_NAMES: "'CH4'",
+            DEF_TRACER_TYPES: "'gas'",
+            DEF_TRACER_PARAM_FILES:
+              retained === 'custom-file'
+                ? "'CH4:/custom/ch4.nml'"
+                : retained === 'builtin-file'
+                  ? "'CH4:standard_ch4_parameter.nml'"
+                  : "'null'",
+          }
+        : {}),
+    };
+    const p = page(
+      'NewCasePage',
+      { form, caseValues, sites: [methane], step: 3 },
+      [methane],
+      initialValues,
+      { schema: methaneSchema, kernels: setupKernels },
+    );
+    if (retained === 'custom-asset')
+      (p.state.version.overlay as Overlay).process_files.push({
+        relative_path: 'standard_ch4_parameter.nml',
+        sha256: 'custom',
+      });
+    await p.mount();
+    await p.click('new-select-AT-Neu');
+    await p.click('new-next');
+    const values = (
+      p.element('ModelSettings').props.setupEnvironment as { caseValues: Record<string, string> }
+    ).caseValues;
+    const expected = ['custom-file', 'custom-asset'].includes(retained) ? '.true.' : '.false.';
+    assert.equal(values.DEF_USE_Dynamic_Wetland, expected);
+    await p.click('new-next');
+    await p.click('new-create');
+    const created = p.calls.find((call) => call.command === 'new_case')!;
+    assert.equal(
+      (created.args.fields as { path: string; value: string }[]).find(
+        (item) => item.path === 'DEF_USE_Dynamic_Wetland',
+      )?.value,
+      expected,
+    );
+  });
+}
+
+test('methane example rejects oversized tracer definitions without truncating or changing the selected site', async () => {
+  const methane = { ...site, name: 'AT-Neu', site_file: '/methane/site.nc' };
+  const caseValues = {
+    DEF_TRACER_NUM: '101',
+    DEF_TRACER_NAMES: `'${['CH4', ...Array.from({ length: 100 }, (_, index) => `Cl${index}`)].join(',')}'`,
+    DEF_TRACER_TYPES: `'${['gas', ...Array.from({ length: 100 }, () => 'solute')].join(',')}'`,
+    DEF_TRACER_PARAM_FILES: "'CH4:/custom/ch4.nml'",
+  };
+  const p = page(
+    'NewCasePage',
+    { form, caseValues, sites: [site, methane], step: 3 },
+    [site, methane],
+    initialValues,
+    { schema: methaneSchema, kernels: setupKernels },
+  );
+  await p.mount();
+  await p.click('new-select-AT-Neu');
+  await p.click('new-next');
+  (p.element('ModelSettings').props.onEdit as () => unknown)();
+  const seed = p.state.newCaseSeed as { form: typeof form; caseValues: Record<string, string> };
+  assert.equal(seed.form.site, form.site);
+  assert.equal(seed.form.name, form.name);
+  assert.deepEqual(seed.caseValues, { ...caseValues, ...modelSettings.caseSchemeFields('IGBP') });
 });
