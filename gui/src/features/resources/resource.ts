@@ -71,6 +71,8 @@ export type ResourceCheck = {
   checked_at: string;
   probe?: {
     hostname?: string;
+    schedulers?: string[];
+    qsub_unverified?: boolean;
     configuration_error?: string;
     engine?: 'source' | 'prebuilt';
     problems?: string[];

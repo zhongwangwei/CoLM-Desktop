@@ -135,6 +135,19 @@
 .resource-identity > .button {
   font-size: 12px;
 }
+.resource-scheduler {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+}
+.resource-scheduler .field {
+  flex: 1;
+  min-width: 0;
+}
+.resource-scheduler > .button {
+  flex-shrink: 0;
+  margin-bottom: 6px;
+}
 .resource-connection-actions small {
   font-size: 11px;
   color: var(--muted);

@@ -86,6 +86,7 @@ export default function ResourcesPage() {
       const next = { ...current };
       delete next.save;
       delete next.credentials;
+      delete next[`scheduler:${selected}`];
       return next;
     });
   }
@@ -324,6 +325,36 @@ export default function ResourcesPage() {
     if (path) editField('identity_file', path);
     return path;
   }
+  async function detectScheduler() {
+    if (!editor) return;
+    const server = structuredClone(editor),
+      configuration = JSON.stringify(server),
+      token = epoch.current;
+    const probe = await invokeJson<ResourceCheck['probe']>('remote_probe', { server });
+    if (
+      !probe?.hostname ||
+      !Array.isArray(probe.schedulers) ||
+      !probe.schedulers.every((name) => ['slurm', 'pbs', 'lsf'].includes(name))
+    )
+      throw new Error(
+        t('服务器未返回有效的调度器识别结果。', 'Invalid scheduler detection response.'),
+      );
+    const schedulers = [...new Set(probe.schedulers)];
+    const next = schedulers.length === 1 ? { ...server, scheduler: schedulers[0] } : server;
+    if (token.active && token === epoch.current && next.scheduler !== server.scheduler) {
+      setEditor((current) => (JSON.stringify(current) === configuration ? next : current));
+      setOutput((current) => {
+        const result = { ...current };
+        delete result[`check:${selected}`];
+        return result;
+      });
+    }
+    return {
+      configuration: JSON.stringify(next),
+      schedulers,
+      unverifiedQsub: probe.qsub_unverified === true,
+    };
+  }
   async function checkLocal() {
     const kernels = await invokeJson<typeof state.kernels>('list_kernels');
     update({ kernels });
@@ -335,6 +366,7 @@ export default function ResourcesPage() {
     setOutput((current) => {
       const next = { ...current };
       delete next[`check:${selected}`];
+      delete next[`scheduler:${selected}`];
       return next;
     });
   }
@@ -356,11 +388,23 @@ export default function ResourcesPage() {
       const next = { ...current };
       delete next[`check:${selected}`];
       delete next[`check:server:${editor.host}`];
+      delete next[`scheduler:${selected}`];
       return next;
     });
     return t('密码已登记到本次会话', 'Password registered for this session');
   }
   const selectedServer = servers.find((server) => server.host === original);
+  const detection = output[`scheduler:${selected}`] as
+    { configuration: string; schedulers: string[]; unverifiedQsub: boolean } | undefined;
+  const schedulerDetection =
+    editor && detection?.configuration === JSON.stringify(editor) ? detection : null;
+  const schedulerLabels: Record<string, string> = {
+    auto: t('运行时自动识别', 'Detect at run time'),
+    bare: t('直接后台运行', 'Direct background execution'),
+    slurm: 'Slurm',
+    pbs: 'PBS',
+    lsf: 'LSF',
+  };
   const checkResult = output[`check:${selected}`] as ResourceCheck | undefined;
   const check = editor ? resourceCheckSummary(editor, checkResult, en) : null;
   const checkEvidence =
@@ -442,7 +486,7 @@ export default function ResourcesPage() {
           type: 'choice',
           options: ['auto', 'bare', 'slurm', 'pbs', 'lsf'].map((value) => ({
             value,
-            label: value,
+            label: schedulerLabels[value],
           })),
           set: (value) => editField('scheduler', value),
         },
@@ -665,12 +709,21 @@ export default function ResourcesPage() {
         run: () => execute('pick-identity', pickIdentity),
       });
     if (advanced)
-      guideActions.push({
-        id: 'resource-directories-toggle',
-        label: t('本地路径映射（可选）', 'Local path mapping (optional)'),
-        kind: 'click',
-        run: () => setDirectories(!directories),
-      });
+      guideActions.push(
+        {
+          id: 'resource-detect-scheduler',
+          label: t('自动识别', 'Detect automatically'),
+          kind: 'click',
+          enabled: !busy && !!editor.host.trim() && !password,
+          run: () => execute(`scheduler:${selected}`, detectScheduler),
+        },
+        {
+          id: 'resource-directories-toggle',
+          label: t('本地路径映射（可选）', 'Local path mapping (optional)'),
+          kind: 'click',
+          run: () => setDirectories(!directories),
+        },
+      );
     if (advanced && directories) {
       guideActions.push({
         id: 'resource-add-map',
@@ -820,6 +873,7 @@ export default function ResourcesPage() {
       dirty,
       historyErrors,
       check,
+      schedulerDetection: advanced ? schedulerDetection : null,
       ...(checkDetails && checkEvidence ? { checkEvidence } : {}),
       local: selected === 'local' ? output.local : undefined,
       records: visibleRecords.map(({ dir, record }) => ({
@@ -1189,7 +1243,41 @@ export default function ResourcesPage() {
             )}
             <div className="form-grid">
               {extraFields.map(([key]) => field(`resource-${key}`))}
-              {field('resource-scheduler')}
+              <div>
+                <div className="resource-scheduler">
+                  {field('resource-scheduler')}
+                  {actionButton('resource-detect-scheduler')}
+                </div>
+                <p className="muted">
+                  {t(
+                    '通过当前 SSH 连接识别调度器，不会提交任务；识别结果保存后生效。',
+                    'Detect through this SSH connection without submitting a job; save to apply.',
+                  )}
+                </p>
+                {schedulerDetection && (
+                  <p role="status">
+                    {schedulerDetection.schedulers.length === 1
+                      ? t(
+                          `已识别为 ${schedulerLabels[schedulerDetection.schedulers[0]]}。${dirty ? '请保存连接设置。' : '与当前设置一致。'}`,
+                          `Detected ${schedulerLabels[schedulerDetection.schedulers[0]]}. ${dirty ? 'Save the connection settings.' : 'Matches the current setting.'}`,
+                        )
+                      : schedulerDetection.schedulers.length > 1
+                        ? t(
+                            `检测到多个调度器：${schedulerDetection.schedulers.map((name) => schedulerLabels[name]).join('、')}。已保留当前选择，请手动确认。`,
+                            `Multiple schedulers detected: ${schedulerDetection.schedulers.map((name) => schedulerLabels[name]).join(', ')}. Current selection retained; choose one manually.`,
+                          )
+                        : schedulerDetection.unverifiedQsub
+                          ? t(
+                              '发现 qsub，但无法确认所属调度系统。已保留当前选择，请确认服务器使用的系统后手动选择。',
+                              'Found qsub, but could not verify its scheduler. Current selection retained; confirm the server scheduler and choose it manually.',
+                            )
+                          : t(
+                              '未检测到 Slurm、PBS 或 LSF，已保留当前选择。集群可能需要先加载调度工具；普通服务器可选择直接后台运行。',
+                              'No Slurm, PBS or LSF detected; current selection retained. Cluster tools may need loading; ordinary servers can use direct background execution.',
+                            )}
+                  </p>
+                )}
+              </div>
               {field('resource-directives')}
             </div>
           </Advanced>

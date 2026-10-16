@@ -1042,16 +1042,22 @@ impl RunPlan {
 
 pub(super) fn parse_scheduler(opts: &Opts, ssh: &Ssh, root: &str) -> Result<Scheduler> {
     Ok(match opts.get("--scheduler").as_deref() {
-        // auto：问服务器有什么调度系统，取第一个；没有就直接后台运行。
-        Some("auto") => colm_remote::probe::probe(ssh, root)?
-            .schedulers
-            .first()
-            .map(|s| Scheduler::parse(s))
-            .transpose()?
-            .unwrap_or(Scheduler::Bare),
+        Some("auto") => detected_scheduler(&colm_remote::probe::probe(ssh, root)?)?,
         Some(name) => Scheduler::parse(name)?,
         None => Scheduler::Bare,
     })
+}
+
+fn detected_scheduler(probe: &colm_remote::probe::Probe) -> Result<Scheduler> {
+    if let Some(name) = probe.schedulers.first() {
+        return Scheduler::parse(name);
+    }
+    // An unidentified qsub may belong to a cluster; never fall back to its login node.
+    ensure!(
+        !probe.qsub_unverified,
+        "qsub was found but its scheduler could not be verified; choose the scheduler explicitly instead of falling back to direct execution"
+    );
+    Ok(Scheduler::Bare)
 }
 
 pub(super) fn resources_from(

@@ -21,8 +21,10 @@ pub struct Probe {
     pub mpi: Option<String>,
     pub cmake: bool,
     pub cc: bool,
-    /// 找到的调度系统：slurm、pbs、lsf；空表示直接后台运行。
+    /// 找到的调度系统：slurm、pbs、lsf；空且 qsub_unverified 为 false 时可直接后台运行。
     pub schedulers: Vec<String>,
+    /// qsub is present but read-only checks could not establish PBS identity.
+    pub qsub_unverified: bool,
     /// 调度系统的分区或队列（`sinfo`、`qstat -Q`、`bqueues`），给“选分区”用；拿不到就空。
     pub queues: Vec<String>,
     /// 工作根目录：存在吗、可写吗、所在盘的剩余空间。
@@ -55,9 +57,32 @@ echo "mpi=$( (command -v mpif90 || command -v mpiifort || command -v mpiifx) 2>/
 echo "cmake=$(command -v cmake)"
 echo "cc=$( (command -v cc || command -v gcc) 2>/dev/null | head -1)"
 echo "slurm=$(command -v sbatch)"
-echo "pbs=$(command -v qsub)"
+PBS=""; QSUB=$(command -v qsub); QSUB_UNVERIFIED=""
+if [ -n "$QSUB" ]; then
+  QSUB_UNVERIFIED=1
+  # Slurm and LSF also install qsub wrappers; command names alone do not identify PBS.
+  if command -v qstat >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    if timeout -k 1 3 qstat --version 2>&1 | grep -Eiq \
+      -e '^[[:space:]]*pbs_version[[:space:]]*=[[:space:]]*[^[:space:]]' \
+      -e '^[[:space:]]*(OpenPBS|PBS Professional|TORQUE)[[:space:]]+([[:alpha:]]+[[:space:]:]+)?[0-9]' \
+      -e '^[[:space:]]*Version:[[:space:]]*[0-9][[:alnum:]._-]*[[:space:]]+TORQUE([[:space:]]|$)'; then
+      PBS="$QSUB"
+    elif timeout -k 1 3 qstat -Bf 2>/dev/null | grep -Eq '^[[:space:]]*pbs_version[[:space:]]*=[[:space:]]*[^[:space:]]'; then
+      PBS="$QSUB"
+    fi
+  fi
+  [ -n "$PBS" ] && QSUB_UNVERIFIED=""
+fi
+echo "pbs=$PBS"
+echo "qsub_unverified=$QSUB_UNVERIFIED"
 echo "lsf=$(command -v bsub)"
-echo "queues=$( (sinfo -h -o '%P' 2>/dev/null; qstat -Q 2>/dev/null | awk 'NR>2{{print $1}}'; bqueues -w 2>/dev/null | awk 'NR>1{{print $1}}') | tr -d '*' | tr '\n' ' ')"
+echo "queues=$( (
+  if command -v timeout >/dev/null 2>&1; then
+    timeout -k 1 3 sinfo -h -o '%P' 2>/dev/null
+    [ -n "$PBS" ] && timeout -k 1 3 qstat -Q 2>/dev/null | awk 'NR>2{{print $1}}'
+    timeout -k 1 3 bqueues -w 2>/dev/null | awk 'NR>1{{print $1}}'
+  fi
+) | tr -d '*' | tr '\n' ' ')"
 if [ -n "$R" ]; then
 echo "root_exists=$([ -d "$R" ] && echo 1)"
 P="$R"; while [ ! -d "$P" ] && [ "$P" != "/" ]; do P=$(dirname "$P"); done
@@ -96,6 +121,7 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .filter(|s| get(s).is_some())
             .map(str::to_owned)
             .collect(),
+        qsub_unverified: get("qsub_unverified") == Some("1"),
         queues: get("queues")
             .map(|v| v.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default(),
