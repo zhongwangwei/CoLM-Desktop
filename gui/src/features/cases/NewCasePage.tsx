@@ -46,6 +46,9 @@ import {
 } from './model-settings';
 import type { CaseOptionPatch } from '../versions/configuration-options';
 import HistoryVariablesCard from './HistoryVariablesCard';
+import MultiSiteSettings from './MultiSiteSettings';
+import { planMultiSites, type MultiSiteDraft, type MultiSiteMode } from './multisite-model';
+import type { CaseEntry } from '../../lib/types';
 
 function siteInfo(s: Site, t: (zh: string, en: string) => string) {
   if (s.urban)
@@ -162,6 +165,16 @@ export default function NewCasePage() {
       return String(e);
     }
   };
+  const [multiSiteEnabled, setMultiSiteEnabled] = useState(seed?.multiSiteEnabled ?? false);
+  const [multiSiteMode, setMultiSiteMode] = useState<MultiSiteMode>(
+    seed?.multiSiteMode ?? 'first-year',
+  );
+  const [multiSiteRepeat, setMultiSiteRepeat] = useState(seed?.multiSiteRepeat ?? '1');
+  const [siteDrafts, setSiteDrafts] = useState<MultiSiteDraft[]>(seed?.siteDrafts ?? []);
+  const [multiResults, setMultiResults] = useState<
+    Array<{ site: string; name: string; dir: string; created?: boolean; error?: string }>
+  >([]);
+  const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
   const [optionStates, setOptionStates] = useState<ConfigurationField[]>([]),
     [optionError, setOptionError] = useState(''),
     [cropDefaults, setCropDefaults] = useState<Record<string, string>>({});
@@ -387,6 +400,9 @@ export default function NewCasePage() {
     });
     if (alive.current && id === sequence.current) {
       setSites(result.sites);
+      setSiteDrafts((drafts) =>
+        drafts.filter((draft) => result.sites.some((site) => site.site_file === draft.site)),
+      );
       setHint(result.hint ?? '');
       setForm((f) => {
         const s = result.sites.find((site) => site.site_file === f.site);
@@ -421,6 +437,7 @@ export default function NewCasePage() {
   }
   async function example() {
     return work(async () => {
+      setMultiSiteEnabled(false);
       const x = await invoke<{
         sitedir: string;
         forcingdir: string;
@@ -538,7 +555,14 @@ export default function NewCasePage() {
       const issue = newCaseRangeProblem(form, en);
       if (issue) return issue;
     }
-    if (at >= 3) {
+    if (at >= 3 && multiSite) {
+      try {
+        multiPlans(at >= 5 ? 5 : 3);
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (at >= 3 && !multiSite) {
       const issue = newCaseProblem(form, 3, selected, physics, en);
       if (issue) return issue;
     }
@@ -549,7 +573,7 @@ export default function NewCasePage() {
       );
     if (at >= 4 && !['IGBP', 'USGS'].includes(form.landcover))
       return t('请选择 IGBP 或 USGS 地表分类。', 'Choose IGBP or USGS land-cover classification.');
-    if (at >= 5) {
+    if (at >= 5 && !multiSite) {
       return (
         newCaseProblem(form, 5, selected, physics, en) ||
         spinupProblem(
@@ -585,6 +609,10 @@ export default function NewCasePage() {
         step: 4,
         ownData,
         exampleValues: exampleValues.current,
+        multiSiteEnabled,
+        multiSiteMode,
+        multiSiteRepeat,
+        siteDrafts,
       },
       simulationReturn: { route: 'new-case', step: 4 },
     });
@@ -609,6 +637,143 @@ export default function NewCasePage() {
       (schema.some((f) => f.name === name) || name.startsWith('DEF_hist_vars%')),
   );
 
+  function multiPlans(at: 3 | 5) {
+    const shared = {
+      ...effectiveModelFields(state.version?.overlay, modelFields),
+      ...schemeFields,
+      ...Object.fromEntries(editedOptions),
+    };
+    for (const key of Object.keys(shared)) {
+      if (
+        [
+          'DEF_CASE_NAME',
+          'DEF_dir_output',
+          'DEF_forcing_namelist',
+          'SITE_fsitedata',
+          'SITE_lon_location',
+          'SITE_lat_location',
+          'SITE_landtype',
+        ].some((name) => name.toLowerCase() === key.toLowerCase()) ||
+        /^DEF_simulation_time%(start|end|spinup)_/i.test(key)
+      )
+        delete shared[key];
+    }
+    return planMultiSites({
+      form,
+      sites,
+      drafts: siteDrafts,
+      mode: multiSiteMode,
+      repeat: multiSiteRepeat,
+      physics: shared,
+      cropDefaults,
+      en,
+      step: at,
+    });
+  }
+
+  async function createMultiSites() {
+    const plans = multiPlans(5);
+    const revision = state.versionRef;
+    const results = [...multiResults];
+    const job = { dir: '', cancelRequested: false };
+    creation.current = job;
+    setCancellingCreation(false);
+    try {
+      for (const plan of plans) {
+        if (job.cancelRequested) break;
+        const out = caseDirectory(plan.form.root, plan.form.name);
+        if (results.some((result) => result.dir === out && !result.error)) continue;
+        job.dir = out;
+        setCreationDir(out);
+        const prior = results.find((result) => result.dir === out);
+        const result = {
+          site: plan.site.site_file,
+          name: plan.form.name,
+          dir: out,
+          created: prior?.created,
+        } as {
+          site: string;
+          name: string;
+          dir: string;
+          created?: boolean;
+          error?: string;
+        };
+        try {
+          if (!result.created)
+            await invoke('new_case', {
+              site: plan.form.site,
+              out,
+              name: plan.form.name,
+              start: plan.form.start,
+              end: plan.form.end,
+              rawdata: form.rawdata || null,
+              runtime: form.runtime || null,
+              met: plan.form.met,
+              mode: plan.mode,
+              fields: physicsFields(plan.fields),
+              modelRevision: revision,
+              engine: form.engine,
+            });
+          result.created = true;
+          if (multiSiteMode === 'first-year')
+            await invoke('set_spinup', {
+              dirs: [out],
+              years: 1,
+              repeat: Number(multiSiteRepeat),
+              kernelDir: null,
+            });
+        } catch (error) {
+          result.error = String(error);
+        }
+        const previous = results.findIndex((item) => item.dir === out);
+        if (previous >= 0) results[previous] = result;
+        else results.push(result);
+        if (alive.current) setMultiResults([...results]);
+      }
+    } finally {
+      if (creation.current === job) {
+        creation.current = null;
+        if (alive.current) {
+          setCreationDir(null);
+          setCancellingCreation(false);
+        }
+      }
+    }
+    return {
+      created: results.filter((result) => !result.error).map((result) => result.dir),
+      failed: results.filter((result) => result.error),
+      cancelled: job.cancelRequested,
+    };
+  }
+
+  function editUnfinishedSites() {
+    if (busy || state.busy) return;
+    const created = multiResults.filter((result) => result.created);
+    setSiteDrafts((drafts) =>
+      drafts.filter((draft) => !created.some((result) => result.site === draft.site)),
+    );
+    setHint(
+      t(
+        '已创建的算例保持原样。这里只调整尚未创建的站点。',
+        'Created cases are preserved. Edit only sites that have not been created.',
+      ),
+    );
+    setMultiResults([]);
+    setError('');
+    setStep(3);
+  }
+
+  async function viewCreatedProject() {
+    return work(async () => {
+      const root = caseDirectory(form.root, form.name);
+      const cases = await invoke<CaseEntry[]>('list_cases', { root });
+      await invoke('save_recent', { key: 'root', value: root });
+      update({ root, cases, selectedCase: null, newCaseSeed: null });
+      lock.current = false;
+      return navigate('project');
+    });
+  }
+
   async function create() {
     return work(async () => {
       const issue = problem(5);
@@ -620,6 +785,7 @@ export default function NewCasePage() {
         state.version.version.revision !== state.versionRef.revision
       )
         throw new Error(t('模型与设置尚未读取完成。', 'Wait for model and settings to load.'));
+      if (multiSite) return createMultiSites();
       const out = caseDirectory(form.root, form.name),
         revision = state.versionRef;
       const changed = editedOptions.map(([path, value]) => ({ path, value }));
@@ -711,7 +877,7 @@ export default function NewCasePage() {
     setCancellingCreation(true);
     try {
       const cancelled = await invoke<number>('case_creation_cancel', { dir: job.dir });
-      if (!cancelled && creation.current === job)
+      if (!multiSite && !cancelled && creation.current === job)
         throw new Error(
           t(
             '尚未取消创建，请等待当前任务结束或重试取消。',
@@ -720,7 +886,7 @@ export default function NewCasePage() {
         );
     } catch (e) {
       if (alive.current && creation.current === job) {
-        job.cancelRequested = false;
+        if (!multiSite) job.cancelRequested = false;
         setCancellingCreation(false);
         setError(String(e));
       }
@@ -763,8 +929,9 @@ export default function NewCasePage() {
       : []),
     ...(form.kind === 'watershed' && form.grid === 'latlon' ? ['shapefile'] : []),
   ];
-  const dataKeys =
-    form.kind === 'site'
+  const dataKeys = multiSite
+    ? ['rawdata', 'runtime']
+    : form.kind === 'site'
       ? ['site', 'met', 'rawdata', 'runtime']
       : ['rawdata', 'runtime', 'forcing'];
   const keys =
@@ -775,12 +942,13 @@ export default function NewCasePage() {
         : step === 3
           ? [
               ...dataKeys,
-              'start',
-              'end',
+              ...(!multiSite ? ['start', 'end', 'spinup_end'] : []),
               ...(form.kind === 'site' && ownData ? ['sitedir', 'forcingdir'] : []),
             ]
           : step === 5
-            ? ['spinup_end']
+            ? multiSite
+              ? []
+              : ['spinup_end']
             : [];
   const visibleSchema = schema.filter(
     (field) =>
@@ -789,7 +957,7 @@ export default function NewCasePage() {
       // 单点只写单文件历史（'one'）；建例前后端还拿不到 SinglePoint 上下文去隐藏它，这里先挡住。
       !(form.kind === 'site' && field.name === 'DEF_HIST_mode'),
   );
-  const enabled = !busy && !state.busy;
+  const enabled = !busy && !state.busy && !multiResults.some((result) => result.created);
   // 当前步骤的必填项没齐全时，“下一步/创建”置灰，并直接说明还差什么。
   const blocker = stepProblem(step);
   const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
@@ -848,6 +1016,18 @@ export default function NewCasePage() {
     disabled: !enabled,
     set: (v) => set(k, v),
   }));
+  if (step === 3 && ownData && form.kind === 'site')
+    fields.push({
+      id: 'new-multi-site',
+      label: t('多站点创建', 'Create multiple sites'),
+      type: 'switch',
+      value: String(multiSiteEnabled),
+      disabled: !enabled,
+      set: (value) => {
+        setError('');
+        setMultiSiteEnabled(value === 'true');
+      },
+    });
   if (step === 1) {
     fields.push({
       id: 'new-case-directory',
@@ -943,6 +1123,42 @@ export default function NewCasePage() {
   }
 
   const actions: UiAction[] = [
+    ...(multiSite && multiResults.length
+      ? [
+          {
+            id: 'new-multi-edit-unfinished',
+            label: t('修改尚未创建的站点', 'Edit uncreated sites'),
+            kind: 'click' as const,
+            enabled:
+              !busy &&
+              !state.busy &&
+              !multiResults.some((result) => result.created && result.error) &&
+              siteDrafts.some(
+                (draft) =>
+                  !multiResults.some((result) => result.site === draft.site && result.created),
+              ),
+            run: editUnfinishedSites,
+          },
+          {
+            id: 'new-multi-retry',
+            label: t('重试未完成的站点', 'Retry unfinished sites'),
+            kind: 'commit' as const,
+            enabled:
+              !busy &&
+              !state.busy &&
+              (multiResults.some((result) => result.error) ||
+                multiResults.length < siteDrafts.length),
+            run: create,
+          },
+          {
+            id: 'new-multi-project',
+            label: t('查看已创建的项目', 'View created project'),
+            kind: 'click' as const,
+            enabled: !busy && !state.busy && multiResults.some((result) => !result.error),
+            run: viewCreatedProject,
+          },
+        ]
+      : []),
     ...(creationDir
       ? [
           {
@@ -1033,7 +1249,7 @@ export default function NewCasePage() {
                 },
               ]
             : []),
-          ...sites.map((s) => ({
+          ...(!multiSite ? sites : []).map((s) => ({
             id: `new-select-${s.name}`,
             label: s.name,
             kind: 'click' as const,
@@ -1354,7 +1570,36 @@ export default function NewCasePage() {
                 </div>
               )}
               {hint && <Notice>{hint}</Notice>}
-              {sites.length > 0 && (
+              {ownData && (
+                <Field label={t('创建方式', 'Creation scope')}>
+                  <Select
+                    disabled={!enabled}
+                    value={multiSiteEnabled ? 'multiple' : 'single'}
+                    onChange={(event) => {
+                      setError('');
+                      setMultiSiteEnabled(event.target.value === 'multiple');
+                    }}
+                  >
+                    <option value="single">{t('单站点', 'Single site')}</option>
+                    <option value="multiple">{t('多站点', 'Multiple sites')}</option>
+                  </Select>
+                </Field>
+              )}
+              {multiSite && (
+                <MultiSiteSettings
+                  sites={sites}
+                  drafts={siteDrafts}
+                  mode={multiSiteMode}
+                  repeat={multiSiteRepeat}
+                  projectDirectory={finalDirectory}
+                  disabled={!enabled}
+                  en={en}
+                  onDraftsChange={setSiteDrafts}
+                  onModeChange={setMultiSiteMode}
+                  onRepeatChange={setMultiSiteRepeat}
+                />
+              )}
+              {!multiSite && sites.length > 0 && (
                 <div className="simulation-site-list">
                   {sites.map((s) => {
                     const info = siteInfo(s, t);
@@ -1430,7 +1675,7 @@ export default function NewCasePage() {
                   })}
                 </div>
               )}
-              {scannedForcing(selected, form.met) && selected && (
+              {!multiSite && scannedForcing(selected, form.met) && selected && (
                 <p className="muted">
                   {t('已读取强迫场覆盖', 'Scanned forcing coverage')}：{selected.start} —{' '}
                   {selected.end}
@@ -1438,106 +1683,112 @@ export default function NewCasePage() {
               )}
             </>
           )}
-          <div className="simulation-dates">{['start', 'end'].map(render)}</div>
-          <p className="field-hint">
-            {t(
-              '日期格式 YYYY-MM-DD，例如 2001-01-01。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
-              'Use YYYY-MM-DD, e.g. 2001-01-01. Site runs normally include the end date, limited by forcing coverage.',
-            )}
-          </p>
-          <div
-            className="simulation-spinup-box"
-            style={{
-              marginTop: '1.25rem',
-              padding: '1rem',
-              borderRadius: 'var(--r-md)',
-              background: 'var(--surface)',
-              border: '1px solid var(--border)',
-            }}
-          >
-            <div
-              style={{
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center',
-                flexWrap: 'wrap',
-                gap: '8px',
-              }}
-            >
-              <div>
-                <strong style={{ fontSize: '14px' }}>
-                  {t('模型预热（Spin-up）设定', 'Model Spin-up Settings')}
-                </strong>
-                <p className="muted" style={{ margin: '2px 0 0', fontSize: '12px' }}>
-                  {t(
-                    '让土壤温湿与碳库等慢变量先趋于平衡；预热期不写输出，正式输出从预热结束后开始。',
-                    'Let soil moisture, temperature and carbon pools reach equilibrium; outputs begin after spin-up.',
-                  )}
-                </p>
-              </div>
-              <Button
-                variant={form.spinup_end ? 'primary' : 'secondary'}
-                style={{ fontSize: '12px', padding: '4px 10px' }}
-                disabled={!enabled}
-                onClick={() => {
-                  if (form.spinup_end) {
-                    set('spinup_end', '');
-                    setOption('DEF_simulation_time%spinup_repeat', '');
-                  } else {
-                    const startYear = form.start ? Number(form.start.slice(0, 4)) : 0;
-                    const endYear = form.end ? Number(form.end.slice(0, 4)) : 0;
-                    // 预热在结束日当天 00:00 截止，默认取开始后一整年（次年 1 月 1 日）。
-                    const defaultCutoff =
-                      startYear && endYear && endYear > startYear
-                        ? `${startYear + 1}-01-01`
-                        : form.start
-                          ? `${form.start.slice(0, 7)}-15`
-                          : '';
-                    set('spinup_end', defaultCutoff);
-                    setOption(
-                      'DEF_simulation_time%spinup_repeat',
-                      caseValues['DEF_simulation_time%spinup_repeat'] || '1',
-                    );
-                  }
+          {!multiSite && (
+            <>
+              <div className="simulation-dates">{['start', 'end'].map(render)}</div>
+              <p className="field-hint">
+                {t(
+                  '日期格式 YYYY-MM-DD，例如 2001-01-01。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
+                  'Use YYYY-MM-DD, e.g. 2001-01-01. Site runs normally include the end date, limited by forcing coverage.',
+                )}
+              </p>
+              <div
+                className="simulation-spinup-box"
+                style={{
+                  marginTop: '1.25rem',
+                  padding: '1rem',
+                  borderRadius: 'var(--r-md)',
+                  background: 'var(--surface)',
+                  border: '1px solid var(--border)',
                 }}
               >
-                {form.spinup_end
-                  ? t('✓ 已开启预热（点击关闭）', '✓ Spin-up Enabled (Click to disable)')
-                  : t('＋ 开启预热（Spin-up）', '＋ Enable Spin-up')}
-              </Button>
-            </div>
-            {Boolean(form.spinup_end) && (
-              <div className="form-grid" style={{ marginTop: '12px' }}>
-                <Field
-                  label={t('预热起始日期', 'Spin-up start')}
-                  hint={t(
-                    'CoLM 预热总是从模拟开始日期起算',
-                    'CoLM spin-up always starts at the simulation start',
-                  )}
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    flexWrap: 'wrap',
+                    gap: '8px',
+                  }}
                 >
-                  <Input readOnly value={form.start} />
-                </Field>
-                {render('spinup_end')}
-                <Field
-                  label={t('预热循环重复次数', 'Spin-up repetitions')}
-                  hint={t(
-                    '从起始日期跑到结束日期（当日 00:00 截止）后重置时间，重复这一段的次数（通常 1~5）',
-                    'Times the start-to-end period (ending 00:00 that day) is repeated (normally 1–5)',
-                  )}
-                >
-                  <Input
-                    type="number"
-                    min={1}
-                    max={99}
-                    step={1}
+                  <div>
+                    <strong style={{ fontSize: '14px' }}>
+                      {t('模型预热（Spin-up）设定', 'Model Spin-up Settings')}
+                    </strong>
+                    <p className="muted" style={{ margin: '2px 0 0', fontSize: '12px' }}>
+                      {t(
+                        '让土壤温湿与碳库等慢变量先趋于平衡；预热期不写输出，正式输出从预热结束后开始。',
+                        'Let soil moisture, temperature and carbon pools reach equilibrium; outputs begin after spin-up.',
+                      )}
+                    </p>
+                  </div>
+                  <Button
+                    variant={form.spinup_end ? 'primary' : 'secondary'}
+                    style={{ fontSize: '12px', padding: '4px 10px' }}
                     disabled={!enabled}
-                    value={caseValues['DEF_simulation_time%spinup_repeat'] || '1'}
-                    onChange={(e) => setOption('DEF_simulation_time%spinup_repeat', e.target.value)}
-                  />
-                </Field>
+                    onClick={() => {
+                      if (form.spinup_end) {
+                        set('spinup_end', '');
+                        setOption('DEF_simulation_time%spinup_repeat', '');
+                      } else {
+                        const startYear = form.start ? Number(form.start.slice(0, 4)) : 0;
+                        const endYear = form.end ? Number(form.end.slice(0, 4)) : 0;
+                        // 预热在结束日当天 00:00 截止，默认取开始后一整年（次年 1 月 1 日）。
+                        const defaultCutoff =
+                          startYear && endYear && endYear > startYear
+                            ? `${startYear + 1}-01-01`
+                            : form.start
+                              ? `${form.start.slice(0, 7)}-15`
+                              : '';
+                        set('spinup_end', defaultCutoff);
+                        setOption(
+                          'DEF_simulation_time%spinup_repeat',
+                          caseValues['DEF_simulation_time%spinup_repeat'] || '1',
+                        );
+                      }
+                    }}
+                  >
+                    {form.spinup_end
+                      ? t('✓ 已开启预热（点击关闭）', '✓ Spin-up Enabled (Click to disable)')
+                      : t('＋ 开启预热（Spin-up）', '＋ Enable Spin-up')}
+                  </Button>
+                </div>
+                {Boolean(form.spinup_end) && (
+                  <div className="form-grid" style={{ marginTop: '12px' }}>
+                    <Field
+                      label={t('预热起始日期', 'Spin-up start')}
+                      hint={t(
+                        'CoLM 预热总是从模拟开始日期起算',
+                        'CoLM spin-up always starts at the simulation start',
+                      )}
+                    >
+                      <Input readOnly value={form.start} />
+                    </Field>
+                    {render('spinup_end')}
+                    <Field
+                      label={t('预热循环重复次数', 'Spin-up repetitions')}
+                      hint={t(
+                        '从起始日期跑到结束日期（当日 00:00 截止）后重置时间，重复这一段的次数（通常 1~5）',
+                        'Times the start-to-end period (ending 00:00 that day) is repeated (normally 1–5)',
+                      )}
+                    >
+                      <Input
+                        type="number"
+                        min={1}
+                        max={99}
+                        step={1}
+                        disabled={!enabled}
+                        value={caseValues['DEF_simulation_time%spinup_repeat'] || '1'}
+                        onChange={(e) =>
+                          setOption('DEF_simulation_time%spinup_repeat', e.target.value)
+                        }
+                      />
+                    </Field>
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            </>
+          )}
           <div className="form-grid" style={{ marginTop: '1rem' }}>
             {dataKeys.map(render)}
             {basicOptions.filter((f) => !f.name.endsWith('spinup_repeat')).map(renderOption)}
@@ -1619,7 +1870,9 @@ export default function NewCasePage() {
                 </dd>
                 <dt>{t('时段', 'Period')}</dt>
                 <dd>
-                  {form.start} — {form.end}
+                  {multiSite
+                    ? t('按各站点设置', 'Per-site periods')
+                    : `${form.start} — ${form.end}`}
                 </dd>
                 <dt>{t('模型', 'Model')}</dt>
                 <dd>
@@ -1632,9 +1885,16 @@ export default function NewCasePage() {
                 </dd>
                 <dt>{t('预热', 'Spin-up')}</dt>
                 <dd>
-                  {form.spinup_end
-                    ? `${form.start} — ${form.spinup_end} × ${caseValues['DEF_simulation_time%spinup_repeat'] || '1'}`
-                    : t('不预热', 'Disabled')}
+                  {multiSite
+                    ? multiSiteMode === 'first-year'
+                      ? t(
+                          `各站首年重复 ${multiSiteRepeat} 次`,
+                          `Each site's first year repeated ${multiSiteRepeat} times`,
+                        )
+                      : t('分站点配置', 'Per-site settings')
+                    : form.spinup_end
+                      ? `${form.start} — ${form.spinup_end} × ${caseValues['DEF_simulation_time%spinup_repeat'] || '1'}`
+                      : t('不预热', 'Disabled')}
                 </dd>
                 <dt>{t('保存位置', 'Save location')}</dt>
                 <dd className="path">
@@ -1646,7 +1906,7 @@ export default function NewCasePage() {
                   <span>✓</span>
                   {t('必填设置已填写', 'Required settings filled')}
                 </p>
-                {scannedForcing(selected, form.met) && selected && (
+                {!multiSite && scannedForcing(selected, form.met) && selected && (
                   <p className="check-fact">
                     <span>✓</span>
                     {t('时段在已扫描覆盖内', 'Period within scanned coverage')}
@@ -1658,11 +1918,42 @@ export default function NewCasePage() {
                 </p>
               </div>
             </div>
+            {multiSite && (
+              <div>
+                {siteDrafts.map((draft) => (
+                  <p key={draft.site}>
+                    {draft.name}: {draft.start} — {draft.end} ·{' '}
+                    {multiSiteMode === 'first-year'
+                      ? t(`首年重复 ${multiSiteRepeat} 次`, `First year × ${multiSiteRepeat}`)
+                      : draft.spinup_end
+                        ? `${draft.spinup_end} × ${draft.spinup_repeat}`
+                        : t('不预热', 'No spinup')}
+                    <br />
+                    <span className="path">
+                      {finalDirectory}/{draft.name}
+                    </span>
+                  </p>
+                ))}
+              </div>
+            )}
+            {multiSite && (
+              <Notice>
+                {t(
+                  '每个站点在当前项目下保存为独立算例。城市与作物站点分别采用相应过程设置；正式输出从各站预热截止后开始。',
+                  'Each site is saved as a separate case under this project. Urban and crop sites use their respective processes; production output starts after each spinup cutoff.',
+                )}
+              </Notice>
+            )}
             <Notice>
-              {t(
-                '创建后进入运行页，由你选择何时开始计算。所有预热、输出与变量仍可在运行前返回调整。',
-                'After creation, choose when to start in the Run page. Spinup, output and variables remain adjustable before running.',
-              )}
+              {multiSite
+                ? t(
+                    '创建后可在项目中批量运行。',
+                    'After creation, run the cases together from the project.',
+                  )
+                : t(
+                    '创建后进入运行页，由你选择何时开始计算。所有预热、输出与变量仍可在运行前返回调整。',
+                    'After creation, choose when to start in the Run page. Spinup, output and variables remain adjustable before running.',
+                  )}
             </Notice>
             <Advanced title={t('查看输入路径与修改选项', 'Inspect inputs and edited options')}>
               <dl className="simulation-paths">
@@ -1696,6 +1987,44 @@ export default function NewCasePage() {
             onChange={(patch) => setCaseValues((old) => ({ ...old, ...patch }))}
           />
         </>
+      )}
+      {multiSite && multiResults.length > 0 && (
+        <Card title={t('创建结果', 'Creation results')}>
+          {multiResults.map((result) => (
+            <div key={result.dir}>
+              <p>
+                {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
+              </p>
+              <p className="path">{result.dir}</p>
+              {result.error && <Notice tone="error">{result.error}</Notice>}
+            </div>
+          ))}
+          <div className="actions">
+            {!multiResults.some((result) => result.created && result.error) &&
+              siteDrafts.some(
+                (draft) =>
+                  !multiResults.some((result) => result.site === draft.site && result.created),
+              ) && (
+                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
+                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
+                </Button>
+              )}
+            {(multiResults.some((result) => result.error) ||
+              multiResults.length < siteDrafts.length) && (
+              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
+                {t('重试未完成的站点', 'Retry unfinished sites')}
+              </Button>
+            )}
+            {multiResults.some((result) => !result.error) && (
+              <Button
+                disabled={busy || state.busy}
+                onClick={() => void viewCreatedProject().catch(() => {})}
+              >
+                {t('查看已创建的项目', 'View created project')}
+              </Button>
+            )}
+          </div>
+        </Card>
       )}
       {blocker && !error && (
         <p className="field-hint simulation-blocker" role="status">
@@ -1738,7 +2067,7 @@ export default function NewCasePage() {
             title={blocker ?? undefined}
             onClick={() => void create().catch(() => {})}
           >
-            {t('创建算例', 'Create case')}
+            {multiSite ? t('创建所选站点', 'Create selected sites') : t('创建算例', 'Create case')}
           </Button>
         )}
       </footer>

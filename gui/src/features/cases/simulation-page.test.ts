@@ -5,6 +5,7 @@ import ts from 'typescript';
 import * as caseModel from './case-model';
 import { caseFieldVisible } from '../versions/configuration-options';
 import * as simulation from './simulation-model';
+import * as multiSiteModel from './multisite-model';
 import * as modelSettings from './model-settings';
 import * as historyVariables from './history-variables';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
@@ -63,6 +64,7 @@ function page(
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     scan?: () => Promise<unknown>;
+    spinup?: (args: Record<string, unknown>) => Promise<unknown>;
   } = {},
 ) {
   const model = {
@@ -107,6 +109,7 @@ function page(
     ...caseModel,
     caseFieldVisible,
     ...simulation,
+    ...multiSiteModel,
     ...modelSettings,
     ...historyVariables,
     fieldInputOptions,
@@ -131,6 +134,7 @@ function page(
         'Notice',
         'SimulationSteps',
         'ModelSettings',
+        'MultiSiteSettings',
         'RunPanel',
         'ResultsPage',
         'HistoryPage',
@@ -223,6 +227,8 @@ function page(
           if (options.create) return options.create(args);
           if (failCreate) throw new Error('creation failed');
           return {};
+        case 'set_spinup':
+          return options.spinup?.(args) ?? {};
         case 'case_creation_cancel':
           return options.cancelCreation?.(args) ?? 0;
         case 'case_data_save':
@@ -2389,3 +2395,190 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
       ),
     );
   });
+
+const multiSites = [
+  { ...site, end: '2004-12-31' },
+  {
+    ...site,
+    name: 'other',
+    site_file: '/other-site.nc',
+    met_file: '/other-met.nc',
+    start: '2005-03-01',
+    end: '2008-12-31',
+  },
+];
+const multiSeed = {
+  form: { ...form, name: 'multi-project' },
+  sites: multiSites,
+  step: 5,
+  ownData: true,
+  multiSiteEnabled: true,
+  multiSiteMode: 'first-year',
+  multiSiteRepeat: '3',
+  siteDrafts: multiSites.map(multiSiteModel.siteDraft),
+};
+
+test('custom multi-site creation uses each station inputs and independently calculated spinup', async () => {
+  const p = page('NewCasePage', multiSeed, multiSites);
+  await p.mount();
+  await p.click('new-create');
+  const created = p.calls.filter((call) => call.command === 'new_case');
+  assert.equal(created.length, 2);
+  assert.deepEqual(
+    created.map((call) => [call.args.site, call.args.met, call.args.out, call.args.start]),
+    [
+      ['/site.nc', '/forcing.nc', '/project/multi-project/CN-Cng', '2001-01-01'],
+      ['/other-site.nc', '/other-met.nc', '/project/multi-project/other', '2005-03-01'],
+    ],
+  );
+  const cutoffs = created.map((call) =>
+    Object.fromEntries(
+      (call.args.fields as { path: string; value: string }[]).map((f) => [f.path, f.value]),
+    ),
+  );
+  assert.equal(cutoffs[0]['DEF_simulation_time%spinup_year'], '2002');
+  assert.equal(cutoffs[1]['DEF_simulation_time%spinup_year'], '2006');
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'set_spinup').map((call) => call.args),
+    created.map((call) => ({ dirs: [call.args.out], years: 1, repeat: 3, kernelDir: null })),
+  );
+  assert.equal(p.calls.filter((call) => call.command === 'run_case').length, 0);
+  assert.equal(p.render().actions.find((action) => action.id === 'new-create')?.enabled, false);
+  assert.deepEqual(p.opened, []);
+});
+
+test('per-site creation saves disabled and custom spinup separately without the common setter', async () => {
+  const drafts = multiSites.map(multiSiteModel.siteDraft);
+  drafts[1].spinup_end = '2007-03-01';
+  drafts[1].spinup_repeat = '5';
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, multiSiteMode: 'per-site', siteDrafts: drafts },
+    multiSites,
+  );
+  await p.mount();
+  await p.click('new-create');
+  const created = p.calls.filter((call) => call.command === 'new_case');
+  const fields = created.map((call) =>
+    Object.fromEntries(
+      (call.args.fields as { path: string; value: string }[]).map((f) => [f.path, f.value]),
+    ),
+  );
+  assert.equal(fields[0]['DEF_simulation_time%spinup_year'], '0');
+  assert.equal(fields[1]['DEF_simulation_time%spinup_year'], '2007');
+  assert.equal(fields[1]['DEF_simulation_time%spinup_repeat'], '5');
+  assert.ok(!p.calls.some((call) => call.command === 'set_spinup'));
+});
+
+test('a failed destination does not overwrite or block another station and retry skips successes', async () => {
+  let failed = true;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    create: async (args) => {
+      if (failed && args.name === 'CN-Cng') throw new Error('destination already exists');
+    },
+  });
+  await p.mount();
+  await p.click('new-create');
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  failed = false;
+  await p.click('new-multi-retry');
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'new_case').map((call) => call.args.name),
+    ['CN-Cng', 'other', 'CN-Cng'],
+  );
+});
+
+test('a spinup write failure retries its settings without recreating the completed case', async () => {
+  let failed = true;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    spinup: async () => {
+      if (failed) throw new Error('write failed');
+    },
+  });
+  await p.mount();
+  await p.click('new-create');
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  failed = false;
+  await p.click('new-multi-retry');
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 2);
+  assert.equal(p.calls.filter((call) => call.command === 'set_spinup').length, 4);
+});
+
+test('cancelling multi-site creation prevents the remaining queue from starting', async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    create: () => gate,
+    cancelCreation: async () => 0,
+  });
+  await p.mount();
+  const pending = p.click('new-create');
+  p.render();
+  await p.click('new-cancel-creation');
+  finish();
+  await pending;
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 1);
+  assert.equal(p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled, true);
+});
+
+test('invalid multi-site coverage is rejected before any case is created', async () => {
+  const drafts = multiSites.map(multiSiteModel.siteDraft);
+  drafts[1].end = '2005-12-31';
+  const p = page('NewCasePage', { ...multiSeed, siteDrafts: drafts }, multiSites);
+  await p.mount();
+  assert.equal(p.render().actions.find((action) => action.id === 'new-create')?.enabled, false);
+  assert.ok(!p.calls.some((call) => call.command === 'new_case'));
+});
+
+test('editing failed stations preserves completed cases and retries only the remaining selection', async () => {
+  let failed = true;
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    create: async (args) => {
+      if (failed && args.name === 'CN-Cng') throw new Error('runtime incomplete');
+    },
+  });
+  await p.mount();
+  await p.click('new-create');
+  await p.click('new-multi-edit-unfinished');
+  const controls = p.element('MultiSiteSettings');
+  assert.deepEqual(
+    (controls.props.drafts as multiSiteModel.MultiSiteDraft[]).map((draft) => draft.name),
+    ['CN-Cng'],
+  );
+  assert.equal(controls.props.disabled, false);
+  p.set('new-runtime', '/complete-runtime');
+  failed = false;
+  await p.goto('new-step-5');
+  await p.settle();
+  await p.click('new-create');
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'new_case').map((call) => call.args.name),
+    ['CN-Cng', 'other', 'CN-Cng'],
+  );
+  assert.equal(
+    p.calls.filter((call) => call.command === 'new_case').at(-1)?.args.runtime,
+    '/complete-runtime',
+  );
+});
+
+test('a cancellation IPC failure still stops the remaining multi-site queue', async () => {
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const p = page('NewCasePage', multiSeed, multiSites, initialValues, {
+    create: () => gate,
+    cancelCreation: async () => {
+      throw new Error('cancel connection failed');
+    },
+  });
+  await p.mount();
+  const pending = p.click('new-create');
+  p.render();
+  await assert.rejects(p.click('new-cancel-creation'), /cancel connection failed/);
+  finish();
+  await pending;
+  assert.equal(p.calls.filter((call) => call.command === 'new_case').length, 1);
+});
