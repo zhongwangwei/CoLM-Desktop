@@ -657,6 +657,7 @@ function ProcessSettingsDialog({
   return (
     <Dialog
       title={t(...title)}
+      showClose={false}
       open
       onOpenChange={(open) => {
         if (!open) close();

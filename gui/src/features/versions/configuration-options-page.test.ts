@@ -483,7 +483,7 @@ test('core runoff enum appears as choice cards while the visible guide shares th
   c.actions.find((a) => a.id === 'configuration-group-water')!.run();
   c = p.render();
   const field = c.fields.find((f) => f.id === 'configuration-DEF_Runoff_SCHEME')!;
-  assert.equal(field.value, '');
+  assert.equal(field.value, '0');
   assert.deepEqual(
     field.options?.map((o) => o.value),
     ['0', '1', '2', '3'],
@@ -693,7 +693,7 @@ test('focused simulation editor stages the final typed value and explicit reset 
   h.props.removedCaseKeys = ['DEF_URBAN_type_scheme'];
   assert.equal(
     h.render().fields.find((f) => f.id === 'configuration-DEF_URBAN_type_scheme')?.value,
-    '',
+    '.false.',
   );
 });
 test('modal save readiness rejects invalid text and unapplied tracer definitions', async () => {
@@ -959,4 +959,89 @@ test('soil settings render and save fitting and resistance while respecting appl
       }
     }
   }
+});
+
+test('process settings display inherited defaults without creating overrides, and reset returns to default', async () => {
+  const h = harness(),
+    patches: helpers.CaseOptionPatch[] = [];
+  const name = 'DEF_PC_CROP_SPLIT';
+  h.props.fields.push({
+    name,
+    section: '地表数据',
+    kind: 'logical',
+    default: '.true.',
+    values: [],
+    derived: false,
+  });
+  h.props.process = 'PC';
+  h.props.subgrid = 'PC';
+  h.props.modalActions = [];
+  h.props.onCaseChange = (p) => {
+    patches.push(p);
+  };
+  h.props.caseValues = {};
+  h.render();
+  let c = await h.settle();
+  assert.equal(c.fields.find((f) => f.id === `configuration-${name}`)!.value, '.true.');
+  assert.ok(
+    !h.nodes.some((n) => n.type === 'option' && n.props.value === ''),
+    'known default has no unspecified option',
+  );
+  assert.equal(c.actions.find((a) => a.id === `configuration-${name}-reset`)!.visible, false);
+  assert.deepEqual(patches, []);
+  await c.fields.find((f) => f.id === `configuration-${name}`)!.set('.false.');
+  assert.equal(patches.at(-1)?.[name], '.false.');
+  h.props.overlay.physics[name] = '.false.';
+  h.props.caseValues[name] = '.false.';
+  c = h.render();
+  assert.equal(c.fields.find((f) => f.id === `configuration-${name}`)!.value, '.false.');
+  await c.actions.find((a) => a.id === `configuration-${name}-reset`)!.run();
+  assert.equal(patches.at(-1)?.[name], null);
+  delete h.props.overlay.physics[name];
+  delete h.props.caseValues[name];
+  h.props.removedCaseKeys = [name];
+  c = h.render();
+  assert.equal(c.fields.find((f) => f.id === `configuration-${name}`)!.value, '.true.');
+});
+
+test('context defaults take precedence over catalog defaults without guessing a choice', async () => {
+  const h = harness();
+  const name = 'DEF_RSS_SCHEME';
+  h.props.fields.push({
+    name,
+    section: '水热过程',
+    kind: 'integer',
+    default: '0',
+    values: ['0', '1'],
+    derived: false,
+  });
+  h.props.process = 'soil';
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = {};
+  h.render();
+  const response = h.response();
+  response.fields = response.fields.map((f) => ({
+    ...f,
+    built_in_default: f.name === name ? '1' : null,
+  }));
+  h.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  assert.equal(h.render().fields.find((f) => f.id === `configuration-${name}`)!.value, '1');
+});
+
+test('stomatal defaults select Ball–Berry but conflicting overrides remain unresolved', async () => {
+  const h = harness();
+  h.props.overlay.physics = {};
+  h.render();
+  await h.settle();
+  h.render()
+    .actions.find((a) => a.id === 'configuration-group-ecology')!
+    .run();
+  assert.equal(
+    h.render().fields.find((f) => f.id === 'configuration-stomatal-scheme')!.value,
+    'BALL_BERRY',
+  );
+  assert.deepEqual(h.changes, []);
+  h.props.overlay.physics = { DEF_USE_MEDLYNST: '.true.', DEF_USE_WUEST: '.true.' };
+  assert.equal(h.render().fields.find((f) => f.id === 'configuration-stomatal-scheme')!.value, '');
 });

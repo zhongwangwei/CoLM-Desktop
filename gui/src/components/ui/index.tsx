@@ -156,12 +156,14 @@ export function Dialog({
   description,
   open,
   onOpenChange,
+  showClose = true,
   children,
 }: {
   title: ReactNode;
   description?: ReactNode;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  showClose?: boolean;
   children: ReactNode;
 }) {
   const id = useId();
@@ -178,9 +180,11 @@ export function Dialog({
           <RadixDialog.Title>{title}</RadixDialog.Title>
           {description && <RadixDialog.Description id={id}>{description}</RadixDialog.Description>}
           {children}
-          <RadixDialog.Close asChild>
-            <Button variant="ghost">{closeLabel}</Button>
-          </RadixDialog.Close>
+          {showClose && (
+            <RadixDialog.Close asChild>
+              <Button variant="ghost">{closeLabel}</Button>
+            </RadixDialog.Close>
+          )}
         </RadixDialog.Content>
       </RadixDialog.Portal>
     </RadixDialog.Root>

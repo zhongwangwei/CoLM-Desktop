@@ -345,7 +345,7 @@ export default function ConfigurationOptions({
                 {optionLabel(rawKey, v, lang)}
               </Button>
             ))}
-            {!shown && <p className="muted">{t('未明确选择', 'Not explicitly selected')}</p>}
+            {!shown && <p className="muted">{t('请选择', 'Choose an option')}</p>}
           </div>
         ) : select ? (
           <Select
@@ -359,7 +359,7 @@ export default function ConfigurationOptions({
               }
             }}
           >
-            <option value="">{t('未明确设置', 'Not explicitly set')}</option>
+            {!shown && <option value="">{t('请选择', 'Choose an option')}</option>}
             {!choices.some((v) => unquote(v) === shown) && shown && (
               <option value={shown}>{shown}</option>
             )}
@@ -397,9 +397,12 @@ export default function ConfigurationOptions({
   }
   function row(field: ModelField) {
     const context = values.fields.find((f) => f.name === field.name),
-      value = removedCaseKeys.includes(field.name)
-        ? ''
-        : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? '');
+      configured = removedCaseKeys.includes(field.name)
+        ? null
+        : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? null),
+      defaultValue = context?.built_in_default ?? field.default ?? '',
+      value = configured ?? defaultValue,
+      overridden = configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive,
       id = `configuration-${field.name}`;
@@ -407,8 +410,8 @@ export default function ConfigurationOptions({
       id: `${id}-reset`,
       label: `${fieldLabel(field.name, lang)} · ${t('移除覆盖', 'Remove override')}`,
       kind: 'click',
-      enabled: !locked && value !== '',
-      visible: value !== '',
+      enabled: !locked && overridden,
+      visible: overridden,
       run: () => write(() => resetModelOption(overlay, field.name)),
     });
     return (
@@ -426,9 +429,9 @@ export default function ConfigurationOptions({
           {field.name} ·{' '}
           {(context?.pending ? t('适用性待核对', 'Applicability pending') : context?.reason) ||
             t('适用性待核对', 'Applicability pending')}{' '}
-          · {t('目录参考', 'Catalog reference')}: {field.default || '—'}
+          · {t('默认值', 'Default')}: {defaultValue || '—'}
         </small>
-        {value !== '' && (
+        {overridden && (
           <Button
             disabled={locked}
             onClick={() => uiWrite(() => resetModelOption(overlay, field.name))}
@@ -445,9 +448,19 @@ export default function ConfigurationOptions({
   );
   function stomatal() {
     if (!showStomatal) return null;
-    const flags = stomatalFields.map((name) =>
-      modelSettingValue(overlay, name)?.trim().toLowerCase(),
-    );
+    const flags = stomatalFields.map((name) => {
+      const context = values.fields.find((field) => field.name === name);
+      const configured = removedCaseKeys.includes(name)
+        ? null
+        : (modelSettingValue(overlay, name) ?? context?.configured_value);
+      return (
+        configured ??
+        context?.built_in_default ??
+        fields.find((field) => field.name === name)?.default
+      )
+        ?.trim()
+        .toLowerCase();
+    });
     const selected = flags.every((v) => v === '.true.' || v === '.false.')
       ? flags[0] === '.true.' && flags[1] === '.true.'
         ? ''
@@ -517,8 +530,8 @@ export default function ConfigurationOptions({
         {!selected && (
           <p className="muted">
             {t(
-              '未明确选择或已有开关冲突，请核对。',
-              'Not explicitly selected, or existing switches conflict; check the configuration.',
+              '开关值冲突或缺少可用默认值，请核对。',
+              'Switches conflict or no usable defaults are available; check the configuration.',
             )}
           </p>
         )}
@@ -932,7 +945,7 @@ export default function ConfigurationOptions({
                 {editor(
                   id,
                   fieldLabel(entry.path, lang),
-                  entry.unset ? '' : entry.value,
+                  entry.unset ? entry.default : entry.value,
                   entry.kind,
                   entry.options,
                   cannot,
@@ -989,7 +1002,7 @@ export default function ConfigurationOptions({
         {editor(
           id,
           en ? entry.label_en : entry.label_zh,
-          entry.configured_value ?? '',
+          entry.configured_value ?? entry.default ?? '',
           entry.kind,
           entry.allowed_values,
           cannot,
@@ -1110,8 +1123,8 @@ export default function ConfigurationOptions({
     <div className="configuration-options">
       <Notice>
         {t(
-          '配置值与目录默认值分别展示；启用过程后显示相关配置。关闭过程保留已有设置。',
-          'Configured values and catalog defaults are shown separately. Enable a process to see its settings. Disabling it preserves saved values.',
+          '未单独设置时显示默认值；修改并保存后覆盖默认值。启用过程后显示相关配置，关闭过程保留已有设置。',
+          'Defaults are shown when no override is set; saved edits override them. Enable a process to see its settings. Disabling it preserves saved values.',
         )}
       </Notice>
       {error && <Notice tone="error">{error}</Notice>}

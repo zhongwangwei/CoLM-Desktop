@@ -184,3 +184,14 @@ test('soil dialog explains parameter sources and excludes spatial fitting at sin
     assert.match(text, /LCT/);
   }
 });
+
+test('all process settings use save and cancel without the redundant close button', () => {
+  for (const process of ['PC', 'PFT', 'soil', 'DEF_USE_BGC', 'DEF_USE_TRACER', 'crop']) {
+    const h = dialog();
+    h.props.process = process;
+    h.render();
+    assert.equal(h.nodes.find((n) => n.type === 'Dialog')!.props.showClose, false);
+    assert.ok(h.action('save'));
+    assert.ok(h.action('cancel'));
+  }
+});
