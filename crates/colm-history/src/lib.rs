@@ -233,7 +233,7 @@ impl History {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)?;
         }
-        let connection = Connection::open(path).context("open operation ledger")?;
+        let mut connection = Connection::open(path).context("open operation ledger")?;
         connection.busy_timeout(Duration::from_secs(5))?;
         // Concurrent first opens can race while upgrading the journal lock; SQLite
         // may return BUSY here without invoking its busy handler.
@@ -250,8 +250,15 @@ impl History {
                 Err(error) => return Err(error).context("enable operation ledger WAL"),
             }
         }
-        connection.execute_batch("PRAGMA synchronous=FULL;
-            CREATE TABLE IF NOT EXISTS history_events (
+        connection
+            .execute_batch("PRAGMA synchronous=FULL;")
+            .context("configure operation ledger durability")?;
+        // Acquire the writer lock before schema reads to avoid read-to-write
+        // upgrades racing other first opens; publish the complete schema at once.
+        let transaction = connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .context("lock operation ledger schema")?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS history_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
                 operation_id TEXT NOT NULL, payload TEXT NOT NULL CHECK(json_valid(payload)));
             CREATE INDEX IF NOT EXISTS history_operation ON history_events(operation_id,seq);
@@ -272,7 +279,11 @@ impl History {
                 CASE WHEN json_extract(e.payload,'$.phase')='finished' THEN 0
                     WHEN json_extract(e.payload,'$.phase')='imported' AND json_extract(e.payload,'$.status')
                         IN ('succeeded','failed','completed','completed_with_failures','cancelled') THEN 0 ELSE 1 END needs_reconciliation
-                FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);")?;
+                FROM history_events e WHERE e.seq=(SELECT s.seq FROM history_events s WHERE s.operation_id=e.operation_id ORDER BY COALESCE(json_extract(s.payload,'$.detail.source_generation'),0) DESC,s.seq DESC LIMIT 1);")
+            .context("initialize operation ledger schema")?;
+        transaction
+            .commit()
+            .context("commit operation ledger schema")?;
         Ok(Self { connection })
     }
     /// Replaying the same event is idempotent; reusing an ID for different data is an error.
