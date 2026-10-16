@@ -37,6 +37,7 @@ export const basicModelFields = [
 ] as const;
 export function modelSettingGroup(field: Pick<SchemaField, 'name' | 'section'>): string {
   const name = field.name.toUpperCase();
+  if (name === 'DEF_VEG_SNOW') return 'water';
   if (
     [
       'DEF_USE_LCT',

@@ -1176,6 +1176,8 @@ export function technicalFieldHint(path: string, lang = 'zh') {
 
 // Optional path sentinels describe absence; they are not a closed list of filenames.
 export function fieldInputOptions(name: string, kind: string, values: string[]): string[] {
+  if (name.toUpperCase() === 'DEF_INTERCEPTION_SCHEME')
+    return values.length ? values.filter((value) => ['1', '8'].includes(value.trim())) : ['1', '8'];
   const character = kind.toLowerCase().startsWith('character') || kind.toLowerCase() === 'string';
   const path = name.split(/[_%]/).some((token) => /^(file|dir|path|namelist)$/i.test(token));
   return character &&
