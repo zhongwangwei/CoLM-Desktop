@@ -59,7 +59,14 @@ export type FrozenRevision = {
   applicability: Applicability;
   derived_from: string | null;
 };
-export type CaseEntry = { dir: string; name: string; has_history: boolean; spatial: boolean };
+export type CaseEntry = {
+  dir: string;
+  name: string;
+  has_history: boolean;
+  spatial: boolean;
+  run_host?: string | null;
+  remote_directory?: string | null;
+};
 export interface Site {
   name: string;
   site_file: string;

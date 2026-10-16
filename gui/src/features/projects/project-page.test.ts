@@ -470,3 +470,27 @@ test('bundled example is not rejected by case switches retained in a legacy froz
   assert.equal(updates.length, 1);
   assert.equal(state.version.overlay.physics.DEF_URBAN_RUN, '.true.');
 });
+
+test('project location displays shared server project without a selected case', () => {
+  const state = {
+    root: '/local/cache/opaque-hash',
+    selectedCase: null,
+    cases: [
+      { run_host: 'compute', remote_directory: '/server/project/site-a' },
+      { run_host: 'compute', remote_directory: '/server/project/site-b/' },
+    ],
+  };
+  assert.equal(expression('projectLocation', { state }), 'compute: /server/project');
+  assert.equal(state.root, '/local/cache/opaque-hash');
+  for (const entry of [
+    {},
+    { run_host: 'other', remote_directory: '/server/project/site-c' },
+    { run_host: 'compute', remote_directory: '/other/site-c' },
+  ]) {
+    assert.equal(
+      expression('projectLocation', { state: { ...state, cases: [...state.cases, entry] } }),
+      state.root,
+    );
+  }
+  assert.equal(expression('projectLocation', { state: { ...state, cases: [] } }), state.root);
+});

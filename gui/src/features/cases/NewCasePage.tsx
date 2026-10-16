@@ -2227,7 +2227,7 @@ export default function NewCasePage() {
               <p>
                 {result.name} · {result.error ? t('创建失败', 'Failed') : t('已创建', 'Created')}
               </p>
-              <p className="path">{result.dir}</p>
+              <p className="path">{result.remoteDir || result.dir}</p>
               {result.error && <Notice tone="error">{result.error}</Notice>}
             </div>
           ))}

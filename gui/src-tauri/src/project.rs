@@ -13,6 +13,8 @@ pub(crate) fn validate_case_name(name: &str) -> Result<(), String> {
 
 #[derive(Debug, Serialize)]
 pub struct CaseEntry {
+    pub run_host: Option<String>,
+    pub remote_directory: Option<String>,
     pub name: String,
     pub dir: String,
     /// 跑过没有 —— 有 history 文件就算跑过
@@ -41,7 +43,10 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
                     .to_string_lossy()
                     .into_owned()
             });
+        let record = recorded_case(&d);
         out.push(CaseEntry {
+            run_host: record.run_host,
+            remote_directory: record.remote_directory,
             // Keep malformed cases discoverable for repair; Study validation
             // reports their parse errors before any model can be launched.
             spatial: colm_case::is_spatial_case(&d.join("case.nml")).unwrap_or(false),

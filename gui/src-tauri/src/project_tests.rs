@@ -431,6 +431,15 @@ fn server_case_cannot_change_its_owning_host() {
         ..Default::default()
     };
     record_case(&argument, &record).unwrap();
+    let listed = list_cases(root.to_string_lossy().into_owned()).unwrap();
+    assert_eq!(listed[0].run_host.as_deref(), Some("compute"));
+    assert_eq!(
+        listed[0].remote_directory.as_deref(),
+        Some("/server/project/site")
+    );
+    let opened = open_case(argument.clone()).unwrap();
+    assert_eq!(opened.entry.run_host, listed[0].run_host);
+    assert_eq!(opened.entry.remote_directory, listed[0].remote_directory);
     for host in [None, Some("other".into())] {
         assert!(set_case_run_host(argument.clone(), host).is_err());
         assert_eq!(recorded_case(&dir), record);

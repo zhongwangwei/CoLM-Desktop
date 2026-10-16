@@ -497,7 +497,7 @@ mod tests {
         let files = json!({"case.nml":"&case\n forcing='/server/case/forcing.nml'\n mesh='/server/case/mesh.nc'\n/\n", "forcing.nml":"&forcing\n path='/data/met'\n/\n"});
         write_files(&dir, &files, "/server/case").unwrap();
         let local = std::fs::read_to_string(dir.join("case.nml")).unwrap();
-        assert!(local.contains(&dir.join("forcing.nml").to_string_lossy().to_string()));
+        assert!(local.contains(&dir.join("forcing.nml").to_string_lossy().replace('\\', "/")));
         assert!(local.contains("/server/case/mesh.nc"));
         assert_eq!(
             publish_files(&dir, "/server/case").unwrap()["case.nml"],
