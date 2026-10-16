@@ -152,7 +152,8 @@ export function processSettingOwner(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): string | null {
-  if (simulationFieldStep(field) === 5) return null;
+  if (simulationFieldStep(field) === 5 || field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO')
+    return null;
   const roots: Record<string, string> = {
     DEF_USE_SOILPAR_UPS_FIT: 'soil',
     DEF_RSS_SCHEME: 'soil',
@@ -213,6 +214,7 @@ export function simulationOptionField(
   field: Pick<SchemaField, 'name' | 'section'>,
   context: readonly { name: string; parent_gate?: string | null }[] = [],
 ): boolean {
+  if (field.name.toUpperCase() === 'DEF_HIGHRESURBAN_ALBEDO') return true;
   if (simulationFieldStep(field) === 5) return false;
   if (processSettingOwner(field, context)) return true;
   if (['DEF_LC_YEAR', 'DEF_CO2SCENARIO'].includes(field.name)) return false;

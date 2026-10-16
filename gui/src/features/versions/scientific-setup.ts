@@ -274,7 +274,13 @@ export function setupChoices(
         return bilingual('流域网格不支持示踪', 'Catchment grid does not support tracers');
     }
     if (['DEF_USE_LULCC', 'DEF_USE_GridRiverLakeFlow', 'DEF_UnitCatchment_regional'].includes(id)) {
-      if (isSite(environment)) return bilingual('需要空间模拟', 'Requires spatial simulation');
+      if (isSite(environment))
+        return id === 'DEF_USE_LULCC'
+          ? bilingual(
+              'SinglePoint 模型不支持土地覆盖变化，请使用空间模拟',
+              'SinglePoint does not support land-cover change; use a spatial simulation',
+            )
+          : bilingual('需要空间模拟', 'Requires spatial simulation');
       if (!environment.domain || !environment.grid)
         return bilingual('待核对：请先确定模拟范围和网格', 'Pending: choose domain and grid');
       if (id === 'DEF_USE_GridRiverLakeFlow' || id === 'DEF_UnitCatchment_regional') {
@@ -384,12 +390,15 @@ export function applySetupRequest(
   const foundation = foundationControls.find((c) => c.id === request.id);
   if (!foundation) {
     let next = setModelOption(overlay, fields, request.id, request.value);
-    if (
-      request.id === 'DEF_USE_LULCC' &&
-      request.value === '.true.' &&
-      fields.some((f) => f.name === 'DEF_UnitCatchment_regional' && !f.derived)
-    )
-      next = setModelOption(next, fields, 'DEF_UnitCatchment_regional', '.false.');
+    if (request.id === 'DEF_USE_LULCC' && request.value === '.true.') {
+      for (const [key, value] of Object.entries({
+        DEF_UnitCatchment_regional: '.false.',
+        DEF_LAI_MONTHLY: '.true.',
+        DEF_LAI_CHANGE_YEARLY: '.true.',
+      }))
+        if (fields.some((field) => field.name === key && !field.derived))
+          next = setModelOption(next, fields, key, value);
+    }
     return next;
   }
   // Migrate only the keys changed by this atomic control; unrelated scoped values stay intact.

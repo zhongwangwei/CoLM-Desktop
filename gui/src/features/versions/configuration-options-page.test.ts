@@ -1321,3 +1321,100 @@ test('CN picker replaces an uncommitted text draft in the research editor', asyn
     '/data/selected.nc',
   );
 });
+
+test('urban hyperspectral albedo has no null text and uses the same guarded file picker', async () => {
+  const h = harness();
+  const name = 'DEF_HighResUrban_albedo';
+  h.props.fields.push({
+    name,
+    section: '地表数据',
+    kind: 'character',
+    default: "'null'",
+    values: [],
+    derived: false,
+  });
+  h.props.hideProcesses = true;
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = { DEF_URBAN_RUN: '.false.' };
+  h.render();
+  let c = await h.settle();
+  c.actions.find((a) => a.id === 'configuration-group-other')!.run();
+  c = h.render();
+  assert.equal(c.fields.find((f) => f.id === `configuration-${name}`)!.value, '');
+  const rows = h.nodes.filter((n) => n.props.className === 'model-setting-row');
+  assert.match(JSON.stringify(rows), /No default file|未提供默认文件/);
+  const patches: helpers.CaseOptionPatch[] = [];
+  h.props.modalActions = [];
+  h.props.onCaseChange = (patch) => {
+    patches.push(patch);
+  };
+  c = h.render();
+  const picked = c.actions.find((a) => a.id === `configuration-${name}-browse`)!.run();
+  assert.deepEqual(h.picks[0].args, { key: name, filter: null });
+  h.picks[0].resolve("/data/O'Brien/urban.nc");
+  await picked;
+  assert.equal(patches.at(-1)![name], "'/data/O''Brien/urban.nc'");
+});
+
+test('catchment lateral flow settings stay accessible without grid river routing', async () => {
+  const h = harness();
+  h.props.hideProcesses = true;
+  h.props.onCaseChange = () => {};
+  h.props.kernelMacros = ['CATCHMENT'];
+  h.props.caseValues = { DEF_USE_GridRiverLakeFlow: '.false.' };
+  const names = [
+    'DEF_ElementNeighbour_file',
+    'DEF_USE_EstimatedRiverDepth',
+    'DEF_Reservoir_Method',
+  ];
+  for (const name of names)
+    h.props.fields.push({
+      name,
+      section: '河道与水库',
+      kind: 'character',
+      default: "'null'",
+      values: [],
+      derived: false,
+    });
+  h.render();
+  let c = await h.settle();
+  c.actions.find((a) => a.id === 'configuration-group-water')!.run();
+  c = h.render();
+  for (const name of names)
+    assert.ok(
+      c.fields.some((f) => f.id === `configuration-${name}`),
+      name,
+    );
+  h.props.kernelMacros = ['GRIDBASED'];
+  c = h.render();
+  for (const name of names)
+    assert.ok(!c.fields.some((f) => f.id === `configuration-${name}`), name);
+});
+test('LULCC settings include associated LAI flags and years', async () => {
+  const h = harness();
+  h.props.process = 'DEF_USE_LULCC';
+  h.props.onCaseChange = () => {};
+  h.props.caseValues = { DEF_USE_LULCC: '.true.', DEF_LAI_CHANGE_YEARLY: '.true.' };
+  const names = [
+    'DEF_LAI_MONTHLY',
+    'DEF_LAI_CHANGE_YEARLY',
+    'DEF_LAI_START_YEAR',
+    'DEF_LAI_END_YEAR',
+  ];
+  for (const name of names)
+    h.props.fields.push({
+      name,
+      section: '地表数据',
+      kind: 'integer',
+      default: '2000',
+      values: [],
+      derived: false,
+    });
+  h.render();
+  const c = await h.settle();
+  for (const name of names)
+    assert.ok(
+      c.fields.some((f) => f.id === `configuration-${name}`),
+      name,
+    );
+});

@@ -238,10 +238,28 @@ export default function ConfigurationOptions({
         })),
       }
     : empty;
+  const catchmentRoutingFields = [
+    'DEF_ElementNeighbour_file',
+    'DEF_USE_EstimatedRiverDepth',
+    'DEF_Reservoir_Method',
+  ];
+  const catchmentRouting = kernelMacros?.includes('CATCHMENT') === true;
+  const lulccLaiFields = [
+    'DEF_LAI_MONTHLY',
+    'DEF_LAI_CHANGE_YEARLY',
+    'DEF_LAI_START_YEAR',
+    'DEF_LAI_END_YEAR',
+  ];
+  const groupForField = (field: ModelField) =>
+    catchmentRouting && catchmentRoutingFields.includes(field.name)
+      ? 'water'
+      : modelSettingGroup(field);
   const included = (field: ModelField) =>
     process
-      ? processSettingOwner(field, values.fields) === process
+      ? processSettingOwner(field, values.fields) === process ||
+        (process === 'DEF_USE_LULCC' && lulccLaiFields.includes(field.name))
       : !hideProcesses ||
+        (catchmentRouting && catchmentRoutingFields.includes(field.name)) ||
         (simulationOptionField(field, values.fields) && !processSettingOwner(field, values.fields));
   const controls: UiField[] = [],
     actions: UiAction[] = [];
@@ -413,8 +431,10 @@ export default function ConfigurationOptions({
         : (modelSettingValue(overlay, field.name) ?? context?.configured_value ?? null),
       defaultValue = context?.built_in_default ?? field.default ?? '',
       cnInitialFile = field.name === 'DEF_file_cn_init',
+      urbanAlbedoFile = field.name === 'DEF_HighResUrban_albedo',
+      fileInput = cnInitialFile || urbanAlbedoFile,
       rawValue = configured ?? defaultValue,
-      value = cnInitialFile && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? '' : rawValue,
+      value = fileInput && /^(null|none)?$/i.test(unquote(rawValue).trim()) ? '' : rawValue,
       overridden = configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive,
@@ -456,10 +476,10 @@ export default function ConfigurationOptions({
         if (mounted.current) setPickingFile(false);
       }
     }
-    if (cnInitialFile)
+    if (fileInput)
       actions.push({
         id: `${id}-browse`,
-        label: t('选择碳氮初始场文件', 'Choose carbon/nitrogen initial-state file'),
+        label: `${t('选择文件', 'Choose file')} · ${fieldLabel(field.name, lang)}`,
         kind: 'click',
         enabled: !cannot && !locked && !pickingFile,
         run: pickFile,
@@ -486,9 +506,14 @@ export default function ConfigurationOptions({
                 '运行数据目录下的 cnsteadystate.nc',
                 'cnsteadystate.nc in the runtime data directory',
               )
-            : defaultValue || '—'}
+            : urbanAlbedoFile && /^(null|none)?$/i.test(unquote(defaultValue).trim())
+              ? t(
+                  '未提供默认文件，请选择城市高光谱反照率 NetCDF 文件',
+                  'No default file; choose an urban hyperspectral albedo NetCDF file',
+                )
+              : defaultValue || '—'}
         </small>
-        {cnInitialFile && (
+        {fileInput && (
           <Button
             disabled={cannot || locked || pickingFile}
             onClick={() => {
@@ -668,9 +693,7 @@ export default function ConfigurationOptions({
                 ? parentValues.subgrid === true
                 : true),
       )
-      .filter(
-        (f) => modelSettingGroup(f) === id && !(showStomatal && stomatalFields.includes(f.name)),
-      );
+      .filter((f) => groupForField(f) === id && !(showStomatal && stomatalFields.includes(f.name)));
     if (id === 'water') {
       const snow = rows.findIndex((field) => field.name === 'DEF_VEG_SNOW');
       if (snow >= 0 && rows.some((field) => field.name === 'DEF_Interception_scheme')) {

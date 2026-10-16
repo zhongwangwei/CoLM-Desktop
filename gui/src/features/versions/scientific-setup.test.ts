@@ -393,3 +393,25 @@ test('enabling spatial crop resets a retained site planting day while site crop 
   }
   assert.equal(o.physics.DEF_TUNING_CROP_PLANTING_DAY, '145');
 });
+
+test('enabling LULCC atomically enforces monthly and annually changing LAI', () => {
+  const o = overlay();
+  o.physics.DEF_LAI_MONTHLY = '.false.';
+  const lai = ['DEF_LAI_MONTHLY', 'DEF_LAI_CHANGE_YEARLY'].map((name) => ({
+    name,
+    section: '地表数据',
+    kind: 'logical',
+    default: '.true.',
+    values: [],
+    derived: false,
+  }));
+  const next = applySetupRequest(
+    o,
+    [...fields, ...lai],
+    { id: 'DEF_USE_LULCC', value: '.true.' },
+    environment,
+  );
+  for (const { name } of lai) assert.equal(next.physics[name], '.true.');
+  assert.equal(o.physics.DEF_LAI_MONTHLY, '.false.');
+  assert.equal(o.physics.DEF_LAI_CHANGE_YEARLY, undefined);
+});
