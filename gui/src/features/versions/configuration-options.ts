@@ -594,7 +594,10 @@ export function tracerFamilyState(
     catchment = macros?.includes('catchment');
   if (catchment) reasons.push(['不支持 Catchment 模式', 'Catchment mode is unsupported']);
   if (context.engine === 'fortran' && macros?.includes('openmp'))
-    reasons.push(['OpenMP 内核不支持示踪', 'OpenMP kernels do not support tracers']);
+    reasons.push([
+      'OpenMP 编译配置不支持示踪',
+      'OpenMP build configurations do not support tracers',
+    ]);
   if (family === 'methane') {
     const riverModes = ['routing', 'hybrid', 'dh_all_thr05', 'dyn_routing_hybrid'];
     if (
@@ -644,8 +647,12 @@ export function tracerFamilyState(
     else if (context.caseScope !== 'spatial' && !macros)
       pending.push(['需要确认空间算例', 'Confirm spatial scope']);
     if (macros && !macros.includes('gridriverlakeflow'))
-      reasons.push(['所选内核没有河湖汇流能力', 'Selected kernel lacks river/lake routing']);
-    else if (!macros) pending.push(['河湖内核能力待核对', 'River/lake kernel capability pending']);
+      reasons.push([
+        '所选编译配置不支持河湖汇流',
+        'Selected build configuration lacks river/lake routing',
+      ]);
+    else if (!macros)
+      pending.push(['河湖汇流编译支持待核对', 'River/lake routing build support pending']);
   }
   return {
     status: reasons.length ? 'blocked' : pending.length ? 'pending' : 'ready',

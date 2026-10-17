@@ -1575,8 +1575,8 @@ export default function ConfigurationOptions({
               {!selection && (
                 <Notice tone="warning">
                   {t(
-                    '请选择当前内核支持的植物类型。',
-                    'Choose a plant type supported by the current kernel.',
+                    '请选择当前编译配置支持的植物类型。',
+                    'Choose a plant type supported by the current build configuration.',
                   )}
                 </Notice>
               )}

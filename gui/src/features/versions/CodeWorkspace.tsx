@@ -112,7 +112,7 @@ export default function CodeWorkspace({
       },
       {
         id: 'workspace-preset',
-        label: t('内核预设', 'Kernel preset'),
+        label: t('编译配置', 'Build configuration'),
         value: preset,
         type: 'text',
         set: setPreset,
@@ -296,7 +296,7 @@ export default function CodeWorkspace({
                 ))}
               </Select>
             </Field>
-            <Field label={t('内核预设', 'Kernel preset')}>
+            <Field label={t('编译配置', 'Build configuration')}>
               <Input value={preset} onChange={(e) => setPreset(e.target.value)} />
             </Field>
             <Field label={t('测试包', 'Test package')}>

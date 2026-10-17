@@ -521,7 +521,7 @@ export default function ResourcesPage() {
       ...([
         {
           id: 'resource-preset',
-          label: t('内核预设', 'Kernel preset'),
+          label: t('编译配置', 'Build configuration'),
           value: preset,
           type: 'text',
           set: setPreset,
@@ -655,7 +655,7 @@ export default function ResourcesPage() {
   if (selected === 'local') {
     guideActions.push({
       id: 'resource-local',
-      label: t('检查本机后端与内核', 'Check local backend and kernels'),
+      label: t('检查本机后端与模型内核', 'Check local backend and model kernel'),
       kind: 'click',
       enabled: !busy,
       run: () => execute('local', checkLocal),
@@ -771,7 +771,7 @@ export default function ResourcesPage() {
         guideActions.push(
           {
             id: 'resource-kernels',
-            label: t('Fortran 内核', 'Fortran kernels'),
+            label: t('Fortran 编译配置', 'Fortran build configurations'),
             kind: 'click',
             enabled: !busy && !dirty,
             run: () =>
@@ -781,7 +781,7 @@ export default function ResourcesPage() {
           },
           {
             id: 'resource-build',
-            label: t('编译 Fortran 内核', 'Build Fortran kernel'),
+            label: t('编译 Fortran 引擎', 'Build Fortran engine'),
             kind: 'commit',
             enabled: !busy && !dirty && !!preset,
             run: () =>
@@ -1073,9 +1073,9 @@ export default function ResourcesPage() {
       {selected === 'local' && (
         <Card title={t('本机计算环境', 'Local environment')}>
           <p>
-            {navigator.hardwareConcurrency || 1} CPU ·{' '}
+            {navigator.hardwareConcurrency || 1} CPU · {t('编译配置：', 'Build configurations: ')}
             {state.kernels.map((kernel) => kernel.preset).join(', ') ||
-              t('尚无 Fortran 内核', 'No Fortran kernel')}
+              t('尚无 Fortran 编译配置', 'No Fortran build configuration')}
           </p>
           {actionButton('resource-local')}
           {output.local != null && <Notice>{String(output.local)}</Notice>}

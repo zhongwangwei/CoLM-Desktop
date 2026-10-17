@@ -1353,7 +1353,7 @@ test('Fortran preset shows the actual automatic match without an editable preset
   await p.mount();
   const preset = () => {
     const field = p.elements.find(
-      (element) => element.type === 'Field' && element.props.label === '匹配内核预设',
+      (element) => element.type === 'Field' && element.props.label === '匹配的编译配置',
     );
     assert.ok(field);
     const input = field.children[0] as Element;

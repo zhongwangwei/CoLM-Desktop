@@ -406,7 +406,7 @@ export default function ResearchPage() {
   }
   const loadContexts = () =>
     task(async (current) => {
-      if (!sites.length || !kernel) throw new Error('Select cases and kernel');
+      if (!sites.length || !kernel) throw new Error('Select cases and a build configuration');
       const effective = [];
       for (const path of sites) {
         effective.push(await effectiveCase(path));
@@ -433,7 +433,7 @@ export default function ResearchPage() {
   }
   function spec() {
     if (!sites.length || !kernel || !confirmed)
-      throw new Error('Select cases, kernel and confirm reviewed ranges');
+      throw new Error('Select cases, a build configuration and confirm reviewed ranges');
     const roots = new Set(sites.map((s) => s.replace(/[/\\][^/\\]+$/, '')));
     if (roots.size !== 1) throw new Error('All cases must share a project directory');
     const params = contexts.flatMap((row, i) => {
@@ -559,7 +559,9 @@ export default function ResearchPage() {
     if (runLock.current || lock.current)
       throw new Error('A study operation is already in progress');
     if (!studyDir || !kernel || !envelope || !confirmed)
-      throw new Error('Select a study and kernel, refresh its status and review its frozen budget');
+      throw new Error(
+        'Select a study and build configuration, refresh its status and review its frozen budget',
+      );
     if (remotePermissions.exists)
       throw new Error(
         'This study has a server submission; inspect or fetch it instead of starting another run',
@@ -963,10 +965,17 @@ export default function ResearchPage() {
       { value: 'parameters', label: tr('AI 参数学习', 'AI parameter learning') },
       { value: 'process', label: tr('AI 过程替代', 'AI process replacement') },
     ]),
-    field('research-kernel', tr('内核目录', 'Kernel directory'), kernel, setKernel, 'choice', [
-      { value: '', label: tr('请选择可用内核', 'Select an available kernel') },
-      ...state.kernels.map((k) => ({ value: k.dir, label: k.dir })),
-    ]),
+    field(
+      'research-kernel',
+      tr('编译配置目录', 'Build configuration directory'),
+      kernel,
+      setKernel,
+      'choice',
+      [
+        { value: '', label: tr('请选择可用的编译配置', 'Select an available build configuration') },
+        ...state.kernels.map((k) => ({ value: k.dir, label: k.dir })),
+      ],
+    ),
     ...state.cases.map((c) =>
       field(
         `research-case-${c.dir}`,
@@ -1719,7 +1728,7 @@ export default function ResearchPage() {
         {!contexts.length && (
           <p>
             {tr(
-              '选择内核后读取共同适用参数；不默认猜测采样上下界。',
+              '选择编译配置后读取共同适用参数；不默认猜测采样上下界。',
               'Load parameters applicable to the selected cases. Sampling bounds must be entered explicitly.',
             )}
           </p>

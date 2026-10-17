@@ -328,7 +328,9 @@ export default function RunPanel({
           bilingual('已有服务器作业：先核对终态，不重复提交', 'Check existing job first'),
         );
       if (!kernelMatches)
-        throw new Error(bilingual('请选择与当前模型匹配的内核', 'Select a compatible kernel'));
+        throw new Error(
+          bilingual('请选择与当前模型匹配的编译配置', 'Select a compatible build configuration'),
+        );
       const nums = [engine === 'rust' ? '1' : ranks, threads, workers].map(Number);
       if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
         throw new Error(
@@ -815,7 +817,7 @@ export default function RunPanel({
       ? [
           {
             id: 'run-kernel',
-            label: bilingual('内核', 'Kernel'),
+            label: bilingual('编译配置', 'Build configuration'),
             type: 'choice' as const,
             value: kernel,
             options: state.kernels.map((k) => ({ value: k.dir, label: k.preset })),
@@ -1034,8 +1036,8 @@ export default function RunPanel({
           <p className={kernelMatches ? 'check-fact' : 'check-pending'}>
             <span>{kernelMatches ? '✓' : '○'}</span>
             {kernelMatches
-              ? t('内核已匹配', 'Kernel matched')
-              : t('尚无匹配内核', 'No matching kernel')}
+              ? t('编译配置已匹配', 'Build configuration matched')
+              : t('尚无匹配的编译配置', 'No matching build configuration')}
           </p>
         </div>
       </div>
@@ -1078,11 +1080,11 @@ export default function RunPanel({
         <Notice tone="warning">
           {t(
             batchCases
-              ? '没有与当前模型匹配的内核，请在模型版本页检查。'
-              : '没有与当前模型匹配的内核。可在下方选择，或在模型版本页检查。',
+              ? '没有与当前模型匹配的编译配置，请在模型版本页检查。'
+              : '没有与当前模型匹配的编译配置。可在下方选择，或在模型版本页检查。',
             batchCases
-              ? 'No compatible kernel. Check Model versions.'
-              : 'Select a compatible kernel below, or check Model versions.',
+              ? 'No compatible build configuration. Check Model versions.'
+              : 'Select a compatible build configuration below, or check Model versions.',
           )}
         </Notice>
       )}
@@ -1114,6 +1116,12 @@ export default function RunPanel({
       {!batchCases && (
         <section aria-label={t('引擎与计算阶段', 'Engine and stages')}>
           <h3>{t('引擎与计算阶段', 'Engine and stages')}</h3>
+          <p className="muted">
+            {t(
+              '按算例自动匹配编译配置；不同配置均属于同一模型内核。',
+              'The case automatically selects a build configuration of the same model kernel.',
+            )}
+          </p>
           <div className="form-grid">
             {fields
               .slice(1)

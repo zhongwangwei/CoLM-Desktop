@@ -165,8 +165,8 @@ export function setupChoices(
     )
       return compiledCrop
         ? bilingual(
-            '当前 CROP 内核要求 BGC；请先切换非作物内核',
-            'Current CROP kernel requires BGC; switch to a non-crop kernel first',
+            '当前作物编译配置要求 BGC；请先切换非作物编译配置',
+            'The crop build configuration requires BGC; switch to a non-crop build configuration first',
           )
         : bilingual('请先关闭作物过程', 'Disable crop first');
     if (
@@ -186,7 +186,10 @@ export function setupChoices(
       if (blocked)
         return (
           blocked.reason ??
-          bilingual('当前源码或内核不支持修改', 'Current source or kernel disallows this option')
+          bilingual(
+            '当前源码或编译配置不支持修改',
+            'Current source or build configuration disallows this option',
+          )
         );
     }
     if (id === 'soil' && v === 'Campbell' && on('DEF_USE_TRACER') && !environment.autoClose)
@@ -208,9 +211,9 @@ export function setupChoices(
       if (id === 'crop') {
         if (!on('DEF_USE_BGC')) return bilingual('请先开启 BGC', 'Enable BGC first');
         if (!environment.cropKernel)
-          return bilingual('待核对：缺少作物内核', 'Pending: crop kernel unavailable');
+          return bilingual('待核对：缺少作物编译支持', 'Pending: crop build support unavailable');
         if (!environment.cropKernel.macros.includes('CROP'))
-          return bilingual('内核未编入 CROP', 'Kernel lacks CROP');
+          return bilingual('当前编译配置不支持作物过程', 'Build configuration lacks crop support');
         if (!environment.domain)
           return bilingual('待核对：请先确定模拟范围', 'Pending: choose simulation domain');
       }
@@ -229,8 +232,8 @@ export function setupChoices(
         )
       )
         return bilingual(
-          '待核对：请先确定网格或候选内核',
-          'Pending: choose grid or candidate kernel',
+          '待核对：请先确定网格或编译配置',
+          'Pending: choose a grid or build configuration',
         );
     }
     if (id === 'DEF_URBAN_RUN' && on('DEF_USE_TRACER'))
@@ -253,8 +256,8 @@ export function setupChoices(
           !environment.kernel?.macros.includes('GridRiverLakeFlow'))
       )
         return bilingual(
-          'SEDIMENT 需要空间模式和已开启的河湖内核',
-          'SEDIMENT requires a spatial river-capable kernel with routing enabled',
+          'SEDIMENT 需要空间模式、河湖汇流编译支持并开启汇流',
+          'SEDIMENT requires a spatial build configuration with routing support and routing enabled',
         );
       if (methane && methaneRiver && displayValue('DEF_USE_GridRiverLakeFlow') !== '.true.')
         return bilingual(
@@ -274,7 +277,10 @@ export function setupChoices(
         environment.engine === 'fortran' &&
         environment.kernel?.macros.some((m) => m.toUpperCase() === 'OPENMP')
       )
-        return bilingual('OpenMP 内核不支持示踪', 'OpenMP kernels do not support tracers');
+        return bilingual(
+          'OpenMP 编译配置不支持示踪',
+          'OpenMP build configurations do not support tracers',
+        );
       if (environment.grid === 'catchment' || environment.kernel?.macros.includes('CATCHMENT'))
         return bilingual('流域网格不支持示踪', 'Catchment grid does not support tracers');
     }
@@ -304,9 +310,15 @@ export function setupChoices(
             'Grid routing is unavailable for catchments',
           );
         if (!environment.kernel)
-          return bilingual('待核对：缺少匹配内核', 'Pending: matching kernel unavailable');
+          return bilingual(
+            '待核对：缺少匹配的编译配置',
+            'Pending: matching build configuration unavailable',
+          );
         if (!environment.kernel.macros.includes('GridRiverLakeFlow'))
-          return bilingual('内核未编入河湖汇流', 'Kernel lacks river-lake routing');
+          return bilingual(
+            '当前编译配置不支持河湖汇流',
+            'Build configuration lacks river-lake routing',
+          );
       } else {
         if (!environment.classification)
           return bilingual('待核对：请先确定地表分类', 'Pending: choose classification');

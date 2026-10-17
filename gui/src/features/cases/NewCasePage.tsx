@@ -1587,7 +1587,7 @@ export default function NewCasePage() {
       type: 'choice',
       options: [
         { value: 'rust', label: t('Rust 引擎', 'Rust engine') },
-        { value: 'fortran', label: t('Fortran 官方内核', 'Fortran official kernel') },
+        { value: 'fortran', label: t('Fortran 官方引擎', 'Official Fortran engine') },
       ],
       disabled: !enabled,
       set: (v) => set('engine', v),
@@ -2107,11 +2107,11 @@ export default function NewCasePage() {
                 disabled={!enabled}
                 onClick={() => set('engine', 'fortran')}
               >
-                <strong>{t('Fortran 官方内核', 'Fortran official kernel')}</strong>
+                <strong>{t('Fortran 官方引擎', 'Official Fortran engine')}</strong>
                 <span>
                   {t(
-                    '传统科学基线，需匹配已编译的内核预设',
-                    'Official scientific baseline, requires compiled kernel preset',
+                    '传统科学基线，使用与算例匹配的编译配置',
+                    'Official scientific baseline, using a compatible build configuration',
                   )}
                 </span>
               </Button>
@@ -2119,7 +2119,7 @@ export default function NewCasePage() {
           </section>
           {form.engine === 'fortran' && (
             <Field
-              label={t('匹配内核预设', 'Matched kernel preset')}
+              label={t('匹配的编译配置', 'Matched build configuration')}
               hint={t(
                 '根据模拟范围、土地覆盖与作物设置自动匹配。',
                 'Automatically matched to the domain, land cover and crop settings.',
@@ -2621,7 +2621,7 @@ export default function NewCasePage() {
                 <dd>
                   {form.engine === 'rust'
                     ? t('Rust 引擎', 'Rust engine')
-                    : t('Fortran 官方内核', 'Fortran official kernel')}
+                    : t('Fortran 官方引擎', 'Official Fortran engine')}
                 </dd>
                 <dt>{t('范围', 'Range')}</dt>
                 <dd>
