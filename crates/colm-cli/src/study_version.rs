@@ -189,6 +189,7 @@ fn record_pin(study_dir: &Path, workspace_root: &Path, pinned: &Pinned) -> Resul
 
 /// 交给快照里的 `colm-cli` 跑这个研究。`args` 是去掉了版本与内核参数的 `study-run` 原参数（不含子命令）。
 pub(crate) fn delegate(pinned: &Pinned, args: &[String]) -> Result<i32> {
+    crate::require_forcing_exclusion(&pinned.cli)?;
     let status = std::process::Command::new(&pinned.cli)
         .arg("study-run")
         .args(args)
@@ -317,8 +318,19 @@ pub(crate) fn compare(a: &Path, b: &Path) -> Result<serde_json::Value> {
     let (right, right_spec) = side(b)?;
     let same = same_design(&left_spec, &right_spec)?;
     let inputs = comparison_inputs(a).and_then(|left_inputs| {
-        comparison_inputs(b)
-            .map(|right_inputs| study::model::same_conditions(&left_inputs, &right_inputs))
+        comparison_inputs(b).map(|right_inputs| {
+            let full = !left_inputs.base_cases.is_empty()
+                && !right_inputs.base_cases.is_empty()
+                && left_inputs
+                    .base_cases
+                    .values()
+                    .chain(right_inputs.base_cases.values())
+                    .all(crate::fingerprint::has_full_forcing_content);
+            (
+                study::model::same_conditions(&left_inputs, &right_inputs),
+                full,
+            )
+        })
     });
     let inputs = inputs.and_then(|same_inputs| {
         anyhow::ensure!(
@@ -327,8 +339,8 @@ pub(crate) fn compare(a: &Path, b: &Path) -> Result<serde_json::Value> {
         );
         Ok(same_inputs)
     });
-    let verified = inputs.is_ok();
-    let same_inputs = inputs.as_ref().is_ok_and(|same| *same);
+    let verified = inputs.as_ref().is_ok_and(|(_, full)| *full);
+    let same_inputs = inputs.as_ref().is_ok_and(|(same, _)| *same);
     let mut result = verdict(left, right, same);
     if !same_inputs {
         result["better"] = serde_json::Value::Null;
@@ -336,13 +348,15 @@ pub(crate) fn compare(a: &Path, b: &Path) -> Result<serde_json::Value> {
     result["same_design"] = serde_json::json!(same);
     result["same_inputs"] = serde_json::json!(same_inputs);
     result["inputs_verified"] = serde_json::json!(verified);
+    result["forcing_contents_verified"] = serde_json::json!(verified);
     let notes = result["notes"]
         .as_array_mut()
         .expect("verdict notes is an array");
     match inputs {
         Err(error) => notes.push(serde_json::json!(format!("full-content inputs, observations and outputs could not be verified: {error:#}; no version winner is reported"))),
-        Ok(false) => notes.push(serde_json::json!("the Studies use different scientific input or observation contents; no version winner is reported")),
-        Ok(true) => (),
+        Ok((false, true)) => notes.push(serde_json::json!("the Studies use different scientific input or observation contents; no version winner is reported")),
+        Ok((_, false)) => notes.push(serde_json::json!("forcing content fingerprints are excluded; only the recorded non-forcing scope was verified; no version winner is reported")),
+        Ok((true, true)) => (),
     }
     Ok(result)
 }
@@ -358,7 +372,22 @@ pub(crate) fn verified_side(study_dir: &Path) -> Result<serde_json::Value> {
         Ok(identity)
     });
     let (inputs, verified, notes) = match verification {
-        Ok(identity) => (Some(identity), true, Vec::new()),
+        Ok(identity) => {
+            let full = !identity.base_cases.is_empty()
+                && identity
+                    .base_cases
+                    .values()
+                    .all(crate::fingerprint::has_full_forcing_content);
+            (
+                Some(identity),
+                full,
+                if full {
+                    Vec::new()
+                } else {
+                    vec!["forcing content fingerprints are excluded; non-forcing scope only".into()]
+                },
+            )
+        }
         Err(error) => (
             None,
             false,
@@ -486,6 +515,9 @@ pub(crate) fn local_comparison_evidence(study_dir: &Path) -> Result<serde_json::
         "state_sha256":state_sha256,
         "state":state,
         "input_identity":inputs,
+        "input_scope":"sha256-nonforcing-v1",
+        "forcing_content_policy":"excluded-v1",
+        "forcing_contents_verified":false,
         "results_sha256":results_sha256,
     }))
 }

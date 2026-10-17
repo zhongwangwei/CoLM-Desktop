@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn full_hash_reports_incremental_bytes_without_changing_identity() {
+    let root = temp_dir("hash-progress");
+    let path = root.join("forcing.nc");
+    std::fs::write(&path, vec![7_u8; 200_000]).unwrap();
+    let mut events = Vec::new();
+    let with_progress = full_file_with_progress(&path, "data", &mut |p, bytes, total| {
+        assert_eq!(p, path);
+        events.push((bytes, total));
+    })
+    .unwrap();
+    assert_eq!(with_progress, full_file(&path, "data").unwrap());
+    assert_eq!(events.first(), Some(&(0, Some(200_000))));
+    assert_eq!(events.last(), Some(&(200_000, Some(200_000))));
+    assert!(events
+        .iter()
+        .any(|(bytes, _)| *bytes > 0 && *bytes < 200_000));
+    assert!(events.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn directory_progress_keeps_full_content_and_membership_checks() {
+    let root = temp_dir("tree-progress");
+    std::fs::create_dir(root.join("data")).unwrap();
+    let path = root.join("data/input.nc");
+    std::fs::write(&path, b"payload").unwrap();
+    let mut out = FullInputIdentity::unavailable("fixture");
+    let mut inventory = false;
+    let mut hash = false;
+    full_directory_with_progress(&mut out, "root", &root.join("data"), &mut |_, _, total| {
+        inventory |= total.is_none();
+        hash |= total.is_some();
+    })
+    .unwrap();
+    assert!(inventory && hash);
+    assert_eq!(
+        out.files["root/input.nc"],
+        full_file(&path, "data").unwrap()
+    );
+    let error = full_directory_with_progress(
+        &mut out,
+        "root",
+        &root.join("data"),
+        &mut |_, bytes, total| {
+            if total.is_some() && bytes > 0 {
+                std::fs::write(root.join("data/new.nc"), b"changed membership").unwrap();
+            }
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("changed during hashing"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn nested_forcing_inventory_follows_the_case_working_directory() {
     let root = temp_dir("nested-forcing");
     std::fs::create_dir_all(root.join("met")).unwrap();
@@ -25,23 +80,13 @@ fn nested_forcing_inventory_follows_the_case_working_directory() {
         .values()
         .filter(|f| f.category == "data")
         .collect();
-    assert_eq!(payloads.len(), 1);
-    assert_eq!(payloads[0].path, actual);
-    assert_eq!(
-        payloads[0].sha256,
-        full_file(&actual, "data").unwrap().sha256
-    );
+    assert!(payloads.is_empty());
     let sampled = compute("colm", &root.join("case.nml"), "k").unwrap();
-    assert!(sampled
-        .files
-        .contains_key(actual.canonicalize().unwrap().to_str().unwrap()));
     assert!(!sampled
         .files
-        .contains_key(decoy.canonicalize().unwrap().to_str().unwrap()));
+        .contains_key(actual.canonicalize().unwrap().to_str().unwrap()));
     let guard = full_input_guard(&root, &identity).unwrap();
-    let matches = guard.forcing_prefixes.get(&root.join("met/x_")).unwrap();
-    assert!(matches.contains_key(&actual));
-    assert!(!matches.contains_key(&decoy));
+    assert!(guard.forcing_prefixes.is_empty());
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -328,9 +373,9 @@ fn forcing_namelist_content_changes_the_fingerprint() {
     let d = temp_dir("forcing-content");
     let case = d.join("case.nml");
     std::fs::write(&case, CASE).unwrap();
-    std::fs::write(d.join("forcing.nml"), "a = 1\n").unwrap();
+    std::fs::write(d.join("forcing.nml"), "&nl_colm_forcing\na = 1\n/\n").unwrap();
     let a = compute("colm", &case, "k").unwrap();
-    std::fs::write(d.join("forcing.nml"), "a = 2\n").unwrap();
+    std::fs::write(d.join("forcing.nml"), "&nl_colm_forcing\na = 2\n/\n").unwrap();
     let b = compute("colm", &case, "k").unwrap();
     assert!(
         first_difference(&a, &b).unwrap().contains("外部输入"),
@@ -361,7 +406,7 @@ fn large_data_content_changes_the_fingerprint() {
 }
 
 #[test]
-fn forcing_payload_content_changes_the_fingerprint() {
+fn forcing_payload_content_is_excluded() {
     let d = temp_dir("forcing-payload");
     let forcing = d.join("met.nc");
     std::fs::write(&forcing, b"first").unwrap();
@@ -380,24 +425,16 @@ fn forcing_payload_content_changes_the_fingerprint() {
     )
     .unwrap();
     let a = compute("colm", &case, "k").unwrap();
-    let marker = a
+    assert!(!a
         .files
-        .get(
-            &forcing
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        )
-        .unwrap();
-    assert!(marker.starts_with("sample-sha256:"), "{marker}");
+        .contains_key(forcing.canonicalize().unwrap().to_str().unwrap()));
     std::fs::write(&forcing, b"second").unwrap();
     let b = compute("colm", &case, "k").unwrap();
-    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
+    assert!(first_difference(&a, &b).is_none());
 }
 
 #[test]
-fn nested_forcing_prefix_payload_changes_the_fingerprint() {
+fn nested_forcing_prefix_payload_is_excluded() {
     let d = temp_dir("forcing-nested-prefix");
     let forcing_dir = d.join("temp");
     std::fs::create_dir_all(&forcing_dir).unwrap();
@@ -420,10 +457,10 @@ fn nested_forcing_prefix_payload_changes_the_fingerprint() {
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    assert!(a.files[&key].starts_with("sample-sha256:"));
+    assert!(!a.files.contains_key(&key));
     std::fs::write(&forcing, b"second").unwrap();
     let b = compute("colm", &case, "k").unwrap();
-    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
+    assert!(first_difference(&a, &b).is_none());
 }
 
 #[test]
@@ -612,4 +649,132 @@ fn a_hybrid_config_and_its_model_only_touch_the_colm_stage() {
     std::fs::write(dir.join("hybrid_climate/climate.nc"), b"two").unwrap();
     assert!(with_climate != compute("colm", &case, "k").unwrap());
     assert!(before[1] == compute("mkinidata", &case, "k").unwrap());
+}
+
+#[test]
+fn forcing_exclusions_cover_cbl_tracers_and_overlapping_data_roots() {
+    let root = temp_dir("all-forcing-excluded");
+    let raw = root.join("raw");
+    std::fs::create_dir(&raw).unwrap();
+    std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_dir_rawdata='raw'\nDEF_TRACER_PARAM_FILES='tracer.nml'\nSITE_fsitedata='raw/exact.nc'\n/\n").unwrap();
+    std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\nDEF_dir_forcing='raw'\nforcing%fprefix(1)='met_'\nforcing%fprefix(2)='exact.nc'\nforcing%CBL_fprefix='cbl_'\n/\n").unwrap();
+    std::fs::write(
+        root.join("tracer.nml"),
+        "&nl_colm_tracer_forcing\nforcing_fprefix='ch4_', 'isotope_'\n/\n",
+    )
+    .unwrap();
+    for name in [
+        "met_1992.nc",
+        "exact.nc",
+        "cbl_2003.nc4",
+        "ch4_2003.nc",
+        "isotope_2003.nc",
+        "soil.nc",
+    ] {
+        std::fs::write(raw.join(name), b"initial").unwrap();
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(raw.join("exact.nc"), raw.join("site-alias.nc")).unwrap();
+    let mut visited = Vec::new();
+    let before =
+        full_inputs_with_progress(&root, &mut |path, _, _| visited.push(path.to_path_buf()))
+            .unwrap();
+    assert_eq!(before.algorithm, INPUT_ALGORITHM);
+    assert_eq!(
+        before.data_settings["forcing_content_policy"],
+        FORCING_CONTENT_POLICY
+    );
+    assert!(!has_full_forcing_content(&before));
+    assert!(!same_data_payloads(&before, &before));
+    assert!(same_payloads(&before, &before));
+    for path in &visited {
+        assert!(
+            !forcing_data_path(&root, path).unwrap() || path.is_dir(),
+            "visited {}",
+            path.display()
+        );
+    }
+    assert!(forcing_data_path(&root, &raw).unwrap());
+    let guard = full_input_guard(&root, &before).unwrap();
+    let sampled = compute("colm", &root.join("case.nml"), "k").unwrap();
+    assert!(sampled.site_sha256.is_empty());
+    for name in [
+        "met_1992.nc",
+        "exact.nc",
+        "cbl_2003.nc4",
+        "ch4_2003.nc",
+        "isotope_2003.nc",
+        "met_new.nc",
+    ] {
+        std::fs::write(raw.join(name), b"changed payload").unwrap();
+    }
+    let after = full_inputs(&root).unwrap();
+    assert!(same_payloads(&before, &after));
+    verify_input_guard(&root, &before, &guard).unwrap();
+    assert_eq!(
+        first_difference(
+            &sampled,
+            &compute("colm", &root.join("case.nml"), "k").unwrap()
+        ),
+        None
+    );
+    std::fs::write(raw.join("soil.nc"), b"changed soil").unwrap();
+    assert!(!same_payloads(&before, &full_inputs(&root).unwrap()));
+    assert!(verify_input_guard(&root, &before, &guard).is_err());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn default_forcing_prefixes_are_excluded_from_overlapping_roots() {
+    let root = temp_dir("default-forcing-prefixes");
+    std::fs::write(
+        root.join("case.nml"),
+        "&nl_colm\nDEF_dir_rawdata='raw'\n/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("forcing.nml"),
+        "&nl_colm_forcing\nDEF_dir_forcing='raw'\nDEF_forcing%fprefix(1)='custom_'\n/\n",
+    )
+    .unwrap();
+    for folder in ["TPHWL6Hrly", "Precip6Hrly", "Solar6Hrly"] {
+        std::fs::create_dir_all(root.join("raw").join(folder)).unwrap();
+    }
+    let files = [
+        "TPHWL6Hrly/clmforc.cruncep.V4.c2011.0.5d.TPQWL.2003.nc",
+        "Precip6Hrly/clmforc.cruncep.V4.c2011.0.5d.Prec.2003.nc",
+        "Solar6Hrly/clmforc.cruncep.V4.c2011.0.5d.Solr.2003.nc",
+        "custom_2003.nc",
+    ];
+    for file in files {
+        std::fs::write(root.join("raw").join(file), b"driver").unwrap();
+    }
+    std::fs::write(root.join("raw/soil.nc"), b"soil").unwrap();
+    let before = full_inputs(&root).unwrap();
+    assert_eq!(
+        before.data_settings["forcing:def_forcing%fprefix(1)"],
+        "'custom_'"
+    );
+    assert!(before
+        .data_settings
+        .contains_key("forcing:def_forcing%cbl_fprefix"));
+    assert_eq!(
+        before
+            .files
+            .values()
+            .filter(|file| file.category == "data")
+            .count(),
+        1
+    );
+    for file in files {
+        std::fs::write(root.join("raw").join(file), b"changed driver").unwrap();
+    }
+    assert!(same_payloads(&before, &full_inputs(&root).unwrap()));
+    std::fs::write(
+        root.join("forcing.nml"),
+        "&nl_colm_forcing\nDEF_dir_forcing='raw'\nDEF_forcing%fprefix(1)='other_'\n/\n",
+    )
+    .unwrap();
+    assert_ne!(before.data_sha256, full_inputs(&root).unwrap().data_sha256);
+    std::fs::remove_dir_all(root).unwrap();
 }

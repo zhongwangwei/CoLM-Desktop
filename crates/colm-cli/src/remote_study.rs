@@ -223,7 +223,7 @@ pub(crate) fn study_job_body(
 ) -> String {
     let bin = quote(&format!("{}/bin", engine::engine_dir(root, engine_id)));
     format!(
-        "# colm-study-root: {study_marker}\necho \"preparing the engine\" > phase\n{ensure}\
+        "# colm-study-root: {study_marker}\necho \"preparing the engine\" > phase\n{ensure}{policy}\
          echo \"creating the Study\" >> phase\n\
          {bin}/colm-cli study-create {project} --spec {spec} > study_create.out\n\
          tail -n 1 study_create.out > study_root\n\
@@ -232,6 +232,7 @@ pub(crate) fn study_job_body(
          RAYON_NUM_THREADS={threads} {bin}/colm-cli study-run \"$STUDY\" --kernel {kernel} --stream 1 --jobs {jobs} --engine {plan_engine} --preprocessors {preprocessors}\n",
         study_marker = serde_json::to_string(remote_project).expect("strings serialize to JSON"),
         ensure = engine::ensure_script(root, engine_id, threads.max(8).clamp(1, 64)),
+        policy = super::forcing_policy_guard(&format!("{}/bin/colm-cli", engine::engine_dir(root, engine_id))),
         project = quote(remote_project),
         spec = quote(&format!("{remote_project}/spec.json")),
         kernel = quote(remote_kernel),
@@ -651,9 +652,22 @@ fn comparison_command(
     ))
 }
 
-fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
-    let projects = project_spellings(ssh, record)?;
-    let output = ssh.run_ok(&comparison_command(record, study_root, &projects)?)?;
+fn scoped_comparison_evidence(
+    cli: &str,
+    command: &str,
+    mut run: impl FnMut(&str) -> Result<String>,
+) -> Result<Value> {
+    let policy = run(&format!(
+        "COLM_AUDIT_BY_PARENT=1 {} fingerprint-policy",
+        quote(cli)
+    ))
+    .context("update the model code: server CLI cannot prove forcing-content exclusion")?;
+    ensure!(
+        serde_json::from_str::<Value>(policy.trim()).ok()
+            == Some(json!({"forcing_content_policy":"excluded-v1"})),
+        "update the model code: server CLI does not exclude forcing content fingerprints"
+    );
+    let output = run(command)?;
     serde_json::from_str(
         output
             .trim()
@@ -661,7 +675,17 @@ fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str)
             .last()
             .context("server returned no comparison proof")?,
     )
-    .context("server CLI does not provide readable full-content Study comparison evidence")
+    .context("server CLI does not provide readable scoped Study evidence")
+}
+
+fn server_comparison_evidence(ssh: &Ssh, record: &StudyRecord, study_root: &str) -> Result<Value> {
+    let projects = project_spellings(ssh, record)?;
+    let command = comparison_command(record, study_root, &projects)?;
+    let cli = format!(
+        "{}/bin/colm-cli",
+        engine::engine_dir(&record.root, &record.engine)
+    );
+    scoped_comparison_evidence(&cli, &command, |command| ssh.run_ok(command))
 }
 
 fn verified_evidence(
@@ -718,8 +742,19 @@ fn verified_evidence(
     let local = study::model::verified_inputs(manifest)?;
     let remote: study::model::StudyInputIdentity =
         serde_json::from_value(evidence["input_identity"].clone())?;
+    if remote
+        .base_cases
+        .values()
+        .any(|identity| identity.algorithm == "sha256-nonforcing-v1")
+    {
+        ensure!(
+            evidence["forcing_content_policy"] == "excluded-v1"
+                && evidence["forcing_contents_verified"] == false,
+            "remote scoped evidence must disclose unverified forcing contents"
+        );
+    }
     ensure!(
-        study::model::same_conditions(&local, &remote),
+        study::model::same_scope_conditions(&local, &remote),
         "server scientific input or observation contents differ from the frozen local Study"
     );
     Ok(local)
@@ -1336,7 +1371,10 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
             )
         })?;
     }
-    let scientific_verified = comparison.is_ok();
+    let scope_verified = comparison.is_ok();
+    let scientific_verified = comparison
+        .as_ref()
+        .is_ok_and(|evidence| evidence["forcing_contents_verified"] == true);
     let verification_error = comparison.as_ref().err().map(|error| format!("{error:#}"));
     for (name, bytes) in regular_tree_files(&study_dir.join("checkpoints/state"), true)? {
         let path = tmp.join("checkpoints/state").join(name);
@@ -1345,9 +1383,12 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     }
     study::checkpoint::write_next(&tmp.join("checkpoints/state"), &typed)?;
     record.fetched_at = Some(now());
-    record.provenance["ok"] = json!(exit_code == 0 && scientific_verified);
+    record.provenance["ok"] = json!(exit_code == 0 && scope_verified);
     record.provenance["exit_code"] = json!(exit_code);
     record.provenance["scientific_verified"] = json!(scientific_verified);
+    record.provenance["nonforcing_inputs_verified"] = json!(scope_verified);
+    record.provenance["forcing_contents_verified"] = json!(scientific_verified);
+    record.provenance["input_scope"] = json!("sha256-nonforcing-v1");
     record.provenance["verification_error"] = json!(verification_error);
     record.provenance["finished"] = json!(now());
     std::fs::write(tmp.join(RECORD), serde_json::to_string_pretty(&record)?)?;
@@ -1361,6 +1402,9 @@ pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
             "fetched": true,
             "exit_code": exit_code,
             "scientific_verified": scientific_verified,
+            "nonforcing_inputs_verified": scope_verified,
+            "forcing_contents_verified": scientific_verified,
+            "input_scope": "sha256-nonforcing-v1",
             "verification_error": verification_error,
             "status": typed.status,
             "best_member": typed.best_member,

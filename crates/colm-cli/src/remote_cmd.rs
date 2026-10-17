@@ -1441,6 +1441,10 @@ fn materialized_revision(
     Ok(Some(revision))
 }
 
+fn forcing_policy_guard(cli: &str) -> String {
+    format!("colm_forcing_policy=$({cli} fingerprint-policy) || {{ echo 'Update model code: fingerprint-policy is unavailable' >&2; exit 1; }}\n[ \"$colm_forcing_policy\" = '{policy}' ] || {{ echo 'Update model code: forcing content fingerprints must be excluded' >&2; exit 1; }}\n", cli=quote(cli), policy=r#"{"forcing_content_policy":"excluded-v1"}"#)
+}
+
 /// 作业体：先确保引擎编好，再跑三段。
 #[allow(clippy::too_many_arguments)]
 fn job_body(
@@ -1488,8 +1492,15 @@ fn job_body(
     if opts.get("--force").is_some_and(|v| v == "1") {
         run.push_str(" --force 1");
     }
+    if opts
+        .get("--record-input-fingerprints")
+        .is_some_and(|v| v == "1")
+    {
+        run.push_str(" --record-input-fingerprints 1");
+    }
     Ok(format!(
-        "echo \"preparing the engine\" > phase\n{ensure}{launcher}echo \"running\" >> phase\n{run}\n",
+        "echo \"preparing the engine\" > phase\n{ensure}{policy}{launcher}echo \"running\" >> phase\n{run}\n",
+        policy = forcing_policy_guard(&format!("{}/bin/colm-cli", engine::engine_dir(root, engine_id))),
         // 编译的并行度与运行线程数无关：至少 8 个任务。
         ensure = engine::ensure_script(root, engine_id, threads.max(8).clamp(1, 64)),
     ))
@@ -2064,6 +2075,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         "ranks": plan.ranks,
         "stage": opts.get("--stage"),
         "force": opts.get("--force").is_some_and(|v| v == "1"),
+        "record_input_fingerprints": opts.get("--record-input-fingerprints").is_some_and(|v| v == "1"),
         "location": { "kind": "server", "host": ssh.host },
         "kernel": match &local_kernel {
             Some((_, kernel)) if !fortran => json!({ "dir": remote_kernel, "identity": kernel.manifest.identity(), "preset": preset }),
@@ -2389,6 +2401,50 @@ fn verify_history_hashes(root: &Path, expected: &OutputHashes) -> Result<()> {
     Ok(())
 }
 
+// Only the explicit new policy can skip content checks; missing legacy metadata cannot.
+fn content_fingerprints_disabled(provenance: &serde_json::Value) -> bool {
+    provenance["verification"]["status"] == "disabled"
+        && provenance["verification"]["input_fingerprints"] == false
+        && provenance["verification"]["content_fingerprints"] == false
+}
+
+fn unhashed_history_files(root: &Path) -> Result<std::collections::BTreeSet<PathBuf>> {
+    let inventory = history_inventory(root)?;
+    let files: std::collections::BTreeSet<_> = inventory
+        .keys()
+        .filter(|p| p.extension().is_some_and(|ext| ext == "nc") && root.join(p).is_file())
+        .cloned()
+        .collect();
+    ensure!(!files.is_empty(), "completion has no history files");
+    Ok(files)
+}
+
+fn unhashed_proof_files(proof: &serde_json::Value) -> Result<std::collections::BTreeSet<PathBuf>> {
+    let files: std::collections::BTreeSet<PathBuf> =
+        serde_json::from_value(proof["history_files"].clone())?;
+    ensure!(
+        !files.is_empty()
+            && files.iter().all(|p| p
+                .components()
+                .all(|c| matches!(c, std::path::Component::Normal(_)))
+                && p.extension().is_some_and(|ext| ext == "nc")),
+        "invalid unverified history file paths"
+    );
+    Ok(files)
+}
+
+fn verify_fetched_history(root: &Path, proof: &serde_json::Value) -> Result<()> {
+    if content_fingerprints_disabled(&proof["provenance"]) {
+        ensure!(
+            unhashed_history_files(root)? == unhashed_proof_files(proof)?,
+            "downloaded history paths differ from server completion"
+        );
+        Ok(())
+    } else {
+        verify_history_hashes(root, &recorded_history_hashes(&proof["provenance"])?)
+    }
+}
+
 /// Read-only proof from the CLI bound to the job's source snapshot.
 pub(crate) fn verify_completed_outputs(case: &Path) -> Result<serde_json::Value> {
     let layout = colm_case::Layout::new(case);
@@ -2401,8 +2457,22 @@ pub(crate) fn verify_completed_outputs(case: &Path) -> Result<serde_json::Value>
         "completion provenance is not a regular file"
     );
     let identity = crate::fingerprint::stable_file_identity(&before);
+    let bytes = std::fs::read(&path)?;
+    let provenance: serde_json::Value = serde_json::from_slice(&bytes)?;
+    if content_fingerprints_disabled(&provenance) {
+        let history_files = unhashed_history_files(&out.join("history"))?;
+        let inventory = history_inventory(&out.join("history"))?;
+        ensure!(
+            identity
+                == crate::fingerprint::stable_file_identity(&std::fs::symlink_metadata(&path)?)
+                && bytes == std::fs::read(&path)?,
+            "completion provenance changed during output inspection"
+        );
+        return Ok(
+            json!({"schema":1,"case_name":name,"provenance":provenance,"history_files":history_files,"history_inventory":inventory,"provenance_identity":identity}),
+        );
+    }
     let digest = crate::fingerprint::full_file(&path, "provenance")?.sha256;
-    let provenance: serde_json::Value = serde_json::from_slice(&std::fs::read(&path)?)?;
     let hashes = recorded_history_hashes(&provenance)?;
     let inventory = history_inventory(&out.join("history"))?;
     verify_history_hashes(&out.join("history"), &hashes)?;
@@ -2445,6 +2515,10 @@ fn parse_output_verification(
         proof["history_inventory"].is_object() && proof["provenance_identity"].is_string(),
         "server proof has no stable output identities"
     );
+    if content_fingerprints_disabled(&proof["provenance"]) {
+        unhashed_proof_files(&proof)?;
+        return Ok(Some(proof));
+    }
     let hashes: OutputHashes = serde_json::from_value(proof["history_sha256"].clone())?;
     ensure!(
         hashes == recorded_history_hashes(&proof["provenance"])?,
@@ -2483,6 +2557,16 @@ fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) 
         remote["execution_snapshot"].as_str() == Some(record.engine.as_str()),
         "server source snapshot differs from submitted engine"
     );
+    if content_fingerprints_disabled(remote) {
+        ensure!(
+            submitted["record_input_fingerprints"] == false,
+            "server disabled fingerprints without an explicit disabled submission policy"
+        );
+        ensure!(
+            submitted["remote_model_run"].is_object() && remote["model_run"].is_object(),
+            "disabled fingerprint fetch requires a bound model identity"
+        );
+    }
     // Legacy runs retain output integrity checks, but cannot certify scientific identity.
     if submitted["remote_model_run"].is_null() && remote["model_run"].is_null() {
         return Ok(());
@@ -2492,11 +2576,22 @@ fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) 
             && remote["model_run"] == submitted["remote_model_run"],
         "server model identity differs from submitted revision"
     );
+    if content_fingerprints_disabled(remote) {
+        return Ok(());
+    }
     let full: crate::fingerprint::FullInputIdentity =
         serde_json::from_value(remote["full_input_identity"].clone())?;
     ensure!(
-        full.complete && full.algorithm == "sha256-full-v1",
-        "server input content identity is incomplete"
+        full.complete
+            && (full.algorithm == "sha256-full-v1"
+                || (full.algorithm == "sha256-nonforcing-v1"
+                    && full
+                        .data_settings
+                        .get("forcing_content_policy")
+                        .map(String::as_str)
+                        == Some("excluded-v1")
+                    && full.unresolved.is_empty())),
+        "server input content identity is incomplete or has an unsupported scope"
     );
     Ok(())
 }
@@ -2529,14 +2624,36 @@ fn fetch_certification(
         let remote = &proof["provenance"];
         for field in [
             "full_input_identity",
+            "verification",
+            "input_sources",
             "input_fingerprint",
             "kernel",
             "execution_program_sha256",
+            "output_sha256",
             "execution_snapshot",
         ] {
-            fetched[field] = remote[field].clone();
+            if let Some(value) = remote.get(field) {
+                fetched[field] = value.clone();
+            } else if let Some(fields) = fetched.as_object_mut() {
+                fields.remove(field);
+            }
         }
         fetched["remote_execution_provenance"] = remote.clone();
+    }
+    if !partial
+        && proof.is_some_and(|p| {
+            content_fingerprints_disabled(&p["provenance"])
+                && p["provenance"]["model_run"].is_object()
+        })
+    {
+        let remote = &proof.unwrap()["provenance"];
+        fetched["verification"] = remote["verification"].clone();
+        fetched["output_verification"] = json!({"status":"disabled","partial":false,"reason":"content fingerprint recording was disabled; output paths and presence were checked"});
+        if remote["ok"] != true {
+            fetched["ok"] = json!(false);
+            fetched["error"] = json!("server execution provenance is not successful");
+        }
+        return;
     }
     let reason = if partial {
         Some("partial history is derived data, not the original completed output")
@@ -2549,6 +2666,13 @@ fn fetch_certification(
     };
     let verified = reason.is_none();
     fetched["output_verification"] = json!({"status":if verified {"passed"} else {"unavailable"},"partial":partial,"reason":reason});
+    if proof.is_some_and(|p| {
+        p["provenance"]["full_input_identity"]["algorithm"] == "sha256-nonforcing-v1"
+    }) {
+        fetched["verification"]["status"] = json!("partial");
+        fetched["verification"]["forcing_contents_verified"] = json!(false);
+        fetched["output_verification"]["forcing_contents_verified"] = json!(false);
+    }
     if let Some(reason) = reason {
         fetched["ok"] = json!(false);
         fetched["error"] = json!(reason);
@@ -2657,10 +2781,7 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     } else {
         ssh.download(&record.remote_case, &entries, &stage.0)?;
         if let Some(proof) = &proof {
-            verify_history_hashes(
-                &staged_history,
-                &recorded_history_hashes(&proof["provenance"])?,
-            )?;
+            verify_fetched_history(&staged_history, proof)?;
         } else {
             history_inventory(&staged_history)?;
         }
@@ -2747,10 +2868,7 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let publication_inventory = history_inventory(&case.join(&history))?;
     if !partial {
         if let Some(proof) = &proof {
-            verify_history_hashes(
-                &case.join(&history),
-                &recorded_history_hashes(&proof["provenance"])?,
-            )?;
+            verify_fetched_history(&case.join(&history), proof)?;
         }
     }
     super::provenance::write_value(&case, &fetched);
@@ -2768,7 +2886,10 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
             "fetched output certification was not recorded"
         );
         if !partial {
-            if let Some(proof) = &proof {
+            if let Some(proof) = proof
+                .as_ref()
+                .filter(|p| !content_fingerprints_disabled(&p["provenance"]))
+            {
                 let expected = recorded_history_hashes(&proof["provenance"])?;
                 ensure!(
                     recorded_history_hashes(&written)? == expected,
@@ -2809,70 +2930,8 @@ pub(crate) fn verify_recorded_inputs(
             && !case.join(FETCH_MARK).exists(),
         "remote output is partial or lacks original-output verification"
     );
-    let local: std::collections::BTreeMap<String, String> =
-        serde_json::from_value(provenance["local_configuration_sha256"].clone())
-            .context("submitted local configuration identity is missing")?;
-    ensure!(
-        crate::fingerprint::configuration_identity(case)? == local,
-        "local frozen configuration changed since remote submission"
-    );
-    let record = read_record(case)?;
-    let expected = record
-        .provenance
-        .as_ref()
-        .context("remote submission provenance is missing")?;
-    ensure!(
-        provenance["remote_model_run"] == expected["remote_model_run"]
-            && provenance["engine_snapshot"] == expected["engine_snapshot"],
-        "remote submission identity changed"
-    );
-    let ssh = Ssh::new(&record.host)?;
-    let proof = remote_output_verification(&ssh, &record)?
-        .context("bound server CLI cannot verify original outputs")?;
-    let remote = &proof["provenance"];
-    ensure!(
-        *remote == provenance["remote_execution_provenance"],
-        "server completion provenance changed since fetch"
-    );
-    verify_history_hashes(
-        &colm_case::Layout::new(case)
-            .out()
-            .join(&record.case_name)
-            .join("history"),
-        &recorded_history_hashes(remote)?,
-    )?;
-    let server_recorded: crate::fingerprint::FullInputIdentity =
-        serde_json::from_value(remote["full_input_identity"].clone())?;
-    ensure!(
-        &server_recorded == recorded,
-        "server input provenance changed since fetch"
-    );
-    let cli = format!(
-        "{}/bin/colm-cli",
-        engine::engine_dir(&record.root, &record.engine)
-    );
-    let actual: crate::fingerprint::FullInputIdentity =
-        serde_json::from_str(&ssh.run_ok(&format!(
-            "COLM_AUDIT_BY_PARENT=1 {} full-input-identity {}",
-            quote(&cli),
-            quote(&record.remote_case)
-        ))?)?;
-    ensure!(
-        &actual == recorded,
-        "server scientific inputs or frozen configuration changed since the run"
-    );
-    ensure!(
-        remote_output_verification(&ssh, &record)?.as_ref() == Some(&proof),
-        "server outputs changed during scientific input verification"
-    );
-    verify_history_hashes(
-        &colm_case::Layout::new(case)
-            .out()
-            .join(&record.case_name)
-            .join("history"),
-        &recorded_history_hashes(remote)?,
-    )?;
-    Ok(())
+    let _ = recorded;
+    bail!("forcing content fingerprints are excluded by policy; full-input verification cannot invoke a remote CLI")
 }
 
 /// 取回时的出处：提交时记下的那份，加上作业的结局。

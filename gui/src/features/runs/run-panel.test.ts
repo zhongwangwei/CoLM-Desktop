@@ -20,6 +20,7 @@ function panel(
     submit?: () => Promise<unknown>;
     remote?: boolean;
     remoteBatch?: boolean;
+    recordInputFingerprints?: boolean;
     ranks?: string;
     ipc?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
     single?: boolean;
@@ -114,6 +115,7 @@ function panel(
     workers: '1',
     stage: '',
     force: false,
+    recordInputFingerprints: options.recordInputFingerprints ?? false,
     invoke,
     invokeJson: invoke,
     notify: () => {},
@@ -423,4 +425,48 @@ test('batch members wait in queue until their own worker starts', async () => {
     },
   });
   await p.run();
+});
+
+test('input fingerprint recording is off by default and opt-in reaches single, batch and remote runs', async () => {
+  for (const shape of [
+    { single: true },
+    {},
+    { remote: true },
+    { remote: true, remoteBatch: true },
+  ]) {
+    for (const recordInputFingerprints of [false, true]) {
+      const p = panel({
+        ...shape,
+        recordInputFingerprints,
+        ipc: async (command) => {
+          if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+          if (command === 'remote_job_record') return null;
+          if (command === 'remote_run')
+            return {
+              record: { host: 'server', job: 'test-job' },
+              status: { state: 'finished', exit_code: 0 },
+            };
+          if (command === 'remote_status')
+            return {
+              record: { host: 'server', job: 'test-job' },
+              status: { state: 'finished', exit_code: 0 },
+            };
+          return command === 'run_batch' ? { succeeded: 2, failed: 0 } : 0;
+        },
+      });
+      await p.run();
+      const calls = p.calls.filter((call) =>
+        ['run_case', 'run_batch', 'remote_run'].includes(call.command),
+      );
+      assert.ok(calls.length);
+      for (const call of calls)
+        assert.equal(call.args.recordInputFingerprints, recordInputFingerprints);
+    }
+  }
+  const defaults = panel({ single: true });
+  await defaults.run();
+  assert.equal(
+    defaults.calls.find((call) => call.command === 'run_case')?.args.recordInputFingerprints,
+    false,
+  );
 });

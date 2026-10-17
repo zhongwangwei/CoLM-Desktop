@@ -484,6 +484,104 @@ fn study_state_status(program: &Path, study: &str) -> String {
     status["state"]["status"].as_str().unwrap().to_owned()
 }
 
+#[test]
+fn ordinary_run_defaults_to_no_input_audit_and_replaces_stale_identity() {
+    let _guard = netcdf_lock();
+    let root = temp_root("noaudit");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+    fs::write(
+        case.join("full-input-identity.json"),
+        r#"{"complete":true,"algorithm":"stale"}"#,
+    )
+    .unwrap();
+    let args = [
+        "run",
+        case.to_str().unwrap(),
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--preprocessors",
+        "fortran",
+        "--stream",
+        "1",
+    ];
+    let output = run_with_bin_ok(&cli, &args);
+    assert!(!output.contains("colm-stage input-check"));
+    assert!(!output.contains("Input SHA-256:"));
+    let identity: Value =
+        serde_json::from_slice(&fs::read(case.join("full-input-identity.json")).unwrap()).unwrap();
+    assert_eq!(identity["complete"], false);
+    let provenance: Value =
+        serde_json::from_slice(&fs::read(case.join("out/siteA/produced-by.json")).unwrap())
+            .unwrap();
+    assert_eq!(provenance["verification"]["status"], "disabled");
+    assert_eq!(provenance["verification"]["input_fingerprints"], false);
+    assert_eq!(provenance["verification"]["content_fingerprints"], false);
+    assert!(provenance.get("output_sha256").is_none());
+    assert!(provenance.get("execution_program_sha256").is_none());
+    let first_count = marker_lines(&root.join("kernel-programs.log")).len();
+    run_with_bin_ok(&cli, &args);
+    assert_eq!(
+        marker_lines(&root.join("kernel-programs.log")).len(),
+        first_count * 2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn enabled_audit_excludes_forcing_and_never_skips_the_model_stage() {
+    let _guard = netcdf_lock();
+    let root = temp_root("partial");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+    let args = [
+        "run",
+        case.to_str().unwrap(),
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--preprocessors",
+        "fortran",
+        "--record-input-fingerprints",
+        "1",
+    ];
+    run_with_bin_ok(&cli, &args);
+    let identity: Value =
+        serde_json::from_slice(&fs::read(case.join("full-input-identity.json")).unwrap()).unwrap();
+    assert_eq!(identity["algorithm"], "sha256-nonforcing-v1");
+    assert!(identity["files"]
+        .as_object()
+        .unwrap()
+        .values()
+        .all(|entry| !entry["path"].as_str().unwrap().ends_with("forcing.nc")));
+    let provenance: Value =
+        serde_json::from_slice(&fs::read(case.join("out/siteA/produced-by.json")).unwrap())
+            .unwrap();
+    assert_eq!(provenance["verification"]["status"], "partial");
+    assert_eq!(
+        provenance["verification"]["nonforcing_inputs_verified"],
+        true
+    );
+    assert_eq!(
+        provenance["verification"]["forcing_contents_verified"],
+        false
+    );
+    let first_count = marker_lines(&root.join("kernel-programs.log")).len();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(case.join("forcing-data/forcing.nc"))
+        .unwrap()
+        .write_all(b"changed forcing contents")
+        .unwrap();
+    run_with_bin_ok(&cli, &args);
+    let calls = marker_lines(&root.join("kernel-programs.log"));
+    assert_eq!(&calls[first_count..], &["colm.x".to_owned()]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
@@ -500,6 +598,8 @@ fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -519,6 +619,8 @@ fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -561,6 +663,8 @@ fn run_rust_mksrfdata_sidecar_change_invalidates_all_preprocessing_downstream() 
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -580,6 +684,8 @@ fn run_rust_mksrfdata_sidecar_change_invalidates_all_preprocessing_downstream() 
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -1982,16 +2088,17 @@ fn two_model_versions_are_calibrated_with_the_same_design_and_compared() {
     switch_b.extend(["--model-version", "other"]);
     assert!(run_fail(&switch_b).contains("started with model version snow"));
 
-    // 同一份设定、同一个程序：两边应当打平，且声明设定一致。
+    // Matching design does not verify forcing contents or justify a winner.
     let compared: Value =
         serde_json::from_str(&run_ok(&["study-compare", &study_a, &study_b])).unwrap();
     assert_eq!(compared["same_design"], true, "{compared}");
-    assert_eq!(compared["inputs_verified"], true, "{compared}");
-    assert_eq!(compared["same_inputs"], true, "{compared}");
+    assert_eq!(compared["inputs_verified"], false, "{compared}");
+    assert_eq!(compared["forcing_contents_verified"], false, "{compared}");
+    assert_eq!(compared["same_inputs"], false, "{compared}");
     assert_eq!(compared["a"]["version"], "official");
     assert_eq!(compared["b"]["version"], "snow");
     assert_eq!(compared["period"], "validation", "{compared}");
-    assert_eq!(compared["better"], "tie", "{compared}");
+    assert!(compared["better"].is_null(), "{compared}");
     fs::remove_file(root.join("siteA-obs.nc")).unwrap();
     let missing_input: Value =
         serde_json::from_str(&run_ok(&["study-compare", &study_a, &study_b])).unwrap();
@@ -2195,9 +2302,10 @@ fn a_study_runs_on_a_server_and_its_results_come_back_into_the_local_study() {
     ))
     .unwrap();
     assert_eq!(compared["same_design"], true, "{compared}");
-    assert_eq!(compared["inputs_verified"], true, "{compared}");
-    assert_eq!(compared["same_inputs"], true, "{compared}");
-    assert_eq!(compared["better"], "tie", "{compared}");
+    assert_eq!(compared["inputs_verified"], false, "{compared}");
+    assert_eq!(compared["forcing_contents_verified"], false, "{compared}");
+    assert_eq!(compared["same_inputs"], false, "{compared}");
+    assert!(compared["better"].is_null(), "{compared}");
     assert_eq!(
         compared["a"]["best_member"], compared["b"]["best_member"],
         "{compared}"

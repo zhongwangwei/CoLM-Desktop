@@ -88,6 +88,7 @@ export default function RunPanel({
     [scheduler, setScheduler] = useState(settings?.scheduler || 'auto'),
     [cpus, setCpus] = useState(settings?.cpus || ''),
     [force, setForce] = useState(false),
+    [recordInputFingerprints, setRecordInputFingerprints] = useState(false),
     [remote, setRemote] = useState<unknown>(
       recoveringRun?.location === 'remote' && recoveringRun.status === 'unknown'
         ? (recoveringRun.progress?.remote ?? {
@@ -412,6 +413,7 @@ export default function RunPanel({
             kernel,
             stage: stage || null,
             force,
+            recordInputFingerprints,
             engine,
             preprocessors,
             ranks: nums[0],
@@ -460,6 +462,7 @@ export default function RunPanel({
           runId,
           kernel,
           force,
+          recordInputFingerprints,
           stage: stage || null,
           mpiRanks: nums[0],
           engine,
@@ -813,6 +816,13 @@ export default function RunPanel({
           },
         ]
       : []),
+    {
+      id: 'run-input-fingerprints',
+      label: t('记录其他文件指纹（默认关闭）', 'Record other file fingerprints (off by default)'),
+      value: String(recordInputFingerprints),
+      type: 'switch' as const,
+      set: (v: string) => setRecordInputFingerprints(v === 'true'),
+    },
     ...(!batchCases
       ? [
           {
@@ -998,6 +1008,8 @@ export default function RunPanel({
     submitting: t('正在提交', 'Submitting'),
   };
   const stageLabels: Record<string, string> = {
+    'input-check': t('检查实际输入', 'Checking actual inputs'),
+    'input-verify': t('核验运行输入', 'Verifying run inputs'),
     'preparing the engine': t('准备运行环境', 'Preparing the environment'),
     'installing Rust/Cargo': t('安装 Rust/Cargo', 'Installing Rust/Cargo'),
     'installing CMake': t('安装 CMake', 'Installing CMake'),
@@ -1097,6 +1109,13 @@ export default function RunPanel({
           )
           .map(render)}
       </div>
+      {render(fields.find((field) => field.id === 'run-input-fingerprints')!)}
+      <p className="muted">
+        {t(
+          '驱动数据始终跳过内容指纹，只记录数据集、路径、前缀和时段。此开关控制其他输入、程序及输出文件；关闭时仅记录来源和配置，开启后校验这些文件。模拟阶段会重新运行，驱动内容不作一致性认证。',
+          'Forcing data never receive content fingerprints; only their dataset, paths, prefixes and period are recorded. This switch controls other inputs, programs and outputs. When off, only sources and settings are recorded; when on, those files are verified. Simulation runs again, and forcing contents are not certified.',
+        )}
+      </p>
       {host && batchCases && (
         <Notice>
           {t(
@@ -1133,6 +1152,7 @@ export default function RunPanel({
                     'run-workers',
                     'run-cpus',
                     'run-scheduler',
+                    'run-input-fingerprints',
                   ].includes(f.id),
               )
               .map(render)}

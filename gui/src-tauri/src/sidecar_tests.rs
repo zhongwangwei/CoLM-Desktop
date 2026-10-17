@@ -761,6 +761,14 @@ fn engine_is_forwarded_only_when_chosen_and_must_be_known() {
 #[test]
 fn stage_headings_name_the_step_in_plain_words() {
     assert_eq!(
+        stage_heading("input-check"),
+        "──── 检查实际输入（input-check）────"
+    );
+    assert_eq!(
+        stage_heading("input-verify"),
+        "──── 核验运行输入（input-verify）────"
+    );
+    assert_eq!(
         super::stage_heading("mksrfdata"),
         "──── 制作地表数据（mksrfdata）────"
     );
@@ -1447,4 +1455,64 @@ fn template_creation_preserves_generated_forcing_path() {
     let mut imported = fields.clone();
     preserve_generated_forcing(None, &mut imported);
     assert_eq!(imported.len(), 2);
+}
+
+#[test]
+fn stderr_capture_preserves_nonempty_lines_for_failure_reason() {
+    let mut emitted = Vec::new();
+    let captured = read_stderr_lines(
+        std::io::Cursor::new("checking inputs\n \nError: missing data\n"),
+        |line| {
+            emitted.push(line.to_string());
+        },
+    );
+    assert_eq!(captured, ["checking inputs", "Error: missing data"]);
+    assert_eq!(emitted, captured);
+    assert_eq!(
+        failure_reason(&captured).as_deref(),
+        Some("checking inputs / Error: missing data")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn stderr_is_emitted_before_the_process_closes_its_pipe() {
+    use std::io::Write;
+    let (mut writer, reader) = std::os::unix::net::UnixStream::pair().unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let thread = std::thread::spawn(move || {
+        read_stderr_lines(BufReader::new(reader), |line| {
+            sender.send(line.to_string()).unwrap();
+        })
+    });
+    writeln!(writer, "checking inputs").unwrap();
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(2)).unwrap(),
+        "checking inputs"
+    );
+    writeln!(writer, "Error: missing data").unwrap();
+    drop(writer);
+    assert_eq!(
+        thread.join().unwrap(),
+        ["checking inputs", "Error: missing data"]
+    );
+    assert_eq!(
+        receiver.try_iter().collect::<Vec<_>>(),
+        ["Error: missing data"]
+    );
+}
+
+#[test]
+fn input_fingerprints_are_opt_in_for_ipc_run_arguments() {
+    for enabled in [None, Some(false), Some(true)] {
+        let mut args = run_args("/case", "/kernel", false, None, 1, None, None).unwrap();
+        add_input_fingerprints(&mut args, enabled);
+        assert_eq!(
+            args.iter().any(|arg| arg == "--record-input-fingerprints"),
+            enabled == Some(true)
+        );
+        if enabled == Some(true) {
+            assert!(args.ends_with(&["--record-input-fingerprints".into(), "1".into()]));
+        }
+    }
 }

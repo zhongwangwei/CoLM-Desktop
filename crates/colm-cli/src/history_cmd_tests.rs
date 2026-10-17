@@ -616,3 +616,22 @@ fn history_finishes_and_authorizes_registered_case_local_and_legacy_runs() {
         }
     }
 }
+
+#[test]
+fn nonforcing_digest_never_authorizes_complete_input_comparison() {
+    let mut identity = crate::fingerprint::FullInputIdentity::unavailable("fixture");
+    identity.algorithm = "sha256-nonforcing-v1".into();
+    identity.complete = true;
+    identity.unresolved.clear();
+    identity.data_sha256 = Some("a".repeat(64));
+    identity
+        .data_settings
+        .insert("forcing_content_policy".into(), "excluded-v1".into());
+    // Rejection precedes opening the case or attempting any actual input verification.
+    assert!(
+        complete_data_identity(&identity, Path::new("/missing-case"))
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported full-content")
+    );
+}

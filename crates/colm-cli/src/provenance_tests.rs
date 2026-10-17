@@ -183,3 +183,54 @@ fn frozen_child_program_identity_is_not_the_current_package_identity() {
     );
     std::fs::remove_dir_all(case).unwrap();
 }
+
+#[test]
+fn input_sources_record_settings_and_paths_without_opening_data() {
+    let root = case_dir("source-settings");
+    std::fs::write(root.join("case.nml"), "&nl_colm\n DEF_CASE_NAME = 'demo'\n DEF_dir_rawdata = '/unmounted/rawdata'\n DEF_forcing_namelist = 'forcing.nml'\n/\n").unwrap();
+    std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\n DEF_dir_forcing = '/unmounted/JRA3Q'\n DEF_forcing%dataset = 'JRA3Q'\n DEF_forcing%fprefix(1) = 'tmp2m/tmp2m'\n/\n").unwrap();
+    let sources = input_sources(&root).unwrap();
+    assert_eq!(
+        sources["case_settings"]["DEF_dir_rawdata"],
+        "'/unmounted/rawdata'"
+    );
+    assert_eq!(
+        sources["forcing_settings"]["DEF_dir_forcing"],
+        "'/unmounted/JRA3Q'"
+    );
+    assert_eq!(
+        sources["forcing_settings"]["DEF_forcing%dataset"],
+        "'JRA3Q'"
+    );
+    assert_eq!(sources["forcing_namelist"], json!(root.join("forcing.nml")));
+    assert!(sources.get("sha256").is_none());
+    assert_eq!(sources["forcing_content_policy"], "excluded-v1");
+    assert_eq!(sources["forcing_contents_verified"], false);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn disabled_recording_keeps_sources_without_program_or_output_hashes() {
+    let root = case_dir("fingerprints-disabled");
+    let version = Version::Official;
+    let mut value = value(
+        &record(&root, &root.join("no-kernel"), &version),
+        true,
+        None,
+    );
+    value["verification"] =
+        json!({"status":"disabled", "input_fingerprints":false, "content_fingerprints":false});
+    assert!(value.get("execution_program_sha256").is_none());
+    std::fs::create_dir_all(root.join("out/demo")).unwrap();
+    std::fs::write(root.join("out/demo/output.nc"), b"output contents").unwrap();
+    write_value(&root, &value);
+    let saved = read(&root).unwrap().unwrap();
+    assert!(saved.get("output_sha256").is_none());
+    assert!(saved.get("input_fingerprint").is_none());
+    assert_eq!(saved["verification"]["status"], "disabled");
+    assert_eq!(
+        saved["input_sources"]["case_namelist"],
+        json!(root.join("case.nml"))
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

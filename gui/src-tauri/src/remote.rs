@@ -1151,6 +1151,7 @@ pub async fn remote_run(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<Value, String> {
     if let Some(run_id) = &run_id {
         crate::sidecar::validate_run_id(run_id)?;
@@ -1166,6 +1167,7 @@ pub async fn remote_run(
     let server_args = server_case_args(&case, &host)?;
     validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
     let mut args = run_args(&server, case.clone(), kernel, stage, force, false, &engine);
+    crate::sidecar::add_input_fingerprints(&mut args, record_input_fingerprints);
     args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
@@ -1240,6 +1242,7 @@ pub async fn remote_preview(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<Value, String> {
     model_version_args(model_version.as_deref())?;
     let resources = resource_dir(&app);
@@ -1252,6 +1255,7 @@ pub async fn remote_preview(
     let server_args = server_case_args(&case, &host)?;
     validate_server_case_inputs(&app, &case, &host, &kernel, model_revision.clone()).await?;
     let mut args = run_args(&server, case, kernel, stage, force, true, &engine);
+    crate::sidecar::add_input_fingerprints(&mut args, record_input_fingerprints);
     args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;

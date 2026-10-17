@@ -1530,8 +1530,12 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         serde_json::from_value(provenance["full_input_identity"].clone())
             .context("run lacks complete content identities; replay refused")?;
     ensure!(
+        expected_full.algorithm == "sha256-nonforcing-v1",
+        "strict replay unavailable: the current policy never fingerprints forcing data, including legacy runs"
+    );
+    ensure!(
         expected_full.complete && expected_full.algorithm == "sha256-full-v1",
-        "input dependencies were not fully captured; replay refused"
+        "strict replay unavailable: forcing contents were deliberately excluded from verification"
     );
     let remote_replay = provenance["location"]["kind"] == "server";
     if !remote_replay {
@@ -1613,6 +1617,7 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         );
         flags.push((flag.into(), value.into()));
     }
+    flags.push(("--record-input-fingerprints".into(), "1".into()));
     let ranks = provenance["ranks"]
         .as_u64()
         .filter(|n| *n > 0)
@@ -2181,7 +2186,7 @@ mod upstream_artifact_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn sibling_run_reuses_only_verified_independent_upstream_copies() {
+    fn sibling_run_does_not_reuse_upstream_artifacts_without_forcing_verification() {
         let root = std::env::temp_dir().join(unique_id());
         let runs = root.join("Library/Application Support/runs");
         let kernel = root.join("kernel");
@@ -2304,18 +2309,13 @@ mod upstream_artifact_tests {
             "local",
         )
         .unwrap();
-        assert_eq!(
-            std::fs::read(new.join("out/demo/landdata/srfdata.nc")).unwrap(),
-            b"surface"
-        );
-        assert!(new.join("upstream-artifacts.json").is_file());
-        assert!(new.join("stages.json").is_file());
-        std::fs::write(new.join("out/demo/landdata/srfdata.nc"), b"new surface").unwrap();
+        assert!(!new.join("out/demo").exists());
+        assert!(!new.join("upstream-artifacts.json").exists());
+        assert!(!new.join("stages.json").exists());
         assert_eq!(
             std::fs::read(out.join("landdata/srfdata.nc")).unwrap(),
             b"surface"
         );
-        std::fs::remove_dir_all(new.join("out")).unwrap();
         std::fs::write(out.join("landdata/srfdata.nc"), b"corrupt").unwrap();
         restore_upstream_artifacts(
             &new,
@@ -2459,6 +2459,7 @@ mod prepared_operation_tests {
                 ("--model-id".into(), "official".into()),
                 ("--model-revision".into(), "1".into()),
                 ("--operation-id".into(), "gui-parent-operation".into()),
+                ("--record-input-fingerprints".into(), "1".into()),
                 (
                     "--history-db".into(),
                     root.join("history.sqlite").to_string_lossy().into_owned(),
@@ -2489,6 +2490,10 @@ mod prepared_operation_tests {
         .unwrap();
         let (prepared, run) = prepare(&opts).unwrap().unwrap();
         assert_eq!(prepared.get("--model-root"), opts.get("--model-root"));
+        assert_eq!(
+            prepared.get("--record-input-fingerprints").as_deref(),
+            Some("1")
+        );
         assert_eq!(run.operation_id, "gui-parent-operation");
         assert_eq!(
             run.run_case,

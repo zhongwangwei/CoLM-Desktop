@@ -384,29 +384,41 @@ fn hyperspectral_optical_sources_are_required_and_fingerprinted() {
 
     let source = root.join("water_params.txt");
     std::fs::write(&source, "first").unwrap();
-    let first = rust_preprocessor_input_identity(&[
-        "--highres-water-optics".into(),
-        source.to_string_lossy().into_owned(),
-    ])
+    let first = rust_preprocessor_input_identity(
+        &root,
+        &[
+            "--highres-water-optics".into(),
+            source.to_string_lossy().into_owned(),
+        ],
+    )
     .unwrap();
     std::fs::write(&source, "second").unwrap();
-    let second = rust_preprocessor_input_identity(&[
-        "--highres-water-optics".into(),
-        source.to_string_lossy().into_owned(),
-    ])
+    let second = rust_preprocessor_input_identity(
+        &root,
+        &[
+            "--highres-water-optics".into(),
+            source.to_string_lossy().into_owned(),
+        ],
+    )
     .unwrap();
     assert_ne!(first, second);
     let urban = root.join("urban_albedo.nc");
-    let first = rust_preprocessor_input_identity(&[
-        "--highres-urban-albedo".into(),
-        urban.to_string_lossy().into_owned(),
-    ])
+    let first = rust_preprocessor_input_identity(
+        &root,
+        &[
+            "--highres-urban-albedo".into(),
+            urban.to_string_lossy().into_owned(),
+        ],
+    )
     .unwrap();
     std::fs::write(&urban, "urban-updated").unwrap();
-    let second = rust_preprocessor_input_identity(&[
-        "--highres-urban-albedo".into(),
-        urban.to_string_lossy().into_owned(),
-    ])
+    let second = rust_preprocessor_input_identity(
+        &root,
+        &[
+            "--highres-urban-albedo".into(),
+            urban.to_string_lossy().into_owned(),
+        ],
+    )
     .unwrap();
     assert_ne!(first, second);
     std::fs::remove_dir_all(root).unwrap();
