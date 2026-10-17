@@ -120,7 +120,7 @@ export default function SpatialForcingFields({
                     )}
           </Notice>
         )}
-        {probe?.status === 'done' && (
+        {currentDataset === undefined && probe?.status === 'done' && (
           <p className="field-hint">
             {probe.coverage
               ? `${t('已读取强迫场时间覆盖', 'Read forcing time coverage')}：${probe.coverage.start} — ${probe.coverage.end}`
