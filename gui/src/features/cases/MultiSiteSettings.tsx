@@ -1,4 +1,4 @@
-import { Button, Field, Input, Notice, Select } from '../../components/ui';
+import { Button, Field, Input, DateInput, Notice, Select } from '../../components/ui';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { caseDirectory, type Site } from './case-model';
 import {
@@ -256,17 +256,26 @@ export default function MultiSiteSettings({
           <div className="form-grid">
             {(['name', 'start', 'end'] as const).map((field) => (
               <Field key={field} label={labels[field]}>
-                <Input
-                  type={field === 'name' ? 'text' : 'date'}
-                  value={draft[field]}
-                  disabled={disabled}
-                  onChange={(event) => update(draft.site, field, event.target.value)}
-                />
+                {field === 'name' ? (
+                  <Input
+                    type="text"
+                    value={draft[field]}
+                    disabled={disabled}
+                    onChange={(event) => update(draft.site, field, event.target.value)}
+                  />
+                ) : (
+                  <DateInput
+                    calendarLabel={`${t('选择日期', 'Choose date')} · ${labels[field]}`}
+                    value={draft[field]}
+                    disabled={disabled}
+                    onChange={(event) => update(draft.site, field, event.target.value)}
+                  />
+                )}
               </Field>
             ))}
             <Field label={labels.spinup_end}>
-              <Input
-                type="date"
+              <DateInput
+                calendarLabel={`${t('选择日期', 'Choose date')} · ${labels.spinup_end}`}
                 value={draft.spinup_end}
                 disabled={disabled}
                 onChange={(event) => {

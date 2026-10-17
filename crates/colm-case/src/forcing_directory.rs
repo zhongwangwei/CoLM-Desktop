@@ -63,49 +63,86 @@ pub fn forcing_directory_parents() -> Result<Vec<String>> {
 /// A candidate needs every required variable for one common year/month.
 /// Identical layouts deliberately produce multiple candidates (e.g. ERA5 and ERA5_LEddy).
 pub fn forcing_directory_candidates(files: &BTreeSet<String>) -> Result<Vec<String>> {
-    let mut candidates = Vec::new();
-    for template in templates()? {
-        let (index, prefix) = template
-            .variables
-            .first()
-            .context("empty forcing template")?;
-        let mut matched = false;
-        for month in 1..=12 {
-            let pattern = metfilename_with_year(&template.dataset, prefix, "YEAR", month, *index);
-            let start = pattern
-                .trim_start_matches('/')
-                .split("YEAR")
-                .next()
-                .unwrap();
-            for file in files.range(start.to_owned()..) {
-                let Some(rest) = file.strip_prefix(start) else {
-                    break;
-                };
-                let Some(year) = rest
-                    .get(..4)
-                    .filter(|y| y.bytes().all(|c| c.is_ascii_digit()))
-                else {
-                    continue;
-                };
-                if template.variables.iter().all(|(i, p)| {
-                    files.contains(
-                        metfilename_with_year(&template.dataset, p, year, month, *i)
-                            .trim_start_matches('/'),
+    Ok(templates()?
+        .iter()
+        .filter(|template| !matching_periods(template, files).is_empty())
+        .map(|template| template.name.to_owned())
+        .collect())
+}
+
+/// Complete filename groups. Actual time coordinates still need separate validation.
+pub struct ForcingPeriod {
+    pub year: i32,
+    pub month: u32,
+    pub files: Vec<(usize, String)>,
+}
+
+pub fn forcing_directory_periods(
+    dataset: &str,
+    files: &BTreeSet<String>,
+) -> Result<Vec<ForcingPeriod>> {
+    let template = templates()?
+        .into_iter()
+        .find(|template| template.name == dataset)
+        .context("unknown forcing template")?;
+    Ok(matching_periods(&template, files)
+        .into_iter()
+        .map(|(year, month)| ForcingPeriod {
+            year,
+            month,
+            files: template
+                .variables
+                .iter()
+                .map(|(index, prefix)| {
+                    (
+                        *index,
+                        metfilename_with_year(
+                            &template.dataset,
+                            prefix,
+                            &format!("{year:04}"),
+                            month as i32,
+                            *index,
+                        )
+                        .trim_start_matches('/')
+                        .to_owned(),
                     )
-                }) {
-                    matched = true;
-                    break;
-                }
-            }
-            if matched {
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+fn matching_periods(template: &Template, files: &BTreeSet<String>) -> BTreeSet<(i32, u32)> {
+    let (index, prefix) = &template.variables[0];
+    let mut periods = BTreeSet::new();
+    for month in 1..=12 {
+        let pattern = metfilename_with_year(&template.dataset, prefix, "YEAR", month, *index);
+        let start = pattern
+            .trim_start_matches('/')
+            .split("YEAR")
+            .next()
+            .unwrap();
+        for file in files.range(start.to_owned()..) {
+            let Some(rest) = file.strip_prefix(start) else {
                 break;
+            };
+            let Some(year) = rest
+                .get(..4)
+                .filter(|y| y.bytes().all(|c| c.is_ascii_digit()))
+            else {
+                continue;
+            };
+            if template.variables.iter().all(|(i, p)| {
+                files.contains(
+                    metfilename_with_year(&template.dataset, p, year, month, *i)
+                        .trim_start_matches('/'),
+                )
+            }) {
+                periods.insert((year.parse().expect("four ASCII digits"), month as u32));
             }
-        }
-        if matched {
-            candidates.push(template.name.to_owned());
         }
     }
-    Ok(candidates)
+    periods
 }
 
 #[cfg(test)]

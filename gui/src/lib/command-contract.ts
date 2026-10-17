@@ -1259,6 +1259,10 @@ export const commandContract = {
     "host": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "dataset": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "remote_scan_sites": {

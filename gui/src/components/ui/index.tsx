@@ -5,6 +5,7 @@ import {
   isValidElement,
   useId,
   useState,
+  useRef,
   type ComponentProps,
   type ReactNode,
   type ReactElement,
@@ -13,6 +14,7 @@ import { Slot, Dialog as RadixDialog, ContextMenu as RadixContextMenu } from 'ra
 import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { useApp } from '../../lib/app-state';
+import { validDate } from '../../lib/dates';
 const buttonStyle = cva('button', {
   variants: {
     variant: {
@@ -39,6 +41,99 @@ export function Button({
 }
 export function Input({ className, ...props }: ComponentProps<'input'>) {
   return <input className={cn('input', className)} {...props} />;
+}
+export function DateInput({
+  value,
+  onChange,
+  disabled,
+  readOnly,
+  calendarLabel,
+  ...props
+}: Omit<ComponentProps<'input'>, 'type' | 'value'> & { value: string; calendarLabel: string }) {
+  const picker = useRef<HTMLInputElement>(null);
+  const [nativeVisible, setNativeVisible] = useState(false);
+  function openCalendar() {
+    if (disabled || readOnly || !picker.current) return;
+    // Older WebKit can silently ignore showPicker, so keep its date control reachable.
+    setNativeVisible(true);
+    picker.current.focus({ preventScroll: true });
+    try {
+      if (typeof picker.current.showPicker === 'function') {
+        picker.current.showPicker();
+      }
+    } catch {
+      // Older webviews can still expose their ordinary native date control.
+    }
+  }
+  return (
+    <div
+      className="browse-input"
+      style={{ position: 'relative', flexWrap: nativeVisible ? 'wrap' : undefined }}
+    >
+      <Input
+        {...props}
+        type="text"
+        value={value}
+        disabled={disabled}
+        readOnly={readOnly}
+        placeholder={props.placeholder ?? 'YYYY-MM-DD'}
+        maxLength={props.maxLength ?? 10}
+        onChange={(event) => {
+          onChange?.(event);
+          setNativeVisible(false);
+        }}
+      />
+      <Button
+        disabled={disabled || readOnly}
+        aria-label={calendarLabel}
+        title={calendarLabel}
+        onClick={openCalendar}
+      >
+        <svg
+          width="18"
+          height="18"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          aria-hidden="true"
+        >
+          <rect x="3" y="5" width="18" height="16" rx="2" />
+          <path d="M16 3v4M8 3v4M3 11h18" />
+        </svg>
+      </Button>
+      <input
+        ref={picker}
+        className="input"
+        type="date"
+        aria-label={calendarLabel}
+        aria-describedby={props['aria-describedby']}
+        tabIndex={nativeVisible ? 0 : -1}
+        min={props.min ?? '0001-01-01'}
+        max={props.max ?? '9999-12-31'}
+        value={validDate(value) ? value : ''}
+        onChange={(event) => {
+          onChange?.(event);
+          setNativeVisible(false);
+        }}
+        disabled={disabled}
+        readOnly={readOnly}
+        style={
+          nativeVisible
+            ? { flexBasis: '100%' }
+            : {
+                position: 'absolute',
+                right: 0,
+                bottom: 0,
+                width: 1,
+                height: 1,
+                opacity: 0,
+                pointerEvents: 'none',
+              }
+        }
+      />
+    </div>
+  );
 }
 export function Select({ className, ...props }: ComponentProps<'select'>) {
   return <select className={cn('input', className)} {...props} />;
@@ -106,7 +201,7 @@ export function Field({
     Children.map(nodes, (child) => {
       if (controlId || !isValidElement<{ id?: string; type?: string; children?: ReactNode }>(child))
         return child;
-      const input = child.type === Input || child.type === 'input';
+      const input = child.type === Input || child.type === DateInput || child.type === 'input';
       if (
         (input &&
           !['hidden', 'button', 'submit', 'reset', 'image'].includes(child.props.type ?? 'text')) ||

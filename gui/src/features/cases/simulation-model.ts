@@ -1,4 +1,6 @@
 import { bilingual } from '../../lib/bilingual';
+import { validDate } from '../../lib/dates';
+export { validDate } from '../../lib/dates';
 import { caseDirectory, siteVersionMismatch, type SchemaField, type Site } from './case-model';
 
 export type SimulationStep = 1 | 2 | 3 | 4 | 5;
@@ -9,11 +11,6 @@ export const simulationSteps = [
   ['模型结构与方案', 'Model structure and schemes'],
   ['检查与运行', 'Review and run'],
 ] as const;
-export function validDate(value: string): boolean {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || Number(value.slice(0, 4)) < 1) return false;
-  const date = new Date(`${value}T00:00:00Z`);
-  return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value;
-}
 export function caseDate(
   values: Record<string, string>,
   prefix: 'start' | 'end' | 'spinup',

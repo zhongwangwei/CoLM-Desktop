@@ -2,7 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
-import { Button, Card, Input, Select, Field, Notice, Advanced } from '../../components/ui';
+import {
+  Button,
+  Card,
+  Input,
+  DateInput,
+  Select,
+  Field,
+  Notice,
+  Advanced,
+} from '../../components/ui';
 import { isCaseField, displayLiteral, effectiveModelFields, type SchemaField } from './case-model';
 import { compatibleKernel } from '../runs/run-model';
 import {
@@ -1041,10 +1050,8 @@ export default function CasesPage() {
             : t('预热结束日期（留空不预热）', 'Spin-up end (blank disables spin-up)')
       }
     >
-      <Input
-        type="text"
-        placeholder="YYYY-MM-DD"
-        maxLength={10}
+      <DateInput
+        calendarLabel={`${t('选择日期', 'Choose date')} · ${prefix === 'start' ? t('开始日期', 'Start date') : prefix === 'end' ? t('结束日期', 'End date') : t('预热结束日期', 'Spin-up end')}`}
         value={prefix === 'start' ? start : prefix === 'end' ? end : spinup}
         disabled={dateDisabled(prefix)}
         onChange={(e) => setDate(prefix, e.target.value)}
@@ -1218,8 +1225,8 @@ export default function CasesPage() {
               </div>
               <p className="field-hint">
                 {t(
-                  '格式 YYYY-MM-DD，例如 2001-01-01。结束日期是截止时刻；日内起止秒数保持原配置。',
-                  'Use YYYY-MM-DD, e.g. 2001-01-01. The end is a cutoff; existing time-of-day seconds are preserved.',
+                  '可填写 YYYY-MM-DD（例如 2001-01-01）或点日历选择。结束日期是截止时刻；日内起止秒数保持原配置。',
+                  'Enter YYYY-MM-DD, e.g. 2001-01-01, or choose from the calendar. The end is a cutoff; existing time-of-day seconds are preserved.',
                 )}
               </p>
               <div

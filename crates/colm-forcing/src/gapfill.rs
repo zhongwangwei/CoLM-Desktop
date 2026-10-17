@@ -1476,17 +1476,14 @@ fn file_times(file: &netcdf::File, name: &str, offset_hours: f64) -> Result<(Vec
     Ok((times, units))
 }
 
-fn validate_cf_calendar(variable: &netcdf::Variable<'_>) -> Result<()> {
-    let Some(calendar) = variable
-        .attribute_value("calendar")
-        .and_then(|value| value.ok())
-        .and_then(|value| match value {
-            netcdf::AttributeValue::Str(value) => Some(value),
-            netcdf::AttributeValue::Strs(values) => values.into_iter().next(),
-            _ => None,
-        })
-    else {
+pub(crate) fn validate_cf_calendar(variable: &netcdf::Variable<'_>) -> Result<()> {
+    let Some(calendar) = variable.attribute_value("calendar") else {
         return Ok(());
+    };
+    let calendar = match calendar? {
+        netcdf::AttributeValue::Str(value) => value,
+        netcdf::AttributeValue::Strs(values) if values.len() == 1 => values[0].clone(),
+        other => bail!("CF calendar is not a single string: {other:?}"),
     };
     match calendar.trim().to_ascii_lowercase().as_str() {
         "" | "standard" | "gregorian" | "proleptic_gregorian" => Ok(()),
@@ -1496,7 +1493,7 @@ fn validate_cf_calendar(variable: &netcdf::Variable<'_>) -> Result<()> {
     }
 }
 
-fn parse_cf_time_units(units: &str) -> Result<(f64, i64)> {
+pub(crate) fn parse_cf_time_units(units: &str) -> Result<(f64, i64)> {
     let (unit, origin) = units
         .split_once(" since ")
         .with_context(|| format!("time units {units:?} has no ' since '"))?;

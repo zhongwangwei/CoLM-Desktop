@@ -143,6 +143,7 @@ function page(
         'Card',
         'Field',
         'Input',
+        'DateInput',
         'Select',
         'Advanced',
         'Notice',
@@ -3647,4 +3648,106 @@ test('multi-site confirmation summarizes the count without duplicating per-stati
   assert.match(text, /已选择 2 个站点/);
   assert.doesNotMatch(text, /2005-03-01|2008-12-31|multi-project\/other/);
   assert.equal(p.render().actions.find((action) => action.id === 'new-create')!.enabled, true);
+});
+
+test('new case calendar fields use the form setters and preserve spinup configuration', async () => {
+  const p = page('NewCasePage', {
+    form: { ...form, spinup_end: '2001-06-01' },
+    sites: [site],
+    step: 3,
+  });
+  await p.mount();
+  const dates = p.elements.filter((e) => e.type === 'DateInput');
+  assert.equal(dates.length, 3);
+  assert.ok(dates.every((e) => e.props.disabled === false && e.props.calendarLabel));
+  (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '2001-02-01' },
+  });
+  const c = p.render();
+  assert.equal(c.fields.find((f) => f.id === 'new-start')?.value, '2001-02-01');
+  assert.equal(c.fields.find((f) => f.id === 'new-spinup_end')?.value, '2001-06-01');
+  assert.equal(c.actions.find((a) => a.id === 'new-next')?.enabled, true);
+});
+
+test('existing case calendar fields save dates without changing time-of-day or spinup', async () => {
+  const p = page('CasesPage');
+  await p.mount();
+  await p.goto('case-step-3');
+  const dates = p.elements.filter((e) => e.type === 'DateInput');
+  assert.equal(dates.length, 3);
+  assert.ok(dates.every((e) => e.props.disabled === false && e.props.calendarLabel));
+  (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '2001-01-01' },
+  });
+  p.render();
+  await p.click('case-save');
+  const saved = p.calls.find((call) => call.command === 'case_data_save');
+  assert.ok(saved);
+  assert.deepEqual(saved.args.fields, [{ path: 'DEF_simulation_time%start_year', value: '2001' }]);
+});
+
+test('spatial coverage fills automatic dates and protects manual edits on dataset changes', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...spatialForcingForm, start: '', end: '' }, step: 3 },
+    [site],
+    initialValues,
+    {
+      forcingProbe: async (args) => ({
+        path: args.path,
+        candidates: ['ERA5LAND'],
+        truncated: false,
+        coverage:
+          args.dataset === 'CMFD'
+            ? { start: '2010-01-01', end: '2012-12-31' }
+            : { start: '2000-01-01', end: '2005-12-31' },
+        coverage_error: null,
+      }),
+    },
+  );
+  await p.mount();
+  p.set('new-spatial_forcingdir', '/data');
+  await p.settle();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '2000-01-01');
+  assert.equal(p.render().fields.find((f) => f.id === 'new-end')?.value, '2005-12-31');
+  p.set('new-start', '200');
+  p.set('new-forcing-dataset', 'CMFD');
+  await p.settle();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '200');
+  assert.equal(p.render().fields.find((f) => f.id === 'new-end')?.value, '2012-12-31');
+  assert.deepEqual(p.calls.filter((c) => c.command === 'probe_forcing_directory').at(-1)?.args, {
+    path: '/data',
+    host: null,
+    dataset: 'CMFD',
+  });
+});
+
+test('spatial coverage ignores stale datasets and unblurred directory edits', async () => {
+  const pending: ((value: unknown) => void)[] = [];
+  const p = page(
+    'NewCasePage',
+    { form: { ...spatialForcingForm, start: '', end: '' }, step: 3 },
+    [site],
+    initialValues,
+    {
+      forcingProbe: () => new Promise((resolve) => pending.push(resolve)),
+    },
+  );
+  await p.mount();
+  p.set('new-spatial_forcingdir', '/data');
+  p.set('new-forcing-dataset', 'CMFD');
+  const response = (start: string) => ({
+    path: '/data',
+    candidates: ['CMFD'],
+    truncated: false,
+    coverage: { start, end: '2012-12-31' },
+  });
+  pending[0](response('2000-01-01'));
+  await p.settle();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '');
+  (p.element('SpatialForcingFields').props.onDirectoryChange as (value: string) => void)('/typing');
+  pending[1](response('2010-01-01'));
+  await p.settle();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '');
+  assert.equal(p.render().details.forcing, null);
 });

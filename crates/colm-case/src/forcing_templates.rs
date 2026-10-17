@@ -201,4 +201,7 @@ pub fn metfilename_with_year(
 
 #[path = "forcing_directory.rs"]
 mod directory;
-pub use directory::{forcing_directory_candidates, forcing_directory_parents};
+pub use directory::{
+    forcing_directory_candidates, forcing_directory_parents, forcing_directory_periods,
+    ForcingPeriod,
+};
