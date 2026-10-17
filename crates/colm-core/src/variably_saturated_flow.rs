@@ -2147,7 +2147,7 @@ pub fn apply_variable_saturated_explicit_step(
         interface_flux_mm_s[0] =
             input.previous_ponding_depth_mm / input.time_step_seconds + input.upper_boundary.value;
     }
-    // 自上而下削减出流（CoLM-SYSU/CoLM#507 的新写法）：某层被抽干（`wa_m1 + dwat < -tol_z`）时，
+    // 自上而下削减出流（CoLM-SYSU/CoLM#507 的新写法）：某层被抽干时，
     // 若上一层的界面通量是向上的且那层没被抽干过，就先削减上界面的向上通量、退回上一层重查；
     // 否则削减下界面的出流。最上层抽干时，降雨边界先用积水补，补不够才把顶界面也截住。
     let previous_water_of = |layer: usize| {
@@ -2169,7 +2169,8 @@ pub fn apply_variable_saturated_explicit_step(
         // `wa_m1 + dwat`：`dwat = (q(i-1)-q(i))*dt` 的乘积收进这个加法。
         let remaining = (interface_flux_mm_s[layer] - interface_flux_mm_s[layer + 1])
             .contract(dt, previous_water);
-        if remaining < -input.depth_tolerance_mm {
+        // Solver depth tolerance must not permit negative water to leave the column step.
+        if remaining < -crate::SOIL_WATER_ROUNDOFF_KG_M2 {
             if layer > 0 {
                 if interface_flux_mm_s[layer] < 0.0 && !dried[layer - 1] {
                     interface_flux_mm_s[layer] =
