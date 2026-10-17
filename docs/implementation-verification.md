@@ -33388,3 +33388,20 @@ CPU 偷走，fork–join 的开销远超计算本身。去掉嵌套以后，下�
 这个算例写成 `.false.` 是 GUI 的缺陷：`regionalRoutingPatch`（`gui/src/features/cases/model-settings.ts`）只把**显式写出**的
 `DEF_USE_GridRiverLakeFlow = .true.` 当成开着，没写时按关处理（`exclusionPatch` 里还写着 `?? '.false.'`），而上游默认是 `.true.`
 （`MOD_Namelist.F90:395`）。本轮没有改 GUI，留作后续。
+
+## 上游核对：zhongwangwei/CoLM202X 到 667b08a5（2026-10-18，不并入）
+
+**范围**：fork 上次并入 vendor 的是 #26（`64ac84c8`，即本仓库 `bef6fe93`）。之后只有 #27（`2d73bd4a`、`0be0de10`，合并于 `667b08a5`）。
+CoLM-SYSU/CoLM 的 master 末端仍是 `a71a81bf`。fork 在 #26 里用 `ed94372f` 同步了它的八个提交，改动只涉及三个文件：
+`MOD_Hydro_SoilWater` 的 `dried` 回溯、`MOD_Runoff` 方法 2 的回退、`DEF_HIST_grid_as_model_mesh`。这三处 vendor 都已经有了
+（`f59ffdce`；`grep` 逐处核对过）。
+
+**#27 的内容**：带符号的示踪物土壤"欠账"实验，改 `MOD_Tracer_SoilWater`/`_Conservation`/`_Rest`，另加 `tests/` 下三个文件。
+新增的代码除一个空行外，全部在 `#ifdef TRACER_SIGNED_SOIL_DEBT_EXPERIMENT` 里；作者注明这是直接调内核的原型，生产环境不要打开，
+全模型与续跑路径会主动 `CoLM_stop`。
+
+**核对**：用 fork 的 `define.h`（打开 `TRACER`）和 `gfortran -cpp -E -P` 预处理 #27 前后的三个文件：`_Conservation`（1059 行）、
+`_Rest`（1527 行）完全相同，`_SoilWater` 只多一个空行（第 2093 行）。补丁能干净地打到 vendor 上（`git apply --check`）。
+
+**结论**：生产路径的 Fortran 与 Rust 都不用修。vendor 暂不镜像 #27：宏关闭时没有任何作用，宏打开时上游自己也拒绝全模型运行；
+而改动 vendor 会变动内核源码指纹，所有缓存的内核和服务器引擎都要重编。等这个实验转正（宏默认打开或进入全模型）时再并入、再移植。
