@@ -1029,7 +1029,7 @@ pub(crate) fn full_inputs_with_progress(
         .insert("forcing_content_policy".into(), "excluded-v1".into());
     out.data_settings.extend(excluded.settings.clone());
     for key in force.paths() {
-        if key.to_ascii_lowercase() != "def_dir_forcing"
+        if !key.eq_ignore_ascii_case("def_dir_forcing")
             && !key.to_ascii_lowercase().contains("fprefix")
         {
             if let Some(value) = force.get(&key) {
