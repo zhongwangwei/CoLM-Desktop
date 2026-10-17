@@ -4378,3 +4378,139 @@ fn server_case_runtime_checks_keep_server_paths_and_numerical_guards() {
     assert!(super::validate_runtime_contract(&doc, &root, None).is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn spatial_forcing_edit_preserves_custom_fields_and_shared_source() {
+    let dirs = batch("spatial-forcing-edit", &[NML_A]);
+    let dir = std::path::Path::new(&dirs[0]);
+    let shared = dir.parent().unwrap().join("shared.nml");
+    let original = "&nl_colm_forcing\n DEF_dir_forcing='/old/'\n DEF_forcing%dataset='CUSTOM'\n DEF_forcing%offset=17\n/\n";
+    std::fs::write(&shared, original).unwrap();
+    let mut case = colm_namelist::parse(NML_A).unwrap();
+    put(
+        &mut case,
+        "DEF_GRIDBASED_lon_res",
+        colm_namelist::Value::Real { text: "1.0".into() },
+    )
+    .unwrap();
+    put(
+        &mut case,
+        "DEF_forcing_namelist",
+        colm_namelist::Value::Str(shared.to_string_lossy().into_owned()),
+    )
+    .unwrap();
+    std::fs::write(dir.join("case.nml"), case.to_string()).unwrap();
+    let prepared = case_forcing::prepare(
+        &dirs,
+        &ForcingInput {
+            directory: dirs[0].clone(),
+            dataset: None,
+        },
+    )
+    .unwrap();
+    let preview = dir.join("preview");
+    std::fs::create_dir_all(&preview).unwrap();
+    std::fs::copy(dir.join("case.nml"), preview.join("case.nml")).unwrap();
+    prepared.stage_preview(preview.to_str().unwrap()).unwrap();
+    assert_eq!(
+        character(
+            &colm_namelist::parse(&std::fs::read_to_string(preview.join("forcing.nml")).unwrap())
+                .unwrap(),
+            "DEF_forcing%dataset"
+        ),
+        "CUSTOM"
+    );
+    assert!(!dir.join("forcing.nml").exists());
+    super::set_fields_with_forcing(dirs.clone(), vec![], &[], None, None, Some(&prepared)).unwrap();
+    assert_eq!(
+        character(
+            &colm_namelist::parse(&std::fs::read_to_string(dir.join("case.nml")).unwrap()).unwrap(),
+            "DEF_forcing_namelist"
+        ),
+        "forcing.nml"
+    );
+    assert_eq!(std::fs::read_to_string(shared).unwrap(), original);
+    let saved =
+        colm_namelist::parse(&std::fs::read_to_string(dir.join("forcing.nml")).unwrap()).unwrap();
+    assert_eq!(
+        saved.get("DEF_forcing%offset"),
+        Some(&colm_namelist::Value::Int(17))
+    );
+    assert_eq!(character(&saved, "DEF_forcing%dataset"), "CUSTOM");
+    assert_eq!(
+        case_forcing_input(dirs[0].clone()).unwrap().directory,
+        format!("{}/", dirs[0])
+    );
+    assert!(prepared.unchanged().is_err());
+    let prepared = case_forcing::prepare(
+        &dirs,
+        &ForcingInput {
+            directory: dirs[0].clone(),
+            dataset: Some("MSWX".into()),
+        },
+    )
+    .unwrap();
+    let before = std::fs::read(dir.join("case.nml")).unwrap();
+    let owned = dir.join("forcing.nml");
+    let original_permissions = std::fs::metadata(&owned).unwrap().permissions();
+    let mut readonly = original_permissions.clone();
+    readonly.set_readonly(true);
+    std::fs::set_permissions(&owned, readonly).unwrap();
+    assert!(
+        super::set_fields_with_forcing(dirs.clone(), vec![], &[], None, None, Some(&prepared))
+            .is_err()
+    );
+    std::fs::set_permissions(&owned, original_permissions).unwrap();
+    assert_eq!(std::fs::read(dir.join("case.nml")).unwrap(), before);
+    assert_eq!(
+        character(
+            &colm_namelist::parse(&std::fs::read_to_string(owned).unwrap()).unwrap(),
+            "DEF_forcing%dataset"
+        ),
+        "CUSTOM"
+    );
+}
+
+#[test]
+fn spatial_forcing_read_resolves_server_cache_and_preserves_server_data_path() {
+    let dirs = batch("spatial-forcing-remote", &["&nl_colm\n DEF_GRIDBASED_lon_res=1.0\n DEF_forcing_namelist='/server/project/case/forcing.nml'\n/\n"]);
+    let dir = std::path::Path::new(&dirs[0]);
+    std::fs::write(
+        dir.join(".colm-desktop.json"),
+        r#"{"run_host":"server","remote_directory":"/server/project/case"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing='/server/data'\n DEF_forcing%dataset='MSWX'\n/\n",
+    )
+    .unwrap();
+    assert_eq!(
+        case_forcing_input(dirs[0].clone()).unwrap().directory,
+        "/server/data"
+    );
+    let prepared = case_forcing::prepare(
+        &dirs,
+        &ForcingInput {
+            directory: "/server/new-data".into(),
+            dataset: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        character(
+            &colm_namelist::parse(&prepared.text).unwrap(),
+            "DEF_dir_forcing"
+        ),
+        "/server/new-data/"
+    );
+    assert_eq!(prepared.path, dir.join("forcing.nml"));
+    assert!(case_forcing::prepare(
+        &[],
+        &ForcingInput {
+            directory: "/data".into(),
+            dataset: None
+        }
+    )
+    .is_err());
+}

@@ -128,6 +128,12 @@ export const commandContract = {
   },
   "assistant_cancel": {},
   "assistant_new_session": {},
+  "case_forcing_input": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "backend_ready": {},
   "probe_log": {
     "msg": {
@@ -405,6 +411,10 @@ export const commandContract = {
     "modelRevision": {
       "required": false,
       "rust_type": "Option<colm_model::VersionRef>"
+    },
+    "forcing": {
+      "required": false,
+      "rust_type": "Option<ForcingInput>"
     }
   },
   "install_example": {},
@@ -1239,6 +1249,16 @@ export const commandContract = {
     "studyDir": {
       "required": true,
       "rust_type": "String"
+    }
+  },
+  "probe_forcing_directory": {
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "host": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "remote_scan_sites": {

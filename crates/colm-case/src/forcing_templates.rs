@@ -148,3 +148,57 @@ pub fn render_forcing_namelist(dataset: &str, forcing_dir: &str) -> Result<Strin
 #[cfg(test)]
 #[path = "forcing_templates_tests.rs"]
 mod forcing_templates_tests;
+
+/// 与运行期文件命名一致，年份串由调用方给：`DEF_USE_ClimForcing_for_Spinup` 预热期是 `'clim'`
+/// （`MOD_UserSpecifiedForcing.F90:172-176`）。
+pub fn metfilename_with_year(
+    dataset: &str,
+    prefix: &str,
+    y: &str,
+    month: i32,
+    variable: usize,
+) -> String {
+    let m = format!("{month:02}");
+    match dataset {
+        "PRINCETON" => format!("/{prefix}{y}-{y}.nc"),
+        "GSWP3" | "QIAN" | "CRUNCEPV4" | "CRUNCEPV7" | "WFDEI" => format!("/{prefix}{y}-{m}.nc"),
+        "ERA5LAND" => {
+            const SUFFIX: [&str; 8] = [
+                "_2m_temperature.nc",
+                "_specific_humidity.nc",
+                "_surface_pressure.nc",
+                "_total_precipitation_m_hr.nc",
+                "_10m_u_component_of_wind.nc",
+                "_10m_v_component_of_wind.nc",
+                "_surface_solar_radiation_downwards_w_m2.nc",
+                "_surface_thermal_radiation_downwards_w_m2.nc",
+            ];
+            format!("/{prefix}_{y}_{m}{}", SUFFIX[variable])
+        }
+        "ERA5" => {
+            const SUFFIX: [&str; 8] = [
+                "_2m_temperature.nc4",
+                "_q.nc4",
+                "_surface_pressure.nc4",
+                "_mean_total_precipitation_rate.nc4",
+                "_10m_u_component_of_wind.nc4",
+                "_10m_v_component_of_wind.nc4",
+                "_mean_surface_downward_short_wave_radiation_flux.nc4",
+                "_mean_surface_downward_long_wave_radiation_flux.nc4",
+            ];
+            format!("/{prefix}_{y}_{m}{}", SUFFIX[variable])
+        }
+        "MSWX" | "JRA3Q" => format!("/{prefix}_{y}_{m}.nc"),
+        "WFDE5" => format!("/{prefix}{y}{m}_v2.1.nc"),
+        "CRUJRA" => format!("/{prefix}{y}.365d.noc.nc"),
+        "JRA55" | "CMFDv2" | "TPMFD" => format!("/{prefix}{y}{m}.nc"),
+        "GDAS" | "CMFD" => format!("/{prefix}{y}{m}.nc4"),
+        "CLDAS" => format!("/{prefix}-{y}{m}.nc"),
+        "CMIP6" | "CRA40" | "IsoGSM" => format!("/{prefix}_{y}.nc"),
+        other => unreachable!("dataset {other} has no metfilename branch"),
+    }
+}
+
+#[path = "forcing_directory.rs"]
+mod directory;
+pub use directory::{forcing_directory_candidates, forcing_directory_parents};

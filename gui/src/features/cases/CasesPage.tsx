@@ -38,6 +38,9 @@ import RunLocationSettings from '../runs/RunLocationSettings';
 import type { Server } from '../resources/resource';
 import ResultsPage from '../results/ResultsPage';
 import HistoryPage from '../history/HistoryPage';
+import RemotePathBrowser from '../../components/RemotePathBrowser';
+import SpatialForcingFields, { type ForcingLayoutProbe } from './SpatialForcingFields';
+type ForcingInput = { directory: string; dataset: string };
 export default function CasesPage() {
   const { state, update, navigate, notify } = useApp(),
     en = state.language === 'en',
@@ -52,6 +55,14 @@ export default function CasesPage() {
   const [runPending, setRunPending] = useState(false);
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
+  const [forcingInput, setForcingInput] = useState<ForcingInput | null>(null);
+  const [savedForcing, setSavedForcing] = useState<ForcingInput | null>(null);
+  const [forcingTemplate, setForcingTemplate] = useState('');
+  const [forcingDatasets, setForcingDatasets] = useState<string[]>([]);
+  const [forcingInputError, setForcingInputError] = useState('');
+  const [forcingProbe, setForcingProbe] = useState<ForcingLayoutProbe | null>(null);
+  const [forcingPicker, setForcingPicker] = useState(false);
+  const forcingSequence = useRef(0);
   useEffect(() => {
     let current = true;
     invoke<{ servers: Server[] }>('remote_config', {})
@@ -70,12 +81,15 @@ export default function CasesPage() {
   }, []);
   const runHost = state.selectedCase?.profile.run_host ?? '';
   const remoteDirectory = state.selectedCase?.profile.remote_directory;
+  const forcingPathHost = remoteDirectory ? runHost : '';
   async function changeRunHost(host: string) {
     if (remoteDirectory && host !== runHost) return;
     if (!dir || editingDisabled || dirty || lock.current) return;
     const target = dir;
     await work(async () => {
       await invoke('set_case_run_host', { dir: target, host: host || null });
+      ++forcingSequence.current;
+      setForcingProbe(null);
       update((old) =>
         old.selectedCase?.entry.dir === target
           ? {
@@ -142,7 +156,10 @@ export default function CasesPage() {
     modelContext.revision === revision
       ? modelContext.profile
       : null;
+  const forcingDirty =
+    !!forcingInput && (forcingInput.directory !== savedForcing?.directory || !!forcingTemplate);
   const dirty =
+    forcingDirty ||
     Object.keys(values).some((k) => values[k] !== saved[k]) ||
     (['start', 'end', 'spinup'] as const).some(
       (prefix) => dateDraft[prefix] !== undefined && dateDraft[prefix] !== caseDate(saved, prefix),
@@ -260,6 +277,10 @@ export default function CasesPage() {
     setValues({ ...saved });
     setDateDraft({});
     setError('');
+    ++forcingSequence.current;
+    setForcingInput(savedForcing);
+    setForcingTemplate('');
+    setForcingProbe(null);
   }
   useEffect(() => {
     const request = { active: true };
@@ -275,6 +296,13 @@ export default function CasesPage() {
     setModelContext(null);
     setOptionStates([]);
     setError('');
+    ++forcingSequence.current;
+    setForcingInput(null);
+    setSavedForcing(null);
+    setForcingTemplate('');
+    setForcingProbe(null);
+    setForcingPicker(false);
+    setForcingInputError('');
     if (!dir) {
       setBusy(false);
       return () => {
@@ -297,6 +325,22 @@ export default function CasesPage() {
       }>('model_case_context', { dir, modelRevision: versionRef });
       if (!request.active) return;
       setModelContext({ dir: dir!, id: versionId, revision, profile: context.profile });
+      if (context.profile.grid) {
+        const [input, datasets] = await Promise.all([
+          invoke<ForcingInput>('case_forcing_input', { dir }).catch((error) => {
+            if (request.active) setForcingInputError(String(error));
+            return null;
+          }),
+          invoke<string[]>('forcing_datasets').catch((error) => {
+            if (request.active) setForcingInputError(String(error));
+            return [];
+          }),
+        ]);
+        if (!request.active) return;
+        setForcingInput(input);
+        setSavedForcing(input);
+        setForcingDatasets(datasets);
+      }
       const preview = context.entry.dir,
         kernel = compatibleKernel(state.kernels, context.profile);
       const [all, text, sourceText, modelFields] = await Promise.all([
@@ -395,6 +439,43 @@ export default function CasesPage() {
     pftSelection: null,
     caseValues: dataPatch,
   });
+  function changeForcingDirectory(directory: string) {
+    ++forcingSequence.current;
+    setForcingProbe(null);
+    setForcingInput((old) => (old ? { ...old, directory } : old));
+  }
+  async function detectCaseForcing(path = forcingInput?.directory ?? '') {
+    const sequence = ++forcingSequence.current;
+    const request = epoch.current;
+    if (!path.trim()) {
+      setForcingProbe(null);
+      return;
+    }
+    setForcingProbe({ status: 'loading', candidates: [] });
+    try {
+      const result = await invoke<{ path: string; candidates: string[]; truncated: boolean }>(
+        'probe_forcing_directory',
+        { path, host: forcingPathHost || null },
+      );
+      if (request.active && epoch.current === request && forcingSequence.current === sequence)
+        setForcingProbe({ status: 'done', ...result });
+    } catch (error) {
+      if (request.active && epoch.current === request && forcingSequence.current === sequence)
+        setForcingProbe({ status: 'error', candidates: [], error: String(error) });
+    }
+  }
+  async function pickForcingDirectory() {
+    if (forcingPathHost) {
+      setForcingPicker(true);
+      return;
+    }
+    const request = epoch.current;
+    const path = await invoke<string | null>('pick_folder', { key: 'case-forcing-directory' });
+    if (path && request.active && epoch.current === request) {
+      changeForcingDirectory(path);
+      await detectCaseForcing(path);
+    }
+  }
   useEffect(() => {
     let current = true;
     if (!dir || !schema.length) return;
@@ -454,7 +535,9 @@ export default function CasesPage() {
       const fields = Object.entries(values)
         .filter(([k, v]) => v !== saved[k])
         .map(([path, value]) => ({ path, value }));
-      if (!target || !fields.length) return;
+      if (forcingDirty && !forcingInput?.directory.trim())
+        throw new Error(t('请选择强迫场数据路径。', 'Choose the forcing data path.'));
+      if (!target || (!fields.length && !forcingDirty)) return;
       await invoke('case_data_save', {
         dirs: [target],
         fields,
@@ -464,6 +547,14 @@ export default function CasesPage() {
             : undefined
           )?.dir ?? null,
         modelRevision: state.versionRef,
+        ...(forcingDirty && forcingInput
+          ? {
+              forcing: {
+                directory: forcingInput.directory,
+                dataset: forcingTemplate || null,
+              },
+            }
+          : {}),
       });
       const context = await invoke<{
         entry: { dir: string };
@@ -479,6 +570,14 @@ export default function CasesPage() {
             },
           });
         setSaved({ ...values });
+        if (forcingDirty && forcingInput) {
+          const input = { ...forcingInput, dataset: forcingTemplate || forcingInput.dataset };
+          setForcingInput(input);
+          setSavedForcing(input);
+          setForcingTemplate('');
+          setValues((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
+          setSaved((old) => ({ ...old, DEF_forcing_namelist: 'forcing.nml' }));
+        }
         setExplicitValues((old) => ({
           ...old,
           ...Object.fromEntries(fields.map((f) => [f.path, f.value])),
@@ -517,6 +616,7 @@ export default function CasesPage() {
       : 'rust';
   const visibleSchema = schema.filter(
     (field) =>
+      !(forcingInput && field.name === 'DEF_forcing_namelist') &&
       (caseSimulationDomain(effectiveProfile) === 'site' || !isSiteConfiguration(field.name)) &&
       caseFieldVisible(field.name, optionStates, { ...explicitValues, ...dataPatch }),
   );
@@ -535,6 +635,7 @@ export default function CasesPage() {
       disabledFields.includes(name) ||
       optionState(name)?.mode === 'disabled' ||
       optionState(name)?.mode === 'readonly';
+  const forcingEditingDisabled = editingDisabled || optionDisabled('DEF_forcing_namelist');
   const dateDisabled = (prefix: string) =>
     editingDisabled ||
     ['year', 'month', 'day'].some(
@@ -626,6 +727,35 @@ export default function CasesPage() {
           })),
         ]
       : [];
+  if (dir && state.caseTab === 'settings' && step === 3 && forcingInput)
+    fields.push(
+      {
+        id: 'case-forcing-directory',
+        label: t('强迫场数据路径', 'Forcing data path'),
+        type: 'text',
+        value: forcingInput.directory,
+        disabled: forcingEditingDisabled,
+        set: (value) => {
+          changeForcingDirectory(value);
+          void detectCaseForcing(value);
+        },
+      },
+      {
+        id: 'case-forcing-dataset',
+        label: t('强迫场数据集', 'Forcing dataset'),
+        type: 'choice',
+        value: forcingTemplate,
+        disabled: forcingEditingDisabled,
+        options: [
+          {
+            value: '',
+            label: `${t('保留当前配置', 'Keep current configuration')}（${forcingInput.dataset}）`,
+          },
+          ...forcingDatasets.map((value) => ({ value, label: value })),
+        ],
+        set: setForcingTemplate,
+      },
+    );
   if (dir && state.caseTab === 'settings' && step === 5)
     fields.push(
       ...historyVars.map((v) => ({
@@ -692,6 +822,7 @@ export default function CasesPage() {
             ...(step >= 3 ? { period: { start, end } } : {}),
             case: state.selectedCase?.entry,
             settings_saved: !busy && !error && !dirty,
+            ...(step === 3 && forcingInput ? { forcing: forcingProbe } : {}),
           }
         : undefined,
     actions: !dir
@@ -763,6 +894,27 @@ export default function CasesPage() {
             : []),
           ...(state.caseTab === 'settings'
             ? [
+                ...(step === 3 && forcingInput
+                  ? [
+                      {
+                        id: 'case-pick-forcing-directory',
+                        label: t('选择强迫场数据路径', 'Choose forcing data path'),
+                        kind: 'click' as const,
+                        enabled: !forcingEditingDisabled,
+                        run: pickForcingDirectory,
+                      },
+                      {
+                        id: 'case-detect-forcing',
+                        label: t('识别数据集', 'Identify dataset'),
+                        kind: 'click' as const,
+                        enabled:
+                          !forcingEditingDisabled &&
+                          !!forcingInput.directory.trim() &&
+                          forcingProbe?.status !== 'loading',
+                        run: () => detectCaseForcing(),
+                      },
+                    ]
+                  : []),
                 ...simulationSteps.slice(0, step - 1).map((label, i) => ({
                   id: `case-step-${i + 1}`,
                   label: label[en ? 1 : 0],
@@ -1108,6 +1260,40 @@ export default function CasesPage() {
               <div className="form-grid" style={{ marginTop: '1rem' }}>
                 {basic.filter((f) => !f.name.startsWith('DEF_simulation_time%')).map(render)}
               </div>
+              {forcingInputError && <Notice tone="warning">{forcingInputError}</Notice>}
+              {forcingInput && (
+                <SpatialForcingFields
+                  directory={forcingInput.directory}
+                  dataset={forcingTemplate}
+                  currentDataset={forcingInput.dataset}
+                  datasets={forcingDatasets}
+                  probe={forcingProbe}
+                  catalogError=""
+                  disabled={forcingEditingDisabled}
+                  en={en}
+                  onDirectoryChange={changeForcingDirectory}
+                  onDirectoryBlur={() => void detectCaseForcing()}
+                  onPick={() =>
+                    void pickForcingDirectory().catch((error) => setError(String(error)))
+                  }
+                  onDatasetChange={setForcingTemplate}
+                  onDetect={() => void detectCaseForcing()}
+                />
+              )}
+              {forcingPicker && (
+                <RemotePathBrowser
+                  host={forcingPathHost}
+                  initialPath={forcingInput?.directory}
+                  directory
+                  en={en}
+                  onSelect={(path) => {
+                    setForcingPicker(false);
+                    changeForcingDirectory(path);
+                    void detectCaseForcing(path);
+                  }}
+                  onClose={() => setForcingPicker(false)}
+                />
+              )}
               {more()}
             </Card>
           )}

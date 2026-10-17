@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+#[path = "case_forcing.rs"]
+mod case_forcing;
+pub use case_forcing::{case_forcing_input, ForcingInput};
+
 #[path = "model_configuration.rs"]
 pub(crate) mod model_configuration;
 
@@ -4714,7 +4718,18 @@ fn set_fields_with_changes(
     kernel_dir: Option<String>,
     contexts: Option<&[String]>,
 ) -> Result<BatchWrite, String> {
-    if fields.is_empty() && remove_fields.is_empty() {
+    set_fields_with_forcing(dirs, fields, remove_fields, kernel_dir, contexts, None)
+}
+
+fn set_fields_with_forcing(
+    dirs: Vec<String>,
+    fields: Vec<FieldChange>,
+    remove_fields: &[String],
+    kernel_dir: Option<String>,
+    contexts: Option<&[String]>,
+    forcing: Option<&case_forcing::Prepared>,
+) -> Result<BatchWrite, String> {
+    if fields.is_empty() && remove_fields.is_empty() && forcing.is_none() {
         return Err("没有要保存的字段".into());
     }
     let kernel = kernel_facts(kernel_dir.as_deref())?;
@@ -4726,6 +4741,10 @@ fn set_fields_with_changes(
     let all = read_all(&dirs)?;
     let mut done: Vec<(String, String)> = Vec::with_capacity(all.len());
     let mut extra: Vec<(std::path::PathBuf, String)> = Vec::new();
+    if let Some(forcing) = forcing {
+        forcing.unchanged()?;
+        extra.push((forcing.path.clone(), forcing.text.clone()));
+    }
     for (index, (d, text)) in all.into_iter().enumerate() {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
         for field in &fields {
@@ -4757,6 +4776,13 @@ fn set_fields_with_changes(
                 std::path::Path::new(&d),
                 &history,
             )?);
+        }
+        if forcing.is_some() {
+            put(
+                &mut doc,
+                "DEF_forcing_namelist",
+                colm_namelist::Value::Str("forcing.nml".into()),
+            )?;
         }
         let effective;
         let validation = if let Some(contexts) = contexts {
@@ -5178,6 +5204,7 @@ pub async fn case_data_save(
     kernel_dir: Option<String>,
     remove_fields: Option<Vec<String>>,
     model_revision: Option<colm_model::VersionRef>,
+    forcing: Option<ForcingInput>,
 ) -> Result<BatchWrite, String> {
     if let Some(field) = fields.iter().find(|f| colm_model::is_model_field(&f.path)) {
         return Err(format!(
@@ -5198,6 +5225,20 @@ pub async fn case_data_save(
             return Err(format!("{key} cannot be set and removed together"));
         }
     }
+    if forcing.is_some()
+        && (fields
+            .iter()
+            .any(|field| field.path.eq_ignore_ascii_case("DEF_forcing_namelist"))
+            || remove_fields
+                .iter()
+                .any(|key| key.eq_ignore_ascii_case("DEF_forcing_namelist")))
+    {
+        return Err("不能同时修改强迫场数据目录和原始配置文件路径".into());
+    }
+    let forcing = forcing
+        .as_ref()
+        .map(|input| case_forcing::prepare(&dirs, input))
+        .transpose()?;
     let case_fields = fields
         .iter()
         .filter(|field| !field.path.starts_with("DEF_hist_vars%"))
@@ -5216,6 +5257,13 @@ pub async fn case_data_save(
             .await?;
             let context_dir = context.entry.dir;
             contexts.push(context_dir.clone());
+            if let Some(forcing) = &forcing {
+                forcing.stage_preview(&context_dir)?;
+                if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
+                    let doc = colm_namelist::parse(&forcing.text).map_err(|e| e.to_string())?;
+                    crate::remote::check_server_paths(app.clone(), &host, serde_json::json!([{"path":character(&doc,"DEF_dir_forcing"),"directory":true}])).await?;
+                }
+            }
             stage_case_tracer_parameters(dir, &context_dir, &fields)?;
             if let Some((host, _)) = crate::remote::server_case_owner(dir)? {
                 let text =
@@ -5237,12 +5285,13 @@ pub async fn case_data_save(
         if read_all(&dirs)? != before {
             return Err("case data changed while validating; reload before saving".into());
         }
-        let saved = set_fields_with_changes(
+        let saved = set_fields_with_forcing(
             dirs.clone(),
             fields,
             &remove_fields,
             kernel_dir,
             Some(&contexts),
+            forcing.as_ref(),
         )?;
         for dir in &dirs {
             if crate::remote::server_case_owner(dir)?.is_some() {

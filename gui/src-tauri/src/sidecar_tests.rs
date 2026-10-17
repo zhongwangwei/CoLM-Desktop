@@ -1427,3 +1427,24 @@ fn batch_budget_tracks_the_selected_stage_implementations() {
     assert_eq!(batch_cpu_budget(None, None, None, 4, Some(2)), 2);
     assert_eq!(batch_cpu_budget(None, None, None, 4, None), 1);
 }
+
+#[test]
+fn template_creation_preserves_generated_forcing_path() {
+    let fields = vec![
+        crate::config::FieldChange {
+            path: " def_FORCING_namelist ".into(),
+            value: "old.nml".into(),
+        },
+        crate::config::FieldChange {
+            path: "DEF_USE_CROP".into(),
+            value: ".true.".into(),
+        },
+    ];
+    let mut generated = fields.clone();
+    preserve_generated_forcing(Some("ERA5"), &mut generated);
+    assert_eq!(generated.len(), 1);
+    assert_eq!(generated[0].path, "DEF_USE_CROP");
+    let mut imported = fields.clone();
+    preserve_generated_forcing(None, &mut imported);
+    assert_eq!(imported.len(), 2);
+}

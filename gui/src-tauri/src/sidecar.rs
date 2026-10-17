@@ -1849,7 +1849,8 @@ pub async fn new_spatial_case(
     run_host: Option<String>,
 ) -> Result<String, String> {
     let run_host = crate::project::validate_run_host(run_host)?;
-    let fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
+    let mut fields = crate::model::creation_fields(fields, model_revision.as_ref())?;
+    preserve_generated_forcing(forcing_dataset.as_deref(), &mut fields);
     let request = SpatialCaseRequest {
         domain,
         grid_kind,
@@ -1991,9 +1992,9 @@ pub async fn new_spatial_case(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| cleanup("forcingDir is required with forcingDataset".into()))?;
-                if !std::path::Path::new(dir).is_dir() {
+                if !std::path::Path::new(dir).is_absolute() || !std::path::Path::new(dir).is_dir() {
                     return Err(cleanup(format!(
-                        "the forcing data directory does not exist: {dir}"
+                        "choose an existing absolute forcing data directory: {dir}"
                     )));
                 }
                 let text = colm_case::forcing_templates::render_forcing_namelist(dataset, dir)
@@ -3486,6 +3487,21 @@ fn capture_untracked(args: &[String]) -> Result<String, String> {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// Template generation owns this path; stale advanced fields must not replace it.
+pub(crate) fn preserve_generated_forcing(
+    dataset: Option<&str>,
+    fields: &mut Vec<crate::config::FieldChange>,
+) {
+    if dataset.is_some_and(|value| !value.trim().is_empty()) {
+        fields.retain(|field| {
+            !field
+                .path
+                .trim()
+                .eq_ignore_ascii_case("DEF_forcing_namelist")
+        });
+    }
 }
 
 #[cfg(test)]

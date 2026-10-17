@@ -69,6 +69,9 @@ function page(
     navigate?: (route: string) => boolean;
     listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
+    forcingProbe?: (args: Record<string, unknown>) => Promise<unknown>;
+    pickFolder?: string;
+    forcingInput?: () => Promise<{ directory: string; dataset: string }>;
   } = {},
 ) {
   const model = {
@@ -152,6 +155,7 @@ function page(
         'ResultsPage',
         'HistoryPage',
         'HistoryVariablesCard',
+        'SpatialForcingFields',
       ].map((key) => [key, key]),
     ),
     useApp: () => ({
@@ -205,6 +209,20 @@ function page(
     invoke: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
       switch (command) {
+        case 'case_forcing_input':
+          return options.forcingInput?.() ?? { directory: '/data/current', dataset: 'ERA5LAND' };
+        case 'forcing_datasets':
+          return ['ERA5', 'ERA5LAND', 'ERA5_LEddy', 'CMFD'];
+        case 'probe_forcing_directory':
+          return (
+            options.forcingProbe?.(args) ?? {
+              path: args.path,
+              candidates: ['ERA5LAND'],
+              truncated: false,
+            }
+          );
+        case 'pick_folder':
+          return options.pickFolder ?? null;
         case 'remote_config':
           return { servers: options.servers ?? [] };
         case 'set_case_run_host':
@@ -1260,6 +1278,9 @@ for (const subgrid of ['PFT', 'PC'])
       catchment: '',
       shapefile: '',
       forcing: '',
+      forcing_mode: 'directory',
+      spatial_forcingdir: '',
+      forcing_dataset: '',
       run_threads: '',
       run_ranks: '1',
       run_workers: '1',
@@ -2839,6 +2860,265 @@ test('server spatial creation passes server paths and grid settings without loca
   assert.equal(request.forcing, '/server/forcing.nml');
   assert.ok(!p.calls.some((call) => call.command === 'new_spatial_case'));
   assert.deepEqual(p.opened, ['/cache/project/site']);
+});
+
+const spatialForcingForm = { ...form, kind: 'global', dlon: '1', dlat: '2' };
+for (const host of ['', 'compute']) {
+  test(`spatial forcing directory auto-selects a unique template and creates ${host || 'local'} configuration`, async () => {
+    const p = page(
+      'NewCasePage',
+      { form: { ...spatialForcingForm, host }, step: 3 },
+      [site],
+      initialValues,
+      {
+        servers: [runServer],
+        pickFolder: '/data/forcing',
+      },
+    );
+    await p.mount();
+    assert.ok(!p.render().fields.some((field) => field.id === 'new-forcing'));
+    if (host) {
+      const picking = p.click('new-pick-spatial_forcingdir');
+      p.render();
+      const browser = p.element('RemotePathBrowser');
+      assert.equal(browser.props.directory, true);
+      (browser.props.onSelect as (path: string) => void)('/data/forcing');
+      await picking;
+    } else await p.click('new-pick-spatial_forcingdir');
+    await p.settle();
+    const probe = p.calls.find((call) => call.command === 'probe_forcing_directory');
+    assert.deepEqual(probe?.args, { path: '/data/forcing', host: host || null });
+    assert.equal(
+      p.render().fields.find((field) => field.id === 'new-forcing-dataset')?.value,
+      'ERA5LAND',
+    );
+    await p.click('new-next');
+    await p.click('new-next');
+    await p.click('new-create');
+    const created = p.calls.find(
+      (call) => call.command === (host ? 'remote_create_case' : 'new_spatial_case'),
+    )!;
+    const request = (host ? created.args.request : created.args) as Record<string, unknown>;
+    assert.equal(request[host ? 'forcing_dataset' : 'forcingDataset'], 'ERA5LAND');
+    assert.equal(request[host ? 'forcing_dir' : 'forcingDir'], '/data/forcing');
+    assert.equal(request.forcing, '');
+    assert.ok(
+      !(request.fields as { path: string }[]).some(
+        (field) => field.path.toLowerCase() === 'def_forcing_namelist',
+      ),
+    );
+  });
+}
+
+for (const result of [
+  { candidates: ['ERA5', 'ERA5_LEddy'], truncated: false },
+  { candidates: [], truncated: false },
+  { candidates: ['ERA5LAND'], truncated: true },
+]) {
+  test(`spatial forcing requires manual confirmation for ${JSON.stringify(result)}`, async () => {
+    const p = page('NewCasePage', { form: spatialForcingForm, step: 3 }, [site], initialValues, {
+      forcingProbe: async (args) => ({ path: args.path, ...result }),
+    });
+    await p.mount();
+    p.set('new-spatial_forcingdir', '/data/forcing');
+    await p.settle();
+    assert.equal(p.render().fields.find((field) => field.id === 'new-forcing-dataset')?.value, '');
+    blocked(p, 'new-next', /确认数据集/);
+    p.set('new-forcing-dataset', 'ERA5');
+    assert.equal(p.render().actions.find((action) => action.id === 'new-next')?.enabled, true);
+  });
+}
+
+test('spatial forcing drops late recognition results after path, mode and host changes', async () => {
+  const pending: ((value: unknown) => void)[] = [];
+  const p = page('NewCasePage', { form: spatialForcingForm, step: 3 }, [site], initialValues, {
+    servers: [runServer],
+    forcingProbe: () =>
+      new Promise((done) => {
+        pending.push(done);
+      }),
+  });
+  await p.mount();
+  p.set('new-spatial_forcingdir', '/old');
+  p.set('new-spatial_forcingdir', '/new');
+  pending[1]({ path: '/new', candidates: ['CMFD'], truncated: false });
+  await p.settle();
+  pending[0]({ path: '/old', candidates: ['ERA5LAND'], truncated: false });
+  await p.settle();
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'new-forcing-dataset')?.value,
+    'CMFD',
+  );
+  p.set('new-spatial_forcingdir', '/later');
+  p.set('new-forcing-mode', 'config');
+  pending[2]({ path: '/later', candidates: ['ERA5LAND'], truncated: false });
+  await p.settle();
+  assert.ok(!p.render().fields.some((field) => field.id === 'new-forcing-dataset'));
+  p.set('new-forcing-mode', 'directory');
+  assert.equal(p.render().fields.find((field) => field.id === 'new-forcing-dataset')?.value, '');
+  p.set('new-spatial_forcingdir', '/host-late');
+  await p.click('new-step-1');
+  p.set('new-run-host', 'compute');
+  pending[3]({ path: '/host-late', candidates: ['ERA5LAND'], truncated: false });
+  await p.goto('new-step-3');
+  assert.equal(p.render().fields.find((field) => field.id === 'new-spatial_forcingdir')?.value, '');
+});
+
+test('spatial forcing keeps manual choices during detection and recovers from errors', async () => {
+  let resolve: (value: unknown) => void = () => {};
+  let reject = false;
+  const p = page('NewCasePage', { form: spatialForcingForm, step: 3 }, [site], initialValues, {
+    forcingProbe: () =>
+      reject
+        ? Promise.reject(new Error('SSH unavailable'))
+        : new Promise((done) => {
+            resolve = done;
+          }),
+  });
+  await p.mount();
+  p.set('new-spatial_forcingdir', '/data');
+  p.set('new-forcing-dataset', 'CMFD');
+  resolve({ path: '/data', candidates: ['ERA5LAND'], truncated: false });
+  await p.settle();
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'new-forcing-dataset')?.value,
+    'CMFD',
+  );
+  reject = true;
+  p.set('new-spatial_forcingdir', '/unavailable');
+  await p.settle();
+  assert.match(JSON.stringify(p.render().details.forcing), /SSH unavailable/);
+  blocked(p, 'new-next', /确认数据集/);
+  p.set('new-forcing-mode', 'config');
+  p.set('new-forcing', '/custom/forcing.nml');
+  assert.equal(p.render().actions.find((action) => action.id === 'new-next')?.enabled, true);
+});
+
+for (const host of ['', 'compute']) {
+  test(`existing spatial case preserves forcing settings when changing ${host || 'local'} data directory`, async () => {
+    const p = page('CasesPage', undefined, [site], initialValues, {
+      profile: {
+        grid: 'latlon',
+        run_host: host,
+        ...(host ? { remote_directory: '/server/site' } : {}),
+      },
+      pickFolder: '/data/replacement',
+    });
+    await p.mount();
+    await p.goto('case-step-3');
+    assert.ok(p.calls.some((call) => call.command === 'case_forcing_input'));
+    assert.ok(!p.render().fields.some((field) => field.id === 'case-DEF_forcing_namelist'));
+    assert.equal(p.element('SpatialForcingFields').props.currentDataset, 'ERA5LAND');
+    if (host) {
+      await p.click('case-pick-forcing-directory');
+      const browser = p.element('RemotePathBrowser');
+      assert.equal(browser.props.host, 'compute');
+      (browser.props.onSelect as (path: string) => void)('/data/replacement');
+    } else await p.click('case-pick-forcing-directory');
+    await p.settle();
+    assert.equal(p.render().fields.find((field) => field.id === 'case-forcing-dataset')?.value, '');
+    await p.click('case-save');
+    const args = p.calls.find((call) => call.command === 'case_data_save')?.args;
+    assert.deepEqual(args?.fields, []);
+    assert.deepEqual(args?.forcing, { directory: '/data/replacement', dataset: null });
+    assert.equal(p.render().status, 'ready');
+  });
+}
+
+test('existing spatial forcing template choice is saved explicitly and discard restores the original', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, { profile: { grid: 'latlon' } });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-forcing-directory', '/new/forcing');
+  p.set('case-forcing-dataset', 'CMFD');
+  assert.ok(p.guard());
+  await p.click('case-discard');
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'case-forcing-directory')?.value,
+    '/data/current',
+  );
+  assert.equal(p.render().fields.find((field) => field.id === 'case-forcing-dataset')?.value, '');
+  assert.equal(p.guard(), null);
+  p.set('case-forcing-directory', '/new/forcing');
+  p.set('case-forcing-dataset', 'CMFD');
+  await p.click('case-save');
+  assert.deepEqual(p.calls.find((call) => call.command === 'case_data_save')?.args.forcing, {
+    directory: '/new/forcing',
+    dataset: 'CMFD',
+  });
+});
+
+test('local-owned remote-run cases keep local forcing paths until runtime mapping', async () => {
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon', run_host: 'compute' },
+    pickFolder: '/local/forcing',
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  await p.click('case-pick-forcing-directory');
+  assert.ok(p.calls.some((call) => call.command === 'pick_folder'));
+  assert.deepEqual(p.calls.find((call) => call.command === 'probe_forcing_directory')?.args, {
+    path: '/local/forcing',
+    host: null,
+  });
+});
+
+test('unreadable existing forcing configuration retains the original file repair field', async () => {
+  const p = page(
+    'CasesPage',
+    undefined,
+    [site],
+    { ...initialValues, DEF_forcing_namelist: '/missing.nml' },
+    {
+      profile: { grid: 'latlon' },
+      schema: [...schema, { ...field('DEF_forcing_namelist', '强迫场'), kind: 'Character' }],
+      forcingInput: async () => {
+        throw new Error('forcing configuration missing');
+      },
+    },
+  );
+  await p.mount();
+  await p.goto('case-step-3');
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'case-DEF_forcing_namelist')?.value,
+    '/missing.nml',
+  );
+  assert.ok(!p.render().fields.some((field) => field.id === 'case-forcing-directory'));
+  p.set('case-DEF_forcing_namelist', '/repaired.nml');
+  await p.click('case-save');
+  assert.equal(p.calls.find((call) => call.command === 'case_data_save')?.args.forcing, undefined);
+});
+
+test('existing forcing recognition cannot restore discarded paths or results from another case', async () => {
+  const pending: ((value: unknown) => void)[] = [];
+  const p = page('CasesPage', undefined, [site], initialValues, {
+    profile: { grid: 'latlon' },
+    forcingProbe: () => new Promise((resolve) => pending.push(resolve)),
+  });
+  await p.mount();
+  await p.goto('case-step-3');
+  p.set('case-forcing-directory', '/old');
+  p.set('case-forcing-directory', '/new');
+  pending[1]({ path: '/new', candidates: ['CMFD'], truncated: false });
+  await p.settle();
+  pending[0]({ path: '/old', candidates: ['ERA5LAND'], truncated: false });
+  await p.settle();
+  assert.deepEqual((p.render().details.forcing as { candidates: string[] }).candidates, ['CMFD']);
+  p.set('case-forcing-directory', '/discard');
+  await p.click('case-discard');
+  pending[2]({ path: '/discard', candidates: ['CMFD'], truncated: false });
+  await p.settle();
+  assert.equal(p.render().details.forcing, null);
+  p.set('case-forcing-directory', '/previous-case');
+  p.state.selectedCase.entry.dir = '/project/other';
+  await p.settle();
+  pending[3]({ path: '/previous-case', candidates: ['CMFD'], truncated: false });
+  await p.settle();
+  assert.equal(p.render().details.forcing, null);
+  assert.equal(
+    p.render().fields.find((field) => field.id === 'case-forcing-directory')?.value,
+    '/data/current',
+  );
 });
 
 const methaneSchema = [
