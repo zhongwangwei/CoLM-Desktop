@@ -181,7 +181,7 @@ fn a_pinned_study_runs_with_the_snapshot_cli() {
     std::fs::write(
         &cli,
         format!(
-            "#!/bin/sh\necho \"$@ by-parent=$COLM_STUDY_BY_PARENT\" > '{}'\n",
+            "#!/bin/sh\nif [ \"$1\" = fingerprint-policy ]; then printf '%s\n' '{{\"forcing_content_policy\":\"excluded-v1\"}}'; exit 0; fi\necho \"$@ by-parent=$COLM_STUDY_BY_PARENT\" > '{}'\n",
             log.display()
         ),
     )
@@ -208,6 +208,16 @@ fn a_pinned_study_runs_with_the_snapshot_cli() {
     assert_eq!(
         std::fs::read_to_string(&log).unwrap().trim(),
         "study-run /study --stream 1 --kernel /k/default by-parent=1"
+    );
+    std::fs::remove_file(&log).unwrap();
+    std::fs::write(&pinned.cli, format!("#!/bin/sh\nif [ \"$1\" = fingerprint-policy ]; then echo '{{}}'; exit 0; fi\necho unsafe-study-run > '{}'\n", log.display())).unwrap();
+    assert!(delegate(&pinned, &args)
+        .unwrap_err()
+        .to_string()
+        .contains("update the model code"));
+    assert!(
+        !log.exists(),
+        "an unsupported CLI must never receive study-run"
     );
 }
 
@@ -385,6 +395,7 @@ fn identical_specs_without_full_input_and_output_evidence_report_no_winner() {
     assert_eq!(result["same_design"], true);
     assert!(result["better"].is_null());
     assert_eq!(result["inputs_verified"], false);
+    assert_eq!(result["forcing_contents_verified"], false);
     assert!(result["notes"]
         .as_array()
         .unwrap()

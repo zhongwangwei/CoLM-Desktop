@@ -447,10 +447,12 @@ pub fn run(study_dir: &Path, options: RunOptions<'_>) -> Result<StudyState> {
     let mut rust_identities = if options.preprocessors == crate::PreprocessorMode::Rust {
         crate::RustPreprocessorIdentities {
             surface: Some(crate::rust_preprocessor_stage_identity(
+                Path::new(&manifest.root),
                 crate::Stage::MkSrfData,
                 &[],
             )?),
             initial: Some(crate::rust_preprocessor_stage_identity(
+                Path::new(&manifest.root),
                 crate::Stage::MkIniData,
                 &[],
             )?),
@@ -1408,9 +1410,12 @@ fn begin_execution(
     anyhow::ensure!(
         baseline.complete
             && identity.inputs.complete
+            && baseline.algorithm == identity.inputs.algorithm
+            && baseline.data_settings.get("forcing_content_policy")
+                == identity.inputs.data_settings.get("forcing_content_policy")
             && baseline.data_sha256.is_some()
             && baseline.data_sha256 == identity.inputs.data_sha256,
-        "Study member data differs from its frozen baseline"
+        "Study member non-forcing data or coverage policy differs from its frozen baseline"
     );
     anyhow::ensure!(
         identity.observation == creation.observations.get(site).cloned(),
@@ -3552,6 +3557,9 @@ pub(crate) fn save_version(
             "sites": manifest.spec.base_cases, "targets": manifest.spec.targets,
             "metrics": metrics,
             "input_provenance": {
+                "algorithm": input_identity.base_cases.iter().map(|(site, identity)| (site, &identity.algorithm)).collect::<BTreeMap<_, _>>(),
+                "coverage": "non-forcing-inputs-and-observations",
+                "forcing_contents_verified": false,
                 "manifest": study_dir.join(super::model::IDENTITY_FILE),
                 "manifest_sha256": crate::fingerprint::full_file(&study_dir.join(super::model::IDENTITY_FILE), "provenance")?.sha256,
                 "data_sha256": input_identity.base_cases.iter().map(|(site, identity)| (site, &identity.data_sha256)).collect::<BTreeMap<_, _>>(),

@@ -119,7 +119,7 @@ usage:
                    # --model-version 用一个工作区（修改版）自己编出的程序跑；跑完写 out/<名>/produced-by.json
                    # --force 不读取或写入指纹，三段全部重跑
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
-                   # --record-input-fingerprints 1 记录完整文件指纹（输入/程序/输出；默认关闭；严格重放始终校验）
+                   # --record-input-fingerprints 1 记录文件指纹（非驱动输入/程序/输出；默认关闭；驱动数据始终跳过）
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
                    # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
                    # --preprocessors 选 mksrfdata/mkinidata 的实现，--engine 选 colm 主循环；
@@ -137,8 +137,10 @@ usage:
   colm-cli version-check --name N --kernel <dir> [--engine rust|fortran]
                    [--preprocessors rust|fortran] [--root <dir>]
   colm-cli produced-by <case-dir>
+  colm-cli fingerprint-policy
+                   # 查询驱动数据永久排除策略，无需读取算例或数据
   colm-cli full-input-identity <case-dir>
-                   # 只读核验配置与全部科学输入的完整 SHA256 内容身份（JSON）
+                   # 只读核验配置与非驱动输入的 SHA256 内容身份（JSON；驱动数据始终跳过）
   colm-cli metrics <case-dir> --obs <Flux.nc> [--spinup N] [--from UNIX] [--to UNIX]
                    [--json 1] [--corrected 1]
                    --corrected: 拿能量闭合订正后的观测比（Qle_cor / Qh_cor）
@@ -335,6 +337,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     .context("invalid energy summary end")?
             )?)?
         ),
+        "fingerprint-policy" => println!("{{\"forcing_content_policy\":\"excluded-v1\"}}"),
         "full-input-identity" => println!(
             "{}",
             serde_json::to_string(&fingerprint::full_inputs(&opts.positional_case()?)?)?
@@ -2743,7 +2746,7 @@ fn hyperspectral_mkinidata_arguments(
     Ok(arguments)
 }
 
-fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
+fn rust_preprocessor_input_identity(case: &Path, arguments: &[String]) -> Result<String> {
     let mut inputs = Vec::new();
     for pair in arguments.windows(2) {
         if matches!(
@@ -2759,7 +2762,11 @@ fn rust_preprocessor_input_identity(arguments: &[String]) -> Result<String> {
                 "{}={}:{}",
                 pair[0],
                 path.display(),
-                fingerprint::input_identity(path)?
+                if fingerprint::forcing_data_path(case, path)? {
+                    "forcing-content-excluded".into()
+                } else {
+                    fingerprint::input_identity(path)?
+                }
             ));
         }
     }
@@ -2782,14 +2789,18 @@ fn rust_model_identity() -> Result<String> {
     ))
 }
 
-fn rust_preprocessor_stage_identity(stage: Stage, arguments: &[String]) -> Result<String> {
+fn rust_preprocessor_stage_identity(
+    case: &Path,
+    stage: Stage,
+    arguments: &[String],
+) -> Result<String> {
     let executable = rust_preprocessor_executable(stage)?;
     let binary = format!(
         "{}={}",
         stage.program(),
         fingerprint::sha256_file(&executable)?
     );
-    let inputs = rust_preprocessor_input_identity(arguments)?;
+    let inputs = rust_preprocessor_input_identity(case, arguments)?;
     Ok(if inputs.is_empty() {
         binary
     } else {
@@ -2971,10 +2982,12 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
         .map(|identity| fingerprint::full_input_guard(&case, identity))
         .transpose()?;
     let had_full_input_identity = full_before.is_some();
-    if let Some(identity) = full_before
-        .as_ref()
-        .filter(|_| materialized_run && (!force || stage.is_some()))
-    {
+    if let Some(identity) = full_before.as_ref().filter(|identity| {
+        materialized_run
+            && identity.complete
+            && identity.algorithm == "sha256-full-v1"
+            && (!force || stage.is_some())
+    }) {
         model_version::restore_upstream_artifacts(
             &case,
             identity,
@@ -3040,7 +3053,7 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
         let was_complete = before.complete;
         if stream {
             use std::io::Write as _;
-            println!("Verifying that execution inputs are unchanged...");
+            println!("Verifying recorded non-forcing inputs are unchanged; forcing data contents are excluded...");
             std::io::stdout().flush()?;
         }
         let guard_check = input_guard
@@ -3106,9 +3119,12 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
         provenance["execution_ok"] = serde_json::json!(execution_ok);
         provenance["execution_error"] = serde_json::json!(execution_error);
         provenance["verification"] = serde_json::json!({
-            "status":if !verification_errors.is_empty() {"rejected"} else if had_full_input_identity {"passed"} else {"disabled"},
+            "status":if !verification_errors.is_empty() {"rejected"} else if had_full_input_identity {"partial"} else {"disabled"},
             "input_fingerprints": had_full_input_identity,
             "content_fingerprints": record_inputs,
+            "inputs_verified": false,
+            "nonforcing_inputs_verified": had_full_input_identity && verification_errors.is_empty(),
+            "forcing_contents_verified": false,
             "errors":verification_errors,
         });
         provenance::write_value(&case, &provenance);
@@ -3127,7 +3143,7 @@ fn run_input_identity(
     use std::io::Write as _;
     use std::time::{Duration, Instant};
     println!("=== colm-stage {stage} begin ===");
-    println!("Checking full input contents; large data archives can take a long time.");
+    println!("Checking non-forcing input contents; forcing data contents are always excluded.");
     std::io::stdout().flush()?;
     let mut last = Instant::now() - Duration::from_secs(1);
     let result = fingerprint::full_inputs_with_progress(case, &mut |path, bytes, total| {
@@ -3163,6 +3179,18 @@ fn required_upstream_stages(stage: Option<Stage>) -> Vec<Stage> {
     }
 }
 
+pub(crate) fn require_forcing_exclusion(cli: &Path) -> Result<()> {
+    let output = std::process::Command::new(cli)
+        .arg("fingerprint-policy")
+        .output()
+        .with_context(|| format!("cannot query fingerprint policy: {}", cli.display()))?;
+    let supported = output.status.success()
+        && serde_json::from_slice::<serde_json::Value>(&output.stdout)
+            .is_ok_and(|policy| policy["forcing_content_policy"] == "excluded-v1");
+    ensure!(supported, "selected model code does not support permanently excluding forcing data fingerprints; update the model code before running ({})", cli.display());
+    Ok(())
+}
+
 fn execute_selected_run(
     opts: &Opts,
     version: &provenance::Version,
@@ -3182,6 +3210,7 @@ fn execute_selected_run(
     };
     preflight_spinup_replay(&case, engine, &execution_cli)?;
     if let Some(cli) = frozen_cli {
+        require_forcing_exclusion(Path::new(&cli))?;
         let mut command = std::process::Command::new(cli);
         command.arg("run").args(&opts.positional);
         for (flag, value) in &opts.flags {
@@ -3226,6 +3255,7 @@ fn execute_selected_run(
                 record_input_fingerprints(opts, &case)?,
             ),
             provenance::Version::Workspace(readiness) => {
+                require_forcing_exclusion(&readiness.cli)?;
                 // 交给版本自己的 colm-cli：参数原样转过去，只换掉内核、去掉只有外层认的几项。
                 let own = [
                     "--model-version",
@@ -3409,12 +3439,12 @@ fn run_case(
         surface: rust_mksrfdata_arguments
             .as_deref()
             .filter(|_| record_inputs)
-            .map(|arguments| rust_preprocessor_stage_identity(Stage::MkSrfData, arguments))
+            .map(|arguments| rust_preprocessor_stage_identity(case, Stage::MkSrfData, arguments))
             .transpose()?,
         initial: rust_mkinidata_arguments
             .as_deref()
             .filter(|_| record_inputs)
-            .map(|arguments| rust_preprocessor_stage_identity(Stage::MkIniData, arguments))
+            .map(|arguments| rust_preprocessor_stage_identity(case, Stage::MkIniData, arguments))
             .transpose()?,
         model: (record_inputs && engine == ModelEngine::Rust)
             .then(rust_model_identity)
@@ -3463,6 +3493,7 @@ fn run_case(
                 &out,
                 &marks,
                 &stage_kernel_id,
+                false,
             )?;
             (Some(want), have_all, skip)
         };
@@ -3885,6 +3916,7 @@ fn stage_fingerprint_status(
     out: &Path,
     marks: &std::collections::BTreeMap<String, fingerprint::Fingerprint>,
     kernel_id: &str,
+    allow_unhashed_forcing_cache: bool,
 ) -> Result<(fingerprint::Fingerprint, bool, bool)> {
     let sname = stage.program();
     let want = fingerprint::compute(sname, case_nml, kernel_id)?;
@@ -3894,7 +3926,9 @@ fn stage_fingerprint_status(
     } else {
         !artifacts.is_empty() && artifacts.iter().all(|path| path.is_file())
     };
-    let current = have_all
+    let current = (stage != Stage::Colm || allow_unhashed_forcing_cache)
+        && have_all
+        && !kernel_id.contains("forcing-content-excluded")
         && marks
             .get(sname)
             .is_some_and(|old| fingerprint::first_difference(old, &want).is_none());
@@ -3934,6 +3968,7 @@ pub(crate) fn case_is_current(
             &out,
             &marks,
             &stage_kernel_identity(kernel_id, stage, rust_identities),
+            true,
         )?
         .2
         {
@@ -6840,7 +6875,7 @@ mod spinup_replay_tests {
                 .to_string();
             assert!(
                 error.contains(if supported {
-                    "cannot run frozen official program"
+                    "cannot query fingerprint policy"
                 } else {
                     "does not support spinup replay"
                 }),
@@ -6877,6 +6912,34 @@ mod input_fingerprint_option_tests {
         assert!(record_input_fingerprints(&option(None), &case).unwrap());
         assert!(record_input_fingerprints(&option(Some("0")), &case).unwrap());
         std::fs::remove_dir_all(case).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delegated_engine_must_explicitly_exclude_forcing_fingerprints() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = std::env::temp_dir().join(format!(
+            "colm-policy-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        for (payload, supported) in [
+            ("{}", false),
+            (r#"{"forcing_content_policy":"excluded-v1"}"#, true),
+            (r#"{"forcing_content_policy":"full"}"#, false),
+        ] {
+            std::fs::write(
+                &path,
+                format!(
+                    "#!/bin/sh\n[ \"$1\" = fingerprint-policy ] || exit 9\nprintf '%s\\n' '{}'\n",
+                    payload
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            assert_eq!(require_forcing_exclusion(&path).is_ok(), supported);
+        }
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

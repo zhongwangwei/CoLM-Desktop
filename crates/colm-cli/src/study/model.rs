@@ -78,6 +78,17 @@ pub(crate) fn verified_inputs(manifest: &Manifest) -> Result<StudyInputIdentity>
 
 /// Model parameters and physics may differ; only data conditions and observations are matched.
 pub(crate) fn same_conditions(a: &StudyInputIdentity, b: &StudyInputIdentity) -> bool {
+    a.base_cases
+        .values()
+        .all(crate::fingerprint::has_full_forcing_content)
+        && b.base_cases
+            .values()
+            .all(crate::fingerprint::has_full_forcing_content)
+        && same_scope_conditions(a, b)
+}
+
+/// Compare only the recorded scope; this never establishes excluded forcing contents.
+pub(crate) fn same_scope_conditions(a: &StudyInputIdentity, b: &StudyInputIdentity) -> bool {
     a.schema == 1
         && b.schema == 1
         && a.base_cases.len() == b.base_cases.len()
@@ -86,7 +97,13 @@ pub(crate) fn same_conditions(a: &StudyInputIdentity, b: &StudyInputIdentity) ->
             b.base_cases.get(site).is_some_and(|right| {
                 left.complete
                     && right.complete
-                    && left.algorithm == "sha256-full-v1"
+                    && (left.algorithm == "sha256-full-v1"
+                        || (left.algorithm == "sha256-nonforcing-v1"
+                            && left
+                                .data_settings
+                                .get("forcing_content_policy")
+                                .map(String::as_str)
+                                == Some("excluded-v1")))
                     && right.algorithm == left.algorithm
                     && left.data_sha256.is_some()
                     && left.data_sha256 == right.data_sha256
@@ -486,7 +503,7 @@ mod tests {
     }
 
     #[test]
-    fn full_creation_identity_detects_middle_forcing_and_observation_changes() {
+    fn scoped_creation_identity_excludes_forcing_but_detects_observation_changes() {
         let root = scratch();
         let manifest = input_fixture(&root);
         capture_inputs(&manifest).unwrap();
@@ -495,7 +512,7 @@ mod tests {
         let mut bytes = std::fs::read(&forcing).unwrap();
         bytes[128 * 1024] = 7;
         std::fs::write(&forcing, &bytes).unwrap();
-        assert!(verified_inputs(&manifest).is_err());
+        verified_inputs(&manifest).unwrap();
         bytes[128 * 1024] = 0;
         std::fs::write(&forcing, &bytes).unwrap();
         verified_inputs(&manifest).unwrap();
@@ -518,7 +535,20 @@ mod tests {
         )
         .unwrap();
         let after = actual_inputs(&manifest).unwrap();
-        assert!(same_conditions(&before, &after));
+        assert!(!same_conditions(&before, &after));
+        assert!(same_scope_conditions(&before, &after));
+        let mut wrong_scope = after.clone();
+        wrong_scope
+            .base_cases
+            .get_mut("caseA")
+            .unwrap()
+            .data_settings
+            .insert("forcing_content_policy".into(), "unknown".into());
+        assert!(!same_scope_conditions(&before, &wrong_scope));
+        assert_eq!(
+            before.base_cases["caseA"].data_sha256,
+            after.base_cases["caseA"].data_sha256
+        );
         assert_ne!(before, after);
         let mut missing = after.clone();
         missing.base_cases.get_mut("caseA").unwrap().complete = false;

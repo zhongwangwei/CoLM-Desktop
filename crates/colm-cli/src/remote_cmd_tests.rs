@@ -1540,6 +1540,9 @@ fn job_input_fingerprints_default_off_and_forward_only_explicit_opt_in() {
             )
             .unwrap();
             assert_eq!(body.contains(" --record-input-fingerprints 1"), enabled);
+            assert!(
+                body.find(" fingerprint-policy").unwrap() < body.find("/colm-cli run ").unwrap()
+            );
             assert!(!body.contains(" --record-input-fingerprints 0"));
         }
     }
@@ -1629,5 +1632,79 @@ fn disabled_fetch_rejects_downgrade_or_ambiguous_disable_markers() {
         let mut changed = proof.clone();
         changed["provenance"]["verification"][key] = value;
         assert!(verify_submitted_output_identity(&changed, &record).is_err());
+    }
+}
+
+#[test]
+fn nonforcing_scope_can_fetch_verified_outputs_without_claiming_forcing_verification() {
+    let fixture = completed_output_fixture("nonforcing-fetch");
+    let (_, pending) = PendingFixture::new("nonforcing-submission");
+    let mut record = pending.record;
+    let mut proof = verify_completed_outputs(&fixture.0).unwrap();
+    record.provenance.as_mut().unwrap()["remote_model_run"] =
+        proof["provenance"]["model_run"].clone();
+    let mut inputs = crate::fingerprint::FullInputIdentity::unavailable("fixture");
+    inputs.algorithm = "sha256-nonforcing-v1".into();
+    inputs.complete = true;
+    inputs.unresolved.clear();
+    inputs
+        .data_settings
+        .insert("forcing_content_policy".into(), "excluded-v1".into());
+    proof["provenance"]["full_input_identity"] = serde_json::to_value(&inputs).unwrap();
+    proof["provenance"]["verification"] = json!({"status":"partial","content_fingerprints":true,"input_fingerprints":true,"forcing_contents_verified":false});
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    let history = fixture.0.join("out/fixture/history");
+    verify_fetched_history(&history, &proof).unwrap();
+    let mut fetched = fetched_provenance(
+        record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["ok"], true);
+    assert_eq!(fetched["verification"]["status"], "partial");
+    assert_eq!(fetched["verification"]["forcing_contents_verified"], false);
+    assert_eq!(fetched["output_verification"]["status"], "passed");
+    assert!(verify_recorded_inputs(&fixture.0, &fetched, &inputs)
+        .unwrap_err()
+        .to_string()
+        .contains("cannot invoke a remote CLI"));
+    inputs.algorithm = "sha256-full-v1".into();
+    assert!(verify_recorded_inputs(&fixture.0, &fetched, &inputs)
+        .unwrap_err()
+        .to_string()
+        .contains("cannot invoke a remote CLI"));
+    std::fs::write(history.join("fixture_hist_2004.nc"), b"tampered").unwrap();
+    assert!(verify_fetched_history(&history, &proof).is_err());
+    proof["provenance"]["full_input_identity"]["data_settings"]["forcing_content_policy"] =
+        json!("unknown");
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn job_policy_guard_blocks_old_engines_before_running_the_model() {
+    use std::os::unix::fs::PermissionsExt;
+    let (fixture, _) = PendingFixture::new("forcing-policy-guard");
+    let cli = fixture.0.join("cli");
+    for (response, success) in [
+        ("{}", false),
+        (r#"{"forcing_content_policy":"excluded-v1"}"#, true),
+    ] {
+        std::fs::write(&cli, format!("#!/bin/sh\nprintf '%s\\n' '{response}'\n")).unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let script = format!(
+            "{}printf model-started",
+            forcing_policy_guard(cli.to_str().unwrap())
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        assert_eq!(output.status.success(), success);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).contains("model-started"),
+            success
+        );
     }
 }

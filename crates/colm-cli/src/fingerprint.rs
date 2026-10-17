@@ -76,6 +76,11 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
     let text = std::fs::read_to_string(case_nml)
         .with_context(|| format!("cannot read {}", case_nml.display()))?;
     let doc = colm_namelist::parse(&text)?;
+    let case_dir = case_nml.parent().unwrap_or_else(|| Path::new("."));
+    let excluded = ForcingExclusions::load(case_dir, &doc)?;
+    let record_file = |out: &mut BTreeMap<String, String>, path: PathBuf, kind: FileKind| {
+        record_nonforcing_file(out, path, kind, &excluded)
+    };
     let self_contained_roots = simple_site_roots_unused(case_nml, &doc)?;
     // CoLM 的缺省值是 .TRUE.；只有显式设为 false 才需跟踪本地日期的月、日、秒。
     let greenwich = !matches!(
@@ -102,6 +107,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
             _ => None,
         })
         .map(|p| resolve(case_dir, &p))
+        .filter(|p| !excluded.contains(p))
         .and_then(|p| std::fs::read(p).ok())
         .map(|b| colm_kernel::sha256_hex(&b))
         .unwrap_or_default();
@@ -117,7 +123,7 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
             record_file(&mut files, spinup, FileKind::SmallConfig);
         }
         record_file(&mut files, forcing.clone(), FileKind::SmallConfig);
-        record_forcing_inventory(&mut files, &forcing, case_dir);
+        inputs.insert("forcing_content_policy".into(), "excluded-v1".into());
     }
     // mksrfdata 按 CH4 参数文件里的两个开关决定要不要生成湖泊土壤碳与空间 pH，mkinidata 再读
     // 湖泊土壤碳（`MOD_Initialize.F90` 的 `lake_soilc_patches.nc`）。参数文件的其它内容不影响这两段，
@@ -205,13 +211,34 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
     if stage == "colm" {
         let hybrid = case_dir.join("hybrid.toml");
         if hybrid.is_file() {
-            let value = match colm_hybrid::HybridConfig::load_spec(&hybrid) {
-                Ok(config) => config.fingerprint,
-                Err(error) => format!("error: {error:#}"),
+            let overlaps = colm_hybrid::HybridConfig::declared(&hybrid).is_ok_and(|slots| {
+                slots.iter().any(|slot| {
+                    slot.model
+                        .iter()
+                        .chain(slot.normalize.iter())
+                        .any(|path| excluded.contains(path))
+                })
+            });
+            let value = if overlaps {
+                record_file(&mut files, hybrid.clone(), FileKind::SmallConfig);
+                for slot in colm_hybrid::HybridConfig::declared(&hybrid)? {
+                    for path in slot.model.into_iter().chain(slot.normalize) {
+                        record_file(&mut files, path, FileKind::SmallConfig);
+                    }
+                }
+                "forcing-content-excluded".into()
+            } else {
+                match colm_hybrid::HybridConfig::load_spec(&hybrid) {
+                    Ok(config) => config.fingerprint,
+                    Err(error) => format!("error: {error:#}"),
+                }
             };
             inputs.insert("hybrid (hybrid.toml)".into(), value);
             // 气候特征文件（`clim_*` 特征）重算过也要重跑 colm 段。
             for file in crate::hybrid_cmd::climate_files(case_dir) {
+                if excluded.contains(&file) {
+                    continue;
+                }
                 let value = std::fs::read(&file).map_or_else(
                     |error| format!("error: {error}"),
                     |bytes| colm_hybrid::sha256_hex(&bytes),
@@ -453,56 +480,260 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
-fn record_forcing_inventory(out: &mut BTreeMap<String, String>, forcing_nml: &Path, case: &Path) {
-    let Ok(text) = std::fs::read_to_string(forcing_nml) else {
-        return;
-    };
-    let Ok(doc) = colm_namelist::parse(&text) else {
-        return;
-    };
-    let base = doc
-        .get("DEF_dir_forcing")
-        .and_then(string_value)
-        .map(|raw| resolve(case, raw));
-    let Some(base) = base else {
-        return;
-    };
-    for field in doc.paths() {
-        if !field
-            .to_ascii_lowercase()
-            .starts_with("def_forcing%fprefix")
-        {
-            continue;
+pub(crate) const INPUT_ALGORITHM: &str = "sha256-nonforcing-v1";
+pub(crate) const FORCING_CONTENT_POLICY: &str = "excluded-v1";
+
+fn effective_forcing_prefixes(
+    doc: &colm_namelist::Document,
+) -> Result<BTreeMap<String, colm_namelist::Value>> {
+    use colm_namelist::Value;
+    let mut values = BTreeMap::new();
+    for name in ["DEF_forcing%fprefix", "DEF_forcing%CBL_fprefix"] {
+        let field = colm_schema::find(name).context("forcing prefix schema missing")?;
+        match field.default {
+            colm_schema::Default::Str(value) => {
+                values.insert(name.to_ascii_lowercase(), Value::Str(value.into()));
+            }
+            colm_schema::Default::Array(value) => {
+                let literal = value.trim().trim_start_matches("(/").trim_end_matches("/)");
+                let defaults = colm_namelist::parse(&format!("&forcing\n{name}={literal}\n/\n"))?;
+                if let Some(Value::List(items)) = defaults.get(name) {
+                    for (index, item) in items.iter().enumerate() {
+                        values.insert(
+                            format!("{}({})", name.to_ascii_lowercase(), index + 1),
+                            item.clone(),
+                        );
+                    }
+                }
+            }
+            _ => {}
         }
-        let Some(raw) = doc.get(&field).and_then(string_value) else {
+    }
+    for item in &doc.items {
+        let colm_namelist::document::Item::Entry(entry) = item else {
             continue;
         };
-        if raw.eq_ignore_ascii_case("null") || raw.trim().is_empty() {
+        let mut key = entry.path.to_string().to_ascii_lowercase();
+        if !key.contains("fprefix") {
             continue;
         }
-        let exact = resolve(&base, raw);
-        if exact.is_file() {
-            record_file(out, exact, FileKind::LargeData);
-            continue;
+        if key.starts_with("forcing%") {
+            key = format!("def_{key}");
         }
-        // Gridded forcing may use a prefix rather than one exact file. Hash the
-        // matched payloads too; metadata-only fingerprints missed rewritten
-        // forcing with unchanged size/mtime.
-        let raw_path = Path::new(raw.trim().trim_matches(['\'', '"']));
-        let prefix_dir = raw_path.parent().unwrap_or_else(|| Path::new(""));
-        let prefix = raw_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(raw);
-        if let Ok(entries) = std::fs::read_dir(base.join(prefix_dir)) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.starts_with(prefix) {
-                    continue;
+        if key == "def_forcing%fprefix" || key.starts_with("def_forcing%fprefix(") {
+            let start = key
+                .split_once('(')
+                .and_then(|(_, index)| index.trim_end_matches(')').parse::<usize>().ok())
+                .unwrap_or(1);
+            let items = match &entry.value {
+                Value::List(items) => items.as_slice(),
+                value => std::slice::from_ref(value),
+            };
+            for (offset, item) in items.iter().enumerate() {
+                values.insert(
+                    format!("def_forcing%fprefix({})", start + offset),
+                    item.clone(),
+                );
+            }
+        } else {
+            values.insert(key, entry.value.clone());
+        }
+    }
+    Ok(values)
+}
+
+#[derive(Default)]
+struct ForcingExclusions {
+    prefixes: Vec<PathBuf>,
+    settings: BTreeMap<String, String>,
+}
+
+impl ForcingExclusions {
+    fn load(case: &Path, doc: &colm_namelist::Document) -> Result<Self> {
+        let forcing = doc
+            .get("DEF_forcing_namelist")
+            .and_then(string_value)
+            .map(|raw| resolve(case, raw))
+            .unwrap_or_else(|| case.join("forcing.nml"));
+        let mut out = Self::default();
+        let force = if forcing.exists() {
+            colm_namelist::parse(&std::fs::read_to_string(&forcing)?)?
+        } else {
+            colm_namelist::parse("&nl_colm_forcing\n/\n")?
+        };
+        let base = force
+            .get("DEF_dir_forcing")
+            .and_then(string_value)
+            .map(|raw| resolve(case, raw))
+            .unwrap_or_else(|| case.to_path_buf());
+        let effective = effective_forcing_prefixes(&force)?;
+        let mut effective_doc = colm_namelist::parse("&forcing\n/\n")?;
+        for (key, value) in effective {
+            out.settings
+                .insert(format!("forcing:{key}"), value.to_string());
+            effective_doc.insert(&key, value, "forcing")?;
+        }
+        out.add_document(&effective_doc, &base);
+        if let Some(raw) = doc.get("DEF_TRACER_PARAM_FILES").and_then(string_value) {
+            for (index, name) in colm_namelist::tracer_files::param_file_paths(raw)?
+                .into_iter()
+                .enumerate()
+            {
+                let path = resolve(case, &name);
+                if path.is_file() {
+                    let tracer = colm_namelist::parse(&std::fs::read_to_string(path)?)?;
+                    for key in tracer
+                        .paths()
+                        .into_iter()
+                        .filter(|key| key.to_ascii_lowercase().contains("fprefix"))
+                    {
+                        if let Some(value) = tracer.get(&key) {
+                            out.settings.insert(
+                                format!("tracer:{index}:{}", key.to_ascii_lowercase()),
+                                value.to_string(),
+                            );
+                        }
+                    }
+                    out.add_document(&tracer, &base);
                 }
-                record_file(out, entry.path(), FileKind::LargeData);
             }
         }
+        Ok(out)
+    }
+
+    fn add_document(&mut self, doc: &colm_namelist::Document, base: &Path) {
+        fn strings(value: &colm_namelist::Value, out: &mut Vec<String>) {
+            match value {
+                colm_namelist::Value::Str(s) => out.push(s.clone()),
+                colm_namelist::Value::List(items) => {
+                    for item in items {
+                        strings(item, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for key in doc
+            .paths()
+            .into_iter()
+            .filter(|key| key.to_ascii_lowercase().contains("fprefix"))
+        {
+            let mut values = Vec::new();
+            if let Some(value) = doc.get(&key) {
+                strings(value, &mut values);
+            }
+            for raw in values
+                .into_iter()
+                .filter(|s| !s.trim().is_empty() && !s.trim().eq_ignore_ascii_case("null"))
+            {
+                let path = resolve(base, &raw);
+                self.prefixes.push(normalized_input_path(&path));
+            }
+        }
+    }
+
+    fn overlaps_directory(&self, path: &Path) -> bool {
+        let path = normalized_input_path(path);
+        self.prefixes.iter().any(|prefix| prefix.starts_with(&path))
+    }
+
+    fn contains(&self, path: &Path) -> bool {
+        let canonical = normalized_input_path(path);
+        let lexical = path
+            .parent()
+            .zip(path.file_name())
+            .map(|(parent, name)| normalized_input_path(parent).join(name))
+            .unwrap_or_else(|| canonical.clone());
+        [canonical, lexical].iter().any(|canonical| {
+            self.prefixes.iter().any(|prefix| {
+                canonical.starts_with(prefix)
+                    || (canonical.parent() == prefix.parent()
+                        && canonical.file_name().zip(prefix.file_name()).is_some_and(
+                            |(name, prefix)| {
+                                name.to_string_lossy()
+                                    .starts_with(prefix.to_string_lossy().as_ref())
+                            },
+                        ))
+            })
+        })
+    }
+}
+
+fn normalized_input_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => normalized_input_path(parent).join(name),
+        _ => path.to_path_buf(),
+    }
+}
+
+pub(crate) fn forcing_data_path(case: &Path, path: &Path) -> Result<bool> {
+    let doc = colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml"))?)?;
+    let excluded = ForcingExclusions::load(case, &doc)?;
+    fn overlaps(
+        path: &Path,
+        excluded: &ForcingExclusions,
+        visited: &mut std::collections::BTreeSet<PathBuf>,
+    ) -> Result<bool> {
+        if excluded.contains(path) {
+            return Ok(true);
+        }
+        if !path.is_dir() || excluded.prefixes.is_empty() {
+            return Ok(false);
+        }
+        if excluded.overlaps_directory(path) {
+            return Ok(true);
+        }
+        if !visited.insert(path.canonicalize()?) {
+            return Ok(false);
+        }
+        for entry in std::fs::read_dir(path)? {
+            if overlaps(&entry?.path(), excluded, visited)? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    overlaps(path, &excluded, &mut std::collections::BTreeSet::new())
+}
+
+pub(crate) fn has_full_forcing_content(identity: &FullInputIdentity) -> bool {
+    identity.complete && identity.algorithm == "sha256-full-v1"
+}
+
+fn record_nonforcing_file(
+    out: &mut BTreeMap<String, String>,
+    path: PathBuf,
+    kind: FileKind,
+    excluded: &ForcingExclusions,
+) {
+    if excluded.contains(&path) {
+        return;
+    }
+    if path.is_dir() && !excluded.prefixes.is_empty() {
+        let value = directory_inventory_filtered(&path, &mut |_, _, _| {}, excluded)
+            .and_then(|inventory| {
+                let mut files = BTreeMap::new();
+                for relative in inventory.keys() {
+                    let file = path.join(relative);
+                    if file.is_file() {
+                        record_file(&mut files, file, FileKind::LargeData);
+                    }
+                }
+                Ok(colm_kernel::sha256_hex(&serde_json::to_vec(&files)?))
+            })
+            .map_or_else(
+                |error| format!("unreadable-dir:{error}"),
+                |hash| format!("dir-sha256:{hash}"),
+            );
+        out.insert(
+            normalized_input_path(&path).to_string_lossy().into_owned(),
+            value,
+        );
+    } else {
+        record_file(out, path, kind);
     }
 }
 
@@ -738,7 +969,7 @@ fn is_comparison_physics(key: &str) -> bool {
     )
 }
 
-/// Resolve explicit payloads, forcing-prefix matches and declared data roots.
+/// Resolve non-forcing payloads and declared data roots; forcing bytes are excluded.
 /// Directory scans are conservative: every regular file is hashed, with stable
 /// membership checked before and after; no metadata-only or sampled shortcuts.
 pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
@@ -752,21 +983,38 @@ pub(crate) fn full_inputs_with_progress(
     crate::model_version::restore_execution_path(case)?;
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
+    let excluded = ForcingExclusions::load(case, &doc)?;
     let self_contained_roots = simple_site_roots_unused(&nml, &doc)?;
     let mut out = FullInputIdentity {
         schema: 1,
-        algorithm: "sha256-full-v1".into(),
+        algorithm: INPUT_ALGORITHM.into(),
         complete: false,
         data_sha256: None,
         data_settings: BTreeMap::new(),
         files: BTreeMap::new(),
         unresolved: Vec::new(),
     };
-    out.add("configuration:case".into(), &nml, "configuration", progress);
+    let add = |out: &mut FullInputIdentity,
+               role: String,
+               path: &Path,
+               category: &str,
+               progress: &mut dyn FnMut(&Path, u64, Option<u64>)| {
+        if !excluded.contains(path) {
+            out.add(role, path, category, progress);
+        }
+    };
+    add(
+        &mut out,
+        "configuration:case".into(),
+        &nml,
+        "configuration",
+        progress,
+    );
     colm_case::spinup_replay_enabled(case)?;
     let spinup = case.join("spinup.nml");
     if spinup.try_exists()? {
-        out.add(
+        add(
+            &mut out,
             "configuration:spinup".into(),
             &spinup,
             "configuration",
@@ -778,70 +1026,28 @@ pub(crate) fn full_inputs_with_progress(
         .and_then(string_value)
         .map(|raw| resolve(case, raw))
         .unwrap_or_else(|| case.join("forcing.nml"));
-    out.add(
+    add(
+        &mut out,
         "configuration:forcing".into(),
         &forcing,
         "configuration",
         progress,
     );
     let force = colm_namelist::parse(&std::fs::read_to_string(&forcing)?)?;
-    let force_base = force
-        .get("DEF_dir_forcing")
-        .and_then(string_value)
-        .map(|raw| resolve(case, raw));
+    out.data_settings
+        .insert("forcing_content_policy".into(), "excluded-v1".into());
+    out.data_settings.extend(excluded.settings.clone());
     for key in force.paths() {
-        let Some(value) = force.get(&key) else {
-            continue;
-        };
-        let lower = key.to_ascii_lowercase();
-        if lower.contains("fprefix") {
-            let Some(raw) = string_value(value)
-                .filter(|raw| !raw.is_empty() && !raw.eq_ignore_ascii_case("null"))
-            else {
-                continue;
-            };
-            let Some(base) = &force_base else {
-                out.unresolved.push("forcing directory is missing".into());
-                continue;
-            };
-            let exact = resolve(base, raw);
-            if exact.is_file() {
-                out.add(format!("forcing:{lower}"), &exact, "data", progress);
-            } else {
-                let parent = exact.parent().unwrap_or(base);
-                let prefix = exact.file_name().unwrap_or_default().to_string_lossy();
-                let mut matched = Vec::new();
-                if let Ok(entries) = std::fs::read_dir(parent) {
-                    for entry in entries {
-                        let entry = entry?;
-                        if entry
-                            .file_name()
-                            .to_string_lossy()
-                            .starts_with(prefix.as_ref())
-                            && entry.path().is_file()
-                        {
-                            matched.push(entry.path());
-                        }
-                    }
-                }
-                matched.sort();
-                if matched.is_empty() {
-                    out.unresolved
-                        .push(format!("forcing:{lower}: no matching files"));
-                }
-                for path in matched {
-                    let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    out.add(format!("forcing:{lower}:{name}"), &path, "data", progress);
-                }
+        if key.to_ascii_lowercase() != "def_dir_forcing"
+            && !key.to_ascii_lowercase().contains("fprefix")
+        {
+            if let Some(value) = force.get(&key) {
+                out.data_settings.insert(
+                    format!("forcing:{}", key.to_ascii_lowercase()),
+                    value.to_string(),
+                );
             }
-        } else if lower != "def_dir_forcing" {
-            out.data_settings
-                .insert(format!("forcing:{lower}"), value.to_string());
         }
-    }
-    if !out.files.keys().any(|role| role.starts_with("forcing:")) {
-        out.unresolved
-            .push("forcing payload inventory is empty".into());
     }
     for key in doc.paths() {
         let Some(value) = doc.get(&key) else {
@@ -862,7 +1068,8 @@ pub(crate) fn full_inputs_with_progress(
             if raw.trim().is_empty() || raw.trim().eq_ignore_ascii_case("null") {
                 out.data_settings.insert(lower, "default".into());
             } else {
-                out.add(
+                add(
+                    &mut out,
                     "case:history_variables".into(),
                     &resolve(case, raw),
                     "data",
@@ -892,7 +1099,8 @@ pub(crate) fn full_inputs_with_progress(
                     .into_iter()
                     .enumerate()
                 {
-                    out.add(
+                    add(
+                        &mut out,
                         format!("model:tracer:{index}"),
                         &resolve(case, path.trim_matches(['\'', '"'])),
                         "model",
@@ -923,14 +1131,16 @@ pub(crate) fn full_inputs_with_progress(
                     continue;
                 }
                 if path.is_dir() {
-                    full_directory_with_progress(
+                    full_directory_filtered(
                         &mut out,
                         &format!("case:{lower}"),
                         &path,
                         progress,
+                        &excluded,
                     )?;
                 } else {
-                    out.add(
+                    add(
+                        &mut out,
                         format!("case:{lower}"),
                         &path,
                         if colm_model::is_model_field(&key) {
@@ -947,7 +1157,8 @@ pub(crate) fn full_inputs_with_progress(
         }
     }
     for file in crate::hybrid_cmd::climate_files(case) {
-        out.add(
+        add(
+            &mut out,
             format!(
                 "climate:{}",
                 file.file_name().unwrap_or_default().to_string_lossy()
@@ -961,7 +1172,8 @@ pub(crate) fn full_inputs_with_progress(
         let manifest: colm_model::MaterializedRun =
             serde_json::from_slice(&std::fs::read(case.join(colm_model::RUN_MANIFEST))?)?;
         for asset in &manifest.artifact_paths {
-            out.add(
+            add(
+                &mut out,
                 format!(
                     "model:{}",
                     asset
@@ -980,11 +1192,12 @@ pub(crate) fn full_inputs_with_progress(
         }
         for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
             if let Some(path) = manifest.inputs.get(&format!("execution-option:{flag}")) {
-                full_directory_with_progress(
+                full_directory_filtered(
                     &mut out,
                     &format!("option:{flag}"),
                     Path::new(path),
                     progress,
+                    &excluded,
                 )?;
             }
         }
@@ -1018,7 +1231,11 @@ pub(crate) fn full_input_guard(
     anyhow::ensure!(
         identity.complete
             && identity.schema == 1
-            && identity.algorithm == "sha256-full-v1"
+            && (identity.algorithm == "sha256-nonforcing-v1"
+                && identity
+                    .data_settings
+                    .get("forcing_content_policy")
+                    .is_some_and(|p| p == "excluded-v1"))
             && identity.data_sha256.is_some(),
         "execution guard requires a complete full-content input identity"
     );
@@ -1036,6 +1253,7 @@ pub(crate) fn full_input_guard(
         .collect::<Result<_>>()?;
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
+    let excluded = ForcingExclusions::load(case, &doc)?;
     let self_contained_roots = identity
         .data_settings
         .get("root_usage_policy")
@@ -1063,7 +1281,10 @@ pub(crate) fn full_input_guard(
         if let Some(raw) = doc.get(&key).and_then(string_value) {
             let path = resolve(case, raw);
             if path.is_dir() {
-                directories.insert(path.clone(), directory_inventory(&path)?);
+                directories.insert(
+                    path.clone(),
+                    directory_inventory_filtered(&path, &mut |_, _, _| {}, &excluded)?,
+                );
             }
         }
     }
@@ -1073,66 +1294,17 @@ pub(crate) fn full_input_guard(
         for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
             if let Some(path) = run.inputs.get(&format!("execution-option:{flag}")) {
                 let path = PathBuf::from(path);
-                directories.insert(path.clone(), directory_inventory(&path)?);
+                directories.insert(
+                    path.clone(),
+                    directory_inventory_filtered(&path, &mut |_, _, _| {}, &excluded)?,
+                );
             }
-        }
-    }
-    let forcing = doc
-        .get("DEF_forcing_namelist")
-        .and_then(string_value)
-        .map(|raw| resolve(case, raw))
-        .unwrap_or_else(|| case.join("forcing.nml"));
-    let force = colm_namelist::parse(&std::fs::read_to_string(&forcing)?)?;
-    let base = force
-        .get("DEF_dir_forcing")
-        .and_then(string_value)
-        .map(|raw| resolve(case, raw));
-    let mut forcing_prefixes = BTreeMap::new();
-    if let Some(base) = base {
-        for key in force
-            .paths()
-            .into_iter()
-            .filter(|key| key.to_ascii_lowercase().contains("fprefix"))
-        {
-            let Some(raw) = force
-                .get(&key)
-                .and_then(string_value)
-                .filter(|raw| !raw.is_empty() && !raw.eq_ignore_ascii_case("null"))
-            else {
-                continue;
-            };
-            let prefix = resolve(&base, raw);
-            if prefix.is_file() {
-                continue;
-            }
-            let parent = prefix
-                .parent()
-                .context("forcing prefix has no parent directory")?;
-            let name = prefix
-                .file_name()
-                .context("forcing prefix has no name")?
-                .to_string_lossy()
-                .into_owned();
-            // A forcing directory may also be the case directory; output/audit writes are not inputs.
-            let mut matches = BTreeMap::new();
-            for entry in std::fs::read_dir(parent)? {
-                let entry = entry?;
-                if entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with(name.as_str())
-                    && entry.path().is_file()
-                {
-                    matches.insert(entry.path(), stable_file_identity(&entry.metadata()?));
-                }
-            }
-            forcing_prefixes.insert(prefix, matches);
         }
     }
     Ok(FullInputGuard {
         files,
         directories,
-        forcing_prefixes,
+        forcing_prefixes: BTreeMap::new(),
     })
 }
 
@@ -1161,13 +1333,23 @@ fn full_data_digest(identity: &FullInputIdentity) -> Result<String> {
 
 // All declared roots are read-only inputs. Reject cycles, special files and
 // changes to membership or file identities while producing the full inventory.
+#[cfg(test)]
 fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
     directory_inventory_with_progress(root, &mut |_, _, _| {})
 }
 
+#[cfg(test)]
 fn directory_inventory_with_progress(
     root: &Path,
     progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+) -> Result<BTreeMap<PathBuf, String>> {
+    directory_inventory_filtered(root, progress, &ForcingExclusions::default())
+}
+
+fn directory_inventory_filtered(
+    root: &Path,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+    excluded: &ForcingExclusions,
 ) -> Result<BTreeMap<PathBuf, String>> {
     fn visit(
         root: &Path,
@@ -1175,15 +1357,26 @@ fn directory_inventory_with_progress(
         active: &mut Vec<PathBuf>,
         out: &mut BTreeMap<PathBuf, String>,
         progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+        excluded: &ForcingExclusions,
     ) -> Result<()> {
         let path = root.join(relative);
+        if excluded.contains(&path) {
+            return Ok(());
+        }
         progress(&path, 0, None);
         let canonical = path
             .canonicalize()
             .with_context(|| format!("cannot resolve scientific input {}", path.display()))?;
         let metadata = std::fs::metadata(&path)
             .with_context(|| format!("cannot inspect scientific input {}", path.display()))?;
-        out.insert(relative.to_path_buf(), stable_file_identity(&metadata));
+        out.insert(
+            relative.to_path_buf(),
+            if metadata.is_dir() && excluded.overlaps_directory(&path) {
+                "directory".into()
+            } else {
+                stable_file_identity(&metadata)
+            },
+        );
         if metadata.is_dir() {
             anyhow::ensure!(
                 !active.contains(&canonical),
@@ -1206,6 +1399,7 @@ fn directory_inventory_with_progress(
                     active,
                     out,
                     progress,
+                    excluded,
                 )?;
             }
             active.pop();
@@ -1225,6 +1419,7 @@ fn directory_inventory_with_progress(
         &mut Vec::new(),
         &mut inventory,
         progress,
+        excluded,
     )?;
     Ok(inventory)
 }
@@ -1233,13 +1428,24 @@ fn full_directory(out: &mut FullInputIdentity, role: &str, root: &Path) -> Resul
     full_directory_with_progress(out, role, root, &mut |_, _, _| {})
 }
 
+#[cfg(test)]
 fn full_directory_with_progress(
     out: &mut FullInputIdentity,
     role: &str,
     root: &Path,
     progress: &mut dyn FnMut(&Path, u64, Option<u64>),
 ) -> Result<()> {
-    let before = directory_inventory_with_progress(root, progress)?;
+    full_directory_filtered(out, role, root, progress, &ForcingExclusions::default())
+}
+
+fn full_directory_filtered(
+    out: &mut FullInputIdentity,
+    role: &str,
+    root: &Path,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+    excluded: &ForcingExclusions,
+) -> Result<()> {
+    let before = directory_inventory_filtered(root, progress, excluded)?;
     for relative in before.keys() {
         let path = root.join(relative);
         if path.is_file() {
@@ -1254,7 +1460,7 @@ fn full_directory_with_progress(
         }
     }
     anyhow::ensure!(
-        before == directory_inventory_with_progress(root, progress)?,
+        before == directory_inventory_filtered(root, progress, excluded)?,
         "input directory changed during hashing: {}",
         root.display()
     );
@@ -1319,6 +1525,11 @@ pub(crate) fn same_payloads(a: &FullInputIdentity, b: &FullInputIdentity) -> boo
     a.complete
         && b.complete
         && a.algorithm == b.algorithm
+        && (a.algorithm == "sha256-full-v1"
+            || (a.algorithm == INPUT_ALGORITHM
+                && a.data_settings
+                    .get("forcing_content_policy")
+                    .is_some_and(|policy| policy == FORCING_CONTENT_POLICY)))
         && a.data_settings == b.data_settings
         && a.data_sha256 == b.data_sha256
         && payloads(a) == payloads(b)
@@ -1393,6 +1604,15 @@ fn simple_site_roots_unused(nml: &Path, doc: &colm_namelist::Document) -> Result
 }
 
 fn declared_root_unused(nml: &Path, doc: &colm_namelist::Document, field: &str) -> Result<bool> {
+    let case = nml.parent().unwrap_or_else(|| Path::new("."));
+    let excluded = ForcingExclusions::load(case, doc)?;
+    if doc
+        .get("SITE_fsitedata")
+        .and_then(string_value)
+        .is_some_and(|raw| excluded.contains(&resolve(case, raw)))
+    {
+        return Ok(false);
+    }
     let enabled = |name: &str| match doc.get(name) {
         Some(colm_namelist::Value::Bool(v)) => *v,
         _ => matches!(
@@ -1701,8 +1921,8 @@ mod full_identity_tests {
                 full_inputs(&root).unwrap().data_sha256
             );
             std::fs::write(root.join("forcing.nc"), b"forcing changed").unwrap();
-            assert_ne!(guard, full_input_guard(&root, &identity).unwrap());
-            assert_ne!(
+            assert_eq!(guard, full_input_guard(&root, &identity).unwrap());
+            assert_eq!(
                 identity.data_sha256,
                 full_inputs(&root).unwrap().data_sha256
             );
@@ -2010,7 +2230,7 @@ mod full_identity_tests {
     }
 
     #[test]
-    fn run_guard_allows_case_output_writes_but_rejects_new_forcing_members() {
+    fn run_guard_allows_case_output_writes_and_new_forcing_members() {
         let root = std::env::temp_dir().join(format!(
             "guard-members-{}-{}",
             std::process::id(),
@@ -2029,7 +2249,7 @@ mod full_identity_tests {
         std::fs::write(root.join("stages.json"), "{}").unwrap();
         verify_input_guard(&root, &inputs, &guard).unwrap();
         std::fs::write(root.join("drivers-b.nc"), b"new driver").unwrap();
-        assert!(verify_input_guard(&root, &inputs, &guard).is_err());
+        assert!(verify_input_guard(&root, &inputs, &guard).is_ok());
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2090,10 +2310,10 @@ mod full_identity_tests {
         let child = std::process::Command::new("sh")
             .args([
                 "-c",
-                "printf B > \"$1\"; printf A > \"$1\"; exit 0",
+                "cp \"$1\" \"$1.bak\"; printf B > \"$1\"; cat \"$1.bak\" > \"$1\"; rm \"$1.bak\"; exit 0",
                 "cached-model",
             ])
-            .arg(root.join("drivers-a.nc"))
+            .arg(&history)
             .status()
             .unwrap();
         assert!(

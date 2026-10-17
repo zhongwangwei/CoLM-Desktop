@@ -142,6 +142,11 @@ fn the_job_creates_the_study_on_the_server_records_its_root_and_runs_it() {
     assert!(body.contains("'/srv/colm/engine/abc123/bin'/colm-cli study-create '/srv/colm/studies/s-1-ff' --spec '/srv/colm/studies/s-1-ff/spec.json'"), "{body}");
     assert!(body.contains("tail -n 1 study_create.out > study_root"));
     assert!(body.contains("study-run \"$STUDY\" --kernel '/srv/colm/kernels/default-1' --stream 1 --jobs 4 --engine rust --preprocessors rust"), "{body}");
+    assert!(body.find(" fingerprint-policy").unwrap() < body.find("study-create").unwrap());
+    let ensure = engine::ensure_script("/srv/colm", "abc123", 8);
+    assert!(
+        body.find(&ensure).unwrap() + ensure.len() <= body.find(" fingerprint-policy").unwrap()
+    );
     assert!(body.find("study-create").unwrap() < body.find("study-run").unwrap());
 }
 
@@ -443,4 +448,35 @@ fn fetch_rejects_a_symlink_checkpoint_parent_without_touching_external_state() {
     assert_eq!(regular_tree_files(&outside, true).unwrap(), before);
     assert!(local.join("checkpoints").is_symlink());
     std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn comparison_probes_forcing_exclusion_before_dispatching_evidence() {
+    for policy in [
+        "{}",
+        "{\"forcing_content_policy\":\"full\"}",
+        "unknown command",
+    ] {
+        let mut commands = Vec::new();
+        let result = scoped_comparison_evidence("/engine/colm-cli", "EVIDENCE", |command| {
+            commands.push(command.to_string());
+            Ok(policy.into())
+        });
+        assert!(result.is_err());
+        assert_eq!(commands.len(), 1);
+        assert!(commands[0].ends_with(" fingerprint-policy"));
+    }
+    let mut commands = Vec::new();
+    let result = scoped_comparison_evidence("/engine/colm-cli", "EVIDENCE", |command| {
+        commands.push(command.to_string());
+        Ok(if command.ends_with(" fingerprint-policy") {
+            r#"{"forcing_content_policy":"excluded-v1"}"#.into()
+        } else {
+            r#"{"scope":"sha256-nonforcing-v1","forcing_contents_verified":false}"#.into()
+        })
+    })
+    .unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(commands[1], "EVIDENCE");
+    assert_eq!(result["forcing_contents_verified"], false);
 }

@@ -1441,6 +1441,10 @@ fn materialized_revision(
     Ok(Some(revision))
 }
 
+fn forcing_policy_guard(cli: &str) -> String {
+    format!("colm_forcing_policy=$({cli} fingerprint-policy) || {{ echo 'Update model code: fingerprint-policy is unavailable' >&2; exit 1; }}\n[ \"$colm_forcing_policy\" = '{policy}' ] || {{ echo 'Update model code: forcing content fingerprints must be excluded' >&2; exit 1; }}\n", cli=quote(cli), policy=r#"{"forcing_content_policy":"excluded-v1"}"#)
+}
+
 /// 作业体：先确保引擎编好，再跑三段。
 #[allow(clippy::too_many_arguments)]
 fn job_body(
@@ -1495,7 +1499,8 @@ fn job_body(
         run.push_str(" --record-input-fingerprints 1");
     }
     Ok(format!(
-        "echo \"preparing the engine\" > phase\n{ensure}{launcher}echo \"running\" >> phase\n{run}\n",
+        "echo \"preparing the engine\" > phase\n{ensure}{policy}{launcher}echo \"running\" >> phase\n{run}\n",
+        policy = forcing_policy_guard(&format!("{}/bin/colm-cli", engine::engine_dir(root, engine_id))),
         // 编译的并行度与运行线程数无关：至少 8 个任务。
         ensure = engine::ensure_script(root, engine_id, threads.max(8).clamp(1, 64)),
     ))
@@ -2577,8 +2582,16 @@ fn verify_submitted_output_identity(proof: &serde_json::Value, record: &Record) 
     let full: crate::fingerprint::FullInputIdentity =
         serde_json::from_value(remote["full_input_identity"].clone())?;
     ensure!(
-        full.complete && full.algorithm == "sha256-full-v1",
-        "server input content identity is incomplete"
+        full.complete
+            && (full.algorithm == "sha256-full-v1"
+                || (full.algorithm == "sha256-nonforcing-v1"
+                    && full
+                        .data_settings
+                        .get("forcing_content_policy")
+                        .map(String::as_str)
+                        == Some("excluded-v1")
+                    && full.unresolved.is_empty())),
+        "server input content identity is incomplete or has an unsupported scope"
     );
     Ok(())
 }
@@ -2611,6 +2624,7 @@ fn fetch_certification(
         let remote = &proof["provenance"];
         for field in [
             "full_input_identity",
+            "verification",
             "input_sources",
             "input_fingerprint",
             "kernel",
@@ -2652,6 +2666,13 @@ fn fetch_certification(
     };
     let verified = reason.is_none();
     fetched["output_verification"] = json!({"status":if verified {"passed"} else {"unavailable"},"partial":partial,"reason":reason});
+    if proof.is_some_and(|p| {
+        p["provenance"]["full_input_identity"]["algorithm"] == "sha256-nonforcing-v1"
+    }) {
+        fetched["verification"]["status"] = json!("partial");
+        fetched["verification"]["forcing_contents_verified"] = json!(false);
+        fetched["output_verification"]["forcing_contents_verified"] = json!(false);
+    }
     if let Some(reason) = reason {
         fetched["ok"] = json!(false);
         fetched["error"] = json!(reason);
@@ -2865,7 +2886,10 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
             "fetched output certification was not recorded"
         );
         if !partial {
-            if let Some(proof) = &proof {
+            if let Some(proof) = proof
+                .as_ref()
+                .filter(|p| !content_fingerprints_disabled(&p["provenance"]))
+            {
                 let expected = recorded_history_hashes(&proof["provenance"])?;
                 ensure!(
                     recorded_history_hashes(&written)? == expected,
@@ -2906,70 +2930,8 @@ pub(crate) fn verify_recorded_inputs(
             && !case.join(FETCH_MARK).exists(),
         "remote output is partial or lacks original-output verification"
     );
-    let local: std::collections::BTreeMap<String, String> =
-        serde_json::from_value(provenance["local_configuration_sha256"].clone())
-            .context("submitted local configuration identity is missing")?;
-    ensure!(
-        crate::fingerprint::configuration_identity(case)? == local,
-        "local frozen configuration changed since remote submission"
-    );
-    let record = read_record(case)?;
-    let expected = record
-        .provenance
-        .as_ref()
-        .context("remote submission provenance is missing")?;
-    ensure!(
-        provenance["remote_model_run"] == expected["remote_model_run"]
-            && provenance["engine_snapshot"] == expected["engine_snapshot"],
-        "remote submission identity changed"
-    );
-    let ssh = Ssh::new(&record.host)?;
-    let proof = remote_output_verification(&ssh, &record)?
-        .context("bound server CLI cannot verify original outputs")?;
-    let remote = &proof["provenance"];
-    ensure!(
-        *remote == provenance["remote_execution_provenance"],
-        "server completion provenance changed since fetch"
-    );
-    verify_history_hashes(
-        &colm_case::Layout::new(case)
-            .out()
-            .join(&record.case_name)
-            .join("history"),
-        &recorded_history_hashes(remote)?,
-    )?;
-    let server_recorded: crate::fingerprint::FullInputIdentity =
-        serde_json::from_value(remote["full_input_identity"].clone())?;
-    ensure!(
-        &server_recorded == recorded,
-        "server input provenance changed since fetch"
-    );
-    let cli = format!(
-        "{}/bin/colm-cli",
-        engine::engine_dir(&record.root, &record.engine)
-    );
-    let actual: crate::fingerprint::FullInputIdentity =
-        serde_json::from_str(&ssh.run_ok(&format!(
-            "COLM_AUDIT_BY_PARENT=1 {} full-input-identity {}",
-            quote(&cli),
-            quote(&record.remote_case)
-        ))?)?;
-    ensure!(
-        &actual == recorded,
-        "server scientific inputs or frozen configuration changed since the run"
-    );
-    ensure!(
-        remote_output_verification(&ssh, &record)?.as_ref() == Some(&proof),
-        "server outputs changed during scientific input verification"
-    );
-    verify_history_hashes(
-        &colm_case::Layout::new(case)
-            .out()
-            .join(&record.case_name)
-            .join("history"),
-        &recorded_history_hashes(remote)?,
-    )?;
-    Ok(())
+    let _ = recorded;
+    bail!("forcing content fingerprints are excluded by policy; full-input verification cannot invoke a remote CLI")
 }
 
 /// 取回时的出处：提交时记下的那份，加上作业的结局。

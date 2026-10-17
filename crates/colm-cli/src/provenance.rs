@@ -132,7 +132,9 @@ fn input_sources(case: &Path) -> Result<Value> {
         _ => case.join("forcing.nml"),
     };
     let mut sources = json!({ "case_namelist": case_path, "case_settings": config,
-        "forcing_namelist": forcing_path });
+        "forcing_namelist": forcing_path,
+        "forcing_content_policy": crate::fingerprint::FORCING_CONTENT_POLICY,
+        "forcing_contents_verified": false });
     if forcing_path.is_file() {
         sources["forcing_settings"] = serde_json::to_value(settings(&forcing_path)?)?;
     }

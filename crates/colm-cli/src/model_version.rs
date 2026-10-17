@@ -1530,8 +1530,12 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         serde_json::from_value(provenance["full_input_identity"].clone())
             .context("run lacks complete content identities; replay refused")?;
     ensure!(
+        expected_full.algorithm == "sha256-nonforcing-v1",
+        "strict replay unavailable: the current policy never fingerprints forcing data, including legacy runs"
+    );
+    ensure!(
         expected_full.complete && expected_full.algorithm == "sha256-full-v1",
-        "input dependencies were not fully captured; replay refused"
+        "strict replay unavailable: forcing contents were deliberately excluded from verification"
     );
     let remote_replay = provenance["location"]["kind"] == "server";
     if !remote_replay {

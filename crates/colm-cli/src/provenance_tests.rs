@@ -204,6 +204,8 @@ fn input_sources_record_settings_and_paths_without_opening_data() {
     );
     assert_eq!(sources["forcing_namelist"], json!(root.join("forcing.nml")));
     assert!(sources.get("sha256").is_none());
+    assert_eq!(sources["forcing_content_policy"], "excluded-v1");
+    assert_eq!(sources["forcing_contents_verified"], false);
     std::fs::remove_dir_all(root).unwrap();
 }
 

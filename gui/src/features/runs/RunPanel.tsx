@@ -818,7 +818,7 @@ export default function RunPanel({
       : []),
     {
       id: 'run-input-fingerprints',
-      label: t('记录文件指纹（默认关闭）', 'Record file fingerprints (off by default)'),
+      label: t('记录其他文件指纹（默认关闭）', 'Record other file fingerprints (off by default)'),
       value: String(recordInputFingerprints),
       type: 'switch' as const,
       set: (v: string) => setRecordInputFingerprints(v === 'true'),
@@ -1112,8 +1112,8 @@ export default function RunPanel({
       {render(fields.find((field) => field.id === 'run-input-fingerprints')!)}
       <p className="muted">
         {t(
-          '统一控制输入、程序及输出文件的内容指纹。关闭时仅记录版本、数据来源、路径与配置，重新执行所选阶段；开启后逐字节校验，用于严格重放和核对，大型目录可能耗时较长。',
-          'Controls content fingerprints for inputs, programs and outputs. When off, only versions, sources, paths and settings are recorded, and selected stages run again. When on, byte-level verification enables strict replay and comparison; large directories can take a long time.',
+          '驱动数据始终跳过内容指纹，只记录数据集、路径、前缀和时段。此开关控制其他输入、程序及输出文件；关闭时仅记录来源和配置，开启后校验这些文件。模拟阶段会重新运行，驱动内容不作一致性认证。',
+          'Forcing data never receive content fingerprints; only their dataset, paths, prefixes and period are recorded. This switch controls other inputs, programs and outputs. When off, only sources and settings are recorded; when on, those files are verified. Simulation runs again, and forcing contents are not certified.',
         )}
       </p>
       {host && batchCases && (
