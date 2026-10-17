@@ -213,7 +213,9 @@ fn release_and_ci_cover_crop_kernel_bundle() {
     assert!(ensure.contains("stage_mpi_runtime.sh"));
     assert!(ensure.contains("[str(launcher), '-n', '1', 'hostname']"));
     assert!(release.contains("git make python"));
-    assert!(release.contains("shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}"));
+    assert!(
+        release.contains("shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}")
+    );
     assert!(read(".github/workflows/windows-kernel.yml").contains("            python\n"));
     let ci = read(".github/workflows/ci.yml");
     assert!(ci.contains("--config tauri.bundle.conf.json --config tauri.bundle-smoke.conf.json"));

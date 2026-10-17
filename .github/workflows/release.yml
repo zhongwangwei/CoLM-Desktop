@@ -272,7 +272,7 @@ jobs:
           path: gui/src-tauri/engine
 
       - name: Bundle
-        shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}
+        shell: ${{ matrix.os == 'windows-latest' && 'msys2 {0}' || 'bash' }}
         working-directory: gui/src-tauri
         env:
           RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
