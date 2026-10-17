@@ -135,7 +135,7 @@ export default function NewCasePage() {
   const initialLandcover = seed?.form?.landcover ?? '';
   const initialSubgrid = seed?.form?.subgrid ?? (seed?.form?.landcover ? seed.form.landcover : '');
   const [form, setForm] = useState<Record<string, string>>({
-    // 计算核心、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
+    // 计算引擎、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
     engine: '',
     host: '',
     root: initialRoot,
@@ -1339,7 +1339,7 @@ export default function NewCasePage() {
     }
   }
   const labels: Record<string, string> = {
-    engine: t('计算核心', 'Computation core'),
+    engine: t('计算引擎', 'Computation engine'),
     root: form.host
       ? t('服务器项目目录', 'Server project folder')
       : t('保存到项目目录', 'Project folder'),
@@ -2068,8 +2068,8 @@ export default function NewCasePage() {
         <Card
           title={t('总的设定', 'General setup')}
           description={t(
-            '先选择运行位置和计算核心，再设置保存路径与模拟名称。',
-            'Choose the run location and computation core before setting paths and simulation name.',
+            '先选择运行位置和计算引擎，再设置保存路径与模拟名称。',
+            'Choose the run location and computation engine before setting paths and simulation name.',
           )}
         >
           <RunLocationSettings
@@ -2083,7 +2083,7 @@ export default function NewCasePage() {
             onConfigure={openResources}
           />
           <section className="simulation-choice-group">
-            <h3>{t('计算核心', 'Computation core')}</h3>
+            <h3>{t('计算引擎', 'Computation engine')}</h3>
             <div className="simulation-choices engine-choices">
               <Button
                 variant="ghost"
@@ -2617,7 +2617,7 @@ export default function NewCasePage() {
                 <dd>{form.name}</dd>
                 <dt>{t('运行位置', 'Run location')}</dt>
                 <dd>{form.host || t('本机', 'Local')}</dd>
-                <dt>{t('计算核心', 'Computation core')}</dt>
+                <dt>{t('计算引擎', 'Computation engine')}</dt>
                 <dd>
                   {form.engine === 'rust'
                     ? t('Rust 引擎', 'Rust engine')

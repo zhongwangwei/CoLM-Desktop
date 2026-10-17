@@ -1129,7 +1129,7 @@ export default function CasesPage() {
             <Card
               title={t('总的设定', 'General setup')}
               description={t(
-                '选择运行位置，核对计算核心、算例保存路径与输出目录。',
+                '选择运行位置，核对计算引擎、算例保存路径与输出目录。',
                 'Choose the run location and review the engine, case directory and output directory.',
               )}
             >
@@ -1156,7 +1156,7 @@ export default function CasesPage() {
               <div className="simulation-site-summary">
                 <strong>{state.selectedCase?.entry.name}</strong>
                 <span>
-                  {t('计算核心：', 'Engine: ')}
+                  {t('计算引擎：', 'Engine: ')}
                   {engine === 'fortran' ? 'Fortran' : 'Rust'}
                 </span>
               </div>
@@ -1184,7 +1184,7 @@ export default function CasesPage() {
               </div>
               <p className="muted">
                 {t(
-                  '已有算例的基础配置由建例时确定；如需更换计算核心或算例目录，请新建模拟。',
+                  '已有算例的基础配置由建例时确定；如需更换计算引擎或算例目录，请新建模拟。',
                   'General settings are set when creating the case. Create a new simulation to change the engine or directory.',
                 )}
               </p>

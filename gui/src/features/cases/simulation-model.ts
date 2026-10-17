@@ -196,7 +196,7 @@ export function simulationFields(
 export function newCaseGeneralProblem(form: Record<string, string>, en = false): string | null {
   const t = (zh: string, english: string) => (en ? english : zh);
   if (!form.engine?.trim() || !['rust', 'fortran'].includes(form.engine))
-    return t('请选择计算核心。', 'Choose a computation core.');
+    return t('请选择计算引擎。', 'Choose a computation engine.');
   if (!form.root?.trim())
     return t('请选择保存模拟的项目目录。', 'Choose a project folder for this simulation.');
   if (!form.name?.trim()) return t('请填写模拟名称。', 'Enter a simulation name.');

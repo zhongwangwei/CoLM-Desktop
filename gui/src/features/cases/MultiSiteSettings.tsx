@@ -229,7 +229,7 @@ export default function MultiSiteSettings({
           </Field>
           <Notice>
             {t(
-              '各站将第一年强迫场预热 N 次，之后从原始起始日期重新开始完整的正式模拟，输出包含第一年。此模式使用 Rust 计算核心。',
+              '各站将第一年强迫场预热 N 次，之后从原始起始日期重新开始完整的正式模拟，输出包含第一年。此模式使用 Rust 计算引擎。',
               'Each site warms up using its first year of forcing N times, then restarts the full formal simulation at the original start date. Output includes the first year. This mode uses the Rust engine.',
             )}
           </Notice>
