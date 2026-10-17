@@ -1324,12 +1324,12 @@ fn full_data_digest(identity: &FullInputIdentity) -> Result<String> {
 
 // All declared roots are read-only inputs. Reject cycles, special files and
 // changes to membership or file identities while producing the full inventory.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
     directory_inventory_with_progress(root, &mut |_, _, _| {})
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn directory_inventory_with_progress(
     root: &Path,
     progress: &mut dyn FnMut(&Path, u64, Option<u64>),
