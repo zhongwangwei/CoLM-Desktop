@@ -3661,6 +3661,10 @@ test('new case calendar fields use the form setters and preserve spinup configur
   assert.equal(dates.length, 3);
   assert.ok(dates.every((e) => e.props.disabled === false && e.props.calendarLabel));
   (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '20010201' },
+  });
+  assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '20010201');
+  (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
     target: { value: '2001-02-01' },
   });
   const c = p.render();
@@ -3676,6 +3680,11 @@ test('existing case calendar fields save dates without changing time-of-day or s
   const dates = p.elements.filter((e) => e.type === 'DateInput');
   assert.equal(dates.length, 3);
   assert.ok(dates.every((e) => e.props.disabled === false && e.props.calendarLabel));
+  (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
+    target: { value: '20010101' },
+  });
+  assert.equal(p.render().fields.find((f) => f.id === 'case-start-date')?.value, '20010101');
+  await assert.rejects(p.click('case-save'), /时段/);
   (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
     target: { value: '2001-01-01' },
   });

@@ -2364,8 +2364,8 @@ export default function NewCasePage() {
               <div className="simulation-dates">{['start', 'end'].map(render)}</div>
               <p className="field-hint">
                 {t(
-                  '可填写 YYYY-MM-DD（例如 2001-01-01）或点日历选择。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
-                  'Enter YYYY-MM-DD, e.g. 2001-01-01, or choose from the calendar. Site runs normally include the end date, limited by forcing coverage.',
+                  '可填 YYYY-MM-DD 或 YYYYMMDD；完整有效日期自动补齐分隔符，也可点日历选择。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
+                  'Enter YYYY-MM-DD or YYYYMMDD; complete valid dates gain separators automatically. You can also choose from the calendar. Site runs normally include the end date, limited by forcing coverage.',
                 )}
               </p>
               <div

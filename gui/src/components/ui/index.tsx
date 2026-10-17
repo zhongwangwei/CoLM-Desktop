@@ -45,6 +45,7 @@ export function Input({ className, ...props }: ComponentProps<'input'>) {
 export function DateInput({
   value,
   onChange,
+  onBlur,
   disabled,
   readOnly,
   calendarLabel,
@@ -52,6 +53,10 @@ export function DateInput({
 }: Omit<ComponentProps<'input'>, 'type' | 'value'> & { value: string; calendarLabel: string }) {
   const picker = useRef<HTMLInputElement>(null);
   const [nativeVisible, setNativeVisible] = useState(false);
+  function formatCompactDate(raw: string) {
+    const date = raw.replace(/^(\d{4})(\d{2})(\d{2})$/, '$1-$2-$3');
+    return validDate(date) ? date : raw;
+  }
   function openCalendar() {
     if (disabled || readOnly || !picker.current) return;
     // Older WebKit can silently ignore showPicker, so keep its date control reachable.
@@ -79,8 +84,19 @@ export function DateInput({
         placeholder={props.placeholder ?? 'YYYY-MM-DD'}
         maxLength={props.maxLength ?? 10}
         onChange={(event) => {
+          if (!disabled && !readOnly)
+            event.currentTarget.value = formatCompactDate(event.currentTarget.value);
           onChange?.(event);
           setNativeVisible(false);
+        }}
+        onBlur={(event) => {
+          const raw = event.currentTarget.value;
+          const date = formatCompactDate(raw);
+          if (!disabled && !readOnly && date !== raw) {
+            event.currentTarget.value = date;
+            onChange?.(event);
+          }
+          onBlur?.(event);
         }}
       />
       <Button

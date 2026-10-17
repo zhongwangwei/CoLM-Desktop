@@ -191,6 +191,9 @@ test('per-site date pickers update only their station and follow disabled state'
   page.fill('multisite-mode', 'per-site');
   assert.equal(page.dateInputs.length, 6);
   assert.ok(page.dateInputs.every((input) => !input.disabled && input.calendarLabel));
+  page.dateInputs[0].onChange({ target: { value: '20000201' } });
+  page.render();
+  assert.equal(page.props.drafts[0].start, '20000201');
   page.dateInputs[0].onChange({ target: { value: '2000-02-01' } });
   page.render();
   assert.equal(page.props.drafts[0].start, '2000-02-01');

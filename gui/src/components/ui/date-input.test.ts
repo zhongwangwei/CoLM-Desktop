@@ -54,6 +54,7 @@ function control(
       calendarLabel: 'Choose start date',
       ...options,
       onChange: (event: { target: { value: string } }) => changes.push(event.target.value),
+      onBlur: (event: { target: { value: string } }) => calls.push(`blur:${event.target.value}`),
     });
   };
   render();
@@ -79,6 +80,50 @@ test('date text remains intact while only valid ISO dates reach the native picke
     assert.equal(control(value).native().value, value);
 });
 
+test('leaving a date field formats valid compact dates and preserves incomplete or invalid text', () => {
+  for (const [raw, expected] of [
+    ['20030201', '2003-02-01'],
+    ['20240229', '2024-02-29'],
+    ['00010101', '0001-01-01'],
+    ['2003-02-01', '2003-02-01'],
+    ['2003-', '2003-'],
+    ['200302', '200302'],
+    ['20030230', '20030230'],
+    ['20010229', '20010229'],
+    ['00000101', '00000101'],
+  ]) {
+    const input = control(raw);
+    const target = { value: raw };
+    (input.text().onBlur as (event: unknown) => void)({ target, currentTarget: target });
+    assert.equal(target.value, expected);
+    assert.deepEqual(input.changes, raw === expected ? [] : [expected]);
+    assert.deepEqual(input.calls, [`blur:${expected}`]);
+  }
+  for (const options of [{ disabled: true }, { readOnly: true }]) {
+    const input = control('20030201', options);
+    const target = { value: '20030201' };
+    (input.text().onBlur as (event: unknown) => void)({ target, currentTarget: target });
+    assert.equal(target.value, '20030201');
+    assert.deepEqual(input.changes, []);
+  }
+});
+
+test('a complete valid eight-digit date formats immediately so navigation does not depend on blur', () => {
+  const input = control('');
+  for (const [raw, expected] of [
+    ['2003020', '2003020'],
+    ['20030201', '2003-02-01'],
+    ['20240229', '2024-02-29'],
+    ['20030229', '20030229'],
+    ['20031301', '20031301'],
+  ]) {
+    const target = { value: raw };
+    (input.text().onChange as (event: unknown) => void)({ target, currentTarget: target });
+    assert.equal(target.value, expected);
+    assert.equal(input.changes.at(-1), expected);
+  }
+});
+
 test('calendar opens during button activation and selected ISO dates use the normal setter', () => {
   let opened = 0;
   const input = control('2001-', {
@@ -91,7 +136,8 @@ test('calendar opens during button activation and selected ISO dates use the nor
   assert.deepEqual(input.calls, ['focus']);
   assert.equal(input.button()['aria-label'], 'Choose start date');
   (input.native().onChange as (event: unknown) => void)({ target: { value: '2001-03-04' } });
-  (input.text().onChange as (event: unknown) => void)({ target: { value: '200' } });
+  const target = { value: '200' };
+  (input.text().onChange as (event: unknown) => void)({ target, currentTarget: target });
   assert.deepEqual(input.changes, ['2001-03-04', '200']);
 });
 
