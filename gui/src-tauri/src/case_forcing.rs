@@ -1,5 +1,6 @@
 //! Case-owned forcing edits, committed alongside case.nml by the configuration transaction.
 use super::*;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Deserialize)]
@@ -18,7 +19,14 @@ pub(super) struct Prepared {
 fn read(dir: &Path) -> Result<(PathBuf, String, colm_namelist::Document), String> {
     let case = std::fs::read_to_string(dir.join("case.nml")).map_err(|e| e.to_string())?;
     let doc = colm_namelist::parse(&case).map_err(|e| e.to_string())?;
-    let name = character(&doc, "DEF_forcing_namelist");
+    let path = forcing_path(dir, &doc)?;
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
+    Ok((path, text, doc))
+}
+
+fn forcing_path(dir: &Path, doc: &colm_namelist::Document) -> Result<PathBuf, String> {
+    let name = character(doc, "DEF_forcing_namelist");
     if name.trim().is_empty() || name.eq_ignore_ascii_case("null") {
         return Err("算例没有强迫场配置文件".into());
     }
@@ -31,9 +39,60 @@ fn read(dir: &Path) -> Result<(PathBuf, String, colm_namelist::Document), String
     if !path.is_absolute() {
         path = dir.join(path);
     }
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let doc = colm_namelist::parse(&text).map_err(|e| e.to_string())?;
-    Ok((path, text, doc))
+    Ok(path)
+}
+
+#[derive(Debug, Serialize)]
+pub struct NamelistPreviewFile {
+    pub name: String,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NamelistPreview {
+    pub files: Vec<NamelistPreviewFile>,
+    pub warnings: Vec<String>,
+}
+
+fn preview_text(path: &Path) -> Result<String, String> {
+    const LIMIT: usize = 4 * 1024 * 1024;
+    let file = std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut text = String::new();
+    file.take(LIMIT as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    if text.len() > LIMIT {
+        return Err(format!("{}: 配置文件超过 4 MiB，无法预览", path.display()));
+    }
+    Ok(text)
+}
+
+#[tauri::command]
+pub fn case_namelist_preview(dir: String) -> Result<NamelistPreview, String> {
+    let dir = Path::new(&dir);
+    let text = preview_text(&dir.join("case.nml"))?;
+    let forcing = colm_namelist::parse(&text)
+        .map_err(|e| format!("case.nml: {e}"))
+        .and_then(|doc| forcing_path(dir, &doc))
+        .and_then(|path| preview_text(&path).map(|text| (path, text)));
+    let mut result = NamelistPreview {
+        files: vec![NamelistPreviewFile {
+            name: "case.nml".into(),
+            text,
+        }],
+        warnings: vec![],
+    };
+    match forcing {
+        Ok((path, text)) => result.files.push(NamelistPreviewFile {
+            name: format!(
+                "forcing: {}",
+                path.file_name().unwrap_or_default().to_string_lossy()
+            ),
+            text,
+        }),
+        Err(error) => result.warnings.push(error),
+    }
+    Ok(result)
 }
 
 #[tauri::command]

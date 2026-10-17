@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 #[path = "case_forcing.rs"]
 mod case_forcing;
-pub use case_forcing::{case_forcing_input, ForcingInput};
+pub use case_forcing::{case_forcing_input, case_namelist_preview, ForcingInput};
 
 #[path = "model_configuration.rs"]
 pub(crate) mod model_configuration;

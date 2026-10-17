@@ -128,6 +128,12 @@ export const commandContract = {
   },
   "assistant_cancel": {},
   "assistant_new_session": {},
+  "case_namelist_preview": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "case_forcing_input": {
     "dir": {
       "required": true,

@@ -1,0 +1,5 @@
+{
+  "build": {
+    "beforeBuildCommand": "npm run build && cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
+  }
+}

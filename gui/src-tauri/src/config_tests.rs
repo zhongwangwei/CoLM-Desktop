@@ -4489,6 +4489,10 @@ fn spatial_forcing_read_resolves_server_cache_and_preserves_server_data_path() {
         case_forcing_input(dirs[0].clone()).unwrap().directory,
         "/server/data"
     );
+    let preview = case_namelist_preview(dirs[0].clone()).unwrap();
+    assert_eq!(preview.files.len(), 2);
+    assert!(preview.files[1].text.contains("/server/data"));
+    assert!(preview.warnings.is_empty());
     let prepared = case_forcing::prepare(
         &dirs,
         &ForcingInput {
@@ -4513,4 +4517,54 @@ fn spatial_forcing_read_resolves_server_cache_and_preserves_server_data_path() {
         }
     )
     .is_err());
+}
+
+#[test]
+fn namelist_preview_is_read_only_and_keeps_case_when_forcing_is_unavailable() {
+    let original = "&nl_colm\n DEF_forcing_namelist='nested/shared.nml'\n/\n";
+    let dirs = batch("namelist-preview", &[original]);
+    let dir = std::path::Path::new(&dirs[0]);
+    std::fs::create_dir(dir.join("nested")).unwrap();
+    let forcing = "! user comments stay intact\n&nl_colm_forcing\n DEF_dir_forcing='/data'\n/\n";
+    std::fs::write(dir.join("nested/shared.nml"), forcing).unwrap();
+    let preview = case_namelist_preview(dirs[0].clone()).unwrap();
+    assert_eq!(preview.files[0].name, "case.nml");
+    assert_eq!(preview.files[0].text, original);
+    assert_eq!(preview.files[1].name, "forcing: shared.nml");
+    assert_eq!(preview.files[1].text, forcing);
+    assert!(preview.warnings.is_empty());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("case.nml")).unwrap(),
+        original
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("nested/shared.nml")).unwrap(),
+        forcing
+    );
+    std::fs::remove_file(dir.join("nested/shared.nml")).unwrap();
+    let preview = case_namelist_preview(dirs[0].clone()).unwrap();
+    assert_eq!(preview.files.len(), 1);
+    assert_eq!(preview.files[0].text, original);
+    assert_eq!(preview.warnings.len(), 1);
+    assert!(preview.warnings[0].contains("shared.nml"));
+    let broken = "&nl_colm\n DEF_CASE_NAME='unterminated";
+    std::fs::write(dir.join("case.nml"), broken).unwrap();
+    let preview = case_namelist_preview(dirs[0].clone()).unwrap();
+    assert_eq!(preview.files[0].text, broken);
+    assert_eq!(preview.warnings.len(), 1);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn namelist_preview_limits_text_reads() {
+    let dirs = batch("namelist-preview-size", &[NML_A]);
+    let dir = std::path::Path::new(&dirs[0]);
+    std::fs::File::create(dir.join("case.nml"))
+        .unwrap()
+        .set_len(4 * 1024 * 1024 + 1)
+        .unwrap();
+    assert!(case_namelist_preview(dirs[0].clone())
+        .unwrap_err()
+        .contains("4 MiB"));
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }

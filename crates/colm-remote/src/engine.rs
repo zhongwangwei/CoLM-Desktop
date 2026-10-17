@@ -221,6 +221,7 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
                         | "for"
                         | "c"
                         | "h"
+                        | "inc"
                         | "cpp"
                         | "hpp"
                         | "py"

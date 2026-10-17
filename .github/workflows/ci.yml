@@ -16,6 +16,7 @@ jobs:
         run: |
           python3 oracle/scripts/test_kernel_filesystem.py
           python3 oracle/scripts/test_kernel_source_copy.py
+          python3 oracle/scripts/test_ensure_native_kernels.py
           python3 oracle/scripts/test_netcdf_initialization.py
           python3 oracle/scripts/test_longitude_normalization.py
           python3 oracle/scripts/test_physics_audit.py
@@ -276,7 +277,7 @@ jobs:
           # 空目录则正常通过。所以给它一个空的。
           mkdir -p ../../kernels
           cargo install tauri-cli --version '^2' --locked
-          cargo tauri build --config tauri.bundle.conf.json
+          cargo tauri build --config tauri.bundle.conf.json --config tauri.bundle-smoke.conf.json
           app='target/release/bundle/macos/CoLM Desktop.app'
           test -x "$app/Contents/MacOS/colm-desktop-gui"
           # 这一行是重点。sidecar 曾经被找去 Contents/Resources/，那里只有图标，

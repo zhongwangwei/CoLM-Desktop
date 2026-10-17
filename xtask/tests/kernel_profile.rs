@@ -201,37 +201,22 @@ fn release_and_ci_cover_crop_kernel_bundle() {
     // hyperspectral）。`-hyper` 三个由 `8ee597e` 引入 release；`bgc` 与 `urban` 不在
     // 这份清单里，它们与 `default` 是同一份 generator_args（见 kernels/*/manifest.json）。
     let release_presets = "default usgs crop latlon latlon-usgs latlon-crop latlon-hyper unstructured unstructured-usgs unstructured-crop unstructured-hyper catchment catchment-usgs catchment-crop catchment-hyper";
-    assert!(
-        release.contains(&format!(
-            "for p in {release_presets}; do ./oracle/scripts/build_kernel.sh \"$p\"; done"
-        )),
-        "release workflow must build every selectable site and spatial kernel"
+    assert_eq!(
+        read("oracle/scripts/kernel-presets.config").trim(),
+        release_presets
     );
-    assert!(
-        release.contains(&format!(
-            "for p in {release_presets}; do\n            test -x \"$app/Contents/Resources/kernels/$p/colm.x\""
-        )),
-        "macOS bundle check must require every selectable kernel"
-    );
-    // 清单在 release.yml 里出现三次（macOS/Linux 构建、Windows 构建、macOS 打包校验）。
-    // 这次失败的根因就是只更新了一部分：构建列表加了 `-hyper`，测试期望的旧清单没跟上。
-    // 与其让三处各自漂移，不如钉住「三处必须逐字相同」。
-    let loops = release
-        .lines()
-        .map(str::trim)
-        .filter(|line| line.starts_with("for p in ") && line.ends_with("; do"))
-        .collect::<Vec<_>>();
-    assert!(
-        !loops.is_empty(),
-        "release workflow must enumerate its kernel presets in `for p in ...; do` loops"
-    );
-    for line in &loops {
-        assert_eq!(
-            *line,
-            format!("for p in {release_presets}; do"),
-            "every release kernel loop must use the same preset list"
-        );
-    }
+    assert_eq!(release.matches("for p in $(cat oracle/scripts/kernel-presets.config); do ./oracle/scripts/build_kernel.sh").count(), 2);
+    assert!(release.contains("for p in $(cat ../../oracle/scripts/kernel-presets.config); do"));
+    let bundle = read("gui/src-tauri/tauri.bundle.conf.json");
+    assert!(bundle.contains("python3 ../oracle/scripts/ensure_native_kernels.py"));
+    let ensure = read("oracle/scripts/ensure_native_kernels.py");
+    assert!(ensure.contains("stage_mpi_runtime.sh"));
+    assert!(ensure.contains("[str(launcher), '-n', '1', 'hostname']"));
+    assert!(release.contains("git make python"));
+    assert!(release.contains("shell: ${{ runner.os == 'Windows' && 'msys2 {0}' || 'bash' }}"));
+    assert!(read(".github/workflows/windows-kernel.yml").contains("            python\n"));
+    let ci = read(".github/workflows/ci.yml");
+    assert!(ci.contains("--config tauri.bundle.conf.json --config tauri.bundle-smoke.conf.json"));
 
     let crop_example = "US-Ne3_2002-2003_FLUXNET2015_CROP";
     assert_eq!(

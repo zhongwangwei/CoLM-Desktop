@@ -185,6 +185,7 @@ pub fn run() {
             model_refresh_code,
             case_data_save,
             case_forcing_input,
+            case_namelist_preview,
             history_list,
             history_detail,
             history_delete_plan,

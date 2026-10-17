@@ -1,5 +1,29 @@
 use super::*;
 
+#[test]
+fn source_identity_tracks_fortran_include_content() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-source-include-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let include = root.join("vendor/CoLM202X/include/pft_override_fields.inc");
+    std::fs::create_dir_all(include.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    let before = source_content_sha256(&root).unwrap();
+    std::fs::write(&include, "real :: pft_parameter = 1.0\n").unwrap();
+    let original = source_content_sha256(&root).unwrap();
+    assert_ne!(original, before);
+    std::fs::write(&include, "real :: pft_parameter = 2.0\n").unwrap();
+    assert_ne!(source_content_sha256(&root).unwrap(), original);
+    std::fs::write(&include, "real :: pft_parameter = 1.0\n").unwrap();
+    assert_eq!(source_content_sha256(&root).unwrap(), original);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 fn linked_source_fixture(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(

@@ -4,6 +4,7 @@ import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
 import { runRemoteBatch } from './remote-batch';
+import NamelistPreview from './NamelistPreview';
 import type { CaseProfile, RunState, Server, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
@@ -87,7 +88,6 @@ export default function RunPanel({
     [scheduler, setScheduler] = useState(settings?.scheduler || 'auto'),
     [cpus, setCpus] = useState(settings?.cpus || ''),
     [force, setForce] = useState(false),
-    [advanced, setAdvanced] = useState(state.expert),
     [remote, setRemote] = useState<unknown>(
       recoveringRun?.location === 'remote' && recoveringRun.status === 'unknown'
         ? (recoveringRun.progress?.remote ?? {
@@ -811,7 +811,7 @@ export default function RunPanel({
           },
         ]
       : []),
-    ...(advanced && !batchCases
+    ...(!batchCases
       ? [
           {
             id: 'run-kernel',
@@ -858,15 +858,6 @@ export default function RunPanel({
         ]
       : []),
   ].map((f) => ({ ...f, disabled: pending || ('disabled' in f && f.disabled === true) }));
-  if (!batchCases)
-    fields.push({
-      id: 'run-advanced',
-      label: t('高级配置', 'Advanced settings'),
-      value: String(advanced),
-      type: 'switch',
-      disabled: pending,
-      set: (v) => setAdvanced(v === 'true'),
-    });
   usePageContract(
     {
       title: batchCases ? t('批量运行', 'Batch run') : bilingual('运行', 'Run'),
@@ -949,7 +940,21 @@ export default function RunPanel({
   );
   const render = (f: UiField) => (
     <Field key={f.id} label={f.label}>
-      {f.type === 'choice' ? (
+      {f.id === 'run-stage' ? (
+        <div className="actions" role="group" aria-label={f.label}>
+          {f.options?.map((option) => (
+            <Button
+              key={option.value}
+              variant={f.value === option.value ? 'primary' : 'secondary'}
+              aria-pressed={f.value === option.value}
+              disabled={!!f.disabled}
+              onClick={() => f.set(option.value)}
+            >
+              {option.label}
+            </Button>
+          ))}
+        </div>
+      ) : f.type === 'choice' ? (
         <Select
           value={String(f.value)}
           disabled={!!f.disabled}
@@ -1074,10 +1079,10 @@ export default function RunPanel({
           {t(
             batchCases
               ? '没有与当前模型匹配的内核，请在模型版本页检查。'
-              : '没有与当前模型匹配的内核。可在高级配置中选择，或在模型版本页检查。',
+              : '没有与当前模型匹配的内核。可在下方选择，或在模型版本页检查。',
             batchCases
               ? 'No compatible kernel. Check Model versions.'
-              : 'Select a compatible kernel in Advanced settings, or check Model versions.',
+              : 'Select a compatible kernel below, or check Model versions.',
           )}
         </Notice>
       )}
@@ -1107,18 +1112,14 @@ export default function RunPanel({
         </p>
       )}
       {!batchCases && (
-        <Advanced
-          open={advanced}
-          onOpenChange={setAdvanced}
-          title={t('高级配置（引擎与计算阶段）', 'Advanced settings (engine and stages)')}
-        >
+        <section aria-label={t('引擎与计算阶段', 'Engine and stages')}>
+          <h3>{t('引擎与计算阶段', 'Engine and stages')}</h3>
           <div className="form-grid">
             {fields
               .slice(1)
               .filter(
                 (f) =>
                   ![
-                    'run-advanced',
                     'run-ranks',
                     'run-threads',
                     'run-workers',
@@ -1128,8 +1129,14 @@ export default function RunPanel({
               )
               .map(render)}
           </div>
-        </Advanced>
+        </section>
       )}
+      <NamelistPreview
+        key={casePath}
+        casePaths={batchCases ?? [casePath]}
+        disabled={disabled}
+        en={en}
+      />
       <footer className="simulation-footer">
         {onBack ? (
           <Button disabled={pending} onClick={back}>
