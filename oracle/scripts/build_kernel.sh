@@ -26,6 +26,7 @@ case "$OUTDIR" in
   *)  OUT_BASE="$REPO_ROOT/$OUTDIR" ;;
 esac
 SRC="$REPO_ROOT/vendor/CoLM202X"
+SOURCE_SHA=$(python3 "$REPO_ROOT/oracle/scripts/ensure_native_kernels.py" --fingerprint)
 
 # Soil hydraulic scheme (Campbell vs. vanGenuchten) used to be a 4th
 # positional argument to create_defineh.bash here. It is a runtime
@@ -418,9 +419,11 @@ else
   echo "need shasum or sha256sum on PATH" >&2; exit 2
 fi
 
+[ "$SOURCE_SHA" = "$(python3 "$REPO_ROOT/oracle/scripts/ensure_native_kernels.py" --fingerprint)" ] || { echo "kernel source changed during compilation" >&2; exit 3; }
 cat > "$DEST/manifest.json" <<JSON
 {
   "schema": 1,
+  "source_sha256": "$SOURCE_SHA",
   "preset": "$PRESET",
   "platform": "$(uname -s)-$(uname -m)",
   "colm_git_sha": "$GIT_SHA",

@@ -26,6 +26,7 @@ pub mod render;
 pub mod slots;
 pub mod snicar;
 pub mod tabular;
+pub mod time_coverage;
 pub mod units;
 
 pub use check::{check, check_series, MetSummary, REQUIRED_VARS};

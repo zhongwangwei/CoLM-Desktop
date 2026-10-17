@@ -49,6 +49,7 @@ jobs:
           install: >-
             git
             make
+            python
             mingw-w64-x86_64-gcc-fortran
             mingw-w64-x86_64-libgomp
             mingw-w64-x86_64-gdb

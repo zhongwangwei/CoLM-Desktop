@@ -2,7 +2,16 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
+import {
+  Button,
+  Card,
+  Field,
+  Input,
+  DateInput,
+  Select,
+  Advanced,
+  Notice,
+} from '../../components/ui';
 import {
   caseDirectory,
   displayLiteral,
@@ -171,6 +180,8 @@ export default function NewCasePage() {
   const [forcingDatasets, setForcingDatasets] = useState<string[]>([]);
   const [forcingCatalogError, setForcingCatalogError] = useState('');
   const forcingSequence = useRef(0);
+  const forcingAutoDates = useRef<Record<string, string>>({});
+  const forcingDateEdits = useRef(new Set<string>());
   const [forcingProbe, setForcingProbe] = useState<ForcingLayoutProbe | null>(null);
   const templateForcing = form.kind !== 'site' && form.forcing_mode !== 'config';
   useEffect(() => {
@@ -453,7 +464,11 @@ export default function NewCasePage() {
   }
   const set = (k: string, v: string) => {
     setError('');
-    if (['host', 'spatial_forcingdir', 'forcing_mode', 'kind'].includes(k) && v !== form[k]) {
+    if (k === 'start' || k === 'end') forcingDateEdits.current.add(k);
+    if (
+      ['host', 'spatial_forcingdir', 'forcing_mode', 'kind', 'forcing_dataset'].includes(k) &&
+      v !== form[k]
+    ) {
       ++forcingSequence.current;
       setForcingProbe(null);
     }
@@ -519,9 +534,13 @@ export default function NewCasePage() {
       };
       return next;
     });
+    if (k === 'forcing_dataset' && templateForcing) void detectForcing(form.spatial_forcingdir, v);
   };
 
-  async function detectForcing(path = form.spatial_forcingdir) {
+  async function detectForcing(
+    path = form.spatial_forcingdir,
+    dataset = path === form.spatial_forcingdir ? form.forcing_dataset : '',
+  ) {
     const request = ++forcingSequence.current;
     if (!path.trim()) {
       setForcingProbe(null);
@@ -529,18 +548,44 @@ export default function NewCasePage() {
     }
     setForcingProbe({ status: 'loading', candidates: [] });
     try {
-      const result = await invoke<{ path: string; candidates: string[]; truncated: boolean }>(
-        'probe_forcing_directory',
-        { path, host: form.host || null },
-      );
+      const result = await invoke<{
+        path: string;
+        candidates: string[];
+        truncated: boolean;
+        coverage?: { start: string; end: string } | null;
+        coverage_error?: string | null;
+      }>('probe_forcing_directory', {
+        path,
+        host: form.host || null,
+        ...(dataset ? { dataset } : {}),
+      });
       if (!alive.current || request !== forcingSequence.current) return;
       setForcingProbe({ status: 'done', ...result });
-      if (result.candidates.length === 1 && !result.truncated)
-        setForm((old) =>
-          old.spatial_forcingdir === path && !old.forcing_dataset
-            ? { ...old, forcing_dataset: result.candidates[0] }
-            : old,
-        );
+      setForm((old) => {
+        if (
+          request !== forcingSequence.current ||
+          old.spatial_forcingdir !== path ||
+          old.host !== form.host ||
+          old.kind !== form.kind ||
+          old.forcing_mode !== form.forcing_mode
+        )
+          return old;
+        const next = { ...old };
+        if (!next.forcing_dataset && result.candidates.length === 1 && !result.truncated)
+          next.forcing_dataset = result.candidates[0];
+        if (result.coverage) {
+          for (const key of ['start', 'end'] as const) {
+            if (
+              !forcingDateEdits.current.has(key) &&
+              (!old[key] || old[key] === forcingAutoDates.current[key])
+            ) {
+              next[key] = result.coverage[key];
+              forcingAutoDates.current[key] = result.coverage[key];
+            }
+          }
+        }
+        return next;
+      });
     } catch (error) {
       if (alive.current && request === forcingSequence.current)
         setForcingProbe({ status: 'error', candidates: [], error: String(error) });
@@ -1809,25 +1854,32 @@ export default function NewCasePage() {
 
   const render = (k: string) => (
     <Field key={k} label={labels[k]}>
-      <div className="browse-input">
-        <Input
+      {['start', 'end', 'spinup_end'].includes(k) ? (
+        <DateInput
           value={form[k]}
+          calendarLabel={`${t('选择日期', 'Choose date')} · ${labels[k]}`}
           disabled={!enabled}
-          placeholder={['start', 'end', 'spinup_end'].includes(k) ? 'YYYY-MM-DD' : undefined}
-          maxLength={['start', 'end', 'spinup_end'].includes(k) ? 10 : undefined}
           onChange={(e) => set(k, e.target.value)}
-          onBlur={k === 'spatial_forcingdir' ? () => void detectForcing() : undefined}
         />
-        {(folderKeys.includes(k) || fileKeys.includes(k)) && (
-          <Button
+      ) : (
+        <div className="browse-input">
+          <Input
+            value={form[k]}
             disabled={!enabled}
-            aria-label={`${labels[k]} · ${t('选择', 'Browse')}`}
-            onClick={() => void pick(k).catch(() => {})}
-          >
-            …
-          </Button>
-        )}
-      </div>
+            onChange={(e) => set(k, e.target.value)}
+            onBlur={k === 'spatial_forcingdir' ? () => void detectForcing() : undefined}
+          />
+          {(folderKeys.includes(k) || fileKeys.includes(k)) && (
+            <Button
+              disabled={!enabled}
+              aria-label={`${labels[k]} · ${t('选择', 'Browse')}`}
+              onClick={() => void pick(k).catch(() => {})}
+            >
+              …
+            </Button>
+          )}
+        </div>
+      )}
     </Field>
   );
   const renderOption = (f: SchemaField) => (
@@ -2312,8 +2364,8 @@ export default function NewCasePage() {
               <div className="simulation-dates">{['start', 'end'].map(render)}</div>
               <p className="field-hint">
                 {t(
-                  '日期格式 YYYY-MM-DD，例如 2001-01-01。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
-                  'Use YYYY-MM-DD, e.g. 2001-01-01. Site runs normally include the end date, limited by forcing coverage.',
+                  '可填 YYYY-MM-DD 或 YYYYMMDD；完整有效日期自动补齐分隔符，也可点日历选择。单点通常包含结束当天，到强迫场末尾时以实际覆盖截止。',
+                  'Enter YYYY-MM-DD or YYYYMMDD; complete valid dates gain separators automatically. You can also choose from the calendar. Site runs normally include the end date, limited by forcing coverage.',
                 )}
               </p>
               <div

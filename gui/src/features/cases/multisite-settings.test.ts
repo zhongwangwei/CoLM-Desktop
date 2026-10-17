@@ -50,9 +50,16 @@ function screen() {
   };
   let contract: PageContract;
   const text: string[] = [];
+  const dateInputs: {
+    value: string;
+    disabled: boolean;
+    calendarLabel: string;
+    onChange: (event: { target: { value: string } }) => void;
+  }[] = [];
   const context = {
     React: {
       createElement: (_type: unknown, _props: unknown, ...children: unknown[]) => {
+        if (_type === context.DateInput) dateInputs.push(_props as (typeof dateInputs)[number]);
         text.push(...children.filter((child): child is string => typeof child === 'string'));
         return null;
       },
@@ -60,6 +67,7 @@ function screen() {
     Button: () => {},
     Field: () => {},
     Input: () => {},
+    DateInput: () => {},
     Notice: () => {},
     Select: () => {},
     usePageContract: (value: PageContract) => {
@@ -80,6 +88,7 @@ function screen() {
   );
   function render() {
     text.length = 0;
+    dateInputs.length = 0;
     Page(props);
   }
   function fill(id: string, value: string) {
@@ -91,7 +100,7 @@ function screen() {
     render();
   }
   render();
-  return { props, text, fill, click, render, contract: () => contract };
+  return { props, text, dateInputs, fill, click, render, contract: () => contract };
 }
 
 test('multi-site selection excludes incomplete data and preserves edited names when selecting all', () => {
@@ -174,4 +183,28 @@ test('unavailable stations retain their specific error and shared selection rema
   assert.deepEqual(page.props.drafts, []);
   assert.equal(page.props.mode, 'first-year');
   assert.equal(page.props.repeat, '3');
+});
+
+test('per-site date pickers update only their station and follow disabled state', () => {
+  const page = screen();
+  page.click('multisite-select-all');
+  page.fill('multisite-mode', 'per-site');
+  assert.equal(page.dateInputs.length, 6);
+  assert.ok(page.dateInputs.every((input) => !input.disabled && input.calendarLabel));
+  page.dateInputs[0].onChange({ target: { value: '20000201' } });
+  page.render();
+  assert.equal(page.props.drafts[0].start, '20000201');
+  page.dateInputs[0].onChange({ target: { value: '2000-02-01' } });
+  page.render();
+  assert.equal(page.props.drafts[0].start, '2000-02-01');
+  assert.equal(page.props.drafts[1].start, '2000-01-01');
+  page.dateInputs[2].onChange({ target: { value: '2001-02-01' } });
+  page.render();
+  assert.equal(page.props.drafts[0].spinup_end, '2001-02-01');
+  page.props.disabled = true;
+  page.render();
+  assert.ok(page.dateInputs.every((input) => input.disabled));
+  page.props.mode = 'first-year';
+  page.render();
+  assert.equal(page.dateInputs.length, 0);
 });

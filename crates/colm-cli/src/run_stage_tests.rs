@@ -531,6 +531,39 @@ fn rust_model_engine_needs_an_lct_kernel() {
 }
 
 #[test]
+fn rust_kernel_arguments_keep_grid_classification_and_crop_independent() {
+    for (grid_macro, grid_kind, grid_flag) in [
+        ("SinglePoint", None, None),
+        ("GRIDBASED", Some("latlon"), None),
+        ("UNSTRUCTURED", Some("unstructured"), Some("--unstructured")),
+        ("CATCHMENT", Some("catchment"), Some("--catchment")),
+    ] {
+        for (classification, land_cover) in [("LULC_IGBP", "igbp"), ("LULC_USGS", "usgs")] {
+            for crop in [false, true] {
+                if crop && classification == "LULC_USGS" {
+                    continue;
+                }
+                let mut kernel = hyperspectral_kernel();
+                kernel.manifest.macros = vec![grid_macro.into(), classification.into()];
+                if crop {
+                    kernel.manifest.macros.push("CROP".into());
+                }
+                assert_eq!(kernel_grid_kind(&kernel), grid_kind);
+                assert_eq!(rust_model_land_cover(&kernel).unwrap(), land_cover);
+                let mut expected = Vec::new();
+                if crop {
+                    expected.push("--crop");
+                }
+                if let Some(flag) = grid_flag {
+                    expected.push(flag);
+                }
+                assert_eq!(rust_model_crop_arguments(&kernel), expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn isolated_single_stage_runs_check_their_required_upstream_stages() {
     assert!(required_upstream_stages(None).is_empty());
     assert!(required_upstream_stages(Some(Stage::MkSrfData)).is_empty());

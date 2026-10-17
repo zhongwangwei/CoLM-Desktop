@@ -765,8 +765,8 @@ export default function ProjectPage() {
               <strong>{t('Rust 逐位一致引擎', 'Rust Bitwise-Exact Engine')}</strong>
               <span>
                 {t(
-                  '已就绪 · 包含 5 个科学预设内核，支持地表数据、初始场与主循环',
-                  'Ready · 5 preset scientific kernels loaded for surface, init, and simulation',
+                  '已就绪 · 支持地表数据、初始场与主循环',
+                  'Ready · Surface data, initialization, and simulation engines available',
                 )}
               </span>
             </div>

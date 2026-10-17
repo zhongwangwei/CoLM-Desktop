@@ -8,7 +8,7 @@ Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   value: { getItem: () => null },
 });
-const { Field, Input, Select, Button } = await import('./index');
+const { Field, Input, DateInput, Select, Button } = await import('./index');
 
 function field(label: string, children: ReactNode) {
   return renderToStaticMarkup(h(Field, { label, children }));
@@ -83,4 +83,15 @@ test('multiple controls keep independent IDs and labels while Field targets only
   const ownLabel = field('Options', h('label', null, 'Enabled', h(Input, { type: 'checkbox' })));
   assert.match(ownLabel, /<span class="field-label">Options<\/span>/);
   assert.match(ownLabel, /<label>Enabled<input/);
+});
+
+test('date fields label the editable text and keep an independently named calendar action', () => {
+  const markup = field(
+    'Start date',
+    h(DateInput, { value: '2001-', calendarLabel: 'Choose start date', onChange: () => {} }),
+  );
+  labelledControl(markup, 'input');
+  assert.match(markup, /type="text"[^>]*value="2001-"/);
+  assert.match(markup, /aria-label="Choose start date"/);
+  assert.match(markup, /type="date"/);
 });

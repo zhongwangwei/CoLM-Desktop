@@ -1548,14 +1548,23 @@ pub async fn probe_forcing_directory(
     app: tauri::AppHandle,
     path: String,
     host: Option<String>,
+    dataset: Option<String>,
 ) -> Result<Value, String> {
     let mut args = vec!["forcing-directory-probe".into(), "--path".into(), path];
+    if let Some(dataset) = dataset.filter(|value| !value.is_empty()) {
+        args.extend(["--dataset".into(), dataset]);
+    }
     let server = host
         .as_deref()
         .map(|host| server_for(app.clone(), host))
         .transpose()?;
     if let Some(server) = &server {
-        args.extend(["--host".into(), server.host.clone()]);
+        args.extend([
+            "--host".into(),
+            server.host.clone(),
+            "--root".into(),
+            server.root.clone(),
+        ]);
     }
     ssh_cli_json(args, resource_dir(&app), server.as_ref()).await
 }

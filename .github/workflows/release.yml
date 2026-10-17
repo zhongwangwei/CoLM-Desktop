@@ -178,11 +178,12 @@ jobs:
         if: runner.os == 'Windows'
         with:
           msystem: MINGW64
+          path-type: inherit
           update: true
           # libgomp：内核用 -fopenmp 链它，MSYS2 的 GCC 16.2.0-4 把它拆成单独的包，不再随 gcc 装上
           # （2026-10-05 发布在 `cannot find -lgomp` 上失败）。折叠块里不能写注释，所以写在这里。
           install: >-
-            git make
+            git make python
             mingw-w64-x86_64-gcc-fortran
             mingw-w64-x86_64-libgomp
             mingw-w64-x86_64-netcdf-fortran
@@ -212,14 +213,14 @@ jobs:
         if: runner.os != 'Windows'
         shell: bash
         run: |
-          for p in default usgs crop latlon latlon-usgs latlon-crop latlon-hyper unstructured unstructured-usgs unstructured-crop unstructured-hyper catchment catchment-usgs catchment-crop catchment-hyper; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in $(cat oracle/scripts/kernel-presets.config); do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
       - name: Build release kernels (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          for p in default usgs crop latlon latlon-usgs latlon-crop latlon-hyper unstructured unstructured-usgs unstructured-crop unstructured-hyper catchment catchment-usgs catchment-crop catchment-hyper; do ./oracle/scripts/build_kernel.sh "$p"; done
+          for p in $(cat oracle/scripts/kernel-presets.config); do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
           # 动态链接 netcdff/netcdf，所以二进制要跟 MSYS2 的 DLL 一起走。
           # 实测：不带 DLL 时退出码 -1073741515（STATUS_DLL_NOT_FOUND），
@@ -270,47 +271,23 @@ jobs:
           name: colm-engine-linux
           path: gui/src-tauri/engine
 
-      - name: Bundle
+      - name: Bundle (Unix)
+        if: runner.os != 'Windows'
         shell: bash
         working-directory: gui/src-tauri
         env:
           RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
-        run: |
-          set -euo pipefail
-          cargo install tauri-cli --version '^2' --locked
-          config=(--config tauri.bundle.conf.json)
-          if [[ "$RUNNER_OS" == Windows && "$RELEASE_PRERELEASE" == true ]]; then
-            if [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
-              core=${BASH_REMATCH[1]}
-              sequence=$((10#${BASH_REMATCH[2]}))
-              (( sequence <= 9999 )) || {
-                echo "::error::Numeric prerelease must not exceed 9999 for Windows installers"
-                exit 1
-              }
-              wix_version="$core.$sequence"
-            elif [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-(alpha|beta|rc)\.([0-9]+)$ ]]; then
-              core=${BASH_REMATCH[1]}
-              channel=${BASH_REMATCH[2]}
-              sequence=$((10#${BASH_REMATCH[3]}))
-              (( sequence <= 9999 )) || {
-                echo "::error::Prerelease sequence must not exceed 9999 for Windows installers"
-                exit 1
-              }
-              case "$channel" in
-                alpha) offset=10000 ;;
-                beta) offset=20000 ;;
-                rc) offset=30000 ;;
-              esac
-              wix_version="$core.$((offset + sequence))"
-            else
-              echo "::error::Windows installers support numeric, alpha.N, beta.N, or rc.N prerelease versions"
-              exit 1
-            fi
-            config+=(--config "{\"bundle\":{\"windows\":{\"wix\":{\"version\":\"$wix_version\"}}}}")
-            echo "Packaging $RELEASE_VERSION with MSI ProductVersion $wix_version"
-          fi
-          cargo tauri build "${config[@]}"
+        run: bash ../../scripts/bundle-release.sh
+
+      - name: Bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        working-directory: gui/src-tauri
+        env:
+          RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+        run: bash ../../scripts/bundle-release.sh
 
       # 装出来的东西必须自带内核，否则这条流水线就白跑了。
       # macOS 上能直接查；另外两个平台的目录结构不同，只查产物存在。
@@ -320,7 +297,7 @@ jobs:
         working-directory: gui/src-tauri
         run: |
           app='target/release/bundle/macos/CoLM Desktop.app'
-          for p in default usgs crop latlon latlon-usgs latlon-crop latlon-hyper unstructured unstructured-usgs unstructured-crop unstructured-hyper catchment catchment-usgs catchment-crop catchment-hyper; do
+          for p in $(cat ../../oracle/scripts/kernel-presets.config); do
             test -x "$app/Contents/Resources/kernels/$p/colm.x"
             test -f "$app/Contents/Resources/kernels/$p/manifest.json"
           done

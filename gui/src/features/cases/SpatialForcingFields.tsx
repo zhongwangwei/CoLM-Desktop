@@ -5,6 +5,8 @@ export type ForcingLayoutProbe = {
   candidates: string[];
   truncated?: boolean;
   error?: string;
+  coverage?: { start: string; end: string } | null;
+  coverage_error?: string | null;
 };
 
 export default function SpatialForcingFields({
@@ -117,6 +119,13 @@ export default function SpatialForcingFields({
                       'No built-in layout matched. Check the configuration or select another dataset.',
                     )}
           </Notice>
+        )}
+        {currentDataset === undefined && probe?.status === 'done' && (
+          <p className="field-hint">
+            {probe.coverage
+              ? `${t('已读取强迫场时间覆盖', 'Read forcing time coverage')}：${probe.coverage.start} — ${probe.coverage.end}`
+              : `${t('未读取到时间覆盖，请手动设置模拟日期', 'Time coverage unavailable; enter simulation dates manually')}${probe.coverage_error ? `：${probe.coverage_error}` : ''}`}
+          </p>
         )}
         <p className="field-hint">
           {t(

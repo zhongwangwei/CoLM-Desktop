@@ -1,6 +1,6 @@
 {
   "build": {
-    "beforeBuildCommand": "npm run build && cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
+    "beforeBuildCommand": "npm run build && python3 ../oracle/scripts/ensure_native_kernels.py && cargo run -q -p xtask --manifest-path ../xtask/Cargo.toml -- stage-sidecar"
   },
   "bundle": {
     "active": true,

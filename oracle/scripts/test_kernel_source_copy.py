@@ -17,6 +17,8 @@ def main():
         script = root / "oracle/scripts/build_kernel.sh"
         script.parent.mkdir(parents=True)
         script.write_text(prefix)
+        for helper in ['ensure_native_kernels.py', 'kernel-presets.config']:
+            (script.parent / helper).write_bytes((ROOT / 'oracle/scripts' / helper).read_bytes())
         vendor = root / "vendor/CoLM202X"
         kept = ["share/model.F90", "share/native.c", "include/options", "Makefile"]
         stale = [".git/config", ".bld/CoLM_Mkdir.o", ".bld/Makefile", "lib/model.a",

@@ -58,6 +58,7 @@ mod case_runs;
 mod energy_summary;
 mod fingerprint;
 mod flux_diagnostics;
+mod forcing_coverage;
 mod forcing_directory;
 mod history_cleanup;
 mod history_cmd;

@@ -106,26 +106,28 @@ function render(
   }).outputText;
   const exports: { default?: (props: unknown) => Element } = {};
   const dependencies = (name: string) =>
-    name === 'react'
-      ? react
-      : name === '../../lib/app-state'
-        ? { useApp: () => app }
-        : name === '../../lib/ipc'
-          ? native
-          : name === '../../lib/guide'
-            ? {
-                usePageContract: (contract: (typeof contracts)[number]) => contracts.push(contract),
-              }
-            : name === '../../components/ui'
-              ? Object.fromEntries(
-                  ['Button', 'Card', 'Field', 'Input', 'Select', 'Advanced', 'Notice'].map((n) => [
-                    n,
-                    n,
-                  ]),
-                )
-              : name === '../../lib/bilingual'
-                ? { bilingual: (zh: string) => zh }
-                : require(name);
+    name === './NamelistPreview'
+      ? { default: 'NamelistPreview' }
+      : name === 'react'
+        ? react
+        : name === '../../lib/app-state'
+          ? { useApp: () => app }
+          : name === '../../lib/ipc'
+            ? native
+            : name === '../../lib/guide'
+              ? {
+                  usePageContract: (contract: (typeof contracts)[number]) =>
+                    contracts.push(contract),
+                }
+              : name === '../../components/ui'
+                ? Object.fromEntries(
+                    ['Button', 'Card', 'Field', 'Input', 'Select', 'Advanced', 'Notice'].map(
+                      (n) => [n, n],
+                    ),
+                  )
+                : name === '../../lib/bilingual'
+                  ? { bilingual: (zh: string) => zh }
+                  : require(name);
   new Function('require', 'exports', 'React', js)(dependencies, exports, react);
   const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null, onBack });
   const elements: Element[] = [];
@@ -675,7 +677,7 @@ test('multi-site review hides engine/stage overrides even in expert mode', () =>
     const contract = batch.contracts[0] as unknown as { fields: { id: string }[] };
     assert.ok(
       !batch.elements.some(
-        (el) => el.type === 'Advanced' && el.props.title === '高级配置（引擎与计算阶段）',
+        (el) => el.type === 'section' && el.props['aria-label'] === '引擎与计算阶段',
       ),
     );
     for (const id of [
@@ -692,7 +694,38 @@ test('multi-site review hides engine/stage overrides even in expert mode', () =>
   const single = render();
   assert.ok(
     single.elements.some(
-      (el) => el.type === 'Advanced' && el.props.title === '高级配置（引擎与计算阶段）',
+      (el) => el.type === 'section' && el.props['aria-label'] === '引擎与计算阶段',
     ),
+  );
+});
+
+test('single-case stages are visible exclusive buttons without enabling advanced settings', () => {
+  const page = render();
+  const buttons = page.elements.filter((el) => el.type === 'Button' && 'aria-pressed' in el.props);
+  assert.deepEqual(
+    buttons.map((el) => el.children[0]),
+    ['全部', 'mksrfdata', 'mkinidata', 'colm'],
+  );
+  assert.deepEqual(
+    buttons.map((el) => el.props['aria-pressed']),
+    [true, false, false, false],
+  );
+  assert.ok(buttons.every((el) => !el.props.disabled));
+  const contract = page.contracts[0] as unknown as { fields: { id: string }[] };
+  assert.ok(contract.fields.some((field) => field.id === 'run-stage'));
+  assert.ok(!contract.fields.some((field) => field.id === 'run-advanced'));
+  const running = render({
+    run_id: 'active',
+    running: true,
+    status: 'running',
+    location: 'local',
+    case: '/case',
+    logs: [],
+    stages: {},
+  });
+  assert.ok(
+    running.elements
+      .filter((el) => el.type === 'Button' && 'aria-pressed' in el.props)
+      .every((el) => el.props.disabled),
   );
 });
