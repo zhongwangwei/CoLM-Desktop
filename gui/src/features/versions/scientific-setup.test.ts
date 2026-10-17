@@ -139,7 +139,7 @@ test('crop accepts standard defaults and verified candidate macro; off preserves
   assert.throws(() => apply(o, 'crop', '0', { ...environment, cropKernel: undefined }), /Pending/);
   assert.throws(
     () => apply(o, 'crop', '0', { ...environment, cropKernel: { ...kernel, macros: [] } }),
-    /CROP/,
+    /Build configuration lacks crop support/,
   );
   o = apply(o, 'crop', '120', { ...environment, domain: 'single' });
   o.physics.DEF_TUNING_CROP_EXTRA = '9';
@@ -309,10 +309,16 @@ test('current compiled CROP remains a BGC prerequisite after removing the planti
   const o = overlay();
   o.physics.DEF_USE_BGC = '.true.';
   const env = { ...environment, kernel: { ...kernel, macros: [...kernel.macros, 'CROP'] } };
-  assert.throws(() => apply(o, 'DEF_USE_BGC', '.false.', env), /CROP/);
+  assert.throws(
+    () => apply(o, 'DEF_USE_BGC', '.false.', env),
+    /crop build configuration requires BGC/,
+  );
   o.physics.DEF_TUNING_CROP_PLANTING_DAY = '0';
   const withoutDay = apply(o, 'crop', '.false.', env);
-  assert.throws(() => apply(withoutDay, 'DEF_USE_BGC', '.false.', env), /CROP/);
+  assert.throws(
+    () => apply(withoutDay, 'DEF_USE_BGC', '.false.', env),
+    /crop build configuration requires BGC/,
+  );
   assert.equal(
     apply(withoutDay, 'DEF_USE_BGC', '.false.', environment).physics.DEF_USE_BGC,
     '.false.',

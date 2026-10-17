@@ -531,7 +531,7 @@ test('rescanning selected forcing fills its full new coverage and does not borro
 test('five-step creation gates each step, chooses the scheme after data, and sends only edited case options', async () => {
   const p = page('NewCasePage');
   await p.mount();
-  blocked(p, 'new-next', /计算核心/);
+  blocked(p, 'new-next', /计算引擎/);
   p.set('new-engine', 'rust');
   blocked(p, 'new-next', /名称/);
   p.set('new-name', 'CN-Cng');
@@ -1353,7 +1353,7 @@ test('Fortran preset shows the actual automatic match without an editable preset
   await p.mount();
   const preset = () => {
     const field = p.elements.find(
-      (element) => element.type === 'Field' && element.props.label === '匹配内核预设',
+      (element) => element.type === 'Field' && element.props.label === '匹配的编译配置',
     );
     assert.ok(field);
     const input = field.children[0] as Element;
@@ -2044,7 +2044,7 @@ test('next button is strictly disabled when required settings are missing', asyn
     );
   assert.equal(findNextButton()?.props.disabled, true);
   p.set('new-name', 'CN-Cng');
-  // 计算核心不预选：选定之前“下一步”仍置灰。
+  // 计算引擎不预选：选定之前“下一步”仍置灰。
   assert.equal(findNextButton()?.props.disabled, true);
   p.set('new-engine', 'rust');
   assert.equal(findNextButton()?.props.disabled, false);

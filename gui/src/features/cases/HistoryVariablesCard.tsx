@@ -102,8 +102,8 @@ export default function HistoryVariablesCard({
     <Card
       title={t('输出变量', 'Output variables')}
       description={t(
-        '选择写入历史文件（NetCDF）的变量：推荐核心量为科研常用的主要通量与状态量，全部变量为当前内核与配置下可写出的 CoLM 历史场全集。',
-        'Choose variables written to history files: the recommended set covers the main fluxes and states; all variables is every CoLM history field writable with the current kernel and settings.',
+        '选择写入历史文件（NetCDF）的变量：推荐核心量为科研常用的主要通量与状态量，全部变量为当前模型配置下可写出的 CoLM 历史场全集。',
+        'Choose variables written to history files: the recommended set covers the main fluxes and states; all variables is every CoLM history field writable with the current model configuration.',
       )}
       className="history-variables-card"
     >
@@ -226,16 +226,16 @@ export default function HistoryVariablesCard({
       {defaultOn && (
         <p className="field-hint">
           {t(
-            '新建时尚未按内核核对；创建后在算例设置中会标出当前内核与配置下写不出的变量。',
-            'Not yet checked against a kernel; after creation the case settings mark variables the kernel cannot write.',
+            '新建时尚未按编译配置核对；创建后在算例设置中会标出当前模型配置下写不出的变量。',
+            'Not yet checked against a build configuration; after creation the case settings mark variables the model configuration cannot write.',
           )}
         </p>
       )}
       {unwritable.length > 0 && (
         <p className="field-hint">
           {t(
-            `另有 ${unwritable.length} 个变量在当前内核或配置下写不出，已从“全部变量”中排除（推荐核心量里如有，会注明原因）。`,
-            `${unwritable.length} more variables cannot be written with the current kernel or settings and are excluded from “All variables”.`,
+            `另有 ${unwritable.length} 个变量在当前模型配置下写不出，已从“全部变量”中排除（推荐核心量里如有，会注明原因）。`,
+            `${unwritable.length} more variables cannot be written with the current model configuration and are excluded from “All variables”.`,
           )}
         </p>
       )}

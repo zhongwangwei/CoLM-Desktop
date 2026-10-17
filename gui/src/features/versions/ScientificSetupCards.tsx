@@ -295,10 +295,13 @@ export default function ScientificSetupCards({
           <p className="muted">
             {environment.cropKernel?.macros.includes('CROP')
               ? t(
-                  '已有 CROP 内核；开启时使用标准算例默认配置，种植日可随后调整。',
-                  'A CROP kernel is available. Enabling uses standard case defaults; the planting day remains adjustable.',
+                  '作物过程编译支持已就绪；开启时使用标准算例默认配置，种植日可随后调整。',
+                  'Crop support is available. Enabling uses standard case defaults; the planting day remains adjustable.',
                 )
-              : t('尚未确认 CROP 候选内核。', 'CROP kernel capability is not yet confirmed.')}
+              : t(
+                  '尚未确认当前编译配置支持作物过程。',
+                  'Crop support has not been confirmed for the current build configuration.',
+                )}
           </p>
         )}
         {control.id === 'crop' && cropOpen && !onOpenSettings && (

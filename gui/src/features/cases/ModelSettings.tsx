@@ -159,8 +159,11 @@ export default function ModelSettings({
     if (value === 'PFT' || value === 'PC')
       return t('需匹配站点植被数据', 'Requires matching vegetation data');
     return state.kernels.some((item) => item.macros.includes(`LULC_${value}`))
-      ? t('本机已有此分类内核 · 点选即生效', 'Kernel installed · applies on click')
-      : t('本机尚无此分类内核', 'No local kernel for this classification');
+      ? t(
+          '本机已有此分类的编译配置 · 点选即生效',
+          'Build configuration available · applies on click',
+        )
+      : t('本机尚无此分类的编译配置', 'No local build configuration for this classification');
   };
   const modeActionId = (value: SimulationMode) =>
     value === 'PFT' || value === 'PC'
@@ -350,8 +353,8 @@ export default function ModelSettings({
       )}
       <p className="muted">
         {t(
-          '四种方案均保存在算例中；选择后无需派生模型版本。地类数据来源决定候选内核，输入数据仍需匹配所选方案。',
-          'All four schemes are case settings; selecting one requires no model revision. Land-cover classification selects candidate kernels, and input data must match the scheme.',
+          '四种方案均保存在算例中；选择后无需派生模型版本。地类数据来源决定适用的编译配置，输入数据仍需匹配所选方案。',
+          'All four schemes are case settings; selecting one requires no model revision. Land-cover classification selects compatible build configurations, and input data must match the scheme.',
         )}
         {!selectedMode && t(' 当前方案尚未确认。', ' Current scheme is unconfirmed.')}
       </p>

@@ -59,7 +59,7 @@ export function planMultiSites({
     throw error;
   };
   if (mode === 'first-year' && form.engine && form.engine !== 'rust')
-    fail('首年重复预热需要 Rust 计算核心。', 'First-year replay spinup requires the Rust engine.');
+    fail('首年重复预热需要 Rust 计算引擎。', 'First-year replay spinup requires the Rust engine.');
   if (!drafts.length) fail('请至少选择一个站点。', 'Select at least one site.');
   let root: string;
   try {

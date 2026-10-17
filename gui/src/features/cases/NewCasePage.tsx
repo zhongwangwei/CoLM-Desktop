@@ -135,7 +135,7 @@ export default function NewCasePage() {
   const initialLandcover = seed?.form?.landcover ?? '';
   const initialSubgrid = seed?.form?.subgrid ?? (seed?.form?.landcover ? seed.form.landcover : '');
   const [form, setForm] = useState<Record<string, string>>({
-    // 计算核心、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
+    // 计算引擎、范围、网格与下垫面方案都必须由用户明确选择，不预选任何一项。
     engine: '',
     host: '',
     root: initialRoot,
@@ -1339,7 +1339,7 @@ export default function NewCasePage() {
     }
   }
   const labels: Record<string, string> = {
-    engine: t('计算核心', 'Computation core'),
+    engine: t('计算引擎', 'Computation engine'),
     root: form.host
       ? t('服务器项目目录', 'Server project folder')
       : t('保存到项目目录', 'Project folder'),
@@ -1587,7 +1587,7 @@ export default function NewCasePage() {
       type: 'choice',
       options: [
         { value: 'rust', label: t('Rust 引擎', 'Rust engine') },
-        { value: 'fortran', label: t('Fortran 官方内核', 'Fortran official kernel') },
+        { value: 'fortran', label: t('Fortran 官方引擎', 'Official Fortran engine') },
       ],
       disabled: !enabled,
       set: (v) => set('engine', v),
@@ -2068,8 +2068,8 @@ export default function NewCasePage() {
         <Card
           title={t('总的设定', 'General setup')}
           description={t(
-            '先选择运行位置和计算核心，再设置保存路径与模拟名称。',
-            'Choose the run location and computation core before setting paths and simulation name.',
+            '先选择运行位置和计算引擎，再设置保存路径与模拟名称。',
+            'Choose the run location and computation engine before setting paths and simulation name.',
           )}
         >
           <RunLocationSettings
@@ -2083,7 +2083,7 @@ export default function NewCasePage() {
             onConfigure={openResources}
           />
           <section className="simulation-choice-group">
-            <h3>{t('计算核心', 'Computation core')}</h3>
+            <h3>{t('计算引擎', 'Computation engine')}</h3>
             <div className="simulation-choices engine-choices">
               <Button
                 variant="ghost"
@@ -2107,11 +2107,11 @@ export default function NewCasePage() {
                 disabled={!enabled}
                 onClick={() => set('engine', 'fortran')}
               >
-                <strong>{t('Fortran 官方内核', 'Fortran official kernel')}</strong>
+                <strong>{t('Fortran 官方引擎', 'Official Fortran engine')}</strong>
                 <span>
                   {t(
-                    '传统科学基线，需匹配已编译的内核预设',
-                    'Official scientific baseline, requires compiled kernel preset',
+                    '传统科学基线，使用与算例匹配的编译配置',
+                    'Official scientific baseline, using a compatible build configuration',
                   )}
                 </span>
               </Button>
@@ -2119,7 +2119,7 @@ export default function NewCasePage() {
           </section>
           {form.engine === 'fortran' && (
             <Field
-              label={t('匹配内核预设', 'Matched kernel preset')}
+              label={t('匹配的编译配置', 'Matched build configuration')}
               hint={t(
                 '根据模拟范围、土地覆盖与作物设置自动匹配。',
                 'Automatically matched to the domain, land cover and crop settings.',
@@ -2617,11 +2617,11 @@ export default function NewCasePage() {
                 <dd>{form.name}</dd>
                 <dt>{t('运行位置', 'Run location')}</dt>
                 <dd>{form.host || t('本机', 'Local')}</dd>
-                <dt>{t('计算核心', 'Computation core')}</dt>
+                <dt>{t('计算引擎', 'Computation engine')}</dt>
                 <dd>
                   {form.engine === 'rust'
                     ? t('Rust 引擎', 'Rust engine')
-                    : t('Fortran 官方内核', 'Fortran official kernel')}
+                    : t('Fortran 官方引擎', 'Official Fortran engine')}
                 </dd>
                 <dt>{t('范围', 'Range')}</dt>
                 <dd>

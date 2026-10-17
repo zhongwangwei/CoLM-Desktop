@@ -770,7 +770,7 @@ export default function ProjectPage() {
                 )}
               </span>
             </div>
-            <span className="badge">{t('内核正常', 'Kernels OK')}</span>
+            <span className="badge">{t('模型内核就绪', 'Model kernel ready')}</span>
           </div>
 
           <div className="readiness-item">

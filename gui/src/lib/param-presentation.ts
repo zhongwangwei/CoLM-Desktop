@@ -753,7 +753,7 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_FAST_PC: pair('PC 快速模式', 'Fast PC mode'),
   DEF_SOLO_PFT: pair('每格单一 PFT', 'Single PFT per cell'),
   DEF_PC_CROP_SPLIT: pair('PC 中作物单独成 patch', 'Split crops out of PC'),
-  DEF_USE_CROP: pair('作物模型（随内核）', 'Crop model (from kernel)'),
+  DEF_USE_CROP: pair('作物模型（随编译配置）', 'Crop model (from build configuration)'),
   'DEF_simulation_time%greenwich': pair('使用格林尼治时间', 'Use Greenwich time'),
   'DEF_simulation_time%start_year': pair('起始年', 'Start year'),
   'DEF_simulation_time%start_month': pair('起始月', 'Start month'),
@@ -985,7 +985,10 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
     7: pair('河网洪泛比例', 'River-routing flood fraction'),
   },
   'DEF_METHANE%inundation_mode': {
-    wetwat: pair('湿地蓄水 / wetwat（任何内核可用）', 'Wetland storage / wetwat (any kernel)'),
+    wetwat: pair(
+      '湿地蓄水 / wetwat（所有编译配置可用）',
+      'Wetland storage / wetwat (all build configurations)',
+    ),
     satellite: pair('卫星湿地面积 / GIEMS', 'Satellite wetland area / GIEMS'),
     routing: pair('河网洪泛比例（需要河湖汇流）', 'River-routing flood fraction (needs routing)'),
     dynamic_wtd: pair(
