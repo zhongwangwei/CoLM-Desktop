@@ -1273,6 +1273,8 @@ SUBROUTINE CoLMMAIN ( &
             qcharge_trc = (wa - wa_old_trc + etroot_aquifer_trc + &
                max(rsub_source_aquifer_trc, 0._r8)) / max(deltim, trc_tiny)
 
+            ! Snow-layer sections start at lbsn, not snl+1: with no snow,
+            ! snow_qout_layer_trc(1:0) is legal but trips ifort -check bounds.
             IF (patchtype == 2 .and. .not. DEF_USE_Dynamic_Wetland) THEN
                CALL tracer_wetland(ipatch, deltim, snl, nl_soil, &
                   rsur, &
@@ -1288,14 +1290,14 @@ SUBROUTINE CoLMMAIN ( &
                   dz_soisno(snl+1:nl_soil), &
                   qflx_irrig_drip + qflx_irrig_flood + qflx_irrig_paddy, &
                   forc_us, forc_vs, waterstorage_trc_ground, &
-                  snow_qout_layer = snow_qout_layer_trc(snl+1:0), &
+                  snow_qout_layer = snow_qout_layer_trc(lbsn:0), &
                   forc_q_frac = forc_q, &
                   forc_psrf_frac = forc_psrf, &
                   tleaf_frac = tleaf, &
                   lai_frac = lai, &
                   rst_frac = rst, &
                   ra_frac = raw_trc, &
-                  dz_sno_frac = dz_soisno(snl+1:0))
+                  dz_sno_frac = dz_soisno(lbsn:0))
             ELSE
                CALL tracer_soil_water(ipatch, deltim, snl, nl_soil, &
                   qlayer, qinfl, qcharge_trc, rsur, rsub, &
@@ -1319,7 +1321,7 @@ SUBROUTINE CoLMMAIN ( &
                   imperv_evap_wdsrf = imperv_evap_wdsrf_trc, &
                   imperv_evap_soil = imperv_evap_soil_trc, &
                   imperv_subl_soil = imperv_subl_soil_trc, &
-                  snow_qout_layer = snow_qout_layer_trc(snl+1:0), &
+                  snow_qout_layer = snow_qout_layer_trc(lbsn:0), &
                   qgtop_solver = qgtop_trc, &
                   tleaf_frac = tleaf, &
                   t_soisno_frac = t_soisno(snl+1:nl_soil), &
@@ -1331,7 +1333,7 @@ SUBROUTINE CoLMMAIN ( &
                   rss_frac = rss, &
                   dz_soi_frac = dz_soisno(1:nl_soil), &
                   porsl_frac = porsl(1:nl_soil), &
-                  dz_sno_frac = dz_soisno(snl+1:0) &
+                  dz_sno_frac = dz_soisno(lbsn:0) &
                   , permeable_soil = permeable_soil_trc &
 #ifdef GridRiverLakeFlow
                   , flood_tracer_input = flood_input_tracer, flood_infil_water = qinfl_fld*deltim &

@@ -846,6 +846,20 @@
   - 两者都改变 LCT 默认算例的结果，要重做黄金回归。
   - "保留阻抗"那一行用的是本地临时诊断版 colm-rs（`COLM_RS_DIAG_KEEP_RSS`，未提交）。
 
+### 85. 无雪时 tracer 调用传 `snow_qout_layer_trc(1:0)`，ifort `-check bounds` 停机——已修
+
+- **位置**：`main/CoLMMAIN.F90` 调 `tracer_wetland` 与 `tracer_soil_water` 处，传 `snow_qout_layer = snow_qout_layer_trc(snl+1:0)`
+  与 `dz_sno_frac = dz_soisno(snl+1:0)`（vendor 第 1291–1336 行附近）。
+- **原因**：`snow_qout_layer_trc` 声明为 `(maxsnl+1:0)`。`snl = 0` 时段为 `(1:0)`，是零长度段，按标准合法、也不访问内存，
+  但 ifort 的边界检查按起点 1 > 上界 0 报 `forrtl: severe (408)`。`dz_soisno` 上界是 `nl_soil`，那一段不会触发。
+- **影响**：只影响开 `-check bounds` 的 Intel 构建在无雪 patch 上停机；数值结果不受影响。
+- **报告**：`zhongwangwei/CoLM202X#25`（@jellywzx）。那一版把两段几十行的参数表复制成 `IF (snl < 0)` 两支、无雪时省略这两个可选参数，
+  结果正确但两份参数表以后容易改漏，未采纳。
+- **修复**（第 695 轮）：两段改从 `lbsn = min(lb,0)` 起，与同一文件里 hydrology 调用 `snow_qout_layer_trc(lbsn:0)`、`mss_*(lbsn:0)` 的写法一致。
+  无雪时实参是长度 1 的 `(0:0)`，被调方的显式形状哑元 `(snl+1:0)` 仍是 0 长（序列关联允许实参更长）；两个参数只在
+  `DO j = lb_snow, 0`、`DO j = lb, -1` 里用到，`snl = 0` 时都是空循环，所以结果不变。
+- **上游**：`zhongwangwei/CoLM202X#26`（分支 `fix/tracer-no-snow-lbsn`，`1b147e5`），替代 #25。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。

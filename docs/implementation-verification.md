@@ -33310,3 +33310,30 @@ Windows main CI修复已合并：f8e07e48及29c84e46。GitHub run 38361734789和
   - 第 4 步四张卡片均未选中、下一步置灰；单点 PC 弹窗只含 `DEF_PC_CROP_SPLIT`；开 BGC 时城市置灰；切 IGBP 自动关闭 BGC 并提示。
   - 第 5 步输出变量卡片推荐 40 / 全部 586；选推荐后创建，`history.nml` 写入 40 个 `.true.`、546 个 `.false.`，`case.nml` 写入 `spinup_year=2009, spinup_month=1, spinup_day=1, spinup_sec=0, spinup_repeat=1`。
   - 已有算例第五步显示推荐 39 / 全部 178、另有 408 个写不出，第五步不再有预热；第三步有预热框。
+
+## 第 695 轮：无雪时 tracer 调用的零长度段改从 `lbsn` 起（2026-10-17，新旧内核逐位对比完成）
+
+**起因**：`zhongwangwei/CoLM202X#25`（@jellywzx）报告 Intel `-check bounds` 构建在无雪 patch 上停机：
+`Subscript #1 of the array SNOW_QOUT_LAYER_TRC has value 1 which is greater than the upper bound of 0`。
+
+**判断**：
+- `snl = 0` 时 `snow_qout_layer_trc(snl+1:0)` 是 `(1:0)`，零长度段，按标准合法、不访问内存；是 ifort 边界检查过严，不是越界。
+- `dz_soisno(snl+1:0)` 上界是 `nl_soil`，不触发。
+- #25 把两段几十行参数表复制成 `IF (snl < 0)` 两支，结果对但以后容易改漏，未采纳。
+
+**修复**：`CoLMMAIN.F90` 调 `tracer_wetland`/`tracer_soil_water` 处，两个可选参数改传 `snow_qout_layer_trc(lbsn:0)`、`dz_soisno(lbsn:0)`，
+与同文件 hydrology 调用的写法一致；无雪时实参长 1、显式形状哑元仍 0 长。vendor 与上游（`zhongwangwei/CoLM202X#26`）同改。
+详见 `docs/upstream-bugs.md` 第 85 条。
+
+**结果不变的依据**：被调方只在 `DO j = lb_snow, 0`、`DO j = lb, -1` 里用这两个参数（vendor 多出的两个 `DO j = lb, 0/-1` 循环也在同一
+`present(dz_sno_frac)` 分支内、不读它们），`snl = 0` 时都是空循环。
+
+**验证（本机）**：
+- `cargo test -p colm-schema --test drift`、`cargo test -p colm-hist --test drift`：各 1 通过。
+- `COLM_KERNEL_PROFILE=debug ./oracle/scripts/build_kernel.sh default`（gfortran 边界检查）编出新内核；同样配置从 HEAD 的临时 worktree 编出旧内核。
+- `golden-run US-NR1-snow`（新内核）三段通过。
+- TRACER 对比：US-NR1-snow 加 `DEF_USE_TRACER`、一个 `solute` 示踪物 Cl（`init_conc = 1e-4`、`precip_default_conc = 5e-5`），
+  结束日期延到 2013-07-15，新旧内核各跑三段：
+  - 覆盖：小时记录 862 个有雪、1490 个无雪（5 月融尽），雪层 Cl 浓度最大 2.3e-4。
+  - 11 个 NetCDF 输出（history、示踪物 history、srfdata、const restart）共 714 个变量，**0 个不同**。
+- 未在 ifort 上验证（本机没有 Intel 编译器）。
