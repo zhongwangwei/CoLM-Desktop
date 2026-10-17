@@ -1992,9 +1992,9 @@ pub async fn new_spatial_case(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .ok_or_else(|| cleanup("forcingDir is required with forcingDataset".into()))?;
-                if !std::path::Path::new(dir).is_dir() {
+                if !std::path::Path::new(dir).is_absolute() || !std::path::Path::new(dir).is_dir() {
                     return Err(cleanup(format!(
-                        "the forcing data directory does not exist: {dir}"
+                        "choose an existing absolute forcing data directory: {dir}"
                     )));
                 }
                 let text = colm_case::forcing_templates::render_forcing_namelist(dataset, dir)

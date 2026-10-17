@@ -164,6 +164,40 @@ test('spatial setup keeps mandatory data, mesh and numeric constraints', () => {
   for (const change of changes)
     assert.ok(newCaseProblem({ ...spatial, ...change }, 3, undefined, {}));
 });
+test('forcing data paths cannot change meaning between creation and model working directories', () => {
+  const spatial = {
+    ...form,
+    kind: 'global',
+    grid: 'latlon',
+    dlon: '1',
+    dlat: '1',
+    rawdata: '/raw',
+    runtime: '/runtime',
+    forcing_mode: 'directory',
+    forcing_dataset: 'MSWX',
+    timestep: '1800',
+  };
+  for (const spatial_forcingdir of ['relative/data', '../forcing', '~/forcing'])
+    assert.match(
+      newCaseProblem({ ...spatial, spatial_forcingdir }, 3, undefined, {}) ?? '',
+      /绝对路径/,
+    );
+  for (const spatial_forcingdir of [
+    '/data/forcing',
+    'C:\\data\\forcing',
+    '\\\\server\\share\\forcing',
+  ])
+    assert.equal(newCaseProblem({ ...spatial, spatial_forcingdir }, 3, undefined, {}), null);
+  assert.match(
+    newCaseProblem(
+      { ...spatial, host: 'compute', spatial_forcingdir: 'C:\\data' },
+      3,
+      undefined,
+      {},
+    ) ?? '',
+    /绝对路径/,
+  );
+});
 test('five steps expose data, model and output separately without dropping advanced fields', () => {
   const field = (name: string, section: string) => ({ name, section }) as SchemaField;
   const schema = [

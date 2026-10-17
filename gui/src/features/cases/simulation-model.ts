@@ -335,6 +335,17 @@ export function newCaseProblem(
               '请选择强迫场数据路径，并识别或确认数据集。',
               'Choose the forcing data path and identify or confirm its dataset.',
             );
+      if (!configurationFile) {
+        const path = form.spatial_forcingdir.trim();
+        const absolute = form.host
+          ? path.startsWith('/')
+          : /^(\/|[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)/.test(path);
+        if (!absolute)
+          return t(
+            '强迫场数据路径须为绝对路径，请使用目录选择按钮。',
+            'Use an absolute forcing data path or the folder picker.',
+          );
+      }
       if (
         !form.timestep?.trim() ||
         !Number.isFinite(Number(form.timestep)) ||
