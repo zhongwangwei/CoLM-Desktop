@@ -33337,3 +33337,40 @@ Windows main CI修复已合并：f8e07e48及29c84e46。GitHub run 38361734789和
   - 覆盖：小时记录 862 个有雪、1490 个无雪（5 月融尽），雪层 Cl 浓度最大 2.3e-4。
   - 11 个 NetCDF 输出（history、示踪物 history、srfdata、const restart）共 714 个变量，**0 个不同**。
 - 未在 ifort 上验证（本机没有 Intel 编译器）。
+
+## 第 696 轮：GUI 走查修补；tms17l 远程建算例卡住与报错（2026-10-17）
+
+### 一、GUI 走查（tsc / eslint / 前端 652 个 / GUI Rust 380 个原本全绿，问题均为人工审读发现）
+
+1. **JavaScriptCore 不认 `Date.parse('2020-01-01Z')`**（跨平台坑）：本机 `jsc` 实测返回 `NaN`；V8（Node、Windows WebView2）返回 `1577836800000`。
+   `…T00:00Z` 两者都认。macOS/Linux 的 Tauri 用 JSC，而前端测试跑在 Node 上，测不出来。
+   结果页（`ResultsPage.tsx`）、研究页（`study.ts calibrationWindows`）原来都用 `${v}Z` 拼串；界面的 `datetime-local` 带 `T`，没事；
+   但 AI 助手经 guide 字段写入纯日期时，只有 Windows 能通过。改为统一用 `lib/dates.ts utcSeconds`：
+   显式补齐成 `YYYY-MM-DDTHH:MM:SS` 再解析，并做往返校验；历史对比（`history.ts`）也改用它。在 `jsc` 上复验：纯日期、分钟、秒三种格式都返回正确秒数，
+   `2020-02-30`、`2020-01-01Z` 返回 NaN。
+2. **受控 `<select>` 的值不在选项里时，显示成第一个选项**：`DEF_HIST_FREQ` 选项是 schema 的大写值，引擎不区分大小写（`colm-hist/schedule.rs`）。
+   手改的 `'monthly'` 会显示成"每日"（按字母排序的第一项 DAILY）。新增 `case-model.ts selectChoice`：大小写不敏感地匹配；对不上的值作为额外选项照实显示。
+   算例页和新建页都已接入。
+3. 版本页"实际引用历史"的时间改用 `appLocale`，不再跟随系统语言。
+4. `openCase` 最后一步 `save_recent` 失败时，只提示，不再把已经打开的算例报成打开失败。
+5. `ipc.ts` 的运行中写保护以前只看顶层 `dirs`，现在也覆盖 `set_pft_parameters_batch` 嵌在 `changes[].dirs` 里的目录（前端目前未调用，属潜在问题）。
+
+### 二、tms17l 建算例一直"正在处理"，最后报 `OSError: [Errno 39] Directory not empty`
+
+- **长时间"正在处理"**：远程首次建算例时，会先上传源码并在服务器上编译 Rust 引擎（`remote_cases.rs` → `engine::ensure_script`）。
+  tms17l 上 `engine/355904eb534e3519` 的编译用了 16:30–16:35，前端这期间没有进度显示，远程创建也没有"取消创建"按钮（`!form.host` 才显示）。
+- **报错本身是清理时的 NFS 问题**：`/tera11` 是 `nfs4`。`remote_cases.py` 创建失败时，在仍持有 `.colm-desktop-creation.json`
+  的 `flock` 句柄时执行 `shutil.rmtree(out)`。NFS 把"删除仍打开的文件"变成 silly rename，生成 `.nfsXXXX`，于是 `rmdir` 报 ENOTEMPTY，
+  **而且这个清理错误把真正的失败原因盖掉了**。进程退出后 `.nfs` 文件消失，只留下空的 `Test1`。旧逻辑下，空目录又让"用相同设置重试"失败。
+- **真正的失败原因**：在 tms17l 上用同一引擎重放 `mesh-new --shp …/heihe_boundary_with_huahai.shp`，报 `needs a WGS84 .prj file`。
+  原因是 `.prj` 文件名是 `Heihe_Boundary_with_huahai.prj`（大写开头），而 `.shp` 是小写；Linux 区分大小写，macOS 和 Windows 不区分。
+  `.prj` 内容本身就是 WGS84。
+- **修复**：
+  - `remote_cases.py`：先删其余文件，再关闭标记句柄，最后删标记和目录；清理失败只写进 stderr，原始错误照常抛出；空的残留目录可以直接重试或 abort。
+  - `colm-srfdata shapefile.rs`：精确名找不到时，在同一目录里按大小写不敏感匹配唯一的 `.prj`；有多个只差大小写的文件时，报歧义错误。
+  - 按用户要求，**目标已存在时直接复用**：文件夹复用，同名文件覆盖；目标路径若是普通文件，就换成文件夹。若该文件夹在本次创建前已有内容（标记里记为 `adopted`），
+    创建失败或 abort 时只删本次的标记，不删任何原有文件。符号链接仍然拒绝。另一个创建进程仍持有锁时也拒绝。
+    桌面端去掉了本地缓存目录必须是新建的检查（`create_dir` 改为 `create_dir_all`）。本地建算例仍保持原来的拒绝行为。
+- **验证**：`remote_cases_test.py` 14 个测试通过。新增的 NFS 模拟（删除打开中的文件时改名成 `.nfs0001`）在旧脚本上复现了 `Directory not empty`，
+  在新脚本上报出的是原始错误 `bad station`。`colm-srfdata` 全部测试（含 `COLM_RAWDATA=/Volumes/Data/CoLMrawdata` 的 raster）、GUI Rust 380 个、
+  前端 655 个、`cargo fmt --check`、`tsc`、`eslint`、`prettier --check` 全部通过。修复后的引擎未在 tms17l 上实跑。

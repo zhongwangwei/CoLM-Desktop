@@ -264,7 +264,8 @@ pub async fn remote_create_case(
     let local = dir.to_string_lossy().into_owned();
     let creation =
         crate::sidecar::CaseCreation::begin(&creations, &local, Duration::from_secs(7200))?;
-    creation.validate_destination(true)?;
+    // An existing server folder is reused (see remote_cases.py), so its local configuration
+    // cache may exist too: configuration files are overwritten and other files are kept.
     let pending = root.join(format!(
         ".{}.creation.json",
         dir.file_name().unwrap().to_string_lossy()
@@ -312,7 +313,7 @@ pub async fn remote_create_case(
             .map(Value::String);
     }
     let result = async {
-        std::fs::create_dir(&dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         write_files(&dir, &generated["files"], &remote)?;
         crate::project::record_case(
             &local,

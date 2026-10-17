@@ -118,11 +118,56 @@ impl PolygonDomain {
     }
 }
 
-fn validate_wgs84_prj(path: &Path) -> Result<()> {
-    let prj = [path.with_extension("prj"), path.with_extension("PRJ")]
+/// The `.prj` beside `path`. Windows and macOS match sidecars case-insensitively, so a
+/// shapefile copied from there (e.g. `heihe.shp` + `Heihe.prj`) must also work on Linux.
+fn prj_sidecar(path: &Path) -> Result<std::path::PathBuf> {
+    if let Some(found) = [path.with_extension("prj"), path.with_extension("PRJ")]
         .into_iter()
         .find(|candidate| candidate.is_file())
-        .with_context(|| format!("{} needs a WGS84 .prj file", path.display()))?;
+    {
+        return Ok(found);
+    }
+    let wanted = path
+        .file_stem()
+        .map(|stem| format!("{}.prj", stem.to_string_lossy().to_lowercase()));
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut matches = fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                .filter(|candidate| {
+                    candidate.is_file()
+                        && candidate
+                            .file_name()
+                            .map(|name| Some(name.to_string_lossy().to_lowercase()) == wanted)
+                            .unwrap_or(false)
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    match matches.len() {
+        1 => Ok(matches.remove(0)),
+        0 => bail!("{} needs a WGS84 .prj file", path.display()),
+        _ => {
+            matches.sort();
+            bail!(
+                "{} has several .prj files differing only in case: {}",
+                path.display(),
+                matches
+                    .iter()
+                    .map(|candidate| candidate.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+}
+
+fn validate_wgs84_prj(path: &Path) -> Result<()> {
+    let prj = prj_sidecar(path)?;
     let text = fs::read_to_string(&prj)
         .with_context(|| format!("cannot read shapefile CRS {}", prj.display()))?
         .to_ascii_uppercase();
@@ -464,6 +509,26 @@ mod tests {
                 .unwrap();
         assert_eq!(mesh.window.nlon, 360);
         assert_eq!(mesh.summary().unwrap().active_cells, 4);
+    }
+
+    #[test]
+    fn prj_sidecar_matches_a_differently_cased_basename() {
+        let shp = fixture();
+        let dir = shp.parent().unwrap().join(format!(
+            "case-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir(&dir).unwrap();
+        let lower = dir.join("heihe_boundary.shp");
+        fs::copy(&shp, &lower).unwrap();
+        fs::copy(shp.with_extension("prj"), dir.join("Heihe_Boundary.prj")).unwrap();
+        assert!(PolygonDomain::read(&lower).is_ok());
+        fs::remove_file(dir.join("Heihe_Boundary.prj")).unwrap();
+        let error = PolygonDomain::read(&lower).unwrap_err().to_string();
+        assert!(error.contains("needs a WGS84 .prj file"), "{error}");
     }
 
     fn put_be_u32(bytes: &mut [u8], offset: usize, value: u32) {

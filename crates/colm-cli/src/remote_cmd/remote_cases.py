@@ -35,9 +35,35 @@ out = path(r['out'])
 if out == pathlib.Path('/'):
     raise ValueError('cannot use the server root as a case directory')
 marker = out / '.colm-desktop-creation.json'
+
+def clear_children():
+    for child in out.iterdir():
+        if child == marker:
+            continue
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+
+def remove_owned(lock):
+    # NFS keeps an unlinked open file as .nfsXXXX, which makes rmdir fail with ENOTEMPTY:
+    # remove everything else under the lock, then release the marker before deleting it.
+    clear_children()
+    lock.close()
+    marker.unlink(missing_ok=True)
+    out.rmdir()
+
+def empty_leftover():
+    # An earlier cleanup may leave only the empty directory; nothing in it can be lost.
+    return out.is_dir() and not out.is_symlink() and not marker.exists() and not any(out.iterdir())
+
 if action in ('publish', 'abort', 'sync'):
     if action == 'abort' and r.get('incomplete_only'):
         if not out.exists() and not out.is_symlink():
+            print(json.dumps({'ok': True}))
+            sys.exit(0)
+        if empty_leftover():
+            out.rmdir()
             print(json.dumps({'ok': True}))
             sys.exit(0)
         if out.is_symlink() or marker.is_symlink():
@@ -55,7 +81,15 @@ if action in ('publish', 'abort', 'sync'):
     elif marker.is_symlink() or json.loads(marker.read_text())['token'] != r['token']:
         raise ValueError('case creation ownership changed; refusing to modify it')
     if action == 'abort':
-        shutil.rmtree(out)
+        if json.loads(marker.read_text()).get('adopted'):
+            # The user chose an existing folder: keep its files, drop only our claim on it.
+            if r.get('incomplete_only'):
+                lock.close()
+            marker.unlink()
+        elif r.get('incomplete_only'):
+            remove_owned(lock)
+        else:
+            shutil.rmtree(out)
     else:
         files = r['files']
         if 'case.nml' not in files:
@@ -112,37 +146,55 @@ if action in ('publish', 'abort', 'sync'):
 
 if action != 'create':
     raise ValueError('unsupported case action')
-# A persisted client token makes a lost SSH response recoverable without adopting other cases.
+# A persisted client token makes a lost SSH response recoverable.
 token = r['token']
 if not isinstance(token, str) or not re.fullmatch(r'[a-f0-9]{32,64}', token):
     raise ValueError('invalid creation token')
 out.parent.mkdir(parents=True, exist_ok=True)
-try:
-    out.mkdir(parents=False, exist_ok=False)
-    lock = marker.open('x+')
-    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    lock.write(json.dumps({'token': token}))
+
+def write_claim(lock, adopted):
+    lock.seek(0)
+    lock.truncate()
+    lock.write(json.dumps({'token': token, 'adopted': adopted}))
     lock.flush()
     os.fsync(lock.fileno())
-except FileExistsError:
-    if out.is_symlink() or marker.is_symlink():
-        raise ValueError('case destination already exists')
-    lock = marker.open('r+')
+
+def claim(adopted):
+    lock = marker.open('x+')
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    saved = json.load(lock)
-    if saved['token'] != token:
-        raise ValueError('case destination belongs to another creation')
-    if saved.get('files') is not None:
-        print(json.dumps({'remote_dir': str(out), 'token': token, 'files': saved['files']}))
-        sys.exit(0)
-    # The same interrupted creator owns this directory and no process holds its lock.
-    for child in out.iterdir():
-        if child == marker:
-            continue
-        if child.is_dir() and not child.is_symlink():
-            shutil.rmtree(child)
-        else:
-            child.unlink()
+    write_claim(lock, adopted)
+    return lock
+
+# An existing destination is reused: generated files overwrite same-name files and
+# nothing that was already there is deleted, even when creation fails ("adopted").
+if out.is_symlink() or marker.is_symlink():
+    raise ValueError('refusing to create a case through a symlink: ' + str(out))
+if out.exists() and not out.is_dir():
+    out.unlink()
+try:
+    out.mkdir(parents=False, exist_ok=False)
+    lock, adopted = claim(False), False
+except FileExistsError:
+    if not marker.exists():
+        # An empty leftover holds nothing to keep, so a failed retry may remove it again.
+        adopted = any(out.iterdir())
+        lock = claim(adopted)
+    else:
+        lock = marker.open('r+')
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('another case creation is still writing ' + str(out))
+        saved = json.load(lock)
+        if saved.get('token') == token and saved.get('files') is not None:
+            print(json.dumps({'remote_dir': str(out), 'token': token, 'files': saved['files']}))
+            sys.exit(0)
+        own = saved.get('token') == token and not saved.get('adopted')
+        adopted = not own
+        if own:
+            # This interrupted creator made the directory; its partial output can go.
+            clear_children()
+        write_claim(lock, adopted)
 
 try:
     kind = r['kind']
@@ -231,11 +283,19 @@ try:
         raise ValueError('namelist configuration exceeds total size limit')
     completed = out / ('.creation-complete-' + uuid.uuid4().hex)
     with completed.open('x') as saved:
-        saved.write(json.dumps({'token': token, 'files': files}))
+        saved.write(json.dumps({'token': token, 'adopted': adopted, 'files': files}))
         saved.flush()
         os.fsync(saved.fileno())
     os.replace(completed, marker)
     print(json.dumps({'remote_dir': str(out), 'token': token, 'files': files}))
 except BaseException:
-    shutil.rmtree(out)
+    try:
+        if adopted:
+            lock.close()
+            marker.unlink(missing_ok=True)
+        else:
+            remove_owned(lock)
+    except OSError as cleanup:
+        # Report the creation failure itself; a cleanup problem must not replace it.
+        print('cleanup of ' + str(out) + ' failed: ' + str(cleanup), file=sys.stderr)
     raise

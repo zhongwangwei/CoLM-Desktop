@@ -8,6 +8,28 @@ import unittest
 
 SCRIPT = pathlib.Path(__file__).with_name('remote_cases.py')
 
+# Emulate NFS silly rename: unlinking a file that is still open leaves .nfsXXXX behind.
+NFS = """
+import io, os, runpy, sys
+handles = []
+original_open, original_unlink = io.open, os.unlink
+def tracked(file, *args, **kwargs):
+    handle = original_open(file, *args, **kwargs)
+    if not isinstance(file, int):
+        handles.append((os.path.basename(os.fspath(file)), handle))
+    return handle
+def unlink(path, *, dir_fd=None):
+    name = os.path.basename(os.fspath(path))
+    if any(n == name and not h.closed for n, h in handles):
+        return os.rename(path, '.nfs0001', src_dir_fd=dir_fd, dst_dir_fd=dir_fd) if dir_fd is not None else os.rename(path, os.path.join(os.path.dirname(os.fspath(path)), '.nfs0001'))
+    return original_unlink(path, dir_fd=dir_fd)
+io.open = tracked
+os.unlink = unlink
+os.remove = unlink
+sys.argv = sys.argv[1:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+
 class RemoteCreation(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -31,16 +53,18 @@ elif args[0] == 'new':
 
     def tearDown(self): self.tmp.cleanup()
 
-    def run_action(self, action, request, success=True, fail_replace=False):
+    def run_action(self, action, request, success=True, fail_replace=False, nfs=False):
         if action == 'create': request.setdefault('token', 'a' * 64)
         launcher = [sys.executable, str(SCRIPT)]
+        if nfs:
+            launcher = [sys.executable, '-c', NFS, str(SCRIPT)]
         if fail_replace:
             launcher = [sys.executable, '-c', "import os,runpy,sys; original=os.replace; count=[0]\ndef replace(a,b):\n count[0]+=1\n if count[0]==2: raise OSError('injected second replacement failure')\n return original(a,b)\nos.replace=replace; sys.argv=sys.argv[1:]; runpy.run_path(sys.argv[0],run_name='__main__')",str(SCRIPT)]
         p = subprocess.run(launcher + [json.dumps({'cli':str(self.cli),'action':action,'request':request})], capture_output=True, text=True)
         self.assertEqual(p.returncode == 0, success, p.stderr)
         return json.loads(p.stdout) if success else p.stderr
 
-    def test_creation_publish_and_no_overwrite(self):
+    def test_creation_publish_and_reuse(self):
         out = self.root/'projects'/'my case'
         req = {'out':str(out),'kind':'site','site':'/data/site.nc'}
         result = self.run_action('create',req)
@@ -48,12 +72,15 @@ elif args[0] == 'new':
         self.assertIn('/data/site.nc', result['files']['case.nml'])
         recovered = self.run_action('create',req)
         self.assertEqual(recovered, result)
-        self.run_action('create',dict(req, token='b'*64),False)
+        # Different settings take over the folder instead of refusing it.
+        other = self.run_action('create',dict(req, token='b'*64))
+        self.assertEqual(other['token'],'b'*64)
         self.assertTrue((out/'case.nml').is_file())
-        self.run_action('publish',{'out':str(out),'token':'wrong','files':result['files']},False)
-        self.run_action('publish',{'out':str(out),'token':result['token'],'files':result['files']})
+        self.run_action('publish',{'out':str(out),'token':'wrong','files':other['files']},False)
+        self.run_action('publish',{'out':str(out),'token':result['token'],'files':other['files']},False)
+        self.run_action('publish',{'out':str(out),'token':other['token'],'files':other['files']})
         self.assertEqual(json.loads((out/'.colm-desktop-server.json').read_text())['remote_directory'],str(out))
-        self.run_action('abort',{'out':str(out),'token':result['token']},False)
+        self.run_action('abort',{'out':str(out),'token':other['token']},False)
         self.assertTrue(out.is_dir())
 
     def test_failure_removes_only_owned_destination(self):
@@ -87,19 +114,22 @@ elif args[0] == 'new':
         (out/'.colm-desktop-server.json').write_text('{}')
         self.run_action('sync',request,False)
 
-    def test_interrupted_owned_creation_resumes_but_other_token_cannot(self):
+    def test_interrupted_creation_resumes_and_another_token_keeps_its_files(self):
         out = self.root/'interrupted'
         out.mkdir()
         (out/'.colm-desktop-creation.json').write_text(json.dumps({'token':'a'*64}))
         (out/'partial.nc').write_text('incomplete')
-        request = {'out':str(out),'kind':'site','site':'/data/site.nc','token':'b'*64}
-        self.run_action('create',request,False)
-        self.assertTrue((out/'partial.nc').exists())
-        request['token'] = 'a'*64
+        request = {'out':str(out),'kind':'site','site':'/data/site.nc','token':'a'*64}
         result = self.run_action('create',request)
         self.assertFalse((out/'partial.nc').exists())
         self.assertEqual(result['token'],'a'*64)
         self.assertEqual(self.run_action('create',request),result)
+        other = self.root/'interrupted-other'
+        other.mkdir()
+        (other/'.colm-desktop-creation.json').write_text(json.dumps({'token':'a'*64}))
+        (other/'partial.nc').write_text('incomplete')
+        self.assertEqual(self.run_action('create',dict(request, out=str(other), token='b'*64))['token'],'b'*64)
+        self.assertTrue((other/'partial.nc').exists())
 
     def test_second_file_publish_failure_restores_every_old_file(self):
         out = self.root/'case'
@@ -142,6 +172,54 @@ elif args[0] == 'new':
         self.assertTrue(out.is_dir())
         self.run_action('abort',{'out':str(out),'token':'c'*64,'incomplete_only':True})
         self.assertFalse(out.exists())
+
+    def test_failure_cleanup_on_nfs_reports_the_creation_error(self):
+        out = self.root/'project'/'nfs'
+        error = self.run_action('create',{'out':str(out),'kind':'site','site':'fail'},False,nfs=True)
+        self.assertIn('bad station', error)
+        self.assertNotIn('Directory not empty', error)
+        self.assertFalse(out.exists())
+
+    def test_empty_leftover_destination_can_be_retried_or_aborted(self):
+        out = self.root/'leftover'
+        out.mkdir()
+        self.run_action('abort',{'out':str(out),'token':'a'*64,'incomplete_only':True})
+        self.assertFalse(out.exists())
+        out.mkdir()
+        result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'})
+        self.assertIn('case.nml', result['files'])
+
+    def test_existing_folder_is_reused_and_kept_when_creation_fails(self):
+        out = self.root/'existing'
+        out.mkdir()
+        (out/'data.nc').write_text('keep')
+        (out/'case.nml').write_text('old case')
+        self.run_action('create',{'out':str(out),'kind':'site','site':'fail'},False,nfs=True)
+        self.assertEqual((out/'data.nc').read_text(),'keep')
+        self.assertEqual((out/'case.nml').read_text(),'old case')
+        self.assertFalse((out/'.colm-desktop-creation.json').exists())
+        result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'})
+        self.assertEqual((out/'case.nml').read_text(),result['files']['case.nml'])
+        self.assertEqual((out/'data.nc').read_text(),'keep')
+        self.run_action('abort',{'out':str(out),'token':result['token'],'incomplete_only':True},False)
+        self.run_action('abort',{'out':str(out),'token':result['token']},nfs=True)
+        self.assertEqual((out/'data.nc').read_text(),'keep')
+        self.assertFalse((out/'.colm-desktop-creation.json').exists())
+
+    def test_plain_file_at_the_case_path_is_replaced(self):
+        out = self.root/'case-file'
+        out.write_text('not a folder')
+        result = self.run_action('create',{'out':str(out),'kind':'site','site':'/data/site.nc'})
+        self.assertTrue((out/'case.nml').is_file())
+        self.assertIn('case.nml',result['files'])
+
+    def test_symlink_destination_is_refused(self):
+        target = self.root/'target'
+        target.mkdir()
+        link = self.root/'link'
+        link.symlink_to(target)
+        self.run_action('create',{'out':str(link),'kind':'site','site':'/data/site.nc'},False)
+        self.assertEqual(list(target.iterdir()),[])
 
     def test_scan_keeps_server_paths(self):
         self.assertEqual(self.run_action('scan',{'dir':'/server/sites','quick':True})['sites'][0]['path'],'/server/sites/site.nc')
