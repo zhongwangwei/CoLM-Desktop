@@ -33526,3 +33526,35 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
   `region/watershed latlon creation turns on regional routing when river-lake routing is left at its default`。
 - 回退 `model-settings.ts` 到修复前再跑：655 个中 4 个失败（上述 3 个新用例，以及“无冲突不改配置”用例——它的预期按新行为补上了区域汇流 `.true.`）。
 - `cargo run -q -p xtask -- check-gui`：`Verified 175 Tauri command contracts.`
+
+## 第 700 轮：外部全量审计的 P0 处理（2026-10-18）
+
+一份外部审计（全仓测试、clippy/fmt、契约检查、5 个分片审计）列出 5 条高优先级问题。逐条对照代码核实后全部属实；抽查的中优先级 6、9、10、11、15、16 也都成立。P0 三条的处理如下。
+
+### 一、study-status 在调度器仍活着时成为第二个 checkpoint 写者（已修）
+
+- `scheduler_is_live` 原来只看 run.lock 的心跳是否在 60 s 内；`clear_stale_run_lock` 则是心跳新鲜或 PID 存活任一成立就算活着。
+  机器睡眠、时钟跳变或心跳写失败一次之后，心跳过期但调度器仍在运行，这时 `study-status`/`study-export` 会把任务标成待审，再 `write_next`；
+  两个写者算出同一个 sequence，调度器那边会中止整个 Study。
+- 不能简单改成"PID 活着就算活"：已有测试要求 PID 被别的程序复用时仍视为无法核实、转入待审。
+  run.lock 一直记录着调度器的 `executable`，但从来没有校验过。现在的判定是：心跳新鲜；或者 PID 存活且运行的可执行文件名与记录一致。
+  查询方式：Linux 读 `/proc/<pid>/exe`（去掉 ` (deleted)` 后缀），macOS 用 `ps -o comm=`，Windows 用 `tasklist`；平台查不到时按"仍活着"处理，宁可不写。
+- 验证：新增"心跳过期但调度器存活时，status 不写 checkpoint"测试；原有 PID 复用测试继续通过；colm-cli 446 个单元测试加 23 个 Study 集成测试；clippy。
+  Linux 和 Windows 分支只在 macOS 上编译过，未实机运行。
+
+### 二、Study 恢复不感知强迫场数据变化（按设计保留）
+
+- 现象属实：`case_is_current` 对 colm 段传入 `allow_unhashed_forcing_cache = true`，而 colm 指纹只记 `forcing.nml` 文本，不记 `.nc` 内容（`excluded-v1`）；
+  普通运行传 `false`，colm 段总会重跑。
+- 用户确认这是自己要求的：强迫场内容永不进入指纹（6de6cba6），Study 恢复时复用已完成站点也是有意为之。不修改；以后的审计不必再报这一条。
+
+### 三、按记录重跑（replay）总是失败（按用户选择恢复为非严格重跑）
+
+- 6de6cba6 在 `model_version::replay` 里加了两道互相矛盾的 `ensure!`：一道要求算法为 `sha256-nonforcing-v1`，另一道要求为 `sha256-full-v1`，因此必然报错。
+  而 GUI 的"按记录设置重跑"按钮一直显示。那次提交的原意是：强迫场排除在指纹之外，就无法证明输入完全一致。
+- 用户选择恢复为非严格重跑：按记录的模型版本和配置重跑，强迫场内容不核对。
+  原运行若记录过完整的非强迫场输入指纹（`INPUT_ALGORITHM`），本地重跑前比对，变了就拒绝；没有记录、记录不完整或是旧算法 `sha256-full-v1` 时不阻止重跑，在结果里标为未核对。
+  服务器端 `run` 读取 `replay-input-identity.json` 时按同一规则处理，内核和执行程序的身份校验不变。
+- 结果 JSON 新增 `verification: {forcing: "not-verified", other_inputs: "verified" | "not-recorded" | "server"}`，历史页据此用警告样式提示"强迫场内容未核对"。
+- 验证：新增 `replay_input_check` 测试，覆盖未记录、旧算法、服务器、强迫场变化后仍可重跑、非强迫场变化后拒绝这几种情况；前端新增提示文案测试；colm-cli 全量测试、clippy；前端 665 个测试。
+  没有在真实窗口里点过重跑。
