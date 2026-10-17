@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  replayVerificationText,
   emptyFilter,
   historyFilter,
   canReplay,
@@ -350,4 +351,14 @@ test('group objects name the common project without enabling representative repl
   };
   assert.equal(historyObject(group, true), 'Multi-site run');
   assert.equal(canDeleteHistory(group), false);
+});
+
+test('replay notices always state that forcing contents were not verified', () => {
+  const text = (other?: string) =>
+    replayVerificationText(other ? { verification: { other_inputs: other } } : {}, false);
+  for (const other of ['verified', 'server', 'not-recorded', undefined])
+    assert.match(text(other), /强迫场内容未核对/);
+  assert.match(text('verified'), /已核对一致/);
+  assert.match(text('not-recorded'), /也未核对/);
+  assert.match(replayVerificationText({}, true), /Forcing contents were not verified/);
 });

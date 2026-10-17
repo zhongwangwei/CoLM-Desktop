@@ -1525,27 +1525,8 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
             == old.effective_nml_sha256,
         "effective configuration changed; replay refused"
     );
-    let expected_full: crate::fingerprint::FullInputIdentity =
-        serde_json::from_value(provenance["full_input_identity"].clone())
-            .context("run lacks complete content identities; replay refused")?;
-    ensure!(
-        expected_full.algorithm == "sha256-nonforcing-v1",
-        "strict replay unavailable: the current policy never fingerprints forcing data, including legacy runs"
-    );
-    ensure!(
-        expected_full.complete && expected_full.algorithm == "sha256-full-v1",
-        "strict replay unavailable: forcing contents were deliberately excluded from verification"
-    );
     let remote_replay = provenance["location"]["kind"] == "server";
-    if !remote_replay {
-        ensure!(
-            crate::fingerprint::same_payloads(
-                &crate::fingerprint::full_inputs(&old_case)?,
-                &expected_full
-            ),
-            "full input content changed; replay refused"
-        );
-    }
+    let other_inputs = replay_input_check(&old_case, &provenance, remote_replay)?;
     let store = registry(opts)?;
     let frozen = store.get(&old.version)?;
     ensure!(
@@ -1669,7 +1650,7 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         );
         let remote = crate::remote_cmd::replay_remote(&old_case, &prepared, &provenance)?;
         return Ok(
-            serde_json::json!({"run_case":new.run_case,"operation_id":new.operation_id,"replay_of":old.operation_id,"remote":remote}),
+            serde_json::json!({"run_case":new.run_case,"operation_id":new.operation_id,"replay_of":old.operation_id,"remote":remote,"verification":replay_verification(other_inputs)}),
         );
     }
     let mut command = std::process::Command::new(std::env::current_exe()?);
@@ -1692,8 +1673,57 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         .map_err(|_| anyhow::anyhow!("replay log forwarding failed"))??;
     ensure!(status.success(), "replayed run failed with {status}");
     Ok(
-        serde_json::json!({"run_case":new.run_case,"operation_id":new.operation_id,"replay_of":old.operation_id}),
+        serde_json::json!({"run_case":new.run_case,"operation_id":new.operation_id,"replay_of":old.operation_id,"verification":replay_verification(other_inputs)}),
     )
+}
+
+/// How far a replay could confirm that its non-forcing inputs match the original run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReplayInputs {
+    /// The original run recorded non-forcing input contents and they are unchanged.
+    Verified,
+    /// Nothing comparable was recorded (fingerprints off, incomplete, or a legacy algorithm).
+    NotRecorded,
+    /// Server runs are compared on the server, not here.
+    Remote,
+}
+
+/// Replay reruns the recorded model version and configuration. Forcing contents are never
+/// fingerprinted, so a replay cannot prove complete input equivalence; it says so instead of
+/// refusing. Recorded non-forcing inputs that changed locally still stop it.
+pub(crate) fn replay_input_check(
+    old_case: &Path,
+    provenance: &serde_json::Value,
+    remote_replay: bool,
+) -> Result<ReplayInputs> {
+    if remote_replay {
+        return Ok(ReplayInputs::Remote);
+    }
+    let Some(expected) = serde_json::from_value::<crate::fingerprint::FullInputIdentity>(
+        provenance["full_input_identity"].clone(),
+    )
+    .ok()
+    .filter(|identity| {
+        identity.complete && identity.algorithm == crate::fingerprint::INPUT_ALGORITHM
+    }) else {
+        return Ok(ReplayInputs::NotRecorded);
+    };
+    ensure!(
+        crate::fingerprint::same_payloads(&crate::fingerprint::full_inputs(old_case)?, &expected),
+        "recorded non-forcing input content changed; replay refused"
+    );
+    Ok(ReplayInputs::Verified)
+}
+
+fn replay_verification(other_inputs: ReplayInputs) -> serde_json::Value {
+    serde_json::json!({
+        "forcing": "not-verified",
+        "other_inputs": match other_inputs {
+            ReplayInputs::Verified => "verified",
+            ReplayInputs::NotRecorded => "not-recorded",
+            ReplayInputs::Remote => "server",
+        },
+    })
 }
 
 fn copy_draft_assets(store: &Registry, draft: &ModelDraft, destination: &Path) -> Result<()> {

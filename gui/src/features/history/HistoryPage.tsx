@@ -37,6 +37,7 @@ import {
   historyReferences,
   historyEvents,
   historyRecordExport,
+  replayVerificationText,
   type HistoryRow,
   type ComparisonInput,
   type HistoryDetail,
@@ -1437,11 +1438,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   </Button>
                 </div>
                 {result != null && (
-                  <Notice>
-                    {t(
-                      '已返回重跑结果，可在下方完整记录中查看。',
-                      'Replay returned a result. Inspect it in the full record below.',
-                    )}
+                  <Notice tone="warning">
+                    {replayVerificationText(result, en)}{' '}
+                    {t('完整结果见下方记录。', 'See the full record below.')}
                   </Notice>
                 )}
                 <Advanced

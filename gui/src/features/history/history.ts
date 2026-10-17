@@ -556,3 +556,27 @@ export function historyStateAfterDirectoryDeletion(
     ),
   };
 }
+
+/** What a replay could confirm: forcing contents are never verified (they are not fingerprinted). */
+export function replayVerificationText(result: unknown, en = false) {
+  const verification =
+    result && typeof result === 'object'
+      ? (result as { verification?: { other_inputs?: string } }).verification
+      : undefined;
+  const others = verification?.other_inputs;
+  const tail =
+    others === 'verified'
+      ? en
+        ? 'other recorded inputs were confirmed unchanged.'
+        : '其他已记录的输入已核对一致。'
+      : others === 'server'
+        ? en
+          ? 'other inputs are checked on the server.'
+          : '其他输入在服务器上核对。'
+        : en
+          ? 'the original run recorded no comparable input fingerprints, so other inputs were not verified either.'
+          : '原运行没有记录可比对的输入指纹，其他输入也未核对。';
+  return en
+    ? `Rerun with the recorded model version and settings. Forcing contents were not verified; ${tail}`
+    : `已按记录的模型版本和设置重跑。强迫场内容未核对；${tail}`;
+}

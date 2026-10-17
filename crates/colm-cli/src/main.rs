@@ -2862,7 +2862,7 @@ fn record_input_fingerprints(opts: &Opts, case: &Path) -> Result<bool> {
         Some("1") => true,
         _ => bail!("--record-input-fingerprints must be 0 or 1"),
     };
-    // A strict replay cannot opt out of verifying its captured inputs.
+    // A replay cannot opt out of verifying the inputs its original run recorded.
     Ok(enabled || case.join("replay-input-identity.json").is_file())
 }
 
@@ -2931,12 +2931,21 @@ fn run_with_provenance(opts: &Opts) -> Result<()> {
         let expected = case.join("replay-input-identity.json");
         if expected.is_file() {
             let expected: serde_json::Value = serde_json::from_slice(&std::fs::read(expected)?)?;
-            let captured: fingerprint::FullInputIdentity =
-                serde_json::from_value(expected["full_input_identity"].clone())?;
-            ensure!(
-                fingerprint::same_payloads(&identity, &captured),
-                "replay scientific inputs changed"
-            );
+            // Forcing is never fingerprinted: only recorded non-forcing contents can be
+            // compared; an unrecorded or legacy identity leaves them unverified.
+            let captured = serde_json::from_value::<fingerprint::FullInputIdentity>(
+                expected["full_input_identity"].clone(),
+            )
+            .ok()
+            .filter(|captured| {
+                captured.complete && captured.algorithm == fingerprint::INPUT_ALGORITHM
+            });
+            if let Some(captured) = captured {
+                ensure!(
+                    fingerprint::same_payloads(&identity, &captured),
+                    "replay scientific inputs changed"
+                );
+            }
             let actual_kernel = Kernel::open_manifest(&used_kernel)?;
             ensure!(
                 serde_json::to_value(&actual_kernel.manifest.sha256)?

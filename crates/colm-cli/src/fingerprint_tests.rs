@@ -778,3 +778,59 @@ fn default_forcing_prefixes_are_excluded_from_overlapping_roots() {
     assert_ne!(before.data_sha256, full_inputs(&root).unwrap().data_sha256);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn replay_checks_recorded_non_forcing_inputs_and_never_requires_forcing() {
+    use crate::model_version::{replay_input_check, ReplayInputs};
+    let root = temp_dir("replay-input-check");
+    std::fs::write(
+        root.join("case.nml"),
+        "&nl_colm\nDEF_dir_rawdata='raw'\n/\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("forcing.nml"),
+        "&nl_colm_forcing\nDEF_dir_forcing='raw'\nDEF_forcing%fprefix(1)='met_'\n/\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(root.join("raw")).unwrap();
+    std::fs::write(root.join("raw/met_2003.nc"), b"driver").unwrap();
+    std::fs::write(root.join("raw/soil.nc"), b"soil").unwrap();
+    let recorded = full_inputs(&root).unwrap();
+    assert!(recorded.complete);
+    let provenance =
+        |identity: serde_json::Value| serde_json::json!({ "full_input_identity": identity });
+
+    // Unrecorded, legacy and server runs replay without a local input comparison.
+    assert_eq!(
+        replay_input_check(&root, &provenance(serde_json::Value::Null), false).unwrap(),
+        ReplayInputs::NotRecorded
+    );
+    let mut legacy = serde_json::to_value(&recorded).unwrap();
+    legacy["algorithm"] = "sha256-full-v1".into();
+    assert_eq!(
+        replay_input_check(&root, &provenance(legacy), false).unwrap(),
+        ReplayInputs::NotRecorded
+    );
+    let current = provenance(serde_json::to_value(&recorded).unwrap());
+    assert_eq!(
+        replay_input_check(&root, &current, true).unwrap(),
+        ReplayInputs::Remote
+    );
+
+    // Changed forcing is not checked; changed recorded non-forcing data stops the replay.
+    std::fs::write(root.join("raw/met_2003.nc"), b"changed driver").unwrap();
+    assert_eq!(
+        replay_input_check(&root, &current, false).unwrap(),
+        ReplayInputs::Verified
+    );
+    std::fs::write(root.join("raw/soil.nc"), b"changed soil").unwrap();
+    let error = replay_input_check(&root, &current, false)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("non-forcing input content changed"),
+        "{error}"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
