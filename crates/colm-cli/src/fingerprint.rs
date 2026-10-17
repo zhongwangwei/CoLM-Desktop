@@ -714,16 +714,7 @@ fn record_nonforcing_file(
     }
     if path.is_dir() && !excluded.prefixes.is_empty() {
         let value = directory_inventory_filtered(&path, &mut |_, _, _| {}, excluded)
-            .and_then(|inventory| {
-                let mut files = BTreeMap::new();
-                for relative in inventory.keys() {
-                    let file = path.join(relative);
-                    if file.is_file() {
-                        record_file(&mut files, file, FileKind::LargeData);
-                    }
-                }
-                Ok(colm_kernel::sha256_hex(&serde_json::to_vec(&files)?))
-            })
+            .and_then(|inventory| Ok(colm_kernel::sha256_hex(&serde_json::to_vec(&inventory)?)))
             .map_or_else(
                 |error| format!("unreadable-dir:{error}"),
                 |hash| format!("dir-sha256:{hash}"),

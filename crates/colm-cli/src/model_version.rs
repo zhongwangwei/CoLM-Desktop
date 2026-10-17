@@ -2186,7 +2186,7 @@ mod upstream_artifact_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn sibling_run_reuses_only_verified_independent_upstream_copies() {
+    fn sibling_run_does_not_reuse_upstream_artifacts_without_forcing_verification() {
         let root = std::env::temp_dir().join(unique_id());
         let runs = root.join("Library/Application Support/runs");
         let kernel = root.join("kernel");
@@ -2309,18 +2309,13 @@ mod upstream_artifact_tests {
             "local",
         )
         .unwrap();
-        assert_eq!(
-            std::fs::read(new.join("out/demo/landdata/srfdata.nc")).unwrap(),
-            b"surface"
-        );
-        assert!(new.join("upstream-artifacts.json").is_file());
-        assert!(new.join("stages.json").is_file());
-        std::fs::write(new.join("out/demo/landdata/srfdata.nc"), b"new surface").unwrap();
+        assert!(!new.join("out/demo").exists());
+        assert!(!new.join("upstream-artifacts.json").exists());
+        assert!(!new.join("stages.json").exists());
         assert_eq!(
             std::fs::read(out.join("landdata/srfdata.nc")).unwrap(),
             b"surface"
         );
-        std::fs::remove_dir_all(new.join("out")).unwrap();
         std::fs::write(out.join("landdata/srfdata.nc"), b"corrupt").unwrap();
         restore_upstream_artifacts(
             &new,

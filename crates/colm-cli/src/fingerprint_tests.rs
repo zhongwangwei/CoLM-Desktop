@@ -319,7 +319,7 @@ fn runtime_directory_content_changes_the_fingerprint() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     std::fs::write(runtime.join("table.txt"), b"second").unwrap();
     let b = compute("colm", &case, "k").unwrap();
-    assert!(first_difference(&a, &b).is_none());
+    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
 }
 
 #[test]
@@ -342,7 +342,7 @@ fn compact_directory_field_names_are_still_tracked() {
     std::thread::sleep(std::time::Duration::from_millis(2));
     std::fs::write(topography.join("grid.nc"), b"second").unwrap();
     let b = compute("colm", &case, "k").unwrap();
-    assert!(first_difference(&a, &b).is_none());
+    assert!(first_difference(&a, &b).unwrap().contains("外部输入"));
 }
 
 #[test]
@@ -373,9 +373,9 @@ fn forcing_namelist_content_changes_the_fingerprint() {
     let d = temp_dir("forcing-content");
     let case = d.join("case.nml");
     std::fs::write(&case, CASE).unwrap();
-    std::fs::write(d.join("forcing.nml"), "a = 1\n").unwrap();
+    std::fs::write(d.join("forcing.nml"), "&nl_colm_forcing\na = 1\n/\n").unwrap();
     let a = compute("colm", &case, "k").unwrap();
-    std::fs::write(d.join("forcing.nml"), "a = 2\n").unwrap();
+    std::fs::write(d.join("forcing.nml"), "&nl_colm_forcing\na = 2\n/\n").unwrap();
     let b = compute("colm", &case, "k").unwrap();
     assert!(
         first_difference(&a, &b).unwrap().contains("外部输入"),

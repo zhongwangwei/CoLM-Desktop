@@ -6167,6 +6167,10 @@ esac
         let execution = actual_execution(&manifest, "caseA", &case).unwrap();
         fs::write(case.join("forcing.nc"), b"temporary forcing change").unwrap();
         fs::write(case.join("forcing.nc"), b"forcing").unwrap();
+        finish_execution(&case, Some(execution)).unwrap();
+        let execution = actual_execution(&manifest, "caseA", &case).unwrap();
+        fs::write(case.join("site.nc"), b"temporary site change").unwrap();
+        fs::write(case.join("site.nc"), b"site").unwrap();
         assert!(finish_execution(&case, Some(execution))
             .unwrap_err()
             .to_string()
