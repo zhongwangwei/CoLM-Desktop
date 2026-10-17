@@ -422,13 +422,13 @@ test('upstream choices close processes they invalidate, and the newest side of a
     { domain: 'region', grid: 'latlon', classification: 'USGS' },
   );
   assert.equal(r.patch.DEF_USE_LULCC, off);
-  // 没有冲突时不动用户的配置。
+  // 没有冲突时不动用户的配置，只补上区域汇流的自动取值（河湖汇流缺省即上游默认开启）。
   r = exclusionPatch(
     { DEF_USE_BGC: on },
     { DEF_USE_PFT: on },
     { subgrid: 'PFT', domain: 'region', grid: 'latlon' },
   );
-  assert.deepEqual(r, { patch: { DEF_USE_PFT: on }, closed: [] });
+  assert.deepEqual(r, { patch: { DEF_USE_PFT: on, DEF_UnitCatchment_regional: on }, closed: [] });
 });
 
 test('regional routing follows domain and active river prerequisites automatically', async () => {
@@ -471,6 +471,62 @@ test('regional routing follows domain and active river prerequisites automatical
       { domain: 'global', grid: 'latlon' },
     ).patch.DEF_UnitCatchment_regional,
     '.false.',
+  );
+});
+
+test('absent river-lake routing counts as its upstream default on', async () => {
+  const { regionalRoutingPatch, exclusionPatch } = await import('./model-settings');
+  // case.nml 不写 DEF_USE_GridRiverLakeFlow 时上游默认 .true.（MOD_Namelist.F90）；
+  // 曾被当成关闭，流域算例因此退回全球单元汇水网络（round 696）。
+  for (const values of [
+    {},
+    { DEF_USE_LULCC: '.false.' },
+    { DEF_USE_GridRiverLakeFlow: ' ' },
+  ] as Record<string, string>[])
+    for (const domain of ['region', 'watershed'])
+      assert.equal(
+        regionalRoutingPatch(values, domain, 'latlon').DEF_UnitCatchment_regional,
+        '.true.',
+      );
+  for (const [values, domain, grid] of [
+    [{}, 'global', 'latlon'],
+    [{}, 'site', null],
+    [{}, 'watershed', 'catchment'],
+    [{ DEF_USE_LULCC: '.true.' }, 'watershed', 'latlon'],
+  ] as const)
+    assert.equal(regionalRoutingPatch(values, domain, grid).DEF_UnitCatchment_regional, '.false.');
+  assert.deepEqual(exclusionPatch({}, {}, { domain: 'watershed', grid: 'latlon' }), {
+    patch: { DEF_UnitCatchment_regional: '.true.' },
+    closed: [],
+  });
+  // 已开的区域汇流不因河湖汇流缺省而被“区域单元汇流需要河湖汇流”关掉。
+  assert.deepEqual(
+    exclusionPatch(
+      { DEF_UnitCatchment_regional: '.true.' },
+      {},
+      { domain: 'watershed', grid: 'latlon' },
+    ),
+    { patch: {}, closed: [] },
+  );
+  // 本次把河湖汇流重置为默认（null）同样算开启。
+  assert.equal(
+    exclusionPatch(
+      { DEF_USE_GridRiverLakeFlow: '.false.', DEF_UnitCatchment_regional: '.false.' },
+      { DEF_USE_GridRiverLakeFlow: null },
+      { domain: 'watershed', grid: 'latlon' },
+    ).patch.DEF_UnitCatchment_regional,
+    '.true.',
+  );
+  // 显式 .false. 仍关闭区域汇流。
+  const r = exclusionPatch(
+    { DEF_USE_GridRiverLakeFlow: '.false.', DEF_UnitCatchment_regional: '.true.' },
+    {},
+    { domain: 'watershed', grid: 'latlon' },
+  );
+  assert.equal(r.patch.DEF_UnitCatchment_regional, '.false.');
+  assert.deepEqual(
+    r.closed.map((c) => c.key),
+    ['DEF_UnitCatchment_regional'],
   );
 });
 

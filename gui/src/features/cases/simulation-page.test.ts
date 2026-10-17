@@ -2137,6 +2137,54 @@ for (const kind of ['region', 'watershed', 'global'])
     );
   });
 
+for (const kind of ['region', 'watershed'])
+  test(`${kind} latlon creation turns on regional routing when river-lake routing is left at its default`, async () => {
+    const p = page(
+      'NewCasePage',
+      {
+        form: {
+          ...form,
+          kind,
+          dlon: '1',
+          dlat: '1',
+          west: '100',
+          east: '102',
+          south: '30',
+          north: '32',
+          shapefile: '/basin.shp',
+          forcing: '/forcing.nml',
+        },
+        step: 5,
+        caseValues: {},
+      },
+      [site],
+      initialValues,
+      {
+        schema: [
+          ...schema,
+          { ...field('DEF_USE_GridRiverLakeFlow', '河道与水库', '.true.'), kind: 'Logical' },
+          ...['DEF_USE_LULCC', 'DEF_UnitCatchment_regional'].map((name) => ({
+            ...field(name, '河道与水库', '.false.'),
+            kind: 'Logical',
+          })),
+        ],
+      },
+    );
+    await p.mount();
+    await p.click('new-create');
+    const request = p.calls.find((call) => call.command === 'new_spatial_case');
+    assert.ok(request);
+    const fields = request.args.fields as { path: string; value: string }[];
+    assert.equal(
+      fields.some((f) => f.path === 'DEF_USE_GridRiverLakeFlow'),
+      false,
+    );
+    assert.equal(
+      fields.filter((f) => f.path === 'DEF_UnitCatchment_regional').at(-1)?.value,
+      '.true.',
+    );
+  });
+
 for (const kind of ['region', 'watershed', 'global'])
   test(`switching site crop to ${kind} keeps crop enabled and creates with the per-CFT calendar`, async () => {
     const p = page(

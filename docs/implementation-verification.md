@@ -33430,7 +33430,8 @@ Windows main CI修复已合并：f8e07e48及29c84e46。GitHub run 38361734789和
   1392 步，约 0.77 s/步，`RAYON_NUM_THREADS=128`），但界面直到 21:02 用户手动核对才知道作业已结束。
   原因：单算例的远程运行面板没有自动核对，只有批量运行和远程研究有。
   现在面板在服务器作业未结束时每 10 秒静默核对一次：不锁面板、出错不弹提示、窗口在后台时暂停，结束时提示一次。远程研究的轮询间隔从 15 秒改为同一个 10 秒。
-- **遗留问题**：0.77 s/步对 610 个 patch 偏慢，怀疑是每步通过 NFS 读取全球 JRA3Q 强迫场，加上线程数开到 128；尚未定位。
+- **遗留问题**：0.77 s/步对 610 个 patch 偏慢，当时怀疑是每步通过 NFS 读取全球 JRA3Q 强迫场，加上线程数开到 128。
+  后经第 698 轮实测，原因是全球河网汇流在大河系内部嵌套并行；第 699 轮让流域、区域 latlon 新算例默认改用区域单元汇流。
 
 ## 第 698 轮：全球河网汇流去掉河系内的按单元嵌套并行（2026-10-18，tms17l 实测，输出逐字节不变）
 
@@ -33499,3 +33500,29 @@ CoLM-SYSU/CoLM 的 master 末端仍是 `a71a81bf`。fork 在 #26 里用 `ed94372
 
 **结论**：生产路径的 Fortran 与 Rust 都不用修。vendor 暂不镜像 #27：宏关闭时没有任何作用，宏打开时上游自己也拒绝全模型运行；
 而改动 vendor 会变动内核源码指纹，所有缓存的内核和服务器引擎都要重编。等这个实验转正（宏默认打开或进入全模型）时再并入、再移植。
+
+## 第 699 轮：流域/区域 latlon 算例在河湖汇流缺省时自动开启区域单元汇流（2026-10-18，前端检查完成）
+
+**起因**：第 696 轮实测的黑河 610 patch 算例（tms17l 上的 `kkk`）case.nml 写着 `DEF_UnitCatchment_regional = .false.`，
+主循环 97.6% 花在全球 15′ 单元汇水网络（252,383 个单元）的汇流上；换成区域网络（2175 个单元、79 个河系）后汇流从 4.02 s/日降到 0.55 s/日。
+上游默认 `DEF_UnitCatchment_regional = .false.`（`MOD_Namelist.F90:398`），GUI 本应给区域/流域算例写 `.true.`，却写了 `.false.`。
+
+**原因**：`regionalRoutingPatch`（`gui/src/features/cases/model-settings.ts`）只把显式写出的 `.true.` 当作河湖汇流开启；
+而 `DEF_USE_GridRiverLakeFlow` 上游默认 `.true.`（`MOD_Namelist.F90:395`）。两处调用都传不含 schema 默认值的取值：
+`NewCasePage` 的 `physics`（overlay + caseValues + 方案字段），`exclusionPatch` 则显式补 `?? '.false.'`。
+case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclusionPatch` 的“区域单元汇流需要河湖汇流”规则同样犯了缺省即关的错，会把已开的区域汇流误关。
+
+**修复**：新增 `flagOn`，缺省或空值按上游默认取值（`DEF_USE_GridRiverLakeFlow` 为开，其余如 `DEF_USE_LULCC` 为关）；
+`regionalRoutingPatch` 与上述规则都改用它，`exclusionPatch` 不再补 `'.false.'`，`null`（重置为默认）同样算开。
+其余规则不变：site/single/global、catchment 网格、LULCC 开启都给 `.false.`。
+“站点/汇水区关闭河湖汇流”那条仍只关显式 `.true.`：这两类内核 `#undef GridRiverLakeFlow`（`include/define.h:55`），缺省值无效果。
+
+**存量算例**：已显式写入 `.false.` 的算例（如 `kkk`）不会被自动改，需手动设 `DEF_UnitCatchment_regional = .true.`，
+并重跑 mksrfdata/mkinidata（mkinidata 写 `landdata/riverlake/unitcatchment_regional.nc`，运行期按该文件读取区域网络）。
+
+**验证（本机，`gui/`）**：
+- `npm run typecheck`、`npm run lint`、`npm run format:check`：均无输出错误，Prettier “All matched files use Prettier code style!”。
+- `npm test`：655 个，655 通过、0 失败。新用例：`absent river-lake routing counts as its upstream default on`、
+  `region/watershed latlon creation turns on regional routing when river-lake routing is left at its default`。
+- 回退 `model-settings.ts` 到修复前再跑：655 个中 4 个失败（上述 3 个新用例，以及“无冲突不改配置”用例——它的预期按新行为补上了区域汇流 `.true.`）。
+- `cargo run -q -p xtask -- check-gui`：`Verified 175 Tauri command contracts.`
