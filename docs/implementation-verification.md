@@ -33337,3 +33337,29 @@ Windows main CI修复已合并：f8e07e48及29c84e46。GitHub run 38361734789和
   - 覆盖：小时记录 862 个有雪、1490 个无雪（5 月融尽），雪层 Cl 浓度最大 2.3e-4。
   - 11 个 NetCDF 输出（history、示踪物 history、srfdata、const restart）共 714 个变量，**0 个不同**。
 - 未在 ifort 上验证（本机没有 Intel 编译器）。
+
+## 第 697 轮：流域/区域 latlon 算例在河湖汇流缺省时自动开启区域单元汇流（2026-10-18，前端检查完成）
+
+**起因**：第 696 轮实测的黑河 610 patch 算例（tms17l 上的 `kkk`）case.nml 写着 `DEF_UnitCatchment_regional = .false.`，
+主循环 97.6% 花在全球 15′ 单元汇水网络（252,383 个单元）的汇流上；换成区域网络（2175 个单元、79 个河系）后汇流从 4.02 s/日降到 0.55 s/日。
+上游默认 `DEF_UnitCatchment_regional = .false.`（`MOD_Namelist.F90:398`），GUI 本应给区域/流域算例写 `.true.`，却写了 `.false.`。
+
+**原因**：`regionalRoutingPatch`（`gui/src/features/cases/model-settings.ts`）只把显式写出的 `.true.` 当作河湖汇流开启；
+而 `DEF_USE_GridRiverLakeFlow` 上游默认 `.true.`（`MOD_Namelist.F90:395`）。两处调用都传不含 schema 默认值的取值：
+`NewCasePage` 的 `physics`（overlay + caseValues + 方案字段），`exclusionPatch` 则显式补 `?? '.false.'`。
+case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclusionPatch` 的“区域单元汇流需要河湖汇流”规则同样犯了缺省即关的错，会把已开的区域汇流误关。
+
+**修复**：新增 `flagOn`，缺省或空值按上游默认取值（`DEF_USE_GridRiverLakeFlow` 为开，其余如 `DEF_USE_LULCC` 为关）；
+`regionalRoutingPatch` 与上述规则都改用它，`exclusionPatch` 不再补 `'.false.'`，`null`（重置为默认）同样算开。
+其余规则不变：site/single/global、catchment 网格、LULCC 开启都给 `.false.`。
+“站点/汇水区关闭河湖汇流”那条仍只关显式 `.true.`：这两类内核 `#undef GridRiverLakeFlow`（`include/define.h:55`），缺省值无效果。
+
+**存量算例**：已显式写入 `.false.` 的算例（如 `kkk`）不会被自动改，需手动设 `DEF_UnitCatchment_regional = .true.`，
+并重跑 mksrfdata/mkinidata（mkinidata 写 `landdata/riverlake/unitcatchment_regional.nc`，运行期按该文件读取区域网络）。
+
+**验证（本机，`gui/`）**：
+- `npm run typecheck`、`npm run lint`、`npm run format:check`：均无输出错误，Prettier “All matched files use Prettier code style!”。
+- `npm test`：655 个，655 通过、0 失败。新用例：`absent river-lake routing counts as its upstream default on`、
+  `region/watershed latlon creation turns on regional routing when river-lake routing is left at its default`。
+- 回退 `model-settings.ts` 到修复前再跑：655 个中 4 个失败（上述 3 个新用例，以及“无冲突不改配置”用例——它的预期按新行为补上了区域汇流 `.true.`）。
+- `cargo run -q -p xtask -- check-gui`：`Verified 175 Tauri command contracts.`

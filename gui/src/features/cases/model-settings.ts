@@ -297,6 +297,15 @@ export function caseSimulationDomain(
     ? 'global'
     : 'region';
 }
+// case.nml 没写的开关按上游默认取值：DEF_USE_GridRiverLakeFlow 默认 .true.
+// （MOD_Namelist.F90），缺省当成关会让流域算例退回全球单元汇水网络（round 696）。
+const upstreamOnByDefault = ['DEF_USE_GridRiverLakeFlow'];
+function flagOn(value: string | null | undefined, key: string): boolean {
+  const text = value?.trim().toLowerCase();
+  return text
+    ? text === '.true.'
+    : upstreamOnByDefault.some((name) => name.toLowerCase() === key.toLowerCase());
+}
 export function regionalRoutingPatch(
   values: Readonly<Record<string, string>>,
   domain?: string | null,
@@ -306,10 +315,10 @@ export function regionalRoutingPatch(
     return {};
   if (!grid && !['site', 'single'].includes(domain)) return {};
   const on = (key: string) =>
-    Object.entries(values)
-      .find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1]
-      .trim()
-      .toLowerCase() === '.true.';
+    flagOn(
+      Object.entries(values).find(([name]) => name.toLowerCase() === key.toLowerCase())?.[1],
+      key,
+    );
   return {
     DEF_UnitCatchment_regional:
       !['site', 'single', 'global'].includes(domain) &&
@@ -440,7 +449,7 @@ export function exclusionPatch(
             ? 'River-lake routing requires a spatial simulation'
             : 'Grid routing is unavailable for catchments',
         ),
-      (site || !on('DEF_USE_GridRiverLakeFlow')) &&
+      (site || !flagOn(read('DEF_USE_GridRiverLakeFlow'), 'DEF_USE_GridRiverLakeFlow')) &&
         close(
           'DEF_UnitCatchment_regional',
           site ? '区域单元汇流需要空间模拟' : '区域单元汇流需要河湖汇流',
@@ -481,8 +490,8 @@ export function exclusionPatch(
   }
   const routing = regionalRoutingPatch(
     {
-      DEF_USE_GridRiverLakeFlow: read('DEF_USE_GridRiverLakeFlow') ?? '.false.',
-      DEF_USE_LULCC: read('DEF_USE_LULCC') ?? '.false.',
+      DEF_USE_GridRiverLakeFlow: read('DEF_USE_GridRiverLakeFlow') ?? '',
+      DEF_USE_LULCC: read('DEF_USE_LULCC') ?? '',
     },
     context.domain,
     context.grid,
