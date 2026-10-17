@@ -247,7 +247,7 @@ fn explicit_vsf_drying_top_layer_limits_the_surface_flux_to_the_ponding() {
 }
 
 #[test]
-fn explicit_dry_layer_tolerance_survives_initialization_and_the_previous_snapshot() {
+fn explicit_drying_below_solver_tolerance_limits_flux_and_preserves_water() {
     let depth_tolerance = 1.0 / 16384.0;
     let volume_tolerance = depth_tolerance / 1024.0;
     let flux = [0.0, 0.25 + 1.0 / 32768.0];
@@ -263,10 +263,12 @@ fn explicit_dry_layer_tolerance_survives_initialization_and_the_previous_snapsho
     explicit.depth_tolerance_mm = depth_tolerance;
     explicit.volume_tolerance = volume_tolerance;
     let dry = apply_variable_saturated_explicit_step(explicit).unwrap();
-    assert_eq!(dry.interface_flux_mm_s, flux);
-    assert_eq!(dry.liquid_water, [-1.0 / 65536.0]);
-    assert_eq!(dry.liquid_water[0] * 2.0, 0.125 * 2.0 + flux[0] - flux[1]);
-    assert!(dry.liquid_water[0] < -volume_tolerance);
+    assert_eq!(dry.interface_flux_mm_s, [0.0, 0.25]);
+    assert_eq!(dry.liquid_water, [0.0]);
+    assert_eq!(
+        dry.liquid_water[0] * 2.0,
+        0.125 * 2.0 + dry.interface_flux_mm_s[0] - dry.interface_flux_mm_s[1]
+    );
     let sublevels = VariableSaturatedSublevelInput {
         interface_depth_mm: explicit.interface_depth_mm,
         porosity: explicit.porosity,
@@ -299,7 +301,7 @@ fn explicit_dry_layer_tolerance_survives_initialization_and_the_previous_snapsho
     );
     assert!(
         apply_variable_saturated_explicit_step(VariableSaturatedExplicitInput {
-            liquid_water: &dry.liquid_water,
+            liquid_water: &[-1.0 / 65536.0],
             ..next
         })
         .is_err()
@@ -320,6 +322,39 @@ fn explicit_dry_layer_tolerance_survives_initialization_and_the_previous_snapsho
             })
             .is_err()
         );
+    }
+}
+
+#[test]
+fn explicit_subtolerance_drying_preserves_each_layer_with_either_flux_direction() {
+    let deficit = 7.936923327158108e-7;
+    let dt = 1800.0;
+    for direction in [-1.0, 1.0] {
+        let flux = [0.0, direction * (0.25 + deficit) / dt, 0.0];
+        let mut input = drying_input(
+            &flux,
+            &[0.125, 0.125],
+            VariableSaturatedBoundary {
+                kind: VariableSaturatedBoundaryKind::FixedFlux,
+                value: 0.0,
+            },
+        );
+        input.time_step_seconds = dt;
+        input.interface_depth_mm = &[0.0, 2.0, 4.0];
+        input.depth_tolerance_mm = 2.5e-5;
+        let state = apply_variable_saturated_explicit_step(input).unwrap();
+        for layer in 0..2 {
+            let water = state.liquid_water[layer] * 2.0;
+            assert!(water >= -crate::SOIL_WATER_ROUNDOFF_KG_M2);
+            close(
+                water,
+                0.25 + dt
+                    * (state.interface_flux_mm_s[layer] - state.interface_flux_mm_s[layer + 1]),
+                1.0e-14,
+            );
+        }
+        close(state.liquid_water.iter().sum::<f64>() * 2.0, 0.5, 1.0e-14);
+        close(state.interface_flux_mm_s[1], direction * 0.25 / dt, 1.0e-18);
     }
 }
 
