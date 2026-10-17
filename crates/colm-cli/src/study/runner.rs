@@ -684,7 +684,72 @@ fn scheduler_is_live(study_dir: &Path) -> Result<bool> {
     let Some(owner) = run_lock_owner(&study_dir.join("run.lock"))? else {
         return Ok(false);
     };
-    Ok(unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS)
+    scheduler_owner_live(&owner)
+}
+
+/// The lock owner may still write checkpoints: its heartbeat is fresh, or its PID is alive and
+/// still runs the recorded scheduler executable. A stale heartbeat alone (sleep, clock jump,
+/// one failed heartbeat write) must not let `study-status` become a second checkpoint writer
+/// next to a running scheduler; a PID reused by another program is not that scheduler.
+fn scheduler_owner_live(owner: &ProcessIdentity) -> Result<bool> {
+    if unix_now().saturating_sub(owner.heartbeat_unix) <= RUN_LOCK_STALE_SECONDS {
+        return Ok(true);
+    }
+    if !scheduler_process_alive(owner.pid)? {
+        return Ok(false);
+    }
+    let recorded = Path::new(&owner.executable).file_name();
+    Ok(match process_image_name(owner.pid) {
+        // When the platform cannot say what the PID runs, stay on the safe side: no second writer.
+        None => true,
+        Some(name) => recorded.is_some_and(|recorded| recorded == name.as_os_str()),
+    })
+}
+
+/// File name of the executable a live PID runs, when the platform can tell.
+#[cfg(target_os = "linux")]
+fn process_image_name(pid: u32) -> Option<std::path::PathBuf> {
+    let target = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+    let text = target.to_string_lossy();
+    // A scheduler binary replaced on disk while running reads back as "... (deleted)".
+    let text = text.strip_suffix(" (deleted)").unwrap_or(&text);
+    Path::new(text).file_name().map(std::path::PathBuf::from)
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_image_name(pid: u32) -> Option<std::path::PathBuf> {
+    // BSD `ps -o comm=` prints the executable path.
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    (output.status.success() && !line.is_empty())
+        .then(|| Path::new(line).file_name().map(std::path::PathBuf::from))
+        .flatten()
+}
+
+#[cfg(windows)]
+fn process_image_name(pid: u32) -> Option<std::path::PathBuf> {
+    let mut command = std::process::Command::new("tasklist");
+    colm_kernel::run::no_console(&mut command);
+    let output = command
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .next()?
+        .split(',')
+        .next()
+        .map(|image| std::path::PathBuf::from(image.trim().trim_matches('"')))
+        .filter(|image| !image.as_os_str().is_empty())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn process_image_name(_pid: u32) -> Option<std::path::PathBuf> {
+    None
 }
 
 fn mark_exited_active_tasks_for_review(state: &mut StudyState) -> Result<bool> {
@@ -4781,6 +4846,54 @@ mod tests {
             recovered.tasks["m000002/site"].status,
             TaskStatus::NeedsReview
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn status_leaves_checkpoints_to_a_live_scheduler_with_a_stale_heartbeat() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-status-live-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let checkpoint = dir.join("checkpoints/state");
+        let id = dir.file_name().unwrap().to_string_lossy().into_owned();
+        write_status_manifest(&dir, &id);
+        std::fs::create_dir_all(&checkpoint).unwrap();
+        // This test process plays the scheduler: alive, but its heartbeat is long expired.
+        let mut owner = supervisor_identity();
+        owner.pid = std::process::id();
+        owner.heartbeat_unix = 0;
+        std::fs::write(dir.join("run.lock"), serde_json::to_vec(&owner).unwrap()).unwrap();
+        let state = StudyState::new(
+            id,
+            [crate::study::state::TaskState {
+                member: "m000001".into(),
+                site: "site".into(),
+                case_dir: "/case".into(),
+                status: TaskStatus::Running,
+                stage: Some("colm".into()),
+                reason: None,
+                objective: None,
+                validation_objective: None,
+                process: Some(owner.clone()),
+            }],
+        )
+        .unwrap();
+        super::super::checkpoint::write_next(&checkpoint, &state).unwrap();
+        let before = std::fs::read_dir(&checkpoint).unwrap().count();
+
+        let observed = status_state(&dir).unwrap().unwrap();
+        assert_eq!(observed.tasks["m000001/site"].status, TaskStatus::Running);
+        assert_eq!(
+            std::fs::read_dir(&checkpoint).unwrap().count(),
+            before,
+            "status must not write a checkpoint while the scheduler process lives"
+        );
+        assert!(clear_stale_run_lock(&dir).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
