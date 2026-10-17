@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn full_hash_reports_incremental_bytes_without_changing_identity() {
+    let root = temp_dir("hash-progress");
+    let path = root.join("forcing.nc");
+    std::fs::write(&path, vec![7_u8; 200_000]).unwrap();
+    let mut events = Vec::new();
+    let with_progress = full_file_with_progress(&path, "data", &mut |p, bytes, total| {
+        assert_eq!(p, path);
+        events.push((bytes, total));
+    })
+    .unwrap();
+    assert_eq!(with_progress, full_file(&path, "data").unwrap());
+    assert_eq!(events.first(), Some(&(0, Some(200_000))));
+    assert_eq!(events.last(), Some(&(200_000, Some(200_000))));
+    assert!(events
+        .iter()
+        .any(|(bytes, _)| *bytes > 0 && *bytes < 200_000));
+    assert!(events.windows(2).all(|pair| pair[0].0 < pair[1].0));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn directory_progress_keeps_full_content_and_membership_checks() {
+    let root = temp_dir("tree-progress");
+    std::fs::create_dir(root.join("data")).unwrap();
+    let path = root.join("data/input.nc");
+    std::fs::write(&path, b"payload").unwrap();
+    let mut out = FullInputIdentity::unavailable("fixture");
+    let mut inventory = false;
+    let mut hash = false;
+    full_directory_with_progress(&mut out, "root", &root.join("data"), &mut |_, _, total| {
+        inventory |= total.is_none();
+        hash |= total.is_some();
+    })
+    .unwrap();
+    assert!(inventory && hash);
+    assert_eq!(
+        out.files["root/input.nc"],
+        full_file(&path, "data").unwrap()
+    );
+    let error = full_directory_with_progress(
+        &mut out,
+        "root",
+        &root.join("data"),
+        &mut |_, bytes, total| {
+            if total.is_some() && bytes > 0 {
+                std::fs::write(root.join("data/new.nc"), b"changed membership").unwrap();
+            }
+        },
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("changed during hashing"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn nested_forcing_inventory_follows_the_case_working_directory() {
     let root = temp_dir("nested-forcing");
     std::fs::create_dir_all(root.join("met")).unwrap();

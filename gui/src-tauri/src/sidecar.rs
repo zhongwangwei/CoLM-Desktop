@@ -753,6 +753,8 @@ fn parse_progress(line: &str) -> Option<Step> {
 /// 日志窗里一段开始时的标题行。
 fn stage_heading(stage: &str) -> String {
     let what = match stage {
+        "input-check" => "检查实际输入",
+        "input-verify" => "核验运行输入",
         "mksrfdata" => "制作地表数据",
         "mkinidata" => "制作初始场",
         "colm" => "模拟",
@@ -1023,6 +1025,13 @@ fn run_args(
     Ok(args)
 }
 
+/// Opt-in only: older IPC callers omit this field and skip bulk input hashing.
+pub(crate) fn add_input_fingerprints(args: &mut Vec<String>, enabled: Option<bool>) {
+    if enabled == Some(true) {
+        args.extend(["--record-input-fingerprints".into(), "1".into()]);
+    }
+}
+
 /// 模型版本：`official` 或一个工作区名（与工作区名同一套校验，拼进命令行前挡住）。
 fn validate_model_version(version: Option<&str>) -> Result<(), String> {
     match version {
@@ -1056,6 +1065,7 @@ pub async fn run_case(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -1074,6 +1084,7 @@ pub async fn run_case(
             model_version,
             model_revision,
             preprocessors,
+            record_input_fingerprints,
         )
     })
     .await
@@ -1086,16 +1097,20 @@ pub async fn run_case(
 /// 会阻塞在那儿，而我们正卡在另一边等 —— 一个不报错的死锁。
 /// `colm-kernel::run` 里是同样的处理。
 ///
-/// 收在内存里而不是边收边发：stderr 上的东西几乎只有最后那句致命错误，
-/// 与 stdout 交错发出去只会让日志窗的顺序变得不可复现。
+/// 普通命令只归集错误；运行命令同时实时发给日志窗。
+fn read_stderr_lines(reader: impl std::io::BufRead, mut on_line: impl FnMut(&str)) -> Vec<String> {
+    let mut errors = Vec::new();
+    for line in reader.lines().map_while(Result::ok) {
+        if !line.trim().is_empty() {
+            on_line(&line);
+            errors.push(line);
+        }
+    }
+    errors
+}
+
 fn drain_stderr(err: std::process::ChildStderr) -> std::thread::JoinHandle<Vec<String>> {
-    std::thread::spawn(move || {
-        BufReader::new(err)
-            .lines()
-            .map_while(Result::ok)
-            .filter(|l| !l.trim().is_empty())
-            .collect()
-    })
+    std::thread::spawn(move || read_stderr_lines(BufReader::new(err), |_| {}))
 }
 
 /// stderr 里哪一段值得当作「失败原因」摆到状态栏上。
@@ -1128,31 +1143,27 @@ fn pump(
     std::thread::spawn(move || {
         let (mut total, mut dropped) = (0usize, 0usize);
         let mut last_progress = Instant::now() - EMIT_INTERVAL;
-        let mut last_lines = Instant::now() - EMIT_INTERVAL;
         let mut buf: VecDeque<String> = VecDeque::with_capacity(LOG_CAPACITY);
-        let mut pending: Vec<String> = Vec::new();
-        // 当前在哪一段。三段串行，所以一个变量就够。
+        // 当前在哪一段。各阶段串行，所以一个变量就够。
         let mut stage = String::from("mksrfdata");
         for line in BufReader::new(out).lines().map_while(Result::ok) {
             total += 1;
             // 阶段标记先认：它不进日志窗，也不该被当成噪声丢掉。
             if let Some((name, state)) = parse_stage(&line) {
                 dropped += 1;
-                // 日志窗里给每段一个醒目的标题；先把上一段攒着的行发出去，次序才对。
+                // 日志窗里给每段一个醒目的标题。
                 if state == "begin" {
                     let heading = stage_heading(&name);
                     if buf.len() == LOG_CAPACITY {
                         buf.pop_front();
                     }
                     buf.push_back(heading.clone());
-                    pending.push(heading);
-                    last_lines = Instant::now();
                     let _ = h.emit(
                         "run://lines",
                         Lines {
                             run_id: run_id.clone(),
                             case: case_id.clone(),
-                            lines: std::mem::take(&mut pending),
+                            lines: vec![heading],
                         },
                     );
                 }
@@ -1199,26 +1210,13 @@ fn pump(
                 buf.pop_front();
             }
             buf.push_back(line.clone());
-            pending.push(line);
-            if last_lines.elapsed() >= EMIT_INTERVAL {
-                last_lines = Instant::now();
-                let _ = h.emit(
-                    "run://lines",
-                    Lines {
-                        run_id: run_id.clone(),
-                        case: case_id.clone(),
-                        lines: std::mem::take(&mut pending),
-                    },
-                );
-            }
-        }
-        if !pending.is_empty() {
+            // A quiet preparation phase may not produce another line for minutes.
             let _ = h.emit(
                 "run://lines",
                 Lines {
-                    run_id,
+                    run_id: run_id.clone(),
                     case: case_id.clone(),
-                    lines: pending,
+                    lines: vec![line],
                 },
             );
         }
@@ -1308,6 +1306,7 @@ pub async fn run_batch(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<BatchSummary, String> {
     validate_run_id(&run_id)?;
     let processes = processes.inner().clone();
@@ -1327,6 +1326,7 @@ pub async fn run_batch(
             model_version,
             model_revision,
             preprocessors,
+            record_input_fingerprints,
         )
     })
     .await
@@ -1350,6 +1350,7 @@ fn run_batch_blocking(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<BatchSummary, String> {
     validate_run_stage(stage.as_deref())?;
     validate_engine(engine.as_deref())?;
@@ -1424,6 +1425,7 @@ fn run_batch_blocking(
                     version.as_deref(),
                     revision.as_ref(),
                     preprocessors.as_deref(),
+                    record_input_fingerprints,
                 )
             }));
             match outcome {
@@ -1496,6 +1498,7 @@ fn run_case_blocking(
     model_version: Option<String>,
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
     if threads == Some(0) {
         return Err("threads must be at least 1".into());
@@ -1515,6 +1518,7 @@ fn run_case_blocking(
         model_version.as_deref(),
         model_revision.as_ref(),
         preprocessors.as_deref(),
+        record_input_fingerprints,
     )
 }
 
@@ -1534,6 +1538,7 @@ fn run_one(
     model_version: Option<&str>,
     model_revision: Option<&colm_model::VersionRef>,
     preprocessors: Option<&str>,
+    record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
     crate::remote::server_case_args(case, "")?;
     let cli = resolve_cli();
@@ -1544,6 +1549,7 @@ fn run_one(
     }
     let prepared = (|| {
         let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
+        add_input_fingerprints(&mut args, record_input_fingerprints);
         crate::model::options(&mut args, model_revision)?;
         add_preprocessors(&mut args, preprocessors)?;
         let event = crate::history::command_start_for_run(&args, Some(run_id))?;
@@ -1588,21 +1594,25 @@ fn run_one(
             serde_json::json!({ "run_id": run_id, "case": case, "source_case":case,"operation_id":event.as_ref().map(|event|&event.operation_id) }),
         );
         let reader = pump(app, run_id, case, out);
-        let errs = drain_stderr(err_pipe);
+        let error_app = app.clone();
+        let error_run_id = run_id.to_string();
+        let error_case = case.to_string();
+        let errs = std::thread::spawn(move || {
+            read_stderr_lines(BufReader::new(err_pipe), |line| {
+                let _ = error_app.emit(
+                    "run://lines",
+                    Lines {
+                        run_id: error_run_id.clone(),
+                        case: error_case.clone(),
+                        lines: vec![line.to_string()],
+                    },
+                );
+            })
+        });
         let (status, cancelled) = wait_process(&mut child, processes, case)?;
         let (total, dropped, _) = reader.join().map_err(|_| "reader thread panicked")?;
         let err = errs.join().map_err(|_| "stderr thread panicked")?;
         let code = status.code().unwrap_or(-1);
-        if !err.is_empty() {
-            let _ = app.emit(
-                "run://lines",
-                Lines {
-                    run_id: run_id.to_string(),
-                    case: case.to_string(),
-                    lines: err.clone(),
-                },
-            );
-        }
         let _ = app.emit(
             "run://done",
             Done {

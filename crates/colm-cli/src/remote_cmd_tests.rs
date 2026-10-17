@@ -1512,3 +1512,122 @@ fn frozen_official_prebuilt_requires_matching_source_and_workspace_still_require
     .is_err());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn job_input_fingerprints_default_off_and_forward_only_explicit_opt_in() {
+    for scheduler in [
+        Scheduler::Bare,
+        Scheduler::Slurm,
+        Scheduler::Pbs,
+        Scheduler::Lsf,
+    ] {
+        for (args, enabled) in [
+            (vec![], false),
+            (vec!["--record-input-fingerprints", "0"], false),
+            (vec!["--record-input-fingerprints", "1"], true),
+        ] {
+            let opts = opts(&args);
+            let plan = RunPlan::from_opts(&opts).unwrap();
+            let body = job_body(
+                "/r",
+                "eng",
+                "/r/cases/c",
+                "/r/kernels/k",
+                4,
+                &plan,
+                scheduler,
+                &opts,
+            )
+            .unwrap();
+            assert_eq!(body.contains(" --record-input-fingerprints 1"), enabled);
+            assert!(!body.contains(" --record-input-fingerprints 0"));
+        }
+    }
+}
+
+#[test]
+fn disabled_content_fetch_keeps_model_binding_and_checks_output_paths() {
+    let fixture = completed_output_fixture("disabled-content-fetch");
+    let (_, pending) = PendingFixture::new("disabled-content-submission");
+    let mut record = pending.record;
+    let mut provenance = crate::provenance::read(&fixture.0).unwrap().unwrap();
+    provenance["verification"] =
+        json!({"status":"disabled","input_fingerprints":false,"content_fingerprints":false});
+    provenance["input_sources"] = json!({"forcing":"/server/forcing"});
+    provenance["model_run"]["operation_id"] = json!("submitted-operation");
+    for key in [
+        "output_sha256",
+        "execution_program_sha256",
+        "full_input_identity",
+    ] {
+        provenance.as_object_mut().unwrap().remove(key);
+    }
+    // Write exactly this completion without the test fixture writer resealing hashes.
+    let completion = fixture.0.join("out/fixture").join(crate::provenance::FILE);
+    std::fs::write(completion, serde_json::to_vec(&provenance).unwrap()).unwrap();
+    let proof = verify_completed_outputs(&fixture.0).unwrap();
+    assert!(proof["history_sha256"].is_null());
+    record.provenance.as_mut().unwrap()["remote_model_run"] = provenance["model_run"].clone();
+    record.provenance.as_mut().unwrap()["record_input_fingerprints"] = json!(false);
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    let history = fixture.0.join("out/fixture/history");
+    verify_fetched_history(&history, &proof).unwrap();
+    let parsed = parse_output_verification(colm_remote::ssh::Output {
+        success: true,
+        code: Some(0),
+        stdout: serde_json::to_string(&proof).unwrap(),
+        stderr: String::new(),
+    })
+    .unwrap()
+    .unwrap();
+    assert_eq!(parsed, proof);
+    let mut fetched = fetched_provenance(
+        record.provenance.as_ref().unwrap(),
+        Some(job::State::Finished { exit_code: 0 }),
+    );
+    fetch_certification(&mut fetched, Some(&proof), false);
+    assert_eq!(fetched["ok"], true);
+    assert_eq!(fetched["input_sources"], provenance["input_sources"]);
+    assert!(fetched.get("execution_program_sha256").is_none());
+    assert!(fetched.get("output_sha256").is_none());
+    assert_eq!(fetched["output_verification"]["status"], "disabled");
+    assert!(verify_recorded_inputs(
+        &fixture.0,
+        &fetched,
+        &crate::fingerprint::FullInputIdentity::unavailable("disabled")
+    )
+    .is_err());
+    let mut wrong = proof.clone();
+    wrong["provenance"]["model_run"]["operation_id"] = json!("wrong-operation");
+    assert!(verify_submitted_output_identity(&wrong, &record).is_err());
+    std::fs::remove_file(history.join("fixture_hist_2004.nc")).unwrap();
+    assert!(verify_fetched_history(&history, &proof).is_err());
+    std::fs::write(history.join("different.nc"), b"unhashed output").unwrap();
+    assert!(verify_fetched_history(&history, &proof).is_err());
+}
+
+#[test]
+fn disabled_fetch_rejects_downgrade_or_ambiguous_disable_markers() {
+    let (_, pending) = PendingFixture::new("disabled-downgrade");
+    let mut record = pending.record;
+    let model = json!({"revision":1,"operation_id":"same-operation"});
+    record.provenance.as_mut().unwrap()["remote_model_run"] = model.clone();
+    let proof = json!({"case_name":record.case_name,"provenance":{
+        "execution_snapshot":record.engine,"model_run":model,
+        "verification":{"status":"disabled","input_fingerprints":false,"content_fingerprints":false}
+    }});
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["record_input_fingerprints"] = json!(true);
+    assert!(verify_submitted_output_identity(&proof, &record).is_err());
+    record.provenance.as_mut().unwrap()["record_input_fingerprints"] = json!(false);
+    verify_submitted_output_identity(&proof, &record).unwrap();
+    for (key, value) in [
+        ("status", json!("rejected")),
+        ("input_fingerprints", json!(true)),
+        ("content_fingerprints", json!(null)),
+    ] {
+        let mut changed = proof.clone();
+        changed["provenance"]["verification"][key] = value;
+        assert!(verify_submitted_output_identity(&changed, &record).is_err());
+    }
+}

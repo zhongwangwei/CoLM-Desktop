@@ -1138,6 +1138,7 @@ fn run_members(
                         None,
                         None,
                         true,
+                        true,
                         &mut |notice| {
                             let event = match notice {
                                 RunNotice::StageBegin(stage) => WorkerEvent::Notice {

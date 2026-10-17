@@ -100,26 +100,43 @@ pub(crate) fn value(record: &Record<'_>, ok: bool, error: Option<&str>) -> Value
     }
     if let Some(hashes) = record.execution_program_sha256 {
         value["execution_program_sha256"] = json!(hashes);
-    } else if let Ok(cli) = std::env::current_exe() {
-        match program_identities(&cli) {
-            Ok(hashes) => value["execution_program_sha256"] = json!(hashes),
-            Err(error) => value["execution_program_identity_error"] = json!(error.to_string()),
+        if let Ok(kernel) = colm_kernel::Kernel::open_manifest(record.kernel) {
+            value["kernel"]["program_sha256"] = json!(kernel.manifest.sha256);
         }
     }
-    if let Ok(kernel) = colm_kernel::Kernel::open_manifest(record.kernel) {
-        if let Ok(inputs) = crate::fingerprint::compute(
-            "colm",
-            &record.case.join("case.nml"),
-            &kernel.manifest.stage_fingerprint_identity(),
-        ) {
-            value["input_fingerprint"] = serde_json::to_value(inputs).unwrap_or(Value::Null);
-        }
-        value["kernel"]["program_sha256"] = json!(kernel.manifest.sha256);
+    match input_sources(record.case) {
+        Ok(sources) => value["input_sources"] = sources,
+        Err(error) => value["input_sources_error"] = json!(format!("{error:#}")),
     }
     if let Err(error) = crate::model_version::attach(record.case, &mut value) {
         value["model_identity_error"] = json!(error.to_string());
     }
     value
+}
+
+// Save declared sources and settings without opening their data payloads.
+fn input_sources(case: &Path) -> Result<Value> {
+    fn settings(path: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+        let doc = colm_namelist::parse(&std::fs::read_to_string(path)?)?;
+        Ok(doc
+            .paths()
+            .into_iter()
+            .filter_map(|path| doc.get(&path).map(|value| (path, value.to_string())))
+            .collect())
+    }
+    let case_path = case.join("case.nml");
+    let config = settings(&case_path)?;
+    let doc = colm_namelist::parse(&std::fs::read_to_string(&case_path)?)?;
+    let forcing_path = match doc.get("DEF_forcing_namelist") {
+        Some(colm_namelist::Value::Str(path)) => case.join(path),
+        _ => case.join("forcing.nml"),
+    };
+    let mut sources = json!({ "case_namelist": case_path, "case_settings": config,
+        "forcing_namelist": forcing_path });
+    if forcing_path.is_file() {
+        sources["forcing_settings"] = serde_json::to_value(settings(&forcing_path)?)?;
+    }
+    Ok(sources)
 }
 
 /// Hash the actual selected executable family, including a delegated frozen CLI.
@@ -190,9 +207,11 @@ pub(crate) fn write_value(case: &Path, record: &Value) {
         let dir = layout.out().join(name);
         std::fs::create_dir_all(&dir)?;
         let mut record = record.clone();
-        match output_identities(&dir) {
-            Ok(identities) => record["output_sha256"] = json!(identities),
-            Err(error) => record["output_identity_error"] = json!(error.to_string()),
+        if record["verification"]["content_fingerprints"] != false {
+            match output_identities(&dir) {
+                Ok(identities) => record["output_sha256"] = json!(identities),
+                Err(error) => record["output_identity_error"] = json!(error.to_string()),
+            }
         }
         let text = serde_json::to_string_pretty(&record)?;
         let tmp = dir.join(format!("{FILE}.tmp"));

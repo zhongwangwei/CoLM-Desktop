@@ -625,6 +625,14 @@ pub(crate) fn stable_file_identity(metadata: &Metadata) -> String {
 }
 
 pub(crate) fn full_file(path: &Path, category: &str) -> Result<FullInputFile> {
+    full_file_with_progress(path, category, &mut |_, _, _| {})
+}
+
+fn full_file_with_progress(
+    path: &Path,
+    category: &str,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+) -> Result<FullInputFile> {
     let mut file = File::open(path).with_context(|| format!("cannot read {}", path.display()))?;
     let before = file.metadata()?;
     anyhow::ensure!(
@@ -640,6 +648,7 @@ pub(crate) fn full_file(path: &Path, category: &str) -> Result<FullInputFile> {
     let mut hash = Sha256::new();
     let mut bytes = 0_u64;
     let mut buffer = [0_u8; 64 * 1024];
+    progress(path, 0, Some(before.len()));
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 {
@@ -647,6 +656,7 @@ pub(crate) fn full_file(path: &Path, category: &str) -> Result<FullInputFile> {
         }
         bytes += count as u64;
         hash.update(&buffer[..count]);
+        progress(path, bytes, Some(before.len()));
     }
     anyhow::ensure!(
         bytes == before.len()
@@ -675,8 +685,14 @@ impl FullInputIdentity {
             unresolved: vec![reason.into()],
         }
     }
-    fn add(&mut self, role: String, path: &Path, category: &str) {
-        match full_file(path, category) {
+    fn add(
+        &mut self,
+        role: String,
+        path: &Path,
+        category: &str,
+        progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+    ) {
+        match full_file_with_progress(path, category, progress) {
             Ok(value) => {
                 self.files.insert(role, value);
             }
@@ -726,6 +742,13 @@ fn is_comparison_physics(key: &str) -> bool {
 /// Directory scans are conservative: every regular file is hashed, with stable
 /// membership checked before and after; no metadata-only or sampled shortcuts.
 pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
+    full_inputs_with_progress(case, &mut |_, _, _| {})
+}
+
+pub(crate) fn full_inputs_with_progress(
+    case: &Path,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+) -> Result<FullInputIdentity> {
     crate::model_version::restore_execution_path(case)?;
     let nml = case.join("case.nml");
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
@@ -739,18 +762,28 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
         files: BTreeMap::new(),
         unresolved: Vec::new(),
     };
-    out.add("configuration:case".into(), &nml, "configuration");
+    out.add("configuration:case".into(), &nml, "configuration", progress);
     colm_case::spinup_replay_enabled(case)?;
     let spinup = case.join("spinup.nml");
     if spinup.try_exists()? {
-        out.add("configuration:spinup".into(), &spinup, "configuration");
+        out.add(
+            "configuration:spinup".into(),
+            &spinup,
+            "configuration",
+            progress,
+        );
     }
     let forcing = doc
         .get("DEF_forcing_namelist")
         .and_then(string_value)
         .map(|raw| resolve(case, raw))
         .unwrap_or_else(|| case.join("forcing.nml"));
-    out.add("configuration:forcing".into(), &forcing, "configuration");
+    out.add(
+        "configuration:forcing".into(),
+        &forcing,
+        "configuration",
+        progress,
+    );
     let force = colm_namelist::parse(&std::fs::read_to_string(&forcing)?)?;
     let force_base = force
         .get("DEF_dir_forcing")
@@ -773,7 +806,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
             };
             let exact = resolve(base, raw);
             if exact.is_file() {
-                out.add(format!("forcing:{lower}"), &exact, "data");
+                out.add(format!("forcing:{lower}"), &exact, "data", progress);
             } else {
                 let parent = exact.parent().unwrap_or(base);
                 let prefix = exact.file_name().unwrap_or_default().to_string_lossy();
@@ -798,7 +831,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                 }
                 for path in matched {
                     let name = path.file_name().unwrap_or_default().to_string_lossy();
-                    out.add(format!("forcing:{lower}:{name}"), &path, "data");
+                    out.add(format!("forcing:{lower}:{name}"), &path, "data", progress);
                 }
             }
         } else if lower != "def_dir_forcing" {
@@ -829,7 +862,12 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
             if raw.trim().is_empty() || raw.trim().eq_ignore_ascii_case("null") {
                 out.data_settings.insert(lower, "default".into());
             } else {
-                out.add("case:history_variables".into(), &resolve(case, raw), "data");
+                out.add(
+                    "case:history_variables".into(),
+                    &resolve(case, raw),
+                    "data",
+                    progress,
+                );
             }
             continue;
         }
@@ -858,6 +896,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                         format!("model:tracer:{index}"),
                         &resolve(case, path.trim_matches(['\'', '"'])),
                         "model",
+                        progress,
                     );
                 }
             }
@@ -884,7 +923,12 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                     continue;
                 }
                 if path.is_dir() {
-                    full_directory(&mut out, &format!("case:{lower}"), &path)?;
+                    full_directory_with_progress(
+                        &mut out,
+                        &format!("case:{lower}"),
+                        &path,
+                        progress,
+                    )?;
                 } else {
                     out.add(
                         format!("case:{lower}"),
@@ -894,6 +938,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                         } else {
                             "data"
                         },
+                        progress,
                     );
                 }
             }
@@ -909,6 +954,7 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
             ),
             &file,
             "data",
+            progress,
         );
     }
     if case.join(colm_model::RUN_MANIFEST).is_file() {
@@ -929,11 +975,17 @@ pub(crate) fn full_inputs(case: &Path) -> Result<FullInputIdentity> {
                 } else {
                     "model"
                 },
+                progress,
             );
         }
         for flag in ["--highres-params", "--soil-hyper-albedo-dir"] {
             if let Some(path) = manifest.inputs.get(&format!("execution-option:{flag}")) {
-                full_directory(&mut out, &format!("option:{flag}"), Path::new(path))?;
+                full_directory_with_progress(
+                    &mut out,
+                    &format!("option:{flag}"),
+                    Path::new(path),
+                    progress,
+                )?;
             }
         }
     }
@@ -1110,13 +1162,22 @@ fn full_data_digest(identity: &FullInputIdentity) -> Result<String> {
 // All declared roots are read-only inputs. Reject cycles, special files and
 // changes to membership or file identities while producing the full inventory.
 fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
+    directory_inventory_with_progress(root, &mut |_, _, _| {})
+}
+
+fn directory_inventory_with_progress(
+    root: &Path,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+) -> Result<BTreeMap<PathBuf, String>> {
     fn visit(
         root: &Path,
         relative: &Path,
         active: &mut Vec<PathBuf>,
         out: &mut BTreeMap<PathBuf, String>,
+        progress: &mut dyn FnMut(&Path, u64, Option<u64>),
     ) -> Result<()> {
         let path = root.join(relative);
+        progress(&path, 0, None);
         let canonical = path
             .canonicalize()
             .with_context(|| format!("cannot resolve scientific input {}", path.display()))?;
@@ -1139,7 +1200,13 @@ fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
                         path.display()
                     )
                 })?;
-                visit(root, &relative.join(entry.file_name()), active, out)?;
+                visit(
+                    root,
+                    &relative.join(entry.file_name()),
+                    active,
+                    out,
+                    progress,
+                )?;
             }
             active.pop();
         } else {
@@ -1152,11 +1219,27 @@ fn directory_inventory(root: &Path) -> Result<BTreeMap<PathBuf, String>> {
         Ok(())
     }
     let mut inventory = BTreeMap::new();
-    visit(root, Path::new(""), &mut Vec::new(), &mut inventory)?;
+    visit(
+        root,
+        Path::new(""),
+        &mut Vec::new(),
+        &mut inventory,
+        progress,
+    )?;
     Ok(inventory)
 }
+#[cfg(test)]
 fn full_directory(out: &mut FullInputIdentity, role: &str, root: &Path) -> Result<()> {
-    let before = directory_inventory(root)?;
+    full_directory_with_progress(out, role, root, &mut |_, _, _| {})
+}
+
+fn full_directory_with_progress(
+    out: &mut FullInputIdentity,
+    role: &str,
+    root: &Path,
+    progress: &mut dyn FnMut(&Path, u64, Option<u64>),
+) -> Result<()> {
+    let before = directory_inventory_with_progress(root, progress)?;
     for relative in before.keys() {
         let path = root.join(relative);
         if path.is_file() {
@@ -1164,12 +1247,14 @@ fn full_directory(out: &mut FullInputIdentity, role: &str, root: &Path) -> Resul
                 .to_str()
                 .context("input filename is not UTF-8")?
                 .replace('\\', "/");
-            out.files
-                .insert(format!("{role}/{name}"), full_file(&path, "data")?);
+            out.files.insert(
+                format!("{role}/{name}"),
+                full_file_with_progress(&path, "data", progress)?,
+            );
         }
     }
     anyhow::ensure!(
-        before == directory_inventory(root)?,
+        before == directory_inventory_with_progress(root, progress)?,
         "input directory changed during hashing: {}",
         root.display()
     );

@@ -1093,6 +1093,10 @@ export const commandContract = {
     "preprocessors": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "recordInputFingerprints": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "remote_kernels": {
@@ -1167,6 +1171,10 @@ export const commandContract = {
     "preprocessors": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "recordInputFingerprints": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "remote_job_record": {
@@ -1364,6 +1372,10 @@ export const commandContract = {
     "preprocessors": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "recordInputFingerprints": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "run_batch": {
@@ -1414,6 +1426,10 @@ export const commandContract = {
     "preprocessors": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "recordInputFingerprints": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "new_case": {

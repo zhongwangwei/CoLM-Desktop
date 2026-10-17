@@ -484,6 +484,52 @@ fn study_state_status(program: &Path, study: &str) -> String {
     status["state"]["status"].as_str().unwrap().to_owned()
 }
 
+#[test]
+fn ordinary_run_defaults_to_no_input_audit_and_replaces_stale_identity() {
+    let _guard = netcdf_lock();
+    let root = temp_root("noaudit");
+    let cli = private_cli(&root);
+    let kernel = fake_kernel(&root, None);
+    write_case(&root, "siteA");
+    let case = root.join("siteA");
+    fs::write(
+        case.join("full-input-identity.json"),
+        r#"{"complete":true,"algorithm":"stale"}"#,
+    )
+    .unwrap();
+    let args = [
+        "run",
+        case.to_str().unwrap(),
+        "--kernel",
+        kernel.to_str().unwrap(),
+        "--preprocessors",
+        "fortran",
+        "--stream",
+        "1",
+    ];
+    let output = run_with_bin_ok(&cli, &args);
+    assert!(!output.contains("colm-stage input-check"));
+    assert!(!output.contains("Input SHA-256:"));
+    let identity: Value =
+        serde_json::from_slice(&fs::read(case.join("full-input-identity.json")).unwrap()).unwrap();
+    assert_eq!(identity["complete"], false);
+    let provenance: Value =
+        serde_json::from_slice(&fs::read(case.join("out/siteA/produced-by.json")).unwrap())
+            .unwrap();
+    assert_eq!(provenance["verification"]["status"], "disabled");
+    assert_eq!(provenance["verification"]["input_fingerprints"], false);
+    assert_eq!(provenance["verification"]["content_fingerprints"], false);
+    assert!(provenance.get("output_sha256").is_none());
+    assert!(provenance.get("execution_program_sha256").is_none());
+    let first_count = marker_lines(&root.join("kernel-programs.log")).len();
+    run_with_bin_ok(&cli, &args);
+    assert_eq!(
+        marker_lines(&root.join("kernel-programs.log")).len(),
+        first_count * 2
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
@@ -500,6 +546,8 @@ fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -519,6 +567,8 @@ fn run_rust_mkinidata_sidecar_change_invalidates_initial_and_runtime_only() {
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -561,6 +611,8 @@ fn run_rust_mksrfdata_sidecar_change_invalidates_all_preprocessing_downstream() 
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),
@@ -580,6 +632,8 @@ fn run_rust_mksrfdata_sidecar_change_invalidates_all_preprocessing_downstream() 
         &cli,
         &[
             "run",
+            "--record-input-fingerprints",
+            "1",
             case.to_str().unwrap(),
             "--kernel",
             kernel.to_str().unwrap(),

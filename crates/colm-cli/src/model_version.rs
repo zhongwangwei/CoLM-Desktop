@@ -1613,6 +1613,7 @@ pub(crate) fn replay(opts: &Opts) -> Result<serde_json::Value> {
         );
         flags.push((flag.into(), value.into()));
     }
+    flags.push(("--record-input-fingerprints".into(), "1".into()));
     let ranks = provenance["ranks"]
         .as_u64()
         .filter(|n| *n > 0)
@@ -2459,6 +2460,7 @@ mod prepared_operation_tests {
                 ("--model-id".into(), "official".into()),
                 ("--model-revision".into(), "1".into()),
                 ("--operation-id".into(), "gui-parent-operation".into()),
+                ("--record-input-fingerprints".into(), "1".into()),
                 (
                     "--history-db".into(),
                     root.join("history.sqlite").to_string_lossy().into_owned(),
@@ -2489,6 +2491,10 @@ mod prepared_operation_tests {
         .unwrap();
         let (prepared, run) = prepare(&opts).unwrap().unwrap();
         assert_eq!(prepared.get("--model-root"), opts.get("--model-root"));
+        assert_eq!(
+            prepared.get("--record-input-fingerprints").as_deref(),
+            Some("1")
+        );
         assert_eq!(run.operation_id, "gui-parent-operation");
         assert_eq!(
             run.run_case,
