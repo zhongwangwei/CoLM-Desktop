@@ -183,7 +183,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
           route: 'case',
           caseTab: tab,
         });
-        await invoke('save_recent', { key: 'root', value: opened.root });
+        // 算例已经打开；记最近目录失败只提示，不能把已成功的打开报成失败。
+        await invoke('save_recent', { key: 'root', value: opened.root }).catch((error) =>
+          notify(String(error)),
+        );
         return normalized;
       } finally {
         if (pendingOpen.current === epoch) {
@@ -192,7 +195,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         }
       }
     },
-    [blocked, update],
+    [blocked, notify, update],
   );
   useEffect(() => {
     document.documentElement.lang = state.language === 'en' ? 'en' : 'zh-CN';

@@ -10,6 +10,7 @@ import {
   preparedDestination,
   effectiveModelFields,
   cropEnabled,
+  selectChoice,
   type SchemaField,
 } from './case-model';
 const field = (name: string, section: string): SchemaField => ({
@@ -83,4 +84,14 @@ describe('case data boundary', () => {
     assert.equal(isCaseField(field('DEF_USE_USGS', '地表数据')), false);
     assert.equal(isCaseField({ ...field('DEF_HIST_FREQ', '输出与重启'), derived: true }), false);
   });
+});
+it('select choices match Fortran strings case-insensitively and keep unknown values visible', () => {
+  const options = ['DAILY', 'HOURLY', 'MONTHLY', 'TIMESTEP', 'YEARLY', 'none'];
+  assert.deepEqual(selectChoice('monthly', options), { value: 'MONTHLY', options });
+  assert.deepEqual(selectChoice('NONE', options), { value: 'none', options });
+  assert.deepEqual(selectChoice('weekly', options), {
+    value: 'weekly',
+    options: [...options, 'weekly'],
+  });
+  assert.deepEqual(selectChoice('', options), { value: '', options });
 });

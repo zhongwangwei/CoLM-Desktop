@@ -22,6 +22,7 @@ import {
   siteVersionMismatch,
   effectiveModelFields,
   isCaseField,
+  selectChoice,
   type SchemaField,
   type Site,
 } from './case-model';
@@ -1882,6 +1883,11 @@ export default function NewCasePage() {
       )}
     </Field>
   );
+  const optionChoice = (f: SchemaField) =>
+    selectChoice(
+      optionValue(f),
+      optionState(f.name)?.allowed_values.length ? optionState(f.name)!.allowed_values : f.values,
+    );
   const renderOption = (f: SchemaField) => (
     <Field
       key={f.name}
@@ -1900,15 +1906,12 @@ export default function NewCasePage() {
         </Select>
       ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
-          value={optionValue(f)}
+          value={optionChoice(f).value}
           disabled={!enabled || optionDisabled(f.name)}
           onChange={(e) => setOption(f.name, e.target.value)}
         >
           <option value="">{autoLabel}</option>
-          {(optionState(f.name)?.allowed_values.length
-            ? optionState(f.name)!.allowed_values
-            : f.values
-          ).map((value) => (
+          {optionChoice(f).options.map((value) => (
             <option key={value} value={value}>
               {optionLabel(f.name, value, state.language)}
             </option>

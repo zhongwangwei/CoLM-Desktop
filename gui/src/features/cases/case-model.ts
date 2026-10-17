@@ -51,6 +51,12 @@ export function versionMode(
 export function displayLiteral(value: string): string {
   return /^(['"]).*\1$/.test(value) ? value.slice(1, -1) : value;
 }
+/** Fortran strings compare case-insensitively: show `'monthly'` as MONTHLY, keep unknown values visible. */
+export function selectChoice(value: string, options: readonly string[]) {
+  const match = options.find((option) => option.toLowerCase() === value.toLowerCase());
+  if (match !== undefined) return { value: match, options: [...options] };
+  return { value, options: value ? [...options, value] : [...options] };
+}
 export function siteVersionMismatch(
   site: Pick<Site, 'crop' | 'urban'>,
   physics: Record<string, string> = {},

@@ -43,7 +43,15 @@ export async function invoke<T = unknown>(
       bilingual('请在桌面软件中执行此操作', 'This operation requires the desktop backend.'),
     );
   if (caseWrites.has(command)) {
-    const dirs = Array.isArray(args.dirs) ? args.dirs : [];
+    // `set_pft_parameters_batch` nests its case directories in `changes[].dirs`.
+    const nested = Array.isArray(args.changes)
+      ? args.changes.flatMap((change) =>
+          change && typeof change === 'object' && Array.isArray((change as { dirs?: unknown }).dirs)
+            ? (change as { dirs: unknown[] }).dirs
+            : [],
+        )
+      : [];
+    const dirs = [...(Array.isArray(args.dirs) ? args.dirs : []), ...nested];
     const busy = dirs.filter((dir) => typeof dir === 'string' && runningTargets().has(dir));
     if (busy.length)
       throw new Error(

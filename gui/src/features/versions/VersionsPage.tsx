@@ -21,6 +21,7 @@ import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
+import { appLocale } from '../history/history';
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
@@ -1218,7 +1219,9 @@ export default function VersionsPage() {
             {references.map((r) => (
               <p key={r.operation_id}>
                 {r.kind} · {r.status} · {r.case_path ?? r.host} · {r.revision ?? '—'} ·{' '}
-                {r.time_ms == null ? '—' : new Date(r.time_ms).toLocaleString()}
+                {r.time_ms == null
+                  ? '—'
+                  : new Date(r.time_ms).toLocaleString(appLocale(state.language === 'en'))}
               </p>
             ))}
             <Button onClick={() => navigate('history')}>{t('完整历史', 'Full history')}</Button>

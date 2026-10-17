@@ -1,3 +1,4 @@
+import { utcSeconds } from '../../lib/dates';
 export interface ParameterContext {
   name: string;
   id: string;
@@ -67,7 +68,7 @@ export function calibrationWindows(
   validationFrom: string,
   validationTo: string,
 ) {
-  const values = [from, to, validationFrom, validationTo].map((v) => Date.parse(`${v}Z`) / 1000);
+  const values = [from, to, validationFrom, validationTo].map(utcSeconds);
   if (
     values.some((v) => !Number.isFinite(v)) ||
     values[0] >= values[1] ||

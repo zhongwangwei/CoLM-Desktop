@@ -4,7 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import type { VersionRef } from './types';
 
-function opening(chosenVersion: VersionRef | null = null) {
+function opening(chosenVersion: VersionRef | null = null, recentFails = false) {
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
     path.pathname,
@@ -34,6 +34,7 @@ function opening(chosenVersion: VersionRef | null = null) {
     },
   };
   const reads: VersionRef[] = [];
+  const notices: string[] = [];
   const bindings: Record<string, VersionRef> = {
     '/soil': soil,
     '/official': { id: 'official', revision: 1 },
@@ -53,6 +54,7 @@ function opening(chosenVersion: VersionRef | null = null) {
       case 'list_cases':
         return [];
       case 'save_recent':
+        if (recentFails) throw new Error('recent store is read-only');
         return;
       default:
         throw new Error(`Unexpected command: ${command}`);
@@ -64,6 +66,7 @@ function opening(chosenVersion: VersionRef | null = null) {
     pendingOpen: { current: null },
     blocked: () => null,
     update: (patch: object) => Object.assign(current.current, patch),
+    notify: (message: string) => notices.push(message),
     invoke,
     invokeJson: invoke,
     bilingual: (_zh: string, en: string) => en,
@@ -75,7 +78,7 @@ function opening(chosenVersion: VersionRef | null = null) {
   const openCase = new Function(...Object.keys(context), `${code}; return callback;`)(
     ...Object.values(context),
   ) as (dir: string, tab?: 'settings' | 'results') => Promise<{ binding: { version: VersionRef } }>;
-  return { openCase, current, reads, official, soil };
+  return { openCase, current, reads, notices, official, soil };
 }
 
 test('openCase respects an explicitly chosen revision over a saved custom binding', async () => {
@@ -122,4 +125,13 @@ test('openCase respects explicit custom and official choices for either saved bi
     assert.deepEqual(app.reads, [chosen, chosen]);
     assert.deepEqual(app.current.current.chosenVersion, chosen);
   }
+});
+
+test('openCase still reports success when only remembering the project root fails', async () => {
+  const { openCase, current, notices } = opening(null, true);
+  const opened = await openCase('/soil', 'results');
+  assert.equal(opened.binding.version.id, 'soil');
+  assert.equal((current.current as { route?: string }).route, 'case');
+  assert.equal(current.current.busy, false);
+  assert.deepEqual(notices, ['Error: recent store is read-only']);
 });

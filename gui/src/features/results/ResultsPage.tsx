@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import { timeTicks } from './time-ticks';
+import { utcSeconds } from '../../lib/dates';
 import 'uplot/dist/uPlot.min.css';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
@@ -321,7 +322,7 @@ export default function ResultsPage({
         const records = Number(spinup);
         if (!Number.isInteger(records) || records < 0)
           throw new Error('Invalid skipped record count');
-        const parse = (value: string) => (value ? Date.parse(`${value}Z`) / 1000 : null);
+        const parse = (value: string) => (value ? utcSeconds(value) : null);
         const start = parse(from),
           end = parse(to);
         if (
@@ -377,7 +378,7 @@ export default function ResultsPage({
   const windowArgs = useCallback(() => {
     const parse = (value: string) => {
       if (!value) return null;
-      const n = Date.parse(`${value}Z`) / 1000;
+      const n = utcSeconds(value);
       if (!Number.isFinite(n)) throw new Error('Invalid UTC date');
       return n;
     };

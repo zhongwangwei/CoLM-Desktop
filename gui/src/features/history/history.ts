@@ -1,5 +1,6 @@
 import { download as exportText } from '../../lib/utils';
 import { bilingual } from '../../lib/bilingual';
+import { utcSeconds } from '../../lib/dates';
 import type { AppState, CaseEntry, HistoryOperation } from '../../lib/types';
 export type Filter = {
   query: string;
@@ -123,14 +124,8 @@ export function comparisonArgs(a: string, b: string, input: ComparisonInput) {
     throw new Error(bilingual('真实观测与变量必填', 'Observations and variable required'));
   const time = (value: string) => {
     if (!value) return null;
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2})?$/.test(value))
-      throw new Error('Invalid UTC date');
-    const seconds = Date.parse(`${value}Z`) / 1000;
-    if (
-      !Number.isSafeInteger(seconds) ||
-      new Date(seconds * 1000).toISOString().slice(0, value.length) !== value
-    )
-      throw new Error('Invalid UTC date');
+    const seconds = utcSeconds(value);
+    if (!Number.isSafeInteger(seconds)) throw new Error('Invalid UTC date');
     return seconds;
   };
   const from = time(input.from),

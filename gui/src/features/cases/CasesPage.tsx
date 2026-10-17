@@ -12,7 +12,13 @@ import {
   Notice,
   Advanced,
 } from '../../components/ui';
-import { isCaseField, displayLiteral, effectiveModelFields, type SchemaField } from './case-model';
+import {
+  isCaseField,
+  displayLiteral,
+  effectiveModelFields,
+  selectChoice,
+  type SchemaField,
+} from './case-model';
 import { compatibleKernel } from '../runs/run-model';
 import {
   caseDate,
@@ -992,6 +998,11 @@ export default function CasesPage() {
         </Card>
       </div>
     );
+  const choice = (f: SchemaField) =>
+    selectChoice(
+      values[f.name] ?? '',
+      optionState(f.name)?.allowed_values.length ? optionState(f.name)!.allowed_values : f.values,
+    );
   const render = (f: SchemaField) => (
     <Field
       key={f.name}
@@ -1015,14 +1026,11 @@ export default function CasesPage() {
         </Select>
       ) : fieldInputOptions(f.name, f.kind, f.values).length ? (
         <Select
-          value={values[f.name] ?? ''}
+          value={choice(f).value}
           disabled={editingDisabled || optionDisabled(f.name)}
           onChange={(e) => setValues((x) => ({ ...x, [f.name]: e.target.value }))}
         >
-          {(optionState(f.name)?.allowed_values.length
-            ? optionState(f.name)!.allowed_values
-            : f.values
-          ).map((v) => (
+          {choice(f).options.map((v) => (
             <option key={v} value={v}>
               {f.name === 'DEF_HIST_FREQ'
                 ? (outputLabels[v] ?? v)
