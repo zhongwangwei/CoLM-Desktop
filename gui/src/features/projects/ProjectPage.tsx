@@ -8,7 +8,12 @@ import './project-version.css';
 import ProjectBatchRun from './ProjectBatchRun';
 import NavIcon from '../../components/NavIcon';
 import type { Site } from '../cases/case-model';
-import type { CaseEntry, FrozenRevision } from '../../lib/types';
+import type { CaseEntry, FrozenRevision, VersionRef } from '../../lib/types';
+type VersionDeleteReport = {
+  deleted: VersionRef[];
+  failed: { version: VersionRef; reason: string }[];
+  removed: string[];
+};
 import {
   RECENT_PROJECTS_KEY,
   recentProjectRoots,
@@ -17,14 +22,19 @@ import {
 } from './project-model';
 
 export default function ProjectPage() {
-  const { state, update, navigate, openCase } = useApp();
+  const { state, update, navigate, openCase, refreshVersions } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [roots, setRoots] = useState<string[]>([]),
     [ready, setReady] = useState(!hasBackend()),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
-    [versionChooser, setVersionChooser] = useState(false);
+    [versionChooser, setVersionChooser] = useState(false),
+    [pendingDelete, setPendingDelete] = useState<{
+      title: string;
+      versions: VersionRef[];
+    } | null>(null),
+    [deleteReport, setDeleteReport] = useState<VersionDeleteReport | null>(null);
   const createdBatch = !!state.projectCasesOpen && state.projectRunSettings?.root === state.root,
     savedView = state.projectView?.root === state.root ? state.projectView : undefined,
     page = state.projectCasesOpen
@@ -153,6 +163,48 @@ export default function ProjectPage() {
       return { version: version.version, name: version.name };
     });
   }
+  const selectedId = state.versionRef.id;
+  // Older official revisions are app rebuilds nobody can choose any more; they hold source snapshots.
+  const oldOfficial = state.versions
+    .filter(
+      (version) =>
+        version.version.id === 'official' &&
+        version.version.revision !== official?.version.revision &&
+        versionKey(version) !== JSON.stringify(state.versionRef),
+    )
+    .map((version) => version.version);
+  const revisionsOf = (id: string) =>
+    state.versions
+      .filter((version) => version.version.id === id)
+      .map((version) => version.version)
+      .sort((a, b) => b.revision - a.revision);
+  function askDelete(version: FrozenRevision) {
+    if (version.version.id === 'official' || version.version.id === selectedId) return;
+    setDeleteReport(null);
+    setPendingDelete({ title: version.name, versions: revisionsOf(version.version.id) });
+  }
+  function askCleanup() {
+    if (!oldOfficial.length) return;
+    setDeleteReport(null);
+    setPendingDelete({
+      title: t('旧的官方版本', 'Older official revisions'),
+      versions: oldOfficial,
+    });
+  }
+  async function deleteVersions() {
+    if (!pendingDelete) return;
+    const target = pendingDelete;
+    return work(async () => {
+      const report = await invokeJson<VersionDeleteReport>('model_delete', {
+        versions: target.versions,
+      });
+      await refreshVersions();
+      if (!active.current) return report;
+      setPendingDelete(null);
+      setDeleteReport(report);
+      return report;
+    });
+  }
   async function loadProject(root: string) {
     const cases = await invoke<CaseEntry[]>('list_cases', { root });
     const next = rememberProject(shownRoots, root);
@@ -240,6 +292,8 @@ export default function ProjectPage() {
   function changeVersionChooser(open: boolean) {
     if (!lock.current && !state.busy) {
       setError('');
+      setPendingDelete(null);
+      setDeleteReport(null);
       setVersionChooser(open);
     }
   }
@@ -349,22 +403,62 @@ export default function ProjectPage() {
         ]
       : []),
   ];
-  const versionActions: UiAction[] = [
-    ...versionRows.map(({ version }) => ({
-      id: `project-version:${versionKey(version)}`,
-      label: `${version.name} · r${version.version.revision}`,
-      kind: 'click' as const,
-      enabled: versionEnabled,
-      run: () => chooseVersion(versionKey(version)),
-    })),
-    {
-      id: 'project-version-close',
-      label: t('关闭', 'Close'),
-      kind: 'click',
-      enabled: versionEnabled,
-      run: () => changeVersionChooser(false),
-    },
-  ];
+  const versionActions: UiAction[] = pendingDelete
+    ? [
+        {
+          id: 'project-version-delete-confirm',
+          label: t('确认删除', 'Confirm deletion'),
+          kind: 'commit',
+          enabled: versionEnabled,
+          run: deleteVersions,
+        },
+        {
+          id: 'project-version-delete-cancel',
+          label: t('取消', 'Cancel'),
+          kind: 'click',
+          enabled: versionEnabled,
+          run: () => setPendingDelete(null),
+        },
+      ]
+    : [
+        ...versionRows.map(({ version }) => ({
+          id: `project-version:${versionKey(version)}`,
+          label: `${version.name} · r${version.version.revision}`,
+          kind: 'click' as const,
+          enabled: versionEnabled,
+          run: () => chooseVersion(versionKey(version)),
+        })),
+        ...versionRows
+          .filter(({ version }) => version.version.id !== 'official')
+          .map(({ version }) => ({
+            id: `project-version-delete:${version.version.id}`,
+            label: `${t('删除版本', 'Delete version')} ${version.name}`,
+            kind: 'click' as const,
+            enabled: versionEnabled && version.version.id !== selectedId,
+            run: () => askDelete(version),
+          })),
+        ...(oldOfficial.length
+          ? [
+              {
+                id: 'project-version-cleanup-official',
+                label: t(
+                  `清理旧的官方版本（${oldOfficial.length} 个）`,
+                  `Clean up older official revisions (${oldOfficial.length})`,
+                ),
+                kind: 'click' as const,
+                enabled: versionEnabled,
+                run: askCleanup,
+              },
+            ]
+          : []),
+        {
+          id: 'project-version-close',
+          label: t('关闭', 'Close'),
+          kind: 'click',
+          enabled: versionEnabled,
+          run: () => changeVersionChooser(false),
+        },
+      ];
   usePageContract(
     {
       title: versionChooser
@@ -545,39 +639,111 @@ export default function ProjectPage() {
       >
         {error && <Notice tone="error">{error}</Notice>}
         {busy && <Notice>{t('正在读取版本…', 'Loading the revision…')}</Notice>}
-        <div className="project-version-list">
-          {versionRows.length ? (
-            versionRows.map(({ version, depth }) => (
-              <Button
-                key={versionKey(version)}
-                className="project-version-option"
-                variant="ghost"
-                style={{ paddingLeft: `${1 + depth * 1.5}rem` }}
-                disabled={!versionEnabled}
-                aria-pressed={versionKey(version) === JSON.stringify(state.versionRef)}
-                onClick={() => void chooseVersion(versionKey(version)).catch(() => {})}
-              >
-                <span>
-                  <strong>
-                    {version.version.id === 'official' ? t('官方版', 'Official') : version.name}
-                  </strong>
-                  <span className="muted">
-                    {version.version.id === 'official'
-                      ? t('随软件提供，不能修改', 'Bundled with the app; read-only')
-                      : version.note}
-                  </span>
-                </span>
-                <span>
-                  {versionKey(version) === JSON.stringify(state.versionRef)
-                    ? t('当前选择', 'Selected')
-                    : '›'}
-                </span>
+        {pendingDelete ? (
+          <div className="project-version-delete">
+            <Notice tone="warning">
+              {t(
+                `将永久删除“${pendingDelete.title}”的 ${pendingDelete.versions.length} 个版本修订，以及只被它们使用的源码快照。使用这些版本的历史记录仍在时不会删除，算例下次打开会改用最新官方版。`,
+                `Permanently delete ${pendingDelete.versions.length} revisions of “${pendingDelete.title}” and source snapshots only they use. Revisions still named by history records are kept; cases using them open with the latest official model.`,
+              )}
+            </Notice>
+            <div className="button-row">
+              <Button disabled={!versionEnabled} onClick={() => setPendingDelete(null)}>
+                {t('取消', 'Cancel')}
               </Button>
-            ))
-          ) : (
-            <p className="muted">{t('暂无可选择的版本。', 'No saved revisions are available.')}</p>
-          )}
-        </div>
+              <Button
+                variant="danger"
+                disabled={!versionEnabled}
+                onClick={() => void deleteVersions().catch(() => {})}
+              >
+                {busy ? t('正在删除…', 'Deleting…') : t('确认删除', 'Confirm deletion')}
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {deleteReport && (
+              <Notice tone={deleteReport.failed.length ? 'warning' : 'success'}>
+                {t(
+                  `已删除 ${deleteReport.deleted.length} 个版本修订，清理 ${deleteReport.removed.length - deleteReport.deleted.length} 个源码快照；保留 ${deleteReport.failed.length} 个。`,
+                  `Deleted ${deleteReport.deleted.length} revisions and ${deleteReport.removed.length - deleteReport.deleted.length} source snapshots; kept ${deleteReport.failed.length}.`,
+                )}
+                {[...new Set(deleteReport.failed.map((failure) => failure.reason))].map(
+                  (reason) => (
+                    <span key={reason} className="project-version-delete-reason">
+                      {reason}
+                    </span>
+                  ),
+                )}
+              </Notice>
+            )}
+            <div className="project-version-list">
+              {versionRows.length ? (
+                versionRows.map(({ version, depth }) => (
+                  <div
+                    key={versionKey(version)}
+                    className="project-version-row"
+                    style={{ paddingLeft: `${depth * 1.5}rem` }}
+                  >
+                    <Button
+                      className="project-version-option"
+                      variant="ghost"
+                      disabled={!versionEnabled}
+                      aria-pressed={versionKey(version) === JSON.stringify(state.versionRef)}
+                      onClick={() => void chooseVersion(versionKey(version)).catch(() => {})}
+                    >
+                      <span>
+                        <strong>
+                          {version.version.id === 'official'
+                            ? t('官方版', 'Official')
+                            : version.name}
+                        </strong>
+                        <span className="muted">
+                          {version.version.id === 'official'
+                            ? t('随软件提供，不能修改', 'Bundled with the app; read-only')
+                            : version.note}
+                        </span>
+                      </span>
+                      <span>
+                        {versionKey(version) === JSON.stringify(state.versionRef)
+                          ? t('当前选择', 'Selected')
+                          : '›'}
+                      </span>
+                    </Button>
+                    {version.version.id !== 'official' && (
+                      <Button
+                        variant="ghost"
+                        className="project-version-delete-button"
+                        disabled={!versionEnabled || version.version.id === selectedId}
+                        title={
+                          version.version.id === selectedId
+                            ? t('先选择其他版本再删除', 'Choose another version before deleting')
+                            : undefined
+                        }
+                        aria-label={`${t('删除版本', 'Delete version')} ${version.name}`}
+                        onClick={() => askDelete(version)}
+                      >
+                        {t('删除', 'Delete')}
+                      </Button>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p className="muted">
+                  {t('暂无可选择的版本。', 'No saved revisions are available.')}
+                </p>
+              )}
+            </div>
+            {oldOfficial.length > 0 && (
+              <Button disabled={!versionEnabled} onClick={askCleanup}>
+                {t(
+                  `清理旧的官方版本（${oldOfficial.length} 个）`,
+                  `Clean up older official revisions (${oldOfficial.length})`,
+                )}
+              </Button>
+            )}
+          </>
+        )}
       </Dialog>
       <section
         className={`project-task-section ${modelChosen ? '' : 'awaiting-model'}`}

@@ -67,6 +67,31 @@ pub struct Server {
     /// 原样追加的调度指令选项，每行一条，例如 `--constraint=cpu`。
     #[serde(default)]
     pub directives: Vec<String>,
+    /// 新建模拟时预填的项目目录（服务器路径）；空表示沿用工作目录。
+    #[serde(default)]
+    pub project_dir: String,
+    /// 新建模拟时预填的地表数据目录（服务器路径）；空表示不预填。
+    #[serde(default)]
+    pub rawdata_dir: String,
+    /// 新建模拟时预填的 Runtime 数据目录。
+    #[serde(default)]
+    pub runtime_dir: String,
+    /// 新建模拟时预填的强迫场数据路径。
+    #[serde(default)]
+    pub forcing_dir: String,
+}
+
+/// 本机新建模拟时预填的数据路径，字段含义同 [`Server`] 的同名字段。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataDefaults {
+    #[serde(default)]
+    pub project_dir: String,
+    #[serde(default)]
+    pub rawdata_dir: String,
+    #[serde(default)]
+    pub runtime_dir: String,
+    #[serde(default)]
+    pub forcing_dir: String,
 }
 
 fn default_auth() -> String {
@@ -125,6 +150,10 @@ fn default_scheduler() -> String {
 pub struct RemoteConfig {
     #[serde(default)]
     pub servers: Vec<Server>,
+    /// 本机的默认数据路径。保存时缺省表示沿用文件里已有的值，
+    /// 这样只编辑服务器列表的界面不会把它清掉。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local: Option<DataDefaults>,
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -256,8 +285,12 @@ pub fn remote_config(app: tauri::AppHandle) -> Result<RemoteConfig, String> {
 
 #[tauri::command]
 pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result<(), String> {
+    let mut config = config;
     validate(&config)?;
     let path = config_path(&app)?;
+    if config.local.is_none() {
+        config.local = read_remote_config(&path)?.local;
+    }
     std::fs::write(
         &path,
         serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
@@ -275,6 +308,95 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
             })
         });
     Ok(())
+}
+
+/// 新建模拟用过的数据路径写回所选计算资源（`host` 为空即本机）；空值不覆盖已有默认。
+pub(crate) fn remember_data_paths(
+    config: &mut RemoteConfig,
+    host: Option<&str>,
+    paths: [Option<&str>; 4],
+) -> Result<bool, String> {
+    let [project, rawdata, runtime, forcing] = paths;
+    let host = host.map(str::trim).filter(|host| !host.is_empty());
+    for value in paths.into_iter().flatten() {
+        let value = value.trim();
+        let absolute = if host.is_some() {
+            value.starts_with('/')
+        } else {
+            std::path::Path::new(value).is_absolute()
+        };
+        if !value.is_empty() && (!absolute || value.contains(['\n', '\r', '\0'])) {
+            return Err(format!("默认数据路径要是绝对路径：{value:?}"));
+        }
+    }
+    let local = config.local.get_or_insert_with(DataDefaults::default);
+    let (project_dir, rawdata_dir, runtime_dir, forcing_dir) = match host {
+        Some(host) => {
+            let server = config
+                .servers
+                .iter_mut()
+                .find(|server| server.host == host)
+                .ok_or_else(|| format!("计算资源里没有服务器 {host}"))?;
+            (
+                &mut server.project_dir,
+                &mut server.rawdata_dir,
+                &mut server.runtime_dir,
+                &mut server.forcing_dir,
+            )
+        }
+        None => (
+            &mut local.project_dir,
+            &mut local.rawdata_dir,
+            &mut local.runtime_dir,
+            &mut local.forcing_dir,
+        ),
+    };
+    let mut changed = false;
+    for (slot, value) in [
+        (project_dir, project),
+        (rawdata_dir, rawdata),
+        (runtime_dir, runtime),
+        (forcing_dir, forcing),
+    ] {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            if slot != value {
+                *slot = value.to_owned();
+                changed = true;
+            }
+        }
+    }
+    Ok(changed)
+}
+
+#[tauri::command]
+pub fn remote_remember_data_paths(
+    app: tauri::AppHandle,
+    host: Option<String>,
+    project: Option<String>,
+    rawdata: Option<String>,
+    runtime: Option<String>,
+    forcing: Option<String>,
+) -> Result<bool, String> {
+    let path = config_path(&app)?;
+    let mut config = read_remote_config(&path)?;
+    let changed = remember_data_paths(
+        &mut config,
+        host.as_deref(),
+        [
+            project.as_deref(),
+            rawdata.as_deref(),
+            runtime.as_deref(),
+            forcing.as_deref(),
+        ],
+    )?;
+    if changed {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(changed)
 }
 
 /// ssh 配置里的主机别名（不含通配符），给“选择服务器”用；只读别名，不读别的。
@@ -400,6 +522,7 @@ fn run_record(case: &str) -> Result<Option<(Value, bool, String)>, String> {
             let connection = server_from_record(&RemoteConfig::default(), &record)?;
             validate(&RemoteConfig {
                 servers: vec![connection],
+                local: None,
             })?;
             if !["job", "engine", "remote_case"].iter().all(|key| {
                 record[*key]
@@ -540,6 +663,7 @@ pub(crate) fn server_from_record(config: &RemoteConfig, record: &Value) -> Resul
         serde_json::from_value(fields).map_err(|_| "远程作业认证信息不合法")?;
     validate(&RemoteConfig {
         servers: vec![connection.clone()],
+        local: None,
     })?;
     let mut server = saved.unwrap_or_else(|| connection.clone());
     server.username = connection.username;
@@ -797,6 +921,7 @@ fn probe_args(server: &Server) -> Result<(Vec<String>, Option<String>), String> 
     validate_connection(server)?;
     let configuration_error = validate(&RemoteConfig {
         servers: vec![server.clone()],
+        local: None,
     })
     .err();
     let mut command = vec!["remote-probe".into(), "--host".into(), server.host.clone()];
@@ -817,6 +942,7 @@ fn engine_resource_args(
 ) -> Result<Vec<String>, String> {
     validate(&RemoteConfig {
         servers: vec![server.clone()],
+        local: None,
     })?;
     let mut args = vec![
         command.into(),
@@ -1090,6 +1216,7 @@ fn run_server_overrides(
     }
     validate(&RemoteConfig {
         servers: vec![server.clone()],
+        local: None,
     })?;
     Ok(server)
 }
@@ -1428,6 +1555,7 @@ pub(crate) fn study_server(config: &RemoteConfig, study: &str) -> Result<Server,
             .ok_or("请恢复待核对研究的服务器连接设置")?;
         validate(&RemoteConfig {
             servers: vec![server.clone()],
+            local: None,
         })?;
         return Ok(server);
     }

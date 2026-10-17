@@ -44,6 +44,21 @@ import {
 } from './history';
 import './history-page.css';
 type Detail = HistoryDetail;
+type ClearPlan = {
+  records: number;
+  unconfirmed: number;
+  unconfirmedRemote: number;
+  cases: { path: string; bytes: number }[];
+  remoteCases: number;
+  skipped: string[];
+};
+type ClearResult = { removed: number; kept: number; deleted: string[]; failed: string[] };
+const sizeText = (bytes: number) =>
+  bytes >= 1024 ** 3
+    ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
+    : bytes >= 1024 ** 2
+      ? `${(bytes / 1024 ** 2).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(bytes / 1024))} KB`;
 function DetailRows({ rows, en }: { rows: HistoryRow[]; en: boolean }) {
   return (
     <dl>
@@ -100,6 +115,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     plan: HistoryDeletePlan | null;
   } | null>(null);
   const [deleteName, setDeleteName] = useState('');
+  const [clearPlan, setClearPlan] = useState<ClearPlan | null>(null),
+    [clearCases, setClearCases] = useState(false),
+    [clearUnconfirmed, setClearUnconfirmed] = useState(false),
+    [clearOutcome, setClearOutcome] = useState<ClearResult | null>(null);
   const deletionPath = deletion?.wholeCase ? deletion.plan?.casePath : deletion?.plan?.path;
   const directoryName =
     deletionPath
@@ -220,6 +239,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       setComparisonResult(null);
       setResult(null);
     }
+  }
+  function closeDetails() {
+    setGroup(null);
+    setDetail(null);
+    setResult(null);
+    setCompare('');
+    setVariables([]);
+    setComparisonResult(null);
   }
   async function showItem(item: HistoryOperation) {
     setGroup(item.run_group ? item : null);
@@ -359,6 +386,27 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setVariables([]);
     setComparisonResult(null);
     setResult(null);
+    setApplied((current) => ({ ...current }));
+  }
+  async function openClear() {
+    const plan = await invokeJson<ClearPlan>('history_clear_plan', {});
+    setClearCases(false);
+    setClearUnconfirmed(false);
+    setClearOutcome(null);
+    setClearPlan(plan);
+  }
+  async function clearHistory() {
+    if (!clearPlan) return;
+    const result = await invokeJson<ClearResult>('history_clear', {
+      cases: clearCases ? clearPlan.cases.map((item) => item.path) : [],
+      unconfirmed: clearUnconfirmed,
+    });
+    for (const path of result.deleted)
+      update((current) => historyStateAfterDirectoryDeletion(current, path, undefined));
+    closeDetails();
+    setClearPlan(null);
+    setClearOutcome(result);
+    setOffset(0);
     setApplied((current) => ({ ...current }));
   }
   async function exportAll(format: 'csv' | 'json') {
@@ -551,6 +599,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       kind: 'click',
       enabled: !busy && offset > 0,
       run: () => setOffset(Math.max(0, offset - 30)),
+    },
+    {
+      id: 'history-clear',
+      label: t('清空历史记录', 'Clear history'),
+      kind: 'click',
+      enabled: !busy,
+      run: () => action(openClear),
     },
     {
       id: 'history-next',
@@ -865,6 +920,146 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           </div>
         </Dialog>
       )}
+      {clearPlan && (
+        <Dialog
+          open
+          title={t('清空历史记录', 'Clear history')}
+          showClose={false}
+          onOpenChange={(open) => {
+            if (!open && !busy) setClearPlan(null);
+          }}
+        >
+          <p>
+            {t(
+              `将移除 ${clearPlan.records} 条已结束的历史记录。`,
+              `Remove ${clearPlan.records} finished history records.`,
+            )}
+          </p>
+          {clearPlan.unconfirmed > 0 && (
+            <>
+              <label className="history-clear-cases">
+                <input
+                  type="checkbox"
+                  disabled={busy}
+                  checked={clearUnconfirmed}
+                  onChange={(event) => setClearUnconfirmed(event.target.checked)}
+                />
+                {t(
+                  `同时移除 ${clearPlan.unconfirmed} 条未确认结束的记录`,
+                  `Also remove ${clearPlan.unconfirmed} records whose completion was never confirmed`,
+                )}
+              </label>
+              <p className="muted">
+                {t(
+                  '多是软件关闭或崩溃时中断的任务。移除只是不再显示，不会停止或取消任何任务；',
+                  'Mostly work interrupted when the app closed or crashed. Removing only hides them and never stops or cancels anything; ',
+                )}
+                {clearPlan.unconfirmedRemote > 0 &&
+                  t(
+                    `其中 ${clearPlan.unconfirmedRemote} 条在服务器上，作业仍可在算例的运行面板里查询和取回。`,
+                    `${clearPlan.unconfirmedRemote} ran on servers; their jobs can still be checked and fetched from the case run panel.`,
+                  )}
+              </p>
+            </>
+          )}
+          {clearPlan.cases.length > 0 ? (
+            <>
+              <label className="history-clear-cases">
+                <input
+                  type="checkbox"
+                  disabled={busy}
+                  checked={clearCases}
+                  onChange={(event) => setClearCases(event.target.checked)}
+                />
+                {t(
+                  `同时永久删除这些记录对应的 ${clearPlan.cases.length} 个本机算例文件夹（共 ${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))}）`,
+                  `Also permanently delete the ${clearPlan.cases.length} local case folders of these records (${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))} in total)`,
+                )}
+              </label>
+              {clearCases && (
+                <Notice tone="warning">
+                  {t(
+                    '算例文件夹内的设置、运行结果和全部文件都会删除，无法恢复；文件夹外引用的原始数据不受影响。',
+                    'Settings, outputs and every file inside these folders are deleted and cannot be recovered; input data referenced outside them is preserved.',
+                  )}
+                </Notice>
+              )}
+              <ul className="history-clear-list">
+                {clearPlan.cases.map((item) => (
+                  <li key={item.path}>
+                    <span>{item.path}</span>
+                    <span className="muted">{sizeText(item.bytes)}</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="muted">
+              {t(
+                '这些记录对应的本机算例文件夹已不存在，或不是可验证的算例目录；只移除记录。',
+                'No verifiable local case folders remain for these records; only records are removed.',
+              )}
+            </p>
+          )}
+          {clearPlan.remoteCases > 0 && (
+            <p className="muted">
+              {t(
+                `${clearPlan.remoteCases} 个服务器算例不会被删除，只移除记录。`,
+                `${clearPlan.remoteCases} server cases are not deleted; only their records are removed.`,
+              )}
+            </p>
+          )}
+          {clearPlan.skipped.length > 0 && (
+            <Advanced
+              title={t(
+                `保留的文件夹（${clearPlan.skipped.length}）`,
+                `Kept folders (${clearPlan.skipped.length})`,
+              )}
+            >
+              <ul className="history-clear-list">
+                {clearPlan.skipped.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            </Advanced>
+          )}
+          {error && <Notice tone="error">{error}</Notice>}
+          <div className="button-row">
+            <Button disabled={busy} onClick={() => setClearPlan(null)}>
+              {t('取消', 'Cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              disabled={
+                busy ||
+                (!clearPlan.records &&
+                  !(clearCases && clearPlan.cases.length) &&
+                  !(clearUnconfirmed && clearPlan.unconfirmed))
+              }
+              onClick={() => run(clearHistory)}
+            >
+              {busy
+                ? t('正在清空…', 'Clearing…')
+                : clearCases
+                  ? t('清空记录并删除文件夹', 'Clear records and delete folders')
+                  : t('确认清空记录', 'Confirm clearing records')}
+            </Button>
+          </div>
+        </Dialog>
+      )}
+      {clearOutcome && (
+        <Notice tone={clearOutcome.failed.length ? 'warning' : 'success'}>
+          {t(
+            `已移除 ${clearOutcome.removed} 条记录，删除 ${clearOutcome.deleted.length} 个算例文件夹；保留 ${clearOutcome.kept} 条记录。`,
+            `Removed ${clearOutcome.removed} records and deleted ${clearOutcome.deleted.length} case folders; kept ${clearOutcome.kept} records.`,
+          )}
+          {clearOutcome.failed.map((failure) => (
+            <span key={failure} className="history-clear-failure">
+              {failure}
+            </span>
+          ))}
+        </Notice>
+      )}
       <header className="history-heading">
         <div>
           <h1>{t('历史记录', 'History')}</h1>
@@ -973,470 +1168,448 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         )}
       </Card>
       {error && <Notice tone="error">{error}</Notice>}
-      <div className="history-workbench">
-        <section className="history-list" aria-label={t('历史记录列表', 'History records')}>
-          <div className="history-list-toolbar">
-            <span className="muted">
-              {busy ? t('正在读取…', 'Loading…') : `${page.total} ${t('条记录', 'records')}`}
-            </span>
-            <div className="button-row">
-              {(['csv', 'json'] as const).map((format) => (
-                <Button key={format} disabled={busy} onClick={() => run(() => exportAll(format))}>
-                  {t('导出', 'Export')} {format.toUpperCase()}
-                </Button>
-              ))}
-            </div>
-          </div>
-          <div
-            className="history-table-scroll"
-            tabIndex={0}
-            role="region"
-            aria-label={t('可滚动的记录表', 'Scrollable record table')}
-          >
-            <table className="history-table">
-              <thead>
-                <tr>
-                  {[
-                    t('时间', 'Time'),
-                    t('类型', 'Type'),
-                    t('对象 / 操作', 'Object / action'),
-                    t('状态', 'Status'),
-                    t('详情', 'Details'),
-                  ].map((label) => (
-                    <th key={label} scope="col">
-                      {label}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {page.items.map((item) => (
-                  <ContextMenu
-                    key={item.operation_id}
-                    items={deleteItems(item)}
-                    onOpenChange={(open) => menuChanged(item, open)}
-                  >
-                    <tr
-                      tabIndex={0}
-                      className={
-                        (group ?? detail?.operation)?.operation_id === item.operation_id
-                          ? 'is-selected'
-                          : ''
-                      }
-                    >
-                      <td>
-                        {item.time_ms == null ? (
-                          '—'
-                        ) : (
-                          <time dateTime={new Date(item.time_ms).toISOString()}>
-                            {new Date(item.time_ms).toLocaleDateString(appLocale(en))}
-                            <br />
-                            {new Date(item.time_ms).toLocaleTimeString(appLocale(en), {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </time>
-                        )}
-                      </td>
-                      <td>{historyKindLabel(item.kind, en)}</td>
-                      <td className="history-object" title={item.case_path ?? item.operation_id}>
-                        <strong>{historyObject(item, en)}</strong>
-                        {item.run_group && (
-                          <small>
-                            {item.run_group.members.length} {t('个站点', 'stations')} ·{' '}
-                            {item.run_group.run_id}
-                          </small>
-                        )}
-                        <small>
-                          {historyPhaseLabel(item.phase, en)} ·{' '}
-                          {item.host ??
-                            (item.location === 'remote'
-                              ? t('远程', 'Remote')
-                              : item.location === 'local'
-                                ? t('本机', 'Local')
-                                : t('位置未记录', 'Location not recorded'))}
-                        </small>
-                      </td>
-                      <td>
-                        <span
-                          className={`history-status history-status-${item.needs_reconciliation ? 'pending' : item.status}`}
-                        >
-                          {item.needs_reconciliation
-                            ? t('待核对', 'Needs reconciliation')
-                            : historyStatusLabel(item.status, en)}
-                        </span>
-                      </td>
-                      <td>
-                        <Button
-                          variant="ghost"
-                          aria-pressed={
-                            (group ?? detail?.operation)?.operation_id === item.operation_id
-                          }
-                          aria-label={`${t('查看记录', 'View record')} ${item.operation_id}`}
-                          disabled={busy}
-                          onClick={() => run(() => showItem(item))}
-                        >
-                          {t('查看', 'View')}
-                        </Button>
-                      </td>
-                    </tr>
-                  </ContextMenu>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {!page.items.length && !busy && (
-            <Notice>
-              {error
-                ? t('记录读取失败，请重试查询。', 'Unable to load records. Retry the search.')
-                : t(
-                    '无匹配记录。可调整筛选条件；尚未记录的操作不会显示。',
-                    'No matching records. Adjust the filters; unrecorded operations are not listed.',
-                  )}
-            </Notice>
-          )}
-          <div className="history-pagination">
-            <Button
-              disabled={busy || offset === 0}
-              onClick={() => setOffset(Math.max(0, offset - 30))}
-            >
-              {t('上一页', 'Previous')}
+      <section className="history-list" aria-label={t('历史记录列表', 'History records')}>
+        <div className="history-list-toolbar">
+          <span className="muted">
+            {busy ? t('正在读取…', 'Loading…') : `${page.total} ${t('条记录', 'records')}`}
+          </span>
+          <div className="button-row">
+            <Button variant="danger" disabled={busy} onClick={() => run(openClear)}>
+              {t('清空历史记录', 'Clear history')}
             </Button>
-            <span>
-              {page.total ? offset + 1 : 0}–{offset + page.items.length} / {page.total}
-            </span>
-            <Button
-              disabled={busy || offset + 30 >= page.total}
-              onClick={() => setOffset(offset + 30)}
-            >
-              {t('下一页', 'Next')}
-            </Button>
-          </div>
-        </section>
-        <aside className="history-inspector" aria-label={t('记录详情', 'Record details')}>
-          {group?.run_group && (
-            <Card title={historyObject(group, en)}>
-              <p>
-                {group.run_group.members.length} {t('个站点', 'stations')} ·{' '}
-                {group.run_group.run_id}
-              </p>
-              <p className="muted">
-                {t(
-                  '选择站点查看详情；右键站点可删除该站点的记录或文件夹。',
-                  'Select a station for details; right-click a station to delete its record or folder.',
-                )}
-              </p>
-              <div className="button-row">
-                {group.run_group.members.map((member) => (
-                  <ContextMenu
-                    key={member.operation_id}
-                    items={deleteItems(member)}
-                    onOpenChange={(open) => menuChanged(member, open)}
-                  >
-                    <Button
-                      disabled={busy}
-                      aria-pressed={detail?.operation.operation_id === member.operation_id}
-                      onClick={() => run(() => show(member.operation_id))}
-                    >
-                      {historyObject(member, en)} ·{' '}
-                      {member.needs_reconciliation
-                        ? t('待核对', 'Needs reconciliation')
-                        : historyStatusLabel(member.status, en)}
-                    </Button>
-                  </ContextMenu>
-                ))}
-              </div>
-              <Button disabled={busy} onClick={() => run(exportGroup)}>
-                {t('导出本次运行 JSON', 'Export this run JSON')}
+            {(['csv', 'json'] as const).map((format) => (
+              <Button key={format} disabled={busy} onClick={() => run(() => exportAll(format))}>
+                {t('导出', 'Export')} {format.toUpperCase()}
               </Button>
-            </Card>
-          )}
-          {detail ? (
-            <Card title={historyKindLabel(detail.operation.kind, en)}>
-              <h3>{historyObject(detail.operation, en)}</h3>
-              <span
-                className={`history-status history-status-${detail.operation.needs_reconciliation ? 'pending' : detail.operation.status}`}
+            ))}
+          </div>
+        </div>
+        <div
+          className="history-cards"
+          role="list"
+          aria-label={t('历史记录卡片', 'History record cards')}
+        >
+          {page.items.map((item) => {
+            const selected = (group ?? detail?.operation)?.operation_id === item.operation_id;
+            const status = item.needs_reconciliation ? 'pending' : item.status;
+            return (
+              <ContextMenu
+                key={item.operation_id}
+                items={deleteItems(item)}
+                onOpenChange={(open) => menuChanged(item, open)}
               >
-                {detail.operation.needs_reconciliation
-                  ? t('待核对', 'Needs reconciliation')
-                  : historyStatusLabel(detail.operation.status, en)}
-              </span>
-              <DetailRows
-                en={en}
-                rows={[
-                  { zh: '算例', en: 'Case', value: detail.operation.case_path },
-                  {
-                    zh: '版本',
-                    en: 'Version',
-                    value: detail.operation.version_id
-                      ? `${detail.operation.version_id} · r${detail.operation.revision ?? '—'}`
-                      : null,
-                  },
-                  {
-                    zh: '位置',
-                    en: 'Location',
-                    value: detail.operation.host ?? detail.operation.location,
-                  },
-                  {
-                    zh: '开始',
-                    en: 'Started',
-                    value:
-                      detail.operation.started_ms == null
-                        ? null
-                        : new Date(detail.operation.started_ms).toLocaleString(appLocale(en)),
-                  },
-                  {
-                    zh: '结束',
-                    en: 'Finished',
-                    value:
-                      detail.operation.finished_ms == null
-                        ? null
-                        : new Date(detail.operation.finished_ms).toLocaleString(appLocale(en)),
-                  },
-                  { zh: '操作标识', en: 'Operation ID', value: detail.operation.operation_id },
-                ]}
-              />
-              {detail.operation.needs_reconciliation && (
-                <Notice tone="warning">
-                  {t(
-                    '需核对真实进程状态，不能视为完成或自动重跑。',
-                    'Reconcile the real process before treating this record as complete or replaying it.',
+                <Button
+                  variant="ghost"
+                  role="listitem"
+                  className={`history-card history-card-${status} ${selected ? 'is-selected' : ''}`}
+                  aria-pressed={selected}
+                  aria-label={`${t('查看记录', 'View record')} ${historyObject(item, en)}`}
+                  title={item.case_path ?? item.operation_id}
+                  disabled={busy}
+                  onClick={() => run(() => showItem(item))}
+                >
+                  <span className="history-card-head">
+                    <span className="history-card-kind">{historyKindLabel(item.kind, en)}</span>
+                    <span className={`history-status history-status-${status}`}>
+                      {item.needs_reconciliation
+                        ? t('待核对', 'Needs reconciliation')
+                        : historyStatusLabel(item.status, en)}
+                    </span>
+                  </span>
+                  <strong className="history-card-title">{historyObject(item, en)}</strong>
+                  {item.run_group && (
+                    <span className="history-card-sub">
+                      {item.run_group.members.length} {t('个站点', 'stations')}
+                    </span>
                   )}
-                </Notice>
-              )}
-              <div className="button-row">
-                {detail.operation.case_path && (
-                  <Button
-                    variant="primary"
-                    disabled={busy}
-                    onClick={() =>
-                      run(async () => {
-                        await openCase(detail.operation.case_path!);
-                      })
-                    }
-                  >
-                    {t('打开算例', 'Open case')}
-                  </Button>
-                )}
-                {openPath && (
-                  <Button
-                    disabled={busy}
-                    onClick={() =>
-                      run(async () => {
-                        await invoke('open_path', { path: openPath });
-                      })
-                    }
-                  >
-                    {t('打开路径', 'Open path')}
-                  </Button>
-                )}
-                {detail.operation.version_id && detail.operation.revision && (
-                  <Button disabled={busy} onClick={() => run(openVersion)}>
-                    {t('打开版本', 'Open version')}
-                  </Button>
-                )}
-                {canReplay(detail.operation) && (
-                  <Button
-                    disabled={busy}
-                    onClick={() =>
-                      run(async () =>
-                        setResult(
-                          await invokeJson('history_replay', {
-                            id: detail.operation.operation_id,
-                          }),
-                        ),
-                      )
-                    }
-                  >
-                    {t('按记录设置重跑', 'Replay recorded settings')}
-                  </Button>
-                )}
-                <Button disabled={busy} onClick={() => run(exportRecord)}>
-                  {t('导出本条记录 JSON', 'Export this record JSON')}
-                </Button>
-              </div>
-              {result != null && (
-                <Notice>
-                  {t(
-                    '已返回重跑结果，可在下方完整记录中查看。',
-                    'Replay returned a result. Inspect it in the full record below.',
-                  )}
-                </Notice>
-              )}
-              <Advanced
-                title={t('依据、比较与完整记录', 'Evidence, comparison and full record')}
-                open={detailsOpen}
-                onOpenChange={setDetailsOpen}
-              >
-                <div className="card-grid">
-                  {historySections(detail, en).map((section) => (
-                    <Card key={section.en} title={t(section.zh, section.en)}>
-                      <DetailRows rows={section.rows} en={en} />
-                      {section.en === 'Source provenance' &&
-                        detail.operation.version_id &&
-                        detail.operation.revision && (
-                          <Button disabled={busy} onClick={() => run(openVersion)}>
-                            {t('查看源码版本', 'View source revision')}
-                          </Button>
-                        )}
-                    </Card>
-                  ))}
-                </div>
-                {detail.operation.needs_reconciliation && (
-                  <Notice tone="warning">
-                    {t(
-                      '记录尚待核对真实进程状态，不视为完成。',
-                      'The real process still needs reconciliation; this record is not treated as complete.',
+                  <span className="history-card-meta">
+                    {item.time_ms == null ? (
+                      t('时间未记录', 'Time not recorded')
+                    ) : (
+                      <time dateTime={new Date(item.time_ms).toISOString()}>
+                        {new Date(item.time_ms).toLocaleString(appLocale(en), {
+                          year: 'numeric',
+                          month: '2-digit',
+                          day: '2-digit',
+                          hour: '2-digit',
+                          minute: '2-digit',
+                        })}
+                      </time>
                     )}
-                  </Notice>
+                    <span>
+                      {historyPhaseLabel(item.phase, en)} ·{' '}
+                      {item.host ??
+                        (item.location === 'remote'
+                          ? t('远程', 'Remote')
+                          : item.location === 'local'
+                            ? t('本机', 'Local')
+                            : t('位置未记录', 'Location not recorded'))}
+                    </span>
+                  </span>
+                </Button>
+              </ContextMenu>
+            );
+          })}
+        </div>
+        {!page.items.length && !busy && (
+          <Notice>
+            {error
+              ? t('记录读取失败，请重试查询。', 'Unable to load records. Retry the search.')
+              : t(
+                  '无匹配记录。可调整筛选条件；尚未记录的操作不会显示。',
+                  'No matching records. Adjust the filters; unrecorded operations are not listed.',
                 )}
-                <h3>{t('依据文件', 'Evidence files')}</h3>
+          </Notice>
+        )}
+        <div className="history-pagination">
+          <Button
+            disabled={busy || offset === 0}
+            onClick={() => setOffset(Math.max(0, offset - 30))}
+          >
+            {t('上一页', 'Previous')}
+          </Button>
+          <span>
+            {page.total ? offset + 1 : 0}–{offset + page.items.length} / {page.total}
+          </span>
+          <Button
+            disabled={busy || offset + 30 >= page.total}
+            onClick={() => setOffset(offset + 30)}
+          >
+            {t('下一页', 'Next')}
+          </Button>
+        </div>
+      </section>
+      {(group || detail) && (
+        <Dialog
+          open
+          className="history-detail-dialog"
+          title={
+            detail
+              ? `${historyKindLabel(detail.operation.kind, en)} · ${historyObject(detail.operation, en)}`
+              : group
+                ? historyObject(group, en)
+                : ''
+          }
+          onOpenChange={(open) => {
+            if (!open && !busy && !deletion) closeDetails();
+          }}
+        >
+          <div className="history-inspector" aria-label={t('记录详情', 'Record details')}>
+            {group?.run_group && (
+              <Card title={historyObject(group, en)}>
+                <p>
+                  {group.run_group.members.length} {t('个站点', 'stations')} ·{' '}
+                  {group.run_group.run_id}
+                </p>
                 <p className="muted">
                   {t(
-                    '大型清单保留在所列文件中，本页仅显示记录中的路径和标识。',
-                    'Large manifests remain in the referenced files; this page displays their recorded paths and identities.',
+                    '选择站点查看详情；右键站点可删除该站点的记录或文件夹。',
+                    'Select a station for details; right-click a station to delete its record or folder.',
                   )}
                 </p>
                 <div className="button-row">
-                  {references.map((reference) => (
+                  {group.run_group.members.map((member) => (
+                    <ContextMenu
+                      key={member.operation_id}
+                      items={deleteItems(member)}
+                      onOpenChange={(open) => menuChanged(member, open)}
+                    >
+                      <Button
+                        disabled={busy}
+                        aria-pressed={detail?.operation.operation_id === member.operation_id}
+                        onClick={() => run(() => show(member.operation_id))}
+                      >
+                        {historyObject(member, en)} ·{' '}
+                        {member.needs_reconciliation
+                          ? t('待核对', 'Needs reconciliation')
+                          : historyStatusLabel(member.status, en)}
+                      </Button>
+                    </ContextMenu>
+                  ))}
+                </div>
+                <Button disabled={busy} onClick={() => run(exportGroup)}>
+                  {t('导出本次运行 JSON', 'Export this run JSON')}
+                </Button>
+              </Card>
+            )}
+            {detail ? (
+              <Card title={historyKindLabel(detail.operation.kind, en)}>
+                <h3>{historyObject(detail.operation, en)}</h3>
+                <span
+                  className={`history-status history-status-${detail.operation.needs_reconciliation ? 'pending' : detail.operation.status}`}
+                >
+                  {detail.operation.needs_reconciliation
+                    ? t('待核对', 'Needs reconciliation')
+                    : historyStatusLabel(detail.operation.status, en)}
+                </span>
+                <DetailRows
+                  en={en}
+                  rows={[
+                    { zh: '算例', en: 'Case', value: detail.operation.case_path },
+                    {
+                      zh: '版本',
+                      en: 'Version',
+                      value: detail.operation.version_id
+                        ? `${detail.operation.version_id} · r${detail.operation.revision ?? '—'}`
+                        : null,
+                    },
+                    {
+                      zh: '位置',
+                      en: 'Location',
+                      value: detail.operation.host ?? detail.operation.location,
+                    },
+                    {
+                      zh: '开始',
+                      en: 'Started',
+                      value:
+                        detail.operation.started_ms == null
+                          ? null
+                          : new Date(detail.operation.started_ms).toLocaleString(appLocale(en)),
+                    },
+                    {
+                      zh: '结束',
+                      en: 'Finished',
+                      value:
+                        detail.operation.finished_ms == null
+                          ? null
+                          : new Date(detail.operation.finished_ms).toLocaleString(appLocale(en)),
+                    },
+                    { zh: '操作标识', en: 'Operation ID', value: detail.operation.operation_id },
+                  ]}
+                />
+                {detail.operation.needs_reconciliation && (
+                  <Notice tone="warning">
+                    {t(
+                      '需核对真实进程状态，不能视为完成或自动重跑。',
+                      'Reconcile the real process before treating this record as complete or replaying it.',
+                    )}
+                  </Notice>
+                )}
+                <div className="button-row">
+                  {detail.operation.case_path && (
                     <Button
-                      key={reference.path}
+                      variant="primary"
                       disabled={busy}
                       onClick={() =>
                         run(async () => {
-                          await invoke('open_path', { path: reference.path });
+                          await openCase(detail.operation.case_path!);
                         })
                       }
                     >
-                      {t(reference.zh, reference.en)} · {reference.path}
+                      {t('打开算例', 'Open case')}
                     </Button>
-                  ))}
+                  )}
+                  {openPath && (
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () => {
+                          await invoke('open_path', { path: openPath });
+                        })
+                      }
+                    >
+                      {t('打开路径', 'Open path')}
+                    </Button>
+                  )}
+                  {detail.operation.version_id && detail.operation.revision && (
+                    <Button disabled={busy} onClick={() => run(openVersion)}>
+                      {t('打开版本', 'Open version')}
+                    </Button>
+                  )}
+                  {canReplay(detail.operation) && (
+                    <Button
+                      disabled={busy}
+                      onClick={() =>
+                        run(async () =>
+                          setResult(
+                            await invokeJson('history_replay', {
+                              id: detail.operation.operation_id,
+                            }),
+                          ),
+                        )
+                      }
+                    >
+                      {t('按记录设置重跑', 'Replay recorded settings')}
+                    </Button>
+                  )}
+                  <Button disabled={busy} onClick={() => run(exportRecord)}>
+                    {t('导出本条记录 JSON', 'Export this record JSON')}
+                  </Button>
                 </div>
-                <Field label={t('与实际历史比较', 'Compare real history')}>
-                  <Select
-                    disabled={busy}
-                    value={compare}
-                    onChange={(e) => changeComparedRun(e.target.value)}
-                  >
-                    <option value="">—</option>
-                    {page.items
-                      .flatMap((item) => item.run_group?.members ?? [item])
-                      .filter(
-                        (i) => i.operation_id !== detail.operation.operation_id && canCompare(i),
-                      )
-                      .map((i) => (
-                        <option key={i.operation_id} value={i.operation_id}>
-                          {i.kind} · {i.operation_id}
-                        </option>
-                      ))}
-                  </Select>
-                </Field>
-                <div className="form-grid">
-                  {(['obs', 'from', 'to', 'spinup'] as const).map((key) => (
-                    <Field key={key} label={comparisonLabels[key]}>
-                      <Input
+                {result != null && (
+                  <Notice>
+                    {t(
+                      '已返回重跑结果，可在下方完整记录中查看。',
+                      'Replay returned a result. Inspect it in the full record below.',
+                    )}
+                  </Notice>
+                )}
+                <Advanced
+                  title={t('依据、比较与完整记录', 'Evidence, comparison and full record')}
+                  open={detailsOpen}
+                  onOpenChange={setDetailsOpen}
+                >
+                  <div className="card-grid">
+                    {historySections(detail, en).map((section) => (
+                      <Card key={section.en} title={t(section.zh, section.en)}>
+                        <DetailRows rows={section.rows} en={en} />
+                        {section.en === 'Source provenance' &&
+                          detail.operation.version_id &&
+                          detail.operation.revision && (
+                            <Button disabled={busy} onClick={() => run(openVersion)}>
+                              {t('查看源码版本', 'View source revision')}
+                            </Button>
+                          )}
+                      </Card>
+                    ))}
+                  </div>
+                  {detail.operation.needs_reconciliation && (
+                    <Notice tone="warning">
+                      {t(
+                        '记录尚待核对真实进程状态，不视为完成。',
+                        'The real process still needs reconciliation; this record is not treated as complete.',
+                      )}
+                    </Notice>
+                  )}
+                  <h3>{t('依据文件', 'Evidence files')}</h3>
+                  <p className="muted">
+                    {t(
+                      '大型清单保留在所列文件中，本页仅显示记录中的路径和标识。',
+                      'Large manifests remain in the referenced files; this page displays their recorded paths and identities.',
+                    )}
+                  </p>
+                  <div className="button-row">
+                    {references.map((reference) => (
+                      <Button
+                        key={reference.path}
                         disabled={busy}
-                        type={
-                          key === 'spinup'
-                            ? 'number'
-                            : key === 'from' || key === 'to'
-                              ? 'datetime-local'
-                              : 'text'
+                        onClick={() =>
+                          run(async () => {
+                            await invoke('open_path', { path: reference.path });
+                          })
                         }
-                        min={key === 'spinup' ? 0 : undefined}
-                        value={comparisonInput[key]}
-                        onChange={(e) => changeComparison(key, e.target.value)}
-                      />
-                    </Field>
-                  ))}
-                  <Field label={comparisonLabels.variable}>
+                      >
+                        {t(reference.zh, reference.en)} · {reference.path}
+                      </Button>
+                    ))}
+                  </div>
+                  <Field label={t('与实际历史比较', 'Compare real history')}>
                     <Select
                       disabled={busy}
-                      value={comparisonInput.variable}
-                      onChange={(e) => changeComparison('variable', e.target.value)}
+                      value={compare}
+                      onChange={(e) => changeComparedRun(e.target.value)}
                     >
                       <option value="">—</option>
-                      {variables.map((v) => (
-                        <option key={v.name} value={v.name}>
-                          {(en ? v.label_en : v.label_zh) ?? v.name} {v.units ?? ''}
-                        </option>
-                      ))}
+                      {page.items
+                        .flatMap((item) => item.run_group?.members ?? [item])
+                        .filter(
+                          (i) => i.operation_id !== detail.operation.operation_id && canCompare(i),
+                        )
+                        .map((i) => (
+                          <option key={i.operation_id} value={i.operation_id}>
+                            {i.kind} · {i.operation_id}
+                          </option>
+                        ))}
                     </Select>
                   </Field>
-                  <Field label={comparisonLabels.corrected}>
-                    <input
-                      type="checkbox"
+                  <div className="form-grid">
+                    {(['obs', 'from', 'to', 'spinup'] as const).map((key) => (
+                      <Field key={key} label={comparisonLabels[key]}>
+                        <Input
+                          disabled={busy}
+                          type={
+                            key === 'spinup'
+                              ? 'number'
+                              : key === 'from' || key === 'to'
+                                ? 'datetime-local'
+                                : 'text'
+                          }
+                          min={key === 'spinup' ? 0 : undefined}
+                          value={comparisonInput[key]}
+                          onChange={(e) => changeComparison(key, e.target.value)}
+                        />
+                      </Field>
+                    ))}
+                    <Field label={comparisonLabels.variable}>
+                      <Select
+                        disabled={busy}
+                        value={comparisonInput.variable}
+                        onChange={(e) => changeComparison('variable', e.target.value)}
+                      >
+                        <option value="">—</option>
+                        {variables.map((v) => (
+                          <option key={v.name} value={v.name}>
+                            {(en ? v.label_en : v.label_zh) ?? v.name} {v.units ?? ''}
+                          </option>
+                        ))}
+                      </Select>
+                    </Field>
+                    <Field label={comparisonLabels.corrected}>
+                      <input
+                        type="checkbox"
+                        disabled={busy}
+                        checked={comparisonInput.corrected}
+                        onChange={(e) => changeComparison('corrected', e.target.checked)}
+                      />
+                    </Field>
+                  </div>
+                  <div className="button-row">
+                    <Button disabled={busy} onClick={() => run(pickObservation)}>
+                      {t('选择观测文件', 'Choose observations')}
+                    </Button>
+                    <Button
+                      disabled={busy || !compare || !comparisonInput.obs}
+                      onClick={() => run(loadVariables)}
+                    >
+                      {t('读取共同可用变量', 'Read common variables')}
+                    </Button>
+                    <Button disabled={!compareEnabled} onClick={() => run(compareRuns)}>
+                      {t('核对条件并比较', 'Check conditions and compare')}
+                    </Button>
+                  </div>
+                  {comparisonResult != null && (
+                    <>
+                      <Notice tone={comparisonWinner(comparisonResult) ? 'success' : 'warning'}>
+                        {comparisonWinner(comparisonResult) === 'tie'
+                          ? t(
+                              '相同评估条件下 RMSE 相同',
+                              'Equal RMSE under verified matching conditions',
+                            )
+                          : comparisonWinner(comparisonResult)
+                            ? `${t('相同评估条件下 RMSE 较低', 'Lower RMSE under verified matching conditions')}: ${comparisonWinner(comparisonResult) === 'a' ? detail.operation.operation_id : compare}`
+                            : t(
+                                '依据不足，不能判断哪个版本更好',
+                                'Insufficient evidence to rank these versions',
+                              )}
+                      </Notice>
+                      <pre>{JSON.stringify(comparisonResult, null, 2)}</pre>
+                    </>
+                  )}
+                  {result != null && <pre>{JSON.stringify(result, null, 2)}</pre>}
+                  <h3>{t('关联记录', 'Related operations')}</h3>
+                  {detail.related.map((item) => (
+                    <Button
+                      key={item.operation_id}
                       disabled={busy}
-                      checked={comparisonInput.corrected}
-                      onChange={(e) => changeComparison('corrected', e.target.checked)}
-                    />
-                  </Field>
-                </div>
-                <div className="button-row">
-                  <Button disabled={busy} onClick={() => run(pickObservation)}>
-                    {t('选择观测文件', 'Choose observations')}
-                  </Button>
-                  <Button
-                    disabled={busy || !compare || !comparisonInput.obs}
-                    onClick={() => run(loadVariables)}
-                  >
-                    {t('读取共同可用变量', 'Read common variables')}
-                  </Button>
-                  <Button disabled={!compareEnabled} onClick={() => run(compareRuns)}>
-                    {t('核对条件并比较', 'Check conditions and compare')}
-                  </Button>
-                </div>
-                {comparisonResult != null && (
-                  <>
-                    <Notice tone={comparisonWinner(comparisonResult) ? 'success' : 'warning'}>
-                      {comparisonWinner(comparisonResult) === 'tie'
-                        ? t(
-                            '相同评估条件下 RMSE 相同',
-                            'Equal RMSE under verified matching conditions',
-                          )
-                        : comparisonWinner(comparisonResult)
-                          ? `${t('相同评估条件下 RMSE 较低', 'Lower RMSE under verified matching conditions')}: ${comparisonWinner(comparisonResult) === 'a' ? detail.operation.operation_id : compare}`
-                          : t(
-                              '依据不足，不能判断哪个版本更好',
-                              'Insufficient evidence to rank these versions',
-                            )}
-                    </Notice>
-                    <pre>{JSON.stringify(comparisonResult, null, 2)}</pre>
-                  </>
-                )}
-                {result != null && <pre>{JSON.stringify(result, null, 2)}</pre>}
-                <h3>{t('关联记录', 'Related operations')}</h3>
-                {detail.related.map((item) => (
-                  <Button
-                    key={item.operation_id}
-                    disabled={busy}
-                    onClick={() => run(() => show(item.operation_id))}
-                  >
-                    {item.kind} · {item.operation_id}
-                  </Button>
-                ))}
-                <h3>{t('事件', 'Events')}</h3>
-                <div>
-                  {historyEvents(detail, en).map((rows, index) => (
-                    <Card key={index} title={`${t('事件', 'Event')} ${index + 1}`}>
-                      <DetailRows rows={rows} en={en} />
-                    </Card>
+                      onClick={() => run(() => show(item.operation_id))}
+                    >
+                      {item.kind} · {item.operation_id}
+                    </Button>
                   ))}
-                </div>
-              </Advanced>
-            </Card>
-          ) : !group ? (
-            <Card title={t('选择一条记录', 'Select a record')}>
-              <p className="muted">
-                {t(
-                  '查看运行设置、源码版本、日志及关联操作。',
-                  'Inspect recorded settings, source revisions, logs and related operations.',
-                )}
-              </p>
-            </Card>
-          ) : null}
-        </aside>
-      </div>
+                  <h3>{t('事件', 'Events')}</h3>
+                  <div>
+                    {historyEvents(detail, en).map((rows, index) => (
+                      <Card key={index} title={`${t('事件', 'Event')} ${index + 1}`}>
+                        <DetailRows rows={rows} en={en} />
+                      </Card>
+                    ))}
+                  </div>
+                </Advanced>
+              </Card>
+            ) : null}
+          </div>
+        </Dialog>
+      )}
     </div>
   );
 }

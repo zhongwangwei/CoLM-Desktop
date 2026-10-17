@@ -698,11 +698,10 @@ fn executable(name: &str) -> String {
     }
 }
 fn cache_dir(opts: &Opts, code: &CodeRef) -> Result<PathBuf> {
-    Ok(registry(opts)?.root().join("sources").join(format!(
-        "{}-{}",
-        code.source_sha256,
-        &colm_kernel::sha256_hex(&serde_json::to_vec(code)?)[..16]
-    )))
+    Ok(registry(opts)?
+        .root()
+        .join("sources")
+        .join(colm_model::source_cache_name(code)?))
 }
 fn copy_tree(from: &Path, to: &Path) -> Result<()> {
     ensure!(

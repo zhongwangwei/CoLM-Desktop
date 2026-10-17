@@ -21,12 +21,6 @@
   overflow-wrap: anywhere;
   margin-bottom: 0;
 }
-.history-workbench {
-  display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(290px, 1fr);
-  gap: 18px;
-  align-items: start;
-}
 .history-list,
 .history-inspector {
   min-width: 0;
@@ -43,51 +37,109 @@
 .history-pagination {
   margin: 14px 0 0;
 }
-.history-table-scroll {
-  max-width: 100%;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
+.history-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px;
 }
-.history-table {
-  border-collapse: collapse;
-  width: 100%;
-  min-width: 540px;
-  font-size: 13px;
-}
-.history-table th,
-.history-table td {
-  padding: 12px 10px;
+.button.history-card {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-start;
+  gap: 8px;
+  height: auto;
+  min-width: 0;
+  padding: 14px;
   text-align: left;
-  border-bottom: 1px solid var(--border);
-  vertical-align: middle;
+  font-weight: 400;
+  white-space: normal;
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: inherit;
+  cursor: pointer;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
-.history-table th {
-  font-weight: 600;
-  background: var(--elevated);
+.button.history-card:hover:not(:disabled) {
+  border-color: var(--accent);
+  box-shadow: 0 2px 10px color-mix(in srgb, var(--accent) 18%, transparent);
 }
-.history-table tr:last-child td {
-  border-bottom: 0;
+.button.history-card.is-selected {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
 }
-.history-table tr.is-selected {
-  background: color-mix(in srgb, var(--accent) 15%, var(--surface));
+.history-card-succeeded {
+  border-left-color: #16794a !important;
 }
-.history-table time {
-  white-space: nowrap;
+.history-card-failed,
+.history-card-completed_with_failures {
+  border-left-color: #b42318 !important;
+}
+.history-card-pending {
+  border-left-color: #c58a00 !important;
+}
+.history-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.history-card-kind {
   font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.history-object {
-  min-width: 130px;
-  max-width: 220px;
+.history-card-title {
+  font-size: 15px;
+  line-height: 1.35;
   overflow-wrap: anywhere;
 }
-.history-object strong,
-.history-object small {
-  display: block;
-}
-.history-object small {
-  margin-top: 5px;
+.history-card-sub,
+.history-card-meta {
+  font-size: 12px;
   color: var(--muted);
+}
+.history-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.dialog-content.history-detail-dialog {
+  width: min(880px, 94vw);
+}
+.history-clear-cases {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 12px 0;
+}
+.history-clear-list {
+  max-height: 220px;
+  overflow: auto;
+  margin: 8px 0 16px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  list-style: none;
+}
+.history-clear-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+  overflow-wrap: anywhere;
+}
+.history-clear-failure {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
 }
 .history-status {
   display: inline-block;
@@ -146,11 +198,6 @@
 .history-inspector pre {
   max-width: 100%;
   overflow: auto;
-}
-@container (max-width: 880px) {
-  .history-workbench {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 @container (max-width: 600px) {
   .history-filter-main {

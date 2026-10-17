@@ -11,6 +11,7 @@ import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../comp
 import {
   compatibleKernel,
   remoteSubmissionBlocked,
+  REMOTE_CHECK_MS,
   remoteRunPermissions,
   reconcileRemoteRun,
   matchesRemoteRun,
@@ -505,6 +506,7 @@ export default function RunPanel({
   async function remoteAction(
     command: 'remote_status' | 'remote_cancel' | 'remote_fetch',
     target = casePath,
+    quiet = false,
   ) {
     const targetRemote = target === casePath ? remote : latest.current[target]?.progress?.remote;
     const permissions = remoteRunPermissions(targetRemote);
@@ -516,7 +518,8 @@ export default function RunPanel({
     if (command === 'remote_fetch' && !permissions.fetch)
       throw new Error(bilingual('先核对服务器任务的真实终态', 'Confirm terminal state first'));
     lock.current = true;
-    setMonitor(true);
+    // Automatic checks run in the background without disabling the panel.
+    if (!quiet) setMonitor(true);
     const expectedRunId = latest.current[target]?.run_id;
     try {
       let result = await invokeJson<Record<string, unknown>>(
@@ -533,6 +536,10 @@ export default function RunPanel({
         result = await invokeJson<Record<string, unknown>>('remote_status', { case: target });
       const merged = reconcileRemoteRun(targetRemote, result);
       if (alive.current && currentCase.current === target) setRemote(merged);
+      if (quiet && remoteRunPermissions(merged).terminal && !permissions.terminal)
+        notify(
+          t('服务器作业已结束，可以取回结果。', 'The server job finished; results can be fetched.'),
+        );
       update((old) => {
         const previous = old.running[target];
         const known = previous?.progress?.remote as Record<string, unknown> | undefined;
@@ -589,13 +596,31 @@ export default function RunPanel({
       });
       return merged;
     } catch (e) {
-      notify(String(e), true);
+      if (!quiet) notify(String(e), true);
       throw e;
     } finally {
       lock.current = false;
-      if (alive.current) setMonitor(false);
+      if (alive.current && !quiet) setMonitor(false);
     }
   }
+  // While this case's server job is unfinished, check its state every 10 seconds.
+  const autoCheck = useRef(() => {});
+  autoCheck.current = () => {
+    if (!document.hidden) void remoteAction('remote_status', casePath, true).catch(() => {});
+  };
+  const watchRemote =
+    !!host &&
+    !batchCases &&
+    !!remote &&
+    !recovering &&
+    !busy &&
+    !monitor &&
+    !remoteRunPermissions(remote).terminal;
+  useEffect(() => {
+    if (!watchRemote) return;
+    const timer = window.setInterval(() => autoCheck.current(), REMOTE_CHECK_MS);
+    return () => window.clearInterval(timer);
+  }, [watchRemote, casePath]);
   async function cancel() {
     try {
       const id = latest.current[casePath]?.run_id;

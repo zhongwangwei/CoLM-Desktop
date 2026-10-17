@@ -66,7 +66,7 @@ import type { CaseOptionPatch } from '../versions/configuration-options';
 import HistoryVariablesCard from './HistoryVariablesCard';
 import MultiSiteSettings from './MultiSiteSettings';
 import { planMultiSites, type MultiSiteDraft, type MultiSiteMode } from './multisite-model';
-import type { CaseEntry } from '../../lib/types';
+import type { CaseEntry, DataDefaults } from '../../lib/types';
 import RunLocationSettings from '../runs/RunLocationSettings';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
@@ -127,7 +127,7 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
 }
 
 export default function NewCasePage() {
-  const { state, update, openCase, navigate } = useApp(),
+  const { state, update, openCase, navigate, notify } = useApp(),
     en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const seed = state.newCaseSeed;
@@ -211,11 +211,20 @@ export default function NewCasePage() {
     scheduler: form.run_scheduler || resourceServer?.scheduler || 'auto',
     cpus: form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
   };
+  const [localData, setLocalData] = useState<DataDefaults | null>(null);
   useEffect(() => {
     let current = true;
-    invoke<{ servers: Server[] }>('remote_config', {})
+    invoke<{ servers: Server[]; local?: DataDefaults }>('remote_config', {})
       .then((config) => {
-        if (current) setServers(config.servers);
+        if (!current) return;
+        setServers(config.servers);
+        setLocalData({
+          project_dir: '',
+          rawdata_dir: '',
+          runtime_dir: '',
+          forcing_dir: '',
+          ...config.local,
+        });
       })
       .catch((e) => {
         if (current) {
@@ -227,6 +236,52 @@ export default function NewCasePage() {
       current = false;
     };
   }, []);
+  // 每选定一次运行位置，用计算资源里登记的默认数据路径填一次空着的框。
+  const filledDefaults = useRef<string | null>(null);
+  const seededRoot = !!seed?.form?.root;
+  useEffect(() => {
+    if (servers === null || localData === null || filledDefaults.current === form.host) return;
+    const defaults = form.host ? servers.find((server) => server.host === form.host) : localData;
+    if (!defaults) return;
+    // A project folder handed over by the page that opened this one stays; otherwise the
+    // resource's default project folder replaces the last-used one.
+    const keepRoot = !form.host && filledDefaults.current === null && seededRoot;
+    filledDefaults.current = form.host;
+    setForm((old) => ({
+      ...old,
+      root: keepRoot ? old.root : defaults.project_dir || old.root,
+      rawdata: old.rawdata || defaults.rawdata_dir || '',
+      runtime: old.runtime || defaults.runtime_dir || '',
+      spatial_forcingdir: old.spatial_forcingdir || defaults.forcing_dir || '',
+    }));
+  }, [form.host, servers, localData, seededRoot]);
+  async function rememberDataPaths(spatial: boolean) {
+    const paths = {
+      project: form.root.trim() || null,
+      rawdata: form.rawdata.trim() || null,
+      runtime: form.runtime.trim() || null,
+      forcing: spatial && templateForcing ? form.spatial_forcingdir.trim() || null : null,
+    };
+    try {
+      await invoke('remote_remember_data_paths', { host: form.host || null, ...paths });
+    } catch (e) {
+      notify(t(`默认数据路径未能同步到计算资源：${e}`, `Could not sync default data paths: ${e}`));
+      return;
+    }
+    const merge = <T extends Partial<DataDefaults>>(old: T): T => ({
+      ...old,
+      ...(paths.project ? { project_dir: paths.project } : {}),
+      ...(paths.rawdata ? { rawdata_dir: paths.rawdata } : {}),
+      ...(paths.runtime ? { runtime_dir: paths.runtime } : {}),
+      ...(paths.forcing ? { forcing_dir: paths.forcing } : {}),
+    });
+    if (!alive.current) return;
+    if (form.host)
+      setServers((old) =>
+        old ? old.map((server) => (server.host === form.host ? merge(server) : server)) : old,
+      );
+    else setLocalData((old) => (old ? merge(old) : old));
+  }
   const [caseValues, setCaseValues] = useState<Record<string, string>>(seed?.caseValues ?? {}),
     [schema, setSchema] = useState<SchemaField[]>([]),
     [schemaReady, setSchemaReady] = useState(false),
@@ -1138,6 +1193,7 @@ export default function NewCasePage() {
         }
       }
     }
+    if (results.some((result) => result.created && !result.error)) await rememberDataPaths(false);
     if (
       !job.cancelRequested &&
       alive.current &&
@@ -1306,6 +1362,7 @@ export default function NewCasePage() {
           }
         }
       }
+      await rememberDataPaths(form.kind !== 'site');
       update({
         root: destination.root,
         versionRef: revision,
@@ -2038,7 +2095,12 @@ export default function NewCasePage() {
         <Notice>
           {cancellingCreation
             ? t('正在取消创建，请等待清理完成…', 'Cancelling creation; waiting for cleanup…')
-            : t('正在处理，请稍候…', 'Working, please wait…')}
+            : creationDir && form.host
+              ? t(
+                  `正在 ${form.host} 上创建算例…首次在该服务器创建、或软件更新后，需要先在服务器上编译计算引擎，可能要几分钟。`,
+                  `Creating the case on ${form.host}… The first creation on a server, or the first after an app update, compiles the engine there first and can take several minutes.`,
+                )
+              : t('正在处理，请稍候…', 'Working, please wait…')}
         </Notice>
       )}
       {remotePicker && (

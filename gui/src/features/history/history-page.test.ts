@@ -120,6 +120,15 @@ function harness(running: Record<string, { running: boolean; run_id: string }> =
     button.props.onClick();
     render();
   };
+  const openCard = (index = 0) => {
+    const card = nodes(tree).filter(
+      (n) => n.type === 'Button' && String(n.props.className).includes('history-card'),
+    )[index];
+    assert.ok(card, 'history card');
+    assert.ok(!card.props.disabled);
+    card.props.onClick();
+    render();
+  };
   const settle = async () => {
     await new Promise((resolve) => setImmediate(resolve));
     render();
@@ -136,6 +145,7 @@ function harness(running: Record<string, { running: boolean; run_id: string }> =
     settle,
     menu,
     click,
+    openCard,
     nodes: () => nodes(tree),
     unmount: () => effects.forEach((e) => e.cleanup?.()),
   };
@@ -298,7 +308,7 @@ test('one run row opens all stations and nonfirst station actions use its real o
   h.requests[0].resolve({ items: [group], total: 1 });
   await h.settle();
   assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 1);
-  h.click('View');
+  h.openCard();
   await h.settle();
   assert.equal(h.requests.length, 1, 'group view must not load representative station');
   assert.equal(h.nodes().filter((n) => n.type === 'ContextMenu').length, 3);
@@ -326,7 +336,7 @@ test('group deletion is record only, carries group scope, and refreshes overview
   const h = harness();
   h.requests[0].resolve({ items: [groupRow()], total: 1 });
   await h.settle();
-  h.click('View');
+  h.openCard();
   await h.settle();
   h.menu().props.onOpenChange(true);
   h.render();
@@ -357,7 +367,7 @@ test('run export retains all station evidence and filtering clears group actions
   const group = groupRow();
   h.requests[0].resolve({ items: [group], total: 1 });
   await h.settle();
-  h.click('View');
+  h.openCard();
   await h.settle();
   h.click('Export this run JSON');
   assert.deepEqual(
@@ -406,4 +416,70 @@ test('assistant details action opens the same group overview without selecting a
   await selecting;
   await h.settle();
   assert.ok(h.guide().actions.some((action) => action.id === 'history-export-run'));
+});
+
+test('clicking a card opens its details in a dialog that closes back to the cards', async () => {
+  const h = harness();
+  h.requests[0].resolve({ items: [row('a')], total: 1 });
+  await h.settle();
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
+  h.openCard();
+  assert.deepEqual(h.requests[1], {
+    ...h.requests[1],
+    command: 'history_detail',
+    args: { id: 'a' },
+  });
+  h.requests[1].resolve({ operation: row('a'), events: [], related: [] });
+  await h.settle();
+  const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
+  assert.ok(dialog);
+  dialog.props.onOpenChange(false);
+  h.render();
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
+});
+
+test('clearing history deletes case folders only when the user ticks them', async () => {
+  const h = harness();
+  h.requests[0].resolve({ items: [row('a')], total: 1 });
+  await h.settle();
+  h.click('Clear history');
+  assert.equal(h.requests[1].command, 'history_clear_plan');
+  h.requests[1].resolve({
+    records: 1,
+    unconfirmed: 2,
+    unconfirmedRemote: 1,
+    cases: [{ path: '/case', bytes: 2048 }],
+    remoteCases: 0,
+    skipped: [],
+  });
+  await h.settle();
+  h.click('Confirm clearing records');
+  assert.deepEqual(h.requests[2].args, { cases: [], unconfirmed: false });
+  h.requests[2].reject(new Error('busy'));
+  await h.settle();
+  const tick = (label: string) => {
+    const text = (node: unknown): string =>
+      Array.isArray(node)
+        ? node.map(text).join('')
+        : node && typeof node === 'object'
+          ? text((node as { children: unknown[] }).children)
+          : node == null || node === false
+            ? ''
+            : String(node);
+    const owner = h.nodes().find((n) => n.type === 'label' && text(n).includes(label))!;
+    const box = owner.children.find((child) => (child as { type?: string })?.type === 'input') as {
+      props: { onChange: (event: unknown) => void };
+    };
+    box.props.onChange({ target: { checked: true } });
+    h.render();
+  };
+  tick('local case folders');
+  h.render();
+  tick('never confirmed');
+  h.click('Clear records and delete folders');
+  assert.deepEqual(h.requests[3].args, { cases: ['/case'], unconfirmed: true });
+  h.requests[3].resolve({ removed: 1, kept: 0, deleted: ['/case'], failed: [] });
+  await h.settle();
+  assert.equal(h.requests[4].command, 'history_list');
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
 });

@@ -107,6 +107,100 @@ pub(crate) async fn assistant_context(
 pub async fn model_list() -> Result<Vec<FrozenRevision>, String> {
     decode(cli(vec!["model-list".into()]).await?)
 }
+/// Visible history operations that still name `version`; deleting it would break their replay.
+fn history_references(ledger: &colm_history::History, version: &VersionRef) -> Result<u64, String> {
+    let revision = version.revision.to_string();
+    let mut count = 0;
+    let mut offset = 0;
+    loop {
+        let page = ledger
+            .query(&colm_history::Query {
+                version_id: Some(version.id.clone()),
+                offset,
+                limit: 500,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        count += page
+            .items
+            .iter()
+            .filter(|operation| operation.latest.revision.as_deref() == Some(revision.as_str()))
+            .count() as u64;
+        offset += page.items.len() as u64;
+        if page.items.is_empty() || offset >= page.total {
+            return Ok(count);
+        }
+    }
+}
+
+fn delete_revision(
+    registry: &Registry,
+    ledger: &colm_history::History,
+    version: &VersionRef,
+) -> Result<Vec<String>, String> {
+    let references = history_references(ledger, version)?;
+    if references > 0 {
+        return Err(format!(
+            "仍有 {references} 条历史记录使用此版本；先在历史记录中删除或清空这些记录，再删除版本"
+        ));
+    }
+    registry
+        .remove(version)
+        .map(|removed| removed.iter().map(|p| p.display().to_string()).collect())
+        .map_err(|e| e.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct DeleteFailure {
+    version: VersionRef,
+    reason: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct DeleteReport {
+    deleted: Vec<VersionRef>,
+    failed: Vec<DeleteFailure>,
+    removed: Vec<String>,
+}
+
+fn delete_revisions(
+    registry: &Registry,
+    ledger: &colm_history::History,
+    versions: Vec<VersionRef>,
+) -> DeleteReport {
+    let mut report = DeleteReport {
+        deleted: Vec::new(),
+        failed: Vec::new(),
+        removed: Vec::new(),
+    };
+    for version in versions {
+        match delete_revision(registry, ledger, &version) {
+            Ok(removed) => {
+                report.removed.extend(removed);
+                report.deleted.push(version);
+            }
+            Err(reason) => report.failed.push(DeleteFailure { version, reason }),
+        }
+    }
+    report
+}
+
+/// Delete saved model revisions and the source snapshots only they used. Each revision is
+/// checked on its own; the report says which stayed and why.
+#[tauri::command]
+pub async fn model_delete(
+    processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    versions: Vec<VersionRef>,
+) -> Result<DeleteReport, String> {
+    let processes = processes.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
+        let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+        processes.with_idle(|| Ok(delete_revisions(&registry, &ledger, versions)))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 pub fn model_get(id: String, revision: u64) -> Result<FrozenRevision, String> {
     Registry::open(root()?)
@@ -432,6 +526,44 @@ pub async fn model_attach_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revisions_still_named_by_history_cannot_be_deleted() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-model-delete-{}",
+            colm_history::Event::start("test").operation_id
+        ));
+        let registry = Registry::open(root.join("models")).unwrap();
+        let code = |sha: &str| colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: sha.repeat(64),
+        };
+        let old = registry.install_official(code("a")).unwrap().version;
+        registry.install_official(code("b")).unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        let mut run = colm_history::Event::start("run");
+        run.version_id = Some("official".into());
+        run.revision = Some("1".into());
+        ledger.append(&run).unwrap();
+        let end = run.next(colm_history::EventPhase::Finished, "succeeded");
+        ledger.append(&end).unwrap();
+        let error = delete_revision(&registry, &ledger, &old).unwrap_err();
+        assert!(error.contains("1 条历史记录"), "{error}");
+        ledger.remove_operation(&end.operation_id).unwrap();
+        let latest = VersionRef {
+            id: "official".into(),
+            revision: 2,
+        };
+        let report = delete_revisions(&registry, &ledger, vec![old.clone(), latest.clone()]);
+        assert_eq!(report.deleted, vec![old.clone()]);
+        assert_eq!(report.failed.len(), 1, "the latest official baseline stays");
+        assert_eq!(report.failed[0].version, latest);
+        assert!(registry.get(&old).is_err());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn concurrent_case_previews_with_the_same_clock_tick_have_distinct_directories() {

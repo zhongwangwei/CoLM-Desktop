@@ -6,7 +6,7 @@ mod registry;
 mod validation;
 pub use equivalence::{is_noop, minimize_physics, same_effect};
 pub use materialize::case_process_references;
-pub use registry::Registry;
+pub use registry::{source_cache_name, Registry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;

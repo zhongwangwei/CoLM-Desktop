@@ -25,6 +25,8 @@ function panel(
     ipc?: (command: string, args: Record<string, unknown>) => Promise<unknown>;
     single?: boolean;
     targets?: string[];
+    notify?: (message: string) => void;
+    setMonitor?: (value: boolean) => void;
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -97,7 +99,7 @@ function panel(
     host: options.remote ? 'server' : '',
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
-    setMonitor: () => {},
+    setMonitor: options.setMonitor ?? (() => {}),
     remoteRunPermissions,
     remoteSubmissionBlocked,
     reconcileRemoteRun,
@@ -118,7 +120,7 @@ function panel(
     recordInputFingerprints: options.recordInputFingerprints ?? false,
     invoke,
     invokeJson: invoke,
-    notify: () => {},
+    notify: options.notify ?? (() => {}),
     setBusy: () => {},
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
@@ -139,7 +141,7 @@ function panel(
   )(...Object.values(context)) as {
     run: () => Promise<unknown>;
     cancel: () => Promise<unknown>;
-    remoteAction: (command: string) => Promise<unknown>;
+    remoteAction: (command: string, target?: string, quiet?: boolean) => Promise<unknown>;
   };
   return { ...methods, state, calls };
 }
@@ -469,4 +471,33 @@ test('input fingerprint recording is off by default and opt-in reaches single, b
     defaults.calls.find((call) => call.command === 'run_case')?.args.recordInputFingerprints,
     false,
   );
+});
+
+test('automatic server checks stay quiet and announce only the finish', async () => {
+  const notices: string[] = [],
+    monitors: boolean[] = [];
+  let fail = true;
+  const p = panel({
+    remote: true,
+    single: true,
+    notify: (message) => notices.push(message),
+    setMonitor: (value) => monitors.push(value),
+    ipc: async (command) => {
+      if (command !== 'remote_status') return 0;
+      if (fail) throw new Error('ssh timeout');
+      return {
+        record: { host: 'server', job: 'job-new' },
+        status: { state: 'finished', exit_code: 0 },
+      };
+    },
+  });
+  await assert.rejects(p.remoteAction('remote_status', '/good', true), /ssh timeout/);
+  assert.deepEqual(notices, [], 'a failed background check raises no notice');
+  fail = false;
+  await p.remoteAction('remote_status', '/good', true);
+  assert.deepEqual(monitors, [], 'background checks never lock the panel');
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /服务器作业已结束/);
+  await p.remoteAction('remote_status', '/good', true);
+  assert.equal(notices.length, 1, 'the finish is announced once');
 });

@@ -139,6 +139,63 @@ impl Registry {
     pub fn tree(&self) -> Result<Vec<FrozenRevision>> {
         self.list()
     }
+    /// Delete a frozen revision nothing in the registry still builds on: not the latest
+    /// official baseline, no child revision and no draft. Source snapshots that no remaining
+    /// revision uses are removed too; the returned paths are what was deleted. Callers check
+    /// external references (history, running work) before calling this.
+    pub fn remove(&self, version: &VersionRef) -> Result<Vec<PathBuf>> {
+        let _lock = self.lock()?;
+        let dir = self.revision_dir(version)?;
+        let frozen = self.get(version)?;
+        let all = self.list()?;
+        if version.id == "official" {
+            let latest = all
+                .iter()
+                .filter(|r| r.version.id == "official")
+                .map(|r| r.version.revision)
+                .max();
+            ensure!(
+                latest != Some(version.revision),
+                "the latest official revision is the bundled baseline and cannot be deleted"
+            );
+        }
+        if let Some(child) = all.iter().find(|r| r.parent.as_ref() == Some(version)) {
+            anyhow::bail!(
+                "revision {}#{} is derived from it; delete that revision first",
+                child.version.id,
+                child.version.revision
+            );
+        }
+        if let Some(draft) = self.drafts()?.iter().find(|d| d.parent == *version) {
+            anyhow::bail!("draft {} is based on it; delete that draft first", draft.id);
+        }
+        let parent = dir.parent().context("revision parent")?.to_path_buf();
+        let trash = parent.join(format!(
+            ".remove-{}-{}",
+            version.revision,
+            std::process::id()
+        ));
+        fs::rename(&dir, &trash)?;
+        fs::remove_dir_all(&trash)?;
+        let mut removed = vec![dir];
+        if fs::read_dir(&parent)?.next().is_none() {
+            fs::remove_dir(&parent)?;
+        }
+        if !all
+            .iter()
+            .any(|r| r.version != *version && r.code == frozen.code)
+        {
+            let source = self
+                .root
+                .join("sources")
+                .join(source_cache_name(&frozen.code)?);
+            if source.is_dir() {
+                fs::remove_dir_all(&source)?;
+                removed.push(source);
+            }
+        }
+        Ok(removed)
+    }
     pub fn drafts(&self) -> Result<Vec<ModelDraft>> {
         let mut drafts = Vec::new();
         for entry in fs::read_dir(self.root.join("drafts"))? {
@@ -529,4 +586,11 @@ fn check_expected_values(changes: &Overlay, baseline: &Overlay) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// Directory name of the frozen source snapshot for `code` under `<registry>/sources`.
+pub fn source_cache_name(code: &CodeRef) -> Result<String> {
+    let digest = Sha256::digest(serde_json::to_vec(code)?);
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    Ok(format!("{}-{}", code.source_sha256, &hex[..16]))
 }

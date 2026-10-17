@@ -468,7 +468,16 @@ test('only visible configuration fields and selected maintenance actions enter t
   let contract = await page.ready();
   assert.deepEqual(
     contract.fields.map((field) => field.id),
-    ['resource-host', 'resource-username', 'resource-root', 'resource-auth'],
+    [
+      'resource-host',
+      'resource-username',
+      'resource-root',
+      'resource-project_dir',
+      'resource-rawdata_dir',
+      'resource-runtime_dir',
+      'resource-forcing_dir',
+      'resource-auth',
+    ],
   );
   assert.ok(!contract.actions.some((action) => action.id === 'resource-build'));
   await page.action('resource-advanced-toggle');
@@ -849,4 +858,36 @@ test('unmount stops scheduling remaining resource CLI calls', async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 4);
   assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 0);
+});
+test('local default data paths save with the server list intact', async () => {
+  const page = harness();
+  await page.ready();
+  const contract = await page.action('resource-select-local');
+  assert.deepEqual(
+    contract.fields.filter((field) => field.id.startsWith('resource-local-')).map((f) => f.id),
+    [
+      'resource-local-project_dir',
+      'resource-local-rawdata_dir',
+      'resource-local-runtime_dir',
+      'resource-local-forcing_dir',
+    ],
+  );
+  page.fill('resource-local-rawdata_dir', ' /Volumes/Data/CoLMrawdata ');
+  page.fill('resource-local-forcing_dir', '/Volumes/Data/CoLM_Forcing/JRA3Q');
+  await page.action('resource-local-data-save');
+  const saved = page.calls.filter((call) => call.command === 'remote_save_config').at(-1)!;
+  const config = saved.args!.config as {
+    servers: { host: string }[];
+    local: Record<string, string>;
+  };
+  assert.deepEqual(
+    config.servers.map((server) => server.host),
+    ['7920land', '7920mp'],
+  );
+  assert.deepEqual(config.local, {
+    project_dir: '',
+    rawdata_dir: '/Volumes/Data/CoLMrawdata',
+    runtime_dir: '',
+    forcing_dir: '/Volumes/Data/CoLM_Forcing/JRA3Q',
+  });
 });

@@ -23,13 +23,15 @@ pub struct DeleteResult {
     host: Option<String>,
 }
 
+/// The ledger confirmed the end: no reconciliation pending and a terminal status
+/// (assistant requests end as `ui_succeeded`/`ui_failed`).
+fn finished(operation: &colm_history::Operation) -> bool {
+    !operation.needs_reconciliation && colm_history::confirmed_status(&operation.latest.status)
+}
+
+/// Folder deletion additionally needs a recorded finish time.
 fn terminal(detail: &OperationDetail) -> bool {
-    !detail.operation.needs_reconciliation
-        && detail.operation.finished_ms.is_some()
-        && matches!(
-            detail.operation.latest.status.as_str(),
-            "succeeded" | "failed" | "cancelled" | "completed" | "completed_with_failures"
-        )
+    finished(&detail.operation) && detail.operation.finished_ms.is_some()
 }
 
 fn plain_directory(path: &Path) -> Result<PathBuf, String> {
@@ -207,6 +209,22 @@ fn history_path(path: &str) -> PathBuf {
 }
 
 fn idle_case(ledger: &History, target: &Path) -> Result<(), String> {
+    idle_against(&unresolved_paths(ledger)?, target)
+}
+
+fn idle_against(unresolved: &[PathBuf], target: &Path) -> Result<(), String> {
+    if unresolved
+        .iter()
+        .any(|path| path.starts_with(target) || target.starts_with(path))
+    {
+        return Err("该算例还有未确认结束的历史任务，请先核对状态".into());
+    }
+    Ok(())
+}
+
+/// Case paths touched by operations whose completion is unconfirmed, removed ones included.
+fn unresolved_paths(ledger: &History) -> Result<Vec<PathBuf>, String> {
+    let mut paths = Vec::new();
     let mut offset = 0;
     loop {
         let page = ledger
@@ -217,38 +235,29 @@ fn idle_case(ledger: &History, target: &Path) -> Result<(), String> {
             })
             .map_err(|e| e.to_string())?;
         for operation in &page.items {
-            let unresolved = operation.needs_reconciliation
-                || !matches!(
-                    operation.latest.status.as_str(),
-                    "succeeded" | "failed" | "completed" | "completed_with_failures" | "cancelled"
-                );
-            if unresolved {
+            if !finished(operation) {
                 let detail = ledger
                     .detail_audit(&operation.latest.operation_id)
                     .map_err(|e| e.to_string())?
                     .ok_or("历史记录已变化")?;
-                let related = detail
-                    .events
-                    .iter()
-                    .flat_map(|event| {
-                        [
-                            event.case_path.as_deref(),
-                            event.detail["model_run"]["source_case"].as_str(),
-                        ]
-                    })
-                    .flatten()
-                    .any(|p| {
-                        let path = history_path(p);
-                        path.starts_with(target) || target.starts_with(path)
-                    });
-                if related {
-                    return Err("该算例还有未确认结束的历史任务，请先核对状态".into());
-                }
+                paths.extend(
+                    detail
+                        .events
+                        .iter()
+                        .flat_map(|event| {
+                            [
+                                event.case_path.as_deref(),
+                                event.detail["model_run"]["source_case"].as_str(),
+                            ]
+                        })
+                        .flatten()
+                        .map(|p| history_path(p).to_path_buf()),
+                );
             }
         }
         offset += page.items.len() as u64;
         if offset >= page.total || page.items.is_empty() {
-            return Ok(());
+            return Ok(paths);
         }
     }
 }
@@ -578,6 +587,268 @@ pub async fn history_delete_plan(app: tauri::AppHandle, id: String) -> Result<De
     Ok(result)
 }
 
+/// Rename into an exclusively created sibling before recursive removal, so a directory
+/// that replaced the verified one between the check and the removal is never deleted.
+fn remove_verified(target: &Path, identity: &std::fs::Metadata) -> Result<(), String> {
+    let quarantine = target.parent().ok_or("目录没有父目录")?.join(format!(
+        ".colm-delete-{}",
+        colm_history::Event::start("delete").operation_id
+    ));
+    std::fs::create_dir(&quarantine).map_err(|e| e.to_string())?;
+    let isolated = quarantine.join("run");
+    if let Err(error) = std::fs::rename(target, &isolated) {
+        let _ = std::fs::remove_dir(&quarantine);
+        return Err(error.to_string());
+    }
+    let moved = std::fs::symlink_metadata(&isolated).map_err(|e| e.to_string())?;
+    if !same_directory(identity, &moved) {
+        // Never remove a replacement that raced the ownership check.
+        if !target.exists() {
+            let _ = std::fs::rename(&isolated, target);
+            let _ = std::fs::remove_dir(&quarantine);
+        }
+        return Err(format!(
+            "目录在删除时发生变化；文件已保留，请检查 {}",
+            quarantine.display()
+        ));
+    }
+    if let Err(error) = std::fs::remove_dir_all(&isolated) {
+        return Err(format!(
+            "删除未完成，记录已保留；剩余文件位于 {}：{error}",
+            isolated.display()
+        ));
+    }
+    std::fs::remove_dir(&quarantine).map_err(|e| e.to_string())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearCase {
+    path: String,
+    bytes: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearPlan {
+    /// Confirmed operations that clearing hides.
+    records: usize,
+    /// Operations whose completion is unconfirmed; hidden only when the user includes them.
+    unconfirmed: usize,
+    /// How many of those ran on a server (their jobs may still be running there).
+    unconfirmed_remote: usize,
+    /// Local case folders that may be deleted with the records.
+    cases: Vec<ClearCase>,
+    /// Server cases are never deleted in bulk; their records are still hidden.
+    remote_cases: usize,
+    /// Local case folders kept, with the reason.
+    skipped: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearResult {
+    removed: usize,
+    kept: usize,
+    deleted: Vec<String>,
+    failed: Vec<String>,
+}
+
+#[derive(Default)]
+struct Survey {
+    terminal: Vec<String>,
+    unconfirmed: Vec<String>,
+    unconfirmed_remote: usize,
+    cases: std::collections::BTreeMap<PathBuf, Vec<String>>,
+    remote_cases: std::collections::BTreeSet<PathBuf>,
+    skipped: Vec<String>,
+}
+
+/// Every visible operation and the local case folders they own, derived from the ledger only.
+/// One representative detail per recorded case path keeps this fast on long histories.
+fn survey(ledger: &History) -> Result<Survey, String> {
+    let mut survey = Survey::default();
+    let mut by_path = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut offset = 0;
+    loop {
+        let page = ledger
+            .query(&colm_history::Query {
+                offset,
+                limit: 500,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        for operation in &page.items {
+            if !finished(operation) {
+                survey
+                    .unconfirmed
+                    .push(operation.latest.operation_id.clone());
+                if operation.latest.host.is_some()
+                    || operation.latest.location.as_deref() == Some("remote")
+                {
+                    survey.unconfirmed_remote += 1;
+                }
+                continue;
+            }
+            let id = operation.latest.operation_id.clone();
+            survey.terminal.push(id.clone());
+            let path = operation.latest.case_path.clone().or_else(|| {
+                operation.latest.detail["model_run"]["source_case"]
+                    .as_str()
+                    .map(str::to_owned)
+            });
+            if let Some(path) = path {
+                by_path.entry(path).or_default().push(id);
+            }
+        }
+        offset += page.items.len() as u64;
+        if page.items.is_empty() || offset >= page.total {
+            break;
+        }
+    }
+    let unresolved = unresolved_paths(ledger)?;
+    for ids in by_path.values() {
+        let Some(detail) = ledger.detail(&ids[0]).map_err(|e| e.to_string())? else {
+            continue;
+        };
+        // A folder that is already gone or is not a plain case directory has nothing to delete.
+        let Ok((path, record)) = case_directory(&detail) else {
+            continue;
+        };
+        if record.remote_directory.is_some() || is_remote(&detail) {
+            survey.remote_cases.insert(path);
+        } else if let Err(reason) = idle_against(&unresolved, &path) {
+            let shown = format!("{}：{reason}", path.display());
+            if !survey.skipped.contains(&shown) {
+                survey.skipped.push(shown);
+            }
+        } else {
+            survey
+                .cases
+                .entry(path)
+                .or_default()
+                .extend(ids.iter().cloned());
+        }
+    }
+    Ok(survey)
+}
+
+fn directory_bytes(path: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let metadata = std::fs::symlink_metadata(entry.path()).ok()?;
+            Some(if metadata.is_dir() {
+                directory_bytes(&entry.path())
+            } else {
+                metadata.len()
+            })
+        })
+        .sum()
+}
+
+fn clear_plan(ledger: &History) -> Result<ClearPlan, String> {
+    let survey = survey(ledger)?;
+    Ok(ClearPlan {
+        records: survey.terminal.len(),
+        unconfirmed: survey.unconfirmed.len(),
+        unconfirmed_remote: survey.unconfirmed_remote,
+        cases: survey
+            .cases
+            .keys()
+            .map(|path| ClearCase {
+                path: path.display().to_string(),
+                bytes: directory_bytes(path),
+            })
+            .collect(),
+        remote_cases: survey.remote_cases.len(),
+        skipped: survey.skipped,
+    })
+}
+
+/// Delete only the confirmed folders that the ledger still attributes to finished work; a
+/// folder that fails to delete keeps its records so the remaining files stay discoverable.
+fn clear(
+    ledger: &History,
+    confirmed_cases: &[String],
+    include_unconfirmed: bool,
+) -> Result<ClearResult, String> {
+    let survey = survey(ledger)?;
+    let mut keep = std::collections::BTreeSet::new();
+    let mut deleted = Vec::new();
+    let mut failed = Vec::new();
+    for (path, ids) in &survey.cases {
+        let shown = path.display().to_string();
+        if !confirmed_cases.contains(&shown) {
+            continue;
+        }
+        let result = std::fs::symlink_metadata(path)
+            .map_err(|e| e.to_string())
+            .and_then(|identity| remove_verified(path, &identity));
+        match result {
+            Ok(()) => deleted.push(shown),
+            Err(error) => {
+                failed.push(format!("{shown}：{error}"));
+                keep.extend(ids.iter().cloned());
+            }
+        }
+    }
+    let mut removed = 0;
+    let mut kept = keep.len();
+    for id in survey.terminal.iter().filter(|id| !keep.contains(*id)) {
+        match ledger.remove_operation(id) {
+            Ok(_) => removed += 1,
+            Err(_) => kept += 1,
+        }
+    }
+    for id in &survey.unconfirmed {
+        if include_unconfirmed && ledger.remove_unconfirmed(id).is_ok() {
+            removed += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    Ok(ClearResult {
+        removed,
+        kept,
+        deleted,
+        failed,
+    })
+}
+
+#[tauri::command]
+pub async fn history_clear_plan() -> Result<ClearPlan, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        clear_plan(&History::open_default().map_err(|e| e.to_string())?)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn history_clear(
+    processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    cases: Vec<String>,
+    unconfirmed: Option<bool>,
+) -> Result<ClearResult, String> {
+    let processes = processes.inner().clone();
+    let unconfirmed = unconfirmed.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        let ledger = History::open_default().map_err(|e| e.to_string())?;
+        // Nothing this session runs may lose its record or folder.
+        if cases.is_empty() && !unconfirmed {
+            clear(&ledger, &cases, false)
+        } else {
+            processes.with_idle(|| clear(&ledger, &cases, unconfirmed))
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn delete(
     ledger: &History,
     id: &str,
@@ -607,36 +878,7 @@ fn delete(
         {
             return Err("运行目录已变化，请重新确认".into());
         }
-        // Rename into an exclusively created sibling before recursive removal.
-        let quarantine = target.parent().ok_or("目录没有父目录")?.join(format!(
-            ".colm-delete-{}",
-            colm_history::Event::start("delete").operation_id
-        ));
-        std::fs::create_dir(&quarantine).map_err(|e| e.to_string())?;
-        let isolated = quarantine.join("run");
-        if let Err(error) = std::fs::rename(&target, &isolated) {
-            let _ = std::fs::remove_dir(&quarantine);
-            return Err(error.to_string());
-        }
-        let moved = std::fs::symlink_metadata(&isolated).map_err(|e| e.to_string())?;
-        if !same_directory(&identity, &moved) {
-            // Never remove a replacement that raced the ownership check.
-            if !target.exists() {
-                let _ = std::fs::rename(&isolated, &target);
-                let _ = std::fs::remove_dir(&quarantine);
-            }
-            return Err(format!(
-                "目录在删除时发生变化；文件已保留，请检查 {}",
-                quarantine.display()
-            ));
-        }
-        if let Err(error) = std::fs::remove_dir_all(&isolated) {
-            return Err(format!(
-                "删除未完成，记录已保留；剩余文件位于 {}：{error}",
-                isolated.display()
-            ));
-        }
-        std::fs::remove_dir(&quarantine).map_err(|e| e.to_string())?;
+        remove_verified(&target, &identity)?;
         Some(target.display().to_string())
     } else {
         None
@@ -770,6 +1012,107 @@ mod tests {
         let end = event.next(EventPhase::Finished, "succeeded");
         ledger.append(&end).unwrap();
         (root, ledger, end)
+    }
+
+    fn mark_case(source: &Path) {
+        std::fs::write(
+            source.join("case.nml"),
+            "&nl_colm\nDEF_CASE_NAME='site'\n/\n",
+        )
+        .unwrap();
+        std::fs::write(source.join(".colm-desktop.json"), r#"{"mode":"pft"}"#).unwrap();
+    }
+
+    #[test]
+    fn clearing_records_only_keeps_every_folder() {
+        let (root, ledger, _) = fixture();
+        let source = root.join("source");
+        mark_case(&source);
+        let plan = clear_plan(&ledger).unwrap();
+        assert_eq!(plan.records, 1);
+        assert_eq!(plan.cases.len(), 1);
+        assert!(plan.cases[0].bytes > 0);
+        let result = clear(&ledger, &[], false).unwrap();
+        assert_eq!((result.removed, result.kept), (1, 0));
+        assert!(result.deleted.is_empty());
+        assert!(source.join("input").is_file());
+        assert_eq!(ledger.query(&Default::default()).unwrap().total, 0);
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_deletes_only_confirmed_idle_case_folders() {
+        let (root, ledger, _) = fixture();
+        let source = root.join("source");
+        mark_case(&source);
+        let shown = clear_plan(&ledger).unwrap().cases[0].path.clone();
+        // An unfinished operation on the same case keeps the folder and its own record.
+        let mut active = Event::start("run");
+        active.case_path = Some(shown.clone());
+        ledger.append(&active).unwrap();
+        let plan = clear_plan(&ledger).unwrap();
+        assert!(plan.cases.is_empty());
+        assert_eq!((plan.unconfirmed, plan.skipped.len()), (1, 1));
+        assert_eq!(plan.unconfirmed_remote, 0);
+        assert!(clear(&ledger, std::slice::from_ref(&shown), false)
+            .unwrap()
+            .deleted
+            .is_empty());
+        assert!(source.exists());
+        ledger
+            .append(&active.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+        // A path the ledger does not attribute to a case is never deleted.
+        let outsider = root.join("outsider");
+        std::fs::create_dir(&outsider).unwrap();
+        let result = clear(
+            &ledger,
+            &[shown.clone(), outsider.display().to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(result.deleted, vec![shown]);
+        assert!(!source.exists());
+        assert!(outsider.exists());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_counts_any_finished_phase_and_hides_unconfirmed_only_on_request() {
+        let (root, ledger, _) = fixture();
+        let assistant = Event::start("assistant_ui");
+        ledger.append(&assistant).unwrap();
+        ledger
+            .append(&assistant.next(EventPhase::Finished, "ui_succeeded"))
+            .unwrap();
+        let mut remote = Event::start("run");
+        remote.host = Some("tms17l".into());
+        remote.location = Some("remote".into());
+        ledger.append(&remote).unwrap();
+        let plan = clear_plan(&ledger).unwrap();
+        assert_eq!(
+            (plan.records, plan.unconfirmed, plan.unconfirmed_remote),
+            (2, 1, 1)
+        );
+        let result = clear(&ledger, &[], false).unwrap();
+        assert_eq!((result.removed, result.kept), (2, 1));
+        let result = clear(&ledger, &[], true).unwrap();
+        assert_eq!((result.removed, result.kept), (1, 0));
+        assert_eq!(ledger.query(&Default::default()).unwrap().total, 0);
+        // The hidden operation still counts as unresolved for executor safety checks.
+        assert!(ledger
+            .query_audit(&Default::default())
+            .unwrap()
+            .items
+            .iter()
+            .any(
+                |operation| operation.latest.operation_id == remote.operation_id
+                    && operation.needs_reconciliation
+            ));
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

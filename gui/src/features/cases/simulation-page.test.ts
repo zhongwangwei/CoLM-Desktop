@@ -72,6 +72,7 @@ function page(
     forcingProbe?: (args: Record<string, unknown>) => Promise<unknown>;
     pickFolder?: string;
     forcingInput?: () => Promise<{ directory: string; dataset: string }>;
+    local?: { project_dir?: string; rawdata_dir: string; runtime_dir: string; forcing_dir: string };
   } = {},
 ) {
   const model = {
@@ -225,7 +226,9 @@ function page(
         case 'pick_folder':
           return options.pickFolder ?? null;
         case 'remote_config':
-          return { servers: options.servers ?? [] };
+          return { servers: options.servers ?? [], local: options.local };
+        case 'remote_remember_data_paths':
+          return true;
         case 'set_case_run_host':
           return {};
         case 'describe_fields':
@@ -3759,4 +3762,41 @@ test('spatial coverage ignores stale datasets and unblurred directory edits', as
   await p.settle();
   assert.equal(p.render().fields.find((f) => f.id === 'new-start')?.value, '');
   assert.equal(p.render().details.forcing, null);
+});
+
+test('new simulations prefill the resource default data paths and sync edits back', async () => {
+  const p = page('NewCasePage', undefined, [site], initialValues, {
+    local: {
+      project_dir: '/defaults/projects',
+      rawdata_dir: '/defaults/raw',
+      runtime_dir: '/defaults/runtime',
+      forcing_dir: '',
+    },
+  });
+  await p.mount();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-root')?.value, '/defaults/projects');
+  p.set('new-engine', 'rust');
+  p.set('new-name', 'CN-Cng');
+  p.set('new-root', '/project');
+  await p.click('new-next');
+  p.set('new-kind', 'site');
+  const c = await p.click('new-next');
+  assert.equal(c.fields.find((f) => f.id === 'new-rawdata')?.value, '/defaults/raw');
+  assert.equal(c.fields.find((f) => f.id === 'new-runtime')?.value, '/defaults/runtime');
+  for (const [key, value] of Object.entries(form))
+    if (key !== 'rawdata' && p.render().fields.some((f) => f.id === `new-${key}`))
+      p.set(`new-${key}`, value);
+  await p.click('new-next');
+  (p.element('ModelSettings').props.onModeChange as (mode: string) => void)('IGBP');
+  p.render();
+  await p.click('new-next');
+  await p.click('new-create');
+  assert.equal(p.calls.find((call) => call.command === 'new_case')?.args.rawdata, '/defaults/raw');
+  assert.deepEqual(p.calls.find((call) => call.command === 'remote_remember_data_paths')?.args, {
+    host: null,
+    project: '/project',
+    rawdata: '/defaults/raw',
+    runtime: '/runtime',
+    forcing: null,
+  });
 });

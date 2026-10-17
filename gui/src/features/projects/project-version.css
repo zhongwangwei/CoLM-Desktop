@@ -106,6 +106,28 @@
   overflow-y: auto;
   margin: 16px 0;
 }
+.project-version-row {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+.project-version-row > .project-version-option {
+  flex: 1;
+  min-width: 0;
+}
+.project-version-delete-button {
+  flex-shrink: 0;
+  color: #b42318 !important;
+  border: 1px solid var(--border) !important;
+}
+.project-version-delete-reason {
+  display: block;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.project-version-delete {
+  margin: 16px 0;
+}
 .project-version-option {
   justify-content: space-between !important;
   text-align: left;

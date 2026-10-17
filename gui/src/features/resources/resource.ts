@@ -20,6 +20,10 @@ export const newServer = (): Server => ({
   fetch_vars: '',
   env_script: '',
   directives: [],
+  project_dir: '',
+  rawdata_dir: '',
+  runtime_dir: '',
+  forcing_dir: '',
 });
 export function replaceServer(servers: Server[], original: string | null, next: Server) {
   if (!next.host.trim() || next.host.startsWith('-') || /\s/.test(next.host))

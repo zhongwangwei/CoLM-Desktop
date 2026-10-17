@@ -25,6 +25,7 @@ import {
   type Server,
   type ResourceCheck,
 } from './resource';
+import type { DataDefaults } from '../../lib/types';
 import NavIcon from '../../components/NavIcon';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import './resources-page.css';
@@ -32,6 +33,12 @@ export default function ResourcesPage() {
   const { state, update, navigate } = useApp(),
     en = state.language === 'en',
     t = (a: string, b: string) => (en ? b : a);
+  const [localData, setLocalData] = useState<DataDefaults>({
+    project_dir: '',
+    rawdata_dir: '',
+    runtime_dir: '',
+    forcing_dir: '',
+  });
   const [servers, setServers] = useState<Server[]>([]),
     [aliases, setAliases] = useState<string[]>([]),
     [editor, setEditor] = useState<Server | null>(null),
@@ -144,9 +151,18 @@ export default function ResourcesPage() {
       .then(async () => {
         if (!token.active || token !== epoch.current) return;
         setConfigLoaded(false);
-        const config = await invokeJson<{ servers: Server[] }>('remote_config');
+        const config = await invokeJson<{ servers: Server[]; local?: DataDefaults }>(
+          'remote_config',
+        );
         if (!token.active || token !== epoch.current) return;
         setServers(config.servers);
+        setLocalData({
+          project_dir: '',
+          rawdata_dir: '',
+          runtime_dir: '',
+          forcing_dir: '',
+          ...config.local,
+        });
         setConfigLoaded(true);
         if (!initialized.current) {
           initialized.current = true;
@@ -392,6 +408,25 @@ export default function ResourcesPage() {
     if (editor)
       editServer({ ...editor, [key]: typeof editor[key] === 'number' ? Number(value) : value });
   }
+  async function saveLocalData() {
+    if (!configLoaded)
+      throw new Error(
+        t(
+          '服务器配置尚未成功加载，请先刷新。',
+          'Load the server configuration successfully before saving.',
+        ),
+      );
+    const local = Object.fromEntries(
+      Object.entries(localData).map(([key, value]) => [key, value.trim()]),
+    ) as DataDefaults;
+    await invoke('remote_save_config', { config: { servers, local } });
+    setLocalData(local);
+    return t('已保存本机默认数据路径', 'Saved local default data paths');
+  }
+  async function pickLocalData(key: keyof DataDefaults) {
+    const path = await invoke<string | null>('pick_folder', { key: `resource-${key}` });
+    if (path) setLocalData((current) => ({ ...current, [key]: path }));
+  }
   async function registerPassword() {
     if (!editor) return;
     await invoke('remote_set_password', {
@@ -438,6 +473,12 @@ export default function ResourcesPage() {
     ['host', t('服务器地址 / SSH 别名', 'Server address / SSH alias')],
     ['username', t('登录账号', 'Username')],
   ];
+  const dataFields: [keyof Server & keyof DataDefaults, string][] = [
+    ['project_dir', t('默认项目目录', 'Default project folder')],
+    ['rawdata_dir', t('默认地表数据目录', 'Default surface data folder')],
+    ['runtime_dir', t('默认 Runtime 数据目录', 'Default runtime data folder')],
+    ['forcing_dir', t('默认强迫场数据路径', 'Default forcing data path')],
+  ];
   const extraFields: [keyof Server, string][] = [
     ['port', t('端口（0 使用 SSH 默认）', 'Port (0 uses SSH default)')],
     ['threads', t('线程', 'Threads')],
@@ -454,11 +495,12 @@ export default function ResourcesPage() {
     ? [
         ...basicFields,
         ['root', t('服务器工作目录', 'Server working root')] as [keyof Server, string],
+        ...dataFields,
         ...(advanced ? extraFields : []),
       ].map(([key, label]) => ({
         id: `resource-${key}`,
         label,
-        value: String(editor[key]),
+        value: String(editor[key] ?? ''),
         type: typeof editor[key] === 'number' ? 'number' : 'text',
         set: (v) => editField(key, v),
       }))
@@ -653,6 +695,31 @@ export default function ResourcesPage() {
         }),
     });
   if (selected === 'local') {
+    guideFields.push(
+      ...dataFields.map(([key, label]) => ({
+        id: `resource-local-${key}`,
+        label,
+        value: localData[key],
+        type: 'text' as const,
+        set: (value: string) => setLocalData((current) => ({ ...current, [key]: value })),
+      })),
+    );
+    guideActions.push(
+      ...dataFields.map(([key, label]) => ({
+        id: `resource-local-pick-${key}`,
+        label: `${t('选择', 'Choose')} ${label}`,
+        kind: 'click' as const,
+        enabled: !busy,
+        run: () => pickLocalData(key),
+      })),
+      {
+        id: 'resource-local-data-save',
+        label: t('保存默认数据路径', 'Save default data paths'),
+        kind: 'commit',
+        enabled: !busy && configLoaded,
+        run: () => execute('local-data', saveLocalData),
+      },
+    );
     guideActions.push({
       id: 'resource-local',
       label: t('检查本机后端与模型内核', 'Check local backend and model kernel'),
@@ -1079,6 +1146,23 @@ export default function ResourcesPage() {
           </p>
           {actionButton('resource-local')}
           {output.local != null && <Notice>{String(output.local)}</Notice>}
+          <section className="resource-data-defaults">
+            <h3>{t('默认数据路径', 'Default data paths')}</h3>
+            <p className="muted">
+              {t(
+                '新建模拟选择本机运行时自动填入项目目录和数据路径；新建时改用的路径会同步回这里。',
+                'Filled in when a new simulation runs locally; paths changed while creating one are synced back here.',
+              )}
+            </p>
+            {dataFields.map(([key]) => (
+              <div className="resource-identity" key={key}>
+                {field(`resource-local-${key}`)}
+                {actionButton(`resource-local-pick-${key}`)}
+              </div>
+            ))}
+            {actionButton('resource-local-data-save', true)}
+            {output['local-data'] != null && <Notice>{String(output['local-data'])}</Notice>}
+          </section>
           {localRunEntries(state.running).map(([dir, task]) => (
             <div className="resource-task-row" key={dir}>
               <span>
@@ -1156,6 +1240,16 @@ export default function ResourcesPage() {
             {field('resource-root')}
             {actionButton('resource-browse-root')}
           </div>
+          <section className="resource-data-defaults">
+            <h3>{t('默认数据路径', 'Default data paths')}</h3>
+            <p className="muted">
+              {t(
+                '新建模拟选择这台服务器时自动填入；新建时改用的路径会同步回这里。填服务器上的绝对路径。',
+                'Filled in when a new simulation runs on this server; paths changed while creating one are synced back here. Use absolute server paths.',
+              )}
+            </p>
+            <div className="form-grid">{dataFields.map(([key]) => field(`resource-${key}`))}</div>
+          </section>
           <section className="resource-checks">
             <h3>{t('连接与环境检查', 'Connection and environment')}</h3>
             <div className="resource-status-grid">

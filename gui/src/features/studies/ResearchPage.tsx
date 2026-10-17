@@ -23,6 +23,7 @@ import {
   type RemoteStudyReply,
 } from './remote-study';
 import type { VersionRef } from '../../lib/types';
+import { REMOTE_CHECK_MS } from '../runs/run-model';
 import { researchMethods, methodFromStudy, completedCandidates } from './research-home';
 import './research-home.css';
 type Envelope = {
@@ -389,7 +390,7 @@ export default function ResearchPage() {
       } catch (e) {
         if (!stopped) setError(String(e));
       }
-      if (!stopped) timer = setTimeout(poll, 15000);
+      if (!stopped) timer = setTimeout(poll, REMOTE_CHECK_MS);
     };
     timer = setTimeout(poll, 1000);
     return () => {

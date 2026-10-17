@@ -1180,3 +1180,56 @@ fn case_local_runs_reject_symlink_escape() {
         .is_err());
     assert!(!outside.join("nested/escape").exists());
 }
+
+#[test]
+fn removing_a_revision_keeps_the_baseline_children_and_shared_sources() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let first = reg.install_official(code()).unwrap();
+    let mut newer_code = code();
+    newer_code.source_sha256 = "b".repeat(64);
+    let latest = reg.install_official(newer_code.clone()).unwrap();
+    assert_eq!(latest.version.revision, 2);
+    for code in [code(), newer_code] {
+        let source = reg
+            .root()
+            .join("sources")
+            .join(source_cache_name(&code).unwrap());
+        fs::create_dir_all(&source).unwrap();
+        fs::write(source.join("code.json"), "{}").unwrap();
+    }
+    // The latest official baseline always stays.
+    assert!(reg.remove(&latest.version).is_err());
+    // A draft and then a frozen child keep their parent.
+    let mut draft = reg.create_draft(draft(first.version.clone())).unwrap();
+    draft
+        .overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    let draft = reg.save_draft(draft, 1).unwrap();
+    assert!(reg.remove(&first.version).is_err());
+    let child = reg.freeze(&draft.id, &tmp.0).unwrap();
+    // The draft stays after freezing and keeps its base; drop it like a user would.
+    fs::remove_file(reg.root().join("drafts").join(format!("{}.json", draft.id))).unwrap();
+    let error = reg.remove(&first.version).unwrap_err().to_string();
+    assert!(error.contains("derived"), "{error}");
+    // The child shares the first revision's code, so its snapshot survives the child's removal.
+    let removed = reg.remove(&child.version).unwrap();
+    assert_eq!(removed.len(), 1);
+    assert!(reg.get(&child.version).is_err());
+    let removed = reg.remove(&first.version).unwrap();
+    assert_eq!(
+        removed.len(),
+        2,
+        "revision and its now unused source snapshot"
+    );
+    assert!(!removed[1].exists());
+    assert_eq!(
+        reg.list()
+            .unwrap()
+            .iter()
+            .map(|r| r.version.clone())
+            .collect::<Vec<_>>(),
+        vec![latest.version]
+    );
+}

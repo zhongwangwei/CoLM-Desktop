@@ -148,6 +148,8 @@ test('version modal closes only after a successful frozen revision read', async 
     lock,
     state: { busy: false },
     setError: () => {},
+    setPendingDelete: () => {},
+    setDeleteReport: () => {},
     setVersionChooser: (open: boolean) => events.push(open ? 'open' : 'close'),
   });
   close(false);
@@ -166,6 +168,12 @@ test('project contract exposes only version dialog actions while the dialog is o
     versionEnabled: true,
     chooseVersion: async (key: string) => chosen.push(key),
     changeVersionChooser: () => {},
+    pendingDelete: null,
+    selectedId: 'official',
+    oldOfficial: [],
+    askDelete: () => {},
+    askCleanup: () => {},
+    deleteVersions: async () => {},
     t: (zh: string) => zh,
   });
   const context = {
@@ -184,7 +192,11 @@ test('project contract exposes only version dialog actions while the dialog is o
   assert.deepEqual(modal.fields, []);
   assert.deepEqual(
     modal.actions.map((action: { id: string }) => action.id),
-    [`project-version:${JSON.stringify(model.version)}`, 'project-version-close'],
+    [
+      `project-version:${JSON.stringify(model.version)}`,
+      'project-version-delete:soil',
+      'project-version-close',
+    ],
   );
   await modal.actions[0].run();
   assert.deepEqual(chosen, [JSON.stringify(model.version)]);
@@ -604,4 +616,51 @@ test('explicit project home hides a remembered batch without losing its return s
   page.remount();
   assert.ok(page.nodes.includes('ProjectBatchRun'));
   assert.equal(page.batchProps.at(-1)?.fromCreation, true);
+});
+
+test('deleting a version asks first, removes all its revisions and reports what stayed', async () => {
+  const official = { version: { id: 'official', revision: 3 }, name: 'Official CoLM' },
+    older = { version: { id: 'official', revision: 2 }, name: 'Official CoLM' },
+    soil = [1, 2].map((revision) => ({ version: { id: 'soil', revision }, name: 'Soil' }));
+  const calls: unknown[] = [];
+  let pending: { title: string; versions: unknown[] } | null = null;
+  let report: unknown = null;
+  const context = {
+    state: { versions: [official, older, ...soil], versionRef: official.version },
+    official,
+    selectedId: 'official',
+    versionKey: (value: typeof official) => JSON.stringify(value.version),
+    t: (zh: string) => zh,
+    setDeleteReport: (value: unknown) => (report = value),
+    setPendingDelete: (value: typeof pending) => (pending = value),
+  };
+  const revisionsOf = expression('revisionsOf', context);
+  const askDelete = expression('askDelete', { ...context, revisionsOf });
+  askDelete(official);
+  assert.equal(pending, null, 'the official model cannot be deleted');
+  askDelete(soil[1]);
+  assert.deepEqual(pending, {
+    title: 'Soil',
+    versions: [soil[1].version, soil[0].version],
+  });
+  const oldOfficial = expression('oldOfficial', context);
+  assert.deepEqual(oldOfficial, [older.version]);
+  const deleteVersions = expression('deleteVersions', {
+    ...context,
+    pendingDelete: pending,
+    work: async (fn: () => Promise<unknown>) => fn(),
+    active: { current: true },
+    invokeJson: async (command: string, args: unknown) => {
+      calls.push([command, args]);
+      return { deleted: [soil[1].version], failed: [], removed: [] };
+    },
+    refreshVersions: async () => calls.push('refresh'),
+  });
+  await deleteVersions();
+  assert.deepEqual(calls, [
+    ['model_delete', { versions: [soil[1].version, soil[0].version] }],
+    'refresh',
+  ]);
+  assert.equal(pending, null);
+  assert.deepEqual((report as { deleted: unknown[] }).deleted, [soil[1].version]);
 });

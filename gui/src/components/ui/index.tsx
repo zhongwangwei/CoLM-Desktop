@@ -298,6 +298,7 @@ export function Dialog({
   open,
   onOpenChange,
   showClose = true,
+  className,
   children,
 }: {
   title: ReactNode;
@@ -305,6 +306,7 @@ export function Dialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   showClose?: boolean;
+  className?: string;
   children: ReactNode;
 }) {
   const id = useId();
@@ -315,7 +317,7 @@ export function Dialog({
       <RadixDialog.Portal>
         <RadixDialog.Overlay className="dialog-overlay" />
         <RadixDialog.Content
-          className="dialog-content"
+          className={cn('dialog-content', className)}
           aria-describedby={description ? id : undefined}
         >
           <RadixDialog.Title>{title}</RadixDialog.Title>

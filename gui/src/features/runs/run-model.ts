@@ -1,3 +1,5 @@
+/** How often an unfinished server job or study is checked automatically. */
+export const REMOTE_CHECK_MS = 10_000;
 import { cropEnabled } from '../cases/case-model';
 import type { RunState } from '../../lib/types';
 export interface RunView {

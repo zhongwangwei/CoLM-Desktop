@@ -15,6 +15,7 @@ fn pending_study_status_uses_its_configured_connection_after_restart() {
     let server:Server = serde_json::from_value(json!({"host":"server","root":"/data/colm","username":"researcher","auth":"password","port":2222})).unwrap();
     let config = RemoteConfig {
         servers: vec![server.clone()],
+        local: None,
     };
     let recovered = study_server(&config, root.to_str().unwrap()).unwrap();
     assert_eq!(recovered.host, server.host);
@@ -64,9 +65,14 @@ fn server_settings_are_validated() {
         fetch_vars: String::new(),
         env_script: String::new(),
         directives: Vec::new(),
+        project_dir: String::new(),
+        rawdata_dir: String::new(),
+        runtime_dir: String::new(),
+        forcing_dir: String::new(),
     };
     let ok = RemoteConfig {
         servers: vec![server("7920land", "/media/zhwei/data02/zhwei/colm-desktop")],
+        local: None,
     };
     assert!(validate(&ok).is_ok());
     for (host, root) in [
@@ -79,7 +85,8 @@ fn server_settings_are_validated() {
     ] {
         assert!(
             validate(&RemoteConfig {
-                servers: vec![server(host, root)]
+                servers: vec![server(host, root)],
+                local: None,
             })
             .is_err(),
             "{host} {root}"
@@ -88,13 +95,15 @@ fn server_settings_are_validated() {
     let mut bad_map = server("h", "/a");
     bad_map.maps[0].remote = "relative".into();
     assert!(validate(&RemoteConfig {
-        servers: vec![bad_map]
+        servers: vec![bad_map],
+        local: None,
     })
     .is_err());
     let mut no_threads = server("h", "/a");
     no_threads.threads = 0;
     assert!(validate(&RemoteConfig {
-        servers: vec![no_threads]
+        servers: vec![no_threads],
+        local: None,
     })
     .is_err());
     // 旧配置没有 threads 字段：默认 8；调度系统默认 auto，其余为空。
@@ -112,6 +121,7 @@ fn scheduler_settings_are_validated() {
         edit(&mut server);
         validate(&RemoteConfig {
             servers: vec![server],
+            local: None,
         })
     };
     assert!(check(&|s| {
@@ -261,7 +271,8 @@ fn fetching_only_the_configured_variables_unless_everything_is_asked_for() {
         server.fetch_vars = bad.into();
         assert!(
             validate(&RemoteConfig {
-                servers: vec![server.clone()]
+                servers: vec![server.clone()],
+                local: None,
             })
             .is_err(),
             "{bad}"
@@ -322,25 +333,29 @@ fn connection_options_reject_invalid_modes_users_and_relative_keys() {
     for user in ["-root", "alice@host", "alice bob", "alice\nroot"] {
         server.username = user.into();
         assert!(validate(&RemoteConfig {
-            servers: vec![server.clone()]
+            servers: vec![server.clone()],
+            local: None,
         })
         .is_err());
     }
     server.username = "alice".into();
     server.auth = "unknown".into();
     assert!(validate(&RemoteConfig {
-        servers: vec![server.clone()]
+        servers: vec![server.clone()],
+        local: None,
     })
     .is_err());
     server.auth = "key".into();
     server.identity_file = "relative-key".into();
     assert!(validate(&RemoteConfig {
-        servers: vec![server.clone()]
+        servers: vec![server.clone()],
+        local: None,
     })
     .is_err());
     server.identity_file.clear();
     assert!(validate(&RemoteConfig {
-        servers: vec![server]
+        servers: vec![server],
+        local: None,
     })
     .is_ok());
 }
@@ -350,6 +365,7 @@ fn saved_jobs_keep_their_original_login_when_a_profile_changes() {
     let changed: Server = serde_json::from_value(json!({"host":"c1", "root":"/data/new", "auth":"key", "username":"bob", "port":22, "fetch_vars":"f_rnet"})).unwrap();
     let config = RemoteConfig {
         servers: vec![changed],
+        local: None,
     };
     let record = json!({"host":"c1", "root":"/data/original", "ssh_auth":{"host":"c1", "username":"alice", "port":2222, "auth":"password", "identity_file":""}});
     let original = server_from_record(&config, &record).unwrap();
@@ -427,6 +443,7 @@ fn a_source_pending_run_outranks_old_records_and_exposes_only_status_recovery() 
     configured.fetch_vars = "f_rnet".into();
     let config = RemoteConfig {
         servers: vec![configured],
+        local: None,
     };
     let case = dir.display().to_string();
     let record = remote_job_record(case.clone()).unwrap().unwrap();
@@ -707,7 +724,8 @@ fn directory_browsing_accepts_incomplete_run_settings_but_validates_connection_a
         "/data/work"
     );
     assert!(validate(&RemoteConfig {
-        servers: vec![server.clone()]
+        servers: vec![server.clone()],
+        local: None,
     })
     .is_err());
     assert!(browse_args(&server, "other", None).is_err());
@@ -763,7 +781,8 @@ fn connection_checks_still_reach_ssh_with_incomplete_run_settings() {
         assert_eq!(args, ["remote-probe", "--host", "tms17l"]);
         assert!(error.is_some());
         assert!(validate(&RemoteConfig {
-            servers: vec![server.clone()]
+            servers: vec![server.clone()],
+            local: None,
         })
         .is_err());
     }
@@ -922,4 +941,67 @@ fn per_run_resources_reject_invalid_overrides_and_keep_saved_automatic_cpus() {
         assert_eq!(effective.cpus, 0);
         assert_eq!(effective.scheduler, scheduler);
     }
+}
+
+#[test]
+fn data_path_defaults_follow_the_chosen_resource_and_keep_unset_values() {
+    let mut config: RemoteConfig =
+        serde_json::from_str(r#"{"servers":[{"host":"tms17l","root":"/tera11/zhwei"}]}"#).unwrap();
+    assert!(config.local.is_none());
+    let local_root = if cfg!(windows) {
+        r"D:\Data"
+    } else {
+        "/Volumes/Data"
+    };
+    let rawdata = format!("{local_root}/CoLMrawdata");
+    let project = format!("{local_root}/projects");
+    assert!(remember_data_paths(
+        &mut config,
+        None,
+        [Some(&project), Some(&rawdata), None, Some("")]
+    )
+    .unwrap());
+    let local = config.local.clone().unwrap();
+    assert_eq!(
+        (local.project_dir.as_str(), local.rawdata_dir.as_str()),
+        (project.as_str(), rawdata.as_str())
+    );
+    assert_eq!(
+        (local.runtime_dir.as_str(), local.forcing_dir.as_str()),
+        ("", "")
+    );
+    assert!(remember_data_paths(
+        &mut config,
+        Some("tms17l"),
+        [
+            Some("/tera11/zhwei/Personal/CoLM/colm-desktop"),
+            Some("/shr03/CoLMrawdata"),
+            Some("/shr03/CoLMruntime"),
+            Some("/shr03/CoLM_Forcing/JRA3Q"),
+        ],
+    )
+    .unwrap());
+    let server = &config.servers[0];
+    assert_eq!(
+        server.project_dir,
+        "/tera11/zhwei/Personal/CoLM/colm-desktop"
+    );
+    assert_eq!(server.forcing_dir, "/shr03/CoLM_Forcing/JRA3Q");
+    // Same values are not a change; unknown servers and relative paths are refused.
+    assert!(!remember_data_paths(
+        &mut config,
+        Some("tms17l"),
+        [None, Some("/shr03/CoLMrawdata"), None, None]
+    )
+    .unwrap());
+    assert!(
+        remember_data_paths(&mut config, Some("absent"), [Some("/x"), None, None, None]).is_err()
+    );
+    assert!(remember_data_paths(
+        &mut config,
+        Some("tms17l"),
+        [Some("relative"), None, None, None]
+    )
+    .is_err());
+    assert_eq!(config.local.unwrap().rawdata_dir, rawdata);
 }

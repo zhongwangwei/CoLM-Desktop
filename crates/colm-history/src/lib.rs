@@ -185,6 +185,21 @@ pub struct Page {
     pub total: u64,
 }
 
+/// Terminal statuses that confirm an operation ended; assistant UI requests end as `ui_*`.
+/// Keep in step with the status list in [`History::remove_operation`].
+pub fn confirmed_status(status: &str) -> bool {
+    matches!(
+        status,
+        "succeeded"
+            | "failed"
+            | "completed"
+            | "completed_with_failures"
+            | "cancelled"
+            | "ui_succeeded"
+            | "ui_failed"
+    )
+}
+
 pub fn default_db_path() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("COLM_HISTORY_DB").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(path));
@@ -410,7 +425,7 @@ impl History {
             "INSERT INTO history_removed_operations(operation_id,removed_ms)
              SELECT operation_id,?2 FROM history_operations WHERE operation_id=?1
              AND needs_reconciliation=0 AND json_extract(payload,'$.status')
-                 IN ('succeeded','failed','completed','completed_with_failures','cancelled')
+                 IN ('succeeded','failed','completed','completed_with_failures','cancelled','ui_succeeded','ui_failed')
              ON CONFLICT(operation_id) DO NOTHING",
             params![operation_id, now_ms()],
         )?;
@@ -430,6 +445,19 @@ impl History {
             }
         }
         transaction.commit()?;
+        Ok(inserted > 0)
+    }
+    /// Hide an operation whose completion was never confirmed, once the user has accepted it
+    /// as abandoned. Its events stay, so audits and executor safety checks still treat it as
+    /// unresolved. Returns false when it was already hidden.
+    pub fn remove_unconfirmed(&self, operation_id: &str) -> Result<bool> {
+        ensure!(!operation_id.is_empty(), "operation ID must be nonempty");
+        let inserted = self.connection.execute(
+            "INSERT INTO history_removed_operations(operation_id,removed_ms)
+             SELECT operation_id,?2 FROM history_operations WHERE operation_id=?1
+             ON CONFLICT(operation_id) DO NOTHING",
+            params![operation_id, now_ms()],
+        )?;
         Ok(inserted > 0)
     }
     pub fn query(&self, query: &Query) -> Result<Page> {

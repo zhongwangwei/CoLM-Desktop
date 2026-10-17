@@ -253,4 +253,15 @@ export type Server = {
   fetch_vars: string;
   env_script: string;
   directives: string[];
+  /** 新建模拟时预填的默认项目目录与数据路径（服务器路径）。 */
+  project_dir?: string;
+  rawdata_dir?: string;
+  runtime_dir?: string;
+  forcing_dir?: string;
+};
+export type DataDefaults = {
+  project_dir: string;
+  rawdata_dir: string;
+  runtime_dir: string;
+  forcing_dir: string;
 };

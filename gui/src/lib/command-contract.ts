@@ -626,6 +626,17 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "history_clear_plan": {},
+  "history_clear": {
+    "cases": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    },
+    "unconfirmed": {
+      "required": false,
+      "rust_type": "Option<bool>"
+    }
+  },
   "history_delete": {
     "id": {
       "required": true,
@@ -664,6 +675,12 @@ export const commandContract = {
   },
   "print_report": {},
   "model_list": {},
+  "model_delete": {
+    "versions": {
+      "required": true,
+      "rust_type": "Vec<VersionRef>"
+    }
+  },
   "model_get": {
     "id": {
       "required": true,
@@ -974,6 +991,28 @@ export const commandContract = {
     "config": {
       "required": true,
       "rust_type": "RemoteConfig"
+    }
+  },
+  "remote_remember_data_paths": {
+    "host": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "project": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "rawdata": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "runtime": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "forcing": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "remote_ssh_hosts": {},
