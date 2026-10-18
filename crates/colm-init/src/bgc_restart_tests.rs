@@ -43,6 +43,7 @@ fn assert_no_deflate(path: &std::path::Path, variable: &str) {
 
 #[test]
 fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-constants");
     let files =
         write_cold_start_bgc_constant_restart(&root, "CN-Cng", 2005, "w180_s90", 2, true, 1)
@@ -127,6 +128,7 @@ fn cold_start_bgc_constants_match_fortran_schema_values_and_layout() {
 
 #[test]
 fn bgc_constant_restart_compresses_only_block_vectors() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-compression");
     let files = write_cold_start_bgc_constant_restart(&root, "case", 2005, "w180_s90", 2, false, 4)
         .unwrap();
@@ -162,6 +164,7 @@ fn bgc_constant_restart_compresses_only_block_vectors() {
 
 #[test]
 fn bgc_constant_restart_rejects_invalid_output_contract() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-invalid");
     assert!(write_cold_start_bgc_constant_restart(
         &root, "bad/name", 2005, "w180_s90", 1, false, 1
@@ -181,6 +184,7 @@ fn bgc_constant_restart_rejects_invalid_output_contract() {
 #[test]
 #[ignore = "requires the local BGC kernel and CoLMruntime cnsteadystate.nc reference data"]
 fn cold_start_bgc_constants_match_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

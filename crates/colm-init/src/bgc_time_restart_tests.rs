@@ -50,6 +50,7 @@ const PATCH_I8: [i8; 2] = [0, 1];
 
 #[test]
 fn bgc_time_restart_matches_fortran_axis_layout_and_optional_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-time");
     let date = RestartDate {
         year: 2008,
@@ -159,6 +160,7 @@ fn bgc_time_restart_matches_fortran_axis_layout_and_optional_fields() {
 
 #[test]
 fn bgc_crop_restart_writes_the_exact_fortran_tail_schema() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-crop");
     let mut input = sample_input();
     input.crop = Some(crop_fields());
@@ -206,6 +208,7 @@ fn bgc_crop_restart_writes_the_exact_fortran_tail_schema() {
 
 #[test]
 fn bgc_time_restart_compresses_only_crop_tail_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-time-compression");
     let mut input = sample_input();
     input.crop = Some(crop_fields());
@@ -246,6 +249,7 @@ fn bgc_time_restart_compresses_only_crop_tail_fields() {
 
 #[test]
 fn bgc_time_restart_rejects_invalid_contract_before_creating_output() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bgc-time-invalid");
     let mut input = sample_input();
     input.climate.precipitation_daily = &DAILY[..7];
@@ -269,6 +273,7 @@ fn bgc_time_restart_rejects_invalid_contract_before_creating_output() {
 #[test]
 #[ignore = "requires the local BGC kernel and CoLMruntime cnsteadystate.nc reference data"]
 fn bgc_time_restart_matches_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()

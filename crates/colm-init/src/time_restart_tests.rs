@@ -16,6 +16,7 @@ static SNOW_RADIATION: [f64; 24] = [
 
 #[test]
 fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("core");
     let result = write_time_restart(
         &root,
@@ -93,6 +94,7 @@ fn time_restart_matches_fortran_filename_dimensions_and_axis_order() {
 
 #[test]
 fn time_restart_dynamic_lake_schema_follows_layer_thickness_input() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("dynamic-lake-schema");
     let with_path = root.join("with.nc");
     write_time_restart_block(&with_path, input()).unwrap();
@@ -115,6 +117,7 @@ fn time_restart_dynamic_lake_schema_follows_layer_thickness_input() {
 
 #[test]
 fn time_restart_rejects_invalid_date_and_incomplete_axis_data_before_writing() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("invalid");
     assert!(write_time_restart(
         &root,
@@ -138,6 +141,7 @@ fn time_restart_rejects_invalid_date_and_incomplete_axis_data_before_writing() {
 
 #[test]
 fn time_restart_writes_hyperspectral_fields_in_fortran_patch_last_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("hyperspectral");
     let albedo = Box::leak(
         (0..(211 * 2 * 2))
@@ -187,6 +191,7 @@ fn time_restart_writes_hyperspectral_fields_in_fortran_patch_last_order() {
 
 #[test]
 fn hyperspectral_fields_append_to_the_shared_common_restart() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("hyperspectral-append");
     let path = root.join("restart.nc");
     write_time_restart_block(&path, input()).unwrap();
@@ -232,6 +237,7 @@ fn hyperspectral_fields_append_to_the_shared_common_restart() {
 
 #[test]
 fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_values() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip time_restart_compresses_all_common_restart_fields_and_preserves_decoded_values: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -257,6 +263,7 @@ fn time_restart_compresses_all_common_restart_fields_and_preserves_decoded_value
 
 #[test]
 fn time_restart_honors_explicit_compression_and_append_levels_and_rejects_invalid_preoutput() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip time_restart_honors_explicit_compression_and_append_levels_and_rejects_invalid_preoutput: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -297,6 +304,7 @@ fn time_restart_honors_explicit_compression_and_append_levels_and_rejects_invali
 #[test]
 #[ignore = "requires the locally generated upstream CN-Cng reference restart"]
 fn time_restart_schema_matches_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = StandardFixture::new();
     let path = temp_dir("upstream-schema").join("restart.nc");
     write_time_restart_block(&path, fixture.input()).unwrap();
@@ -653,6 +661,7 @@ fn temp_dir(label: &str) -> PathBuf {
 /// 对账**（覆盖整份文件，不是挑选过的字段），并抽查类型化取用助手。
 #[test]
 fn time_restart_round_trips_through_the_reader() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("read-round-trip");
     std::fs::create_dir_all(&root).unwrap();
     let path = root.join("restart.nc");

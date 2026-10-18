@@ -7,6 +7,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("constant");
     let path = write_pft_constant_restart(
         &root,
@@ -63,6 +64,7 @@ fn pft_constant_restart_matches_fortran_name_schema_and_crop_branch() {
 
 #[test]
 fn pftless_single_point_keeps_an_empty_constant_vector() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("pftless-constant");
     let path = write_pft_constant_restart(
         &root,
@@ -116,6 +118,7 @@ fn pftless_single_point_keeps_an_empty_constant_vector() {
 
 #[test]
 fn pft_time_restart_preserves_fortran_axis_order_and_feature_schema() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let root = temp_dir("time");
     let path = write_pft_time_restart(
@@ -175,6 +178,7 @@ fn pft_time_restart_preserves_fortran_axis_order_and_feature_schema() {
 
 #[test]
 fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let values = vec![fixture.pft.as_slice(); PFT_BGC_F64_VARIABLES.len()];
     let mut input = fixture.time_input();
@@ -238,6 +242,7 @@ fn pft_bgc_restart_writes_every_upstream_carbon_nitrogen_field_in_order() {
 
 #[test]
 fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let values = vec![fixture.pft.as_slice(); PFT_BGC_F64_VARIABLES.len()];
     let mut input = fixture.time_input();
@@ -318,6 +323,7 @@ fn pft_crop_restart_writes_the_exact_fortran_tail_schema() {
 
 #[test]
 fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip pft_restart_applies_def_rest_compression_to_constant_and_time_variables: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -365,6 +371,7 @@ fn pft_restart_applies_def_rest_compression_to_constant_and_time_variables() {
 
 #[test]
 fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -404,6 +411,7 @@ fn pft_restart_honors_level_zero_and_four_and_rejects_invalid_preoutput() {
 #[test]
 #[ignore = "requires the local BGC kernel and CoLMruntime cnsteadystate.nc reference data"]
 fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -565,6 +573,7 @@ fn pft_bgc_restart_matches_the_upstream_fortran_reference() {
 
 #[test]
 fn pft_restart_rejects_invalid_feature_shapes_before_creating_a_file() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("invalid");
     assert!(write_pft_constant_restart(
         &root,

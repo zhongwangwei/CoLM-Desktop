@@ -2,6 +2,7 @@ use super::*;
 
 #[test]
 fn crop_state_keeps_pft_and_patch_phase_axes_distinct() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let state = empty_crop_state(2, 3);
 
     assert_eq!(state.pft_fields().crop_phase, [4.0, 4.0]);
@@ -10,6 +11,7 @@ fn crop_state_keeps_pft_and_patch_phase_axes_distinct() {
 
 #[test]
 fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let state = spatial_crop_cold_start_from_tuning(
         &[1, 15, 16],
         &[0, 0, 1],
@@ -31,6 +33,7 @@ fn spatial_tuning_keeps_crop_pft_and_bgc_patch_axes_aligned() {
 
 #[test]
 fn spatial_tuning_allows_empty_pft_axis_and_keeps_patch_defaults() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let state = spatial_crop_cold_start_from_tuning(&[], &[], &[], 2, 120.0, 1).unwrap();
 
     assert!(state.pft_fields().planting_date.is_empty());
@@ -43,6 +46,7 @@ fn spatial_tuning_allows_empty_pft_axis_and_keeps_patch_defaults() {
 
 #[test]
 fn explicit_planting_day_keeps_source_one_manure_without_management_maps() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let state = crop_cold_start_from_tuning(&[17], &[1.0], 120.0, 1).unwrap();
     let pft = state.pft_fields();
     let patch = state.bgc_fields();
@@ -66,6 +70,7 @@ fn explicit_planting_day_keeps_source_one_manure_without_management_maps() {
 
 #[test]
 fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_runtime_dir("crop-management");
     write_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
     write_fertilizer_source_one(&root.join("crop/fertnitro_fillcoast.nc"));
@@ -127,6 +132,7 @@ fn management_maps_keep_restart_inputs_independent_of_runtime_application() {
 
 #[test]
 fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_runtime_dir("spatial-crop-management");
     write_spatial_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
     write_spatial_fertilizer_source_one(&root.join("crop/fertnitro_fillcoast.nc"));
@@ -197,6 +203,7 @@ fn spatial_management_maps_are_areal_and_irrigation_uses_the_largest_overlap() {
 
 #[test]
 fn spatial_management_allows_empty_pft_axis_but_keeps_patch_crop_maps() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_runtime_dir("spatial-crop-empty-pft");
     write_spatial_planting_map(&root.join("crop/plantdt-colm-64cfts-rice2_fillcoast.nc"));
     write_spatial_fertilizer_source_two(&root.join("crop/fertilizer_2015soc.nc"));
@@ -460,6 +467,7 @@ fn point_map(path: &std::path::Path, single_precision: bool) -> netcdf::FileMut 
 
 #[test]
 fn source_one_manure_matches_the_complete_fortran_class_table() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let classes = (0..=78).collect::<Vec<_>>();
     let mut state = empty_crop_state(classes.len(), 1);
     state.set_source_one_manure(&classes);

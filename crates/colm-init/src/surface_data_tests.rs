@@ -7,6 +7,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("vgm");
     write_surface(&path, 8, true, true, true);
     let data = read_single_point_surface(
@@ -30,6 +31,7 @@ fn reader_maps_the_single_point_surface_contract_to_source_soil_layers() {
 
 #[test]
 fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("bedrock");
     write_surface(&path, 8, true, true, true);
     let root = path.with_file_name(format!("colm-init-bedrock-restart-{}", std::process::id()));
@@ -79,6 +81,7 @@ fn single_point_bedrock_is_optional_until_the_namelist_enables_it() {
 
 #[test]
 fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("hyperspectral-soil-albedo");
     write_surface(&path, 8, true, true, true);
     let mut file = netcdf::append(&path).unwrap();
@@ -99,6 +102,7 @@ fn hyperspectral_soil_albedo_requires_all_211_finite_site_values() {
 
 #[test]
 fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("ten-layer");
     write_surface(&path, 10, true, true, true);
     let data = read_single_point_surface(
@@ -115,6 +119,7 @@ fn reader_uses_the_first_eight_layers_of_a_ten_layer_site_profile() {
 
 #[test]
 fn campbell_does_not_require_van_genuchten_surface_variables() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("campbell");
     write_surface(&path, 8, false, true, true);
     let data =
@@ -133,6 +138,7 @@ fn campbell_does_not_require_van_genuchten_surface_variables() {
 
 #[test]
 fn inactive_runoff_reader_skips_soil_texture_but_active_runoff_requires_it() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     for present in [false, true] {
         let path = temp_file("runoff-texture");
         write_surface(&path, 8, false, true, present);
@@ -155,6 +161,7 @@ fn inactive_runoff_reader_skips_soil_texture_but_active_runoff_requires_it() {
 
 #[test]
 fn reader_rejects_missing_or_wrong_sized_scientific_inputs() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let short = temp_file("short");
     write_surface(&short, 7, true, true, true);
     assert!(read_single_point_surface(
@@ -182,6 +189,7 @@ fn reader_rejects_missing_or_wrong_sized_scientific_inputs() {
 
 #[test]
 fn monthly_vegetation_uses_the_single_point_year_selection_contract() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("monthly");
     let mut file = netcdf::create(&path).unwrap();
     file.add_dimension("LAI_year", 2).unwrap();
@@ -222,6 +230,7 @@ fn monthly_vegetation_uses_the_single_point_year_selection_contract() {
 
 #[test]
 fn eight_day_vegetation_uses_native_julian_slices_and_year_selection() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("eight-day");
     let mut file = netcdf::create(&path).unwrap();
     file.add_dimension("LAI_year", 2).unwrap();
@@ -246,6 +255,7 @@ fn eight_day_vegetation_uses_native_julian_slices_and_year_selection() {
 
 #[test]
 fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("pft-monthly");
     let mut file = netcdf::create(&path).unwrap();
     file.add_dimension("LAI_year", 2).unwrap();
@@ -295,6 +305,7 @@ fn pft_monthly_reader_packs_positive_site_components_in_fortran_order() {
 
 #[test]
 fn crop_pft_reader_preserves_cft_weights_and_crop_fractions() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("crop-pft");
     let mut file = netcdf::create(&path).unwrap();
     file.add_dimension("LAI_year", 1).unwrap();
@@ -337,6 +348,7 @@ fn crop_pft_reader_preserves_cft_weights_and_crop_fractions() {
 
 #[test]
 fn urban_reader_uses_the_shared_static_contract_without_a_land_class_variable() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     for active in [false, true] {
         let path = temp_file("urban");
         write_surface(&path, 8, false, true, active);
@@ -443,6 +455,7 @@ fn urban_reader_uses_the_shared_static_contract_without_a_land_class_variable() 
 
 #[test]
 fn lucy_reader_transposes_runtime_component_region_arrays_once() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let path = temp_file("lucy");
     let mut file = netcdf::create(&path).unwrap();
     for (name, length) in [
@@ -573,6 +586,7 @@ fn temp_file(label: &str) -> PathBuf {
 #[test]
 #[ignore = "requires the locally generated upstream CN-Cng surface and restart artifacts"]
 fn single_point_static_kernels_match_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     use crate::{derive_igbp_canopy, derive_lake_layers, derive_soil_parameters, SoilField};
 
     let root =

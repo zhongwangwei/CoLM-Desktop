@@ -43,6 +43,7 @@ fn assert_no_deflate(path: &std::path::Path, variable: &str) {
 
 #[test]
 fn cold_restart_matches_gridriver_schema_two_base_state() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("base");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -133,6 +134,7 @@ fn cold_restart_matches_gridriver_schema_two_base_state() {
 
 #[test]
 fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("compression");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -186,6 +188,7 @@ fn gridriver_restart_compresses_vectors_but_not_transaction_scalars() {
 
 #[test]
 fn cold_restart_refuses_unimplemented_reservoir_methods() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("features");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -215,6 +218,7 @@ fn cold_restart_refuses_unimplemented_reservoir_methods() {
 
 #[test]
 fn cold_restart_carries_native_zero_bifurcation_state() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bifurcation");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -326,6 +330,7 @@ fn cold_restart_accepts_inactive_levels_before_active_ones() {
 
 #[test]
 fn cold_restart_carries_zero_levee_state() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("levee");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment(&unit_catchment);
@@ -372,6 +377,7 @@ fn cold_restart_carries_zero_levee_state() {
 
 #[test]
 fn cold_restart_carries_native_reservoir_identity_and_volume() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("reservoir");
     let unit_catchment = root.join("unitcatchment.nc");
     let parameters = root.join("reservoir.nc");

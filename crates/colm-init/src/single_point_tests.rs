@@ -12,6 +12,7 @@ use super::*;
 #[test]
 fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
     colm_numeric::skip_unless_fused!();
+    let _netcdf_guard = crate::netcdf_test_guard();
     // Actual PC prefixes, original MOD_HtopReadin/MOD_IniTimeVariable SUM(a*b),
     // gfortran -O2 -fdefault-real-8. Prefix weights are not renormalized.
     let height = [0.5, 25.658609866484777];
@@ -59,6 +60,7 @@ fn pft_patch_weighted_scalars_preserve_original_compiled_sums() {
 #[test]
 fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
     colm_numeric::skip_unless_fused!();
+    let _netcdf_guard = crate::netcdf_test_guard();
     // Actual PC patch prefix from PearlRiver_PC_GRID_2x2 e110_n25 patch 1.
     // The expected bit patterns are pristine
     // `sum(ssun_p/ssha_p(...,ps:pe)*pftfrac(ps:pe))`, compiled with
@@ -185,6 +187,7 @@ fn pft_radiation_absorption_reductions_preserve_original_sum_rounding() {
 
 #[test]
 fn pft_radiation_keeps_existing_absorption_when_ground_is_absent() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fractions = [0.25, 0.75];
     let states = [
         ColdStartRadiation {
@@ -222,6 +225,7 @@ fn pft_radiation_keeps_existing_absorption_when_ground_is_absent() {
 
 #[test]
 fn pft_radiation_rejects_ground_absorption_without_broadband_transmission() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let state = ColdStartRadiation {
         albedo: [[0.0; 2]; 2],
         transmission: None,
@@ -246,6 +250,7 @@ fn pft_radiation_rejects_ground_absorption_without_broadband_transmission() {
 
 #[test]
 fn pft_radiation_derives_soil_and_snow_absorption_after_transmission_sum() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     // Original MOD_Albedo.F90 PFT/PC order first sums `tran(k,j,ps:pe)` and
     // only then derives `ssoi`/`ssno`.  These constants are from an unchanged
     // gfortran -O2 -fdefault-real-8 probe of that expression, not from Rust.
@@ -327,6 +332,7 @@ fn pft_transmission_order_ground() -> ColdStartGroundAlbedo {
 
 #[test]
 fn static_config_uses_the_upstream_namelist_defaults() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     assert_eq!(RestartTuning::default().zlnd, 0.01);
     assert_eq!(RestartTuning::default().wetwatmax, 200.0);
     assert_eq!(patch_type(LandCoverScheme::Igbp, 10).unwrap(), 0);
@@ -337,6 +343,7 @@ fn static_config_uses_the_upstream_namelist_defaults() {
 
 #[test]
 fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-namelist-static-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -398,6 +405,7 @@ fn namelist_static_run_uses_colm_paths_defaults_and_surface_contract() {
 
 #[test]
 fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let document = parse(
         "&nl_colm
  DEF_USE_LCT = .false.
@@ -450,6 +458,7 @@ fn pc_subgrid_is_resolved_exclusively_and_uses_fortran_canopy_layers() {
 /// 「namelist 一个字都没说」的旧算例，不能盖掉算例自己的声明。
 #[test]
 fn single_point_subgrid_falls_back_only_when_the_namelist_is_silent() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let silent = parse("&nl_colm\n DEF_CASE_NAME='case'\n /\n").unwrap();
     assert_eq!(
         single_point_subgrid(&silent, None).unwrap(),
@@ -468,6 +477,7 @@ fn single_point_subgrid_falls_back_only_when_the_namelist_is_silent() {
 
 #[test]
 fn pft_optics_honor_the_native_indexed_namelist_override() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let document = parse("&nl_colm\n DEF_PFT_CHIL(2) = 0.25\n /\n").unwrap();
     let optics = pft_leaf_optics(&document, 1, HydraulicModel::VanGenuchten, false).unwrap();
     assert_eq!(optics.chil, 0.25);
@@ -483,6 +493,7 @@ fn pft_optics_honor_the_native_indexed_namelist_override() {
 
 #[test]
 fn pc_optics_use_the_original_mode_specific_defaults() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let document = parse("&nl_colm\n DEF_USE_PC = .true.\n /\n").unwrap();
     for (class, reflectance, transmittance) in [
         (
@@ -517,6 +528,7 @@ fn pc_optics_use_the_original_mode_specific_defaults() {
 
 #[test]
 fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     // Original ebe6de9, -O2 -fdefault-real-8, GRIDBASED + LULC_IGBP_PC.
     // PearlRiver_PC_GRID_2x2, 2003-001-00000, e110_n25 patch 1.
     // PFT fractions are pct_pfts (not landpft pctshared); wliq uses soil slot 5.
@@ -681,6 +693,7 @@ fn pc_mixed_bare_and_vegetated_patch_matches_original_cold_radiation() {
 
 #[test]
 fn cold_namelist_errors_on_missing_snicar_tables_and_keeps_non_snicar_state_sources() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-namelist-runtime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -732,6 +745,7 @@ fn cold_namelist_errors_on_missing_snicar_tables_and_keeps_non_snicar_state_sour
 
 #[test]
 fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-init-nonvegetated-scalar-{}",
         std::process::id()
@@ -823,6 +837,7 @@ fn single_point_pft_pc_nonvegetated_scalar_consumers_accept_zero_pft_layout() {
 
 #[test]
 fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     use crate::spatial_static::spatial_static_tests::{
         write_high_resolution_radiation, write_high_resolution_urban_albedo,
     };
@@ -909,6 +924,7 @@ fn single_point_nonnatural_hyperspectral_uses_scalar_canopy_and_rejects_snow() {
 
 #[test]
 fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-init-scalar-cn-vegsnow-{}",
         std::process::id()
@@ -1034,6 +1050,7 @@ fn single_point_scalar_consumes_tracer_cn_and_vegetation_snow_flag() {
 
 #[test]
 fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-init-lake-carbon-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
@@ -1102,6 +1119,7 @@ fn single_point_lake_soil_carbon_uses_bgc_and_derived_organic_matter() {
 
 #[test]
 fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!(
         "colm-init-single-vic-output-{}",
         std::process::id()
@@ -1171,6 +1189,7 @@ fn single_point_vic_sources_are_written_and_grid_missing_values_are_rejected() {
 
 #[test]
 fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mask() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-init-urban-only-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let namelist = root.join("case.nml");
@@ -1261,6 +1280,7 @@ fn urban_only_uses_the_selected_land_class_and_changes_only_the_single_point_mas
 
 #[test]
 fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inactive_source() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root =
         std::env::temp_dir().join(format!("colm-init-runoff-texture-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
@@ -1338,6 +1358,7 @@ fn single_point_runoff_texture_mapping_preserves_active_values_and_ignores_inact
 
 #[test]
 fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_paths() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-single-runoff-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -1387,6 +1408,7 @@ fn single_point_runoff_namelist_forces_topmodel_method_zero_and_resolves_vic_pat
 
 #[test]
 fn cold_namelist_uses_start_year_for_lulcc_restarts() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-lulcc-start-year-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -1415,6 +1437,7 @@ fn cold_namelist_uses_start_year_for_lulcc_restarts() {
 
 #[test]
 fn cold_lct_namelist_accepts_native_eight_day_lai() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-eight-day-lai-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -1444,6 +1467,7 @@ fn cold_lct_namelist_accepts_native_eight_day_lai() {
 
 #[test]
 fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-urban-namelist-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -1595,6 +1619,7 @@ fn urban_subgrids_write_urban_restarts_without_pft_inputs() {
 
 #[test]
 fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory =
         std::env::temp_dir().join(format!("colm-init-bgc-namelist-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
@@ -1637,6 +1662,7 @@ fn bgc_namelist_requires_a_vector_subgrid_and_resolves_its_runtime_source() {
 
 #[test]
 fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let directory = std::env::temp_dir().join(format!(
         "colm-init-single-point-crop-patches-{}",
         std::process::id()
@@ -1803,6 +1829,7 @@ fn crop_common_restart_keeps_each_cft_on_its_own_patch_axis() {
 #[test]
 #[ignore = "requires the local BGC kernels and CoLMruntime cnsteadystate.nc reference data"]
 fn native_single_point_bgc_cold_restart_matches_the_upstream_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -1892,6 +1919,7 @@ fn native_single_point_bgc_cold_restart_matches_the_upstream_reference() {
 #[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_static_restart_matches_the_upstream_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let surface = root.join("oracle/work/generated/out/CN-Cng/landdata/srfdata.nc");
     let reference = root.join(
@@ -1959,6 +1987,7 @@ fn native_single_point_static_restart_matches_the_upstream_reference() {
 #[test]
 #[ignore = "requires the locally generated CN-Cng upstream single-point restart artifact"]
 fn native_single_point_cold_time_restart_matches_the_upstream_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let reference = root.join(
         "oracle/work/generated/out/CN-Cng/restart/2008-001-00000/CN-Cng_restart_2008-001-00000_lc2005_w180_s90.nc",

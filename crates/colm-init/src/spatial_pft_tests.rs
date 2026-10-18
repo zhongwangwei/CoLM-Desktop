@@ -7,6 +7,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn common_pc_roughness_scales_the_aggregated_height() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     // Actual final e100_n20 Pearl River patch; pristine MOD_HtopReadin followed
     // by MOD_IniTimeVariable with -O2 -fdefault-real-8.
     let top_m = [
@@ -37,6 +38,7 @@ fn common_pc_roughness_scales_the_aggregated_height() {
 
 #[test]
 fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     write_i32(&landdata, "landpft", "landpft", "settyp", &[1, 13]);
@@ -68,6 +70,7 @@ fn spatial_pft_writes_the_separate_constant_restart_and_honors_overrides() {
 
 #[test]
 fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     write_i32(&landdata, "landpatch", "landpatch", "settyp", &[12]);
@@ -97,6 +100,7 @@ fn spatial_pft_constant_restart_copies_crop_fractions_by_landpatch() {
 
 #[test]
 fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     write_i32(&landdata, "landpatch", "landpatch", "settyp", &[12]);
@@ -119,6 +123,7 @@ fn spatial_pft_constant_restart_rejects_misaligned_crop_fractions() {
 
 #[test]
 fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     write_common_landdata(&landdata);
@@ -170,6 +175,7 @@ fn spatial_pft_soil_texture_gate_tracks_scheme_and_explicit_catch_force() {
 
 #[test]
 fn spatial_pft_common_honors_urban_only_for_pft_and_pc_and_rejects_malformed_flag_before_output() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     write_common_landdata(&landdata);
@@ -246,6 +252,7 @@ fn spatial_pft_common_honors_urban_only_for_pft_and_pc_and_rejects_malformed_fla
 
 #[test]
 fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let namelist = root.join("case.nml");
     let landdata = root.join("landdata");
@@ -270,6 +277,7 @@ fn spatial_pft_time_requires_bgc_for_crop_before_materializing_any_restart() {
 
 #[test]
 fn spatial_pft_runoff_scheme_one_uses_shared_vic_source_resolution() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -307,6 +315,7 @@ fn spatial_pft_runoff_scheme_one_uses_shared_vic_source_resolution() {
 
 #[test]
 fn empty_pft_inputs_require_nonnatural_owners_and_reject_orphan_or_corrupt_data() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let landdata = root.join("landdata");
     let namelist = root.join("case.nml");
@@ -371,6 +380,7 @@ fn empty_pft_inputs_require_nonnatural_owners_and_reject_orphan_or_corrupt_data(
 
 #[test]
 fn shared_crop_ranges_keep_ordered_natural_and_cft_owners() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let mut patches = crate::spatial_static::Patches {
         class: vec![1, 12, 12],
         element: vec![7; 3],
@@ -409,6 +419,7 @@ fn shared_crop_ranges_keep_ordered_natural_and_cft_owners() {
 
 #[test]
 fn spatial_pft_time_config_defaults_to_loading_snicar_from_document() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir();
     let namelist = root.join("case.nml");
     let landdata = root.join("landdata");
@@ -429,6 +440,7 @@ fn spatial_pft_time_config_defaults_to_loading_snicar_from_document() {
 
 #[test]
 fn spatial_pft_snow_cover_uses_pft_geometry_and_snow_adjusts_sai_inputs() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let pfts = SpatialPftVectors {
         class: vec![1, 13],
         element: vec![7, 7],
@@ -660,6 +672,7 @@ fn temp_dir() -> PathBuf {
 /// 不能退回 PFT（这个默认值差异是旧代码 `optional_bool_or(..., !pc)` 的语义）。
 #[test]
 fn spatial_pft_subgrid_uses_the_kernel_only_when_the_namelist_is_silent() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let silent = parse("&nl_colm\n DEF_CASE_NAME='case'\n /\n").unwrap();
     assert_eq!(
         spatial_pft_subgrid(&silent, None).unwrap(),

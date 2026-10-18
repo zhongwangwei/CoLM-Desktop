@@ -8,6 +8,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 #[test]
 fn patch_centroid_retains_upstream_spherical_area_rounding() {
     colm_numeric::skip_unless_fused!();
+    let _netcdf_guard = crate::netcdf_test_guard();
     // gfortran -O2 -fdefault-real-8, original MOD_Utils::areaquad and
     // MOD_Pixelset::get_pixelset_rlon/rlat,
     // 2048 pixels cycling through these four cells (no reassociation/fast-math).
@@ -60,6 +61,7 @@ fn patch_centroid_retains_upstream_spherical_area_rounding() {
 
 #[test]
 fn lct_spatial_block_becomes_a_constant_restart() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("lct");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -105,6 +107,7 @@ fn lct_spatial_block_becomes_a_constant_restart() {
 
 #[test]
 fn spatial_lake_soil_carbon_preserves_source_and_only_defaults_absent_data() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("lake-soil-carbon");
     let landdata = root.join("landdata");
     write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 17], &[1, 1]);
@@ -185,6 +188,7 @@ fn spatial_lake_soil_carbon_preserves_source_and_only_defaults_absent_data() {
 
 #[test]
 fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_placeholder() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("inactive-soiltexture");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -219,6 +223,7 @@ fn spatial_lct_inactive_soil_texture_skips_missing_source_with_deterministic_pla
 
 #[test]
 fn spatial_lct_active_soil_texture_requires_source_and_preserves_normalization() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("active-soiltexture");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -265,6 +270,7 @@ fn spatial_lct_active_soil_texture_requires_source_and_preserves_normalization()
 
 #[test]
 fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("wmo-mask");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -312,6 +318,7 @@ fn spatial_lct_constant_restart_masks_virtual_wmo_patch() {
 
 #[test]
 fn spatial_lct_urban_only_masks_nonurban_through_urban_wrapper_without_compacting() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("urban-only-mixed");
     let landdata = root.join("landdata");
     write_mixed_landdata(&landdata, 2005, "w180_s90", &[13, 10, 17], &[1, 1, 1]);
@@ -413,6 +420,7 @@ fn spatial_lct_urban_only_masks_nonurban_through_urban_wrapper_without_compactin
 
 #[test]
 fn spatial_lct_urban_only_preserves_wmo_sentinel_mask_and_usgs_urban_class() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("urban-only-sentinel-usgs");
     let landdata = root.join("landdata");
     write_mixed_landdata(&landdata, 2005, "w180_s90", &[13], &[-1]);
@@ -453,6 +461,7 @@ fn spatial_lct_urban_only_preserves_wmo_sentinel_mask_and_usgs_urban_class() {
 
 #[test]
 fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("optional-static");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -503,6 +512,7 @@ fn spatial_lct_writes_only_enabled_bedrock_and_hyperspectral_fields() {
 
 #[test]
 fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("topmodel-simple-terrain");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -562,6 +572,7 @@ fn spatial_lct_writes_enabled_topmodel_and_simple_terrain_fields() {
 
 #[test]
 fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("runoff-topmodel");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -623,6 +634,7 @@ fn spatial_runoff_topmodel_methods_read_only_their_selected_sources() {
 
 #[test]
 fn spatial_vic_scalar_and_grid_parameters_follow_runoff_scheme_one() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("runoff-vic");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -683,6 +695,7 @@ fn spatial_vic_scalar_and_grid_parameters_follow_runoff_scheme_one() {
 
 #[test]
 fn spatial_lct_writes_enabled_regular_terrain_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("regular-terrain");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -743,6 +756,7 @@ fn spatial_lct_writes_enabled_regular_terrain_fields() {
 
 #[test]
 fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("pft-common");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -835,6 +849,7 @@ fn spatial_pft_cold_start_writes_common_and_pft_constant_restarts() {
 
 #[test]
 fn spatial_pft_wmo_virtual_patch_keeps_sentinel_geometry_and_time_state() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("pft-wmo");
     let landdata = root.join("landdata");
     write_landdata(&landdata, 2005, "w180_s90");
@@ -924,6 +939,7 @@ fn spatial_pft_wmo_virtual_patch_keeps_sentinel_geometry_and_time_state() {
 
 #[test]
 fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("pft-time");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1016,6 +1032,7 @@ fn spatial_pft_cold_start_writes_pft_time_and_replaces_common_optics() {
 
 #[test]
 fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("pft-hyperspectral");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1156,6 +1173,7 @@ fn spatial_pft_hyperspectral_cold_start_writes_shared_common_and_pft_spectra() {
 
 #[test]
 fn spatial_hyperspectral_keeps_nonnatural_patches_out_of_pft_canopy() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("mixed-hyperspectral");
     let landdata = root.join("landdata");
     write_mixed_landdata(&landdata, 2005, "w180_s90", &[1, 13, 11, 15, 17], &[1; 5]);
@@ -1241,6 +1259,7 @@ fn spatial_hyperspectral_keeps_nonnatural_patches_out_of_pft_canopy() {
 
 #[test]
 fn spatial_pft_pc_empty_blocks_keep_common_cn_and_crop_without_pft_files() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("zero-pft");
     let landdata = root.join("landdata");
     write_mixed_landdata(&landdata, 2005, "w180_s90", &[11, 13, 15, 17], &[1; 4]);
@@ -1355,6 +1374,7 @@ fn spatial_pft_pc_empty_blocks_keep_common_cn_and_crop_without_pft_files() {
 
 #[test]
 fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("crop-tuning");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1419,6 +1439,7 @@ fn spatial_crop_tuning_writes_pft_and_bgc_restart_state_without_management_maps(
 
 #[test]
 fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("crop-management");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1501,6 +1522,7 @@ fn spatial_crop_management_maps_reach_the_shared_restart_writers() {
 
 #[test]
 fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("cn-equilibrium");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1552,6 +1574,7 @@ fn spatial_bgc_cn_equilibrium_maps_soil_by_patch_and_vegetation_by_pft() {
 
 #[test]
 fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     use crate::MISSING;
     let root = temp_dir("wetland-cn");
     let landdata = root.join("landdata");
@@ -1707,6 +1730,7 @@ fn spatial_pft_and_pc_seed_only_tracer_wetland_cn_without_synthetic_pfts() {
 
 #[test]
 fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("time");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1741,6 +1765,7 @@ fn spatial_lct_cold_start_writes_the_timestamped_restart_from_monthly_landdata()
 
 #[test]
 fn spatial_lct_cold_start_reads_8_day_lai_and_native_stem_area() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("eight-day-time");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1771,6 +1796,7 @@ fn spatial_lct_cold_start_reads_8_day_lai_and_native_stem_area() {
 
 #[test]
 fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("observed-soil-snow");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1812,6 +1838,7 @@ fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
 
 #[test]
 fn spatial_lct_observed_soil_masks_every_field_from_missing_water_table() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("observed-soil-missing");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1848,6 +1875,7 @@ fn spatial_lct_observed_soil_masks_every_field_from_missing_water_table() {
 
 #[test]
 fn spatial_lct_cold_start_uses_explicit_edge_water_table_without_soil() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("observed-wtd");
     let landdata = root.join("landdata");
     let restart = root.join("restart");
@@ -1884,6 +1912,7 @@ fn spatial_lct_cold_start_uses_explicit_edge_water_table_without_soil() {
 
 #[test]
 fn spatial_lcz_urban_cold_start_writes_common_and_urban_restarts() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("urban");
     let landdata = root.join("landdata");
     let restart = root.join("restart");

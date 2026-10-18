@@ -179,6 +179,7 @@ mod tests {
 
     #[test]
     fn every_ensemble_member_is_an_exact_common_restart_copy() {
+        let _netcdf_guard = crate::netcdf_test_guard();
         let root = std::env::temp_dir().join(format!(
             "colm-da-restart-{}-{:?}",
             std::process::id(),
@@ -257,6 +258,7 @@ mod tests {
 
     #[test]
     fn rejects_an_empty_ensemble() {
+        let _netcdf_guard = crate::netcdf_test_guard();
         let error = write_data_assimilation_restart("missing.nc", 0, 0).unwrap_err();
         assert!(error.to_string().contains("positive"));
     }

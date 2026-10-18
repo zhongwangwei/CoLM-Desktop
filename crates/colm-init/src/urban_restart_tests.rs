@@ -45,6 +45,7 @@ fn assert_no_deflate(path: &std::path::Path, variable: &str) {
 
 #[test]
 fn urban_constant_restart_matches_fortran_filename_schema_and_axis_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let root = temp_dir("core");
     let path =
@@ -86,6 +87,7 @@ fn urban_constant_restart_matches_fortran_filename_schema_and_axis_order() {
 
 #[test]
 fn urban_constant_and_time_restart_obey_compression_level() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let root = temp_dir("compression");
     let constant = write_urban_constant_restart(
@@ -195,6 +197,7 @@ fn urban_constant_and_time_restart_obey_compression_level() {
 
 #[test]
 fn urban_constant_restart_rejects_wrong_layer_shape_before_writing() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let fixture = Fixture::new();
     let mut thermal = fixture.thermal();
     thermal.roof_heat_capacity = &[0.0; 19];
@@ -303,6 +306,7 @@ fn temp_dir(label: &str) -> PathBuf {
 
 #[test]
 fn urban_time_restart_writes_the_complete_upstream_field_family() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("time");
     let scalar_values = vec![10.0, 20.0];
     let radiative_values = (0..8).map(f64::from).collect::<Vec<_>>();
@@ -385,6 +389,7 @@ fn urban_time_restart_writes_the_complete_upstream_field_family() {
 
 #[test]
 fn urban_time_restart_rejects_missing_schema_fields_before_writing() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("time-invalid");
     let values = vec![0.0];
     let mut scalar_fields = URBAN_TIME_SCALARS
@@ -437,6 +442,7 @@ fn urban_time_restart_rejects_missing_schema_fields_before_writing() {
 
 #[test]
 fn cold_urban_writer_preserves_layer_major_soil_water_for_every_patch() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("cold");
     let radiation = vec![cold_radiation(1.0), cold_radiation(2.0)];
     let soil = (0..20).map(f64::from).collect::<Vec<_>>();

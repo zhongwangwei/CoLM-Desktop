@@ -4,6 +4,7 @@ use super::*;
 
 #[test]
 fn profile_and_water_table_read_one_month_and_nearest_cell() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("runtime-profile");
     let soil = root.join("soilstate.nc");
     write_soil_state(&soil);
@@ -26,6 +27,7 @@ fn profile_and_water_table_read_one_month_and_nearest_cell() {
 
 #[test]
 fn missing_water_table_marks_soil_profile_invalid() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("runtime-missing");
     let soil = root.join("soilstate.nc");
     write_soil_state(&soil);
@@ -45,6 +47,7 @@ fn missing_water_table_marks_soil_profile_invalid() {
 
 #[test]
 fn cn_state_reads_profiles_in_fortran_pool_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("runtime-cn");
     let cn = root.join("cnsteadystate.nc");
     write_cn_state(&cn);

@@ -24,6 +24,7 @@ fn temp_dir(label: &str) -> PathBuf {
 
 #[test]
 fn missing_variables_and_wrong_shapes_name_the_offender() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("shapes");
     let path = root.join("restart.nc");
     let mut file = netcdf::create(&path).unwrap();
@@ -79,6 +80,7 @@ fn missing_variables_and_wrong_shapes_name_the_offender() {
 /// `f32` 与 `i8` 都要按加宽后的 `f64`/`i64` 读出来 —— 写出器实测会写这两种。
 #[test]
 fn narrower_types_are_widened_instead_of_refused() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("widening");
     let path = root.join("restart.nc");
     let mut file = netcdf::create(&path).unwrap();
@@ -102,6 +104,7 @@ fn narrower_types_are_widened_instead_of_refused() {
 /// `u64` 不能加宽进 `i64`，必须报错而不是截断。
 #[test]
 fn an_unwidenable_type_is_refused_by_name() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("types");
     let path = root.join("restart.nc");
     let mut file = netcdf::create(&path).unwrap();
@@ -120,6 +123,7 @@ fn an_unwidenable_type_is_refused_by_name() {
 
 #[test]
 fn a_file_that_cannot_be_opened_reports_its_path() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let missing = std::env::temp_dir().join("colm-init-restart-read-does-not-exist.nc");
     let error = RestartFile::open(&missing).unwrap_err().to_string();
     assert!(error.contains("cannot open restart"), "{error}");
@@ -129,6 +133,7 @@ fn a_file_that_cannot_be_opened_reports_its_path() {
 /// 落盘后被反成 patch 在前。`patch_matrix` 必须把这一步反回来。
 #[test]
 fn a_three_dimensional_field_is_returned_in_memory_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("patch-matrix");
     let path = root.join("restart.nc");
     let (patches, first, second) = (2, 2, 3);
@@ -181,6 +186,7 @@ fn a_three_dimensional_field_is_returned_in_memory_order() {
 /// 续跑写出：结构原样搬过去，只换声明过的那几个变量；类型也必须还原。
 #[test]
 fn a_continuation_write_preserves_the_schema_and_applies_overrides() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("continuation");
     let source_path = root.join("time.nc");
     let (patches, layers) = (2, 3);
@@ -236,6 +242,7 @@ fn a_continuation_write_preserves_the_schema_and_applies_overrides() {
 
 #[test]
 fn a_continuation_write_refuses_a_bad_override() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("continuation-refusal");
     let source_path = root.join("time.nc");
     let mut file = netcdf::create(&source_path).unwrap();

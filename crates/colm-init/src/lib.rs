@@ -262,6 +262,27 @@ pub(crate) fn ncdump_available() -> bool {
         .is_ok()
 }
 
+/// 串行化本 crate 测试里的 NetCDF/HDF5 调用。
+///
+/// netcdf-c / HDF5 默认**不是线程安全的**（Homebrew HDF5 1.14.6 的
+/// `libhdf5.settings` 写着 `Threadsafety: OFF`，CI 从源码静态编的也一样）。
+/// libtest 默认多线程跑测试，两个测试各自 open/create **不同的**文件照样在库内
+/// 全局状态上互踩，报 `Netcdf(-101)`（NC_EHDFERR）。实测本机默认并行
+/// 124 passed / 32 failed，`--test-threads=1` 全过，单跑每个都过 —— 所以只给
+/// 临时文件换唯一路径不够，必须串行。
+///
+/// 凡是会碰 NetCDF 的测试模块，每个 `#[test]` 第一行持有这把锁、活到函数末尾；
+/// 纯计算的（snicar / spatial_time / spatial_urban）不持锁，照旧并行。
+/// 锁中毒时照样拿回来：一个测试的真失败不该连锁成几十个 `PoisonError`
+/// （colm-srfdata 那次 1 个 `-101` 带出 47 个就是这个形状）。与 colm-cli 的
+/// `netcdf_test_guard` 同形。
+#[cfg(test)]
+pub(crate) fn netcdf_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// 删掉测试用的临时目录。
 ///
 /// 为什么需要它：这些测试用 `netcdf::open` 打开的 `Dataset` 大多活到函数末尾

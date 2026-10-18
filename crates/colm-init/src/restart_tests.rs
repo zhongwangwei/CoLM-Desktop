@@ -10,6 +10,7 @@ static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
 
 #[test]
 fn restart_tuning_namelist_preserves_all_overrides_in_netcdf() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     use colm_namelist::parse;
     assert_eq!(
         RestartTuning::from_document(&parse("&nl_colm\n/\n").unwrap()).unwrap(),
@@ -57,6 +58,7 @@ fn restart_tuning_namelist_preserves_all_overrides_in_netcdf() {
 
 #[test]
 fn restart_tuning_rejects_invalid_types_ranges_and_potential_order() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     for (field, value) in [
         ("ZLND", "'0.02'"),
         ("ZSNO", ".true."),
@@ -87,6 +89,7 @@ fn restart_tuning_rejects_invalid_types_ranges_and_potential_order() {
 
 #[test]
 fn constant_restart_matches_fortran_variable_order_shapes_and_transposition() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -176,6 +179,7 @@ fn constant_restart_matches_fortran_variable_order_shapes_and_transposition() {
 
 #[test]
 fn optional_fortran_restart_sections_have_native_netcdf_dimensions() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -240,6 +244,7 @@ fn optional_fortran_restart_sections_have_native_netcdf_dimensions() {
 #[test]
 #[ignore = "requires the locally generated upstream CN-Cng reference restart"]
 fn static_restart_schema_matches_the_upstream_fortran_reference() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -271,6 +276,7 @@ fn static_restart_schema_matches_the_upstream_fortran_reference() {
 
 #[test]
 fn restart_rejects_conflicting_or_incomplete_optional_sections() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
@@ -295,6 +301,7 @@ fn restart_rejects_conflicting_or_incomplete_optional_sections() {
 
 #[test]
 fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_validation() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip constant_restart_writes_optional_lake_soil_carbon_with_compression_and_validation: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -370,6 +377,7 @@ fn constant_restart_writes_optional_lake_soil_carbon_with_compression_and_valida
 
 #[test]
 fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fields: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -420,6 +428,7 @@ fn constant_restart_applies_def_rest_compression_only_to_upstream_compressed_fie
 
 #[test]
 fn constant_restart_honors_explicit_compression_levels_and_rejects_invalid_before_output() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     if !crate::ncdump_available() {
         eprintln!("skip constant_restart_honors_explicit_compression_levels_and_rejects_invalid_before_output: ncdump not found（CI 刻意不装系统 netCDF）");
         return;
@@ -449,6 +458,7 @@ fn constant_restart_honors_explicit_compression_levels_and_rejects_invalid_befor
 
 #[test]
 fn restart_compression_level_parser_matches_namelist_contract() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     assert_eq!(
         restart_compression_level(&colm_namelist::parse("&nl_colm\n/\n").unwrap()).unwrap(),
         1
@@ -698,6 +708,7 @@ fn integers_as_i64(variable: &netcdf::Variable<'_>) -> Vec<i64> {
 /// 再抽查加宽后的整数（`patchmask` 是 i8）与盘上 `(patch, soil)` 的层列。
 #[test]
 fn constant_restart_round_trips_through_the_reader() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let soil = soil_state();
     let lake = derive_lake_layers(&[20.0, 30.0], 10).unwrap();
     let canopy = canopy();
