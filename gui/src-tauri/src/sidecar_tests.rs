@@ -1516,3 +1516,53 @@ fn input_fingerprints_are_opt_in_for_ipc_run_arguments() {
         }
     }
 }
+
+#[test]
+fn log_lines_are_batched_in_order_and_never_held_back_while_quiet() {
+    let (send, received) = std::sync::mpsc::channel();
+    let collector = std::thread::spawn(move || {
+        let mut out = Vec::new();
+        batch_pump_events(received, Duration::from_millis(500), |event| {
+            out.push(match event {
+                PumpEvent::Lines(lines) => format!("lines:{}", lines.len()),
+                PumpEvent::Stage(stage, state) => format!("stage:{stage}:{state}"),
+                _ => "other".into(),
+            })
+        });
+        out
+    });
+    // A burst of 3000 lines becomes a handful of events, not 3000.
+    for index in 0..3000 {
+        send.send(PumpEvent::Line(format!("line {index}"))).unwrap();
+    }
+    send.send(PumpEvent::Stage("colm".into(), "begin".into()))
+        .unwrap();
+    send.send(PumpEvent::Line("after stage".into())).unwrap();
+    // The last line is delivered within the interval although nothing else arrives.
+    std::thread::sleep(Duration::from_millis(1500));
+    drop(send);
+    let events = collector.join().unwrap();
+    assert_eq!(events.len(), 3, "{events:?}");
+    assert_eq!(events[0], "lines:3000");
+    assert_eq!(events[1], "stage:colm:begin");
+    assert_eq!(events[2], "lines:1");
+}
+
+#[test]
+fn a_quiet_program_still_gets_its_pending_line_flushed_by_the_timer() {
+    let (send, received) = std::sync::mpsc::channel();
+    let (seen, observed) = std::sync::mpsc::channel();
+    let collector = std::thread::spawn(move || {
+        batch_pump_events(received, Duration::from_millis(30), |event| {
+            if let PumpEvent::Lines(lines) = event {
+                seen.send(lines).unwrap();
+            }
+        })
+    });
+    send.send(PumpEvent::Line("preparing".into())).unwrap();
+    // Sender still open: only the timer can deliver it.
+    let lines = observed.recv_timeout(Duration::from_secs(2)).unwrap();
+    assert_eq!(lines, vec!["preparing".to_string()]);
+    drop(send);
+    collector.join().unwrap();
+}

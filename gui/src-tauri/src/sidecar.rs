@@ -1141,6 +1141,39 @@ fn pump(
         .map(|t| t.total_steps)
         .unwrap_or(0);
     std::thread::spawn(move || {
+        let (events, received) = std::sync::mpsc::channel::<PumpEvent>();
+        let emitter = {
+            let (h, run_id, case_id) = (h.clone(), run_id.clone(), case_id.clone());
+            std::thread::spawn(move || {
+                batch_pump_events(received, EMIT_INTERVAL, |event| match event {
+                    PumpEvent::Lines(lines) => {
+                        let _ = h.emit(
+                            "run://lines",
+                            Lines {
+                                run_id: run_id.clone(),
+                                case: case_id.clone(),
+                                lines,
+                            },
+                        );
+                    }
+                    PumpEvent::Stage(stage, state) => {
+                        let _ = h.emit(
+                            "run://stage",
+                            StageMark {
+                                run_id: run_id.clone(),
+                                case: case_id.clone(),
+                                stage,
+                                state,
+                            },
+                        );
+                    }
+                    PumpEvent::Progress(progress) => {
+                        let _ = h.emit("run://progress", progress);
+                    }
+                    PumpEvent::Line(_) => {}
+                })
+            })
+        };
         let (mut total, mut dropped) = (0usize, 0usize);
         let mut last_progress = Instant::now() - EMIT_INTERVAL;
         let mut buf: VecDeque<String> = VecDeque::with_capacity(LOG_CAPACITY);
@@ -1158,25 +1191,10 @@ fn pump(
                         buf.pop_front();
                     }
                     buf.push_back(heading.clone());
-                    let _ = h.emit(
-                        "run://lines",
-                        Lines {
-                            run_id: run_id.clone(),
-                            case: case_id.clone(),
-                            lines: vec![heading],
-                        },
-                    );
+                    let _ = events.send(PumpEvent::Line(heading));
                 }
                 stage = name.clone();
-                let _ = h.emit(
-                    "run://stage",
-                    StageMark {
-                        run_id: run_id.clone(),
-                        case: case_id.clone(),
-                        stage: name,
-                        state,
-                    },
-                );
+                let _ = events.send(PumpEvent::Stage(name, state));
                 continue;
             }
             if is_rangecheck_noise(&line) {
@@ -1191,18 +1209,15 @@ fn pump(
             if let Some(s) = parse_progress(&line) {
                 if last_progress.elapsed() >= EMIT_INTERVAL {
                     last_progress = Instant::now();
-                    let _ = h.emit(
-                        "run://progress",
-                        Progress {
-                            run_id: run_id.clone(),
-                            case: case_id.clone(),
-                            stage: stage.clone(),
-                            step: s.step,
-                            total_steps,
-                            date: s.date,
-                            spinup: s.spinup,
-                        },
-                    );
+                    let _ = events.send(PumpEvent::Progress(Progress {
+                        run_id: run_id.clone(),
+                        case: case_id.clone(),
+                        stage: stage.clone(),
+                        step: s.step,
+                        total_steps,
+                        date: s.date,
+                        spinup: s.spinup,
+                    }));
                 }
                 continue;
             }
@@ -1210,18 +1225,68 @@ fn pump(
                 buf.pop_front();
             }
             buf.push_back(line.clone());
-            // A quiet preparation phase may not produce another line for minutes.
-            let _ = h.emit(
-                "run://lines",
-                Lines {
-                    run_id: run_id.clone(),
-                    case: case_id.clone(),
-                    lines: vec![line],
-                },
-            );
+            let _ = events.send(PumpEvent::Line(line));
         }
+        // Everything read is emitted before the caller reports completion.
+        drop(events);
+        let _ = emitter.join();
         (total, dropped, buf)
     })
+}
+
+/// What the stdout reader hands to the emitter, in output order.
+enum PumpEvent {
+    Line(String),
+    Lines(Vec<String>),
+    Stage(String, String),
+    Progress(Progress),
+}
+
+/// Batch log lines into at most one event per `interval` (the header's rate bound) without
+/// holding a line back for more than `interval`, even when the program then stays quiet for
+/// minutes. Pending lines are flushed before a stage mark or progress event to keep order.
+fn batch_pump_events(
+    received: std::sync::mpsc::Receiver<PumpEvent>,
+    interval: Duration,
+    mut emit: impl FnMut(PumpEvent),
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    let mut pending = Vec::new();
+    let mut deadline: Option<Instant> = None;
+    let flush = |pending: &mut Vec<String>, emit: &mut dyn FnMut(PumpEvent)| {
+        if !pending.is_empty() {
+            emit(PumpEvent::Lines(std::mem::take(pending)));
+        }
+    };
+    loop {
+        let next = match deadline {
+            Some(at) => received.recv_timeout(at.saturating_duration_since(Instant::now())),
+            None => received.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match next {
+            Ok(PumpEvent::Line(line)) => {
+                pending.push(line);
+                deadline.get_or_insert_with(|| Instant::now() + interval);
+            }
+            Ok(PumpEvent::Lines(lines)) => {
+                pending.extend(lines);
+                deadline.get_or_insert_with(|| Instant::now() + interval);
+            }
+            Ok(other) => {
+                flush(&mut pending, &mut emit);
+                deadline = None;
+                emit(other);
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                flush(&mut pending, &mut emit);
+                deadline = None;
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                flush(&mut pending, &mut emit);
+                return;
+            }
+        }
+    }
 }
 
 /// 同时最多跑几个算例。
