@@ -323,11 +323,28 @@ pub struct Snapshot {
     pub files: Vec<String>,
 }
 
+/// The spelling of a Windows path every git accepts: no verbatim `\\?\` prefix (which
+/// `canonicalize` adds) and forward slashes. MSYS2's git, used by the Windows release job, read
+/// `\\?\D:\a\CoLM-Desktop` as `\?D:aCoLM-Desktop` (2026-10-18). Other paths pass unchanged.
+fn git_path_spelling(path: &str, windows: bool) -> String {
+    if !windows {
+        return path.to_owned();
+    }
+    let plain = if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        path.to_owned()
+    };
+    plain.replace('\\', "/")
+}
+
 /// Files of a checkout under `paths`: tracked plus not-yet-added, never ignored scratch output.
 pub fn git_files(repo: &Path, paths: &[&str]) -> Result<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(repo)
+        .arg(git_path_spelling(&repo.to_string_lossy(), cfg!(windows)))
         // 已纳入管理的加上还没 `git add`、也没被忽略的：快照就是工作区里的样子（第 637 轮：新 crate
         // 还没纳入管理时，只取已管理的文件会让 workspace 缺成员而编译失败）。
         .args([
@@ -853,3 +870,22 @@ pub fn upload_prebuilt(ssh: &Ssh, root: &str, prebuilt: &Prebuilt) -> Result<boo
 #[cfg(test)]
 #[path = "engine_tests.rs"]
 mod engine_tests;
+
+#[cfg(test)]
+mod git_path_tests {
+    use super::git_path_spelling;
+
+    #[test]
+    fn windows_paths_reach_git_without_verbatim_prefixes_or_backslashes() {
+        assert_eq!(
+            git_path_spelling(r"\\?\D:\a\CoLM-Desktop\CoLM-Desktop", true),
+            "D:/a/CoLM-Desktop/CoLM-Desktop"
+        );
+        assert_eq!(
+            git_path_spelling(r"\\?\UNC\server\share\repo", true),
+            "//server/share/repo"
+        );
+        assert_eq!(git_path_spelling(r"C:\work\repo", true), "C:/work/repo");
+        assert_eq!(git_path_spelling("/Users/me/repo", false), "/Users/me/repo");
+    }
+}
