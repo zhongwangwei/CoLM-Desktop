@@ -484,3 +484,30 @@ test('remote batch cards show actual remote-status stage, numerical progress and
     [{ 'aria-label': 'A', value: 14, max: 50 }],
   );
 });
+
+test('a station whose remote job still runs cannot be deselected', async () => {
+  const page = screen();
+  page.render();
+  for (const request of page.requests) request.resolve({ profile: { grid: 'site' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.state.running['/a'] = {
+    running: true,
+    status: 'submitted',
+    location: 'remote',
+  } as (typeof page.state.running)[string];
+  page.render();
+  page.select('/a', false);
+  page.render();
+  const field = page.fields().find((entry) => entry.id === 'project-batch-case:/a')!;
+  assert.equal(field.disabled, true);
+  page.select('/b', false);
+  page.render();
+  // The running station keeps its place; the idle one could still be removed.
+  assert.ok(!page.fields().find((entry) => entry.id === 'project-batch-case:/b')!.disabled);
+  const value = (dir: string) =>
+    page.fields().find((entry) => entry.id === `project-batch-case:${dir}`)! as unknown as {
+      value: string;
+    };
+  assert.equal(value('/a').value, 'true');
+  assert.equal(value('/b').value, 'false');
+});

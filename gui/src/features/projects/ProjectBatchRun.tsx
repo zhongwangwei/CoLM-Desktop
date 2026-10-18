@@ -82,8 +82,11 @@ export default function ProjectBatchRun({
       active = false;
     };
   }, [first, id, revision, contextKey, en]);
+  // A station whose task still runs (here or on a server) keeps its card, status and cancel
+  // control: it cannot be deselected until its run ends.
+  const pinned = (dir: string) => paths.includes(dir) && !!state.running[dir]?.running;
   function select(dir: string, checked: boolean) {
-    if (locked) return;
+    if (locked || (!checked && pinned(dir))) return;
     setSelected((previous) =>
       checked ? [...new Set([...previous, dir])] : previous.filter((path) => path !== dir),
     );
@@ -168,7 +171,7 @@ export default function ProjectBatchRun({
             label: entry.name,
             type: 'switch' as const,
             value: String(paths.includes(entry.dir)),
-            disabled: !!locked,
+            disabled: !!locked || pinned(entry.dir),
             set: (value) => select(entry.dir, value === 'true'),
           }))
         : [],
@@ -250,11 +253,18 @@ export default function ProjectBatchRun({
               </div>
               <div className="check-grid">
                 {state.cases.map((entry) => (
-                  <label key={entry.dir}>
+                  <label
+                    key={entry.dir}
+                    title={
+                      pinned(entry.dir)
+                        ? t('运行结束前不能取消选择', 'Cannot be deselected until its run ends')
+                        : undefined
+                    }
+                  >
                     <input
                       type="checkbox"
                       checked={paths.includes(entry.dir)}
-                      disabled={!!locked}
+                      disabled={!!locked || pinned(entry.dir)}
                       onChange={(event) => select(entry.dir, event.target.checked)}
                     />
                     {entry.name}
