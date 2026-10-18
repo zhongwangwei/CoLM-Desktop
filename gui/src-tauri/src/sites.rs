@@ -43,7 +43,7 @@ pub struct Site {
 /// 扫描结果。**空结果要能自己解释** —— 用户指错目录（比如指了
 /// `Forcing` 而站点文件在 `Sitedata`）时，一个空列表什么都没说，
 /// 而那正是第一次用最容易发生的事。
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ScanResult {
     pub sites: Vec<Site>,
     /// 一句人话，说清楚找的是什么、以及旁边哪个目录像是对的。
@@ -143,6 +143,26 @@ pub async fn scan_sites(
         sites,
         hint,
         suggest,
+    })
+}
+
+/// 服务器上 `colm-cli scan` 的输出（与本机同样是一个站点数组）整理成界面要的形状。
+///
+/// 此前 `remote_scan_sites` 把裸数组原样交给页面，页面读 `result.sites` 得到
+/// `undefined`，整页崩成"暂时无法加载"。服务器目录不能就近列兄弟目录，所以没有 `suggest`。
+pub(crate) fn remote_scan_result(value: serde_json::Value) -> Result<ScanResult, String> {
+    let sites: Vec<Site> = serde_json::from_value(value).map_err(|e| {
+        format!("服务器上 colm-cli scan 的输出解析不了（两边的字段可能已经对不上）：{e}")
+    })?;
+    let hint = sites.is_empty().then(|| {
+        "服务器上这个目录里没有站点文件（找的是 *_site.nc 或 *_site_v1.nc）。\
+         PLUMBER2 的站点文件在 Sitedata 目录里，Forcing 与 Observation 里的是别的东西。"
+            .to_string()
+    });
+    Ok(ScanResult {
+        sites,
+        hint,
+        suggest: None,
     })
 }
 

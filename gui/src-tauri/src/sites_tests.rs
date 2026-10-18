@@ -33,6 +33,23 @@ fn a_site_says_whether_its_forcing_and_observation_are_there() {
 }
 
 #[test]
+fn a_server_scan_array_becomes_the_page_shape() {
+    // 服务器端 `colm-cli scan` 打印的是裸数组；页面要的是 `{sites, hint, suggest}`。
+    let found = remote_scan_result(serde_json::from_str(SAMPLE).unwrap()).expect("parses");
+    assert_eq!(found.sites.len(), 1);
+    assert_eq!(found.sites[0].name, "AT-Neu");
+    assert!(found.hint.is_none() && found.suggest.is_none());
+
+    let empty = remote_scan_result(serde_json::json!([])).expect("empty is fine");
+    assert!(empty.sites.is_empty());
+    assert!(empty.hint.unwrap().contains("*_site.nc"));
+    assert!(empty.suggest.is_none());
+
+    let wrong = remote_scan_result(serde_json::json!({"sites": "nope"})).unwrap_err();
+    assert!(wrong.contains("解析不了"), "{wrong}");
+}
+
+#[test]
 fn it_parses_what_the_real_cli_prints() {
     // **这条才是两边结构体不脱钩的保证。** `colm-cli` 在另一个 workspace，
     // 两个 crate 不互相依赖；`Site` 与 `SiteInfo` 各写各的。哪天那边改了

@@ -2945,6 +2945,32 @@ test('local reading of sites says what it is doing', async () => {
   assert.ok(notices(p).some((text) => text.includes('正在读取站点与强迫场覆盖时段')));
 });
 
+test('a scan result without a site list is reported instead of breaking the page', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '/server/sites' },
+      ownData: true,
+      sites: [site],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    { servers: [runServer], scan: async () => [site] },
+  );
+  await p.mount();
+  await assert.rejects(p.click('new-scan'), /读取站点的结果格式不对/);
+  p.render();
+  assert.ok(
+    p.elements.some(
+      (element) =>
+        element.type === 'Notice' &&
+        element.props.tone === 'error' &&
+        String((element.children as unknown[]).flat(Infinity).join('')).includes('格式不对'),
+    ),
+  );
+});
+
 test('remote multi-site retries retain server identity and request atomic replay settings', async () => {
   let failed = true;
   const p = page(

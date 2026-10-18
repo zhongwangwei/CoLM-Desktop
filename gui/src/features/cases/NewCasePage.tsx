@@ -739,6 +739,10 @@ export default function NewCasePage() {
         quick: false,
       },
     );
+    if (!Array.isArray(result?.sites))
+      throw new Error(
+        t('读取站点的结果格式不对。', 'The site scan returned an unexpected result.'),
+      );
     if (alive.current && id === sequence.current) {
       setSites(result.sites);
       setSiteDrafts((drafts) =>

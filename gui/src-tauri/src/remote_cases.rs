@@ -57,16 +57,17 @@ pub async fn remote_scan_sites(
     forcing_dir: Option<String>,
     quick: Option<bool>,
     model_revision: Option<colm_model::VersionRef>,
-) -> Result<Value, String> {
+) -> Result<crate::sites::ScanResult, String> {
     let server = crate::remote::server_for(app.clone(), &host)?;
-    command(
+    let output = command(
         &app,
         &server,
         "remote-site-scan",
         &json!({"dir":dir,"forcing_dir":forcing_dir,"quick":quick.unwrap_or(false)}),
         model_revision.as_ref(),
     )
-    .await
+    .await?;
+    crate::sites::remote_scan_result(output)
 }
 
 /// 选中服务器时在后台把与当前版本一致的计算引擎准备好（缺了就上传源码并编译）。

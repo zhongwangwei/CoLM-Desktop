@@ -33682,3 +33682,8 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 
    debug 版就绪路径要 16.7 s（16.2 s 是本机对冻结源码的哈希校验），所以"5 秒判为编译"只对 release/打包版成立。
    GUI 侧新增 3 条测试，覆盖核对、编译提示、等待后切换文字、会话内不重复预热、失败提示、本机不预热；`npm test` 672 passed。
+4. **引擎编好后，"读取站点"把整页弄崩**：页面显示"暂时无法加载"，报错 `undefined is not an object (evaluating 'a.sites.find')`。
+   原因：服务器端 `colm-cli scan` 打印的是裸站点数组（用 official/61 实测的 `remote-site-scan` 输出以 `[{"crop":false,…` 开头）。本机的 `scan_sites` 会把它解析成 `Site` 再包成 `{sites, hint, suggest}`，
+   `remote_scan_sites` 却原样返回，页面读 `result.sites` 得到 `undefined`。以前每次都卡在服务器编译那一步，所以一直没走到这里；GUI 测试桩替远程返回的是 `{sites}`，也把这个形状差异掩盖了。
+   现在 `remote_scan_result` 用同一个 `Site` 结构解析服务器输出：空目录给出服务器端提示，没有 `suggest`，因为不能就近列服务器上的兄弟目录；解析失败返回明确错误。
+   页面上 `result.sites` 不是数组时报"读取站点的结果格式不对"，不再整页崩溃。新增测试：Tauri `a_server_scan_array_becomes_the_page_shape`，GUI 一条"格式不对时报错而不是崩溃"；`npm test` 673 passed。
