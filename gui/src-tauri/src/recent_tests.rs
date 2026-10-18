@@ -79,3 +79,28 @@ fn text_export_cancel_and_atomic_save_preserve_existing_data_on_failure() {
     std::fs::set_permissions(&path, original).unwrap();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn an_unreadable_recent_file_is_kept_instead_of_being_replaced_by_one_entry() {
+    let dir = std::env::temp_dir().join(format!(
+        "colm-recent-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("recent.json");
+    remember(&path, "root".into(), "/data/projects".into()).unwrap();
+    remember(&path, "rawdata".into(), "/data/raw".into()).unwrap();
+    let all = read_recent(&path).unwrap();
+    assert_eq!(all.len(), 2);
+    std::fs::write(&path, "{\"root\": \"/data/proj").unwrap();
+    assert!(remember(&path, "runtime".into(), "/data/runtime".into()).is_err());
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "{\"root\": \"/data/proj"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}

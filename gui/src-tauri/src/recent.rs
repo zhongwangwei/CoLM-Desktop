@@ -28,9 +28,29 @@ fn path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 pub fn load_recent(app: tauri::AppHandle) -> BTreeMap<String, String> {
     path(&app)
         .ok()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
+        .and_then(|p| read_recent(&p).ok())
         .unwrap_or_default()
+}
+
+/// The remembered values; a missing file is empty, an unreadable one is an error.
+fn read_recent(path: &std::path::Path) -> Result<BTreeMap<String, String>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(error) => Err(format!("{}: {error}", path.display())),
+    }
+}
+
+/// Add one value without ever replacing a file it could not read, and replace it atomically,
+/// so a truncated or unreadable recent.json never wipes every remembered folder.
+fn remember(path: &std::path::Path, key: String, value: String) -> Result<(), String> {
+    let mut all =
+        read_recent(path).map_err(|e| format!("最近使用的目录记录无法读取，未覆盖：{e}"))?;
+    all.insert(key, value);
+    crate::config::write_export_text_atomic(
+        path,
+        serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?,
+    )
 }
 
 /// 记一个值。整份读改写 —— 五个键而已。
@@ -41,14 +61,7 @@ pub fn save_recent(app: tauri::AppHandle, key: String, value: String) -> Result<
     if value.trim().is_empty() {
         return Ok(());
     }
-    let mut all = load_recent(app.clone());
-    all.insert(key, value);
-    let p = path(&app)?;
-    std::fs::write(
-        &p,
-        serde_json::to_string_pretty(&all).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{}: {e}", p.display()))
+    remember(&path(&app)?, key, value)
 }
 
 #[cfg(test)]
