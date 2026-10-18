@@ -33765,3 +33765,7 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
      - 这个自检是 10-17 才加的（8f1420a4），运行时打包从 d1088fdb（8 月，早于 beta.3）就是这样，所以 beta.3 的 Linux 包很可能早就带着用不了的 MPI。
    - **混合批量**：按 CPU 数并发、每站 1 核，只用于全部是站点算例的服务器批量；混有空间算例时，沿用原来的线程、CPU 和并发设置，避免把区域/流域算例压成单核。
    - 推送前全量验证：`npm test` 682 passed；check-gui；fmt（两个 workspace）；clippy（colm-cli、colm-kernel、gui/src-tauri）；Tauri lib 396 passed；colm-kernel 49 passed；colm-cli 串行全部通过；xtask；`remote_cases_test.py`、`test_ensure_native_kernels.py`；vendor 静态测试 26 passed。
+7. **误提交的 `gui/node_modules` 符号链接**：worktree 里为了用主检出的依赖，建了一个本地链接 `gui/node_modules -> ../../../../gui/node_modules`。`.gitignore` 写的是 `node_modules/`，只忽略目录，所以 `git add -A` 把这个链接提交进了 e9c70ac7。
+   推送后主检出快进时，git 把原本被忽略的真实 `node_modules` 目录当成可丢弃的文件删掉了，换成了悬空链接。
+   修复（02e6647d）：停止跟踪这个链接；`.gitignore` 改为 `node_modules`，不论文件类型都忽略；主检出里用 `npm ci` 按 lockfile 重装（137 个包），`tsc --noEmit` 通过。
+   复核 fdd125f0..HEAD 的全部改动，没有其它符号链接或大文件。
