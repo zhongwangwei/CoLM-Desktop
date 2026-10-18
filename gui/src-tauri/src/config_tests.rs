@@ -4595,3 +4595,57 @@ fn rejected_wizard_edit_leaves_history_and_case_files_unchanged() {
     let staged = std::fs::read_to_string(&history).unwrap_or_default();
     assert!(!staged.contains("f_rnet"), "{staged}");
 }
+
+#[test]
+fn history_edits_never_write_outside_the_case_directory() {
+    let mut dirs = batch("history-outside", &[SAMPLE, SAMPLE]);
+    let other = std::path::PathBuf::from(dirs.pop().unwrap());
+    let dir = dirs.pop().unwrap();
+    let shared = other.join("history.nml");
+    std::fs::write(
+        &shared,
+        "&nl_colm_history\nDEF_hist_vars%f_fsena = .false.\n/\n",
+    )
+    .unwrap();
+    let case = std::path::Path::new(&dir).join("case.nml");
+    for target in [
+        shared.display().to_string(),
+        format!(
+            "../{}/history.nml",
+            other.file_name().unwrap().to_string_lossy()
+        ),
+    ] {
+        let text = std::fs::read_to_string(&case).unwrap();
+        let mut doc = colm_namelist::parse(&text).unwrap();
+        super::put(
+            &mut doc,
+            "DEF_HIST_vars_namelist",
+            colm_namelist::Value::Str(target),
+        )
+        .unwrap();
+        std::fs::write(&case, doc.to_string()).unwrap();
+        let _ = std::fs::remove_file(std::path::Path::new(&dir).join(super::HISTORY_FILE));
+        super::apply_fields(
+            &dir,
+            &[FieldChange {
+                path: "DEF_hist_vars%f_rnet".into(),
+                value: ".false.".into(),
+            }],
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&shared).unwrap(),
+            "&nl_colm_history\nDEF_hist_vars%f_fsena = .false.\n/\n",
+            "the other case's file is untouched"
+        );
+        let local =
+            std::fs::read_to_string(std::path::Path::new(&dir).join(super::HISTORY_FILE)).unwrap();
+        assert!(
+            local.contains("f_rnet") && local.contains("f_fsena"),
+            "{local}"
+        );
+        assert!(std::fs::read_to_string(&case)
+            .unwrap()
+            .contains("'history.nml'"));
+    }
+}

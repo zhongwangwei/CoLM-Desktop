@@ -4879,16 +4879,23 @@ fn stage_history_file(
     case_dir: &std::path::Path,
     changes: &[FieldChange],
 ) -> Result<(std::path::PathBuf, String), String> {
+    let local = case_dir.join(HISTORY_FILE);
     let path = match history_file(doc, case_dir) {
-        Some(path) => path,
-        None => {
+        Some(path) if inside_case(&path, case_dir) => path,
+        found => {
+            // Never edit a history file outside this case: an imported case may point at a
+            // shared or another case's file. Continue from its switches in a case-local copy.
+            if let Some(external) = found.filter(|path| path.is_file() && !local.is_file()) {
+                std::fs::copy(&external, &local)
+                    .map_err(|e| format!("{}: {e}", external.display()))?;
+            }
             put(
                 doc,
                 "DEF_HIST_vars_namelist",
                 colm_namelist::Value::Str(HISTORY_FILE.into()),
             )
             .map_err(|e| format!("{}: {e}", case_dir.display()))?;
-            case_dir.join(HISTORY_FILE)
+            local
         }
     };
     // 原子写入要先有目标文件（它先备份再替换）。空组等于没有任何覆盖，与文件不存在时效果相同，
@@ -4907,6 +4914,27 @@ fn stage_history_file(
             .map_err(|e| format!("{}: {e:#}", path.display()))?;
     }
     Ok((path, history.to_string()))
+}
+
+/// Whether `path` stays inside `case_dir` (no `..` step, and absolute paths under the case).
+fn inside_case(path: &std::path::Path, case_dir: &std::path::Path) -> bool {
+    if path
+        .components()
+        .any(|part| matches!(part, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    if path.starts_with(case_dir) {
+        return true;
+    }
+    // Aliases such as /var → /private/var: compare the resolved parent directories.
+    match (
+        path.parent().and_then(|parent| parent.canonicalize().ok()),
+        case_dir.canonicalize(),
+    ) {
+        (Some(parent), Ok(case)) => parent.starts_with(case),
+        _ => false,
+    }
 }
 
 /// 输出变量文件里显式设了的开关（`DEF_hist_vars%X` → 值）。
