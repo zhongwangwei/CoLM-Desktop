@@ -351,3 +351,38 @@ fn a_top_level_sidecar_leads_its_own_process_group() {
     assert!(group.status.success(), "process must be visible to ps");
     assert_eq!(String::from_utf8_lossy(&group.stdout).trim(), pid);
 }
+
+#[test]
+#[cfg(unix)]
+fn an_observed_stage_reports_the_child_it_actually_started() {
+    let (k, work) = fake_kernel(
+        "observed",
+        "#!/bin/sh\necho \"pid=$$\"\necho 'CoLM Execution Completed.'\n",
+    );
+    let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let recorded = seen.clone();
+    let mut printed = String::new();
+    let report = crate::run::observe_spawns(
+        move |pid, program| recorded.borrow_mut().push((pid, program.to_path_buf())),
+        || {
+            run_stage_streaming(
+                &k,
+                Stage::Colm,
+                Path::new("case.nml"),
+                &work,
+                &[],
+                &mut |line| {
+                    if let Some(pid) = line.strip_prefix("pid=") {
+                        printed = pid.to_string();
+                    }
+                },
+            )
+        },
+    )
+    .expect("runs");
+    assert!(report.succeeded());
+    let seen = seen.borrow();
+    assert_eq!(seen.len(), 1);
+    assert_eq!(seen[0].0.to_string(), printed, "the child's own PID");
+    assert_eq!(seen[0].1, k.dir.join(crate::manifest::program_file("colm")));
+}

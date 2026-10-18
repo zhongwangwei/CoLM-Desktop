@@ -251,6 +251,13 @@ enum WorkerEvent {
         case_dir: PathBuf,
         error: Option<String>,
     },
+    /// A stage child (Fortran kernel or Rust engine) started for this task.
+    Process {
+        member: String,
+        site: String,
+        pid: u32,
+        program: PathBuf,
+    },
 }
 
 pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
@@ -1192,72 +1199,84 @@ fn run_members(
                 let event_site = site.clone();
                 let mut last_task_log_emit = None;
                 let execution = begin_execution(manifest, &site, &case_dir);
-                let result = execution.and_then(|identity| {
-                    crate::run_case(
-                        &case_dir,
-                        &kernel_dir,
-                        stream,
-                        false,
-                        None,
-                        1,
-                        preprocessors,
-                        engine,
-                        None,
-                        None,
-                        true,
-                        true,
-                        &mut |notice| {
-                            let event = match notice {
-                                RunNotice::StageBegin(stage) => WorkerEvent::Notice {
-                                    member: event_member.clone(),
-                                    site: event_site.clone(),
-                                    kind: "stage_started".into(),
-                                    stage: stage.into(),
-                                    line: None,
-                                    ok: None,
-                                },
-                                RunNotice::StageSkipped(stage) => WorkerEvent::Notice {
-                                    member: event_member.clone(),
-                                    site: event_site.clone(),
-                                    kind: "stage_skipped".into(),
-                                    stage: stage.into(),
-                                    line: None,
-                                    ok: Some(true),
-                                },
-                                RunNotice::Log { stage, line } => {
-                                    // The complete member log is already on disk. Sampling here,
-                                    // before the unbounded scheduler channel, prevents parallel
-                                    // CoLM chatter from exhausting memory while preserving live logs.
-                                    if line.trim().is_empty()
-                                        || !should_emit_task_log(
-                                            &mut last_task_log_emit,
-                                            Instant::now(),
-                                        )
-                                    {
-                                        return;
-                                    }
-                                    WorkerEvent::Notice {
+                let spawn_tx = tx.clone();
+                let (spawn_member, spawn_site) = (member.clone(), site.clone());
+                let observer = move |pid: u32, program: &Path| {
+                    let _ = spawn_tx.send(WorkerEvent::Process {
+                        member: spawn_member.clone(),
+                        site: spawn_site.clone(),
+                        pid,
+                        program: program.to_path_buf(),
+                    });
+                };
+                let result = colm_kernel::observe_spawns(observer, || {
+                    execution.and_then(|identity| {
+                        crate::run_case(
+                            &case_dir,
+                            &kernel_dir,
+                            stream,
+                            false,
+                            None,
+                            1,
+                            preprocessors,
+                            engine,
+                            None,
+                            None,
+                            true,
+                            true,
+                            &mut |notice| {
+                                let event = match notice {
+                                    RunNotice::StageBegin(stage) => WorkerEvent::Notice {
                                         member: event_member.clone(),
                                         site: event_site.clone(),
-                                        kind: "task_log".into(),
+                                        kind: "stage_started".into(),
                                         stage: stage.into(),
-                                        line: Some(line.into()),
+                                        line: None,
                                         ok: None,
+                                    },
+                                    RunNotice::StageSkipped(stage) => WorkerEvent::Notice {
+                                        member: event_member.clone(),
+                                        site: event_site.clone(),
+                                        kind: "stage_skipped".into(),
+                                        stage: stage.into(),
+                                        line: None,
+                                        ok: Some(true),
+                                    },
+                                    RunNotice::Log { stage, line } => {
+                                        // The complete member log is already on disk. Sampling here,
+                                        // before the unbounded scheduler channel, prevents parallel
+                                        // CoLM chatter from exhausting memory while preserving live logs.
+                                        if line.trim().is_empty()
+                                            || !should_emit_task_log(
+                                                &mut last_task_log_emit,
+                                                Instant::now(),
+                                            )
+                                        {
+                                            return;
+                                        }
+                                        WorkerEvent::Notice {
+                                            member: event_member.clone(),
+                                            site: event_site.clone(),
+                                            kind: "task_log".into(),
+                                            stage: stage.into(),
+                                            line: Some(line.into()),
+                                            ok: None,
+                                        }
                                     }
-                                }
-                                RunNotice::StageDone { stage, ok } => WorkerEvent::Notice {
-                                    member: event_member.clone(),
-                                    site: event_site.clone(),
-                                    kind: "stage_done".into(),
-                                    stage: stage.into(),
-                                    line: None,
-                                    ok: Some(ok),
-                                },
-                            };
-                            let _ = event_tx.send(event);
-                        },
-                    )?;
-                    finish_execution(&case_dir, identity)
+                                    RunNotice::StageDone { stage, ok } => WorkerEvent::Notice {
+                                        member: event_member.clone(),
+                                        site: event_site.clone(),
+                                        kind: "stage_done".into(),
+                                        stage: stage.into(),
+                                        line: None,
+                                        ok: Some(ok),
+                                    },
+                                };
+                                let _ = event_tx.send(event);
+                            },
+                        )?;
+                        finish_execution(&case_dir, identity)
+                    })
                 });
                 let _ = tx.send(WorkerEvent::Finished {
                     member,
@@ -1282,6 +1301,29 @@ fn run_members(
                         serde_json::json!({"type":"task_started","kind":"task_started","member":member,"site":site}),
                     )?;
                     super::checkpoint::write_next(checkpoint_dir, state)?;
+                }
+                WorkerEvent::Process {
+                    member,
+                    site,
+                    pid,
+                    program,
+                } => {
+                    // Track the process that actually computes, so status and cancellation see a
+                    // model that outlives a killed scheduler instead of re-checking our own PID.
+                    if let Some(task) = state.tasks.get_mut(&super::state::task_id(&member, &site))
+                    {
+                        if matches!(task.status, TaskStatus::Running | TaskStatus::Evaluating) {
+                            let now = unix_now();
+                            task.process = Some(ProcessIdentity {
+                                pid,
+                                executable: program.to_string_lossy().into_owned(),
+                                argv_sha256: String::new(),
+                                started_unix: now,
+                                heartbeat_unix: now,
+                            });
+                            super::checkpoint::write_next(checkpoint_dir, state)?;
+                        }
+                    }
                 }
                 WorkerEvent::Notice {
                     member,

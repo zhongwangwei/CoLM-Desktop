@@ -18,6 +18,40 @@ use crate::manifest::Kernel;
 use crate::outcome::{adjudicate, Outcome, Stage};
 use crate::overrides::{extract, Override};
 
+type SpawnObserver = Box<dyn FnMut(u32, &Path)>;
+thread_local! {
+    static SPAWN_OBSERVER: std::cell::RefCell<Option<SpawnObserver>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Run `work` while every stage child this thread starts is reported to `observer` as
+/// `(pid, program)`. Callers that track who is computing (the Study scheduler) need the
+/// model process, not their own PID. Observers do not nest; the previous one is restored.
+pub fn observe_spawns<T>(
+    observer: impl FnMut(u32, &Path) + 'static,
+    work: impl FnOnce() -> T,
+) -> T {
+    let previous = SPAWN_OBSERVER.with(|slot| slot.replace(Some(Box::new(observer))));
+    struct Restore(Option<Option<SpawnObserver>>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            if let Some(previous) = self.0.take() {
+                SPAWN_OBSERVER.with(|slot| *slot.borrow_mut() = previous);
+            }
+        }
+    }
+    let _restore = Restore(Some(previous));
+    work()
+}
+
+fn report_spawn(pid: u32, program: &Path) {
+    SPAWN_OBSERVER.with(|slot| {
+        if let Some(observer) = slot.borrow_mut().as_mut() {
+            observer(pid, program);
+        }
+    });
+}
+
 /// 一段跑完之后知道的一切。
 #[derive(Debug)]
 pub struct StageReport {
@@ -219,6 +253,7 @@ fn run_stage_streaming_with_command(
         .stderr(Stdio::piped())
         .spawn()
         .with_context(|| format!("failed to spawn {}", program.display()))?;
+    report_spawn(child.id(), &program);
 
     let mut err_pipe = child.stderr.take().context("no stderr pipe")?;
     let errs = std::thread::spawn(move || {
@@ -397,3 +432,37 @@ fn prepend_env_path(cmd: &mut Command, name: &str, first: &Path) -> Result<()> {
 #[cfg(test)]
 #[path = "run_tests.rs"]
 mod run_tests;
+
+#[cfg(test)]
+mod spawn_observer_tests {
+    use super::*;
+
+    #[test]
+    fn spawns_are_reported_only_inside_the_observed_work_and_observers_restore() {
+        let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        report_spawn(1, Path::new("/outside"));
+        let outer = seen.clone();
+        observe_spawns(
+            move |pid, program| outer.borrow_mut().push((pid, program.to_path_buf())),
+            || {
+                report_spawn(7, Path::new("/bin/colm-rs"));
+                let inner = std::rc::Rc::new(std::cell::RefCell::new(0));
+                let counted = inner.clone();
+                observe_spawns(
+                    move |_, _| *counted.borrow_mut() += 1,
+                    || report_spawn(8, Path::new("/bin/mksrfdata-rs")),
+                );
+                assert_eq!(*inner.borrow(), 1);
+                report_spawn(9, Path::new("/bin/mkinidata-rs"));
+            },
+        );
+        report_spawn(10, Path::new("/after"));
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                (7, PathBuf::from("/bin/colm-rs")),
+                (9, PathBuf::from("/bin/mkinidata-rs"))
+            ]
+        );
+    }
+}
