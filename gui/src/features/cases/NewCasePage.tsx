@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
-import { invoke } from '../../lib/ipc';
+import { invoke, listen } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import {
   Button,
@@ -303,6 +303,11 @@ export default function NewCasePage() {
     [busyTask, setBusyTask] = useState<'scan' | ''>(''),
     [engine, setEngine] = useState<EngineState | null>(null),
     [creationDir, setCreationDir] = useState<string | null>(null),
+    [batchProgress, setBatchProgress] = useState<{
+      stage: string;
+      done: number;
+      total: number;
+    } | null>(null),
     [cancellingCreation, setCancellingCreation] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
     [ownData, setOwnData] = useState(!!seed?.form?.host || (seed?.ownData ?? false)),
@@ -455,7 +460,7 @@ export default function NewCasePage() {
             ),
           )),
   );
-  const creation = useRef<{ dir: string; cancelRequested: boolean } | null>(null),
+  const creation = useRef<{ dir: string; cancelRequested: boolean; batch?: string } | null>(null),
     lock = useRef(false),
     sequence = useRef(0),
     alive = useRef(true),
@@ -1273,7 +1278,14 @@ export default function NewCasePage() {
         remote_dir: undefined as string | undefined,
       };
     }
-    const modelRevision = args.modelRevision;
+    return invoke<{ dir: string; root: string; remote_dir: string }>('remote_create_case', {
+      host: form.host,
+      modelRevision: args.modelRevision,
+      request: serverRequest(command, args),
+    });
+  }
+  // The server request is the local creation's arguments in snake_case, plus the domain kind.
+  function serverRequest(command: 'new_case' | 'new_spatial_case', args: Record<string, unknown>) {
     const request = Object.fromEntries(
       Object.entries(args)
         .filter(([key]) => key !== 'modelRevision' && key !== 'runHost')
@@ -1282,22 +1294,96 @@ export default function NewCasePage() {
           value,
         ]),
     );
-    return invoke<{ dir: string; root: string; remote_dir: string }>('remote_create_case', {
-      host: form.host,
-      modelRevision,
-      request: { ...request, kind: command === 'new_case' ? 'site' : args.domain },
-    });
+    return { ...request, kind: command === 'new_case' ? 'site' : args.domain };
   }
 
   async function createMultiSites() {
     const plans = multiPlans(5);
     const revision = state.versionRef;
     const results = [...multiResults];
-    const job = { dir: '', cancelRequested: false };
+    const job: { dir: string; cancelRequested: boolean; batch?: string } = {
+      dir: '',
+      cancelRequested: false,
+    };
     creation.current = job;
     setCancellingCreation(false);
+    const siteArgs = (plan: (typeof plans)[number], out: string) => ({
+      site: plan.form.site,
+      out,
+      name: plan.form.name,
+      start: plan.form.start,
+      end: plan.form.end,
+      rawdata: form.rawdata || null,
+      runtime: form.runtime || null,
+      met: plan.form.met,
+      mode: plan.mode,
+      fields: physicsFields(plan.fields),
+      modelRevision: revision,
+      engine: form.engine,
+      runHost: form.host || null,
+      ...(form.host && multiSiteMode === 'first-year'
+        ? { spinupRepeat: Number(multiSiteRepeat) }
+        : {}),
+    });
+    const record = (out: string, result: (typeof results)[number]) => {
+      const previous = results.findIndex((item) => (item.remoteDir || item.dir) === out);
+      if (previous >= 0) results[previous] = result;
+      else results.push(result);
+    };
     try {
-      for (const plan of plans) {
+      if (form.host) {
+        // One server batch: a single engine check, lock and SSH session per step, with each
+        // site's own result so failures can be retried on their own.
+        const pending = plans
+          .map((plan) => ({ plan, out: caseDirectory(plan.form.root, plan.form.name) }))
+          .filter(
+            ({ out }) =>
+              !results.some((result) => (result.remoteDir || result.dir) === out && !result.error),
+          );
+        if (pending.length) {
+          const batch = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+          job.batch = batch;
+          job.dir = form.root;
+          setCreationDir(form.root);
+          setBatchProgress({ stage: 'prepare', done: 0, total: pending.length });
+          const stop = await listen<{ batch: string; stage: string; done: number; total: number }>(
+            'remote-create://progress',
+            (progress) => {
+              if (progress.batch === batch && alive.current) setBatchProgress(progress);
+            },
+          );
+          try {
+            const outcomes = await invoke<
+              { ok?: { dir: string; root: string; remote_dir: string }; error?: string }[]
+            >('remote_create_cases', {
+              host: form.host,
+              modelRevision: revision,
+              batch,
+              requests: pending.map(({ plan, out }) =>
+                serverRequest('new_case', siteArgs(plan, out)),
+              ),
+            });
+            pending.forEach(({ plan, out }, index) => {
+              const outcome = outcomes[index];
+              record(out, {
+                site: plan.site.site_file,
+                name: plan.form.name,
+                dir: outcome?.ok?.dir ?? out,
+                remoteDir: out,
+                root: outcome?.ok?.root,
+                created: !!outcome?.ok,
+                ...(outcome?.ok
+                  ? {}
+                  : { error: outcome?.error ?? t('服务器没有返回结果', 'No server result') }),
+              });
+            });
+          } finally {
+            stop();
+          }
+          if (alive.current) setMultiResults([...results]);
+        }
+      }
+      for (const plan of form.host ? [] : plans) {
         if (job.cancelRequested) break;
         const out = caseDirectory(plan.form.root, plan.form.name);
         if (results.some((result) => (result.remoteDir || result.dir) === out && !result.error))
@@ -1323,24 +1409,7 @@ export default function NewCasePage() {
         };
         try {
           if (!result.created) {
-            const destination = await createDestination('new_case', {
-              site: plan.form.site,
-              out,
-              name: plan.form.name,
-              start: plan.form.start,
-              end: plan.form.end,
-              rawdata: form.rawdata || null,
-              runtime: form.runtime || null,
-              met: plan.form.met,
-              mode: plan.mode,
-              fields: physicsFields(plan.fields),
-              modelRevision: revision,
-              engine: form.engine,
-              runHost: form.host || null,
-              ...(form.host && multiSiteMode === 'first-year'
-                ? { spinupRepeat: Number(multiSiteRepeat) }
-                : {}),
-            });
+            const destination = await createDestination('new_case', siteArgs(plan, out));
             result.dir = destination.dir;
             result.root = destination.root;
           }
@@ -1356,9 +1425,7 @@ export default function NewCasePage() {
         } catch (error) {
           result.error = String(error);
         }
-        const previous = results.findIndex((item) => (item.remoteDir || item.dir) === out);
-        if (previous >= 0) results[previous] = result;
-        else results.push(result);
+        record(out, result);
         if (alive.current) setMultiResults([...results]);
       }
     } finally {
@@ -1366,6 +1433,7 @@ export default function NewCasePage() {
         creation.current = null;
         if (alive.current) {
           setCreationDir(null);
+          setBatchProgress(null);
           setCancellingCreation(false);
         }
       }
@@ -1562,6 +1630,28 @@ export default function NewCasePage() {
       return await openCase(destination.dir);
     });
   }
+  function batchLabel(progress: { stage: string; done: number; total: number }) {
+    const { stage, done, total } = progress;
+    if (stage === 'server')
+      return t(
+        `正在 ${form.host} 上批量创建 ${total} 个站点…软件更新后第一次使用时，服务器要先编译计算引擎，可能要几分钟。`,
+        `Creating ${total} sites on ${form.host}… The first use after an app update compiles the engine there first and can take several minutes.`,
+      );
+    if (stage === 'local')
+      return t(
+        `正在整理本机配置：${done} / ${total}`,
+        `Preparing local configuration: ${done} / ${total}`,
+      );
+    if (stage === 'publish' || stage === 'done')
+      return t(
+        `正在把 ${total} 个站点的配置发布到 ${form.host}…`,
+        `Publishing ${total} sites to ${form.host}…`,
+      );
+    return t(
+      `正在准备 ${total} 个站点：${done} / ${total}`,
+      `Preparing ${total} sites: ${done} / ${total}`,
+    );
+  }
   async function cancelCreation() {
     const job = creation.current;
     if (!alive.current || !job || job.cancelRequested)
@@ -1569,7 +1659,9 @@ export default function NewCasePage() {
     job.cancelRequested = true;
     setCancellingCreation(true);
     try {
-      const cancelled = await invoke<number>('case_creation_cancel', { dir: job.dir });
+      const cancelled = job.batch
+        ? await invoke<number>('remote_create_cases_cancel', { batch: job.batch })
+        : await invoke<number>('case_creation_cancel', { dir: job.dir });
       if (!multiSite && !cancelled && creation.current === job)
         throw new Error(
           t(
@@ -1973,7 +2065,7 @@ export default function NewCasePage() {
           },
         ]
       : []),
-    ...(creationDir && !form.host
+    ...(creationDir && (!form.host || batchProgress)
       ? [
           {
             id: 'new-cancel-creation',
@@ -2303,14 +2395,16 @@ export default function NewCasePage() {
         <Notice>
           {cancellingCreation
             ? t('正在取消创建，请等待清理完成…', 'Cancelling creation; waiting for cleanup…')
-            : creationDir && form.host
-              ? t(
-                  `正在 ${form.host} 上创建算例…首次在该服务器创建、或软件更新后，需要先在服务器上编译计算引擎，可能要几分钟。`,
-                  `Creating the case on ${form.host}… The first creation on a server, or the first after an app update, compiles the engine there first and can take several minutes.`,
-                )
-              : busyTask === 'scan'
-                ? scanLabel()
-                : t('正在处理，请稍候…', 'Working, please wait…')}
+            : batchProgress
+              ? batchLabel(batchProgress)
+              : creationDir && form.host
+                ? t(
+                    `正在 ${form.host} 上创建算例…首次在该服务器创建、或软件更新后，需要先在服务器上编译计算引擎，可能要几分钟。`,
+                    `Creating the case on ${form.host}… The first creation on a server, or the first after an app update, compiles the engine there first and can take several minutes.`,
+                  )
+                : busyTask === 'scan'
+                  ? scanLabel()
+                  : t('正在处理，请稍候…', 'Working, please wait…')}
         </Notice>
       )}
       {remotePicker && (
@@ -2334,7 +2428,7 @@ export default function NewCasePage() {
           }}
         />
       )}
-      {creationDir && !form.host && (
+      {creationDir && (!form.host || batchProgress) && (
         <Button disabled={cancellingCreation} onClick={() => void cancelCreation().catch(() => {})}>
           {t('取消创建', 'Cancel creation')}
         </Button>

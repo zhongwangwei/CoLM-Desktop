@@ -2,6 +2,7 @@
 use super::*;
 
 const SCRIPT: &str = include_str!("remote_cases.py");
+const BATCH: &str = include_str!("remote_cases_batch.py");
 
 pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
@@ -20,7 +21,7 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
     }
     // `prepare` 只做 `create`/`scan` 前半段的引擎准备：界面选中服务器时就在后台跑，
     // 软件更新后那次几分钟的服务器端编译不再压在"读取站点"或"创建算例"上。
-    let needs_engine = matches!(action, "create" | "scan" | "prepare");
+    let needs_engine = matches!(action, "create" | "create-batch" | "scan" | "prepare");
     let lock = if needs_engine {
         Some(colm_remote::engine_inventory::LifecycleLock::acquire(
             &ssh, &root,
@@ -48,6 +49,9 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         if action == "prepare" {
             return Ok(json!({"ready": true}));
         }
+        if let Some(single) = action.strip_suffix("-batch") {
+            return run_batch(&ssh, single, &request, &cli);
+        }
         let payload = serde_json::to_string(&json!({"action":action,"request":request,"cli":cli}))?;
         let script = SCRIPT.replace(
             "payload = json.loads(sys.argv[1])",
@@ -67,6 +71,54 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
     };
     println!("{output}");
     Ok(())
+}
+
+/// `{"items": [request, ...]}` → `{"results": [{"ok": response} | {"error": message}, ...]}`,
+/// in item order. Each item runs as its own `remote_cases.py` process on the server, so a
+/// failure stays with its item and its creation claim behaves exactly as for one request.
+fn run_batch(
+    ssh: &Ssh,
+    action: &str,
+    request: &serde_json::Value,
+    cli: &str,
+) -> Result<serde_json::Value> {
+    anyhow::ensure!(
+        matches!(action, "create" | "publish" | "abort"),
+        "unsupported batch action {action}"
+    );
+    let items = request["items"]
+        .as_array()
+        .context("a batch request needs an items list")?;
+    let jobs = items
+        .iter()
+        .map(|item| serde_json::to_string(&json!({"action":action,"request":item,"cli":cli})))
+        .collect::<Result<Vec<_>, _>>()?;
+    // The data rides inside the program text on stdin: one argv string is capped at 128 KiB
+    // on Linux, which a batch of a few dozen sites can exceed.
+    let program = BATCH
+        .replace(
+            "SCRIPT = json.loads(sys.argv[1])",
+            &format!(
+                "SCRIPT = json.loads({})",
+                serde_json::to_string(&serde_json::to_string(SCRIPT)?)?
+            ),
+        )
+        .replace(
+            "JOBS = json.loads(sys.argv[2])",
+            &format!(
+                "JOBS = json.loads({})",
+                serde_json::to_string(&serde_json::to_string(&jobs)?)?
+            ),
+        );
+    let script =
+        format!("python3 - <<'COLM_REMOTE_CASE_BATCH_PY'\n{program}\nCOLM_REMOTE_CASE_BATCH_PY\n");
+    let output: serde_json::Value = serde_json::from_str(&ssh.run_ok(&script)?)?;
+    anyhow::ensure!(
+        output["results"].as_array().map(Vec::len) == Some(items.len()),
+        "the server answered a batch of {} with a different number of results",
+        items.len()
+    );
+    Ok(output)
 }
 
 fn frozen_source_options(opts: &Opts, code: &colm_model::CodeRef) -> Result<Opts> {

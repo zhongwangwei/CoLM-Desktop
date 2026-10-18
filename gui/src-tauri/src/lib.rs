@@ -116,6 +116,7 @@ pub fn run() {
         })
         .manage(RunProcesses::default())
         .manage(CaseCreations::default())
+        .manage(remote_cases::RemoteCreationBatches::default())
         .manage(AssistantProcess::default())
         // 注意：这里**没有**单份写入的命令（`set_field` / `write_text` /
         // 单份写入）。参数改动一律走 `*_batch` —— 前端只有一条写入路径，
@@ -246,6 +247,8 @@ pub fn run() {
             remote_scan_sites,
             remote_prepare_engine,
             remote_create_case,
+            remote_create_cases,
+            remote_create_cases_cancel,
             remote_browse,
             remote_mkdir,
             remote_engines,

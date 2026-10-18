@@ -224,4 +224,38 @@ elif args[0] == 'new':
     def test_scan_keeps_server_paths(self):
         self.assertEqual(self.run_action('scan',{'dir':'/server/sites','quick':True})['sites'][0]['path'],'/server/sites/site.nc')
 
+    def run_batch(self, action, items):
+        # Assemble the program the way remote_cases.rs does: data inside the program text.
+        batch = SCRIPT.with_name('remote_cases_batch.py').read_text()
+        jobs = [json.dumps({'cli': str(self.cli), 'action': action, 'request': item}) for item in items]
+        program = batch.replace('SCRIPT = json.loads(sys.argv[1])', 'SCRIPT = json.loads(%s)' % json.dumps(json.dumps(SCRIPT.read_text()))).replace(
+            'JOBS = json.loads(sys.argv[2])', 'JOBS = json.loads(%s)' % json.dumps(json.dumps(jobs)))
+        p = subprocess.run([sys.executable, '-'], input=program, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        return json.loads(p.stdout)['results']
+
+    def test_batch_reports_each_item_and_keeps_failures_to_their_item(self):
+        good = self.root/'project'/'A'
+        bad = self.root/'project'/'B'
+        items = [
+            {'out': str(good), 'kind': 'site', 'site': '/data/site.nc', 'token': 'a'*64},
+            {'out': str(bad), 'kind': 'site', 'site': 'fail', 'token': 'b'*64},
+            {'out': str(self.root/'project'/'C'), 'kind': 'site', 'site': '/data/site.nc', 'token': 'c'*64},
+        ]
+        results = self.run_batch('create', items)
+        self.assertEqual([('ok' in r, 'error' in r) for r in results], [(True, False), (False, True), (True, False)])
+        self.assertEqual(results[0]['ok']['token'], 'a'*64)
+        self.assertIn('bad station', results[1]['error'])
+        self.assertFalse(bad.exists())
+        published = self.run_batch('publish', [
+            {'out': str(good), 'token': 'a'*64, 'files': results[0]['ok']['files']},
+            {'out': str(self.root/'project'/'C'), 'token': 'wrong', 'files': results[2]['ok']['files']},
+        ])
+        self.assertEqual(published[0], {'ok': {'ok': True}})
+        self.assertIn('ownership changed', published[1]['error'])
+        self.assertTrue((good/'.colm-desktop-server.json').is_file())
+        aborted = self.run_batch('abort', [{'out': str(self.root/'project'/'C'), 'token': 'c'*64}])
+        self.assertEqual(aborted, [{'ok': {'ok': True}}])
+        self.assertFalse((self.root/'project'/'C').exists())
+
 if __name__ == '__main__': unittest.main()

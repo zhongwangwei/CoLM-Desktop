@@ -99,6 +99,18 @@ pub async fn case_creation_cancel(
         .map_err(|e| e.to_string())?
 }
 
+/// Cancels the creations writing these local directories (blocking).
+pub(crate) fn cancel_creations(
+    creations: &CaseCreations,
+    dirs: &[String],
+) -> Result<usize, String> {
+    let keys = dirs
+        .iter()
+        .map(|dir| creation_key(dir))
+        .collect::<Result<Vec<_>, _>>()?;
+    creations.0.cancel(Some(keys))
+}
+
 impl CaseCreations {
     pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
         self.0.cancel(None)

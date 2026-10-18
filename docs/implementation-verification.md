@@ -33710,3 +33710,36 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - 请求流程不变，只调整了布局；测试里找文件夹按钮的文字从 `▸ sites/` 改成 `sites`，箭头改由 CSS 画出。
 4. 验证：`npm test` 679 passed，新增"按类型记路径"的纯函数测试、页面测试和计算资源页测试，以及多站点筛选测试；Tauri `kind_paths_are_kept_per_resource_and_kind_and_survive_saving_servers` 通过；check-gui、tsc、eslint、clippy 和 `cargo test -p xtask` 都通过。
    布局本身没有自动化的视觉验证（GUI e2e 不截图），交给用户在重编后的应用里目测。
+
+## 第 708 轮：服务器端批量创建多站点（2026-10-18）
+
+1. **原因**：多站点是逐个站点串行创建的。实测 tms17l 上 79 个站点从 12:51:07 建到 12:54:28，平均每站 2.6 s，最慢的一个 6 s；
+   服务器上 `colm-cli new` 生成一个算例只要 0.26 s。拆开看单站：
+   | 步骤 | 耗时 |
+   |---|---|
+   | 完整的 `remote-case-create`（拿锁、探测服务器、核对引擎、本机校验源码哈希、生成算例） | 1.59 s |
+   | 本机 `model-migrate-case` | 0.48 s |
+   | 生成预览，再走一次 SSH 做 `remote-case-publish` | 约 0.5 s |
+
+   每个站点都把锁、探测和引擎核对完整重做一遍，还要多次 SSH 往返。
+2. **改动**：
+   - colm-cli：新增 `remote-case-create-batch`、`-publish-batch`、`-abort-batch`。锁、探测、引擎核对和源码校验每批只做一次。
+   - 服务器端：`remote_cases_batch.py` 在一个 SSH 会话里为每个站点单独起一个 `remote_cases.py` 进程，8 个并行，各站点的失败和创建凭据互不影响，与单条请求完全一致；结果按请求顺序返回 `{"ok"}` 或 `{"error"}`。
+     任务数据嵌在经标准输入传过去的程序文本里，而不是放进命令行参数：Linux 上单个参数上限是 128 KiB，几十个站点就可能超过。
+   - Tauri：`remote_create_case` 拆成"准备 → 服务器创建 → 本机收尾 → 发布 → 失败清理 → 结算"几段，单条创建行为不变。新命令 `remote_create_cases` 复用这几段：
+     - 批量创建一次；
+     - 本机收尾（绑定模型版本、生成预览）8 个一组并行；
+     - 批量发布一次，失败的批量清理一次；
+     - 返回逐站结果，并通过 `remote-create://progress` 推送 `{batch, stage, done, total}`。
+   - 取消：`remote_create_cases_cancel(batch)` 复用 `CaseCreation` 的取消机制，尚未发布的站点会在服务器上清理掉。远程多站点以前没有取消按钮，现在批量创建期间有了。
+   - 前端：远程多站点一次调用批量命令，按阶段显示进度（服务器批量创建 / 整理本机配置 n / N / 发布）。失败的站点照旧单独列出，"重试"只重发失败的那些。
+3. **实测**（tms17l，release colm-cli，PLUMBER2s 全部 90 个站点，输出到 scratch，测完已删除）：
+   | 操作 | 耗时 |
+   |---|---|
+   | `remote-case-create-batch` | 5.44 s，90/90 成功（原来逐个约 90 × 1.59 ≈ 143 s） |
+   | 45 个站点 `publish-batch` | 0.47 s |
+   | 另外 45 个站点 `abort-batch` | 0.37 s；已发布的带 `.colm-desktop-server.json`，被清理的目录已删除 |
+
+   本机收尾按 0.5–0.6 s/站、8 路并行估算约 7 s，这一段要在应用里实测。
+4. 测试：Python 新增 `test_batch_reports_each_item_and_keeps_failures_to_their_item`（15 passed）；Tauri 新增 `batch_results_keep_each_item_and_reject_a_short_answer`；
+   GUI 的远程多站点重试测试改为断言"每次尝试一个批次、只重发失败的站点"，新增进度与取消测试；`npm test` 680 passed，check-gui、clippy（colm-cli、gui/src-tauri）、fmt 都通过。

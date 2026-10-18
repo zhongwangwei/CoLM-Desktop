@@ -89,6 +89,7 @@ export type AppEvent =
   | 'run://done'
   | 'study://event'
   | 'assistant://event'
+  | 'remote-create://progress'
   | 'colm-about';
 export async function listen<T = unknown>(
   event: AppEvent,

@@ -1392,6 +1392,30 @@ export const commandContract = {
       "rust_type": "Option<colm_model::VersionRef>"
     }
   },
+  "remote_create_cases": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "requests": {
+      "required": true,
+      "rust_type": "Vec<Value>"
+    },
+    "modelRevision": {
+      "required": false,
+      "rust_type": "Option<colm_model::VersionRef>"
+    },
+    "batch": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "remote_create_cases_cancel": {
+    "batch": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "case_creation_cancel": {
     "dir": {
       "required": true,

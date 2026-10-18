@@ -97,6 +97,7 @@ function page(
     projectRunSettings: undefined as AppState['projectRunSettings'],
     projectView: undefined as AppState['projectView'],
   };
+  const listeners: { event: string; callback: (payload: unknown) => void }[] = [];
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     routes: string[] = [],
     opened: string[] = [],
@@ -209,6 +210,13 @@ function page(
         });
       }
     },
+    listen: async (event: string, callback: (payload: unknown) => void) => {
+      listeners.push({ event, callback });
+      return () => {
+        const index = listeners.findIndex((listener) => listener.callback === callback);
+        if (index >= 0) listeners.splice(index, 1);
+      };
+    },
     invoke: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
       switch (command) {
@@ -268,6 +276,27 @@ function page(
           return '';
         case 'read_case':
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));
+        case 'remote_create_cases': {
+          const outcomes = [];
+          for (const request of args.requests as { out: string }[]) {
+            try {
+              outcomes.push({
+                ok: options.create
+                  ? await options.create({ ...args, request })
+                  : {
+                      dir: `/cache/project/${request.out.split('/').pop()}`,
+                      root: '/cache/project',
+                      remote_dir: request.out,
+                    },
+              });
+            } catch (error) {
+              outcomes.push({ error: String(error) });
+            }
+          }
+          return outcomes;
+        }
+        case 'remote_create_cases_cancel':
+          return 1;
         case 'remote_create_case':
           if (options.create) return options.create(args);
           return {
@@ -382,6 +411,7 @@ function page(
   return {
     state,
     calls,
+    listeners,
     routes,
     opened,
     scrolls,
@@ -3130,15 +3160,67 @@ test('remote multi-site retries retain server identity and request atomic replay
   await p.click('new-create');
   failed = false;
   await p.click('new-multi-retry');
-  const requests = p.calls
-    .filter((call) => call.command === 'remote_create_case')
-    .map((call) => call.args.request as Record<string, unknown>);
+  const batches = p.calls.filter((call) => call.command === 'remote_create_cases');
+  assert.equal(batches.length, 2, 'one server batch per attempt');
+  assert.ok(!p.calls.some((call) => call.command === 'remote_create_case'));
+  const requests = batches.flatMap((call) => call.args.requests as Record<string, unknown>[]);
   assert.deepEqual(
     requests.map((request) => request.name),
     ['CN-Cng', 'other', 'CN-Cng'],
   );
+  assert.ok(batches.every((call) => call.args.host === 'compute' && call.args.batch));
   assert.ok(requests.every((request) => request.spinup_repeat === 3));
   assert.ok(!p.calls.some((call) => call.command === 'set_spinup' || call.command === 'new_case'));
+});
+
+test('a server multi-site batch shows its progress and can be cancelled', async () => {
+  let release: () => void = () => {};
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, form: { ...multiSeed.form, host: 'compute' } },
+    multiSites,
+    initialValues,
+    {
+      servers: [runServer],
+      create: async (args) => {
+        await new Promise<void>((resolve) => (release = resolve));
+        const request = args.request as { name: string; out: string };
+        return {
+          dir: `/cache/multi/${request.name}`,
+          root: '/cache/multi',
+          remote_dir: request.out,
+        };
+      },
+    },
+  );
+  await p.mount();
+  const creating = p.click('new-create');
+  await p.settle();
+  const call = p.calls.find((item) => item.command === 'remote_create_cases')!;
+  const batch = call.args.batch as string;
+  const progress = p.listeners.find((listener) => listener.event === 'remote-create://progress')!;
+  const notices = () =>
+    p.elements
+      .filter((element) => element.type === 'Notice')
+      .map((element) => (element.children as unknown[]).flat(Infinity).join(''));
+  progress.callback({ batch: 'another', stage: 'local', done: 9, total: 9 });
+  progress.callback({ batch, stage: 'server', done: 0, total: 2 });
+  p.render();
+  assert.ok(notices().some((text) => text.includes('正在 compute 上批量创建 2 个站点')));
+  progress.callback({ batch, stage: 'local', done: 1, total: 2 });
+  p.render();
+  assert.ok(notices().some((text) => text.includes('正在整理本机配置：1 / 2')));
+  await p.click('new-cancel-creation');
+  assert.deepEqual(p.calls.find((item) => item.command === 'remote_create_cases_cancel')?.args, {
+    batch,
+  });
+  release();
+  await p.settle();
+  release();
+  await creating;
+  await p.settle();
+  assert.equal(p.listeners.length, 0, 'the progress listener is removed');
+  assert.ok(!notices().some((text) => text.includes('整理本机配置')));
 });
 
 test('server spatial creation passes server paths and grid settings without local creation', async () => {
