@@ -33596,3 +33596,23 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 之后改为看到 `fail 0` 才提交。
 
 验证：gui/src-tauri 392 个测试、colm-history 37 个测试、两个 workspace 的 clippy -D warnings 和 fmt；前端 667 个测试、tsc、eslint、prettier。
+
+## 第 703 轮：外部审计其余中低优先级（2026-10-18）
+
+1. **CBL 强迫场 namelist 裸写（#13）**：先写 forcing.nml、后开 `DEF_USE_CBL_HEIGHT` 是有意的顺序，第二步失败只会留下不生效的配置，这一点审计没说对。
+   真正的问题是 forcing.nml 在写锁外用 `fs::write` 原地截断重写。现在改走 `write_files_atomic`（加锁、临时文件、备份）。没有端到端测试（缺 NetCDF 测试数据）。
+2. **远程部分取回直接覆盖 history（#14）**：新增 `publish_partial_history`：每个将被替换的文件先移到暂存区；任一步失败，就按逆序撤销已完成的步骤；
+   只有撤销本身也失败时才保留暂存区并报告位置，与完整取回的路径一致。unix 测试：第二个文件挪开失败时，第一个文件被回滚，两个旧文件都原样保留。
+3. **Study 任务记录的是调度器 PID（#12）**：worker 是调度器内的线程，真正计算的是 `run_case` 启动的 Fortran 内核或 Rust 引擎子进程。
+   colm-kernel 新增 `observe_spawns`（线程内的观察者），三种阶段路径共用的唯一启动点会报告子进程的 `(pid, program)`；
+   Study worker 用它包住 `run_case`，调度器把子进程记为任务的 process 并写入 checkpoint。测试：观察者单元测试，以及真实 fake 内核报告的 PID 与子进程自己打印的 `$$` 一致。
+   调度器侧写入 checkpoint 没有端到端测试：checkpoint 只保留两份，现有集成测试抓不到运行中的那一刻。
+4. **recent.json**：读失败时静默返回空表，下一次保存就用这张空表覆盖整个文件。现在保存时，若现有文件无法解析就拒绝覆盖，写入改为原子替换；界面读取时仍把坏文件当空表处理。
+5. **run.lock**：心跳改为写同目录临时文件再改名；锁里记录的身份已不是自己（被判定过期后让位给了新调度器）时，心跳停止；Drop 只删除仍属于自己的锁（比对 pid、启动时间、argv 哈希）。
+6. **notify() 丢弃错误标志**：新增并行的 `errorNotices`，`notify(msg, true)` 的提示用错误样式显示，提示滚出列表或点"收起提示"时一并清除。
+
+验证：colm-cli 449 个单元测试加 23 个 Study 集成测试，colm-kernel 48 个，gui/src-tauri 全部测试，前端 668 个测试；clippy -D warnings、fmt、tsc、eslint、prettier。
+
+仍未处理的审计条目：#16（i18n 门禁只扫描 legacy dist，React 中有硬编码中英混排）、冻结官方修订未绑定 Fortran 内核源码、远程无路径映射时没有上传入口，
+以及若干低优先级项（新建模拟复核勾选不比较日期、换运行位置不重置时段、结果图每次渲染重建、check-gui 只看字面量命令名、重启窄整型静默回绕、
+测试写真实历史库、服务器算例本地运行泄漏 pending 预留、e2e 后门无鉴权、非 UTF-8 输出时管道停读）。
