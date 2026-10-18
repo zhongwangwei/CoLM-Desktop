@@ -451,6 +451,9 @@ export function historyStatusLabel(status: string, en = false): string {
     completed_with_failures: ['部分失败', 'Partially failed'],
     failed: ['失败', 'Failed'],
     cancelled: ['已取消', 'Cancelled'],
+    completed: ['已完成', 'Completed'],
+    paused: ['已暂停', 'Paused'],
+    needs_review: ['待复核', 'Needs review'],
     interrupted: ['已中断', 'Interrupted'],
     unknown: ['未知', 'Unknown'],
   };

@@ -3078,7 +3078,25 @@ fn study_run_blocking(
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
     }
     let result = study_run_untracked(app, processes, args);
-    crate::history::command_finish(event.as_ref(), result, "succeeded")
+    let status = result
+        .as_deref()
+        .map(study_run_status)
+        .unwrap_or("succeeded");
+    crate::history::command_finish(event.as_ref(), result, status)
+}
+
+/// History status for a study-run that exited normally: the CLI also exits 0 when the Study
+/// pauses, finishes with failures or needs review, and says so in its final `study_done`.
+fn study_run_status(output: &str) -> &'static str {
+    let event: serde_json::Value = serde_json::from_str(output).unwrap_or_default();
+    match event["status"].as_str() {
+        Some("completed") => "completed",
+        Some("completed_with_failures") => "completed_with_failures",
+        Some("cancelled") => "cancelled",
+        Some("paused") => "paused",
+        Some("needs_review") => "needs_review",
+        _ => "succeeded",
+    }
 }
 fn study_run_untracked(
     app: tauri::AppHandle,

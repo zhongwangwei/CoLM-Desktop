@@ -185,7 +185,8 @@ pub struct Page {
     pub total: u64,
 }
 
-/// Terminal statuses that confirm an operation ended; assistant UI requests end as `ui_*`.
+/// Terminal statuses that confirm an operation ended; assistant UI requests end as `ui_*`, and a
+/// study-run invocation may end `paused` or `needs_review` (resuming starts a new operation).
 /// Keep in step with the status list in [`History::remove_operation`].
 pub fn confirmed_status(status: &str) -> bool {
     matches!(
@@ -197,6 +198,8 @@ pub fn confirmed_status(status: &str) -> bool {
             | "cancelled"
             | "ui_succeeded"
             | "ui_failed"
+            | "paused"
+            | "needs_review"
     )
 }
 
@@ -425,7 +428,7 @@ impl History {
             "INSERT INTO history_removed_operations(operation_id,removed_ms)
              SELECT operation_id,?2 FROM history_operations WHERE operation_id=?1
              AND needs_reconciliation=0 AND json_extract(payload,'$.status')
-                 IN ('succeeded','failed','completed','completed_with_failures','cancelled','ui_succeeded','ui_failed')
+                 IN ('succeeded','failed','completed','completed_with_failures','cancelled','ui_succeeded','ui_failed','paused','needs_review')
              ON CONFLICT(operation_id) DO NOTHING",
             params![operation_id, now_ms()],
         )?;

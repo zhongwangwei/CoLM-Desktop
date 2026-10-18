@@ -1566,3 +1566,23 @@ fn a_quiet_program_still_gets_its_pending_line_flushed_by_the_timer() {
     drop(send);
     collector.join().unwrap();
 }
+
+#[test]
+fn study_run_history_records_the_studys_actual_end_state() {
+    let done = |status: &str| {
+        serde_json::json!({"type":"study_done","kind":"study_done","study":"s","status":status})
+            .to_string()
+    };
+    assert_eq!(study_run_status(&done("completed")), "completed");
+    assert_eq!(
+        study_run_status(&done("completed_with_failures")),
+        "completed_with_failures"
+    );
+    assert_eq!(study_run_status(&done("paused")), "paused");
+    assert_eq!(study_run_status(&done("needs_review")), "needs_review");
+    assert_eq!(
+        study_run_status(r#"{"type":"study_done","kind":"study_done"}"#),
+        "succeeded"
+    );
+    assert_eq!(study_run_status("not json"), "succeeded");
+}
