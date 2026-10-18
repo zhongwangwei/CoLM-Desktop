@@ -679,6 +679,8 @@ mod project_tests;
 
 /// Open an existing local artifact with its platform-associated application.
 #[tauri::command]
+// Each platform builds `result` differently; the binding keeps the cfg branches statements.
+#[allow(clippy::let_and_return)]
 pub fn open_path(path: String) -> Result<(), String> {
     let path = std::path::Path::new(&path)
         .canonicalize()
@@ -687,12 +689,35 @@ pub fn open_path(path: String) -> Result<(), String> {
     let mut command = std::process::Command::new("open");
     #[cfg(target_os = "linux")]
     let mut command = std::process::Command::new("xdg-open");
+    // explorer.exe rejects some verbatim (\\?\) paths and often exits non-zero even after
+    // opening the file, so pass a plain path and treat a successful launch as success.
     #[cfg(target_os = "windows")]
-    let mut command = std::process::Command::new("explorer.exe");
-    let status = command.arg(path).status().map_err(|e| e.to_string())?;
-    if status.success() {
-        Ok(())
+    let result = std::process::Command::new("explorer.exe")
+        .arg(plain_windows_path(&path.to_string_lossy()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open artifact: {e}"));
+    #[cfg(not(target_os = "windows"))]
+    let result = {
+        let status = command.arg(path).status().map_err(|e| e.to_string())?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("could not open artifact: {status}"))
+        }
+    };
+    result
+}
+
+/// `canonicalize` on Windows yields verbatim paths (`\\?\C:\…`, `\\?\UNC\server\…`);
+/// return the ordinary spelling that shell programs accept.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn plain_windows_path(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
     } else {
-        Err(format!("could not open artifact: {status}"))
+        path.to_string()
     }
 }

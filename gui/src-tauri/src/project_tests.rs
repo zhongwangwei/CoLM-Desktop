@@ -454,3 +454,19 @@ fn server_case_cannot_change_its_owning_host() {
         Some("/server/project/site")
     );
 }
+
+#[test]
+fn shell_open_receives_plain_windows_paths() {
+    assert_eq!(
+        super::plain_windows_path(r"\\?\C:\Users\me\out.nc"),
+        r"C:\Users\me\out.nc"
+    );
+    assert_eq!(
+        super::plain_windows_path(r"\\?\UNC\server\share\out.nc"),
+        r"\\server\share\out.nc"
+    );
+    assert_eq!(
+        super::plain_windows_path("/Users/me/out.nc"),
+        "/Users/me/out.nc"
+    );
+}
