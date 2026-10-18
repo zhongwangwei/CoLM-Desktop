@@ -729,8 +729,11 @@ export default function RunPanel({
     : t('下一步：查看结果', 'Next: view results');
 
   // A batch of station cases on a server runs as many stations at once as CPUs are requested,
-  // each station with one CPU and one thread.
-  const siteBatch = !!batchCases && !!host;
+  // each station with one CPU and one thread. Batches with spatial cases keep their settings.
+  const siteBatch =
+    !!batchCases &&
+    !!host &&
+    batchCases.every((dir) => state.cases?.some((entry) => entry.dir === dir && !entry.spatial));
   const runServer = servers.find((server) => server.host === host);
   const stationConcurrency =
     Number(cpus) > 0 ? Number(cpus) : runServer?.cpus || runServer?.threads || 1;
@@ -809,7 +812,7 @@ export default function RunPanel({
       ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
         : []),
-      ...(batchCases && !host
+      ...(batchCases && !siteBatch
         ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
         : []),
       ...(host

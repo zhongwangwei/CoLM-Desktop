@@ -33,7 +33,9 @@ if(process.argv.includes('--self-test')){
  assert(issues(invocations("invoke('check',{})"),{check:{file:{required:true}}},new Set(['check'])).some(s=>s.includes('missing required argument file')));
  console.log('GUI contract parser regressions passed.');process.exit(0);
 }
-const freshness=spawnSync(process.platform==='win32'?'python':'python3',[join(root,'scripts/generate-gui-contract.py'),'--check'],{stdio:'inherit'});
+// A relative path from the repository root: MSYS2's python (Windows release job) reads a
+// Windows absolute path as relative and cannot find the script.
+const freshness=spawnSync(process.platform==='win32'?'python':'python3',['scripts/generate-gui-contract.py','--check'],{cwd:root,stdio:'inherit'});
 if(freshness.error)throw freshness.error;if(freshness.status!==0)process.exit(freshness.status??1);
 const generated=readFileSync(join(root,'gui/src/lib/command-contract.ts'),'utf8');
 const contract=JSON.parse(generated.slice(generated.indexOf('=')+1,generated.indexOf(' as const;')));

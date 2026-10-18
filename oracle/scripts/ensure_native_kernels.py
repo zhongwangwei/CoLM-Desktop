@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Build missing/stale native kernels before a production desktop bundle."""
+import shutil
 import hashlib
 import json
 import os
@@ -109,7 +110,21 @@ def main():
     for key, directory in [('PATH', runtime / 'bin'), ('LD_LIBRARY_PATH', runtime / 'lib'),
                            ('DYLD_LIBRARY_PATH', runtime / 'lib'), ('DYLD_FALLBACK_LIBRARY_PATH', runtime / 'lib')]:
         environment[key] = str(directory) + os.pathsep + environment.get(key, '')
-    subprocess.run([str(launcher), '-n', '1', 'hostname'], env=environment, check=True, timeout=30)
+    try:
+        subprocess.run([str(launcher), '-n', '1', 'hostname'], env=environment, check=True, timeout=30)
+    except subprocess.CalledProcessError:
+        # Open MPI that cannot load its components does not even know `-n`; show where it looked.
+        info = shutil.which('ompi_info')
+        if info:
+            for key in ['prefix', 'pkglibdir', 'datadir']:
+                found = subprocess.run([info, '--path', key, '--parsable'], env=environment,
+                                       capture_output=True, text=True).stdout.strip()
+                print(f'bundled MPI {key}: {found}', flush=True)
+                path = found.split(':', 2)[-1]
+                if key == 'pkglibdir':
+                    print(f'  exists={os.path.isdir(path)} entries={len(os.listdir(path)) if os.path.isdir(path) else 0}',
+                          flush=True)
+        raise
     if source_fingerprint(ROOT) != fingerprint or any(
             not current(ROOT / 'kernels' / preset, preset, fingerprint, platform) for preset in presets):
         raise SystemExit('native kernels changed during MPI staging; rebuild before packaging')

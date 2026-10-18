@@ -33755,3 +33755,13 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - 侧栏顶部固定显示"当前项目"入口，远程项目显示为"服务器: 项目目录名"。在任何页面点一下都能回到原来的工作页面；它也登记进了页面契约，名为 `nav-current-project`。
 4. **打开项目的起始路径**：`pick_folder` 会读 `project-open` 这条记录，但选完以后从来没有写回去，所以每次都从系统默认位置（Desktop）开始。现在 `pick_folder`/`pick_file` 选完都会把结果记到对应的 key 下；写入失败不影响这次选择。
 5. 验证：`npm test` 682 passed，新增"项目记忆/项目名"和"站点批量按 CPU 并发、每站 1 CPU"两组测试；check-gui、tsc、eslint、gui/src-tauri clippy 与 fmt、`cargo test --lib recent`、xtask 都通过。
+6. **推送前检查发现 0.3.0-beta.4 一直没有发布出来**：fdd125f0、602df058、edfdc9d3 触发的三次 release 里，Windows 和 Linux 的打包作业都失败了，macOS Intel 作业一直在跑。
+   - **Windows**：`check-gui.mjs` 在 MSYS2 shell 里把 Windows 绝对路径交给 `python`，MSYS 的 python 当成了相对路径：`can't open file '/d/a/.../gui/D:\a\...\scripts\generate-gui-contract.py'`。现在改为以仓库根为 cwd、用相对路径调用。
+   - **Linux**：自检 `kernels/_runtime/bin/mpiexec -n 1 hostname` 报 `Error: unknown option "-n"`。这是 opal 命令行解析的报错；OpenMPI 4 的 `-n` 由 schizo/ompi 组件注册，说明搬家后的运行时没有加载到组件。
+     - 能解释这一现象的情况：设了 `OPAL_PREFIX` 后，组件目录按编译时的布局换到 runtime 下一个不存在的子路径，而组件实际拷在 `lib/openmpi`。
+     - 另外，`OMPI_MCA_component_path` 不是 OpenMPI 4 认的参数名（正式名是 `mca_base_component_path`）。
+     - 现在 `stage_mpi_runtime.sh` 用 `OPAL_PREFIX=<runtime> ompi_info --path pkglibdir/datadir` 问出搬家后的位置，把组件和帮助文本也放一份到那里，并在日志里打出这个路径。`ensure_native_kernels.py` 自检失败时会打印 OpenMPI 实际查找的 prefix/pkglibdir/datadir，以及组件目录是否存在。
+     - 本机（Homebrew OpenMPI 5）上 `pkglibdir` 不随 `OPAL_PREFIX` 改变，`datadir` 会；T7920（Ubuntu 26.04）和 tms17l 都没装 OpenMPI，所以 Ubuntu 4.1.6 的实际行为要看下一轮 CI。
+     - 这个自检是 10-17 才加的（8f1420a4），运行时打包从 d1088fdb（8 月，早于 beta.3）就是这样，所以 beta.3 的 Linux 包很可能早就带着用不了的 MPI。
+   - **混合批量**：按 CPU 数并发、每站 1 核，只用于全部是站点算例的服务器批量；混有空间算例时，沿用原来的线程、CPU 和并发设置，避免把区域/流域算例压成单核。
+   - 推送前全量验证：`npm test` 682 passed；check-gui；fmt（两个 workspace）；clippy（colm-cli、colm-kernel、gui/src-tauri）；Tauri lib 396 passed；colm-kernel 49 passed；colm-cli 串行全部通过；xtask；`remote_cases_test.py`、`test_ensure_native_kernels.py`；vendor 静态测试 26 passed。

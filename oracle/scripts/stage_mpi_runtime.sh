@@ -133,6 +133,31 @@ case "$(uname -s)" in
       mkdir -p "$RUNTIME/etc/openmpi"
       cp -RL /etc/openmpi/. "$RUNTIME/etc/openmpi/"
     fi
+    # With OPAL_PREFIX pointing here, Open MPI 4 looks for its components and help text at
+    # its configure-time layout moved under the new prefix (Ubuntu: lib/<triplet>/openmpi/lib/
+    # openmpi3), not at lib/openmpi. Without the components, orterun does not even know `-n`
+    # (the 0.3.0-beta.4 Linux bundle failed its `mpiexec -n 1 hostname` check this way).
+    # Ask Open MPI where that is and put a copy there too.
+    runtime_abs=$(cd "$RUNTIME" && pwd)
+    relocated_pkglib=$(OPAL_PREFIX="$runtime_abs" ompi_info --path pkglibdir --parsable | cut -d: -f3-)
+    relocated_data=$(OPAL_PREFIX="$runtime_abs" ompi_info --path datadir --parsable | cut -d: -f3-)
+    echo "relocated Open MPI component directory: $relocated_pkglib"
+    case "$relocated_pkglib" in
+      "$runtime_abs"/*)
+        if test "$relocated_pkglib" != "$runtime_abs/lib/openmpi" && test -d "$pkglibdir"; then
+          mkdir -p "$relocated_pkglib"
+          cp -RL "$pkglibdir/." "$relocated_pkglib/"
+        fi
+        ;;
+    esac
+    case "$relocated_data" in
+      "$runtime_abs"/*)
+        if test "$relocated_data" != "$runtime_abs/share" && test -d "$datadir/openmpi"; then
+          mkdir -p "$relocated_data/openmpi"
+          cp -RL "$datadir/openmpi/." "$relocated_data/openmpi/"
+        fi
+        ;;
+    esac
 
     while IFS= read -r file; do
       file "$file" | grep -qE 'ELF .* (executable|shared object)' || continue
