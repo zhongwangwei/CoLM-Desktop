@@ -78,14 +78,25 @@ pub async fn pick_folder(app: tauri::AppHandle, key: String) -> Option<String> {
     if let Some(path) = crate::e2e_driver::take_pick() {
         return Some(path);
     }
-    let start = load_recent(app).get(&key).cloned();
+    let start = load_recent(app.clone()).get(&key).cloned();
     let mut d = rfd::AsyncFileDialog::new();
     if let Some(s) = start.filter(|s| std::path::Path::new(s).is_dir()) {
         d = d.set_directory(s);
     }
-    d.pick_folder()
+    let picked = d
+        .pick_folder()
         .await
-        .map(|h| h.path().display().to_string())
+        .map(|h| h.path().display().to_string());
+    remember_pick(&app, &key, picked.as_deref());
+    picked
+}
+
+/// The next dialog for the same field starts where this one ended. Losing the note only costs
+/// a starting folder, so a failure to write it never fails the pick.
+fn remember_pick(app: &tauri::AppHandle, key: &str, picked: Option<&str>) {
+    if let (Some(value), Ok(path)) = (picked, path(app)) {
+        let _ = remember(&path, key.to_owned(), value.to_owned());
+    }
 }
 
 /// 选一个文件。`filter` 是逗号分隔的后缀名，如 `nc,nc4`。
@@ -101,7 +112,7 @@ pub async fn pick_file(
     }
     // 起始目录取上次那个**值所在的目录** —— 记住的是文件路径时，
     // 直接当目录用会打不开。
-    let start = load_recent(app).get(&key).cloned().and_then(|s| {
+    let start = load_recent(app.clone()).get(&key).cloned().and_then(|s| {
         let p = std::path::PathBuf::from(&s);
         if p.is_dir() {
             Some(p)
@@ -123,7 +134,9 @@ pub async fn pick_file(
             d = d.add_filter("data", &extensions);
         }
     }
-    d.pick_file().await.map(|h| h.path().display().to_string())
+    let picked = d.pick_file().await.map(|h| h.path().display().to_string());
+    remember_pick(&app, &key, picked.as_deref());
+    picked
 }
 
 fn text_export_filter(suggested_name: &str, mime_type: &str) -> Result<&'static str, String> {

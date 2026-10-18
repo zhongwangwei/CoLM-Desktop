@@ -2,7 +2,16 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { activeNavigation, navigation, navigationTarget } from './navigation';
+import {
+  activeNavigation,
+  currentProjectView,
+  navigation,
+  navigationTarget,
+  projectName,
+  projectToSave,
+  readSavedProject,
+  writeSavedProject,
+} from './navigation';
 
 test('sidebar groups model/data work under Project and opens real case tabs', () => {
   assert.deepEqual(
@@ -114,4 +123,56 @@ test('sidebar applies the Project view only after navigation is allowed', () => 
   assert.deepEqual(updates, [
     { projectView: { ...bookmark, home: true }, projectCasesOpen: false },
   ]);
+});
+
+test('the current project and its page survive navigation and restarts', () => {
+  const store = new Map<string, string>();
+  const storage = {
+    getItem: (key: string) => store.get(key) ?? null,
+    setItem: (key: string, value: string) => void store.set(key, value),
+    removeItem: (key: string) => void store.delete(key),
+  };
+  assert.equal(readSavedProject(storage), null);
+  const batch = {
+    root: '/p',
+    projectView: { root: '/p', page: 'batch' as const, fromCreation: true },
+  };
+  writeSavedProject(storage, projectToSave(batch, null));
+  assert.deepEqual(readSavedProject(storage), { root: '/p', page: 'batch', fromCreation: true });
+
+  // Going home or elsewhere keeps the saved page; returning opens it, not the home page.
+  const away = { root: '/p', projectView: undefined };
+  assert.deepEqual(projectToSave(away, readSavedProject(storage)), readSavedProject(storage));
+  assert.deepEqual(currentProjectView(away, readSavedProject(storage)), {
+    root: '/p',
+    page: 'batch',
+    fromCreation: true,
+    home: false,
+  });
+  // Another project starts on its case list; closing the project forgets it.
+  assert.deepEqual(
+    currentProjectView({ root: '/q', projectView: undefined }, readSavedProject(storage)),
+    {
+      root: '/q',
+      page: 'cases',
+      home: false,
+    },
+  );
+  writeSavedProject(storage, projectToSave({ root: '', projectView: undefined }, null));
+  assert.equal(readSavedProject(storage), null);
+  store.set('colm-ui-project', '{not json');
+  assert.equal(readSavedProject(storage), null);
+  store.set('colm-ui-project', JSON.stringify({ root: '/p', page: 'elsewhere' }));
+  assert.equal(readSavedProject(storage), null);
+});
+
+test('projects are named by their server folder or their own folder', () => {
+  assert.equal(
+    projectName('/cache/remote-projects/abc123', [
+      { run_host: 'tms17l', remote_directory: '/tera11/zhwei/colm-desktop/Plumber/AT-Neu' },
+    ]),
+    'tms17l: Plumber',
+  );
+  assert.equal(projectName('/Users/me/Desktop/my-project/', []), 'my-project');
+  assert.equal(projectName('D:\\runs\\basin', []), 'basin');
 });

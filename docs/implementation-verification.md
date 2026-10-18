@@ -33743,3 +33743,15 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    本机收尾按 0.5–0.6 s/站、8 路并行估算约 7 s，这一段要在应用里实测。
 4. 测试：Python 新增 `test_batch_reports_each_item_and_keeps_failures_to_their_item`（15 passed）；Tauri 新增 `batch_results_keep_each_item_and_reject_a_short_answer`；
    GUI 的远程多站点重试测试改为断言"每次尝试一个批次、只重发失败的站点"，新增进度与取消测试；`npm test` 680 passed，check-gui、clippy（colm-cli、gui/src-tauri）、fmt 都通过。
+
+## 第 709 轮：站点并发跟申请 CPU 走；文件浏览器加宽；回到当前项目；打开项目从上次路径开始（2026-10-18）
+
+1. **站点并发 = 申请 CPU 数**：服务器上批量跑站点算例时，不再单独设"同时运行站点数"。同时运行的站点数直接取申请 CPU 数（空白时用服务器设置的 cpus，没有再用 threads），每个站点作业按 1 个 CPU、1 个线程提交。
+   这样不会出现"N 个并发 × 每个 N 个 CPU"的过量申请。新建模拟第 5 步和运行面板都把 CPU 字段改名为"申请 CPU 数 = 同时运行的站点数"，并隐藏线程数和并发数字段；本机批量仍保留"同时运行站点数"。
+2. **服务器文件浏览器**：宽度改为 `min(1080px, 94vw)`，工具栏、底栏和新建文件夹表单里的按钮都不换行，列表区高度也加大。
+3. **回到当前项目**：原因有两个——应用启动时 `root` 是空的，不会恢复当前项目；点"项目"总是回到项目首页，当前项目的工作页面（批量页、算例列表或结果）只存在内存里。
+   - 现在当前项目和它的页面存在 `localStorage` 的 `colm-ui-project` 里，`projectToSave` 会保留同一项目之前存的页面。
+   - 启动时用 `list_cases` 核对目录还在，再直接回到那一页；目录列不出来时保留记录，下次启动再试，不报错。
+   - 侧栏顶部固定显示"当前项目"入口，远程项目显示为"服务器: 项目目录名"。在任何页面点一下都能回到原来的工作页面；它也登记进了页面契约，名为 `nav-current-project`。
+4. **打开项目的起始路径**：`pick_folder` 会读 `project-open` 这条记录，但选完以后从来没有写回去，所以每次都从系统默认位置（Desktop）开始。现在 `pick_folder`/`pick_file` 选完都会把结果记到对应的 key 下；写入失败不影响这次选择。
+5. 验证：`npm test` 682 passed，新增"项目记忆/项目名"和"站点批量按 CPU 并发、每站 1 CPU"两组测试；check-gui、tsc、eslint、gui/src-tauri clippy 与 fmt、`cargo test --lib recent`、xtask 都通过。

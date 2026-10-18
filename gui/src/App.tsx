@@ -1,7 +1,14 @@
 import { Suspense, lazy, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { assistantPanelWidth } from './lib/utils';
 import { useApp } from './lib/app-state';
-import { activeNavigation, navigation, navigationTarget } from './lib/navigation';
+import {
+  activeNavigation,
+  currentProjectView,
+  navigation,
+  navigationTarget,
+  projectName,
+  readSavedProject,
+} from './lib/navigation';
 import NavIcon from './components/NavIcon';
 import appManifest from '../package.json';
 import { GuideBinding, usePageContract } from './lib/guide';
@@ -85,6 +92,22 @@ export default function App() {
     if (target.projectView) update({ projectView: target.projectView, projectCasesOpen: false });
     return true;
   };
+  // Wherever the user is, one click returns to the project being worked on, on its last page.
+  const onCurrentProject =
+    state.route === 'project' && state.projectView?.root === state.root && !state.projectView?.home;
+  const openCurrentProject = () => {
+    if (!state.root) return false;
+    let saved = null;
+    try {
+      saved = readSavedProject(localStorage);
+    } catch {
+      /* Storage may be unavailable; the project still opens on its case list. */
+    }
+    const view = currentProjectView(state, saved);
+    if (!navigate('project')) return false;
+    update({ projectView: view, projectCasesOpen: false });
+    return true;
+  };
   const navButton = (item: (typeof navigation)[number]) => (
     <Button
       key={item.id}
@@ -102,12 +125,24 @@ export default function App() {
     step: state.route,
     scope: 'shell',
     fields: [],
-    actions: navigation.map((item) => ({
-      id: `nav-${item.id}`,
-      label: tr(item.zh, item.en),
-      kind: 'click' as const,
-      run: () => openNavigation(item),
-    })),
+    actions: [
+      ...(state.root
+        ? [
+            {
+              id: 'nav-current-project',
+              label: tr('回到当前项目', 'Back to current project'),
+              kind: 'click' as const,
+              run: openCurrentProject,
+            },
+          ]
+        : []),
+      ...navigation.map((item) => ({
+        id: `nav-${item.id}`,
+        label: tr(item.zh, item.en),
+        kind: 'click' as const,
+        run: () => openNavigation(item),
+      })),
+    ],
   });
   const content =
     state.route === 'project' ? (
@@ -162,6 +197,18 @@ export default function App() {
           </div>
         </header>
         <aside className="sidebar" aria-label={tr('主导航', 'Main navigation')}>
+          {state.root && (
+            <button
+              type="button"
+              className={`current-project ${onCurrentProject ? 'active' : ''}`}
+              title={state.root}
+              aria-current={onCurrentProject ? 'page' : undefined}
+              onClick={() => openCurrentProject()}
+            >
+              <span className="current-project-label">{tr('当前项目', 'Current project')}</span>
+              <span className="current-project-name">{projectName(state.root, state.cases)}</span>
+            </button>
+          )}
           <nav className="sidebar-links">{navigation.slice(0, 5).map(navButton)}</nav>
           <div className="sidebar-bottom">
             <nav className="sidebar-links">{navigation.slice(5).map(navButton)}</nav>

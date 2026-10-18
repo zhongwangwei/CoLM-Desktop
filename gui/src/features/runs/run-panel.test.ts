@@ -27,6 +27,7 @@ function panel(
     targets?: string[];
     notify?: (message: string) => void;
     setMonitor?: (value: boolean) => void;
+    stationConcurrency?: number;
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -53,6 +54,7 @@ function panel(
     selectedCase: { dir: '/good', binding: { version: { id: 'old', revision: 1 } } },
   };
   const calls: { command: string; args: Record<string, unknown> }[] = [];
+  const batchWorkers: number[] = [];
   const latest = { current: state.running };
   const invoke = async (command: string, args: Record<string, unknown>) => {
     calls.push({ command, args });
@@ -97,6 +99,8 @@ function panel(
         ? undefined
         : (options.targets ?? ['/good', '/bad']),
     host: options.remote ? 'server' : '',
+    siteBatch: !!options.remote && !!options.remoteBatch && !options.single,
+    stationConcurrency: options.stationConcurrency ?? 1,
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
     setMonitor: options.setMonitor ?? (() => {}),
@@ -125,8 +129,10 @@ function panel(
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
     settleRuns,
-    runRemoteBatch: (args: Parameters<typeof runRemoteBatch>[0]) =>
-      runRemoteBatch({ ...args, wait: async () => {} }),
+    runRemoteBatch: (args: Parameters<typeof runRemoteBatch>[0]) => {
+      batchWorkers.push(args.workers);
+      return runRemoteBatch({ ...args, wait: async () => {} });
+    },
     update: (patch: Partial<typeof state> | ((old: typeof state) => Partial<typeof state>)) => {
       Object.assign(state, typeof patch === 'function' ? patch(state) : patch);
       latest.current = state.running;
@@ -143,7 +149,7 @@ function panel(
     cancel: () => Promise<unknown>;
     remoteAction: (command: string, target?: string, quiet?: boolean) => Promise<unknown>;
   };
-  return { ...methods, state, calls };
+  return { ...methods, state, calls, batchWorkers };
 }
 
 test('one failed migration does not prevent healthy batch cases from running', async () => {
@@ -271,11 +277,12 @@ test('an empty project selection cannot start a run', async () => {
   assert.equal(p.calls.length, 0);
 });
 
-test('remote batch passes resource overrides to each case and tracks separate finished jobs', async () => {
+test('remote batch runs as many stations as CPUs are requested, one CPU each, and tracks separate jobs', async () => {
   const p = panel({
     remote: true,
     remoteBatch: true,
     ranks: '8',
+    stationConcurrency: 6,
     ipc: async (command, args) => {
       if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
       if (command === 'remote_job_record') return null;
@@ -298,8 +305,9 @@ test('remote batch passes resource overrides to each case and tracks separate fi
     assert.equal(args.threads, 1);
     assert.equal(args.ranks, 1);
     assert.equal(args.scheduler, 'auto');
-    assert.equal(args.cpus, null);
+    assert.equal(args.cpus, 1);
   }
+  assert.deepEqual(p.batchWorkers, [6]);
   assert.equal(p.state.running['/good'].status, 'succeeded');
   assert.equal(p.state.running['/bad'].status, 'failed');
   assert.equal(p.state.running['/bad'].running, false);

@@ -12,6 +12,7 @@ import {
 import { invoke, invokeJson, listen, hasBackend, bindRunningTargets } from './ipc';
 import { applyRunEvent } from './run-events';
 import { navigationBlock, type NavigationGuard, type NavigationTarget } from './navigation-guard';
+import { projectToSave, readSavedProject, writeSavedProject } from './navigation';
 import type {
   AppState,
   AppPatch,
@@ -210,6 +211,39 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('colm-ui-theme', state.theme);
     localStorage.setItem('colm-ui-assistant', String(state.assistantOpen));
   }, [state.language, state.theme, state.assistantOpen]);
+  // Reopen the project worked on last, on the page it was left on; a folder that no longer
+  // lists is forgotten.
+  const projectRestored = useRef(false);
+  useEffect(() => {
+    const saved = readSavedProject(localStorage);
+    if (!saved || !hasBackend()) {
+      projectRestored.current = true;
+      return;
+    }
+    let alive = true;
+    void invoke<CaseEntry[]>('list_cases', { root: saved.root })
+      .then((cases) => {
+        if (alive && !current.current.root)
+          update({
+            root: saved.root,
+            cases,
+            projectView: { ...saved, home: current.current.route !== 'project' },
+          });
+      })
+      .catch(() => {})
+      .finally(() => {
+        projectRestored.current = true;
+      });
+    return () => {
+      alive = false;
+    };
+  }, [update]);
+  useEffect(() => {
+    if (projectRestored.current)
+      writeSavedProject(localStorage, projectToSave(state, readSavedProject(localStorage)));
+    // Only the project and its view are remembered.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.root, state.projectView]);
   useEffect(() => {
     let alive = true;
     const identity = openEpoch;

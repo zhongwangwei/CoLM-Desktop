@@ -1143,7 +1143,7 @@ export default function NewCasePage() {
       const counts = [
         runSettings.threads,
         runSettings.ranks,
-        ...(multiSite ? [runSettings.workers] : []),
+        ...(multiSite && !form.host ? [runSettings.workers] : []),
         ...(form.host ? [runSettings.cpus] : []),
       ].map(Number);
       if (
@@ -1833,13 +1833,17 @@ export default function NewCasePage() {
       });
   }
   const resourceFields: UiField[] = [
-    {
-      id: 'new-run-threads',
-      label: t('每个算例的线程数', 'Threads per case'),
-      value: runSettings.threads,
-      type: 'number' as const,
-      set: (value: string) => set('run_threads', value),
-    },
+    ...(multiSite && form.host
+      ? []
+      : [
+          {
+            id: 'new-run-threads',
+            label: t('每个算例的线程数', 'Threads per case'),
+            value: runSettings.threads,
+            type: 'number' as const,
+            set: (value: string) => set('run_threads', value),
+          },
+        ]),
     ...(form.engine === 'fortran'
       ? [
           {
@@ -1851,7 +1855,7 @@ export default function NewCasePage() {
           },
         ]
       : []),
-    ...(multiSite
+    ...(multiSite && !form.host
       ? [
           {
             id: 'new-run-workers',
@@ -1878,7 +1882,12 @@ export default function NewCasePage() {
           },
           {
             id: 'new-run-cpus',
-            label: t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
+            label: multiSite
+              ? t(
+                  '申请 CPU 数 = 同时运行的站点数（每个站点 1 个 CPU）',
+                  'Allocated CPUs = stations running at once (one CPU per station)',
+                )
+              : t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
             value: runSettings.cpus,
             type: 'number' as const,
             set: (value: string) => set('run_cpus', value),

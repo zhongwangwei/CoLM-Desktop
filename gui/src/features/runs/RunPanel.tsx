@@ -333,7 +333,11 @@ export default function RunPanel({
         throw new Error(
           bilingual('请选择与当前模型匹配的编译配置', 'Select a compatible build configuration'),
         );
-      const nums = [engine === 'rust' ? '1' : ranks, threads, workers].map(Number);
+      const nums = [
+        engine === 'rust' ? '1' : ranks,
+        siteBatch ? '1' : threads,
+        siteBatch ? String(stationConcurrency) : workers,
+      ].map(Number);
       if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
         throw new Error(
           t(
@@ -419,7 +423,8 @@ export default function RunPanel({
             preprocessors,
             ranks: nums[0],
             threads: nums[1],
-            cpus: cpus ? Number(cpus) : null,
+            // Server site batches: the requested CPUs are the stations running at once, one each.
+            cpus: siteBatch ? 1 : cpus ? Number(cpus) : null,
             scheduler,
             modelVersion: null,
             modelRevision: revision,
@@ -723,6 +728,12 @@ export default function RunPanel({
     ? t('查看站点结果', 'View station results')
     : t('下一步：查看结果', 'Next: view results');
 
+  // A batch of station cases on a server runs as many stations at once as CPUs are requested,
+  // each station with one CPU and one thread.
+  const siteBatch = !!batchCases && !!host;
+  const runServer = servers.find((server) => server.host === host);
+  const stationConcurrency =
+    Number(cpus) > 0 ? Number(cpus) : runServer?.cpus || runServer?.threads || 1;
   function back() {
     if (!onBack || pending) return;
     if (batchCases)
@@ -795,20 +806,25 @@ export default function RunPanel({
       ...(engine === 'fortran'
         ? [['ranks', t('每个算例的 MPI 进程数', 'MPI ranks per case'), ranks, setRanks] as const]
         : []),
-      ...(engine === 'rust' || preprocessors === 'rust'
+      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
         : []),
-      ...(batchCases
+      ...(batchCases && !host
         ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
         : []),
       ...(host
         ? [
             [
               'cpus',
-              t(
-                '每个 MPI 进程申请 CPU 数（空白沿用服务器设置）',
-                'Requested CPUs per MPI rank (blank uses server setting)',
-              ),
+              siteBatch
+                ? t(
+                    `申请 CPU 数 = 同时运行的站点数（空白沿用服务器设置：${stationConcurrency}）`,
+                    `Requested CPUs = stations running at once (blank uses the server setting: ${stationConcurrency})`,
+                  )
+                : t(
+                    '每个 MPI 进程申请 CPU 数（空白沿用服务器设置）',
+                    'Requested CPUs per MPI rank (blank uses server setting)',
+                  ),
               cpus,
               setCpus,
             ] as const,
