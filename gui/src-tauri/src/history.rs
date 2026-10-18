@@ -72,6 +72,59 @@ pub fn history_list(filter: Option<HistoryFilter>) -> Result<Page, String> {
         .and_then(|h| h.query(&filter.unwrap_or_default().into()))
         .map_err(|e| e.to_string())
 }
+/// How a case's most recent run ended, as the ledger knows it.
+#[derive(Debug, serde::Serialize, PartialEq)]
+pub struct LastRun {
+    pub status: String,
+    pub operation_id: String,
+    pub needs_reconciliation: bool,
+    pub finished_ms: Option<i64>,
+    pub location: Option<String>,
+    pub host: Option<String>,
+}
+
+/// Each case's latest run. Reopening a project restores these, so a finished batch reads as
+/// finished instead of every station waiting to be re-checked on its server.
+#[tauri::command]
+pub fn project_last_runs(
+    dirs: Vec<String>,
+) -> Result<std::collections::BTreeMap<String, LastRun>, String> {
+    let ledger = History::open_default().map_err(|e| e.to_string())?;
+    let mut result = std::collections::BTreeMap::new();
+    for dir in dirs {
+        let page = ledger
+            .query(&Query {
+                case_path: Some(dir.clone()),
+                limit: 200,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        let runs = page
+            .items
+            .iter()
+            .filter(|op| matches!(op.latest.kind.as_str(), "run" | "remote-run" | "remote_run"))
+            .collect::<Vec<_>>();
+        // An import only repeats a job the case already names; use it when nothing else exists.
+        let latest = runs
+            .iter()
+            .find(|op| op.latest.phase != EventPhase::Imported)
+            .or_else(|| runs.first());
+        if let Some(op) = latest {
+            result.insert(
+                dir,
+                LastRun {
+                    status: op.latest.status.clone(),
+                    operation_id: op.latest.operation_id.clone(),
+                    needs_reconciliation: op.needs_reconciliation,
+                    finished_ms: op.finished_ms,
+                    location: op.latest.location.clone(),
+                    host: op.latest.host.clone(),
+                },
+            );
+        }
+    }
+    Ok(result)
+}
 #[tauri::command]
 pub fn history_detail(id: String) -> Result<OperationDetail, String> {
     History::open_default()
@@ -785,6 +838,34 @@ mod tests {
         let mut fetch = Event::start("fetch");
         fetch.detail = serde_json::json!({"action": "remote-fetch"});
         assert!(!status_poll(&fetch));
+    }
+    #[test]
+    fn a_finished_run_is_what_a_reopened_project_restores() {
+        let case = format!(
+            "/tmp/colm-last-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let ledger = History::open_default().unwrap();
+        let mut start = Event::start("run");
+        start.case_path = Some(case.clone());
+        start.host = Some("compute".into());
+        start.location = Some("remote".into());
+        ledger.append(&start).unwrap();
+        let before = project_last_runs(vec![case.clone()]).unwrap();
+        assert_eq!(before[&case].status, "running");
+        ledger
+            .append(&start.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+        let after = project_last_runs(vec![case.clone(), "/tmp/never-ran".into()]).unwrap();
+        assert_eq!(after.len(), 1, "a case that never ran has no entry");
+        let last = &after[&case];
+        assert_eq!(last.status, "succeeded");
+        assert!(!last.needs_reconciliation);
+        assert_eq!(last.host.as_deref(), Some("compute"));
     }
     #[test]
     fn command_run_identity_survives_started_and_terminal_records() {

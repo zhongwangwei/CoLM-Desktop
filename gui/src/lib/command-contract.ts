@@ -560,6 +560,12 @@ export const commandContract = {
       "rust_type": "Option<HistoryFilter>"
     }
   },
+  "project_last_runs": {
+    "dirs": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    }
+  },
   "history_detail": {
     "id": {
       "required": true,

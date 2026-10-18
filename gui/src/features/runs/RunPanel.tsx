@@ -5,11 +5,13 @@ import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
 import { runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
-import type { CaseProfile, RunState, Server, VersionRef } from '../../lib/types';
+import type { CaseProfile, LastRun, RunState, Server, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
 import {
   compatibleKernel,
+  endedRun,
+  restoredRuns,
   remoteSubmissionBlocked,
   REMOTE_CHECK_MS,
   remoteRunPermissions,
@@ -180,8 +182,40 @@ export default function RunPanel({
     setRemote(null);
     const known = latest.current[casePath]?.progress?.remote;
     if (known) setRemote(known);
-    invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath })
-      .then(async (record) => {
+    // What each case's last run ended as is known from the ledger. A batch that finished is shown
+    // finished, rather than as stations waiting to be re-checked on their server.
+    let endedHere: LastRun | undefined;
+    const restoreEnded = async () => {
+      const dirs = batchCases ?? [casePath];
+      const last = await invokeJson<Record<string, LastRun>>('project_last_runs', { dirs }).catch(
+        () => ({}) as Record<string, LastRun>,
+      );
+      if (!current || !alive.current) return;
+      endedHere = endedRun(last[casePath]) ? last[casePath] : undefined;
+      update((old) => {
+        const added = restoredRuns(last, old.running);
+        return Object.keys(added).length ? { running: { ...old.running, ...added } } : {};
+      });
+    };
+    restoreEnded()
+      .then(() =>
+        invokeJson<Record<string, unknown> | null>('remote_job_record', { case: casePath }),
+      )
+      .then(async (rawRecord) => {
+        // The job file outlives the run. When the ledger says the run ended, the file only gives
+        // the server and job name, so fetching stays possible and nothing waits for a re-check.
+        const record =
+          rawRecord && endedHere
+            ? {
+                record: rawRecord,
+                status: {
+                  state: 'finished',
+                  exit_code: ['succeeded', 'completed'].includes(endedHere.status) ? 0 : 1,
+                },
+                pending: false,
+                needs_reconciliation: false,
+              }
+            : rawRecord;
         if (!current || !alive.current) return;
         const previous = latest.current[casePath];
         setRemote(
@@ -193,7 +227,7 @@ export default function RunPanel({
                 })
               : null),
         );
-        if (record)
+        if (record && !endedHere)
           update((old) =>
             old.running[casePath]
               ? {}

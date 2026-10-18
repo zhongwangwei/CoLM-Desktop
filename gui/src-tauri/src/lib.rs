@@ -131,6 +131,7 @@ pub fn run() {
             apply_import_parameter_overrides,
             list_cases,
             project_wizard_seed,
+            project_last_runs,
             open_case,
             set_case_run_host,
             mark_results_stale,

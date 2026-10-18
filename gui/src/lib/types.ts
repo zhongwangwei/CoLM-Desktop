@@ -124,6 +124,15 @@ export type KernelEntry = {
   colm_git_sha: string;
   platform: string;
 };
+/** How a case's most recent run ended, from the history ledger. */
+export type LastRun = {
+  status: string;
+  operation_id: string;
+  needs_reconciliation: boolean;
+  finished_ms: number | null;
+  location: string | null;
+  host: string | null;
+};
 export type RunState = {
   location?: 'local' | 'remote';
   run_id?: string;

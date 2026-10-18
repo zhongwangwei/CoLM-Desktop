@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import {
   settleRuns,
+  endedRun,
+  restoredRuns,
   remoteRunPermissions,
   remoteSubmissionBlocked,
   reconcileRemoteRun,
@@ -508,4 +510,33 @@ test('automatic server checks stay quiet and announce only the finish', async ()
   assert.match(notices[0], /服务器作业已结束/);
   await p.remoteAction('remote_status', '/good', true);
   assert.equal(notices.length, 1, 'the finish is announced once');
+});
+
+test('a batch that finished before is restored as finished, not as stations to re-check', () => {
+  const finished = {
+    status: 'succeeded',
+    operation_id: 'op-1',
+    needs_reconciliation: false,
+    finished_ms: 1,
+    location: 'remote',
+    host: 'tms17l',
+  };
+  const restored = restoredRuns(
+    {
+      '/a': finished,
+      '/b': { ...finished, operation_id: 'op-2', status: 'failed' },
+      '/c': { ...finished, needs_reconciliation: true },
+      '/d': { ...finished, finished_ms: null, status: 'running' },
+      '/e': finished,
+    },
+    { '/e': { case: '/e', status: 'running', running: true, logs: [], stages: {} } },
+  );
+  assert.deepEqual(Object.keys(restored).sort(), ['/a', '/b']);
+  assert.equal(restored['/a'].status, 'succeeded');
+  assert.equal(restored['/a'].running, false);
+  assert.equal(restored['/a'].location, 'remote');
+  assert.equal(restored['/b'].status, 'failed');
+  assert.ok(endedRun(finished));
+  assert.ok(!endedRun({ ...finished, needs_reconciliation: true }));
+  assert.ok(!endedRun(undefined));
 });

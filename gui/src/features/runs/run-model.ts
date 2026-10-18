@@ -1,7 +1,7 @@
 /** How often an unfinished server job or study is checked automatically. */
 export const REMOTE_CHECK_MS = 10_000;
 import { cropEnabled } from '../cases/case-model';
-import type { RunState } from '../../lib/types';
+import type { LastRun, RunState } from '../../lib/types';
 export interface RunView {
   runId: string;
   casePath: string;
@@ -184,4 +184,34 @@ export function settleRuns(
         ]),
     ),
   };
+}
+
+const ENDED = ['succeeded', 'completed', 'failed', 'cancelled', 'completed_with_failures'];
+/** A last run the ledger has settled: finished, and nothing left to re-check on a server. */
+export function endedRun(run: LastRun | undefined): run is LastRun {
+  return (
+    !!run && !run.needs_reconciliation && run.finished_ms != null && ENDED.includes(run.status)
+  );
+}
+/** Run states for cases that ended before this session and have none yet. */
+export function restoredRuns(
+  last: Record<string, LastRun>,
+  running: Record<string, RunState>,
+): Record<string, RunState> {
+  const restored: Record<string, RunState> = {};
+  for (const [dir, run] of Object.entries(last)) {
+    if (running[dir] || !endedRun(run)) continue;
+    restored[dir] = {
+      case: dir,
+      location: run.location === 'local' ? 'local' : 'remote',
+      run_id: run.operation_id,
+      operation_id: run.operation_id,
+      status: ['succeeded', 'completed'].includes(run.status) ? 'succeeded' : 'failed',
+      running: false,
+      logs: [],
+      stages: {},
+      ...(run.host ? { progress: { host: run.host } } : {}),
+    };
+  }
+  return restored;
 }
