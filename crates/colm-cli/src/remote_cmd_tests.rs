@@ -1708,3 +1708,55 @@ fn job_policy_guard_blocks_old_engines_before_running_the_model() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn partial_fetch_publication_rolls_back_instead_of_mixing_history() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-partial-publish-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let (staged, history, replaced) = (
+        root.join("staged"),
+        root.join("history"),
+        root.join("replaced"),
+    );
+    for dir in [&staged, &history, &replaced] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(staged.join("a.nc"), "new a").unwrap();
+    std::fs::write(staged.join("b.nc"), "new b").unwrap();
+    std::fs::write(history.join("a.nc"), "old a").unwrap();
+    std::fs::write(history.join("b.nc"), "old b").unwrap();
+    // Setting b.nc aside fails: its backup slot is a non-empty directory.
+    std::fs::create_dir_all(replaced.join("b.nc/blocker")).unwrap();
+    let error = publish_partial_history(&staged, &history, &replaced)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("rolled back"), "{error}");
+    assert_eq!(
+        std::fs::read_to_string(history.join("a.nc")).unwrap(),
+        "old a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(history.join("b.nc")).unwrap(),
+        "old b"
+    );
+
+    std::fs::remove_dir_all(replaced.join("b.nc")).unwrap();
+    std::fs::write(staged.join("a.nc"), "new a").unwrap();
+    publish_partial_history(&staged, &history, &replaced).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(history.join("a.nc")).unwrap(),
+        "new a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(history.join("b.nc")).unwrap(),
+        "new b"
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}

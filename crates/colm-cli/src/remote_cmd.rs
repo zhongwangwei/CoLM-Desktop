@@ -2822,10 +2822,16 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
         "cannot invalidate previous output certification"
     );
     if partial {
-        std::fs::create_dir_all(case.join(&history))?;
-        for entry in std::fs::read_dir(&staged_history)? {
-            let entry = entry?;
-            std::fs::rename(entry.path(), case.join(&history).join(entry.file_name()))?;
+        if let Err(error) = publish_partial_history(
+            &staged_history,
+            &case.join(&history),
+            &stage.0.join("replaced-history"),
+        ) {
+            if error.to_string().contains(PARTIAL_ROLLBACK_FAILED) {
+                // Keep the only intact copies of the replaced files.
+                std::mem::forget(stage);
+            }
+            return Err(error);
         }
         std::fs::write(
             case.join(FETCH_MARK),
@@ -2985,6 +2991,67 @@ fn replay_remote_flag(flag: &str) -> bool {
             | "--remote-kernel"
     )
 }
+const PARTIAL_ROLLBACK_FAILED: &str = "cannot restore the previous history files";
+
+/// Move fetched subset files into the case history, keeping each replaced file aside, and undo
+/// every step if one fails so the history never mixes old and new files.
+pub(crate) fn publish_partial_history(
+    staged: &Path,
+    history: &Path,
+    replaced: &Path,
+) -> Result<()> {
+    std::fs::create_dir_all(history)?;
+    std::fs::create_dir_all(replaced)?;
+    let mut names = std::fs::read_dir(staged)?
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    names.sort();
+    let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    for name in names {
+        let destination = history.join(&name);
+        let step = (|| -> std::io::Result<Option<PathBuf>> {
+            let backup = if destination.exists() {
+                let backup = replaced.join(&name);
+                std::fs::rename(&destination, &backup)?;
+                Some(backup)
+            } else {
+                None
+            };
+            if let Err(error) = std::fs::rename(staged.join(&name), &destination) {
+                if let Some(backup) = &backup {
+                    let _ = std::fs::rename(backup, &destination);
+                }
+                return Err(error);
+            }
+            Ok(backup)
+        })();
+        match step {
+            Ok(backup) => done.push((destination, backup)),
+            Err(error) => {
+                let mut failures = Vec::new();
+                for (destination, backup) in done.iter().rev() {
+                    let undone = std::fs::remove_file(destination).and_then(|_| match backup {
+                        Some(backup) => std::fs::rename(backup, destination),
+                        None => Ok(()),
+                    });
+                    if let Err(failure) = undone {
+                        failures.push(format!("{}: {failure}", destination.display()));
+                    }
+                }
+                if failures.is_empty() {
+                    bail!("partial fetch publication failed and was rolled back: {error}");
+                }
+                bail!(
+                    "{PARTIAL_ROLLBACK_FAILED} after a fetch failure ({error}; {}); they remain in {}",
+                    failures.join("; "),
+                    replaced.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn replay_remote(
     old_case: &Path,
     prepared: &Opts,
