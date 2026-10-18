@@ -28,6 +28,14 @@ on:
 permissions:
   contents: write
 
+# A newer push supersedes a release build still running for the same branch or tag: several
+# runs for one version only compete for runners and race to upload the same assets
+# (2026-10-18: four 0.3.0-beta.4 runs at once). An interrupted publish is redone by the next
+# run, which sees an incomplete release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   prepare:
     runs-on: ubuntu-latest
@@ -151,9 +159,13 @@ jobs:
           npm run lint
           npm test
           npm run build
+      # Both workspaces: the bundle builds the engine sidecars (colm-cli with static NetCDF/HDF5)
+      # in the root workspace, about a quarter of an hour uncached.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: gui/src-tauri
+          workspaces: |
+            gui/src-tauri
+            . -> target
 
       - name: Verify runner architecture
         if: runner.os != 'Windows'
@@ -212,15 +224,42 @@ jobs:
 
       # ---- 发布编译期内核 ----
       # PFT/PC/BGC/URBAN 已是运行时选择；IGBP/USGS 与 CROP 数组尺寸仍需产物。
-      - name: Build release kernels (unix)
+      # Fifteen kernels take 33 min (Linux) to 2 h (Intel macOS) and change only with the Fortran
+      # source or the toolchain, so they are cached under both. The key's toolchain part is a file
+      # because the Windows compilers live in MSYS2. ensure_native_kernels.py still checks every
+      # restored kernel against the exact source fingerprint and rebuilds any that do not match.
+      - name: Record the kernel toolchain (unix)
         if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          { uname -sm; gfortran --version | sed -n 1p; mpifort --version 2>/dev/null | sed -n 1p || true
+            nf-config --version 2>/dev/null || true; } > .kernel-toolchain
+          cat .kernel-toolchain
+
+      - name: Record the kernel toolchain (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          { uname -sm; gfortran --version | sed -n 1p; nf-config --version 2>/dev/null || true
+            pacman -Q mingw-w64-x86_64-msmpi 2>/dev/null || true; } > .kernel-toolchain
+          cat .kernel-toolchain
+
+      - name: Restore release kernels
+        id: kernel-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: kernels
+          key: kernels-v1-${{ matrix.label }}-${{ hashFiles('.kernel-toolchain') }}-${{ hashFiles('vendor/CoLM202X/**/*.F90', 'vendor/CoLM202X/**/*.f90', 'vendor/CoLM202X/**/*.F', 'vendor/CoLM202X/**/*.f', 'vendor/CoLM202X/**/*.c', 'vendor/CoLM202X/**/*.h', 'vendor/CoLM202X/**/*.inc', 'vendor/CoLM202X/**/*.sh', 'vendor/CoLM202X/**/*.mk', 'vendor/CoLM202X/**/Makefile*', 'vendor/CoLM202X/**/Makeoptions*', 'oracle/scripts/build_kernel.sh', 'oracle/scripts/ensure_native_kernels.py', 'oracle/scripts/kernel-presets.config', 'oracle/scripts/makeoptions/**') }}
+
+      - name: Build release kernels (unix)
+        if: runner.os != 'Windows' && steps.kernel-cache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           for p in $(cat oracle/scripts/kernel-presets.config); do ./oracle/scripts/build_kernel.sh "$p"; done
           ls -la kernels/*/
 
       - name: Build release kernels (Windows)
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' && steps.kernel-cache.outputs.cache-hit != 'true'
         shell: msys2 {0}
         run: |
           for p in $(cat oracle/scripts/kernel-presets.config); do ./oracle/scripts/build_kernel.sh "$p"; done
@@ -239,6 +278,14 @@ jobs:
             done | sort -u | while read -r dll; do cp -n "$dll" "$d"; done
             echo "$d: $(ls "$d"*.dll | wc -l) DLLs"
           done
+
+      # Saved straight after building: the MPI staging below rewrites macOS kernels in place.
+      - name: Save release kernels
+        if: steps.kernel-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: kernels
+          key: ${{ steps.kernel-cache.outputs.cache-primary-key }}
 
       - name: Release kernels use the production profile
         shell: bash

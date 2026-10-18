@@ -232,9 +232,13 @@ jobs:
           npm run lint
           npm test
           npm run build
+      # 两个 workspace 都要缓存：macOS 打包冒烟会在根 workspace 里用 release 编引擎 sidecar
+      # （colm-cli 静态链 NetCDF/HDF5），不缓存时这一段要 15 分钟左右。
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: gui/src-tauri
+          workspaces: |
+            gui/src-tauri
+            . -> target
 
       # Tauri 在 Linux 上要系统的 webkit2gtk。macOS 用 WKWebView、
       # Windows 用 WebView2，两者都随系统来，不用装。
@@ -280,7 +284,7 @@ jobs:
           # 打包直接失败**（实测：`resource path '../../kernels' doesn't exist`），
           # 空目录则正常通过。所以给它一个空的。
           mkdir -p ../../kernels
-          cargo install tauri-cli --version '^2' --locked
+          command -v cargo-tauri >/dev/null 2>&1 || cargo install tauri-cli --version '^2' --locked
           cargo tauri build --config tauri.bundle.conf.json --config tauri.bundle-smoke.conf.json
           app='target/release/bundle/macos/CoLM Desktop.app'
           test -x "$app/Contents/MacOS/colm-desktop-gui"

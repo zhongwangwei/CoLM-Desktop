@@ -33769,3 +33769,20 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    推送后主检出快进时，git 把原本被忽略的真实 `node_modules` 目录当成可丢弃的文件删掉了，换成了悬空链接。
    修复（02e6647d）：停止跟踪这个链接；`.gitignore` 改为 `node_modules`，不论文件类型都忽略；主检出里用 `npm ci` 按 lockfile 重装（137 个包），`tsc --noEmit` 通过。
    复核 fdd125f0..HEAD 的全部改动，没有其它符号链接或大文件。
+
+## 第 710 轮：CI 与发布提速（2026-10-18）
+
+1. **耗时在哪**：CI 墙钟约 30 分钟，测试本身不是瓶颈，最长的 Windows Rust 测试也只有 8.5 分钟。发布慢在每次都把 15 套 Fortran 内核从零编一遍：`build_kernel.sh` 是单线程 `make`、串行编译、没有缓存。各平台编内核的时间：
+   | 平台 | 编 15 套内核 |
+   |---|---|
+   | macOS Intel | 2 小时 2 分 |
+   | Windows | 1 小时 17 分 |
+   | macOS Apple Silicon | 1 小时 |
+   | Linux | 33 分 |
+
+   CI 的 macOS 打包冒烟用了 17 分钟。原先以为是 `tauri-cli` 每次现编，查日志发现 rust-cache 早已恢复了它（`Ignored package tauri-cli v2.12.3 is already installed`）。真正的耗时是 `stage-sidecar` 在根 workspace 里用 release 编 sidecar（5m27s、5m54s、1m52s……合计约 15 分钟），而 rust-cache 只缓存了 `gui/src-tauri`。
+2. **改动**：
+   - **内核缓存**：key 由平台、工具链版本（`.kernel-toolchain`：gfortran、mpifort、nf-config、Windows 的 msmpi 包）和内核源码文件的哈希组成，后缀与 `source_fingerprint` 一致。编完后立刻 `actions/cache/save`，赶在 macOS 的 MPI 打包改写二进制之前；命中缓存就跳过编译。恢复出来的内核仍由 `ensure_native_kernels.py` 按精确指纹逐个校验，不符的会重编。
+   - **发布只留最新一轮**：release.yml 加了 `concurrency: release-${{ github.ref }}` 并开启 `cancel-in-progress`，新推送会取消同一分支或 tag 上还在跑的旧发布；被打断的发布由下一轮补上，因为它会看到发布不完整。
+   - **sidecar 缓存**：CI 的 gui 作业和发布的 bundle 作业里，rust-cache 都改成缓存两个 workspace（`gui/src-tauri` 和 `. -> target`）。`ci.yml` 和 `bundle-release.sh` 在已有 `cargo-tauri` 时不再执行 `cargo install`。
+3. **预期**：内核源码和工具链不变时，发布各平台省去 33 分钟到 2 小时的内核编译；CI 的 macOS 打包冒烟在缓存命中后约省 15 分钟。第一次运行要先建缓存，耗时不变。工作流的语法只用 YAML 解析检查过，实际效果以下一轮 CI 为准。

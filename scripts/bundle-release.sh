@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cargo install tauri-cli --version '^2' --locked
+# rust-cache restores ~/.cargo/bin; only install when it did not.
+command -v cargo-tauri >/dev/null 2>&1 || cargo install tauri-cli --version '^2' --locked
 config=(--config tauri.bundle.conf.json)
 if [[ "$RUNNER_OS" == Windows && "$RELEASE_PRERELEASE" == true ]]; then
   if [[ "$RELEASE_VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-([0-9]+)$ ]]; then
