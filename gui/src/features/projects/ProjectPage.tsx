@@ -480,7 +480,13 @@ export default function ProjectPage() {
   );
   if (batchPage)
     return (
-      <ProjectBatchRun fromCreation={batchFromCreation} onBack={() => setChooser('simulation')} />
+      <ProjectBatchRun
+        fromCreation={batchFromCreation}
+        onBack={() => {
+          // A reopened project keeps its filled-in wizard behind this page.
+          if (!(state.newCaseSeed && navigate('new-case'))) setChooser('simulation');
+        }}
+      />
     );
   if (chooser)
     return (

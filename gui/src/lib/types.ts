@@ -199,8 +199,6 @@ export type AppState = {
     multiSiteMode?: import('../features/cases/multisite-model').MultiSiteMode;
     multiSiteRepeat?: string;
     siteDrafts?: import('../features/cases/multisite-model').MultiSiteDraft[];
-    /** What the project already ran, shown on the last step of a reopened project. */
-    previousResults?: PreviousResults;
   } | null;
   simulationReturn: {
     route: 'new-case' | 'case';
@@ -229,11 +227,6 @@ export type WizardSeed = {
   drafts: import('../features/cases/multisite-model').MultiSiteDraft[];
   multi_site_mode: import('../features/cases/multisite-model').MultiSiteMode;
   multi_site_repeat: string;
-};
-export type PreviousResults = {
-  counts: { succeeded: number; failed: number; running: number; pending: number };
-  time_ms: number;
-  cases: { name: string; status: string; time_ms: number }[];
 };
 export type HistoryOperation = {
   run_group?: { run_id: string; members: HistoryOperation[] };

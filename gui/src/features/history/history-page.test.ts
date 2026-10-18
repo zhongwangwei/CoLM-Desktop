@@ -559,7 +559,7 @@ test('a project card opens its timeline, batching stations, and a case opens its
   const listing = h.requests.at(-1)!;
   assert.equal(listing.command, 'list_cases');
   assert.deepEqual(listing.args, { root: '/cache/222' });
-  // A multi-site project opens on the last page of 新建模拟, filled from what it was created with.
+  // A multi-site project opens on the run page its creation led to, with the filled wizard behind it.
   listing.resolve([{ dir: '/cache/222/AT-Neu' }, { dir: '/cache/222/AU-Cpr' }]);
   await h.settle();
   const seedRequest = h.requests.at(-1)!;
@@ -591,7 +591,21 @@ test('a project card opens its timeline, batching stations, and a case opens its
     multi_site_repeat: '1',
   });
   await h.settle();
-  assert.deepEqual(h.routes.at(-1), 'new-case');
+  const config = h.requests.at(-1)!;
+  assert.equal(config.command, 'remote_config');
+  config.resolve({ servers: [{ host: 'tms17l', scheduler: 'bare', cpus: 128 }] });
+  await h.settle();
+  assert.deepEqual(h.routes.at(-1), 'project');
+  const reopened = h.updates.at(-1) as {
+    projectCasesOpen: boolean;
+    projectRunSettings: { batch: boolean; cases: string[]; host: string };
+  };
+  // The page creating the stations led to: all of them, as one batch.
+  assert.equal(reopened.projectCasesOpen, true);
+  assert.equal(reopened.projectRunSettings.batch, true);
+  assert.deepEqual(reopened.projectRunSettings.cases, ['/cache/222/AT-Neu', '/cache/222/AU-Cpr']);
+  assert.equal(reopened.projectRunSettings.host, 'tms17l');
+  assert.equal((reopened.projectRunSettings as { scheduler?: string }).scheduler, 'bare');
   const seeded = (
     h.updates.at(-1) as {
       newCaseSeed: {
@@ -601,12 +615,12 @@ test('a project card opens its timeline, batching stations, and a case opens its
         siteDrafts: { name: string }[];
         sites: { met_file: string }[];
         multiSiteMode: string;
-        previousResults?: { cases: { name: string; status: string }[] };
       };
     }
   ).newCaseSeed;
   assert.deepEqual(seeded.form, { host: 'tms17l', kind: 'site', subgrid: 'PC' });
-  assert.equal(seeded.step, 5);
+  // Back from the run page lands on the last configuration step.
+  assert.equal(seeded.step, 4);
   assert.deepEqual(seeded.caseValues, { DEF_HIST_FREQ: "'HOURLY'" });
   assert.deepEqual(
     seeded.siteDrafts.map((draft) => draft.name),
@@ -614,8 +628,6 @@ test('a project card opens its timeline, batching stations, and a case opens its
   );
   assert.equal(seeded.multiSiteMode, 'first-year');
   assert.equal(seeded.sites[0].met_file, '/f/AT-Neu_Met.nc');
-  // What the project already ran is carried along for the last step.
-  assert.ok(seeded.previousResults && seeded.previousResults.cases.length > 0);
   assert.ok(h.guide().actions.some((action) => action.id === 'history-open-project'));
   // A single case opens on its simulation settings.
   h.click('Open this project');

@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import { previousStatusLabel, statusCountsLabel } from '../history/history';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, listen } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
@@ -145,8 +144,6 @@ export default function NewCasePage() {
     en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const seed = state.newCaseSeed;
-  // The seed is cleared once the page has taken it, so what the project already ran is kept here.
-  const previousResults = useRef(seed?.previousResults).current;
   const initialRoot = seed?.form?.root ?? state.root ?? '',
     initialName = seed?.form?.name ?? '';
   const initialLandcover = seed?.form?.landcover ?? '';
@@ -3028,47 +3025,6 @@ export default function NewCasePage() {
       )}
       {step === 5 && (
         <>
-          {previousResults && previousResults.cases.length > 0 && (
-            <Card
-              title={t('这个项目之前的运行结果', 'Previous results of this project')}
-              description={`${statusCountsLabel(previousResults.counts, en)} · ${new Date(
-                previousResults.time_ms,
-              ).toLocaleString(en ? 'en-US' : 'zh-CN')}`}
-            >
-              <details>
-                <summary>
-                  {t(
-                    `各站点的最近一次结果（${previousResults.cases.length} 个）`,
-                    `Latest result per site (${previousResults.cases.length})`,
-                  )}
-                </summary>
-                <ul className="simulation-previous-results">
-                  {previousResults.cases.map((item) => (
-                    <li key={item.name}>
-                      <strong>{item.name}</strong> · {previousStatusLabel(item.status, en)} ·{' '}
-                      {new Date(item.time_ms).toLocaleString(en ? 'en-US' : 'zh-CN')}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-              <p className="muted">
-                {t(
-                  '运行会沿用这些算例原来的设置，不做任何修改。要改设置，用“上一步”回到前面的页面，再创建新的算例。',
-                  'Running uses these cases exactly as they are. To change settings, go back through the steps and create new cases.',
-                )}
-              </p>
-              <Button
-                variant="primary"
-                disabled={!enabled}
-                onClick={() => {
-                  if (!navigate('project')) return;
-                  update({ projectView: { root: state.root ?? '', page: 'batch', home: false } });
-                }}
-              >
-                {t('按原设置运行', 'Run as originally set')}
-              </Button>
-            </Card>
-          )}
           <Card
             title={t('检查并创建算例', 'Review and create the case')}
             description={t(

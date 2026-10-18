@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import type { CaseEntry, HistoryOperation, WizardSeed } from '../../lib/types';
+import type { CaseEntry, HistoryOperation, Server, WizardSeed } from '../../lib/types';
 import {
   Advanced,
   Button,
@@ -41,7 +41,6 @@ import {
   comparisonArgs,
   comparisonWinner,
   historySections,
-  projectPreviousResults,
   historyReferences,
   historyEvents,
   historyRecordExport,
@@ -254,7 +253,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   }
   // From a project's history to where it is simulated: a multi-site project's batch run page,
   // a single case's simulation settings. Not the case list, which is one more step away.
-  async function openProject(path: string, project?: HistoryOperation['project_group']) {
+  async function openProject(path: string) {
     const cases = await invokeJson<CaseEntry[]>('list_cases', { root: path });
     const switching = path !== state.root ? { selectedCase: null } : {};
     if (cases.length === 1) {
@@ -262,25 +261,41 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       await openCase(cases[0].dir, 'settings');
       return;
     }
-    // A multi-site project reopens as the last page of 新建模拟 (检查与运行) with every step filled from what it was created with,
-    // not as a run page that would show the last run again.
+    // A multi-site project reopens on the page that creating its stations led to: the batch run
+    // page with all of them, showing how they ended. Back from there is the wizard with every
+    // step already filled in from what the project was created with.
     const seed = await invokeJson<WizardSeed>('project_wizard_seed', { root: path });
-    if (!navigate('new-case')) return;
+    const server = (
+      await invokeJson<{ servers: Server[] }>('remote_config', {}).catch(() => ({
+        servers: [] as Server[],
+      }))
+    ).servers.find((entry) => entry.host === seed.form.host);
+    if (!navigate('project')) return;
     update({
       root: path,
       cases,
-      projectCasesOpen: false,
+      projectCasesOpen: true,
+      projectRunSettings: {
+        root: path,
+        cases: cases.map((entry) => entry.dir),
+        batch: true,
+        host: seed.form.host ?? '',
+        threads: '1',
+        ranks: '1',
+        workers: '1',
+        scheduler: server?.scheduler || 'auto',
+        cpus: server && server.cpus > 0 ? String(server.cpus) : '',
+      },
       newCaseSeed: {
         form: seed.form,
         sites: seed.sites,
         caseValues: seed.case_values,
-        step: 5,
+        step: 4,
         ownData: seed.form.kind === 'site',
         multiSiteEnabled: true,
         multiSiteMode: seed.multi_site_mode,
         multiSiteRepeat: seed.multi_site_repeat,
         siteDrafts: seed.drafts,
-        ...(project ? { previousResults: projectPreviousResults(project) } : {}),
       },
       ...switching,
     });
@@ -682,7 +697,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       label: t('打开这个项目', 'Open this project'),
       kind: 'click',
       enabled: !busy,
-      run: () => action(() => openProject(path, group.project_group)),
+      run: () => action(() => openProject(path)),
     });
   }
   if (group?.run_group) {
@@ -1386,9 +1401,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 <span className="muted">{group.project_group.name}</span>
                 <Button
                   disabled={busy}
-                  onClick={() =>
-                    run(() => openProject(group.project_group!.path, group.project_group))
-                  }
+                  onClick={() => run(() => openProject(group.project_group!.path))}
                 >
                   {t('打开这个项目', 'Open this project')}
                 </Button>
@@ -1400,9 +1413,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   <Button
                     variant="primary"
                     disabled={busy}
-                    onClick={() =>
-                      run(() => openProject(group.project_group!.path, group.project_group))
-                    }
+                    onClick={() => run(() => openProject(group.project_group!.path))}
                   >
                     {t('打开这个项目', 'Open this project')}
                   </Button>
