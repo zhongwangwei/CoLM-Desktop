@@ -124,3 +124,40 @@ test('default observation uses the existing evaluator once its run catalog is re
   execute(body, { ...context, selectionKey: 'manual' })();
   assert.equal(evaluations, 1);
 });
+
+test('finishing or starting a run keeps the chosen observations, window and metrics', async () => {
+  const calls: { body: string; deps: string }[] = [];
+  const walk = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect')
+      calls.push({
+        body: node.arguments[0].getText(source),
+        deps: node.arguments[1]?.getText(source) ?? '',
+      });
+    ts.forEachChild(node, walk);
+  };
+  walk(source);
+  const reset = calls.find((call) => call.body.includes('defaultObservation(caseDir)'));
+  assert.ok(reset);
+  assert.ok(!reset.deps.includes('completedRunCase'), reset.deps);
+  const refresh = calls.find(
+    (call) => call.deps.includes('completedRunCase') && call.body.includes('model_case_runs'),
+  );
+  assert.ok(refresh, 'a separate effect follows finished runs');
+  const chosen: string[] = [];
+  let runs: unknown[] = [];
+  // Only these names exist: touching observations, the window or metrics would throw.
+  execute(refresh.body, {
+    caseDir: '/case',
+    completedRunCase: '/case/runs/new',
+    stationTarget: { current: '/case' },
+    invokeJson: async () => [{ run_case: '/case/runs/old' }, { run_case: '/case/runs/new' }],
+    setRuns: (value: unknown[]) => (runs = value),
+    setSource: (value: string) => chosen.push(value),
+  })();
+  await tick();
+  assert.equal(runs.length, 2);
+  assert.deepEqual(chosen, ['/case/runs/new']);
+  // A run that just started (no completed output yet) changes nothing.
+  const idle = execute(refresh.body, { caseDir: '/case', completedRunCase: undefined })();
+  assert.equal(idle, undefined);
+});

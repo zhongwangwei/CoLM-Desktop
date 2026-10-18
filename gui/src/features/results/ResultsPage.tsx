@@ -158,6 +158,8 @@ export default function ResultsPage({
   const [source, setSource] = useState('');
   const completedRunCase =
     state.running?.[caseDir]?.status === 'succeeded' ? state.running[caseDir]?.run_case : undefined;
+  const latestCompletedRun = useRef(completedRunCase);
+  latestCompletedRun.current = completedRunCase;
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [variable, setVariable] = useState('');
   const [obs, setObs] = useState('');
@@ -231,7 +233,7 @@ export default function ResultsPage({
         if (!cancelled && stationTarget.current === caseDir) {
           setRuns(data);
           setSource(
-            data.find((r) => r.run_case === completedRunCase)?.run_case ||
+            data.find((r) => r.run_case === latestCompletedRun.current)?.run_case ||
               data.find(
                 (r) =>
                   r.run_case && r.version?.id === versionId && r.version?.revision === revision,
@@ -248,7 +250,23 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [caseDir, versionId, revision, completedRunCase, stationRetry]);
+  }, [caseDir, versionId, revision, stationRetry]);
+  // A run of this case finishing adds and selects its output without discarding the chosen
+  // observations, window, spin-up or diagnostics; starting a run changes nothing here.
+  useEffect(() => {
+    if (!caseDir || !completedRunCase) return;
+    let cancelled = false;
+    void invokeJson<Run[]>('model_case_runs', { dir: caseDir })
+      .then((data) => {
+        if (cancelled || stationTarget.current !== caseDir) return;
+        setRuns(data);
+        if (data.some((r) => r.run_case === completedRunCase)) setSource(completedRunCase);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [caseDir, completedRunCase]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
