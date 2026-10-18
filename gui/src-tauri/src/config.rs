@@ -3916,7 +3916,7 @@ pub fn reset_process_parameter_field_batch(
     })
 }
 
-fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+pub(crate) fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
     let event = crate::history::start(
         "case-config-save",
         None,

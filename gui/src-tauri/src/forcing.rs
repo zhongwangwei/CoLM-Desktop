@@ -774,8 +774,9 @@ pub fn configure_cbl_batch(
         put(&mut forcing_doc, path, value, "nl_colm_forcing")
             .map_err(|e| format!("{}: {e}", forcing_path.display()))?;
     }
-    std::fs::write(&forcing_path, forcing_doc.to_string())
-        .map_err(|e| format!("{}: {e}", forcing_path.display()))?;
+    // Same locked, staged replacement as every other configuration write: a crash or a
+    // concurrent save never leaves a truncated forcing.nml.
+    crate::config::write_files_atomic(&[(forcing_path, forcing_doc.to_string())])?;
     crate::config::set_field_batch(
         dirs,
         "DEF_USE_CBL_HEIGHT".into(),
