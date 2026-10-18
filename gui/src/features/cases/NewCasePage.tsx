@@ -35,6 +35,8 @@ import {
   simulationFields,
   isSiteConfiguration,
   isForcingScheme,
+  kindPathFields,
+  kindPathPrefill,
   simulationSteps,
   spinupProblem,
   type SimulationStep,
@@ -257,7 +259,6 @@ export default function NewCasePage() {
       root: keepRoot ? old.root : defaults.project_dir || old.root,
       rawdata: old.rawdata || defaults.rawdata_dir || '',
       runtime: old.runtime || defaults.runtime_dir || '',
-      spatial_forcingdir: old.spatial_forcingdir || defaults.forcing_dir || '',
     }));
   }, [form.host, servers, localData, seededRoot]);
   async function rememberDataPaths(spatial: boolean) {
@@ -337,6 +338,106 @@ export default function NewCasePage() {
     resolve: (path: string | null) => void;
   } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
+  // Paths remembered for this resource and simulation kind (site folders, boundary or grid
+  // files, forcing). Filled once per resource/kind/grid/forcing mode, only into empty fields or
+  // ones still holding an earlier prefill; prefills the user left alone are cleared when they no
+  // longer apply, so a watershed shapefile never lingers in a region case.
+  const autoFilled = useRef<Record<string, string>>({});
+  const filledKind = useRef('');
+  const pathSource =
+    servers === null || localData === null
+      ? null
+      : form.host
+        ? (servers.find((server) => server.host === form.host) ?? null)
+        : localData;
+  const kindKey = pathSource
+    ? [form.host, form.kind, form.grid, form.forcing_mode, ownData].join('\n')
+    : '';
+  useEffect(() => {
+    if (!pathSource || filledKind.current === kindKey) return;
+    filledKind.current = kindKey;
+    const fields =
+      form.kind === 'site' && !ownData
+        ? []
+        : kindPathFields(form.kind, form.grid, form.forcing_mode);
+    const { patch, filled } = kindPathPrefill(
+      form,
+      fields,
+      pathSource.kind_paths?.[form.kind] ?? {},
+      pathSource.forcing_dir || '',
+      autoFilled.current,
+    );
+    autoFilled.current = filled;
+    if (Object.keys(patch).length) setForm((old) => ({ ...old, ...patch }));
+    // kindKey encodes the resource, kind, grid, forcing mode and data source.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kindKey]);
+  // Remembered site folders are read once on reaching the data step, so the site list is
+  // there without another click. Typed folders wait for the button: a half-typed path is not
+  // worth a (remote) scan.
+  const autoRead = useRef('');
+  useEffect(() => {
+    if (
+      step !== 3 ||
+      form.kind !== 'site' ||
+      !ownData ||
+      !form.sitedir ||
+      form.sitedir !== autoFilled.current.sitedir ||
+      sites.length ||
+      busy ||
+      state.busy
+    )
+      return;
+    const key = [form.host, form.sitedir, form.forcingdir].join('\n');
+    if (autoRead.current === key) return;
+    autoRead.current = key;
+    void readSites().catch(() => {});
+    // readSites reads the same form fields listed here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    step,
+    form.kind,
+    ownData,
+    form.host,
+    form.sitedir,
+    form.forcingdir,
+    sites.length,
+    busy,
+    state.busy,
+  ]);
+  async function rememberKindPaths(kind: string, paths: Record<string, string>) {
+    const entries = Object.entries(paths).filter(([, value]) => value.trim());
+    if (!kind || !entries.length) return;
+    const host = form.host;
+    try {
+      await invoke('remote_remember_kind_paths', {
+        host: host || null,
+        kind,
+        paths: Object.fromEntries(entries.map(([key, value]) => [key, value.trim()])),
+      });
+    } catch (e) {
+      notify(t(`路径未能记到计算资源：${e}`, `Could not remember the paths: ${e}`));
+      return;
+    }
+    const merge = <T extends { kind_paths?: Record<string, Record<string, string>> }>(
+      old: T,
+    ): T => ({
+      ...old,
+      kind_paths: {
+        ...old.kind_paths,
+        [kind]: {
+          ...old.kind_paths?.[kind],
+          ...Object.fromEntries(entries.map(([key, value]) => [key, value.trim()])),
+        },
+      },
+    });
+    if (!alive.current) return;
+    if (host)
+      setServers((old) =>
+        old ? old.map((server) => (server.host === host ? merge(server) : server)) : old,
+      );
+    else setLocalData((old) => (old ? merge(old) : old));
+  }
   useEffect(() => {
     if (!busy && (error || (multiSite && multiResults.length > 0)))
       document.querySelector('.main-pane')?.scrollTo({ top: 0 });
@@ -727,6 +828,17 @@ export default function NewCasePage() {
           `正在从 ${form.host} 读取站点与强迫场覆盖时段…`,
           `Reading sites and forcing coverage on ${form.host}…`,
         );
+  }
+  // The user's own site folders: a scan that finds sites remembers them for this resource.
+  function readSites() {
+    const dir = form.sitedir,
+      forcingDir = form.forcingdir;
+    return work(async () => {
+      const result = await scan(dir, forcingDir);
+      if (result.sites.length)
+        void rememberKindPaths('site', { sitedir: dir, forcingdir: forcingDir });
+      return result;
+    }, 'scan');
   }
   async function scan(dir = form.sitedir, forcingDir = form.forcingdir) {
     const id = ++sequence.current;
@@ -1258,7 +1370,10 @@ export default function NewCasePage() {
         }
       }
     }
-    if (results.some((result) => result.created && !result.error)) await rememberDataPaths(false);
+    if (results.some((result) => result.created && !result.error)) {
+      await rememberDataPaths(false);
+      await rememberKindPaths('site', { sitedir: form.sitedir, forcingdir: form.forcingdir });
+    }
     if (
       !job.cancelRequested &&
       alive.current &&
@@ -1428,6 +1543,16 @@ export default function NewCasePage() {
         }
       }
       await rememberDataPaths(form.kind !== 'site');
+      if (form.kind !== 'site' || ownData)
+        await rememberKindPaths(
+          form.kind,
+          Object.fromEntries(
+            kindPathFields(form.kind, form.grid, form.forcing_mode).map((key) => [
+              key,
+              form[key] ?? '',
+            ]),
+          ),
+        );
       update({
         root: destination.root,
         versionRef: revision,
@@ -1938,7 +2063,7 @@ export default function NewCasePage() {
                   label: t('读取站点与覆盖时段', 'Read sites and coverage'),
                   kind: 'click' as const,
                   enabled: enabled && !!form.sitedir,
-                  run: () => work(() => scan(), 'scan'),
+                  run: () => readSites(),
                 },
               ]
             : []),
@@ -2399,7 +2524,7 @@ export default function NewCasePage() {
                   <div className="form-grid">{['sitedir', 'forcingdir'].map(render)}</div>
                   <Button
                     disabled={!enabled || !form.sitedir}
-                    onClick={() => void work(() => scan(), 'scan').catch(() => {})}
+                    onClick={() => void readSites().catch(() => {})}
                   >
                     {t('读取站点与覆盖时段', 'Read sites and coverage')}
                   </Button>

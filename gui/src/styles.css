@@ -1614,3 +1614,36 @@ table input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.kind-path-list {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.kind-path-row {
+  display: grid;
+  grid-template-columns: auto minmax(7em, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.kind-path-kind {
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.kind-path-field {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.kind-path-value {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

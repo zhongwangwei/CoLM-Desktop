@@ -250,6 +250,9 @@ function page(
             root: '/bundled',
             runtimedir: '/bundled/runtime',
           };
+        case 'remote_remember_kind_paths':
+        case 'remote_forget_kind_path':
+          return true;
         case 'remote_prepare_engine':
           return options.prepare ? options.prepare(args) : { ready: true };
         case 'remote_scan_sites':
@@ -2969,6 +2972,138 @@ test('a scan result without a site list is reported instead of breaking the page
         String((element.children as unknown[]).flat(Infinity).join('')).includes('格式不对'),
     ),
   );
+});
+
+test('remembered paths cover the fields each simulation kind and grid uses', () => {
+  assert.deepEqual(simulation.kindPathFields('site', '', 'directory'), ['sitedir', 'forcingdir']);
+  assert.deepEqual(simulation.kindPathFields('watershed', 'latlon', 'directory'), [
+    'shapefile',
+    'spatial_forcingdir',
+    'forcing_dataset',
+  ]);
+  assert.deepEqual(simulation.kindPathFields('region', 'latlon', 'config'), ['forcing']);
+  assert.deepEqual(simulation.kindPathFields('global', 'catchment', 'directory'), [
+    'catchment',
+    'spatial_forcingdir',
+    'forcing_dataset',
+  ]);
+  assert.deepEqual(simulation.kindPathFields('region', 'unstructure', 'config'), [
+    'mesh',
+    'forcing',
+  ]);
+  assert.deepEqual(simulation.kindPathFields('', '', 'directory'), []);
+});
+
+test('prefill fills empty fields, replaces untouched prefills and keeps what the user typed', () => {
+  const memory = {
+    shapefile: '/basins/heihe.shp',
+    spatial_forcingdir: '/forcing/jra',
+    forcing_dataset: 'JRA3Q',
+  };
+  const fields = simulation.kindPathFields('watershed', 'latlon', 'directory');
+  const empty = { shapefile: '', spatial_forcingdir: '', forcing_dataset: '', mesh: '' };
+  const first = simulation.kindPathPrefill(empty, fields, memory, '/default/forcing', {});
+  assert.deepEqual(first.patch, memory);
+  assert.deepEqual(first.filled, memory);
+
+  // Switching to a lat-lon region: the untouched shapefile no longer applies and is cleared,
+  // the forcing folder follows the region's memory and the dataset is not carried over.
+  const region = simulation.kindPathPrefill(
+    { ...empty, ...first.patch },
+    simulation.kindPathFields('region', 'latlon', 'directory'),
+    { spatial_forcingdir: '/forcing/era5' },
+    '/default/forcing',
+    first.filled,
+  );
+  assert.deepEqual(region.patch, {
+    shapefile: '',
+    spatial_forcingdir: '/forcing/era5',
+    forcing_dataset: '',
+  });
+
+  // Without memory the resource default forcing folder is used; typed values stay.
+  const typed = simulation.kindPathPrefill(
+    { ...empty, shapefile: '/mine.shp' },
+    fields,
+    {},
+    '/default/forcing',
+    {},
+  );
+  assert.equal(typed.patch.shapefile, undefined);
+  assert.equal(typed.patch.spatial_forcingdir, '/default/forcing');
+  assert.equal(typed.patch.forcing_dataset, '');
+
+  // A remembered dataset is only used with its own folder.
+  const otherFolder = simulation.kindPathPrefill(
+    { ...empty, spatial_forcingdir: '/typed/forcing' },
+    fields,
+    memory,
+    '',
+    {},
+  );
+  assert.equal(otherFolder.patch.forcing_dataset, '');
+});
+
+test('remembered site folders are prefilled per server and read once on reaching the data step', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '', forcingdir: '' },
+      ownData: true,
+      sites: [],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        {
+          ...runServer,
+          kind_paths: {
+            site: { sitedir: '/server/Sitedata', forcingdir: '/server/Forcing' },
+            region: { mesh: '/server/mesh.nc' },
+          },
+        },
+      ],
+    },
+  );
+  await p.mount();
+  await p.settle();
+  const c = p.render();
+  assert.equal(c.fields.find((field) => field.id === 'new-sitedir')?.value, '/server/Sitedata');
+  assert.equal(c.fields.find((field) => field.id === 'new-forcingdir')?.value, '/server/Forcing');
+  const scans = p.calls.filter((call) => call.command === 'remote_scan_sites');
+  assert.equal(scans.length, 1);
+  assert.equal(scans[0].args.dir, '/server/Sitedata');
+  assert.equal(scans[0].args.forcingDir, '/server/Forcing');
+  assert.deepEqual(p.calls.find((call) => call.command === 'remote_remember_kind_paths')?.args, {
+    host: 'compute',
+    kind: 'site',
+    paths: { sitedir: '/server/Sitedata', forcingdir: '/server/Forcing' },
+  });
+  await p.settle();
+  assert.equal(p.calls.filter((call) => call.command === 'remote_scan_sites').length, 1);
+});
+
+test('a typed site folder waits for the read button and is remembered once sites are found', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, sitedir: '', forcingdir: '' }, ownData: true, sites: [], step: 3 },
+    [site],
+    initialValues,
+  );
+  await p.mount();
+  p.set('new-sitedir', '/typed/Sitedata');
+  await p.settle();
+  assert.ok(!p.calls.some((call) => call.command === 'scan_sites'));
+  await p.click('new-scan');
+  await p.settle();
+  assert.equal(p.calls.filter((call) => call.command === 'scan_sites').length, 1);
+  assert.deepEqual(p.calls.find((call) => call.command === 'remote_remember_kind_paths')?.args, {
+    host: null,
+    kind: 'site',
+    paths: { sitedir: '/typed/Sitedata' },
+  });
 });
 
 test('remote multi-site retries retain server identity and request atomic replay settings', async () => {

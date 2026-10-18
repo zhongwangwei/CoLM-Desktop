@@ -1,7 +1,7 @@
 //! 远程运行（R1）：服务器配置、测试连接、提交、查状态、取消、取回结果。实际工作都由
 //! `colm-cli remote-*` 做（经用户自己的 ssh），这里只存配置、转调命令、把日志末尾解析成阶段与进度。
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -79,7 +79,29 @@ pub struct Server {
     /// 新建模拟时预填的强迫场数据路径。
     #[serde(default)]
     pub forcing_dir: String,
+    /// 按模拟类型记住的上次用过的路径，见 [`KindPaths`]。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kind_paths: KindPaths,
 }
+
+/// 模拟类型（site/watershed/region/global）→ 字段名 → 上次用过的值。
+///
+/// 只由 `remote_remember_kind_paths`/`remote_forget_kind_path` 改；`remote_save_config`
+/// 保存服务器列表时一律沿用文件里已有的值，编辑连接设置的界面不会把它清掉。
+pub type KindPaths = BTreeMap<String, BTreeMap<String, String>>;
+
+const PATH_KINDS: [&str; 4] = ["site", "watershed", "region", "global"];
+/// 可以记住的字段。除 `forcing_dataset`（数据集名）外都是路径。
+const KIND_PATH_FIELDS: [&str; 8] = [
+    "sitedir",
+    "forcingdir",
+    "shapefile",
+    "catchment",
+    "mesh",
+    "spatial_forcingdir",
+    "forcing_dataset",
+    "forcing",
+];
 
 /// 本机新建模拟时预填的数据路径，字段含义同 [`Server`] 的同名字段。
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,6 +114,8 @@ pub struct DataDefaults {
     pub runtime_dir: String,
     #[serde(default)]
     pub forcing_dir: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kind_paths: KindPaths,
 }
 
 fn default_auth() -> String {
@@ -288,9 +312,8 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
     let mut config = config;
     validate(&config)?;
     let path = config_path(&app)?;
-    if config.local.is_none() {
-        config.local = read_remote_config(&path)?.local;
-    }
+    let saved = read_remote_config(&path)?;
+    keep_kind_paths(&mut config, saved);
     std::fs::write(
         &path,
         serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
@@ -308,6 +331,159 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
             })
         });
     Ok(())
+}
+
+/// 保存时沿用文件里的 `local` 与各处的 `kind_paths`：它们由各自的命令维护，
+/// 发来的配置里带的值（可能是界面加载时的旧副本）一律不算数。
+pub(crate) fn keep_kind_paths(config: &mut RemoteConfig, saved: RemoteConfig) {
+    let RemoteConfig {
+        servers: saved_servers,
+        local: saved_local,
+    } = saved;
+    let mut saved_paths: HashMap<String, KindPaths> = saved_servers
+        .into_iter()
+        .map(|server| (server.host, server.kind_paths))
+        .collect();
+    for server in &mut config.servers {
+        server.kind_paths = saved_paths.remove(&server.host).unwrap_or_default();
+    }
+    let saved_local_paths = saved_local
+        .as_ref()
+        .map(|local| local.kind_paths.clone())
+        .unwrap_or_default();
+    match config.local.as_mut() {
+        Some(local) => local.kind_paths = saved_local_paths,
+        None => config.local = saved_local,
+    }
+}
+
+fn kind_paths_of<'a>(
+    config: &'a mut RemoteConfig,
+    host: Option<&str>,
+) -> Result<&'a mut KindPaths, String> {
+    match host.map(str::trim).filter(|host| !host.is_empty()) {
+        Some(host) => config
+            .servers
+            .iter_mut()
+            .find(|server| server.host == host)
+            .map(|server| &mut server.kind_paths)
+            .ok_or_else(|| format!("计算资源里没有服务器 {host}")),
+        None => Ok(&mut config
+            .local
+            .get_or_insert_with(DataDefaults::default)
+            .kind_paths),
+    }
+}
+
+/// 把新建模拟用过的、属于某一模拟类型的路径记到所选计算资源下（`host` 为空即本机）。
+/// 空值不覆盖已有记录；返回是否有改动。
+pub(crate) fn remember_kind_paths(
+    config: &mut RemoteConfig,
+    host: Option<&str>,
+    kind: &str,
+    paths: &BTreeMap<String, String>,
+) -> Result<bool, String> {
+    if !PATH_KINDS.contains(&kind) {
+        return Err(format!("未知的模拟类型：{kind:?}"));
+    }
+    let remote = host.map(str::trim).is_some_and(|host| !host.is_empty());
+    let mut clean = Vec::new();
+    for (key, value) in paths {
+        if !KIND_PATH_FIELDS.contains(&key.as_str()) {
+            return Err(format!("不能记住的字段：{key:?}"));
+        }
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        if value.contains(['\n', '\r', '\0']) || value.len() > 4096 {
+            return Err(format!("{key} 的值不合法"));
+        }
+        let absolute = if remote {
+            value.starts_with('/')
+        } else {
+            std::path::Path::new(value).is_absolute()
+        };
+        if key != "forcing_dataset" && !absolute {
+            return Err(format!("{key} 要是绝对路径：{value:?}"));
+        }
+        clean.push((key.clone(), value.to_owned()));
+    }
+    let slot = kind_paths_of(config, host)?
+        .entry(kind.to_owned())
+        .or_default();
+    let mut changed = false;
+    for (key, value) in clean {
+        if slot.get(&key) != Some(&value) {
+            slot.insert(key, value);
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+/// 忘掉某一类型下的一项记录；`key` 为空时忘掉这个类型的全部记录。
+pub(crate) fn forget_kind_path(
+    config: &mut RemoteConfig,
+    host: Option<&str>,
+    kind: &str,
+    key: Option<&str>,
+) -> Result<bool, String> {
+    let paths = kind_paths_of(config, host)?;
+    let changed = match key {
+        Some(key) => {
+            let removed = paths
+                .get_mut(kind)
+                .is_some_and(|slot| slot.remove(key).is_some());
+            if paths.get(kind).is_some_and(BTreeMap::is_empty) {
+                paths.remove(kind);
+            }
+            removed
+        }
+        None => paths.remove(kind).is_some(),
+    };
+    Ok(changed)
+}
+
+fn update_remote_config(
+    app: &tauri::AppHandle,
+    change: impl FnOnce(&mut RemoteConfig) -> Result<bool, String>,
+) -> Result<bool, String> {
+    let path = config_path(app)?;
+    let mut config = read_remote_config(&path)?;
+    let changed = change(&mut config)?;
+    if changed {
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
+        )
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(changed)
+}
+
+#[tauri::command]
+pub fn remote_remember_kind_paths(
+    app: tauri::AppHandle,
+    host: Option<String>,
+    kind: String,
+    paths: BTreeMap<String, String>,
+) -> Result<bool, String> {
+    update_remote_config(&app, |config| {
+        remember_kind_paths(config, host.as_deref(), &kind, &paths)
+    })
+}
+
+#[tauri::command]
+pub fn remote_forget_kind_path(
+    app: tauri::AppHandle,
+    host: Option<String>,
+    kind: String,
+    key: Option<String>,
+) -> Result<bool, String> {
+    update_remote_config(&app, |config| {
+        forget_kind_path(config, host.as_deref(), &kind, key.as_deref())
+    })
 }
 
 /// 新建模拟用过的数据路径写回所选计算资源（`host` 为空即本机）；空值不覆盖已有默认。

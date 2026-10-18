@@ -4,6 +4,61 @@ export { validDate } from '../../lib/dates';
 import { caseDirectory, siteVersionMismatch, type SchemaField, type Site } from './case-model';
 
 export type SimulationStep = 1 | 2 | 3 | 4 | 5;
+/**
+ * Form fields whose last value is remembered per resource and simulation kind, for the
+ * current grid and forcing mode. Only the boundary/grid file the grid actually uses is
+ * listed, so a remembered mesh never rides along with a lat-lon case.
+ */
+export function kindPathFields(kind: string, grid: string, forcingMode: string): string[] {
+  if (kind === 'site') return ['sitedir', 'forcingdir'];
+  if (!['watershed', 'region', 'global'].includes(kind)) return [];
+  const gridFile =
+    grid === 'latlon'
+      ? kind === 'watershed'
+        ? ['shapefile']
+        : []
+      : grid === 'catchment'
+        ? ['catchment']
+        : grid
+          ? ['mesh']
+          : [];
+  const forcing =
+    forcingMode === 'config' ? ['forcing'] : ['spatial_forcingdir', 'forcing_dataset'];
+  return [...gridFile, ...forcing];
+}
+
+/**
+ * Values to write into the form for remembered per-kind paths. `previous` holds what the last
+ * prefill wrote: a field still holding it counts as untouched, may be replaced, and is cleared
+ * when it no longer applies. Fields the user typed into are never changed.
+ */
+export function kindPathPrefill(
+  form: Record<string, string>,
+  fields: string[],
+  memory: Record<string, string>,
+  defaultForcingDir: string,
+  previous: Record<string, string>,
+) {
+  const patch: Record<string, string> = {};
+  for (const [key, value] of Object.entries(previous))
+    if (form[key] === value && !fields.includes(key)) patch[key] = '';
+  const filled: Record<string, string> = {};
+  for (const key of fields) {
+    if (form[key] && form[key] !== previous[key]) continue;
+    let value = memory[key] || '';
+    if (key === 'spatial_forcingdir') value ||= defaultForcingDir;
+    // A remembered dataset belongs to the remembered forcing folder only.
+    if (
+      key === 'forcing_dataset' &&
+      (patch.spatial_forcingdir ?? form.spatial_forcingdir) !== memory.spatial_forcingdir
+    )
+      value = '';
+    patch[key] = value;
+    if (value) filled[key] = value;
+  }
+  return { patch, filled };
+}
+
 export const simulationSteps = [
   ['总的设定', 'General setup'],
   ['范围与网格', 'Range and grid'],

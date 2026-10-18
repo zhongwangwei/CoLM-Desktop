@@ -260,10 +260,15 @@ export type Server = {
   rawdata_dir?: string;
   runtime_dir?: string;
   forcing_dir?: string;
+  /** Last-used paths per simulation kind (site/watershed/region/global). */
+  kind_paths?: KindPaths;
 };
 export type DataDefaults = {
   project_dir: string;
   rawdata_dir: string;
   runtime_dir: string;
   forcing_dir: string;
+  kind_paths?: KindPaths;
 };
+/** Simulation kind → form field → last value used on that resource. */
+export type KindPaths = Record<string, Record<string, string>>;

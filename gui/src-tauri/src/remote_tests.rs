@@ -69,6 +69,7 @@ fn server_settings_are_validated() {
         rawdata_dir: String::new(),
         runtime_dir: String::new(),
         forcing_dir: String::new(),
+        kind_paths: Default::default(),
     };
     let ok = RemoteConfig {
         servers: vec![server("7920land", "/media/zhwei/data02/zhwei/colm-desktop")],
@@ -1004,4 +1005,105 @@ fn data_path_defaults_follow_the_chosen_resource_and_keep_unset_values() {
     )
     .is_err());
     assert_eq!(config.local.unwrap().rawdata_dir, rawdata);
+}
+
+#[test]
+fn kind_paths_are_kept_per_resource_and_kind_and_survive_saving_servers() {
+    let mut config: RemoteConfig = serde_json::from_str(
+        r#"{"servers":[{"host":"tms17l","root":"/tera11/zhwei"},{"host":"bd","root":"/share"}]}"#,
+    )
+    .unwrap();
+    let site = std::collections::BTreeMap::from([
+        (
+            "sitedir".to_string(),
+            "/shr03/PLUMBER2s/Sitedata".to_string(),
+        ),
+        (
+            "forcingdir".to_string(),
+            " /shr03/PLUMBER2s/Forcing ".to_string(),
+        ),
+        ("mesh".to_string(), "".to_string()),
+    ]);
+    assert!(remember_kind_paths(&mut config, Some("tms17l"), "site", &site).unwrap());
+    assert!(!remember_kind_paths(&mut config, Some("tms17l"), "site", &site).unwrap());
+    let watershed = std::collections::BTreeMap::from([
+        (
+            "shapefile".to_string(),
+            "/shr03/basins/heihe.shp".to_string(),
+        ),
+        ("forcing_dataset".to_string(), "JRA3Q".to_string()),
+    ]);
+    assert!(remember_kind_paths(&mut config, Some("tms17l"), "watershed", &watershed).unwrap());
+    let saved = &config.servers[0].kind_paths;
+    assert_eq!(saved["site"]["forcingdir"], "/shr03/PLUMBER2s/Forcing");
+    assert!(
+        !saved["site"].contains_key("mesh"),
+        "empty values are not remembered"
+    );
+    assert_eq!(saved["watershed"]["forcing_dataset"], "JRA3Q");
+    assert!(
+        config.servers[1].kind_paths.is_empty(),
+        "other servers untouched"
+    );
+
+    // Unknown kinds or fields, relative paths and unknown servers are refused.
+    let bad = |key: &str, value: &str| {
+        std::collections::BTreeMap::from([(key.to_string(), value.to_string())])
+    };
+    assert!(
+        remember_kind_paths(&mut config, Some("tms17l"), "planet", &bad("mesh", "/m")).is_err()
+    );
+    assert!(
+        remember_kind_paths(&mut config, Some("tms17l"), "region", &bad("root", "/r")).is_err()
+    );
+    assert!(remember_kind_paths(
+        &mut config,
+        Some("tms17l"),
+        "region",
+        &bad("mesh", "mesh.nc")
+    )
+    .is_err());
+    assert!(
+        remember_kind_paths(&mut config, Some("absent"), "region", &bad("mesh", "/m")).is_err()
+    );
+
+    // Saving the server list from an editor that loaded an older copy keeps the paths.
+    let mut edited: RemoteConfig = serde_json::from_str(
+        r#"{"servers":[{"host":"tms17l","root":"/tera11/zhwei","threads":16},{"host":"new","root":"/n"}]}"#,
+    )
+    .unwrap();
+    keep_kind_paths(&mut edited, config.clone());
+    assert_eq!(edited.servers[0].threads, 16);
+    assert_eq!(edited.servers[0].kind_paths, config.servers[0].kind_paths);
+    assert!(edited.servers[1].kind_paths.is_empty());
+
+    // Local paths live under `local` and are kept when only servers are saved.
+    let local_dir = if cfg!(windows) {
+        r"D:\sites"
+    } else {
+        "/Volumes/Data/sites"
+    };
+    assert!(remember_kind_paths(&mut config, None, "site", &bad("sitedir", local_dir)).unwrap());
+    let mut servers_only = RemoteConfig {
+        servers: config.servers.clone(),
+        local: None,
+    };
+    keep_kind_paths(&mut servers_only, config.clone());
+    assert_eq!(
+        servers_only.local.unwrap().kind_paths["site"]["sitedir"],
+        local_dir
+    );
+
+    assert!(forget_kind_path(&mut config, Some("tms17l"), "site", Some("sitedir")).unwrap());
+    assert!(!config.servers[0].kind_paths["site"].contains_key("sitedir"));
+    assert!(forget_kind_path(&mut config, Some("tms17l"), "site", Some("forcingdir")).unwrap());
+    assert!(
+        !config.servers[0].kind_paths.contains_key("site"),
+        "empty kinds are dropped"
+    );
+    assert!(forget_kind_path(&mut config, Some("tms17l"), "watershed", None).unwrap());
+    assert!(config.servers[0].kind_paths.is_empty());
+    assert!(!serde_json::to_string(&config.servers[0])
+        .unwrap()
+        .contains("kind_paths"));
 }

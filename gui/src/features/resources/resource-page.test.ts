@@ -53,6 +53,8 @@ function harness(
       case 'remote_save_config':
         if (failures.save) throw new Error('Cannot save connection settings');
         return null;
+      case 'remote_forget_kind_path':
+        return true;
       case 'remote_ssh_hosts':
         return ['7920land', '7920mp'];
       case 'remote_job_record':
@@ -251,6 +253,42 @@ test('resource selection is page-local and dirty drafts block switching and navi
   contract = await page.action('resource-select-server-7920mp');
   assert.equal((contract.details as { selected: string }).selected, 'server:7920mp');
   assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('remembered paths by simulation type are listed per server, survive saving and can be forgotten', async () => {
+  const page = harness();
+  Object.assign(page.servers[0], {
+    kind_paths: {
+      watershed: { shapefile: '/basins/heihe.shp' },
+      site: { forcingdir: '/server/Forcing', sitedir: '/server/Sitedata' },
+    },
+  });
+  await page.ready();
+  const forget = () =>
+    page
+      .contract()
+      .actions.filter((action) => action.id.startsWith('resource-forget-'))
+      .map((action) => action.id);
+  assert.deepEqual(forget(), [
+    'resource-forget-site-sitedir',
+    'resource-forget-site-forcingdir',
+    'resource-forget-watershed-shapefile',
+  ]);
+  page.fill('resource-username', 'changed');
+  await page.action('resource-save');
+  assert.equal(forget().length, 3, 'saving connection settings keeps the remembered paths');
+  await page.action('resource-forget-site-sitedir');
+  assert.deepEqual(page.calls.find((call) => call.command === 'remote_forget_kind_path')?.args, {
+    host: '7920land',
+    kind: 'site',
+    key: 'sitedir',
+  });
+  assert.deepEqual(forget(), [
+    'resource-forget-site-forcingdir',
+    'resource-forget-watershed-shapefile',
+  ]);
+  await page.action('resource-select-server-7920mp');
+  assert.deepEqual(forget(), []);
 });
 
 test('scheduler detection is visible beside advanced settings and applies one candidate only to the draft', async () => {

@@ -238,6 +238,8 @@ pub fn run() {
             remote_config,
             remote_save_config,
             remote_remember_data_paths,
+            remote_remember_kind_paths,
+            remote_forget_kind_path,
             remote_set_password,
             remote_ssh_hosts,
             remote_probe,

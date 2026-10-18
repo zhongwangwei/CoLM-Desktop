@@ -993,6 +993,34 @@ export const commandContract = {
       "rust_type": "RemoteConfig"
     }
   },
+  "remote_remember_kind_paths": {
+    "host": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "kind": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "paths": {
+      "required": true,
+      "rust_type": "BTreeMap<String, String>"
+    }
+  },
+  "remote_forget_kind_path": {
+    "host": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "kind": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "key": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "remote_remember_data_paths": {
     "host": {
       "required": false,

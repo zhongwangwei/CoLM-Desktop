@@ -24,8 +24,10 @@ import {
   resourceTaskInfo,
   type Server,
   type ResourceCheck,
+  kindPathRows,
 } from './resource';
 import type { DataDefaults } from '../../lib/types';
+type DataPathKey = Exclude<keyof DataDefaults, 'kind_paths'>;
 import NavIcon from '../../components/NavIcon';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import './resources-page.css';
@@ -314,7 +316,12 @@ export default function ResourcesPage() {
       throw new Error(
         t('请先登记密码，或清空密码后保存。', 'Register or clear the password before saving.'),
       );
-    const next = replaceServer(servers, original, editor);
+    // The backend keeps remembered per-kind paths; show its copy, not the editor's.
+    const next = replaceServer(servers, original, editor).map((server) =>
+      server.host === editor.host
+        ? { ...server, kind_paths: servers.find((old) => old.host === original)?.kind_paths }
+        : server,
+    );
     await invoke('remote_save_config', { config: { servers: next } });
     setServers(next);
     setOriginal(editor.host);
@@ -416,14 +423,19 @@ export default function ResourcesPage() {
           'Load the server configuration successfully before saving.',
         ),
       );
-    const local = Object.fromEntries(
-      Object.entries(localData).map(([key, value]) => [key, value.trim()]),
-    ) as DataDefaults;
+    // Remembered per-kind paths are kept by the backend; only the default folders are saved here.
+    const local: DataDefaults = {
+      project_dir: localData.project_dir.trim(),
+      rawdata_dir: localData.rawdata_dir.trim(),
+      runtime_dir: localData.runtime_dir.trim(),
+      forcing_dir: localData.forcing_dir.trim(),
+      ...(localData.kind_paths ? { kind_paths: localData.kind_paths } : {}),
+    };
     await invoke('remote_save_config', { config: { servers, local } });
     setLocalData(local);
     return t('已保存本机默认数据路径', 'Saved local default data paths');
   }
-  async function pickLocalData(key: keyof DataDefaults) {
+  async function pickLocalData(key: DataPathKey) {
     const path = await invoke<string | null>('pick_folder', { key: `resource-${key}` });
     if (path) setLocalData((current) => ({ ...current, [key]: path }));
   }
@@ -473,7 +485,7 @@ export default function ResourcesPage() {
     ['host', t('服务器地址 / SSH 别名', 'Server address / SSH alias')],
     ['username', t('登录账号', 'Username')],
   ];
-  const dataFields: [keyof Server & keyof DataDefaults, string][] = [
+  const dataFields: [DataPathKey, string][] = [
     ['project_dir', t('默认项目目录', 'Default project folder')],
     ['rawdata_dir', t('默认地表数据目录', 'Default surface data folder')],
     ['runtime_dir', t('默认 Runtime 数据目录', 'Default runtime data folder')],
@@ -694,6 +706,85 @@ export default function ResourcesPage() {
           setDeletingServer(null);
         }),
     });
+  const kindLabels: Record<string, string> = {
+    site: t('站点', 'Site'),
+    watershed: t('流域', 'Watershed'),
+    region: t('区域', 'Region'),
+    global: t('全球', 'Global'),
+  };
+  const kindFieldLabels: Record<string, string> = {
+    sitedir: t('站点数据目录', 'Site data folder'),
+    forcingdir: t('站点强迫场目录', 'Site forcing folder'),
+    shapefile: t('流域边界文件', 'Watershed boundary'),
+    catchment: t('Catchment 文件', 'Catchment file'),
+    mesh: t('网格文件', 'Mesh file'),
+    spatial_forcingdir: t('强迫场数据路径', 'Forcing data path'),
+    forcing_dataset: t('强迫场数据集', 'Forcing dataset'),
+    forcing: t('强迫场配置文件', 'Forcing configuration'),
+  };
+  const kindPathHost = selected === 'local' ? null : (selectedServer?.host ?? null);
+  const kindPaths = kindPathRows(
+    selected === 'local' ? localData.kind_paths : selectedServer?.kind_paths,
+  );
+  if (selected === 'local' || selectedServer)
+    guideActions.push(
+      ...kindPaths.map(({ kind, key }) => ({
+        id: `resource-forget-${kind}-${key}`,
+        label: t('清除', 'Forget'),
+        kind: 'commit' as const,
+        enabled: !busy,
+        run: () =>
+          execute('kind-paths', async () => {
+            await invoke('remote_forget_kind_path', { host: kindPathHost, kind, key });
+            const forget = <T extends { kind_paths?: Record<string, Record<string, string>> }>(
+              old: T,
+            ): T => {
+              const fields = { ...old.kind_paths?.[kind] };
+              delete fields[key];
+              const paths = { ...old.kind_paths, [kind]: fields };
+              if (!Object.keys(fields).length) delete paths[kind];
+              return { ...old, kind_paths: paths };
+            };
+            if (kindPathHost)
+              setServers((old) =>
+                old.map((server) => (server.host === kindPathHost ? forget(server) : server)),
+              );
+            else setLocalData((old) => forget(old));
+            return t(
+              `已清除 ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
+              `Forgot ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
+            );
+          }),
+      })),
+    );
+  const kindPathSection = (
+    <section className="resource-kind-paths">
+      <h3>{t('各类型上次使用的路径', 'Last paths by simulation type')}</h3>
+      <p className="muted">
+        {t(
+          '新建模拟在这里选择相应类型时，自动填入空着的框。创建成功后更新；站点在读到站点时就更新。',
+          'Filled into empty fields when a new simulation of that type runs here. Updated after a successful creation, and for sites as soon as sites are read.',
+        )}
+      </p>
+      {kindPaths.length ? (
+        <div className="kind-path-list">
+          {kindPaths.map(({ kind, key, value }) => (
+            <div className="kind-path-row" key={`${kind}:${key}`}>
+              <span className="kind-path-kind">{kindLabels[kind] ?? kind}</span>
+              <span className="kind-path-field">{kindFieldLabels[key] ?? key}</span>
+              <code className="kind-path-value" title={value}>
+                {value}
+              </code>
+              {actionButton(`resource-forget-${kind}-${key}`)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="muted">{t('还没有记录。', 'Nothing remembered yet.')}</p>
+      )}
+      {output['kind-paths'] != null && <Notice>{String(output['kind-paths'])}</Notice>}
+    </section>
+  );
   if (selected === 'local') {
     guideFields.push(
       ...dataFields.map(([key, label]) => ({
@@ -1163,6 +1254,7 @@ export default function ResourcesPage() {
             {actionButton('resource-local-data-save', true)}
             {output['local-data'] != null && <Notice>{String(output['local-data'])}</Notice>}
           </section>
+          {kindPathSection}
           {localRunEntries(state.running).map(([dir, task]) => (
             <div className="resource-task-row" key={dir}>
               <span>
@@ -1250,6 +1342,7 @@ export default function ResourcesPage() {
             </p>
             <div className="form-grid">{dataFields.map(([key]) => field(`resource-${key}`))}</div>
           </section>
+          {selectedServer && kindPathSection}
           <section className="resource-checks">
             <h3>{t('连接与环境检查', 'Connection and environment')}</h3>
             <div className="resource-status-grid">

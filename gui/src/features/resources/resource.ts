@@ -1,4 +1,4 @@
-import type { RunState, Server } from '../../lib/types';
+import type { KindPaths, RunState, Server } from '../../lib/types';
 import { remoteStudyReply, remoteStudyPermissions } from '../studies/remote-study';
 export type { Server } from '../../lib/types';
 export const newServer = (): Server => ({
@@ -228,4 +228,32 @@ export function resourceTaskInfo(value: unknown, result?: unknown) {
     status: state,
     pending,
   };
+}
+
+const pathKindOrder = ['site', 'watershed', 'region', 'global'];
+const pathFieldOrder = [
+  'sitedir',
+  'forcingdir',
+  'shapefile',
+  'catchment',
+  'mesh',
+  'spatial_forcingdir',
+  'forcing_dataset',
+  'forcing',
+];
+/** Remembered per-kind paths as rows, in wizard order (kind, then field). */
+export function kindPathRows(paths: KindPaths | undefined) {
+  const rank = (order: string[], value: string) =>
+    order.includes(value) ? order.indexOf(value) : order.length;
+  return Object.entries(paths ?? {})
+    .flatMap(([kind, fields]) =>
+      Object.entries(fields)
+        .filter(([, value]) => value)
+        .map(([key, value]) => ({ kind, key, value })),
+    )
+    .sort(
+      (a, b) =>
+        rank(pathKindOrder, a.kind) - rank(pathKindOrder, b.kind) ||
+        rank(pathFieldOrder, a.key) - rank(pathFieldOrder, b.key),
+    );
 }
