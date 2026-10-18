@@ -25,7 +25,10 @@ fn parent_name(path: &str) -> Option<String> {
 /// come from the server folder recorded in `.colm-desktop.json`; `project_path` is the local
 /// folder the history groups by.
 fn case_subject(path: &str, name: Option<String>) -> Option<Value> {
-    let trimmed = path.trim_end_matches(['/', '\\']);
+    let case = crate::projects::owning_case(path)
+        .to_string_lossy()
+        .into_owned();
+    let trimmed = case.as_str();
     let remote = std::fs::read_to_string(Path::new(trimmed).join(".colm-desktop.json"))
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())

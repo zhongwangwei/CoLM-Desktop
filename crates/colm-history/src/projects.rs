@@ -22,14 +22,25 @@ fn file_name(path: &str) -> Option<String> {
         .filter(|name| !name.is_empty())
 }
 
+/// The case a path belongs to: a run folder inside a case (`<case>/runs/<id>`) counts as
+/// that case, otherwise every run would become a project of its own.
+pub(crate) fn owning_case(path: &str) -> &Path {
+    let path = Path::new(path.trim_end_matches(['/', '\\']));
+    match path.parent() {
+        Some(runs) if runs.file_name().is_some_and(|name| name == "runs") => {
+            runs.parent().unwrap_or(path)
+        }
+        _ => path,
+    }
+}
+
 /// The project folder an operation belongs to: the recorded `detail.subject.project_path`, else
 /// the folder containing its case.
 pub(super) fn project_path(event: &Event) -> Option<String> {
     if let Some(path) = event.detail["subject"]["project_path"].as_str() {
         return Some(path.to_owned()).filter(|path| !path.is_empty());
     }
-    let case = event.case_path.as_deref()?.trim_end_matches(['/', '\\']);
-    Path::new(case)
+    owning_case(event.case_path.as_deref()?)
         .parent()
         .map(|parent| parent.to_string_lossy().into_owned())
         .filter(|parent| !parent.is_empty())
@@ -41,7 +52,7 @@ fn project_name(path: &str, members: &[Operation]) -> String {
         let Some(case) = member.latest.case_path.as_deref() else {
             continue;
         };
-        let record = Path::new(case).join(".colm-desktop.json");
+        let record = owning_case(case).join(".colm-desktop.json");
         let Ok(text) = std::fs::read_to_string(record) else {
             continue;
         };
@@ -281,6 +292,8 @@ mod tests {
         let au = server.join("AU-Cpr").to_string_lossy().into_owned();
         let h = History::open(":memory:").unwrap();
         finished(&h, "run", &at, "succeeded", 1_000);
+        // A run folder inside a case belongs to that case's project.
+        finished(&h, "run", &format!("{at}/runs/run-1"), "succeeded", 1_500);
         finished(&h, "run", &au, "failed", 2_000);
         // A case import repeats a server job as an unconfirmed placeholder.
         let mut imported =
@@ -307,7 +320,7 @@ mod tests {
             project.name, "222",
             "named by the server folder, not the cache hash"
         );
-        assert_eq!(project.members.len(), 3);
+        assert_eq!(project.members.len(), 4);
         assert_eq!(page.items[1].latest.kind, "project");
         assert_eq!(page.items[1].latest.status, "completed_with_failures");
         assert!(
