@@ -37,7 +37,10 @@ def test_flat_pixelset_load_filters_int64_indices_locally() -> None:
 
         assert "CALL mpi_send" not in body
         assert "CALL mpi_recv" not in body
-        assert "mesh(ie)%indx == pixelset%eindex(iset)" in body
+        assert "CALL quicksort (numelm, elmsorted, elmorder)" in body
+        assert (
+            "find_in_sorted_list1(pixelset%eindex(iset), numelm, elmsorted) > 0" in body
+        )
         assert "sbuff = pack(pixelset%eindex, msk)" in body
         assert "CALL move_alloc(sbuff, pixelset%eindex)" in body
         assert "pixelset%nset = nset" in body

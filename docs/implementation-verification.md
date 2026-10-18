@@ -33635,3 +33635,20 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    同一命令 `cargo test -p colm-init --lib` 默认并行跑三次，结果都是 185 passed、0 failed；main 上不加锁时为 144/41 和 140/45 failed。
 4. **版本号升到 0.3.0-beta.4**：改了 workspace、GUI、Tauri 配置、legacy 静态页、README 徽章/下载链接/发布记录、版本一致性测试，以及两个 Cargo.lock 中 workspace 成员的版本行。
    注意：推送到 main 后，release.yml 会在 `v0.3.0-beta.4` 尚无完整发布时自动构建并发布预发布版。
+
+## 第 705 轮：`upstream-fortran-f48-sync` 逐 hunk 核对后删除；vendor 静态测试进 CI（2026-10-18）
+
+1. **结论：这条分支已被 main 取代，没有缺失的数值修复。** `901d1fb7`（9 月 12 日，从 `40260ef3` 分出）是对上游 `f48fbf9` 的一次早期选择性同步。
+   main 之后另做过一次**按语义 hunk** 的同步（`5d7f373`/`6d98eb6`/`b25b904`，由 `oracle/scripts/test_upstream_f48_sync.py` 守护），
+   9 月 30 日的 `7abd6a23` 又独立修好了 FLAT_SPMD 的多块元素顺序。第 704 轮说的"32% 的行不在 main"，逐 hunk 看分为三类：
+   | 类别 | 内容 |
+   |---|---|
+   | main 已有，原样 | 区域水库目录（`nresv_catalogue`/`catalogue_to_active`、`DEF_Reservoir_Method` 检查、`CASE DEFAULT`）、分汊 `prev_active_lev`、`rivsto_hist`、河网历史坐标在所有 rank 上分配、臭氧关闭时迭代前把 `o3coef*` 置 1、臭氧开关默认关闭、`init_ozone_data` 冷启动时就做 `grid2pset`、Mesh 分区不再按元素号排序、示踪物清理的 `allocated` 守卫 |
+   | main 用等价写法 | CoLMMAIN 的 PFT 守卫（外层 `DEF_USE_PFT .or. DEF_USE_PC` 包住 `patchtype == 0`）；路由历史用 `x_ucat_all/y_ucat_all`，不用 `x_ucat_global`；像素集过滤用 `quicksort` 加 `find_in_sorted_list1`，不用手写二分；臭氧值域检查用运行期 `DEF_USE_RangeCheck`，不用 `#ifdef RangeCheck`；水库通量清零提到循环外 |
+   | main 确实没有 | ① 子步开始时清零 `hflux_fc/mflux_fc/zgrad_dn`。不清零也没有数值影响：残值只会流进同一已完成河系里的非活动单元，`WHERE (ucatfilter)` 把它们排除了；`-99`/`-10` 分支不设 `zgrad_dn`，但下游没有使用者。② 若干注释。③ `vendor/PROVENANCE.md` 的同步说明：main 在 `5ecb511f` 里有意删除了这个文件，同步记录改放在本文件里 |
+   远程分支已删除，tip `901d1fb7d123d09bd2bcd09d236f4b35f92c6e52` 已记录。
+2. **核对时发现 main 自己的一条静态断言过时了**：`vendor/CoLM202X/tests/test_pixelset_load_flat_static.py` 还在找 `7abd6a23` 之前的线性扫描
+   `mesh(ie)%indx == pixelset%eindex(iset)`，所以 `python3 -m pytest -q vendor/CoLM202X/tests` 是 1 failed、25 passed。
+   现在这条改为断言 `quicksort (numelm, elmsorted, elmorder)` 加 `find_in_sorted_list1(...) > 0`，结果 26 passed。
+   根因是这 14 个 vendor 静态测试**从来不在 CI 里**，现在已加到 `ci.yml` 的 `kernel-filesystem` 作业：apt 安装 `python3-pytest`，运行 `python3 -m pytest -q vendor/CoLM202X/tests`。
+   这些文件在 `/tests` 下，`build_kernel.sh` 不会编译它们，所以内核和服务器引擎都不用重编。

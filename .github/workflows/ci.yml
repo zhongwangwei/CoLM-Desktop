@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install the kernel compiler
-        run: sudo apt-get update && sudo apt-get install -y gfortran libnetcdff-dev libnetcdf-dev
+        run: sudo apt-get update && sudo apt-get install -y gfortran libnetcdff-dev libnetcdf-dev python3-pytest
       - name: Check literal filesystem paths
         run: |
           python3 oracle/scripts/test_kernel_filesystem.py
@@ -31,6 +31,10 @@ jobs:
       # 却从未入库，那三处证据对别人不可复现。
       - name: Guard the vendored upstream sync markers
         run: python3 oracle/scripts/test_upstream_f48_sync.py
+      # vendor 自带的 FLAT_SPMD 静态断言此前不在 CI 里，7abd6a23 换掉像素集过滤
+      # 实现后其中一条一直过时到第 705 轮才发现。
+      - name: Check the vendored FLAT_SPMD static assertions
+        run: python3 -m pytest -q vendor/CoLM202X/tests
 
   # 每个 PR 都跑：纯 Rust 侧
   rust:
