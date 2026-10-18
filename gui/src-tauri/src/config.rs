@@ -4366,22 +4366,30 @@ pub(crate) fn apply_fields(dir: &str, fields: &[FieldChange]) -> Result<(), Stri
         let value = typed(&field.path, &field.value).map_err(|e| format!("{dir}: {e}"))?;
         put(&mut doc, &field.path, value).map_err(|e| format!("{dir}: {e}"))?;
     }
-    if !history.is_empty() {
-        let (hist_path, hist_text) =
-            stage_history_file(&mut doc, std::path::Path::new(dir), &history)?;
-        std::fs::write(&hist_path, hist_text)
-            .map_err(|e| format!("{}: {e}", hist_path.display()))?;
-    }
+    let staged_history = if history.is_empty() {
+        None
+    } else {
+        Some(stage_history_file(
+            &mut doc,
+            std::path::Path::new(dir),
+            &history,
+        )?)
+    };
+    // Validate the complete edit before touching any file, so a rejected edit changes nothing.
+    validate_runtime_contract(&doc, std::path::Path::new(dir), None)
+        .map_err(|e| format!("{dir}: {e}"))?;
+    validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
     stage_tracer_parameters(
         dir,
         &fields,
         param(METHANE_MODE),
         (param(SOLUTE_INIT_CONC), param(SOLUTE_PRECIP_CONC)),
     )?;
-    validate_runtime_contract(&doc, std::path::Path::new(dir), None)
-        .map_err(|e| format!("{dir}: {e}"))?;
-    validate_changed_fields(&doc, &fields).map_err(|e| format!("{dir}: {e}"))?;
-    std::fs::write(&path, doc.to_string()).map_err(|e| format!("{}: {e}", path.display()))
+    // case.nml is the only copy of the configuration: replace it (and its history file)
+    // through staged files with backups instead of truncating in place.
+    let mut writes = staged_history.into_iter().collect::<Vec<_>>();
+    writes.push((path, doc.to_string()));
+    write_files_atomic_untracked(&writes).map(|_| ())
 }
 
 /// 向导写的示踪物参数文件：`DEF_TRACER_PARAM_FILES` 里点名的内置文件（CH4、H₂¹⁸O、HDO、Cl、

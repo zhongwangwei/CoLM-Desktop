@@ -4568,3 +4568,30 @@ fn namelist_preview_limits_text_reads() {
         .contains("4 MiB"));
     std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
 }
+
+#[test]
+fn rejected_wizard_edit_leaves_history_and_case_files_unchanged() {
+    let dir = batch("wizard-history-invalid", &[SAMPLE]).remove(0);
+    let case = std::path::Path::new(&dir).join("case.nml");
+    let history = std::path::Path::new(&dir).join(super::HISTORY_FILE);
+    let before = std::fs::read_to_string(&case).unwrap();
+    let err = super::apply_fields(
+        &dir,
+        &[
+            FieldChange {
+                path: "DEF_hist_vars%f_rnet".into(),
+                value: ".false.".into(),
+            },
+            FieldChange {
+                path: "DEF_simulation_time%timestep".into(),
+                value: "1800.5".into(),
+            },
+        ],
+    )
+    .unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(std::fs::read_to_string(&case).unwrap(), before);
+    // At most the harmless empty group that staging creates; never the rejected switch.
+    let staged = std::fs::read_to_string(&history).unwrap_or_default();
+    assert!(!staged.contains("f_rnet"), "{staged}");
+}
