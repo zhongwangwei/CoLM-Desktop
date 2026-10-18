@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Button, Field, Input, DateInput, Notice, Select } from '../../components/ui';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { caseDirectory, type Site } from './case-model';
@@ -33,6 +34,23 @@ export default function MultiSiteSettings({
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const available = (site: Site) => !site.problem && !!site.met_file && !!site.start && !!site.end;
+  const unavailableReason = (site: Site) =>
+    site.problem ||
+    t(
+      '缺少强迫场或有效的覆盖时段，无法选择。',
+      'Forcing or coverage dates are missing; this site cannot be selected.',
+    );
+  const [filter, setFilter] = useState('');
+  const query = filter.trim().toLowerCase();
+  const shown = query ? sites.filter((site) => site.name.toLowerCase().includes(query)) : sites;
+  const availableCount = sites.filter(available).length;
+  const selectAllLabel = query
+    ? t('全选筛选出的站点', 'Select all filtered')
+    : t('全选可用站点', 'Select all available');
+  const coordinate = (value: number, positive: string, negative: string) =>
+    Number.isFinite(value)
+      ? `${Math.abs(value).toFixed(2)}°${value < 0 ? negative : positive}`
+      : '';
   const options = [
     {
       value: 'first-year',
@@ -59,13 +77,18 @@ export default function MultiSiteSettings({
         drafts.map((draft) => (draft.site === site ? { ...draft, [field]: value } : draft)),
       );
   }
+  // Selects every available site in view (all of them without a filter), keeping earlier picks.
   function selectAll() {
-    if (!disabled)
-      onDraftsChange(
-        sites
-          .filter(available)
-          .map((site) => drafts.find((draft) => draft.site === site.site_file) ?? siteDraft(site)),
-      );
+    if (disabled) return;
+    const picked = new Set([
+      ...drafts.map((draft) => draft.site),
+      ...shown.filter(available).map((site) => site.site_file),
+    ]);
+    onDraftsChange(
+      sites
+        .filter((site) => available(site) && picked.has(site.site_file))
+        .map((site) => drafts.find((draft) => draft.site === site.site_file) ?? siteDraft(site)),
+    );
   }
   function clear() {
     if (!disabled) onDraftsChange([]);
@@ -109,6 +132,17 @@ export default function MultiSiteSettings({
         if (!disabled && (value === 'first-year' || value === 'per-site')) onModeChange(value);
       },
     },
+    ...(sites.length > 8
+      ? [
+          {
+            id: 'multisite-filter',
+            label: t('筛选站点', 'Filter sites'),
+            type: 'text' as const,
+            value: filter,
+            set: setFilter,
+          },
+        ]
+      : []),
     ...(mode === 'first-year'
       ? [
           {
@@ -151,7 +185,7 @@ export default function MultiSiteSettings({
     actions: [
       {
         id: 'multisite-select-all',
-        label: t('全选可用站点', 'Select all available'),
+        label: selectAllLabel,
         kind: 'click',
         enabled: !disabled,
         run: selectAll,
@@ -167,40 +201,72 @@ export default function MultiSiteSettings({
   });
   return (
     <div className="page-stack">
-      <div className="button-row">
+      <div className="multisite-toolbar">
+        {sites.length > 8 && (
+          <Input
+            type="search"
+            className="multisite-filter"
+            aria-label={t('筛选站点', 'Filter sites')}
+            placeholder={t('按名称筛选站点', 'Filter sites by name')}
+            value={filter}
+            onChange={(event) => setFilter(event.target.value)}
+          />
+        )}
         <Button disabled={disabled} onClick={selectAll}>
-          {t('全选可用站点', 'Select all available')}
+          {selectAllLabel}
         </Button>
         <Button disabled={disabled} onClick={clear}>
           {t('清空选择', 'Clear selection')}
         </Button>
-        <span>
-          {t('已选站点：', 'Selected sites: ')}
-          {drafts.length}
+        <span className="multisite-count">
+          {t(
+            `已选 ${drafts.length} · 可用 ${availableCount} · 共 ${sites.length}`,
+            `${drafts.length} selected · ${availableCount} available · ${sites.length} total`,
+          )}
         </span>
       </div>
-      {sites.map((site) => (
-        <div key={site.site_file}>
-          <label>
-            <input
-              type="checkbox"
-              checked={drafts.some((draft) => draft.site === site.site_file)}
-              disabled={disabled || !available(site)}
-              onChange={(event) => select(site, event.target.checked)}
-            />{' '}
-            {site.name}
-          </label>
-          {!available(site) && (
-            <Notice tone="warning">
-              {site.problem ||
-                t(
-                  '缺少强迫场或有效的覆盖时段，无法选择。',
-                  'Forcing or coverage dates are missing; this site cannot be selected.',
+      <div className="multisite-grid" role="group" aria-label={t('站点', 'Sites')}>
+        {shown.map((site) => {
+          const checked = drafts.some((draft) => draft.site === site.site_file);
+          const ok = available(site);
+          return (
+            <label
+              key={site.site_file}
+              className={`multisite-site${checked ? ' selected' : ''}${ok ? '' : ' unavailable'}`}
+              title={ok ? site.name : unavailableReason(site)}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                disabled={disabled || !ok}
+                onChange={(event) => select(site, event.target.checked)}
+              />
+              <span className="multisite-site-body">
+                <span className="multisite-site-name">
+                  {site.name}
+                  {site.crop && <span className="multisite-tag">{t('作物', 'Crop')}</span>}
+                  {site.urban && <span className="multisite-tag">{t('城市', 'Urban')}</span>}
+                </span>
+                {ok ? (
+                  <>
+                    <span className="multisite-site-meta">{`${site.start} → ${site.end}`}</span>
+                    <span className="multisite-site-meta">
+                      {[coordinate(site.lat, 'N', 'S'), coordinate(site.lon, 'E', 'W')]
+                        .filter(Boolean)
+                        .join(' ')}
+                    </span>
+                  </>
+                ) : (
+                  <span className="multisite-site-problem">{unavailableReason(site)}</span>
                 )}
-            </Notice>
-          )}
-        </div>
-      ))}
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      {shown.length === 0 && (
+        <p className="muted">{t('没有名称匹配的站点。', 'No site name matches.')}</p>
+      )}
       <Field label={t('预热配置方式', 'Spinup configuration')}>
         <Select
           value={mode}
@@ -250,60 +316,65 @@ export default function MultiSiteSettings({
               {sites.find((site) => site.site_file === draft.site)?.name ?? draft.name}: {error}
             </Notice>
           ))}
-      {(mode === 'per-site' ? rows : []).map(({ draft, destination }) => (
-        <section className="card" key={draft.site}>
-          <h3>{sites.find((site) => site.site_file === draft.site)?.name ?? draft.name}</h3>
-          <div className="form-grid">
-            {(['name', 'start', 'end'] as const).map((field) => (
-              <Field key={field} label={labels[field]}>
-                {field === 'name' ? (
-                  <Input
-                    type="text"
-                    value={draft[field]}
-                    disabled={disabled}
-                    onChange={(event) => update(draft.site, field, event.target.value)}
-                  />
-                ) : (
-                  <DateInput
-                    calendarLabel={`${t('选择日期', 'Choose date')} · ${labels[field]}`}
-                    value={draft[field]}
-                    disabled={disabled}
-                    onChange={(event) => update(draft.site, field, event.target.value)}
-                  />
-                )}
-              </Field>
-            ))}
-            <Field label={labels.spinup_end}>
-              <DateInput
-                calendarLabel={`${t('选择日期', 'Choose date')} · ${labels.spinup_end}`}
-                value={draft.spinup_end}
-                disabled={disabled}
-                onChange={(event) => {
-                  update(draft.site, 'spinup_end', event.target.value);
-                }}
-              />
-            </Field>
-            {mode === 'per-site' && (
-              <Field label={labels.spinup_repeat}>
-                <Input
-                  type="number"
-                  min="1"
-                  max="2147483647"
-                  step="1"
-                  value={draft.spinup_repeat}
-                  disabled={disabled || !draft.spinup_end}
-                  onChange={(event) => update(draft.site, 'spinup_repeat', event.target.value)}
+      <div className="multisite-cards">
+        {(mode === 'per-site' ? rows : []).map(({ draft, destination }) => (
+          <section className="card multisite-card" key={draft.site}>
+            <h3>{sites.find((site) => site.site_file === draft.site)?.name ?? draft.name}</h3>
+            <div className="form-grid">
+              {(['name', 'start', 'end'] as const).map((field) => (
+                <Field key={field} label={labels[field]}>
+                  {field === 'name' ? (
+                    <Input
+                      type="text"
+                      value={draft[field]}
+                      disabled={disabled}
+                      onChange={(event) => update(draft.site, field, event.target.value)}
+                    />
+                  ) : (
+                    <DateInput
+                      calendarLabel={`${t('选择日期', 'Choose date')} · ${labels[field]}`}
+                      value={draft[field]}
+                      disabled={disabled}
+                      onChange={(event) => update(draft.site, field, event.target.value)}
+                    />
+                  )}
+                </Field>
+              ))}
+              <Field label={labels.spinup_end}>
+                <DateInput
+                  calendarLabel={`${t('选择日期', 'Choose date')} · ${labels.spinup_end}`}
+                  value={draft.spinup_end}
+                  disabled={disabled}
+                  onChange={(event) => {
+                    update(draft.site, 'spinup_end', event.target.value);
+                  }}
                 />
               </Field>
-            )}
-          </div>
-          <p className="path">
-            {t('保存位置：', 'Save to: ')}
-            {destination ||
-              t('请填写有效的项目目录与算例名称', 'Enter a valid project directory and case name')}
-          </p>
-        </section>
-      ))}
+              {mode === 'per-site' && (
+                <Field label={labels.spinup_repeat}>
+                  <Input
+                    type="number"
+                    min="1"
+                    max="2147483647"
+                    step="1"
+                    value={draft.spinup_repeat}
+                    disabled={disabled || !draft.spinup_end}
+                    onChange={(event) => update(draft.site, 'spinup_repeat', event.target.value)}
+                  />
+                </Field>
+              )}
+            </div>
+            <p className="path">
+              {t('保存位置：', 'Save to: ')}
+              {destination ||
+                t(
+                  '请填写有效的项目目录与算例名称',
+                  'Enter a valid project directory and case name',
+                )}
+            </p>
+          </section>
+        ))}
+      </div>
     </div>
   );
 }

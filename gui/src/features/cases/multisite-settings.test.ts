@@ -49,6 +49,8 @@ function screen() {
     },
   };
   let contract: PageContract;
+  const slots: unknown[] = [];
+  let cursor = 0;
   const text: string[] = [];
   const dateInputs: {
     value: string;
@@ -63,6 +65,16 @@ function screen() {
         text.push(...children.filter((child): child is string => typeof child === 'string'));
         return null;
       },
+    },
+    useState: (initial: unknown) => {
+      const key = cursor++;
+      if (!(key in slots)) slots[key] = initial;
+      return [
+        slots[key],
+        (value: unknown) => {
+          slots[key] = value;
+        },
+      ];
     },
     Button: () => {},
     Field: () => {},
@@ -87,6 +99,7 @@ function screen() {
     ...Object.values(context),
   );
   function render() {
+    cursor = 0;
     text.length = 0;
     dateInputs.length = 0;
     Page(props);
@@ -207,4 +220,35 @@ test('per-site date pickers update only their station and follow disabled state'
   page.props.mode = 'first-year';
   page.render();
   assert.equal(page.dateInputs.length, 0);
+});
+
+test('many sites can be filtered by name and select-all adds only the filtered available ones', () => {
+  const page = screen();
+  const base = page.props.sites[0];
+  page.props.sites = [
+    ...page.props.sites,
+    ...['US-Ha1', 'US-Var', 'AU-How', 'AU-Tum', 'DE-Hai', 'FR-Pue'].map((name) => ({
+      ...base,
+      name,
+      site_file: `/${name}.nc`,
+    })),
+    { ...base, name: 'US-Bad', site_file: '/US-Bad.nc', met_file: null },
+  ];
+  page.render();
+  assert.ok(page.text.some((value) => value.includes('0 selected · 8 available · 10 total')));
+  page.fill('multisite-select:/a.nc', 'true');
+  page.fill('multisite-filter', 'us-');
+  assert.equal(
+    page.contract().actions.find((action) => action.id === 'multisite-select-all')?.label,
+    'Select all filtered',
+  );
+  assert.ok(page.text.includes('US-Ha1'));
+  assert.ok(!page.text.includes('AU-How'));
+  page.click('multisite-select-all');
+  assert.deepEqual(
+    page.props.drafts.map((draft) => draft.name),
+    ['A', 'US-Ha1', 'US-Var'],
+  );
+  page.fill('multisite-filter', 'nothing');
+  assert.ok(page.text.some((value) => value.includes('No site name matches')));
 });

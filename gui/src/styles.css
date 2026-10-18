@@ -1647,3 +1647,242 @@ table input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.multisite-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.multisite-filter {
+  flex: 1 1 220px;
+  max-width: 320px;
+}
+.multisite-count {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.multisite-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px;
+  max-height: 420px;
+  overflow-y: auto;
+  padding: 2px;
+}
+.multisite-site {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  cursor: pointer;
+  transition:
+    border-color 0.12s,
+    background-color 0.12s;
+}
+.multisite-site:hover {
+  border-color: var(--accent);
+}
+.multisite-site.selected {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.multisite-site.unavailable {
+  cursor: not-allowed;
+  opacity: 0.6;
+  border-style: dashed;
+}
+.multisite-site.unavailable:hover {
+  border-color: var(--border);
+}
+.multisite-site input {
+  margin-top: 3px;
+  accent-color: var(--accent);
+}
+.multisite-site-body {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+.multisite-site-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.multisite-site-meta {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.multisite-site-problem {
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.35;
+}
+.multisite-tag {
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--elevated);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+.multisite-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 12px;
+}
+.multisite-card {
+  margin: 0;
+}
+.dialog-content.remote-browser {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(760px, 92vw);
+  overflow: hidden;
+}
+.remote-browser-bar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.remote-browser-address {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+}
+.remote-browser-crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  border-radius: var(--r-sm);
+  background: var(--elevated);
+  font-size: 13px;
+}
+.remote-browser-crumb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.remote-browser-crumb {
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+}
+.remote-browser-crumb:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.remote-browser-crumb.current {
+  padding: 1px 6px;
+  color: var(--foreground);
+  font-weight: 600;
+}
+.remote-browser-separator {
+  color: var(--muted);
+}
+.remote-browser-filter {
+  max-width: 280px;
+}
+.remote-browser-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 160px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+}
+.remote-browser-entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.remote-browser-entry:hover,
+.remote-browser-entry:focus-visible {
+  background: var(--accent-soft);
+}
+.remote-browser-entry.folder::after {
+  content: '›';
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 16px;
+}
+.remote-browser-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+}
+.remote-browser-entry.folder .remote-browser-icon {
+  fill: var(--accent);
+  opacity: 0.85;
+}
+.remote-browser-entry.file .remote-browser-icon {
+  fill: none;
+  stroke: var(--muted);
+  stroke-width: 1.4;
+  stroke-linejoin: round;
+}
+.remote-browser-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.remote-browser-empty {
+  margin: auto;
+  padding: 24px;
+  text-align: center;
+}
+.remote-browser-new-folder {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.remote-browser-new-folder .input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.remote-browser-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+.remote-browser-count {
+  color: var(--muted);
+  font-size: 13px;
+}
+.remote-browser-spacer {
+  flex: 1;
+}

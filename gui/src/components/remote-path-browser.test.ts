@@ -218,7 +218,7 @@ test('remote file browser loads, navigates folders and selects files', async () 
   await view.settle();
   view.click('site.nc');
   assert.deepEqual(view.selected, ['/data/site.nc']);
-  view.click('▸ sites/');
+  view.click('sites');
   assert.equal(view.requests[1].args.path, '/data/sites');
   assert.ok(!view.text().includes('site.nc'));
 });
