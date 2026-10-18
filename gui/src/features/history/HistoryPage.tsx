@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import type { HistoryOperation } from '../../lib/types';
+import type { CaseEntry, HistoryOperation } from '../../lib/types';
 import {
   Advanced,
   Button,
@@ -250,6 +250,21 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       setComparisonResult(null);
       setResult(null);
     }
+  }
+  // From a project's history straight to the project itself, on the page it was left on.
+  async function openProject(path: string) {
+    const cases = await invokeJson<CaseEntry[]>('list_cases', { root: path });
+    if (!navigate('project')) return;
+    update({
+      root: path,
+      cases,
+      projectCasesOpen: false,
+      projectView:
+        state.projectView?.root === path
+          ? { ...state.projectView, home: false }
+          : { root: path, page: 'cases' },
+      ...(path !== state.root ? { selectedCase: null } : {}),
+    });
   }
   function closeDetails() {
     setGroup(null);
@@ -641,6 +656,16 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       run: () => action(() => showItem(item)),
     })),
   ];
+  if (group?.project_group) {
+    const path = group.project_group.path;
+    guideActions.push({
+      id: 'history-open-project',
+      label: t('打开这个项目', 'Open this project'),
+      kind: 'click',
+      enabled: !busy,
+      run: () => action(() => openProject(path)),
+    });
+  }
   if (group?.run_group) {
     guideActions.push(
       ...group.run_group.members.map((member) => ({
@@ -1340,10 +1365,25 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   {t('← 返回项目时间线', '← Back to project timeline')}
                 </Button>
                 <span className="muted">{group.project_group.name}</span>
+                <Button
+                  disabled={busy}
+                  onClick={() => run(() => openProject(group.project_group!.path))}
+                >
+                  {t('打开这个项目', 'Open this project')}
+                </Button>
               </div>
             )}
             {group?.project_group && !detail && (
               <Card title={t('项目时间线', 'Project timeline')}>
+                <div className="button-row">
+                  <Button
+                    variant="primary"
+                    disabled={busy}
+                    onClick={() => run(() => openProject(group.project_group!.path))}
+                  >
+                    {t('打开这个项目', 'Open this project')}
+                  </Button>
+                </div>
                 <p className="muted">
                   {group.project_group.path} ·{' '}
                   {t(

@@ -541,4 +541,10 @@ test('a project card opens its timeline, batching stations, and a case opens its
   assert.equal(h.nodes().filter((n) => n.type === 'details').length, 0);
   h.click('← Back to project timeline');
   assert.equal(h.nodes().filter((n) => n.type === 'details').length, 2);
+  h.click('Open this project');
+  await h.settle();
+  const opened = h.requests.at(-1)!;
+  assert.equal(opened.command, 'list_cases');
+  assert.deepEqual(opened.args, { root: '/cache/222' });
+  assert.ok(h.guide().actions.some((action) => action.id === 'history-open-project'));
 });
