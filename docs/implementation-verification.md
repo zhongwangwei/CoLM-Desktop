@@ -33577,3 +33577,22 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    发送端不关闭、程序安静时，计时器仍会把积压的行发出。
 
 验证：gui/src-tauri 全部 390 个测试、clippy -D warnings、fmt。#6 的测试只在 unix 上运行。
+
+## 第 702 轮：外部审计 P2 五条（2026-10-18）
+
+1. **Windows 发布作业吞掉前端检查失败（#5）**：release.yml 的前端步骤没写 `shell: bash`，Windows 默认用 pwsh，前面的 npm ci、lint、test 失败不会中止，
+   只有最后的 `npm run build` 决定步骤成败。已补上 `shell: bash`，与 ci.yml 一致。同一作业里的 MS-MPI 步骤是 PowerShell，但自己检查了退出码，无需改动。
+2. **Windows open_path（#15）**：原来 `canonicalize` 之后得到 `\\?\` 形式的路径，再按 explorer.exe 的退出码判断成败（它打开成功也常返回非 0）。
+   现在传普通写法的路径（`\\?\UNC\server\…` 改为 `\\server\…`），能成功启动就算成功。路径转换是纯函数，在 macOS 上有单元测试；未在 Windows 实机验证。
+   cfg 分支写成 `let result = …` 语句形式，因为属性加在尾表达式上不稳定。
+3. **结果页在运行开始/结束时被清空（#11）**：`completedRunCase` 来自实时运行状态，又放在重置 effect 的依赖里。拆成两个 effect：
+   切换算例、版本或重试时仍完整重置；本算例跑完时只刷新运行列表并选中新结果，开始运行时不做任何改动。
+4. **远程批量运行中可以取消勾选站点（#7）**：远程任务原本不参与锁定（应是为了不让遗留的"待核对"记录永久锁住整个选择）。
+   现在只禁止取消勾选正在运行的站点（本机或远程），仍可以添加站点。
+5. **study-run 历史状态写死为 succeeded（#8）**：CLI 在 Study 暂停、部分失败、需复核时也以 0 退出，并在最后一条 `study_done` 里给出真实状态。
+   现在按这个状态记录；`paused` 和 `needs_review` 算作这次调用已确认结束（之后恢复会是新的操作），已加入 `confirmed_status` 和 SQL 白名单，历史页也有对应标签。
+
+过程中出了一次差错：P2-7 的提交命令只检查了 grep 的退出码，有一个测试失败时仍然提交了。已修正测试，并修订进同一个未推送的提交（ff833790）。
+之后改为看到 `fail 0` 才提交。
+
+验证：gui/src-tauri 392 个测试、colm-history 37 个测试、两个 workspace 的 clippy -D warnings 和 fmt；前端 667 个测试、tsc、eslint、prettier。
