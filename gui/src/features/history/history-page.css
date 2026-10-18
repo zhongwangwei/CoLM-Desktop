@@ -261,3 +261,9 @@
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
+.history-timeline-back {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}

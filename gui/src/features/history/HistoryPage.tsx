@@ -1334,7 +1334,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           }}
         >
           <div className="history-inspector" aria-label={t('记录详情', 'Record details')}>
-            {group?.project_group && (
+            {group?.project_group && detail && (
+              <div className="history-timeline-back">
+                <Button variant="ghost" disabled={busy} onClick={() => setDetail(null)}>
+                  {t('← 返回项目时间线', '← Back to project timeline')}
+                </Button>
+                <span className="muted">{group.project_group.name}</span>
+              </div>
+            )}
+            {group?.project_group && !detail && (
               <Card title={t('项目时间线', 'Project timeline')}>
                 <p className="muted">
                   {group.project_group.path} ·{' '}
@@ -1375,9 +1383,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                             >
                               <Button
                                 disabled={busy}
-                                aria-pressed={
-                                  detail?.operation.operation_id === member.operation_id
-                                }
                                 onClick={() => run(() => show(member.operation_id))}
                               >
                                 {historyObject(member, en)} ·{' '}

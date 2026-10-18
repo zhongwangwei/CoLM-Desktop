@@ -535,4 +535,10 @@ test('a project card opens its timeline, batching stations, and a case opens its
   h.click('AU-Cpr · Failed');
   assert.equal(h.requests[1].command, 'history_detail');
   assert.deepEqual(h.requests[1].args, { id: 'r2' });
+  h.requests[1].resolve({ operation: members[1], events: [], related: [] });
+  await h.settle();
+  // The record replaces the timeline, so it is never pushed below a long batch.
+  assert.equal(h.nodes().filter((n) => n.type === 'details').length, 0);
+  h.click('← Back to project timeline');
+  assert.equal(h.nodes().filter((n) => n.type === 'details').length, 2);
 });
