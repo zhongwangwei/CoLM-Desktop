@@ -1340,6 +1340,16 @@ export const commandContract = {
       "rust_type": "Option<colm_model::VersionRef>"
     }
   },
+  "remote_prepare_engine": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "modelRevision": {
+      "required": false,
+      "rust_type": "Option<colm_model::VersionRef>"
+    }
+  },
   "remote_create_case": {
     "host": {
       "required": true,

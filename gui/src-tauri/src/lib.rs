@@ -242,6 +242,7 @@ pub fn run() {
             remote_ssh_hosts,
             remote_probe,
             remote_scan_sites,
+            remote_prepare_engine,
             remote_create_case,
             remote_browse,
             remote_mkdir,

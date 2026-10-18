@@ -66,6 +66,7 @@ function page(
     create?: (args: Record<string, unknown>) => Promise<unknown>;
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     scan?: () => Promise<unknown>;
+    prepare?: (args: Record<string, unknown>) => Promise<unknown>;
     navigate?: (route: string) => boolean;
     listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
@@ -249,6 +250,8 @@ function page(
             root: '/bundled',
             runtimedir: '/bundled/runtime',
           };
+        case 'remote_prepare_engine':
+          return options.prepare ? options.prepare(args) : { ready: true };
         case 'remote_scan_sites':
         case 'scan_sites':
           return options.scan ? options.scan() : { sites: scannedSites };
@@ -2847,6 +2850,99 @@ test('server input pickers return selected paths and scan only the chosen server
   assert.ok(
     !p.calls.some((call) => call.command === 'scan_sites' || call.command === 'pick_folder'),
   );
+});
+
+const notices = (p: { elements: Element[] }) =>
+  p.elements
+    .filter((element) => element.type === 'Notice')
+    .map((element) => (element.children as unknown[]).flat(Infinity).join(''));
+
+test('choosing a server prepares its engine in the background and says when it is compiling', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let ready: (value: unknown) => void = () => {};
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '/server/sites' },
+      ownData: true,
+      sites: [site],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [runServer],
+      prepare: () => new Promise((resolve) => (ready = resolve)),
+      scan: () => new Promise(() => {}),
+    },
+  );
+  await p.mount();
+  const prepare = p.calls.filter((call) => call.command === 'remote_prepare_engine');
+  assert.equal(prepare.length, 1);
+  assert.equal(prepare[0].args.host, 'compute');
+  assert.deepEqual(prepare[0].args.modelRevision, p.state.versionRef);
+  assert.ok(notices(p).some((text) => text.includes('正在核对 compute 上的计算引擎')));
+
+  t.mock.timers.tick(5000);
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('正在后台上传源码并编译')));
+
+  void p.click('new-scan');
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('正在等 compute 上的计算引擎准备好')));
+  assert.ok(!notices(p).some((text) => text.includes('正在处理，请稍候')));
+
+  ready({ ready: true });
+  await p.settle();
+  assert.ok(!notices(p).some((text) => text.includes('计算引擎')));
+  assert.ok(notices(p).some((text) => text.includes('正在从 compute 读取站点与强迫场覆盖时段')));
+  await p.remount();
+  assert.equal(p.calls.filter((call) => call.command === 'remote_prepare_engine').length, 1);
+});
+
+test('a failed engine preparation is shown and reading sites names the server', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '/server/sites' },
+      ownData: true,
+      sites: [site],
+      step: 3,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [runServer],
+      prepare: async () => {
+        throw new Error('cargo is missing');
+      },
+      scan: () => new Promise(() => {}),
+    },
+  );
+  await p.mount();
+  assert.ok(
+    notices(p).some(
+      (text) => text.includes('准备 compute 上的计算引擎失败') && text.includes('cargo is missing'),
+    ),
+  );
+  void p.click('new-scan');
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('正在从 compute 读取站点与强迫场覆盖时段')));
+});
+
+test('local reading of sites says what it is doing', async () => {
+  const p = page(
+    'NewCasePage',
+    { form: { ...form, sitedir: '/sites' }, ownData: true, sites: [site], step: 3 },
+    [site],
+    initialValues,
+    { scan: () => new Promise(() => {}) },
+  );
+  await p.mount();
+  assert.ok(!p.calls.some((call) => call.command === 'remote_prepare_engine'));
+  void p.click('new-scan');
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('正在读取站点与强迫场覆盖时段')));
 });
 
 test('remote multi-site retries retain server identity and request atomic replay settings', async () => {

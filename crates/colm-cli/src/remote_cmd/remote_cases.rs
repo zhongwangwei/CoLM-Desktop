@@ -18,7 +18,10 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         crate::model_version::verify_code(opts, &frozen.code)?;
         prepared = frozen_source_options(opts, &frozen.code)?;
     }
-    let lock = if matches!(action, "create" | "scan") {
+    // `prepare` 只做 `create`/`scan` 前半段的引擎准备：界面选中服务器时就在后台跑，
+    // 软件更新后那次几分钟的服务器端编译不再压在"读取站点"或"创建算例"上。
+    let needs_engine = matches!(action, "create" | "scan" | "prepare");
+    let lock = if needs_engine {
         Some(colm_remote::engine_inventory::LifecycleLock::acquire(
             &ssh, &root,
         )?)
@@ -26,7 +29,7 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         None
     };
     let operation = || -> Result<serde_json::Value> {
-        let cli = if matches!(action, "create" | "scan") {
+        let cli = if needs_engine {
             let version = remote_version(&prepared)?;
             let engine = choose_engine(&prepared, &ssh, &root, version.as_ref())?;
             engine.upload(&ssh, &root)?;
@@ -42,6 +45,9 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         } else {
             String::new()
         };
+        if action == "prepare" {
+            return Ok(json!({"ready": true}));
+        }
         let payload = serde_json::to_string(&json!({"action":action,"request":request,"cli":cli}))?;
         let script = SCRIPT.replace(
             "payload = json.loads(sys.argv[1])",

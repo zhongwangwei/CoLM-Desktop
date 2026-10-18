@@ -445,6 +445,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-workspace" => remote_workspace_cmd::run(opts)?,
         "remote-probe" => remote_cmd::cmd_probe(opts)?,
         "remote-site-scan" => remote_cmd::remote_cases::cmd(opts, "scan")?,
+        "remote-engine-prepare" => remote_cmd::remote_cases::cmd(opts, "prepare")?,
         "remote-case-create" => remote_cmd::remote_cases::cmd(opts, "create")?,
         "remote-case-publish" => remote_cmd::remote_cases::cmd(opts, "publish")?,
         "remote-case-sync" => remote_cmd::remote_cases::cmd(opts, "sync")?,

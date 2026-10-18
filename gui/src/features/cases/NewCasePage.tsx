@@ -126,6 +126,11 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
   };
 }
 
+// Engines already confirmed on a server this session, keyed by host and model revision.
+// The engine only changes with the app's own source, so one confirmation per session is enough.
+const preparedEngines = new Set<string>();
+type EngineState = { host: string; phase: 'checking' | 'building' | 'failed'; error?: string };
+
 export default function NewCasePage() {
   const { state, update, openCase, navigate, notify } = useApp(),
     en = state.language === 'en',
@@ -294,6 +299,8 @@ export default function NewCasePage() {
     [hint, setHint] = useState(''),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
+    [busyTask, setBusyTask] = useState<'scan' | ''>(''),
+    [engine, setEngine] = useState<EngineState | null>(null),
     [creationDir, setCreationDir] = useState<string | null>(null),
     [cancellingCreation, setCancellingCreation] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
@@ -385,6 +392,39 @@ export default function NewCasePage() {
       alive.current = false;
     };
   }, [update]);
+  // Prepare the server engine as soon as a server is chosen. After an app update the server
+  // compiles a matching engine for a few minutes; doing it here keeps that wait off
+  // "Read sites" and case creation, which share the same server-side build lock.
+  const engineKey = form.host ? `${form.host}\n${JSON.stringify(state.versionRef ?? null)}` : '';
+  useEffect(() => {
+    if (!engineKey || preparedEngines.has(engineKey)) {
+      setEngine(null);
+      return;
+    }
+    const host = form.host;
+    let current = true;
+    setEngine({ host, phase: 'checking' });
+    // An engine that is already there answers in a few seconds; longer means upload and build.
+    const slow = setTimeout(() => {
+      if (current)
+        setEngine((old) => (old?.phase === 'checking' ? { host, phase: 'building' } : old));
+    }, 5000);
+    invoke('remote_prepare_engine', { host, modelRevision: state.versionRef })
+      .then(() => {
+        preparedEngines.add(engineKey);
+        if (current) setEngine(null);
+      })
+      .catch((e) => {
+        if (current) setEngine({ host, phase: 'failed', error: String(e) });
+      })
+      .finally(() => clearTimeout(slow));
+    return () => {
+      current = false;
+      clearTimeout(slow);
+    };
+    // engineKey already encodes form.host and state.versionRef.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [engineKey]);
   useEffect(() => {
     let current = true;
     setSchemaReady(false);
@@ -659,9 +699,10 @@ export default function NewCasePage() {
     if (name === 'DEF_simulation_time%timestep')
       setForm((old) => ({ ...old, timestep: value || '1800' }));
   }
-  async function work<T>(fn: () => Promise<T>) {
+  async function work<T>(fn: () => Promise<T>, task: 'scan' | '' = '') {
     if (lock.current) throw new Error(t('请等待当前操作。', 'Wait for the current operation.'));
     lock.current = true;
+    setBusyTask(task);
     setBusy(true);
     setError('');
     try {
@@ -673,6 +714,19 @@ export default function NewCasePage() {
       lock.current = false;
       if (alive.current) setBusy(false);
     }
+  }
+  function scanLabel() {
+    if (!form.host)
+      return t('正在读取站点与强迫场覆盖时段…', 'Reading sites and forcing coverage…');
+    return engine && engine.phase !== 'failed'
+      ? t(
+          `正在等 ${form.host} 上的计算引擎准备好，之后读取站点与强迫场覆盖时段…`,
+          `Waiting for the engine on ${form.host}, then reading sites and forcing coverage…`,
+        )
+      : t(
+          `正在从 ${form.host} 读取站点与强迫场覆盖时段…`,
+          `Reading sites and forcing coverage on ${form.host}…`,
+        );
   }
   async function scan(dir = form.sitedir, forcingDir = form.forcingdir) {
     const id = ++sequence.current;
@@ -1880,7 +1934,7 @@ export default function NewCasePage() {
                   label: t('读取站点与覆盖时段', 'Read sites and coverage'),
                   kind: 'click' as const,
                   enabled: enabled && !!form.sitedir,
-                  run: () => work(() => scan()),
+                  run: () => work(() => scan(), 'scan'),
                 },
               ]
             : []),
@@ -2098,6 +2152,24 @@ export default function NewCasePage() {
         <Notice tone="warning">{autoClosed.text}</Notice>
       )}
       {optionError && <Notice tone="warning">{optionError}</Notice>}
+      {engine?.host === form.host && engine.phase !== 'failed' && (
+        <Notice>
+          {engine.phase === 'checking'
+            ? t(`正在核对 ${engine.host} 上的计算引擎…`, `Checking the engine on ${engine.host}…`)
+            : t(
+                `${engine.host} 上还没有与当前版本一致的计算引擎，正在后台上传源码并编译；软件更新后第一次使用需要几分钟。可以先继续填写，读取站点和创建算例会等它完成。`,
+                `${engine.host} has no engine matching this version yet; uploading the source and compiling it in the background. The first use after an app update takes a few minutes. Keep filling in the form; reading sites and creating the case wait for it.`,
+              )}
+        </Notice>
+      )}
+      {engine?.host === form.host && engine.phase === 'failed' && (
+        <Notice tone="warning">
+          {t(
+            `准备 ${engine.host} 上的计算引擎失败：${engine.error}。读取站点或创建算例时会再试一次。`,
+            `Preparing the engine on ${engine.host} failed: ${engine.error}. Reading sites or creating the case tries again.`,
+          )}
+        </Notice>
+      )}
       {busy && (
         <Notice>
           {cancellingCreation
@@ -2107,7 +2179,9 @@ export default function NewCasePage() {
                   `正在 ${form.host} 上创建算例…首次在该服务器创建、或软件更新后，需要先在服务器上编译计算引擎，可能要几分钟。`,
                   `Creating the case on ${form.host}… The first creation on a server, or the first after an app update, compiles the engine there first and can take several minutes.`,
                 )
-              : t('正在处理，请稍候…', 'Working, please wait…')}
+              : busyTask === 'scan'
+                ? scanLabel()
+                : t('正在处理，请稍候…', 'Working, please wait…')}
         </Notice>
       )}
       {remotePicker && (
@@ -2321,7 +2395,7 @@ export default function NewCasePage() {
                   <div className="form-grid">{['sitedir', 'forcingdir'].map(render)}</div>
                   <Button
                     disabled={!enabled || !form.sitedir}
-                    onClick={() => void work(() => scan()).catch(() => {})}
+                    onClick={() => void work(() => scan(), 'scan').catch(() => {})}
                   >
                     {t('读取站点与覆盖时段', 'Read sites and coverage')}
                   </Button>

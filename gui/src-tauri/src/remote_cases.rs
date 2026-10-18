@@ -69,6 +69,25 @@ pub async fn remote_scan_sites(
     .await
 }
 
+/// 选中服务器时在后台把与当前版本一致的计算引擎准备好（缺了就上传源码并编译）。
+/// 与 `remote_scan_sites`/`remote_create_case` 走同一条引擎路径，服务器端由编译锁去重。
+#[tauri::command]
+pub async fn remote_prepare_engine(
+    app: tauri::AppHandle,
+    host: String,
+    model_revision: Option<colm_model::VersionRef>,
+) -> Result<Value, String> {
+    let server = crate::remote::server_for(app.clone(), &host)?;
+    command(
+        &app,
+        &server,
+        "remote-engine-prepare",
+        &json!({}),
+        model_revision.as_ref(),
+    )
+    .await
+}
+
 fn text(request: &Value, key: &str) -> Option<String> {
     request.get(key).and_then(Value::as_str).map(str::to_owned)
 }
