@@ -300,7 +300,7 @@ export default function NewCasePage() {
     [hint, setHint] = useState(''),
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
-    [busyTask, setBusyTask] = useState<'scan' | ''>(''),
+    [scanning, setScanning] = useState(false),
     [engine, setEngine] = useState<EngineState | null>(null),
     [creationDir, setCreationDir] = useState<string | null>(null),
     [batchProgress, setBatchProgress] = useState<{
@@ -389,6 +389,7 @@ export default function NewCasePage() {
       !form.sitedir ||
       form.sitedir !== autoFilled.current.sitedir ||
       sites.length ||
+      scanning ||
       busy ||
       state.busy
     )
@@ -407,6 +408,7 @@ export default function NewCasePage() {
     form.sitedir,
     form.forcingdir,
     sites.length,
+    scanning,
     busy,
     state.busy,
   ]);
@@ -676,6 +678,8 @@ export default function NewCasePage() {
     }
     if (k === 'host' && v !== form.host) {
       ++sequence.current;
+      ++scanToken.current;
+      setScanning(false);
       exampleValues.current = {};
       setSites([]);
       setSiteDrafts([]);
@@ -805,10 +809,9 @@ export default function NewCasePage() {
     if (name === 'DEF_simulation_time%timestep')
       setForm((old) => ({ ...old, timestep: value || '1800' }));
   }
-  async function work<T>(fn: () => Promise<T>, task: 'scan' | '' = '') {
+  async function work<T>(fn: () => Promise<T>) {
     if (lock.current) throw new Error(t('请等待当前操作。', 'Wait for the current operation.'));
     lock.current = true;
-    setBusyTask(task);
     setBusy(true);
     setError('');
     try {
@@ -835,15 +838,37 @@ export default function NewCasePage() {
         );
   }
   // The user's own site folders: a scan that finds sites remembers them for this resource.
+  // Reading does not lock the page: a server read can wait minutes for an engine build, and the
+  // rest of the form stays usable meanwhile. Stopping only stops waiting for the answer.
+  const scanToken = useRef(0);
   function readSites() {
+    if (scanning)
+      return Promise.reject(
+        new Error(t('正在读取站点，请稍候或先停止。', 'Sites are being read; wait or stop first.')),
+      );
     const dir = form.sitedir,
-      forcingDir = form.forcingdir;
-    return work(async () => {
-      const result = await scan(dir, forcingDir);
-      if (result.sites.length)
-        void rememberKindPaths('site', { sitedir: dir, forcingdir: forcingDir });
-      return result;
-    }, 'scan');
+      forcingDir = form.forcingdir,
+      token = ++scanToken.current;
+    setScanning(true);
+    setError('');
+    return scan(dir, forcingDir)
+      .then((result) => {
+        if (result.sites.length && scanToken.current === token)
+          void rememberKindPaths('site', { sitedir: dir, forcingdir: forcingDir });
+        return result;
+      })
+      .catch((e) => {
+        if (alive.current && scanToken.current === token) setError(String(e));
+        throw e;
+      })
+      .finally(() => {
+        if (alive.current && scanToken.current === token) setScanning(false);
+      });
+  }
+  function stopReading() {
+    ++scanToken.current;
+    ++sequence.current;
+    setScanning(false);
   }
   async function scan(dir = form.sitedir, forcingDir = form.forcingdir) {
     const id = ++sequence.current;
@@ -2161,11 +2186,23 @@ export default function NewCasePage() {
             ? [
                 {
                   id: 'new-scan',
-                  label: t('读取站点与覆盖时段', 'Read sites and coverage'),
+                  label: scanning
+                    ? t('正在读取站点…', 'Reading sites…')
+                    : t('读取站点与覆盖时段', 'Read sites and coverage'),
                   kind: 'click' as const,
-                  enabled: enabled && !!form.sitedir,
+                  enabled: enabled && !!form.sitedir && !scanning,
                   run: () => readSites(),
                 },
+                ...(scanning
+                  ? [
+                      {
+                        id: 'new-scan-stop',
+                        label: t('停止读取', 'Stop reading'),
+                        kind: 'click' as const,
+                        run: stopReading,
+                      },
+                    ]
+                  : []),
               ]
             : []),
           ...(!multiSite ? sites : []).map((s) => ({
@@ -2184,7 +2221,7 @@ export default function NewCasePage() {
     step: 'new-case',
     fields,
     actions,
-    status: busy ? 'busy' : error || 'ready',
+    status: busy ? 'busy' : scanning ? 'reading' : error || 'ready',
     details: {
       step,
       model: state.versionRef,
@@ -2411,9 +2448,15 @@ export default function NewCasePage() {
                     `正在 ${form.host} 上创建算例…首次在该服务器创建、或软件更新后，需要先在服务器上编译计算引擎，可能要几分钟。`,
                     `Creating the case on ${form.host}… The first creation on a server, or the first after an app update, compiles the engine there first and can take several minutes.`,
                   )
-                : busyTask === 'scan'
-                  ? scanLabel()
-                  : t('正在处理，请稍候…', 'Working, please wait…')}
+                : t('正在处理，请稍候…', 'Working, please wait…')}
+        </Notice>
+      )}
+      {scanning && (
+        <Notice>
+          {scanLabel()}{' '}
+          <Button variant="ghost" onClick={stopReading}>
+            {t('停止读取', 'Stop reading')}
+          </Button>
         </Notice>
       )}
       {remotePicker && (
@@ -2626,10 +2669,12 @@ export default function NewCasePage() {
                 <div className="simulation-own-data">
                   <div className="form-grid">{['sitedir', 'forcingdir'].map(render)}</div>
                   <Button
-                    disabled={!enabled || !form.sitedir}
+                    disabled={!enabled || !form.sitedir || scanning}
                     onClick={() => void readSites().catch(() => {})}
                   >
-                    {t('读取站点与覆盖时段', 'Read sites and coverage')}
+                    {scanning
+                      ? t('正在读取站点…', 'Reading sites…')
+                      : t('读取站点与覆盖时段', 'Read sites and coverage')}
                   </Button>
                 </div>
               )}

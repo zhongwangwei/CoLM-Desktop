@@ -1897,13 +1897,53 @@ test('site scanning never offers the creation cancellation action', async () => 
   await p.mount();
   const pending = p.click('new-scan');
   const c = p.render();
-  assert.equal(c.status, 'busy');
+  assert.equal(c.status, 'reading');
   assert.ok(!c.actions.some((a) => a.id === 'new-cancel-creation'));
   assert.ok(!p.elements.some((e) => e.type === 'Button' && e.children.includes('取消创建')));
   finish({ sites: [site] });
   await pending;
   assert.ok(!p.calls.some((call) => call.command === 'case_creation_cancel'));
 });
+test('reading sites leaves the page usable and can be stopped without applying a late answer', async () => {
+  let finish!: (value: unknown) => void;
+  const other = { ...site, name: 'US-Ha1', site_file: '/US-Ha1.nc' };
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'compute', sitedir: '/server/sites' },
+      sites: [site],
+      step: 3,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [runServer],
+      scan: () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    },
+  );
+  await p.mount();
+  assert.ok(p.render().actions.some((a) => a.id === `new-select-${site.name}`));
+  void p.click('new-scan').catch(() => {});
+  let c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-scan')?.enabled, false);
+  assert.ok(c.actions.some((a) => a.id === 'new-scan-stop'));
+  assert.notEqual(c.actions.find((a) => a.id === 'new-pick-sitedir')?.enabled, false);
+  await p.click('new-scan-stop');
+  c = p.render();
+  assert.ok(!c.actions.some((a) => a.id === 'new-scan-stop'));
+  assert.notEqual(c.actions.find((a) => a.id === 'new-scan')?.enabled, false);
+  finish({ sites: [other] });
+  await p.settle();
+  c = p.render();
+  assert.ok(!c.actions.some((a) => a.id === 'new-select-US-Ha1'), 'a stopped read is ignored');
+  assert.ok(c.actions.some((a) => a.id === `new-select-${site.name}`));
+});
+
 test('spatial creation cancellation targets its own output directory', async () => {
   let finish!: (error: Error) => void;
   const p = page(

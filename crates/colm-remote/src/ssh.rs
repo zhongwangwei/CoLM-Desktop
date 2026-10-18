@@ -57,7 +57,10 @@ impl Ssh {
         crate::auth::check_host(&self.host)?;
         let mut command = Command::new("ssh");
         crate::auth::configure(&mut command)?;
-        command.args(["-o", "ConnectTimeout=20", "-o", "ServerAliveInterval=30"]);
+        // 60 s, not 20: a chain of jump hosts can need most of a minute just to connect
+        // (2026-10-18, tms17l via macpro-ts and land: the Tailscale hop alone took 21.7 s and the
+        // whole chain failed with "Connection timed out during banner exchange").
+        command.args(["-o", "ConnectTimeout=60", "-o", "ServerAliveInterval=30"]);
         if cfg!(unix) {
             command.args([
                 "-o",
