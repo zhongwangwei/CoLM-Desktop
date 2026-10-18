@@ -28,6 +28,7 @@ pub struct RunOptions<'a> {
 
 pub(crate) struct StudyRunLock {
     path: PathBuf,
+    identity: ProcessIdentity,
     stop: mpsc::Sender<()>,
     heartbeat: Option<std::thread::JoinHandle<()>>,
 }
@@ -65,6 +66,7 @@ impl StudyRunLock {
             return Err(error);
         }
         let heartbeat_path = path.clone();
+        let owner = identity.clone();
         let (stop, stopped) = mpsc::channel();
         // ponytail: MSRV 1.85 has no portable std file lock; this short lease
         // prevents confirmed crash recovery from deleting a live scheduler lock.
@@ -74,17 +76,20 @@ impl StudyRunLock {
                 stopped.recv_timeout(std::time::Duration::from_secs(RUN_LOCK_HEARTBEAT_SECONDS)),
                 Err(mpsc::RecvTimeoutError::Timeout)
             ) {
-                identity.heartbeat_unix = unix_now();
-                let Ok(bytes) = serde_json::to_vec(&identity) else {
+                // A lock that now names another scheduler (ours was judged stale and
+                // cleared) is not ours to refresh.
+                if !owns_run_lock(&heartbeat_path, &identity) {
                     break;
-                };
-                if fs::write(&heartbeat_path, bytes).is_err() {
+                }
+                identity.heartbeat_unix = unix_now();
+                if replace_run_lock(&heartbeat_path, &identity).is_err() {
                     break;
                 }
             }
         });
         Ok(Self {
             path,
+            identity: owner,
             stop,
             heartbeat: Some(heartbeat),
         })
@@ -97,8 +102,31 @@ impl Drop for StudyRunLock {
         if let Some(heartbeat) = self.heartbeat.take() {
             let _ = heartbeat.join();
         }
-        let _ = fs::remove_file(&self.path);
+        // Remove only our own lock, never one a replacement scheduler created after ours.
+        if owns_run_lock(&self.path, &self.identity) {
+            let _ = fs::remove_file(&self.path);
+        }
     }
+}
+
+fn owns_run_lock(path: &Path, identity: &ProcessIdentity) -> bool {
+    run_lock_owner(path).ok().flatten().is_some_and(|owner| {
+        owner.pid == identity.pid
+            && owner.started_unix == identity.started_unix
+            && owner.argv_sha256 == identity.argv_sha256
+    })
+}
+
+/// Rewrite the lease through a sibling file and a rename, so readers never see half a record.
+fn replace_run_lock(path: &Path, identity: &ProcessIdentity) -> Result<()> {
+    let staged = path.with_extension(format!("lock.{}", std::process::id()));
+    let mut file = fs::File::create(&staged)?;
+    write_run_lock_identity(&staged, &mut file, identity)?;
+    drop(file);
+    fs::rename(&staged, path).inspect_err(|_| {
+        let _ = fs::remove_file(&staged);
+    })?;
+    Ok(())
 }
 
 fn write_run_lock_identity(
@@ -4936,6 +4964,40 @@ mod tests {
             "status must not write a checkpoint while the scheduler process lives"
         );
         assert!(clear_stale_run_lock(&dir).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_replaced_run_lock_is_neither_refreshed_nor_removed_by_its_old_owner() {
+        let dir = std::env::temp_dir().join(format!(
+            "colm-study-lock-owner-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = StudyRunLock::acquire(&dir).unwrap();
+        let path = dir.join("run.lock");
+        assert!(owns_run_lock(&path, &lock.identity));
+        replace_run_lock(&path, &lock.identity).unwrap();
+        assert!(
+            owns_run_lock(&path, &lock.identity),
+            "atomic rewrite keeps a valid record"
+        );
+        // A replacement scheduler takes over after ours was judged stale.
+        let mut successor = lock.identity.clone();
+        successor.pid = lock.identity.pid.wrapping_add(1);
+        successor.started_unix += 1;
+        std::fs::write(&path, serde_json::to_vec(&successor).unwrap()).unwrap();
+        drop(lock);
+        assert!(
+            path.is_file(),
+            "the old owner left the successor's lock alone"
+        );
+        let owner = run_lock_owner(&path).unwrap().unwrap();
+        assert_eq!(owner.pid, successor.pid);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
