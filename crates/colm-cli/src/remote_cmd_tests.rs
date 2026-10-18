@@ -1760,3 +1760,39 @@ fn partial_fetch_publication_rolls_back_instead_of_mixing_history() {
     );
     std::fs::remove_dir_all(root).unwrap();
 }
+
+/// CentOS 8 (the 摆渡船 login node) answers `python3` with 3.6: no `text=` or `capture_output=` in
+/// `subprocess.run`, no `date.fromisoformat`. Scripts that run on a server must avoid them.
+#[test]
+fn server_side_python_runs_on_python_3_6() {
+    for (name, source) in [
+        (
+            "remote_cases.py",
+            include_str!("remote_cmd/remote_cases.py"),
+        ),
+        (
+            "remote_cases_batch.py",
+            include_str!("remote_cmd/remote_cases_batch.py"),
+        ),
+        ("forcing_directory.rs", include_str!("forcing_directory.rs")),
+        ("remote_files.rs", include_str!("remote_files.rs")),
+        (
+            "remote_workspace_cmd.rs",
+            include_str!("remote_workspace_cmd.rs"),
+        ),
+        ("history_cleanup.rs", include_str!("history_cleanup.rs")),
+    ] {
+        for forbidden in [
+            "text=True",
+            "capture_output",
+            "fromisoformat",
+            "missing_ok",
+            "dirs_exist_ok",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{name} uses {forbidden}, which Python 3.6 does not have"
+            );
+        }
+    }
+}

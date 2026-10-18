@@ -144,7 +144,7 @@ except FileNotFoundError:
     pass
 for _, cli in sorted(engines, reverse=True)[:3]:
     try:
-        result = subprocess.run([cli, 'forcing-directory-probe', '--path', path, '--dataset', dataset], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        result = subprocess.run([cli, 'forcing-directory-probe', '--path', path, '--dataset', dataset], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=20)
         if result.returncode:
             detail = result.stderr.strip() or result.stdout.strip()
             if 'unknown command' in detail.lower() and 'forcing-directory-probe' in detail:

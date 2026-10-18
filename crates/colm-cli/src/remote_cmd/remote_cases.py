@@ -5,8 +5,16 @@ r = payload['request']
 action = payload['action']
 cli = payload['cli']
 
+def forget(path):
+    # Path.unlink's flag for a missing file needs Python 3.8; CentOS 8's python3 is 3.6.
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
 def call(args):
-    p = subprocess.run([cli] + [str(x) for x in args], text=True, capture_output=True)
+    # CentOS 8's python3 is 3.6: subprocess.run takes universal_newlines and explicit pipes.
+    p = subprocess.run([cli] + [str(x) for x in args], universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if p.returncode:
         raise RuntimeError(p.stderr.strip() or p.stdout.strip() or 'server case command failed')
     return p.stdout
@@ -50,7 +58,7 @@ def remove_owned(lock):
     # remove everything else under the lock, then release the marker before deleting it.
     clear_children()
     lock.close()
-    marker.unlink(missing_ok=True)
+    forget(marker)
     out.rmdir()
 
 def empty_leftover():
@@ -124,7 +132,7 @@ if action in ('publish', 'abort', 'sync'):
             for target, backup in reversed(applied):
                 try:
                     if backup is None:
-                        target.unlink(missing_ok=True)
+                        forget(target)
                     else:
                         os.replace(backup, target)
                 except BaseException as rollback:
@@ -135,9 +143,9 @@ if action in ('publish', 'abort', 'sync'):
             raise
         finally:
             for temporary, target, backup in staged:
-                temporary.unlink(missing_ok=True)
+                forget(temporary)
                 if backup is not None and not preserve_backups:
-                    backup.unlink(missing_ok=True)
+                    forget(backup)
         if action == 'publish':
             (out / '.colm-desktop-server.json').write_text(json.dumps({'schema': 1, 'remote_directory': str(out)}))
             marker.unlink()
@@ -292,7 +300,7 @@ except BaseException:
     try:
         if adopted:
             lock.close()
-            marker.unlink(missing_ok=True)
+            forget(marker)
         else:
             remove_owned(lock)
     except OSError as cleanup:

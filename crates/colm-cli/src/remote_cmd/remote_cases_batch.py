@@ -15,7 +15,7 @@ def failure(stderr, code):
 
 def run(job):
     try:
-        done = subprocess.run([sys.executable, '-c', SCRIPT, job], capture_output=True, text=True)
+        done = subprocess.run([sys.executable, '-c', SCRIPT, job], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     except Exception as error:
         return {'error': str(error)}
     if done.returncode == 0:

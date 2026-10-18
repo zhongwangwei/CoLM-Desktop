@@ -33926,3 +33926,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    测试：colm-remote 79 条（新增 `a_system_cmake_older_than_3_26_is_replaced_by_our_own`、`a_system_cmake_too_old_for_hdf5_is_not_a_usable_build_tool`，并把原有 cmake 桩改成会输出版本）；clippy 干净。
 4. **bd 上源码构建的另一个坑（因人而异，不在应用里改）**：用户的 `~/.gitconfig` 在 bd 上写着 `http.proxy = http://127.0.0.1:18088`（111/113 的 SSH 反向转发），bd 没有这条转发，cargo 又会读 git 的代理，下载依赖失败。mgt01 本身能直连 crates.io。只在 `~/.cargo/config.toml` 加了 `[http] proxy = ""`（只影响 cargo）。另外 bd 到 GitHub release 的下载很慢（cmake 安装包拉不下来）。
 5. **改走预编引擎**：应用已有预编引擎机制（`scripts/build-engine-linux.sh`，zig 钉 glibc 2.17，netCDF/HDF5 静态链接，服务器上不需要 Rust/cmake/联网）。快照 id 随源码变化，所以为当前源码在 tms17l（有 Rust、能联网）上跑 `colm-cli remote-dist --targets x86_64`，取回到本机缓存，再由 `remote-engine-prepare` 传到 bd。
+6. **改用 bd 上用户自己的 conda cmake，不走预编**：用户指出预编路线不合理并提示 conda。`bd` 上 `/share/home/dq013/miniconda3-3.12/bin/cmake` 是 3.31.5（系统 3.11.4）；Rust 1.97.1 已由应用装在 `~/.cargo`。应用的构建 PATH 优先找 `~/.local/share/colm/toolchain/cmake/bin/cmake`，所以在那里放了一个指向 conda cmake 的符号链接（只影响该用户，可随时删除）。探测随即变为 `cmake=true`、`build_problems=[]`，在 bd 上源码构建引擎 551 秒完成（`ready: true`）。tms17l 上的预编任务自己失败了（构建脚本报错），未再追究。
+7. **通用缺陷 2：服务器端 Python 脚本要兼容 3.6**。bd 的 `python3` 是 3.6.8，读站点/创建算例时脚本因 `subprocess.run(text=True)`、`capture_output=True`、`Path.unlink(missing_ok=True)`（3.7/3.8 才有）失败。改为 `universal_newlines=True` + 显式 PIPE、自带 `forget()`（`remote_cases.py`、`remote_cases_batch.py`、`forcing_directory.rs`），并新增测试 `server_side_python_runs_on_python_3_6`，禁止这些写法进入服务器端脚本（含 `fromisoformat`、`dirs_exist_ok`）。两个 `.py` 在 bd 的 3.6.8 上解析通过；colm-cli 97 条远程相关测试与 15 条 Python 测试通过，clippy 干净。
+8. **bd 端到端实测（LSF）**：
+   - 探测：`schedulers=["lsf"]`、`queues=["normal","gpu"]`、cmake 3.31.5、cargo 1.97.1。
+   - 读站点：`/share/home/dq013/zhwei/colm/data/CoLM_Forcing/PLUMBER2s`，90 个站点，40 秒。
+   - 创建：服务器批量创建 `lsf-test/AT-Neu`（rust 引擎，2002-01-01 → 2003-01-01）。
+   - 提交：`remote_run`，`scheduler=lsf`，4 线程；生成的脚本头是 `#BSUB -J colm_AT-Neu`、`-oo …/log`、`-n 4`、`-R "span[hosts=1]"`、`-q normal`；作业号 232718，提交时已在 RUN（没有排队）。
+   - 结果：LSF 状态 DONE，`node085`，27 秒；`remote_status` → `finished`、`exit_code 0`、17568 步、13 个历史文件；`remote_fetch` 取回 `out/AT-Neu/history`、`mksrfdata.log`、`mkinidata.log`、`colm.log`，`partial=false`。
+   - 配置（用户的 `remote.json`，备份为 `remote.json.bak-20261019-bd`）：bd 的 `scheduler=lsf`、`partition=normal`、`threads=8`，rawdata / runtime / 站点 / 强迫场路径指向用户自己的数据目录；这些路径因人而异，应用代码里没有写死任何用户名。
+   - 因人而异的环境处理（不属于应用）：bd 的 `~/.gitconfig` 里有指向 `127.0.0.1:18088` 的代理，已在 `~/.cargo/config.toml` 对 cargo 关闭代理；cmake 的符号链接见第 6 条。
+9. **还没做**：`env_script`（服务器配置里的 `module load` / PATH）目前只写进运行作业，不作用于"准备引擎"。若也让它作用于引擎构建，用户只需在服务器配置里填一次 `export PATH=…`（或 `module load`），不必在服务器上手工放符号链接，其他用户也能照着同样填。
