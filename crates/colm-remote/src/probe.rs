@@ -9,7 +9,7 @@ use crate::ssh::{quote, Ssh};
 
 // Non-interactive SSH does not reliably load the user's toolchain PATH.
 pub(crate) const BUILD_PATH_PRELUDE: &str =
-    "export PATH=\"$PATH:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin:$HOME/.local/share/colm/toolchain/cmake/bin\"\n";
+    "export PATH=\"$HOME/.local/share/colm/toolchain/cmake/bin:$PATH:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin\"\n";
 
 /// 探测结果。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
@@ -61,7 +61,7 @@ C=$(command -v cargo || ls "$HOME/.cargo/bin/cargo" 2>/dev/null)
 echo "cargo=$([ -n "$C" ] && rustc --version >/dev/null 2>&1 && "$C" --version 2>/dev/null)"
 echo "gfortran=$(gfortran --version 2>/dev/null | head -1)"
 echo "mpi=$( (command -v mpif90 || command -v mpiifort || command -v mpiifx) 2>/dev/null | head -1)"
-echo "cmake=$(cmake --version >/dev/null 2>&1 && command -v cmake)"
+echo "cmake=$(colm_cmake_ok && command -v cmake)"
 echo "cc=$( (command -v cc || command -v gcc) 2>/dev/null | head -1)"
 echo "slurm=$(command -v sbatch)"
 PBS=""; QSUB=$(command -v qsub); QSUB_UNVERIFIED=""
@@ -158,9 +158,10 @@ pub fn parse(root: &str, text: &str) -> Probe {
             .push("cargo (Rust) is not installed; source builds need Rust/Cargo".into());
     }
     if !probe.cmake || !probe.cc {
-        probe
-            .build_problems
-            .push("cmake and a C compiler are needed to build netCDF/HDF5 into the engine".into());
+        probe.build_problems.push(
+            "CMake 3.26 or newer and a C compiler are needed to build netCDF/HDF5 into the engine"
+                .into(),
+        );
     }
     if !root.is_empty() && !probe.root_writable {
         probe.problems.push(format!(

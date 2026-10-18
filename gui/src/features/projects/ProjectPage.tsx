@@ -242,10 +242,22 @@ export default function ProjectPage() {
     if (state.selectedCase) return navigate('case', 'results');
     setChooser('results');
   }
+  // Choosing a new simulation leaves the project worked on until now: the sidebar's current
+  // project becomes the new one once it is created, not the old one meanwhile.
   const newSimulation = () => {
-    update({ newCaseSeed: null });
-    return navigate('new-case');
+    if (!navigate('new-case')) return false;
+    update({
+      newCaseSeed: null,
+      root: '',
+      cases: [],
+      selectedCase: null,
+      projectView: undefined,
+      projectCasesOpen: false,
+    });
+    return true;
   };
+  // Opening a project means choosing from what was already done, so it goes to the history.
+  const openProjectFromHistory = () => navigate('history');
   const example = () =>
     work(async () => {
       const paths = await invoke<{
@@ -310,7 +322,7 @@ export default function ProjectPage() {
       label: t('打开项目', 'Open project'),
       kind: 'click',
       enabled: enabled && ready,
-      run: browseProject,
+      run: openProjectFromHistory,
     },
     {
       id: 'project-view-results',
@@ -789,7 +801,7 @@ export default function ProjectPage() {
             className="project-action"
             variant="ghost"
             disabled={!enabled || !ready}
-            onClick={() => void browseProject().catch(() => {})}
+            onClick={() => void openProjectFromHistory()}
           >
             <span className="project-action-icon">
               <NavIcon name="project" />

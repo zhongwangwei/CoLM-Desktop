@@ -33912,3 +33912,17 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - 向导的种子留在后面（`step: 4`），批量运行页的"上一步"在有种子时回到向导，前面各步都已填好；没有种子（刚创建完）时仍回算例列表。
    - 删掉向导第 5 步的上次结果卡片、种子里的 `previousResults`、`projectPreviousResults`/`previousStatusLabel`。
    - e2e 实测（项目 333）：无"调整运行站点"，"运行中 0 · 等待 0 · 完成 90 · 失败 0 · 已停止 0 · 待核对 0 · 已结束的站点（90）"，按钮"上一步 / 开始运行 / 查看站点结果"；点"上一步"回到向导方案页。GUI 690 条通过。
+
+## 第 716 轮：摆渡船（bd，LSF）接入——旧 cmake 与预编引擎；打开项目走历史；新建模拟切换当前项目（2026-10-19）
+
+1. **界面**：
+   - 项目页的"打开项目"改为进历史记录，由用户从历史里选项目（"选择其他目录"仍保留文件选择）。
+   - 项目页点"新建模拟"时立刻离开当前项目（`root`/`cases`/`selectedCase`/`projectView` 清空，已记住的当前项目随之清除），侧栏的"当前项目"在新项目创建后才指向新项目，不再停在旧项目上。
+2. **bd 的环境（实测）**：`bd` = `dq013@211.66.130.146`，登录节点 mgt01（CentOS 8、glibc 2.28）；调度器 LSF（队列 normal / gpu，normal 当时 2499 个排队、1152 个在跑）；系统 cmake 3.11.4、gcc 8.3、无 cargo；非交互 ssh 的 PATH 里没有 `bsub`，靠 `/etc/profile`（`PATH_PRELUDE` 已处理）；只有 mgt01 能联网，计算节点不能。探测结果：`schedulers=["lsf"]`、`queues=["normal","gpu"]`、`toolchain_installable=true`。
+3. **通用缺陷：只查"有没有 cmake"不查版本**。应用在服务器上装的 Rust 没问题，编译到 `hdf5-metno-src` 时失败：`CMake 3.26 or higher is required. You are running version 3.11.4`。探测与安装脚本都把 3.11 当成可用 cmake，所以也不会去装自己的 cmake；而且应用自己装的 cmake 目录在 PATH 末尾，系统旧 cmake 总是排在前面。改为：
+   - `colm_cmake_ok`（纯 shell 解析 `cmake --version`，要求 ≥ 3.26）用于探测、`colm_tools_ready` 与安装判断；
+   - 应用自己的 cmake 目录放到 PATH 最前（`BUILD_PATH_PRELUDE` 与安装脚本）；
+   - 探测的 `build_problems` 提示"CMake 3.26 or newer …"。
+   测试：colm-remote 79 条（新增 `a_system_cmake_older_than_3_26_is_replaced_by_our_own`、`a_system_cmake_too_old_for_hdf5_is_not_a_usable_build_tool`，并把原有 cmake 桩改成会输出版本）；clippy 干净。
+4. **bd 上源码构建的另一个坑（因人而异，不在应用里改）**：用户的 `~/.gitconfig` 在 bd 上写着 `http.proxy = http://127.0.0.1:18088`（111/113 的 SSH 反向转发），bd 没有这条转发，cargo 又会读 git 的代理，下载依赖失败。mgt01 本身能直连 crates.io。只在 `~/.cargo/config.toml` 加了 `[http] proxy = ""`（只影响 cargo）。另外 bd 到 GitHub release 的下载很慢（cmake 安装包拉不下来）。
+5. **改走预编引擎**：应用已有预编引擎机制（`scripts/build-engine-linux.sh`，zig 钉 glibc 2.17，netCDF/HDF5 静态链接，服务器上不需要 Rust/cmake/联网）。快照 id 随源码变化，所以为当前源码在 tms17l（有 Rust、能联网）上跑 `colm-cli remote-dist --targets x86_64`，取回到本机缓存，再由 `remote-engine-prepare` 传到 bd。

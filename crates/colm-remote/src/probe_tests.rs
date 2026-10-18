@@ -159,7 +159,7 @@ exit "$result""#,
         let sandbox = Sandbox::new();
         sandbox.scheduler("sbatch");
         sandbox.stub("cargo", "echo 'cargo user-toolchain'");
-        sandbox.stub("cmake", "exit 0");
+        sandbox.stub("cmake", "echo 'cmake version 3.28.0'");
         sandbox.stub("cc", "exit 0");
         for (tool, directory) in [
             ("cargo", ".cargo/bin"),
@@ -185,7 +185,7 @@ exit "$result""#,
         let sandbox = Sandbox::new();
         sandbox.scheduler("sbatch");
         sandbox.stub("cargo", "echo 'cargo selected-toolchain'");
-        sandbox.stub("cmake", "exit 0");
+        sandbox.stub("cmake", "echo 'cmake version 3.28.0'");
         sandbox.stub("cc", "exit 0");
         let fallback = sandbox.root.join(".cargo/bin");
         std::fs::create_dir_all(&fallback).unwrap();
@@ -195,6 +195,18 @@ exit "$result""#,
         let probe = sandbox.probe();
         assert_eq!(probe.cargo.as_deref(), Some("cargo selected-toolchain"));
         assert!(probe.build_problems.is_empty());
+    }
+
+    #[test]
+    fn a_system_cmake_too_old_for_hdf5_is_not_a_usable_build_tool() {
+        let sandbox = Sandbox::new();
+        sandbox.scheduler("bsub");
+        sandbox.stub("cargo", "echo 'cargo 1.97.1'");
+        sandbox.stub("cmake", "echo 'cmake version 3.11.4'");
+        sandbox.stub("cc", "exit 0");
+        let probe = sandbox.probe();
+        assert!(!probe.cmake, "CMake 3.11 cannot build the HDF5 sources");
+        assert!(probe.build_problems.iter().any(|p| p.contains("3.26")));
     }
 
     #[test]

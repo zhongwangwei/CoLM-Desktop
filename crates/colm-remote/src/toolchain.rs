@@ -2,7 +2,18 @@
 
 /// Read-only eligibility check, shared with the connection probe.
 pub fn requirements_script() -> &'static str {
-    r#"colm_toolchain_installable() {
+    r#"colm_cmake_ok() {
+  colm_cmake_line=$(cmake --version 2>/dev/null | { read -r colm_first; echo "$colm_first"; })
+  colm_cmake_version=${colm_cmake_line##* }
+  colm_cmake_major=${colm_cmake_version%%.*}
+  colm_cmake_rest=${colm_cmake_version#*.}
+  colm_cmake_minor=${colm_cmake_rest%%.*}
+  colm_cmake_minor=${colm_cmake_minor%%[!0-9]*}
+  case "$colm_cmake_major" in ''|*[!0-9]*) return 1;; esac
+  case "$colm_cmake_minor" in ''|*[!0-9]*) return 1;; esac
+  [ "$colm_cmake_major" -gt 3 ] || { [ "$colm_cmake_major" -eq 3 ] && [ "$colm_cmake_minor" -ge 26 ]; }
+}
+colm_toolchain_installable() {
   [ "$(uname -s)" = Linux ] || return 1
   case "$(uname -m)" in x86_64) colm_glibc_minor=17;; aarch64) colm_glibc_minor=28;; *) return 1;; esac
   colm_glibc=$(getconf GNU_LIBC_VERSION 2>/dev/null) || return 1
@@ -30,7 +41,10 @@ pub fn install_script() -> String {
         requirements_script(),
         r#"(
 set -e
-colm_tools_ready() { cargo --version >/dev/null 2>&1 && rustc --version >/dev/null 2>&1 && cmake --version >/dev/null 2>&1; }
+# The HDF5 sources need CMake 3.26 or newer; an older system CMake (CentOS 8 ships 3.11) is not enough.
+colm_own_cmake="$HOME/.local/share/colm/toolchain/cmake/bin"
+[ -x "$colm_own_cmake/cmake" ] && PATH="$colm_own_cmake:$PATH"
+colm_tools_ready() { cargo --version >/dev/null 2>&1 && rustc --version >/dev/null 2>&1 && colm_cmake_ok; }
 colm_tools_ready && exit 0
 if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
   if [ "${CARGO_HOME:-$HOME/.cargo}" != "$HOME/.cargo" ] || [ "${RUSTUP_HOME:-$HOME/.rustup}" != "$HOME/.rustup" ]; then
@@ -81,7 +95,7 @@ if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
     exit 1
   }
 fi
-if ! cmake --version >/dev/null 2>&1; then
+if ! colm_cmake_ok; then
   if [ -e "$colm_base/cmake" ] || [ -L "$colm_base/cmake" ]; then
     echo "Existing CoLM CMake installation is unusable: $colm_base/cmake. Repair it manually; it will not be overwritten." >&2
     exit 1

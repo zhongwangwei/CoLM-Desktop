@@ -464,12 +464,20 @@ test('the loaded official model is usable at once; choosing another version is o
   assert.deepEqual(page.routes, ['new-case']);
   page.state.versionRef = { id: 'official', revision: 5 };
   contract = page.render();
-  for (const id of tasks)
+  // The project worked on until now is left behind as soon as a new simulation is chosen.
+  assert.equal(page.state.root, '');
+  for (const id of tasks.filter((task) => !task.startsWith('project-recent:')))
     assert.equal(
       contract.actions.find((action) => action.id === id)?.enabled,
       false,
       'tasks wait while the selected revision is still being read',
     );
+});
+test('opening a project goes to the history, where it is chosen', async () => {
+  const page = home();
+  page.render();
+  await page.click('project-open');
+  assert.deepEqual(page.routes, ['history']);
 });
 test('a failed version read keeps the current model and leaves the version modal open', async () => {
   const page = home();

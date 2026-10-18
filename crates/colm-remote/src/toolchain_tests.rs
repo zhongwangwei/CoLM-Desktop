@@ -24,7 +24,13 @@ gcc() { return 0; }
 flock() { echo lock >> "$HOME/events"; }
 cargo() { [ -f "$HOME/rust-ready" ]; }
 rustc() { [ -f "$HOME/rust-ready" ]; }
-cmake() { [ -f "$HOME/cmake-ready" ] || [ -x "$HOME/.local/share/colm/toolchain/cmake/bin/cmake" ]; }
+cmake() {
+  if [ -x "$HOME/.local/share/colm/toolchain/cmake/bin/cmake" ]; then colm_mock_version=4.4.4
+  elif [ -f "$HOME/cmake-ready" ]; then colm_mock_version=${TEST_CMAKE:-4.4.4}
+  else return 1; fi
+  [ "$1" = --version ] && echo "cmake version $colm_mock_version"
+  return 0
+}
 curl() {
   echo download >> "$HOME/events"
   while [ "$1" != --output ]; do shift; done
@@ -193,6 +199,43 @@ sha256sum() { return 0; }
             "installing Rust/Cargo\ninstalling CMake\n"
         );
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_system_cmake_older_than_3_26_is_replaced_by_our_own() {
+        // CentOS 8 (the 摆渡船 login node) ships CMake 3.11; the HDF5 sources need 3.26.
+        for (version, installs) in [
+            ("3.11.4", true),
+            ("3.25.9", true),
+            ("3.26.0", false),
+            ("3.31.2", false),
+            ("4.0.1", false),
+        ] {
+            let (output, root) = run(
+                &format!(
+                    "touch \"$HOME/rust-ready\" \"$HOME/cmake-ready\"; export TEST_CMAKE={version}"
+                ),
+                false,
+            );
+            assert!(
+                output.status.success(),
+                "{version}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let events = fs::read_to_string(root.join("events")).unwrap_or_default();
+            assert_eq!(
+                events.matches("unpack").count(),
+                usize::from(installs),
+                "{version}"
+            );
+            assert_eq!(
+                root.join(".local/share/colm/toolchain/cmake/bin/cmake")
+                    .is_file(),
+                installs,
+                "{version}"
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
