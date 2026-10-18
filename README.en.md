@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3"><img src="https://img.shields.io/badge/version-v0.3.0--beta.3-orange" alt="Current beta version: v0.3.0-beta.3"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4"><img src="https://img.shields.io/badge/version-v0.3.0--beta.4-orange" alt="Current beta version: v0.3.0-beta.4"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,14 +20,14 @@
 CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints, the three-stage run and result evaluation together in one graphical interface. All three stages — surface data (`mksrfdata`), initial conditions (`mkinidata`) and the model main loop (`colm`) — run on the **Rust engine**, and the results are **bit-for-bit identical** to the original CoLM202X. The installers work out of the box: you do not need a Rust, Fortran, MPI or NetCDF toolchain.
 
 > [!WARNING]
-> **This is the `0.3.0-beta.3` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
+> **This is the `0.3.0-beta.4` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
 > Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. **Parameter tuning and uncertainty analysis are not yet available in spatial mode.** They come back when you switch to site mode.
 
 ## Download
 
-Get the installer for your platform from the [v0.3.0-beta.3 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.3):
+Get the installer for your platform from the [v0.3.0-beta.4 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4):
 
 | Platform | Architecture | Format |
 |---|---|---|
@@ -44,7 +44,17 @@ Run `colm-agent chat --project-root /your/project` without the desktop window. I
 
 pip distribution is temporarily paused: wheel generation and publishing are disabled. The desktop app and native CLI remain available. See [terminal usage](docs/terminal-assistant.md).
 
-## What's new in 0.3.0-beta.3 (release notes)
+## What's new in 0.3.0-beta.4 (release notes)
+
+- **Rebuilt interface**: a version-first UI; History shows records as cards whose details open in a dialog, and can be cleared (optionally with local case folders and records whose end was never confirmed).
+- **Default paths per compute resource**: this machine and each server can store default project, surface data, runtime and forcing paths; new simulations fill them in and sync edits back.
+- **Model versions**: modified versions can be deleted, and older official revisions cleaned up together with source snapshots only they used.
+- **Remote runs**: server jobs are checked every 10 seconds; remote case creation reuses an existing folder; cleanup on NFS no longer hides the real error; a `.prj` whose name differs only in case is accepted.
+- **Routing**: watershed/region lat-lon cases default to the regional river network; global routing drops inefficient nested parallelism.
+- **Research and history**: replay of recorded settings works again as a non-strict rerun; several data-safety fixes in Study state and locks, fetching and deletion.
+- Both engines still give bit-identical results.
+
+## What's new in 0.3.0-beta.3
 
 This section preserves the released interface description. For the current source interface, see Workflow below.
 

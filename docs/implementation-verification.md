@@ -33616,3 +33616,22 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 仍未处理的审计条目：#16（i18n 门禁只扫描 legacy dist，React 中有硬编码中英混排）、冻结官方修订未绑定 Fortran 内核源码、远程无路径映射时没有上传入口，
 以及若干低优先级项（新建模拟复核勾选不比较日期、换运行位置不重置时段、结果图每次渲染重建、check-gui 只看字面量命令名、重启窄整型静默回绕、
 测试写真实历史库、服务器算例本地运行泄漏 pending 预留、e2e 后门无鉴权、非 UTF-8 输出时管道停读）。
+
+## 第 704 轮：7920l"使用自己的数据"无反应；清理分支；colm-init 并行测试锁；0.3.0-beta.4（2026-10-18）
+
+1. **"使用自己的数据"点了没反应**：用隔离 HOME 加 7920l 的配置在真实窗口复现。选了服务器后，第 3 步本来就自动切到自己的数据，
+   站点数据目录、强迫场目录、"读取站点与覆盖时段"都已显示，服务器目录浏览器也能列出 `/media/zhwei/data02/Colm-desktop`；
+   再点这个按钮不改变任何状态，按钮也没有选中样式，看上去像坏了。现在当前的数据来源按钮显示为按下状态；已选中时再点，会滚动并聚焦到站点数据目录输入框。
+2. **分支清理**：`codex/*` 六条（forcing-data-autodetect、history-resource-deletion、model-kernel-wording、project-batch-run、simulation-date-picker、
+   windows-ci-fixes）用 `git merge-tree` 试合并，并逐提交统计新增行在 main 对应文件里的覆盖率：model-kernel-wording 合并后零改动；
+   其余 73–100%，缺的都是被 main 后来重写的旧版本（例如 run_stage 的 Windows verbatim 测试、VersionsPage 的"返回模拟配置"、release 内核步骤按平台拆分，main 里都有）。
+   这六条已删除本地和远程分支。被工作目录占用的 12 个（4 个 `worktree-agent-*`、colm-guide、full-compile-test、happy-sammet、intelligent-greider、project-next-steps、
+   strange-boyd、ui-fixes、Codex 的 windows-ci-final）已确认没有进程使用：其中 intelligent-greider 的 windows_console 改动 main 已有；
+   colm-guide 只有未入库的 64 MB 示例数据；ui-fixes 的 `is_model_field` 改动已被 main 更彻底的重写取代；strange-boyd 的 NetCDF 测试锁 main 没有，已合并（见第 3 条）。
+   随后删除了这 12 个工作目录和分支。各分支删除前的 tip SHA 都留有记录。
+   保留不动：`upstream-fortran-f48-sync`（9 月的 vendor Fortran 选择性同步，32% 的行不在 main，是否需要属于模型层面的判断）、
+   两个 release 标记分支，以及仍有 Claude 会话进程打开的 5 个工作目录（分支内容都已在 main）。
+3. **colm-init 测试并行失败**：netcdf-c 和 HDF5 编译时没有开启线程安全。现在每个会碰 NetCDF 的测试都持有一把 crate 级的锁（锁中毒时照样取回）。
+   同一命令 `cargo test -p colm-init --lib` 默认并行跑三次，结果都是 185 passed、0 failed；main 上不加锁时为 144/41 和 140/45 failed。
+4. **版本号升到 0.3.0-beta.4**：改了 workspace、GUI、Tauri 配置、legacy 静态页、README 徽章/下载链接/发布记录、版本一致性测试，以及两个 Cargo.lock 中 workspace 成员的版本行。
+   注意：推送到 main 后，release.yml 会在 `v0.3.0-beta.4` 尚无完整发布时自动构建并发布预发布版。
