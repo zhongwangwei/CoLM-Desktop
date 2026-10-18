@@ -1586,3 +1586,43 @@ fn study_run_history_records_the_studys_actual_end_state() {
     );
     assert_eq!(study_run_status("not json"), "succeeded");
 }
+
+#[test]
+fn model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let runs = RunProcesses::default();
+    let creations = CaseCreations::default();
+    let tidy = |runs: &RunProcesses, creations: &CaseCreations| {
+        crate::model::while_idle(runs, creations, || Ok("tidied"))
+    };
+    let case = "/tmp/tidy-run".to_string();
+    runs.prepare(std::slice::from_ref(&case)).unwrap();
+    let error = tidy(&runs, &creations).unwrap_err();
+    assert!(error.contains("整理模型缓存"), "{error}");
+    runs.forget(&case).unwrap();
+    let created = "/tmp/tidy-new-case".to_string();
+    creations.0.prepare(std::slice::from_ref(&created)).unwrap();
+    assert!(
+        tidy(&runs, &creations).is_err(),
+        "a case being created blocks it"
+    );
+    creations.0.forget(&created).unwrap();
+    assert_eq!(tidy(&runs, &creations).unwrap(), "tidied");
+    // While it works, a run cannot register; it starts once the tidy returns.
+    let registered = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        crate::model::while_idle(&runs, &creations, || {
+            let waiter = scope.spawn(|| {
+                runs.prepare(std::slice::from_ref(&case)).unwrap();
+                registered.store(true, Ordering::SeqCst);
+            });
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            assert!(!registered.load(Ordering::SeqCst), "run started mid-tidy");
+            Ok(waiter)
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+    });
+    assert!(registered.load(Ordering::SeqCst));
+}

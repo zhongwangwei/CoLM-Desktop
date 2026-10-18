@@ -130,6 +130,13 @@ impl Registry {
                 return Ok(rebound);
             }
             ensure!(binding.schema == SCHEMA, "unsupported case binding schema");
+            // Old official revisions are tidied away; say so plainly so the desktop can offer a
+            // rebind instead of a raw "No such file" on revision.json.
+            ensure!(
+                self.revision_dir(&binding.version)?.is_dir(),
+                "{}",
+                missing_revision_message(&binding.version)
+            );
             self.get(&binding.version)?;
             let data: CaseData = read_json(&case.join(CASE_DATA_FILE))?;
             ensure!(

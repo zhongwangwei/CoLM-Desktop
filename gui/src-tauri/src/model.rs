@@ -201,6 +201,162 @@ pub async fn model_delete(
     .await
     .map_err(|e| e.to_string())?
 }
+/// Project roots the desktop knows: the remembered project folders in recent.json and every
+/// server project mirrored under `<app data>/remote-projects`.
+pub(crate) fn known_project_roots(
+    recent: &std::collections::BTreeMap<String, String>,
+    data_dir: &Path,
+) -> Result<Vec<PathBuf>, String> {
+    let mut roots: Vec<PathBuf> = ["root", "spatial-root"]
+        .iter()
+        .filter_map(|key| recent.get(*key))
+        .map(PathBuf::from)
+        .collect();
+    if let Some(list) = recent.get("ui-project-roots") {
+        let list: Vec<String> = serde_json::from_str(list)
+            .map_err(|e| format!("recent project list is unreadable: {e}"))?;
+        roots.extend(list.into_iter().map(PathBuf::from));
+    }
+    if let Ok(mirrors) = std::fs::read_dir(data_dir.join("remote-projects")) {
+        roots.extend(mirrors.flatten().map(|entry| entry.path()));
+    }
+    roots.retain(|root| !root.as_os_str().is_empty());
+    roots.dedup();
+    Ok(roots)
+}
+
+fn remember(used: &mut Vec<VersionRef>, version: VersionRef) {
+    if !used.contains(&version) {
+        used.push(version);
+    }
+}
+
+/// Revisions something outside the registry still names: visible history records (as
+/// [`history_references`] counts them), and the `model-binding.json` / study pin of every case
+/// those records touched or that sits in a known project (its cases, studies and members).
+fn revisions_in_use(
+    ledger: &colm_history::History,
+    roots: &[PathBuf],
+) -> Result<Vec<VersionRef>, String> {
+    let mut used = Vec::new();
+    let mut dirs = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = ledger
+            .query(&colm_history::Query {
+                offset,
+                limit: 500,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        for operation in &page.items {
+            let event = &operation.latest;
+            if let (Some(id), Some(revision)) = (
+                &event.version_id,
+                event.revision.as_deref().and_then(|r| r.parse().ok()),
+            ) {
+                remember(
+                    &mut used,
+                    VersionRef {
+                        id: id.clone(),
+                        revision,
+                    },
+                );
+            }
+            dirs.extend(event.case_path.as_deref().map(PathBuf::from));
+        }
+        offset += page.items.len() as u64;
+        if page.items.is_empty() || offset >= page.total {
+            break;
+        }
+    }
+    let children = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+            .unwrap_or_default()
+    };
+    for root in roots {
+        dirs.push(root.clone());
+        dirs.extend(children(root));
+        for study in children(&root.join(".colm").join("studies")) {
+            dirs.extend(children(&study.join("members")));
+            dirs.push(study);
+        }
+    }
+    let read = |path: PathBuf| -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    };
+    for dir in dirs {
+        // A binding that cannot be read cannot start a run either; it keeps nothing.
+        let named = [
+            read(dir.join(colm_model::BINDING_FILE)).map(|b| b["version"].clone()),
+            read(dir.join("model-version.json"))
+                .map(|pin| pin["model_revision"]["version"].clone()),
+        ];
+        for version in named.into_iter().flatten() {
+            if let Ok(version) = serde_json::from_value(version) {
+                remember(&mut used, version);
+            }
+        }
+    }
+    Ok(used)
+}
+
+const TIDY_BUSY: &str = "有模拟正在运行或算例正在创建，稍后再整理模型缓存";
+
+/// Run `action` only while no simulation runs and no case is being created, and keep both
+/// from starting until it returns: a run or a new binding must not land on a revision being
+/// removed.
+pub(crate) fn while_idle<T>(
+    runs: &crate::sidecar::RunProcesses,
+    creations: &crate::sidecar::CaseCreations,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    runs.with_idle_because(TIDY_BUSY, || creations.with_idle_because(TIDY_BUSY, action))
+}
+
+fn prune_args(keep: &[VersionRef], dry_run: bool) -> Vec<String> {
+    vec![
+        "model-prune".into(),
+        "--json".into(),
+        json!({"keep": keep, "dry_run": dry_run}).to_string(),
+    ]
+}
+
+/// Tidy away old official revisions (and their ~126 MB source snapshots) that no known case,
+/// study or visible history record uses. `dry_run` only reports what would go and how much
+/// space that frees. The desktop calls this once after start; the settings page offers it too.
+#[tauri::command]
+pub async fn model_prune(
+    app: tauri::AppHandle,
+    processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    creations: tauri::State<'_, crate::sidecar::CaseCreations>,
+    dry_run: bool,
+) -> Result<colm_model::PruneReport, String> {
+    use tauri::Manager;
+    let recent = crate::recent::load_recent_strict(&app)?;
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let roots = known_project_roots(&recent, &data_dir)?;
+    let processes = processes.inner().clone();
+    let creations = creations.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let prune = || {
+            let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+            let keep = revisions_in_use(&ledger, &roots)?;
+            drop(ledger);
+            let output = crate::sidecar::capture(&prune_args(&keep, dry_run))?;
+            serde_json::from_str(output.trim())
+                .map_err(|e| format!("invalid model prune response: {e}"))
+        };
+        if dry_run {
+            prune()
+        } else {
+            while_idle(&processes, &creations, prune)
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
 #[tauri::command]
 pub fn model_get(id: String, revision: u64) -> Result<FrozenRevision, String> {
     Registry::open(root()?)
@@ -563,6 +719,125 @@ mod tests {
         assert!(registry.get(&old).is_err());
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn revisions_in_use_come_from_history_bindings_studies_and_known_projects() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-model-in-use-{}",
+            colm_history::Event::start("test").operation_id
+        ));
+        let official = |revision| VersionRef {
+            id: "official".into(),
+            revision,
+        };
+        let bind = |dir: &Path, version: &VersionRef| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(colm_model::BINDING_FILE),
+                json!({"schema":1,"version":version}).to_string(),
+            )
+            .unwrap();
+        };
+        let project = root.join("project");
+        bind(&project.join("site-a"), &official(59));
+        bind(&project.join("site-b"), &official(59));
+        let study = project.join(".colm/studies/tune");
+        bind(&study.join("members/m1"), &official(64));
+        std::fs::write(
+            study.join("model-version.json"),
+            json!({"model_revision":{"version":official(61)}}).to_string(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(project.join("broken")).unwrap();
+        std::fs::write(project.join("broken").join(colm_model::BINDING_FILE), "{").unwrap();
+        // A case outside every known project is found through the history that touched it.
+        let elsewhere = root.join("elsewhere/case");
+        bind(&elsewhere, &official(68));
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        let mut run = colm_history::Event::start("run");
+        run.version_id = Some("official".into());
+        run.revision = Some("6".into());
+        run.case_path = Some(elsewhere.display().to_string());
+        ledger.append(&run).unwrap();
+        let end = run.next(colm_history::EventPhase::Finished, "succeeded");
+        ledger.append(&end).unwrap();
+        let mut used = revisions_in_use(&ledger, &[project.clone(), root.join("gone")]).unwrap();
+        used.sort_by_key(|v| v.revision);
+        assert_eq!(
+            used,
+            vec![
+                official(6),
+                official(59),
+                official(61),
+                official(64),
+                official(68)
+            ]
+        );
+        // A history record the user removed no longer keeps its revision.
+        ledger.remove_operation(&end.operation_id).unwrap();
+        let used = revisions_in_use(&ledger, &[project]).unwrap();
+        assert!(!used.contains(&official(6)) && !used.contains(&official(68)));
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Audit on real data: `COLM_TIDY_AUDIT_MODELS` (a copy of the model registry),
+    /// `COLM_TIDY_AUDIT_HISTORY` (a copy of the history database) and `COLM_TIDY_AUDIT_APP`
+    /// (the app data folder, read only). Prints what an automatic tidy would keep and remove.
+    #[test]
+    #[ignore]
+    fn audit_tidy_on_real_data() {
+        let var = |name| PathBuf::from(std::env::var_os(name).expect(name));
+        let app = var("COLM_TIDY_AUDIT_APP");
+        let recent: std::collections::BTreeMap<String, String> =
+            serde_json::from_slice(&std::fs::read(app.join("recent.json")).unwrap()).unwrap();
+        let roots = known_project_roots(&recent, &app).unwrap();
+        let ledger = colm_history::History::open(var("COLM_TIDY_AUDIT_HISTORY")).unwrap();
+        let keep = revisions_in_use(&ledger, &roots).unwrap();
+        let registry = Registry::open(var("COLM_TIDY_AUDIT_MODELS")).unwrap();
+        let report = registry.prune_official(&keep, true).unwrap();
+        println!("roots: {}", roots.len());
+        println!("in use: {keep:?}");
+        println!("{}", serde_json::to_string_pretty(&report).unwrap());
+    }
+
+    #[test]
+    fn known_project_roots_read_recent_folders_and_server_mirrors() {
+        let data = std::env::temp_dir().join(format!(
+            "colm-known-roots-{}",
+            colm_history::Event::start("test").operation_id
+        ));
+        std::fs::create_dir_all(data.join("remote-projects/abc")).unwrap();
+        let mut recent = std::collections::BTreeMap::new();
+        recent.insert("root".to_string(), "/p/one".to_string());
+        recent.insert("spatial-root".to_string(), "/p/two".to_string());
+        recent.insert("forcingdir".to_string(), "/data/forcing".to_string());
+        recent.insert(
+            "ui-project-roots".to_string(),
+            r#"["/p/three","/p/one"]"#.to_string(),
+        );
+        let roots = known_project_roots(&recent, &data).unwrap();
+        for expected in ["/p/one", "/p/two", "/p/three"] {
+            assert!(roots.contains(&PathBuf::from(expected)), "{roots:?}");
+        }
+        assert!(roots.contains(&data.join("remote-projects/abc")));
+        assert!(!roots.contains(&PathBuf::from("/data/forcing")));
+        // An unreadable project list must stop the tidy, not shrink what it keeps.
+        recent.insert("ui-project-roots".to_string(), "not json".to_string());
+        assert!(known_project_roots(&recent, &data).is_err());
+        let args = prune_args(
+            &[VersionRef {
+                id: "official".into(),
+                revision: 6,
+            }],
+            true,
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&args[2]).unwrap(),
+            json!({"dry_run":true,"keep":[{"id":"official","revision":6}]})
+        );
+        std::fs::remove_dir_all(data).unwrap();
     }
 
     #[test]

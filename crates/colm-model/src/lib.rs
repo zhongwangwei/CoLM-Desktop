@@ -124,6 +124,30 @@ pub struct FrozenRevision {
     pub applicability: Applicability,
     pub derived_from: Option<String>,
 }
+/// The error a case bound to a revision that is gone reports. The desktop matches
+/// "model revision <id>#<n> is no longer in the model registry" to offer a rebind.
+pub fn missing_revision_message(version: &VersionRef) -> String {
+    format!(
+        "model revision {}#{} is no longer in the model registry (unused old official revisions are tidied away); rebind the case to an available revision",
+        version.id, version.revision
+    )
+}
+/// What [`Registry::prune_official`] removed (or, for a dry run, would remove).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PruneReport {
+    pub dry_run: bool,
+    pub removed: Vec<VersionRef>,
+    /// Official revisions that stay, each with why.
+    pub kept: Vec<KeptRevision>,
+    /// Revision directories and source snapshots removed.
+    pub paths: Vec<PathBuf>,
+    pub bytes: u64,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeptRevision {
+    pub version: VersionRef,
+    pub reason: String,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseBinding {
