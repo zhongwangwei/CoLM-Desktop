@@ -142,6 +142,9 @@ jobs:
           cache: npm
           cache-dependency-path: gui/package-lock.json
       - name: Install and verify React frontend
+        # Windows defaults to pwsh, where a failing native command does not stop the
+        # script; only the last command would decide the step (see ci.yml).
+        shell: bash
         working-directory: gui
         run: |
           npm ci
