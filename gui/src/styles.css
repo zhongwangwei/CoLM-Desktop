@@ -1191,6 +1191,11 @@ table input {
   border-color: var(--border);
   gap: 10px;
 }
+.simulation-source .button[aria-pressed='true'] {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
 .simulation-site-list .selected {
   border-color: var(--accent);
   background: var(--accent-soft);

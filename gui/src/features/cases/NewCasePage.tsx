@@ -706,7 +706,14 @@ export default function NewCasePage() {
     return result;
   }
   function selectOwnData() {
-    if (ownData || lock.current) return;
+    if (lock.current) return;
+    if (ownData) {
+      // Already the source (a server always uses its own data): show where to fill it in.
+      const input = document.querySelector<HTMLInputElement>('.simulation-own-data input');
+      input?.scrollIntoView?.({ block: 'center' });
+      input?.focus?.();
+      return;
+    }
     ++sequence.current;
     const bundled = exampleValues.current;
     exampleValues.current = {};
@@ -2283,11 +2290,21 @@ export default function NewCasePage() {
             <>
               <div className="actions simulation-source">
                 {!form.host && (
-                  <Button disabled={!enabled} onClick={() => void example().catch(() => {})}>
+                  <Button
+                    className={!ownData && sites.length > 0 ? 'selected' : ''}
+                    aria-pressed={!ownData && sites.length > 0}
+                    disabled={!enabled}
+                    onClick={() => void example().catch(() => {})}
+                  >
                     {t('使用内置示例', 'Use bundled examples')}
                   </Button>
                 )}
-                <Button disabled={!enabled} onClick={selectOwnData}>
+                <Button
+                  className={ownData ? 'selected' : ''}
+                  aria-pressed={ownData}
+                  disabled={!enabled}
+                  onClick={selectOwnData}
+                >
                   {t('使用自己的数据', 'Use your data')}
                 </Button>
               </div>

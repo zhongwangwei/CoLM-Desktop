@@ -3848,3 +3848,25 @@ test('new simulations prefill the resource default data paths and sync edits bac
     forcing: null,
   });
 });
+
+test('on a server the own-data source shows as chosen and pressing it again stays put', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 1 }, [site], initialValues, {
+    servers: [runServer],
+  });
+  await p.mount();
+  p.set('new-run-host', 'compute');
+  p.set('new-name', 'CN-Cng');
+  await p.click('new-next');
+  p.set('new-kind', 'site');
+  await p.click('new-next');
+  const ownButton = () =>
+    p.elements.find(
+      (element) =>
+        element.type === 'Button' && JSON.stringify(element.children).includes('使用自己的数据'),
+    )!;
+  assert.equal(ownButton().props['aria-pressed'], true);
+  assert.ok(!p.elements.some((e) => JSON.stringify(e.children).includes('使用内置示例')));
+  await p.click('new-own-data');
+  assert.equal(ownButton().props['aria-pressed'], true);
+  assert.ok(p.render().actions.some((action) => action.id === 'new-scan'));
+});
