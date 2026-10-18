@@ -792,6 +792,22 @@ fn verify_build_stamp(bin: &Path, source_sha256: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Moves a finished code cache into place. The cache is named by its code identity, so when
+/// another process already published a complete one (it has `code.json`), that one is used and
+/// this copy is dropped by the caller: replacing it could delete a cache a concurrent writer is
+/// reading, and racing renames fail with "Directory not empty" (2026-10-18, eight parallel
+/// `model-migrate-case` runs on a new official revision). Only an incomplete leftover is replaced.
+fn publish_code_cache(stage: &Path, dest: &Path) -> Result<()> {
+    if dest.exists() && !dest.join("code.json").exists() {
+        std::fs::remove_dir_all(dest)?;
+    }
+    match std::fs::rename(stage, dest) {
+        Ok(()) => Ok(()),
+        Err(_) if dest.join("code.json").exists() => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
     let dest = cache_dir(opts, code_ref)?;
     if dest.join("code.json").exists() {
@@ -945,11 +961,7 @@ pub(crate) fn cache_code(opts: &Opts, code_ref: &CodeRef) -> Result<()> {
         }
         std::fs::write(stage.join("artifacts.json"), serde_json::to_vec(&programs)?)?;
         std::fs::write(stage.join("code.json"), serde_json::to_vec(code_ref)?)?;
-        if dest.exists() {
-            std::fs::remove_dir_all(&dest)?;
-        }
-        std::fs::rename(&stage, &dest)?;
-        Ok(())
+        publish_code_cache(&stage, &dest)
     })();
     if stage.exists() {
         let _ = std::fs::remove_dir_all(stage);
@@ -1014,6 +1026,39 @@ pub(crate) fn protected_snapshots(opts: &Opts) -> Result<Vec<serde_json::Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_complete_code_cache_published_first_is_kept() {
+        let root = std::env::temp_dir().join(format!("colm-code-cache-{}", unique_id()));
+        let dest = root.join("cache");
+        let make = |name: &str, marker: &str| {
+            let stage = root.join(name);
+            std::fs::create_dir_all(stage.join("bin")).unwrap();
+            std::fs::write(stage.join("code.json"), marker).unwrap();
+            stage
+        };
+        // First writer moves its copy into place.
+        publish_code_cache(&make(".a", "first"), &dest).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("code.json")).unwrap(),
+            "first"
+        );
+        // A later writer of the same cache keeps the published one instead of failing.
+        let late = make(".b", "second");
+        publish_code_cache(&late, &dest).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("code.json")).unwrap(),
+            "first"
+        );
+        // An incomplete leftover (no code.json) is replaced.
+        std::fs::remove_file(dest.join("code.json")).unwrap();
+        publish_code_cache(&make(".c", "third"), &dest).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("code.json")).unwrap(),
+            "third"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn revision_selection_rejects_partial_and_legacy_identity() {
         let parse = |args: &[&str]| {
