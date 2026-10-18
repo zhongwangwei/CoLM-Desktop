@@ -262,7 +262,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       await openCase(cases[0].dir, 'settings');
       return;
     }
-    // A multi-site project reopens as the first page of 新建模拟 with everything it was created with,
+    // A multi-site project reopens as the last page of 新建模拟 (检查与运行) with every step filled from what it was created with,
     // not as a run page that would show the last run again.
     const seed = await invokeJson<WizardSeed>('project_wizard_seed', { root: path });
     if (!navigate('new-case')) return;
@@ -272,9 +272,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       projectCasesOpen: false,
       newCaseSeed: {
         form: seed.form,
-        sites: [],
+        sites: seed.sites,
         caseValues: seed.case_values,
-        step: 1,
+        step: 5,
         ownData: seed.form.kind === 'site',
         multiSiteEnabled: true,
         multiSiteMode: seed.multi_site_mode,

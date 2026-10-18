@@ -559,7 +559,7 @@ test('a project card opens its timeline, batching stations, and a case opens its
   const listing = h.requests.at(-1)!;
   assert.equal(listing.command, 'list_cases');
   assert.deepEqual(listing.args, { root: '/cache/222' });
-  // A multi-site project opens on the first page of 新建模拟, filled from what it was created with.
+  // A multi-site project opens on the last page of 新建模拟, filled from what it was created with.
   listing.resolve([{ dir: '/cache/222/AT-Neu' }, { dir: '/cache/222/AU-Cpr' }]);
   await h.settle();
   const seedRequest = h.requests.at(-1)!;
@@ -568,6 +568,15 @@ test('a project card opens its timeline, batching stations, and a case opens its
   seedRequest.resolve({
     form: { host: 'tms17l', kind: 'site', subgrid: 'PC' },
     case_values: { DEF_HIST_FREQ: "'HOURLY'" },
+    sites: [
+      {
+        name: 'AT-Neu',
+        site_file: '/s/AT-Neu.nc',
+        met_file: '/f/AT-Neu_Met.nc',
+        start: '2002-01-01',
+        end: '2013-01-01',
+      },
+    ],
     drafts: [
       {
         site: '/s/AT-Neu.nc',
@@ -590,19 +599,21 @@ test('a project card opens its timeline, batching stations, and a case opens its
         step: number;
         caseValues: unknown;
         siteDrafts: { name: string }[];
+        sites: { met_file: string }[];
         multiSiteMode: string;
         previousResults?: { cases: { name: string; status: string }[] };
       };
     }
   ).newCaseSeed;
   assert.deepEqual(seeded.form, { host: 'tms17l', kind: 'site', subgrid: 'PC' });
-  assert.equal(seeded.step, 1);
+  assert.equal(seeded.step, 5);
   assert.deepEqual(seeded.caseValues, { DEF_HIST_FREQ: "'HOURLY'" });
   assert.deepEqual(
     seeded.siteDrafts.map((draft) => draft.name),
     ['AT-Neu'],
   );
   assert.equal(seeded.multiSiteMode, 'first-year');
+  assert.equal(seeded.sites[0].met_file, '/f/AT-Neu_Met.nc');
   // What the project already ran is carried along for the last step.
   assert.ok(seeded.previousResults && seeded.previousResults.cases.length > 0);
   assert.ok(h.guide().actions.some((action) => action.id === 'history-open-project'));

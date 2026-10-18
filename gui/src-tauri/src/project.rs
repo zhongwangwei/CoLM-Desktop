@@ -156,6 +156,22 @@ pub struct WizardSiteDraft {
     pub spinup_repeat: String,
 }
 
+/// 第 3 步站点卡片所需的站点信息（与扫描结果同形），取自算例自己的文件，所以不必重新扫描。
+#[derive(Debug, Serialize, PartialEq)]
+pub struct WizardSite {
+    pub name: String,
+    pub site_file: String,
+    pub met_file: Option<String>,
+    pub obs_file: Option<String>,
+    pub urban: bool,
+    pub crop: bool,
+    pub lon: f64,
+    pub lat: f64,
+    pub start: String,
+    pub end: String,
+    pub problem: Option<String>,
+}
+
 /// 一个已有项目还原成「新建模拟」五步所需的全部输入。
 #[derive(Debug, Serialize, PartialEq)]
 pub struct WizardSeed {
@@ -163,6 +179,8 @@ pub struct WizardSeed {
     pub form: std::collections::BTreeMap<String, String>,
     /// 第 4–5 步的模型方案与输出选项（取自第一个算例的 `case.nml`）。
     pub case_values: std::collections::BTreeMap<String, String>,
+    /// 多站点项目的站点（含强迫场文件与时段）；空间项目为空。
+    pub sites: Vec<WizardSite>,
     /// 多站点项目的逐站设置；空间项目为空。
     pub drafts: Vec<WizardSiteDraft>,
     /// `first-year`：每站都是起始后一年结束预热、重复次数一致；否则 `per-site`。
@@ -223,6 +241,7 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
         }
     }
     let mut drafts = Vec::new();
+    let mut sites = Vec::new();
     for case in cases.iter().filter(|case| !case.spatial) {
         let dir = Path::new(&case.dir);
         let Ok(text) = std::fs::read_to_string(dir.join("case.nml")) else {
@@ -249,6 +268,30 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
         } else {
             String::new()
         };
+        let forcing = std::fs::read_to_string(dir.join("forcing.nml"))
+            .ok()
+            .and_then(|text| colm_namelist::parse(&text).ok());
+        let met_file = forcing.as_ref().and_then(|doc| {
+            let prefix = match doc.get("DEF_forcing%fprefix(1)") {
+                Some(colm_namelist::Value::Str(prefix)) if !prefix.is_empty() => prefix.clone(),
+                _ => return None,
+            };
+            let directory = crate::config::character(doc, "DEF_dir_forcing");
+            Some(format!("{}/{prefix}", directory.trim_end_matches('/')))
+        });
+        sites.push(WizardSite {
+            name: case.name.clone(),
+            site_file: site.clone(),
+            met_file,
+            obs_file: record.obs_file.clone(),
+            urban: profile.urban,
+            crop: profile.crop,
+            lon: crate::config::real(&doc, "SITE_lon_location"),
+            lat: crate::config::real(&doc, "SITE_lat_location"),
+            start: profile.inputs.start.clone(),
+            end: profile.inputs.end.clone(),
+            problem: None,
+        });
         drafts.push(WizardSiteDraft {
             site,
             name: case.name.clone(),
@@ -272,6 +315,7 @@ pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
     Ok(WizardSeed {
         form,
         case_values,
+        sites,
         drafts,
         multi_site_mode: if first_year { "first-year" } else { "per-site" },
         multi_site_repeat: repeat,
@@ -601,8 +645,6 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     if !nml.is_file() {
         return Err(format!("{} 不是算例目录（没有 case.nml）", dir.display()));
     }
-    let text = std::fs::read_to_string(&nml).map_err(|e| format!("{}: {e}", nml.display()))?;
-    let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
     let root = dir
         .parent()
         .ok_or_else(|| format!("{} 没有上级目录", dir.display()))?
@@ -612,14 +654,26 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
         .into_iter()
         .find(|c| Path::new(&c.dir) == dir)
         .ok_or_else(|| format!("{} 读不出算例", dir.display()))?;
-    let record = recorded_case(&dir);
-    let mut profile = case_profile(
-        &text,
-        entry.spatial,
-        stages.as_deref(),
-        record.mode.as_deref(),
-    )?;
-    profile.obs_file = case_default_observation(&dir, &record);
+    let profile = case_profile_of(&dir, entry.spatial)?;
+    Ok(OpenedCase {
+        entry,
+        root,
+        profile,
+    })
+}
+
+/// One case's profile straight from its own files. `open_case` also lists every sibling and
+/// records the project in history; reading many cases at once needs only this.
+pub(crate) fn case_profile_of(dir: &Path, spatial: bool) -> Result<CaseProfile, String> {
+    let nml = dir.join("case.nml");
+    if !nml.is_file() {
+        return Err(format!("{} 不是算例目录（没有 case.nml）", dir.display()));
+    }
+    let text = std::fs::read_to_string(&nml).map_err(|e| format!("{}: {e}", nml.display()))?;
+    let stages = std::fs::read_to_string(dir.join("stages.json")).ok();
+    let record = recorded_case(dir);
+    let mut profile = case_profile(&text, spatial, stages.as_deref(), record.mode.as_deref())?;
+    profile.obs_file = case_default_observation(dir, &record);
     profile.domain_kind = record.domain;
     profile.shapefile = record.shapefile;
     profile.engine = record.engine;
@@ -628,15 +682,11 @@ pub fn open_case(dir: String) -> Result<OpenedCase, String> {
     let doc = colm_namelist::parse(&text).ok();
     profile.methane_mode = doc
         .as_ref()
-        .and_then(|doc| crate::config::methane_mode(doc, &dir));
+        .and_then(|doc| crate::config::methane_mode(doc, dir));
     profile.solute_conc = doc
         .as_ref()
-        .and_then(|doc| crate::config::solute_concentrations(doc, &dir));
-    Ok(OpenedCase {
-        entry,
-        root,
-        profile,
-    })
+        .and_then(|doc| crate::config::solute_concentrations(doc, dir));
+    Ok(profile)
 }
 
 /// 自含的站点算例不需要 RawData/Runtime，`colm-cli new` 填的是算例里的占位目录

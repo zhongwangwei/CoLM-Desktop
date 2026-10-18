@@ -415,7 +415,8 @@ fn case_profile_under(
     dir: &str,
     version: &VersionRef,
 ) -> Result<crate::project::CaseProfile, String> {
-    let source = crate::project::open_case(dir.to_owned())?;
+    let spatial = colm_case::is_spatial_case(&Path::new(dir).join("case.nml")).unwrap_or(false);
+    let source = crate::project::case_profile_of(Path::new(dir), spatial)?;
     let id = preview_id(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -427,10 +428,12 @@ fn case_profile_under(
         .materialize_run_with_case_changes(version, Path::new(dir), &preview_dir, &id, &[], &[])
         .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))
         .and_then(|run| {
-            open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
+            let mut profile = crate::project::case_profile_of(&run.run_case, spatial)?;
+            carry_case_identity(&mut profile, &source);
+            Ok(profile)
         });
     let _ = std::fs::remove_dir_all(&preview_dir);
-    result.map(|opened| opened.profile)
+    result
 }
 
 /// Effective profiles of many cases under one model revision, read eight at a time without
@@ -477,17 +480,25 @@ fn open_preview_with_case_identity(
     source: &crate::project::CaseProfile,
 ) -> Result<crate::project::OpenedCase, String> {
     let mut preview = crate::project::open_case(dir)?;
-    preview.profile.classification = source.classification;
-    preview.profile.classification_source = source.classification_source;
-    preview.profile.crop |= source.crop;
-    if matches!(preview.profile.subgrid, "IGBP" | "USGS") {
-        preview.profile.subgrid = source.classification;
-    }
-    preview.profile.domain_kind = source.domain_kind.clone();
-    preview.profile.shapefile = source.shapefile.clone();
-    preview.profile.run_host = source.run_host.clone();
-    preview.profile.remote_directory = source.remote_directory.clone();
+    carry_case_identity(&mut preview.profile, source);
     Ok(preview)
+}
+
+/// A preview is rebuilt from the model, so what the case itself recorded is carried over.
+fn carry_case_identity(
+    profile: &mut crate::project::CaseProfile,
+    source: &crate::project::CaseProfile,
+) {
+    profile.classification = source.classification;
+    profile.classification_source = source.classification_source;
+    profile.crop |= source.crop;
+    if matches!(profile.subgrid, "IGBP" | "USGS") {
+        profile.subgrid = source.classification;
+    }
+    profile.domain_kind = source.domain_kind.clone();
+    profile.shapefile = source.shapefile.clone();
+    profile.run_host = source.run_host.clone();
+    profile.remote_directory = source.remote_directory.clone();
 }
 #[tauri::command]
 pub async fn study_save_version(

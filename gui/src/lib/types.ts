@@ -216,6 +216,7 @@ export type AppPatch = Partial<AppState> | ((state: AppState) => Partial<AppStat
 export type WizardSeed = {
   form: Record<string, string>;
   case_values: Record<string, string>;
+  sites: Site[];
   drafts: import('../features/cases/multisite-model').MultiSiteDraft[];
   multi_site_mode: import('../features/cases/multisite-model').MultiSiteMode;
   multi_site_repeat: string;

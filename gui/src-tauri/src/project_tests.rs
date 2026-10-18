@@ -466,7 +466,7 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
     .unwrap();
     std::fs::write(
         dir.join("forcing.nml"),
-        "&nl_colm_forcing\n DEF_dir_forcing = '/data/forcing/'\n/\n",
+        "&nl_colm_forcing\n DEF_dir_forcing = '/data/forcing/'\n DEF_forcing%fprefix(1) = 'CN-Cng_Met.nc'\n/\n",
     )
     .unwrap();
     record_case(
@@ -497,6 +497,14 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
     assert_eq!(seed.drafts.len(), 1);
     assert_eq!(seed.drafts[0].site, "/data/sites/CN-Cng_site.nc");
     assert_eq!(seed.drafts[0].name, "CN-Cng");
+    // The site card needs no rescan: forcing file and period come from the case itself.
+    assert_eq!(seed.sites.len(), 1);
+    assert_eq!(
+        seed.sites[0].met_file.as_deref(),
+        Some("/data/forcing/CN-Cng_Met.nc")
+    );
+    assert_eq!(seed.sites[0].start, seed.drafts[0].start);
+    assert_eq!(seed.sites[0].end, seed.drafts[0].end);
     assert!(seed
         .case_values
         .keys()

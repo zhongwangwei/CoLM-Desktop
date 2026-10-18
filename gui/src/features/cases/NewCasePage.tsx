@@ -3053,18 +3053,19 @@ export default function NewCasePage() {
               </details>
               <p className="muted">
                 {t(
-                  '再次创建会得到新的算例；要查看或继续使用这些结果，请到该项目的运行页。',
-                  'Creating again makes new cases; to view or keep using these results, open the project run page.',
+                  '运行会沿用这些算例原来的设置，不做任何修改。要改设置，用“上一步”回到前面的页面，再创建新的算例。',
+                  'Running uses these cases exactly as they are. To change settings, go back through the steps and create new cases.',
                 )}
               </p>
               <Button
+                variant="primary"
                 disabled={!enabled}
                 onClick={() => {
                   if (!navigate('project')) return;
                   update({ projectView: { root: state.root ?? '', page: 'batch', home: false } });
                 }}
               >
-                {t('查看这些结果', 'View these results')}
+                {t('按原设置运行', 'Run as originally set')}
               </Button>
             </Card>
           )}
