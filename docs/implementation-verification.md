@@ -33786,3 +33786,25 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - **发布只留最新一轮**：release.yml 加了 `concurrency: release-${{ github.ref }}` 并开启 `cancel-in-progress`，新推送会取消同一分支或 tag 上还在跑的旧发布；被打断的发布由下一轮补上，因为它会看到发布不完整。
    - **sidecar 缓存**：CI 的 gui 作业和发布的 bundle 作业里，rust-cache 都改成缓存两个 workspace（`gui/src-tauri` 和 `. -> target`）。`ci.yml` 和 `bundle-release.sh` 在已有 `cargo-tauri` 时不再执行 `cargo install`。
 3. **预期**：内核源码和工具链不变时，发布各平台省去 33 分钟到 2 小时的内核编译；CI 的 macOS 打包冒烟在缓存命中后约省 15 分钟。第一次运行要先建缓存，耗时不变。工作流的语法只用 YAML 解析检查过，实际效果以下一轮 CI 为准。
+
+## 第 711 轮：历史记录看得懂——主题、结构化卡片、例行记录、测试隔离（2026-10-18）
+
+1. **原因**：研究、检查、建版本、新建算例这类记录既没有 `case_id`/`case_path`，也没有 `version_id`，卡片标题就退回 64 位的 `operation_id`。另外库里的 5245 条记录中，约 1700 条带测试特征（程序在 `target/debug`，路径在 `/var/folders/.../T/`），是跑 `cargo test` 时写进用户真实历史库的；还有大量内部动作，如自动保存设置 2497 条、绑定版本 569 条、核对研究状态 261 条、探测服务器 69 条。
+2. **写入时记主题**：colm-history 新增 `operation_subject(action, object, flag)`，colm-cli（`history_cmd::begin`）和桌面端（`command_event`）写历史时都调用它，在 `detail.subject` 里记下对象：
+   - 算例：站点名和所属项目，`new`/`site-new`/`spatial-new` 取 `--out`/`--name`，`mesh-new` 取上级目录；
+   - 研究、模型版本、代码工作区、服务器。
+
+   CLI 只从 `--out`、`--name`、`--study`、`--from`、`--host`、`--model-id` 这几个名称和路径参数里取值，不碰其它自由参数。
+3. **旧记录推断与卡片**：前端 `historySubject` 的取值顺序是 `detail.subject` → `case_path`（父目录作为项目）→ `case_id` → `--out`/`--name`/`detail.object`/命令首个参数 → `version_id` → 主机，实在没有时显示 `#` 加 8 位短 id。卡片排版：
+   - 第 1 行：动作（`historyActionLabel` 按 `detail.action` 区分"运行研究""研究预检""检查服务器"等）+ 状态；
+   - 第 2 行：对象名；
+   - 第 3 行："项目 xxx"或"N 个站点"；
+   - 一排标签：模型版本（`official` 显示为"官方版 r64"，其它版本按本机版本列表显示名称）· 位置 · 用时；
+   - 最后是时间。
+
+   详情标题和读屏标签也改用同一个名字。
+4. **例行记录**："显示自动例行记录"原先只按 kind 排除，而核对研究状态、探测服务器这类记录的 kind 是 `server`，没被藏住。现在 `Query` 新增 `exclude_actions`，按 `detail.action` 排除（用 `COALESCE`，没有动作的记录不会被误排除）。默认隐藏绑定版本、核对作业或研究状态、探测服务器；打开开关后，这些卡片以淡色显示。
+5. **测试不再写真实库**：仓库根新增 `.cargo/config.toml`，用 `[env]` 把 `COLM_HISTORY_DB` 设为 `target/test-history/history.sqlite3`，作用于 cargo 运行的测试和它们拉起的 colm-cli，`gui/src-tauri` 也会向上找到这份配置。由于模型库路径由历史库路径推出，测试的模型库也一并隔离到这里。打包出来的应用不受影响。
+   验证：整轮测试（Tauri 396、colm-history 39、colm-cli 串行全部、GUI 683）跑完后，真实库的记录数和删除标记数都保持 5245。
+6. **清理已有测试记录**：查库发现可见记录已经是 0 条。全部 5245 条都有删除标记：4046 条来自 10-17 18:37 的"清空历史记录"，1199 条来自今天 16:21:27，早于测试隔离（16:35），而且包含 GUI 写的设置保存和版本绑定，像是用户在应用里清空的。删除标记只是隐藏、可以恢复，所以没有再改动这个库，也就不需要备份。
+7. 新增测试：colm-history 的 `operation_subject`（算例、网格、研究、版本、工作区、服务器、参数误作对象）和 `exclude_actions`（含无动作记录保留）；前端的主题推断、动作标签、版本标签、用时、例行判定。

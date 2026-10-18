@@ -217,7 +217,7 @@ test('history presentation uses real recorded names and preserves unknown vocabu
   } as import('../../lib/types').HistoryOperation;
   assert.equal(historyObject(operation), 'CN-Cng');
   assert.equal(historyObject({ ...operation, case_path: null }), 'v1');
-  assert.equal(historyObject({ ...operation, case_path: null, version_id: null }), 'op-123');
+  assert.equal(historyObject({ ...operation, case_path: null, version_id: null }), '#op-123');
   assert.equal(historyKindLabel('run'), '运行');
   assert.equal(historyStatusLabel('succeeded'), '已完成');
   assert.equal(historyStatusLabel('completed_with_failures'), '部分失败');
@@ -361,4 +361,82 @@ test('replay notices always state that forcing contents were not verified', () =
   assert.match(text('verified'), /已核对一致/);
   assert.match(text('not-recorded'), /也未核对/);
   assert.match(replayVerificationText({}, true), /Forcing contents were not verified/);
+});
+
+test('history cards name what was done, to what, with which model, where and for how long', async () => {
+  const {
+    historyActionLabel,
+    historyDurationLabel,
+    historyInternal,
+    historySubject,
+    historyVersionLabel,
+  } = await import('./history');
+  type Operation = import('../../lib/types').HistoryOperation;
+  const base = {
+    operation_id: '7850f3ff9555c89a3f313e5d499356c8ada1b72c3b8590a9c54cb9ee5541639f',
+    kind: 'study',
+    case_path: null,
+    case_id: null,
+    version_id: null,
+    revision: null,
+    host: null,
+    detail: {},
+    command: null,
+  } as unknown as Operation;
+  // Recorded subjects win; older records fall back to the command's object or --out/--name.
+  assert.deepEqual(
+    historySubject({
+      ...base,
+      detail: { subject: { kind: 'case', name: 'AT-Neu', project: 'PLUMBER2' } },
+    }),
+    { name: 'AT-Neu', project: 'PLUMBER2', kind: 'case' },
+  );
+  assert.deepEqual(
+    historySubject({ ...base, detail: { action: 'study-run', object: '/work/studies/lai-fit' } }),
+    { name: 'lai-fit', project: 'studies' },
+  );
+  assert.deepEqual(
+    historySubject({
+      ...base,
+      kind: 'new',
+      detail: { action: 'new', args: { '--out': '/p/heihe/basin', '--name': 'Heihe' } },
+    }),
+    { name: 'Heihe', project: 'heihe' },
+  );
+  assert.deepEqual(
+    historySubject({
+      ...base,
+      command: { program: 'colm-cli', argv: ['ws-create', '--from', '/x'], cwd: null },
+    }),
+    { name: '#7850f3ff' },
+  );
+  assert.deepEqual(historySubject({ ...base, host: 'tms17l' }), { name: 'tms17l', kind: 'server' });
+
+  assert.equal(historyActionLabel({ ...base, detail: { action: 'study-run' } }), '运行研究');
+  assert.equal(historyActionLabel({ ...base, detail: { action: 'future-action' } }), '研究');
+  assert.equal(historyActionLabel(base), '研究');
+
+  assert.equal(historyVersionLabel({ version_id: 'official', revision: '64' }), '官方版 r64');
+  assert.equal(
+    historyVersionLabel({ version_id: 'model-1', revision: '2' }, { 'model-1': '雪方案' }),
+    '雪方案 r2',
+  );
+  assert.equal(
+    historyVersionLabel({ version_id: 'official', revision: null }, {}, true),
+    'Official',
+  );
+  assert.equal(historyVersionLabel({ version_id: null, revision: null }), null);
+
+  assert.equal(historyDurationLabel(158), '不到 1 秒');
+  assert.equal(historyDurationLabel(42_000), '42 秒');
+  assert.equal(historyDurationLabel(5 * 60_000), '5 分钟');
+  assert.equal(historyDurationLabel(3_900_000, true), '1 h 5 min');
+  assert.equal(historyDurationLabel(null), null);
+
+  assert.equal(historyInternal({ ...base, kind: 'case-config-save' }), true);
+  assert.equal(
+    historyInternal({ ...base, kind: 'server', detail: { action: 'remote-probe' } }),
+    true,
+  );
+  assert.equal(historyInternal({ ...base, kind: 'run', detail: { action: 'run' } }), false);
 });

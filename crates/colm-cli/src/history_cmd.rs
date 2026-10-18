@@ -343,6 +343,21 @@ pub(crate) fn begin(
     event.detail = json!({"action":command,"args":safe,"object":primary.first(),"command_capture":"public_arguments_only",
         "machine":{"os":std::env::consts::OS,"architecture":std::env::consts::ARCH,
         "logical_cpus":std::thread::available_parallelism().ok().map(|n|n.get())}});
+    if let Some(subject) = colm_history::operation_subject(
+        command,
+        primary.first().map(String::as_str),
+        // Only names and folders, never free-form values, name the subject.
+        &|key| {
+            matches!(
+                key,
+                "--out" | "--name" | "--study" | "--from" | "--host" | "--model-id"
+            )
+            .then(|| flags.get(key).cloned())
+            .flatten()
+        },
+    ) {
+        event.detail["subject"] = subject;
+    }
     if command.starts_with("remote-") {
         if let Some(connection) = colm_remote::auth::current_connection() {
             event.detail["login_method"] = json!(connection.auth);

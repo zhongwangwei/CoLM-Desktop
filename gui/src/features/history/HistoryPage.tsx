@@ -16,8 +16,12 @@ import {
 } from '../../components/ui';
 import {
   historyKindLabel,
+  historyActionLabel,
+  historyDurationLabel,
+  historyInternal,
+  historySubject,
+  historyVersionLabel,
   historyStatusLabel,
-  historyPhaseLabel,
   appLocale,
   historyObject,
   scopedHistoryFilter,
@@ -83,6 +87,9 @@ type EvaluationVariable = {
 };
 export default function HistoryPage({ casePath }: { casePath?: string }) {
   const { state, openCase, update, navigate } = useApp();
+  const versionNames = Object.fromEntries(
+    (state.versions ?? []).map((revision) => [revision.version.id, revision.name]),
+  );
   const en = state.language === 'en';
   const t = (zh: string, enText: string) => (en ? enText : zh);
   const [filter, setFilter] = useState<Filter>({ ...emptyFilter, casePath: casePath ?? '' }),
@@ -1193,6 +1200,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           {page.items.map((item) => {
             const selected = (group ?? detail?.operation)?.operation_id === item.operation_id;
             const status = item.needs_reconciliation ? 'pending' : item.status;
+            const subject = historySubject(item);
+            const version = historyVersionLabel(
+              item.run_group?.members[0] ?? item,
+              versionNames,
+              en,
+            );
+            const duration = historyDurationLabel(item.duration_ms, en);
             return (
               <ContextMenu
                 key={item.operation_id}
@@ -1202,7 +1216,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 <Button
                   variant="ghost"
                   role="listitem"
-                  className={`history-card history-card-${status} ${selected ? 'is-selected' : ''}`}
+                  className={`history-card history-card-${status} ${selected ? 'is-selected' : ''} ${historyInternal(item) ? 'is-routine' : ''}`}
                   aria-pressed={selected}
                   aria-label={`${t('查看记录', 'View record')} ${historyObject(item, en)}`}
                   title={item.case_path ?? item.operation_id}
@@ -1210,7 +1224,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   onClick={() => run(() => showItem(item))}
                 >
                   <span className="history-card-head">
-                    <span className="history-card-kind">{historyKindLabel(item.kind, en)}</span>
+                    <span className="history-card-kind">{historyActionLabel(item, en)}</span>
                     <span className={`history-status history-status-${status}`}>
                       {item.needs_reconciliation
                         ? t('待核对', 'Needs reconciliation')
@@ -1218,11 +1232,25 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     </span>
                   </span>
                   <strong className="history-card-title">{historyObject(item, en)}</strong>
-                  {item.run_group && (
+                  {(item.run_group || subject.project) && (
                     <span className="history-card-sub">
-                      {item.run_group.members.length} {t('个站点', 'stations')}
+                      {item.run_group
+                        ? `${item.run_group.members.length} ${t('个站点', 'stations')}`
+                        : `${t('项目', 'Project')} ${subject.project}`}
                     </span>
                   )}
+                  <span className="history-card-chips">
+                    {version && <span className="history-chip">{version}</span>}
+                    <span className="history-chip">
+                      {item.host ??
+                        (item.location === 'remote'
+                          ? t('服务器', 'Server')
+                          : item.location === 'local'
+                            ? t('本机', 'Local')
+                            : t('位置未记录', 'Location not recorded'))}
+                    </span>
+                    {duration && <span className="history-chip">{duration}</span>}
+                  </span>
                   <span className="history-card-meta">
                     {item.time_ms == null ? (
                       t('时间未记录', 'Time not recorded')
@@ -1237,15 +1265,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                         })}
                       </time>
                     )}
-                    <span>
-                      {historyPhaseLabel(item.phase, en)} ·{' '}
-                      {item.host ??
-                        (item.location === 'remote'
-                          ? t('远程', 'Remote')
-                          : item.location === 'local'
-                            ? t('本机', 'Local')
-                            : t('位置未记录', 'Location not recorded'))}
-                    </span>
                   </span>
                 </Button>
               </ContextMenu>

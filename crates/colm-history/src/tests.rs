@@ -1041,3 +1041,36 @@ fn audit_retains_hidden_roots_and_new_active_generations() {
     assert_eq!(export["total"], 0);
     assert_eq!(history.export_csv(&query).unwrap().lines().count(), 1);
 }
+
+#[test]
+fn routine_actions_are_left_out_while_records_without_an_action_stay() {
+    let h = ledger();
+    for (kind, action) in [
+        ("server", Some("remote-study-status")),
+        ("server", Some("remote-probe")),
+        ("run", Some("run")),
+        ("case", None),
+    ] {
+        let mut event = Event::start(kind);
+        if let Some(action) = action {
+            event.detail = json!({ "action": action });
+        }
+        h.append(&event).unwrap();
+    }
+    let all = h.query(&Query::default()).unwrap();
+    assert_eq!(all.total, 4);
+    let listed = h
+        .query(&Query {
+            exclude_actions: vec!["remote-study-status".into(), "remote-probe".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    let mut kinds = listed
+        .items
+        .iter()
+        .map(|item| item.latest.kind.clone())
+        .collect::<Vec<_>>();
+    kinds.sort();
+    assert_eq!(listed.total, 2);
+    assert_eq!(kinds, ["case", "run"]);
+}

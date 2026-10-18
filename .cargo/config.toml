@@ -1,0 +1,5 @@
+# Processes cargo runs (tests, and the colm-cli they spawn) write the operation ledger here,
+# never into the user's real history: 2026-10-18 about 1700 test records had piled up in it.
+# gui/src-tauri finds this file too. Packaged applications are not affected.
+[env]
+COLM_HISTORY_DB = { value = "target/test-history/history.sqlite3", relative = true }

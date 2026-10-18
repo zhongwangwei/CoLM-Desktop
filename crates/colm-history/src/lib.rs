@@ -6,6 +6,8 @@ mod import;
 mod provenance;
 pub use provenance::{capture_provenance, load_provenance};
 mod sanitize;
+mod subject;
+pub use subject::operation_subject;
 
 use anyhow::{ensure, Context, Result};
 pub use import::{ImportKind, ImportReport};
@@ -152,6 +154,9 @@ pub struct Query {
     pub needs_reconciliation: Option<bool>,
     /// Kinds left out of the listing (routine bookkeeping such as autosaves).
     pub exclude_kinds: Vec<String>,
+    /// Actions (`detail.action`) left out of the listing, for routine work recorded under a broad
+    /// kind such as `server` (status polls, connection checks).
+    pub exclude_actions: Vec<String>,
     pub offset: u64,
     pub limit: u64,
     pub ascending: bool,
@@ -172,6 +177,7 @@ impl Default for Query {
             to_ms: None,
             needs_reconciliation: None,
             exclude_kinds: Vec::new(),
+            exclude_actions: Vec::new(),
             offset: 0,
             limit: 100,
             ascending: false,
@@ -721,6 +727,14 @@ fn filter(
             "json_extract(payload,'$.kind') NOT IN ({placeholders})"
         ));
         values.extend(q.exclude_kinds.iter().cloned().map(Sql::Text));
+    }
+    if !q.exclude_actions.is_empty() {
+        let placeholders = vec!["?"; q.exclude_actions.len()].join(",");
+        // Records without an action stay listed: NULL NOT IN (...) would drop them.
+        clauses.push(format!(
+            "COALESCE(json_extract(payload,'$.detail.action'),'') NOT IN ({placeholders})"
+        ));
+        values.extend(q.exclude_actions.iter().cloned().map(Sql::Text));
     }
     if let Some(value) = &q.search {
         clauses.push("instr(lower(payload),lower(?))>0".into());

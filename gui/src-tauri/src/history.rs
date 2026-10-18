@@ -25,15 +25,28 @@ const ROUTINE_KINDS: &[&str] = &[
     "remote-status",
     "remote-study-status",
 ];
+/// Routine work recorded under a broad kind (`server`), recognized by its action.
+const ROUTINE_ACTIONS: &[&str] = &[
+    "model-migrate-case",
+    "remote-status",
+    "remote-study-status",
+    "remote-probe",
+];
 impl From<HistoryFilter> for Query {
     fn from(f: HistoryFilter) -> Self {
-        let exclude_kinds = if f.kind.is_none() && f.include_routine != Some(true) {
-            ROUTINE_KINDS.iter().map(|k| (*k).to_owned()).collect()
-        } else {
-            Vec::new()
-        };
+        let hide_routine = f.kind.is_none() && f.include_routine != Some(true);
+        let owned = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
         Self {
-            exclude_kinds,
+            exclude_kinds: if hide_routine {
+                owned(ROUTINE_KINDS)
+            } else {
+                Vec::new()
+            },
+            exclude_actions: if hide_routine {
+                owned(ROUTINE_ACTIONS)
+            } else {
+                Vec::new()
+            },
             kind: f.kind,
             case_path: f.case_path,
             version_id: f.version_id,
@@ -1153,6 +1166,11 @@ fn command_event(args: &[String], run_id: Option<&str>) -> Result<Option<Event>,
     );
     // Only these known public settings enter the ledger; auth and JSON requests never do.
     event.detail = serde_json::json!({"action":kind,"engine":flag("--engine"),"preprocessors":flag("--preprocessors"),"kernel":flag("--kernel"),"stage":flag("--stage"),"ranks":flag("--ranks"),"force":flag("--force")});
+    if let Some(subject) =
+        colm_history::operation_subject(kind, args.get(1).map(String::as_str), &|key| flag(key))
+    {
+        event.detail["subject"] = subject;
+    }
     if kind.starts_with("ws-") {
         event.detail["workspace_name"] = serde_json::json!(flag("--name"));
         event.detail["workspace_root"] = serde_json::json!(flag("--root"));

@@ -434,6 +434,12 @@ export function historyKindLabel(kind: string, en = false): string {
     'ws-patch': ['应用补丁', 'Apply patch'],
     'ws-revert-file': ['撤销文件改动', 'Revert file'],
     'ws-export': ['导出改动', 'Export changes'],
+    'study-preflight': ['研究预检', 'Study preflight'],
+    'remote-study-run': ['服务器运行研究', 'Run study on server'],
+    'remote-study-fetch': ['取回研究结果', 'Fetch study results'],
+    'remote-fetch': ['取回结果', 'Fetch results'],
+    'remote-probe': ['检查服务器', 'Check server'],
+    'engine-pack': ['打包引擎', 'Package engine'],
     check: ['检查', 'Check'],
     build: ['编译', 'Build'],
     assistant: ['助手', 'Assistant'],
@@ -473,6 +479,98 @@ export function historyPhaseLabel(phase?: string | null, en = false): string {
   };
   return labels[phase.toLowerCase()]?.[en ? 1 : 0] ?? phase;
 }
+/** The command an operation ran (`study-run`, `new`, …); older records only carry their kind. */
+export function historyAction(operation: HistoryOperation): string {
+  const action = operation.detail?.action;
+  return typeof action === 'string' && action ? action : operation.kind;
+}
+/** What the operation did, e.g. 运行研究 rather than the generic kind 研究. */
+export function historyActionLabel(operation: HistoryOperation, en = false): string {
+  const action = historyAction(operation);
+  const label = historyKindLabel(action, en);
+  return label === action || label === action.replace(/[-_]/g, ' ')
+    ? historyKindLabel(operation.kind, en)
+    : label;
+}
+/** Bookkeeping the app does by itself (binding versions, polling servers, autosaving settings). */
+export function historyInternal(operation: HistoryOperation): boolean {
+  if (operation.run_group) return false;
+  return (
+    operation.kind === 'case-config-save' ||
+    ['model-migrate-case', 'remote-status', 'remote-study-status', 'remote-probe'].includes(
+      historyAction(operation),
+    )
+  );
+}
+const lastName = (path: string) =>
+  path
+    .replace(/[\\/]+$/, '')
+    .split(/[\\/]/)
+    .pop() || '';
+const parentName = (path: string) =>
+  lastName(path.replace(/[\\/]+$/, '').replace(/[\\/][^\\/]*$/, ''));
+const nonEmpty = (value: unknown) => (typeof value === 'string' && value ? value : undefined);
+/**
+ * The record's subject as a name and its project: recorded since 2026-10-18 as
+ * `detail.subject`, and derived from the case path, the command's first argument or its
+ * `--out`/`--name` for older records. Unknown subjects show a short record number.
+ */
+export function historySubject(operation: HistoryOperation): {
+  name: string;
+  project?: string;
+  kind?: string;
+} {
+  const subject = operation.detail?.subject as
+    { kind?: unknown; name?: unknown; project?: unknown } | undefined;
+  if (nonEmpty(subject?.name))
+    return {
+      name: nonEmpty(subject?.name)!,
+      project: nonEmpty(subject?.project),
+      kind: nonEmpty(subject?.kind),
+    };
+  if (operation.case_path)
+    return {
+      name: lastName(operation.case_path),
+      project: parentName(operation.case_path) || undefined,
+    };
+  if (operation.case_id) return { name: operation.case_id };
+  const args = (operation.detail?.args ?? {}) as Record<string, unknown>;
+  const path =
+    nonEmpty(args['--out']) ??
+    nonEmpty(operation.detail?.object) ??
+    nonEmpty(operation.detail?.workspace_name) ??
+    nonEmpty(operation.command?.argv?.[1])?.replace(/^-.*/, '');
+  const name = nonEmpty(args['--name']) ?? (path ? lastName(path) : undefined);
+  if (name) return { name, project: path ? parentName(path) || undefined : undefined };
+  if (operation.version_id) return { name: operation.version_id, kind: 'version' };
+  if (operation.host) return { name: operation.host, kind: 'server' };
+  return { name: `#${operation.operation_id.slice(0, 8)}` };
+}
+/** `official` r64 → 官方版 r64; other versions by their registry name when known. */
+export function historyVersionLabel(
+  operation: Pick<HistoryOperation, 'version_id' | 'revision'>,
+  names: Record<string, string> = {},
+  en = false,
+): string | null {
+  if (!operation.version_id) return null;
+  const name =
+    operation.version_id === 'official'
+      ? en
+        ? 'Official'
+        : '官方版'
+      : (names[operation.version_id] ?? operation.version_id);
+  return operation.revision ? `${name} r${operation.revision}` : name;
+}
+export function historyDurationLabel(ms: number | null | undefined, en = false): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  if (ms < 1000) return en ? '< 1 s' : '不到 1 秒';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return en ? `${seconds} s` : `${seconds} 秒`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return en ? `${minutes} min` : `${minutes} 分钟`;
+  const hours = Math.floor(minutes / 60);
+  return en ? `${hours} h ${minutes % 60} min` : `${hours} 小时 ${minutes % 60} 分`;
+}
 export function historyObject(operation: HistoryOperation, en = false): string {
   if (operation.run_group) {
     const parents = operation.run_group.members.map((member) =>
@@ -485,15 +583,7 @@ export function historyObject(operation: HistoryOperation, en = false): string {
         ? 'Multi-site run'
         : '多站点运行';
   }
-  return (
-    operation.case_id ||
-    operation.case_path
-      ?.replace(/[\\/]+$/, '')
-      .split(/[\\/]/)
-      .pop() ||
-    operation.version_id ||
-    operation.operation_id
-  );
+  return historySubject(operation).name;
 }
 
 export type HistoryDeletePlan = {
