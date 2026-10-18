@@ -135,3 +135,39 @@ test('openCase still reports success when only remembering the project root fail
   assert.equal(current.current.busy, false);
   assert.deepEqual(notices, ['Error: recent store is read-only']);
 });
+
+test('error notices keep their error style until they scroll out or are dismissed', () => {
+  const path = new URL('./app-state.tsx', import.meta.url);
+  const source = ts.createSourceFile(
+    path.pathname,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'notify')
+      body = node.initializer!.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  assert.ok(body);
+  const state: { notices: string[]; errorNotices?: string[] } = { notices: [] };
+  const update = (patch: (old: typeof state) => Partial<typeof state>) =>
+    Object.assign(state, patch(state));
+  const code = ts.transpileModule(`const callback = (${body});`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const notify = new Function('update', 'useCallback', `${code}; return callback;`)(
+    update,
+    (callback: unknown) => callback,
+  ) as (message: string, error?: boolean) => void;
+  notify('saved');
+  notify('cannot reach server', true);
+  assert.deepEqual(state.notices, ['saved', 'cannot reach server']);
+  assert.deepEqual(state.errorNotices, ['cannot reach server']);
+  for (const message of ['a', 'b', 'c', 'd', 'e']) notify(message);
+  assert.ok(!state.notices.includes('cannot reach server'));
+  assert.deepEqual(state.errorNotices, [], 'an error that scrolled out is forgotten');
+});

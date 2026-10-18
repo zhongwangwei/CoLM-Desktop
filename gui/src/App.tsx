@@ -175,10 +175,15 @@ export default function App() {
         <main className="main-pane">
           <div className="notifications" aria-live="polite">
             {state.notices.map((message, index) => (
-              <Notice key={`${index}:${message}`}>{message}</Notice>
+              <Notice
+                key={`${index}:${message}`}
+                tone={state.errorNotices?.includes(message) ? 'error' : 'info'}
+              >
+                {message}
+              </Notice>
             ))}
             {state.notices.length > 0 && (
-              <Button variant="ghost" onClick={() => update({ notices: [] })}>
+              <Button variant="ghost" onClick={() => update({ notices: [], errorNotices: [] })}>
                 {tr('收起提示', 'Dismiss')}
               </Button>
             )}

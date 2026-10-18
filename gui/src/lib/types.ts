@@ -205,6 +205,8 @@ export type AppState = {
   assistantSettingsOpen: boolean;
   running: Record<string, RunState>;
   notices: string[];
+  /** Notices raised as errors (`notify(message, true)`), shown in the error style. */
+  errorNotices?: string[];
   busy: boolean;
 };
 export type AppPatch = Partial<AppState> | ((state: AppState) => Partial<AppState>);

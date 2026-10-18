@@ -84,10 +84,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
   const notify = useCallback(
-    (message: string) =>
-      update((old) => ({
-        notices: old.notices.at(-1) === message ? old.notices : [...old.notices.slice(-4), message],
-      })),
+    (message: string, error = false) =>
+      update((old) => {
+        const notices =
+          old.notices.at(-1) === message ? old.notices : [...old.notices.slice(-4), message];
+        const errors = (old.errorNotices ?? []).filter((item) => notices.includes(item));
+        return {
+          notices,
+          errorNotices: error && !errors.includes(message) ? [...errors, message] : errors,
+        };
+      }),
     [update],
   );
   const registerNavigationGuard = useCallback((guard: NavigationGuard) => {
