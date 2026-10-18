@@ -33889,3 +33889,11 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 4. **e2e 实测**（`--features e2e-driver`，隔离 HOME）：第 1 步服务器 tms17l、Rust 引擎、`/tera11/zhwei/Personal/CoLM/colm-desktop` + 名称 333 都已填；第 3 步站点目录 `/shr03/CoLM_Forcing/PLUMBER2s/Sitedata`、强迫场、rawdata、runtime 已填，站点列表待读取。
 5. **没覆盖**：选中的站点清单没有还原（需重新读取并勾选）；批量运行页在 debug 版里 `model_case_profiles` 每个算例仍约 1.4 s，release 版没量过。运行面板尚未标出"这是上一次的结果"。
 6. 验证：Tauri 测试 `a_project_reopens_as_the_form_it_was_created_with`、`case_profiles_are_read_without_leaving_previews`；GUI 688 条；tsc、fmt、clippy 通过。
+7. **补齐第 2–5 步（同轮追加）**：上面只预填了第 1 步，用户指出其余步骤没还原。`project_wizard_seed` 现在返回完整种子：
+   - `form`：第 1–3 步；
+   - `case_values`：第一个算例 `case.nml` 里 schema 已知的选项（输出间隔、各过程开关等），不含路径、算例名、起止/预热时间和由次网格决定的开关，字符串去引号以符合页面的表示；
+   - `drafts` / `multi_site_mode` / `multi_site_repeat`：每个站点的站点文件、算例名、起止与预热结束日，按"各站都是起始后一年结束、重复次数一致"判成首年预热，否则逐站配置。
+   第 3 步 e2e 实测：已选 90 个站点、预热方式 first-year、各目录都在；站点列表本身要连服务器读，隔离环境没连，所以"下一步"被"请重新扫描"挡住（真实环境进第 3 步会自动读取）。
+8. **第 5 步显示上次结果**：历史页打开项目时把该项目每个算例的最近一次结果（汇总、时间、逐站状态）放进种子的 `previousResults`；第 5 步顶部显示"这个项目之前的运行结果"卡片，可展开逐站列表，并带"查看这些结果"回项目运行页。种子在页面接管后会被清空，所以这份数据在首次渲染时存进 ref——测试里抓到的缺陷：直接读 `state.newCaseSeed` 第二次渲染就没了。
+9. **直接运行不再有两个 CPU 输入框**：调度系统是"直接运行"（`bare`，tms17l 的默认）且不是多站点时，不存在"申请 CPU"，每个算例用的 CPU 就是它的线程数；隐藏"申请 CPU 数"，提交时 `cpus` 取线程数。多站点仍是"申请 CPU 数 = 同时运行的站点数"（每站 1 个）；Slurm/PBS/LSF 仍有两个输入。
+10. 验证：GUI 690 条（新增直接运行的 CPU、重开项目的上次结果卡片、历史页种子）；Tauri 项目测试 23 条（种子含逐站草稿和选项）；tsc、fmt、clippy 通过。第 4、5 步没能在隔离 e2e 里走到（要先读到站点），靠单元测试覆盖。

@@ -6,6 +6,7 @@ import * as caseModel from './case-model';
 import * as configuration from '../versions/configuration-options';
 import * as simulation from './simulation-model';
 import * as multiSiteModel from './multisite-model';
+import * as historyModel from '../history/history';
 import * as modelSettings from './model-settings';
 import * as historyVariables from './history-variables';
 import { compatibleKernel, type KernelChoice } from '../runs/run-model';
@@ -127,6 +128,7 @@ function page(
     ...configuration,
     ...simulation,
     ...multiSiteModel,
+    ...historyModel,
     ...modelSettings,
     ...historyVariables,
     fieldInputOptions,
@@ -3937,6 +3939,64 @@ test('server resource choices inherit configured defaults and reject invalid num
   await p.click('new-create');
   assert.equal(p.state.projectRunSettings?.scheduler, 'bare');
   assert.equal(p.state.projectRunSettings?.threads, '2');
+});
+
+test('direct execution has no separate CPU request: the CPUs are the case threads', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        { host: 'cluster', root: '/work', maps: [], threads: 8, cpus: 4, scheduler: 'bare' },
+      ],
+    },
+  );
+  await p.mount();
+  assert.equal(p.render().fields.find((field) => field.id === 'new-run-scheduler')?.value, 'bare');
+  assert.ok(!p.render().fields.some((field) => field.id === 'new-run-cpus'));
+  p.set('new-run-threads', '6');
+  await p.click('new-create');
+  assert.equal(p.state.projectRunSettings?.threads, '6');
+  assert.equal(p.state.projectRunSettings?.cpus, '6');
+});
+
+test('a reopened project shows what it already ran on the last step', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+      previousResults: {
+        counts: { succeeded: 2, failed: 1, running: 0, pending: 0 },
+        time_ms: 1760000000000,
+        cases: [
+          { name: 'AT-Neu', status: 'succeeded', time_ms: 1760000000000 },
+          { name: 'AU-Cpr', status: 'failed', time_ms: 1760000000000 },
+        ],
+      },
+    },
+    [site],
+    initialValues,
+    { servers: [{ host: 'cluster', root: '/work', maps: [], scheduler: 'slurm' }] },
+  );
+  await p.mount();
+  p.render();
+  const card = p.elements.find((item) =>
+    String((item.props as { title?: string })?.title ?? '').includes('之前的运行结果'),
+  );
+  assert.ok(card, 'the previous results card is rendered');
+  assert.match(String((card.props as { description?: string }).description), /成功 2 · 失败 1/);
 });
 
 test('multi-site success opens the created project only after all spinup writes finish', async () => {

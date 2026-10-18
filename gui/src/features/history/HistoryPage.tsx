@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import type { CaseEntry, HistoryOperation } from '../../lib/types';
+import type { CaseEntry, HistoryOperation, WizardSeed } from '../../lib/types';
 import {
   Advanced,
   Button,
@@ -41,6 +41,7 @@ import {
   comparisonArgs,
   comparisonWinner,
   historySections,
+  projectPreviousResults,
   historyReferences,
   historyEvents,
   historyRecordExport,
@@ -253,7 +254,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   }
   // From a project's history to where it is simulated: a multi-site project's batch run page,
   // a single case's simulation settings. Not the case list, which is one more step away.
-  async function openProject(path: string) {
+  async function openProject(path: string, project?: HistoryOperation['project_group']) {
     const cases = await invokeJson<CaseEntry[]>('list_cases', { root: path });
     const switching = path !== state.root ? { selectedCase: null } : {};
     if (cases.length === 1) {
@@ -263,18 +264,23 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     }
     // A multi-site project reopens as the first page of 新建模拟 with everything it was created with,
     // not as a run page that would show the last run again.
-    const form = await invokeJson<Record<string, string>>('project_wizard_seed', { root: path });
+    const seed = await invokeJson<WizardSeed>('project_wizard_seed', { root: path });
     if (!navigate('new-case')) return;
     update({
       root: path,
       cases,
       projectCasesOpen: false,
       newCaseSeed: {
-        form,
+        form: seed.form,
         sites: [],
+        caseValues: seed.case_values,
         step: 1,
-        ownData: form.kind === 'site',
+        ownData: seed.form.kind === 'site',
         multiSiteEnabled: true,
+        multiSiteMode: seed.multi_site_mode,
+        multiSiteRepeat: seed.multi_site_repeat,
+        siteDrafts: seed.drafts,
+        ...(project ? { previousResults: projectPreviousResults(project) } : {}),
       },
       ...switching,
     });
@@ -676,7 +682,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       label: t('打开这个项目', 'Open this project'),
       kind: 'click',
       enabled: !busy,
-      run: () => action(() => openProject(path)),
+      run: () => action(() => openProject(path, group.project_group)),
     });
   }
   if (group?.run_group) {
@@ -1380,7 +1386,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 <span className="muted">{group.project_group.name}</span>
                 <Button
                   disabled={busy}
-                  onClick={() => run(() => openProject(group.project_group!.path))}
+                  onClick={() =>
+                    run(() => openProject(group.project_group!.path, group.project_group))
+                  }
                 >
                   {t('打开这个项目', 'Open this project')}
                 </Button>
@@ -1392,7 +1400,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   <Button
                     variant="primary"
                     disabled={busy}
-                    onClick={() => run(() => openProject(group.project_group!.path))}
+                    onClick={() =>
+                      run(() => openProject(group.project_group!.path, group.project_group))
+                    }
                   >
                     {t('打开这个项目', 'Open this project')}
                   </Button>

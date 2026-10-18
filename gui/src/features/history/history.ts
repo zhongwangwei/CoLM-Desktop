@@ -1,7 +1,7 @@
 import { download as exportText } from '../../lib/utils';
 import { bilingual } from '../../lib/bilingual';
 import { utcSeconds } from '../../lib/dates';
-import type { AppState, CaseEntry, HistoryOperation } from '../../lib/types';
+import type { AppState, CaseEntry, HistoryOperation, PreviousResults } from '../../lib/types';
 export type Filter = {
   query: string;
   kind: string;
@@ -607,6 +607,31 @@ export function projectSummary(group: NonNullable<HistoryOperation['project_grou
       latestPerCase.set(member.case_path, member);
   return { cases: latestPerCase.size, counts: countStatuses([...latestPerCase.values()]) };
 }
+/** The latest result of every case in a project, for showing what was already run. */
+export function projectPreviousResults(
+  group: NonNullable<HistoryOperation['project_group']>,
+): PreviousResults {
+  const real = group.members.filter((member) => member.phase !== 'imported');
+  const latestPerCase = new Map<string, HistoryOperation>();
+  for (const member of [...(real.length ? real : group.members)].sort((a, b) => when(b) - when(a)))
+    if (member.case_path && !latestPerCase.has(member.case_path))
+      latestPerCase.set(member.case_path, member);
+  const latest = [...latestPerCase.values()];
+  return {
+    counts: countStatuses(latest),
+    time_ms: latest.reduce(
+      (newest, member) => Math.max(newest, member.finished_ms ?? when(member)),
+      0,
+    ),
+    cases: latest
+      .map((member) => ({
+        name: member.case_id ?? member.case_path!.replace(/[\\/]+$/, '').replace(/^.*[\\/]/, ''),
+        status: member.needs_reconciliation ? 'pending' : member.status,
+        time_ms: member.finished_ms ?? when(member),
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+  };
+}
 export function statusCountsLabel(counts: ProjectTimelineRow['counts'], en = false): string {
   const parts = [
     counts.succeeded && (en ? `${counts.succeeded} succeeded` : `成功 ${counts.succeeded}`),
@@ -742,4 +767,13 @@ export function replayVerificationText(result: unknown, en = false) {
   return en
     ? `Rerun with the recorded model version and settings. Forcing contents were not verified; ${tail}`
     : `已按记录的模型版本和设置重跑。强迫场内容未核对；${tail}`;
+}
+
+/** A project's per-case status as one short word. */
+export function previousStatusLabel(status: string, en = false): string {
+  if (['succeeded', 'completed'].includes(status)) return en ? 'succeeded' : '成功';
+  if (['failed', 'completed_with_failures'].includes(status)) return en ? 'failed' : '失败';
+  if (status === 'cancelled') return en ? 'cancelled' : '已取消';
+  if (status === 'pending') return en ? 'to reconcile' : '待核对';
+  return en ? 'running' : '进行中';
 }

@@ -62,10 +62,7 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
 
 /// 把一个已有项目的设置还原成「新建模拟」第一页的表单：项目里每个算例都带着建例时的选择，
 /// 取第一个算例即可。读不到的字段留空，由向导自己的默认值与按服务器记住的路径补上。
-#[tauri::command]
-pub fn project_wizard_seed(
-    root: String,
-) -> Result<std::collections::BTreeMap<String, String>, String> {
+fn project_wizard_form(root: String) -> Result<std::collections::BTreeMap<String, String>, String> {
     use crate::config::character;
     let cases = list_cases(root.clone())?;
     let first = cases.first().ok_or_else(|| format!("{root} 里没有算例"))?;
@@ -146,6 +143,139 @@ pub fn project_wizard_seed(
         }),
     );
     Ok(form)
+}
+
+/// 向导第 3 步里的一个站点：站点文件、算例名、起止与预热结束日。
+#[derive(Debug, Serialize, PartialEq)]
+pub struct WizardSiteDraft {
+    pub site: String,
+    pub name: String,
+    pub start: String,
+    pub end: String,
+    pub spinup_end: String,
+    pub spinup_repeat: String,
+}
+
+/// 一个已有项目还原成「新建模拟」五步所需的全部输入。
+#[derive(Debug, Serialize, PartialEq)]
+pub struct WizardSeed {
+    /// 第 1–3 步的表单。
+    pub form: std::collections::BTreeMap<String, String>,
+    /// 第 4–5 步的模型方案与输出选项（取自第一个算例的 `case.nml`）。
+    pub case_values: std::collections::BTreeMap<String, String>,
+    /// 多站点项目的逐站设置；空间项目为空。
+    pub drafts: Vec<WizardSiteDraft>,
+    /// `first-year`：每站都是起始后一年结束预热、重复次数一致；否则 `per-site`。
+    pub multi_site_mode: &'static str,
+    pub multi_site_repeat: String,
+}
+
+fn first_year_cutoff(start: &str) -> Option<String> {
+    let year: i64 = start.get(..4)?.parse().ok()?;
+    Some(format!("{:04}{}", year + 1, start.get(4..)?))
+}
+
+/// 向导不当作「可编辑选项」的字段：路径、身份、时间与由次网格模式决定的开关。
+fn wizard_skips(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.starts_with("def_simulation_time%start_")
+        || lower.starts_with("def_simulation_time%end_")
+        || lower.starts_with("def_simulation_time%spinup_")
+        || lower.starts_with("site_")
+        || matches!(
+            lower.as_str(),
+            "def_case_name"
+                | "def_forcing_namelist"
+                | "def_subgrid_scheme"
+                | "def_use_lct"
+                | "def_use_pft"
+                | "def_use_pc"
+        )
+        || ["dir_", "file_", "fsitedata", "filename", "path"]
+            .iter()
+            .any(|part| lower.contains(part))
+}
+
+#[tauri::command]
+pub fn project_wizard_seed(root: String) -> Result<WizardSeed, String> {
+    use crate::config::integer;
+    let form = project_wizard_form(root.clone())?;
+    let cases = list_cases(root)?;
+    let mut case_values = std::collections::BTreeMap::new();
+    if let Some(doc) = cases
+        .first()
+        .and_then(|case| std::fs::read_to_string(Path::new(&case.dir).join("case.nml")).ok())
+        .and_then(|text| colm_namelist::parse(&text).ok())
+    {
+        for name in doc.paths() {
+            let known = colm_schema::find(&name).is_some() || name.starts_with("DEF_hist_vars%");
+            if !known || wizard_skips(&name) {
+                continue;
+            }
+            if let Some(value) = doc.get(&name) {
+                // The page keeps strings bare ("DAILY") and logicals as literals (".true.").
+                let text = match value {
+                    colm_namelist::Value::Str(text) => text.clone(),
+                    other => other.to_string(),
+                };
+                case_values.insert(name, text);
+            }
+        }
+    }
+    let mut drafts = Vec::new();
+    for case in cases.iter().filter(|case| !case.spatial) {
+        let dir = Path::new(&case.dir);
+        let Ok(text) = std::fs::read_to_string(dir.join("case.nml")) else {
+            continue;
+        };
+        let record = recorded_case(dir);
+        let Some(site) = record.site.clone() else {
+            continue;
+        };
+        let Ok(profile) = case_profile(&text, false, None, record.mode.as_deref()) else {
+            continue;
+        };
+        let Ok(doc) = colm_namelist::parse(&text) else {
+            continue;
+        };
+        let spinup = |unit: &str| integer(&doc, &format!("DEF_simulation_time%spinup_{unit}"));
+        let spinup_end = if spinup("year") > 0 {
+            format!(
+                "{:04}-{:02}-{:02}",
+                spinup("year"),
+                spinup("month"),
+                spinup("day")
+            )
+        } else {
+            String::new()
+        };
+        drafts.push(WizardSiteDraft {
+            site,
+            name: case.name.clone(),
+            start: profile.inputs.start,
+            end: profile.inputs.end,
+            spinup_end,
+            spinup_repeat: integer(&doc, "DEF_simulation_time%spinup_repeat")
+                .max(1)
+                .to_string(),
+        });
+    }
+    let repeat = drafts
+        .first()
+        .map(|draft| draft.spinup_repeat.clone())
+        .unwrap_or_else(|| "1".to_owned());
+    let first_year = !drafts.is_empty()
+        && drafts.iter().all(|draft| {
+            draft.spinup_repeat == repeat
+                && first_year_cutoff(&draft.start).as_deref() == Some(draft.spinup_end.as_str())
+        });
+    Ok(WizardSeed {
+        form,
+        case_values,
+        drafts,
+        multi_site_mode: if first_year { "first-year" } else { "per-site" },
+        multi_site_repeat: repeat,
+    })
 }
 
 /// 打开已有算例时从 `case.nml`（和跑过时的 `stages.json`）反推出的向导选择，前端据此恢复会话。

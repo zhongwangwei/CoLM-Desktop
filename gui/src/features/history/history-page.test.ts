@@ -565,12 +565,46 @@ test('a project card opens its timeline, batching stations, and a case opens its
   const seedRequest = h.requests.at(-1)!;
   assert.equal(seedRequest.command, 'project_wizard_seed');
   assert.deepEqual(seedRequest.args, { root: '/cache/222' });
-  seedRequest.resolve({ host: 'tms17l', kind: 'site', subgrid: 'PC' });
+  seedRequest.resolve({
+    form: { host: 'tms17l', kind: 'site', subgrid: 'PC' },
+    case_values: { DEF_HIST_FREQ: "'HOURLY'" },
+    drafts: [
+      {
+        site: '/s/AT-Neu.nc',
+        name: 'AT-Neu',
+        start: '2002-01-01',
+        end: '2013-01-01',
+        spinup_end: '2003-01-01',
+        spinup_repeat: '1',
+      },
+    ],
+    multi_site_mode: 'first-year',
+    multi_site_repeat: '1',
+  });
   await h.settle();
   assert.deepEqual(h.routes.at(-1), 'new-case');
-  const seeded = (h.updates.at(-1) as { newCaseSeed: { form: unknown; step: number } }).newCaseSeed;
+  const seeded = (
+    h.updates.at(-1) as {
+      newCaseSeed: {
+        form: unknown;
+        step: number;
+        caseValues: unknown;
+        siteDrafts: { name: string }[];
+        multiSiteMode: string;
+        previousResults?: { cases: { name: string; status: string }[] };
+      };
+    }
+  ).newCaseSeed;
   assert.deepEqual(seeded.form, { host: 'tms17l', kind: 'site', subgrid: 'PC' });
   assert.equal(seeded.step, 1);
+  assert.deepEqual(seeded.caseValues, { DEF_HIST_FREQ: "'HOURLY'" });
+  assert.deepEqual(
+    seeded.siteDrafts.map((draft) => draft.name),
+    ['AT-Neu'],
+  );
+  assert.equal(seeded.multiSiteMode, 'first-year');
+  // What the project already ran is carried along for the last step.
+  assert.ok(seeded.previousResults && seeded.previousResults.cases.length > 0);
   assert.ok(h.guide().actions.some((action) => action.id === 'history-open-project'));
   // A single case opens on its simulation settings.
   h.click('Open this project');

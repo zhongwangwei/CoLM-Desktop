@@ -460,6 +460,11 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
     let root = tmp("wizard-seed");
     let dir = make_case(&root, "site", "CN-Cng");
     std::fs::write(
+        dir.join("case.nml"),
+        "&nl_colm\n DEF_CASE_NAME = 'CN-Cng'\n DEF_HIST_FREQ = 'HOURLY'\n DEF_dir_output = '/x/out/'\n DEF_simulation_time%spinup_year = 2009\n/\n",
+    )
+    .unwrap();
+    std::fs::write(
         dir.join("forcing.nml"),
         "&nl_colm_forcing\n DEF_dir_forcing = '/data/forcing/'\n/\n",
     )
@@ -476,7 +481,8 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
         },
     )
     .unwrap();
-    let form = project_wizard_seed(root.to_string_lossy().into_owned()).unwrap();
+    let seed = project_wizard_seed(root.to_string_lossy().into_owned()).unwrap();
+    let form = &seed.form;
     let get = |key: &str| form.get(key).map(String::as_str);
     assert_eq!(get("host"), Some("compute"));
     assert_eq!(get("engine"), Some("rust"));
@@ -487,6 +493,18 @@ fn a_project_reopens_as_the_form_it_was_created_with() {
     assert_eq!(get("forcingdir"), Some("/data/forcing/"));
     // A server project keeps its local cache out of the form: the wizard picks the cache itself.
     assert_eq!(get("root"), None);
+    // Each site comes back as a draft, and paths or per-site times never leak into the options.
+    assert_eq!(seed.drafts.len(), 1);
+    assert_eq!(seed.drafts[0].site, "/data/sites/CN-Cng_site.nc");
+    assert_eq!(seed.drafts[0].name, "CN-Cng");
+    assert!(seed
+        .case_values
+        .keys()
+        .all(|name| !name.contains("dir_") && !name.contains("spinup_")));
+    assert_eq!(
+        seed.case_values.get("DEF_HIST_FREQ").map(String::as_str),
+        Some("HOURLY")
+    );
 }
 
 #[test]

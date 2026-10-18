@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { previousStatusLabel, statusCountsLabel } from '../history/history';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, listen } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
@@ -144,6 +145,8 @@ export default function NewCasePage() {
     en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const seed = state.newCaseSeed;
+  // The seed is cleared once the page has taken it, so what the project already ran is kept here.
+  const previousResults = useRef(seed?.previousResults).current;
   const initialRoot = seed?.form?.root ?? state.root ?? '',
     initialName = seed?.form?.name ?? '';
   const initialLandcover = seed?.form?.landcover ?? '';
@@ -216,14 +219,6 @@ export default function NewCasePage() {
     };
   }, [templateForcing, form.kind]);
   const resourceServer = servers?.find((server) => server.host === form.host);
-  const runSettings = {
-    host: form.host,
-    threads: form.run_threads || String(resourceServer?.threads || 1),
-    ranks: form.engine === 'fortran' ? form.run_ranks : '1',
-    workers: form.run_workers,
-    scheduler: form.run_scheduler || resourceServer?.scheduler || 'auto',
-    cpus: form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
-  };
   const [localData, setLocalData] = useState<DataDefaults | null>(null);
   useEffect(() => {
     let current = true;
@@ -349,6 +344,20 @@ export default function NewCasePage() {
     resolve: (path: string | null) => void;
   } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
+  const scheduler = form.run_scheduler || resourceServer?.scheduler || 'auto';
+  // Direct execution allocates nothing, so the CPUs a case uses are simply its threads.
+  const directRun = !!form.host && scheduler === 'bare' && !multiSite;
+  const runThreads = form.run_threads || String(resourceServer?.threads || 1);
+  const runSettings = {
+    host: form.host,
+    threads: runThreads,
+    ranks: form.engine === 'fortran' ? form.run_ranks : '1',
+    workers: form.run_workers,
+    scheduler,
+    cpus: directRun
+      ? runThreads
+      : form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
+  };
   // Paths remembered for this resource and simulation kind (site folders, boundary or grid
   // files, forcing). Filled once per resource/kind/grid/forcing mode, only into empty fields or
   // ones still holding an earlier prefill; prefills the user left alone are cleared when they no
@@ -1944,18 +1953,22 @@ export default function NewCasePage() {
             ],
             set: (value: string) => set('run_scheduler', value),
           },
-          {
-            id: 'new-run-cpus',
-            label: multiSite
-              ? t(
-                  '申请 CPU 数 = 同时运行的站点数（每个站点 1 个 CPU）',
-                  'Allocated CPUs = stations running at once (one CPU per station)',
-                )
-              : t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
-            value: runSettings.cpus,
-            type: 'number' as const,
-            set: (value: string) => set('run_cpus', value),
-          },
+          ...(directRun
+            ? []
+            : [
+                {
+                  id: 'new-run-cpus',
+                  label: multiSite
+                    ? t(
+                        '申请 CPU 数 = 同时运行的站点数（每个站点 1 个 CPU）',
+                        'Allocated CPUs = stations running at once (one CPU per station)',
+                      )
+                    : t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
+                  value: runSettings.cpus,
+                  type: 'number' as const,
+                  set: (value: string) => set('run_cpus', value),
+                },
+              ]),
         ]
       : []),
   ].map((field) => ({ ...field, disabled: !enabled }));
@@ -3015,6 +3028,46 @@ export default function NewCasePage() {
       )}
       {step === 5 && (
         <>
+          {previousResults && previousResults.cases.length > 0 && (
+            <Card
+              title={t('这个项目之前的运行结果', 'Previous results of this project')}
+              description={`${statusCountsLabel(previousResults.counts, en)} · ${new Date(
+                previousResults.time_ms,
+              ).toLocaleString(en ? 'en-US' : 'zh-CN')}`}
+            >
+              <details>
+                <summary>
+                  {t(
+                    `各站点的最近一次结果（${previousResults.cases.length} 个）`,
+                    `Latest result per site (${previousResults.cases.length})`,
+                  )}
+                </summary>
+                <ul className="simulation-previous-results">
+                  {previousResults.cases.map((item) => (
+                    <li key={item.name}>
+                      <strong>{item.name}</strong> · {previousStatusLabel(item.status, en)} ·{' '}
+                      {new Date(item.time_ms).toLocaleString(en ? 'en-US' : 'zh-CN')}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+              <p className="muted">
+                {t(
+                  '再次创建会得到新的算例；要查看或继续使用这些结果，请到该项目的运行页。',
+                  'Creating again makes new cases; to view or keep using these results, open the project run page.',
+                )}
+              </p>
+              <Button
+                disabled={!enabled}
+                onClick={() => {
+                  if (!navigate('project')) return;
+                  update({ projectView: { root: state.root ?? '', page: 'batch', home: false } });
+                }}
+              >
+                {t('查看这些结果', 'View these results')}
+              </Button>
+            </Card>
+          )}
           <Card
             title={t('检查并创建算例', 'Review and create the case')}
             description={t(
