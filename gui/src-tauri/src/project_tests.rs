@@ -456,6 +456,40 @@ fn server_case_cannot_change_its_owning_host() {
 }
 
 #[test]
+fn a_project_reopens_as_the_form_it_was_created_with() {
+    let root = tmp("wizard-seed");
+    let dir = make_case(&root, "site", "CN-Cng");
+    std::fs::write(
+        dir.join("forcing.nml"),
+        "&nl_colm_forcing\n DEF_dir_forcing = '/data/forcing/'\n/\n",
+    )
+    .unwrap();
+    record_case(
+        &dir.to_string_lossy(),
+        &CaseRecord {
+            mode: Some("pc".into()),
+            engine: Some("rust".into()),
+            site: Some("/data/sites/CN-Cng_site.nc".into()),
+            run_host: Some("compute".into()),
+            remote_directory: Some("/server/work/333/CN-Cng".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let form = project_wizard_seed(root.to_string_lossy().into_owned()).unwrap();
+    let get = |key: &str| form.get(key).map(String::as_str);
+    assert_eq!(get("host"), Some("compute"));
+    assert_eq!(get("engine"), Some("rust"));
+    assert_eq!(get("kind"), Some("site"));
+    assert_eq!(get("subgrid"), Some("IGBP"));
+    assert_eq!(get("name"), Some("333"));
+    assert_eq!(get("sitedir"), Some("/data/sites"));
+    assert_eq!(get("forcingdir"), Some("/data/forcing/"));
+    // A server project keeps its local cache out of the form: the wizard picks the cache itself.
+    assert_eq!(get("root"), None);
+}
+
+#[test]
 fn shell_open_receives_plain_windows_paths() {
     assert_eq!(
         super::plain_windows_path(r"\\?\C:\Users\me\out.nc"),

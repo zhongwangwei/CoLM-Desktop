@@ -44,19 +44,15 @@ export default function ProjectBatchRun({
   const current = context?.key === contextKey ? context : null;
   useEffect(() => {
     let active = true;
+    // One call reads every case's settings in parallel on the backend and keeps no previews.
     if (first)
-      void Promise.all(
-        (JSON.parse(contextKey)[0] as string[]).map(async (dir) => {
-          const { profile } = await invoke<{ profile: CaseProfile }>('model_case_context', {
-            dir,
-            modelRevision: { id, revision },
-          });
-          return [dir, profile] as const;
-        }),
-      ).then(
-        (entries) => {
+      void invoke<Record<string, CaseProfile>>('model_case_profiles', {
+        dirs: JSON.parse(contextKey)[0] as string[],
+        modelRevision: { id, revision },
+      }).then(
+        (profiles) => {
           if (!active) return;
-          const profiles = Object.fromEntries(entries);
+          const entries = Object.entries(profiles);
           const firstProfile = profiles[first];
           const mixed = entries.some(
             ([, profile]) =>
@@ -280,7 +276,14 @@ export default function ProjectBatchRun({
           ? t(`运行站点：${cases.length} 个`, `Stations to run: ${cases.length}`)
           : t('请选择要运行的算例。', 'Select cases to run.')}
       </p>
-      {first && !current && <Notice>{t('正在读取算例设置…', 'Loading case settings…')}</Notice>}
+      {first && !current && (
+        <Notice>
+          {t(
+            `正在读取 ${paths.length} 个算例的设置…`,
+            `Loading the settings of ${paths.length} cases…`,
+          )}
+        </Notice>
+      )}
       {current?.error && <Notice tone="error">{current.error}</Notice>}
       {first && current?.profiles && (
         <RunPanel

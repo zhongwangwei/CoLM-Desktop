@@ -89,10 +89,28 @@ function screen(
       previous?.cleanup();
       effects.set(index, { deps, cleanup: effect() });
     },
-    invoke: (_command: string, args: unknown) =>
-      new Promise((resolve) => {
-        requests.push({ args, resolve });
-      }),
+    // The page reads every station in one model_case_profiles call; each station still
+    // appears here as its own request so tests can answer stations one by one.
+    invoke: (command: string, args: { dirs?: string[]; modelRevision?: unknown }) => {
+      if (command !== 'model_case_profiles')
+        return new Promise((resolve) => {
+          requests.push({ args, resolve });
+        });
+      const dirs = args.dirs ?? [];
+      return Promise.all(
+        dirs.map(
+          (dir) =>
+            new Promise<{ profile: unknown }>((resolve) => {
+              requests.push({
+                args: { dir, modelRevision: args.modelRevision },
+                resolve: (value) => resolve(value as { profile: unknown }),
+              });
+            }),
+        ),
+      ).then((answers) =>
+        Object.fromEntries(dirs.map((dir, index) => [dir, answers[index].profile])),
+      );
+    },
   };
   const source = readFileSync(new URL('./ProjectBatchRun.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;$/gm, '')

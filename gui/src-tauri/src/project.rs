@@ -60,6 +60,94 @@ pub fn list_cases(root: String) -> Result<Vec<CaseEntry>, String> {
     Ok(out)
 }
 
+/// 把一个已有项目的设置还原成「新建模拟」第一页的表单：项目里每个算例都带着建例时的选择，
+/// 取第一个算例即可。读不到的字段留空，由向导自己的默认值与按服务器记住的路径补上。
+#[tauri::command]
+pub fn project_wizard_seed(
+    root: String,
+) -> Result<std::collections::BTreeMap<String, String>, String> {
+    use crate::config::character;
+    let cases = list_cases(root.clone())?;
+    let first = cases.first().ok_or_else(|| format!("{root} 里没有算例"))?;
+    let dir = PathBuf::from(&first.dir);
+    let opened = open_case(first.dir.clone())?;
+    let profile = opened.profile;
+    let record = recorded_case(&dir);
+    let doc = std::fs::read_to_string(dir.join("case.nml"))
+        .ok()
+        .and_then(|text| colm_namelist::parse(&text).ok());
+    let forcing = std::fs::read_to_string(dir.join("forcing.nml"))
+        .ok()
+        .and_then(|text| colm_namelist::parse(&text).ok());
+    let mut form = std::collections::BTreeMap::new();
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+            form.insert(key.to_owned(), value);
+        }
+    };
+    let host = profile.run_host.clone().filter(|host| !host.is_empty());
+    let project = match record.remote_directory.as_deref() {
+        Some(remote) if host.is_some() => Path::new(remote.trim_end_matches('/'))
+            .parent()
+            .map(Path::to_path_buf),
+        _ => Path::new(&opened.root).to_path_buf().into(),
+    };
+    put("engine", profile.engine.clone());
+    put("host", host.clone());
+    put(
+        "kind",
+        Some(match profile.domain_kind.as_deref() {
+            Some(kind) => kind.to_owned(),
+            None if profile.spatial => "region".to_owned(),
+            None => "site".to_owned(),
+        }),
+    );
+    put("subgrid", Some(profile.subgrid.to_owned()));
+    put("landcover", Some(profile.classification.to_owned()));
+    put("grid", profile.grid.map(str::to_owned));
+    put("rawdata", Some(profile.inputs.rawdata.clone()));
+    put("runtime", Some(profile.inputs.runtime.clone()));
+    put("start", Some(profile.inputs.start.clone()));
+    put("end", Some(profile.inputs.end.clone()));
+    put("timestep", Some(format!("{}", profile.inputs.timestep)));
+    put(
+        "name",
+        project
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|n| n.to_string_lossy().into_owned()),
+    );
+    if host.is_none() {
+        put(
+            "root",
+            project
+                .as_ref()
+                .and_then(|path| path.parent())
+                .map(|path| path.to_string_lossy().into_owned()),
+        );
+    }
+    put("shapefile", profile.shapefile.clone());
+    put(
+        "forcingdir",
+        forcing
+            .as_ref()
+            .map(|doc| character(doc, "DEF_dir_forcing")),
+    );
+    let site = record
+        .site
+        .clone()
+        .or_else(|| doc.as_ref().map(|doc| character(doc, "SITE_fsitedata")));
+    put(
+        "sitedir",
+        site.as_deref().and_then(|file| {
+            Path::new(file)
+                .parent()
+                .map(|parent| parent.to_string_lossy().into_owned())
+        }),
+    );
+    Ok(form)
+}
+
 /// 打开已有算例时从 `case.nml`（和跑过时的 `stages.json`）反推出的向导选择，前端据此恢复会话。
 #[derive(Debug, Serialize, PartialEq)]
 pub struct CaseProfile {

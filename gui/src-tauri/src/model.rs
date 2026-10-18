@@ -408,6 +408,70 @@ pub(crate) async fn model_case_context_with_fields(
     open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
 }
 
+/// One case's effective profile under `version`, from a preview that is removed right after.
+fn case_profile_under(
+    registry: &Registry,
+    parent: &Path,
+    dir: &str,
+    version: &VersionRef,
+) -> Result<crate::project::CaseProfile, String> {
+    let source = crate::project::open_case(dir.to_owned())?;
+    let id = preview_id(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos(),
+    );
+    let preview_dir = parent.join(&id);
+    let result = registry
+        .materialize_run_with_case_changes(version, Path::new(dir), &preview_dir, &id, &[], &[])
+        .map_err(|e| format!("Cannot read case configuration {dir}: {e:#}"))
+        .and_then(|run| {
+            open_preview_with_case_identity(run.run_case.display().to_string(), &source.profile)
+        });
+    let _ = std::fs::remove_dir_all(&preview_dir);
+    result.map(|opened| opened.profile)
+}
+
+/// Effective profiles of many cases under one model revision, read eight at a time without
+/// keeping their previews. The batch run page used one `model_case_context` per case: ninety
+/// stations took minutes and left ninety preview copies behind every time (2026-10-18).
+#[tauri::command]
+pub async fn model_case_profiles(
+    dirs: Vec<String>,
+    model_revision: VersionRef,
+) -> Result<std::collections::BTreeMap<String, crate::project::CaseProfile>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
+        let parent = root()?.join("previews");
+        std::fs::create_dir_all(&parent).map_err(|e| e.to_string())?;
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let results = std::sync::Mutex::new(Vec::with_capacity(dirs.len()));
+        std::thread::scope(|scope| {
+            for _ in 0..dirs.len().clamp(1, 8) {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some(dir) = dirs.get(index) else { break };
+                    let profile = case_profile_under(&registry, &parent, dir, &model_revision);
+                    if let Ok(mut results) = results.lock() {
+                        results.push((dir.clone(), profile));
+                    }
+                });
+            }
+        });
+        let results = results
+            .into_inner()
+            .map_err(|_| "profile reader poisoned")?;
+        let mut profiles = std::collections::BTreeMap::new();
+        for (dir, profile) in results {
+            profiles.insert(dir, profile?);
+        }
+        Ok(profiles)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn open_preview_with_case_identity(
     dir: String,
     source: &crate::project::CaseProfile,
@@ -638,6 +702,60 @@ mod tests {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn case_profiles_are_read_without_leaving_previews() {
+        let directory = std::env::temp_dir().join(format!(
+            "colm-case-profiles-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let registry = Registry::open(directory.join("registry")).unwrap();
+        let official = registry
+            .install_official(colm_model::CodeRef {
+                kind: colm_model::CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "b".repeat(64),
+            })
+            .unwrap();
+        let previews = directory.join("previews");
+        std::fs::create_dir_all(&previews).unwrap();
+        for site in ["A", "B", "C"] {
+            let case = directory.join("project").join(site);
+            std::fs::create_dir_all(&case).unwrap();
+            std::fs::write(
+                case.join("case.nml"),
+                format!("&nl_colm\n DEF_CASE_NAME='{site}'\n DEF_USE_LCT=.true.\n/\n"),
+            )
+            .unwrap();
+            let profile = case_profile_under(
+                &registry,
+                &previews,
+                &case.display().to_string(),
+                &official.version,
+            )
+            .unwrap();
+            assert!(!profile.spatial);
+        }
+        assert_eq!(
+            std::fs::read_dir(&previews).unwrap().count(),
+            0,
+            "no preview copy is kept"
+        );
+        let missing = case_profile_under(
+            &registry,
+            &previews,
+            &directory.join("absent").display().to_string(),
+            &official.version,
+        );
+        assert!(missing.is_err());
+        assert_eq!(std::fs::read_dir(&previews).unwrap().count(), 0);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

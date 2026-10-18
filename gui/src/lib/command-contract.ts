@@ -767,6 +767,16 @@ export const commandContract = {
       "rust_type": "Option<VersionRef>"
     }
   },
+  "model_case_profiles": {
+    "dirs": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    },
+    "modelRevision": {
+      "required": true,
+      "rust_type": "VersionRef"
+    }
+  },
   "study_save_version": {
     "studyDir": {
       "required": true,
@@ -888,6 +898,12 @@ export const commandContract = {
     }
   },
   "list_cases": {
+    "root": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "project_wizard_seed": {
     "root": {
       "required": true,
       "rust_type": "String"

@@ -559,15 +559,18 @@ test('a project card opens its timeline, batching stations, and a case opens its
   const listing = h.requests.at(-1)!;
   assert.equal(listing.command, 'list_cases');
   assert.deepEqual(listing.args, { root: '/cache/222' });
-  // A multi-site project opens on its batch run page, not its case list.
+  // A multi-site project opens on the first page of 新建模拟, filled from what it was created with.
   listing.resolve([{ dir: '/cache/222/AT-Neu' }, { dir: '/cache/222/AU-Cpr' }]);
   await h.settle();
-  assert.deepEqual(h.routes.at(-1), 'project');
-  assert.deepEqual((h.updates.at(-1) as { projectView: unknown }).projectView, {
-    root: '/cache/222',
-    page: 'batch',
-    home: false,
-  });
+  const seedRequest = h.requests.at(-1)!;
+  assert.equal(seedRequest.command, 'project_wizard_seed');
+  assert.deepEqual(seedRequest.args, { root: '/cache/222' });
+  seedRequest.resolve({ host: 'tms17l', kind: 'site', subgrid: 'PC' });
+  await h.settle();
+  assert.deepEqual(h.routes.at(-1), 'new-case');
+  const seeded = (h.updates.at(-1) as { newCaseSeed: { form: unknown; step: number } }).newCaseSeed;
+  assert.deepEqual(seeded.form, { host: 'tms17l', kind: 'site', subgrid: 'PC' });
+  assert.equal(seeded.step, 1);
   assert.ok(h.guide().actions.some((action) => action.id === 'history-open-project'));
   // A single case opens on its simulation settings.
   h.click('Open this project');

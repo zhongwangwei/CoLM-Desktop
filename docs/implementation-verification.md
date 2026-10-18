@@ -33877,3 +33877,15 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - GUI 688 条（新增时间线批次与汇总、项目卡片打开时间线、点算例才加载详情）；
    - check-gui、fmt、clippy 都通过。
 7. **运行目录也归到所属算例**：用真实历史库估算时，271 条非例行记录被分成了 91 张卡片，原因是 90 条记录的 `case_path` 指向算例里的运行目录 `<case>/runs/<id>`，上一级是 `<case>/runs`。`owning_case` 现在把 `runs/` 下的路径退回到算例本身，再取算例的上一级目录作为项目，`case_subject` 也按同样规则处理。修正后真实数据是 271 条操作对应 1 张卡片。
+
+## 第 715 轮：从历史打开多站点项目——进新建模拟第一页，不再逐个读算例（2026-10-18）
+
+1. **现象**：从历史"打开这个项目"打开 90 个站点的项目后，批量运行页一直停在"正在读取算例设置…"，读完又停在上一次的运行结果上（AT-Neu 210384/210384），看起来像重新运行。
+2. **根因**：批量运行页对每个算例各调一次 `model_case_context`，每次要物化一份预览（约 0.3–1.4 s），90 个算例要几分钟，预览目录还从不清理（e2e 里积到 1784 个）。运行面板恢复的是旧结果，不是新运行：历史里 AT-Neu 只有 18:00 提交、18:07 取回。
+3. **改法**：
+   - 多站点项目从历史打开时，进"新建模拟"第一页，表单用项目里已存的设置预填。新命令 `project_wizard_seed(root)` 取第一个算例：引擎、服务器、范围、次网格、地表分类、rawdata/runtime、起止日期、站点目录（`.colm-desktop.json` 的 site 的上级）、强迫场目录（`forcing.nml`）、项目名与服务器项目目录。不打开任何预览，e2e 里 1.5 s 出页。
+   - 单算例项目仍直接打开模拟设置。
+   - 批量运行页仍可从项目页进入，它读取设置改为一次 `model_case_profiles`（8 线程、读完即删预览），提示里带算例数。
+4. **e2e 实测**（`--features e2e-driver`，隔离 HOME）：第 1 步服务器 tms17l、Rust 引擎、`/tera11/zhwei/Personal/CoLM/colm-desktop` + 名称 333 都已填；第 3 步站点目录 `/shr03/CoLM_Forcing/PLUMBER2s/Sitedata`、强迫场、rawdata、runtime 已填，站点列表待读取。
+5. **没覆盖**：选中的站点清单没有还原（需重新读取并勾选）；批量运行页在 debug 版里 `model_case_profiles` 每个算例仍约 1.4 s，release 版没量过。运行面板尚未标出"这是上一次的结果"。
+6. 验证：Tauri 测试 `a_project_reopens_as_the_form_it_was_created_with`、`case_profiles_are_read_without_leaving_previews`；GUI 688 条；tsc、fmt、clippy 通过。
