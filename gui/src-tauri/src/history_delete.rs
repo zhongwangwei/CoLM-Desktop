@@ -613,6 +613,14 @@ fn remove_verified(target: &Path, identity: &std::fs::Metadata) -> Result<(), St
         ));
     }
     if let Err(error) = std::fs::remove_dir_all(&isolated) {
+        // Put what is left back where the record points, so the same deletion can be retried.
+        if !target.exists() && std::fs::rename(&isolated, target).is_ok() {
+            let _ = std::fs::remove_dir(&quarantine);
+            return Err(format!(
+                "删除未完成，记录已保留；剩余文件仍在 {}，可重试删除：{error}",
+                target.display()
+            ));
+        }
         return Err(format!(
             "删除未完成，记录已保留；剩余文件位于 {}：{error}",
             isolated.display()
@@ -1012,6 +1020,37 @@ mod tests {
         let end = event.next(EventPhase::Finished, "succeeded");
         ledger.append(&end).unwrap();
         (root, ledger, end)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_partly_failed_deletion_returns_the_rest_to_its_place_for_a_retry() {
+        use std::os::unix::fs::PermissionsExt;
+        let (root, ledger, _) = fixture();
+        let target = root.join("victim");
+        let locked = target.join("locked");
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(target.join("loose"), "x").unwrap();
+        std::fs::write(locked.join("kept"), "x").unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let identity = std::fs::symlink_metadata(&target).unwrap();
+        let error = remove_verified(&target, &identity).unwrap_err();
+        assert!(error.contains("可重试"), "{error}");
+        assert!(
+            locked.join("kept").is_file(),
+            "the rest is back at the recorded path"
+        );
+        assert!(std::fs::read_dir(&root).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".colm-delete-")));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let identity = std::fs::symlink_metadata(&target).unwrap();
+        remove_verified(&target, &identity).unwrap();
+        assert!(!target.exists());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn mark_case(source: &Path) {
