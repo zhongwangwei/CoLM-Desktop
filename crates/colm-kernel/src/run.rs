@@ -52,6 +52,30 @@ fn report_spawn(pid: u32, program: &Path) {
     });
 }
 
+/// `ETXTBSY`（Linux/macOS 都是 26）：可执行文件仍有进程以写模式打开着。
+/// Windows 上 26 是别的错误，所以只在 unix 上认它。
+const TEXT_FILE_BUSY: i32 = 26;
+
+/// 撞上 `Text file busy` 就短暂退避后重试，最多 8 次（累计约 0.7 s）。
+///
+/// 写完一个可执行文件、关掉句柄之后，同进程的另一个线程若恰好在 fork，
+/// 子进程会带着那个写句柄的副本，直到它自己 exec（`O_CLOEXEC` 那时才生效）。
+/// 这段窗口里 exec 同一个 inode 就报 ETXTBSY —— 改名换路径也没用，inode 没变。
+/// Ubuntu CI 上 colm-kernel 的并行测试就这么偶发失败过；桌面端一边安装内核
+/// 一边起别的子进程，也有同样的窗口。窗口只有微秒级，重试就够了。
+fn retry_text_file_busy<T>(mut spawn: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let mut attempt = 0u64;
+    loop {
+        match spawn() {
+            Err(e) if cfg!(unix) && e.raw_os_error() == Some(TEXT_FILE_BUSY) && attempt < 8 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(20 * attempt));
+            }
+            result => return result,
+        }
+    }
+}
+
 /// 一段跑完之后知道的一切。
 #[derive(Debug)]
 pub struct StageReport {
@@ -246,12 +270,12 @@ fn run_stage_streaming_with_command(
     if uses_mpi {
         configure_mpi_runtime(&mut cmd, exe)?;
     }
-    let mut child = no_console(&mut cmd)
+    no_console(&mut cmd)
         .args(args)
         .current_dir(work)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = retry_text_file_busy(|| cmd.spawn())
         .with_context(|| format!("failed to spawn {}", program.display()))?;
     report_spawn(child.id(), &program);
 
@@ -436,6 +460,37 @@ mod run_tests;
 #[cfg(test)]
 mod spawn_observer_tests {
     use super::*;
+
+    #[test]
+    #[cfg(unix)]
+    fn a_busy_executable_is_retried_and_other_errors_are_not() {
+        let mut calls = 0;
+        let ok = retry_text_file_busy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::from_raw_os_error(TEXT_FILE_BUSY))
+            } else {
+                Ok(calls)
+            }
+        });
+        assert_eq!(ok.expect("third attempt"), 3);
+
+        let mut calls = 0;
+        let missing = retry_text_file_busy(|| -> std::io::Result<()> {
+            calls += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        });
+        assert_eq!(missing.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
+
+        let mut calls = 0;
+        let busy = retry_text_file_busy(|| -> std::io::Result<()> {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(TEXT_FILE_BUSY))
+        });
+        assert_eq!(busy.unwrap_err().raw_os_error(), Some(TEXT_FILE_BUSY));
+        assert_eq!(calls, 9);
+    }
 
     #[test]
     fn spawns_are_reported_only_inside_the_observed_work_and_observers_restore() {

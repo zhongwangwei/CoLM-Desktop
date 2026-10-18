@@ -79,9 +79,9 @@ fn fake_kernel(name: &str, script: &str) -> (Kernel, PathBuf) {
     std::fs::create_dir_all(d.join("work")).expect("create workdir");
     for prog in crate::manifest::PROGRAMS {
         let p = d.join(crate::manifest::program_file(prog));
-        // Linux CI 偶发 `Text file busy`：在 overlayfs 上，刚关闭写句柄就直接
-        // exec 同一路径仍可能撞到 ETXTBSY。先写临时文件、关句柄，再原子改名，
-        // 让最终可执行路径从未以写模式打开过。
+        // 先写临时文件再改名，最终路径就不会被看到写了一半的脚本。并行测试里
+        // 偶发的 `Text file busy` 不靠这一步解决（改名后还是同一个 inode，fork
+        // 出去的子进程仍可能持有写句柄），而是靠 `run.rs` 的 spawn 重试。
         let tmp = p.with_extension("new");
         std::fs::write(&tmp, script).expect("write script");
         #[cfg(unix)]

@@ -33636,7 +33636,7 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 4. **版本号升到 0.3.0-beta.4**：改了 workspace、GUI、Tauri 配置、legacy 静态页、README 徽章/下载链接/发布记录、版本一致性测试，以及两个 Cargo.lock 中 workspace 成员的版本行。
    注意：推送到 main 后，release.yml 会在 `v0.3.0-beta.4` 尚无完整发布时自动构建并发布预发布版。
 
-## 第 705 轮：`upstream-fortran-f48-sync` 逐 hunk 核对后删除；vendor 静态测试进 CI（2026-10-18）
+## 第 705 轮：`upstream-fortran-f48-sync` 逐 hunk 核对后删除；vendor 静态测试进 CI；内核 spawn 遇 ETXTBSY 重试（2026-10-18）
 
 1. **结论：这条分支已被 main 取代，没有缺失的数值修复。** `901d1fb7`（9 月 12 日，从 `40260ef3` 分出）是对上游 `f48fbf9` 的一次早期选择性同步。
    main 之后另做过一次**按语义 hunk** 的同步（`5d7f373`/`6d98eb6`/`b25b904`，由 `oracle/scripts/test_upstream_f48_sync.py` 守护），
@@ -33652,3 +33652,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    现在这条改为断言 `quicksort (numelm, elmsorted, elmorder)` 加 `find_in_sorted_list1(...) > 0`，结果 26 passed。
    根因是这 14 个 vendor 静态测试**从来不在 CI 里**，现在已加到 `ci.yml` 的 `kernel-filesystem` 作业：apt 安装 `python3-pytest`，运行 `python3 -m pytest -q vendor/CoLM202X/tests`。
    这些文件在 `/tests` 下，`build_kernel.sh` 不会编译它们，所以内核和服务器引擎都不用重编。
+3. **fdd125f0 的 CI 挂在 `rust (ubuntu-latest)`**：`colm-kernel` 的 `a_line_reaches_the_caller_while_the_child_is_still_running`
+   报 `failed to spawn /tmp/colm-kernel-run-live-7204/colm.x: Text file busy (os error 26)`，同一轮其余作业全过。
+   `fake_kernel` 原有的"先写临时文件再改名"防护没有对准病因：写完关掉句柄时，同进程另一个测试线程若正在 fork，
+   子进程会带着写句柄的副本直到它自己 exec，这段窗口里 exec 同一个 inode 就报 ETXTBSY；改名后 inode 不变，所以挡不住。
+   现在 `run.rs` 唯一的 spawn 处套了一层 `retry_text_file_busy`：只在 unix 上（Windows 的 26 是别的错误），遇到 ETXTBSY 时按 20·n ms 退避，最多重试 8 次（累计约 0.7 s），
+   其它错误原样立即返回。桌面端一边安装内核一边起子进程，也有同样的窗口。新增的单元测试覆盖三种情况：忙两次后成功、非 ETXTBSY 不重试、重试次数到顶后返回原错误。
+   本机 macOS 复现不了这个竞态，本地证据只有 `cargo test -p colm-kernel --lib` 连跑三次 49 passed、`cargo clippy -p colm-kernel --all-targets -D warnings` 通过；Linux 上是否根除要看后续 CI。
