@@ -251,19 +251,23 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       setResult(null);
     }
   }
-  // From a project's history straight to the project itself, on the page it was left on.
+  // From a project's history to where it is simulated: a multi-site project's batch run page,
+  // a single case's simulation settings. Not the case list, which is one more step away.
   async function openProject(path: string) {
     const cases = await invokeJson<CaseEntry[]>('list_cases', { root: path });
+    const switching = path !== state.root ? { selectedCase: null } : {};
+    if (cases.length === 1) {
+      update({ root: path, cases, projectCasesOpen: false, ...switching });
+      await openCase(cases[0].dir, 'settings');
+      return;
+    }
     if (!navigate('project')) return;
     update({
       root: path,
       cases,
       projectCasesOpen: false,
-      projectView:
-        state.projectView?.root === path
-          ? { ...state.projectView, home: false }
-          : { root: path, page: 'cases' },
-      ...(path !== state.root ? { selectedCase: null } : {}),
+      projectView: { root: path, page: 'batch', home: false },
+      ...switching,
     });
   }
   function closeDetails() {
