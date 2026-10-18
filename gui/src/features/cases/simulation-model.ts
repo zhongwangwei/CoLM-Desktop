@@ -59,6 +59,14 @@ export function kindPathPrefill(
   return { patch, filled };
 }
 
+/** How long something has been waited for, for progress notices: 45 秒, 2 分 10 秒. */
+export function elapsedLabel(ms: number, en = false): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  if (!minutes) return en ? `${seconds} s` : `${seconds} 秒`;
+  return en ? `${minutes} min ${seconds % 60} s` : `${minutes} 分 ${seconds % 60} 秒`;
+}
+
 export const simulationSteps = [
   ['总的设定', 'General setup'],
   ['范围与网格', 'Range and grid'],

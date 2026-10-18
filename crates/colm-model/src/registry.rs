@@ -6,7 +6,10 @@ use sha2::{Digest, Sha256};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+/// How long a registry writer waits for another one to finish.
+const REGISTRY_LOCK_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone)]
 pub struct Registry {
@@ -30,10 +33,38 @@ impl Registry {
         &self.root
     }
     fn lock(&self) -> Result<Lock> {
+        self.lock_within(REGISTRY_LOCK_WAIT)
+    }
+    /// Writers wait their turn instead of failing at once: the desktop finishes server cases
+    /// several at a time, and each `model-migrate-case` takes this lock briefly (2026-10-18:
+    /// four of five sites in a batch failed with "model registry is locked").
+    fn lock_within(&self, wait: Duration) -> Result<Lock> {
         let path = self.root.join("write.lock");
-        let mut file = OpenOptions::new().write(true).create_new(true).open(&path).context("model registry is locked; recover a stale write.lock only after confirming its writer exited")?;
-        writeln!(file, "{}", std::process::id())?;
-        Ok(Lock(path))
+        let deadline = Instant::now() + wait;
+        let mut pause = Duration::from_millis(10);
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    writeln!(file, "{}", std::process::id())?;
+                    return Ok(Lock(path));
+                }
+                // Windows reports a lock file that is being deleted as PermissionDenied.
+                Err(error)
+                    if (error.kind() == std::io::ErrorKind::AlreadyExists
+                        || (cfg!(windows)
+                            && error.kind() == std::io::ErrorKind::PermissionDenied))
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(pause);
+                    pause = (pause * 2).min(Duration::from_millis(200));
+                }
+                Err(error) => {
+                    return Err(error).context(
+                        "model registry is locked; recover a stale write.lock only after confirming its writer exited",
+                    )
+                }
+            }
+        }
     }
     pub(crate) fn revision_dir(&self, version: &VersionRef) -> Result<PathBuf> {
         validation::identifier(&version.id)?;
@@ -593,4 +624,34 @@ pub fn source_cache_name(code: &CodeRef) -> Result<String> {
     let digest = Sha256::digest(serde_json::to_vec(code)?);
     let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     Ok(format!("{}-{}", code.source_sha256, &hex[..16]))
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_writer_waits_for_the_lock_instead_of_failing() {
+        let root = std::env::temp_dir().join(format!("colm-registry-lock-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let registry = Registry::open(&root).unwrap();
+        let held = registry.lock().unwrap();
+        // Still held after the wait: the original error, not a hang.
+        let refused = registry
+            .lock_within(Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(format!("{refused:#}").contains("model registry is locked"));
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(held);
+        });
+        let started = Instant::now();
+        let second = registry.lock_within(Duration::from_secs(10)).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(250));
+        releaser.join().unwrap();
+        drop(second);
+        assert!(!root.join("write.lock").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
 }

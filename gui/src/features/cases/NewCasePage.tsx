@@ -35,6 +35,7 @@ import {
   simulationFields,
   isSiteConfiguration,
   isForcingScheme,
+  elapsedLabel,
   kindPathFields,
   kindPathPrefill,
   simulationSteps,
@@ -131,7 +132,12 @@ function siteInfo(s: Site, t: (zh: string, en: string) => string) {
 // Engines already confirmed on a server this session, keyed by host and model revision.
 // The engine only changes with the app's own source, so one confirmation per session is enough.
 const preparedEngines = new Set<string>();
-type EngineState = { host: string; phase: 'checking' | 'building' | 'failed'; error?: string };
+type EngineState = {
+  host: string;
+  phase: 'checking' | 'building' | 'failed';
+  since: number;
+  error?: string;
+};
 
 export default function NewCasePage() {
   const { state, update, openCase, navigate, notify } = useApp(),
@@ -511,11 +517,12 @@ export default function NewCasePage() {
     }
     const host = form.host;
     let current = true;
-    setEngine({ host, phase: 'checking' });
+    const since = Date.now();
+    setEngine({ host, phase: 'checking', since });
     // An engine that is already there answers in a few seconds; longer means upload and build.
     const slow = setTimeout(() => {
       if (current)
-        setEngine((old) => (old?.phase === 'checking' ? { host, phase: 'building' } : old));
+        setEngine((old) => (old?.phase === 'checking' ? { host, phase: 'building', since } : old));
     }, 5000);
     invoke('remote_prepare_engine', { host, modelRevision: state.versionRef })
       .then(() => {
@@ -523,7 +530,7 @@ export default function NewCasePage() {
         if (current) setEngine(null);
       })
       .catch((e) => {
-        if (current) setEngine({ host, phase: 'failed', error: String(e) });
+        if (current) setEngine({ host, phase: 'failed', since, error: String(e) });
       })
       .finally(() => clearTimeout(slow));
     return () => {
@@ -533,6 +540,18 @@ export default function NewCasePage() {
     // engineKey already encodes form.host and state.versionRef.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [engineKey]);
+  // A one-second clock for the waiting notices, running only while something is waited for.
+  const [clock, setClock] = useState(() => Date.now());
+  const waitingForEngine = !!engine && engine.phase !== 'failed';
+  useEffect(() => {
+    if (!waitingForEngine && !scanning) return;
+    setClock(Date.now());
+    const timer = setInterval(() => setClock(Date.now()), 1000);
+    // Never keep a test process alive for a notice clock (Node timers only).
+    (timer as unknown as { unref?: () => void }).unref?.();
+    return () => clearInterval(timer);
+  }, [waitingForEngine, scanning]);
+  const waited = (since: number) => elapsedLabel(Math.max(0, clock - since), en);
   useEffect(() => {
     let current = true;
     setSchemaReady(false);
@@ -825,22 +844,27 @@ export default function NewCasePage() {
     }
   }
   function scanLabel() {
+    const time = waited(scanSince);
     if (!form.host)
-      return t('正在读取站点与强迫场覆盖时段…', 'Reading sites and forcing coverage…');
+      return t(
+        `正在读取站点与强迫场覆盖时段（已 ${time}）…`,
+        `Reading sites and forcing coverage (${time})…`,
+      );
     return engine && engine.phase !== 'failed'
       ? t(
-          `正在等 ${form.host} 上的计算引擎准备好，之后读取站点与强迫场覆盖时段…`,
-          `Waiting for the engine on ${form.host}, then reading sites and forcing coverage…`,
+          `读取站点：先等 ${form.host} 上的计算引擎编译完成，之后读取站点与强迫场覆盖时段（已等 ${time}）…`,
+          `Reading sites: waiting for the engine on ${form.host} to finish compiling, then reading sites and forcing coverage (${time})…`,
         )
       : t(
-          `正在从 ${form.host} 读取站点与强迫场覆盖时段…`,
-          `Reading sites and forcing coverage on ${form.host}…`,
+          `读取站点：正在从 ${form.host} 读取站点与强迫场覆盖时段（已 ${time}）…`,
+          `Reading sites: reading sites and forcing coverage on ${form.host} (${time})…`,
         );
   }
   // The user's own site folders: a scan that finds sites remembers them for this resource.
   // Reading does not lock the page: a server read can wait minutes for an engine build, and the
   // rest of the form stays usable meanwhile. Stopping only stops waiting for the answer.
   const scanToken = useRef(0);
+  const [scanSince, setScanSince] = useState(0);
   function readSites() {
     if (scanning)
       return Promise.reject(
@@ -850,6 +874,7 @@ export default function NewCasePage() {
       forcingDir = form.forcingdir,
       token = ++scanToken.current;
     setScanning(true);
+    setScanSince(Date.now());
     setError('');
     return scan(dir, forcingDir)
       .then((result) => {
@@ -1772,6 +1797,20 @@ export default function NewCasePage() {
       !(form.kind === 'site' && field.name === 'DEF_HIST_mode'),
   );
   const enabled = !busy && !state.busy && !multiResults.some((result) => result.created);
+  // Once some sites exist the form is locked, so the remaining ones keep the same settings.
+  // Back then means "edit the sites not yet created" rather than doing nothing.
+  const lockedByCreated = !busy && !state.busy && multiResults.some((result) => result.created);
+  const canEditUnfinished =
+    !multiResults.some((result) => result.created && result.error) &&
+    siteDrafts.some(
+      (draft) => !multiResults.some((result) => result.site === draft.site && result.created),
+    );
+  const backEnabled = enabled || (lockedByCreated && canEditUnfinished);
+  function goBack() {
+    if (!enabled && lockedByCreated && canEditUnfinished) return editUnfinishedSites();
+    setError('');
+    setStep((step - 1) as SimulationStep);
+  }
   // 当前步骤的必填项没齐全时，“下一步/创建”置灰，并直接说明还差什么。
   const blocker = stepProblem(step);
   const groupFields = schema.filter((field) => simulationOptionField(field, optionStates)),
@@ -2135,11 +2174,8 @@ export default function NewCasePage() {
             id: 'new-previous',
             label: t('上一步', 'Back'),
             kind: 'click' as const,
-            enabled,
-            run: () => {
-              setError('');
-              setStep((step - 1) as SimulationStep);
-            },
+            enabled: backEnabled,
+            run: goBack,
           },
         ]
       : []),
@@ -2422,10 +2458,13 @@ export default function NewCasePage() {
       {engine?.host === form.host && engine.phase !== 'failed' && (
         <Notice>
           {engine.phase === 'checking'
-            ? t(`正在核对 ${engine.host} 上的计算引擎…`, `Checking the engine on ${engine.host}…`)
+            ? t(
+                `正在核对 ${engine.host} 上的计算引擎（已 ${waited(engine.since)}）…`,
+                `Checking the engine on ${engine.host} (${waited(engine.since)})…`,
+              )
             : t(
-                `${engine.host} 上还没有与当前版本一致的计算引擎，正在后台上传源码并编译；软件更新后第一次使用需要几分钟。可以先继续填写，读取站点和创建算例会等它完成。`,
-                `${engine.host} has no engine matching this version yet; uploading the source and compiling it in the background. The first use after an app update takes a few minutes. Keep filling in the form; reading sites and creating the case wait for it.`,
+                `${engine.host} 正在上传源码并编译与当前版本一致的计算引擎（已 ${waited(engine.since)}，软件更新后第一次使用通常要 2–4 分钟）。可以先继续填写，读取站点和创建算例会等它完成。`,
+                `${engine.host} is uploading the source and compiling an engine for this version (${waited(engine.since)}; usually 2–4 minutes after an app update). Keep filling in the form; reading sites and creating the case wait for it.`,
               )}
         </Notice>
       )}
@@ -3192,15 +3231,22 @@ export default function NewCasePage() {
           {blocker}
         </p>
       )}
+      {lockedByCreated && (
+        <p className="field-hint simulation-blocker" role="status">
+          {canEditUnfinished
+            ? t(
+                '已有站点创建成功，设置已锁定。点"上一步"或"修改尚未创建的站点"只调整其余站点，已创建的保持不变。',
+                'Some sites are created and settings are locked. Back or "Edit uncreated sites" adjusts only the remaining sites; created ones stay as they are.',
+              )
+            : t(
+                '已有站点创建成功，设置已锁定。请"重试未完成的站点"，或"查看已创建的项目"。',
+                'Some sites are created and settings are locked. Retry unfinished sites, or view the created project.',
+              )}
+        </p>
+      )}
       <footer className="simulation-footer">
         {step > 1 ? (
-          <Button
-            disabled={!enabled}
-            onClick={() => {
-              setError('');
-              setStep((step - 1) as SimulationStep);
-            }}
-          >
+          <Button disabled={!backEnabled} onClick={goBack}>
             {t('上一步', 'Back')}
           </Button>
         ) : (

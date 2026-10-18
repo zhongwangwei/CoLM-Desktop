@@ -2931,7 +2931,7 @@ const notices = (p: { elements: Element[] }) =>
     .map((element) => (element.children as unknown[]).flat(Infinity).join(''));
 
 test('choosing a server prepares its engine in the background and says when it is compiling', async (t) => {
-  t.mock.timers.enable({ apis: ['setTimeout'] });
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval', 'Date'] });
   let ready: (value: unknown) => void = () => {};
   const p = page(
     'NewCasePage',
@@ -2958,11 +2958,23 @@ test('choosing a server prepares its engine in the background and says when it i
 
   t.mock.timers.tick(5000);
   p.render();
-  assert.ok(notices(p).some((text) => text.includes('正在后台上传源码并编译')));
+  assert.ok(
+    notices(p).some((text) => text.includes('正在上传源码并编译') && text.includes('已 5 秒')),
+  );
+  t.mock.timers.tick(125_000);
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('已 2 分 10 秒')));
 
   void p.click('new-scan');
   p.render();
-  assert.ok(notices(p).some((text) => text.includes('正在等 compute 上的计算引擎准备好')));
+  assert.ok(
+    notices(p).some(
+      (text) => text.includes('先等 compute 上的计算引擎编译完成') && text.includes('已等 0 秒'),
+    ),
+  );
+  t.mock.timers.tick(3000);
+  p.render();
+  assert.ok(notices(p).some((text) => text.includes('已等 3 秒')));
   assert.ok(!notices(p).some((text) => text.includes('正在处理，请稍候')));
 
   ready({ ready: true });
@@ -4248,4 +4260,52 @@ test('on a server the own-data source shows as chosen and pressing it again stay
   await p.click('new-own-data');
   assert.equal(ownButton().props['aria-pressed'], true);
   assert.ok(p.render().actions.some((action) => action.id === 'new-scan'));
+});
+
+test('waiting notices count seconds and minutes', () => {
+  assert.equal(simulation.elapsedLabel(0), '0 秒');
+  assert.equal(simulation.elapsedLabel(45_900), '45 秒');
+  assert.equal(simulation.elapsedLabel(130_000), '2 分 10 秒');
+  assert.equal(simulation.elapsedLabel(130_000, true), '2 min 10 s');
+  assert.equal(simulation.elapsedLabel(-5), '0 秒');
+});
+
+test('after a partly failed server batch, Back edits only the sites not yet created', async () => {
+  const p = page(
+    'NewCasePage',
+    { ...multiSeed, form: { ...multiSeed.form, host: 'compute' } },
+    multiSites,
+    initialValues,
+    {
+      servers: [runServer],
+      create: async (args) => {
+        const request = args.request as { name: string; out: string };
+        if (request.name === 'CN-Cng') throw new Error('model registry is locked');
+        return {
+          dir: `/cache/multi/${request.name}`,
+          root: '/cache/multi',
+          remote_dir: request.out,
+        };
+      },
+    },
+  );
+  await p.mount();
+  await p.click('new-create');
+  let c = p.render();
+  assert.equal(c.actions.find((a) => a.id === 'new-previous')?.enabled, true);
+  assert.ok(
+    p.elements.some(
+      (e) =>
+        e.type === 'p' &&
+        String((e.children as unknown[]).flat(Infinity).join('')).includes('设置已锁定'),
+    ),
+  );
+  await p.click('new-previous');
+  c = p.render();
+  assert.equal((c.details as { step?: number }).step, 3);
+  const drafts = p.element('MultiSiteSettings').props.drafts as { site: string }[];
+  assert.deepEqual(
+    drafts.map((draft) => draft.site),
+    multiSites.filter((site) => site.name === 'CN-Cng').map((site) => site.site_file),
+  );
 });
