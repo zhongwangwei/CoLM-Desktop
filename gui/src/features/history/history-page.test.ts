@@ -483,3 +483,56 @@ test('clearing history deletes case folders only when the user ticks them', asyn
   assert.equal(h.requests[4].command, 'history_list');
   assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
 });
+
+test('a project card opens its timeline, batching stations, and a case opens its record', async () => {
+  const h = harness();
+  const member = (id: string, site: string, action: string, status: string, time: number) => ({
+    ...row(id),
+    case_path: `/cache/222/${site}`,
+    status,
+    time_ms: time,
+    started_ms: time,
+    detail: { action },
+  });
+  const members = [
+    member('r1', 'AT-Neu', 'remote-run', 'succeeded', 5_000),
+    member('r2', 'AU-Cpr', 'remote-run', 'failed', 4_000),
+    member('n1', 'AT-Neu', 'new', 'succeeded', 1_000),
+    {
+      ...member('i1', 'AU-Cpr', 'remote-run', 'needs_reconciliation', 4_500),
+      phase: 'imported',
+      needs_reconciliation: true,
+    },
+  ];
+  const project = {
+    ...row('r1'),
+    kind: 'project',
+    case_path: null,
+    status: 'completed_with_failures',
+    detail: { project_path: '/cache/222', subject: { kind: 'project', name: '222' } },
+    project_group: { path: '/cache/222', name: '222', members },
+  };
+  h.requests[0].resolve({ items: [project], total: 1 });
+  await h.settle();
+  const text = (n: unknown): string =>
+    Array.isArray(n)
+      ? n.map(text).join('')
+      : n && typeof n === 'object'
+        ? text((n as { children: unknown[] }).children)
+        : n == null || n === false
+          ? ''
+          : String(n);
+  const page = text(h.nodes());
+  assert.ok(page.includes('222'));
+  assert.ok(page.includes('2 cases'));
+  assert.ok(page.includes('1 succeeded · 1 failed'), 'latest per case, imported left out');
+  h.openCard();
+  await h.settle();
+  assert.equal(h.requests.length, 1, 'opening a project loads no single record');
+  const rows = h.nodes().filter((n) => n.type === 'details');
+  assert.equal(rows.length, 2, 'two remote runs share a row; creation has its own');
+  assert.ok(text(rows[0]).includes('2 cases'));
+  h.click('AU-Cpr · Failed');
+  assert.equal(h.requests[1].command, 'history_detail');
+  assert.deepEqual(h.requests[1].args, { id: 'r2' });
+});

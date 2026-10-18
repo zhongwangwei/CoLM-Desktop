@@ -16,6 +16,8 @@ pub struct HistoryFilter {
     offset: Option<u64>,
     /// Also list routine bookkeeping (autosaved settings, draft saves, case binding checks).
     include_routine: Option<bool>,
+    /// One entry per project folder (the default); false lists operations one by one.
+    group_projects: Option<bool>,
 }
 /// Recorded for audit, but not what a user means by "what did I do": shown on request only.
 const ROUTINE_KINDS: &[&str] = &[
@@ -35,6 +37,7 @@ const ROUTINE_ACTIONS: &[&str] = &[
 impl From<HistoryFilter> for Query {
     fn from(f: HistoryFilter) -> Self {
         let hide_routine = f.kind.is_none() && f.include_routine != Some(true);
+        let group_projects = f.case_path.is_none() && f.group_projects != Some(false);
         let owned = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
         Self {
             exclude_kinds: if hide_routine {
@@ -58,6 +61,7 @@ impl From<HistoryFilter> for Query {
             limit: f.limit.unwrap_or(100),
             offset: f.offset.unwrap_or(0),
             group_runs: true,
+            group_projects,
             ..Default::default()
         }
     }
@@ -82,7 +86,11 @@ pub fn history_export(
     out: Option<String>,
 ) -> Result<String, String> {
     let ledger = History::open_default().map_err(|e| e.to_string())?;
-    let query = filter.unwrap_or_default().into();
+    // Exports are audit records: one row per operation, never folded into projects.
+    let query = Query {
+        group_projects: false,
+        ..filter.unwrap_or_default().into()
+    };
     let content = match format.as_str() {
         "csv" => ledger.export_csv(&query),
         "json" => ledger.export_json(&query),
@@ -353,6 +361,13 @@ fn event_action(event: &Event) -> &str {
     event.detail["action"].as_str().unwrap_or(&event.kind)
 }
 
+/// A server job status poll. It still reconciles the run it observes and imports the case,
+/// but is not itself a ledger operation: the run records each status change, and a poll every
+/// few seconds made 1134 records for two multi-site runs (2026-10-18).
+fn status_poll(event: &Event) -> bool {
+    matches!(event_action(event), "remote-status" | "remote-study-status")
+}
+
 fn record_metadata(record: &serde_json::Value) -> serde_json::Value {
     let mut metadata = serde_json::Map::new();
     for key in [
@@ -619,7 +634,9 @@ pub(crate) fn finish<T>(
     }
     capture_remote_record(&mut end);
     if let Err(error) = History::open_default().and_then(|h| {
-        append_outcome(&h, event, &end).map_err(std::io::Error::other)?;
+        if !status_poll(event) {
+            append_outcome(&h, event, &end).map_err(std::io::Error::other)?;
+        }
         reconcile_remote(&h, &end).map_err(std::io::Error::other)?;
         if result.is_ok() {
             if event.kind.starts_with("ws-") {
@@ -741,6 +758,34 @@ fn append_outcome(history: &History, start: &Event, end: &Event) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_polls_reconcile_without_becoming_ledger_operations() {
+        let case = format!(
+            "/tmp/colm-status-poll-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let event = command_start_for_run(&["remote-status".into(), case.clone()], None)
+            .unwrap()
+            .expect("the poll still yields an event for reconciliation");
+        assert!(status_poll(&event));
+        let listed = History::open_default()
+            .unwrap()
+            .query_audit(&Query {
+                case_path: Some(case.clone()),
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(listed.total, 0, "a poll writes nothing");
+        assert!(!status_poll(&Event::start("run")));
+        let mut fetch = Event::start("fetch");
+        fetch.detail = serde_json::json!({"action": "remote-fetch"});
+        assert!(!status_poll(&fetch));
+    }
     #[test]
     fn command_run_identity_survives_started_and_terminal_records() {
         for (action, status) in [("run", "cancelled"), ("remote-run", "succeeded")] {
@@ -1075,6 +1120,9 @@ pub(crate) fn command_start_for_run(
     let Some(event) = command_event(args, run_id)? else {
         return Ok(None);
     };
+    if status_poll(&event) {
+        return Ok(Some(event));
+    }
     History::open_default()
         .and_then(|h| h.append(&event))
         .map_err(|e| {

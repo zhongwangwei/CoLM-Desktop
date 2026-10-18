@@ -43,6 +43,10 @@ fn query_filter_parse_and_default_root_share_database_parent() {
 fn audit_classification_does_not_log_read_only_or_auth_commands() {
     assert_eq!(action_kind("run"), Some("run"));
     assert_eq!(action_kind("history-list"), None);
+    // Status polls reconcile the run they observe instead of becoming operations.
+    assert_eq!(action_kind("remote-status"), None);
+    assert_eq!(action_kind("remote-study-status"), None);
+    assert_eq!(action_kind("remote-fetch"), Some("fetch"));
     assert_eq!(action_kind("series"), None);
     let flags = Flags::from([
         ("--password".into(), "credential".into()),

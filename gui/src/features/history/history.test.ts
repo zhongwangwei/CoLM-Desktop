@@ -440,3 +440,45 @@ test('history cards name what was done, to what, with which model, where and for
   );
   assert.equal(historyInternal({ ...base, kind: 'run', detail: { action: 'run' } }), false);
 });
+
+test('project timelines batch consecutive actions and summarize the latest result per case', async () => {
+  const { projectTimeline, projectSummary, statusCountsLabel } = await import('./history');
+  type Operation = import('../../lib/types').HistoryOperation;
+  const op = (id: string, action: string, status: string, time: number, site = id) =>
+    ({
+      operation_id: id,
+      kind: 'run',
+      phase: 'finished',
+      status,
+      needs_reconciliation: false,
+      time_ms: time,
+      started_ms: time,
+      case_path: `/p/${site}`,
+      detail: { action },
+    }) as unknown as Operation;
+  const members = [
+    op('a', 'remote-run', 'succeeded', 10 * 60_000),
+    op('b', 'remote-run', 'failed', 9 * 60_000),
+    op('c', 'remote-run', 'succeeded', 60 * 60_000 + 9 * 60_000, 'a'),
+    op('d', 'new', 'succeeded', 0),
+  ];
+  const rows = projectTimeline(members);
+  assert.deepEqual(
+    rows.map((row) => [row.action, row.members.length]),
+    [
+      ['remote-run', 1],
+      ['remote-run', 2],
+      ['new', 1],
+    ],
+    'an hour apart is another batch',
+  );
+  assert.deepEqual(rows[1].counts, { succeeded: 1, failed: 1, running: 0, pending: 0 });
+  const summary = projectSummary({ path: '/p', name: 'p', members });
+  assert.equal(summary.cases, 3);
+  assert.deepEqual(summary.counts, { succeeded: 2, failed: 1, running: 0, pending: 0 });
+  assert.equal(statusCountsLabel(summary.counts), '成功 2 · 失败 1');
+  assert.equal(
+    statusCountsLabel({ succeeded: 0, failed: 0, running: 1, pending: 2 }, true),
+    '1 running · 2 to reconcile',
+  );
+});

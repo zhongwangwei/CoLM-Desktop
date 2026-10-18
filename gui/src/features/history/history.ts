@@ -440,6 +440,7 @@ export function historyKindLabel(kind: string, en = false): string {
     'remote-fetch': ['取回结果', 'Fetch results'],
     'remote-probe': ['检查服务器', 'Check server'],
     'engine-pack': ['打包引擎', 'Package engine'],
+    project: ['项目', 'Project'],
     check: ['检查', 'Check'],
     build: ['编译', 'Build'],
     assistant: ['助手', 'Assistant'],
@@ -545,6 +546,75 @@ export function historySubject(operation: HistoryOperation): {
   if (operation.version_id) return { name: operation.version_id, kind: 'version' };
   if (operation.host) return { name: operation.host, kind: 'server' };
   return { name: `#${operation.operation_id.slice(0, 8)}` };
+}
+export type ProjectTimelineRow = {
+  key: string;
+  action: string;
+  members: HistoryOperation[];
+  time_ms: number | null;
+  counts: { succeeded: number; failed: number; running: number; pending: number };
+};
+const when = (operation: HistoryOperation) => operation.started_ms ?? operation.time_ms ?? 0;
+function countStatuses(members: HistoryOperation[]) {
+  const counts = { succeeded: 0, failed: 0, running: 0, pending: 0 };
+  for (const member of members) {
+    if (member.needs_reconciliation) counts.pending++;
+    else if (['succeeded', 'completed'].includes(member.status)) counts.succeeded++;
+    else if (['failed', 'completed_with_failures', 'cancelled'].includes(member.status))
+      counts.failed++;
+    else counts.running++;
+  }
+  return counts;
+}
+/**
+ * A project's operations as a timeline, newest first. Consecutive operations of the same
+ * action within a quarter of an hour (a batch of stations) share one row. Imported
+ * placeholders (a case import repeating a job its run already records) are left out when the
+ * project has anything else.
+ */
+export function projectTimeline(members: HistoryOperation[]): ProjectTimelineRow[] {
+  const real = members.filter((member) => member.phase !== 'imported');
+  const shown = [...(real.length ? real : members)].sort((a, b) => when(b) - when(a));
+  const rows: ProjectTimelineRow[] = [];
+  for (const member of shown) {
+    const action = historyAction(member);
+    const last = rows.at(-1);
+    if (
+      last &&
+      last.action === action &&
+      Math.abs((last.time_ms ?? 0) - when(member)) <= 15 * 60_000
+    ) {
+      last.members.push(member);
+      continue;
+    }
+    rows.push({
+      key: member.operation_id,
+      action,
+      members: [member],
+      time_ms: when(member) || null,
+      counts: { succeeded: 0, failed: 0, running: 0, pending: 0 },
+    });
+  }
+  for (const row of rows) row.counts = countStatuses(row.members);
+  return rows;
+}
+/** How many cases a project touched and how its latest operations ended. */
+export function projectSummary(group: NonNullable<HistoryOperation['project_group']>) {
+  const real = group.members.filter((member) => member.phase !== 'imported');
+  const latestPerCase = new Map<string, HistoryOperation>();
+  for (const member of [...(real.length ? real : group.members)].sort((a, b) => when(b) - when(a)))
+    if (member.case_path && !latestPerCase.has(member.case_path))
+      latestPerCase.set(member.case_path, member);
+  return { cases: latestPerCase.size, counts: countStatuses([...latestPerCase.values()]) };
+}
+export function statusCountsLabel(counts: ProjectTimelineRow['counts'], en = false): string {
+  const parts = [
+    counts.succeeded && (en ? `${counts.succeeded} succeeded` : `成功 ${counts.succeeded}`),
+    counts.failed && (en ? `${counts.failed} failed` : `失败 ${counts.failed}`),
+    counts.running && (en ? `${counts.running} running` : `进行中 ${counts.running}`),
+    counts.pending && (en ? `${counts.pending} to reconcile` : `待核对 ${counts.pending}`),
+  ].filter(Boolean);
+  return parts.join(' · ');
 }
 /** `official` r64 → 官方版 r64; other versions by their registry name when known. */
 export function historyVersionLabel(

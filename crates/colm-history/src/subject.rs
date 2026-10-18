@@ -21,6 +21,28 @@ fn parent_name(path: &str) -> Option<String> {
         .and_then(name_of)
 }
 
+/// A case and its project. Server cases live in a local cache named by a hash, so their names
+/// come from the server folder recorded in `.colm-desktop.json`; `project_path` is the local
+/// folder the history groups by.
+fn case_subject(path: &str, name: Option<String>) -> Option<Value> {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    let remote = std::fs::read_to_string(Path::new(trimmed).join(".colm-desktop.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|record| record["remote_directory"].as_str().map(str::to_owned));
+    let (default_name, project) = match &remote {
+        Some(remote) => (name_of(remote), parent_name(remote)),
+        None => (name_of(trimmed), parent_name(trimmed)),
+    };
+    let mut value = subject("case", name.or(default_name), project)?;
+    if let Some(parent) = Path::new(trimmed).parent().and_then(|p| p.to_str()) {
+        if !parent.is_empty() {
+            value["project_path"] = json!(parent);
+        }
+    }
+    Some(value)
+}
+
 fn subject(kind: &str, name: Option<String>, project: Option<String>) -> Option<Value> {
     let name = name?;
     let mut value = json!({ "kind": kind, "name": name });
@@ -41,16 +63,12 @@ pub fn operation_subject(
     match action {
         "new" | "site-new" | "spatial-new" => {
             let out = flag("--out").or_else(|| object.map(str::to_owned))?;
-            subject(
-                "case",
-                flag("--name").or_else(|| name_of(&out)),
-                parent_name(&out),
-            )
+            case_subject(&out, flag("--name"))
         }
         "mesh-new" => {
             let out = flag("--out")?;
             let case = Path::new(&out).parent()?.to_str()?.to_owned();
-            subject("case", name_of(&case), parent_name(&case))
+            case_subject(&case, None)
         }
         "model-create" | "model-save-draft" | "model-freeze" => subject(
             "version",
@@ -71,7 +89,7 @@ pub fn operation_subject(
             None,
         ),
         _ => match object {
-            Some(path) => subject("case", name_of(path), parent_name(path)),
+            Some(path) => case_subject(path, None),
             None => subject("server", flag("--host"), None),
         },
     }
@@ -95,7 +113,9 @@ mod tests {
         let none = flags(&[]);
         assert_eq!(
             operation_subject("run", Some("/data/PLUMBER2/AT-Neu/"), &none),
-            Some(json!({"kind":"case","name":"AT-Neu","project":"PLUMBER2"}))
+            Some(
+                json!({"kind":"case","name":"AT-Neu","project":"PLUMBER2","project_path":"/data/PLUMBER2"})
+            )
         );
         assert_eq!(
             operation_subject(
@@ -103,7 +123,7 @@ mod tests {
                 None,
                 &flags(&[("--out", "/p/heihe/basin"), ("--name", "Heihe")])
             ),
-            Some(json!({"kind":"case","name":"Heihe","project":"heihe"}))
+            Some(json!({"kind":"case","name":"Heihe","project":"heihe","project_path":"/p/heihe"}))
         );
         assert_eq!(
             operation_subject(
@@ -111,7 +131,9 @@ mod tests {
                 None,
                 &flags(&[("--out", "/p/region/caseA/mesh.nc")])
             ),
-            Some(json!({"kind":"case","name":"caseA","project":"region"}))
+            Some(
+                json!({"kind":"case","name":"caseA","project":"region","project_path":"/p/region"})
+            )
         );
         assert_eq!(
             operation_subject("study-run", Some("/studies/calibrate-lai"), &none),
@@ -135,5 +157,25 @@ mod tests {
         );
         assert_eq!(operation_subject("remote-probe", None, &none), None);
         assert_eq!(operation_subject("run", Some("--engine"), &none), None);
+    }
+
+    #[test]
+    fn server_cases_are_named_by_their_server_folder() {
+        let cache = std::env::temp_dir().join(format!("colm-subject-{}", std::process::id()));
+        let case = cache.join("3f2a9c").join("AT-Neu");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join(".colm-desktop.json"),
+            r#"{"remote_directory":"/tera11/colm-desktop/333/AT-Neu"}"#,
+        )
+        .unwrap();
+        let subject = operation_subject("remote-run", case.to_str(), &|_| None).unwrap();
+        assert_eq!(subject["name"], "AT-Neu");
+        assert_eq!(subject["project"], "333");
+        assert_eq!(
+            subject["project_path"],
+            json!(cache.join("3f2a9c").to_str().unwrap())
+        );
+        let _ = std::fs::remove_dir_all(&cache);
     }
 }

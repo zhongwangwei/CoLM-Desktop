@@ -33838,3 +33838,41 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 
    其余 65 个旧官方修订按 `Registry::remove` 的规则处理：持写锁；源码缓存只在没有保留修订共用时才移走。`sources` 降到 629 MB，当时应用正在用的 official#70 不受影响。
    根本问题：每次重编应用都会冻结一个新的官方修订（约 126 MB 源码缓存），但从来没有东西处理没人用的旧修订。另外，扫描只覆盖已知项目，放在其它目录、绑定到旧修订的算例，打开时需要改绑到新版本。
+
+## 第 714 轮：历史按项目目录合并为一张卡片；服务器作业状态只在变化时记；发布的 rpm 与 Windows 修复（2026-10-18）
+
+1. **现场**：历史页可见记录 1856 条，全部是 16:21 之后产生的：
+   | 记录 | 条数 |
+   |---|---|
+   | 桌面端每约 3 秒一次的 `remote-status` | 1134 |
+   | 绑定模型版本 | 271 |
+   | 保存设置 | 180 |
+   | 案例导入产生的 `remote_run` 占位（`imported`、需要核对，与真实运行记录重复） | 180 |
+   | 真实运行（`remote-run`，每个站点一条） | 90 |
+
+   即使隐藏例行动作，两个各 90 个站点的项目仍有 271 张卡片，因为现有的多站点合并靠 `run_id`，而服务器运行记录里没有它。
+2. **按项目目录合并**：colm-history 新增 `Query.group_projects` 和 `projects` 模块：
+   - 以 `detail.subject.project_path`（没有时用 `case_path` 的上一级目录）为键，把可见操作折叠成一条，`kind=project`，带 `project_group {path, name, members}`。
+   - 状态汇总沿用多站点运行的优先级；有真实记录时，导入占位不参与汇总，所以项目不会一直显示"待核对"。
+   - 服务器项目的名字从成员算例的 `.colm-desktop.json` 里的 `remote_directory` 取上一级目录名（如"222"），不用本机缓存的哈希。
+   - 按最近活动排序，筛选和分页都在折叠之后做。
+
+   桌面端默认按项目合并；按算例过滤时（算例页内的历史）不合并；导出始终逐条导出操作。
+   写入端：`operation_subject` 为算例写入 `project_path`；服务器算例的名字和项目名取服务器目录。
+3. **卡片与时间线**：
+   - 项目卡片显示"N 个算例 · N 条操作"，以及每个算例最近一次结果的汇总（"成功 X · 失败 Y"）。
+   - 点开是项目时间线：按时间倒序；15 分钟内连续的同一动作合成一行（一批站点）；展开后点算例进入原来的详情，删除、对比都在详情里做。项目卡片本身的右键菜单只提示"打开时间线后逐条删除"。
+4. **状态只在变化时记**：运行记录上的核对原本就只在 phase、状态或细节变化时追加（`reconcile_remote_once` 里比较 `next` 与 `latest`），单独的状态查询记录是重复的。
+   - 桌面端：`status_poll` 事件只在内存里用，开始时不落盘，结束时照常核对原运行记录、导入算例，但不追加这条查询本身。
+   - colm-cli：`action_kind` 对 `remote-status`、`remote-study-status` 返回 `None`。
+5. **发布（6e223883 那一轮）**：
+   - Linux：第 709 轮的 MPI 修复在 CI 上得到证实。搬家后的组件目录正是 `_runtime/lib/x86_64-linux-gnu/openmpi/lib/openmpi3`，自检通过，`.deb` 也打出来了；新的失败是 tauri-cli 2.12 拒绝带 `-` 的 rpm 版本号（beta.3 时还能打）。`bundle-release.sh` 改为先打 deb 和 AppImage，再把 rpm 以版本 `0.3.0`、release `0.beta.4` 单独打一次（b69a8bbb）。release 以 `0.` 开头，rpm 会把它排在正式版 `0.3.0-1` 之前，以后能正常升级。
+   - Windows：`check-gui` 的修复生效，内核也从缓存恢复；新的失败是 `engine-pack` 里 MSYS2 的 git 把 verbatim 路径 `\\?\D:\a\CoLM-Desktop` 读成 `\?D:aCoLM-Desktop`。`git_files` 现在去掉前缀并改用正斜杠（c2c1ca9f）。
+   - 两个 macOS 平台都打包成功，内核缓存已经存入（Linux 的缓存键见 CI 日志），下一轮发布可以复用。
+6. 验证：
+   - colm-history 42 条（新增按项目折叠、状态优先级、服务器项目命名、`project_path` 写入）；
+   - Tauri 397 条（新增"状态查询不落盘"）；
+   - colm-cli 串行 450 + 23 等（`action_kind` 断言更新）；
+   - colm-remote 77 条（新增 git 路径写法）；
+   - GUI 688 条（新增时间线批次与汇总、项目卡片打开时间线、点算例才加载详情）；
+   - check-gui、fmt、clippy 都通过。

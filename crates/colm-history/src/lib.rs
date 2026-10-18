@@ -2,6 +2,8 @@
 //! Persist the started event before performing work. Use `Event::next` for a full
 //! metadata snapshot; uncertain work must be reconciled by its actual executor.
 mod grouped;
+mod projects;
+pub use projects::ProjectGroup;
 mod import;
 mod provenance;
 pub use provenance::{capture_provenance, load_provenance};
@@ -126,6 +128,9 @@ pub struct Operation {
     pub needs_reconciliation: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_group: Option<RunGroup>,
+    /// Set on a listing entry that stands for a whole project folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_group: Option<ProjectGroup>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunGroup {
@@ -161,6 +166,8 @@ pub struct Query {
     pub limit: u64,
     pub ascending: bool,
     pub group_runs: bool,
+    /// One entry per project folder (see `projects`); takes precedence over `group_runs`.
+    pub group_projects: bool,
 }
 impl Default for Query {
     fn default() -> Self {
@@ -182,6 +189,7 @@ impl Default for Query {
             limit: 100,
             ascending: false,
             group_runs: false,
+            group_projects: false,
         }
     }
 }
@@ -632,6 +640,9 @@ fn query_page(
     values: &[rusqlite::types::Value],
     view: OperationView,
 ) -> Result<Page> {
+    if query.group_projects && query.case_path.is_none() {
+        return projects::query_page(connection, query, view);
+    }
     if query.group_runs && query.case_path.is_none() {
         return grouped::query_page(connection, query, view);
     }
@@ -669,6 +680,7 @@ fn read_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Operation> {
         event_count: row.get(3)?,
         needs_reconciliation: row.get(4)?,
         run_group: None,
+        project_group: None,
     })
 }
 fn filter(

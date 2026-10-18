@@ -232,9 +232,10 @@ fn action_kind(command: &str) -> Option<&'static str> {
         | "remote-engines"
         | "remote-clean"
         | "remote-unlock"
-        | "remote-stop"
-        | "remote-status"
-        | "remote-study-status" => "server",
+        | "remote-stop" => "server",
+        // Status polls are not operations: they reconcile the run they observe, which records
+        // each change (see reconcile_remote_once); a poll every few seconds is not history.
+        "remote-status" | "remote-study-status" => return None,
         "remote-fetch" | "remote-study-fetch" => "fetch",
         _ => return None,
     })

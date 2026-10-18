@@ -21,6 +21,9 @@ import {
   historyInternal,
   historySubject,
   historyVersionLabel,
+  projectSummary,
+  projectTimeline,
+  statusCountsLabel,
   historyStatusLabel,
   appLocale,
   historyObject,
@@ -257,10 +260,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setComparisonResult(null);
   }
   async function showItem(item: HistoryOperation) {
-    setGroup(item.run_group ? item : null);
+    setGroup(item.run_group || item.project_group ? item : null);
     setDetail(null);
     setResult(null);
-    if (!item.run_group) await show(item.operation_id);
+    if (!item.run_group && !item.project_group) await show(item.operation_id);
   }
   function deleteAllowed(item: HistoryOperation) {
     return (
@@ -277,7 +280,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     const request = {};
     menuRequest.current = open ? request : null;
     setDeletePlan(null);
-    if (!open || item.run_group || !deleteAllowed(item) || busy) return;
+    if (!open || item.run_group || item.project_group || !deleteAllowed(item) || busy) return;
     const token = epoch.current;
     void invokeJson<HistoryDeletePlan>('history_delete_plan', { id: item.operation_id })
       .then((plan) => {
@@ -300,6 +303,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   function deleteItems(item: HistoryOperation) {
     const plan = deletePlan?.id === item.operation_id ? deletePlan : null;
     const allowed = deleteAllowed(item);
+    if (item.project_group)
+      return [
+        {
+          label: t('打开项目时间线后逐条删除', 'Open the project timeline to delete records'),
+          disabled: true,
+          onSelect: () => {},
+        },
+      ];
     if (item.run_group)
       return [
         {
@@ -1232,11 +1243,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     </span>
                   </span>
                   <strong className="history-card-title">{historyObject(item, en)}</strong>
-                  {(item.run_group || subject.project) && (
+                  {(item.run_group || item.project_group || subject.project) && (
                     <span className="history-card-sub">
-                      {item.run_group
-                        ? `${item.run_group.members.length} ${t('个站点', 'stations')}`
-                        : `${t('项目', 'Project')} ${subject.project}`}
+                      {item.project_group
+                        ? `${projectSummary(item.project_group).cases} ${t('个算例', 'cases')} · ${item.project_group.members.length} ${t('条操作', 'operations')}`
+                        : item.run_group
+                          ? `${item.run_group.members.length} ${t('个站点', 'stations')}`
+                          : `${t('项目', 'Project')} ${subject.project}`}
                     </span>
                   )}
                   <span className="history-card-chips">
@@ -1250,6 +1263,12 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                             : t('位置未记录', 'Location not recorded'))}
                     </span>
                     {duration && <span className="history-chip">{duration}</span>}
+                    {item.project_group &&
+                      statusCountsLabel(projectSummary(item.project_group).counts, en) && (
+                        <span className="history-chip">
+                          {statusCountsLabel(projectSummary(item.project_group).counts, en)}
+                        </span>
+                      )}
                   </span>
                   <span className="history-card-meta">
                     {item.time_ms == null ? (
@@ -1315,6 +1334,66 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           }}
         >
           <div className="history-inspector" aria-label={t('记录详情', 'Record details')}>
+            {group?.project_group && (
+              <Card title={t('项目时间线', 'Project timeline')}>
+                <p className="muted">
+                  {group.project_group.path} ·{' '}
+                  {t(
+                    '同一批的操作合成一行；展开后点算例查看详情，详情里可以删除或对比。',
+                    'A batch shares one row; expand it and choose a case for details, where it can be deleted or compared.',
+                  )}
+                </p>
+                <ol className="history-timeline">
+                  {projectTimeline(group.project_group.members).map((row) => (
+                    <li key={row.key}>
+                      <details>
+                        <summary>
+                          <span className="history-timeline-time">
+                            {row.time_ms == null
+                              ? t('时间未记录', 'Time not recorded')
+                              : new Date(row.time_ms).toLocaleString(appLocale(en), {
+                                  month: '2-digit',
+                                  day: '2-digit',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                          </span>
+                          <strong>{historyActionLabel(row.members[0], en)}</strong>
+                          <span>
+                            {row.members.length > 1
+                              ? `${row.members.length} ${t('个算例', 'cases')}`
+                              : historyObject(row.members[0], en)}
+                          </span>
+                          <span className="muted">{statusCountsLabel(row.counts, en)}</span>
+                        </summary>
+                        <div className="button-row">
+                          {row.members.map((member) => (
+                            <ContextMenu
+                              key={member.operation_id}
+                              items={deleteItems(member)}
+                              onOpenChange={(open) => menuChanged(member, open)}
+                            >
+                              <Button
+                                disabled={busy}
+                                aria-pressed={
+                                  detail?.operation.operation_id === member.operation_id
+                                }
+                                onClick={() => run(() => show(member.operation_id))}
+                              >
+                                {historyObject(member, en)} ·{' '}
+                                {member.needs_reconciliation
+                                  ? t('待核对', 'Needs reconciliation')
+                                  : historyStatusLabel(member.status, en)}
+                              </Button>
+                            </ContextMenu>
+                          ))}
+                        </div>
+                      </details>
+                    </li>
+                  ))}
+                </ol>
+              </Card>
+            )}
             {group?.run_group && (
               <Card title={historyObject(group, en)}>
                 <p>
