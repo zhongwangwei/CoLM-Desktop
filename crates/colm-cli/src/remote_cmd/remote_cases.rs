@@ -34,15 +34,33 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
             let version = remote_version(&prepared)?;
             let engine = choose_engine(&prepared, &ssh, &root, version.as_ref())?;
             engine.upload(&ssh, &root)?;
-            if matches!(engine, Engine::Source(_)) {
+            if let Engine::Source(snapshot) = &engine {
                 // Keep build output away from the JSON response. This runs on the login node, which
                 // other users share and where heavy programs are discouraged (星逸, 摆渡船): four
                 // compiler jobs at the lowest priority.
-                ssh.run_ok(&format!(
-                    "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
-                    quote(&root),
-                    engine::ensure_script(&root, engine.id(), LOGIN_NODE_BUILD_JOBS)
-                ))?;
+                let build = || {
+                    ssh.run_ok(&format!(
+                        "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
+                        quote(&root),
+                        engine::ensure_script(&root, engine.id(), LOGIN_NODE_BUILD_JOBS)
+                    ))
+                };
+                if let Err(error) = build() {
+                    // The connectivity check fetches two tiny files; a slow proxy passes it and can
+                    // still time out on real downloads (天河's: 8 KB/s from GitHub, 2026-10-19).
+                    // Such a failure gets one offline retry.
+                    if !colm_remote::offline::looks_like_network_failure(&format!("{error:#}")) {
+                        return Err(error);
+                    }
+                    eprintln!("the server failed to download build dependencies; sending them from this computer");
+                    colm_remote::offline::stage(
+                        &ssh,
+                        &root,
+                        &engine::lock_text(snapshot)?,
+                        &|line| eprintln!("{line}"),
+                    )?;
+                    build()?;
+                }
             }
             format!("{}/bin/colm-cli", engine::engine_dir(&root, engine.id()))
         } else {

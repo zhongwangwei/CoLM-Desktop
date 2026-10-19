@@ -15,6 +15,8 @@ sha2.workspace = true
 # 读安装包随附的 colm-src.tar.gz，按与开发版相同的算法算快照标识（见 engine::tarball_content_id）。
 flate2 = "1.1"
 tar = "0.4"
+# 离线服务器（offline.rs）：本机下载 Rust/CMake 与 Cargo.lock 里的包。与 colm-agent 同一版本，Cargo.lock 不新增包。
+ureq = "3"
 
 [lints]
 workspace = true

@@ -9,7 +9,7 @@ use crate::ssh::{quote, Ssh};
 
 // Non-interactive SSH does not reliably load the user's toolchain PATH.
 pub(crate) const BUILD_PATH_PRELUDE: &str =
-    "export PATH=\"$HOME/.local/share/colm/toolchain/cmake/bin:$PATH:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin\"\n";
+    "export PATH=\"$HOME/.local/share/colm/toolchain/cmake/bin:$HOME/.local/share/colm/toolchain/rust/bin:$PATH:$HOME/.local/bin:${CARGO_HOME:-$HOME/.cargo}/bin\"\n";
 
 /// 探测结果。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]

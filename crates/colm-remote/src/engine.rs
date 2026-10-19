@@ -628,6 +628,28 @@ fi
     )
 }
 
+/// The snapshot's `Cargo.lock`, which decides the crates an offline server needs.
+pub fn lock_text(snapshot: &Snapshot) -> Result<String> {
+    match &snapshot.source {
+        Source::Checkout(repo) => std::fs::read_to_string(repo.join("Cargo.lock"))
+            .with_context(|| format!("cannot read {}", repo.join("Cargo.lock").display())),
+        Source::Tarball(path) => {
+            let file = std::fs::File::open(path)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+            let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+            for entry in archive.entries()? {
+                let mut entry = entry?;
+                if logical_path(&entry.path()?)?.trim_start_matches("./") == "Cargo.lock" {
+                    let mut text = String::new();
+                    entry.read_to_string(&mut text)?;
+                    return Ok(text);
+                }
+            }
+            bail!("{} has no Cargo.lock", path.display())
+        }
+    }
+}
+
 /// 作业脚本里“确保引擎编好”的一段：没编过就加锁编译，编好把四个程序放进 `bin`。
 pub fn ensure_script(root: &str, id: &str, jobs: u32) -> String {
     let engine = quote(&engine_dir(root, id));
@@ -647,7 +669,13 @@ if [ ! -x "$E/bin/colm-rs" ]; then
     echo "building the Rust engine" >> phase
     echo "building the Rust engine"
     C=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
-    (cd "$E/src" && CARGO_TARGET_DIR={target} "$C" build --release --locked -j {jobs} {packages}) || exit 1
+    colm_build() {{ (cd "$E/src" && CARGO_TARGET_DIR={target} "$C" build --release --locked -j {jobs} {packages} "$@"); }}
+    K=$({{ sha256sum "$E/src/Cargo.lock" 2>/dev/null || shasum -a 256 "$E/src/Cargo.lock"; }} | cut -c1-16)
+    if [ -n "$K" ] && [ -f {vendor_prefix}"$K/.complete" ]; then
+      colm_build --offline --config 'source.crates-io.replace-with="colm-vendor"' --config {vendor_config}"$K"'"' || exit 1
+    else
+      colm_build || exit 1
+    fi
     mkdir -p "$E/bin"
     for b in {copies}; do cp {target}/release/$b "$E/bin/$b" || exit 1; done
   fi
@@ -656,6 +684,14 @@ fi
 "#,
         build_path = crate::probe::BUILD_PATH_PRELUDE,
         toolchain = crate::toolchain::install_script(),
+        vendor_prefix = quote(&crate::offline::vendor_dir(root, "")),
+        // `quote` protects the path from the shell; the escapes keep it a valid TOML string for cargo.
+        vendor_config = quote(&format!(
+            "source.colm-vendor.directory=\"{}",
+            crate::offline::vendor_dir(root, "")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+        )),
         packages = packages.join(" "),
         copies = copies.join(" "),
     )

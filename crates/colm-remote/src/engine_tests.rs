@@ -484,3 +484,75 @@ fn docs_stay_out_of_the_snapshot_id_but_ship_in_the_source_pack() {
     assert_eq!(installed(&docs), checkout.id);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Run `ensure_script` with a `cargo` that records its arguments, and return them.
+#[cfg(unix)]
+fn cargo_arguments_of_a_build(root: &Path, vendor: bool) -> String {
+    let root_s = root.to_str().unwrap();
+    let src = root.join("engine/abc/src");
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("Cargo.lock"), "version = 4\n").unwrap();
+    let key = crate::offline::lock_key("version = 4\n");
+    if vendor {
+        let dir = crate::offline::vendor_dir(root_s, &key);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(Path::new(&dir).join(".complete"), "").unwrap();
+    }
+    let release = root.join("target/release");
+    std::fs::create_dir_all(&release).unwrap();
+    for (_, binary) in BINARIES {
+        std::fs::write(release.join(binary), "").unwrap();
+    }
+    let mocks = format!(
+        "flock() {{ :; }}\nrustc() {{ :; }}\ncmake() {{ echo 'cmake version 4.4.4'; }}\n\
+         cargo() {{ [ \"$1\" = --version ] || printf '%s\\n' \"$@\" > {}; }}\ncd {}\n",
+        crate::ssh::quote(&format!("{root_s}/arguments")),
+        crate::ssh::quote(root_s)
+    );
+    let output = Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "set -e\n{mocks}{}",
+            ensure_script(root_s, "abc", 4)
+        ))
+        .env("HOME", root)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    std::fs::read_to_string(root.join("arguments")).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_vendor_directory_for_the_snapshot_lock_turns_the_build_offline() {
+    let base = std::env::temp_dir().join(format!("colm-offline-build-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    // A root with a space and a double quote: the path crosses both shell and TOML quoting.
+    let root = base.join("work \"root\"");
+    let online = cargo_arguments_of_a_build(&base.join("plain"), false);
+    assert!(!online.contains("--offline"), "{online}");
+    let offline = cargo_arguments_of_a_build(&root, true);
+    let lines: Vec<&str> = offline.lines().collect();
+    let at = lines
+        .iter()
+        .position(|l| *l == "--offline")
+        .expect(&offline);
+    assert_eq!(lines[at + 1], "--config");
+    assert_eq!(
+        lines[at + 2],
+        "source.crates-io.replace-with=\"colm-vendor\""
+    );
+    assert_eq!(lines[at + 3], "--config");
+    let key = crate::offline::lock_key("version = 4\n");
+    let toml = format!(
+        "source.colm-vendor.directory=\"{}\"",
+        crate::offline::vendor_dir(root.to_str().unwrap(), &key).replace('"', "\\\"")
+    );
+    assert_eq!(lines[at + 4], toml);
+    assert!(root.join("engine/abc/bin/colm-rs").is_file());
+    std::fs::remove_dir_all(base).unwrap();
+}

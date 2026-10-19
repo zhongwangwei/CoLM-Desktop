@@ -34031,3 +34031,12 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 改为：回退顺序里先取"带版本的运行"，再取任意有 `run_case` 的。
     - 测试：`the default result is the recorded run, not the legacy placeholder listed before it`（真实运行的修订与当前不同、占位排在前面；去掉修复时失败：pass 706 / fail 1，加上修复：707 条全部通过）。
     - 没改的：占位本身仍会出现在"已记录的运行"列表里；账本为什么把同一次 bd 作业既导入成占位又记成真实运行，这里没有追。
+
+29. **离线服务器自动送依赖并编译，做成应用功能（`colm_remote::offline`，2026-10-19）**：第 27 条的手工流程改为应用自己完成，本机不需要 cargo。
+    - 做法：每次上传源码快照后（`Engine::upload` 与远程工作区的引擎上传），一次 ssh 读服务器状态：本快照的引擎已编好就什么都不做；否则看 `<根>/offline/vendor-<键>` 是否已有，没有时再用 curl 试 crates.io 与 rust-lang.org。连不上时，本机下载并按钉住的校验和核对 Rust 1.97.1 的 `rustc`/`cargo`/`rust-std` 三个组件包和 cmake 4.4.4，经 ssh 管道上传，再用组件自带的 `install.sh` 装到 `~/.local/share/colm/toolchain/rust`（服务器已有的就跳过）；同时按快照的 `Cargo.lock` 从 `static.crates.io` 下载每个包，用锁文件里的校验和核对后，重新打包成 cargo 的 directory source 上传。键是 `Cargo.lock` 的 SHA-256 前 16 位。`ensure_script` 在服务器上对 `$E/src/Cargo.lock` 算出同一个键，找到带 `.complete` 的 vendor 目录就用 `--offline --config source.crates-io.replace-with=… --config source.colm-vendor.directory=…` 编译，所以作业脚本里的编译（计算节点同样没网）也走这条路，调用方都不用改。登录节点编译如果因下载失败而失败（错误信息像网络故障），会强制送一次依赖再编一次：连通性检查只取两个小文件，慢代理能通过检查，真正下载时却会超时。
+    - 实测结论：`--config` 可以定义 `[source.*]`，不需要写配置文件（第 27 条只试过环境变量）；`.cargo-checksum.json` 写成 `{"files":{},"package":"<sha>"}` 能被 cargo 接受，`package` 照样按锁文件核对，故意改错就报 "unable to verify that `itoa v1.0.11` is the same as when the lockfile was generated"（cargo 1.97.1，用全新的空 `CARGO_HOME`）。重新打包时跳过 `._*`，并拒绝任何写到 `<名>-<版本>/` 之外的条目。六个钉住的 Rust 校验和与 static.rust-lang.org 上的 `.sha256` 逐一核对过，一致。
+    - 本机端到端：225 个包下载并校验用了 37 s，vendor 包 75 MB；全新空 `CARGO_HOME`、`--offline --locked`，只靠这份 vendor 编出四个程序，用时 2 分 11 秒（release）。
+    - 天河（ln202，DNS 都解析不出）：`remote-engine-prepare` 共 7 分 18 秒，返回 `{"ready":true}`。应用判断出服务器没网，只上传 vendor（Rust 与 cmake 已在，跳过了），然后在登录节点 nice 19、4 个编译任务下离线编出 `engine/e907bed7398032b0/bin` 的四个程序。`target/release/deps` 里有 202 个 dep-info 指向新的 `offline/vendor-1d4f346251affc1e`，`~/.cargo/registry` 里只有 `CACHEDIR.TAG`，说明没有任何下载。
+    - 踩坑：直接在终端里跑 `colm-cli`（没有 `COLM_SSH_AUTH_STDIN`）会强制 `StrictHostKeyChecking=yes`，而 `~/.ssh/config` 里 tianhe 写的是 `UserKnownHostsFile /dev/null`，主机密钥永远不会被记住，于是报 "Host key verification failed"。界面传 `{"auth":"config"}`，按 ssh 配置走，所以不受影响；手工复现时要照界面的方式传。
+    - 没测：Rust 组件包的 `install.sh` 与 cmake 解包这两段没在真机上跑过（天河已经有这两样）；用 Windows 桌面送依赖。
+    - 已知缺口：探测时把 curl 算作"能自动装工具链"的前提（`colm_toolchain_installable`），所以完全没有 curl 的离线服务器在选引擎那一步就被拒绝，走不到这里。

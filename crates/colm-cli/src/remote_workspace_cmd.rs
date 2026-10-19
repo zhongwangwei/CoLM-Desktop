@@ -227,6 +227,7 @@ fn submit(ws: &Workspace, opts: &Opts) -> Result<Value> {
             colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &record.root)?;
         engine_lock.run(|| {
         engine::upload(&ssh, &record.root, &snapshot)?;
+        super::remote_cmd::prepare_offline(&ssh, &record.root, &snapshot)?;
         ssh.upload(
             &staging,
             &["candidate".into(), "baseline".into()],

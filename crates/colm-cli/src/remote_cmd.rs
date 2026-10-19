@@ -929,10 +929,22 @@ impl Engine {
     /// 传上去（已经在就跳过）；返回这次是不是真的传了。
     fn upload(&self, ssh: &Ssh, root: &str) -> Result<bool> {
         match self {
-            Self::Source(snapshot) => engine::upload(ssh, root, snapshot),
+            Self::Source(snapshot) => {
+                let uploaded = engine::upload(ssh, root, snapshot)?;
+                prepare_offline(ssh, root, snapshot)?;
+                Ok(uploaded)
+            }
             Self::Prebuilt(prebuilt) => engine::upload_prebuilt(ssh, root, prebuilt),
         }
     }
+}
+
+/// A server without internet gets Rust, CMake and the crates from this computer before anything
+/// builds the snapshot there (see `colm_remote::offline`); a connected one is left as it was.
+pub(crate) fn prepare_offline(ssh: &Ssh, root: &str, snapshot: &Snapshot) -> Result<()> {
+    let lock = engine::lock_text(snapshot)?;
+    colm_remote::offline::prepare(ssh, root, &snapshot.id, &lock, &|line| eprintln!("{line}"))?;
+    Ok(())
 }
 
 fn exe_dir() -> Result<PathBuf> {
