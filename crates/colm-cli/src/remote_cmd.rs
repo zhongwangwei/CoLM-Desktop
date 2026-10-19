@@ -2060,6 +2060,14 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         return Ok(());
     }
     let id = format!("run-{}", opts.need_str("--operation-id")?);
+    // 多站点批量运行带上批次号：分区独占时同一批的站点放进同一个节点队列（`colm_remote::pack`），
+    // 不再一个站点占一个节点。分区是否独占由服务器上的提交脚本判断。
+    let pack = opts
+        .get("--pack-batch")
+        .map(|batch| colm_remote::pack::Pack {
+            pool: batch.to_owned(),
+            slots: 0,
+        });
     let raw_body = job_body(
         &root,
         engine.id(),
@@ -2162,7 +2170,7 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
 
     // 4. 提交作业：先确保引擎编好，再跑。
     ensure!(crate::fingerprint::configuration_identity(&case)? == local_configuration, "local frozen configuration changed during remote staging");
-    let submitted = job::submit(&ssh, &root, &id, &body, &spec, engine.id())?;
+    let submitted = job::submit_with(&ssh, &root, &id, &body, &spec, engine.id(), pack.as_ref())?;
         Ok((engine_uploaded, submitted))
     })?;
         Ok((engine_lock, engine_uploaded, submitted))
@@ -2219,7 +2227,7 @@ fn pending_identity_script(pending: &PendingRun) -> Result<String> {
         format!("# colm-operation-id: {operation}"),
     ];
     let checks = markers.iter().map(|marker| format!("grep -Fqx -- {} script.sh || {{ echo 'pending job identity changed' >&2; exit 1; }}", quote(marker))).collect::<Vec<_>>().join("\n");
-    Ok(format!("set -e\ncd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\n[ \"$S\" = {scheduler} ] || {{ echo 'pending scheduler identity changed' >&2; exit 1; }}\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler)))
+    Ok(format!("set -e\ncd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\ncase \"$S\" in {scheduler}|{scheduler}-pack) ;; *) echo 'pending scheduler identity changed' >&2; exit 1;; esac\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\necho \"$S\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler)))
 }
 
 fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<()> {
@@ -2242,6 +2250,14 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
     let mut record = pending.record.clone();
     if verified && record.scheduler != "bare" {
         record.scheduler_id = identity.lines().nth(1).map(str::to_owned);
+        // 打包提交在记下意图时还不知道服务器会不会打包；以服务器上写下的为准。
+        if let Some(actual) = identity
+            .lines()
+            .nth(2)
+            .filter(|s| *s == format!("{}-pack", record.scheduler))
+        {
+            record.scheduler = actual.to_owned();
+        }
     }
     let record_warning = if verified {
         finish_pending(&pending, &record)

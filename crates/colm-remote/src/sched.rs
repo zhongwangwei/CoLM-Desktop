@@ -303,36 +303,49 @@ pub const PATH_PRELUDE: &str = r#"if ! { command -v sbatch >/dev/null 2>&1 || co
 fi
 "#;
 
+// 一份文本两处用（单站点提交、打包的载体作业），`concat!` 只认字面量，所以写成宏。
+macro_rules! slurm_submit {
+    () => {
+        r#"colm_sbatch() {
+  OUT=$(sbatch --parsable "$1" 2>&1) || {
+    W=$(pwd -P); ID=
+    for colm_try in 1 2 3; do
+      ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-1hours -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$W" '$2 == w { print $1 }' | sort -u)
+      [ -n "$ID" ] && break
+      [ "$colm_try" = 3 ] || sleep 2
+    done
+    case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch failed: $OUT" >&2; return 1;; esac
+    echo "sbatch reported an error but the job was accepted ($ID): $OUT" >&2
+    OUT=$ID
+  }
+  ID=${OUT%%;*}
+  case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch gave no job id: $OUT" >&2; return 1;; esac
+  return 0
+}
+"#
+    };
+}
+/// `colm_sbatch 脚本`：在脚本所在的当前目录提交，成功时把作业号放进 `$ID`。
+///
+/// 天河实测（Slurm 23.11，2026-10-19）：同时提交 5 个，slurmctld 都收下并开始运行了，sbatch 却报
+/// "Unexpected message received" 退出非零，`sched_id` 没写，应用只能标"待核对"、整批停下。作业目录
+/// 只属于这一次提交，所以 sbatch 报错时先按工作目录找：squeue 找排队和运行中的，sacct 找已经跑完的
+/// （实测 47 s 就结束的也有）。恰好找到一个才算提交成功；找到多个或一个都没有，仍按失败报告，不猜。
+pub(crate) const SLURM_SUBMIT: &str = slurm_submit!();
+
+const SLURM_LAUNCH: &str = concat!(
+    "echo slurm > scheduler\n",
+    slurm_submit!(),
+    "colm_sbatch script.sh || exit 1\necho \"$ID\" > sched_id\necho \"$ID\"\n"
+);
+
 /// 提交的一段（`script.sh` 已写好，当前目录是作业目录）：成功时最后一行输出调度器给的作业号。
 pub fn launch(scheduler: Scheduler) -> &'static str {
     match scheduler {
         Scheduler::Bare => {
             "setsid nohup ./script.sh > log 2>&1 < /dev/null &\necho $! > pid\ncat pid\n"
         }
-        Scheduler::Slurm => {
-            // 天河实测（Slurm 23.11，2026-10-19）：同时提交 5 个，slurmctld 都收下并开始运行了，sbatch
-            // 却报 "Unexpected message received" 退出非零，`sched_id` 没写，应用只能标"待核对"、
-            // 整批停下。作业目录只属于这一次提交，所以 sbatch 报错时先按工作目录找：squeue 找排队
-            // 和运行中的，sacct 找已经跑完的（实测 47 s 就结束的也有）。恰好找到一个才算提交成功；
-            // 找到多个或一个都没有，仍按失败报告，不猜。
-            r#"echo slurm > scheduler
-OUT=$(sbatch --parsable script.sh 2>&1) || {
-  W=$(pwd -P); ID=
-  for colm_try in 1 2 3; do
-    ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-1hours -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$W" '$2 == w { print $1 }' | sort -u)
-    [ -n "$ID" ] && break
-    [ "$colm_try" = 3 ] || sleep 2
-  done
-  case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch failed: $OUT" >&2; exit 1;; esac
-  echo "sbatch reported an error but the job was accepted ($ID): $OUT" >&2
-  OUT=$ID
-}
-ID=${OUT%%;*}
-case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch gave no job id: $OUT" >&2; exit 1;; esac
-echo "$ID" > sched_id
-echo "$ID"
-"#
-        }
+        Scheduler::Slurm => SLURM_LAUNCH,
         Scheduler::Pbs => {
             r#"echo pbs > scheduler
 OUT=$(qsub script.sh 2>&1) || { echo "qsub failed: $OUT" >&2; exit 1; }
@@ -369,6 +382,26 @@ slurm)
     case "$Q" in PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";; *) echo "state=running";; esac
     echo "detail=$Q"
   fi ;;
+slurm-pack)
+  # 打包运行（`crate::pack`）：看站点被哪个载体领走、那个载体还在不在。
+  P=$(cat pool 2>/dev/null); J=${PWD##*/}
+  if [ -z "$P" ]; then echo "state=unknown"
+  elif [ -f "$P/claimed/$J/carrier" ]; then
+    C=$(cat "$P/claimed/$J/carrier"); Q=$(squeue -h -j "$C" -o %T 2>/dev/null | head -n 1)
+    if [ -n "$Q" ]; then echo "state=running"; echo "detail=node pack job $C $Q"
+    else echo "state=lost"; echo "detail=node pack job $C $(sacct -n -X -P -j "$C" -o State,ExitCode 2>/dev/null | head -n 1)"; fi
+  elif [ -f "$P/claimed/$J/cancelled" ]; then echo "state=lost"; echo "detail=cancelled before it started"
+  elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
+  elif [ -f "$P/queue/$J" ]; then
+    L=
+    for c in "$P"/carriers/c*; do
+      [ -f "$c/sched_id" ] && [ ! -f "$c/closing" ] || continue
+      Q=$(squeue -h -j "$(cat "$c/sched_id")" -o %T 2>/dev/null | head -n 1)
+      if [ -n "$Q" ]; then L="$L $(cat "$c/sched_id") $Q"; fi
+    done
+    if [ -n "$L" ]; then echo "state=queued"; echo "detail=waiting in node pack:$L"
+    else echo "state=lost"; echo "detail=node pack has no job left to run it"; fi
+  else echo "state=lost"; echo "detail=not in the node pack queue"; fi ;;
 pbs)
   Q=$(qstat -f "$ID" 2>/dev/null | sed -n 's/^ *job_state = *//p' | head -n 1)
   if [ -z "$Q" ]; then
@@ -394,6 +427,10 @@ pub const CANCEL: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
 ID=$(cat sched_id 2>/dev/null || true)
 case "$S" in
 slurm) scancel "$ID" || exit $? ;;
+slurm-pack)
+  # 不能 scancel：载体上还跑着别的站点。没领走的抢先占住，领走了的请载体只杀这一个。
+  P=$(cat pool) || exit 1; J=${PWD##*/}
+  if mkdir "$P/claimed/$J" 2>/dev/null; then : > "$P/claimed/$J/cancelled"; else : > "$P/claimed/$J/cancel"; fi ;;
 pbs) qdel "$ID" || exit $? ;;
 lsf) bkill "$ID" || exit $? ;;
 bare)

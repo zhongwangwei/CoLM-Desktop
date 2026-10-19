@@ -34067,3 +34067,20 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：`a_job_slurm_accepted_despite_an_sbatch_error_is_found_by_its_directory`（squeue 找到；只在 sacct 里的已结束作业也能找到；两个候选就判失败，且不写 `sched_id`）。前端新增 `jobs running when a submission fails are followed to the end, and nothing more is sent`，并改了三条原来断言"出错后不再查询"的测试；这四条在旧的循环下都失败。colm-remote 97 条、GUI 前端 713 条通过。
     - 没做：为什么同时提交 5 个会让天河的 slurmctld 回复错乱（第一批 5 个是好的），没有查；提交并发数没有改。眼下这 5 个待核对的站点，作业目录里仍然没有 `sched_id`。
     - 另外注意：每个站点的作业都独占一个 64 核节点（第 27 条已记），90 个站点就是 90 个节点各占几分钟，计费远多于实际用到的。"按节点打包站点"还没做。
+
+34. **按节点打包站点（`colm_remote::pack`，2026-10-19，用户要求）**：天河 deimos 分区是 `OverSubscribe=EXCLUSIVE`，任何作业都占整个节点、按整节点计费。sacct 实测：作业申请 1 核，分到 64 核；AU-How 跑了 5 分 27 秒，记 5 小时 48 分核时。每个站点一个作业，90 个站点就占 90 个节点。
+    - 做法：多站点批量运行时，桌面把这次批量的编号作为 `--pack-batch` 传给 `remote-run`。服务器上的提交脚本先判断分区是否独占：`scontrol -o show partition <分区>` 含 `OverSubscribe=EXCLUSIVE`（老版本 Slurm 叫 `Shared=EXCLUSIVE`），或者指令里有 `--exclusive`。
+      - 不独占：照旧每个站点单独 sbatch，行为不变。
+      - 独占：站点写好自己的作业目录后，放进 `<根>/pools/<批次>/queue/`；作业目录里 `scheduler` 记为 `slurm-pack`，`pool` 记队列目录，`sched_id` 记批次号。接着在同一把锁下算还要几个"载体"作业：没被领走的站点数，超过活着的载体剩余位置数，就再交一个。每个载体占一个节点，同时跑节点核数个站点（`SLURM_CPUS_ON_NODE`；登录节点上用 `sinfo -o %c` 估计，并记在 `slots` 里）。
+      - 载体用 `mkdir claimed/<站点>` 领取站点（原子操作，所以一个站点只会被跑一次），用 `setsid` 让每个站点在自己的进程组里跑。站点脚本照常自己写 `exit_code`；站点被杀、没写成时，由载体补上它实际的退出状态。队列空了等 60 s，没有新站点就收尾。收尾的规则：先写 `closing`，等 2 s 再看一次队列，因为并行文件系统上 `flock` 未必跨节点生效。入队一方先入队、后看 `closing`，所以两边至少有一方看得见对方。
+    - 状态：已被领走且载体还在 → 运行中；载体没了却没有 `exit_code` → lost。没被领走：有活着的载体 → 排队，没有 → lost。取消前就被占住的 → lost（"cancelled before it started"）。
+    - 取消：不能 `scancel`，因为载体上还跑着别的站点。没被领走的站点，由取消方抢先 `mkdir` 占住，载体就不会再跑它；已经在跑的站点，写一个 `cancel` 标记，载体只杀这个站点的进程组（10 s 后升级为 KILL）。
+    - 不确定的提交：意图里记的是 `slurm`，服务器可能写成 `slurm-pack`。核对时两者都认，核对通过后改用服务器上记的那个。
+    - 测试（沙箱里真的跑载体脚本，`flock`、`setsid` 用替身，bash 3.2）：
+      - 4 个站点、每节点 2 个位置，只交了 2 个载体；还没被领走的站点取消后不会再跑，也没有编造退出码，且没有对载体 `scancel`；
+      - 载体跑完 a（0）、b（3）；c 运行中显示"node pack job 100"，取消后得到 143，载体随后收尾；
+      - 共享分区照旧单独提交；载体交不上去时，站点撤出队列，并按失败报告。
+      - 前端：站点批量提交带 `pack: true` 和同一个 `runId`。
+      - colm-remote 100 条、colm-cli 454 条（串行）、gui/src-tauri 408 条、前端 713 条通过。
+    - 天河只读核对：`deimos` 判为独占，`sinfo` 得 64 核，`setsid`、`flock` 都在，bash 5.1。天河没有默认分区，所以服务器设置里不指定分区时不会打包。
+    - 没测：天河上真实提交一批。"同时运行的站点数"（申请 CPU 数）仍然限制同时在途的站点数：设成 128，90 个站点才会同时分到两个节点上；设成 10，只会占一个节点，但每次只跑 10 个。

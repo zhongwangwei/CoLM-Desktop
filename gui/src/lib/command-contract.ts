@@ -1201,6 +1201,10 @@ export const commandContract = {
     "recordInputFingerprints": {
       "required": false,
       "rust_type": "Option<bool>"
+    },
+    "pack": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "remote_kernels": {

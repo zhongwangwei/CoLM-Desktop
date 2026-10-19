@@ -13,6 +13,7 @@ pub mod engine_inventory;
 pub mod job;
 pub mod kernel;
 pub mod offline;
+pub mod pack;
 pub mod probe;
 pub mod sched;
 pub mod ssh;

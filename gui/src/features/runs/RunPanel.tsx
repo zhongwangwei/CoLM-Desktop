@@ -490,7 +490,13 @@ export default function RunPanel({
                 stopped: () => stoppedBatches.has(runId) || cancelledRun.current === runId,
                 record: (dir) => invokeJson('remote_job_record', { case: dir }),
                 status: (dir) => invokeJson('remote_status', { case: dir }),
-                submit: (dir) => invokeJson('remote_run', { ...args, case: dir }),
+                // 站点批量：分区独占的服务器上，同一批的站点放进同一个节点队列，不再一个站点占一个节点。
+                submit: (dir) =>
+                  invokeJson('remote_run', {
+                    ...args,
+                    case: dir,
+                    ...(siteBatch ? { pack: true } : {}),
+                  }),
                 change: (dir, status, result, error) => {
                   const record =
                     result ??

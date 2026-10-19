@@ -314,6 +314,9 @@ test('remote batch runs as many stations as CPUs are requested, one CPU each, an
     assert.equal(args.ranks, 1);
     assert.equal(args.scheduler, 'auto');
     assert.equal(args.cpus, 1);
+    // One batch shares one node queue; the server packs it only on whole-node partitions.
+    assert.equal(args.pack, true);
+    assert.equal(args.runId, submissions[0].args.runId);
   }
   assert.deepEqual(p.batchWorkers, [6]);
   assert.equal(p.state.running['/good'].status, 'succeeded');

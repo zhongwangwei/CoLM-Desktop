@@ -79,6 +79,32 @@ pub fn job_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<Strin
 /// 提交作业的远程脚本：写下作业脚本，交给调度系统（或脱离 ssh 会话在后台跑），最后一行回报作业号。
 /// 作业脚本里可以 `echo 阶段 > phase` 报告进度；结束时写下退出码。
 pub fn submit_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<String> {
+    submit_script_with(root, id, body, spec, sched::launch(spec.scheduler))
+}
+
+/// 和 [`submit_script`] 一样，但分区独占时放进这一批的节点队列（[`crate::pack`]）。只用于 Slurm。
+pub fn packed_submit_script(
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    pack: &crate::pack::Pack,
+) -> Result<String> {
+    anyhow::ensure!(
+        spec.scheduler == Scheduler::Slurm,
+        "node packing is only for Slurm"
+    );
+    let launch = crate::pack::launch(root, id, pack, &spec.resources)?;
+    submit_script_with(root, id, body, spec, &launch)
+}
+
+fn submit_script_with(
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    launch: &str,
+) -> Result<String> {
     let dir = quote(&job_dir(root, id));
     let script = job_script(root, id, body, spec)?;
     let prelude = if spec.scheduler == Scheduler::Bare {
@@ -89,7 +115,6 @@ pub fn submit_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<St
     Ok(format!(
         "set -e\n{prelude}mkdir -p {jobs}\nmkdir {dir} || {{ echo 'job identity already exists; inspect its status instead of resubmitting' >&2; exit 1; }}\ncd {dir}\ncat > script.sh <<'COLM_JOB_EOF'\n{script}COLM_JOB_EOF\nchmod +x script.sh\n{launch}",
         jobs = quote(&format!("{}/jobs",root.trim_end_matches('/'))),
-        launch = sched::launch(spec.scheduler),
     ))
 }
 
@@ -204,9 +229,28 @@ pub fn submit(
     spec: &Spec,
     engine_id: &str,
 ) -> Result<Submitted> {
+    submit_with(ssh, root, id, body, spec, engine_id, None)
+}
+
+/// 带上批次时，分区独占的 Slurm 服务器把站点放进节点队列；其它情况和 [`submit`] 一样。
+pub fn submit_with(
+    ssh: &Ssh,
+    root: &str,
+    id: &str,
+    body: &str,
+    spec: &Spec,
+    engine_id: &str,
+    pack: Option<&crate::pack::Pack>,
+) -> Result<Submitted> {
     check_id(id)?;
     let body = engine_body(engine_id, body)?;
-    let out = ssh.run_ok(&submit_script(root, id, &body, spec)?)?;
+    let script = match pack {
+        Some(pack) if spec.scheduler == Scheduler::Slurm => {
+            packed_submit_script(root, id, &body, spec, pack)?
+        }
+        _ => submit_script(root, id, &body, spec)?,
+    };
+    let out = ssh.run_ok(&script)?;
     let last = out
         .trim()
         .lines()
@@ -214,6 +258,14 @@ pub fn submit(
         .map(str::trim)
         .filter(|l| !l.is_empty())
         .context("the job did not report an id")?;
+    if let Some(batch) = last.strip_prefix("pack ") {
+        check_id(batch)?;
+        return Ok(Submitted {
+            scheduler: "slurm-pack",
+            pid: None,
+            scheduler_id: Some(batch.to_owned()),
+        });
+    }
     Ok(match spec.scheduler {
         Scheduler::Bare => Submitted {
             scheduler: "bare",

@@ -1473,6 +1473,7 @@ pub async fn remote_run(
     model_revision: Option<colm_model::VersionRef>,
     preprocessors: Option<String>,
     record_input_fingerprints: Option<bool>,
+    pack: Option<bool>,
 ) -> Result<Value, String> {
     if let Some(run_id) = &run_id {
         crate::sidecar::validate_run_id(run_id)?;
@@ -1492,6 +1493,10 @@ pub async fn remote_run(
     args.extend(server_args);
     crate::model::options(&mut args, model_revision.as_ref())?;
     crate::sidecar::add_preprocessors(&mut args, preprocessors.as_deref())?;
+    // 同一批的站点共用一个节点队列，队列名就是这次批量运行的编号。
+    if let (Some(true), Some(run_id)) = (pack, &run_id) {
+        args.extend(["--pack-batch".into(), run_id.clone()]);
+    }
     ssh_cli_json_for_run(
         args,
         resources,

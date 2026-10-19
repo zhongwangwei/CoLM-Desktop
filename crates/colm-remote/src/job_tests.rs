@@ -492,3 +492,184 @@ fn stale_bare_pid_cannot_cancel_an_unrelated_process() {
     assert!(!ok && error.contains("job process"), "{error}");
     assert!(!dir.join("exit_code").exists());
 }
+
+// ---- 按节点打包（crate::pack）：载体脚本真的在沙箱里跑，flock 与 setsid 用替身（macOS 没有） ----
+
+#[cfg(unix)]
+fn pack_sandbox(tag: &str, partition_line: &str) -> Sandbox {
+    let sb = Sandbox::new(tag);
+    sb.stub("scontrol", &format!("echo '{partition_line}'"));
+    sb.stub("sinfo", "echo 2");
+    sb.stub("flock", "exit 0");
+    sb.stub("setsid", "exec \"$@\"");
+    // Each submission gets the next id and is pending until a test marks it gone.
+    sb.stub(
+        "sbatch",
+        "n=$(cat \"$STUBS/next\" 2>/dev/null || echo 100); echo $((n + 1)) > \"$STUBS/next\"\necho \"$n\" >> \"$STUBS/live\"; pwd >> \"$STUBS/submitted_from\"; echo \"$n\"",
+    );
+    sb.stub(
+        "squeue",
+        "while [ $# -gt 0 ]; do [ \"$1\" = -j ] && id=$2; shift; done\n[ -n \"$id\" ] && grep -qx \"$id\" \"$STUBS/live\" 2>/dev/null && echo RUNNING; true",
+    );
+    sb
+}
+
+#[cfg(unix)]
+fn pack_spec() -> (Spec, crate::pack::Pack) {
+    (
+        slurm_spec(),
+        crate::pack::Pack {
+            pool: "batch-1".into(),
+            slots: 0,
+        },
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn an_exclusive_partition_queues_sites_and_adds_a_node_job_per_node_of_sites() {
+    let sb = pack_sandbox(
+        "pack",
+        "PartitionName=cpu AllowGroups=ALL OverSubscribe=EXCLUSIVE State=UP",
+    );
+    let (spec, pack) = pack_spec();
+    let bodies = [
+        ("j-a", "true"),
+        ("j-b", "exit 3"),
+        ("j-c", "sleep 20"),
+        ("j-d", "true"),
+    ];
+    for (id, body) in bodies {
+        let script = packed_submit_script(&sb.work(), id, body, &spec, &pack).unwrap();
+        let (out, err, ok) = sb.run(&script);
+        assert!(ok, "{id}: {err}");
+        assert_eq!(out.trim().lines().last(), Some("pack batch-1"), "{id}");
+        assert_eq!(
+            std::fs::read_to_string(sb.job_dir(id).join("scheduler")).unwrap(),
+            "slurm-pack\n"
+        );
+    }
+    // Two slots per node (sinfo): a and b share the first node job, c needs a second; d fits.
+    assert_eq!(sb.read("live").lines().collect::<Vec<_>>(), ["100", "101"]);
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-1"));
+    assert_eq!(
+        std::fs::read_to_string(pool.join("slots")).unwrap().trim(),
+        "2"
+    );
+    let carrier = std::fs::read_to_string(pool.join("carriers/c0/script.sh")).unwrap();
+    assert!(carrier.contains("#SBATCH --partition=cpu"), "{carrier}");
+    assert!(carrier.contains("#SBATCH --cpus-per-task=1"), "{carrier}");
+    let queued = sb.status("j-a");
+    assert_eq!(queued.state, State::Queued);
+    assert!(queued.detail.unwrap().contains("waiting in node pack"));
+
+    // Cancelling a site no node job has taken: nothing will run it, and nothing forges an exit code.
+    let (out, err, ok) = sb.run(&cancel_script(&sb.work(), "j-d"));
+    assert!(ok, "{err}");
+    assert!(out.contains("cancellation_requested"));
+    assert!(
+        sb.read("cancelled").is_empty(),
+        "the node job itself is never scancelled"
+    );
+    let cancelled = sb.status("j-d");
+    assert_eq!(cancelled.state, State::Lost);
+    assert_eq!(
+        cancelled.detail.as_deref(),
+        Some("cancelled before it started")
+    );
+
+    // Run the first node job as Slurm would, with two cores.
+    let child = Command::new("bash")
+        .arg(pool.join("carriers/c0/script.sh"))
+        .current_dir(pool.join("carriers/c0"))
+        .env("STUBS", &sb.bin)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", sb.bin.display()),
+        )
+        .env("SLURM_JOB_ID", "100")
+        .env("SLURM_CPUS_ON_NODE", "2")
+        .env("COLM_PACK_LINGER", "2")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let wait_for = |what: &str, done: &dyn Fn() -> bool| {
+        for _ in 0..200 {
+            if done() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("timed out waiting for {what}");
+    };
+    wait_for("c to start", &|| pool.join("claimed/j-c/carrier").is_file());
+    let running = sb.status("j-c");
+    assert_eq!(running.state, State::Running);
+    assert!(running.detail.unwrap().contains("node pack job 100"));
+    // Cancelling a running site stops only that site; the node job goes on and then ends.
+    let (_, err, ok) = sb.run(&cancel_script(&sb.work(), "j-c"));
+    assert!(ok, "{err}");
+    let child = std::cell::RefCell::new(child);
+    wait_for("the node job to end", &|| {
+        child.borrow_mut().try_wait().unwrap().is_some()
+    });
+    assert_eq!(sb.status("j-a").state, State::Finished { exit_code: 0 });
+    assert_eq!(sb.status("j-b").state, State::Finished { exit_code: 3 });
+    assert_eq!(sb.status("j-c").state, State::Finished { exit_code: 143 });
+    assert!(
+        !pool.join("claimed/j-d/carrier").exists(),
+        "a cancelled site never runs"
+    );
+    assert!(pool.join("carriers/c0/closing").is_file());
+    // Every site ran exactly once, in its own directory, with its own log.
+    for id in ["j-a", "j-b", "j-c"] {
+        assert_eq!(
+            std::fs::read_to_string(pool.join(format!("claimed/{id}/carrier"))).unwrap(),
+            "100\n"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_shared_partition_keeps_one_job_per_site() {
+    let sb = pack_sandbox("pack-shared", "PartitionName=cpu OverSubscribe=NO State=UP");
+    let (spec, pack) = pack_spec();
+    let script = packed_submit_script(&sb.work(), "j-s", "true", &spec, &pack).unwrap();
+    let (out, err, ok) = sb.run(&script);
+    assert!(ok, "{err}");
+    assert_eq!(out.trim().lines().last(), Some("100"));
+    assert_eq!(
+        std::fs::read_to_string(sb.job_dir("j-s").join("scheduler")).unwrap(),
+        "slurm\n"
+    );
+    assert_eq!(
+        sb.read("submitted_from").trim(),
+        sb.job_dir("j-s").to_string_lossy()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_site_whose_node_job_cannot_be_submitted_leaves_the_queue() {
+    let sb = pack_sandbox("pack-fail", "PartitionName=cpu OverSubscribe=EXCLUSIVE");
+    sb.stub(
+        "sbatch",
+        "echo 'sbatch: error: invalid account' >&2; exit 1",
+    );
+    let (spec, pack) = pack_spec();
+    let script = packed_submit_script(&sb.work(), "j-f", "true", &spec, &pack).unwrap();
+    let (_, err, ok) = sb.run(&script);
+    assert!(!ok);
+    assert!(
+        err.contains("sbatch failed") && err.contains("invalid account"),
+        "{err}"
+    );
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-1"));
+    assert!(
+        !pool.join("queue/j-f").exists(),
+        "no node job would ever run it"
+    );
+    assert!(!sb.job_dir("j-f").join("sched_id").exists());
+}
