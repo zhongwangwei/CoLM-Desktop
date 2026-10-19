@@ -195,7 +195,10 @@ test('openCase offers to rebind a case whose revision was tidied away, then open
   const app = opening();
   const opened = await app.openCase('/tidied');
   assert.equal(app.questions.length, 1);
-  assert.match(app.questions[0], /model revision official#2, which is no longer in the model registry/);
+  assert.match(
+    app.questions[0],
+    /model revision official#2, which is no longer in the model registry/,
+  );
   assert.match(app.questions[0], /Rebind it to official#3/);
   assert.deepEqual(app.migrations, [{ dir: '/tidied' }, { dir: '/tidied', target: app.official }]);
   assert.deepEqual(opened.binding.version, app.official);
@@ -212,7 +215,10 @@ test('openCase rebinds a tidied case to the explicitly chosen revision', async (
 
 test('declining the rebind leaves the case unopened with a plain explanation', async () => {
   const app = opening(null, false, false);
-  await assert.rejects(app.openCase('/tidied'), /official#2 is no longer in the model registry; it was not rebound or opened/);
+  await assert.rejects(
+    app.openCase('/tidied'),
+    /official#2 is no longer in the model registry; it was not rebound or opened/,
+  );
   assert.equal(app.migrations.length, 1, 'nothing rebinds the case');
   assert.equal(app.current.current.busy, false);
   assert.equal((app.current.current as { route?: string }).route, undefined);
