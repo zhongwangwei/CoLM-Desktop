@@ -71,12 +71,26 @@ test('existing unreconciled records block duplicate submission for each selected
         ? finished(dir)
         : { record: record(dir), status: { state: 'running' } },
   });
-  await assert.rejects(q.run(), /existing server job/);
+  await assert.rejects(q.run(), /previous server submission is not confirmed/);
   assert.deepEqual(q.submitted, ['a']);
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'b')?.state, 'unknown');
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'c')?.state, 'cancelled');
   // The job already running is followed to its end instead of being left 运行中.
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'a')?.state, 'succeeded');
+});
+
+test('a previous submission still being reconciled is reported as unconfirmed, not as a changed job', async () => {
+  const q = queue({
+    cases: ['a'],
+    record: async (dir) => ({ ...record(dir), operation_id: 'op-1', pending: true }),
+    status: async (dir) => ({
+      record: null,
+      pending: { host: 'server', job: `job-${dir}`, needs_reconciliation: true },
+      status: { state: 'unknown' },
+    }),
+  });
+  await assert.rejects(q.run(), /previous server submission is not confirmed/);
+  assert.deepEqual(q.submitted, []);
 });
 
 test('terminal previous records allow a new run and terminal failures release one slot', async () => {

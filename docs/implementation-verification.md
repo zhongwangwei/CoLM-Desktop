@@ -34110,3 +34110,12 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - colm-cli 455 条（串行）、gui/src-tauri 410 条、前端 714 条通过。
     - 天河只读核对：`uuu` 里正好是 90 个自己归属自己的算例，共 5.4 GB；工作目录下 10 个作业都有 `exit_code`。本机那 5 个"待核对"站点的记录还没确认，所以现在会被"未确认结束的任务"挡住。
     - 没测：真的删掉一个服务器项目。
+
+36. **新建的服务器项目在历史里找不到；批量报 "AU-How: server job identity changed"（用户报，2026-10-19）**：
+    - 现场（复制历史库后只读查询）：uuu 共 395 条操作，其中 200 条在 19:34 被删掉；剩下可见的是 90 条保存设置、90 条绑定版本（都属于例行记录，列表里不显示）、10 条导入的待核对占位，以及 19:35 新一批的 5 条运行。整个库里**没有一条 uuu 的"新建"记录**：本机新建算例走 `colm-cli new`，会记录；服务器上新建走 `remote-case-create`/`remote-case-publish`，不记录。所以项目只靠运行记录出现在历史里，运行记录一删就找不到了。新建模拟的草稿记录在 18:27:51 建好后按设计关掉了。
+    - 改为：`remote_cases::conclude` 在服务器算例建好后，记一条 `kind=new`、`detail.action=remote-case-create` 的操作，`case_path` 是本机镜像目录，所以它和运行记录合在同一张项目卡片里，界面显示"在服务器上新建算例"。写不进去也不让创建失败。已有的 uuu 不会补记。
+    - AU-How 的报错：它 18:28 的提交是第 33 条说的"sbatch 报错其实已收下"，本机一直留着 `.colm-remote-pending.json`，服务器上没有 `sched_id`。19:35 新一批先核对它：待核对的回复里 `record` 是 null，作业信息放在 `pending` 里，`checkIdentity` 却拿整条回复去比 `job`，于是误报"身份变了"，整批也因此停止提交新站点。
+      - 改为：比对时用 `pending`；`pending` 里没有操作编号，就不比操作编号。真的还没核对清楚时，报 "the previous server submission is not confirmed yet"。
+      - 核对脚本（`pending_identity_script`）：没有 `sched_id` 的 Slurm 提交，按作业目录到 squeue 和 sacct（近 14 天）里找一次，恰好找到一个就写入 `sched_id`；脚本开头补上 `PATH_PRELUDE`。这样那 5 个站点下次核对时会自己归位，不用手动写 `sched_id`。
+    - 测试：`a_pending_slurm_submission_adopts_the_one_job_in_its_directory`（两个候选时不认；只有一个时写入 `sched_id`，输出 verified、作业号、slurm）；`a_case_created_on_a_server_is_recorded_under_its_project`；前端 `a previous submission still being reconciled is reported as unconfirmed, not as a changed job`。colm-cli 456 条、gui/src-tauri 411 条、前端 715 条通过。
+    - 没测：在天河上真的核对那 5 个站点。

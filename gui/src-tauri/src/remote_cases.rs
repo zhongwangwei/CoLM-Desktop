@@ -392,6 +392,7 @@ async fn finish_locally(
 /// Settles one creation: `result` is its outcome, `cleanup` the server abort that followed a
 /// failure. A failure whose abort was not confirmed keeps the local cache so it can recover.
 fn conclude(
+    host: &str,
     prepared: PreparedCreation,
     result: Result<(), String>,
     cleanup: Result<(), String>,
@@ -414,7 +415,32 @@ fn conclude(
     }
     creation.finish(result.map(|()| local.clone()))?;
     std::fs::remove_file(&pending).map_err(|e| format!("算例已创建，但无法清除创建凭据: {e}"))?;
+    // 算例已经建好，历史写不进去也不能让创建失败；写进去了，项目在历史里就有自己的"新建"记录，
+    // 不靠运行记录才出现（用户报：新建的 uuu 在历史里找不到）。
+    if let Ok(ledger) = colm_history::History::open_default() {
+        let _ = record_creation(&ledger, host, &local, &remote);
+    }
     Ok(json!({"dir":local,"root":root.to_string_lossy(),"remote_dir":remote}))
+}
+
+/// 服务器上建好的一个算例：记在本机镜像目录下，所以和这个项目的运行记录合在同一张项目卡片里。
+fn record_creation(
+    ledger: &colm_history::History,
+    host: &str,
+    local: &str,
+    remote: &str,
+) -> Result<(), String> {
+    let mut event = colm_history::Event::start("new");
+    event.case_path = Some(local.to_owned());
+    event.host = Some(host.to_owned());
+    event.location = Some("remote".into());
+    event.initiator = Some("gui".into());
+    event.detail = json!({ "action": "remote-case-create", "remote_directory": remote });
+    ledger.append(&event).map_err(|e| e.to_string())?;
+    ledger
+        .append(&event.next(colm_history::EventPhase::Finished, "succeeded"))
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// A server failure before anything local was written: the token stays for a retry.
@@ -485,7 +511,7 @@ pub async fn remote_create_case(
         .await
         .map(|_| ()),
     };
-    conclude(prepared, result, cleanup)
+    conclude(&host, prepared, result, cleanup)
 }
 
 /// Batches in flight, so the page can cancel one: batch id → (cancelled, local cache dirs).
@@ -707,7 +733,7 @@ pub async fn remote_create_cases(
                 .unwrap_or(Err("缺少清理结果".into()))
                 .map(|_| ()),
         };
-        outcomes[index] = Some(conclude(item, result, cleanup));
+        outcomes[index] = Some(conclude(&host, item, result, cleanup));
     }
     progress("done", total);
     if let Ok(mut registry) = batches.0.lock() {
@@ -787,6 +813,29 @@ pub(crate) async fn sync_case(app: &tauri::AppHandle, dir: &str) -> Result<(), S
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_case_created_on_a_server_is_recorded_under_its_project() {
+        let ledger = colm_history::History::open(":memory:").unwrap();
+        let mirror = "/cache/remote-projects/abc/AT-Neu";
+        super::record_creation(&ledger, "tianhe", mirror, "/srv/colm/uuu/AT-Neu").unwrap();
+        let page = ledger
+            .query(&colm_history::Query {
+                group_projects: true,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(page.total, 1);
+        let project = page.items[0].project_group.as_ref().unwrap();
+        assert_eq!(project.path, "/cache/remote-projects/abc");
+        let created = &project.members[0].latest;
+        assert_eq!(
+            (created.kind.as_str(), created.status.as_str()),
+            ("new", "succeeded")
+        );
+        assert_eq!(created.detail["action"], "remote-case-create");
+        assert_eq!(created.host.as_deref(), Some("tianhe"));
+    }
+
     use super::*;
     #[test]
     fn batch_results_keep_each_item_and_reject_a_short_answer() {

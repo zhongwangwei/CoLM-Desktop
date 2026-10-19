@@ -957,6 +957,64 @@ fn pending_status_rejects_a_server_script_for_another_case_or_operation() {
     assert!(!run().status.success());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_pending_slurm_submission_adopts_the_one_job_in_its_directory() {
+    let (fixture, mut pending) = PendingFixture::new("adopt");
+    pending.record.root = fixture.0.to_string_lossy().into_owned();
+    pending.record.remote_case = format!("{}/cases/fixture", pending.record.root);
+    pending.record.scheduler = "slurm".into();
+    let dir = PathBuf::from(job::job_dir(&pending.record.root, &pending.record.job));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("script.sh"), format!("# colm-engine-snapshot: {}\n# colm-run-case: {}\n# colm-operation-id: original-operation\n", pending.record.engine, serde_json::to_string(&pending.record.remote_case).unwrap())).unwrap();
+    std::fs::write(dir.join("scheduler"), "slurm\n").unwrap();
+    let bin = fixture.0.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = |name: &str, body: &str| {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(bin.join(name), format!("#!/bin/bash\n{body}\n")).unwrap();
+        std::fs::set_permissions(bin.join(name), std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    stub("sbatch", "exit 1");
+    stub("sacct", "true");
+    let run = || {
+        Command::new("bash")
+            .arg("-c")
+            .arg(pending_identity_script(&pending).unwrap())
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap()
+    };
+    // Two jobs in the same directory are not guessed between.
+    stub(
+        "squeue",
+        "echo \"8675098|$(pwd -P)\"; echo \"8675099|$(pwd -P)\"",
+    );
+    let out = run();
+    assert!(String::from_utf8_lossy(&out.stdout).contains("identity=incomplete"));
+    assert!(!dir.join("sched_id").exists());
+    stub(
+        "squeue",
+        "echo \"1|/elsewhere\"; echo \"8675099|$(pwd -P)\"",
+    );
+    let out = run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .collect::<Vec<_>>(),
+        ["identity=verified", "8675099", "slurm"]
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("sched_id")).unwrap(),
+        "8675099\n"
+    );
+}
+
 #[test]
 fn packaged_sources_take_precedence_over_an_enclosing_checkout() {
     let root = std::env::temp_dir().join(format!(

@@ -411,6 +411,7 @@ export function historyKindLabel(kind: string, en = false): string {
     case: ['算例修改', 'Case change'],
     'case-config-save': ['保存算例设置', 'Save case settings'],
     new: ['新建算例', 'New case'],
+    'remote-case-create': ['在服务器上新建算例', 'New case on server'],
     'site-new': ['新建站点算例', 'New site case'],
     'spatial-new': ['新建区域算例', 'New regional case'],
     'mesh-new': ['新建网格算例', 'New mesh case'],

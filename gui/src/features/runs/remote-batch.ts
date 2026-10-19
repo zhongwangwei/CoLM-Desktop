@@ -38,7 +38,9 @@ export async function runRemoteBatch(options: {
   const wait = options.wait ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 3000)));
   function checkIdentity(dir: string, previous: Remote, result: Remote) {
     const before = (previous.record ?? previous) as Remote;
-    const after = (result.record ?? result) as Remote;
+    // A submission still being reconciled answers with `pending` (no record yet); its host and job
+    // are what identify it, so it is not mistaken for a changed job (天河 2026-10-19, AU-How).
+    const after = (result.record ?? result.pending ?? result) as Remote;
     const operation = (value: Remote) =>
       value.operation_id ?? (value.provenance as Remote | undefined)?.operation_id;
     const expected = operation(before);
@@ -47,7 +49,9 @@ export async function runRemoteBatch(options: {
       typeof before.host !== 'string' ||
       before.job !== after.job ||
       before.host !== after.host ||
-      (typeof expected === 'string' && expected !== operation(after))
+      (typeof expected === 'string' &&
+        operation(after) !== undefined &&
+        expected !== operation(after))
     )
       throw new Error(`${dir}: server job identity changed`);
   }
@@ -75,7 +79,9 @@ export async function runRemoteBatch(options: {
         checkIdentity(dir, record, status);
         known = reconcileRemoteRun(record, status);
         if (!remoteRunPermissions(known).terminal)
-          throw new Error(`${dir}: reconcile the existing server job before resubmitting`);
+          throw new Error(
+            `${dir}: the previous server submission is not confirmed yet; check its status before resubmitting`,
+          );
       }
       if (options.stopped()) {
         options.change(dir, 'cancelled');

@@ -2227,8 +2227,18 @@ fn pending_identity_script(pending: &PendingRun) -> Result<String> {
         format!("# colm-operation-id: {operation}"),
     ];
     let checks = markers.iter().map(|marker| format!("grep -Fqx -- {} script.sh || {{ echo 'pending job identity changed' >&2; exit 1; }}", quote(marker))).collect::<Vec<_>>().join("\n");
-    Ok(format!("set -e\ncd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\ncase \"$S\" in {scheduler}|{scheduler}-pack) ;; *) echo 'pending scheduler identity changed' >&2; exit 1;; esac\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\necho \"$S\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler)))
+    Ok(format!("set -e\n{prelude}cd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\ncase \"$S\" in {scheduler}|{scheduler}-pack) ;; *) echo 'pending scheduler identity changed' >&2; exit 1;; esac\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n{adopt}  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\necho \"$S\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler),adopt=ADOPT_SLURM_JOB,prelude=colm_remote::sched::PATH_PRELUDE))
 }
+
+/// 待核对的 Slurm 提交没有 `sched_id` 时，按作业目录去 Slurm 里找一次，恰好一个就记下。天河 2026-10-19：
+/// sbatch 报 "Unexpected message received" 退出非零，作业其实已被收下并跑完了；当时的提交脚本没有按目录
+/// 找，这 5 个站点就一直"待核对"，下一次批量又把它们当成身份变了。作业目录只属于这一次提交，所以按目录
+/// 找到的就是它；找到多个或一个都没有，仍然不认。
+const ADOPT_SLURM_JOB: &str = r#"  if [ -z "$ID" ] && [ "$S" = slurm ]; then
+    ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-14days -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$(pwd -P)" '$2 == w { print $1 }' | sort -u)
+    case "$ID" in ''|*[!A-Za-z0-9._-]*) ID= ;; *) echo "$ID" > sched_id ;; esac
+  fi
+"#;
 
 fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<()> {
     colm_remote::auth::check_connection(pending.record.ssh_auth.as_ref())?;
