@@ -169,10 +169,6 @@ function harness(
     await new Promise((resolve) => setImmediate(resolve));
     return render();
   }
-  // The open project's server tasks are read on request, not when the page opens.
-  async function tasks() {
-    return action('resource-load-tasks');
-  }
   async function action(id: string) {
     const item = contract.actions.find((action) => action.id === id);
     assert.ok(item, `visible action ${id}`);
@@ -188,7 +184,6 @@ function harness(
   }
   return {
     ready,
-    tasks,
     unmount: () => cleanup?.(),
     restartEffect: () => {
       cleanup?.();
@@ -595,35 +590,6 @@ test('an incomplete server draft still checks SSH without claiming the run setti
   assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
 });
 
-test('remote tasks filter by actual host, preserve orphan records, and expose operations only after expansion', async () => {
-  const page = harness({
-    '/case/land': { host: '7920land', job: 'job1' },
-    '/case/mp': { host: '7920mp', job: 'job2' },
-    '/case/orphan': { host: 'removed', job: 'job3' },
-    '/case/missing': { error: 'Unreadable record' },
-  });
-  await page.ready();
-  let contract = await page.tasks();
-  assert.ok(contract.actions.some((action) => action.id === 'resource-task-/case/land'));
-  assert.ok(!contract.actions.some((action) => action.id === 'resource-task-/case/mp'));
-  assert.ok(contract.actions.some((action) => action.id === 'resource-task-/case/orphan'));
-  assert.ok(contract.actions.some((action) => action.id === 'resource-task-/case/missing'));
-  assert.ok(!contract.actions.some((action) => action.id === 'resource-case-status-/case/land'));
-  contract = await page.action('resource-task-/case/land');
-  assert.equal(
-    contract.actions.find((action) => action.id === 'resource-case-fetch-/case/land')?.kind,
-    'commit',
-  );
-  assert.equal(
-    contract.actions.find((action) => action.id === 'resource-case-status-/case/land')?.kind,
-    'click',
-  );
-  await page.action('resource-case-status-/case/land');
-  assert.deepEqual(page.calls.at(-1), { command: 'remote_status', args: { case: '/case/land' } });
-  contract = await page.action('resource-task-/case/land');
-  assert.ok(!contract.actions.some((action) => action.id === 'resource-case-status-/case/land'));
-});
-
 function callback(name: string, context: Record<string, unknown>) {
   const path = new URL('./ResourcesPage.tsx', import.meta.url),
     source = ts.createSourceFile(
@@ -734,19 +700,6 @@ test('leaving password authentication clears the hidden password draft', () => {
   assert.equal(password, '');
   assert.deepEqual(next, { ...editor, auth: 'config' });
 });
-test('refresh replaces job identities without retaining a previous job status for the same directory', async () => {
-  const records: Record<string, unknown> = { '/case/land': { host: '7920land', job: 'job1' } };
-  const page = harness(records);
-  await page.ready();
-  await page.tasks();
-  await page.action('resource-task-/case/land');
-  await page.action('resource-case-status-/case/land');
-  records['/case/land'] = { host: '7920land', job: 'new-job' };
-  const contract = await page.action('resource-refresh');
-  const rows = (contract.details as { records: { job: string; status: string }[] }).records;
-  assert.equal(rows[0].job, 'new-job');
-  assert.equal(rows[0].status, 'unknown');
-});
 test('failed checks retain readable error evidence only when their details are visible', async () => {
   const page = harness();
   await page.ready();
@@ -762,13 +715,9 @@ test('failed checks retain readable error evidence only when their details are v
   assert.ok(!('checkEvidence' in (contract.details as object)));
 });
 
-test('a deleted case reports its history error without losing saved servers on the next save', async () => {
-  const page = harness({ '/deleted': null }, undefined, { history: '/deleted' });
-  await page.ready();
-  const contract = await page.tasks();
-  assert.deepEqual((contract.details as { historyErrors: string[] }).historyErrors, [
-    '/deleted: Error: Case directory was deleted',
-  ]);
+test('adding a server keeps the saved ones', async () => {
+  const page = harness({ '/some/case': null });
+  const contract = await page.ready();
   assert.ok(contract.actions.some((action) => action.id === 'resource-select-server-7920land'));
   assert.ok(contract.actions.some((action) => action.id === 'resource-select-server-7920mp'));
   await page.action('resource-new');
@@ -780,7 +729,29 @@ test('a deleted case reports its history error without losing saved servers on t
     ['7920land', '7920mp', 'new-host'],
   );
 });
-
+test('compute resources do not read the open project: a ninety-station project costs nothing', async () => {
+  const page = harness(
+    Object.fromEntries(
+      Array.from({ length: 90 }, (_, i) => [
+        `/batch/site-${i}`,
+        { host: '7920land', job: `j${i}` },
+      ]),
+    ),
+  );
+  const contract = await page.ready();
+  assert.ok(contract.actions.some((action) => action.id === 'resource-select-server-7920land'));
+  assert.deepEqual(
+    page.calls
+      .map((call) => call.command)
+      .filter((command) =>
+        ['remote_job_record', 'case_runs', 'study_status', 'remote_status'].includes(command),
+      ),
+    [],
+  );
+  // The server tasks of a project belong to the run and history pages, not to this one.
+  assert.ok(!contract.actions.some((action) => /^resource-(task|case|study)-/.test(action.id)));
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-load-tasks'));
+});
 test('failed configuration loads disable adding and saving, including after a successful load', async () => {
   const failures = { config: true };
   const page = harness({}, undefined, failures);
@@ -829,96 +800,6 @@ test('configuring a simulation opens its selected resource instead of another se
   assert.equal((page.contract().details as { selected: string }).selected, 'server:selected');
 });
 
-test('90-station resource refresh reads every job record, searches studies on a dozen cases, and serializes overlapping refreshes', async () => {
-  const records = Object.fromEntries(
-    Array.from({ length: 90 }, (_, i) => [
-      `/batch/site-${i}`,
-      { host: '7920land', job: `job-${i}` },
-    ]),
-  );
-  let active = 0;
-  let peak = 0;
-  let release!: () => void;
-  const blocked = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  let block = true;
-  const page = harness(records, undefined, {}, undefined, {
-    before: async (command) => {
-      if (!['remote_job_record', 'case_runs', 'study_status'].includes(command)) return;
-      active++;
-      peak = Math.max(peak, active);
-      if (block) await blocked;
-      await new Promise((resolve) => setImmediate(resolve));
-      active--;
-    },
-    studies: { '/batch/site-3': Array.from({ length: 90 }, (_, i) => ({ dir: `/study/${i}` })) },
-  });
-  await page.ready();
-  // Opening the page reads nothing of the project: compute resources do not depend on it.
-  assert.equal(active, 0);
-  assert.equal(
-    page.calls.filter((c) => ['remote_job_record', 'case_runs'].includes(c.command)).length,
-    0,
-  );
-  void page.tasks().catch(() => {});
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(active, 8);
-  // A changed case list restarts the effect while the previous CLI calls still exist.
-  page.restartEffect();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(active, 8);
-  block = false;
-  release();
-  // The page is usable as soon as the servers are shown; the job records finish behind it.
-  const recordsRead = () =>
-    (page.render().details as { records: { dir: string }[] }).records.some(
-      (r) => r.dir === '/batch/site-89',
-    );
-  for (let i = 0; i < 5000 && !(recordsRead() && (active as number) === 0); i++) {
-    await new Promise((resolve) => setImmediate(resolve));
-  }
-  assert.equal(page.contract().actions.find((a) => a.id === 'resource-refresh')?.enabled, true);
-  assert.equal(peak, 8);
-  assert.equal(active, 0);
-  const details = page.contract().details as { records: { dir: string }[] };
-  assert.ok(details.records.some((r) => r.dir === '/batch/site-89'));
-  // Ninety job records are read, but only a dozen cases are searched for studies.
-  // The eight in flight when the case list changed, plus one full pass of ninety.
-  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 98);
-  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 12);
-  assert.equal(page.calls.filter((c) => c.command === 'study_status').length, 90);
-  assert.equal(
-    page.calls.filter((c) => c.command === 'study_status').at(-1)?.args?.studyDir,
-    '/study/89',
-  );
-});
-
-test('unmount stops scheduling remaining resource CLI calls', async () => {
-  let release!: () => void;
-  const blocked = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const page = harness(
-    Object.fromEntries(Array.from({ length: 90 }, (_, i) => [`/batch/${i}`, null])),
-    undefined,
-    {},
-    undefined,
-    {
-      before: async (command) => {
-        if (command === 'remote_job_record') await blocked;
-      },
-    },
-  );
-  await page.ready();
-  void page.tasks().catch(() => {});
-  await new Promise((resolve) => setImmediate(resolve));
-  page.unmount();
-  release();
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 8);
-  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 0);
-});
 test('local default data paths save with the server list intact', async () => {
   const page = harness();
   await page.ready();

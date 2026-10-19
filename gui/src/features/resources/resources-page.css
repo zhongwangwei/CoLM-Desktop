@@ -268,18 +268,6 @@
   font-size: 12px;
   flex-shrink: 0;
 }
-.resource-task + .resource-task {
-  border-top: 1px solid var(--border);
-}
-.resource-tasks > p {
-  font-size: 12px;
-  margin: 0;
-}
-.resource-orphan {
-  color: var(--warning);
-  font-size: 11px;
-  margin: 0 0 8px;
-}
 .resources-footer {
   display: flex;
   gap: 12px;
