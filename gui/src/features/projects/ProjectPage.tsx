@@ -558,188 +558,87 @@ export default function ProjectPage() {
     );
   return (
     <div className="project-home">
-      <section className="project-hero" aria-label={t('开始你的研究', 'Start your research')}>
-        <div className="project-hero-text">
-          <span className="project-hero-eyebrow">CoLM Desktop</span>
-          <h1>{t('开始你的研究', 'Start your research')}</h1>
-          <p>
-            {t(
-              '从一次模拟开始，探索陆地系统的更多可能。',
-              'Start with a simulation and explore how land systems work.',
-            )}
-          </p>
-          <div className="project-hero-actions">
-            <Button
-              variant="primary"
-              className="project-hero-primary"
-              disabled={!enabled}
-              onClick={newSimulation}
-            >
-              <span aria-hidden="true">＋</span>
-              {t('新建模拟', 'New simulation')}
-            </Button>
-            <Button
-              className="project-hero-secondary"
-              disabled={!enabled || !ready}
-              onClick={() => void openProjectFromHistory()}
-            >
-              <NavIcon name="project" />
-              {t('打开项目', 'Open project')}
-            </Button>
-          </div>
-        </div>
-        <dl className="project-hero-status">
-          <div>
-            <dt>{t('模型版本', 'Model version')}</dt>
-            <dd className={modelChosen ? undefined : 'project-choice-pending'}>
-              {modelChosen
-                ? state.version!.version.id === 'official'
-                  ? t('官方版', 'Official')
-                  : state.version!.name
-                : t('正在读取…', 'Loading…')}
-            </dd>
-          </div>
-          <div>
-            <dt>{t('计算引擎', 'Engine')}</dt>
-            <dd>
-              <span className="status-indicator online" aria-hidden="true" />
-              {t('Rust 逐位一致引擎已就绪', 'Rust bitwise-exact engine ready')}
-            </dd>
-          </div>
-          <div>
-            <dt>{t('工作目录', 'Working folder')}</dt>
-            <dd className="path" title={projectLocation || undefined}>
-              {projectLocation ||
-                t('未选择（新建时用默认路径）', 'None (new simulations use the default)')}
-            </dd>
-          </div>
-        </dl>
-      </section>
+      <div className="project-intro">
+        <h1>{t('开始你的研究', 'Start your research')}</h1>
+        <p>
+          {t(
+            '从模拟开始，探索陆地系统的更多可能。',
+            'Start with a simulation and explore how land systems work.',
+          )}
+        </p>
+      </div>
       {!versionChooser && error && <Notice tone="error">{error}</Notice>}
       {!versionChooser && busy && (
         <Notice>{t('正在打开，请稍候…', 'Opening, please wait…')}</Notice>
       )}
-      <div className="project-home-grid">
-        <section
-          className="project-panel"
-          aria-label={t('选择模型版本', 'Choose a model revision')}
-        >
-          <header className="project-panel-head">
-            <h2>{t('模型版本', 'Model version')}</h2>
-            <p>
-              {t(
-                '默认使用官方版；要用自己改过的版本，在这里换。',
-                'The official model is used by default; switch here to use a modified one.',
-              )}
-            </p>
-          </header>
-          <div className="project-options">
-            <Button
-              className="project-option"
-              variant="ghost"
-              aria-pressed={officialSelected}
-              disabled={!versionEnabled || !official}
-              onClick={() => void chooseVersion(versionKey(official!)).catch(() => {})}
-            >
-              <span className="project-option-icon">
-                <NavIcon name="project" />
-              </span>
-              <span className="project-option-text">
-                <strong>{t('官方版', 'Official model')}</strong>
-                <span>{t('使用随软件提供的模型版本', 'Use the model bundled with CoLM')}</span>
-              </span>
-              <span className="project-option-mark" aria-hidden="true">
-                {officialSelected ? '✓' : '›'}
-              </span>
-            </Button>
-            <Button
-              className="project-option"
-              variant="ghost"
-              aria-pressed={existingSelected}
-              disabled={!versionEnabled}
-              onClick={() => changeVersionChooser(true)}
-            >
-              <span className="project-option-icon">
-                <NavIcon name="history" />
-              </span>
-              <span className="project-option-text">
-                <strong>
-                  {existingSelected && state.version
-                    ? `${t('已有版本', 'Existing version')}：${state.version.name}`
-                    : t('已有版本', 'Existing versions')}
-                </strong>
-                <span>{t('选择已保存的模型版本', 'Choose a saved model revision')}</span>
-              </span>
-              <span className="project-option-mark" aria-hidden="true">
-                {existingSelected ? '✓' : '›'}
-              </span>
-            </Button>
-            <Button
-              className="project-option"
-              variant="ghost"
-              disabled={!versionEnabled || !modelReady}
-              onClick={() => navigate('versions')}
-            >
-              <span className="project-option-icon">＋</span>
-              <span className="project-option-text">
-                <strong>{t('新建修改版', 'New modified model')}</strong>
-                <span>
-                  {t('派生、修改并选择新的版本', 'Derive, modify and select a new revision')}
-                </span>
-              </span>
-              <span className="project-option-mark" aria-hidden="true">
-                ›
-              </span>
-            </Button>
-          </div>
-        </section>
-        <section className="project-panel" aria-label={t('工作目录', 'Working folder')}>
-          <header className="project-panel-head">
-            <h2>{t('工作目录', 'Working folder')}</h2>
-            <Button
-              variant="ghost"
-              className="project-panel-link"
-              disabled={!enabled || !ready}
-              onClick={() => void browseProject().catch(() => {})}
-            >
-              {state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
-            </Button>
-          </header>
-          <div className="project-folder-current">
-            <span className="status-indicator active" aria-hidden="true" />
-            <span className="path">
-              {projectLocation ||
-                t(
-                  '未选择项目目录，新建模拟时将使用默认路径。',
-                  'No project folder selected; new simulations use the default path.',
-                )}
-            </span>
-          </div>
-          <h3 className="project-recent-title">{t('最近打开', 'Recently opened')}</h3>
-          {shownRoots.length ? (
-            <ul className="project-recent-list">
-              {shownRoots.slice(0, 5).map((root) => (
-                <li key={root}>
-                  <Button
-                    variant="ghost"
-                    className="project-recent-item"
-                    disabled={!enabled || !ready}
-                    title={root}
-                    onClick={() => void work(() => loadProject(root)).catch(() => {})}
-                  >
-                    <strong>{projectName(root)}</strong>
-                    <span className="path">{root}</span>
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted project-recent-empty">
-              {t('还没有打开过的项目。', 'No projects opened yet.')}
-            </p>
+      <section
+        className="project-version-section"
+        aria-label={t('选择模型版本', 'Choose a model revision')}
+      >
+        <div className="project-version-heading">
+          <h2>{t('模型版本', 'Model version')}</h2>
+          <p className={modelChosen ? 'project-chosen-model' : 'project-choice-pending'}>
+            {modelChosen
+              ? `${t('当前', 'Current')}: ${state.version!.version.id === 'official' ? t('官方版', 'Official') : state.version!.name}`
+              : t('正在读取…', 'Loading…')}
+          </p>
+        </div>
+        <p className="project-version-hint">
+          {t(
+            '默认使用官方版。要用自己改过的版本，在这里换。',
+            'The official model is used by default. Switch here to use a modified version.',
           )}
-        </section>
-      </div>
+        </p>
+        <div className="project-actions">
+          <Button
+            className="project-action project-version-card"
+            variant="ghost"
+            aria-pressed={officialSelected}
+            disabled={!versionEnabled || !official}
+            onClick={() => void chooseVersion(versionKey(official!)).catch(() => {})}
+          >
+            <span className="project-action-icon primary">
+              <NavIcon name="project" />
+            </span>
+            <span>
+              <strong>{t('官方版', 'Official model')}</strong>
+              <span>{t('使用随软件提供的模型版本', 'Use the model bundled with CoLM')}</span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
+          <Button
+            className="project-action project-version-card"
+            variant="ghost"
+            aria-pressed={existingSelected}
+            disabled={!versionEnabled}
+            onClick={() => changeVersionChooser(true)}
+          >
+            <span className="project-action-icon">
+              <NavIcon name="history" />
+            </span>
+            <span>
+              <strong>{t('已有版本', 'Existing versions')}</strong>
+              <span>{t('选择已保存的模型版本', 'Choose a saved model revision')}</span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
+          <Button
+            className="project-action project-version-card"
+            variant="ghost"
+            disabled={!versionEnabled || !modelReady}
+            onClick={() => navigate('versions')}
+          >
+            <span className="project-action-icon">＋</span>
+            <span>
+              <strong>{t('新建修改版', 'New modified model')}</strong>
+              <span>
+                {t('派生、修改并选择新的版本', 'Derive, modify and select a new revision')}
+              </span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
+        </div>
+      </section>
       <Dialog
         title={t('选择已有版本', 'Choose an existing version')}
         open={versionChooser}
@@ -853,6 +752,126 @@ export default function ProjectPage() {
           </>
         )}
       </Dialog>
+      <section
+        className={`project-task-section ${modelChosen ? '' : 'awaiting-model'}`}
+        aria-label={t('选择操作', 'Choose an action')}
+      >
+        <div className="project-task-heading">
+          <h2>{t('开始', 'Start')}</h2>
+          <p>
+            {modelChosen
+              ? t(
+                  '使用已选版本开始或继续研究。',
+                  'Start or continue your research with this revision.',
+                )
+              : t('正在读取模型版本…', 'Loading the model version…')}
+          </p>
+        </div>
+        <div className="project-actions">
+          <Button
+            className="project-action"
+            variant="ghost"
+            disabled={!enabled}
+            onClick={newSimulation}
+          >
+            <span className="project-action-icon primary">＋</span>
+            <span>
+              <strong>{t('新建模拟', 'New simulation')}</strong>
+              <span>
+                {t(
+                  '设置站点、时段和配置，开始一次新的模拟。',
+                  'Choose a site, period and data for a new simulation.',
+                )}
+              </span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
+          <Button
+            className="project-action"
+            variant="ghost"
+            disabled={!enabled || !ready}
+            onClick={() => void openProjectFromHistory()}
+          >
+            <span className="project-action-icon">
+              <NavIcon name="project" />
+            </span>
+            <span>
+              <strong>{t('打开项目', 'Open project')}</strong>
+              <span>
+                {t(
+                  '浏览包含算例的项目目录，继续你的研究。',
+                  'Browse a project folder containing cases and continue your work.',
+                )}
+              </span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
+        </div>
+      </section>
+      <section
+        className="project-readiness-section"
+        aria-label={t('系统与数据就绪状态', 'System & data readiness')}
+      >
+        <div className="project-task-heading">
+          <h2>{t('运行环境与数据就绪', 'Environment & data readiness')}</h2>
+        </div>
+        <div className="project-readiness-card">
+          <div className="readiness-item">
+            <span className="status-indicator online" />
+            <div className="readiness-info">
+              <strong>{t('Rust 逐位一致引擎', 'Rust Bitwise-Exact Engine')}</strong>
+              <span>
+                {t(
+                  '已就绪 · 支持地表数据、初始场与主循环',
+                  'Ready · Surface data, initialization, and simulation engines available',
+                )}
+              </span>
+            </div>
+            <span className="badge">{t('模型内核就绪', 'Model kernel ready')}</span>
+          </div>
+
+          <div className="readiness-item">
+            <span className="status-indicator active" />
+            <div className="readiness-info">
+              <strong>{t('当前工作目录', 'Current working folder')}</strong>
+              <span className="path">
+                {projectLocation ||
+                  t(
+                    '未选择项目目录（新建模拟时将使用默认路径）',
+                    'No project folder selected (default path used for new simulations)',
+                  )}
+              </span>
+            </div>
+            <div className="readiness-actions">
+              <Button
+                variant="ghost"
+                disabled={!enabled || !ready}
+                onClick={() => void browseProject().catch(() => {})}
+              >
+                {state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
+              </Button>
+            </div>
+          </div>
+
+          {shownRoots.length > 0 && (
+            <div className="readiness-recents">
+              <span className="muted">{t('打开过的目录:', 'Previous folders:')}</span>
+              {shownRoots.slice(0, 3).map((root) => (
+                <Button
+                  key={root}
+                  variant="ghost"
+                  className="readiness-recent-chip"
+                  disabled={!enabled || !ready}
+                  title={root}
+                  onClick={() => void work(() => loadProject(root)).catch(() => {})}
+                >
+                  {projectName(root)}
+                </Button>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
     </div>
   );
 }
