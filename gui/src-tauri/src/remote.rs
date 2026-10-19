@@ -1454,9 +1454,120 @@ async fn validate_server_case_inputs(
     result
 }
 
+/// 一次提交的结果，给同一批次、同一站点的重复请求共用。
+type SharedOutcome = std::sync::Arc<(Mutex<Option<Result<Value, String>>>, std::sync::Condvar)>;
+static SUBMISSIONS: OnceLock<Mutex<std::collections::HashMap<String, SharedOutcome>>> =
+    OnceLock::new();
+
+/// 同一批次、同一站点的"提交运行"只执行一次。Tauri 前端调用在自定义协议出错时会改走 postMessage，
+/// 把同一个请求再发一次（tauri `scripts/ipc-protocol.js`）。land02 实测（2026-10-19）：5 个站点的提交
+/// 等登录节点编引擎 3 分多钟，21:59:44 同时被重发，AU-Cpr 交了两个作业，其余留下永远"运行中"的记录。
+/// 重复的请求不再提交，等第一个的结果原样返回；记录在本次运行期间一直保留，晚到的重发也一样处理。
+fn claim_submission(key: &str) -> (SharedOutcome, bool) {
+    let mut map = SUBMISSIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(outcome) = map.get(key) {
+        return (outcome.clone(), false);
+    }
+    let outcome: SharedOutcome = Default::default();
+    map.insert(key.to_owned(), outcome.clone());
+    (outcome, true)
+}
+
+fn settle_submission(outcome: &SharedOutcome, result: &Result<Value, String>) {
+    let (slot, ready) = &**outcome;
+    *slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(result.clone());
+    ready.notify_all();
+}
+
+fn wait_for_submission(outcome: &SharedOutcome) -> Result<Value, String> {
+    let (slot, ready) = &**outcome;
+    let mut value = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    while value.is_none() {
+        value = ready
+            .wait(value)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+    }
+    value.clone().expect("checked above")
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn remote_run(
+    app: tauri::AppHandle,
+    run_id: Option<String>,
+    case: String,
+    host: String,
+    kernel: String,
+    stage: Option<String>,
+    force: bool,
+    engine: Option<String>,
+    ranks: Option<u32>,
+    threads: Option<u32>,
+    cpus: Option<u32>,
+    scheduler: Option<String>,
+    model_version: Option<String>,
+    model_revision: Option<colm_model::VersionRef>,
+    preprocessors: Option<String>,
+    record_input_fingerprints: Option<bool>,
+    pack: Option<bool>,
+) -> Result<Value, String> {
+    let Some(id) = run_id.clone() else {
+        return submit_run(
+            app,
+            None,
+            case,
+            host,
+            kernel,
+            stage,
+            force,
+            engine,
+            ranks,
+            threads,
+            cpus,
+            scheduler,
+            model_version,
+            model_revision,
+            preprocessors,
+            record_input_fingerprints,
+            pack,
+        )
+        .await;
+    };
+    let (outcome, first) = claim_submission(&format!("{id}\n{case}"));
+    if !first {
+        return tauri::async_runtime::spawn_blocking(move || wait_for_submission(&outcome))
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    let result = submit_run(
+        app,
+        run_id,
+        case,
+        host,
+        kernel,
+        stage,
+        force,
+        engine,
+        ranks,
+        threads,
+        cpus,
+        scheduler,
+        model_version,
+        model_revision,
+        preprocessors,
+        record_input_fingerprints,
+        pack,
+    )
+    .await;
+    settle_submission(&outcome, &result);
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn submit_run(
     app: tauri::AppHandle,
     run_id: Option<String>,
     case: String,

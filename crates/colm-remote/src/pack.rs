@@ -2,7 +2,7 @@
 //!
 //! 天河的 deimos 分区是 `OverSubscribe=EXCLUSIVE`：不管要几个核，一个作业就占一整个节点、按整节点计费。
 //! 每个站点一个作业时，90 个站点占 90 个节点；sacct 实测 AU-How 跑 5 分 27 秒，记 5 小时 48 分核时
-//! （2026-10-19）。所以在独占分区上，站点不再各交一个作业，而是放进本批的队列
+//! （2026-10-19）。所以站点不再各交一个作业，而是放进本批的队列
 //! `<根>/pools/<批次>/queue/`，由"载体"作业去领：一个载体占一个节点，同时跑到这个节点的核数，
 //! 跑完一个领下一个，队列空了再等一会儿就退出。90 个站点、64 核的节点，就是两个载体。
 //!
@@ -11,7 +11,9 @@
 //! 领取用 `mkdir claimed/<站点>`（原子操作），所以一个站点只会被一个载体跑一次；取消一个还没领的站点
 //! 也是抢先建这个目录，载体就不会再跑它。
 //!
-//! 共享节点的分区不打包：在那里每个站点一个作业本来就只占它要的核。
+//! 共享节点的分区也打包：land02 的 faculty 账户每人同时只能跑 3 个作业（`MaxJobs=3`，2026-10-19），
+//! 一个站点一个作业时 90 个站点 3 个 3 个地挪。那里载体要明确申请整个节点的逻辑 CPU（超线程的节点
+//! 96 个 CPU = 48 核），站点按物理核数放；内存由 `colm_sbatch` 按核补上。
 use anyhow::{ensure, Result};
 
 use crate::sched::{self, Resources, Scheduler};
@@ -45,6 +47,7 @@ fn carrier_script(pool: &str, jobs: &str, slots: u32, header: &[String]) -> Stri
         r#"cd "${{SLURM_SUBMIT_DIR:-.}}"
 P={pool}; JOBS={jobs}
 SLOTS={slots}
+[ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=$(cat "$P/slots" 2>/dev/null)
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=${{SLURM_CPUS_ON_NODE:-$(nproc 2>/dev/null || echo 1)}}
 LINGER=${{COLM_PACK_LINGER:-60}}
 ME=${{SLURM_JOB_ID:-$(cat sched_id 2>/dev/null)}}
@@ -173,12 +176,18 @@ pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Resu
             },
         )
     };
-    let estimate = match &partition {
-        Some(part) => format!("sinfo -h -p {part} -o %c"),
-        None => "sinfo -h -o %c".to_owned(),
+    // 每个节点：插槽 × 每插槽核数（物理核）与逻辑 CPU 数，取分区里最小的节点。land02 的节点有超线程
+    // （96 个逻辑 CPU = 48 核）：站点按物理核放，载体按逻辑 CPU 申请才能拿到这些核。
+    let nodes = match &partition {
+        Some(part) => format!("sinfo -h -p {part} -o '%X %Y %c'"),
+        None => "sinfo -h -o '%X %Y %c'".to_owned(),
     };
     Ok(format!(
-        r#"{submit}if {exclusive}; then
+        r#"{submit}# 站点批量一律按节点打包：天河整节点独占计费，land02 每人同时只能跑 3 个作业（faculty 账户
+# MaxJobs=3，2026-10-19），一个站点一个作业两边都慢。独占分区上载体照样只要 1 核（整节点自然归它），
+# 共享分区上要明确申请整个节点的 CPU，并由 colm_sbatch 按核补内存。
+COLM_WHOLE=
+if {exclusive}; then COLM_WHOLE=1; fi
 P={pool}; J={job}
 mkdir -p "$P/queue" "$P/claimed" "$P/carriers"
 echo slurm-pack > scheduler
@@ -188,8 +197,11 @@ exec 8>"$P/.lock"
 flock 8
 SLOTS={slots}
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=$(cat "$P/slots" 2>/dev/null || true)
-[ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=$({estimate} 2>/dev/null | tr -d '+ ' | sort -n | head -n 1)
+COLM_SIZES=$({nodes} 2>/dev/null | tr -d '+' | awk '$1 > 0 && $2 > 0 {{ c = $1 * $2; if (cores == "" || c < cores) cores = c; if (cpus == "" || $3 < cpus) cpus = $3 }} END {{ if (cores > 0) print cores, cpus }}')
+[ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=${{COLM_SIZES%% *}}
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=1
+COLM_CPUS=${{COLM_SIZES##* }}
+[ "$COLM_CPUS" -ge "$SLOTS" ] 2>/dev/null || COLM_CPUS=$SLOTS
 echo "$SLOTS" > "$P/slots"
 : > "$P/queue/$J"
 # 还要几个载体：没领走的站点比活着的载体剩下的位置多，就再交一个。站点一个一个到，载体也一个一个加。
@@ -213,6 +225,8 @@ if [ "$W" -gt $((L * SLOTS - R)) ]; then
   cat > "$C/script.sh" <<'COLM_CARRIER_EOF'
 {script}COLM_CARRIER_EOF
   chmod +x "$C/script.sh"
+  COLM_SBATCH_EXTRA=
+  [ -n "$COLM_WHOLE" ] || COLM_SBATCH_EXTRA="--cpus-per-task=$COLM_CPUS"
   if ! ( cd "$C" && colm_sbatch script.sh && echo "$ID" > sched_id ); then
     # 没有载体来跑它：撤出队列，这次提交按失败报告。
     rm -f "$P/queue/$J" sched_id
@@ -221,8 +235,6 @@ if [ "$W" -gt $((L * SLOTS - R)) ]; then
 fi
 exec 8>&-
 echo pack {batch}
-else
-{single}fi
 "#,
         submit = sched::SLURM_SUBMIT,
         pool = quote(&pool),
@@ -230,6 +242,5 @@ else
         batch = quote(&pack.pool),
         slots = pack.slots,
         jobs = quote(&jobs),
-        single = sched::launch(Scheduler::Slurm),
     ))
 }

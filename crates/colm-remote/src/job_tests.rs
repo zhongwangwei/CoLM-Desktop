@@ -499,13 +499,14 @@ fn stale_bare_pid_cannot_cancel_an_unrelated_process() {
 fn pack_sandbox(tag: &str, partition_line: &str) -> Sandbox {
     let sb = Sandbox::new(tag);
     sb.stub("scontrol", &format!("echo '{partition_line}'"));
-    sb.stub("sinfo", "echo 2");
+    // One socket of two cores, four logical CPUs (hyperthreads).
+    sb.stub("sinfo", "echo '1 2 4'");
     sb.stub("flock", "exit 0");
     sb.stub("setsid", "exec \"$@\"");
     // Each submission gets the next id and is pending until a test marks it gone.
     sb.stub(
         "sbatch",
-        "n=$(cat \"$STUBS/next\" 2>/dev/null || echo 100); echo $((n + 1)) > \"$STUBS/next\"\necho \"$n\" >> \"$STUBS/live\"; pwd >> \"$STUBS/submitted_from\"; echo \"$n\"",
+        "n=$(cat \"$STUBS/next\" 2>/dev/null || echo 100); echo $((n + 1)) > \"$STUBS/next\"\necho \"$n\" >> \"$STUBS/live\"; pwd >> \"$STUBS/submitted_from\"; echo \"$@\" >> \"$STUBS/sbatch_args\"; echo \"$n\"",
     );
     sb.stub(
         "squeue",
@@ -633,20 +634,32 @@ fn an_exclusive_partition_queues_sites_and_adds_a_node_job_per_node_of_sites() {
 
 #[cfg(unix)]
 #[test]
-fn a_shared_partition_keeps_one_job_per_site() {
+fn a_shared_partition_packs_too_and_asks_for_a_whole_node() {
+    // land02: shared nodes, but at most three running jobs per user.
     let sb = pack_sandbox("pack-shared", "PartitionName=cpu OverSubscribe=NO State=UP");
     let (spec, pack) = pack_spec();
     let script = packed_submit_script(&sb.work(), "j-s", "true", &spec, &pack).unwrap();
     let (out, err, ok) = sb.run(&script);
     assert!(ok, "{err}");
-    assert_eq!(out.trim().lines().last(), Some("100"));
+    assert_eq!(out.trim().lines().last(), Some("pack batch-1"));
     assert_eq!(
         std::fs::read_to_string(sb.job_dir("j-s").join("scheduler")).unwrap(),
-        "slurm\n"
+        "slurm-pack\n"
     );
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-1"));
     assert_eq!(
-        sb.read("submitted_from").trim(),
-        sb.job_dir("j-s").to_string_lossy()
+        std::fs::read_to_string(pool.join("slots")).unwrap().trim(),
+        "2",
+        "physical cores"
+    );
+    let submitted = sb.read("submitted_from");
+    assert_eq!(submitted.lines().count(), 1, "one node job");
+    assert!(submitted.contains("carriers/c0"), "{submitted}");
+    // Its node job asks for every logical CPU of a node, so the two cores are really its own.
+    assert!(
+        sb.read("sbatch_args").contains("--cpus-per-task=4"),
+        "{}",
+        sb.read("sbatch_args")
     );
 }
 

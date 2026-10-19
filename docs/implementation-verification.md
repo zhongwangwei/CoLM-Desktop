@@ -34220,3 +34220,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 批量页每个服务器站点，在原来的状态和阶段下面再加一行说明（排队原因、正在编译引擎、怎么结束的）；运行中、已完成的阶段已经写明，就不重复。
     - "核对服务器状态"改为在一把面板锁下同时查 5 个站点（`remoteAction` 加了 `held` 参数），原来是一个接一个查。
     - 更正：上一个提交 `17752506` 的 Tested 写了"726 条"，实际当时有 1 条失败（"已完成"和测试期望的"已结束，成功（退出码 0）"不一致）。这次恢复了"已结束，成功/失败（退出码 N）"的写法，并加了批量页的测试；现在前端 727 条全部通过。
+
+48. **land02 上一批"都挂了"：同一站点被提交两次；每人同时只能跑 3 个作业 → Slurm 站点批量一律打包（用户报、用户要求，2026-10-19）**：
+    - 现场（只读）：21:30 之后只交上去 6 个作业，全部 COMPLETED、退出码 0，作业本身没挂。本机账本里，批次 `b9bbea0c` 的 5 个站点在 21:56:33 提交过一次，**21:59:44 同一批次又同时提交了一遍**（第一次的 5 个提交正在等登录节点编引擎，引擎 22:00:51 才编完）；AU-Cpr 因此跑了两遍，另外 4 个的第一次提交只有"开始"没有"结束"，一直显示运行中。前端每个站点只调用一次 `remote_run`，后端也不重试；Tauri 的 `scripts/ipc-protocol.js` 在自定义协议请求出错时会改走 postMessage，**把同一个请求再发一次**（`IPC custom protocol failed, Tauri will now use the postMessage interface instead`），这与 5 个请求同时重发对得上。
+    - 修复一（`remote.rs`）：带批次号的 `remote_run` 按"批次 + 站点"只执行一次（`claim_submission`），重复的请求在后台线程等第一次的结果并原样返回；记录在本次运行期间一直保留，晚到的重发也同样处理。测试 `a_resent_station_submission_waits_for_the_first_instead_of_submitting_again`。
+    - 只读核对 land02 的限额：faculty 账户 `MaxJobs=3`，即每人同时只能有 3 个作业在跑，一个站点一个作业时 90 个站点只能 3 个 3 个地挪。
+    - 修复二（用户要求"Slurm 的都做成打包"）：`pack::launch` 不再只在独占分区上打包，Slurm 站点批量一律打包。分区是否独占只决定载体作业申请多少资源：
+      - 独占分区（天河）：载体仍只申请 1 核，整个节点自然归它；
+      - 共享分区（land02）：载体通过命令行申请整个节点的逻辑 CPU（`--cpus-per-task`，经 `COLM_SBATCH_EXTRA` 传给 `colm_sbatch`），内存由 `colm_sbatch` 按核补上。
+      - 每个载体同时跑的站点数按物理核算（`sinfo -o '%X %Y %c'`，插槽 × 每插槽核数，取分区里最小的节点），记在 `slots` 里，载体从那里读。只读实测：land02 first 为 48 核 / 96 CPU，天河 deimos 为 64 / 64。
+      - 测试 `a_shared_partition_packs_too_and_asks_for_a_whole_node` 替换了原来的"共享分区每个站点一个作业"。colm-remote 104 条、gui/src-tauri 415 条、colm-cli 457 条通过。
+    - bd（LSF）的打包另行实现（用户随后要求）。

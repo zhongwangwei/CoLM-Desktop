@@ -1158,3 +1158,22 @@ fn a_server_run_is_read_on_the_server_until_its_results_are_fetched() {
     );
     std::fs::remove_dir_all(&run).unwrap();
 }
+
+#[test]
+fn a_resent_station_submission_waits_for_the_first_instead_of_submitting_again() {
+    let key = format!("batch-{}\n/case/AU-Cpr", std::process::id());
+    let (first, submits) = claim_submission(&key);
+    assert!(submits);
+    let (again, resubmits) = claim_submission(&key);
+    assert!(!resubmits, "the resent request does not submit");
+    let waiter = std::thread::spawn(move || wait_for_submission(&again));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    settle_submission(&first, &Ok(serde_json::json!({"job": "run-1"})));
+    assert_eq!(waiter.join().unwrap().unwrap()["job"], "run-1");
+    // A request arriving after the first finished gets the same answer, not a second job.
+    let (late, submits_late) = claim_submission(&key);
+    assert!(!submits_late);
+    assert_eq!(wait_for_submission(&late).unwrap()["job"], "run-1");
+    // Another station of the batch is its own submission.
+    assert!(claim_submission(&format!("batch-{}\n/case/AU-How", std::process::id())).1);
+}

@@ -322,7 +322,7 @@ macro_rules! slurm_submit {
       [ -n "$COLM_MB" ] && COLM_MEM="--mem-per-cpu=${COLM_MB}M" ;;
     esac
   fi
-  OUT=$(sbatch --parsable $COLM_MEM "$1" 2>&1) || {
+  OUT=$(sbatch --parsable $COLM_MEM ${COLM_SBATCH_EXTRA:-} "$1" 2>&1) || {
     W=$(pwd -P); ID=
     for colm_try in 1 2 3; do
       ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-1hours -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$W" '$2 == w { print $1 }' | sort -u)
