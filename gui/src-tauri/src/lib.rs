@@ -176,6 +176,7 @@ pub fn run() {
             open_path,
             model_get,
             model_delete,
+            model_prune,
             model_create,
             model_draft,
             model_save_draft,

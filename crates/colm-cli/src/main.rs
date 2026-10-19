@@ -128,10 +128,11 @@ usage:
                    # HYPERSPECTRAL PFT/PC：--highres-params 包含 fsds/、
                    # leaf_optical_properties/ 和 water_params.txt；--soil-hyper-albedo-dir
                    # 包含 colm_soil_albedo_400nm.nc ... colm_soil_albedo_2500nm.nc
-  colm-cli model-list|get|create|draft|save-draft|freeze|migrate-case|rollback|make-run|attach-network
+  colm-cli model-list|prune|get|create|draft|save-draft|freeze|migrate-case|rollback|make-run|attach-network
                    --model-root DIR [--model-id ID --model-revision N] [--json JSON|-]
                    # create JSON: {name,note,parent:{id,revision},workspace?}; save-draft: ModelDraft + --expected-generation N
                    # freeze: --model-id ID --asset-root DIR; migrate-case/rollback: <case-dir>
+                   # prune JSON: {keep:[{id,revision}],dry_run?}: drop unused old official revisions
                    # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
   colm-cli study-save-version <study-dir> --member best|ID --name NAME --model-root DIR [--note TEXT]
   colm-cli version-check --name N --kernel <dir> [--engine rust|fortran]
@@ -375,6 +376,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
             println!("case ready: {}", case.display());
         }
         "model-list"
+        | "model-prune"
         | "model-get"
         | "model-create"
         | "model-draft"

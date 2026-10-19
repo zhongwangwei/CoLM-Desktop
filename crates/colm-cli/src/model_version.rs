@@ -87,6 +87,26 @@ struct Create {
     parent: VersionRef,
     workspace: Option<String>,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Prune {
+    keep: Vec<VersionRef>,
+    #[serde(default)]
+    dry_run: bool,
+}
+/// The running program's own official revision may be older than the latest one (a rebuild
+/// back onto earlier source): new cases bind to it, so it stays with what the desktop keeps.
+fn prune(store: &Registry, input: Prune, current: &CodeRef) -> Result<colm_model::PruneReport> {
+    let mut keep = input.keep;
+    keep.extend(
+        store
+            .list()?
+            .into_iter()
+            .filter(|r| r.version.id == "official" && r.code == *current)
+            .map(|r| r.version),
+    );
+    store.prune_official(&keep, input.dry_run)
+}
 fn unique_id() -> String {
     format!(
         "model-{}-{}",
@@ -106,6 +126,7 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
             store.install_official(code)?;
             serde_json::to_value(store.list()?)?
         }
+        "model-prune" => serde_json::to_value(prune(&store, request(opts)?, &code(opts, None)?)?)?,
         "model-get" => {
             serde_json::to_value(store.get(&selected(opts)?.context("model revision required")?)?)?
         }
@@ -1026,6 +1047,44 @@ pub(crate) fn protected_snapshots(opts: &Opts) -> Result<Vec<serde_json::Value>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pruning_keeps_the_running_programs_official_revision() {
+        let root = std::env::temp_dir().join(format!("colm-prune-{}", unique_id()));
+        let store = Registry::open(&root).unwrap();
+        let code = |c: &str| CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: c.repeat(64),
+        };
+        // Built on a, then b, then c, then back on a: a's revision is current, c's the latest.
+        for c in ["a", "b", "c"] {
+            store.install_official(code(c)).unwrap();
+        }
+        let report = prune(
+            &store,
+            serde_json::from_str(r#"{"keep":[]}"#).unwrap(),
+            &code("a"),
+        )
+        .unwrap();
+        assert!(!report.dry_run);
+        assert_eq!(
+            report.removed,
+            vec![VersionRef {
+                id: "official".into(),
+                revision: 2
+            }]
+        );
+        let left: Vec<_> = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|r| r.version.revision)
+            .collect();
+        assert_eq!(left, vec![1, 3]);
+        assert!(serde_json::from_str::<Prune>(r#"{"keep":[],"extra":1}"#).is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn a_complete_code_cache_published_first_is_kept() {
         let root = std::env::temp_dir().join(format!("colm-code-cache-{}", unique_id()));

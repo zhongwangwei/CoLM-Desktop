@@ -11,6 +11,14 @@ import {
 } from 'react';
 import { invoke, invokeJson, listen, hasBackend, bindRunningTargets } from './ipc';
 import { applyRunEvent } from './run-events';
+import {
+  askToRebind,
+  missingRevision,
+  rebindQuestion,
+  tidyModelsAfterStartup,
+  versionLabel,
+  withoutRevisions,
+} from './model-tidy';
 import { navigationBlock, type NavigationGuard, type NavigationTarget } from './navigation-guard';
 import { projectToSave, readSavedProject, writeSavedProject } from './navigation';
 import type {
@@ -157,7 +165,35 @@ export function AppProvider({ children }: { children: ReactNode }) {
       update({ busy: true });
       try {
         const opened = await invoke<OpenedCase>('open_case', { dir });
-        const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', { dir });
+        const latestOfficial = current.current.versions
+          .filter((v) => v.version.id === 'official')
+          .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
+        const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+          dir,
+        }).catch(async (error: unknown) => {
+          // 绑定的修订已被整理（或删除）：问一句改绑到哪个版本，而不是抛出读不到 revision.json。
+          const missing = missingRevision(error);
+          const target = current.current.chosenVersion ?? latestOfficial;
+          if (!missing || !target) throw error;
+          if (!askToRebind(rebindQuestion(missing, target, bilingual)))
+            throw new Error(
+              bilingual(
+                `算例绑定的模型版本 ${versionLabel(missing)} 已不在模型库中；未改绑，算例未打开。`,
+                `The case's model revision ${versionLabel(missing)} is no longer in the model registry; it was not rebound or opened.`,
+              ),
+            );
+          const rebound = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+            dir,
+            target,
+          });
+          notify(
+            bilingual(
+              `已把算例改绑到 ${versionLabel(target)}（原绑定的 ${versionLabel(missing)} 已整理）`,
+              `Rebound the case to ${versionLabel(target)} (${versionLabel(missing)} was tidied away).`,
+            ),
+          );
+          return rebound;
+        });
         // 优先使用用户明确选择的版本；没有明确选择时恢复算例的修改版绑定，否则用最新官方版。
         // 运行时再把实际所用版本写回算例。
         const bound =
@@ -168,9 +204,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
               v.version.revision === binding.version.revision,
           );
         // 只认用户明确选的版本（`chosenVersion`）；打开上一个算例时带出的版本不能串到别的算例上。
-        const latestOfficial = current.current.versions
-          .filter((v) => v.version.id === 'official')
-          .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
         const selectedVersion =
           current.current.chosenVersion ??
           (bound ? binding.version : (latestOfficial ?? current.current.versionRef));
@@ -300,6 +333,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
             version: official ?? null,
             ...(official ? { versionRef: official.version } : {}),
           });
+        // 版本列表到手之后，在后台整理没人用的旧官方修订（运行或创建中时后端会拒绝，只记日志）。
+        void tidyModelsAfterStartup(invokeJson).then((removed) => {
+          if (alive && removed.length)
+            update((old) => ({ versions: withoutRevisions(old.versions, removed) }));
+        });
       } catch (error) {
         if (alive) notify(String(error));
       } finally {

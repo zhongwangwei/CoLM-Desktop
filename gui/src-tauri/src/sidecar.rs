@@ -115,6 +115,14 @@ impl CaseCreations {
     pub(crate) fn cancel_on_shutdown(&self) -> Result<usize, String> {
         self.0.cancel(None)
     }
+    /// Hold the creation registry so no case creation starts while `action` runs.
+    pub(crate) fn with_idle_because<T>(
+        &self,
+        busy: &str,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        self.0.with_idle_because(busy, action)
+    }
 }
 
 #[derive(Clone)]
@@ -339,12 +347,21 @@ impl RunProcesses {
         &self,
         action: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_idle_because("请等待正在运行或准备中的任务结束后再删除文件夹", action)
+    }
+
+    /// [`Self::with_idle`] with the refusal the caller's work needs.
+    pub(crate) fn with_idle_because<T>(
+        &self,
+        busy: &str,
+        action: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
         let state = self
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
         if !state.pids.is_empty() || !state.pending.is_empty() {
-            return Err("请等待正在运行或准备中的任务结束后再删除文件夹".into());
+            return Err(busy.into());
         }
         action()
     }

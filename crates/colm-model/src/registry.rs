@@ -179,53 +179,99 @@ impl Registry {
         let dir = self.revision_dir(version)?;
         let frozen = self.get(version)?;
         let all = self.list()?;
-        if version.id == "official" {
-            let latest = all
-                .iter()
-                .filter(|r| r.version.id == "official")
-                .map(|r| r.version.revision)
-                .max();
-            ensure!(
-                latest != Some(version.revision),
-                "the latest official revision is the bundled baseline and cannot be deleted"
-            );
+        if let Some(reason) = removal_blocker(&all, &self.drafts()?, version) {
+            anyhow::bail!(reason);
         }
-        if let Some(child) = all.iter().find(|r| r.parent.as_ref() == Some(version)) {
-            anyhow::bail!(
-                "revision {}#{} is derived from it; delete that revision first",
-                child.version.id,
-                child.version.revision
-            );
-        }
-        if let Some(draft) = self.drafts()?.iter().find(|d| d.parent == *version) {
-            anyhow::bail!("draft {} is based on it; delete that draft first", draft.id);
-        }
-        let parent = dir.parent().context("revision parent")?.to_path_buf();
-        let trash = parent.join(format!(
-            ".remove-{}-{}",
-            version.revision,
-            std::process::id()
-        ));
-        fs::rename(&dir, &trash)?;
-        fs::remove_dir_all(&trash)?;
+        self.discard_revision(&dir)?;
         let mut removed = vec![dir];
-        if fs::read_dir(&parent)?.next().is_none() {
-            fs::remove_dir(&parent)?;
-        }
         if !all
             .iter()
             .any(|r| r.version != *version && r.code == frozen.code)
         {
-            let source = self
-                .root
-                .join("sources")
-                .join(source_cache_name(&frozen.code)?);
+            let source = self.source_dir(&frozen.code)?;
             if source.is_dir() {
                 fs::remove_dir_all(&source)?;
                 removed.push(source);
             }
         }
         Ok(removed)
+    }
+    /// Tidy away old official baselines nothing uses any more. Every desktop start freezes the
+    /// bundled source as a new official revision with a ~126 MB source snapshot, and nothing
+    /// removed the old ones (2026-10-18: 71 revisions, 8.57 GB). `keep` names the revisions the
+    /// caller knows are still in use (case bindings, history, the official revision of the
+    /// running program); on top of it the rules of [`Registry::remove`] hold: the latest
+    /// official revision and anything a revision or draft builds on stay, and a source
+    /// snapshot goes only when no remaining revision or draft shares it. `dry_run` reports
+    /// what would go without touching anything.
+    pub fn prune_official(&self, keep: &[VersionRef], dry_run: bool) -> Result<PruneReport> {
+        let _lock = self.lock()?;
+        let all = self.list()?;
+        let drafts = self.drafts()?;
+        let mut report = PruneReport {
+            dry_run,
+            ..PruneReport::default()
+        };
+        for revision in all.iter().filter(|r| r.version.id == "official") {
+            let reason = removal_blocker(&all, &drafts, &revision.version).or_else(|| {
+                keep.contains(&revision.version)
+                    .then(|| "a case or history record still uses it".to_owned())
+            });
+            match reason {
+                Some(reason) => report.kept.push(KeptRevision {
+                    version: revision.version.clone(),
+                    reason,
+                }),
+                None => report.removed.push(revision.version.clone()),
+            }
+        }
+        let remaining = |code: &CodeRef| {
+            all.iter()
+                .any(|r| !report.removed.contains(&r.version) && r.code == *code)
+                || drafts.iter().any(|d| d.code == *code)
+        };
+        let mut sources = Vec::new();
+        for revision in all.iter().filter(|r| report.removed.contains(&r.version)) {
+            let source = self.source_dir(&revision.code)?;
+            if !remaining(&revision.code) && source.is_dir() && !sources.contains(&source) {
+                sources.push(source);
+            }
+        }
+        for version in &report.removed {
+            let dir = self.revision_dir(version)?;
+            report.bytes += tree_size(&dir)?;
+            if !dry_run {
+                self.discard_revision(&dir)?;
+            }
+            report.paths.push(dir);
+        }
+        for source in sources {
+            report.bytes += tree_size(&source)?;
+            if !dry_run {
+                // Rename first: a half-deleted snapshot without code.json counts as missing.
+                let name = source.file_name().context("source name")?.to_string_lossy();
+                let trash = source.with_file_name(format!(".remove-{name}-{}", std::process::id()));
+                fs::rename(&source, &trash)?;
+                fs::remove_dir_all(&trash)?;
+            }
+            report.paths.push(source);
+        }
+        Ok(report)
+    }
+    fn source_dir(&self, code: &CodeRef) -> Result<PathBuf> {
+        Ok(self.root.join("sources").join(source_cache_name(code)?))
+    }
+    /// Remove one revision directory atomically (and its version directory once empty).
+    fn discard_revision(&self, dir: &Path) -> Result<()> {
+        let parent = dir.parent().context("revision parent")?.to_path_buf();
+        let name = dir.file_name().context("revision name")?.to_string_lossy();
+        let trash = parent.join(format!(".remove-{name}-{}", std::process::id()));
+        fs::rename(dir, &trash)?;
+        fs::remove_dir_all(&trash)?;
+        if fs::read_dir(&parent)?.next().is_none() {
+            fs::remove_dir(&parent)?;
+        }
+        Ok(())
     }
     pub fn drafts(&self) -> Result<Vec<ModelDraft>> {
         let mut drafts = Vec::new();
@@ -477,6 +523,48 @@ impl Registry {
         }
         result
     }
+}
+/// Why the registry itself still needs `version`: the latest official baseline, a revision
+/// derived from it, or a draft based on it. `None` means only outside references can keep it.
+fn removal_blocker(
+    all: &[FrozenRevision],
+    drafts: &[ModelDraft],
+    version: &VersionRef,
+) -> Option<String> {
+    if version.id == "official"
+        && all
+            .iter()
+            .filter(|r| r.version.id == "official")
+            .map(|r| r.version.revision)
+            .max()
+            == Some(version.revision)
+    {
+        return Some(
+            "the latest official revision is the bundled baseline and cannot be deleted".into(),
+        );
+    }
+    if let Some(child) = all.iter().find(|r| r.parent.as_ref() == Some(version)) {
+        return Some(format!(
+            "revision {}#{} is derived from it; delete that revision first",
+            child.version.id, child.version.revision
+        ));
+    }
+    drafts
+        .iter()
+        .find(|d| d.parent == *version)
+        .map(|draft| format!("draft {} is based on it; delete that draft first", draft.id))
+}
+/// Bytes under `path`, not following links.
+fn tree_size(path: &Path) -> Result<u64> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_dir() {
+        return Ok(meta.len());
+    }
+    let mut total = 0;
+    for entry in fs::read_dir(path)? {
+        total += tree_size(&entry?.path())?;
+    }
+    Ok(total)
 }
 pub(crate) fn normalize_overlay(overlay: &mut Overlay) {
     overlay.parameters.sort_by_key(parameter_key);

@@ -1,6 +1,71 @@
+import { useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
+import { invokeJson } from '../../lib/ipc';
+import { formatBytes, withoutRevisions, type PruneReport } from '../../lib/model-tidy';
 import { Button, Card, Field, Select } from '../../components/ui';
+
+/** Check how much the old official revisions take, and tidy them on request. */
+function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
+  const { update } = useApp();
+  const [report, setReport] = useState<PruneReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const run = async (dryRun: boolean) => {
+    setBusy(true);
+    setMessage('');
+    try {
+      const result = await invokeJson<PruneReport>('model_prune', { dryRun });
+      setReport(result);
+      if (!dryRun) {
+        update((old) => ({ versions: withoutRevisions(old.versions, result.removed) }));
+        setMessage(
+          t(
+            `已整理 ${result.removed.length} 个旧官方修订，释放 ${formatBytes(result.bytes)}`,
+            `Tidied ${result.removed.length} old official revisions, freeing ${formatBytes(result.bytes)}`,
+          ),
+        );
+      }
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const removable = report?.dry_run ? report.removed.length : 0;
+  return (
+    <Card
+      title={t('模型缓存', 'Model cache')}
+      description={t(
+        '每次软件更新都会登记一个新的官方修订和约 126 MB 的源码快照。启动时会自动整理没有算例、研究或历史记录使用的旧官方修订；最新修订、被派生或草稿依赖的修订始终保留。',
+        'Each software update registers a new official revision with a ~126 MB source snapshot. Old official revisions no case, study or history record uses are tidied at start; the latest one and any a version or draft builds on always stay.',
+      )}
+    >
+      {report?.dry_run && (
+        <p>
+          {removable
+            ? t(
+                `可整理 ${removable} 个旧官方修订，约 ${formatBytes(report.bytes)}；保留 ${report.kept.length} 个。`,
+                `${removable} old official revisions can go (about ${formatBytes(report.bytes)}); ${report.kept.length} stay.`,
+              )
+            : t(
+                `没有可整理的旧官方修订；保留 ${report.kept.length} 个。`,
+                `Nothing to tidy; ${report.kept.length} official revisions stay.`,
+              )}
+        </p>
+      )}
+      {message && <p className="muted">{message}</p>}
+      <div className="actions">
+        <Button disabled={busy} onClick={() => void run(true)}>
+          {t('检查可释放的空间', 'Check reclaimable space')}
+        </Button>
+        <Button disabled={busy || !removable} onClick={() => void run(false)}>
+          {t('整理模型缓存', 'Tidy model cache')}
+        </Button>
+      </div>
+    </Card>
+  );
+}
 
 export default function SettingsPage() {
   const { state, update, navigate } = useApp();
@@ -95,6 +160,7 @@ export default function SettingsPage() {
       >
         <Button onClick={assistantSettings}>{t('配置 AI 助手', 'Configure AI assistant')}</Button>
       </Card>
+      <ModelCacheCard t={t} />
       <Button onClick={() => navigate('help')}>{t('帮助', 'Help')}</Button>
     </div>
   );

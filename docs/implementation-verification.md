@@ -33993,3 +33993,25 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：新增三条（提交与核对确实并行、并行提交也不超过并发数、并行中一个失败的记录与取消），既有的串行用例原样通过；GUI 698 条，eslint 全绿。
 24. **混用测试窗口的事故（2026-10-19）**：为在天河上测试，我用 `--features e2e-driver` 重编并启动了一个隔离 HOME（`/tmp/ce7`）的测试实例。用户原来的窗口退出后，再点"打开应用"，macOS 激活的是已经在运行的同一个应用（即测试实例），于是用户在测试窗口里新建项目并在 bd 上跑了 90 站点的批量——数据全在 `/tmp/ce7/` 下，真实的历史库因此没有这批记录。测试实例里 bd 的作业是真实的（服务器上的结果不受影响），但本机侧的项目缓存与历史只在 `/tmp/ce7`。处理：不在批量跑完前关闭或清理这个实例；之后把项目目录复制到真实应用的 `remote-projects/` 下，用"选择其他目录"打开。以后给测试实例用不同的应用名/标识，或者用完立刻关闭并明确告知。
 25. 事故处理（第 24 条）：用户确认那批 bd 批量只是他的测试，不需要保留。给测试窗口加了红色横幅和标题"【测试窗口】…隔离数据"，重编正常版（含第 23 条的并行提交与核对），用 `open -n` 另开一个正常实例（真实 HOME）与测试窗口并存；天河的引擎准备仍在测试进程里继续，所以测试窗口暂不关闭。`open` 不带 `-n` 时会激活已在运行的同一应用，这是这次混淆的原因。
+
+## 第 717 轮：自动整理不再使用的旧官方修订（2026-10-18，由整理分支并入，原编号 714）
+
+接第 713 轮第 7 条：手动整理之后，要让应用自己得出同样的结论。
+
+1. **整理入口 `Registry::prune_official(keep, dry_run)`**（colm-model）：持写锁；只看 `official` 修订；与 `Registry::remove` 共用同一条判定 `removal_blocker`（最新官方修订、有派生修订、有草稿以它为基础，三者之一即保留），再加上调用方给的 `keep`。源码缓存在所有删除决定做完之后才判断：只有剩下的修订和草稿都不再用这份代码时才移走，并且先改名再删除（删到一半的缓存没有 `code.json`，会被当作缺失，而不是被当作完整缓存使用）。`dry_run` 只报告会删什么、能释放多少字节。`remove` 改为复用同一判定，行为不变。
+2. **"仍在使用"的集合**（gui/src-tauri `model.rs::revisions_in_use`）：
+   - 可见历史记录里每条操作最新事件的 `version_id`/`revision`（与 `history_references` 同一口径；用户删掉的记录不再保留修订）；
+   - 已知项目：`recent.json` 的 `root`、`spatial-root`、`ui-project-roots`，加上 `<app data>/remote-projects/*` 的服务器项目镜像；每个项目扫描子目录的 `model-binding.json`，以及 `.colm/studies/*` 的研究固定版本（`model-version.json` 的 `model_revision`）和成员算例；
+   - 历史记录触及过的每个算例目录（`case_path`）的绑定：不在最近 8 个项目里、但跑过的算例也算在内。
+   - `recent.json` 或项目列表读不出来时整理直接中止，不会因为"看不到项目"而少保留。
+   - CLI `model-prune` 再把当前打包源码对应的官方修订加进保留集合：重编回旧源码时，`install_official` 返回的是那个旧修订，新算例会绑到它，它不一定是编号最大的那个。
+3. **调用时机**：启动时 `model_list` 拿到版本列表之后，前端在后台调一次 `model_prune`（`tidyModelsAfterStartup`），失败只 `console.warn`，不提示用户；删掉的修订从界面版本列表里去掉。后端 `while_idle` 同时持住运行登记（模拟、研究）和算例创建登记：任一有任务就拒绝（"有模拟正在运行或算例正在创建，稍后再整理模型缓存"），整理期间新运行、新创建会等它结束；在用集合也在持锁之后才计算，避免刚结束的运行写入的历史被漏掉。
+   设置页加了"模型缓存"卡片："检查可释放的空间"（dry run，显示可整理几个、约多大、保留几个）和"整理模型缓存"。
+4. **打开绑定到已整理修订的算例**：`migrate_case_to` 在绑定的修订目录不存在时报 `model revision official#N is no longer in the model registry (…); rebind the case to an available revision`（`colm_model::missing_revision_message`），不再是读不到 `revision.json` 的原始错误。前端 `openCase` 识别这句，弹窗询问改绑到用户明确选的版本，否则最新官方版本；同意则改绑并提示"已把算例改绑到 …"，取消则不打开、不改动算例，并给出一句说明。
+5. **真实数据审计**（只读）：模型库用 APFS clone 复制到 scratch，历史库用 `sqlite3 .backup` 复制，`recent.json` 与远程项目缓存只读；另外人为加一个与 official#70 同代码的 official#65。`cargo test --lib audit_tidy_on_real_data -- --ignored --nocapture` 的结果：14 个项目根，在用 `official#70/#68/#64/#59`；保留 #6（被用户版本 `model-69623-…#1` 派生）、#59/#64/#68（被使用）、#70（最新）——与第 713 轮手动整理的保留集合完全一致；#65 判为可删，只删 782 字节的修订目录，共用的源码缓存保留。
+6. 已知局限：同一台机器上同时开着两个源码不同的应用（例如开发版和安装版共用 `~/Library/Application Support/CoLM-Desktop/models`）时，一方看不到另一方当前的官方修订，可能把它整理掉；另一方下次登记时会重新冻结一个新修订、重新复制源码缓存，新建算例不受影响，已打开的算例按第 4 条改绑。放在其它目录、从未运行过、也不在最近项目里的算例，同样在打开时按第 4 条改绑。没有修订引用的孤立源码缓存不在这次整理范围内。
+7. 验证：
+   - 引擎 workspace：`cargo test --workspace --lib --bins -- --test-threads=1` 共 2566 条通过（新增 colm-model `pruning_keeps_the_latest_bound_derived_and_draft_bases_and_shared_sources`、`a_case_bound_to_a_tidied_revision_says_so_and_can_be_rebound`，colm-cli `pruning_keeps_the_running_programs_official_revision`）；clippy `-D warnings` 零警告；fmt 干净。
+   - GUI Rust：399 条通过、1 条 ignore（上面的真实数据审计）；新增 `revisions_in_use_come_from_history_bindings_studies_and_known_projects`、`known_project_roots_read_recent_folders_and_server_mirrors`、`model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works`；clippy 零警告；fmt 干净。
+   - 前端：`npm test` 693 条通过（新增启动后才整理、整理失败只记日志、改绑提示同意/取消/按明确选择改绑、`model-tidy` 解析）；`gui/tests/*.mjs` 33 个套件全部通过；`check-gui` 185 个命令契约（含重新生成的 `model_prune`）。
+   - 调试构建的 `colm-cli model-migrate-case` 仍被"缺少打包戳记"挡住（同第 713 轮），所以缺失修订的错误文本没有经过真实 CLI 端到端，只由 colm-model 单元测试覆盖；`colm-cli model-prune` 在调试构建上跑通。

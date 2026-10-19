@@ -1233,3 +1233,150 @@ fn removing_a_revision_keeps_the_baseline_children_and_shared_sources() {
         vec![latest.version]
     );
 }
+
+#[test]
+fn pruning_keeps_the_latest_bound_derived_and_draft_bases_and_shared_sources() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let code_of = |c: char| CodeRef {
+        source_sha256: c.to_string().repeat(64),
+        ..code()
+    };
+    let source = |c: char| {
+        reg.root()
+            .join("sources")
+            .join(source_cache_name(&code_of(c)).unwrap())
+    };
+    // official#1..#6: a = derived base, b = bound, c = unused but shares its code with the
+    // derived version, d = draft base, e = unused, f = latest.
+    let official: Vec<_> = "abcdef"
+        .chars()
+        .map(|c| {
+            fs::create_dir_all(source(c)).unwrap();
+            fs::write(source(c).join("code.json"), "{}").unwrap();
+            fs::write(source(c).join("payload"), vec![0u8; 1000]).unwrap();
+            reg.install_official(code_of(c)).unwrap().version
+        })
+        .collect();
+    let mut derived = draft(official[0].clone());
+    derived.code = code_of('c');
+    let mut derived = reg.create_draft(derived).unwrap();
+    derived
+        .overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    reg.save_draft(derived, 1).unwrap();
+    let frozen = reg.freeze("experiment", &tmp.0).unwrap();
+    fs::remove_file(reg.root().join("drafts/experiment.json")).unwrap();
+    let mut pending = draft(official[3].clone());
+    pending.id = "pending".into();
+    pending.code = code_of('d');
+    reg.create_draft(pending).unwrap();
+    let keep = vec![official[1].clone()];
+    let removed = vec![official[2].clone(), official[4].clone()];
+
+    let preview = reg.prune_official(&keep, true).unwrap();
+    assert!(preview.dry_run);
+    assert_eq!(preview.removed, removed);
+    assert_eq!(
+        preview.paths,
+        vec![
+            reg.revision_dir(&official[2]).unwrap(),
+            reg.revision_dir(&official[4]).unwrap(),
+            source('e'),
+        ],
+        "the shared c snapshot stays; e's goes with its revision"
+    );
+    assert!(preview.bytes > 1000);
+    assert_eq!(reg.list().unwrap().len(), 7, "a dry run removes nothing");
+    assert!(source('e').is_dir());
+
+    let report = reg.prune_official(&keep, false).unwrap();
+    assert_eq!(report.removed, removed);
+    assert_eq!(report.paths, preview.paths);
+    assert_eq!(report.bytes, preview.bytes);
+    let reasons: Vec<_> = report
+        .kept
+        .iter()
+        .map(|k| (k.version.revision, k.reason.as_str()))
+        .collect();
+    assert!(reasons[0].1.contains("derived"), "{reasons:?}");
+    assert!(reasons[1].1.contains("uses it"), "{reasons:?}");
+    assert!(reasons[2].1.contains("draft"), "{reasons:?}");
+    assert!(reasons[3].1.contains("latest"), "{reasons:?}");
+    assert_eq!(
+        reasons.iter().map(|r| r.0).collect::<Vec<_>>(),
+        vec![1, 2, 4, 6]
+    );
+    let left: Vec<_> = reg.list().unwrap().into_iter().map(|r| r.version).collect();
+    assert_eq!(
+        left,
+        vec![
+            frozen.version.clone(),
+            official[0].clone(),
+            official[1].clone(),
+            official[3].clone(),
+            official[5].clone(),
+        ]
+    );
+    for (c, kept) in [
+        ('a', true),
+        ('b', true),
+        ('c', true),
+        ('d', true),
+        ('e', false),
+        ('f', true),
+    ] {
+        assert_eq!(source(c).is_dir(), kept, "source {c}");
+    }
+    assert!(
+        fs::read_dir(reg.root().join("sources"))
+            .unwrap()
+            .chain(fs::read_dir(reg.root().join("versions/official")).unwrap())
+            .all(|e| !e.unwrap().file_name().to_string_lossy().starts_with('.')),
+        "no trash left behind"
+    );
+    // Nothing else is unused: a second pass removes nothing.
+    assert!(reg.prune_official(&keep, false).unwrap().removed.is_empty());
+}
+
+#[test]
+fn a_case_bound_to_a_tidied_revision_says_so_and_can_be_rebound() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let old = reg.install_official(code()).unwrap().version;
+    let latest = reg
+        .install_official(CodeRef {
+            source_sha256: "b".repeat(64),
+            ..code()
+        })
+        .unwrap()
+        .version;
+    let case = tmp.case();
+    fs::write(
+        case.join(BINDING_FILE),
+        serde_json::to_vec(&CaseBinding {
+            schema: SCHEMA,
+            version: old.clone(),
+            original_case_sha256: "x".repeat(64),
+            migrated_unix: 0,
+            model_fields: Vec::new(),
+        })
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        reg.prune_official(&[], false).unwrap().removed,
+        vec![old.clone()]
+    );
+    let error = reg
+        .migrate_case_to(&case, code(), None)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(error, missing_revision_message(&old));
+    assert!(error.starts_with("model revision official#1 is no longer in the model registry"));
+    let rebound = reg
+        .migrate_case_to(&case, code(), Some(latest.clone()))
+        .unwrap();
+    assert_eq!(rebound.version, latest);
+}

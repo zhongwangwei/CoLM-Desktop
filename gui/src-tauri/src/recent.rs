@@ -32,6 +32,13 @@ pub fn load_recent(app: tauri::AppHandle) -> BTreeMap<String, String> {
         .unwrap_or_default()
 }
 
+/// The remembered values, where an unreadable file is an error rather than empty.
+pub(crate) fn load_recent_strict(
+    app: &tauri::AppHandle,
+) -> Result<BTreeMap<String, String>, String> {
+    read_recent(&path(app)?)
+}
+
 /// The remembered values; a missing file is empty, an unreadable one is an error.
 fn read_recent(path: &std::path::Path) -> Result<BTreeMap<String, String>, String> {
     match std::fs::read_to_string(path) {

@@ -687,6 +687,12 @@ export const commandContract = {
       "rust_type": "Vec<VersionRef>"
     }
   },
+  "model_prune": {
+    "dryRun": {
+      "required": true,
+      "rust_type": "bool"
+    }
+  },
   "model_get": {
     "id": {
       "required": true,
