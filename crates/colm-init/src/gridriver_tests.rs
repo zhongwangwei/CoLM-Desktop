@@ -295,6 +295,7 @@ fn cold_restart_carries_native_zero_bifurcation_state() {
 /// 上游只要求有效层（宽度 > 0）之间高程不降；首层无效的路径（真实 15 弧分数据里多数如此）要接受。
 #[test]
 fn cold_restart_accepts_inactive_levels_before_active_ones() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("bifurcation-gap");
     let unit_catchment = root.join("unitcatchment.nc");
     write_unit_catchment_with_width(&unit_catchment, [0.0, 4.0]);

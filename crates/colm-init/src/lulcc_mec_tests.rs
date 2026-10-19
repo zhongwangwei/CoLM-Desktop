@@ -187,6 +187,7 @@ fn case(dir: &Path) -> (RestartFile, RestartFile, RestartFile, RestartFile) {
 
 #[test]
 fn changed_patches_mix_sources_by_transfer_fraction() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("mix");
     let (old_time, old_const, new_time, new_const) = case(&dir);
     // 新 patch 0（类型 1）：来自旧类型 1 的 0.25、旧类型 5 的 0.75；新 patch 1（类型 17）不变。
@@ -243,6 +244,7 @@ fn changed_patches_mix_sources_by_transfer_fraction() {
 
 #[test]
 fn a_missing_source_class_is_refused() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("missing");
     let (old_time, old_const, new_time, new_const) = case(&dir);
     let mut lcc0 = vec![0.0; 18];
@@ -266,6 +268,7 @@ fn a_missing_source_class_is_refused() {
 
 #[test]
 fn unchanged_fractions_keep_the_sat_result() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("unchanged");
     let (old_time, old_const, new_time, new_const) = case(&dir);
     let mut lcc0 = vec![0.0; 18];
@@ -315,6 +318,7 @@ fn pft_restart(path: &Path) -> RestartFile {
 
 #[test]
 fn pft_merges_soil_classes_and_rescales_ldew_p() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("pft");
     let (old_time, _, new_time, new_const) = case(&dir);
     // 旧单元：PFT 土壤 patch（类 1）与水体（类 17）。

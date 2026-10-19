@@ -77,6 +77,7 @@ fn options() -> SatOptions {
 
 #[test]
 fn pairs_walk_each_element_by_patch_class() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     // 单元 7：旧 [1, 5, 17]，新 [1, 2, 17] —— 5 消失、2 新增；单元 9 只在新的一侧。
     let old_class = [1, 5, 17];
     let old_element = [7, 7, 7];
@@ -101,6 +102,7 @@ fn pairs_walk_each_element_by_patch_class() {
 
 #[test]
 fn matched_patches_take_the_old_state_and_new_ones_stay_cold() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("assign");
     // 旧：2 个 patch（类型 1、17）；新：3 个（1、2、17）。sigf 旧值 0，新 patch 有叶。
     let old_file = restart(&dir.join("old.nc"), 2, 100.0, &[0.0, 0.5], &[0.0, 0.0]);
@@ -158,6 +160,7 @@ fn matched_patches_take_the_old_state_and_new_ones_stay_cold() {
 
 #[test]
 fn a_missing_variable_is_named() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("missing");
     let old_file = restart(&dir.join("old.nc"), 1, 0.0, &[0.0], &[0.0]);
     let new_file = restart(&dir.join("new.nc"), 1, 0.0, &[0.0], &[0.0]);
@@ -198,6 +201,7 @@ fn pft_restart(path: &Path, pfts: usize, base: f64) -> RestartFile {
 /// `ldew` 按新的 `pftfrac` 从 0 起顺序 FMA 重算。非土壤配对不碰 PFT。
 #[test]
 fn pfts_pair_by_class_and_ldew_is_reweighted() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("pft");
     let new_time = restart(&dir.join("new.nc"), 2, 100.0, &[1.0, 1.0], &[1.0, 1.0]);
     let old_time = restart(&dir.join("old.nc"), 2, 0.0, &[1.0, 1.0], &[1.0, 1.0]);
@@ -256,6 +260,7 @@ fn pfts_pair_by_class_and_ldew_is_reweighted() {
 /// 城市 patch 还要按城市类型对齐：旧 [城市 2, 城市 3]，新 [城市 1, 城市 3] —— 2 消失、1 新增。
 #[test]
 fn urban_patches_pair_by_urban_class() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("urban-pairs");
     let time = restart(&dir.join("t.nc"), 3, 0.0, &[0.0; 3], &[0.0; 3]);
     let class = [1, URBAN, URBAN];
@@ -284,6 +289,7 @@ fn urban_patches_pair_by_urban_class() {
 /// 城市 patch 的水量重组：屋顶只占前 6 层，透水地面整列，不透水地面前 6 层；`scv` 三项加权。
 #[test]
 fn urban_patch_water_is_recomposed_from_the_urban_columns() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let dir = temp_dir("urban-water");
     let mut file = netcdf::create(dir.join("u.nc")).unwrap();
     file.add_dimension("urban", 1).unwrap();

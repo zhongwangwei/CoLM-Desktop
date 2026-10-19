@@ -294,6 +294,7 @@ fn a_continuation_write_refuses_a_bad_override() {
 /// 多 patch 视图：最外层 `patch` 维取一块、`pft` 维取区间，其余原样；`patch` 在内层时报错。
 #[test]
 fn a_patch_view_selects_the_outer_patch_and_pft_blocks() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = temp_dir("select-patch");
     let path = root.join("restart.nc");
     {

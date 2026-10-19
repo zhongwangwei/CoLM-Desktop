@@ -1502,6 +1502,7 @@ fn urban_namelist_uses_lct_and_resolves_the_shared_runtime_contract() {
 
 #[test]
 fn urban_subgrids_write_urban_restarts_without_pft_inputs() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     use colm_srfdata::site::{
         fill, materialize_single_point_surface_from_namelist, prepare_urban, skeleton_with_mode,
         SiteKind, SiteMode,
@@ -2497,6 +2498,7 @@ fn assert_bgc_pft_restart_equal(actual_path: &std::path::Path, expected_path: &s
 
 #[test]
 fn soil_reflectance_scheme_defaults_to_site_values_and_accepts_urban_colour_tables() {
+    let _netcdf_guard = crate::netcdf_test_guard();
     let root = std::env::temp_dir().join(format!("colm-init-soil-refl-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let namelist = root.join("case.nml");
