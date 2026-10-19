@@ -53,3 +53,11 @@ test('server-native setup describes server data and locks only the location', ()
   assert.match(html, /<select[^>]*disabled/);
   assert.doesNotMatch(html, /<button[^>]*disabled/);
 });
+
+test('choosing a server shows its status panel; local and unconfigured choices do not', () => {
+  const html = render('compute');
+  assert.ok(html.includes('aria-label="Server status"'));
+  assert.ok(html.includes('Refresh'));
+  assert.ok(!render('').includes('Server status'));
+  assert.ok(!render('missing').includes('Server status'));
+});

@@ -34348,3 +34348,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 前端 `server-load.test.ts`（分区、作业槽、负载三种摘要，等待原因合并）；
       - run-next `run location and submission mode share one settings row`；
       - 前端 734 条、colm-remote 110 条、colm-cli 458 条（串行）、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。两个 workspace 的 clippy 与 fmt 均通过；check-gui 通过。
+
+55. **选运行位置时就显示服务器状况（用户要求，2026-10-20）**
+    - 新建模拟第一步和算例页共用 `RunLocationSettings`。现在选中一台已配置的服务器，选择框下面就出现"服务器状况"面板，和运行面板里的是同一个 `ServerLoadPanel`。
+    - 新增 `LiveServerLoad`：自己读取负载，每选一台服务器读一次，点"刷新"再读。来回切换服务器时，较慢返回的那次结果不会盖住当前服务器的结果。
+    - 选"本机"或选了未配置的服务器时不显示。
+    - 运行面板仍用自己的读取：它要把负载摘要接在"核对服务器状态"的结果后面。
+    - 测试：`choosing a server shows its status panel; local and unconfigured choices do not`（服务端渲染，effect 不执行，只看面板在不在）。前端 735 条通过，check-gui 与构建通过。

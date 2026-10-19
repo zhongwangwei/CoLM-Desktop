@@ -1,5 +1,6 @@
 import { Button, Field, Input, Notice, Select } from '../../components/ui';
 import type { Server } from '../resources/resource';
+import LiveServerLoad from './LiveServerLoad';
 
 export default function RunLocationSettings({
   host,
@@ -48,6 +49,8 @@ export default function RunLocationSettings({
       {error && <Notice tone="warning">{error}</Notice>}
       {host ? (
         <>
+          {/* 选服务器时就看它忙不忙：负载、各分区空闲节点、全体排队和自己的作业。 */}
+          {server && <LiveServerLoad host={host} partition={server.partition} en={en} />}
           <p className="muted">
             {serverNative
               ? t(
