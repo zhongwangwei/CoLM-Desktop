@@ -154,7 +154,6 @@
 @container (max-width:570px) {
   .project-version-section,
   .project-task-section,
-  .project-scenarios-section,
   .project-readiness-section {
     padding: 14px 12px;
     margin-bottom: 20px;
@@ -166,84 +165,6 @@
     padding: 14px 10px !important;
     min-height: 118px;
   }
-}
-
-/* 科研场景与模板卡片 - 卡片边框化统一 */
-.project-scenarios-section {
-  padding: 20px 22px;
-  border: 1px solid var(--border);
-  border-left: 4px solid var(--accent);
-  border-radius: 8px;
-  background: var(--surface);
-  margin-top: 0;
-  margin-bottom: 26px;
-  box-shadow: 0 2px 7px #10243a04;
-}
-.project-scenario-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px;
-}
-.project-scenario-card {
-  display: flex;
-  flex-direction: column;
-  padding: 20px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  background: var(--background);
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease,
-    background 0.15s ease;
-}
-.project-scenario-card:hover {
-  border-color: var(--accent);
-  background: var(--surface);
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.04);
-}
-.project-scenario-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-.project-scenario-badge {
-  font-size: 11px;
-  font-weight: 600;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: var(--elevated);
-  color: var(--foreground);
-}
-.project-scenario-badge.primary {
-  background: var(--accent);
-  color: #fff;
-}
-.project-scenario-tag {
-  font-size: 12px;
-  color: var(--muted);
-}
-.project-scenario-card h3 {
-  font-size: 16px;
-  font-weight: 650;
-  margin: 0 0 8px;
-  color: var(--foreground);
-}
-.project-scenario-card p {
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--muted);
-  margin: 0 0 18px;
-  flex: 1;
-}
-.project-scenario-footer {
-  display: flex;
-  justify-content: flex-start;
-  align-items: center;
-  margin-top: auto;
-}
-.project-scenario-footer .button {
-  font-size: 13px;
 }
 
 /* 运行环境与数据看板 - 卡片边框化统一 */
@@ -336,10 +257,4 @@
 }
 .readiness-footer .button {
   font-size: 12px;
-}
-
-@container (max-width: 680px) {
-  .project-scenario-grid {
-    grid-template-columns: 1fr;
-  }
 }

@@ -34355,3 +34355,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 选"本机"或选了未配置的服务器时不显示。
     - 运行面板仍用自己的读取：它要把负载摘要接在"核对服务器状态"的结果后面。
     - 测试：`choosing a server shows its status panel; local and unconfigured choices do not`（服务端渲染，effect 不执行，只看面板在不在）。前端 735 条通过，check-gui 与构建通过。
+
+56. **项目首页去掉"直接查看结果"和"科研场景与推荐模板"；研究页选运行位置时也显示服务器状况（用户要求，2026-10-20）**
+    - 项目首页的"开始"区只剩"新建模拟"和"打开项目"。"直接查看结果"的按钮、助手动作 `project-view-results` 和 `viewResults` 一并删除，看结果走侧栏的"结果"。
+    - "科研场景与推荐模板"整块删除（四张卡片及其样式）。"打开 CN-Cng 示例"的助手动作 `project-example` 保留，页面上已没有它的按钮。
+    - 没删干净的部分：项目页"选择要分析的算例"这个选择框模式（`chooser === 'results'`，含 `otherResults`）。它原来只从"直接查看结果"进入，现在只在恢复旧的已保存页面状态 `projectView.page = 'results'` 时还会出现。彻底删掉要连带改 `projectView` 的类型和保存格式，这次没动。
+    - 研究页：选中一台已配置的服务器时，在运行位置下方显示 `LiveServerLoad`。各服务器的分区和服务器列表一起读入，存在一个 ref 里，借 `setServers` 的重绘显示，不新增 state（研究页的测试按函数抽取，不受影响）。
+    - 测试：`the loaded official model is usable at once…` 改为同时断言首页已没有 `project-view-results`。前端 735 条通过，check-gui 与构建通过。

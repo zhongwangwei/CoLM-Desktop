@@ -238,10 +238,6 @@ export default function ProjectPage() {
       setChooser(null);
       return opened;
     });
-  function viewResults() {
-    if (state.selectedCase) return navigate('case', 'results');
-    setChooser('results');
-  }
   // Choosing a new simulation leaves the project worked on until now: the sidebar's current
   // project becomes the new one once it is created, not the old one meanwhile.
   const newSimulation = () => {
@@ -323,13 +319,6 @@ export default function ProjectPage() {
       kind: 'click',
       enabled: enabled && ready,
       run: openProjectFromHistory,
-    },
-    {
-      id: 'project-view-results',
-      label: t('直接查看结果', 'View results'),
-      kind: 'click',
-      enabled,
-      run: viewResults,
     },
     {
       id: 'project-example',
@@ -817,124 +806,8 @@ export default function ProjectPage() {
             </span>
             <span className="project-chevron">›</span>
           </Button>
-          <Button
-            className="project-action"
-            variant="ghost"
-            disabled={!enabled}
-            onClick={viewResults}
-          >
-            <span className="project-action-icon primary">
-              <NavIcon name="results" />
-            </span>
-            <span>
-              <strong>{t('直接查看结果', 'View results')}</strong>
-              <span>
-                {t(
-                  '打开已有的模拟结果，进行分析与评估。',
-                  'Open existing simulation results for analysis and evaluation.',
-                )}
-              </span>
-            </span>
-            <span className="project-chevron">›</span>
-          </Button>
         </div>
       </section>
-      <section
-        className="project-scenarios-section"
-        aria-label={t('科研场景与模板', 'Research scenarios & templates')}
-      >
-        <div className="project-task-heading">
-          <h2>{t('科研场景与推荐模板', 'Research scenarios & templates')}</h2>
-          <p>
-            {t(
-              '根据研究目标选用标准范式与预设配置，快速开始模拟。',
-              'Choose a standard scientific workflow and recommended setup for your research.',
-            )}
-          </p>
-        </div>
-        <div className="project-scenario-grid">
-          <div className="project-scenario-card">
-            <div className="project-scenario-header">
-              <span className="project-scenario-badge primary">{t('开箱即用', 'Bundled')}</span>
-              <span className="project-scenario-tag">{t('站点通量', 'Single-site')}</span>
-            </div>
-            <h3>{t('单点生态水文通量验证', 'Single-site Ecohydrology')}</h3>
-            <p>
-              {t(
-                'CN-Cng 草地站，自带通量观测与逐半小时强迫场，验证感热、潜热与地表能量平衡。',
-                'CN-Cng grassland site with bundled observations and half-hourly forcing for energy balance validation.',
-              )}
-            </p>
-            <div className="project-scenario-footer">
-              <Button
-                variant="primary"
-                disabled={!enabled || !state.version}
-                onClick={() => void example().catch(() => {})}
-              >
-                {t('打开草地示例', 'Open grassland example')}
-              </Button>
-            </div>
-          </div>
-
-          <div className="project-scenario-card">
-            <div className="project-scenario-header">
-              <span className="project-scenario-badge">{t('物理过程', 'Process')}</span>
-              <span className="project-scenario-tag">BGC / CH₄</span>
-            </div>
-            <h3>{t('碳氮生物地球化学循环', 'Carbon-Nitrogen BGC')}</h3>
-            <p>
-              {t(
-                '植物功能型（PFT）动态分配、光合呼吸、土壤碳氮库演变以及湿地甲烷排放模拟。',
-                'Plant functional type dynamics, photosynthesis, soil carbon-nitrogen pools, and wetland methane emissions.',
-              )}
-            </p>
-            <div className="project-scenario-footer">
-              <Button variant="ghost" disabled={!enabled} onClick={newSimulation}>
-                {t('配置模拟向导', 'Setup simulation')} ›
-              </Button>
-            </div>
-          </div>
-
-          <div className="project-scenario-card">
-            <div className="project-scenario-header">
-              <span className="project-scenario-badge">{t('空间水文', 'Spatial')}</span>
-              <span className="project-scenario-tag">{t('汇流与水库', 'Hydrology')}</span>
-            </div>
-            <h3>{t('流域河网汇流与水库调度', 'Watershed Routing & Reservoirs')}</h3>
-            <p>
-              {t(
-                '河网水动力学汇流、湖泊水热交换、GRanD 水库调度，产物与陆面网格对齐。',
-                'Hydrodynamic routing, lake heat-water exchange, GRanD reservoir operations, and aligned runoff outputs.',
-              )}
-            </p>
-            <div className="project-scenario-footer">
-              <Button variant="ghost" disabled={!enabled} onClick={newSimulation}>
-                {t('配置模拟向导', 'Setup simulation')} ›
-              </Button>
-            </div>
-          </div>
-
-          <div className="project-scenario-card">
-            <div className="project-scenario-header">
-              <span className="project-scenario-badge">{t('调优拟合', 'Study')}</span>
-              <span className="project-scenario-tag">{t('参数与网络', 'Parameters')}</span>
-            </div>
-            <h3>{t('参数敏感性与率定实验', 'Sensitivity & Calibration')}</h3>
-            <p>
-              {t(
-                '参数空间敏感性分析、多站点批量调参与混合神经网络拟合，探索最优物理配置。',
-                'Parameter sensitivity analysis, multi-site batch tuning, and hybrid neural network fitting.',
-              )}
-            </p>
-            <div className="project-scenario-footer">
-              <Button variant="ghost" disabled={!enabled} onClick={() => navigate('research')}>
-                {t('进入研究模块', 'Open research')} ›
-              </Button>
-            </div>
-          </div>
-        </div>
-      </section>
-
       <section
         className="project-readiness-section"
         aria-label={t('系统与数据就绪状态', 'System & data readiness')}

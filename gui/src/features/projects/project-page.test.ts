@@ -443,7 +443,6 @@ test('the loaded official model is usable at once; choosing another version is o
     tasks = [
       'project-new-simulation',
       'project-open',
-      'project-view-results',
       'project-example',
       'project-prepare',
       'project-recent:/project',
@@ -451,6 +450,10 @@ test('the loaded official model is usable at once; choosing another version is o
   let contract = page.render();
   for (const id of tasks)
     assert.equal(contract.actions.find((action) => action.id === id)?.enabled, true, id);
+  assert.ok(
+    !contract.actions.some((action) => action.id === 'project-view-results'),
+    'results open from the sidebar, not from a project-home shortcut',
+  );
   await page.click('project-existing');
   await page.click('project-version-close');
   contract = page.render();

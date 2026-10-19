@@ -24,6 +24,7 @@ import {
 } from './remote-study';
 import type { VersionRef } from '../../lib/types';
 import { REMOTE_CHECK_MS } from '../runs/run-model';
+import LiveServerLoad from '../runs/LiveServerLoad';
 import { researchMethods, methodFromStudy, completedCandidates } from './research-home';
 import './research-home.css';
 type Envelope = {
@@ -142,6 +143,8 @@ export default function ResearchPage() {
   const [preprocessors, setPreprocessors] = useState('rust');
   const [host, setHost] = useState('');
   const [servers, setServers] = useState<string[]>([]);
+  // 各服务器设置里的分区：服务器状况面板高亮它。和 servers 同时写入，借 setServers 的重绘显示。
+  const serverPartitions = useRef<Record<string, string>>({});
   const [remoteReply, setRemoteReply] = useState<RemoteStudyReply | null>(null);
   const [sites, setSites] = useState<string[]>([]);
   const [kernel, setKernel] = useState(state.kernelDir || '');
@@ -211,9 +214,13 @@ export default function ResearchPage() {
   );
   useEffect(() => {
     let current = true;
-    invokeJson<{ servers: { host: string }[] }>('remote_config')
+    invokeJson<{ servers: { host: string; partition?: string }[] }>('remote_config')
       .then((value) => {
-        if (current) setServers(value.servers.map((server) => server.host));
+        if (!current) return;
+        serverPartitions.current = Object.fromEntries(
+          value.servers.map((server) => [server.host, server.partition ?? '']),
+        );
+        setServers(value.servers.map((server) => server.host));
       })
       .catch((e) => {
         if (current) notify(String(e), true);
@@ -1701,6 +1708,9 @@ export default function ResearchPage() {
       >
         <div className="grid gap-3 md:grid-cols-2">{renderFields(baseFields)}</div>
         <div className="actions">{renderActions([resourcesAction])}</div>
+        {host && servers.includes(host) && (
+          <LiveServerLoad host={host} partition={serverPartitions.current[host]} en={en} />
+        )}
         {host && (
           <Notice>
             {tr(
