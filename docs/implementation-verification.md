@@ -34040,3 +34040,9 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 踩坑：直接在终端里跑 `colm-cli`（没有 `COLM_SSH_AUTH_STDIN`）会强制 `StrictHostKeyChecking=yes`，而 `~/.ssh/config` 里 tianhe 写的是 `UserKnownHostsFile /dev/null`，主机密钥永远不会被记住，于是报 "Host key verification failed"。界面传 `{"auth":"config"}`，按 ssh 配置走，所以不受影响；手工复现时要照界面的方式传。
     - 没测：Rust 组件包的 `install.sh` 与 cmake 解包这两段没在真机上跑过（天河已经有这两样）；用 Windows 桌面送依赖。
     - 已知缺口（当天已补）：原来探测时把 curl 算作"能自动装工具链"的前提（`colm_toolchain_installable`），完全没有 curl 的离线服务器在选引擎那一步就被拒绝，走不到这里。现在这一条不再要 curl（离线路线用不到它）；SHA-256 工具仍然要，因为 `ensure_script` 靠它算出 vendor 目录的键。在线安装脚本自己检查 curl，缺了就报 "Toolchain download failed: the server has no curl."，这句话命中网络故障的判定，于是转去由桌面送依赖。不过实际上，上传快照之后的连通性检查在没有 curl 时就已经判为"不能联网"，会先把依赖送过去。测试：`a_server_without_curl_can_still_be_given_tools_but_never_downloads`（在旧代码下失败：提示的是"条件不满足"，不算网络故障）。
+
+30. **本机打包默认不编 Fortran 内核（2026-10-19，用户要求）**：这一轮打包用了 40 分 47 秒，大半时间在重编 15 个内核。重编是合规则的：10-17 的 `bef6fe93` 改了 `CoLMMAIN.F90`，`9e2ded78` 改了 `ensure_native_kernels.py`，而这个脚本自己也算在指纹里。
+    - 改为：`ensure_native_kernels.py` 默认只核对。内核"过期"（manifest 记录的指纹不是当前源码或编译设置的，但按它自己记录的指纹完整、一致）照样打包，最后打印一行 `WARNING`，列出过期的内核以及 `COLM_BUILD_KERNELS=1` 的用法；内核缺失或不能用（平台、宏、二进制哈希对不上）就报错停下，因为缺内核的包不能用。设 `COLM_BUILD_KERNELS=1` 时和原来一样，重编缺失或过期的。`release.yml` 的两个打包步骤设了这个变量，所以发布版仍不会带过期内核。
+    - 指纹去掉了 `ensure_native_kernels.py` 本身：它只决定编不编，不影响编出来的东西，算进去的后果是改一次打包规则，15 个内核就全部过期。release 的内核缓存键也同步去掉它。指纹定义变了，旧值 `c4909376…` 换成新值 `921ba653…`。本机的 15 个内核先按旧指纹逐个通过完整核对（manifest、宏、三个程序的 SHA-256），再把 manifest 里的 `source_sha256` 文本替换为新值，没有重编；两种定义只差这一个文件，所以换算是如实的。
+    - 验证：`test_ensure_native_kernels.py` 8 条通过，新加的 4 条里有 3 条在旧脚本下失败（过期内核被重编、缺内核时去编而不是停下、改脚本导致指纹变化）。真实脚本跑一遍 12.8 s：15 个都是 "validated"，没有 "building"。设 `COLM_KERNEL_EXTRA_FFLAGS=-O3` 让 15 个都过期后，只打印 WARNING、退出码 0、没有编译。之后改了一次脚本里警告的措辞，15 个内核仍然全部有效，说明脚本已经不在指纹里了。
+    - 没测：带新规则的一次完整 `cargo tauri build`。原因是打包会写到正开着的 `CoLM Desktop.app` 上；打包前那一步执行的就是上面跑过的这个脚本。release 流水线上设了 `COLM_BUILD_KERNELS=1` 的打包步骤也没跑过。

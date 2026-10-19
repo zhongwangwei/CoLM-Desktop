@@ -227,7 +227,8 @@ jobs:
       # Fifteen kernels take 33 min (Linux) to 2 h (Intel macOS) and change only with the Fortran
       # source or the toolchain, so they are cached under both. The key's toolchain part is a file
       # because the Windows compilers live in MSYS2. ensure_native_kernels.py still checks every
-      # restored kernel against the exact source fingerprint and rebuilds any that do not match.
+      # restored kernel against the exact source fingerprint and, with COLM_BUILD_KERNELS=1 on the
+      # bundle step, rebuilds any that do not match. The script itself is not in the fingerprint.
       - name: Record the kernel toolchain (unix)
         if: runner.os != 'Windows'
         shell: bash
@@ -249,7 +250,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: kernels
-          key: kernels-v1-${{ matrix.label }}-${{ hashFiles('.kernel-toolchain') }}-${{ hashFiles('vendor/CoLM202X/**/*.F90', 'vendor/CoLM202X/**/*.f90', 'vendor/CoLM202X/**/*.F', 'vendor/CoLM202X/**/*.f', 'vendor/CoLM202X/**/*.c', 'vendor/CoLM202X/**/*.h', 'vendor/CoLM202X/**/*.inc', 'vendor/CoLM202X/**/*.sh', 'vendor/CoLM202X/**/*.mk', 'vendor/CoLM202X/**/Makefile*', 'vendor/CoLM202X/**/Makeoptions*', 'oracle/scripts/build_kernel.sh', 'oracle/scripts/ensure_native_kernels.py', 'oracle/scripts/kernel-presets.config', 'oracle/scripts/makeoptions/**') }}
+          key: kernels-v1-${{ matrix.label }}-${{ hashFiles('.kernel-toolchain') }}-${{ hashFiles('vendor/CoLM202X/**/*.F90', 'vendor/CoLM202X/**/*.f90', 'vendor/CoLM202X/**/*.F', 'vendor/CoLM202X/**/*.f', 'vendor/CoLM202X/**/*.c', 'vendor/CoLM202X/**/*.h', 'vendor/CoLM202X/**/*.inc', 'vendor/CoLM202X/**/*.sh', 'vendor/CoLM202X/**/*.mk', 'vendor/CoLM202X/**/Makefile*', 'vendor/CoLM202X/**/Makeoptions*', 'oracle/scripts/build_kernel.sh', 'oracle/scripts/kernel-presets.config', 'oracle/scripts/makeoptions/**') }}
 
       - name: Build release kernels (unix)
         if: runner.os != 'Windows' && steps.kernel-cache.outputs.cache-hit != 'true'
@@ -328,6 +329,8 @@ jobs:
         env:
           RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          # A local bundle reuses stale kernels; a release rebuilds any the cache did not match.
+          COLM_BUILD_KERNELS: '1'
         run: bash ../../scripts/bundle-release.sh
 
       - name: Bundle (Windows)
@@ -337,6 +340,8 @@ jobs:
         env:
           RELEASE_PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
           RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
+          # A local bundle reuses stale kernels; a release rebuilds any the cache did not match.
+          COLM_BUILD_KERNELS: '1'
         run: bash ../../scripts/bundle-release.sh
 
       # 装出来的东西必须自带内核，否则这条流水线就白跑了。

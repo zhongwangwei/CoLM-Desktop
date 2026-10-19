@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Build missing/stale native kernels before a production desktop bundle."""
+"""Check the native kernels before a production desktop bundle; build them only when asked.
+
+A local bundle does not compile Fortran: kernels built from older Fortran source or build settings
+are bundled with a warning, and a missing or unusable kernel stops the bundle. COLM_BUILD_KERNELS=1
+builds every missing or stale kernel first (release.yml sets it, so a release never ships a stale
+kernel).
+"""
 import shutil
 import hashlib
 import json
@@ -23,8 +29,9 @@ BUILD_ENV = ('NETCDF_PREFIX', 'NETCDF_INC', 'NETCDF_LIB', 'NETCDF_FLIBS',
 
 
 def source_fingerprint(root):
-    paths = [root / 'oracle/scripts/build_kernel.sh', root / 'oracle/scripts/ensure_native_kernels.py',
-             root / 'oracle/scripts/kernel-presets.config']
+    # Not this script: it only decides whether to build, and counting it made a change of bundling
+    # policy turn all fifteen kernels stale (2026-10-19).
+    paths = [root / 'oracle/scripts/build_kernel.sh', root / 'oracle/scripts/kernel-presets.config']
     for directory in ['vendor/CoLM202X', 'oracle/scripts/makeoptions']:
         paths.extend(path for path in (root / directory).rglob('*')
                      if path.is_file() and not any(part in {'.git', '.bld', 'lib'} for part in path.parts)
@@ -74,6 +81,13 @@ def current(directory, preset, fingerprint, platform):
         return False
 
 
+def recorded_source(directory):
+    try:
+        return json.loads((directory / 'manifest.json').read_text()).get('source_sha256')
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
 def main():
     fingerprint = source_fingerprint(ROOT)
     if sys.argv[1:] == ['--fingerprint']:
@@ -85,11 +99,20 @@ def main():
         raise SystemExit('desktop production bundles require production kernels with flat SPMD')
     platform = '-'.join(subprocess.check_output(['uname', flag], text=True).strip() for flag in ['-s', '-m'])
     presets = (ROOT / 'oracle/scripts/kernel-presets.config').read_text().split()
+    build = os.environ.get('COLM_BUILD_KERNELS') == '1'
+    stale = []
     for preset in presets:
         directory = ROOT / 'kernels' / preset
         if current(directory, preset, fingerprint, platform):
             print(f'validated native kernel {preset}', flush=True)
             continue
+        if not build:
+            # Complete and consistent with the source it records, just not today's source.
+            if current(directory, preset, recorded_source(directory), platform):
+                stale.append(preset)
+                continue
+            raise SystemExit(f'native kernel {preset} is missing or unusable; build it with '
+                             f'COLM_BUILD_KERNELS=1 (or oracle/scripts/build_kernel.sh {preset})')
         print(f'building missing or stale native kernel {preset}', flush=True)
         subprocess.run(['bash', str(ROOT / 'oracle/scripts/build_kernel.sh'), preset], cwd=ROOT, check=True)
         if source_fingerprint(ROOT) != fingerprint or not current(directory, preset, fingerprint, platform):
@@ -126,8 +149,14 @@ def main():
                           flush=True)
         raise
     if source_fingerprint(ROOT) != fingerprint or any(
-            not current(ROOT / 'kernels' / preset, preset, fingerprint, platform) for preset in presets):
+            not current(ROOT / 'kernels' / preset, preset,
+                        recorded_source(ROOT / 'kernels' / preset) if preset in stale else fingerprint,
+                        platform) for preset in presets):
         raise SystemExit('native kernels changed during MPI staging; rebuild before packaging')
+    if stale:
+        print(f'WARNING: bundling {len(stale)} native kernel(s) built from older Fortran source or '
+              f'build settings, not rebuilt: {" ".join(stale)}. Set COLM_BUILD_KERNELS=1 to rebuild '
+              f'them.', flush=True)
 
 
 if __name__ == '__main__':
