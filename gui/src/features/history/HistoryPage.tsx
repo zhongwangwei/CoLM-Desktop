@@ -25,6 +25,8 @@ import {
   projectTimeline,
   statusCountsLabel,
   historyStatusLabel,
+  hasNewerRun,
+  pendingReason,
   appLocale,
   historyObject,
   scopedHistoryFilter,
@@ -1458,6 +1460,19 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             ))}
           </div>
         </div>
+        {page.items.some(
+          (item) =>
+            item.needs_reconciliation ||
+            !!item.run_group?.members.some((member) => member.needs_reconciliation) ||
+            (!!item.project_group && projectSummary(item.project_group).counts.pending > 0),
+        ) && (
+          <p className="muted history-legend">
+            {t(
+              '「已完成」：软件确认作业已结束且成功。「待核对」：软件还没确认它怎么结束——作业可能还在服务器上跑，也可能在软件没盯着的时候已经结束，或请求取消后没再确认。待核对的记录不算完成，也不能删除；把鼠标停在“待核对”上或点开记录，可以看到具体原因和怎么处理。',
+              '“Completed”: the app confirmed the job ended successfully. “Needs reconciliation”: the app has not confirmed how it ended — the job may still run on the server, may have ended while the app was not watching, or was asked to cancel without confirmation. Such records are not treated as complete and cannot be deleted; hover over the label or open the record for the reason and what to do.',
+            )}
+          </p>
+        )}
         <div
           className="history-cards"
           role="list"
@@ -1491,7 +1506,10 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 >
                   <span className="history-card-head">
                     <span className="history-card-kind">{historyActionLabel(item, en)}</span>
-                    <span className={`history-status history-status-${status}`}>
+                    <span
+                      className={`history-status history-status-${status}`}
+                      title={item.needs_reconciliation ? pendingReason(item, en) : undefined}
+                    >
                       {item.needs_reconciliation
                         ? t('待核对', 'Needs reconciliation')
                         : historyStatusLabel(item.status, en)}
@@ -1653,6 +1671,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                             >
                               <Button
                                 disabled={busy}
+                                title={
+                                  member.needs_reconciliation
+                                    ? pendingReason(
+                                        member,
+                                        en,
+                                        hasNewerRun(member, group.project_group!.members),
+                                      )
+                                    : undefined
+                                }
                                 onClick={() => run(() => show(member.operation_id))}
                               >
                                 {historyObject(member, en)} ·{' '}
@@ -1690,6 +1717,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     >
                       <Button
                         disabled={busy}
+                        title={
+                          member.needs_reconciliation
+                            ? pendingReason(
+                                member,
+                                en,
+                                hasNewerRun(member, group.run_group!.members),
+                              )
+                            : undefined
+                        }
                         aria-pressed={detail?.operation.operation_id === member.operation_id}
                         onClick={() => run(() => show(member.operation_id))}
                       >
@@ -1753,9 +1789,17 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 />
                 {detail.operation.needs_reconciliation && (
                   <Notice tone="warning">
+                    {pendingReason(
+                      detail.operation,
+                      en,
+                      hasNewerRun(
+                        detail.operation,
+                        group?.project_group?.members ?? group?.run_group?.members ?? [],
+                      ),
+                    )}{' '}
                     {t(
-                      '需核对真实进程状态，不能视为完成或自动重跑。',
-                      'Reconcile the real process before treating this record as complete or replaying it.',
+                      '确认之前它不算完成，也不能删除或自动重跑。',
+                      'Until then it is not treated as complete and cannot be deleted or replayed.',
                     )}
                   </Notice>
                 )}

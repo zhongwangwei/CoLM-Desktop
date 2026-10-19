@@ -267,3 +267,12 @@
   gap: 8px;
   margin-bottom: 8px;
 }
+.history-legend {
+  margin: 0 0 10px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--warning);
+  border-radius: var(--r-sm);
+  background: var(--elevated);
+  font-size: 12px;
+  line-height: 1.6;
+}

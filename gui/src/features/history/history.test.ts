@@ -482,3 +482,36 @@ test('project timelines batch consecutive actions and summarize the latest resul
     '1 running · 2 to reconcile',
   );
 });
+
+test('a record awaiting reconciliation says why and how it becomes completed', async () => {
+  const { pendingReason, hasNewerRun } = await import('./history');
+  const op = (fields: Record<string, unknown>) =>
+    ({
+      operation_id: 'op',
+      kind: 'run',
+      phase: 'status',
+      status: 'running',
+      location: 'remote',
+      case_path: '/p/AT-Neu',
+      time_ms: null,
+      started_ms: 1,
+      needs_reconciliation: true,
+      ...fields,
+    }) as unknown as Parameters<typeof pendingReason>[0];
+  assert.match(pendingReason(op({})), /上次向服务器查到：运行中.*打开这个项目的运行页/);
+  assert.match(
+    pendingReason(op({ status: 'cancel_requested', kind: 'remote-cancel' })),
+    /已请求取消/,
+  );
+  assert.match(pendingReason(op({ phase: 'imported', status: 'needs_reconciliation' })), /导入/);
+  assert.match(pendingReason(op({ location: 'local' })), /软件被关闭/);
+  assert.match(pendingReason(op({ status: 'needs_reconciliation' }), true), /could not confirm/);
+  const older = op({});
+  const newer = op({ operation_id: 'op-2', started_ms: 5 });
+  assert.ok(hasNewerRun(older, [older, newer]));
+  assert.ok(!hasNewerRun(newer, [older, newer]));
+  assert.ok(
+    !hasNewerRun(older, [older, op({ operation_id: 'op-3', started_ms: 5, case_path: '/p/b' })]),
+  );
+  assert.match(pendingReason(older, false, true), /只核对最新的那次/);
+});

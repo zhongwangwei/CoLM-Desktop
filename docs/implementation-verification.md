@@ -34294,3 +34294,25 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - colm-cli `a_finished_remote_run_keeps_its_last_stage_and_step_but_no_log_text`：运行中不记；结束时记下 `{"stages":[["colm","ok"]],"step":87646,…}`；日志里的 `token=secret` 不进台账；之后一次空日志的观察不抹掉。
       - 前端 `a station that ended before the window opened shows its recorded last stage and step`。
       - 前端 730 条、colm-cli 458 条（串行）、colm-kernel 49 条、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。两个 workspace 的 clippy 与 fmt 均通过。
+
+53. **历史记录里"待核对"与"已完成"要有说明（用户要求，2026-10-20）**：只读统计台账里可见的待核对记录，共三类：
+    - 190 条：从算例文件夹导入的作业记录（`imported`，状态 `needs_reconciliation`）。
+    - 53 条：land02 上的取消请求（`remote-cancel`，`cancel_requested`）。
+    - 9 条：land02 上的运行，最后一次观察是 `running`（10-19 22:00）。这几个算例之后又提交过，软件只核对每个算例最新的那次，所以这些旧记录不会再更新。
+    - 共同原因：台账只在有窗口盯着时才记下结束。服务器作业在没人看的时候跑完、请求取消后没人再查、软件中途被关，记录都会停在待核对。
+    - 改为：
+      - `history.ts` 新增 `pendingReason`，按记录说明原因与处理办法：
+        - 上次查到运行中、排队或已提交：给出时间，打开项目的运行页会自动核对；
+        - 已请求取消、未确认停下；
+        - 导入的记录没有结束信息；
+        - 本机运行没有记下结束，多半是软件被关闭；
+        - 提交时没能确认服务器收到。
+      - 新增 `hasNewerRun`：同一算例之后又运行过时，说明这条旧记录不会再自动更新。
+      - 列表里只要有待核对记录，就在上方显示一段"已完成 / 待核对"的说明。
+      - 卡片上的"待核对"、项目时间线和本次运行里的站点按钮，鼠标停留时显示原因。
+      - 详情里的警告由原来笼统的"需核对真实进程状态"改为具体原因，加上"确认之前不算完成，也不能删除或自动重跑"。
+    - 没做（问题记在这里）：
+      - 取消请求的记录在作业确认结束后不会被关闭。
+      - 被同一算例新运行取代的旧运行记录也不会被关闭。
+      - 两者都会让"待核对"一直留着；要改需要 colm-cli 在核对时一并结束它们。
+    - 测试：`a record awaiting reconciliation says why and how it becomes completed`。前端 731 条通过。

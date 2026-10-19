@@ -453,6 +453,60 @@ export function historyKindLabel(kind: string, en = false): string {
   if (label) return label[en ? 1 : 0];
   return en ? kind.replace(/[-_]/g, ' ') : kind;
 }
+/** 同一算例在这条记录之后又开始过运行：软件只核对每个算例最新的那次。 */
+export function hasNewerRun(operation: HistoryOperation, members: HistoryOperation[]): boolean {
+  const start = operation.started_ms ?? operation.time_ms ?? 0;
+  return members.some(
+    (member) =>
+      member.operation_id !== operation.operation_id &&
+      !!operation.case_path &&
+      member.case_path === operation.case_path &&
+      ['run', 'remote-run', 'remote_run'].includes(member.kind) &&
+      (member.started_ms ?? member.time_ms ?? 0) > start,
+  );
+}
+/**
+ * 一条"待核对"记录为什么还不算结束、怎样才会变成已完成。台账只在有窗口盯着时才记下结束：
+ * 服务器作业在没人看的时候跑完、请求取消后没人再查、软件中途被关，记录都会停在待核对。
+ */
+export function pendingReason(operation: HistoryOperation, en = false, newer = false): string {
+  const at =
+    operation.time_ms == null ? '' : new Date(operation.time_ms).toLocaleString(appLocale(en));
+  const since = at ? (en ? ` (${at})` : `（${at}）`) : '';
+  const remote = operation.location === 'remote' || operation.kind.startsWith('remote');
+  if (newer)
+    return en
+      ? 'This case ran again later. The app only checks a case’s latest run, so this older record will not update by itself.'
+      : '这个算例之后又运行过，软件只核对最新的那次，这条旧记录不会再自动更新。';
+  if (operation.phase === 'imported')
+    return en
+      ? 'A job record imported from the case folder; the history has no record of how it ended.'
+      : '从算例文件夹导入的作业记录，历史里没有它怎么结束的信息。';
+  if (operation.status === 'cancel_requested')
+    return en
+      ? `Cancellation was requested${since}, but the app has not confirmed that the server job stopped.`
+      : `已请求取消${since}，软件还没确认服务器上的作业已经停下。`;
+  const seen: Record<string, [string, string]> = {
+    running: ['运行中', 'running'],
+    queued: ['排队中', 'queued'],
+    submitted: ['已提交', 'submitted'],
+  };
+  if (remote && seen[operation.status])
+    return en
+      ? `Last seen on the server as ${seen[operation.status][1]}${since}. The app has not checked since, so it does not know whether the job ended. Open the project’s run page and the app checks the server by itself.`
+      : `上次向服务器查到：${seen[operation.status][0]}${since}。之后软件没再查，所以不知道它是否已经结束。打开这个项目的运行页，软件会自动向服务器核对。`;
+  if (operation.status === 'running')
+    return en
+      ? `The app recorded this run starting on this computer${since} but never its end, most likely because the app was closed during the run.`
+      : `软件记下它在本机开始运行${since}，但没有记下结束，多半是运行途中软件被关闭了。`;
+  return remote
+    ? en
+      ? `The app could not confirm that the server received this job${since} (for example, the connection dropped). Use “Check server status” on the run page.`
+      : `提交时没能确认服务器收到了这个作业${since}（例如连接中断）。可在运行页点“核对服务器状态”确认。`
+    : en
+      ? 'The app did not record how this operation ended.'
+      : '软件没有记下这项操作怎么结束。';
+}
 export function historyStatusLabel(status: string, en = false): string {
   const labels: Record<string, [string, string]> = {
     running: ['运行中', 'Running'],
