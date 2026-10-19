@@ -752,6 +752,14 @@ fn reconcile_remote_once(
     next.detail["remote_record"] = remote_record_metadata(record);
     next.detail["status"] = json!({"state":outcome["status"]["state"],"exit_code":outcome["status"]["exit_code"],"phase":outcome["status"]["phase"]});
     next.detail["remote_outcome"] = json!({"outcome":outcome["outcome"],"terminal":outcome["terminal"],"job":outcome["job"],"request_accepted":outcome["request_accepted"],"state":outcome["status"]["state"],"exit_code":outcome["status"]["exit_code"]});
+    // 结束时把最后的阶段和模拟步记下来：重新打开项目时窗口不再连服务器，台账里只有"成功"的站点
+    // 原来只能显示"运行完成"（land02 实测 2026-10-19）。只记阶段名与步数，日志原文可能含敏感信息，不进台账。
+    if phase == EventPhase::Finished && latest.detail.get("final_progress").is_none() {
+        if let Some(summary) = final_progress(outcome["status"]["log_tail"].as_str().unwrap_or(""))
+        {
+            next.detail["final_progress"] = summary;
+        }
+    }
     if matches!(latest.kind.as_str(), "run" | "remote-run") {
         let path = record["provenance"]["model_run"]["run_case"]
             .as_str()
@@ -772,6 +780,19 @@ fn reconcile_remote_once(
         return history.append_if_latest(&latest.event_id, &next);
     }
     Ok(true)
+}
+
+/// 日志末尾里最后的阶段状态与模拟步；什么都认不出（例如取回时不读日志）就不记。
+fn final_progress(log: &str) -> Option<Value> {
+    let (stages, step) = colm_kernel::progress::parse_log(log);
+    if stages.is_empty() && step.is_none() {
+        return None;
+    }
+    Some(json!({
+        "stages": stages,
+        "step": step.as_ref().map(|s| s.0),
+        "date": step.map(|s| s.1),
+    }))
 }
 
 fn completion(

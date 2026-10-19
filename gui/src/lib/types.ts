@@ -132,6 +132,13 @@ export type LastRun = {
   finished_ms: number | null;
   location: string | null;
   host: string | null;
+  /** 远程运行结束时台账记下的最后阶段与模拟步，加上算例总步数；旧记录没有。 */
+  progress?: {
+    stages?: [string, string][];
+    step?: number | null;
+    date?: string | null;
+    total_steps?: number | null;
+  } | null;
 };
 export type RunState = {
   location?: 'local' | 'remote';

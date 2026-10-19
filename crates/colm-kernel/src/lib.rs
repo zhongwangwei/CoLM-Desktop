@@ -18,6 +18,7 @@
 pub mod manifest;
 pub mod outcome;
 pub mod overrides;
+pub mod progress;
 pub mod run;
 
 pub use manifest::{program_file, sha256_hex, Kernel, Manifest, EXE_SUFFIX, PROGRAMS};

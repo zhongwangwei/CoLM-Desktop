@@ -15,6 +15,7 @@ import {
   reconcileRemoteRun,
   matchesRemoteRun,
   remoteEndStatus,
+  restoreRunView,
 } from './run-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
 import { compatibleKernel } from './run-model';
@@ -585,6 +586,43 @@ test('a batch that finished before is restored as finished, not as stations to r
   assert.ok(endedRun(finished));
   assert.ok(!endedRun({ ...finished, needs_reconciliation: true }));
   assert.ok(!endedRun(undefined));
+});
+
+test('a station that ended before the window opened shows its recorded last stage and step', () => {
+  const ended = {
+    status: 'succeeded',
+    operation_id: 'op-1',
+    needs_reconciliation: false,
+    finished_ms: 1,
+    location: 'remote',
+    host: 'land02',
+  };
+  const restored = restoredRuns(
+    {
+      '/HU-Bug': {
+        ...ended,
+        progress: {
+          stages: [['colm', 'ok']] as [string, string][],
+          step: 87646,
+          date: '2006-12-31-81000',
+          total_steps: 87646,
+        },
+      },
+      '/old': ended,
+      '/stopped': { ...ended, operation_id: 'op-3', status: 'cancelled' },
+    },
+    {},
+  );
+  const view = restoreRunView(restored['/HU-Bug'], '/HU-Bug')!;
+  assert.deepEqual(
+    [view.status, view.stage, view.step, view.total],
+    ['succeeded', 'colm', 87646, 87646],
+  );
+  assert.equal((restored['/HU-Bug'].progress as { host: string }).host, 'land02');
+  assert.equal(restored['/HU-Bug'].progress?.remote, undefined, 'nothing is left to re-check');
+  const old = restoreRunView(restored['/old'], '/old')!;
+  assert.deepEqual([old.stage, old.step, old.total], [undefined, undefined, undefined]);
+  assert.equal(restored['/stopped'].status, 'cancelled');
 });
 
 test('open ledger runs are watched, and checking server jobs reports a summary', () => {

@@ -81,6 +81,9 @@ pub struct LastRun {
     pub finished_ms: Option<i64>,
     pub location: Option<String>,
     pub host: Option<String>,
+    /// 远程运行结束时台账记下的最后阶段与模拟步（`final_progress`），加上这个算例的总步数。
+    /// 窗口打开前就结束的站点靠它显示步数，不必为每个站点再连一次服务器。
+    pub progress: Option<serde_json::Value>,
 }
 
 /// Each case's latest run. Reopening a project restores these, so a finished batch reads as
@@ -110,6 +113,14 @@ pub fn project_last_runs(
             .find(|op| op.latest.phase != EventPhase::Imported)
             .or_else(|| runs.first());
         if let Some(op) = latest {
+            let progress = op.latest.detail.get("final_progress").map(|summary| {
+                let mut summary = summary.clone();
+                summary["total_steps"] =
+                    serde_json::json!(crate::config::read_timing(vec![dir.clone()])
+                        .ok()
+                        .map(|t| t.total_steps));
+                summary
+            });
             result.insert(
                 dir,
                 LastRun {
@@ -119,6 +130,7 @@ pub fn project_last_runs(
                     finished_ms: op.finished_ms,
                     location: op.latest.location.clone(),
                     host: op.latest.host.clone(),
+                    progress,
                 },
             );
         }

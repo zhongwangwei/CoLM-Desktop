@@ -572,6 +572,43 @@ fn remote_replay_submission_is_pending_and_reconciliation_checks_job_binding() {
 }
 
 #[test]
+fn a_finished_remote_run_keeps_its_last_stage_and_step_but_no_log_text() {
+    let history = History::open(":memory:").unwrap();
+    let mut start = Event::start("remote-run");
+    start.operation_id = "remote-operation".into();
+    start.case_path = Some("/cases/source".into());
+    start.detail = json!({"action":"remote-run","remote_record":{"host":"land02","root":"/data/jobs","job":"job-a","engine":"engine-a","remote_case":"/data/jobs/cases/a"}});
+    history.append(&start).unwrap();
+    let record = json!({"host":"land02","root":"/data/jobs","job":"job-a","engine":"engine-a","remote_case":"/data/jobs/cases/a","provenance":{"operation_id":"remote-operation","model_run":{"source_case":"/cases/source"}}});
+    let log = "token=secret\n=== colm-stage colm begin ===\nTIMESTEP = 87645 | DATE = 2006-12-31-79200\nTIMESTEP = 87646 | DATE = 2006-12-31-81000\n=== colm-stage colm ok ===\n";
+    let running = json!({"job":"job-a","outcome":"observed","terminal":false,"status":{"state":"running","log_tail":log}});
+    reconcile_remote_history(&history, &record, &running, None).unwrap();
+    let latest = || {
+        history
+            .detail("remote-operation")
+            .unwrap()
+            .unwrap()
+            .operation
+            .latest
+    };
+    assert!(
+        latest().detail.get("final_progress").is_none(),
+        "only a finished run records it"
+    );
+    let done = json!({"job":"job-a","outcome":"observed","terminal":true,"status":{"state":"finished","exit_code":0,"log_tail":log}});
+    reconcile_remote_history(&history, &record, &done, None).unwrap();
+    assert_eq!(
+        latest().detail["final_progress"],
+        json!({"stages":[["colm","ok"]],"step":87646,"date":"2006-12-31-81000"})
+    );
+    assert!(!latest().detail.to_string().contains("secret"));
+    // 取回时不读日志（`lines` 为 0）：已记下的最终进度不被一次空观察抹掉。
+    let fetched = json!({"job":"job-a","outcome":"observed","terminal":true,"status":{"state":"finished","exit_code":0,"log_tail":""}});
+    reconcile_remote_history(&history, &record, &fetched, None).unwrap();
+    assert_eq!(latest().detail["final_progress"]["step"], 87646);
+}
+
+#[test]
 fn history_finishes_and_authorizes_registered_case_local_and_legacy_runs() {
     for legacy in [false, true] {
         let temp = Temp::new();

@@ -34273,3 +34273,24 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 状态色用新加的 `--ok`、`--info` 两个主题变量，深色主题各有一份。
     - 测试：新增 `station picker filters by status and quick-selects only what is listed or unfinished`、`monitor tiles show one status at a time and pick failed stations for a rerun`。后者最初失败，原因是测试里正在运行的站点是本地运行，本地运行会锁住选择，"重跑"按钮按设计不起作用；把它改成服务器运行后通过。前端 729 条通过。
     - 没测：真实窗口里的观感（按约定不截屏），由用户在重启后的软件里看。
+
+52. **窗口打开前就结束的站点只显示"运行完成"（land02 实测，2026-10-19/20）**：同一批里，FR-Hes、FR-LBr、FR-Pue 显示"运行完成 · 模型计算 192816 / 192816"，HU-Bug 只有"运行完成"。
+    - 只读核对：HU-Bug 的作业 `run-b5024edd…` 退出码为 0，日志从 `2003-01-01` 一直算到 `TIMESTEP = 87646 | DATE = 2006-12-31-81000`，确实跑完了。
+    - 台账显示：HU-Bug 23:18:33 开始、23:20:01 记为结束；当时的窗口 23:30:55 才启动。FR-* 在窗口启动时台账里还是"运行中"，窗口每 10 s 查一次服务器，23:58:47 查到它们结束。
+    - 原因：
+      - 阶段和步数是窗口从服务器状态里的日志末尾解析出来的，台账的结束事件里只有"成功"。
+      - 窗口启动前就结束的站点，由 `restoredRuns` 只按台账恢复，因此没有阶段、步数和日志。
+    - 改为：
+      - 日志解析（`parse_progress`、`parse_stage`、`parse_log`）从 `gui/src-tauri/src/sidecar.rs` 挪到 `colm_kernel::progress`，窗口进程和 colm-cli 共用一份，免得两处对"哪一行算步数"的判断分叉。
+      - colm-cli 记远程运行结束（`reconcile_remote_once` 进入 `Finished`）时，从这次观察到的日志末尾解析出最后的阶段状态和模拟步，记为 `detail.final_progress`（`stages`、`step`、`date`）。
+      - 只记阶段名与数字，日志原文不进台账：原有规则是"日志可能含敏感信息"。
+      - 已经记下的不会被之后的观察抹掉。比如取回结果时按 0 行读日志，什么也认不出，就沿用已记下的。
+      - `project_last_runs` 把它连同算例总步数（`read_timing`）一起返回。`restoredRuns` 按本机运行的形状放进 `progress`（`stage`、`step`、`total_steps`），不带 `remote`，所以不会被当成还要核对的服务器作业。
+    - 顺带修正：`restoredRuns` 原来把台账里 `cancelled` 的运行也恢复成"运行失败"，现在恢复为"已停止"。
+    - 限制：
+      - 只对改动之后结束的运行有效。之前已结束的站点（包括 HU-Bug）台账里没有这份记录，重开后仍只显示"运行完成"。
+      - 日志本身仍只在运行期间或服务器上可看。
+    - 测试：
+      - colm-cli `a_finished_remote_run_keeps_its_last_stage_and_step_but_no_log_text`：运行中不记；结束时记下 `{"stages":[["colm","ok"]],"step":87646,…}`；日志里的 `token=secret` 不进台账；之后一次空日志的观察不抹掉。
+      - 前端 `a station that ended before the window opened shows its recorded last stage and step`。
+      - 前端 730 条、colm-cli 458 条（串行）、colm-kernel 49 条、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。两个 workspace 的 clippy 与 fmt 均通过。

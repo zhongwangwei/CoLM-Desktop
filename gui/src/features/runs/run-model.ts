@@ -214,16 +214,30 @@ export function restoredRuns(
   const restored: Record<string, RunState> = {};
   for (const [dir, run] of Object.entries(last)) {
     if (running[dir] || !endedRun(run)) continue;
+    // 台账记下的最终进度按本机运行的形状放进去：没有 `remote`，就不会被当成还要核对的服务器作业。
+    const final = run.progress;
+    const progress = {
+      ...(run.host ? { host: run.host } : {}),
+      ...(final?.stages?.length ? { stage: final.stages.at(-1)![0] } : {}),
+      ...(typeof final?.step === 'number' ? { step: final.step } : {}),
+      ...(typeof final?.total_steps === 'number' ? { total_steps: final.total_steps } : {}),
+      ...(final?.date ? { date: final.date } : {}),
+    };
     restored[dir] = {
       case: dir,
       location: run.location === 'local' ? 'local' : 'remote',
       run_id: run.operation_id,
       operation_id: run.operation_id,
-      status: ['succeeded', 'completed'].includes(run.status) ? 'succeeded' : 'failed',
+      // 停止的就是停止，不算失败（以前重开项目后，取消的站点都显示成"运行失败"）。
+      status: ['succeeded', 'completed'].includes(run.status)
+        ? 'succeeded'
+        : run.status === 'cancelled'
+          ? 'cancelled'
+          : 'failed',
       running: false,
       logs: [],
       stages: {},
-      ...(run.host ? { progress: { host: run.host } } : {}),
+      ...(Object.keys(progress).length ? { progress } : {}),
     };
   }
   return restored;
