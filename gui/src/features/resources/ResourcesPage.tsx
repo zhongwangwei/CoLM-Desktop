@@ -60,6 +60,7 @@ export default function ResourcesPage() {
     [configLoaded, setConfigLoaded] = useState(false),
     [historyErrors, setHistoryErrors] = useState<string[]>([]),
     [output, setOutput] = useState<Record<string, unknown>>({}),
+    [tasksShown, setTasksShown] = useState(false),
     [records, setRecords] = useState<{ dir: string; record: unknown; kind: 'case' | 'study' }[]>(
       [],
     ),
@@ -149,6 +150,82 @@ export default function ResourcesPage() {
     setError('');
     clearFeedback();
   }
+  // The tasks (job records, studies) of the cases of the open project. Read on request.
+  const caseList = useRef(state.cases);
+  caseList.current = state.cases;
+  const tasksLoaded = useRef(false);
+  const scanTasks = useCallback(async (token: { active: boolean }) => {
+    const errors: string[] = [];
+    const rows: { dir: string; record: unknown; kind: 'case' | 'study' }[] = [];
+    const histories: { studies?: { dir: string }[] }[] = [];
+    // A job record is one small file per case; read them all. A project of ninety stations
+    // used to start ninety command-line processes here and freeze the page for a minute.
+    let nextCase = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(8, caseList.current.length) }, async () => {
+        while (token.active && token === epoch.current) {
+          const index = nextCase++;
+          const c = caseList.current[index];
+          if (!c) return;
+          rows[index] = {
+            dir: c.dir,
+            kind: 'case',
+            record: await invokeJson('remote_job_record', { case: c.dir }).catch((e) => ({
+              error: String(e),
+            })),
+          };
+        }
+      }),
+    );
+    if (!token.active || token !== epoch.current) return;
+    // Studies are rare: look for them on a dozen cases at most, those with a server job first.
+    const withJobs = [
+      ...caseList.current.filter((_, index) => rows[index]?.record),
+      ...caseList.current.filter((_, index) => !rows[index]?.record),
+    ].slice(0, STUDY_SCAN_LIMIT);
+    let nextStudy = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, withJobs.length) }, async () => {
+        while (token.active && token === epoch.current) {
+          const c = withJobs[nextStudy++];
+          if (!c) return;
+          histories.push(
+            await invokeJson<{ studies?: { dir: string }[] }>('case_runs', {
+              case: c.dir,
+            }).catch((e) => {
+              errors.push(`${c.dir}: ${String(e)}`);
+              return { studies: [] };
+            }),
+          );
+        }
+      }),
+    );
+    if (!token.active || token !== epoch.current) return;
+    const studyDirs = [
+      ...new Set(histories.flatMap((h) => (h.studies ?? []).map((s) => s.dir)).filter(Boolean)),
+    ];
+    const studies: typeof rows = [];
+    for (const dir of studyDirs) {
+      if (!token.active || token !== epoch.current) return;
+      const record = await invokeJson<{ remote?: unknown }>('study_status', {
+        studyDir: dir,
+      }).catch((e) => ({ remote: true, error: String(e) }));
+      studies.push({
+        dir,
+        kind: 'study',
+        record: studyResourcePermissions(record).exists ? record : null,
+      });
+    }
+    if (token.active && token === epoch.current) {
+      setHistoryErrors(errors);
+      setRecords([...rows, ...studies].filter((r) => r.record));
+      setOutput((current) => {
+        const next = { ...current };
+        for (const { dir } of [...rows, ...studies]) delete next[dir];
+        return next;
+      });
+    }
+  }, []);
   const refresh = useCallback(async () => {
     const token = epoch.current;
     const pending = refreshQueue.current
@@ -183,84 +260,17 @@ export default function ResourcesPage() {
             setBaseline(JSON.stringify(first));
           }
         }
-        // The servers are shown at once; reading the project's job records goes on behind them.
+        // The servers are all this page needs. The project's server tasks are read only when asked
+        // for (or refreshed, once read): compute resources do not depend on which project is open.
         setBusy(false);
-        const errors: string[] = [];
         const hosts = await invokeJson<string[]>('remote_ssh_hosts');
-        const rows: { dir: string; record: unknown; kind: 'case' | 'study' }[] = [];
-        const histories: { studies?: { dir: string }[] }[] = [];
-        // A job record is one small file per case; read them all. A project of ninety stations
-        // used to start ninety command-line processes here and freeze the page for a minute.
-        let nextCase = 0;
-        await Promise.all(
-          Array.from({ length: Math.min(8, state.cases.length) }, async () => {
-            while (token.active && token === epoch.current) {
-              const index = nextCase++;
-              const c = state.cases[index];
-              if (!c) return;
-              rows[index] = {
-                dir: c.dir,
-                kind: 'case',
-                record: await invokeJson('remote_job_record', { case: c.dir }).catch((e) => ({
-                  error: String(e),
-                })),
-              };
-            }
-          }),
-        );
         if (!token.active || token !== epoch.current) return;
-        // Studies are rare: look for them on a dozen cases at most, those with a server job first.
-        const withJobs = [
-          ...state.cases.filter((_, index) => rows[index]?.record),
-          ...state.cases.filter((_, index) => !rows[index]?.record),
-        ].slice(0, STUDY_SCAN_LIMIT);
-        let nextStudy = 0;
-        await Promise.all(
-          Array.from({ length: Math.min(4, withJobs.length) }, async () => {
-            while (token.active && token === epoch.current) {
-              const c = withJobs[nextStudy++];
-              if (!c) return;
-              histories.push(
-                await invokeJson<{ studies?: { dir: string }[] }>('case_runs', {
-                  case: c.dir,
-                }).catch((e) => {
-                  errors.push(`${c.dir}: ${String(e)}`);
-                  return { studies: [] };
-                }),
-              );
-            }
-          }),
-        );
-        if (!token.active || token !== epoch.current) return;
-        const studyDirs = [
-          ...new Set(histories.flatMap((h) => (h.studies ?? []).map((s) => s.dir)).filter(Boolean)),
-        ];
-        const studies: typeof rows = [];
-        for (const dir of studyDirs) {
-          if (!token.active || token !== epoch.current) return;
-          const record = await invokeJson<{ remote?: unknown }>('study_status', {
-            studyDir: dir,
-          }).catch((e) => ({ remote: true, error: String(e) }));
-          studies.push({
-            dir,
-            kind: 'study',
-            record: studyResourcePermissions(record).exists ? record : null,
-          });
-        }
-        if (token.active && token === epoch.current) {
-          setAliases(hosts);
-          setHistoryErrors(errors);
-          setRecords([...rows, ...studies].filter((r) => r.record));
-          setOutput((current) => {
-            const next = { ...current };
-            for (const { dir } of [...rows, ...studies]) delete next[dir];
-            return next;
-          });
-        }
+        setAliases(hosts);
+        if (tasksLoaded.current) await scanTasks(token);
       });
     refreshQueue.current = pending;
     return pending;
-  }, [state.cases, state.simulationReturn?.resourceHost]);
+  }, [scanTasks, state.simulationReturn?.resourceHost]);
 
   useEffect(() => {
     const token = { active: true };
@@ -677,6 +687,16 @@ export default function ResourcesPage() {
         },
       ] as UiField[]),
     );
+  const loadTasks = () =>
+    execute('tasks', async () => {
+      const token = epoch.current;
+      // From now on a refresh reads them again too.
+      tasksLoaded.current = true;
+      const pending = refreshQueue.current.catch(() => {}).then(() => scanTasks(token));
+      refreshQueue.current = pending;
+      await pending;
+      setTasksShown(true);
+    });
   const visibleRecords = records.filter(({ record, dir }) => {
     const info = resourceTaskInfo(record, output[dir]);
     return (
@@ -684,6 +704,17 @@ export default function ResourcesPage() {
     );
   });
   const guideActions: UiAction[] = [
+    ...(tasksShown || !state.cases.length
+      ? []
+      : [
+          {
+            id: 'resource-load-tasks',
+            label: t('读取当前项目的服务器任务', 'Read the open project’s server tasks'),
+            kind: 'click' as const,
+            enabled: !busy,
+            run: loadTasks,
+          },
+        ]),
     {
       id: 'resource-refresh',
       label: t('刷新资源记录', 'Refresh records'),
@@ -1609,62 +1640,83 @@ export default function ResourcesPage() {
             : t('服务器上的任务', 'Server tasks')
         }
       >
-        {!visibleRecords.length && (
+        {!tasksShown && (
+          <>
+            <p className="muted">
+              {state.cases.length
+                ? t(
+                    '这是当前项目的服务器作业记录，与服务器配置无关，所以打开本页时不会读取。',
+                    'These are the open project’s server job records. They do not belong to the server settings, so opening this page does not read them.',
+                  )
+                : t('当前没有打开的项目。', 'No project is open.')}
+            </p>
+            {!!state.cases.length && (
+              <Button disabled={busy} onClick={() => void loadTasks().catch(() => {})}>
+                {t(
+                  `读取当前项目的服务器任务（${state.cases.length} 个算例）`,
+                  `Read the server tasks of the open project (${state.cases.length} cases)`,
+                )}
+              </Button>
+            )}
+          </>
+        )}
+        {tasksShown && !visibleRecords.length && (
           <p className="muted">{t('暂无已登记的远程任务。', 'No recorded remote tasks.')}</p>
         )}
-        {visibleRecords.map(({ dir, record, kind }) => {
-          const info = resourceTaskInfo(record, output[dir]),
-            orphan = !info.host || !servers.some((server) => server.host === info.host);
-          return (
-            <div className="resource-task" key={dir}>
-              <div className="resource-task-row">
-                <span className="resource-task-name">
-                  <strong>{dir.split(/[\\/]/).filter(Boolean).at(-1) ?? dir}</strong>
-                  <small>
-                    {info.host ?? t('主机未记录', 'Host not recorded')} ·{' '}
-                    {info.job ?? t('身份未确认', 'Unconfirmed identity')} ·{' '}
-                    {info.pending
-                      ? t('提交待确认', 'Submission unconfirmed')
-                      : ({
-                          unknown: t('状态未确认', 'Status unknown'),
-                          queued: t('排队中', 'Queued'),
-                          running: t('运行中', 'Running'),
-                          succeeded: t('已完成', 'Succeeded'),
-                          failed: t('失败', 'Failed'),
-                          lost: t('未找到', 'Not found'),
-                        }[info.status] ?? info.status)}
-                  </small>
-                </span>
-                {actionButton(`resource-task-${dir}`)}
-              </div>
-              {orphan && (
-                <p className="resource-orphan">
-                  {t(
-                    '记录缺少主机，或对应服务器配置已移除；展开查看原始记录并核对。',
-                    'The record has no host or its server configuration was removed. Open the record to reconcile.',
-                  )}
-                </p>
-              )}
-              {taskDetails[dir] && (
-                <div className="resource-task-detail">
-                  <p className="path">{dir}</p>
-                  <Notice>
-                    {t(
-                      '登记记录不是实时状态；核对不会重提任务，取消请求不代表任务已停止。',
-                      'Records are not live state. Reconcile does not resubmit; a cancellation request does not prove the job stopped.',
-                    )}
-                  </Notice>
-                  <div className="actions">
-                    {['status', 'fetch', 'cancel'].map((operation) =>
-                      actionButton(`resource-${kind}-${operation}-${dir}`),
-                    )}
-                  </div>
-                  <pre>{JSON.stringify(output[dir] ?? record, null, 2)}</pre>
+        {tasksShown &&
+          visibleRecords.map(({ dir, record, kind }) => {
+            const info = resourceTaskInfo(record, output[dir]),
+              orphan = !info.host || !servers.some((server) => server.host === info.host);
+            return (
+              <div className="resource-task" key={dir}>
+                <div className="resource-task-row">
+                  <span className="resource-task-name">
+                    <strong>{dir.split(/[\\/]/).filter(Boolean).at(-1) ?? dir}</strong>
+                    <small>
+                      {info.host ?? t('主机未记录', 'Host not recorded')} ·{' '}
+                      {info.job ?? t('身份未确认', 'Unconfirmed identity')} ·{' '}
+                      {info.pending
+                        ? t('提交待确认', 'Submission unconfirmed')
+                        : ({
+                            unknown: t('状态未确认', 'Status unknown'),
+                            queued: t('排队中', 'Queued'),
+                            running: t('运行中', 'Running'),
+                            succeeded: t('已完成', 'Succeeded'),
+                            failed: t('失败', 'Failed'),
+                            lost: t('未找到', 'Not found'),
+                          }[info.status] ?? info.status)}
+                    </small>
+                  </span>
+                  {actionButton(`resource-task-${dir}`)}
                 </div>
-              )}
-            </div>
-          );
-        })}
+                {orphan && (
+                  <p className="resource-orphan">
+                    {t(
+                      '记录缺少主机，或对应服务器配置已移除；展开查看原始记录并核对。',
+                      'The record has no host or its server configuration was removed. Open the record to reconcile.',
+                    )}
+                  </p>
+                )}
+                {taskDetails[dir] && (
+                  <div className="resource-task-detail">
+                    <p className="path">{dir}</p>
+                    <Notice>
+                      {t(
+                        '登记记录不是实时状态；核对不会重提任务，取消请求不代表任务已停止。',
+                        'Records are not live state. Reconcile does not resubmit; a cancellation request does not prove the job stopped.',
+                      )}
+                    </Notice>
+                    <div className="actions">
+                      {['status', 'fetch', 'cancel'].map((operation) =>
+                        actionButton(`resource-${kind}-${operation}-${dir}`),
+                      )}
+                    </div>
+                    <pre>{JSON.stringify(output[dir] ?? record, null, 2)}</pre>
+                  </div>
+                )}
+              </div>
+            );
+          })}
       </Card>
       {rootBrowser && (
         <RemotePathBrowser

@@ -169,6 +169,10 @@ function harness(
     await new Promise((resolve) => setImmediate(resolve));
     return render();
   }
+  // The open project's server tasks are read on request, not when the page opens.
+  async function tasks() {
+    return action('resource-load-tasks');
+  }
   async function action(id: string) {
     const item = contract.actions.find((action) => action.id === id);
     assert.ok(item, `visible action ${id}`);
@@ -184,6 +188,7 @@ function harness(
   }
   return {
     ready,
+    tasks,
     unmount: () => cleanup?.(),
     restartEffect: () => {
       cleanup?.();
@@ -597,7 +602,8 @@ test('remote tasks filter by actual host, preserve orphan records, and expose op
     '/case/orphan': { host: 'removed', job: 'job3' },
     '/case/missing': { error: 'Unreadable record' },
   });
-  let contract = await page.ready();
+  await page.ready();
+  let contract = await page.tasks();
   assert.ok(contract.actions.some((action) => action.id === 'resource-task-/case/land'));
   assert.ok(!contract.actions.some((action) => action.id === 'resource-task-/case/mp'));
   assert.ok(contract.actions.some((action) => action.id === 'resource-task-/case/orphan'));
@@ -732,6 +738,7 @@ test('refresh replaces job identities without retaining a previous job status fo
   const records: Record<string, unknown> = { '/case/land': { host: '7920land', job: 'job1' } };
   const page = harness(records);
   await page.ready();
+  await page.tasks();
   await page.action('resource-task-/case/land');
   await page.action('resource-case-status-/case/land');
   records['/case/land'] = { host: '7920land', job: 'new-job' };
@@ -757,7 +764,8 @@ test('failed checks retain readable error evidence only when their details are v
 
 test('a deleted case reports its history error without losing saved servers on the next save', async () => {
   const page = harness({ '/deleted': null }, undefined, { history: '/deleted' });
-  const contract = await page.ready();
+  await page.ready();
+  const contract = await page.tasks();
   assert.deepEqual((contract.details as { historyErrors: string[] }).historyErrors, [
     '/deleted: Error: Case directory was deleted',
   ]);
@@ -847,6 +855,14 @@ test('90-station resource refresh reads every job record, searches studies on a 
     studies: { '/batch/site-3': Array.from({ length: 90 }, (_, i) => ({ dir: `/study/${i}` })) },
   });
   await page.ready();
+  // Opening the page reads nothing of the project: compute resources do not depend on it.
+  assert.equal(active, 0);
+  assert.equal(
+    page.calls.filter((c) => ['remote_job_record', 'case_runs'].includes(c.command)).length,
+    0,
+  );
+  void page.tasks().catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
   assert.equal(active, 8);
   // A changed case list restarts the effect while the previous CLI calls still exist.
   page.restartEffect();
@@ -895,6 +911,8 @@ test('unmount stops scheduling remaining resource CLI calls', async () => {
     },
   );
   await page.ready();
+  void page.tasks().catch(() => {});
+  await new Promise((resolve) => setImmediate(resolve));
   page.unmount();
   release();
   await new Promise((resolve) => setImmediate(resolve));
