@@ -27,7 +27,8 @@ colm_toolchain_installable() {
     [ "${CARGO_HOME:-$HOME/.cargo}" = "$HOME/.cargo" ] && [ "${RUSTUP_HOME:-$HOME/.rustup}" = "$HOME/.rustup" ] || return 1
   fi
   cc --version >/dev/null 2>&1 || gcc --version >/dev/null 2>&1 || return 1
-  for colm_tool in curl tar gzip flock mktemp; do command -v "$colm_tool" >/dev/null 2>&1 || return 1; done
+  # No curl here: without it the desktop sends Rust and CMake itself (offline.rs).
+  for colm_tool in tar gzip flock mktemp; do command -v "$colm_tool" >/dev/null 2>&1 || return 1; done
   command -v sha256sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1 || return 1
   [ -d "$HOME" ] && [ -w "$HOME" ]
 }
@@ -53,9 +54,11 @@ if ! cargo --version >/dev/null 2>&1 || ! rustc --version >/dev/null 2>&1; then
   fi
 fi
 if ! colm_toolchain_installable; then
-  echo 'Automatic Rust/CMake installation requires Linux x86_64 (glibc >= 2.17) or aarch64 (glibc >= 2.28), a C compiler, curl, tar, gzip, flock, mktemp, SHA-256 verification and a writable home. Install these prerequisites manually or supply an exact-source prebuilt engine.' >&2
+  echo 'Automatic Rust/CMake installation requires Linux x86_64 (glibc >= 2.17) or aarch64 (glibc >= 2.28), a C compiler, tar, gzip, flock, mktemp, SHA-256 verification and a writable home. Install these prerequisites manually or supply an exact-source prebuilt engine.' >&2
   exit 1
 fi
+# The wording is what offline::looks_like_network_failure looks for: the desktop then sends the tools.
+command -v curl >/dev/null 2>&1 || { echo 'Toolchain download failed: the server has no curl.' >&2; exit 1; }
 colm_base="$HOME/.local/share/colm/toolchain"
 mkdir -p "$colm_base"
 exec 8>"$colm_base/install.lock"

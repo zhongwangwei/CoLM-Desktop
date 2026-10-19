@@ -17,12 +17,33 @@ simultaneous runs; separate model source identities remain separate.
   includes the installation directories after the user's existing PATH.
 
 Automatic installation supports GNU Linux x86_64 with glibc >=2.17, and aarch64
-with glibc >=2.28. A C compiler, curl, tar, gzip, flock, mktemp, a SHA-256 utility,
-a writable home and outbound HTTPS are required. Missing compilers must be
+with glibc >=2.28. A C compiler, tar, gzip, flock, mktemp, a SHA-256 utility and a
+writable home are required; curl and outbound HTTPS only for the online route below. Missing compilers must be
 provided by the server administrator or an existing environment module. Custom
 Rust homes are reused if working; missing custom installations require manual
 setup. Failed downloads or checksum checks stop the job with a diagnostic.
 Unusable existing CoLM CMake directories are preserved for manual repair.
+
+## Servers without internet
+
+After uploading a source snapshot the desktop checks, in one SSH call, whether the
+engine is already built, whether the snapshot's crates are already on the server, and
+otherwise whether the server's curl reaches crates.io and static.rust-lang.org. When it
+cannot (no curl, no DNS, a blocked proxy), the desktop downloads instead and sends
+everything over the same SSH pipe:
+
+- the official Rust 1.97.1 `rustc`, `cargo` and `rust-std` archives, checksums pinned in
+  `crates/colm-remote/src/offline.rs`, installed with their own `install.sh` into
+  `~/.local/share/colm/toolchain/rust`, and the same pinned CMake archive as above;
+- every crates.io package in the snapshot's `Cargo.lock`, checked against the lock
+  file's checksums and repacked as a cargo directory source in
+  `<work root>/offline/vendor-<first 16 hex digits of SHA-256(Cargo.lock)>`.
+
+Tools the server already has are skipped, downloads are cached on the desktop, and a
+build finds the vendor directory by hashing its own `Cargo.lock`, so jobs on compute
+nodes build offline too. A login-node build that still fails with a download error
+(a proxy that passes the check but is too slow) is retried once after the dependencies
+are sent. The desktop needs internet access, but not cargo.
 
 Automatic engine selection prefers a matching prebuilt package when build tools
 are missing. Otherwise it installs the prerequisites and builds from the selected

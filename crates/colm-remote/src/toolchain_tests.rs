@@ -277,6 +277,41 @@ sha256sum() { return 0; }
     }
 
     #[test]
+    fn a_server_without_curl_can_still_be_given_tools_but_never_downloads() {
+        // bash so that `command` can be overridden; the real curl of the test machine stays hidden.
+        let hide = "command() { if [ \"$1\" = -v ] && [ \"$2\" = curl ]; then return 1; fi; builtin command \"$@\"; }";
+        let (output, root) = run(hide, false);
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            crate::offline::looks_like_network_failure(&stderr),
+            "{stderr}"
+        );
+        assert!(!fs::read_to_string(root.join("events"))
+            .unwrap_or_default()
+            .contains("download"));
+        fs::remove_dir_all(root).unwrap();
+
+        let output = Command::new("bash")
+            .args([
+                "-c",
+                &format!(
+                    "{hide}\nuname() {{ if [ \"$1\" = -s ]; then echo Linux; else echo x86_64; fi; }}\n\
+                     getconf() {{ echo 'glibc 2.39'; }}\ncc() {{ :; }}\ncargo() {{ return 1; }}\nrustc() {{ return 1; }}\n\
+                     tar() {{ :; }}\ngzip() {{ :; }}\nflock() {{ :; }}\nmktemp() {{ :; }}\nsha256sum() {{ :; }}\n\
+                     {}\ncolm_toolchain_installable",
+                    requirements_script()
+                ),
+            ])
+            .env("HOME", std::env::temp_dir())
+            .env_remove("CARGO_HOME")
+            .env_remove("RUSTUP_HOME")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "no curl is still installable");
+    }
+
+    #[test]
     fn existing_cmake_destination_is_preserved() {
         let (output, root) = run("touch \"$HOME/rust-ready\"; mkdir -p \"$HOME/.local/share/colm/toolchain\"; ln -s /nonexistent \"$HOME/.local/share/colm/toolchain/cmake\"", false);
         assert!(!output.status.success());
