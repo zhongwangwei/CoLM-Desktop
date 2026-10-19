@@ -556,3 +556,55 @@ fn a_vendor_directory_for_the_snapshot_lock_turns_the_build_offline() {
     assert!(root.join("engine/abc/bin/colm-rs").is_file());
     std::fs::remove_dir_all(base).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn the_engine_being_built_reports_cargo_progress() {
+    let root = std::env::temp_dir().join(format!("colm-build-progress-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let run = |root: &Path| {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(progress_script(root.to_str().unwrap()))
+            .output()
+            .unwrap();
+        parse_progress(&String::from_utf8_lossy(&out.stdout))
+    };
+    assert_eq!(run(&root), BuildProgress::default(), "no server root yet");
+    // A finished engine is not reported; the one still building is.
+    std::fs::create_dir_all(root.join("engine/old/bin")).unwrap();
+    std::fs::create_dir_all(root.join("engine/old/src")).unwrap();
+    std::fs::write(root.join("engine/old/bin/colm-rs"), "").unwrap();
+    std::fs::set_permissions(
+        root.join("engine/old/bin/colm-rs"),
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    assert_eq!(run(&root).engine, None);
+    std::fs::create_dir_all(root.join("engine/new/src")).unwrap();
+    std::fs::write(
+        root.join("phase"),
+        "installing CMake\nbuilding the Rust engine\n",
+    )
+    .unwrap();
+    let started = run(&root);
+    assert_eq!(started.engine.as_deref(), Some("new"));
+    assert_eq!(started.stage.as_deref(), Some("building the Rust engine"));
+    assert_eq!(
+        (started.done, started.total),
+        (None, None),
+        "cargo has not started"
+    );
+    std::fs::write(
+        root.join("engine/new/build.log"),
+        "   Compiling anyhow v1.0\n    Building [==>   ] 2/664: anyhow(build)    \r    Building [=====>   ] 312/664: colm-core, netcdf-sys(build)        \r",
+    )
+    .unwrap();
+    let building = run(&root);
+    assert_eq!((building.done, building.total), (Some(312), Some(664)));
+    assert_eq!(
+        building.current.as_deref(),
+        Some("colm-core, netcdf-sys(build)")
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

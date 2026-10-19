@@ -68,6 +68,7 @@ function page(
     cancelCreation?: (args: Record<string, unknown>) => Promise<number>;
     scan?: () => Promise<unknown>;
     prepare?: (args: Record<string, unknown>) => Promise<unknown>;
+    progress?: () => unknown;
     navigate?: (route: string) => boolean;
     listCases?: (args: Record<string, unknown>) => Promise<unknown>;
     spinup?: (args: Record<string, unknown>) => Promise<unknown>;
@@ -162,6 +163,7 @@ function page(
         'HistoryPage',
         'HistoryVariablesCard',
         'SpatialForcingFields',
+        'EngineProgress',
       ].map((key) => [key, key]),
     ),
     useApp: () => ({
@@ -265,6 +267,8 @@ function page(
           return true;
         case 'remote_prepare_engine':
           return options.prepare ? options.prepare(args) : { ready: true };
+        case 'remote_engine_progress':
+          return options.progress ? options.progress() : {};
         case 'remote_scan_sites':
         case 'scan_sites':
           return options.scan ? options.scan() : { sites: scannedSites };
@@ -3028,6 +3032,13 @@ test('choosing a server prepares its engine in the background and says when it i
       servers: [runServer],
       prepare: () => new Promise((resolve) => (ready = resolve)),
       scan: () => new Promise(() => {}),
+      progress: () => ({
+        engine: 'abc',
+        stage: 'building the Rust engine',
+        done: 312,
+        total: 664,
+        current: 'colm-core',
+      }),
     },
   );
   await p.mount();
@@ -3035,16 +3046,29 @@ test('choosing a server prepares its engine in the background and says when it i
   assert.equal(prepare.length, 1);
   assert.equal(prepare[0].args.host, 'compute');
   assert.deepEqual(prepare[0].args.modelRevision, p.state.versionRef);
-  assert.ok(notices(p).some((text) => text.includes('正在核对 compute 上的计算引擎')));
+  const card = () => p.element('EngineProgress').props as Record<string, unknown>;
+  assert.deepEqual([card().host, card().phase], ['compute', 'checking']);
+  assert.ok(
+    !p.calls.some((call) => call.command === 'remote_engine_progress'),
+    'not while checking',
+  );
 
   t.mock.timers.tick(5000);
-  p.render();
-  assert.ok(
-    notices(p).some((text) => text.includes('正在上传源码并编译') && text.includes('已 5 秒')),
+  await p.settle();
+  assert.deepEqual([card().phase, card().waited], ['building', '5 秒']);
+  // Building: the server's progress is read and drawn, then again every five seconds.
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'remote_engine_progress').at(-1)?.args,
+    {
+      host: 'compute',
+    },
   );
+  assert.equal((card().progress as { done: number }).done, 312);
+  const polls = p.calls.filter((call) => call.command === 'remote_engine_progress').length;
   t.mock.timers.tick(125_000);
-  p.render();
-  assert.ok(notices(p).some((text) => text.includes('已 2 分 10 秒')));
+  await p.settle();
+  assert.equal(card().waited, '2 分 10 秒');
+  assert.ok(p.calls.filter((call) => call.command === 'remote_engine_progress').length > polls);
 
   void p.click('new-scan');
   p.render();

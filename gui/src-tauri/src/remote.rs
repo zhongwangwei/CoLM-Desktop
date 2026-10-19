@@ -1588,6 +1588,25 @@ pub async fn remote_preview(
     ssh_cli_json(args, resources, Some(&server)).await
 }
 
+/// 服务器上正在编的引擎编到哪一步：等待引擎时每隔几秒问一次，画进度条。
+#[tauri::command]
+pub async fn remote_engine_progress(app: tauri::AppHandle, host: String) -> Result<Value, String> {
+    let server = server_for(app.clone(), &host)?;
+    validate_connection(&server)?;
+    ssh_cli_json(
+        vec![
+            "remote-engine-progress".into(),
+            "--host".into(),
+            server.host.clone(),
+            "--root".into(),
+            server.root.clone(),
+        ],
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await
+}
+
 /// 结果还在服务器上、本机没取回的运行目录：返回它的服务器。结果页对这样的运行改在服务器上读
 /// （`colm-cli remote-read`），只把算好的 JSON 传回来；取回过的照旧读本机。
 pub(crate) fn results_on_server(case: &str) -> Option<String> {

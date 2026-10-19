@@ -1305,6 +1305,12 @@ export const commandContract = {
       "rust_type": "Option<bool>"
     }
   },
+  "remote_engine_progress": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "remote_job_record": {
     "case": {
       "required": true,

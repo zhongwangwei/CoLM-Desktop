@@ -2347,6 +2347,15 @@ pub(super) fn cmd_read(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 服务器上正在编的引擎编到哪一步（给界面的进度条）；只读，几十字节。
+pub(super) fn cmd_engine_progress(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = opts.need_str("--root")?;
+    let progress = engine::parse_progress(&ssh.run_ok(&engine::progress_script(&root))?);
+    println!("{}", serde_json::to_string(&progress)?);
+    Ok(())
+}
+
 pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
     let record = read_record(&case)?;

@@ -256,6 +256,7 @@ pub fn run() {
             remote_probe,
             remote_scan_sites,
             remote_prepare_engine,
+            remote_engine_progress,
             remote_create_case,
             remote_create_cases,
             remote_create_cases_cancel,

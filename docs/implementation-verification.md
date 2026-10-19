@@ -34167,3 +34167,15 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 实测：本机新编的 `colm-cli remote-read` 走界面同样的认证方式连天河，读 AU-Cpr 的变量表用了 8.4 s（包括 ssh），一条 2400 点的曲线 1.4 s；`--command remote-cancel` 被拒绝。
     - 测试：`reading_results_on_a_server_allows_only_result_commands`、`a_server_run_is_read_on_the_server_until_its_results_are_fetched`，前端改为验证"服务器上的运行照常向后端请求变量表"。colm-cli 457 条、gui/src-tauri 413 条、前端 718 条通过。
     - 没做：在服务器上算评估指标；曲线缓存仍是结果页原有的 16 条。
+
+42. **服务器编引擎时显示进度条（用户要求，2026-10-19）**：land02 一次接近从头的编译用了 10 分钟以上，界面只写着"已 6 分 56 秒，通常要 2–4 分钟"。
+    - 服务器端：`ensure_script` 编译时设 `CARGO_TERM_PROGRESS_WHEN=always`。本机实测，不是终端时 cargo 也会输出 `Building [====>  ] 2/4: anyhow, colm-namelist`（以 `\r` 分隔）。stderr 写进 `engine/<编号>/build.log`；编译失败时，把去掉进度行的最后 80 行转回 stderr，所以报错内容和"下载失败就由桌面送依赖"的判断都不变。
+    - 新命令 `colm-cli remote-engine-progress --host --root`（GUI 命令 `remote_engine_progress`）：在服务器上取最新的、还没有 `bin/colm-rs` 的引擎目录，读 `phase` 的最后一行（installing Rust/Cargo、installing CMake、building the Rust engine），以及 `build.log` 里最后一个"已编 N / 共 M 个编译单元、正在编哪些"。只读，返回几十字节。对 land02 实跑过：它已经编完，返回全空，符合预期。
+    - 界面：新建模拟里的引擎等待提示换成进度卡片 `EngineProgress`。
+      - 五个步骤：核对引擎 → 上传源码 → 安装工具链 → 编译模块 → 链接程序。
+      - 进度条显示百分比和"已编译 312 / 664 个模块 · 正在编译 colm-core"；还没有数字时显示来回滑动的进度条。
+      - 剩最后 4 个单元时（就是那 4 个程序，带 LTO、单个代码生成单元，最耗时）切到"链接程序"，并说明"这一步最慢，通常还要几分钟"，免得进度条停在 99% 却不说原因。
+      - 颜色用主题变量，深色模式也能用；系统要求减少动画时，不播放滑动动画。
+      - 进入"编译"阶段后每 5 s 读一次进度。
+    - 测试：`the_engine_being_built_reports_cargo_progress`（没有工作目录、引擎都已编好、刚开始编、编译中四种情况）；`engine-progress.test.ts`（步骤判断）；向导测试改为检查进度卡片的阶段、已用时间，以及编译阶段每 5 s 读一次进度。colm-remote 103 条、colm-cli 457 条、gui/src-tauri 413 条、前端 719 条通过。
+    - 没测：在服务器上真实编译时看进度卡片（下一次更新后在 land02 或天河上第一次使用时就能看到）。运行面板提交前在登录节点编引擎的那段等待，还没有接这个进度卡片。

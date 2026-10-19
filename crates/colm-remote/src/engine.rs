@@ -12,6 +12,8 @@ use std::process::Command;
 use anyhow::{bail, ensure, Context, Result};
 use sha2::{Digest, Sha256};
 
+use serde::Serialize;
+
 use crate::ssh::{quote, Ssh};
 
 /// 远程要编的四个程序：（包，可执行文件）。
@@ -669,7 +671,7 @@ if [ ! -x "$E/bin/colm-rs" ]; then
     echo "building the Rust engine" >> phase
     echo "building the Rust engine"
     C=$(command -v cargo || echo "$HOME/.cargo/bin/cargo")
-    colm_build() {{ (cd "$E/src" && CARGO_TARGET_DIR={target} "$C" build --release --locked -j {jobs} {packages} "$@"); }}
+    colm_build() {{ (cd "$E/src" && CARGO_TERM_PROGRESS_WHEN=always CARGO_TERM_PROGRESS_WIDTH=100 CARGO_TARGET_DIR={target} "$C" build --release --locked -j {jobs} {packages} "$@") 2>"$E/build.log" || {{ tr '\r' '\n' < "$E/build.log" | grep -av '^ *Building \[' | tail -n 80 >&2; return 1; }}; }}
     K=$({{ sha256sum "$E/src/Cargo.lock" 2>/dev/null || shasum -a 256 "$E/src/Cargo.lock"; }} | cut -c1-16)
     if [ -n "$K" ] && [ -f {vendor_prefix}"$K/.complete" ]; then
       colm_build --offline --config 'source.crates-io.replace-with="colm-vendor"' --config {vendor_config}"$K"'"' || exit 1
@@ -695,6 +697,63 @@ fi
         packages = packages.join(" "),
         copies = copies.join(" "),
     )
+}
+
+/// 服务器上正在编的引擎编到哪一步了，给界面画进度条。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct BuildProgress {
+    /// 正在准备的引擎；空表示没有在编的（都编好了，或还没开始上传）。
+    pub engine: Option<String>,
+    /// `ensure_script` 写的最近一个阶段：installing Rust/Cargo、installing CMake、building the Rust engine。
+    pub stage: Option<String>,
+    /// cargo 自己的进度：已编完几个编译单元、一共几个，正在编哪些。
+    pub done: Option<u32>,
+    pub total: Option<u32>,
+    pub current: Option<String>,
+}
+
+/// 编译时 cargo 的进度写在 `engine/<编号>/build.log`（`ensure_script` 里 `CARGO_TERM_PROGRESS_WHEN=always`，
+/// 不是终端也照样输出 `Building [==>  ] 312/664: 名字`）。取最新的、还没有 `bin/colm-rs` 的引擎目录。
+pub fn progress_script(root: &str) -> String {
+    format!(
+        r#"cd {engines} 2>/dev/null || exit 0
+E=
+for d in $(ls -t 2>/dev/null); do
+  if [ -d "$d" ] && [ ! -x "$d/bin/colm-rs" ] && [ -d "$d/src" ]; then E=$d; break; fi
+done
+[ -n "$E" ] || exit 0
+echo "engine=$E"
+echo "stage=$(tail -n 1 {phase} 2>/dev/null)"
+if [ -f "$E/build.log" ]; then
+  L=$(tr '\r' '\n' < "$E/build.log" | grep -a 'Building \[' | tail -n 1)
+  echo "progress=$(printf '%s' "$L" | sed -n 's/.*\] *\([0-9]*\/[0-9]*\).*/\1/p')"
+  echo "current=$(printf '%s' "$L" | sed -n 's/.*\] *[0-9]*\/[0-9]*: *//p' | sed 's/ *$//')"
+fi
+"#,
+        engines = quote(&format!("{}/engine", root.trim_end_matches('/'))),
+        phase = quote(&format!("{}/phase", root.trim_end_matches('/'))),
+    )
+}
+
+pub fn parse_progress(text: &str) -> BuildProgress {
+    let value = |key: &str| {
+        text.lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let counts = value("progress").and_then(|p| {
+        let (done, total) = p.split_once('/')?;
+        Some((done.parse().ok()?, total.parse().ok()?))
+    });
+    BuildProgress {
+        engine: value("engine"),
+        stage: value("stage"),
+        done: counts.map(|(done, _)| done),
+        total: counts.map(|(_, total)| total),
+        current: value("current"),
+    }
 }
 
 // ---- 预编的引擎（R3）：没有 cargo 或不能联网的服务器直接用，不必在那里编译 ---------------------------------------

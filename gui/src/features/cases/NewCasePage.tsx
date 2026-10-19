@@ -76,6 +76,8 @@ import RunLocationSettings from '../runs/RunLocationSettings';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
 import SpatialForcingFields, { type ForcingLayoutProbe } from './SpatialForcingFields';
+import EngineProgress from './EngineProgress';
+import type { BuildProgress } from './engine-progress';
 
 function isMethaneSite(site: Site) {
   return (
@@ -639,6 +641,26 @@ export default function NewCasePage() {
     return () => clearInterval(timer);
   }, [waitingForEngine, scanning]);
   const waited = (since: number) => elapsedLabel(Math.max(0, clock - since), en);
+  // 服务器在编引擎时，每 5 秒读一次它编到哪了（`remote_engine_progress`），画进度条。
+  const [buildProgress, setBuildProgress] = useState<BuildProgress | null>(null);
+  const buildingOn = engine?.phase === 'building' ? engine.host : '';
+  useEffect(() => {
+    setBuildProgress(null);
+    if (!buildingOn) return;
+    let current = true;
+    const poll = () =>
+      invoke<BuildProgress>('remote_engine_progress', { host: buildingOn })
+        .then((progress) => {
+          if (current) setBuildProgress(progress);
+        })
+        .catch(() => {});
+    void poll();
+    const timer = setInterval(() => void poll(), 5000);
+    return () => {
+      current = false;
+      clearInterval(timer);
+    };
+  }, [buildingOn]);
   useEffect(() => {
     let current = true;
     setSchemaReady(false);
@@ -2542,17 +2564,13 @@ export default function NewCasePage() {
       )}
       {optionError && <Notice tone="warning">{optionError}</Notice>}
       {engine?.host === form.host && engine.phase !== 'failed' && (
-        <Notice>
-          {engine.phase === 'checking'
-            ? t(
-                `正在核对 ${engine.host} 上的计算引擎（已 ${waited(engine.since)}）…`,
-                `Checking the engine on ${engine.host} (${waited(engine.since)})…`,
-              )
-            : t(
-                `${engine.host} 正在上传源码并编译与当前版本一致的计算引擎（已 ${waited(engine.since)}，软件更新后第一次使用通常要 2–4 分钟）。可以先继续填写，读取站点和创建算例会等它完成。`,
-                `${engine.host} is uploading the source and compiling an engine for this version (${waited(engine.since)}; usually 2–4 minutes after an app update). Keep filling in the form; reading sites and creating the case wait for it.`,
-              )}
-        </Notice>
+        <EngineProgress
+          host={engine.host}
+          phase={engine.phase}
+          waited={waited(engine.since)}
+          progress={buildProgress}
+          en={en}
+        />
       )}
       {engine?.host === form.host && engine.phase === 'failed' && (
         <Notice tone="warning">
