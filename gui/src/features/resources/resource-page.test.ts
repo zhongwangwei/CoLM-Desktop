@@ -821,7 +821,7 @@ test('configuring a simulation opens its selected resource instead of another se
   assert.equal((page.contract().details as { selected: string }).selected, 'server:selected');
 });
 
-test('90-station resource refresh bounds CLI concurrency, keeps every record and serializes overlapping refreshes', async () => {
+test('90-station resource refresh reads every job record, searches studies on a dozen cases, and serializes overlapping refreshes', async () => {
   const records = Object.fromEntries(
     Array.from({ length: 90 }, (_, i) => [
       `/batch/site-${i}`,
@@ -844,29 +844,33 @@ test('90-station resource refresh bounds CLI concurrency, keeps every record and
       await new Promise((resolve) => setImmediate(resolve));
       active--;
     },
-    studies: { '/batch/site-89': Array.from({ length: 90 }, (_, i) => ({ dir: `/study/${i}` })) },
+    studies: { '/batch/site-3': Array.from({ length: 90 }, (_, i) => ({ dir: `/study/${i}` })) },
   });
   await page.ready();
-  assert.equal(active, 4);
+  assert.equal(active, 8);
   // A changed case list restarts the effect while the previous CLI calls still exist.
   page.restartEffect();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(active, 4);
+  assert.equal(active, 8);
   block = false;
   release();
-  for (
-    let i = 0;
-    i < 1000 && !page.render().actions.find((a) => a.id === 'resource-refresh')?.enabled;
-    i++
-  ) {
+  // The page is usable as soon as the servers are shown; the job records finish behind it.
+  const recordsRead = () =>
+    (page.render().details as { records: { dir: string }[] }).records.some(
+      (r) => r.dir === '/batch/site-89',
+    );
+  for (let i = 0; i < 5000 && !(recordsRead() && (active as number) === 0); i++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   assert.equal(page.contract().actions.find((a) => a.id === 'resource-refresh')?.enabled, true);
-  assert.equal(peak, 4);
+  assert.equal(peak, 8);
   assert.equal(active, 0);
   const details = page.contract().details as { records: { dir: string }[] };
   assert.ok(details.records.some((r) => r.dir === '/batch/site-89'));
-  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 90);
+  // Ninety job records are read, but only a dozen cases are searched for studies.
+  // The eight in flight when the case list changed, plus one full pass of ninety.
+  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 98);
+  assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 12);
   assert.equal(page.calls.filter((c) => c.command === 'study_status').length, 90);
   assert.equal(
     page.calls.filter((c) => c.command === 'study_status').at(-1)?.args?.studyDir,
@@ -894,7 +898,7 @@ test('unmount stops scheduling remaining resource CLI calls', async () => {
   page.unmount();
   release();
   await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 4);
+  assert.equal(page.calls.filter((c) => c.command === 'remote_job_record').length, 8);
   assert.equal(page.calls.filter((c) => c.command === 'case_runs').length, 0);
 });
 test('local default data paths save with the server list intact', async () => {

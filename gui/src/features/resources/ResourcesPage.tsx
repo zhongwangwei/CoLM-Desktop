@@ -31,6 +31,9 @@ type DataPathKey = Exclude<keyof DataDefaults, 'kind_paths'>;
 import NavIcon from '../../components/NavIcon';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import './resources-page.css';
+/** How many cases of a project are searched for studies when the page opens. */
+const STUDY_SCAN_LIMIT = 12;
+
 export default function ResourcesPage() {
   const { state, update, navigate } = useApp(),
     en = state.language === 'en',
@@ -180,14 +183,17 @@ export default function ResourcesPage() {
             setBaseline(JSON.stringify(first));
           }
         }
+        // The servers are shown at once; reading the project's job records goes on behind them.
+        setBusy(false);
         const errors: string[] = [];
         const hosts = await invokeJson<string[]>('remote_ssh_hosts');
         const rows: { dir: string; record: unknown; kind: 'case' | 'study' }[] = [];
         const histories: { studies?: { dir: string }[] }[] = [];
+        // A job record is one small file per case; read them all. A project of ninety stations
+        // used to start ninety command-line processes here and freeze the page for a minute.
         let nextCase = 0;
-        // Each request starts a CLI process; bound the total even for large station batches.
         await Promise.all(
-          Array.from({ length: Math.min(4, state.cases.length) }, async () => {
+          Array.from({ length: Math.min(8, state.cases.length) }, async () => {
             while (token.active && token === epoch.current) {
               const index = nextCase++;
               const c = state.cases[index];
@@ -199,13 +205,29 @@ export default function ResourcesPage() {
                   error: String(e),
                 })),
               };
-              if (!token.active || token !== epoch.current) return;
-              histories[index] = await invokeJson<{ studies?: { dir: string }[] }>('case_runs', {
-                case: c.dir,
-              }).catch((e) => {
-                errors.push(`${c.dir}: ${String(e)}`);
-                return { studies: [] };
-              });
+            }
+          }),
+        );
+        if (!token.active || token !== epoch.current) return;
+        // Studies are rare: look for them on a dozen cases at most, those with a server job first.
+        const withJobs = [
+          ...state.cases.filter((_, index) => rows[index]?.record),
+          ...state.cases.filter((_, index) => !rows[index]?.record),
+        ].slice(0, STUDY_SCAN_LIMIT);
+        let nextStudy = 0;
+        await Promise.all(
+          Array.from({ length: Math.min(4, withJobs.length) }, async () => {
+            while (token.active && token === epoch.current) {
+              const c = withJobs[nextStudy++];
+              if (!c) return;
+              histories.push(
+                await invokeJson<{ studies?: { dir: string }[] }>('case_runs', {
+                  case: c.dir,
+                }).catch((e) => {
+                  errors.push(`${c.dir}: ${String(e)}`);
+                  return { studies: [] };
+                }),
+              );
             }
           }),
         );
