@@ -524,6 +524,75 @@ export default function NewCasePage() {
       alive.current = false;
     };
   }, [update]);
+  // 新建模拟的进度从第二步起记进历史：向导里的内容只在这个页面里，切到别的页面或关掉软件就没了
+  // （用户报：走到第三步切出去就找不回来）。从历史重新打开已建好的项目时不记，那个项目已有记录。
+  const draft = useRef({
+    id: (seed?.draftId ?? null) as string | null,
+    record: seed?.recordDraft !== false,
+    closed: false,
+    queue: Promise.resolve() as Promise<unknown>,
+  });
+  function wizardSeed(at: SimulationStep) {
+    return {
+      form,
+      sites,
+      caseValues: {
+        ...caseValues,
+        ...schemeFields,
+      },
+      step: at,
+      ownData,
+      exampleValues: exampleValues.current,
+      multiSiteEnabled,
+      multiSiteMode,
+      multiSiteRepeat,
+      siteDrafts,
+    };
+  }
+  // 记录失败不挡向导：这只是方便找回，写不进去时照样能建模拟。保存排成一队，免得第一次保存还没
+  // 拿到记录号时，下一次又另起一条。
+  function saveDraft(at: SimulationStep) {
+    const record = draft.current;
+    if (!record.record || record.closed || (at < 2 && !record.id)) return;
+    const snapshot = wizardSeed(at),
+      name = (form.name ?? '').trim() || t('未命名模拟', 'Untitled simulation');
+    record.queue = record.queue
+      .then(() =>
+        invoke<string>('new_simulation_draft_save', {
+          id: record.id,
+          name,
+          step: at,
+          seed: snapshot,
+        }),
+      )
+      .then((id) => {
+        if (typeof id === 'string') record.id = id;
+      })
+      .catch(() => {});
+  }
+  // 建好以后由项目自己的记录接替；排在未完成的保存之后，拿到的是最终的记录号。
+  function closeDraft() {
+    const record = draft.current;
+    if (record.closed) return;
+    record.closed = true;
+    record.queue = record.queue
+      .then(() => {
+        if (record.id) return invoke('new_simulation_draft_close', { id: record.id });
+      })
+      .catch(() => {});
+  }
+  // 离开页面时的保存要用最后一次渲染的内容。
+  const saveOnLeave = useRef(() => {});
+  saveOnLeave.current = () => saveDraft(step);
+  useEffect(() => () => saveOnLeave.current(), []);
+  useEffect(() => {
+    saveDraft(step);
+    // Saved per step; leaving the page saves whatever was filled in since.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step]);
+  useEffect(() => {
+    if (multiResults.some((result) => result.created)) closeDraft();
+  }, [multiResults]);
   // Prepare the server engine as soon as a server is chosen. After an app update the server
   // compiles a matching engine for a few minutes; doing it here keeps that wait off
   // "Read sites" and case creation, which share the same server-side build lock.
@@ -1260,19 +1329,8 @@ export default function NewCasePage() {
   function leaveForConfiguration(route: 'resources' | 'research', returnStep: SimulationStep) {
     update({
       newCaseSeed: {
-        form,
-        sites,
-        caseValues: {
-          ...caseValues,
-          ...schemeFields,
-        },
-        step: returnStep,
-        ownData,
-        exampleValues: exampleValues.current,
-        multiSiteEnabled,
-        multiSiteMode,
-        multiSiteRepeat,
-        siteDrafts,
+        ...wizardSeed(returnStep),
+        ...(draft.current.id ? { draftId: draft.current.id } : {}),
       },
       simulationReturn: {
         route: 'new-case',
@@ -1690,6 +1748,7 @@ export default function NewCasePage() {
             ]),
           ),
         );
+      closeDraft();
       update({
         root: destination.root,
         versionRef: revision,

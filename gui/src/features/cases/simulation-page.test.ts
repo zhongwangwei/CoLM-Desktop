@@ -322,6 +322,10 @@ function page(
         case 'case_data_save':
           if (failCreate) throw new Error('save failed');
           return {};
+        case 'new_simulation_draft_save':
+          return (args.id as string | null) ?? 'draft-1';
+        case 'new_simulation_draft_close':
+          return null;
         default:
           throw new Error(`Unexpected IPC: ${command}`);
       }
@@ -612,6 +616,81 @@ test('five-step creation gates each step, chooses the scheme after data, and sen
   );
   assert.deepEqual(p.opened, ['/project/CN-Cng']);
   assert.ok(!p.calls.some((call) => /run_start|run_case|submit/.test(call.command)));
+});
+test('an unfinished simulation is recorded from step 2 and saved again when the page is left', async () => {
+  const p = page('NewCasePage');
+  await p.mount();
+  const drafts = () => p.calls.filter((call) => call.command === 'new_simulation_draft_save');
+  p.set('new-engine', 'rust');
+  p.set('new-name', 'CN-Cng');
+  p.set('new-root', '/project');
+  await p.settle();
+  assert.equal(drafts().length, 0, 'step 1 alone is not worth a record');
+  await p.click('new-next');
+  await p.settle();
+  assert.equal(drafts().length, 1);
+  const first = drafts()[0].args as { id: unknown; name: string; step: number; seed: unknown };
+  assert.equal(first.id, null);
+  assert.equal(first.name, 'CN-Cng');
+  assert.equal(first.step, 2);
+  const seed = first.seed as { form: Record<string, string>; step: number };
+  assert.equal(seed.form.name, 'CN-Cng');
+  assert.equal(seed.step, 2);
+  p.set('new-kind', 'site');
+  // Leaving the page keeps what was filled in since, on the same record.
+  await p.remount();
+  await p.settle();
+  const left = drafts().at(-1)!.args as { id: unknown; seed: { form: Record<string, string> } };
+  assert.equal(left.id, 'draft-1');
+  assert.equal(left.seed.form.kind, 'site');
+});
+test('a simulation resumed from history keeps its record and closes it once created', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 3, draftId: 'draft-7' });
+  await p.mount();
+  await p.settle();
+  const saves = p.calls.filter((call) => call.command === 'new_simulation_draft_save');
+  assert.deepEqual(
+    saves.map((call) => [call.args.id, call.args.step]),
+    [['draft-7', 3]],
+    'reopening at step 3 continues the same record',
+  );
+  // React runs effects after every commit; this harness only on settle.
+  await p.click('new-next');
+  await p.settle();
+  await p.click('new-next');
+  await p.settle();
+  await p.click('new-create');
+  await p.settle();
+  assert.equal(p.opened.length, 1, 'the created case opened');
+  assert.deepEqual(
+    p.calls
+      .filter((call) => call.command === 'new_simulation_draft_save')
+      .map((call) => [call.args.id, call.args.step]),
+    [
+      ['draft-7', 3],
+      ['draft-7', 4],
+      ['draft-7', 5],
+    ],
+    'each step is saved on the same record',
+  );
+  const close = p.calls.find((call) => call.command === 'new_simulation_draft_close');
+  assert.deepEqual(close?.args, { id: 'draft-7' });
+  // Closed drafts are not saved again when the created case takes over the page.
+  const count = p.calls.filter((call) => call.command === 'new_simulation_draft_save').length;
+  await p.remount();
+  await p.settle();
+  assert.equal(
+    p.calls.filter((call) => call.command === 'new_simulation_draft_save').length,
+    count,
+  );
+});
+test('a created project reopened from history is not recorded as an unfinished simulation', async () => {
+  const p = page('NewCasePage', { form, sites: [site], step: 4, recordDraft: false });
+  await p.mount();
+  await p.click('new-next');
+  await p.remount();
+  await p.settle();
+  assert.ok(!p.calls.some((call) => call.command.startsWith('new_simulation_draft')));
 });
 test('data step rejects scanned forcing overflow and failed creation never opens or starts a run', async () => {
   const p = page('NewCasePage', { form, sites: [site], step: 3 });

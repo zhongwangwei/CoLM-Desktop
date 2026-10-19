@@ -2101,6 +2101,30 @@ export const commandContract = {
       "rust_type": "FitRequest"
     }
   },
+  "new_simulation_draft_save": {
+    "id": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "step": {
+      "required": true,
+      "rust_type": "u8"
+    },
+    "seed": {
+      "required": true,
+      "rust_type": "Value"
+    }
+  },
+  "new_simulation_draft_close": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "site_pfts": {
     "dir": {
       "required": true,

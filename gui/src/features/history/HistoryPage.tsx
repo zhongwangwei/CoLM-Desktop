@@ -33,6 +33,7 @@ import {
   historyFilter,
   canReplay,
   canDeleteHistory,
+  simulationDraft,
   historyStateAfterDirectoryDeletion,
   type HistoryDeletePlan,
   canCompare,
@@ -298,8 +299,21 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         multiSiteMode: seed.multi_site_mode,
         multiSiteRepeat: seed.multi_site_repeat,
         siteDrafts: seed.drafts,
+        recordDraft: false,
       },
       ...switching,
+    });
+  }
+  // 未完成的新建模拟：回到向导里停下的那一步，接着记在同一条记录上。
+  function resumeSimulation(operation: HistoryOperation) {
+    const seed = simulationDraft(operation);
+    if (!seed || !navigate('new-case')) return;
+    update({
+      newCaseSeed: {
+        ...seed,
+        draftId: operation.operation_id,
+      },
+      simulationReturn: null,
     });
   }
   function closeDetails() {
@@ -1593,6 +1607,18 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   </Notice>
                 )}
                 <div className="button-row">
+                  {simulationDraft(detail.operation) && (
+                    <Button
+                      variant="primary"
+                      disabled={busy}
+                      onClick={() => resumeSimulation(detail.operation)}
+                    >
+                      {t(
+                        `继续新建（第 ${simulationDraft(detail.operation)!.step} 步）`,
+                        `Continue (step ${simulationDraft(detail.operation)!.step})`,
+                      )}
+                    </Button>
+                  )}
                   {detail.operation.case_path && (
                     <Button
                       variant="primary"

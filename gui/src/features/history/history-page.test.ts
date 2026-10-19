@@ -497,6 +497,36 @@ test('clearing history deletes case folders only when the user ticks them', asyn
   assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
 });
 
+test('an unfinished new simulation can be continued from its record or deleted', async () => {
+  const h = harness();
+  const seed = { form: { name: 'demo', root: '/p' }, sites: [], step: 3 };
+  const draft = {
+    ...row('d1'),
+    kind: 'new-simulation',
+    status: 'paused',
+    detail: {
+      action: 'new-simulation',
+      subject: { kind: 'simulation', name: 'demo' },
+      step: 3,
+      seed,
+    },
+  };
+  h.requests[0].resolve({ items: [draft], total: 1 });
+  await h.settle();
+  assert.equal(h.menu().props.items[0].disabled, false, 'the record can be deleted');
+  h.openCard();
+  h.requests[1].resolve({ operation: draft, events: [], related: [] });
+  await h.settle();
+  h.click('Continue (step 3)');
+  assert.equal(h.routes.at(-1), 'new-case');
+  const reopened = h.updates.at(-1) as {
+    newCaseSeed: { form: { name: string }; step: number; draftId: string };
+  };
+  assert.equal(reopened.newCaseSeed.form.name, 'demo');
+  assert.equal(reopened.newCaseSeed.step, 3);
+  assert.equal(reopened.newCaseSeed.draftId, 'd1', 'later steps keep updating the same record');
+});
+
 test('right-clicking a project card deletes that project only, through the clear dialog', async () => {
   const h = harness();
   const members = [{ ...row('r1'), case_path: '/cache/222/AT-Neu' }];

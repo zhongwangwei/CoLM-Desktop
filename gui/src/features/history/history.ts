@@ -414,6 +414,7 @@ export function historyKindLabel(kind: string, en = false): string {
     'site-new': ['新建站点算例', 'New site case'],
     'spatial-new': ['新建区域算例', 'New regional case'],
     'mesh-new': ['新建网格算例', 'New mesh case'],
+    'new-simulation': ['新建模拟（未完成）', 'Unfinished new simulation'],
     'hybrid-fit': ['训练 AI 网络', 'Train AI network'],
     'hybrid-install': ['安装 AI 网络', 'Install AI network'],
     'hybrid-remove': ['移除 AI 网络', 'Remove AI network'],
@@ -666,6 +667,7 @@ export type HistoryDeletePlan = {
   reason: string | null;
 };
 export function canDeleteHistory(operation: HistoryOperation): boolean {
+  if (simulationDraft(operation)) return true;
   return (
     !operation.needs_reconciliation &&
     (!operation.run_group || operation.run_group.members.every(canDeleteHistory)) &&
@@ -742,4 +744,17 @@ export function replayVerificationText(result: unknown, en = false) {
   return en
     ? `Rerun with the recorded model version and settings. Forcing contents were not verified; ${tail}`
     : `已按记录的模型版本和设置重跑。强迫场内容未核对；${tail}`;
+}
+
+/** The filled-in wizard an unfinished 新建模拟 record keeps (`simulation_draft.rs`), with its step. */
+export function simulationDraft(
+  operation: HistoryOperation,
+): (NonNullable<AppState['newCaseSeed']> & { step: 1 | 2 | 3 | 4 | 5 }) | null {
+  if (operation.kind !== 'new-simulation') return null;
+  const seed = operation.detail?.seed as AppState['newCaseSeed'] | undefined,
+    recorded = operation.detail?.step,
+    step = typeof recorded === 'number' ? recorded : (seed?.step ?? 1);
+  return seed && typeof seed === 'object' && seed.form && typeof seed.form === 'object'
+    ? { ...seed, step: Math.min(5, Math.max(1, Math.round(step))) as 1 | 2 | 3 | 4 | 5 }
+    : null;
 }

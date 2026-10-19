@@ -199,6 +199,10 @@ export type AppState = {
     multiSiteMode?: import('../features/cases/multisite-model').MultiSiteMode;
     multiSiteRepeat?: string;
     siteDrafts?: import('../features/cases/multisite-model').MultiSiteDraft[];
+    /** The history record keeping this unfinished simulation (see `simulation_draft.rs`). */
+    draftId?: string;
+    /** False when the seed reopens a project that was already created. */
+    recordDraft?: boolean;
   } | null;
   simulationReturn: {
     route: 'new-case' | 'case';

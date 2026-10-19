@@ -25,6 +25,7 @@ mod recent;
 mod remote;
 mod remote_cases;
 mod sidecar;
+mod simulation_draft;
 mod sitedata;
 mod sites;
 mod workspace;
@@ -43,6 +44,7 @@ use recent::*;
 use remote::*;
 use remote_cases::*;
 use sidecar::*;
+use simulation_draft::*;
 use sitedata::*;
 use sites::*;
 use tauri::{Emitter, Manager};
@@ -201,6 +203,8 @@ pub fn run() {
             history_export,
             history_replay,
             history_compare,
+            new_simulation_draft_save,
+            new_simulation_draft_close,
             study_save_version,
             study_parameter_contexts,
             study_clone,
