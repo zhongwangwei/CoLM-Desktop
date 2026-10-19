@@ -336,3 +336,10 @@
 .resources-page .advanced[open] > .advanced-content {
   padding-top: 10px;
 }
+.resource-preset-notes {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+.resource-preset-notes li + li {
+  margin-top: 2px;
+}

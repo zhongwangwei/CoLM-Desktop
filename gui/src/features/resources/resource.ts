@@ -26,6 +26,128 @@ export const newServer = (): Server => ({
   runtime_dir: '',
   forcing_dir: '',
 });
+/**
+ * Clusters this app has been run on, as starting points for a new server. Only what every user of
+ * the cluster shares: scheduler, partitions, node size, limits and shared data folders. Never an
+ * address, account, key or personal folder (the user's own work root contains their account name
+ * on 天河 and 摆渡船, so it stays empty). Facts measured 2026-10-18/19.
+ */
+export type ServerPreset = {
+  id: string;
+  zh: string;
+  en: string;
+  notes: [string, string][];
+  fields: Partial<Server>;
+  /**
+   * How a checked server is recognised as this cluster: its scheduler and the partitions or
+   * queues it lists, never its address (login nodes, jump hosts and VPN addresses change).
+   */
+  match: { scheduler: string; queues: string[] };
+};
+export const SERVER_PRESETS: ServerPreset[] = [
+  {
+    id: 'tianhe-xingyi',
+    zh: '天河·星逸（Slurm）',
+    en: 'Tianhe Xingyi (Slurm)',
+    fields: { scheduler: 'slurm', partition: 'deimos', walltime: '12:00:00', cores_per_node: 64 },
+    match: { scheduler: 'slurm', queues: ['deimos', 'phobos'] },
+    notes: [
+      [
+        '分区 deimos：每节点 64 核，整节点独占计费；多站点批量会自动按节点打包。另有 phobos（88 核）与 debug（最长 30 分钟）。',
+        'Partition deimos: 64 cores per node, billed per whole node; station batches are packed per node. Also phobos (88 cores) and debug (30 minutes at most).',
+      ],
+      [
+        '没有外网：编引擎所需的依赖、Rust 与 CMake 由本机下载后经 ssh 送过去。',
+        'No internet: build dependencies, Rust and CMake are downloaded here and sent over SSH.',
+      ],
+      [
+        '计算节点没有 C 链接器：引擎先在登录节点编好再提交作业。',
+        'Compute nodes have no C linker: the engine is built on the login node before jobs are submitted.',
+      ],
+      [
+        '工作目录请填自己 HDD_POOL 下的一个文件夹。',
+        'Use a folder under your own HDD_POOL as the work root.',
+      ],
+    ],
+  },
+  {
+    id: 'baiduchuan',
+    zh: '摆渡船（LSF）',
+    en: 'Baiduchuan (LSF)',
+    fields: { scheduler: 'lsf', partition: 'normal', cores_per_node: 48 },
+    match: { scheduler: 'lsf', queues: ['normal', 'gpu'] },
+    notes: [
+      [
+        '队列 normal，每节点 48 核；作业按申请的核数分配，不占整个节点。',
+        'Queue normal, 48 cores per node; jobs get the cores they ask for, not whole nodes.',
+      ],
+      [
+        '只有登录节点能上网，计算节点不能；系统自带的 CMake 太旧，首次编引擎时会在用户目录装新版。',
+        'Only the login node has internet; the system CMake is too old, so a newer one is installed in your home folder on the first build.',
+      ],
+    ],
+  },
+  {
+    id: 'land',
+    zh: 'land 集群 land02（Slurm）',
+    en: 'land cluster, land02 (Slurm)',
+    fields: {
+      scheduler: 'slurm',
+      partition: 'first',
+      cores_per_node: 48,
+      rawdata_dir: '/shr03/CoLMrawdata',
+      runtime_dir: '/shr03/CoLMruntime',
+      forcing_dir: '/shr03/CoLM_Forcing/JRA3Q',
+    },
+    match: { scheduler: 'slurm', queues: ['first', 'second', 'largemem'] },
+    notes: [
+      [
+        '分区 first：7 个节点，每节点 48 核 / 320 GB，单作业最多 3 节点；second：64–80 核 / 512 GB–1 TB，单作业 1 节点；largemem：48 核 / 1.5 TB。',
+        'Partition first: 7 nodes of 48 cores / 320 GB, up to 3 nodes per job; second: 64–80 cores / 512 GB–1 TB, one node per job; largemem: 48 cores / 1.5 TB.',
+      ],
+      [
+        '不写内存的作业会占满整个节点的内存，应用提交时自动按核分配内存；second 常被别人的作业占满内存，排队时可改用 first。',
+        'A job without a memory request takes the whole node’s memory; the app requests memory per core. second is often full, so try first when queued.',
+      ],
+      [
+        '默认数据目录是课题组共享的 /shr03 下的 CoLMrawdata、CoLMruntime 与 CoLM_Forcing。',
+        'Default data folders are the group’s shared CoLMrawdata, CoLMruntime and CoLM_Forcing under /shr03.',
+      ],
+    ],
+  },
+];
+
+/** The preset a checked server looks like, by its scheduler and every partition the preset names. */
+export function recognisedPreset(probe: ResourceCheck['probe'] | undefined): ServerPreset | null {
+  const schedulers = probe?.schedulers ?? [];
+  const queues = new Set([
+    ...(probe?.queues ?? []),
+    ...(probe?.partitions ?? []).map((partition) => partition.name),
+  ]);
+  return (
+    SERVER_PRESETS.find(
+      (preset) =>
+        schedulers.includes(preset.match.scheduler) &&
+        preset.match.queues.every((queue) => queues.has(queue)),
+    ) ?? null
+  );
+}
+
+const PRESET_DATA_KEYS = ['project_dir', 'rawdata_dir', 'runtime_dir', 'forcing_dir'] as const;
+
+/**
+ * A server with a preset applied: scheduling settings follow the preset; data folders are only
+ * filled where still empty; address, account, authentication and work root are never touched.
+ */
+export function applyServerPreset(server: Server, preset: ServerPreset): Server {
+  const next: Server = { ...server };
+  for (const [key, value] of Object.entries(preset.fields) as [keyof Server, unknown][]) {
+    if ((PRESET_DATA_KEYS as readonly string[]).includes(key) && next[key]) continue;
+    (next as Record<string, unknown>)[key] = value;
+  }
+  return next;
+}
+
 export function replaceServer(servers: Server[], original: string | null, next: Server) {
   if (!next.host.trim() || next.host.startsWith('-') || /\s/.test(next.host))
     throw new Error('Invalid SSH host');
@@ -137,6 +259,7 @@ export type ResourceCheck = {
     root_writable?: boolean;
     maps?: { local: string; remote: string; local_exists: boolean; remote_exists: boolean }[];
     partitions?: Partition[];
+    queues?: string[];
   };
   engines?: { engines?: { id?: string; ready?: boolean }[] };
   probe_error?: string;

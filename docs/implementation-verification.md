@@ -34200,3 +34200,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 改为：`colm_remote::job::ended`：状态为 `Lost` 且调度系统的记录里有 CANCELLED 的，返回 `cancelled`；有 FAILED、TIMEOUT、OUT_OF_MEMORY、NODE_FAIL、PREEMPTED、BOOT_FAIL、DEADLINE 的，返回 `failed`。`COMPLETED` 却没有退出码、或查不到记录的，仍是 `Lost`。不编造退出码。`remote-status`（包括待核对的提交）在输出里带 `ended`，并把它算作终态；账本据此记为 `finished/cancelled` 或 `finished/failed`。前端 `remoteRunPermissions` 把这类作业也当终态（但不能"取回结果"，因为没有输出），`remoteEndStatus` 统一给出"已完成 / 失败 / 已停止"，批量循环、停止运行、核对服务器状态三处都用它。
     - 测试：`a_job_the_scheduler_ended_without_an_exit_code_is_over`（land02 的 sacct 原文、打包运行开跑前取消、超时、载体内存不足；含糊的情况仍是 lost；有退出码时不参与判断）；前端 `a server job the scheduler cancelled before it ran is over, with nothing to fetch`。colm-remote 104 条、colm-cli 457 条、前端 722 条通过。
     - 那 40 个站点在新版本里点一次"核对服务器状态"就会变成"已停止"，然后就可以重新提交。
+
+46. **内置集群预设（用户要求，2026-10-19）**：把今天跑通的三个集群的公共特征放进软件，新用户新建服务器时可以直接选用。
+    - 用户的取舍：服务器地址（IP、主机名）不写进预设，由用户自己填；land02 上课题组共享的数据目录（`/shr03/CoLMrawdata`、`/shr03/CoLMruntime`、`/shr03/CoLM_Forcing/JRA3Q`）写进去。账号、SSH 别名、密钥、个人目录（天河、摆渡船、land 上的个人目录本身就带着账号名）一律不放；用户自己的机器（7920、macpro）不做预设。
+    - 内容（`resource.ts` 的 `SERVER_PRESETS`）：
+      - 天河·星逸：slurm、deimos、12:00:00、64 核；说明 deimos 整节点独占（自动打包），以及 phobos、debug、没有外网、计算节点没有 C 链接器、工作目录建议放在自己的 HDD_POOL 下。
+      - 摆渡船：lsf、normal、48 核；说明只有登录节点能上网，系统 CMake 太旧会自动在用户目录装新版。
+      - land02：slurm、first、48 核，加上述共享数据目录；说明三个分区的规模，以及"作业不写内存会占满整节点内存、应用会按核申请内存，second 常被占满时可改用 first"。
+    - 套用规则（`applyServerPreset`）：调度相关的设置照预设覆盖；数据目录只填还空着的；地址、账号、认证方式、工作目录从不改动。
+    - 认集群不看地址（用户问"不写 IP 怎么匹配"）：预设带特征 `match`，即调度系统加上它列出的分区或队列（天河：slurm + deimos、phobos；land：slurm + first、second、largemem；摆渡船：lsf + normal、gpu）。"检查连接"或"识别调度器"之后，如果对上了，就提示"这台服务器看起来是……，要套用预设吗？"，只提示、不自动改。登录节点、跳板机、VPN 地址变了照样认得出。
+    - 界面：服务器配置的连接区最前面加"集群预设"下拉框（助手也能设置）；套用后在下面列出这个集群的注意事项。
+    - 测试：预设里不出现 host、username、identity_file、root、auth、port、maps，也不出现 IP 和个人目录名；套用只改调度设置和空着的数据目录；按调度系统和分区认集群，分区不全或调度系统不对时不认；页面上套用后地址和工作目录不变、不会自动保存。前端 726 条通过。

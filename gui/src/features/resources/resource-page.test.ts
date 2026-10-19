@@ -387,6 +387,23 @@ test('a checked Slurm server offers its partitions with node sizes and fills cor
   );
 });
 
+test('a cluster preset fills scheduling settings without touching address, account or work root', async () => {
+  const page = harness();
+  await page.ready();
+  await page.action('resource-advanced-toggle');
+  page.fill('resource-preset', 'land');
+  const contract = page.contract();
+  const value = (id: string) => contract.fields.find((field) => field.id === id)?.value;
+  assert.deepEqual(
+    ['resource-scheduler', 'resource-partition', 'resource-cores_per_node'].map(value),
+    ['slurm', 'first', '48'],
+  );
+  assert.equal(value('resource-host'), '7920land', 'the address the user gave stays');
+  assert.equal(value('resource-root'), '/data/colm', 'so does the work root');
+  assert.equal(value('resource-rawdata_dir'), '/shr03/CoLMrawdata');
+  assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
 test('ambiguous or absent schedulers retain the manual selection, without falling back to bare', async () => {
   for (const schedulers of [[], ['slurm', 'pbs']]) {
     const page = harness();
@@ -579,6 +596,7 @@ test('only visible configuration fields and selected maintenance actions enter t
       'resource-rawdata_dir',
       'resource-runtime_dir',
       'resource-forcing_dir',
+      'resource-preset',
       'resource-auth',
     ],
   );

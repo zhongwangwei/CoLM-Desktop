@@ -20,6 +20,9 @@ import {
   localRunEntries,
   resourceCheckSummary,
   partitionLabel,
+  SERVER_PRESETS,
+  applyServerPreset,
+  recognisedPreset,
   type Partition,
   type Server,
   type ResourceCheck,
@@ -66,7 +69,10 @@ export default function ResourcesPage() {
     [packageName, setPackageName] = useState('colm-core'),
     [changeKind, setChangeKind] = useState('refactor'),
     // 服务器探测报回的 Slurm 分区（按服务器地址），给"分区"一栏做下拉；改设置不清空它。
-    [partitionsByHost, setPartitionsByHost] = useState<Record<string, Partition[]>>({});
+    [partitionsByHost, setPartitionsByHost] = useState<Record<string, Partition[]>>({}),
+    // 套用了哪个集群预设（只在这次编辑里记着，用来显示它的注意事项），以及检查连接后认出的集群。
+    [appliedPreset, setAppliedPreset] = useState(''),
+    [recognisedByHost, setRecognisedByHost] = useState<Record<string, string>>({});
   const lock = useRef(false),
     epoch = useRef({ active: false }),
     initialized = useRef(false),
@@ -103,6 +109,7 @@ export default function ResourcesPage() {
       return;
     }
     setSelected(server ? `server:${server.host}` : 'local');
+    setAppliedPreset('');
     setOriginal(server?.host ?? null);
     setEditor(server ? structuredClone(server) : null);
     setBaseline(server ? JSON.stringify(server) : '');
@@ -121,6 +128,7 @@ export default function ResourcesPage() {
       return;
     }
     const next = newServer();
+    setAppliedPreset('');
     setSelected('new');
     setOriginal(null);
     setEditor(next);
@@ -337,9 +345,16 @@ export default function ResourcesPage() {
     });
   }
   function rememberPartitions(host: string, probe: ResourceCheck['probe']) {
+    const recognised = recognisedPreset(probe);
+    if (recognised) setRecognisedByHost((current) => ({ ...current, [host]: recognised.id }));
     const partitions = probe?.partitions;
     if (Array.isArray(partitions) && partitions.length)
       setPartitionsByHost((current) => ({ ...current, [host]: partitions }));
+  }
+  function applyPreset(id: string) {
+    const preset = SERVER_PRESETS.find((item) => item.id === id);
+    setAppliedPreset(id);
+    if (editor && preset) editServer(applyServerPreset(editor, preset));
   }
   function editField(key: keyof Server, value: string) {
     if (key === 'auth' && value !== 'password') setPassword('');
@@ -500,6 +515,20 @@ export default function ResourcesPage() {
     };
   }
   if (editor) {
+    guideFields.push({
+      id: 'resource-preset',
+      label: t('集群预设', 'Cluster preset'),
+      value: appliedPreset,
+      type: 'choice',
+      options: [
+        { value: '', label: t('不使用预设', 'No preset') },
+        ...SERVER_PRESETS.map((preset) => ({
+          value: preset.id,
+          label: en ? preset.en : preset.zh,
+        })),
+      ],
+      set: (value) => applyPreset(value),
+    });
     guideFields.push({
       id: 'resource-auth',
       label: t('认证方式', 'Authentication'),
@@ -1188,6 +1217,7 @@ export default function ResourcesPage() {
           title={`${original ?? t('新服务器', 'New server')} ${t('服务器配置', 'configuration')}`}
         >
           <div className="resource-connection-grid">
+            {field('resource-preset')}
             {field('resource-host')}
             <div className="field">
               <span className="field-label">{t('认证方式', 'Authentication')}</span>
@@ -1219,6 +1249,37 @@ export default function ResourcesPage() {
               <option key={alias} value={alias} />
             ))}
           </datalist>
+          {(() => {
+            const applied = SERVER_PRESETS.find((preset) => preset.id === appliedPreset);
+            const recognised = SERVER_PRESETS.find(
+              (preset) => preset.id === recognisedByHost[editor.host],
+            );
+            return (
+              <>
+                {recognised && recognised.id !== appliedPreset && (
+                  <Notice>
+                    {t(
+                      `这台服务器看起来是${recognised.zh}（按调度系统和分区认出，不看地址）。要套用这个预设吗？账号、地址和工作目录不会改。`,
+                      `This server looks like ${recognised.en} (recognised by its scheduler and partitions, not its address). Apply that preset? Account, address and work root stay as they are.`,
+                    )}{' '}
+                    <Button disabled={busy} onClick={() => applyPreset(recognised.id)}>
+                      {t('套用预设', 'Apply preset')}
+                    </Button>
+                  </Notice>
+                )}
+                {applied && (
+                  <Notice>
+                    <strong>{en ? applied.en : applied.zh}</strong>
+                    <ul className="resource-preset-notes">
+                      {applied.notes.map(([zh, english]) => (
+                        <li key={zh}>{en ? english : zh}</li>
+                      ))}
+                    </ul>
+                  </Notice>
+                )}
+              </>
+            );
+          })()}
           <div className="resource-wide-field">{field('resource-username')}</div>
           {editor.auth === 'key' && (
             <div className="resource-identity">

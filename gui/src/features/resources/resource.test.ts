@@ -9,6 +9,9 @@ import {
   resourceCheckSummary,
   resourceTaskInfo,
   partitionLabel,
+  SERVER_PRESETS,
+  applyServerPreset,
+  recognisedPreset,
   type ResourceCheck,
 } from './resource';
 test('server edits preserve others and reject duplicate host', () => {
@@ -306,4 +309,63 @@ test('a partition reads as its node sizes, limits and whether it takes whole nod
     partitionLabel({ ...deimos, name: 'debug', exclusive: false, max_time: '00:30:00' }, true),
     'debug · 1514 nodes · 64 cores / 500 GB per node · 30 min',
   );
+});
+
+test('presets carry only what a cluster shares, never an address, account or personal folder', () => {
+  for (const preset of SERVER_PRESETS) {
+    for (const key of ['host', 'username', 'identity_file', 'root', 'auth', 'port', 'maps'])
+      assert.ok(!(key in preset.fields), `${preset.id} sets ${key}`);
+    const text = JSON.stringify(preset);
+    assert.ok(!/\d+\.\d+\.\d+\.\d+/.test(text), `${preset.id} names an IP address`);
+    assert.ok(!/sysu_|dq013|zhwei|\/home\//i.test(text), `${preset.id} names a personal folder`);
+  }
+});
+
+test('a preset fills scheduling settings and only the data folders still empty', () => {
+  const land = SERVER_PRESETS.find((preset) => preset.id === 'land')!;
+  const mine = {
+    ...newServer(),
+    host: 'land02',
+    username: 'me',
+    root: '/tera11/me/colm',
+    scheduler: 'auto',
+    rawdata_dir: '/my/rawdata',
+  };
+  const next = applyServerPreset(mine, land);
+  assert.deepEqual(
+    [next.host, next.username, next.root, next.auth],
+    ['land02', 'me', '/tera11/me/colm', mine.auth],
+  );
+  assert.deepEqual([next.scheduler, next.partition, next.cores_per_node], ['slurm', 'first', 48]);
+  assert.equal(next.rawdata_dir, '/my/rawdata', 'a folder the user set is kept');
+  assert.equal(next.runtime_dir, '/shr03/CoLMruntime');
+});
+
+test('a checked server is recognised by its scheduler and partitions, not its address', () => {
+  const partitions = (names: string[]) =>
+    names.map(
+      (name) =>
+        ({ name }) as NonNullable<ResourceCheck['probe']>['partitions'] extends
+          (infer P)[] | undefined
+          ? P
+          : never,
+    );
+  assert.equal(
+    recognisedPreset({
+      schedulers: ['slurm'],
+      partitions: partitions(['first', 'largemem', 'second']),
+    })?.id,
+    'land',
+  );
+  assert.equal(
+    recognisedPreset({ schedulers: ['slurm'], queues: ['deimos', 'phobos', 'debug'] })?.id,
+    'tianhe-xingyi',
+  );
+  assert.equal(
+    recognisedPreset({ schedulers: ['lsf'], queues: ['normal', 'gpu'] })?.id,
+    'baiduchuan',
+  );
+  assert.equal(recognisedPreset({ schedulers: ['slurm'], queues: ['normal', 'gpu'] }), null);
+  assert.equal(recognisedPreset({ schedulers: ['slurm'], queues: ['first', 'second'] }), null);
+  assert.equal(recognisedPreset(undefined), null);
 });
