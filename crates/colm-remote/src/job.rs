@@ -169,7 +169,7 @@ pub fn ended(status: &Status) -> Option<&'static str> {
 pub fn status_script(root: &str, id: &str, lines: usize) -> String {
     let dir = quote(&job_dir(root, id));
     format!(
-        r#"{prelude}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
+        r#"{prelude}{alive}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
 if [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
 else
 {query}fi
@@ -178,7 +178,8 @@ echo "---log---"
 tail -n {lines} log 2>/dev/null
 true
 "#,
-        prelude = format!("{}{}", sched::PATH_PRELUDE, crate::pack::ALIVE),
+        prelude = sched::PATH_PRELUDE,
+        alive = crate::pack::ALIVE,
         query = sched::QUERY,
     )
 }
