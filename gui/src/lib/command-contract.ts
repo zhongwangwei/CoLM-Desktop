@@ -632,7 +632,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
-  "history_clear_plan": {},
+  "history_clear_plan": {
+    "project": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "history_clear": {
     "cases": {
       "required": true,
@@ -641,6 +646,10 @@ export const commandContract = {
     "unconfirmed": {
       "required": false,
       "rust_type": "Option<bool>"
+    },
+    "project": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "history_delete": {

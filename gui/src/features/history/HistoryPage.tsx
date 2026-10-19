@@ -129,7 +129,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   const [clearPlan, setClearPlan] = useState<ClearPlan | null>(null),
     [clearCases, setClearCases] = useState(false),
     [clearUnconfirmed, setClearUnconfirmed] = useState(false),
-    [clearOutcome, setClearOutcome] = useState<ClearResult | null>(null);
+    [clearOutcome, setClearOutcome] = useState<ClearResult | null>(null),
+    // 从项目卡片右键进来时只清这一个项目；为空时是整页的“清空历史记录”。
+    [clearProject, setClearProject] = useState<{ path: string; name: string } | null>(null);
   const deletionPath = deletion?.wholeCase ? deletion.plan?.casePath : deletion?.plan?.path;
   const directoryName =
     deletionPath
@@ -352,14 +354,21 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   function deleteItems(item: HistoryOperation) {
     const plan = deletePlan?.id === item.operation_id ? deletePlan : null;
     const allowed = deleteAllowed(item);
-    if (item.project_group)
+    if (item.project_group) {
+      // 一个多站点项目可有上千条记录，逐条删不现实；整项目删除沿用清空历史的范围与确认框。
+      const { path, name } = item.project_group;
       return [
         {
-          label: t('打开项目时间线后逐条删除', 'Open the project timeline to delete records'),
-          disabled: true,
-          onSelect: () => {},
+          label: t('删除这个项目…', 'Delete this project…'),
+          danger: true,
+          disabled: busy,
+          onSelect: () => {
+            setError('');
+            run(() => openClear({ path, name }));
+          },
         },
       ];
+    }
     if (item.run_group)
       return [
         {
@@ -456,8 +465,12 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setResult(null);
     setApplied((current) => ({ ...current }));
   }
-  async function openClear() {
-    const plan = await invokeJson<ClearPlan>('history_clear_plan', {});
+  async function openClear(project?: { path: string; name: string }) {
+    const plan = await invokeJson<ClearPlan>(
+      'history_clear_plan',
+      project ? { project: project.path } : {},
+    );
+    setClearProject(project ?? null);
     setClearCases(false);
     setClearUnconfirmed(false);
     setClearOutcome(null);
@@ -468,6 +481,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     const result = await invokeJson<ClearResult>('history_clear', {
       cases: clearCases ? clearPlan.cases.map((item) => item.path) : [],
       unconfirmed: clearUnconfirmed,
+      ...(clearProject ? { project: clearProject.path } : {}),
     });
     for (const path of result.deleted)
       update((current) => historyStateAfterDirectoryDeletion(current, path, undefined));
@@ -673,7 +687,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       label: t('清空历史记录', 'Clear history'),
       kind: 'click',
       enabled: !busy,
-      run: () => action(openClear),
+      run: () => action(() => openClear()),
     },
     {
       id: 'history-next',
@@ -1001,7 +1015,11 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       {clearPlan && (
         <Dialog
           open
-          title={t('清空历史记录', 'Clear history')}
+          title={
+            clearProject
+              ? t(`删除项目“${clearProject.name}”`, `Delete project “${clearProject.name}”`)
+              : t('清空历史记录', 'Clear history')
+          }
           showClose={false}
           onOpenChange={(open) => {
             if (!open && !busy) setClearPlan(null);
@@ -1012,6 +1030,11 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
               `将移除 ${clearPlan.records} 条已结束的历史记录。`,
               `Remove ${clearPlan.records} finished history records.`,
             )}
+            {clearProject &&
+              t(
+                '项目文件夹本身不会删除，只有下面勾选的算例文件夹会删除。',
+                'The project folder itself is kept; only the case folders below are deleted when ticked.',
+              )}
           </p>
           {clearPlan.unconfirmed > 0 && (
             <>
@@ -1117,10 +1140,16 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
               onClick={() => run(clearHistory)}
             >
               {busy
-                ? t('正在清空…', 'Clearing…')
-                : clearCases
-                  ? t('清空记录并删除文件夹', 'Clear records and delete folders')
-                  : t('确认清空记录', 'Confirm clearing records')}
+                ? clearProject
+                  ? t('正在删除…', 'Deleting…')
+                  : t('正在清空…', 'Clearing…')
+                : clearProject
+                  ? clearCases
+                    ? t('删除项目记录和算例文件夹', 'Delete project records and case folders')
+                    : t('删除项目记录', 'Delete project records')
+                  : clearCases
+                    ? t('清空记录并删除文件夹', 'Clear records and delete folders')
+                    : t('确认清空记录', 'Confirm clearing records')}
             </Button>
           </div>
         </Dialog>
@@ -1252,7 +1281,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             {busy ? t('正在读取…', 'Loading…') : `${page.total} ${t('条记录', 'records')}`}
           </span>
           <div className="button-row">
-            <Button variant="danger" disabled={busy} onClick={() => run(openClear)}>
+            <Button variant="danger" disabled={busy} onClick={() => run(() => openClear())}>
               {t('清空历史记录', 'Clear history')}
             </Button>
             {(['csv', 'json'] as const).map((format) => (

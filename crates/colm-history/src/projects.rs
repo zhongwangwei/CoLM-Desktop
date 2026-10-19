@@ -36,7 +36,7 @@ pub(crate) fn owning_case(path: &str) -> &Path {
 
 /// The project folder an operation belongs to: the recorded `detail.subject.project_path`, else
 /// the folder containing its case.
-pub(super) fn project_path(event: &Event) -> Option<String> {
+pub fn project_path(event: &Event) -> Option<String> {
     if let Some(path) = event.detail["subject"]["project_path"].as_str() {
         return Some(path.to_owned()).filter(|path| !path.is_empty());
     }

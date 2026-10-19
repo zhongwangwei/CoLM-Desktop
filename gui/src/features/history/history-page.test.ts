@@ -497,6 +497,49 @@ test('clearing history deletes case folders only when the user ticks them', asyn
   assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
 });
 
+test('right-clicking a project card deletes that project only, through the clear dialog', async () => {
+  const h = harness();
+  const members = [{ ...row('r1'), case_path: '/cache/222/AT-Neu' }];
+  const project = {
+    ...row('r1'),
+    kind: 'project',
+    case_path: null,
+    detail: { project_path: '/cache/222', subject: { kind: 'project', name: '222' } },
+    project_group: { path: '/cache/222', name: '222', members },
+  };
+  h.requests[0].resolve({ items: [project], total: 1 });
+  await h.settle();
+  const items = h.menu().props.items;
+  assert.equal(items.length, 1);
+  assert.equal(items[0].disabled, false, 'a project can be deleted from its card');
+  items[0].onSelect();
+  assert.equal(h.requests[1].command, 'history_clear_plan');
+  assert.deepEqual(h.requests[1].args, { project: '/cache/222' });
+  h.requests[1].resolve({
+    records: 3,
+    unconfirmed: 0,
+    unconfirmedRemote: 0,
+    cases: [],
+    remoteCases: 2,
+    skipped: [],
+  });
+  await h.settle();
+  const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
+  assert.equal(dialog.props.title, 'Delete project “222”');
+  h.click('Delete project records');
+  assert.equal(h.requests[2].command, 'history_clear');
+  assert.deepEqual(h.requests[2].args, { cases: [], unconfirmed: false, project: '/cache/222' });
+  h.requests[2].resolve({ removed: 3, kept: 0, deleted: [], failed: [] });
+  await h.settle();
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
+  assert.equal(h.requests[3].command, 'history_list');
+  h.requests[3].resolve({ items: [], total: 0 });
+  await h.settle();
+  // The page-wide clear afterwards is not narrowed to the last project.
+  h.click('Clear history');
+  assert.deepEqual(h.requests.at(-1)!.args, {});
+});
+
 test('a project card opens its timeline, batching stations, and a case opens its record', async () => {
   const h = harness();
   const member = (id: string, site: string, action: string, status: string, time: number) => ({

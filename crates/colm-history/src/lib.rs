@@ -3,7 +3,7 @@
 //! metadata snapshot; uncertain work must be reconciled by its actual executor.
 mod grouped;
 mod projects;
-pub use projects::ProjectGroup;
+pub use projects::{project_path, ProjectGroup};
 mod import;
 mod provenance;
 pub use provenance::{capture_provenance, load_provenance};

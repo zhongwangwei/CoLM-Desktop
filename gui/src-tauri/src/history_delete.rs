@@ -674,7 +674,8 @@ struct Survey {
 
 /// Every visible operation and the local case folders they own, derived from the ledger only.
 /// One representative detail per recorded case path keeps this fast on long histories.
-fn survey(ledger: &History) -> Result<Survey, String> {
+/// `project` narrows it to one project card, matched with the same rule that folds the listing.
+fn survey(ledger: &History, project: Option<&str>) -> Result<Survey, String> {
     let mut survey = Survey::default();
     let mut by_path = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut offset = 0;
@@ -687,6 +688,11 @@ fn survey(ledger: &History) -> Result<Survey, String> {
             })
             .map_err(|e| e.to_string())?;
         for operation in &page.items {
+            if project.is_some_and(|project| {
+                colm_history::project_path(&operation.latest).as_deref() != Some(project)
+            }) {
+                continue;
+            }
             if !finished(operation) {
                 survey
                     .unconfirmed
@@ -758,8 +764,8 @@ fn directory_bytes(path: &Path) -> u64 {
         .sum()
 }
 
-fn clear_plan(ledger: &History) -> Result<ClearPlan, String> {
-    let survey = survey(ledger)?;
+fn clear_plan(ledger: &History, project: Option<&str>) -> Result<ClearPlan, String> {
+    let survey = survey(ledger, project)?;
     Ok(ClearPlan {
         records: survey.terminal.len(),
         unconfirmed: survey.unconfirmed.len(),
@@ -783,8 +789,9 @@ fn clear(
     ledger: &History,
     confirmed_cases: &[String],
     include_unconfirmed: bool,
+    project: Option<&str>,
 ) -> Result<ClearResult, String> {
-    let survey = survey(ledger)?;
+    let survey = survey(ledger, project)?;
     let mut keep = std::collections::BTreeSet::new();
     let mut deleted = Vec::new();
     let mut failed = Vec::new();
@@ -828,9 +835,12 @@ fn clear(
 }
 
 #[tauri::command]
-pub async fn history_clear_plan() -> Result<ClearPlan, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        clear_plan(&History::open_default().map_err(|e| e.to_string())?)
+pub async fn history_clear_plan(project: Option<String>) -> Result<ClearPlan, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        clear_plan(
+            &History::open_default().map_err(|e| e.to_string())?,
+            project.as_deref(),
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -841,16 +851,18 @@ pub async fn history_clear(
     processes: tauri::State<'_, crate::sidecar::RunProcesses>,
     cases: Vec<String>,
     unconfirmed: Option<bool>,
+    project: Option<String>,
 ) -> Result<ClearResult, String> {
     let processes = processes.inner().clone();
     let unconfirmed = unconfirmed.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let ledger = History::open_default().map_err(|e| e.to_string())?;
         // Nothing this session runs may lose its record or folder.
+        let project = project.as_deref();
         if cases.is_empty() && !unconfirmed {
-            clear(&ledger, &cases, false)
+            clear(&ledger, &cases, false, project)
         } else {
-            processes.with_idle(|| clear(&ledger, &cases, unconfirmed))
+            processes.with_idle(|| clear(&ledger, &cases, unconfirmed, project))
         }
     })
     .await
@@ -1067,11 +1079,11 @@ mod tests {
         let (root, ledger, _) = fixture();
         let source = root.join("source");
         mark_case(&source);
-        let plan = clear_plan(&ledger).unwrap();
+        let plan = clear_plan(&ledger, None).unwrap();
         assert_eq!(plan.records, 1);
         assert_eq!(plan.cases.len(), 1);
         assert!(plan.cases[0].bytes > 0);
-        let result = clear(&ledger, &[], false).unwrap();
+        let result = clear(&ledger, &[], false, None).unwrap();
         assert_eq!((result.removed, result.kept), (1, 0));
         assert!(result.deleted.is_empty());
         assert!(source.join("input").is_file());
@@ -1085,16 +1097,16 @@ mod tests {
         let (root, ledger, _) = fixture();
         let source = root.join("source");
         mark_case(&source);
-        let shown = clear_plan(&ledger).unwrap().cases[0].path.clone();
+        let shown = clear_plan(&ledger, None).unwrap().cases[0].path.clone();
         // An unfinished operation on the same case keeps the folder and its own record.
         let mut active = Event::start("run");
         active.case_path = Some(shown.clone());
         ledger.append(&active).unwrap();
-        let plan = clear_plan(&ledger).unwrap();
+        let plan = clear_plan(&ledger, None).unwrap();
         assert!(plan.cases.is_empty());
         assert_eq!((plan.unconfirmed, plan.skipped.len()), (1, 1));
         assert_eq!(plan.unconfirmed_remote, 0);
-        assert!(clear(&ledger, std::slice::from_ref(&shown), false)
+        assert!(clear(&ledger, std::slice::from_ref(&shown), false, None)
             .unwrap()
             .deleted
             .is_empty());
@@ -1109,11 +1121,48 @@ mod tests {
             &ledger,
             &[shown.clone(), outsider.display().to_string()],
             false,
+            None,
         )
         .unwrap();
         assert_eq!(result.deleted, vec![shown]);
         assert!(!source.exists());
         assert!(outsider.exists());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_a_project_leaves_every_other_project_alone() {
+        let (root, ledger, _) = fixture();
+        let mut cases = Vec::new();
+        for project in ["alpha", "beta"] {
+            let case = root.join(project).join("site");
+            std::fs::create_dir_all(&case).unwrap();
+            mark_case(&case);
+            let mut event = Event::start("run");
+            event.case_path = Some(case.display().to_string());
+            ledger.append(&event).unwrap();
+            ledger
+                .append(&event.next(EventPhase::Finished, "succeeded"))
+                .unwrap();
+            cases.push(case.display().to_string());
+        }
+        let alpha = root.join("alpha").display().to_string();
+        let plan = clear_plan(&ledger, Some(&alpha)).unwrap();
+        assert_eq!((plan.records, plan.unconfirmed), (1, 0));
+        let shown = plan.cases.iter().map(|case| case.path.clone());
+        assert_eq!(shown.collect::<Vec<_>>(), vec![cases[0].clone()]);
+        // Naming another project's folder in the request still never deletes it.
+        let result = clear(&ledger, &cases, false, Some(&alpha)).unwrap();
+        assert_eq!((result.removed, result.kept), (1, 0));
+        assert_eq!(result.deleted, vec![cases[0].clone()]);
+        assert!(!Path::new(&cases[0]).exists());
+        assert!(Path::new(&cases[1]).join("case.nml").is_file());
+        assert_eq!(
+            ledger.query(&Default::default()).unwrap().total,
+            2,
+            "beta and the fixture's run keep their records"
+        );
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1130,14 +1179,14 @@ mod tests {
         remote.host = Some("tms17l".into());
         remote.location = Some("remote".into());
         ledger.append(&remote).unwrap();
-        let plan = clear_plan(&ledger).unwrap();
+        let plan = clear_plan(&ledger, None).unwrap();
         assert_eq!(
             (plan.records, plan.unconfirmed, plan.unconfirmed_remote),
             (2, 1, 1)
         );
-        let result = clear(&ledger, &[], false).unwrap();
+        let result = clear(&ledger, &[], false, None).unwrap();
         assert_eq!((result.removed, result.kept), (2, 1));
-        let result = clear(&ledger, &[], true).unwrap();
+        let result = clear(&ledger, &[], true, None).unwrap();
         assert_eq!((result.removed, result.kept), (1, 0));
         assert_eq!(ledger.query(&Default::default()).unwrap().total, 0);
         // The hidden operation still counts as unresolved for executor safety checks.
