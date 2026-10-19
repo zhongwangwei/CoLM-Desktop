@@ -555,3 +555,91 @@ test('a server station says why it waits, or that the engine is being compiled',
   assert.ok(page.text.includes('Compiling the engine on the server'));
   assert.ok(page.text.includes('Stopped (the job was cancelled)'));
 });
+
+test('station picker filters by status and quick-selects only what is listed or unfinished', () => {
+  const page = screen();
+  page.state.cases = ['A', 'B', 'C'].map((name) => ({ dir: `/${name}`, name }));
+  page.state.running = {
+    '/A': { running: false, status: 'succeeded', logs: [] },
+    '/B': { running: false, status: 'failed', logs: [] },
+  };
+  page.render();
+  page
+    .actions()
+    .find((action) => action.id === 'project-batch-selection')!
+    .run();
+  page.render();
+  const click = (label: string) => {
+    const element = page.elements.find(
+      (el) => el.children.includes(label) && typeof el.props?.onClick === 'function',
+    )!;
+    (element.props.onClick as () => void)();
+    page.render();
+  };
+  const chosen = () =>
+    page
+      .fields()
+      .filter((field) => (field as unknown as { value: string }).value === 'true')
+      .map((field) => field.id.split(':')[1]);
+  const listed = () =>
+    page.elements
+      .filter((el) => el.type === 'label' && String(el.props.className).startsWith('batch-station'))
+      .map((el) => el.props.className);
+  assert.deepEqual(chosen(), ['/A', '/B', '/C']);
+  click('Only stations without results (2)');
+  assert.deepEqual(chosen(), ['/B', '/C']);
+  click('Failed or stopped');
+  assert.deepEqual(listed(), ['batch-station is-failed is-selected']);
+  click('Deselect listed');
+  assert.deepEqual(chosen(), ['/C']);
+  click('All');
+  assert.equal(listed().length, 3);
+  click('Select all stations');
+  assert.deepEqual(chosen(), ['/A', '/B', '/C']);
+});
+
+test('monitor tiles show one status at a time and pick failed stations for a rerun', () => {
+  const page = screen();
+  page.state.cases = ['Done', 'Broke', 'Halted', 'Busy'].map((name) => ({
+    dir: `/${name}`,
+    name,
+  }));
+  page.state.running = {
+    '/Done': { running: false, status: 'succeeded', logs: [] },
+    '/Broke': { running: false, status: 'failed', logs: [] },
+    '/Halted': { running: false, status: 'cancelled', logs: [] },
+    // 本地运行会锁住整个选择；服务器上的运行只钉住它自己。
+    '/Busy': {
+      running: true,
+      status: 'running',
+      location: 'remote',
+      logs: [],
+    } as (typeof page.state.running)[string],
+  };
+  page.render();
+  assert.ok(page.text.includes('3 of 4 ended'));
+  const articles = () =>
+    page.elements.filter((el) => el.type === 'article').map((el) => el.props['aria-label']);
+  const tile = (tone: string) =>
+    page.elements.find(
+      (el) => el.type === 'button' && el.props.className === `batch-tile is-${tone}`,
+    )!;
+  (tile('failed').props.onClick as () => void)();
+  page.render();
+  assert.deepEqual(articles(), ['Broke']);
+  assert.equal(tile('failed').props['aria-pressed'], true);
+  assert.ok(
+    !page.elements.some(
+      (el) => el.type === 'details' && String(el.props?.className) === 'batch-group',
+    ),
+  );
+  (tile('failed').props.onClick as () => void)();
+  page.render();
+  assert.deepEqual(articles(), ['Busy', 'Done', 'Broke', 'Halted']);
+  const rerun = page.elements.find((el) =>
+    el.children.includes('Select the 2 failed or stopped stations to rerun'),
+  )!;
+  (rerun.props.onClick as () => void)();
+  page.render();
+  assert.deepEqual(articles(), ['Busy', 'Broke', 'Halted'], 'the running station stays selected');
+});
