@@ -483,6 +483,9 @@ export default function RunPanel({
               await runRemoteBatch({
                 cases: prepared,
                 workers: nums[2],
+                // Several submissions and status checks at once: each station costs seconds of SSH.
+                submitConcurrency: 3,
+                pollConcurrency: 4,
                 stopped: () => stoppedBatches.has(runId) || cancelledRun.current === runId,
                 record: (dir) => invokeJson('remote_job_record', { case: dir }),
                 status: (dir) => invokeJson('remote_status', { case: dir }),

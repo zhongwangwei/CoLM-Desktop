@@ -174,3 +174,91 @@ test('a late polling response cannot replace a terminal cancellation or start an
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'a')?.state, 'cancelled');
   assert.deepEqual(q.submitted, ['a', 'b']);
 });
+
+const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test('stations are submitted and polled several at a time, not one after another', async () => {
+  const cases = ['a', 'b', 'c', 'd', 'e', 'f'];
+  let submitting = 0;
+  let peakSubmitting = 0;
+  let polling = 0;
+  let peakPolling = 0;
+  const done = new Set<string>();
+  const changes: { dir: string; state: string }[] = [];
+  await runRemoteBatch({
+    cases,
+    workers: 6,
+    submitConcurrency: 3,
+    pollConcurrency: 4,
+    stopped: () => false,
+    record: async () => null,
+    submit: async (dir) => {
+      peakSubmitting = Math.max(peakSubmitting, ++submitting);
+      await tick();
+      await tick();
+      submitting--;
+      return record(dir);
+    },
+    status: async (dir) => {
+      peakPolling = Math.max(peakPolling, ++polling);
+      await tick();
+      polling--;
+      done.add(dir);
+      return finished(dir);
+    },
+    change: (dir, state) => changes.push({ dir, state }),
+    wait: async () => {},
+  });
+  assert.equal(peakSubmitting, 3);
+  assert.equal(peakPolling, 4);
+  for (const dir of cases)
+    assert.equal([...changes].reverse().find((entry) => entry.dir === dir)?.state, 'succeeded');
+});
+
+test('parallel submissions never exceed the workers, counting those still being submitted', async () => {
+  let inFlight = 0;
+  let peak = 0;
+  const sent: string[] = [];
+  const q = queue({
+    cases: ['a', 'b', 'c', 'd', 'e'],
+    workers: 2,
+    submitConcurrency: 4,
+    submit: async (dir) => {
+      sent.push(dir);
+      peak = Math.max(peak, ++inFlight);
+      await tick();
+      return record(dir);
+    },
+    status: async (dir) => {
+      inFlight--;
+      return finished(dir);
+    },
+  });
+  await q.run();
+  assert.equal(peak, 2);
+  assert.deepEqual([...sent].sort(), ['a', 'b', 'c', 'd', 'e']);
+});
+
+test('one failed submission among parallel ones is recorded, the rest of the queue is stopped', async () => {
+  const sent: string[] = [];
+  const q = queue({
+    cases: ['a', 'b', 'c', 'd', 'e', 'f'],
+    workers: 6,
+    submitConcurrency: 3,
+    submit: async (dir) => {
+      sent.push(dir);
+      await tick();
+      if (dir === 'b') throw new Error('Lost after submit');
+      return record(dir);
+    },
+  });
+  await assert.rejects(q.run(), /Lost after submit/);
+  const last = (dir: string) => [...q.changes].reverse().find((entry) => entry.dir === dir)?.state;
+  assert.equal(last('b'), 'unknown');
+  // A station started while another was still failing is not lost: whatever was sent has its
+  // outcome recorded, and nothing is started once the failure is seen.
+  assert.ok(sent.length >= 3 && sent.length <= 5, `${sent}`);
+  for (const dir of sent.filter((name) => name !== 'b')) assert.equal(last(dir), 'submitted', dir);
+  for (const dir of ['a', 'b', 'c', 'd', 'e', 'f'].filter((name) => !sent.includes(name)))
+    assert.equal(last(dir), 'cancelled', dir);
+});

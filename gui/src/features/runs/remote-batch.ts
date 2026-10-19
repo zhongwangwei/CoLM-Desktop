@@ -3,6 +3,12 @@ import { reconcileRemoteRun, remoteRunPermissions } from './run-model';
 type Remote = Record<string, unknown>;
 
 // The window owns pending work; submitted jobs retain their durable backend records.
+//
+// Submitting a station takes several seconds of SSH round trips, and so does asking for a job's
+// state. Done one by one, ninety stations spend minutes only on submissions and a round of status
+// checks takes longer than the jobs run. `submitConcurrency` submissions and `pollConcurrency`
+// status checks run at once (each is its own SSH session, so keep their sum under sshd's usual
+// ten-session limit); both default to one, the original strictly sequential behaviour.
 export async function runRemoteBatch(options: {
   cases: string[];
   workers: number;
@@ -12,9 +18,22 @@ export async function runRemoteBatch(options: {
   status: (dir: string) => Promise<Remote>;
   change: (dir: string, state: string, remote?: Remote, error?: string) => void;
   wait?: () => Promise<void>;
+  submitConcurrency?: number;
+  pollConcurrency?: number;
 }) {
   const active = new Map<string, Remote>();
+  const submitting = new Set<Promise<void>>();
+  const submitLimit = Math.max(1, Math.floor(options.submitConcurrency ?? 1));
+  const pollLimit = Math.max(1, Math.floor(options.pollConcurrency ?? 1));
   let next = 0;
+  let failed = false;
+  let failure: unknown;
+  const fail = (error: unknown) => {
+    if (!failed) {
+      failed = true;
+      failure = error;
+    }
+  };
   const wait = options.wait ?? (() => new Promise<void>((resolve) => setTimeout(resolve, 3000)));
   function checkIdentity(dir: string, previous: Remote, result: Remote) {
     const before = (previous.record ?? previous) as Remote;
@@ -42,63 +61,93 @@ export async function runRemoteBatch(options: {
     if (permissions.terminal) active.delete(dir);
     else if (!permissions.cancel) throw new Error(`${dir}: server job state is unconfirmed`);
   }
-  try {
-    while (next < options.cases.length || active.size) {
-      if (options.stopped()) break;
-      while (next < options.cases.length && active.size < options.workers && !options.stopped()) {
-        const dir = options.cases[next++];
-        let known: Remote | undefined;
-        try {
-          const record = await options.record(dir);
-          if (record) {
-            known = record;
-            const status = await options.status(dir);
-            checkIdentity(dir, record, status);
-            known = reconcileRemoteRun(record, status);
-            if (!remoteRunPermissions(known).terminal)
-              throw new Error(`${dir}: reconcile the existing server job before resubmitting`);
-          }
-          if (options.stopped()) {
-            options.change(dir, 'cancelled');
-            break;
-          }
-          options.change(dir, 'submitting');
-          known = await options.submit(dir);
-          const identity = (known.record ?? known) as Remote;
-          if (
-            typeof identity.job !== 'string' ||
-            typeof identity.host !== 'string' ||
-            known.pending ||
-            known.needs_reconciliation
-          )
-            throw new Error(`${dir}: submission identity is unconfirmed`);
-          active.set(dir, known);
-          options.change(dir, 'submitted', known);
-        } catch (error) {
-          options.change(dir, 'unknown', known, String(error));
-          throw error;
-        }
+  // One station: check what it already has, submit it, and take it into `active`. A failure is
+  // recorded on the station and stops the whole batch (nothing more is submitted).
+  async function submitOne(dir: string) {
+    let known: Remote | undefined;
+    try {
+      const record = await options.record(dir);
+      if (record) {
+        known = record;
+        const status = await options.status(dir);
+        checkIdentity(dir, record, status);
+        known = reconcileRemoteRun(record, status);
+        if (!remoteRunPermissions(known).terminal)
+          throw new Error(`${dir}: reconcile the existing server job before resubmitting`);
       }
-      if (!active.size || options.stopped()) break;
-      await wait();
+      if (options.stopped()) {
+        options.change(dir, 'cancelled');
+        return;
+      }
+      options.change(dir, 'submitting');
+      known = await options.submit(dir);
+      const identity = (known.record ?? known) as Remote;
+      if (
+        typeof identity.job !== 'string' ||
+        typeof identity.host !== 'string' ||
+        known.pending ||
+        known.needs_reconciliation
+      )
+        throw new Error(`${dir}: submission identity is unconfirmed`);
+      active.set(dir, known);
+      options.change(dir, 'submitted', known);
+    } catch (error) {
+      options.change(dir, 'unknown', known, String(error));
+      fail(error);
+    }
+  }
+  async function pollOne(dir: string, previous: Remote) {
+    if (options.stopped() || failed) return;
+    try {
+      const result = await options.status(dir);
+      if (options.stopped()) return;
+      checkIdentity(dir, previous, result);
+      const merged = reconcileRemoteRun(previous, result);
+      active.set(dir, merged);
+      publish(dir, merged);
+    } catch (error) {
+      if (options.stopped()) return;
+      options.change(dir, 'unknown', active.get(dir), String(error));
+      fail(error);
+    }
+  }
+  try {
+    while (!failed && (next < options.cases.length || active.size || submitting.size)) {
       if (options.stopped()) break;
-      for (const [dir, previous] of active) {
-        if (options.stopped()) break;
-        try {
-          const result = await options.status(dir);
-          if (options.stopped()) break;
-          checkIdentity(dir, previous, result);
-          const merged = reconcileRemoteRun(previous, result);
-          active.set(dir, merged);
-          publish(dir, merged);
-        } catch (error) {
-          if (options.stopped()) break;
-          options.change(dir, 'unknown', active.get(dir), String(error));
-          throw error;
-        }
+      while (
+        !failed &&
+        next < options.cases.length &&
+        active.size + submitting.size < options.workers &&
+        submitting.size < submitLimit &&
+        !options.stopped()
+      ) {
+        const task: Promise<void> = submitOne(options.cases[next++]).finally(() =>
+          submitting.delete(task),
+        );
+        submitting.add(task);
+      }
+      if (failed || options.stopped()) break;
+      if (!active.size && !submitting.size) break;
+      // Submissions under way come first: as soon as one finishes there may be room for the next.
+      // Only when nothing can be started are the running jobs looked at (every few seconds).
+      if (submitting.size) {
+        await Promise.race(submitting);
+        continue;
+      }
+      await wait();
+      if (options.stopped() || failed) break;
+      const entries = [...active];
+      for (let index = 0; index < entries.length; index += pollLimit) {
+        if (options.stopped() || failed) break;
+        await Promise.all(
+          entries.slice(index, index + pollLimit).map(([dir, previous]) => pollOne(dir, previous)),
+        );
       }
     }
   } finally {
+    // Submissions already under way finish (and are recorded) before the rest are given up.
+    await Promise.allSettled([...submitting]);
     for (const dir of options.cases.slice(next)) options.change(dir, 'cancelled');
   }
+  if (failed) throw failure;
 }
