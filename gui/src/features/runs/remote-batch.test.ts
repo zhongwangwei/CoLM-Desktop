@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runRemoteBatch } from './remote-batch';
+import { eachLimited, runRemoteBatch } from './remote-batch';
 
 const record = (dir: string) => ({ host: 'server', job: `job-${dir}` });
 const finished = (dir: string, exit_code = 0) => ({
@@ -309,4 +309,21 @@ test('one failed submission among parallel ones is recorded, the rest of the que
   for (const dir of sent.filter((name) => name !== 'b')) assert.equal(last(dir), 'succeeded', dir);
   for (const dir of ['a', 'b', 'c', 'd', 'e', 'f'].filter((name) => !sent.includes(name)))
     assert.equal(last(dir), 'cancelled', dir);
+});
+
+test('stopping a batch cancels several stations at once, never more than the limit', async () => {
+  let active = 0,
+    peak = 0;
+  const done: string[] = [];
+  const stations = Array.from({ length: 12 }, (_, index) => `s${index}`);
+  await eachLimited(stations, 5, async (dir) => {
+    active++;
+    peak = Math.max(peak, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    done.push(dir);
+    active--;
+  });
+  assert.deepEqual([...done].sort(), [...stations].sort());
+  assert.equal(peak, 5, 'five at a time, not one by one');
+  await eachLimited([], 5, async () => assert.fail('nothing to do'));
 });

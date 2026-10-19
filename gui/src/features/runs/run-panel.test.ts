@@ -15,7 +15,7 @@ import {
   reconcileRemoteRun,
   matchesRemoteRun,
 } from './run-model';
-import { runRemoteBatch } from './remote-batch';
+import { eachLimited, runRemoteBatch } from './remote-batch';
 import { compatibleKernel } from './run-model';
 import { applyRunEvent } from '../../lib/run-events';
 import type { RunState } from '../../lib/types';
@@ -137,6 +137,7 @@ function panel(
     bilingual: (zh: string) => zh,
     t: (zh: string) => zh,
     settleRuns,
+    eachLimited,
     runRemoteBatch: (args: Parameters<typeof runRemoteBatch>[0]) => {
       batchWorkers.push(args.workers);
       return runRemoteBatch({ ...args, wait: async () => {} });

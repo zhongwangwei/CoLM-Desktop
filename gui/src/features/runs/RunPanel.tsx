@@ -3,7 +3,7 @@ import { Fragment, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
-import { runRemoteBatch } from './remote-batch';
+import { eachLimited, runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
 import EngineProgress from '../cases/EngineProgress';
 import type { BuildProgress } from '../cases/engine-progress';
@@ -811,18 +811,18 @@ export default function RunPanel({
         : [casePath];
       if (host && batchCases) {
         let count = 0;
-        for (const dir of targets) {
+        await eachLimited(targets, 5, async (dir) => {
           const record = latest.current[dir]?.progress?.remote;
-          if (!record) continue;
+          if (!record) return;
           try {
             let result = await invokeJson<Record<string, unknown>>('remote_status', { case: dir });
-            if (!matchesRemoteRun(latest.current[dir], result)) continue;
+            if (!matchesRemoteRun(latest.current[dir], result)) return;
             if (remoteRunPermissions(result).cancel) {
               await invokeJson('remote_cancel', { case: dir });
               count++;
               result = await invokeJson('remote_status', { case: dir });
             }
-            if (!matchesRemoteRun(latest.current[dir], result)) continue;
+            if (!matchesRemoteRun(latest.current[dir], result)) return;
             const terminal = remoteRunPermissions(result).terminal;
             const status = result.status as { exit_code?: number } | undefined;
             if (id)
@@ -834,7 +834,7 @@ export default function RunPanel({
           } catch (error) {
             notify(String(error), true);
           }
-        }
+        });
         notify(
           t(
             `已停止继续提交，并向 ${count} 个服务器作业请求取消；已提交作业须核对终态。`,

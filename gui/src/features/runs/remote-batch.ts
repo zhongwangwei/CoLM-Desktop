@@ -161,3 +161,20 @@ export async function runRemoteBatch(options: {
   }
   if (failed) throw failure;
 }
+
+/**
+ * Run `work` over `items`, at most `limit` at a time. Stopping a batch went station by station:
+ * three SSH round trips each (identity check, cancel, status), so 40 queued land02 jobs took
+ * minutes (2026-10-19). Five at a time stays under the ten sessions sshd allows, as submission does.
+ */
+export async function eachLimited<T>(
+  items: T[],
+  limit: number,
+  work: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0;
+  const lanes = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+    while (next < items.length) await work(items[next++]);
+  });
+  await Promise.all(lanes);
+}
