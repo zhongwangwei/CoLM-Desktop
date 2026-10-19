@@ -673,3 +673,49 @@ fn a_site_whose_node_job_cannot_be_submitted_leaves_the_queue() {
     );
     assert!(!sb.job_dir("j-f").join("sched_id").exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_partition_that_hands_out_whole_node_memory_gets_a_fair_share_per_cpu() {
+    // land02 (Slurm 19.05, CR_CORE_MEMORY): without --mem a job takes the node's whole memory.
+    let line = |extra: &str| format!("PartitionName=cpu Default=YES MaxNodes=3 {extra} State=UP");
+    let submit = |tag: &str, partition: &str, memory: Option<u32>| {
+        let sb = Sandbox::new(tag);
+        sb.stub("scontrol", &format!("echo '{partition}'"));
+        sb.stub("sinfo", "printf '320000 96\\n384000 96+\\n'");
+        let mut spec = slurm_spec();
+        spec.resources.memory_gb = memory;
+        let (_, err, ok) = sb.run(&submit_script(&sb.work(), "j-m", "true", &spec).unwrap());
+        assert!(ok, "{err}");
+        sb.read("sbatch_args")
+    };
+    let args = submit(
+        "mem-unlimited",
+        &line("OverSubscribe=NO DefMemPerNode=UNLIMITED"),
+        None,
+    );
+    assert!(
+        args.contains("--mem-per-cpu=3333M"),
+        "smallest node per CPU: {args}"
+    );
+    for (tag, partition, memory) in [
+        (
+            "mem-set",
+            line("OverSubscribe=NO DefMemPerNode=UNLIMITED"),
+            Some(32),
+        ),
+        (
+            "mem-exclusive",
+            line("OverSubscribe=EXCLUSIVE DefMemPerNode=UNLIMITED"),
+            None,
+        ),
+        (
+            "mem-default",
+            line("OverSubscribe=NO DefMemPerCPU=2000"),
+            None,
+        ),
+    ] {
+        let args = submit(tag, &partition, memory);
+        assert!(!args.contains("--mem-per-cpu"), "{tag}: {args}");
+    }
+}

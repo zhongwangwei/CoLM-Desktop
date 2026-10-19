@@ -38,6 +38,45 @@ slurm=\npbs=\nlsf=\nqueues=\nroot_exists=\nroot_writable=1\nroot_free_kb=2791728
 }
 
 #[test]
+fn slurm_partitions_carry_their_node_sizes_and_limits() {
+    // land02 as it answered on 2026-10-19 (Slurm 19.05; first is the default).
+    let text = "os=Ubuntu\narch=x86_64\nslurm=/usr/bin/sbatch\n\
+partition=first|1|0|3|7-00:00:00|1\npartition=largemem|0|0|1|7-00:00:00|1\n\
+partition=second|0|0|1|7-00:00:00|1\npartition=deimos|0|1|UNLIMITED|UNLIMITED|0\n\
+partnode=first|4|12|320000\npartnode=first|4|12|384000\npartnode=largemem|4|12|1548000\n\
+partnode=second|2|32|515000\npartnode=second|4|20|1031000\npartnode=second|4|20|1031000+\n\
+partnode=ghost|1|1|1\npartnode=second|x|20|1\n";
+    let probe = parse("/r", text);
+    let by = |name: &str| probe.partitions.iter().find(|p| p.name == name).unwrap();
+    let first = by("first");
+    assert!(first.default && !first.exclusive && first.whole_node_memory);
+    assert_eq!((first.nodes, first.cores_min, first.cores_max), (2, 48, 48));
+    assert_eq!((first.memory_gb_min, first.memory_gb_max), (312, 375));
+    assert_eq!(
+        (first.max_nodes, first.max_time.as_deref()),
+        (Some(3), Some("7-00:00:00"))
+    );
+    let second = by("second");
+    assert_eq!(
+        (second.nodes, second.cores_min, second.cores_max),
+        (3, 64, 80)
+    );
+    assert_eq!(second.memory_gb_max, 1006);
+    assert_eq!(by("largemem").memory_gb_min, 1511);
+    let deimos = by("deimos");
+    assert!(deimos.exclusive && !deimos.default);
+    assert_eq!(
+        (deimos.max_nodes, deimos.max_time.clone(), deimos.nodes),
+        (None, None, 0)
+    );
+    assert_eq!(
+        probe.partitions.len(),
+        4,
+        "nodes of unknown partitions are ignored"
+    );
+}
+
+#[test]
 fn connection_only_probe_does_not_require_a_work_directory() {
     let probe = parse("", "hostname=server\nos=Linux\narch=x86_64\n");
     assert_eq!(probe.hostname, "server");

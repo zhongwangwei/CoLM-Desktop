@@ -31,6 +31,8 @@ pub struct Probe {
     pub qsub_unverified: bool,
     /// 调度系统的分区或队列（`sinfo`、`qstat -Q`、`bqueues`），给“选分区”用；拿不到就空。
     pub queues: Vec<String>,
+    /// Slurm 分区的详情，给"选分区"显示节点规模，并在选定后自动填"每节点核数"；拿不到就空。
+    pub partitions: Vec<Partition>,
     /// 工作根目录：存在吗、可写吗、所在盘的剩余空间。
     pub root: String,
     pub root_exists: bool,
@@ -45,6 +47,43 @@ pub struct Probe {
     /// 这次要用的引擎：source（在服务器上编）、prebuilt（传预编包）；调用方判断后填，探测本身不填。
     pub engine: Option<String>,
 }
+
+/// 一个 Slurm 分区。land02（2026-10-19）有 first、second、largemem 三个分区，节点 48–80 核、
+/// 320 GB–1.5 TB 不等，单作业能占的节点数也不同；只给分区名时，用户得自己去查这些。
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Partition {
+    pub name: String,
+    pub default: bool,
+    /// 作业总是占整个节点（`OverSubscribe=EXCLUSIVE`）：站点批量会按节点打包（`crate::pack`）。
+    pub exclusive: bool,
+    pub nodes: u32,
+    /// 物理核数（插槽 × 每插槽核数，不算超线程），分区里最小、最大的节点。
+    pub cores_min: u32,
+    pub cores_max: u32,
+    pub memory_gb_min: u64,
+    pub memory_gb_max: u64,
+    /// 单个作业最多几个节点；`UNLIMITED` 时为空。
+    pub max_nodes: Option<u32>,
+    pub max_time: Option<String>,
+    /// 不写内存的作业会拿走整个节点的内存（`DefMemPerNode=UNLIMITED`）；提交时会补上按核分摊的内存。
+    pub whole_node_memory: bool,
+}
+
+/// `partition=名|默认|独占|单作业节点数|时限|整节点内存` 每个分区一行，`partnode=分区|插槽|每插槽核|内存MB`
+/// 每个节点一行（一个节点在几个分区就出现几次）。有 timeout 才问，免得卡死的 slurmctld 拖住整个探测。
+const PARTITIONS: &str = r#"if command -v scontrol >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+  timeout -k 1 5 scontrol -o show partition 2>/dev/null | awk '{ n=""; d=0; x=0; mn=""; mt=""; u=0
+    for (i = 1; i <= NF; i++) { k = $i; sub(/=.*/, "", k); v = substr($i, length(k) + 2)
+      if (k == "PartitionName") n = v
+      else if (k == "Default" && v == "YES") d = 1
+      else if ((k == "OverSubscribe" || k == "Shared") && v ~ /^EXCLUSIVE/) x = 1
+      else if (k == "MaxNodes") mn = v
+      else if (k == "MaxTime") mt = v
+      else if (k == "DefMemPerNode" && v == "UNLIMITED") u = 1 }
+    if (n != "") print "partition=" n "|" d "|" x "|" mn "|" mt "|" u }'
+  timeout -k 1 5 sinfo -h -N -o '%R|%X|%Y|%m' 2>/dev/null | sed 's/^/partnode=/'
+fi
+"#;
 
 /// 探测脚本：每行 `key=value`，缺的工具输出空值。
 pub fn script(root: &str) -> String {
@@ -83,7 +122,7 @@ fi
 echo "pbs=$PBS"
 echo "qsub_unverified=$QSUB_UNVERIFIED"
 echo "lsf=$(command -v bsub)"
-echo "queues=$( (
+{partitions}echo "queues=$( (
   if command -v timeout >/dev/null 2>&1; then
     timeout -k 1 3 sinfo -h -o '%P' 2>/dev/null
     [ -n "$PBS" ] && timeout -k 1 3 qstat -Q 2>/dev/null | awk 'NR>2{{print $1}}'
@@ -101,7 +140,64 @@ fi
         prelude = crate::sched::PATH_PRELUDE,
         build_path = BUILD_PATH_PRELUDE,
         toolchain_requirements = crate::toolchain::requirements_script(),
+        partitions = PARTITIONS,
     )
+}
+
+fn partitions(text: &str) -> Vec<Partition> {
+    let mut found: Vec<Partition> = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("partition=") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split('|').collect();
+        let [name, default, exclusive, max_nodes, max_time, whole] = fields[..] else {
+            continue;
+        };
+        if name.is_empty() || found.iter().any(|p| p.name == name) {
+            continue;
+        }
+        found.push(Partition {
+            name: name.to_owned(),
+            default: default == "1",
+            exclusive: exclusive == "1",
+            max_nodes: max_nodes.parse().ok(),
+            max_time: Some(max_time.to_owned()).filter(|t| !t.is_empty() && t != "UNLIMITED"),
+            whole_node_memory: whole == "1",
+            ..Partition::default()
+        });
+    }
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("partnode=") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split('|').collect();
+        let [name, sockets, cores, memory] = fields[..] else {
+            continue;
+        };
+        let (Ok(sockets), Ok(cores), Ok(memory)) = (
+            sockets.parse::<u32>(),
+            cores.parse::<u32>(),
+            memory.trim_end_matches('+').parse::<u64>(),
+        ) else {
+            continue;
+        };
+        let Some(partition) = found.iter_mut().find(|p| p.name == name) else {
+            continue;
+        };
+        let (cores, memory) = (sockets * cores, memory / 1024);
+        if partition.nodes == 0 {
+            (partition.cores_min, partition.cores_max) = (cores, cores);
+            (partition.memory_gb_min, partition.memory_gb_max) = (memory, memory);
+        } else {
+            partition.cores_min = partition.cores_min.min(cores);
+            partition.cores_max = partition.cores_max.max(cores);
+            partition.memory_gb_min = partition.memory_gb_min.min(memory);
+            partition.memory_gb_max = partition.memory_gb_max.max(memory);
+        }
+        partition.nodes += 1;
+    }
+    found
 }
 
 /// 解析探测脚本的输出。
@@ -134,6 +230,7 @@ pub fn parse(root: &str, text: &str) -> Probe {
         queues: get("queues")
             .map(|v| v.split_whitespace().map(str::to_owned).collect())
             .unwrap_or_default(),
+        partitions: partitions(text),
         root: root.to_owned(),
         root_exists: get("root_exists").is_some(),
         root_writable: get("root_writable").is_some(),

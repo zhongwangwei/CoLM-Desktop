@@ -19,6 +19,8 @@ import {
   remoteCheckRequest,
   localRunEntries,
   resourceCheckSummary,
+  partitionLabel,
+  type Partition,
   type Server,
   type ResourceCheck,
   kindPathRows,
@@ -62,7 +64,9 @@ export default function ResourcesPage() {
     [action, setAction] = useState('test'),
     [remoteCase, setRemoteCase] = useState(''),
     [packageName, setPackageName] = useState('colm-core'),
-    [changeKind, setChangeKind] = useState('refactor');
+    [changeKind, setChangeKind] = useState('refactor'),
+    // 服务器探测报回的 Slurm 分区（按服务器地址），给"分区"一栏做下拉；改设置不清空它。
+    [partitionsByHost, setPartitionsByHost] = useState<Record<string, Partition[]>>({});
   const lock = useRef(false),
     epoch = useRef({ active: false }),
     initialized = useRef(false),
@@ -258,6 +262,7 @@ export default function ResourcesPage() {
     };
     try {
       result.probe = await invokeJson<ResourceCheck['probe']>('remote_probe', { server });
+      rememberPartitions(server.host, result.probe);
     } catch (error) {
       result.probe_error = String(error);
     }
@@ -291,6 +296,7 @@ export default function ResourcesPage() {
       configuration = JSON.stringify(server),
       token = epoch.current;
     const probe = await invokeJson<ResourceCheck['probe']>('remote_probe', { server });
+    rememberPartitions(server.host, probe);
     if (
       !probe?.hostname ||
       !Array.isArray(probe.schedulers) ||
@@ -329,6 +335,11 @@ export default function ResourcesPage() {
       delete next[`scheduler:${selected}`];
       return next;
     });
+  }
+  function rememberPartitions(host: string, probe: ResourceCheck['probe']) {
+    const partitions = probe?.partitions;
+    if (Array.isArray(partitions) && partitions.length)
+      setPartitionsByHost((current) => ({ ...current, [host]: partitions }));
   }
   function editField(key: keyof Server, value: string) {
     if (key === 'auth' && value !== 'password') setPassword('');
@@ -456,6 +467,38 @@ export default function ResourcesPage() {
         set: (v) => editField(key, v),
       }))
     : [];
+  const partitions = editor ? (partitionsByHost[editor.host] ?? []) : [];
+  const partitionAt = guideFields.findIndex((item) => item.id === 'resource-partition');
+  if (editor && partitions.length && partitionAt >= 0) {
+    const chosen = editor.partition;
+    const fallback = partitions.find((item) => item.default);
+    guideFields[partitionAt] = {
+      ...guideFields[partitionAt],
+      type: 'choice',
+      options: [
+        {
+          value: '',
+          label: fallback
+            ? t(`服务器默认（${fallback.name}）`, `Server default (${fallback.name})`)
+            : t('服务器默认', 'Server default'),
+        },
+        ...partitions.map((item) => ({ value: item.name, label: partitionLabel(item, en) })),
+        ...(chosen && !partitions.some((item) => item.name === chosen)
+          ? [{ value: chosen, label: chosen }]
+          : []),
+      ],
+      // 选了分区，"每节点核数"还没填时顺手填上（取分区里最小的节点），MPI 运行据此算占几个节点。
+      set: (value) => {
+        const picked =
+          partitions.find((item) => item.name === value) ?? (value ? undefined : fallback);
+        editServer({
+          ...editor,
+          partition: value,
+          ...(picked && !editor.cores_per_node ? { cores_per_node: picked.cores_min } : {}),
+        });
+      },
+    };
+  }
   if (editor) {
     guideFields.push({
       id: 'resource-auth',

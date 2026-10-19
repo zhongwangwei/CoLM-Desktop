@@ -73,6 +73,34 @@ function harness(
           qsub_unverified: unverifiedQsub,
           root_writable: true,
           maps: [],
+          partitions: [
+            {
+              name: 'first',
+              default: true,
+              exclusive: false,
+              nodes: 7,
+              cores_min: 48,
+              cores_max: 48,
+              memory_gb_min: 312,
+              memory_gb_max: 375,
+              max_nodes: 3,
+              max_time: '7-00:00:00',
+              whole_node_memory: true,
+            },
+            {
+              name: 'second',
+              default: false,
+              exclusive: false,
+              nodes: 7,
+              cores_min: 64,
+              cores_max: 80,
+              memory_gb_min: 502,
+              memory_gb_max: 1006,
+              max_nodes: 1,
+              max_time: '7-00:00:00',
+              whole_node_memory: true,
+            },
+          ],
           ...(!(args?.server as resource.Server)?.root
             ? { configuration_error: '请填写服务器工作目录' }
             : {}),
@@ -320,6 +348,43 @@ test('scheduler detection is visible beside advanced settings and applies one ca
     assert.equal(contract.fields.find((field) => field.id === 'resource-scheduler')?.value, 'auto');
     assert.equal((contract.details as { schedulerDetection: unknown }).schedulerDetection, null);
   }
+});
+
+test('a checked Slurm server offers its partitions with node sizes and fills cores per node', async () => {
+  const page = harness();
+  await page.ready();
+  let contract = await page.action('resource-advanced-toggle');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-partition')?.type,
+    'text',
+    'typed by hand until the server is checked',
+  );
+  await page.action('resource-check');
+  contract = page.contract();
+  const partition = contract.fields.find((field) => field.id === 'resource-partition')!;
+  assert.equal(partition.type, 'choice');
+  assert.deepEqual(
+    partition.options?.map((option) => option.label),
+    [
+      '服务器默认（first）',
+      'first（默认） · 7 个节点 · 每节点 48 核 / 312–375 GB · 单作业最多 3 节点 · 7 天',
+      'second · 7 个节点 · 每节点 64–80 核 / 502–1006 GB · 单作业最多 1 节点 · 7 天',
+    ],
+  );
+  page.fill('resource-partition', 'second');
+  contract = page.contract();
+  assert.equal(contract.fields.find((field) => field.id === 'resource-partition')?.value, 'second');
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-cores_per_node')?.value,
+    '64',
+  );
+  // A value the user already set is kept.
+  page.fill('resource-partition', 'first');
+  contract = page.contract();
+  assert.equal(
+    contract.fields.find((field) => field.id === 'resource-cores_per_node')?.value,
+    '64',
+  );
 });
 
 test('ambiguous or absent schedulers retain the manual selection, without falling back to bare', async () => {

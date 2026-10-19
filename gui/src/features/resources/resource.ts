@@ -71,6 +71,56 @@ export function studyResourcePermissions(value: unknown, result?: unknown) {
   return { ...remoteStudyPermissions(record, pending || null, reply), pending };
 }
 
+/** A Slurm partition as the server probe reports it (`colm_remote::probe::Partition`). */
+export type Partition = {
+  name: string;
+  default: boolean;
+  exclusive: boolean;
+  nodes: number;
+  cores_min: number;
+  cores_max: number;
+  memory_gb_min: number;
+  memory_gb_max: number;
+  max_nodes: number | null;
+  max_time: string | null;
+  whole_node_memory: boolean;
+};
+
+function slurmDuration(text: string, en: boolean) {
+  const match = /^(?:(\d+)-)?(\d+):(\d+)(?::(\d+))?$/.exec(text);
+  if (!match) return text;
+  const [days, hours, minutes] = [Number(match[1] ?? 0), Number(match[2]), Number(match[3])];
+  if (days && !hours && !minutes) return en ? `${days} d` : `${days} 天`;
+  if (!days && hours && !minutes) return en ? `${hours} h` : `${hours} 小时`;
+  if (!days && !hours) return en ? `${minutes} min` : `${minutes} 分钟`;
+  return text;
+}
+
+/** One line telling partitions apart: name, size of its nodes and what a single job may take. */
+export function partitionLabel(partition: Partition, en = false): string {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  const range = (low: number, high: number) => (low === high ? `${low}` : `${low}–${high}`);
+  return [
+    `${partition.name}${partition.default ? t('（默认）', ' (default)') : ''}`,
+    partition.nodes ? t(`${partition.nodes} 个节点`, `${partition.nodes} nodes`) : '',
+    partition.nodes
+      ? t(
+          `每节点 ${range(partition.cores_min, partition.cores_max)} 核 / ${range(partition.memory_gb_min, partition.memory_gb_max)} GB`,
+          `${range(partition.cores_min, partition.cores_max)} cores / ${range(partition.memory_gb_min, partition.memory_gb_max)} GB per node`,
+        )
+      : '',
+    partition.max_nodes
+      ? t(`单作业最多 ${partition.max_nodes} 节点`, `up to ${partition.max_nodes} nodes per job`)
+      : '',
+    partition.max_time ? slurmDuration(partition.max_time, en) : '',
+    partition.exclusive
+      ? t('整节点独占（站点批量会按节点打包）', 'whole nodes (station batches are packed per node)')
+      : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
 export type ResourceCheck = {
   configuration: string;
   checked_at: string;
@@ -86,6 +136,7 @@ export type ResourceCheck = {
     root_exists?: boolean;
     root_writable?: boolean;
     maps?: { local: string; remote: string; local_exists: boolean; remote_exists: boolean }[];
+    partitions?: Partition[];
   };
   engines?: { engines?: { id?: string; ready?: boolean }[] };
   probe_error?: string;

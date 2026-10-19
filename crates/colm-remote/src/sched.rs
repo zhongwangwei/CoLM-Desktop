@@ -307,7 +307,22 @@ fi
 macro_rules! slurm_submit {
     () => {
         r#"colm_sbatch() {
-  OUT=$(sbatch --parsable "$1" 2>&1) || {
+  COLM_MEM=
+  if ! grep -Eq '^#SBATCH --mem(-per-cpu|-per-gpu)?[= ]' "$1"; then
+    COLM_PART=$(sed -n 's/^#SBATCH --partition=//p' "$1" | head -n 1)
+    if [ -n "$COLM_PART" ]; then
+      COLM_LINE=$(scontrol -o show partition "$COLM_PART" 2>/dev/null | head -n 1)
+    else
+      COLM_LINE=$(scontrol -o show partition 2>/dev/null | grep Default=YES | head -n 1)
+    fi
+    case "$COLM_LINE" in
+    *OverSubscribe=EXCLUSIVE*|*Shared=EXCLUSIVE*) ;;
+    *DefMemPerNode=UNLIMITED*)
+      COLM_MB=$(sinfo -h ${COLM_PART:+-p "$COLM_PART"} -o '%m %c' 2>/dev/null | tr -d '+' | awk '$2 > 0 { v = int($1 / $2); if (min == "" || v < min) min = v } END { if (min > 0) print min }')
+      [ -n "$COLM_MB" ] && COLM_MEM="--mem-per-cpu=${COLM_MB}M" ;;
+    esac
+  fi
+  OUT=$(sbatch --parsable $COLM_MEM "$1" 2>&1) || {
     W=$(pwd -P); ID=
     for colm_try in 1 2 3; do
       ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-1hours -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$W" '$2 == w { print $1 }' | sort -u)
@@ -326,6 +341,12 @@ macro_rules! slurm_submit {
     };
 }
 /// `colm_sbatch 脚本`：在脚本所在的当前目录提交，成功时把作业号放进 `$ID`。
+///
+/// 脚本没写内存时，分区的默认内存若是"整个节点"（`DefMemPerNode=UNLIMITED`，没有 `DefMemPerCPU`），
+/// 就按节点内存 ÷ CPU 数（取分区里最小的节点）给 `--mem-per-cpu`。land02 实测（Slurm 19.05，
+/// `CR_CORE_MEMORY`，2026-10-19）：不写内存的作业拿走整个节点的内存（4 核的作业占 1031000 MB），
+/// 一个只要 1 核的站点就把整个节点挡住，90 个站点最多同时跑十几个，还挡住别人的作业。独占分区不加：
+/// 那里整节点本来就归这个作业。
 ///
 /// 天河实测（Slurm 23.11，2026-10-19）：同时提交 5 个，slurmctld 都收下并开始运行了，sbatch 却报
 /// "Unexpected message received" 退出非零，`sched_id` 没写，应用只能标"待核对"、整批停下。作业目录

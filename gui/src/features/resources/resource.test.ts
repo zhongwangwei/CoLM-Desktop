@@ -8,6 +8,7 @@ import {
   studyResourcePermissions,
   resourceCheckSummary,
   resourceTaskInfo,
+  partitionLabel,
   type ResourceCheck,
 } from './resource';
 test('server edits preserve others and reject duplicate host', () => {
@@ -280,5 +281,29 @@ test('resource task summaries retain pending host identity and require actual re
     resourceTaskInfo({ record: null, status: { state: 'finished', exit_code: 0 } }).status,
     'unknown',
     'completion also requires a recorded host and job',
+  );
+});
+
+test('a partition reads as its node sizes, limits and whether it takes whole nodes', () => {
+  const deimos = {
+    name: 'deimos',
+    default: false,
+    exclusive: true,
+    nodes: 1514,
+    cores_min: 64,
+    cores_max: 64,
+    memory_gb_min: 500,
+    memory_gb_max: 500,
+    max_nodes: null,
+    max_time: '7-00:00:00',
+    whole_node_memory: true,
+  };
+  assert.equal(
+    partitionLabel(deimos),
+    'deimos · 1514 个节点 · 每节点 64 核 / 500 GB · 7 天 · 整节点独占（站点批量会按节点打包）',
+  );
+  assert.equal(
+    partitionLabel({ ...deimos, name: 'debug', exclusive: false, max_time: '00:30:00' }, true),
+    'debug · 1514 nodes · 64 cores / 500 GB per node · 30 min',
   );
 });

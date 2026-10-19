@@ -34135,3 +34135,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 拒绝提交时，跳过这类作业的导入占位，由真实运行的那条记录自己决定。没有真实运行记录的占位仍然挡住，因为没有别的东西会去核对它。
     - 测试：`durable_remote_intent_binds_the_original_source_case_and_blocks_new_copies` 扩展了三种情况：导入同一作业的运行记录不再生成占位（imported 0、duplicates 1）；已有的占位不再挡；不认识的作业的占位仍然挡，报错里带作业号。colm-history 42 条、colm-cli 456 条、gui/src-tauri 411 条通过。
     - 已有的占位仍然留在历史里（按设计，项目的状态汇总会忽略它们），只是不再挡住提交。
+
+39. **land02（Slurm）：内存默认吃满整节点；分区要能看着选（用户要求，2026-10-19）**：
+    - 只读核对 land02（Slurm 19.05.5，`SelectTypeParameters=CR_CORE_MEMORY`）：
+      - 分区：first（默认）7 个节点，48 核、320/384 GB，单作业最多 3 节点；second 7 个节点，64 或 80 核、512 GB/1 TB，单作业 1 节点；largemem 1 个节点，48 核、1.5 TB。时限都是 7 天，都不是独占（`OverSubscribe=NO`）。
+      - 所有分区都是 `DefMemPerNode=UNLIMITED`：不写内存的作业拿走整个节点的内存。正在跑的作业里就有 4 核占 1031000 MB、4 核占 312.5 GB 的。我们的站点作业只申请 1 核、不写内存，在 land02 上每个站点会挡住一整个节点，90 个站点最多同时跑十几个，还挡住别人的作业。
+    - 改动一（`sched.rs` 的 `colm_sbatch`，单站点提交和打包的载体都经过它）：脚本里没写 `--mem` / `--mem-per-cpu` / `--mem-per-gpu`，而分区是 `DefMemPerNode=UNLIMITED` 且不独占时，命令行补上 `--mem-per-cpu=<节点内存 ÷ CPU 数>`，取分区里最小的节点。在服务器上只读跑这段判断：land02 first 3333M、second 4023M、largemem 16125M；默认分区按 first 算；天河 deimos 因为独占不加（它同样是 `DefMemPerNode=UNLIMITED`）。按核分配时一个核算 2 个 CPU，所以单个站点约 6.5 GB，高于实测峰值 3 GB。
+    - 改动二（探测）：`Probe.partitions` 带回每个分区是否默认、是否独占、节点数、每节点物理核数（插槽 × 核，不算超线程）和内存的范围、单作业最多几个节点、时限、默认是否吃满整节点内存。数据来自一次 `scontrol -o show partition` 和一次 `sinfo -N -o '%R|%X|%Y|%m'`，各带 5 s 超时。land02、天河上实跑过（天河：deimos 64 核、phobos 88 核、debug 30 分钟，三个都是独占）。
+    - 改动三（服务器设置）："检查连接"或"识别调度器"之后，"分区 / 队列"变成下拉选择，每项显示规模和限制，比如"second · 7 个节点 · 每节点 64–80 核 / 502–1006 GB · 单作业最多 1 节点 · 7 天"；独占分区会注明"站点批量会按节点打包"。选了分区后，"每节点核数"还没填的，自动填分区里最小节点的核数；已经填了的不改。
+    - 测试：`a_partition_that_hands_out_whole_node_memory_gets_a_fair_share_per_cpu`（覆盖整节点内存、已写内存、独占、分区有默认内存四种情况）；`slurm_partitions_carry_their_node_sizes_and_limits`（用 land02 的真实输出，外加一个独占分区和几条坏行）；前端 `a checked Slurm server offers its partitions with node sizes and fills cores per node`、`a partition reads as its node sizes…`。colm-remote 102 条、colm-cli 456 条、前端 717 条通过。
+    - land02 的服务器设置按用户要求改为默认用 second（每节点核数 64）。
+    - 没测：在 land02 上真实提交。
