@@ -52,7 +52,7 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
         if let Some(single) = action.strip_suffix("-batch") {
             return run_batch(&ssh, single, &request, &cli);
         }
-        let payload = serde_json::to_string(&json!({"action":action,"request":request,"cli":cli}))?;
+        let payload = ascii_json(&json!({"action":action,"request":request,"cli":cli}))?;
         let script = SCRIPT.replace(
             "payload = json.loads(sys.argv[1])",
             &format!("payload = json.loads({})", serde_json::to_string(&payload)?),
@@ -73,6 +73,27 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
     Ok(())
 }
 
+/// JSON with every non-ASCII character written as `\uXXXX`. Data embedded in a Python program
+/// piped to a server must be ASCII: Python 3.6 (CentOS 8's `python3`) checks a very long source
+/// line in fixed-size chunks and rejects a multi-byte character that straddles two of them
+/// (`SyntaxError: Non-UTF-8 code starting with '\xe6'`), which a batch of site requests with any
+/// Chinese in it will hit. 2026-10-19, reproduced on bd with a 113 KB line.
+fn ascii_json(value: &serde_json::Value) -> Result<String> {
+    let text = serde_json::to_string(value)?;
+    let mut ascii = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_ascii() {
+            ascii.push(character);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in character.encode_utf16(&mut units) {
+                ascii.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    Ok(ascii)
+}
+
 /// `{"items": [request, ...]}` → `{"results": [{"ok": response} | {"error": message}, ...]}`,
 /// in item order. Each item runs as its own `remote_cases.py` process on the server, so a
 /// failure stays with its item and its creation claim behaves exactly as for one request.
@@ -91,7 +112,7 @@ fn run_batch(
         .context("a batch request needs an items list")?;
     let jobs = items
         .iter()
-        .map(|item| serde_json::to_string(&json!({"action":action,"request":item,"cli":cli})))
+        .map(|item| ascii_json(&json!({"action":action,"request":item,"cli":cli})))
         .collect::<Result<Vec<_>, _>>()?;
     // The data rides inside the program text on stdin: one argv string is capped at 128 KiB
     // on Linux, which a batch of a few dozen sites can exceed.
@@ -154,6 +175,29 @@ fn frozen_source_options(opts: &Opts, code: &colm_model::CodeRef) -> Result<Opts
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn data_embedded_in_server_programs_is_ascii_and_round_trips() {
+        let value = json!({
+            "name": "站点AT-Neu",
+            "note": "创建\"算例\"\\路径",
+            "emoji": "😀",
+            "items": ["é", "plain"],
+        });
+        let text = ascii_json(&value).unwrap();
+        assert!(text.is_ascii(), "{text}");
+        assert!(text.contains("\\u7ad9") && text.contains("\\ud83d\\ude00"));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap(),
+            value
+        );
+        // A batch of a few dozen requests is one very long line: it stays ASCII as a whole.
+        let items: Vec<_> = (0..400)
+            .map(|index| json!({"name": format!("站点{index}"), "note": "创建".repeat(40)}))
+            .collect();
+        let long = ascii_json(&json!(items)).unwrap();
+        assert!(long.len() > 100_000 && long.is_ascii());
+    }
 
     #[test]
     fn frozen_workspace_case_creation_retains_workspace_provenance_and_cached_source() {

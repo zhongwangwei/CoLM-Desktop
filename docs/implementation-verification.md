@@ -33937,3 +33937,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - 配置（用户的 `remote.json`，备份为 `remote.json.bak-20261019-bd`）：bd 的 `scheduler=lsf`、`partition=normal`、`threads=8`，rawdata / runtime / 站点 / 强迫场路径指向用户自己的数据目录；这些路径因人而异，应用代码里没有写死任何用户名。
    - 因人而异的环境处理（不属于应用）：bd 的 `~/.gitconfig` 里有指向 `127.0.0.1:18088` 的代理，已在 `~/.cargo/config.toml` 对 cargo 关闭代理；cmake 的符号链接见第 6 条。
 9. **还没做**：`env_script`（服务器配置里的 `module load` / PATH）目前只写进运行作业，不作用于"准备引擎"。若也让它作用于引擎构建，用户只需在服务器配置里填一次 `export PATH=…`（或 `module load`），不必在服务器上手工放符号链接，其他用户也能照着同样填。
+10. **服务器配置的 `env_script` 现在作用于应用在服务器上执行的所有命令**（之前只写进运行作业）：探测、读站点、创建算例、准备引擎、目录浏览、提交作业……用的 `python3`/`cargo`/`cmake` 与运行作业时是同一批，每个用户在服务器配置里填一次（`export PATH=…` 或 `module load …`）即可，不必在服务器上手工放链接。
+    - 桌面应用经 `ssh_cli_json` 启动 colm-cli 时，把该服务器的 `env_script` 放进环境变量 `COLM_REMOTE_ENV_SCRIPT`；`Ssh::new` 读取它，`Ssh::run` 在每个远程脚本前先执行（花括号而不是子 shell，`export` 才留在后面；输出转到 stderr，不污染要解析的 stdout）。
+    - 实测发现并修掉一个相关问题：探测脚本为找 `bsub` 会 `source /etc/profile`，bd 的 profile 会把 PATH 整个重设，冲掉 `env_script` 设的 PATH。`PATH_PRELUDE` 现在读完 profile 后把原来的 PATH 放回最前。
+    - bd 实测（临时挪开 cmake 链接）：不带 `env_script` → `cmake=false`（系统 3.11）；`export PATH=/share/home/dq013/miniconda3-3.12/bin:$PATH` 加一句会打印的命令 → `cmake=true`、无构建问题，探测输出解析不受影响。之后已恢复链接。没有把它写进用户的 bd 配置（会把 conda 整个 bin 放到 PATH 最前，由用户决定）。
+    - 测试：`the_servers_environment_script_runs_first_without_touching_stdout`、`reading_the_login_profile_keeps_the_path_the_caller_set_first`；colm-remote 81 条，clippy 干净。
+11. **Python 3.6 读超长一行含中文会误报 "Non-UTF-8 code"**（用户报：批量创建 4 个站点全部失败，`SyntaxError: Non-UTF-8 code starting with '\xe6' in file <stdin>`）。服务器端 Python 经 heredoc 从 stdin 读程序，批量请求被嵌进程序的一行里；Python 3.6 的词法器按固定大小分块读超长行，多字节字符正好跨在块边界上就被判为非法 UTF-8。在 bd 上用 113 KB 一行 + 中文复现，同样内容改成 ASCII 转义后 256 KB 也能通过（中文与 emoji 都还原）。改为：嵌进程序的 JSON 一律 `\uXXXX` 转义（`ascii_json`，非 BMP 字符按 UTF-16 代理对），单个请求与批量都用。测试：`data_embedded_in_server_programs_is_ascii_and_round_trips`。
+12. **"申请 CPU 数"清不掉**：输入框直接显示"有效值"，清空后立刻回落成服务器默认（8）。线程数与 CPU 数现在显示用户输入的内容（空则空），默认值只作占位提示，有效值不变。测试：`the CPU and thread boxes can be emptied`（GUI 692 条）。

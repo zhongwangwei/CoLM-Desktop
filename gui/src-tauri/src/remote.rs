@@ -944,6 +944,10 @@ async fn ssh_cli_json_untracked(
     let payload = payload.map(|p| p.to_string());
     let mut command = std::process::Command::new(crate::sidecar::resolve_cli());
     command.args(&args).env("COLM_AUDIT_BY_PARENT", "1");
+    // The server's environment preparation (module load, PATH) applies to every command run there.
+    if let Some(server) = server.filter(|server| !server.env_script.trim().is_empty()) {
+        command.env("COLM_REMOTE_ENV_SCRIPT", &server.env_script);
+    }
     if payload.is_some() {
         command
             .env("COLM_SSH_AUTH_STDIN", "1")

@@ -257,8 +257,12 @@ pub fn directives(
 }
 
 /// 找得到调度命令的前置：非交互的 ssh 会话常常没有 `/etc/profile` 里设的 PATH。
+///
+/// 有些集群（摆渡船）的 `/etc/profile` 会把 PATH 整个重设；服务器配置的环境准备（`export PATH=…`）
+/// 已经在前面跑过，所以读完 profile 后把原来的 PATH 放回最前。
 pub const PATH_PRELUDE: &str = r#"if ! { command -v sbatch >/dev/null 2>&1 || command -v qsub >/dev/null 2>&1 || command -v bsub >/dev/null 2>&1; }; then
-  COLM_FLAGS=$-; set +e; [ -f /etc/profile ] && . /etc/profile >/dev/null 2>&1
+  COLM_FLAGS=$-; COLM_PATH_BEFORE=$PATH; set +e; [ -f /etc/profile ] && . /etc/profile >/dev/null 2>&1
+  PATH="$COLM_PATH_BEFORE:$PATH"; export PATH
   case "$COLM_FLAGS" in *e*) set -e;; esac
 fi
 "#;

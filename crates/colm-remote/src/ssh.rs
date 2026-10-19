@@ -10,6 +10,22 @@ use anyhow::{bail, Context, Result};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ssh {
     pub host: String,
+    /// 服务器配置里的环境准备（`module load …`、`export PATH=…`）：在每次远程执行前先跑一遍，
+    /// 这样探测、读站点、创建算例、准备引擎用的 `python3`、`cargo`、`cmake` 与运行作业时是同一批。
+    /// 由调用方经 `COLM_REMOTE_ENV_SCRIPT` 交给 colm-cli。
+    pub env_script: Option<String>,
+}
+
+/// 环境变量名：桌面应用启动 colm-cli 时用它传服务器配置里的环境准备。
+pub const ENV_SCRIPT_VAR: &str = "COLM_REMOTE_ENV_SCRIPT";
+
+/// 把环境准备放在脚本前面。它的输出（`module load` 常会打印）转到 stderr，不混进要解析的 stdout；
+/// 用花括号而不是子 shell，`export` 才留在后面的脚本里。
+pub fn with_env_script(env_script: Option<&str>, script: &str) -> String {
+    match env_script.map(str::trim).filter(|text| !text.is_empty()) {
+        Some(env) => format!("{{\n{env}\n}} >&2\n{script}"),
+        None => script.to_owned(),
+    }
 }
 
 /// 单引号转义，供拼进远程 shell 命令。
@@ -49,6 +65,9 @@ impl Ssh {
         crate::auth::check_host(host)?;
         Ok(Self {
             host: host.to_owned(),
+            env_script: std::env::var(ENV_SCRIPT_VAR)
+                .ok()
+                .filter(|text| !text.trim().is_empty()),
         })
     }
 
@@ -89,7 +108,7 @@ impl Ssh {
             .stdin
             .take()
             .context("no stdin")?
-            .write_all(script.as_bytes())?;
+            .write_all(with_env_script(self.env_script.as_deref(), script).as_bytes())?;
         let output = child.wait_with_output()?;
         Ok(Output {
             success: output.status.success(),

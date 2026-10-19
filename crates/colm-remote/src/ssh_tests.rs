@@ -126,3 +126,47 @@ fn staged_source_upload_retries_partial_transfers_without_local_cat() {
     assert!(engine::uploaded(&ssh, &server, &snapshot.id).unwrap());
     assert!(!engine::upload(&ssh, &server, &snapshot).unwrap());
 }
+
+#[cfg(unix)]
+#[test]
+fn the_servers_environment_script_runs_first_without_touching_stdout() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let run = |env: Option<&str>, script: &str| {
+        let mut child = Command::new("bash")
+            .arg("-s")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(with_env_script(env, script).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    };
+    // What the preparation sets is visible to the script; what it prints is not output.
+    let (stdout, stderr) = run(
+        Some("echo module-loaded\nexport COLM_TEST_TOOL=conda"),
+        "echo \"tool=$COLM_TEST_TOOL\"",
+    );
+    assert_eq!(stdout, "tool=conda\n");
+    assert!(stderr.contains("module-loaded"));
+    // Heredoc scripts (how most server commands carry Python) keep working behind it.
+    let (stdout, _) = run(
+        Some("export COLM_TEST_TOOL=conda"),
+        "cat <<'COLM_TEST_EOF'\nheredoc ok\nCOLM_TEST_EOF\necho \"$COLM_TEST_TOOL\"",
+    );
+    assert_eq!(stdout, "heredoc ok\nconda\n");
+    // Nothing configured: the script goes out unchanged.
+    for env in [None, Some(""), Some("  \n")] {
+        assert_eq!(with_env_script(env, "echo hi\n"), "echo hi\n");
+    }
+}

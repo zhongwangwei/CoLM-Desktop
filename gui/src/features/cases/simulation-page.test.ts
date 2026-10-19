@@ -3941,6 +3941,43 @@ test('server resource choices inherit configured defaults and reject invalid num
   assert.equal(p.state.projectRunSettings?.threads, '2');
 });
 
+test('the CPU and thread boxes can be emptied: the server default is only a hint', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        { host: 'cluster', root: '/work', maps: [], threads: 8, cpus: 4, scheduler: 'slurm' },
+      ],
+    },
+  );
+  await p.mount();
+  const box = (hint: string) =>
+    p.elements.find(
+      (e) => e.type === 'Input' && (e.props as { placeholder?: string }).placeholder === hint,
+    );
+  p.render();
+  // Untouched: empty box, default as the hint, default as the effective value.
+  assert.equal((box('4')?.props as { value: string }).value, '');
+  assert.equal(p.render().fields.find((f) => f.id === 'new-run-cpus')?.value, '4');
+  p.set('new-run-cpus', '12');
+  p.render();
+  assert.equal(p.render().fields.find((f) => f.id === 'new-run-cpus')?.value, '12');
+  // Deleting the typed number leaves the box empty (it used to refill with the default at once).
+  p.set('new-run-cpus', '');
+  p.render();
+  assert.equal((box('4')?.props as { value: string }).value, '');
+  assert.equal(p.render().fields.find((f) => f.id === 'new-run-cpus')?.value, '4');
+});
+
 test('direct execution has no separate CPU request: the CPUs are the case threads', async () => {
   const p = page(
     'NewCasePage',

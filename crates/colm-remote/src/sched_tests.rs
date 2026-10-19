@@ -174,3 +174,22 @@ fn mpi_jobs_ask_for_ranks_and_spread_them_over_nodes() {
         .join("\n");
     assert!(single.contains("--nodes=1") && single.contains("--ntasks=1"));
 }
+
+#[cfg(unix)]
+#[test]
+fn reading_the_login_profile_keeps_the_path_the_caller_set_first() {
+    // The server's own environment preparation (conda, modules) runs before this prelude; a
+    // cluster whose /etc/profile rewrites PATH (摆渡船) must not undo it.
+    let output = std::process::Command::new("bash")
+        .args([
+            "-c",
+            &format!(
+                "export PATH=/colm-test-first:$PATH\n{}\nprintf '%s' \"$PATH\"",
+                PATH_PRELUDE
+            ),
+        ])
+        .output()
+        .unwrap();
+    let path = String::from_utf8(output.stdout).unwrap();
+    assert!(path.starts_with("/colm-test-first:"), "{path}");
+}

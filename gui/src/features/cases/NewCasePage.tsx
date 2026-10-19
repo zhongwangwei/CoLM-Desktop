@@ -1969,6 +1969,10 @@ export default function NewCasePage() {
         ]
       : []),
   ].map((field) => ({ ...field, disabled: !enabled }));
+  const resourceDrafts: Record<string, string> = {
+    'new-run-threads': form.run_threads,
+    'new-run-cpus': form.run_cpus,
+  };
   if (step === 5) fields.push(...resourceFields);
   if (step === 3 && ownData && form.kind === 'site')
     fields.push({
@@ -3056,7 +3060,13 @@ export default function NewCasePage() {
                     <Input
                       type="number"
                       min="1"
-                      value={String(field.value)}
+                      // Threads and CPUs fall back to the server's own numbers when left empty, so
+                      // the box shows what was typed (and the fallback as a hint): showing the
+                      // fallback itself made the field refill the moment it was cleared.
+                      value={
+                        field.id in resourceDrafts ? resourceDrafts[field.id] : String(field.value)
+                      }
+                      placeholder={field.id in resourceDrafts ? String(field.value) : undefined}
                       disabled={!enabled}
                       onChange={(event) => field.set(event.target.value)}
                     />
