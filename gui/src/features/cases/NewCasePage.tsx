@@ -77,6 +77,7 @@ import RemotePathBrowser from '../../components/RemotePathBrowser';
 import type { Server } from '../resources/resource';
 import SpatialForcingFields, { type ForcingLayoutProbe } from './SpatialForcingFields';
 import EngineProgress from './EngineProgress';
+import TaskCard from '../../components/TaskCard';
 import type { BuildProgress } from './engine-progress';
 
 function isMethaneSite(site: Site) {
@@ -952,21 +953,23 @@ export default function NewCasePage() {
       if (alive.current) setBusy(false);
     }
   }
+  // 读取站点在服务器上可能先等引擎编完（几分钟）、再逐个打开站点与强迫场文件（几十秒到一两分钟）；
+  // 只写"正在读取站点…"时用户看不出在等什么（land02，2026-10-19）。
+  const scanWaitsForEngine = !!form.host && !!engine && engine.phase !== 'failed';
   function scanLabel() {
-    const time = waited(scanSince);
     if (!form.host)
       return t(
-        `正在读取站点与强迫场覆盖时段（已 ${time}）…`,
-        `Reading sites and forcing coverage (${time})…`,
+        '正在逐个打开站点文件和对应的强迫场，核对能覆盖的时段…',
+        'Opening each site file and its forcing to check the period they cover…',
       );
-    return engine && engine.phase !== 'failed'
+    return scanWaitsForEngine
       ? t(
-          `读取站点：先等 ${form.host} 上的计算引擎编译完成，之后读取站点与强迫场覆盖时段（已等 ${time}）…`,
-          `Reading sites: waiting for the engine on ${form.host} to finish compiling, then reading sites and forcing coverage (${time})…`,
+          `先等 ${form.host} 上的计算引擎编译完成（进度见上方），之后在服务器上读取站点与强迫场覆盖时段。`,
+          `Waiting for the engine on ${form.host} to finish compiling (progress above); then sites and forcing coverage are read there.`,
         )
       : t(
-          `读取站点：正在从 ${form.host} 读取站点与强迫场覆盖时段（已 ${time}）…`,
-          `Reading sites: reading sites and forcing coverage on ${form.host} (${time})…`,
+          `正在从 ${form.host} 读取站点与强迫场覆盖时段：在服务器上逐个打开站点文件和对应的强迫场，核对能覆盖的时段；站点多时要几十秒到一两分钟。`,
+          `Reading sites and forcing coverage on ${form.host}: each site file and its forcing are opened there to check the period they cover; many sites take from tens of seconds to a couple of minutes.`,
         );
   }
   // The user's own site folders: a scan that finds sites remembers them for this resource.
@@ -2595,12 +2598,27 @@ export default function NewCasePage() {
         </Notice>
       )}
       {scanning && (
-        <Notice>
-          {scanLabel()}{' '}
-          <Button variant="ghost" onClick={stopReading}>
-            {t('停止读取', 'Stop reading')}
-          </Button>
-        </Notice>
+        <TaskCard
+          title={
+            form.host
+              ? t(`正在从 ${form.host} 读取站点`, `Reading sites on ${form.host}`)
+              : t('正在读取站点', 'Reading sites')
+          }
+          waited={t(`已用 ${waited(scanSince)}`, `${waited(scanSince)} so far`)}
+          steps={
+            form.host
+              ? [t('准备计算引擎', 'Engine'), t('读取站点与覆盖时段', 'Read sites and coverage')]
+              : undefined
+          }
+          step={scanWaitsForEngine ? 0 : 1}
+          detail={scanLabel()}
+          hint={t('读取期间可以继续填写其它设置。', 'Other settings stay editable meanwhile.')}
+          action={
+            <Button variant="ghost" onClick={stopReading}>
+              {t('停止读取', 'Stop reading')}
+            </Button>
+          }
+        />
       )}
       {remotePicker && (
         <RemotePathBrowser

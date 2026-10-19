@@ -164,6 +164,7 @@ function page(
         'HistoryVariablesCard',
         'SpatialForcingFields',
         'EngineProgress',
+        'TaskCard',
       ].map((key) => [key, key]),
     ),
     useApp: () => ({
@@ -3072,20 +3073,20 @@ test('choosing a server prepares its engine in the background and says when it i
 
   void p.click('new-scan');
   p.render();
-  assert.ok(
-    notices(p).some(
-      (text) => text.includes('先等 compute 上的计算引擎编译完成') && text.includes('已等 0 秒'),
-    ),
-  );
+  const reading = () => p.element('TaskCard').props as Record<string, unknown>;
+  assert.equal(reading().title, '正在从 compute 读取站点');
+  assert.deepEqual([reading().step, reading().waited], [0, '已用 0 秒']);
+  assert.match(String(reading().detail), /先等 compute 上的计算引擎编译完成/);
   t.mock.timers.tick(3000);
   p.render();
-  assert.ok(notices(p).some((text) => text.includes('已等 3 秒')));
+  assert.equal(reading().waited, '已用 3 秒');
   assert.ok(!notices(p).some((text) => text.includes('正在处理，请稍候')));
 
   ready({ ready: true });
   await p.settle();
-  assert.ok(!notices(p).some((text) => text.includes('计算引擎')));
-  assert.ok(notices(p).some((text) => text.includes('正在从 compute 读取站点与强迫场覆盖时段')));
+  assert.ok(!p.elements.some((element) => element.type === 'EngineProgress'));
+  assert.equal(reading().step, 1);
+  assert.match(String(reading().detail), /正在从 compute 读取站点与强迫场覆盖时段/);
   await p.remount();
   assert.equal(p.calls.filter((call) => call.command === 'remote_prepare_engine').length, 1);
 });
@@ -3117,7 +3118,9 @@ test('a failed engine preparation is shown and reading sites names the server', 
   );
   void p.click('new-scan');
   p.render();
-  assert.ok(notices(p).some((text) => text.includes('正在从 compute 读取站点与强迫场覆盖时段')));
+  const reading = p.element('TaskCard').props as Record<string, unknown>;
+  assert.equal(reading.step, 1, 'a failed preparation is not waited for');
+  assert.match(String(reading.detail), /正在从 compute 读取站点与强迫场覆盖时段/);
 });
 
 test('local reading of sites says what it is doing', async () => {
@@ -3132,7 +3135,10 @@ test('local reading of sites says what it is doing', async () => {
   assert.ok(!p.calls.some((call) => call.command === 'remote_prepare_engine'));
   void p.click('new-scan');
   p.render();
-  assert.ok(notices(p).some((text) => text.includes('正在读取站点与强迫场覆盖时段')));
+  const reading = p.element('TaskCard').props as Record<string, unknown>;
+  assert.equal(reading.title, '正在读取站点');
+  assert.equal(reading.steps, undefined, 'no engine step on this computer');
+  assert.match(String(reading.detail), /核对能覆盖的时段/);
 });
 
 test('a scan result without a site list is reported instead of breaking the page', async () => {

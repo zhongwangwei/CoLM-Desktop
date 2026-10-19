@@ -719,7 +719,10 @@ pub fn progress_script(root: &str) -> String {
         r#"cd {engines} 2>/dev/null || exit 0
 E=
 for d in $(ls -t 2>/dev/null); do
-  if [ -d "$d" ] && [ ! -x "$d/bin/colm-rs" ] && [ -d "$d/src" ]; then E=$d; break; fi
+  [ -d "$d" ] && [ ! -x "$d/bin/colm-rs" ] && [ -d "$d/src" ] || continue
+  # 只认编译锁正被占着的：编到一半失败的旧目录（天河上计算节点编失败留下的）不算在编。
+  if command -v flock >/dev/null 2>&1 && [ -e "$d/.build.lock" ] && flock -n "$d/.build.lock" true 2>/dev/null; then continue; fi
+  E=$d; break
 done
 [ -n "$E" ] || exit 0
 echo "engine=$E"

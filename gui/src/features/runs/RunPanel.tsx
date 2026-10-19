@@ -5,6 +5,9 @@ import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
 import { runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
+import EngineProgress from '../cases/EngineProgress';
+import type { BuildProgress } from '../cases/engine-progress';
+import { elapsedLabel } from '../cases/simulation-model';
 import type { CaseProfile, LastRun, RunState, Server, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
@@ -23,6 +26,7 @@ import {
   matchesRemoteRun,
   restoreRunView,
   settleRuns,
+  submittingHost,
 } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
@@ -113,6 +117,11 @@ export default function RunPanel({
     ),
     [recovering, setRecovering] = useState(true),
     [busy, setBusy] = useState(false),
+    [serverBuild, setServerBuild] = useState<{
+      progress: BuildProgress;
+      since: number;
+      now: number;
+    } | null>(null),
     [monitor, setMonitor] = useState(false),
     [lastCheck, setLastCheck] = useState<{ at: number; text: string } | null>(null);
   const lock = useRef(false),
@@ -337,6 +346,30 @@ export default function RunPanel({
     onBusyChange?.(batchCases ? busy || recovering : pending);
     return () => onBusyChange?.(false);
   }, [pending, onBusyChange, batchCases, busy, recovering]);
+  // 提交服务器运行前，登录节点要先编好引擎（软件更新后几分钟到十几分钟）。站点处在"提交中"时每 5 秒
+  // 问一次服务器在不在编、编到哪了；在编就显示和新建模拟里一样的进度卡片。
+  const submittingOn = submittingHost(host, batchCases ?? [casePath], state.running);
+  useEffect(() => {
+    setServerBuild(null);
+    if (!submittingOn) return;
+    let current = true;
+    const poll = () =>
+      invoke<BuildProgress>('remote_engine_progress', { host: submittingOn })
+        .then((progress) => {
+          if (!current) return;
+          const now = Date.now();
+          setServerBuild((old) =>
+            progress?.engine ? { progress, since: old?.since ?? now, now } : null,
+          );
+        })
+        .catch(() => {});
+    void poll();
+    const timer = setInterval(() => void poll(), 5000);
+    return () => {
+      current = false;
+      clearInterval(timer);
+    };
+  }, [submittingOn]);
   async function action(fn: () => Promise<unknown>) {
     if (lock.current) return;
     lock.current = true;
@@ -1244,6 +1277,19 @@ export default function RunPanel({
           'Input files are checked when you start the run; missing inputs are reported.',
         )}
       </p>
+      {serverBuild && submittingOn && (
+        <EngineProgress
+          host={submittingOn}
+          phase="building"
+          waited={elapsedLabel(serverBuild.now - serverBuild.since, en)}
+          progress={serverBuild.progress}
+          en={en}
+          hint={t(
+            '编好后自动开始提交；同一批的其余站点会等它编完，不会重复编。',
+            'Submission starts once it is built; the other stations wait for this build instead of repeating it.',
+          )}
+        />
+      )}
       <div className="run-location">
         {render({
           ...fields[0],

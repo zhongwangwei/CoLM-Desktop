@@ -396,3 +396,16 @@ export function runCountsText(runs: (RunState | undefined)[], en = false): strin
   ].filter(Boolean);
   return parts.join(' · ');
 }
+
+/**
+ * The server whose login node may be building the engine for this submission: a server run builds
+ * its engine there before submitting (several minutes after an update), while its stations show
+ * 提交中. Empty when nothing is being submitted to a server.
+ */
+export function submittingHost(
+  host: string,
+  targets: string[],
+  running: Record<string, Pick<RunState, 'status'> | undefined>,
+): string {
+  return host && targets.some((dir) => running[dir]?.status === 'submitting') ? host : '';
+}

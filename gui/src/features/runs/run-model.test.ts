@@ -9,6 +9,7 @@ import {
   compatibleKernel,
   restoreRunView,
   settleRuns,
+  submittingHost,
 } from './run-model';
 const run: RunState = {
   run_id: 'new',
@@ -275,4 +276,14 @@ test('remote view reads parsed status progress, last valid stage and log tail wi
   assert.equal(restoreRunView(remoteRun, '/case/a')?.stage, 'colm');
   remoteRun.progress = { remote: { status: { phase: 'unknown text' }, stages: [] } };
   assert.equal(restoreRunView(remoteRun, '/case/a')?.stage, undefined);
+});
+
+test('the engine build is watched only while a server run is being submitted', () => {
+  const running = {
+    '/a': { status: 'submitting' },
+    '/b': { status: 'submitted' },
+  };
+  assert.equal(submittingHost('tianhe', ['/a', '/b'], running), 'tianhe');
+  assert.equal(submittingHost('tianhe', ['/b'], running), '', 'already submitted');
+  assert.equal(submittingHost('', ['/a'], running), '', 'a local run builds no server engine');
 });

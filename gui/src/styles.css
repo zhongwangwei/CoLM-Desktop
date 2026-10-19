@@ -1921,3 +1921,122 @@ table input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* TaskCard (long waits: engine build, reading sites): global so components importing it stay testable in node. */
+.task-card {
+  margin: 8px 0;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 4%);
+  display: grid;
+  gap: 10px;
+}
+.task-card-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.task-card-head strong {
+  font-size: 14px;
+  font-weight: 600;
+}
+.task-card-time {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.task-card-steps {
+  display: grid;
+  grid-template-columns: repeat(var(--steps, 5), 1fr);
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.task-card-steps li {
+  padding-top: 7px;
+  border-top: 3px solid var(--border);
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition:
+    border-color 0.3s ease,
+    color 0.3s ease;
+}
+.task-card-steps li.is-done {
+  border-top-color: var(--accent);
+  color: var(--foreground);
+}
+.task-card-steps li.is-active {
+  border-top-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.task-card-bar {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+.task-card-bar > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 65%, #fff));
+  transition: width 0.6s ease;
+}
+.task-card-bar.is-indeterminate > span {
+  position: absolute;
+  width: 35%;
+  animation: task-card-slide 1.6s ease-in-out infinite;
+}
+@keyframes task-card-slide {
+  from {
+    left: -35%;
+  }
+  to {
+    left: 100%;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .task-card-bar.is-indeterminate > span {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
+  }
+}
+.task-card-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.task-card-detail {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.task-card-percent {
+  flex: none;
+  color: var(--accent);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.task-card-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.task-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}

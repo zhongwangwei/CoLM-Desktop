@@ -1,4 +1,4 @@
-import './engine-progress.css';
+import TaskCard from '../../components/TaskCard';
 import { engineStep, type BuildProgress } from './engine-progress';
 
 const STEPS: [string, string][] = [
@@ -15,12 +15,15 @@ export default function EngineProgress({
   waited,
   progress,
   en,
+  hint,
 }: {
   host: string;
   phase: 'checking' | 'building';
   waited: string;
   progress?: BuildProgress | null;
   en: boolean;
+  /** What the user can do meanwhile; the wizard's wording by default. */
+  hint?: string;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const step = engineStep(phase, progress);
@@ -47,46 +50,23 @@ export default function EngineProgress({
     ),
   ][step];
   return (
-    <section className="engine-progress" role="status" aria-live="polite">
-      <header className="engine-progress-head">
-        <strong>
-          {t(
-            `${host} 正在准备与当前版本一致的计算引擎`,
-            `${host} is preparing an engine for this version`,
-          )}
-        </strong>
-        <span className="engine-progress-time">{t(`已用 ${waited}`, `${waited} so far`)}</span>
-      </header>
-      <ol className="engine-progress-steps">
-        {STEPS.map(([zh, english], index) => (
-          <li
-            key={zh}
-            className={index < step ? 'is-done' : index === step ? 'is-active' : undefined}
-            aria-current={index === step ? 'step' : undefined}
-          >
-            {en ? english : zh}
-          </li>
-        ))}
-      </ol>
-      <div
-        className={`engine-progress-bar${percent === null ? ' is-indeterminate' : ''}`}
-        role="progressbar"
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent ?? undefined}
-      >
-        <span style={percent === null ? undefined : { width: `${Math.max(percent, 2)}%` }} />
-      </div>
-      <div className="engine-progress-meta">
-        <span className="engine-progress-detail">{detail}</span>
-        {percent !== null && <span className="engine-progress-percent">{percent}%</span>}
-      </div>
-      <p className="engine-progress-hint">
-        {t(
+    <TaskCard
+      title={t(
+        `${host} 正在准备与当前版本一致的计算引擎`,
+        `${host} is preparing an engine for this version`,
+      )}
+      waited={t(`已用 ${waited}`, `${waited} so far`)}
+      steps={STEPS.map(([zh, english]) => (en ? english : zh))}
+      step={step}
+      percent={percent}
+      detail={detail}
+      hint={
+        hint ??
+        t(
           '可以先继续填写，读取站点和创建算例会等它完成。',
           'Keep filling in the form; reading sites and creating the case wait for it.',
-        )}
-      </p>
-    </section>
+        )
+      }
+    />
   );
 }
