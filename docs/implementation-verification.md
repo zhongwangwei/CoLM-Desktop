@@ -34019,3 +34019,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 恢复出来的占位状态带着账本的 `operation_id`；导入记录的是 `legacy-…`，服务器上的作业没有这个身份，`matchesRemoteRun` 因 `operation !== expectedOperation` 判为"不是同一个作业"。改为恢复时不带 `operation_id`（`openRuns`），由第一次状态核对按"同一台服务器、记录有作业号、没有待确认"认领。
     - 这条"认领"路径（`discovered`）只对当前站点（`currentCase.current === target`）开放，批量里其余 89 个站点永远认领不了。改为批量里的任何站点都可以。
     测试：`every station of a reopened batch claims its server job on the first status check`（旧写法下失败、新写法下通过）；GUI 706 条。bd 上这些作业早已结束，核对后应都变成完成。
+
+27. **天河（星逸，Slurm，无外网）：上传依赖、登录节点离线编译，已就绪（2026-10-19）**：
+    - 做法：本机 `cargo vendor --locked` 得到 225 个 crate、下载 cmake 4.4.4 与 Rust 1.97.1，经 `ssh host 'cat > f' < local` 管道上传（`scp` 在天河上不可用）；服务器上用工作根目录的 `.cargo/config.toml`（`[net] offline=true` + 源替换到 vendor 目录）离线编译。只上传构建依赖，没有在天河上装任何 AI 相关的东西。
+    - 踩坑：macOS 的 tar 会带 `._*`（AppleDouble）文件，其中 `tract-linalg` 的 build.rs 因此编译失败——打包要 `COPYFILE_DISABLE=1`，并在服务器上删掉已有的 `._*`；cargo 的源替换只能写在配置文件里，环境变量定义不了 `[source.*]` 表；天河的中心代理对 GitHub 下载只有 8 KB/s，Rust 下载则很快，所以 cmake 改为本机下载再上传。
+    - 结果：`remote_prepare_engine` 约 659 s 返回 `{"ready":true}`，`engine/363e67a7c94a145d/bin` 下 `colm-cli`、`colm-rs`、`mkinidata-rs`、`mksrfdata-rs` 都在。
+    - 只读验证（未提交任何作业）：`remote_probe` 在 ln233 上返回 `problems: []`、`build_problems: []`，队列 deimos/phobos/debug；`remote_scan_sites` 读到 PLUMBER2s 站点列表（47 KB，约 40 s，登录节点负载高）；`sbatch --test-only` 对 deimos、debug 都接受，且都是"独占一个 64 核节点"（deimos 预计 22:43 起，debug 约 13:16 起）。
+    - 没做：真实作业（debug 分区会整节点计费几分钟，等用户点头）；"按节点打包站点"；把"离线服务器自动上传依赖并编译"做成应用功能（要先给方案）。
