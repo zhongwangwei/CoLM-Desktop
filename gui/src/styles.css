@@ -794,85 +794,6 @@ table input {
   margin: 0 auto;
   container-type: inline-size;
 }
-.project-intro {
-  display: flex;
-  align-items: baseline;
-  gap: 20px;
-  flex-wrap: wrap;
-  margin-bottom: 26px;
-}
-.project-intro h1 {
-  margin: 0;
-  font-size: 28px;
-  color: var(--foreground);
-}
-.project-intro p {
-  margin: 0;
-  font-size: 13px;
-  color: var(--muted);
-}
-.project-actions {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-bottom: 20px;
-}
-.project-action {
-  display: flex;
-  justify-content: flex-start !important;
-  align-items: flex-start !important;
-  gap: 12px !important;
-  padding: 22px 18px !important;
-  border: 1px solid var(--border) !important;
-  background: var(--surface) !important;
-  min-height: 142px;
-  text-align: left;
-  box-shadow: 0 2px 7px #10243a04;
-}
-.project-action:hover {
-  border-color: var(--accent) !important;
-  background: var(--accent-soft) !important;
-}
-.project-action > span:nth-child(2) {
-  flex: 1;
-  min-width: 0;
-}
-.project-action strong {
-  display: block;
-  font-size: 16px;
-  font-weight: 650;
-  margin-bottom: 9px;
-}
-.project-action strong + span {
-  display: block;
-  font-size: 12px;
-  line-height: 1.7;
-  font-weight: 400;
-  color: var(--muted);
-}
-.project-action-icon {
-  display: flex;
-  width: 42px;
-  height: 42px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 9px;
-  background: var(--elevated);
-  color: var(--foreground);
-  flex-shrink: 0;
-  font-size: 32px;
-  font-weight: 400;
-  line-height: 1;
-}
-.project-action-icon.primary {
-  background: #0b7f86;
-  color: #fff;
-}
-.project-action-icon .nav-icon {
-  margin: 0;
-  width: 25px;
-  height: 25px;
-}
 .project-chevron {
   color: var(--muted);
   font-size: 22px;
@@ -968,43 +889,11 @@ table input {
   text-align: left;
 }
 @container (max-width:720px) {
-  .project-action {
-    padding: 16px 12px !important;
-    gap: 8px !important;
-    min-height: 124px;
-  }
-  .project-action-icon {
-    width: 32px;
-    height: 32px;
-    font-size: 28px;
-  }
-  .project-action-icon .nav-icon {
-    width: 21px;
-    height: 21px;
-  }
-  .project-action .project-chevron {
-    display: none;
-  }
   .project-example img {
     width: 100px;
   }
-  .project-intro {
-    gap: 8px;
-  }
 }
 @container (max-width:480px) {
-  .project-actions {
-    grid-template-columns: 1fr;
-    gap: 10px;
-  }
-  .project-action {
-    min-height: 100px;
-    flex-wrap: nowrap;
-    align-items: center !important;
-  }
-  .project-action > span:nth-child(2) {
-    flex-basis: auto;
-  }
   .project-example {
     flex-wrap: wrap;
   }
