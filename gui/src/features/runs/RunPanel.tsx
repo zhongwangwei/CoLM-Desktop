@@ -609,19 +609,21 @@ export default function RunPanel({
     command: 'remote_status' | 'remote_cancel' | 'remote_fetch',
     target = casePath,
     quiet = false,
+    // The caller already holds the panel lock (the Check button checks several stations at once).
+    held = false,
   ) {
     const targetRemote = target === casePath ? remote : latest.current[target]?.progress?.remote;
     const permissions = remoteRunPermissions(targetRemote);
-    if (lock.current || monitor) return;
+    if (!held && (lock.current || monitor)) return;
     if (command === 'remote_cancel' && !permissions.cancel)
       throw new Error(
         bilingual('先核对服务器任务身份与运行状态', 'Reconcile job identity and state first'),
       );
     if (command === 'remote_fetch' && !permissions.fetch)
       throw new Error(bilingual('先核对服务器任务的真实终态', 'Confirm terminal state first'));
-    lock.current = true;
+    if (!held) lock.current = true;
     // Automatic checks run in the background without disabling the panel.
-    if (!quiet) setMonitor(true);
+    if (!quiet && !held) setMonitor(true);
     const expectedRunId = latest.current[target]?.run_id;
     try {
       let result = await invokeJson<Record<string, unknown>>(
@@ -699,8 +701,8 @@ export default function RunPanel({
       if (!quiet) notify(String(e), true);
       throw e;
     } finally {
-      lock.current = false;
-      if (alive.current && !quiet) setMonitor(false);
+      if (!held) lock.current = false;
+      if (alive.current && !quiet && !held) setMonitor(false);
     }
   }
   // While this case's server job is unfinished, check its state every 10 seconds.
@@ -777,14 +779,22 @@ export default function RunPanel({
     const targets = open.length ? open : [casePath];
     const results: unknown[] = [];
     const errors: string[] = [];
-    for (const dir of targets) {
-      try {
-        const merged = await remoteAction('remote_status', dir, true);
-        if (merged) results.push(merged);
-      } catch (error) {
-        errors.push(String(error));
-        notify(String(error), true);
-      }
+    // Five stations at a time under one lock: one by one, 40 stations took minutes.
+    lock.current = true;
+    setMonitor(true);
+    try {
+      await eachLimited(targets, 5, async (dir) => {
+        try {
+          const merged = await remoteAction('remote_status', dir, true, true);
+          if (merged) results.push(merged);
+        } catch (error) {
+          errors.push(String(error));
+          notify(String(error), true);
+        }
+      });
+    } finally {
+      lock.current = false;
+      if (alive.current) setMonitor(false);
     }
     if (results.length) say(remoteStatusSummary(results, en));
     else if (errors.length) say(errors[0], true);

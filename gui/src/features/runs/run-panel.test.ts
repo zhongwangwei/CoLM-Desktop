@@ -618,7 +618,7 @@ test('open ledger runs are watched, and checking server jobs reports a summary',
   ]);
   assert.equal(
     summary,
-    '已核对 6 个服务器作业：完成 2 · 失败 1 · 运行中 1 · 排队中 1 · 未能确认 1',
+    '已核对 6 个服务器作业：已完成 2 · 失败 1 · 运行中 1 · 排队中 1 · 未能确认 1',
   );
 });
 
@@ -655,7 +655,7 @@ test('a server job is described in words, with the raw record left for troublesh
     },
     1792375398000 + 5 * 60000,
   );
-  assert.equal(running['状态'], '运行中');
+  assert.equal(running['状态'], '运行中，已算到 2002-12-30');
   assert.equal(running['调度器状态'], 'RUN');
   assert.equal(running['服务器'], 'bd');
   assert.equal(running['调度系统'], 'LSF · 作业号 232723');

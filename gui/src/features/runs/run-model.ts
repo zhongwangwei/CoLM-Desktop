@@ -256,24 +256,130 @@ export function openRuns(
 }
 
 /** One line for the result of checking server jobs: how many finished, failed, run, wait. */
-export function remoteStatusSummary(results: unknown[], en = false): string {
-  const counts = { finished: 0, failed: 0, running: 0, queued: 0, unknown: 0 };
-  for (const result of results) {
-    const status = ((result as { status?: { state?: string; exit_code?: number } } | null)
-      ?.status ?? {}) as { state?: string; exit_code?: number };
-    if (remoteRunPermissions(result).terminal)
-      counts[status.exit_code === 0 ? 'finished' : 'failed']++;
-    else if (status.state === 'running') counts.running++;
-    else if (status.state === 'queued') counts.queued++;
-    else counts.unknown++;
+export type RemoteActivityKind =
+  'finished' | 'failed' | 'stopped' | 'building' | 'running' | 'queued' | 'unconfirmed';
+
+/** Why Slurm keeps a job waiting (`squeue %r`), as a person would say it. */
+function waitingReason(reason: string, en: boolean): string {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  const known: Record<string, string> = {
+    Priority: t('前面有优先级更高的作业', 'jobs with higher priority are ahead'),
+    Resources: t('在等空闲的核与内存', 'waiting for free cores and memory'),
+    Dependency: t('在等它依赖的作业', 'waiting for a job it depends on'),
+    QOSMaxJobsPerUserLimit: t('超过了每人可同时运行的作业数', 'over the per-user job limit'),
+    AssocMaxJobsLimit: t('超过了账户可同时运行的作业数', 'over the account job limit'),
+    ReqNodeNotAvail: t('需要的节点暂时不可用', 'the requested nodes are unavailable'),
+    PartitionTimeLimit: t('申请的时限超过了分区上限', 'the time limit exceeds the partition limit'),
+  };
+  return known[reason] ?? reason;
+}
+
+/**
+ * What the server is doing with a job, in one sentence: compiling the engine, making surface data,
+ * running the model (and how far), waiting in the queue (and why), or how it ended. "运行中 /
+ * 未能确认" alone did not say whether the server was compiling or computing (land02, 2026-10-19).
+ */
+export function remoteActivity(
+  value: unknown,
+  en = false,
+): { kind: RemoteActivityKind; text: string } {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  const data = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  const status =
+    data.status && typeof data.status === 'object' ? (data.status as Record<string, unknown>) : {};
+  const state = typeof status.state === 'string' ? status.state : '';
+  const detail = typeof status.detail === 'string' ? status.detail : '';
+  const phase = typeof status.phase === 'string' ? status.phase : '';
+  if (remoteRunPermissions(value).terminal) {
+    const ended = remoteEndStatus(value);
+    if (ended === 'succeeded') return { kind: 'finished', text: t('已完成', 'Finished') };
+    if (ended === 'cancelled')
+      return {
+        kind: 'stopped',
+        text: t('已停止（作业被取消）', 'Stopped (the job was cancelled)'),
+      };
+    return {
+      kind: 'failed',
+      text: Number.isInteger(status.exit_code)
+        ? t(`失败（退出码 ${status.exit_code}）`, `Failed (exit code ${status.exit_code})`)
+        : t(
+            `失败（调度器：${detail.split('|')[0]}）`,
+            `Failed (scheduler: ${detail.split('|')[0]})`,
+          ),
+    };
   }
-  const parts = [
-    counts.finished && (en ? `${counts.finished} finished` : `完成 ${counts.finished}`),
-    counts.failed && (en ? `${counts.failed} failed` : `失败 ${counts.failed}`),
-    counts.running && (en ? `${counts.running} running` : `运行中 ${counts.running}`),
-    counts.queued && (en ? `${counts.queued} queued` : `排队中 ${counts.queued}`),
-    counts.unknown && (en ? `${counts.unknown} unconfirmed` : `未能确认 ${counts.unknown}`),
-  ].filter(Boolean);
+  if (state === 'queued') {
+    const reason = detail.split('|')[1]?.trim();
+    return {
+      kind: 'queued',
+      text: reason
+        ? t(`排队中：${waitingReason(reason, en)}`, `Queued: ${waitingReason(reason, en)}`)
+        : t('排队中，等待调度器分配资源', 'Queued for resources'),
+    };
+  }
+  if (state === 'running') {
+    const stages: Record<string, [RemoteActivityKind, string, string]> = {
+      'preparing the engine': ['building', '正在准备计算引擎', 'Preparing the engine'],
+      'installing Rust/Cargo': ['building', '正在安装 Rust 编译器', 'Installing the Rust compiler'],
+      'installing CMake': ['building', '正在安装 CMake', 'Installing CMake'],
+      'building the Rust engine': [
+        'building',
+        '正在服务器上编译计算引擎',
+        'Compiling the engine on the server',
+      ],
+      mksrfdata: ['running', '正在制作地表数据', 'Making surface data'],
+      mkinidata: ['running', '正在制作初始条件', 'Making initial conditions'],
+      colm: ['running', '正在进行主模型计算', 'Running the model'],
+    };
+    const [kind, zh, english] = stages[phase] ?? ['running', '运行中', 'Running'];
+    const lines = typeof status.log_tail === 'string' ? status.log_tail.split('\n') : [];
+    const date = [...lines]
+      .reverse()
+      .map((line) => line.match(/TIMESTEP\s*=\s*\d+\s*\|\s*DATE\s*=\s*(\d{4}-\d{2}-\d{2})/)?.[1])
+      .find(Boolean);
+    return {
+      kind,
+      text:
+        date && kind === 'running'
+          ? t(`${zh}，已算到 ${date}`, `${english}, at ${date}`)
+          : t(zh, english),
+    };
+  }
+  if (state === 'lost')
+    return {
+      kind: 'unconfirmed',
+      text: t(
+        '作业已不在调度器里，也没有留下退出码，需要核对',
+        'The job is gone without an exit code; check it',
+      ),
+    };
+  if (data.pending || data.needs_reconciliation)
+    return {
+      kind: 'unconfirmed',
+      text: t('提交结果还没有确认', 'The submission is not confirmed yet'),
+    };
+  return { kind: 'unconfirmed', text: t('未能确认', 'Unconfirmed') };
+}
+
+export function remoteStatusSummary(results: unknown[], en = false): string {
+  const groups = new Map<string, number>();
+  for (const result of results) {
+    const { kind, text } = remoteActivity(result, en);
+    const reason = kind === 'queued' ? text.split(/[：:]/)[1]?.trim() : '';
+    const names: Record<RemoteActivityKind, [string, string]> = {
+      finished: ['已完成', 'finished'],
+      failed: ['失败', 'failed'],
+      stopped: ['已停止', 'stopped'],
+      building: ['编译计算引擎', 'compiling the engine'],
+      running: ['运行中', 'running'],
+      queued: ['排队中', 'queued'],
+      unconfirmed: ['未能确认', 'unconfirmed'],
+    };
+    const name = en ? names[kind][1] : names[kind][0];
+    const key = reason ? `${name}（${reason}）` : name;
+    groups.set(key, (groups.get(key) ?? 0) + 1);
+  }
+  const parts = [...groups].map(([name, count]) => (en ? `${count} ${name}` : `${name} ${count}`));
   const head = en
     ? `Checked ${results.length} server job(s)`
     : `已核对 ${results.length} 个服务器作业`;
@@ -309,19 +415,7 @@ export function remoteJobFacts(
   const permissions = remoteRunPermissions(value);
   const state = text(status.state);
   const detail = text(status.detail);
-  let stateText = t('未能确认（请核对服务器状态）', 'Unconfirmed (check the server status)');
-  if (permissions.terminal)
-    stateText =
-      status.exit_code === 0
-        ? t('已结束，成功（退出码 0）', 'Finished, succeeded (exit code 0)')
-        : t(
-            `已结束，失败（退出码 ${status.exit_code}）`,
-            `Finished, failed (exit code ${status.exit_code})`,
-          );
-  else if (state === 'running') stateText = t('运行中', 'Running');
-  else if (state === 'queued') stateText = t('排队中，等待调度器分配资源', 'Queued for resources');
-  else if (state === 'lost')
-    stateText = t('作业已不在调度器里，也没有留下退出码', 'The job is gone without an exit code');
+  const stateText = remoteActivity(value, en).text;
   add(t('状态', 'State'), stateText);
   if (detail && state !== 'finished') add(t('调度器状态', 'Scheduler state'), detail);
 

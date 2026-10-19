@@ -396,11 +396,12 @@ case "$S" in
 bare)
   if [ -f pid ] && kill -0 "$(cat pid)" 2>/dev/null; then echo "state=running"; else echo "state=lost"; fi ;;
 slurm)
-  Q=$(squeue -h -j "$ID" -o %T 2>/dev/null | head -n 1)
+  # 状态带上原因（`PENDING|Priority`）：排队时界面要说清楚是在等优先级更高的作业还是在等资源。
+  Q=$(squeue -h -j "$ID" -o '%T|%r' 2>/dev/null | head -n 1)
   if [ -z "$Q" ]; then
     echo "state=lost"; echo "detail=$(sacct -n -X -P -j "$ID" -o State,ExitCode 2>/dev/null | head -n 1)"
   else
-    case "$Q" in PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";; *) echo "state=running";; esac
+    case "${Q%%|*}" in PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";; *) echo "state=running";; esac
     echo "detail=$Q"
   fi ;;
 slurm-pack)
