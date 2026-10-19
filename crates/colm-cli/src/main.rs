@@ -32,6 +32,7 @@
 //! colm-cli study-parameters
 //! colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
 //! colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --job <作业> --operation <运行> --expected-path <目录> [--whole-case 1] [--delete 1]
+//! colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --project 1 --expected-path <项目目录> [--delete 1]
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
@@ -187,6 +188,7 @@ usage:
   colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
                    # 独占创建一个文件夹，不覆盖已有路径、不创建父目录
   colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --job <作业> --operation <运行> --expected-path <目录> [--whole-case 1] [--delete 1]
+  colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --project 1 --expected-path <项目目录> [--delete 1]
                    # 默认预检；只清理身份已核实且已完成的独占服务器运行目录
   colm-cli study-preflight <case-root> --spec study.json
                    # 只校验 Study，不创建目录

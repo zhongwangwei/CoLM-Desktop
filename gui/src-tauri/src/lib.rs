@@ -199,6 +199,8 @@ pub fn run() {
             history_delete_plan,
             history_clear_plan,
             history_clear,
+            history_project_delete_plan,
+            history_project_delete,
             history_delete,
             history_export,
             history_replay,

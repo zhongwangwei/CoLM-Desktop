@@ -9,8 +9,9 @@ use colm_remote::{
 
 const CLEANUP: &str = r#"
 import hashlib, json, os, re, shutil, stat, sys, tempfile
-root, job, operation, target, action, case_digest = sys.argv[1:]
+root, job, operation, target, action, case_digest, mode = sys.argv[1:]
 whole_case = bool(case_digest)
+project = mode == 'project'
 def plain(path):
     if not path.startswith('/') or path == '/' or any(p in ('', '.', '..') for p in path.split('/')[1:]):
         raise ValueError('unsafe absolute directory')
@@ -24,6 +25,22 @@ def read_json(path):
     plain(path)
     with open(path) as source:
         return json.load(source)
+def finished(directory, name):
+    exit_path = directory + '/exit_code'
+    if os.path.lexists(exit_path):
+        plain(exit_path)
+        with open(exit_path) as source:
+            return re.fullmatch(r'-?\d+\s*', source.read(64)) is not None
+    # A packed station cancelled before any node job took it never runs, so it never writes an
+    # exit code; nothing can start it any more (colm_remote::pack).
+    if os.path.isfile(directory + '/scheduler') and os.path.isfile(directory + '/pool'):
+        with open(plain(directory + '/scheduler')) as source:
+            scheduler = source.read().strip()
+        with open(plain(directory + '/pool')) as source:
+            pool = plain(source.read().strip())
+        claim = pool + '/claimed/' + name
+        return scheduler == 'slurm-pack' and os.path.isfile(claim + '/cancelled') and not os.path.exists(claim + '/carrier')
+    return False
 def marker(text, key):
     values = re.findall(r'^# ' + re.escape(key) + r': (.+)$', text, re.M)
     if len(values) != 1:
@@ -38,12 +55,25 @@ if not os.path.isdir(root + '/.engine-lifecycle-lock'):
     raise ValueError('exclusive lifecycle lock is required')
 if os.path.isdir(root + '/.engine-leases') and os.listdir(root + '/.engine-leases'):
     raise ValueError('submission is in progress or uncertain')
-if whole_case:
+home = os.path.realpath(os.path.expanduser('~'))
+reserved = ('engine', 'kernels', 'tools', 'jobs', 'pools', 'offline', 'target', '.engine-leases', '.engine-lifecycle-lock', 's', 'studies')
+if (project or whole_case) and (target == home or home.startswith(target + '/') or target == root or target == root + '/cases' or any(target == root + '/' + name or target.startswith(root + '/' + name + '/') for name in reserved)):
+    raise ValueError('protected home or server resource directory')
+if project:
+    # A whole project folder: every entry must be one of its cases, each owning itself. Anything
+    # else means the folder holds more than the app made, so nothing is deleted.
+    for name in sorted(os.listdir(target)):
+        case = plain(target + '/' + name)
+        if not stat.S_ISDIR(os.lstat(case).st_mode):
+            raise ValueError('the project folder holds something that is not a case: ' + name)
+        try:
+            owner = read_json(case + '/.colm-desktop-server.json')
+        except (OSError, ValueError):
+            raise ValueError('the project folder holds something that is not a case: ' + name)
+        if owner.get('schema') != 1 or owner.get('remote_directory') != case or not os.path.isfile(plain(case + '/case.nml')):
+            raise ValueError('the project folder holds something that is not a case: ' + name)
+elif whole_case:
     base = target
-    home = os.path.realpath(os.path.expanduser('~'))
-    reserved = ('engine', 'kernels', 'tools', 'jobs', '.engine-leases', '.engine-lifecycle-lock', 's', 'studies')
-    if target == home or home.startswith(target + '/') or target == root + '/cases' or any(target == root + '/' + name or target.startswith(root + '/' + name + '/') for name in reserved):
-        raise ValueError('protected home or server resource directory')
     nml = plain(target + '/case.nml')
     with open(nml, 'rb') as source:
         if hashlib.sha256(source.read()).hexdigest() != case_digest:
@@ -55,23 +85,22 @@ else:
     manifest = read_json(target + '/model-run.json')
     if manifest.get('schema') != 1 or manifest.get('operation_id') != operation or manifest.get('run_case') != target:
         raise ValueError('frozen run ownership does not match')
-owner = read_json(base + '/.colm-desktop-server.json')
-if owner.get('schema') != 1 or owner.get('remote_directory') != base:
-    raise ValueError('server project ownership does not match')
+if not project:
+    owner = read_json(base + '/.colm-desktop-server.json')
+    if owner.get('schema') != 1 or owner.get('remote_directory') != base:
+        raise ValueError('server project ownership does not match')
 # The run must never contain the lifecycle/job registry that protects it.
 if root == target or root.startswith(target + '/'):
     raise ValueError('run directory contains the server resource root')
 jobs = root + '/jobs'
 if os.path.lexists(jobs):
     plain(jobs)
-seen = whole_case and not job
+seen = project or (whole_case and not job)
 for name in os.listdir(jobs) if os.path.exists(jobs) else []:
     directory = plain(jobs + '/' + name)
-    exit_path = plain(directory + '/exit_code')
-    with open(exit_path) as source:
-        if not re.fullmatch(r'-?\d+\s*', source.read(64)):
-            raise ValueError('job is not confirmed finished: ' + name)
-    if name == job:
+    if not finished(directory, name):
+        raise ValueError('job is not confirmed finished: ' + name)
+    if name == job and not project:
         plain(directory + '/script.sh')
         with open(directory + '/script.sh') as source:
             text = source.read(2 * 1024 * 1024 + 1)
@@ -123,16 +152,54 @@ fn script(
             "unsafe cleanup path"
         );
     }
-    Ok(format!(
-        "python3 - {} {} {} {} {} {} <<'COLM_HISTORY_CLEANUP'\n{}\nCOLM_HISTORY_CLEANUP\n",
+    Ok(invocation(
+        root,
+        id,
+        operation,
+        path,
+        delete,
+        case_digest.unwrap_or(""),
+        "run",
+    ))
+}
+
+fn invocation(
+    root: &str,
+    id: &str,
+    operation: &str,
+    path: &str,
+    delete: bool,
+    case_digest: &str,
+    mode: &str,
+) -> String {
+    format!(
+        "python3 - {} {} {} {} {} {} {mode} <<'COLM_HISTORY_CLEANUP'\n{}\nCOLM_HISTORY_CLEANUP\n",
         quote(root),
         quote(id),
         quote(operation),
         quote(path),
         if delete { "delete" } else { "preview" },
-        quote(case_digest.unwrap_or("")),
+        quote(case_digest),
         CLEANUP
-    ))
+    )
+}
+
+/// 删除整个服务器项目文件夹：里面只能是这个项目的算例（各自的 `.colm-desktop-server.json`
+/// 指向自己），服务器工作目录下的作业都已结束。
+fn project_script(root: &str, path: &str, delete: bool) -> Result<String> {
+    for value in [root, path] {
+        ensure!(
+            value.starts_with('/')
+                && value != "/"
+                && !value.chars().any(char::is_control)
+                && value
+                    .split('/')
+                    .skip(1)
+                    .all(|p| !matches!(p, "" | "." | "..")),
+            "unsafe cleanup path"
+        );
+    }
+    Ok(invocation(root, "", "project", path, delete, "", "project"))
 }
 
 fn validate_case_namelist(text: &str) -> Result<()> {
@@ -147,6 +214,18 @@ fn validate_case_namelist(text: &str) -> Result<()> {
 pub(super) fn run(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
     let root = opts.need_str("--root")?;
+    if opts.get("--project").as_deref() == Some("1") {
+        let path = opts.need_str("--expected-path")?;
+        let delete = opts.get("--delete").as_deref() == Some("1");
+        let command = project_script(&root, &path, delete)?;
+        let mut lock = LifecycleLock::acquire_exclusive(&ssh, &root)?;
+        let result = lock.run(|| -> Result<serde_json::Value> {
+            Ok(serde_json::from_str(&ssh.run_ok(&command)?)?)
+        })?;
+        lock.finish()?;
+        println!("{result}");
+        return Ok(());
+    }
     let whole_case = opts.get("--whole-case").as_deref() == Some("1");
     let path = opts.need_str("--expected-path")?;
     let id = if whole_case {
@@ -424,6 +503,94 @@ mod tests {
         assert!(project.exists());
         assert!(validate_case_namelist("not a namelist").is_err());
         assert!(validate_case_namelist("&colm_inparm\n DEF_CASE_NAME = ''\n/\n").is_err());
+    }
+    fn project(f: &Fixture, delete: bool) -> std::process::Output {
+        let command = project_script(
+            f.root.to_str().unwrap(),
+            f.base.join("uuu").to_str().unwrap(),
+            delete,
+        )
+        .unwrap();
+        Command::new("bash")
+            .args(["-c", &command])
+            .output()
+            .unwrap()
+    }
+    fn server_case(dir: &std::path::Path) {
+        fs::create_dir_all(dir.join("runs/r1")).unwrap();
+        fs::write(
+            dir.join("case.nml"),
+            "&colm_inparm\nDEF_CASE_NAME = 'x'\n/\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join(".colm-desktop-server.json"),
+            serde_json::json!({"schema":1,"remote_directory":dir}).to_string(),
+        )
+        .unwrap();
+    }
+    #[test]
+    fn remote_project_cleanup_deletes_only_a_folder_of_its_own_cases_once_jobs_are_done() {
+        let f = Fixture::new();
+        let folder = f.base.join("uuu");
+        for site in ["AT-Neu", "AU-How"] {
+            server_case(&folder.join(site));
+        }
+        let ok = |out: &std::process::Output| {
+            assert!(
+                out.status.success(),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        let refused = |out: &std::process::Output, why: &str| {
+            assert!(!out.status.success());
+            let err = String::from_utf8_lossy(&out.stderr);
+            assert!(err.contains(why), "{err}");
+        };
+        ok(&project(&f, false));
+        // Anything the app did not make keeps the whole folder.
+        fs::write(folder.join("notes.txt"), "mine").unwrap();
+        refused(&project(&f, true), "not a case: notes.txt");
+        fs::remove_file(folder.join("notes.txt")).unwrap();
+        fs::create_dir(folder.join("other")).unwrap();
+        refused(&project(&f, true), "not a case: other");
+        fs::remove_dir(folder.join("other")).unwrap();
+        // A job still going on the server blocks it.
+        fs::create_dir(f.root.join("jobs/run-live")).unwrap();
+        refused(&project(&f, true), "not confirmed finished: run-live");
+        // A packed station a node job took but that wrote no exit code is not finished either.
+        let pool = f.root.join("pools/b1");
+        fs::create_dir_all(pool.join("claimed/run-live")).unwrap();
+        fs::write(f.root.join("jobs/run-live/scheduler"), "slurm-pack\n").unwrap();
+        fs::write(
+            f.root.join("jobs/run-live/pool"),
+            format!("{}\n", pool.display()),
+        )
+        .unwrap();
+        fs::write(pool.join("claimed/run-live/carrier"), "100\n").unwrap();
+        refused(&project(&f, true), "not confirmed finished: run-live");
+        // One cancelled before any node job took it can never start, so it does not block.
+        fs::remove_file(pool.join("claimed/run-live/carrier")).unwrap();
+        fs::write(pool.join("claimed/run-live/cancelled"), "").unwrap();
+        ok(&project(&f, true));
+        assert!(!folder.exists());
+        assert!(f.root.join("jobs/job1/script.sh").exists());
+        // The server's own directories are never a project.
+        let out = Command::new("bash")
+            .args([
+                "-c",
+                &project_script(
+                    f.root.to_str().unwrap(),
+                    f.root.join("jobs").to_str().unwrap(),
+                    true,
+                )
+                .unwrap(),
+            ])
+            .output()
+            .unwrap();
+        refused(&out, "protected");
+        assert!(f.root.join("jobs").exists());
     }
     #[test]
     fn remote_history_cleanup_refuses_lease_wrong_job_and_unsafe_paths() {

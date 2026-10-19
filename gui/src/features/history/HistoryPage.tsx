@@ -62,6 +62,20 @@ type ClearPlan = {
   skipped: string[];
 };
 type ClearResult = { removed: number; kept: number; deleted: string[]; failed: string[] };
+type ProjectDeletePlan = {
+  records: number;
+  path: string;
+  bytes: number;
+  host: string | null;
+  remotePath: string | null;
+  reason: string | null;
+};
+type ProjectDeleteResult = {
+  removed: number;
+  path: string;
+  host: string | null;
+  remotePath: string | null;
+};
 const sizeText = (bytes: number) =>
   bytes >= 1024 ** 3
     ? `${(bytes / 1024 ** 3).toFixed(1)} GB`
@@ -133,6 +147,14 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     [clearOutcome, setClearOutcome] = useState<ClearResult | null>(null),
     // 从项目卡片右键进来时只清这一个项目；为空时是整页的“清空历史记录”。
     [clearProject, setClearProject] = useState<{ path: string; name: string } | null>(null);
+  // 项目卡片右键的"删除记录和项目文件夹"：右键时先核对（服务器项目还要到服务器上预检），确认框里再输入文件夹名。
+  const [projectPlan, setProjectPlan] = useState<ProjectDeletePlan | null>(null),
+    [projectDeletion, setProjectDeletion] = useState<{
+      project: { path: string; name: string };
+      plan: ProjectDeletePlan;
+    } | null>(null),
+    [projectConfirm, setProjectConfirm] = useState(''),
+    [projectOutcome, setProjectOutcome] = useState<ProjectDeleteResult | null>(null);
   const deletionPath = deletion?.wholeCase ? deletion.plan?.casePath : deletion?.plan?.path;
   const directoryName =
     deletionPath
@@ -345,6 +367,25 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     const request = {};
     menuRequest.current = open ? request : null;
     setDeletePlan(null);
+    setProjectPlan(null);
+    if (open && item.project_group && !busy) {
+      const token = epoch.current,
+        path = item.project_group.path;
+      void invokeJson<ProjectDeletePlan>('history_project_delete_plan', { project: path })
+        .catch((e) => ({
+          records: 0,
+          path,
+          bytes: 0,
+          host: null,
+          remotePath: null,
+          reason: String(e),
+        }))
+        .then((plan) => {
+          if (token.active && token === epoch.current && menuRequest.current === request)
+            setProjectPlan(plan);
+        });
+      return;
+    }
     if (!open || item.run_group || item.project_group || !deleteAllowed(item) || busy) return;
     const token = epoch.current;
     void invokeJson<HistoryDeletePlan>('history_delete_plan', { id: item.operation_id })
@@ -369,16 +410,34 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     const plan = deletePlan?.id === item.operation_id ? deletePlan : null;
     const allowed = deleteAllowed(item);
     if (item.project_group) {
-      // 一个多站点项目可有上千条记录，逐条删不现实；整项目删除沿用清空历史的范围与确认框。
+      // 一个多站点项目可有上千条记录，逐条删不现实。只删记录沿用清空历史的确认框；连文件夹一起删的，
+      // 右键时已核对过（项目文件夹里只有它自己的、空闲的算例）。
       const { path, name } = item.project_group;
+      const folder = projectPlan?.path === path ? projectPlan : null;
       return [
         {
-          label: t('删除这个项目…', 'Delete this project…'),
+          label: t('仅删除记录…', 'Delete records only…'),
           danger: true,
           disabled: busy,
           onSelect: () => {
             setError('');
             run(() => openClear({ path, name }));
+          },
+        },
+        {
+          label: !folder
+            ? t('正在核对项目文件夹…', 'Checking the project folder…')
+            : folder.reason
+              ? folder.reason
+              : t('删除记录和项目文件夹…', 'Delete records and project folder…'),
+          danger: true,
+          disabled: busy || !folder || !!folder.reason,
+          onSelect: () => {
+            if (!folder || folder.reason) return;
+            setError('');
+            setProjectConfirm('');
+            setProjectOutcome(null);
+            setProjectDeletion({ project: { path, name }, plan: folder });
           },
         },
       ];
@@ -479,6 +538,21 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     setResult(null);
     setApplied((current) => ({ ...current }));
   }
+  async function deleteProject() {
+    if (!projectDeletion || projectConfirm !== projectDeletion.project.name) return;
+    const { project, plan } = projectDeletion;
+    const result = await invokeJson<ProjectDeleteResult>('history_project_delete', {
+      project: project.path,
+      expectedPath: plan.path,
+      expectedRemote: plan.remotePath,
+    });
+    update((current) => historyStateAfterDirectoryDeletion(current, result.path, undefined));
+    closeDetails();
+    setProjectDeletion(null);
+    setProjectOutcome(result);
+    setOffset(0);
+    setApplied((current) => ({ ...current }));
+  }
   async function openClear(project?: { path: string; name: string }) {
     const plan = await invokeJson<ClearPlan>(
       'history_clear_plan',
@@ -493,7 +567,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
   async function clearHistory() {
     if (!clearPlan) return;
     const result = await invokeJson<ClearResult>('history_clear', {
-      cases: clearCases ? clearPlan.cases.map((item) => item.path) : [],
+      cases: clearCases && !clearProject ? clearPlan.cases.map((item) => item.path) : [],
       unconfirmed: clearUnconfirmed,
       ...(clearProject ? { project: clearProject.path } : {}),
     });
@@ -1046,8 +1120,8 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
             )}
             {clearProject &&
               t(
-                '项目文件夹本身不会删除，只有下面勾选的算例文件夹会删除。',
-                'The project folder itself is kept; only the case folders below are deleted when ticked.',
+                '只删记录，项目文件夹和其中的算例、结果都不动。',
+                'Only records are removed; the project folder, its cases and results are kept.',
               )}
           </p>
           {clearPlan.unconfirmed > 0 && (
@@ -1077,66 +1151,70 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
               </p>
             </>
           )}
-          {clearPlan.cases.length > 0 ? (
+          {!clearProject && (
             <>
-              <label className="history-clear-cases">
-                <input
-                  type="checkbox"
-                  disabled={busy}
-                  checked={clearCases}
-                  onChange={(event) => setClearCases(event.target.checked)}
-                />
-                {t(
-                  `同时永久删除这些记录对应的 ${clearPlan.cases.length} 个本机算例文件夹（共 ${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))}）`,
-                  `Also permanently delete the ${clearPlan.cases.length} local case folders of these records (${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))} in total)`,
-                )}
-              </label>
-              {clearCases && (
-                <Notice tone="warning">
-                  {t(
-                    '算例文件夹内的设置、运行结果和全部文件都会删除，无法恢复；文件夹外引用的原始数据不受影响。',
-                    'Settings, outputs and every file inside these folders are deleted and cannot be recovered; input data referenced outside them is preserved.',
+              {clearPlan.cases.length > 0 ? (
+                <>
+                  <label className="history-clear-cases">
+                    <input
+                      type="checkbox"
+                      disabled={busy}
+                      checked={clearCases}
+                      onChange={(event) => setClearCases(event.target.checked)}
+                    />
+                    {t(
+                      `同时永久删除这些记录对应的 ${clearPlan.cases.length} 个本机算例文件夹（共 ${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))}）`,
+                      `Also permanently delete the ${clearPlan.cases.length} local case folders of these records (${sizeText(clearPlan.cases.reduce((sum, item) => sum + item.bytes, 0))} in total)`,
+                    )}
+                  </label>
+                  {clearCases && (
+                    <Notice tone="warning">
+                      {t(
+                        '算例文件夹内的设置、运行结果和全部文件都会删除，无法恢复；文件夹外引用的原始数据不受影响。',
+                        'Settings, outputs and every file inside these folders are deleted and cannot be recovered; input data referenced outside them is preserved.',
+                      )}
+                    </Notice>
                   )}
-                </Notice>
+                  <ul className="history-clear-list">
+                    {clearPlan.cases.map((item) => (
+                      <li key={item.path}>
+                        <span>{item.path}</span>
+                        <span className="muted">{sizeText(item.bytes)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              ) : (
+                <p className="muted">
+                  {t(
+                    '这些记录对应的本机算例文件夹已不存在，或不是可验证的算例目录；只移除记录。',
+                    'No verifiable local case folders remain for these records; only records are removed.',
+                  )}
+                </p>
               )}
-              <ul className="history-clear-list">
-                {clearPlan.cases.map((item) => (
-                  <li key={item.path}>
-                    <span>{item.path}</span>
-                    <span className="muted">{sizeText(item.bytes)}</span>
-                  </li>
-                ))}
-              </ul>
+              {clearPlan.remoteCases > 0 && (
+                <p className="muted">
+                  {t(
+                    `${clearPlan.remoteCases} 个服务器算例不会被删除，只移除记录。`,
+                    `${clearPlan.remoteCases} server cases are not deleted; only their records are removed.`,
+                  )}
+                </p>
+              )}
+              {clearPlan.skipped.length > 0 && (
+                <Advanced
+                  title={t(
+                    `保留的文件夹（${clearPlan.skipped.length}）`,
+                    `Kept folders (${clearPlan.skipped.length})`,
+                  )}
+                >
+                  <ul className="history-clear-list">
+                    {clearPlan.skipped.map((reason) => (
+                      <li key={reason}>{reason}</li>
+                    ))}
+                  </ul>
+                </Advanced>
+              )}
             </>
-          ) : (
-            <p className="muted">
-              {t(
-                '这些记录对应的本机算例文件夹已不存在，或不是可验证的算例目录；只移除记录。',
-                'No verifiable local case folders remain for these records; only records are removed.',
-              )}
-            </p>
-          )}
-          {clearPlan.remoteCases > 0 && (
-            <p className="muted">
-              {t(
-                `${clearPlan.remoteCases} 个服务器算例不会被删除，只移除记录。`,
-                `${clearPlan.remoteCases} server cases are not deleted; only their records are removed.`,
-              )}
-            </p>
-          )}
-          {clearPlan.skipped.length > 0 && (
-            <Advanced
-              title={t(
-                `保留的文件夹（${clearPlan.skipped.length}）`,
-                `Kept folders (${clearPlan.skipped.length})`,
-              )}
-            >
-              <ul className="history-clear-list">
-                {clearPlan.skipped.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            </Advanced>
           )}
           {error && <Notice tone="error">{error}</Notice>}
           <div className="button-row">
@@ -1158,15 +1236,90 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   ? t('正在删除…', 'Deleting…')
                   : t('正在清空…', 'Clearing…')
                 : clearProject
-                  ? clearCases
-                    ? t('删除项目记录和算例文件夹', 'Delete project records and case folders')
-                    : t('删除项目记录', 'Delete project records')
+                  ? t('删除项目记录', 'Delete project records')
                   : clearCases
                     ? t('清空记录并删除文件夹', 'Clear records and delete folders')
                     : t('确认清空记录', 'Confirm clearing records')}
             </Button>
           </div>
         </Dialog>
+      )}
+      {projectDeletion && (
+        <Dialog
+          open
+          title={t(
+            `删除项目“${projectDeletion.project.name}”及其文件夹`,
+            `Delete project “${projectDeletion.project.name}” and its folder`,
+          )}
+          showClose={false}
+          onOpenChange={(open) => {
+            if (!open && !busy) setProjectDeletion(null);
+          }}
+        >
+          <p>
+            {t(
+              `将删除这个项目的 ${projectDeletion.plan.records} 条记录，并永久删除下面的文件夹及其中全部算例、运行结果和文件，无法恢复。`,
+              `Removes the project's ${projectDeletion.plan.records} records and permanently deletes the folders below with every case, result and file in them. This cannot be undone.`,
+            )}
+          </p>
+          <ul className="history-clear-list">
+            {projectDeletion.plan.host && projectDeletion.plan.remotePath && (
+              <li>
+                <span>
+                  {t('服务器', 'Server')} {projectDeletion.plan.host}：
+                  {projectDeletion.plan.remotePath}
+                </span>
+              </li>
+            )}
+            <li>
+              <span>
+                {projectDeletion.plan.host
+                  ? t('本机的配置缓存', 'Local configuration cache')
+                  : t('本机', 'This computer')}
+                ：{projectDeletion.plan.path}
+              </span>
+              <span className="muted">{sizeText(projectDeletion.plan.bytes)}</span>
+            </li>
+          </ul>
+          <Notice tone="warning">
+            {t(
+              '文件夹外引用的原始数据（站点、强迫场、地表数据）不会删除。',
+              'Input data referenced outside these folders (sites, forcing, surface data) is preserved.',
+            )}
+          </Notice>
+          <label>
+            {t(
+              `输入项目文件夹名“${projectDeletion.project.name}”确认`,
+              `Type the project folder name “${projectDeletion.project.name}” to confirm`,
+            )}
+            <input
+              value={projectConfirm}
+              disabled={busy}
+              onChange={(event) => setProjectConfirm(event.target.value)}
+            />
+          </label>
+          {error && <Notice tone="error">{error}</Notice>}
+          <div className="button-row">
+            <Button disabled={busy} onClick={() => setProjectDeletion(null)}>
+              {t('取消', 'Cancel')}
+            </Button>
+            <Button
+              variant="danger"
+              disabled={busy || projectConfirm !== projectDeletion.project.name}
+              onClick={() => run(deleteProject)}
+            >
+              {busy ? t('正在删除…', 'Deleting…') : t('确认删除', 'Confirm deletion')}
+            </Button>
+          </div>
+        </Dialog>
+      )}
+      {projectOutcome && (
+        <Notice tone="success">
+          {t(
+            `已删除 ${projectOutcome.removed} 条记录和项目文件夹${projectOutcome.host ? `（${projectOutcome.host}：${projectOutcome.remotePath}）` : ''}。`,
+            `Removed ${projectOutcome.removed} records and the project folder${projectOutcome.host ? ` (${projectOutcome.host}: ${projectOutcome.remotePath})` : ''}.`,
+          )}
+        </Notice>
       )}
       {clearOutcome && (
         <Notice tone={clearOutcome.failed.length ? 'warning' : 'success'}>

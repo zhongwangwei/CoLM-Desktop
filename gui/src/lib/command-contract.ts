@@ -652,6 +652,26 @@ export const commandContract = {
       "rust_type": "Option<String>"
     }
   },
+  "history_project_delete_plan": {
+    "project": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "history_project_delete": {
+    "project": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "expectedPath": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "expectedRemote": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "history_delete": {
     "id": {
       "required": true,

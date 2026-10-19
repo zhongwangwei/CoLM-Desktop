@@ -527,7 +527,78 @@ test('an unfinished new simulation can be continued from its record or deleted',
   assert.equal(reopened.newCaseSeed.draftId, 'd1', 'later steps keep updating the same record');
 });
 
-test('right-clicking a project card deletes that project only, through the clear dialog', async () => {
+test('a project folder is deleted with its records only once checked and its name is typed', async () => {
+  const h = harness();
+  const project = {
+    ...row('r1'),
+    kind: 'project',
+    case_path: null,
+    detail: { project_path: '/cache/222', subject: { kind: 'project', name: 'uuu' } },
+    project_group: { path: '/cache/222', name: 'uuu', members: [{ ...row('r1') }] },
+  };
+  h.requests[0].resolve({ items: [project], total: 1 });
+  await h.settle();
+  h.menu().props.onOpenChange(true);
+  assert.equal(h.requests[1].command, 'history_project_delete_plan');
+  assert.deepEqual(h.requests[1].args, { project: '/cache/222' });
+  assert.equal(h.menu().props.items[1].label, 'Checking the project folder…');
+  // A folder that holds more than the project's cases can only lose its records.
+  h.requests[1].resolve({
+    records: 0,
+    path: '/cache/222',
+    bytes: 0,
+    host: null,
+    remotePath: null,
+    reason: '项目文件夹里有不是算例的内容（notes.txt），不能删除整个文件夹；可以只删记录',
+  });
+  await h.settle();
+  assert.equal(h.menu().props.items[1].disabled, true);
+  assert.match(h.menu().props.items[1].label, /notes\.txt/);
+  h.menu().props.onOpenChange(false);
+  h.menu().props.onOpenChange(true);
+  h.requests[2].resolve({
+    records: 180,
+    path: '/cache/222',
+    bytes: 4096,
+    host: 'tianhe',
+    remotePath: '/HOME/x/colm-desktop/uuu',
+    reason: null,
+  });
+  await h.settle();
+  const folder = h.menu().props.items[1];
+  assert.equal(folder.label, 'Delete records and project folder…');
+  assert.equal(folder.disabled, false);
+  folder.onSelect();
+  h.render();
+  const confirm = () =>
+    h
+      .nodes()
+      .find((n) => n.type === 'Button' && JSON.stringify(n.children).includes('Confirm deletion'))!;
+  assert.equal(confirm().props.disabled, true, 'nothing is deleted before the name is typed');
+  const input = h.nodes().find((n) => n.type === 'input' && 'value' in n.props)!;
+  (input.props.onChange as (event: unknown) => void)({ target: { value: 'uuu' } });
+  h.render();
+  assert.equal(confirm().props.disabled, false);
+  h.click('Confirm deletion');
+  const request = h.requests.at(-1)!;
+  assert.equal(request.command, 'history_project_delete');
+  assert.deepEqual(request.args, {
+    project: '/cache/222',
+    expectedPath: '/cache/222',
+    expectedRemote: '/HOME/x/colm-desktop/uuu',
+  });
+  request.resolve({
+    removed: 180,
+    path: '/cache/222',
+    host: 'tianhe',
+    remotePath: '/HOME/x/colm-desktop/uuu',
+  });
+  await h.settle();
+  assert.equal(h.nodes().filter((n) => n.type === 'Dialog').length, 0);
+  assert.equal(h.requests.at(-1)!.command, 'history_list');
+});
+
+test('right-clicking a project card deletes only the records of that project, through the clear dialog', async () => {
   const h = harness();
   const members = [{ ...row('r1'), case_path: '/cache/222/AT-Neu' }];
   const project = {
@@ -540,8 +611,9 @@ test('right-clicking a project card deletes that project only, through the clear
   h.requests[0].resolve({ items: [project], total: 1 });
   await h.settle();
   const items = h.menu().props.items;
-  assert.equal(items.length, 1);
+  assert.equal(items.length, 2, 'records only, or records and the project folder');
   assert.equal(items[0].disabled, false, 'a project can be deleted from its card');
+  assert.equal(items[1].disabled, true, 'the folder is checked first');
   items[0].onSelect();
   assert.equal(h.requests[1].command, 'history_clear_plan');
   assert.deepEqual(h.requests[1].args, { project: '/cache/222' });
@@ -556,6 +628,16 @@ test('right-clicking a project card deletes that project only, through the clear
   await h.settle();
   const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
   assert.equal(dialog.props.title, 'Delete project “222”');
+  const text = (n: unknown): string =>
+    Array.isArray(n)
+      ? n.map(text).join('')
+      : n && typeof n === 'object'
+        ? text((n as { children: unknown[] }).children)
+        : n == null || n === false
+          ? ''
+          : String(n);
+  assert.ok(text(dialog).includes('folder, its cases and results are kept'));
+  assert.ok(!text(dialog).includes('local case folders'), 'no folder option when deleting records');
   h.click('Delete project records');
   assert.equal(h.requests[2].command, 'history_clear');
   assert.deepEqual(h.requests[2].args, { cases: [], unconfirmed: false, project: '/cache/222' });

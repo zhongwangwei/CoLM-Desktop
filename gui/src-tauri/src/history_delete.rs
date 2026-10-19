@@ -144,30 +144,7 @@ fn case_directory(
     {
         return Err("历史记录中的算例目录相互冲突".into());
     }
-    if !has_case_depth(&target) {
-        return Err("不能删除根目录或系统顶层目录".into());
-    }
-    for protected in [
-        std::env::var_os("HOME").map(PathBuf::from),
-        std::env::var_os("USERPROFILE").map(PathBuf::from),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        if protected
-            .canonicalize()
-            .is_ok_and(|home| home.starts_with(&target))
-        {
-            return Err("不能删除用户主目录或其祖先目录".into());
-        }
-    }
-    if crate::model::root()
-        .ok()
-        .and_then(|root| root.canonicalize().ok())
-        .is_some_and(|root| root.starts_with(&target) || target.starts_with(root))
-    {
-        return Err("不能删除模型缓存或其祖先、子目录".into());
-    }
+    protected_directory(&target)?;
     for name in ["case.nml", ".colm-desktop.json"] {
         let metadata = std::fs::symlink_metadata(target.join(name)).map_err(|e| e.to_string())?;
         if !metadata.is_file() || metadata.file_type().is_symlink() {
@@ -185,6 +162,35 @@ fn case_directory(
     )
     .map_err(|e| e.to_string())?;
     Ok((target, record))
+}
+
+/// 根目录、系统顶层、用户主目录及其祖先、模型缓存都不能删。
+fn protected_directory(target: &Path) -> Result<(), String> {
+    if !has_case_depth(target) {
+        return Err("不能删除根目录或系统顶层目录".into());
+    }
+    for protected in [
+        std::env::var_os("HOME").map(PathBuf::from),
+        std::env::var_os("USERPROFILE").map(PathBuf::from),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if protected
+            .canonicalize()
+            .is_ok_and(|home| home.starts_with(target))
+        {
+            return Err("不能删除用户主目录或其祖先目录".into());
+        }
+    }
+    if crate::model::root()
+        .ok()
+        .and_then(|root| root.canonicalize().ok())
+        .is_some_and(|root| root.starts_with(target) || target.starts_with(root))
+    {
+        return Err("不能删除模型缓存或其祖先、子目录".into());
+    }
+    Ok(())
 }
 
 fn history_path(path: &str) -> PathBuf {
@@ -869,6 +875,347 @@ pub async fn history_clear(
     .map_err(|e| e.to_string())?
 }
 
+/// 删除整个项目（记录 + 项目文件夹，服务器项目连服务器上的项目文件夹）之前给用户看的内容。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDeletePlan {
+    /// 一并删除的记录数（这个项目的全部记录，包括列表里隐藏的例行记录）。
+    records: usize,
+    /// 本机的项目文件夹（服务器项目是它在本机的配置缓存）。
+    path: String,
+    bytes: u64,
+    host: Option<String>,
+    remote_path: Option<String>,
+    /// 不能删文件夹的原因；有它时只能删记录。
+    reason: Option<String>,
+}
+
+#[derive(Debug, PartialEq)]
+struct ProjectTarget {
+    local: PathBuf,
+    /// 服务器项目：服务器名与服务器上的项目文件夹。
+    remote: Option<(String, String)>,
+    records: usize,
+}
+
+/// 一个算例路径属于哪个算例：`<算例>/runs/<编号>` 算作那个算例（与历史按项目合并的规则一致）。
+fn owning_case(path: &str) -> PathBuf {
+    let path = history_path(path);
+    match path.parent() {
+        Some(runs) if runs.file_name().is_some_and(|name| name == "runs") => {
+            runs.parent().map(Path::to_path_buf).unwrap_or(path)
+        }
+        _ => path,
+    }
+}
+
+/// 整个项目文件夹能不能删。项目没有专门的标记，所以按内容认：文件夹里每一项都是这个项目历史记录里的
+/// 算例文件夹（`case.nml` 与 `.colm-desktop.json` 都是普通文件），并且都已空闲。单个算例的"项目"就是
+/// 它的上一级目录，那可能是任意一个普通文件夹；里面有别的东西时，这一条就会挡住。服务器项目的算例必须
+/// 属于同一台服务器上的同一个目录，而且本机镜像正是按它算出的缓存目录。
+fn project_target(ledger: &History, project: &str, cache: &Path) -> Result<ProjectTarget, String> {
+    let target = plain_directory(Path::new(project))?;
+    protected_directory(&target)?;
+    let mut known = std::collections::BTreeSet::new();
+    let mut records = 0;
+    let mut offset = 0;
+    loop {
+        let page = ledger
+            .query(&colm_history::Query {
+                offset,
+                limit: 500,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        for operation in &page.items {
+            if colm_history::project_path(&operation.latest).as_deref() != Some(project) {
+                continue;
+            }
+            records += 1;
+            if let Some(path) = &operation.latest.case_path {
+                known.insert(owning_case(path));
+            }
+        }
+        offset += page.items.len() as u64;
+        if page.items.is_empty() || offset >= page.total {
+            break;
+        }
+    }
+    let mut remotes = Vec::new();
+    let mut local_cases = 0;
+    for entry in std::fs::read_dir(&target).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // Finder 自己会写这个文件，不算用户的内容。
+        if name == ".DS_Store" {
+            continue;
+        }
+        let not_a_case =
+            || format!("项目文件夹里有不是算例的内容（{name}），不能删除整个文件夹；可以只删记录");
+        let metadata = std::fs::symlink_metadata(entry.path()).map_err(|e| e.to_string())?;
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(not_a_case());
+        }
+        for marker in ["case.nml", ".colm-desktop.json"] {
+            match std::fs::symlink_metadata(entry.path().join(marker)) {
+                Ok(file) if file.is_file() && !file.file_type().is_symlink() => {}
+                _ => return Err(not_a_case()),
+            }
+        }
+        let case = entry.path();
+        if !known.contains(&case) {
+            return Err(format!(
+                "算例 {name} 不在这个项目的历史记录里，不能删除整个文件夹；可以只删记录"
+            ));
+        }
+        let record: crate::project::CaseRecord = serde_json::from_slice(
+            &std::fs::read(case.join(".colm-desktop.json")).map_err(|e| e.to_string())?,
+        )
+        .map_err(|_| not_a_case())?;
+        match (record.run_host, record.remote_directory) {
+            (Some(host), Some(remote)) => remotes.push((host, remote)),
+            (_, None) => local_cases += 1,
+            (None, Some(_)) => return Err(format!("服务器算例 {name} 没有服务器身份")),
+        }
+    }
+    idle_against(&unresolved_paths(ledger)?, &target)?;
+    if remotes.is_empty() {
+        return Ok(ProjectTarget {
+            local: target,
+            remote: None,
+            records,
+        });
+    }
+    if local_cases > 0 {
+        return Err("项目里既有本机算例也有服务器算例，不能整体删除；请逐个删除".into());
+    }
+    let (host, first) = &remotes[0];
+    let parent = Path::new(first.trim_end_matches('/'))
+        .parent()
+        .and_then(Path::to_str)
+        .ok_or("服务器算例目录没有上一级目录")?
+        .to_owned();
+    if remotes.iter().any(|(other_host, remote)| {
+        other_host != host
+            || Path::new(remote.trim_end_matches('/')).parent() != Some(Path::new(&parent))
+    }) {
+        return Err("项目里的算例分属不同的服务器或目录，不能整体删除".into());
+    }
+    for (_, remote) in &remotes {
+        let (mirror, _) = crate::remote_cases::cache_paths(cache, host, remote)?;
+        if plain_directory(&mirror)? != target {
+            return Err("服务器目录与本机镜像身份不匹配，不能删除".into());
+        }
+    }
+    Ok(ProjectTarget {
+        local: target,
+        remote: Some((host.clone(), parent)),
+        records,
+    })
+}
+
+/// 这个项目的记录里用过的服务器工作目录都得是现在这个：用旧目录跑的作业，删除前在服务器上核对不到。
+fn project_roots_match(
+    ledger: &History,
+    project: &str,
+    host: &str,
+    root: &str,
+) -> Result<(), String> {
+    let mut offset = 0;
+    loop {
+        let page = ledger
+            .query(&colm_history::Query {
+                offset,
+                limit: 500,
+                ..Default::default()
+            })
+            .map_err(|e| e.to_string())?;
+        for operation in &page.items {
+            if colm_history::project_path(&operation.latest).as_deref() != Some(project) {
+                continue;
+            }
+            let Some(detail) = ledger
+                .detail(&operation.latest.operation_id)
+                .map_err(|e| e.to_string())?
+            else {
+                continue;
+            };
+            for event in &detail.events {
+                let binding = crate::history::binding(event);
+                if binding["root"].as_str().is_some_and(|saved| saved != root)
+                    || binding["host"].as_str().is_some_and(|saved| saved != host)
+                {
+                    return Err("项目曾使用不同的服务器工作目录；请恢复原连接配置并核对旧目录中的任务后再删除".into());
+                }
+            }
+        }
+        offset += page.items.len() as u64;
+        if page.items.is_empty() || offset >= page.total {
+            return Ok(());
+        }
+    }
+}
+
+fn project_cleanup_args(host: &str, root: &str, path: &str, delete: bool) -> Vec<String> {
+    let mut args = vec![
+        "remote-history-cleanup".into(),
+        "--host".into(),
+        host.into(),
+        "--root".into(),
+        root.into(),
+        "--project".into(),
+        "1".into(),
+        "--expected-path".into(),
+        path.into(),
+    ];
+    if delete {
+        args.extend(["--delete".into(), "1".into()]);
+    }
+    args
+}
+
+async fn checked_project(
+    app: &tauri::AppHandle,
+    project: &str,
+) -> Result<(ProjectTarget, Option<crate::remote::Server>), String> {
+    let cache = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let owned = project.to_owned();
+    let target = tauri::async_runtime::spawn_blocking(move || {
+        project_target(
+            &History::open_default().map_err(|e| e.to_string())?,
+            &owned,
+            &cache,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let Some((host, _)) = &target.remote else {
+        return Ok((target, None));
+    };
+    let server = crate::remote::server_for(app.clone(), host)?;
+    crate::remote::validate_connection(&server)?;
+    let (owned, host, root) = (project.to_owned(), host.clone(), server.root.clone());
+    tauri::async_runtime::spawn_blocking(move || {
+        project_roots_match(
+            &History::open_default().map_err(|e| e.to_string())?,
+            &owned,
+            &host,
+            &root,
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok((target, Some(server)))
+}
+
+#[tauri::command]
+pub async fn history_project_delete_plan(
+    app: tauri::AppHandle,
+    project: String,
+) -> Result<ProjectDeletePlan, String> {
+    let blocked = |reason: String| ProjectDeletePlan {
+        records: 0,
+        path: project.clone(),
+        bytes: 0,
+        host: None,
+        remote_path: None,
+        reason: Some(reason),
+    };
+    let (target, server) = match checked_project(&app, &project).await {
+        Ok(checked) => checked,
+        Err(reason) => return Ok(blocked(reason)),
+    };
+    let mut plan = ProjectDeletePlan {
+        records: target.records,
+        path: target.local.display().to_string(),
+        bytes: directory_bytes(&target.local),
+        host: None,
+        remote_path: None,
+        reason: None,
+    };
+    if let (Some((host, path)), Some(server)) = (&target.remote, &server) {
+        plan.host = Some(host.clone());
+        plan.remote_path = Some(path.clone());
+        // 服务器那边先预检一遍（不删除），把"有作业没结束""文件夹里有别的东西"这类原因提前告诉用户。
+        let response = crate::remote::ssh_cli_json(
+            project_cleanup_args(host, &server.root, path, false),
+            crate::remote::resource_dir(&app),
+            Some(server),
+        )
+        .await;
+        if let Err(reason) = confirm_remote_response(response, path, false) {
+            plan.reason = Some(reason);
+        }
+    }
+    Ok(plan)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDeleteResult {
+    removed: usize,
+    path: String,
+    host: Option<String>,
+    remote_path: Option<String>,
+}
+
+#[tauri::command]
+pub async fn history_project_delete(
+    app: tauri::AppHandle,
+    processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    project: String,
+    expected_path: String,
+    expected_remote: Option<String>,
+) -> Result<ProjectDeleteResult, String> {
+    let (target, server) = checked_project(&app, &project).await?;
+    if target.local.display().to_string() != expected_path
+        || target.remote.as_ref().map(|(_, path)| path) != expected_remote.as_ref()
+    {
+        return Err("确认的项目文件夹已变化，请重新打开删除确认".into());
+    }
+    // 先删服务器上的：删不掉时本机什么都没动，可以原样重试。
+    if let (Some((host, path)), Some(server)) = (&target.remote, &server) {
+        let response = crate::remote::ssh_cli_json(
+            project_cleanup_args(host, &server.root, path, true),
+            crate::remote::resource_dir(&app),
+            Some(server),
+        )
+        .await;
+        confirm_remote_response(response, path, true)?;
+    }
+    let processes = processes.inner().clone();
+    let local = target.local.clone();
+    let remote_done = target.remote.is_some();
+    tauri::async_runtime::spawn_blocking(move || {
+        processes.with_idle(|| {
+            let identity = std::fs::symlink_metadata(&local).map_err(|e| e.to_string())?;
+            remove_verified(&local, &identity).map_err(|e| {
+                if remote_done {
+                    format!("服务器上的项目文件夹已删除，本机文件夹没删成，记录已保留：{e}")
+                } else {
+                    e
+                }
+            })
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let owned = project.clone();
+    let removed = tauri::async_runtime::spawn_blocking(move || {
+        let ledger = History::open_default().map_err(|e| e.to_string())?;
+        clear(&ledger, &[], false, Some(&owned)).map(|result| result.removed)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| format!("项目文件夹已删除，但记录没删成，请再点一次\"仅删除记录\"：{e}"))?;
+    Ok(ProjectDeleteResult {
+        removed,
+        path: target.local.display().to_string(),
+        host: target.remote.as_ref().map(|(host, _)| host.clone()),
+        remote_path: target.remote.map(|(_, path)| path),
+    })
+}
+
 fn delete(
     ledger: &History,
     id: &str,
@@ -1163,6 +1510,101 @@ mod tests {
             2,
             "beta and the fixture's run keep their records"
         );
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn project_case(ledger: &History, dir: &Path, record: serde_json::Value) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("case.nml"), "&nl_colm\nDEF_CASE_NAME='site'\n/\n").unwrap();
+        std::fs::write(dir.join(".colm-desktop.json"), record.to_string()).unwrap();
+        let mut event = Event::start("run");
+        event.case_path = Some(dir.display().to_string());
+        ledger.append(&event).unwrap();
+        ledger
+            .append(&event.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_project_folder_is_deletable_only_when_it_holds_just_its_idle_cases() {
+        let (root, ledger, _) = fixture();
+        let project = root.join("proj");
+        for site in ["AT-Neu", "AU-How"] {
+            project_case(
+                &ledger,
+                &project.join(site),
+                serde_json::json!({"mode":"pft"}),
+            );
+        }
+        let key = project.display().to_string();
+        let cache = root.join("cache");
+        let target = project_target(&ledger, &key, &cache).unwrap();
+        assert_eq!(
+            (target.local.clone(), target.remote.clone(), target.records),
+            (project.clone(), None, 2)
+        );
+        std::fs::write(project.join(".DS_Store"), "").unwrap();
+        assert!(
+            project_target(&ledger, &key, &cache).is_ok(),
+            "Finder's file is not the user's"
+        );
+        std::fs::write(project.join("notes.txt"), "mine").unwrap();
+        let error = project_target(&ledger, &key, &cache).unwrap_err();
+        assert!(
+            error.contains("notes.txt") && error.contains("只删记录"),
+            "{error}"
+        );
+        std::fs::remove_file(project.join("notes.txt")).unwrap();
+        // A case folder the project's records never mention is not the app's to delete.
+        let stray = project.join("CN-Cng");
+        std::fs::create_dir(&stray).unwrap();
+        std::fs::write(stray.join("case.nml"), "&nl_colm\n/\n").unwrap();
+        std::fs::write(stray.join(".colm-desktop.json"), "{}").unwrap();
+        let error = project_target(&ledger, &key, &cache).unwrap_err();
+        assert!(error.contains("CN-Cng"), "{error}");
+        std::fs::remove_dir_all(&stray).unwrap();
+        // Work still unconfirmed on one of its cases keeps the folder.
+        let mut active = Event::start("run");
+        active.case_path = Some(project.join("AU-How").display().to_string());
+        ledger.append(&active).unwrap();
+        assert!(project_target(&ledger, &key, &cache).is_err());
+        ledger
+            .append(&active.next(EventPhase::Finished, "succeeded"))
+            .unwrap();
+        assert!(project_target(&ledger, &key, &cache).is_ok());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_server_project_names_its_one_server_folder() {
+        let (root, ledger, _) = fixture();
+        let cache = root.join("cache");
+        let (mirror, _) =
+            crate::remote_cases::cache_paths(&cache, "tianhe", "/srv/colm/uuu/AT-Neu").unwrap();
+        for site in ["AT-Neu", "AU-How"] {
+            project_case(
+                &ledger,
+                &mirror.join(site),
+                serde_json::json!({"run_host":"tianhe","remote_directory":format!("/srv/colm/uuu/{site}")}),
+            );
+        }
+        let key = mirror.canonicalize().unwrap().display().to_string();
+        let target = project_target(&ledger, &key, &cache).unwrap();
+        assert_eq!(
+            target.remote,
+            Some(("tianhe".into(), "/srv/colm/uuu".into()))
+        );
+        // A case of another server in the same folder makes the folder ambiguous.
+        std::fs::write(
+            mirror.join("AU-How/.colm-desktop.json"),
+            serde_json::json!({"run_host":"bd","remote_directory":"/srv/colm/uuu/AU-How"})
+                .to_string(),
+        )
+        .unwrap();
+        let error = project_target(&ledger, &key, &cache).unwrap_err();
+        assert!(error.contains("不同的服务器"), "{error}");
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }
