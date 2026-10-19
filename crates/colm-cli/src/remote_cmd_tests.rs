@@ -362,6 +362,22 @@ fn fetching_refuses_to_overwrite_local_results_newer_than_the_remote_job() {
     assert!(refuse_to_overwrite_newer(Some(101), 100, true).is_ok());
 }
 
+/// 2026-10-19：同一个作业取回第二次被"本机结果比服务器运行新"拦住——那份"更新的"本机结果就是它上一次取回写的。
+#[test]
+fn a_job_can_be_fetched_again_into_its_own_run_directory() {
+    let per_run =
+        serde_json::json!({"model_run": {"run_case": "/p/AT-Neu/runs/abc", "operation_id": "abc"}});
+    assert!(fetches_into_its_own_run_directory(Some(&per_run)));
+    // Older records, or ones without a per-run directory, still protect newer local results.
+    assert!(!fetches_into_its_own_run_directory(None));
+    assert!(!fetches_into_its_own_run_directory(Some(
+        &serde_json::json!({"engine": "rust"})
+    )));
+    assert!(!fetches_into_its_own_run_directory(Some(
+        &serde_json::json!({"model_run": null})
+    )));
+}
+
 #[test]
 fn job_connection_binding_is_optional_and_contains_no_password() {
     let legacy = serde_json::json!({

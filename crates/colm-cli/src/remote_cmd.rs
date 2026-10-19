@@ -2310,6 +2310,15 @@ fn newest_local_history(case: &Path, case_name: &str) -> Option<u64> {
         .max()
 }
 
+/// 取回的目标是不是这次作业自己的运行目录（`runs/<作业号>`，记录里有 `model_run`）。是的话里面的历史
+/// 只可能是这个作业上一次取回写进去的，再取回一次就是用服务器的同一份结果覆盖同一份，不需要拦。
+/// 只有取回到别的、可能被本机另外跑过的目录（直接写进源算例的旧做法）时才要保护本机更新的结果。
+pub(crate) fn fetches_into_its_own_run_directory(provenance: Option<&serde_json::Value>) -> bool {
+    provenance
+        .and_then(|p| p.get("model_run"))
+        .is_some_and(|run| run.is_object())
+}
+
 /// 本机结果比这次远程运行还新（提交之后本机又跑过），取回会覆盖它：除非明确要求，否则拒绝。
 /// 界面的自动取回不带 `--overwrite-newer`，手动点“取回”才带（审查第 2 条的复查：恢复任务时本机还没有结果，
 /// 之后本机跑完了，原来记下的“可以自动取回”不能再算数）。
@@ -2692,10 +2701,12 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let case = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
     let record = read_record(&case)?;
     let case = crate::model_version::recorded_run_case(&case, record.provenance.as_ref())?;
+    let overwrite = opts.get("--overwrite-newer").is_some_and(|v| v == "1")
+        || fetches_into_its_own_run_directory(record.provenance.as_ref());
     refuse_to_overwrite_newer(
         newest_local_history(&case, &record.case_name),
         record.submitted_at,
-        opts.get("--overwrite-newer").is_some_and(|v| v == "1"),
+        overwrite,
     )?;
     let ssh = Ssh::new(&record.host)?;
     let history = format!("out/{}/history", record.case_name);
@@ -2801,7 +2812,7 @@ pub(super) fn cmd_fetch(opts: &Opts) -> Result<()> {
     refuse_to_overwrite_newer(
         newest_local_history(&case, &record.case_name),
         record.submitted_at,
-        opts.get("--overwrite-newer").is_some_and(|v| v == "1"),
+        overwrite,
     )?;
     if partial && case.join(&history).exists() {
         history_inventory(&case.join(&history))?;
