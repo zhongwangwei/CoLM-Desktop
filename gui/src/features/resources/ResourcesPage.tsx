@@ -32,6 +32,7 @@ import type { DataDefaults } from '../../lib/types';
 type DataPathKey = Exclude<keyof DataDefaults, 'kind_paths'>;
 import NavIcon from '../../components/NavIcon';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
+import LiveServerLoad from '../runs/LiveServerLoad';
 import './resources-page.css';
 export default function ResourcesPage() {
   const { state, update, navigate } = useApp(),
@@ -1321,6 +1322,14 @@ export default function ResourcesPage() {
             <div className="form-grid">{dataFields.map(([key]) => field(`resource-${key}`))}</div>
           </section>
           {selectedServer && kindPathSection}
+          {/* 已保存的服务器才读：新填的地址还没连通过，读负载只会报错。 */}
+          {selectedServer && (
+            <LiveServerLoad
+              host={selectedServer.host}
+              partition={selectedServer.partition}
+              en={en}
+            />
+          )}
           <section className="resource-checks">
             <h3>{t('连接与环境检查', 'Connection and environment')}</h3>
             <div className="resource-status-grid">

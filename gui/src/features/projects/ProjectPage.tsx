@@ -870,15 +870,6 @@ export default function ProjectPage() {
               ))}
             </div>
           )}
-
-          <div className="readiness-footer">
-            <Button variant="ghost" disabled={!enabled} onClick={() => navigate('preparation')}>
-              {t('准备输入数据与探针', 'Prepare input data & probes')}
-            </Button>
-            <Button variant="ghost" disabled={!enabled} onClick={() => navigate('history')}>
-              {t('查看历史记录流水', 'View full history log')} ›
-            </Button>
-          </div>
         </div>
       </section>
     </div>

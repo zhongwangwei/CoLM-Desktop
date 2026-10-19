@@ -34362,3 +34362,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 没删干净的部分：项目页"选择要分析的算例"这个选择框模式（`chooser === 'results'`，含 `otherResults`）。它原来只从"直接查看结果"进入，现在只在恢复旧的已保存页面状态 `projectView.page = 'results'` 时还会出现。彻底删掉要连带改 `projectView` 的类型和保存格式，这次没动。
     - 研究页：选中一台已配置的服务器时，在运行位置下方显示 `LiveServerLoad`。各服务器的分区和服务器列表一起读入，存在一个 ref 里，借 `setServers` 的重绘显示，不新增 state（研究页的测试按函数抽取，不受影响）。
     - 测试：`the loaded official model is usable at once…` 改为同时断言首页已没有 `project-view-results`。前端 735 条通过，check-gui 与构建通过。
+
+57. **项目首页再去掉两个入口；计算资源页接入服务器状况（用户要求，2026-10-20）**
+    - 项目首页"运行环境与数据就绪"底部的"准备输入数据与探针"和"查看历史记录流水"两个按钮删除，连同 `.readiness-footer` 样式。
+      - 历史记录仍可从侧栏进入。
+      - 准备输入数据页（`preparation`）在界面上已没有按钮入口，只剩助手动作 `project-prepare`。页面本身没删；要彻底去掉需要另改路由。
+    - 计算资源页：在已保存服务器的配置卡片里、"连接与环境检查"上方显示 `LiveServerLoad`，用这台服务器设置里的分区。新填、还没保存的服务器不显示：还没连通过，读负载只会报错。
+    - 测试：`a saved server shows its live status panel with its partition`（资源页测试替身记录了这个组件收到的参数）。前端 736 条通过，check-gui 与构建通过。

@@ -245,16 +245,3 @@
   border: 1px solid var(--border) !important;
   background: var(--surface) !important;
 }
-.readiness-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  border-top: 1px solid var(--border);
-  padding-top: 12px;
-  margin-top: 4px;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.readiness-footer .button {
-  font-size: 12px;
-}

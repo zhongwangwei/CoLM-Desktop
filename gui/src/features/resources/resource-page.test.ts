@@ -37,6 +37,7 @@ function harness(
   let unverifiedQsub = false;
   let pendingProbe: Promise<void> | undefined;
   const menus: { items: { disabled?: boolean; onSelect: () => void }[] }[] = [];
+  const liveLoads: { host: string; partition: string }[] = [];
   let browser: {
     server: resource.Server;
     directory: boolean;
@@ -123,10 +124,12 @@ function harness(
       createElement: (type: string, props: Record<string, unknown>) => {
         if (type === 'remote-browser') browser = props as typeof browser;
         if (type === 'context-menu') menus.push(props as (typeof menus)[number]);
+        if (type === 'live-server-load') liveLoads.push(props as (typeof liveLoads)[number]);
         return null;
       },
     },
     RemotePathBrowser: 'remote-browser',
+    LiveServerLoad: 'live-server-load',
     ContextMenu: 'context-menu',
     Dialog: () => {},
     Advanced: () => {},
@@ -244,6 +247,7 @@ function harness(
     },
     browser: () => browser,
     menus: () => menus,
+    liveLoads: () => liveLoads,
   };
 }
 
@@ -914,4 +918,12 @@ test('local default data paths save with the server list intact', async () => {
     runtime_dir: '',
     forcing_dir: '/Volumes/Data/CoLM_Forcing/JRA3Q',
   });
+});
+
+test('a saved server shows its live status panel with its partition', async () => {
+  const page = harness();
+  await page.ready();
+  const panel = page.liveLoads().at(-1);
+  assert.equal(panel?.host, '7920land');
+  assert.equal(panel?.partition, '');
 });
