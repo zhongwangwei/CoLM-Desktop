@@ -1135,3 +1135,26 @@ fn kind_paths_are_kept_per_resource_and_kind_and_survive_saving_servers() {
         .unwrap()
         .contains("kind_paths"));
 }
+
+#[test]
+fn a_server_run_is_read_on_the_server_until_its_results_are_fetched() {
+    let run = std::env::temp_dir().join(format!("colm-results-on-server-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&run);
+    std::fs::create_dir_all(&run).unwrap();
+    let case = run.to_string_lossy().into_owned();
+    assert_eq!(results_on_server(&case), None, "a local run");
+    std::fs::write(
+        run.join(".colm-remote.json"),
+        r#"{"host":"tianhe","job":"run-1"}"#,
+    )
+    .unwrap();
+    assert_eq!(results_on_server(&case).as_deref(), Some("tianhe"));
+    std::fs::create_dir_all(run.join("out/AU-Cpr/history")).unwrap();
+    std::fs::write(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-01.nc"), "").unwrap();
+    assert_eq!(
+        results_on_server(&case),
+        None,
+        "fetched results are read locally"
+    );
+    std::fs::remove_dir_all(&run).unwrap();
+}

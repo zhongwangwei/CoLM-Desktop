@@ -1870,3 +1870,20 @@ fn server_side_python_runs_on_python_3_6() {
         }
     }
 }
+
+#[test]
+fn reading_results_on_a_server_allows_only_result_commands() {
+    for command in [
+        "remote-cancel",
+        "run",
+        "remote-history-cleanup",
+        "series; rm -rf /",
+    ] {
+        let opts = crate::Opts {
+            positional: vec!["/nowhere".into()],
+            flags: vec![("--command".into(), command.into())],
+        };
+        let error = cmd_read(&opts).unwrap_err().to_string();
+        assert!(error.contains("only reads results"), "{command}: {error}");
+    }
+}

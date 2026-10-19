@@ -288,9 +288,7 @@ export default function ResultsPage({
     setDiagnostic(null);
     setEvaluation([]);
     setCatalogKey('');
-    // 结果还在服务器上时不去读本机：取回是按需的，由下面的"取回结果"触发。
-    const chosen = runs.find((item) => item.run_case === source);
-    if (!source || (chosen?.server && chosen.outputs_local === false)) return;
+    if (!source) return;
     void invokeJson<Catalog>('history_catalog', { case: source })
       .then((data) => {
         if (!cancelled && stationTarget.current === caseDir) {
@@ -306,7 +304,7 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [source, caseDir, versionId, revision, runs]);
+  }, [source, caseDir, versionId, revision]);
   useEffect(() => {
     epoch.current++;
     setMetrics([]);
@@ -405,7 +403,8 @@ export default function ResultsPage({
   const run = (fn: () => Promise<unknown>) => {
     void fn().catch(() => {});
   };
-  // 只取这一个站点、这一次运行的结果：一个站点的历史输出就有约 0.5 GB，整批同步回来既慢又占地方。
+  // 结果还在服务器上的运行，变量表和曲线由后端改在服务器上读（`remote-read`），只传回算好的数据；
+  // 要 NetCDF 文件或评估指标时才按需取回这一个站点、这一次运行（一个站点约 0.5 GB）。
   const awaitingFetch = !!selectedRun?.server && selectedRun.outputs_local === false;
   async function fetchSelectedRun() {
     const target = source,
@@ -1138,10 +1137,10 @@ export default function ResultsPage({
         </Field>
       )}
       {awaitingFetch && (
-        <Notice tone="warning">
+        <Notice>
           {tr(
-            `这次运行的结果还在服务器 ${selectedRun?.server ?? ''} 上，没有取回本机。按需取回：只取这一个站点、这一次运行的结果。`,
-            `This run's results are still on the server ${selectedRun?.server ?? ''}. Fetch on demand: only this station and run are copied.`,
+            `数据在服务器 ${selectedRun?.server ?? ''} 上：变量和曲线直接在服务器上读取，只传回画图要用的数据，每次切换要几秒。要 NetCDF 文件或评估指标时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
+            `Data stays on ${selectedRun?.server ?? ''}: variables and curves are read there and only the plotted values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files or evaluation metrics.`,
           )}
           <Button disabled={busy} onClick={() => run(fetchSelectedRun)}>
             {busy ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}

@@ -2314,6 +2314,39 @@ pub(super) fn cmd_status(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 结果页看服务器上的运行：在服务器上用这次运行的引擎读它的 history，只把结果（变量表约 15 KB、
+/// 一条曲线约 70 KB）传回来，不搬 NetCDF。天河实测 AU-Cpr（84 个月文件，457 MB）：变量表第一次 9 s、
+/// 之后约 1 s，一条曲线 3–7 s（2026-10-19）。只放行只读的结果命令。
+pub(super) fn cmd_read(opts: &Opts) -> Result<()> {
+    let command = opts.need_str("--command")?;
+    ensure!(
+        matches!(
+            command.as_str(),
+            "history-catalog" | "series" | "energy-summary"
+        ),
+        "remote-read only reads results (history-catalog, series, energy-summary), not {command}"
+    );
+    let case = opts.positional_case()?;
+    let record = read_record(&case)?;
+    let mut args = vec![command, record.remote_case.clone()];
+    for flag in ["--vars", "--from", "--to", "--max-points"] {
+        if let Some(value) = opts.get(flag) {
+            args.extend([flag.to_owned(), value]);
+        }
+    }
+    let binary = format!(
+        "{}/bin/colm-cli",
+        engine::engine_dir(&record.root, &record.engine)
+    );
+    let command = std::iter::once(binary)
+        .chain(args)
+        .map(|arg| quote(&arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    print!("{}", Ssh::new(&record.host)?.run_ok(&command)?);
+    Ok(())
+}
+
 pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
     let record = read_record(&case)?;

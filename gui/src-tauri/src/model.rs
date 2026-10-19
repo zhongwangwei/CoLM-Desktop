@@ -526,7 +526,7 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
     Ok(rows)
 }
 /// 本机运行目录里有没有取回来的历史输出（`out/<算例>/history/` 里至少一个文件）。
-fn has_local_history(run_case: &Path) -> bool {
+pub(crate) fn has_local_history(run_case: &Path) -> bool {
     std::fs::read_dir(run_case.join("out")).is_ok_and(|cases| {
         cases.flatten().any(|case| {
             std::fs::read_dir(case.path().join("history"))

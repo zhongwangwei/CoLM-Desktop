@@ -162,7 +162,7 @@ test('finishing or starting a run keeps the chosen observations, window and metr
   assert.equal(idle, undefined);
 });
 
-test('a server run whose results are not fetched is not read, and fetching takes only that run', async () => {
+test('a server run is read in place, and fetching takes only that run', async () => {
   const bodies: string[] = [];
   let fetchBody = '';
   const walk = (node: ts.Node) => {
@@ -200,10 +200,8 @@ test('a server run whose results are not fetched is not read, and fetching takes
     setVariable: noop,
   });
   const remote = { run_case: '/case/runs/r1', server: 'tianhe', outputs_local: false };
+  // The backend reads it on the server (remote-read); the page asks for it like any other run.
   execute(catalog, context([remote]))();
-  await tick();
-  assert.equal(calls.length, 0, 'results still on the server are not read');
-  execute(catalog, context([{ ...remote, outputs_local: true }]))();
   await tick();
   assert.deepEqual(
     calls.map((call) => call.command),

@@ -34156,3 +34156,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 结果页遇到 `server` 且 `outputs_local=false` 的运行，不去读本机的 history，而是提示"这次运行的结果还在服务器 tianhe 上……"，并给出"取回结果"按钮：只对这一个运行目录调用 `remote_fetch`（`run_record` 会从运行目录找到它自己的 `.colm-remote.json`），取回后重新读运行列表，这时才去读目录。
     - 测试：前端 `a server run whose results are not fetched is not read, and fetching takes only that run`；gui/src-tauri `a_server_run_has_local_results_only_once_its_history_was_fetched`。前端 718 条、gui/src-tauri 412 条通过。
     - 没做：整批取回；"取回变量"（`fetch_vars`）可以在服务器上先裁剪变量、减少传输量，但目前要在服务器设置里填。
+
+41. **服务器上的结果直接在服务器上读，不搬 NetCDF（用户要求"像 ncview 那样在服务器上画"，2026-10-19）**：
+    - 结果页的数据都来自 `colm-cli` 的 `history-catalog`、`series`、`energy-summary`，服务器上每个引擎目录里都有同一个 `colm-cli`。在天河上直接对 AU-Cpr 跑（84 个月文件，457 MB）：变量表 15 KB，第一次 9.4 s、之后 0.96 s；一条曲线约 70 KB，3–7 s。说明可以只传回算好的数据。
+    - 改为：
+      - 新命令 `colm-cli remote-read <本机运行目录> --command history-catalog|series|energy-summary [--vars --from --to --max-points]`：读本机运行目录里的 `.colm-remote.json`，通过 ssh 在服务器上用这次运行的引擎（`engine/<编号>/bin/colm-cli`）对 `remote_case` 跑同名命令，原样输出结果。只放行这三个只读命令；白名单在读运行记录之前就检查。
+      - GUI 的 `history_catalog`、`series`、`energy_summary`：运行目录有 `.colm-remote.json` 但本机还没有 history（`results_on_server`）时，改走 `remote-read`；取回过的照旧读本机。前端调用方式不变。
+      - 结果页对这类运行照常加载，提示"数据在服务器 tianhe 上：变量和曲线直接在服务器上读取……"，"取回结果"按钮保留，给要 NetCDF 文件或评估指标时用。
+      - `metrics`（评估指标要用观测）对这类运行先直接报"请先取回结果"，在服务器上算评估留到下一步。
+    - 实测：本机新编的 `colm-cli remote-read` 走界面同样的认证方式连天河，读 AU-Cpr 的变量表用了 8.4 s（包括 ssh），一条 2400 点的曲线 1.4 s；`--command remote-cancel` 被拒绝。
+    - 测试：`reading_results_on_a_server_allows_only_result_commands`、`a_server_run_is_read_on_the_server_until_its_results_are_fetched`，前端改为验证"服务器上的运行照常向后端请求变量表"。colm-cli 457 条、gui/src-tauri 413 条、前端 718 条通过。
+    - 没做：在服务器上算评估指标；曲线缓存仍是结果页原有的 16 条。

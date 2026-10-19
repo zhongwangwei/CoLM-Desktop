@@ -1588,6 +1588,40 @@ pub async fn remote_preview(
     ssh_cli_json(args, resources, Some(&server)).await
 }
 
+/// 结果还在服务器上、本机没取回的运行目录：返回它的服务器。结果页对这样的运行改在服务器上读
+/// （`colm-cli remote-read`），只把算好的 JSON 传回来；取回过的照旧读本机。
+pub(crate) fn results_on_server(case: &str) -> Option<String> {
+    let dir = std::path::Path::new(case);
+    if crate::model::has_local_history(dir) {
+        return None;
+    }
+    let record: Value =
+        serde_json::from_slice(&std::fs::read(dir.join(".colm-remote.json")).ok()?).ok()?;
+    record["host"].as_str().map(str::to_owned)
+}
+
+pub(crate) async fn read_on_server(
+    app: &tauri::AppHandle,
+    host: &str,
+    case: String,
+    command: &str,
+    flags: Vec<(&str, String)>,
+) -> Result<String, String> {
+    let server = server_for(app.clone(), host)?;
+    validate_connection(&server)?;
+    let mut args = vec![
+        "remote-read".to_owned(),
+        case,
+        "--command".to_owned(),
+        command.to_owned(),
+    ];
+    for (flag, value) in flags {
+        args.extend([flag.to_owned(), value]);
+    }
+    let value = ssh_cli_json(args, resource_dir(app), Some(&server)).await?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
 /// Recover job identity before connecting, so a missing session password stays visible.
 #[tauri::command]
 pub fn remote_job_record(case: String) -> Result<Option<Value>, String> {

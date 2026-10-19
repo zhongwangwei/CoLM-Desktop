@@ -2266,6 +2266,11 @@ pub async fn metrics(
     from: Option<i64>,
     to: Option<i64>,
 ) -> Result<String, String> {
+    if let Some(host) = crate::remote::results_on_server(&case) {
+        return Err(format!(
+            "这次运行的结果在服务器 {host} 上；在服务器上算评估指标还没做，请先在结果页点\"取回结果\""
+        ));
+    }
     capture_async(metrics_args(
         case,
         obs,
@@ -2370,12 +2375,26 @@ pub async fn evaluation_plan(
 /// 不该为了画一条曲线把整个静态 HDF5 拖进来。
 #[tauri::command]
 pub async fn series(
+    app: tauri::AppHandle,
     case: String,
     vars: String,
     from: Option<i64>,
     to: Option<i64>,
     max_points: Option<usize>,
 ) -> Result<String, String> {
+    if let Some(host) = crate::remote::results_on_server(&case) {
+        let mut flags = vec![("--vars", vars)];
+        for (flag, value) in [
+            ("--from", from.map(|v| v.to_string())),
+            ("--to", to.map(|v| v.to_string())),
+            ("--max-points", max_points.map(|v| v.to_string())),
+        ] {
+            if let Some(value) = value {
+                flags.push((flag, value));
+            }
+        }
+        return crate::remote::read_on_server(&app, &host, case, "series", flags).await;
+    }
     let mut args = vec!["series".to_string(), case, "--vars".into(), vars];
     for (flag, value) in [
         ("--from", from.map(|v| v.to_string())),
@@ -2393,10 +2412,18 @@ pub async fn series(
 /// 全量能量通量统计与同一数据的绘图样本；窗口进程不读取 NetCDF。
 #[tauri::command]
 pub async fn energy_summary(
+    app: tauri::AppHandle,
     case: String,
     from: Option<i64>,
     to: Option<i64>,
 ) -> Result<String, String> {
+    if let Some(host) = crate::remote::results_on_server(&case) {
+        let flags = [("--from", from), ("--to", to)]
+            .into_iter()
+            .filter_map(|(flag, value)| value.map(|v| (flag, v.to_string())))
+            .collect();
+        return crate::remote::read_on_server(&app, &host, case, "energy-summary", flags).await;
+    }
     let mut args = vec!["energy-summary".to_string(), case];
     for (flag, value) in [("--from", from), ("--to", to)] {
         if let Some(value) = value {
@@ -2408,7 +2435,11 @@ pub async fn energy_summary(
 
 /// 轻量结果索引：变量、单位、维度与时间覆盖。数值仍由 `series` 按需读取。
 #[tauri::command]
-pub async fn history_catalog(case: String) -> Result<String, String> {
+pub async fn history_catalog(app: tauri::AppHandle, case: String) -> Result<String, String> {
+    if let Some(host) = crate::remote::results_on_server(&case) {
+        return crate::remote::read_on_server(&app, &host, case, "history-catalog", Vec::new())
+            .await;
+    }
     capture_async(vec!["history-catalog".to_string(), case]).await
 }
 
