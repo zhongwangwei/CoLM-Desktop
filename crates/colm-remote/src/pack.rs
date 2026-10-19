@@ -1,4 +1,4 @@
-//! 按节点打包站点（Slurm）。
+//! 按节点打包站点（Slurm、LSF、PBS，以及没有调度系统的机器）。
 //!
 //! 天河的 deimos 分区是 `OverSubscribe=EXCLUSIVE`：不管要几个核，一个作业就占一整个节点、按整节点计费。
 //! 每个站点一个作业时，90 个站点占 90 个节点；sacct 实测 AU-How 跑 5 分 27 秒，记 5 小时 48 分核时
@@ -14,6 +14,11 @@
 //! 共享节点的分区也打包：land02 的 faculty 账户每人同时只能跑 3 个作业（`MaxJobs=3`，2026-10-19），
 //! 一个站点一个作业时 90 个站点 3 个 3 个地挪。那里载体要明确申请整个节点的逻辑 CPU（超线程的节点
 //! 96 个 CPU = 48 核），站点按物理核数放；内存由 `colm_sbatch` 按核补上。
+//!
+//! 用户要求不管什么调度系统都打包（2026-10-19）：LSF（摆渡船）用 `bsub -n 核数 -R span[hosts=1]`、PBS 用
+//! `qsub -l select=1:ncpus=核数` 交载体；没有调度系统的机器直接在后台起一个载体进程，按机器的核数同时跑。
+//! 不同调度系统只差交载体、判断载体还在不在、载体的作业号从哪个环境变量来这几处；排队、领取、收尾、
+//! 取消都一样。作业目录里的 `scheduler` 是 `<调度系统>-pack`。
 use anyhow::{ensure, Result};
 
 use crate::sched::{self, Resources, Scheduler};
@@ -24,7 +29,8 @@ use crate::ssh::quote;
 pub struct Pack {
     /// 批次号（应用里一次批量运行的编号），也是队列目录名。
     pub pool: String,
-    /// 每个载体同时跑几个站点；0 = 用节点的核数（登录节点上按 `sinfo` 估，载体里按 `SLURM_CPUS_ON_NODE`）。
+    /// 每个载体同时跑几个站点；0 = 用节点的核数（Slurm 按 `sinfo` 估，其它按机器的核数）。服务器设置里填了
+    /// 每节点核数时由调用方传进来（摆渡船 48）。
     pub slots: u32,
 }
 
@@ -44,13 +50,14 @@ fn carrier_script(pool: &str, jobs: &str, slots: u32, header: &[String]) -> Stri
         script.push('\n');
     }
     script.push_str(&format!(
-        r#"cd "${{SLURM_SUBMIT_DIR:-.}}"
+        r#"cd "${{SLURM_SUBMIT_DIR:-${{PBS_O_WORKDIR:-${{LS_SUBCWD:-.}}}}}}"
 P={pool}; JOBS={jobs}
 SLOTS={slots}
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=$(cat "$P/slots" 2>/dev/null)
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=${{SLURM_CPUS_ON_NODE:-$(nproc 2>/dev/null || echo 1)}}
 LINGER=${{COLM_PACK_LINGER:-60}}
-ME=${{SLURM_JOB_ID:-$(cat sched_id 2>/dev/null)}}
+# 自己的作业号：各调度系统的环境变量；没有调度系统时是自己的进程号（启动它的一方记下的正是这个）。
+ME=${{SLURM_JOB_ID:-${{LSB_JOBID:-${{PBS_JOBID:-$$}}}}}}
 mkdir -p running done pg term
 idle=0
 while :; do
@@ -125,9 +132,57 @@ done
     script
 }
 
-/// 替代 `sched::launch` 的一段：`script.sh` 已写好，当前目录是站点的作业目录。分区独占时入队，
-/// 必要时再交一个载体，最后一行输出 `pack <批次>`；分区不独占时照常单独提交，最后一行是作业号。
-pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Result<String> {
+/// 判断载体还在不在（排队或运行中）的 shell 函数 `colm_alive 作业号`：还在就输出它的状态词。按
+/// `$COLM_BASE`（slurm、lsf、pbs、bare）选问法；打包提交与状态查询共用这一份。
+pub(crate) const ALIVE: &str = r#"colm_alive() {
+  case "$COLM_BASE" in
+  slurm) squeue -h -j "$1" -o %T 2>/dev/null | head -n 1 ;;
+  lsf) bjobs -noheader -o stat "$1" 2>/dev/null | awk 'NR == 1 && $1 != "DONE" && $1 != "EXIT" { print $1 }' ;;
+  pbs) qstat -f "$1" 2>/dev/null | sed -n 's/^ *job_state = *//p' | head -n 1 | awk '$1 != "F" && $1 != "X" { print $1 }' ;;
+  bare) kill -0 "$1" 2>/dev/null && echo RUNNING ;;
+  esac
+}
+"#;
+
+/// 交载体（当前目录是载体目录，`script.sh` 已写好），成功时作业号放进 `$ID`。`$SLOTS` 是它要同时跑的
+/// 站点数，`$COLM_CPUS` 是一个节点的逻辑 CPU 数，`$COLM_WHOLE` 非空表示分区本来就整节点独占（Slurm）。
+fn carrier_submit(scheduler: Scheduler) -> &'static str {
+    match scheduler {
+        Scheduler::Slurm => {
+            "colm_carrier() { COLM_SBATCH_EXTRA=; [ -n \"$COLM_WHOLE\" ] || COLM_SBATCH_EXTRA=\"--cpus-per-task=$COLM_CPUS\"; colm_sbatch script.sh; }\n"
+        }
+        // 命令行的选项盖过脚本里 `#BSUB` / `#PBS` 写的 1 核。
+        Scheduler::Lsf => {
+            r#"colm_carrier() {
+  OUT=$(bsub -n "$SLOTS" -R "span[hosts=1]" < script.sh 2>&1) || { echo "bsub failed: $OUT" >&2; return 1; }
+  ID=$(echo "$OUT" | sed -n 's/^Job <\([0-9][0-9]*\)>.*/\1/p' | head -n 1)
+  [ -n "$ID" ] || { echo "bsub gave no job id: $OUT" >&2; return 1; }
+}
+"#
+        }
+        Scheduler::Pbs => {
+            r#"colm_carrier() {
+  OUT=$(qsub -l "select=1:ncpus=$SLOTS" script.sh 2>&1) || { echo "qsub failed: $OUT" >&2; return 1; }
+  ID=$(echo "$OUT" | tail -n 1)
+  case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "qsub gave no job id: $OUT" >&2; return 1;; esac
+}
+"#
+        }
+        Scheduler::Bare => {
+            "colm_carrier() { setsid nohup ./script.sh > log 2>&1 < /dev/null & ID=$!; }\n"
+        }
+    }
+}
+
+/// 替代 `sched::launch` 的一段：`script.sh` 已写好，当前目录是站点的作业目录。站点进本批的队列，必要时
+/// 再交一个载体，最后一行输出 `pack <批次>`。
+pub fn launch(
+    root: &str,
+    job: &str,
+    pack: &Pack,
+    scheduler: Scheduler,
+    resources: &Resources,
+) -> Result<String> {
     crate::job::check_id(job)?;
     crate::job::check_id(&pack.pool)?;
     let pool = pool_dir(root, &pack.pool);
@@ -145,10 +200,11 @@ pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Resu
         env_script: None,
         directives: resources.directives.clone(),
     };
+    // 日志不放进 carriers/：那里按 `c*` 数载体（天河实测 `carrier-<号>.log` 也被数了进去）。没有调度
+    // 系统时载体自己的输出写在它目录下的 `log`。
     let header = sched::directives(
-        Scheduler::Slurm,
+        scheduler,
         &sched::job_name("pack"),
-        // 不放进 carriers/：那里按 `c*` 数载体（天河实测 `carrier-<号>.log` 也被数了进去，好在没有 sched_id 被跳过）。
         &format!("{pool}/carrier-%j.log"),
         &carrier,
     )?;
@@ -157,14 +213,18 @@ pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Resu
         !script.contains("COLM_CARRIER_EOF"),
         "the carrier script may not contain its terminator"
     );
-    let forced = resources
-        .directives
-        .iter()
-        .any(|d| d == "--exclusive" || d.starts_with("--exclusive="));
+    let slurm = scheduler == Scheduler::Slurm;
+    let forced = slurm
+        && resources
+            .directives
+            .iter()
+            .any(|d| d == "--exclusive" || d.starts_with("--exclusive="));
     let partition = resources.partition.as_deref().map(quote);
     // 分区要不要整节点：`scontrol -o` 每个分区一行，没指定分区时看默认分区；老版本的 Slurm 叫 Shared。
     let exclusive = if forced {
         "true".to_owned()
+    } else if !slurm {
+        "false".to_owned()
     } else {
         format!(
             r#"{{ L=$(scontrol -o show partition {part} 2>/dev/null | {pick} | head -n 1); case "$L" in *OverSubscribe=EXCLUSIVE*|*Shared=EXCLUSIVE*) true;; *) false;; esac; }}"#,
@@ -178,19 +238,24 @@ pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Resu
     };
     // 每个节点：插槽 × 每插槽核数（物理核）与逻辑 CPU 数，取分区里最小的节点。land02 的节点有超线程
     // （96 个逻辑 CPU = 48 核）：站点按物理核放，载体按逻辑 CPU 申请才能拿到这些核。
-    let nodes = match &partition {
-        Some(part) => format!("sinfo -h -p {part} -o '%X %Y %c'"),
-        None => "sinfo -h -o '%X %Y %c'".to_owned(),
+    // 其它调度系统没有统一的问法：用服务器设置里的每节点核数（`pack.slots`），没填时按这台机器的核数。
+    let nodes = match (&partition, slurm) {
+        (Some(part), true) => format!("sinfo -h -p {part} -o '%X %Y %c'"),
+        (None, true) => "sinfo -h -o '%X %Y %c'".to_owned(),
+        (_, false) => {
+            "echo \"1 $(nproc 2>/dev/null || echo 1) $(nproc 2>/dev/null || echo 1)\"".to_owned()
+        }
     };
     Ok(format!(
-        r#"{submit}# 站点批量一律按节点打包：天河整节点独占计费，land02 每人同时只能跑 3 个作业（faculty 账户
+        r#"{submit}{alive}{carrier_submit}COLM_BASE={kind}
+# 站点批量一律按节点打包：天河整节点独占计费，land02 每人同时只能跑 3 个作业（faculty 账户
 # MaxJobs=3，2026-10-19），一个站点一个作业两边都慢。独占分区上载体照样只要 1 核（整节点自然归它），
 # 共享分区上要明确申请整个节点的 CPU，并由 colm_sbatch 按核补内存。
 COLM_WHOLE=
 if {exclusive}; then COLM_WHOLE=1; fi
 P={pool}; J={job}
 mkdir -p "$P/queue" "$P/claimed" "$P/carriers"
-echo slurm-pack > scheduler
+echo {kind}-pack > scheduler
 echo "$P" > pool
 echo {batch} > sched_id
 exec 8>"$P/.lock"
@@ -215,7 +280,7 @@ done
 L=0
 for c in "$P"/carriers/c*; do
   [ -f "$c/sched_id" ] && [ ! -f "$c/closing" ] || continue
-  if [ -n "$(squeue -h -j "$(cat "$c/sched_id")" -o %i 2>/dev/null)" ]; then L=$((L + 1)); fi
+  if [ -n "$(colm_alive "$(cat "$c/sched_id")")" ]; then L=$((L + 1)); fi
 done
 if [ "$W" -gt $((L * SLOTS - R)) ]; then
   N=0
@@ -225,9 +290,7 @@ if [ "$W" -gt $((L * SLOTS - R)) ]; then
   cat > "$C/script.sh" <<'COLM_CARRIER_EOF'
 {script}COLM_CARRIER_EOF
   chmod +x "$C/script.sh"
-  COLM_SBATCH_EXTRA=
-  [ -n "$COLM_WHOLE" ] || COLM_SBATCH_EXTRA="--cpus-per-task=$COLM_CPUS"
-  if ! ( cd "$C" && colm_sbatch script.sh && echo "$ID" > sched_id ); then
+  if ! ( cd "$C" && colm_carrier && echo "$ID" > sched_id ); then
     # 没有载体来跑它：撤出队列，这次提交按失败报告。
     rm -f "$P/queue/$J" sched_id
     exit 1
@@ -236,7 +299,10 @@ fi
 exec 8>&-
 echo pack {batch}
 "#,
-        submit = sched::SLURM_SUBMIT,
+        submit = if slurm { sched::SLURM_SUBMIT } else { "" },
+        alive = ALIVE,
+        carrier_submit = carrier_submit(scheduler),
+        kind = scheduler.name(),
         pool = quote(&pool),
         job = quote(job),
         batch = quote(&pack.pool),

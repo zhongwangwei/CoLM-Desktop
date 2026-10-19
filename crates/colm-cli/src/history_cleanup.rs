@@ -39,7 +39,7 @@ def finished(directory, name):
         with open(plain(directory + '/pool')) as source:
             pool = plain(source.read().strip())
         claim = pool + '/claimed/' + name
-        return scheduler == 'slurm-pack' and os.path.isfile(claim + '/cancelled') and not os.path.exists(claim + '/carrier')
+        return scheduler.endswith('-pack') and os.path.isfile(claim + '/cancelled') and not os.path.exists(claim + '/carrier')
     return False
 def marker(text, key):
     values = re.findall(r'^# ' + re.escape(key) + r': (.+)$', text, re.M)

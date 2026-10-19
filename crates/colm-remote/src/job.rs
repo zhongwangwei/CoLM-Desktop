@@ -82,7 +82,7 @@ pub fn submit_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<St
     submit_script_with(root, id, body, spec, sched::launch(spec.scheduler))
 }
 
-/// 和 [`submit_script`] 一样，但分区独占时放进这一批的节点队列（[`crate::pack`]）。只用于 Slurm。
+/// 和 [`submit_script`] 一样，但放进这一批的节点队列（[`crate::pack`]），由载体按节点打包运行。
 pub fn packed_submit_script(
     root: &str,
     id: &str,
@@ -90,11 +90,7 @@ pub fn packed_submit_script(
     spec: &Spec,
     pack: &crate::pack::Pack,
 ) -> Result<String> {
-    anyhow::ensure!(
-        spec.scheduler == Scheduler::Slurm,
-        "node packing is only for Slurm"
-    );
-    let launch = crate::pack::launch(root, id, pack, &spec.resources)?;
+    let launch = crate::pack::launch(root, id, pack, spec.scheduler, &spec.resources)?;
     submit_script_with(root, id, body, spec, &launch)
 }
 
@@ -182,7 +178,7 @@ echo "---log---"
 tail -n {lines} log 2>/dev/null
 true
 "#,
-        prelude = sched::PATH_PRELUDE,
+        prelude = format!("{}{}", sched::PATH_PRELUDE, crate::pack::ALIVE),
         query = sched::QUERY,
     )
 }
@@ -258,7 +254,7 @@ pub fn submit(
     submit_with(ssh, root, id, body, spec, engine_id, None)
 }
 
-/// 带上批次时，分区独占的 Slurm 服务器把站点放进节点队列；其它情况和 [`submit`] 一样。
+/// 带上批次时站点放进节点队列（任何调度系统都打包）；不带时和 [`submit`] 一样。
 pub fn submit_with(
     ssh: &Ssh,
     root: &str,
@@ -271,10 +267,8 @@ pub fn submit_with(
     check_id(id)?;
     let body = engine_body(engine_id, body)?;
     let script = match pack {
-        Some(pack) if spec.scheduler == Scheduler::Slurm => {
-            packed_submit_script(root, id, &body, spec, pack)?
-        }
-        _ => submit_script(root, id, &body, spec)?,
+        Some(pack) => packed_submit_script(root, id, &body, spec, pack)?,
+        None => submit_script(root, id, &body, spec)?,
     };
     let out = ssh.run_ok(&script)?;
     let last = out
@@ -287,7 +281,12 @@ pub fn submit_with(
     if let Some(batch) = last.strip_prefix("pack ") {
         check_id(batch)?;
         return Ok(Submitted {
-            scheduler: "slurm-pack",
+            scheduler: match spec.scheduler {
+                Scheduler::Slurm => "slurm-pack",
+                Scheduler::Lsf => "lsf-pack",
+                Scheduler::Pbs => "pbs-pack",
+                Scheduler::Bare => "bare-pack",
+            },
             pid: None,
             scheduler_id: Some(batch.to_owned()),
         });

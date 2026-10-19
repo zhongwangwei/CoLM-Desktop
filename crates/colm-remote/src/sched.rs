@@ -404,26 +404,6 @@ slurm)
     case "${Q%%|*}" in PENDING|CONFIGURING|REQUEUED|REQUEUE_HOLD|RESV_DEL_HOLD|SPECIAL_EXIT) echo "state=queued";; *) echo "state=running";; esac
     echo "detail=$Q"
   fi ;;
-slurm-pack)
-  # 打包运行（`crate::pack`）：看站点被哪个载体领走、那个载体还在不在。
-  P=$(cat pool 2>/dev/null); J=${PWD##*/}
-  if [ -z "$P" ]; then echo "state=unknown"
-  elif [ -f "$P/claimed/$J/carrier" ]; then
-    C=$(cat "$P/claimed/$J/carrier"); Q=$(squeue -h -j "$C" -o %T 2>/dev/null | head -n 1)
-    if [ -n "$Q" ]; then echo "state=running"; echo "detail=node pack job $C $Q"
-    else echo "state=lost"; echo "detail=node pack job $C $(sacct -n -X -P -j "$C" -o State,ExitCode 2>/dev/null | head -n 1)"; fi
-  elif [ -f "$P/claimed/$J/cancelled" ]; then echo "state=lost"; echo "detail=cancelled before it started"
-  elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
-  elif [ -f "$P/queue/$J" ]; then
-    L=
-    for c in "$P"/carriers/c*; do
-      [ -f "$c/sched_id" ] && [ ! -f "$c/closing" ] || continue
-      Q=$(squeue -h -j "$(cat "$c/sched_id")" -o %T 2>/dev/null | head -n 1)
-      if [ -n "$Q" ]; then L="$L $(cat "$c/sched_id") $Q"; fi
-    done
-    if [ -n "$L" ]; then echo "state=queued"; echo "detail=waiting in node pack:$L"
-    else echo "state=lost"; echo "detail=node pack has no job left to run it"; fi
-  else echo "state=lost"; echo "detail=not in the node pack queue"; fi ;;
 pbs)
   Q=$(qstat -f "$ID" 2>/dev/null | sed -n 's/^ *job_state = *//p' | head -n 1)
   if [ -z "$Q" ]; then
@@ -439,6 +419,28 @@ lsf)
   RUN|USUSP|SSUSP|WAIT|PROV) echo "state=running"; echo "detail=$Q";;
   *) echo "state=lost"; echo "detail=$Q";;
   esac ;;
+*-pack)
+  # 打包运行（`crate::pack`）：看站点被哪个载体领走、那个载体还在不在。
+  COLM_BASE=${S%-pack}
+  P=$(cat pool 2>/dev/null); J=${PWD##*/}
+  if [ -z "$P" ]; then echo "state=unknown"
+  elif [ -f "$P/claimed/$J/carrier" ]; then
+    C=$(cat "$P/claimed/$J/carrier"); Q=$(colm_alive "$C")
+    if [ -n "$Q" ]; then echo "state=running"; echo "detail=node pack job $C $Q"
+    elif [ "$COLM_BASE" = slurm ]; then echo "state=lost"; echo "detail=node pack job $C $(sacct -n -X -P -j "$C" -o State,ExitCode 2>/dev/null | head -n 1)"
+    else echo "state=lost"; echo "detail=node pack job $C ended"; fi
+  elif [ -f "$P/claimed/$J/cancelled" ]; then echo "state=lost"; echo "detail=cancelled before it started"
+  elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
+  elif [ -f "$P/queue/$J" ]; then
+    L=
+    for c in "$P"/carriers/c*; do
+      [ -f "$c/sched_id" ] && [ ! -f "$c/closing" ] || continue
+      Q=$(colm_alive "$(cat "$c/sched_id")")
+      if [ -n "$Q" ]; then L="$L $(cat "$c/sched_id") $Q"; fi
+    done
+    if [ -n "$L" ]; then echo "state=queued"; echo "detail=waiting in node pack:$L"
+    else echo "state=lost"; echo "detail=node pack has no job left to run it"; fi
+  else echo "state=lost"; echo "detail=not in the node pack queue"; fi ;;
 *) echo "state=unknown" ;;
 esac
 "#;
@@ -449,8 +451,8 @@ pub const CANCEL: &str = r#"S=$(cat scheduler 2>/dev/null || echo bare)
 ID=$(cat sched_id 2>/dev/null || true)
 case "$S" in
 slurm) scancel "$ID" || exit $? ;;
-slurm-pack)
-  # 不能 scancel：载体上还跑着别的站点。没领走的抢先占住，领走了的请载体只杀这一个。
+*-pack)
+  # 不能取消整个载体：它上面还跑着别的站点。没领走的抢先占住，领走了的请载体只杀这一个。
   P=$(cat pool) || exit 1; J=${PWD##*/}
   if mkdir "$P/claimed/$J" 2>/dev/null; then : > "$P/claimed/$J/cancelled"; else : > "$P/claimed/$J/cancel"; fi ;;
 pbs) qdel "$ID" || exit $? ;;

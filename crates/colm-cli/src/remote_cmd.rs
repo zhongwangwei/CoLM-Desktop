@@ -2066,7 +2066,11 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         .get("--pack-batch")
         .map(|batch| colm_remote::pack::Pack {
             pool: batch.to_owned(),
-            slots: 0,
+            // 服务器设置里填了每节点核数就按它放站点（摆渡船 48）；没填时由服务器上的提交脚本自己估。
+            slots: opts
+                .get("--cores-per-node")
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(0),
         });
     let raw_body = job_body(
         &root,
@@ -2271,15 +2275,18 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
     let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":matches!(status.state,job::State::Finished{..}) || ended.is_some(),"ended":ended,"status":status});
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
     let mut record = pending.record.clone();
-    if verified && record.scheduler != "bare" {
-        record.scheduler_id = identity.lines().nth(1).map(str::to_owned);
-        // 打包提交在记下意图时还不知道服务器会不会打包；以服务器上写下的为准。
-        if let Some(actual) = identity
+    if verified {
+        // 打包提交在记下意图时记的是基础调度系统；以服务器上写下的为准（`bare-pack` 也有作业号）。
+        let packed = identity
             .lines()
             .nth(2)
             .filter(|s| *s == format!("{}-pack", record.scheduler))
-        {
-            record.scheduler = actual.to_owned();
+            .map(str::to_owned);
+        if let Some(actual) = packed {
+            record.scheduler = actual;
+            record.scheduler_id = identity.lines().nth(1).map(str::to_owned);
+        } else if record.scheduler != "bare" {
+            record.scheduler_id = identity.lines().nth(1).map(str::to_owned);
         }
     }
     let record_warning = if verified {

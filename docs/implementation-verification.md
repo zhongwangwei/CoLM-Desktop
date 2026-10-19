@@ -34231,3 +34231,15 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 每个载体同时跑的站点数按物理核算（`sinfo -o '%X %Y %c'`，插槽 × 每插槽核数，取分区里最小的节点），记在 `slots` 里，载体从那里读。只读实测：land02 first 为 48 核 / 96 CPU，天河 deimos 为 64 / 64。
       - 测试 `a_shared_partition_packs_too_and_asks_for_a_whole_node` 替换了原来的"共享分区每个站点一个作业"。colm-remote 104 条、gui/src-tauri 415 条、colm-cli 457 条通过。
     - bd（LSF）的打包另行实现（用户随后要求）。
+
+49. **所有调度系统的站点批量都打包（用户要求，2026-10-19）**：第 48 条只把 Slurm 全部改成了打包，用户随后要求摆渡船（LSF）也打包，并且"不管什么调度系统"都打包。
+    - 打包机制（队列、`mkdir` 领取、收尾、单站点取消）本来就和调度系统无关。按调度系统分开的只有：
+      - 交载体：Slurm 用 `colm_sbatch`，共享分区上加 `--cpus-per-task=<节点逻辑 CPU>`；LSF 用 `bsub -n <站点数> -R "span[hosts=1]" < script.sh`；PBS 用 `qsub -l select=1:ncpus=<站点数>`；没有调度系统时 `setsid nohup ./script.sh &`，以进程号作为载体编号。命令行选项会盖过脚本里 `#BSUB`、`#PBS` 写的 1 核。
+      - 判断载体还在不在：`pack::ALIVE` 里按 `$COLM_BASE` 分别调用 squeue、`bjobs -o stat`（DONE、EXIT 算已结束）、`qstat -f`（F、X 算已结束）、`kill -0`。打包提交和状态查询共用这一份，状态查询脚本在开头定义它。
+      - 载体自己的作业号：依次取 `SLURM_JOB_ID`、`LSB_JOBID`、`PBS_JOBID`，没有调度系统时用 `$$`。工作目录：依次取 `SLURM_SUBMIT_DIR`、`PBS_O_WORKDIR`、`LS_SUBCWD`。
+    - 作业目录里的 `scheduler` 记为 `<调度系统>-pack`。状态查询和取消里原来的 `slurm-pack)` 分支改为 `*-pack)`；服务器端清理判断"开跑前就被取消"时也改为认所有 `*-pack`。待核对的提交如果服务器上记的是 `<原调度系统>-pack`，就采用它（直接运行的也一样）。
+    - 每个载体放几个站点：`remote-run` 把服务器设置里的"每节点核数"（`--cores-per-node`）传进来，摆渡船为 48；没填时，Slurm 按 `sinfo` 估，其它调度系统按这台机器的核数。
+    - 只读核对摆渡船：IBM Spectrum LSF 10.1；`bjobs -noheader -o stat <号>` 查不到作业时，"Job <1> is not found"写在标准错误上，不会被误当成"还在"。
+    - 测试：`an_lsf_batch_is_packed_with_a_whole_node_per_job`（每节点 2 核时 3 个站点交 2 个载体，参数是 `-n 2 -R span[hosts=1]`；排队时状态显示"waiting in node pack: 700 RUN"；用 `LSB_JOBID` 跑载体后，站点结果分别为 0 和 4）；`a_machine_without_a_scheduler_runs_its_batch_in_one_background_carrier`。colm-remote 106 条、colm-cli 457 条、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。
+    - 更正：第 48 条的提交说明写了"gui/src-tauri 415 条"，实际是 414 条通过、1 条按设计跳过。
+    - 没测：在摆渡船、PBS 集群上真实交一批。

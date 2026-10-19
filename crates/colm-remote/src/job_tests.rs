@@ -764,3 +764,111 @@ fn a_job_the_scheduler_ended_without_an_exit_code_is_over() {
     };
     assert_eq!(ended(&finished), None, "an exit code decides by itself");
 }
+
+#[cfg(unix)]
+#[test]
+fn an_lsf_batch_is_packed_with_a_whole_node_per_job() {
+    // 摆渡船: LSF, 48 cores per node in the server settings (2 here).
+    let sb = pack_sandbox("pack-lsf", "unused");
+    sb.stub(
+        "bsub",
+        "n=$(cat \"$STUBS/next\" 2>/dev/null || echo 700); echo $((n + 1)) > \"$STUBS/next\"\necho \"$n\" >> \"$STUBS/live\"; printf '%s\\n' \"$*\" >> \"$STUBS/bsub_args\"; cat > /dev/null; echo \"Job <$n> is submitted to queue <normal>.\"",
+    );
+    sb.stub(
+        "bjobs",
+        "for a in \"$@\"; do id=$a; done\ngrep -qx \"$id\" \"$STUBS/live\" 2>/dev/null && echo RUN; true",
+    );
+    let mut spec = slurm_spec();
+    spec.scheduler = Scheduler::Lsf;
+    spec.resources.partition = Some("normal".into());
+    let pack = crate::pack::Pack {
+        pool: "batch-l".into(),
+        slots: 2,
+    };
+    for (id, body) in [("j-a", "true"), ("j-b", "exit 4"), ("j-c", "true")] {
+        let (out, err, ok) =
+            sb.run(&packed_submit_script(&sb.work(), id, body, &spec, &pack).unwrap());
+        assert!(ok, "{id}: {err}");
+        assert_eq!(out.trim().lines().last(), Some("pack batch-l"));
+        assert_eq!(
+            std::fs::read_to_string(sb.job_dir(id).join("scheduler")).unwrap(),
+            "lsf-pack\n"
+        );
+    }
+    let args = sb.read("bsub_args");
+    assert_eq!(
+        args.lines().count(),
+        2,
+        "two node jobs for three stations at two per node"
+    );
+    assert!(
+        args.lines()
+            .all(|line| line.contains("-n 2 -R span[hosts=1]")),
+        "{args}"
+    );
+    let waiting = sb.status("j-a");
+    assert_eq!(waiting.state, State::Queued);
+    assert!(waiting
+        .detail
+        .unwrap()
+        .contains("waiting in node pack: 700 RUN"));
+    // The first node job runs as LSF would start it.
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-l"));
+    let out = Command::new("bash")
+        .arg(pool.join("carriers/c0/script.sh"))
+        .current_dir(pool.join("carriers/c0"))
+        .env("STUBS", &sb.bin)
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin:/usr/sbin:/sbin", sb.bin.display()),
+        )
+        .env("LSB_JOBID", "700")
+        .env("COLM_PACK_LINGER", "2")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(pool.join("claimed/j-a/carrier")).unwrap(),
+        "700\n"
+    );
+    assert_eq!(sb.status("j-a").state, State::Finished { exit_code: 0 });
+    assert_eq!(sb.status("j-b").state, State::Finished { exit_code: 4 });
+}
+
+#[cfg(unix)]
+#[test]
+fn a_machine_without_a_scheduler_runs_its_batch_in_one_background_carrier() {
+    let sb = pack_sandbox("pack-bare", "unused");
+    // Record how the carrier would be started instead of starting it.
+    sb.stub("setsid", "echo \"$@\" >> \"$STUBS/setsid_args\"");
+    let pack = crate::pack::Pack {
+        pool: "batch-b".into(),
+        slots: 4,
+    };
+    let (out, err, ok) =
+        sb.run(&packed_submit_script(&sb.work(), "j-x", "true", &Spec::bare(), &pack).unwrap());
+    assert!(ok, "{err}");
+    assert_eq!(out.trim().lines().last(), Some("pack batch-b"));
+    assert_eq!(
+        std::fs::read_to_string(sb.job_dir("j-x").join("scheduler")).unwrap(),
+        "bare-pack\n"
+    );
+    // The carrier is started in the background; give it a moment to record how.
+    for _ in 0..50 {
+        if !sb.read("setsid_args").is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(sb.read("setsid_args").contains("nohup ./script.sh"));
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-b"));
+    let pid = std::fs::read_to_string(pool.join("carriers/c0/sched_id")).unwrap();
+    assert!(
+        pid.trim().parse::<u32>().is_ok(),
+        "the carrier is known by its process id"
+    );
+}
