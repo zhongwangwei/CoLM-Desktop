@@ -34,34 +34,7 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
             let version = remote_version(&prepared)?;
             let engine = choose_engine(&prepared, &ssh, &root, version.as_ref())?;
             engine.upload(&ssh, &root)?;
-            if let Engine::Source(snapshot) = &engine {
-                // Keep build output away from the JSON response. This runs on the login node, which
-                // other users share and where heavy programs are discouraged (星逸, 摆渡船): four
-                // compiler jobs at the lowest priority.
-                let build = || {
-                    ssh.run_ok(&format!(
-                        "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
-                        quote(&root),
-                        engine::ensure_script(&root, engine.id(), LOGIN_NODE_BUILD_JOBS)
-                    ))
-                };
-                if let Err(error) = build() {
-                    // The connectivity check fetches two tiny files; a slow proxy passes it and can
-                    // still time out on real downloads (天河's: 8 KB/s from GitHub, 2026-10-19).
-                    // Such a failure gets one offline retry.
-                    if !colm_remote::offline::looks_like_network_failure(&format!("{error:#}")) {
-                        return Err(error);
-                    }
-                    eprintln!("the server failed to download build dependencies; sending them from this computer");
-                    colm_remote::offline::stage(
-                        &ssh,
-                        &root,
-                        &engine::lock_text(snapshot)?,
-                        &|line| eprintln!("{line}"),
-                    )?;
-                    build()?;
-                }
-            }
+            build_on_login_node(&ssh, &root, &engine)?;
             format!("{}/bin/colm-cli", engine::engine_dir(&root, engine.id()))
         } else {
             String::new()
@@ -119,6 +92,41 @@ fn ascii_json(value: &serde_json::Value) -> Result<String> {
 /// failure stays with its item and its creation claim behaves exactly as for one request.
 /// Compiler jobs for the engine build on a shared login node.
 const LOGIN_NODE_BUILD_JOBS: u32 = 4;
+
+/// Build an uploaded source engine on the login node (nothing to do once it is built). Compute
+/// nodes cannot be relied on to build it: 天河's have no `cc`, so a job building the engine fails
+/// at the link step (2026-10-19).
+pub(super) fn build_on_login_node(ssh: &Ssh, root: &str, engine: &Engine) -> Result<()> {
+    let Engine::Source(snapshot) = engine else {
+        return Ok(());
+    };
+    // Keep build output away from the JSON response. This runs on the login node, which
+    // other users share and where heavy programs are discouraged (星逸, 摆渡船): four
+    // compiler jobs at the lowest priority.
+    let build = || {
+        ssh.run_ok(&format!(
+            "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
+            quote(root),
+            engine::ensure_script(root, engine.id(), LOGIN_NODE_BUILD_JOBS)
+        ))
+    };
+    if let Err(error) = build() {
+        // The connectivity check fetches two tiny files; a slow proxy passes it and can
+        // still time out on real downloads (天河's: 8 KB/s from GitHub, 2026-10-19).
+        // Such a failure gets one offline retry.
+        if !colm_remote::offline::looks_like_network_failure(&format!("{error:#}")) {
+            return Err(error);
+        }
+        eprintln!(
+            "the server failed to download build dependencies; sending them from this computer"
+        );
+        colm_remote::offline::stage(ssh, root, &engine::lock_text(snapshot)?, &|line| {
+            eprintln!("{line}")
+        })?;
+        build()?;
+    }
+    Ok(())
+}
 
 fn run_batch(
     ssh: &Ssh,

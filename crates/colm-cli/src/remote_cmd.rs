@@ -2141,6 +2141,18 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         run_case: case.clone(),
         record: record.clone(),
     };
+    // 提交前先在登录节点把引擎编好：天河的计算节点没有 cc，作业里编引擎会在链接时失败（2026-10-19，
+    // 软件更新后的一批站点全部这样失败）。放在记下提交意图之前：编不成时这次运行直接报错，不会留下待核对。
+    if matches!(engine, Engine::Source(_)) {
+        let mut lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
+        let built = lock.run(|| {
+            engine.upload(&ssh, &root)?;
+            remote_cases::build_on_login_node(&ssh, &root, &engine)
+        });
+        let unlocked = lock.finish();
+        built?;
+        unlocked?;
+    }
     let (engine_lock, engine_uploaded, submitted) = submit_with_intent(&pending, || {
         crate::history_cmd::observe_remote_outcome(
             &json!({"job":id,"outcome":"uncertain","terminal":false,"remote_record":pending}),

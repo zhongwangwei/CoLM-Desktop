@@ -145,7 +145,8 @@ pub fn launch(root: &str, job: &str, pack: &Pack, resources: &Resources) -> Resu
     let header = sched::directives(
         Scheduler::Slurm,
         &sched::job_name("pack"),
-        &format!("{pool}/carriers/carrier-%j.log"),
+        // 不放进 carriers/：那里按 `c*` 数载体（天河实测 `carrier-<号>.log` 也被数了进去，好在没有 sched_id 被跳过）。
+        &format!("{pool}/carrier-%j.log"),
         &carrier,
     )?;
     let script = carrier_script(&pool, &jobs, pack.slots, &header);

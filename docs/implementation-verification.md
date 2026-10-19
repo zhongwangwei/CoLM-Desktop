@@ -34119,3 +34119,10 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 核对脚本（`pending_identity_script`）：没有 `sched_id` 的 Slurm 提交，按作业目录到 squeue 和 sacct（近 14 天）里找一次，恰好找到一个就写入 `sched_id`；脚本开头补上 `PATH_PRELUDE`。这样那 5 个站点下次核对时会自己归位，不用手动写 `sched_id`。
     - 测试：`a_pending_slurm_submission_adopts_the_one_job_in_its_directory`（两个候选时不认；只有一个时写入 `sched_id`，输出 verified、作业号、slurm）；`a_case_created_on_a_server_is_recorded_under_its_project`；前端 `a previous submission still being reconciled is reported as unconfirmed, not as a changed job`。colm-cli 456 条、gui/src-tauri 411 条、前端 715 条通过。
     - 没测：在天河上真的核对那 5 个站点。
+
+37. **软件更新后，天河上一批站点全部失败："linker `cc` not found"（用户报"重启后一直显示运行中"，2026-10-19）**：
+    - 现场（只读）：19:36 那一批确实打包了：只交了一个节点作业 `colm_pack` 8675812，5 个站点在同一个节点上跑。但这次更新让引擎快照变成了 `be1a63b44b4c8d2d`，服务器上还没编；作业里的 `ensure_script` 只好在计算节点上编译，而天河的计算节点没有 `cc`，编到链接这一步失败，站点退出码为 1。一个站点在编译，其余的在等编译锁，所以界面一直显示"运行中"。
+    - 以前没暴露，是因为每次运行之前都碰巧在新建向导里预先准备过引擎（`remote_prepare_engine` 在登录节点上编）；运行这条路径本身从来不在登录节点上编。
+    - 改为：`cmd_run` 在记下提交意图之前，先取生命周期锁、上传引擎，然后在登录节点上编好（`remote_cases::build_on_login_node`：nice 19、4 个编译任务，和新建算例时同一套；下载失败时由桌面送依赖再编一次；已经编好的话立刻返回）。编不成时，这次运行直接报错，不会留下待核对的记录。同一批的几个站点同时提交时，第一个去编，其余的在 `ensure_script` 的锁上等它编完。
+    - 顺带：载体作业的日志原来写在 `carriers/carrier-<号>.log`，会被按 `c*` 数载体的循环数进去（因为没有 `sched_id` 被跳过，没出错）；现在改到队列根目录。
+    - 没测：登录节点预编这一步需要真实的 ssh，没有单元测试；天河上还没有用新版本重新跑一批。
