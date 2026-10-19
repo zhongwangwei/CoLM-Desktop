@@ -238,6 +238,8 @@ export default function ResultsPage({
                 (r) =>
                   r.run_case && r.version?.id === versionId && r.version?.revision === revision,
               )?.run_case ||
+              // A ledger-imported legacy placeholder points at the case itself and has no output.
+              data.find((r) => r.run_case && r.version)?.run_case ||
               data.find((r) => r.run_case)?.run_case ||
               '',
           );

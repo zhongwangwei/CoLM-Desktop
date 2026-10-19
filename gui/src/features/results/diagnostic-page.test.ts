@@ -66,9 +66,11 @@ function harness(
     if (command === 'model_case_runs' && args.dir === '/empty') return [];
     if (command === 'model_case_runs')
       return [
+        // The ledger's imported placeholder comes first and has no output of its own.
+        { run_case: '/case', version: null, legacy: true, status: 'needs_reconciliation' },
         {
           run_case: '/case/.colm/runs/a',
-          version: { id: 'official', revision: 1 },
+          version: { id: 'official', revision: 2 },
           status: 'succeeded',
         },
       ];
@@ -331,4 +333,12 @@ test('blocked navigation restores the original station and an unselected single 
   await empty.chooseStation('/case');
   assert.deepEqual(empty.opened, ['/case']);
   assert.ok(empty.charts().length);
+});
+
+test('the default result is the recorded run, not the legacy placeholder listed before it', async () => {
+  const h = harness(true);
+  await h.render();
+  const catalogs = h.requests.filter((request) => request.command === 'history_catalog');
+  assert.ok(catalogs.length);
+  assert.ok(catalogs.every((request) => request.args.case === '/case/.colm/runs/a'));
 });

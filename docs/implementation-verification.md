@@ -34026,3 +34026,8 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 结果：`remote_prepare_engine` 约 659 s 返回 `{"ready":true}`，`engine/363e67a7c94a145d/bin` 下 `colm-cli`、`colm-rs`、`mkinidata-rs`、`mksrfdata-rs` 都在。
     - 只读验证（未提交任何作业）：`remote_probe` 在 ln233 上返回 `problems: []`、`build_problems: []`，队列 deimos/phobos/debug；`remote_scan_sites` 读到 PLUMBER2s 站点列表（47 KB，约 40 s，登录节点负载高）；`sbatch --test-only` 对 deimos、debug 都接受，且都是"独占一个 64 核节点"（deimos 预计 22:43 起，debug 约 13:16 起）。
     - 没做：真实作业（debug 分区会整节点计费几分钟，等用户点头）；"按节点打包站点"；把"离线服务器自动上传依赖并编译"做成应用功能（要先给方案）。
+
+28. **结果页默认选中了账本导入的占位，报"no history at …/out/AT-Neu/history"（用户报）**：`model_case_runs` 把账本里导入的 `legacy-…` 记录列在真实运行前面，它的 `run_case` 就是项目算例目录本身（没有 `out/`、没有版本）。结果页默认选择在"刚完成的运行""版本与当前一致的运行"都没命中时退到"第一条有 `run_case` 的"，于是选了占位，页面同时提示"历史结果缺少版本出处"。真实结果在 `runs/<id>/out/…/history`，一直都在。
+    - 改为：回退顺序里先取"带版本的运行"，再取任意有 `run_case` 的。
+    - 测试：`the default result is the recorded run, not the legacy placeholder listed before it`（真实运行的修订与当前不同、占位排在前面；去掉修复时失败：pass 706 / fail 1，加上修复：707 条全部通过）。
+    - 没改的：占位本身仍会出现在"已记录的运行"列表里；账本为什么把同一次 bd 作业既导入成占位又记成真实运行，这里没有追。
