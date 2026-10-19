@@ -11,6 +11,8 @@ import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../comp
 import {
   compatibleKernel,
   endedRun,
+  openRuns,
+  remoteStatusSummary,
   restoredRuns,
   remoteSubmissionBlocked,
   REMOTE_CHECK_MS,
@@ -20,6 +22,13 @@ import {
   restoreRunView,
   settleRuns,
 } from './run-model';
+// A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
+// back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
+// from whichever panel is showing, so the stop marks live here rather than in a component ref.
+const stoppedBatches = new Set<string>();
+// Runs whose submission loop is alive in this window; the others are only watched.
+const drivenBatches = new Set<string>();
+
 export default function RunPanel({
   casePath,
   effectiveProfile,
@@ -193,7 +202,7 @@ export default function RunPanel({
       if (!current || !alive.current) return;
       endedHere = endedRun(last[casePath]) ? last[casePath] : undefined;
       update((old) => {
-        const added = restoredRuns(last, old.running);
+        const added = { ...restoredRuns(last, old.running), ...openRuns(last, old.running) };
         return Object.keys(added).length ? { running: { ...old.running, ...added } } : {};
       });
     };
@@ -464,26 +473,31 @@ export default function RunPanel({
             modelRevision: revision,
           };
           if (batchCases) {
-            await runRemoteBatch({
-              cases: prepared,
-              workers: nums[2],
-              stopped: () => !alive.current || cancelledRun.current === runId,
-              record: (dir) => invokeJson('remote_job_record', { case: dir }),
-              status: (dir) => invokeJson('remote_status', { case: dir }),
-              submit: (dir) => invokeJson('remote_run', { ...args, case: dir }),
-              change: (dir, status, result, error) => {
-                const record =
-                  result ??
-                  (status === 'unknown' ? { status: { state: 'unknown' }, error } : undefined);
-                patchRun([dir], runId, {
-                  status,
-                  running: !['succeeded', 'failed', 'cancelled'].includes(status),
-                  ...(record ? { progress: { host, remote: record } } : {}),
-                  ...(error ? { error } : {}),
-                });
-                if (dir === casePath && record && alive.current) setRemote(record);
-              },
-            });
+            drivenBatches.add(runId);
+            try {
+              await runRemoteBatch({
+                cases: prepared,
+                workers: nums[2],
+                stopped: () => stoppedBatches.has(runId) || cancelledRun.current === runId,
+                record: (dir) => invokeJson('remote_job_record', { case: dir }),
+                status: (dir) => invokeJson('remote_status', { case: dir }),
+                submit: (dir) => invokeJson('remote_run', { ...args, case: dir }),
+                change: (dir, status, result, error) => {
+                  const record =
+                    result ??
+                    (status === 'unknown' ? { status: { state: 'unknown' }, error } : undefined);
+                  patchRun([dir], runId, {
+                    status,
+                    running: !['succeeded', 'failed', 'cancelled'].includes(status),
+                    ...(record ? { progress: { host, remote: record } } : {}),
+                    ...(error ? { error } : {}),
+                  });
+                  if (dir === casePath && record && alive.current) setRemote(record);
+                },
+              });
+            } finally {
+              drivenBatches.delete(runId);
+            }
             return;
           }
           submitted = true;
@@ -660,10 +674,60 @@ export default function RunPanel({
     const timer = window.setInterval(() => autoCheck.current(), REMOTE_CHECK_MS);
     return () => window.clearInterval(timer);
   }, [watchRemote, casePath]);
+  // Stations of a batch whose server job is still open but that no live submission loop follows
+  // (the loop ended, or this is a reopened project) are checked every 10 seconds, a few at a time,
+  // so jobs that finished on the server turn into "finished" without anyone pressing Check.
+  const openBatchRuns = () =>
+    (batchCases ?? [])
+      .filter((dir) => {
+        const run = latest.current[dir];
+        return (
+          !!run &&
+          run.location === 'remote' &&
+          run.running &&
+          !(run.run_id && drivenBatches.has(run.run_id))
+        );
+      })
+      .slice(0, 8);
+  const watchBatch = useRef(async () => {});
+  watchBatch.current = async () => {
+    if (document.hidden) return;
+    for (const dir of openBatchRuns()) {
+      if (!alive.current) return;
+      await remoteAction('remote_status', dir, true).catch(() => {});
+    }
+  };
+  const watchingBatch = !!host && !!batchCases?.length && !recovering;
+  useEffect(() => {
+    if (!watchingBatch) return;
+    const timer = window.setInterval(() => void watchBatch.current(), REMOTE_CHECK_MS);
+    void watchBatch.current();
+    return () => window.clearInterval(timer);
+    // The watcher reads the current runs through refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [watchingBatch, casePath]);
+  // The Check button: every open server job of the batch (or the case), with a summary shown.
+  async function checkServerStatus() {
+    const open = batchCases ? openBatchRuns() : [];
+    const targets = open.length ? open : [casePath];
+    const results: unknown[] = [];
+    for (const dir of targets) {
+      try {
+        const merged = await remoteAction('remote_status', dir, true);
+        if (merged) results.push(merged);
+      } catch (error) {
+        notify(String(error), true);
+      }
+    }
+    if (results.length) notify(remoteStatusSummary(results, en));
+  }
   async function cancel() {
     try {
       const id = latest.current[casePath]?.run_id;
-      if (id) cancelledRun.current = id;
+      if (id) {
+        cancelledRun.current = id;
+        stoppedBatches.add(id);
+      }
       const targets = id
         ? Object.entries(latest.current)
             .filter(([, run]) => run.run_id === id && run.running)
@@ -1006,7 +1070,7 @@ export default function RunPanel({
                 label: bilingual('核对服务器状态', 'Check'),
                 kind: 'click' as const,
                 enabled: !monitor,
-                run: () => remoteAction('remote_status'),
+                run: () => checkServerStatus(),
               },
               {
                 id: 'remote-cancel',
@@ -1309,10 +1373,7 @@ export default function RunPanel({
             </Notice>
           )}
           <div className="actions">
-            <Button
-              disabled={monitor}
-              onClick={() => void remoteAction('remote_status').catch(() => {})}
-            >
+            <Button disabled={monitor} onClick={() => void checkServerStatus().catch(() => {})}>
               {t('核对服务器状态', 'Check server status')}
             </Button>
             <Button

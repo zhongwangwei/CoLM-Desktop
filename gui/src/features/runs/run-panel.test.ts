@@ -5,6 +5,8 @@ import ts from 'typescript';
 import {
   settleRuns,
   endedRun,
+  openRuns,
+  remoteStatusSummary,
   restoredRuns,
   remoteRunPermissions,
   remoteSubmissionBlocked,
@@ -94,6 +96,8 @@ function panel(
     lock: { current: false },
     alive: { current: true },
     cancelledRun: { current: null as string | null },
+    stoppedBatches: new Set<string>(),
+    drivenBatches: new Set<string>(),
     casePath: '/good',
     currentCase: { current: '/good' },
     batchCases:
@@ -151,7 +155,7 @@ function panel(
     cancel: () => Promise<unknown>;
     remoteAction: (command: string, target?: string, quiet?: boolean) => Promise<unknown>;
   };
-  return { ...methods, state, calls, batchWorkers };
+  return { ...methods, state, calls, batchWorkers, alive: context.alive };
 }
 
 test('one failed migration does not prevent healthy batch cases from running', async () => {
@@ -313,6 +317,38 @@ test('remote batch runs as many stations as CPUs are requested, one CPU each, an
   assert.equal(p.state.running['/good'].status, 'succeeded');
   assert.equal(p.state.running['/bad'].status, 'failed');
   assert.equal(p.state.running['/bad'].running, false);
+});
+
+test('leaving the page does not stop the stations still to be submitted', async () => {
+  const targets = ['/a', '/b', '/c', '/d'];
+  let p!: ReturnType<typeof panel>;
+  p = panel({
+    remote: true,
+    remoteBatch: true,
+    stationConcurrency: 1,
+    targets,
+    ipc: async (command, args) => {
+      if (command === 'model_migrate_case') return { version: { id: 'chosen', revision: 2 } };
+      if (command === 'remote_job_record') return null;
+      if (command === 'remote_run') {
+        // The page unmounts right after the first station is submitted.
+        if (args.case === '/a') p.alive.current = false;
+        return { host: 'server', job: `job-${args.case}` };
+      }
+      if (command === 'remote_status')
+        return {
+          record: { host: 'server', job: `job-${args.case}` },
+          status: { state: 'finished', exit_code: 0 },
+        };
+      throw new Error(command);
+    },
+  });
+  await p.run();
+  assert.deepEqual(
+    p.calls.filter((call) => call.command === 'remote_run').map((call) => call.args.case),
+    targets,
+  );
+  for (const dir of targets) assert.equal(p.state.running[dir].status, 'succeeded');
 });
 
 test('batch kernel check validates every selected profile', () => {
@@ -539,4 +575,42 @@ test('a batch that finished before is restored as finished, not as stations to r
   assert.ok(endedRun(finished));
   assert.ok(!endedRun({ ...finished, needs_reconciliation: true }));
   assert.ok(!endedRun(undefined));
+});
+
+test('open ledger runs are watched, and checking server jobs reports a summary', () => {
+  const last = (status: string, needs = false, location: string | null = 'remote') => ({
+    status,
+    operation_id: `op-${status}`,
+    needs_reconciliation: needs,
+    finished_ms: status === 'running' ? null : 1,
+    location,
+    host: 'bd',
+  });
+  const watched = openRuns(
+    {
+      '/done': last('succeeded'),
+      '/open': last('running'),
+      '/unsure': last('succeeded', true),
+      '/local': last('running', false, 'local'),
+      '/known': last('running'),
+    },
+    { '/known': { case: '/known', status: 'running', running: true, logs: [], stages: {} } },
+  );
+  assert.deepEqual(Object.keys(watched).sort(), ['/open', '/unsure']);
+  assert.equal(watched['/open'].status, 'unknown');
+  assert.equal(watched['/open'].running, true);
+  assert.equal((watched['/open'].progress as { host: string }).host, 'bd');
+  const record = { host: 'bd', job: 'j' };
+  const summary = remoteStatusSummary([
+    { record, status: { state: 'finished', exit_code: 0 } },
+    { record, status: { state: 'finished', exit_code: 0 } },
+    { record, status: { state: 'finished', exit_code: 2 } },
+    { record, status: { state: 'running' } },
+    { record, status: { state: 'queued' } },
+    { record, status: { state: 'lost' } },
+  ]);
+  assert.equal(
+    summary,
+    '已核对 6 个服务器作业：完成 2 · 失败 1 · 运行中 1 · 排队中 1 · 未能确认 1',
+  );
 });

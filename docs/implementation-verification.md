@@ -33944,3 +33944,14 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：`the_servers_environment_script_runs_first_without_touching_stdout`、`reading_the_login_profile_keeps_the_path_the_caller_set_first`；colm-remote 81 条，clippy 干净。
 11. **Python 3.6 读超长一行含中文会误报 "Non-UTF-8 code"**（用户报：批量创建 4 个站点全部失败，`SyntaxError: Non-UTF-8 code starting with '\xe6' in file <stdin>`）。服务器端 Python 经 heredoc 从 stdin 读程序，批量请求被嵌进程序的一行里；Python 3.6 的词法器按固定大小分块读超长行，多字节字符正好跨在块边界上就被判为非法 UTF-8。在 bd 上用 113 KB 一行 + 中文复现，同样内容改成 ASCII 转义后 256 KB 也能通过（中文与 emoji 都还原）。改为：嵌进程序的 JSON 一律 `\uXXXX` 转义（`ascii_json`，非 BMP 字符按 UTF-16 代理对），单个请求与批量都用。测试：`data_embedded_in_server_programs_is_ascii_and_round_trips`。
 12. **"申请 CPU 数"清不掉**：输入框直接显示"有效值"，清空后立刻回落成服务器默认（8）。线程数与 CPU 数现在显示用户输入的内容（空则空），默认值只作占位提示，有效值不变。测试：`the CPU and thread boxes can be emptied`（GUI 692 条）。
+13. **bd 上的批量运行（用户实测，项目 qqq，90 站点）：只提交了 9 个站点，其余 81 个"已停止"，已跑完的作业仍显示"等待"**。
+    - **账本与 LSF 对照**：本机账本里 9 个站点有"提交"事件（AT-Neu … BE-Bra，10:03:13–10:04，每个约 8 秒，作业号 232723–232731），其余 81 个只有"已停止"；bd 上 `bjobs -a`：8 个 DONE、1 个 RUN（AU-How，时限 7 天）。界面"完成 1 · 等待 8 · 已停止 81"正好是 `next = 9`：1 个已被轮询为完成，8 个停在"已提交"，81 个未提交的被 `finally` 标为取消。没有"待核对"，说明不是某个站点报错，而是循环被 `stopped()` 打断。
+    - **根因**：`runRemoteBatch` 的 `stopped()` 里有 `!alive.current`，即页面组件一卸载（切换页面、重新挂载）整批的后续提交和状态轮询就停了；停了以后没有任何东西再去核对那 8 个已在服务器上跑完的作业。批量模式又没有后台自动核对，"核对服务器状态"按钮只核对第一个站点（AT-Neu，本来就已完成），所以点了没有任何显示。
+    - **改为**：
+      1. 提交循环只在"停止运行"时停止，不再因页面卸载而停（停止标记 `stoppedBatches` 放在模块级，换了页面再回来的面板也能停；`drivenBatches` 记录本窗口里还有活循环的运行）。
+      2. 批量面板每 10 秒自动核对"仍未结束且没有活循环在跟"的站点（一次最多 8 个，已结束的会变成完成）；重开项目时账本里未结束的远程站点也按"未知，运行中"恢复出来交给它核对（`openRuns`）。
+      3. "核对服务器状态"在批量模式下核对所有未结束的站点，单个算例也一样，并给出汇总提示，如"已核对 9 个服务器作业：完成 8 · 运行中 1"（`remoteStatusSummary`）。
+    - 保持不变：已有未终结的服务器作业仍会阻止重复提交（`remote-batch.ts` 的安全规则）。
+    - 测试：`leaving the page does not stop the stations still to be submitted`（旧逻辑下失败、新逻辑下通过）、`open ledger runs are watched, and checking server jobs reports a summary`；GUI 694 条。
+    - 提交 CPU 数不需要写节点数：LSF 脚本是 `-n <CPU 数>` 加 `span[hosts=1]`（同一节点），"节点"设置只在跨节点的 MPI 运行里才有用。
+    - 未做：重新点"开始运行"会把 90 个站点全部再提交一遍（含已完成的）；没有"只运行未完成的站点"。

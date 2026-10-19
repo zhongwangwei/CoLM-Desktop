@@ -215,3 +215,53 @@ export function restoredRuns(
   }
   return restored;
 }
+
+/** Cases whose last run the ledger leaves open: they are watched until their server says how it ended. */
+export function openRuns(
+  last: Record<string, LastRun>,
+  running: Record<string, RunState>,
+): Record<string, RunState> {
+  const open: Record<string, RunState> = {};
+  for (const [dir, run] of Object.entries(last)) {
+    // `endedRun` narrows its argument, so read it as a plain boolean here.
+    const ended: boolean = endedRun(run);
+    if (running[dir] || ended || run.location === 'local') continue;
+    open[dir] = {
+      case: dir,
+      location: 'remote',
+      run_id: run.operation_id,
+      operation_id: run.operation_id,
+      status: 'unknown',
+      running: true,
+      logs: [],
+      stages: {},
+      ...(run.host ? { progress: { host: run.host } } : {}),
+    };
+  }
+  return open;
+}
+
+/** One line for the result of checking server jobs: how many finished, failed, run, wait. */
+export function remoteStatusSummary(results: unknown[], en = false): string {
+  const counts = { finished: 0, failed: 0, running: 0, queued: 0, unknown: 0 };
+  for (const result of results) {
+    const status = ((result as { status?: { state?: string; exit_code?: number } } | null)
+      ?.status ?? {}) as { state?: string; exit_code?: number };
+    if (remoteRunPermissions(result).terminal)
+      counts[status.exit_code === 0 ? 'finished' : 'failed']++;
+    else if (status.state === 'running') counts.running++;
+    else if (status.state === 'queued') counts.queued++;
+    else counts.unknown++;
+  }
+  const parts = [
+    counts.finished && (en ? `${counts.finished} finished` : `完成 ${counts.finished}`),
+    counts.failed && (en ? `${counts.failed} failed` : `失败 ${counts.failed}`),
+    counts.running && (en ? `${counts.running} running` : `运行中 ${counts.running}`),
+    counts.queued && (en ? `${counts.queued} queued` : `排队中 ${counts.queued}`),
+    counts.unknown && (en ? `${counts.unknown} unconfirmed` : `未能确认 ${counts.unknown}`),
+  ].filter(Boolean);
+  const head = en
+    ? `Checked ${results.length} server job(s)`
+    : `已核对 ${results.length} 个服务器作业`;
+  return parts.length ? `${head}：${parts.join(' · ')}` : head;
+}

@@ -501,7 +501,13 @@ export default function ResourcesPage() {
     ['memory_gb', t('内存 GB', 'Memory GB')],
     ['nodes', t('节点', 'Nodes')],
     ['fetch_vars', t('取回变量', 'Fetch variables')],
-    ['env_script', t('环境脚本', 'Environment script')],
+    [
+      'env_script',
+      t(
+        '环境脚本（先于服务器上的每条命令执行，如 module load、export PATH）',
+        'Environment script (runs before every command on the server, e.g. module load, export PATH)',
+      ),
+    ],
   ];
   const guideFields: UiField[] = editor
     ? [
