@@ -1311,6 +1311,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "remote_load": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "remote_job_record": {
     "case": {
       "required": true,

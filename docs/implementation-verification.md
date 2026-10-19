@@ -34316,3 +34316,35 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 被同一算例新运行取代的旧运行记录也不会被关闭。
       - 两者都会让"待核对"一直留着；要改需要 colm-cli 在核对时一并结束它们。
     - 测试：`a record awaiting reconciliation says why and how it becomes completed`。前端 731 条通过。
+
+54. **"核对服务器状态"带上服务器负载与排队；运行位置和提交方式同一行；"检查并运行"改版（用户要求，2026-10-20）**
+    - 新增 `colm_remote::load`、`colm-cli remote-load --host <服务器>` 和 Tauri 命令 `remote_load`。只读，不进历史，每条查询限时 8 s。读取的内容：
+      - 登录节点：逻辑 CPU 数、1/5/15 分钟负载（`/proc/loadavg`）、内存总量与可用量（`MemAvailable`）。
+      - Slurm：各分区节点与 CPU 的已分配/空闲/其他/总数（`sinfo -h -o '%R|%F|%C'`）；全体用户各分区的排队与运行作业数（`squeue -o '%P|%T'`）；自己的作业按分区、状态和等待原因归并（`squeue -u $USER -o '%P|%T|%r'`）。
+      - LSF：先加载 `/etc/profile`（`sched::PATH_PRELUDE`）。各队列的 PEND/RUN 来自 `bqueues -w`；主机可用/已满/关闭数与作业槽 MAX/NJOBS 之和来自 `bhosts -w`；自己的作业来自 `bjobs -o 'queue stat'`。状态词换成 Slurm 的说法。
+      - PBS：只读自己的作业（`qstat -u`）。
+    - 实测（`target/debug/colm-cli remote-load`）：
+      - land02：登录节点 40 核，负载 3.9，内存可用 76.2/94.3 GB。first 分区 7 个节点里 5 个忙、2 个空闲，CPU 296/672；second 分区 7 个节点全忙；全体排队 first 1、second 3。
+      - 摆渡船（主机名 mgt01）：主机可用 66、已满 47、关闭 7 台，作业槽 2280/5728；normal 队列全体排队 5137、运行 2257。
+      - 天河：colm-cli 的严格主机密钥检查拒绝了连接（"No ED25519 host key is known for [100.64.3.20]:6666"）。命令行直接 `ssh tianhe` 能连上，说明该别名的 known_hosts 设置与 colm-cli 的检查方式不同，与本改动无关，未处理。
+    - 运行面板：
+      - 选中服务器时读一次负载，放在面板全部 hook 的最后：run-next 测试按顺序取前面的 effect。
+      - 点"核对服务器状态"时，在逐个核对作业的同时读负载，不占提交锁。核对结果后面接一句服务器情况，例如"first 分区 CPU 占用 44%，空闲节点 2 个，空闲核 376；全体排队 1、运行 5；运行 3，排队 3（超过了每人可同时运行的作业数）"。
+      - 新的"服务器状况"面板：
+        - 登录节点负载条与内存条；
+        - LSF 显示作业槽条；
+        - 你的作业；
+        - Slurm 分区表：节点忙/空闲/下线、CPU 占用条、全体排队/运行，当前分区高亮；
+        - LSF 显示队列表；
+        - 刷新按钮。
+      - 负载条超过 60% 变黄，超过 85% 变红。
+    - "检查并运行"改版：
+      - 顶部四格概要：算例、时段、模型、引擎。旁边是三个检查标记：设置已保存、编译配置匹配、开始时检查输入。
+      - 运行位置、提交方式和各项资源数字放在同一行（自动换行的网格）。
+      - 指纹开关及其说明、"开始运行时检查输入"、首次构建安装工具链的说明，收进"更多选项与说明"。
+    - 踩坑：`ServerLoadPanel` 起初引用 ui 组件库里的 `Button`。run-next 测试用真实 require 加载这个组件，ui 组件库又引入了 app-state，后者在 node 下读 `localStorage` 报错，一次挂了 25 条测试。改用带同样样式类的原生按钮。
+    - 测试：
+      - colm-remote `load_tests`（land02 实测输出、LSF 状态词、残缺行、脚本限时与 PATH 前导）；
+      - 前端 `server-load.test.ts`（分区、作业槽、负载三种摘要，等待原因合并）；
+      - run-next `run location and submission mode share one settings row`；
+      - 前端 734 条、colm-remote 110 条、colm-cli 458 条（串行）、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。两个 workspace 的 clippy 与 fmt 均通过；check-gui 通过。

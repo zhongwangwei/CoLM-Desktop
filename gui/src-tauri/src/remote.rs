@@ -1718,6 +1718,19 @@ pub async fn remote_engine_progress(app: tauri::AppHandle, host: String) -> Resu
     .await
 }
 
+/// "核对服务器状态"时一并看服务器忙不忙（`colm-cli remote-load`）。只读，不进历史。
+#[tauri::command]
+pub async fn remote_load(app: tauri::AppHandle, host: String) -> Result<Value, String> {
+    let server = server_for(app.clone(), &host)?;
+    validate_connection(&server)?;
+    ssh_cli_json(
+        vec!["remote-load".into(), "--host".into(), server.host.clone()],
+        resource_dir(&app),
+        Some(&server),
+    )
+    .await
+}
+
 /// 结果还在服务器上、本机没取回的运行目录：返回它的服务器。结果页对这样的运行改在服务器上读
 /// （`colm-cli remote-read`），只把算好的 JSON 传回来；取回过的照旧读本机。
 pub(crate) fn results_on_server(case: &str) -> Option<String> {

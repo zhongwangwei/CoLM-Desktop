@@ -12,6 +12,7 @@ pub mod engine;
 pub mod engine_inventory;
 pub mod job;
 pub mod kernel;
+pub mod load;
 pub mod offline;
 pub mod pack;
 pub mod probe;

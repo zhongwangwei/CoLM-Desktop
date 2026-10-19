@@ -660,6 +660,19 @@ test('delayed server defaults are not mistaken for automatically saved batch pre
   assert.deepEqual(changed, [], 'genuine saved preferences still win over server defaults');
 });
 
+test('run location and submission mode share one settings row', () => {
+  const page = render(undefined, [], undefined, {}, undefined, 'server');
+  const row = page.elements.find((el) => el.props.className === 'run-settings')!;
+  const labels = row.children
+    .flat()
+    .filter((el): el is Element => !!el && typeof el === 'object')
+    .map((el) => el.props.label);
+  assert.deepEqual(labels.slice(0, 2), ['运行位置', '提交方式']);
+  assert.ok(
+    page.elements.some((el) => typeof el.type === 'function' && el.props.host === 'server'),
+  );
+});
+
 test('multi-site review hides engine/stage overrides even in expert mode', () => {
   for (const expert of [false, true]) {
     const batch = render(

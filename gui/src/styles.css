@@ -1288,10 +1288,6 @@ table input {
 .simulation-paths dd {
   margin: 4px 0 12px;
 }
-.run-location {
-  max-width: 320px;
-  margin-bottom: 18px;
-}
 .simulation-monitor {
   margin-top: 22px;
   border-top: 1px solid var(--border);
@@ -2431,5 +2427,221 @@ table input {
 @media (prefers-reduced-motion: reduce) {
   .batch-run.is-running .batch-dot {
     animation: none;
+  }
+}
+
+/* 检查并运行：上面一条概要（四项事实 + 检查标记），下面运行位置与提交方式同一行，服务器状况在其下。 */
+.run-review {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  gap: 12px;
+  margin: 4px 0 18px;
+}
+.run-review-facts {
+  flex: 3 1 420px;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--border);
+  overflow: hidden;
+}
+.run-review-facts > div {
+  min-width: 0;
+  padding: 12px 14px;
+  background: var(--surface);
+}
+.run-review-facts dt {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+.run-review-facts dd {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.run-review-checks {
+  flex: 1 1 200px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 7px;
+  margin: 0;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  list-style: none;
+  font-size: 12px;
+}
+.run-review-checks li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.run-review-checks span {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+}
+.run-review-checks .check-fact span {
+  color: #fff;
+  background: var(--accent);
+}
+[data-theme='dark'] .run-review-checks .check-fact span {
+  color: #112b33;
+}
+.run-review-checks .check-pending span {
+  border: 1.5px solid var(--muted);
+}
+.run-review-checks .check-note {
+  color: var(--muted);
+}
+.run-review-checks .check-note span {
+  border: 1.5px solid var(--muted);
+  font-style: italic;
+}
+.run-settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 4px 18px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.run-engine {
+  margin-top: 14px;
+}
+.run-engine h3 {
+  margin-bottom: 4px;
+  font-size: 14px;
+}
+.server-load {
+  margin: 14px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--background);
+}
+.server-load-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.server-load-head strong {
+  font-size: 14px;
+}
+.server-load-head .muted {
+  font-size: 12px;
+}
+.server-load-head .button {
+  margin-left: auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--accent);
+}
+.server-load-error {
+  margin: 0 0 8px;
+  color: var(--danger);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.server-load-tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.server-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.server-tile-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+.server-tile strong {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.server-tile strong small {
+  margin-left: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.server-tile-note {
+  color: var(--muted);
+  font-size: 11px;
+}
+.server-tile-mine {
+  font-size: 13px;
+  line-height: 1.5;
+}
+.server-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--elevated);
+  overflow: hidden;
+}
+.server-meter > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 0.6s ease;
+}
+.server-meter.is-mid > span {
+  background: var(--warning);
+}
+.server-meter.is-high > span {
+  background: var(--danger);
+}
+.server-load-table {
+  width: 100%;
+  font-size: 12px;
+}
+.server-load-table th,
+.server-load-table td {
+  padding: 7px 10px;
+  font-variant-numeric: tabular-nums;
+}
+.server-load-table tr.is-current td {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.server-load-cpu {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.server-load-cpu .server-meter {
+  flex: 1 1 80px;
+  min-width: 60px;
+}
+.server-load-cpu span {
+  white-space: nowrap;
+}
+@container (max-width:640px) {
+  .run-review-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

@@ -2368,6 +2368,16 @@ pub(super) fn cmd_engine_progress(opts: &Opts) -> Result<()> {
     Ok(())
 }
 
+/// 服务器忙不忙：登录节点负载、各分区占用、排队情况和自己的作业（`colm_remote::load`）。只读。
+pub(super) fn cmd_load(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    println!(
+        "{}",
+        serde_json::to_string(&colm_remote::load::load(&ssh)?)?
+    );
+    Ok(())
+}
+
 pub(super) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let case = opts.positional_case()?;
     let record = read_record(&case)?;

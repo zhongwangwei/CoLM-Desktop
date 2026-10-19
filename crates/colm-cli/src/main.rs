@@ -35,6 +35,7 @@
 //! colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --project 1 --expected-path <项目目录> [--delete 1]
 //! colm-cli remote-read <运行目录> --command history-catalog|series|energy-summary [--vars …] [--from …] [--to …] [--max-points N]
 //! colm-cli remote-engine-progress --host <服务器> --root <工作目录>
+//! colm-cli remote-load --host <服务器>
 //! colm-cli study-preflight <case-root> --spec study.json
 //! colm-cli study-create <case-root> --spec study.json
 //! colm-cli study-status <study-dir>
@@ -193,6 +194,8 @@ usage:
   colm-cli remote-history-cleanup --host <服务器> --root <工作目录> --project 1 --expected-path <项目目录> [--delete 1]
   colm-cli remote-read <运行目录> --command history-catalog|series|energy-summary [--vars …] [--from …] [--to …] [--max-points N]
   colm-cli remote-engine-progress --host <服务器> --root <工作目录>
+  colm-cli remote-load --host <服务器>
+                   # 只读：登录节点负载与内存、各分区占用、排队与自己的作业
                    # 默认预检；只清理身份已核实且已完成的独占服务器运行目录
   colm-cli study-preflight <case-root> --spec study.json
                    # 只校验 Study，不创建目录
@@ -485,6 +488,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-fetch" => remote_cmd::cmd_fetch(opts)?,
         "remote-read" => remote_cmd::cmd_read(opts)?,
         "remote-engine-progress" => remote_cmd::cmd_engine_progress(opts)?,
+        "remote-load" => remote_cmd::cmd_load(opts)?,
         "verify-completed-outputs" => println!(
             "{}",
             remote_cmd::verify_completed_outputs(&opts.positional_case()?)?

@@ -6,6 +6,8 @@ import { effectiveModelFields } from '../cases/case-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
 import NamelistPreview from './NamelistPreview';
 import EngineProgress from '../cases/EngineProgress';
+import ServerLoadPanel from './ServerLoadPanel';
+import { serverLoadSummary, type ServerLoad } from './server-load';
 import type { BuildProgress } from '../cases/engine-progress';
 import { elapsedLabel } from '../cases/simulation-model';
 import type { CaseProfile, LastRun, RunState, Server, VersionRef } from '../../lib/types';
@@ -124,7 +126,16 @@ export default function RunPanel({
       now: number;
     } | null>(null),
     [monitor, setMonitor] = useState(false),
-    [lastCheck, setLastCheck] = useState<{ at: number; text: string } | null>(null);
+    [lastCheck, setLastCheck] = useState<{ at: number; text: string } | null>(null),
+    // 服务器忙不忙（`remote_load`）：选中服务器时读一次，"核对服务器状态"时再读。初值不用 null：
+    // 只记哪台服务器的、什么时候读到的。
+    [serverLoad, setServerLoad] = useState<{
+      host?: string;
+      at?: number;
+      load?: ServerLoad;
+      error?: string;
+    }>({}),
+    [loadBusy, setLoadBusy] = useState(false);
   const lock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
@@ -765,6 +776,15 @@ export default function RunPanel({
       setLastCheck({ at: Date.now(), text });
       notify(text, error);
     };
+    // 作业状态之外再看服务器忙不忙：和逐个核对作业同时读，不占提交锁。
+    const loading = refreshLoad();
+    const withLoad = async (text: string) => {
+      const load = await loading;
+      const partition = servers.find((server) => server.host === host)?.partition ?? '';
+      return load
+        ? `${text.replace(/[。.]$/, '')}${t('。服务器：', '. Server: ')}${serverLoadSummary(load, en, partition)}`
+        : text;
+    };
     if (lock.current || monitor) {
       const standing = runCountsText(
         (batchCases ?? [casePath]).map((dir) => latest.current[dir]),
@@ -799,13 +819,15 @@ export default function RunPanel({
       lock.current = false;
       if (alive.current) setMonitor(false);
     }
-    if (results.length) say(remoteStatusSummary(results, en));
+    if (results.length) say(await withLoad(remoteStatusSummary(results, en)));
     else if (errors.length) say(errors[0], true);
     else
       say(
-        t(
-          '没有需要核对的服务器作业：这些站点都已结束，或还没有提交。',
-          'No server job needs checking: the stations have finished or were not submitted.',
+        await withLoad(
+          t(
+            '没有需要核对的服务器作业：这些站点都已结束，或还没有提交。',
+            'No server job needs checking: the stations have finished or were not submitted.',
+          ),
         ),
       );
   }
@@ -940,6 +962,22 @@ export default function RunPanel({
       });
     onBack();
   }
+  /** Reads how busy the server is; returns the load so a status check can summarise it. */
+  async function refreshLoad(): Promise<ServerLoad | undefined> {
+    const target = host;
+    if (!target) return undefined;
+    setLoadBusy(true);
+    try {
+      const load = await invoke<ServerLoad>('remote_load', { host: target });
+      if (alive.current) setServerLoad({ host: target, at: Date.now(), load });
+      return load;
+    } catch (error) {
+      if (alive.current) setServerLoad({ host: target, at: Date.now(), error: String(error) });
+      return undefined;
+    } finally {
+      if (alive.current) setLoadBusy(false);
+    }
+  }
 
   useEffect(() => {
     if (!batchCases) return;
@@ -974,6 +1012,11 @@ export default function RunPanel({
     update,
   ]);
 
+  // 换了服务器就读一次它的负载；放在所有 hook 的最后，测试按顺序取前面的 effect。
+  useEffect(() => {
+    if (host && serverLoad.host !== host) void refreshLoad();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [host]);
   const fields: UiField[] = [
     {
       id: 'run-host',
@@ -1244,45 +1287,46 @@ export default function RunPanel({
   };
   return (
     <Card title={t('检查并运行', 'Review and run')} className="simulation-run-card">
-      <p className="muted">
-        {t('确认以下设置，然后开始计算。', 'Review these settings, then start the calculation.')}
-      </p>
-      <div className="simulation-review">
-        <dl>
-          <dt>{t('算例', 'Case')}</dt>
-          <dd>{summary?.name ?? state.selectedCase?.entry.name}</dd>
-          <dt>{t('时段', 'Period')}</dt>
-          <dd>{summary?.period ?? '—'}</dd>
-          <dt>{t('模型', 'Model')}</dt>
-          <dd>
-            {state.version?.name ?? '—'} · r{state.versionRef.revision}
-          </dd>
-          <dt>{t('运行位置', 'Run location')}</dt>
-          <dd>
-            {host || t('本机', 'Local')} · {engine === 'rust' ? 'Rust' : 'Fortran'}
-          </dd>
+      <div className="run-review">
+        <dl className="run-review-facts">
+          <div>
+            <dt>{t('算例', 'Case')}</dt>
+            <dd>{summary?.name ?? state.selectedCase?.entry.name}</dd>
+          </div>
+          <div>
+            <dt>{t('时段', 'Period')}</dt>
+            <dd>{summary?.period ?? '—'}</dd>
+          </div>
+          <div>
+            <dt>{t('模型', 'Model')}</dt>
+            <dd>
+              {state.version?.name ?? '—'} · r{state.versionRef.revision}
+            </dd>
+          </div>
+          <div>
+            <dt>{t('引擎', 'Engine')}</dt>
+            <dd>{engine === 'rust' ? 'Rust' : 'Fortran'}</dd>
+          </div>
         </dl>
-        <div className="simulation-checks">
-          <p className={disabled ? 'check-pending' : 'check-fact'}>
-            <span>{disabled ? '○' : '✓'}</span>
+        <ul className="run-review-checks">
+          <li className={disabled ? 'check-pending' : 'check-fact'}>
+            <span aria-hidden="true">{disabled ? '○' : '✓'}</span>
             {disabled
               ? t('设置待保存或读取', 'Settings pending')
               : t('算例设置已保存', 'Case settings saved')}
-          </p>
-          <p className={kernelMatches ? 'check-fact' : 'check-pending'}>
-            <span>{kernelMatches ? '✓' : '○'}</span>
+          </li>
+          <li className={kernelMatches ? 'check-fact' : 'check-pending'}>
+            <span aria-hidden="true">{kernelMatches ? '✓' : '○'}</span>
             {kernelMatches
               ? t('编译配置已匹配', 'Build configuration matched')
               : t('尚无匹配的编译配置', 'No matching build configuration')}
-          </p>
-        </div>
+          </li>
+          <li className="check-note">
+            <span aria-hidden="true">i</span>
+            {t('开始运行时检查输入文件', 'Input files are checked at start')}
+          </li>
+        </ul>
       </div>
-      <p className="muted">
-        {t(
-          '点击“开始运行”时检查输入文件；若有缺失，将显示具体原因。',
-          'Input files are checked when you start the run; missing inputs are reported.',
-        )}
-      </p>
       {serverBuild && submittingOn && (
         <EngineProgress
           host={submittingOn}
@@ -1296,7 +1340,8 @@ export default function RunPanel({
           )}
         />
       )}
-      <div className="run-location">
+      {/* 运行位置和提交方式放在同一行：两者一起决定作业交到哪、怎么交。 */}
+      <div className="run-settings">
         {render({
           ...fields[0],
           label: t('运行位置', 'Run location'),
@@ -1307,6 +1352,10 @@ export default function RunPanel({
               : []),
             ...servers.map((s) => ({ value: s.host, label: s.host })),
           ],
+        })}
+        {['run-scheduler', 'run-ranks', 'run-threads', 'run-workers', 'run-cpus'].flatMap((id) => {
+          const field = fields.find((entry) => entry.id === id);
+          return field ? [render(field)] : [];
         })}
       </div>
       {disabled && (
@@ -1337,22 +1386,6 @@ export default function RunPanel({
           )}
         </Notice>
       )}
-      <div className="form-grid">
-        {fields
-          .filter((field) =>
-            ['run-ranks', 'run-threads', 'run-workers', 'run-cpus', 'run-scheduler'].includes(
-              field.id,
-            ),
-          )
-          .map(render)}
-      </div>
-      {render(fields.find((field) => field.id === 'run-input-fingerprints')!)}
-      <p className="muted">
-        {t(
-          '驱动数据始终跳过内容指纹，只记录数据集、路径、前缀和时段。此开关控制其他输入、程序及输出文件；关闭时仅记录来源和配置，开启后校验这些文件。模拟阶段会重新运行，驱动内容不作一致性认证。',
-          'Forcing data never receive content fingerprints; only their dataset, paths, prefixes and period are recorded. This switch controls other inputs, programs and outputs. When off, only sources and settings are recorded; when on, those files are verified. Simulation runs again, and forcing contents are not certified.',
-        )}
-      </p>
       {host && batchCases && (
         <Notice>
           {siteBatch
@@ -1367,15 +1400,19 @@ export default function RunPanel({
         </Notice>
       )}
       {host && (
-        <p className="muted">
-          {t(
-            '首次源码构建若缺少 Rust/Cargo 或 CMake，会从官方下载安装到服务器用户目录，不需要 sudo。需要服务器联网并已有 C 编译器；已有工具直接复用。',
-            'The first source build installs missing Rust/Cargo or CMake from official downloads into your server account, without sudo. Internet access and a C compiler are required; existing tools are reused.',
-          )}
-        </p>
+        <ServerLoadPanel
+          host={host}
+          load={serverLoad.host === host ? serverLoad.load : undefined}
+          error={serverLoad.host === host ? serverLoad.error : undefined}
+          at={serverLoad.host === host ? serverLoad.at : undefined}
+          busy={loadBusy}
+          partition={servers.find((server) => server.host === host)?.partition}
+          en={en}
+          onRefresh={() => void refreshLoad()}
+        />
       )}
       {!batchCases && (
-        <section aria-label={t('引擎与计算阶段', 'Engine and stages')}>
+        <section className="run-engine" aria-label={t('引擎与计算阶段', 'Engine and stages')}>
           <h3>{t('引擎与计算阶段', 'Engine and stages')}</h3>
           <p className="muted">
             {t(
@@ -1401,6 +1438,29 @@ export default function RunPanel({
           </div>
         </section>
       )}
+      <Advanced title={t('更多选项与说明', 'More options and notes')}>
+        {render(fields.find((field) => field.id === 'run-input-fingerprints')!)}
+        <p className="muted">
+          {t(
+            '驱动数据始终跳过内容指纹，只记录数据集、路径、前缀和时段。此开关控制其他输入、程序及输出文件；关闭时仅记录来源和配置，开启后校验这些文件。模拟阶段会重新运行，驱动内容不作一致性认证。',
+            'Forcing data never receive content fingerprints; only their dataset, paths, prefixes and period are recorded. This switch controls other inputs, programs and outputs. When off, only sources and settings are recorded; when on, those files are verified. Simulation runs again, and forcing contents are not certified.',
+          )}
+        </p>
+        <p className="muted">
+          {t(
+            '点击“开始运行”时检查输入文件；若有缺失，将显示具体原因。',
+            'Input files are checked when you start the run; missing inputs are reported.',
+          )}
+        </p>
+        {host && (
+          <p className="muted">
+            {t(
+              '首次源码构建若缺少 Rust/Cargo 或 CMake，会从官方下载安装到服务器用户目录，不需要 sudo。需要服务器联网并已有 C 编译器；已有工具直接复用。',
+              'The first source build installs missing Rust/Cargo or CMake from official downloads into your server account, without sudo. Internet access and a C compiler are required; existing tools are reused.',
+            )}
+          </p>
+        )}
+      </Advanced>
       <NamelistPreview
         key={casePath}
         casePaths={batchCases ?? [casePath]}

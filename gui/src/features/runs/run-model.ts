@@ -274,7 +274,7 @@ export type RemoteActivityKind =
   'finished' | 'failed' | 'stopped' | 'building' | 'running' | 'queued' | 'unconfirmed';
 
 /** Why Slurm keeps a job waiting (`squeue %r`), as a person would say it. */
-function waitingReason(reason: string, en: boolean): string {
+export function waitingReason(reason: string, en: boolean): string {
   const t = (zh: string, english: string) => (en ? english : zh);
   const known: Record<string, string> = {
     Priority: t('前面有优先级更高的作业', 'jobs with higher priority are ahead'),
