@@ -330,6 +330,43 @@ fn a_failed_submission_is_reported_not_swallowed() {
 
 #[cfg(unix)]
 #[test]
+fn a_job_slurm_accepted_despite_an_sbatch_error_is_found_by_its_directory() {
+    let sb = Sandbox::new("slurm-garbled");
+    sb.stub(
+        "sbatch",
+        "echo 'sbatch: error: Batch job submission failed: Unexpected message received' >&2; exit 1",
+    );
+    // squeue lists another job of the user too; only the one in this job's directory counts.
+    sb.stub(
+        "squeue",
+        "echo \"8675098|/elsewhere\"; echo \"8675099|$(pwd -P)\"",
+    );
+    let (out, err, ok) = sb.run(&submit_script(&sb.work(), "j-6", "true", &slurm_spec()).unwrap());
+    assert!(ok, "{err}");
+    assert_eq!(out.trim().lines().last(), Some("8675099"));
+    assert!(sb.job_dir("j-6").join("sched_id").exists());
+    assert!(err.contains("accepted (8675099)"), "{err}");
+
+    // A job that already finished is only in sacct.
+    let sb = Sandbox::new("slurm-garbled-done");
+    sb.stub("sbatch", "echo 'Unexpected message received' >&2; exit 1");
+    sb.stub("sacct", "echo \"8675101|$(pwd -P)\"");
+    let (out, err, ok) = sb.run(&submit_script(&sb.work(), "j-7", "true", &slurm_spec()).unwrap());
+    assert!(ok, "{err}");
+    assert_eq!(out.trim().lines().last(), Some("8675101"));
+
+    // Two candidates are not guessed between.
+    let sb = Sandbox::new("slurm-garbled-two");
+    sb.stub("sbatch", "echo 'Unexpected message received' >&2; exit 1");
+    sb.stub("squeue", "echo \"1|$(pwd -P)\"; echo \"2|$(pwd -P)\"");
+    let (_, err, ok) = sb.run(&submit_script(&sb.work(), "j-8", "true", &slurm_spec()).unwrap());
+    assert!(!ok);
+    assert!(err.contains("sbatch failed"), "{err}");
+    assert!(!sb.job_dir("j-8").join("sched_id").exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn pbs_job_states_and_cancel() {
     let sb = Sandbox::new("pbs");
     let mut spec = slurm_spec();

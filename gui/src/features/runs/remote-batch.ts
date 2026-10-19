@@ -63,7 +63,8 @@ export async function runRemoteBatch(options: {
     else if (!permissions.cancel) throw new Error(`${dir}: server job state is unconfirmed`);
   }
   // One station: check what it already has, submit it, and take it into `active`. A failure is
-  // recorded on the station and stops the whole batch (nothing more is submitted).
+  // recorded on the station and stops further submissions; jobs already running are still
+  // followed to the end, or they would stay 运行中 forever (天河, 2026-10-19).
   async function submitOne(dir: string) {
     let known: Remote | undefined;
     try {
@@ -98,7 +99,7 @@ export async function runRemoteBatch(options: {
     }
   }
   async function pollOne(dir: string, previous: Remote) {
-    if (options.stopped() || failed) return;
+    if (options.stopped()) return;
     try {
       const result = await options.status(dir);
       if (options.stopped()) return;
@@ -109,11 +110,13 @@ export async function runRemoteBatch(options: {
     } catch (error) {
       if (options.stopped()) return;
       options.change(dir, 'unknown', active.get(dir), String(error));
+      // Not polled again: an identity that changed would fail the same way every few seconds.
+      active.delete(dir);
       fail(error);
     }
   }
   try {
-    while (!failed && (next < options.cases.length || active.size || submitting.size)) {
+    while ((!failed && next < options.cases.length) || active.size || submitting.size) {
       if (options.stopped()) break;
       while (
         !failed &&
@@ -127,7 +130,7 @@ export async function runRemoteBatch(options: {
         );
         submitting.add(task);
       }
-      if (failed || options.stopped()) break;
+      if (options.stopped()) break;
       if (!active.size && !submitting.size) break;
       // Submissions under way come first: as soon as one finishes there may be room for the next.
       // Only when nothing can be started are the running jobs looked at (every few seconds).
@@ -136,10 +139,10 @@ export async function runRemoteBatch(options: {
         continue;
       }
       await wait();
-      if (options.stopped() || failed) break;
+      if (options.stopped()) break;
       const entries = [...active];
       for (let index = 0; index < entries.length; index += pollLimit) {
-        if (options.stopped() || failed) break;
+        if (options.stopped()) break;
         await Promise.all(
           entries.slice(index, index + pollLimit).map(([dir, previous]) => pollOne(dir, previous)),
         );

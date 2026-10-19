@@ -310,8 +310,23 @@ pub fn launch(scheduler: Scheduler) -> &'static str {
             "setsid nohup ./script.sh > log 2>&1 < /dev/null &\necho $! > pid\ncat pid\n"
         }
         Scheduler::Slurm => {
+            // 天河实测（Slurm 23.11，2026-10-19）：同时提交 5 个，slurmctld 都收下并开始运行了，sbatch
+            // 却报 "Unexpected message received" 退出非零，`sched_id` 没写，应用只能标"待核对"、
+            // 整批停下。作业目录只属于这一次提交，所以 sbatch 报错时先按工作目录找：squeue 找排队
+            // 和运行中的，sacct 找已经跑完的（实测 47 s 就结束的也有）。恰好找到一个才算提交成功；
+            // 找到多个或一个都没有，仍按失败报告，不猜。
             r#"echo slurm > scheduler
-OUT=$(sbatch --parsable script.sh 2>&1) || { echo "sbatch failed: $OUT" >&2; exit 1; }
+OUT=$(sbatch --parsable script.sh 2>&1) || {
+  W=$(pwd -P); ID=
+  for colm_try in 1 2 3; do
+    ID=$( { squeue -h -u "$(id -un)" -o '%i|%Z' 2>/dev/null; sacct -n -X -P -u "$(id -un)" -S now-1hours -o JobID,WorkDir 2>/dev/null; } | awk -F'|' -v w="$W" '$2 == w { print $1 }' | sort -u)
+    [ -n "$ID" ] && break
+    [ "$colm_try" = 3 ] || sleep 2
+  done
+  case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch failed: $OUT" >&2; exit 1;; esac
+  echo "sbatch reported an error but the job was accepted ($ID): $OUT" >&2
+  OUT=$ID
+}
 ID=${OUT%%;*}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) echo "sbatch gave no job id: $OUT" >&2; exit 1;; esac
 echo "$ID" > sched_id

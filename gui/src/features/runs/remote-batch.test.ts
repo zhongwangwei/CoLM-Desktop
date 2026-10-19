@@ -45,7 +45,7 @@ test('remote concurrency counts active scheduler jobs, not successful submission
   assert.equal(q.changes.filter((entry) => entry.state === 'succeeded').length, 3);
 });
 
-test('unknown, missing exit code and poll failure stop submission without freeing active jobs', async () => {
+test('unknown, missing exit code and poll failure stop submission without freeing their slots', async () => {
   for (const failure of ['unknown', 'finished', 'network']) {
     const q = queue({
       status: async (dir) => {
@@ -55,21 +55,28 @@ test('unknown, missing exit code and poll failure stop submission without freein
     });
     await assert.rejects(q.run());
     assert.deepEqual(q.submitted, ['a', 'b']);
+    // b is still followed after a fails, and fails the same way.
     assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'a')?.state, 'unknown');
-    assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'b')?.state, 'submitted');
+    assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'b')?.state, 'unknown');
     assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'c')?.state, 'cancelled');
   }
 });
 
 test('existing unreconciled records block duplicate submission for each selected case', async () => {
+  let polls = 0;
   const q = queue({
     record: async (dir) => (dir === 'b' ? record(dir) : null),
-    status: async (dir) => ({ record: record(dir), status: { state: 'running' } }),
+    status: async (dir) =>
+      dir === 'a' && ++polls > 2
+        ? finished(dir)
+        : { record: record(dir), status: { state: 'running' } },
   });
   await assert.rejects(q.run(), /existing server job/);
   assert.deepEqual(q.submitted, ['a']);
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'b')?.state, 'unknown');
   assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'c')?.state, 'cancelled');
+  // The job already running is followed to its end instead of being left 运行中.
+  assert.equal([...q.changes].reverse().find((entry) => entry.dir === 'a')?.state, 'succeeded');
 });
 
 test('terminal previous records allow a new run and terminal failures release one slot', async () => {
@@ -239,6 +246,33 @@ test('parallel submissions never exceed the workers, counting those still being 
   assert.deepEqual([...sent].sort(), ['a', 'b', 'c', 'd', 'e']);
 });
 
+test('jobs running when a submission fails are followed to the end, and nothing more is sent', async () => {
+  // 天河 2026-10-19: five ran, the next five got an sbatch error; the five running ones then
+  // stayed 运行中 because polling stopped with the queue.
+  const polled: string[] = [];
+  let polls = 0;
+  const q = queue({
+    cases: ['a', 'b', 'c', 'd'],
+    workers: 2,
+    submit: async (dir) => {
+      if (dir === 'b') throw new Error('sbatch failed: Unexpected message received');
+      return record(dir);
+    },
+    status: async (dir) => {
+      polled.push(dir);
+      return ++polls > 2 ? finished(dir) : { record: record(dir), status: { state: 'running' } };
+    },
+  });
+  await assert.rejects(q.run(), /Unexpected message/);
+  const last = (dir: string) => [...q.changes].reverse().find((entry) => entry.dir === dir)?.state;
+  assert.equal(last('a'), 'succeeded');
+  assert.equal(last('b'), 'unknown');
+  assert.equal(last('c'), 'cancelled');
+  assert.equal(last('d'), 'cancelled');
+  assert.deepEqual(q.submitted, []);
+  assert.ok(polled.every((dir) => dir === 'a'));
+});
+
 test('one failed submission among parallel ones is recorded, the rest of the queue is stopped', async () => {
   const sent: string[] = [];
   const q = queue({
@@ -255,10 +289,10 @@ test('one failed submission among parallel ones is recorded, the rest of the que
   await assert.rejects(q.run(), /Lost after submit/);
   const last = (dir: string) => [...q.changes].reverse().find((entry) => entry.dir === dir)?.state;
   assert.equal(last('b'), 'unknown');
-  // A station started while another was still failing is not lost: whatever was sent has its
-  // outcome recorded, and nothing is started once the failure is seen.
+  // A station started while another was still failing is not lost: whatever was sent is followed
+  // to its end, and nothing is started once the failure is seen.
   assert.ok(sent.length >= 3 && sent.length <= 5, `${sent}`);
-  for (const dir of sent.filter((name) => name !== 'b')) assert.equal(last(dir), 'submitted', dir);
+  for (const dir of sent.filter((name) => name !== 'b')) assert.equal(last(dir), 'succeeded', dir);
   for (const dir of ['a', 'b', 'c', 'd', 'e', 'f'].filter((name) => !sent.includes(name)))
     assert.equal(last(dir), 'cancelled', dir);
 });
