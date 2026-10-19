@@ -7,7 +7,7 @@
 //!                        [--scheduler auto|bare|slurm|pbs|lsf] [--partition P] [--account A] [--walltime T]
 //!                        [--cpus N] [--mem-gb N] [--env-script TEXT] [--directive '-x…']… [--dry-run 1]
 //!                        [--engine rust|fortran] [--remote-kernel auto|名字|路径] [--preprocessors rust|fortran]
-//!                        [--ranks N] [--nodes N] [--launcher auto|srun|mpiexec]
+//!                        [--ranks N] [--nodes N] [--cores-per-node N] [--launcher auto|srun|mpiexec]
 //!                        [--model-version official|<修改版>] [--workspace-root DIR]
 //! colm-cli remote-kernel --host H --root R --preset P [--env-script TEXT] [--profile production|debug] [--force 1]
 //!                        [--model-version <修改版>]   # 用修改版的源码编，内核身份记为 ws-<名>-<提交>
@@ -1111,6 +1111,12 @@ pub(super) fn resources_from(
             .unwrap_or(threads),
         ranks,
         nodes,
+        cores_per_node: opts
+            .get("--cores-per-node")
+            .map(|v| v.parse())
+            .transpose()
+            .context("--cores-per-node must be a whole number")?
+            .unwrap_or(0),
         memory_gb: opts
             .get("--mem-gb")
             .map(|v| v.parse())
@@ -2982,6 +2988,7 @@ fn replay_remote_flag(flag: &str) -> bool {
             | "--cpus"
             | "--mem-gb"
             | "--nodes"
+            | "--cores-per-node"
             | "--walltime"
             | "--queue"
             | "--partition"

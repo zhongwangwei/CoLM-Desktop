@@ -62,6 +62,7 @@ fn server_settings_are_validated() {
         cpus: 0,
         memory_gb: 0,
         nodes: 0,
+        cores_per_node: 0,
         fetch_vars: String::new(),
         env_script: String::new(),
         directives: Vec::new(),
@@ -143,6 +144,31 @@ fn scheduler_settings_are_validated() {
 }
 
 #[test]
+fn the_node_size_reaches_the_run_so_big_mpi_jobs_plan_their_nodes() {
+    let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
+    server.cores_per_node = 48;
+    let args = run_args(
+        &server,
+        "/c".into(),
+        "/k".into(),
+        None,
+        false,
+        false,
+        &Engine::default(),
+    );
+    let at = args.iter().position(|a| a == "--cores-per-node").unwrap();
+    assert_eq!(args[at + 1], "48");
+    assert!(scheduler_args(&server).contains(&"--cores-per-node".to_string()));
+    let mut invalid = server.clone();
+    invalid.cores_per_node = 5000;
+    assert!(validate(&RemoteConfig {
+        servers: vec![invalid],
+        local: None,
+    })
+    .is_err());
+}
+
+#[test]
 fn run_arguments_carry_the_scheduler_request_and_the_preview_flag() {
     let mut server: Server = serde_json::from_str(r#"{"host":"c1","root":"/data/colm"}"#).unwrap();
     server.scheduler = "slurm".into();
@@ -174,6 +200,8 @@ fn run_arguments_carry_the_scheduler_request_and_the_preview_flag() {
     assert_eq!(after("--env-script"), "module load rust");
     assert_eq!(after("--directive"), "--constraint=ib");
     assert!(!args.contains(&"--account".to_string()) && !args.contains(&"--cpus".to_string()));
+    // Unknown node size: nothing is sent; known, the server plans nodes from it.
+    assert!(!args.contains(&"--cores-per-node".to_string()));
     assert!(!args.contains(&"--dry-run".to_string()));
     let preview = run_args(
         &server,

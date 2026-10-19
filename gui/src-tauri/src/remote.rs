@@ -58,6 +58,9 @@ pub struct Server {
     /// MPI 运行占几个节点；0 表示不指定（Slurm 自己分配，其余按一个节点）。
     #[serde(default)]
     pub nodes: u32,
+    /// 每个节点的核数（摆渡船是 48）；0 表示不知道。节点数没指定而总核数超过它时，自动算出要占几个节点。
+    #[serde(default)]
+    pub cores_per_node: u32,
     /// 自动取回结果时只取这些变量（逗号分隔，例如 `f_fsena,f_rnet`）；空表示取回全部。
     #[serde(default)]
     pub fetch_vars: String,
@@ -273,6 +276,9 @@ pub(crate) fn validate(config: &RemoteConfig) -> Result<(), String> {
         }
         if server.nodes > 4096 {
             return Err(format!("{host} 的节点数不合理"));
+        }
+        if server.cores_per_node > 4096 {
+            return Err(format!("{host} 的每节点核数不合理"));
         }
         if server.cpus > 1024 || server.memory_gb > 100_000 {
             return Err(format!("{host} 的核数或内存数不合理"));
@@ -1247,6 +1253,10 @@ pub(crate) fn run_args(
         args.push("--cpus".into());
         args.push(server.cpus.to_string());
     }
+    if server.cores_per_node > 0 {
+        args.push("--cores-per-node".into());
+        args.push(server.cores_per_node.to_string());
+    }
     if server.memory_gb > 0 {
         args.push("--mem-gb".into());
         args.push(server.memory_gb.to_string());
@@ -1356,6 +1366,10 @@ pub(crate) fn scheduler_args(server: &Server) -> Vec<String> {
     if server.cpus > 0 {
         args.push("--cpus".into());
         args.push(server.cpus.to_string());
+    }
+    if server.cores_per_node > 0 {
+        args.push("--cores-per-node".into());
+        args.push(server.cores_per_node.to_string());
     }
     if server.memory_gb > 0 {
         args.push("--mem-gb".into());

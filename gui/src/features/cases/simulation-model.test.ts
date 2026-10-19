@@ -8,6 +8,8 @@ import {
   casePeriodText,
   scannedForcing,
   newCaseProblem,
+  nodePlan,
+  nodePlanText,
   newCaseRangeProblem,
   newCaseGeneralProblem,
   simulationFields,
@@ -310,4 +312,29 @@ test('general identity and range coordinates stay separate from model source set
     ['DEF_LC_YEAR', '地表数据', 3],
   ] as const)
     assert.equal(simulationFieldStep({ name, section }), expected, name);
+});
+
+test('a run bigger than one node plans its nodes from the cores a node has', () => {
+  const plan = (cpus: number, ranks: number, coresPerNode: number, nodes = 0) =>
+    nodePlan({ cpus, ranks, coresPerNode, nodes });
+  // Nothing to plan: it fits on one node, or the node size is unknown.
+  assert.equal(plan(4, 1, 48), null);
+  assert.equal(plan(1, 48, 48), null);
+  assert.equal(plan(1, 96, 0), null);
+  // 摆渡船 (48 cores a node).
+  assert.deepEqual(plan(1, 96, 48), { total: 96, nodes: 2, perNode: 48, explicit: false });
+  assert.deepEqual(plan(2, 48, 48), { total: 96, nodes: 2, perNode: 48, explicit: false });
+  assert.deepEqual(plan(1, 100, 48), { total: 100, nodes: 4, perNode: 25, explicit: false });
+  // An explicit node count wins.
+  assert.deepEqual(plan(1, 96, 48, 4), { total: 96, nodes: 4, perNode: 24, explicit: true });
+  // Cannot be placed.
+  assert.deepEqual(plan(96, 1, 48), { error: 'single', total: 96, coresPerNode: 48 });
+  assert.deepEqual(plan(64, 4, 48), { error: 'rank', total: 256, coresPerNode: 48 });
+  assert.deepEqual(plan(1, 97, 48), { error: 'uneven', total: 97, coresPerNode: 48 });
+  assert.equal(
+    nodePlanText(plan(1, 96, 48)),
+    '将占用 2 个节点，每个节点 48 核，共 96 核（自动计算）。',
+  );
+  assert.match(nodePlanText(plan(96, 1, 48)), /单个进程要 96 个核/);
+  assert.equal(nodePlanText(null), '');
 });

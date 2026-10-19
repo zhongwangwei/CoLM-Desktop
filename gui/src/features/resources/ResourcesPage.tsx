@@ -500,10 +500,17 @@ export default function ResourcesPage() {
     ['cpus', 'CPUs'],
     ['memory_gb', t('内存 GB', 'Memory GB')],
     [
+      'cores_per_node',
+      t(
+        '每节点核数（如摆渡船 48；填了以后，总核数超过它的 MPI 运行会自动算出占几个节点）',
+        'Cores per node (e.g. 48; with it, an MPI run that needs more cores plans its own nodes)',
+      ),
+    ],
+    [
       'nodes',
       t(
-        '节点数（留空或 0 = 不指定，单节点作业不用填；只有跨节点的 MPI 运行才需要）',
-        'Nodes (empty or 0 = unspecified; single-node jobs need none, only multi-node MPI runs do)',
+        '节点数（留空或 0 = 自动；需要手动指定占几个节点时才填）',
+        'Nodes (empty or 0 = automatic; fill only to force how many nodes a run takes)',
       ),
     ],
     ['fetch_vars', t('取回变量', 'Fetch variables')],

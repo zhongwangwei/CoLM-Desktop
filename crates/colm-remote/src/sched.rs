@@ -44,6 +44,8 @@ pub struct Resources {
     pub ranks: u32,
     /// 占几个节点；0 表示不指定（Slurm 自己分配；PBS、LSF 按一个节点算）。进程数要能被它整除。
     pub nodes: u32,
+    /// 每个节点的核数（0 = 不知道）。节点数没指定、总核数又超过它时，由 `planned_nodes` 算出要占几个节点。
+    pub cores_per_node: u32,
     /// 每个节点的内存（GB）。
     pub memory_gb: Option<u32>,
     /// `HH:MM:SS`、`D-HH:MM:SS` 或 `HH:MM`。
@@ -101,8 +103,41 @@ fn word(what: &str, text: &str) -> Result<()> {
 }
 
 impl Resources {
+    /// 作业实际占几个节点；0 表示不指定。指定了节点数就用它；没指定时，总核数（每进程核数 × 进程数）
+    /// 不超过一个节点的核数就是 0，超过了就取能让进程数整除、且每节点不超过 `cores_per_node` 的最少节点数。
+    pub fn planned_nodes(&self) -> Result<u32> {
+        if self.nodes > 0 {
+            return Ok(self.nodes);
+        }
+        let ranks = self.ranks.max(1);
+        let total = self.cpus.max(1) * ranks;
+        let per_node = self.cores_per_node;
+        if per_node == 0 || total <= per_node {
+            return Ok(0);
+        }
+        ensure!(
+            ranks > 1,
+            "a single process asks for {total} cores but a node has {per_node}; lower the threads or use MPI ranks"
+        );
+        ensure!(
+            self.cpus <= per_node,
+            "each MPI process asks for {} cores but a node has {per_node}",
+            self.cpus
+        );
+        // Never more than twice the minimum: a prime rank count would otherwise end up one per node.
+        let first = total.div_ceil(per_node);
+        (first..=ranks.min(first * 2))
+            .find(|nodes| ranks % nodes == 0)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the {ranks} MPI ranks cannot be spread evenly over nodes of {per_node} cores"
+                )
+            })
+    }
+
     pub fn validate(&self) -> Result<()> {
         ensure!(self.cpus >= 1, "cpus must be at least 1");
+        self.planned_nodes()?;
         ensure!(
             self.nodes == 0 || self.ranks.max(1) % self.nodes == 0,
             "the {} MPI ranks cannot be spread evenly over {} nodes",
@@ -158,6 +193,7 @@ pub fn directives(
     resources: &Resources,
 ) -> Result<Vec<String>> {
     resources.validate()?;
+    let nodes = resources.planned_nodes()?;
     let seconds = resources
         .walltime
         .as_deref()
@@ -170,8 +206,8 @@ pub fn directives(
             lines.push(format!("#SBATCH --job-name={name}"));
             lines.push(format!("#SBATCH --output={log}"));
             lines.push(format!("#SBATCH --error={log}"));
-            if resources.nodes > 0 {
-                lines.push(format!("#SBATCH --nodes={}", resources.nodes));
+            if nodes > 0 {
+                lines.push(format!("#SBATCH --nodes={nodes}"));
             } else if resources.ranks <= 1 {
                 lines.push("#SBATCH --nodes=1".into());
             }
@@ -200,7 +236,7 @@ pub fn directives(
             lines.push(format!("#PBS -N {name}"));
             lines.push("#PBS -j oe".into());
             lines.push(format!("#PBS -o {log}"));
-            let nodes = resources.nodes.max(1);
+            let nodes = nodes.max(1);
             let per_node = resources.ranks.max(1) / nodes;
             let mut select = format!(
                 "select={nodes}:ncpus={}:mpiprocs={per_node}",
@@ -228,8 +264,8 @@ pub fn directives(
                 "#BSUB -n {}",
                 resources.cpus * resources.ranks.max(1)
             ));
-            if resources.nodes > 1 {
-                let per_node = resources.cpus * resources.ranks.max(1) / resources.nodes;
+            if nodes > 1 {
+                let per_node = resources.cpus * resources.ranks.max(1) / nodes;
                 lines.push(format!("#BSUB -R \"span[ptile={per_node}]\""));
             } else {
                 lines.push("#BSUB -R \"span[hosts=1]\"".into());

@@ -5,6 +5,7 @@ fn resources() -> Resources {
         cpus: 16,
         ranks: 0,
         nodes: 0,
+        cores_per_node: 0,
         memory_gb: Some(64),
         walltime: Some("1-02:30:00".into()),
         partition: Some("cpu".into()),
@@ -192,4 +193,87 @@ fn reading_the_login_profile_keeps_the_path_the_caller_set_first() {
         .unwrap();
     let path = String::from_utf8(output.stdout).unwrap();
     assert!(path.starts_with("/colm-test-first:"), "{path}");
+}
+
+#[test]
+fn nodes_are_planned_from_the_cores_a_node_has() {
+    let plan = |cpus: u32, ranks: u32, per_node: u32, nodes: u32| {
+        Resources {
+            cpus,
+            ranks,
+            nodes,
+            cores_per_node: per_node,
+            ..Resources::default()
+        }
+        .planned_nodes()
+    };
+    // Fits on one node, or the node size is unknown: nothing to plan.
+    assert_eq!(plan(4, 1, 48, 0).unwrap(), 0);
+    assert_eq!(plan(1, 48, 48, 0).unwrap(), 0);
+    assert_eq!(plan(1, 96, 0, 0).unwrap(), 0);
+    // 摆渡船 (48 cores a node): 96 ranks need two nodes, 48 cores each.
+    assert_eq!(plan(1, 96, 48, 0).unwrap(), 2);
+    assert_eq!(plan(2, 48, 48, 0).unwrap(), 2);
+    assert_eq!(plan(1, 144, 48, 0).unwrap(), 3);
+    // The ranks have to divide evenly: 100 ranks of one core use four nodes of 25.
+    assert_eq!(plan(1, 100, 48, 0).unwrap(), 4);
+    // An explicit node count wins.
+    assert_eq!(plan(1, 96, 48, 4).unwrap(), 4);
+    assert_eq!(plan(1, 8, 48, 3).unwrap(), 3);
+    // One process cannot be spread over nodes.
+    assert!(plan(96, 1, 48, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("single process"));
+    assert!(plan(64, 4, 48, 0)
+        .unwrap_err()
+        .to_string()
+        .contains("each MPI process"));
+    assert!(plan(1, 97, 48, 0).is_err());
+}
+
+#[test]
+fn lsf_spreads_a_big_mpi_job_over_the_planned_nodes() {
+    let lines = |ranks: u32, nodes: u32| {
+        directives(
+            Scheduler::Lsf,
+            "colm_t",
+            "/log",
+            &Resources {
+                cpus: 1,
+                ranks,
+                nodes,
+                cores_per_node: 48,
+                ..Resources::default()
+            },
+        )
+        .unwrap()
+    };
+    let big = lines(96, 0);
+    assert!(big.contains(&"#BSUB -n 96".to_string()), "{big:?}");
+    assert!(
+        big.contains(&"#BSUB -R \"span[ptile=48]\"".to_string()),
+        "{big:?}"
+    );
+    let small = lines(24, 0);
+    assert!(
+        small.contains(&"#BSUB -R \"span[hosts=1]\"".to_string()),
+        "{small:?}"
+    );
+    let slurm = directives(
+        Scheduler::Slurm,
+        "colm_t",
+        "/log",
+        &Resources {
+            cpus: 1,
+            ranks: 96,
+            cores_per_node: 48,
+            ..Resources::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        slurm.contains(&"#SBATCH --nodes=2".to_string()),
+        "{slurm:?}"
+    );
 }

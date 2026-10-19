@@ -3978,6 +3978,54 @@ test('the CPU and thread boxes can be emptied: the server default is only a hint
   assert.equal(p.render().fields.find((f) => f.id === 'new-run-cpus')?.value, '4');
 });
 
+test('step 5 says how many nodes a big MPI run takes, and refuses one that cannot be placed', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, engine: 'fortran', host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        {
+          host: 'cluster',
+          root: '/work',
+          maps: [],
+          threads: 1,
+          cpus: 1,
+          cores_per_node: 48,
+          scheduler: 'lsf',
+        },
+      ],
+    },
+  );
+  await p.mount();
+  const note = () =>
+    p.elements
+      .filter((e) => e.type === 'p')
+      .map((e) => (e.children as unknown[]).join(''))
+      .find((text) => /占用|节点/.test(text));
+  p.set('new-run-ranks', '96');
+  p.render();
+  assert.equal(note(), '将占用 2 个节点，每个节点 48 核，共 96 核（自动计算）。');
+  assert.equal(p.render().actions.find((a) => a.id === 'new-create')?.enabled, true);
+  // One process cannot be spread over nodes: it is said, and creating is refused.
+  p.set('new-run-ranks', '1');
+  p.set('new-run-cpus', '96');
+  p.render();
+  assert.match(note() ?? '', /单个进程要 96 个核/);
+  assert.equal(p.render().actions.find((a) => a.id === 'new-create')?.enabled, false);
+  // Fits on one node: nothing is said.
+  p.set('new-run-cpus', '8');
+  p.render();
+  assert.equal(note(), undefined);
+});
+
 test('direct execution has no separate CPU request: the CPUs are the case threads', async () => {
   const p = page(
     'NewCasePage',

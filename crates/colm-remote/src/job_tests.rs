@@ -13,6 +13,7 @@ fn slurm_spec() -> Spec {
             cpus: 8,
             ranks: 0,
             nodes: 0,
+            cores_per_node: 0,
             memory_gb: Some(32),
             walltime: Some("02:00:00".into()),
             partition: Some("cpu".into()),

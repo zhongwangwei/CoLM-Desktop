@@ -429,3 +429,64 @@ export function newCaseProblem(
     replayStart,
   );
 }
+
+export type NodePlan =
+  | { total: number; nodes: number; perNode: number; explicit: boolean }
+  | { error: 'single' | 'rank' | 'uneven'; total: number; coresPerNode: number };
+
+/**
+ * How many nodes a run takes, mirroring the engine's planning (`Resources::planned_nodes`): an explicit
+ * node count wins; otherwise a run that fits on one node, or on a server whose node size is unknown,
+ * needs no plan (`null`); a bigger one takes the fewest nodes that divide its MPI ranks evenly.
+ */
+export function nodePlan({
+  cpus,
+  ranks,
+  coresPerNode,
+  nodes,
+}: {
+  cpus: number;
+  ranks: number;
+  coresPerNode: number;
+  nodes: number;
+}): NodePlan | null {
+  const processes = Math.max(1, ranks);
+  const total = Math.max(1, cpus) * processes;
+  if (nodes > 0) return { total, nodes, perNode: total / nodes, explicit: true };
+  if (!(coresPerNode > 0) || total <= coresPerNode) return null;
+  if (processes === 1) return { error: 'single', total, coresPerNode };
+  if (cpus > coresPerNode) return { error: 'rank', total, coresPerNode };
+  const first = Math.ceil(total / coresPerNode);
+  for (let count = first; count <= Math.min(processes, first * 2); count++)
+    if (processes % count === 0)
+      return { total, nodes: count, perNode: total / count, explicit: false };
+  return { error: 'uneven', total, coresPerNode };
+}
+
+export function nodePlanText(plan: NodePlan | null, en = false): string {
+  if (!plan) return '';
+  if ('error' in plan) {
+    const per = plan.coresPerNode;
+    if (plan.error === 'single')
+      return en
+        ? `One process asks for ${plan.total} cores but a node has ${per}. Lower the threads or use MPI ranks.`
+        : `单个进程要 ${plan.total} 个核，而一个节点只有 ${per} 个。请减少线程数，或改用多个 MPI 进程。`;
+    if (plan.error === 'rank')
+      return en
+        ? `Each MPI process asks for more cores than a node has (${per}).`
+        : `每个 MPI 进程申请的核数超过了一个节点的核数（${per}）。`;
+    return en
+      ? `${plan.total} cores cannot be split evenly over nodes of ${per} cores; change the number of MPI processes.`
+      : `${plan.total} 个核无法平均分到每节点 ${per} 核的节点上，请调整 MPI 进程数。`;
+  }
+  const mode = plan.explicit
+    ? en
+      ? 'set by hand'
+      : '手动指定'
+    : en
+      ? 'planned automatically'
+      : '自动计算';
+  return en
+    ? `Takes ${plan.nodes} node(s) with ${plan.perNode} cores each, ${plan.total} cores in all (${mode}).`
+    : `将占用 ${plan.nodes} 个节点，每个节点 ${plan.perNode} 核，共 ${plan.total} 核（${mode}）。`;
+}

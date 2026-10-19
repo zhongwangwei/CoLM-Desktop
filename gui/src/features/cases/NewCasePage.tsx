@@ -37,6 +37,8 @@ import {
   isForcingScheme,
   elapsedLabel,
   kindPathFields,
+  nodePlan,
+  nodePlanText,
   kindPathPrefill,
   simulationSteps,
   spinupProblem,
@@ -355,6 +357,16 @@ export default function NewCasePage() {
       ? runThreads
       : form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
   };
+  // A server run that needs more cores than one node has: how many nodes, or why it cannot be placed.
+  const placement =
+    form.host && !multiSite && runSettings.scheduler !== 'bare'
+      ? nodePlan({
+          cpus: Number(runSettings.cpus),
+          ranks: Number(runSettings.ranks),
+          coresPerNode: resourceServer?.cores_per_node ?? 0,
+          nodes: resourceServer?.nodes ?? 0,
+        })
+      : null;
   // Paths remembered for this resource and simulation kind (site folders, boundary or grid
   // files, forcing). Filled once per resource/kind/grid/forcing mode, only into empty fields or
   // ones still holding an earlier prefill; prefills the user left alone are cleared when they no
@@ -1213,6 +1225,7 @@ export default function NewCasePage() {
         );
       if (form.host && !['auto', 'bare', 'slurm', 'pbs', 'lsf'].includes(runSettings.scheduler))
         return t('请选择受支持的调度系统。', 'Select a supported scheduler.');
+      if (placement && 'error' in placement) return nodePlanText(placement, en);
     }
     if (at >= 5 && !multiSite) {
       return (
@@ -3074,6 +3087,14 @@ export default function NewCasePage() {
                 </Field>
               ))}
             </div>
+            {placement && (
+              <p
+                className={'error' in placement ? 'field-hint simulation-blocker' : 'muted'}
+                role="status"
+              >
+                {nodePlanText(placement, en)}
+              </p>
+            )}
             <p className="muted">
               {multiSite
                 ? t(

@@ -17,6 +17,7 @@ export const newServer = (): Server => ({
   cpus: 0,
   memory_gb: 0,
   nodes: 0,
+  cores_per_node: 0,
   fetch_vars: '',
   env_script: '',
   directives: [],

@@ -272,6 +272,8 @@ export type Server = {
   cpus: number;
   memory_gb: number;
   nodes: number;
+  /** Cores one node has (摆渡船: 48); 0 = unknown. Used to plan how many nodes a big MPI run takes. */
+  cores_per_node: number;
   fetch_vars: string;
   env_script: string;
   directives: string[];
