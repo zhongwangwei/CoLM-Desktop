@@ -161,3 +161,70 @@ test('finishing or starting a run keeps the chosen observations, window and metr
   const idle = execute(refresh.body, { caseDir: '/case', completedRunCase: undefined })();
   assert.equal(idle, undefined);
 });
+
+test('a server run whose results are not fetched is not read, and fetching takes only that run', async () => {
+  const bodies: string[] = [];
+  let fetchBody = '';
+  const walk = (node: ts.Node) => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'useEffect')
+      bodies.push(node.arguments[0].getText(source));
+    if (ts.isFunctionDeclaration(node) && node.name?.getText(source) === 'fetchSelectedRun')
+      fetchBody = node
+        .getText(source)
+        .replace(/^async function fetchSelectedRun/, 'async function');
+    ts.forEachChild(node, walk);
+  };
+  walk(source);
+  const catalog = bodies.find((body) => body.includes("'history_catalog'"));
+  assert.ok(catalog && fetchBody);
+  const calls: { command: string; args: unknown }[] = [];
+  const noop = () => {};
+  const context = (runs: unknown[]) => ({
+    epoch: { current: 0 },
+    stationTarget: { current: '/case' },
+    caseDir: '/case',
+    source: '/case/runs/r1',
+    runs,
+    invokeJson: async (command: string, args: unknown) => {
+      calls.push({ command, args });
+      return command === 'model_case_runs' ? [] : { variables: [] };
+    },
+    overviewVariable: () => '',
+    setError: noop,
+    setCatalog: noop,
+    setSeries: noop,
+    setMetrics: noop,
+    setDiagnostic: noop,
+    setEvaluation: noop,
+    setCatalogKey: noop,
+    setVariable: noop,
+  });
+  const remote = { run_case: '/case/runs/r1', server: 'tianhe', outputs_local: false };
+  execute(catalog, context([remote]))();
+  await tick();
+  assert.equal(calls.length, 0, 'results still on the server are not read');
+  execute(catalog, context([{ ...remote, outputs_local: true }]))();
+  await tick();
+  assert.deepEqual(
+    calls.map((call) => call.command),
+    ['history_catalog'],
+  );
+  calls.length = 0;
+  let runs: unknown;
+  const fetch = execute(fetchBody, {
+    ...context([remote]),
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    setRuns: (value: unknown) => {
+      runs = value;
+    },
+  });
+  await fetch();
+  assert.deepEqual(calls, [
+    {
+      command: 'remote_fetch',
+      args: { case: '/case/runs/r1', host: null, all: false, overwriteNewer: false },
+    },
+    { command: 'model_case_runs', args: { dir: '/case' } },
+  ]);
+  assert.deepEqual(runs, []);
+});

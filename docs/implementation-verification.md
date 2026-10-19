@@ -34146,3 +34146,13 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：`a_partition_that_hands_out_whole_node_memory_gets_a_fair_share_per_cpu`（覆盖整节点内存、已写内存、独占、分区有默认内存四种情况）；`slurm_partitions_carry_their_node_sizes_and_limits`（用 land02 的真实输出，外加一个独占分区和几条坏行）；前端 `a checked Slurm server offers its partitions with node sizes and fills cores per node`、`a partition reads as its node sizes…`。colm-remote 102 条、colm-cli 456 条、前端 717 条通过。
     - land02 的服务器设置按用户要求改为默认用 second（每节点核数 64）。
     - 没测：在 land02 上真实提交。
+
+40. **天河跑完的站点在结果页报 "no history at …/runs/<编号>/out/AU-Cpr/history"（用户报，2026-10-19）**：
+    - 现场（只读）：AU-Cpr 在天河上退出码 0，`out/AU-Cpr/history` 里有 84 个月文件，共 457 MB（另有 restart 7.4 MB）；uuu 整个项目在服务器上 51 GB。本机运行目录里只有提交时写下的配置文件（`case.nml`、`model-run.json`、`.colm-remote.json` 等），结果没有取回来。结果页拿运行目录去读 history，于是报错。
+    - 为什么没有自动取回：服务器运行在提交时就建好了本机运行目录（`run_case`），运行面板"查看结果"原来按"有没有 `run_case`"判断要不要先取回，结果以为已经取回过了；结果页本身也没有取回入口。
+    - 用户定的原则：按需取回，不整批同步。一个站点约 0.5 GB，90 个站点约 40 GB。
+    - 改为：
+      - `model_case_runs` 给服务器运行（`location=remote`，或运行目录里有 `.colm-remote.json`）标出 `server` 和 `outputs_local`（`out/*/history/` 里至少一个文件才算已取回）。
+      - 结果页遇到 `server` 且 `outputs_local=false` 的运行，不去读本机的 history，而是提示"这次运行的结果还在服务器 tianhe 上……"，并给出"取回结果"按钮：只对这一个运行目录调用 `remote_fetch`（`run_record` 会从运行目录找到它自己的 `.colm-remote.json`），取回后重新读运行列表，这时才去读目录。
+    - 测试：前端 `a server run whose results are not fetched is not read, and fetching takes only that run`；gui/src-tauri `a_server_run_has_local_results_only_once_its_history_was_fetched`。前端 718 条、gui/src-tauri 412 条通过。
+    - 没做：整批取回；"取回变量"（`fetch_vars`）可以在服务器上先裁剪变量、减少传输量，但目前要在服务器设置里填。

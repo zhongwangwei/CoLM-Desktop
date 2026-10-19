@@ -41,7 +41,15 @@ type Catalog = {
   end: number;
   variables: { name: string; units?: string; kind: string; dimensions: unknown[] }[];
 };
-type Run = RecordedRun & { run_id?: string; id?: string; legacy?: boolean; [key: string]: unknown };
+type Run = RecordedRun & {
+  run_id?: string;
+  id?: string;
+  legacy?: boolean;
+  /** Server runs: the server, and whether their outputs were fetched to this computer. */
+  server?: string | null;
+  outputs_local?: boolean;
+  [key: string]: unknown;
+};
 type BaselineComparison = {
   same_design: boolean;
   better?: string | null;
@@ -280,7 +288,9 @@ export default function ResultsPage({
     setDiagnostic(null);
     setEvaluation([]);
     setCatalogKey('');
-    if (!source) return;
+    // 结果还在服务器上时不去读本机：取回是按需的，由下面的"取回结果"触发。
+    const chosen = runs.find((item) => item.run_case === source);
+    if (!source || (chosen?.server && chosen.outputs_local === false)) return;
     void invokeJson<Catalog>('history_catalog', { case: source })
       .then((data) => {
         if (!cancelled && stationTarget.current === caseDir) {
@@ -296,7 +306,7 @@ export default function ResultsPage({
       cancelled = true;
       requestEpoch.current++;
     };
-  }, [source, caseDir, versionId, revision]);
+  }, [source, caseDir, versionId, revision, runs]);
   useEffect(() => {
     epoch.current++;
     setMetrics([]);
@@ -395,6 +405,22 @@ export default function ResultsPage({
   const run = (fn: () => Promise<unknown>) => {
     void fn().catch(() => {});
   };
+  // 只取这一个站点、这一次运行的结果：一个站点的历史输出就有约 0.5 GB，整批同步回来既慢又占地方。
+  const awaitingFetch = !!selectedRun?.server && selectedRun.outputs_local === false;
+  async function fetchSelectedRun() {
+    const target = source,
+      dir = caseDir;
+    await task(async (current) => {
+      await invokeJson('remote_fetch', {
+        case: target,
+        host: null,
+        all: false,
+        overwriteNewer: false,
+      });
+      const data = await invokeJson<Run[]>('model_case_runs', { dir });
+      if (current() && stationTarget.current === dir) setRuns(data);
+    });
+  }
   const windowArgs = useCallback(() => {
     const parse = (value: string) => {
       if (!value) return null;
@@ -1110,6 +1136,17 @@ export default function ResultsPage({
             ))}
           </Select>
         </Field>
+      )}
+      {awaitingFetch && (
+        <Notice tone="warning">
+          {tr(
+            `这次运行的结果还在服务器 ${selectedRun?.server ?? ''} 上，没有取回本机。按需取回：只取这一个站点、这一次运行的结果。`,
+            `This run's results are still on the server ${selectedRun?.server ?? ''}. Fetch on demand: only this station and run are copied.`,
+          )}
+          <Button disabled={busy} onClick={() => run(fetchSelectedRun)}>
+            {busy ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}
+          </Button>
+        </Notice>
       )}
       {source && !selectedRun?.version && (
         <Notice>

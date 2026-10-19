@@ -506,6 +506,16 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
             }
             row["status"] = json!(event.status);
             row["needs_reconciliation"] = json!(operation.needs_reconciliation);
+            // 服务器运行在提交时就建好了本机运行目录（只有配置），结果要取回才有。结果页据此提示去取回，
+            // 而不是去读一个还没有的 history（天河 2026-10-19：AU-Cpr 跑完了，结果页报 "no history"）。
+            if let Some(run_case) = row["run_case"].as_str().map(PathBuf::from) {
+                if event.location.as_deref() == Some("remote")
+                    || run_case.join(".colm-remote.json").is_file()
+                {
+                    row["server"] = json!(event.host);
+                    row["outputs_local"] = json!(has_local_history(&run_case));
+                }
+            }
             rows.push(row);
         }
         query.offset += count;
@@ -515,6 +525,16 @@ pub async fn model_case_runs(dir: String) -> Result<Vec<Value>, String> {
     }
     Ok(rows)
 }
+/// 本机运行目录里有没有取回来的历史输出（`out/<算例>/history/` 里至少一个文件）。
+fn has_local_history(run_case: &Path) -> bool {
+    std::fs::read_dir(run_case.join("out")).is_ok_and(|cases| {
+        cases.flatten().any(|case| {
+            std::fs::read_dir(case.path().join("history"))
+                .is_ok_and(|mut files| files.next().is_some())
+        })
+    })
+}
+
 /// Existing result/sidebar consumers retain their envelope while runs come from the ledger.
 #[tauri::command]
 pub async fn case_runs(case: String) -> Result<Value, String> {
@@ -757,6 +777,22 @@ pub async fn model_attach_network(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_run_has_local_results_only_once_its_history_was_fetched() {
+        let run = std::env::temp_dir().join(format!("colm-local-history-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&run);
+        std::fs::create_dir_all(&run).unwrap();
+        assert!(!has_local_history(&run), "configuration only, as submitted");
+        std::fs::create_dir_all(run.join("out/AU-Cpr/history")).unwrap();
+        assert!(
+            !has_local_history(&run),
+            "an empty history folder is not a result"
+        );
+        std::fs::write(run.join("out/AU-Cpr/history/AU-Cpr_hist_2011-01.nc"), "").unwrap();
+        assert!(has_local_history(&run));
+        std::fs::remove_dir_all(&run).unwrap();
+    }
 
     #[test]
     fn revisions_still_named_by_history_cannot_be_deleted() {
