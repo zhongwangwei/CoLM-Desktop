@@ -6,6 +6,7 @@ import {
   settleRuns,
   endedRun,
   openRuns,
+  remoteJobFacts,
   remoteStatusSummary,
   restoredRuns,
   remoteRunPermissions,
@@ -613,4 +614,61 @@ test('open ledger runs are watched, and checking server jobs reports a summary',
     summary,
     '已核对 6 个服务器作业：完成 2 · 失败 1 · 运行中 1 · 排队中 1 · 未能确认 1',
   );
+});
+
+test('a server job is described in words, with the raw record left for troubleshooting', () => {
+  const record = {
+    host: 'bd',
+    job: 'run-abc',
+    scheduler: 'lsf',
+    scheduler_id: '232723',
+    submitted_at: 1792375398,
+    remote_case: '/share/home/u/colm-desktop/qqq/AT-Neu/runs/abc',
+    provenance: {
+      engine: 'rust',
+      ranks: 1,
+      model_revision: { id: 'official', revision: 74 },
+      remote_options: [
+        ['--partition', 'normal'],
+        ['--cpus', '1'],
+        ['--threads', '1'],
+      ],
+    },
+  };
+  const facts = (value: unknown, now?: number) =>
+    Object.fromEntries(remoteJobFacts(value, false, now).map((f) => [f.label, f.value]));
+  const running = facts(
+    {
+      record,
+      status: {
+        state: 'running',
+        detail: 'RUN',
+        phase: 'running',
+        log_tail: 'starting\nTIMESTEP = 17471 | DATE = 2002-12-30-82800\n',
+      },
+    },
+    1792375398000 + 5 * 60000,
+  );
+  assert.equal(running['状态'], '运行中');
+  assert.equal(running['调度器状态'], 'RUN');
+  assert.equal(running['服务器'], 'bd');
+  assert.equal(running['调度系统'], 'LSF · 作业号 232723');
+  assert.equal(running['申请资源'], '队列 normal · 1 CPU · 1 线程');
+  assert.match(running['提交时间'], /5 分钟前/);
+  assert.equal(running['模型版本'], '官方版 r74');
+  assert.equal(running['计算引擎'], 'Rust');
+  assert.equal(running['模型计算进度'], '第 17471 步（2002-12-30）');
+  assert.equal(running['最近输出'], 'starting');
+  assert.equal(
+    facts({ record, status: { state: 'finished', exit_code: 0 } })['状态'],
+    '已结束，成功（退出码 0）',
+  );
+  assert.equal(
+    facts({ record, status: { state: 'finished', exit_code: 3 } })['状态'],
+    '已结束，失败（退出码 3）',
+  );
+  assert.match(facts({ record, status: { state: 'queued' } })['状态'], /排队中/);
+  assert.match(facts({ status: { state: 'unknown' } })['状态'], /未能确认/);
+  // Nothing is invented for a record that says little.
+  assert.deepEqual(Object.keys(facts(null)), ['状态']);
 });

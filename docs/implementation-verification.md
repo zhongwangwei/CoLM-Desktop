@@ -33955,3 +33955,4 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：`leaving the page does not stop the stations still to be submitted`（旧逻辑下失败、新逻辑下通过）、`open ledger runs are watched, and checking server jobs reports a summary`；GUI 694 条。
     - 提交 CPU 数不需要写节点数：LSF 脚本是 `-n <CPU 数>` 加 `span[hosts=1]`（同一节点），"节点"设置只在跨节点的 MPI 运行里才有用。
     - 未做：重新点"开始运行"会把 90 个站点全部再提交一遍（含已完成的）；没有"只运行未完成的站点"。
+14. **"服务器作业详情"改成读得懂的摘要**：原先只是 `JSON.stringify(remote)` 把整份记录倒出来（`provenance`、各种 sha256、本机和服务器两套路径），用户看不懂。现在 `remoteJobFacts` 把它整理成一张表：状态（排队中 / 运行中 / 已结束成功或失败及退出码 / 未能确认 / 作业已丢失）、调度器状态（如 RUN）、服务器、调度系统与作业号（如"LSF · 作业号 232723"）、申请资源（队列、CPU、线程、MPI 进程）、提交时间（5 分钟内带"N 分钟前"）、模型版本（官方版 r74）、计算引擎、服务器上的算例目录、模型计算进度（第 N 步（日期））、当前阶段、最近输出。原始 JSON 收进里面一个"原始记录（排错用）"折叠项，排错时仍可看。记录里没有的项不显示，不编造。测试：`a server job is described in words, with the raw record left for troubleshooting`（GUI 695 条）。

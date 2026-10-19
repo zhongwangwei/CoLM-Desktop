@@ -1,5 +1,5 @@
 import { bilingual } from '../../lib/bilingual';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { effectiveModelFields } from '../cases/case-model';
@@ -12,6 +12,7 @@ import {
   compatibleKernel,
   endedRun,
   openRuns,
+  remoteJobFacts,
   remoteStatusSummary,
   restoredRuns,
   remoteSubmissionBlocked,
@@ -1390,7 +1391,17 @@ export default function RunPanel({
             </Button>
           </div>
           <Advanced title={t('服务器作业详情', 'Server job details')}>
-            <pre>{JSON.stringify(remote, null, 2)}</pre>
+            <dl className="simulation-review">
+              {remoteJobFacts(remote, en).map((fact) => (
+                <Fragment key={fact.label}>
+                  <dt>{fact.label}</dt>
+                  <dd>{fact.value}</dd>
+                </Fragment>
+              ))}
+            </dl>
+            <Advanced title={t('原始记录（排错用）', 'Raw record (for troubleshooting)')}>
+              <pre>{JSON.stringify(remote, null, 2)}</pre>
+            </Advanced>
           </Advanced>
         </>
       )}

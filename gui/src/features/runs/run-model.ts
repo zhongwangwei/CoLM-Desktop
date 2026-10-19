@@ -265,3 +265,109 @@ export function remoteStatusSummary(results: unknown[], en = false): string {
     : `已核对 ${results.length} 个服务器作业`;
   return parts.length ? `${head}：${parts.join(' · ')}` : head;
 }
+
+const text = (value: unknown): string => (typeof value === 'string' ? value : '');
+const asRecord = (value: unknown): Record<string, unknown> =>
+  value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+
+/** What a server job record says, in words: the facts a person wants, not the raw JSON. */
+export function remoteJobFacts(
+  value: unknown,
+  en = false,
+  now = Date.now(),
+): { label: string; value: string }[] {
+  const data = asRecord(value);
+  const record = asRecord(data.record ?? value);
+  const status = asRecord(data.status);
+  const provenance = asRecord(record.provenance);
+  const options = new Map(
+    (Array.isArray(provenance.remote_options) ? provenance.remote_options : [])
+      .filter((item): item is [string, string] => Array.isArray(item) && item.length === 2)
+      .map(([flag, option]) => [String(flag), String(option)]),
+  );
+  const t = (zh: string, english: string) => (en ? english : zh);
+  const facts: { label: string; value: string }[] = [];
+  const add = (label: string, content: unknown) => {
+    const shown = typeof content === 'number' ? String(content) : text(content);
+    if (shown) facts.push({ label, value: shown });
+  };
+
+  const permissions = remoteRunPermissions(value);
+  const state = text(status.state);
+  const detail = text(status.detail);
+  let stateText = t('未能确认（请核对服务器状态）', 'Unconfirmed (check the server status)');
+  if (permissions.terminal)
+    stateText =
+      status.exit_code === 0
+        ? t('已结束，成功（退出码 0）', 'Finished, succeeded (exit code 0)')
+        : t(
+            `已结束，失败（退出码 ${status.exit_code}）`,
+            `Finished, failed (exit code ${status.exit_code})`,
+          );
+  else if (state === 'running') stateText = t('运行中', 'Running');
+  else if (state === 'queued') stateText = t('排队中，等待调度器分配资源', 'Queued for resources');
+  else if (state === 'lost')
+    stateText = t('作业已不在调度器里，也没有留下退出码', 'The job is gone without an exit code');
+  add(t('状态', 'State'), stateText);
+  if (detail && state !== 'finished') add(t('调度器状态', 'Scheduler state'), detail);
+
+  add(t('服务器', 'Server'), record.host);
+  const scheduler = text(record.scheduler);
+  const schedulerId = text(record.scheduler_id);
+  if (scheduler)
+    add(
+      t('调度系统', 'Scheduler'),
+      `${scheduler === 'bare' ? t('直接运行', 'Direct execution') : scheduler.toUpperCase()}${
+        schedulerId ? ` · ${t('作业号', 'job')} ${schedulerId}` : ''
+      }`,
+    );
+  const requested = [
+    options.get('--partition') && `${t('队列', 'queue')} ${options.get('--partition')}`,
+    options.get('--cpus') && `${options.get('--cpus')} CPU`,
+    options.get('--threads') && `${options.get('--threads')} ${t('线程', 'threads')}`,
+    Number(provenance.ranks) > 1 && `${provenance.ranks} ${t('个 MPI 进程', 'MPI ranks')}`,
+  ].filter(Boolean);
+  if (requested.length) add(t('申请资源', 'Requested'), requested.join(' · '));
+
+  const submitted = Number(record.submitted_at);
+  if (Number.isFinite(submitted) && submitted > 0) {
+    const when = new Date(submitted * 1000);
+    const minutes = Math.max(0, Math.round((now - when.getTime()) / 60000));
+    add(
+      t('提交时间', 'Submitted'),
+      `${when.toLocaleString(en ? 'en-US' : 'zh-CN')}${
+        minutes < 1 ? '' : minutes < 60 ? t(`（${minutes} 分钟前）`, ` (${minutes} min ago)`) : ''
+      }`,
+    );
+  }
+  const revision = asRecord(provenance.model_revision);
+  if (text(revision.id))
+    add(
+      t('模型版本', 'Model'),
+      `${revision.id === 'official' ? t('官方版', 'Official') : revision.id} r${revision.revision ?? ''}`.trim(),
+    );
+  const engine = text(provenance.engine);
+  if (engine)
+    add(
+      t('计算引擎', 'Engine'),
+      engine === 'rust' ? 'Rust' : engine === 'fortran' ? 'Fortran' : engine,
+    );
+  add(t('服务器上的算例目录', 'Server case folder'), record.remote_case);
+
+  const lines = text(status.log_tail)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const progress = [...lines].reverse().find((line) => /^TIMESTEP\s*=/.test(line));
+  const match = progress?.match(/TIMESTEP\s*=\s*(\d+)\s*\|\s*DATE\s*=\s*(\d{4}-\d{2}-\d{2})/);
+  if (match)
+    add(
+      t('模型计算进度', 'Model progress'),
+      t(`第 ${match[1]} 步（${match[2]}）`, `step ${match[1]} (${match[2]})`),
+    );
+  const phase = text(status.phase);
+  if (phase && !permissions.terminal) add(t('当前阶段', 'Stage'), phase);
+  const last = lines.filter((line) => !/^TIMESTEP\s*=/.test(line)).slice(-3);
+  if (last.length) add(t('最近输出', 'Recent output'), last.join(' / '));
+  return facts;
+}
