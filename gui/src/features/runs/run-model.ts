@@ -292,7 +292,11 @@ export function remoteActivity(
   const phase = typeof status.phase === 'string' ? status.phase : '';
   if (remoteRunPermissions(value).terminal) {
     const ended = remoteEndStatus(value);
-    if (ended === 'succeeded') return { kind: 'finished', text: t('已完成', 'Finished') };
+    if (ended === 'succeeded')
+      return {
+        kind: 'finished',
+        text: t('已结束，成功（退出码 0）', 'Finished, succeeded (exit code 0)'),
+      };
     if (ended === 'cancelled')
       return {
         kind: 'stopped',
@@ -301,9 +305,12 @@ export function remoteActivity(
     return {
       kind: 'failed',
       text: Number.isInteger(status.exit_code)
-        ? t(`失败（退出码 ${status.exit_code}）`, `Failed (exit code ${status.exit_code})`)
+        ? t(
+            `已结束，失败（退出码 ${status.exit_code}）`,
+            `Finished, failed (exit code ${status.exit_code})`,
+          )
         : t(
-            `失败（调度器：${detail.split('|')[0]}）`,
+            `已结束，失败（调度器：${detail.split('|')[0]}）`,
             `Failed (scheduler: ${detail.split('|')[0]})`,
           ),
     };

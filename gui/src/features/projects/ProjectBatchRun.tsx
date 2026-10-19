@@ -5,7 +5,7 @@ import { usePageContract } from '../../lib/guide';
 import { invoke } from '../../lib/ipc';
 import type { CaseProfile } from '../../lib/types';
 import RunPanel from '../runs/RunPanel';
-import { restoreRunView } from '../runs/run-model';
+import { remoteActivity, restoreRunView } from '../runs/run-model';
 
 export default function ProjectBatchRun({
   onBack,
@@ -133,6 +133,12 @@ export default function ProjectBatchRun({
   const uncertainRuns = runs.filter(
     (run) => !activeRuns.includes(run) && !waitingRuns.includes(run) && !terminalRuns.includes(run),
   );
+  // 服务器上的站点再说一句它在做什么：排队的原因、在编译引擎、怎么结束的。阶段已经写明的运行中不重复。
+  const remoteNote = (run: (typeof runs)[number]['run']) => {
+    if (run.location !== 'remote' || !run.progress?.remote) return '';
+    const activity = remoteActivity(run.progress.remote, en);
+    return activity.kind === 'running' || activity.kind === 'finished' ? '' : activity.text;
+  };
   const renderRun = ({ entry, run, view, status }: (typeof runs)[number]) => (
     <article key={entry.dir} aria-label={entry.name}>
       <h4>{entry.name}</h4>
@@ -140,6 +146,7 @@ export default function ProjectBatchRun({
         {statusLabels[status] ?? t('等待核对', 'Needs verification')}
         {view.stage ? ` · ${stageLabels[view.stage] ?? view.stage}` : ''}
       </p>
+      {remoteNote(run) && <p className="muted">{remoteNote(run)}</p>}
       {!!view.total && (
         <>
           <progress aria-label={entry.name} value={view.step ?? 0} max={view.total} />

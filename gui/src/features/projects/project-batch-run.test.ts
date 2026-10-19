@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
-import { restoreRunView } from '../runs/run-model';
+import { remoteActivity, restoreRunView } from '../runs/run-model';
 
 function screen(
   handoff?: {
@@ -68,6 +68,7 @@ function screen(
     Notice: () => {},
     RunPanel,
     restoreRunView,
+    remoteActivity,
     useApp: () => ({ state }),
     usePageContract: (value: typeof contract) => {
       contract = value;
@@ -528,4 +529,29 @@ test('a station whose remote job still runs cannot be deselected', async () => {
     };
   assert.equal(value('/a').value, 'true');
   assert.equal(value('/b').value, 'false');
+});
+
+test('a server station says why it waits, or that the engine is being compiled', () => {
+  const page = screen();
+  page.state.cases = ['Q', 'B', 'S'].map((name) => ({ dir: `/${name}`, name }));
+  const remote = (status: Record<string, unknown>, extra: Record<string, unknown> = {}) => ({
+    running: true,
+    status: 'submitted',
+    location: 'remote',
+    logs: [],
+    progress: { remote: { record: { host: 'land02', job: 'run-1' }, status, ...extra } },
+  });
+  page.state.running = {
+    '/Q': remote({ state: 'queued', detail: 'PENDING|Resources' }),
+    '/B': remote({ state: 'running', phase: 'building the Rust engine' }),
+    '/S': {
+      ...remote({ state: 'lost', detail: 'CANCELLED by 1026|0:0' }, { ended: 'cancelled' }),
+      running: false,
+      status: 'cancelled',
+    },
+  };
+  page.render();
+  assert.ok(page.text.includes('Queued: waiting for free cores and memory'));
+  assert.ok(page.text.includes('Compiling the engine on the server'));
+  assert.ok(page.text.includes('Stopped (the job was cancelled)'));
 });
