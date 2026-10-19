@@ -499,7 +499,13 @@ export default function ResourcesPage() {
     ['walltime', t('时限', 'Walltime')],
     ['cpus', 'CPUs'],
     ['memory_gb', t('内存 GB', 'Memory GB')],
-    ['nodes', t('节点', 'Nodes')],
+    [
+      'nodes',
+      t(
+        '节点数（留空或 0 = 不指定，单节点作业不用填；只有跨节点的 MPI 运行才需要）',
+        'Nodes (empty or 0 = unspecified; single-node jobs need none, only multi-node MPI runs do)',
+      ),
+    ],
     ['fetch_vars', t('取回变量', 'Fetch variables')],
     [
       'env_script',
