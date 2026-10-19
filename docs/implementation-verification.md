@@ -34015,3 +34015,7 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
    - GUI Rust：399 条通过、1 条 ignore（上面的真实数据审计）；新增 `revisions_in_use_come_from_history_bindings_studies_and_known_projects`、`known_project_roots_read_recent_folders_and_server_mirrors`、`model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works`；clippy 零警告；fmt 干净。
    - 前端：`npm test` 693 条通过（新增启动后才整理、整理失败只记日志、改绑提示同意/取消/按明确选择改绑、`model-tidy` 解析）；`gui/tests/*.mjs` 33 个套件全部通过；`check-gui` 185 个命令契约（含重新生成的 `model_prune`）。
    - 调试构建的 `colm-cli model-migrate-case` 仍被"缺少打包戳记"挡住（同第 713 轮），所以缺失修订的错误文本没有经过真实 CLI 端到端，只由 colm-model 单元测试覆盖；`colm-cli model-prune` 在调试构建上跑通。
+26. **打开别处建的项目后 90 个站点一直"待核对"、一直"进行中"（用户报）**：用户在正常窗口里打开了测试窗口建的项目（`/tmp/ce7/…`，账本因此导入了它的 90 个站点，状态是 `imported / needs_reconciliation`，作业身份是 `legacy-<哈希>` 占位号）。第 13 条的"自动核对"把这些站点恢复成"未知、运行中"，每 10 秒用 `remote_status` 核对，但核对结果始终没被采纳，面板一直显示"运行中…"，按钮"核对服务器状态"只会说"正在提交或核对"。两个缺口：
+    - 恢复出来的占位状态带着账本的 `operation_id`；导入记录的是 `legacy-…`，服务器上的作业没有这个身份，`matchesRemoteRun` 因 `operation !== expectedOperation` 判为"不是同一个作业"。改为恢复时不带 `operation_id`（`openRuns`），由第一次状态核对按"同一台服务器、记录有作业号、没有待确认"认领。
+    - 这条"认领"路径（`discovered`）只对当前站点（`currentCase.current === target`）开放，批量里其余 89 个站点永远认领不了。改为批量里的任何站点都可以。
+    测试：`every station of a reopened batch claims its server job on the first status check`（旧写法下失败、新写法下通过）；GUI 706 条。bd 上这些作业早已结束，核对后应都变成完成。

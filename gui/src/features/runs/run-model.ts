@@ -226,11 +226,12 @@ export function openRuns(
     // `endedRun` narrows its argument, so read it as a plain boolean here.
     const ended: boolean = endedRun(run);
     if (running[dir] || ended || run.location === 'local') continue;
+    // No operation id here: an imported record carries a placeholder (`legacy-…`) that the server's
+    // job never has, and the first status check claims the job by its host instead.
     open[dir] = {
       case: dir,
       location: 'remote',
       run_id: run.operation_id,
-      operation_id: run.operation_id,
       status: 'unknown',
       running: true,
       logs: [],

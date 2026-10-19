@@ -697,3 +697,24 @@ test('the standing of a batch is said in numbers, so a skipped check still answe
   );
   assert.equal(runCountsText([]), '');
 });
+
+test('every station of a reopened batch claims its server job on the first status check', async () => {
+  const p = panel({ remote: true, remoteBatch: true });
+  // What reopening a project restores: no job record, no operation id, only the host.
+  for (const dir of ['/good', '/bad'])
+    p.state.running[dir] = {
+      case: dir,
+      location: 'remote',
+      run_id: `legacy-${dir}`,
+      status: 'unknown',
+      running: true,
+      logs: [],
+      stages: {},
+      progress: { host: 'server' },
+    };
+  for (const dir of ['/good', '/bad']) await p.remoteAction('remote_status', dir, true);
+  for (const dir of ['/good', '/bad']) {
+    assert.equal(p.state.running[dir].status, 'succeeded', dir);
+    assert.equal(p.state.running[dir].running, false, dir);
+  }
+});

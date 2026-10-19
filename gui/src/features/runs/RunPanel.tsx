@@ -612,7 +612,7 @@ export default function RunPanel({
           knownRecord?.operation_id ??
           (knownRecord?.provenance as Record<string, unknown> | undefined)?.operation_id;
         const discovered =
-          currentCase.current === target &&
+          (currentCase.current === target || !!batchCases?.includes(target)) &&
           command === 'remote_status' &&
           previous?.location === 'remote' &&
           previous.status === 'unknown' &&
