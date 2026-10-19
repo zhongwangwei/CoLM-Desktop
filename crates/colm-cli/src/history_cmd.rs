@@ -531,7 +531,13 @@ pub(crate) fn refuse_unresolved_remote_submission(opts: &crate::Opts, source: &P
                         | "cancel_requested"
                 )
             {
-                bail!("source case has unresolved remote job {} (operation {}); inspect remote-status before any new run", binding["job"].as_str().unwrap(), event.operation_id);
+                let job = binding["job"].as_str().unwrap();
+                // An imported placeholder of a job the app recorded itself is never reconciled; the
+                // recorded run decides, and it is checked on its own here (天河 2026-10-19).
+                if event.phase == EventPhase::Imported && history.tracks_remote_job(job)? {
+                    continue;
+                }
+                bail!("source case has unresolved remote job {} (operation {}); inspect remote-status before any new run", job, event.operation_id);
             }
         }
         query.offset += page.items.len() as u64;

@@ -107,6 +107,30 @@ fn durable_remote_intent_binds_the_original_source_case_and_blocks_new_copies() 
         json!({"job":"original-job","terminal":true,"status":{"state":"finished","exit_code":0}});
     reconcile_remote_history(&history, &record, &outcome, Some(&source)).unwrap();
     assert!(refuse_unresolved_remote_submission(&retry, &source).is_ok());
+
+    // Importing the case's own run record of that job adds no placeholder (天河 2026-10-19).
+    std::fs::write(temp.0.join(".colm-remote.json"), record.to_string()).unwrap();
+    let report = history.import_case(&source).unwrap();
+    assert_eq!((report.imported, report.duplicates), (0, 1));
+    // Placeholders imported before this check existed no longer refuse a new run either.
+    let mut placeholder =
+        Event::start("remote_run").next(EventPhase::Imported, "needs_reconciliation");
+    placeholder.operation_id = "legacy-old".into();
+    placeholder.case_path = Some(source.to_string_lossy().into_owned());
+    placeholder.detail = json!({"legacy": record});
+    history.append(&placeholder).unwrap();
+    assert!(refuse_unresolved_remote_submission(&retry, &source).is_ok());
+    // One for a job the app never recorded still does: nothing else will settle it.
+    let mut stranger =
+        Event::start("remote_run").next(EventPhase::Imported, "needs_reconciliation");
+    stranger.operation_id = "legacy-stranger".into();
+    stranger.case_path = Some(source.to_string_lossy().into_owned());
+    stranger.detail = json!({"legacy": {"host":"server","job":"unknown-job"}});
+    history.append(&stranger).unwrap();
+    assert!(refuse_unresolved_remote_submission(&retry, &source)
+        .unwrap_err()
+        .to_string()
+        .contains("unknown-job"));
 }
 
 #[test]

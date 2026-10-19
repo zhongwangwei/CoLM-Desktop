@@ -112,6 +112,7 @@ impl History {
         verified: bool,
     ) -> Result<ImportReport> {
         let mut events = vec![];
+        let mut tracked = 0;
         for row in rows {
             ensure!(row.is_object(), "legacy history must be a JSON object");
             if matches!(kind, ImportKind::Gates) {
@@ -162,6 +163,20 @@ impl History {
                     row.is_object(),
                     "legacy history payload must be a JSON object"
                 );
+                // A server run the app recorded itself must not come back as an imported placeholder:
+                // that placeholder is never reconciled (the real run is), so it stayed 待核对 and
+                // refused every later submission of the case (天河 2026-10-19, ten of them).
+                if matches!(kind, ImportKind::RemoteRun) {
+                    let job = row["job"]
+                        .as_str()
+                        .or_else(|| row["record"]["job"].as_str());
+                    if let Some(job) = job {
+                        if self.tracks_remote_job(job)? {
+                            tracked += 1;
+                            continue;
+                        }
+                    }
+                }
                 let mut event = legacy_event(row, kind, source, case, None)?;
                 if sequence.is_some() {
                     // Envelope hashes differ between legacy typed and normalized readers;
@@ -199,9 +214,21 @@ impl History {
         let imported = self.append_batch(&events)?;
         Ok(ImportReport {
             imported,
-            duplicates: events.len() - imported,
+            duplicates: events.len() - imported + tracked,
             sources: vec![source.to_owned()],
         })
+    }
+    /// Whether an operation the app recorded itself (not an import) is bound to this server job.
+    pub fn tracks_remote_job(&self, job: &str) -> Result<bool> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM history_events WHERE operation_id NOT LIKE 'legacy-%'
+             AND json_extract(payload,'$.phase') != 'imported'
+             AND (json_extract(payload,'$.detail.job') = ?1
+                  OR json_extract(payload,'$.detail.remote_record.job') = ?1
+                  OR json_extract(payload,'$.detail.remote_record.record.job') = ?1))",
+            [job],
+            |row| row.get(0),
+        )?)
     }
     /// Enumerate only known small metadata files, never recursively scan model outputs.
     pub fn import_case(&self, case: impl AsRef<Path>) -> Result<ImportReport> {

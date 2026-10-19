@@ -34126,3 +34126,12 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 改为：`cmd_run` 在记下提交意图之前，先取生命周期锁、上传引擎，然后在登录节点上编好（`remote_cases::build_on_login_node`：nice 19、4 个编译任务，和新建算例时同一套；下载失败时由桌面送依赖再编一次；已经编好的话立刻返回）。编不成时，这次运行直接报错，不会留下待核对的记录。同一批的几个站点同时提交时，第一个去编，其余的在 `ensure_script` 的锁上等它编完。
     - 顺带：载体作业的日志原来写在 `carriers/carrier-<号>.log`，会被按 `c*` 数载体的循环数进去（因为没有 `sched_id` 被跳过，没出错）；现在改到队列根目录。
     - 没测：登录节点预编这一步需要真实的 ssh，没有单元测试；天河上还没有用新版本重新跑一批。
+
+38. **重新提交时 5 个站点都报 "source case has unresolved remote job run-… (operation legacy-…)"，其余 85 个被停下（用户报，2026-10-19）**：
+    - 现场（复制历史库后只读查询，以 AT-Neu 的 `run-b8ec45fb…` 为例）：真实运行 `b8ec45fb…` 在 19:48:24 被核对为 `finished/failed`；同一个作业另有**两条**导入的占位（`legacy-b87d…` 挂在算例上，`legacy-4be8…` 挂在运行目录上），都是 `imported/needs_reconciliation`。占位是导入算例目录里的 `.colm-remote.json`、`.colm-remote-pending.json` 生成的。状态核对只更新真实运行那条记录，占位永远不会被核对，于是一直"待核对"。提交前的 `refuse_unresolved_remote_submission` 看到它，就拒绝再提交这个算例。第 28 条记过"同一次作业既导入成占位又记成真实运行，没有追"，这次它挡住了重新提交。
+    - 改为：
+      - `History::tracks_remote_job(job)`：判断是否有应用自己记录的（不是导入的）操作绑定到这个作业，按 `detail.job`、`detail.remote_record.job`、`detail.remote_record.record.job` 查。
+      - 导入 `RemoteRun` 时，作业已经有这样的记录就跳过，算作重复。
+      - 拒绝提交时，跳过这类作业的导入占位，由真实运行的那条记录自己决定。没有真实运行记录的占位仍然挡住，因为没有别的东西会去核对它。
+    - 测试：`durable_remote_intent_binds_the_original_source_case_and_blocks_new_copies` 扩展了三种情况：导入同一作业的运行记录不再生成占位（imported 0、duplicates 1）；已有的占位不再挡；不认识的作业的占位仍然挡，报错里带作业号。colm-history 42 条、colm-cli 456 条、gui/src-tauri 411 条通过。
+    - 已有的占位仍然留在历史里（按设计，项目的状态汇总会忽略它们），只是不再挡住提交。
