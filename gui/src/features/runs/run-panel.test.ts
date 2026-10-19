@@ -7,6 +7,7 @@ import {
   endedRun,
   openRuns,
   remoteJobFacts,
+  runCountsText,
   remoteStatusSummary,
   restoredRuns,
   remoteRunPermissions,
@@ -322,8 +323,7 @@ test('remote batch runs as many stations as CPUs are requested, one CPU each, an
 
 test('leaving the page does not stop the stations still to be submitted', async () => {
   const targets = ['/a', '/b', '/c', '/d'];
-  let p!: ReturnType<typeof panel>;
-  p = panel({
+  const p: ReturnType<typeof panel> = panel({
     remote: true,
     remoteBatch: true,
     stationConcurrency: 1,
@@ -671,4 +671,29 @@ test('a server job is described in words, with the raw record left for troublesh
   assert.match(facts({ status: { state: 'unknown' } })['状态'], /未能确认/);
   // Nothing is invented for a record that says little.
   assert.deepEqual(Object.keys(facts(null)), ['状态']);
+});
+
+test('the standing of a batch is said in numbers, so a skipped check still answers', () => {
+  const run = (status: string, running = false) => ({
+    case: '/x',
+    status,
+    running,
+    logs: [],
+    stages: {},
+  });
+  assert.equal(
+    runCountsText([
+      run('submitted', true),
+      run('running', true),
+      run('preparing', true),
+      run('succeeded'),
+      run('succeeded'),
+      run('failed'),
+      run('cancelled'),
+      run('unknown', true),
+      undefined,
+    ]),
+    '运行中 2 · 等待 1 · 完成 2 · 失败 1 · 已停止 1 · 待核对 1',
+  );
+  assert.equal(runCountsText([]), '');
 });

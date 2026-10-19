@@ -371,3 +371,27 @@ export function remoteJobFacts(
   if (last.length) add(t('最近输出', 'Recent output'), last.join(' / '));
   return facts;
 }
+
+/** How the stations of a batch stand right now, from the run states the page already holds. */
+export function runCountsText(runs: (RunState | undefined)[], en = false): string {
+  const counts = { running: 0, waiting: 0, succeeded: 0, failed: 0, stopped: 0, unconfirmed: 0 };
+  for (const run of runs) {
+    if (!run) continue;
+    if (run.status === 'succeeded') counts.succeeded++;
+    else if (run.status === 'failed') counts.failed++;
+    else if (run.status === 'cancelled') counts.stopped++;
+    else if (run.status === 'unknown') counts.unconfirmed++;
+    else if (['submitted', 'running', 'queued'].includes(run.status)) counts.running++;
+    else counts.waiting++;
+  }
+  const parts = [
+    counts.running && (en ? `${counts.running} running` : `运行中 ${counts.running}`),
+    counts.waiting && (en ? `${counts.waiting} waiting` : `等待 ${counts.waiting}`),
+    counts.succeeded && (en ? `${counts.succeeded} finished` : `完成 ${counts.succeeded}`),
+    counts.failed && (en ? `${counts.failed} failed` : `失败 ${counts.failed}`),
+    counts.stopped && (en ? `${counts.stopped} stopped` : `已停止 ${counts.stopped}`),
+    counts.unconfirmed &&
+      (en ? `${counts.unconfirmed} unconfirmed` : `待核对 ${counts.unconfirmed}`),
+  ].filter(Boolean);
+  return parts.join(' · ');
+}

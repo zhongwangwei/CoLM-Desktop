@@ -13,6 +13,7 @@ import {
   endedRun,
   openRuns,
   remoteJobFacts,
+  runCountsText,
   remoteStatusSummary,
   restoredRuns,
   remoteSubmissionBlocked,
@@ -112,7 +113,8 @@ export default function RunPanel({
     ),
     [recovering, setRecovering] = useState(true),
     [busy, setBusy] = useState(false),
-    [monitor, setMonitor] = useState(false);
+    [monitor, setMonitor] = useState(false),
+    [lastCheck, setLastCheck] = useState<{ at: number; text: string } | null>(null);
   const lock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
@@ -309,6 +311,8 @@ export default function RunPanel({
     return () => {
       current = false;
     };
+    // The batch list is a prop rebuilt on every render; the case path identifies the batch here.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [casePath, notify, update]);
   useEffect(() => {
     setKernel(
@@ -705,22 +709,50 @@ export default function RunPanel({
     void watchBatch.current();
     return () => window.clearInterval(timer);
     // The watcher reads the current runs through refs.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [watchingBatch, casePath]);
   // The Check button: every open server job of the batch (or the case), with a summary shown.
   async function checkServerStatus() {
+    // Whatever happens, the answer is written under the button: a toast alone is easy to miss, and a
+    // check that was skipped because the panel is busy used to say nothing at all.
+    const say = (text: string, error = false) => {
+      setLastCheck({ at: Date.now(), text });
+      notify(text, error);
+    };
+    if (lock.current || monitor) {
+      const standing = runCountsText(
+        (batchCases ?? [casePath]).map((dir) => latest.current[dir]),
+        en,
+      );
+      say(
+        t(
+          `正在提交或核对，请稍候；状态会自动更新。${standing ? `现在：${standing}。` : ''}`,
+          `Submitting or checking right now; the status updates by itself.${standing ? ` Now: ${standing}.` : ''}`,
+        ),
+      );
+      return;
+    }
     const open = batchCases ? openBatchRuns() : [];
     const targets = open.length ? open : [casePath];
     const results: unknown[] = [];
+    const errors: string[] = [];
     for (const dir of targets) {
       try {
         const merged = await remoteAction('remote_status', dir, true);
         if (merged) results.push(merged);
       } catch (error) {
+        errors.push(String(error));
         notify(String(error), true);
       }
     }
-    if (results.length) notify(remoteStatusSummary(results, en));
+    if (results.length) say(remoteStatusSummary(results, en));
+    else if (errors.length) say(errors[0], true);
+    else
+      say(
+        t(
+          '没有需要核对的服务器作业：这些站点都已结束，或还没有提交。',
+          'No server job needs checking: the stations have finished or were not submitted.',
+        ),
+      );
   }
   async function cancel() {
     try {
@@ -1390,6 +1422,14 @@ export default function RunPanel({
               {t('取回结果', 'Fetch results')}
             </Button>
           </div>
+          {lastCheck && (
+            <p className="muted" role="status">
+              {t('上次核对', 'Last check')}{' '}
+              {new Date(lastCheck.at).toLocaleTimeString(en ? 'en-US' : 'zh-CN')}
+              {t('：', ': ')}
+              {lastCheck.text}
+            </p>
+          )}
           <Advanced title={t('服务器作业详情', 'Server job details')}>
             <dl className="simulation-review">
               {remoteJobFacts(remote, en).map((fact) => (

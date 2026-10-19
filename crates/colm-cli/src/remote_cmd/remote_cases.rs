@@ -35,11 +35,13 @@ pub(crate) fn cmd(opts: &Opts, action: &str) -> Result<()> {
             let engine = choose_engine(&prepared, &ssh, &root, version.as_ref())?;
             engine.upload(&ssh, &root)?;
             if matches!(engine, Engine::Source(_)) {
-                // Keep build output away from the JSON response.
+                // Keep build output away from the JSON response. This runs on the login node, which
+                // other users share and where heavy programs are discouraged (星逸, 摆渡船): four
+                // compiler jobs at the lowest priority.
                 ssh.run_ok(&format!(
-                    "set -e\ncd {}\n{}",
+                    "set -e\nrenice -n 19 -p $$ >/dev/null 2>&1 || true\ncd {}\n{}",
                     quote(&root),
-                    engine::ensure_script(&root, engine.id(), 8)
+                    engine::ensure_script(&root, engine.id(), LOGIN_NODE_BUILD_JOBS)
                 ))?;
             }
             format!("{}/bin/colm-cli", engine::engine_dir(&root, engine.id()))
@@ -97,6 +99,9 @@ fn ascii_json(value: &serde_json::Value) -> Result<String> {
 /// `{"items": [request, ...]}` → `{"results": [{"ok": response} | {"error": message}, ...]}`,
 /// in item order. Each item runs as its own `remote_cases.py` process on the server, so a
 /// failure stays with its item and its creation claim behaves exactly as for one request.
+/// Compiler jobs for the engine build on a shared login node.
+const LOGIN_NODE_BUILD_JOBS: u32 = 4;
+
 fn run_batch(
     ssh: &Ssh,
     action: &str,
