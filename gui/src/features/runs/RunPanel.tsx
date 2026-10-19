@@ -484,8 +484,9 @@ export default function RunPanel({
                 cases: prepared,
                 workers: nums[2],
                 // Several submissions and status checks at once: each station costs seconds of SSH.
-                submitConcurrency: 3,
-                pollConcurrency: 4,
+                // The two phases alternate, so the larger stays under the ten sessions sshd allows.
+                submitConcurrency: 5,
+                pollConcurrency: 6,
                 stopped: () => stoppedBatches.has(runId) || cancelledRun.current === runId,
                 record: (dir) => invokeJson('remote_job_record', { case: dir }),
                 status: (dir) => invokeJson('remote_status', { case: dir }),

@@ -7,8 +7,9 @@ type Remote = Record<string, unknown>;
 // Submitting a station takes several seconds of SSH round trips, and so does asking for a job's
 // state. Done one by one, ninety stations spend minutes only on submissions and a round of status
 // checks takes longer than the jobs run. `submitConcurrency` submissions and `pollConcurrency`
-// status checks run at once (each is its own SSH session, so keep their sum under sshd's usual
-// ten-session limit); both default to one, the original strictly sequential behaviour.
+// status checks run at once (each is its own SSH session; the two phases alternate, so the larger
+// one must stay under sshd's usual ten sessions per connection); both default to one, the original
+// strictly sequential behaviour.
 export async function runRemoteBatch(options: {
   cases: string[];
   workers: number;
