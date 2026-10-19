@@ -1,4 +1,4 @@
-import { reconcileRemoteRun, remoteRunPermissions } from './run-model';
+import { reconcileRemoteRun, remoteEndStatus, remoteRunPermissions } from './run-model';
 
 type Remote = Record<string, unknown>;
 
@@ -57,12 +57,7 @@ export async function runRemoteBatch(options: {
   }
   function publish(dir: string, result: Remote) {
     const permissions = remoteRunPermissions(result);
-    const status = result.status as { state?: string; exit_code?: number } | undefined;
-    options.change(
-      dir,
-      permissions.terminal ? (status?.exit_code === 0 ? 'succeeded' : 'failed') : 'submitted',
-      result,
-    );
+    options.change(dir, permissions.terminal ? remoteEndStatus(result) : 'submitted', result);
     if (permissions.terminal) active.delete(dir);
     else if (!permissions.cancel) throw new Error(`${dir}: server job state is unconfirmed`);
   }

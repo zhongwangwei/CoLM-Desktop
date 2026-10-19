@@ -34194,3 +34194,9 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 改为：用 `eachLimited` 同时处理 5 个站点（和提交时的并发数一样，低于 sshd 默认的 10 个会话上限）。每个站点的处理步骤和判断都不变。
     - 测试：`stopping a batch cancels several stations at once, never more than the limit`（12 个站点，同时处理的峰值恰好是 5，全部处理到；空列表什么都不做）。前端 721 条通过。
     - 没测：在 land02 上真实停止一批。
+
+45. **取消排队中的作业后，站点一直"待核对"，"运行"按钮一直是灰的（用户报，land02，2026-10-19）**：
+    - 现场（只读）：作业目录里只有 `script.sh`、`scheduler`、`sched_id`，没有 `exit_code`，因为作业从没开始；`squeue` 查不到；`sacct` 显示 `CANCELLED by 1026|0:0`。状态判为 `lost`，而前端、账本都只把"有退出码的 finished"当成终态，于是 40 个站点一直算在运行中，界面显示"运行中…"、按钮是灰的；账本里这些操作也一直未结束，重新提交还会被"未核对的服务器作业"挡住。
+    - 改为：`colm_remote::job::ended`：状态为 `Lost` 且调度系统的记录里有 CANCELLED 的，返回 `cancelled`；有 FAILED、TIMEOUT、OUT_OF_MEMORY、NODE_FAIL、PREEMPTED、BOOT_FAIL、DEADLINE 的，返回 `failed`。`COMPLETED` 却没有退出码、或查不到记录的，仍是 `Lost`。不编造退出码。`remote-status`（包括待核对的提交）在输出里带 `ended`，并把它算作终态；账本据此记为 `finished/cancelled` 或 `finished/failed`。前端 `remoteRunPermissions` 把这类作业也当终态（但不能"取回结果"，因为没有输出），`remoteEndStatus` 统一给出"已完成 / 失败 / 已停止"，批量循环、停止运行、核对服务器状态三处都用它。
+    - 测试：`a_job_the_scheduler_ended_without_an_exit_code_is_over`（land02 的 sacct 原文、打包运行开跑前取消、超时、载体内存不足；含糊的情况仍是 lost；有退出码时不参与判断）；前端 `a server job the scheduler cancelled before it ran is over, with nothing to fetch`。colm-remote 104 条、colm-cli 457 条、前端 722 条通过。
+    - 那 40 个站点在新版本里点一次"核对服务器状态"就会变成"已停止"，然后就可以重新提交。

@@ -14,6 +14,7 @@ import {
   remoteSubmissionBlocked,
   reconcileRemoteRun,
   matchesRemoteRun,
+  remoteEndStatus,
 } from './run-model';
 import { eachLimited, runRemoteBatch } from './remote-batch';
 import { compatibleKernel } from './run-model';
@@ -116,6 +117,7 @@ function panel(
     remoteSubmissionBlocked,
     reconcileRemoteRun,
     matchesRemoteRun,
+    remoteEndStatus,
     recovering: false,
     disabled: false,
     kernelMatches: true,

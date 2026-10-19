@@ -66,13 +66,26 @@ export function remoteRunPermissions(value: unknown) {
     data.record !== null &&
     typeof record.host === 'string' &&
     typeof record.job === 'string';
-  const terminal = confirmed && status.state === 'finished' && Number.isInteger(status.exit_code);
+  const finished = confirmed && status.state === 'finished' && Number.isInteger(status.exit_code);
+  // No exit code, but the scheduler recorded the end (`colm_remote::job::ended`): a job cancelled
+  // while queued never writes one (land02, 2026-10-19). Over, but there is nothing to fetch.
+  const ended =
+    confirmed && status.state === 'lost' && (data.ended === 'cancelled' || data.ended === 'failed');
   return {
     pending,
-    terminal,
+    terminal: finished || ended,
     cancel: confirmed && ['queued', 'running'].includes(String(status.state)),
-    fetch: terminal,
+    fetch: finished,
   };
+}
+
+/** How a terminal server job ended: by its exit code, or as the scheduler recorded it. */
+export function remoteEndStatus(value: unknown): 'succeeded' | 'failed' | 'cancelled' {
+  const data = value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
+  if (data.ended === 'cancelled') return 'cancelled';
+  const status =
+    data.status && typeof data.status === 'object' ? (data.status as Record<string, unknown>) : {};
+  return status.exit_code === 0 ? 'succeeded' : 'failed';
 }
 
 export function reconcileRemoteRun(previous: unknown, result: Record<string, unknown>) {

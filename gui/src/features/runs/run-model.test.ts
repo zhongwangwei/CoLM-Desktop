@@ -10,6 +10,7 @@ import {
   restoreRunView,
   settleRuns,
   submittingHost,
+  remoteEndStatus,
 } from './run-model';
 const run: RunState = {
   run_id: 'new',
@@ -286,4 +287,29 @@ test('the engine build is watched only while a server run is being submitted', (
   assert.equal(submittingHost('tianhe', ['/a', '/b'], running), 'tianhe');
   assert.equal(submittingHost('tianhe', ['/b'], running), '', 'already submitted');
   assert.equal(submittingHost('', ['/a'], running), '', 'a local run builds no server engine');
+});
+
+test('a server job the scheduler cancelled before it ran is over, with nothing to fetch', () => {
+  const record = { host: 'land02', job: 'run-1' };
+  const cancelled = {
+    record,
+    status: { state: 'lost', detail: 'CANCELLED by 1026|0:0' },
+    ended: 'cancelled',
+  };
+  assert.deepEqual(remoteRunPermissions(cancelled), {
+    pending: false,
+    terminal: true,
+    cancel: false,
+    fetch: false,
+  });
+  assert.equal(remoteEndStatus(cancelled), 'cancelled');
+  assert.equal(remoteEndStatus({ ...cancelled, ended: 'failed' }), 'failed');
+  assert.equal(
+    remoteRunPermissions({ record, status: { state: 'lost' }, ended: null }).terminal,
+    false,
+  );
+  assert.equal(
+    remoteEndStatus({ record, status: { state: 'finished', exit_code: 0 } }),
+    'succeeded',
+  );
 });

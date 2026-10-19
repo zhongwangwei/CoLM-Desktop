@@ -719,3 +719,35 @@ fn a_partition_that_hands_out_whole_node_memory_gets_a_fair_share_per_cpu() {
         assert!(!args.contains("--mem-per-cpu"), "{tag}: {args}");
     }
 }
+
+#[test]
+fn a_job_the_scheduler_ended_without_an_exit_code_is_over() {
+    let lost = |detail: Option<&str>| Status {
+        state: State::Lost,
+        phase: None,
+        detail: detail.map(str::to_owned),
+        log_tail: String::new(),
+    };
+    // land02: queued jobs cancelled before they started (sacct `CANCELLED by 1026|0:0`).
+    assert_eq!(
+        ended(&lost(Some("CANCELLED by 1026|0:0"))),
+        Some("cancelled")
+    );
+    assert_eq!(
+        ended(&lost(Some("cancelled before it started"))),
+        Some("cancelled")
+    );
+    assert_eq!(ended(&lost(Some("TIMEOUT|0:0"))), Some("failed"));
+    assert_eq!(
+        ended(&lost(Some("node pack job 100 OUT_OF_MEMORY|0:125"))),
+        Some("failed")
+    );
+    // Unclear endings stay lost: a COMPLETED job without an exit code, or no record at all.
+    assert_eq!(ended(&lost(Some("COMPLETED|0:0"))), None);
+    assert_eq!(ended(&lost(None)), None);
+    let finished = Status {
+        state: State::Finished { exit_code: 0 },
+        ..lost(Some("CANCELLED"))
+    };
+    assert_eq!(ended(&finished), None, "an exit code decides by itself");
+}

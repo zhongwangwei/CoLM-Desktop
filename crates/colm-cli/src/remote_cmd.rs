@@ -2267,7 +2267,8 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
             log_tail: String::new(),
         }
     };
-    let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":matches!(status.state,job::State::Finished{..}),"status":status});
+    let ended = job::ended(&status);
+    let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":matches!(status.state,job::State::Finished{..}) || ended.is_some(),"ended":ended,"status":status});
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
     let mut record = pending.record.clone();
     if verified && record.scheduler != "bare" {
@@ -2291,7 +2292,7 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
     let unresolved = !verified || record_warning.is_some();
     println!(
         "{}",
-        json!({"record":if unresolved {serde_json::Value::Null}else{serde_json::to_value(&record)?},"pending":if unresolved {json!({"host":record.host,"root":record.root,"job":record.job,"remote_case":record.remote_case,"source_case":pending.source_case,"run_case":pending.run_case,"needs_reconciliation":true})}else{serde_json::Value::Null},"status":status,"record_warning":record_warning})
+        json!({"record":if unresolved {serde_json::Value::Null}else{serde_json::to_value(&record)?},"pending":if unresolved {json!({"host":record.host,"root":record.root,"job":record.job,"remote_case":record.remote_case,"source_case":pending.source_case,"run_case":pending.run_case,"needs_reconciliation":true})}else{serde_json::Value::Null},"status":status,"ended":ended,"record_warning":record_warning})
     );
     Ok(())
 }
@@ -2308,9 +2309,13 @@ pub(super) fn cmd_status(opts: &Opts) -> Result<()> {
     }
     let record = read_record(&case)?;
     let status = job::status(&Ssh::new(&record.host)?, &record.root, &record.job, lines)?;
-    let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished {..}),"status":status});
+    let ended = job::ended(&status);
+    let outcome = json!({"job":record.job,"outcome":"observed","terminal":matches!(status.state, job::State::Finished {..}) || ended.is_some(),"ended":ended,"status":status});
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &outcome)?;
-    println!("{}", json!({ "record": record, "status": status }));
+    println!(
+        "{}",
+        json!({ "record": record, "status": status, "ended": ended })
+    );
     Ok(())
 }
 

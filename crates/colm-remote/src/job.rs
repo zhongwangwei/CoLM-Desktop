@@ -144,6 +144,32 @@ pub struct Status {
     pub log_tail: String,
 }
 
+/// 作业不在队列里、也没有退出码（`Lost`），但调度系统明确记下了它怎么结束的：`cancelled` 或 `failed`。
+/// land02 实测（2026-10-19）：取消 40 个还在排队的作业后，sacct 是 `CANCELLED by 1026|0:0`；它们从没开始，
+/// 所以没有 `exit_code`。只认 `Finished` 时这些站点永远"待核对"，界面一直显示运行中，也不能重新提交。
+/// 不编造退出码；调度系统说法含糊（`COMPLETED` 却没有退出码、查不到记录）的仍是 `Lost`。
+pub fn ended(status: &Status) -> Option<&'static str> {
+    if status.state != State::Lost {
+        return None;
+    }
+    let detail = status.detail.as_deref()?.to_ascii_uppercase();
+    if detail.contains("CANCELLED") {
+        return Some("cancelled");
+    }
+    [
+        "FAILED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "PREEMPTED",
+        "BOOT_FAIL",
+        "DEADLINE",
+    ]
+    .iter()
+    .any(|word| detail.contains(word))
+    .then_some("failed")
+}
+
 pub fn status_script(root: &str, id: &str, lines: usize) -> String {
     let dir = quote(&job_dir(root, id));
     format!(

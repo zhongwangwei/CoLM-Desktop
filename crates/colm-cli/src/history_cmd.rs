@@ -433,6 +433,15 @@ fn remote_record_metadata(record: &Value) -> Value {
 }
 
 fn observed_phase(outcome: &Value) -> (EventPhase, &'static str) {
+    // The scheduler recorded how a job without an exit code ended (`job::ended`): never started
+    // and cancelled, timed out, out of memory… It is over, so the operation is no longer pending.
+    if outcome["terminal"] == true && outcome["status"]["state"] == "lost" {
+        match outcome["ended"].as_str() {
+            Some("cancelled") => return (EventPhase::Finished, "cancelled"),
+            Some("failed") => return (EventPhase::Finished, "failed"),
+            _ => {}
+        }
+    }
     if outcome["terminal"] == true && outcome["status"]["state"] == "finished" {
         if let Some(code) = outcome["status"]["exit_code"].as_i64() {
             return (

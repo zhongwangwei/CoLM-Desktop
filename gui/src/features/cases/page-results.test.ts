@@ -2,7 +2,12 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
-import { matchesRemoteRun, reconcileRemoteRun, remoteRunPermissions } from '../runs/run-model';
+import {
+  matchesRemoteRun,
+  reconcileRemoteRun,
+  remoteEndStatus,
+  remoteRunPermissions,
+} from '../runs/run-model';
 import { caseSimulationDomain } from './model-settings';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
@@ -213,6 +218,7 @@ test('resource and run reconciliation callbacks return the recorded failure to t
     notify: noop,
     reconcileRemoteRun,
     matchesRemoteRun,
+    remoteEndStatus,
     remoteRunPermissions,
     update: (fn: (state: typeof app) => Partial<typeof app>) => {
       app = { ...app, ...fn(app) };

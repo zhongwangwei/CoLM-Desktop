@@ -27,6 +27,7 @@ import {
   restoreRunView,
   settleRuns,
   submittingHost,
+  remoteEndStatus,
 } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
@@ -687,9 +688,7 @@ export default function RunPanel({
         if (status) {
           entry.running = !remoteRunPermissions(merged).terminal;
           entry.status = remoteRunPermissions(merged).terminal
-            ? status.exit_code === 0
-              ? 'succeeded'
-              : 'failed'
+            ? remoteEndStatus(merged)
             : (status.state ?? 'unknown');
           if (status.log_tail) entry.logs = status.log_tail.split('\n');
         }
@@ -824,11 +823,10 @@ export default function RunPanel({
             }
             if (!matchesRemoteRun(latest.current[dir], result)) return;
             const terminal = remoteRunPermissions(result).terminal;
-            const status = result.status as { exit_code?: number } | undefined;
             if (id)
               patchRun([dir], id, {
                 running: !terminal,
-                status: terminal ? (status?.exit_code === 0 ? 'succeeded' : 'failed') : 'unknown',
+                status: terminal ? remoteEndStatus(result) : 'unknown',
                 progress: { host, remote: result },
               });
           } catch (error) {
