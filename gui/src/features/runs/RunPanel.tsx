@@ -516,7 +516,10 @@ export default function RunPanel({
             try {
               await runRemoteBatch({
                 cases: prepared,
-                workers: nums[2],
+                // 站点批量按节点打包（`colm_remote::pack`）：同时跑多少由载体按节点核数决定，所以站点
+                // 一次全部交进服务器的队列。按"同时运行的站点数"一个个等着交时，land02 上 48 核的节点
+                // 每次只在跑几个站点，载体还因 60 s 没有新站点而退出、重新排队（2026-10-19）。
+                workers: siteBatch ? prepared.length : nums[2],
                 // Several submissions and status checks at once: each station costs seconds of SSH.
                 // The two phases alternate, so the larger stays under the ten sessions sshd allows.
                 submitConcurrency: 5,
@@ -997,19 +1000,14 @@ export default function RunPanel({
       ...(batchCases && !siteBatch
         ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
         : []),
-      ...(host
+      ...(host && !siteBatch
         ? [
             [
               'cpus',
-              siteBatch
-                ? t(
-                    `申请 CPU 数 = 同时运行的站点数（空白沿用服务器设置：${stationConcurrency}）`,
-                    `Requested CPUs = stations running at once (blank uses the server setting: ${stationConcurrency})`,
-                  )
-                : t(
-                    '每个 MPI 进程申请 CPU 数（空白沿用服务器设置）',
-                    'Requested CPUs per MPI rank (blank uses server setting)',
-                  ),
+              t(
+                '每个 MPI 进程申请 CPU 数（空白沿用服务器设置）',
+                'Requested CPUs per MPI rank (blank uses server setting)',
+              ),
               cpus,
               setCpus,
             ] as const,
@@ -1357,10 +1355,15 @@ export default function RunPanel({
       </p>
       {host && batchCases && (
         <Notice>
-          {t(
-            '同时运行数包含排队中的作业。请保持此窗口打开以继续提交；关闭窗口后已提交作业继续运行，尚未提交的站点停止。',
-            'Concurrency includes queued jobs. Keep this window open to submit remaining stations. Closing it leaves submitted jobs running and stops unsent stations.',
-          )}
+          {siteBatch
+            ? t(
+                '站点按节点打包运行：所有站点一次排进服务器上的队列，每个节点作业同时跑满这个节点的核数（站点数多就自动多开节点），跑完一个接着跑下一个。请保持此窗口打开直到站点都交上去；关闭窗口后已交上去的站点照常运行，没交上去的停止。',
+                'Stations are packed per node: all of them join a queue on the server, each node job runs as many as the node has cores (more stations open more node jobs) and takes the next as one finishes. Keep this window open until every station is sent; closing it leaves sent stations running and stops the rest.',
+              )
+            : t(
+                '同时运行数包含排队中的作业。请保持此窗口打开以继续提交；关闭窗口后已提交作业继续运行，尚未提交的站点停止。',
+                'Concurrency includes queued jobs. Keep this window open to submit remaining stations. Closing it leaves submitted jobs running and stops unsent stations.',
+              )}
         </Notice>
       )}
       {host && (

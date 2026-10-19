@@ -321,7 +321,8 @@ test('remote batch runs as many stations as CPUs are requested, one CPU each, an
     assert.equal(args.pack, true);
     assert.equal(args.runId, submissions[0].args.runId);
   }
-  assert.deepEqual(p.batchWorkers, [6]);
+  // Packed per node on the server: every station joins the queue at once.
+  assert.deepEqual(p.batchWorkers, [2]);
   assert.equal(p.state.running['/good'].status, 'succeeded');
   assert.equal(p.state.running['/bad'].status, 'failed');
   assert.equal(p.state.running['/bad'].running, false);
@@ -432,7 +433,9 @@ test('remote batch failures retain a reconciliation placeholder without inventin
       status: { state: 'unknown' },
       error: 'Error: Connection lost',
     });
-    assert.equal(p.state.running['/bad'].status, 'cancelled');
+    // A packed batch sends every station at once, so the other station was sent too and is
+    // equally unconfirmed rather than never sent.
+    assert.equal(p.state.running['/bad'].status, 'unknown');
   }
 });
 

@@ -55,7 +55,7 @@ P={pool}; JOBS={jobs}
 SLOTS={slots}
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=$(cat "$P/slots" 2>/dev/null)
 [ "$SLOTS" -gt 0 ] 2>/dev/null || SLOTS=${{SLURM_CPUS_ON_NODE:-$(nproc 2>/dev/null || echo 1)}}
-LINGER=${{COLM_PACK_LINGER:-60}}
+LINGER=${{COLM_PACK_LINGER:-180}}
 # 自己的作业号：各调度系统的环境变量；没有调度系统时是自己的进程号（启动它的一方记下的正是这个）。
 ME=${{SLURM_JOB_ID:-${{LSB_JOBID:-${{PBS_JOBID:-$$}}}}}}
 mkdir -p running done pg term

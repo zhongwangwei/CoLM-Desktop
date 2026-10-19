@@ -34243,3 +34243,9 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：`an_lsf_batch_is_packed_with_a_whole_node_per_job`（每节点 2 核时 3 个站点交 2 个载体，参数是 `-n 2 -R span[hosts=1]`；排队时状态显示"waiting in node pack: 700 RUN"；用 `LSB_JOBID` 跑载体后，站点结果分别为 0 和 4）；`a_machine_without_a_scheduler_runs_its_batch_in_one_background_carrier`。colm-remote 106 条、colm-cli 457 条、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。
     - 更正：第 48 条的提交说明写了"gui/src-tauri 415 条"，实际是 414 条通过、1 条按设计跳过。
     - 没测：在摆渡船、PBS 集群上真实交一批。
+
+50. **打包后站点仍然一个一个慢慢上去（land02 实测，2026-10-19）**：用户在 land02 交了一批，打包本身正常：两个载体（119574、119575），每个申请 96 个逻辑 CPU、每 CPU 3333 MB，每节点放 48 个站点；前 32 个站点里 25 个已跑完，全部退出码 0。但站点进队列很慢：头 8 个 7 s 内到齐，之后每 30–60 s 才来一个；第一个载体在 60 s 没有新站点后于 22:53 退出，后面的站点只好再排队申请一个节点（等了 4 分钟）。
+    - 原因：站点批量仍按"同时运行的站点数"（申请 CPU 数）限制在途站点，前面的没跑完就不再交新的。这在打包之后已经没有意义：同时跑多少由载体按节点核数决定，载体数由站点数决定。
+    - 改为：站点批量把所有站点一次交进服务器的队列（`runRemoteBatch` 的 `workers` 取站点总数；提交仍是每次 5 个并发）。运行面板对站点批量不再显示"申请 CPU 数"，改为说明打包方式。载体空闲后等待新站点的时间从 60 s 延长到 180 s，免得站点陆续到达时载体刚退出又要重新排队；代价是最后一批跑完后，节点要多空占 3 分钟（天河按整节点计费）。
+    - 测试：`remote batch runs as many stations as CPUs are requested…` 改为检查站点一次全部在途（两个站点 → workers 2）；`remote batch failures retain a reconciliation placeholder…` 改为：两个站点同时交上去，都处于待核对，而不是第二个"没交上去"。前端 727 条、colm-remote 106 条通过。
+    - 没做：把站点配置合成一批上传（现在每个站点仍单独走一遍 ssh，每次 5 个并发）。
