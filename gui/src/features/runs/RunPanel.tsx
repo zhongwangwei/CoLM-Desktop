@@ -1395,7 +1395,9 @@ export default function RunPanel({
       </div>
       {host &&
         !siteBatch &&
-        scheduler !== 'bare' &&
+        (scheduler === 'slurm' ||
+          (scheduler === 'auto' &&
+            servers.find((server) => server.host === host)?.scheduler === 'slurm')) &&
         !servers.find((server) => server.host === host)?.memory_gb && (
           <p className="muted">
             {t(

@@ -301,8 +301,10 @@ if [ "$W" -gt $((L * SLOTS - R)) ]; then
 {script}COLM_CARRIER_EOF
   chmod +x "$C/script.sh"
   if ! ( cd "$C" && colm_carrier && echo "$ID" > sched_id ); then
-    # 没有载体来跑它：撤出队列，这次提交按失败报告。
+    # 没有载体来跑它：撤出队列，这次提交按失败报告。撤出以后它确定不会再跑，记下来：之后核对
+    # 这次提交时据此判为失败、放开重新提交，而不是永远"身份不完整、不要重新提交"。
     rm -f "$P/queue/$J" sched_id
+    echo "the node job could not be submitted" > submit_failed
     exit 1
   fi
 fi

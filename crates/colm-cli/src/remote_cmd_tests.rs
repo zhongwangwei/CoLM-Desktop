@@ -1925,3 +1925,38 @@ fn results_are_read_with_the_newest_built_engine_or_else_the_run_engine() {
     );
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_pack_submission_the_server_marked_failed_is_resolved_not_left_pending() {
+    let (fixture, mut pending) = PendingFixture::new("pack-failed");
+    pending.record.root = fixture.0.to_string_lossy().into_owned();
+    pending.record.remote_case = format!("{}/cases/fixture", pending.record.root);
+    pending.record.scheduler = "lsf".into();
+    let dir = PathBuf::from(job::job_dir(&pending.record.root, &pending.record.job));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("script.sh"), format!("# colm-engine-snapshot: {}\n# colm-run-case: {}\n# colm-operation-id: original-operation\n", pending.record.engine, serde_json::to_string(&pending.record.remote_case).unwrap())).unwrap();
+    std::fs::write(dir.join("scheduler"), "lsf-pack\n").unwrap();
+    let run = || {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(pending_identity_script(&pending).unwrap())
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert!(
+        run().starts_with("identity=incomplete"),
+        "no id yet and no failure mark"
+    );
+    std::fs::write(
+        dir.join("submit_failed"),
+        "the node job could not be submitted\n",
+    )
+    .unwrap();
+    let out = run();
+    assert_eq!(
+        out.lines().collect::<Vec<_>>(),
+        ["identity=failed", "the node job could not be submitted"]
+    );
+}

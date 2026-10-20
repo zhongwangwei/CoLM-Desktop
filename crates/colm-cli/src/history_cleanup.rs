@@ -31,6 +31,10 @@ def finished(directory, name):
         plain(exit_path)
         with open(exit_path) as source:
             return re.fullmatch(r'-?\d+\s*', source.read(64)) is not None
+    # A packed station whose node job could not be submitted left the queue for good
+    # (colm_remote::pack writes submit_failed); it never runs either.
+    if os.path.isfile(directory + '/submit_failed') and not os.path.islink(directory + '/submit_failed'):
+        return True
     # A packed station cancelled before any node job took it never runs, so it never writes an
     # exit code; nothing can start it any more (colm_remote::pack).
     if os.path.isfile(directory + '/scheduler') and os.path.isfile(directory + '/pool'):
@@ -570,6 +574,14 @@ mod tests {
         .unwrap();
         fs::write(pool.join("claimed/run-live/carrier"), "100\n").unwrap();
         refused(&project(&f, true), "not confirmed finished: run-live");
+        // One whose node job could not be submitted left the queue for good: it does not block.
+        fs::write(
+            f.root.join("jobs/run-live/submit_failed"),
+            "the node job could not be submitted\n",
+        )
+        .unwrap();
+        ok(&project(&f, false));
+        fs::remove_file(f.root.join("jobs/run-live/submit_failed")).unwrap();
         // One cancelled before any node job took it can never start, so it does not block.
         fs::remove_file(pool.join("claimed/run-live/carrier")).unwrap();
         fs::write(pool.join("claimed/run-live/cancelled"), "").unwrap();

@@ -753,6 +753,8 @@ fn a_site_whose_node_job_cannot_be_submitted_leaves_the_queue() {
         "no node job would ever run it"
     );
     assert!(!sb.job_dir("j-f").join("sched_id").exists());
+    // 确定不会再跑：留下标记，之后核对这次提交时据此判失败、放开重新提交。
+    assert!(sb.job_dir("j-f").join("submit_failed").is_file());
 }
 
 #[cfg(unix)]

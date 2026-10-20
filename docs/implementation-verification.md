@@ -34494,3 +34494,28 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - gui/src-tauri：`an_interrupted_first_submission_still_answers_the_resent_request`、`a_server_project_in_the_work_root_has_no_folder_of_its_own`。
       - 前端：`an open overtaken by leaving the page or by another open ends quietly`、`clicking the same case again while it opens waits for the first open`、`an old server engine that cannot read grids is explained instead of quoted`。
       - colm-remote 113 条、colm-cli 464 条（串行）、gui/src-tauri 416 条（另有 1 条按设计跳过）、前端 745 条通过。工作区 clippy、两边 fmt、eslint、prettier、check-gui、构建通过。
+
+63. **两天改动的第二轮核查（用户要求，2026-10-20）**：这次看第 62 条没细看的部分（新建模拟草稿、项目删除、服务器建算例与登录节点编译、待核对作业的认领、集群预设、结果按需取回与服务器读取、别处提交的启动封面），以及第 62 条刚写的修复。
+    - **找到并修复：打包时交载体失败的站点会永远卡在"待核对"、不能重新提交。**
+      - 提交失败时桌面端保留"待核对"预约（`submit_with_intent`），是因为作业有没有被收下往往说不准。
+      - 打包时交载体失败（例如账户或分区不对），脚本已经把站点撤出队列，这个站点确定不会再跑。但服务器上只剩写着 `<调度系统>-pack` 的 `scheduler` 文件，没有 `sched_id`：核对身份永远是"不完整、不要重新提交"，只能手动删掉预约文件。
+      - 改为：撤出队列时写下 `submit_failed`。核对身份时遇到它就报 `identity=failed`，`remote-status` 据此记为失败、已结束，删掉本机的待核对预约，放开重新提交。
+      - 服务器清理的 `finished()` 也认这个标记，删记录时能一并删掉服务器上的作业目录。
+      - 普通的单作业提交失败仍按原规则保留待核对：sbatch 报错后在 squeue/sacct 里按目录找不到，不等于没交上（有的集群没开 sacct）。
+    - **顺手改：** 运行面板"没填内存"的提示只在 Slurm 上显示。原来提交方式是"自动识别"时，在 LSF 机器上也会出现。
+    - **核过、没发现问题：**
+      - `openCase` 的新写法：被取代、重复点击、出错时 busy 的收尾。
+      - 新建模拟草稿：每步存一次加离开时存一次；继续新建时接着用原记录；在历史里删掉的草稿不会复活。
+      - 登录节点编译：最低优先级运行，网络失败时改送依赖再试一次。
+      - 待核对作业按目录认领：找到多个不认。
+      - 集群预设：按调度系统和分区识别；探测时已去掉默认分区名后的 `*`；只补空着的数据目录。
+      - 结果按需取回与服务器读取的路由。
+      - 启动封面：图标在打包产物里；20 秒后一定放手。
+      - 第 62 条的 `cancelled` 标记、`colm_gone`、`carrier.log`、`SettleOnDrop`、格点闭合诊断与 `history-map` 取最后一步。
+    - **小瑕疵，没改：** 启动封面在 JS 加载前固定显示英文 "Loading…"，加载后换成按语言显示的"正在加载…"，会闪一下字。
+    - **仍未解决：** 载体死掉后被判失败的站点没有退出码、也没有标记，服务器端清理仍不认它，只能删记录（见第 62 条）。
+    - 测试：
+      - colm-remote `a_site_whose_node_job_cannot_be_submitted_leaves_the_queue` 增加断言：留下 `submit_failed`。
+      - colm-cli 新增 `a_pack_submission_the_server_marked_failed_is_resolved_not_left_pending`。
+      - 服务器清理测试增加：有 `submit_failed` 的站点不挡住删除。
+      - colm-remote 113 条、colm-cli 465 条（串行）、gui/src-tauri 416 条（另有 1 条按设计跳过）、前端 745 条通过。工作区 clippy、两边 fmt、eslint、prettier、check-gui、构建通过。

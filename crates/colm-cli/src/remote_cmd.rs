@@ -2243,7 +2243,7 @@ fn pending_identity_script(pending: &PendingRun) -> Result<String> {
         format!("# colm-operation-id: {operation}"),
     ];
     let checks = markers.iter().map(|marker| format!("grep -Fqx -- {} script.sh || {{ echo 'pending job identity changed' >&2; exit 1; }}", quote(marker))).collect::<Vec<_>>().join("\n");
-    Ok(format!("set -e\n{prelude}cd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\ncase \"$S\" in {scheduler}|{scheduler}-pack) ;; *) echo 'pending scheduler identity changed' >&2; exit 1;; esac\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n{adopt}  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\necho \"$S\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler),adopt=ADOPT_SLURM_JOB,prelude=colm_remote::sched::PATH_PRELUDE))
+    Ok(format!("set -e\n{prelude}cd {dir} 2>/dev/null || {{ echo 'identity=missing'; exit 0; }}\n[ -f script.sh ] && [ ! -L script.sh ] || {{ echo 'identity=incomplete'; exit 0; }}\n{checks}\nS=$(cat scheduler 2>/dev/null || echo bare)\ncase \"$S\" in {scheduler}|{scheduler}-pack) ;; *) echo 'pending scheduler identity changed' >&2; exit 1;; esac\n[ -f submit_failed ] && {{ echo 'identity=failed'; cat submit_failed; exit 0; }}\nif [ \"$S\" = bare ]; then\n  ID=$(cat pid 2>/dev/null || true)\n  case \"$ID\" in ''|*[!0-9]*) echo 'identity=incomplete'; exit 0;; esac\nelse\n  ID=$(cat sched_id 2>/dev/null || true)\n{adopt}  case \"$ID\" in ''|*[!A-Za-z0-9._-]*) echo 'identity=incomplete'; exit 0;; esac\nfi\necho 'identity=verified'\necho \"$ID\"\necho \"$S\"\n", dir=quote(&job::job_dir(&pending.record.root,&pending.record.job)),scheduler=quote(&pending.record.scheduler),adopt=ADOPT_SLURM_JOB,prelude=colm_remote::sched::PATH_PRELUDE))
 }
 
 /// 待核对的 Slurm 提交没有 `sched_id` 时，按作业目录去 Slurm 里找一次，恰好一个就记下。天河 2026-10-19：
@@ -2261,6 +2261,28 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
     let ssh = Ssh::new(&pending.record.host)?;
     let identity = ssh.run_ok(&pending_identity_script(&pending)?)?;
     let verified = identity.lines().next() == Some("identity=verified");
+    // 服务器明确记下这次提交没进任何队列（打包时交载体失败，站点已撤出队列）：它不会再跑，
+    // 判为失败并放开重新提交。
+    if identity.lines().next() == Some("identity=failed") {
+        let reason = identity.lines().nth(1).unwrap_or("submission failed");
+        let status = job::Status {
+            state: job::State::Lost,
+            phase: None,
+            detail: Some(format!(
+                "FAILED: {reason}; the station never joined a queue"
+            )),
+            log_tail: String::new(),
+        };
+        let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":true,"ended":"failed","status":status});
+        crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
+        std::fs::remove_file(pending.source_case.join(PENDING))?;
+        sync_directory(&pending.source_case)?;
+        println!(
+            "{}",
+            json!({"record":pending.record,"pending":serde_json::Value::Null,"status":status,"ended":"failed"})
+        );
+        return Ok(());
+    }
     let status = if verified {
         job::status(&ssh, &pending.record.root, &pending.record.job, lines)?
     } else {
