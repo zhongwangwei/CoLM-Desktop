@@ -10,12 +10,12 @@ import {
   makeRecord,
   parameterKey,
   upsertParameter,
-  versionDepth,
   type Descriptor,
   type ModelField,
 } from './model';
 import CodeWorkspace from './CodeWorkspace';
 import VersionChanges from './VersionChanges';
+import RevisionTree from './RevisionTree';
 import ConfigurationOptions from './ConfigurationOptions';
 import { setupHandledKeys, type SetupEnvironment } from './scientific-setup';
 import { compatibleKernel } from '../runs/run-model';
@@ -772,23 +772,14 @@ export default function VersionsPage() {
       {error && <Notice tone="error">{error}</Notice>}
       <div className="form-grid">
         <Card title={t('版本树与修订', 'Version tree and revisions')}>
-          <nav aria-label={t('版本树', 'Version tree')}>
-            {state.versions.map((v) => (
-              <div
-                key={`${v.version.id}@${v.version.revision}`}
-                style={{ paddingInlineStart: versionDepth(v, state.versions) * 14 }}
-              >
-                <Button
-                  disabled={busy || codeBusy || dirty}
-                  variant={selected?.fingerprint === v.fingerprint ? 'primary' : 'ghost'}
-                  onClick={() => run(() => select(v))}
-                >
-                  {v.name} · r{v.version.revision}{' '}
-                  {v.version.id === 'official' ? t('官方', 'Official') : ''}
-                </Button>
-              </div>
-            ))}
-          </nav>
+          <RevisionTree
+            versions={state.versions}
+            selected={selected}
+            disabled={busy || codeBusy || dirty}
+            en={state.language === 'en'}
+            onSelect={(v) => run(() => select(v))}
+            onDeleted={refreshVersions}
+          />
           <h3>{t('草稿', 'Drafts')}</h3>
           {drafts.map((d) => (
             <Button

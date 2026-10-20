@@ -174,6 +174,11 @@ impl Registry {
     /// official baseline, no child revision and no draft. Source snapshots that no remaining
     /// revision uses are removed too; the returned paths are what was deleted. Callers check
     /// external references (history, running work) before calling this.
+    /// What stops `version` from being removed (the latest official revision, a revision
+    /// derived from it, a draft based on it); `None` when the registry itself allows it.
+    pub fn removal_blocker(&self, version: &VersionRef) -> Result<Option<String>> {
+        Ok(removal_blocker(&self.list()?, &self.drafts()?, version))
+    }
     pub fn remove(&self, version: &VersionRef) -> Result<Vec<PathBuf>> {
         let _lock = self.lock()?;
         let dir = self.revision_dir(version)?;

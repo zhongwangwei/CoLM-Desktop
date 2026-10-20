@@ -2999,6 +2999,24 @@ table input {
 .freeze-check li.is-note {
   color: var(--muted);
 }
+.version-tree-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.version-tree-delete {
+  border: 0;
+  background: none;
+  padding: 2px 4px;
+  color: var(--danger);
+  font-size: 12px;
+  cursor: pointer;
+}
+.version-tree-delete:disabled {
+  color: var(--muted);
+  cursor: default;
+}
 .version-changes {
   display: grid;
   gap: 10px;

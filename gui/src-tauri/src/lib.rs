@@ -186,6 +186,7 @@ pub fn run() {
             model_freeze,
             model_freeze_check,
             model_changes,
+            model_usage,
             model_migrate_case,
             model_case_runs,
             model_case_context,

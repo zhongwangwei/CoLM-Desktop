@@ -714,8 +714,13 @@ export const commandContract = {
     "versions": {
       "required": true,
       "rust_type": "Vec<VersionRef>"
+    },
+    "keepHistory": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
+  "model_usage": {},
   "model_prune": {
     "dryRun": {
       "required": true,

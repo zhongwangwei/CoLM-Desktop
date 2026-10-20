@@ -137,12 +137,26 @@ fn delete_revision(
     registry: &Registry,
     ledger: &colm_history::History,
     version: &VersionRef,
+    bound: Option<&Uses>,
 ) -> Result<Vec<String>, String> {
-    let references = history_references(ledger, version)?;
-    if references > 0 {
-        return Err(format!(
-            "仍有 {references} 条历史记录使用此版本；先在历史记录中删除或清空这些记录，再删除版本"
-        ));
+    match bound {
+        // 版本页的"清理"：只看现存的算例和研究。历史记录照样保留，只是不能再按这个版本重放。
+        Some(uses) => {
+            let cases = Uses::count(&uses.bound, version);
+            if cases > 0 {
+                return Err(format!(
+                    "仍有 {cases} 个算例或研究绑定此版本；先把它们换到别的版本，再删除"
+                ));
+            }
+        }
+        None => {
+            let references = history_references(ledger, version)?;
+            if references > 0 {
+                return Err(format!(
+                    "仍有 {references} 条历史记录使用此版本；先在历史记录中删除或清空这些记录，再删除版本"
+                ));
+            }
+        }
     }
     registry
         .remove(version)
@@ -167,6 +181,7 @@ fn delete_revisions(
     registry: &Registry,
     ledger: &colm_history::History,
     versions: Vec<VersionRef>,
+    bound: Option<&Uses>,
 ) -> DeleteReport {
     let mut report = DeleteReport {
         deleted: Vec::new(),
@@ -174,7 +189,7 @@ fn delete_revisions(
         removed: Vec::new(),
     };
     for version in versions {
-        match delete_revision(registry, ledger, &version) {
+        match delete_revision(registry, ledger, &version, bound) {
             Ok(removed) => {
                 report.removed.extend(removed);
                 report.deleted.push(version);
@@ -187,16 +202,86 @@ fn delete_revisions(
 
 /// Delete saved model revisions and the source snapshots only they used. Each revision is
 /// checked on its own; the report says which stayed and why.
+///
+/// `keep_history`：只要没有现存的算例或研究绑定就删，提到它的历史记录留着（不能再按它重放）。
+/// 不给时沿用原规则：还有历史记录提到它就不删。
 #[tauri::command]
 pub async fn model_delete(
+    app: tauri::AppHandle,
     processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    creations: tauri::State<'_, crate::sidecar::CaseCreations>,
     versions: Vec<VersionRef>,
+    keep_history: Option<bool>,
 ) -> Result<DeleteReport, String> {
+    use tauri::Manager;
+    let roots = match keep_history {
+        Some(true) => Some(known_project_roots(
+            &crate::recent::load_recent_strict(&app)?,
+            &app.path().app_data_dir().map_err(|e| e.to_string())?,
+        )?),
+        _ => None,
+    };
     let processes = processes.inner().clone();
+    let creations = creations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
         let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
-        processes.with_idle(|| Ok(delete_revisions(&registry, &ledger, versions)))
+        while_idle(&processes, &creations, || {
+            // 在空闲锁里重新数绑定：算例创建与运行都停着，数完到删完之间不会有新绑定落到它上面。
+            let bound = roots
+                .as_deref()
+                .map(|roots| uses(&ledger, roots))
+                .transpose()?;
+            Ok(delete_revisions(
+                &registry,
+                &ledger,
+                versions,
+                bound.as_ref(),
+            ))
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 一个修订被谁用着：现存的算例和研究绑定数、提到它的历史记录数，以及注册表规则挡不挡删除。
+#[derive(serde::Serialize)]
+pub struct RevisionUsage {
+    version: VersionRef,
+    cases: u64,
+    history: u64,
+    /// 注册表自己的规则（最新官方版、有派生版本或草稿）；为空表示注册表允许删。
+    blocker: Option<String>,
+}
+
+/// 版本页"版本树与修订"里每个修订的用途，用来标出哪些没用、可以清理。
+#[tauri::command]
+pub async fn model_usage(app: tauri::AppHandle) -> Result<Vec<RevisionUsage>, String> {
+    use tauri::Manager;
+    let roots = known_project_roots(
+        &crate::recent::load_recent_strict(&app)?,
+        &app.path().app_data_dir().map_err(|e| e.to_string())?,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
+        let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
+        let found = uses(&ledger, &roots)?;
+        registry
+            .list()
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .map(|revision| {
+                let version = revision.version;
+                Ok(RevisionUsage {
+                    cases: Uses::count(&found.bound, &version),
+                    history: Uses::count(&found.history, &version),
+                    blocker: registry
+                        .removal_blocker(&version)
+                        .map_err(|e| e.to_string())?,
+                    version,
+                })
+            })
+            .collect()
     })
     .await
     .map_err(|e| e.to_string())?
@@ -234,11 +319,31 @@ fn remember(used: &mut Vec<VersionRef>, version: VersionRef) {
 /// Revisions something outside the registry still names: visible history records (as
 /// [`history_references`] counts them), and the `model-binding.json` / study pin of every case
 /// those records touched or that sits in a known project (its cases, studies and members).
-fn revisions_in_use(
-    ledger: &colm_history::History,
-    roots: &[PathBuf],
-) -> Result<Vec<VersionRef>, String> {
-    let mut used = Vec::new();
+/// 谁在用哪个修订：历史记录提到它的次数，以及现存目录（已知项目里的算例、研究、研究成员，
+/// 历史记录里的算例目录）绑定它的个数。同一个目录只数一次。
+#[derive(Default)]
+struct Uses {
+    history: Vec<(VersionRef, u64)>,
+    bound: Vec<(VersionRef, u64)>,
+}
+
+impl Uses {
+    fn add(list: &mut Vec<(VersionRef, u64)>, version: VersionRef) {
+        match list.iter_mut().find(|(known, _)| *known == version) {
+            Some((_, count)) => *count += 1,
+            None => list.push((version, 1)),
+        }
+    }
+
+    fn count(list: &[(VersionRef, u64)], version: &VersionRef) -> u64 {
+        list.iter()
+            .find(|(known, _)| known == version)
+            .map_or(0, |(_, count)| *count)
+    }
+}
+
+fn uses(ledger: &colm_history::History, roots: &[PathBuf]) -> Result<Uses, String> {
+    let mut found = Uses::default();
     let mut dirs = Vec::new();
     let mut offset = 0;
     loop {
@@ -255,8 +360,8 @@ fn revisions_in_use(
                 &event.version_id,
                 event.revision.as_deref().and_then(|r| r.parse().ok()),
             ) {
-                remember(
-                    &mut used,
+                Uses::add(
+                    &mut found.history,
                     VersionRef {
                         id: id.clone(),
                         revision,
@@ -283,6 +388,9 @@ fn revisions_in_use(
             dirs.push(study);
         }
     }
+    // 历史里同一个算例目录出现成百上千次（每次运行、迁移一条），读一次就够。
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|dir| seen.insert(dir.clone()));
     let read = |path: PathBuf| -> Option<Value> {
         serde_json::from_slice(&std::fs::read(path).ok()?).ok()
     };
@@ -295,9 +403,21 @@ fn revisions_in_use(
         ];
         for version in named.into_iter().flatten() {
             if let Ok(version) = serde_json::from_value(version) {
-                remember(&mut used, version);
+                Uses::add(&mut found.bound, version);
             }
         }
+    }
+    Ok(found)
+}
+
+fn revisions_in_use(
+    ledger: &colm_history::History,
+    roots: &[PathBuf],
+) -> Result<Vec<VersionRef>, String> {
+    let found = uses(ledger, roots)?;
+    let mut used = Vec::new();
+    for (version, _) in found.history.into_iter().chain(found.bound) {
+        remember(&mut used, version);
     }
     Ok(used)
 }
@@ -851,18 +971,78 @@ mod tests {
         ledger.append(&run).unwrap();
         let end = run.next(colm_history::EventPhase::Finished, "succeeded");
         ledger.append(&end).unwrap();
-        let error = delete_revision(&registry, &ledger, &old).unwrap_err();
+        let error = delete_revision(&registry, &ledger, &old, None).unwrap_err();
         assert!(error.contains("1 条历史记录"), "{error}");
         ledger.remove_operation(&end.operation_id).unwrap();
         let latest = VersionRef {
             id: "official".into(),
             revision: 2,
         };
-        let report = delete_revisions(&registry, &ledger, vec![old.clone(), latest.clone()]);
+        let report = delete_revisions(&registry, &ledger, vec![old.clone(), latest.clone()], None);
         assert_eq!(report.deleted, vec![old.clone()]);
         assert_eq!(report.failed.len(), 1, "the latest official baseline stays");
         assert_eq!(report.failed[0].version, latest);
         assert!(registry.get(&old).is_err());
+        drop(ledger);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_revision_only_history_names_can_be_cleared_but_not_one_a_case_is_bound_to() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-model-clear-{}",
+            colm_history::Event::start("test").operation_id
+        ));
+        let registry = Registry::open(root.join("models")).unwrap();
+        let code = |sha: &str| colm_model::CodeRef {
+            kind: colm_model::CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: sha.repeat(64),
+        };
+        let first = registry.install_official(code("a")).unwrap().version;
+        let second = registry.install_official(code("b")).unwrap().version;
+        registry.install_official(code("c")).unwrap();
+        let ledger = colm_history::History::open(root.join("history.sqlite3")).unwrap();
+        // A case that was deleted long ago still names the first revision in history.
+        let gone = root.join("project/gone");
+        let mut run = colm_history::Event::start("run");
+        run.version_id = Some("official".into());
+        run.revision = Some("1".into());
+        run.case_path = Some(gone.display().to_string());
+        ledger.append(&run).unwrap();
+        ledger
+            .append(&run.next(colm_history::EventPhase::Finished, "succeeded"))
+            .unwrap();
+        // A case that exists is bound to the second.
+        let case = root.join("project/live");
+        std::fs::create_dir_all(&case).unwrap();
+        std::fs::write(
+            case.join(colm_model::BINDING_FILE),
+            json!({"schema":1,"version":second}).to_string(),
+        )
+        .unwrap();
+        let found = uses(&ledger, &[root.join("project")]).unwrap();
+        assert_eq!(Uses::count(&found.history, &first), 1);
+        assert_eq!(Uses::count(&found.bound, &first), 0);
+        assert_eq!(Uses::count(&found.bound, &second), 1);
+        let report = delete_revisions(
+            &registry,
+            &ledger,
+            vec![first.clone(), second.clone()],
+            Some(&found),
+        );
+        assert_eq!(report.deleted, vec![first.clone()]);
+        assert_eq!(report.failed.len(), 1);
+        assert!(
+            report.failed[0].reason.contains("1 个算例"),
+            "{}",
+            report.failed[0].reason
+        );
+        assert!(registry.get(&first).is_err());
+        assert!(registry.get(&second).is_ok());
+        // The history record stays; only its replay is gone.
+        assert_eq!(uses(&ledger, &[]).unwrap().history.len(), 1);
         drop(ledger);
         std::fs::remove_dir_all(root).unwrap();
     }

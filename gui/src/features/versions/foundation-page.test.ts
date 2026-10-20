@@ -87,6 +87,7 @@ function page(
         'Advanced',
         'CodeWorkspace',
         'VersionChanges',
+        'RevisionTree',
       ].map((k) => [k, k]),
     ),
     IGBP: [],
