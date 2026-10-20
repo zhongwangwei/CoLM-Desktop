@@ -1242,10 +1242,12 @@ mod tests {
         }
         let cached = cache_dir(&opts, &code_ref).unwrap().join("workspaces/soil");
         std::fs::create_dir_all(&cached).unwrap();
+        // 与冻结时一样克隆到相对路径：Git for Windows 不接受 verbatim 的绝对目标路径（CI 实测）。
         assert!(std::process::Command::new("git")
             .args(["clone", "-q", "--local"])
-            .arg(&repo)
-            .arg(cached.join("src"))
+            .arg(std::path::absolute(&repo).unwrap())
+            .arg("src")
+            .current_dir(&cached)
             .status()
             .unwrap()
             .success());

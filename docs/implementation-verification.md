@@ -34594,3 +34594,8 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 测试：
       - colm-cli `version_changes_tests.rs` 三条：参数与物理方案的前后值、来源研究的读取、两份独立克隆之间按内容比较；另有 `a_new_network_drops_only_the_old_networks_studies`。
       - 前端 `version-changes.test.ts` 两条（中英文）；`foundation-page.test.ts` 的桩加上 `VersionChanges`。
+
+68. **Windows CI：测试里克隆到注册表缓存目录失败（2026-10-20）**：推送第 64–67 条后，Windows 的 rust 任务中只有 `a_version_built_on_a_workspace_is_copied_at_its_frozen_commit` 一条测试失败，报 `fatal: could not create work tree dir '\\?\C:\…\models\sources\…\workspaces\soil\src': Invalid argument`。
+    - 原因：注册表根目录经过规范化，变成 verbatim 路径（`\\?\` 前缀）。Git for Windows 不接受这种形式的克隆目标。冻结代码早就因此改为在缓存目录里克隆到相对路径 `src`，测试却直接传了绝对路径。
+    - 改为与冻结代码同样的写法：`current_dir` 设为缓存目录，目标写相对路径 `src`，来源用 `std::path::absolute`。
+    - 规矩：凡是把注册表或缓存下的路径交给 git 当目标，都用相对路径。
