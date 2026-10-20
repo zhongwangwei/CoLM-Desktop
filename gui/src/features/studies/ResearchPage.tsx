@@ -948,9 +948,23 @@ export default function ResearchPage() {
     }
     setWorkbench(true);
   }
+  // 从"新建修改版"点进来：直接打开那个方法，不再停在研究首页。
+  useEffect(() => {
+    const method = state.researchMethod;
+    if (!method) return;
+    update({ researchMethod: null });
+    try {
+      chooseMethod(method);
+    } catch (e) {
+      setError(String(e));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.researchMethod]);
+  // 研究没有自己的首页了：方法从"新建修改版"里选，返回也回到那里（2026-10-21 用户要求）。
   function showHome() {
     if (lock.current || runLock.current) throw new Error('A study operation is in progress');
-    setWorkbench(false);
+    update({ versionsView: 'create' });
+    if (!navigate('versions')) setWorkbench(false);
   }
   const field = (
     id: string,
@@ -1462,7 +1476,7 @@ export default function ResearchPage() {
   ];
   const backAction = action(
     'research-home',
-    tr('返回研究首页', 'Back to research'),
+    tr('← 新建修改版', '← New modified version'),
     showHome,
     !launching,
   );

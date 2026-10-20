@@ -220,6 +220,10 @@ export type AppState = {
     subgrid?: 'LCT' | 'PFT' | 'PC';
     setup?: { id: string; value: string };
   } | null;
+  /** 模型版本页显示哪一页：`create` 是"新建修改版"的 6 种方式，`library` 是全部版本。 */
+  versionsView?: 'create' | 'library';
+  /** 从"新建修改版"点进研究时要直接打开的方法（tuning、uncertainty…），研究页用完清掉。 */
+  researchMethod?: string | null;
   /** 版本页选好的要研究的参数：研究页加载参数行之后据此勾选，用完清掉。 */
   researchSeed?: { parameters: StudyPick[] } | null;
   expert: boolean;

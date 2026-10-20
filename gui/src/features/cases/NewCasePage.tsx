@@ -1350,11 +1350,13 @@ export default function NewCasePage() {
   function openResources() {
     return leaveForConfiguration('resources', step);
   }
+  // 改模型从"新建修改版"进去（2026-10-21 研究不再单独占侧栏一项）。
   function openResearch() {
-    return leaveForConfiguration('research', 4);
+    return leaveForConfiguration('versions', 4);
   }
-  function leaveForConfiguration(route: 'resources' | 'research', returnStep: SimulationStep) {
+  function leaveForConfiguration(route: 'resources' | 'versions', returnStep: SimulationStep) {
     update({
+      ...(route === 'versions' ? { versionsView: 'create' as const } : {}),
       newCaseSeed: {
         ...wizardSeed(returnStep),
         ...(draft.current.id ? { draftId: draft.current.id } : {}),

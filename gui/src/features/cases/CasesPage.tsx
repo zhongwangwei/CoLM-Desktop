@@ -690,9 +690,10 @@ export default function CasesPage() {
     await save();
     setStep((step + 1) as SimulationStep);
   }
+  // 研究从"新建修改版"进去（2026-10-21 研究不再单独占侧栏一项）。
   function openResearch() {
-    update({ simulationReturn: { route: 'case', step: 4 } });
-    return navigate('research');
+    update({ simulationReturn: { route: 'case', step: 4 }, versionsView: 'create' });
+    return navigate('versions');
   }
   const datePrefixes: ('start' | 'end' | 'spinup')[] = step === 3 ? ['start', 'end', 'spinup'] : [];
   const fields: UiField[] =

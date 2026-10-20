@@ -3486,3 +3486,63 @@ table input {
 .dialog-content.study-import {
   width: min(860px, 94vw);
 }
+.version-hub {
+  display: grid;
+  gap: 16px;
+}
+.version-hub-base {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px 18px;
+}
+.version-hub-base .field {
+  flex: 0 1 420px;
+}
+.version-hub-base p {
+  margin: 0 0 10px;
+}
+.version-hub-methods {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin-bottom: 0;
+}
+.version-hub-tag {
+  display: inline-block !important;
+  margin-top: 6px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--elevated);
+  font-size: 11px !important;
+}
+.version-hub-drafts {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.version-hub-drafts button {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  text-align: left;
+}
+.version-hub-drafts button:hover {
+  background: var(--background);
+}
+.version-hub-drafts .muted {
+  font-size: 12px;
+}
+.param-group td {
+  padding-top: 14px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+}

@@ -304,6 +304,7 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
   );
   assert.equal(downloads.length, 0, 'a late response does not download a different selection');
   const actions = callback(page, 'actions', {
+    improveModel: () => {},
     tab: 'series',
     source: '/copy',
     variable: 'f_fsena',
@@ -418,6 +419,7 @@ test('Results report formats retain summary metrics and route native PDF through
     /native print failed/,
   );
   const actions = callback(page, 'actions', {
+    improveModel: () => {},
     tab: 'report',
     reportFormat: 'pdf',
     catalog: { steps: 2 },
@@ -492,7 +494,7 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
   assert.deepEqual(published.at(-1), { key: 'verified-selection', rows: [] });
 });
 
-test('result navigation opens research and returns diagnostics to overview', async () => {
+test('result navigation opens 新建修改版 and returns diagnostics to overview', async () => {
   const destinations: string[] = [],
     noop = () => {};
   for (const tab of ['overview', 'diagnostics']) {
@@ -512,6 +514,7 @@ test('result navigation opens research and returns diagnostics to overview', asy
       setTab: (step: string) => destinations.push(step),
       tr: (zh: string) => zh,
       navigate: (page: string) => destinations.push(page),
+      improveModel: () => destinations.push('versions'),
     }) as unknown as { id: string; enabled?: boolean; run: () => Promise<unknown> }[];
     const improve = actions.find((action) => action.id === 'result-improve')!;
     assert.equal(improve.enabled, true);
@@ -522,7 +525,8 @@ test('result navigation opens research and returns diagnostics to overview', asy
       await back.run();
     }
   }
-  assert.deepEqual(destinations, ['research', 'research', 'overview']);
+  // 模型改进 goes to 新建修改版 (research has no sidebar entry of its own).
+  assert.deepEqual(destinations, ['versions', 'versions', 'overview']);
 });
 
 test('overview contract exposes optional evaluation conditions only while advanced settings are visible', () => {

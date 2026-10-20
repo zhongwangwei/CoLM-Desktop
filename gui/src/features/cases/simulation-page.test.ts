@@ -715,7 +715,7 @@ test('research entry round trip retains form, scanned sites, option edits and th
     p = page('NewCasePage', { form, sites: [site], caseValues: option, step: 4 });
   await p.mount();
   (p.element('ModelSettings').props.onEdit as () => unknown)();
-  assert.deepEqual(p.routes, ['research']);
+  assert.deepEqual(p.routes, ['versions'], 'model changes start from 新建修改版');
   const seed = p.state.newCaseSeed as {
     form: typeof form;
     sites: unknown[];
@@ -1067,7 +1067,7 @@ test('existing case returns from version editing to the model step after the dat
   await p.mount();
   await p.goto('case-step-4');
   (p.element('ModelSettings').props.onEdit as () => void)();
-  assert.deepEqual(p.routes, ['research']);
+  assert.deepEqual(p.routes, ['versions'], 'model changes start from 新建修改版');
   assert.deepEqual(p.state.simulationReturn, { route: 'case', step: 4 });
   const returned = await p.remount();
   assert.equal(returned.details.simulation_step, 4);
@@ -1446,7 +1446,7 @@ for (const name of ['NewCasePage', 'CasesPage'] as const)
     await p.mount();
     if (name === 'CasesPage') await p.goto('case-step-4');
     (p.element('ModelSettings').props.onEdit as () => void)();
-    assert.deepEqual(p.routes, ['research']);
+    assert.deepEqual(p.routes, ['versions'], 'model changes start from 新建修改版');
     assert.ok(
       !p.calls.some(
         (call) =>

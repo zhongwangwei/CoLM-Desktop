@@ -53,6 +53,13 @@ const show = (value: number | null | undefined) =>
       ? String(value)
       : String(Number(value.toPrecision(6)));
 
+/** 目录里的默认值是 Fortran 写法（`5._r8`），显示成普通的数。 */
+const plain = (text: string | null) => {
+  if (text == null) return '—';
+  const value = literalNumber(text);
+  return value == null ? text : show(value);
+};
+
 const typesOf = (type: ParameterType, crops: boolean): [number, string, string][] =>
   type === 'igbp' ? IGBP : type === 'usgs' ? USGS : PFT.filter(([id]) => crops || id <= 16);
 
@@ -361,19 +368,34 @@ export default function ParameterDialog({
               </tr>
             </thead>
             <tbody>
-              {listed
+              {[...listed]
                 .filter((d) => !onlyChanged || recordOf(d) || physicsOf(d) != null)
-                .map((d) => (
-                  <tr key={d.id} title={en ? d.doc_en : d.doc_zh}>
-                    <td>
-                      <strong>{label(d)}</strong>
-                      <code className="param-key">{d.raw_key}</code>
-                    </td>
-                    <td className="muted">{d.default ?? '—'}</td>
-                    <td>{cell(d, 0, '', d.default ?? '')}</td>
-                    <td className="muted">{meta(d)}</td>
-                  </tr>
-                ))}
+                .sort((a, b) =>
+                  `${a.section}|${subgroup(a)}`.localeCompare(`${b.section}|${subgroup(b)}`),
+                )
+                .flatMap((d, i, rows) => {
+                  const heading = `${d.section} · ${subgroup(d)}`;
+                  const first =
+                    i === 0 || heading !== `${rows[i - 1]!.section} · ${subgroup(rows[i - 1]!)}`;
+                  return [
+                    ...(first
+                      ? [
+                          <tr key={`group:${heading}`} className="param-group">
+                            <td colSpan={4}>{d.section === subgroup(d) ? d.section : heading}</td>
+                          </tr>,
+                        ]
+                      : []),
+                    <tr key={d.id} title={en ? d.doc_en : d.doc_zh}>
+                      <td>
+                        <strong>{label(d)}</strong>
+                        <code className="param-key">{d.raw_key}</code>
+                      </td>
+                      <td className="muted">{plain(d.default)}</td>
+                      <td>{cell(d, 0, '', plain(d.default))}</td>
+                      <td className="muted">{meta(d)}</td>
+                    </tr>,
+                  ];
+                })}
             </tbody>
           </table>
         )}
@@ -527,7 +549,7 @@ export default function ParameterDialog({
                           d,
                           0,
                           processFile || overlay.process_files[0]!.relative_path,
-                          d.default ?? '',
+                          plain(d.default),
                         )}
                       </td>
                       <td className="muted">{meta(d)}</td>

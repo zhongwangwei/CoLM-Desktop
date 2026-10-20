@@ -1,0 +1,127 @@
+import type { FrozenRevision, ModelDraft, VersionRef } from '../../lib/types';
+import { Button, Card, Field, Select } from '../../components/ui';
+import { hubMethods, type HubMethod } from './hub-methods';
+import { changeSummary } from './VersionLibrary';
+// 和原研究首页同一套方式卡片的样式（研究页是按需加载的，这里不能指望它已经载入）。
+import '../studies/research-home.css';
+
+const keyOf = (v: VersionRef) => `${v.id}#${v.revision}`;
+
+export default function VersionHub({
+  versions,
+  drafts,
+  base,
+  inUse,
+  en,
+  disabled,
+  onBase,
+  onMethod,
+  onOpenDraft,
+  onLibrary,
+}: {
+  versions: FrozenRevision[];
+  drafts: ModelDraft[];
+  /** 新版本基于哪个版本。 */
+  base: FrozenRevision | null;
+  inUse: FrozenRevision | null;
+  en: boolean;
+  disabled: boolean;
+  onBase: (key: string) => void;
+  onMethod: (method: HubMethod) => void;
+  onOpenDraft: (id: string) => void;
+  onLibrary: () => void;
+}) {
+  const t = (zh: string, english: string) => (en ? english : zh);
+  const research = (id: string) => !['manual', 'source'].includes(id);
+  return (
+    <div className="version-hub">
+      <div className="page-heading versions-heading">
+        <div>
+          <h1>{t('新建修改版', 'New modified version')}</h1>
+          <p className="muted">
+            {t(
+              '选一种改模型的方式，点了就开始。手动改参数和修改源码直接建好草稿；率定、不确定性分析和 AI 在研究里完成，结果可以写回版本。',
+              'Choose how to change the model; it starts right away. Editing parameters or code creates a draft directly; calibration, uncertainty analysis and AI run as studies whose results can come back into a version.',
+            )}
+          </p>
+        </div>
+        <Button variant="ghost" onClick={onLibrary}>
+          {t('所有版本 →', 'All versions →')}
+        </Button>
+      </div>
+      <div className="version-hub-base">
+        <Field label={t('基于哪个版本', 'Based on')}>
+          <Select
+            value={base ? keyOf(base.version) : ''}
+            disabled={disabled}
+            onChange={(e) => onBase(e.target.value)}
+          >
+            {versions.map((v) => (
+              <option key={keyOf(v.version)} value={keyOf(v.version)}>
+                {v.name} · r{v.version.revision}
+                {v.version.id === 'official' ? ` (${t('官方', 'official')})` : ''}
+              </option>
+            ))}
+          </Select>
+        </Field>
+        {inUse && (
+          <p className="muted">
+            {t(
+              `模拟正在使用 ${inUse.name} · r${inUse.version.revision}`,
+              `Simulations use ${inUse.name} · r${inUse.version.revision}`,
+            )}
+          </p>
+        )}
+      </div>
+      <div className="research-methods version-hub-methods" role="group">
+        {hubMethods.map((item) => (
+          <Button
+            key={item.id}
+            id={`version-method-${item.id}`}
+            className="research-method"
+            disabled={disabled || !base}
+            onClick={() => onMethod(item.id)}
+          >
+            <span className="research-method-icon">
+              <svg
+                viewBox="0 0 24 24"
+                aria-hidden="true"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <path d={item.icon} />
+              </svg>
+            </span>
+            <span className="research-method-copy">
+              <strong>{en ? item.en : item.zh}</strong>
+              <span>{en ? item.descriptionEn : item.descriptionZh}</span>
+              {research(item.id) && (
+                <span className="version-hub-tag">{t('在研究里完成', 'Runs as a study')}</span>
+              )}
+            </span>
+            <span className="research-method-arrow" aria-hidden="true">
+              ›
+            </span>
+          </Button>
+        ))}
+      </div>
+      {drafts.length > 0 && (
+        <Card title={t('继续之前的修改', 'Continue earlier work')}>
+          <ul className="version-hub-drafts">
+            {drafts.map((d) => (
+              <li key={d.id}>
+                <button type="button" disabled={disabled} onClick={() => onOpenDraft(d.id)}>
+                  <strong>{d.name}</strong>
+                  <span className="muted">{changeSummary(d.overlay, !!d.code.workspace, en)}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+    </div>
+  );
+}

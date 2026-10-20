@@ -4,7 +4,6 @@ export const navigation = [
   { id: 'project', zh: '项目', en: 'Project', route: 'project' },
   { id: 'simulation', zh: '模拟', en: 'Simulation', route: 'case', tab: 'settings' },
   { id: 'results', zh: '结果', en: 'Results', route: 'case', tab: 'results' },
-  { id: 'research', zh: '研究', en: 'Research', route: 'research' },
   { id: 'history', zh: '历史记录', en: 'History', route: 'history' },
   { id: 'resources', zh: '计算资源', en: 'Compute resources', route: 'resources' },
   { id: 'settings', zh: '设置', en: 'Settings', route: 'settings' },
@@ -43,7 +42,8 @@ export function activeNavigation(
     return 'simulation';
   if (state.route === 'case') return state.caseTab === 'results' ? 'results' : 'simulation';
   if (state.route === 'new-case') return 'simulation';
-  if (['preparation', 'versions'].includes(state.route)) return 'project';
+  // 研究不再单独占侧栏一项：从"新建修改版"进去（2026-10-21 用户要求），归在项目下。
+  if (['preparation', 'versions', 'research'].includes(state.route)) return 'project';
   if (state.route === 'help') return 'settings';
   return state.route;
 }

@@ -143,7 +143,12 @@ export default function ResultsPage({
   casePath?: string;
   onBack?: () => void;
 }) {
-  const { state, navigate, openCase } = useApp();
+  const { state, navigate, openCase, update } = useApp();
+  // "模型改进"进"新建修改版"的 6 种方式（研究不再单独占侧栏一项）。
+  const improveModel = () => {
+    update({ versionsView: 'create' });
+    return navigate('versions');
+  };
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const caseDir = casePath || state.selectedCase?.dir || '';
@@ -877,7 +882,7 @@ export default function ResultsPage({
             enabled: !busy,
             label: tr('模型改进', 'Improve model'),
             kind: 'click' as const,
-            run: () => navigate('research'),
+            run: improveModel,
           },
         ]
       : []),
@@ -895,7 +900,7 @@ export default function ResultsPage({
             enabled: !busy,
             label: tr('模型改进', 'Improve model'),
             kind: 'click' as const,
-            run: () => navigate('research'),
+            run: improveModel,
           },
         ]
       : []),
@@ -1391,7 +1396,7 @@ export default function ResultsPage({
             <Button variant="ghost" disabled={busy} onClick={() => setTab('overview')}>
               {tr('← 返回结果总览', '← Back to results overview')}
             </Button>
-            <Button disabled={busy} onClick={() => navigate('research')}>
+            <Button disabled={busy} onClick={improveModel}>
               {tr('模型改进', 'Improve model')}
             </Button>
           </>

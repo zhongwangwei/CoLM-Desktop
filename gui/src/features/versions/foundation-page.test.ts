@@ -5,6 +5,8 @@ import ts from 'typescript';
 import * as model from './model';
 import * as setup from './scientific-setup';
 import { researchVersion } from './research-version';
+import { hubMethods } from './hub-methods';
+import { appLocale } from '../history/history';
 import { schemeVersionName } from './version-tree';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
@@ -65,6 +67,8 @@ function page(
     ...setup,
     ScientificSetupCards: 'ScientificSetupCards',
     researchVersion,
+    hubMethods,
+    appLocale,
     schemeVersionName,
     compatibleKernel,
     effectiveModelFields,
@@ -91,6 +95,7 @@ function page(
         'StudyImportDialog',
         'VersionChanges',
         'VersionLibrary',
+        'VersionHub',
         'ParameterDialog',
       ].map((k) => [k, k]),
     ),
@@ -370,4 +375,33 @@ test('the version page shows one version in tabs that hide panels without unmoun
   assert.ok(p.elements.some((e) => e.type === 'CodeWorkspace'));
   assert.ok(p.elements.some((e) => e.type === 'ParameterDialog'));
   assert.ok(!p.elements.some((e) => e.type === 'VersionLibrary'), 'the library is its own page');
+});
+
+test('新建修改版 offers six ways and starts each without a confirmation form', async () => {
+  const p = page();
+  const c = await p.mount();
+  const ids = c.actions.filter((a) => a.id.startsWith('version-method-')).map((a) => a.id);
+  assert.deepEqual(ids, [
+    'version-method-manual',
+    'version-method-tuning',
+    'version-method-uncertainty',
+    'version-method-parameters',
+    'version-method-process',
+    'version-method-source',
+  ]);
+  // By hand: a draft is created straight away, named automatically, and the parameter dialog opens.
+  await c.actions.find((a) => a.id === 'version-method-manual')!.run();
+  await p.settle();
+  const create = p.calls.find((call) => call.command === 'model_create')!;
+  assert.equal(create.args.branchCode, false);
+  assert.match(String(create.args.name), /^手动修改参数 /);
+  assert.ok(String(create.args.note).includes('基于 Official r1'));
+  const dialog = p.elements.find((e) => e.type === 'ParameterDialog')!;
+  assert.equal(dialog.props.open, true);
+  // A study method goes to the research page with that method chosen.
+  const q = page();
+  const d = await q.mount();
+  await d.actions.find((a) => a.id === 'version-method-tuning')!.run();
+  assert.equal(q.routes.at(-1), 'research');
+  assert.equal((q.state as { researchMethod?: string }).researchMethod, 'tuning');
 });

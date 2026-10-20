@@ -9,7 +9,7 @@ import type {
   StudyPick,
   VersionRef,
 } from '../../lib/types';
-import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { Advanced, Button, Card, Field, Input, Notice } from '../../components/ui';
 import { download } from '../history/history';
 import {
   importParameters,
@@ -27,6 +27,8 @@ import StudyPicks from './StudyPicks';
 import StudyImportDialog, { type StudyPreview } from './StudyImportDialog';
 import VersionChanges from './VersionChanges';
 import VersionLibrary from './VersionLibrary';
+import VersionHub from './VersionHub';
+import { hubMethods, type HubMethod } from './hub-methods';
 import ParameterDialog from './ParameterDialog';
 import ConfigurationOptions from './ConfigurationOptions';
 import { setupHandledKeys, type SetupEnvironment } from './scientific-setup';
@@ -80,11 +82,12 @@ export default function VersionsPage() {
     [references, setReferences] = useState<HistoryOperation[]>([]),
     [assetRoot, setAssetRoot] = useState(''),
     [processPath, setProcessPath] = useState(''),
-    [tab, setTab] = useState<'changes' | 'code' | 'research' | 'usage'>('changes'),
-    // 新建修改版的表单：页头按钮打开，建好草稿后收起。
-    [creating, setCreating] = useState(false);
+    [tab, setTab] = useState<'changes' | 'code' | 'research' | 'usage'>('changes');
   const epoch = useRef({ active: false }),
-    lock = useRef(false);
+    lock = useRef(false),
+    // 从"修改参数（手动）"自动建的草稿：一点没改就离开时删掉，免得点一下就留个空草稿。
+    autoCreated = useRef(new Set<string>()),
+    draftNow = useRef<ModelDraft | null>(null);
   const keyOf = (v: VersionRef) => `${v.id}#${v.revision}`;
   const selected = state.version,
     viewing = viewKey ? (state.versions.find((v) => keyOf(v.version) === viewKey) ?? null) : null,
@@ -99,6 +102,24 @@ export default function VersionsPage() {
     codeBusyNow = useRef(false);
   const dirtyNow = useRef(dirty);
   dirtyNow.current = dirty;
+  draftNow.current = draft;
+  function dropIfUntouched() {
+    const d = draftNow.current;
+    if (
+      !d ||
+      !autoCreated.current.has(d.id) ||
+      d.generation !== 1 ||
+      dirtyNow.current ||
+      d.code.workspace
+    )
+      return;
+    autoCreated.current.delete(d.id);
+    void invokeJson('model_delete_draft', { id: d.id, deleteWorkspace: false })
+      .then(() => invokeJson<ModelDraft[]>('model_drafts'))
+      .then(setDrafts)
+      .catch(() => {});
+  }
+  useEffect(() => () => dropIfUntouched(), []);
   function codePending(pending: boolean) {
     codeBusyNow.current = pending;
     setCodeBusy(pending);
@@ -232,6 +253,7 @@ export default function VersionsPage() {
     return navigate(target.route, target.route === 'case' ? 'settings' : undefined);
   }
   async function openResearch() {
+    if (draft) autoCreated.current.delete(draft.id);
     if (draft) await freeze(draft, dirtyNow.current, false);
     else if (viewing) chooseForSimulation(viewing);
     else if (!selected) throw new Error(t('请选择冻结版本', 'Select a frozen revision'));
@@ -263,8 +285,47 @@ export default function VersionsPage() {
       throw new Error(
         t('请先保存草稿，或放弃本地修改', 'Save the draft or discard local changes first'),
       );
+    dropIfUntouched();
     setDraft(null);
     setViewKey(null);
+  }
+  // "新建修改版"的 6 种方式。手动改参数、修改源码直接建草稿（自动起名，之后在草稿里能改）；
+  // 其余 4 种是研究：以所选版本为基础，直接打开研究页对应的方法。
+  async function startMethod(method: HubMethod, base = parentVersion) {
+    if (!base) throw new Error(t('请选择基于哪个版本', 'Choose the version to start from'));
+    if (method === 'manual' || method === 'source') {
+      const stamp = new Date().toLocaleString(appLocale(state.language === 'en'), {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      });
+      const what =
+        method === 'manual'
+          ? t('手动修改参数', 'Manual parameter changes')
+          : t('修改源码', 'Source code changes');
+      const d = await invokeJson<ModelDraft>('model_create', {
+        name: `${what} ${stamp}`,
+        note: `${what}（${t('基于', 'based on')} ${base.name} r${base.version.revision}）`,
+        parent: base.version,
+        workspace: null,
+        branchCode: method === 'source',
+      });
+      if (method === 'manual') autoCreated.current.add(d.id);
+      setAssetRoot('');
+      setDraft(d);
+      setDirty(false);
+      setViewKey(null);
+      setTab(method === 'source' ? 'code' : 'changes');
+      setDrafts(await invokeJson('model_drafts'));
+      if (method === 'manual') openParameters('global');
+      return d;
+    }
+    if (!selected || keyOf(selected.version) !== keyOf(base.version)) chooseForSimulation(base);
+    update({ researchMethod: method });
+    lock.current = false;
+    if (!navigate('research')) throw new Error(t('当前修改尚未保存', 'Current edits are unsaved'));
+    return null;
   }
   // 草稿要改代码时才复制一份父版本的代码（约 3 秒），不改代码的草稿不用复制、也不用编译。
   async function branchCode() {
@@ -538,7 +599,6 @@ export default function VersionsPage() {
     setAssetRoot('');
     setDraft(d);
     setDirty(false);
-    setCreating(false);
     setViewKey(null);
     setTab(codeMode === 'branch' ? 'code' : 'changes');
     setName('');
@@ -608,6 +668,13 @@ export default function VersionsPage() {
       kind: 'click' as const,
       enabled: !busy && !codeBusy && !dirty,
       run: () => execute(() => select(v)),
+    })),
+    ...hubMethods.map((m) => ({
+      id: `version-method-${m.id}`,
+      label: state.language === 'en' ? m.en : m.zh,
+      kind: (m.id === 'manual' || m.id === 'source' ? 'commit' : 'click') as 'commit' | 'click',
+      enabled: !busy && !codeBusy && !dirty && !!parentVersion,
+      run: () => execute(() => startMethod(m.id)),
     })),
     ...state.versions.map((v) => ({
       id: `version-use-${v.version.id}-${v.version.revision}`,
@@ -973,11 +1040,6 @@ export default function VersionsPage() {
     setParamsParameter(parameterId);
     setParamsOpen(true);
   };
-  const startCreate = (from: FrozenRevision | null, mode: 'inherit' | 'branch') => {
-    setParentKey(from ? keyOf(from.version) : '');
-    setCodeMode(mode);
-    setCreating(true);
-  };
   const sortedParameters = shown
     ? [...shown.overlay.parameters].sort(
         (a, b) =>
@@ -998,78 +1060,6 @@ export default function VersionsPage() {
     }
     return groups;
   })();
-  const createForm = creating && (
-    <Card
-      className="versions-create"
-      title={t('新建修改版', 'New modified version')}
-      description={t(
-        '先建成草稿，在草稿里改参数和代码，改完冻结成新版本。',
-        'It starts as a draft; change parameters and code there, then freeze it as a version.',
-      )}
-    >
-      <div className="versions-create-grid">
-        <Field label={t('基于哪个版本', 'Based on')}>
-          <Select
-            value={parentVersion ? keyOf(parentVersion.version) : ''}
-            disabled={busy || codeBusy}
-            onChange={(e) => setParentKey(e.target.value)}
-          >
-            {state.versions.map((v) => (
-              <option key={keyOf(v.version)} value={keyOf(v.version)}>
-                {v.name} · r{v.version.revision}
-                {v.version.id === 'official' ? ` (${t('官方', 'official')})` : ''}
-              </option>
-            ))}
-          </Select>
-        </Field>
-        <Field label={t('名称', 'Name')}>
-          <Input
-            value={name}
-            placeholder={t('如：根系吸水改进', 'e.g. Root water uptake')}
-            disabled={busy || codeBusy}
-            onChange={(e) => setName(e.target.value)}
-          />
-        </Field>
-        <Field label={t('目的与说明', 'Purpose and notes')}>
-          <Input
-            value={note}
-            placeholder={t('想验证什么、改了哪里', 'What it tests, what it changes')}
-            disabled={busy || codeBusy}
-            onChange={(e) => setNote(e.target.value)}
-          />
-        </Field>
-      </div>
-      <label className="param-check">
-        <input
-          type="checkbox"
-          checked={codeMode === 'branch'}
-          disabled={busy || codeBusy}
-          onChange={(e) => setCodeMode(e.target.checked ? 'branch' : 'inherit')}
-        />
-        {t(
-          '要改代码：现在就复制一份父版本的代码（不选也行，草稿里随时可以开始改代码）',
-          'I will change code: copy the parent code now (optional; a draft can start editing code any time)',
-        )}
-      </label>
-      <div className="button-row">
-        <Button
-          disabled={!guideActions[0].enabled}
-          variant="primary"
-          onClick={() => run(deriveVersion)}
-        >
-          {t('创建草稿', 'Create draft')}
-        </Button>
-        <Button variant="ghost" onClick={() => setCreating(false)}>
-          {t('取消', 'Cancel')}
-        </Button>
-        {(!name || !note) && (
-          <span className="muted">
-            {t('名称和目的都要填。', 'Both a name and a purpose are needed.')}
-          </span>
-        )}
-      </div>
-    </Card>
-  );
 
   return (
     <div className="page-stack versions-page">
@@ -1095,11 +1085,27 @@ export default function VersionsPage() {
           ) : null}
         </div>
       )}
-      {!shown ? (
+      {!shown && state.versionsView !== 'library' ? (
+        <>
+          {error && <Notice tone="error">{error}</Notice>}
+          <VersionHub
+            versions={state.versions}
+            drafts={drafts}
+            base={parentVersion}
+            inUse={selected}
+            en={state.language === 'en'}
+            disabled={busy || codeBusy}
+            onBase={setParentKey}
+            onMethod={(method) => run(() => startMethod(method))}
+            onOpenDraft={(id) => run(() => loadDraft(id))}
+            onLibrary={() => update({ versionsView: 'library' })}
+          />
+        </>
+      ) : !shown ? (
         <>
           <div className="page-heading versions-heading">
             <div>
-              <h1>{t('模型版本', 'Model versions')}</h1>
+              <h1>{t('所有版本', 'All versions')}</h1>
               <p className="muted">
                 {t(
                   '版本 = 官方代码 + 你的改动（参数、开关、AI 网络或代码本身）。打开一个版本查看或修改；模拟用哪个版本，用「设为模拟使用」选。',
@@ -1109,14 +1115,13 @@ export default function VersionsPage() {
             </div>
             <Button
               variant="primary"
-              disabled={busy || codeBusy || !parentVersion}
-              onClick={() => (creating ? setCreating(false) : startCreate(null, 'inherit'))}
+              disabled={busy || codeBusy}
+              onClick={() => update({ versionsView: 'create' })}
             >
-              {creating ? t('收起', 'Close') : `＋ ${t('新建修改版', 'New modified version')}`}
+              {`＋ ${t('新建修改版', 'New modified version')}`}
             </Button>
           </div>
           {error && <Notice tone="error">{error}</Notice>}
-          {createForm}
           <VersionLibrary
             versions={state.versions}
             drafts={drafts}
@@ -1140,7 +1145,10 @@ export default function VersionsPage() {
               disabled={busy || codeBusy}
               onClick={() => run(async () => backToLibrary())}
             >
-              ← {t('版本库', 'Version library')}
+              ←{' '}
+              {state.versionsView === 'library'
+                ? t('所有版本', 'All versions')
+                : t('新建修改版', 'New modified version')}
             </button>
             {lineage.length > 0 && (
               <span className="muted">
@@ -1149,7 +1157,6 @@ export default function VersionsPage() {
             )}
           </div>
           {error && <Notice tone="error">{error}</Notice>}
-          {createForm}
           <Card className="versions-head">
             <div className="versions-head-top">
               <div className="versions-head-title">
@@ -1210,7 +1217,13 @@ export default function VersionsPage() {
                     )}
                     <Button
                       disabled={busy || codeBusy}
-                      onClick={() => startCreate(viewing, 'inherit')}
+                      onClick={() =>
+                        run(async () => {
+                          setParentKey(viewing ? keyOf(viewing.version) : '');
+                          backToLibrary();
+                          update({ versionsView: 'create' });
+                        })
+                      }
                     >
                       {t('基于它新建修改版', 'Derive from it')}
                     </Button>
@@ -1772,7 +1785,7 @@ export default function VersionsPage() {
                       <Button
                         variant="primary"
                         disabled={busy || codeBusy}
-                        onClick={() => startCreate(viewing, 'branch')}
+                        onClick={() => run(() => startMethod('source', viewing))}
                       >
                         {t('修改代码…', 'Change the code…')}
                       </Button>
@@ -1827,64 +1840,72 @@ export default function VersionsPage() {
                 disabled={busy || codeBusy}
                 onChange={setPicks}
               />
+              <p className="versions-label">
+                {draft
+                  ? t(
+                      `用这个草稿做（会先保存并冻结一个修订给研究用${picks.length ? `，带上 ${picks.length} 个参数` : ''}）：`,
+                      `Study this draft (a revision is saved and frozen for the study first${picks.length ? `, with ${picks.length} parameters` : ''}):`,
+                    )
+                  : t(
+                      `用这个版本做${picks.length ? `（带上 ${picks.length} 个参数）` : ''}：`,
+                      `Study this version${picks.length ? ` (with ${picks.length} parameters)` : ''}:`,
+                    )}
+              </p>
               <div className="button-row">
-                <Button
-                  variant="primary"
-                  disabled={busy || codeBusy}
-                  onClick={() => {
-                    update({ researchSeed: picks.length ? { parameters: picks } : null });
-                    // 没去成研究页就把种子清掉，免得以后在研究页莫名其妙地生效。
-                    run(() =>
-                      openResearch().catch((e) => {
-                        update({ researchSeed: null });
-                        throw e;
-                      }),
-                    );
-                  }}
-                >
-                  {draft
-                    ? t('保存、冻结并去研究页', 'Save, freeze and go to research')
-                    : t('去研究页', 'Go to research')}
-                  {picks.length > 0 &&
-                    t(`（带上 ${picks.length} 个参数）`, ` (with ${picks.length} parameters)`)}
-                </Button>
+                {hubMethods
+                  .filter((m) => m.id !== 'manual' && m.id !== 'source')
+                  .map((m, i) => (
+                    <Button
+                      key={m.id}
+                      variant={i === 0 ? 'primary' : undefined}
+                      disabled={busy || codeBusy}
+                      onClick={() => {
+                        update({
+                          researchSeed: picks.length ? { parameters: picks } : null,
+                          researchMethod: m.id,
+                        });
+                        // 没去成研究页就把种子和方法清掉，免得以后在研究页莫名其妙地生效。
+                        run(() =>
+                          openResearch().catch((e) => {
+                            update({ researchSeed: null, researchMethod: null });
+                            throw e;
+                          }),
+                        );
+                      }}
+                    >
+                      {state.language === 'en' ? m.en : m.zh}
+                    </Button>
+                  ))}
               </div>
             </Card>
-            <Card
-              title={t('研究', 'Research')}
-              description={t(
-                '用这个版本做率定、敏感性或不确定性分析，或训练 AI 网络；跑完的率定结果可以导入草稿。',
-                'Calibrate, run sensitivity or uncertainty analyses, or train an AI network with this version; finished calibrations can be imported into a draft.',
-              )}
-            >
-              <div className="button-row">
-                <Button
-                  variant="primary"
-                  disabled={busy || codeBusy}
-                  onClick={() => run(openResearch)}
-                >
-                  {draft
-                    ? t('保存、冻结并去做研究', 'Save, freeze and research it')
-                    : t('用它做研究', 'Research with it')}
-                </Button>
-                {editable && (
-                  <Button
-                    disabled={busy || codeBusy}
-                    onClick={() => void previewStudy().catch(() => {})}
-                  >
-                    {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
-                  </Button>
+            {editable && (
+              <Card
+                title={t('研究结果', 'Study results')}
+                description={t(
+                  '跑完的率定或敏感性研究，可以把最优成员的参数勾选后写进这个草稿。',
+                  'Tick parameters from the best member of a finished calibration or sensitivity study to write them into this draft.',
                 )}
-              </div>
-              {draft && (
-                <p className="muted versions-hint">
-                  {t(
-                    '研究要用冻结的版本：会先把这个草稿冻结成一个修订给研究用，草稿留着，研究结果还可以导回来。',
-                    'Research needs a frozen version: the draft is frozen into a revision for the study and kept, so the results can come back into it.',
+              >
+                <div className="button-row">
+                  {editable && (
+                    <Button
+                      disabled={busy || codeBusy}
+                      onClick={() => void previewStudy().catch(() => {})}
+                    >
+                      {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
+                    </Button>
                   )}
-                </p>
-              )}
-            </Card>
+                </div>
+                {draft && (
+                  <p className="muted versions-hint">
+                    {t(
+                      '研究要用冻结的版本：会先把这个草稿冻结成一个修订给研究用，草稿留着，研究结果还可以导回来。',
+                      'Research needs a frozen version: the draft is frozen into a revision for the study and kept, so the results can come back into it.',
+                    )}
+                  </p>
+                )}
+              </Card>
+            )}
             <Card
               title={t('AI 网络', 'AI network')}
               description={t(

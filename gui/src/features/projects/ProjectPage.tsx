@@ -332,7 +332,10 @@ export default function ProjectPage() {
       label: t('新建修改版', 'New modified model'),
       kind: 'click',
       enabled: versionEnabled && modelReady,
-      run: () => navigate('versions'),
+      run: () => {
+        update({ versionsView: 'create' });
+        return navigate('versions');
+      },
     },
     {
       id: 'project-official',
@@ -626,13 +629,19 @@ export default function ProjectPage() {
             className="project-action project-version-card"
             variant="ghost"
             disabled={!versionEnabled || !modelReady}
-            onClick={() => navigate('versions')}
+            onClick={() => {
+              update({ versionsView: 'create' });
+              navigate('versions');
+            }}
           >
             <span className="project-action-icon">＋</span>
             <span>
               <strong>{t('新建修改版', 'New modified model')}</strong>
               <span>
-                {t('派生、修改并选择新的版本', 'Derive, modify and select a new revision')}
+                {t(
+                  '手动改参数、率定、不确定性分析、AI、改源码',
+                  'Edit parameters, calibrate, analyse uncertainty, AI, change code',
+                )}
               </span>
             </span>
             <span className="project-chevron">›</span>
