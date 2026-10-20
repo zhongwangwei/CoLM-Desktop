@@ -79,6 +79,7 @@ mod remote_files;
 mod remote_workspace_cmd;
 mod study;
 mod study_version;
+mod version_changes;
 mod ws_cmd;
 
 use std::path::{Path, PathBuf};
@@ -140,6 +141,8 @@ usage:
                    # freeze: --model-id ID --asset-root DIR; migrate-case/rollback: <case-dir>
                    # prune JSON: {keep:[{id,revision}],dry_run?}: drop unused old official revisions
                    # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
+  colm-cli model-changes --model-root DIR --version ID --revision N [--against ID --against-revision N]
+                   # 只读：代码相对官方源码改了的文件，参数/物理方案/过程文件/AI 网络相对父版本（或 --against）的不同，来源研究
   colm-cli study-save-version <study-dir> --member best|ID --name NAME --model-root DIR [--note TEXT]
   colm-cli version-check --name N --kernel <dir> [--engine rust|fortran]
                    [--preprocessors rust|fortran] [--root <dir>]
@@ -405,6 +408,10 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         | "model-attach-network"
         | "model-import-process"
         | "model-import-study" => model_version::cmd(cmd, opts)?,
+        "model-changes" => println!(
+            "{}",
+            serde_json::to_string(&version_changes::changes(opts)?)?
+        ),
         "run" => run_with_provenance(opts)?,
         "run-replay" => println!("{}", model_version::replay(opts)?),
         "version-check" => {

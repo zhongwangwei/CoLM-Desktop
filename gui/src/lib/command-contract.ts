@@ -770,6 +770,24 @@ export const commandContract = {
       "rust_type": "u64"
     }
   },
+  "model_changes": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "revision": {
+      "required": true,
+      "rust_type": "u32"
+    },
+    "againstId": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "againstRevision": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    }
+  },
   "model_freeze_check": {
     "id": {
       "required": true,

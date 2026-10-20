@@ -15,6 +15,7 @@ import {
   type ModelField,
 } from './model';
 import CodeWorkspace from './CodeWorkspace';
+import VersionChanges from './VersionChanges';
 import ConfigurationOptions from './ConfigurationOptions';
 import { setupHandledKeys, type SetupEnvironment } from './scientific-setup';
 import { compatibleKernel } from '../runs/run-model';
@@ -1367,6 +1368,7 @@ export default function VersionsPage() {
                 : t('打开研究与网络', 'Open research and networks')}
             </Button>
           </Card>
+          {!draft && selected && <VersionChanges version={selected} versions={state.versions} />}
           <CodeWorkspace
             disabled={busy || codeBusy || dirty}
             key={shown.code.workspace ?? 'official'}

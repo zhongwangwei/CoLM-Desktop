@@ -2999,3 +2999,35 @@ table input {
 .freeze-check li.is-note {
   color: var(--muted);
 }
+.version-changes {
+  display: grid;
+  gap: 10px;
+}
+.version-changes-block h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+.version-changes-block p {
+  margin: 4px 0;
+}
+.version-changes-block ul {
+  display: grid;
+  gap: 3px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.version-changes-block li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  min-width: 0;
+}
+.version-changes-block code {
+  overflow-wrap: anywhere;
+}
+.version-changes-files {
+  max-height: 260px;
+  overflow: auto;
+}

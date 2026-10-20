@@ -34569,3 +34569,28 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 冻结检查里 `parameters` 一项通过。
       - 在同一个工作区的真实 `MOD_Namelist.F90` 里新增 `DEF_USE_MyRootScheme`、删掉 `DEF_USE_WUEST` 后，`namelist` 一项报出：应用还不认识的新变量 `DEF_USE_MyRootScheme`，删掉的变量 `DEF_USE_WUEST`。另外 `kernel_built` 和 `drift` 两项拦住冻结。
     - 测试：colm-cli `calibrated_values_become_the_same_overrides_as_manual_edits`；colm-workspace `namelist_variables_added_or_removed_by_a_version_are_reported`。
+
+67. **版本树里看每个版本改了什么，任意两个版本能比（2026-10-20）**：
+    - **问题**：版本树原来只列名字和修订号。要知道一个修改版动了哪些代码，得去它的工作区里翻 git；冻结以后工作区可能已经删了，只剩注册表里缓存的克隆。
+    - **改动**：
+      - `model-changes --version ID --revision N [--against ID --against-revision N]`（只读，Tauri `model_changes`）。界面上，选中一个冻结版本后出现"这个版本改了什么"卡片（`VersionChanges.tsx`），可以选比较对象，默认是父版本。内容分四部分：
+        1. 代码：相对官方源码改了的文件及增删行数（含祖先修改版的改动），按 Rust 引擎、Fortran 内核归类。从注册表里缓存的克隆取，`官方基线..冻结的提交`。
+        2. 与比较对象内容不同的文件：只比两边相对官方源码改过的文件，按 git 对象 id 比。两个版本各自建工作区时的基线提交 id 不同，但内容相同的文件 id 相同。
+        3. 参数（按"变量 + 作用范围"认同一条）、物理方案、过程文件、AI 网络：前后值。
+        4. 来源研究：用途、站点、目标、最优成员。别的出处写法（`case:…`、`study:…/member:…`）原样显示。
+      - 比较不完整时给说明（中英文由界面给）：两个官方修订源码不同时，不逐个列上游改动；两个版本基于不同官方源码时，只比各自改过的文件。
+      - `colm_workspace::git` 新增 `changed_between`（`changed_files` 改为调用它）和 `blob`。
+    - **顺手修**：第 66 条的 `declare_studies` 会**整段覆盖** `derived_from` 和率定时段。先挂研究 A 训练的网络、再从研究 B 导入参数，A 的出处就丢了。
+      - 改为每条研究记下用途（`network` / `parameters`）。挂网络只换掉网络那几条；导入参数只换掉同一研究的那条；时段按留下的全部研究重算。
+      - 没写用途的旧记录按挂网络处理（以前只有挂网络会写）。不是这里写的出处，在没有要声明的研究时保持不动。
+    - **实测**（另建的临时注册表：只复制了官方 r99 的修订和源码缓存，没有指向真实注册表的链接）：
+      - 第一代：从 r99 复制代码；在 `crates/colm-core/src/lib.rs` 加一行注释；从第 66 条的 CN-Cng 研究导入最优参数；编译这个版本自己的引擎（2 min 19 s）。冻结检查就绪后冻结。
+        - 相对父版本：1 个文件（Rust 引擎）；两条参数从无到有；来源研究一条，用途是 `parameters`。
+        - 官方 r99 反过来与它比：同一个文件不同，两条参数从有到无。自己与自己比：没有不同。
+      - 第二代：从第一代复制代码（这也实测了"父版本是修改版"的复制路径，内容哈希一致）；在 `crates/colm-runtime/src/lib.rs` 加一行注释；把 CNFAC 从 0.2627 改成 0.3；编译引擎（2 min 11 s）后冻结。
+        - 相对父版本：只有 `colm-runtime/src/lib.rs` 不同，参数只有 CNFAC 0.2627… → 0.3。
+        - 相对官方源码：两个文件都列出（含父版本的改动）。与 r99 比：两个文件都不同、两条参数。
+      - 测试用的 VMAX25 采样范围按 mol 取了 2e-5–8e-5，而表里是 µmol（草地 52），所以这次研究只是功能冒烟，数值没有物理意义。
+    - 测试：
+      - colm-cli `version_changes_tests.rs` 三条：参数与物理方案的前后值、来源研究的读取、两份独立克隆之间按内容比较；另有 `a_new_network_drops_only_the_old_networks_studies`。
+      - 前端 `version-changes.test.ts` 两条（中英文）；`foundation-page.test.ts` 的桩加上 `VersionChanges`。

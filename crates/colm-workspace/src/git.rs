@@ -118,17 +118,15 @@ pub fn commits_since(dir: &Path, base: &str) -> Result<Vec<Commit>> {
 
 /// `base..HEAD` 改动的文件与增删行数。
 pub fn changed_files(dir: &Path, base: &str) -> Result<Vec<FileChange>> {
+    changed_between(dir, base, "HEAD")
+}
+
+/// `from..to` 改动的文件与增删行数（二进制文件两个数都是 0）。冻结版本的代码缓存里 HEAD
+/// 不一定是冻结的那次提交，所以要能指定终点。
+pub fn changed_between(dir: &Path, from: &str, to: &str) -> Result<Vec<FileChange>> {
     let bytes = run_bytes(
         dir,
-        &[
-            "diff",
-            "--no-renames",
-            "--numstat",
-            "-z",
-            base,
-            "HEAD",
-            "--",
-        ],
+        &["diff", "--no-renames", "--numstat", "-z", from, to, "--"],
     )?;
     let text = String::from_utf8(bytes).context("changed file paths must be UTF-8")?;
     Ok(text
@@ -145,6 +143,22 @@ pub fn changed_files(dir: &Path, base: &str) -> Result<Vec<FileChange>> {
             })
         })
         .collect())
+}
+
+/// 某次提交里一个路径的对象 id（内容相同的文件在不同克隆里 id 也相同）；路径不存在时为空。
+pub fn blob(dir: &Path, rev: &str, path: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--verify", "--quiet", &format!("{rev}:{path}")])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null())
+        .output()
+        .context("cannot run git (is it installed?)")?;
+    Ok(output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]

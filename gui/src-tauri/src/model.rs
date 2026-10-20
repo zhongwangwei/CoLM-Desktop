@@ -403,6 +403,33 @@ pub async fn model_save_draft(
         .await?,
     )
 }
+/// 一个版本改了什么：代码相对官方源码改了的文件，参数、物理方案、过程文件、AI 网络相对父版本
+/// （给了 `against_id` 就相对那个版本）的不同，以及它由哪些研究得来。
+#[tauri::command]
+pub async fn model_changes(
+    id: String,
+    revision: u32,
+    against_id: Option<String>,
+    against_revision: Option<u32>,
+) -> Result<Value, String> {
+    let mut args = vec![
+        "model-changes".into(),
+        "--version".into(),
+        id,
+        "--revision".into(),
+        revision.to_string(),
+    ];
+    if let (Some(against), Some(against_revision)) = (against_id, against_revision) {
+        args.extend([
+            "--against".into(),
+            against,
+            "--against-revision".into(),
+            against_revision.to_string(),
+        ]);
+    }
+    cli(args).await
+}
+
 /// 冻结前的检查清单（用自己代码的草稿：引擎、内核、生成表、继承的参数改值）。
 #[tauri::command]
 pub async fn model_freeze_check(id: String) -> Result<Value, String> {

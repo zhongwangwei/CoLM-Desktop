@@ -77,9 +77,17 @@ function page(
       },
     },
     ...Object.fromEntries(
-      ['Button', 'Card', 'Field', 'Input', 'Select', 'Notice', 'Advanced', 'CodeWorkspace'].map(
-        (k) => [k, k],
-      ),
+      [
+        'Button',
+        'Card',
+        'Field',
+        'Input',
+        'Select',
+        'Notice',
+        'Advanced',
+        'CodeWorkspace',
+        'VersionChanges',
+      ].map((k) => [k, k]),
     ),
     IGBP: [],
     USGS: [],

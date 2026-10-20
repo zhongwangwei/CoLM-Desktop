@@ -753,7 +753,7 @@ fn executable(name: &str) -> String {
         name.into()
     }
 }
-fn cache_dir(opts: &Opts, code: &CodeRef) -> Result<PathBuf> {
+pub(crate) fn cache_dir(opts: &Opts, code: &CodeRef) -> Result<PathBuf> {
     Ok(registry(opts)?
         .root()
         .join("sources")
@@ -1298,6 +1298,64 @@ mod tests {
         assert_eq!(ws.info.based_on.as_deref(), Some("soil"));
         assert_eq!(ws.info.root_commit.as_deref(), Some("officialbase"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_new_network_drops_only_the_old_networks_studies() {
+        let entry = |study: &str, purpose: Option<&str>, from: i64, to: i64| {
+            let mut value = serde_json::json!({"study":study,"sites":[study],"targets":[{"from":from,"to":to}]});
+            if let Some(purpose) = purpose {
+                value["use"] = serde_json::json!(purpose);
+            }
+            value
+        };
+        let mut draft = ModelDraft {
+            id: "model-1".into(),
+            name: "d".into(),
+            note: String::new(),
+            parent: VersionRef {
+                id: "official".into(),
+                revision: 1,
+            },
+            code: CodeRef {
+                kind: CodeKind::Official,
+                workspace: None,
+                commit: None,
+                source_sha256: "0".repeat(64),
+            },
+            overlay: Default::default(),
+            applicability: Default::default(),
+            generation: 1,
+            created_unix: 0,
+            derived_from: Some(
+                serde_json::json!({"declared_training_studies":[
+                    // Written before entries carried a use: an attached network's study.
+                    entry("/s/old-network", None, 0, 86_400),
+                    entry("/s/calibration", Some("parameters"), 864_000, 950_400),
+                ]})
+                .to_string(),
+            ),
+        };
+        // A network attached without studies replaces the old network's provenance only.
+        declare_studies(&mut draft, &[], "network").unwrap();
+        let kept: serde_json::Value =
+            serde_json::from_str(draft.derived_from.as_deref().unwrap()).unwrap();
+        let studies: Vec<&str> = kept["declared_training_studies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["study"].as_str().unwrap())
+            .collect();
+        assert_eq!(studies, ["/s/calibration"]);
+        let calibration = draft.applicability.calibration.clone().unwrap();
+        assert_eq!(
+            (calibration.start.as_str(), calibration.end.as_str()),
+            ("1970-01-11", "1970-01-12")
+        );
+        // Provenance this code did not write (a migrated case) is left alone.
+        draft.derived_from = Some("case:abc".into());
+        declare_studies(&mut draft, &[], "network").unwrap();
+        assert_eq!(draft.derived_from.as_deref(), Some("case:abc"));
     }
 
     #[test]
@@ -1886,7 +1944,7 @@ fn attach_network(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
             .into_iter()
             .map(|path| Ok(PathBuf::from(path).canonicalize()?))
             .collect::<Result<Vec<_>>>()?;
-        declare_studies(&mut draft, &studies)?;
+        declare_studies(&mut draft, &studies, "network")?;
         let draft = store.save_draft(draft, expected)?;
         Ok(serde_json::json!({"draft":draft,"asset_root":staging}))
     })();
@@ -1898,43 +1956,78 @@ fn attach_network(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
 
 /// 记下一个版本由哪些研究得来：站点并进适用范围，率定与验证时段取各研究目标的并集，研究本身写进
 /// `derived_from`。挂 AI 网络与写入率定参数共用这一份。
-fn declare_studies(draft: &mut ModelDraft, studies: &[PathBuf]) -> Result<()> {
-    let mut evidence = Vec::new();
-    let mut calibration: Option<(i64, i64)> = None;
-    let mut validation: Option<(i64, i64)> = None;
+///
+/// 每条研究记着用途（`network` / `parameters`）。原来整段覆盖：先挂了研究 A 训练的网络、再从研究 B
+/// 导入参数，A 的出处和时段就丢了。现在挂网络只换掉网络那几条（新网络与旧网络的研究无关），导入参数
+/// 只换掉同一个研究的那条；时段按留下的全部研究重算。没写用途的旧记录都是挂网络时写的。
+fn declare_studies(draft: &mut ModelDraft, studies: &[PathBuf], purpose: &str) -> Result<()> {
+    let previous = draft
+        .derived_from
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+        .and_then(|value| value.get("declared_training_studies").cloned())
+        .and_then(|value| value.as_array().cloned());
+    if studies.is_empty() && previous.is_none() {
+        // 不是这里写的出处（比如从算例迁移来的），没有要声明的研究就不动它。
+        return Ok(());
+    }
+    let paths: Vec<serde_json::Value> =
+        studies.iter().map(|path| serde_json::json!(path)).collect();
+    let mut evidence: Vec<serde_json::Value> = previous
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| {
+            let used_for = entry
+                .get("use")
+                .and_then(|v| v.as_str())
+                .unwrap_or("network");
+            if purpose == "network" {
+                used_for != "network"
+            } else {
+                !(used_for == purpose && entry.get("study").is_some_and(|s| paths.contains(s)))
+            }
+        })
+        .collect();
     for path in studies {
         let _lock = crate::study::runner::StudyRunLock::acquire(path)?;
         let manifest = crate::study::engine::status(path)?;
         crate::study::engine::verify_frozen_inputs(&manifest)?;
-        for site in &manifest.spec.base_cases {
-            if !draft.applicability.sites.contains(site) {
-                draft.applicability.sites.push(site.clone());
+        evidence.push(serde_json::json!({"study":path,"use":purpose,"targets":manifest.spec.targets,"sites":manifest.spec.base_cases,"state":crate::study::runner::status_state(path)?}));
+    }
+    let mut calibration: Option<(i64, i64)> = None;
+    let mut validation: Option<(i64, i64)> = None;
+    let widen = |window: &mut Option<(i64, i64)>, from: i64, to: i64| {
+        *window = Some(match *window {
+            Some((a, b)) => (a.min(from), b.max(to)),
+            None => (from, to),
+        });
+    };
+    for entry in &evidence {
+        for site in entry["sites"].as_array().into_iter().flatten() {
+            if let Some(site) = site.as_str() {
+                if !draft.applicability.sites.iter().any(|known| known == site) {
+                    draft.applicability.sites.push(site.to_owned());
+                }
             }
         }
-        for target in &manifest.spec.targets {
-            calibration = Some(match calibration {
-                Some((a, b)) => (a.min(target.from), b.max(target.to)),
-                None => (target.from, target.to),
-            });
-            if let (Some(from), Some(to)) = (target.validation_from, target.validation_to) {
-                validation = Some(match validation {
-                    Some((a, b)) => (a.min(from), b.max(to)),
-                    None => (from, to),
-                });
+        for target in entry["targets"].as_array().into_iter().flatten() {
+            let field = |key: &str| target.get(key).and_then(serde_json::Value::as_i64);
+            if let (Some(from), Some(to)) = (field("from"), field("to")) {
+                widen(&mut calibration, from, to);
+            }
+            if let (Some(from), Some(to)) = (field("validation_from"), field("validation_to")) {
+                widen(&mut validation, from, to);
             }
         }
-        evidence.push(serde_json::json!({"study":path,"targets":manifest.spec.targets,"sites":manifest.spec.base_cases,"state":crate::study::runner::status_state(path)?}));
     }
-    if !evidence.is_empty() {
-        let period = |(from, to)| colm_model::Period {
-            start: crate::unix_date(from),
-            end: crate::unix_date(to),
-        };
-        draft.applicability.calibration = calibration.map(period);
-        draft.applicability.validation = validation.map(period);
-        draft.derived_from =
-            Some(serde_json::json!({"declared_training_studies":evidence}).to_string());
-    }
+    let period = |(from, to)| colm_model::Period {
+        start: crate::unix_date(from),
+        end: crate::unix_date(to),
+    };
+    draft.applicability.calibration = calibration.map(period);
+    draft.applicability.validation = validation.map(period);
+    draft.derived_from = (!evidence.is_empty())
+        .then(|| serde_json::json!({"declared_training_studies":evidence}).to_string());
     Ok(())
 }
 
@@ -2051,7 +2144,7 @@ fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
         }
         draft.overlay.parameters.push(record.clone());
     }
-    declare_studies(&mut draft, std::slice::from_ref(&study))?;
+    declare_studies(&mut draft, std::slice::from_ref(&study), "parameters")?;
     let draft = store.save_draft(draft, expected)?;
     Ok(serde_json::json!({"draft":draft,"member":member,"parameters":records.len()}))
 }
