@@ -2,7 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import type { FrozenRevision, ModelDraft, HistoryOperation, VersionRef } from '../../lib/types';
+import type {
+  FrozenRevision,
+  ModelDraft,
+  HistoryOperation,
+  StudyPick,
+  VersionRef,
+} from '../../lib/types';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { download } from '../history/history';
 import {
@@ -17,6 +23,8 @@ import {
 } from './model';
 import CodeWorkspace from './CodeWorkspace';
 import CodeFiles from './CodeFiles';
+import StudyPicks from './StudyPicks';
+import StudyImportDialog, { type StudyPreview } from './StudyImportDialog';
 import VersionChanges from './VersionChanges';
 import VersionLibrary from './VersionLibrary';
 import ParameterDialog from './ParameterDialog';
@@ -48,6 +56,9 @@ export default function VersionsPage() {
     [paramsParameter, setParamsParameter] = useState(''),
     // 冻结前检查里正在处理的项（编引擎要两三分钟，给个说明）。
     [fixing, setFixing] = useState(''),
+    // 研究结果先列出来勾选（不直接全写进草稿）；以及这个版本要研究的参数。
+    [studyPreview, setStudyPreview] = useState<StudyPreview | null>(null),
+    [picks, setPicks] = useState<StudyPick[]>([]),
     // 冻结前的检查清单（只有用自己代码的草稿才有）；checkTick 用来手动重查。
     [freezeCheck, setFreezeCheck] = useState<{
       ready: boolean;
@@ -328,6 +339,51 @@ export default function VersionsPage() {
       setDrafts(await invokeJson('model_drafts'));
     });
   }
+  // 先列出研究最优成员会带进来的参数，勾选后再写（previewStudy → importChosen）。
+  async function previewStudy() {
+    await execute(async () => {
+      if (!draft) throw new Error('No current draft');
+      const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
+      if (!studyDir) return;
+      const result = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
+        id: draft.id,
+        studyDir,
+        member: null,
+        expectedGeneration: draft.generation,
+        preview: true,
+        only: null,
+      });
+      setStudyPreview({ ...result, study: studyDir });
+    });
+  }
+  async function importChosen(chosen: [string, string | null, number | null][]) {
+    await execute(async () => {
+      if (!draft || !studyPreview) return;
+      const current = dirtyNow.current ? await save() : draft;
+      const result = await invokeJson<{ draft: ModelDraft; member: string; parameters: number }>(
+        'model_import_study',
+        {
+          id: current.id,
+          studyDir: studyPreview.study,
+          member: studyPreview.member,
+          expectedGeneration: current.generation,
+          preview: null,
+          only: chosen,
+        },
+      );
+      setDraft(result.draft);
+      dirtyNow.current = false;
+      setDirty(false);
+      setDrafts(await invokeJson('model_drafts'));
+      setStudyPreview(null);
+      setStudyNotice(
+        t(
+          `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进这个版本，并记下了研究的站点与时段。`,
+          `Wrote ${result.parameters} parameters of study member ${result.member} into this version and recorded the study's sites and periods.`,
+        ),
+      );
+    });
+  }
   // 研究的结果写进这个版本：选一个已完成的率定或敏感性研究，把它最优成员的参数值写成参数改值。
   async function importStudyParameters() {
     await execute(async () => {
@@ -337,7 +393,14 @@ export default function VersionsPage() {
       const current = dirtyNow.current ? await save() : draft;
       const result = await invokeJson<{ draft: ModelDraft; member: string; parameters: number }>(
         'model_import_study',
-        { id: current.id, studyDir, member: null, expectedGeneration: current.generation },
+        {
+          id: current.id,
+          studyDir,
+          member: null,
+          expectedGeneration: current.generation,
+          preview: null,
+          only: null,
+        },
       );
       setDraft(result.draft);
       dirtyNow.current = false;
@@ -1325,7 +1388,7 @@ export default function VersionsPage() {
                   <>
                     <Button
                       disabled={busy || codeBusy}
-                      onClick={() => void importStudyParameters()}
+                      onClick={() => void previewStudy().catch(() => {})}
                     >
                       {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
                     </Button>
@@ -1751,6 +1814,43 @@ export default function VersionsPage() {
           </div>
           <div hidden={tab !== 'research'} className="versions-panel">
             <Card
+              title={t('要研究的参数', 'Parameters to study')}
+              description={t(
+                '先在这里定好研究哪些参数和范围（地类、PFT 参数可以逐个类型选），再去研究页选算例、目标和方法；这里选的会自动勾上。',
+                'Choose the parameters and ranges here (land-class and PFT parameters type by type), then pick cases, targets and a method on the research page; these are ticked there automatically.',
+              )}
+            >
+              <StudyPicks
+                owner={draft ? draft.id : viewing ? keyOf(viewing.version) : ''}
+                catalog={allowed}
+                en={state.language === 'en'}
+                disabled={busy || codeBusy}
+                onChange={setPicks}
+              />
+              <div className="button-row">
+                <Button
+                  variant="primary"
+                  disabled={busy || codeBusy}
+                  onClick={() => {
+                    update({ researchSeed: picks.length ? { parameters: picks } : null });
+                    // 没去成研究页就把种子清掉，免得以后在研究页莫名其妙地生效。
+                    run(() =>
+                      openResearch().catch((e) => {
+                        update({ researchSeed: null });
+                        throw e;
+                      }),
+                    );
+                  }}
+                >
+                  {draft
+                    ? t('保存、冻结并去研究页', 'Save, freeze and go to research')
+                    : t('去研究页', 'Go to research')}
+                  {picks.length > 0 &&
+                    t(`（带上 ${picks.length} 个参数）`, ` (with ${picks.length} parameters)`)}
+                </Button>
+              </div>
+            </Card>
+            <Card
               title={t('研究', 'Research')}
               description={t(
                 '用这个版本做率定、敏感性或不确定性分析，或训练 AI 网络；跑完的率定结果可以导入草稿。',
@@ -1768,7 +1868,10 @@ export default function VersionsPage() {
                     : t('用它做研究', 'Research with it')}
                 </Button>
                 {editable && (
-                  <Button disabled={busy || codeBusy} onClick={() => void importStudyParameters()}>
+                  <Button
+                    disabled={busy || codeBusy}
+                    onClick={() => void previewStudy().catch(() => {})}
+                  >
                     {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
                   </Button>
                 )}
@@ -1855,6 +1958,16 @@ export default function VersionsPage() {
               </Button>
             </Card>
           </div>
+          {draft && (
+            <StudyImportDialog
+              preview={studyPreview}
+              overlay={draft.overlay}
+              en={state.language === 'en'}
+              busy={busy}
+              onClose={() => setStudyPreview(null)}
+              onImport={(chosen) => void importChosen(chosen).catch(() => {})}
+            />
+          )}
           <ParameterDialog
             open={paramsOpen}
             onOpenChange={setParamsOpen}

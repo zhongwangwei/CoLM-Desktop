@@ -14,6 +14,7 @@ import {
   parameterSpec,
   studyPermissions,
   type ParameterContext,
+  applyResearchSeed,
 } from './study';
 import {
   remoteStudyPermissions,
@@ -131,7 +132,7 @@ function StudyResult({ text, theme }: { text: string; theme: string }) {
 }
 
 export default function ResearchPage() {
-  const { state, notify, refreshVersions, navigate } = useApp();
+  const { state, notify, refreshVersions, navigate, update } = useApp();
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const dir = state.selectedCase?.dir || '';
@@ -178,6 +179,8 @@ export default function ResearchPage() {
   const [busy, setBusy] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState('');
+  // 版本页带过来的参数勾上了几个（有的在这些算例里没有，比如算例里没有那个地类或植物类型）。
+  const [seedNotice, setSeedNotice] = useState('');
   const [advanced, setAdvanced] = useState(false);
   const [slot, setSlot] = useState('pft');
   const [features, setFeatures] = useState('clim_tair, clim_vpd, clim_prec');
@@ -424,7 +427,22 @@ export default function ResearchPage() {
         dirs: effective,
         kernelDir: kernel,
       });
-      if (current()) setContexts(rows);
+      if (current()) {
+        setContexts(rows);
+        const seed = state.researchSeed?.parameters;
+        if (seed?.length) {
+          const picked = applyResearchSeed(rows, seed);
+          setParameters((old) => ({ ...old, ...picked }));
+          const matched = Object.keys(picked).length;
+          setSeedNotice(
+            tr(
+              `已按版本页选的参数勾上 ${matched} 个${matched < seed.length ? `；另 ${seed.length - matched} 个在这些算例里没有（比如算例里没有那个地类或植物类型）` : ''}。`,
+              `Ticked ${matched} of the parameters chosen on the version page${matched < seed.length ? `; ${seed.length - matched} do not apply to these cases (for example, the class or plant type is absent)` : ''}.`,
+            ),
+          );
+          update({ researchSeed: null });
+        }
+      }
       return rows;
     });
   function network() {
@@ -1736,6 +1754,15 @@ export default function ResearchPage() {
       )}
       <Card title={tr('参数范围与研究设计', 'Parameter ranges and study design')}>
         <div className="flex gap-2">{renderActions(designActions.slice(0, 1))}</div>
+        {state.researchSeed?.parameters.length && !contexts.length ? (
+          <Notice>
+            {tr(
+              `从版本页带来 ${state.researchSeed.parameters.length} 个要研究的参数：选好算例和编译配置、读取参数后会自动勾上。`,
+              `${state.researchSeed.parameters.length} parameters came from the version page; they are ticked once cases and a build configuration are chosen and parameters are loaded.`,
+            )}
+          </Notice>
+        ) : null}
+        {seedNotice && <Notice tone="success">{seedNotice}</Notice>}
         {!contexts.length && (
           <p>
             {tr(

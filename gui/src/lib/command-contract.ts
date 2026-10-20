@@ -979,6 +979,14 @@ export const commandContract = {
     "expectedGeneration": {
       "required": true,
       "rust_type": "u64"
+    },
+    "preview": {
+      "required": false,
+      "rust_type": "Option<bool>"
+    },
+    "only": {
+      "required": false,
+      "rust_type": "Option<Vec<ChosenParameter>>"
     }
   },
   "model_import_process": {

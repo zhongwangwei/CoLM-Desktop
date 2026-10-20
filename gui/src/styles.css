@@ -3470,3 +3470,19 @@ table input {
   margin: 18px 0 8px;
   font-size: 14px;
 }
+.study-picks-add {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.study-picks-add select {
+  max-width: 420px;
+}
+.study-picks .param-input {
+  width: 110px;
+}
+.dialog-content.study-import {
+  width: min(860px, 94vw);
+}

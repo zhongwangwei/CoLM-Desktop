@@ -16,6 +16,9 @@ export type Descriptor = {
   doc_zh: string;
   doc_en: string;
   validation: { min: string | null; max: string | null; allowed_values: string[]; finite: boolean };
+  /** 研究里能不能当待率定的参数（目录里标的）。 */
+  calibration_eligible?: boolean;
+  recommended_scale?: string;
 };
 export type ModelField = {
   name: string;

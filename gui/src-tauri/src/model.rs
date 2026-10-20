@@ -1522,13 +1522,21 @@ pub async fn model_branch_code(id: String, expected_generation: u64) -> Result<M
     )
 }
 
+/// 研究结果里勾选的一个参数：`[parameter_id, scheme, index]`。
+type ChosenParameter = (String, Option<String>, Option<u8>);
+
 /// 把一次已完成的率定或敏感性研究里某个成员（默认最优）的参数值写进草稿的参数改值。
 #[tauri::command]
+///
+/// `preview`：只列出会带进来的参数和目标函数值，不改草稿。`only`：只导入这些
+/// `[parameter_id, scheme, index]`（版本页勾选的）。
 pub async fn model_import_study(
     id: String,
     study_dir: String,
     member: Option<String>,
     expected_generation: u64,
+    preview: Option<bool>,
+    only: Option<Vec<ChosenParameter>>,
 ) -> Result<Value, String> {
     if study_dir.contains('\0') || !std::path::Path::new(&study_dir).is_absolute() {
         return Err("研究目录须为绝对路径".into());
@@ -1539,7 +1547,7 @@ pub async fn model_import_study(
     if member.starts_with('-') || member.contains(['\0', '\n']) {
         return Err("成员编号不合法".into());
     }
-    cli(vec![
+    let mut args: Vec<String> = vec![
         "model-import-study".into(),
         "--model-id".into(),
         id,
@@ -1549,8 +1557,17 @@ pub async fn model_import_study(
         member,
         "--expected-generation".into(),
         expected_generation.to_string(),
-    ])
-    .await
+    ];
+    if preview == Some(true) {
+        args.extend(["--preview".into(), "1".into()]);
+    }
+    if let Some(only) = only {
+        args.extend([
+            "--only".into(),
+            serde_json::to_string(&only).map_err(|e| e.to_string())?,
+        ]);
+    }
+    cli(args).await
 }
 
 #[tauri::command]

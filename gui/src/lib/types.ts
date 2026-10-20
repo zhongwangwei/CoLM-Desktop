@@ -220,6 +220,8 @@ export type AppState = {
     subgrid?: 'LCT' | 'PFT' | 'PC';
     setup?: { id: string; value: string };
   } | null;
+  /** 版本页选好的要研究的参数：研究页加载参数行之后据此勾选，用完清掉。 */
+  researchSeed?: { parameters: StudyPick[] } | null;
   expert: boolean;
   language: 'zh' | 'en';
   theme: 'light' | 'dark';
@@ -230,6 +232,16 @@ export type AppState = {
   /** Notices raised as errors (`notify(message, true)`), shown in the error style. */
   errorNotices?: string[];
   busy: boolean;
+};
+/** 一个要研究的参数：哪个参数、哪个地类或植物类型、取值范围与尺度。 */
+export type StudyPick = {
+  parameter_id: string;
+  raw_key: string;
+  scheme: string | null;
+  index: number | null;
+  min: string;
+  max: string;
+  scale: string;
 };
 export type AppPatch = Partial<AppState> | ((state: AppState) => Partial<AppState>);
 /** A saved project turned back into the inputs of the five 新建模拟 steps. */

@@ -2128,16 +2128,30 @@ fn study_parameter_records(
 /// 把一次率定（或敏感性）研究里某个成员（默认最优）的参数值写进草稿的参数改值。原来率定结果只能
 /// "应用到一个新算例"，进不了版本（2026-10-20 梳理）。研究里的参数都在参数目录里登记过，按目录身份
 /// 写成和手工改值完全一样的记录；土层参数没有版本里的改值形式，AI 网络走"挂网络"那条路，都明确拒绝。
+/// 勾选导入的一个研究参数：`[parameter_id, scheme, index]`。
+type ChosenParameter = (String, Option<String>, Option<u8>);
+
+/// `--preview 1`：只给出这个成员会带进来的参数和它的目标函数值，不改草稿（版本页先列出来让人勾选）。
+/// `--only`：只导入勾选的那些，JSON 数组，每项 `[parameter_id, scheme 或 null, index 或 null]`。
 fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
     let mut draft = store.draft(&opts.need_str("--model-id")?)?;
-    let expected = opts.need_str("--expected-generation")?.parse::<u64>()?;
+    let preview = opts.get("--preview").is_some_and(|v| v == "1");
+    let expected = if preview {
+        draft.generation
+    } else {
+        opts.need_str("--expected-generation")?.parse::<u64>()?
+    };
     ensure!(
         draft.generation == expected,
         "model draft changed; reload it before importing study parameters"
     );
     let study = PathBuf::from(opts.need_str("--study-dir")?).canonicalize()?;
     let member_id = opts.get("--member").unwrap_or_else(|| "best".into());
-    let (records, member) = {
+    let only: Option<Vec<ChosenParameter>> = opts
+        .get("--only")
+        .map(|text| serde_json::from_str(&text).context("--only must be a JSON array"))
+        .transpose()?;
+    let (mut records, member, objective) = {
         // 与研究页"存成新版本"同一组校验：输入没被改过、成员确实算完且有结果证据。
         let (_lock, manifest, member) = crate::study::runner::verified_member(&study, &member_id)?;
         ensure!(
@@ -2148,8 +2162,26 @@ fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
             "this study trained an AI network; attach the network from the research page instead"
         );
         let records = study_parameter_records(&manifest.spec.parameters, &member)?;
-        (records, member.id.clone())
+        let objective = crate::study::runner::status_state(&study)?
+            .and_then(|state| state.candidates.get(&member.id).and_then(|c| c.calibration));
+        (records, member.id.clone(), objective)
     };
+    if let Some(only) = &only {
+        records.retain(|r| {
+            only.iter().any(|(id, scheme, index)| {
+                *id == r.parameter_id
+                    && *scheme == r.scope_instance.scheme
+                    && *index == r.scope_instance.index
+            })
+        });
+        ensure!(
+            !records.is_empty(),
+            "none of the chosen parameters is in this study member"
+        );
+    }
+    if preview {
+        return Ok(serde_json::json!({"member":member,"objective":objective,"records":records}));
+    }
     let same = |a: &colm_model::ParameterOverrideRecord,
                 b: &colm_model::ParameterOverrideRecord| {
         a.parameter_id == b.parameter_id

@@ -186,3 +186,25 @@ export function networkDefaults(slot: string) {
         relative: true,
       };
 }
+
+/**
+ * 版本页带来的要研究的参数，对上研究页按算例读出的参数行：同一个参数、同一个地类或植物类型就勾上，
+ * 范围与尺度用版本页定的。返回研究页参数表的那种 `{行号: 设定}`。
+ */
+export function applyResearchSeed(
+  rows: ParameterContext[],
+  seed: import('../../lib/types').StudyPick[],
+): Record<string, { enabled: boolean; min: string; max: string; scale: string }> {
+  const picked: Record<string, { enabled: boolean; min: string; max: string; scale: string }> = {};
+  rows.forEach((row, i) => {
+    const pick = seed.find(
+      (p) =>
+        p.parameter_id === row.id &&
+        (p.index ?? null) === (row.scope_instance.index ?? null) &&
+        (p.scheme ?? null) === (row.scope_instance.scheme ?? null),
+    );
+    if (pick)
+      picked[String(i)] = { enabled: true, min: pick.min, max: pick.max, scale: pick.scale };
+  });
+  return picked;
+}

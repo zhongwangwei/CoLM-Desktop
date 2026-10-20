@@ -87,6 +87,8 @@ function page(
         'Advanced',
         'CodeWorkspace',
         'CodeFiles',
+        'StudyPicks',
+        'StudyImportDialog',
         'VersionChanges',
         'VersionLibrary',
         'ParameterDialog',
