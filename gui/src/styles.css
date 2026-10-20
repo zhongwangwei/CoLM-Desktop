@@ -2852,3 +2852,109 @@ table input {
   margin: 6px 0 0;
   font-size: 12px;
 }
+
+/* 修改版的代码文件：左边目录，右边编辑器。 */
+.code-files {
+  margin: 12px 0;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--background);
+}
+.code-files-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.code-files-head h3 {
+  margin: 0;
+  font-size: 15px;
+}
+.code-files-head .muted {
+  font-size: 12px;
+}
+.code-files-body {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(0, 2.4fr);
+  gap: 12px;
+}
+.code-files-tree,
+.code-files-editor {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.code-files-tree ul {
+  max-height: 420px;
+  margin: 6px 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+.code-files-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  text-align: left;
+}
+.code-files-entry:hover:not(:disabled) {
+  background: var(--accent-soft);
+}
+.code-files-entry small {
+  margin-left: auto;
+  color: var(--muted);
+}
+.code-files-tree li.is-open .code-files-entry {
+  background: var(--accent-soft);
+  font-weight: 600;
+}
+.code-files-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.code-files-path .button {
+  min-height: 26px;
+  padding: 2px 8px;
+}
+.code-files-text {
+  width: 100%;
+  min-height: 420px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  tab-size: 4;
+  resize: vertical;
+  white-space: pre;
+}
+.code-files-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+@container (max-width: 760px) {
+  .code-files-body {
+    grid-template-columns: 1fr;
+  }
+}

@@ -3,6 +3,7 @@ import { invokeJson, invoke } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import CodeFiles from './CodeFiles';
 type Status = {
   workspace?: { base_commit?: string };
   changed_files?: { path: string; added?: number; removed?: number }[];
@@ -255,6 +256,16 @@ export default function CodeWorkspace({
           </>
         ) : (
           <>
+            <CodeFiles
+              name={name}
+              message={message}
+              en={state.language === 'en'}
+              disabled={busy || disabled}
+              onChanged={async () => {
+                setStatus(await invokeJson<Status>('workspace_status', { name }));
+                await onChanged();
+              }}
+            />
             <Button disabled={busy || !message} onClick={() => run(patch)}>
               {t('导入补丁', 'Import patch')}
             </Button>

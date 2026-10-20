@@ -2350,6 +2350,80 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "workspace_files": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dir": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "workspace_file": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "workspace_write_file": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "text": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "message": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "workspace_put": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "from": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "folder": {
+      "required": true,
+      "rust_type": "bool"
+    },
+    "message": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "workspace_remove": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "message": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "version_check": {
     "name": {
       "required": true,

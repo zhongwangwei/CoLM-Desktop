@@ -230,8 +230,8 @@ pub async fn workspace_status(name: String) -> Result<Value, String> {
     cli_json(args("ws-status", &["--name", &name]), None).await
 }
 
-fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String>, String> {
-    valid_name(name)?;
+/// 工作区里的相对路径：与 `colm-workspace` 的补丁规则一致（拼进命令行前先在这一层挡住）。
+fn checked_path(path: &str) -> Result<(), String> {
     let lower = path.to_ascii_lowercase();
     if path.is_empty()
         || path.starts_with('/')
@@ -245,6 +245,21 @@ fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String
     {
         return Err("文件路径须为工作区内未受保护的相对路径".into());
     }
+    Ok(())
+}
+
+/// 改动说明：一行非空文字。
+fn checked_message(message: &str) -> Result<&str, String> {
+    let message = message.trim();
+    if message.is_empty() || message.chars().count() > 200 || message.contains(['\n', '\r', '\0']) {
+        return Err("改动说明须为一行非空文字，最多 200 字".into());
+    }
+    Ok(message)
+}
+
+fn file_args(name: &str, path: &str, message: Option<&str>) -> Result<Vec<String>, String> {
+    valid_name(name)?;
+    checked_path(path)?;
     let mut command = args(
         if message.is_some() {
             "ws-revert-file"
@@ -276,6 +291,133 @@ pub async fn workspace_revert_file(
     message: String,
 ) -> Result<Value, String> {
     cli_json(file_args(&name, &path, Some(&message))?, None).await
+}
+
+/// 列出修改版源码里的一个目录（空 = 根目录）。
+#[tauri::command]
+pub async fn workspace_files(name: String, dir: Option<String>) -> Result<Value, String> {
+    valid_name(&name)?;
+    let dir = dir.unwrap_or_default();
+    if !dir.is_empty() {
+        checked_path(&dir)?;
+    }
+    cli_json(args("ws-ls", &["--name", &name, "--dir", &dir]), None).await
+}
+
+/// 读修改版里的一个文件；文本才带内容。
+#[tauri::command]
+pub async fn workspace_file(name: String, path: String) -> Result<Value, String> {
+    valid_name(&name)?;
+    checked_path(&path)?;
+    cli_json(args("ws-file", &["--name", &name, "--path", &path]), None).await
+}
+
+/// 在界面里编辑后保存一个文本文件（新建或覆盖），成为一次改动提交。文本经临时文件传给 colm-cli：
+/// 几 MB 的源码放进命令行参数会超过系统上限。
+#[tauri::command]
+pub async fn workspace_write_file(
+    name: String,
+    path: String,
+    text: String,
+    message: String,
+) -> Result<Value, String> {
+    valid_name(&name)?;
+    checked_path(&path)?;
+    let message = checked_message(&message)?.to_owned();
+    if text.len() > 2 * 1024 * 1024 || text.contains('\0') {
+        return Err("文本最多 2 MB，不能含空字符；更大的文件请用本机文件替换".into());
+    }
+    let file = std::env::temp_dir().join(format!(
+        "colm-ws-write-{}-{}.txt",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::write(&file, &text).map_err(|e| e.to_string())?;
+    let result = cli_json(
+        args(
+            "ws-write",
+            &[
+                "--name",
+                &name,
+                "--path",
+                &path,
+                "--text-file",
+                &file.to_string_lossy(),
+                "--message",
+                &message,
+            ],
+        ),
+        None,
+    )
+    .await;
+    let _ = std::fs::remove_file(&file);
+    result
+}
+
+/// 用本机的文件（可以是二进制）或文件夹（整个替换目录）替换或新增修改版里的路径。
+#[tauri::command]
+pub async fn workspace_put(
+    name: String,
+    path: String,
+    from: String,
+    folder: bool,
+    message: String,
+) -> Result<Value, String> {
+    valid_name(&name)?;
+    checked_path(&path)?;
+    let message = checked_message(&message)?;
+    let source = PathBuf::from(&from);
+    if from.contains('\0')
+        || !source.is_absolute()
+        || (folder && !source.is_dir())
+        || (!folder && !source.is_file())
+    {
+        return Err(if folder {
+            "请选择一个本机文件夹".into()
+        } else {
+            "请选择一个本机文件".into()
+        });
+    }
+    cli_json(
+        args(
+            if folder { "ws-put-dir" } else { "ws-put" },
+            &[
+                "--name",
+                &name,
+                "--path",
+                &path,
+                "--from",
+                &from,
+                "--message",
+                message,
+            ],
+        ),
+        None,
+    )
+    .await
+}
+
+/// 删除修改版里的一个文件或目录，成为一次改动提交。
+#[tauri::command]
+pub async fn workspace_remove(
+    name: String,
+    path: String,
+    message: String,
+) -> Result<Value, String> {
+    valid_name(&name)?;
+    checked_path(&path)?;
+    let message = checked_message(&message)?;
+    cli_json(
+        args(
+            "ws-rm",
+            &["--name", &name, "--path", &path, "--message", message],
+        ),
+        None,
+    )
+    .await
 }
 
 fn version_check_args(

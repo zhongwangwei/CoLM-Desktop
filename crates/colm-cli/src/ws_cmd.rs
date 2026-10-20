@@ -9,6 +9,12 @@
 //! colm-cli ws-read     (--name N | --source DIR) --path P [--from L] [--to L]
 //! colm-cli ws-symbols  (--name N | --source DIR) --path P      # --source：应用自己的源码，只读，不建工作区
 //! colm-cli ws-patch    --name N --message M (--diff-file F | --diff TEXT)
+//! colm-cli ws-ls       --name N [--dir D]                    # 列出源码里的一个目录
+//! colm-cli ws-file     --name N --path P                     # 读一个文件（文本才给内容）
+//! colm-cli ws-write    --name N --path P --text-file F --message M   # 写文本文件并提交
+//! colm-cli ws-put      --name N --path P --from F --message M        # 用本机文件替换或新增（可二进制）
+//! colm-cli ws-put-dir  --name N --path P --from D --message M        # 用本机文件夹整个替换目录
+//! colm-cli ws-rm       --name N --path P --message M                 # 删除文件或目录并提交
 //! colm-cli ws-revert   --name N --commit HEX
 //! colm-cli ws-build-engine --name N [--network 1]
 //! colm-cli ws-build-kernel --name N --preset P
@@ -34,7 +40,9 @@ use colm_workspace::compare::Tolerance;
 use colm_workspace::gates::ChangeKind;
 use colm_workspace::parity::Baseline;
 use colm_workspace::testrun::Kind;
-use colm_workspace::{build, code, compare, kernels, layout, parity, patch, testrun, Workspace};
+use colm_workspace::{
+    build, code, compare, files, kernels, layout, parity, patch, testrun, Workspace,
+};
 use serde_json::json;
 
 use super::Opts;
@@ -243,6 +251,38 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
                 &opts.need_str("--message")?
             )?));
         }
+        "ws-ls" => print(json!({
+            "entries": files::list(&open(opts)?, &opts.get("--dir").unwrap_or_default())?
+        })),
+        "ws-file" => print(json!(files::read(&open(opts)?, &opts.need_str("--path")?)?)),
+        "ws-write" => {
+            let file = opts.need_str("--text-file")?;
+            let text =
+                std::fs::read_to_string(&file).with_context(|| format!("cannot read {file}"))?;
+            print(json!(files::write_text(
+                &open(opts)?,
+                &opts.need_str("--path")?,
+                &text,
+                &opts.need_str("--message")?
+            )?));
+        }
+        "ws-put" => print(json!(files::put_file(
+            &open(opts)?,
+            &opts.need_str("--path")?,
+            &PathBuf::from(opts.need_str("--from")?),
+            &opts.need_str("--message")?
+        )?)),
+        "ws-put-dir" => print(json!(files::put_dir(
+            &open(opts)?,
+            &opts.need_str("--path")?,
+            &PathBuf::from(opts.need_str("--from")?),
+            &opts.need_str("--message")?
+        )?)),
+        "ws-rm" => print(json!(files::remove(
+            &open(opts)?,
+            &opts.need_str("--path")?,
+            &opts.need_str("--message")?
+        )?)),
         "ws-diff" => print(json!(patch::diff_file(
             &open(opts)?,
             &opts.need_str("--path")?

@@ -11,6 +11,7 @@
 pub mod build;
 pub mod code;
 pub mod compare;
+pub mod files;
 pub mod gates;
 pub mod git;
 pub mod kernels;
