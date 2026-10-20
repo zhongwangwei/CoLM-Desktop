@@ -742,3 +742,40 @@ test('single-case stages are visible exclusive buttons without enabling advanced
       .every((el) => el.props.disabled),
   );
 });
+
+test('a single server run shows what the server does, its step and date, the job and the latest log', () => {
+  const remote = {
+    record: { host: 'bd', job: 'run-1', scheduler: 'lsf', scheduler_id: '232924' },
+    status: {
+      state: 'running',
+      log_tail: '=== colm-stage colm begin ===\nTIMESTEP = 2879 | DATE = 2003-04-01-82800\n',
+    },
+    stages: [['colm', 'begin']],
+    progress: { step: 2879, date: '2003-04-01-82800', total_steps: 2880 },
+  };
+  const page = render({
+    case: '/case',
+    location: 'remote',
+    running: true,
+    status: 'running',
+    logs: [],
+    stages: {},
+    progress: { host: 'bd', remote },
+  });
+  const strings = page.elements.flatMap((el) =>
+    el.children.filter((child): child is string => typeof child === 'string'),
+  );
+  const text = strings.join('\n');
+  assert.ok(text.includes('2879 / 2880 · 99%'), text);
+  assert.ok(text.includes(' · 模拟到 2003-04-01'));
+  assert.ok(text.includes('LSF · 作业号 232924'));
+  assert.ok(
+    page.elements.some(
+      (el) =>
+        el.type === 'pre' &&
+        String(el.children[0]).includes('TIMESTEP = 2879 | DATE = 2003-04-01-82800'),
+    ),
+    'the latest log lines are visible without opening anything',
+  );
+  assert.ok(page.elements.some((el) => el.props.className === 'run-progress-activity'));
+});

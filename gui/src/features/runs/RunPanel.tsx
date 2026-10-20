@@ -30,6 +30,7 @@ import {
   settleRuns,
   submittingHost,
   remoteEndStatus,
+  remoteActivity,
 } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
@@ -178,6 +179,33 @@ export default function RunPanel({
   const completed = !!resultRun;
   const view = restoreRunView(persisted, casePath),
     remotePermissions = remoteRunPermissions(remote);
+  // 单个算例在服务器上跑时，进度区也说清服务器在做什么、算到哪一天、作业在哪：和批量页的站点行一样。
+  const remoteRun = persisted?.location === 'remote' && !!remote;
+  const serverActivity = remoteRun ? remoteActivity(remote, en).text : '';
+  const progressData = (
+    remoteRun ? (remote as { progress?: unknown }).progress : persisted?.progress
+  ) as { date?: unknown } | null | undefined;
+  const simulatedDate =
+    typeof progressData?.date === 'string' ? progressData.date.slice(0, 10) : '';
+  const jobFacts = remoteRun
+    ? remoteJobFacts(remote, en).filter((fact) =>
+        [
+          t('服务器', 'Server'),
+          t('调度系统', 'Scheduler'),
+          t('申请资源', 'Requested'),
+          t('提交时间', 'Submitted'),
+        ].includes(fact.label),
+      )
+    : [];
+  const progressTone = !view
+    ? 'unknown'
+    : ['running', 'starting', 'submitted'].includes(view.status)
+      ? 'running'
+      : ['succeeded', 'failed', 'cancelled'].includes(view.status)
+        ? view.status
+        : ['queued', 'preparing', 'submitting'].includes(view.status)
+          ? 'waiting'
+          : 'unknown';
   const resultsBlocked =
     ((!batchCases || !!host) && pending) ||
     disabled ||
@@ -1510,19 +1538,59 @@ export default function RunPanel({
       </footer>
       {view && !batchCases && (
         <section className="simulation-monitor" aria-live="polite">
-          <h3>{t('运行进度', 'Run progress')}</h3>
-          <p role="status">
+          <div className="run-progress-head">
+            <h3>{t('运行进度', 'Run progress')}</h3>
+            <span className={`run-progress-chip is-${progressTone}`}>
+              {statusLabels[view.status] ?? view.status}
+            </span>
+          </div>
+          <p role="status" className="run-progress-status">
             {statusLabels[view.status] ?? view.status}
             {view.stage ? ` · ${stageLabels[view.stage] ?? view.stage}` : ''}
           </p>
-          {!!view.total && <progress value={view.step ?? 0} max={view.total} />}
+          {serverActivity && <p className="run-progress-activity">{serverActivity}</p>}
+          {!!view.total && (
+            <div className="run-progress-bar">
+              <progress value={view.step ?? 0} max={view.total} />
+              <span>
+                {`${view.step ?? 0} / ${view.total} · ${Math.floor(((view.step ?? 0) / view.total) * 100)}%`}
+                {simulatedDate
+                  ? t(` · 模拟到 ${simulatedDate}`, ` · simulated to ${simulatedDate}`)
+                  : ''}
+              </span>
+            </div>
+          )}
+          {!!jobFacts.length && (
+            <dl className="run-progress-facts">
+              {jobFacts.map((fact) => (
+                <div key={fact.label}>
+                  <dt>{fact.label}</dt>
+                  <dd>{fact.value}</dd>
+                </div>
+              ))}
+            </dl>
+          )}
           <p className="path">
             {t('运行编号', 'Run ID')}：{view.runId || t('等待核对', 'Needs verification')}
           </p>
           {persisted?.error && <Notice tone="error">{persisted.error}</Notice>}
-          <Advanced title={t('查看运行日志', 'View run log')} open={!!persisted?.running}>
-            <pre className="run-log">{view.lines.join('\n') || t('暂无日志', 'No log yet')}</pre>
-          </Advanced>
+          <div className="run-progress-log">
+            <strong>{t('最新日志', 'Latest log')}</strong>
+            <pre className="run-log">
+              {view.lines.slice(-12).join('\n') ||
+                (persisted?.location === 'remote'
+                  ? t(
+                      '服务器还没写出日志：作业可能还在排队或刚开始。软件每 10 秒自动核对一次。',
+                      'The server has written no log yet: the job may still be queued or just starting. The app checks every 10 seconds.',
+                    )
+                  : t('暂无日志', 'No log yet'))}
+            </pre>
+          </div>
+          {view.lines.length > 12 && (
+            <Advanced title={t('查看完整日志', 'View the full log')}>
+              <pre className="run-log">{view.lines.join('\n')}</pre>
+            </Advanced>
+          )}
         </section>
       )}
       {remote != null && (

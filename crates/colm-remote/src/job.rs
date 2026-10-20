@@ -55,16 +55,23 @@ impl Spec {
 pub fn job_script(root: &str, id: &str, body: &str, spec: &Spec) -> Result<String> {
     check_id(id)?;
     let dir = job_dir(root, id);
+    // LSF 的 `-oo` 和 PBS 的 `-o` 要等作业结束才把输出写回去（摆渡船实测 2026-10-20：作业 08:55 开始，
+    // `log` 直到 08:58 结束才出现），运行期间读不到阶段、步数和日志。这两种由脚本自己把输出实时追加到
+    // `log`，调度系统的输出另写到 `scheduler.log`，结束时就不会把 `log` 盖掉。Slurm 的 `--output` 本来就是实时写的。
+    let spooled = matches!(spec.scheduler, Scheduler::Lsf | Scheduler::Pbs);
     let header = sched::directives(
         spec.scheduler,
         &spec.name,
-        &format!("{dir}/log"),
+        &format!("{dir}/{}", if spooled { "scheduler.log" } else { "log" }),
         &spec.resources,
     )?;
     let mut script = String::from("#!/bin/bash\n");
     for line in header {
         script.push_str(&line);
         script.push('\n');
+    }
+    if spooled {
+        script.push_str(&format!("exec >> {} 2>&1\n", quote(&format!("{dir}/log"))));
     }
     script.push_str(&format!("cd {}\n", quote(&dir)));
     if let Some(env) = &spec.resources.env_script {

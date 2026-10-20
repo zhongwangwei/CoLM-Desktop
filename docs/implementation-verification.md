@@ -34404,3 +34404,27 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
   - `styles.css`：`.start-cover*`，用现有的 `--background`/`--foreground`/`--muted`，深浅色主题都跟着走。
 - **验证**：前端 739 条通过（新增 `the start cover shows from the first paint until the first load finishes`），tsc、eslint、`format:check`、`check-gui`、`vite build` 通过；把静态版单独渲染后截图，logo、名称、"Loading…" 居中显示。
 - **没做**：没有量测封面实际停留多久（桌面窗口里后端就绪通常很快，封面可能只一闪而过）；Tauri 窗口本身的原生启动背景没有改。
+
+60. **摆渡船（LSF）上的单个算例运行时面板没有进度和日志（用户测试，2026-10-20）**
+    - 现象：运行面板的"运行进度"一直只有"运行中"和运行编号，日志显示"暂无日志"。
+    - 只读核对作业 `run-5d2aae95…`（LSF 作业 232924，45 核，node040）：
+      - 08:55 开始，08:58 结束，退出码 0；日志最后是 `TIMESTEP = 2880 … CoLM Execution Completed.`。
+      - 日志文件的修改时间正好是 08:58：LSF 的 `#BSUB -oo` 要等作业结束才把输出写回去。
+      - PBS 的 `-o` 同样是结束时才拷回。Slurm 的 `--output` 是实时写的，所以 land02 和天河没暴露出来。
+      - 打包的站点批量由载体直接 `> log`，不受影响。
+    - 改为：
+      - `job_script` 对 LSF 和 PBS 在脚本开头加 `exec >> <作业目录>/log 2>&1`，由脚本自己实时追加日志。
+      - 调度系统的输出改写到 `<作业目录>/scheduler.log`，结束时不会覆盖 `log`。
+    - 面板：单算例的"运行进度"原来只显示状态和一个折叠的日志。现在有：
+      - 状态标签与阶段；
+      - 服务器在做什么（`remoteActivity`：排队原因、在编引擎、在算哪一段）；
+      - 步数、百分比、模拟到哪一天；
+      - 作业信息：服务器、调度系统与作业号、申请资源、提交时间；
+      - 直接可见的最新 12 行日志，完整日志收在折叠里；
+      - 服务器还没写出日志时，说明作业可能还在排队或刚开始，并告知软件每 10 秒自动核对一次。
+    - 测试：
+      - colm-remote `lsf_and_pbs_jobs_write_their_log_while_running_and_keep_scheduler_output_apart`。
+      - colm-remote `an_lsf_job_log_holds_the_output_before_the_job_ends`：真跑生成的脚本，作业体在结束前从 `log` 里读到自己的 `TIMESTEP`；旧脚本下读不到。
+      - 前端 `a single server run shows what the server does, its step and date, the job and the latest log`。
+      - colm-remote 112 条、前端 740 条通过；两个 workspace 的 fmt、colm-remote clippy、check-gui、构建通过。
+    - 没测：在摆渡船上真交一个单个算例，看运行期间日志是否实时出现。

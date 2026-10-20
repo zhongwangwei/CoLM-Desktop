@@ -58,6 +58,66 @@ fn scheduler_job_script_has_directives_environment_then_body() {
 }
 
 #[test]
+fn lsf_and_pbs_jobs_write_their_log_while_running_and_keep_scheduler_output_apart() {
+    for (scheduler, directive) in [
+        (Scheduler::Lsf, "#BSUB -oo /r/jobs/j-1/scheduler.log"),
+        (Scheduler::Pbs, "#PBS -o /r/jobs/j-1/scheduler.log"),
+    ] {
+        let spec = Spec {
+            scheduler,
+            ..slurm_spec()
+        };
+        let script = job_script("/r", "j-1", "echo body", &spec).unwrap();
+        let at = |needle: &str| {
+            script
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}\n{script}"))
+        };
+        assert!(script.contains(directive), "{script}");
+        assert!(!script.contains("/r/jobs/j-1/log\n"), "{script}");
+        assert!(at("exec >> '/r/jobs/j-1/log' 2>&1") < at("cd '/r/jobs/j-1'"));
+    }
+    let slurm = job_script("/r", "j-1", "echo body", &slurm_spec()).unwrap();
+    assert!(slurm.contains("#SBATCH --output=/r/jobs/j-1/log"));
+    assert!(
+        !slurm.contains("exec >>"),
+        "Slurm writes --output live already"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_lsf_job_log_holds_the_output_before_the_job_ends() {
+    let root = std::env::temp_dir().join(format!("colm-lsf-live-log-{}", std::process::id()));
+    let dir = root.join("jobs/j-1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let spec = Spec {
+        scheduler: Scheduler::Lsf,
+        resources: Resources {
+            env_script: None,
+            ..slurm_spec().resources
+        },
+        ..slurm_spec()
+    };
+    // 作业体在结束前读自己的日志：调度系统结束时才回写的话，这里读到的是空的。
+    let body = "echo 'TIMESTEP = 7 | DATE = 2003-01-01-10800'\ngrep -q 'TIMESTEP = 7' log";
+    let script = job_script(root.to_str().unwrap(), "j-1", body, &spec).unwrap();
+    std::fs::write(dir.join("script.sh"), &script).unwrap();
+    let status = std::process::Command::new("bash")
+        .arg(dir.join("script.sh"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(
+        std::fs::read_to_string(dir.join("exit_code"))
+            .unwrap()
+            .trim(),
+        "0"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn status_output_is_parsed() {
     let running = parse_status(
         "state=running\nphase=building the Rust engine\n---log---\nCompiling colm-core\n",
