@@ -212,6 +212,7 @@ fn action_kind(command: &str) -> Option<&'static str> {
         | "model-attach-network"
         | "model-import-process"
         | "model-import-study"
+        | "model-branch-code"
         | "model-rollback"
         | "study-save-version"
         | "ws-create"

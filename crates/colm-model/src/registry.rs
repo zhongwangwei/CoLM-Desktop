@@ -343,6 +343,23 @@ impl Registry {
         write_json(&file, &draft)?;
         Ok(draft)
     }
+    /// Delete a draft and the assets staged for it. Frozen revisions never read either: freezing
+    /// copies what they need into the revision. A code workspace the draft points at is not
+    /// touched here; the caller decides about it. Returns the removed paths.
+    pub fn delete_draft(&self, id: &str) -> Result<Vec<PathBuf>> {
+        let _lock = self.lock()?;
+        validation::identifier(id)?;
+        let file = self.root.join("drafts").join(format!("{id}.json"));
+        ensure!(file.is_file(), "draft {id} does not exist");
+        fs::remove_file(&file)?;
+        let mut removed = vec![file];
+        let assets = self.root.join("draft-assets").join(id);
+        if assets.is_dir() {
+            fs::remove_dir_all(&assets)?;
+            removed.push(assets);
+        }
+        Ok(removed)
+    }
     pub fn save_draft(
         &self,
         mut draft: ModelDraft,

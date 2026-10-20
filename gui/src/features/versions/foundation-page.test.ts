@@ -87,7 +87,8 @@ function page(
         'Advanced',
         'CodeWorkspace',
         'VersionChanges',
-        'RevisionTree',
+        'VersionLibrary',
+        'ParameterDialog',
       ].map((k) => [k, k]),
     ),
     IGBP: [],
@@ -204,8 +205,20 @@ function page(
     Component();
     return contract;
   }
+  // 版本页先显示版本库；这些测试看的是一个版本的工作台，所以像用户一样先打开模拟正在用的那个版本。
+  let opened = false;
   async function mount() {
     render();
+    effects.splice(0).forEach((f) => f());
+    for (let i = 0; i < 12; i++) await Promise.resolve();
+    if (!opened) {
+      opened = true;
+      await render()
+        .actions.find(
+          (a) => a.id === `version-select-${version.version.id}-${version.version.revision}`,
+        )
+        ?.run();
+    }
     effects.splice(0).forEach((f) => f());
     for (let i = 0; i < 12; i++) await Promise.resolve();
     return render();
@@ -318,8 +331,11 @@ test('a new version can copy its parent code into a workspace of its own', async
   const call = p.calls.find((entry) => entry.command === 'model_create')!;
   assert.equal(call.args.branchCode, true);
   assert.equal(call.args.workspace, null);
-  set('version-code', 'existing');
-  assert.ok(c.fields.some((field) => field.id === 'version-workspace'));
+  assert.deepEqual(
+    c.fields.find((field) => field.id === 'version-code')!.options!.map((o) => o.value),
+    ['inherit', 'branch'],
+    'an existing workspace is chosen from the draft’s code tab, not when creating',
+  );
 });
 
 test('a draft on its own code shows what blocks freezing and cannot be frozen until it is fixed', async () => {
@@ -339,15 +355,16 @@ test('the version page shows one version in tabs that hide panels without unmoun
   const p = page('PFT');
   await p.mount();
   const tabs = p.elements.filter((e) => e.props.role === 'tab');
-  assert.equal(tabs.length, 5);
+  assert.equal(tabs.length, 4);
   assert.equal(tabs.filter((e) => e.props['aria-selected']).length, 1, 'one tab is current');
   const panels = p.elements.filter(
     (e) => e.type === 'div' && e.props.className === 'versions-panel',
   );
-  assert.equal(panels.length, 5);
+  assert.equal(panels.length, 4);
   assert.equal(panels.filter((e) => !e.props.hidden).length, 1, 'only the current panel shows');
   // Hidden panels still render: their page contracts and unsaved edits stay.
   assert.ok(p.elements.some((e) => e.type === 'ConfigurationOptions'));
   assert.ok(p.elements.some((e) => e.type === 'CodeWorkspace'));
-  assert.ok(p.elements.some((e) => e.type === 'RevisionTree'));
+  assert.ok(p.elements.some((e) => e.type === 'ParameterDialog'));
+  assert.ok(!p.elements.some((e) => e.type === 'VersionLibrary'), 'the library is its own page');
 });

@@ -127,6 +127,56 @@ pub fn parameter_catalog() -> Vec<colm_case::parameters::ParameterDescriptor> {
     colm_case::parameters::all().to_vec()
 }
 
+/// 一个按类型取值的参数在每个类型上的默认值。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct TypeDefault {
+    pub index: i64,
+    pub value: Option<f64>,
+}
+
+/// 地类、PFT、PC 参数在每个地类或植物功能型上的默认值：版本页的参数矩阵把它们灰显出来，
+/// 改过的格子才高亮。PFT 的部分默认值随土壤水力模型变，这里按 namelist 默认（vG，
+/// `DEF_USE_Campbell_SOIL_MODEL = .false.`）取——版本不知道算例最后用哪个。
+#[tauri::command]
+pub fn parameter_type_defaults(parameter_id: String) -> Result<Vec<TypeDefault>, String> {
+    if let Some(rest) = parameter_id.strip_prefix("lct:") {
+        let (scheme, key) = rest
+            .split_once(':')
+            .ok_or_else(|| format!("unknown parameter {parameter_id}"))?;
+        let usgs = match scheme {
+            "IGBP" => false,
+            "USGS" => true,
+            other => return Err(format!("unknown land-cover scheme {other}")),
+        };
+        let classes = if usgs { 1..=24 } else { 1..=17 };
+        return classes
+            .map(|index| {
+                Ok(TypeDefault {
+                    index,
+                    value: colm_case::land_cover::default_value(key, usgs, index)
+                        .map_err(|e| e.to_string())?,
+                })
+            })
+            .collect();
+    }
+    let (key, pc) = if let Some(key) = parameter_id.strip_prefix("pc-pft:") {
+        (key, true)
+    } else if let Some(key) = parameter_id.strip_prefix("pft:") {
+        (key, false)
+    } else {
+        return Err(format!("{parameter_id} has no per-type values"));
+    };
+    (0..79u8)
+        .map(|index| {
+            Ok(TypeDefault {
+                index: i64::from(index),
+                value: colm_case::pft::default_value(key, index, false, pc)
+                    .map_err(|e| e.to_string())?,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterScopeInstance {
     pub kind: String,

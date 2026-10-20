@@ -4649,3 +4649,30 @@ fn history_edits_never_write_outside_the_case_directory() {
             .contains("'history.nml'"));
     }
 }
+
+#[test]
+fn per_type_parameters_list_a_default_for_every_class_or_plant_type() {
+    let igbp = parameter_type_defaults("lct:IGBP:DEF_LC_VMAX25".into()).unwrap();
+    assert_eq!(igbp.len(), 17);
+    assert_eq!(igbp[0].index, 1);
+    // Grassland (IGBP 10) carries 52 umol in MOD_Const_LC.
+    assert_eq!(igbp[9].value, Some(52.0));
+    assert_eq!(
+        parameter_type_defaults("lct:USGS:DEF_LC_VMAX25".into())
+            .unwrap()
+            .len(),
+        24
+    );
+    let pft = parameter_type_defaults("pft:DEF_PFT_VMAX25".into()).unwrap();
+    assert_eq!(pft.len(), 79);
+    assert_eq!(pft[0].index, 0);
+    assert!(pft[1].value.is_some(), "{pft:?}");
+    assert_eq!(
+        parameter_type_defaults("pc-pft:DEF_PFT_VMAX25".into())
+            .unwrap()
+            .len(),
+        79
+    );
+    assert!(parameter_type_defaults("case:DEF_TUNING_CNFAC".into()).is_err());
+    assert!(parameter_type_defaults("lct:XX:DEF_LC_VMAX25".into()).is_err());
+}

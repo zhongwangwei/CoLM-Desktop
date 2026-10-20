@@ -407,7 +407,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         | "model-make-run"
         | "model-attach-network"
         | "model-import-process"
-        | "model-import-study" => model_version::cmd(cmd, opts)?,
+        | "model-import-study"
+        | "model-branch-code" => model_version::cmd(cmd, opts)?,
         "model-changes" => println!(
             "{}",
             serde_json::to_string(&version_changes::changes(opts)?)?

@@ -1380,3 +1380,28 @@ fn a_case_bound_to_a_tidied_revision_says_so_and_can_be_rebound() {
         .unwrap();
     assert_eq!(rebound.version, latest);
 }
+
+#[test]
+fn a_draft_is_deleted_with_its_staged_assets_and_its_frozen_revision_stays() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    let mut d = draft(official.version.clone());
+    d.overlay
+        .physics
+        .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
+    reg.create_draft(d).unwrap();
+    let frozen = reg.freeze("experiment", &tmp.0).unwrap();
+    let staged = tmp.0.join("registry/draft-assets/experiment/x");
+    fs::create_dir_all(&staged).unwrap();
+    let removed = reg.delete_draft("experiment").unwrap();
+    assert_eq!(removed.len(), 2, "{removed:?}");
+    assert!(reg.drafts().unwrap().is_empty());
+    assert!(!staged.exists());
+    assert_eq!(reg.get(&frozen.version).unwrap(), frozen);
+    assert!(
+        reg.delete_draft("experiment").is_err(),
+        "a second delete says so"
+    );
+    assert!(reg.delete_draft("../versions").is_err());
+}

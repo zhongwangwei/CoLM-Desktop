@@ -149,6 +149,12 @@ export const commandContract = {
   },
   "describe_fields": {},
   "parameter_catalog": {},
+  "parameter_type_defaults": {
+    "parameterId": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "export_parameter_overrides": {
     "dirs": {
       "required": true,
@@ -720,6 +726,16 @@ export const commandContract = {
       "rust_type": "Option<bool>"
     }
   },
+  "model_delete_draft": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "deleteWorkspace": {
+      "required": true,
+      "rust_type": "bool"
+    }
+  },
   "model_usage": {},
   "model_prune": {
     "dryRun": {
@@ -807,6 +823,10 @@ export const commandContract = {
     "assetRoot": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "finish": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "model_migrate_case": {
@@ -905,6 +925,16 @@ export const commandContract = {
   },
   "model_drafts": {},
   "model_fields": {},
+  "model_branch_code": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "expectedGeneration": {
+      "required": true,
+      "rust_type": "u64"
+    }
+  },
   "model_import_study": {
     "id": {
       "required": true,

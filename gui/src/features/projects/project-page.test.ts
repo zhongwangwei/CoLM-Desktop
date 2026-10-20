@@ -502,9 +502,10 @@ test('a failed version read keeps the current model and leaves the version modal
     true,
   );
 });
-test('model manager selection and successful freezing record the chosen frozen revision', async () => {
+test('opening a version only shows it; choosing it for simulations and freezing record it', async () => {
   const model = { version: { id: 'modified', revision: 2 } },
-    updates: unknown[] = [];
+    updates: unknown[] = [],
+    viewed: unknown[] = [];
   await expression(
     'select',
     {
@@ -512,7 +513,18 @@ test('model manager selection and successful freezing record the chosen frozen r
       t: (zh: string) => zh,
       update: (patch: unknown) => updates.push(patch),
       setDraft: () => {},
+      setViewKey: (key: unknown) => viewed.push(key),
+      setTab: () => {},
+      keyOf: (v: { id: string; revision: number }) => `${v.id}#${v.revision}`,
     },
+    '../versions/VersionsPage.tsx',
+  )(model);
+  assert.equal(updates.length, 0, 'opening does not switch the simulation version');
+  assert.equal(viewed.length, 1);
+  assert.equal(viewed[0], 'modified#2');
+  await expression(
+    'chooseForSimulation',
+    { update: (patch: unknown) => updates.push(patch) },
     '../versions/VersionsPage.tsx',
   )(model);
   assert.deepEqual(updates.pop(), {
@@ -527,12 +539,17 @@ test('model manager selection and successful freezing record the chosen frozen r
       draft: {},
       dirtyNow: { current: false },
       selected: null,
+      viewing: null,
       assetRoot: '',
       save: () => {},
-      invokeJson: () => {},
+      invokeJson: async () => [],
       update: (patch: unknown) => updates.push(patch),
       setDraft: () => {},
       setDirty: () => {},
+      setViewKey: (key: unknown) => viewed.push(key),
+      setTab: () => {},
+      setDrafts: () => {},
+      keyOf: (v: { id: string; revision: number }) => `${v.id}#${v.revision}`,
       refreshVersions: async () => {},
     },
     '../versions/VersionsPage.tsx',
@@ -542,6 +559,7 @@ test('model manager selection and successful freezing record the chosen frozen r
     versionRef: model.version,
     chosenVersion: model.version,
   });
+  assert.equal(viewed.pop(), 'modified#2', 'the frozen version is shown afterwards');
 });
 
 test('bundled example is not rejected by case switches retained in a legacy frozen revision', async () => {

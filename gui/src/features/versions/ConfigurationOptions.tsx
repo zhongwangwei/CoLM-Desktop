@@ -830,11 +830,11 @@ export default function ConfigurationOptions({
         );
       }
     }
+    // 没有可设项的分组不显示：版本页原来列出一串"· 0"（2026-10-20 用户反映），算例页早就这样。
     if (
-      onCaseChange &&
       !rows.length &&
       !(id === 'ecology' && showStomatal) &&
-      !(id === 'tracer' && caseProcessVisible(id))
+      !(id === 'tracer' && (caseProcessVisible(id) || !onCaseChange))
     )
       return null;
     if (process)

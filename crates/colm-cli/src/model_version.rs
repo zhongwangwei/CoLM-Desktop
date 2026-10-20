@@ -174,6 +174,7 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         "model-attach-network" => attach_network(&store, opts)?,
         "model-import-process" => import_process(&store, opts)?,
         "model-import-study" => import_study(&store, opts)?,
+        "model-branch-code" => branch_draft_code(&store, opts)?,
         "model-freeze-check" => {
             let draft = store.draft(&opts.need_str("--model-id")?)?;
             match freeze_check(opts, &draft)? {
@@ -1872,6 +1873,30 @@ fn branch_parent_code(
         );
     }
     Ok(copied)
+}
+
+/// 给一个还在用父版本代码的草稿一份它自己的代码副本，之后就能直接改代码（版本页"开始修改代码"）。
+/// 原来要在新建时就选"复制父版本的代码来修改"；没改代码的草稿也复制一份、还得编引擎才能冻结，
+/// 所以改成要改时再复制（2026-10-20 用户要求代码在草稿里直接改）。
+fn branch_draft_code(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
+    let mut draft = store.draft(&opts.need_str("--model-id")?)?;
+    let expected = opts.need_str("--expected-generation")?.parse::<u64>()?;
+    ensure!(
+        draft.generation == expected,
+        "model draft changed; reload it before copying its code"
+    );
+    ensure!(
+        draft.code.workspace.is_none(),
+        "this draft already has its own code"
+    );
+    let parent = store.get(&draft.parent)?;
+    ensure!(
+        draft.code == parent.code,
+        "this draft does not use its parent's code; choose its code workspace instead"
+    );
+    draft.code = branch_parent_code(opts, &parent, &draft.id)?;
+    let generation = draft.generation;
+    Ok(serde_json::to_value(store.save_draft(draft, generation)?)?)
 }
 
 pub(crate) fn cached_source_dir(opts: &Opts, code: &CodeRef) -> Result<PathBuf> {

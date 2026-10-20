@@ -244,6 +244,43 @@ pub async fn model_delete(
     .map_err(|e| e.to_string())?
 }
 
+/// 删除一个草稿（版本库左栏的"×"）。冻结出的版本不受影响。`delete_workspace`：草稿有自己的代码
+/// 工作区、又没有别的草稿用它时，一并删掉——里面还没冻结的代码改动会跟着没有，所以由用户确认。
+#[tauri::command]
+pub async fn model_delete_draft(
+    processes: tauri::State<'_, crate::sidecar::RunProcesses>,
+    creations: tauri::State<'_, crate::sidecar::CaseCreations>,
+    id: String,
+    delete_workspace: bool,
+) -> Result<Value, String> {
+    let processes = processes.inner().clone();
+    let creations = creations.inner().clone();
+    let workspace = tauri::async_runtime::spawn_blocking(move || {
+        let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
+        while_idle(&processes, &creations, || {
+            let draft = registry.draft(&id).map_err(|e| e.to_string())?;
+            let shared = draft.code.workspace.as_ref().is_some_and(|name| {
+                registry.drafts().is_ok_and(|all| {
+                    all.iter()
+                        .any(|other| other.id != id && other.code.workspace.as_ref() == Some(name))
+                })
+            });
+            registry.delete_draft(&id).map_err(|e| e.to_string())?;
+            Ok(draft.code.workspace.filter(|_| !shared))
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let deleted_workspace = match workspace {
+        Some(name) if delete_workspace => {
+            crate::workspace::workspace_delete(name.clone()).await?;
+            Some(name)
+        }
+        _ => None,
+    };
+    Ok(json!({"deleted_workspace": deleted_workspace}))
+}
+
 /// 一个修订被谁用着：现存的算例和研究绑定数、提到它的历史记录数，以及注册表规则挡不挡删除。
 #[derive(serde::Serialize)]
 pub struct RevisionUsage {
@@ -557,9 +594,13 @@ pub async fn model_freeze_check(id: String) -> Result<Value, String> {
 }
 
 #[tauri::command]
+///
+/// `finish`：这是"冻结为新版本"——冻结后删掉草稿（草稿越积越多：2026-10-20 用户反映）。
+/// 为了做研究而冻结时不给，草稿留着，研究结果还要写回它。
 pub async fn model_freeze(
     id: String,
     asset_root: Option<String>,
+    finish: Option<bool>,
 ) -> Result<FrozenRevision, String> {
     let registry = Registry::open(root()?).map_err(|e| e.to_string())?;
     if !registry
@@ -578,11 +619,16 @@ pub async fn model_freeze(
             return Ok(existing);
         }
     }
-    let mut args = vec!["model-freeze".into(), "--model-id".into(), id];
+    let mut args = vec!["model-freeze".into(), "--model-id".into(), id.clone()];
     if let Some(root) = asset_root {
         args.extend(["--asset-root".into(), root]);
     }
-    decode(cli(args).await?)
+    let frozen: FrozenRevision = decode(cli(args).await?)?;
+    if finish == Some(true) {
+        // 冻结已经成功；草稿删不掉只是多留一个，不把成功的冻结报成失败。
+        let _ = registry.delete_draft(&id);
+    }
+    Ok(frozen)
 }
 /// `target` 给出时把算例绑到这个版本（已迁移的算例就是改绑）：界面上为算例选的版本
 /// 要跟着算例走，重启后仍是它（第 692 轮：原先只是应用级选择，重启后静默回到官方版）。
@@ -1429,6 +1475,21 @@ pub fn model_fields() -> Vec<crate::config::Field> {
         .into_iter()
         .filter(|f| colm_model::is_model_field(f.name))
         .collect()
+}
+
+/// 给还在用父版本代码的草稿复制一份它自己的代码（版本页"开始修改代码"，约 3 秒）。
+#[tauri::command]
+pub async fn model_branch_code(id: String, expected_generation: u64) -> Result<ModelDraft, String> {
+    decode(
+        cli(vec![
+            "model-branch-code".into(),
+            "--model-id".into(),
+            id,
+            "--expected-generation".into(),
+            expected_generation.to_string(),
+        ])
+        .await?,
+    )
 }
 
 /// 把一次已完成的率定或敏感性研究里某个成员（默认最优）的参数值写进草稿的参数改值。

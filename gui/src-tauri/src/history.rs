@@ -1243,6 +1243,7 @@ fn command_event(args: &[String], run_id: Option<&str>) -> Result<Option<Event>,
             | "model-attach-network"
             | "model-import-process"
             | "model-import-study"
+            | "model-branch-code"
             | "study-create"
             | "study-save-version"
             | "study-run"

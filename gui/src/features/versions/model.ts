@@ -26,6 +26,33 @@ export type ModelField = {
   doc?: string;
   derived: boolean;
 };
+export type ParameterType = 'global' | 'igbp' | 'usgs' | 'pft' | 'pc' | 'process';
+
+/** 一个参数描述属于哪一类：决定用列表还是"参数 × 类型"矩阵编辑。 */
+export function parameterType(d: Descriptor): ParameterType {
+  if (d.scope === 'land-cover-class') return d.id.startsWith('lct:USGS:') ? 'usgs' : 'igbp';
+  if (d.scope === 'pft-type') return 'pft';
+  if (d.scope === 'pc-pft-component') return 'pc';
+  if (d.storage === 'process-parameter-file') return 'process';
+  return 'global';
+}
+
+/** 一条改值记录属于哪一类（与 parameterType 对应）。 */
+export function recordType(r: ParameterOverride): ParameterType {
+  switch (r.scope_instance.kind) {
+    case 'land-cover-class':
+      return r.scope_instance.scheme === 'USGS' ? 'usgs' : 'igbp';
+    case 'pft':
+      return 'pft';
+    case 'pc-pft':
+      return 'pc';
+    case 'process-file':
+      return 'process';
+    default:
+      return 'global';
+  }
+}
+
 export function parameterKey(r: ParameterOverride) {
   const s = r.scope_instance;
   return JSON.stringify([
