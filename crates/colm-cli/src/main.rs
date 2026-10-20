@@ -28,6 +28,7 @@
 //! colm-cli evaluation-catalog <算例目录> --obs <Flux.nc>
 //! colm-cli evaluation-plan <算例目录> --obs <Flux.nc> --kernel <目录>
 //! colm-cli history-catalog <算例目录>
+//! colm-cli history-map <算例目录> --var <变量> --index <时间步>
 //! colm-cli series    <算例目录> --vars f_rnet,f_fsena [--max-points N] [--out series.json]
 //! colm-cli study-parameters
 //! colm-cli remote-mkdir --host <服务器> --path <现有父目录> --name <新目录名>
@@ -66,6 +67,7 @@ mod forcing_coverage;
 mod forcing_directory;
 mod history_cleanup;
 mod history_cmd;
+mod history_grid;
 mod history_subset;
 mod hybrid_cmd;
 mod hybrid_fit;
@@ -184,6 +186,8 @@ usage:
   colm-cli history-subset <case-dir> --out <dir> [--vars f_a,f_b] [--from YYYY-MM] [--to YYYY-MM] [--compress N] [--list 1]
                     # 把 history 裁成只含所选变量与月份的压缩小文件（远程取回结果用，R5）
   colm-cli history-catalog <case-dir>
+  colm-cli history-map <case-dir> --var <name> --index <step>
+                   # 格点变量某一时间步的整张图（大网格隔行隔列抽稀）
   colm-cli series  <case-dir> --vars f_rnet,f_fsena [--from UNIX] [--to UNIX]
                    [--max-points N] [--out series.json]
   colm-cli study-parameters
@@ -520,6 +524,15 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         }
         "history-catalog" => {
             cmd_history_catalog(&opts.positional_case()?)?;
+        }
+        "history-map" => {
+            history_grid::cmd_history_map(
+                &opts.positional_case()?,
+                &opts.need_str("--var")?,
+                opts.need_str("--index")?
+                    .parse()
+                    .context("--index must be a whole number")?,
+            )?;
         }
         "study-params" | "study-parameters" => println!("{}", study::engine::parameters_json()?),
         "study-preflight" | "study-create" => {
@@ -4945,6 +4958,9 @@ struct HistoryCatalog {
 struct HistoryVariable {
     name: String,
     units: Option<String>,
+    /// NetCDF 的 `long_name`：结果页在没有中文名时用它当说明。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    long_name: Option<String>,
     dimensions: Vec<DimensionShape>,
     kind: &'static str,
 }
@@ -4952,6 +4968,17 @@ struct HistoryVariable {
 fn history_kind(dimensions: &[(String, usize)]) -> &'static str {
     if dimensions.is_empty() {
         return "scalar";
+    }
+    // 没有时间维的是坐标或常量（lat、area_lake…）：不是一条能画的序列。单点文件里它们长度是 1，
+    // 原来也被当成 series 列进图表变量，选了只会报"值的个数和时间步对不上"。
+    if !dimensions
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("time"))
+    {
+        return "static";
+    }
+    if history_grid::grid_shape(dimensions).is_some() {
+        return "grid";
     }
     let names: Vec<String> = dimensions
         .iter()
@@ -4996,6 +5023,7 @@ fn history_variables(files: &[PathBuf]) -> Result<Vec<HistoryVariable>> {
                 name.clone(),
                 HistoryVariable {
                     units: variable_units(&file, &name),
+                    long_name: variable_text_attribute(&file, &name, "long_name"),
                     name,
                     kind: history_kind(&dimensions),
                     dimensions: dimensions
@@ -5046,6 +5074,9 @@ fn cmd_history_catalog(case: &Path) -> Result<()> {
 
 #[derive(serde::Serialize)]
 struct SeriesBody {
+    /// 这些变量是格点场的区域平均，不是某一个点。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    area_mean: Vec<String>,
     files: usize,
     source_n: usize,
     n: usize,
@@ -5167,6 +5198,16 @@ fn cmd_series(
     // 而且它是 netcdf-free 的，GUI 后端将来也用得上。
     let unix = colm_hist::time::unix_seconds(&t_min);
 
+    // 格点变量（区域模拟）画区域平均：按纬度余弦加权，缺测不参与。
+    let mut area_mean = Vec::new();
+    for v in &names {
+        if raw[*v].len() != unix.len() {
+            if let Some(mean) = history_grid::area_mean_series(&hists, v, &raw[*v])? {
+                raw.insert((*v).to_owned(), mean);
+                area_mean.push((*v).to_owned());
+            }
+        }
+    }
     for v in &names {
         let values = &raw[*v];
         if values.len() != unix.len() {
@@ -5187,6 +5228,7 @@ fn cmd_series(
         .filter(|time| to.is_none_or(|end| **time <= end))
         .count();
     let body = SeriesBody {
+        area_mean,
         files: hists.len(),
         source_n,
         n: indexes.len(),
@@ -5228,8 +5270,13 @@ fn cmd_series(
 /// `forcing-probe`（猜到的槽位要报单位）与 `forcing-convert`（自动匹配的
 /// 槽位要读源单位）都要这个，两条子命令共用一份读法。
 fn variable_units(f: &netcdf::File, name: &str) -> Option<String> {
+    variable_text_attribute(f, name, "units")
+}
+
+/// 变量的一个文字属性（`units`、`long_name`），没有就是 `None`。
+fn variable_text_attribute(f: &netcdf::File, name: &str, attribute: &str) -> Option<String> {
     f.variable(name)
-        .and_then(|v| v.attribute_value("units"))
+        .and_then(|v| v.attribute_value(attribute))
         .and_then(|r| r.ok())
         .and_then(|v| match v {
             netcdf::AttributeValue::Str(s) => Some(s),

@@ -1887,3 +1887,41 @@ fn reading_results_on_a_server_allows_only_result_commands() {
         assert!(error.contains("only reads results"), "{command}: {error}");
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn results_are_read_with_the_newest_built_engine_or_else_the_run_engine() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = std::env::temp_dir().join(format!("colm-read-engine-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let stub = |engine: &str| {
+        let bin = root.join(format!("engine/{engine}/bin"));
+        std::fs::create_dir_all(&bin).unwrap();
+        let path = bin.join("colm-cli");
+        std::fs::write(&path, format!("#!/bin/sh\necho {engine} \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // ls -t 按修改时间排：让后写的确实更新。
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+    };
+    let run = |args: &[&str]| {
+        let script = read_script(
+            root.to_str().unwrap(),
+            "old-run",
+            &args.iter().map(|a| a.to_string()).collect::<Vec<_>>(),
+        );
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(script)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+    stub("old-run");
+    assert_eq!(run(&["series", "/case"]), "old-run series /case");
+    stub("new-desktop");
+    assert_eq!(
+        run(&["history-map", "/case", "--var", "f_fsena", "--index", "3"]),
+        "new-desktop history-map /case --var f_fsena --index 3"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

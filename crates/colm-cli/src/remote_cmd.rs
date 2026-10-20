@@ -2334,29 +2334,49 @@ pub(super) fn cmd_read(opts: &Opts) -> Result<()> {
     ensure!(
         matches!(
             command.as_str(),
-            "history-catalog" | "series" | "energy-summary"
+            "history-catalog" | "series" | "energy-summary" | "history-map"
         ),
-        "remote-read only reads results (history-catalog, series, energy-summary), not {command}"
+        "remote-read only reads results (history-catalog, series, energy-summary, history-map), not {command}"
     );
     let case = opts.positional_case()?;
     let record = read_record(&case)?;
     let mut args = vec![command, record.remote_case.clone()];
-    for flag in ["--vars", "--from", "--to", "--max-points"] {
+    for flag in [
+        "--vars",
+        "--from",
+        "--to",
+        "--max-points",
+        "--var",
+        "--index",
+    ] {
         if let Some(value) = opts.get(flag) {
             args.extend([flag.to_owned(), value]);
         }
     }
-    let binary = format!(
-        "{}/bin/colm-cli",
-        engine::engine_dir(&record.root, &record.engine)
+    print!(
+        "{}",
+        Ssh::new(&record.host)?.run_ok(&read_script(&record.root, &record.engine, &args))?
     );
-    let command = std::iter::once(binary)
-        .chain(args)
-        .map(|arg| quote(&arg))
-        .collect::<Vec<_>>()
-        .join(" ");
-    print!("{}", Ssh::new(&record.host)?.run_ok(&command)?);
     Ok(())
+}
+
+/// 读结果用服务器上最新编好的引擎，没有才用这次运行自己的引擎：读 history 的代码只增不改（格点的
+/// 区域平均、`history-map` 是 2026-10-20 才有的），旧运行的引擎读不出格点图。
+fn read_script(root: &str, run_engine: &str, args: &[String]) -> String {
+    let own = format!("{}/bin/colm-cli", engine::engine_dir(root, run_engine));
+    let engines = format!("{}/engine", root.trim_end_matches('/'));
+    format!(
+        "B=$(ls -td {engines}/*/bin/colm-cli 2>/dev/null | head -n 1)
+[ -n \"$B\" ] && [ -x \"$B\" ] || B={own}
+exec \"$B\" {args}\n",
+        engines = quote(&engines),
+        own = quote(&own),
+        args = args
+            .iter()
+            .map(|arg| quote(arg))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 /// 服务器上正在编的引擎编到哪一步（给界面的进度条）；只读，几十字节。

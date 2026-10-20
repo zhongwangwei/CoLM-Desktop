@@ -172,6 +172,7 @@ pub fn run() {
             cancel_runs,
             case_creation_cancel,
             history_catalog,
+            history_map,
             model_list,
             model_drafts,
             model_fields,

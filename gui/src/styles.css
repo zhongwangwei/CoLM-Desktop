@@ -2772,3 +2772,83 @@ table input {
   margin: 0;
   max-height: 260px;
 }
+
+/* 结果页：格点变量的空间分布图。 */
+.grid-map-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.grid-map-head h2 {
+  margin: 0;
+  font-size: 16px;
+}
+.grid-map-time {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 12px 0;
+}
+.grid-map-time input {
+  flex: 1;
+  accent-color: var(--accent);
+}
+.grid-map-time span {
+  flex: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.grid-map-canvas {
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  transition: opacity 0.2s ease;
+}
+.grid-map-canvas.is-busy {
+  opacity: 0.6;
+}
+.grid-map-canvas canvas {
+  display: block;
+  max-width: 100%;
+  margin: 0 auto;
+  image-rendering: pixelated;
+  cursor: crosshair;
+}
+.grid-map-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.grid-map-scale {
+  width: 220px;
+  height: 10px;
+  border-radius: 999px;
+  background: linear-gradient(
+    90deg,
+    rgb(68 1 84),
+    rgb(62 74 137),
+    rgb(38 130 142),
+    rgb(53 183 121),
+    rgb(253 231 37)
+  );
+}
+.grid-map-hover {
+  margin-left: auto;
+  color: var(--foreground);
+}
+.grid-map-error {
+  color: var(--warning);
+  font-size: 13px;
+}
+.grid-map-note {
+  margin: 6px 0 0;
+  font-size: 12px;
+}

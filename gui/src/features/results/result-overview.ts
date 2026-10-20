@@ -1,3 +1,4 @@
+import { variableTitle } from './variable-labels';
 import type { ResultMetric } from './series';
 export function overviewMetric<T extends ResultMetric>(rows: T[], variable: string): T | undefined {
   return rows.find((row) => !row.site && (row.model_var === variable || row.name === variable));
@@ -13,8 +14,10 @@ export function overviewRunStatus(run: Record<string, unknown> | undefined, en: 
 }
 
 export function overviewVariable(variables: { name: string; kind: string }[]): string {
+  // 单点是 (time) 序列，区域模拟是 (time, lat, lon) 格点：两种都能画。
   const series = variables.filter(
-    (variable) => variable.kind === 'series' && variable.name !== 'time',
+    (variable) =>
+      (variable.kind === 'series' || variable.kind === 'grid') && variable.name !== 'time',
   );
   return series.find((variable) => variable.name === 'f_lfevpa')?.name || series[0]?.name || '';
 }
@@ -32,15 +35,12 @@ export function overviewRunLabel(
   return `${en ? 'Run' : '运行'} ${id.slice(0, 12)} · ${run.version ? `${run.version.id}@${run.version.revision}` : en ? 'Unknown version' : '版本身份未知'}`;
 }
 
-export function overviewVariableLabel(variable: string, en: boolean): string {
-  return (
-    (
-      {
-        f_lfevpa: en ? 'Latent heat flux' : '潜热通量',
-        f_fsena: en ? 'Sensible heat flux' : '感热通量',
-      } as Record<string, string>
-    )[variable] || variable
-  );
+export function overviewVariableLabel(
+  variable: string,
+  en: boolean,
+  longName?: string | null,
+): string {
+  return variableTitle(variable, en, longName);
 }
 export function overviewFinding(
   metric: ResultMetric | undefined,

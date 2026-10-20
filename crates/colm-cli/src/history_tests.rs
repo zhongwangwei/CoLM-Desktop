@@ -300,6 +300,15 @@ fn history_shapes_are_classified_for_the_result_browser() {
         super::history_kind(&[("time".into(), 12), ("pft".into(), 15)]),
         "category"
     );
+    assert_eq!(
+        super::history_kind(&[("time".into(), 12), ("lat".into(), 22), ("lon".into(), 32)]),
+        "grid"
+    );
+    assert_eq!(
+        super::history_kind(&[("lat".into(), 1), ("lon".into(), 1)]),
+        "static",
+        "coordinates and constants are not chart series"
+    );
 }
 
 #[test]
@@ -648,6 +657,7 @@ fn history_catalog_rejects_static_coordinates_without_a_time_series() {
                 len: 2,
             }],
             kind: "series",
+            long_name: None,
         },
         super::HistoryVariable {
             name: "longitude".to_string(),
@@ -657,6 +667,7 @@ fn history_catalog_rejects_static_coordinates_without_a_time_series() {
                 len: 1,
             }],
             kind: "series",
+            long_name: None,
         },
     ];
     super::ensure_usable_history_catalog(&[1.0, 2.0], &variables)

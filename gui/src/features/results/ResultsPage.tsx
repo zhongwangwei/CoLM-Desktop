@@ -31,6 +31,13 @@ import {
   overviewVariableLabel,
   overviewRunLocation,
 } from './result-overview';
+import {
+  chartVariables,
+  isGridCatalog,
+  variableOption,
+  type CatalogVariable,
+} from './variable-labels';
+import GridMap from './GridMap';
 import NavIcon from '../../components/NavIcon';
 import { defaultObservation } from './default-observation';
 import './results-page.css';
@@ -39,7 +46,7 @@ type Catalog = {
   steps: number;
   start: number;
   end: number;
-  variables: { name: string; units?: string; kind: string; dimensions: unknown[] }[];
+  variables: CatalogVariable[];
 };
 type Run = RecordedRun & {
   run_id?: string;
@@ -786,9 +793,10 @@ export default function ResultsPage({
       label: tr('图表变量', 'Chart variable'),
       value: variable,
       type: 'choice',
-      options: catalog?.variables
-        .filter((v) => v.kind === 'series' && v.name !== 'time')
-        .map((v) => ({ value: v.name, label: overviewVariableLabel(v.name, en) })),
+      options: chartVariables(catalog?.variables ?? []).map((v) => ({
+        value: v.name,
+        label: variableOption(v, en),
+      })),
       disabled: busy,
       set: setVariable,
     });
@@ -1232,13 +1240,11 @@ export default function ResultsPage({
                   disabled={busy || !catalog}
                   onChange={(event) => setVariable(event.target.value)}
                 >
-                  {catalog?.variables
-                    .filter((item) => item.kind === 'series' && item.name !== 'time')
-                    .map((item) => (
-                      <option key={item.name} value={item.name}>
-                        {overviewVariableLabel(item.name, en)}
-                      </option>
-                    ))}
+                  {chartVariables(catalog?.variables ?? []).map((item) => (
+                    <option key={item.name} value={item.name}>
+                      {variableOption(item, en)}
+                    </option>
+                  ))}
                 </Select>
                 <Button
                   variant="ghost"
@@ -1253,6 +1259,12 @@ export default function ResultsPage({
             <div className="results-plot-meta">
               <span>
                 {tr('单位', 'Units')}: {selectedMetric?.units || variableInfo?.units || '—'}
+                {variableInfo?.kind === 'grid'
+                  ? tr(
+                      ' · 区域平均（按纬度加权，跳过缺测）',
+                      ' · area mean (latitude-weighted, missing cells skipped)',
+                    )
+                  : ''}
               </span>
               <div className="results-legend">
                 {validPairs && <span className="observed">{tr('观测', 'Observation')}</span>}
@@ -1290,6 +1302,14 @@ export default function ResultsPage({
                     )}
               </div>
             )}
+            {isGridCatalog(catalog?.variables ?? []) && (
+              <p className="results-sampling">
+                {tr(
+                  '区域模拟：曲线是整个区域的平均，下面的空间分布图可以看每个格点；观测评估按站点做，这里不配对。',
+                  'Regional run: the curve is the area mean and the map below shows each cell; observation evaluation is per site, so nothing is paired here.',
+                )}
+              </p>
+            )}
             {(selectedMetric?.pair_downsampled || series?.downsampled) && (
               <p className="results-sampling">
                 {tr(
@@ -1324,6 +1344,17 @@ export default function ResultsPage({
               <Notice tone="warning">{String(selectedMetric.beta_warning)}</Notice>
             )}
           </Card>
+          {variableInfo?.kind === 'grid' && source && catalog && (
+            <Card className="results-map-card">
+              <GridMap
+                source={source}
+                variable={variable}
+                title={variableOption(variableInfo, en)}
+                steps={catalog.steps}
+                en={en}
+              />
+            </Card>
+          )}
           <Card className="results-next">
             <div>
               <h2>{tr('下一步可以做什么', 'Next steps')}</h2>
@@ -1605,15 +1636,17 @@ export default function ResultsPage({
           <table>
             <thead>
               <tr>
-                <th>Variable</th>
-                <th>Units</th>
-                <th>Shape</th>
+                <th>{tr('变量', 'Variable')}</th>
+                <th>{tr('说明', 'Description')}</th>
+                <th>{tr('单位', 'Units')}</th>
+                <th>{tr('维度', 'Shape')}</th>
               </tr>
             </thead>
             <tbody>
               {catalog.variables.map((v) => (
                 <tr key={v.name}>
                   <td>{v.name}</td>
+                  <td>{overviewVariableLabel(v.name, en, v.long_name)}</td>
                   <td>{v.units || '—'}</td>
                   <td>{JSON.stringify(v.dimensions)}</td>
                 </tr>

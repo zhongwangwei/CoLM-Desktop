@@ -1881,6 +1881,20 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "history_map": {
+    "case": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "var": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "index": {
+      "required": true,
+      "rust_type": "usize"
+    }
+  },
   "study_parameter_contexts": {
     "dirs": {
       "required": true,

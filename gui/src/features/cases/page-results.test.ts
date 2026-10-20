@@ -9,6 +9,7 @@ import {
   remoteRunPermissions,
 } from '../runs/run-model';
 import { caseSimulationDomain } from './model-settings';
+import { chartVariables, variableOption } from '../results/variable-labels';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -555,6 +556,8 @@ test('overview contract exposes optional evaluation conditions only while advanc
     comparison: '',
     reportFormat: 'json',
     overviewRunLabel: () => '',
+    chartVariables,
+    variableOption,
     setSource: noop,
     chooseRecordedRun: noop,
     setTab: noop,

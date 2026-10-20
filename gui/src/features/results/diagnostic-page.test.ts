@@ -4,6 +4,7 @@ import test from 'node:test';
 import ts from 'typescript';
 import * as seriesHelpers from './series';
 import * as overviewHelpers from './result-overview';
+import * as variableLabels from './variable-labels';
 import type { PageContract } from '../../lib/guide';
 
 type Element = { type: string | { name: string }; props: Record<string, unknown> };
@@ -89,6 +90,8 @@ function harness(
   const env: Record<string, unknown> = {
     ...seriesHelpers,
     ...overviewHelpers,
+    ...variableLabels,
+    GridMap: () => {},
     invokeJson,
     invoke: invokeJson,
     hasBackend: () => true,

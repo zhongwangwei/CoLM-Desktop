@@ -2376,6 +2376,26 @@ pub async fn history_catalog(app: tauri::AppHandle, case: String) -> Result<Stri
     capture_async(vec!["history-catalog".to_string(), case]).await
 }
 
+/// 格点变量某一时间步的整张图（`colm-cli history-map`）。服务器上的运行照样在服务器上读，只传回这一张图。
+#[tauri::command]
+pub async fn history_map(
+    app: tauri::AppHandle,
+    case: String,
+    var: String,
+    index: usize,
+) -> Result<String, String> {
+    let flags = vec![("--var", var), ("--index", index.to_string())];
+    if let Some(host) = crate::remote::results_on_server(&case) {
+        return crate::remote::read_on_server(&app, &host, case, "history-map", flags).await;
+    }
+    let mut args = vec!["history-map".to_string(), case];
+    for (flag, value) in flags {
+        args.push(flag.into());
+        args.push(value);
+    }
+    capture_async(args).await
+}
+
 #[derive(Serialize)]
 pub struct StudyParameterContextRow {
     name: String,

@@ -34428,3 +34428,37 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 前端 `a single server run shows what the server does, its step and date, the job and the latest log`。
       - colm-remote 112 条、前端 740 条通过；两个 workspace 的 fmt、colm-remote clippy、check-gui、构建通过。
     - 没测：在摆渡船上真交一个单个算例，看运行期间日志是否实时出现。
+
+61. **结果与评估：变量名人性化、只列真实输出变量、支持格点结果（用户要求，2026-10-20）**
+    - 原状：
+      - 图表变量只有 `f_lfevpa`、`f_fsena` 两个有中文名，其余显示原始名。
+      - 列表按 `history_kind` 的 `series` 取：没有时间维的坐标和常量在单点文件里长度为 1，也被算成 series 列了进去。
+      - 区域模拟的 `(time, lat, lon)` 变量被归为 `category`，一个都不列。摆渡船 `uuu` 实测：155 个变量里 112 个是 `(time, lat:22, lon:32)`。
+    - 后端（colm-cli）：
+      - 结果目录（`history-catalog`）给每个变量带上 NetCDF 的 `long_name`。
+      - 没有时间维的变量归为 `static`。
+      - 由新模块 `history_grid.rs` 判断 `(time, lat*, lon*)` 且不止一格的变量，归为 `grid`；单点的 1×1 照旧是 series，带层维的格点（如 `(time, soil, lat, lon)`）不算。
+      - `series` 遇到格点变量时返回区域平均：按纬度余弦加权，跳过缺测。返回里用 `area_mean` 列出这些变量。
+      - 新命令 `history-map <算例> --var X --index N`：读第 N 个时间步（跨月文件连续编号）的整张图，只读那一步的切片。超过 20 万格时隔行隔列抽稀；缺测为 null；附带单位和 `long_name`。
+    - 服务器上的结果：
+      - `remote-read` 放行 `history-map`。
+      - 改为优先用服务器上最新编好的引擎读（`ls -td <根>/engine/*/bin/colm-cli`），没有才用这次运行自己的引擎。读 history 的代码只增不改，旧运行的引擎读不出格点图。
+      - 服务器上所有引擎都是旧版时，界面提示先用新版在这台服务器上提交一次运行。
+    - 前端：
+      - 新增 `variable-labels.ts`：去掉 `f_` 前缀后查模拟页那张中英文名表（80 个核心量），查不到用 `long_name`，都没有才用原名。下拉项形如"感热通量（f_fsena） · W/m2"。
+      - 只列 series 和 grid，推荐核心量在前，其余按名字排。
+      - 格点结果的图表标注"区域平均（按纬度加权，跳过缺测）"，并说明观测评估按站点做、这里不配对。
+      - 下方新增"空间分布"卡片（`GridMap.tsx`）：viridis 色块图、北在上、色标与最小最大值、时间滑块（停下 250 ms 才读）、鼠标悬停读格点值。
+      - 数据目录表加了"说明"一列。
+    - 实测：把 `uuu` 的 6 个 history 文件只读拷到本机临时目录，用新 colm-cli 读。
+      - 结果目录：grid 120、static 21、profile 8、category 3、series 3。`f_fsena` 的 `long_name` 是 "sensible heat from canopy height to atmosphere"，单位 W/m2。
+      - `series --vars f_fsena,f_rnet` 返回 `area_mean: [f_fsena, f_rnet]`。
+      - `history-map --var f_fsena --index 20`：22×32 网格，共 60 步，抽稀间隔为 1，704 格中 245 格缺测，范围 −6.48 到 65.73 W/m2。
+    - 测试：
+      - colm-cli：`history_grid` 4 条（格点判定、纬度加权与缺测、跨月文件读图与缺测为 null、区域平均与目录分类）；`results_are_read_with_the_newest_built_engine_or_else_the_run_engine`；`history_shapes_are_classified_for_the_result_browser` 增加 grid 与 static。
+      - 前端：`variable-labels.test.ts` 2 条。
+      - colm-cli 463 条（串行）、前端 742 条、gui/src-tauri 414 条通过（另有 1 条按设计跳过）。工作区 clippy、两边 fmt、check-gui、构建通过。
+    - 没做：
+      - 格点结果的观测评估。
+      - 剖面变量（土壤、雪层）的画法。
+      - 在服务器上用新引擎实际读格点图：bd 上现有的引擎都是旧版，要等下一次用新版提交运行后才会编出新引擎。
