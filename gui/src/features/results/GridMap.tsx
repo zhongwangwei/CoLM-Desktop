@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
+import { readErrorText } from './variable-labels';
 
 /** What `history_map` returns (`colm-cli history-map`). */
 type MapData = {
@@ -73,19 +74,13 @@ export default function GridMap({
       setError('');
       invokeJson<MapData>('history_map', { case: source, var: variable, index })
         .then((value) => {
-          if (current) setData(value);
+          if (!current) return;
+          setData(value);
+          // 这个变量自己的步数比主输出少时，后端取了最后一步：滑块跟着它走。
+          if (value.index !== index) setIndex(value.index);
         })
         .catch((e: unknown) => {
-          if (!current) return;
-          const text = String(e);
-          setError(
-            /history-map|not a \(time, patch\) series/.test(text)
-              ? t(
-                  '服务器上的引擎版本较旧，还不能读格点图。用新版软件在这台服务器上提交一次运行（会编译新引擎）后再看。',
-                  'The engine on the server is too old to read grid maps. Submit one run on this server with this app version (it builds the new engine), then look again.',
-                )
-              : text,
-          );
+          if (current) setError(readErrorText(e, en));
         })
         .finally(() => {
           if (current) setBusy(false);
@@ -153,12 +148,17 @@ export default function GridMap({
         <input
           type="range"
           min={0}
-          max={Math.max(0, steps - 1)}
+          max={Math.max(0, (data?.steps ?? steps) - 1)}
           value={index}
           aria-label={t('时间步', 'Time step')}
           onChange={(event) => setIndex(Number(event.target.value))}
         />
-        <span>{t(`第 ${index + 1} / ${steps} 步`, `step ${index + 1} of ${steps}`)}</span>
+        <span>
+          {t(
+            `第 ${index + 1} / ${data?.steps ?? steps} 步`,
+            `step ${index + 1} of ${data?.steps ?? steps}`,
+          )}
+        </span>
       </div>
       {error ? (
         <p className="grid-map-error">{error}</p>

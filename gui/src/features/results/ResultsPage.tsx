@@ -34,6 +34,7 @@ import {
 import {
   chartVariables,
   isGridCatalog,
+  readErrorText,
   variableOption,
   type CatalogVariable,
 } from './variable-labels';
@@ -444,14 +445,16 @@ export default function ResultsPage({
       const args = { case: source, vars, ...windowArgs(), maxPoints };
       const key = JSON.stringify(args);
       if (maxPoints !== null && cache.current.has(key)) return cache.current.get(key) as SeriesData;
-      const value = await invokeJson<SeriesData>('series', args);
+      const value = await invokeJson<SeriesData>('series', args).catch((error: unknown) => {
+        throw new Error(readErrorText(error, en));
+      });
       if (maxPoints !== null) {
         if (cache.current.size >= 16) cache.current.delete(cache.current.keys().next().value!);
         cache.current.set(key, value);
       }
       return value;
     },
-    [source, windowArgs],
+    [source, windowArgs, en],
   );
   useEffect(() => {
     let cancelled = false;
@@ -536,6 +539,8 @@ export default function ResultsPage({
       const data = await invokeJson<EnergyDiagnostic>('energy_summary', {
         case: source,
         ...windowArgs(),
+      }).catch((error: unknown) => {
+        throw new Error(readErrorText(error, en));
       });
       fullEnergyStats(data);
       if (current()) {
@@ -678,8 +683,11 @@ export default function ResultsPage({
       setEvaluation([]);
       setRunChooser(false);
       try {
-        const opened = await openCase(dir, 'results');
-        if (!opened) throw new Error(tr('未能切换站点', 'Could not switch stations'));
+        // 没有结果 = 被后来的页面切换或打开取代了：不算切换失败、不报错，但还在本页时把原来的站点读回来。
+        if (!(await openCase(dir, 'results'))) {
+          stationTarget.current = caseDir;
+          setStationRetry((previous) => previous + 1);
+        }
       } catch (error) {
         stationTarget.current = caseDir;
         setStationError(String(error));
@@ -1780,6 +1788,14 @@ export default function ResultsPage({
                 · {tr('有效记录算术平均', 'Arithmetic mean of complete records')}=
                 {number(diagnostic.full_stats.mean)} {diagnostic.full_stats.units}
               </p>
+              {diagnostic.area_mean && (
+                <p className="muted">
+                  {tr(
+                    '区域模拟：每一步先逐格计算残差（四项通量都有值的格子），再按纬度加权取区域平均。',
+                    'Regional run: each step takes the residual cell by cell (cells with all four fluxes), then the latitude-weighted area mean.',
+                  )}
+                </p>
+              )}
               {diagnostic.full_stats.status === 'unavailable' && (
                 <Notice>
                   {tr(

@@ -11,7 +11,12 @@ import {
   withoutRevisions,
 } from './model-tidy';
 
-function opening(chosenVersion: VersionRef | null = null, recentFails = false, rebind = true) {
+function opening(
+  chosenVersion: VersionRef | null = null,
+  recentFails = false,
+  rebind = true,
+  listing?: Promise<void>,
+) {
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
     path.pathname,
@@ -44,6 +49,8 @@ function opening(chosenVersion: VersionRef | null = null, recentFails = false, r
   const notices: string[] = [];
   const questions: string[] = [];
   const migrations: Record<string, unknown>[] = [];
+  const opens: string[] = [];
+  const openEpoch = { current: 0 };
   const bindings: Record<string, VersionRef> = {
     '/soil': soil,
     '/official': { id: 'official', revision: 1 },
@@ -52,6 +59,7 @@ function opening(chosenVersion: VersionRef | null = null, recentFails = false, r
   const invoke = async (command: string, args: Record<string, unknown>) => {
     switch (command) {
       case 'open_case':
+        opens.push(String(args.dir));
         return { entry: { dir: args.dir, name: args.dir }, root: '/project' };
       case 'model_migrate_case':
         migrations.push(args);
@@ -64,6 +72,7 @@ function opening(chosenVersion: VersionRef | null = null, recentFails = false, r
         return { version };
       }
       case 'list_cases':
+        await listing;
         return [];
       case 'save_recent':
         if (recentFails) throw new Error('recent store is read-only');
@@ -74,8 +83,9 @@ function opening(chosenVersion: VersionRef | null = null, recentFails = false, r
   };
   const context = {
     current,
-    openEpoch: { current: 0 },
+    openEpoch,
     pendingOpen: { current: null },
+    inflightOpen: { current: null },
     blocked: () => null,
     update: (patch: object) => Object.assign(current.current, patch),
     notify: (message: string) => notices.push(message),
@@ -96,8 +106,22 @@ function opening(chosenVersion: VersionRef | null = null, recentFails = false, r
   }).outputText;
   const openCase = new Function(...Object.keys(context), `${code}; return callback;`)(
     ...Object.values(context),
-  ) as (dir: string, tab?: 'settings' | 'results') => Promise<{ binding: { version: VersionRef } }>;
-  return { openCase, current, reads, notices, questions, migrations, official, soil };
+  ) as (
+    dir: string,
+    tab?: 'settings' | 'results',
+  ) => Promise<{ binding: { version: VersionRef } } | null>;
+  return {
+    openCase,
+    current,
+    reads,
+    notices,
+    questions,
+    migrations,
+    official,
+    soil,
+    opens,
+    openEpoch,
+  };
 }
 
 test('openCase respects an explicitly chosen revision over a saved custom binding', async () => {
@@ -106,7 +130,7 @@ test('openCase respects an explicitly chosen revision over a saved custom bindin
   const opened = await app.openCase('/soil');
   assert.deepEqual(app.reads, [chosen]);
   assert.deepEqual(app.current.current.versionRef, chosen);
-  assert.deepEqual(opened.binding.version, app.soil);
+  assert.deepEqual(opened?.binding.version, app.soil);
   assert.equal(app.current.current.busy, false);
 });
 
@@ -149,7 +173,7 @@ test('openCase respects explicit custom and official choices for either saved bi
 test('openCase still reports success when only remembering the project root fails', async () => {
   const { openCase, current, notices } = opening(null, true);
   const opened = await openCase('/soil', 'results');
-  assert.equal(opened.binding.version.id, 'soil');
+  assert.equal(opened?.binding.version.id, 'soil');
   assert.equal((current.current as { route?: string }).route, 'case');
   assert.equal(current.current.busy, false);
   assert.deepEqual(notices, ['Error: recent store is read-only']);
@@ -201,7 +225,7 @@ test('openCase offers to rebind a case whose revision was tidied away, then open
   );
   assert.match(app.questions[0], /Rebind it to official#3/);
   assert.deepEqual(app.migrations, [{ dir: '/tidied' }, { dir: '/tidied', target: app.official }]);
-  assert.deepEqual(opened.binding.version, app.official);
+  assert.deepEqual(opened?.binding.version, app.official);
   assert.deepEqual(app.current.current.versionRef, app.official);
   assert.deepEqual(app.notices, ['Rebound the case to official#3 (official#2 was tidied away).']);
 });
@@ -321,4 +345,29 @@ test('the start cover shows from the first paint until the first load finishes',
   assert.match(state, /update\(\{ busy: false, starting: false \}\)/);
   assert.match(state, /if \(!hasBackend\(\)\) \{\n {6}update\(\{ starting: false \}\);/);
   assert.match(app, /<StartCover \/>/);
+});
+
+test('an open overtaken by leaving the page or by another open ends quietly', async () => {
+  let release!: () => void;
+  const page = opening(null, false, true, new Promise<void>((done) => (release = done)));
+  const first = page.openCase('/official');
+  await new Promise<void>((done) => setImmediate(done));
+  // The user clicks elsewhere while the case is still opening (`navigate` advances the epoch).
+  page.openEpoch.current++;
+  release();
+  assert.equal(await first, null, 'no error for an open the user already left');
+  assert.deepEqual(page.notices, []);
+  assert.notEqual((page.current.current as { route?: string }).route, 'case');
+});
+
+test('clicking the same case again while it opens waits for the first open', async () => {
+  let release!: () => void;
+  const page = opening(null, false, true, new Promise<void>((done) => (release = done)));
+  const first = page.openCase('/official', 'results');
+  await new Promise<void>((done) => setImmediate(done));
+  const second = page.openCase('/official', 'results');
+  release();
+  const [a, b] = await Promise.all([first, second]);
+  assert.ok(a && a === b, 'both clicks get the same opened case');
+  assert.deepEqual(page.opens, ['/official'], 'the case is read once');
 });

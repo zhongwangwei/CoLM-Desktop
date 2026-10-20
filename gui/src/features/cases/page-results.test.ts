@@ -9,7 +9,7 @@ import {
   remoteRunPermissions,
 } from '../runs/run-model';
 import { caseSimulationDomain } from './model-settings';
-import { chartVariables, variableOption } from '../results/variable-labels';
+import { chartVariables, readErrorText, variableOption } from '../results/variable-labels';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -261,6 +261,8 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
   };
   const readSeries = callback(page, 'readSeries', {
     source: '/copy',
+    en: false,
+    readErrorText,
     useCallback: (fn: unknown) => fn,
     windowArgs: () => ({ from: 0, to: 60 }),
     cache,

@@ -34462,3 +34462,35 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 格点结果的观测评估。
       - 剖面变量（土壤、雪层）的画法。
       - 在服务器上用新引擎实际读格点图：bd 上现有的引擎都是旧版，要等下一次用新版提交运行后才会编出新引擎。
+
+62. **两天改动的核查与修复（用户要求，2026-10-20）**：逐块读了 10-19 起的 63 个提交（约 1.3 万行），重点是在服务器上执行的脚本、台账、结果读取、删除和新界面。找到以下问题，全部修复：
+    1. **"打开期间页面已变化"误报**（`app-state.tsx` 的 `openCase`）：
+       - 查了所有调用处。结果页切站点有锁，App 层也没有在根目录变化时自动跳页面。所以误报来自"打开还没完成时，用户切了页面，或又点了一次打开"；在服务器项目上打开要好几秒，最容易碰到。
+       - 改为：被后来的页面切换或打开取代的那次，返回 `null`、不报错；之后才出错的也一样。同一算例、同一页签正在打开时再点一次，直接等前一次的结果。
+       - 结果页切站点遇到 `null`：不报"未能切换站点"，但如果还在本页，把原来的站点读回来。
+    2. **运行面板快速换服务器**：慢的那次回答盖掉当前服务器的，还提前收起"读取中"。改为只认当前服务器的回答（`loadTarget`）。
+    3. **运行中被停下的打包站点记成"失败"**：载体杀掉站点后写的是退出码 143，没调度系统的单个作业取消时也写 143。
+       - 改为：确实是我们停下、且站点自己没来得及写退出码时，在作业目录里记一个 `cancelled`。状态据此报 `state=lost` 加 `detail=CANCELLED by request (exit 143)`，走 Slurm 取消已有的那条路，界面和台账都记"已停止"。
+       - TERM 发出时恰好自己写完退出码的，照实按它的退出码算。
+       - 服务器清理按"有退出码文件就算结束"判断，不受影响。
+    4. **LSF、PBS、没调度系统的机器上载体死掉，它领走的站点永远"待核对"**：
+       - 新增 `colm_gone`：只在调度系统明确说载体已结束时才算——LSF 的 DONE、EXIT 或 "is not found"；PBS 的 F、X 或 "Unknown Job Id"；本机上进程已不在。这时状态报 FAILED，判为结束、失败。
+       - 调度系统没回答时报 "is not answering"，不算结束。
+    5. **服务器上用旧引擎读格点结果时报原始错误**：新增 `readErrorText`，时序、空间分布图、闭合诊断统一提示"引擎版本较旧，用新版提交一次运行后再看"。
+    6. **LSF、PBS 的载体日志互相覆盖**：原来写成 `<队列>/carrier-%j.log`，只有 Slurm 认 `%j`。改为每个载体在自己目录里写相对路径的 `carrier.log`；三种调度系统都按提交目录解析相对路径。
+    7. **空间分布图的步数**：变量所在那组输出的步数和主输出不同时，`history-map` 取它自己的最后一步，并回报实际的序号和步数；滑块据此收窄。原来会报超范围。
+    8. **防重复提交的极端情况**：第一次提交如果 panic 或任务被丢弃，重发的请求会一直等。加了 `SettleOnDrop`，第一次不管怎么结束都给出回答。
+    9. **直接建在服务器工作根目录下的项目整体删除**：服务器端本来就会拒绝，但报的是英文。现在删除前先用中文说明：没有单独的项目文件夹，只能删记录或逐个删算例。
+    10. **Slurm 默认内存可能不够**：没填内存、而分区按整节点给内存时，按申请核数分摊节点内存，大区域可能不够。运行面板在这种情况下给出提示，告诉用户在计算资源里填"内存 GB"。
+    11. **闭合诊断支持格点**：每个时间步先逐格算残差（四个通量都有值的格子），再按纬度余弦加权取区域平均。先平均各通量再相减，缺测的格子对不齐。
+       - 结果带 `area_mean: true`，界面加了说明。
+       - 每个通量一次最多读 2000 万个值。
+       - `uuu` 实测：60 步全部有效，区域平均残差 0.02 W/m²。
+    - 核过、没发现问题的：打包的领取、收尾和取消；sbatch 报错后按目录找回作业（找到多个按失败报告）；台账里的最终进度与待核对原因；删除项目文件夹的安全检查（服务器端拒绝工作根目录和保留目录）；LSF/PBS 实时日志与载体重定向不冲突；`uuu` 的 unitcat 格点坐标和南北方向。
+    - 仍未解决：载体死掉后被判失败的站点没有退出码文件，服务器端清理的 `finished()` 不认它，只能删记录、删不了服务器上的作业目录。
+    - 测试：
+      - colm-remote：`a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_proof`；打包测试里改为断言运行中停下的站点是 cancelled，并断言载体日志是 `carrier.log`。
+      - colm-cli：`a_grid_residual_is_taken_per_cell_then_area_weighted`；`history-map` 超出步数时取最后一步。
+      - gui/src-tauri：`an_interrupted_first_submission_still_answers_the_resent_request`、`a_server_project_in_the_work_root_has_no_folder_of_its_own`。
+      - 前端：`an open overtaken by leaving the page or by another open ends quietly`、`clicking the same case again while it opens waits for the first open`、`an old server engine that cannot read grids is explained instead of quoted`。
+      - colm-remote 113 条、colm-cli 464 条（串行）、gui/src-tauri 416 条（另有 1 条按设计跳过）、前端 745 条通过。工作区 clippy、两边 fmt、eslint、prettier、check-gui、构建通过。

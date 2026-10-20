@@ -620,6 +620,10 @@ fn an_exclusive_partition_queues_sites_and_adds_a_node_job_per_node_of_sites() {
     let carrier = std::fs::read_to_string(pool.join("carriers/c0/script.sh")).unwrap();
     assert!(carrier.contains("#SBATCH --partition=cpu"), "{carrier}");
     assert!(carrier.contains("#SBATCH --cpus-per-task=1"), "{carrier}");
+    assert!(
+        carrier.contains("#SBATCH --output=carrier.log"),
+        "each carrier logs in its own directory"
+    );
     let queued = sb.status("j-a");
     assert_eq!(queued.state, State::Queued);
     assert!(queued.detail.unwrap().contains("waiting in node pack"));
@@ -677,7 +681,11 @@ fn an_exclusive_partition_queues_sites_and_adds_a_node_job_per_node_of_sites() {
     });
     assert_eq!(sb.status("j-a").state, State::Finished { exit_code: 0 });
     assert_eq!(sb.status("j-b").state, State::Finished { exit_code: 3 });
-    assert_eq!(sb.status("j-c").state, State::Finished { exit_code: 143 });
+    // 运行中被停下的站点说"已停止"，不是退出码 143 的"失败"。
+    let stopped = sb.status("j-c");
+    assert_eq!(stopped.state, State::Lost);
+    assert_eq!(crate::job::ended(&stopped), Some("cancelled"));
+    assert!(stopped.detail.unwrap().contains("exit 143"));
     assert!(
         !pool.join("claimed/j-d/carrier").exists(),
         "a cancelled site never runs"
@@ -930,5 +938,56 @@ fn a_machine_without_a_scheduler_runs_its_batch_in_one_background_carrier() {
     assert!(
         pid.trim().parse::<u32>().is_ok(),
         "the carrier is known by its process id"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_proof() {
+    let sb = pack_sandbox("pack-lsf-gone", "unused");
+    sb.stub(
+        "bsub",
+        "cat > /dev/null; echo 'Job <900> is submitted to queue <normal>.'",
+    );
+    // 901 ended (EXIT); 902 cannot be asked (LSF down); anything else is unknown to LSF.
+    sb.stub(
+        "bjobs",
+        "for a in \"$@\"; do id=$a; done\ncase $id in 901) echo EXIT;; 902) echo 'LSF is down. Please wait' >&2; exit 255;; *) echo \"Job <$id> is not found\" >&2;; esac",
+    );
+    let mut spec = slurm_spec();
+    spec.scheduler = Scheduler::Lsf;
+    let pack = crate::pack::Pack {
+        pool: "batch-g".into(),
+        slots: 1,
+    };
+    let pool = std::path::PathBuf::from(crate::pack::pool_dir(&sb.work(), "batch-g"));
+    for (id, carrier) in [("j-x", "901"), ("j-y", "902"), ("j-z", "903")] {
+        let (_, err, ok) =
+            sb.run(&packed_submit_script(&sb.work(), id, "true", &spec, &pack).unwrap());
+        assert!(ok, "{id}: {err}");
+        // Claimed by a node job that then went away without the station writing its exit code.
+        std::fs::create_dir_all(pool.join(format!("claimed/{id}"))).unwrap();
+        std::fs::write(
+            pool.join(format!("claimed/{id}/carrier")),
+            format!("{carrier}\n"),
+        )
+        .unwrap();
+    }
+    let ended = sb.status("j-x");
+    assert_eq!(ended.state, State::Lost);
+    assert_eq!(
+        crate::job::ended(&ended),
+        Some("failed"),
+        "{:?}",
+        ended.detail
+    );
+    let silent = sb.status("j-y");
+    assert_eq!(silent.state, State::Lost);
+    assert_eq!(crate::job::ended(&silent), None, "no answer is not an end");
+    assert!(silent.detail.unwrap().contains("not answering"));
+    assert_eq!(
+        crate::job::ended(&sb.status("j-z")),
+        Some("failed"),
+        "LSF no longer knows it"
     );
 }

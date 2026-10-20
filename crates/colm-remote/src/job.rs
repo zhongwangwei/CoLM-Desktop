@@ -177,7 +177,8 @@ pub fn status_script(root: &str, id: &str, lines: usize) -> String {
     let dir = quote(&job_dir(root, id));
     format!(
         r#"{prelude}{alive}cd {dir} 2>/dev/null || {{ echo "state=unknown"; exit 0; }}
-if [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
+if [ -f exit_code ] && [ -f cancelled ]; then echo "state=lost"; echo "detail=CANCELLED by request (exit $(cat exit_code))"
+elif [ -f exit_code ]; then echo "state=finished $(cat exit_code)"
 else
 {query}fi
 echo "phase=$(tail -n 1 phase 2>/dev/null)"

@@ -1074,6 +1074,19 @@ fn project_cleanup_args(host: &str, root: &str, path: &str, delete: bool) -> Vec
     args
 }
 
+/// 算例直接建在服务器工作目录（或它的 `cases/`）下的项目没有自己的文件夹：那一级是整个工作目录，
+/// 里面还有引擎、作业和别的项目。服务器端本来就会拒绝（摆渡船 `uuu`，2026-10-20 核查），这里先用人话说清。
+fn own_server_project_folder(folder: &str, root: &str) -> Result<(), String> {
+    let folder = folder.trim_end_matches('/');
+    let root = root.trim_end_matches('/');
+    if folder == root || folder == format!("{root}/cases") {
+        return Err(format!(
+            "这个项目的算例直接放在服务器工作目录 {root} 下，没有单独的项目文件夹，不能整体删除；可以只删记录，或在项目里逐个删除算例"
+        ));
+    }
+    Ok(())
+}
+
 async fn checked_project(
     app: &tauri::AppHandle,
     project: &str,
@@ -1094,6 +1107,9 @@ async fn checked_project(
     };
     let server = crate::remote::server_for(app.clone(), host)?;
     crate::remote::validate_connection(&server)?;
+    if let Some((_, remote)) = &target.remote {
+        own_server_project_folder(remote, &server.root)?;
+    }
     let (owned, host, root) = (project.to_owned(), host.clone(), server.root.clone());
     tauri::async_runtime::spawn_blocking(move || {
         project_roots_match(
@@ -1332,6 +1348,26 @@ fn hide_after_files(ledger: &History, id: &str, deleted: Option<&str>) -> Result
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_server_project_in_the_work_root_has_no_folder_of_its_own() {
+        let error = super::own_server_project_folder(
+            "/share/zhwei/colm-desktop/",
+            "/share/zhwei/colm-desktop",
+        )
+        .unwrap_err();
+        assert!(error.contains("没有单独的项目文件夹"), "{error}");
+        assert!(super::own_server_project_folder(
+            "/share/zhwei/colm-desktop/cases",
+            "/share/zhwei/colm-desktop"
+        )
+        .is_err());
+        assert!(super::own_server_project_folder(
+            "/share/zhwei/colm-desktop/p1",
+            "/share/zhwei/colm-desktop/"
+        )
+        .is_ok());
+    }
+
     use super::*;
     use colm_history::{Event, EventPhase};
 

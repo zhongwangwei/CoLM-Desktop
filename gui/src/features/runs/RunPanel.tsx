@@ -992,20 +992,24 @@ export default function RunPanel({
       });
     onBack();
   }
+  // 快速换服务器时，慢的那次回答不能盖掉当前服务器的，也不能提前收起"读取中"。
+  const loadTarget = useRef(host);
+  loadTarget.current = host;
   /** Reads how busy the server is; returns the load so a status check can summarise it. */
   async function refreshLoad(): Promise<ServerLoad | undefined> {
     const target = host;
     if (!target) return undefined;
+    const mine = () => alive.current && loadTarget.current === target;
     setLoadBusy(true);
     try {
       const load = await invoke<ServerLoad>('remote_load', { host: target });
-      if (alive.current) setServerLoad({ host: target, at: Date.now(), load });
+      if (mine()) setServerLoad({ host: target, at: Date.now(), load });
       return load;
     } catch (error) {
-      if (alive.current) setServerLoad({ host: target, at: Date.now(), error: String(error) });
+      if (mine()) setServerLoad({ host: target, at: Date.now(), error: String(error) });
       return undefined;
     } finally {
-      if (alive.current) setLoadBusy(false);
+      if (mine()) setLoadBusy(false);
     }
   }
 
@@ -1389,6 +1393,17 @@ export default function RunPanel({
           return field ? [render(field)] : [];
         })}
       </div>
+      {host &&
+        !siteBatch &&
+        scheduler !== 'bare' &&
+        !servers.find((server) => server.host === host)?.memory_gb && (
+          <p className="muted">
+            {t(
+              '没填内存：在按整节点给内存的 Slurm 分区（如 land02）上，会按申请的核数分摊节点内存，例如 8 个线程约拿到节点内存的 8/96。大区域或高分辨率的模拟请在计算资源里填"内存 GB"。',
+              'No memory set: on Slurm partitions that hand out whole-node memory (such as land02) the node memory is shared out by the cores requested, e.g. 8 threads get about 8/96 of it. For large or high-resolution regions, set "Memory GB" in Compute resources.',
+            )}
+          </p>
+        )}
       {disabled && (
         <Notice tone="warning">
           {t(

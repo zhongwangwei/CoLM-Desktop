@@ -10,6 +10,8 @@ export interface EnergyDiagnostic {
   schema: 1;
   expression: string;
   closure_assessed: false;
+  /** 区域模拟：序列是逐格残差的纬度加权区域平均。 */
+  area_mean?: boolean;
   full_stats: {
     basis: 'all_records_in_selected_window';
     mean_kind: 'arithmetic_mean_of_common_finite_records';

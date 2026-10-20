@@ -1482,6 +1482,24 @@ fn settle_submission(outcome: &SharedOutcome, result: &Result<Value, String>) {
     ready.notify_all();
 }
 
+/// 第一个请求不管怎么结束——正常返回、出错、panic、任务被丢弃——都给等着的重复请求一个回答，
+/// 否则它们的阻塞线程会一直等下去。
+struct SettleOnDrop {
+    outcome: SharedOutcome,
+    settled: bool,
+}
+
+impl Drop for SettleOnDrop {
+    fn drop(&mut self) {
+        if !self.settled {
+            settle_submission(
+                &self.outcome,
+                &Err("提交在完成前被中断；请先核对服务器作业状态再重试 / The submission was interrupted; check the server job before retrying".into()),
+            );
+        }
+    }
+}
+
 fn wait_for_submission(outcome: &SharedOutcome) -> Result<Value, String> {
     let (slot, ready) = &**outcome;
     let mut value = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1542,6 +1560,10 @@ pub async fn remote_run(
             .await
             .map_err(|e| e.to_string())?;
     }
+    let mut guard = SettleOnDrop {
+        outcome: outcome.clone(),
+        settled: false,
+    };
     let result = submit_run(
         app,
         run_id,
@@ -1563,6 +1585,7 @@ pub async fn remote_run(
     )
     .await;
     settle_submission(&outcome, &result);
+    guard.settled = true;
     result
 }
 

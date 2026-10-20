@@ -46,3 +46,16 @@ export function chartVariables(variables: CatalogVariable[]): CatalogVariable[] 
 export function isGridCatalog(variables: CatalogVariable[]): boolean {
   return variables.some((item) => item.kind === 'grid');
 }
+
+/**
+ * 读结果的错误换成人话：服务器上的引擎还是旧版时，格点变量的区域平均和空间分布图都读不了
+ * （旧版 `series` 报 "is not a (time, patch) series"，旧版没有 `history-map` 这个命令）。
+ */
+export function readErrorText(error: unknown, en: boolean): string {
+  const text = String(error);
+  if (/not a \(time, patch\) series|history-map|single-point scalar time series/.test(text))
+    return en
+      ? 'The engine on the server is too old to read grid results. Submit one run on this server with this app version (it builds the new engine), then look again.'
+      : '服务器上的引擎版本较旧，还读不了格点结果。用新版软件在这台服务器上提交一次运行（会编译新引擎）后再看。';
+  return text;
+}

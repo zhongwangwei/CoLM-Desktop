@@ -66,6 +66,9 @@ while :; do
     [ -e "$r" ] || continue
     j=${{r##*/}}
     if [ -f "done/$j" ]; then
+      # 是应请求停下的（term/ 里有它，而且它自己没来得及写退出码）：记一笔，状态才说"已停止"而不是
+      # 退出码 143 的"失败"。TERM 发出时恰好自己跑完、写了退出码的，照实按它的退出码算。
+      [ -e "term/$j" ] && [ ! -f "$JOBS/$j/exit_code" ] && : > "$JOBS/$j/cancelled"
       [ -f "$JOBS/$j/exit_code" ] || cp "done/$j" "$JOBS/$j/exit_code"
       wait "$(cat "$r")" 2>/dev/null
       rm -f "$r"
@@ -142,6 +145,15 @@ pub(crate) const ALIVE: &str = r#"colm_alive() {
   bare) kill -0 "$1" 2>/dev/null && echo RUNNING ;;
   esac
 }
+# 载体确实已经结束（调度系统明确这么说）时输出 yes。查不到、调度系统没回答都不算：那只是"不知道"，
+# 不能据此把站点判成失败。
+colm_gone() {
+  case "$COLM_BASE" in
+  lsf) colm_s=$(bjobs -noheader -o stat "$1" 2>&1); case "$colm_s" in DONE*|EXIT*|*"is not found"*) echo yes ;; esac ;;
+  pbs) colm_s=$(qstat -f "$1" 2>&1); case "$colm_s" in *"job_state = F"*|*"job_state = X"*|*"Unknown Job Id"*|*"Job has finished"*) echo yes ;; esac ;;
+  bare) kill -0 "$1" 2>/dev/null || echo yes ;;
+  esac
+}
 "#;
 
 /// 交载体（当前目录是载体目录，`script.sh` 已写好），成功时作业号放进 `$ID`。`$SLOTS` 是它要同时跑的
@@ -200,14 +212,12 @@ pub fn launch(
         env_script: None,
         directives: resources.directives.clone(),
     };
-    // 日志不放进 carriers/：那里按 `c*` 数载体（天河实测 `carrier-<号>.log` 也被数了进去）。没有调度
-    // 系统时载体自己的输出写在它目录下的 `log`。
-    let header = sched::directives(
-        scheduler,
-        &sched::job_name("pack"),
-        &format!("{pool}/carrier-%j.log"),
-        &carrier,
-    )?;
+    // 日志写在每个载体自己的目录里（`carriers/cN/carrier.log`），用相对路径：载体都在自己的目录里提交，
+    // 三种调度系统都按提交目录解析相对路径。原来写成 `<队列>/carrier-%j.log`：只有 Slurm 认 `%j`，
+    // LSF 认 `%J`、PBS 不替换，于是摆渡船上所有载体写进同一个文件、互相覆盖（2026-10-20 核查）。
+    // 也不能直接放进 carriers/：那里按 `c*` 数载体（天河实测 `carrier-<号>.log` 也被数了进去）。
+    // 没有调度系统时载体自己的输出写在它目录下的 `log`。
+    let header = sched::directives(scheduler, &sched::job_name("pack"), "carrier.log", &carrier)?;
     let script = carrier_script(&pool, &jobs, pack.slots, &header);
     ensure!(
         !script.contains("COLM_CARRIER_EOF"),

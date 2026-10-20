@@ -1177,3 +1177,20 @@ fn a_resent_station_submission_waits_for_the_first_instead_of_submitting_again()
     // Another station of the batch is its own submission.
     assert!(claim_submission(&format!("batch-{}\n/case/AU-How", std::process::id())).1);
 }
+
+#[test]
+fn an_interrupted_first_submission_still_answers_the_resent_request() {
+    let key = format!("batch-interrupted-{}\n/case", std::process::id());
+    let (first, submits) = claim_submission(&key);
+    assert!(submits);
+    let (again, resubmits) = claim_submission(&key);
+    assert!(!resubmits);
+    let waiter = std::thread::spawn(move || wait_for_submission(&again));
+    // The first request's task goes away (panic or dropped future) before it settles.
+    drop(SettleOnDrop {
+        outcome: first,
+        settled: false,
+    });
+    let answer = waiter.join().unwrap();
+    assert!(answer.unwrap_err().contains("interrupted"));
+}

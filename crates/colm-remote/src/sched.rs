@@ -428,7 +428,9 @@ lsf)
     C=$(cat "$P/claimed/$J/carrier"); Q=$(colm_alive "$C")
     if [ -n "$Q" ]; then echo "state=running"; echo "detail=node pack job $C $Q"
     elif [ "$COLM_BASE" = slurm ]; then echo "state=lost"; echo "detail=node pack job $C $(sacct -n -X -P -j "$C" -o State,ExitCode 2>/dev/null | head -n 1)"
-    else echo "state=lost"; echo "detail=node pack job $C ended"; fi
+    # 载体确实结束了，站点却没写下退出码：它被连带停掉了（超时、节点故障），这个站点不会再跑完。
+    elif [ -n "$(colm_gone "$C")" ]; then echo "state=lost"; echo "detail=node pack job $C ended before this station finished: FAILED"
+    else echo "state=lost"; echo "detail=node pack job $C is not answering"; fi
   elif [ -f "$P/claimed/$J/cancelled" ]; then echo "state=lost"; echo "detail=cancelled before it started"
   elif [ -d "$P/claimed/$J" ]; then echo "state=queued"; echo "detail=starting in node pack"
   elif [ -f "$P/queue/$J" ]; then
@@ -478,7 +480,8 @@ bare)
     sleep 1
     if kill -0 -- -"$P" 2>/dev/null; then echo "job group still exists" >&2; exit 1; fi
   fi
-  [ -f exit_code ] || echo 143 > exit_code ;;
+  # 是我们停下的：退出码 143 之外再记一笔，状态说"已停止"而不是"失败"。
+  [ -f exit_code ] || { echo 143 > exit_code; : > cancelled; } ;;
 *) echo "unknown scheduler: $S" >&2; exit 1 ;;
 
 esac

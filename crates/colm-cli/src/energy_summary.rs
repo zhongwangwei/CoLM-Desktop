@@ -21,22 +21,28 @@ fn file_stats(files: &[PathBuf]) -> Result<BTreeMap<PathBuf, String>> {
         .collect()
 }
 
-fn check_variable(file: &netcdf::File, name: &str, records: usize) -> Result<()> {
+/// 一个通量变量能不能参与统计：单点的 `(time[, 1…])` 序列，或区域模拟的 `(time, lat, lon)` 格点
+/// （按格点算残差再取区域平均）。返回每个时间步的格子数（单点为 1）。
+fn check_variable(file: &netcdf::File, name: &str, records: usize) -> Result<usize> {
     let variable = file
         .variable(name)
         .with_context(|| format!("missing energy flux {name}"))?;
+    let dimensions: Vec<(String, usize)> = variable
+        .dimensions()
+        .iter()
+        .map(|dim| (dim.name(), dim.len()))
+        .collect();
+    let single = dimensions.iter().skip(1).all(|(_, len)| *len == 1);
+    let cells = if single {
+        1
+    } else {
+        super::history_grid::grid_shape(&dimensions).map_or(0, |(_, nlat, _, nlon)| nlat * nlon)
+    };
     ensure!(
-        variable
-            .dimensions()
-            .first()
-            .is_some_and(|dim| dim.name() == "time")
-            && variable
-                .dimensions()
-                .iter()
-                .skip(1)
-                .all(|dim| dim.len() == 1)
-            && variable.len() == records,
-        "{name}: energy statistics require a single-point scalar time series"
+        dimensions.first().is_some_and(|(dim, _)| dim == "time")
+            && cells > 0
+            && variable.len() == records * cells,
+        "{name}: energy statistics require a single-point time series or a (time, lat, lon) grid"
     );
     for (attribute, identity) in [("scale_factor", 1.0), ("add_offset", 0.0)] {
         if let Some(value) = variable.attribute_value(attribute) {
@@ -73,8 +79,11 @@ fn check_variable(file: &netcdf::File, name: &str, records: usize) -> Result<()>
             "{name}: energy statistics require W/m²; actual units are {units:?}"
         );
     }
-    Ok(())
+    Ok(cells)
 }
+
+/// 区域模拟一次读进内存的通量值上限（每个通量）：4 个通量各 2000 万个双精度约 640 MB。
+const MAX_GRID_VALUES: usize = 20_000_000;
 
 pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Value> {
     ensure!(
@@ -94,15 +103,22 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
     let available = super::files_with_variables(&all, &wanted)?;
     let mut files = Vec::new();
     let mut total = 0_usize;
+    let mut cells = 1_usize;
     for path in available {
         let file = netcdf::open(&path)?;
         let records = file
             .variable("time")
             .context("history time is missing")?
             .len();
+        let mut sizes = std::collections::BTreeSet::new();
         for variable in &wanted {
-            check_variable(&file, variable, records)?;
+            let size = check_variable(&file, variable, records)?;
+            if *variable != "time" {
+                sizes.insert(size);
+            }
         }
+        ensure!(sizes.len() == 1, "energy fluxes do not share one grid");
+        cells = *sizes.first().expect("one size");
         if from.is_some() || to.is_some() {
             let time = super::read_file_1d(&file, &path, "time")?;
             let unix = colm_hist::time::unix_seconds(&time);
@@ -116,6 +132,10 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
             .checked_add(records)
             .context("history record count overflow")?;
         ensure!(total <= MAX_RECORDS, "energy statistics limited to 1000000 history records; select a smaller window or subset the inputs");
+        ensure!(
+            total.saturating_mul(cells) <= MAX_GRID_VALUES,
+            "energy statistics on this grid are limited to {MAX_GRID_VALUES} values per flux; select a shorter window"
+        );
         files.push(path);
     }
     ensure!(
@@ -126,10 +146,13 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
     let time = raw.remove("time").context("history time is missing")?;
     let unix = colm_hist::time::unix_seconds(&time);
     ensure!(
-        FLUXES.iter().all(|name| raw[*name].len() == time.len()),
-        "energy fluxes do not share one scalar time axis"
+        FLUXES
+            .iter()
+            .all(|name| raw[*name].len() == time.len() * cells),
+        "energy fluxes do not share one time axis"
     );
-    let residual = (0..time.len())
+    // 每个格子（单点就是那一个点）在每个时间步的残差；四个通量都有值才算。
+    let cell_residual = (0..time.len() * cells)
         .map(|index| {
             let values = FLUXES.map(|name| raw[name][index]);
             if values.iter().all(|value| value.is_finite()) {
@@ -144,6 +167,16 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
             }
         })
         .collect::<Result<Vec<_>>>()?;
+    // 格点：先按格子算残差，再按纬度余弦取区域平均。先平均各通量再相减，四个通量缺测的格子不同时
+    // 会对不齐。
+    let area_mean = cells > 1;
+    let residual = if area_mean {
+        let (lat, nlon) = super::history_grid::grid_weights(&files, "f_rnet")?
+            .context("f_rnet is not a (time, lat, lon) grid")?;
+        super::history_grid::area_mean(&cell_residual, &lat, nlon)
+    } else {
+        cell_residual
+    };
     let indexes = super::series_indices_multi(&unix, &[residual.as_slice()], from, to, None);
     let selected = indexes
         .iter()
@@ -165,6 +198,8 @@ pub(super) fn run(case: &Path, from: Option<i64>, to: Option<i64>) -> Result<Val
         "schema":1,
         "expression":"f_rnet - f_fsena - f_lfevpa - f_fgrnd",
         "closure_assessed":false,
+        // 区域模拟：序列是逐格残差按纬度余弦加权的区域平均。
+        "area_mean":area_mean,
         "full_stats":{
             "basis":"all_records_in_selected_window",
             "mean_kind":"arithmetic_mean_of_common_finite_records",
@@ -220,6 +255,50 @@ mod tests {
         drop(file);
         root
     }
+    #[test]
+    fn a_grid_residual_is_taken_per_cell_then_area_weighted() {
+        let _guard = super::super::netcdf_test_guard();
+        let root = std::env::temp_dir().join(format!("energy-grid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("out/Case/history")).unwrap();
+        std::fs::write(root.join("case.nml"), "&nl_colm\nDEF_CASE_NAME='Case'\n/\n").unwrap();
+        let mut file = netcdf::create(root.join("out/Case/history/Case_hist_2000-01.nc")).unwrap();
+        file.add_dimension("time", 2).unwrap();
+        file.add_dimension("lat", 2).unwrap();
+        file.add_dimension("lon", 1).unwrap();
+        let start = colm_hist::time::minutes_from_1900(2000) as f64;
+        let mut time = file.add_variable::<f64>("time", &["time"]).unwrap();
+        time.put_attribute("units", "minutes since 1900-1-1 0:0:0")
+            .unwrap();
+        time.put_values(&[start, start + 60.], ..).unwrap();
+        let mut lat = file.add_variable::<f64>("lat", &["lat"]).unwrap();
+        lat.put_values(&[0., 60.], ..).unwrap();
+        // 第 1 步：赤道格残差 100、60°N 格残差 40；第 2 步 60°N 格的潜热缺测，只剩赤道格 10。
+        let rnet = [100., 40., 10., 999.];
+        let latent = [0., 0., 0., f64::NAN];
+        for name in FLUXES {
+            let mut variable = file
+                .add_variable::<f64>(name, &["time", "lat", "lon"])
+                .unwrap();
+            variable.put_attribute("units", "W/m2").unwrap();
+            let values = match name {
+                "f_rnet" => rnet,
+                "f_lfevpa" => latent,
+                _ => [0.; 4],
+            };
+            variable.put_values(&values, ..).unwrap();
+        }
+        drop(file);
+        let report = run(&root, None, None).unwrap();
+        assert_eq!(report["area_mean"], true);
+        let residual = report["series"]["vars"]["residual"].as_array().unwrap();
+        // (100·1 + 40·0.5) / 1.5 = 80；第 2 步只有赤道格。
+        assert!((residual[0].as_f64().unwrap() - 80.).abs() < 1e-9);
+        assert!((residual[1].as_f64().unwrap() - 10.).abs() < 1e-9);
+        assert!((report["full_stats"]["mean"].as_f64().unwrap() - 45.).abs() < 1e-9);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn full_mean_is_not_the_extrema_sample_mean() {
         let _guard = super::super::netcdf_test_guard();

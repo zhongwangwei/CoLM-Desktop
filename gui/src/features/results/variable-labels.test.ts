@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chartVariables, isGridCatalog, variableOption, variableTitle } from './variable-labels';
+import {
+  chartVariables,
+  isGridCatalog,
+  readErrorText,
+  variableOption,
+  variableTitle,
+} from './variable-labels';
 import { overviewVariable } from './result-overview';
 
 const grid = (name: string, extra: Record<string, unknown> = {}) => ({
@@ -36,4 +42,16 @@ test('only time-varying series and grids are listed, core variables first', () =
   assert.ok(isGridCatalog([grid('f_fsena')]));
   assert.ok(!isGridCatalog([{ name: 'f_fsena', kind: 'series', dimensions: [] }]));
   assert.equal(overviewVariable([grid('f_fsena'), grid('f_lfevpa')]), 'f_lfevpa');
+});
+
+test('an old server engine that cannot read grids is explained instead of quoted', () => {
+  assert.match(
+    readErrorText(
+      'Error: f_fsena has 39424 values for 56 time steps; it is not a (time, patch) series',
+      false,
+    ),
+    /引擎版本较旧/,
+  );
+  assert.match(readErrorText('error: unknown command history-map', true), /too old/);
+  assert.equal(readErrorText('Error: no history at /x', false), 'Error: no history at /x');
 });

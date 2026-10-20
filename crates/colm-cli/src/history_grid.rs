@@ -84,6 +84,17 @@ fn latitudes(file: &netcdf::File, dimension: &str, n: usize) -> Vec<f64> {
         })
 }
 
+/// 格点变量的纬度坐标与经度格数（区域平均要的权重）；不是格点变量时为 `None`。
+pub(crate) fn grid_weights(files: &[PathBuf], name: &str) -> Result<Option<(Vec<f64>, usize)>> {
+    let (stream, dimensions) = dimensions_of(files, name)?;
+    let Some((lat_dim, nlat, _, nlon)) = grid_shape(&dimensions) else {
+        return Ok(None);
+    };
+    let first = stream.first().expect("streams are never empty");
+    let file = netcdf::open(first).with_context(|| format!("cannot open {}", first.display()))?;
+    Ok(Some((latitudes(&file, &lat_dim, nlat), nlon)))
+}
+
 /// `series` 遇到格点变量时：把它变成区域平均序列。不是格点变量就返回 `None`，由调用方照旧报错。
 pub(crate) fn area_mean_series(
     files: &[PathBuf],
@@ -144,20 +155,29 @@ fn history_map(case: &Path, var: &str, index: usize) -> Result<MapBody> {
     let Some((lat_dim, nlat, lon_dim, nlon)) = grid_shape(&dimensions) else {
         bail!("{var} is not a (time, lat, lon) grid variable");
     };
-    let mut seen = 0usize;
-    let mut total = 0usize;
-    let mut hit: Option<(PathBuf, usize, f64)> = None;
+    // 每个文件的时间步数，先数完再定位：要的步超出这个变量自己的步数时取最后一步。结果页的滑块按主输出
+    // 的步数开头，另一组输出（如 unitcat）步数可能不同；回答里带上实际的序号和步数，滑块据此收窄。
+    let mut counts = Vec::with_capacity(stream.len());
     for path in &stream {
         let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
-        let times = crate::read_file_1d(&file, path, "time")?;
-        if hit.is_none() && index < seen + times.len() {
-            hit = Some((path.clone(), index - seen, times[index - seen]));
-        }
-        seen += times.len();
-        total = seen;
+        counts.push(crate::read_file_1d(&file, path, "time")?.len());
     }
-    let Some((path, local, minutes)) = hit else {
-        bail!("{var} has {total} time steps; step {index} does not exist");
+    let total: usize = counts.iter().sum();
+    ensure!(total > 0, "{var} has no time steps");
+    let index = index.min(total - 1);
+    let (mut seen, mut hit) = (0usize, None);
+    for (path, count) in stream.iter().zip(&counts) {
+        if index < seen + count {
+            hit = Some((path.clone(), index - seen));
+            break;
+        }
+        seen += count;
+    }
+    let (path, local) = hit.expect("index is below the total");
+    let minutes = {
+        let file =
+            netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
+        crate::read_file_1d(&file, &path, "time")?[local]
     };
     let file = netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
     let variable = file

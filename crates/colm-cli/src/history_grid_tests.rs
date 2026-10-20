@@ -100,8 +100,9 @@ fn a_map_reads_one_step_across_month_files_with_missing_cells_as_null() {
     assert_eq!((map.min, map.max), (Some(106.0), Some(110.0)));
     assert_eq!(map.units.as_deref(), Some("W/m2"));
     assert_eq!(map.long_name.as_deref(), Some("sensible heat"));
-    let error = history_map(&case, "f_fsena", 4).unwrap_err().to_string();
-    assert!(error.contains("4 time steps"), "{error}");
+    // 超出这个变量自己的步数：取最后一步，并说出实际的序号，滑块据此收窄。
+    let last = history_map(&case, "f_fsena", 99).unwrap();
+    assert_eq!((last.index, last.steps), (3, 4));
     let _ = std::fs::remove_dir_all(&case);
 }
 

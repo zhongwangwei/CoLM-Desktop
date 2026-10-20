@@ -62,7 +62,8 @@ type AppContextValue = {
   registerNavigationGuard: (guard: NavigationGuard) => () => void;
   notify: (message: string, error?: boolean) => void;
   refreshCases: () => Promise<void>;
-  openCase: (dir: string, tab?: AppState['caseTab']) => Promise<OpenedCase>;
+  /** `null`：打开还没完成就被后来的页面切换或另一次打开取代了，界面以后来的为准，不算出错。 */
+  openCase: (dir: string, tab?: AppState['caseTab']) => Promise<OpenedCase | null>;
   refreshVersions: () => Promise<void>;
 };
 const Context = createContext<AppContextValue | null>(null);
@@ -83,6 +84,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   current.current = state;
   const openEpoch = useRef(0);
   const pendingOpen = useRef<number | null>(null);
+  // 正在进行的那次打开：同一算例、同一页签再点一次时接着等它，不重新开始。
+  const inflightOpen = useRef<{
+    key: string;
+    epoch: number;
+    promise: Promise<OpenedCase | null>;
+  } | null>(null);
   const guards = useRef(new Set<NavigationGuard>());
   const update = useCallback(
     (patch: AppPatch) =>
@@ -161,79 +168,95 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (!dir) throw new Error(bilingual('请选择算例目录', 'Select a case directory.'));
       const reason = blocked({ route: 'case', caseDir: dir, reload: true });
       if (reason) throw new Error(reason);
+      // 等得久了又点同一个算例：接着等前一次，两次不会互相作废（2026-10-20 用户看到"打开期间页面已变化"）。
+      const key = `${dir}\n${tab}`;
+      const running = inflightOpen.current;
+      if (running && running.key === key && pendingOpen.current === running.epoch)
+        return running.promise;
       const epoch = ++openEpoch.current;
       pendingOpen.current = epoch;
       update({ busy: true });
-      try {
-        const opened = await invoke<OpenedCase>('open_case', { dir });
-        const latestOfficial = current.current.versions
-          .filter((v) => v.version.id === 'official')
-          .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
-        const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
-          dir,
-        }).catch(async (error: unknown) => {
-          // 绑定的修订已被整理（或删除）：问一句改绑到哪个版本，而不是抛出读不到 revision.json。
-          const missing = missingRevision(error);
-          const target = current.current.chosenVersion ?? latestOfficial;
-          if (!missing || !target) throw error;
-          if (!askToRebind(rebindQuestion(missing, target, bilingual)))
-            throw new Error(
+      const opening = (async (): Promise<OpenedCase | null> => {
+        try {
+          const opened = await invoke<OpenedCase>('open_case', { dir });
+          const latestOfficial = current.current.versions
+            .filter((v) => v.version.id === 'official')
+            .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
+          const binding = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+            dir,
+          }).catch(async (error: unknown) => {
+            // 绑定的修订已被整理（或删除）：问一句改绑到哪个版本，而不是抛出读不到 revision.json。
+            const missing = missingRevision(error);
+            const target = current.current.chosenVersion ?? latestOfficial;
+            if (!missing || !target) throw error;
+            if (!askToRebind(rebindQuestion(missing, target, bilingual)))
+              throw new Error(
+                bilingual(
+                  `算例绑定的模型版本 ${versionLabel(missing)} 已不在模型库中；未改绑，算例未打开。`,
+                  `The case's model revision ${versionLabel(missing)} is no longer in the model registry; it was not rebound or opened.`,
+                ),
+              );
+            const rebound = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
+              dir,
+              target,
+            });
+            notify(
               bilingual(
-                `算例绑定的模型版本 ${versionLabel(missing)} 已不在模型库中；未改绑，算例未打开。`,
-                `The case's model revision ${versionLabel(missing)} is no longer in the model registry; it was not rebound or opened.`,
+                `已把算例改绑到 ${versionLabel(target)}（原绑定的 ${versionLabel(missing)} 已整理）`,
+                `Rebound the case to ${versionLabel(target)} (${versionLabel(missing)} was tidied away).`,
               ),
             );
-          const rebound = await invokeJson<{ version: VersionRef }>('model_migrate_case', {
-            dir,
-            target,
+            return rebound;
           });
-          notify(
-            bilingual(
-              `已把算例改绑到 ${versionLabel(target)}（原绑定的 ${versionLabel(missing)} 已整理）`,
-              `Rebound the case to ${versionLabel(target)} (${versionLabel(missing)} was tidied away).`,
-            ),
+          // 优先使用用户明确选择的版本；没有明确选择时恢复算例的修改版绑定，否则用最新官方版。
+          // 运行时再把实际所用版本写回算例。
+          const bound =
+            binding.version.id !== 'official' &&
+            current.current.versions.some(
+              (v) =>
+                v.version.id === binding.version.id &&
+                v.version.revision === binding.version.revision,
+            );
+          // 只认用户明确选的版本（`chosenVersion`）；打开上一个算例时带出的版本不能串到别的算例上。
+          const selectedVersion =
+            current.current.chosenVersion ??
+            (bound ? binding.version : (latestOfficial ?? current.current.versionRef));
+          const version = await invokeJson<FrozenRevision>('model_get', { ...selectedVersion });
+          const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
+          // 打开期间页面切走了、或者又开始打开别的算例：这次作废，以后来的为准。不报错——后来的那次
+          // 已经正常打开，或者用户本来就离开了，弹一个 Error 只会让人以为出了问题。
+          if (epoch !== openEpoch.current) return null;
+          const normalized = { ...opened, dir: opened.entry.dir, name: opened.entry.name, binding };
+          update({
+            selectedCase: normalized,
+            root: opened.root,
+            cases,
+            version,
+            versionRef: selectedVersion,
+            route: 'case',
+            caseTab: tab,
+          });
+          // 算例已经打开；记最近目录失败只提示，不能把已成功的打开报成失败。
+          await invoke('save_recent', { key: 'root', value: opened.root }).catch((error) =>
+            notify(String(error)),
           );
-          return rebound;
-        });
-        // 优先使用用户明确选择的版本；没有明确选择时恢复算例的修改版绑定，否则用最新官方版。
-        // 运行时再把实际所用版本写回算例。
-        const bound =
-          binding.version.id !== 'official' &&
-          current.current.versions.some(
-            (v) =>
-              v.version.id === binding.version.id &&
-              v.version.revision === binding.version.revision,
-          );
-        // 只认用户明确选的版本（`chosenVersion`）；打开上一个算例时带出的版本不能串到别的算例上。
-        const selectedVersion =
-          current.current.chosenVersion ??
-          (bound ? binding.version : (latestOfficial ?? current.current.versionRef));
-        const version = await invokeJson<FrozenRevision>('model_get', { ...selectedVersion });
-        const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
-        if (epoch !== openEpoch.current)
-          throw new Error(
-            bilingual('打开期间页面已变化，请重新打开', 'The page changed while opening the case.'),
-          );
-        const normalized = { ...opened, dir: opened.entry.dir, name: opened.entry.name, binding };
-        update({
-          selectedCase: normalized,
-          root: opened.root,
-          cases,
-          version,
-          versionRef: selectedVersion,
-          route: 'case',
-          caseTab: tab,
-        });
-        // 算例已经打开；记最近目录失败只提示，不能把已成功的打开报成失败。
-        await invoke('save_recent', { key: 'root', value: opened.root }).catch((error) =>
-          notify(String(error)),
-        );
-        return normalized;
-      } finally {
-        if (pendingOpen.current === epoch) {
-          pendingOpen.current = null;
-          update({ busy: false });
+          return normalized;
+        } catch (error) {
+          // 已经被取代的那次打开出了错，也不是用户眼下在做的事。
+          if (epoch !== openEpoch.current) return null;
+          throw error;
+        } finally {
+          if (pendingOpen.current === epoch) {
+            pendingOpen.current = null;
+            update({ busy: false });
+          }
         }
+      })();
+      inflightOpen.current = { key, epoch, promise: opening };
+      try {
+        return await opening;
+      } finally {
+        if (inflightOpen.current?.epoch === epoch) inflightOpen.current = null;
       }
     },
     [blocked, notify, update],
