@@ -748,6 +748,10 @@ export const commandContract = {
     "workspace": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "branchCode": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "model_draft": {

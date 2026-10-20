@@ -269,3 +269,25 @@ test('research configuration retains the engine of a new or existing simulation'
     assert.equal(config.props.engine, 'fortran');
   }
 });
+
+test('a new version can copy its parent code into a workspace of its own', async () => {
+  const p = page('PFT');
+  let c = await p.mount();
+  const set = (id: string, value: string) => {
+    c.fields.find((field) => field.id === id)!.set(value);
+    c = p.render();
+  };
+  set('version-name', 'Soil change');
+  set('version-note', 'New soil evaporation scheme');
+  assert.ok(
+    !c.fields.some((field) => field.id === 'version-workspace'),
+    'no workspace box unless chosen',
+  );
+  set('version-code', 'branch');
+  await c.actions.find((action) => action.id === 'version-create')!.run();
+  const call = p.calls.find((entry) => entry.command === 'model_create')!;
+  assert.equal(call.args.branchCode, true);
+  assert.equal(call.args.workspace, null);
+  set('version-code', 'existing');
+  assert.ok(c.fields.some((field) => field.id === 'version-workspace'));
+});

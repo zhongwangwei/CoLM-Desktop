@@ -195,6 +195,58 @@ impl Workspace {
         }
     }
 
+    /// 从一份冻结的源码快照新建工作区：模型库里某个版本的源码缓存（普通目录、源码包或带历史的
+    /// git 克隆）。"新建修改版"从任意版本派生代码时用它，起点是那个版本冻结时的代码，而不是
+    /// 某个工作区眼下的代码。和 [`Workspace::create`] 分开：用户手填的本地路径仍然必须是 git 仓库。
+    pub fn create_from_snapshot(
+        root: &Path,
+        name: &str,
+        snapshot: &Path,
+        label: &str,
+        rev: Option<&str>,
+    ) -> Result<Self> {
+        validate_name(name)?;
+        let dir = root.join(name);
+        ensure!(
+            !dir.exists(),
+            "workspace {name} already exists at {}",
+            dir.display()
+        );
+        std::fs::create_dir_all(root)
+            .with_context(|| format!("cannot create {}", root.display()))?;
+        std::fs::create_dir(&dir).with_context(|| format!("cannot reserve {}", dir.display()))?;
+        let filled = (|| -> Result<Self> {
+            let text = snapshot.to_str().context("snapshot path is not UTF-8")?;
+            if snapshot.join(".git").exists() || text.ends_with(".tar.gz") || text.ends_with(".tgz")
+            {
+                return Self::populate(&dir, name, text, rev);
+            }
+            ensure!(
+                snapshot.is_dir(),
+                "{} is not a source snapshot",
+                snapshot.display()
+            );
+            let src = dir.join("src");
+            copy_plain_tree(snapshot, &src)?;
+            git::run(&src, &["init", "-q"])?;
+            git::set_identity(&src)?;
+            git::run(&src, &["add", "-A", "-f"])?;
+            git::run(&src, &["commit", "-q", "-m", &format!("base: {label}")])?;
+            Self::finish(&dir, name, label, None)
+        })();
+        match filled {
+            Ok(mut workspace) => {
+                workspace.info.origin = label.to_owned();
+                workspace.save()?;
+                Ok(workspace)
+            }
+            Err(error) => {
+                let _ = std::fs::remove_dir_all(&dir);
+                Err(error)
+            }
+        }
+    }
+
     fn populate(dir: &Path, name: &str, from: &str, rev: Option<&str>) -> Result<Self> {
         let src = dir.join("src");
         let is_tarball = from.ends_with(".tar.gz") || from.ends_with(".tgz");
@@ -224,6 +276,12 @@ impl Workspace {
             );
             clone(from, &src, true)?;
         }
+        Self::finish(dir, name, from, rev)
+    }
+
+    /// 源码已放进 `src/` 以后的共同收尾：切到要的提交、建本工作区的分支、写下工作区信息。
+    fn finish(dir: &Path, name: &str, from: &str, rev: Option<&str>) -> Result<Self> {
+        let src = dir.join("src");
         git::set_identity(&src)?;
         if let Some(rev) = rev {
             ensure!(
@@ -406,6 +464,63 @@ impl Drop for InfoLock {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
+}
+
+/// 原样复制一棵目录。上游源码里本来就有相对的符号链接（`vendor/CoLM202X/include/Makeoptions`
+/// → `Makeoptions.github`，官方 r99 实测），照样复制成链接；指向快照外面的（绝对路径或跳出去的 `..`）
+/// 拒绝，免得复制出指向别处的东西。
+fn copy_plain_tree(from: &Path, to: &Path) -> Result<()> {
+    copy_plain_tree_in(from, to, from)
+}
+
+fn copy_plain_tree_in(from: &Path, to: &Path, top: &Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_symlink() {
+            let link = std::fs::read_link(entry.path())?;
+            let resolved = entry
+                .path()
+                .parent()
+                .map(|parent| parent.join(&link))
+                .and_then(|path| std::path::absolute(path).ok())
+                .map(|path| normalize(&path));
+            ensure!(
+                link.is_relative() && resolved.is_some_and(|path| path.starts_with(normalize(top))),
+                "source snapshot has a symbolic link that leaves it: {}",
+                entry.path().display()
+            );
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&link, &target)?;
+            #[cfg(not(unix))]
+            anyhow::bail!(
+                "symbolic links in a source snapshot need a Unix system: {}",
+                entry.path().display()
+            );
+        } else if kind.is_dir() {
+            copy_plain_tree_in(&entry.path(), &target, top)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// 去掉路径里的 `.` 和 `..`，不访问文件系统。
+fn normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 fn clone(from: &str, src: &Path, local: bool) -> Result<()> {

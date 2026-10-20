@@ -86,6 +86,9 @@ struct Create {
     note: String,
     parent: VersionRef,
     workspace: Option<String>,
+    /// 给新版本一份它自己的代码：从父版本冻结时的源码新建一个工作区（见 [`branch_parent_code`]）。
+    #[serde(default)]
+    branch_code: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -133,15 +136,25 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         "model-create" => {
             let input: Create = request(opts)?;
             let parent = store.get(&input.parent)?;
+            ensure!(
+                !(input.branch_code && input.workspace.is_some()),
+                "choose either an existing code workspace or a new copy of the parent's code"
+            );
+            let id = unique_id();
+            let code = if input.branch_code {
+                branch_parent_code(opts, &parent, &id)?
+            } else {
+                match input.workspace.as_deref() {
+                    Some(name) => code(opts, Some(name))?,
+                    None => parent.code.clone(),
+                }
+            };
             let draft = ModelDraft {
-                id: unique_id(),
+                id,
                 name: input.name,
                 note: input.note,
                 parent: input.parent,
-                code: match input.workspace.as_deref() {
-                    Some(name) => code(opts, Some(name))?,
-                    None => parent.code,
-                },
+                code,
                 overlay: parent.overlay,
                 applicability: parent.applicability,
                 generation: 0,
@@ -1086,6 +1099,186 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
+    fn a_new_version_gets_its_own_copy_of_the_parent_frozen_code() {
+        let root = std::env::temp_dir().join(format!("colm-branch-{}", unique_id()));
+        let source = root.join("app-source");
+        std::fs::create_dir_all(source.join("vendor/CoLM202X/main")).unwrap();
+        std::fs::write(
+            source.join("vendor/CoLM202X/main/MOD_A.F90"),
+            "MODULE MOD_A\nEND MODULE\n",
+        )
+        .unwrap();
+        std::fs::write(source.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let official = CodeRef {
+            kind: CodeKind::Official,
+            workspace: None,
+            commit: None,
+            source_sha256: crate::remote_cmd::source_content_sha256(&source).unwrap(),
+        };
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![
+                (
+                    "--model-root".into(),
+                    root.join("models").to_string_lossy().into_owned(),
+                ),
+                (
+                    "--workspace-root".into(),
+                    root.join("ws").to_string_lossy().into_owned(),
+                ),
+            ],
+        };
+        let store = registry(&opts).unwrap();
+        let parent = store.install_official(official.clone()).unwrap();
+        // The source cache a frozen official revision keeps (a plain directory, as on disk).
+        copy_tree(
+            &source,
+            &cache_dir(&opts, &official).unwrap().join("source"),
+        )
+        .unwrap();
+        let copied = branch_parent_code(&opts, &parent, "model-7-42").unwrap();
+        assert_eq!(copied.kind, CodeKind::Workspace);
+        assert_eq!(copied.workspace.as_deref(), Some("ver-7-42"));
+        assert_eq!(copied.source_sha256, official.source_sha256);
+        let ws = colm_workspace::Workspace::open(&root.join("ws"), "ver-7-42").unwrap();
+        assert!(ws.info.note.contains("official#"), "{}", ws.info.note);
+        // A second draft never shares the first one's workspace.
+        let other = branch_parent_code(&opts, &parent, "model-7-43").unwrap();
+        assert_ne!(other.workspace, copied.workspace);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_version_built_on_a_workspace_is_copied_at_its_frozen_commit() {
+        let root = std::env::temp_dir().join(format!("colm-branch-ws-{}", unique_id()));
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![
+                (
+                    "--model-root".into(),
+                    root.join("models").to_string_lossy().into_owned(),
+                ),
+                (
+                    "--workspace-root".into(),
+                    root.join("ws").to_string_lossy().into_owned(),
+                ),
+            ],
+        };
+        // The parent's workspace, frozen at its first commit; it changed again afterwards.
+        let repo = root.join("parent-src");
+        std::fs::create_dir_all(repo.join("vendor")).unwrap();
+        std::fs::write(repo.join("vendor/MOD_A.F90"), "frozen\n").unwrap();
+        std::fs::write(repo.join("Cargo.toml"), "[workspace]\n").unwrap();
+        for args in [
+            &["init", "-q"][..],
+            &["add", "-A"],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "a",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let frozen_commit = colm_workspace::git::head(&repo).unwrap();
+        let code_ref = CodeRef {
+            kind: CodeKind::Workspace,
+            workspace: Some("soil".into()),
+            commit: Some(frozen_commit.clone()),
+            source_sha256: crate::remote_cmd::source_content_sha256(&repo).unwrap(),
+        };
+        std::fs::write(repo.join("vendor/MOD_A.F90"), "later\n").unwrap();
+        for args in [
+            &["add", "-A"][..],
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "b",
+            ],
+        ] {
+            assert!(std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success());
+        }
+        let cached = cache_dir(&opts, &code_ref).unwrap().join("workspaces/soil");
+        std::fs::create_dir_all(&cached).unwrap();
+        assert!(std::process::Command::new("git")
+            .args(["clone", "-q", "--local"])
+            .arg(&repo)
+            .arg(cached.join("src"))
+            .status()
+            .unwrap()
+            .success());
+        let info = colm_workspace::Info {
+            name: "soil".into(),
+            created_at: 1,
+            origin: "app".into(),
+            base_commit: "officialbase".into(),
+            branch: "ws/soil".into(),
+            gates: Default::default(),
+            adopted: Vec::new(),
+            note: String::new(),
+            based_on: None,
+            root_commit: None,
+        };
+        std::fs::write(
+            cached.join("workspace.json"),
+            serde_json::to_vec(&info).unwrap(),
+        )
+        .unwrap();
+        let parent = colm_model::FrozenRevision {
+            schema: colm_model::SCHEMA,
+            version: VersionRef {
+                id: "soil".into(),
+                revision: 2,
+            },
+            name: "Soil".into(),
+            note: "n".into(),
+            parent: None,
+            code: code_ref.clone(),
+            overlay: Default::default(),
+            overlay_sha256: String::new(),
+            fingerprint: String::new(),
+            created_unix: 0,
+            applicability: Default::default(),
+            derived_from: None,
+        };
+        let copied = branch_parent_code(&opts, &parent, "model-1-9").unwrap();
+        assert_eq!(copied.source_sha256, code_ref.source_sha256);
+        let ws = colm_workspace::Workspace::open(&root.join("ws"), "ver-1-9").unwrap();
+        assert_eq!(
+            ws.head().unwrap(),
+            frozen_commit,
+            "the parent's frozen commit, not its later one"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.src().join("vendor/MOD_A.F90")).unwrap(),
+            "frozen\n"
+        );
+        assert_eq!(ws.info.based_on.as_deref(), Some("soil"));
+        assert_eq!(ws.info.root_commit.as_deref(), Some("officialbase"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_complete_code_cache_published_first_is_kept() {
         let root = std::env::temp_dir().join(format!("colm-code-cache-{}", unique_id()));
         let dest = root.join("cache");
@@ -1415,6 +1608,77 @@ mod artifact_tests {
         assert_ne!(before, after);
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// 新建修改版时给它一份自己的代码：从父版本冻结时的源码（模型库里的源码缓存）新建一个工作区，
+/// 起点就是父版本当时的代码。原来只能从内置源码或某个工作区眼下的代码起步：父版本若基于一个后来
+/// 又改过的工作区，就拿不回它冻结时的代码；派生的版本还和父版本共用一个工作区（2026-10-20 梳理）。
+fn branch_parent_code(
+    opts: &Opts,
+    parent: &colm_model::FrozenRevision,
+    draft_id: &str,
+) -> Result<CodeRef> {
+    let name = format!("ver-{}", draft_id.trim_start_matches("model-"));
+    // 官方版优先用源码缓存里的普通目录：从源码包建仓库时被 .gitignore 忽略的文件不会被跟踪，
+    // 内容哈希只算跟踪的文件，就和冻结时对不上（官方 r99 实测）。
+    let plain = cache_dir(opts, &parent.code)?.join("source");
+    let snapshot = match parent.code.kind {
+        CodeKind::Official if plain.is_dir() => plain,
+        _ => cached_source_dir(opts, &parent.code)?,
+    };
+    ensure!(
+        snapshot.exists(),
+        "the source frozen with {}#{} is no longer in the model registry; its code cannot be copied",
+        parent.version.id,
+        parent.version.revision
+    );
+    let label = format!(
+        "{} ({}#{})",
+        parent.name, parent.version.id, parent.version.revision
+    );
+    let root = crate::provenance::workspace_root(opts.get("--workspace-root"));
+    let rev = match parent.code.kind {
+        CodeKind::Workspace => parent.code.commit.as_deref(),
+        CodeKind::Official => None,
+    };
+    let mut workspace =
+        colm_workspace::Workspace::create_from_snapshot(&root, &name, &snapshot, &label, rev)?;
+    // 父版本自己基于一个工作区时，记下它是谁、官方源码是哪次提交：改动范围、要不要自己的内核都相对官方算。
+    let parent_info = match &parent.code.workspace {
+        Some(parent_name) => {
+            let file = cache_dir(opts, &parent.code)?
+                .join("workspaces")
+                .join(parent_name)
+                .join("workspace.json");
+            Some(serde_json::from_slice::<colm_workspace::Info>(
+                &std::fs::read(&file).with_context(|| format!("cannot read {}", file.display()))?,
+            )?)
+        }
+        None => None,
+    };
+    workspace.update(|info| {
+        info.note = format!("代码副本：{label}");
+        if let Some(parent) = &parent_info {
+            info.based_on = Some(parent.name.clone());
+            info.root_commit = Some(
+                parent
+                    .root_commit
+                    .clone()
+                    .unwrap_or_else(|| parent.base_commit.clone()),
+            );
+        }
+    })?;
+    let copied = code(opts, Some(&name))?;
+    if copied.source_sha256 != parent.code.source_sha256 {
+        // 不留一个代码和父版本不一样的副本。
+        let _ = std::fs::remove_dir_all(&workspace.dir);
+        anyhow::bail!(
+            "the copied code differs from the code frozen with {}#{}",
+            parent.version.id,
+            parent.version.revision
+        );
+    }
+    Ok(copied)
 }
 
 pub(crate) fn cached_source_dir(opts: &Opts, code: &CodeRef) -> Result<PathBuf> {

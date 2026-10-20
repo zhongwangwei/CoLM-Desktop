@@ -32,6 +32,8 @@ export default function VersionsPage() {
     [name, setName] = useState(''),
     [note, setNote] = useState(''),
     [workspace, setWorkspace] = useState(''),
+    // 新版本的代码从哪来：沿用父版本、复制父版本的代码来改，或用一个已有的代码工作区。
+    [codeMode, setCodeMode] = useState<'inherit' | 'branch' | 'existing'>('inherit'),
     [parameter, setParameter] = useState(''),
     [value, setValue] = useState(''),
     [index, setIndex] = useState(1),
@@ -337,7 +339,8 @@ export default function VersionsPage() {
       name,
       note,
       parent: selected.version,
-      workspace: workspace || null,
+      workspace: codeMode === 'existing' && workspace ? workspace : null,
+      branchCode: codeMode === 'branch',
     });
     setAssetRoot('');
     setDraft(d);
@@ -361,12 +364,31 @@ export default function VersionsPage() {
       set: setNote,
     },
     {
-      id: 'version-workspace',
-      label: t('代码工作区', 'Code workspace'),
-      value: workspace,
-      type: 'text',
-      set: setWorkspace,
+      id: 'version-code',
+      label: t('新版本的代码', 'Code of the new version'),
+      value: codeMode,
+      type: 'choice',
+      options: [
+        { value: 'inherit', label: t('沿用父版本的代码', 'Keep the parent code') },
+        {
+          value: 'branch',
+          label: t('复制父版本的代码来修改', 'Copy the parent code to change it'),
+        },
+        { value: 'existing', label: t('使用已有的代码工作区', 'Use an existing code workspace') },
+      ],
+      set: (value) => setCodeMode(value as typeof codeMode),
     },
+    ...(codeMode === 'existing'
+      ? [
+          {
+            id: 'version-workspace',
+            label: t('代码工作区', 'Code workspace'),
+            value: workspace,
+            type: 'text' as const,
+            set: setWorkspace,
+          },
+        ]
+      : []),
   ];
   const guideActions: UiAction[] = [
     {
@@ -738,13 +760,46 @@ export default function VersionsPage() {
               onChange={(e) => setNote(e.target.value)}
             />
           </Field>
-          <Field label={t('代码工作区（可选）', 'Code workspace (optional)')}>
-            <Input
-              value={workspace}
+          <Field label={t('新版本的代码', 'Code of the new version')}>
+            <Select
+              value={codeMode}
               disabled={busy || codeBusy}
-              onChange={(e) => setWorkspace(e.target.value)}
-            />
+              onChange={(e) => setCodeMode(e.target.value as typeof codeMode)}
+            >
+              <option value="inherit">{t('沿用父版本的代码', 'Keep the parent code')}</option>
+              <option value="branch">
+                {t('复制父版本的代码来修改', 'Copy the parent code to change it')}
+              </option>
+              <option value="existing">
+                {t('使用已有的代码工作区', 'Use an existing code workspace')}
+              </option>
+            </Select>
           </Field>
+          <p className="muted">
+            {codeMode === 'inherit'
+              ? t(
+                  '只改参数、物理开关、过程文件或 AI 网络时选这个；代码和父版本完全一样。',
+                  'For parameters, physics switches, process files or AI networks only; the code stays exactly the parent’s.',
+                )
+              : codeMode === 'branch'
+                ? t(
+                    '从父版本冻结时的代码复制一份，只属于这个新版本；之后可以改任意 Rust 或 Fortran 代码、替换或新增文件，不影响父版本和其他版本。',
+                    'Copies the code frozen with the parent into a workspace of this version alone; then change any Rust or Fortran code, replace or add files, without touching the parent or other versions.',
+                  )
+                : t(
+                    '用一个已经存在的代码工作区的当前代码。',
+                    'Uses the current code of an existing code workspace.',
+                  )}
+          </p>
+          {codeMode === 'existing' && (
+            <Field label={t('代码工作区', 'Code workspace')}>
+              <Input
+                value={workspace}
+                disabled={busy || codeBusy}
+                onChange={(e) => setWorkspace(e.target.value)}
+              />
+            </Field>
+          )}
           <p>
             {t('来源', 'Parent')}: {selected?.name} r{selected?.version.revision}
           </p>

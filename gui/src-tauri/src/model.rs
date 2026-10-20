@@ -369,12 +369,14 @@ pub async fn model_create(
     note: String,
     parent: VersionRef,
     workspace: Option<String>,
+    branch_code: Option<bool>,
 ) -> Result<ModelDraft, String> {
+    // branch_code：给新版本一份它自己的代码副本（从父版本冻结时的源码起步），之后可以改任意代码。
     decode(
         cli(vec![
             "model-create".into(),
             "--json".into(),
-            json!({"name":name,"note":note,"parent":parent,"workspace":workspace}).to_string(),
+            json!({"name":name,"note":note,"parent":parent,"workspace":workspace,"branch_code":branch_code.unwrap_or(false)}).to_string(),
         ])
         .await?,
     )

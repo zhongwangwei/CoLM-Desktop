@@ -237,3 +237,79 @@ fn concurrent_gate_updates_do_not_lose_each_other() {
     ws.update(|info| info.adopted.clear()).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_workspace_starts_from_a_frozen_plain_source_snapshot() {
+    let root = temp("snapshot-plain");
+    let snapshot = root.join("cache/source");
+    std::fs::create_dir_all(snapshot.join("vendor/CoLM202X/main")).unwrap();
+    std::fs::write(
+        snapshot.join("vendor/CoLM202X/main/MOD_A.F90"),
+        "MODULE MOD_A\nEND MODULE\n",
+    )
+    .unwrap();
+    // Ignored names in the snapshot still belong to it: the frozen identity covered them.
+    std::fs::write(snapshot.join(".gitignore"), "*.inc\n").unwrap();
+    std::fs::write(snapshot.join("vendor/CoLM202X/main/kept.inc"), "x\n").unwrap();
+    let ws =
+        Workspace::create_from_snapshot(&root.join("ws"), "ver-1", &snapshot, "official r95", None)
+            .unwrap();
+    assert_eq!(ws.info.origin, "official r95");
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    assert_eq!(
+        std::fs::read_to_string(ws.src().join("vendor/CoLM202X/main/MOD_A.F90")).unwrap(),
+        "MODULE MOD_A\nEND MODULE\n"
+    );
+    let tracked = git::run(&ws.src(), &["ls-files"]).unwrap();
+    assert!(tracked.contains("kept.inc"), "{tracked}");
+    assert_eq!(ws.info.branch, "ws/ver-1");
+}
+
+#[test]
+fn a_workspace_starts_from_the_frozen_commit_of_a_git_snapshot() {
+    let root = temp("snapshot-git");
+    let repo = root.join("frozen/src");
+    source_repo(&repo);
+    let frozen = git::head(&repo).unwrap();
+    std::fs::write(repo.join("later.txt"), "after freezing\n").unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "later"]).unwrap();
+    let ws =
+        Workspace::create_from_snapshot(&root.join("ws"), "ver-2", &repo, "demo r3", Some(&frozen))
+            .unwrap();
+    assert_eq!(ws.head().unwrap(), frozen);
+    assert!(!ws.src().join("later.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_snapshot_keeps_its_inner_links_but_refuses_links_that_leave_it() {
+    let root = temp("snapshot-link");
+    let snapshot = root.join("cache/source");
+    std::fs::create_dir_all(snapshot.join("include")).unwrap();
+    // Like vendor/CoLM202X/include/Makeoptions -> Makeoptions.github upstream.
+    std::fs::write(
+        snapshot.join("include/Makeoptions.github"),
+        "FC = gfortran\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("Makeoptions.github", snapshot.join("include/Makeoptions")).unwrap();
+    let ws =
+        Workspace::create_from_snapshot(&root.join("ws"), "ver-3", &snapshot, "x", None).unwrap();
+    let link = ws.src().join("include/Makeoptions");
+    assert!(std::fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), "FC = gfortran\n");
+    for (name, target) in [("abs", "/etc"), ("up", "../../outside")] {
+        let bad = root.join(format!("cache-{name}"));
+        std::fs::create_dir_all(&bad).unwrap();
+        std::os::unix::fs::symlink(target, bad.join("elsewhere")).unwrap();
+        let error = Workspace::create_from_snapshot(&root.join("ws"), "ver-4", &bad, "x", None)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("leaves it"), "{error}");
+        assert!(!root.join("ws/ver-4").exists());
+    }
+}
