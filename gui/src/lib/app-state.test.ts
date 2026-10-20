@@ -308,3 +308,17 @@ test('a refused or failed startup tidy is only logged, never shown to the user',
     console.warn = warn;
   }
 });
+
+test('the start cover shows from the first paint until the first load finishes', () => {
+  const state = readFileSync(new URL('./app-state.tsx', import.meta.url), 'utf8');
+  const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
+  const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  // The page itself carries a static cover, so there is no blank window before the scripts load.
+  assert.match(html, /<div id="root"><div class="start-cover"/);
+  // The app starts in the "starting" state and always leaves it: after the load, or at once
+  // without a backend (a plain browser).
+  assert.match(state, /busy: false,\n {2}starting: true,\n\};/);
+  assert.match(state, /update\(\{ busy: false, starting: false \}\)/);
+  assert.match(state, /if \(!hasBackend\(\)\) \{\n {6}update\(\{ starting: false \}\);/);
+  assert.match(app, /<StartCover \/>/);
+});

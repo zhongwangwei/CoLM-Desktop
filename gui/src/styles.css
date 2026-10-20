@@ -2645,3 +2645,39 @@ table input {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* 启动封面：index.html 的静态版与 StartCover.tsx 共用。 */
+.start-cover {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--background);
+  color: var(--foreground);
+}
+.start-cover-panel {
+  width: min(360px, 90vw);
+  padding: 24px;
+  text-align: center;
+}
+.start-cover-logo {
+  display: block;
+  width: min(240px, 70vw);
+  height: auto;
+  margin: 0 auto 20px;
+}
+.start-cover-panel h1 {
+  margin: 0;
+  font-size: 26px;
+}
+.start-cover-version {
+  margin: 3px 0 18px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.start-cover-status {
+  margin: 0;
+  color: var(--muted);
+}

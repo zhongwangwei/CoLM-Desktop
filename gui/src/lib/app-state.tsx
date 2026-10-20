@@ -53,6 +53,7 @@ const initial: AppState = {
   running: {},
   notices: [],
   busy: false,
+  starting: true,
 };
 type AppContextValue = {
   state: AppState;
@@ -290,6 +291,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ),
     );
     if (!hasBackend()) {
+      update({ starting: false });
       notify(
         bilingual(
           '请使用桌面软件执行模型操作；浏览器仅能查看界面。',
@@ -341,7 +343,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (error) {
         if (alive) notify(String(error));
       } finally {
-        if (alive) update({ busy: false });
+        if (alive) update({ busy: false, starting: false });
       }
     }
     void boot();

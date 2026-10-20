@@ -166,6 +166,8 @@ export type Route =
   | 'settings'
   | 'help';
 export type AppState = {
+  /** True until the first backend/kernel/version load has finished; the cover shows meanwhile. */
+  starting?: boolean;
   route: Route;
   caseTab: 'settings' | 'runs' | 'results';
   selectedCase: OpenedCase | null;

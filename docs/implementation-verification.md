@@ -34392,3 +34392,15 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 改 `server resource choices inherit configured defaults…`：Rust 下没有 CPU 框。
       - 改 `the CPU and thread boxes can be emptied…`：换成 Fortran 引擎。
       - 前端 738 条通过，tsc、eslint、prettier、check-gui、构建通过。
+
+## 第 718 轮：恢复启动封面（2026-10-20）
+
+用户问：早期启动时会先显示一个封面，现在没有了。
+
+- **原因**：旧界面（`gui/dist`）的 `index.html` 有 `loadinggate`——logo、名称、版本号和"Loading…"，一直显示到后端与内核就绪。0.3.0-beta.4 重建成 React 时（见 `docs/ui-rebuild-plan.md` 的"没有启动页"），`gui/index.html` 只剩一个空的 `<div id="root">`，启动期间是一片白。
+- **改动**：
+  - `gui/index.html`：`#root` 里放一个静态封面（logo、名称、"Loading…"），脚本没加载完时就能看见；React 挂载时它被替换。
+  - `StartCover.tsx`：挂载后接着显示同一个封面，带版本号；`AppState.starting`（可选字段）在首次加载（后端就绪、内核、版本）结束时变为 false，无后端（浏览器直接打开）时立刻变 false；20 秒还没好也放手，免得后端卡住时界面永远被挡着。
+  - `styles.css`：`.start-cover*`，用现有的 `--background`/`--foreground`/`--muted`，深浅色主题都跟着走。
+- **验证**：前端 739 条通过（新增 `the start cover shows from the first paint until the first load finishes`），tsc、eslint、`format:check`、`check-gui`、`vite build` 通过；把静态版单独渲染后截图，logo、名称、"Loading…" 居中显示。
+- **没做**：没有量测封面实际停留多久（桌面窗口里后端就绪通常很快，封面可能只一闪而过）；Tauri 窗口本身的原生启动背景没有改。
