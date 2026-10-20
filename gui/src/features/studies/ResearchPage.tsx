@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type uPlot from 'uplot';
 import { ScienceChart } from '../results/ResultsPage';
 import { invoke, invokeJson } from '../../lib/ipc';
@@ -23,10 +23,12 @@ import {
   type RemoteStudyRecord,
   type RemoteStudyReply,
 } from './remote-study';
-import type { VersionRef } from '../../lib/types';
+import type { ModelDraft, VersionRef } from '../../lib/types';
+import StudyImportDialog, { type StudyPreview } from '../versions/StudyImportDialog';
 import { REMOTE_CHECK_MS } from '../runs/run-model';
 import LiveServerLoad from '../runs/LiveServerLoad';
 import { researchMethods, methodFromStudy, completedCandidates } from './research-home';
+import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
 type Envelope = {
   state?: {
@@ -196,6 +198,16 @@ export default function ResearchPage() {
   const [ridge, setRidge] = useState('0.001');
   const [epochs, setEpochs] = useState('200');
   const [trainNetwork, setTrainNetwork] = useState(false);
+  // 研究工作台分四步走（2026-10-21 用户反映原来一页铺开所有字段"乱七八糟"）：
+  // 1 选算例与运行位置，2 选参数（AI：网络设计），3 目标与预算，4 运行与结果。
+  const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
+  const loadedFor = useRef('');
+  // 从"新建修改版"进来的（返回时回那里）；从草稿进来的看 state.researchTarget；都不是就是侧栏的研究首页。
+  const [fromHub, setFromHub] = useState(false);
+  // 研究结果正要写进的草稿与研究成员的参数（勾选对话框）；created 表示草稿是为这次写入新建的。
+  const [writing, setWriting] = useState<
+    (StudyPreview & { draft: ModelDraft; created: boolean }) | null
+  >(null);
   const epoch = useRef(0),
     lock = useRef(false),
     runLock = useRef(false),
@@ -763,6 +775,102 @@ export default function ResearchPage() {
       if (current()) notify(`${version.version.id}@${version.version.revision}`);
       return version;
     });
+  // 研究结果进模型版本和手动改参数走同一条路：先写进草稿，到版本页审阅、冻结。从草稿进来的写回那个草稿，
+  // 否则以研究所用的版本为父版本新建一个。原来要么直接冻结成版本（跳过审阅和冻结检查），要么回版本页
+  // 再手动找研究目录导入（2026-10-21 用户要求把研究理进"构建新版本"）。
+  const writeBack = () =>
+    task(async (current) => {
+      const target = state.researchTarget;
+      if (!studyDir) throw new Error('Open a finished study first');
+      // 新草稿的父版本只能是研究真正用的版本；没记下来就不猜（当前选的版本未必是它）。
+      if (!target && !modelUsed)
+        throw new Error(
+          tr(
+            '这个研究没有记下所用的模型版本，不能据此新建版本；可以在某个草稿的"研究"页签里打开研究，再写回那个草稿。',
+            "This study did not record its model version, so no new version can be based on it; open it from a draft's Research tab and write back into that draft.",
+          ),
+        );
+      let draft: ModelDraft;
+      let created = false;
+      if (target) {
+        try {
+          draft = await invokeJson<ModelDraft>('model_draft', { id: target.draftId });
+        } catch {
+          update({ researchTarget: null });
+          throw new Error(
+            tr(
+              `草稿"${target.name}"已经不在了（可能已冻结或删除）；再点一次会新建一个草稿。`,
+              `Draft "${target.name}" no longer exists (frozen or deleted); click again to create a new draft.`,
+            ),
+          );
+        }
+      } else {
+        draft = await invokeJson<ModelDraft>('model_create', {
+          name: `${en ? methodTitle.en : methodTitle.zh} ${envelope?.manifest?.id ?? ''}`.trim(),
+          note: `${tr('研究结果', 'Study results')}: ${studyDir}`,
+          parent: modelUsed!,
+          workspace: null,
+          branchCode: false,
+        });
+        created = true;
+      }
+      try {
+        const preview = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
+          id: draft.id,
+          studyDir,
+          member: member || null,
+          expectedGeneration: draft.generation,
+          preview: true,
+          only: null,
+        });
+        if (!current()) throw new Error('Context changed');
+        setWriting({ ...preview, study: studyDir, draft, created });
+        return preview;
+      } catch (e) {
+        if (created)
+          await invokeJson('model_delete_draft', { id: draft.id, deleteWorkspace: false }).catch(
+            () => {},
+          );
+        throw e;
+      }
+    });
+  function cancelWriteBack() {
+    const w = writing;
+    setWriting(null);
+    // 为这次写入新建的草稿还什么都没写，取消就删掉，不留空草稿。
+    if (w?.created)
+      void invokeJson('model_delete_draft', { id: w.draft.id, deleteWorkspace: false }).catch(
+        () => {},
+      );
+  }
+  const confirmWriteBack = async (chosen: [string, string | null, number | null][]) => {
+    const w = writing;
+    if (!w) return null;
+    const result = await task(() =>
+      invokeJson<{ draft: ModelDraft; member: string; parameters: number }>('model_import_study', {
+        id: w.draft.id,
+        studyDir: w.study,
+        member: w.member,
+        expectedGeneration: w.draft.generation,
+        preview: null,
+        only: chosen,
+      }),
+    );
+    setWriting(null);
+    notify(
+      tr(
+        `已把研究成员 ${result.member} 的 ${result.parameters} 个参数写进草稿"${w.draft.name}"，审阅后冻结成新版本。`,
+        `Wrote ${result.parameters} parameters of study member ${result.member} into draft "${w.draft.name}"; review it and freeze a new version.`,
+      ),
+    );
+    // 这个研究以后再写也进同一个草稿；导航放在 task 之外，task 持锁时导航守卫会拦下。
+    update({
+      researchTarget: { draftId: w.draft.id, name: w.draft.name },
+      openDraft: w.draft.id,
+    });
+    navigate('versions');
+    return result;
+  };
   const inspectHybrid = () =>
     task(async (current) => {
       const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
@@ -881,6 +989,29 @@ export default function ResearchPage() {
       }
     });
   const status = envelope?.state?.status || 'Draft';
+  // 打开的研究以它记下的版本为准（可能不是当前选给模拟用的那个）。
+  const versionLabel = (v: VersionRef) =>
+    `${state.versions.find((x) => x.version.id === v.id && x.version.revision === v.revision)?.name ?? v.id} r${v.revision}`;
+  const modelUsed = envelope?.model_version?.model_revision?.version;
+  // 研究状态的中文说法；后端的状态名原样留给助手和日志。
+  const statusText = (value: string) => {
+    const key = value.replace(/_/g, '').toLowerCase();
+    const names: Record<string, [string, string]> = {
+      draft: ['还没创建', 'Not created'],
+      ready: ['已创建，等待运行', 'Created, waiting to run'],
+      running: ['运行中', 'Running'],
+      paused: ['已暂停', 'Paused'],
+      completed: ['已完成', 'Completed'],
+      completedwithfailures: ['已完成，有失败的成员', 'Completed with failures'],
+      needsreview: ['待复核', 'Needs review'],
+      failed: ['失败', 'Failed'],
+      cancelled: ['已取消', 'Cancelled'],
+      canceled: ['已取消', 'Cancelled'],
+      submitted: ['已提交服务器', 'Submitted'],
+    };
+    const hit = names[key];
+    return hit ? tr(hit[0], hit[1]) : value;
+  };
   const permissions = studyPermissions(launching && status === 'Ready' ? 'Running' : status);
   let budgetText: string;
   try {
@@ -941,6 +1072,7 @@ export default function ResearchPage() {
     if (value !== tab) {
       epoch.current++;
       setTab(value);
+      setStep(1);
       setResult('');
       setFit(null);
       if (value === 'process') chooseSlot('soil_stress');
@@ -948,11 +1080,12 @@ export default function ResearchPage() {
     }
     setWorkbench(true);
   }
-  // 从"新建修改版"点进来：直接打开那个方法，不再停在研究首页。
+  // 从"新建修改版"或草稿的研究页签点进来：直接打开那个方法，不再停在研究首页。
   useEffect(() => {
     const method = state.researchMethod;
     if (!method) return;
     update({ researchMethod: null });
+    setFromHub(!state.researchTarget);
     try {
       chooseMethod(method);
     } catch (e) {
@@ -960,12 +1093,23 @@ export default function ResearchPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchMethod]);
-  // 研究没有自己的首页了：方法从"新建修改版"里选，返回也回到那里（2026-10-21 用户要求）。
+  // 返回到进来的地方：草稿、"新建修改版"或侧栏的研究首页（侧栏的研究 2026-10-21 先保留）。
   function showHome() {
     if (lock.current || runLock.current) throw new Error('A study operation is in progress');
-    update({ versionsView: 'create' });
-    if (!navigate('versions')) setWorkbench(false);
+    const target = state.researchTarget;
+    // 没用上的参数种子不留到下一次研究。
+    update({ researchSeed: null });
+    if (target) {
+      update({ openDraft: target.draftId });
+      if (navigate('versions')) return;
+      update({ openDraft: null });
+    } else if (fromHub) {
+      update({ versionsView: 'create' });
+      if (navigate('versions')) return;
+    }
+    setWorkbench(false);
   }
+
   const field = (
     id: string,
     label: string,
@@ -1021,10 +1165,12 @@ export default function ResearchPage() {
         `research-case-${c.dir}`,
         c.dir,
         String(sites.includes(c.dir)),
-        (v) =>
+        (v) => {
+          sitesTouched.current = true;
           setSites((old) =>
             v === 'true' ? [...new Set([...old, c.dir])] : old.filter((d) => d !== c.dir),
-          ),
+          );
+        },
         'switch',
       ),
     ),
@@ -1360,8 +1506,20 @@ export default function ResearchPage() {
       !!studyDir && !!resultPath && !unresolvedRemote,
     ),
     action(
+      'study-write-version',
+      state.researchTarget
+        ? tr(
+            `写回草稿"${state.researchTarget.name}"…`,
+            `Write back to "${state.researchTarget.name}"…`,
+          )
+        : tr('写入新版本…', 'Write into a new version…'),
+      writeBack,
+      permissions.results && (!!state.researchTarget || !!modelUsed) && !unresolvedRemote,
+      true,
+    ),
+    action(
       'study-save-version',
-      tr('保存为新模型版本', 'Save as new model version'),
+      tr('不经草稿，直接保存为版本', 'Save as a version without a draft'),
       saveVersion,
       permissions.results && !!member && !!name && !unresolvedRemote,
       true,
@@ -1425,7 +1583,6 @@ export default function ResearchPage() {
     envelope?.manifest?.spec && typeof envelope.manifest.spec === 'object'
       ? (envelope.manifest.spec as Record<string, unknown>)
       : null;
-  const modelUsed = envelope?.model_version?.model_revision?.version;
   const remoteIdentity =
     envelope?.remote ?? envelope?.remote_pending ?? remoteReply?.record ?? remoteReply;
   const remoteStatus = remotePermissions.fetched
@@ -1476,7 +1633,11 @@ export default function ResearchPage() {
   ];
   const backAction = action(
     'research-home',
-    tr('← 新建修改版', '← New modified version'),
+    state.researchTarget
+      ? tr('← 回到草稿', '← Back to the draft')
+      : fromHub
+        ? tr('← 新建修改版', '← New modified version')
+        : tr('← 研究首页', '← Research home'),
     showHome,
     !launching,
   );
@@ -1486,6 +1647,35 @@ export default function ResearchPage() {
   const currentState = remotePermissions.exists ? remoteStatus : status;
   const methodTitle = researchMethods.find((item) => item.id === tab)!;
   const currentMethod = researchMethods.find((item) => item.id === methodFromStudy(frozenSpec))!;
+  // 编译配置：没选时挑一个单点内核（优先 default）；界面上只显示配置名，不显示目录。
+  useEffect(() => {
+    if (kernel || !state.kernels.length) return;
+    const pick =
+      state.kernels.find((k) => k.preset === 'default') ??
+      state.kernels.find((k) => k.macros.includes('SinglePoint')) ??
+      state.kernels[0];
+    if (pick) setKernel(pick.dir);
+  }, [state.kernels, kernel]);
+  // 项目里只有一个单点算例时直接勾上（没有别的可选）。换版本会清空所选算例，所以不是只勾一次；
+  // 用户自己动过勾选就不再替他勾。
+  const sitesTouched = useRef(false);
+  useEffect(() => {
+    if (sitesTouched.current || sites.length) return;
+    const single = state.cases.filter((c) => !c.spatial);
+    if (single.length === 1) setSites([single[0]!.dir]);
+  }, [state.cases, sites]);
+  // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）；同一组算例只读一次。
+  useEffect(() => {
+    const key = `${kernel}|${sites.join('|')}`;
+    if (step !== 2 || !kernel || !sites.length || busy || loadedFor.current === key) return;
+    loadedFor.current = key;
+    execute(loadContexts);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, kernel, sites, busy]);
+  // 建好或打开了一个研究：直接看运行与结果。
+  useEffect(() => {
+    if (studyDir) setStep(4);
+  }, [studyDir]);
   usePageContract(
     workbench
       ? {
@@ -1540,57 +1730,6 @@ export default function ResearchPage() {
         },
   );
 
-  function renderFields(fields: UiField[]) {
-    return fields.map((f) => (
-      <Field key={f.id} label={f.label}>
-        {f.type === 'choice' ? (
-          <Select
-            id={f.id}
-            value={String(f.value)}
-            disabled={f.disabled}
-            onChange={(e) => f.set(e.target.value)}
-          >
-            {f.options?.map((o) => (
-              <option key={o.value} value={o.value}>
-                {o.label}
-              </option>
-            ))}
-          </Select>
-        ) : f.type === 'switch' ? (
-          <input
-            id={f.id}
-            type="checkbox"
-            checked={f.value === 'true'}
-            disabled={f.disabled}
-            onChange={(e) => f.set(String(e.target.checked))}
-          />
-        ) : f.id === 'research-observations' ? (
-          <textarea
-            id={f.id}
-            rows={3}
-            className="w-full"
-            value={String(f.value)}
-            disabled={f.disabled}
-            onChange={(e) => f.set(e.target.value)}
-          />
-        ) : (
-          <Input
-            id={f.id}
-            type={
-              f.id.includes('-from') || f.id.includes('-to')
-                ? 'datetime-local'
-                : f.type === 'number'
-                  ? 'number'
-                  : 'text'
-            }
-            value={String(f.value)}
-            disabled={f.disabled}
-            onChange={(e) => f.set(e.target.value)}
-          />
-        )}
-      </Field>
-    ));
-  }
   const renderActions = (actions: UiAction[]) =>
     actions.map((a) => (
       <Button
@@ -1617,8 +1756,8 @@ export default function ResearchPage() {
             <h1>{tr('研究与模型改进', 'Research and model improvement')}</h1>
             <p>
               {tr(
-                '先明确研究目标，再选择方法。',
-                'Start with a research question, then choose a method.',
+                '先明确研究目标，再选择方法。研究跑完可以把结果写进一个新的模型版本。',
+                'Start with a research question, then choose a method. Finished results can go into a new model version.',
               )}
             </p>
           </div>
@@ -1638,7 +1777,15 @@ export default function ResearchPage() {
               id={`research-method-${item.id}`}
               className="research-method"
               disabled={homeMethod.disabled}
-              onClick={() => execute(() => chooseMethod(item.id))}
+              onClick={() =>
+                execute(() => {
+                  // 研究首页新开的研究不写回之前的草稿。
+                  setFromHub(false);
+                  // 草稿页签带来的参数和要写回的草稿只属于从那里进来的那次研究。
+                  update({ researchTarget: null, researchSeed: null });
+                  chooseMethod(item.id);
+                })
+              }
             >
               <span className="research-method-icon">
                 <svg
@@ -1715,8 +1862,298 @@ export default function ResearchPage() {
         </section>
       </div>
     );
+  const kernelEntry = state.kernels.find((k) => k.dir === kernel);
+  const siteName = (path: string) =>
+    path
+      .replace(/[/\\]+$/, '')
+      .split(/[/\\]/)
+      .pop() || path;
+  // 观测文件仍按原来的"站点名 | 绝对路径"一行一个存（研究规格就这样读），界面上按站点逐个选。
+  const observationOf: Record<string, string> = Object.fromEntries(
+    observations
+      .split('\n')
+      .map((line) => line.split('|'))
+      .filter((parts) => parts.length >= 2 && parts[0]!.trim())
+      .map(([name, ...rest]) => [name!.trim(), rest.join('|').trim()]),
+  );
+  const setObservation = (site: string, path: string) => {
+    const next = { ...observationOf, [site]: path };
+    setObservations(
+      sites
+        .map(siteName)
+        .filter((name) => next[name])
+        .map((name) => `${name} | ${next[name]}`)
+        .join('\n'),
+    );
+  };
+  const pickObservation = (site: string) =>
+    execute(async () => {
+      const path = await invoke<string | null>('pick_file', { key: 'study-observation' });
+      if (path) setObservation(site, path);
+    });
+  const metricNames: Record<string, [string, string]> = {
+    nrmse: ['NRMSE 归一化均方根误差（越小越好）', 'NRMSE (lower is better)'],
+    mae: ['MAE 平均绝对误差（越小越好）', 'MAE (lower is better)'],
+    abs_bias: ['绝对偏差（越小越好）', 'Absolute bias (lower is better)'],
+    nse: ['NSE 效率系数（越大越好）', 'NSE (higher is better)'],
+    kge: ['KGE 效率系数（越大越好）', 'KGE (higher is better)'],
+    r2: ['R² 决定系数（越大越好）', 'R² (higher is better)'],
+    r: ['r 相关系数（越大越好）', 'Correlation r (higher is better)'],
+  };
+  const chosenCount = Object.values(parameters).filter((p) => p.enabled).length;
+  let budgetSummary: string;
+  let budgetOk = true;
+  try {
+    const b = candidateBudget(
+      tuning ? 'tuning' : 'uncertainty',
+      method,
+      chosenCount,
+      Number(count),
+      Number(population),
+      Number(generations),
+      sites.length,
+    );
+    budgetSummary = tr(
+      `${b.candidates} 组参数 + 1 组基准，${sites.length} 个站点，共 ${b.tasks} 次模拟`,
+      `${b.candidates} parameter sets + 1 baseline across ${sites.length} sites: ${b.tasks} simulations`,
+    );
+  } catch {
+    budgetOk = false;
+    budgetSummary = tuning
+      ? tr(
+          '种群至少 4、迭代至少 1 代，总数不超过 1000。',
+          'Population ≥ 4, generations ≥ 1, at most 1000 in total.',
+        )
+      : tr(
+          '样本数 1–1000；一次一个法需要先选参数。',
+          'Samples 1–1000; one-at-a-time needs parameters chosen first.',
+        );
+  }
+  const scopeText = (row: ParameterContext) => {
+    const s = row.scope_instance;
+    if (s.kind === 'land-cover-class') {
+      const table = s.scheme === 'USGS' ? USGS : IGBP;
+      const hit = table.find(([id]) => id === s.index);
+      return `${s.scheme ?? ''} ${s.index ?? ''} ${hit ? (en ? hit[2] : hit[1]) : ''}`.trim();
+    }
+    if (s.kind === 'pft-type' || s.kind === 'pc-pft-component') {
+      const hit = PFT.find(([id]) => id === s.index);
+      return `${s.kind === 'pc-pft-component' ? 'PC ' : 'PFT '}${s.index ?? ''} ${hit ? (en ? hit[2] : hit[1]) : (s.type_name ?? '')}`;
+    }
+    if (s.kind === 'soil-layer')
+      return tr(`第 ${s.index ?? ''} 层土壤`, `Soil layer ${s.index ?? ''}`);
+    return tr('全局参数', 'Global parameters');
+  };
+  const groupKey = (row: ParameterContext) =>
+    `${row.scope_instance.kind}|${row.scope_instance.scheme ?? ''}|${row.scope_instance.index ?? ''}`;
+  // 参数目录用 ±最小正规数表示"严格大于/小于 0"（照搬 Fortran 的 tiny），直接显示成 -2.2e-308 没人看得懂。
+  const bound = (value: number | undefined, inclusive: boolean | undefined, lower: boolean) => {
+    if (value == null) return '';
+    const zero = value !== 0 && Math.abs(value) < 1e-300;
+    const strict = zero || inclusive === false;
+    return `${lower ? (strict ? '>' : '≥') : strict ? '<' : '≤'} ${zero ? 0 : Number(value.toPrecision(6))}`;
+  };
+  const groupOrder = [
+    'case-scalar',
+    'land-cover-class',
+    'pft-type',
+    'pc-pft-component',
+    'soil-layer',
+  ];
+  const contextOrder = contexts
+    .map((row, i) => ({ row, i }))
+    .sort(
+      (a, b) =>
+        groupOrder.indexOf(a.row.scope_instance.kind) -
+          groupOrder.indexOf(b.row.scope_instance.kind) ||
+        (a.row.scope_instance.index ?? 0) - (b.row.scope_instance.index ?? 0),
+    );
+  const setParameter = (
+    i: number,
+    row: ParameterContext,
+    patch: Partial<{ enabled: boolean; min: string; max: string; scale: string }>,
+  ) =>
+    setParameters((old) => {
+      const p = old[String(i)] || {
+        enabled: false,
+        min: '',
+        max: '',
+        scale: row.scale || 'linear',
+      };
+      return { ...old, [String(i)]: { ...p, ...patch } };
+    });
+  const plannedTotal = (() => {
+    const b = frozenSpec?.budget as Record<string, unknown> | undefined;
+    if (!b) return null;
+    const c = Number(b.candidate_count);
+    if (c > 0) return c;
+    const p = Number(b.population),
+      g = Number(b.generations);
+    return p > 0 && g >= 0 ? p * (g + 1) : null;
+  })();
+  const ranked = Object.entries(envelope?.state?.candidates ?? {})
+    .sort(
+      ([, a], [, b]) =>
+        (a.calibration ?? Number.POSITIVE_INFINITY) - (b.calibration ?? Number.POSITIVE_INFINITY),
+    )
+    .slice(0, 200);
+  const best = envelope?.state?.best_member;
+  const controlIds = [
+    'study-run',
+    'study-pause',
+    'study-resume',
+    'study-retry',
+    'study-cancel',
+    'remote-study-status',
+    'remote-study-cancel',
+    'remote-study-fetch',
+  ];
+  const controls = lifecycleActions.filter((a) => controlIds.includes(a.id) && a.enabled);
+  const byId = (id: string) => lifecycleActions.find((a) => a.id === id);
+  const stepNames: [1 | 2 | 3 | 4, string][] = [
+    [1, tr('选算例', 'Cases')],
+    [2, ai ? tr('网络设计', 'Network') : tr('选参数', 'Parameters')],
+    [3, tr('目标与预算', 'Targets and budget')],
+    [4, tr('运行与结果', 'Run and results')],
+  ];
+  const canStep = (n: number) =>
+    n === 1 ||
+    (n === 2 && sites.length > 0 && !!kernel) ||
+    (n === 3 && sites.length > 0 && !!kernel && (ai || chosenCount > 0)) ||
+    (n === 4 && !!studyDir);
+  const parameterTable = (
+    <>
+      {state.researchSeed?.parameters.length && !contexts.length ? (
+        <Notice>
+          {tr(
+            `从版本页带来 ${state.researchSeed.parameters.length} 个参数，读出参数后会自动勾上。`,
+            `${state.researchSeed.parameters.length} parameters came from the version page and are ticked once loaded.`,
+          )}
+        </Notice>
+      ) : null}
+      {seedNotice && <Notice tone="success">{seedNotice}</Notice>}
+      {!contexts.length ? (
+        <p className="versions-empty">
+          {busy
+            ? tr('正在读取这些算例能研究的参数…', 'Reading the parameters these cases can study…')
+            : tr('还没读到参数。', 'No parameters loaded yet.')}{' '}
+          <button
+            type="button"
+            className="library-action"
+            disabled={!designActions[0]!.enabled}
+            onClick={() => execute(designActions[0]!.run)}
+          >
+            {tr('重新读取', 'Load again')}
+          </button>
+        </p>
+      ) : (
+        <div className="table-scroll">
+          <table className="versions-table study-parameters">
+            <thead>
+              <tr>
+                <th />
+                <th>{tr('参数', 'Parameter')}</th>
+                <th>{tr('默认', 'Default')}</th>
+                <th>{tr('下限', 'Min')}</th>
+                <th>{tr('上限', 'Max')}</th>
+                <th>{tr('尺度', 'Scale')}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {contextOrder.map(({ row, i }, n) => {
+                const label = en ? row.label_en : row.label_zh;
+                // 很多全局参数目录里还没有中文名，标签就是键名换成空格，这时只显示一次键名。
+                const unnamed = label.replace(/\s+/g, '_').toUpperCase() === row.name.toUpperCase();
+                const heading = n === 0 || groupKey(contextOrder[n - 1]!.row) !== groupKey(row);
+                const p = parameters[String(i)] || {
+                  enabled: false,
+                  min: '',
+                  max: '',
+                  scale: row.scale || 'linear',
+                };
+                return (
+                  <Fragment key={i}>
+                    {heading && (
+                      <tr className="study-group">
+                        <th colSpan={6}>{scopeText(row)}</th>
+                      </tr>
+                    )}
+                    <tr className={p.enabled ? 'is-on' : undefined}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={row.name}
+                          checked={p.enabled}
+                          disabled={busy || launching}
+                          onChange={(e) => setParameter(i, row, { enabled: e.target.checked })}
+                        />
+                      </td>
+                      <td>
+                        {unnamed ? (
+                          <code>{row.name}</code>
+                        ) : (
+                          <>
+                            <strong>{label}</strong>
+                            <code className="param-key">{row.name}</code>
+                          </>
+                        )}
+                      </td>
+                      <td className="muted">{Number(row.default.toPrecision(6))}</td>
+                      {(['min', 'max'] as const).map((key) => (
+                        <td key={key}>
+                          <Input
+                            className="param-input"
+                            type="number"
+                            value={p[key]}
+                            placeholder={
+                              key === 'min'
+                                ? bound(row.min, row.min_inclusive, true)
+                                : bound(row.max, row.max_inclusive, false)
+                            }
+                            disabled={!p.enabled || busy || launching}
+                            onChange={(e) => setParameter(i, row, { [key]: e.target.value })}
+                          />
+                        </td>
+                      ))}
+                      <td>
+                        <Select
+                          value={p.scale}
+                          disabled={!p.enabled || busy || launching}
+                          onChange={(e) => setParameter(i, row, { scale: e.target.value })}
+                        >
+                          <option value="linear">{tr('线性', 'Linear')}</option>
+                          <option value="log">{tr('对数', 'Log')}</option>
+                        </Select>
+                      </td>
+                    </tr>
+                  </Fragment>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className="muted study-hint">
+        {tr(`已选 ${chosenCount} 个参数。`, `${chosenCount} parameters chosen.`)}
+      </p>
+    </>
+  );
+  const footer = (back: boolean, next?: { label: string; enabled: boolean; to: 1 | 2 | 3 | 4 }) => (
+    <div className="study-footer">
+      {back && (
+        <Button variant="ghost" onClick={() => setStep((step - 1) as 1 | 2 | 3)}>
+          ← {tr('上一步', 'Back')}
+        </Button>
+      )}
+      {next && (
+        <Button variant="primary" disabled={!next.enabled} onClick={() => setStep(next.to)}>
+          {next.label} →
+        </Button>
+      )}
+    </div>
+  );
   return (
-    <div className="research-workbench space-y-5">
+    <div className="research-workbench study-workbench">
       {state.simulationReturn && (
         <div className="button-row">
           <Button onClick={returnToSimulation}>
@@ -1729,278 +2166,882 @@ export default function ResearchPage() {
           <h1>{en ? methodTitle.en : methodTitle.zh}</h1>
           <p>{en ? methodTitle.descriptionEn : methodTitle.descriptionZh}</p>
         </div>
-        {renderActions([backAction])}
+        <div className="study-heading-actions">
+          {renderActions([lifecycleActions[0]!])}
+          {renderActions([backAction])}
+        </div>
       </header>
-      <Card
-        title={tr('研究工作台', 'Research workbench')}
-        description={tr(
-          '率定、敏感性与 AI 训练均使用内置后端；每个产物保留研究范围。',
-          'Calibration, sensitivity and AI training use the built-in backend with explicit applicability.',
-        )}
-      >
-        <div className="grid gap-3 md:grid-cols-2">{renderFields(baseFields)}</div>
-        <div className="actions">{renderActions([resourcesAction])}</div>
-        {host && servers.includes(host) && (
-          <LiveServerLoad host={host} partition={serverPartitions.current[host]} en={en} />
-        )}
-        {host && (
-          <Notice>
+      <p className="study-context">
+        {state.researchTarget ? (
+          <>
             {tr(
-              '服务器认证、资源配额与数据路径映射沿用计算资源页面的配置。研究提交后独立运行，按真实状态监控；结束后取回并校验结果。',
-              'Server authentication, quotas and input mappings use the compute resources settings. Submitted studies run independently; monitor their actual state, then fetch verified results.',
-            )}
-          </Notice>
+              `正在构建草稿"${state.researchTarget.name}"：研究用它冻结的修订运行，跑完把结果写回这个草稿，在版本页审阅后冻结。`,
+              `Building draft "${state.researchTarget.name}": the study runs on its frozen revision and the results go back into the draft, which you review and freeze on the versions page.`,
+            )}{' '}
+            <button
+              type="button"
+              className="library-action"
+              disabled={busy || launching}
+              onClick={() => update({ researchTarget: null })}
+            >
+              {tr('改为另建新版本', 'Use a new version instead')}
+            </button>
+          </>
+        ) : studyDir && envelope && !modelUsed ? (
+          tr('这个研究没有记下所用的模型版本。', 'This study did not record its model version.')
+        ) : (
+          tr(
+            `研究用的模型版本：${versionLabel(modelUsed ?? state.versionRef)}。跑完可以把结果写进以它为基础的新版本草稿，审阅后冻结。`,
+            `Model version for the study: ${versionLabel(modelUsed ?? state.versionRef)}. Finished results can go into a new version draft based on it, which you review and freeze.`,
+          )
         )}
-      </Card>
+      </p>
+      <ol className="study-steps">
+        {stepNames.map(([n, label]) => (
+          <li key={n} className={n === step ? 'is-current' : n < step ? 'is-done' : undefined}>
+            <button type="button" disabled={!canStep(n)} onClick={() => setStep(n)}>
+              <span className="study-step-number">{n < step ? '✓' : n}</span>
+              {label}
+            </button>
+          </li>
+        ))}
+      </ol>
       {error && <Notice tone="error">{error}</Notice>}
-      {ai && (
-        <Card title={tr('AI 网络设计', 'AI network design')}>
-          <Notice>
-            {tr(
-              'AI 网络仅支持 Rust。过程 β 不适用于 PC 或已启用植物水力的配置；预检以实际算例为准。',
-              'AI networks require Rust. Soil-stress β requires compatible land cover and disabled plant hydraulics; preflight checks the actual cases.',
+
+      {step === 1 && (
+        <Card
+          title={tr('选算例与运行位置', 'Cases and where to run')}
+          description={tr(
+            '研究在这些算例上反复运行模型。目前只支持单点算例；选多个站点时参数在所有站点共用。',
+            'The study runs the model repeatedly on these cases. Only single-point cases are supported for now; with several sites the parameters are shared.',
+          )}
+        >
+          {state.cases.length === 0 ? (
+            <p className="versions-empty">
+              {tr(
+                '当前项目里还没有算例。先在"项目"里打开项目或新建模拟。',
+                'The current project has no cases yet. Open a project or create a simulation first.',
+              )}
+            </p>
+          ) : (
+            <div className="study-cases">
+              {state.cases.map((c) => {
+                const on = sites.includes(c.dir);
+                return (
+                  <label
+                    key={c.dir}
+                    className={`study-case${on ? ' is-on' : ''}${c.spatial ? ' is-off' : ''}`}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={on}
+                      disabled={c.spatial || busy || launching}
+                      onChange={(e) => {
+                        sitesTouched.current = true;
+                        setSites((old) =>
+                          e.target.checked
+                            ? [...new Set([...old, c.dir])]
+                            : old.filter((d) => d !== c.dir),
+                        );
+                      }}
+                    />
+                    <span>
+                      <strong>{c.name}</strong>
+                      <small>
+                        {c.spatial
+                          ? tr('格点算例，研究暂不支持', 'Gridded case, not supported yet')
+                          : c.run_host
+                            ? tr(
+                                `单点 · 服务器 ${c.run_host}`,
+                                `Single point · server ${c.run_host}`,
+                              )
+                            : tr('单点', 'Single point')}
+                      </small>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <div className="study-grid">
+            <Field label={tr('在哪里运行', 'Run on')}>
+              <Select
+                value={host}
+                disabled={busy || launching || remotePermissions.exists}
+                onChange={(e) => setHost(e.target.value)}
+              >
+                <option value="">{tr('本机', 'This computer')}</option>
+                {knownHosts.map((value) => (
+                  <option key={value} value={value}>
+                    {tr(`服务器 ${value}`, `Server ${value}`)}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {!ai && (
+              <Field label={tr('计算引擎', 'Engine')}>
+                <Select
+                  value={engine}
+                  disabled={busy || launching}
+                  onChange={(e) => setEngine(e.target.value)}
+                >
+                  <option value="rust">Rust</option>
+                  <option value="fortran">Fortran</option>
+                </Select>
+              </Field>
             )}
-          </Notice>
-          <div className="grid gap-3 md:grid-cols-2">{renderFields(networkFields)}</div>
-          <div className="flex flex-wrap gap-2">{renderActions(aiActions.slice(0, 3))}</div>
-          {hybridInfo && <pre className="overflow-auto">{JSON.stringify(hybridInfo, null, 2)}</pre>}
+            <Field label={tr('编译配置', 'Build configuration')}>
+              <Select
+                value={kernel}
+                disabled={busy || launching}
+                onChange={(e) => setKernel(e.target.value)}
+              >
+                <option value="">{tr('请选择', 'Choose one')}</option>
+                {state.kernels.map((k) => (
+                  <option key={k.dir} value={k.dir}>
+                    {k.preset}
+                    {k.macros.includes('SinglePoint') ? '' : tr('（区域）', ' (regional)')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          {kernelEntry && (
+            <p className="muted study-hint">
+              {kernelEntry.macros.join(' · ')} · {kernelEntry.platform}
+            </p>
+          )}
+          {host && servers.includes(host) && (
+            <LiveServerLoad host={host} partition={serverPartitions.current[host]} en={en} />
+          )}
+          {host && (
+            <p className="muted study-hint">
+              {tr(
+                '服务器的登录、资源和数据路径用"计算资源"里的设置；提交后研究在服务器上独立运行，跑完取回结果。',
+                'Server login, resources and data paths come from Compute resources; a submitted study runs on the server by itself and its results are fetched when done.',
+              )}{' '}
+              <button
+                type="button"
+                className="library-action"
+                onClick={() => navigate('resources')}
+              >
+                {tr('计算资源 →', 'Compute resources →')}
+              </button>
+            </p>
+          )}
+          {footer(false, {
+            label: ai
+              ? tr('下一步：网络设计', 'Next: network')
+              : tr('下一步：选参数', 'Next: parameters'),
+            enabled: canStep(2),
+            to: 2,
+          })}
         </Card>
       )}
-      <Card title={tr('参数范围与研究设计', 'Parameter ranges and study design')}>
-        <div className="flex gap-2">{renderActions(designActions.slice(0, 1))}</div>
-        {state.researchSeed?.parameters.length && !contexts.length ? (
-          <Notice>
-            {tr(
-              `从版本页带来 ${state.researchSeed.parameters.length} 个要研究的参数：选好算例和编译配置、读取参数后会自动勾上。`,
-              `${state.researchSeed.parameters.length} parameters came from the version page; they are ticked once cases and a build configuration are chosen and parameters are loaded.`,
-            )}
-          </Notice>
-        ) : null}
-        {seedNotice && <Notice tone="success">{seedNotice}</Notice>}
-        {!contexts.length && (
-          <p>
-            {tr(
-              '选择编译配置后读取共同适用参数；不默认猜测采样上下界。',
-              'Load parameters applicable to the selected cases. Sampling bounds must be entered explicitly.',
-            )}
-          </p>
-        )}
-        <div className="grid gap-3 md:grid-cols-2">
-          {renderFields(parameterFields)}
-          {renderFields(designFields)}
-        </div>
-        <Notice>{budgetText}</Notice>
-        <p>
-          {tr(
-            '校准与验证时段不重叠；时间按 UTC。研究包含真实基准任务，仅在明确启动后运行。',
-            'Training and validation windows are disjoint UTC intervals. Baseline tasks run only when you explicitly start the study.',
+
+      {step === 2 && ai && (
+        <Card
+          title={tr('网络设计', 'Network design')}
+          description={tr(
+            'AI 网络根据站点特征给出参数（或替换一个过程），只支持 Rust 引擎。土壤水分胁迫 β 不适用于 PC 或开了植物水力的配置。',
+            'The network turns site features into a parameter (or replaces a process); Rust engine only. Soil-stress β does not apply with PC or plant hydraulics.',
           )}
-        </p>
-        <div className="flex gap-2">{renderActions(designActions.slice(1))}</div>
-        {preflight && <pre className="overflow-auto">{preflight}</pre>}
-      </Card>
-      <Card title={tr('研究任务与产物', 'Study lifecycle and products')}>
-        <div className="grid gap-3 md:grid-cols-2">{renderFields(lifecycleFields)}</div>
-        {frozenSpec && (
-          <Notice>
-            <p>
-              {tr(
-                '已冻结研究：运行使用以下设定与模型修订；修改上方设计后需创建新研究。',
-                'Frozen study: execution uses this design and model revision. Create a new study to apply edits above.',
-              )}{' '}
-              {modelUsed
-                ? `${modelUsed.id}@${modelUsed.revision}`
-                : tr(
-                    '冻结修订身份未知；请查看原版本出处。',
-                    'Frozen revision unknown; inspect the recorded source version.',
+        >
+          <div className="study-grid">
+            <Field label={tr('网络作用在', 'Applies to')}>
+              <Select value={slot} onChange={(e) => chooseSlot(e.target.value)}>
+                {(tab === 'process' ? ['soil_stress'] : ['pft', 'land_class']).map((v) => (
+                  <option key={v} value={v}>
+                    {v === 'pft'
+                      ? tr('每个植物功能型', 'Each plant functional type')
+                      : v === 'land_class'
+                        ? tr('每个地类', 'Each land class')
+                        : tr('土壤水分胁迫 β', 'Soil-water stress β')}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label={tr('输入特征（逗号分隔）', 'Input features (comma separated)')}>
+              <Input value={features} onChange={(e) => setFeatures(e.target.value)} />
+            </Field>
+            <Field label={tr('输出参数', 'Output parameter')}>
+              <Input value={output} onChange={(e) => setOutput(e.target.value)} />
+            </Field>
+            <Field label={tr('网络结构', 'Network')}>
+              <Select value={hidden} onChange={(e) => setHidden(e.target.value)}>
+                <option value="linear">{tr('线性', 'Linear')}</option>
+                <option value="4">{tr('4 个隐藏单元', '4 hidden units')}</option>
+                <option value="8">{tr('8 个隐藏单元', '8 hidden units')}</option>
+              </Select>
+            </Field>
+            <Field label={tr('输出下限', 'Output minimum')}>
+              <Input type="number" value={lower} onChange={(e) => setLower(e.target.value)} />
+            </Field>
+            <Field label={tr('输出上限', 'Output maximum')}>
+              <Input type="number" value={upper} onChange={(e) => setUpper(e.target.value)} />
+            </Field>
+          </div>
+          <label className="param-check">
+            <input
+              type="checkbox"
+              checked={relative}
+              onChange={(e) => setRelative(e.target.checked)}
+            />
+            {tr(
+              '输出是对原参数值的倍数（相对值）',
+              'The output multiplies the original value (relative)',
+            )}
+          </label>
+          <div className="button-row">{renderActions(aiActions.slice(0, 3))}</div>
+          {hybridInfo && (
+            <Advanced title={tr('适用性检查结果', 'Applicability check')}>
+              <pre className="overflow-auto">{JSON.stringify(hybridInfo, null, 2)}</pre>
+            </Advanced>
+          )}
+          {result && (
+            <Advanced title={tr('检查与气候特征输出', 'Check and climate-feature output')}>
+              <pre className="overflow-auto">{result}</pre>
+            </Advanced>
+          )}
+          <h3 className="study-subhead">
+            {tr('同时率定的参数（可不选）', 'Parameters calibrated alongside (optional)')}
+          </h3>
+          {parameterTable}
+          {footer(true, {
+            label: tr('下一步：目标与预算', 'Next: targets and budget'),
+            enabled: canStep(3),
+            to: 3,
+          })}
+        </Card>
+      )}
+
+      {step === 2 && !ai && (
+        <Card
+          title={tr('选要研究的参数', 'Parameters to study')}
+          description={tr(
+            '下面是这些算例里能研究的参数。勾上要研究的，填取值范围；对数尺度适合跨好几个数量级的参数。',
+            'These parameters can be studied on the chosen cases. Tick the ones to study and give their ranges; a log scale suits parameters spanning orders of magnitude.',
+          )}
+        >
+          {parameterTable}
+          {footer(true, {
+            label: tr('下一步：目标与预算', 'Next: targets and budget'),
+            enabled: canStep(3),
+            to: 3,
+          })}
+        </Card>
+      )}
+
+      {step === 3 && (
+        <Card
+          title={
+            tuning
+              ? tr('目标与预算', 'Targets and budget')
+              : tr('输出与抽样', 'Outputs and sampling')
+          }
+          description={
+            tuning
+              ? tr(
+                  '率定按观测找参数：每个站点选一个观测文件，定好率定期（可再留一段验证期）和比较指标。',
+                  'Calibration fits parameters to observations: choose an observation file per site, a calibration period (optionally a validation period) and a metric.',
+                )
+              : tr(
+                  '不确定性分析在参数范围里抽样，看输出变化有多大。',
+                  'Uncertainty analysis samples the parameter ranges and shows how much the outputs vary.',
+                )
+          }
+        >
+          <Field
+            label={
+              tuning
+                ? tr(
+                    '目标变量（逗号分隔，如 Qle, Qh）',
+                    'Target variables (comma separated, e.g. Qle, Qh)',
+                  )
+                : tr('输出变量（逗号分隔）', 'Output variables (comma separated)')
+            }
+          >
+            <Input value={variables} onChange={(e) => setVariables(e.target.value)} />
+          </Field>
+          {tuning && (
+            <>
+              <h3 className="study-subhead">{tr('观测文件', 'Observation files')}</h3>
+              <div className="study-observations">
+                {sites.map((d) => {
+                  const name = siteName(d);
+                  return (
+                    <div key={d} className="study-observation">
+                      <strong>{name}</strong>
+                      <Input
+                        value={observationOf[name] ?? ''}
+                        placeholder={tr(
+                          '观测文件的绝对路径（*_Flux.nc）',
+                          'Absolute path of the observation file (*_Flux.nc)',
+                        )}
+                        onChange={(e) => setObservation(name, e.target.value)}
+                      />
+                      <Button onClick={() => pickObservation(name)}>
+                        {tr('选择…', 'Choose…')}
+                      </Button>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="study-grid">
+                <Field label={tr('率定期开始（UTC）', 'Calibration start (UTC)')}>
+                  <Input
+                    type="datetime-local"
+                    value={from}
+                    onChange={(e) => setFrom(e.target.value)}
+                  />
+                </Field>
+                <Field label={tr('率定期结束（UTC）', 'Calibration end (UTC)')}>
+                  <Input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
+                </Field>
+                <Field label={tr('验证期开始（可空）', 'Validation start (optional)')}>
+                  <Input
+                    type="datetime-local"
+                    value={valFrom}
+                    onChange={(e) => setValFrom(e.target.value)}
+                  />
+                </Field>
+                <Field label={tr('验证期结束（可空）', 'Validation end (optional)')}>
+                  <Input
+                    type="datetime-local"
+                    value={valTo}
+                    onChange={(e) => setValTo(e.target.value)}
+                  />
+                </Field>
+                <Field label={tr('比较指标', 'Metric')}>
+                  <Select value={metric} onChange={(e) => setMetric(e.target.value)}>
+                    {Object.entries(metricNames).map(([value, [zh, english]]) => (
+                      <option key={value} value={value}>
+                        {en ? english : zh}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label={tr('每个站点至少多少对观测', 'Minimum observation pairs per site')}>
+                  <Input
+                    type="number"
+                    value={minPairs}
+                    onChange={(e) => setMinPairs(e.target.value)}
+                  />
+                </Field>
+                <Field
+                  label={tr(
+                    '种群大小（每代多少组参数）',
+                    'Population (parameter sets per generation)',
                   )}
-            </p>
+                >
+                  <Input
+                    type="number"
+                    value={population}
+                    onChange={(e) => setPopulation(e.target.value)}
+                  />
+                </Field>
+                <Field label={tr('迭代代数', 'Generations')}>
+                  <Input
+                    type="number"
+                    value={generations}
+                    onChange={(e) => setGenerations(e.target.value)}
+                  />
+                </Field>
+              </div>
+              {ai && (
+                <label className="param-check">
+                  <input
+                    type="checkbox"
+                    checked={trainNetwork}
+                    onChange={(e) => setTrainNetwork(e.target.checked)}
+                  />
+                  {tr(
+                    '这次研究直接用差分进化训练网络（不选就只率定上一步的参数）',
+                    'Train the network with differential evolution in this study',
+                  )}
+                </label>
+              )}
+            </>
+          )}
+          {!tuning && (
+            <div className="study-grid">
+              <Field label={tr('抽样方法', 'Sampling')}>
+                <Select value={method} onChange={(e) => setMethod(e.target.value)}>
+                  <option value="lhs">
+                    {tr('拉丁超立方（整体不确定性）', 'Latin hypercube (overall uncertainty)')}
+                  </option>
+                  <option value="oat">
+                    {tr('一次改一个（逐个看敏感性）', 'One at a time (per-parameter sensitivity)')}
+                  </option>
+                </Select>
+              </Field>
+              {method === 'lhs' && (
+                <Field label={tr('样本数', 'Samples')}>
+                  <Input type="number" value={count} onChange={(e) => setCount(e.target.value)} />
+                </Field>
+              )}
+            </div>
+          )}
+          <Advanced title={tr('更多设置', 'More settings')}>
+            <div className="study-grid">
+              <Field label={tr('同时运行几个模拟（1–16）', 'Simulations at a time (1–16)')}>
+                <Input type="number" value={jobs} onChange={(e) => setJobs(e.target.value)} />
+              </Field>
+              <Field label={tr('随机种子', 'Random seed')}>
+                <Input type="number" value={seed} onChange={(e) => setSeed(e.target.value)} />
+              </Field>
+              {host && (
+                <Field label={tr('服务器前处理引擎', 'Server preprocessors')}>
+                  <Select value={preprocessors} onChange={(e) => setPreprocessors(e.target.value)}>
+                    <option value="rust">Rust</option>
+                    <option value="fortran">Fortran</option>
+                  </Select>
+                </Field>
+              )}
+            </div>
+          </Advanced>
+          <div className={`study-budget${budgetOk ? '' : ' is-bad'}`}>
+            <span>{tr('预算', 'Budget')}</span>
+            <strong>{budgetSummary}</strong>
+          </div>
+          <label className="param-check study-confirm">
+            <input
+              type="checkbox"
+              checked={confirmed}
+              disabled={busy || launching}
+              onChange={(e) => setConfirmed(e.target.checked)}
+            />
+            {tr(
+              '我已核对参数范围、预算和适用范围（研究会真的运行这么多次模拟）',
+              'I reviewed the ranges, budget and applicability (the study really runs this many simulations)',
+            )}
+          </label>
+          {preflight && (
+            <>
+              <Notice tone="success">
+                {tr(
+                  '预检通过：算例、参数范围和观测都能用，可以创建研究。',
+                  'Preflight passed: the cases, ranges and observations are usable; the study can be created.',
+                )}
+              </Notice>
+              <Advanced title={tr('预检详情', 'Preflight details')}>
+                <pre className="overflow-auto">{preflight}</pre>
+              </Advanced>
+            </>
+          )}
+          <div className="study-footer">
+            <Button variant="ghost" onClick={() => setStep(2)}>
+              ← {tr('上一步', 'Back')}
+            </Button>
+            <Button
+              disabled={!designActions[1]!.enabled}
+              onClick={() => execute(designActions[1]!.run)}
+            >
+              {tr('预检', 'Preflight')}
+            </Button>
+            <Button
+              variant="primary"
+              disabled={!designActions[2]!.enabled}
+              onClick={() => execute(designActions[2]!.run)}
+            >
+              {tr('创建研究 →', 'Create study →')}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {step === 4 && (
+        <>
+          <Card className="study-status-card">
+            <div className="study-status-head">
+              <div>
+                <h2>
+                  {studyDir
+                    ? envelope?.manifest?.id || siteName(studyDir)
+                    : tr('还没有研究', 'No study yet')}
+                </h2>
+                <p className="muted">
+                  {modelUsed
+                    ? tr(`模型版本 ${versionLabel(modelUsed)}`, `Model ${versionLabel(modelUsed)}`)
+                    : ''}
+                  {remoteIdentity?.host || host
+                    ? ` · ${tr('服务器', 'server')} ${remoteIdentity?.host || host}`
+                    : ` · ${tr('本机', 'this computer')}`}
+                </p>
+              </div>
+              <span
+                className={`badge study-state is-${(remotePermissions.exists ? remoteStatus : status).toLowerCase()}`}
+              >
+                {statusText(remotePermissions.exists ? remoteStatus : status)}
+                {launching ? tr(' · 正在执行', ' · working') : ''}
+              </span>
+            </div>
+            {(() => {
+              const done = completed ?? 0;
+              const pct = plannedTotal
+                ? Math.min(100, Math.round((done / plannedTotal) * 100))
+                : null;
+              return (
+                <div className="study-progress">
+                  <div className="study-progress-bar">
+                    <span style={{ width: `${pct ?? 0}%` }} />
+                  </div>
+                  <span>
+                    {plannedTotal
+                      ? tr(
+                          `已完成 ${done} / ${plannedTotal} 组参数`,
+                          `${done} of ${plannedTotal} parameter sets done`,
+                        )
+                      : tr(`已完成 ${done} 组参数`, `${done} parameter sets done`)}
+                    {best ? tr(` · 当前最优 ${best}`, ` · best so far ${best}`) : ''}
+                  </span>
+                </div>
+              );
+            })()}
+            {frozenSpec && (
+              <p className="muted study-hint">
+                {tr('冻结的设定：', 'Frozen design: ')}
+                {[
+                  frozenSpec.kind === 'tuning'
+                    ? tr('率定', 'calibration')
+                    : tr('不确定性分析', 'uncertainty'),
+                  Array.isArray(frozenSpec.parameters) &&
+                    tr(
+                      `${frozenSpec.parameters.length} 个参数`,
+                      `${frozenSpec.parameters.length} parameter${frozenSpec.parameters.length === 1 ? '' : 's'}`,
+                    ),
+                  Array.isArray(frozenSpec.base_cases) &&
+                    tr(
+                      `${frozenSpec.base_cases.length} 个站点`,
+                      `${frozenSpec.base_cases.length} site${frozenSpec.base_cases.length === 1 ? '' : 's'}`,
+                    ),
+                  Array.isArray(frozenSpec.targets) &&
+                    tr(
+                      `${frozenSpec.targets.length} 个目标`,
+                      `${frozenSpec.targets.length} target${frozenSpec.targets.length === 1 ? '' : 's'}`,
+                    ),
+                ]
+                  .filter(Boolean)
+                  .join(' · ')}
+                {tr('。改设计要新建研究。', '. Create a new study to change the design.')}
+              </p>
+            )}
+            <div className="button-row">
+              {renderActions(controls)}
+              {renderActions([byId('study-status')!].filter((a) => a.enabled))}
+            </div>
+            {remotePermissions.exists && (
+              <div className="study-remote">
+                <p className="muted">
+                  {tr('作业', 'Job')} {remoteIdentity?.job || '—'} · {remoteReply?.status?.phase}
+                </p>
+                {envelope?.remote_pending && (
+                  <Notice tone="warning">
+                    {tr(
+                      '提交结果待核对：已保留提交意图。核对保存的服务器作业；不要再次提交。',
+                      'Submission is uncertain and its intent is recorded. Check the recorded server job; do not submit it again.',
+                    )}
+                  </Notice>
+                )}
+                {remoteReply?.outcome === 'cancel_requested' && !remotePermissions.terminal && (
+                  <Notice>
+                    {tr(
+                      '取消请求已受理，等服务器真正退出。',
+                      'Cancellation accepted; waiting for the server to exit.',
+                    )}
+                  </Notice>
+                )}
+                {(remoteReply?.status?.state === 'lost' ||
+                  remoteReply?.status?.state === 'unknown' ||
+                  remoteReply?.outcome === 'uncertain') && (
+                  <Notice tone="warning">
+                    {tr(
+                      '服务器状态还没核对，不能当作完成、失败或已取消，也不会重复提交。',
+                      'The server state is unconfirmed; it is not treated as finished, failed or cancelled, and will not be resubmitted.',
+                    )}
+                  </Notice>
+                )}
+                {remotePermissions.fetch && (
+                  <Notice>
+                    {tr(
+                      `服务器已退出（退出码 ${remoteReply?.status?.exit_code ?? '—'}）。取回时会核对研究身份和各成员，再读结果。`,
+                      `The server exited (code ${remoteReply?.status?.exit_code ?? '—'}). Fetching checks the study identity and members before reading results.`,
+                    )}
+                  </Notice>
+                )}
+                {remotePermissions.fetched && (
+                  <Notice
+                    tone={remotePermissions.scientificVerified === true ? 'success' : 'warning'}
+                  >
+                    {remotePermissions.scientificVerified === true
+                      ? tr('服务器结果已取回并核对。', 'Server results are fetched and verified.')
+                      : tr(
+                          '服务器诊断结果已取回，但没有通过完整核对，不能据此声称模型改进。',
+                          'Server diagnostics are fetched but not fully verified; they do not establish an improvement.',
+                        )}
+                  </Notice>
+                )}
+                {envelope?.remote?.verification_error && (
+                  <Notice tone="warning">{envelope.remote.verification_error}</Notice>
+                )}
+                {remoteReply?.warnings.map((warning, i) => (
+                  <Notice tone="warning" key={i}>
+                    {warning}
+                  </Notice>
+                ))}
+                {remoteReply?.status?.log_tail && (
+                  <pre className="run-log">{remoteReply.status.log_tail}</pre>
+                )}
+              </div>
+            )}
+          </Card>
+          {ranked.length > 0 && (
+            <Card
+              title={tr('各组参数的成绩', 'Scores of each parameter set')}
+              description={tr(
+                '按率定期成绩排序（目标函数越小越好）；验证期成绩用来看是否过拟合。',
+                'Sorted by the calibration score (lower objective is better); the validation score shows over-fitting.',
+              )}
+            >
+              <div className="table-scroll study-ranking">
+                <table className="versions-table">
+                  <thead>
+                    <tr>
+                      <th>{tr('成员', 'Member')}</th>
+                      <th>{tr('率定期', 'Calibration')}</th>
+                      <th>{tr('验证期', 'Validation')}</th>
+                      <th>{tr('说明', 'Note')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ranked.map(([key, c]) => (
+                      <tr key={key} className={key === best ? 'is-best' : undefined}>
+                        <td>
+                          <code>{key}</code>
+                          {/* sample::design 总把基准放在第一个成员 m000000。 */}
+                          {key === 'm000000' && (
+                            <span className="badge versions-badge">{tr('基准', 'Baseline')}</span>
+                          )}
+                          {key === best && (
+                            <span className="badge versions-badge is-used">
+                              {tr('最优', 'Best')}
+                            </span>
+                          )}
+                        </td>
+                        <td>
+                          {c.calibration == null ? '—' : Number(c.calibration.toPrecision(4))}
+                        </td>
+                        <td>{c.validation == null ? '—' : Number(c.validation.toPrecision(4))}</td>
+                        <td className="muted">
+                          {c.feasible === false ? c.reason || tr('不可行', 'Infeasible') : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </Card>
+          )}
+          {studyDir && (
+            <Card
+              title={
+                state.researchTarget
+                  ? tr('写回草稿', 'Write back to the draft')
+                  : tr('写入新版本', 'Into a new version')
+              }
+              description={
+                tuning
+                  ? tr(
+                      '把选中成员（默认最优）的参数写进草稿：先列出每个参数的研究值，勾选后写入，再到版本页审阅、冻结成新版本。原来的算例不变。',
+                      'Write the chosen member (the best by default) into a draft: each parameter is listed with its study value, the ticked ones are written, then you review and freeze a new version on the versions page. The original cases stay unchanged.',
+                    )
+                  : tr(
+                      '不确定性分析主要看输出的分布；需要时也可以把某个样本成员的参数写进新版本草稿。',
+                      'Uncertainty analysis is mainly about the spread of outputs; a sample member can still be written into a new version draft when needed.',
+                    )
+              }
+            >
+              <div className="study-grid">
+                <Field label={tr('用哪个成员', 'Member')}>
+                  <Input
+                    value={member}
+                    placeholder={best ?? ''}
+                    onChange={(e) => setMember(e.target.value)}
+                  />
+                </Field>
+              </div>
+              {!permissions.results ? (
+                <p className="muted study-hint">
+                  {tr('研究完成后才能写入。', 'Available once the study has finished.')}
+                </p>
+              ) : (
+                !state.researchTarget &&
+                !modelUsed && (
+                  <p className="muted study-hint">
+                    {tr(
+                      '这个研究没有记下所用的模型版本，不能据此新建版本；从某个草稿的"研究"页签打开它，就能写回那个草稿。',
+                      "This study did not record its model version, so no new version can be based on it; open it from a draft's Research tab to write back into that draft.",
+                    )}
+                  </p>
+                )
+              )}
+              <div className="button-row">{renderActions([byId('study-write-version')!])}</div>
+              <Advanced title={tr('不经草稿，直接保存为版本', 'Save as a version without a draft')}>
+                <p className="muted study-hint">
+                  {tr(
+                    '直接冻结成一个版本，跳过版本页的审阅和冻结检查。',
+                    'Freezes a version directly, skipping the review and freeze checks on the versions page.',
+                  )}
+                </p>
+                <Field label={tr('新版本名称', 'New version name')}>
+                  <Input value={name} onChange={(e) => setName(e.target.value)} />
+                </Field>
+                <div className="button-row">{renderActions([byId('study-save-version')!])}</div>
+              </Advanced>
+            </Card>
+          )}
+          {studyDir && (
+            <Card title={tr('结果文件', 'Result files')}>
+              {(envelope?.results?.length ?? 0) > 0 ? (
+                <>
+                  <div className="study-grid">
+                    <Field label={tr('选一个结果文件', 'Result file')}>
+                      <Select value={resultPath} onChange={(e) => setResultPath(e.target.value)}>
+                        <option value="">—</option>
+                        {(envelope?.results || []).map((v) => {
+                          const path = typeof v === 'string' ? v : v.path;
+                          return (
+                            <option key={path} value={path}>
+                              {path}
+                            </option>
+                          );
+                        })}
+                      </Select>
+                    </Field>
+                  </div>
+                  <div className="button-row">{renderActions([byId('study-results')!])}</div>
+                </>
+              ) : (
+                <p className="versions-empty">{tr('还没有结果文件。', 'No result files yet.')}</p>
+              )}
+              {result && <StudyResult text={result} theme={state.theme} />}
+              <Advanced title={tr('导出研究', 'Export the study')}>
+                <Field label={tr('导出到哪个目录', 'Export to')}>
+                  <Input value={out} onChange={(e) => setOut(e.target.value)} />
+                </Field>
+                <div className="button-row">{renderActions([byId('study-export')!])}</div>
+              </Advanced>
+            </Card>
+          )}
+          {ai && (
+            <Card
+              title={tr('从已完成的率定学习参数', 'Learn parameters from finished calibrations')}
+              description={tr(
+                '把几个站点各自率定出的参数，按站点特征拟合成一个网络；留一研究验证通过才能存成版本。',
+                'Fit a network from site features to the parameters calibrated at several sites; it can be saved as a version only if leave-one-study-out validation passes.',
+              )}
+            >
+              <div className="button-row">{renderActions(aiActions.slice(3, 4))}</div>
+              {hybridStudies.length > 0 && (
+                <div className="study-cases">
+                  {hybridStudies.map((s) => (
+                    <label
+                      key={s.dir}
+                      className={`study-case${chosenStudies.includes(s.dir) ? ' is-on' : ''}`}
+                    >
+                      <input
+                        type="checkbox"
+                        checked={chosenStudies.includes(s.dir)}
+                        onChange={(e) =>
+                          setChosenStudies((old) =>
+                            e.target.checked
+                              ? [...new Set([...old, s.dir])]
+                              : old.filter((d) => d !== s.dir),
+                          )
+                        }
+                      />
+                      <span>
+                        <strong>{s.sites.join(', ')}</strong>
+                        <small>
+                          {statusText(s.status)} · {siteName(s.dir)}
+                        </small>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+              )}
+              <Field label={tr('拟合结果放在哪个目录', 'Fit output directory')}>
+                <Input value={out} onChange={(e) => setOut(e.target.value)} />
+              </Field>
+              <div className="button-row">{renderActions(aiActions.slice(4))}</div>
+              {fit && (
+                <Notice tone={fitValidation(fit.report) === true ? 'success' : 'warning'}>
+                  {fitValidation(fit.report) === true
+                    ? tr(
+                        '留一研究验证通过，可以存成版本。',
+                        'Leave-one-study-out validation passed; it can be saved as a version.',
+                      )
+                    : fitValidation(fit.report) === false
+                      ? tr(
+                          '留一研究验证没通过，不能存成可用的版本。',
+                          'Leave-one-study-out validation failed; it cannot be saved as a usable version.',
+                        )
+                      : tr(
+                          '没有独立的交叉验证，不能推断在新站点上更好。',
+                          'No independent cross-validation; better results at new sites are unproven.',
+                        )}
+                </Notice>
+              )}
+              <Advanced title={tr('拟合设置与报告', 'Fit settings and report')}>
+                <div className="study-grid">
+                  <Field label={tr('岭回归正则', 'Ridge regularization')}>
+                    <Input type="number" value={ridge} onChange={(e) => setRidge(e.target.value)} />
+                  </Field>
+                  <Field label={tr('Adam 训练轮数', 'Adam epochs')}>
+                    <Input
+                      type="number"
+                      value={epochs}
+                      onChange={(e) => setEpochs(e.target.value)}
+                    />
+                  </Field>
+                </div>
+                {fit && <pre className="overflow-auto">{JSON.stringify(fit, null, 2)}</pre>}
+              </Advanced>
+            </Card>
+          )}
+          <Advanced
+            title={tr('研究的完整设定与出处', 'Full study settings and provenance')}
+            open={advanced}
+            onOpenChange={setAdvanced}
+          >
+            <p className="muted study-hint">{studyDir}</p>
             <pre className="overflow-auto">
               {JSON.stringify(
                 {
-                  kind: frozenSpec.kind,
-                  method: frozenSpec.method,
-                  budget: frozenSpec.budget,
-                  cases: Array.isArray(frozenSpec.base_cases)
-                    ? frozenSpec.base_cases.length
-                    : undefined,
-                  parameters: Array.isArray(frozenSpec.parameters)
-                    ? frozenSpec.parameters.length
-                    : undefined,
-                  targets: Array.isArray(frozenSpec.targets)
-                    ? frozenSpec.targets.length
-                    : undefined,
+                  modelRevision: modelUsed ?? null,
+                  selectedModelRevision: state.versionRef,
+                  recordedVersion: envelope?.model_version,
+                  manifest: envelope?.manifest,
+                  tasks: envelope?.state?.tasks,
                 },
                 null,
                 2,
               )}
             </pre>
-          </Notice>
-        )}
-        <p role="status">
-          {remotePermissions.exists ? remoteStatus : status}{' '}
-          {launching ? tr('· 命令正在执行', '· command active') : ''} ·{' '}
-          {remoteReply?.study?.completed_candidates ?? envelope?.state?.completed_candidates ?? '—'}{' '}
-          {tr('已完成候选', 'completed candidates')}
-        </p>
-        {remotePermissions.exists && (
-          <div className="space-y-3">
-            <p>
-              {tr('服务器', 'Server')}: {remoteIdentity?.host || host} · {tr('作业', 'Job')}:{' '}
-              {remoteIdentity?.job || '—'} · {remoteReply?.status?.phase}
-            </p>
-            {envelope?.remote_pending && (
-              <Notice tone="warning">
-                {tr(
-                  '提交结果待核对：已保留提交意图。核对保存的服务器作业；不要再次提交。',
-                  'Submission is uncertain and its intent is recorded. Check the recorded server job; do not submit it again.',
-                )}
-              </Notice>
-            )}
-            {remoteReply?.outcome === 'cancel_requested' && !remotePermissions.terminal && (
-              <Notice>
-                {tr(
-                  '取消请求已受理，仍等待服务器的真实退出状态。',
-                  'Cancellation was accepted; a real server exit is still required.',
-                )}
-              </Notice>
-            )}
-            {(remoteReply?.status?.state === 'lost' ||
-              remoteReply?.status?.state === 'unknown' ||
-              remoteReply?.outcome === 'uncertain') && (
-              <Notice tone="warning">
-                {tr(
-                  '服务器状态或操作结果尚未核对，不能当作完成、失败或已取消，也不会重复提交。',
-                  'The server state or action outcome is unconfirmed. It is not treated as completion, failure or cancellation, and will not be resubmitted.',
-                )}
-              </Notice>
-            )}
-            {remotePermissions.fetch && (
-              <Notice>
-                {tr('服务器已退出，退出码', 'Server exited with code')}{' '}
-                {remoteReply?.status?.exit_code}。
-                {tr(
-                  '取回后将核对冻结身份与研究成员，再读取有效结果。',
-                  'Fetch verifies frozen identity and members before reading valid results.',
-                )}
-              </Notice>
-            )}
-            {remotePermissions.fetched && (
-              <Notice tone={remotePermissions.scientificVerified === true ? 'success' : 'warning'}>
-                {remotePermissions.scientificVerified === true
-                  ? tr(
-                      '服务器产物已取回，完整科学身份核对已通过；模型改进仍需以训练和验证指标为依据。',
-                      'Server artifacts are fetched and full scientific identity is verified. Model improvement still requires training and validation evidence.',
-                    )
-                  : tr(
-                      '服务器诊断产物已取回；未提供或未通过完整科学身份核对，不能据此声称模型改进。',
-                      'Server diagnostic artifacts are fetched. Full scientific identity is absent or unverified; this does not establish model improvement.',
-                    )}
-              </Notice>
-            )}
-            {envelope?.remote?.verification_error && (
-              <Notice tone="warning">{envelope.remote.verification_error}</Notice>
-            )}
-            {remoteReply?.warnings.map((warning, i) => (
-              <Notice tone="warning" key={i}>
-                {warning}
-              </Notice>
-            ))}
-            {remoteReply?.status?.log_tail && (
-              <pre className="run-log">{remoteReply.status.log_tail}</pre>
-            )}
-          </div>
-        )}
-        <div className="flex flex-wrap gap-2">{renderActions(lifecycleActions)}</div>
-        <Notice>
-          {tr(
-            '产物保存为新的不可变模型修订，原算例不被替换。缺失同条件基准时不解释优劣；不会追加计算。',
-            'Products become new immutable model revisions. Comparison requires a real baseline under the same conditions; no additional runs are started.',
-          )}
-        </Notice>
-        {envelope?.state?.candidates && (
-          <table>
-            <thead>
-              <tr>
-                <th>{tr('候选成员', 'Member')}</th>
-                <th>{tr('可行', 'Feasible')}</th>
-                <th>{tr('训练损失', 'Training loss')}</th>
-                <th>{tr('验证损失', 'Validation loss')}</th>
-                <th>{tr('原因', 'Reason')}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {Object.entries(envelope.state.candidates)
-                .slice(0, 1000)
-                .map(([key, c]) => (
-                  <tr key={key}>
-                    <td>{key}</td>
-                    <td>{String(c.feasible ?? false)}</td>
-                    <td>{c.calibration ?? '—'}</td>
-                    <td>{c.validation ?? '—'}</td>
-                    <td>{c.reason}</td>
-                  </tr>
-                ))}
-            </tbody>
-          </table>
-        )}
-        {result && <StudyResult text={result} theme={state.theme} />}
-      </Card>
-      {ai && (
-        <Card title={tr('从已完成率定学习参数', 'Learn parameters from completed calibration')}>
-          <div className="flex flex-wrap gap-2">{renderActions(aiActions.slice(3))}</div>
-          {renderFields(
-            fitFields.filter(
-              (f) => !f.id.startsWith('fit-ridge') && !f.id.startsWith('fit-epochs'),
-            ),
-          )}
-          {fit && (
-            <>
-              <Notice>
-                {fitValidation(fit.report) === true
-                  ? tr('留一研究验证已通过。', 'Leave-one-study-out validation passed.')
-                  : fitValidation(fit.report) === false
-                    ? tr(
-                        '留一研究验证未通过；禁止将此拟合保存为可部署模型。',
-                        'Leave-one-study-out validation failed; saving this fit as a deployable model is disabled.',
-                      )
-                    : tr(
-                        '未提供独立交叉验证；不能推断在新站点上的改进。',
-                        'No independent cross-validation; improvement at new sites is unproven.',
-                      )}
-              </Notice>
-              <Notice>
-                {tr(
-                  '拟合产物和留一验证报告已生成。未通过适用性与验证门槛不能据此声称优于基准。',
-                  'Fit artifacts and leave-one-study-out report are available. Applicability and validation gates must pass before claiming an improvement.',
-                )}
-              </Notice>
-              <pre className="overflow-auto">{JSON.stringify(fit, null, 2)}</pre>
-            </>
-          )}
-        </Card>
+          </Advanced>
+          {!studyDir && footer(true)}
+        </>
       )}
-      <Advanced
-        title={tr('专家设置与研究出处', 'Expert settings and provenance')}
-        open={advanced}
-        onOpenChange={setAdvanced}
-      >
-        {ai && renderFields(fitFields.filter((f) => f.id === 'fit-ridge' || f.id === 'fit-epochs'))}
-        {renderFields(remoteFields)}
-        <pre className="overflow-auto">
-          {JSON.stringify(
-            {
-              modelRevision: modelUsed ?? null,
-              selectedModelRevision: state.versionRef,
-              recordedVersion: envelope?.model_version,
-              manifest: envelope?.manifest,
-              tasks: envelope?.state?.tasks,
-            },
-            null,
-            2,
-          )}
-        </pre>
-      </Advanced>
+      {writing && (
+        <StudyImportDialog
+          preview={writing}
+          overlay={writing.draft.overlay}
+          en={en}
+          busy={busy}
+          onClose={cancelWriteBack}
+          onImport={(chosen) => execute(() => confirmWriteBack(chosen))}
+        />
+      )}
     </div>
   );
 }

@@ -205,3 +205,80 @@ it('legacy research provenance does not inherit the currently selected frozen re
     pinned,
   );
 });
+
+// 研究结果进版本要走草稿：没绑定草稿时以研究记下的版本为父版本新建，绑定了就写回那个草稿，
+// 研究没记版本时不拿当前选的版本去猜。
+function writeBackContext(overrides: Record<string, unknown>) {
+  const calls: [string, Record<string, unknown>][] = [];
+  const written: unknown[] = [];
+  const context = {
+    task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => true),
+    studyDir: '/p/.colm/studies/s-1',
+    state: { researchTarget: null as null | { draftId: string; name: string } },
+    modelUsed: { id: 'official', revision: 6 } as unknown,
+    update: () => {},
+    tr: (zh: string) => zh,
+    en: false,
+    methodTitle: { zh: '参数率定', en: 'Calibration' },
+    envelope: { manifest: { id: 's-1' } },
+    member: '',
+    setWriting: (value: unknown) => written.push(value),
+    invokeJson: async (command: string, args: Record<string, unknown>) => {
+      calls.push([command, args]);
+      if (command === 'model_create' || command === 'model_draft')
+        return { id: (args.id as string) ?? 'model-new', generation: 4, overlay: {} };
+      if (command === 'model_import_study') return { member: 'm000001', objective: 1, records: [] };
+      return null;
+    },
+    ...overrides,
+  };
+  return { context, calls, written };
+}
+it('writes study results into a new draft based on the version the study recorded', async () => {
+  const { context, calls, written } = writeBackContext({});
+  await pageCallback('writeBack', context)();
+  assert.deepEqual(
+    calls.map(([command]) => command),
+    ['model_create', 'model_import_study'],
+  );
+  assert.deepEqual(calls[0]![1].parent, { id: 'official', revision: 6 });
+  assert.equal(calls[1]![1].id, 'model-new');
+  assert.equal(calls[1]![1].preview, true);
+  assert.equal(calls[1]![1].member, null, 'an empty member means the best one');
+  assert.equal((written[0] as { created: boolean }).created, true);
+});
+it('writes back into the draft the study was started from without creating another', async () => {
+  const { context, calls, written } = writeBackContext({
+    state: { researchTarget: { draftId: 'model-7', name: 'PFT' } },
+    modelUsed: undefined,
+    member: 'm000003',
+  });
+  await pageCallback('writeBack', context)();
+  assert.deepEqual(
+    calls.map(([command]) => command),
+    ['model_draft', 'model_import_study'],
+  );
+  assert.equal(calls[1]![1].id, 'model-7');
+  assert.equal(calls[1]![1].member, 'm000003');
+  assert.equal((written[0] as { created: boolean }).created, false);
+});
+it('refuses a new version for a study without a recorded version and cleans up failed previews', async () => {
+  const none = writeBackContext({ modelUsed: undefined });
+  await assert.rejects(pageCallback('writeBack', none.context)(), /没有记下所用的模型版本/);
+  assert.equal(none.calls.length, 0);
+  const failing = writeBackContext({});
+  const invoke = failing.context.invokeJson;
+  failing.context.invokeJson = async (command: string, args: Record<string, unknown>) => {
+    if (command === 'model_import_study') {
+      failing.calls.push([command, args]);
+      throw new Error('study has no completed member');
+    }
+    return invoke(command, args);
+  };
+  await assert.rejects(pageCallback('writeBack', failing.context)(), /no completed member/);
+  assert.deepEqual(
+    failing.calls.map(([command]) => command),
+    ['model_create', 'model_import_study', 'model_delete_draft'],
+  );
+  assert.equal(failing.written.length, 0);
+});

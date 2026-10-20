@@ -167,3 +167,267 @@
     grid-template-columns: 1fr;
   }
 }
+/* 研究工作台分四步（2026-10-21）：原来一页铺开 2000 多像素高、十个按钮挤一排，用户说"乱七八糟"。 */
+.study-workbench > .card + .card,
+.study-workbench > .card + .advanced,
+.study-workbench > .notice {
+  margin-top: 16px;
+}
+.study-heading-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.study-steps {
+  display: flex;
+  gap: 8px;
+  margin: 0 0 20px;
+  padding: 0;
+  list-style: none;
+  counter-reset: none;
+}
+.study-steps li {
+  flex: 1;
+  min-width: 0;
+}
+.study-steps button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 3px solid var(--border);
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+.study-steps button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+.study-steps .is-done button {
+  color: var(--foreground);
+  border-bottom-color: var(--accent-soft);
+}
+.study-steps .is-current button {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+.study-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: var(--elevated);
+  font-size: 12px;
+}
+.study-steps .is-current .study-step-number {
+  background: var(--accent);
+  color: var(--surface);
+}
+.study-steps .is-done .study-step-number {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.study-cases {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin: 16px 0 20px;
+}
+.study-case {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+.study-case input {
+  margin-top: 3px;
+}
+.study-case strong {
+  display: block;
+  overflow-wrap: anywhere;
+}
+.study-case small {
+  display: block;
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.study-case.is-on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.study-case.is-off {
+  cursor: default;
+  opacity: 0.6;
+}
+.study-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 12px 16px;
+  margin: 12px 0;
+}
+.study-hint {
+  margin: 8px 0;
+  font-size: 12px;
+}
+.study-subhead {
+  margin: 20px 0 8px;
+  font-size: 14px;
+}
+.study-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 20px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+.study-footer > .button-ghost:first-child {
+  margin-right: auto;
+}
+.study-parameters td {
+  padding: 6px 8px;
+}
+.study-parameters tr.is-on td {
+  background: var(--accent-soft);
+}
+.study-parameters .param-input {
+  width: 110px;
+}
+.study-observations {
+  display: grid;
+  gap: 8px;
+}
+.study-observation {
+  display: grid;
+  grid-template-columns: minmax(80px, 160px) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+.study-observation strong {
+  overflow-wrap: anywhere;
+}
+.study-budget {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin: 16px 0 10px;
+  padding: 12px 14px;
+  border-radius: var(--r-sm);
+  background: var(--elevated);
+}
+.study-budget span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.study-budget.is-bad strong {
+  color: var(--warning);
+}
+.study-confirm {
+  margin: 4px 0 0;
+}
+.study-status-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.study-status-head h2 {
+  margin: 0 0 4px;
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+.study-status-head p {
+  margin: 0;
+}
+.study-state {
+  flex-shrink: 0;
+  font-size: 12px;
+}
+.study-state.is-running,
+.study-state.is-submitted {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.study-state.is-completed {
+  color: var(--ok);
+}
+.study-state.is-failed,
+.study-state.is-lost {
+  color: var(--danger);
+}
+.study-progress {
+  margin: 16px 0;
+  font-size: 13px;
+}
+.study-progress-bar {
+  height: 8px;
+  margin-bottom: 8px;
+  border-radius: 999px;
+  background: var(--elevated);
+  overflow: hidden;
+}
+.study-progress-bar span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s;
+}
+.study-remote {
+  margin-top: 16px;
+}
+.study-ranking {
+  max-height: 420px;
+}
+.study-ranking tr.is-best td {
+  background: var(--accent-soft);
+}
+.study-ranking .versions-badge {
+  margin-left: 8px;
+}
+@container (max-width:560px) {
+  .study-steps {
+    flex-wrap: wrap;
+  }
+  .study-steps li {
+    flex-basis: 45%;
+  }
+  .study-observation {
+    grid-template-columns: 1fr;
+  }
+}
+.study-parameters tr.study-group th {
+  padding: 14px 8px 6px;
+  color: var(--foreground);
+  font-size: 13px;
+  background: none;
+}
+.study-context {
+  margin: -12px 0 20px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--accent-soft);
+  font-size: 13px;
+}
+/* .button-row 只在模拟页、版本页里有间距，研究页自己补上。 */
+.study-workbench .button-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}

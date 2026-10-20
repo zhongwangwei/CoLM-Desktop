@@ -161,6 +161,32 @@ export default function VersionsPage() {
       token.active = false;
     };
   }, [state.versionRef.id, state.versionRef.revision]);
+  // 研究结果刚写进草稿：直接打开那个草稿审阅、冻结（放在上面那个重置之后，不会被它清掉）。
+  // 不走 execute：开发模式下副作用会挂两次，第一次的结果被重置作废、第二次又被执行锁挡住，草稿打不开。
+  useEffect(() => {
+    const id = state.openDraft;
+    if (!id) return;
+    let live = true;
+    invokeJson<ModelDraft>('model_draft', { id })
+      .then((d) => {
+        if (!live) return;
+        update({ openDraft: null });
+        setDraft(d);
+        setAssetRoot('');
+        setDirty(false);
+        setViewKey(null);
+        setTab('changes');
+      })
+      .catch((e) => {
+        if (!live) return;
+        update({ openDraft: null });
+        setError(String(e));
+      });
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.openDraft]);
   useEffect(() => {
     let live = true;
     setReferences([]);
@@ -322,7 +348,8 @@ export default function VersionsPage() {
       return d;
     }
     if (!selected || keyOf(selected.version) !== keyOf(base.version)) chooseForSimulation(base);
-    update({ researchMethod: method });
+    // 从"新建修改版"开始的研究不绑定草稿：结果出来时再建一个以研究所用版本为父版本的草稿。
+    update({ researchMethod: method, researchTarget: null, researchSeed: null });
     lock.current = false;
     if (!navigate('research')) throw new Error(t('当前修改尚未保存', 'Current edits are unsaved'));
     return null;
@@ -1863,11 +1890,17 @@ export default function VersionsPage() {
                         update({
                           researchSeed: picks.length ? { parameters: picks } : null,
                           researchMethod: m.id,
+                          // 从草稿进去的研究，结果直接写回这个草稿，不用再回来选研究目录。
+                          researchTarget: draft ? { draftId: draft.id, name: draft.name } : null,
                         });
                         // 没去成研究页就把种子和方法清掉，免得以后在研究页莫名其妙地生效。
                         run(() =>
                           openResearch().catch((e) => {
-                            update({ researchSeed: null, researchMethod: null });
+                            update({
+                              researchSeed: null,
+                              researchMethod: null,
+                              researchTarget: null,
+                            });
                             throw e;
                           }),
                         );
@@ -1899,8 +1932,8 @@ export default function VersionsPage() {
                 {draft && (
                   <p className="muted versions-hint">
                     {t(
-                      '研究要用冻结的版本：会先把这个草稿冻结成一个修订给研究用，草稿留着，研究结果还可以导回来。',
-                      'Research needs a frozen version: the draft is frozen into a revision for the study and kept, so the results can come back into it.',
+                      '研究要用冻结的版本：会先把这个草稿冻结成一个修订给研究用，草稿留着；研究跑完在研究页点"写回草稿"就回到这里。别处做的研究用上面的按钮导入。',
+                      'Research needs a frozen version: the draft is frozen into a revision for the study and kept; when the study finishes, "Write back to draft" on the research page returns here. Use the button above for studies made elsewhere.',
                     )}
                   </p>
                 )}

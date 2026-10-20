@@ -40,8 +40,8 @@ export default function VersionHub({
           <h1>{t('新建修改版', 'New modified version')}</h1>
           <p className="muted">
             {t(
-              '选一种改模型的方式，点了就开始。手动改参数和修改源码直接建好草稿；率定、不确定性分析和 AI 在研究里完成，结果可以写回版本。',
-              'Choose how to change the model; it starts right away. Editing parameters or code creates a draft directly; calibration, uncertainty analysis and AI run as studies whose results can come back into a version.',
+              '选一种改模型的方式，点了就开始。手动改参数和修改源码直接建好草稿；率定、不确定性分析和 AI 先跑研究，跑完把结果写进一个新版本的草稿，审阅后冻结。',
+              'Choose how to change the model; it starts right away. Editing parameters or code creates a draft directly; calibration, uncertainty analysis and AI first run a study, whose results go into a new version draft that you review and freeze.',
             )}
           </p>
         </div>
@@ -99,7 +99,9 @@ export default function VersionHub({
               <strong>{en ? item.en : item.zh}</strong>
               <span>{en ? item.descriptionEn : item.descriptionZh}</span>
               {research(item.id) && (
-                <span className="version-hub-tag">{t('在研究里完成', 'Runs as a study')}</span>
+                <span className="version-hub-tag">
+                  {t('先研究，再写入新版本', 'Study first, then a new version')}
+                </span>
               )}
             </span>
             <span className="research-method-arrow" aria-hidden="true">

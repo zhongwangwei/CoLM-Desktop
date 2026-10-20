@@ -226,6 +226,13 @@ export type AppState = {
   researchMethod?: string | null;
   /** 版本页选好的要研究的参数：研究页加载参数行之后据此勾选，用完清掉。 */
   researchSeed?: { parameters: StudyPick[] } | null;
+  /**
+   * 研究结果要写回的草稿（从草稿的"研究"页签进去时设置）。研究页切走就卸载，所以记在这里而不是页面里；
+   * 没有它时，研究结果写进一个以研究所用版本为父版本的新草稿。
+   */
+  researchTarget?: { draftId: string; name: string } | null;
+  /** 版本页进来时直接打开的草稿（研究结果写进去之后去审阅、冻结），版本页用完清掉。 */
+  openDraft?: string | null;
   expert: boolean;
   language: 'zh' | 'en';
   theme: 'light' | 'dark';
