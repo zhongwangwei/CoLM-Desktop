@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
-import type { FrozenRevision, ModelDraft, HistoryOperation } from '../../lib/types';
+import type { FrozenRevision, ModelDraft, HistoryOperation, VersionRef } from '../../lib/types';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { download } from '../history/history';
 import {
@@ -55,7 +55,12 @@ export default function VersionsPage() {
     [advanced, setAdvanced] = useState(state.expert),
     [references, setReferences] = useState<HistoryOperation[]>([]),
     [assetRoot, setAssetRoot] = useState(''),
-    [processPath, setProcessPath] = useState('');
+    [processPath, setProcessPath] = useState(''),
+    [tab, setTab] = useState<'overview' | 'parameters' | 'configuration' | 'code' | 'usage'>(
+      'overview',
+    ),
+    // 新建修改版的表单：页头按钮打开，建好草稿后收起。
+    [creating, setCreating] = useState(false);
   const epoch = useRef({ active: false }),
     lock = useRef(false);
   const selected = state.version,
@@ -393,6 +398,8 @@ export default function VersionsPage() {
     setAssetRoot('');
     setDraft(d);
     setDirty(false);
+    setCreating(false);
+    setTab('overview');
     setDrafts(await invokeJson('model_drafts'));
     return d;
   }
@@ -744,8 +751,93 @@ export default function VersionsPage() {
     actions: guideActions,
   });
 
+  const parentOf = (ref: VersionRef | null | undefined) => {
+    if (!ref) return null;
+    const found = state.versions.find(
+      (v) => v.version.id === ref.id && v.version.revision === ref.revision,
+    );
+    return found ? `${found.name} · r${found.version.revision}` : `${ref.id} r${ref.revision}`;
+  };
+  const scopeText = (r: ModelDraft['overlay']['parameters'][number]) => {
+    const s = r.scope_instance;
+    const label = (table: [number, string, string][], id: number | null) => {
+      const hit = table.find(([n]) => n === id);
+      return hit ? `${id} ${state.language === 'en' ? hit[2] : hit[1]}` : String(id ?? '');
+    };
+    switch (s.kind) {
+      case 'case-scalar':
+        return t('全局', 'Global');
+      case 'land-cover-class':
+        return `${s.scheme ?? ''} ${label(s.scheme === 'USGS' ? USGS : IGBP, s.index ?? null)}`;
+      case 'pft-type':
+      case 'pc-pft-component':
+        return `PFT ${label(PFT, s.index ?? null)}`;
+      default:
+        return [s.kind, s.process_file, s.type_name].filter(Boolean).join(' · ');
+    }
+  };
+  const isOfficial = !draft && selected?.version.id === 'official';
+  const kindBadge = draft
+    ? t('草稿', 'Draft')
+    : isOfficial
+      ? t('官方', 'Official')
+      : t('修改版', 'Modified');
+  const counts = shown
+    ? {
+        parameters: shown.overlay.parameters.length,
+        physics: Object.keys(shown.overlay.physics).length,
+        files: shown.overlay.process_files.length,
+        network: !!shown.overlay.hybrid,
+      }
+    : null;
+  const tabs: [typeof tab, string][] = [
+    ['overview', t('概览', 'Overview')],
+    [
+      'parameters',
+      `${t('参数与物理方案', 'Parameters')}${counts && counts.parameters + counts.physics > 0 ? ` (${counts.parameters + counts.physics})` : ''}`,
+    ],
+    ['configuration', t('过程配置', 'Processes')],
+    ['code', t('代码', 'Code')],
+    ['usage', `${t('使用记录', 'Usage')}${references.length > 0 ? ` (${references.length})` : ''}`],
+  ];
+  const changeTable = (
+    rows: { key: string; scope?: string; value: string; onRemove?: () => void }[],
+    empty: string,
+    removeLabel: string,
+  ) =>
+    rows.length === 0 ? (
+      <p className="versions-empty">{empty}</p>
+    ) : (
+      <div className="table-scroll">
+        <table className="versions-table">
+          <tbody>
+            {rows.map((row) => (
+              <tr key={`${row.key}|${row.scope ?? ''}`}>
+                <td>
+                  <code>{row.key}</code>
+                </td>
+                {row.scope !== undefined && <td className="muted">{row.scope}</td>}
+                <td>
+                  <code>{row.value}</code>
+                </td>
+                {editable && (
+                  <td className="versions-table-action">
+                    {row.onRemove && (
+                      <Button variant="ghost" disabled={busy || codeBusy} onClick={row.onRemove}>
+                        {removeLabel}
+                      </Button>
+                    )}
+                  </td>
+                )}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+
   return (
-    <div className="page-stack">
+    <div className="page-stack versions-page">
       {state.simulationReturn && (
         <div className="button-row">
           <Button disabled={busy || codeBusy || dirty} onClick={returnToSimulation}>
@@ -768,138 +860,258 @@ export default function VersionsPage() {
           ) : null}
         </div>
       )}
-      <h1>{t('模型版本', 'Model versions')}</h1>
-      {error && <Notice tone="error">{error}</Notice>}
-      <div className="form-grid">
-        <Card title={t('版本树与修订', 'Version tree and revisions')}>
-          <RevisionTree
-            versions={state.versions}
-            selected={selected}
-            disabled={busy || codeBusy || dirty}
-            en={state.language === 'en'}
-            onSelect={(v) => run(() => select(v))}
-            onDeleted={refreshVersions}
-          />
-          <h3>{t('草稿', 'Drafts')}</h3>
-          {drafts.map((d) => (
-            <Button
-              key={d.id}
-              disabled={busy || codeBusy || dirty}
-              onClick={() => run(() => loadDraft(d.id))}
-            >
-              {d.name} · {d.id} · g{d.generation}
-            </Button>
-          ))}
-        </Card>
-        <Card title={t('派生新版本', 'Derive a new version')}>
-          <Field label={t('名称', 'Name')}>
-            <Input
-              value={name}
-              disabled={busy || codeBusy}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </Field>
-          <Field label={t('目的与说明', 'Purpose and notes')}>
-            <Input
-              value={note}
-              disabled={busy || codeBusy}
-              onChange={(e) => setNote(e.target.value)}
-            />
-          </Field>
-          <Field label={t('新版本的代码', 'Code of the new version')}>
-            <Select
-              value={codeMode}
-              disabled={busy || codeBusy}
-              onChange={(e) => setCodeMode(e.target.value as typeof codeMode)}
-            >
-              <option value="inherit">{t('沿用父版本的代码', 'Keep the parent code')}</option>
-              <option value="branch">
-                {t('复制父版本的代码来修改', 'Copy the parent code to change it')}
-              </option>
-              <option value="existing">
-                {t('使用已有的代码工作区', 'Use an existing code workspace')}
-              </option>
-            </Select>
-          </Field>
+      <div className="page-heading versions-heading">
+        <div>
+          <h1>{t('模型版本', 'Model versions')}</h1>
           <p className="muted">
-            {codeMode === 'inherit'
-              ? t(
-                  '只改参数、物理开关、过程文件或 AI 网络时选这个；代码和父版本完全一样。',
-                  'For parameters, physics switches, process files or AI networks only; the code stays exactly the parent’s.',
-                )
-              : codeMode === 'branch'
-                ? t(
-                    '从父版本冻结时的代码复制一份，只属于这个新版本；之后可以改任意 Rust 或 Fortran 代码、替换或新增文件，不影响父版本和其他版本。',
-                    'Copies the code frozen with the parent into a workspace of this version alone; then change any Rust or Fortran code, replace or add files, without touching the parent or other versions.',
-                  )
-                : t(
-                    '用一个已经存在的代码工作区的当前代码。',
-                    'Uses the current code of an existing code workspace.',
-                  )}
-          </p>
-          {codeMode === 'existing' && (
-            <Field label={t('代码工作区', 'Code workspace')}>
-              <Input
-                value={workspace}
-                disabled={busy || codeBusy}
-                onChange={(e) => setWorkspace(e.target.value)}
-              />
-            </Field>
-          )}
-          <p>
-            {t('来源', 'Parent')}: {selected?.name} r{selected?.version.revision}
-          </p>
-          <Button
-            disabled={!guideActions[0].enabled}
-            variant="primary"
-            onClick={() => run(deriveVersion)}
-          >
-            {t('派生新版本', 'Derive version')}
-          </Button>
-        </Card>
-      </div>
-      {shown && (
-        <>
-          <Card
-            title={`${shown.name} · ${draft ? t('草稿', 'Draft') : `r${selected?.version.revision}`}`}
-          >
-            <p>{shown.note}</p>
-            <p>
-              {shown.code.kind} · {shown.code.commit ?? shown.code.source_sha256}
-            </p>
-            {!editable && (
-              <Notice>
-                {t(
-                  '冻结版本只读。派生新版本后编辑。',
-                  'Frozen revisions are read-only. Derive a version to edit.',
-                )}
-              </Notice>
+            {t(
+              '版本 = 官方代码 + 你的改动（参数、物理开关、过程文件、AI 网络，或代码本身）。模拟用哪个版本，在左边选。',
+              'A version is the official code plus your changes (parameters, physics switches, process files, an AI network, or the code itself). Choose on the left which one simulations use.',
             )}
-            {editable && (
-              <>
-                <div className="button-row">
-                  <Button disabled={busy || codeBusy || !dirty} onClick={() => run(save)}>
-                    {t('保存草稿', 'Save draft')}
-                  </Button>
-                  <Button
-                    disabled={busy || codeBusy || freezeCheck?.ready === false}
-                    variant="primary"
-                    onClick={() => run(freeze)}
+          </p>
+        </div>
+        <Button
+          variant="primary"
+          disabled={busy || codeBusy || dirty || !selected}
+          onClick={() => setCreating(!creating)}
+        >
+          {creating ? t('收起', 'Close') : `＋ ${t('新建修改版', 'New modified version')}`}
+        </Button>
+      </div>
+      {error && <Notice tone="error">{error}</Notice>}
+      <div className="versions-layout">
+        <RevisionTree
+          versions={state.versions}
+          drafts={drafts}
+          selected={selected}
+          openDraft={draft?.id ?? null}
+          dirty={dirty}
+          disabled={busy || codeBusy || dirty}
+          en={state.language === 'en'}
+          onSelect={(v) => run(() => select(v))}
+          onOpenDraft={(id) => run(() => loadDraft(id))}
+          onDeleted={refreshVersions}
+        />
+        <div className="versions-main">
+          {creating && (
+            <Card
+              className="versions-create"
+              title={t('新建修改版', 'New modified version')}
+              description={t(
+                `基于 ${parentOf(selected?.version) ?? '—'}。先建成草稿，改完再冻结成新版本。`,
+                `Based on ${parentOf(selected?.version) ?? '—'}. It starts as a draft; freeze it once your changes are done.`,
+              )}
+            >
+              <div className="form-grid">
+                <Field label={t('名称', 'Name')}>
+                  <Input
+                    value={name}
+                    placeholder={t('如：根系吸水改进', 'e.g. Root water uptake')}
+                    disabled={busy || codeBusy}
+                    onChange={(e) => setName(e.target.value)}
+                  />
+                </Field>
+                <Field label={t('目的与说明', 'Purpose and notes')}>
+                  <Input
+                    value={note}
+                    placeholder={t('想验证什么、改了哪里', 'What it tests, what it changes')}
+                    disabled={busy || codeBusy}
+                    onChange={(e) => setNote(e.target.value)}
+                  />
+                </Field>
+              </div>
+              <p className="versions-label">{t('新版本的代码', 'Code of the new version')}</p>
+              <div className="versions-choices" role="radiogroup">
+                {(
+                  [
+                    [
+                      'inherit',
+                      t('沿用父版本的代码', 'Keep the parent code'),
+                      t(
+                        '只改参数、物理开关、过程文件或 AI 网络；代码和父版本完全一样。',
+                        'Parameters, physics switches, process files or an AI network only; the code stays the parent’s.',
+                      ),
+                    ],
+                    [
+                      'branch',
+                      t('复制父版本的代码来修改', 'Copy the parent code to change it'),
+                      t(
+                        '复制一份只属于这个版本的代码，可以改任意 Rust 或 Fortran 文件、替换或新增文件。',
+                        'A copy of the code for this version alone: change any Rust or Fortran file, replace or add files.',
+                      ),
+                    ],
+                    [
+                      'existing',
+                      t('使用已有的代码工作区', 'Use an existing code workspace'),
+                      t(
+                        '用一个已经建好的代码工作区的当前代码。',
+                        'The current code of a workspace you already have.',
+                      ),
+                    ],
+                  ] as const
+                ).map(([mode, title, detail]) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="radio"
+                    aria-checked={codeMode === mode}
+                    className={`versions-choice${codeMode === mode ? ' is-active' : ''}`}
+                    disabled={busy || codeBusy}
+                    onClick={() => setCodeMode(mode)}
                   >
-                    {t('冻结修订', 'Freeze revision')}
-                  </Button>
-                  <Button
-                    disabled={busy || codeBusy || !dirty}
-                    onClick={() => {
-                      if (window.confirm(t('放弃尚未保存的修改？', 'Discard unsaved edits?')))
-                        run(discardLocal);
-                    }}
-                  >
-                    {t('放弃本地修改', 'Discard local edits')}
-                  </Button>
-                  <span>{dirty ? t('未保存', 'Unsaved') : `generation ${draft.generation}`}</span>
+                    <strong>{title}</strong>
+                    <span>{detail}</span>
+                  </button>
+                ))}
+              </div>
+              {codeMode === 'existing' && (
+                <Field label={t('代码工作区', 'Code workspace')}>
+                  <Input
+                    value={workspace}
+                    disabled={busy || codeBusy}
+                    onChange={(e) => setWorkspace(e.target.value)}
+                  />
+                </Field>
+              )}
+              <div className="button-row">
+                <Button
+                  disabled={!guideActions[0].enabled}
+                  variant="primary"
+                  onClick={() => run(deriveVersion)}
+                >
+                  {t('创建草稿', 'Create draft')}
+                </Button>
+                <Button variant="ghost" onClick={() => setCreating(false)}>
+                  {t('取消', 'Cancel')}
+                </Button>
+                {(!name || !note) && (
+                  <span className="muted">
+                    {t('名称和目的都要填。', 'Both a name and a purpose are needed.')}
+                  </span>
+                )}
+              </div>
+            </Card>
+          )}
+          {!shown ? (
+            <Card>
+              <p className="versions-empty">
+                {t('在左边选一个版本。', 'Choose a version on the left.')}
+              </p>
+            </Card>
+          ) : (
+            <>
+              <Card className="versions-head">
+                <div className="versions-head-top">
+                  <div className="versions-head-title">
+                    <h2>{shown.name}</h2>
+                    <span
+                      className={`badge versions-badge is-${draft ? 'draft' : isOfficial ? 'official' : 'modified'}`}
+                    >
+                      {kindBadge}
+                    </span>
+                    {!draft && selected && (
+                      <span className="badge versions-badge is-used">
+                        {t('模拟正在使用', 'Used for simulations')}
+                      </span>
+                    )}
+                    {draft && dirty && (
+                      <span className="badge versions-badge is-unsaved">
+                        {t('未保存', 'Unsaved')}
+                      </span>
+                    )}
+                  </div>
+                  <div className="button-row versions-head-actions">
+                    {editable ? (
+                      <>
+                        <Button disabled={busy || codeBusy || !dirty} onClick={() => run(save)}>
+                          {t('保存草稿', 'Save draft')}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          disabled={busy || codeBusy || !dirty}
+                          onClick={() => {
+                            if (window.confirm(t('放弃尚未保存的修改？', 'Discard unsaved edits?')))
+                              run(discardLocal);
+                          }}
+                        >
+                          {t('放弃修改', 'Discard edits')}
+                        </Button>
+                        <Button
+                          disabled={busy || codeBusy || freezeCheck?.ready === false}
+                          variant="primary"
+                          onClick={() => run(freeze)}
+                        >
+                          {t('冻结为新版本', 'Freeze as a version')}
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          disabled={busy || codeBusy || dirty}
+                          onClick={() => setCreating(true)}
+                        >
+                          {t('基于它新建修改版', 'Derive from it')}
+                        </Button>
+                        <Button disabled={busy || codeBusy} onClick={() => run(openResearch)}>
+                          {t('用它做研究', 'Use it for research')}
+                        </Button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                {freezeCheck && (
+                <dl className="versions-facts">
+                  <div>
+                    <dt>{draft ? t('状态', 'State') : t('修订', 'Revision')}</dt>
+                    <dd>
+                      {draft
+                        ? dirty
+                          ? t('有未保存的修改', 'Unsaved edits')
+                          : t(
+                              `已保存 ${draft.generation} 次`,
+                              draft.generation === 1
+                                ? 'Saved once'
+                                : `Saved ${draft.generation} times`,
+                            )
+                        : `r${selected?.version.revision}`}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>{t('基于', 'Based on')}</dt>
+                    <dd>{parentOf(shown.parent) ?? t('—（官方基线）', '— (official baseline)')}</dd>
+                  </div>
+                  <div>
+                    <dt>{t('代码', 'Code')}</dt>
+                    <dd>
+                      {shown.code.workspace
+                        ? t(
+                            `自己的代码 · ${shown.code.commit?.slice(0, 8) ?? ''}`,
+                            `Own code · ${shown.code.commit?.slice(0, 8) ?? ''}`,
+                          )
+                        : isOfficial
+                          ? t('官方源码', 'Official source')
+                          : t('与父版本相同', 'Same as the parent')}
+                    </dd>
+                  </div>
+                  {!draft && shown.created_unix > 0 && (
+                    <div>
+                      <dt>{t('冻结于', 'Frozen')}</dt>
+                      <dd>
+                        {new Date(shown.created_unix * 1000).toLocaleDateString(
+                          appLocale(state.language === 'en'),
+                        )}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+                <p className="versions-note">
+                  {isOfficial
+                    ? t(
+                        '随软件提供的官方基线，只读。要改它，基于它新建修改版。',
+                        'The official baseline shipped with the app, read-only. Derive a modified version to change it.',
+                      )
+                    : shown.note || <span className="muted">{t('没有写说明。', 'No notes.')}</span>}
+                </p>
+                {editable && freezeCheck && (
                   <div
                     className="freeze-check"
                     aria-label={t('冻结前检查', 'Checks before freezing')}
@@ -933,453 +1145,640 @@ export default function VersionsPage() {
                     </ul>
                   </div>
                 )}
-                <Field label={t('名称', 'Name')}>
-                  <Input
-                    disabled={busy || codeBusy}
-                    value={draft.name}
-                    onChange={(e) => edit({ ...draft, name: e.target.value })}
-                  />
-                </Field>
-                <Field label={t('说明', 'Notes')}>
-                  <Input
-                    disabled={busy || codeBusy}
-                    value={draft.note}
-                    onChange={(e) => edit({ ...draft, note: e.target.value })}
-                  />
-                </Field>
-              </>
-            )}
-            <Advanced
-              open={advanced}
-              onOpenChange={setAdvanced}
-              title={t(
-                '适用范围与率定/验证时段',
-                'Applicability and calibration / validation periods',
-              )}
-            >
-              <div className="form-grid">
-                {(['sites', 'land_classes'] as const).map((key) => (
-                  <Field
-                    key={key}
-                    label={
-                      key === 'sites'
-                        ? t('站点（逗号分隔）', 'Sites (comma separated)')
-                        : t('地类（逗号分隔）', 'Land classes (comma separated)')
-                    }
-                  >
-                    <Input
-                      disabled={!editable || busy || codeBusy}
-                      value={shown.applicability[key].join(',')}
-                      onChange={(e) =>
-                        draft &&
-                        edit({
-                          ...draft,
-                          applicability: {
-                            ...draft.applicability,
-                            [key]: e.target.value
-                              .split(',')
-                              .map((s) => s.trim())
-                              .filter(Boolean),
-                          },
-                        })
-                      }
-                    />
-                  </Field>
-                ))}
-                {(['calibration', 'validation'] as const).map((key) => (
-                  <div key={key}>
-                    <p>
-                      {key === 'calibration' ? t('率定', 'Calibration') : t('验证', 'Validation')}
-                    </p>
-                    {(['start', 'end'] as const).map((part) => (
-                      <Field key={part} label={part}>
+                <div className="versions-tabs" role="tablist">
+                  {tabs.map(([id, label]) => (
+                    <button
+                      key={id}
+                      type="button"
+                      role="tab"
+                      aria-selected={tab === id}
+                      className={`versions-tab${tab === id ? ' is-active' : ''}`}
+                      onClick={() => setTab(id)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </Card>
+              {/* 页签只隐藏不卸载：代码文件里没保存的编辑、助手能操作的字段都还在。 */}
+              <div hidden={tab !== 'overview'} className="versions-panel">
+                {counts && (
+                  <div className="versions-summary">
+                    {(
+                      [
+                        [t('参数改值', 'Parameter overrides'), counts.parameters],
+                        [t('物理开关', 'Physics switches'), counts.physics],
+                        [t('过程文件', 'Process files'), counts.files],
+                        [
+                          t('AI 网络', 'AI network'),
+                          counts.network ? t('有', 'Yes') : t('无', 'No'),
+                        ],
+                      ] as const
+                    ).map(([label, value]) => (
+                      <div key={label} className="versions-stat">
+                        <span>{label}</span>
+                        <strong>{value}</strong>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {editable && (
+                  <Card title={t('名称与说明', 'Name and notes')}>
+                    <div className="form-grid">
+                      <Field label={t('名称', 'Name')}>
                         <Input
-                          type="text"
-                          placeholder="YYYY-MM-DD"
-                          maxLength={10}
-                          disabled={!editable || busy || codeBusy}
-                          value={shown.applicability[key]?.[part] ?? ''}
-                          onChange={(e) =>
-                            draft &&
-                            edit({
-                              ...draft,
-                              applicability: {
-                                ...draft.applicability,
-                                [key]: {
-                                  start: draft.applicability[key]?.start ?? '',
-                                  end: draft.applicability[key]?.end ?? '',
-                                  [part]: e.target.value,
-                                },
-                              },
-                            })
-                          }
+                          disabled={busy || codeBusy}
+                          value={draft.name}
+                          onChange={(e) => edit({ ...draft, name: e.target.value })}
                         />
                       </Field>
-                    ))}
+                      <Field label={t('说明', 'Notes')}>
+                        <Input
+                          disabled={busy || codeBusy}
+                          value={draft.note}
+                          onChange={(e) => edit({ ...draft, note: e.target.value })}
+                        />
+                      </Field>
+                    </div>
+                  </Card>
+                )}
+                {!draft && selected && (
+                  <VersionChanges version={selected} versions={state.versions} />
+                )}
+                <div className="versions-applicability">
+                  <Advanced
+                    open={advanced}
+                    onOpenChange={setAdvanced}
+                    title={t(
+                      '适用范围与率定/验证时段',
+                      'Applicability and calibration / validation periods',
+                    )}
+                  >
+                    <div className="form-grid">
+                      {(['sites', 'land_classes'] as const).map((key) => (
+                        <Field
+                          key={key}
+                          label={
+                            key === 'sites'
+                              ? t('站点（逗号分隔）', 'Sites (comma separated)')
+                              : t('地类（逗号分隔）', 'Land classes (comma separated)')
+                          }
+                        >
+                          <Input
+                            disabled={!editable || busy || codeBusy}
+                            value={shown.applicability[key].join(',')}
+                            onChange={(e) =>
+                              draft &&
+                              edit({
+                                ...draft,
+                                applicability: {
+                                  ...draft.applicability,
+                                  [key]: e.target.value
+                                    .split(',')
+                                    .map((s) => s.trim())
+                                    .filter(Boolean),
+                                },
+                              })
+                            }
+                          />
+                        </Field>
+                      ))}
+                      {(['calibration', 'validation'] as const).map((key) => (
+                        <div key={key}>
+                          <p>
+                            {key === 'calibration'
+                              ? t('率定', 'Calibration')
+                              : t('验证', 'Validation')}
+                          </p>
+                          {(['start', 'end'] as const).map((part) => (
+                            <Field
+                              key={part}
+                              label={part === 'start' ? t('开始', 'Start') : t('结束', 'End')}
+                            >
+                              <Input
+                                type="text"
+                                placeholder="YYYY-MM-DD"
+                                maxLength={10}
+                                disabled={!editable || busy || codeBusy}
+                                value={shown.applicability[key]?.[part] ?? ''}
+                                onChange={(e) =>
+                                  draft &&
+                                  edit({
+                                    ...draft,
+                                    applicability: {
+                                      ...draft.applicability,
+                                      [key]: {
+                                        start: draft.applicability[key]?.start ?? '',
+                                        end: draft.applicability[key]?.end ?? '',
+                                        [part]: e.target.value,
+                                      },
+                                    },
+                                  })
+                                }
+                              />
+                            </Field>
+                          ))}
+                          {editable && (
+                            <Button
+                              disabled={busy || codeBusy}
+                              onClick={() =>
+                                edit({
+                                  ...draft!,
+                                  applicability: { ...draft!.applicability, [key]: null },
+                                })
+                              }
+                            >
+                              {t('清除时段', 'Clear period')}
+                            </Button>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <Field
+                      label={t(
+                        '待冻结资产根目录（留空使用草稿目录）',
+                        'Asset root (blank uses draft staging)',
+                      )}
+                    >
+                      <Input
+                        disabled={!editable || busy || codeBusy}
+                        value={assetRoot}
+                        onChange={(e) => setAssetRoot(e.target.value)}
+                      />
+                    </Field>
+                  </Advanced>
+                </div>
+              </div>
+              <div hidden={tab !== 'parameters'} className="versions-panel">
+                <Card
+                  title={t('参数改值', 'Parameter overrides')}
+                  description={t(
+                    '相对父版本改了哪些参数；没列出的沿用父版本的值。',
+                    'Parameters changed from the parent; anything not listed keeps the parent’s value.',
+                  )}
+                >
+                  {changeTable(
+                    shown.overlay.parameters.map((r) => ({
+                      key: r.raw_key,
+                      scope: scopeText(r),
+                      value: `${r.value}${r.unit ? ` ${r.unit}` : ''}`,
+                      onRemove: editable
+                        ? () =>
+                            edit({
+                              ...draft!,
+                              overlay: {
+                                ...draft!.overlay,
+                                parameters: draft!.overlay.parameters.filter(
+                                  (x) => parameterKey(x) !== parameterKey(r),
+                                ),
+                              },
+                            })
+                        : undefined,
+                    })),
+                    t('没有参数改值。', 'No parameter overrides.'),
+                    t('移除', 'Remove'),
+                  )}
+                  <div className="button-row">
                     {editable && (
+                      <>
+                        <Button
+                          disabled={busy || codeBusy}
+                          onClick={() => void importStudyParameters()}
+                        >
+                          {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
+                        </Button>
+                        <Button disabled={busy || codeBusy} onClick={() => run(importFile)}>
+                          {t('导入参数 JSON', 'Import parameters JSON')}
+                        </Button>
+                      </>
+                    )}
+                    <Button
+                      variant="ghost"
+                      disabled={busy || codeBusy}
+                      onClick={() =>
+                        run(() =>
+                          download(
+                            JSON.stringify({ records: shown.overlay.parameters }, null, 2),
+                            'model-parameters.json',
+                            'application/json',
+                          ),
+                        )
+                      }
+                    >
+                      {t('导出参数 JSON', 'Export parameters JSON')}
+                    </Button>
+                  </div>
+                  {editable && (
+                    <p className="muted versions-hint">
+                      {t(
+                        '从研究导入：选一个已完成的率定或敏感性研究目录，它最优成员的参数值会写成这里的参数改值。AI 网络请在研究页安装。',
+                        'From a study: choose a finished calibration or sensitivity study folder; its best member’s values become overrides here. Install AI networks from the research page.',
+                      )}
+                    </p>
+                  )}
+                  {studyNotice && <Notice tone="success">{studyNotice}</Notice>}
+                  {editable && (
+                    <div className="versions-editor">
+                      <h4>{t('添加或修改一个参数', 'Add or change a parameter')}</h4>
+                      <div className="form-grid">
+                        <Field label={t('搜索参数', 'Search parameters')}>
+                          <Input value={query} onChange={(e) => setQuery(e.target.value)} />
+                        </Field>
+                        <Field label={t('参数目录', 'Parameter catalog')}>
+                          <Select
+                            disabled={busy || codeBusy}
+                            value={parameter}
+                            onChange={(e) => selectParameter(e.target.value)}
+                          >
+                            <option value="">—</option>
+                            {allowed
+                              .filter(
+                                (d) =>
+                                  !query ||
+                                  `${d.id} ${d.label_zh} ${d.label_en}`
+                                    .toLowerCase()
+                                    .includes(query.toLowerCase()),
+                              )
+                              .map((d) => (
+                                <option key={d.id} value={d.id}>
+                                  {state.language === 'en' ? d.label_en : d.label_zh} · {d.id}
+                                </option>
+                              ))}
+                          </Select>
+                        </Field>
+                        {descriptor &&
+                          ['land-cover-class', 'pft-type', 'pc-pft-component'].includes(
+                            descriptor.scope,
+                          ) && (
+                            <Field label={t('地类 / PFT 索引', 'Land class / PFT index')}>
+                              <Select
+                                value={index}
+                                onChange={(e) => setIndex(Number(e.target.value))}
+                              >
+                                {(descriptor.scope === 'land-cover-class'
+                                  ? descriptor.id.includes(':USGS:')
+                                    ? USGS
+                                    : IGBP
+                                  : PFT
+                                ).map(([id, zh, en]) => (
+                                  <option key={id} value={id}>
+                                    {id} · {state.language === 'en' ? en : zh}
+                                  </option>
+                                ))}
+                              </Select>
+                            </Field>
+                          )}
+                        {descriptor?.storage === 'process-parameter-file' && (
+                          <Field label={t('冻结过程文件', 'Frozen process file')}>
+                            <Select value={process} onChange={(e) => setProcess(e.target.value)}>
+                              <option value="">—</option>
+                              {draft.overlay.process_files.map((a) => (
+                                <option key={a.relative_path}>{a.relative_path}</option>
+                              ))}
+                            </Select>
+                          </Field>
+                        )}
+                        <Field
+                          label={t(
+                            '参数值（Namelist 字面值）',
+                            'Parameter value (namelist literal)',
+                          )}
+                        >
+                          <Input
+                            value={value}
+                            disabled={busy || codeBusy}
+                            onChange={(e) => setValue(e.target.value)}
+                          />
+                        </Field>
+                      </div>
+                      {descriptor && (
+                        <p className="muted versions-hint">
+                          {state.language === 'en' ? descriptor.doc_en : descriptor.doc_zh}
+                          {' · '}
+                          {descriptor.unit ?? '—'} · {descriptor.validation.min ?? '−∞'} …{' '}
+                          {descriptor.validation.max ?? '∞'}
+                        </p>
+                      )}
                       <Button
-                        disabled={busy || codeBusy}
-                        onClick={() =>
+                        disabled={busy || codeBusy || !descriptor || !value}
+                        onClick={() => {
+                          try {
+                            addParameter();
+                          } catch (e) {
+                            setError(String(e));
+                          }
+                        }}
+                      >
+                        {t('应用到草稿', 'Apply to draft')}
+                      </Button>
+                    </div>
+                  )}
+                </Card>
+                <Card
+                  title={t('物理开关', 'Physics switches')}
+                  description={t(
+                    '相对父版本改了的 namelist 开关。',
+                    'Namelist switches changed from the parent.',
+                  )}
+                >
+                  {changeTable(
+                    Object.entries(shown.overlay.physics).map(([key, v]) => ({
+                      key,
+                      value: v,
+                      onRemove: editable
+                        ? () => {
+                            const next = { ...draft!.overlay.physics };
+                            delete next[key];
+                            edit({ ...draft!, overlay: { ...draft!.overlay, physics: next } });
+                          }
+                        : undefined,
+                    })),
+                    t('没有改物理开关。', 'No physics switches changed.'),
+                    t('重置', 'Reset'),
+                  )}
+                  {editable && (
+                    <div className="versions-editor">
+                      <h4>{t('改一个开关', 'Change a switch')}</h4>
+                      <div className="form-grid">
+                        <Field label={t('模型字段', 'Model field')}>
+                          <Select value={physics} onChange={(e) => selectPhysics(e.target.value)}>
+                            <option value="">—</option>
+                            {fields
+                              .filter(
+                                (f) =>
+                                  !f.derived &&
+                                  f.name !== 'DEF_SUBGRID_SCHEME' &&
+                                  !setupHandledKeys.includes(f.name) &&
+                                  !allowed.some(
+                                    (d) =>
+                                      d.raw_key.toLowerCase() === f.name.toLowerCase() &&
+                                      ['land-cover-class', 'pft-type', 'pc-pft-component'].includes(
+                                        d.scope,
+                                      ),
+                                  ),
+                              )
+                              .map((f) => (
+                                <option key={f.name}>{f.name}</option>
+                              ))}
+                          </Select>
+                        </Field>
+                        <Field label={t('值', 'Value')}>
+                          <Input
+                            value={physicsValue}
+                            onChange={(e) => setPhysicsValue(e.target.value)}
+                          />
+                        </Field>
+                      </div>
+                      {modelField && (
+                        <p className="muted versions-hint">
+                          {modelField.doc} · {modelField.kind}
+                          {modelField.values.length > 0 && ` · ${modelField.values.join(', ')}`}
+                        </p>
+                      )}
+                      <Button
+                        disabled={busy || codeBusy || !modelField || !physicsValue}
+                        onClick={() => {
+                          if (
+                            draft.overlay.parameters.some(
+                              (r) => r.raw_key.toLowerCase() === physics.toLowerCase(),
+                            )
+                          ) {
+                            setError(
+                              t('请先重置同名参数覆盖', 'Reset the parameter override first'),
+                            );
+                            return;
+                          }
                           edit({
-                            ...draft!,
-                            applicability: { ...draft!.applicability, [key]: null },
+                            ...draft,
+                            overlay: {
+                              ...draft.overlay,
+                              physics: { ...draft.overlay.physics, [physics]: physicsValue },
+                            },
+                          });
+                        }}
+                      >
+                        {t('应用到草稿', 'Apply to draft')}
+                      </Button>
+                    </div>
+                  )}
+                </Card>
+                <Card
+                  title={t('AI 网络', 'AI network')}
+                  description={t(
+                    '网络在研究页训练和安装，只支持 Rust 引擎。',
+                    'Networks are trained and installed on the research page and need the Rust engine.',
+                  )}
+                >
+                  {shown.overlay.hybrid ? (
+                    <>
+                      <p>
+                        {t(
+                          `已挂上 AI 网络（${(shown.overlay.hybrid.assets ?? []).length} 个模型文件）。`,
+                          `An AI network is attached (${(shown.overlay.hybrid.assets ?? []).length} model files).`,
+                        )}
+                      </p>
+                      <Advanced title={t('网络配置', 'Network configuration')}>
+                        <pre>{shown.overlay.hybrid.config}</pre>
+                      </Advanced>
+                    </>
+                  ) : (
+                    <p className="versions-empty">{t('没有 AI 网络。', 'No AI network.')}</p>
+                  )}
+                  <div className="button-row">
+                    <Button disabled={busy || codeBusy} onClick={() => run(openResearch)}>
+                      {draft
+                        ? t('保存、冻结并进入研究', 'Save, freeze and open research')
+                        : t('打开研究与网络', 'Open research and networks')}
+                    </Button>
+                    {draft && (
+                      <span className="muted">
+                        {t(
+                          '会先保存并冻结这个草稿，再用新版本做研究。',
+                          'Saves and freezes this draft first, then researches with the new version.',
+                        )}
+                      </span>
+                    )}
+                  </div>
+                </Card>
+                {editable && (
+                  <Card>
+                    <Advanced title={t('按路径导入过程文件', 'Import a process file by path')}>
+                      <Field label={t('导入过程文件的相对路径', 'Process file relative path')}>
+                        <Input
+                          disabled={busy || codeBusy}
+                          value={processPath}
+                          onChange={(e) => setProcessPath(e.target.value)}
+                        />
+                      </Field>
+                      <Button
+                        disabled={busy || codeBusy || dirty || !processPath}
+                        onClick={() =>
+                          run(async () => {
+                            const file = await invoke<string | null>('pick_file', {
+                              key: 'model-process',
+                            });
+                            if (!file) return;
+                            const result = await invokeJson<{
+                              draft: ModelDraft;
+                              assetRoot: string;
+                            }>('model_import_process', {
+                              id: draft.id,
+                              file,
+                              relativePath: processPath,
+                              expectedGeneration: draft.generation,
+                            });
+                            setDraft(result.draft);
+                            setAssetRoot(result.assetRoot);
+                            setDirty(false);
                           })
                         }
                       >
-                        {t('清除时段', 'Clear period')}
+                        {t('导入过程文件', 'Import process file')}
                       </Button>
-                    )}
-                  </div>
-                ))}
-              </div>
-              <Field
-                label={t(
-                  '待冻结资产根目录（留空使用草稿目录）',
-                  'Asset root (blank uses draft staging)',
+                    </Advanced>
+                  </Card>
                 )}
-              >
-                <Input
-                  disabled={!editable || busy || codeBusy}
-                  value={assetRoot}
-                  onChange={(e) => setAssetRoot(e.target.value)}
-                />
-              </Field>
-            </Advanced>
-          </Card>
-          <Card
-            title={t('按过程配置后续选项', 'Configure process options')}
-            description={t(
-              '开启父过程后展开子项；过程文件与 PFT 参数分别配置。',
-              'Parent processes reveal their options; process files and PFT parameters keep their own scopes.',
-            )}
-          >
-            <ConfigurationOptions
-              engine={setupEnvironment.engine}
-              subgrid={setupEnvironment.subgrid}
-              caseValues={setupEnvironment.caseValues}
-              excludeKeys={setupHandledKeys}
-              source={
-                draft
-                  ? {
-                      kind: 'draft',
-                      id: draft.id,
-                      generation: draft.generation,
-                      overlay: draft.overlay,
+              </div>
+              <div hidden={tab !== 'configuration'} className="versions-panel">
+                <Card
+                  title={t('过程配置', 'Process options')}
+                  description={t(
+                    '开启父过程后展开子项；过程文件与 PFT 参数分别配置。',
+                    'Parent processes reveal their options; process files and PFT parameters keep their own scopes.',
+                  )}
+                >
+                  <ConfigurationOptions
+                    engine={setupEnvironment.engine}
+                    subgrid={setupEnvironment.subgrid}
+                    caseValues={setupEnvironment.caseValues}
+                    excludeKeys={setupHandledKeys}
+                    source={
+                      draft
+                        ? {
+                            kind: 'draft',
+                            id: draft.id,
+                            generation: draft.generation,
+                            overlay: draft.overlay,
+                          }
+                        : { kind: 'frozen', version: selected!.version }
                     }
-                  : { kind: 'frozen', version: selected!.version }
-              }
-              overlay={shown.overlay}
-              fields={fields}
-              catalog={catalog}
-              caseDir={configurationCase}
-              kernelDir={configurationKernel?.dir ?? null}
-              kernelMacros={configurationKernel?.macros}
-              caseScope={
-                setupEnvironment.domain === 'site'
-                  ? 'site'
-                  : setupEnvironment.domain
-                    ? 'spatial'
-                    : 'unknown'
-              }
-              disabled={busy || codeBusy}
-              onChange={editable ? (next) => edit({ ...draft!, overlay: next }) : undefined}
-              onImportProcess={editable ? importConfigurationProcess : undefined}
-            />
-          </Card>
-          <Card title={t('参数', 'Parameters')}>
-            {editable && (
-              <>
-                <div className="button-row">
-                  <Button disabled={busy || codeBusy} onClick={() => void importStudyParameters()}>
-                    {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
-                  </Button>
-                  <span className="muted">
-                    {t(
-                      '选一个已完成的率定或敏感性研究目录；它最优成员的参数值会写成这个版本的参数改值。AI 网络请在研究页安装。',
-                      'Choose a finished calibration or sensitivity study folder; its best member’s values become this version’s parameter overrides. Install AI networks from the research page.',
-                    )}
-                  </span>
-                </div>
-                {studyNotice && <Notice tone="success">{studyNotice}</Notice>}
-                <Field label={t('搜索参数', 'Search parameters')}>
-                  <Input value={query} onChange={(e) => setQuery(e.target.value)} />
-                </Field>
-                <Field label={t('参数目录', 'Parameter catalog')}>
-                  <Select
+                    overlay={shown.overlay}
+                    fields={fields}
+                    catalog={catalog}
+                    caseDir={configurationCase}
+                    kernelDir={configurationKernel?.dir ?? null}
+                    kernelMacros={configurationKernel?.macros}
+                    caseScope={
+                      setupEnvironment.domain === 'site'
+                        ? 'site'
+                        : setupEnvironment.domain
+                          ? 'spatial'
+                          : 'unknown'
+                    }
                     disabled={busy || codeBusy}
-                    value={parameter}
-                    onChange={(e) => selectParameter(e.target.value)}
-                  >
-                    <option value="">—</option>
-                    {allowed
-                      .filter(
-                        (d) =>
-                          !query ||
-                          `${d.id} ${d.label_zh} ${d.label_en}`
-                            .toLowerCase()
-                            .includes(query.toLowerCase()),
-                      )
-                      .map((d) => (
-                        <option key={d.id} value={d.id}>
-                          {state.language === 'en' ? d.label_en : d.label_zh} · {d.id}
-                        </option>
-                      ))}
-                  </Select>
-                </Field>
-                {descriptor && (
-                  <>
-                    <p>{state.language === 'en' ? descriptor.doc_en : descriptor.doc_zh}</p>
-                    <p>
-                      {descriptor.unit ?? '—'} · {descriptor.activation.join(', ')} ·{' '}
-                      {descriptor.validation.min ?? '−∞'} … {descriptor.validation.max ?? '∞'}
+                    onChange={editable ? (next) => edit({ ...draft!, overlay: next }) : undefined}
+                    onImportProcess={editable ? importConfigurationProcess : undefined}
+                  />
+                </Card>
+              </div>
+              <div hidden={tab !== 'code'} className="versions-panel">
+                {!shown.code.workspace && (
+                  <Card>
+                    <p className="versions-empty">
+                      {draft
+                        ? t(
+                            '这个草稿沿用父版本的代码。要改代码，新建修改版时选「复制父版本的代码来修改」。',
+                            'This draft keeps the parent’s code. To change code, create a modified version with “Copy the parent code to change it”.',
+                          )
+                        : t(
+                            '这个版本用的是官方或父版本的代码，冻结后只读。要改代码，基于它新建修改版，并选「复制父版本的代码来修改」。',
+                            'This version uses the official or parent code and is read-only. To change code, derive a modified version and choose “Copy the parent code to change it”.',
+                          )}
                     </p>
-                    {['land-cover-class', 'pft-type', 'pc-pft-component'].includes(
-                      descriptor.scope,
-                    ) && (
-                      <Field label={t('地类 / PFT 索引', 'Land class / PFT index')}>
-                        <Select value={index} onChange={(e) => setIndex(Number(e.target.value))}>
-                          {(descriptor.scope === 'land-cover-class'
-                            ? descriptor.id.includes(':USGS:')
-                              ? USGS
-                              : IGBP
-                            : PFT
-                          ).map(([id, zh, en]) => (
-                            <option key={id} value={id}>
-                              {id} · {state.language === 'en' ? en : zh}
-                            </option>
-                          ))}
-                        </Select>
-                      </Field>
-                    )}
-                    {descriptor.storage === 'process-parameter-file' && (
-                      <Field label={t('冻结过程文件', 'Frozen process file')}>
-                        <Select value={process} onChange={(e) => setProcess(e.target.value)}>
-                          <option value="">—</option>
-                          {draft.overlay.process_files.map((a) => (
-                            <option key={a.relative_path}>{a.relative_path}</option>
-                          ))}
-                        </Select>
-                      </Field>
-                    )}
-                  </>
+                  </Card>
                 )}
-                <Field label={t('参数值（Namelist 字面值）', 'Parameter value (namelist literal)')}>
-                  <Input
-                    value={value}
-                    disabled={busy || codeBusy}
-                    onChange={(e) => setValue(e.target.value)}
+                {shown.code.workspace ? (
+                  <CodeWorkspace
+                    disabled={busy || codeBusy || dirty}
+                    key={shown.code.workspace}
+                    name={shown.code.workspace}
+                    onChanged={refreshCode}
+                    onPendingChange={codePending}
                   />
-                </Field>
-                <Button
-                  disabled={busy || codeBusy || !descriptor || !value}
-                  onClick={() => {
-                    try {
-                      addParameter();
-                    } catch (e) {
-                      setError(String(e));
-                    }
-                  }}
-                >
-                  {t('应用参数到草稿', 'Apply parameter to draft')}
-                </Button>
-                <Field label={t('导入过程文件的相对路径', 'Process file relative path')}>
-                  <Input
-                    disabled={busy || codeBusy}
-                    value={processPath}
-                    onChange={(e) => setProcessPath(e.target.value)}
-                  />
-                </Field>
-                <Button
-                  disabled={busy || codeBusy || dirty || !processPath}
-                  onClick={() =>
-                    run(async () => {
-                      const file = await invoke<string | null>('pick_file', {
-                        key: 'model-process',
-                      });
-                      if (!file) return;
-                      const result = await invokeJson<{ draft: ModelDraft; assetRoot: string }>(
-                        'model_import_process',
-                        {
-                          id: draft.id,
-                          file,
-                          relativePath: processPath,
-                          expectedGeneration: draft.generation,
-                        },
-                      );
-                      setDraft(result.draft);
-                      setAssetRoot(result.assetRoot);
-                      setDirty(false);
-                    })
-                  }
-                >
-                  {t('导入过程文件', 'Import process file')}
-                </Button>
-                <Button disabled={busy || codeBusy} onClick={() => run(importFile)}>
-                  {t('导入参数 JSON', 'Import parameters JSON')}
-                </Button>
-              </>
-            )}
-            <Button
-              disabled={busy || codeBusy}
-              onClick={() =>
-                run(() =>
-                  download(
-                    JSON.stringify({ records: shown.overlay.parameters }, null, 2),
-                    'model-parameters.json',
-                    'application/json',
-                  ),
-                )
-              }
-            >
-              {t('导出参数 JSON', 'Export parameters JSON')}
-            </Button>
-            {shown.overlay.parameters.map((r) => (
-              <div key={parameterKey(r)}>
-                <code>
-                  {r.raw_key} = {r.value} {r.unit ?? ''}
-                </code>
-                <p>{JSON.stringify(r.scope_instance)}</p>
-                {editable && (
-                  <Button
-                    disabled={busy || codeBusy}
-                    onClick={() =>
-                      edit({
-                        ...draft!,
-                        overlay: {
-                          ...draft!.overlay,
-                          parameters: draft!.overlay.parameters.filter(
-                            (x) => parameterKey(x) !== parameterKey(r),
-                          ),
-                        },
-                      })
-                    }
-                  >
-                    {t('移除覆盖', 'Remove override')}
-                  </Button>
+                ) : (
+                  <Card>
+                    <Advanced
+                      title={t(
+                        '从其他代码仓库建一个代码工作区',
+                        'Create a code workspace from another repository',
+                      )}
+                    >
+                      <CodeWorkspace
+                        disabled={busy || codeBusy || dirty}
+                        key="official"
+                        name={null}
+                        onChanged={refreshCode}
+                        onPendingChange={codePending}
+                      />
+                    </Advanced>
+                  </Card>
                 )}
               </div>
-            ))}
-          </Card>
-          <Card title={t('物理方案', 'Physics')}>
-            {editable && (
-              <>
-                <Field label={t('模型字段', 'Model field')}>
-                  <Select value={physics} onChange={(e) => selectPhysics(e.target.value)}>
-                    <option value="">—</option>
-                    {fields
-                      .filter(
-                        (f) =>
-                          !f.derived &&
-                          f.name !== 'DEF_SUBGRID_SCHEME' &&
-                          !setupHandledKeys.includes(f.name) &&
-                          !allowed.some(
-                            (d) =>
-                              d.raw_key.toLowerCase() === f.name.toLowerCase() &&
-                              ['land-cover-class', 'pft-type', 'pc-pft-component'].includes(
-                                d.scope,
-                              ),
-                          ),
-                      )
-                      .map((f) => (
-                        <option key={f.name}>{f.name}</option>
-                      ))}
-                  </Select>
-                </Field>
-                {modelField && (
-                  <p>
-                    {modelField.doc} · {modelField.kind} · {modelField.values.join(', ')}
-                  </p>
-                )}
-                <Field label={t('值', 'Value')}>
-                  <Input value={physicsValue} onChange={(e) => setPhysicsValue(e.target.value)} />
-                </Field>
-                <Button
-                  disabled={busy || codeBusy || !modelField || !physicsValue}
-                  onClick={() => {
-                    if (
-                      draft.overlay.parameters.some(
-                        (r) => r.raw_key.toLowerCase() === physics.toLowerCase(),
-                      )
-                    ) {
-                      setError(t('请先重置同名参数覆盖', 'Reset the parameter override first'));
-                      return;
-                    }
-                    edit({
-                      ...draft,
-                      overlay: {
-                        ...draft.overlay,
-                        physics: { ...draft.overlay.physics, [physics]: physicsValue },
-                      },
-                    });
-                  }}
+              <div hidden={tab !== 'usage'} className="versions-panel">
+                <Card
+                  title={t('使用记录', 'Usage')}
+                  description={t(
+                    '最近用这个版本做过的运行、研究和其他操作。',
+                    'Recent runs, studies and other operations with this version.',
+                  )}
                 >
-                  {t('应用物理设置', 'Apply physics setting')}
-                </Button>
-              </>
-            )}
-            {Object.entries(shown.overlay.physics).map(([key, v]) => (
-              <div key={key}>
-                <code>
-                  {key} = {v}
-                </code>
-                {editable && (
-                  <Button
-                    disabled={busy || codeBusy}
-                    onClick={() => {
-                      const next = { ...draft!.overlay.physics };
-                      delete next[key];
-                      edit({ ...draft!, overlay: { ...draft!.overlay, physics: next } });
-                    }}
-                  >
-                    {t('重置', 'Reset')}
+                  {references.length === 0 ? (
+                    <p className="versions-empty">
+                      {t('还没有用这个版本做过什么。', 'Nothing has used this version yet.')}
+                    </p>
+                  ) : (
+                    <div className="table-scroll">
+                      <table className="versions-table">
+                        <thead>
+                          <tr>
+                            <th>{t('时间', 'Time')}</th>
+                            <th>{t('操作', 'Operation')}</th>
+                            <th>{t('状态', 'Status')}</th>
+                            <th>{t('算例或服务器', 'Case or server')}</th>
+                            <th>{t('修订', 'Revision')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {references.map((r) => (
+                            <tr key={r.operation_id}>
+                              <td>
+                                {r.time_ms == null
+                                  ? '—'
+                                  : new Date(r.time_ms).toLocaleString(
+                                      appLocale(state.language === 'en'),
+                                    )}
+                              </td>
+                              <td>{r.kind}</td>
+                              <td>{r.status}</td>
+                              <td className="versions-table-path">
+                                {r.case_path ?? r.host ?? '—'}
+                              </td>
+                              <td>{r.revision ? `r${r.revision}` : '—'}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <Button variant="ghost" onClick={() => navigate('history')}>
+                    {t('完整历史', 'Full history')}
                   </Button>
-                )}
+                </Card>
               </div>
-            ))}
-          </Card>
-          <Card title={t('AI 网络', 'AI network')}>
-            <Notice>
-              {t(
-                '网络训练与安装使用研究页真实流程，网络仅支持 Rust 引擎。',
-                'Training and installation use the real research workflow. Networks require the Rust engine.',
-              )}
-            </Notice>
-            <pre>{JSON.stringify(shown.overlay.hybrid, null, 2)}</pre>
-            {draft && (
-              <p>
-                {t(
-                  '将保存当前草稿并冻结新修订，随后使用该修订开展研究。',
-                  'The current draft will be saved and frozen, then used for research.',
-                )}
-              </p>
-            )}
-            <Button disabled={busy || codeBusy} onClick={() => run(openResearch)}>
-              {draft
-                ? t('保存、冻结并进入研究', 'Save, freeze and open research')
-                : t('打开研究与网络', 'Open research and networks')}
-            </Button>
-          </Card>
-          {!draft && selected && <VersionChanges version={selected} versions={state.versions} />}
-          <CodeWorkspace
-            disabled={busy || codeBusy || dirty}
-            key={shown.code.workspace ?? 'official'}
-            name={shown.code.workspace}
-            onChanged={refreshCode}
-            onPendingChange={codePending}
-          />
-          <Card title={t('实际引用历史', 'Actual usage history')}>
-            {references.map((r) => (
-              <p key={r.operation_id}>
-                {r.kind} · {r.status} · {r.case_path ?? r.host} · {r.revision ?? '—'} ·{' '}
-                {r.time_ms == null
-                  ? '—'
-                  : new Date(r.time_ms).toLocaleString(appLocale(state.language === 'en'))}
-              </p>
-            ))}
-            <Button onClick={() => navigate('history')}>{t('完整历史', 'Full history')}</Button>
-          </Card>
-        </>
-      )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

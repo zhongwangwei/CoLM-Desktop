@@ -334,3 +334,20 @@ test('a draft on its own code shows what blocks freezing and cannot be frozen un
   );
   assert.ok(texts.includes('先在当前提交上编译 Rust 引擎'));
 });
+
+test('the version page shows one version in tabs that hide panels without unmounting them', async () => {
+  const p = page('PFT');
+  await p.mount();
+  const tabs = p.elements.filter((e) => e.props.role === 'tab');
+  assert.equal(tabs.length, 5);
+  assert.equal(tabs.filter((e) => e.props['aria-selected']).length, 1, 'one tab is current');
+  const panels = p.elements.filter(
+    (e) => e.type === 'div' && e.props.className === 'versions-panel',
+  );
+  assert.equal(panels.length, 5);
+  assert.equal(panels.filter((e) => !e.props.hidden).length, 1, 'only the current panel shows');
+  // Hidden panels still render: their page contracts and unsaved edits stay.
+  assert.ok(p.elements.some((e) => e.type === 'ConfigurationOptions'));
+  assert.ok(p.elements.some((e) => e.type === 'CodeWorkspace'));
+  assert.ok(p.elements.some((e) => e.type === 'RevisionTree'));
+});

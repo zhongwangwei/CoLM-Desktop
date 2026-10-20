@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
-import type { FrozenRevision, VersionRef } from '../../lib/types';
-import { Button, Notice } from '../../components/ui';
+import type { FrozenRevision, ModelDraft, VersionRef } from '../../lib/types';
+import { Notice } from '../../components/ui';
 import { versionDepth } from './model';
 
 export type RevisionUsage = {
@@ -45,20 +45,33 @@ export function usageLabel(
   return t('没有用到', 'Unused');
 }
 
-/** 版本树：每个修订标出谁在用，没用的可以单个删，也可以一次清理。 */
+/**
+ * 版本库：修改版（按派生关系缩进）、草稿、官方版本三组。官方版每次升级软件都会多一个，
+ * 只突出最新的，更早的收起来（2026-10-20 本机 12 个官方修订占满了整个列表）。每行标出谁在用，
+ * 没用的可以单个删，也可以一次清理。
+ */
 export default function RevisionTree({
   versions,
+  drafts,
   selected,
+  openDraft,
+  dirty,
   disabled,
   en,
   onSelect,
+  onOpenDraft,
   onDeleted,
 }: {
   versions: FrozenRevision[];
+  drafts: ModelDraft[];
   selected: FrozenRevision | null;
+  /** 正在右边打开的草稿。 */
+  openDraft: string | null;
+  dirty: boolean;
   disabled: boolean;
   en: boolean;
   onSelect: (v: FrozenRevision) => void;
+  onOpenDraft: (id: string) => void;
   onDeleted: () => Promise<void>;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
@@ -79,6 +92,24 @@ export default function RevisionTree({
   }, [versions, tick]);
   const of = (v: FrozenRevision) => usage.find((u) => same(u.version, v.version));
   const spare = versions.filter((v) => removable(of(v), chosen));
+  const officials = versions
+    .filter((v) => v.version.id === 'official')
+    .sort((a, b) => b.version.revision - a.version.revision);
+  const [latest, ...older] = officials;
+  // 修改版按派生关系排：父版本在前，派生出的紧跟在它下面。
+  const modified: FrozenRevision[] = [];
+  const own = versions.filter((v) => v.version.id !== 'official');
+  const place = (v: FrozenRevision) => {
+    if (modified.includes(v)) return;
+    modified.push(v);
+    own.filter((c) => same(v.version, c.parent)).forEach(place);
+  };
+  own.filter((v) => !own.some((p) => same(p.version, v.parent))).forEach(place);
+  own.forEach(place);
+  const nameOf = (ref: VersionRef) => {
+    const found = versions.find((v) => same(v.version, ref));
+    return found ? `${found.name} · r${found.version.revision}` : `${ref.id} r${ref.revision}`;
+  };
   async function remove(targets: FrozenRevision[]) {
     if (busy || disabled || targets.length === 0) return;
     const records = targets.reduce((sum, v) => sum + (of(v)?.history ?? 0), 0);
@@ -119,48 +150,125 @@ export default function RevisionTree({
       setTick((n) => n + 1);
     }
   }
-  return (
-    <>
-      <nav aria-label={t('版本树', 'Version tree')} className="version-tree">
-        {versions.map((v) => {
-          const use = of(v);
-          return (
-            <div
-              key={`${v.version.id}@${v.version.revision}`}
-              className="version-tree-row"
-              style={{ paddingInlineStart: versionDepth(v, versions) * 14 }}
-            >
-              <Button
-                disabled={disabled || busy}
-                variant={same(v.version, chosen) ? 'primary' : 'ghost'}
-                onClick={() => onSelect(v)}
-              >
-                {v.name} · r{v.version.revision}{' '}
-                {v.version.id === 'official' ? t('官方', 'Official') : ''}
-              </Button>
-              <small className="muted">{usageLabel(use, chosen, en)}</small>
-              {removable(use, chosen) && (
-                <button
-                  type="button"
-                  className="version-tree-delete"
-                  disabled={disabled || busy}
-                  title={t('删除这个版本', 'Delete this version')}
-                  onClick={() => void remove([v])}
-                >
-                  {t('删除', 'Delete')}
-                </button>
+  const row = (v: FrozenRevision, indent = 0) => {
+    const use = of(v);
+    const active = !openDraft && same(v.version, chosen);
+    return (
+      <li key={`${v.version.id}@${v.version.revision}`} style={{ paddingInlineStart: indent * 14 }}>
+        <div className={`version-row${active ? ' is-active' : ''}`}>
+          <button
+            type="button"
+            className="version-row-main"
+            disabled={disabled || busy}
+            aria-current={active ? 'true' : undefined}
+            onClick={() => onSelect(v)}
+          >
+            <span className="version-row-title">
+              <span className="version-row-name">{v.name}</span>
+              <span className="version-row-rev">r{v.version.revision}</span>
+            </span>
+            <span className="version-row-meta">
+              {same(v.version, chosen) && <span className="version-dot" aria-hidden="true" />}
+              {same(v.version, chosen)
+                ? t('模拟正在使用', 'Used for simulations')
+                : usageLabel(use, chosen, en)}
+            </span>
+          </button>
+          {removable(use, chosen) && (
+            <button
+              type="button"
+              className="version-row-delete"
+              disabled={disabled || busy}
+              title={t('删除这个版本', 'Delete this version')}
+              aria-label={t(
+                `删除 ${v.name} r${v.version.revision}`,
+                `Delete ${v.name} r${v.version.revision}`,
               )}
-            </div>
-          );
-        })}
-      </nav>
+              onClick={() => void remove([v])}
+            >
+              ×
+            </button>
+          )}
+        </div>
+      </li>
+    );
+  };
+  const olderOpen = older.some((v) => same(v.version, chosen));
+  return (
+    <nav className="version-library" aria-label={t('版本库', 'Version library')}>
+      <section>
+        <h3>{t('修改版', 'Modified versions')}</h3>
+        {modified.length === 0 ? (
+          <p className="version-library-empty">
+            {t(
+              '还没有修改版。点右上角「新建修改版」，从选中的版本派生一个。',
+              'No modified versions yet. Use “New modified version” to derive one from the selected version.',
+            )}
+          </p>
+        ) : (
+          <ul>{modified.map((v) => row(v, Math.max(0, versionDepth(v, versions) - 1)))}</ul>
+        )}
+      </section>
+      {drafts.length > 0 && (
+        <section>
+          <h3>{t('草稿', 'Drafts')}</h3>
+          <ul>
+            {drafts.map((d) => {
+              const active = openDraft === d.id;
+              return (
+                <li key={d.id}>
+                  <div className={`version-row is-draft${active ? ' is-active' : ''}`}>
+                    <button
+                      type="button"
+                      className="version-row-main"
+                      disabled={disabled || busy}
+                      aria-current={active ? 'true' : undefined}
+                      onClick={() => onOpenDraft(d.id)}
+                    >
+                      <span className="version-row-title">
+                        <span className="version-row-name">{d.name}</span>
+                        {active && dirty && (
+                          <span className="version-row-unsaved">{t('未保存', 'Unsaved')}</span>
+                        )}
+                      </span>
+                      <span className="version-row-meta">
+                        {t(`基于 ${nameOf(d.parent)}`, `Based on ${nameOf(d.parent)}`)}
+                      </span>
+                    </button>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      )}
+      <section>
+        <h3>{t('官方版本', 'Official versions')}</h3>
+        <ul>{latest && row(latest)}</ul>
+        {older.length > 0 && (
+          <details className="version-older" open={olderOpen || undefined}>
+            <summary>
+              {t(
+                `更早的官方版本（${older.length}）`,
+                `Earlier official versions (${older.length})`,
+              )}
+            </summary>
+            <ul>{older.map((v) => row(v))}</ul>
+          </details>
+        )}
+      </section>
       {spare.length > 0 && (
-        <Button disabled={disabled || busy} onClick={() => void remove(spare)}>
+        <button
+          type="button"
+          className="version-library-clean"
+          disabled={disabled || busy}
+          onClick={() => void remove(spare)}
+        >
           {t(`清理没用的版本（${spare.length} 个）`, `Remove unused versions (${spare.length})`)}
-        </Button>
+        </button>
       )}
       {notice && <Notice tone="success">{notice}</Notice>}
       {error && <Notice tone="error">{error}</Notice>}
-    </>
+    </nav>
   );
 }
