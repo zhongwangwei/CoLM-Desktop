@@ -5,6 +5,14 @@ use std::process::{Command, Stdio};
 
 use anyhow::{bail, Context, Result};
 
+/// 交给 git 的本地路径（`-C` 的目录、`hash-object` 的文件）：模型库缓存下的路径在 Windows 上带 `\\?\` 前缀，git 不认，交给它之前去掉。
+pub fn spelled(dir: &Path) -> std::ffi::OsString {
+    match dir.to_str() {
+        Some(text) => crate::layout::git_spelling(text).into(),
+        None => dir.as_os_str().to_owned(),
+    }
+}
+
 /// 在 `dir` 里运行 git，返回 stdout（去掉结尾换行）；失败时带上 stderr。
 pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&run_bytes(dir, args)?)
@@ -15,7 +23,7 @@ pub fn run(dir: &Path, args: &[&str]) -> Result<String> {
 fn run_bytes(dir: &Path, args: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(dir)
+        .arg(spelled(dir))
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_EDITOR", "true")
@@ -37,7 +45,7 @@ pub fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String>
     use std::io::Write;
     let mut child = Command::new("git")
         .arg("-C")
-        .arg(dir)
+        .arg(spelled(dir))
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::piped())
@@ -149,7 +157,7 @@ pub fn changed_between(dir: &Path, from: &str, to: &str) -> Result<Vec<FileChang
 pub fn blob(dir: &Path, rev: &str, path: &str) -> Result<Option<String>> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(dir)
+        .arg(spelled(dir))
         .args(["rev-parse", "--verify", "--quiet", &format!("{rev}:{path}")])
         .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())

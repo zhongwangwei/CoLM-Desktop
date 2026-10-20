@@ -313,3 +313,17 @@ fn a_snapshot_keeps_its_inner_links_but_refuses_links_that_leave_it() {
         assert!(!root.join("ws/ver-4").exists());
     }
 }
+
+#[test]
+fn git_gets_registry_paths_without_the_windows_verbatim_prefix() {
+    assert_eq!(
+        git_spelling(r"\\?\C:\Users\a\models\sources\x\workspaces\soil\src"),
+        r"C:\Users\a\models\sources\x\workspaces\soil\src"
+    );
+    assert_eq!(
+        git_spelling(r"\\?\UNC\server\share\models"),
+        r"\\server\share\models"
+    );
+    assert_eq!(git_spelling("/Users/a/models/src"), "/Users/a/models/src");
+    assert_eq!(git_spelling("source.tar.gz"), "source.tar.gz");
+}

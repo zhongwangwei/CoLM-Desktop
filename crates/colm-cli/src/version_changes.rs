@@ -234,7 +234,7 @@ fn hash_file(file: &Path) -> Result<Option<String>> {
     }
     let output = Command::new("git")
         .args(["hash-object", "--no-filters"])
-        .arg(file)
+        .arg(git::spelled(file))
         .stdin(Stdio::null())
         .output()
         .context("cannot run git (is it installed?)")?;

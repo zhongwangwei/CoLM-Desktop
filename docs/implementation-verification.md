@@ -34599,6 +34599,12 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 原因：注册表根目录经过规范化，变成 verbatim 路径（`\\?\` 前缀）。Git for Windows 不接受这种形式的克隆目标。冻结代码早就因此改为在缓存目录里克隆到相对路径 `src`，测试却直接传了绝对路径。
     - 改为与冻结代码同样的写法：`current_dir` 设为缓存目录，目标写相对路径 `src`，来源用 `std::path::absolute`。
     - 规矩：凡是把注册表或缓存下的路径交给 git 当目标，都用相对路径。
+    - **第二轮 CI 暴露了生产代码的同类缺陷**：测试改好后，同一测试接着在 `branch_parent_code` 里失败，报 `git clone \\?\C:\…\workspaces\soil\src failed: hostname contains invalid characters`。
+      - 原因：`create_from_snapshot` 把缓存里的 git 克隆当来源交给 `git clone`。来源路径带 `\\?\` 前缀，git 把它当成网络地址。
+      - 后果：在 Windows 上，从修改版父版本"复制父版本的代码来修改"会直接失败。官方父版本走的是普通目录复制，所以不受影响。
+      - 修复：新增 `layout::git_spelling`，去掉前缀，UNC 形式还原成 `\\server\share`，写法与 `colm_kernel::manifest::plain` 一致。`create_from_snapshot` 交给 git 的来源，以及 `colm_workspace::git` 所有 `git -C <目录>`，都先经过它。
+      - 后两处是同一路径的另外两个出口，也在注册表缓存下：`model-changes`、冻结检查用 `-C` 读缓存克隆，`version_changes` 用 `git hash-object` 算官方源码文件的内容 id。一并处理，免得 CI 一次只暴露一个。
+      - 测试：colm-workspace `git_gets_registry_paths_without_the_windows_verbatim_prefix`，纯字符串，各平台都跑。
 
 69. **版本树里清理没用的版本（用户要求，2026-10-20）**：用户反映"新建修改版"页的版本树里有一堆修订。
     - **实测原因**（本机注册表：官方 r6、r68、r70、r73、r83、r85、r86、r89、r90、r92、r95、r100）：

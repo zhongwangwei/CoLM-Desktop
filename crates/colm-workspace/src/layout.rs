@@ -216,10 +216,10 @@ impl Workspace {
             .with_context(|| format!("cannot create {}", root.display()))?;
         std::fs::create_dir(&dir).with_context(|| format!("cannot reserve {}", dir.display()))?;
         let filled = (|| -> Result<Self> {
-            let text = snapshot.to_str().context("snapshot path is not UTF-8")?;
+            let text = git_spelling(snapshot.to_str().context("snapshot path is not UTF-8")?);
             if snapshot.join(".git").exists() || text.ends_with(".tar.gz") || text.ends_with(".tgz")
             {
-                return Self::populate(&dir, name, text, rev);
+                return Self::populate(&dir, name, &text, rev);
             }
             ensure!(
                 snapshot.is_dir(),
@@ -552,6 +552,20 @@ fn clone(from: &str, src: &Path, local: bool) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// 交给 git 的本地路径写法：去掉 Windows 的 `\\?\` 前缀（UNC 形式还原成 `\\server\share`）。
+/// 模型库的根目录经过规范化，Windows 上带这个前缀；git 把 `\\?\C:\...` 当成网络地址，
+/// 从修改版父版本的缓存克隆时报 "hostname contains invalid characters"（2026-10-20 Windows CI）。
+/// 其他写法原样返回。
+pub(crate) fn git_spelling(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 #[cfg(test)]
