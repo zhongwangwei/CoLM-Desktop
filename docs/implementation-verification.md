@@ -34375,3 +34375,20 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - 撤回后只修一处：删掉"直接查看结果"以后，"开始"区只剩"新建模拟"和"打开项目"两张卡片，却仍在三列网格里，右边空出一格。改为这一区两列等宽；窗口窄于 480 px 时仍是一列。
     - 教训：用户要的是局部修整（对齐），不是重新布局。观感改动先做最小的一步。
     - 测试：前端 736 条通过，prettier、tsc、构建通过。
+
+59. **Rust 引擎不再单独填"申请 CPU 数"（用户要求，2026-10-20）**
+    - 背景：线程数写成作业里的 `RAYON_NUM_THREADS`，是程序真正用几个核；申请 CPU 数只写进调度系统的申请（Slurm `--cpus-per-task`、PBS `ncpus`、LSF `-n`）。
+      - Rust 引擎只有一个进程，两者本该相等。
+      - 原来两个数各填各的：服务器设置里的 CPU 数会盖过线程数。线程比核多就挤在少数核上；核比线程多就空占计费。
+    - 改为：
+      - 运行面板只在 Fortran 引擎（MPI）时显示"每个 MPI 进程申请 CPU 数"。
+      - Rust 引擎提交时 `cpus` 直接取线程数，不再取面板里残留的值或服务器设置。
+      - 新建模拟第 5 步同样只在 Fortran 引擎时显示；Rust 引擎下申请的核数等于线程数，直接运行时本来就如此。
+      - 多站点批量现在按节点打包，第 5 步原来那个"申请 CPU 数 = 同时运行的站点数"也一并去掉。
+      - 计算资源页的 CPU 字段改名为"每个 MPI 进程申请的 CPU 数（只用于 Fortran 引擎；Rust 引擎按线程数申请）"。这个设置另外还用于编译 Fortran 内核（`scheduler_args`）。
+    - 测试：
+      - 新增 `a Rust run on a scheduler requests as many CPUs as threads, not the server CPU setting`：服务器设置 CPU 4、线程 6，申请 6。
+      - 新增 `a Rust server run requests its thread count as CPUs; Fortran keeps the CPUs per rank`。
+      - 改 `server resource choices inherit configured defaults…`：Rust 下没有 CPU 框。
+      - 改 `the CPU and thread boxes can be emptied…`：换成 Fortran 引擎。
+      - 前端 738 条通过，tsc、eslint、prettier、check-gui、构建通过。

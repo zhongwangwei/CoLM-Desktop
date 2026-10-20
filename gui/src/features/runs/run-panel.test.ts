@@ -36,6 +36,9 @@ function panel(
     notify?: (message: string) => void;
     setMonitor?: (value: boolean) => void;
     stationConcurrency?: number;
+    engine?: string;
+    threads?: string;
+    cpus?: string;
   } = {},
 ) {
   const source = ts.createSourceFile(
@@ -123,11 +126,11 @@ function panel(
     disabled: false,
     kernelMatches: true,
     kernel: '/kernel',
-    engine: 'rust',
+    engine: options.engine ?? 'rust',
     preprocessors: 'rust',
     ranks: options.ranks ?? '1',
-    threads: '1',
-    cpus: '',
+    threads: options.threads ?? '1',
+    cpus: options.cpus ?? '',
     scheduler: 'auto',
     workers: '1',
     stage: '',
@@ -763,5 +766,17 @@ test('every station of a reopened batch claims its server job on the first statu
   for (const dir of ['/good', '/bad']) {
     assert.equal(p.state.running[dir].status, 'succeeded', dir);
     assert.equal(p.state.running[dir].running, false, dir);
+  }
+});
+
+test('a Rust server run requests its thread count as CPUs; Fortran keeps the CPUs per rank', async () => {
+  for (const [engine, ranks, expected] of [
+    ['rust', '1', 6],
+    ['fortran', '2', 4],
+  ] as const) {
+    const p = panel({ remote: true, single: true, engine, ranks, threads: '6', cpus: '4' });
+    await p.run().catch(() => {});
+    const submitted = p.calls.find((call) => call.command === 'remote_run');
+    assert.equal(submitted?.args.cpus, expected, engine);
   }
 });

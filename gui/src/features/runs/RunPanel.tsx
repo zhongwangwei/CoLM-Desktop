@@ -517,7 +517,9 @@ export default function RunPanel({
             ranks: nums[0],
             threads: nums[1],
             // Server site batches: the requested CPUs are the stations running at once, one each.
-            cpus: siteBatch ? 1 : cpus ? Number(cpus) : null,
+            // Rust 引擎只有一个进程，核数就按线程数申请：不让服务器设置里的 CPU 数盖掉它，
+            // 免得多开的线程挤在少数几个核上、或多占的核空着。
+            cpus: siteBatch ? 1 : engine === 'rust' ? nums[1] : cpus ? Number(cpus) : null,
             scheduler,
             modelVersion: null,
             modelRevision: revision,
@@ -1043,7 +1045,8 @@ export default function RunPanel({
       ...(batchCases && !siteBatch
         ? [['workers', t('同时运行站点数', 'Concurrent stations'), workers, setWorkers] as const]
         : []),
-      ...(host && !siteBatch
+      // 只有 Fortran 引擎（MPI）才要另填每个进程的 CPU 数；Rust 引擎按线程数申请。
+      ...(host && !siteBatch && engine === 'fortran'
         ? [
             [
               'cpus',

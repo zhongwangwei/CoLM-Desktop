@@ -4036,7 +4036,10 @@ test('server resource choices inherit configured defaults and reject invalid num
   );
   await p.mount();
   assert.equal(p.render().fields.find((field) => field.id === 'new-run-threads')?.value, '8');
-  assert.equal(p.render().fields.find((field) => field.id === 'new-run-cpus')?.value, '4');
+  assert.ok(
+    !p.render().fields.some((field) => field.id === 'new-run-cpus'),
+    'the Rust engine requests its threads; only Fortran asks for CPUs per MPI rank',
+  );
   assert.equal(p.render().fields.find((field) => field.id === 'new-run-scheduler')?.value, 'slurm');
   assert.ok(!p.render().fields.some((field) => field.id === 'new-run-workers'));
   for (const invalid of ['0', '-1', '1.5', '257']) {
@@ -4050,11 +4053,36 @@ test('server resource choices inherit configured defaults and reject invalid num
   assert.equal(p.state.projectRunSettings?.threads, '2');
 });
 
-test('the CPU and thread boxes can be emptied: the server default is only a hint', async () => {
+test('a Rust run on a scheduler requests as many CPUs as threads, not the server CPU setting', async () => {
   const p = page(
     'NewCasePage',
     {
       form: { ...form, host: 'cluster', root: '/server/project' },
+      sites: [site],
+      step: 5,
+      ownData: true,
+      multiSiteEnabled: false,
+    },
+    [site],
+    initialValues,
+    {
+      servers: [
+        { host: 'cluster', root: '/work', maps: [], threads: 8, cpus: 4, scheduler: 'slurm' },
+      ],
+    },
+  );
+  await p.mount();
+  p.set('new-run-threads', '6');
+  await p.click('new-create');
+  assert.equal(p.state.projectRunSettings?.scheduler, 'slurm');
+  assert.equal(p.state.projectRunSettings?.cpus, '6');
+});
+
+test('the CPU and thread boxes can be emptied: the server default is only a hint', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      form: { ...form, engine: 'fortran', host: 'cluster', root: '/server/project' },
       sites: [site],
       step: 5,
       ownData: true,

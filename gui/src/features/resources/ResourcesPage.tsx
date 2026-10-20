@@ -444,7 +444,13 @@ export default function ResourcesPage() {
     ['partition', t('分区 / 队列', 'Partition / queue')],
     ['account', t('账户', 'Account')],
     ['walltime', t('时限', 'Walltime')],
-    ['cpus', 'CPUs'],
+    [
+      'cpus',
+      t(
+        '每个 MPI 进程申请的 CPU 数（只用于 Fortran 引擎；Rust 引擎按线程数申请）',
+        'CPUs per MPI rank (Fortran engine only; the Rust engine requests its thread count)',
+      ),
+    ],
     ['memory_gb', t('内存 GB', 'Memory GB')],
     [
       'cores_per_node',

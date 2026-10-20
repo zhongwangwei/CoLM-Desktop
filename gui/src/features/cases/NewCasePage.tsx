@@ -349,6 +349,8 @@ export default function NewCasePage() {
   const scheduler = form.run_scheduler || resourceServer?.scheduler || 'auto';
   // Direct execution allocates nothing, so the CPUs a case uses are simply its threads.
   const directRun = !!form.host && scheduler === 'bare' && !multiSite;
+  // Rust 引擎只有一个进程：申请的核数就是线程数，不另填。只有 Fortran（MPI）要按进程填 CPU 数。
+  const cpusFollowThreads = directRun || form.engine !== 'fortran';
   const runThreads = form.run_threads || String(resourceServer?.threads || 1);
   const runSettings = {
     host: form.host,
@@ -356,7 +358,7 @@ export default function NewCasePage() {
     ranks: form.engine === 'fortran' ? form.run_ranks : '1',
     workers: form.run_workers,
     scheduler,
-    cpus: directRun
+    cpus: cpusFollowThreads
       ? runThreads
       : form.run_cpus || String(resourceServer?.cpus || resourceServer?.threads || 1),
   };
@@ -2047,17 +2049,13 @@ export default function NewCasePage() {
             ],
             set: (value: string) => set('run_scheduler', value),
           },
-          ...(directRun
+          // 多站点批量在服务器上按节点打包（`colm_remote::pack`），核数由节点决定，也不另填。
+          ...(cpusFollowThreads || multiSite
             ? []
             : [
                 {
                   id: 'new-run-cpus',
-                  label: multiSite
-                    ? t(
-                        '申请 CPU 数 = 同时运行的站点数（每个站点 1 个 CPU）',
-                        'Allocated CPUs = stations running at once (one CPU per station)',
-                      )
-                    : t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
+                  label: t('申请 CPU 数（每个 MPI 进程）', 'Allocated CPUs per MPI rank'),
                   value: runSettings.cpus,
                   type: 'number' as const,
                   set: (value: string) => set('run_cpus', value),
