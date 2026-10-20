@@ -16,6 +16,7 @@ import {
   type ModelField,
 } from './model';
 import CodeWorkspace from './CodeWorkspace';
+import CodeFiles from './CodeFiles';
 import VersionChanges from './VersionChanges';
 import VersionLibrary from './VersionLibrary';
 import ParameterDialog from './ParameterDialog';
@@ -45,6 +46,8 @@ export default function VersionsPage() {
     [paramsOpen, setParamsOpen] = useState(false),
     [paramsType, setParamsType] = useState<ParameterType>('global'),
     [paramsParameter, setParamsParameter] = useState(''),
+    // 冻结前检查里正在处理的项（编引擎要两三分钟，给个说明）。
+    [fixing, setFixing] = useState(''),
     // 冻结前的检查清单（只有用自己代码的草稿才有）；checkTick 用来手动重查。
     [freezeCheck, setFreezeCheck] = useState<{
       ready: boolean;
@@ -264,6 +267,30 @@ export default function VersionsPage() {
     dirtyNow.current = false;
     setDirty(false);
     setDrafts(await invokeJson('model_drafts'));
+  }
+  // 冻结前检查里能直接处理的项：编引擎、编内核（用当前算例对应的内核预设，没有就 default）、跑 drift。
+  const fixes: Record<string, string> = {
+    engine_built: 'build-engine',
+    kernel_built: 'build-kernel',
+    drift: 'test-drift',
+  };
+  async function fixFreezeItems(codes: string[]) {
+    const name = draft?.code.workspace;
+    if (!name) return;
+    for (const code of codes) {
+      const action = fixes[code];
+      if (!action) continue;
+      setFixing(code);
+      await invokeJson('workspace_check', {
+        name,
+        action,
+        preset: configurationKernel?.preset ?? 'default',
+        package: null,
+        case: state.selectedCase?.entry.dir ?? null,
+      });
+    }
+    setFixing('');
+    setCheckTick((value) => value + 1);
   }
   async function adoptWorkspace(name: string) {
     if (!draft || !name.trim()) return;
@@ -1144,14 +1171,47 @@ export default function VersionsPage() {
                       ? t('冻结前检查：可以冻结', 'Checks before freezing: ready')
                       : t('冻结前检查：还不能冻结', 'Checks before freezing: not yet')}
                   </strong>
-                  <Button
-                    variant="ghost"
-                    disabled={busy || codeBusy}
-                    onClick={() => setCheckTick((value) => value + 1)}
-                  >
-                    {t('重新检查', 'Check again')}
-                  </Button>
+                  <span className="button-row freeze-check-actions">
+                    {freezeCheck.items.some((item) => item.blocking && fixes[item.code]) && (
+                      <Button
+                        disabled={busy || codeBusy || dirty}
+                        onClick={() =>
+                          run(() =>
+                            fixFreezeItems(
+                              freezeCheck.items
+                                .filter((item) => item.blocking && fixes[item.code])
+                                .map((item) => item.code),
+                            ),
+                          )
+                        }
+                      >
+                        {busy ? t('处理中…', 'Working…') : t('一键处理', 'Fix all')}
+                      </Button>
+                    )}
+                    <Button
+                      variant="ghost"
+                      disabled={busy || codeBusy}
+                      onClick={() => setCheckTick((value) => value + 1)}
+                    >
+                      {t('重新检查', 'Check again')}
+                    </Button>
+                  </span>
                 </div>
+                {fixing && busy && (
+                  <Notice>
+                    {fixing === 'engine_built'
+                      ? t(
+                          '正在编译这个版本的 Rust 引擎，通常要两三分钟…',
+                          'Building this version’s Rust engine; this usually takes two or three minutes…',
+                        )
+                      : fixing === 'kernel_built'
+                        ? t(
+                            '正在编译内核，可能要几分钟…',
+                            'Building the kernel; this can take a few minutes…',
+                          )
+                        : t('正在检查生成表…', 'Checking the generated tables…')}
+                  </Notice>
+                )}
                 <ul>
                   {freezeCheck.items.map((item) => (
                     <li
@@ -1159,7 +1219,24 @@ export default function VersionsPage() {
                       className={item.blocking ? 'is-blocking' : item.ok ? 'is-ok' : 'is-note'}
                     >
                       <span aria-hidden="true">{item.blocking ? '✕' : item.ok ? '✓' : 'i'}</span>
-                      {item.message}
+                      <span className="freeze-check-message">{item.message}</span>
+                      {item.blocking && fixes[item.code] && (
+                        <button
+                          type="button"
+                          className="library-action"
+                          disabled={busy || codeBusy || dirty}
+                          onClick={() => run(() => fixFreezeItems([item.code]))}
+                        >
+                          {item.code === 'drift'
+                            ? t('现在检查', 'Check now')
+                            : item.code === 'kernel_built'
+                              ? t(
+                                  `编译内核（${configurationKernel?.preset ?? 'default'}）`,
+                                  `Build kernel (${configurationKernel?.preset ?? 'default'})`,
+                                )
+                              : t('编译引擎', 'Build engine')}
+                        </button>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -1585,6 +1662,17 @@ export default function VersionsPage() {
                         {t('开始修改代码', 'Start editing code')}
                       </Button>
                     </div>
+                    <h3 className="versions-subhead">
+                      {t('父版本的代码（只读）', 'The parent’s code (read-only)')}
+                    </h3>
+                    <CodeFiles
+                      name=""
+                      message=""
+                      en={state.language === 'en'}
+                      disabled={false}
+                      onChanged={async () => {}}
+                      source={draft.parent}
+                    />
                     <Advanced
                       title={t(
                         '改用一个已有的代码工作区',
@@ -1632,6 +1720,16 @@ export default function VersionsPage() {
                         )}
                       </span>
                     </div>
+                    {viewing && (
+                      <CodeFiles
+                        name=""
+                        message=""
+                        en={state.language === 'en'}
+                        disabled={false}
+                        onChanged={async () => {}}
+                        source={viewing.version}
+                      />
+                    )}
                   </>
                 )}
                 <Advanced

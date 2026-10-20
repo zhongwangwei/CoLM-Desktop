@@ -34697,3 +34697,12 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - 前端 `parameter-dialog.test.ts`（类型归属、Fortran 数值写法、范围校验）、`version-library.test.ts`；
       - `foundation-page.test.ts` 的桩先打开版本再看工作台；`project-page.test.ts` 改为断言"打开不换模拟版本，设为模拟使用和冻结才换"。
     - **还没做（下一步）**：冻结版本的代码只读浏览；一个"检查并编译"按钮；研究整合（在参数弹窗里标"待率定"并给范围，从工作台发起多站点研究，结果作为建议改动勾选接收）；格点率定另行立项。
+
+72. **版本代码：冻结的只读浏览，冻结前检查里直接编译（2026-10-20，第 71 条的下一步）**：
+    - **只读浏览**：新 CLI `model-code-ls` / `model-code-file`（`version_code.rs`，Tauri `model_code_files` / `model_code_file`）只读注册表缓存。
+      - 修改版读冻结时的 git 克隆，**按冻结的那次提交**读（`git ls-tree`、`git cat-file`）：缓存克隆的 HEAD 不一定是它，测试里在冻结后又提交了一次，确认读到的是冻结时的内容。
+      - 官方版读缓存里的普通源码目录；每一段都不许是符号链接；路径不许空段、`.`、`..`、绝对路径。
+      - `CodeFiles` 加了只读模式（给 `source`）：冻结的版本和还在用父版本代码的草稿，都能逐个文件看代码。
+      - 实测临时注册表：第二代修改版 `crates/colm-runtime/src` 42 项，`lib.rs` 第一行是冻结时加的那行注释；官方 r99 根目录 10 项；`../x` 被拒。
+    - **冻结前检查里直接处理**：编引擎、编内核（用当前算例对应的内核预设，没有就 default）、跑 drift，每项一个按钮，另有"一键处理"按顺序做完再重查，编译期间给出要几分钟的说明。原来要去代码区的"检查"下拉框选 build-engine 等。检查项的文字里去掉了"（检查 → build-engine）"这类指向旧界面的说明。
+    - 测试：colm-cli `a_frozen_version_is_browsed_at_its_frozen_commit_and_read_only_inside_its_source`（冻结后的提交不可见、二进制不显示、越界路径与链接被拒）。

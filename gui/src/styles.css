@@ -2985,12 +2985,25 @@ table input {
   display: flex;
   gap: 8px;
 }
-.freeze-check li span {
+.freeze-check li {
+  align-items: baseline;
+}
+.freeze-check li > span:first-child {
   flex: none;
   width: 16px;
   font-weight: 700;
 }
-.freeze-check li.is-ok span {
+.freeze-check-message {
+  flex: 1;
+  min-width: 0;
+}
+.freeze-check-actions {
+  margin: 0;
+}
+.code-files-actions[hidden] {
+  display: none;
+}
+.freeze-check li.is-ok > span:first-child {
   color: var(--ok);
 }
 .freeze-check li.is-blocking {
@@ -3452,4 +3465,8 @@ table input {
 .version-changes-files {
   max-height: 260px;
   overflow: auto;
+}
+.versions-subhead {
+  margin: 18px 0 8px;
+  font-size: 14px;
 }

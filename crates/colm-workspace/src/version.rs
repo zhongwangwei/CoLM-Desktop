@@ -271,7 +271,7 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
         message: if engine {
             "Rust 引擎与前处理已在当前提交上编好".into()
         } else {
-            "先在当前提交上编译 Rust 引擎（检查 → build-engine）".into()
+            "还没在当前提交上编译这个版本自己的 Rust 引擎".into()
         },
     });
     if touches.kernel {
@@ -294,7 +294,7 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
             ok: !built.is_empty(),
             blocking: built.is_empty(),
             message: if built.is_empty() {
-                "改了 Fortran：先在当前提交上编译要用的内核预设（检查 → build-kernel）".into()
+                "改了 Fortran：还没在当前提交上编译内核".into()
             } else {
                 format!(
                     "改过的 Fortran 内核已在当前提交上编好：{}",
@@ -316,7 +316,7 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
             message: if drift {
                 "生成表与 Fortran 源码一致（drift 检查已在当前提交上通过）".into()
             } else {
-                "改了生成表的来源（namelist、history 变量、地类或 CO₂ 表）：先重新生成并通过 drift 检查（检查 → test-drift）".into()
+                "改了生成表的来源（namelist、history 变量、地类或 CO₂ 表）：生成表还没在当前提交上通过一致性（drift）检查".into()
             },
         });
     }

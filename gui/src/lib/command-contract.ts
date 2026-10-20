@@ -925,6 +925,34 @@ export const commandContract = {
   },
   "model_drafts": {},
   "model_fields": {},
+  "model_code_files": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "revision": {
+      "required": true,
+      "rust_type": "u32"
+    },
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "model_code_file": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "revision": {
+      "required": true,
+      "rust_type": "u32"
+    },
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "model_branch_code": {
     "id": {
       "required": true,

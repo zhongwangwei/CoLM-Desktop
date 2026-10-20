@@ -17,6 +17,7 @@ const sizeLabel = (bytes: number) =>
 /**
  * 修改版的代码文件：浏览源码目录，文本文件直接在这里编辑保存；任何文件或整个目录都能用本机的
  * 文件、文件夹替换（可以是二进制，比如查找表），也能新增和删除。每次改动都是工作区里的一次提交。
+ * 给了 `source`（一个冻结版本）就只读浏览它冻结时的代码，不能改。
  */
 export default function CodeFiles({
   name,
@@ -24,13 +25,16 @@ export default function CodeFiles({
   en,
   disabled,
   onChanged,
+  source,
 }: {
   name: string;
   message: string;
   en: boolean;
   disabled: boolean;
   onChanged: () => Promise<void>;
+  source?: { id: string; revision: number };
 }) {
+  const readOnly = !!source;
   const t = (zh: string, english: string) => (en ? english : zh);
   const [dir, setDir] = useState('');
   const [entries, setEntries] = useState<Entry[]>([]);
@@ -44,7 +48,9 @@ export default function CodeFiles({
   const edited = open?.text != null && draft !== open.text;
   async function load(next = dir) {
     const mine = ++token.current;
-    const value = await invokeJson<{ entries: Entry[] }>('workspace_files', { name, dir: next });
+    const value = source
+      ? await invokeJson<{ entries: Entry[] }>('model_code_files', { ...source, dir: next })
+      : await invokeJson<{ entries: Entry[] }>('workspace_files', { name, dir: next });
     if (mine === token.current) {
       setDir(next);
       setEntries(value.entries);
@@ -54,7 +60,7 @@ export default function CodeFiles({
     setOpen(null);
     void load('').catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [name]);
+  }, [name, source?.id, source?.revision]);
   async function act(work: () => Promise<unknown>, done: string) {
     if (busy || disabled) return;
     setBusy(true);
@@ -76,11 +82,13 @@ export default function CodeFiles({
     if (edited && !window.confirm(t('当前文件的修改还没保存，放弃吗？', 'Discard unsaved edits?')))
       return;
     setError('');
-    const file = await invokeJson<FileText>('workspace_file', { name, path });
+    const file = source
+      ? await invokeJson<FileText>('model_code_file', { ...source, path })
+      : await invokeJson<FileText>('workspace_file', { name, path });
     setOpen(file);
     setDraft(file.text ?? '');
   }
-  const needMessage = !message.trim();
+  const needMessage = !readOnly && !message.trim();
   const save = () =>
     act(
       async () => {
@@ -146,10 +154,15 @@ export default function CodeFiles({
       <div className="code-files-head">
         <h3>{t('代码文件', 'Code files')}</h3>
         <span className="muted">
-          {t(
-            'Rust 引擎在 crates/，Fortran 上游在 vendor/CoLM202X/；每次保存、替换、删除都是一次可以撤回的改动。',
-            'The Rust engine is under crates/, upstream Fortran under vendor/CoLM202X/; every save, replacement or deletion is one revertible change.',
-          )}
+          {readOnly
+            ? t(
+                'Rust 引擎在 crates/，Fortran 上游在 vendor/CoLM202X/；冻结时的代码，只读。',
+                'The Rust engine is under crates/, upstream Fortran under vendor/CoLM202X/; the frozen code, read-only.',
+              )
+            : t(
+                'Rust 引擎在 crates/，Fortran 上游在 vendor/CoLM202X/；每次保存、替换、删除都是一次可以撤回的改动。',
+                'The Rust engine is under crates/, upstream Fortran under vendor/CoLM202X/; every save, replacement or deletion is one revertible change.',
+              )}
         </span>
       </div>
       {needMessage && (
@@ -194,7 +207,7 @@ export default function CodeFiles({
               </li>
             ))}
           </ul>
-          <div className="code-files-actions">
+          <div className="code-files-actions" hidden={readOnly}>
             <Input
               value={newPath}
               placeholder={t('新文件名，如 MOD_Mine.F90', 'New file name, e.g. MOD_Mine.F90')}
@@ -263,21 +276,27 @@ export default function CodeFiles({
               </div>
               {open.text == null ? (
                 <Notice>
-                  {t(
-                    '这是二进制文件或超过 2 MB，不能在这里编辑；可以用本机文件替换。',
-                    'Binary or larger than 2 MB: it cannot be edited here, but it can be replaced from this computer.',
-                  )}
+                  {readOnly
+                    ? t(
+                        '这是二进制文件或超过 2 MB，不在这里显示。',
+                        'Binary or larger than 2 MB; not shown here.',
+                      )
+                    : t(
+                        '这是二进制文件或超过 2 MB，不能在这里编辑；可以用本机文件替换。',
+                        'Binary or larger than 2 MB: it cannot be edited here, but it can be replaced from this computer.',
+                      )}
                 </Notice>
               ) : (
                 <textarea
                   className="code-files-text"
                   spellCheck={false}
                   value={draft}
-                  disabled={busy || disabled}
+                  readOnly={readOnly}
+                  disabled={!readOnly && (busy || disabled)}
                   onChange={(e) => setDraft(e.target.value)}
                 />
               )}
-              <div className="code-files-actions">
+              <div className="code-files-actions" hidden={readOnly}>
                 {open.text != null && (
                   <Button
                     variant="primary"

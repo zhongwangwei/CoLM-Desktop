@@ -80,6 +80,7 @@ mod remote_workspace_cmd;
 mod study;
 mod study_version;
 mod version_changes;
+mod version_code;
 mod ws_cmd;
 
 use std::path::{Path, PathBuf};
@@ -141,6 +142,8 @@ usage:
                    # freeze: --model-id ID --asset-root DIR; migrate-case/rollback: <case-dir>
                    # prune JSON: {keep:[{id,revision}],dry_run?}: drop unused old official revisions
                    # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
+  colm-cli model-code-ls|model-code-file --model-root DIR --version ID --revision N [--dir D | --path P]
+                   # 只读：冻结版本的代码（修改版按冻结的那次提交读），列目录或读一个文件
   colm-cli model-changes --model-root DIR --version ID --revision N [--against ID --against-revision N]
                    # 只读：代码相对官方源码改了的文件，参数/物理方案/过程文件/AI 网络相对父版本（或 --against）的不同，来源研究
   colm-cli study-save-version <study-dir> --member best|ID --name NAME --model-root DIR [--note TEXT]
@@ -413,6 +416,11 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
             "{}",
             serde_json::to_string(&version_changes::changes(opts)?)?
         ),
+        "model-code-ls" => println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "entries": version_code::list(opts)? }))?
+        ),
+        "model-code-file" => println!("{}", serde_json::to_string(&version_code::read(opts)?)?),
         "run" => run_with_provenance(opts)?,
         "run-replay" => println!("{}", model_version::replay(opts)?),
         "version-check" => {

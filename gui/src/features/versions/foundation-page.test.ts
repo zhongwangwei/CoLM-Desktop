@@ -86,6 +86,7 @@ function page(
         'Notice',
         'Advanced',
         'CodeWorkspace',
+        'CodeFiles',
         'VersionChanges',
         'VersionLibrary',
         'ParameterDialog',

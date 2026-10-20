@@ -190,6 +190,8 @@ pub fn run() {
             model_usage,
             model_delete_draft,
             model_branch_code,
+            model_code_files,
+            model_code_file,
             model_migrate_case,
             model_case_runs,
             model_case_context,

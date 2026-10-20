@@ -1477,6 +1477,36 @@ pub fn model_fields() -> Vec<crate::config::Field> {
         .collect()
 }
 
+/// 只读浏览冻结版本的代码：列一个目录。
+#[tauri::command]
+pub async fn model_code_files(id: String, revision: u32, dir: String) -> Result<Value, String> {
+    cli(vec![
+        "model-code-ls".into(),
+        "--version".into(),
+        id,
+        "--revision".into(),
+        revision.to_string(),
+        "--dir".into(),
+        dir,
+    ])
+    .await
+}
+
+/// 只读浏览冻结版本的代码：读一个文件（二进制或超过 2 MB 时只给大小）。
+#[tauri::command]
+pub async fn model_code_file(id: String, revision: u32, path: String) -> Result<Value, String> {
+    cli(vec![
+        "model-code-file".into(),
+        "--version".into(),
+        id,
+        "--revision".into(),
+        revision.to_string(),
+        "--path".into(),
+        path,
+    ])
+    .await
+}
+
 /// 给还在用父版本代码的草稿复制一份它自己的代码（版本页"开始修改代码"，约 3 秒）。
 #[tauri::command]
 pub async fn model_branch_code(id: String, expected_generation: u64) -> Result<ModelDraft, String> {
