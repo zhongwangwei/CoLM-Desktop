@@ -79,6 +79,8 @@ fn whole_files_and_folders_are_replaced_and_binary_files_are_allowed() {
 
 #[test]
 fn protected_paths_links_and_dirty_trees_are_refused() {
+    // root 只在下面 Unix 才跑的符号链接检查里用到。
+    #[cfg_attr(not(unix), allow(unused_variables))]
     let (root, ws) = fresh("files-refuse");
     for bad in [
         "oracle/golden/CN-Cng.nc",
