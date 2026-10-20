@@ -1224,6 +1224,37 @@ pub fn model_fields() -> Vec<crate::config::Field> {
         .collect()
 }
 
+/// 把一次已完成的率定或敏感性研究里某个成员（默认最优）的参数值写进草稿的参数改值。
+#[tauri::command]
+pub async fn model_import_study(
+    id: String,
+    study_dir: String,
+    member: Option<String>,
+    expected_generation: u64,
+) -> Result<Value, String> {
+    if study_dir.contains('\0') || !std::path::Path::new(&study_dir).is_absolute() {
+        return Err("研究目录须为绝对路径".into());
+    }
+    let member = member
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "best".into());
+    if member.starts_with('-') || member.contains(['\0', '\n']) {
+        return Err("成员编号不合法".into());
+    }
+    cli(vec![
+        "model-import-study".into(),
+        "--model-id".into(),
+        id,
+        "--study-dir".into(),
+        study_dir,
+        "--member".into(),
+        member,
+        "--expected-generation".into(),
+        expected_generation.to_string(),
+    ])
+    .await
+}
+
 #[tauri::command]
 pub async fn model_import_process(
     id: String,

@@ -8,6 +8,9 @@
 //! 换成 namelist 判据还顺带解决了反方向的问题：有 6 个字段有声明有默认值
 //! 但不在任何组里（用户改不了），以及 `ieee_arithmetic` 这种 `USE` 语句
 //! 被误当成声明的情况。
+//!
+//! 原本在 xtask 的生成器里；修改版冻结前要拿它对比工作区自己的 `MOD_Namelist.F90` 与应用内置的字段表
+//! （新增的变量应用还不认识，见 `colm_workspace::version::freeze_check`），所以搬到这里两边共用。
 
 use std::collections::BTreeMap;
 
@@ -19,7 +22,7 @@ use std::collections::BTreeMap;
 /// 2. 续行符之后带**行尾注释**（`DEF_LAI_MONTHLY, & !add by ...`）；
 /// 3. 有一个成员被宏包住（`DEF_file_GIEMS` 在 TRACER+BGC 下才可设）——
 ///    守卫行本身跳过，成员照收，因为它确实是字段。
-pub fn groups(text: &str) -> BTreeMap<String, String> {
+pub fn namelist_groups(text: &str) -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     let mut lines = text.lines();
     while let Some(raw) = lines.next() {

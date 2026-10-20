@@ -403,7 +403,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         | "model-preview-context"
         | "model-make-run"
         | "model-attach-network"
-        | "model-import-process" => model_version::cmd(cmd, opts)?,
+        | "model-import-process"
+        | "model-import-study" => model_version::cmd(cmd, opts)?,
         "run" => run_with_provenance(opts)?,
         "run-replay" => println!("{}", model_version::replay(opts)?),
         "version-check" => {

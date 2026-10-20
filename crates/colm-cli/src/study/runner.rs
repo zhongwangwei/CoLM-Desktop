@@ -3612,22 +3612,30 @@ fn unix_now() -> i64 {
 }
 
 /// Export an evaluated member as a model revision without editing its source cases.
+/// 要把一个成员的参数带出研究（存成新版本，或并进一个修改版草稿）之前的同一组校验；锁要拿到用完为止。
+pub(crate) fn verified_member(
+    study_dir: &Path,
+    member_id: &str,
+) -> Result<(StudyRunLock, Manifest, MemberPlan)> {
+    clear_stale_run_lock(study_dir)?;
+    let lock = StudyRunLock::acquire(study_dir)?;
+    let manifest = super::engine::status(study_dir)?;
+    super::engine::ensure_supported_study_manifest(&manifest, None)?;
+    super::engine::verify_frozen_inputs(&manifest)?;
+    let member = resolve_apply_member(study_dir, &manifest, member_id)?;
+    let evidence_state = status_state(study_dir)?.context("Study has no evaluated member state")?;
+    verify_member_evidence(&manifest, &evidence_state, &member.id)?;
+    Ok((lock, manifest, member))
+}
+
 pub(crate) fn save_version(
     study_dir: &Path,
     member_id: &str,
     opts: &crate::Opts,
 ) -> Result<colm_model::FrozenRevision> {
     let study_dir = colm_kernel::manifest::absolute(study_dir)?;
-    clear_stale_run_lock(&study_dir)?;
-    let _lock = StudyRunLock::acquire(&study_dir)?;
-    let manifest = super::engine::status(&study_dir)?;
-    super::engine::ensure_supported_study_manifest(&manifest, None)?;
-    super::engine::verify_frozen_inputs(&manifest)?;
-    let member = resolve_apply_member(&study_dir, &manifest, member_id)?;
+    let (_lock, manifest, member) = verified_member(&study_dir, member_id)?;
     let input_identity = super::model::verified_inputs(&manifest)?;
-    let evidence_state =
-        status_state(&study_dir)?.context("Study has no evaluated member state")?;
-    verify_member_evidence(&manifest, &evidence_state, &member.id)?;
     let store = crate::model_version::registry(opts)?;
     let pin = crate::study_version::pinned(&study_dir)?;
     if pin.as_ref().is_some_and(|p| p.model_revision.is_none()) {

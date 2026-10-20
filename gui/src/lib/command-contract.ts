@@ -882,6 +882,24 @@ export const commandContract = {
   },
   "model_drafts": {},
   "model_fields": {},
+  "model_import_study": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "studyDir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "member": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "expectedGeneration": {
+      "required": true,
+      "rust_type": "u64"
+    }
+  },
   "model_import_process": {
     "id": {
       "required": true,

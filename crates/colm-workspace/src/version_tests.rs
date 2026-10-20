@@ -251,3 +251,41 @@ fn a_version_freezes_only_when_built_consistent_and_its_parameters_still_exist()
     std::fs::write(ws.src().join("scratch.txt"), "x").unwrap();
     assert!(blocking(&freeze_check(&ws, &[]).unwrap()).contains(&"clean"));
 }
+
+#[test]
+fn namelist_variables_added_or_removed_by_a_version_are_reported() {
+    let root = temp("freeze-namelist");
+    let repo = root.join("source");
+    source_repo(&repo);
+    let namelist = "vendor/CoLM202X/share/MOD_Namelist.F90";
+    std::fs::create_dir_all(repo.join("vendor/CoLM202X/share")).unwrap();
+    std::fs::write(
+        repo.join(namelist),
+        "namelist /nl_colm/ DEF_USE_PLANTHYDRAULICS, &\n   DEF_Kmax_sun\n",
+    )
+    .unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "namelist"]).unwrap();
+    let ws = Workspace::create(&root.join("ws"), "v", repo.to_str().unwrap(), None).unwrap();
+    assert!(!freeze_check(&ws, &[])
+        .unwrap()
+        .items
+        .iter()
+        .any(|i| i.code == "namelist"));
+    std::fs::write(
+        ws.src().join(namelist),
+        "namelist /nl_colm/ DEF_USE_PLANTHYDRAULICS, DEF_USE_OZONESTRESS, &\n   DEF_My_switch\n",
+    )
+    .unwrap();
+    git::set_identity(&ws.src()).unwrap();
+    git::run(&ws.src(), &["commit", "-q", "-am", "my switch"]).unwrap();
+    let check = freeze_check(&ws, &[]).unwrap();
+    let item = check.items.iter().find(|i| i.code == "namelist").unwrap();
+    // Informational only: the new switch works with its default in the code.
+    assert!(!item.ok && !item.blocking, "{item:?}");
+    let parts: Vec<&str> = item.message.split('；').collect();
+    assert_eq!(parts.len(), 3, "{}", item.message);
+    assert!(parts[0].contains("不认识") && parts[0].ends_with("DEF_My_switch"));
+    assert!(parts[1].contains("已认识") && parts[1].ends_with("DEF_USE_OZONESTRESS"));
+    assert!(parts[2].contains("删掉") && parts[2].ends_with("DEF_Kmax_sun"));
+}

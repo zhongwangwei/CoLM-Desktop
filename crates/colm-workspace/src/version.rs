@@ -220,7 +220,7 @@ pub fn check(
 /// 生成表的来源：改了它们（或生成器、生成出的表），界面与引擎里那几张表要重新生成，一致性检查（drift）
 /// 必须在当前提交上通过——否则界面认识的 namelist 字段、history 变量、地类表和代码对不上。
 const GENERATED_SOURCES: &[&str] = &[
-    "vendor/CoLM202X/share/MOD_Namelist.F90",
+    NAMELIST_SOURCE,
     "vendor/CoLM202X/main/MOD_Hist.F90",
     "vendor/CoLM202X/main/MOD_Const_LC.F90",
     "vendor/CoLM202X/main/MOD_MonthlyinSituCO2MaunaLoa.F90",
@@ -320,6 +320,9 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
             },
         });
     }
+    if paths.contains(&NAMELIST_SOURCE) {
+        items.push(namelist_item(workspace)?);
+    }
     let missing = missing_namelist_keys(&src, parameter_keys)?;
     if !parameter_keys.is_empty() {
         items.push(Item {
@@ -348,6 +351,89 @@ pub fn freeze_check(workspace: &Workspace, parameter_keys: &[String]) -> Result<
         ready: !items.iter().any(|item| item.blocking),
         touches,
         items,
+    })
+}
+
+const NAMELIST_SOURCE: &str = "vendor/CoLM202X/share/MOD_Namelist.F90";
+
+/// 这份代码的 namelist 相对官方基线新增、删掉了哪些变量。不拦冻结：新增的变量照样按代码里的默认值生效；
+/// 但应用内置的字段表（参数页、研究、算例设置共用）是随应用编进来的，不认识的那些在这个版本里还不能
+/// 通过参数改值或研究来设——要设就改代码里的默认值。删掉的变量若有算例还在写，Fortran 读 namelist 会报错。
+fn namelist_item(workspace: &Workspace) -> Result<Item> {
+    let src = workspace.src();
+    let now = std::fs::read_to_string(src.join(NAMELIST_SOURCE)).unwrap_or_default();
+    let base = crate::git::run(
+        &src,
+        &[
+            "show",
+            &format!("{}:{NAMELIST_SOURCE}", workspace.official_base()),
+        ],
+    )
+    .unwrap_or_default();
+    // Fortran 不分大小写：按小写比，报出来用源码里的写法。
+    let names = |text: &str| -> std::collections::BTreeMap<String, String> {
+        colm_schema::source::namelist_groups(text)
+            .into_keys()
+            .map(|name| (name.to_ascii_lowercase(), name))
+            .collect()
+    };
+    let (now, base) = (names(&now), names(&base));
+    // 字段表里派生类型的成员是 `DEF_a%b`，namelist 语句里只写 `DEF_a`。
+    let known: std::collections::BTreeSet<String> = colm_schema::all()
+        .iter()
+        .map(|field| {
+            field
+                .name
+                .split('%')
+                .next()
+                .unwrap_or(field.name)
+                .to_ascii_lowercase()
+        })
+        .collect();
+    type Names = std::collections::BTreeMap<String, String>;
+    fn only<'a>(
+        a: &'a Names,
+        b: &Names,
+        known: &std::collections::BTreeSet<String>,
+        app_knows: Option<bool>,
+    ) -> Vec<&'a str> {
+        a.iter()
+            .filter(|(key, _)| !b.contains_key(*key))
+            .filter(|(key, _)| app_knows.is_none_or(|knows| known.contains(*key) == knows))
+            .map(|(_, name)| name.as_str())
+            .collect()
+    }
+    let unknown = only(&now, &base, &known, Some(false));
+    let recognised = only(&now, &base, &known, Some(true));
+    let removed = only(&base, &now, &known, None);
+    let added = unknown.len() + recognised.len();
+    let mut message = Vec::new();
+    if added == 0 && removed.is_empty() {
+        message.push("改了 MOD_Namelist.F90，但 namelist 变量没有增减".to_owned());
+    }
+    if !unknown.is_empty() {
+        message.push(format!(
+            "新增的 namelist 变量应用还不认识，这个版本里只能用代码里的默认值，不能通过参数改值或研究来设：{}",
+            unknown.join("、")
+        ));
+    }
+    if !recognised.is_empty() {
+        message.push(format!(
+            "新增的 namelist 变量应用已认识，可以照常设置：{}",
+            recognised.join("、")
+        ));
+    }
+    if !removed.is_empty() {
+        message.push(format!(
+            "删掉了这些 namelist 变量，还写着它们的算例在这个版本上会读 namelist 出错：{}",
+            removed.join("、")
+        ));
+    }
+    Ok(Item {
+        code: "namelist",
+        ok: unknown.is_empty() && removed.is_empty(),
+        blocking: false,
+        message: message.join("；"),
     })
 }
 

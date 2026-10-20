@@ -173,6 +173,7 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         }
         "model-attach-network" => attach_network(&store, opts)?,
         "model-import-process" => import_process(&store, opts)?,
+        "model-import-study" => import_study(&store, opts)?,
         "model-freeze-check" => {
             let draft = store.draft(&opts.need_str("--model-id")?)?;
             match freeze_check(opts, &draft)? {
@@ -1300,6 +1301,89 @@ mod tests {
     }
 
     #[test]
+    fn calibrated_values_become_the_same_overrides_as_manual_edits() {
+        use crate::study::spec::{
+            MemberPlan, ParameterScopeInstance, ParameterScopeKind, ParameterSpec,
+        };
+        use colm_case::parameters::{ParameterScope, Storage};
+        let catalog = colm_case::parameters::all();
+        let scalar = catalog
+            .iter()
+            .find(|d| {
+                d.scope == ParameterScope::CaseScalar
+                    && d.storage == Storage::CaseNml
+                    && d.calibration_eligible
+                    && d.value_kind.eq_ignore_ascii_case("real")
+                    && d.default.is_some()
+            })
+            .expect("a calibratable real case scalar");
+        let pft = catalog
+            .iter()
+            .find(|d| d.scope == ParameterScope::PftType && d.storage == Storage::PftOverride)
+            .expect("a PFT parameter");
+        let spec = |d: &colm_case::parameters::ParameterDescriptor,
+                    scope: Option<ParameterScopeInstance>| ParameterSpec {
+            name: d.raw_key.clone(),
+            parameter_id: Some(d.id.clone()),
+            scope_instance: scope,
+            sample_min: 0.0,
+            sample_max: 1.0,
+            scale: None,
+        };
+        let pft_spec = spec(
+            pft,
+            Some(ParameterScopeInstance {
+                kind: ParameterScopeKind::PftType,
+                scheme: None,
+                index: Some(1),
+                type_name: None,
+            }),
+        );
+        let parameters = vec![spec(scalar, None), pft_spec.clone()];
+        // Defaults are Fortran literals such as 0.01_r8.
+        let scalar_value: f64 = scalar
+            .default
+            .as_deref()
+            .unwrap()
+            .trim_end_matches("_r8")
+            .parse()
+            .unwrap();
+        let pft_value = colm_case::pft::default_value(&pft.raw_key, 1, false, false)
+            .ok()
+            .flatten()
+            .unwrap_or(0.5);
+        let member = MemberPlan {
+            id: "m7".into(),
+            generation: 0,
+            candidate_index: 0,
+            baseline: false,
+            parameters: [
+                (scalar.raw_key.clone(), scalar_value),
+                (pft_spec.member_key(), pft_value),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let records = study_parameter_records(&parameters, &member).unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].scope_instance.kind, "case-scalar");
+        assert_eq!(records[1].scope_instance.kind, "pft");
+        assert_eq!(records[1].scope_instance.index, Some(1));
+        // The records pass the same validation as overrides typed on the version page.
+        colm_model::validate_overlay(&colm_model::Overlay {
+            parameters: records,
+            ..Default::default()
+        })
+        .unwrap();
+        // A value the member lacks is an error, not a silent default.
+        let missing = MemberPlan {
+            parameters: Default::default(),
+            ..member
+        };
+        assert!(study_parameter_records(&parameters, &missing).is_err());
+    }
+
+    #[test]
     fn a_complete_code_cache_published_first_is_kept() {
         let root = std::env::temp_dir().join(format!("colm-code-cache-{}", unique_id()));
         let dest = root.join("cache");
@@ -1797,43 +1881,12 @@ fn attach_network(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
             config: std::fs::read_to_string(staging.join("hybrid.toml"))?,
             assets,
         });
-        let mut evidence = Vec::new();
-        let mut calibration: Option<(i64, i64)> = None;
-        let mut validation: Option<(i64, i64)> = None;
-        for path in opts.get_all("--study-dir") {
-            let path = PathBuf::from(path).canonicalize()?;
-            let _lock = crate::study::runner::StudyRunLock::acquire(&path)?;
-            let manifest = crate::study::engine::status(&path)?;
-            crate::study::engine::verify_frozen_inputs(&manifest)?;
-            for site in &manifest.spec.base_cases {
-                if !draft.applicability.sites.contains(site) {
-                    draft.applicability.sites.push(site.clone());
-                }
-            }
-            for target in &manifest.spec.targets {
-                calibration = Some(match calibration {
-                    Some((a, b)) => (a.min(target.from), b.max(target.to)),
-                    None => (target.from, target.to),
-                });
-                if let (Some(from), Some(to)) = (target.validation_from, target.validation_to) {
-                    validation = Some(match validation {
-                        Some((a, b)) => (a.min(from), b.max(to)),
-                        None => (from, to),
-                    });
-                }
-            }
-            evidence.push(serde_json::json!({"study":path,"targets":manifest.spec.targets,"sites":manifest.spec.base_cases,"state":crate::study::runner::status_state(&path)?}));
-        }
-        if !evidence.is_empty() {
-            let period = |(from, to)| colm_model::Period {
-                start: crate::unix_date(from),
-                end: crate::unix_date(to),
-            };
-            draft.applicability.calibration = calibration.map(period);
-            draft.applicability.validation = validation.map(period);
-            draft.derived_from =
-                Some(serde_json::json!({"declared_training_studies":evidence}).to_string());
-        }
+        let studies = opts
+            .get_all("--study-dir")
+            .into_iter()
+            .map(|path| Ok(PathBuf::from(path).canonicalize()?))
+            .collect::<Result<Vec<_>>>()?;
+        declare_studies(&mut draft, &studies)?;
         let draft = store.save_draft(draft, expected)?;
         Ok(serde_json::json!({"draft":draft,"asset_root":staging}))
     })();
@@ -1841,6 +1894,166 @@ fn attach_network(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
         let _ = std::fs::remove_dir_all(staging);
     }
     result
+}
+
+/// 记下一个版本由哪些研究得来：站点并进适用范围，率定与验证时段取各研究目标的并集，研究本身写进
+/// `derived_from`。挂 AI 网络与写入率定参数共用这一份。
+fn declare_studies(draft: &mut ModelDraft, studies: &[PathBuf]) -> Result<()> {
+    let mut evidence = Vec::new();
+    let mut calibration: Option<(i64, i64)> = None;
+    let mut validation: Option<(i64, i64)> = None;
+    for path in studies {
+        let _lock = crate::study::runner::StudyRunLock::acquire(path)?;
+        let manifest = crate::study::engine::status(path)?;
+        crate::study::engine::verify_frozen_inputs(&manifest)?;
+        for site in &manifest.spec.base_cases {
+            if !draft.applicability.sites.contains(site) {
+                draft.applicability.sites.push(site.clone());
+            }
+        }
+        for target in &manifest.spec.targets {
+            calibration = Some(match calibration {
+                Some((a, b)) => (a.min(target.from), b.max(target.to)),
+                None => (target.from, target.to),
+            });
+            if let (Some(from), Some(to)) = (target.validation_from, target.validation_to) {
+                validation = Some(match validation {
+                    Some((a, b)) => (a.min(from), b.max(to)),
+                    None => (from, to),
+                });
+            }
+        }
+        evidence.push(serde_json::json!({"study":path,"targets":manifest.spec.targets,"sites":manifest.spec.base_cases,"state":crate::study::runner::status_state(path)?}));
+    }
+    if !evidence.is_empty() {
+        let period = |(from, to)| colm_model::Period {
+            start: crate::unix_date(from),
+            end: crate::unix_date(to),
+        };
+        draft.applicability.calibration = calibration.map(period);
+        draft.applicability.validation = validation.map(period);
+        draft.derived_from =
+            Some(serde_json::json!({"declared_training_studies":evidence}).to_string());
+    }
+    Ok(())
+}
+
+/// 研究成员的参数值 → 版本的参数改值记录，与手工改值同一种形式。
+fn study_parameter_records(
+    parameters: &[crate::study::spec::ParameterSpec],
+    member: &crate::study::spec::MemberPlan,
+) -> Result<Vec<colm_model::ParameterOverrideRecord>> {
+    use crate::study::spec::ParameterScopeKind as Kind;
+    let mut records = Vec::new();
+    for parameter in parameters {
+        let descriptor = parameter.descriptor()?;
+        let key = parameter.member_key();
+        let value = *member
+            .parameters
+            .get(&key)
+            .with_context(|| format!("member {} has no value for {key}", member.id))?;
+        let scope = parameter.scope_instance.as_ref();
+        let (kind, scheme, index) = match scope.map(|s| s.kind) {
+            None | Some(Kind::CaseScalar) => ("case-scalar", None, None),
+            Some(Kind::LandCoverClass) => (
+                "land-cover-class",
+                scope.and_then(|s| s.scheme.clone()).map(|s| s.to_ascii_uppercase()),
+                scope.and_then(|s| s.index),
+            ),
+            Some(Kind::PftType) => ("pft", None, scope.and_then(|s| s.index)),
+            Some(Kind::PcPftComponent) => ("pc-pft", None, scope.and_then(|s| s.index)),
+            Some(Kind::SoilLayer) => anyhow::bail!(
+                "{} is a soil-layer parameter, which a model version cannot override; apply it to a case instead",
+                parameter.name
+            ),
+        };
+        // 改值的形式由参数存在哪决定；对不上（比如存在过程参数文件里的）就不猜，交给"应用到算例"。
+        {
+            use colm_case::parameters::Storage;
+            let fits = matches!(
+                (kind, &descriptor.storage),
+                ("case-scalar" | "land-cover-class", Storage::CaseNml)
+                    | ("pft", Storage::PftOverride)
+                    | ("pc-pft", Storage::PcPftOverride)
+            );
+            ensure!(
+                fits,
+                "{} cannot be written into a model version from a study; apply it to a case instead",
+                parameter.name
+            );
+        }
+        let value = if descriptor.value_kind.eq_ignore_ascii_case("integer") {
+            format!("{}", value.round() as i64)
+        } else {
+            format!("{value:?}")
+        };
+        records.push(colm_model::ParameterOverrideRecord {
+            parameter_id: descriptor.id.clone(),
+            raw_key: descriptor.raw_key.clone(),
+            scope_instance: colm_model::ParameterScopeInstance {
+                kind: kind.into(),
+                scheme,
+                index,
+                type_name: scope.and_then(|s| s.type_name.clone()),
+                process_file: None,
+            },
+            value,
+            expected_old_value: None,
+            unit: descriptor.unit.clone(),
+        });
+    }
+    Ok(records)
+}
+
+/// 把一次率定（或敏感性）研究里某个成员（默认最优）的参数值写进草稿的参数改值。原来率定结果只能
+/// "应用到一个新算例"，进不了版本（2026-10-20 梳理）。研究里的参数都在参数目录里登记过，按目录身份
+/// 写成和手工改值完全一样的记录；土层参数没有版本里的改值形式，AI 网络走"挂网络"那条路，都明确拒绝。
+fn import_study(store: &Registry, opts: &Opts) -> Result<serde_json::Value> {
+    let mut draft = store.draft(&opts.need_str("--model-id")?)?;
+    let expected = opts.need_str("--expected-generation")?.parse::<u64>()?;
+    ensure!(
+        draft.generation == expected,
+        "model draft changed; reload it before importing study parameters"
+    );
+    let study = PathBuf::from(opts.need_str("--study-dir")?).canonicalize()?;
+    let member_id = opts.get("--member").unwrap_or_else(|| "best".into());
+    let (records, member) = {
+        // 与研究页"存成新版本"同一组校验：输入没被改过、成员确实算完且有结果证据。
+        let (_lock, manifest, member) = crate::study::runner::verified_member(&study, &member_id)?;
+        ensure!(
+            !member
+                .parameters
+                .keys()
+                .any(|key| crate::study::hybrid::is_weight_key(key)),
+            "this study trained an AI network; attach the network from the research page instead"
+        );
+        let records = study_parameter_records(&manifest.spec.parameters, &member)?;
+        (records, member.id.clone())
+    };
+    let same = |a: &colm_model::ParameterOverrideRecord,
+                b: &colm_model::ParameterOverrideRecord| {
+        a.parameter_id == b.parameter_id
+            && a.scope_instance.scheme == b.scope_instance.scheme
+            && a.scope_instance.index == b.scope_instance.index
+            && a.scope_instance.process_file == b.scope_instance.process_file
+    };
+    for record in &records {
+        // 研究定下的值替换草稿里同一个参数原来的改值；一个案例标量同时也是物理开关时，以研究的值为准。
+        draft
+            .overlay
+            .parameters
+            .retain(|prior| !same(prior, record));
+        if record.scope_instance.kind == "case-scalar" {
+            draft
+                .overlay
+                .physics
+                .retain(|key, _| !key.eq_ignore_ascii_case(&record.raw_key));
+        }
+        draft.overlay.parameters.push(record.clone());
+    }
+    declare_studies(&mut draft, std::slice::from_ref(&study))?;
+    let draft = store.save_draft(draft, expected)?;
+    Ok(serde_json::json!({"draft":draft,"member":member,"parameters":records.len()}))
 }
 
 pub(crate) fn recorded_run_case(

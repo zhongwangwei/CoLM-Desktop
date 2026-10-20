@@ -192,6 +192,7 @@ pub fn run() {
             model_configuration,
             model_attach_network,
             model_import_process,
+            model_import_study,
             model_refresh_code,
             case_data_save,
             case_forcing_input,

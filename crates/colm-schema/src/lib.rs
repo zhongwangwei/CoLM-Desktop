@@ -13,6 +13,7 @@
 
 pub mod field;
 pub mod generated;
+pub mod source;
 
 pub use field::{Default, Field, FieldKind};
 

@@ -211,6 +211,7 @@ fn action_kind(command: &str) -> Option<&'static str> {
         | "model-freeze"
         | "model-attach-network"
         | "model-import-process"
+        | "model-import-study"
         | "model-rollback"
         | "study-save-version"
         | "ws-create"

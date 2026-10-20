@@ -34519,3 +34519,53 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - colm-cli 新增 `a_pack_submission_the_server_marked_failed_is_resolved_not_left_pending`。
       - 服务器清理测试增加：有 `submit_failed` 的站点不挡住删除。
       - colm-remote 113 条、colm-cli 465 条（串行）、gui/src-tauri 416 条（另有 1 条按设计跳过）、前端 745 条通过。工作区 clippy、两边 fmt、eslint、prettier、check-gui、构建通过。
+
+64. **新建修改版：可以复制任何版本的代码来改，并且能直接改、换、增、删任意文件（用户要求，2026-10-20）**：用户要"基于某版本修改任意部分代码或进行任意替代，包括研究里的和研究以外的代码"。原来新修改版只能沿用父版本的代码或挑一个已有工作区，改代码只能导入补丁或让助手改。
+    - **复制父版本的代码**（`7c47475c`）：
+      - `Workspace::create_from_snapshot` 接受普通目录、源码包或 git 快照。
+      - 快照里指向快照内部的相对符号链接照样复制：上游有 `vendor/CoLM202X/include/Makeoptions -> Makeoptions.github`。指出快照的链接拒绝复制。
+      - 用 `git add -A -f`：被 `.gitignore` 忽略的文件也要进提交，否则内容哈希对不上。实测：从源码包复制时，被忽略的文件没进跟踪，哈希核对失败，所以官方父版本改为从 `cache/source` 这个普通目录复制。
+      - 父版本是修改版时，从它缓存的克隆取冻结时的那个提交，`based_on` 和 `root_commit` 从缓存的 `workspace.json` 读。
+      - 复制完核对内容哈希，必须与父版本冻结时的一致，不一致就删掉工作区并报错。
+      - 版本页加了"新版本的代码"一项：沿用父版本的代码、复制父版本的代码来修改、使用已有的代码工作区。
+      - 实测：在临时注册表里从官方 r99 复制，3.4 s，哈希 `f2259a…` 与父版本一致。
+    - **直接改文件**（`37480059`，`colm-workspace` 的 `files.rs`）：
+      - 浏览、读、写文本，用本机的文件或整个文件夹替换（可以是二进制，比如查找表），新增，删除。
+      - 每次改动是一次提交，可以撤回；要求工作区干净。路径规则同补丁（`patch::check_path`：不出 `src/`、不碰 `.git` 与黄金参考），写入路径上不许有符号链接。
+      - 上限：文本 2 MB；单个文件 64 MB；文件夹 20 000 个文件、512 MB，不能含符号链接或 `.git`。
+      - CLI：`ws-ls`、`ws-file`、`ws-write`、`ws-put`、`ws-put-dir`、`ws-rm`。界面：修改版代码区的"代码文件"面板（`CodeFiles.tsx`）。
+    - 测试：colm-workspace 的 `files_tests.rs` 三条（编辑提交、二进制与文件夹替换、拒绝受保护路径、链接和未提交的改动），复制快照的测试；前端 `code-files.test.ts`。
+
+65. **冻结前检查**（`e8939297`，`colm_workspace::version::freeze_check`）：冻结以后这个版本就固定给算例和服务器用，所以先确认它能用。
+    - 检查项：
+      - 源码干净；
+      - 当前提交上编好了这个版本自己的 Rust 引擎（不论改没改 Rust 都要）；
+      - 改了 Fortran 时，当前提交上编好了至少一个内核预设；
+      - 改了生成表的来源（四个 Fortran 源、`xtask/`、生成出的表）时，drift 检查在当前提交上通过；
+      - 继承来的参数改值在新代码的 `MOD_Namelist.F90` 里还有对应变量；
+      - 还没改会影响计算结果的代码时给提示（不拦）。
+    - `model-freeze` 在检查没过时拒绝冻结。版本页列出各项和"重新检查"，有拦着的项时冻结按钮不可用。
+
+66. **研究结果并进修改版，以及 namelist 新增变量的提示（2026-10-20）**：
+    - **问题**：研究得出的参数只能在研究页"存成新版本"，单独冻结成一个版本，不能和代码改动放在同一个修改版里。
+    - **改动**：
+      - `model-import-study --model-id --study-dir [--member best] --expected-generation`，界面上是参数卡片里的"从研究导入最优参数…"。
+      - 导入前的校验与"存成新版本"共用 `study::runner::verified_member`：清掉过期的运行锁、确认研究清单支持、输入没被改过、成员确实算完且有结果证据。导入原来少了其中两项，所以抽成一个函数，两边不会再走偏。
+      - 研究的参数换成和手动改值同样的记录：案例标量对应 `case-scalar`；地类对应 `land-cover-class`（方案大写，序号从 1 起）；PFT 对应 `pft`（从 0 起）；PC 对应 `pc-pft`。土壤分层的参数、存储方式对不上的参数拒绝导入。
+      - 草稿里同一参数原来的改值被替换。一个案例标量同时也是物理开关时，以研究的值为准。研究记进 `derived_from`，同一研究不重复记。
+      - 训练过 AI 网络的研究拒绝导入，提示去研究页挂网络。
+    - **namelist 新增变量**：
+      - 参数目录和 namelist 字段表是随应用编进来的，参数页、研究、算例设置都用它。修改版在 `MOD_Namelist.F90` 里新加的变量，应用不认识，所以不能通过参数改值或研究来设，只能改代码里的默认值。
+      - 被否决的方案：
+        - 让注册表操作改走修改版自己编出的 colm-cli。否决理由：程序版本不同的程序会去写同一份共享注册表。
+        - 运行时注入参数目录。否决理由：要改的模块太多。
+        - 这两个方案留作后续。
+      - 这轮只做提示：冻结检查在 `MOD_Namelist.F90` 被改过时加一项 `namelist`（不拦冻结）。它把这份代码的 namelist 语句与官方基线比较，分三类列出：应用还不认识的新变量、应用已认识的新变量、被删掉的变量（还写着它们的算例读 namelist 会出错）。
+      - 解析 namelist 语句的代码从 xtask 搬到 `colm_schema::source::namelist_groups`，生成器和冻结检查共用。生成结果不变，drift 测试通过。
+    - **实测**（研究路径太长会超过 CoLM 的 256 字节上限，所以放在仓库的 `tmp/imps`）：
+      - 研究：CN-Cng 示例站，2008 年 1–3 月；率定 `DEF_TUNING_CNFAC` 和 IGBP 草地（序号 10）的 `DEF_LC_VMAX25`；目标为 Qle 的 NRMSE；DE 种群 4、跑 1 代。9 个成员全部成功，用时 5.6 s，最优是 m000001（NRMSE 1.658）。
+      - 导入临时注册表里的草稿后，两条改值与 m000001 成员 namelist 里的值相同（0.26275…、6.86422…e-5）。草稿的 generation 从 1 变为 2。
+      - 用旧的 generation 再导入，被拒绝。换 m000004 导入时替换了原来那两条，没有变成四条；研究只记了一次。
+      - 冻结检查里 `parameters` 一项通过。
+      - 在同一个工作区的真实 `MOD_Namelist.F90` 里新增 `DEF_USE_MyRootScheme`、删掉 `DEF_USE_WUEST` 后，`namelist` 一项报出：应用还不认识的新变量 `DEF_USE_MyRootScheme`，删掉的变量 `DEF_USE_WUEST`。另外 `kernel_built` 和 `drift` 两项拦住冻结。
+    - 测试：colm-cli `calibrated_values_become_the_same_overrides_as_manual_edits`；colm-workspace `namelist_variables_added_or_removed_by_a_version_are_reported`。

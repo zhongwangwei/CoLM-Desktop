@@ -15,7 +15,6 @@ mod co2;
 mod gui;
 mod hist;
 mod landcover;
-mod namelist;
 mod sidecar;
 mod usage;
 
@@ -415,7 +414,7 @@ fn gen_schema() -> Result<()> {
     let src = root.join("vendor/CoLM202X/share/MOD_Namelist.F90");
     let text =
         std::fs::read_to_string(&src).with_context(|| format!("cannot read {}", src.display()))?;
-    let groups = namelist::groups(&text);
+    let groups = colm_schema::source::namelist_groups(&text);
     if groups.len() < 150 {
         bail!(
             "only {} namelist members found — the statement format must have changed",

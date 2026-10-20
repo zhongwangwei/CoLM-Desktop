@@ -10,6 +10,7 @@ description = "Development workspaces for the AI assistant (docs/design-ai-assis
 
 [dependencies]
 anyhow.workspace = true
+colm-schema = { path = "../colm-schema" }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 # 对比两份 history 要读 NetCDF；与 colm-cli 一样静态链接。

@@ -40,6 +40,7 @@ export default function VersionsPage() {
       items: { code: string; ok: boolean; blocking: boolean; message: string }[];
     } | null>(null),
     [checkTick, setCheckTick] = useState(0),
+    [studyNotice, setStudyNotice] = useState(''),
     [parameter, setParameter] = useState(''),
     [value, setValue] = useState(''),
     [index, setIndex] = useState(1),
@@ -242,6 +243,29 @@ export default function VersionsPage() {
       dirtyNow.current = false;
       setDirty(false);
       setDrafts(await invokeJson('model_drafts'));
+    });
+  }
+  // 研究的结果写进这个版本：选一个已完成的率定或敏感性研究，把它最优成员的参数值写成参数改值。
+  async function importStudyParameters() {
+    await execute(async () => {
+      if (!draft) throw new Error('No current draft');
+      const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
+      if (!studyDir) return;
+      const current = dirtyNow.current ? await save() : draft;
+      const result = await invokeJson<{ draft: ModelDraft; member: string; parameters: number }>(
+        'model_import_study',
+        { id: current.id, studyDir, member: null, expectedGeneration: current.generation },
+      );
+      setDraft(result.draft);
+      dirtyNow.current = false;
+      setDirty(false);
+      setDrafts(await invokeJson('model_drafts'));
+      setStudyNotice(
+        t(
+          `已把研究最优成员 ${result.member} 的 ${result.parameters} 个参数写进这个版本，并记下了研究的站点与时段。`,
+          `Wrote ${result.parameters} parameters of the study's best member ${result.member} into this version and recorded the study's sites and periods.`,
+        ),
+      );
     });
   }
   const setup = state.simulationReturn?.route === 'new-case' ? state.newCaseSeed?.form : null;
@@ -677,6 +701,13 @@ export default function VersionsPage() {
         run: addParameter,
       },
       {
+        id: 'version-import-study',
+        label: t('从研究导入最优参数', 'Import the best parameters from a study'),
+        kind: 'commit',
+        enabled: !busy && !codeBusy,
+        run: () => importStudyParameters(),
+      },
+      {
         id: 'version-import-parameters',
         label: t('导入参数 JSON', 'Import parameters JSON'),
         kind: 'click',
@@ -1066,6 +1097,18 @@ export default function VersionsPage() {
           <Card title={t('参数', 'Parameters')}>
             {editable && (
               <>
+                <div className="button-row">
+                  <Button disabled={busy || codeBusy} onClick={() => void importStudyParameters()}>
+                    {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
+                  </Button>
+                  <span className="muted">
+                    {t(
+                      '选一个已完成的率定或敏感性研究目录；它最优成员的参数值会写成这个版本的参数改值。AI 网络请在研究页安装。',
+                      'Choose a finished calibration or sensitivity study folder; its best member’s values become this version’s parameter overrides. Install AI networks from the research page.',
+                    )}
+                  </span>
+                </div>
+                {studyNotice && <Notice tone="success">{studyNotice}</Notice>}
                 <Field label={t('搜索参数', 'Search parameters')}>
                   <Input value={query} onChange={(e) => setQuery(e.target.value)} />
                 </Field>
