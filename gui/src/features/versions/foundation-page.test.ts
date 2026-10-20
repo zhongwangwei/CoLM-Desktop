@@ -15,12 +15,13 @@ function page(
   subgrid?: 'LCT' | 'PFT' | 'PC',
   physics: Record<string, string> = {},
   parameters: ParameterOverride[] = [],
+  codeRef: Record<string, unknown> = { kind: 'official' },
 ) {
   const version = {
     name: 'Official',
     note: '',
     version: { id: 'official', revision: 1 },
-    code: { kind: 'official' },
+    code: codeRef,
     overlay: { physics, parameters, process_files: [], hybrid: {} },
     applicability: { sites: [], land_classes: [] },
   };
@@ -50,6 +51,7 @@ function page(
     contract: { fields: UiField[]; actions: UiAction[]; status: string };
   const slots: unknown[] = [],
     registered = new Set<number>(),
+    effectDeps = new Map<number, unknown[]>(),
     effects: (() => unknown)[] = [],
     elements: Element[] = [];
   const context = {
@@ -110,12 +112,18 @@ function page(
       if (!(key in slots)) slots[key] = { current: initial };
       return slots[key];
     },
-    useEffect: (fn: () => unknown) => {
+    useEffect: (fn: () => unknown, deps?: unknown[]) => {
       const key = effectCursor++;
-      if (!registered.has(key)) {
+      const previous = effectDeps.get(key);
+      // Like React: run once, and again whenever a dependency changes.
+      if (
+        !registered.has(key) ||
+        (deps && previous && deps.some((value, index) => !Object.is(value, previous[index])))
+      ) {
         registered.add(key);
         effects.push(fn);
       }
+      if (deps) effectDeps.set(key, deps);
     },
     invokeJson: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
@@ -153,6 +161,19 @@ function page(
           return { items: [] };
         case 'model_draft':
           return draft;
+        case 'model_freeze_check':
+          return {
+            ready: false,
+            items: [
+              { code: 'clean', ok: true, blocking: false, message: '源码干净' },
+              {
+                code: 'engine_built',
+                ok: false,
+                blocking: true,
+                message: '先在当前提交上编译 Rust 引擎',
+              },
+            ],
+          };
         default:
           throw Error(command);
       }
@@ -290,4 +311,17 @@ test('a new version can copy its parent code into a workspace of its own', async
   assert.equal(call.args.workspace, null);
   set('version-code', 'existing');
   assert.ok(c.fields.some((field) => field.id === 'version-workspace'));
+});
+
+test('a draft on its own code shows what blocks freezing and cannot be frozen until it is fixed', async () => {
+  const p = page(undefined, {}, [], { kind: 'workspace', workspace: 'ver-1', commit: 'abc' });
+  let c = await p.mount();
+  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
+  c = await p.mount();
+  assert.ok(p.calls.some((call) => call.command === 'model_freeze_check'));
+  assert.equal(c.actions.find((a) => a.id === 'version-freeze')?.enabled, false);
+  const texts = p.elements.flatMap((e) =>
+    ((e as { children?: unknown[] }).children ?? []).filter((x) => typeof x === 'string'),
+  );
+  assert.ok(texts.includes('先在当前提交上编译 Rust 引擎'));
 });

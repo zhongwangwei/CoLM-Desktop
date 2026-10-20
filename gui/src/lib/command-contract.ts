@@ -770,6 +770,12 @@ export const commandContract = {
       "rust_type": "u64"
     }
   },
+  "model_freeze_check": {
+    "id": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "model_freeze": {
     "id": {
       "required": true,

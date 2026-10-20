@@ -2958,3 +2958,44 @@ table input {
     grid-template-columns: 1fr;
   }
 }
+
+/* 冻结前检查清单。 */
+.freeze-check {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+}
+.freeze-check-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.freeze-check ul {
+  display: grid;
+  gap: 4px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 13px;
+}
+.freeze-check li {
+  display: flex;
+  gap: 8px;
+}
+.freeze-check li span {
+  flex: none;
+  width: 16px;
+  font-weight: 700;
+}
+.freeze-check li.is-ok span {
+  color: var(--ok);
+}
+.freeze-check li.is-blocking {
+  color: var(--danger);
+}
+.freeze-check li.is-note {
+  color: var(--muted);
+}

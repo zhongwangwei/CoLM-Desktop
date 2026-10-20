@@ -178,3 +178,76 @@ fn a_derived_version_counts_its_parents_changes_from_the_official_source() {
         "commits still count from the parent's head"
     );
 }
+
+fn blocking(check: &FreezeCheck) -> Vec<&'static str> {
+    check
+        .items
+        .iter()
+        .filter(|i| i.blocking)
+        .map(|i| i.code)
+        .collect()
+}
+
+#[test]
+fn a_version_freezes_only_when_built_consistent_and_its_parameters_still_exist() {
+    let root = temp("freeze-check");
+    let repo = root.join("source");
+    source_repo(&repo);
+    std::fs::create_dir_all(repo.join("vendor/CoLM202X/share")).unwrap();
+    std::fs::write(
+        repo.join("vendor/CoLM202X/share/MOD_Namelist.F90"),
+        "LOGICAL :: DEF_USE_PLANTHYDRAULICS = .false.\nREAL(r8) :: DEF_Kmax_sun = 2.0\n",
+    )
+    .unwrap();
+    git::run(&repo, &["add", "-A"]).unwrap();
+    git::run(&repo, &["commit", "-q", "-m", "namelist"]).unwrap();
+    let mut ws = Workspace::create(&root.join("ws"), "v", repo.to_str().unwrap(), None).unwrap();
+    // Untouched code still needs this version's own engine built.
+    let check = freeze_check(&ws, &[]).unwrap();
+    assert_eq!(blocking(&check), ["engine_built"]);
+    assert!(check.items.iter().any(|i| i.code == "no_model_change"));
+    mark_engine_built(&mut ws);
+    assert!(freeze_check(&ws, &[]).unwrap().ready);
+    // Fortran changed: a kernel built on this commit is needed, and the engine again.
+    edit_and_commit(&ws, "vendor/CoLM202X/main/MOD_Demo.F90");
+    assert_eq!(
+        blocking(&freeze_check(&ws, &[]).unwrap()),
+        ["engine_built", "kernel_built"]
+    );
+    mark_engine_built(&mut ws);
+    let head = ws.head().unwrap();
+    std::fs::create_dir_all(ws.kernels().join("default")).unwrap();
+    std::fs::write(ws.kernels().join("default/manifest.json"), "{}").unwrap();
+    ws.info.gates.kernels.insert("default".into(), gate(&head));
+    ws.save().unwrap();
+    assert!(freeze_check(&ws, &[]).unwrap().ready);
+    // The namelist source changed: the generated tables must pass the drift check on this commit.
+    std::fs::write(
+        ws.src().join("vendor/CoLM202X/share/MOD_Namelist.F90"),
+        "LOGICAL :: DEF_USE_PLANTHYDRAULICS = .false.\n",
+    )
+    .unwrap();
+    git::run(&ws.src(), &["commit", "-q", "-am", "drop Kmax"]).unwrap();
+    mark_engine_built(&mut ws);
+    let head = ws.head().unwrap();
+    ws.info.gates.kernels.insert("default".into(), gate(&head));
+    ws.save().unwrap();
+    let keys = vec![
+        "DEF_Kmax_sun".to_owned(),
+        "DEF_USE_PLANTHYDRAULICS".to_owned(),
+    ];
+    let check = freeze_check(&ws, &keys).unwrap();
+    assert_eq!(blocking(&check), ["drift", "parameters"]);
+    let parameters = check.items.iter().find(|i| i.code == "parameters").unwrap();
+    assert!(
+        parameters.message.contains("DEF_Kmax_sun")
+            && !parameters.message.contains("PLANTHYDRAULICS")
+    );
+    ws.info.gates.tests.insert("drift".into(), gate(&head));
+    ws.save().unwrap();
+    assert_eq!(blocking(&freeze_check(&ws, &keys).unwrap()), ["parameters"]);
+    assert!(freeze_check(&ws, &keys[1..]).unwrap().ready);
+    // Uncommitted edits block.
+    std::fs::write(ws.src().join("scratch.txt"), "x").unwrap();
+    assert!(blocking(&freeze_check(&ws, &[]).unwrap()).contains(&"clean"));
+}

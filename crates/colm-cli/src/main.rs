@@ -395,6 +395,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         | "model-draft"
         | "model-save-draft"
         | "model-freeze"
+        | "model-freeze-check"
         | "model-migrate-case"
         | "model-rollback"
         | "model-hybrid-check"

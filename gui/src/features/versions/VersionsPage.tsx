@@ -34,6 +34,12 @@ export default function VersionsPage() {
     [workspace, setWorkspace] = useState(''),
     // 新版本的代码从哪来：沿用父版本、复制父版本的代码来改，或用一个已有的代码工作区。
     [codeMode, setCodeMode] = useState<'inherit' | 'branch' | 'existing'>('inherit'),
+    // 冻结前的检查清单（只有用自己代码的草稿才有）；checkTick 用来手动重查。
+    [freezeCheck, setFreezeCheck] = useState<{
+      ready: boolean;
+      items: { code: string; ok: boolean; blocking: boolean; message: string }[];
+    } | null>(null),
+    [checkTick, setCheckTick] = useState(0),
     [parameter, setParameter] = useState(''),
     [value, setValue] = useState(''),
     [index, setIndex] = useState(1),
@@ -117,6 +123,23 @@ export default function VersionsPage() {
       live = false;
     };
   }, [draft?.id, state.versionRef.id]);
+  // 用自己代码的草稿：冻结前要编过引擎、改了 Fortran 要编过内核、改了生成表来源要过 drift、继承的参数
+  // 在新代码里还在。代码一变（提交号变了）或草稿保存后重查。
+  useEffect(() => {
+    let live = true;
+    setFreezeCheck(null);
+    if (!draft?.code.workspace) return;
+    invokeJson<NonNullable<typeof freezeCheck>>('model_freeze_check', { id: draft.id })
+      .then((check) => {
+        if (live) setFreezeCheck(check);
+      })
+      .catch((e) => {
+        if (live) setError(String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [draft?.id, draft?.code.workspace, draft?.code.commit, draft?.generation, checkTick]);
   async function execute<T>(fn: () => Promise<T>) {
     if (codeBusyNow.current)
       throw new Error(t('代码工作区操作进行中', 'A code workspace operation is in progress'));
@@ -643,7 +666,7 @@ export default function VersionsPage() {
         id: 'version-freeze',
         label: t('冻结修订', 'Freeze revision'),
         kind: 'commit',
-        enabled: !busy && !codeBusy,
+        enabled: !busy && !codeBusy && freezeCheck?.ready !== false,
         run: () => execute(freeze),
       },
       {
@@ -835,7 +858,11 @@ export default function VersionsPage() {
                   <Button disabled={busy || codeBusy || !dirty} onClick={() => run(save)}>
                     {t('保存草稿', 'Save draft')}
                   </Button>
-                  <Button disabled={busy || codeBusy} variant="primary" onClick={() => run(freeze)}>
+                  <Button
+                    disabled={busy || codeBusy || freezeCheck?.ready === false}
+                    variant="primary"
+                    onClick={() => run(freeze)}
+                  >
                     {t('冻结修订', 'Freeze revision')}
                   </Button>
                   <Button
@@ -849,6 +876,40 @@ export default function VersionsPage() {
                   </Button>
                   <span>{dirty ? t('未保存', 'Unsaved') : `generation ${draft.generation}`}</span>
                 </div>
+                {freezeCheck && (
+                  <div
+                    className="freeze-check"
+                    aria-label={t('冻结前检查', 'Checks before freezing')}
+                  >
+                    <div className="freeze-check-head">
+                      <strong>
+                        {freezeCheck.ready
+                          ? t('冻结前检查：可以冻结', 'Checks before freezing: ready')
+                          : t('冻结前检查：还不能冻结', 'Checks before freezing: not yet')}
+                      </strong>
+                      <Button
+                        variant="ghost"
+                        disabled={busy || codeBusy}
+                        onClick={() => setCheckTick((value) => value + 1)}
+                      >
+                        {t('重新检查', 'Check again')}
+                      </Button>
+                    </div>
+                    <ul>
+                      {freezeCheck.items.map((item) => (
+                        <li
+                          key={item.code}
+                          className={item.blocking ? 'is-blocking' : item.ok ? 'is-ok' : 'is-note'}
+                        >
+                          <span aria-hidden="true">
+                            {item.blocking ? '✕' : item.ok ? '✓' : 'i'}
+                          </span>
+                          {item.message}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <Field label={t('名称', 'Name')}>
                   <Input
                     disabled={busy || codeBusy}

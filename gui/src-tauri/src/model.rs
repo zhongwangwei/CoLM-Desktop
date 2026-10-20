@@ -403,6 +403,12 @@ pub async fn model_save_draft(
         .await?,
     )
 }
+/// 冻结前的检查清单（用自己代码的草稿：引擎、内核、生成表、继承的参数改值）。
+#[tauri::command]
+pub async fn model_freeze_check(id: String) -> Result<Value, String> {
+    cli(vec!["model-freeze-check".into(), "--model-id".into(), id]).await
+}
+
 #[tauri::command]
 pub async fn model_freeze(
     id: String,

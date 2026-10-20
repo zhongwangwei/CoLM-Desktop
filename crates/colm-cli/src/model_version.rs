@@ -173,6 +173,14 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
         }
         "model-attach-network" => attach_network(&store, opts)?,
         "model-import-process" => import_process(&store, opts)?,
+        "model-freeze-check" => {
+            let draft = store.draft(&opts.need_str("--model-id")?)?;
+            match freeze_check(opts, &draft)? {
+                Some(check) => serde_json::to_value(check)?,
+                // 沿用官方代码的版本没有自己的程序要编，参数与开关在保存草稿时已校验。
+                None => serde_json::json!({"ready": true, "items": []}),
+            }
+        }
         "model-freeze" => {
             let id = opts.need_str("--model-id")?;
             let mut draft = store.draft(&id)?;
@@ -183,6 +191,19 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
                     draft.code = actual;
                     draft = store.save_draft(draft, generation)?;
                 }
+            }
+            if let Some(check) = freeze_check(opts, &draft)? {
+                let blocking: Vec<String> = check
+                    .items
+                    .iter()
+                    .filter(|item| item.blocking)
+                    .map(|item| item.message.clone())
+                    .collect();
+                ensure!(
+                    blocking.is_empty(),
+                    "this version cannot be frozen yet: {}",
+                    blocking.join("; ")
+                );
             }
             verify_code(opts, &draft.code)?;
             cache_code(opts, &draft.code)?;
@@ -1608,6 +1629,34 @@ mod artifact_tests {
         assert_ne!(before, after);
         std::fs::remove_dir_all(root).unwrap();
     }
+}
+
+/// 用自己代码工作区的草稿在冻结前要过的检查（[`colm_workspace::version::freeze_check`]）；沿用官方
+/// 代码的草稿没有。核对的 namelist 变量是草稿里改了值的参数与物理开关。
+fn freeze_check(
+    opts: &Opts,
+    draft: &ModelDraft,
+) -> Result<Option<colm_workspace::version::FreezeCheck>> {
+    let Some(name) = draft.code.workspace.as_deref() else {
+        return Ok(None);
+    };
+    let workspace = colm_workspace::Workspace::open(
+        &crate::provenance::workspace_root(opts.get("--workspace-root")),
+        name,
+    )?;
+    let mut keys: Vec<String> = draft
+        .overlay
+        .parameters
+        .iter()
+        .filter(|record| record.scope_instance.kind == "case-scalar")
+        .map(|record| record.raw_key.clone())
+        .chain(draft.overlay.physics.keys().cloned())
+        .collect();
+    keys.sort();
+    keys.dedup();
+    Ok(Some(colm_workspace::version::freeze_check(
+        &workspace, &keys,
+    )?))
 }
 
 /// 新建修改版时给它一份自己的代码：从父版本冻结时的源码（模型库里的源码缓存）新建一个工作区，
