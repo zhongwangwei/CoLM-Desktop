@@ -24,11 +24,17 @@ import {
   type RemoteStudyRecord,
   type RemoteStudyReply,
 } from './remote-study';
-import type { ModelDraft, VersionRef } from '../../lib/types';
+import type { CaseProfile, ModelDraft, VersionRef } from '../../lib/types';
 import StudyImportDialog, { type StudyPreview } from '../versions/StudyImportDialog';
 import { REMOTE_CHECK_MS } from '../runs/run-model';
 import LiveServerLoad from '../runs/LiveServerLoad';
-import { researchMethods, methodFromStudy, completedCandidates } from './research-home';
+import {
+  researchMethods,
+  methodFromStudy,
+  completedCandidates,
+  resultFileLabel,
+  shownResultFiles,
+} from './research-home';
 import { hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
@@ -152,7 +158,15 @@ export default function ResearchPage() {
   const serverPartitions = useRef<Record<string, string>>({});
   const [remoteReply, setRemoteReply] = useState<RemoteStudyReply | null>(null);
   const [sites, setSites] = useState<string[]>([]);
-  const [kernel, setKernel] = useState(state.kernelDir || '');
+  // 研究只跑单点算例，只能用带 SinglePoint 的编译配置；原来区域配置也列着（标"区域"），选了就跑不起来。
+  const studyKernels = state.kernels.filter((k) => k.macros.includes('SinglePoint'));
+  const [kernel, setKernel] = useState(
+    () =>
+      studyKernels.find((k) => k.dir === state.kernelDir)?.dir ??
+      studyKernels.find((k) => k.preset === 'default')?.dir ??
+      studyKernels[0]?.dir ??
+      '',
+  );
   const [contexts, setContexts] = useState<ParameterContext[]>([]);
   const [parameters, setParameters] = useState<
     Record<string, { enabled: boolean; min: string; max: string; scale: string }>
@@ -163,7 +177,8 @@ export default function ResearchPage() {
   const [count, setCount] = useState('40');
   const [population, setPopulation] = useState('8');
   const [generations, setGenerations] = useState('4');
-  const [jobs, setJobs] = useState('1');
+  // 单点模拟很轻，默认同时跑 4 个；原来默认 1 个，几十次模拟一个接一个跑。
+  const [jobs, setJobs] = useState('4');
   const [seed, setSeed] = useState('1');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -178,6 +193,8 @@ export default function ResearchPage() {
   const [resultPath, setResultPath] = useState('');
   const [result, setResult] = useState('');
   const [out, setOut] = useState('');
+  // 导出研究的目录；原来和 AI 拟合的输出目录共用 out，填了一个另一个也跟着变。
+  const [exportDir, setExportDir] = useState('');
   const [name, setName] = useState('research-model');
   const [member, setMember] = useState('');
   const [busy, setBusy] = useState(false);
@@ -246,9 +263,6 @@ export default function ResearchPage() {
       current = false;
     };
   }, [notify]);
-  useEffect(() => {
-    if (!kernel && state.kernelDir) setKernel(state.kernelDir);
-  }, [state.kernelDir, kernel]);
   useEffect(() => {
     const requestEpoch = epoch;
     requestEpoch.current++;
@@ -364,8 +378,11 @@ export default function ResearchPage() {
         if (adopt) setStudyDir(path);
         setEnvelope(safe);
         if (remote?.host || pending?.host) setHost(remote?.host || pending?.host || '');
-        setMember(data.state?.best_member || '');
-        const files = (data.results || []).map((v) => (typeof v === 'string' ? v : v.path));
+        // 轮询刷新时保留用户在下拉框里选的成员，只有它不在成员里时才回到最优。
+        setMember((previous) =>
+          previous && data.state?.candidates?.[previous] ? previous : data.state?.best_member || '',
+        );
+        const files = shownResultFiles(data.results);
         setResultPath((previous) => (files.includes(previous) ? previous : files[0] || ''));
       }
       return safe;
@@ -761,22 +778,6 @@ export default function ResearchPage() {
         throw error;
       }
     });
-  const saveVersion = () =>
-    task(async (current) => {
-      if (!member || !name.trim()) throw new Error('Member and version name required');
-      const version = await invokeJson<{ version: { id: string; revision: number } }>(
-        'study_save_version',
-        {
-          studyDir,
-          member,
-          name,
-          note: 'Research product; applicability retained from study training and validation scope',
-        },
-      );
-      await refreshVersions();
-      if (current()) notify(`${version.version.id}@${version.version.revision}`);
-      return version;
-    });
   // 研究结果进模型版本和手动改参数走同一条路：先写进草稿，到版本页审阅、冻结。从草稿进来的写回那个草稿，
   // 否则以研究所用的版本为父版本新建一个。原来要么直接冻结成版本（跳过审阅和冻结检查），要么回版本页
   // 再手动找研究目录导入（2026-10-21 用户要求把研究理进"构建新版本"）。
@@ -873,10 +874,13 @@ export default function ResearchPage() {
     navigate('versions');
     return result;
   };
+  // AI 的检查、拟合用第 1 步选的算例。原来用的是"模拟"页打开的那个算例（state.selectedCase），
+  // 和研究选的算例不是一回事；没在别处打开算例时这两个按钮一直是灰的。
+  const aiCase = sites[0] ?? dir;
   const inspectHybrid = () =>
     task(async (current) => {
       const data = await invokeJson<Record<string, unknown>>('hybrid_info', {
-        case: await effectiveCase(dir),
+        case: await effectiveCase(aiCase),
       });
       if (current()) setHybridInfo(data);
       return data;
@@ -890,7 +894,7 @@ export default function ResearchPage() {
   const checkHybrid = () =>
     task(async (current) => {
       const data = await invokeJson('hybrid_check', {
-        case: dir,
+        case: aiCase,
         kernelDir: kernel,
         modelRevision: state.versionRef,
         preprocessors,
@@ -936,7 +940,7 @@ export default function ResearchPage() {
           ...data,
           networkSpec: net,
           studyDirs: [...chosenStudies],
-          sourceCase: dir,
+          sourceCase: aiCase,
           parent: state.versionRef,
         });
       return data;
@@ -1052,9 +1056,10 @@ export default function ResearchPage() {
     'Relative multiplier': '相对物理值乘数',
     'Train network with differential evolution': '通过差分进化训练网络',
     'Study directory': '研究任务目录',
-    'New model version / fit name': '新模型版本 / 拟合名称',
-    'Export / fit output directory': '导出 / 拟合输出目录',
-    'Member to save': '要保存的候选成员',
+    'AI fit name': 'AI 拟合名称',
+    'Export directory': '导出目录',
+    'Fit output directory': '拟合输出目录',
+    'Member to write': '要写入的成员',
     'Result file': '研究结果文件',
     'Ridge regularization': '岭回归正则系数',
     'Adam epochs': 'Adam 训练轮数',
@@ -1104,6 +1109,55 @@ export default function ResearchPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchMethod]);
+  // 第 3 步的率定期和观测文件原来全空着，要手填日期和绝对路径。所选算例的模拟期和算例记下的观测文件
+  // 都现成：进第 3 步时把空着的填上（几个算例取共同的模拟期）。只填空的、每组算例只填一次，
+  // 用户改过或清空的不再动。
+  const [casePeriod, setCasePeriod] = useState<[string, string] | null>(null);
+  const prefilledFor = useRef('');
+  useEffect(() => {
+    const key = `${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
+    if (!workbench || step !== 3 || !tuning || !sites.length || prefilledFor.current === key)
+      return;
+    prefilledFor.current = key;
+    let live = true;
+    void invoke<Record<string, CaseProfile>>('model_case_profiles', {
+      dirs: sites,
+      modelRevision: state.versionRef,
+    })
+      .then((profiles) => {
+        if (!live) return;
+        const all = sites.map((d) => profiles[d]).filter((p): p is CaseProfile => !!p);
+        const starts = all.map((p) => p.inputs.start).filter(Boolean);
+        const ends = all.map((p) => p.inputs.end).filter(Boolean);
+        if (starts.length === sites.length && ends.length === sites.length) {
+          const start = [...starts].sort().at(-1)!,
+            end = [...ends].sort()[0]!;
+          if (start < end) {
+            setCasePeriod([start, end]);
+            setFrom((old) => old || `${start}T00:00`);
+            setTo((old) => old || `${end}T00:00`);
+          }
+        }
+        const base = (path: string) =>
+          path
+            .replace(/[/\\]+$/, '')
+            .split(/[/\\]/)
+            .pop() || path;
+        setObservations((old) => {
+          const known = new Set(old.split('\n').map((line) => line.split('|')[0]!.trim()));
+          const added = sites
+            .filter((d) => profiles[d]?.obs_file && !known.has(base(d)))
+            .map((d) => `${base(d)} | ${profiles[d]!.obs_file}`);
+          return [old, ...added].filter(Boolean).join('\n');
+        });
+      })
+      // 读不到就照旧手填，不报错。
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workbench, step, tuning, sites.join('|'), state.versionRef.id, state.versionRef.revision]);
   // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
   // 任何研究都会写回那个草稿。
   useEffect(() => {
@@ -1187,7 +1241,7 @@ export default function ResearchPage() {
       'choice',
       [
         { value: '', label: tr('请选择可用的编译配置', 'Select an available build configuration') },
-        ...state.kernels.map((k) => ({ value: k.dir, label: k.dir })),
+        ...studyKernels.map((k) => ({ value: k.dir, label: k.dir })),
       ],
     ),
     ...state.cases.map((c) =>
@@ -1359,21 +1413,22 @@ export default function ResearchPage() {
       setResult('');
       setConfirmed(false);
     }),
-    field('product-name', 'New model version / fit name', name, setName),
-    field('export-directory', 'Export / fit output directory', out, setOut),
+    field('product-name', 'AI fit name', name, setName),
+    field('export-directory', 'Export directory', exportDir, setExportDir),
+    field('fit-directory', 'Fit output directory', out, setOut),
     ...(envelope
       ? [
-          field('study-member', 'Member to save', member, setMember),
+          field('study-member', 'Member to write', member, setMember),
           field(
             'study-result-file',
             'Result file',
             resultPath,
             setResultPath,
             'choice',
-            (envelope.results || []).map((v) => {
-              const path = typeof v === 'string' ? v : v.path;
-              return { value: path, label: path };
-            }),
+            shownResultFiles(envelope.results).map((path) => ({
+              value: path,
+              label: resultFileLabel(path, en),
+            })),
           ),
         ]
       : []),
@@ -1522,11 +1577,11 @@ export default function ResearchPage() {
       tr('导出研究', 'Export study'),
       () =>
         task(async (current) => {
-          const value = await invoke('study_export', { studyDir, out });
+          const value = await invoke('study_export', { studyDir, out: exportDir });
           if (current()) setResult(String(value));
           return value;
         }),
-      !!studyDir && !!out && !launching && !unresolvedRemote,
+      !!studyDir && !!exportDir && !launching && !unresolvedRemote,
       true,
     ),
     action(
@@ -1547,17 +1602,10 @@ export default function ResearchPage() {
       permissions.results && (!!state.researchTarget || !!modelUsed) && !unresolvedRemote,
       true,
     ),
-    action(
-      'study-save-version',
-      tr('不经草稿，直接保存为版本', 'Save as a version without a draft'),
-      saveVersion,
-      permissions.results && !!member && !!name && !unresolvedRemote,
-      true,
-    ),
   ];
   const aiActions = ai
     ? [
-        action('hybrid-info', tr('检查适用性', 'Inspect applicability'), inspectHybrid, !!dir),
+        action('hybrid-info', tr('检查适用性', 'Inspect applicability'), inspectHybrid, !!aiCase),
         action(
           'hybrid-climate',
           tr('生成气候特征', 'Generate climate features'),
@@ -1567,9 +1615,9 @@ export default function ResearchPage() {
         ),
         action(
           'hybrid-check',
-          tr('检查当前算例网络', 'Check case network'),
+          tr('在所选算例上检查网络', 'Check the network on the chosen case'),
           checkHybrid,
-          !!dir && !!kernel,
+          !!aiCase && !!kernel,
         ),
         action(
           'hybrid-studies',
@@ -1627,12 +1675,6 @@ export default function ResearchPage() {
     set: chooseMethod,
     disabled: busy || launching || unresolvedRemote,
   };
-  const newStudyAction = action(
-    'research-new',
-    tr('＋ 新建研究', '＋ New study'),
-    () => document.getElementById('research-method-tuning')?.focus(),
-    !launching && !unresolvedRemote,
-  );
   const hasStudy = !!studyDir && !!envelope;
   function returnToSimulation() {
     const target = state.simulationReturn;
@@ -1677,14 +1719,11 @@ export default function ResearchPage() {
   const currentState = remotePermissions.exists ? remoteStatus : status;
   const methodTitle = researchMethods.find((item) => item.id === tab)!;
   const currentMethod = researchMethods.find((item) => item.id === methodFromStudy(frozenSpec))!;
-  // 编译配置：没选时挑一个单点内核（优先 default）；界面上只显示配置名，不显示目录。
+  // 编译配置：没选、或选的不是单点配置时，挑一个单点配置（优先 default）；界面上只显示配置名。
   useEffect(() => {
-    if (kernel || !state.kernels.length) return;
-    const pick =
-      state.kernels.find((k) => k.preset === 'default') ??
-      state.kernels.find((k) => k.macros.includes('SinglePoint')) ??
-      state.kernels[0];
-    if (pick) setKernel(pick.dir);
+    const usable = state.kernels.filter((k) => k.macros.includes('SinglePoint'));
+    if (!usable.length || usable.some((k) => k.dir === kernel)) return;
+    setKernel((usable.find((k) => k.preset === 'default') ?? usable[0]!).dir);
   }, [state.kernels, kernel]);
   // 项目里只有一个单点算例时直接勾上（没有别的可选）。换版本会清空所选算例，所以不是只勾一次；
   // 用户自己动过勾选就不再替他勾。
@@ -1750,7 +1789,7 @@ export default function ResearchPage() {
           step: 'research',
           status: busy ? 'working' : error || currentState,
           fields: [homeMethod],
-          actions: [newStudyAction, ...homeActions],
+          actions: homeActions,
           details: {
             studyDir: hasStudy ? studyDir : null,
             status: hasStudy ? currentState : null,
@@ -1791,13 +1830,6 @@ export default function ResearchPage() {
               )}
             </p>
           </div>
-          <Button
-            variant="primary"
-            disabled={!newStudyAction.enabled}
-            onClick={() => execute(newStudyAction.run)}
-          >
-            {newStudyAction.label}
-          </Button>
         </header>
         {error && <Notice tone="error">{error}</Notice>}
         <div className="research-methods" role="group" aria-label={homeMethod.label}>
@@ -1888,7 +1920,7 @@ export default function ResearchPage() {
               </p>
               <p>
                 {tr(
-                  '这里显示本次打开的研究及其真实状态。',
+                  '这里显示本次打开的研究和它的进度。',
                   'The study opened in this session and its recorded status appear here.',
                 )}
               </p>
@@ -1926,6 +1958,12 @@ export default function ResearchPage() {
       const path = await invoke<string | null>('pick_file', { key: 'study-observation' });
       if (path) setObservation(site, path);
     });
+  const pickFolder = (key: string, set: (path: string) => void) =>
+    execute(async () => {
+      const path = await invoke<string | null>('pick_folder', { key });
+      if (path) set(path);
+    });
+  const resultFiles = shownResultFiles(envelope?.results);
   const metricNames: Record<string, [string, string]> = {
     nrmse: ['NRMSE 归一化均方根误差（越小越好）', 'NRMSE (lower is better)'],
     mae: ['MAE 平均绝对误差（越小越好）', 'MAE (lower is better)'],
@@ -2332,10 +2370,9 @@ export default function ResearchPage() {
                 onChange={(e) => setKernel(e.target.value)}
               >
                 <option value="">{tr('请选择', 'Choose one')}</option>
-                {state.kernels.map((k) => (
+                {studyKernels.map((k) => (
                   <option key={k.dir} value={k.dir}>
                     {k.preset}
-                    {k.macros.includes('SinglePoint') ? '' : tr('（区域）', ' (regional)')}
                   </option>
                 ))}
               </Select>
@@ -2384,17 +2421,15 @@ export default function ResearchPage() {
         >
           <div className="study-grid">
             <Field label={tr('网络作用在', 'Applies to')}>
-              <Select value={slot} onChange={(e) => chooseSlot(e.target.value)}>
-                {(tab === 'process' ? ['soil_stress'] : ['pft', 'land_class']).map((v) => (
-                  <option key={v} value={v}>
-                    {v === 'pft'
-                      ? tr('每个植物功能型', 'Each plant functional type')
-                      : v === 'land_class'
-                        ? tr('每个地类', 'Each land class')
-                        : tr('土壤水分胁迫 β', 'Soil-water stress β')}
-                  </option>
-                ))}
-              </Select>
+              {tab === 'process' ? (
+                // 替换过程目前只有这一项，一个选项的下拉框没得选。
+                <p className="study-fixed">{tr('土壤水分胁迫 β', 'Soil-water stress β')}</p>
+              ) : (
+                <Select value={slot} onChange={(e) => chooseSlot(e.target.value)}>
+                  <option value="pft">{tr('每个植物功能型', 'Each plant functional type')}</option>
+                  <option value="land_class">{tr('每个地类', 'Each land class')}</option>
+                </Select>
+              )}
             </Field>
             <Field label={tr('输入特征（逗号分隔）', 'Input features (comma separated)')}>
               <Input value={features} onChange={(e) => setFeatures(e.target.value)} />
@@ -2523,6 +2558,14 @@ export default function ResearchPage() {
                 })}
               </div>
               <div className="study-grid">
+                {casePeriod && (
+                  <p className="muted study-hint study-wide">
+                    {tr(
+                      `所选算例的模拟期：${casePeriod[0]} 至 ${casePeriod[1]}，率定期默认取这一段。`,
+                      `Simulation period of the chosen cases: ${casePeriod[0]} to ${casePeriod[1]}; the calibration period defaults to it.`,
+                    )}
+                  </p>
+                )}
                 <Field label={tr('率定期开始（UTC）', 'Calibration start (UTC)')}>
                   <Input
                     type="datetime-local"
@@ -2830,7 +2873,7 @@ export default function ResearchPage() {
               </div>
             )}
           </Card>
-          {ranked.length > 0 && (
+          {ranked.some(([, c]) => c.calibration != null) && (
             <Card
               title={tr('各组参数的成绩', 'Scores of each parameter set')}
               description={tr(
@@ -2898,11 +2941,17 @@ export default function ResearchPage() {
             >
               <div className="study-grid">
                 <Field label={tr('用哪个成员', 'Member')}>
-                  <Input
-                    value={member}
-                    placeholder={best ?? ''}
-                    onChange={(e) => setMember(e.target.value)}
-                  />
+                  {/* 原来是手填成员编号的输入框；成员就是上面成绩表里那些，直接选。 */}
+                  <Select value={member || best || ''} onChange={(e) => setMember(e.target.value)}>
+                    {ranked.map(([key, c]) => (
+                      <option key={key} value={key}>
+                        {key}
+                        {key === best ? tr('（最优）', ' (best)') : ''}
+                        {key === 'm000000' ? tr('（基准）', ' (baseline)') : ''}
+                        {c.calibration == null ? '' : ` · ${Number(c.calibration.toPrecision(4))}`}
+                      </option>
+                    ))}
+                  </Select>
                 </Field>
               </div>
               {!permissions.results ? (
@@ -2921,36 +2970,20 @@ export default function ResearchPage() {
                 )
               )}
               <div className="button-row">{renderActions([byId('study-write-version')!])}</div>
-              <Advanced title={tr('不经草稿，直接保存为版本', 'Save as a version without a draft')}>
-                <p className="muted study-hint">
-                  {tr(
-                    '直接冻结成一个版本，跳过版本页的审阅和冻结检查。',
-                    'Freezes a version directly, skipping the review and freeze checks on the versions page.',
-                  )}
-                </p>
-                <Field label={tr('新版本名称', 'New version name')}>
-                  <Input value={name} onChange={(e) => setName(e.target.value)} />
-                </Field>
-                <div className="button-row">{renderActions([byId('study-save-version')!])}</div>
-              </Advanced>
             </Card>
           )}
           {studyDir && (
             <Card title={tr('结果文件', 'Result files')}>
-              {(envelope?.results?.length ?? 0) > 0 ? (
+              {resultFiles.length > 0 ? (
                 <>
                   <div className="study-grid">
                     <Field label={tr('选一个结果文件', 'Result file')}>
                       <Select value={resultPath} onChange={(e) => setResultPath(e.target.value)}>
-                        <option value="">—</option>
-                        {(envelope?.results || []).map((v) => {
-                          const path = typeof v === 'string' ? v : v.path;
-                          return (
-                            <option key={path} value={path}>
-                              {path}
-                            </option>
-                          );
-                        })}
+                        {resultFiles.map((path) => (
+                          <option key={path} value={path}>
+                            {resultFileLabel(path, en)}
+                          </option>
+                        ))}
                       </Select>
                     </Field>
                   </div>
@@ -2962,7 +2995,12 @@ export default function ResearchPage() {
               {result && <StudyResult text={result} theme={state.theme} />}
               <Advanced title={tr('导出研究', 'Export the study')}>
                 <Field label={tr('导出到哪个目录', 'Export to')}>
-                  <Input value={out} onChange={(e) => setOut(e.target.value)} />
+                  <div className="study-path">
+                    <Input value={exportDir} onChange={(e) => setExportDir(e.target.value)} />
+                    <Button onClick={() => pickFolder('study-export', setExportDir)}>
+                      {tr('选择…', 'Choose…')}
+                    </Button>
+                  </div>
                 </Field>
                 <div className="button-row">{renderActions([byId('study-export')!])}</div>
               </Advanced>
@@ -3005,9 +3043,24 @@ export default function ResearchPage() {
                   ))}
                 </div>
               )}
-              <Field label={tr('拟合结果放在哪个目录', 'Fit output directory')}>
-                <Input value={out} onChange={(e) => setOut(e.target.value)} />
-              </Field>
+              <div className="study-grid">
+                <Field
+                  label={tr(
+                    '拟合名称（字母、数字、- 和 _）',
+                    'Fit name (letters, digits, - and _)',
+                  )}
+                >
+                  <Input value={name} onChange={(e) => setName(e.target.value)} />
+                </Field>
+                <Field label={tr('拟合结果放在哪个目录', 'Fit output directory')}>
+                  <div className="study-path">
+                    <Input value={out} onChange={(e) => setOut(e.target.value)} />
+                    <Button onClick={() => pickFolder('hybrid-fit-out', setOut)}>
+                      {tr('选择…', 'Choose…')}
+                    </Button>
+                  </div>
+                </Field>
+              </div>
               <div className="button-row">{renderActions(aiActions.slice(4))}</div>
               {fit && (
                 <Notice tone={fitValidation(fit.report) === true ? 'success' : 'warning'}>

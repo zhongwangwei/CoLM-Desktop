@@ -320,6 +320,22 @@
 .study-observation strong {
   overflow-wrap: anywhere;
 }
+/* 目录输入框 + "选择…"。 */
+.study-path {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+/* 只有一个取值时直接写出来，不放一个没得选的下拉框。 */
+.study-fixed {
+  margin: 0;
+  padding: 8px 0;
+  font-weight: 500;
+}
+.study-grid > .study-wide {
+  grid-column: 1 / -1;
+  margin: 0;
+}
 .study-budget {
   display: flex;
   align-items: baseline;

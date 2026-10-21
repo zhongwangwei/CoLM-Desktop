@@ -2,7 +2,12 @@ import { it } from 'node:test';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import assert from 'node:assert/strict';
-import { methodFromStudy, completedCandidates } from './research-home';
+import {
+  methodFromStudy,
+  completedCandidates,
+  resultFileLabel,
+  shownResultFiles,
+} from './research-home';
 it('opens existing studies in the matching built-in method', () => {
   assert.equal(methodFromStudy({ kind: 'uncertainty' }), 'uncertainty');
   assert.equal(methodFromStudy({ kind: 'tuning', hybrid: { slot: 'soil_stress' } }), 'process');
@@ -145,6 +150,7 @@ it('a picked directory becomes the current study only after a successful current
       setHost: noop,
       setMember: noop,
       setResultPath: noop,
+      shownResultFiles,
     }) as (path: string, adopt: boolean) => Promise<unknown>;
     if (outcome === 'broken') await assert.rejects(read('/picked', true), /missing manifest/);
     else await read('/picked', true);
@@ -281,4 +287,21 @@ it('refuses a new version for a study without a recorded version and cleans up f
     ['model_create', 'model_import_study', 'model_delete_draft'],
   );
   assert.equal(failing.written.length, 0);
+});
+
+it('result files list the results people read, not every member record', () => {
+  const files = shownResultFiles([
+    'de/g000001.json',
+    'metrics.csv',
+    { path: 'objectives.csv' },
+    'provenance/m000000/cng.json',
+    'tasks/m000001/cng.json',
+  ]);
+  assert.deepEqual(files, ['objectives.csv', 'de/g000001.json', 'metrics.csv']);
+  assert.equal(
+    resultFileLabel('objectives.csv', false),
+    '各成员的目标函数（表格） · objectives.csv',
+  );
+  assert.equal(resultFileLabel('de/g000012.json', false), '差分进化第 12 代 · de/g000012.json');
+  assert.equal(resultFileLabel('outputs/qle.csv', true), 'outputs/qle.csv');
 });

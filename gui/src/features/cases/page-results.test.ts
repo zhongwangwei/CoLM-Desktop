@@ -124,12 +124,13 @@ test('research inspection and saved-model callbacks return backend evidence even
     setContexts: ignored,
     spec: () => ({ caseRoot: '/project', specJson: '{}' }),
     member: 'm000001',
+    aiCase: '/case',
     name: 'soil',
     studyDir: '/study',
     notify: ignored,
     refreshVersions: async () => {},
   };
-  for (const name of ['check', 'inspectHybrid', 'checkHybrid', 'findStudies', 'saveVersion'])
+  for (const name of ['check', 'inspectHybrid', 'checkHybrid', 'findStudies'])
     assert.equal(
       await callback(research, name, common)(),
       evidence,

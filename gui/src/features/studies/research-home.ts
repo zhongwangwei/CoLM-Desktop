@@ -51,3 +51,31 @@ export function methodFromStudy(spec: unknown): string {
 export function completedCandidates(value: unknown): number | null {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
 }
+
+/**
+ * 给人看的结果文件：`provenance/`、`tasks/` 是每个成员的出处与任务记录（一个研究几十上百个），
+ * 原来全列在下拉框里，真正的结果反而找不到；它们仍在研究目录里，导出研究时一并带走。
+ */
+export function shownResultFiles(results: (string | { path: string })[] | undefined): string[] {
+  const files = (results || []).map((v) => (typeof v === 'string' ? v : v.path));
+  const shown = files.filter((path) => !/^(provenance|tasks)\//.test(path));
+  // 目标函数表放第一个：率定最常看的就是它。
+  return [...shown].sort(
+    (a, b) => Number(!a.startsWith('objectives.')) - Number(!b.startsWith('objectives.')),
+  );
+}
+export function resultFileLabel(path: string, en: boolean): string {
+  const generation = /^de\/g0*(\d+)\.json$/.exec(path);
+  const known: Record<string, [string, string]> = {
+    'objectives.csv': ['各成员的目标函数（表格）', 'Objective of each member (table)'],
+    'objectives.json': ['各成员的目标函数', 'Objective of each member'],
+    'metrics.csv': ['各成员的各项指标（表格）', 'Metrics of each member (table)'],
+    'metrics.json': ['各成员的各项指标', 'Metrics of each member'],
+  };
+  const label = generation
+    ? en
+      ? `Differential evolution, generation ${generation[1]}`
+      : `差分进化第 ${generation[1]} 代`
+    : known[path]?.[en ? 1 : 0];
+  return label ? `${label} · ${path}` : path;
+}
