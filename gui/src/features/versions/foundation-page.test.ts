@@ -487,3 +487,14 @@ test('closing the parameter table of a fresh hand-edit draft without changes can
   await e.settle();
   assert.equal(deletes(e), 0);
 });
+
+test('a draft offers importing a study only on its research tab', async () => {
+  const p = page();
+  const c = await p.mount();
+  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
+  await p.mount();
+  const imports = p.elements.filter(
+    (e) => e.type === 'Button' && e.children.flat().includes('从研究导入最优参数…'),
+  );
+  assert.equal(imports.length, 1);
+});

@@ -1470,18 +1470,12 @@ export default function VersionsPage() {
                     ? t('修改参数…', 'Edit parameters…')
                     : t('查看全部参数…', 'All parameters…')}
                 </Button>
+                {/* 研究结果从研究页"写入新版本 / 写回草稿"进来，别处做的研究在"研究"页签导入；
+                    这里原来也有一个"从研究导入最优参数…"，是研究并进版本之前留下的重复入口（2026-10-21 用户指出）。 */}
                 {editable && (
-                  <>
-                    <Button
-                      disabled={busy || codeBusy}
-                      onClick={() => void previewStudy().catch(() => {})}
-                    >
-                      {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
-                    </Button>
-                    <Button disabled={busy || codeBusy} onClick={() => run(importFile)}>
-                      {t('导入参数 JSON', 'Import parameters JSON')}
-                    </Button>
-                  </>
+                  <Button disabled={busy || codeBusy} onClick={() => run(importFile)}>
+                    {t('导入参数 JSON', 'Import parameters JSON')}
+                  </Button>
                 )}
                 <Button
                   variant="ghost"
