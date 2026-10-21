@@ -38,6 +38,24 @@ MODULE MOD_Grid_RiverLakeFlow
    real(r8), parameter :: RIVERMIN  = 1.e-5_r8
    real(r8), parameter :: RIVERLAKE_FLOOD_MISSING_VALUE = -1.e30_r8
 
+   ! --- Adaptive routing substep protection ---------------------------------
+   ! A near-dry unit catchment with a positive net outflow would otherwise set
+   ! dt = volwater/sum_hflux_riv -> 0.  With DEF_USE_BIFURCATION the smallest
+   ! dt of any cell on any worker is synchronized to every worker, so the
+   ! substep loop would need acctime_rnof/dt iterations and print nothing
+   ! until it finishes -- the job then looks hung for hours or days.  Under
+   ! bifurcation keep the storage constraint out of the near-empty regime (the
+   ! gross outgoing-face limiter caps those cells; without bifurcation there is
+   ! no such limiter, so the constraint stays in force), and in every mode fail
+   ! loudly if the substep count explodes.  The substep limits are given as a
+   ! mean substep dt, so they scale with the routing interval (a healthy
+   ! 0.1-degree US run averages ~8.6 s, i.e. ~420 substeps per 3600 s).
+   real(r8), parameter :: ROUTING_STORAGE_DT_EPS   = 1.e-6_r8  ! [m3]
+   real(r8), parameter :: ROUTING_SUBSTEP_WARN_DT  = 2._r8     ! [s] mean dt that warns
+   real(r8), parameter :: ROUTING_SUBSTEP_ABORT_DT = 0.2_r8    ! [s] mean dt that aborts
+   ! Global adaptive dt of the last completed substep (diagnostics only).
+   real(r8), save :: routing_last_global_dt = 0._r8
+
    real(r8), save :: acctime_rnof_max
    integer, save :: routing_zero_dt_warn_count = 0
 
@@ -305,7 +323,9 @@ CONTAINS
 
    ! Local Variables
    integer  :: i, j, irsv, ntimestep, ipth, i_up
+   integer  :: i_local_min, nsub_warn, nsub_abort
    real(r8) :: dt_this
+   real(r8) :: dt_local_min, sub_span, dt_report
    integer  :: sed_clock_start, sed_clock_end, sed_clock_rate
    real(r8) :: sed_elapsed
 
@@ -661,6 +681,16 @@ CONTAINS
       ENDIF
 
          dt_res(:) = acctime_rnof
+         ! Cell that binds the adaptive dt (diagnostics for the substep-count
+         ! warning below); reset again at the start of every substep.
+         dt_local_min = huge(1._r8)
+         i_local_min  = 0
+         ! Substep-count limits of this call.  acctime_rnof may exceed
+         ! acctime_rnof_max when deltime is longer than the routing interval.
+         sub_span = acctime_rnof_max
+         IF (ieee_is_finite(acctime_rnof)) sub_span = max(sub_span, acctime_rnof)
+         nsub_warn  = max(2, int(min(sub_span / ROUTING_SUBSTEP_WARN_DT,  1.e8_r8)) + 1)
+         nsub_abort = max(nsub_warn + 1, int(min(sub_span / ROUTING_SUBSTEP_ABORT_DT, 1.e9_r8)) + 1)
 
          IF (DEF_USE_BIFURCATION) THEN
             CALL bifurcation_invalidate_static_dn()
@@ -680,6 +710,48 @@ CONTAINS
          DO WHILE (loop_active)
 
             ntimestep = ntimestep + 1
+
+            ! Fail loudly instead of appearing to hang if the adaptive dt
+            ! collapses: warn once, then abort, when the substep count implies
+            ! a mean dt below ROUTING_SUBSTEP_WARN_DT / ROUTING_SUBSTEP_ABORT_DT
+            ! (otherwise the process sits in an effectively unbounded loop
+            ! with no output).  The binding cell and its state are those of the
+            ! previous, completed substep.  Under bifurcation the dt is global,
+            ! so all workers reach the limits together and the owner(s) of the
+            ! binding cell report it; otherwise each worker counts its own
+            ! river systems and reports its own binding cell.
+            IF (DEF_USE_BIFURCATION) THEN
+               dt_report = routing_last_global_dt
+            ELSE
+               dt_report = dt_local_min
+            ENDIF
+            IF (ntimestep == nsub_warn) THEN
+               IF (DEF_USE_BIFURCATION .and. p_iam_worker == p_root) THEN
+                  write(*,'(A,I0,A,ES12.4,A)') 'WARNING grid_riverlake_flow: substep count ', &
+                     ntimestep, ', dt_global=', dt_report, ' s; adaptive routing dt is very small'
+               ENDIF
+               IF (i_local_min > 0) THEN
+                  IF ((.not. DEF_USE_BIFURCATION) .or. &
+                      dt_local_min <= routing_last_global_dt * (1._r8 + 1.e-10_r8)) THEN
+                     write(*,'(A,I0,A,ES12.4,A,I0,A,I0,A,I0,A,ES12.4,A,ES12.4,A,ES12.4,A,ES12.4,A,L1)') &
+                        'WARNING grid_riverlake_flow: substep ', ntimestep, &
+                        ' binding dt=', dt_local_min, ' s; cell rank=', p_iam_glb, &
+                        ' ucat=', i_local_min, ' gid=', ucat_gdid(i_local_min), &
+                        ' rivlen=', topo_rivlen(i_local_min), ' rivare=', topo_rivare(i_local_min), &
+                        ' wdsrf=', wdsrf_ucat(i_local_min), &
+                        ' netflux=', sum_hflux_riv(i_local_min), &
+                        ' built_dam=', is_built_resv(i_local_min)
+                  ENDIF
+               ENDIF
+               ! Worker stdout is buffered when redirected; a hung job is
+               ! usually killed, which would lose this line.
+               flush(6)
+            ELSEIF (ntimestep > nsub_abort) THEN
+               IF (p_iam_worker == p_root .or. .not. DEF_USE_BIFURCATION) &
+                  write(*,'(A,I0,A,ES12.4,A)') 'ERROR grid_riverlake_flow: substep count exceeded ', &
+                     nsub_abort, ', binding dt=', dt_report, ' s'
+               CALL CoLM_stop('grid_riverlake_flow: adaptive routing dt collapsed')
+            ENDIF
 
             CALL worker_push_data (push_next2ucat, wdsrf_ucat, wdsrf_next, fillvalue = spval)
             ! velocity in ocean or inland depression is assumed to be 0.
@@ -892,6 +964,9 @@ CONTAINS
 
             ENDIF
 
+            dt_local_min = huge(1._r8)
+            i_local_min  = 0
+
             DO i = 1, numucat
 
                IF (.not. ucatfilter(i)) CYCLE
@@ -919,7 +994,16 @@ CONTAINS
                      volwater = volresv(ucat2resv(i))
                   ENDIF
 
-                  dt_this = min(dt_this, volwater / sum_hflux_riv(i))
+                  ! With bifurcation, tiny storage is protected by the gross
+                  ! outgoing-face limiter below rather than by forcing a
+                  ! pathological dt: a nearly dry cell with a small positive
+                  ! net outflow would drive the globally synchronized dt
+                  ! towards 0 and the substep loop would effectively never
+                  ! terminate.  This restores the guard the fork had before
+                  ! the SYSU integration merge.  That limiter only runs with
+                  ! bifurcation, so otherwise the bound always applies.
+                  IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &
+                     dt_this = min(dt_this, volwater / sum_hflux_riv(i))
 
                ENDIF
 
@@ -933,6 +1017,12 @@ CONTAINS
                ENDIF
 
                dt_all(irivsys(i)) = min(dt_this, dt_all(irivsys(i)))
+
+               ! Record the binding cell of this sub-step (diagnostics only).
+               IF (dt_this < dt_local_min) THEN
+                  dt_local_min = dt_this
+                  i_local_min  = i
+               ENDIF
 
             ENDDO
 
@@ -1003,6 +1093,11 @@ CONTAINS
                         IF (.not. ieee_is_finite(dt_this) .or. dt_this <= 0._r8) &
                            CALL CoLM_stop('grid_riverlake_flow: invalid final momentum dt')
                         dt_all(irivsys(i)) = min(dt_all(irivsys(i)), dt_this)
+                        ! The final momentum bound can bind the step too.
+                        IF (dt_this < dt_local_min) THEN
+                           dt_local_min = dt_this
+                           i_local_min  = i
+                        ENDIF
                      ENDIF
                   ENDDO
                ENDIF
@@ -1593,6 +1688,7 @@ CONTAINS
          CALL CoLM_stop('grid_riverlake_flow: non-finite routing residual')
 
       dt_global = dt_reduce(1)
+      routing_last_global_dt = dt_global
       max_residual = -dt_reduce(2)
       next_loop_active = .false.
 

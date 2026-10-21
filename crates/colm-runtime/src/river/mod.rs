@@ -28,6 +28,54 @@ use network::{RiverNetwork, RunoffRouting, INLAND_DEPRESSION, RIVER_MOUTH};
 const RIVERMIN: f64 = 1.0e-5;
 /// `MOD_Const_Physical` 的 `grav`。
 const GRAV: f64 = 9.80616;
+/// `ROUTING_STORAGE_DT_EPS`（m³）：开分汊时蓄量不超过它的单元流域不参与蓄量限制，
+/// 交给普通出流限制与分汊限流（上游 PR #28）。
+const ROUTING_STORAGE_DT_EPS: f64 = 1.0e-6;
+/// `ROUTING_SUBSTEP_WARN_DT`/`ROUTING_SUBSTEP_ABORT_DT`（s）：一次汇流的子步数折合的平均子步长
+/// 低于它们时告警一次、停机。
+const ROUTING_SUBSTEP_WARN_DT: f64 = 2.0;
+const ROUTING_SUBSTEP_ABORT_DT: f64 = 0.2;
+
+/// 一次汇流的子步数门限 `(nsub_warn, nsub_abort)`。陆面步长比 `DEF_GRIDBASED_ROUTING_MAX_DT`
+/// 长时 `acctime_rnof` 会超过它，门限按两者中大的那个算。
+fn substep_limits(acctime: f64, max_dt: f64) -> (usize, usize) {
+    let span = if acctime.is_finite() {
+        max_dt.max(acctime)
+    } else {
+        max_dt
+    };
+    let warn = ((span / ROUTING_SUBSTEP_WARN_DT).min(1.0e8) as usize + 1).max(2);
+    let abort = ((span / ROUTING_SUBSTEP_ABORT_DT).min(1.0e9) as usize + 1).max(warn + 1);
+    (warn, abort)
+}
+
+/// 子步数保护（上游 PR #28）：自适应子步长塌缩时先告警、再停机，而不是长时间没有输出、看起来卡死。
+struct SubstepGuard<'w> {
+    warn: usize,
+    abort: usize,
+    /// 本次汇流已经告过警。上游每个进程告一次；Rust 单进程、河系并行，只告一次。
+    warned: &'w std::sync::atomic::AtomicBool,
+}
+
+/// 定下子步长的单元流域（只用于子步数告警）。
+#[derive(Clone, Copy)]
+struct Binding {
+    dt: f64,
+    k: Option<usize>,
+}
+
+impl Binding {
+    const NONE: Self = Self {
+        dt: f64::MAX,
+        k: None,
+    };
+
+    fn note(&mut self, dt: f64, k: usize) {
+        if dt < self.dt {
+            *self = Self { dt, k: Some(k) };
+        }
+    }
+}
 
 /// `rebuild_volwater_ucat`（`volwater_ucat_valid` 为真时的那一支）：只补「没有蓄量却有水深」的单元。
 ///
@@ -654,6 +702,13 @@ impl RiverModel {
         let resv = self.reservoir.as_ref().map(|reservoir| (reservoir, year));
         let momentum_limit = self.momentum_dt_limit;
         let acctime = state.acctime_rnof;
+        let (warn, abort) = substep_limits(acctime, self.max_dt);
+        let warned = std::sync::atomic::AtomicBool::new(false);
+        let guard = SubstepGuard {
+            warn,
+            abort,
+            warned: &warned,
+        };
         let record = self.tracers.is_some();
         let sed_acc = self.sediment.as_ref().map(|sediment| SedimentIn {
             acc: sediment.acc.as_slice(),
@@ -674,6 +729,7 @@ impl RiverModel {
                         Some(run),
                         momentum_limit,
                         acctime,
+                        &guard,
                         record,
                         sed_acc,
                     )],
@@ -693,6 +749,7 @@ impl RiverModel {
                                 None,
                                 momentum_limit,
                                 acctime,
+                                &guard,
                                 record,
                                 sed_acc,
                             )
@@ -706,6 +763,9 @@ impl RiverModel {
             results.iter().all(|result| !result.protected_failed),
             "BIF protected-side limiter failed"
         );
+        if let Some(message) = results.iter().find_map(|result| result.collapsed.as_ref()) {
+            anyhow::bail!("{message}");
+        }
         self.flood_uc = vec![[0.0; 3]; self.network.len()];
         for (system, mut result) in systems.into_iter().zip(results) {
             for &(r, volresv, a) in &result.reservoirs {
@@ -913,6 +973,8 @@ struct SystemResult<'a> {
     reservoirs: Vec<(usize, f64, [f64; 4])>,
     /// 堤内一侧的分汊出流扣穿了堤内蓄量（上游 `BIF protected-side limiter failed`）。
     protected_failed: bool,
+    /// 子步数超过停机门限（上游 `adaptive routing dt collapsed`）。
+    collapsed: Option<String>,
     /// 开示踪物时这一河系的磁带。
     tape: Option<tracer::SystemTape>,
     /// 开泥沙时逐单元流域的水量累加（`sediment_diag_accumulate`）。
@@ -951,6 +1013,8 @@ struct MomentumLimit<'m> {
     on: bool,
     momen: &'m [f64],
     veloc: &'m [f64],
+    /// 缩放后的这道动量限制也可能定下子步长（只用于子步数告警）。
+    binding: &'m mut Binding,
 }
 
 /// 一次汇流里分汊要带进带出的东西（全网一个河系，单元流域下标即全局序号）。
@@ -987,6 +1051,7 @@ fn route_system<'a>(
     mut bif: Option<BifurcationRun<'a>>,
     momentum_limit: bool,
     acctime: f64,
+    guard: &SubstepGuard<'_>,
     record: bool,
     sed_in: Option<SedimentIn<'_>>,
 ) -> SystemResult<'a> {
@@ -1156,9 +1221,56 @@ fn route_system<'a>(
     // 堤防 + 分汊：第 2 层及以上（堤内一侧）的净分汊出流，以及堤内蓄量被扣穿时的报错。
     let mut bif_lev_sum = Vec::new();
     let mut protected_failed = false;
+    // 子步数保护：`binding` 是上一个子步定下子步长的单元流域，`last_dt` 是上一个子步的
+    // （开分汊时即全局的）子步长。
+    let mut ntimestep = 0;
+    let mut binding = Binding::NONE;
+    let mut last_dt = 0.0;
+    let mut collapsed = None;
     // 河系内部串行，不再按单元嵌套并行（第 696 轮）：子步内每段只有几十微秒的活，嵌套 `par_iter`
     // 在 240 线程的机器上让 128 个线程空转抢活，全球河网一天的汇流从 4 s 拖到 41 s。
     while dt_res > 0.0 {
+        ntimestep += 1;
+        // 开分汊时子步长是全局的，告警给全局子步长；否则给本河系定下子步长的单元流域。
+        let dt_report = if bif.is_some() { last_dt } else { binding.dt };
+        if ntimestep == guard.warn {
+            if !guard
+                .warned
+                .swap(true, std::sync::atomic::Ordering::Relaxed)
+            {
+                if bif.is_some() {
+                    eprintln!(
+                        "WARNING grid_riverlake_flow: substep count {ntimestep}, \
+                         dt_global={dt_report:.4e} s; adaptive routing dt is very small"
+                    );
+                }
+                if let Some(k) = binding.k {
+                    if bif.is_none() || binding.dt <= last_dt * (1.0 + 1.0e-10) {
+                        let i = cells[k];
+                        let gid = (net.y[i] as i64 - 1) * net.nlon as i64 + net.x[i] as i64;
+                        eprintln!(
+                            "WARNING grid_riverlake_flow: substep {ntimestep} binding dt={:.4e} s; \
+                             cell ucat={} gid={gid} rivlen={:.4e} rivare={:.4e} wdsrf={:.4e} \
+                             netflux={:.4e} built_dam={}",
+                            binding.dt,
+                            i + 1,
+                            net.rivlen[i],
+                            net.rivare[i],
+                            wdsrf[k],
+                            sums[k].0,
+                            built[k].is_some(),
+                        );
+                    }
+                }
+            }
+        } else if ntimestep > guard.abort {
+            collapsed = Some(format!(
+                "grid_riverlake_flow: adaptive routing dt collapsed \
+                 (substep count exceeded {}, binding dt={dt_report:.4e} s)",
+                guard.abort
+            ));
+            break;
+        }
         let mut dt_all = dt_res.min(60.0);
         // 所有河系的剩余时间相同（每个子步都同步成同一 `dt`），起始子步长也相同。
         let mut dt_sys = bif.is_some().then(|| vec![dt_all; net.river_systems]);
@@ -1240,6 +1352,7 @@ fn route_system<'a>(
             }
         }
         // 子步长：CFL 与蓄量两道限制，逐单元流域取最小。
+        binding = Binding::NONE;
         for k in 0..n {
             let i = cells[k];
             // 开分汊时每个河系从自己的子步长起算（`dt_this = dt_all(irivsys(i))`）。
@@ -1260,7 +1373,12 @@ fn route_system<'a>(
                 } else {
                     net.curves[i].volume(w)
                 };
-                dt_this = dt_this.min(volwater / sums[k].0);
+                // 开分汊时几乎干涸、净出流为正的单元流域会把全局同步的子步长压向 0，子步循环
+                // 实际上停不下来；这样的单元流域交给普通出流限制与分汊限流（上游 PR #28）。
+                // 不开分汊时没有那道限流，蓄量限制照旧。
+                if volwater > ROUTING_STORAGE_DT_EPS || bif.is_none() {
+                    dt_this = dt_this.min(volwater / sums[k].0);
+                }
             }
             // 动量限制：流速超过 0.1 m/s 且动量收支要把它推向反向时，子步长不超过让动量归零的时间。
             if momentum_limit && built[k].is_none() {
@@ -1274,6 +1392,7 @@ fn route_system<'a>(
                 let s = net.river_system[i];
                 dt_sys[s] = dt_this.min(dt_sys[s]);
             }
+            binding.note(dt_this, k);
         }
         let dt = match (bif.as_mut(), dt_sys.as_mut()) {
             (Some(run), Some(dt_sys)) => bifurcation_substep(
@@ -1296,6 +1415,7 @@ fn route_system<'a>(
                     on: momentum_limit,
                     momen: &momen,
                     veloc: &veloc,
+                    binding: &mut binding,
                 },
                 lev.as_ref().map(|lev| {
                     (
@@ -1308,6 +1428,7 @@ fn route_system<'a>(
             ),
             _ => dt_all,
         };
+        last_dt = dt;
         // `tracer_lifecycle_route_sediment_bif`：每条活动路径逐层限流后的毛水量。
         if let (Some(out), Some(run)) = (sed.as_mut(), bif.as_ref()) {
             if let Some(acc) = out.bif.as_mut() {
@@ -1549,6 +1670,7 @@ fn route_system<'a>(
         bifurcation: bif,
         reservoirs,
         protected_failed,
+        collapsed,
         tape,
         sediment: sed,
         flood: flood_uc
@@ -1666,6 +1788,7 @@ fn bifurcation_substep(
                 let limit = ((momentum.momen[k] * net.rivare[k]) / gradient).abs();
                 let s = net.river_system[k];
                 dt_sys[s] = dt_sys[s].min(limit);
+                momentum.binding.note(limit, k);
             }
         }
     }

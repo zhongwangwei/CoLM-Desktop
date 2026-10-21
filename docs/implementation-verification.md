@@ -35119,3 +35119,59 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
       - Ball–Berry、Medlyn、WUE 五个气孔参数在 CoLM 里是整个算例一个数，仍只在单点按本站地类写；格点算例给了按地类的记录会报错，提示到全局参数里改。
       - 研究页的地类参数仍只对"所选算例同一本站地类"的单点给出，格点研究要先有选地类的界面。
       - USGS 的格点算例和城市算例没有实跑。
+
+## 第 719 轮：并入 zhongwangwei/CoLM202X#28——分汊时汇流子步长塌缩的保护（2026-10-21）
+
+**范围**：上次核对到 `667b08a5`（10-18，#27 不并入）。之后只有 #28（`f98f7467`，合并于 `1d7f3b25`），只改
+`main/HYDRO/MOD_Grid_RiverLakeFlow.F90`。CoLM-SYSU/CoLM 的 master 末端仍是 `a71a81bf`。与 #27 不同，#28 在开分汊时改变物理，
+并给所有模式加了停机条件，所以并入，Rust 跟着改。缺陷本身记在 `docs/upstream-bugs.md` 第 86 条。
+
+**#28 的内容**：
+1. 开 `DEF_USE_BIFURCATION` 时，蓄量不超过 `ROUTING_STORAGE_DT_EPS = 1e-6 m³` 的单元流域不参与蓄量限制 `volwater / sum_hflux_riv`，
+   交给普通出流限制 `ordinary_scale` 与分汊限流。不开分汊照旧。vendor 在 `1deb5ee2`（同步 `3c799bae`）之前对所有模式都有这道守卫，
+   同步时丢了；#28 只在分汊下恢复。
+2. 子步数门限：`span = max(DEF_GRIDBASED_ROUTING_MAX_DT, acctime_rnof)`（`acctime_rnof` 有限时），告警 `max(2, int(span/2)+1)`，
+   停机 `max(告警+1, int(span/0.2)+1)`。3600 s 的汇流是 1801 / 18001 个子步。到告警门限时打印上一子步定下子步长的单元流域
+   （分汊缩放后的动量限制也算），超过停机门限时 `CoLM_stop('grid_riverlake_flow: adaptive routing dt collapsed')`。
+3. 新增模块变量 `routing_last_global_dt`，只用于告警。
+
+**vendor**：`git apply -C2` 打上。第 3 个 hunk 的上下文是 `#endif`，vendor 里那一行已改成运行时开关的 `ENDIF`，要缩小上下文。
+打完与上游 #28 之后的文件比，去掉 `#ifdef TRACER/CoLMDEBUG` 与对应 `IF (DEF_USE_*)` 的行后没有差别。
+
+**Rust**（`colm-runtime::river`）：
+- `route_system` 的蓄量限制加同样的条件，`bif.is_some()` 就是 `DEF_USE_BIFURCATION`。
+- `substep_limits` 算门限；`SubstepGuard` 在一次汇流里共用，超过停机门限时这一河系停下，`route` 报
+  `grid_riverlake_flow: adaptive routing dt collapsed (substep count exceeded N, binding dt=… s)`。
+- 不分汊时 Rust 按河系并行、各自计数；上游按进程计数，子步数是该进程各河系子步数的最大值。所以"某个河系超过门限"与上游等价。
+  告警上游每个进程打一次，Rust 单进程，一次汇流只打一次。
+- 告警文字与上游相同；`rank` 不适用，`ucat` 给全网 1 起的序号，`gid = (y-1)*nlon + x`。
+- `oracle/scripts/test_upstream_f48_sync.py` 加三条断言，防止以后同步时这道守卫再丢一次。
+- 不涉及 namelist，schema 与生成表不变。vendor 源码指纹变了，缓存的内核与服务器引擎都要重编。
+
+**实测**：广东 113–114°E、23–24°N，0.5° 共 4 格，JRA3Q，`DEF_USE_BIFURCATION = .true.`，全球单元流域网络（252383 个，
+`DEF_UnitCatchment_regional` 缺省为关），续跑逐日。`kernels/latlon` 用新源码重编（只有 `CoLM.F90:549` 那条既有告警）。
+
+| 对比（2003-01-01→01-02） | 结果 |
+|---|---|
+| 新源码：纯 Fortran 三段 vs 全 Rust 三段 | restart、history、landdata 共 260 个文件逐位一致。初始 gridriver 重启有 5 个变量 Rust 侧少 `missing_value` 属性，是既有差异（第 718 轮记过 4 个；开分汊多一个 `wdsrf_ucat_prev`） |
+| 旧内核（主检出 `kernels/latlon`，09b8a0e4）纯 Fortran vs 新源码纯 Fortran | 260 个文件逐位一致 |
+
+- 两边日志都没有子步告警，也没有 `invalid adaptive dt` 回退告警。
+- colm 段耗时：Fortran 约 2.9 min/天，Rust 约 1 min/天（全网单线程推进）。
+- **新分支有没有走到**：用临时探针（未提交）跑全 Rust 整个 1 月。初始水深全球都是 `rivhgt`（中位数 1 m），只有 4 格有径流，
+  全球河道一直在排空：第 2 天末已有 101 个单元流域蓄量在 (0, 1e-6] m³。
+  - 新分支走到约 5.0 万次。
+  - 没有一次是旧蓄量限制起约束作用的场合（`volwater/净出流 < 当时的 dt_this` 为 0 次）。抽样的 100 次（涉及 52 个单元流域）里，
+    旧限制给出的 dt 最小 1.26e7 s，当时的 dt_this 是 60 s。
+  - 原因：近干单元流域的出流随水深的高次方趋于 0，`蓄量/出流` 反而变大。所以这个算例整月的结果改前改后相同。
+    上游集群上坝 + 分汊、0.1° 的那种塌缩，本机没有复现。
+
+**测试**：`cargo test --workspace --lib --bins -- --test-threads=1` 2648 条通过（新增 `substep_limits_follow_the_routing_span`）；
+`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`；`test_upstream_f48_sync.py`、
+`test_gridriver_restart_sentinel.py` PASS。
+
+**没做**：
+- 告警与停机两条路径没有端到端触发过，只有门限计算的单元测试。
+- 新分支改变子步长的情形没有逐位对照过：本机算例里没有出现，这一支两侧都只有一个条件判断。
+- 分汊 + 堤防/水库/示踪物/泥沙没有重跑。示踪物与泥沙都按汇流磁带上的 dt 重放，dt 的来源没有改。
+- 只重编了 `kernels/latlon`，其余 16 个预设没有重编。

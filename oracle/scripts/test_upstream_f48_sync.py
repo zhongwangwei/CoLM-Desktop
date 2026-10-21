@@ -72,6 +72,11 @@ def main() -> None:
     mksrfdata = read("mksrfdata/MKSRFDATA.F90")
     assert "'Successful in surface data making.'\n" in mksrfdata
     assert "CALL CoLM_stop()\n#endif" not in mksrfdata
+    # 2026-10-21 同步 zhongwangwei/CoLM202X#28：开分汊时近干单元流域不参与蓄量限制，子步数过多时
+    # 告警、停机。这道守卫在并入 CoLM-SYSU-integration（df09a27b）时丢过一次，Rust 汇流同样实现。
+    assert "IF (volwater > ROUTING_STORAGE_DT_EPS .or. .not. DEF_USE_BIFURCATION) &" in flow
+    assert "CALL CoLM_stop('grid_riverlake_flow: adaptive routing dt collapsed')" in flow
+    assert "routing_last_global_dt = dt_global" in flow
     # 8 个维度是运行时开关：上游新代码里的这些宏必须在同步时转换掉，不能漏进源码。
     import re
     converted = r"\b(TRACER|BGC|LULC_IGBP_PFT|LULC_IGBP_PC|LULCC|CoLMDEBUG|RangeCheck|SrfdataDiag|Campbell_SOIL_MODEL|vanGenuchten_Mualem_SOIL_MODEL)\b"

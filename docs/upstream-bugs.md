@@ -860,6 +860,21 @@
   `DO j = lb_snow, 0`、`DO j = lb, -1` 里用到，`snl = 0` 时都是空循环，所以结果不变。
 - **上游**：`zhongwangwei/CoLM202X#26`（分支 `fix/tracer-no-snow-lbsn`，`1b147e5`），替代 #25。
 
+### 86. 开分汊时近干单元流域把全局汇流子步长压向 0，作业看起来卡死——已修
+
+- **位置**：`main/HYDRO/MOD_Grid_RiverLakeFlow.F90` 自适应子步长的蓄量限制 `dt_this = min(dt_this, volwater / sum_hflux_riv(i))`。
+- **原因**：开 `DEF_USE_BIFURCATION` 时子步长是所有进程、所有单元流域的最小值。几乎干涸、净出流为正的单元流域让
+  `volwater / 净出流` 任意小，子步循环要跑 `acctime_rnof / dt` 次，期间没有任何输出。已有的停机条件
+  （`max_residual - dt_global >= max_residual`）只在 dt 小于约 2.3e-13 s 时才触发。fork 原来对 `volwater <= 1e-6 m³`
+  跳过这道限制（不分模式），`df09a27b` 并入 CoLM-SYSU-integration 时丢了；vendor 在 `1deb5ee2`（同步 `3c799bae`）之前
+  也有这道守卫，同步时跟着丢了。
+- **影响**：只在开分汊时改变结果。不开分汊没有分汊的毛出流限流，蓄量限制保持原样（否则后面的截断会凭空造水）。
+- **修复**（第 719 轮，随上游 #28）：开分汊时近干单元流域不参与蓄量限制，交给普通出流限制 `ordinary_scale` 与分汊限流；
+  所有模式下，一次汇流的子步数折合的平均子步长低于 2 s 时告警一次（报出上一子步定下子步长的单元流域），低于 0.2 s 时停机。
+  Rust 汇流同样实现。
+- **上游**：`zhongwangwei/CoLM202X#28`（`f98f7467`，合并于 `1d7f3b25`）。作者注明坝 + 分汊算例的卡死还没证实就是 dt 塌缩，
+  若复现时一分钟内没有子步告警，要查真正的死锁（BIF 推送顺序、共用的 tag 101）。
+
 ## 二、TRACER 编译开关改变了物理（需要上游确认哪一边是对的）
 
 这一版上游在很多地方给 TRACER 构建和非 TRACER 构建写了**不同的物理**，不只是记账不同。
