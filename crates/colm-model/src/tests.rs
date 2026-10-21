@@ -1405,3 +1405,129 @@ fn a_draft_is_deleted_with_its_staged_assets_and_its_frozen_revision_stays() {
     );
     assert!(reg.delete_draft("../versions").is_err());
 }
+
+fn process_record(file: &str, id: &str, key: &str, value: &str) -> ParameterOverrideRecord {
+    ParameterOverrideRecord {
+        parameter_id: id.into(),
+        raw_key: key.into(),
+        scope_instance: ParameterScopeInstance {
+            kind: "process-file".into(),
+            scheme: None,
+            index: None,
+            type_name: None,
+            process_file: Some(file.into()),
+        },
+        value: value.into(),
+        expected_old_value: None,
+        unit: None,
+    }
+}
+
+#[test]
+fn standard_tracer_parameters_can_change_without_carrying_the_file() {
+    let accepted = |file: &str, id: &str, key: &str, value: &str| {
+        let mut overlay = Overlay::default();
+        overlay
+            .parameters
+            .push(process_record(file, id, key, value));
+        validation::validate_overlay(&overlay).is_ok()
+    };
+    let sediment = "standard_sediment_parameter.nml";
+    let density = "process:sediment:DEF_SEDIMENT%grain_density";
+    assert!(accepted(
+        sediment,
+        density,
+        "DEF_SEDIMENT%grain_density",
+        "2500.0"
+    ));
+    // A misspelt file would silently never apply.
+    assert!(!accepted(
+        "standard_sediment.nml",
+        density,
+        "DEF_SEDIMENT%grain_density",
+        "2500.0"
+    ));
+    // A methane coefficient does not belong in the sediment file.
+    assert!(!accepted(
+        sediment,
+        "process:methane:DEF_METHANE%q10methane",
+        "DEF_METHANE%q10methane",
+        "2.5"
+    ));
+    // The inundation mode is chosen by the case when it is created; a version must not override it.
+    assert!(!accepted(
+        "standard_ch4_parameter.nml",
+        "process:methane:DEF_METHANE%inundation_mode",
+        "DEF_METHANE%inundation_mode",
+        "'hybrid'"
+    ));
+    assert!(accepted(
+        "standard_ch4_parameter.nml",
+        "process:methane:DEF_METHANE%q10methane",
+        "DEF_METHANE%q10methane",
+        "2.5"
+    ));
+}
+
+#[test]
+fn version_changes_land_on_the_case_parameter_file_and_skip_cases_without_it() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let file = "standard_sediment_parameter.nml";
+    let template = include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml");
+    let with = case_with(
+        &tmp,
+        "with-sediment",
+        &format!(" SITE_landtype = 7\n DEF_TRACER_PARAM_FILES = 'SEDIMENT:{file}'\n"),
+    );
+    fs::write(with.join(file), template).unwrap();
+    let without = case_with(&tmp, "without-sediment", " SITE_landtype = 7\n");
+    let official = reg.install_official(code()).unwrap();
+    let mut d = draft(official.version);
+    d.overlay.parameters.push(process_record(
+        file,
+        "process:sediment:DEF_SEDIMENT%grain_density",
+        "DEF_SEDIMENT%grain_density",
+        "2500.0",
+    ));
+    // One diameter per grain-size class.
+    d.overlay.parameters.push(process_record(
+        file,
+        "process:sediment:DEF_SEDIMENT%grain_diameter",
+        "DEF_SEDIMENT%grain_diameter",
+        "1.0e-5, 2.0e-4, 2.0e-3",
+    ));
+    reg.create_draft(d).unwrap();
+    let version = reg.freeze("experiment", &tmp.0).unwrap();
+    assert!(version.overlay.process_files.is_empty());
+    let run = reg
+        .materialize_run(&version.version, &with, &tmp.0.join("run-with"), "with")
+        .unwrap();
+    let doc = colm_namelist::parse(&fs::read_to_string(run.run_case.join(file)).unwrap()).unwrap();
+    assert_eq!(
+        doc.get("DEF_SEDIMENT%grain_density").unwrap().as_f64(),
+        Some(2500.0)
+    );
+    assert_eq!(
+        doc.get("DEF_SEDIMENT%grain_diameter").unwrap().to_string(),
+        colm_namelist::parse("&g\n x = 1.0e-5, 2.0e-4, 2.0e-3\n/\n")
+            .unwrap()
+            .get("x")
+            .unwrap()
+            .to_string()
+    );
+    // Everything else stays as the case had it.
+    assert_eq!(
+        doc.get("DEF_SEDIMENT%porosity").unwrap().as_f64(),
+        Some(0.4)
+    );
+    let run = reg
+        .materialize_run(
+            &version.version,
+            &without,
+            &tmp.0.join("run-without"),
+            "without",
+        )
+        .unwrap();
+    assert!(!run.run_case.join(file).exists());
+}

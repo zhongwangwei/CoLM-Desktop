@@ -13,6 +13,31 @@ import {
 import { IGBP, PFT, USGS } from './scope-labels';
 
 type TypeDefault = { index: number; value: number | null };
+/** 示踪物标准参数文件里版本能改的参数（后端 `standard_process_parameters`）。 */
+type StandardFile = {
+  file: string;
+  parameters: { id: string; path: string; value: string; group: string; kind: string }[];
+};
+const tracerFiles: Record<string, [string, string]> = {
+  'standard_sediment_parameter.nml': ['河道泥沙', 'River sediment'],
+  'standard_ch4_parameter.nml': ['甲烷 CH4', 'Methane CH4'],
+  'standard_O18_parameter.nml': ['水同位素 H₂¹⁸O', 'Water isotope H₂¹⁸O'],
+  'standard_HDO_parameter.nml': ['水同位素 HDO', 'Water isotope HDO'],
+  'standard_chloride_parameter.nml': ['氯离子 Cl', 'Chloride Cl'],
+};
+/**
+ * 示踪物共用的设置（DEF_TRACER_*，如 Craig–Gordon 相对湿度上限、非稳态叶片水）：存法是普通 namelist 参数，
+ * 但只跟示踪物有关，放在"示踪物与泥沙"页，不放全局参数（2026-10-21 用户：全局参数里还有很多示踪物的参数）。
+ */
+const sharedTracer = (key: string) => /^DEF_TRACER_/i.test(key);
+/** namelist 里的一组数显示成逗号隔开，和输入时的写法一样。 */
+const listText = (value: string) => value.trim().split(/\s+/).join(', ');
+const SHARED = 'shared-tracer-settings';
+const tracerGroups: Record<string, [string, string]> = {
+  nl_colm_tracer_parameter: ['通用示踪参数', 'Generic tracer parameters'],
+  nl_colm_methane_parameter: ['甲烷参数', 'Methane parameters'],
+  nl_colm_sediment_parameter: ['泥沙参数', 'Sediment parameters'],
+};
 
 /** namelist 字面值读成数：`1.5d-3`、`0.01_r8` 这类写法都认；不是数时为 null。 */
 export function literalNumber(text: string): number | null {
@@ -33,6 +58,9 @@ export function valueProblem(d: Descriptor, text: string, en: boolean): string {
       ? ''
       : t('只能是 .true. 或 .false.', 'Must be .true. or .false.');
   if (!['real', 'integer'].includes(d.value_kind)) return '';
+  // 有的参数是一组数（泥沙各粒级的粒径），逐个检查；逗号、空格隔开都认。
+  const items = text.trim().split(/[\s,]+/);
+  if (items.length > 1) return items.map((item) => valueProblem(d, item, en)).find(Boolean) ?? '';
   const value = literalNumber(text);
   if (value == null) return t('不是数', 'Not a number');
   if (d.value_kind === 'integer' && !Number.isInteger(value))
@@ -104,6 +132,7 @@ export default function ParameterDialog({
   onChange,
   initialType = 'global',
   initialParameter = '',
+  onImportProcessFile,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -115,6 +144,8 @@ export default function ParameterDialog({
   initialType?: ParameterType;
   /** 打开时直接选中这个参数（改动清单里"在矩阵里看"）。 */
   initialParameter?: string;
+  /** 把自己的参数文件整份带进版本（专家用；标准文件不用导入）。 */
+  onImportProcessFile?: () => void;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const [type, setType] = useState<ParameterType>(initialType);
@@ -129,9 +160,23 @@ export default function ParameterDialog({
   const [problem, setProblem] = useState('');
   const [defaults, setDefaults] = useState<Record<string, TypeDefault[]>>({});
   useEffect(() => {
-    if (open)
-      setType(initialType === 'process' && !overlay.process_files.length ? 'global' : initialType);
-  }, [open, initialType, overlay.process_files.length]);
+    if (open) setType(initialType);
+  }, [open, initialType]);
+  const [standard, setStandard] = useState<StandardFile[] | null>(null);
+  useEffect(() => {
+    if (!open || type !== 'process' || standard) return;
+    let live = true;
+    invokeJson<StandardFile[]>('standard_process_parameters')
+      .then((files) => {
+        if (live) setStandard(files);
+      })
+      .catch((e) => {
+        if (live) setProblem(String(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, [open, type, standard]);
   useEffect(() => {
     setGroup('');
     setChosen(initialParameter);
@@ -145,17 +190,32 @@ export default function ParameterDialog({
     (en
       ? (d as Descriptor & { subgroup_en?: string }).subgroup_en
       : (d as Descriptor & { subgroup_zh?: string }).subgroup_zh) || d.section;
-  const ofType = useMemo(() => catalog.filter((d) => parameterType(d) === type), [catalog, type]);
+  const ofType = useMemo(
+    () =>
+      catalog.filter(
+        (d) => parameterType(d) === type && !(type === 'global' && sharedTracer(d.raw_key)),
+      ),
+    [catalog, type],
+  );
+  const sharedTracerParams = catalog.filter(
+    (d) => parameterType(d) === 'global' && sharedTracer(d.raw_key),
+  );
   const records = overlay.parameters;
+  const globalPhysics = Object.keys(overlay.physics).filter((k) =>
+    catalog.some(
+      (d) => parameterType(d) === 'global' && d.raw_key.toLowerCase() === k.toLowerCase(),
+    ),
+  );
+  // 示踪物共用的设置算在"示踪物与泥沙"页上。
+  const sharedChanged =
+    records.filter((r) => recordType(r) === 'global' && sharedTracer(r.raw_key)).length +
+    globalPhysics.filter(sharedTracer).length;
   const changedIn = (kind: ParameterType) =>
-    records.filter((r) => recordType(r) === kind).length +
-    (kind === 'global'
-      ? Object.keys(overlay.physics).filter((k) =>
-          catalog.some(
-            (d) => parameterType(d) === 'global' && d.raw_key.toLowerCase() === k.toLowerCase(),
-          ),
-        ).length
-      : 0);
+    kind === 'global'
+      ? records.filter((r) => recordType(r) === 'global' && !sharedTracer(r.raw_key)).length +
+        globalPhysics.filter((k) => !sharedTracer(k)).length
+      : records.filter((r) => recordType(r) === kind).length +
+        (kind === 'process' ? sharedChanged : 0);
   const recordOf = (d: Descriptor, index?: number, file?: string) =>
     records.find(
       (r) =>
@@ -185,7 +245,11 @@ export default function ParameterDialog({
         setProblem(`${d.raw_key}: ${issue}`);
         return;
       }
-      parameters = upsertParameter(parameters, makeRecord(d, value, index, file));
+      // 一组数统一写成逗号隔开的 namelist 写法。
+      const literal = ['real', 'integer'].includes(d.value_kind)
+        ? value.split(/[\s,]+/).join(', ')
+        : value;
+      parameters = upsertParameter(parameters, makeRecord(d, literal, index, file));
     }
     const physics =
       parameterType(d) === 'global'
@@ -230,9 +294,10 @@ export default function ParameterDialog({
   const defaultAt = (d: Descriptor, index: number) =>
     defaults[d.id]?.find((x) => x.index === index)?.value ?? null;
   const cell = (d: Descriptor, index: number, file: string, fallback: string) => {
-    const current = ['igbp', 'usgs', 'pft', 'pc'].includes(type)
+    const kind = parameterType(d);
+    const current = ['igbp', 'usgs', 'pft', 'pc'].includes(kind)
       ? recordOf(d, index)?.value
-      : type === 'process'
+      : kind === 'process'
         ? recordOf(d, undefined, file)?.value
         : (recordOf(d)?.value ?? physicsOf(d));
     return (
@@ -253,19 +318,31 @@ export default function ParameterDialog({
     );
   };
   const changedCount = (d: Descriptor) => records.filter((r) => r.parameter_id === d.id).length;
-  // 过程文件是示踪物等过程自带的参数文件（如 CH4.nml），在「其他模型设置」的示踪过程里导入；多数版本没有，
-  // 没有时这一页签是空的、让人看不懂要干啥（2026-10-21 用户反映），所以有过程文件才显示。
-  const hasProcessFiles = overlay.process_files.length > 0;
+  // 示踪物（水同位素、甲烷、氯离子、河道泥沙）各自参数文件里的参数，放在修改参数里一起改，不再要先导入文件
+  // （2026-10-21 用户：示踪物与过程文件为什么不一起做到修改参数里，河道泥沙也要支撑，所有尺度都能用）。
   const tabs: [ParameterType, string][] = [
     ['global', t('全局参数', 'Global')],
     ['igbp', t('地类 · IGBP', 'Land class · IGBP')],
     ['usgs', t('地类 · USGS', 'Land class · USGS')],
     ['pft', 'PFT'],
     ['pc', 'PC'],
-    ...(hasProcessFiles
-      ? ([['process', t('过程文件', 'Process files')]] as [ParameterType, string][])
-      : []),
+    ['process', t('示踪物与泥沙', 'Tracers and sediment')],
   ];
+  // 可选的文件：标准参数文件，加上版本自己带着的其他参数文件。
+  const ownFiles = overlay.process_files
+    .map((a) => a.relative_path)
+    .filter((path) => !tracerFiles[path]);
+  // 河道泥沙排第一；共用设置排在各示踪物后面。
+  const standardFiles = [...(standard ?? [])].sort(
+    (a, b) => Object.keys(tracerFiles).indexOf(a.file) - Object.keys(tracerFiles).indexOf(b.file),
+  );
+  const fileChoices = [
+    ...standardFiles.map((f) => f.file),
+    ...(sharedTracerParams.length ? [SHARED] : []),
+    ...ownFiles,
+  ];
+  const chosenFile = processFile || fileChoices[0] || '';
+  const chosenStandard = standard?.find((f) => f.file === chosenFile);
   const meta = (d: Descriptor) => [d.unit, rangeText(d, en)].filter(Boolean).join(' · ');
   return (
     <Dialog
@@ -501,30 +578,106 @@ export default function ParameterDialog({
             </div>
           </div>
         )}
-        {type === 'process' &&
-          (overlay.process_files.length === 0 ? (
-            <p className="versions-empty">
+        {type === 'process' && (
+          <>
+            <p className="muted param-note">
               {t(
-                '这个版本还没有过程文件。先在「其他模型设置」里导入过程文件，再改它里面的参数。',
-                'This version has no process files yet. Import one under “Other model settings” first, then edit its parameters here.',
+                '各示踪物参数文件里的参数，标准值是 CoLM 随附的标准参数文件里的值。版本只记你改了的值，运行时改到算例自己的参数文件上：只在开了这个示踪物的模拟里起作用，河道泥沙还要开河道汇流；单点、区域、全球都一样。哪些示踪物参与模拟、甲烷淹没方案、溶质浓度在新建模拟里选。',
+                "Parameters in each tracer's parameter file; the standard values come from the files shipped with CoLM. The version records only the values you change, and they are applied to the case's own parameter file at run time: only simulations with that tracer on use them, and river sediment also needs river routing; the same at every scale. Which tracers run, the methane inundation scheme and solute concentrations are chosen when creating a simulation.",
               )}
             </p>
-          ) : (
-            <>
-              <p className="muted">
-                {t(
-                  '示踪物等过程自带的参数文件（在「其他模型设置」的示踪过程里导入）。选一个文件，改它里面的参数。',
-                  'Parameter files that come with processes such as tracers (imported under the tracer process in “Other model settings”). Choose a file and edit its parameters.',
-                )}
-              </p>
-              <Select
-                value={processFile || overlay.process_files[0]!.relative_path}
-                onChange={(e) => setProcessFile(e.target.value)}
-              >
-                {overlay.process_files.map((a) => (
-                  <option key={a.relative_path}>{a.relative_path}</option>
-                ))}
-              </Select>
+            <div className="param-mode" role="radiogroup">
+              {fileChoices.map((file) => {
+                const count =
+                  file === SHARED
+                    ? sharedChanged
+                    : records.filter((r) => r.scope_instance.process_file === file).length;
+                return (
+                  <button
+                    key={file}
+                    type="button"
+                    role="radio"
+                    aria-checked={chosenFile === file}
+                    className={`versions-tab${chosenFile === file ? ' is-active' : ''}`}
+                    onClick={() => setProcessFile(file)}
+                  >
+                    {file === SHARED
+                      ? t('所有示踪物共用', 'Shared by all tracers')
+                      : (tracerFiles[file]?.[en ? 1 : 0] ?? file)}
+                    {count > 0 && <span className="param-count">{count}</span>}
+                  </button>
+                );
+              })}
+              {editable && onImportProcessFile && (
+                <button type="button" className="library-action" onClick={onImportProcessFile}>
+                  {t('导入自己的参数文件…', 'Import your own parameter file…')}
+                </button>
+              )}
+            </div>
+            {chosenFile === SHARED ? (
+              <table className="versions-table param-table">
+                <thead>
+                  <tr>
+                    <th>{t('参数', 'Parameter')}</th>
+                    <th>{t('默认', 'Default')}</th>
+                    <th>{t('改值', 'Value')}</th>
+                    <th>{t('单位 · 范围', 'Unit · range')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sharedTracerParams.filter(matches).map((d) => (
+                    <tr key={d.id} title={docOf(d, en) || undefined}>
+                      <td>
+                        <strong>{label(d)}</strong>
+                        <code className="param-key">{d.raw_key}</code>
+                      </td>
+                      <td className="muted">{plain(d.default)}</td>
+                      <td>{cell(d, 0, '', plain(d.default))}</td>
+                      <td className="muted">{meta(d)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : !standard && !ownFiles.length ? (
+              <p className="muted">{t('正在读取标准参数…', 'Reading the standard parameters…')}</p>
+            ) : chosenStandard ? (
+              <table className="versions-table param-table">
+                <thead>
+                  <tr>
+                    <th>{t('参数', 'Parameter')}</th>
+                    <th>{t('标准值', 'Standard')}</th>
+                    <th>{t('改值', 'Value')}</th>
+                    <th>{t('单位 · 范围', 'Unit · range')}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {chosenStandard.parameters
+                    .flatMap((p) => {
+                      const d = catalog.find((x) => x.id === p.id);
+                      return d && matches(d) ? [{ p, d }] : [];
+                    })
+                    .flatMap(({ p, d }, i, rows) => [
+                      ...(i === 0 || rows[i - 1]!.p.group !== p.group
+                        ? [
+                            <tr key={`group:${p.group}`} className="param-group">
+                              <td colSpan={4}>{tracerGroups[p.group]?.[en ? 1 : 0] ?? p.group}</td>
+                            </tr>,
+                          ]
+                        : []),
+                      <tr key={p.id} title={docOf(d, en) || undefined}>
+                        <td>
+                          <strong>{label(d)}</strong>
+                          <code className="param-key">{d.raw_key}</code>
+                        </td>
+                        <td className="muted">{listText(p.value)}</td>
+                        <td>{cell(d, 0, chosenFile, listText(p.value))}</td>
+                        <td className="muted">{meta(d)}</td>
+                      </tr>,
+                    ])}
+                </tbody>
+              </table>
+            ) : (
+              // 版本自己带着的其他参数文件：整份跟着版本走，里面的参数照旧按文件改。
               <table className="versions-table param-table">
                 <tbody>
                   {listed.map((d) => (
@@ -533,21 +686,15 @@ export default function ParameterDialog({
                         <strong>{label(d)}</strong>
                         <code className="param-key">{d.raw_key}</code>
                       </td>
-                      <td>
-                        {cell(
-                          d,
-                          0,
-                          processFile || overlay.process_files[0]!.relative_path,
-                          plain(d.default),
-                        )}
-                      </td>
+                      <td>{cell(d, 0, chosenFile, plain(d.default))}</td>
                       <td className="muted">{meta(d)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
-            </>
-          ))}
+            )}
+          </>
+        )}
         {listed.length === 0 && type !== 'process' && (
           <p className="versions-empty">{t('没有符合条件的参数。', 'No parameters match.')}</p>
         )}

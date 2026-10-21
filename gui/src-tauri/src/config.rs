@@ -177,6 +177,87 @@ pub fn parameter_type_defaults(parameter_id: String) -> Result<Vec<TypeDefault>,
         .collect()
 }
 
+/// 示踪物标准参数文件的内容，和 `colm_case::parameters::process::STANDARD_PARAM_FILES` 一一对应。
+const STANDARD_PARAM_TEMPLATES: [(&str, &str); 5] = [
+    (
+        "standard_ch4_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_ch4_parameter.nml"),
+    ),
+    (
+        "standard_sediment_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_sediment_parameter.nml"),
+    ),
+    (
+        "standard_O18_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_O18_parameter.nml"),
+    ),
+    (
+        "standard_HDO_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_HDO_parameter.nml"),
+    ),
+    (
+        "standard_chloride_parameter.nml",
+        include_str!("../../../vendor/CoLM202X/run/standard_chloride_parameter.nml"),
+    ),
+];
+
+/// 一份示踪物标准参数文件里，版本能改的参数和它们的标准值。
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StandardProcessParameter {
+    /// 参数目录里的条目：界面名、取值范围、改值记录都按它。
+    pub id: String,
+    pub path: String,
+    pub value: String,
+    pub group: &'static str,
+    pub kind: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct StandardProcessFile {
+    pub file: &'static str,
+    pub parameters: Vec<StandardProcessParameter>,
+}
+
+/// "修改参数"的"示踪物与泥沙"页：每份标准参数文件里版本能改的参数及标准值。只列数值：
+/// 开关和方案（甲烷淹没方案、稻田……）在新建模拟里由算例选；强迫数据组属于算例。
+/// 版本只记改动，运行时改到算例自己的那份文件上（见 `colm_model` 的 materialize）。
+#[tauri::command]
+pub fn standard_process_parameters() -> Result<Vec<StandardProcessFile>, String> {
+    let defaults = process_code_defaults();
+    STANDARD_PARAM_TEMPLATES
+        .iter()
+        .map(|(file, text)| {
+            let doc = colm_namelist::parse(text).map_err(|e| format!("{file}: {e:#}"))?;
+            let parameters = doc
+                .paths()
+                .into_iter()
+                .filter_map(|path| {
+                    let meta = defaults
+                        .iter()
+                        .find(|d| d.path.eq_ignore_ascii_case(&path))?;
+                    let descriptor = colm_case::parameters::all().iter().find(|d| {
+                        d.storage == colm_case::parameters::Storage::ProcessParameterFile
+                            && d.raw_key.eq_ignore_ascii_case(&path)
+                            && d.subgroup.as_deref() == Some(meta.group)
+                    })?;
+                    (matches!(meta.kind, "real" | "integer")
+                        && colm_case::parameters::process::standard_file_accepts(
+                            file, &path, meta.group,
+                        ))
+                    .then(|| StandardProcessParameter {
+                        id: descriptor.id.clone(),
+                        value: doc.get(&path).map(|v| v.to_string()).unwrap_or_default(),
+                        path,
+                        group: meta.group,
+                        kind: meta.kind,
+                    })
+                })
+                .collect();
+            Ok(StandardProcessFile { file, parameters })
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterScopeInstance {
     pub kind: String,

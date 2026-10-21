@@ -4676,3 +4676,56 @@ fn per_type_parameters_list_a_default_for_every_class_or_plant_type() {
     assert!(parameter_type_defaults("case:DEF_TUNING_CNFAC".into()).is_err());
     assert!(parameter_type_defaults("lct:XX:DEF_LC_VMAX25".into()).is_err());
 }
+
+#[test]
+fn standard_tracer_parameters_list_numbers_a_version_may_change() {
+    let files = standard_process_parameters().unwrap();
+    let names: Vec<_> = files.iter().map(|f| f.file).collect();
+    assert_eq!(
+        names,
+        colm_case::parameters::process::STANDARD_PARAM_FILES
+            .iter()
+            .map(|(name, _)| *name)
+            .collect::<Vec<_>>()
+    );
+    let of = |file: &str| &files.iter().find(|f| f.file == file).unwrap().parameters;
+    let sediment = of("standard_sediment_parameter.nml");
+    let density = sediment
+        .iter()
+        .find(|p| p.path == "DEF_SEDIMENT%grain_density")
+        .unwrap();
+    assert_eq!(density.value.parse::<f64>().unwrap(), 2650.0);
+    assert!(sediment.iter().all(|p| p.group != "nl_colm_tracer_forcing"));
+    let methane = of("standard_ch4_parameter.nml");
+    assert!(methane.iter().any(|p| p.path == "DEF_METHANE%q10methane"));
+    // Switches and the cases' own choices stay with the case.
+    assert!(methane
+        .iter()
+        .all(|p| p.kind != "logical" && p.path != "DEF_METHANE%inundation_mode"));
+    assert!(of("standard_chloride_parameter.nml")
+        .iter()
+        .all(|p| p.path != "DEF_TRACER%init_conc" && p.path != "DEF_TRACER%precip_default_conc"));
+    // Everything offered here is accepted as a version change without carrying the file.
+    let mut overlay = colm_model::Overlay::default();
+    for file in &files {
+        for p in &file.parameters {
+            overlay
+                .parameters
+                .push(colm_model::ParameterOverrideRecord {
+                    parameter_id: p.id.clone(),
+                    raw_key: p.path.clone(),
+                    scope_instance: colm_model::ParameterScopeInstance {
+                        kind: "process-file".into(),
+                        scheme: None,
+                        index: None,
+                        type_name: None,
+                        process_file: Some(file.file.into()),
+                    },
+                    value: p.value.clone(),
+                    expected_old_value: None,
+                    unit: None,
+                });
+        }
+    }
+    colm_model::validate_overlay(&overlay).unwrap();
+}

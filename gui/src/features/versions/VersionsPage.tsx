@@ -33,8 +33,7 @@ import VersionLibrary from './VersionLibrary';
 import VersionHub from './VersionHub';
 import { hubMethods, type HubMethod } from './hub-methods';
 import ParameterDialog from './ParameterDialog';
-import ConfigurationOptions from './ConfigurationOptions';
-import { setupHandledKeys, type SetupEnvironment } from './scientific-setup';
+import { setupHandledKeys } from './scientific-setup';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
@@ -444,7 +443,8 @@ export default function VersionsPage() {
       setTab('changes');
     }
   }
-  async function importConfigurationProcess(relativePath: string) {
+  // 专家把自己的参数文件整份带进版本，用文件自己的名字（标准示踪物参数不用导入，直接在修改参数里改）。
+  async function importConfigurationProcess() {
     await execute(async () => {
       if (!draft) throw new Error('No current draft');
       const file = await invoke<string | null>('pick_file', {
@@ -452,6 +452,7 @@ export default function VersionsPage() {
         filter: 'nml',
       });
       if (!file) return;
+      const relativePath = file.split(/[/\\]/).pop() || 'parameter.nml';
       const current = dirtyNow.current ? await save() : draft;
       const result = await invokeJson<{ draft: ModelDraft; assetRoot: string }>(
         'model_import_process',
@@ -540,7 +541,6 @@ export default function VersionsPage() {
     });
   }
   const setup = state.simulationReturn?.route === 'new-case' ? state.newCaseSeed?.form : null;
-  const configurationCase = setup ? null : (state.selectedCase?.entry.dir ?? null);
   const configurationProfile = setup
     ? {
         grid: setup.kind === 'site' ? null : setup.grid,
@@ -552,26 +552,6 @@ export default function VersionsPage() {
     configurationProfile,
     effectiveModelFields(shown?.overlay, fields),
   );
-  const setupEnvironment: SetupEnvironment = {
-    engine: setup?.engine ?? state.selectedCase?.profile.engine,
-    subgrid: setup?.subgrid ?? setup?.landcover ?? state.selectedCase?.profile.subgrid,
-    caseValues: setup ? state.newCaseSeed?.caseValues : undefined,
-    domain:
-      setup?.kind ??
-      (state.selectedCase?.profile.spatial === false
-        ? 'site'
-        : state.selectedCase?.profile.spatial
-          ? 'region'
-          : null),
-    grid: configurationProfile.grid,
-    classification: configurationProfile.classification,
-    kernel: configurationKernel,
-    cropKernel: compatibleKernel(
-      state.kernels,
-      { ...configurationProfile, crop: true },
-      effectiveModelFields(shown?.overlay, fields),
-    ),
-  };
   const allowed = catalog.filter(
     (d) =>
       d.raw_key.toUpperCase() !== 'DEF_SUBGRID_SCHEME' &&
@@ -1594,50 +1574,6 @@ export default function VersionsPage() {
               </Card>
             )}
             {!draft && viewing && <VersionChanges version={viewing} versions={state.versions} />}
-            <Advanced title={t('示踪物与过程文件', 'Tracers and process files')}>
-              <p className="muted versions-hint">
-                {t(
-                  '只在要用示踪物（同位素、甲烷等）时需要：选要追踪的物质、填示踪物定义、导入过程文件（导入后"修改参数"里会多出"过程文件"一页）。其余参数都在"修改参数"里改。',
-                  'Only needed for tracers (isotopes, methane…): choose tracer families, fill in tracer definitions and import process files (which then get a "Process files" page under "Edit parameters"). Every other parameter is changed under "Edit parameters".',
-                )}
-              </p>
-              {/* 原来这里按过程列出 48 个设置，外加"按植物类型调整参数"，全是"修改参数"里已有的
-                  全局参数和 PFT 参数（2026-10-21 用户问"有啥用"，对照真实目录查过），而且写进的是
-                  开关改值，同一个参数有两种存法。只留示踪物这部分独有的内容。 */}
-              <ConfigurationOptions
-                process="DEF_USE_TRACER"
-                engine={setupEnvironment.engine}
-                subgrid={setupEnvironment.subgrid}
-                caseValues={setupEnvironment.caseValues}
-                excludeKeys={setupHandledKeys}
-                source={
-                  draft
-                    ? {
-                        kind: 'draft',
-                        id: draft.id,
-                        generation: draft.generation,
-                        overlay: draft.overlay,
-                      }
-                    : { kind: 'frozen', version: viewing!.version }
-                }
-                overlay={shown.overlay}
-                fields={fields}
-                catalog={catalog}
-                caseDir={configurationCase}
-                kernelDir={configurationKernel?.dir ?? null}
-                kernelMacros={configurationKernel?.macros}
-                caseScope={
-                  setupEnvironment.domain === 'site'
-                    ? 'site'
-                    : setupEnvironment.domain
-                      ? 'spatial'
-                      : 'unknown'
-                }
-                disabled={busy || codeBusy}
-                onChange={editable ? (next) => edit({ ...draft!, overlay: next }) : undefined}
-                onImportProcess={editable ? importConfigurationProcess : undefined}
-              />
-            </Advanced>
             {(() => {
               // 适用范围：研究结果写进来时自动记下这个版本是在哪些站点、哪些时段率定出来的，只作记录，
               // 运行时不做检查。原来是一张手填的表（逗号分隔的站点、YYYY-MM-DD 文本框、"待冻结资产根目录"），
@@ -2016,6 +1952,7 @@ export default function VersionsPage() {
             onChange={(next) => draft && edit({ ...draft, overlay: next })}
             initialType={paramsType}
             initialParameter={paramsParameter}
+            onImportProcessFile={editable ? () => void importConfigurationProcess() : undefined}
           />
         </>
       )}

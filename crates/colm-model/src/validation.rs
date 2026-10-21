@@ -346,6 +346,7 @@ pub(crate) fn parameter_key(r: &ParameterOverrideRecord) -> String {
 }
 pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
     let mut keys = BTreeSet::new();
+    let mut process_defaults = None;
     for record in &overlay.parameters {
         parameter_value(record)?;
         ensure!(
@@ -360,13 +361,28 @@ pub fn validate_overlay(overlay: &Overlay) -> Result<()> {
             "parameter duplicated in physics"
         );
         if let Some(file) = &record.scope_instance.process_file {
-            ensure!(
-                overlay
-                    .process_files
+            // 不带文件的改动只能记在示踪物标准参数文件上，运行时改到算例自己的那份；限定文件名和组，
+            // 免得拼错的文件名或放错组的参数静默地不起作用。
+            if !overlay
+                .process_files
+                .iter()
+                .any(|a| a.relative_path == *file)
+            {
+                let group = process_defaults
+                    .get_or_insert_with(colm_case::parameters::process::code_defaults)
                     .iter()
-                    .any(|a| a.relative_path == *file),
-                "process override has no frozen process asset"
-            );
+                    .find(|p| p.path.eq_ignore_ascii_case(&record.raw_key))
+                    .map(|p| p.group)
+                    .context("unknown process parameter")?;
+                ensure!(
+                    colm_case::parameters::process::standard_file_accepts(
+                        file,
+                        &record.raw_key,
+                        group
+                    ),
+                    "process override has no frozen process asset and is not a standard tracer parameter of {file}"
+                );
+            }
         }
     }
     let tuning = overlay

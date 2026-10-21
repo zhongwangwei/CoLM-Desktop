@@ -155,6 +155,7 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "standard_process_parameters": {},
   "export_parameter_overrides": {
     "dirs": {
       "required": true,

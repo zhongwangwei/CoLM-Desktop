@@ -119,3 +119,14 @@ test('placeholder docs that only repeat the key are not shown', () => {
   const real = descriptor({ doc_zh: '根50%失导水势；按所选 PFT/CFT 槽位稀疏覆盖。' });
   assert.equal(docOf(real, false), '根50%失导水势；按所选 PFT/CFT 槽位稀疏覆盖。');
 });
+
+test('a parameter holding several numbers is checked number by number', () => {
+  // DEF_SEDIMENT%grain_diameter: one diameter per grain-size class.
+  const diameter = descriptor({
+    validation: { min: '0', max: null, allowed_values: [], finite: true },
+  });
+  assert.equal(valueProblem(diameter, '2.0e-5, 2.0e-4, 2.0e-3', false), '');
+  assert.equal(valueProblem(diameter, '2.0e-5, x', false), '不是数');
+  assert.equal(valueProblem(diameter, '2.0e-5, -1', false), '不能小于 0');
+  assert.equal(valueProblem(diameter, '2.0e-5 2.0e-4 2.0e-3', false), '');
+});

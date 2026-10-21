@@ -315,18 +315,16 @@ test('saved drafts can return while unsaved model edits keep the return button l
   assert.ok(!p.calls.some((c) => c.command === 'model_freeze'));
 });
 
-test('research configuration retains the engine of a new or existing simulation', async () => {
-  for (const origin of ['new', 'existing']) {
-    const h = page('LCT');
-    if (origin === 'new') h.state.newCaseSeed = { form: { engine: 'fortran', kind: 'site' } };
-    else {
-      h.state.simulationReturn = { route: 'case', step: 2 };
-      h.state.selectedCase = { entry: { dir: '/case' }, profile: { engine: 'fortran' } };
-    }
-    await h.mount();
-    const config = h.elements.find((e) => e.type === 'ConfigurationOptions')!;
-    assert.equal(config.props.engine, 'fortran');
-  }
+test('tracer and sediment parameters live in the parameter dialog, not a separate block', async () => {
+  const p = page('PFT');
+  const c = await p.mount();
+  assert.ok(!p.elements.some((e) => e.type === 'ConfigurationOptions'));
+  // A frozen version opens read-only: no importing files into it.
+  const dialog = () => p.elements.find((e) => e.type === 'ParameterDialog')!.props;
+  assert.equal(dialog().onImportProcessFile, undefined);
+  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
+  await p.mount();
+  assert.equal(typeof dialog().onImportProcessFile, 'function');
 });
 
 test('a new version can copy its parent code into a workspace of its own', async () => {
@@ -383,7 +381,6 @@ test('the version page shows one version in tabs that hide panels without unmoun
   assert.equal(panels.length, 4);
   assert.equal(panels.filter((e) => !e.props.hidden).length, 1, 'only the current panel shows');
   // Hidden panels still render: their page contracts and unsaved edits stay.
-  assert.ok(p.elements.some((e) => e.type === 'ConfigurationOptions'));
   assert.ok(p.elements.some((e) => e.type === 'CodeWorkspace'));
   assert.ok(p.elements.some((e) => e.type === 'ParameterDialog'));
   assert.ok(!p.elements.some((e) => e.type === 'VersionLibrary'), 'the library is its own page');

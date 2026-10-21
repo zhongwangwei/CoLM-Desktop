@@ -11,6 +11,46 @@ pub struct ProcessDefault {
     pub source_location: String,
 }
 
+/// CoLM 随附的示踪物标准参数文件（`vendor/CoLM202X/run/standard_*_parameter.nml`）和版本能改的 namelist 组。
+/// 新建模拟开示踪物时，算例目录里生成的就是这几份。版本不带文件、只记改动时，改动作用在算例自己的
+/// 这份文件上（2026-10-21 用户选的做法）：算例在新建模拟时选的方案和浓度不被版本整份盖掉。
+/// `nl_colm_tracer_forcing` 是强迫数据的设置，属于算例，不在可改之列。
+pub const STANDARD_PARAM_FILES: &[(&str, &[&str])] = &[
+    (
+        "standard_ch4_parameter.nml",
+        &["nl_colm_tracer_parameter", "nl_colm_methane_parameter"],
+    ),
+    (
+        "standard_sediment_parameter.nml",
+        &["nl_colm_tracer_parameter", "nl_colm_sediment_parameter"],
+    ),
+    ("standard_O18_parameter.nml", &["nl_colm_tracer_parameter"]),
+    ("standard_HDO_parameter.nml", &["nl_colm_tracer_parameter"]),
+    (
+        "standard_chloride_parameter.nml",
+        &["nl_colm_tracer_parameter"],
+    ),
+];
+
+/// 新建模拟时由算例选定、写进这些文件的值（甲烷淹没方案、稻田、空间 pH、溶质初始与降水浓度）：
+/// 版本只记参数改动，不能盖掉它们。
+pub const CASE_CHOSEN: &[&str] = &[
+    "DEF_METHANE%inundation_mode",
+    "DEF_METHANE%enable_rice_paddy",
+    "DEF_METHANE%use_spatial_ph",
+    "DEF_TRACER%init_conc",
+    "DEF_TRACER%precip_default_conc",
+];
+
+/// 不带文件时，`path`（所属组 `group`）能不能作为改动记在标准参数文件 `file` 上。
+pub fn standard_file_accepts(file: &str, path: &str, group: &str) -> bool {
+    STANDARD_PARAM_FILES
+        .iter()
+        .find(|(name, _)| *name == file)
+        .is_some_and(|(_, groups)| groups.contains(&group))
+        && !CASE_CHOSEN.iter().any(|key| key.eq_ignore_ascii_case(path))
+}
+
 pub fn code_defaults() -> Vec<ProcessDefault> {
     let mut defaults = process_type_defaults(
         include_str!("../../../../vendor/CoLM202X/main/TRACER/MOD_Tracer_Defs.F90"),

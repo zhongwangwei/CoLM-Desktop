@@ -129,6 +129,7 @@ pub fn run() {
             describe_fields,
             parameter_catalog,
             parameter_type_defaults,
+            standard_process_parameters,
             export_parameter_overrides,
             preview_import_parameter_overrides,
             apply_import_parameter_overrides,

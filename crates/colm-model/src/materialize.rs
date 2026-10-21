@@ -555,6 +555,20 @@ impl Registry {
                             .process_file
                             .as_deref()
                             .context("missing process file")?;
+                        validation::relative(file)?;
+                        // 版本没带这份文件、只记了改动：改到算例自己的那份上（复制进运行目录的算例 .nml）。
+                        // 算例没用这个示踪物时没有这份文件，改动不起作用。
+                        if !destination.join(file).exists() {
+                            ensure!(
+                                !frozen
+                                    .overlay
+                                    .process_files
+                                    .iter()
+                                    .any(|asset| asset.relative_path == file),
+                                "frozen process asset was not copied: {file}"
+                            );
+                            continue;
+                        }
                         let path = safe_file(&destination, file)?;
                         let mut process = colm_namelist::parse(&fs::read_to_string(&path)?)?;
                         let meta = colm_case::parameters::process::code_defaults()
