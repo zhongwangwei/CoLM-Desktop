@@ -49,6 +49,7 @@ function page(
     expert: false,
     kernels: [],
   };
+  let guard: (() => string | null) | undefined;
   let cursor = 0,
     effectCursor = 0,
     contract: { fields: UiField[]; actions: UiAction[]; status: string };
@@ -107,13 +108,17 @@ function page(
     useApp: () => ({
       state,
       update: (patch: object) => Object.assign(state, patch),
+      // Like the app: a page's leave guard can refuse the navigation.
       navigate: (route: string) => {
+        if (guard?.()) return false;
         routes.push(route);
         return true;
       },
       refreshVersions: async () => {},
     }),
-    useNavigationGuard: () => {},
+    useNavigationGuard: (g: () => string | null) => {
+      guard = g;
+    },
     usePageContract: (c: typeof contract) => {
       contract = c;
     },
@@ -406,4 +411,32 @@ test('新建修改版 offers six ways and starts each without a confirmation for
   await d.actions.find((a) => a.id === 'version-method-tuning')!.run();
   assert.equal(q.routes.at(-1), 'research');
   assert.equal((q.state as { researchMethod?: string }).researchMethod, 'tuning');
+});
+
+test('the research home starts 修改参数（手动） and 修改源码 here, once per click', async () => {
+  const p = page();
+  await p.mount();
+  const creates = () => p.calls.filter((call) => call.command === 'model_create');
+  const manual = { method: 'manual' as const };
+  Object.assign(p.state, { versionMethod: manual });
+  await p.mount();
+  assert.equal(creates().length, 1);
+  assert.equal(creates()[0]!.args.branchCode, false);
+  assert.equal((p.state as { versionMethod?: unknown }).versionMethod, null);
+  assert.equal(p.elements.find((e) => e.type === 'ParameterDialog')!.props.open, true);
+  // Development mode runs the effect twice with the same request: no second, empty draft.
+  Object.assign(p.state, { versionMethod: manual });
+  await p.mount();
+  assert.equal(creates().length, 1);
+  // Back goes where the user came from: research home, not 新建修改版.
+  const back = p.elements.find(
+    (e) => e.type === 'button' && e.children.flat().includes('研究首页'),
+  )!;
+  (back.props.onClick as () => void)();
+  await p.settle();
+  assert.equal(p.routes.at(-1), 'research');
+  Object.assign(p.state, { versionMethod: { method: 'source' } });
+  await p.mount();
+  assert.equal(creates().length, 2);
+  assert.equal(creates()[1]!.args.branchCode, true);
 });

@@ -233,6 +233,11 @@ export type AppState = {
   researchTarget?: { draftId: string; name: string } | null;
   /** 侧栏点了"研究"：研究页回到首页并丢掉草稿带来的写回目标，用完清掉。 */
   researchHome?: boolean;
+  /**
+   * 研究首页点了"修改参数（手动）"或"修改源码"：版本页进来就按这种方式建草稿，和在"新建修改版"点卡片一样，
+   * 用完清掉。每次点击是一个新对象，版本页靠对象身份只认一次。
+   */
+  versionMethod?: { method: 'manual' | 'source' } | null;
   /** 版本页进来时直接打开的草稿（研究结果写进去之后去审阅、冻结），版本页用完清掉。 */
   openDraft?: string | null;
   expert: boolean;

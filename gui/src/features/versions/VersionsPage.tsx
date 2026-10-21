@@ -4,6 +4,7 @@ import { invoke, invokeJson } from '../../lib/ipc';
 import { withCatalogLabels } from '../../lib/param-presentation';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import type {
+  AppState,
   FrozenRevision,
   ModelDraft,
   HistoryOperation,
@@ -188,6 +189,28 @@ export default function VersionsPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.openDraft]);
+  // 研究首页点了"修改参数（手动）"或"修改源码"：进来就建草稿。开发模式下副作用会挂两次，靠 startedMethod
+  // 只认一次请求，否则会多建一个空草稿；也不按 live 丢弃结果（第一次挂载的清理会把它作废，草稿就打不开了）。
+  // 不走 execute，理由同上。
+  const startedMethod = useRef<AppState['versionMethod']>(null);
+  // 从研究首页建的草稿：返回按钮回研究首页（返回按来路走，和研究页一样）。
+  const [researchDraft, setResearchDraft] = useState<string | null>(null);
+  useEffect(() => {
+    const request = state.versionMethod;
+    if (!request || startedMethod.current === request) return;
+    startedMethod.current = request;
+    update({ versionMethod: null });
+    lock.current = true;
+    setBusy(true);
+    startMethod(request.method)
+      .then((d) => setResearchDraft(d?.id ?? null))
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        lock.current = false;
+        setBusy(false);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.versionMethod]);
   useEffect(() => {
     let live = true;
     setReferences([]);
@@ -1019,6 +1042,7 @@ export default function VersionsPage() {
     return found ? `${found.name} · r${found.version.revision}` : `${ref.id} r${ref.revision}`;
   };
   // 派生链：官方 r101 › 根系方案 r1 › 根系方案调参 r2。
+  const backToResearch = !!draft && draft.id === researchDraft;
   const lineage = (() => {
     const chain: string[] = [];
     let ref = shown?.parent ?? null;
@@ -1171,12 +1195,23 @@ export default function VersionsPage() {
             <button
               type="button"
               disabled={busy || codeBusy}
-              onClick={() => run(async () => backToLibrary())}
+              onClick={() =>
+                run(async () => {
+                  backToLibrary();
+                  if (!backToResearch) return;
+                  setResearchDraft(null);
+                  // run 正拿着执行锁，离开保护会把跳转拦下（预览里实测停在了汇总页）；草稿已处理完，放开再走。
+                  lock.current = false;
+                  navigate('research');
+                })
+              }
             >
               ←{' '}
-              {state.versionsView === 'library'
-                ? t('所有版本', 'All versions')
-                : t('新建修改版', 'New modified version')}
+              {backToResearch
+                ? t('研究首页', 'Research home')
+                : state.versionsView === 'library'
+                  ? t('所有版本', 'All versions')
+                  : t('新建修改版', 'New modified version')}
             </button>
             {lineage.length > 0 && (
               <span className="muted">

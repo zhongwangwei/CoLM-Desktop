@@ -29,6 +29,7 @@ import StudyImportDialog, { type StudyPreview } from '../versions/StudyImportDia
 import { REMOTE_CHECK_MS } from '../runs/run-model';
 import LiveServerLoad from '../runs/LiveServerLoad';
 import { researchMethods, methodFromStudy, completedCandidates } from './research-home';
+import { hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
 type Envelope = {
@@ -1064,10 +1065,9 @@ export default function ResearchPage() {
   function chooseMethod(value: string) {
     if (lock.current || runLock.current || unresolvedRemote)
       throw new Error('Wait for the current study operation or server record to be resolved');
-    if (!researchMethods.some((item) => item.id === value))
-      throw new Error('Unknown research method');
-    if (value === 'source') {
-      navigate('versions');
+    if (!hubMethods.some((item) => item.id === value)) throw new Error('Unknown research method');
+    if (value === 'manual' || value === 'source') {
+      startVersionMethod(value);
       return;
     }
     if (value !== tab) {
@@ -1080,6 +1080,16 @@ export default function ResearchPage() {
       else if (value === 'parameters') chooseSlot('pft');
     }
     setWorkbench(true);
+  }
+  // 手动改参数和修改源码不跑研究：到版本页直接建好草稿（和"新建修改版"点卡片一样），基于模拟正在用的版本。
+  function startVersionMethod(method: 'manual' | 'source') {
+    update({
+      researchTarget: null,
+      researchSeed: null,
+      versionsView: 'create',
+      versionMethod: { method },
+    });
+    if (!navigate('versions')) update({ versionMethod: null });
   }
   // 从"新建修改版"或草稿的研究页签点进来：直接打开那个方法，不再停在研究首页。
   useEffect(() => {
@@ -1613,7 +1623,7 @@ export default function ResearchPage() {
     label: tr('选择研究方法', 'Choose a research method'),
     value: '',
     type: 'choice',
-    options: researchMethods.map((item) => ({ value: item.id, label: en ? item.en : item.zh })),
+    options: hubMethods.map((item) => ({ value: item.id, label: en ? item.en : item.zh })),
     set: chooseMethod,
     disabled: busy || launching || unresolvedRemote,
   };
@@ -1791,7 +1801,7 @@ export default function ResearchPage() {
         </header>
         {error && <Notice tone="error">{error}</Notice>}
         <div className="research-methods" role="group" aria-label={homeMethod.label}>
-          {researchMethods.map((item) => (
+          {hubMethods.map((item) => (
             <Button
               key={item.id}
               id={`research-method-${item.id}`}
@@ -1823,6 +1833,11 @@ export default function ResearchPage() {
               <span className="research-method-copy">
                 <strong>{en ? item.en : item.zh}</strong>
                 <span>{en ? item.descriptionEn : item.descriptionZh}</span>
+                {(item.id === 'manual' || item.id === 'source') && (
+                  <span className="version-hub-tag">
+                    {tr('不跑研究，直接建草稿', 'No study: opens a draft directly')}
+                  </span>
+                )}
               </span>
               <span className="research-method-arrow" aria-hidden="true">
                 ›
