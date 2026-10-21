@@ -10,6 +10,9 @@ import {
   calibrationWindows,
   candidateBudget,
   fitValidation,
+  gridTargetDefaults,
+  gridTargetSpec,
+  type GridTargetDraft,
   networkSpec,
   networkDefaults,
   parameterSpec,
@@ -38,6 +41,14 @@ import {
 import { hubMethods } from '../versions/hub-methods';
 import { IGBP, PFT, USGS } from '../versions/scope-labels';
 import './research-home.css';
+
+/** 格点研究能选的地类或植物类型（后端 `study_type_choices`）。 */
+type TypeChoices = {
+  spatial: boolean;
+  kind: 'igbp' | 'usgs' | 'pft' | 'pc';
+  max: number;
+  present: number[] | null;
+};
 type Envelope = {
   state?: {
     status?: string;
@@ -176,6 +187,13 @@ export default function ResearchPage() {
     Record<string, { enabled: boolean; min: string; max: string; scale: string }>
   >({});
   const [observations, setObservations] = useState('');
+  // 格点算例要研究哪些地类或植物类型（单点按本站地类自动定）；present 是 landdata 里各算例都有的。
+  const [typeChoices, setTypeChoices] = useState<TypeChoices | null>(null);
+  const [types, setTypes] = useState<number[]>([]);
+  // 格点算例的率定目标：格点观测产品、区域里的通量站、水文站流量。
+  const [gridTargets, setGridTargets] = useState<GridTargetDraft[]>([
+    { ...gridTargetDefaults.grid },
+  ]);
   const [variables, setVariables] = useState('Qle');
   const [method, setMethod] = useState('lhs');
   const [count, setCount] = useState('40');
@@ -293,6 +311,8 @@ export default function ResearchPage() {
     epoch.current++;
     setContexts([]);
     setParameters({});
+    setTypeChoices(null);
+    setTypes([]);
     setPreflight('');
     setEnvelope(null);
     setRemoteReply(null);
@@ -461,6 +481,7 @@ export default function ResearchPage() {
       const rows = await invokeJson<ParameterContext[]>('study_parameter_contexts', {
         dirs: effective,
         kernelDir: kernel,
+        types: spatialStudy ? types : null,
       });
       if (current()) {
         setContexts(withCatalogLabels(rows));
@@ -526,7 +547,8 @@ export default function ResearchPage() {
       .split(',')
       .map((v) => v.trim())
       .filter(Boolean);
-    if (!names.length) throw new Error('Choose target/output variables');
+    if (!names.length && !(tuning && spatialStudy))
+      throw new Error('Choose target/output variables');
     const base = {
       kind: tuning ? 'tuning' : 'uncertainty',
       method: tuning ? 'differential-evolution' : method,
@@ -560,6 +582,23 @@ export default function ResearchPage() {
     const windows = calibrationWindows(from, to, valFrom, valTo);
     const pairs = Number(minPairs);
     if (!Number.isInteger(pairs) || pairs < 2) throw new Error('Minimum pairs must be ≥2');
+    // 格点算例：每个目标自带观测文件（格点产品、通量站、水文站），不按站点给观测。
+    if (spatialStudy) {
+      if (!gridTargets.length) throw new Error('Add at least one calibration target');
+      return {
+        caseRoot: [...roots][0]!,
+        specJson: JSON.stringify({
+          ...base,
+          targets: gridTargets.map((t, i) => gridTargetSpec(t, i, windows, metric, pairs)),
+          budget: {
+            population: Number(population),
+            generations: Number(generations),
+            jobs: concurrency,
+          },
+          ...(ai && trainNetwork ? { hybrid: network() } : {}),
+        }),
+      };
+    }
     const targets = sites.flatMap((path) => {
       const site = path.split(/[/\\]/).pop()!;
       if (!obs[site]) throw new Error(`Observation missing: ${site}`);
@@ -1756,14 +1795,42 @@ export default function ResearchPage() {
     const single = state.cases.filter((c) => !c.spatial);
     if (single.length === 1) setSites([single[0]!.dir]);
   }, [state.cases, sites]);
-  // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）；同一组算例只读一次。
+  // 格点算例：进到第 2 步先读能选哪些地类或植物类型（landdata 里有的），版本页带来的类型自动勾上。
   useEffect(() => {
-    const key = `${kernel}|${sites.join('|')}`;
+    if (step !== 2 || !spatialStudy || !kernel || !sites.length || typeChoices) return;
+    let current = true;
+    invokeJson<TypeChoices>('study_type_choices', {
+      dirs: sites,
+      kernelDir: kernel,
+    })
+      .then((choices) => {
+        if (!current) return;
+        setTypeChoices(choices);
+        const seeded = (state.researchSeed?.parameters ?? [])
+          .map((pick) => pick.index)
+          .filter((index): index is number => index != null)
+          .filter((index) => index >= 1 && index <= choices.max)
+          .filter((index) => !choices.present || choices.present.includes(index));
+        if (seeded.length) setTypes([...new Set(seeded)].sort((a, b) => a - b));
+      })
+      .catch((e) => {
+        if (current) setError(String(e));
+      });
+    return () => {
+      current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, spatialStudy, kernel, sites, typeChoices]);
+  // 进到第 2 步就读出这些算例能研究的参数（原来要先点"读取适用参数"）；同一组算例、同一组类型只读一次。
+  // 格点算例要先选了类型（不选也能读：只有整算例的系数）。
+  useEffect(() => {
+    const key = `${kernel}|${sites.join('|')}|${spatialStudy ? types.join(',') : ''}`;
     if (step !== 2 || !kernel || !sites.length || busy || loadedFor.current === key) return;
+    if (spatialStudy && !typeChoices) return;
     loadedFor.current = key;
     execute(loadContexts);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, kernel, sites, busy]);
+  }, [step, kernel, sites, busy, types, typeChoices, spatialStudy]);
   // 建好或打开了一个研究：直接看运行与结果。
   useEffect(() => {
     if (studyDir) setStep(4);
@@ -1981,6 +2048,163 @@ export default function ResearchPage() {
       const path = await invoke<string | null>('pick_file', { key: 'study-observation' });
       if (path) setObservation(site, path);
     });
+  const setGridTarget = (index: number, patch: Partial<GridTargetDraft>) =>
+    setGridTargets((old) => old.map((t, i) => (i === index ? { ...t, ...patch } : t)));
+  const pickTargetFile = (index: number) =>
+    execute(async () => {
+      const path = await invoke<string | null>('pick_file', { key: 'study-observation' });
+      if (path) setGridTarget(index, { path });
+    });
+  const targetKinds: [GridTargetDraft['kind'], string, string][] = [
+    ['grid', '格点观测产品（NetCDF）', 'Gridded product (NetCDF)'],
+    ['station', '区域里的通量站', 'Flux station in the domain'],
+    ['gauge', '水文站流量', 'River gauge discharge'],
+  ];
+  const gridTargetEditor = (
+    <>
+      <h3 className="study-subhead">{tr('率定目标', 'Calibration targets')}</h3>
+      <p className="muted study-hint">
+        {tr(
+          '格点算例拿三种观测比：格点产品（如 GLEAM 蒸散）按模型格子平均后逐格比；通量站比站点所在那一格；水文站比站点所在汇流单元的流量。',
+          'Gridded cases are compared with three kinds of observations: a gridded product (such as GLEAM evaporation) averaged into model cells and compared cell by cell; a flux station against the cell it sits in; a river gauge against the discharge of its unit catchment.',
+        )}
+      </p>
+      <div className="study-targets">
+        {gridTargets.map((t, index) => (
+          <div key={index} className="study-target">
+            <Field label={tr('种类', 'Kind')}>
+              <Select
+                value={t.kind}
+                onChange={(e) => {
+                  const kind = e.target.value as GridTargetDraft['kind'];
+                  setGridTarget(index, { ...gridTargetDefaults[kind], path: t.path });
+                }}
+              >
+                {targetKinds.map(([value, zh, english]) => (
+                  <option key={value} value={value}>
+                    {en ? english : zh}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field
+              label={
+                t.kind === 'station'
+                  ? tr('观测变量（如 Qle）', 'Observed variable (e.g. Qle)')
+                  : tr('模型输出变量', 'Model output variable')
+              }
+            >
+              <Input
+                value={t.variable}
+                onChange={(e) => setGridTarget(index, { variable: e.target.value })}
+              />
+            </Field>
+            {t.kind !== 'station' && (
+              <Field
+                label={
+                  t.kind === 'grid'
+                    ? tr('观测文件里的变量名', 'Variable in the observation file')
+                    : tr('观测变量名（NetCDF 才填）', 'Observed variable (NetCDF only)')
+                }
+              >
+                <Input
+                  value={t.obsVariable}
+                  onChange={(e) => setGridTarget(index, { obsVariable: e.target.value })}
+                />
+              </Field>
+            )}
+            {t.kind === 'grid' ? (
+              <Field label={tr('观测乘多少换成模型单位', 'Scale from observed to model units')}>
+                <Input
+                  type="number"
+                  value={t.scale}
+                  onChange={(e) => setGridTarget(index, { scale: e.target.value })}
+                />
+              </Field>
+            ) : (
+              <>
+                <Field label={tr('站点经度', 'Station longitude')}>
+                  <Input
+                    type="number"
+                    value={t.lon}
+                    onChange={(e) => setGridTarget(index, { lon: e.target.value })}
+                  />
+                </Field>
+                <Field label={tr('站点纬度', 'Station latitude')}>
+                  <Input
+                    type="number"
+                    value={t.lat}
+                    onChange={(e) => setGridTarget(index, { lat: e.target.value })}
+                  />
+                </Field>
+                {t.kind === 'station' && (
+                  <Field
+                    label={tr(
+                      '观测比世界时早几小时（PLUMBER2 是当地标准时，中国填 8）',
+                      'Hours the observations lead UTC (PLUMBER2 uses local standard time; 8 in China)',
+                    )}
+                  >
+                    <Input
+                      type="number"
+                      value={t.utcOffset}
+                      onChange={(e) => setGridTarget(index, { utcOffset: e.target.value })}
+                    />
+                  </Field>
+                )}
+              </>
+            )}
+            {t.kind !== 'station' && (
+              <Field label={tr('按什么时段平均后比', 'Compare averages over')}>
+                <Select
+                  value={t.period}
+                  onChange={(e) =>
+                    setGridTarget(index, { period: e.target.value as GridTargetDraft['period'] })
+                  }
+                >
+                  <option value="">{tr('按观测的时间间隔', 'The observation interval')}</option>
+                  <option value="daily">{tr('逐日', 'Daily')}</option>
+                  <option value="monthly">{tr('逐月', 'Monthly')}</option>
+                </Select>
+              </Field>
+            )}
+            <div className="study-path study-wide">
+              <Input
+                value={t.path}
+                placeholder={
+                  t.kind === 'gauge'
+                    ? tr(
+                        '观测文件（NetCDF，或"日期,流量"的 CSV）',
+                        'Observation file (NetCDF, or a date,discharge CSV)',
+                      )
+                    : tr('观测文件的绝对路径', 'Absolute path of the observation file')
+                }
+                onChange={(e) => setGridTarget(index, { path: e.target.value })}
+              />
+              <Button onClick={() => pickTargetFile(index)}>{tr('选择…', 'Choose…')}</Button>
+            </div>
+            {gridTargets.length > 1 && (
+              <div className="study-wide">
+                <button
+                  type="button"
+                  className="library-action"
+                  onClick={() => setGridTargets((old) => old.filter((_, i) => i !== index))}
+                >
+                  {tr('删掉这个目标', 'Remove this target')}
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="library-action"
+        onClick={() => setGridTargets((old) => [...old, { ...gridTargetDefaults.grid }])}
+      >
+        {tr('再加一个目标', 'Add another target')}
+      </button>
+    </>
+  );
   const pickFolder = (key: string, set: (path: string) => void) =>
     execute(async () => {
       const path = await invoke<string | null>('pick_folder', { key });
@@ -2117,8 +2341,63 @@ export default function ResearchPage() {
     (n === 2 && sites.length > 0 && !!kernel) ||
     (n === 3 && sites.length > 0 && !!kernel && (ai || chosenCount > 0)) ||
     (n === 4 && !!studyDir);
+  const typeTable = !typeChoices
+    ? []
+    : typeChoices.kind === 'igbp'
+      ? IGBP
+      : typeChoices.kind === 'usgs'
+        ? USGS
+        : PFT.filter(([id]) => id >= 1 && id <= typeChoices.max);
+  const typePicker = spatialStudy && (
+    <div className="study-types">
+      <h3 className="study-subhead">
+        {typeChoices?.kind === 'pft' || typeChoices?.kind === 'pc'
+          ? tr('要研究哪些植物类型', 'Plant types to study')
+          : tr('要研究哪些地类', 'Land classes to study')}
+      </h3>
+      {!typeChoices ? (
+        <p className="versions-empty">{tr('正在读取…', 'Reading…')}</p>
+      ) : (
+        <>
+          <p className="muted study-hint">
+            {typeChoices.present
+              ? tr(
+                  '只列出这些格点算例里都有的类型。勾上的类型各自出一组参数行；不勾只研究整个算例的系数。',
+                  'Only types present in all these gridded cases are listed. Each ticked type adds its own parameter rows; with none ticked, only case-wide coefficients are studied.',
+                )
+              : tr(
+                  '这些算例还没做过前处理，列出全部类型；区域里没有的类型，建研究时会报出来。',
+                  'These cases have not been preprocessed yet, so every type is listed; a type absent from the domain is reported when the study is created.',
+                )}
+          </p>
+          <div className="study-type-grid">
+            {typeTable
+              .filter(([id]) => !typeChoices.present || typeChoices.present.includes(id))
+              .map(([id, zh, english]) => (
+                <label key={id} className="param-check">
+                  <input
+                    type="checkbox"
+                    checked={types.includes(id)}
+                    disabled={busy || launching}
+                    onChange={(e) =>
+                      setTypes((old) =>
+                        e.target.checked
+                          ? [...new Set([...old, id])].sort((a, b) => a - b)
+                          : old.filter((value) => value !== id),
+                      )
+                    }
+                  />
+                  {id} {en ? english : zh}
+                </label>
+              ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
   const parameterTable = (
     <>
+      {typePicker}
       {state.researchSeed?.parameters.length && !contexts.length ? (
         <Notice>
           {tr(
@@ -2544,42 +2823,58 @@ export default function ResearchPage() {
                 )
           }
         >
-          <Field
-            label={
-              tuning
-                ? tr(
-                    '目标变量（逗号分隔，如 Qle, Qh）',
-                    'Target variables (comma separated, e.g. Qle, Qh)',
-                  )
-                : tr('输出变量（逗号分隔）', 'Output variables (comma separated)')
-            }
-          >
-            <Input value={variables} onChange={(e) => setVariables(e.target.value)} />
-          </Field>
+          {!(tuning && spatialStudy) && (
+            <Field
+              label={
+                tuning
+                  ? tr(
+                      '目标变量（逗号分隔，如 Qle, Qh）',
+                      'Target variables (comma separated, e.g. Qle, Qh)',
+                    )
+                  : tr('输出变量（逗号分隔）', 'Output variables (comma separated)')
+              }
+            >
+              <Input value={variables} onChange={(e) => setVariables(e.target.value)} />
+            </Field>
+          )}
+          {!tuning && spatialStudy && (
+            <p className="muted study-hint">
+              {tr(
+                '格点算例的输出取全区按陆地面积加权的平均（每个时刻一个数）。',
+                'For gridded cases each output is the land-area-weighted mean over the domain (one value per time).',
+              )}
+            </p>
+          )}
           {tuning && (
             <>
-              <h3 className="study-subhead">{tr('观测文件', 'Observation files')}</h3>
-              <div className="study-observations">
-                {sites.map((d) => {
-                  const name = siteName(d);
-                  return (
-                    <div key={d} className="study-observation">
-                      <strong>{name}</strong>
-                      <Input
-                        value={observationOf[name] ?? ''}
-                        placeholder={tr(
-                          '观测文件的绝对路径（*_Flux.nc）',
-                          'Absolute path of the observation file (*_Flux.nc)',
-                        )}
-                        onChange={(e) => setObservation(name, e.target.value)}
-                      />
-                      <Button onClick={() => pickObservation(name)}>
-                        {tr('选择…', 'Choose…')}
-                      </Button>
-                    </div>
-                  );
-                })}
-              </div>
+              {spatialStudy ? (
+                gridTargetEditor
+              ) : (
+                <>
+                  <h3 className="study-subhead">{tr('观测文件', 'Observation files')}</h3>
+                  <div className="study-observations">
+                    {sites.map((d) => {
+                      const name = siteName(d);
+                      return (
+                        <div key={d} className="study-observation">
+                          <strong>{name}</strong>
+                          <Input
+                            value={observationOf[name] ?? ''}
+                            placeholder={tr(
+                              '观测文件的绝对路径（*_Flux.nc）',
+                              'Absolute path of the observation file (*_Flux.nc)',
+                            )}
+                            onChange={(e) => setObservation(name, e.target.value)}
+                          />
+                          <Button onClick={() => pickObservation(name)}>
+                            {tr('选择…', 'Choose…')}
+                          </Button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
               <div className="study-grid">
                 {casePeriod && (
                   <p className="muted study-hint study-wide">

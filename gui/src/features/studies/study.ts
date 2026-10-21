@@ -242,6 +242,8 @@ export interface GridTargetDraft {
   lat: string;
   /** `grid`：观测乘多少换成模型单位。 */
   scale: string;
+  /** `station`：观测时间比世界时早几小时（PLUMBER2 是当地标准时，中国的站填 8）；空着按 0。 */
+  utcOffset: string;
   period: '' | 'daily' | 'monthly';
 }
 
@@ -254,6 +256,7 @@ export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft
     lon: '',
     lat: '',
     scale: '1',
+    utcOffset: '',
     period: '',
   },
   station: {
@@ -264,6 +267,7 @@ export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft
     lon: '',
     lat: '',
     scale: '1',
+    utcOffset: '',
     period: '',
   },
   gauge: {
@@ -274,6 +278,7 @@ export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft
     lon: '',
     lat: '',
     scale: '1',
+    utcOffset: '',
     period: 'daily',
   },
 };
@@ -336,9 +341,12 @@ export function gridTargetSpec(
   } else {
     const lon = number(draft.lon, -180, 360, ['经度', 'longitude']);
     const lat = number(draft.lat, -90, 90, ['纬度', 'latitude']);
+    const offset = draft.utcOffset.trim()
+      ? number(draft.utcOffset, -14, 14, ['时差', 'UTC offset'])
+      : 0;
     source =
       draft.kind === 'station'
-        ? { kind: 'station', path, lon, lat }
+        ? { kind: 'station', path, lon, lat, ...(offset ? { utc_offset: offset } : {}) }
         : {
             kind: 'gauge',
             path,

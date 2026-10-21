@@ -171,7 +171,13 @@ describe('gridded study targets', () => {
     });
     assert.equal(grid.key, 'f_lfevpa@grid1');
     const station = gridTargetSpec(
-      { ...gridTargetDefaults.station, path: '/obs/flux.nc', lon: '123.5', lat: '44.6' },
+      {
+        ...gridTargetDefaults.station,
+        path: '/obs/flux.nc',
+        lon: '123.5',
+        lat: '44.6',
+        utcOffset: '8',
+      },
       1,
       windows,
       'nrmse',
@@ -182,6 +188,7 @@ describe('gridded study targets', () => {
       path: '/obs/flux.nc',
       lon: 123.5,
       lat: 44.6,
+      utc_offset: 8,
     });
     const gauge = gridTargetSpec(
       { ...gridTargetDefaults.gauge, path: '/obs/q.csv', lon: '113.2', lat: '23.4' },

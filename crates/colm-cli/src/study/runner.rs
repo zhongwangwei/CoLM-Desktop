@@ -1964,8 +1964,18 @@ fn target_result(
         (target.from, target.to, "calibration")
     };
     // 格点算例里的通量站：比站点所在那一格；单点算例取整条站点序列。
-    let point = if let Some(super::spec::TargetSource::Station { lon, lat, .. }) = &target.source {
-        Some((*lon, *lat))
+    let point = if let Some(super::spec::TargetSource::Station {
+        lon,
+        lat,
+        utc_offset,
+        ..
+    }) = &target.source
+    {
+        Some(crate::StationPoint {
+            lon: *lon,
+            lat: *lat,
+            utc_offset_hours: *utc_offset,
+        })
     } else {
         None
     };

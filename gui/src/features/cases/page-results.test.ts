@@ -143,6 +143,8 @@ test('research inspection and saved-model callbacks return backend evidence even
       sites: ['/case'],
       invokeJson: async () => rows,
       withCatalogLabels,
+      spatialStudy: false,
+      types: [],
     })(),
     rows,
   );

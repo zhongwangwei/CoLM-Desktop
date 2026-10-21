@@ -320,6 +320,31 @@
 .study-observation strong {
   overflow-wrap: anywhere;
 }
+/* 格点研究：选地类或植物类型、逐行填的目标。 */
+.study-types {
+  margin-bottom: 16px;
+}
+.study-type-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 4px 16px;
+}
+.study-targets {
+  display: grid;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.study-target {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.study-target .study-wide {
+  grid-column: 1 / -1;
+}
 /* 目录输入框 + "选择…"。 */
 .study-path {
   display: grid;

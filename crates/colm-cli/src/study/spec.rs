@@ -337,8 +337,15 @@ pub enum TargetSource {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         period: Option<TargetPeriod>,
     },
-    /// 区域里的通量站（PLUMBER2 格式的观测文件），比站点所在那一格的模拟。
-    Station { path: String, lon: f64, lat: f64 },
+    /// 区域里的通量站（PLUMBER2 格式的观测文件），比站点所在那一格的模拟。格点算例按世界时跑，
+    /// PLUMBER2 的观测是当地标准时：`utc_offset` 是观测时间比世界时早几小时（中国的站是 8）。
+    Station {
+        path: String,
+        lon: f64,
+        lat: f64,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        utc_offset: f64,
+    },
     /// 水文站流量（NetCDF 或 `日期,流量` 的 CSV，m³/s），比站点所在那个汇流单元的模拟流量。
     Gauge {
         path: String,
@@ -373,6 +380,10 @@ impl TargetSource {
 pub enum TargetPeriod {
     Daily,
     Monthly,
+}
+
+fn is_zero(value: &f64) -> bool {
+    *value == 0.0
 }
 
 fn one_f64() -> f64 {
@@ -885,7 +896,20 @@ fn validate_target_source(key: &str, source: &TargetSource) -> Result<()> {
                 bail!("target {key} needs a finite non-zero unit scale and a finite offset");
             }
         }
-        TargetSource::Station { lon, lat, .. } | TargetSource::Gauge { lon, lat, .. } => {
+        TargetSource::Station {
+            lon,
+            lat,
+            utc_offset,
+            ..
+        } => {
+            if !located(*lon, *lat) {
+                bail!("target {key} needs a station longitude and latitude");
+            }
+            if !utc_offset.is_finite() || utc_offset.abs() > 14.0 {
+                bail!("target {key} needs a UTC offset between -14 and 14 hours");
+            }
+        }
+        TargetSource::Gauge { lon, lat, .. } => {
             if !located(*lon, *lat) {
                 bail!("target {key} needs a station longitude and latitude");
             }

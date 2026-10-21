@@ -4188,8 +4188,17 @@ struct MetricsRequest<'a> {
     pair_max_points: Option<usize>,
     from: Option<i64>,
     to: Option<i64>,
-    /// 格点算例里的通量站：取（经度, 纬度）所在那一格的模拟；单点算例是 `None`。
-    point: Option<(f64, f64)>,
+    /// 格点算例里的通量站：取站点所在那一格的模拟；单点算例是 `None`。
+    point: Option<StationPoint>,
+}
+
+/// 区域里的通量站。格点算例按世界时（UTC）跑，PLUMBER2 的观测是当地标准时：配对前观测时间减去
+/// `utc_offset_hours`（中国的站是 8）。单点算例本身就按当地时间跑，不用这一项。
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct StationPoint {
+    lon: f64,
+    lat: f64,
+    utc_offset_hours: f64,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -4708,7 +4717,12 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
     // minutes of native-I/O setup rather than numerical work.
     let obs_file =
         netcdf::open(obs_path).with_context(|| format!("cannot open {}", obs_path.display()))?;
-    let o_t = read_file_1d(&obs_file, obs_path, "time")?;
+    let mut o_t = read_file_1d(&obs_file, obs_path, "time")?;
+    if let Some(point) = point {
+        for t in &mut o_t {
+            *t -= point.utc_offset_hours * 3600.0;
+        }
+    }
     let selected = colm_hist::obs::EVALUATION_VARIABLES
         .iter()
         .filter(|variable| {
@@ -4732,7 +4746,8 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         wanted.extend(source.required());
     }
     let wanted = wanted.into_iter().collect::<Vec<_>>();
-    let mut model_data = read_history_many_at(&hists, &wanted, point)?;
+    let mut model_data =
+        read_history_many_at(&hists, &wanted, point.map(|point| (point.lon, point.lat)))?;
     let m_t = model_data.remove("time").expect("time was requested");
     // 观测的 time 原点可能在年中（AU-Preston 是 2003-08-12 03:30），
     // 必须按完整日期时间换算；只取年份会把序列错配几个月。

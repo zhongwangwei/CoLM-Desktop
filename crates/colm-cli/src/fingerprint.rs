@@ -78,8 +78,15 @@ pub fn compute(stage: &str, case_nml: &Path, kernel: &str) -> Result<Fingerprint
     let doc = colm_namelist::parse(&text)?;
     let case_dir = case_nml.parent().unwrap_or_else(|| Path::new("."));
     let excluded = ForcingExclusions::load(case_dir, &doc)?;
+    // 格点算例的数据根（rawdata 约 31 万个文件）不碰强迫目录时走 `directory_fingerprint` 的快路；按强迫排除逐个
+    // 规范化路径再 stat，外接盘上要二十分钟以上（2026-10-21 研究开跑时实测）。单点照旧，已有研究的指纹不变。
+    let spatial = colm_case::is_spatial_case(case_nml)?;
     let record_file = |out: &mut BTreeMap<String, String>, path: PathBuf, kind: FileKind| {
-        record_nonforcing_file(out, path, kind, &excluded)
+        if spatial && path.is_dir() && !excluded.overlaps_directory(&path) {
+            record_file(out, path, kind);
+        } else {
+            record_nonforcing_file(out, path, kind, &excluded)
+        }
     };
     let self_contained_roots = simple_site_roots_unused(case_nml, &doc)?;
     // CoLM 的缺省值是 .TRUE.；只有显式设为 false 才需跟踪本地日期的月、日、秒。
@@ -976,6 +983,9 @@ pub(crate) fn full_inputs_with_progress(
     let doc = colm_namelist::parse(&std::fs::read_to_string(&nml)?)?;
     let excluded = ForcingExclusions::load(case, &doc)?;
     let self_contained_roots = simple_site_roots_unused(&nml, &doc)?;
+    // 格点算例的数据根是全球 rawdata（实测 6.7 TB、31 万个文件）与 runtime：整份算 SHA-256 要以天计，
+    // 连逐个文件 stat 加规范化路径也要二十分钟以上（2026-10-21 在研究建立时实测）。只记规范路径。
+    let spatial = colm_case::is_spatial_case(&nml)?;
     let mut out = FullInputIdentity {
         schema: 1,
         algorithm: INPUT_ALGORITHM.into(),
@@ -1121,7 +1131,17 @@ pub(crate) fn full_inputs_with_progress(
                         .insert(format!("unused:{lower}"), "true".into());
                     continue;
                 }
-                if path.is_dir() {
+                if path.is_dir() && spatial {
+                    out.data_settings
+                        .insert("spatial_root_policy".into(), "path-only-v1".into());
+                    out.data_settings.insert(
+                        format!("root:{lower}"),
+                        path.canonicalize()
+                            .unwrap_or(path)
+                            .to_string_lossy()
+                            .into_owned(),
+                    );
+                } else if path.is_dir() {
                     full_directory_filtered(
                         &mut out,
                         &format!("case:{lower}"),
@@ -1250,9 +1270,21 @@ pub(crate) fn full_input_guard(
         .get("root_usage_policy")
         .is_some_and(|policy| policy == "self-contained-lct-v1")
         && simple_site_roots_unused(&nml, &doc)?;
+    // 格点算例的数据根只按路径记（`full_inputs_with_progress`），运行时也不逐个文件看护。
+    let path_only_roots = identity
+        .data_settings
+        .get("spatial_root_policy")
+        .is_some_and(|policy| policy == "path-only-v1");
     let mut directories = BTreeMap::new();
     for key in doc.paths() {
         let lower = key.to_ascii_lowercase();
+        if path_only_roots
+            && identity
+                .data_settings
+                .contains_key(&format!("root:{lower}"))
+        {
+            continue;
+        }
         if (self_contained_roots && is_global_data_root(&lower))
             || !looks_like_config_path(&key)
             || lower.starts_with("def_hist")
@@ -1676,6 +1708,42 @@ fn declared_root_unused(nml: &Path, doc: &colm_namelist::Document, field: &str) 
 #[cfg(test)]
 mod full_identity_tests {
     use super::*;
+
+    /// 格点算例的数据根只记规范路径，不读不列；换了目录（路径变）身份就变。
+    #[test]
+    fn gridded_cases_record_their_data_roots_by_path() {
+        let root = std::env::temp_dir().join(format!(
+            "colm-gridded-identity-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        for dir in ["raw", "raw2"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            std::fs::write(root.join(dir).join("soil.nc"), b"soil").unwrap();
+        }
+        std::fs::write(root.join("mesh.nc"), b"mesh").unwrap();
+        std::fs::write(root.join("forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
+        let case = |raw: &str| {
+            format!(
+                "&nl_colm\n DEF_CASE_NAME='grid'\n DEF_file_mesh='mesh.nc'\n DEF_dir_rawdata='{raw}/'\n \
+                 DEF_forcing_namelist='forcing.nml'\n/\n"
+            )
+        };
+        std::fs::write(root.join("case.nml"), case("raw")).unwrap();
+        let first = full_inputs(&root).unwrap();
+        assert!(!first
+            .files
+            .keys()
+            .any(|key| key.starts_with("case:def_dir_rawdata")));
+        assert_eq!(first.data_settings["spatial_root_policy"], "path-only-v1");
+        assert!(first.data_settings["root:def_dir_rawdata"].ends_with("raw"));
+        std::fs::write(root.join("case.nml"), case("raw2")).unwrap();
+        assert_ne!(first.data_sha256, full_inputs(&root).unwrap().data_sha256);
+        std::fs::remove_dir_all(root).unwrap();
+    }
     fn self_contained_site(path: &Path, texture: Option<f64>) {
         use colm_srfdata::site::{REQUIRED_FIELDS, SOIL_RUN_FIELDS};
         let mut file = netcdf::create(path).unwrap();

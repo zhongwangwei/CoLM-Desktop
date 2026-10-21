@@ -254,7 +254,7 @@ fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()
         for site in &manifest.spec.base_cases {
             let destination = root.join("members").join(&member.id).join(site);
             if destination.join("case.nml").is_file() {
-                verify_materialized_member(&destination, member)?;
+                verify_materialized_member(&destination, &manifest.spec, member)?;
                 continue;
             }
             let values = manifest.spec.member_namelist_values(&member.parameters);
@@ -272,7 +272,11 @@ fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()
     Ok(())
 }
 
-fn verify_materialized_member(destination: &Path, member: &MemberPlan) -> Result<()> {
+fn verify_materialized_member(
+    destination: &Path,
+    spec: &super::spec::StudySpec,
+    member: &MemberPlan,
+) -> Result<()> {
     let expected_stamp = format!("{:x}", Sha256::digest(serde_json::to_vec(member)?));
     let stamp = destination.join(".colm-study-sample.sha256");
     let actual_stamp = fs::read_to_string(&stamp).with_context(|| {
@@ -292,8 +296,9 @@ fn verify_materialized_member(destination: &Path, member: &MemberPlan) -> Result
     let case_nml = destination.join("case.nml");
     let document = colm_namelist::parse(&fs::read_to_string(&case_nml)?)?;
     super::hybrid::verify_member_files(destination, &member.parameters)?;
-    for (name, expected) in member
-        .parameters
+    // 成员算例里写的是 namelist 键（逐地类的是 `DEF_LC_X(lc)`），不是样本键。
+    for (name, expected) in spec
+        .member_namelist_values(&member.parameters)
         .iter()
         .filter(|(name, _)| !super::hybrid::is_weight_key(name))
     {
