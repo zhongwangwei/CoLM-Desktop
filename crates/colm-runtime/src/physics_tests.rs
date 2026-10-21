@@ -568,3 +568,51 @@ fn single_point_forces_topmodel_method_zero_and_spatial_reads_it() {
     let error = topmodel_method(&case_with("DEF_TOPMOD_method = 3")).unwrap_err();
     assert!(error.to_string().contains("0, 1 or 2"), "{error}");
 }
+
+/// `DEF_LC_X(lc)` 按地类读进表（PHS 九列另一张表）；PFT/PC 下上游不用、这里也不读；IGBP 没有第 18 类。
+#[test]
+fn land_class_overrides_are_read_per_class() {
+    let physics = land_physics_parameters(
+        &case_with(
+            "DEF_LC_VMAX25(7) = 40.0\nDEF_LC_VMAX25(10) = 60.0\nDEF_LC_PSI50_ROOT(10) = -300000.0",
+        ),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    assert_eq!(
+        physics.land_class_overrides.for_class(7).vmax25_umol,
+        Some(40.0)
+    );
+    assert_eq!(
+        physics.land_class_overrides.for_class(10).vmax25_umol,
+        Some(60.0)
+    );
+    assert_eq!(physics.land_class_overrides.for_class(3).vmax25_umol, None);
+    assert_eq!(
+        physics
+            .plant_hydraulic_overrides
+            .for_class(10)
+            .root_psi50_mm,
+        Some(-300000.0)
+    );
+    let pft = land_physics_parameters(
+        &case_with("DEF_USE_LCT=.false.\nDEF_USE_PFT=.true.\nDEF_LC_VMAX25 = 40.0"),
+        LandCoverScheme::Igbp,
+        HEIGHTS,
+    )
+    .unwrap();
+    assert!(pft.land_class_overrides.is_empty());
+    for body in ["DEF_LC_VMAX25 = 40.0", "DEF_LC_VMAX25(18) = 40.0"] {
+        assert!(
+            land_physics_parameters(&case_with(body), LandCoverScheme::Igbp, HEIGHTS).is_err(),
+            "{body}"
+        );
+    }
+    assert!(land_physics_parameters(
+        &case_with("DEF_LC_VMAX25(18) = 40.0"),
+        LandCoverScheme::Usgs,
+        HEIGHTS
+    )
+    .is_ok());
+}

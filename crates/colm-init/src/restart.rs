@@ -102,8 +102,9 @@ pub struct RestartTuning {
     pub trsmx0: f64,
     pub tcrit: f64,
     pub wetwatmax: f64,
-    /// 单点 LCT 本站地类的 `DEF_LC_*` 逐列覆盖（`apply_lc_scalar_overrides`，`Init_LC_Const` 在
-    /// mksrfdata/mkinidata/colm 三处都调）。PFT/PC 下为空；只有单点路径读它。
+    /// 单点 LCT 本站地类的 `DEF_LC_*(lc)` 覆盖（`apply_lc_overrides`，`Init_LC_Const` 在
+    /// mksrfdata/mkinidata/colm 三处都调）：从各地类的覆盖里取本站地类那一组。PFT/PC 下为空；
+    /// 只有单点路径读它，格点初始化按 patch 的地类取（见 [`crate::land_class`]）。
     pub land_class: colm_core::LandClassOverrides,
 }
 
@@ -178,23 +179,18 @@ impl RestartTuning {
         if crate::single_point::single_point_subgrid(document, None)?
             == crate::single_point::SinglePointSubgrid::Lct
         {
-            for name in colm_core::LandClassOverrides::REAL_NAMES {
-                if let Some(value) = document.get(name) {
-                    let value = value
-                        .as_f64()
-                        .with_context(|| format!("{name} must be a real value"))?;
-                    // `LC_OVERRIDE_UNSET = -1.e36`：显式写成哨兵也算没设。
-                    if value != -1.0e36 {
-                        tuning.land_class.set_real(name, value)?;
-                    }
-                }
+            // 方案（IGBP/USGS）由内核定，这里不知道：按最多的 24 格读，主循环那边按方案再查一遍。
+            let (table, _) = crate::land_class::land_class_overrides(
+                document,
+                crate::land_class::LC_OVERRIDE_SLOTS,
+            )?;
+            if let Some(site) = document
+                .get("SITE_landtype")
+                .and_then(colm_namelist::Value::as_f64)
+                .filter(|class| *class >= 1.0)
+            {
+                tuning.land_class = table.for_class(site as usize);
             }
-            tuning.land_class.c3c4 = match document.get("DEF_LC_C3C4") {
-                None => None,
-                Some(colm_namelist::Value::Int(-1)) => None,
-                Some(colm_namelist::Value::Int(value @ (0 | 1))) => Some(i32::try_from(*value)?),
-                Some(other) => bail!("DEF_LC_C3C4 must be the integer -1, 0, or 1, got {other:?}"),
-            };
         }
         Ok(tuning)
     }

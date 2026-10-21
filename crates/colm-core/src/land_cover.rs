@@ -81,10 +81,61 @@ pub struct PlantHydraulicTraits {
 
 /// `DEF_LC_*` 的九个可选覆盖（`MOD_Namelist.F90:573-581`）。
 ///
-/// `None` = namelist 没写（schema 的声明默认值是 `-1.e36`，也就是上游的
-/// `LC_OVERRIDE_UNSET`），用表里的值；`Some(_)` = 该列整体覆盖成同一个数。
-/// 上游的判据是 `IF (DEF_LC_X /= LC_OVERRIDE_UNSET) X(lc) = DEF_LC_X`，
-/// 所以是"整列一个数"，不是逐地类。
+/// `None` = namelist 没写这个地类的格（schema 的声明默认值是 `-1.e36`，也就是上游的
+/// `LC_OVERRIDE_UNSET`），用表里的值；`Some(_)` = 覆盖这个地类的表值。
+/// 上游的判据是 `IF (DEF_LC_X(lc) /= LC_OVERRIDE_UNSET) X(lc) = DEF_LC_X(lc)`，每个地类一组，
+/// 见 [`ByLandClass`]。
+/// 按地类的覆盖：`DEF_LC_X(lc)` 每个地类一格（`MOD_Namelist.F90` 的 `LC_OVERRIDE_SLOTS`）。
+///
+/// 原来是单点本站地类的一个数（`apply_lc_scalar_overrides`，只在 `#ifdef SinglePoint` 里）；2026-10-21
+/// 起 vendor 改成逐地类、各种尺度都生效。单点取本站地类那一组，格点按每个 patch 的地类取；
+/// 没写的地类取默认（全是 `None`，不覆盖）。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ByLandClass<T>(std::collections::BTreeMap<usize, T>);
+
+impl<T> ByLandClass<T> {
+    /// 空表（不覆盖任何地类）；`const` 是为了让配置结构体能借一个 `static` 空表当默认值、继续 `Copy`。
+    #[must_use]
+    pub const fn new() -> Self {
+        Self(std::collections::BTreeMap::new())
+    }
+}
+
+impl<T: Copy + Default> ByLandClass<T> {
+    /// 只有一个地类有覆盖的表（单点：本站地类）。
+    #[must_use]
+    pub fn only(class: usize, overrides: T) -> Self {
+        Self(std::collections::BTreeMap::from([(class, overrides)]))
+    }
+
+    /// 1 基地类号 `class` 的覆盖；没写过就是默认（不覆盖）。
+    #[must_use]
+    pub fn for_class(&self, class: usize) -> T {
+        self.0.get(&class).copied().unwrap_or_default()
+    }
+
+    pub fn class_mut(&mut self, class: usize) -> &mut T {
+        self.0.entry(class).or_default()
+    }
+
+    /// 有覆盖的地类号，从小到大。
+    pub fn classes(&self) -> impl Iterator<Item = usize> + '_ {
+        self.0.keys().copied()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// 各地类的地类表覆盖。
+pub type LandClassOverrideTable = ByLandClass<LandClassOverrides>;
+/// 各地类的植物水力九列覆盖。
+pub type PlantHydraulicOverrideTable = ByLandClass<PlantHydraulicOverrides>;
+/// 不覆盖任何地类；给按引用携带地类表的配置当默认值。
+pub static NO_LAND_CLASS_OVERRIDES: LandClassOverrideTable = ByLandClass::new();
+
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct PlantHydraulicOverrides {
     pub maximum_sunlit_leaf_conductance: Option<f64>,
@@ -98,10 +149,10 @@ pub struct PlantHydraulicOverrides {
     pub vulnerability_shape: Option<f64>,
 }
 
-/// `apply_lc_scalar_overrides`（`MOD_Const_LC.F90:879-930`）里 PHS 之外的地类表逐列覆盖。
+/// `apply_lc_overrides`（`MOD_Const_LC.F90`）里 PHS 之外、**一个地类**的表值覆盖。
 ///
-/// 上游只在单点、`DEF_USE_LCT` 时对本站地类（`SITE_landtype`）生效，在 `Init_LC_Const` 里、根系分布
-/// 之前覆盖——所以 `d50`/`beta` 的覆盖也改 `rootfr`。`vmax25` 以 µmol/m²/s 给出，与表值一样再乘 1e-6。
+/// 上游在 `DEF_USE_LCT` 时对每个地类生效（单点、流域、区域、全球一样），在 `Init_LC_Const` 里、根系分布
+/// 之前覆盖——所以 `d50`/`beta` 的覆盖也改 `rootfr`。按地类的整张见 [`ByLandClass`]。`vmax25` 以 µmol/m²/s 给出，与表值一样再乘 1e-6。
 /// `respcp` 覆盖原来不起作用（`calc_photo_params` 把同名局部量按 `0.015*c3 + 0.025*c4` 重算，
 /// upstream-bugs 第 32 条）；vendor 已修，现由 [`crate::LeafBiochemistry::respiration_fraction_override`] 带进光合。
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

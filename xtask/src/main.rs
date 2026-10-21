@@ -533,6 +533,7 @@ struct Field {
 /// fexists / ivar / ierr / iomesg / set_defaults / onoff），全部是子程序
 /// 局部变量与哑元。靠 `intent(...)` 属性过滤不够，因为其中 4 个没有 intent。
 fn extract(text: &str, groups: &BTreeMap<String, String>) -> Result<Vec<Field>> {
+    let constants = integer_parameters(text);
     let mut out = Vec::new();
     let mut owner: Option<String> = None;
     let mut lines = text.lines().enumerate().peekable();
@@ -556,7 +557,7 @@ fn extract(text: &str, groups: &BTreeMap<String, String>) -> Result<Vec<Field>> 
             continue;
         }
 
-        let Some(decl) = parse_decl(line) else {
+        let Some(decl) = parse_decl(line, &constants) else {
             continue;
         };
         // 顶层字段的判据是「它出现在某个 namelist 语句里」，不是名字前缀。
@@ -628,7 +629,27 @@ struct Decl {
     arity: Option<usize>,
 }
 
-fn parse_decl(line: &str) -> Option<Decl> {
+/// 声明区里的整型命名常量（`integer, parameter :: LC_OVERRIDE_SLOTS = 24`）：数组字段的长度
+/// 可以写成常量名，不认的话 `DEF_LC_X(LC_OVERRIDE_SLOTS)` 会被当成标量。
+fn integer_parameters(text: &str) -> BTreeMap<String, usize> {
+    text.lines()
+        .filter_map(|raw| {
+            let line = raw.split('!').next()?.trim();
+            let (head, tail) = line.split_once("::")?;
+            let head = head.to_ascii_lowercase();
+            if !(head.starts_with("integer") && head.contains("parameter")) {
+                return None;
+            }
+            let (name, value) = tail.split_once('=')?;
+            Some((
+                name.trim().to_ascii_uppercase(),
+                value.trim().parse::<usize>().ok()?,
+            ))
+        })
+        .collect()
+}
+
+fn parse_decl(line: &str, constants: &BTreeMap<String, usize>) -> Option<Decl> {
     let (head, tail) = line.split_once("::")?;
     let head_low = head.to_ascii_lowercase();
     let kind = if head_low.starts_with("logical") {
@@ -655,10 +676,15 @@ fn parse_decl(line: &str) -> Option<Decl> {
     };
     let lhs = lhs.trim();
     let (name, arity) = match lhs.split_once('(') {
-        Some((n, a)) => (
-            n.trim().to_string(),
-            a.trim_end_matches(')').trim().parse::<usize>().ok(),
-        ),
+        Some((n, a)) => {
+            let a = a.trim_end_matches(')').trim();
+            (
+                n.trim().to_string(),
+                a.parse::<usize>()
+                    .ok()
+                    .or_else(|| constants.get(&a.to_ascii_uppercase()).copied()),
+            )
+        }
         None => (lhs.to_string(), None),
     };
     Some(Decl {

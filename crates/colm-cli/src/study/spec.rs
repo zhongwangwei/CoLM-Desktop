@@ -181,6 +181,42 @@ impl ParameterSpec {
         }
         self.name.clone()
     }
+
+    /// 成员算例 namelist 里写的键。逐地类的 `DEF_LC_X` 写成 `DEF_LC_X(lc)`：2026-10-21 起 vendor 把它们
+    /// 改成每个地类一格的数组，不带下标只落到第 1 格。成员键（[`Self::member_key`]）仍是不带下标的名字，
+    /// 已有研究的样本文件与戳不受影响。
+    pub fn namelist_key(&self) -> String {
+        match &self.scope_instance {
+            Some(scope)
+                if scope.kind == ParameterScopeKind::LandCoverClass
+                    && colm_case::land_cover::is_class_array(&self.name) =>
+            {
+                match scope.index {
+                    Some(index) => colm_case::land_cover::override_path(&self.name, index),
+                    None => self.name.clone(),
+                }
+            }
+            _ => self.member_key(),
+        }
+    }
+}
+
+impl StudySpec {
+    /// 成员的参数值 → 成员算例 namelist 的键值（见 [`ParameterSpec::namelist_key`]）。不是研究参数的键
+    /// （混合网络权重）原样传下去。
+    pub fn member_namelist_values(&self, parameters: &BTreeMap<String, f64>) -> Vec<(String, f64)> {
+        parameters
+            .iter()
+            .map(|(key, value)| {
+                let name = self
+                    .parameters
+                    .iter()
+                    .find(|parameter| parameter.member_key() == *key)
+                    .map_or_else(|| key.clone(), ParameterSpec::namelist_key);
+                (name, *value)
+            })
+            .collect()
+    }
 }
 
 fn scope_matches(
@@ -921,6 +957,42 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("scope_instance"));
+    }
+
+    #[test]
+    fn land_class_members_write_the_class_slot_but_keep_their_sample_key() {
+        let mut spec = tuning_spec(vec![tuning_target("qle", true)]);
+        let land = |name: &str| ParameterSpec {
+            name: name.into(),
+            parameter_id: Some(format!("lct:IGBP:{name}")),
+            scope_instance: Some(ParameterScopeInstance {
+                kind: ParameterScopeKind::LandCoverClass,
+                scheme: Some("IGBP".into()),
+                index: Some(10),
+                type_name: None,
+            }),
+            sample_min: 10.0,
+            sample_max: 100.0,
+            scale: Some(ScaleSpec::Linear),
+        };
+        spec.parameters = vec![land("DEF_LC_VMAX25"), land("DEF_MEDLYN_G1")];
+        // 样本键不变（已有研究的样本文件照旧能读）；逐地类数组写到第 10 格，气孔参数是整个算例一个数。
+        assert_eq!(spec.parameters[0].member_key(), "DEF_LC_VMAX25");
+        assert_eq!(spec.parameters[0].namelist_key(), "DEF_LC_VMAX25(10)");
+        assert_eq!(spec.parameters[1].namelist_key(), "DEF_MEDLYN_G1");
+        let values = spec.member_namelist_values(&BTreeMap::from([
+            ("DEF_LC_VMAX25".to_string(), 40.0),
+            ("DEF_MEDLYN_G1".to_string(), 4.0),
+            ("hybrid_weight".to_string(), 1.0),
+        ]));
+        assert_eq!(
+            values,
+            [
+                ("DEF_LC_VMAX25(10)".to_string(), 40.0),
+                ("DEF_MEDLYN_G1".to_string(), 4.0),
+                ("hybrid_weight".to_string(), 1.0),
+            ]
+        );
     }
 
     #[test]

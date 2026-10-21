@@ -470,10 +470,50 @@ pub fn all_parameters() -> &'static [ParameterMeta] {
     PARAMETERS
 }
 
+/// `DEF_LC_X(lc)` 有几格（`MOD_Namelist.F90` 的 `LC_OVERRIDE_SLOTS`）：USGS 24 类，IGBP 用前 17 格。
+pub const LC_OVERRIDE_SLOTS: u8 = 24;
+
+/// 也认 `DEF_LC_X(lc)` 这种写法（只对每个地类一格的那 39 个）。
 pub fn parameter(name: &str) -> Option<&'static ParameterMeta> {
+    let (base, indexed) = match split_index(name) {
+        Some((base, _)) => (base, true),
+        None => (name, false),
+    };
     PARAMETERS
         .iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name))
+        .find(|p| p.name.eq_ignore_ascii_case(base))
+        .filter(|p| !indexed || is_class_array_meta(p))
+}
+
+/// 每个地类一格的数组：名字以 `DEF_LC_` 开头的 39 个。2026-10-21 起 vendor 把它们从"单点本站地类的
+/// 一个数"改成逐地类、各种尺度都生效；不带下标的 `DEF_LC_X = v` 在 Fortran 里只落到第 1 格。另外五个
+/// 气孔参数（Ball–Berry、Medlyn、WUE）在 namelist 里仍是整个算例一个数，上游对所有 patch 都用它。
+pub fn is_class_array(name: &str) -> bool {
+    parameter(name).is_some_and(is_class_array_meta)
+}
+
+fn is_class_array_meta(meta: &ParameterMeta) -> bool {
+    meta.name.starts_with("DEF_LC_")
+}
+
+/// `DEF_LC_X(lc)` → (`DEF_LC_X`, lc)；不带下标、不是逐地类的参数、下标越出 1..=24 都是 `None`。
+pub fn override_instance(path: &str) -> Option<(&'static str, u8)> {
+    let (_, class) = split_index(path)?;
+    let meta = parameter(path)?;
+    (1..=LC_OVERRIDE_SLOTS)
+        .contains(&class)
+        .then_some((meta.name, class))
+}
+
+/// `DEF_LC_X` 在地类 `class` 上的 namelist 键。
+pub fn override_path(name: &str, class: u8) -> String {
+    format!("{name}({class})")
+}
+
+fn split_index(name: &str) -> Option<(&str, u8)> {
+    let (base, rest) = name.split_once('(')?;
+    let index = rest.strip_suffix(')')?.trim().parse().ok()?;
+    Some((base.trim(), index))
 }
 
 pub fn is_parameter(name: &str) -> bool {
@@ -486,7 +526,7 @@ pub fn needs_plant_hydraulics(name: &str) -> bool {
 
 pub fn default_literal(name: &str, usgs: bool, landtype: i64) -> Result<Option<String>> {
     Ok(default_value(name, usgs, landtype)?.map(|value| {
-        if name.eq_ignore_ascii_case("DEF_LC_C3C4") {
+        if parameter(name).is_some_and(|meta| meta.name == "DEF_LC_C3C4") {
             (value as i64).to_string()
         } else {
             format_value(value)

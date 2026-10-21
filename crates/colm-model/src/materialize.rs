@@ -161,8 +161,7 @@ impl Registry {
         let mut fields = BTreeMap::new();
         let mut model_fields = Vec::new();
         let mut process_file_bindings = BTreeMap::new();
-        let usgs = matches!(doc.get("DEF_USE_USGS"), Some(Value::Bool(true)));
-        let scheme = if usgs { "USGS" } else { "IGBP" };
+        let scheme = case_land_cover_scheme(&doc, &case)?.unwrap_or("IGBP");
         let pft_kind = if matches!(doc.get("DEF_USE_PC"), Some(Value::Bool(true))) {
             "pc-pft"
         } else {
@@ -189,16 +188,10 @@ impl Registry {
                     expected_old_value: None,
                     unit: None,
                 });
-            } else if colm_case::land_cover::is_parameter(&key) {
-                let index = doc
-                    .get("SITE_landtype")
-                    .and_then(Value::as_f64)
-                    .filter(|v| v.fract() == 0.0 && *v > 0.0 && *v <= 255.0)
-                    .map(|v| v as u8)
-                    .context(
-                        "land-cover override needs explicit SITE_landtype to preserve its scope",
-                    )?;
-                let raw = colm_schema::find(&key).context("land-cover field")?.name;
+            } else if let Some(index) = land_cover_index(&doc, &key)? {
+                let raw = colm_case::land_cover::parameter(&key)
+                    .context("land-cover field")?
+                    .name;
                 overlay.parameters.push(ParameterOverrideRecord {
                     parameter_id: format!("lct:{scheme}:{raw}"),
                     raw_key: raw.into(),
@@ -546,6 +539,7 @@ impl Registry {
             {
                 put(&mut doc, &record.raw_key, parameter_value(record)?)?;
             }
+            let land_cover_scheme = run_land_cover_scheme(&doc, &source, &frozen.overlay)?;
             for record in &frozen.overlay.parameters {
                 let value = parameter_value(record)?;
                 let scope = &record.scope_instance;
@@ -616,15 +610,41 @@ impl Registry {
                         )?;
                     }
                     "land-cover-class" => {
-                        let landtype = doc
-                            .get("SITE_landtype")
-                            .and_then(Value::as_f64)
-                            .context("land-cover override requires explicit case landtype")?;
-                        if Some(landtype) != scope.index.map(f64::from) {
+                        let index = scope
+                            .index
+                            .context("land-cover override needs a land class")?;
+                        let scheme = scope
+                            .scheme
+                            .as_deref()
+                            .context("land-cover override needs IGBP or USGS")?;
+                        // 版本的 IGBP、USGS 两页可能都改过：只写算例自己那套分类的，另一套的地类号对不上。
+                        // 分类与内核是否一致由调用方的内核检查负责（`DEF_USE_USGS` 由宏决定）。
+                        if !scheme.eq_ignore_ascii_case(land_cover_scheme) {
                             continue;
                         }
-                        // Macro-derived scheme must be checked by the caller's kernel readiness check.
-                        put(&mut doc, &record.raw_key, value)?;
+                        if colm_case::land_cover::is_class_array(&record.raw_key) {
+                            doc.insert(
+                                &colm_case::land_cover::override_path(&record.raw_key, index),
+                                value,
+                                "nl_colm",
+                            )?;
+                        } else {
+                            // 气孔五个参数在 namelist 里是整个算例一个数：单点按本站地类写，格点算例没有"本站地类"。
+                            let landtype = doc
+                                .get("SITE_landtype")
+                                .and_then(Value::as_f64)
+                                .with_context(|| {
+                                    format!(
+                                        "{} is one value for the whole case, so it cannot be scoped to land \
+                                         class {index} here; set it as a global parameter instead",
+                                        record.raw_key
+                                    )
+                                })?;
+                            if landtype != f64::from(index) {
+                                continue;
+                            }
+                            put(&mut doc, &record.raw_key, value)?;
+                        }
                     }
                     "case-scalar" => {}
                     _ => anyhow::bail!("unsupported scope"),
@@ -704,6 +724,90 @@ impl Registry {
         result
     }
 }
+/// 算例用哪套地类（IGBP/USGS），与 GUI 的 `CaseProfile::classification` 同一顺序：先看
+/// `DEF_SUBGRID_SCHEME`，再看建算例时记下的模式，最后看 `DEF_USE_USGS`。都没写是 `None`。
+pub fn case_land_cover_scheme(doc: &Document, case: &Path) -> Result<Option<&'static str>> {
+    if let Some(Value::Str(scheme)) = doc.get("DEF_SUBGRID_SCHEME") {
+        match scheme.trim().to_ascii_uppercase().as_str() {
+            "USGS" => return Ok(Some("USGS")),
+            "IGBP" => return Ok(Some("IGBP")),
+            _ => {}
+        }
+    }
+    match fs::read(case.join(".colm-desktop.json")) {
+        Ok(bytes) => {
+            if let Some(mode) = serde_json::from_slice::<serde_json::Value>(&bytes)
+                .ok()
+                .and_then(|record| record["mode"].as_str().map(str::to_owned))
+            {
+                return Ok(Some(if mode.ends_with("usgs") {
+                    "USGS"
+                } else {
+                    "IGBP"
+                }));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(match doc.get("DEF_USE_USGS") {
+        Some(Value::Bool(true)) => Some("USGS"),
+        Some(Value::Bool(false)) => Some("IGBP"),
+        _ => None,
+    })
+}
+
+/// 运行时写哪套地类的改值。算例没说清用哪套时，版本只改了一套就用那套；两套都改了就不猜。
+fn run_land_cover_scheme(doc: &Document, case: &Path, overlay: &Overlay) -> Result<&'static str> {
+    if let Some(scheme) = case_land_cover_scheme(doc, case)? {
+        return Ok(scheme);
+    }
+    let mut schemes = overlay
+        .parameters
+        .iter()
+        .filter(|record| record.scope_instance.kind == "land-cover-class")
+        .filter_map(|record| record.scope_instance.scheme.as_deref());
+    let first = schemes.next();
+    ensure!(
+        schemes.all(|scheme| Some(scheme) == first),
+        "this model version changes both IGBP and USGS land-class parameters, and the case does not \
+         say which classification it uses (DEF_SUBGRID_SCHEME)"
+    );
+    Ok(
+        if first.is_some_and(|scheme| scheme.eq_ignore_ascii_case("USGS")) {
+            "USGS"
+        } else {
+            "IGBP"
+        },
+    )
+}
+
+/// 迁移旧算例时一个地类表改值落到哪个地类。`DEF_LC_X(lc)` 就是 `lc`；不带下标的是旧写法（单点本站地类
+/// 的一个数），落到 `SITE_landtype`。格点算例没有本站地类，不带下标的逐地类改值无从归属，报错让人写清。
+/// 不是地类表参数返回 `None`。
+fn land_cover_index(doc: &Document, key: &str) -> Result<Option<u8>> {
+    if let Some((_, class)) = colm_case::land_cover::override_instance(key) {
+        return Ok(Some(class));
+    }
+    if !colm_case::land_cover::is_parameter(key) {
+        return Ok(None);
+    }
+    doc.get("SITE_landtype")
+        .and_then(Value::as_f64)
+        .filter(|v| v.fract() == 0.0 && *v > 0.0 && *v <= 255.0)
+        .map(|v| Some(v as u8))
+        .with_context(|| {
+            if colm_case::land_cover::is_class_array(key) {
+                format!(
+                    "{key} has no land-class index and the case has no SITE_landtype to take it from; \
+                     write {key}(lc) = value for the land class it should change"
+                )
+            } else {
+                format!("{key} is kept per site land class, which needs an explicit SITE_landtype")
+            }
+        })
+}
+
 fn put(doc: &mut Document, key: &str, value: Value) -> Result<()> {
     let group = colm_schema::find(key)
         .and_then(|f| f.group)

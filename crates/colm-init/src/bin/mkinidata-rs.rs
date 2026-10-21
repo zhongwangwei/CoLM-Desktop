@@ -317,6 +317,8 @@ struct SpatialNamelistRun {
     snow_cover_exponent: f64,
     observations: SpatialObservedInitializationPaths,
     tuning: RestartTuning,
+    /// LCT（含城市）的 `DEF_LC_X(lc)`：先按 24 格读，地类方案定了再查是否越界。
+    land_classes: colm_core::LandClassOverrideTable,
     snicar: Option<SnicarInitialization>,
     /// `DEF_USE_TRACER`：`Some(DEF_TRACER_AQUIFER_MIXING_WATER_MM)`，时间重启带空示踪物事务。
     tracer_mixing_water_mm: Option<f64>,
@@ -369,6 +371,7 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
             let land_cover = land_cover.context(
                 "spatial LCT case needs --land-cover igbp or usgs because a landpatch block stores only its selected class table",
             )?;
+            ensure_land_classes_fit(&run, land_cover)?;
             for block in spatial_blocks(&run, block_override)? {
                 write_spatial_lct_namelist_block(
                     &run,
@@ -396,6 +399,7 @@ fn run_spatial_namelist(invocation: SpatialNamelistInvocation<'_>) -> Result<()>
                 land_cover == LandCoverScheme::Igbp,
                 "spatial urban cold starts always use the IGBP parent land-cover table"
             );
+            ensure_land_classes_fit(&run, land_cover)?;
             for block in spatial_blocks(&run, block_override)? {
                 write_spatial_urban_namelist_block(
                     &run,
@@ -501,6 +505,17 @@ fn write_catch_lateral_namelist_restart(
     )
 }
 
+/// IGBP 只有 17 类：写到第 18–24 格的覆盖 Fortran 会悄悄不用，这里报错。
+fn ensure_land_classes_fit(run: &SpatialNamelistRun, land_cover: LandCoverScheme) -> Result<()> {
+    let classes = colm_core::land_cover_classes(land_cover);
+    if let Some(class) = run.land_classes.classes().find(|class| *class > classes) {
+        bail!(
+            "DEF_LC_*({class}) is outside 1..={classes} for the {land_cover:?} land-cover scheme"
+        );
+    }
+    Ok(())
+}
+
 fn write_spatial_urban_namelist_block(
     run: &SpatialNamelistRun,
     urban: &SpatialUrbanRun,
@@ -519,6 +534,7 @@ fn write_spatial_urban_namelist_block(
     static_config.compression_level = run.compression_level;
     static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
+    static_config.land_classes = &run.land_classes;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_soil_texture = run.use_soil_texture;
@@ -545,6 +561,7 @@ fn write_spatial_urban_namelist_block(
     );
     time.compression_level = run.compression_level;
     time.tuning = run.tuning;
+    time.land_classes = &run.land_classes;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
@@ -613,6 +630,7 @@ fn write_spatial_lct_namelist_block(
     static_config.compression_level = run.compression_level;
     static_config.urban_only = run.urban_only;
     static_config.tuning = run.tuning;
+    static_config.land_classes = &run.land_classes;
     static_config.use_bedrock = run.use_bedrock;
     static_config.use_topmodel = run.use_topmodel;
     static_config.use_soil_texture = run.use_soil_texture;
@@ -634,6 +652,7 @@ fn write_spatial_lct_namelist_block(
     );
     time.compression_level = run.compression_level;
     time.tuning = run.tuning;
+    time.land_classes = &run.land_classes;
     time.lai_year = run.lai_year;
     time.lai_frequency = run.lai_frequency;
     time.greenwich = run.greenwich;
@@ -899,6 +918,16 @@ fn spatial_namelist_run_with_subgrid(
         snow_cover_exponent: namelist_f64(&document, "DEF_TUNING_SNOW_COVER_EXPONENT", 1.0)?,
         observations: SpatialObservedInitializationPaths::from_document(&document)?,
         tuning: RestartTuning::from_document(&document)?,
+        // PFT/PC 下上游不用这张表（`apply_lc_overrides` 只在 `DEF_USE_LCT` 时生效），也就不去读、不报错。
+        land_classes: if lct {
+            colm_init::land_class::land_class_overrides(
+                &document,
+                colm_init::land_class::LC_OVERRIDE_SLOTS,
+            )?
+            .0
+        } else {
+            colm_core::LandClassOverrideTable::new()
+        },
         snicar,
         tracer_mixing_water_mm: if namelist_bool(&document, "DEF_USE_TRACER", false)? {
             Some(namelist_f64(

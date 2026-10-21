@@ -16,9 +16,9 @@
 
 use anyhow::{bail, ensure, Context, Result};
 use colm_core::{
-    HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicOverrides,
-    PlantHydraulicParameters, PrecipitationPhaseScheme, RootFractionScheme, StomataOptions,
-    SurfaceLayerScheme, ThermalConductivityScheme,
+    HydraulicModel, LandCoverScheme, ObservationHeightMode, PlantHydraulicParameters,
+    PrecipitationPhaseScheme, RootFractionScheme, StomataOptions, SurfaceLayerScheme,
+    ThermalConductivityScheme,
 };
 use colm_namelist::{Document, Value};
 use colm_schema::{find, Default as SchemaDefault};
@@ -217,33 +217,24 @@ pub fn land_physics_parameters(
     // `K_AXS` 是轴向导度系数、`FROOT_CARBON`/`ROOT_DENSITY`/`ROOT_RADIUS`
     // 一起定细根长度密度、`FROOT_LEAF` 是细根-叶面积分配、`KRMAX` 是单位长度
     // 单位面积的最大径向导度。
-    // `DEF_LC_*` 的九个植物水力覆盖。schema 的声明默认值是 `-1.e36`，就是上游的
-    // `LC_OVERRIDE_UNSET` —— 读到它表示 namelist 没写这一列，用地类表的值。
-    //
-    // 用 `==` 比而不是容差比：两边都是同一个十进制字面量解析出来的 `f64`，
-    // 位模式必然一致；给这样一个"哨兵值"加容差反而会把一个刚好接近 -1e36 的
-    // 真实覆盖误判成未设置。
-    // 其余 `DEF_LC_*` 地类表逐列覆盖（`apply_lc_scalar_overrides`）：上游只在单点、`DEF_USE_LCT` 时生效，
-    // PFT/PC 下读了也不用。`DEF_LC_C3C4` 是整数列，哨兵是 `-1`，只许 0/1（`MOD_Namelist.F90:2070`）。
-    let mut land_class_overrides = colm_core::LandClassOverrides::default();
-    if selected[0] == "DEF_USE_LCT" {
-        for name in colm_core::LandClassOverrides::REAL_NAMES {
-            if let Some(value) = land_cover_override(document, name)? {
-                land_class_overrides.set_real(name, value)?;
-            }
-        }
-        land_class_overrides.c3c4 = match integer(document, "DEF_LC_C3C4")? {
-            -1 => None,
-            value @ (0 | 1) => Some(i32::try_from(value)?),
-            other => bail!("DEF_LC_C3C4 must be -1, 0, or 1, got {other}"),
-        };
-        // 上游只覆盖本站地类 `SITE_landtype`；城市单点里还有别的地类的 patch，Rust 没有按地类区分，拒绝。
-        ensure!(
-            land_class_overrides == colm_core::LandClassOverrides::default() || !urban_run,
-            "DEF_LC_* land-class overrides together with DEF_URBAN_RUN are not verified: upstream \
-             overrides only SITE_landtype, and an urban site mixes land classes"
-        );
-    }
+    // `DEF_LC_X(lc)` 地类表逐列覆盖（含植物水力九列），读法与初始化共用 [`colm_init::land_class`]。
+    // 上游 `apply_lc_overrides` 只在 `DEF_USE_LCT` 时生效，PFT/PC 下读了也不用；2026-10-21 起 vendor 改成
+    // 逐地类、各种尺度都生效（原来只在单点、只改 `SITE_landtype` 一类）。`DEF_LC_C3C4` 是整数列，哨兵是
+    // `-1`，只许 0/1（`MOD_Namelist.F90` 的 `any(DEF_LC_C3C4 ...)` 检查）。
+    let (land_class_overrides, plant_hydraulic_overrides) = if selected[0] == "DEF_USE_LCT" {
+        colm_init::land_class::land_class_overrides(
+            document,
+            colm_core::land_cover_classes(land_cover_scheme),
+        )?
+    } else {
+        Default::default()
+    };
+    // 城市单点里一个站点混着城市与自然地类的 patch，Rust 城市分支的逐地类取值还没和 Fortran 逐项对过，先拒绝。
+    ensure!(
+        land_class_overrides.is_empty() || !urban_run,
+        "DEF_LC_* land-class overrides together with DEF_URBAN_RUN are not verified in the Rust \
+         engine: the urban step's per-class lookups have not been compared with Fortran"
+    );
     // 这里曾有一张"设了非默认值就拒绝"的表（`oracle/nml-unread.snapshot` 里会改变物理、而运行期不读的
     // 开关）。第 443 轮逐个核对上游后全部清空，理由记在 `docs/implementation-verification.md`：
     // - 运行期死参数：`DEF_TUNING_CSOILC`（`rd_opt` 恒为 3，`MOD_LeafTemperature.F90:438`）、
@@ -256,17 +247,6 @@ pub fn land_physics_parameters(
     // - `DEF_TOPMOD_method`：TOPMODEL 只在 `DEF_Runoff_SCHEME == 0` 时调用，而单点构建在那时把它强制为 0
     //   （`MOD_Namelist.F90:1899-1904`），这里给 0；空间入口按 namelist 覆盖成 0/1/2
     //   （`MOD_Runoff.F90:90-130,215-219`，方法 2 含 `GRATIO`），见 [`topmodel_method`]。
-    let plant_hydraulic_overrides = PlantHydraulicOverrides {
-        maximum_sunlit_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SUN")?,
-        maximum_shaded_leaf_conductance: land_cover_override(document, "DEF_LC_KMAX_SHA")?,
-        maximum_xylem_conductance: land_cover_override(document, "DEF_LC_KMAX_XYL")?,
-        maximum_root_conductance: land_cover_override(document, "DEF_LC_KMAX_ROOT")?,
-        sunlit_leaf_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_SUN")?,
-        shaded_leaf_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_SHA")?,
-        xylem_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_XYL")?,
-        root_psi50_mm: land_cover_override(document, "DEF_LC_PSI50_ROOT")?,
-        vulnerability_shape: land_cover_override(document, "DEF_LC_CK")?,
-    };
     let plant_hydraulic_parameters = PlantHydraulicParameters {
         coarse_root_lateral_length_m: real(document, "DEF_PH_CROOT_LATERAL_LENGTH")?,
         axial_root_conductivity: real(document, "DEF_PH_K_AXS")?,
@@ -574,22 +554,6 @@ pub(crate) fn real(document: &Document, path: &str) -> Result<f64> {
         }
     };
     parse_fortran_real(&text).with_context(|| format!("{path} is not a readable real: {text:?}"))
-}
-
-/// 上游 `MOD_Namelist.F90` 的 `LC_OVERRIDE_UNSET = -1.e36_r8`。
-///
-/// 它是 `DEF_LC_*` 的声明默认值，含义是"namelist 没写这一列，用地类表的值"——
-/// 而不是一个真实的物理量。所以这里必须把它映射成 `None`，不能当成一个
-/// `-1e36` 的叶导度传下去。
-const LC_OVERRIDE_UNSET: f64 = -1.0e36;
-
-/// 读一个 `DEF_LC_*`，把 `LC_OVERRIDE_UNSET` 折成 `None`。
-fn land_cover_override(document: &Document, path: &str) -> Result<Option<f64>> {
-    let value = real(document, path)?;
-    if value == LC_OVERRIDE_UNSET {
-        return Ok(None);
-    }
-    Ok(Some(value))
 }
 
 pub(crate) fn logical(document: &Document, path: &str) -> Result<bool> {

@@ -35079,3 +35079,43 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
     - **验证**：
       - 浏览器预览：改一个参数 → 冻结 → 提示和底部条如上，头部只剩页签 → 点"基于它新建修改版"进"新建修改版"，"基于哪个版本"选的是刚冻结的 r1。
       - 测试：官方版本有底部条和"基于它新建修改版"、没有"冻结为新版本"；草稿从底部冻结后提示"已冻结为……模拟已改用这个版本"。前端共 775 条。
+86. **地类表改值 `DEF_LC_X` 改成逐地类、单点到全球都生效（用户要求，2026-10-21）**：
+    - 用户问"修改参数"里的参数是不是单点、多站点、流域、区域、全球都能用。核对结果：全局、PFT/PC、示踪物参数都能用；IGBP/USGS 地类参数只在单点生效——上游 `apply_lc_scalar_overrides` 在 `#ifdef SinglePoint` 里、只改 `SITE_landtype` 一类，格点算例运行准备还直接报错（"land-cover override requires explicit case landtype"）。用户选"全尺度生效（改 CoLM 源码）"。
+    - **Fortran**（vendor，详见新建的 `vendor/PROVENANCE.md`）：
+      - 39 个 `DEF_LC_X` 改成 `DEF_LC_X(LC_OVERRIDE_SLOTS)`，24 格；逐格检查，报错带 `name(lc)`；MPI 广播整个数组。
+      - `apply_lc_overrides` 在 `DEF_USE_LCT` 时逐地类覆盖，去掉 `SinglePoint` 门，仍在根系分布之前。
+      - `DEF_LC_RESPCP` 在 `calc_photo_params` 里由 c3/c4 重算，需要当前 patch 的地类：`lc_current_class` 设成 `THREADPRIVATE`（`CoLMDRIVER` 对 patch 做 OpenMP 并行），`CoLMDRIVER` 在 `m = patchclass(i)` 之后设它。
+    - **schema**：生成器原来不认命名常量做数组长度（`DEF_LC_X(LC_OVERRIDE_SLOTS)`），`xtask` 加了 `integer, parameter` 的解析；重新生成后只有 `DEF_LC_*` 变成 `arity: 24`、`requires: []`。
+    - **Rust 引擎**：
+      - `colm-core`：`ByLandClass<T>`（按地类号存的覆盖表），`LandClassOverrideTable` / `PlantHydraulicOverrideTable`。
+      - `colm-init::land_class`：初始化与主循环共用一个读法；不带下标的 `DEF_LC_X` 报错（Fortran 里它只落到第 1 格）；超出本方案地类数报错（IGBP 写到第 18 格 Fortran 会悄悄不用）。
+      - 格点初始化原来不看覆盖。现在按 patch 地类取：冠层高度表、`LAI_readin` 的 `fveg0` 除法与 8 天 LAI 的 `sai0`、`z0m = htop·z0mr`（原来写死 0.1）、叶片光学。
+      - 主循环 `LandPhysicsParameters` 带整张表，装配时按 `patchclass` 取；混合模型的地类插槽按每行的地类写。
+      - 城市算例加地类覆盖仍拒绝（Rust 城市分支的逐地类取值没和 Fortran 逐项核对过）。
+    - **运行准备与研究**：
+      - `colm-model` 把版本里的地类改值写成 `DEF_LC_X(lc)`，不再只写本站那一类。版本的 IGBP、USGS 两页都改过时只写算例那一套：先看 `DEF_SUBGRID_SCHEME`，再看建算例时记的模式，最后看 `DEF_USE_USGS`；都没写又两页都改过就报错，不猜。
+      - 迁移旧算例：不带下标的值归到 `SITE_landtype`，格点算例报错并提示写 `DEF_LC_X(lc)`。
+      - `colm-cli` 的内核检查不再要求 SinglePoint；版本的两套分类里至少一套对上内核即可。运行前拒绝不带下标的写法。
+      - 研究成员写 `DEF_LC_X(lc)`；样本键仍是不带下标的名字，已有研究的样本文件照旧能读。
+    - **GUI**：
+      - 后端：算例级字段、导出/导入都按地类下标读写。
+      - 前端："修改参数"的 IGBP/USGS 页加一句说明：所有尺度都生效；五个气孔参数例外，只在单点对本站地类起作用。
+    - **实测**（`kernels/` 下 17 个预设全部用新源码重编，退出码全 0）：
+      - **无覆盖时**：三份黄金（`CN-Cng`、`CN-Cng-wet`、`US-NR1-snow`）用新 `kernels/default` 全链路重跑，`golden-compare` 127 个变量全部逐位一致。
+      - **单点改前/改后**（`CN-Cng`，地类 10，同时改 `VMAX25/RESPCP/RHOL_VIS/Z0MR/FVEG0/HTOP0/CHIL` 七项）：
+        - 旧内核（与 HEAD 的 Fortran 源相同）配不带下标的写法，新内核配 `DEF_LC_X(10)`：127 个变量逐位一致。
+        - 这七项确实改变结果：与黄金比 `f_zol` 264/264 不同。
+        - 新内核配不带下标的写法时，结果等于没改：只改了地类 1。所以运行前要拦下这种写法。
+        - 纯 Rust 全链路配 `DEF_LC_X(10)`，与新 Fortran 逐位一致。
+      - **区域**：广东 113–114°E、23–24°N，0.5° 共 4 格、14 个地类、48 个 patch，JRA3Q，2003-01-01→01-02；改地类 2、9、10、12 的七项。
+        - 纯 Fortran（`kernels/latlon`）与纯 Rust：无覆盖时 history 142 个变量逐位一致，有覆盖时也一致。
+        - 有覆盖时，常数重启与时间重启共 7 份对比，其中 6 份逐位一致。另 1 份是初始 gridriver 重启，只差 4 个 `missing_value` 属性；无覆盖的那组也一样，是既有差异。
+        - 覆盖确实生效：有覆盖与无覆盖相比，`f_zol` 8/8 不同。
+    - **测试**：
+      - 引擎 workspace `--lib --bins` 共 2647 条通过，新增 8 条：逐地类读与拒绝（2 条）、冠层高度表、格点 `fveg0/sai0`、运行时按类读、各尺度逐格写入与两套分类取舍（替换原来"只写本站地类"那条）、迁移归位与格点拒绝、研究成员键。成员算例写下标加在原有的 `materializes_only_the_selected_pft_slots` 里。
+      - GUI 后端 420 条通过（导出/导入按下标；算例级写本站那一格）。前端 775 条通过。
+      - 四张生成表的 drift、namelist 往返、`tier-check`、vendor 的 `test_create_newcase_runtime_contract.sh` 都通过。
+    - **没做**：
+      - Ball–Berry、Medlyn、WUE 五个气孔参数在 CoLM 里是整个算例一个数，仍只在单点按本站地类写；格点算例给了按地类的记录会报错，提示到全局参数里改。
+      - 研究页的地类参数仍只对"所选算例同一本站地类"的单点给出，格点研究要先有选地类的界面。
+      - USGS 的格点算例和城市算例没有实跑。

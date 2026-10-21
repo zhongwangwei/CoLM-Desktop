@@ -76,9 +76,10 @@ pub fn member_case(
             colm_case::pft::validate_override(base, *value)?;
             let meta = colm_case::pft::parameter(base).expect("override_instance validated base");
             document.insert(name, pft_value(meta, *value), "nl_colm")?;
-        } else if colm_case::land_cover::is_parameter(name) {
+        } else if let Some(meta) = colm_case::land_cover::parameter(name) {
             colm_case::land_cover::validate_override(name, *value)?;
-            let field = colm_schema::find(name)
+            // `name` 可能带地类下标（`DEF_LC_X(lc)`）；schema 按不带下标的名字查。
+            let field = colm_schema::find(meta.name)
                 .with_context(|| format!("{name} is missing from the generated schema"))?;
             let group = field
                 .group
@@ -516,6 +517,23 @@ mod tests {
             Some(50.0)
         );
         assert!(document.get("DEF_PFT_VMAX25(4)").is_none());
+        // 逐地类的地类表改值带着地类下标写进成员算例（不带下标只会改到第 1 个地类）。
+        let land = root.join("land-member");
+        member_case(
+            &baseline,
+            &land,
+            "m000002",
+            "site",
+            &[("DEF_LC_VMAX25(10)".into(), 40.0)],
+        )
+        .unwrap();
+        let document =
+            colm_namelist::parse(&std::fs::read_to_string(land.join("case.nml")).unwrap()).unwrap();
+        assert_eq!(
+            document.get("DEF_LC_VMAX25(10)").and_then(Value::as_f64),
+            Some(40.0)
+        );
+        assert!(document.get("DEF_LC_VMAX25").is_none());
         assert_eq!(
             std::fs::read_to_string(baseline.join("case.nml")).unwrap(),
             original

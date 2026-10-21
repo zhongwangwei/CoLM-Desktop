@@ -2226,10 +2226,23 @@ fn land_cover_expert_override_batch_write_is_validated_and_atomic() {
     );
     let written = set_batch(dirs.clone(), "DEF_LC_VMAX25".into(), "60".into()).unwrap();
     assert_eq!(written.written, 2);
-    for dir in &dirs {
+    // 逐地类的数组：写到各自本站地类那一格，不写不带下标的（那在 Fortran 里只改第 1 个地类）。
+    for (dir, class) in dirs.iter().zip([1, 2]) {
         let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml")).unwrap();
-        assert!(text.contains("DEF_LC_VMAX25 = 60"), "{dir}: {text}");
+        assert!(
+            text.contains(&format!("DEF_LC_VMAX25({class}) = 60")),
+            "{dir}: {text}"
+        );
+        assert!(!text.contains("DEF_LC_VMAX25 ="), "{dir}: {text}");
     }
+    let states = field_states_for_at(
+        &std::fs::read_to_string(std::path::Path::new(&dirs[1]).join("case.nml")).unwrap(),
+        &std::collections::BTreeSet::from(["SinglePoint", "LULC_IGBP"]),
+        None,
+    )
+    .unwrap();
+    let state = states.iter().find(|s| s.name == "DEF_LC_VMAX25").unwrap();
+    assert_eq!(state.override_value.as_deref(), Some("60"));
 
     let before: Vec<_> = dirs
         .iter()
@@ -2977,6 +2990,41 @@ fn process_export_omits_present_values_equal_to_fortran_code_defaults() {
     assert!(records
         .iter()
         .any(|record| { record.raw_key == "DEF_METHANE%f_methane" && record.value == "0.25" }));
+}
+
+/// 逐地类的 `DEF_LC_X(lc)` 按地类导出，导入到没有本站地类的格点算例也落在同一个地类格。
+#[test]
+fn indexed_land_class_overrides_export_and_import_by_class() {
+    let source = batch(
+        "parameter-export-lc-class",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_USE_LCT=.true.\n DEF_USE_USGS=.false.\n DEF_LC_VMAX25(10)=40.\n/\n"],
+    );
+    let bundle = export_parameter_overrides(source, None).unwrap();
+    let record = bundle.cases[0]
+        .records
+        .iter()
+        .find(|record| record.raw_key == "DEF_LC_VMAX25")
+        .unwrap();
+    assert_eq!(record.scope_instance.index, Some(10));
+    assert_eq!(record.scope_instance.scheme.as_deref(), Some("IGBP"));
+    let target = batch(
+        "parameter-import-lc-grid",
+        &["&nl_colm\n DEF_CASE_NAME='case0'\n DEF_USE_LCT=.true.\n DEF_USE_USGS=.false.\n/\n"],
+    );
+    let json = serde_json::to_string(&bundle).unwrap();
+    let preview = preview_import_parameter_overrides(target.clone(), json.clone(), None).unwrap();
+    assert!(preview.can_apply, "{:#?}", preview.items);
+    apply_import_parameter_overrides(target.clone(), json, preview.version_token, None).unwrap();
+    let doc = colm_namelist::parse(
+        &std::fs::read_to_string(std::path::Path::new(&target[0]).join("case.nml")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        doc.get("DEF_LC_VMAX25(10)")
+            .and_then(|value| value.as_f64()),
+        Some(40.0)
+    );
+    assert!(doc.get("DEF_LC_VMAX25").is_none());
 }
 
 #[test]

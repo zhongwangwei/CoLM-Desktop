@@ -1794,6 +1794,51 @@ fn spatial_lct_cold_start_reads_8_day_lai_and_native_stem_area() {
     crate::remove_test_tree(root);
 }
 
+/// 格点也逐地类取 `DEF_LC_X(lc)`：地类 1 的 `fveg0` 改成 0.5，`LAI_readin` 把 LAI（月度时连 SAI）除以它，
+/// 8 天 LAI 时 `tsai = sai0(lc)`（`MOD_LAIReadin.F90:142-157`）；别的地类的改值不碰这个 patch。
+#[test]
+fn spatial_lct_cold_start_takes_the_patch_class_overrides() {
+    let _netcdf_guard = crate::netcdf_test_guard();
+    let root = temp_dir("class-overrides");
+    let landdata = root.join("landdata");
+    write_landdata(&landdata, 2005, "w180_s90");
+    write_monthly_vegetation(&landdata, 2005, "w180_s90", 2.5, 0.4);
+    write_eight_day_lai(&landdata, 2005, "w180_s90", 9, 2.5);
+    let mut table = colm_core::LandClassOverrideTable::new();
+    table.class_mut(1).fveg0 = Some(0.5);
+    table.class_mut(1).sai0 = Some(1.5);
+    table.class_mut(2).fveg0 = Some(0.1);
+    for (frequency, julian_day, tsai) in [
+        (crate::LaiFrequency::Monthly, 1, 0.8),
+        (crate::LaiFrequency::EightDay, 12, 1.5),
+    ] {
+        let restart = root.join(format!("restart-{julian_day}"));
+        let mut config = crate::SpatialLctTimeConfig::new(
+            &landdata,
+            &restart,
+            "test",
+            2005,
+            "w180_s90",
+            LandCoverScheme::Igbp,
+            HydraulicModel::VanGenuchten,
+            crate::RestartDate {
+                year: 2005,
+                julian_day,
+                seconds: 0,
+            },
+        );
+        config.lai_frequency = frequency;
+        config.plant_hydraulics = false;
+        config.land_classes = &table;
+        let output = crate::write_spatial_lct_cold_time_restart(config).unwrap();
+        let file = netcdf::open(output.block).unwrap();
+        assert_eq!(values_f64(&file, "tlai").unwrap(), [5.0], "{frequency:?}");
+        assert_eq!(values_f64(&file, "tsai").unwrap(), [tsai], "{frequency:?}");
+        assert_eq!(values_f64(&file, "fveg").unwrap(), [0.5], "{frequency:?}");
+    }
+    crate::remove_test_tree(root);
+}
+
 #[test]
 fn spatial_lct_cold_start_area_averages_observed_soil_and_snow() {
     let _netcdf_guard = crate::netcdf_test_guard();

@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
+use colm_core::LandClassOverrides;
 use colm_namelist::Document;
 
 use crate::crop::{map_field_time_3d, map_field_time_profile_4d, AreaMapping, MapGrid};
@@ -63,6 +64,8 @@ pub struct SpatialLctTimeConfig<'a> {
     pub vegetation_snow: bool,
     pub snow_cover_exponent: f64,
     pub tuning: RestartTuning,
+    /// 各地类的 `DEF_LC_X(lc)`：冠层高度、`fveg0`/`sai0`（`LAI_readin`）、`z0mr`、叶片光学按 patch 地类取。
+    pub land_classes: &'a colm_core::LandClassOverrideTable,
     /// Optional monthly sources enabled by CoLM's `DEF_USE_*Init` switches.
     pub observations: SpatialObservedInitialization<'a>,
     /// Immutable SNICAR tables resolved before writing any block outputs.
@@ -105,6 +108,7 @@ impl<'a> SpatialLctTimeConfig<'a> {
             vegetation_snow: true,
             snow_cover_exponent: 0.5,
             tuning: RestartTuning::default(),
+            land_classes: &colm_core::NO_LAND_CLASS_OVERRIDES,
             observations: SpatialObservedInitialization::default(),
             snicar: None,
             crop: None,
@@ -208,15 +212,18 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
         config.hydraulic_model,
     )?;
     let mut canopy = read_canopy(
-        crate::SpatialLctStaticConfig::new(
-            config.landdata,
-            config.restart_dir,
-            config.case_name,
-            config.land_cover_year,
-            config.block_label,
-            config.land_cover,
-            config.hydraulic_model,
-        ),
+        crate::SpatialLctStaticConfig {
+            land_classes: config.land_classes,
+            ..crate::SpatialLctStaticConfig::new(
+                config.landdata,
+                config.restart_dir,
+                config.case_name,
+                config.land_cover_year,
+                config.block_label,
+                config.land_cover,
+                config.hydraulic_model,
+            )
+        },
         &patches.class,
         &kind,
         count,
@@ -300,7 +307,12 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             patches
                 .class
                 .iter()
-                .map(|&class| stem_area_index(config.land_cover, class))
+                .map(|&class| {
+                    Ok(match class_overrides(config.land_classes, class).sai0 {
+                        Some(sai0) => sai0,
+                        None => stem_area_index(config.land_cover, class)?,
+                    })
+                })
                 .collect::<Result<Vec<_>>>()?,
         ),
     };
@@ -378,13 +390,30 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             total_sai[patch] = 0.0;
             lai_now[patch] = 0.0;
             sai_now[patch] = 0.0;
-        } else {
-            fveg[patch] = urban_at_patch[patch]
-                .map(|urban| urban_data.expect("urban map has data").state.tree_fraction[urban])
-                .unwrap_or(1.0);
+        } else if let Some(urban) = urban_at_patch[patch] {
+            fveg[patch] = urban_data.expect("urban map has data").state.tree_fraction[urban];
             green[patch] = 1.0;
+        } else {
+            // `MOD_LAIReadin.F90:142-157`：表里植被地类的 `fveg0` 都是 1，只有 `DEF_LC_FVEG0(lc)` 让除法起作用；
+            // 8 天 LAI 的 `tsai = sai0` 已在上面按地类取过。
+            let fveg0 = class_constants(config, class)?.maximum_vegetation_fraction();
+            fveg[patch] = fveg0;
+            if fveg0 > 0.0 {
+                total_lai[patch] /= fveg0;
+                if config.lai_frequency == LaiFrequency::Monthly {
+                    total_sai[patch] /= fveg0;
+                }
+                green[patch] = 1.0;
+            } else {
+                total_lai[patch] = 0.0;
+                total_sai[patch] = 0.0;
+            }
+            lai_now[patch] = total_lai[patch];
+            sai_now[patch] = total_sai[patch];
         }
-        roughness[patch] = canopy.patch_top_m[patch] * 0.1;
+        // `z0m = htop * z0mr`（`MOD_IniTimeVariable.F90:508`）；表里 LCT 的 `z0mr` 都是 0.1。
+        roughness[patch] =
+            canopy.patch_top_m[patch] * class_constants(config, class)?.roughness_to_height_ratio();
         let porosity = soil_column(&soil, SoilField::Porosity, patch);
         let residual = soil_column(&soil, SoilField::ThetaR, patch);
         let psi0 = soil_column(&soil, SoilField::Psi0, patch);
@@ -531,7 +560,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
             leaf_optics_from_land_cover_one_based(
                 config.land_cover,
                 class,
-                colm_core::LandClassOverrides::default(),
+                class_overrides(config.land_classes, class),
             )?,
             lai_now[patch],
             sai_now[patch],
@@ -557,7 +586,7 @@ pub(crate) fn write_spatial_lct_cold_time_restart_with_urban(
                 leaf_optics: leaf_optics_from_land_cover_one_based(
                     config.land_cover,
                     class,
-                    colm_core::LandClassOverrides::default(),
+                    class_overrides(config.land_classes, class),
                 )?,
                 vegetation_fraction: fveg[patch],
                 vegetation_center_height_m: data.state.roof_height_m[urban]
@@ -970,6 +999,22 @@ fn eight_day_julian_day(date: RestartDate) -> Result<u16> {
         "restart Julian day is outside its year"
     );
     Ok((date.julian_day - 1) / 8 * 8 + 1)
+}
+
+fn class_overrides(table: &colm_core::LandClassOverrideTable, class: i32) -> LandClassOverrides {
+    usize::try_from(class).map_or_else(
+        |_| LandClassOverrides::default(),
+        |class| table.for_class(class),
+    )
+}
+
+fn class_constants(
+    config: SpatialLctTimeConfig<'_>,
+    class: i32,
+) -> Result<colm_core::ClassConstants> {
+    let index = usize::try_from(class).context("land class must be positive")?;
+    Ok(colm_core::ClassConstants::new(config.land_cover, index)?
+        .with_overrides(config.land_classes.for_class(index)))
 }
 
 pub(crate) fn stem_area_index(scheme: LandCoverScheme, class: i32) -> Result<f64> {

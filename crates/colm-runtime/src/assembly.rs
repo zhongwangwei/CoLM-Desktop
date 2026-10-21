@@ -93,8 +93,9 @@ pub struct LandPhysicsParameters {
     pub bgc: Option<colm_core::bgc_driver::BgcSwitches>,
     /// `DEF_USE_IRRIGATION`（只在 CROP 内核生效，`colm-rs --crop` 之外清成 `None`）。
     pub irrigation: Option<colm_core::IrrigationSettings>,
-    /// 单点 LCT 的 `DEF_LC_*` 地类表逐列覆盖（PHS 九列在 `plant_hydraulic_overrides`）；PFT/PC 下为空。
-    pub land_class_overrides: colm_core::LandClassOverrides,
+    /// LCT 的 `DEF_LC_X(lc)` 地类表逐列覆盖，按地类号存（PHS 九列在 `plant_hydraulic_overrides`）；
+    /// 装配期按本 patch 的 `patchclass` 取那一组。PFT/PC 下为空。
+    pub land_class_overrides: colm_core::LandClassOverrideTable,
     /// 混合模型 `pft` 插槽给本 patch 各 PFT 的 `DEF_PFT_*` 覆盖（按 PFT 在本 patch 里的次序；空 = 不覆盖）。
     /// 语义同 namelist 的 `DEF_PFT_*(class)`，只是按 PFT 而不是按类别；派生量照原路径算（见 `crate::pft`）。
     pub pft_overrides: Vec<std::collections::BTreeMap<String, f64>>,
@@ -141,7 +142,7 @@ pub struct LandPhysicsParameters {
     /// 里先抄地类表、再按 `DEF_LC_X /= LC_OVERRIDE_UNSET` 覆盖，所以覆盖必须和
     /// 地类号一起用；地类号来自重启（`patchclass`），装配期才知道，
     /// 于是这一项只能在这里传递、不能在这里求值。
-    pub plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides,
+    pub plant_hydraulic_overrides: colm_core::PlantHydraulicOverrideTable,
     /// `DEF_USE_OZONESTRESS`（城市模型下上游强制关掉）：LCT patch 的 `CalcOzoneStress` 参数
     /// （`ivt` 按地类取，装配时由 [`crate::physics::lct_ozone_parameters`] 逐 patch 填）。PFT/PC 的逐 PFT 参数由
     /// [`colm_core::PftParameters`] 换掉类别那三项。关掉时为 `None`。
@@ -1466,7 +1467,7 @@ fn assemble(
         )?);
     }
     let class = ClassConstants::new(physics.land_cover_scheme, land_class)?
-        .with_overrides(physics.land_class_overrides);
+        .with_overrides(physics.land_class_overrides.for_class(land_class));
     // `MOD_LAIReadin.F90:128-145`（`USE_SITE_LAI` 那条）：水体与地类 0 是 0，
     // 否则看 `fveg0`。地类 0 在上面的校验里已经被拒，所以只剩水体那一条。
     let vegetation_greenness = if land_class
@@ -1501,7 +1502,7 @@ fn assemble(
         land_class as i32,
         physics.root_fraction_scheme,
         &interface_depth_m,
-        physics.land_class_overrides,
+        physics.land_class_overrides.for_class(land_class),
     )?;
     // `eroot` 把 `soil_water_stress` 直接定义成 sum(rootfr * resistance)，而每一步
     // 都要求胁迫落在 [0, 1]；所以**求和不得超过 1**。这里只守上限，不要求等于 1：
@@ -1522,7 +1523,9 @@ fn assemble(
         physics
             .plant_hydraulics
             .then(|| colm_core::PlantHydraulicSettings {
-                traits: class.plant_hydraulic_traits(physics.plant_hydraulic_overrides),
+                traits: class.plant_hydraulic_traits(
+                    physics.plant_hydraulic_overrides.for_class(land_class),
+                ),
                 parameters: physics.plant_hydraulic_parameters,
                 soil_surface_resistance_scheme: physics.surface_resistance_scheme,
             });
@@ -2007,7 +2010,7 @@ impl StandardLctRestartTemplate {
         // 否则除以 `fveg0`（`DEF_LAI_MONTHLY` 下 `tsai` 也除），`fveg0 <= 0` 清零。
         // 两张表的 `fveg0` 都是 1.0，没有 `DEF_LC_FVEG0` 时除法对植被地类是恒等的。
         let fveg0 = ClassConstants::new(self.physics.land_cover_scheme, self.land_class)?
-            .with_overrides(self.physics.land_class_overrides)
+            .with_overrides(self.physics.land_class_overrides.for_class(self.land_class))
             .maximum_vegetation_fraction();
         let (tlai, tsai) = if self.land_class
             == colm_core::waterbody_class(self.physics.land_cover_scheme)
@@ -2531,7 +2534,7 @@ impl StandardLctRestartTemplate {
             optics: colm_core::leaf_optics_from_land_cover_one_based(
                 self.physics.land_cover_scheme,
                 i32::try_from(self.land_class)?,
-                self.physics.land_class_overrides,
+                self.physics.land_class_overrides.for_class(self.land_class),
             )?,
             wet_snow_fraction: step.wet_snow_fraction,
             snow_water_equivalent_mm: state.snow.water_equivalent_kg_m2,
@@ -3671,7 +3674,7 @@ impl UrbanTemplate {
             leaf_optics: colm_core::leaf_optics_from_land_cover_one_based(
                 physics.land_cover_scheme,
                 i32::try_from(land_class)?,
-                physics.land_class_overrides,
+                physics.land_class_overrides.for_class(land_class),
             )?,
             soil_node_depth_m: soil_grid.0.to_vec(),
             soil_layer_thickness_m: soil_grid.1.to_vec(),

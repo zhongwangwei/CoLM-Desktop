@@ -3080,11 +3080,7 @@ pub fn apply(
     super::engine::ensure_supported_study_manifest(&manifest, None)?;
     super::engine::verify_frozen_inputs(&manifest)?;
     let member = resolve_apply_member(&study_dir, &manifest, member_id)?;
-    let values = member
-        .parameters
-        .iter()
-        .map(|(name, value)| (name.clone(), *value))
-        .collect::<Vec<_>>();
+    let values = manifest.spec.member_namelist_values(&member.parameters);
     let output_name = output
         .file_name()
         .context("Study apply output must name a case or directory")?;
@@ -3668,11 +3664,7 @@ pub(crate) fn save_version(
             .unwrap_or_default()
             .as_nanos()
     ));
-    let values = member
-        .parameters
-        .iter()
-        .map(|(name, value)| (name.clone(), *value))
-        .collect::<Vec<_>>();
+    let values = manifest.spec.member_namelist_values(&member.parameters);
     let result = (|| -> Result<colm_model::FrozenRevision> {
         super::materialize::member_case(
             &super::model::base_case(&manifest, first)?,

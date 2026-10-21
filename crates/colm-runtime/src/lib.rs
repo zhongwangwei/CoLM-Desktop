@@ -2216,7 +2216,7 @@ mod tests {
             use_pc: false,
             bgc: None,
             irrigation: None,
-            land_class_overrides: colm_core::LandClassOverrides::default(),
+            land_class_overrides: colm_core::LandClassOverrideTable::new(),
             pft_overrides: Vec::new(),
             soil_stress: None,
             dynamic_wetland: false,
@@ -2231,7 +2231,7 @@ mod tests {
             river_lake_flow_build: false,
             catch_lateral: false,
             plant_hydraulic_parameters: colm_core::PlantHydraulicParameters::default(),
-            plant_hydraulic_overrides: colm_core::PlantHydraulicOverrides::default(),
+            plant_hydraulic_overrides: colm_core::PlantHydraulicOverrideTable::new(),
             ozone: None,
             vegetation_snow: false,
             split_soil_snow: false,
@@ -3129,6 +3129,7 @@ mod tests {
                 )
                 .unwrap()[0]
                 .land_class_overrides
+                .for_class(3)
                 .vmax25_umol
                 .unwrap()
         };
@@ -3140,7 +3141,7 @@ mod tests {
         assert_eq!(vmax(factor(1.0), &physics).to_bits(), table.to_bits());
         assert_eq!(vmax(factor(2.0), &physics), table * 2.0);
         let mut overridden = physics.clone();
-        overridden.land_class_overrides.vmax25_umol = Some(40.0);
+        overridden.land_class_overrides.class_mut(3).vmax25_umol = Some(40.0);
         assert_eq!(vmax(factor(1.5), &overridden), 60.0);
     }
 
@@ -3175,11 +3176,11 @@ mod tests {
                 &colm_namelist::parse("&nl_colm\n/\n").unwrap(),
             )
             .unwrap();
-        // 两个 patch 都是土壤 patch，每一列都被覆盖了（覆盖确实走了插槽这条路）。
-        assert!(per_patch
-            .iter()
-            .all(|physics| physics.land_class_overrides.vmax25_umol.is_some()
-                && physics.land_class_overrides.beta.is_some()));
+        // 两个 patch 都是土壤 patch（地类 1 与 3），各自地类的每一列都被覆盖了（覆盖确实走了插槽这条路）。
+        assert!(per_patch.iter().zip([1, 3]).all(|(physics, class)| {
+            let overrides = physics.land_class_overrides.for_class(class);
+            overrides.vmax25_umol.is_some() && overrides.beta.is_some()
+        }));
 
         let plain = run_day(&case, &fixture, physics);
         let echoed = run_day(&case, &fixture, per_patch[1].clone());
@@ -3229,7 +3230,7 @@ mod tests {
             .table_value("DEF_LC_VMAX25")
             .unwrap();
         assert_eq!(
-            per_patch[0].land_class_overrides.vmax25_umol,
+            per_patch[0].land_class_overrides.for_class(3).vmax25_umol,
             Some(table * 2.0)
         );
         let plain = run_day(&case, &fixture, physics);

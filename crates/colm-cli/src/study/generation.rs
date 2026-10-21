@@ -257,11 +257,7 @@ fn materialize_missing(manifest: &Manifest, members: &[MemberPlan]) -> Result<()
                 verify_materialized_member(&destination, member)?;
                 continue;
             }
-            let values = member
-                .parameters
-                .iter()
-                .map(|(name, value)| (name.clone(), *value))
-                .collect::<Vec<_>>();
+            let values = manifest.spec.member_namelist_values(&member.parameters);
             super::materialize::member_case(
                 &super::model::base_case(manifest, site)?,
                 &destination,

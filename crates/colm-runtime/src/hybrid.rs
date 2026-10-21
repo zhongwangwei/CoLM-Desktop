@@ -45,7 +45,7 @@ pub struct Hybrid {
     case_dir: Option<PathBuf>,
 }
 
-/// 一个分类（地类或 PFT 类）下参数的有效值：地类取表值或本站的 `DEF_LC_*` 覆盖，PFT 取与装配相同的
+/// 一个分类（地类或 PFT 类）下参数的有效值：地类取表值或该地类的 `DEF_LC_X(lc)` 覆盖，PFT 取与装配相同的
 /// 查表（含 namelist 的 `DEF_PFT_*(class)`）。相对输出与 tap 的 `physics:` 列都用它。
 fn physics_value(
     slot: &SlotConfig,
@@ -57,7 +57,7 @@ fn physics_value(
     if slot.name == LAND_CLASS_SLOT {
         let class = usize::try_from(class).context("patchclass is negative")?;
         colm_core::ClassConstants::new(physics.land_cover_scheme, class)?
-            .with_overrides(physics.land_class_overrides)
+            .with_overrides(physics.land_class_overrides.for_class(class))
             .effective_value(name)
     } else {
         let class = i32::try_from(class).context("pftclass is out of range")?;
@@ -330,7 +330,8 @@ impl Hybrid {
                 if skip[index] {
                     continue;
                 }
-                let overrides = &mut out[row].land_class_overrides;
+                let class = usize::try_from(classes[index]).context("patchclass is negative")?;
+                let overrides = out[row].land_class_overrides.class_mut(class);
                 for (output, &value) in slot.config.outputs.iter().zip(values.row(index)) {
                     overrides.set_real(&output.name, value)?;
                 }

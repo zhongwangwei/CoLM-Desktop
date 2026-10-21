@@ -3443,6 +3443,7 @@ fn run_case(
     } else {
         None
     };
+    reject_bare_land_class_overrides(&layout.case_nml())?;
     preflight_spatial_case(&layout.case_nml(), &kernel, only_stage)?;
     ensure_cli_output_dir(&layout.case_nml(), &layout.out())?;
     let name = colm_case::case_name(&layout.case_nml())?;
@@ -3729,6 +3730,25 @@ fn kernel_grid_kind(kernel: &Kernel) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// 2026-10-21 起 `DEF_LC_X` 是每个地类一格的数组：不带下标的旧写法在 Fortran 里只改第 1 个地类，也不报错。
+/// 两个引擎跑之前都先拦下（经模型版本运行的旧算例在迁移时已归到本站地类、写成带下标的形式）。
+fn reject_bare_land_class_overrides(case_nml: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(case_nml)
+        .with_context(|| format!("cannot read {}", case_nml.display()))?;
+    let doc = colm_namelist::parse(&text)
+        .with_context(|| format!("cannot parse {}", case_nml.display()))?;
+    if let Some(name) = doc.paths().into_iter().find(|path| {
+        colm_case::land_cover::is_class_array(path)
+            && colm_case::land_cover::override_instance(path).is_none()
+    }) {
+        bail!(
+            "{name} needs a land-class index: write {name}(lc) = value; a bare {name} would only \
+             change land class 1"
+        );
+    }
+    Ok(())
 }
 
 fn preflight_spatial_case(

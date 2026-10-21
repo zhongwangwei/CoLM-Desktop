@@ -596,37 +596,128 @@ fn tracer_file_references_are_case_choices_while_assets_remain_frozen() {
     assert!(case_process_references(&overlay, &empty, None).is_err());
 }
 
+fn land_class_record(scheme: &str, index: u8, value: &str) -> ParameterOverrideRecord {
+    ParameterOverrideRecord {
+        parameter_id: format!("lct:{scheme}:DEF_LC_VMAX25"),
+        raw_key: "DEF_LC_VMAX25".into(),
+        scope_instance: ParameterScopeInstance {
+            kind: "land-cover-class".into(),
+            scheme: Some(scheme.into()),
+            index: Some(index),
+            type_name: None,
+            process_file: None,
+        },
+        value: value.into(),
+        expected_old_value: None,
+        unit: None,
+    }
+}
+
 #[test]
-fn model_with_multiple_land_classes_applies_only_matching_site_class() {
+fn model_writes_each_land_class_into_its_own_slot_at_every_scale() {
     let tmp = Temp::new();
     let reg = tmp.registry();
-    let case = tmp.case();
     let official = reg.install_official(code()).unwrap();
-    let mut d = draft(official.version);
-    for (index, value) in [(7, "40.0"), (8, "50.0")] {
-        d.overlay.parameters.push(ParameterOverrideRecord {
-            parameter_id: "lct:IGBP:DEF_LC_VMAX25".into(),
-            raw_key: "DEF_LC_VMAX25".into(),
-            scope_instance: ParameterScopeInstance {
-                kind: "land-cover-class".into(),
-                scheme: Some("IGBP".into()),
-                index: Some(index),
-                type_name: None,
-                process_file: None,
-            },
-            value: value.into(),
-            expected_old_value: None,
-            unit: None,
-        });
-    }
+    let mut d = draft(official.version.clone());
+    d.overlay.parameters = vec![
+        land_class_record("IGBP", 7, "40.0"),
+        land_class_record("IGBP", 8, "50.0"),
+    ];
     reg.create_draft(d).unwrap();
     let version = reg.freeze("experiment", &tmp.0).unwrap();
+    // 单点（本站地类 7）和没有本站地类的格点算例都逐地类写；不再只写本站那一类，也不写不带下标的旧形式。
+    for (name, extra) in [
+        ("site", " SITE_landtype = 7\n"),
+        ("grid", " DEF_SUBGRID_SCHEME = 'IGBP'\n"),
+    ] {
+        let case = case_with(&tmp, name, extra);
+        let run = reg
+            .materialize_run(
+                &version.version,
+                &case,
+                &tmp.0.join(format!("run-{name}")),
+                name,
+            )
+            .unwrap();
+        let doc = colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap())
+            .unwrap();
+        assert_eq!(
+            doc.get("DEF_LC_VMAX25(7)").unwrap().as_f64(),
+            Some(40.0),
+            "{name}"
+        );
+        assert_eq!(
+            doc.get("DEF_LC_VMAX25(8)").unwrap().as_f64(),
+            Some(50.0),
+            "{name}"
+        );
+        assert!(doc.get("DEF_LC_VMAX25").is_none(), "{name}");
+    }
+
+    // 两页都改过：算例说清是 IGBP 就只写 IGBP 的；没说清就不猜。
+    let mut d = draft(official.version);
+    d.id = "both".into();
+    d.overlay.parameters = vec![
+        land_class_record("IGBP", 7, "40.0"),
+        land_class_record("USGS", 20, "60.0"),
+    ];
+    reg.create_draft(d).unwrap();
+    let both = reg.freeze("both", &tmp.0).unwrap();
+    let igbp = case_with(&tmp, "igbp", " DEF_SUBGRID_SCHEME = 'IGBP'\n");
     let run = reg
-        .materialize_run(&version.version, &case, &tmp.0.join("run"), "multi-class")
+        .materialize_run(&both.version, &igbp, &tmp.0.join("run-igbp"), "igbp")
         .unwrap();
     let doc =
         colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
-    assert_eq!(doc.get("DEF_LC_VMAX25").unwrap().as_f64(), Some(40.0));
+    assert_eq!(doc.get("DEF_LC_VMAX25(7)").unwrap().as_f64(), Some(40.0));
+    assert!(doc.get("DEF_LC_VMAX25(20)").is_none());
+    let unknown = case_with(&tmp, "unknown", "");
+    let error = reg
+        .materialize_run(
+            &both.version,
+            &unknown,
+            &tmp.0.join("run-unknown"),
+            "unknown",
+        )
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("both IGBP and USGS"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn migration_files_bare_land_class_values_under_the_site_class_and_refuses_them_on_grids() {
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    reg.install_official(code()).unwrap();
+    let site = case_with(
+        &tmp,
+        "site",
+        " SITE_landtype = 7\n DEF_LC_VMAX25 = 40.0\n DEF_LC_HTOP0(9) = 3.0\n",
+    );
+    let binding = reg.migrate_case(&site, code()).unwrap();
+    let frozen = reg.get(&binding.version).unwrap();
+    let mut scopes = frozen
+        .overlay
+        .parameters
+        .iter()
+        .map(|record| (record.raw_key.clone(), record.scope_instance.index))
+        .collect::<Vec<_>>();
+    scopes.sort();
+    assert_eq!(
+        scopes,
+        [
+            ("DEF_LC_HTOP0".to_string(), Some(9)),
+            ("DEF_LC_VMAX25".to_string(), Some(7)),
+        ]
+    );
+    let grid = case_with(&tmp, "grid", " DEF_LC_VMAX25 = 40.0\n");
+    let error = reg.migrate_case(&grid, code()).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("DEF_LC_VMAX25(lc)"),
+        "{error:#}"
+    );
 }
 
 #[test]

@@ -12,6 +12,12 @@ MODULE MOD_AssimStomataConductance
    PUBLIC :: stomata
    PUBLIC :: update_photosyn
 
+   ! Land class of the patch being computed, set by CoLMDRIVER for every patch. DEF_LC_RESPCP is
+   ! looked up by class here because respcp is recomputed from c3/c4 below instead of coming
+   ! from the land-cover table. One copy per OpenMP thread: patches run in parallel.
+   integer, PUBLIC :: lc_current_class = 0
+!$OMP THREADPRIVATE(lc_current_class)
+
 ! PRIVATE MEMBER FUNCTIONS:
    PRIVATE :: sortin
    PRIVATE :: calc_photo_params
@@ -480,9 +486,7 @@ CONTAINS
                                vm, epar, respc, omss, gbh2o, gammas, rrkk, c3, c4)
 
    USE MOD_Precision
-#ifdef SinglePoint
-   USE MOD_Namelist, only: DEF_USE_LCT, DEF_LC_RESPCP, LC_OVERRIDE_UNSET
-#endif
+   USE MOD_Namelist, only: DEF_USE_LCT, DEF_LC_RESPCP, LC_OVERRIDE_UNSET, LC_OVERRIDE_SLOTS
    IMPLICIT NONE
 
 !-------------------------- Dummy Arguments ----------------------------
@@ -593,11 +597,12 @@ CONTAINS
       epar = min(4.6e-6 * par * effcon, jmax)
 
       respcp = 0.015 * c3 + 0.025 * c4
-#ifdef SinglePoint
-      ! DEF_LC_RESPCP (single-point LCT, the site's class) used to be stored in the land
-      ! cover table but never reached here: respcp is recomputed from c3/c4 above
-      IF (DEF_USE_LCT .and. DEF_LC_RESPCP /= LC_OVERRIDE_UNSET) respcp = DEF_LC_RESPCP
-#endif
+      ! DEF_LC_RESPCP(lc) is stored in the land cover table too but never reaches here, because
+      ! respcp is recomputed from c3/c4 above; apply it for the class of this patch (LCT only).
+      IF (DEF_USE_LCT .and. lc_current_class >= 1 .and. lc_current_class <= LC_OVERRIDE_SLOTS) THEN
+         IF (DEF_LC_RESPCP(lc_current_class) /= LC_OVERRIDE_UNSET) &
+            respcp = DEF_LC_RESPCP(lc_current_class)
+      ENDIF
       respc = respcp * vmax25 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
 !     respc = 0.7e-6 * 2.0**qt / ( 1. + exp( trda*(tlef-trdm )) ) * rstfac
       respc = respc * cint(1)

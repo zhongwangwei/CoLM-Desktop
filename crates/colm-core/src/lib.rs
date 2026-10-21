@@ -319,8 +319,9 @@ pub use lake_temperature::{
 };
 pub use land_cover::{
     land_cover_classes, land_cover_tables, root_fraction, schenk_jackson_root_fraction,
-    waterbody_class, ClassConstants, LandClassOverrides, PlantHydraulicOverrides,
-    PlantHydraulicTraits, RootFractionScheme,
+    waterbody_class, ByLandClass, ClassConstants, LandClassOverrideTable, LandClassOverrides,
+    PlantHydraulicOverrideTable, PlantHydraulicOverrides, PlantHydraulicTraits, RootFractionScheme,
+    NO_LAND_CLASS_OVERRIDES,
 };
 pub use leaf_temperature::{
     leaf_temperature, reference_height_temperature_k, LeafPlantHydraulicInput,

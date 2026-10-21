@@ -369,6 +369,26 @@ pub fn export_parameter_overrides(
                 ));
                 continue;
             }
+            // `DEF_LC_X(lc)`：逐地类的地类表改值，作用域就是下标那个地类。
+            if let Some((raw_key, class)) = colm_case::land_cover::override_instance(&path) {
+                let Some(descriptor) =
+                    colm_case::parameters::find(&format!("lct:{land_scheme}:{raw_key}"))
+                else {
+                    continue;
+                };
+                records.push(exported_record(
+                    descriptor,
+                    value,
+                    ParameterScopeInstance {
+                        kind: "land-cover-class".into(),
+                        scheme: Some(land_scheme.clone()),
+                        index: Some(class),
+                        type_name: None,
+                        process_file: None,
+                    },
+                ));
+                continue;
+            }
             let Some(field) = colm_schema::find(&path).filter(|field| field.group.is_some()) else {
                 continue;
             };
@@ -647,6 +667,21 @@ fn prepare_parameter_import(
                             Err("目标算例当前不是 LCT 模式".into())
                         } else if record.scope_instance.scheme.as_deref() != Some(target_scheme) {
                             Err("禁止在 IGBP 与 USGS 之间按数字索引导入".into())
+                        } else if let (true, Some(class)) = (
+                            colm_case::land_cover::is_class_array(&record.raw_key),
+                            record.scope_instance.index,
+                        ) {
+                            // 逐地类的数组各种尺度都生效：写进目标算例的同一个地类格，不要求目标是这个地类的单点。
+                            let key = colm_case::land_cover::override_path(&record.raw_key, class);
+                            let current = doc.get(&key).map(ToString::to_string);
+                            let value = typed(&record.raw_key, &record.value)?;
+                            doc.insert(&key, value, "nl_colm")
+                                .map_err(|error| format!("{error:#}"))?;
+                            changed_fields.push(FieldChange {
+                                path: key,
+                                value: record.value.clone(),
+                            });
+                            Ok((current, case_file.clone()))
                         } else if record.scope_instance.index.map(i64::from) != Some(site_landtype)
                         {
                             Err("目标算例地类与导出作用域不同".into())
@@ -1995,7 +2030,7 @@ fn expert_tuning_runtime_state(
         if colm_case::land_cover::needs_plant_hydraulics(name) && !c.plant_hydraulics {
             return Some(hidden("需要先启用植物水力过程"));
         }
-        // 城市单点里还有别的地类的 patch，上游只覆盖本站地类；Rust 没有按地类区分，`colm-rs` 拒绝。
+        // 城市单点里还有别的地类的 patch；上游逐地类覆盖，Rust 城市分支的逐地类取值还没和 Fortran 核对过，`colm-rs` 拒绝。
         if c.urban {
             let changed = if name == "DEF_LC_C3C4" {
                 integer(c.doc, name) != -1
@@ -2004,7 +2039,7 @@ fn expert_tuning_runtime_state(
             };
             return Some(rust_unported(
                 changed,
-                "城市单点里还有其它地类的 patch，Rust 引擎不支持按地类覆盖（上游只覆盖本站地类），仅 Fortran 引擎生效",
+                "城市单点里还有其它地类的 patch，Rust 引擎的按地类覆盖还没与 Fortran 核对，仅 Fortran 引擎生效",
             ));
         }
         if name == "DEF_LC_C3C4" {
@@ -2794,7 +2829,17 @@ fn field_states_for_at(
             } else {
                 None
             };
-            let override_value = doc.get(field.name).map(ToString::to_string);
+            // 逐地类的数组：算例级字段看本站地类那一格（见 `site_class_fields`）。
+            let override_value = if colm_case::land_cover::is_class_array(field.name) {
+                u8::try_from(context.site_landtype)
+                    .ok()
+                    .and_then(|class| {
+                        doc.get(&colm_case::land_cover::override_path(field.name, class))
+                    })
+                    .map(ToString::to_string)
+            } else {
+                doc.get(field.name).map(ToString::to_string)
+            };
             let built_in_default = context_default
                 .clone()
                 .or_else(|| Some(default_literal(field.default)));
@@ -4294,7 +4339,7 @@ fn typed(path: &str, raw: &str) -> Result<colm_namelist::Value, String> {
     use colm_namelist::Value;
     use colm_schema::FieldKind as K;
     let s = raw.trim();
-    let Some(f) = colm_schema::find(path) else {
+    let Some(f) = colm_schema::find(schema_name(path)) else {
         return Ok(Value::Str(s.to_string()));
     };
     let quoted = s.len() >= 2
@@ -4398,10 +4443,46 @@ fn put(
 ) -> Result<(), String> {
     // 组名从 schema 来 —— 那是从 CoLM 自己的声明里扫出来的。
     // schema 不认识的字段只能改不能插：不知道往哪个组插，而插错组等于没设。
-    match colm_schema::find(path).and_then(|f| f.group) {
+    match colm_schema::find(schema_name(path)).and_then(|f| f.group) {
         Some(g) => doc.insert(path, v, g).map_err(|e| format!("{e:#}")),
         None => doc.set(path, v).map_err(|e| format!("{e:#}")),
     }
+}
+
+/// schema 按不带下标的名字登记；逐地类的 `DEF_LC_X(lc)` 查 `DEF_LC_X`。
+fn schema_name(path: &str) -> &str {
+    colm_case::land_cover::override_instance(path).map_or(path, |(name, _)| name)
+}
+
+/// 算例级的地类表字段（不带下标）指本站地类。2026-10-21 起 `DEF_LC_X` 是每个地类一格的数组，不带下标在
+/// Fortran 里只落到第 1 格，所以写成 `DEF_LC_X(SITE_landtype)`；没有本站地类的算例请在「修改参数」里按地类改。
+fn site_class_fields(
+    doc: &colm_namelist::Document,
+    fields: &[FieldChange],
+) -> Result<Vec<FieldChange>, String> {
+    fields
+        .iter()
+        .map(|field| {
+            if !colm_case::land_cover::is_class_array(&field.path)
+                || colm_case::land_cover::override_instance(&field.path).is_some()
+            {
+                return Ok(field.clone());
+            }
+            let class = u8::try_from(integer(doc, "SITE_landtype"))
+                .ok()
+                .filter(|class| *class >= 1)
+                .ok_or_else(|| {
+                    format!(
+                        "{} 按地类生效，算例没有本站地类（SITE_landtype）；请在「修改参数」的 IGBP/USGS 页里按地类改",
+                        field.path
+                    )
+                })?;
+            Ok(FieldChange {
+                path: colm_case::land_cover::override_path(&field.path, class),
+                value: field.value.clone(),
+            })
+        })
+        .collect()
 }
 
 /// 读一批算例的 case.nml。
@@ -4886,6 +4967,7 @@ fn set_fields_with_forcing(
     }
     for (index, (d, text)) in all.into_iter().enumerate() {
         let mut doc = colm_namelist::parse(&text).map_err(|e| format!("{d}: {e:#}"))?;
+        let fields = site_class_fields(&doc, &fields).map_err(|e| format!("{d}: {e}"))?;
         for field in &fields {
             let value = typed(&field.path, &field.value)?;
             put(&mut doc, &field.path, value).map_err(|e| format!("{d}: {e}"))?;

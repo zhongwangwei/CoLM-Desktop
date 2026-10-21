@@ -1636,16 +1636,35 @@ pub(crate) fn check_kernel(
     let has = |key: &str| kernel.manifest.macros.iter().any(|m| m == key);
     let overlay = colm_model::model_overlay(&frozen.overlay);
     // Runtime vegetation selection is validated against the case during materialization.
+    // 地类表改值逐地类、各种尺度都生效（vendor `apply_lc_overrides`）。版本的 IGBP、USGS 两页可能都改过，
+    // 运行时只写算例那一套；所以只要求至少有一套对得上内核，全都对不上才拦。
+    let land_class_schemes = overlay
+        .parameters
+        .iter()
+        .filter(|parameter| parameter.scope_instance.kind == "land-cover-class")
+        .filter_map(|parameter| parameter.scope_instance.scheme.as_deref())
+        .collect::<std::collections::BTreeSet<_>>();
+    if !land_class_schemes.is_empty() {
+        ensure!(
+            land_class_schemes
+                .iter()
+                .any(|scheme| has(&format!("LULC_{scheme}"))),
+            "this version changes only {} land-class parameters, but the kernel uses neither",
+            land_class_schemes
+                .iter()
+                .copied()
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+    }
     for parameter in &overlay.parameters {
         if let Some(scheme) = &parameter.scope_instance.scheme {
             ensure!(
-                has(&format!("LULC_{scheme}")),
+                parameter.scope_instance.kind == "land-cover-class"
+                    || has(&format!("LULC_{scheme}")),
                 "parameter {} requires a {scheme} kernel",
                 parameter.parameter_id
             );
-        }
-        if parameter.scope_instance.kind == "land-cover-class" {
-            ensure!(has("SinglePoint"), "land-cover scalar overrides require a SinglePoint kernel; regional multi-class application is unsupported");
         }
         if matches!(parameter.scope_instance.kind.as_str(), "pft" | "pc-pft")
             && parameter
@@ -2836,28 +2855,27 @@ fn prepare_native_paths(run: &mut colm_model::MaterializedRun) -> Result<()> {
     Ok(())
 }
 
+/// 算例的分类（IGBP/USGS）与内核对得上，地类表改值才落在对的地类上；对不上时号码含义整个不同。
 fn check_case_scopes(
     frozen: &colm_model::FrozenRevision,
     kernel: &colm_kernel::Kernel,
     case: &Path,
 ) -> Result<()> {
+    if !frozen
+        .overlay
+        .parameters
+        .iter()
+        .any(|record| record.scope_instance.kind == "land-cover-class")
+    {
+        return Ok(());
+    }
     let doc = colm_namelist::parse(&std::fs::read_to_string(case.join("case.nml"))?)?;
-    let landtype = doc
-        .get("SITE_landtype")
-        .and_then(colm_namelist::Value::as_f64);
     let has = |key: &str| kernel.manifest.macros.iter().any(|m| m == key);
-    for record in &frozen.overlay.parameters {
-        let scope = &record.scope_instance;
-        if scope.kind == "land-cover-class" && landtype == scope.index.map(f64::from) {
-            let scheme = scope
-                .scheme
-                .as_deref()
-                .context("land-cover override requires scheme")?;
-            ensure!(
-                has("SinglePoint") && has(&format!("LULC_{scheme}")),
-                "land-cover record does not match actual selected kernel classification"
-            );
-        }
+    if let Some(scheme) = colm_model::case_land_cover_scheme(&doc, case)? {
+        ensure!(
+            has(&format!("LULC_{scheme}")),
+            "the case uses {scheme} land classes, but the kernel was built for the other classification"
+        );
     }
     Ok(())
 }

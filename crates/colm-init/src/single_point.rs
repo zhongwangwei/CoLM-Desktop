@@ -933,8 +933,7 @@ fn write_single_point_constant_restart_from_surface(
     let observed_top = vec![surface.canopy_height_m; patches];
     let (top_table, bottom_table) = canopy_tables(
         config.land_cover,
-        surface.land_class,
-        config.tuning.land_class,
+        &site_overrides(surface.land_class, config.tuning.land_class),
     );
     let mut canopy = match config.land_cover {
         LandCoverScheme::Igbp => derive_igbp_canopy(
@@ -3559,7 +3558,7 @@ fn canopy_top(
     overrides: colm_core::LandClassOverrides,
 ) -> Result<f64> {
     let kind = patch_type(land_cover, class)?;
-    let (top_table, bottom_table) = canopy_tables(land_cover, class, overrides);
+    let (top_table, bottom_table) = canopy_tables(land_cover, &site_overrides(class, overrides));
     let canopy = match land_cover {
         LandCoverScheme::Igbp => derive_igbp_canopy(
             &[class],
@@ -3574,28 +3573,38 @@ fn canopy_top(
     Ok(canopy.patch_top_m[0])
 }
 
-/// `htop0`/`hbot0` 表（下标即 1 基地类号）叠上本站地类的 `DEF_LC_HTOP0`/`DEF_LC_HBOT0`
-/// （`apply_lc_scalar_overrides`，`MOD_HtopReadin` 读的是覆盖后的表）。
-fn canopy_tables(
+/// `htop0`/`hbot0` 表（下标即 1 基地类号）叠上各地类的 `DEF_LC_HTOP0(lc)`/`DEF_LC_HBOT0(lc)`
+/// （`apply_lc_overrides`，`MOD_HtopReadin` 读的是覆盖后的表）。单点只有本站地类那一组。
+pub(crate) fn canopy_tables(
     land_cover: LandCoverScheme,
-    site_class: i32,
-    overrides: colm_core::LandClassOverrides,
+    overrides: &colm_core::LandClassOverrideTable,
 ) -> (Vec<f64>, Vec<f64>) {
     let (mut top, mut bottom) = match land_cover {
         LandCoverScheme::Igbp => (IGBP_TOP.to_vec(), IGBP_BOTTOM.to_vec()),
         LandCoverScheme::Usgs => (USGS_TOP.to_vec(), USGS_BOTTOM.to_vec()),
     };
-    if let Ok(index) = usize::try_from(site_class) {
-        if index >= 1 && index < top.len() {
-            if let Some(value) = overrides.htop0 {
-                top[index] = value;
-            }
-            if let Some(value) = overrides.hbot0 {
-                bottom[index] = value;
-            }
+    let rows = 1..top.len();
+    for index in overrides.classes().filter(|index| rows.contains(index)) {
+        let class = overrides.for_class(index);
+        if let Some(value) = class.htop0 {
+            top[index] = value;
+        }
+        if let Some(value) = class.hbot0 {
+            bottom[index] = value;
         }
     }
     (top, bottom)
+}
+
+/// 单点：只有本站地类的那组覆盖。
+fn site_overrides(
+    site_class: i32,
+    overrides: colm_core::LandClassOverrides,
+) -> colm_core::LandClassOverrideTable {
+    usize::try_from(site_class).map_or_else(
+        |_| colm_core::LandClassOverrideTable::new(),
+        |class| colm_core::LandClassOverrideTable::only(class, overrides),
+    )
 }
 
 fn is_water_class(land_cover: LandCoverScheme, class: i32) -> bool {

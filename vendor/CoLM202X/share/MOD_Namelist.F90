@@ -486,47 +486,52 @@ MODULE MOD_Namelist
    real(r8) :: DEF_MEDLYN_G0 = -1.0_r8 ! Medlyn intercept; valid override >= 0
    real(r8) :: DEF_WUE_LAMBDA = -1.0_r8 ! WUE marginal water cost; valid override > 0
 
-   ! Optional SinglePoint land-cover table override. LC_OVERRIDE_UNSET keeps built-in tables bit-identical.
+   ! Optional land-cover table overrides, one slot per land class: DEF_LC_X(lc) replaces the
+   ! table value of class lc (IGBP uses slots 1-17, USGS 1-24). Applied at every scale whenever
+   ! DEF_USE_LCT (single point, catchment, regional, global). LC_OVERRIDE_UNSET keeps the
+   ! built-in tables bit-identical. Earlier versions had scalars applied only to the single-point
+   ! site class; a bare scalar in a namelist now sets slot 1 only, so always write DEF_LC_X(lc).
    real(r8), parameter :: LC_OVERRIDE_UNSET = -1.e36_r8
-   real(r8) :: DEF_LC_HTOP0 = -1.e36_r8
-   real(r8) :: DEF_LC_HBOT0 = -1.e36_r8
-   real(r8) :: DEF_LC_FVEG0 = -1.e36_r8
-   real(r8) :: DEF_LC_SAI0 = -1.e36_r8
-   real(r8) :: DEF_LC_Z0MR = -1.e36_r8
-   real(r8) :: DEF_LC_DISPLAR = -1.e36_r8
-   real(r8) :: DEF_LC_SQRTDI = -1.e36_r8
-   real(r8) :: DEF_LC_CHIL = -1.e36_r8
-   real(r8) :: DEF_LC_RHOL_VIS = -1.e36_r8
-   real(r8) :: DEF_LC_RHOL_NIR = -1.e36_r8
-   real(r8) :: DEF_LC_RHOS_VIS = -1.e36_r8
-   real(r8) :: DEF_LC_RHOS_NIR = -1.e36_r8
-   real(r8) :: DEF_LC_TAUL_VIS = -1.e36_r8
-   real(r8) :: DEF_LC_TAUL_NIR = -1.e36_r8
-   real(r8) :: DEF_LC_TAUS_VIS = -1.e36_r8
-   real(r8) :: DEF_LC_TAUS_NIR = -1.e36_r8
-   real(r8) :: DEF_LC_VMAX25 = -1.e36_r8
-   real(r8) :: DEF_LC_EFFCON = -1.e36_r8
-   real(r8) :: DEF_LC_RESPCP = -1.e36_r8
-   real(r8) :: DEF_LC_SHTI = -1.e36_r8
-   real(r8) :: DEF_LC_SLTI = -1.e36_r8
-   real(r8) :: DEF_LC_TRDA = -1.e36_r8
-   real(r8) :: DEF_LC_TRDM = -1.e36_r8
-   real(r8) :: DEF_LC_TROP = -1.e36_r8
-   real(r8) :: DEF_LC_HHTI = -1.e36_r8
-   real(r8) :: DEF_LC_HLTI = -1.e36_r8
-   real(r8) :: DEF_LC_EXTKN = -1.e36_r8
-   real(r8) :: DEF_LC_D50 = -1.e36_r8
-   real(r8) :: DEF_LC_BETA = -1.e36_r8
-   real(r8) :: DEF_LC_KMAX_SUN = -1.e36_r8
-   real(r8) :: DEF_LC_KMAX_SHA = -1.e36_r8
-   real(r8) :: DEF_LC_KMAX_XYL = -1.e36_r8
-   real(r8) :: DEF_LC_KMAX_ROOT = -1.e36_r8
-   real(r8) :: DEF_LC_PSI50_SUN = -1.e36_r8
-   real(r8) :: DEF_LC_PSI50_SHA = -1.e36_r8
-   real(r8) :: DEF_LC_PSI50_XYL = -1.e36_r8
-   real(r8) :: DEF_LC_PSI50_ROOT = -1.e36_r8
-   real(r8) :: DEF_LC_CK = -1.e36_r8
-   integer :: DEF_LC_C3C4 = -1
+   integer,  parameter :: LC_OVERRIDE_SLOTS = 24
+   real(r8) :: DEF_LC_HTOP0(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_HBOT0(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_FVEG0(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_SAI0(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_Z0MR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_DISPLAR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_SQRTDI(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_CHIL(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_RHOL_VIS(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_RHOL_NIR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_RHOS_VIS(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_RHOS_NIR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TAUL_VIS(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TAUL_NIR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TAUS_VIS(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TAUS_NIR(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_VMAX25(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_EFFCON(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_RESPCP(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_SHTI(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_SLTI(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TRDA(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TRDM(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_TROP(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_HHTI(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_HLTI(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_EXTKN(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_D50(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_BETA(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_SUN(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_SHA(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_XYL(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_KMAX_ROOT(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_SUN(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_SHA(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_XYL(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_PSI50_ROOT(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_CK(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   integer :: DEF_LC_C3C4(LC_OVERRIDE_SLOTS) = -1
 
    integer, parameter :: PFT_OVERRIDE_SLOTS = 79
 #ifdef CROP
@@ -2187,8 +2192,8 @@ CONTAINS
          CALL check_lc_override('DEF_LC_PSI50_SHA', DEF_LC_PSI50_SHA, 0.0_r8, 0.0_r8, 'negative')
          CALL check_lc_override('DEF_LC_PSI50_XYL', DEF_LC_PSI50_XYL, 0.0_r8, 0.0_r8, 'negative')
          CALL check_lc_override('DEF_LC_PSI50_ROOT', DEF_LC_PSI50_ROOT, 0.0_r8, 0.0_r8, 'negative')
-         IF (DEF_LC_C3C4 /= -1 .and. DEF_LC_C3C4 /= 0 .and. DEF_LC_C3C4 /= 1) THEN
-            write(*,*) 'Fatal ERROR: DEF_LC_C3C4 must be -1, 0, or 1.'
+         IF (any(DEF_LC_C3C4 /= -1 .and. DEF_LC_C3C4 /= 0 .and. DEF_LC_C3C4 /= 1)) THEN
+            write(*,*) 'Fatal ERROR: every DEF_LC_C3C4(lc) must be -1, 0, or 1.'
             CALL CoLM_stop ()
          ENDIF
 #define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) CALL check_pft_real_override(LABEL, VAR, RULE)
@@ -2652,45 +2657,45 @@ CONTAINS
       CALL mpi_bcast (DEF_MEDLYN_G1                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_MEDLYN_G0                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_WUE_LAMBDA                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_HTOP0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_HBOT0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_FVEG0                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_SAI0                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_Z0MR                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_DISPLAR                       ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_SQRTDI                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_CHIL                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_RHOL_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_RHOL_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_RHOS_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_RHOS_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TAUL_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TAUL_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TAUS_VIS                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TAUS_NIR                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_VMAX25                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_EFFCON                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_RESPCP                        ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_SHTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_SLTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TRDA                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TRDM                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_TROP                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_HHTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_HLTI                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_EXTKN                         ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_D50                           ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_BETA                          ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_KMAX_SUN                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_KMAX_SHA                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_KMAX_XYL                      ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_KMAX_ROOT                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_PSI50_SUN                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_PSI50_SHA                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_PSI50_XYL                     ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_PSI50_ROOT                    ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_CK                            ,1   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
-      CALL mpi_bcast (DEF_LC_C3C4                          ,1   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HTOP0                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HBOT0                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_FVEG0                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SAI0                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_Z0MR                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_DISPLAR                       ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SQRTDI                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_CHIL                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOL_VIS                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOL_NIR                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOS_VIS                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RHOS_NIR                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUL_VIS                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUL_NIR                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUS_VIS                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TAUS_NIR                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_VMAX25                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_EFFCON                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_RESPCP                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SHTI                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_SLTI                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TRDA                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TRDM                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_TROP                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HHTI                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_HLTI                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_EXTKN                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_D50                           ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_BETA                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_SUN                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_SHA                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_XYL                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_KMAX_ROOT                     ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_SUN                     ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_SHA                     ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_XYL                     ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_PSI50_ROOT                    ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_CK                            ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_C3C4                          ,LC_OVERRIDE_SLOTS   ,mpi_integer   ,p_address_master ,p_comm_glb ,p_err)
 #define PFT_OVERRIDE_REAL(VAR,TARGET,RULE,SCALE,LABEL) CALL mpi_bcast (VAR, PFT_OVERRIDE_SLOTS, mpi_real8, p_address_master, p_comm_glb, p_err)
 #define PFT_OVERRIDE_INTEGER(VAR,TARGET,RULE,LABEL) CALL mpi_bcast (VAR, PFT_OVERRIDE_SLOTS, mpi_integer, p_address_master, p_comm_glb, p_err)
 #include <pft_override_fields.inc>
@@ -3025,12 +3030,30 @@ CONTAINS
 
    END FUNCTION get_unitcatchment_file
 
-   SUBROUTINE check_lc_override(name, value, lower, upper, rule)
+   SUBROUTINE check_lc_override(name, values, lower, upper, rule)
    USE MOD_SPMD_Task, ONLY: CoLM_stop
    IMPLICIT NONE
 
    character(len=*), intent(in) :: name
    character(len=*), intent(in) :: rule
+   real(r8), intent(in) :: values(LC_OVERRIDE_SLOTS)
+   real(r8), intent(in) :: lower
+   real(r8), intent(in) :: upper
+   integer :: lc
+
+      DO lc = 1, LC_OVERRIDE_SLOTS
+         CALL check_lc_override_value(name, lc, values(lc), lower, upper, rule)
+      ENDDO
+
+   END SUBROUTINE check_lc_override
+
+   SUBROUTINE check_lc_override_value(name, lc, value, lower, upper, rule)
+   USE MOD_SPMD_Task, ONLY: CoLM_stop
+   IMPLICIT NONE
+
+   character(len=*), intent(in) :: name
+   character(len=*), intent(in) :: rule
+   integer,  intent(in) :: lc
    real(r8), intent(in) :: value
    real(r8), intent(in) :: lower
    real(r8), intent(in) :: upper
@@ -3053,11 +3076,12 @@ CONTAINS
          END SELECT
       ENDIF
       IF (.not. ok) THEN
-         write(*,*) 'Fatal ERROR: invalid land-cover override ', trim(name), '. Use -1.e36 for no override.'
+         write(*,*) 'Fatal ERROR: invalid land-cover override ', trim(name), '(', lc, &
+            '). Use -1.e36 for no override.'
          CALL CoLM_stop ()
       ENDIF
 
-   END SUBROUTINE check_lc_override
+   END SUBROUTINE check_lc_override_value
 
    SUBROUTINE check_pft_real_override(name, values, rule)
    USE MOD_SPMD_Task, ONLY: CoLM_stop

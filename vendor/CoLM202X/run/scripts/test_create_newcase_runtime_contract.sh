@@ -96,8 +96,8 @@ grep -q 'DEF_USE_BGC = .true.' "$NML"
 grep -q 'DEF_URBAN_RUN = .true.' "$NML"
 grep -q 'DEF_USE_Campbell_SOIL_MODEL = .true.' "$NML"
 
-# Expert land-cover scalar overrides must be accepted by nl_colm, validated, broadcast,
-# and applied only through the SinglePoint SITE_landtype sparse overlay.
+# Expert land-cover overrides (one slot per land class) must be accepted by nl_colm, validated,
+# broadcast, and applied class by class at every scale whenever DEF_USE_LCT.
 grep -q 'DEF_LC_VMAX25' "${ROOT}/share/MOD_Namelist.F90"
 grep -q 'DEF_LC_C3C4' "${ROOT}/share/MOD_Namelist.F90"
 grep -q 'DEF_LC_PSI50_ROOT' "${ROOT}/share/MOD_Namelist.F90"
@@ -105,12 +105,15 @@ if grep -q 'DEF_LC_UNSET' "${ROOT}/share/MOD_Namelist.F90"; then
   echo "DEF_LC_UNSET must not look like a schema/nml field" >&2
   exit 1
 fi
-grep -q 'real(r8) :: DEF_LC_VMAX25 = -1.e36_r8' "${ROOT}/share/MOD_Namelist.F90"
+grep -q 'real(r8) :: DEF_LC_VMAX25(LC_OVERRIDE_SLOTS) = -1.e36_r8' "${ROOT}/share/MOD_Namelist.F90"
 grep -q 'CALL check_lc_override' "${ROOT}/share/MOD_Namelist.F90"
 grep -q 'CALL mpi_bcast (DEF_LC_VMAX25' "${ROOT}/share/MOD_Namelist.F90"
-grep -q 'CALL apply_lc_scalar_overrides' "${ROOT}/main/MOD_Const_LC.F90"
-grep -Fq 'vmax25     (lc) = DEF_LC_VMAX25 * 1.e-6_r8' "${ROOT}/main/MOD_Const_LC.F90"
-grep -q '#ifdef SinglePoint' "${ROOT}/main/MOD_Const_LC.F90"
+grep -q 'CALL apply_lc_overrides' "${ROOT}/main/MOD_Const_LC.F90"
+grep -Fq 'vmax25     (lc) = DEF_LC_VMAX25(lc) * 1.e-6_r8' "${ROOT}/main/MOD_Const_LC.F90"
+if grep -q 'lc = SITE_landtype' "${ROOT}/main/MOD_Const_LC.F90"; then
+  echo "land-cover overrides must apply per class, not only to the single-point site class" >&2
+  exit 1
+fi
 grep -q 'IF (.not. DEF_USE_LCT) RETURN' "${ROOT}/main/MOD_Const_LC.F90"
 
 grep -q 'create_defineh.bash' "${SCRIPT_DIR}/create_newcase"

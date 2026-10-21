@@ -11,9 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{ensure, Context, Result};
 
 use crate::crop::{map_field_2d, AreaMapping, MapGrid};
-use crate::single_point::{
-    patch_type, urban_class, BVIC_USDA, IGBP_BOTTOM, IGBP_TOP, USGS_BOTTOM, USGS_TOP,
-};
+use crate::single_point::{canopy_tables, patch_type, urban_class, BVIC_USDA};
 use crate::{
     colm_soil_grid, derive_bedrock, derive_igbp_canopy, derive_lake_layers,
     derive_spatial_soil_parameters, derive_usgs_canopy, normalize_soil_texture,
@@ -37,6 +35,8 @@ pub struct SpatialLctStaticConfig<'a> {
     pub land_cover: LandCoverScheme,
     pub hydraulic_model: HydraulicModel,
     pub tuning: RestartTuning,
+    /// 各地类的 `DEF_LC_X(lc)`：`htop0`/`hbot0` 进冠层高度表（`MOD_HtopReadin` 读的是覆盖后的表）。
+    pub land_classes: &'a colm_core::LandClassOverrideTable,
     /// Write `dbedrock` and `ibedrock`, matching `DEF_USE_BEDROCK`.
     pub use_bedrock: bool,
     /// Read/write `lake_soilc_srf`, present whenever Desktop BGC is enabled.
@@ -79,6 +79,7 @@ impl<'a> SpatialLctStaticConfig<'a> {
             land_cover,
             hydraulic_model,
             tuning: RestartTuning::default(),
+            land_classes: &colm_core::NO_LAND_CLASS_OVERRIDES,
             use_bedrock: false,
             use_bgc: false,
             use_hyperspectral: false,
@@ -871,8 +872,9 @@ pub(crate) fn read_canopy(
     kind: &[i32],
     patches: usize,
 ) -> Result<CanopyState> {
+    let (top_table, bottom_table) = canopy_tables(config.land_cover, config.land_classes);
     match config.land_cover {
-        LandCoverScheme::Usgs => derive_usgs_canopy(class, &USGS_TOP, &USGS_BOTTOM),
+        LandCoverScheme::Usgs => derive_usgs_canopy(class, &top_table, &bottom_table),
         LandCoverScheme::Igbp => derive_igbp_canopy(
             class,
             kind,
@@ -885,8 +887,8 @@ pub(crate) fn read_canopy(
                 config.block_label,
                 patches,
             )?,
-            &IGBP_TOP,
-            &IGBP_BOTTOM,
+            &top_table,
+            &bottom_table,
             None,
         ),
     }

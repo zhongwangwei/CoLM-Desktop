@@ -980,11 +980,7 @@ fn materialize(
         let site = base.file_name().and_then(|s| s.to_str()).unwrap_or("case");
         for member in members {
             let dst = root.join("members").join(&member.id).join(site);
-            let values = member
-                .parameters
-                .iter()
-                .map(|(field, value)| (field.clone(), *value))
-                .collect::<Vec<_>>();
+            let values = spec.member_namelist_values(&member.parameters);
             super::materialize::member_case(base, &dst, &member.id, site, &values)?;
             super::hybrid::write_member_files(&dst, spec, &member.parameters)?;
             super::materialize::write_sample_stamp(&dst, member)?;

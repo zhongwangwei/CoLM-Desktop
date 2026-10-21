@@ -16,6 +16,7 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
    USE MOD_Precision
    USE MOD_Const_Physical, only: tfrz, rgas, vonkar
    USE MOD_Const_LC
+   USE MOD_AssimStomataConductance, only: lc_current_class
    USE MOD_Vars_Global
    USE MOD_Vars_TimeInvariants
    USE MOD_Vars_TimeVariables
@@ -86,6 +87,8 @@ SUBROUTINE CoLMDRIVER (idate,deltim,dolai,doalb,dosst,oro,istep_in)
          ENDIF
 
          m = patchclass(i)
+         ! Photosynthesis looks up the per-class DEF_LC_RESPCP override by this (thread-private).
+         lc_current_class = m
 
          IF (DEF_USE_TRACER .and. DEF_URBAN_RUN .and. m.eq.URBAN .and. ntracers > 0) THEN
             CALL CoLM_stop ('TRACER does not yet support full urban patches: ' // &
