@@ -5,7 +5,7 @@ Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   value: { getItem: () => null },
 });
-const { literalNumber, valueProblem } = await import('./ParameterDialog');
+const { docOf, literalNumber, rangeText, valueProblem } = await import('./ParameterDialog');
 
 const descriptor = (patch: Partial<Descriptor>): Descriptor => ({
   id: 'case:DEF_X',
@@ -76,4 +76,46 @@ test('namelist numbers are read in Fortran spellings and checked against the cat
     valueProblem(descriptor({ value_kind: 'logical' }), 'yes', false),
     '只能是 .true. 或 .false.',
   );
+});
+
+test('ranges read as > 0 or < 0 instead of the spelled-out smallest double', () => {
+  // The catalog writes "must be > 0" as the smallest positive double, 300-odd digits long.
+  const tiny = `0.${'0'.repeat(307)}22250738585072014`;
+  const sqrtdi = descriptor({
+    validation: { min: tiny, max: null, allowed_values: [], finite: true },
+  });
+  const psi50 = descriptor({
+    validation: { min: null, max: `-${tiny}`, allowed_values: [], finite: true },
+  });
+  assert.equal(rangeText(sqrtdi, false), '> 0');
+  assert.equal(rangeText(psi50, false), '< 0');
+  assert.equal(rangeText(descriptor({}), false), '0 … 1');
+  assert.equal(
+    rangeText(
+      descriptor({ validation: { min: '1.e3_r8', max: null, allowed_values: [], finite: true } }),
+      true,
+    ),
+    '≥ 1000',
+  );
+  assert.equal(
+    rangeText(
+      descriptor({ validation: { min: null, max: null, allowed_values: [], finite: true } }),
+      false,
+    ),
+    '',
+  );
+  assert.equal(valueProblem(sqrtdi, '0', false), '必须大于 0');
+  assert.equal(valueProblem(psi50, '0', true), 'Must be below 0');
+  assert.equal(valueProblem(sqrtdi, '5', false), '');
+});
+
+test('placeholder docs that only repeat the key are not shown', () => {
+  const generic = descriptor({
+    doc_zh: 'CoLM 配置字段 DEF_LC_PSI50_ROOT。',
+    doc_en: 'CoLM configuration field DEF_LC_PSI50_ROOT.',
+  });
+  assert.equal(docOf(generic, false), '');
+  assert.equal(docOf(generic, true), '');
+  const real = descriptor({ doc_zh: '根50%失导水势；按所选 PFT/CFT 槽位稀疏覆盖。' });
+  assert.equal(docOf(real, false), '根50%失导水势；按所选 PFT/CFT 槽位稀疏覆盖。');
 });

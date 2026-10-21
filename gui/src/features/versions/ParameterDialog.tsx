@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
 import type { Overlay } from '../../lib/types';
-import { Button, Dialog, Input, Select } from '../../components/ui';
+import { Dialog, Input, Select } from '../../components/ui';
 import {
   makeRecord,
   parameterType,
@@ -40,10 +40,36 @@ export function valueProblem(d: Descriptor, text: string, en: boolean): string {
   const min = d.validation.min == null ? null : literalNumber(d.validation.min);
   const max = d.validation.max == null ? null : literalNumber(d.validation.max);
   if (min != null && value < min)
-    return t(`不能小于 ${d.validation.min}`, `Below ${d.validation.min}`);
+    return tinyAbove(min)
+      ? t('必须大于 0', 'Must be above 0')
+      : t(`不能小于 ${show(min)}`, `Below ${show(min)}`);
   if (max != null && value > max)
-    return t(`不能大于 ${d.validation.max}`, `Above ${d.validation.max}`);
+    return tinyBelow(max)
+      ? t('必须小于 0', 'Must be below 0')
+      : t(`不能大于 ${show(max)}`, `Above ${show(max)}`);
   return '';
+}
+
+// 目录把"必须 > 0 / < 0"写成 ±最小正双精度（2.2e-308），字符串是展开的三百多位小数，原样显示就是
+// "中间好多个 0"（2026-10-21 用户反映叶片特征尺寸倒平方根、根 50% 失导水势）。
+const tinyAbove = (v: number) => v > 0 && v < 1e-300;
+const tinyBelow = (v: number) => v < 0 && v > -1e-300;
+
+/** 参数说明；目录里没写说明的，后端填的是"CoLM 配置字段 X。"，只重复键名，不显示。 */
+export function docOf(d: Descriptor, en: boolean): string {
+  const doc = (en ? d.doc_en : d.doc_zh) ?? '';
+  return /^(CoLM 配置字段 \S+。|CoLM configuration field \S+\.?)$/.test(doc.trim()) ? '' : doc;
+}
+
+/** 参数的取值范围，给人看的写法：`> 0`、`< 0`、`≥ 1`、`0 … 1`。没有范围时为空。 */
+export function rangeText(d: Descriptor, en: boolean): string {
+  const min = d.validation.min == null ? null : literalNumber(d.validation.min);
+  const max = d.validation.max == null ? null : literalNumber(d.validation.max);
+  if (min != null && max != null && !tinyAbove(min) && !tinyBelow(max))
+    return `${show(min)} … ${show(max)}`;
+  const lower = min == null ? null : tinyAbove(min) ? '> 0' : `≥ ${show(min)}`;
+  const upper = max == null ? null : tinyBelow(max) ? '< 0' : `≤ ${show(max)}`;
+  return [lower, upper].filter(Boolean).join(en ? ', ' : '，');
 }
 
 const show = (value: number | null | undefined) =>
@@ -100,12 +126,12 @@ export default function ParameterDialog({
   const [chosen, setChosen] = useState('');
   const [typeIndex, setTypeIndex] = useState(1);
   const [processFile, setProcessFile] = useState('');
-  const [factor, setFactor] = useState('1.2');
   const [problem, setProblem] = useState('');
   const [defaults, setDefaults] = useState<Record<string, TypeDefault[]>>({});
   useEffect(() => {
-    if (open) setType(initialType);
-  }, [open, initialType]);
+    if (open)
+      setType(initialType === 'process' && !overlay.process_files.length ? 'global' : initialType);
+  }, [open, initialType, overlay.process_files.length]);
   useEffect(() => {
     setGroup('');
     setChosen(initialParameter);
@@ -227,47 +253,20 @@ export default function ParameterDialog({
     );
   };
   const changedCount = (d: Descriptor) => records.filter((r) => r.parameter_id === d.id).length;
-  function scaleAll(d: Descriptor) {
-    const by = literalNumber(factor);
-    if (by == null) return setProblem(t('系数不是数', 'The factor is not a number'));
-    let parameters = records;
-    for (const [index] of types) {
-      // PFT/PC 的 0 号是非植被：整体缩放植被参数时不该带上它。
-      if ((type === 'pft' || type === 'pc') && index === 0) continue;
-      const base = defaultAt(d, index);
-      if (base == null) continue;
-      const value = base * by;
-      const text =
-        d.value_kind === 'integer'
-          ? String(Math.round(value))
-          : String(Number(value.toPrecision(8)));
-      const issue = valueProblem(d, text, en);
-      if (issue) return setProblem(`${d.raw_key} · ${index}: ${issue}`);
-      parameters = upsertParameter(parameters, makeRecord(d, text, index, ''));
-    }
-    setProblem('');
-    onChange({ ...overlay, parameters });
-  }
-  function resetAll(d: Descriptor) {
-    onChange({ ...overlay, parameters: records.filter((r) => r.parameter_id !== d.id) });
-  }
+  // 过程文件是示踪物等过程自带的参数文件（如 CH4.nml），在「其他模型设置」的示踪过程里导入；多数版本没有，
+  // 没有时这一页签是空的、让人看不懂要干啥（2026-10-21 用户反映），所以有过程文件才显示。
+  const hasProcessFiles = overlay.process_files.length > 0;
   const tabs: [ParameterType, string][] = [
     ['global', t('全局参数', 'Global')],
     ['igbp', t('地类 · IGBP', 'Land class · IGBP')],
     ['usgs', t('地类 · USGS', 'Land class · USGS')],
     ['pft', 'PFT'],
     ['pc', 'PC'],
-    ['process', t('过程文件', 'Process files')],
+    ...(hasProcessFiles
+      ? ([['process', t('过程文件', 'Process files')]] as [ParameterType, string][])
+      : []),
   ];
-  const meta = (d: Descriptor) =>
-    [
-      d.unit,
-      d.validation.min != null || d.validation.max != null
-        ? `${d.validation.min ?? '−∞'} … ${d.validation.max ?? '∞'}`
-        : null,
-    ]
-      .filter(Boolean)
-      .join(' · ');
+  const meta = (d: Descriptor) => [d.unit, rangeText(d, en)].filter(Boolean).join(' · ');
   return (
     <Dialog
       open={open}
@@ -385,7 +384,7 @@ export default function ParameterDialog({
                           </tr>,
                         ]
                       : []),
-                    <tr key={d.id} title={en ? d.doc_en : d.doc_zh}>
+                    <tr key={d.id} title={docOf(d, en) || undefined}>
                       <td>
                         <strong>{label(d)}</strong>
                         <code className="param-key">{d.raw_key}</code>
@@ -423,23 +422,7 @@ export default function ParameterDialog({
                   <code>{parameter.raw_key}</code>
                   {meta(parameter) && ` · ${meta(parameter)}`}
                 </p>
-                {(en ? parameter.doc_en : parameter.doc_zh) && (
-                  <p className="param-doc">{en ? parameter.doc_en : parameter.doc_zh}</p>
-                )}
-                {editable && (
-                  <div className="param-bulk">
-                    <span>
-                      {type === 'pft' || type === 'pc'
-                        ? t('所有植被类型乘以', 'Scale every vegetated type by')
-                        : t('全部类型乘以', 'Scale every type by')}
-                    </span>
-                    <Input value={factor} onChange={(e) => setFactor(e.target.value)} />
-                    <Button onClick={() => scaleAll(parameter)}>{t('应用', 'Apply')}</Button>
-                    <Button variant="ghost" onClick={() => resetAll(parameter)}>
-                      {t('全部恢复默认', 'Reset all')}
-                    </Button>
-                  </div>
-                )}
+                {docOf(parameter, en) && <p className="param-doc">{docOf(parameter, en)}</p>}
                 <table className="versions-table param-table">
                   <thead>
                     <tr>
@@ -503,7 +486,7 @@ export default function ParameterDialog({
                 </thead>
                 <tbody>
                   {listed.map((d) => (
-                    <tr key={d.id} title={en ? d.doc_en : d.doc_zh}>
+                    <tr key={d.id} title={docOf(d, en) || undefined}>
                       <td>
                         <strong>{label(d)}</strong>
                         <code className="param-key">{d.raw_key}</code>
@@ -528,6 +511,12 @@ export default function ParameterDialog({
             </p>
           ) : (
             <>
+              <p className="muted">
+                {t(
+                  '示踪物等过程自带的参数文件（在「其他模型设置」的示踪过程里导入）。选一个文件，改它里面的参数。',
+                  'Parameter files that come with processes such as tracers (imported under the tracer process in “Other model settings”). Choose a file and edit its parameters.',
+                )}
+              </p>
               <Select
                 value={processFile || overlay.process_files[0]!.relative_path}
                 onChange={(e) => setProcessFile(e.target.value)}

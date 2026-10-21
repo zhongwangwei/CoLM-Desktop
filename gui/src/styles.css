@@ -3399,17 +3399,6 @@ table input {
   font-size: 13px;
   line-height: 1.6;
 }
-.param-bulk {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin: 10px 0;
-  font-size: 13px;
-}
-.param-bulk input {
-  width: 80px;
-}
 .param-table td {
   padding: 6px 10px;
 }
