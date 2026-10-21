@@ -89,6 +89,8 @@ export default function VersionsPage() {
     lock = useRef(false),
     // 从"修改参数（手动）"自动建的草稿：一点没改就离开时删掉，免得点一下就留个空草稿。
     autoCreated = useRef(new Set<string>()),
+    // "修改参数（手动）"建草稿后马上打开参数表；这第一次关掉时若什么都没改，就当取消。
+    manualStart = useRef<string | null>(null),
     draftNow = useRef<ModelDraft | null>(null);
   const keyOf = (v: VersionRef) => `${v.id}#${v.revision}`;
   const selected = state.version,
@@ -339,6 +341,14 @@ export default function VersionsPage() {
     setDraft(null);
     setViewKey(null);
   }
+  // 离开工作台、按来路回去：研究首页建的草稿回研究首页，其余回"新建修改版"或版本库。
+  function leaveWorkbench() {
+    const toResearch = !!draftNow.current && draftNow.current.id === researchDraft;
+    backToLibrary();
+    if (!toResearch) return;
+    setResearchDraft(null);
+    navigate('research');
+  }
   // "新建修改版"的 6 种方式。手动改参数、修改源码直接建草稿（自动起名，之后在草稿里能改）；
   // 其余 4 种是研究：以所选版本为基础，直接打开研究页对应的方法。
   async function startMethod(method: HubMethod, base = parentVersion) {
@@ -361,7 +371,10 @@ export default function VersionsPage() {
         workspace: null,
         branchCode: method === 'source',
       });
-      if (method === 'manual') autoCreated.current.add(d.id);
+      if (method === 'manual') {
+        autoCreated.current.add(d.id);
+        manualStart.current = d.id;
+      }
       setAssetRoot('');
       setDraft(d);
       setDirty(false);
@@ -1197,12 +1210,9 @@ export default function VersionsPage() {
               disabled={busy || codeBusy}
               onClick={() =>
                 run(async () => {
-                  backToLibrary();
-                  if (!backToResearch) return;
-                  setResearchDraft(null);
-                  // run 正拿着执行锁，离开保护会把跳转拦下（预览里实测停在了汇总页）；草稿已处理完，放开再走。
+                  // run 正拿着执行锁，离开保护会把跳转拦下（预览里实测停在了汇总页）；这里只剩离开，放开再走。
                   lock.current = false;
-                  navigate('research');
+                  leaveWorkbench();
                 })
               }
             >
@@ -2060,7 +2070,15 @@ export default function VersionsPage() {
           )}
           <ParameterDialog
             open={paramsOpen}
-            onOpenChange={setParamsOpen}
+            onOpenChange={(open) => {
+              setParamsOpen(open);
+              // 什么都没改就关掉参数表，是不想改了：回到来的地方、删掉刚建的空草稿，不停在空草稿页
+              // （2026-10-21 用户：关掉后跳到草稿页，下面又是"修改参数""从研究导入最优参数"，不合理）。
+              // 只管刚建好时的这一次；之后从草稿页再打开参数表，关掉就留在草稿页。
+              if (open || !draft || manualStart.current !== draft.id) return;
+              manualStart.current = null;
+              if (!dirtyNow.current && !lock.current) leaveWorkbench();
+            }}
             catalog={allowed}
             overlay={shown.overlay}
             editable={editable}

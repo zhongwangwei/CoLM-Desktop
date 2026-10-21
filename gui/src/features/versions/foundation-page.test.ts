@@ -440,3 +440,50 @@ test('the research home starts 修改参数（手动） and 修改源码 here, o
   assert.equal(creates().length, 2);
   assert.equal(creates()[1]!.args.branchCode, true);
 });
+
+test('closing the parameter table of a fresh hand-edit draft without changes cancels it', async () => {
+  const dialog = (p: ReturnType<typeof page>) =>
+    p.elements.find((e) => e.type === 'ParameterDialog')!.props as {
+      open: boolean;
+      onOpenChange: (open: boolean) => void;
+      onChange: (next: unknown) => void;
+      overlay: Record<string, unknown>;
+    };
+  const deletes = (p: ReturnType<typeof page>) =>
+    p.calls.filter((call) => call.command === 'model_delete_draft').length;
+  // From research home: back to research home, and the empty draft is gone.
+  const r = page();
+  await r.mount();
+  Object.assign(r.state, { versionMethod: { method: 'manual' } });
+  await r.mount();
+  dialog(r).onOpenChange(false);
+  await r.settle();
+  assert.equal(deletes(r), 1);
+  assert.equal(r.routes.at(-1), 'research');
+  // From 新建修改版: back to the six ways on the same page.
+  const h = page();
+  const c = await h.mount();
+  await c.actions.find((a) => a.id === 'version-method-manual')!.run();
+  await h.settle();
+  dialog(h).onOpenChange(false);
+  await h.settle();
+  assert.equal(deletes(h), 1);
+  assert.deepEqual(h.routes, []);
+  assert.ok(h.elements.some((el) => el.type === 'VersionHub'));
+  // Something was changed: closing keeps the draft open for saving and freezing.
+  const e = page();
+  const d = await e.mount();
+  await d.actions.find((a) => a.id === 'version-method-manual')!.run();
+  await e.settle();
+  dialog(e).onChange({ ...dialog(e).overlay, physics: { DEF_USE_PLANTHYDRAULICS: '.true.' } });
+  e.render();
+  dialog(e).onOpenChange(false);
+  await e.settle();
+  assert.equal(deletes(e), 0);
+  assert.ok(!e.elements.some((el) => el.type === 'VersionHub'));
+  // Opening the table again from the draft and closing it leaves the draft alone as well.
+  dialog(e).onOpenChange(true);
+  dialog(e).onOpenChange(false);
+  await e.settle();
+  assert.equal(deletes(e), 0);
+});

@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { utcSeconds } from '../../lib/dates';
 export interface ParameterContext {
   name: string;
@@ -68,15 +69,34 @@ export function calibrationWindows(
   validationFrom: string,
   validationTo: string,
 ) {
-  const values = [from, to, validationFrom, validationTo].map(utcSeconds);
-  if (
-    values.some((v) => !Number.isFinite(v)) ||
-    values[0] >= values[1] ||
-    values[2] >= values[3] ||
-    !(values[1] <= values[2] || values[3] <= values[0])
-  )
-    throw new Error('Training and validation UTC windows must be valid, ordered and disjoint');
-  return { from: values[0], to: values[1], validation_from: values[2], validation_to: values[3] };
+  const [start, end] = [from, to].map(utcSeconds);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || start >= end)
+    throw new Error(
+      bilingual(
+        '率定期要填开始和结束，并且开始早于结束',
+        'The calibration window needs a start before its end',
+      ),
+    );
+  // 验证期可空：后端两头都不填也接受（研究记录里提示"没有独立验证期"）。原来这里要求四个时间都填，
+  // 页面却标着"可空"，空着就被拒（2026-10-21 打包应用里实测）。要填就两头都填，和后端一样。
+  if (!validationFrom.trim() && !validationTo.trim())
+    return { from: start, to: end, validation_from: null, validation_to: null };
+  const [validStart, validEnd] = [validationFrom, validationTo].map(utcSeconds);
+  if (!Number.isFinite(validStart) || !Number.isFinite(validEnd) || validStart >= validEnd)
+    throw new Error(
+      bilingual(
+        '验证期要么都空着，要么开始和结束都填，并且开始早于结束',
+        'Leave the validation window empty, or give a start before its end',
+      ),
+    );
+  if (!(end <= validStart || validEnd <= start))
+    throw new Error(
+      bilingual(
+        '验证期不能和率定期重叠',
+        'The validation window must not overlap the calibration window',
+      ),
+    );
+  return { from: start, to: end, validation_from: validStart, validation_to: validEnd };
 }
 export function candidateBudget(
   kind: string,

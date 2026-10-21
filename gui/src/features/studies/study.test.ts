@@ -83,6 +83,19 @@ describe('study contracts', () => {
       1583020800,
     );
   });
+  it('takes an empty validation window as none, but not half of one', () => {
+    assert.deepEqual(calibrationWindows('2008-01-01T00:00', '2008-03-31T23:30', '', ''), {
+      from: 1199145600,
+      to: 1207006200,
+      validation_from: null,
+      validation_to: null,
+    });
+    assert.throws(
+      () => calibrationWindows('2008-01-01T00:00', '2008-03-31T23:30', '2008-04-01T00:00', ''),
+      /validation window/,
+    );
+    assert.throws(() => calibrationWindows('', '2008-03-31T23:30', '', ''), /calibration window/);
+  });
   it('budgets baseline and every stage for every site', () => {
     assert.deepEqual(candidateBudget('tuning', '', 2, 0, 8, 4, 3), {
       candidates: 40,
