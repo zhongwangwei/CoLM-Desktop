@@ -30,6 +30,7 @@ function page(
   };
   let failedCommand = '';
   let draft = { ...version, id: 'custom', generation: 1 };
+  const notices: string[] = [];
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     scrolls: unknown[] = [],
     routes: string[] = [];
@@ -107,7 +108,7 @@ function page(
     PFT: [],
     useApp: () => ({
       state,
-      notify: () => {},
+      notify: (message: string) => notices.push(message),
       update: (patch: object) => Object.assign(state, patch),
       // Like the app: a page's leave guard can refuse the navigation.
       navigate: (route: string) => {
@@ -268,6 +269,7 @@ function page(
     elements,
     state,
     calls,
+    notices,
     routes,
     version,
     card,
@@ -499,4 +501,23 @@ test('a draft offers importing a study only on its research tab', async () => {
     (e) => e.type === 'Button' && e.children.flat().includes('从研究导入最优参数…'),
   );
   assert.equal(imports.length, 1);
+});
+
+test('frozen versions keep their next steps in the bottom bar, and freezing says what comes next', async () => {
+  const p = page();
+  const c = await p.mount();
+  const bar = () =>
+    p.elements.some((e) => e.type === 'div' && e.props.className === 'versions-actionbar');
+  const button = (text: string) =>
+    p.elements.find((e) => e.type === 'Button' && e.children.flat().includes(text));
+  // The official version in use: derive from it at the bottom, nothing to freeze.
+  assert.ok(bar());
+  assert.ok(button('基于它新建修改版'));
+  assert.ok(!button('冻结为新版本'));
+  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
+  await p.mount();
+  assert.ok(bar());
+  (button('冻结为新版本')!.props.onClick as () => void)();
+  await p.settle();
+  assert.match(p.notices.at(-1) ?? '', /已冻结为.*模拟已改用这个版本/);
 });

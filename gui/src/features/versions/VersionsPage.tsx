@@ -1188,33 +1188,6 @@ export default function VersionsPage() {
                   <span className="badge versions-badge is-unsaved">{t('未保存', 'Unsaved')}</span>
                 )}
               </div>
-              <div className="button-row versions-head-actions">
-                {editable ? null : (
-                  <>
-                    {!inUse && viewing && (
-                      <Button
-                        variant="primary"
-                        disabled={busy || codeBusy}
-                        onClick={() => chooseForSimulation(viewing)}
-                      >
-                        {t('设为模拟使用', 'Use for simulations')}
-                      </Button>
-                    )}
-                    <Button
-                      disabled={busy || codeBusy}
-                      onClick={() =>
-                        run(async () => {
-                          setParentKey(viewing ? keyOf(viewing.version) : '');
-                          backToLibrary();
-                          update({ versionsView: 'create' });
-                        })
-                      }
-                    >
-                      {t('基于它新建修改版', 'Derive from it')}
-                    </Button>
-                  </>
-                )}
-              </div>
             </div>
             <p className="versions-note">
               {isOfficial
@@ -1372,8 +1345,8 @@ export default function VersionsPage() {
             <Card
               title={t('参数改值', 'Parameter overrides')}
               description={t(
-                '相对父版本改了的参数；没列出的沿用父版本的值。全局、地类、PFT、PC、过程文件参数都在「修改参数」里按类型改。',
-                'Parameters changed from the parent; anything not listed keeps the parent’s value. Edit global, land-class, PFT, PC and process-file parameters by type under “Edit parameters”.',
+                '相对父版本改了的参数；没列出的沿用父版本的值。全局、地类（IGBP / USGS）、PFT、PC、示踪物与泥沙参数都在「修改参数」里按类型改。',
+                'Parameters changed from the parent; anything not listed keeps the parent’s value. Edit global, land-class (IGBP / USGS), PFT, PC, tracer and sediment parameters by type under “Edit parameters”.',
               )}
             >
               <div className="button-row versions-card-actions">
@@ -1863,67 +1836,118 @@ export default function VersionsPage() {
           </div>
           {/* 保存、放弃、冻结是改完才做的事：放在底部，贴着窗口底边，长页面滚到哪里都点得到
               （2026-10-21 用户：这几个按钮放最下面更合适）。页签留在上面，它决定下面显示什么。 */}
-          {editable && (
-            <div className="versions-actionbar">
-              <span className={dirty ? 'versions-actionbar-dirty' : 'muted'}>
-                {dirty
-                  ? t('有未保存的修改', 'Unsaved edits')
-                  : freezeCheck?.ready === false
-                    ? t(
-                        '已保存；冻结前检查还没通过（见上方）',
-                        'Saved; checks before freezing not passed yet (above)',
-                      )
-                    : t(
-                        '已保存在版本库里：以后从"新建修改版"页的"继续之前的修改"再打开',
-                        'Saved in the version library: reopen it later under "Continue earlier work" on the New modified version page',
-                      )}
-              </span>
-              <div className="button-row">
-                <Button
-                  variant="ghost"
-                  disabled={busy || codeBusy || !dirty}
-                  onClick={() =>
-                    void askConfirm(
-                      t(
-                        '放弃尚未保存的修改？草稿回到上次保存时的样子。',
-                        'Discard unsaved edits? The draft goes back to how it was last saved.',
-                      ),
-                      { confirmLabel: t('放弃修改', 'Discard edits'), danger: true },
-                    ).then((ok) => {
-                      if (ok) run(discardLocal);
-                    })
-                  }
-                >
-                  {t('放弃修改', 'Discard edits')}
-                </Button>
-                <Button
-                  disabled={busy || codeBusy || !dirty}
-                  onClick={() =>
-                    run(async () => {
-                      const saved = await save();
-                      // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
-                      notify(
+          <div className="versions-actionbar">
+            {editable ? (
+              <>
+                <span className={dirty ? 'versions-actionbar-dirty' : 'muted'}>
+                  {dirty
+                    ? t('有未保存的修改', 'Unsaved edits')
+                    : freezeCheck?.ready === false
+                      ? t(
+                          '已保存；冻结前检查还没通过（见上方）',
+                          'Saved; checks before freezing not passed yet (above)',
+                        )
+                      : t(
+                          '已保存在版本库里：以后从"新建修改版"页的"继续之前的修改"再打开',
+                          'Saved in the version library: reopen it later under "Continue earlier work" on the New modified version page',
+                        )}
+                </span>
+                <div className="button-row">
+                  <Button
+                    variant="ghost"
+                    disabled={busy || codeBusy || !dirty}
+                    onClick={() =>
+                      void askConfirm(
                         t(
-                          `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。`,
-                          `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".`,
+                          '放弃尚未保存的修改？草稿回到上次保存时的样子。',
+                          'Discard unsaved edits? The draft goes back to how it was last saved.',
                         ),
-                      );
-                      return saved;
-                    })
-                  }
-                >
-                  {t('保存草稿', 'Save draft')}
-                </Button>
-                <Button
-                  disabled={busy || codeBusy || freezeCheck?.ready === false}
-                  variant="primary"
-                  onClick={() => run(freeze)}
-                >
-                  {t('冻结为新版本', 'Freeze as a version')}
-                </Button>
-              </div>
-            </div>
-          )}
+                        { confirmLabel: t('放弃修改', 'Discard edits'), danger: true },
+                      ).then((ok) => {
+                        if (ok) run(discardLocal);
+                      })
+                    }
+                  >
+                    {t('放弃修改', 'Discard edits')}
+                  </Button>
+                  <Button
+                    disabled={busy || codeBusy || !dirty}
+                    onClick={() =>
+                      run(async () => {
+                        const saved = await save();
+                        // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
+                        notify(
+                          t(
+                            `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。`,
+                            `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".`,
+                          ),
+                        );
+                        return saved;
+                      })
+                    }
+                  >
+                    {t('保存草稿', 'Save draft')}
+                  </Button>
+                  <Button
+                    disabled={busy || codeBusy || freezeCheck?.ready === false}
+                    variant="primary"
+                    onClick={() =>
+                      run(async () => {
+                        const frozen = await freeze();
+                        notify(
+                          t(
+                            `已冻结为"${frozen.name}" r${frozen.version.revision}，模拟已改用这个版本。接下来到"项目"里打开算例运行；要接着改，点底部的"基于它新建修改版"。`,
+                            `Frozen as "${frozen.name}" r${frozen.version.revision}; simulations now use it. Next, open a case under Project to run it; to change it further, use "Derive from it" at the bottom.`,
+                          ),
+                        );
+                        return frozen;
+                      })
+                    }
+                  >
+                    {t('冻结为新版本', 'Freeze as a version')}
+                  </Button>
+                </div>
+              </>
+            ) : (
+              // 冻结的版本也一样放在底部：下一步是用它跑模拟，或者基于它接着改
+              // （2026-10-21 用户：冻结后转到这个版本，下一步做什么？基于它新建修改版要不要也悬浮在下面）。
+              <>
+                <span className="muted">
+                  {inUse
+                    ? t(
+                        '模拟正在使用这个版本：到"项目"里打开算例运行；要接着改，基于它新建修改版。',
+                        'Simulations use this version: open a case under Project to run it; to change it further, derive a new modified version.',
+                      )
+                    : isOfficial
+                      ? t('官方基线，只读。', 'The official baseline, read-only.')
+                      : t('已冻结的版本，只读。', 'A frozen version, read-only.')}
+                </span>
+                <div className="button-row">
+                  {!inUse && viewing && (
+                    <Button
+                      disabled={busy || codeBusy}
+                      onClick={() => chooseForSimulation(viewing)}
+                    >
+                      {t('设为模拟使用', 'Use for simulations')}
+                    </Button>
+                  )}
+                  <Button
+                    variant="primary"
+                    disabled={busy || codeBusy}
+                    onClick={() =>
+                      run(async () => {
+                        setParentKey(viewing ? keyOf(viewing.version) : '');
+                        backToLibrary();
+                        update({ versionsView: 'create' });
+                      })
+                    }
+                  >
+                    {t('基于它新建修改版', 'Derive from it')}
+                  </Button>
+                </div>
+              </>
+            )}
+          </div>
           {draft && (
             <StudyImportDialog
               preview={studyPreview}

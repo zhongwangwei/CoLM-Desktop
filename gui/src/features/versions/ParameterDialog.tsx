@@ -322,8 +322,8 @@ export default function ParameterDialog({
   // （2026-10-21 用户：示踪物与过程文件为什么不一起做到修改参数里，河道泥沙也要支撑，所有尺度都能用）。
   const tabs: [ParameterType, string][] = [
     ['global', t('全局参数', 'Global')],
-    ['igbp', t('地类 · IGBP', 'Land class · IGBP')],
-    ['usgs', t('地类 · USGS', 'Land class · USGS')],
+    ['igbp', 'IGBP'],
+    ['usgs', 'USGS'],
     ['pft', 'PFT'],
     ['pc', 'PC'],
     ['process', t('示踪物与泥沙', 'Tracers and sediment')],
