@@ -19,7 +19,15 @@ export const navigation = [
 export function navigationTarget(
   item: (typeof navigation)[number],
   state: Pick<AppState, 'root' | 'projectView'>,
-): { route: Route; tab?: AppState['caseTab']; projectView?: AppState['projectView'] } {
+): {
+  route: Route;
+  tab?: AppState['caseTab'];
+  projectView?: AppState['projectView'];
+  researchHome?: boolean;
+} {
+  // 侧栏的"研究"总是回研究首页：已经在研究页时页面不会重新挂载，要靠这个标记让它收起工作台；
+  // 从草稿带来的"要写回的草稿"也只属于那次进入，侧栏进来时要清掉。
+  if (item.id === 'research') return { route: 'research', researchHome: true };
   if (item.id === 'project' && state.projectView?.root === state.root)
     return { route: 'project', projectView: { ...state.projectView, home: true } };
   if (

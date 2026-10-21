@@ -10,6 +10,7 @@ import {
 } from '../runs/run-model';
 import { caseSimulationDomain } from './model-settings';
 import { chartVariables, readErrorText, variableOption } from '../results/variable-labels';
+import { withCatalogLabels } from '../../lib/param-presentation';
 
 // Run the actual page callbacks with native IPC replaced; no duplicate task implementation.
 function callback(page: string, name: string, context: Record<string, unknown>) {
@@ -140,6 +141,7 @@ test('research inspection and saved-model callbacks return backend evidence even
       ...common,
       sites: ['/case'],
       invokeJson: async () => rows,
+      withCatalogLabels,
     })(),
     rows,
   );

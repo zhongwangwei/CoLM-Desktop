@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { invoke } from '../../lib/ipc';
+import { withCatalogLabels } from '../../lib/param-presentation';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import type { FrozenRevision, KernelEntry } from '../../lib/types';
 import ConfigurationOptions from '../versions/ConfigurationOptions';
@@ -101,7 +102,7 @@ export default function ModelSettings({
                   !models.some((model) => model.name.toLowerCase() === field.name.toLowerCase()),
               ),
           );
-          setCatalog(parameters);
+          setCatalog(withCatalogLabels(parameters));
         }
       })
       .catch((e) => {

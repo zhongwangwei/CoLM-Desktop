@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
+import { withCatalogLabels } from '../../lib/param-presentation';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import type {
   FrozenRevision,
@@ -149,7 +150,7 @@ export default function VersionsPage() {
     ])
       .then(([c, f, d]) => {
         if (token.active && token === epoch.current) {
-          setCatalog(c);
+          setCatalog(withCatalogLabels(c));
           setFields(f);
           setDrafts(d);
         }

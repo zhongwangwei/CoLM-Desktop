@@ -11,6 +11,7 @@ import { schemeVersionName } from './version-tree';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
+import { withCatalogLabels } from '../../lib/param-presentation';
 import type { UiField, UiAction } from '../../lib/guide';
 type Element = { type: string; props: Record<string, unknown>; children: unknown[] };
 function page(
@@ -72,6 +73,7 @@ function page(
     schemeVersionName,
     compatibleKernel,
     effectiveModelFields,
+    withCatalogLabels,
     ConfigurationOptions: 'ConfigurationOptions',
     React: {
       createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => {

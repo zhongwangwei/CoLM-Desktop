@@ -91,6 +91,7 @@ export default function App() {
     const target = navigationTarget(item, state);
     if (!navigate(target.route, target.tab)) return false;
     if (target.projectView) update({ projectView: target.projectView, projectCasesOpen: false });
+    if (target.researchHome) update({ researchHome: true });
     return true;
   };
   // Wherever the user is, one click returns to the project being worked on, on its last page.

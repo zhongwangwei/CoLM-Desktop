@@ -231,6 +231,8 @@ export type AppState = {
    * 没有它时，研究结果写进一个以研究所用版本为父版本的新草稿。
    */
   researchTarget?: { draftId: string; name: string } | null;
+  /** 侧栏点了"研究"：研究页回到首页并丢掉草稿带来的写回目标，用完清掉。 */
+  researchHome?: boolean;
   /** 版本页进来时直接打开的草稿（研究结果写进去之后去审阅、冻结），版本页用完清掉。 */
   openDraft?: string | null;
   expert: boolean;

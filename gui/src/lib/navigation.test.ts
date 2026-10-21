@@ -22,6 +22,12 @@ test('sidebar groups model/data work under Project and opens real case tabs', ()
   for (const route of ['project', 'preparation', 'versions'] as const)
     assert.equal(activeNavigation({ route, caseTab: 'results' }), 'project');
   assert.equal(activeNavigation({ route: 'research', caseTab: 'results' }), 'research');
+  // The sidebar entry always lands on research home, also when research is already open.
+  const research = navigation.find((item) => item.id === 'research')!;
+  assert.deepEqual(navigationTarget(research, { root: '/p' }), {
+    route: 'research',
+    researchHome: true,
+  });
   assert.equal(activeNavigation({ route: 'new-case', caseTab: 'settings' }), 'simulation');
   for (const tab of ['settings', 'runs'] as const)
     assert.equal(activeNavigation({ route: 'case', caseTab: tab }), 'simulation');

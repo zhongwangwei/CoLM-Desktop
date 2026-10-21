@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type uPlot from 'uplot';
 import { ScienceChart } from '../results/ResultsPage';
 import { invoke, invokeJson } from '../../lib/ipc';
+import { withCatalogLabels } from '../../lib/param-presentation';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Notice, Advanced } from '../../components/ui';
@@ -440,7 +441,7 @@ export default function ResearchPage() {
         kernelDir: kernel,
       });
       if (current()) {
-        setContexts(rows);
+        setContexts(withCatalogLabels(rows));
         const seed = state.researchSeed?.parameters;
         if (seed?.length) {
           const picked = applyResearchSeed(rows, seed);
@@ -1093,6 +1094,25 @@ export default function ResearchPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchMethod]);
+  // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
+  // 任何研究都会写回那个草稿。
+  useEffect(() => {
+    if (!state.researchHome) return;
+    update({ researchHome: false });
+    if (lock.current || runLock.current) {
+      setError(
+        tr(
+          '研究操作还在进行，结束后再回研究首页。',
+          'A study operation is in progress; return to research home when it finishes.',
+        ),
+      );
+      return;
+    }
+    setFromHub(false);
+    update({ researchTarget: null, researchSeed: null });
+    setWorkbench(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.researchHome]);
   // 返回到进来的地方：草稿、"新建修改版"或侧栏的研究首页（侧栏的研究 2026-10-21 先保留）。
   function showHome() {
     if (lock.current || runLock.current) throw new Error('A study operation is in progress');
@@ -2062,8 +2082,8 @@ export default function ResearchPage() {
             <tbody>
               {contextOrder.map(({ row, i }, n) => {
                 const label = en ? row.label_en : row.label_zh;
-                // 很多全局参数目录里还没有中文名，标签就是键名换成空格，这时只显示一次键名。
-                const unnamed = label.replace(/\s+/g, '_').toUpperCase() === row.name.toUpperCase();
+                // 上游新加、名称表里还没配名字的参数，界面名就是去掉前缀的键名，这时只显示一次键名。
+                const unnamed = row.name.toUpperCase().endsWith(label.toUpperCase());
                 const heading = n === 0 || groupKey(contextOrder[n - 1]!.row) !== groupKey(row);
                 const p = parameters[String(i)] || {
                   enabled: false,

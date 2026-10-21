@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { Overlay, ParameterOverride } from '../../lib/types';
 import { Button, Dialog } from '../../components/ui';
 import { IGBP, PFT, USGS } from './scope-labels';
+import { fieldLabel } from '../../lib/param-presentation';
 
 export type StudyPreview = {
   study: string;
@@ -56,11 +57,24 @@ export default function StudyImportDialog({
     const hit = table.find(([id]) => id === s.index);
     return hit ? `${s.index} ${en ? hit[2] : hit[1]}` : String(s.index);
   };
+  // 和研究页的参数表一样：有界面名就名字在前、键名在后；名称表里没有的（如 PFT 参数）只显示键名。
+  const name = (key: string) => {
+    const label = fieldLabel(key, en ? 'en' : 'zh');
+    return key.toUpperCase().endsWith(label.toUpperCase()) ? (
+      <code>{key}</code>
+    ) : (
+      <>
+        <strong>{label}</strong> <code className="param-key">{key}</code>
+      </>
+    );
+  };
   const chosen = preview.records.filter((_, i) => checked[i]);
   return (
     <Dialog
       open
-      onOpenChange={(open) => !open && onClose()}
+      // 取消和写进去并排放在一行；对话框自带的"关闭"会单独落到下一行。
+      showClose={false}
+      onOpenChange={(open) => !open && !busy && onClose()}
       className="study-import"
       title={t('从研究导入参数', 'Import parameters from a study')}
       description={t(
@@ -99,9 +113,7 @@ export default function StudyImportDialog({
                   }
                 />
               </td>
-              <td>
-                <code>{r.raw_key}</code>
-              </td>
+              <td>{name(r.raw_key)}</td>
               <td className="muted">{scope(r)}</td>
               <td className="muted">
                 <code>{current(r) ?? t('默认', 'default')}</code>
@@ -114,6 +126,9 @@ export default function StudyImportDialog({
         </tbody>
       </table>
       <div className="button-row">
+        <Button disabled={busy} onClick={onClose}>
+          {t('取消', 'Cancel')}
+        </Button>
         <Button
           variant="primary"
           disabled={busy || chosen.length === 0}

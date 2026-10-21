@@ -521,6 +521,14 @@ table input {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+/* 对话框经 Portal 挂在 body 下，页面里 `.xxx-page .button-row` 的间距管不到，按钮会贴在一起。 */
+.dialog-content .button-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 16px;
+}
 .fatal-error {
   padding: 40px;
 }

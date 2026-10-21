@@ -1153,6 +1153,24 @@ export function catalogLabel(
   return fieldLabel(item?.raw_key ?? item?.name ?? '', lang);
 }
 
+/** 目录条目换上界面名。后端给全局参数的名字只是键名拆词（"DEF TUNING CAPR"），研究页、参数对话框和
+ *  搜索直接读 label_zh / label_en，所以在读进目录时换一次，不在每个显示点各调一遍 [`catalogLabel`]。 */
+export function withCatalogLabels<
+  T extends {
+    label_en?: string;
+    label_zh?: string;
+    scope?: string;
+    raw_key?: string;
+    name?: string;
+  },
+>(items: T[]): T[] {
+  return items.map((item) => ({
+    ...item,
+    label_zh: catalogLabel(item, 'zh'),
+    label_en: catalogLabel(item, 'en'),
+  }));
+}
+
 /** 字段的界面名：有配好的中英文名就用它，没有就显示 CoLM 原名。 */
 export function fieldLabel(path: string, lang = 'zh') {
   const exact = pick(LABELS[path], lang);
