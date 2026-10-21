@@ -10,6 +10,7 @@
 //! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>] [--crop 1]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
+//! colm-cli case-land-classes <算例目录>             # 格点算例 landdata 里有哪些地类（JSON）
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
@@ -107,6 +108,7 @@ usage:
                    # 建一份站点文件：经纬度必给，其余从 rawdata 抽或用
                    # 标称假设。--landtype 不给就不写，让 CoLM 回落
   colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
+  colm-cli case-land-classes <case-dir>     # land classes present in a gridded case's landdata (JSON)
                    # 输出 PFT/PC 站点的非零 PFT 类型与归一化比例
   colm-cli new     --site <site.nc> --out <dir> [--name N] [--start Y-M-D] [--end Y-M-D]
                    [--met <Met.nc>]   # 前处理转出来的强迫场；不给就按命名约定
@@ -373,6 +375,15 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "site-new" => {
             cmd_site_new(opts)?;
         }
+        "case-land-classes" => {
+            // 格点算例 landdata 里出现过的地类（研究页的选地类）；还没做过前处理时是 null。
+            let case = opts.positional_at(0, "a case directory")?;
+            let text = std::fs::read_to_string(case.join("case.nml"))
+                .with_context(|| format!("cannot read {}", case.join("case.nml").display()))?;
+            let doc = colm_namelist::parse(&text)?;
+            let classes = study::engine::spatial_land_classes(&case, &doc)?;
+            println!("{}", serde_json::json!({ "classes": classes }));
+        }
         "site-pfts" => {
             let site = opts.positional_at(0, "a site.nc file")?;
             let crop = opts.get("--crop").is_some();
@@ -470,6 +481,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 pair_max_points: opts.get("--max-points").map(|v| v.parse()).transpose()?,
                 from: opts.get("--from").map(|v| v.parse()).transpose()?,
                 to: opts.get("--to").map(|v| v.parse()).transpose()?,
+                point: None,
             })?;
         }
         "hybrid-install" => hybrid_cmd::cmd_hybrid_install(opts)?,
@@ -805,6 +817,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     pair_max_points: None,
                     from: None,
                     to: None,
+                    point: None,
                 })?,
                 None => println!("no --obs given; skipping the metrics table"),
             }
@@ -4175,6 +4188,8 @@ struct MetricsRequest<'a> {
     pair_max_points: Option<usize>,
     from: Option<i64>,
     to: Option<i64>,
+    /// 格点算例里的通量站：取（经度, 纬度）所在那一格的模拟；单点算例是 `None`。
+    point: Option<(f64, f64)>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -4681,6 +4696,7 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         pair_max_points,
         from,
         to,
+        point,
     } = request;
     validate_pair_vars(&pair_vars)?;
     let layout = Layout::new(case);
@@ -4716,7 +4732,7 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
         wanted.extend(source.required());
     }
     let wanted = wanted.into_iter().collect::<Vec<_>>();
-    let mut model_data = read_history_many(&hists, &wanted)?;
+    let mut model_data = read_history_many_at(&hists, &wanted, point)?;
     let m_t = model_data.remove("time").expect("time was requested");
     // 观测的 time 原点可能在年中（AU-Preston 是 2003-08-12 03:30），
     // 必须按完整日期时间换算；只取年份会把序列错配几个月。
@@ -5366,6 +5382,123 @@ fn variable_missing_count(variable: &netcdf::Variable) -> Result<usize> {
         .iter()
         .filter(|value| !value.is_finite() || markers.contains(value))
         .count())
+}
+
+/// 格点 history 里一个点（经度, 纬度）所在那一格的时间序列。陆面 history 按 `lon_w/lon_e/lat_s/lat_n` 的格子边界找；
+/// 汇流单元 history（`lat_ucat/lon_ucat`）只有格心，取最近的格心。一维（只有时间）的变量原样读。
+fn read_file_at_point(
+    f: &netcdf::File,
+    path: &Path,
+    name: &str,
+    (lon, lat): (f64, f64),
+) -> Result<Vec<f64>> {
+    let variable = f
+        .variable(name)
+        .with_context(|| format!("{} has no variable {name}", path.display()))?;
+    let dims = variable
+        .dimensions()
+        .iter()
+        .map(|dim| dim.name())
+        .collect::<Vec<_>>();
+    if dims.len() <= 1 {
+        return read_file_1d(f, path, name);
+    }
+    let [time, lat_dim, lon_dim] = dims.as_slice() else {
+        bail!(
+            "{name} in {} is not a time × lat × lon field",
+            path.display()
+        );
+    };
+    ensure!(
+        time == "time",
+        "{name} in {} does not start with the time dimension",
+        path.display()
+    );
+    let (row, column) = history_cell(f, path, lat_dim, lon_dim, (lon, lat))?;
+    let markers = variable_missing_markers(&variable);
+    let mut values = variable
+        .get_values::<f64, _>((.., row, column))
+        .with_context(|| format!("cannot read {name} from {}", path.display()))?;
+    for value in &mut values {
+        if markers.contains(value) {
+            *value = f64::NAN;
+        }
+    }
+    Ok(values)
+}
+
+/// 点（经度, 纬度）落在格点 history 的哪一格：`(纬向下标, 经向下标)`。
+fn history_cell(
+    f: &netcdf::File,
+    path: &Path,
+    lat_dim: &str,
+    lon_dim: &str,
+    (lon, lat): (f64, f64),
+) -> Result<(usize, usize)> {
+    // 经度统一到 [-180, 180) 再比，模型与站点各用 0–360 还是 ±180 都行。
+    let wrap = |value: f64| (value + 180.0).rem_euclid(360.0) - 180.0;
+    let lon = wrap(lon);
+    let bounded = |low: &str, high: &str, value: f64, wrapped: bool| -> Result<Option<usize>> {
+        if f.variable(low).is_none() || f.variable(high).is_none() {
+            return Ok(None);
+        }
+        let lows = read_file_1d(f, path, low)?;
+        let highs = read_file_1d(f, path, high)?;
+        Ok(lows.iter().zip(&highs).position(|(&low, &high)| {
+            if wrapped {
+                let (low, width) = (wrap(low), high - low);
+                (value - low).rem_euclid(360.0) < width
+            } else {
+                value >= low.min(high) && value < low.max(high)
+            }
+        }))
+    };
+    // 没有边界（汇流单元 history）时取最近的格心，但离得超过一个格距就当作在模拟范围之外。
+    let nearest = |name: &str, value: f64, wrapped: bool| -> Result<usize> {
+        let centers = read_file_1d(f, path, name)?;
+        let distance = |center: f64| {
+            if wrapped {
+                let gap = (wrap(center) - value).abs();
+                gap.min(360.0 - gap)
+            } else {
+                (center - value).abs()
+            }
+        };
+        let spacing = centers
+            .windows(2)
+            .map(|pair| (pair[1] - pair[0]).abs())
+            .filter(|gap| *gap > 0.0)
+            .fold(f64::INFINITY, f64::min);
+        let (index, center) = centers
+            .iter()
+            .enumerate()
+            .filter(|(_, center)| center.is_finite())
+            .min_by(|(_, a), (_, b)| distance(**a).total_cmp(&distance(**b)))
+            .with_context(|| format!("{} has no {name} coordinates", path.display()))?;
+        ensure!(
+            !spacing.is_finite() || distance(*center) <= spacing,
+            "({lon}, {lat}) is outside the simulated grid of {}",
+            path.display()
+        );
+        Ok(index)
+    };
+    let outside = || {
+        anyhow::anyhow!(
+            "({lon}, {lat}) is outside the simulated grid of {}",
+            path.display()
+        )
+    };
+    let row = if lat_dim == "lat" && f.variable("lat_s").is_some() {
+        bounded("lat_s", "lat_n", lat, false)?.ok_or_else(outside)?
+    } else {
+        nearest(lat_dim, lat, false)?
+    };
+    let column = if lon_dim == "lon" && f.variable("lon_w").is_some() {
+        bounded("lon_w", "lon_e", lon, true)?.ok_or_else(outside)?
+    } else {
+        nearest(lon_dim, lon, true)?
+    };
+    Ok((row, column))
 }
 
 fn read_file_1d(f: &netcdf::File, path: &Path, name: &str) -> Result<Vec<f64>> {
@@ -6728,6 +6861,7 @@ fn history_has_variables(files: &[PathBuf], vars: &[&str]) -> bool {
 fn read_history_many_from(
     files: &[PathBuf],
     vars: &[&str],
+    point: Option<(f64, f64)>,
 ) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
     let mut out = vars
         .iter()
@@ -6736,7 +6870,10 @@ fn read_history_many_from(
     for f in files {
         let file = netcdf::open(f).with_context(|| format!("cannot open {}", f.display()))?;
         for name in vars {
-            let values = read_file_1d(&file, f, name)?;
+            let values = match point {
+                Some(point) => read_file_at_point(&file, f, name, point)?,
+                None => read_file_1d(&file, f, name)?,
+            };
             out.get_mut(*name)
                 .expect("all names were inserted")
                 .extend(values);
@@ -6760,6 +6897,16 @@ fn read_history_many(
     files: &[PathBuf],
     vars: &[&str],
 ) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
+    read_history_many_at(files, vars, None)
+}
+
+/// 同 [`read_history_many`]；给了 `point`（经度, 纬度）时，格点变量取这个点所在那一格的时间序列
+/// （区域里的通量站、水文站）。
+fn read_history_many_at(
+    files: &[PathBuf],
+    vars: &[&str],
+    point: Option<(f64, f64)>,
+) -> Result<std::collections::BTreeMap<String, Vec<f64>>> {
     let wants_time = vars.contains(&"time");
     let data_vars = vars
         .iter()
@@ -6767,7 +6914,7 @@ fn read_history_many(
         .filter(|name| *name != "time")
         .collect::<std::collections::BTreeSet<_>>();
     if data_vars.is_empty() {
-        return read_history_many_from(&primary_history_files(files), vars);
+        return read_history_many_from(&primary_history_files(files), vars, point);
     }
 
     let mut out = std::collections::BTreeMap::new();
@@ -6791,7 +6938,7 @@ fn read_history_many(
             request.push("time");
         }
         request.extend(stream_vars.iter().copied());
-        let mut data = read_history_many_from(&stream, &request)?;
+        let mut data = read_history_many_from(&stream, &request, point)?;
         if let Some(time) = data.remove("time") {
             if let Some(reference) = &reference_time {
                 if reference != &time {
@@ -6821,7 +6968,7 @@ fn read_history_many(
         out.insert(
             "time".into(),
             reference_time.unwrap_or_else(|| {
-                read_history_many_from(&primary_history_files(files), &["time"])
+                read_history_many_from(&primary_history_files(files), &["time"], None)
                     .unwrap_or_default()
                     .remove("time")
                     .unwrap_or_default()

@@ -220,6 +220,7 @@ pub fn run() {
             new_simulation_draft_close,
             study_save_version,
             study_parameter_contexts,
+            study_type_choices,
             study_clone,
             study_compare,
             study_create_json,

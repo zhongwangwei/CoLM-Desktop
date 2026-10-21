@@ -229,12 +229,8 @@ pub fn land_physics_parameters(
     } else {
         Default::default()
     };
-    // 城市单点里一个站点混着城市与自然地类的 patch，Rust 城市分支的逐地类取值还没和 Fortran 逐项对过，先拒绝。
-    ensure!(
-        land_class_overrides.is_empty() || !urban_run,
-        "DEF_LC_* land-class overrides together with DEF_URBAN_RUN are not verified in the Rust \
-         engine: the urban step's per-class lookups have not been compared with Fortran"
-    );
+    // 城市算例也一样：城市 patch 用城市地类那一行（`CoLMMAIN_Urban` 收的是 `vmax25(m)` 一类），
+    // 自然 patch 用各自地类；2026-10-21 与 Fortran 逐位核对后放开（原来拒绝）。
     // 这里曾有一张"设了非默认值就拒绝"的表（`oracle/nml-unread.snapshot` 里会改变物理、而运行期不读的
     // 开关）。第 443 轮逐个核对上游后全部清空，理由记在 `docs/implementation-verification.md`：
     // - 运行期死参数：`DEF_TUNING_CSOILC`（`rd_opt` 恒为 3，`MOD_LeafTemperature.F90:438`）、

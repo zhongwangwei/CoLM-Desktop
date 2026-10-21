@@ -161,15 +161,46 @@ pub fn parameters_json() -> Result<String> {
     Ok(String::from_utf8(buf)?)
 }
 
+/// 研究能用哪些算例：单点（含多站点）与格点（流域、区域、全球）都行，但一个研究里只有一种，内核与之相配。
+/// 单点的率定目标比站点观测；格点的比格点产品、区域内通量站或水文站（[`super::spec::TargetSource`]）。
 pub(super) fn ensure_supported_study_inputs(
     base_cases: &[PathBuf],
     kernel_macros: &[String],
+    spec: &StudySpec,
 ) -> Result<()> {
-    if !kernel_macros.is_empty() && !kernel_macros.iter().any(|name| name == "SinglePoint") {
-        bail!("Study currently supports SinglePoint kernels only; spatial kernels cannot run tuning or uncertainty Studies yet");
-    }
+    let mut kinds = BTreeSet::new();
     for case in base_cases {
-        reject_spatial_study_case(case)?;
+        kinds.insert(colm_case::is_spatial_case(&case.join("case.nml"))?);
+    }
+    if kinds.len() > 1 {
+        bail!("a Study cannot mix single-point and gridded base cases");
+    }
+    let kernel_spatial = (!kernel_macros.is_empty())
+        .then(|| !kernel_macros.iter().any(|name| name == "SinglePoint"));
+    let spatial = match kinds.first() {
+        Some(spatial) => *spatial,
+        None => kernel_spatial.unwrap_or(false),
+    };
+    if kernel_spatial.is_some_and(|kernel| kernel != spatial) {
+        bail!(
+            "the Study kernel does not match its base cases: single-point cases need a SinglePoint \
+             kernel and gridded cases a spatial one"
+        );
+    }
+    for target in &spec.targets {
+        if spatial && target.source.is_none() {
+            bail!(
+                "target {}: gridded cases are compared with a gridded product, a flux station in the \
+                 domain or a river gauge, not with a site observation file",
+                target.key
+            );
+        }
+        if !spatial && target.source.is_some() {
+            bail!(
+                "target {}: single-point cases are compared with their site observation file",
+                target.key
+            );
+        }
     }
     Ok(())
 }
@@ -178,27 +209,32 @@ pub(super) fn ensure_supported_study_manifest(
     manifest: &Manifest,
     kernel_macros: Option<&[String]>,
 ) -> Result<()> {
-    if let Some(kernel_macros) = kernel_macros {
-        ensure_supported_study_inputs(&[], kernel_macros)?;
+    let frozen_kernel = manifest
+        .spec
+        .kernel_dir
+        .as_deref()
+        .map(|kernel_dir| {
+            colm_kernel::Kernel::open_manifest(Path::new(kernel_dir))
+                .with_context(|| format!("cannot inspect Study kernel {kernel_dir}"))
+        })
+        .transpose()?
+        .map(|kernel| kernel.manifest.macros);
+    let base_cases = manifest
+        .spec
+        .base_cases
+        .iter()
+        .map(|site| super::model::base_case(manifest, site))
+        .collect::<Result<Vec<_>>>()?;
+    for macros in [kernel_macros, frozen_kernel.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        ensure_supported_study_inputs(&base_cases, macros, &manifest.spec)?;
     }
-    if let Some(kernel_dir) = manifest.spec.kernel_dir.as_deref() {
-        let kernel = colm_kernel::Kernel::open_manifest(Path::new(kernel_dir))
-            .with_context(|| format!("cannot inspect Study kernel {}", kernel_dir))?;
-        ensure_supported_study_inputs(&[], &kernel.manifest.macros)?;
-    }
-    for site in &manifest.spec.base_cases {
-        reject_spatial_study_case(&super::model::base_case(manifest, site)?)?;
-    }
-    Ok(())
-}
-
-fn reject_spatial_study_case(case: &Path) -> Result<()> {
-    let case_nml = case.join("case.nml");
-    if colm_case::is_spatial_case(&case_nml)? {
-        bail!(
-            "Study currently supports SinglePoint cases only; spatial mesh is present in {}",
-            case_nml.display()
-        );
+    // 没记内核的研究都是格点研究出现以前建的（建研究要求 `kernel_dir`），按单点查：
+    // 基础算例后来改成了格点算例，就在这里拦下。
+    if kernel_macros.is_none() && frozen_kernel.is_none() {
+        ensure_supported_study_inputs(&base_cases, &["SinglePoint".into()], &manifest.spec)?;
     }
     Ok(())
 }
@@ -257,7 +293,7 @@ fn create_with_baselines(
         .transpose()?
         .map(|kernel| kernel.manifest.macros)
         .unwrap_or_default();
-    ensure_supported_study_inputs(&base_cases, &kernel_macros)?;
+    ensure_supported_study_inputs(&base_cases, &kernel_macros, &spec)?;
     let baseline = baseline(&base_cases, &spec, &kernel_macros)?;
     super::hybrid::freeze_normalization(&mut spec, &base_cases)?;
     let members = sample::design(&spec, &baseline)?;
@@ -445,6 +481,14 @@ pub(crate) fn verify_frozen_inputs(manifest: &Manifest) -> Result<()> {
         };
         verify_hash(&format!("observation {site}"), expected, &actual)?;
     }
+    let actual = target_source_hashes(&manifest.spec)?;
+    for (key, expected) in &manifest.provenance.target_source_sha256 {
+        verify_hash(
+            &format!("observation of target {key}"),
+            expected,
+            actual.get(key).map_or("", String::as_str),
+        )?;
+    }
     Ok(())
 }
 
@@ -529,7 +573,7 @@ pub(super) fn baseline(
             .iter()
             .map(|case| {
                 let nml = case.join("case.nml");
-                if let Some(value) = value_in_case(&nml, &key)? {
+                if let Some(value) = value_in_case(&nml, &p.namelist_key())? {
                     return Ok(value);
                 }
                 let text = fs::read_to_string(&nml)?;
@@ -620,15 +664,18 @@ pub(super) fn validate_case_parameters(
             .as_ref()
             .is_some_and(|scope| !matches!(scope.kind, ParameterScopeKind::CaseScalar))
     });
-    let landtype = if needs_type_context
+    // 格点算例没有"本站地类"：地类参数只查地类号在分类范围内、landdata 里有没有这个地类（见下）。
+    let spatial = colm_case::is_spatial_case(&case_nml)?;
+    let landtype = if spatial {
+        -1
+    } else if needs_type_context
         || (has("SinglePoint") && !case_scalars.is_empty() && doc.get("SITE_fsitedata").is_some())
     {
         site_landtype(case, &doc, usgs)?
     } else {
         integer(&doc, "SITE_landtype")
     };
-    // Stomatal scalar overrides are catalogued as land-cover parameters too;
-    // their activity guards must not depend on the UI/catalog scope label.
+    // 调优目录里的整算例系数（含 `DEF_BALL_BERRY_GRADM` 一类气孔标量）按名字查活动条件，不看目录把它放在哪一页。
     let names = spec
         .parameters
         .iter()
@@ -680,6 +727,24 @@ pub(super) fn validate_case_parameters(
                 {
                     bail!("{} is inactive without plant hydraulics", descriptor.id);
                 }
+                // Medlyn 的 g1/g0 与 WUE 的 lambda 只在各自方案里用（gradm/binter 三种方案都用到）。
+                use colm_case::land_cover::Condition;
+                let condition =
+                    colm_case::land_cover::parameter(&parameter.name).map(|meta| meta.condition);
+                let medlyn = logical(&doc, "DEF_USE_MEDLYNST");
+                let wue = logical(&doc, "DEF_USE_WUEST");
+                if condition == Some(Condition::Medlyn) && !(medlyn && !wue) {
+                    bail!(
+                        "{} is inactive without the Medlyn stomatal scheme",
+                        descriptor.id
+                    );
+                }
+                if condition == Some(Condition::Wue) && !(wue && !medlyn) {
+                    bail!(
+                        "{} is inactive without the WUE stomatal scheme",
+                        descriptor.id
+                    );
+                }
                 let scoped_usgs = scope
                     .scheme
                     .as_deref()
@@ -690,7 +755,25 @@ pub(super) fn validate_case_parameters(
                         descriptor.id
                     );
                 }
-                if scope.index.map(i64::from) != Some(landtype) {
+                let class = scope.index.context("missing land class")?;
+                if spatial {
+                    let classes = if usgs { 24 } else { 17 };
+                    if !(1..=classes).contains(&class) {
+                        bail!(
+                            "{} targets class {class}, outside 1..={classes}",
+                            descriptor.id
+                        );
+                    }
+                    if let Some(present) = spatial_land_classes(case, &doc)? {
+                        if !present.contains(&i32::from(class)) {
+                            bail!(
+                                "{} targets class {class}, but no patch of {} has that class",
+                                descriptor.id,
+                                case.display()
+                            );
+                        }
+                    }
+                } else if i64::from(class) != landtype {
                     bail!(
                         "{} targets class {:?}, but {} uses class {landtype}",
                         descriptor.id,
@@ -711,17 +794,20 @@ pub(super) fn validate_case_parameters(
                 if index == 0 || (!crop && index > 15) {
                     bail!("PFT {index} is not available in the selected kernel");
                 }
-                let site = site_file(case, &doc)?;
-                let components = colm_srfdata::site::pft_components(
-                    &site,
-                    crop,
-                    (landtype >= 0).then_some(landtype as i32),
-                )?;
-                if !components
-                    .iter()
-                    .any(|component| component.pft_type == index)
-                {
-                    bail!("{} does not contain PFT {index}", case.display());
+                // 单点查站点文件里有没有这个植物类型；格点算例各格的组分在 landdata 里，不逐格查。
+                if !spatial {
+                    let site = site_file(case, &doc)?;
+                    let components = colm_srfdata::site::pft_components(
+                        &site,
+                        crop,
+                        (landtype >= 0).then_some(landtype as i32),
+                    )?;
+                    if !components
+                        .iter()
+                        .any(|component| component.pft_type == index)
+                    {
+                        bail!("{} does not contain PFT {index}", case.display());
+                    }
                 }
                 let meta = colm_case::pft::parameter(&parameter.name)
                     .context("catalog PFT descriptor has no PFT metadata")?;
@@ -795,6 +881,47 @@ fn pft_parameter_applies(
             }
             _ => true,
         }
+}
+
+/// 格点算例 landdata 里出现过的地类（`landpatch` 的 `settyp`）。还没做过前处理（没有 landdata）时是 `None`：
+/// 那就只查地类号在范围内，跑起来时这个地类不存在只是改值不起作用。
+pub(crate) fn spatial_land_classes(
+    case: &Path,
+    doc: &colm_namelist::Document,
+) -> Result<Option<BTreeSet<i32>>> {
+    let name = match doc.get("DEF_CASE_NAME") {
+        Some(colm_namelist::Value::Str(name)) => name.trim().to_string(),
+        _ => return Ok(None),
+    };
+    let output = match doc.get("DEF_dir_output") {
+        Some(colm_namelist::Value::Str(dir)) => {
+            let dir = Path::new(dir.trim());
+            if dir.is_absolute() {
+                dir.to_path_buf()
+            } else {
+                case.join(dir)
+            }
+        }
+        _ => case.join("out"),
+    };
+    let landpatch = output.join(&name).join("landdata/landpatch");
+    let Ok(years) = fs::read_dir(&landpatch) else {
+        return Ok(None);
+    };
+    let mut classes = BTreeSet::new();
+    for year in years {
+        for file in fs::read_dir(year?.path())? {
+            let path = file?.path();
+            if path.extension().is_some_and(|extension| extension == "nc") {
+                let file = netcdf::open(&path)
+                    .with_context(|| format!("cannot open {}", path.display()))?;
+                if let Some(variable) = file.variable("settyp") {
+                    classes.extend(variable.get_values::<i32, _>(..)?);
+                }
+            }
+        }
+    }
+    Ok((!classes.is_empty()).then_some(classes))
 }
 
 fn site_landtype(case: &Path, doc: &colm_namelist::Document, usgs: bool) -> Result<i64> {
@@ -994,6 +1121,29 @@ pub(crate) fn normalize_observations(
     base_cases: &[PathBuf],
     spec: &mut StudySpec,
 ) -> Result<()> {
+    // 格点目标的观测文件：与站点观测一样写成绝对路径、建研究时就要存在。
+    for target in &mut spec.targets {
+        if let Some(source) = &mut target.source {
+            let path = Path::new(source.path());
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                case_root.join(path)
+            };
+            if !path.is_file() {
+                bail!(
+                    "observation file for target {} does not exist: {}",
+                    target.key,
+                    path.display()
+                );
+            }
+            source.set_path(
+                colm_kernel::manifest::absolute(&path)?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+    }
     if spec.observations.is_empty() {
         return Ok(());
     }
@@ -1074,6 +1224,7 @@ fn provenance(
         .iter()
         .map(|(site, path)| Ok((site.clone(), hash_file(Path::new(path))?)))
         .collect::<Result<_>>()?;
+    let target_source_sha256 = target_source_hashes(spec)?;
     Ok(ManifestProvenance {
         app_version: env!("CARGO_PKG_VERSION").into(),
         kernel_id,
@@ -1087,7 +1238,16 @@ fn provenance(
         parameter_source_sha256,
         base_case_fingerprints,
         observation_sha256,
+        target_source_sha256,
     })
+}
+
+fn target_source_hashes(spec: &StudySpec) -> Result<BTreeMap<String, String>> {
+    spec.targets
+        .iter()
+        .filter_map(|target| target.source.as_ref().map(|source| (target, source)))
+        .map(|(target, source)| Ok((target.key.clone(), hash_file(Path::new(source.path()))?)))
+        .collect()
 }
 
 fn selected_parameter_sources(
@@ -1190,6 +1350,49 @@ mod tests {
     use crate::study::spec::{
         ParameterSpec, ScaleSpec, SiteMode, StudyBudget, StudyKind, StudyMethod, StudySpec,
     };
+
+    /// 单点与格点都能做研究：一个研究里只有一种算例、内核与之相配；格点的目标比格点产品、通量站或水文站，
+    /// 单点的比站点观测。
+    #[test]
+    fn gridded_studies_need_gridded_targets_and_a_spatial_kernel() {
+        let d = temp("gridded");
+        fs::create_dir_all(d.join("grid")).unwrap();
+        fs::write(
+            d.join("grid/case.nml"),
+            "&nl_colm\n DEF_CASE_NAME = 'grid'\n DEF_file_mesh = 'mesh.nc'\n/\n",
+        )
+        .unwrap();
+        let spec = |source: serde_json::Value| -> StudySpec {
+            let mut target = serde_json::json!({
+                "key": "et", "variable": "f_lfevpa", "from": 0, "to": 86400
+            });
+            if !source.is_null() {
+                target["source"] = source;
+            }
+            serde_json::from_value(serde_json::json!({
+                "kind": "tuning", "method": "differential-evolution", "base_cases": ["grid"],
+                "parameters": [], "targets": [target]
+            }))
+            .unwrap()
+        };
+        let grid = spec(serde_json::json!({"kind": "grid", "path": "obs.nc", "variable": "E"}));
+        let spatial = ["GRIDBASED".to_string(), "LULC_IGBP".to_string()];
+        let single = ["SinglePoint".to_string(), "LULC_IGBP".to_string()];
+        let gridded = [d.join("grid")];
+        ensure_supported_study_inputs(&gridded, &spatial, &grid).unwrap();
+        assert!(ensure_supported_study_inputs(&gridded, &single, &grid).is_err());
+        let site = spec(serde_json::Value::Null);
+        let error = ensure_supported_study_inputs(&gridded, &spatial, &site).unwrap_err();
+        assert!(error.to_string().contains("gridded product"), "{error}");
+        let point = [d.join("caseA")];
+        ensure_supported_study_inputs(&point, &single, &site).unwrap();
+        assert!(ensure_supported_study_inputs(&point, &single, &grid).is_err());
+        assert!(
+            ensure_supported_study_inputs(&[point[0].clone(), gridded[0].clone()], &[], &site)
+                .is_err()
+        );
+        fs::remove_dir_all(d).unwrap();
+    }
 
     fn temp(name: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
@@ -1464,7 +1667,7 @@ mod tests {
         );
         let macros = vec!["SinglePoint".into(), "LULC_IGBP".into()];
         for (name, flag) in [
-            ("DEF_MEDLYN_G1", "DEF_USE_MEDLYNST"),
+            ("DEF_LC_G1", "DEF_USE_MEDLYNST"),
             ("DEF_LC_KMAX_SUN", "DEF_USE_PLANTHYDRAULICS"),
         ] {
             spec.parameters[0].name = name.into();

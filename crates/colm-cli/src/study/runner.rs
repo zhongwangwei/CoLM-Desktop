@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::science::{ObjectiveMetric, ObjectiveTerm};
-use super::spec::{Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetSpec};
+use super::spec::{
+    Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetSource, TargetSpec,
+};
 use super::state::{CandidateState, ProcessIdentity, StudyState, StudyStatus, TaskStatus};
 use crate::{Layout, MetricsRequest, RunNotice, VarMetrics};
 
@@ -318,7 +320,7 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
     let kernel_macros = colm_kernel::Kernel::open_manifest(&resolved)?
         .manifest
         .macros;
-    super::engine::ensure_supported_study_inputs(&base_case_paths, &kernel_macros)?;
+    super::engine::ensure_supported_study_inputs(&base_case_paths, &kernel_macros, &spec)?;
     super::engine::baseline(&base_case_paths, &spec, &kernel_macros)?;
     if spec.kind == StudyKind::Uncertainty {
         for output in &spec.outputs {
@@ -341,13 +343,22 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         return Ok(());
     }
     for (site, case) in &sites {
-        let observation = observation_for(&spec, &case_root, site)?;
-        let catalog = crate::evaluation_plan_rows(&case.join("case.nml"), &observation, &resolved)?;
+        let planned = crate::planned_history_variables(&case.join("case.nml"), &resolved)?;
         for target in spec
             .targets
             .iter()
             .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
         {
+            let observation = match &target.source {
+                Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. }) => {
+                    super::targets::preflight_observation(&case_root, target, &planned)?;
+                    continue;
+                }
+                Some(TargetSource::Station { path, .. }) => resolve_observation(&case_root, path)?,
+                None => observation_for(&spec, &case_root, site)?,
+            };
+            let catalog =
+                crate::evaluation_plan_rows(&case.join("case.nml"), &observation, &resolved)?;
             let row = catalog
                 .iter()
                 .find(|row| row.name.eq_ignore_ascii_case(&target.variable))
@@ -382,6 +393,19 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn resolve_observation(case_root: &Path, raw: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(raw);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        case_root.join(path)
+    };
+    if !path.is_file() {
+        bail!("observation file does not exist: {}", path.display());
+    }
+    Ok(path)
 }
 
 pub fn result_files(study_dir: &Path) -> Result<Vec<ResultFile>> {
@@ -1838,36 +1862,48 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
             }
         }
         StudyKind::Tuning => {
-            let observation = PathBuf::from(
-                manifest
-                    .spec
-                    .observations
-                    .get(site)
-                    .with_context(|| format!("missing frozen observation for {site}"))?,
-            );
             for target in manifest
                 .spec
                 .targets
                 .iter()
                 .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
             {
-                result.calibration.push(target_result(
-                    case,
-                    &observation,
-                    site,
-                    target,
-                    false,
-                    manifest.spec.base_cases.len(),
-                )?);
-                if target.validation_from.is_some() {
-                    match target_result(
-                        case,
-                        &observation,
-                        site,
-                        target,
-                        true,
-                        manifest.spec.base_cases.len(),
+                // 单点比 `observations` 里该站的文件；区域里的通量站比它自己的文件；格点产品与水文站自己配对。
+                let observation =
+                    match &target.source {
+                        Some(source) => PathBuf::from(source.path()),
+                        None => {
+                            PathBuf::from(manifest.spec.observations.get(site).with_context(
+                                || format!("missing frozen observation for {site}"),
+                            )?)
+                        }
+                    };
+                let evaluate = |validation: bool| {
+                    if matches!(
+                        target.source,
+                        Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. })
                     ) {
+                        paired_target_result(
+                            case,
+                            site,
+                            target,
+                            validation,
+                            manifest.spec.base_cases.len(),
+                        )
+                    } else {
+                        target_result(
+                            case,
+                            &observation,
+                            site,
+                            target,
+                            validation,
+                            manifest.spec.base_cases.len(),
+                        )
+                    }
+                };
+                result.calibration.push(evaluate(false)?);
+                if target.validation_from.is_some() {
+                    match evaluate(true) {
                         Ok(row) => result.validation.push(row),
                         Err(error) => result.validation_errors.push(TargetError {
                             key: target.key.clone(),
@@ -1927,6 +1963,12 @@ fn target_result(
     } else {
         (target.from, target.to, "calibration")
     };
+    // 格点算例里的通量站：比站点所在那一格；单点算例取整条站点序列。
+    let point = if let Some(super::spec::TargetSource::Station { lon, lat, .. }) = &target.source {
+        Some((*lon, *lat))
+    } else {
+        None
+    };
     let rows = crate::compute_metric_rows(MetricsRequest {
         case,
         obs_path: observation,
@@ -1938,6 +1980,7 @@ fn target_result(
         pair_max_points: None,
         from: Some(from),
         to: Some(to),
+        point,
     })?;
     let row = rows
         .into_iter()
@@ -1999,6 +2042,77 @@ fn target_result(
         model_mean: row.model_mean,
         observation_mean: row.obs_mean,
         support_hash,
+    })
+}
+
+/// 格点观测产品与水文站：先按时段平均、配好对（[`super::targets`]），再与站点目标同一套指标和损失。
+fn paired_target_result(
+    case: &Path,
+    site: &str,
+    target: &TargetSpec,
+    validation: bool,
+    site_count: usize,
+) -> Result<TargetResult> {
+    let (from, to, period) = if validation {
+        (
+            target.validation_from.context("missing validation start")?,
+            target.validation_to.context("missing validation end")?,
+            "validation",
+        )
+    } else {
+        (target.from, target.to, "calibration")
+    };
+    let paired = match &target.source {
+        Some(TargetSource::Grid { .. }) => super::targets::grid_pairs(case, target, (from, to))?,
+        Some(TargetSource::Gauge { .. }) => super::targets::gauge_pairs(case, target, (from, to))?,
+        Some(TargetSource::Station { .. }) | None => {
+            bail!("target {} is compared through the site metrics", target.key)
+        }
+    };
+    let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
+        format!(
+            "target {} ({}) has fewer than two paired values for {site} in the {period} window",
+            target.key, target.variable
+        )
+    })?;
+    let value = match target.metric {
+        ObjectiveMetric::Nrmse => metrics.rmse,
+        ObjectiveMetric::Mae => metrics.mae,
+        ObjectiveMetric::AbsBias => metrics.bias,
+        ObjectiveMetric::Nse => metrics.nse,
+        ObjectiveMetric::Kge => metrics.kge,
+        ObjectiveMetric::R2 => metrics.r2,
+        ObjectiveMetric::R => metrics.correlation,
+    };
+    let weight = if target.site.is_none() {
+        target.weight / site_count.max(1) as f64
+    } else {
+        target.weight
+    };
+    let term = ObjectiveTerm {
+        metric: target.metric,
+        value,
+        observation_sd: Some(metrics.obs_sd),
+        weight,
+        pairs: metrics.n,
+    };
+    let loss = super::science::objective_loss(&term, target.min_pairs)
+        .map_err(|reason| anyhow::anyhow!("target {} {reason}", target.key))?;
+    Ok(TargetResult {
+        key: target.key.clone(),
+        site: site.into(),
+        variable: target.variable.clone(),
+        period: period.into(),
+        metric: target.metric,
+        weight,
+        min_pairs: target.min_pairs,
+        pairs: metrics.n,
+        value,
+        observation_sd: Some(metrics.obs_sd),
+        loss,
+        model_mean: metrics.model_mean,
+        observation_mean: metrics.obs_mean,
+        support_hash: pair_support_hash(&paired.support, &paired.obs),
     })
 }
 
@@ -3417,6 +3531,16 @@ fn model_series(
     from: Option<i64>,
     to: Option<i64>,
 ) -> Result<(Vec<i64>, Vec<f64>, Option<String>)> {
+    // 格点算例：每个时刻全区按陆地面积加权的平均。
+    if let Some((time, values, units)) = super::targets::domain_mean_series(case, variable)? {
+        let (time, values) = time
+            .into_iter()
+            .zip(values)
+            .filter(|(time, _)| from.is_none_or(|from| *time >= from))
+            .filter(|(time, _)| to.is_none_or(|to| *time < to))
+            .unzip();
+        return Ok((time, values, units));
+    }
     let layout = Layout::new(case);
     let name = colm_case::case_name(&layout.case_nml())?;
     let files = crate::history_files(&layout.out().join(&name))?;
@@ -3892,6 +4016,7 @@ mod tests {
                     validation_from: Some(10),
                     validation_to: Some(20),
                     min_pairs: 2,
+                    source: None,
                 }],
                 budget: Default::default(),
                 hybrid: None,
@@ -5482,7 +5607,7 @@ mod tests {
     }
 
     #[test]
-    fn study_create_rejects_spatial_case_namelist() {
+    fn study_create_rejects_a_gridded_case_with_a_single_point_kernel() {
         let root = std::env::temp_dir().join(format!(
             "colm-study-spatial-case-{}-{}",
             std::process::id(),
@@ -5503,13 +5628,13 @@ mod tests {
         let error = super::super::engine::create(&root, &spec)
             .unwrap_err()
             .to_string();
-        assert!(error.contains("SinglePoint cases only"), "{error}");
+        assert!(error.contains("does not match its base cases"), "{error}");
         assert!(!root.join(".colm/studies").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
-    fn study_preflight_rejects_non_singlepoint_kernel() {
+    fn study_preflight_rejects_a_spatial_kernel_for_single_point_cases() {
         let root = std::env::temp_dir().join(format!(
             "colm-study-spatial-kernel-{}-{}",
             std::process::id(),
@@ -5528,7 +5653,7 @@ mod tests {
         std::fs::write(root.join("site/forcing.nml"), "&nl_colm_forcing\n/\n").unwrap();
         let spec = write_study_spec(&root, &kernel);
         let error = preflight_create(&root, &spec).unwrap_err().to_string();
-        assert!(error.contains("SinglePoint kernels only"), "{error}");
+        assert!(error.contains("does not match its base cases"), "{error}");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -5563,7 +5688,9 @@ mod tests {
     }
 
     #[test]
-    fn spatial_case_study_actions_reject_before_mutation() {
+    /// 研究建好后基础算例改成了格点算例：带内核的运行报内核与算例不配，其余操作在冻结的基础算例指纹上停下；
+    /// 都在改动任何状态之前。
+    fn study_actions_reject_a_kernel_that_no_longer_matches_the_cases_before_mutation() {
         let (root, study) = preview_fixture();
         let kernel = write_fake_kernel(&root);
         mark_baseline_case_spatial(&root);
@@ -5585,12 +5712,15 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(run_error.contains("SinglePoint cases only"), "{run_error}");
+        assert!(
+            run_error.contains("does not match its base cases"),
+            "{run_error}"
+        );
         assert_eq!(checkpoint_count(&study), checkpoints);
 
         let retry_error = retry(&study, false).unwrap_err().to_string();
         assert!(
-            retry_error.contains("SinglePoint cases only"),
+            retry_error.contains("does not match its base cases"),
             "{retry_error}"
         );
         assert_eq!(checkpoint_count(&study), checkpoints);
@@ -5601,20 +5731,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            apply_error.contains("SinglePoint cases only"),
+            apply_error.contains("does not match its base cases"),
             "{apply_error}"
         );
         assert!(!output.exists());
 
         let preview_error = apply_preview(&study, "m000001").unwrap_err().to_string();
         assert!(
-            preview_error.contains("SinglePoint cases only"),
+            preview_error.contains("does not match its base cases"),
             "{preview_error}"
         );
 
         let resume_error = super::super::state::resume(&study).unwrap_err().to_string();
         assert!(
-            resume_error.contains("SinglePoint cases only"),
+            resume_error.contains("does not match its base cases"),
             "{resume_error}"
         );
         assert!(study.join("pause.request").is_file());
@@ -5622,7 +5752,7 @@ mod tests {
     }
 
     #[test]
-    fn stored_spatial_kernel_study_actions_reject_site_shaped_cases() {
+    fn stored_spatial_kernel_study_actions_reject_single_point_cases() {
         let (root, study) = preview_fixture();
         let spatial_kernel = write_fake_spatial_kernel(&root);
         set_stored_kernel(&study, &spatial_kernel);
@@ -5645,14 +5775,14 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(
-            run_error.contains("SinglePoint kernels only"),
+            run_error.contains("does not match its base cases"),
             "{run_error}"
         );
         assert_eq!(checkpoint_count(&study), checkpoints);
 
         let retry_error = retry(&study, false).unwrap_err().to_string();
         assert!(
-            retry_error.contains("SinglePoint kernels only"),
+            retry_error.contains("does not match its base cases"),
             "{retry_error}"
         );
         assert_eq!(checkpoint_count(&study), checkpoints);
@@ -5663,20 +5793,20 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            apply_error.contains("SinglePoint kernels only"),
+            apply_error.contains("does not match its base cases"),
             "{apply_error}"
         );
         assert!(!output.exists());
 
         let preview_error = apply_preview(&study, "m000001").unwrap_err().to_string();
         assert!(
-            preview_error.contains("SinglePoint kernels only"),
+            preview_error.contains("does not match its base cases"),
             "{preview_error}"
         );
 
         let resume_error = super::super::state::resume(&study).unwrap_err().to_string();
         assert!(
-            resume_error.contains("SinglePoint kernels only"),
+            resume_error.contains("does not match its base cases"),
             "{resume_error}"
         );
         assert!(study.join("pause.request").is_file());
@@ -5820,6 +5950,7 @@ mod tests {
                     validation_from: None,
                     validation_to: None,
                     min_pairs: 2,
+                    source: None,
                 }],
                 budget: Default::default(),
                 hybrid: None,

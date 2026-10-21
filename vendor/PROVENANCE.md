@@ -35,4 +35,11 @@
 - 对旧算例的影响：不带下标的 `DEF_LC_X = v` 在 namelist 里只落到第 1 格，**改的是地类 1**。Desktop 在
   三处兜住：迁移旧算例时把它归到 `SITE_landtype`（格点算例报错）；运行前拒绝不带下标的写法；Rust 引擎
   读到不带下标的也报错。
-- 不在范围内：Ball–Berry、Medlyn、WUE 五个气孔参数仍是整个算例一个数（上游对所有 patch 都用它）。
+- 气孔五张表（`gradm`、`binter`、`g1`、`g0`、`lambda`）同样按地类改：`DEF_LC_GRADM/BINTER/G1/G0/LAMBDA(lc)`，与 PFT 侧的
+  `DEF_PFT_GRADM(k)` 等对称。上游原有的整算例标量 `DEF_BALL_BERRY_GRADM`、`DEF_MEDLYN_G1` 一类不变：只在对应方案下、写了时
+  盖过各地类与各 PFT 的表值。注意 `gradm`/`binter` 表不只 Ball–Berry 用（三种方案共用的迭代区间、WUE 下的 C4 植物）。
+
+### 2026-10-21：格点城市 LCZ 方案按每个 patch 自己的像元面积平均材料参数
+
+- `mksrfdata/Aggregation_Urban.F90`：LCZ 原来不请求像元面积，沿用人口那一循环最后一个城市 patch 的面积，材料参数差最后几位、MPI 下随进程划分变。
+  现在与 NCAR 方案一样按 patch 请求面积。详见 `docs/upstream-bugs.md` 第 86 条。

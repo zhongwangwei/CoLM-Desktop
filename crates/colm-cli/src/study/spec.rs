@@ -311,6 +311,68 @@ pub struct TargetSpec {
     pub validation_to: Option<i64>,
     #[serde(default = "default_min_pairs")]
     pub min_pairs: usize,
+    /// 拿什么比。缺省（不写）是 `observations` 里该站的站点观测（单点算例）；格点算例用这里的三种。
+    /// 不写时不序列化，旧研究的 `spec_sha256` 不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TargetSource>,
+}
+
+/// 格点算例（流域、区域、全球）的率定目标。`TargetSpec::variable` 的含义随种类变：
+/// `Station` 是站点观测的标准名（`Qle` 一类，与单点相同）；`Grid` 与 `Gauge` 是模型 history 变量名。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum TargetSource {
+    /// 格点观测产品（NetCDF，`time × lat × lon`，如 GLEAM 蒸散、FLUXCOM GPP）。观测按模型格子平均后
+    /// 逐格、逐时段与模拟比。
+    Grid {
+        path: String,
+        /// 观测文件里的变量名。
+        variable: String,
+        /// 观测换成模型单位：`观测 * scale + offset`。
+        #[serde(default = "one_f64")]
+        scale: f64,
+        #[serde(default)]
+        offset: f64,
+        /// 逐日还是逐月平均后比；不写按观测的时间间隔定。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        period: Option<TargetPeriod>,
+    },
+    /// 区域里的通量站（PLUMBER2 格式的观测文件），比站点所在那一格的模拟。
+    Station { path: String, lon: f64, lat: f64 },
+    /// 水文站流量（NetCDF 或 `日期,流量` 的 CSV，m³/s），比站点所在那个汇流单元的模拟流量。
+    Gauge {
+        path: String,
+        /// NetCDF 观测里的变量名；CSV 不用填。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variable: Option<String>,
+        lon: f64,
+        lat: f64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        period: Option<TargetPeriod>,
+    },
+}
+
+impl TargetSource {
+    pub fn path(&self) -> &str {
+        match self {
+            Self::Grid { path, .. } | Self::Station { path, .. } | Self::Gauge { path, .. } => path,
+        }
+    }
+
+    pub fn set_path(&mut self, value: String) {
+        match self {
+            Self::Grid { path, .. } | Self::Station { path, .. } | Self::Gauge { path, .. } => {
+                *path = value;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TargetPeriod {
+    Daily,
+    Monthly,
 }
 
 fn one_f64() -> f64 {
@@ -576,6 +638,9 @@ pub struct ManifestProvenance {
     pub parameter_source_sha256: BTreeMap<String, String>,
     pub base_case_fingerprints: BTreeMap<String, String>,
     pub observation_sha256: BTreeMap<String, String>,
+    /// 格点目标各自的观测文件（按目标键）；旧研究没有。
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub target_source_sha256: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -617,7 +682,10 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
     if spec.kind == StudyKind::Tuning && spec.targets.is_empty() {
         bail!("parameter tuning needs at least one target");
     }
-    if spec.kind == StudyKind::Tuning && spec.observations.is_empty() {
+    if spec.kind == StudyKind::Tuning
+        && spec.observations.is_empty()
+        && spec.targets.iter().any(|target| target.source.is_none())
+    {
         bail!("parameter tuning needs an observation file for every base case");
     }
     if spec.kind == StudyKind::Uncertainty && spec.outputs.is_empty() {
@@ -755,6 +823,9 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         if target.min_pairs < 2 {
             bail!("target {} needs min_pairs >= 2", target.key);
         }
+        if let Some(source) = &target.source {
+            validate_target_source(&target.key, source)?;
+        }
         match (target.validation_from, target.validation_to) {
             (None, None) => {}
             (Some(from), Some(to)) if from < to && (to <= target.from || from >= target.to) => {
@@ -785,6 +856,48 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
             || !outputs.insert(output.to_ascii_lowercase())
         {
             bail!("history outputs must be non-empty and unique");
+        }
+    }
+    Ok(())
+}
+
+fn validate_target_source(key: &str, source: &TargetSource) -> Result<()> {
+    if source.path().trim().is_empty() {
+        bail!("target {key} needs an observation file");
+    }
+    let located = |lon: f64, lat: f64| {
+        lon.is_finite()
+            && lat.is_finite()
+            && (-180.0..=360.0).contains(&lon)
+            && (-90.0..=90.0).contains(&lat)
+    };
+    match source {
+        TargetSource::Grid {
+            variable,
+            scale,
+            offset,
+            ..
+        } => {
+            if variable.trim().is_empty() {
+                bail!("target {key} needs the variable name in the gridded observation file");
+            }
+            if !scale.is_finite() || *scale == 0.0 || !offset.is_finite() {
+                bail!("target {key} needs a finite non-zero unit scale and a finite offset");
+            }
+        }
+        TargetSource::Station { lon, lat, .. } | TargetSource::Gauge { lon, lat, .. } => {
+            if !located(*lon, *lat) {
+                bail!("target {key} needs a station longitude and latitude");
+            }
+        }
+    }
+    if let TargetSource::Gauge {
+        variable: Some(variable),
+        ..
+    } = source
+    {
+        if variable.trim().is_empty() {
+            bail!("target {key} has an empty gauge variable name");
         }
     }
     Ok(())
@@ -870,6 +983,7 @@ mod tests {
             validation_from: validation.then_some(10),
             validation_to: validation.then_some(20),
             min_pairs: 30,
+            source: None,
         }
     }
 

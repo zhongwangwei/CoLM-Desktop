@@ -283,6 +283,11 @@ fn writing_the_table_value_back_as_an_override_changes_nothing() {
                     c.extinction_coefficient(),
                     c.root_d50(),
                     c.root_beta(),
+                    c.wue_lambda(),
+                    c.biochemistry().medlyn_g1,
+                    c.biochemistry().medlyn_g0,
+                    c.biochemistry().ball_berry_slope,
+                    c.biochemistry().ball_berry_intercept,
                 ]
                 .map(f64::to_bits)
             };
@@ -302,4 +307,35 @@ fn writing_the_table_value_back_as_an_override_changes_nothing() {
         .unwrap()
         .table_value("DEF_LC_C3C4")
         .is_err());
+}
+
+/// 气孔五张表按地类改：只改写了的那一类，别的地类照旧是表值。
+#[test]
+fn stomatal_tables_take_per_class_overrides() {
+    let mut overrides = LandClassOverrides::default();
+    for (name, value) in [
+        ("DEF_LC_GRADM", 6.0),
+        ("DEF_LC_BINTER", 0.02),
+        ("DEF_LC_G1", 4.5),
+        ("DEF_LC_G0", 50.0),
+        ("DEF_LC_LAMBDA", 800.0),
+    ] {
+        overrides.set_real(name, value).unwrap();
+    }
+    let class = ClassConstants::new(LandCoverScheme::Igbp, 10)
+        .unwrap()
+        .with_overrides(overrides);
+    let biochemistry = class.biochemistry();
+    assert_eq!(
+        (
+            biochemistry.ball_berry_slope,
+            biochemistry.ball_berry_intercept,
+            biochemistry.medlyn_g1,
+            biochemistry.medlyn_g0,
+            class.wue_lambda(),
+        ),
+        (6.0, 0.02, 4.5, 50.0, 800.0)
+    );
+    let other = ClassConstants::new(LandCoverScheme::Igbp, 1).unwrap();
+    assert_eq!(other.biochemistry().ball_berry_slope, 9.0);
 }

@@ -1228,6 +1228,7 @@ fn compare(history: &History, flags: &Flags) -> Result<Value> {
                 pair_max_points: None,
                 from,
                 to,
+                point: None,
             })
         };
         let am = metrics(&ar.run_case)?;

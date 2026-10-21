@@ -686,6 +686,50 @@ fn model_writes_each_land_class_into_its_own_slot_at_every_scale() {
     );
 }
 
+/// 旧版本把五个整算例气孔标量记在地类页里；读出来改记成同一张表按地类改（`DEF_MEDLYN_G1` → `DEF_LC_G1(lc)`），
+/// 旧哨兵 `-1`（没改）丢掉。
+#[test]
+fn legacy_stomatal_land_class_records_become_per_class_tables() {
+    let legacy = |raw: &str, value: &str| ParameterOverrideRecord {
+        parameter_id: format!("lct:IGBP:{raw}"),
+        raw_key: raw.into(),
+        value: value.into(),
+        ..land_class_record("IGBP", 7, value)
+    };
+    let overlay = Overlay {
+        parameters: vec![
+            legacy("DEF_MEDLYN_G1", "4.0"),
+            legacy("DEF_BALL_BERRY_GRADM", "-1"),
+        ],
+        ..Overlay::default()
+    };
+    let upgraded = model_overlay(&overlay);
+    assert_eq!(upgraded.parameters.len(), 1);
+    assert_eq!(upgraded.parameters[0].raw_key, "DEF_LC_G1");
+    assert_eq!(upgraded.parameters[0].parameter_id, "lct:IGBP:DEF_LC_G1");
+    assert_eq!(upgraded.parameters[0].scope_instance.index, Some(7));
+    validate_overlay(&upgraded).unwrap();
+
+    let tmp = Temp::new();
+    let reg = tmp.registry();
+    let official = reg.install_official(code()).unwrap();
+    reg.create_draft(draft(official.version)).unwrap();
+    // 旧版本留在磁盘上的草稿：记录原样写回文件，读出时才改记。
+    let file = tmp.0.join("registry/drafts/experiment.json");
+    let mut stored: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    stored["overlay"]["parameters"] = serde_json::to_value(&overlay.parameters).unwrap();
+    fs::write(&file, serde_json::to_vec(&stored).unwrap()).unwrap();
+    let version = reg.freeze("experiment", &tmp.0).unwrap();
+    let case = case_with(&tmp, "site", " SITE_landtype = 7\n");
+    let run = reg
+        .materialize_run(&version.version, &case, &tmp.0.join("run"), "legacy")
+        .unwrap();
+    let doc =
+        colm_namelist::parse(&fs::read_to_string(run.run_case.join("case.nml")).unwrap()).unwrap();
+    assert_eq!(doc.get("DEF_LC_G1(7)").unwrap().as_f64(), Some(4.0));
+    assert!(doc.get("DEF_MEDLYN_G1").is_none());
+}
+
 #[test]
 fn migration_files_bare_land_class_values_under_the_site_class_and_refuses_them_on_grids() {
     let tmp = Temp::new();

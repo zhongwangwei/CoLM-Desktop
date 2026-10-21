@@ -436,8 +436,8 @@ export default function ParameterDialog({
         // 2026-10-21 起 vendor 把地类表改值改成逐地类、各种尺度都生效（原来只在单点、只改本站地类）。
         <p className="muted param-note">
           {t(
-            '改哪个地类，就作用在那个地类的所有 patch 上：单点、多站点、流域、区域、全球都一样，只在内核是这套分类时起作用。Ball–Berry、Medlyn、WUE 五个气孔参数例外：CoLM 里它们是整个算例一个数，按地类改只在单点模拟里对本站地类起作用，区域模拟请在全局参数里改。',
-            'A change to a class applies to every patch of that class, at every scale (single point, multi-site, watershed, regional, global), whenever the kernel uses this classification. The five stomatal parameters (Ball–Berry, Medlyn, WUE) are the exception: CoLM keeps one value for the whole case, so a per-class change only acts on the site class of a single-point simulation; for regional runs change them under Global.',
+            '改哪个地类，就作用在那个地类的所有 patch 上：单点、多站点、流域、区域、全球都一样，只在内核是这套分类时起作用。气孔参数（Ball–Berry、Medlyn、WUE）也按地类改；全局参数里还有一组"全部类型统一"的，写了就盖过这里各地类的值。',
+            'A change to a class applies to every patch of that class, at every scale (single point, multi-site, watershed, regional, global), whenever the kernel uses this classification. The stomatal parameters (Ball–Berry, Medlyn, WUE) are per class too; Global also has an "all types" set that, when written, overrides every class here.',
           )}
         </p>
       )}

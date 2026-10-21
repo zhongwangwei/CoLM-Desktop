@@ -35124,7 +35124,7 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 
 **范围**：上次核对到 `667b08a5`（10-18，#27 不并入）。之后只有 #28（`f98f7467`，合并于 `1d7f3b25`），只改
 `main/HYDRO/MOD_Grid_RiverLakeFlow.F90`。CoLM-SYSU/CoLM 的 master 末端仍是 `a71a81bf`。与 #27 不同，#28 在开分汊时改变物理，
-并给所有模式加了停机条件，所以并入，Rust 跟着改。缺陷本身记在 `docs/upstream-bugs.md` 第 86 条。
+并给所有模式加了停机条件，所以并入，Rust 跟着改。缺陷本身记在 `docs/upstream-bugs.md` 第 87 条。
 
 **#28 的内容**：
 1. 开 `DEF_USE_BIFURCATION` 时，蓄量不超过 `ROUTING_STORAGE_DT_EPS = 1e-6 m³` 的单元流域不参与蓄量限制 `volwater / sum_hflux_riv`，
@@ -35175,3 +35175,42 @@ case.nml 不提河湖汇流时，区域汇流因此被判为 `.false.`。`exclus
 - 新分支改变子步长的情形没有逐位对照过：本机算例里没有出现，这一支两侧都只有一个条件判断。
 - 分汊 + 堤防/水库/示踪物/泥沙没有重跑。示踪物与泥沙都按汇流磁带上的 dt 重放，dt 的来源没有改。
 - 只重编了 `kernels/latlon`，其余 16 个预设没有重编。
+
+## 第 720 轮：提交主检出里积压的四项改动（2026-10-21）
+
+**来历**：并入第 719 轮时，主检出里有 38 个已修改文件和 2 个新文件没有提交（19:40 前后改的，没有对应的会话在跑）。
+用户决定与分支一起提交。先用 `git stash create` 备份为 `1ed92fea`，并挂在 `refs/backup/main-wip-20261021`；
+再把 `main` 快进到第 719 轮的提交，最后把这批改动作为单独一个提交放在上面。
+
+**内容**：
+1. **气孔五张表按地类改**：新增 `DEF_LC_GRADM/BINTER/G1/G0/LAMBDA(lc)`，涉及 vendor 的 `MOD_Namelist`（声明、检查、广播）与 `MOD_Const_LC`、
+   Rust 的 `LandClassOverrides`/`ClassConstants`、schema、参数审计、GUI。整算例的 `DEF_BALL_BERRY_GRADM`、`DEF_MEDLYN_G1` 一类写了时仍然优先。
+   旧版本"IGBP/USGS 页"里存成整算例标量的地类记录，迁移时改记为按地类的写法；值为 `-1` 的旧哨兵直接丢掉。
+2. **城市算例放开地类覆盖**：Rust 不再拒绝 `DEF_URBAN_RUN` 加 `DEF_LC_*`。代码注释说 2026-10-21 已与 Fortran 逐位核对，本轮没有重跑。
+3. **LCZ 城市材料参数按 patch 自己的像元面积平均**：Fortran 与 Rust 一起改，见 `docs/upstream-bugs.md` 第 86 条。那里记的逐位对照本轮没有重跑。
+4. **格点算例的研究目标**：新增 `TargetSource::{Grid, Station, Gauge}`（格点观测产品、区域里的通量站、水文站流量）、
+   格点算例的全区按陆地面积加权平均输出（`colm-cli/src/study/targets.rs`），以及研究页与 `study_type_choices` 命令。
+
+**提交前补修的三处**（都会让 CI 失败）：
+- `cargo fmt` 没跑：两个 workspace 统一格式化。
+- `colm-cli` 的 clippy `type_complexity`：`domain_mean_series` 的返回类型改用 `type DomainSeries`。
+- schema 字段数测试没跟上：顶层 307 → 312、总数 946 → 951，正好是新增的 5 张表。另外 GUI 契约没有重新生成，`npm run contract` 后多出 `study_type_choices`，共 211 个命令。
+
+另外，第 719 轮的 PR #64 在 CI 上红在 `parameter-audit`。原因是 `09b8a0e4` 去掉 `DEF_LC_X` 的 SinglePoint 门之后没有重新生成审计。
+已在 `4f33a113` 补上。这批改动带的审计产物，与在它之上重新生成的结果逐字节相同。
+
+**验证（主检出，含这批改动）**：
+- 引擎：`cargo test --workspace --lib --bins --no-fail-fast -- --test-threads=1` 2656 条通过；`cargo clippy --workspace --all-targets -- -D warnings` 零警告；
+  `cargo fmt --all --check` 干净。
+- drift：colm-schema、colm-hist、colm-core 的 landcover/co2 都通过；`colm-namelist` roundtrip 5 条通过。
+- CI 的集成测试：`study_cli_tuning` 23、`engine_pack` 1、oracle `judge` 12 / `golden_run` 1 / `histmap` 5、
+  xtask `kernel_profile` 10 / `windows_console` 4 / `ci_golden_status` 1，全部通过。
+- 不融合 FMA（`--features colm-numeric/unfused`）：colm-runtime 193 条、colm-srfdata 276 + 49 条通过。
+- GUI 后端：420 条通过，clippy 零警告，fmt 干净。
+- 前端：`scripts/test-react.mjs` 777 条通过，tsc、eslint、prettier 都通过，`check-gui` 校验 211 个命令；`gui/tests/*.mjs` 的 15 个套件通过。
+- 内核：用这批源码编 `default`、`latlon` 到临时目录，都是 exit 0，只有 `CoLM.F90:549` 那条既有告警。
+- vendor 静态测试：`test_upstream_f48_sync.py`、`test_gridriver_restart_sentinel.py`、`test_create_newcase_runtime_contract.sh`，以及入库的 26 个 pytest，都通过。
+- 本机失败、但与这批改动无关：`test_netcdf_initialization.py`（SIGABRT）与 `test_land_history_restart_shape.py`（dyld 找不到 `libnetcdf.22.dylib`），
+  在不含这批改动的 `88ba3abd` 上同样失败。主检出 `vendor/CoLM202X/tests` 下另有 118 个未跟踪的上游测试，CI 不跑，也不在入库范围内。
+
+**没做**：本轮没有重跑上面第 2、3 项写下的 Fortran/Rust 逐位对照，也没有在真实窗口里点过研究页的新目标类型。

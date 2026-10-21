@@ -2118,7 +2118,9 @@ fn land_cover_expert_defaults_follow_classification_and_site_landtype() {
     assert_eq!(mode(&igbp, "DEF_LC_HTOP0"), &FieldMode::Editable);
     assert_eq!(default(&igbp, "DEF_LC_HTOP0"), 17.0);
     assert_eq!(default(&igbp, "DEF_LC_VMAX25"), 54.0);
-    assert_eq!(default(&igbp, "DEF_BALL_BERRY_GRADM"), 9.0);
+    // 气孔表按地类：Ball–Berry 方案下 `DEF_LC_GRADM` 给出本地类表值，Medlyn 的 `DEF_LC_G1` 不用。
+    assert_eq!(default(&igbp, "DEF_LC_GRADM"), 9.0);
+    assert_eq!(mode(&igbp, "DEF_LC_G1"), &FieldMode::Hidden);
     assert_eq!(default(&igbp, "DEF_LC_KMAX_SUN"), 2.0e-8);
     assert_eq!(
         runtime_state(&igbp, "DEF_LC_C3C4").allowed_values,
@@ -4142,10 +4144,10 @@ fn no_schema_option_is_longer_than_its_character_length() {
     assert_eq!(kinetic.values, ["EXPONENT", "MJ79"]);
 }
 
-/// 城市单点混有其它地类，Rust 引擎拒绝 `DEF_LC_*` 覆盖：没改过时隐藏，改过时显示并说明只对 Fortran 生效。
+/// 城市单点也能按地类改（2026-10-21 起两个引擎都按地类取值），与非城市站点一样可编辑、不带"仅 Fortran"说明。
 #[test]
-fn land_class_overrides_on_urban_sites_are_fortran_only() {
-    let mode = |text: &str| {
+fn land_class_overrides_on_urban_sites_work_on_both_engines() {
+    let state = |text: &str| {
         let have: std::collections::BTreeSet<&str> =
             ["SinglePoint", "LULC_IGBP"].into_iter().collect();
         field_states_for_at(text, &have, None)
@@ -4156,16 +4158,14 @@ fn land_class_overrides_on_urban_sites_are_fortran_only() {
     };
     let urban = "&nl_colm\n SITE_fsitedata = 'site.nc'\n SITE_landtype = 10\n USE_SITE_landtype = .true.\n \
                  DEF_URBAN_RUN = .true.\n/\n";
-    assert!(matches!(mode(urban).mode, FieldMode::Hidden));
-    let changed = urban.replace("/\n", " DEF_LC_C3C4 = 0\n/\n");
-    let state = mode(&changed);
-    assert!(matches!(state.mode, FieldMode::Editable));
-    assert!(state.reason.unwrap_or_default().contains("Fortran"));
-    // 非城市站点照常可编辑，不带说明。
-    let plain = urban.replace(" DEF_URBAN_RUN = .true.\n", "");
-    let state = mode(&plain);
-    assert!(matches!(state.mode, FieldMode::Editable));
-    assert!(state.reason.is_none());
+    for text in [
+        urban.to_string(),
+        urban.replace(" DEF_URBAN_RUN = .true.\n", ""),
+    ] {
+        let state = state(&text);
+        assert!(matches!(state.mode, FieldMode::Editable), "{text}");
+        assert!(state.reason.is_none(), "{text}");
+    }
 }
 
 #[test]

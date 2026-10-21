@@ -30,6 +30,42 @@ fn patches() -> FlatPatches {
     .unwrap()
 }
 
+/// 格点 LCZ 材料按 patch 自己的像元面积加权（上游修过的 `Aggregation_Urban.F90`）：常数表值平均后可能差最后一位，
+/// 与上游同样按 `sum(v*area)/sum(area)` 的次序与乘加算。
+#[test]
+fn gridded_lcz_materials_are_area_weighted_like_upstream() {
+    let area = [0.3, 0.7, 0.1, 0.2];
+    let values = aggregate_lcz_urban_material(&patches(), &[1, 7], &area).unwrap();
+    let table = UrbanMaterialParameters::from_lcz_classes(&[1, 7]).unwrap();
+    let weighted = |value: f64, cells: &[f64]| {
+        let mut sum = 0.0;
+        let mut total = 0.0;
+        for &a in cells {
+            total += a;
+            sum = value.contract(a, sum);
+        }
+        sum / total
+    };
+    for (patch, cells) in [(0, &area[0..2]), (1, &area[2..4])] {
+        assert_eq!(
+            values.impervious_albedo[patch].to_bits(),
+            weighted(table.impervious_albedo[patch], cells).to_bits()
+        );
+        assert_eq!(
+            values.roof_emissivity[patch].to_bits(),
+            weighted(table.roof_emissivity[patch], cells).to_bits()
+        );
+    }
+    // 只是按面积平均常数：数值上仍是表值。
+    for (a, b) in values
+        .impervious_albedo
+        .iter()
+        .zip(&table.impervious_albedo)
+    {
+        assert!((a - b).abs() < 1e-12);
+    }
+}
+
 #[test]
 fn lcz_geometry_uses_lookup_values_and_upstream_missing_masks() {
     let values = aggregate_lcz_urban_geometry(

@@ -522,6 +522,13 @@ MODULE MOD_Namelist
    real(r8) :: DEF_LC_EXTKN(LC_OVERRIDE_SLOTS) = -1.e36_r8
    real(r8) :: DEF_LC_D50(LC_OVERRIDE_SLOTS) = -1.e36_r8
    real(r8) :: DEF_LC_BETA(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   ! Stomatal tables per class (gradm/binter for Ball-Berry, g1/g0 for Medlyn, lambda for WUE).
+   ! The case-wide DEF_BALL_BERRY_GRADM etc. above still win over these when set, as before.
+   real(r8) :: DEF_LC_GRADM(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_BINTER(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_G1(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_G0(LC_OVERRIDE_SLOTS) = -1.e36_r8
+   real(r8) :: DEF_LC_LAMBDA(LC_OVERRIDE_SLOTS) = -1.e36_r8
    real(r8) :: DEF_LC_KMAX_SUN(LC_OVERRIDE_SLOTS) = -1.e36_r8
    real(r8) :: DEF_LC_KMAX_SHA(LC_OVERRIDE_SLOTS) = -1.e36_r8
    real(r8) :: DEF_LC_KMAX_XYL(LC_OVERRIDE_SLOTS) = -1.e36_r8
@@ -1538,6 +1545,11 @@ CONTAINS
       DEF_LC_EXTKN,                             &
       DEF_LC_D50,                               &
       DEF_LC_BETA,                              &
+      DEF_LC_GRADM,                              &
+      DEF_LC_BINTER,                             &
+      DEF_LC_G1,                                 &
+      DEF_LC_G0,                                 &
+      DEF_LC_LAMBDA,                             &
       DEF_LC_KMAX_SUN,                          &
       DEF_LC_KMAX_SHA,                          &
       DEF_LC_KMAX_XYL,                          &
@@ -2187,6 +2199,12 @@ CONTAINS
          CALL check_lc_override('DEF_LC_SQRTDI', DEF_LC_SQRTDI, 0.0_r8, 0.0_r8, 'gt')
          CALL check_lc_override('DEF_LC_D50', DEF_LC_D50, 0.0_r8, 0.0_r8, 'gt')
          CALL check_lc_override('DEF_LC_BETA', DEF_LC_BETA, 0.0_r8, 0.0_r8, 'negative')
+         ! Same valid ranges as the case-wide stomatal overrides.
+         CALL check_lc_override('DEF_LC_GRADM', DEF_LC_GRADM, 1.6_r8, 0.0_r8, 'gt')
+         CALL check_lc_override('DEF_LC_BINTER', DEF_LC_BINTER, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_G1', DEF_LC_G1, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_G0', DEF_LC_G0, 0.0_r8, 0.0_r8, 'ge')
+         CALL check_lc_override('DEF_LC_LAMBDA', DEF_LC_LAMBDA, 0.0_r8, 0.0_r8, 'gt')
          CALL check_lc_override('DEF_LC_CHIL', DEF_LC_CHIL, -1.0_r8, 1.0_r8, 'range')
          CALL check_lc_override('DEF_LC_PSI50_SUN', DEF_LC_PSI50_SUN, 0.0_r8, 0.0_r8, 'negative')
          CALL check_lc_override('DEF_LC_PSI50_SHA', DEF_LC_PSI50_SHA, 0.0_r8, 0.0_r8, 'negative')
@@ -2686,6 +2704,11 @@ CONTAINS
       CALL mpi_bcast (DEF_LC_EXTKN                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LC_D50                           ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LC_BETA                          ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_GRADM                         ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_BINTER                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_G1                            ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_G0                            ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
+      CALL mpi_bcast (DEF_LC_LAMBDA                        ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LC_KMAX_SUN                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LC_KMAX_SHA                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)
       CALL mpi_bcast (DEF_LC_KMAX_XYL                      ,LC_OVERRIDE_SLOTS   ,mpi_real8     ,p_address_master ,p_comm_glb ,p_err)

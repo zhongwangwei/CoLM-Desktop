@@ -5,9 +5,14 @@ use super::parameters::{self, ParameterScope};
 #[test]
 fn catalog_counts_match_current_sources() {
     // 840 + PR #504 的 104 个火诊断历史开关（`history_var_type`）+ PR #507 的
-    // `DEF_HIST_grid_as_model_mesh` + 河湖汇流运行时开关 `DEF_USE_GridRiverLakeFlow`。
-    assert_eq!(colm_schema::all().len(), 840 + 104 + 1 + 1);
-    assert_eq!(parameters::schema_descriptors().len(), 884 + 104 + 1 + 1);
+    // `DEF_HIST_grid_as_model_mesh` + 河湖汇流运行时开关 `DEF_USE_GridRiverLakeFlow`
+    // + 按地类的气孔五张表 `DEF_LC_GRADM/BINTER/G1/G0/LAMBDA`（地类参数个数不变：原来那五个
+    // 整算例标量挪回全局参数）。
+    assert_eq!(colm_schema::all().len(), 840 + 104 + 1 + 1 + 5);
+    assert_eq!(
+        parameters::schema_descriptors().len(),
+        884 + 104 + 1 + 1 + 5
+    );
     assert_eq!(parameters::land_cover_descriptors().len(), 88);
     assert_eq!(parameters::pft_descriptors().len(), 87);
     assert_eq!(parameters::pc_pft_descriptors().len(), 87);

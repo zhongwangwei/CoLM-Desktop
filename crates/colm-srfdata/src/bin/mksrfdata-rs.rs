@@ -14,10 +14,11 @@ use colm_srfdata::soil::{
 };
 use colm_srfdata::spatial::write_landpft_vector;
 use colm_srfdata::{
-    aggregate_lcz_urban_geometry, aggregate_ncar_urban_geometry, aggregate_ncar_urban_material,
-    aggregate_pft_canopy_structure, aggregate_pft_fractions, aggregate_pft_height,
-    aggregate_pft_index, aggregate_urban_region_ids, aggregate_urban_tree_index,
-    build_catchment_lct_land_patches_from_raster, build_catchment_pft_land_patches_from_raster,
+    aggregate_lcz_urban_geometry, aggregate_lcz_urban_material, aggregate_ncar_urban_geometry,
+    aggregate_ncar_urban_material, aggregate_pft_canopy_structure, aggregate_pft_fractions,
+    aggregate_pft_height, aggregate_pft_index, aggregate_urban_region_ids,
+    aggregate_urban_tree_index, build_catchment_lct_land_patches_from_raster,
+    build_catchment_pft_land_patches_from_raster,
     build_catchment_spatial_topology_with_filter_and_raw_grids, build_crop_land_patches,
     build_crop_pft_topology, build_lct_land_patches_from_raster, build_methane_ph_patch_selection,
     build_pft_land_patches_from_raster, build_pft_topology,
@@ -1821,7 +1822,7 @@ fn materialize_spatial_urban(
                 raw_geometry,
                 inputs.use_canyon_hwr,
             )?,
-            UrbanMaterialParameters::from_lcz_classes(&land_urban.set_type)?,
+            aggregate_lcz_urban_material(&layout, &land_urban.set_type, &area)?,
         ),
         UrbanScheme::Ncar => {
             let regions = read_mesh_tiled_raster_i32(

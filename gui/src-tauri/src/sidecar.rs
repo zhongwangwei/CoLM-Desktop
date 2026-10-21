@@ -2424,9 +2424,14 @@ pub struct StudyParameterContextRow {
 pub async fn study_parameter_contexts(
     dirs: Vec<String>,
     kernel_dir: String,
+    types: Option<Vec<u8>>,
 ) -> Result<Vec<StudyParameterContextRow>, String> {
     if dirs.is_empty() {
         return Err("没有可配置的算例".into());
+    }
+    let choices = study_type_choices_for(&dirs, &kernel_dir, false).await?;
+    if choices.spatial {
+        return spatial_study_rows(&dirs, &kernel_dir, &choices, &types.unwrap_or_default());
     }
     let field_states = crate::config::field_states_batch(dirs.clone(), kernel_dir.clone())?;
     let fields = field_states
@@ -2577,6 +2582,273 @@ pub async fn study_parameter_contexts(
                         scheme: None,
                         index: Some(pft_type),
                         type_name: Some(component.name_en.clone()),
+                        process_file: None,
+                    },
+                    default,
+                )?);
+            }
+        }
+    }
+    rows.sort_by(|left, right| {
+        left.id
+            .cmp(&right.id)
+            .then(left.scope_instance.index.cmp(&right.scope_instance.index))
+    });
+    Ok(rows)
+}
+
+/// 研究页选地类或植物类型用：这批算例是单点还是格点、按哪套类型（IGBP、USGS、PFT、PC）、格点算例里实际有哪些地类。
+#[derive(Debug, Serialize)]
+pub struct StudyTypeChoices {
+    spatial: bool,
+    /// `igbp`、`usgs`、`pft`、`pc`。
+    kind: &'static str,
+    /// 地类或植物类型号的上限（含）：IGBP 17、USGS 24、PFT 15（CROP 内核 78）。
+    max: u8,
+    /// 格点 LCT 算例 landdata 里各算例都有的地类；没做过前处理或不是 LCT 时为空（那就全部可选）。
+    present: Option<Vec<u8>>,
+}
+
+#[tauri::command]
+pub async fn study_type_choices(
+    dirs: Vec<String>,
+    kernel_dir: String,
+) -> Result<StudyTypeChoices, String> {
+    study_type_choices_for(&dirs, &kernel_dir, true).await
+}
+
+async fn study_type_choices_for(
+    dirs: &[String],
+    kernel_dir: &str,
+    read_present: bool,
+) -> Result<StudyTypeChoices, String> {
+    let kernel = colm_kernel::Kernel::open_manifest(std::path::Path::new(kernel_dir))
+        .map_err(|error| format!("{error:#}"))?;
+    let has = |name: &str| kernel.manifest.macros.iter().any(|item| item == name);
+    let mut spatial = None;
+    let mut subgrid = None;
+    for dir in dirs {
+        let case_nml = std::path::Path::new(dir).join("case.nml");
+        let this = colm_case::is_spatial_case(&case_nml).map_err(|error| format!("{error:#}"))?;
+        if spatial.replace(this).is_some_and(|before| before != this) {
+            return Err("一次研究里不能同时有单点和格点算例".into());
+        }
+        let text = std::fs::read_to_string(&case_nml).map_err(|error| format!("{dir}: {error}"))?;
+        let doc = colm_namelist::parse(&text).map_err(|error| format!("{dir}: {error:#}"))?;
+        let logical = |name: &str| matches!(doc.get(name), Some(colm_namelist::Value::Bool(true)));
+        let kind = if logical("DEF_USE_PC") {
+            "pc"
+        } else if logical("DEF_USE_PFT") {
+            "pft"
+        } else if has("LULC_USGS") {
+            "usgs"
+        } else {
+            "igbp"
+        };
+        if subgrid.replace(kind).is_some_and(|before| before != kind) {
+            return Err("所选算例的次网格结构（LCT、PFT、PC）不同；请分开研究".into());
+        }
+    }
+    let spatial = spatial.unwrap_or(false);
+    let kind = subgrid.unwrap_or("igbp");
+    let max = match kind {
+        "usgs" => 24,
+        "igbp" => 17,
+        "pft" | "pc" if has("CROP") => 78,
+        "pft" | "pc" => 15,
+        other => return Err(format!("unknown subgrid structure {other}")),
+    };
+    let mut present: Option<Vec<u8>> = None;
+    if read_present && spatial && matches!(kind, "igbp" | "usgs") {
+        for dir in dirs {
+            let json = capture_async(vec!["case-land-classes".into(), dir.clone()]).await?;
+            let value: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|error| format!("colm-cli case-land-classes 的输出解析不了：{error}"))?;
+            let Some(classes) = value["classes"].as_array() else {
+                present = None;
+                break;
+            };
+            let here = classes
+                .iter()
+                .filter_map(|class| class.as_u64().and_then(|class| u8::try_from(class).ok()))
+                .collect::<Vec<_>>();
+            present = Some(match present {
+                Some(before) => before
+                    .into_iter()
+                    .filter(|class| here.contains(class))
+                    .collect(),
+                None => here,
+            });
+        }
+    }
+    Ok(StudyTypeChoices {
+        spatial,
+        kind,
+        max,
+        present,
+    })
+}
+
+/// 格点算例的研究参数：整算例系数照常从字段状态取；地类（LCT）或植物类型（PFT/PC）参数按研究页选的类型号
+/// 逐个给一行，默认值取各类型的表值。活动条件（植物水力、气孔方案）按算例开关筛；地类在不在 landdata 里由
+/// 建研究时的检查报。
+fn spatial_study_rows(
+    dirs: &[String],
+    kernel_dir: &str,
+    choices: &StudyTypeChoices,
+    types: &[u8],
+) -> Result<Vec<StudyParameterContextRow>, String> {
+    let field_states = crate::config::field_states_batch(dirs.to_vec(), kernel_dir.to_string())?;
+    let fields = field_states
+        .iter()
+        .map(|state| (state.name.to_ascii_lowercase(), state))
+        .collect::<HashMap<_, _>>();
+    let mut rows = Vec::new();
+    for descriptor in colm_case::parameters::all().iter().filter(|descriptor| {
+        descriptor.calibration_eligible
+            && !descriptor.structural_parameter
+            && matches!(
+                descriptor.scope,
+                colm_case::parameters::ParameterScope::CaseScalar
+            )
+    }) {
+        let Some(state) = fields.get(&descriptor.raw_key.to_ascii_lowercase()) else {
+            continue;
+        };
+        if !matches!(state.mode, crate::config::FieldMode::Editable)
+            || state.mixed
+            || state.effective_mixed
+        {
+            continue;
+        }
+        let Some(default) = state.effective_value.as_deref().and_then(parse_number) else {
+            continue;
+        };
+        rows.push(study_row(
+            descriptor,
+            "case-scalar",
+            crate::config::ParameterScopeInstance {
+                kind: "case-scalar".into(),
+                scheme: None,
+                index: None,
+                type_name: None,
+                process_file: None,
+            },
+            default,
+        )?);
+    }
+    let docs = dirs
+        .iter()
+        .map(|dir| {
+            let text = std::fs::read_to_string(std::path::Path::new(dir).join("case.nml"))
+                .map_err(|error| format!("{dir}: {error}"))?;
+            colm_namelist::parse(&text).map_err(|error| format!("{dir}: {error:#}"))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let all = |name: &str, default: bool| {
+        docs.iter().all(|doc| match doc.get(name) {
+            Some(colm_namelist::Value::Bool(value)) => *value,
+            _ => default,
+        })
+    };
+    let schema_default = |name: &str| {
+        matches!(
+            colm_schema::find(name).map(|field| field.default),
+            Some(colm_schema::Default::Logical(true))
+        )
+    };
+    let plant_hydraulics = all(
+        "DEF_USE_PLANTHYDRAULICS",
+        schema_default("DEF_USE_PLANTHYDRAULICS"),
+    );
+    let medlyn = all("DEF_USE_MEDLYNST", schema_default("DEF_USE_MEDLYNST"));
+    let wue = all("DEF_USE_WUEST", schema_default("DEF_USE_WUEST"));
+    let types = types
+        .iter()
+        .copied()
+        .filter(|index| *index >= 1 && *index <= choices.max)
+        .collect::<Vec<_>>();
+    if matches!(choices.kind, "igbp" | "usgs") {
+        let scheme = choices.kind.to_ascii_uppercase();
+        let usgs = choices.kind == "usgs";
+        for descriptor in colm_case::parameters::land_cover_descriptors()
+            .into_iter()
+            .filter(|descriptor| {
+                descriptor.calibration_eligible
+                    && descriptor.id.split(':').nth(1) == Some(scheme.as_str())
+            })
+        {
+            use colm_case::land_cover::Condition;
+            let Some(meta) = colm_case::land_cover::parameter(&descriptor.raw_key) else {
+                continue;
+            };
+            let active = match meta.condition {
+                Condition::Always => true,
+                Condition::PlantHydraulics => plant_hydraulics,
+                Condition::BallBerry => !medlyn && !wue,
+                Condition::Medlyn => medlyn && !wue,
+                Condition::Wue => wue && !medlyn,
+            };
+            if !active {
+                continue;
+            }
+            for &class in &types {
+                let Some(default) = colm_case::land_cover::default_value(
+                    &descriptor.raw_key,
+                    usgs,
+                    i64::from(class),
+                )
+                .map_err(|error| format!("{error:#}"))?
+                else {
+                    continue;
+                };
+                rows.push(study_row(
+                    descriptor,
+                    "land-cover-class",
+                    crate::config::ParameterScopeInstance {
+                        kind: "land-cover-class".into(),
+                        scheme: Some(scheme.clone()),
+                        index: Some(class),
+                        type_name: None,
+                        process_file: None,
+                    },
+                    default,
+                )?);
+            }
+        }
+    } else {
+        let pc = choices.kind == "pc";
+        let campbell = all(
+            "DEF_USE_Campbell_SOIL_MODEL",
+            schema_default("DEF_USE_Campbell_SOIL_MODEL"),
+        );
+        let scope = if pc {
+            colm_case::parameters::ParameterScope::PcPftComponent
+        } else {
+            colm_case::parameters::ParameterScope::PftType
+        };
+        let label = if pc { "pc-pft-component" } else { "pft-type" };
+        for descriptor in colm_case::parameters::all().iter().filter(|descriptor| {
+            descriptor.scope == scope
+                && descriptor.calibration_eligible
+                && !descriptor.structural_parameter
+        }) {
+            for &pft in &types {
+                let Some(default) =
+                    colm_case::pft::default_value(&descriptor.raw_key, pft, campbell, pc)
+                        .map_err(|error| format!("{error:#}"))?
+                        .filter(|value| *value != -999.0 && (*value + 999.9).abs() >= 1e-9)
+                else {
+                    continue;
+                };
+                rows.push(study_row(
+                    descriptor,
+                    label,
+                    crate::config::ParameterScopeInstance {
+                        kind: label.into(),
+                        scheme: None,
+                        index: Some(pft),
+                        type_name: colm_case::pft::pft_name(pft).map(|name| name.en.to_string()),
                         process_file: None,
                     },
                     default,

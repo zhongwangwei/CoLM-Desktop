@@ -2021,6 +2021,20 @@ export const commandContract = {
     "kernelDir": {
       "required": true,
       "rust_type": "String"
+    },
+    "types": {
+      "required": false,
+      "rust_type": "Option<Vec<u8>>"
+    }
+  },
+  "study_type_choices": {
+    "dirs": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    },
+    "kernelDir": {
+      "required": true,
+      "rust_type": "String"
     }
   },
   "study_clone": {

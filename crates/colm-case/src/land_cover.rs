@@ -419,26 +419,31 @@ pub const PARAMETERS: &[ParameterMeta] = &[
         Some(0.0),
         None
     ),
-    p!(
-        "DEF_BALL_BERRY_GRADM",
+    // 气孔五张表按地类改（vendor `apply_lc_overrides`）。整算例一个数的 `DEF_BALL_BERRY_GRADM` 一类
+    // 在"全局参数"里，只在 Ball–Berry 方案下、写了时盖过各地类（上游 `stomata` 里的顺序）。
+    // `gradm`/`binter` 表不只 Ball–Berry 用：`range = pco2m*(1-1.6/gradm)` 是三种方案共用的迭代区间，
+    // WUE 下 C4 植物也走 Ball–Berry 迭代（`MOD_AssimStomataConductance.F90:229,238`）。2026-10-21 实测默认
+    // （WUE）方案下改 `DEF_LC_GRADM(10)`，`CN-Cng` 71 个变量变了；所以这两项不按方案藏起来。
+    lc!(
+        "DEF_LC_GRADM",
         "gradm",
         "Ball–Berry 斜率",
         Some("-"),
-        Condition::BallBerry,
+        Condition::Always,
         Some(1.6),
         None
     ),
-    p!(
-        "DEF_BALL_BERRY_BINTER",
+    lc!(
+        "DEF_LC_BINTER",
         "binter",
         "Ball–Berry 截距",
         Some("-"),
-        Condition::BallBerry,
+        Condition::Always,
         Some(0.0),
         None
     ),
-    p!(
-        "DEF_MEDLYN_G1",
+    lc!(
+        "DEF_LC_G1",
         "g1",
         "Medlyn 斜率 g1",
         Some("-"),
@@ -446,8 +451,8 @@ pub const PARAMETERS: &[ParameterMeta] = &[
         Some(0.0),
         None
     ),
-    p!(
-        "DEF_MEDLYN_G0",
+    lc!(
+        "DEF_LC_G0",
         "g0",
         "Medlyn 截距 g0",
         Some("-"),
@@ -455,8 +460,8 @@ pub const PARAMETERS: &[ParameterMeta] = &[
         Some(0.0),
         None
     ),
-    p!(
-        "DEF_WUE_LAMBDA",
+    lc!(
+        "DEF_LC_LAMBDA",
         "lambda",
         "WUE 边际水分成本",
         Some("mol mol-1"),
@@ -503,6 +508,21 @@ pub fn override_instance(path: &str) -> Option<(&'static str, u8)> {
     (1..=LC_OVERRIDE_SLOTS)
         .contains(&class)
         .then_some((meta.name, class))
+}
+
+/// 整算例气孔标量 → 同一张表按地类改的名字（`DEF_MEDLYN_G1` → `DEF_LC_G1`）。旧版本把前者记成地类参数。
+pub fn per_class_stomatal_name(case_wide: &str) -> Option<&'static str> {
+    const PAIRS: [(&str, &str); 5] = [
+        ("DEF_BALL_BERRY_GRADM", "DEF_LC_GRADM"),
+        ("DEF_BALL_BERRY_BINTER", "DEF_LC_BINTER"),
+        ("DEF_MEDLYN_G1", "DEF_LC_G1"),
+        ("DEF_MEDLYN_G0", "DEF_LC_G0"),
+        ("DEF_WUE_LAMBDA", "DEF_LC_LAMBDA"),
+    ];
+    PAIRS
+        .iter()
+        .find(|(old, _)| old.eq_ignore_ascii_case(case_wide))
+        .map(|(_, new)| *new)
 }
 
 /// `DEF_LC_X` 在地类 `class` 上的 namelist 键。
@@ -557,25 +577,24 @@ pub fn validate_override(name: &str, value: f64) -> Result<()> {
     if value == meta.sentinel {
         return Ok(());
     }
-    if meta.name == "DEF_BALL_BERRY_GRADM" && value <= 1.6 {
-        bail!("{name} must be -1 or greater than 1.6");
+    // 与 Fortran `check_lc_override` 同一套：`GRADM` 要大于 1.6、`LAMBDA` 要大于 0（严格），其余是闭区间。
+    if meta.name == "DEF_LC_GRADM" && value <= 1.6 {
+        bail!("{name} must be greater than 1.6");
     }
-    if meta.name == "DEF_WUE_LAMBDA" && value <= 0.0 {
-        bail!("{name} must be -1 or positive");
+    if meta.name == "DEF_LC_LAMBDA" && value <= 0.0 {
+        bail!("{name} must be positive");
     }
     if meta.name == "DEF_LC_C3C4" && value != 0.0 && value != 1.0 {
         bail!("{name} must be -1, 0, or 1");
     }
-    if meta.name != "DEF_BALL_BERRY_GRADM" && meta.name != "DEF_WUE_LAMBDA" {
-        if let Some(min) = meta.min {
-            if value < min {
-                bail!("{name} must be -1 or at least {min}");
-            }
+    if let Some(min) = meta.min {
+        if value < min {
+            bail!("{name} must be at least {min}");
         }
-        if let Some(max) = meta.max {
-            if value > max {
-                bail!("{name} must be at most {max}");
-            }
+    }
+    if let Some(max) = meta.max {
+        if value > max {
+            bail!("{name} must be at most {max}");
         }
     }
     Ok(())

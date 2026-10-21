@@ -228,3 +228,133 @@ export function applyResearchSeed(
   });
   return picked;
 }
+
+/** 格点算例（流域、区域、全球）的一个率定目标，研究页上逐行填。 */
+export interface GridTargetDraft {
+  /** `grid` 格点观测产品；`station` 区域里的通量站；`gauge` 水文站流量。 */
+  kind: 'grid' | 'station' | 'gauge';
+  /** `grid`、`gauge`：模型 history 变量（f_lfevpa、f_discharge）；`station`：观测标准名（Qle）。 */
+  variable: string;
+  path: string;
+  /** `grid`：观测文件里的变量；`gauge` 的 NetCDF 观测才要填。 */
+  obsVariable: string;
+  lon: string;
+  lat: string;
+  /** `grid`：观测乘多少换成模型单位。 */
+  scale: string;
+  period: '' | 'daily' | 'monthly';
+}
+
+export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft> = {
+  grid: {
+    kind: 'grid',
+    variable: 'f_lfevpa',
+    path: '',
+    obsVariable: '',
+    lon: '',
+    lat: '',
+    scale: '1',
+    period: '',
+  },
+  station: {
+    kind: 'station',
+    variable: 'Qle',
+    path: '',
+    obsVariable: '',
+    lon: '',
+    lat: '',
+    scale: '1',
+    period: '',
+  },
+  gauge: {
+    kind: 'gauge',
+    variable: 'f_discharge',
+    path: '',
+    obsVariable: '',
+    lon: '',
+    lat: '',
+    scale: '1',
+    period: 'daily',
+  },
+};
+
+/**
+ * 格点目标 → 研究规格里的 `targets` 项（带 `source`）。键是"变量@种类序号"，同一变量能有几个站。
+ * 填得不对就报错（中英两种说法），不让它到后端才失败。
+ */
+export function gridTargetSpec(
+  draft: GridTargetDraft,
+  index: number,
+  windows: ReturnType<typeof calibrationWindows>,
+  metric: string,
+  minPairs: number,
+) {
+  const variable = draft.variable.trim();
+  const path = draft.path.trim();
+  if (!variable || !path)
+    throw new Error(
+      bilingual(
+        `第 ${index + 1} 个目标要填变量和观测文件`,
+        `Target ${index + 1} needs a variable and an observation file`,
+      ),
+    );
+  const number = (text: string, low: number, high: number, what: [string, string]) => {
+    const value = Number(text);
+    if (!text.trim() || !Number.isFinite(value) || value < low || value > high)
+      throw new Error(
+        bilingual(
+          `第 ${index + 1} 个目标的${what[0]}不对`,
+          `Target ${index + 1} has an invalid ${what[1]}`,
+        ),
+      );
+    return value;
+  };
+  let source: Record<string, unknown>;
+  if (draft.kind === 'grid') {
+    if (!draft.obsVariable.trim())
+      throw new Error(
+        bilingual(
+          `第 ${index + 1} 个目标要填观测文件里的变量名`,
+          `Target ${index + 1} needs the variable name in the observation file`,
+        ),
+      );
+    const scale = number(draft.scale, -Infinity, Infinity, ['单位换算系数', 'unit scale']);
+    if (scale === 0)
+      throw new Error(
+        bilingual(
+          `第 ${index + 1} 个目标的单位换算系数不能是 0`,
+          `Target ${index + 1} cannot have a zero unit scale`,
+        ),
+      );
+    source = {
+      kind: 'grid',
+      path,
+      variable: draft.obsVariable.trim(),
+      scale,
+      ...(draft.period ? { period: draft.period } : {}),
+    };
+  } else {
+    const lon = number(draft.lon, -180, 360, ['经度', 'longitude']);
+    const lat = number(draft.lat, -90, 90, ['纬度', 'latitude']);
+    source =
+      draft.kind === 'station'
+        ? { kind: 'station', path, lon, lat }
+        : {
+            kind: 'gauge',
+            path,
+            lon,
+            lat,
+            ...(draft.obsVariable.trim() ? { variable: draft.obsVariable.trim() } : {}),
+            ...(draft.period ? { period: draft.period } : {}),
+          };
+  }
+  return {
+    key: `${variable}@${draft.kind}${index + 1}`,
+    variable,
+    metric,
+    weight: 1,
+    min_pairs: minPairs,
+    ...windows,
+    source,
+  };
+}

@@ -26,7 +26,7 @@ import {
 } from './remote-study';
 import type { CaseProfile, ModelDraft, VersionRef } from '../../lib/types';
 import StudyImportDialog, { type StudyPreview } from '../versions/StudyImportDialog';
-import { REMOTE_CHECK_MS } from '../runs/run-model';
+import { REMOTE_CHECK_MS, compatibleKernel } from '../runs/run-model';
 import LiveServerLoad from '../runs/LiveServerLoad';
 import {
   researchMethods,
@@ -158,8 +158,12 @@ export default function ResearchPage() {
   const serverPartitions = useRef<Record<string, string>>({});
   const [remoteReply, setRemoteReply] = useState<RemoteStudyReply | null>(null);
   const [sites, setSites] = useState<string[]>([]);
-  // 研究只跑单点算例，只能用带 SinglePoint 的编译配置；原来区域配置也列着（标"区域"），选了就跑不起来。
-  const studyKernels = state.kernels.filter((k) => k.macros.includes('SinglePoint'));
+  // 格点算例（流域、区域、全球）也能做研究（2026-10-21 用户要求）。一次研究里只有一种算例，编译配置跟着换：
+  // 单点用带 SinglePoint 的，格点用格点配置。
+  const spatialStudy = sites.some((d) => state.cases.find((c) => c.dir === d)?.spatial);
+  const studyKernels = state.kernels.filter(
+    (k) => k.macros.includes('SinglePoint') !== spatialStudy,
+  );
   const [kernel, setKernel] = useState(
     () =>
       studyKernels.find((k) => k.dir === state.kernelDir)?.dir ??
@@ -1719,12 +1723,31 @@ export default function ResearchPage() {
   const currentState = remotePermissions.exists ? remoteStatus : status;
   const methodTitle = researchMethods.find((item) => item.id === tab)!;
   const currentMethod = researchMethods.find((item) => item.id === methodFromStudy(frozenSpec))!;
-  // 编译配置：没选、或选的不是单点配置时，挑一个单点配置（优先 default）；界面上只显示配置名。
+  // 编译配置：没选、或选的与算例种类不配时重挑。单点挑 default；格点按第一个算例的网格与分类挑
+  // （与项目页运行时同一个 compatibleKernel）。界面上只显示配置名。
   useEffect(() => {
-    const usable = state.kernels.filter((k) => k.macros.includes('SinglePoint'));
-    if (!usable.length || usable.some((k) => k.dir === kernel)) return;
-    setKernel((usable.find((k) => k.preset === 'default') ?? usable[0]!).dir);
-  }, [state.kernels, kernel]);
+    if (!studyKernels.length || studyKernels.some((k) => k.dir === kernel)) return;
+    if (!spatialStudy) {
+      setKernel((studyKernels.find((k) => k.preset === 'default') ?? studyKernels[0]!).dir);
+      return;
+    }
+    let current = true;
+    invoke<{ profile: Parameters<typeof compatibleKernel>[1] }>('model_case_context', {
+      dir: sites[0],
+      modelRevision: state.versionRef,
+    })
+      .then((context) => {
+        if (current)
+          setKernel((compatibleKernel(studyKernels, context.profile) ?? studyKernels[0]!).dir);
+      })
+      .catch(() => {
+        if (current) setKernel(studyKernels[0]!.dir);
+      });
+    return () => {
+      current = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.kernels, kernel, spatialStudy, sites]);
   // 项目里只有一个单点算例时直接勾上（没有别的可选）。换版本会清空所选算例，所以不是只勾一次；
   // 用户自己动过勾选就不再替他勾。
   const sitesTouched = useRef(false);
@@ -2301,28 +2324,28 @@ export default function ResearchPage() {
               {state.cases.map((c) => {
                 const on = sites.includes(c.dir);
                 return (
-                  <label
-                    key={c.dir}
-                    className={`study-case${on ? ' is-on' : ''}${c.spatial ? ' is-off' : ''}`}
-                  >
+                  <label key={c.dir} className={`study-case${on ? ' is-on' : ''}`}>
                     <input
                       type="checkbox"
                       checked={on}
-                      disabled={c.spatial || busy || launching}
+                      disabled={busy || launching}
                       onChange={(e) => {
                         sitesTouched.current = true;
-                        setSites((old) =>
-                          e.target.checked
-                            ? [...new Set([...old, c.dir])]
-                            : old.filter((d) => d !== c.dir),
-                        );
+                        // 一次研究里只有一种算例：勾上与已选种类不同的算例时，换成只选它。
+                        setSites((old) => {
+                          if (!e.target.checked) return old.filter((d) => d !== c.dir);
+                          const same = old.filter(
+                            (d) => !!state.cases.find((x) => x.dir === d)?.spatial === c.spatial,
+                          );
+                          return [...new Set([...same, c.dir])];
+                        });
                       }}
                     />
                     <span>
                       <strong>{c.name}</strong>
                       <small>
                         {c.spatial
-                          ? tr('格点算例，研究暂不支持', 'Gridded case, not supported yet')
+                          ? tr('格点（流域、区域或全球）', 'Gridded (basin, region or globe)')
                           : c.run_host
                             ? tr(
                                 `单点 · 服务器 ${c.run_host}`,

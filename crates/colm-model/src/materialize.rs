@@ -622,29 +622,17 @@ impl Registry {
                         if !scheme.eq_ignore_ascii_case(land_cover_scheme) {
                             continue;
                         }
-                        if colm_case::land_cover::is_class_array(&record.raw_key) {
-                            doc.insert(
-                                &colm_case::land_cover::override_path(&record.raw_key, index),
-                                value,
-                                "nl_colm",
-                            )?;
-                        } else {
-                            // 气孔五个参数在 namelist 里是整个算例一个数：单点按本站地类写，格点算例没有"本站地类"。
-                            let landtype = doc
-                                .get("SITE_landtype")
-                                .and_then(Value::as_f64)
-                                .with_context(|| {
-                                    format!(
-                                        "{} is one value for the whole case, so it cannot be scoped to land \
-                                         class {index} here; set it as a global parameter instead",
-                                        record.raw_key
-                                    )
-                                })?;
-                            if landtype != f64::from(index) {
-                                continue;
-                            }
-                            put(&mut doc, &record.raw_key, value)?;
-                        }
+                        // `model_overlay` 已把旧的气孔五个整算例标量改记成 `DEF_LC_X`，这里只剩逐地类的数组。
+                        ensure!(
+                            colm_case::land_cover::is_class_array(&record.raw_key),
+                            "{} is not a per-class land-cover parameter",
+                            record.raw_key
+                        );
+                        doc.insert(
+                            &colm_case::land_cover::override_path(&record.raw_key, index),
+                            value,
+                            "nl_colm",
+                        )?;
                     }
                     "case-scalar" => {}
                     _ => anyhow::bail!("unsupported scope"),
@@ -797,14 +785,10 @@ fn land_cover_index(doc: &Document, key: &str) -> Result<Option<u8>> {
         .filter(|v| v.fract() == 0.0 && *v > 0.0 && *v <= 255.0)
         .map(|v| Some(v as u8))
         .with_context(|| {
-            if colm_case::land_cover::is_class_array(key) {
-                format!(
-                    "{key} has no land-class index and the case has no SITE_landtype to take it from; \
-                     write {key}(lc) = value for the land class it should change"
-                )
-            } else {
-                format!("{key} is kept per site land class, which needs an explicit SITE_landtype")
-            }
+            format!(
+                "{key} has no land-class index and the case has no SITE_landtype to take it from; \
+                 write {key}(lc) = value for the land class it should change"
+            )
         })
 }
 

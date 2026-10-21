@@ -4,6 +4,8 @@ import {
   calibrationWindows,
   candidateBudget,
   fitValidation,
+  gridTargetDefaults,
+  gridTargetSpec,
   networkSpec,
   networkDefaults,
   parameterSpec,
@@ -149,4 +151,75 @@ it('switching network slots starts with compatible complete defaults', () => {
   assert.throws(() =>
     networkSpec('soil_stress', 'beta_physics', 'beta', '-1', '2', 'linear', true),
   );
+});
+
+describe('gridded study targets', () => {
+  const windows = { from: 0, to: 86_400, validation_from: null, validation_to: null };
+  it('turns each kind into a target with its own observation source', () => {
+    const grid = gridTargetSpec(
+      { ...gridTargetDefaults.grid, path: '/obs/gleam.nc', obsVariable: 'E', scale: '0.5' },
+      0,
+      windows,
+      'kge',
+      20,
+    );
+    assert.deepEqual(grid.source, {
+      kind: 'grid',
+      path: '/obs/gleam.nc',
+      variable: 'E',
+      scale: 0.5,
+    });
+    assert.equal(grid.key, 'f_lfevpa@grid1');
+    const station = gridTargetSpec(
+      { ...gridTargetDefaults.station, path: '/obs/flux.nc', lon: '123.5', lat: '44.6' },
+      1,
+      windows,
+      'nrmse',
+      20,
+    );
+    assert.deepEqual(station.source, {
+      kind: 'station',
+      path: '/obs/flux.nc',
+      lon: 123.5,
+      lat: 44.6,
+    });
+    const gauge = gridTargetSpec(
+      { ...gridTargetDefaults.gauge, path: '/obs/q.csv', lon: '113.2', lat: '23.4' },
+      2,
+      windows,
+      'nse',
+      20,
+    );
+    assert.deepEqual(gauge.source, {
+      kind: 'gauge',
+      path: '/obs/q.csv',
+      lon: 113.2,
+      lat: 23.4,
+      period: 'daily',
+    });
+  });
+  it('refuses incomplete targets before they reach the engine', () => {
+    assert.throws(() => gridTargetSpec(gridTargetDefaults.grid, 0, windows, 'kge', 20));
+    assert.throws(() =>
+      gridTargetSpec({ ...gridTargetDefaults.grid, path: '/o.nc' }, 0, windows, 'kge', 20),
+    );
+    assert.throws(() =>
+      gridTargetSpec(
+        { ...gridTargetDefaults.station, path: '/o.nc', lon: '113', lat: '95' },
+        0,
+        windows,
+        'kge',
+        20,
+      ),
+    );
+    assert.throws(() =>
+      gridTargetSpec(
+        { ...gridTargetDefaults.grid, path: '/o.nc', obsVariable: 'E', scale: '0' },
+        0,
+        windows,
+        'kge',
+        20,
+      ),
+    );
+  });
 });

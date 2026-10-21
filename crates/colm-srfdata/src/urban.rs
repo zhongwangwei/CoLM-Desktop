@@ -808,6 +808,160 @@ pub fn aggregate_ncar_urban_geometry(
     Ok(output)
 }
 
+/// LCZ 分支的材料参数（`Aggregation_Urban.F90` 里 `DEF_URBAN_type_scheme == 2`）。上游对每个 500 m 像元
+/// 取本 patch LCZ 类的表值，再按像元面积加权平均（`sum(v*area)/sum(area)`）——值虽是常数，平均出来的位型
+/// 不一定等于表值（2026-10-21 实测 `ALB_IMPROAD` 0.14 → 0.13999999999999996）。[`UrbanMaterialParameters::from_lcz_classes`]
+/// 直接取表值，单点用它（单点没有像元平均）；格点要用这里，否则 Rust 前处理与 Fortran 差最后一位。
+pub fn aggregate_lcz_urban_material(
+    patches: &FlatPatches,
+    classes: &[i32],
+    land_area: &[f64],
+) -> Result<UrbanMaterialParameters> {
+    ensure!(
+        patches.len() == classes.len(),
+        "urban classes must have one value per urban patch"
+    );
+    let table = UrbanMaterialParameters::from_lcz_classes(classes)?;
+    let urban = classes.len();
+    let mut output = table.clone();
+    for patch in 0..urban {
+        let layer_at = |layer: usize| layer * urban + patch;
+        let spectral_at = |solar: usize, radiation: usize| {
+            (solar * URBAN_RADIATION_TYPES + radiation) * urban + patch
+        };
+        let scalars = [
+            table.pervious_road_fraction[patch],
+            table.roof_emissivity[patch],
+            table.wall_emissivity[patch],
+            table.impervious_emissivity[patch],
+            table.pervious_emissivity[patch],
+            table.roof_thickness_m[patch],
+            table.wall_thickness_m[patch],
+            table.room_min_k[patch],
+            table.room_max_k[patch],
+        ];
+        let mut area_sum = 0.0;
+        let mut scalar_sums = [0.0; 9];
+        let mut layer_sums = [[0.0; URBAN_LAYERS]; 6];
+        let mut impervious_weight = [[0.0; URBAN_LAYERS]; 2];
+        let mut albedo_sums = [[[0.0; URBAN_RADIATION_TYPES]; URBAN_SOLAR_BANDS]; 4];
+        for &cell in patches.raw_cells(patch) {
+            let area = *land_area
+                .get(cell)
+                .with_context(|| format!("urban patch {patch} references missing cell {cell}"))?;
+            ensure!(
+                area.is_finite() && area >= 0.0,
+                "urban patch {patch} has a non-finite or negative land area"
+            );
+            area_sum += area;
+            for (sum, value) in scalar_sums.iter_mut().zip(scalars) {
+                *sum = value.contract(area, *sum);
+            }
+            for layer in 0..URBAN_LAYERS {
+                let at = layer_at(layer);
+                // 上游先累加不透水路面的两列（带 -999 检查和各自权重），再累加屋顶、墙。
+                for (index, value) in [
+                    table.impervious_thermal_conductivity[at],
+                    table.impervious_heat_capacity[at],
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    if value != -999.0 {
+                        layer_sums[4 + index][layer] =
+                            value.contract(area, layer_sums[4 + index][layer]);
+                        impervious_weight[index][layer] += area;
+                    }
+                }
+            }
+            for (index, values) in [
+                &table.roof_heat_capacity,
+                &table.wall_heat_capacity,
+                &table.roof_thermal_conductivity,
+                &table.wall_thermal_conductivity,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for layer in 0..URBAN_LAYERS {
+                    layer_sums[index][layer] =
+                        values[layer_at(layer)].contract(area, layer_sums[index][layer]);
+                }
+            }
+            for (index, values) in [
+                &table.roof_albedo,
+                &table.wall_albedo,
+                &table.impervious_albedo,
+                &table.pervious_albedo,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                for solar in 0..URBAN_SOLAR_BANDS {
+                    for radiation in 0..URBAN_RADIATION_TYPES {
+                        albedo_sums[index][solar][radiation] = values
+                            [spectral_at(solar, radiation)]
+                        .contract(area, albedo_sums[index][solar][radiation]);
+                    }
+                }
+            }
+        }
+        ensure!(
+            area_sum.is_finite() && area_sum > 0.0,
+            "urban patch {patch} has no positive land area"
+        );
+        for (target, sum) in [
+            &mut output.pervious_road_fraction,
+            &mut output.roof_emissivity,
+            &mut output.wall_emissivity,
+            &mut output.impervious_emissivity,
+            &mut output.pervious_emissivity,
+            &mut output.roof_thickness_m,
+            &mut output.wall_thickness_m,
+            &mut output.room_min_k,
+            &mut output.room_max_k,
+        ]
+        .into_iter()
+        .zip(scalar_sums)
+        {
+            target[patch] = sum / area_sum;
+        }
+        for layer in 0..URBAN_LAYERS {
+            let at = layer_at(layer);
+            output.roof_heat_capacity[at] = layer_sums[0][layer] / area_sum;
+            output.wall_heat_capacity[at] = layer_sums[1][layer] / area_sum;
+            output.roof_thermal_conductivity[at] = layer_sums[2][layer] / area_sum;
+            output.wall_thermal_conductivity[at] = layer_sums[3][layer] / area_sum;
+            output.impervious_thermal_conductivity[at] = if impervious_weight[0][layer] > 0.0 {
+                layer_sums[4][layer] / impervious_weight[0][layer]
+            } else {
+                0.0
+            };
+            output.impervious_heat_capacity[at] = if impervious_weight[1][layer] > 0.0 {
+                layer_sums[5][layer] / impervious_weight[1][layer]
+            } else {
+                0.0
+            };
+        }
+        for (target, sums) in [
+            &mut output.roof_albedo,
+            &mut output.wall_albedo,
+            &mut output.impervious_albedo,
+            &mut output.pervious_albedo,
+        ]
+        .into_iter()
+        .zip(albedo_sums)
+        {
+            for solar in 0..URBAN_SOLAR_BANDS {
+                for radiation in 0..URBAN_RADIATION_TYPES {
+                    target[spectral_at(solar, radiation)] = sums[solar][radiation] / area_sum;
+                }
+            }
+        }
+    }
+    Ok(output)
+}
+
 /// Area-weights NCAR's regional material table for each urban density patch.
 /// `-999` impervious-layer entries retain the upstream independent valid-area
 /// average; an entirely missing layer remains zero.

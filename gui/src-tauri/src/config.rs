@@ -1346,6 +1346,7 @@ pub(crate) fn server_runtime_paths(
 
 fn is_expert_tuning_name(name: &str) -> bool {
     colm_case::land_cover::is_parameter(name)
+        || colm_case::land_cover::per_class_stomatal_name(name).is_some()
         || name.starts_with("DEF_TUNING_")
         || name.starts_with("DEF_PH_")
         || name == "DEF_OZONE_KO3"
@@ -1362,6 +1363,10 @@ fn is_expert_tuning_name(name: &str) -> bool {
 fn validate_real_value(name: &str, value: f64) -> Result<(), String> {
     if colm_case::land_cover::is_parameter(name) {
         return colm_case::land_cover::validate_override(name, value).map_err(|e| format!("{e:#}"));
+    }
+    // 整算例的五个气孔标量（哨兵 -1 表示用各地类/PFT 的表值）；范围在调优目录里。
+    if colm_case::land_cover::per_class_stomatal_name(name).is_some() {
+        return colm_case::tuning::validate_value(name, value).map_err(|e| format!("{e:#}"));
     }
     let one_of = |names: &[&str]| names.contains(&name);
     if !value.is_finite() {
@@ -2030,17 +2035,17 @@ fn expert_tuning_runtime_state(
         if colm_case::land_cover::needs_plant_hydraulics(name) && !c.plant_hydraulics {
             return Some(hidden("需要先启用植物水力过程"));
         }
-        // 城市单点里还有别的地类的 patch；上游逐地类覆盖，Rust 城市分支的逐地类取值还没和 Fortran 核对过，`colm-rs` 拒绝。
-        if c.urban {
-            let changed = if name == "DEF_LC_C3C4" {
-                integer(c.doc, name) != -1
-            } else {
-                c.doc.get(name).is_some()
-            };
-            return Some(rust_unported(
-                changed,
-                "城市单点里还有其它地类的 patch，Rust 引擎的按地类覆盖还没与 Fortran 核对，仅 Fortran 引擎生效",
-            ));
+        // 按地类的气孔表只在对应的气孔导度方案里用到，与整算例的那五个标量同一套条件。
+        use colm_case::land_cover::Condition;
+        let condition = colm_case::land_cover::parameter(name).map(|meta| meta.condition);
+        if condition == Some(Condition::BallBerry) && (c.medlyn || c.wuest) {
+            return Some(hidden("仅 Ball–Berry 气孔导度方案使用"));
+        }
+        if condition == Some(Condition::Medlyn) && !c.medlyn {
+            return Some(hidden("仅 Medlyn 气孔导度方案使用"));
+        }
+        if condition == Some(Condition::Wue) && !c.wuest {
+            return Some(hidden("仅水分利用效率（WUE）气孔导度方案使用"));
         }
         if name == "DEF_LC_C3C4" {
             return Some((FieldMode::Editable, None, vec!["-1", "0", "1"]));

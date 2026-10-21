@@ -187,11 +187,18 @@ pub struct LandClassOverrides {
     pub extkn: Option<f64>,
     pub d50: Option<f64>,
     pub beta: Option<f64>,
+    /// 气孔五张表（Ball–Berry 的 `gradm`/`binter`、Medlyn 的 `g1`/`g0`、WUE 的 `lambda`）。整算例的
+    /// `DEF_BALL_BERRY_GRADM` 一类写了时仍盖过它们（`StomataOptions` 的 `*_override`，与上游同序）。
+    pub gradm: Option<f64>,
+    pub binter: Option<f64>,
+    pub g1: Option<f64>,
+    pub g0: Option<f64>,
+    pub lambda: Option<f64>,
 }
 
 impl LandClassOverrides {
     /// namelist 名（`DEF_LC_*`，不含 PHS 九列与 `C3C4`）→ 字段。
-    pub const REAL_NAMES: [&'static str; 29] = [
+    pub const REAL_NAMES: [&'static str; 34] = [
         "DEF_LC_HTOP0",
         "DEF_LC_HBOT0",
         "DEF_LC_FVEG0",
@@ -221,6 +228,11 @@ impl LandClassOverrides {
         "DEF_LC_EXTKN",
         "DEF_LC_D50",
         "DEF_LC_BETA",
+        "DEF_LC_GRADM",
+        "DEF_LC_BINTER",
+        "DEF_LC_G1",
+        "DEF_LC_G0",
+        "DEF_LC_LAMBDA",
     ];
 
     /// 按 [`Self::REAL_NAMES`] 的名字设一列；名字不认识时报错。
@@ -266,6 +278,11 @@ impl LandClassOverrides {
             "DEF_LC_EXTKN" => &mut self.extkn,
             "DEF_LC_D50" => &mut self.d50,
             "DEF_LC_BETA" => &mut self.beta,
+            "DEF_LC_GRADM" => &mut self.gradm,
+            "DEF_LC_BINTER" => &mut self.binter,
+            "DEF_LC_G1" => &mut self.g1,
+            "DEF_LC_G0" => &mut self.g0,
+            "DEF_LC_LAMBDA" => &mut self.lambda,
             other => anyhow::bail!("{other} is not a land-class scalar override"),
         })
     }
@@ -364,6 +381,11 @@ impl ClassConstants {
             "DEF_LC_EXTKN" => |table| table.extkn,
             "DEF_LC_D50" => |table| table.d50,
             "DEF_LC_BETA" => |table| table.beta,
+            "DEF_LC_GRADM" => |table| table.gradm,
+            "DEF_LC_BINTER" => |table| table.binter,
+            "DEF_LC_G1" => |table| table.g1,
+            "DEF_LC_G0" => |table| table.g0,
+            "DEF_LC_LAMBDA" => |table| table.lambda,
             other => anyhow::bail!("{other} is not a land-class scalar override"),
         };
         Ok(self.value(column))
@@ -397,7 +419,7 @@ impl ClassConstants {
     /// "用表值"，只有 `> 0` 才是覆盖（`MOD_AssimStomataConductance.F90:201`）。
     /// 拿 namelist 的值当基准，默认算例就会把 `-1` 送进 WUE 求解。
     pub fn wue_lambda(&self) -> f64 {
-        self.value(|table| table.lambda)
+        self.column(|table| table.lambda, |o| o.lambda)
     }
 
     pub fn canopy_bottom_m(&self) -> f64 {
@@ -528,10 +550,10 @@ impl ClassConstants {
             respiration_temperature_slope: self.column(|table| table.trda, |o| o.trda),
             respiration_temperature_half_k: self.column(|table| table.trdm, |o| o.trdm),
             optimum_temperature_k: self.column(|table| table.trop, |o| o.trop),
-            medlyn_g1: self.value(|table| table.g1),
-            medlyn_g0: self.value(|table| table.g0),
-            ball_berry_slope: self.value(|table| table.gradm),
-            ball_berry_intercept: self.value(|table| table.binter),
+            medlyn_g1: self.column(|table| table.g1, |o| o.g1),
+            medlyn_g0: self.column(|table| table.g0, |o| o.g0),
+            ball_berry_slope: self.column(|table| table.gradm, |o| o.gradm),
+            ball_berry_intercept: self.column(|table| table.binter, |o| o.binter),
         }
     }
 

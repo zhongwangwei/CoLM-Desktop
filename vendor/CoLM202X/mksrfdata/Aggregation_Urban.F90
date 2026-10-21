@@ -830,6 +830,9 @@ ENDIF
 #ifdef USEMPI
 IF (DEF_URBAN_type_scheme == 1) THEN
          CALL aggregation_data_daemon (grid_urban_500m, data_i4_2d_in1 = reg_typid)
+ELSE
+         ! LCZ requests only the pixel areas of each urban patch (see below).
+         CALL aggregation_data_daemon (grid_urban_500m)
 ENDIF
 #endif
       ENDIF
@@ -897,6 +900,12 @@ ENDIF
 IF (DEF_URBAN_type_scheme == 1) THEN
             CALL aggregation_request_data (landurban, iurban, grid_urban_500m, zip = USE_zip_for_aggregation, &
                   area = area_one, data_i4_2d_in2 = reg_typid, data_i4_2d_out2 = reg_typid_one)
+ELSE
+            ! LCZ used to skip this request, so area_one still held the masked pixel areas of the
+            ! last urban patch of the population loop above: every patch was averaged with those
+            ! weights (round-off in the material values) and area_urb/urb_pct were all the same.
+            CALL aggregation_request_data (landurban, iurban, grid_urban_500m, zip = USE_zip_for_aggregation, &
+                  area = area_one)
 ENDIF
 
             sumarea          = sum(area_one)
@@ -1059,9 +1068,7 @@ ENDIF
          urb_pct(:) = area_urb(:)/sarea_urb(:)
 
 #ifdef USEMPI
-IF (DEF_URBAN_type_scheme == 1) THEN
          CALL aggregation_worker_done ()
-ENDIF
 #endif
       ENDIF
 

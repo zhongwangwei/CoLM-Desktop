@@ -119,6 +119,7 @@ fn validate_date(s: &str) -> Result<()> {
 /// Historical revisions keep their stored identity, but case settings no longer override cases.
 pub fn model_overlay(overlay: &Overlay) -> Overlay {
     let mut overlay = overlay.clone();
+    upgrade_legacy_stomatal_records(&mut overlay);
     let is_case_control = |key: &str| {
         colm_schema::find(key).is_some_and(|f| f.group.is_some()) && !is_model_field(key)
     };
@@ -127,6 +128,32 @@ pub fn model_overlay(overlay: &Overlay) -> Overlay {
         record.scope_instance.kind != "case-scalar" || !is_case_control(&record.raw_key)
     });
     overlay
+}
+
+/// 2026-10-21 之前 IGBP/USGS 页里的五个气孔参数存的是整算例标量（`DEF_MEDLYN_G1` 一类，运行时只在单点、
+/// 本站地类等于记录的地类时写）。现在按地类改的是 `DEF_LC_G1(lc)` 一类，整算例标量在全局参数里。旧记录改记成
+/// 新的那一类：单点本站地类上效果相同（上游把同一个值送进同一个地类的气孔计算）。旧哨兵 `-1` 表示没改，丢掉。
+fn upgrade_legacy_stomatal_records(overlay: &mut Overlay) {
+    overlay.parameters.retain_mut(|record| {
+        if record.scope_instance.kind != "land-cover-class" {
+            return true;
+        }
+        let Some(name) = colm_case::land_cover::per_class_stomatal_name(&record.raw_key) else {
+            return true;
+        };
+        if literal(&record.value)
+            .ok()
+            .and_then(|value| value.as_f64())
+            .is_some_and(|value| value == -1.0)
+        {
+            return false;
+        }
+        if let Some(scheme) = record.scope_instance.scheme.as_deref() {
+            record.parameter_id = format!("lct:{scheme}:{name}");
+        }
+        record.raw_key = name.into();
+        true
+    });
 }
 
 /// Only actual coefficients belong to a model; selecting existing schemes is case configuration.

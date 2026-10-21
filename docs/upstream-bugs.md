@@ -860,7 +860,21 @@
   `DO j = lb_snow, 0`、`DO j = lb, -1` 里用到，`snl = 0` 时都是空循环，所以结果不变。
 - **上游**：`zhongwangwei/CoLM202X#26`（分支 `fix/tracer-no-snow-lbsn`，`1b147e5`），替代 #25。
 
-### 86. 开分汊时近干单元流域把全局汇流子步长压向 0，作业看起来卡死——已修
+### 86. 格点城市 LCZ 方案的材料参数用了上一个循环剩下的像元面积——已修
+
+- **位置**：`mksrfdata/Aggregation_Urban.F90` 材料参数那一段（`DO iurban = 1, numurban` 里 `sumarea = sum(area_one)`）。
+- **原因**：NCAR 方案（`DEF_URBAN_type_scheme == 1`）在循环开头 `aggregation_request_data(..., area = area_one, ...)`；LCZ 方案跳过了这次请求，
+  `area_one` 还是前面人口那一循环**最后一个城市 patch** 的像元面积（`pop_one < 0` 的像元已被置 0）。于是每个 LCZ patch 都按那组面积做加权平均。
+- **影响**：
+  - LCZ 的材料参数在 patch 内是常数，平均后理应等于表值，实际差最后几位（实测 `ALB_IMPROAD` 0.14 → 0.13999999999999996，`CV_IMPROAD`
+    1680000 → 1679999.9999999993）；MPI 下各进程的"最后一个 patch"不同，结果还随进程划分变。
+  - `area_urb` 对所有 patch 都一样，诊断输出的 `urb_pct` 是错的。
+- **修复**（2026-10-21）：LCZ 也按 patch 请求自己的像元面积（只要面积）；MPI 下相应地为 LCZ 起 `aggregation_data_daemon`，两种方案都 `aggregation_worker_done`。
+  Rust `colm_srfdata::aggregate_lcz_urban_material` 同样按 patch 自己的像元面积加权（乘加按 `contract`），原来直接取表值。
+- **验证**：广东 113–114°E、23–24°N 的 0.5° 区域城市算例（LCZ），纯 Fortran 与纯 Rust 的 history 161 个变量逐位一致，重启 10 份中 9 份一致
+  （剩下 1 份是初始 gridriver 重启的 `missing_value` 属性，修之前就有）；修之前材料参数 21 个变量差最后几位。
+
+### 87. 开分汊时近干单元流域把全局汇流子步长压向 0，作业看起来卡死——已修
 
 - **位置**：`main/HYDRO/MOD_Grid_RiverLakeFlow.F90` 自适应子步长的蓄量限制 `dt_this = min(dt_this, volwater / sum_hflux_riv(i))`。
 - **原因**：开 `DEF_USE_BIFURCATION` 时子步长是所有进程、所有单元流域的最小值。几乎干涸、净出流为正的单元流域让
