@@ -521,6 +521,15 @@ table input {
   border-radius: var(--r-md);
   background: var(--surface);
 }
+.dialog-content.confirm-dialog {
+  width: min(460px, 90vw);
+}
+.confirm-message {
+  white-space: pre-line;
+}
+.confirm-actions {
+  justify-content: flex-end;
+}
 /* 对话框经 Portal 挂在 body 下，页面里 `.xxx-page .button-row` 的间距管不到，按钮会贴在一起。 */
 .dialog-content .button-row {
   display: flex;
@@ -3214,6 +3223,45 @@ table input {
 .versions-note {
   margin: 10px 0 0;
   line-height: 1.6;
+}
+/* 草稿的保存、放弃、冻结：贴着窗口底边，长页面滚到哪里都点得到。 */
+.versions-actionbar {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 -6px 16px #0e1c2c14;
+}
+.versions-actionbar .button-row {
+  margin: 0;
+}
+.versions-actionbar-dirty {
+  color: var(--warning);
+  font-weight: 600;
+}
+/* 只读的适用范围。 */
+.versions-facts {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 6px 16px;
+  margin: 0;
+}
+.versions-facts > div {
+  display: contents;
+}
+.versions-facts dt {
+  color: var(--muted);
+}
+.versions-facts dd {
+  margin: 0;
 }
 .versions-summary {
   display: grid;

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import type { FrozenRevision, ModelDraft, Overlay, VersionRef } from '../../lib/types';
 import { Card, Notice } from '../../components/ui';
 import { versionDepth } from './model';
@@ -142,12 +143,13 @@ export default function VersionLibrary({
     const records = targets.reduce((sum, v) => sum + (of(v)?.history ?? 0), 0);
     const names = targets.map((v) => `${v.name} · r${v.version.revision}`).join(t('、', ', '));
     if (
-      !window.confirm(
+      !(await askConfirm(
         t(
           `删除 ${names}？${records > 0 ? `提到它们的 ${records} 条历史记录会保留，但不能再按原版本重放。` : ''}删除后不能恢复。`,
           `Delete ${names}? ${records > 0 ? `The ${records} history records that name them stay, but can no longer be replayed with that version. ` : ''}This cannot be undone.`,
         ),
-      )
+        { confirmLabel: t('删除', 'Delete'), danger: true },
+      ))
     )
       return;
     setBusy(true);
@@ -180,12 +182,13 @@ export default function VersionLibrary({
   async function removeDraft(d: ModelDraft) {
     if (busy || disabled) return;
     if (
-      !window.confirm(
+      !(await askConfirm(
         t(
           `删除草稿「${d.name}」？已经从它冻结出的版本不受影响。删除后不能恢复。`,
           `Delete the draft “${d.name}”? Versions already frozen from it stay. This cannot be undone.`,
         ),
-      )
+        { confirmLabel: t('删除草稿', 'Delete draft'), danger: true },
+      ))
     )
       return;
     // 草稿自己的代码副本：里面可能有还没冻结的代码改动，单独问一次。别的草稿也在用的不删（后端会再查一遍）。
@@ -195,12 +198,17 @@ export default function VersionLibrary({
     const deleteWorkspace =
       !!d.code.workspace &&
       !shared &&
-      window.confirm(
+      (await askConfirm(
         t(
-          `同时删除它的代码工作区 ${d.code.workspace}？里面还没冻结的代码改动会一起删掉；选「取消」则保留代码。`,
-          `Also delete its code workspace ${d.code.workspace}? Code changes not yet frozen go with it; choose Cancel to keep the code.`,
+          `同时删除它的代码工作区 ${d.code.workspace}？里面还没冻结的代码改动会一起删掉。`,
+          `Also delete its code workspace ${d.code.workspace}? Code changes not yet frozen go with it.`,
         ),
-      );
+        {
+          confirmLabel: t('一起删除代码', 'Delete the code too'),
+          cancelLabel: t('保留代码', 'Keep the code'),
+          danger: true,
+        },
+      ));
     setBusy(true);
     setError('');
     setNotice('');

@@ -197,7 +197,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             const missing = missingRevision(error);
             const target = current.current.chosenVersion ?? latestOfficial;
             if (!missing || !target) throw error;
-            if (!askToRebind(rebindQuestion(missing, target, bilingual)))
+            if (!(await askToRebind(rebindQuestion(missing, target, bilingual))))
               throw new Error(
                 bilingual(
                   `算例绑定的模型版本 ${versionLabel(missing)} 已不在模型库中；未改绑，算例未打开。`,

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke, invokeJson } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import { Button, Field, Input, Notice } from '../../components/ui';
 
 type Entry = { name: string; path: string; kind: 'file' | 'dir' | 'link'; size: number };
@@ -79,7 +80,12 @@ export default function CodeFiles({
     }
   }
   async function openFile(path: string) {
-    if (edited && !window.confirm(t('当前文件的修改还没保存，放弃吗？', 'Discard unsaved edits?')))
+    if (
+      edited &&
+      !(await askConfirm(t('当前文件的修改还没保存，放弃吗？', 'Discard unsaved edits?'), {
+        danger: true,
+      }))
+    )
       return;
     setError('');
     const file = source
@@ -113,12 +119,13 @@ export default function CodeFiles({
         const from = await invoke<string | null>('pick_folder', { key: 'workspace-put-dir' });
         if (!from) return false;
         if (
-          !window.confirm(
+          !(await askConfirm(
             t(
               `用所选文件夹整个替换 ${path}？原目录里的文件都会被换掉（改动可以撤回）。`,
               `Replace ${path} entirely with the chosen folder? Every file in it is replaced (the change can be reverted).`,
             ),
-          )
+            { danger: true },
+          ))
         )
           return false;
         await invokeJson('workspace_put', { name, path, from, folder: true, message });
@@ -130,7 +137,12 @@ export default function CodeFiles({
     act(
       async () => {
         if (
-          !window.confirm(t(`删除 ${path}？（改动可以撤回）`, `Delete ${path}? (can be reverted)`))
+          !(await askConfirm(
+            t(`删除 ${path}？（改动可以撤回）`, `Delete ${path}? (can be reverted)`),
+            {
+              danger: true,
+            },
+          ))
         )
           return false;
         await invokeJson('workspace_remove', { name, path, message });

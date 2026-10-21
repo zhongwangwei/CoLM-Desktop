@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { withCatalogLabels } from '../../lib/param-presentation';
+import { askConfirm } from '../../lib/confirm';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import type {
   AppState,
@@ -40,7 +41,7 @@ import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
 import { appLocale } from '../history/history';
 export default function VersionsPage() {
-  const { state, update, navigate, refreshVersions } = useApp(),
+  const { state, update, navigate, refreshVersions, notify } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
   const [draft, setDraft] = useState<ModelDraft | null>(null),
     [drafts, setDrafts] = useState<ModelDraft[]>([]),
@@ -80,7 +81,6 @@ export default function VersionsPage() {
     [error, setError] = useState(''),
     [busy, setBusy] = useState(false),
     [dirty, setDirty] = useState(false),
-    [advanced, setAdvanced] = useState(state.expert),
     [references, setReferences] = useState<HistoryOperation[]>([]),
     [assetRoot, setAssetRoot] = useState(''),
     [processPath, setProcessPath] = useState(''),
@@ -769,12 +769,6 @@ export default function VersionsPage() {
   if (shown) {
     guideActions.push(
       {
-        id: 'version-advanced-toggle',
-        label: t('适用范围与率定/验证时段', 'Applicability and calibration / validation periods'),
-        kind: 'click',
-        run: () => setAdvanced(!advanced),
-      },
-      {
         id: 'version-export-parameters',
         enabled: !busy && !codeBusy,
         label: t('导出参数 JSON', 'Export parameters JSON'),
@@ -930,53 +924,6 @@ export default function VersionsPage() {
         ],
         set: setProcess,
       });
-    if (advanced) {
-      for (const key of ['sites', 'land_classes'] as const)
-        guideFields.push({
-          id: `version-${key}`,
-          label: key,
-          value: draft.applicability[key].join(','),
-          type: 'text',
-          set: (v) =>
-            edit({
-              ...draft,
-              applicability: {
-                ...draft.applicability,
-                [key]: v
-                  .split(',')
-                  .map((s) => s.trim())
-                  .filter(Boolean),
-              },
-            }),
-        });
-      for (const key of ['calibration', 'validation'] as const)
-        for (const part of ['start', 'end'] as const)
-          guideFields.push({
-            id: `version-${key}-${part}`,
-            label: `${key} ${part}`,
-            value: draft.applicability[key]?.[part] ?? '',
-            type: 'text',
-            set: (v) =>
-              edit({
-                ...draft,
-                applicability: {
-                  ...draft.applicability,
-                  [key]: {
-                    start: draft.applicability[key]?.start ?? '',
-                    end: draft.applicability[key]?.end ?? '',
-                    [part]: v,
-                  },
-                },
-              }),
-          });
-      guideFields.push({
-        id: 'version-asset-root',
-        label: t('资产根目录', 'Asset root'),
-        value: assetRoot,
-        type: 'text',
-        set: setAssetRoot,
-      });
-    }
     guideActions.push(
       {
         id: 'version-discard',
@@ -1094,11 +1041,19 @@ export default function VersionsPage() {
   const isOfficial = !draft && viewing?.version.id === 'official';
   const inUse =
     !draft && !!viewing && !!selected && keyOf(viewing.version) === keyOf(selected.version);
+  // 页签名说清楚里面是什么（2026-10-21 用户问这几个页签会不会引起混乱）：草稿上第一页是改参数的地方，
+  // 冻结的版本上是"改了什么"；"研究"和侧栏的研究页同名，这里是"拿这个版本做研究、结果写回它"。
+  // 使用记录没有内容时不占一个页签。
   const tabs: [typeof tab, string][] = [
-    ['changes', t('改动', 'Changes')],
+    ['changes', draft ? t('参数与设置', 'Parameters and settings') : t('改了什么', 'What changed')],
     ['code', t('代码', 'Code')],
-    ['research', t('研究', 'Research')],
-    ['usage', `${t('使用记录', 'Usage')}${references.length ? ` (${references.length})` : ''}`],
+    [
+      'research',
+      draft ? t('用研究定参数', 'Tune by a study') : t('研究这个版本', 'Study this version'),
+    ],
+    ...(references.length || tab === 'usage'
+      ? ([['usage', `${t('使用记录', 'Usage')} (${references.length})`]] as [typeof tab, string][])
+      : []),
   ];
   const openParameters = (type: ParameterType = 'global', parameterId = '') => {
     setParamsType(type);
@@ -1254,30 +1209,7 @@ export default function VersionsPage() {
                 )}
               </div>
               <div className="button-row versions-head-actions">
-                {editable ? (
-                  <>
-                    <Button disabled={busy || codeBusy || !dirty} onClick={() => run(save)}>
-                      {t('保存草稿', 'Save draft')}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      disabled={busy || codeBusy || !dirty}
-                      onClick={() => {
-                        if (window.confirm(t('放弃尚未保存的修改？', 'Discard unsaved edits?')))
-                          run(discardLocal);
-                      }}
-                    >
-                      {t('放弃修改', 'Discard edits')}
-                    </Button>
-                    <Button
-                      disabled={busy || codeBusy || freezeCheck?.ready === false}
-                      variant="primary"
-                      onClick={() => run(freeze)}
-                    >
-                      {t('冻结为新版本', 'Freeze as a version')}
-                    </Button>
-                  </>
-                ) : (
+                {editable ? null : (
                   <>
                     {!inUse && viewing && (
                       <Button
@@ -1532,7 +1464,21 @@ export default function VersionsPage() {
                               </button>
                             </td>
                             <td>
-                              <code>{row.raw_key}</code>
+                              {/* 和参数表一样名字在前、键名在后；名称表里没有的只显示键名。 */}
+                              {(() => {
+                                const label = catalog.find((d) => d.id === row.parameter_id)?.[
+                                  state.language === 'en' ? 'label_en' : 'label_zh'
+                                ];
+                                return label &&
+                                  !row.raw_key.toUpperCase().endsWith(label.toUpperCase()) ? (
+                                  <>
+                                    <strong>{label}</strong>
+                                    <code className="param-key">{row.raw_key}</code>
+                                  </>
+                                ) : (
+                                  <code>{row.raw_key}</code>
+                                );
+                              })()}
                             </td>
                             <td className="muted">
                               {many
@@ -1588,12 +1534,32 @@ export default function VersionsPage() {
                 </div>
               )}
             </Card>
+            {/* AI 网络是版本内容的一部分，放在这一页；原来放在"研究"页签里，没有网络时也占一张"没有 AI 网络"的卡片。 */}
+            {shown.overlay.hybrid && (
+              <Card
+                title={t('AI 网络', 'AI network')}
+                description={t(
+                  '网络在研究页训练和安装，只支持 Rust 引擎。',
+                  'Networks are trained and installed on the research page and need the Rust engine.',
+                )}
+              >
+                <p>
+                  {t(
+                    `已挂上 AI 网络（${(shown.overlay.hybrid.assets ?? []).length} 个模型文件）。`,
+                    `An AI network is attached (${(shown.overlay.hybrid.assets ?? []).length} model files).`,
+                  )}
+                </p>
+                <Advanced title={t('网络配置', 'Network configuration')}>
+                  <pre>{shown.overlay.hybrid.config}</pre>
+                </Advanced>
+              </Card>
+            )}
             {Object.keys(shown.overlay.physics).length > 0 && (
               <Card
                 title={t('开关改值', 'Switch values')}
                 description={t(
-                  '在「其他模型设置」里按过程写下的 namelist 值。',
-                  'Namelist values written under “Other model settings”.',
+                  '以 namelist 值写下的改动（示踪物设置，或以前按过程改的参数）。全局参数在"修改参数"里改一次，就会换成参数改值。',
+                  'Changes stored as namelist values (tracer settings, or parameters changed by process before). Changing a global parameter under "Edit parameters" turns it into a parameter override.',
                 )}
               >
                 <table className="versions-table">
@@ -1628,154 +1594,84 @@ export default function VersionsPage() {
               </Card>
             )}
             {!draft && viewing && <VersionChanges version={viewing} versions={state.versions} />}
-            <Card>
-              <Advanced
-                title={t(
-                  '其他模型设置：示踪物、过程文件、按过程看参数',
-                  'Other model settings: tracers, process files, parameters by process',
+            <Advanced title={t('示踪物与过程文件', 'Tracers and process files')}>
+              <p className="muted versions-hint">
+                {t(
+                  '只在要用示踪物（同位素、甲烷等）时需要：选要追踪的物质、填示踪物定义、导入过程文件（导入后"修改参数"里会多出"过程文件"一页）。其余参数都在"修改参数"里改。',
+                  'Only needed for tracers (isotopes, methane…): choose tracer families, fill in tracer definitions and import process files (which then get a "Process files" page under "Edit parameters"). Every other parameter is changed under "Edit parameters".',
                 )}
-              >
-                <p className="muted versions-hint">
-                  {t(
-                    '过程开关（是否启用某个过程、用哪个方案）属于算例，在模拟设置里选；这里只有版本能带的设置。',
-                    'Process switches (whether a process runs, which scheme) belong to a case and are chosen in the simulation setup; only settings a version can carry are here.',
-                  )}
-                </p>
-                <ConfigurationOptions
-                  engine={setupEnvironment.engine}
-                  subgrid={setupEnvironment.subgrid}
-                  caseValues={setupEnvironment.caseValues}
-                  excludeKeys={setupHandledKeys}
-                  source={
-                    draft
-                      ? {
-                          kind: 'draft',
-                          id: draft.id,
-                          generation: draft.generation,
-                          overlay: draft.overlay,
-                        }
-                      : { kind: 'frozen', version: viewing!.version }
-                  }
-                  overlay={shown.overlay}
-                  fields={fields}
-                  catalog={catalog}
-                  caseDir={configurationCase}
-                  kernelDir={configurationKernel?.dir ?? null}
-                  kernelMacros={configurationKernel?.macros}
-                  caseScope={
-                    setupEnvironment.domain === 'site'
-                      ? 'site'
-                      : setupEnvironment.domain
-                        ? 'spatial'
-                        : 'unknown'
-                  }
-                  disabled={busy || codeBusy}
-                  onChange={editable ? (next) => edit({ ...draft!, overlay: next }) : undefined}
-                  onImportProcess={editable ? importConfigurationProcess : undefined}
-                />
-              </Advanced>
-            </Card>
-            <Card>
-              <Advanced
-                open={advanced}
-                onOpenChange={setAdvanced}
-                title={t(
-                  '适用范围与率定/验证时段',
-                  'Applicability and calibration / validation periods',
-                )}
-              >
-                <div className="form-grid">
-                  {(['sites', 'land_classes'] as const).map((key) => (
-                    <Field
-                      key={key}
-                      label={
-                        key === 'sites'
-                          ? t('站点（逗号分隔）', 'Sites (comma separated)')
-                          : t('地类（逗号分隔）', 'Land classes (comma separated)')
+              </p>
+              {/* 原来这里按过程列出 48 个设置，外加"按植物类型调整参数"，全是"修改参数"里已有的
+                  全局参数和 PFT 参数（2026-10-21 用户问"有啥用"，对照真实目录查过），而且写进的是
+                  开关改值，同一个参数有两种存法。只留示踪物这部分独有的内容。 */}
+              <ConfigurationOptions
+                process="DEF_USE_TRACER"
+                engine={setupEnvironment.engine}
+                subgrid={setupEnvironment.subgrid}
+                caseValues={setupEnvironment.caseValues}
+                excludeKeys={setupHandledKeys}
+                source={
+                  draft
+                    ? {
+                        kind: 'draft',
+                        id: draft.id,
+                        generation: draft.generation,
+                        overlay: draft.overlay,
                       }
-                    >
-                      <Input
-                        disabled={!editable || busy || codeBusy}
-                        value={shown.applicability[key].join(',')}
-                        onChange={(e) =>
-                          draft &&
-                          edit({
-                            ...draft,
-                            applicability: {
-                              ...draft.applicability,
-                              [key]: e.target.value
-                                .split(',')
-                                .map((s) => s.trim())
-                                .filter(Boolean),
-                            },
-                          })
-                        }
-                      />
-                    </Field>
-                  ))}
-                  {(['calibration', 'validation'] as const).map((key) => (
-                    <div key={key}>
-                      <p>
-                        {key === 'calibration' ? t('率定', 'Calibration') : t('验证', 'Validation')}
-                      </p>
-                      {(['start', 'end'] as const).map((part) => (
-                        <Field
-                          key={part}
-                          label={part === 'start' ? t('开始', 'Start') : t('结束', 'End')}
-                        >
-                          <Input
-                            type="text"
-                            placeholder="YYYY-MM-DD"
-                            maxLength={10}
-                            disabled={!editable || busy || codeBusy}
-                            value={shown.applicability[key]?.[part] ?? ''}
-                            onChange={(e) =>
-                              draft &&
-                              edit({
-                                ...draft,
-                                applicability: {
-                                  ...draft.applicability,
-                                  [key]: {
-                                    start: draft.applicability[key]?.start ?? '',
-                                    end: draft.applicability[key]?.end ?? '',
-                                    [part]: e.target.value,
-                                  },
-                                },
-                              })
-                            }
-                          />
-                        </Field>
-                      ))}
-                      {editable && (
-                        <Button
-                          disabled={busy || codeBusy}
-                          onClick={() =>
-                            edit({
-                              ...draft!,
-                              applicability: { ...draft!.applicability, [key]: null },
-                            })
-                          }
-                        >
-                          {t('清除时段', 'Clear period')}
-                        </Button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <Field
-                  label={t(
-                    '待冻结资产根目录（留空使用草稿目录）',
-                    'Asset root (blank uses draft staging)',
+                    : { kind: 'frozen', version: viewing!.version }
+                }
+                overlay={shown.overlay}
+                fields={fields}
+                catalog={catalog}
+                caseDir={configurationCase}
+                kernelDir={configurationKernel?.dir ?? null}
+                kernelMacros={configurationKernel?.macros}
+                caseScope={
+                  setupEnvironment.domain === 'site'
+                    ? 'site'
+                    : setupEnvironment.domain
+                      ? 'spatial'
+                      : 'unknown'
+                }
+                disabled={busy || codeBusy}
+                onChange={editable ? (next) => edit({ ...draft!, overlay: next }) : undefined}
+                onImportProcess={editable ? importConfigurationProcess : undefined}
+              />
+            </Advanced>
+            {(() => {
+              // 适用范围：研究结果写进来时自动记下这个版本是在哪些站点、哪些时段率定出来的，只作记录，
+              // 运行时不做检查。原来是一张手填的表（逗号分隔的站点、YYYY-MM-DD 文本框、"待冻结资产根目录"），
+              // 看不懂也用不上（2026-10-21 用户问"有用吗"）；现在有记录才显示，只读。
+              const a = shown.applicability;
+              const period = (p: { start: string; end: string } | null | undefined) =>
+                p && (p.start || p.end)
+                  ? `${p.start || '…'} ${t('至', 'to')} ${p.end || '…'}`
+                  : null;
+              const rows = [
+                [t('站点', 'Sites'), a.sites.join(', ') || null],
+                [t('地类', 'Land classes'), a.land_classes.join(', ') || null],
+                [t('率定期', 'Calibration period'), period(a.calibration)],
+                [t('验证期', 'Validation period'), period(a.validation)],
+              ].filter(([, v]) => v);
+              return rows.length ? (
+                <Card
+                  title={t('适用范围', 'Where it was calibrated')}
+                  description={t(
+                    '研究结果写进这个版本时自动记下的站点和时段，说明它是在哪里、用哪段数据率定出来的；只作记录，运行时不检查。',
+                    'Recorded automatically when study results were written into this version: the sites and periods it was calibrated on. A record only; runs do not check it.',
                   )}
                 >
-                  <Input
-                    disabled={!editable || busy || codeBusy}
-                    value={assetRoot}
-                    onChange={(e) => setAssetRoot(e.target.value)}
-                  />
-                </Field>
-              </Advanced>
-            </Card>
+                  <dl className="versions-facts">
+                    {rows.map(([k, v]) => (
+                      <div key={k}>
+                        <dt>{k}</dt>
+                        <dd>{v}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </Card>
+              ) : null;
+            })()}
           </div>
           <div hidden={tab !== 'code'} className="versions-panel">
             {shown.code.workspace && draft ? (
@@ -1979,29 +1875,6 @@ export default function VersionsPage() {
                 )}
               </Card>
             )}
-            <Card
-              title={t('AI 网络', 'AI network')}
-              description={t(
-                '网络在研究页训练和安装，只支持 Rust 引擎。',
-                'Networks are trained and installed on the research page and need the Rust engine.',
-              )}
-            >
-              {shown.overlay.hybrid ? (
-                <>
-                  <p>
-                    {t(
-                      `已挂上 AI 网络（${(shown.overlay.hybrid.assets ?? []).length} 个模型文件）。`,
-                      `An AI network is attached (${(shown.overlay.hybrid.assets ?? []).length} model files).`,
-                    )}
-                  </p>
-                  <Advanced title={t('网络配置', 'Network configuration')}>
-                    <pre>{shown.overlay.hybrid.config}</pre>
-                  </Advanced>
-                </>
-              ) : (
-                <p className="versions-empty">{t('没有 AI 网络。', 'No AI network.')}</p>
-              )}
-            </Card>
           </div>
           <div hidden={tab !== 'usage'} className="versions-panel">
             <Card
@@ -2052,6 +1925,69 @@ export default function VersionsPage() {
               </Button>
             </Card>
           </div>
+          {/* 保存、放弃、冻结是改完才做的事：放在底部，贴着窗口底边，长页面滚到哪里都点得到
+              （2026-10-21 用户：这几个按钮放最下面更合适）。页签留在上面，它决定下面显示什么。 */}
+          {editable && (
+            <div className="versions-actionbar">
+              <span className={dirty ? 'versions-actionbar-dirty' : 'muted'}>
+                {dirty
+                  ? t('有未保存的修改', 'Unsaved edits')
+                  : freezeCheck?.ready === false
+                    ? t(
+                        '已保存；冻结前检查还没通过（见上方）',
+                        'Saved; checks before freezing not passed yet (above)',
+                      )
+                    : t(
+                        '已保存在版本库里：以后从"新建修改版"页的"继续之前的修改"再打开',
+                        'Saved in the version library: reopen it later under "Continue earlier work" on the New modified version page',
+                      )}
+              </span>
+              <div className="button-row">
+                <Button
+                  variant="ghost"
+                  disabled={busy || codeBusy || !dirty}
+                  onClick={() =>
+                    void askConfirm(
+                      t(
+                        '放弃尚未保存的修改？草稿回到上次保存时的样子。',
+                        'Discard unsaved edits? The draft goes back to how it was last saved.',
+                      ),
+                      { confirmLabel: t('放弃修改', 'Discard edits'), danger: true },
+                    ).then((ok) => {
+                      if (ok) run(discardLocal);
+                    })
+                  }
+                >
+                  {t('放弃修改', 'Discard edits')}
+                </Button>
+                <Button
+                  disabled={busy || codeBusy || !dirty}
+                  onClick={() =>
+                    run(async () => {
+                      const saved = await save();
+                      // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
+                      notify(
+                        t(
+                          `已保存草稿"${saved.name}"。它留在版本库里，关掉应用也不会丢：以后从"项目"首页点"＋ 新建修改版"，在"继续之前的修改"里打开；"所有版本"里也列着。`,
+                          `Saved the draft "${saved.name}". It stays in the version library even after you quit: open it again from Project → "+ New modified version" → "Continue earlier work", or from "All versions".`,
+                        ),
+                      );
+                      return saved;
+                    })
+                  }
+                >
+                  {t('保存草稿', 'Save draft')}
+                </Button>
+                <Button
+                  disabled={busy || codeBusy || freezeCheck?.ready === false}
+                  variant="primary"
+                  onClick={() => run(freeze)}
+                >
+                  {t('冻结为新版本', 'Freeze as a version')}
+                </Button>
+              </div>
+            </div>
+          )}
           {draft && (
             <StudyImportDialog
               preview={studyPreview}

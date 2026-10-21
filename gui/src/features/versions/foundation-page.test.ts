@@ -107,6 +107,7 @@ function page(
     PFT: [],
     useApp: () => ({
       state,
+      notify: () => {},
       update: (patch: object) => Object.assign(state, patch),
       // Like the app: a page's leave guard can refuse the navigation.
       navigate: (route: string) => {
@@ -370,7 +371,11 @@ test('the version page shows one version in tabs that hide panels without unmoun
   const p = page('PFT');
   await p.mount();
   const tabs = p.elements.filter((e) => e.props.role === 'tab');
-  assert.equal(tabs.length, 4);
+  // A frozen version: "what changed" instead of an editing page; no usage tab while nothing used it.
+  assert.deepEqual(
+    tabs.map((e) => e.children.flat().join('')),
+    ['改了什么', '代码', '研究这个版本'],
+  );
   assert.equal(tabs.filter((e) => e.props['aria-selected']).length, 1, 'one tab is current');
   const panels = p.elements.filter(
     (e) => e.type === 'div' && e.props.className === 'versions-panel',

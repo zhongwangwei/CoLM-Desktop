@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import {
   Advanced,
@@ -1508,9 +1509,9 @@ export default function ResourcesPage() {
               </div>
               <Button
                 disabled={busy || dirty}
-                onClick={() => {
+                onClick={async () => {
                   if (
-                    window.confirm(
+                    await askConfirm(
                       t(
                         '核对并恢复租约？仅在确认任务已结束时移除失效租约。',
                         'Reconcile leases? Remove stale leases only after confirming their jobs have stopped.',
@@ -1529,13 +1530,14 @@ export default function ResourcesPage() {
                 <Button
                   variant="danger"
                   disabled={busy || dirty || !snapshot}
-                  onClick={() => {
+                  onClick={async () => {
                     if (
-                      window.confirm(
+                      await askConfirm(
                         t(
                           '清理该快照？后端会保护活动租约。',
                           'Clean this snapshot? Active leases are protected by the backend.',
                         ),
+                        { danger: true },
                       )
                     )
                       run(`maintenance:${selected}`, () =>

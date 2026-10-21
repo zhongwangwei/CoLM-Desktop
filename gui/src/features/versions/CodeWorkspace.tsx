@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { invokeJson, invoke } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
@@ -283,8 +284,12 @@ export default function CodeWorkspace({
                 <Button
                   disabled={busy || !message}
                   variant="danger"
-                  onClick={() => {
-                    if (window.confirm(t(`恢复 ${file.path}？`, `Revert ${file.path}?`)))
+                  onClick={async () => {
+                    if (
+                      await askConfirm(t(`恢复 ${file.path}？`, `Revert ${file.path}?`), {
+                        danger: true,
+                      })
+                    )
                       run(async () => {
                         const value = await invokeJson('workspace_revert_file', {
                           name,
@@ -344,10 +349,11 @@ export default function CodeWorkspace({
             <Button
               variant="danger"
               disabled={busy || !commit}
-              onClick={() => {
+              onClick={async () => {
                 if (
-                  window.confirm(
+                  await askConfirm(
                     t('丢弃该提交后的代码改动？', 'Discard code changes after this commit?'),
+                    { danger: true },
                   )
                 )
                   run(async () => {
@@ -362,8 +368,13 @@ export default function CodeWorkspace({
             <Button
               variant="danger"
               disabled={busy}
-              onClick={() => {
-                if (window.confirm(t(`删除工作区 ${name}？`, `Delete workspace ${name}?`)))
+              onClick={async () => {
+                if (
+                  await askConfirm(t(`删除工作区 ${name}？`, `Delete workspace ${name}?`), {
+                    confirmLabel: t('删除', 'Delete'),
+                    danger: true,
+                  })
+                )
                   run(async () => {
                     const result = await invokeJson('workspace_delete', { name });
                     setStatus(null);

@@ -14,6 +14,7 @@ import appManifest from '../package.json';
 import { GuideBinding, usePageContract } from './lib/guide';
 import { Button, Notice } from './components/ui';
 import AboutDialog, { betaNote } from './components/AboutDialog';
+import ConfirmHost from './components/ConfirmHost';
 import StartCover from './components/StartCover';
 const ProjectPage = lazy(() => import('./features/projects/ProjectPage'));
 const CasesPage = lazy(() => import('./features/cases/CasesPage'));
@@ -173,6 +174,7 @@ export default function App() {
       <StartCover />
       <GuideBinding />
       <AboutDialog fallbackVersion={appManifest.version} />
+      <ConfirmHost />
       <div
         className={`desktop-shell ${state.assistantOpen ? 'assistant-visible' : ''}`}
         style={{ '--assistant-width': `${assistantWidth}px` } as CSSProperties}

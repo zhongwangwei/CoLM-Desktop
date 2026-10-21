@@ -1,3 +1,4 @@
+import { askConfirm } from './confirm';
 import type { FrozenRevision, VersionRef } from './types';
 
 /** `model_prune`: old official revisions removed (or, for a dry run, removable). */
@@ -61,4 +62,4 @@ export function rebindQuestion(
 }
 
 /** Ask before rebinding; a separate function so tests can answer for the user. */
-export const askToRebind = (question: string) => window.confirm(question);
+export const askToRebind = (question: string) => askConfirm(question);
