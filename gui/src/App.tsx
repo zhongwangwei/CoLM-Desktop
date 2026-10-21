@@ -200,7 +200,7 @@ export default function App() {
           </div>
         </header>
         <aside className="sidebar" aria-label={tr('主导航', 'Main navigation')}>
-          {state.root && (
+          {state.root ? (
             <button
               type="button"
               className={`current-project ${onCurrentProject ? 'active' : ''}`}
@@ -210,6 +210,16 @@ export default function App() {
             >
               <span className="current-project-label">{tr('当前项目', 'Current project')}</span>
               <span className="current-project-name">{projectName(state.root, state.cases)}</span>
+            </button>
+          ) : (
+            // 启动时不自动打开上次的项目：这里写明还没选，点一下去首页的"最近的项目"里选。
+            <button
+              type="button"
+              className="current-project is-empty"
+              onClick={() => openNavigation(navigation[0])}
+            >
+              <span className="current-project-label">{tr('当前项目', 'Current project')}</span>
+              <span className="current-project-name">{tr('未选项目', 'None selected')}</span>
             </button>
           )}
           <nav className="sidebar-links">{navigation.slice(0, 5).map(navButton)}</nav>

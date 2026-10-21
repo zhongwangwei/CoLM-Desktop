@@ -1929,6 +1929,13 @@ table input {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.current-project.is-empty {
+  border-style: dashed;
+}
+.current-project.is-empty .current-project-name {
+  color: var(--muted);
+  font-weight: 500;
+}
 
 /* TaskCard (long waits: engine build, reading sites): global so components importing it stay testable in node. */
 .task-card {

@@ -16,6 +16,8 @@ type VersionDeleteReport = {
 };
 import {
   RECENT_PROJECTS_KEY,
+  RECENT_PROJECT_NAMES_KEY,
+  recentProjectNames,
   recentProjectRoots,
   rememberProject,
   projectName,
@@ -26,6 +28,7 @@ export default function ProjectPage() {
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [roots, setRoots] = useState<string[]>([]),
+    [names, setNames] = useState<Record<string, string>>({}),
     [ready, setReady] = useState(!hasBackend()),
     [busy, setBusy] = useState(false),
     [error, setError] = useState(''),
@@ -68,6 +71,7 @@ export default function ProjectPage() {
         .then((recent) => {
           if (current) {
             setRoots(recentProjectRoots(recent[RECENT_PROJECTS_KEY]));
+            setNames(recentProjectNames(recent[RECENT_PROJECT_NAMES_KEY]));
             setReady(true);
           }
         })
@@ -220,6 +224,22 @@ export default function ProjectPage() {
     });
     return { root, cases };
   }
+  // 最近列表里的目录可能已经删了（临时目录、换过位置的项目）：打不开就从列表里拿掉，别一直留着。
+  // 只在读目录失败时拿掉；"等当前操作完成"这类没真去读的失败不算。
+  const openRecent = (root: string) =>
+    work(async () => {
+      try {
+        return await loadProject(root);
+      } catch (error) {
+        const next = roots.filter((item) => item !== root);
+        if (active.current) setRoots(next);
+        await invoke('save_recent', {
+          key: RECENT_PROJECTS_KEY,
+          value: JSON.stringify(next),
+        }).catch(() => {});
+        throw error;
+      }
+    });
   const browseProject = () =>
     work(async () => {
       const root = await invoke<string | null>('pick_folder', { key: 'project-open' });
@@ -864,17 +884,18 @@ export default function ProjectPage() {
 
           {shownRoots.length > 0 && (
             <div className="readiness-recents">
-              <span className="muted">{t('打开过的目录:', 'Previous folders:')}</span>
-              {shownRoots.slice(0, 3).map((root) => (
+              <span className="muted">{t('最近的项目:', 'Recent projects:')}</span>
+              {/* 启动时不再自动打开上次的项目，这里是重新打开的主要入口，所以多列几个。 */}
+              {shownRoots.slice(0, 5).map((root) => (
                 <Button
                   key={root}
                   variant="ghost"
                   className="readiness-recent-chip"
                   disabled={!enabled || !ready}
                   title={root}
-                  onClick={() => void work(() => loadProject(root)).catch(() => {})}
+                  onClick={() => void openRecent(root).catch(() => {})}
                 >
-                  {projectName(root)}
+                  {names[root] ?? projectName(root)}
                 </Button>
               ))}
             </div>

@@ -271,7 +271,8 @@ function booting(prune: () => Promise<unknown>) {
   const state: Record<string, unknown> = {};
   const invoke = async (command: string) => {
     calls.push(command);
-    if (command === 'load_recent') return {};
+    if (command === 'load_recent') return { root: '/last/project' };
+    if (command === 'list_cases') return [{ dir: '/last/project/a', name: 'a' }];
     if (command === 'list_kernels') return [];
     return undefined;
   };
@@ -370,4 +371,14 @@ test('clicking the same case again while it opens waits for the first open', asy
   const [a, b] = await Promise.all([first, second]);
   assert.ok(a && a === b, 'both clicks get the same opened case');
   assert.deepEqual(page.opens, ['/official'], 'the case is read once');
+});
+
+test('startup does not reopen the project worked on last', async () => {
+  // 2026-10-21 用户：重新打开总显示上次的"当前项目"，不合理；首页列出最近的项目，点了才打开。
+  const app = booting(async () => ({ removed: [] }));
+  await app.boot();
+  await settle();
+  assert.equal(app.state.root, undefined);
+  assert.ok(!app.calls.includes('list_cases'), String(app.calls));
+  assert.equal(app.state.busy, false);
 });

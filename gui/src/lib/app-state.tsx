@@ -20,7 +20,15 @@ import {
   withoutRevisions,
 } from './model-tidy';
 import { navigationBlock, type NavigationGuard, type NavigationTarget } from './navigation-guard';
-import { projectToSave, readSavedProject, writeSavedProject } from './navigation';
+import { projectName, projectToSave, readSavedProject, writeSavedProject } from './navigation';
+import {
+  RECENT_PROJECTS_KEY,
+  RECENT_PROJECT_NAMES_KEY,
+  namesFor,
+  recentProjectNames,
+  recentProjectRoots,
+  rememberProject,
+} from '../features/projects/project-model';
 import type {
   AppState,
   AppPatch,
@@ -268,39 +276,34 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('colm-ui-theme', state.theme);
     localStorage.setItem('colm-ui-assistant', String(state.assistantOpen));
   }, [state.language, state.theme, state.assistantOpen]);
-  // Reopen the project worked on last, on the page it was left on; a folder that no longer
-  // lists is forgotten.
-  const projectRestored = useRef(false);
+  // 当前项目只在这次打开的应用里有效：启动时不再自动打开上次的项目（2026-10-21 用户：重新打开总显示
+  // "当前项目 tianhe:uuu"，不合理）。首页列出最近的项目，点一下再打开；本次会话里各页之间仍能回到它。
   useEffect(() => {
-    const saved = readSavedProject(localStorage);
-    if (!saved || !hasBackend()) {
-      projectRestored.current = true;
-      return;
-    }
-    let alive = true;
-    void invoke<CaseEntry[]>('list_cases', { root: saved.root })
-      .then((cases) => {
-        if (alive && !current.current.root)
-          update({
-            root: saved.root,
-            cases,
-            projectView: { ...saved, home: current.current.route !== 'project' },
-          });
-      })
-      .catch(() => {})
-      .finally(() => {
-        projectRestored.current = true;
-      });
-    return () => {
-      alive = false;
-    };
-  }, [update]);
-  useEffect(() => {
-    if (projectRestored.current)
-      writeSavedProject(localStorage, projectToSave(state, readSavedProject(localStorage)));
+    writeSavedProject(localStorage, projectToSave(state, readSavedProject(localStorage)));
     // Only the project and its view are remembered.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.root, state.projectView]);
+  // 成为当前项目的目录都记进"最近的项目"，连同显示名：首页靠这份列表一点就开。原来只有项目页"选择目录"
+  // 会记，从历史、新建模拟打开的项目（比如服务器项目）都不在里面。`root` 也照旧记，后台整理模型版本时
+  // 靠它和这份列表判断哪些版本还有项目在用。
+  useEffect(() => {
+    const root = state.root;
+    if (!root || !hasBackend()) return;
+    // 算例还没读到时取不出服务器项目的名字，不拿哈希目录名去覆盖已有的名字。
+    const name = state.cases.length ? projectName(root, state.cases) : '';
+    void (async () => {
+      const recent = await invoke<Record<string, string>>('load_recent');
+      const roots = rememberProject(recentProjectRoots(recent[RECENT_PROJECTS_KEY]), root);
+      const names = recentProjectNames(recent[RECENT_PROJECT_NAMES_KEY]);
+      if (name) names[root] = name;
+      await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(roots) });
+      await invoke('save_recent', {
+        key: RECENT_PROJECT_NAMES_KEY,
+        value: JSON.stringify(namesFor(roots, names)),
+      });
+      await invoke('save_recent', { key: 'root', value: root });
+    })().catch(() => {});
+  }, [state.root, state.cases]);
   useEffect(() => {
     let alive = true;
     const identity = openEpoch;
@@ -330,30 +333,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
       update({ busy: true });
       try {
         await invoke('backend_ready');
-        const [kernels, recent, versions] = await Promise.all([
+        const [kernels, versions] = await Promise.all([
           invoke<KernelEntry[]>('list_kernels'),
-          invoke<Record<string, string>>('load_recent'),
           invokeJson<FrozenRevision[]>('model_list'),
         ]);
         if (!alive) return;
         const official = versions
           .filter((v) => v.version.id === 'official')
           .sort((a, b) => b.version.revision - a.version.revision)[0];
-        const root = recent.root ?? '';
-        let cases: CaseEntry[] = [];
-        if (root) {
-          try {
-            cases = await invoke<CaseEntry[]>('list_cases', { root });
-          } catch (error) {
-            if (alive) notify(String(error));
-          }
-        }
         if (alive)
           update({
             kernels,
             kernelDir: kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
-            root,
-            cases,
             versions,
             version: official ?? null,
             ...(official ? { versionRef: official.version } : {}),
