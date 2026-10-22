@@ -1960,3 +1960,54 @@ fn a_pack_submission_the_server_marked_failed_is_resolved_not_left_pending() {
         ["identity=failed", "the node job could not be submitted"]
     );
 }
+
+// 服务器上用的就是 POSIX sh；这里直接执行生成的片段，覆盖首次写入、内容相同不动、内容变化原子替换。
+#[cfg(unix)]
+#[test]
+fn kernel_manifest_is_written_without_an_empty_window() {
+    let root = std::env::temp_dir().join(format!("colm-manifest-write-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let dir = root.join("kernels/default-1");
+    let target = dir.join("manifest.json");
+    let run = |manifest: &str| {
+        let status = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(super::write_manifest_script(
+                dir.to_str().unwrap(),
+                manifest,
+            ))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name != "manifest.json")
+            .collect();
+        assert!(leftovers.is_empty(), "temporary files left: {leftovers:?}");
+    };
+    run("{\"schema\": 1}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"schema\": 1}\n"
+    );
+    let inode = |path: &std::path::Path| {
+        use std::os::unix::fs::MetadataExt;
+        std::fs::metadata(path).unwrap().ino()
+    };
+    let first = inode(&target);
+    run("{\"schema\": 1}");
+    assert_eq!(inode(&target), first, "an unchanged manifest is left alone");
+    run("{\"schema\": 2}");
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "{\"schema\": 2}\n"
+    );
+    assert_ne!(
+        inode(&target),
+        first,
+        "a changed manifest is replaced by rename, not rewritten"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -35773,3 +35773,23 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 **测试**：两个 workspace 的 fmt 与 clippy 通过；GUI 后端 429 条通过（新增 1 条）；`colm-agent` 197+7 条通过。
 
 **没做**：长超时名单与 C 级分级没有类似的自动核对，仍靠这一轮的人工比对。动态 `kind`（`kind={...}`）的按钮和研究页由 `action(...)` 生成的动作不在新测试的扫描范围内，这一轮已逐个人工核对过。
+
+## 第 739 轮：服务器批量运行偶发"内核清单为空"（2026-10-22）
+
+**现象**：用户在 T7920 上批量运行 90 个单点站点，其中 US-MMS 失败：`Preparing model execution...` 之后报 `cannot parse the kernel manifest at …/kernels/default-481e63c8/manifest.json`，原因是 `EOF while parsing a value at line 1 column 0`。
+
+**核对（服务器上只读查看）**：
+- `jobs/` 下 90 个作业里只有这一个的日志里有这条错误。
+- 清单目录 19:01:13 建立，`manifest.json` 最后一次改写在 19:08:09，现在是完整的 763 字节。
+- US-MMS 的作业在 19:07:39 开跑，正落在批量提交还在进行的 19:01–19:08 之间。
+
+**原因**：每次提交都用 `cat > manifest.json <<EOF` 原地重写这份清单。`cat >` 先把文件截空再写，中间有极短的空窗。写入本身在 `LifecycleLock` 里，提交之间不会互相踩；但读它的是已经开跑的作业，它不拿锁。US-MMS 正好在别的站点重写清单的空窗里读到了空文件。这个写法从远程功能一开始（`e11d328e`）就有；10 月 19 日改成"站点一次全部交进队列、5 路同时提交、按节点打包后立即开跑"以后，读写重叠的时间变长，才撞上。
+
+**修法**：`remote_cmd.rs` 新增 `write_manifest_script`，单站提交和研究提交（`remote_study.rs`）共用。先写到同目录的临时文件 `.manifest.json.$$`，内容与现有文件相同就删掉临时文件，不同才 `mv -f` 原子替换；读的一方只会看到旧的或新的完整文件。
+
+**测试**：
+- 新增 `kernel_manifest_is_written_without_an_empty_window`（Unix）：用 `sh` 实际执行生成的片段，检查首次写入的内容、内容相同时 inode 不变、内容变化时换成新 inode，并且不留临时文件。
+- 同一片段在 T7920 的 `/bin/sh`（dash）上、获准目录 `/media/zhwei/data02/zhwei/colm-desktop/tmp-manifest-check` 里实跑三次，结果相同（`cmp` 在 `/usr/bin/cmp`），之后已删除该目录。
+- 根 workspace fmt、clippy 通过；`cargo test -p colm-cli --bin colm-cli -- --test-threads=1` 484 条、`cargo test -p colm-remote --lib` 113 条通过。
+
+**用户要做的**：失败的 US-MMS 用批量运行页的"只选失败或已停止的站点重跑"再交一次即可。服务器上那份清单现在是完整的。

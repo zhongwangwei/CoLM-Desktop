@@ -1386,6 +1386,21 @@ fn resolve_remote_kernel(
     Ok(dir)
 }
 
+/// 在服务器上写内核清单的 shell 片段。
+///
+/// 原来每次提交都 `cat > manifest.json` 原地重写：`cat >` 先把文件截空再写，批量提交时已经开跑的
+/// 站点恰好在这几毫秒里读，就报 "EOF while parsing a value at line 1 column 0"（2026-10-22，
+/// 7920 上 90 站里的 US-MMS）。写入本身在 `LifecycleLock` 里，但读它的是正在运行的作业，不拿锁。
+/// 所以先写临时文件，内容相同就丢掉，不同才 `mv` 原子替换：读的一方只会看到旧的或新的完整文件。
+pub(crate) fn write_manifest_script(dir: &str, manifest: &str) -> String {
+    let dir = quote(dir);
+    format!(
+        "mkdir -p {dir} && t={dir}/.manifest.json.$$ && cat > \"$t\" <<'COLM_MANIFEST_EOF' && \
+{{ cmp -s \"$t\" {dir}/manifest.json && rm -f \"$t\" || mv -f \"$t\" {dir}/manifest.json; }}\n\
+{manifest}\nCOLM_MANIFEST_EOF\n"
+    )
+}
+
 /// Validate the execution host's selected manifest, never the local preset proxy.
 pub(super) fn check_selected_remote_kernel(
     ssh: &Ssh,
@@ -2168,27 +2183,28 @@ pub(super) fn cmd_run(opts: &Opts) -> Result<()> {
         )?;
         let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
         let (engine_uploaded, submitted) = engine_lock.run(|| {
-    let engine_uploaded = engine.upload(&ssh, &root)?;
-    if !fortran {
-        ssh.run_ok(&format!(
-            "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest}\nCOLM_MANIFEST_EOF\n",
-            dir = quote(&remote_kernel)
-        ))?;
-    }
-    let entries: Vec<String> = std::fs::read_dir(&staging)?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect();
-    if let Some(base) = &server_case {
-        check_server_destination(&ssh, base, &remote_case, true)?;
-    }
-    ssh.upload(&staging, &entries, &remote_case)?;
-    let _ = std::fs::remove_dir_all(&staging);
+            let engine_uploaded = engine.upload(&ssh, &root)?;
+            if !fortran {
+                ssh.run_ok(&write_manifest_script(&remote_kernel, &manifest))?;
+            }
+            let entries: Vec<String> = std::fs::read_dir(&staging)?
+                .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                .collect();
+            if let Some(base) = &server_case {
+                check_server_destination(&ssh, base, &remote_case, true)?;
+            }
+            ssh.upload(&staging, &entries, &remote_case)?;
+            let _ = std::fs::remove_dir_all(&staging);
 
-    // 4. 提交作业：先确保引擎编好，再跑。
-    ensure!(crate::fingerprint::configuration_identity(&case)? == local_configuration, "local frozen configuration changed during remote staging");
-    let submitted = job::submit_with(&ssh, &root, &id, &body, &spec, engine.id(), pack.as_ref())?;
-        Ok((engine_uploaded, submitted))
-    })?;
+            // 4. 提交作业：先确保引擎编好，再跑。
+            ensure!(
+                crate::fingerprint::configuration_identity(&case)? == local_configuration,
+                "local frozen configuration changed during remote staging"
+            );
+            let submitted =
+                job::submit_with(&ssh, &root, &id, &body, &spec, engine.id(), pack.as_ref())?;
+            Ok((engine_uploaded, submitted))
+        })?;
         Ok((engine_lock, engine_uploaded, submitted))
     })?;
     let mut record = record;

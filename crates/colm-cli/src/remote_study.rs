@@ -451,21 +451,21 @@ pub(crate) fn cmd_run(opts: &Opts) -> Result<()> {
     pending.sync_all()?;
     let mut engine_lock = colm_remote::engine_inventory::LifecycleLock::acquire(&ssh, &root)?;
     let (engine_uploaded, id, submitted) = engine_lock.run(|| {
-    let engine_uploaded = engine.upload(&ssh, &root)?;
-    if !fortran {
-        ssh.run_ok(&format!(
-            "mkdir -p {dir} && cat > {dir}/manifest.json <<'COLM_MANIFEST_EOF'\n{manifest_text}\nCOLM_MANIFEST_EOF\n",
-            dir = quote(&remote_kernel)
-        ))?;
-    }
-    // 服务器上已有的旧项目目录先清掉：研究要从头按这份设定建。
-    ssh.run_ok(&format!("rm -rf {}", quote(&remote_project)))?;
-    let entries: Vec<String> = std::fs::read_dir(&staging)?
-        .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
-        .collect();
-    ssh.upload(&staging, &entries, &remote_project)?;
-    let _ = std::fs::remove_dir_all(&staging);
-    let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
+        let engine_uploaded = engine.upload(&ssh, &root)?;
+        if !fortran {
+            ssh.run_ok(&super::write_manifest_script(
+                &remote_kernel,
+                &manifest_text,
+            ))?;
+        }
+        // 服务器上已有的旧项目目录先清掉：研究要从头按这份设定建。
+        ssh.run_ok(&format!("rm -rf {}", quote(&remote_project)))?;
+        let entries: Vec<String> = std::fs::read_dir(&staging)?
+            .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+            .collect();
+        ssh.upload(&staging, &entries, &remote_project)?;
+        let _ = std::fs::remove_dir_all(&staging);
+        let submitted = job::submit(&ssh, &root, &id, &body, &job_spec, engine.id())?;
         Ok((engine_uploaded, id.clone(), submitted))
     })?;
     let record = StudyRecord {
