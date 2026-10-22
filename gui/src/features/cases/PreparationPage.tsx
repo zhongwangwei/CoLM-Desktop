@@ -119,7 +119,13 @@ export default function PreparationPage() {
       return value;
     } catch (e) {
       setError(String(e));
-      notify(String(e), true);
+      // 用户选择"不覆盖"是一个决定，不是失败：页面内说明即可，不推全局错误横幅。否则取消一次覆盖
+      // 会在其它页面上挂着一条红色 "Error: 没有覆盖已有的输出文件。"（2026-10-22 窗口实测）。
+      // 用属性标记而不是自定义错误类：本文件被测试按源码抽取 function work 执行，catch 里引入新的
+      // 自由标识符会让抽取出来的函数在测试上下文里 ReferenceError。
+      const declined =
+        !!e && typeof e === 'object' && (e as { userDeclined?: boolean }).userDeclined === true;
+      if (!declined) notify(String(e), true);
       throw e;
     } finally {
       setBusy(false);
@@ -251,9 +257,13 @@ export default function PreparationPage() {
         { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
       );
       if (!ok)
-        throw new Error(t('没有覆盖已有的输出文件。', 'The existing output file was kept.'), {
-          cause: error,
-        });
+        throw Object.assign(
+          new Error(
+            t('已取消：没有覆盖已有的输出文件。', 'Cancelled: the existing output file was kept.'),
+            { cause: error },
+          ),
+          { userDeclined: true },
+        );
       return await write(true);
     }
   }
@@ -625,6 +635,8 @@ export default function PreparationPage() {
           'Source files are preserved. Inspect first, verify variables and units, then write to an isolated destination. ERA5 download requires CDS credentials configured locally.',
         )}
       </Notice>
+      {/* 这一页原来只把失败放进 PageContract/全局通知；页面内没有落点，用户取消覆盖后看不到任何说明。 */}
+      {error && <Notice tone="error">{error}</Notice>}
       <Card>
         <div className="form-grid">
           {fields
