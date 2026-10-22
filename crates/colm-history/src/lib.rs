@@ -318,6 +318,15 @@ impl History {
                 seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE,
                 operation_id TEXT NOT NULL, payload TEXT NOT NULL CHECK(json_valid(payload)));
             CREATE INDEX IF NOT EXISTS history_operation ON history_events(operation_id,seq);
+            -- `tracks_remote_job` 按这三处的 job 查；原来整表扫描并逐行解析 JSON，2.2 万条时每次 70 ms。
+            -- 启动时每个算例的 .colm-remote.json 都要查一次，90 站的项目要 6 s，超过前端等 backend_ready
+            -- 的 15 s 上限（2026-10-22）。表达式要和查询里逐字一致，规划器才会用上。
+            CREATE INDEX IF NOT EXISTS history_detail_job
+                ON history_events(json_extract(payload,'$.detail.job'));
+            CREATE INDEX IF NOT EXISTS history_remote_record_job
+                ON history_events(json_extract(payload,'$.detail.remote_record.job'));
+            CREATE INDEX IF NOT EXISTS history_remote_record_record_job
+                ON history_events(json_extract(payload,'$.detail.remote_record.record.job'));
             CREATE TRIGGER IF NOT EXISTS history_no_update BEFORE UPDATE ON history_events
                 BEGIN SELECT RAISE(ABORT,'history is append-only'); END;
             CREATE TRIGGER IF NOT EXISTS history_no_delete BEFORE DELETE ON history_events

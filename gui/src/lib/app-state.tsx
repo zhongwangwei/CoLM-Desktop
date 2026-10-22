@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { invoke, invokeJson, listen, hasBackend, bindRunningTargets, withTimeout } from './ipc';
 import { applyRunEvent } from './run-events';
+import { errorText } from './utils';
 import {
   askToRebind,
   missingRevision,
@@ -353,7 +354,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       try {
         // 每个阶段都有上限：命令永不返回时也要落到"失败 + 重试"，而不是一直转圈。
-        await withTimeout(invoke('backend_ready'), 15_000, 'backend_ready');
+        // 第三个参数会直接出现在启动失败封面上，写给用户看的话，不写命令名。
+        await withTimeout(
+          invoke('backend_ready'),
+          15_000,
+          bilingual('后台整理运行记录', 'the backend to load the run history'),
+        );
         if (!alive) return;
         stage = 'kernels';
         update({ startup: { phase: 'booting', stage, startedAt } });
@@ -398,23 +404,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
           () => {},
         );
         const [kernelResult, versionResult] = await Promise.allSettled([
-          withTimeout(kernelsCall, 30_000, 'list_kernels'),
-          withTimeout(versionsCall, 30_000, 'model_list'),
+          withTimeout(kernelsCall, 30_000, bilingual('读取模型内核', 'the model kernels')),
+          withTimeout(versionsCall, 30_000, bilingual('读取模型版本', 'the model versions')),
         ]);
         if (!alive) return;
         const problems: string[] = [];
         if (kernelResult.status === 'rejected' && !gotKernels)
           problems.push(
             bilingual(
-              `模型内核读取失败：${String(kernelResult.reason)}`,
-              `Reading model kernels failed: ${String(kernelResult.reason)}`,
+              `模型内核读取失败：${errorText(kernelResult.reason)}`,
+              `Reading model kernels failed: ${errorText(kernelResult.reason)}`,
             ),
           );
         if (versionResult.status === 'rejected' && !gotVersions)
           problems.push(
             bilingual(
-              `模型版本读取失败：${String(versionResult.reason)}`,
-              `Reading model versions failed: ${String(versionResult.reason)}`,
+              `模型版本读取失败：${errorText(versionResult.reason)}`,
+              `Reading model versions failed: ${errorText(versionResult.reason)}`,
             ),
           );
         if (problems.length) throw new Error(problems.join('；'));
@@ -428,7 +434,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // 失败留在封面上（含阶段和原因），并给"重试启动"；不再只发一条可被清掉的通知。
         if (alive)
           update({
-            startup: { phase: 'failed', stage, startedAt, error: String(error) },
+            startup: { phase: 'failed', stage, startedAt, error: errorText(error) },
           });
       } finally {
         if (alive) update({ busy: false, starting: false });

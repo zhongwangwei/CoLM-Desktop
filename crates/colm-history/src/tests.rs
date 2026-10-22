@@ -1102,3 +1102,32 @@ fn routine_actions_are_left_out_while_records_without_an_action_stay() {
     assert_eq!(listed.total, 2);
     assert_eq!(kinds, ["case", "run"]);
 }
+
+/// 启动时每个算例都按 job 查一次；整表扫描时 90 站的项目要 6 s，超过前端 15 s 的启动上限（2026-10-22）。
+#[test]
+fn remote_job_lookup_uses_the_job_indexes() {
+    let h = ledger();
+    let plan = h
+        .connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::import::TRACKS_REMOTE_JOB
+        ))
+        .unwrap()
+        .query_map(["run-x"], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .all(|step| !step.starts_with("SCAN history_events")),
+        "{plan:?}"
+    );
+    assert_eq!(
+        plan.iter()
+            .filter(|step| step.contains("USING INDEX"))
+            .count(),
+        3,
+        "{plan:?}"
+    );
+}

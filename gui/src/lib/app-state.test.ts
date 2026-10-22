@@ -298,6 +298,7 @@ function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
     withTimeout: <T>(promise: Promise<T>, _ms: number, what: string) =>
       what === timeoutOn ? Promise.reject(new Error(`${what} timed out`)) : promise,
     bilingual: (_zh: string, en: string) => en,
+    errorText: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     tidyModelsAfterStartup,
     withoutRevisions,
   };
@@ -389,6 +390,11 @@ test('a failed startup stage is kept on the cover state, and retrying can recove
   assert.equal(failed.phase, 'failed');
   assert.equal(failed.stage, 'kernels');
   assert.match(failed.error, /model versions/i);
+  assert.doesNotMatch(
+    failed.error,
+    /Error: /,
+    'the cover shows the message, not the exception class',
+  );
   // Kernels succeeded before versions failed: keep that half instead of clearing everything.
   assert.deepEqual(app.state.kernels, []);
   assert.equal(app.state.busy, false);
@@ -456,7 +462,8 @@ test('a startup call that answers after its timeout still completes the startup'
   const late = booting(
     async () => ({ removed: [], kept: [], bytes: 0, dry_run: false }),
     '',
-    'list_kernels',
+    // 超时描述是给用户看的话（测试里 bilingual 取英文）。
+    'the model kernels',
   );
   await late.boot();
   for (let i = 0; i < 5; i++) await settle();

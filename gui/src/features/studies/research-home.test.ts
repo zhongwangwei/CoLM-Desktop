@@ -867,6 +867,44 @@ it('step 3 offers the targets every site can compare once an observation is chos
     .find((node) => node.type === 'Input' && node.props.value === 'Qle, Qh');
   assert.ok(field, 'ticking Qh adds it to the target list');
 });
+it('defaults concurrency to the machine and population to the ticked parameters until edited', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  page.requests
+    .at(-1)!
+    .resolve([0, 1, 2].map((i) => ({ ...parameterRow(), id: `t${i}`, name: `DEF_T${i}` })));
+  await page.settle();
+  const field = (id: string) =>
+    (page.contract().fields as { id: string; value: string; set: (v: string) => void }[]).find(
+      (f) => f.id === id,
+    )!;
+  const cores = globalThis.navigator?.hardwareConcurrency || 4;
+  assert.equal(
+    field('research-jobs').value,
+    String(Math.min(16, Math.max(1, Math.floor(cores * 0.75)))),
+  );
+  assert.equal(field('population').value, '8');
+  const tick = (name: string) => {
+    const box = page.nodes().find((n) => n.type === 'input' && n.props['aria-label'] === name);
+    (box!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  };
+  ['DEF_T0', 'DEF_T1', 'DEF_T2'].forEach(tick);
+  await page.settle();
+  assert.equal(field('population').value, '12', 'four sets per parameter');
+  field('population').set('20');
+  field('research-jobs').set('2');
+  await page.settle();
+  const untick = page.nodes().find((n) => n.type === 'input' && n.props['aria-label'] === 'DEF_T0');
+  (untick!.props.onChange as (event: unknown) => void)({ target: { checked: false } });
+  await page.settle();
+  assert.equal(field('population').value, '20', 'an edited population stays');
+  assert.equal(field('research-jobs').value, '2', 'an edited concurrency stays');
+});
 it('step 4 lists the run-and-results buttons on screen and a write-back dialog blocks them', async () => {
   const page = await openCompletedStudy();
   assert.deepEqual(page.ids(), [

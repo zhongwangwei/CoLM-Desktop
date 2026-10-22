@@ -24,7 +24,7 @@ export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: str
         reject(
           new Error(
             bilingual(
-              `等待 ${what} 超过 ${Math.round(timeoutMs / 1000)} 秒仍未完成`,
+              `${what}超过 ${Math.round(timeoutMs / 1000)} 秒仍未完成`,
               `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${what}`,
             ),
           ),

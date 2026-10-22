@@ -35947,3 +35947,24 @@ Slurm、LSF、PBS 的载体由 `sbatch`/`bsub`/`qsub` 交给调度系统起，�
 **实测**：`colm-cli evaluation-plan tmp/ep/AT-Neu --obs …/AT-Neu_2002-2012_FLUXNET2015_Flux.nc --kernel kernels/default` 耗时 0.1 s。AT-Neu 未运行；11 个变量中有 10 个可比（Rnet、Qh、Qle、Qg、SWup、Ustar、GPP、GPP_DT、Resp、NEE），FCH4_f_ann 不可比。
 
 **没做**：格点率定的目标编辑器（格点产品、通量站、水文站）仍然手填变量名；服务器研究的目标变量也还没有选项。
+
+## 第 745 轮：启动卡在"等待 backend_ready 超过 15 秒"；研究页默认值（2026-10-22）
+
+**现象**：用户重启应用后，启动封面显示"Error: 等待 backend_ready 超过 15 秒仍未完成"。
+
+**原因**：
+- `backend_ready` 先执行 `history::bootstrap`，把最近打开的项目里每个算例的 `.colm-remote.json` 导入运行记录库。最近打开的是服务器项目 ttt，有 90 个站。
+- 每次导入都要调 `tracks_remote_job`，看这个 job 是否已由应用自己记录过。这条查询是整表扫描，对每一行都用 `json_extract` 解析三处 job；用户的库有 22,489 条事件、46 MB，每次查询约 70 ms。
+- 在库的副本上实测：一遍导入 6.1 s，导入过的再导一遍仍是 6.1 s。启动时还有内核、版本等其他读取同时进行，就超过了前端给的 15 s 上限。这个耗时随运行记录增长而线性增加。
+
+**改动**：
+- `colm-history` 的建表语句里，为三处 job 表达式加了三个表达式索引。查询改用常量 `TRACKS_REMOTE_JOB`，保证表达式和索引逐字一致；新测试 `remote_job_lookup_uses_the_job_indexes` 用 `EXPLAIN QUERY PLAN` 检查不再整表扫描。
+  - 同一份库副本：导入 6.1 s → 0.36 s，每站约 4 ms。
+  - 第一次打开时建索引多花 0.24 s，库增大约 1 MB。
+- 启动失败封面上的超时文字改写给用户看，例如"后台整理运行记录超过 15 秒仍未完成"，不再出现 `backend_ready`、`list_kernels` 这类命令名。失败原因去掉 `Error: ` 前缀。
+- 研究页默认值：
+  - 同时运行的模拟数：本机取核数的 3/4（上限 16）；交给服务器时取 16。原来固定为 4。
+  - 率定种群：max(8, 4 × 勾选的参数数)。原来固定为 8。
+  - 两项被用户手动改过后都不再自动变。
+
+**没做**：`tracks_study` 也是整表扫描，但每个研究只调一次，ttt 项目里没有研究。项目里研究很多时，它会成为下一个瓶颈。

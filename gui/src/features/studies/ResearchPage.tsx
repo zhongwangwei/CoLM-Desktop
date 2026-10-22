@@ -240,6 +240,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [generations, setGenerations] = useState('4');
   // 单点模拟很轻，默认同时跑 4 个；原来默认 1 个，几十次模拟一个接一个跑。
   const [jobs, setJobs] = useState('4');
+  // 并发数和种群按机器与参数个数给默认值；人改过就不再跟着变。
+  const jobsEdited = useRef(false);
+  const populationEdited = useRef(false);
+  const editJobs = (value: string) => {
+    jobsEdited.current = true;
+    setJobs(value);
+  };
+  const editPopulation = (value: string) => {
+    populationEdited.current = true;
+    setPopulation(value);
+  };
   const [seed, setSeed] = useState('1');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
@@ -1526,7 +1537,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             })),
           ),
           field('minimum-pairs', 'Minimum paired observations', minPairs, setMinPairs, 'number'),
-          field('population', 'Population', population, setPopulation, 'number'),
+          field('population', 'Population', population, editPopulation, 'number'),
           field('generations', 'Generations', generations, setGenerations, 'number'),
         ]
       : [
@@ -1538,7 +1549,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             ? [field('candidate-count', 'Candidates', count, setCount, 'number')]
             : []),
         ]),
-    field('research-jobs', 'Concurrent jobs (1–16)', jobs, setJobs, 'number'),
+    field('research-jobs', 'Concurrent jobs (1–16)', jobs, editJobs, 'number'),
     field('research-seed', 'Seed', seed, setSeed, 'number'),
     field(
       'confirm-ranges',
@@ -2067,6 +2078,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
   }, [step, tuning, spatialStudy, host, kernel, sites, observations]);
+  const tickedCount = Object.values(parameters).filter((p) => p.enabled).length;
+  useEffect(() => {
+    // 原来固定 4：16 核的本机和 48 核的服务器都只跑 4 个。本机留四分之一给界面和系统；
+    // 服务器取研究规格允许的上限 16。
+    if (!jobsEdited.current) {
+      const cores = globalThis.navigator?.hardwareConcurrency || 4;
+      setJobs(String(host ? 16 : Math.min(16, Math.max(1, Math.floor(cores * 0.75)))));
+    }
+    // 差分进化的种群太小会早熟收敛；按每个参数 4 组、至少 8 组。
+    if (!populationEdited.current) setPopulation(String(Math.max(8, 4 * tickedCount)));
+  }, [host, tickedCount]);
   usePageContract(
     workbench
       ? {
@@ -3339,7 +3361,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   <Input
                     type="number"
                     value={population}
-                    onChange={(e) => setPopulation(e.target.value)}
+                    onChange={(e) => editPopulation(e.target.value)}
                   />
                 </Field>
                 <Field label={tr('迭代代数', 'Generations')}>
@@ -3387,7 +3409,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           <Advanced title={tr('更多设置', 'More settings')}>
             <div className="study-grid">
               <Field label={tr('同时运行几个模拟（1–16）', 'Simulations at a time (1–16)')}>
-                <Input type="number" value={jobs} onChange={(e) => setJobs(e.target.value)} />
+                <Input type="number" value={jobs} onChange={(e) => editJobs(e.target.value)} />
               </Field>
               <Field label={tr('随机种子', 'Random seed')}>
                 <Input type="number" value={seed} onChange={(e) => setSeed(e.target.value)} />

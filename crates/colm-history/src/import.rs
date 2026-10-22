@@ -261,15 +261,9 @@ impl History {
     }
     /// Whether an operation the app recorded itself (not an import) is bound to this server job.
     pub fn tracks_remote_job(&self, job: &str) -> Result<bool> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM history_events WHERE operation_id NOT LIKE 'legacy-%'
-             AND json_extract(payload,'$.phase') != 'imported'
-             AND (json_extract(payload,'$.detail.job') = ?1
-                  OR json_extract(payload,'$.detail.remote_record.job') = ?1
-                  OR json_extract(payload,'$.detail.remote_record.record.job') = ?1))",
-            [job],
-            |row| row.get(0),
-        )?)
+        Ok(self
+            .connection
+            .query_row(TRACKS_REMOTE_JOB, [job], |row| row.get(0))?)
     }
     /// Enumerate only known small metadata files, never recursively scan model outputs.
     pub fn import_case(&self, case: impl AsRef<Path>) -> Result<ImportReport> {
@@ -454,3 +448,11 @@ fn legacy_event(
         "reproducibility":{"legacy_record":true,"original_case_path":case,"source_sha256":hash(&serde_json::to_vec(row)?),"path_identity_only":true,"requires_input_verification":true}});
     Ok(event)
 }
+
+/// 三处 job 的表达式要和 `lib.rs` 里的三个索引逐字一致；`tests.rs` 用查询计划守住这一点。
+pub(crate) const TRACKS_REMOTE_JOB: &str =
+    "SELECT EXISTS(SELECT 1 FROM history_events WHERE operation_id NOT LIKE 'legacy-%'
+     AND json_extract(payload,'$.phase') != 'imported'
+     AND (json_extract(payload,'$.detail.job') = ?1
+          OR json_extract(payload,'$.detail.remote_record.job') = ?1
+          OR json_extract(payload,'$.detail.remote_record.record.job') = ?1))";
