@@ -57,7 +57,25 @@ fn print_report(window: tauri::WebviewWindow) -> Result<(), String> {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 关窗与退出走同一套停止规则。原来两处各写一份，退出路径漏了 AI 助手（第 732 轮）。
+/// 两个事件在单窗口下都会触发；每一步都是幂等的，重复调用无害。
+fn stop_everything(app: &tauri::AppHandle, when: &str) {
+    if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
+        eprintln!("failed to stop every run while {when}: {error}");
+    }
+    if let Err(error) = app.state::<CaseCreations>().cancel_on_shutdown() {
+        eprintln!("failed to stop case creation while {when}: {error}");
+    }
+    // 远程提交/编引擎与数据准备不在 RunProcesses 里，但同样要停，否则界面承诺不成立。
+    if let Err(error) = crate::sidecar::cancel_detached_children() {
+        eprintln!("failed to stop remote submissions and data preparation while {when}: {error}");
+    }
+    app.state::<AssistantProcess>().stop();
+}
+
 pub fn run() {
+    let run_processes = RunProcesses::default();
+    crate::sidecar::install_run_registry(&run_processes);
     let builder = tauri::Builder::default();
     #[cfg(feature = "e2e-driver")]
     let builder = builder.setup(|app| {
@@ -99,28 +117,10 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                if let Err(error) = window
-                    .app_handle()
-                    .state::<RunProcesses>()
-                    .cancel_on_shutdown()
-                {
-                    eprintln!("failed to stop every run while closing: {error}");
-                }
-                if let Err(error) = window
-                    .app_handle()
-                    .state::<CaseCreations>()
-                    .cancel_on_shutdown()
-                {
-                    eprintln!("failed to stop case creation while closing: {error}");
-                }
-                // 远程提交/编引擎不是本机 RunProcesses，但关窗也要停，否则界面承诺不成立。
-                if let Err(error) = crate::sidecar::cancel_remote_children() {
-                    eprintln!("failed to stop remote submissions while closing: {error}");
-                }
-                window.app_handle().state::<AssistantProcess>().stop();
+                stop_everything(window.app_handle(), "closing");
             }
         })
-        .manage(RunProcesses::default())
+        .manage(run_processes)
         .manage(CaseCreations::default())
         .manage(remote_cases::RemoteCreationBatches::default())
         .manage(AssistantProcess::default())
@@ -177,6 +177,7 @@ pub fn run() {
             run_case,
             run_batch,
             cancel_runs,
+            cancel_preparation,
             cancel_remote_submission,
             case_creation_cancel,
             history_catalog,
@@ -349,15 +350,7 @@ pub fn run() {
                 event,
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
-                if let Err(error) = app.state::<CaseCreations>().cancel_on_shutdown() {
-                    eprintln!("failed to stop case creation while exiting: {error}");
-                }
-                if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
-                    eprintln!("failed to stop every run while exiting: {error}");
-                }
-                if let Err(error) = crate::sidecar::cancel_remote_children() {
-                    eprintln!("failed to stop remote submissions while exiting: {error}");
-                }
+                stop_everything(app, "exiting");
             }
         });
 }

@@ -353,7 +353,7 @@ pub async fn convert_forcing_table(
     }
     std::fs::create_dir_all(&dst).map_err(|error| format!("产物目录 {dst} 无法创建：{error}"))?;
     let args = build_table_convert_args(&src, &dst, &slots, &options);
-    let json = crate::sidecar::capture_async(args).await?;
+    let json = crate::sidecar::capture_preparation_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!(
             "colm-cli forcing-table-convert 的输出解析不了（两边的字段可能已经对不上）：{error}"
@@ -421,7 +421,7 @@ pub async fn convert_forcing(
     reject_same_dir(std::path::Path::new(&src), std::path::Path::new(&dst))?;
     refuse_existing(&dst, overwrite)?;
     let args = build_convert_args(&src, &dst, &slots, heights);
-    crate::sidecar::capture_async(args).await?;
+    crate::sidecar::capture_preparation_async(args).await?;
     Ok(dst)
 }
 
@@ -542,7 +542,7 @@ pub async fn repair_forcing(
     }
     refuse_existing(&dst, overwrite)?;
     let args = build_gap_args("forcing-repair", &src, Some(&dst), &slots, &options);
-    let json = crate::sidecar::capture_async(args).await?;
+    let json = crate::sidecar::capture_preparation_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!("colm-cli forcing-repair 的输出解析不了（两边的字段可能已经对不上）：{error}")
     })
@@ -568,7 +568,7 @@ pub async fn download_era5land(
         "--end".into(),
         end,
     ];
-    crate::sidecar::capture_async(args)
+    crate::sidecar::capture_preparation_async(args)
         .await
         .map_err(|error| format!("ERA5-Land 下载任务异常终止：{error}"))?;
     Ok(dst)

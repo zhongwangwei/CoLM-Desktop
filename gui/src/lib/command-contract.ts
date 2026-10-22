@@ -1645,6 +1645,7 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "cancel_preparation": {},
   "list_kernels": {},
   "run_case": {
     "runId": {

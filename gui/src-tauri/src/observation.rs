@@ -113,7 +113,7 @@ pub async fn convert_observation_table(
     }
     args.push("--json".into());
     args.push("1".into());
-    let json = crate::sidecar::capture_async(args).await?;
+    let json = crate::sidecar::capture_preparation_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {
         format!("colm-cli observation-table-convert 的输出解析不了（两边的字段可能已经对不上）：{error}")
     })

@@ -3031,8 +3031,18 @@ fn merge_field_states(groups: &[Vec<FieldState>]) -> Vec<FieldState> {
 /// 批量编辑时按全部算例合并状态：只有全部无效才隐藏；任一算例有效就显示，
 /// 同时用 `mixed` 标出条件差异。这样不会因代表算例 BGC=false 而把另一个
 /// BGC=true 算例的子字段整个藏掉。
+// 批量页加选格点算例时要读它的全部设置，十几秒；放到后台线程，窗口不再卡住。
 #[tauri::command]
-pub fn field_states_batch(
+pub async fn field_states_batch(
+    dirs: Vec<String>,
+    kernel_dir: String,
+) -> Result<Vec<FieldState>, String> {
+    tauri::async_runtime::spawn_blocking(move || field_states(dirs, kernel_dir))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+pub(crate) fn field_states(
     dirs: Vec<String>,
     kernel_dir: String,
 ) -> Result<Vec<FieldState>, String> {
@@ -4106,6 +4116,8 @@ pub fn reset_process_parameter_field_batch(
 }
 
 pub(crate) fn write_files_atomic(done: &[(std::path::PathBuf, String)]) -> Result<usize, String> {
+    let paths: Vec<&std::path::Path> = done.iter().map(|(path, _)| path.as_path()).collect();
+    crate::sidecar::refuse_writes_into_running_cases(&paths)?;
     let event = crate::history::start(
         "case-config-save",
         None,

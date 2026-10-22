@@ -127,12 +127,22 @@ export default function PreparationPage() {
       // 会在其它页面上挂着一条红色 "Error: 没有覆盖已有的输出文件。"（2026-10-22 窗口实测）。
       // 用属性标记而不是自定义错误类：本文件被测试按源码抽取 function work 执行，catch 里引入新的
       // 自由标识符会让抽取出来的函数在测试上下文里 ReferenceError。
+      // 用户按了"停止"也是决定：后端在进程被停止按钮或关窗终止时给出这句固定文字。
+      const stopped = String(e).includes('已停止：数据准备被中断');
       const declined =
-        !!e && typeof e === 'object' && (e as { userDeclined?: boolean }).userDeclined === true;
+        stopped ||
+        (!!e && typeof e === 'object' && (e as { userDeclined?: boolean }).userDeclined === true);
       if (declined) {
         // 页面内也按提示显示，不是红色的 "Error: …"。
         setError('');
-        setDeclined((e as Error).message);
+        setDeclined(
+          stopped
+            ? t(
+                '已停止。输出文件可能不完整；重新生成前请删掉它或换一个输出路径。',
+                'Stopped. The output file may be incomplete; delete it or choose another path before generating again.',
+              )
+            : (e as Error).message,
+        );
       } else notify(String(e), true);
       throw e;
     } finally {
@@ -361,6 +371,19 @@ export default function PreparationPage() {
       if (mode === 'netcdf' || mode === 'gaps') setProduced((p) => ({ ...p, met: output }));
     }
     return done;
+  }
+  // 数据准备原来停不了，退出应用后子进程还在写文件（第 732 轮）。后端按进程组终止，
+  // 正在跑的 work 随即以"已停止"结束。
+  async function stopPreparation() {
+    const stopped = await invoke<number>('cancel_preparation');
+    if (!stopped)
+      notify(
+        t(
+          '没有正在进行的数据准备可停；检查输入这类短任务会自己结束。',
+          'No data preparation is running; short tasks such as inspecting input finish on their own.',
+        ),
+      );
+    return stopped;
   }
   // 带着这一页做好的文件去新建模拟；原来什么都没做也能点，进去是空白向导（2026-10-22 用户实测）。
   const canUse = !!produced.site || !!produced.met;
@@ -603,6 +626,13 @@ export default function PreparationPage() {
           ]
         : []),
       {
+        id: 'prep-stop',
+        label: t('停止', 'Stop'),
+        kind: 'click',
+        enabled: busy,
+        run: stopPreparation,
+      },
+      {
         id: 'prep-execute',
         label: t('生成数据', 'Generate data'),
         kind: 'commit',
@@ -731,6 +761,11 @@ export default function PreparationPage() {
           >
             {t('生成数据', 'Generate data')}
           </Button>
+          {busy && (
+            <Button onClick={() => void stopPreparation().catch((e) => notify(String(e), true))}>
+              {t('停止', 'Stop')}
+            </Button>
+          )}
           <Button
             disabled={busy || !canUse}
             title={

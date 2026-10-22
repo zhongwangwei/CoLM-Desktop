@@ -1648,25 +1648,70 @@ fn model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works() {
     assert!(registered.load(Ordering::SeqCst));
 }
 
+// 表是进程级静态的：两种归属放在同一条测试里，免得并行测试互相终止对方登记的子进程。
 #[cfg(unix)]
 #[test]
-fn remote_children_are_killed_when_the_app_exits() {
-    let mut command = std::process::Command::new("sh");
-    command.args(["-c", "sleep 30"]);
-    colm_kernel::run::top_level_sidecar(&mut command);
-    let mut child = command.spawn().unwrap();
-    let guard = register_remote_child(child.id(), Some("/case/a".into()));
-    // 别的算例的停止不碰它。
+fn detached_children_stop_by_owner_and_all_stop_when_the_app_exits() {
+    let sleeper = || {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        colm_kernel::run::top_level_sidecar(&mut command);
+        command.spawn().unwrap()
+    };
+    let mut remote = sleeper();
+    let remote_guard = register_remote_child(remote.id(), Some("/case/a".into()));
+    let mut preparation = sleeper();
+    let preparation_guard = register_child(preparation.id(), ChildOwner::Preparation);
+    // 别的算例的停止不碰它，数据准备的停止也不碰远程提交。
     assert_eq!(cancel_remote_submission("/case/b".into()).unwrap(), 0);
+    assert_eq!(cancel_preparation().unwrap(), 1);
     assert!(
-        cancel_remote_children().unwrap() >= 1,
-        "a registered remote child is cancelled"
+        !preparation.wait().unwrap().success(),
+        "preparation was terminated"
     );
-    assert!(!child.wait().unwrap().success(), "the child was terminated");
-    drop(guard);
+    assert!(
+        preparation_guard.stopped(),
+        "a stopped preparation reports why it failed"
+    );
+    assert!(!remote_guard.stopped());
+    drop(preparation_guard);
     assert_eq!(
-        cancel_remote_children().unwrap(),
+        cancel_detached_children().unwrap(),
+        1,
+        "exit cancels the remaining remote child"
+    );
+    assert!(
+        !remote.wait().unwrap().success(),
+        "the child was terminated"
+    );
+    drop(remote_guard);
+    assert_eq!(
+        cancel_detached_children().unwrap(),
         0,
         "the guard removes a finished child from the registry"
     );
+}
+
+// 只有这一条测试安装窗口那份登记表（进程级 OnceLock），其它测试用各自的 RunProcesses。
+#[test]
+fn config_writes_into_a_running_case_are_refused() {
+    let root =
+        std::env::temp_dir().join(format!("colm-running-case-writes-{}", std::process::id()));
+    let running = root.join("running");
+    let idle = root.join("idle");
+    std::fs::create_dir_all(&running).unwrap();
+    std::fs::create_dir_all(&idle).unwrap();
+    let processes = RunProcesses::default();
+    install_run_registry(&processes);
+    let key = running.display().to_string();
+    processes.prepare(std::slice::from_ref(&key)).unwrap();
+    let error = refuse_writes_into_running_cases(&[&running.join("case.nml")]).unwrap_err();
+    assert!(error.contains("算例正在运行"), "{error}");
+    // 规范化后才比较：带 `..` 的写法也拦得住。
+    let roundabout = idle.join("..").join("running").join("forcing.nml");
+    assert!(refuse_writes_into_running_cases(&[&roundabout]).is_err());
+    refuse_writes_into_running_cases(&[&idle.join("case.nml")]).unwrap();
+    processes.forget(&key).unwrap();
+    refuse_writes_into_running_cases(&[&running.join("case.nml")]).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
 }

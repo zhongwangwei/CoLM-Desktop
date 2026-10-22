@@ -203,7 +203,7 @@ pub async fn make_site(
     crop: bool,
 ) -> Result<SiteReport, String> {
     let args = build_site_new_args(&out, lon, lat, landtype, rawdata.as_deref(), &mode, crop);
-    let json = crate::sidecar::capture_async(args).await?;
+    let json = crate::sidecar::capture_preparation_async(args).await?;
     serde_json::from_str(&json).map_err(|e| {
         // 说清楚是**解析**失败而不是建站点失败 —— 照 `probe_forcing`/`scan_sites`
         // 的措辞，两者的处置完全不同：前者是我们两边的结构体对不上了，

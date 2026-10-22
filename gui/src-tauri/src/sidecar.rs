@@ -490,6 +490,21 @@ impl RunProcesses {
         }
     }
 
+    /// 正在本机运行或准备运行的算例目录（研究的 `study:` 键不是算例目录，不算）。
+    fn active_case_dirs(&self) -> Result<Vec<String>, String> {
+        let state = self
+            .inner
+            .lock()
+            .map_err(|_| "run process registry poisoned")?;
+        Ok(state
+            .pids
+            .keys()
+            .chain(state.pending.iter())
+            .filter(|key| !key.starts_with("study:"))
+            .cloned()
+            .collect())
+    }
+
     pub(crate) fn cancel(&self, keys: Option<Vec<String>>) -> Result<usize, String> {
         let (requested, targets) = {
             let mut state = self
@@ -530,6 +545,50 @@ impl RunProcesses {
         }
         Ok(requested.len())
     }
+}
+
+/// 窗口管理的那份运行登记，供不经 tauri State 的写配置路径查询。
+///
+/// 原来"算例正在运行时不许改配置"只靠前端拦：重启后前端忘了在跑的、两个页面同时开着、
+/// AI 助手直接调命令，都会在 mksrfdata 和主循环之间改掉 case.nml，各阶段读到的配置不一致
+/// （第 732 轮）。登记表本身只有一份，这里存的是它的克隆（内部共用同一个 Arc）。
+static RUN_REGISTRY: OnceLock<RunProcesses> = OnceLock::new();
+
+pub(crate) fn install_run_registry(processes: &RunProcesses) {
+    let _ = RUN_REGISTRY.set(processes.clone());
+}
+
+fn canonical_or_self(path: &std::path::Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// 要写的文件落在某个正在本机运行的算例目录里时拒绝。远程运行用的是上传时的快照，不拦。
+pub(crate) fn refuse_writes_into_running_cases(paths: &[&std::path::Path]) -> Result<(), String> {
+    let Some(processes) = RUN_REGISTRY.get() else {
+        return Ok(());
+    };
+    let running = processes.active_case_dirs()?;
+    if running.is_empty() {
+        return Ok(());
+    }
+    let running: Vec<PathBuf> = running
+        .iter()
+        .map(|dir| canonical_or_self(std::path::Path::new(dir)))
+        .collect();
+    for path in paths {
+        // 文件本身可能还不存在：按所在目录规范化。
+        let target = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => canonical_or_self(parent).join(name),
+            _ => canonical_or_self(path),
+        };
+        if let Some(dir) = running.iter().find(|dir| target.starts_with(dir)) {
+            return Err(format!(
+                "算例正在运行，等它结束或停止后再改配置：{}",
+                dir.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn sidecar_command(program: impl AsRef<OsStr>) -> std::process::Command {
@@ -616,45 +675,72 @@ fn process_group_alive(pid: u32) -> bool {
         })
 }
 
+// 每个进程组终止要等约 300 ms 确认退出；批量停 90 个站点时同步命令会让窗口卡几十秒。
 #[tauri::command]
-pub fn cancel_runs(
+pub async fn cancel_runs(
     processes: tauri::State<'_, RunProcesses>,
     cases: Option<Vec<String>>,
 ) -> Result<usize, String> {
-    processes.cancel(cases)
+    let processes = processes.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || processes.cancel(cases))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
-/// 远程提交/编引擎/取回用的 `colm-cli` 子进程：它们不写本机运行状态，所以不在 `RunProcesses` 里，
-/// 但关窗/退出时同样必须被终止，否则界面承诺的"没交上去的停止"不成立（GUI 审查 2026-10-22 P1-2）。
+/// 不写本机运行状态、因而不在 `RunProcesses` 里的 `colm-cli` 子进程：远程提交/编引擎/取回，以及
+/// 准备页的数据准备（做站点文件、转换/补缺强迫场、下载 ERA5）。关窗/退出时同样必须被终止，否则界面
+/// 承诺的"没交上去的停止"不成立（GUI 审查 2026-10-22 P1-2）；数据准备原来走 `capture_untracked`，
+/// 和窗口同一个进程组，退出后变成孤儿继续写文件，页面上也停不了（第 732 轮）。
 ///
-/// 用进程级静态表而不是给每个命令加 State：`ssh_cli_json_untracked` 在 `spawn_blocking` 里跑，
-/// 签名里没有 AppHandle；而这只有一个窗口进程会写。登记的是 PID，也就是 `top_level_sidecar`
-/// 建的进程组 ID，退出时按组终止。
-/// 值是这次提交属于哪个算例（单算例提交的"停止"按它找）；编引擎、取回这类不属于某个算例的为 `None`。
-static REMOTE_CHILDREN: OnceLock<Mutex<HashMap<u32, Option<String>>>> = OnceLock::new();
+/// 用进程级静态表而不是给每个命令加 State：这些子进程在 `spawn_blocking` 里跑，签名里没有
+/// AppHandle；而这只有一个窗口进程会写。登记的是 PID，也就是 `top_level_sidecar` 建的进程组 ID，
+/// 按组终止。值里记归属（停止按钮按它挑）和是否已被要求停止（用来给出"已停止"而不是空报错）。
+static DETACHED_CHILDREN: OnceLock<Mutex<HashMap<u32, (ChildOwner, bool)>>> = OnceLock::new();
 
-fn remote_children() -> &'static Mutex<HashMap<u32, Option<String>>> {
-    REMOTE_CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ChildOwner {
+    /// 远程子进程；单算例提交带着算例目录（单算例"停止"按它找），编引擎、取回这类为 `None`。
+    Remote(Option<String>),
+    /// 准备页的数据准备。页面同一时间只跑一件，停止就停全部。
+    Preparation,
 }
 
-/// 远程子进程登记项：读输出结束（含错误路径）后自动移除，避免 PID 复用后误杀。
-pub(crate) struct RemoteChildGuard {
+fn detached_children() -> &'static Mutex<HashMap<u32, (ChildOwner, bool)>> {
+    DETACHED_CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 子进程登记项：读输出结束（含错误路径）后自动移除，避免 PID 复用后误杀。
+pub(crate) struct DetachedChildGuard {
     pid: u32,
 }
 
-impl Drop for RemoteChildGuard {
+impl DetachedChildGuard {
+    /// 这个子进程是否被停止按钮或关窗终止过。
+    fn stopped(&self) -> bool {
+        detached_children()
+            .lock()
+            .map(|children| children.get(&self.pid).is_some_and(|(_, stopped)| *stopped))
+            .unwrap_or(false)
+    }
+}
+
+impl Drop for DetachedChildGuard {
     fn drop(&mut self) {
-        if let Ok(mut children) = remote_children().lock() {
+        if let Ok(mut children) = detached_children().lock() {
             children.remove(&self.pid);
         }
     }
 }
 
-pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> RemoteChildGuard {
-    if let Ok(mut children) = remote_children().lock() {
-        children.insert(pid, case);
+pub(crate) fn register_child(pid: u32, owner: ChildOwner) -> DetachedChildGuard {
+    if let Ok(mut children) = detached_children().lock() {
+        children.insert(pid, (owner, false));
     }
-    RemoteChildGuard { pid }
+    DetachedChildGuard { pid }
+}
+
+pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> DetachedChildGuard {
+    register_child(pid, ChildOwner::Remote(case))
 }
 
 /// 只终止这一个远程子进程（启动失败/传凭据失败时用）。
@@ -662,21 +748,23 @@ pub(crate) fn kill_remote_child(pid: u32) -> Result<(), String> {
     terminate_process_tree(pid)
 }
 
-/// 终止所有在途远程子进程；返回成功发出终止的个数。关窗/退出时调用。
-pub(crate) fn cancel_remote_children() -> Result<usize, String> {
-    cancel_remote_children_of(None)
+/// 终止所有登记的子进程（远程与数据准备）；返回成功发出终止的个数。关窗/退出时调用。
+pub(crate) fn cancel_detached_children() -> Result<usize, String> {
+    cancel_children_where(|_| true)
 }
 
-/// `case` 给出时只终止这个算例的远程提交。
-fn cancel_remote_children_of(case: Option<&str>) -> Result<usize, String> {
+fn cancel_children_where(wanted: impl Fn(&ChildOwner) -> bool) -> Result<usize, String> {
     let pids: Vec<u32> = {
-        let children = remote_children()
+        let mut children = detached_children()
             .lock()
-            .map_err(|_| "remote child registry poisoned")?;
+            .map_err(|_| "child process registry poisoned")?;
         let mut pids: Vec<u32> = children
-            .iter()
-            .filter(|(_, owner)| case.is_none() || owner.as_deref() == case)
-            .map(|(pid, _)| *pid)
+            .iter_mut()
+            .filter(|(_, (owner, _))| wanted(owner))
+            .map(|(pid, (_, stopped))| {
+                *stopped = true;
+                *pid
+            })
             .collect();
         pids.sort_unstable();
         pids
@@ -701,7 +789,41 @@ fn cancel_remote_children_of(case: Option<&str>) -> Result<usize, String> {
 /// 记成"提交未确认"，由运行面板核对，不当作没提交。
 #[tauri::command]
 pub fn cancel_remote_submission(case: String) -> Result<usize, String> {
-    cancel_remote_children_of(Some(&case))
+    cancel_children_where(|owner| *owner == ChildOwner::Remote(Some(case.clone())))
+}
+
+/// 停掉准备页正在跑的数据准备。返回终止的进程数；0 表示没有在跑的（例如已经结束）。
+#[tauri::command]
+pub fn cancel_preparation() -> Result<usize, String> {
+    cancel_children_where(|owner| *owner == ChildOwner::Preparation)
+}
+
+/// 数据准备专用的 [`capture_async`]：子进程自成进程组并登记，停止按钮和关窗都能按组终止。
+pub(crate) async fn capture_preparation_async(args: Vec<String>) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || capture_with(&args, capture_preparation))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn capture_preparation(args: &[String]) -> Result<String, String> {
+    let cli = resolve_cli();
+    let mut command = sidecar_command(&cli);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = colm_kernel::run::top_level_sidecar(&mut command)
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
+    let guard = register_child(child.id(), ChildOwner::Preparation);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        if guard.stopped() {
+            return Err("已停止：数据准备被中断，输出文件可能不完整".into());
+        }
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn study_process_key(study_dir: &str) -> String {
@@ -941,8 +1063,15 @@ pub struct KernelEntry {
 /// 这里用 `resource_dir()` 是**对的**，与 `resolve_cli` 不同：Tauri 把
 /// `bundle.resources` 放进 `Contents/Resources/`，而把 `externalBin`
 /// 放在主二进制旁边。两个目录不同，两处各按各的来。
+// 要哈希约 200 MB 的内核文件；同步命令跑在主线程，启动时整个窗口卡住（第 732 轮）。
 #[tauri::command]
-pub fn list_kernels(app: tauri::AppHandle) -> Vec<KernelEntry> {
+pub async fn list_kernels(app: tauri::AppHandle) -> Result<Vec<KernelEntry>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_kernels_blocking(app))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn list_kernels_blocking(app: tauri::AppHandle) -> Vec<KernelEntry> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Ok(p) = std::env::var("COLM_KERNELS") {
         roots.push(PathBuf::from(p));
@@ -2545,7 +2674,7 @@ pub async fn study_parameter_contexts(
     if choices.spatial {
         return spatial_study_rows(&dirs, &kernel_dir, &choices, &types.unwrap_or_default());
     }
-    let field_states = crate::config::field_states_batch(dirs.clone(), kernel_dir.clone())?;
+    let field_states = crate::config::field_states(dirs.clone(), kernel_dir.clone())?;
     let fields = field_states
         .iter()
         .map(|state| (state.name.to_ascii_lowercase(), state))
@@ -2810,7 +2939,7 @@ fn spatial_study_rows(
     choices: &StudyTypeChoices,
     types: &[u8],
 ) -> Result<Vec<StudyParameterContextRow>, String> {
-    let field_states = crate::config::field_states_batch(dirs.to_vec(), kernel_dir.to_string())?;
+    let field_states = crate::config::field_states(dirs.to_vec(), kernel_dir.to_string())?;
     let fields = field_states
         .iter()
         .map(|state| (state.name.to_ascii_lowercase(), state))

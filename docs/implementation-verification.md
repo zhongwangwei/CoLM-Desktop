@@ -35504,3 +35504,42 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 **测试**：根 workspace `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test -p colm-case` 78 条、`cargo test -p colm-cli --bins -- --test-threads=1` 482 条通过。GUI 后端 fmt、clippy、425 条测试通过。前端 tsc、eslint、prettier、契约重新生成后无差异（213 条命令）、`check-gui`、802 条测试、`gui/tests/*.mjs` 通过。
 
 **没做**：参数对话框的开区间提示没有在窗口里逐项点开看，只由单元测试覆盖。远程提交的停止没有连真实服务器试。
+
+## 第 732 轮：作业停止规则、运行中的配置写入、主线程上的重命令（2026-10-22）
+
+**来历**：第 731 轮后给的第 4 组方案，用户同意按 1 → 2 → 3 做。
+
+**方案调整（动手前摸底的结论）**：原方案第 1 步是新建一张统一的作业登记表，取代现有的五处。核对代码后决定不重写，理由如下。
+- 本机运行和建例的登记（`RunProcesses` / `CaseCreations`）已经处理好了取消与登记之间的竞争，研究也已按 `study:` 前缀纳入。
+- 审查报告 P1-2（退出时不停远程提交）已由 `REMOTE_CHILDREN` 修掉。`SUBMISSIONS` 只是提交结果的去重缓存，不是进程。
+
+真正的缺口是下面两处，只补这两处：
+- **数据准备没有登记**：做站点文件、转换和补缺强迫场、转换观测、下载 ERA5 都走 `capture_untracked`。子进程和窗口在同一个进程组，退出应用后变成孤儿继续写文件，页面上也没有停止按钮。
+- **关窗和退出各有一套停止代码**：退出那份漏了 AI 助手。
+
+**1. 停止规则**
+- `REMOTE_CHILDREN` 改为 `DETACHED_CHILDREN`，值里记归属（`ChildOwner::Remote(case)` / `Preparation`）和是否已被要求停止。
+- 数据准备改走 `capture_preparation_async`：子进程自成进程组并登记。新命令 `cancel_preparation` 按组终止，被终止的任务报固定文字"已停止：数据准备被中断……"。
+- 准备页在忙时显示"停止"，同时作为页面动作 `prep-stop` 开放给 AI 助手。停止后按提示显示"已停止。输出文件可能不完整……"，不推红色错误横幅。
+- 关窗和退出都调用 `stop_everything`：依次停本机运行、建例、远程与数据准备子进程、AI 助手。
+- 测试（Unix）：同一条测试里登记一个远程、一个数据准备的真实 `sleep` 进程组，按归属分别停、退出时全停。两种归属放在一条测试里，因为表是进程级静态的，并行测试会互相终止对方登记的进程。
+
+**2. 运行中的算例拒绝写配置**
+- 原来只靠前端拦。重启后前端忘了在跑的运行、两个页面同时开着、AI 助手直接调命令，这几种情况都可能在 mksrfdata 与主循环之间改掉 `case.nml`，各阶段读到的配置不一致。
+- 现在写配置的统一出口 `write_files_atomic` 先查窗口那份 `RunProcesses`，要写的文件落在正在本机运行或准备运行的算例目录里就拒绝。比较前两边都规范化路径，研究的 `study:` 键不算，远程运行用的是上传快照，也不拦。
+- 不经 tauri State 的写入路径通过 `install_run_registry` 存下的克隆查询，克隆和原表共用同一个 Arc。
+- 窗口实测（隔离 HOME，AT-Neu，Rust 引擎，15 天，约 3 秒）：运行期间每 100 ms 试写一次 `set_field_batch`，结果 1 次写入、8 次被拒。那 1 次写入发生在前端已显示"停止运行"、后端还没登记运行的准备阶段，这一段仍由前端拦。运行结束后写入恢复。测试改动已用 `reset_field_batch` 还原。
+
+**3. 主线程上的重命令**
+- 这 5 个命令改到 `spawn_blocking` 后台线程执行，签名和前端调用都不变：
+  - `list_kernels`：要哈希约 200 MB 内核，启动时卡界面；
+  - `cancel_runs`：每个进程组要等约 300 ms 确认退出，批量停 90 站会卡几十秒；
+  - `field_states_batch`：批量页加选格点算例时要十几秒；
+  - `history_list`；
+  - `install_example`：首次要复制示例数据。
+- `field_states_batch` 的同步实现改名为 `field_states`，供 sidecar 内部调用。其余 68 个同步命令按实测再改，不一次全改。
+- 窗口实测：`list_kernels` 返回 17 个预设，`history_list` 正常。
+
+**测试**：GUI 后端 fmt、clippy、426 条测试通过；根 workspace fmt 通过。前端 tsc、eslint、prettier、契约重新生成（214 条命令）、`check-gui`、803 条测试通过。
+
+**没做**：数据准备的"停止"没在窗口里实际停下一次。`make_site` 在本机不到 4 秒就做完了，ERA5 下载在隔离 HOME 里没有 CDS 凭据，而凭据不复制进测试目录。这项只由真实进程组的单元测试覆盖。

@@ -87,8 +87,15 @@ fn cases_root(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 /// 见那里为什么不能是同一个地方。两处都是「已经存在就不再复制/不再新建」——
 /// 站点数据那份可能被用户改过，算例根目录下可能已经有他自己建的算例，
 /// 覆盖或改址都会让人以为东西丢了。
+// 第一次要把示例数据整份复制进应用数据目录；同步命令会让窗口在复制期间无响应。
 #[tauri::command]
-pub fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
+pub async fn install_example(app: tauri::AppHandle) -> Result<Example, String> {
+    tauri::async_runtime::spawn_blocking(move || install_example_blocking(app))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn install_example_blocking(app: tauri::AppHandle) -> Result<Example, String> {
     let src =
         source(&app).ok_or("这个版本没有自带示例数据（examples/ 不在安装包里，也不在仓库里）")?;
     let dest = app

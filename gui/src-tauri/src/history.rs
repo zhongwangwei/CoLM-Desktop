@@ -67,10 +67,14 @@ impl From<HistoryFilter> for Query {
     }
 }
 #[tauri::command]
-pub fn history_list(filter: Option<HistoryFilter>) -> Result<Page, String> {
-    History::open_default()
-        .and_then(|h| h.query(&filter.unwrap_or_default().into()))
-        .map_err(|e| e.to_string())
+pub async fn history_list(filter: Option<HistoryFilter>) -> Result<Page, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        History::open_default()
+            .and_then(|h| h.query(&filter.unwrap_or_default().into()))
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 /// How a case's most recent run ended, as the ledger knows it.
 #[derive(Debug, serde::Serialize, PartialEq)]

@@ -52,6 +52,7 @@ test('preparation callbacks retain native evidence and errors through both async
     setError: (value: string) => errors.push(value),
     setDeclined: () => {},
     notify: () => {},
+    t: (zh: string) => zh,
   });
   const inspection = { slots: [], time_start: '2008-01-01', time_end: '2010-01-01' };
   const inspect = callback(prep, 'inspect', {
@@ -95,6 +96,37 @@ test('preparation callbacks retain native evidence and errors through both async
   );
   assert.equal(errors.at(-1), 'Error: forcing missing');
   assert.equal(lock.current, false);
+});
+test('stopping data preparation reads as a decision, not a failure', async () => {
+  const errors: string[] = [],
+    declined: string[] = [],
+    notices: [string, boolean | undefined][] = [];
+  const work = callback(prep, 'work', {
+    lock: { current: false },
+    setBusy: () => {},
+    setResult: () => {},
+    setError: (value: string) => errors.push(value),
+    setDeclined: (value: string) => declined.push(value),
+    notify: (message: string, error?: boolean) => notices.push([message, error]),
+    t: (zh: string) => zh,
+  });
+  await assert.rejects(
+    work(async () => {
+      throw '已停止：数据准备被中断，输出文件可能不完整';
+    }),
+  );
+  assert.equal(errors.at(-1), '');
+  assert.match(declined.at(-1) ?? '', /^已停止。输出文件可能不完整/);
+  assert.ok(!notices.some(([, error]) => error), 'no error banner for a stop');
+  const calls: string[] = [];
+  const stop = callback(prep, 'stopPreparation', {
+    invoke: async (command: string) => (calls.push(command), 0),
+    notify: (message: string) => notices.push([message, undefined]),
+    t: (zh: string) => zh,
+  });
+  assert.equal(await stop(), 0);
+  assert.deepEqual(calls, ['cancel_preparation']);
+  assert.match(notices.at(-1)?.[0] ?? '', /没有正在进行的数据准备可停/);
 });
 test('research inspection and saved-model callbacks return backend evidence even if display context changes', async () => {
   const task = callback(research, 'task', {
