@@ -532,8 +532,8 @@ impl RunProcesses {
             (requested, targets)
         };
         let mut failures = Vec::new();
-        for (key, pid) in targets {
-            if let Err(error) = terminate_process_tree(pid) {
+        for (key, outcome) in terminate_all(targets) {
+            if let Err(error) = outcome {
                 failures.push(format!("{key}: {error}"));
                 if let Ok(mut state) = self.inner.lock() {
                     state.cancelled.remove(&key);
@@ -596,6 +596,27 @@ fn sidecar_command(program: impl AsRef<OsStr>) -> std::process::Command {
     colm_kernel::run::no_console(&mut command);
     command.env("COLM_AUDIT_BY_PARENT", "1");
     command
+}
+
+/// 同时终止多个进程组。每组发信号后要等约 300 ms 确认退出，串行时批量停 90 个站点要近半分钟
+/// （第 735 轮）。每批最多 16 个，免得一下子起上百个 kill/ps 子进程。
+fn terminate_all<T: Send>(targets: Vec<(T, u32)>) -> Vec<(T, Result<(), String>)> {
+    const AT_ONCE: usize = 16;
+    let mut outcomes = Vec::with_capacity(targets.len());
+    let mut rest = targets.into_iter().peekable();
+    while rest.peek().is_some() {
+        let batch: Vec<_> = rest.by_ref().take(AT_ONCE).collect();
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = batch
+                .into_iter()
+                .map(|(tag, pid)| scope.spawn(move || (tag, terminate_process_tree(pid))))
+                .collect();
+            for handle in handles {
+                outcomes.push(handle.join().expect("process termination thread panicked"));
+            }
+        });
+    }
+    outcomes
 }
 
 #[cfg(unix)]
@@ -771,8 +792,8 @@ fn cancel_children_where(wanted: impl Fn(&ChildOwner) -> bool) -> Result<usize, 
     };
     let mut cancelled = 0;
     let mut failures = Vec::new();
-    for pid in pids {
-        match terminate_process_tree(pid) {
+    for (pid, outcome) in terminate_all(pids.into_iter().map(|pid| (pid, pid)).collect()) {
+        match outcome {
             Ok(()) => cancelled += 1,
             Err(error) => failures.push(format!("{pid}: {error}")),
         }

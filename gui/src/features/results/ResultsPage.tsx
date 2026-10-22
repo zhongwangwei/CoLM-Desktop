@@ -1,5 +1,6 @@
 import { bilingual } from '../../lib/bilingual';
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { sameSeries } from './chart-data';
 import uPlot from 'uplot';
 import { timeTicks } from './time-ticks';
 import { utcSeconds } from '../../lib/dates';
@@ -97,8 +98,17 @@ export function ScienceChart({
   compact?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const plotRef = useRef<uPlot | null>(null);
+  // 调用方每次渲染都新建 data/labels 数组：原来 effect 以它们为依赖，页面上任何输入都会让图整张
+  // 销毁重建，看得见地闪一下（第 735 轮）。内容没变就沿用上一次的引用；只有数据变了用 setData，
+  // 标签、主题、尺寸变了才重建。
+  const stableData = useRef(data);
+  if (!sameSeries(stableData.current, data)) stableData.current = data;
+  const shownData = stableData.current;
+  const labelKey = labels.join('\u0000');
+  const hasData = data[0].length > 0;
   useEffect(() => {
-    if (!ref.current || !data[0].length) return;
+    if (!ref.current || !hasData) return;
     const host = ref.current;
     const plot = new uPlot(
       {
@@ -108,7 +118,7 @@ export function ScienceChart({
         tzDate: (ts) => uPlot.tzDate(new Date(ts * 1000), 'Etc/UTC'),
         series: [
           {},
-          ...labels.map((label, i) => ({
+          ...labelKey.split('\u0000').map((label, i) => ({
             label,
             stroke: (paired ? ['#0d9488', '#858b94'] : ['#0d9488', '#e87945', '#6366f1'])[i % 3],
             dash: paired && i === 1 ? [6, 3] : [],
@@ -121,9 +131,10 @@ export function ScienceChart({
           { stroke: theme === 'dark' ? '#b8c7d9' : '#475569' },
         ],
       },
-      data,
+      stableData.current,
       host,
     );
+    plotRef.current = plot;
     const resize = new ResizeObserver(() =>
       plot.setSize({ width: Math.max(160, host.clientWidth), height: compact ? 220 : 300 }),
     );
@@ -131,8 +142,12 @@ export function ScienceChart({
     return () => {
       resize.disconnect();
       plot.destroy();
+      plotRef.current = null;
     };
-  }, [data, labels, theme, paired, compact]);
+  }, [hasData, labelKey, theme, paired, compact]);
+  useEffect(() => {
+    plotRef.current?.setData(shownData);
+  }, [shownData]);
   return <div ref={ref} aria-label={labels.join(', ')} style={{ minWidth: 0 }} />;
 }
 function runLabel(path: string) {

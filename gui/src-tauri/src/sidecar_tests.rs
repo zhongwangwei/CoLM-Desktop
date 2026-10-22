@@ -1715,3 +1715,34 @@ fn config_writes_into_a_running_case_are_refused() {
     refuse_writes_into_running_cases(&[&running.join("case.nml")]).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[cfg(unix)]
+#[test]
+fn many_process_groups_stop_together_not_one_after_another() {
+    let children: Vec<_> = (0..20)
+        .map(|_| {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "sleep 30"]);
+            colm_kernel::run::top_level_sidecar(&mut command);
+            command.spawn().unwrap()
+        })
+        .collect();
+    let started = std::time::Instant::now();
+    let outcomes = terminate_all(
+        children
+            .iter()
+            .map(|child| (child.id(), child.id()))
+            .collect(),
+    );
+    // 串行是 20 × 约 300 ms；两批并行只需要两次等待。
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "took {:?}",
+        started.elapsed()
+    );
+    assert_eq!(outcomes.len(), 20);
+    assert!(outcomes.iter().all(|(_, outcome)| outcome.is_ok()));
+    for mut child in children {
+        assert!(!child.wait().unwrap().success());
+    }
+}
