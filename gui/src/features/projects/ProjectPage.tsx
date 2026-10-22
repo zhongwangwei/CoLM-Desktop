@@ -860,6 +860,26 @@ export default function ProjectPage() {
             </span>
             <span className="project-chevron">›</span>
           </Button>
+          <Button
+            className="project-action"
+            variant="ghost"
+            disabled={!enabled}
+            onClick={() => navigate('preparation')}
+          >
+            <span className="project-action-icon">
+              <NavIcon name="data" />
+            </span>
+            <span>
+              <strong>{t('准备输入数据', 'Prepare input data')}</strong>
+              <span>
+                {t(
+                  '制作站点文件，或转换、修复强迫场，供新建算例使用。',
+                  'Make site files, or convert and repair forcing for a new case.',
+                )}
+              </span>
+            </span>
+            <span className="project-chevron">›</span>
+          </Button>
         </div>
       </section>
       {/* 设计里 CN-Cng 示例与数据准备是次要可见入口；只留在助手契约里等于界面上不存在。 */}
@@ -923,24 +943,6 @@ export default function ProjectPage() {
                 onClick={() => void browseProject().catch(() => {})}
               >
                 {state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
-              </Button>
-            </div>
-          </div>
-
-          <div className="readiness-item">
-            <span className="status-indicator active" />
-            <div className="readiness-info">
-              <strong>{t('输入数据准备', 'Prepare input data')}</strong>
-              <span>
-                {t(
-                  '制作站点文件、转换或修复强迫场，供新建算例使用。',
-                  'Make site files or convert and repair forcing for a new case.',
-                )}
-              </span>
-            </div>
-            <div className="readiness-actions">
-              <Button variant="ghost" disabled={!enabled} onClick={() => navigate('preparation')}>
-                {t('准备输入数据', 'Prepare inputs')}
               </Button>
             </div>
           </div>
