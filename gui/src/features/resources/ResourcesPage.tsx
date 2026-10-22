@@ -2,7 +2,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import {
   Advanced,
   Button,
@@ -261,6 +262,32 @@ export default function ResourcesPage() {
     setOriginal(editor.host);
     setSelected(`server:${editor.host}`);
     setBaseline(JSON.stringify(editor));
+  }
+  /** 删除连接设置：只改本机保存的服务器清单，服务器上的文件和任务不动。 */
+  async function deleteConnection() {
+    const deleting = deletingServer;
+    if (!deleting) return;
+    await execute('delete', async () => {
+      if (!configLoaded)
+        throw new Error(
+          t('无法读取连接配置，请刷新后重试', 'Cannot read connection settings; refresh and retry'),
+        );
+      if (dirty) throw new Error(t('请先保存或放弃修改', 'Save or discard edits first'));
+      const host = deleting.host;
+      if (!servers.some((server) => server.host === host))
+        throw new Error(t('连接已被删除，请刷新', 'Connection was already removed; refresh first'));
+      const next = servers.filter((server) => server.host !== host);
+      await invoke('remote_save_config', { config: { servers: next } });
+      setServers(next);
+      if (original === host) {
+        setSelected('local');
+        setEditor(null);
+        setOriginal(null);
+        setBaseline('');
+        setPassword('');
+      }
+      setDeletingServer(null);
+    });
   }
   async function checkConnection() {
     if (!editor) return;
@@ -657,70 +684,6 @@ export default function ResourcesPage() {
         },
       ] as UiField[]),
     );
-  const guideActions: UiAction[] = [
-    {
-      id: 'resource-refresh',
-      label: t('刷新服务器配置', 'Refresh server settings'),
-      kind: 'click',
-      enabled: !busy && !dirty,
-      run: () => execute('refresh', refresh),
-    },
-    {
-      id: 'resource-new',
-      label: t('添加服务器', 'Add server'),
-      kind: 'click',
-      enabled: configLoaded && !busy && !dirty,
-      run: addServer,
-    },
-    {
-      id: 'resource-select-local',
-      label: t('本机', 'Local'),
-      kind: 'click',
-      enabled: !busy && !dirty,
-      run: () => selectResource(null),
-    },
-    ...servers.map((server) => ({
-      id: `resource-select-server-${server.host}`,
-      label: server.host,
-      kind: 'click' as const,
-      enabled: !busy && !dirty,
-      run: () => selectResource(server),
-    })),
-  ];
-  if (deletingServer)
-    guideActions.push({
-      id: 'resource-delete-confirm',
-      label: t('删除连接设置', 'Delete connection settings'),
-      kind: 'commit',
-      enabled: configLoaded && !busy && !dirty,
-      run: () =>
-        execute('delete', async () => {
-          if (!configLoaded)
-            throw new Error(
-              t(
-                '无法读取连接配置，请刷新后重试',
-                'Cannot read connection settings; refresh and retry',
-              ),
-            );
-          if (dirty) throw new Error(t('请先保存或放弃修改', 'Save or discard edits first'));
-          const host = deletingServer.host;
-          if (!servers.some((server) => server.host === host))
-            throw new Error(
-              t('连接已被删除，请刷新', 'Connection was already removed; refresh first'),
-            );
-          const next = servers.filter((server) => server.host !== host);
-          await invoke('remote_save_config', { config: { servers: next } });
-          setServers(next);
-          if (original === host) {
-            setSelected('local');
-            setEditor(null);
-            setOriginal(null);
-            setBaseline('');
-            setPassword('');
-          }
-          setDeletingServer(null);
-        }),
-    });
   const kindLabels: Record<string, string> = {
     site: t('站点', 'Site'),
     watershed: t('流域', 'Watershed'),
@@ -741,37 +704,28 @@ export default function ResourcesPage() {
   const kindPaths = kindPathRows(
     selected === 'local' ? localData.kind_paths : selectedServer?.kind_paths,
   );
-  if (selected === 'local' || selectedServer)
-    guideActions.push(
-      ...kindPaths.map(({ kind, key }) => ({
-        id: `resource-forget-${kind}-${key}`,
-        label: t('清除', 'Forget'),
-        kind: 'commit' as const,
-        enabled: !busy,
-        run: () =>
-          execute('kind-paths', async () => {
-            await invoke('remote_forget_kind_path', { host: kindPathHost, kind, key });
-            const forget = <T extends { kind_paths?: Record<string, Record<string, string>> }>(
-              old: T,
-            ): T => {
-              const fields = { ...old.kind_paths?.[kind] };
-              delete fields[key];
-              const paths = { ...old.kind_paths, [kind]: fields };
-              if (!Object.keys(fields).length) delete paths[kind];
-              return { ...old, kind_paths: paths };
-            };
-            if (kindPathHost)
-              setServers((old) =>
-                old.map((server) => (server.host === kindPathHost ? forget(server) : server)),
-              );
-            else setLocalData((old) => forget(old));
-            return t(
-              `已清除 ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
-              `Forgot ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
-            );
-          }),
-      })),
+  /** 清除某类型记住的路径：只动本机保存的"上次用过的路径"，不删文件。 */
+  async function forgetKindPath(kind: string, key: string) {
+    await invoke('remote_forget_kind_path', { host: kindPathHost, kind, key });
+    const forget = <T extends { kind_paths?: Record<string, Record<string, string>> }>(
+      old: T,
+    ): T => {
+      const fields = { ...old.kind_paths?.[kind] };
+      delete fields[key];
+      const paths = { ...old.kind_paths, [kind]: fields };
+      if (!Object.keys(fields).length) delete paths[kind];
+      return { ...old, kind_paths: paths };
+    };
+    if (kindPathHost)
+      setServers((old) =>
+        old.map((server) => (server.host === kindPathHost ? forget(server) : server)),
+      );
+    else setLocalData((old) => forget(old));
+    return t(
+      `已清除 ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
+      `Forgot ${kindLabels[kind] ?? kind} · ${kindFieldLabels[key] ?? key}`,
     );
+  }
   const kindPathSection = (
     <section className="resource-kind-paths">
       <h3>{t('各类型上次使用的路径', 'Last paths by simulation type')}</h3>
@@ -790,7 +744,13 @@ export default function ResourcesPage() {
               <code className="kind-path-value" title={value}>
                 {value}
               </code>
-              {actionButton(`resource-forget-${kind}-${key}`)}
+              {/* 清除记住的路径属于"忘记连接设置"，只在界面上按，不登记给助手（D 级）。 */}
+              <Button
+                disabled={busy}
+                onClick={() => run('kind-paths', () => forgetKindPath(kind, key))}
+              >
+                {t('清除', 'Forget')}
+              </Button>
             </div>
           ))}
         </div>
@@ -810,202 +770,7 @@ export default function ResourcesPage() {
         set: (value: string) => setLocalData((current) => ({ ...current, [key]: value })),
       })),
     );
-    guideActions.push(
-      ...dataFields.map(([key, label]) => ({
-        id: `resource-local-pick-${key}`,
-        label: `${t('选择', 'Choose')} ${label}`,
-        kind: 'click' as const,
-        enabled: !busy,
-        run: () => pickLocalData(key),
-      })),
-      {
-        id: 'resource-local-data-save',
-        label: t('保存默认数据路径', 'Save default data paths'),
-        kind: 'commit',
-        enabled: !busy && configLoaded,
-        run: () => execute('local-data', saveLocalData),
-      },
-    );
-    guideActions.push({
-      id: 'resource-local',
-      label: t('检查本机后端与模型内核', 'Check local backend and model kernel'),
-      kind: 'click',
-      enabled: !busy,
-      run: () => execute('local', checkLocal),
-    });
-    for (const [dir, task] of localRunEntries(state.running))
-      if (task.running)
-        guideActions.push({
-          id: `resource-local-cancel-${dir}`,
-          label: t('取消本机任务', 'Cancel local task'),
-          kind: 'commit',
-          enabled: !busy,
-          run: () => execute(dir, () => invoke('cancel_runs', { cases: [dir] })),
-        });
   }
-  if (editor) {
-    if (checkEvidence)
-      guideActions.push({
-        id: 'resource-check-details',
-        label: t('检查详情', 'Check details'),
-        kind: 'click',
-        run: () => setCheckDetails(!checkDetails),
-      });
-    guideActions.push(
-      {
-        id: 'resource-advanced-toggle',
-        label: t('高级设置', 'Advanced'),
-        kind: 'click',
-        run: () => setAdvanced(!advanced),
-      },
-      {
-        id: 'resource-check',
-        label: t('检查连接', 'Check connection'),
-        kind: 'click',
-        enabled: !busy && !!editor.host,
-        run: () => execute(`check:${selected}`, checkConnection),
-      },
-      {
-        id: 'resource-browse-root',
-        label: t('浏览服务器', 'Browse server'),
-        kind: 'click',
-        enabled: !busy && !!editor.host,
-        run: () => setRootBrowser(structuredClone(editor)),
-      },
-    );
-    if (dirty)
-      guideActions.push(
-        {
-          id: 'resource-save',
-          label: t('保存连接设置', 'Save connection'),
-          kind: 'commit',
-          enabled: configLoaded && !busy && !password,
-          run: () => execute('save', save),
-        },
-        {
-          id: 'resource-discard',
-          label: t('放弃修改', 'Discard edits'),
-          kind: 'click',
-          enabled: !busy,
-          run: discard,
-        },
-      );
-    if (editor.auth === 'key')
-      guideActions.push({
-        id: 'resource-pick-identity',
-        label: t('选择密钥文件', 'Choose identity file'),
-        kind: 'click',
-        enabled: !busy,
-        run: () => execute('pick-identity', pickIdentity),
-      });
-    if (advanced)
-      guideActions.push(
-        {
-          id: 'resource-detect-scheduler',
-          label: t('自动识别', 'Detect automatically'),
-          kind: 'click',
-          enabled: !busy && !!editor.host.trim() && !password,
-          run: () => execute(`scheduler:${selected}`, detectScheduler),
-        },
-        {
-          id: 'resource-directories-toggle',
-          label: t('本地路径映射（可选）', 'Local path mapping (optional)'),
-          kind: 'click',
-          run: () => setDirectories(!directories),
-        },
-      );
-    if (advanced && directories) {
-      guideActions.push({
-        id: 'resource-add-map',
-        label: t('添加映射', 'Add mapping'),
-        kind: 'click',
-        enabled: !busy,
-        run: () => editServer({ ...editor, maps: [...editor.maps, { local: '', remote: '' }] }),
-      });
-      editor.maps.forEach((_, i) =>
-        guideActions.push({
-          id: `resource-remove-map-${i}`,
-          label: t('移除映射', 'Remove mapping'),
-          kind: 'click',
-          enabled: !busy,
-          run: () => editServer({ ...editor, maps: editor.maps.filter((_, n) => n !== i) }),
-        }),
-      );
-    }
-    if (selectedServer) {
-      const server = selectedServer;
-      guideActions.push({
-        id: 'resource-maintenance-toggle',
-        label: t('编译、远程检查与维护', 'Build, remote checks and maintenance'),
-        kind: 'click',
-        run: () => setMaintenance(!maintenance),
-      });
-      if (maintenance)
-        guideActions.push(
-          {
-            id: 'resource-kernels',
-            label: t('Fortran 编译配置', 'Fortran build configurations'),
-            kind: 'click',
-            enabled: !busy && !dirty,
-            run: () =>
-              execute(`maintenance:${selected}`, () =>
-                invokeJson('remote_kernels', { host: server.host }),
-              ),
-          },
-          {
-            id: 'resource-build',
-            label: t('编译 Fortran 引擎', 'Build Fortran engine'),
-            kind: 'commit',
-            enabled: !busy && !dirty && !!preset,
-            run: () =>
-              execute(`maintenance:${selected}`, () =>
-                invokeJson('remote_build_kernel', {
-                  host: server.host,
-                  preset,
-                  modelVersion: state.version?.code.workspace ?? null,
-                }),
-              ),
-          },
-          {
-            id: 'resource-workspace-submit',
-            label: t('提交远程检查', 'Submit remote check'),
-            kind: 'commit',
-            enabled: !busy && !dirty && !!workspace,
-            run: () =>
-              execute(`maintenance:${selected}`, () =>
-                invokeJson('workspace_remote', {
-                  name: workspace,
-                  operation: 'submit',
-                  host: server.host,
-                  request: remoteCheckRequest(action, preset, remoteCase, packageName, changeKind),
-                }),
-              ),
-          },
-          ...(['list', 'status', 'fetch', 'cancel'] as const).map((operation) => ({
-            id: `resource-workspace-${operation}`,
-            label: operation,
-            kind:
-              operation === 'list' || operation === 'status'
-                ? ('click' as const)
-                : ('commit' as const),
-            enabled: !busy && !dirty && !!workspace && (operation === 'list' || !!job),
-            run: () =>
-              execute(`maintenance:${selected}`, () =>
-                invokeJson('workspace_remote', { name: workspace, operation, job: job || null }),
-              ),
-          })),
-        );
-    }
-  }
-  if (state.simulationReturn)
-    guideActions.push({
-      id: 'resource-back-simulation',
-      label: t('返回模拟设置', 'Back to simulation setup'),
-      kind: 'click',
-      enabled: !busy && !dirty,
-      run: () =>
-        navigate(state.simulationReturn!.route === 'new-case' ? 'new-case' : 'case', 'settings'),
-    });
   usePageContract({
     title: t('计算资源', 'Resources'),
     step: 'resources',
@@ -1019,23 +784,9 @@ export default function ResourcesPage() {
       local: selected === 'local' ? output.local : undefined,
     },
     fields: guideFields.map((field) => ({ ...field, disabled: busy })),
-    actions: guideActions,
+    // 动作由界面上的按钮自己登记（第 737 轮）：助手只看此刻真正显示着的按钮。
+    actions: [],
   });
-  function actionButton(id: string, primary = false) {
-    const control = guideActions.find((item) => item.id === id);
-    return control ? (
-      <Button
-        key={id}
-        variant={primary ? 'primary' : 'secondary'}
-        disabled={control.enabled === false}
-        onClick={() => {
-          void Promise.resolve(control.run()).catch((e) => setError(String(e)));
-        }}
-      >
-        {control.label}
-      </Button>
-    ) : null;
-  }
   function field(id: string) {
     const control = guideFields.find((item) => item.id === id);
     return control ? (
@@ -1082,14 +833,34 @@ export default function ResourcesPage() {
             )}
           </p>
         </div>
-        {actionButton('resource-back-simulation')}
-        {actionButton('resource-new', true)}
+        {state.simulationReturn && (
+          <ActionButton
+            action="resource-back-simulation"
+            label={t('返回模拟设置', 'Back to simulation setup')}
+            disabled={busy || dirty}
+            run={() =>
+              navigate(
+                state.simulationReturn!.route === 'new-case' ? 'new-case' : 'case',
+                'settings',
+              )
+            }
+          />
+        )}
+        <ActionButton
+          action="resource-new"
+          label={t('添加服务器', 'Add server')}
+          variant="primary"
+          disabled={!configLoaded || busy || dirty}
+          run={addServer}
+        />
       </header>
       {busy && <Notice>{t('操作进行中…', 'Operation in progress…')}</Notice>}
       {error && <Notice tone="error">{error}</Notice>}
       <Dialog
         open={deletingServer !== null}
         title={t('删除连接设置', 'Delete connection settings')}
+        // 删除是 D 级，删除按钮本身不登记；只把"关闭"登记给助手，免得对话框开着时无路可走。
+        closeAction="resource-delete-close"
         onOpenChange={(open) => {
           if (!open && !busy) setDeletingServer(null);
         }}
@@ -1110,10 +881,7 @@ export default function ResourcesPage() {
             variant="danger"
             disabled={!configLoaded || busy || dirty}
             onClick={() => {
-              const control = guideActions.find(
-                (action) => action.id === 'resource-delete-confirm',
-              );
-              if (control?.enabled !== false) void Promise.resolve(control?.run()).catch(() => {});
+              void deleteConnection().catch(() => {});
             }}
           >
             {t('删除连接设置', 'Delete connection settings')}
@@ -1121,11 +889,13 @@ export default function ResourcesPage() {
         </div>
       </Dialog>
       <div className="resources-selector">
-        <Button
+        <ActionButton
+          action="resource-select-local"
+          label={t('本机', 'Local')}
           className={`resource-choice ${selected === 'local' ? 'selected' : ''}`}
           aria-pressed={selected === 'local'}
           disabled={busy || dirty}
-          onClick={() => selectResource(null)}
+          run={() => selectResource(null)}
         >
           <span className="resource-device" aria-hidden="true">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7">
@@ -1138,7 +908,7 @@ export default function ResourcesPage() {
             <small>{output.local ? String(output.local) : t('尚未检查', 'Not checked')}</small>
           </span>
           {selected === 'local' && <span className="badge">{t('当前选择', 'Selected')}</span>}
-        </Button>
+        </ActionButton>
         {servers.map((server) => (
           <ContextMenu
             key={server.host}
@@ -1156,11 +926,13 @@ export default function ResourcesPage() {
               },
             ]}
           >
-            <Button
+            <ActionButton
+              action={`resource-select-server-${server.host}`}
+              label={server.host}
               className={`resource-choice ${selected === `server:${server.host}` ? 'selected' : ''}`}
               aria-pressed={selected === `server:${server.host}`}
               disabled={busy || dirty}
-              onClick={() => selectResource(server)}
+              run={() => selectResource(server)}
             >
               <span className="resource-device" aria-hidden="true">
                 <NavIcon name="resources" />
@@ -1180,7 +952,7 @@ export default function ResourcesPage() {
               {selected === `server:${server.host}` && (
                 <span className="badge">{t('当前选择', 'Selected')}</span>
               )}
-            </Button>
+            </ActionButton>
           </ContextMenu>
         ))}
       </div>
@@ -1191,7 +963,12 @@ export default function ResourcesPage() {
             {state.kernels.map((kernel) => kernel.preset).join(', ') ||
               t('尚无 Fortran 编译配置', 'No Fortran build configuration')}
           </p>
-          {actionButton('resource-local')}
+          <ActionButton
+            action="resource-local"
+            label={t('检查本机后端与模型内核', 'Check local backend and model kernel')}
+            disabled={busy}
+            run={() => execute('local', checkLocal)}
+          />
           {output.local != null && <Notice>{String(output.local)}</Notice>}
           <section className="resource-data-defaults">
             <h3>{t('默认数据路径', 'Default data paths')}</h3>
@@ -1201,13 +978,30 @@ export default function ResourcesPage() {
                 'Filled in when a new simulation runs locally; paths changed while creating one are synced back here.',
               )}
             </p>
-            {dataFields.map(([key]) => (
+            {dataFields.map(([key, label]) => (
               <div className="resource-identity" key={key}>
                 {field(`resource-local-${key}`)}
-                {actionButton(`resource-local-pick-${key}`)}
+                <ActionButton
+                  action={`resource-local-pick-${key}`}
+                  label={`${t('选择', 'Choose')} ${label}`}
+                  disabled={busy}
+                  run={() =>
+                    pickLocalData(key).catch((e) => {
+                      setError(String(e));
+                      throw e;
+                    })
+                  }
+                />
               </div>
             ))}
-            {actionButton('resource-local-data-save', true)}
+            <ActionButton
+              action="resource-local-data-save"
+              label={t('保存默认数据路径', 'Save default data paths')}
+              kind="commit"
+              variant="primary"
+              disabled={busy || !configLoaded}
+              run={() => execute('local-data', saveLocalData)}
+            />
             {output['local-data'] != null && <Notice>{String(output['local-data'])}</Notice>}
           </section>
           {kindPathSection}
@@ -1216,7 +1010,13 @@ export default function ResourcesPage() {
               <span>
                 {dir} · {task.status}
               </span>
-              {actionButton(`resource-local-cancel-${dir}`)}
+              <ActionButton
+                action={`resource-local-cancel-${dir}`}
+                label={t('取消本机任务', 'Cancel local task')}
+                kind="commit"
+                disabled={busy}
+                run={() => execute(dir, () => invoke('cancel_runs', { cases: [dir] }))}
+              />
             </div>
           ))}
         </Card>
@@ -1272,9 +1072,12 @@ export default function ResourcesPage() {
                       `这台服务器看起来是${recognised.zh}（按调度系统和分区认出，不看地址）。要套用这个预设吗？账号、地址和工作目录不会改。`,
                       `This server looks like ${recognised.en} (recognised by its scheduler and partitions, not its address). Apply that preset? Account, address and work root stay as they are.`,
                     )}{' '}
-                    <Button disabled={busy} onClick={() => applyPreset(recognised.id)}>
-                      {t('套用预设', 'Apply preset')}
-                    </Button>
+                    <ActionButton
+                      action="resource-apply-preset"
+                      label={t('套用预设', 'Apply preset')}
+                      disabled={busy}
+                      run={() => applyPreset(recognised.id)}
+                    />
                   </Notice>
                 )}
                 {applied && (
@@ -1294,7 +1097,12 @@ export default function ResourcesPage() {
           {editor.auth === 'key' && (
             <div className="resource-identity">
               {field('resource-identity')}
-              {actionButton('resource-pick-identity')}
+              <ActionButton
+                action="resource-pick-identity"
+                label={t('选择密钥文件', 'Choose identity file')}
+                disabled={busy}
+                run={() => execute('pick-identity', pickIdentity)}
+              />
             </div>
           )}
           {editor.auth === 'password' && (
@@ -1318,7 +1126,12 @@ export default function ResourcesPage() {
           )}
           <div className="resource-identity">
             {field('resource-root')}
-            {actionButton('resource-browse-root')}
+            <ActionButton
+              action="resource-browse-root"
+              label={t('浏览服务器', 'Browse server')}
+              disabled={busy || !editor.host}
+              run={() => setRootBrowser(structuredClone(editor))}
+            />
           </div>
           <section className="resource-data-defaults">
             <h3>{t('默认数据路径', 'Default data paths')}</h3>
@@ -1375,10 +1188,32 @@ export default function ResourcesPage() {
               </p>
             )}
             <div className="actions resource-connection-actions">
-              {actionButton('resource-check', !dirty)}
-              {actionButton('resource-save', true)}
-              {actionButton('resource-discard')}
-              {dirty && <small>{t('有未保存的修改', 'Unsaved changes')}</small>}
+              <ActionButton
+                action="resource-check"
+                label={t('检查连接', 'Check connection')}
+                variant={dirty ? 'secondary' : 'primary'}
+                disabled={busy || !editor.host}
+                run={() => execute(`check:${selected}`, checkConnection)}
+              />
+              {dirty && (
+                <>
+                  <ActionButton
+                    action="resource-save"
+                    label={t('保存连接设置', 'Save connection')}
+                    kind="commit"
+                    variant="primary"
+                    disabled={!configLoaded || busy || !!password}
+                    run={() => execute('save', save)}
+                  />
+                  <ActionButton
+                    action="resource-discard"
+                    label={t('放弃修改', 'Discard edits')}
+                    disabled={busy}
+                    run={discard}
+                  />
+                  <small>{t('有未保存的修改', 'Unsaved changes')}</small>
+                </>
+              )}
               {['save', 'credentials']
                 .filter((key) => output[key] != null)
                 .map((key) => (
@@ -1400,6 +1235,8 @@ export default function ResourcesPage() {
                 ))}
             {checkEvidence && (
               <Advanced
+                action="resource-check-details"
+                actionLabel={t('检查详情', 'Check details')}
                 title={t('检查详情', 'Check details')}
                 open={checkDetails}
                 onOpenChange={setCheckDetails}
@@ -1408,8 +1245,17 @@ export default function ResourcesPage() {
               </Advanced>
             )}
           </section>
-          <Advanced open={advanced} onOpenChange={setAdvanced}>
-            {advanced && actionButton('resource-directories-toggle')}
+          <Advanced
+            action="resource-advanced-toggle"
+            actionLabel={t('高级设置', 'Advanced')}
+            open={advanced}
+            onOpenChange={setAdvanced}
+          >
+            <ActionButton
+              action="resource-directories-toggle"
+              label={t('本地路径映射（可选）', 'Local path mapping (optional)')}
+              run={() => setDirectories(!directories)}
+            />
             {advanced && directories && (
               <section className="resource-directories">
                 <h3>{t('本地路径映射（可选）', 'Local path mapping (optional)')}</h3>
@@ -1429,10 +1275,24 @@ export default function ResourcesPage() {
                   <div className="resource-map" key={i}>
                     {field(`resource-map-${i}-local`)}
                     {field(`resource-map-${i}-remote`)}
-                    {actionButton(`resource-remove-map-${i}`)}
+                    <ActionButton
+                      action={`resource-remove-map-${i}`}
+                      label={t('移除映射', 'Remove mapping')}
+                      disabled={busy}
+                      run={() =>
+                        editServer({ ...editor, maps: editor.maps.filter((_, n) => n !== i) })
+                      }
+                    />
                   </div>
                 ))}
-                {actionButton('resource-add-map')}
+                <ActionButton
+                  action="resource-add-map"
+                  label={t('添加映射', 'Add mapping')}
+                  disabled={busy}
+                  run={() =>
+                    editServer({ ...editor, maps: [...editor.maps, { local: '', remote: '' }] })
+                  }
+                />
                 <p className="muted">
                   {t(
                     '路径存在不代表模型输入已完整；运行前仍需输入检查。',
@@ -1446,7 +1306,12 @@ export default function ResourcesPage() {
               <div>
                 <div className="resource-scheduler">
                   {field('resource-scheduler')}
-                  {actionButton('resource-detect-scheduler')}
+                  <ActionButton
+                    action="resource-detect-scheduler"
+                    label={t('自动识别', 'Detect automatically')}
+                    disabled={busy || !editor.host.trim() || !!password}
+                    run={() => execute(`scheduler:${selected}`, detectScheduler)}
+                  />
                 </div>
                 <p className="muted">
                   {t(
@@ -1483,6 +1348,8 @@ export default function ResourcesPage() {
           </Advanced>
           {selectedServer && (
             <Advanced
+              action="resource-maintenance-toggle"
+              actionLabel={t('编译、远程检查与维护', 'Build, remote checks and maintenance')}
               title={t('编译、远程检查与维护', 'Build, remote checks and maintenance')}
               open={maintenance}
               onOpenChange={setMaintenance}
@@ -1499,16 +1366,113 @@ export default function ResourcesPage() {
                 ].map((key) => field(`resource-${key}`))}
               </div>
               <div className="actions">
-                {[
-                  'kernels',
-                  'build',
-                  'workspace-submit',
-                  'workspace-list',
-                  'workspace-status',
-                  'workspace-fetch',
-                  'workspace-cancel',
-                ].map((key) => actionButton(`resource-${key}`))}
+                <ActionButton
+                  action="resource-kernels"
+                  label={t('Fortran 编译配置', 'Fortran build configurations')}
+                  disabled={busy || dirty}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('remote_kernels', { host: selectedServer.host }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-build"
+                  label={t('编译 Fortran 引擎', 'Build Fortran engine')}
+                  kind="commit"
+                  disabled={busy || dirty || !preset}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('remote_build_kernel', {
+                        host: selectedServer.host,
+                        preset,
+                        modelVersion: state.version?.code.workspace ?? null,
+                      }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-workspace-submit"
+                  label={t('提交远程检查', 'Submit remote check')}
+                  kind="commit"
+                  disabled={busy || dirty || !workspace}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('workspace_remote', {
+                        name: workspace,
+                        operation: 'submit',
+                        host: selectedServer.host,
+                        request: remoteCheckRequest(
+                          action,
+                          preset,
+                          remoteCase,
+                          packageName,
+                          changeKind,
+                        ),
+                      }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-workspace-list"
+                  label="list"
+                  disabled={busy || dirty || !workspace}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('workspace_remote', {
+                        name: workspace,
+                        operation: 'list',
+                        job: job || null,
+                      }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-workspace-status"
+                  label="status"
+                  disabled={busy || dirty || !workspace}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('workspace_remote', {
+                        name: workspace,
+                        operation: 'status',
+                        job: job || null,
+                      }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-workspace-fetch"
+                  label="fetch"
+                  kind="commit"
+                  disabled={busy || dirty || !workspace || !job}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('workspace_remote', {
+                        name: workspace,
+                        operation: 'fetch',
+                        job: job || null,
+                      }),
+                    )
+                  }
+                />
+                <ActionButton
+                  action="resource-workspace-cancel"
+                  label="cancel"
+                  kind="commit"
+                  disabled={busy || dirty || !workspace || !job}
+                  run={() =>
+                    execute(`maintenance:${selected}`, () =>
+                      invokeJson('workspace_remote', {
+                        name: workspace,
+                        operation: 'cancel',
+                        job: job || null,
+                      }),
+                    )
+                  }
+                />
               </div>
+              {/* 核对租约、清理快照会动服务器上的租约/快照：D 级，只在界面上按，不登记。 */}
               <Button
                 disabled={busy || dirty}
                 onClick={async () => {
@@ -1579,7 +1543,12 @@ export default function ResourcesPage() {
         />
       )}
       <footer className="resources-footer">
-        {actionButton('resource-refresh')}
+        <ActionButton
+          action="resource-refresh"
+          label={t('刷新服务器配置', 'Refresh server settings')}
+          disabled={busy || dirty}
+          run={() => execute('refresh', refresh)}
+        />
         <span>
           {t(
             '选择仅用于查看资源，不改变模拟运行位置。',

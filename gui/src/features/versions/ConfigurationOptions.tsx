@@ -2,6 +2,7 @@ import { bilingual } from '../../lib/bilingual';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
@@ -54,6 +55,8 @@ type Props = {
   engine?: string;
   process?: string;
   hideProcesses?: boolean;
+  /** 只表示"这份配置在对话框里"（页面契约按对话框合并、草稿改动暂存）；不再承载动作，
+   *  对话框的保存/取消在对话框里由 `ActionButton` 自己登记（第 737 轮）。 */
   modalActions?: UiAction[];
   onReady?: (ready: boolean) => void;
   removedCaseKeys?: readonly string[];
@@ -292,8 +295,7 @@ export default function ConfigurationOptions({
       : !hideProcesses ||
         (catchmentRouting && catchmentRoutingFields.includes(field.name)) ||
         (simulationOptionField(field, values.fields) && !processSettingOwner(field, values.fields));
-  const controls: UiField[] = [],
-    actions: UiAction[] = [];
+  const controls: UiField[] = [];
   function write(change: () => Overlay) {
     if (locked || !writable.current || savingNow.current || current.current !== request)
       throw new Error(bilingual('当前配置不可修改', 'Configuration is locked or stale'));
@@ -317,13 +319,6 @@ export default function ConfigurationOptions({
     } catch (e) {
       setError(String(e));
       throw e;
-    }
-  }
-  function uiWrite(change: () => Overlay) {
-    try {
-      write(change);
-    } catch {
-      /* Keep draft and invalid input for correction. */
     }
   }
   function open(id: string) {
@@ -483,15 +478,9 @@ export default function ConfigurationOptions({
       overridden = !forcedResistance && configured !== null && configured !== '';
     const inactive = ['disabled', 'readonly', 'read-only'].includes(context?.mode ?? ''),
       cannot = !ready || !!inactive || forcedResistance,
-      id = `configuration-${field.name}`;
-    actions.push({
-      id: `${id}-reset`,
-      label: `${fieldLabel(field.name, lang)} · ${t('恢复默认', 'Restore default')}`,
-      kind: 'click',
-      enabled: !locked && overridden,
-      visible: overridden,
-      run: () => write(() => resetModelOption(overlay, field.name)),
-    });
+      id = `configuration-${field.name}`,
+      // 同一页里有很多行都有"恢复默认/选择文件"，助手的动作说明带上字段名才分得清。
+      fieldName = fieldLabel(field.name, lang);
     async function pickFile() {
       if (
         cannot ||
@@ -547,22 +536,6 @@ export default function ConfigurationOptions({
         return next;
       });
     }
-    if (vicFile)
-      actions.push({
-        id: `${id}-preset`,
-        label: `${t('使用预设路径', 'Use preset path')} · ${fieldLabel(field.name, lang)}`,
-        kind: 'click',
-        enabled: !cannot && !locked && !!vicDefault,
-        run: restoreDefault,
-      });
-    if (fileInput)
-      actions.push({
-        id: `${id}-browse`,
-        label: `${t('选择文件', 'Choose file')} · ${fieldLabel(field.name, lang)}`,
-        kind: 'click',
-        enabled: !cannot && !locked && !pickingFile,
-        run: pickFile,
-      });
     const reason = configurationReason(context?.reason);
     const resistanceReason = forcedResistance
       ? t(
@@ -599,36 +572,34 @@ export default function ConfigurationOptions({
                 : defaultValue || '—'}
         </small>
         {vicFile && (
-          <Button
+          <ActionButton
+            action={`${id}-preset`}
+            label={`${t('使用预设路径', 'Use preset path')} · ${fieldName}`}
             disabled={cannot || locked || !vicDefault}
-            onClick={() => {
-              try {
-                restoreDefault();
-              } catch {
-                /* Keep the error visible. */
-              }
-            }}
+            run={restoreDefault}
           >
             {t('使用预设路径', 'Use preset path')}
-          </Button>
+          </ActionButton>
         )}
         {fileInput && (
-          <Button
+          <ActionButton
+            action={`${id}-browse`}
+            label={`${t('选择文件', 'Choose file')} · ${fieldName}`}
             disabled={cannot || locked || pickingFile}
-            onClick={() => {
-              void pickFile().catch(() => {});
-            }}
+            run={pickFile}
           >
             {t('选择文件', 'Choose file')}
-          </Button>
+          </ActionButton>
         )}
         {overridden && !vicFile && (
-          <Button
+          <ActionButton
+            action={`${id}-reset`}
+            label={`${fieldName} · ${t('恢复默认', 'Restore default')}`}
             disabled={locked}
-            onClick={() => uiWrite(() => resetModelOption(overlay, field.name))}
+            run={() => write(() => resetModelOption(overlay, field.name))}
           >
             {t('恢复默认', 'Restore default')}
-          </Button>
+          </ActionButton>
         )}
       </div>
     );
@@ -698,14 +669,6 @@ export default function ConfigurationOptions({
     });
     const reset = () =>
       write(() => stomatalFields.reduce((next, name) => resetModelOption(next, name), overlay));
-    actions.push({
-      id: 'configuration-stomatal-reset',
-      label: t('气孔导度方案 · 恢复默认', 'Stomatal scheme · Restore default'),
-      kind: 'click',
-      enabled: !locked && overridden,
-      visible: overridden,
-      run: reset,
-    });
     return (
       <div className="model-setting-row">
         <h3>{t('气孔导度方案', 'Stomatal scheme')}</h3>
@@ -741,18 +704,14 @@ export default function ConfigurationOptions({
           </p>
         )}
         {overridden && (
-          <Button
+          <ActionButton
+            action="configuration-stomatal-reset"
+            label={t('气孔导度方案 · 恢复默认', 'Stomatal scheme · Restore default')}
             disabled={locked}
-            onClick={() => {
-              try {
-                reset();
-              } catch {
-                /* Preserve draft. */
-              }
-            }}
+            run={reset}
           >
             {t('恢复默认', 'Restore default')}
-          </Button>
+          </ActionButton>
         )}
       </div>
     );
@@ -851,19 +810,12 @@ export default function ConfigurationOptions({
           {rows.map(row)}
         </Card>
       );
-    actions.push({
-      id: `${groupPrefix}-group-${id}`,
-      label: t(zh, english),
-      kind: 'click',
-      enabled: !disabled,
-      run: () => {
-        if (disabled) throw new Error('Configuration is locked');
-        setOpened((previous) => ({ ...previous, [`${sourceKey}:${id}`]: !open(id) }));
-      },
-    });
     return (
       <Advanced
         key={id}
+        // 折叠标题就是展开/收起动作；配置锁定时界面上按不动，也就不登记（第 737 轮）。
+        action={disabled ? undefined : `${groupPrefix}-group-${id}`}
+        actionLabel={t(zh, english)}
         title={`${t(zh, english)} · ${rows.length}`}
         open={open(id)}
         onOpenChange={(value) => {
@@ -966,21 +918,16 @@ export default function ConfigurationOptions({
               }
             } else setTracers(next);
           };
-          actions.push({
-            id: `configuration-family-${family.id}`,
-            label: t(family.zh, family.en),
-            kind: 'click',
-            enabled: !blocked,
-            run: add,
-          });
           return (
-            <Button
+            <ActionButton
               key={family.id}
+              action={`configuration-family-${family.id}`}
+              label={t(family.zh, family.en)}
               className="simulation-choice-card"
               variant={already ? 'primary' : 'secondary'}
               aria-pressed={already}
               disabled={blocked}
-              onClick={add}
+              run={add}
             >
               <strong>{t(family.zh, family.en)}</strong>
               <span>{family.rows.map(([name]) => name).join(' / ')}</span>
@@ -1012,7 +959,7 @@ export default function ConfigurationOptions({
               {availability.reasons.map(([zh, english]) => (
                 <small key={zh}>{t(zh, english)}</small>
               ))}
-            </Button>
+            </ActionButton>
           );
         })}
       </div>
@@ -1034,16 +981,6 @@ export default function ConfigurationOptions({
       throw new Error('Tracer editor is locked or stale');
     setTracers(table.filter((_, rowIndex) => rowIndex !== index));
   }
-  if (tracerOpen)
-    table.forEach((row, index) =>
-      actions.push({
-        id: `configuration-tracer-${index}-remove`,
-        label: t(`移除 ${row.NAMES || index + 1}`, `Remove ${row.NAMES || index + 1}`),
-        kind: 'click',
-        enabled: tracerReady,
-        run: () => removeTracer(index),
-      }),
-    );
   const tracerTable = tracerOpen && (
     <Card
       title={t('示踪物定义（每行对应同一个示踪物）', 'Tracer definitions (aligned rows)')}
@@ -1135,16 +1072,18 @@ export default function ConfigurationOptions({
                   );
                 })}
                 <td>
-                  <Button
+                  <ActionButton
+                    action={`configuration-tracer-${index}-remove`}
+                    label={t(`移除 ${row.NAMES || index + 1}`, `Remove ${row.NAMES || index + 1}`)}
                     disabled={!tracerReady}
-                    onClick={() => removeTracer(index)}
+                    run={() => removeTracer(index)}
                     aria-label={t(
                       `移除 ${row.NAMES || index + 1}`,
                       `Remove ${row.NAMES || index + 1}`,
                     )}
                   >
                     {t('移除', 'Remove')}
-                  </Button>
+                  </ActionButton>
                 </td>
               </tr>
             ))}
@@ -1152,9 +1091,11 @@ export default function ConfigurationOptions({
         </table>
       </div>
       <div className="button-row">
-        <Button
+        <ActionButton
+          action="configuration-tracers-add"
+          label={t('增加示踪物', 'Add tracer')}
           disabled={!tracerReady}
-          onClick={() =>
+          run={() =>
             setTracers([
               ...table,
               Object.fromEntries(tracerColumns.map((c) => [c, ''])) as (typeof table)[number],
@@ -1162,26 +1103,26 @@ export default function ConfigurationOptions({
           }
         >
           {t('增加示踪物', 'Add tracer')}
-        </Button>
-        <Button
+        </ActionButton>
+        <ActionButton
+          action="configuration-tracers-remove"
+          label={t('移除末行', 'Remove last row')}
           disabled={!tracerReady || !table.length}
-          onClick={() => setTracers(table.slice(0, -1))}
+          run={() => setTracers(table.slice(0, -1))}
         >
           {t('移除末行', 'Remove last row')}
-        </Button>
-        <Button
+        </ActionButton>
+        <ActionButton
+          action="configuration-tracers-apply"
+          label={t('应用示踪物定义', 'Apply tracer definitions')}
           disabled={!tracerReady || tracers === null}
-          onClick={() => {
-            try {
-              write(() => applyTracerSelection(overlay, fields, table));
-              setTracers(null);
-            } catch {
-              /* Preserve incomplete table. */
-            }
+          run={() => {
+            write(() => applyTracerSelection(overlay, fields, table));
+            setTracers(null);
           }}
         >
           {t('应用示踪物定义', 'Apply tracer definitions')}
-        </Button>
+        </ActionButton>
       </div>
       <p>
         {t('示踪物数量', 'Tracer count')} (DEF_TRACER_NUM): {table.length}
@@ -1194,62 +1135,13 @@ export default function ConfigurationOptions({
       </p>
     </Card>
   );
-  actions.push(
-    {
-      id: 'configuration-tracers-add',
-      label: t('增加示踪物', 'Add tracer'),
-      kind: 'click',
-      visible: tracerOpen,
-      enabled: tracerReady,
-      run: () => {
-        if (!tracerReady || !tracerOpen) throw new Error('Tracer editor is locked');
-        setTracers([
-          ...table,
-          Object.fromEntries(tracerColumns.map((c) => [c, ''])) as (typeof table)[number],
-        ]);
-      },
-    },
-    {
-      id: 'configuration-tracers-remove',
-      label: t('移除末行', 'Remove last row'),
-      kind: 'click',
-      visible: tracerOpen,
-      enabled: tracerReady && table.length > 0,
-      run: () => {
-        if (!tracerReady || !tracerOpen || !table.length)
-          throw new Error('Tracer editor is locked');
-        setTracers(table.slice(0, -1));
-      },
-    },
-    {
-      id: 'configuration-tracers-apply',
-      label: t('应用示踪物定义', 'Apply tracer definitions'),
-      kind: 'click',
-      visible: tracerOpen,
-      enabled: tracerOpen && tracerReady && tracers !== null,
-      run: () => {
-        if (!tracerOpen || !tracerReady || tracers === null)
-          throw new Error('Tracer table is unavailable');
-        write(() => applyTracerSelection(overlay, fields, table));
-        setTracers(null);
-      },
-    },
-  );
   const assets = (caseProcessVisible('tracer') ? values.process_files : []).map((asset) => {
     const isOpen = opened[`${sourceKey}:${asset.file}`] ?? tracerOpen;
-    actions.push({
-      id: `configuration-asset-${asset.file}`,
-      label: asset.file,
-      kind: 'click',
-      enabled: !disabled,
-      run: () => {
-        if (disabled) throw new Error('Configuration is locked');
-        setOpened((previous) => ({ ...previous, [`${sourceKey}:${asset.file}`]: !isOpen }));
-      },
-    });
     return (
       <Advanced
         key={asset.file}
+        action={disabled ? undefined : `configuration-asset-${asset.file}`}
+        actionLabel={asset.file}
         title={`${asset.title} · ${asset.file} · ${asset.active_methane_asset === true ? t('当前 CH4', 'Current CH4') : asset.active_methane_asset === false ? t('CH4 未采用', 'Not used by CH4') : t('是否被 CH4 采用待核对', 'CH4 usage pending')}`}
         open={isOpen}
         onOpenChange={(value) => {
@@ -1266,16 +1158,6 @@ export default function ConfigurationOptions({
               cannot =
                 !!onCaseChange || !ready || !asset.verified || !entry.editable || !descriptor;
             const reset = () => write(() => resetProcessOption(overlay, descriptor!, asset.file));
-            actions.push({
-              id: `${id}-reset`,
-              label: `${fieldLabel(entry.path, lang)} · ${t('恢复资产原值', 'Restore asset value')}`,
-              kind: 'click',
-              enabled: !locked && !cannot,
-              run: () => {
-                if (cannot) throw new Error('Process parameter is unavailable');
-                reset();
-              },
-            });
             return (
               <div className="model-setting-row" key={entry.path}>
                 {editor(
@@ -1296,18 +1178,14 @@ export default function ConfigurationOptions({
                     : t('已核对目录条件', 'Catalog conditions checked')}{' '}
                   · {entry.doc} · {t('目录参考', 'Catalog reference')}: {entry.default || '—'}
                 </small>
-                <Button
+                <ActionButton
+                  action={`${id}-reset`}
+                  label={`${fieldLabel(entry.path, lang)} · ${t('恢复资产原值', 'Restore asset value')}`}
                   disabled={locked || cannot}
-                  onClick={() => {
-                    try {
-                      reset();
-                    } catch {
-                      /* Preserve draft. */
-                    }
-                  }}
+                  run={reset}
                 >
                   {t('恢复资产原值', 'Restore asset value')}
-                </Button>
+                </ActionButton>
               </div>
             );
           })}
@@ -1324,17 +1202,6 @@ export default function ConfigurationOptions({
       cannot = !!onCaseChange || !ready || entry.mode !== 'editable' || !descriptor || !selection,
       overridden = entry.configured_value !== null;
     const reset = () => write(() => resetScopedOption(overlay, descriptor!, Number(pftIndex), ''));
-    actions.push({
-      id: `${id}-reset`,
-      label: `${entry.name} · ${t('恢复默认', 'Restore default')}`,
-      kind: 'click',
-      enabled: !onCaseChange && !locked && !!descriptor && !!selection && overridden,
-      visible: overridden,
-      run: () => {
-        if (!descriptor || !selection) throw new Error('PFT parameter is unavailable');
-        reset();
-      },
-    });
     return (
       <div className="model-setting-row" key={id}>
         {editor(
@@ -1353,18 +1220,14 @@ export default function ConfigurationOptions({
           {t('目录参考', 'Catalog reference')}: {entry.default ?? '—'}
         </small>
         {overridden && (
-          <Button
+          <ActionButton
+            action={`${id}-reset`}
+            label={`${entry.name} · ${t('恢复默认', 'Restore default')}`}
             disabled={!!onCaseChange || locked || !descriptor || !selection}
-            onClick={() => {
-              try {
-                reset();
-              } catch {
-                /* Preserve draft. */
-              }
-            }}
+            run={reset}
           >
             {t('恢复默认', 'Restore default')}
-          </Button>
+          </ActionButton>
         )}
       </div>
     );
@@ -1395,25 +1258,7 @@ export default function ConfigurationOptions({
         setProcessName(value);
       },
     });
-    actions.push({
-      id: 'configuration-process-import',
-      label: t('选择并导入过程文件', 'Choose and import process file'),
-      kind: 'commit',
-      enabled: !locked && !!processName.trim(),
-      run: importProcess,
-    });
   }
-  if (pftVisible)
-    actions.push({
-      id: 'configuration-pft-toggle',
-      label: t('按植物类型调整参数', 'Adjust parameters by plant type'),
-      kind: 'click',
-      enabled: !disabled,
-      run: () => {
-        if (disabled) throw new Error('Configuration is locked');
-        setOpened((previous) => ({ ...previous, pft: !pftOpen }));
-      },
-    });
   if (pftOpen && !fixedPftKind)
     controls.push({
       id: 'configuration-pft-kind',
@@ -1455,7 +1300,8 @@ export default function ConfigurationOptions({
     step: 'configuration-options',
     modal: !!modalActions,
     fields: controls,
-    actions: [...actions, ...(modalActions ?? [])],
+    // 动作由界面上的按钮自己登记（第 737 轮）；modalActions 只表示"这是对话框里的一份配置"。
+    actions: [],
     status: error || (!ready ? 'loading' : 'pending_source_verification'),
     details: { context_complete: values.context_complete, warnings: values.warnings },
   });
@@ -1517,20 +1363,23 @@ export default function ConfigurationOptions({
                   onChange={(e) => setProcessName(e.target.value)}
                 />
               </Field>
-              <Button
+              <ActionButton
+                action="configuration-process-import"
+                label={t('选择并导入过程文件', 'Choose and import process file')}
+                kind="commit"
                 disabled={locked || !processName.trim()}
-                onClick={() => {
-                  void importProcess().catch(() => {});
-                }}
+                run={importProcess}
               >
                 {t('选择并导入过程文件', 'Choose and import process file')}
-              </Button>
+              </ActionButton>
             </div>
           )}
         </Card>
       )}
       {pftVisible && (
         <Advanced
+          action={disabled ? undefined : 'configuration-pft-toggle'}
+          actionLabel={t('按植物类型调整参数', 'Adjust parameters by plant type')}
           title={t('按植物类型调整参数', 'Adjust parameters by plant type')}
           open={pftOpen}
           onOpenChange={(value) => {

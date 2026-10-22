@@ -9,6 +9,7 @@ import { PFT } from './scope-labels';
 import type { Overlay } from '../../lib/types';
 import type { UiAction, UiField } from '../../lib/guide';
 import type { ModelField, Descriptor } from './model';
+import { ActionButtonStub } from '../../lib/rendered-tree';
 type Contract = { modal?: boolean; fields: UiField[]; actions: UiAction[]; status: string };
 function harness() {
   const overlay: Overlay = {
@@ -85,16 +86,18 @@ function harness() {
     pending: (() => void)[] = [];
   let cursor = 0,
     effectCursor = 0,
-    contract: Contract;
-  const nodes: { type: string; props: Record<string, unknown>; children?: unknown[] }[] = [];
+    contract: Contract,
+    tree: unknown;
+  const nodes: { type: unknown; props: Record<string, unknown>; children?: unknown[] }[] = [];
   const context = {
     PFT,
     RemotePathBrowser: 'RemotePathBrowser',
+    ActionButton: ActionButtonStub,
     ...helpers,
     ...settings,
     ...presentation,
     React: {
-      createElement: (type: string, p: Record<string, unknown>, ...children: unknown[]) => {
+      createElement: (type: unknown, p: Record<string, unknown>, ...children: unknown[]) => {
         const result = { type, props: p ?? {}, children };
         nodes.push(result);
         return result;
@@ -104,8 +107,14 @@ function harness() {
       ['Advanced', 'Button', 'Card', 'Field', 'Input', 'Notice', 'Select'].map((k) => [k, k]),
     ),
     useApp: () => ({ state: { language: 'zh' } }),
+    // 动作由按钮自己登记（第 737 轮）：从渲染出的元素树里收；折叠着的内容不显示，不登记。
     usePageContract: (value: Contract) => {
-      contract = value;
+      contract = {
+        ...value,
+        get actions() {
+          return renderedActions();
+        },
+      };
     },
     useState: (initial: unknown) => {
       const i = cursor++;
@@ -151,11 +160,52 @@ function harness() {
   const Component = new Function(...Object.keys(context), `${code};return ConfigurationOptions;`)(
     ...Object.values(context),
   );
+  function renderedActions(): UiAction[] {
+    const collect = (node: unknown): UiAction[] => {
+      if (!node || typeof node !== 'object') return [];
+      if (Array.isArray(node)) return node.flatMap(collect);
+      const element = node as {
+        type: unknown;
+        props: Record<string, unknown>;
+        children?: unknown[];
+      };
+      const p = element.props ?? {},
+        children = element.children ?? p.children;
+      if (element.type === 'Advanced') {
+        const own: UiAction[] =
+          typeof p.action === 'string'
+            ? [
+                {
+                  id: String(p.action),
+                  label: String(p.actionLabel ?? ''),
+                  kind: 'click',
+                  enabled: true,
+                  run: () => (p.onOpenChange as (open: boolean) => void)(!p.open),
+                },
+              ]
+            : [];
+        // 折叠着的可折叠区不渲染内容，里面的按钮也就不存在。
+        return [...own, ...(p.open ? collect(children) : [])];
+      }
+      if (element.type === ActionButtonStub)
+        return [
+          {
+            id: String(p.action),
+            label: String(p.label),
+            kind: (p.kind as UiAction['kind']) ?? 'click',
+            enabled: !p.disabled,
+            run: p.run as UiAction['run'],
+          },
+        ];
+      return collect(children);
+    };
+    return collect(tree);
+  }
   function render() {
     cursor = 0;
     effectCursor = 0;
     nodes.length = 0;
-    Component(props);
+    tree = Component(props);
     pending.splice(0).forEach((f) => f());
     return contract;
   }
@@ -694,7 +744,8 @@ test('focused simulation editor stages the final typed value and explicit reset 
   const h = harness(),
     patches: helpers.CaseOptionPatch[] = [];
   h.props.process = 'DEF_URBAN_RUN';
-  h.props.modalActions = [{ id: 'save-dialog', label: 'Save', kind: 'click', run: () => {} }];
+  // modalActions 只表示"这是对话框"，保存/取消由对话框里的按钮登记（第 737 轮）。
+  h.props.modalActions = [];
   h.props.onCaseChange = (patch) => {
     patches.push(patch);
   };
@@ -707,11 +758,15 @@ test('focused simulation editor stages the final typed value and explicit reset 
   await new Promise((resolve) => setTimeout(resolve, 0));
   let c = h.render();
   assert.equal(c.modal, true);
-  assert.ok(c.actions.some((a) => a.id === 'save-dialog'));
+  assert.ok(!c.actions.some((a) => a.id === 'save-dialog'));
   assert.ok(!c.fields.some((f) => f.id.includes('tracer') || f.id.includes('stomatal')));
   const input = h.nodes.find((n) => n.type === 'Input' && n.props.value === '1')!;
   (input.props.onChange as (e: { target: { value: string } }) => void)({ target: { value: '2' } });
   assert.deepEqual(patches.at(-1), { DEF_URBAN_type_scheme: '2' });
+  assert.ok(
+    h.render().actions.some((a) => a.id === 'configuration-DEF_URBAN_type_scheme-reset'),
+    'the reset button is registered while the staged override is visible',
+  );
   c = h.render();
   await c.actions.find((a) => a.id === 'configuration-DEF_URBAN_type_scheme-reset')!.run();
   assert.deepEqual(patches.at(-1), { DEF_URBAN_type_scheme: null });
@@ -1054,7 +1109,7 @@ test('process settings display inherited defaults without creating overrides, an
     !h.nodes.some((n) => n.type === 'option' && n.props.value === ''),
     'known default has no unspecified option',
   );
-  assert.equal(c.actions.find((a) => a.id === `configuration-${name}-reset`)!.visible, false);
+  assert.ok(!c.actions.some((a) => a.id === `configuration-${name}-reset`));
   assert.deepEqual(patches, []);
   await c.fields.find((f) => f.id === `configuration-${name}`)!.set('.false.');
   assert.equal(patches.at(-1)?.[name], '.false.');
@@ -1148,12 +1203,10 @@ test('stomatal restore is visible only for an explicit override', async () => {
   h.render()
     .actions.find((a) => a.id === 'configuration-group-ecology')!
     .run();
-  let action = h.render().actions.find((a) => a.id === 'configuration-stomatal-reset')!;
-  assert.equal(action.visible, false);
-  assert.equal(action.enabled, false);
+  assert.ok(!h.render().actions.some((a) => a.id === 'configuration-stomatal-reset'));
   h.props.overlay.physics.DEF_USE_MEDLYNST = '.true.';
-  action = h.render().actions.find((a) => a.id === 'configuration-stomatal-reset')!;
-  assert.equal(action.visible, true);
+  const action = h.render().actions.find((a) => a.id === 'configuration-stomatal-reset')!;
+  assert.equal(action.enabled, true);
   assert.match(action.label, /恢复默认/);
 });
 
@@ -1187,10 +1240,10 @@ test('PFT restore is hidden for inherited values and shown for configured values
   await new Promise((resolve) => setTimeout(resolve, 0));
   c = h.render();
   const id = 'configuration-pft-1-test_pft-reset';
-  assert.equal(c.actions.find((a) => a.id === id)!.visible, false);
+  assert.ok(!c.actions.some((a) => a.id === id));
   entry.configured_value = '2';
   c = h.render();
-  assert.equal(c.actions.find((a) => a.id === id)!.visible, true);
+  assert.ok(c.actions.some((a) => a.id === id));
   assert.match(c.actions.find((a) => a.id === id)!.label, /恢复默认/);
 });
 
@@ -1590,6 +1643,8 @@ test('VIC files expose preset paths and guarded browsing only for the selected s
     await pick;
     assert.equal(h.props.overlay.physics[name], "'/data/O''Brien/vic.txt'");
     c = h.render();
+    // VIC 行只有"使用预设路径/选择文件"；旧清单里给所有行都列的"恢复默认"在界面上不存在（幽灵按钮）。
+    assert.ok(!c.actions.some((a) => a.id === `configuration-${name}-reset`));
     c.actions.find((a) => a.id === `configuration-${name}-preset`)!.run();
     assert.equal(h.props.overlay.physics[name], undefined);
     h.props.overlay.physics.DEF_Runoff_SCHEME = '3';
@@ -1929,7 +1984,8 @@ for (const site of ['scope', 'macro', 'spatial']) {
     const c = await h.settle();
     const action = c.actions.find((item) => item.id === 'configuration-family-sediment')!;
     const button = h.nodes.find(
-      (node) => node.type === 'Button' && node.props.onClick === action.run,
+      (node) =>
+        node.type === ActionButtonStub && node.props.action === 'configuration-family-sediment',
     )!;
     assert.ok(button);
     assert.equal(action.enabled, site === 'spatial');
@@ -1965,4 +2021,28 @@ test('a run-time closed WUE removes only that stomatal choice', async () => {
   assert.ok(!scheme.options!.some((o) => o.value === 'WUE'));
   assert.notEqual(scheme.value, 'WUE');
   assert.throws(() => scheme.set('WUE'));
+});
+
+test('the guide lists exactly the rendered buttons: collapsed areas and a locked configuration drop out', async () => {
+  const h = harness();
+  h.render();
+  let c = await h.settle();
+  // 默认 BGC 打开，生态组展开：标题与组内按钮都登记。
+  assert.ok(c.fields.some((f) => f.id === 'configuration-stomatal-scheme'));
+  c.actions.find((a) => a.id === 'configuration-group-ecology')!.run();
+  c = h.render();
+  // 收起后组内字段与按钮都不再渲染，助手也就看不到。
+  assert.ok(!c.fields.some((f) => f.id === 'configuration-stomatal-scheme'));
+  assert.ok(!c.actions.some((a) => a.id === 'configuration-stomatal-reset'));
+  c.actions.find((a) => a.id === 'configuration-group-ecology')!.run();
+  c = h.render();
+  assert.ok(c.fields.some((f) => f.id === 'configuration-stomatal-scheme'));
+  // 同时渲染的按钮 id 唯一（数组项都带各自的 key/id）。
+  const ids = c.actions.map((a) => a.id);
+  assert.equal(new Set(ids).size, ids.length, `duplicate action ids: ${ids}`);
+  // 锁定配置后折叠标题按不动，助手也看不到展开动作（Advanced 没有 disabled，按模型设置的做法不登记）。
+  h.props.disabled = true;
+  c = h.render();
+  assert.ok(!c.actions.some((a) => a.id === 'configuration-group-ecology'));
+  assert.ok(!c.actions.some((a) => a.id === 'configuration-pft-toggle'));
 });

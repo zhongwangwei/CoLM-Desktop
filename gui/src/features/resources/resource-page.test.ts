@@ -4,9 +4,19 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as resource from './resource';
 import { remoteRunPermissions, reconcileRemoteRun } from '../runs/run-model';
+import { ActionButtonStub } from '../../lib/rendered-tree';
 import type { UiAction, UiField } from '../../lib/guide';
 
 type Contract = { fields: UiField[]; actions: UiAction[]; details: unknown };
+type Rendered = {
+  id: string;
+  label: string;
+  kind: 'click' | 'commit';
+  enabled: boolean;
+  run: () => unknown;
+};
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Node = { type: unknown; props: Record<string, any>; children?: unknown[] };
 function harness(
   records: Record<string, unknown> = {},
   hosts = ['7920land', '7920mp'],
@@ -34,6 +44,34 @@ function harness(
   const servers = hosts.map((host) => ({ ...resource.newServer(), host, root: '/data/colm' }));
   let failProbe = false;
   let schedulers: unknown = ['slurm'];
+  let probePartitions: resource.Partition[] = [
+    {
+      name: 'first',
+      default: true,
+      exclusive: false,
+      nodes: 7,
+      cores_min: 48,
+      cores_max: 48,
+      memory_gb_min: 312,
+      memory_gb_max: 375,
+      max_nodes: 3,
+      max_time: '7-00:00:00',
+      whole_node_memory: true,
+    },
+    {
+      name: 'second',
+      default: false,
+      exclusive: false,
+      nodes: 7,
+      cores_min: 64,
+      cores_max: 80,
+      memory_gb_min: 502,
+      memory_gb_max: 1006,
+      max_nodes: 1,
+      max_time: '7-00:00:00',
+      whole_node_memory: true,
+    },
+  ];
   let unverifiedQsub = false;
   let pendingProbe: Promise<void> | undefined;
   const menus: { items: { disabled?: boolean; onSelect: () => void }[] }[] = [];
@@ -74,34 +112,7 @@ function harness(
           qsub_unverified: unverifiedQsub,
           root_writable: true,
           maps: [],
-          partitions: [
-            {
-              name: 'first',
-              default: true,
-              exclusive: false,
-              nodes: 7,
-              cores_min: 48,
-              cores_max: 48,
-              memory_gb_min: 312,
-              memory_gb_max: 375,
-              max_nodes: 3,
-              max_time: '7-00:00:00',
-              whole_node_memory: true,
-            },
-            {
-              name: 'second',
-              default: false,
-              exclusive: false,
-              nodes: 7,
-              cores_min: 64,
-              cores_max: 80,
-              memory_gb_min: 502,
-              memory_gb_max: 1006,
-              max_nodes: 1,
-              max_time: '7-00:00:00',
-              whole_node_memory: true,
-            },
-          ],
+          partitions: probePartitions,
           ...(!(args?.server as resource.Server)?.root
             ? { configuration_error: '请填写服务器工作目录' }
             : {}),
@@ -116,30 +127,37 @@ function harness(
         return null;
     }
   };
+  let tree: unknown;
   const environment = {
     ...resource,
     remoteRunPermissions,
     reconcileRemoteRun,
     React: {
-      createElement: (type: string, props: Record<string, unknown>) => {
+      createElement: (
+        type: unknown,
+        props: Record<string, unknown> | null,
+        ...children: unknown[]
+      ) => {
         if (type === 'remote-browser') browser = props as typeof browser;
         if (type === 'context-menu') menus.push(props as (typeof menus)[number]);
         if (type === 'live-server-load') liveLoads.push(props as (typeof liveLoads)[number]);
-        return null;
+        return { type, props: { ...(props ?? {}), children } };
       },
+      Fragment: 'Fragment',
     },
     RemotePathBrowser: 'remote-browser',
     LiveServerLoad: 'live-server-load',
     ContextMenu: 'context-menu',
-    Dialog: () => {},
-    Advanced: () => {},
-    Button: () => {},
-    Card: () => {},
-    Field: () => {},
-    Input: () => {},
-    Notice: () => {},
-    Select: () => {},
-    NavIcon: () => {},
+    Dialog: 'Dialog',
+    Advanced: 'Advanced',
+    Button: 'Button',
+    Card: 'Card',
+    Field: 'Field',
+    Input: 'Input',
+    Notice: 'Notice',
+    Select: 'Select',
+    NavIcon: 'NavIcon',
+    ActionButton: ActionButtonStub,
     useApp: () => ({
       state: {
         language: 'zh',
@@ -180,8 +198,14 @@ function harness(
     useNavigationGuard: (fn: () => string | null) => {
       guard = fn;
     },
+    // 动作由按钮自己登记（第 737 轮）：从渲染出的元素树里收；打开的对话框挡住页面，只算对话框里的。
     usePageContract: (value: Contract) => {
-      contract = value;
+      contract = {
+        ...value,
+        get actions() {
+          return visibleActions();
+        },
+      };
     },
     invoke: ipc,
     invokeJson: ipc,
@@ -189,10 +213,84 @@ function harness(
   const Page = new Function(...Object.keys(environment), `${code};return ResourcesPage;`)(
     ...Object.values(environment),
   );
+  const walk = (node: unknown): Node[] =>
+    !node || typeof node !== 'object'
+      ? []
+      : Array.isArray(node)
+        ? node.flatMap(walk)
+        : [node as Node, ...walk((node as Node).props?.children)];
+  const text = (node: unknown): string =>
+    Array.isArray(node)
+      ? node.map(text).join('')
+      : node == null || node === false
+        ? ''
+        : typeof node === 'object'
+          ? text((node as Node).props?.children)
+          : String(node);
+  function collect(node: unknown): Rendered[] {
+    if (!node || typeof node !== 'object') return [];
+    if (Array.isArray(node)) return node.flatMap(collect);
+    const element = node as Node,
+      props = element.props ?? {};
+    if (element.type === 'Dialog') return props.open ? collect(props.children) : [];
+    if (element.type === 'Advanced') {
+      const own: Rendered[] =
+        typeof props.action === 'string'
+          ? [
+              {
+                id: String(props.action),
+                label: String(props.actionLabel ?? ''),
+                kind: 'click',
+                enabled: true,
+                run: () => (props.onOpenChange as (open: boolean) => void)(!props.open),
+              },
+            ]
+          : [];
+      // 折叠着的可折叠区不渲染内容，里面的按钮也就不存在。
+      return [...own, ...(props.open ? collect(props.children) : [])];
+    }
+    if (element.type === ActionButtonStub)
+      return [
+        {
+          id: String(props.action),
+          label: String(props.label),
+          kind: (props.kind as Rendered['kind']) ?? 'click',
+          enabled: !props.disabled,
+          run: props.run as () => unknown,
+        },
+      ];
+    return collect(props.children);
+  }
+  function findOpenDialog(node: unknown): Node | null {
+    if (!node || typeof node !== 'object') return null;
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = findOpenDialog(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    const element = node as Node;
+    if (element.type === 'Dialog' && element.props?.open) return element;
+    return findOpenDialog(element.props?.children);
+  }
+  function visibleActions(): UiAction[] {
+    const dialog = findOpenDialog(tree),
+      found = collect(dialog ? dialog.props.children : tree);
+    if (dialog && typeof dialog.props.closeAction === 'string')
+      found.unshift({
+        id: dialog.props.closeAction,
+        label: '关闭',
+        kind: 'click',
+        enabled: true,
+        run: () => (dialog.props.onOpenChange as (open: boolean) => void)(false),
+      });
+    return found;
+  }
   function render() {
     cursor = 0;
     menus.length = 0;
-    Page();
+    tree = Page();
     return contract;
   }
   async function ready() {
@@ -201,7 +299,7 @@ function harness(
     return render();
   }
   async function action(id: string) {
-    const item = contract.actions.find((action) => action.id === id);
+    const item = visibleActions().find((action) => action.id === id);
     assert.ok(item, `visible action ${id}`);
     assert.notEqual(item.enabled, false, `${id} is enabled`);
     await item.run();
@@ -211,6 +309,19 @@ function harness(
     const item = contract.fields.find((field) => field.id === id);
     assert.ok(item, `visible field ${id}`);
     item.set(value);
+    return render();
+  }
+  /** 普通按钮（删除、清除这类 D 级动作）：不登记给助手，但界面上能按。 */
+  function button(label: string) {
+    const item = walk(tree).find((node) => node.type === 'Button' && text(node) === label);
+    assert.ok(item, `button ${label}`);
+    return item;
+  }
+  async function press(label: string) {
+    const item = button(label);
+    assert.notEqual(item.props.disabled, true, `${label} is enabled`);
+    (item.props.onClick as () => void)();
+    await new Promise((resolve) => setImmediate(resolve));
     return render();
   }
   return {
@@ -223,17 +334,25 @@ function harness(
     },
     action,
     fill,
+    press,
+    button,
     render,
     calls,
     routes,
     servers,
     guard: () => guard(),
     contract: () => contract,
+    visible: visibleActions,
+    nodes: () => walk(tree),
+    text,
     failProbe: () => {
       failProbe = true;
     },
     schedulers: (value: unknown) => {
       schedulers = value;
+    },
+    partitions: (value: resource.Partition[]) => {
+      probePartitions = value;
     },
     unverifiedQsub: () => {
       unverifiedQsub = true;
@@ -296,31 +415,23 @@ test('remembered paths by simulation type are listed per server, survive saving 
     },
   });
   await page.ready();
+  // "清除"忘记记住的路径属于 D 级：界面上有按钮，助手看不到（第 737 轮）。
   const forget = () =>
-    page
-      .contract()
-      .actions.filter((action) => action.id.startsWith('resource-forget-'))
-      .map((action) => action.id);
-  assert.deepEqual(forget(), [
-    'resource-forget-site-sitedir',
-    'resource-forget-site-forcingdir',
-    'resource-forget-watershed-shapefile',
-  ]);
+    page.nodes().filter((node) => node.type === 'Button' && page.text(node) === '清除');
+  assert.equal(forget().length, 3);
+  assert.ok(!page.contract().actions.some((action) => action.id.includes('forget')));
   page.fill('resource-username', 'changed');
   await page.action('resource-save');
   assert.equal(forget().length, 3, 'saving connection settings keeps the remembered paths');
-  await page.action('resource-forget-site-sitedir');
+  await page.press('清除');
   assert.deepEqual(page.calls.find((call) => call.command === 'remote_forget_kind_path')?.args, {
     host: '7920land',
     kind: 'site',
     key: 'sitedir',
   });
-  assert.deepEqual(forget(), [
-    'resource-forget-site-forcingdir',
-    'resource-forget-watershed-shapefile',
-  ]);
+  assert.equal(forget().length, 2);
   await page.action('resource-select-server-7920mp');
-  assert.deepEqual(forget(), []);
+  assert.equal(forget().length, 0);
 });
 
 test('scheduler detection is visible beside advanced settings and applies one candidate only to the draft', async () => {
@@ -406,6 +517,106 @@ test('a cluster preset fills scheduling settings without touching address, accou
   assert.equal(value('resource-root'), '/data/colm', 'so does the work root');
   assert.equal(value('resource-rawdata_dir'), '/shr03/CoLMrawdata');
   assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('a recognised cluster preset is applied from its notice and only edits the draft', async () => {
+  const page = harness();
+  await page.ready();
+  assert.ok(!page.contract().actions.some((action) => action.id === 'resource-apply-preset'));
+  page.partitions([
+    {
+      name: 'first',
+      default: true,
+      exclusive: false,
+      nodes: 7,
+      cores_min: 48,
+      cores_max: 48,
+      memory_gb_min: 312,
+      memory_gb_max: 375,
+      max_nodes: 3,
+      max_time: '7-00:00:00',
+      whole_node_memory: true,
+    },
+    {
+      name: 'second',
+      default: false,
+      exclusive: false,
+      nodes: 7,
+      cores_min: 64,
+      cores_max: 80,
+      memory_gb_min: 502,
+      memory_gb_max: 1006,
+      max_nodes: 1,
+      max_time: '7-00:00:00',
+      whole_node_memory: true,
+    },
+    {
+      name: 'largemem',
+      default: false,
+      exclusive: false,
+      nodes: 1,
+      cores_min: 48,
+      cores_max: 48,
+      memory_gb_min: 1500,
+      memory_gb_max: 1500,
+      max_nodes: 1,
+      max_time: '7-00:00:00',
+      whole_node_memory: true,
+    },
+  ]);
+  await page.action('resource-advanced-toggle');
+  await page.action('resource-check');
+  const preset = page.contract().actions.find((action) => action.id === 'resource-apply-preset');
+  assert.ok(preset, 'the recognised cluster notice registers its apply button');
+  assert.equal(preset.label, '套用预设');
+  const contract = await page.action('resource-apply-preset');
+  const value = (id: string) => contract.fields.find((field) => field.id === id)?.value;
+  assert.deepEqual(
+    ['resource-scheduler', 'resource-partition', 'resource-cores_per_node'].map(value),
+    ['slurm', 'first', '48'],
+  );
+  assert.equal(value('resource-host'), '7920land');
+  assert.equal(page.calls.filter((call) => call.command === 'remote_save_config').length, 0);
+});
+
+test('destructive resource actions stay on the interface, while removing a draft mapping row is registered', async () => {
+  const page = harness();
+  Object.assign(page.servers[0], {
+    kind_paths: { site: { sitedir: '/server/Sitedata' } },
+  });
+  await page.ready();
+  // 界面上真正删除/清理/忘记的动作不登记给助手（D 级，第 737 轮）。
+  const forbidden = /^resource-(delete|forget|clean|recover|register-password)/;
+  assert.ok(!page.contract().actions.some((action) => forbidden.test(action.id)));
+  assert.ok(page.button('清除'), 'the forget button is still on the interface');
+  // 删除连接对话框：助手只看得到"关闭"。
+  page.menus()[0].items[0].onSelect();
+  page.render();
+  assert.deepEqual(
+    page.contract().actions.map((action) => action.id),
+    ['resource-delete-close'],
+  );
+  await page.action('resource-delete-close');
+  // 移除映射行只改内存草稿，保留原 id 与 kind=click。
+  await page.action('resource-advanced-toggle');
+  await page.action('resource-directories-toggle');
+  let contract = await page.action('resource-add-map');
+  assert.ok(contract.actions.some((action) => action.id === 'resource-remove-map-0'));
+  assert.ok(!contract.actions.some((action) => forbidden.test(action.id)));
+  contract = await page.action('resource-remove-map-0');
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-remove-map-0'));
+  // 维护区里清理快照、核对租约只在界面上。
+  contract = await page.action('resource-maintenance-toggle');
+  assert.ok(!contract.actions.some((action) => forbidden.test(action.id)));
+  assert.ok(page.button('清理快照'));
+  assert.ok(page.button('核对并恢复租约'));
+  // 同时渲染的按钮 id 唯一（列表项都带各自的 key）。
+  const ids = contract.actions.map((action) => action.id);
+  assert.equal(new Set(ids).size, ids.length, `duplicate action ids: ${ids}`);
+  // 密码是本次会话的密钥，登记密码也不登记给助手。
+  page.fill('resource-auth', 'password');
+  assert.ok(!page.render().actions.some((action) => forbidden.test(action.id)));
+  assert.ok(page.button('登记密码'));
 });
 
 test('ambiguous or absent schedulers retain the manual selection, without falling back to bare', async () => {
@@ -501,7 +712,13 @@ test('resource context menu deletes only the confirmed connection and preserves 
   page.menus()[1].items[0].onSelect();
   page.render();
   assert.match(page.guard()!, /删除确认/);
-  const contract = await page.action('resource-delete-confirm');
+  // 删除连接设置是 D 级：确认按钮不登记，助手只看到对话框的"关闭"。
+  assert.deepEqual(
+    page.contract().actions.map((action) => action.id),
+    ['resource-delete-close'],
+  );
+  assert.equal(page.button('删除连接设置').props.disabled, false);
+  const contract = await page.press('删除连接设置');
   assert.equal((contract.details as { selected: string }).selected, 'server:7920land');
   assert.equal(page.menus().length, 1);
   assert.deepEqual(page.calls.at(-1), {
@@ -516,33 +733,36 @@ test('connection delete failure preserves settings and dirty drafts disable its 
   await page.ready();
   page.menus()[0].items[0].onSelect();
   page.render();
-  await assert.rejects(page.action('resource-delete-confirm'), /Cannot save/);
+  await page.press('删除连接设置');
   page.render();
   assert.equal(page.menus().length, 2);
-  assert.ok(page.contract().actions.some((action) => action.id === 'resource-delete-confirm'));
+  // 删除失败后对话框仍开着，助手依旧只看到"关闭"。
+  assert.deepEqual(
+    page.contract().actions.map((action) => action.id),
+    ['resource-delete-close'],
+  );
   page.fill('resource-username', 'edited');
   assert.ok(page.menus().every((menu) => menu.items[0].disabled));
-  assert.equal(
-    page.contract().actions.find((action) => action.id === 'resource-delete-confirm')?.enabled,
-    false,
-  );
+  assert.equal(page.button('删除连接设置').props.disabled, true);
 });
 
-test('failed configuration refresh prevents deletion from overwriting with a stale server list', async () => {
-  const failures = { config: false };
-  const page = harness({}, undefined, failures);
+test('the open delete dialog blocks page actions and only offers its close button', async () => {
+  const page = harness();
   await page.ready();
   page.menus()[0].items[0].onSelect();
   page.render();
-  failures.config = true;
-  await assert.rejects(page.action('resource-refresh'), /Unreadable/);
-  const contract = page.render();
-  const deletion = contract.actions.find((action) => action.id === 'resource-delete-confirm');
-  assert.ok(deletion);
-  assert.equal(deletion.enabled, false);
-  assert.ok(page.menus().every((menu) => menu.items[0].disabled));
-  await assert.rejects(async () => await deletion.run(), /无法读取连接配置/);
+  // 对话框打开时页面上的按钮被挡住，助手连"刷新"也按不到。
+  await assert.rejects(page.action('resource-refresh'), /visible action resource-refresh/);
+  assert.deepEqual(
+    page.contract().actions.map((action) => action.id),
+    ['resource-delete-close'],
+  );
   assert.ok(!page.calls.some((call) => call.command === 'remote_save_config'));
+  const contract = await page.action('resource-delete-close');
+  assert.equal(page.guard(), null);
+  // 关闭后页面动作回来，删除仍然看不到。
+  assert.ok(contract.actions.some((action) => action.id === 'resource-refresh'));
+  assert.ok(!contract.actions.some((action) => action.id === 'resource-delete-confirm'));
 });
 
 test('server work directory picker uses the unsaved host and only fills its draft', async () => {
