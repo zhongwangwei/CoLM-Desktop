@@ -811,9 +811,12 @@ fn code_page_commits_require_fresh_decisions_despite_auto_or_remembered_ui_commi
         "workspace-create",
         "workspace-patch",
         "workspace-check",
-        "workspace-export",
-        "resource-build-7920l",
-        "resource-workspace-submit-7920l",
+        "version-branch-code",
+        "version-import-process",
+        "resource-build",
+        "resource-workspace-submit",
+        "version-fix-drift",
+        "code-file-save",
     ];
     for target in targets {
         let result = execute_tool(

@@ -35752,3 +35752,24 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 - 窗口实测发现并修了两处：设置页"检查可释放的空间"只查不删，原来没登记（第 3 批遗留），现登记为 `settings-cache-check`；`Advanced` 的折叠标题此前只在 `useRenderedAction` 里登记、DOM 上没有 `data-action`，端到端与审查脚本看不到它，现在补上 `data-action`（助手本来就能看到）。
 - 未在窗口里走到：多站点设置的"多站点"模式要先生成/选择站点目录才会出现，本轮隔离环境里没走完建例向导；该组件由第 3 批单元测试覆盖。项目页版本选择对话框里的"删除版本/清理旧官方版本"要存在可删版本才出现，D 级不可见由第 5 批测试覆盖。
 - 普通 `.app` 已用 `cargo tauri build --config src-tauri/tauri.bundle.conf.json --bundles app` 重建；测试包用单独的 `CARGO_TARGET_DIR` 与应用标识，不覆盖用户手上的正式包。
+
+## 第 738 轮：复查第 737 轮第 7–10 批（DeepSeek 完成）（2026-10-22）
+
+**来历**：用户让 DeepSeek 接着完成动作迁移的第 7–10 批（结果页、版本/改代码页、配置选项与计算资源页、研究页）以及后端白名单同步，共 6 个提交（`c8cf7518`…`a6a8a697`），然后让我检查。
+
+**复查结论**：迁移本身没有问题。
+- 前端 831 条测试、tsc、lint、prettier、`check-gui` 通过；GUI 后端 428 条、`colm-agent` 197+7 条、两个 workspace 的 fmt 与 clippy 通过；推送后的 CI（ci / windows-kernel / release）全部成功。
+- 18 个页面的 `PageContract.actions` 都已清空。
+- D 级没有漏：登记的动作里带 remove/discard/adopt 字样的，经逐个核对，都只改表单草稿（移除映射行、示踪物行、率定目标行，放弃未保存修改），或只是把工作区名字记进草稿（`version-adopt-workspace`，不是已删除的"设为默认"）。
+- 源码里出现多次的动作名（9 个）都分属互斥的标签页、步骤或对话框，不会同时显示。
+- 所有写死 `kind="commit"` 的按钮和研究页 13 个 commit 动作都在审计白名单里。
+- 结果页删掉的旧断言都换成了按渲染结果检查的测试，没有削弱。
+
+**修正的三处收尾问题**：
+- **按记录重跑的超时**：`history-replay` 会同步重跑整个模型，却只有默认的 120 秒超时，助手每次都会把它报成"结果未确认"。`project-example` 与 `new-example` 做同一件事（复制示例数据再扫描），后者早已在长超时名单里，前者却不在。两者都已加入长超时名单。
+- **白名单残留**：提交说明写着"删掉已不存在的 id"，审计白名单里却还留着 5 个已没有对应按钮的前缀（`resource-build-`、`resource-case-fetch-`、`resource-study-fetch-`、`resource-case-cancel-`、`resource-study-cancel-`），超时名单留着一条泛化的 `resource-*-fetch-*`，C 级审批函数留着 `workspace-export`。这些都已删除。C 级审批函数里的 `resource-build`、`resource-workspace-submit` 原来用前缀匹配，是为了让一条仍用旧目标名（`resource-build-7920l` 等）的测试继续通过；现在改为精确匹配，那条测试也换成界面上实际存在的目标。
+- **防止再漏**：DeepSeek 的提交只留了一句规矩"加 commit 按钮时三张表要同步改"，靠人记。现在新增 `history.rs` 测试 `every_fixed_commit_button_is_an_audited_target`：扫描 `gui/src` 里所有写死 `kind="commit"` 的 `ActionButton`，断言它们都能通过审计白名单。临时从白名单删掉 `project-example` 时，测试立即失败并指出 `ProjectPage.tsx`；随后还原。
+
+**测试**：两个 workspace 的 fmt 与 clippy 通过；GUI 后端 429 条通过（新增 1 条）；`colm-agent` 197+7 条通过。
+
+**没做**：长超时名单与 C 级分级没有类似的自动核对，仍靠这一轮的人工比对。动态 `kind`（`kind={...}`）的按钮和研究页由 `action(...)` 生成的动作不在新测试的扫描范围内，这一轮已逐个人工核对过。

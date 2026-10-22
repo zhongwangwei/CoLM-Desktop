@@ -313,12 +313,7 @@ fn assistant_ui_event(
             ) || [
                 "prep-finish-",
                 "history-export-",
-                "resource-build-",
-                "resource-case-fetch-",
-                "resource-study-fetch-",
-                "resource-case-cancel-",
                 "resource-local-cancel-",
-                "resource-study-cancel-",
                 "version-fix-",
                 "version-method-",
             ]
@@ -843,6 +838,56 @@ fn append_outcome(history: &History, start: &Event, end: &Event) -> Result<(), S
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 前端写死 `kind="commit"` 的 ActionButton 都必须是白名单里的目标：原来靠"加按钮时记得同步"，
+    /// 第 737 轮迁移后仍漏了好几个（助手按下去会被当成未知改动拒绝），改由这条测试守住。
+    /// 动态 kind（`kind={...}`）和研究页 `action(...)` 生成的动作不在扫描范围内。
+    #[test]
+    fn every_fixed_commit_button_is_an_audited_target() {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "tsx") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut files = Vec::new();
+        walk(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../src"),
+            &mut files,
+        );
+        let mut checked = 0;
+        for file in files {
+            let text = std::fs::read_to_string(&file).unwrap();
+            for chunk in text.split("<ActionButton").skip(1) {
+                let tag = &chunk[..chunk.find('>').unwrap_or(chunk.len())];
+                if !tag.contains("kind=\"commit\"") {
+                    continue;
+                }
+                let target = if let Some(rest) = tag.split("action=\"").nth(1) {
+                    rest[..rest.find('"').unwrap()].to_string()
+                } else if let Some(rest) = tag.split("action={`").nth(1) {
+                    // 模板名：取 `${` 之前的前缀，补一个示例后缀。
+                    let name = &rest[..rest.find('`').unwrap()];
+                    format!("{}x", &name[..name.find("${").unwrap_or(name.len())])
+                } else {
+                    continue;
+                };
+                assert!(
+                    assistant_ui_event("ui-check", "commit", Some(&target)).is_ok(),
+                    "{}: commit button {target} is missing from the audit whitelist",
+                    file.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 20,
+            "only {checked} commit buttons found; the scan is broken"
+        );
+    }
     #[test]
     fn status_polls_reconcile_without_becoming_ledger_operations() {
         let case = format!(

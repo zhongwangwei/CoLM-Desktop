@@ -192,12 +192,11 @@ fn code_commit(args: &Value) -> bool {
             "workspace-create"
                 | "workspace-patch"
                 | "workspace-check"
-                | "workspace-export"
                 | "version-branch-code"
                 | "version-import-process"
-        ) || target.starts_with("resource-build")
-            || target.starts_with("resource-workspace-submit")
-            || target.starts_with("version-fix-")
+                | "resource-build"
+                | "resource-workspace-submit"
+        ) || target.starts_with("version-fix-")
             || target.starts_with("code-file-")
     })
 }

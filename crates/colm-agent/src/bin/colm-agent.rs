@@ -482,6 +482,8 @@ fn frontend_timeout(action: &str, args: &Value) -> Duration {
                     | "hybrid-climate"
                     | "new-create"
                     | "new-example"
+                    | "project-example"
+                    | "history-replay"
                     | "new-multi-retry"
                     | "workspace-create"
                     | "workspace-patch"
@@ -506,7 +508,6 @@ fn frontend_timeout(action: &str, args: &Value) -> Duration {
                 // 编译引擎/内核一跑几分钟；文件选择框要等用户选完。
                 || target.starts_with("version-fix-")
                 || target.starts_with("history-export-")
-                || (target.starts_with("resource-") && target.contains("-fetch-"))
         }));
     let long_analysis = action == "click"
         && matches!(
@@ -1403,7 +1404,8 @@ mod tests {
             "resource-workspace-submit",
             "resource-workspace-fetch",
             "resource-workspace-cancel",
-            "resource-study-fetch-/a/study",
+            "project-example",
+            "history-replay",
             "code-file-add",
             "code-file-replace",
             "version-import-process",
