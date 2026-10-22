@@ -993,3 +993,30 @@ fn a_station_whose_lsf_node_job_ended_is_failed_but_a_silent_scheduler_is_not_pr
         "LSF no longer knows it"
     );
 }
+
+// 入队一侧拿着 `$P/.lock` 的 flock 起载体；没有调度系统时载体是直接起的后台进程，继承了 8 号描述符就
+// 一直占着这把锁，后面的站点全卡在 flock 上（2026-10-22，T7920 上停了 5 分钟）。沙箱里 flock 是替身，
+// 所以直接看载体进程手里还有没有 8 号描述符。
+#[cfg(unix)]
+#[test]
+fn a_bare_carrier_does_not_carry_the_enqueue_lock_away() {
+    let sb = pack_sandbox("pack-bare-lock", "unused");
+    sb.stub(
+        "setsid",
+        "if [ -e /dev/fd/8 ]; then echo open; else echo closed; fi >> \"$STUBS/fd8\"",
+    );
+    let pack = crate::pack::Pack {
+        pool: "batch-l".into(),
+        slots: 4,
+    };
+    let (_, err, ok) =
+        sb.run(&packed_submit_script(&sb.work(), "j-l", "true", &Spec::bare(), &pack).unwrap());
+    assert!(ok, "{err}");
+    for _ in 0..50 {
+        if !sb.read("fd8").is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(sb.read("fd8").trim(), "closed");
+}

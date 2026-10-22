@@ -300,7 +300,10 @@ if [ "$W" -gt $((L * SLOTS - R)) ]; then
   cat > "$C/script.sh" <<'COLM_CARRIER_EOF'
 {script}COLM_CARRIER_EOF
   chmod +x "$C/script.sh"
-  if ! ( cd "$C" && colm_carrier && echo "$ID" > sched_id ); then
+  # 载体不能带走入队锁：没有调度系统时它是这里直接起的后台进程，会继承 8 号描述符，flock 跟着
+  # 打开的文件走，载体活着锁就一直被占着。T7920 上 90 站批量的后续站点因此卡在 flock 上，直到载体
+  # 空闲满 LINGER（180 s）重开 8 号描述符才放行，提交整整停了 5 分钟（2026-10-22）。
+  if ! ( cd "$C" && colm_carrier 8>&- && echo "$ID" > sched_id ); then
     # 没有载体来跑它：撤出队列，这次提交按失败报告。撤出以后它确定不会再跑，记下来：之后核对
     # 这次提交时据此判为失败、放开重新提交，而不是永远"身份不完整、不要重新提交"。
     rm -f "$P/queue/$J" sched_id
