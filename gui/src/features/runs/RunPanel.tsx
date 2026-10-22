@@ -187,9 +187,11 @@ export default function RunPanel({
   currentCase.current = casePath;
   latest.current = state.running;
   const persisted = state.running[casePath];
+  // 单算例的服务器运行在"提交中"（还没拿到作业记录）也能停：停的是本机正在提交的那个进程。
+  const submittingRemote = persisted?.location === 'remote' && !persisted?.progress?.remote;
   const canCancel =
     !!persisted?.run_id &&
-    (persisted?.location === 'local' || !!batchCases) &&
+    (persisted?.location === 'local' || !!batchCases || submittingRemote) &&
     Object.values(state.running).some((run) => run.run_id === persisted.run_id && run.running);
   const kernelMatches =
     !!effectiveProfile &&
@@ -920,9 +922,17 @@ export default function RunPanel({
         : [casePath];
       if (host && batchCases) {
         let count = 0;
+        let interrupted = 0;
         await eachLimited(targets, 5, async (dir) => {
           const record = latest.current[dir]?.progress?.remote;
-          if (!record) return;
+          // 还在提交的站点没有作业记录：停掉本机正在提交它的进程。原来直接跳过，之后仍会交上去，
+          // 提示却说"已停止继续提交"（GUI 审查 runs #3）。
+          if (!record) {
+            interrupted += await invoke<number>('cancel_remote_submission', { case: dir }).catch(
+              () => 0,
+            );
+            return;
+          }
           try {
             let result = await invokeJson<Record<string, unknown>>('remote_status', { case: dir });
             if (!matchesRemoteRun(latest.current[dir], result)) return;
@@ -945,11 +955,25 @@ export default function RunPanel({
         });
         notify(
           t(
-            `已停止继续提交，并向 ${count} 个服务器作业请求取消；已提交作业须核对终态。`,
-            `Submission stopped; cancellation requested for ${count} jobs. Reconcile submitted jobs before restarting.`,
+            `已停止继续提交（中断 ${interrupted} 个正在提交的站点），并向 ${count} 个服务器作业请求取消；已提交作业须核对终态。`,
+            `Submission stopped (${interrupted} in-flight submissions interrupted); cancellation requested for ${count} jobs. Reconcile submitted jobs before restarting.`,
           ),
         );
         return { stop_requested: count, terminal: false };
+      }
+      if (host && !batchCases) {
+        const stopped = await invoke<number>('cancel_remote_submission', { case: casePath });
+        notify(
+          t(
+            stopped
+              ? '已中断提交。服务器上可能已经排上了作业：运行记录会标成"提交未确认"，请核对服务器状态。'
+              : '没有正在进行的提交可停；作业已交上去时请用"取消服务器作业"。',
+            stopped
+              ? 'Submission interrupted. A job may already be queued on the server: the run is marked as an unconfirmed submission; check the server status.'
+              : 'No submission in progress; once the job is submitted, use Cancel server job.',
+          ),
+        );
+        return { stop_requested: stopped, terminal: false };
       }
       const count = await invoke<number>('cancel_runs', { cases: targets });
       notify(

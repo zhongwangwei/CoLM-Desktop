@@ -57,23 +57,52 @@ pub struct PftComponentReport {
     pub name_en: String,
 }
 
-fn pft_site_input(case_dir: &std::path::Path) -> Result<(std::path::PathBuf, Option<i64>), String> {
+fn case_site_document(case_dir: &std::path::Path) -> Result<colm_namelist::Document, String> {
     let file = case_dir.join("case.nml");
     let text = std::fs::read_to_string(&file).map_err(|e| format!("{}: {e}", file.display()))?;
-    let doc = colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", file.display()))?;
-    let enabled = |name| matches!(doc.get(name), Some(colm_namelist::Value::Bool(true)));
-    if !enabled("DEF_USE_PFT") && !enabled("DEF_USE_PC") {
-        return Err("当前算例没有使用 PFT 或 PC 次网格".into());
-    }
+    colm_namelist::parse(&text).map_err(|e| format!("{}: {e:#}", file.display()))
+}
+
+fn case_site_file(
+    case_dir: &std::path::Path,
+    doc: &colm_namelist::Document,
+) -> Result<std::path::PathBuf, String> {
     let Some(colm_namelist::Value::Str(path)) = doc.get("SITE_fsitedata") else {
         return Err("当前算例没有 SITE_fsitedata".into());
     };
     let path = std::path::Path::new(path);
-    let path = if path.is_absolute() {
+    Ok(if path.is_absolute() {
         path.to_path_buf()
     } else {
         case_dir.join(path)
-    };
+    })
+}
+
+/// 单点算例的站点文件带了哪几套地类分类（IGBP / USGS），用来决定已有算例能切到哪种分类。
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SiteClassifications {
+    pub igbp: bool,
+    pub usgs: bool,
+}
+
+#[tauri::command]
+pub async fn site_classifications(dir: String) -> Result<SiteClassifications, String> {
+    let case_dir = std::path::Path::new(&dir);
+    let doc = case_site_document(case_dir)?;
+    let site = case_site_file(case_dir, &doc)?;
+    let json =
+        crate::sidecar::capture_async(vec!["site-classes".into(), site.display().to_string()])
+            .await?;
+    serde_json::from_str(&json).map_err(|e| format!("colm-cli site-classes 的输出解析不了：{e}"))
+}
+
+fn pft_site_input(case_dir: &std::path::Path) -> Result<(std::path::PathBuf, Option<i64>), String> {
+    let doc = case_site_document(case_dir)?;
+    let enabled = |name| matches!(doc.get(name), Some(colm_namelist::Value::Bool(true)));
+    if !enabled("DEF_USE_PFT") && !enabled("DEF_USE_PC") {
+        return Err("当前算例没有使用 PFT 或 PC 次网格".into());
+    }
+    let path = case_site_file(case_dir, &doc)?;
     let landtype = match doc.get("SITE_landtype") {
         Some(colm_namelist::Value::Int(value)) if *value >= 0 => Some(*value),
         _ => None,

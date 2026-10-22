@@ -1655,7 +1655,9 @@ fn remote_children_are_killed_when_the_app_exits() {
     command.args(["-c", "sleep 30"]);
     colm_kernel::run::top_level_sidecar(&mut command);
     let mut child = command.spawn().unwrap();
-    let guard = register_remote_child(child.id());
+    let guard = register_remote_child(child.id(), Some("/case/a".into()));
+    // 别的算例的停止不碰它。
+    assert_eq!(cancel_remote_submission("/case/b".into()).unwrap(), 0);
     assert!(
         cancel_remote_children().unwrap() >= 1,
         "a registered remote child is cancelled"

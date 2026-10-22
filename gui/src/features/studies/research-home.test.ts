@@ -319,3 +319,72 @@ it('result files list the results people read, not every member record', () => {
   assert.equal(resultFileLabel('de/g000012.json', false), '差分进化第 12 代 · de/g000012.json');
   assert.equal(resultFileLabel('outputs/qle.csv', true), 'outputs/qle.csv');
 });
+
+// "待复核"的成员：问过用户再连同它们一起重跑；用户不确认就什么都不发（GUI 审查 R3）。
+it('retrying a study that needs review reruns those members only after confirmation', async () => {
+  for (const confirmed of [true, false]) {
+    const calls: [string, Record<string, unknown>][] = [];
+    const control = pageCallback('control', {
+      remotePermissions: { exists: false },
+      tr: (zh: string) => zh,
+      status: 'needs_review',
+      askConfirm: async () => confirmed,
+      epoch: { current: 1 },
+      task: (fn: (current: () => boolean) => Promise<unknown>) => fn(() => false),
+      invoke: async (command: string, args: Record<string, unknown>) => {
+        calls.push([command, args]);
+        return null;
+      },
+      studyDir: '/s',
+      readStatus: async () => null,
+      runLock: { current: false },
+      start: async () => null,
+    });
+    await (control as unknown as (command: string) => Promise<unknown>)('study_retry');
+    assert.deepEqual(
+      calls,
+      confirmed ? [['study_retry', { studyDir: '/s', includeReview: true }]] : [],
+    );
+  }
+});
+
+// 服务器提交失败而研究里没有任何服务器记录：收回"提交中"占位，可以改了再交（GUI 审查 R2）。
+it('a server submission that recorded nothing can be submitted again', async () => {
+  for (const recorded of [false, true]) {
+    const replies: unknown[] = [];
+    let reply: unknown = null;
+    const start = pageCallback('start', {
+      runLock: { current: false },
+      lock: { current: false },
+      runKernel: '/kernel',
+      studyDir: '/s',
+      envelope: { state: { status: 'Ready' } },
+      confirmed: true,
+      remotePermissions: { exists: false },
+      tr: (zh: string) => zh,
+      jobs: '1',
+      studyModelRevision: () => ({ id: 'official', revision: 1 }),
+      state: { versionRef: { id: 'official', revision: 1 } },
+      remoteRequest: { current: 0 },
+      setLaunching: () => {},
+      setError: () => {},
+      epoch: { current: 1 },
+      host: 'server',
+      setRemoteReply: (next: unknown) => {
+        reply = typeof next === 'function' ? (next as (old: unknown) => unknown)(reply) : next;
+        replies.push(reply);
+      },
+      remoteStudyReply: (value: unknown) => value,
+      invokeJson: async () => {
+        throw new Error('ssh: connection refused');
+      },
+      readStatus: async () => (recorded ? { remote_pending: { host: 'server' } } : {}),
+      ai: false,
+      engine: 'rust',
+      preprocessors: 'rust',
+    });
+    await assert.rejects(start(), /connection refused/);
+    if (recorded) assert.equal((reply as { status: { state: string } }).status.state, 'unknown');
+    else assert.equal(reply, null);
+  }
+});

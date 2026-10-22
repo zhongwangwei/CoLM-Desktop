@@ -70,3 +70,33 @@ fn exposes_conditions_and_validates_overrides() {
     assert!(validate_override("DEF_LC_BETA", 0.0).is_err());
     assert!(validate_override("DEF_BALL_BERRY_GRADM", 1.6).is_err());
 }
+
+/// 地类参数的范围与保存规则一致：`GRADM` > 1.6、`LAMBDA` > 0 都是开区间。
+#[test]
+fn shown_land_class_bounds_agree_with_the_saved_override_rules() {
+    for meta in PARAMETERS {
+        let bounds = super::land_cover::bounds(meta.name).unwrap();
+        if let Some(min) = bounds.min {
+            if min != meta.sentinel {
+                assert_eq!(
+                    validate_override(meta.name, min).is_ok(),
+                    bounds.min_inclusive,
+                    "{} at its lower bound {min}",
+                    meta.name
+                );
+            }
+        }
+        if let Some(max) = bounds.max {
+            if max != meta.sentinel {
+                assert_eq!(
+                    validate_override(meta.name, max).is_ok(),
+                    bounds.max_inclusive,
+                    "{} at its upper bound {max}",
+                    meta.name
+                );
+            }
+        }
+    }
+    let gradm = super::land_cover::bounds("DEF_LC_GRADM").unwrap();
+    assert_eq!((gradm.min, gradm.min_inclusive), (Some(1.6), false));
+}

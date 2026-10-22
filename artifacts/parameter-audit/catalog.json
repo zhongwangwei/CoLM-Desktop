@@ -10028,6 +10028,7 @@
     "validation": {
       "min": "1.6",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -10067,6 +10068,7 @@
     "validation": {
       "min": "1.6",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -10344,6 +10346,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -10383,6 +10386,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -39263,6 +39267,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -39304,6 +39309,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -40505,8 +40511,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": "0",
+      "min": "1.6",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -40546,8 +40553,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": "0",
+      "min": "1.6",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -40671,6 +40679,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -40712,6 +40721,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41081,6 +41091,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41122,6 +41133,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41412,6 +41424,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41456,6 +41469,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41499,6 +41513,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41542,6 +41557,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41583,6 +41599,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41624,6 +41641,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41665,6 +41683,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41706,6 +41725,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41747,6 +41767,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41788,6 +41809,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41829,6 +41851,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41870,6 +41893,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41915,6 +41939,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -41960,6 +41985,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42005,6 +42031,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42050,6 +42077,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42095,6 +42123,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42140,6 +42169,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42185,6 +42215,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42230,6 +42261,7 @@
     "validation": {
       "min": null,
       "max": "0",
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42271,6 +42303,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -42312,6 +42345,7 @@
     "validation": {
       "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -43335,8 +43369,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43376,8 +43410,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43417,8 +43451,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43458,8 +43492,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43499,8 +43533,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43540,8 +43574,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43581,8 +43615,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43622,8 +43656,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43663,8 +43697,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43704,8 +43738,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43745,8 +43779,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43786,8 +43820,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43827,8 +43861,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43868,8 +43902,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43909,8 +43943,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43950,8 +43984,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -43991,8 +44025,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44032,8 +44067,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44073,8 +44109,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44114,8 +44151,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44155,8 +44193,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44196,8 +44235,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44237,8 +44277,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44278,8 +44319,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44319,8 +44361,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44360,8 +44403,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44401,8 +44445,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44442,8 +44487,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44483,8 +44529,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44524,8 +44571,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -44565,7 +44613,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44606,7 +44654,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44647,7 +44695,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44688,7 +44736,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44729,7 +44777,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "-1",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44770,7 +44818,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "-1",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -44811,8 +44859,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -44852,8 +44900,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -44893,8 +44941,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -44934,8 +44982,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -44975,7 +45023,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -45016,7 +45064,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -45057,8 +45105,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45098,8 +45147,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45139,7 +45189,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -45180,7 +45230,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -45221,8 +45271,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45262,8 +45312,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45303,7 +45353,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": false
@@ -45344,7 +45394,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": false
@@ -45385,8 +45435,10 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
+      "min_exclusive": true,
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45426,8 +45478,10 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
+      "min_exclusive": true,
+      "max_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45549,8 +45603,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45590,8 +45644,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45631,8 +45685,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45672,8 +45726,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45713,8 +45767,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45754,8 +45808,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45795,8 +45849,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45836,8 +45890,8 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
-      "max": null,
+      "min": "0",
+      "max": "1",
       "allowed_values": [],
       "finite": true
     },
@@ -45877,8 +45931,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45918,8 +45973,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -45959,7 +46015,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -46000,7 +46056,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -46041,8 +46097,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -46082,8 +46139,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -46123,8 +46181,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -46164,8 +46223,9 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
+      "min_exclusive": true,
       "allowed_values": [],
       "finite": true
     },
@@ -46205,7 +46265,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PFT branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true
@@ -46246,7 +46306,7 @@
     "default": null,
     "default_provider": "MOD_Const_PFT.F90 current PC branch",
     "validation": {
-      "min": null,
+      "min": "0",
       "max": null,
       "allowed_values": [],
       "finite": true

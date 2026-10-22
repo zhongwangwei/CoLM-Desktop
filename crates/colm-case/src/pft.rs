@@ -1289,6 +1289,81 @@ fn fixed_table() -> &'static Table {
     })
 }
 
+/// 一个参数能取的范围，带开闭。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Bounds {
+    pub min: Option<f64>,
+    pub min_inclusive: bool,
+    pub max: Option<f64>,
+    pub max_inclusive: bool,
+}
+
+impl Bounds {
+    /// 与另一组范围取交集：下限取大的、上限取小的，相等时取开区间。
+    pub fn intersect(self, other: Bounds) -> Bounds {
+        let lower = match (self.min, other.min) {
+            (Some(a), Some(b)) if a > b => (Some(a), self.min_inclusive),
+            (Some(a), Some(b)) if b > a => (Some(b), other.min_inclusive),
+            (Some(a), Some(_)) => (Some(a), self.min_inclusive && other.min_inclusive),
+            (Some(a), None) => (Some(a), self.min_inclusive),
+            (None, b) => (b, other.min_inclusive),
+        };
+        let upper = match (self.max, other.max) {
+            (Some(a), Some(b)) if a < b => (Some(a), self.max_inclusive),
+            (Some(a), Some(b)) if b < a => (Some(b), other.max_inclusive),
+            (Some(a), Some(_)) => (Some(a), self.max_inclusive && other.max_inclusive),
+            (Some(a), None) => (Some(a), self.max_inclusive),
+            (None, b) => (b, other.max_inclusive),
+        };
+        Bounds {
+            min: lower.0,
+            min_inclusive: lower.1,
+            max: upper.0,
+            max_inclusive: upper.1,
+        }
+    }
+}
+
+/// 参数的取值范围：内核规则（`pft_override_fields.inc`，`validate_override` 用的同一张表）与名称表的
+/// 范围取交集。原来界面只看名称表：`DEF_PFT_GRADM` 显示"≥ 0"而内核要 > 1.6，约 22 个参数没有范围，
+/// 都要等保存时才被拒（GUI 审查 2026-10-22，VE#2）。
+pub fn bounds(name: &str) -> Option<Bounds> {
+    let meta = parameter(name)?;
+    let closed = |min: Option<f64>, max: Option<f64>| Bounds {
+        min,
+        min_inclusive: true,
+        max,
+        max_inclusive: true,
+    };
+    let rule = match validation_rule(meta.name) {
+        Some("range01") | Some("binary") => closed(Some(0.0), Some(1.0)),
+        Some("range_chil") => closed(Some(-1.0), Some(1.0)),
+        Some("open01") => Bounds {
+            min: Some(0.0),
+            min_inclusive: false,
+            max: Some(1.0),
+            max_inclusive: false,
+        },
+        Some("ge") => closed(Some(0.0), None),
+        Some("gt") => Bounds {
+            min_inclusive: false,
+            ..closed(Some(0.0), None)
+        },
+        Some("gt_1_6") => Bounds {
+            min_inclusive: false,
+            ..closed(Some(1.6), None)
+        },
+        Some("negative") => Bounds {
+            max_inclusive: false,
+            ..closed(None, Some(0.0))
+        },
+        // -1 表示按动态计算，其余要 ≥ 0：最紧的连续下界是 -1。
+        Some("dynamic_or_ge") => closed(Some(-1.0), None),
+        _ => closed(None, None),
+    };
+    Some(rule.intersect(closed(meta.min, meta.max)))
+}
+
 pub fn validate_override(name: &str, value: f64) -> Result<()> {
     let Some(meta) = parameter(name) else {
         bail!("{name} is not a PFT parameter");

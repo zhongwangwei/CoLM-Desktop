@@ -1639,6 +1639,12 @@ export const commandContract = {
       "rust_type": "Option<Vec<String>>"
     }
   },
+  "cancel_remote_submission": {
+    "case": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "list_kernels": {},
   "run_case": {
     "runId": {
@@ -2323,6 +2329,12 @@ export const commandContract = {
   },
   "new_simulation_draft_close": {
     "id": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "site_classifications": {
+    "dir": {
       "required": true,
       "rust_type": "String"
     }

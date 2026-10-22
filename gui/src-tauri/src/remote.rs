@@ -904,7 +904,13 @@ async fn ssh_cli_json_for_run(
             .map_err(|error| error.to_string())?;
         }
 
-        ssh_cli_json_untracked(args, resources, server).await
+        ssh_cli_json_untracked(
+            args,
+            resources,
+            server,
+            run.map(|(_, _, case)| case.to_owned()),
+        )
+        .await
     }
     .await;
     if let (Some(event), Ok(value)) = (&mut event, &result) {
@@ -939,6 +945,7 @@ async fn ssh_cli_json_untracked(
     args: Vec<String>,
     resources: Option<PathBuf>,
     server: Option<&Server>,
+    case: Option<String>,
 ) -> Result<Value, String> {
     let payload = server.map(auth_payload).transpose()?;
     let password = payload
@@ -968,7 +975,7 @@ async fn ssh_cli_json_untracked(
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动 colm-cli：{e}"))?;
-        let _remote_child = crate::sidecar::register_remote_child(child.id());
+        let _remote_child = crate::sidecar::register_remote_child(child.id(), case);
         if let Some(payload) = payload {
             let result = child.stdin.take().ok_or("no stdin").and_then(|mut stdin| {
                 writeln!(stdin, "{payload}").map_err(|_| "无法传递 SSH 登录信息")

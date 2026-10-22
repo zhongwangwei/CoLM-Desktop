@@ -630,10 +630,11 @@ pub fn cancel_runs(
 /// 用进程级静态表而不是给每个命令加 State：`ssh_cli_json_untracked` 在 `spawn_blocking` 里跑，
 /// 签名里没有 AppHandle；而这只有一个窗口进程会写。登记的是 PID，也就是 `top_level_sidecar`
 /// 建的进程组 ID，退出时按组终止。
-static REMOTE_CHILDREN: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+/// 值是这次提交属于哪个算例（单算例提交的"停止"按它找）；编引擎、取回这类不属于某个算例的为 `None`。
+static REMOTE_CHILDREN: OnceLock<Mutex<HashMap<u32, Option<String>>>> = OnceLock::new();
 
-fn remote_children() -> &'static Mutex<HashSet<u32>> {
-    REMOTE_CHILDREN.get_or_init(|| Mutex::new(HashSet::new()))
+fn remote_children() -> &'static Mutex<HashMap<u32, Option<String>>> {
+    REMOTE_CHILDREN.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 远程子进程登记项：读输出结束（含错误路径）后自动移除，避免 PID 复用后误杀。
@@ -649,9 +650,9 @@ impl Drop for RemoteChildGuard {
     }
 }
 
-pub(crate) fn register_remote_child(pid: u32) -> RemoteChildGuard {
+pub(crate) fn register_remote_child(pid: u32, case: Option<String>) -> RemoteChildGuard {
     if let Ok(mut children) = remote_children().lock() {
-        children.insert(pid);
+        children.insert(pid, case);
     }
     RemoteChildGuard { pid }
 }
@@ -663,11 +664,20 @@ pub(crate) fn kill_remote_child(pid: u32) -> Result<(), String> {
 
 /// 终止所有在途远程子进程；返回成功发出终止的个数。关窗/退出时调用。
 pub(crate) fn cancel_remote_children() -> Result<usize, String> {
+    cancel_remote_children_of(None)
+}
+
+/// `case` 给出时只终止这个算例的远程提交。
+fn cancel_remote_children_of(case: Option<&str>) -> Result<usize, String> {
     let pids: Vec<u32> = {
         let children = remote_children()
             .lock()
             .map_err(|_| "remote child registry poisoned")?;
-        let mut pids: Vec<u32> = children.iter().copied().collect();
+        let mut pids: Vec<u32> = children
+            .iter()
+            .filter(|(_, owner)| case.is_none() || owner.as_deref() == case)
+            .map(|(pid, _)| *pid)
+            .collect();
         pids.sort_unstable();
         pids
     };
@@ -684,6 +694,14 @@ pub(crate) fn cancel_remote_children() -> Result<usize, String> {
     } else {
         Err(failures.join("; "))
     }
+}
+
+/// 停掉一个算例正在进行的服务器提交（`colm-cli remote-run` 还没返回）。单算例远程运行原来在提交期间
+/// 没有停止按钮，只有关窗才停得掉（GUI 审查 runs #2）。停下以后服务器上可能已经排上了作业，台账照常
+/// 记成"提交未确认"，由运行面板核对，不当作没提交。
+#[tauri::command]
+pub fn cancel_remote_submission(case: String) -> Result<usize, String> {
+    cancel_remote_children_of(Some(&case))
 }
 
 fn study_process_key(study_dir: &str) -> String {
@@ -2966,24 +2984,26 @@ fn study_row(
 ) -> Result<StudyParameterContextRow, String> {
     let tuning =
         colm_case::tuning::find(&descriptor.raw_key).map_err(|error| format!("{error:#}"))?;
-    let pft = colm_case::pft::parameter(&descriptor.raw_key);
     let lc = colm_case::land_cover::parameter(&descriptor.raw_key);
+    // PFT、地类参数的范围用内核规则与名称表取交集后的结果（带开闭），和版本页参数表同一个来源。
+    let rule = colm_case::pft::bounds(&descriptor.raw_key)
+        .or_else(|| colm_case::land_cover::bounds(&descriptor.raw_key));
     let min = tuning
         .and_then(|meta| meta.min.map(|bound| bound.value))
-        .or_else(|| pft.and_then(|meta| meta.min))
-        .or_else(|| lc.and_then(|meta| meta.min));
+        .or_else(|| rule.and_then(|bounds| bounds.min));
     let max = tuning
         .and_then(|meta| meta.max.map(|bound| bound.value))
-        .or_else(|| pft.and_then(|meta| meta.max))
-        .or_else(|| lc.and_then(|meta| meta.max));
+        .or_else(|| rule.and_then(|bounds| bounds.max));
     let min_inclusive = min.map(|bound| {
         tuning
             .and_then(|meta| meta.min.map(|value| value.inclusive))
+            .or_else(|| rule.map(|bounds| bounds.min_inclusive))
             .unwrap_or_else(|| validate_bound(descriptor, bound))
     });
     let max_inclusive = max.map(|bound| {
         tuning
             .and_then(|meta| meta.max.map(|value| value.inclusive))
+            .or_else(|| rule.map(|bounds| bounds.max_inclusive))
             .unwrap_or_else(|| validate_bound(descriptor, bound))
     });
     let sentinel = tuning

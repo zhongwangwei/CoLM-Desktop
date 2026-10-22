@@ -216,6 +216,13 @@ test('model settings guide exposes classification only with a callback and catal
   assert.deepEqual(result.fields, []);
   result.actions.find((action) => action.id === 'simulation-classification-usgs')!.run();
   assert.deepEqual(choices, ['USGS']);
+  // 站点文件只带 IGBP 分类：USGS 卡片不能直接切，不再出现可点的动作。
+  result = render(true, false, {
+    classification: 'IGBP',
+    siteClassifications: { igbp: true, usgs: false },
+  });
+  assert.ok(!result.actions.some((action) => action.id === 'simulation-classification-usgs'));
+  assert.ok(result.actions.some((action) => action.id === 'simulation-classification-igbp'));
   assert.deepEqual(version.overlay.physics, {});
   result.actions.find((action) => action.id === 'simulation-parameter-catalog-toggle')!.run();
   result = render();

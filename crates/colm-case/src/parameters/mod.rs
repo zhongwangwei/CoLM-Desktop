@@ -49,8 +49,25 @@ pub enum Visibility {
 pub struct Validation {
     pub min: Option<String>,
     pub max: Option<String>,
+    /// 下限、上限是开区间（`> min`、`< max`）。只在为真时写出，其余参数的目录不变。
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub min_exclusive: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub max_exclusive: bool,
     pub allowed_values: Vec<String>,
     pub finite: bool,
+}
+
+/// 目录里的范围：PFT、地类参数用内核规则与名称表取交集后的 [`crate::pft::Bounds`]。
+fn bounded(bounds: crate::pft::Bounds, allowed_values: Vec<String>, finite: bool) -> Validation {
+    Validation {
+        min: bounds.min.map(|v| v.to_string()),
+        max: bounds.max.map(|v| v.to_string()),
+        min_exclusive: bounds.min.is_some() && !bounds.min_inclusive,
+        max_exclusive: bounds.max.is_some() && !bounds.max_inclusive,
+        allowed_values,
+        finite,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -251,11 +268,20 @@ fn schema_descriptor(
             "MOD_Namelist.F90 declaration"
         }
         .into(),
-        validation: Validation {
-            min: lc.and_then(|m| m.min.map(|v| v.to_string())),
-            max: lc.and_then(|m| m.max.map(|v| v.to_string())),
-            allowed_values: field.values.iter().map(|x| x.to_string()).collect(),
-            finite: matches!(field.kind, colm_schema::FieldKind::Real),
+        validation: match lc.and_then(|m| crate::land_cover::bounds(m.name)) {
+            Some(bounds) => bounded(
+                bounds,
+                field.values.iter().map(|x| x.to_string()).collect(),
+                matches!(field.kind, colm_schema::FieldKind::Real),
+            ),
+            None => Validation {
+                min: None,
+                max: None,
+                min_exclusive: false,
+                max_exclusive: false,
+                allowed_values: field.values.iter().map(|x| x.to_string()).collect(),
+                finite: matches!(field.kind, colm_schema::FieldKind::Real),
+            },
         },
         write_strategy: if field.group.is_some() {
             "write sparse explicit override to case.nml only when user changes it".into()
@@ -320,12 +346,11 @@ fn pft_descriptor(meta: &crate::pft::ParameterMeta, pc: bool) -> ParameterDescri
             "MOD_Const_PFT.F90 current PFT branch"
         }
         .into(),
-        validation: Validation {
-            min: meta.min.map(|v| v.to_string()),
-            max: meta.max.map(|v| v.to_string()),
-            allowed_values: Vec::new(),
-            finite: matches!(meta.kind, crate::pft::Kind::Real),
-        },
+        validation: bounded(
+            crate::pft::bounds(meta.name).expect("PFT parameter has bounds"),
+            Vec::new(),
+            matches!(meta.kind, crate::pft::Kind::Real),
+        ),
         write_strategy: if pc {
             "write sparse PC-PFT component override; omit inherited defaults".into()
         } else {
@@ -334,7 +359,9 @@ fn pft_descriptor(meta: &crate::pft::ParameterMeta, pc: bool) -> ParameterDescri
         calibration_eligible: !matches!(meta.kind, crate::pft::Kind::Integer),
         supports_linear_range: !matches!(meta.kind, crate::pft::Kind::Integer),
         supports_log_range: !matches!(meta.kind, crate::pft::Kind::Integer)
-            && meta.max.is_none_or(|max| max > 0.0),
+            && crate::pft::bounds(meta.name)
+                .and_then(|bounds| bounds.max)
+                .is_none_or(|max| max > 0.0),
         structural_parameter: matches!(meta.kind, crate::pft::Kind::Integer),
         recommended_scale: None,
         source_location: "MOD_Const_PFT.F90 + include/pft_override_fields.inc".into(),
@@ -376,6 +403,8 @@ fn process_descriptor(field: process::ProcessDefault) -> ParameterDescriptor {
         validation: Validation {
             min: None,
             max: None,
+            min_exclusive: false,
+            max_exclusive: false,
             allowed_values: Vec::new(),
             finite: field.kind == "real",
         },

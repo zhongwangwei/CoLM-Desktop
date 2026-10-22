@@ -35474,3 +35474,33 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
   - 顶部"查看结果"和底部"下一步：查看结果"保留：前者是随时切到结果页签（包括以前的运行），后者是刚跑完时的下一步。
 
 **测试**：GUI 后端 fmt、clippy、425 条测试通过；前端 tsc、eslint、prettier、`check-gui`、797 条测试、`gui/tests/*.mjs` 通过。
+
+## 第 731 轮：参数边界与地类切换的科学正确性，三处死路（2026-10-22）
+
+**来历**：第 730 轮后列出的剩余问题里，用户同意先做第 1 组（科学正确性）和第 2 组（死路）。
+
+**第 1 组：科学正确性**
+- **PFT 列表的作物分界差一位**：参数对话框默认只列自然 PFT，原来按 `id <= 16` 过滤，把第一个作物类型也算进去了。改成 `id <= 15`，开关文案写成"显示作物类型（16–78）"。新增测试 1 条。
+- **界面显示的取值范围比内核宽**：原来 PFT / 地类参数的上下限只取元数据表，而写 namelist 时内核按 `pft_override_fields.inc` 的规则（range01、binary、range_chil、open01、ge、gt、gt_1_6、negative、dynamic_or_ge）检查，界面放行的值会在运行时才被拒。
+  - 现在由 `pft::bounds` / `land_cover::bounds` 从同一套规则推出边界，再和元数据表取交集。
+  - 开区间用 `min_exclusive` / `max_exclusive` 表示，例如 GRADM > 1.6、LAMBDA > 0、BETA < 0、GRNFILL ∈ (0,1)。
+  - 研究页的 `study_row` 和参数目录用的是同一份边界。`artifacts/parameter-audit/catalog.json` 已重新生成。
+  - 一致性测试：在每条边界内侧和外侧各取一个值，让覆盖规则检查。内侧必须通过，外侧必须被拒。
+  - 踩坑：`dynamic_or_ge` 是"−1 或 ≥0"，不是连续区间，测试改为探测 0。
+- **已有算例切换 IGBP↔USGS 不看站点文件**：站点文件里没有对应分类的变量时，切过去就跑不起来。
+  - 新增 `colm-cli site-classes <site.nc>` 和 GUI 命令 `site_classifications`。NetCDF 照旧只在 sidecar 里读。
+  - 第 4 步遇到缺分类的卡片会禁用，并写明"站点文件没有 X 分类；要用它请重建站点文件"。
+  - 窗口实测：AT-Neu 返回 `{"igbp":true,"usgs":true}`；AU-Preston（城市站）返回两者皆 false，USGS 卡片灰显并显示上述原因，当前所用的 IGBP 仍可点。
+
+**第 2 组：死路**
+- **"需复核"的研究点"重试"没反应**：原来只重试失败项，需复核项被跳过，按钮看上去什么也没做。现在先确认，确认后带 `includeReview: true` 重试。新增测试。
+- **服务器研究提交失败后卡在"提交中"**：失败后先读一次研究状态。服务器上确实没有记录就清掉提交状态；查不清就标成"未确认"，让用户核对，不再一直转圈。新增测试。顺带把预填 effect 里的局部变量 `start` / `end` 改名：它和被测函数 `start` 同名，测试抽取器会抽错。
+- **单算例远程提交期间没有"停止"**：从开始提交到服务器返回作业记录之间，"停止"按钮不可用，本机的 ssh 提交进程也无从中断。
+  - 现在 `REMOTE_CHILDREN` 按算例登记，新命令 `cancel_remote_submission(case)` 只中断这个算例的提交进程，返回中断数。
+  - 单算例停止调用这个命令。批量远程停止也用它处理尚无作业记录的站点。原来跳过这些站点，提示却说"已停止继续提交"，作业之后照样会交上去。
+  - 中断后提示用户：服务器上可能已经排上了作业。
+  - 新增后端测试：别的算例调用时返回 0。前端新增测试 1 条。
+
+**测试**：根 workspace `cargo fmt --all --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo test -p colm-case` 78 条、`cargo test -p colm-cli --bins -- --test-threads=1` 482 条通过。GUI 后端 fmt、clippy、425 条测试通过。前端 tsc、eslint、prettier、契约重新生成后无差异（213 条命令）、`check-gui`、802 条测试、`gui/tests/*.mjs` 通过。
+
+**没做**：参数对话框的开区间提示没有在窗口里逐项点开看，只由单元测试覆盖。远程提交的停止没有连真实服务器试。

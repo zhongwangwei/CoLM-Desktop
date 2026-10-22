@@ -200,3 +200,52 @@ fn fixed_pft_flags_follow_mod_const_pft() {
     assert!(fixed_value("dsladlai", 7).unwrap().is_finite());
     assert!(fixed_value("vmax25", 1).is_err());
 }
+
+/// 界面和研究页用的范围（[`super::pft::bounds`]）必须和保存时的规则（`validate_override`）一致：
+/// 闭端点能存、开端点不能存，往里一点都能存。原来 `DEF_PFT_GRADM` 显示"≥ 0"而保存要 > 1.6。
+#[test]
+fn shown_bounds_agree_with_the_saved_override_rules() {
+    let nudge = |value: f64, up: bool| {
+        let step = value.abs().max(1.0) * 1e-9;
+        if up {
+            value + step
+        } else {
+            value - step
+        }
+    };
+    for meta in all_parameters() {
+        if meta.kind == Kind::Integer {
+            continue;
+        }
+        let bounds = super::pft::bounds(meta.name).unwrap();
+        if let Some(min) = bounds.min {
+            assert_eq!(
+                validate_override(meta.name, min).is_ok(),
+                bounds.min_inclusive,
+                "{} at its lower bound {min}",
+                meta.name
+            );
+            // `dynamic_or_ge`：-1（按动态计算）或 ≥ 0，中间那段不合法；往里取 0。
+            let inside = if min == -1.0 && bounds.max.is_none() {
+                0.0
+            } else {
+                bounds.max.map_or(nudge(min, true), |max| (min + max) / 2.0)
+            };
+            assert!(
+                validate_override(meta.name, inside).is_ok(),
+                "{} inside",
+                meta.name
+            );
+        }
+        if let Some(max) = bounds.max {
+            assert_eq!(
+                validate_override(meta.name, max).is_ok(),
+                bounds.max_inclusive,
+                "{} at its upper bound {max}",
+                meta.name
+            );
+        }
+    }
+    let gradm = super::pft::bounds("DEF_PFT_GRADM").unwrap();
+    assert_eq!((gradm.min, gradm.min_inclusive), (Some(1.6), false));
+}

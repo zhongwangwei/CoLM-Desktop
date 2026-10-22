@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import type uPlot from 'uplot';
 import { ScienceChart } from '../results/ResultsPage';
 import { invoke, invokeJson } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import { withCatalogLabels } from '../../lib/param-presentation';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
@@ -810,13 +811,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     } catch (e) {
       if (token === epoch.current) {
         setError(String(e));
-        if (host)
-          setRemoteReply((previous) => ({
-            ...previous,
-            host,
-            status: { state: 'unknown' },
-            warnings: [String(e)],
-          }));
+        if (host) {
+          // 提交失败时，研究自己的记录里既没有服务器作业、也没有"已发出提交"的意图，说明什么都没交上去：
+          // 收回本地的"提交中"占位，可以改了再交。原来一律记成"状态未确认"，"开始运行"从此一直灰着，
+          // 核对服务器也清不掉（GUI 审查 R2）。有记录时照旧按"未确认"处理，不能重复提交。
+          const recorded = await readStatus()
+            .then((fresh) => !!(fresh.remote || fresh.remote_pending))
+            .catch(() => true);
+          if (!recorded && token === epoch.current) setRemoteReply(null);
+          else if (token === epoch.current)
+            setRemoteReply((previous) => ({
+              ...previous,
+              host,
+              status: { state: 'unknown' },
+              warnings: [String(e)],
+            }));
+        }
       }
       throw e;
     } finally {
@@ -834,11 +844,29 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'Use the recorded server controls for this study',
         ),
       );
+    // "待复核"的任务是进程身份核对不上的（多是软件中途被关）：原来重试固定不带它们，按了等于没按
+    //（GUI 审查 R3）。问过用户确认它们确实不在运行，再连同待复核的一起重跑；后端还会核对残留的运行锁。
+    const includeReview =
+      command === 'study_retry' &&
+      status.replace(/_/g, '').toLowerCase() === 'needsreview' &&
+      (await askConfirm(
+        tr(
+          '有成员处于"待复核"：软件没法确认它们的进程是否已经结束（多是中途关了软件）。确认它们已经不在运行后再重跑这些成员？',
+          'Some members need review: the app cannot confirm their processes ended (usually the app was closed mid-run). Rerun them once you are sure they are no longer running?',
+        ),
+        { confirmLabel: tr('重跑', 'Rerun') },
+      ));
+    if (
+      command === 'study_retry' &&
+      status.replace(/_/g, '').toLowerCase() === 'needsreview' &&
+      !includeReview
+    )
+      return null;
     const token = epoch.current;
     const value = await task(async (current) => {
       const response = await invoke(command, {
         studyDir,
-        ...(command === 'study_retry' ? { includeReview: false } : {}),
+        ...(command === 'study_retry' ? { includeReview } : {}),
       });
       return current() ? await readStatus() : response;
     });
@@ -1308,12 +1336,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         const starts = all.map((p) => p.inputs.start).filter(Boolean);
         const ends = all.map((p) => p.inputs.end).filter(Boolean);
         if (starts.length === sites.length && ends.length === sites.length) {
-          const start = [...starts].sort().at(-1)!,
-            end = [...ends].sort()[0]!;
-          if (start < end) {
-            setCasePeriod([start, end]);
-            setFrom((old) => old || `${start}T00:00`);
-            setTo((old) => old || `${end}T00:00`);
+          const latestStart = [...starts].sort().at(-1)!,
+            earliestEnd = [...ends].sort()[0]!;
+          if (latestStart < earliestEnd) {
+            setCasePeriod([latestStart, earliestEnd]);
+            setFrom((old) => old || `${latestStart}T00:00`);
+            setTo((old) => old || `${earliestEnd}T00:00`);
           }
         }
         const base = (path: string) =>

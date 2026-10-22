@@ -77,6 +77,11 @@ export default function CasesPage() {
   const [forcingInputError, setForcingInputError] = useState('');
   const [forcingProbe, setForcingProbe] = useState<ForcingLayoutProbe | null>(null);
   const [forcingPicker, setForcingPicker] = useState(false);
+  // 单点算例的站点文件带了哪几套分类（第 4 步的 IGBP/USGS 卡片用）；读不到就不限制。
+  const [siteClasses, setSiteClasses] = useState<{
+    dir: string;
+    value: { igbp: boolean; usgs: boolean };
+  } | null>(null);
   const forcingSequence = useRef(0);
   useEffect(() => {
     let current = true;
@@ -981,6 +986,19 @@ export default function CasesPage() {
   });
   // 项目里有算例、只是没选（批量运行之后）：结果页自带选站点。一个算例都没有时结果页什么都选不了，
   // 原来照样铺开一整页空的评估界面、按钮点了也没用，和模拟页一样给出打开项目或新建模拟。
+  const singlePointCase = state.selectedCase?.entry.spatial === false;
+  useEffect(() => {
+    if (!dir || step !== 4 || !singlePointCase) return;
+    let live = true;
+    invoke<{ igbp: boolean; usgs: boolean }>('site_classifications', { dir })
+      .then((value) => {
+        if (live) setSiteClasses({ dir, value });
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [dir, step, singlePointCase]);
   if (!dir && state.caseTab === 'results' && state.cases.length > 0)
     return <ResultsPage onBack={backToSimulation} />;
   if (!dir)
@@ -1359,6 +1377,7 @@ export default function CasesPage() {
                     : undefined,
                 }}
                 onCaseChange={changeCaseOptions}
+                siteClassifications={siteClasses?.dir === dir ? siteClasses.value : null}
                 disabled={editingDisabled || dirty}
                 onEdit={() => openResearch()}
               />

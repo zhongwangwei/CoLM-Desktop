@@ -781,3 +781,17 @@ test('a Rust server run requests its thread count as CPUs; Fortran keeps the CPU
     assert.equal(submitted?.args.cpus, expected, engine);
   }
 });
+
+test('stop during a single remote submission interrupts the local submitting process', async () => {
+  const notices: string[] = [];
+  const p = panel({
+    remote: true,
+    notify: (message: string) => notices.push(message),
+    ipc: async (command) => (command === 'cancel_remote_submission' ? 1 : 0),
+  });
+  await p.cancel();
+  const call = p.calls.find((entry) => entry.command === 'cancel_remote_submission');
+  assert.deepEqual(call?.args, { case: '/good' });
+  assert.ok(!p.calls.some((entry) => entry.command === 'cancel_runs'));
+  assert.match(notices.join('\n'), /已中断提交/);
+});

@@ -5,7 +5,8 @@ Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
   value: { getItem: () => null },
 });
-const { docOf, literalNumber, rangeText, valueProblem } = await import('./ParameterDialog');
+const { docOf, literalNumber, rangeText, valueProblem, typesOf } =
+  await import('./ParameterDialog');
 
 const descriptor = (patch: Partial<Descriptor>): Descriptor => ({
   id: 'case:DEF_X',
@@ -129,4 +130,28 @@ test('a parameter holding several numbers is checked number by number', () => {
   assert.equal(valueProblem(diameter, '2.0e-5, x', false), '不是数');
   assert.equal(valueProblem(diameter, '2.0e-5, -1', false), '不能小于 0');
   assert.equal(valueProblem(diameter, '2.0e-5 2.0e-4 2.0e-3', false), '');
+});
+
+// 0 起编号里 16（灌溉 C3）已经是作物：不显示作物时最多到 15，和后端、ConfigurationOptions 一致。
+test('plant types without crops stop before the first crop type', () => {
+  const ids = typesOf('pft', false).map(([id]) => id);
+  assert.equal(Math.max(...ids), 15);
+  assert.ok(typesOf('pft', true).some(([id]) => id === 16));
+});
+
+// 内核要 GRADM > 1.6：开区间端点显示成 "> 1.6"，1.6 本身不能填。
+test('open bounds from the kernel rules are shown and enforced', () => {
+  const gradm = {
+    value_kind: 'real',
+    validation: {
+      min: '1.6',
+      max: null,
+      min_exclusive: true,
+      allowed_values: [],
+      finite: true,
+    },
+  } as unknown as Descriptor;
+  assert.equal(rangeText(gradm, false), '> 1.6');
+  assert.match(valueProblem(gradm, '1.6', false), /必须大于 1.6/);
+  assert.equal(valueProblem(gradm, '1.7', false), '');
 });

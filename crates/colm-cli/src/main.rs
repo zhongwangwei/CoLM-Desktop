@@ -10,6 +10,7 @@
 //! colm-cli site-new  --out <site.nc> --lon <度> --lat <度> [--landtype N] [--rawdata <目录>] [--crop 1]
 //!                    [--mode igbp|usgs|pft|pc|urban|urban-igbp|urban-usgs|urban-pft|urban-pc]
 //! colm-cli site-pfts <site.nc> [--crop 1] [--landtype N]
+//! colm-cli site-classes <site.nc>                 # 站点文件带了哪几套地类分类（JSON）
 //! colm-cli case-land-classes <算例目录>             # 格点算例 landdata 里有哪些地类（JSON）
 //! colm-cli new       --site <站点文件> --out <目录> [--name N] [--start Y-M-D] [--end Y-M-D]
 //!                    [--spinup-years N] [--spinup-repeat N]
@@ -383,6 +384,20 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
             let doc = colm_namelist::parse(&text)?;
             let classes = study::engine::spatial_land_classes(&case, &doc)?;
             println!("{}", serde_json::json!({ "classes": classes }));
+        }
+        // 站点文件带了哪几套地类分类。已有算例切换 IGBP↔USGS 前要知道：站点文件只带一套时，换成另一套
+        // 到运行的地表数据阶段才报缺变量，界面却写着"点选即生效"（GUI 审查 2026-10-22）。
+        "site-classes" => {
+            let site = opts.positional_at(0, "a site.nc file")?;
+            let file =
+                netcdf::open(&site).with_context(|| format!("cannot open {}", site.display()))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "igbp": file.variable("IGBP_classification").is_some(),
+                    "usgs": file.variable("USGS_classification").is_some(),
+                })
+            );
         }
         "site-pfts" => {
             let site = opts.positional_at(0, "a site.nc file")?;

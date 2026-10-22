@@ -71,10 +71,15 @@ export function valueProblem(d: Descriptor, text: string, en: boolean): string {
     return tinyAbove(min)
       ? t('必须大于 0', 'Must be above 0')
       : t(`不能小于 ${show(min)}`, `Below ${show(min)}`);
+  // 开区间端点本身也不行（`GRADM` 要 > 1.6）：原来 1.6 能填，保存或运行时才被拒。
+  if (min != null && d.validation.min_exclusive && value === min)
+    return t(`必须大于 ${show(min)}`, `Must be above ${show(min)}`);
   if (max != null && value > max)
     return tinyBelow(max)
       ? t('必须小于 0', 'Must be below 0')
       : t(`不能大于 ${show(max)}`, `Above ${show(max)}`);
+  if (max != null && d.validation.max_exclusive && value === max)
+    return t(`必须小于 ${show(max)}`, `Must be below ${show(max)}`);
   return '';
 }
 
@@ -93,10 +98,12 @@ export function docOf(d: Descriptor, en: boolean): string {
 export function rangeText(d: Descriptor, en: boolean): string {
   const min = d.validation.min == null ? null : literalNumber(d.validation.min);
   const max = d.validation.max == null ? null : literalNumber(d.validation.max);
-  if (min != null && max != null && !tinyAbove(min) && !tinyBelow(max))
+  const openMin = !!d.validation.min_exclusive,
+    openMax = !!d.validation.max_exclusive;
+  if (min != null && max != null && !tinyAbove(min) && !tinyBelow(max) && !openMin && !openMax)
     return `${show(min)} … ${show(max)}`;
-  const lower = min == null ? null : tinyAbove(min) ? '> 0' : `≥ ${show(min)}`;
-  const upper = max == null ? null : tinyBelow(max) ? '< 0' : `≤ ${show(max)}`;
+  const lower = min == null ? null : tinyAbove(min) ? '> 0' : `${openMin ? '>' : '≥'} ${show(min)}`;
+  const upper = max == null ? null : tinyBelow(max) ? '< 0' : `${openMax ? '<' : '≤'} ${show(max)}`;
   return [lower, upper].filter(Boolean).join(en ? ', ' : '，');
 }
 
@@ -114,8 +121,10 @@ const plain = (text: string | null) => {
   return value == null ? text : show(value);
 };
 
-const typesOf = (type: ParameterType, crops: boolean): [number, string, string][] =>
-  type === 'igbp' ? IGBP : type === 'usgs' ? USGS : PFT.filter(([id]) => crops || id <= 16);
+// 0 起编号里 15 是 C3 作物、16 是灌溉 C3：16 起才要 CROP 编译配置（后端 `index > 15` 才放行，ConfigurationOptions
+// 也是 `<= 15`）。原来这里写 `<= 16`、文案写 17–78，不勾"作物"仍能改 16 号，冻结或运行时才被拒（GUI 审查 VE#3）。
+export const typesOf = (type: ParameterType, crops: boolean): [number, string, string][] =>
+  type === 'igbp' ? IGBP : type === 'usgs' ? USGS : PFT.filter(([id]) => crops || id <= 15);
 
 /**
  * 修改参数：按参数类型分开编辑。全局参数是一张列表；地类、PFT、PC 参数是"参数 × 类型"矩阵，可以
@@ -417,7 +426,7 @@ export default function ParameterDialog({
         {(type === 'pft' || type === 'pc') && (
           <label className="param-check">
             <input type="checkbox" checked={crops} onChange={(e) => setCrops(e.target.checked)} />
-            {t('显示作物类型（17–78）', 'Show crop types (17–78)')}
+            {t('显示作物类型（16–78）', 'Show crop types (16–78)')}
           </label>
         )}
         {type === 'global' && (

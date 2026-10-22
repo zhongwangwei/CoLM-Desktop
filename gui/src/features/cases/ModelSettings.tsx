@@ -35,6 +35,8 @@ type Props = {
   mode?: SimulationMode;
   onModeChange?: (value: SimulationMode) => void;
   onClassificationChange?: (value: 'IGBP' | 'USGS') => void;
+  /** 单点算例的站点文件带了哪几套地类分类；没带的那套不能直接切过去。 */
+  siteClassifications?: { igbp: boolean; usgs: boolean } | null;
   profile?: {
     subgrid?: string;
     soil?: string;
@@ -53,6 +55,7 @@ export default function ModelSettings({
   disabled = false,
   classification,
   onClassificationChange,
+  siteClassifications,
   mode,
   onModeChange,
   profile,
@@ -147,8 +150,19 @@ export default function ModelSettings({
     modelSettingValue(version?.overlay ?? { physics: {}, parameters: [], process_files: [] }, key)
       ?.trim()
       .toLowerCase();
+  // 站点文件只带一套分类时，另一套切过去要到运行的地表数据阶段才报缺变量，卡片却写着"点选即生效"。
+  const missingClassification = (value: SimulationMode) =>
+    (value === 'IGBP' || value === 'USGS') &&
+    value !== selectedMode &&
+    !!siteClassifications &&
+    !siteClassifications[value === 'IGBP' ? 'igbp' : 'usgs'];
   const schemeDetail = (value: SimulationMode) => {
     const site = ['site', 'single'].includes(setupEnvironment?.domain ?? '');
+    if (missingClassification(value))
+      return t(
+        `站点文件没有 ${value} 分类；要用它请重建站点文件`,
+        `The site file has no ${value} classification; rebuild the site file to use it`,
+      );
     if (selectedMode === value && value === 'PC' && !site)
       return caseValue('DEF_FAST_PC') === '.false.'
         ? t('标准植物群落 · 可在专属设置中修改', 'Standard PC · adjustable in settings')
@@ -173,7 +187,8 @@ export default function ModelSettings({
         ? `simulation-mode-${value.toLowerCase()}`
         : `simulation-classification-${value.toLowerCase()}`;
   const modeAvailable = (value: SimulationMode) =>
-    !!onModeChange || ((value === 'IGBP' || value === 'USGS') && !!onClassificationChange);
+    !missingClassification(value) &&
+    (!!onModeChange || ((value === 'IGBP' || value === 'USGS') && !!onClassificationChange));
   const changeMode = (value: SimulationMode) => {
     if (disabled || !modeAvailable(value)) return;
     if (onCaseChange && value !== selectedMode && schemeSettings(value)) setPendingScheme(value);

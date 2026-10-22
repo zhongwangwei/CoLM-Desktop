@@ -567,6 +567,33 @@ pub fn default_value(name: &str, usgs: bool, landtype: i64) -> Result<Option<f64
         .map(Some)
 }
 
+/// 地类参数的取值范围（带开闭），与 [`validate_override`] 同一套规则：`GRADM` 要大于 1.6、`LAMBDA`
+/// 要大于 0（严格），其余是名称表的闭区间。原来界面显示"≥ 1.6""≥ 0"并接受边界值（GUI 审查 VE#2）。
+pub fn bounds(name: &str) -> Option<crate::pft::Bounds> {
+    let meta = parameter(name)?;
+    let closed = crate::pft::Bounds {
+        min: meta.min,
+        min_inclusive: true,
+        max: meta.max,
+        max_inclusive: true,
+    };
+    Some(match meta.name {
+        "DEF_LC_GRADM" => closed.intersect(crate::pft::Bounds {
+            min: Some(1.6),
+            min_inclusive: false,
+            max: None,
+            max_inclusive: true,
+        }),
+        "DEF_LC_LAMBDA" => closed.intersect(crate::pft::Bounds {
+            min: Some(0.0),
+            min_inclusive: false,
+            max: None,
+            max_inclusive: true,
+        }),
+        _ => closed,
+    })
+}
+
 pub fn validate_override(name: &str, value: f64) -> Result<()> {
     let Some(meta) = parameter(name) else {
         bail!("{name} is not a land-cover parameter");
