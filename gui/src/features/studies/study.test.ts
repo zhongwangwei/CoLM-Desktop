@@ -10,6 +10,7 @@ import {
   networkDefaults,
   parameterSpec,
   studyPermissions,
+  suggestedRange,
   type ParameterContext,
 } from './study';
 const parameter: ParameterContext = {
@@ -40,6 +41,30 @@ describe('study contracts', () => {
     assert.throws(() => parameterSpec(parameter, '0', '3', 'linear'));
     assert.throws(() => parameterSpec(parameter, '', '3', 'linear'));
     assert.throws(() => parameterSpec(parameter, '1', '11', 'linear'));
+  });
+  it('prefills a range the spec accepts, stepping off open bounds', () => {
+    const accepted = (row: ParameterContext, scale: string) => {
+      const [min, max] = suggestedRange(row, scale);
+      parameterSpec(row, min, max, scale);
+      return [min, max];
+    };
+    assert.deepEqual(accepted({ ...parameter, default: 4 }, 'linear'), ['2', '6']);
+    assert.deepEqual(accepted({ ...parameter, default: 8 }, 'linear'), ['4', '10']);
+    // GRADM 一类：下界 1.6 是开区间，默认值的一半落到界外，收到界内而不是贴在 1.6 上。
+    const gradm = { ...parameter, default: 2, min: 1.6, max: undefined, min_inclusive: false };
+    const [low] = accepted(gradm, 'linear');
+    assert.ok(Number(low) > 1.6);
+    // 目录用最小正规数表示"严格大于 0"；默认 0 时用目录上下界。
+    const tiny = { ...parameter, default: 0, min: Number.MIN_VALUE * 2 ** 52, max: 1 };
+    assert.ok(Number(accepted(tiny, 'linear')[0]) > 0);
+    assert.deepEqual(suggestedRange({ ...parameter, default: 0, max: undefined }, 'linear'), [
+      '',
+      '',
+    ]);
+    assert.deepEqual(suggestedRange({ ...parameter, default: -1, min: undefined }, 'log'), [
+      '',
+      '',
+    ]);
   });
   it('sends only the study scope fields that the study spec accepts', () => {
     const catalogRow: ParameterContext = {

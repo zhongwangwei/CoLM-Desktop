@@ -19,6 +19,7 @@ import {
   networkDefaults,
   parameterSpec,
   studyPermissions,
+  suggestedRange,
   type ParameterContext,
   applyResearchSeed,
 } from './study';
@@ -168,6 +169,21 @@ function StudyResult({ text, theme, en }: { text: string; theme: string; en: boo
  * `active`：研究页打开过一次就常驻（App 里隐藏而不卸载）。本机跑研究要几十分钟到几小时，原来靠导航守卫
  * 把整个应用锁在研究页（卸载就丢了正在跑的研究和它的进度）；现在可以离开去看结果、历史，回来还是那个研究。
  */
+/** `evaluation_plan` 的一行：观测标准名（研究目标用它）与是否各站都能比。 */
+type TargetChoice = {
+  name: string;
+  label_zh: string;
+  label_en: string;
+  units: string;
+  available: boolean;
+};
+type ParameterDraft = { enabled: boolean; min: string; max: string; scale: string };
+/** 刚勾上、上下限都空着的参数预填一个合法范围；已经填过的不动。 */
+function withSuggestedRange(row: ParameterContext, p: ParameterDraft): ParameterDraft {
+  if (!p.enabled || p.min.trim() || p.max.trim()) return p;
+  const [min, max] = suggestedRange(row, p.scale);
+  return { ...p, min, max };
+}
 export default function ResearchPage({ active = true }: { active?: boolean }) {
   const { state, notify, refreshVersions, navigate, update } = useApp();
   const en = state.language === 'en';
@@ -213,6 +229,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     { ...gridTargetDefaults.grid },
   ]);
   const [variables, setVariables] = useState('Qle');
+  // 单点率定能选哪些目标：各站都能比的变量（按 case.nml 的输出与观测文件判断，算例不必先跑过）。
+  const [targetChoices, setTargetChoices] = useState<TargetChoice[] | null>(null);
   // 不确定性分析的输出是模型 history 变量名（f_lfevpa 一类），和率定目标的观测名（Qle）不是一套：
   // 原来两者共用一个框、默认 Qle，切到不确定性分析直接预检就报"算例没开这个输出"。
   const [outputs, setOutputs] = useState('f_lfevpa');
@@ -243,6 +261,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [busy, setBusy] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState('');
+  // 后端和校验器的报错原样显示，只去掉 String(error) 带出来的 "Error: "。
+  const shownError = error.replace(/^Error: /, '');
   // 版本页带过来的参数勾上了几个（有的在这些算例里没有，比如算例里没有那个地类或植物类型）。
   const [seedNotice, setSeedNotice] = useState('');
   const [advanced, setAdvanced] = useState(false);
@@ -353,6 +373,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     epoch.current++;
     setPreflight('');
+    // 上一次预检或创建的报错说的是改之前的设计；换了方法或改了设定还留着，像是新设计也错了。
+    setError('');
   }, [
     tab,
     observations,
@@ -568,12 +590,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setUpper(defaults.upper);
     setRelative(defaults.relative);
   }
-  function spec() {
-    if (!sites.length || !kernel || !confirmed)
+  // 预检只是把规格交给引擎检查，不落盘也不跑，所以不要求先勾"已核查"；
+  // 原来两个按钮都卡在这个勾上，没勾时预检是灰的，看不出为什么。只有创建研究要它。
+  function spec(forCreate: boolean) {
+    if (!sites.length || !kernel)
+      throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
+    if (forCreate && !confirmed)
       throw new Error(
         tr(
-          '请先选算例和编译配置，并勾选"我已核对参数范围、预算和适用范围"',
-          'Select cases, a build configuration and confirm reviewed ranges',
+          '请先勾选"我已核对参数范围、预算和适用范围"',
+          'Confirm that you reviewed parameter ranges, budget and applicability',
         ),
       );
     const roots = new Set(sites.map((s) => s.replace(/[/\\][^/\\]+$/, '')));
@@ -705,7 +731,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   }
   const check = () =>
     task(async (current) => {
-      const plan = spec();
+      const plan = spec(false);
       const value = await invoke('study_preflight_json', {
         ...plan,
         modelRevision: state.versionRef,
@@ -716,7 +742,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     });
   const create = () =>
     task(async (current) => {
-      const plan = spec();
+      const plan = spec(true);
       await invoke('study_preflight_json', { ...plan, modelRevision: state.versionRef });
       if (!current()) throw new Error('Context changed');
       const path = await invoke<string>('study_create_json', {
@@ -1533,7 +1559,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       scale: row.scale || 'linear',
     };
     const update = (patch: Partial<typeof p>) =>
-      setParameters((old) => ({ ...old, [String(i)]: { ...p, ...patch } }));
+      setParameters((old) => ({
+        ...old,
+        [String(i)]: withSuggestedRange(row, { ...p, ...patch }),
+      }));
     const label = `${en ? row.label_en : row.label_zh} · ${row.name} · ${JSON.stringify(row.scope_instance)}`;
     return [
       field(
@@ -1697,7 +1726,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       'study-preflight',
       tr('预检', 'Preflight'),
       check,
-      !!kernel && confirmed && !launching && !unresolvedRemote,
+      !!kernel && !launching && !unresolvedRemote,
     ),
     action(
       'study-create',
@@ -1999,6 +2028,45 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     if (studyDir) setStep(4);
   }, [studyDir]);
+  useEffect(() => {
+    setTargetChoices(null);
+    // 交服务器的研究，观测是服务器上的路径，本机读不到；格点率定用目标编辑器。
+    if (step !== 3 || !tuning || spatialStudy || host || !kernel || !sites.length) return;
+    const obsOf = new Map(
+      observations
+        .split('\n')
+        .map((line) => line.split('|'))
+        .filter((parts) => parts.length >= 2)
+        .map(([name, ...rest]) => [name!.trim(), rest.join('|').trim()]),
+    );
+    const pairs = sites.flatMap((d) => {
+      const obs = obsOf.get(
+        d
+          .replace(/[/\\]+$/, '')
+          .split(/[/\\]/)
+          .pop() || d,
+      );
+      return obs ? [[d, obs] as const] : [];
+    });
+    if (!pairs.length) return;
+    let live = true;
+    Promise.all(
+      pairs.map(([d, obs]) =>
+        invokeJson<TargetChoice[]>('evaluation_plan', { case: d, obs, kernelDir: kernel }),
+      ),
+    )
+      .then((plans) => {
+        if (!live) return;
+        const everywhere = (name: string) =>
+          plans.every((plan) => plan.some((row) => row.name === name && row.available));
+        setTargetChoices(plans[0]!.filter((row) => everywhere(row.name)));
+      })
+      // 读不到（观测路径填错、文件不是 NetCDF）就只留手填框，预检会给出具体原因。
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [step, tuning, spatialStudy, host, kernel, sites, observations]);
   usePageContract(
     workbench
       ? {
@@ -2100,7 +2168,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             </p>
           </div>
         </header>
-        {error && <Notice tone="error">{error}</Notice>}
+        {error && <Notice tone="error">{shownError}</Notice>}
         {/* 率定、不确定性和 AI 都在项目的算例上跑；还没打开项目时先说清楚，不让人选了方法才发现没算例。 */}
         {!state.cases.length && (
           <Notice>
@@ -2443,6 +2511,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     });
   const resultFiles = shownResultFiles(envelope?.results);
   const chosenCount = Object.values(parameters).filter((p) => p.enabled).length;
+  const variableNames = variables
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+  const unknownTargets = variableNames.filter(
+    (name) => !targetChoices?.some((row) => row.name === name),
+  );
+  const unranged = contexts.flatMap((row, i) => {
+    const p = parameters[String(i)];
+    return p?.enabled && (!p.min.trim() || !p.max.trim()) ? [row.name] : [];
+  });
   let budgetSummary: string;
   let budgetOk = true;
   try {
@@ -2522,7 +2601,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         max: '',
         scale: row.scale || 'linear',
       };
-      return { ...old, [String(i)]: { ...p, ...patch } };
+      return { ...old, [String(i)]: withSuggestedRange(row, { ...p, ...patch }) };
     });
   const plannedTotal = (() => {
     const b = frozenSpec?.budget as Record<string, unknown> | undefined;
@@ -2735,6 +2814,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       <p className="muted study-hint">
         {tr(`已选 ${chosenCount} 个参数。`, `${chosenCount} parameters chosen.`)}
       </p>
+      {unranged.length > 0 && (
+        <Notice tone="warning">
+          {tr(
+            `${unranged.join('、')} 没有能自动给出的范围，请填上下限，否则预检会被拒。`,
+            `${unranged.join(', ')} ${unranged.length > 1 ? 'have' : 'has'} no automatic range; fill in the bounds or preflight will refuse it.`,
+          )}
+        </Notice>
+      )}
     </>
   );
   const footer = (back: boolean, next?: { label: string; enabled: boolean; to: 1 | 2 | 3 | 4 }) => (
@@ -2828,7 +2915,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           </li>
         ))}
       </ol>
-      {error && <Notice tone="error">{error}</Notice>}
+      {error && <Notice tone="error">{shownError}</Notice>}
 
       {step === 1 && (
         <Card
@@ -3097,6 +3184,49 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               />
             </Field>
           )}
+          {tuning && !spatialStudy && targetChoices && (
+            <div className="study-type-grid">
+              {targetChoices.length ? (
+                targetChoices.map((row) => {
+                  const chosen = variableNames.includes(row.name);
+                  return (
+                    <label key={row.name} className="param-check">
+                      <input
+                        type="checkbox"
+                        checked={chosen}
+                        disabled={busy || launching}
+                        onChange={(e) =>
+                          setVariables(
+                            (e.target.checked
+                              ? [...variableNames, row.name]
+                              : variableNames.filter((name) => name !== row.name)
+                            ).join(', '),
+                          )
+                        }
+                      />
+                      {en ? row.label_en : row.label_zh} · {row.name}
+                      {row.units ? ` (${row.units})` : ''}
+                    </label>
+                  );
+                })
+              ) : (
+                <p className="muted study-hint">
+                  {tr(
+                    '这些站的观测和模型输出没有共同的可比变量。',
+                    'The observations and model output of these sites share no comparable variable.',
+                  )}
+                </p>
+              )}
+            </div>
+          )}
+          {tuning && !spatialStudy && targetChoices && unknownTargets.length > 0 && (
+            <Notice tone="warning">
+              {tr(
+                `${unknownTargets.join('、')} 不是所有站都能比的变量，预检会拒。`,
+                `${unknownTargets.join(', ')} cannot be compared at every site; preflight will refuse it.`,
+              )}
+            </Notice>
+          )}
           {!tuning && spatialStudy && (
             <p className="muted study-hint">
               {tr(
@@ -3300,6 +3430,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 <pre className="overflow-auto">{preflight}</pre>
               </Advanced>
             </>
+          )}
+          {!confirmed && (
+            <p className="muted study-hint">
+              {tr(
+                '预检随时可以做；勾上上面的核对项后才能创建研究。',
+                'Preflight works any time; tick the review box above to create the study.',
+              )}
+            </p>
           )}
           <div className="study-footer">
             <ActionButton
@@ -3760,7 +3898,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           overlay={writing.draft.overlay}
           en={en}
           busy={busy}
-          error={error}
+          error={shownError}
           onClose={cancelWriteBack}
           onImport={(chosen) => execute(() => confirmWriteBack(chosen))}
         />

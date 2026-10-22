@@ -20,6 +20,7 @@ import {
   networkSpec,
   parameterSpec,
   studyPermissions,
+  suggestedRange,
 } from './study';
 import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
 import { hubMethods } from '../versions/hub-methods';
@@ -538,6 +539,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     studyPermissions,
     USGS,
     withCatalogLabels,
+    suggestedRange,
     useApp: () => app,
     useNavigationGuard: () => {},
     usePageContract: (value: Contract) => {
@@ -742,7 +744,7 @@ it('a method card opens the workbench and each step lists only the buttons on sc
     false,
   );
 });
-it('step 2 loads the parameter table and step 3 gates preflight and create on the review checkbox', async () => {
+it('step 2 prefills a ticked range and step 3 gates only create on the review checkbox', async () => {
   const page = researchPage();
   page.render();
   page.press('research-method-tuning');
@@ -774,6 +776,11 @@ it('step 2 loads the parameter table and step 3 gates preflight and create on th
   (parameter.props.onChange as (event: unknown) => void)({ target: { checked: true } });
   page.render();
   assert.equal(enabled('research-step-next'), true);
+  const bounds = page
+    .nodes()
+    .filter((node) => node.type === 'Input' && node.props.className === 'param-input')
+    .map((node) => node.props.value);
+  assert.deepEqual(bounds, ['0.5', '1.5'], 'ticking fills 0.5–1.5 × default');
   page.press('research-step-3');
   assert.deepEqual(page.ids(), [
     'research-home',
@@ -788,7 +795,8 @@ it('step 2 loads the parameter table and step 3 gates preflight and create on th
     'study-observation-pick:/p/site1',
     'study-preflight',
   ]);
-  assert.equal(enabled('study-preflight'), false);
+  // 预检不落盘，不必先勾核对项；创建才要。
+  assert.equal(enabled('study-preflight'), true);
   assert.equal(enabled('study-create'), false);
   const confirm = page
     .nodes()
@@ -800,6 +808,64 @@ it('step 2 loads the parameter table and step 3 gates preflight and create on th
   const create = page.actions().find((action) => action.id === 'study-create')!;
   assert.equal(create.enabled, true);
   assert.equal(create.kind, 'commit');
+});
+it('step 3 offers the targets every site can compare once an observation is chosen', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  page.requests.at(-1)!.resolve([parameterRow()]);
+  await page.settle();
+  const parameter = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  (parameter!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('research-step-3');
+  await page.settle();
+  assert.ok(!page.requests.some((r) => r.command === 'evaluation_plan'), 'no observation yet');
+  const obs = page
+    .nodes()
+    .find(
+      (node) => node.type === 'Input' && String(node.props.placeholder ?? '').includes('*_Flux.nc'),
+    );
+  (obs!.props.onChange as (event: unknown) => void)({ target: { value: '/obs/site1_Flux.nc' } });
+  await page.settle();
+  const plan = page.requests.at(-1)!;
+  assert.equal(plan.command, 'evaluation_plan');
+  assert.deepEqual(plan.args, {
+    case: '/p/site1',
+    obs: '/obs/site1_Flux.nc',
+    kernelDir: '/kernels/default',
+  });
+  const row = (name: string, available: boolean) => ({
+    name,
+    label_zh: name,
+    label_en: name,
+    units: 'W/m²',
+    available,
+  });
+  plan.resolve([row('Qle', true), row('Qh', true), row('NEE', false)]);
+  await page.settle();
+  const boxes = () =>
+    page
+      .nodes()
+      .filter((node) => node.type === 'label' && node.props.className === 'param-check')
+      .flatMap((node) => (node.children as Tree[]).filter((c) => c?.type === 'input'));
+  assert.deepEqual(
+    boxes().map((box) => box.props.checked),
+    [true, false],
+    'only comparable targets are offered; the default Qle is ticked',
+  );
+  (boxes()[1]!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  const field = page
+    .nodes()
+    .find((node) => node.type === 'Input' && node.props.value === 'Qle, Qh');
+  assert.ok(field, 'ticking Qh adds it to the target list');
 });
 it('step 4 lists the run-and-results buttons on screen and a write-back dialog blocks them', async () => {
   const page = await openCompletedStudy();

@@ -81,6 +81,36 @@ export function parameterSpec(
     scale,
   };
 }
+/**
+ * 勾上参数时预填的研究范围：和版本页 `defaultRange` 同一条规则（默认值的 0.5–1.5 倍，夹进目录的上下界），
+ * 但这里还拿得到开闭与尺度。夹到开区间的端点上时 `parameterSpec` 会拒，所以往里收 1%；
+ * 对数尺度的下限必须大于 0。给不出合法范围就留空，让人自己填。
+ */
+export function suggestedRange(row: ParameterContext, scale: string): [string, string] {
+  const trim = (value: number) => String(Number(value.toPrecision(6)));
+  // 目录用 ±最小正规数表示"严格大于/小于 0"。
+  const clean = (value: number | undefined) =>
+    value == null ? null : value !== 0 && Math.abs(value) < 1e-300 ? 0 : value;
+  const lowBound = clean(row.min),
+    highBound = clean(row.max);
+  const lowOpen = lowBound != null && (row.min_inclusive === false || lowBound !== row.min),
+    highOpen = highBound != null && (row.max_inclusive === false || highBound !== row.max);
+  let low: number, high: number;
+  if (row.default !== 0 && Number.isFinite(row.default)) {
+    low = Math.min(row.default * 0.5, row.default * 1.5);
+    high = Math.max(row.default * 0.5, row.default * 1.5);
+  } else if (lowBound != null && highBound != null) {
+    [low, high] = [lowBound, highBound];
+  } else return ['', ''];
+  if (lowBound != null && low <= lowBound) low = lowBound;
+  if (highBound != null && high >= highBound) high = highBound;
+  const span = high - low;
+  if (lowOpen && low === lowBound) low += span * 0.01;
+  if (highOpen && high === highBound) high -= span * 0.01;
+  if (scale === 'log' && low <= 0) return ['', ''];
+  if (!(low < high) || low === row.sentinel || high === row.sentinel) return ['', ''];
+  return [trim(low), trim(high)];
+}
 export function calibrationWindows(
   from: string,
   to: string,
