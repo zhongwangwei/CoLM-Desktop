@@ -1647,3 +1647,24 @@ fn model_tidy_waits_for_runs_and_creations_and_holds_both_off_while_it_works() {
     });
     assert!(registered.load(Ordering::SeqCst));
 }
+
+#[cfg(unix)]
+#[test]
+fn remote_children_are_killed_when_the_app_exits() {
+    let mut command = std::process::Command::new("sh");
+    command.args(["-c", "sleep 30"]);
+    colm_kernel::run::top_level_sidecar(&mut command);
+    let mut child = command.spawn().unwrap();
+    let guard = register_remote_child(child.id());
+    assert!(
+        cancel_remote_children().unwrap() >= 1,
+        "a registered remote child is cancelled"
+    );
+    assert!(!child.wait().unwrap().success(), "the child was terminated");
+    drop(guard);
+    assert_eq!(
+        cancel_remote_children().unwrap(),
+        0,
+        "the guard removes a finished child from the registry"
+    );
+}

@@ -113,6 +113,10 @@ pub fn run() {
                 {
                     eprintln!("failed to stop case creation while closing: {error}");
                 }
+                // 远程提交/编引擎不是本机 RunProcesses，但关窗也要停，否则界面承诺不成立。
+                if let Err(error) = crate::sidecar::cancel_remote_children() {
+                    eprintln!("failed to stop remote submissions while closing: {error}");
+                }
                 window.app_handle().state::<AssistantProcess>().stop();
             }
         })
@@ -348,6 +352,9 @@ pub fn run() {
                 }
                 if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
                     eprintln!("failed to stop every run while exiting: {error}");
+                }
+                if let Err(error) = crate::sidecar::cancel_remote_children() {
+                    eprintln!("failed to stop remote submissions while exiting: {error}");
                 }
             }
         });

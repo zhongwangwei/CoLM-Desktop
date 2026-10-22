@@ -35,7 +35,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -622,6 +622,68 @@ pub fn cancel_runs(
     cases: Option<Vec<String>>,
 ) -> Result<usize, String> {
     processes.cancel(cases)
+}
+
+/// 远程提交/编引擎/取回用的 `colm-cli` 子进程：它们不写本机运行状态，所以不在 `RunProcesses` 里，
+/// 但关窗/退出时同样必须被终止，否则界面承诺的"没交上去的停止"不成立（GUI 审查 2026-10-22 P1-2）。
+///
+/// 用进程级静态表而不是给每个命令加 State：`ssh_cli_json_untracked` 在 `spawn_blocking` 里跑，
+/// 签名里没有 AppHandle；而这只有一个窗口进程会写。登记的是 PID，也就是 `top_level_sidecar`
+/// 建的进程组 ID，退出时按组终止。
+static REMOTE_CHILDREN: OnceLock<Mutex<HashSet<u32>>> = OnceLock::new();
+
+fn remote_children() -> &'static Mutex<HashSet<u32>> {
+    REMOTE_CHILDREN.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// 远程子进程登记项：读输出结束（含错误路径）后自动移除，避免 PID 复用后误杀。
+pub(crate) struct RemoteChildGuard {
+    pid: u32,
+}
+
+impl Drop for RemoteChildGuard {
+    fn drop(&mut self) {
+        if let Ok(mut children) = remote_children().lock() {
+            children.remove(&self.pid);
+        }
+    }
+}
+
+pub(crate) fn register_remote_child(pid: u32) -> RemoteChildGuard {
+    if let Ok(mut children) = remote_children().lock() {
+        children.insert(pid);
+    }
+    RemoteChildGuard { pid }
+}
+
+/// 只终止这一个远程子进程（启动失败/传凭据失败时用）。
+pub(crate) fn kill_remote_child(pid: u32) -> Result<(), String> {
+    terminate_process_tree(pid)
+}
+
+/// 终止所有在途远程子进程；返回成功发出终止的个数。关窗/退出时调用。
+pub(crate) fn cancel_remote_children() -> Result<usize, String> {
+    let pids: Vec<u32> = {
+        let children = remote_children()
+            .lock()
+            .map_err(|_| "remote child registry poisoned")?;
+        let mut pids: Vec<u32> = children.iter().copied().collect();
+        pids.sort_unstable();
+        pids
+    };
+    let mut cancelled = 0;
+    let mut failures = Vec::new();
+    for pid in pids {
+        match terminate_process_tree(pid) {
+            Ok(()) => cancelled += 1,
+            Err(error) => failures.push(format!("{pid}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(cancelled)
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 fn study_process_key(study_dir: &str) -> String {

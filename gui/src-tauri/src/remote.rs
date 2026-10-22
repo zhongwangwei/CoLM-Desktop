@@ -960,19 +960,21 @@ async fn ssh_cli_json_untracked(
     if let Some(dir) = resources {
         command.env("COLM_RESOURCE_DIR", dir);
     }
-    colm_kernel::run::no_console(&mut command);
+    // 远程子进程也要自成一个进程组：关窗/退出时按组终止，SSH 与远端提交一起停。
+    colm_kernel::run::top_level_sidecar(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
         let mut child = command
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("无法启动 colm-cli：{e}"))?;
+        let _remote_child = crate::sidecar::register_remote_child(child.id());
         if let Some(payload) = payload {
             let result = child.stdin.take().ok_or("no stdin").and_then(|mut stdin| {
                 writeln!(stdin, "{payload}").map_err(|_| "无法传递 SSH 登录信息")
             });
             if let Err(error) = result {
-                let _ = child.kill();
+                let _ = crate::sidecar::kill_remote_child(child.id());
                 let _ = child.wait();
                 return Err(error.into());
             }
