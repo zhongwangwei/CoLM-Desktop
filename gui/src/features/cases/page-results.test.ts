@@ -50,6 +50,7 @@ test('preparation callbacks retain native evidence and errors through both async
     setBusy: () => {},
     setResult: (value: unknown) => shown.push(value),
     setError: (value: string) => errors.push(value),
+    setDeclined: () => {},
     notify: () => {},
   });
   const inspection = { slots: [], time_start: '2008-01-01', time_end: '2010-01-01' };

@@ -358,44 +358,65 @@ export function AppProvider({ children }: { children: ReactNode }) {
         stage = 'kernels';
         update({ startup: { phase: 'booting', stage, startedAt } });
         // 内核与版本互不依赖：一个失败仍保留另一个的结果，避免一次失败把整屏都清空。
+        // 超时只是不再干等，命令本身还在跑：晚到的结果照样接上，两样都到了就收起失败封面。原来超时后
+        // 结果被丢掉，慢盘上首次哈希内核超过 30 秒时，"重试启动"每次都一样超时（2026-10-22 复查）。
+        let gotKernels = false,
+          gotVersions = false;
+        const settle = () => {
+          if (alive && gotKernels && gotVersions)
+            update((old) => (old.startup?.phase === 'failed' ? { startup: undefined } : {}));
+        };
+        const kernelsCall = invoke<KernelEntry[]>('list_kernels');
+        const versionsCall = invokeJson<FrozenRevision[]>('model_list');
+        kernelsCall.then(
+          (kernels) => {
+            if (!alive) return;
+            gotKernels = true;
+            update({
+              kernels,
+              kernelDir:
+                kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
+            });
+            settle();
+          },
+          () => {},
+        );
+        versionsCall.then(
+          (versions) => {
+            if (!alive) return;
+            gotVersions = true;
+            const official = versions
+              .filter((v) => v.version.id === 'official')
+              .sort((a, b) => b.version.revision - a.version.revision)[0];
+            update({
+              versions,
+              version: official ?? null,
+              ...(official ? { versionRef: official.version } : {}),
+            });
+            settle();
+          },
+          () => {},
+        );
         const [kernelResult, versionResult] = await Promise.allSettled([
-          withTimeout(invoke<KernelEntry[]>('list_kernels'), 30_000, 'list_kernels'),
-          withTimeout(invokeJson<FrozenRevision[]>('model_list'), 30_000, 'model_list'),
+          withTimeout(kernelsCall, 30_000, 'list_kernels'),
+          withTimeout(versionsCall, 30_000, 'model_list'),
         ]);
         if (!alive) return;
         const problems: string[] = [];
-        if (kernelResult.status === 'fulfilled') {
-          const kernels = kernelResult.value;
-          update({
-            kernels,
-            kernelDir: kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
-          });
-        } else {
+        if (kernelResult.status === 'rejected' && !gotKernels)
           problems.push(
             bilingual(
               `模型内核读取失败：${String(kernelResult.reason)}`,
               `Reading model kernels failed: ${String(kernelResult.reason)}`,
             ),
           );
-        }
-        if (versionResult.status === 'fulfilled') {
-          const versions = versionResult.value;
-          const official = versions
-            .filter((v) => v.version.id === 'official')
-            .sort((a, b) => b.version.revision - a.version.revision)[0];
-          update({
-            versions,
-            version: official ?? null,
-            ...(official ? { versionRef: official.version } : {}),
-          });
-        } else {
+        if (versionResult.status === 'rejected' && !gotVersions)
           problems.push(
             bilingual(
               `模型版本读取失败：${String(versionResult.reason)}`,
               `Reading model versions failed: ${String(versionResult.reason)}`,
             ),
           );
-        }
         if (problems.length) throw new Error(problems.join('；'));
         update({ startup: undefined });
         // 版本列表到手之后，在后台整理没人用的旧官方修订（运行或创建中时后端会拒绝，只记日志）。

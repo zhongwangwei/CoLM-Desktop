@@ -10,7 +10,7 @@ import appManifest from '../../package.json';
  * 用户只会看到一排永远灰着的按钮，既不知道失败在哪也没法重试（GUI 审查 2026-10-22 P1-3）。
  */
 export default function StartCover() {
-  const { state, retryStartup } = useApp();
+  const { state, update, retryStartup } = useApp();
   const en = state.language === 'en';
   const startup = state.startup;
   const failed = startup?.phase === 'failed';
@@ -53,9 +53,15 @@ export default function StartCover() {
               {en ? 'The app could not finish starting.' : '应用没有启动完成。'}
             </p>
             <p className="start-cover-error">{startup?.error}</p>
-            <Button variant="primary" onClick={retryStartup}>
-              {en ? 'Retry startup' : '重试启动'}
-            </Button>
+            <div className="button-row">
+              <Button variant="primary" onClick={retryStartup}>
+                {en ? 'Retry startup' : '重试启动'}
+              </Button>
+              {/* 失败不该把整个应用挡住：设置、历史、计算资源（以及另一半读到的内容）仍然能用。 */}
+              <Button onClick={() => update({ startup: undefined })}>
+                {en ? 'Continue with limited features' : '先进入应用（部分功能不可用）'}
+              </Button>
+            </div>
           </>
         ) : (
           <>

@@ -111,7 +111,9 @@ export default function RunPanel({
     !!batchProfiles &&
     Object.keys(batchProfiles).length > 0 &&
     Object.values(batchProfiles).every((profile) => !profile.spatial);
-  const localSiteOnly = !singleSpatialCase && !initialHostValue && (!batchCases || batchSiteCases);
+  const siteCasesOnly = !singleSpatialCase && (!batchCases || batchSiteCases);
+  // 只用来定初值；页面上改了运行位置以后看 `localSiteNow`。
+  const localSiteOnly = siteCasesOnly && !initialHostValue;
   const [host, setHost] = useState(initialHostValue),
     [servers, setServers] = useState<Server[]>([]),
     [kernel, setKernel] = useState(''),
@@ -160,6 +162,8 @@ export default function RunPanel({
       error?: string;
     }>({}),
     [loadBusy, setLoadBusy] = useState(false);
+  // 当前选的是本机、算例全是单点：线程框不显示、固定 1 线程。
+  const localSiteNow = siteCasesOnly && !host;
   const lock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
@@ -245,7 +249,9 @@ export default function RunPanel({
         if (current) {
           setServers(c.servers);
           const server = c.servers.find((entry) => entry.host === host);
-          if (server && !hadSavedSettings.current && !localSiteOnly) {
+          // 按当前运行位置判断：原来用打开页面时的位置，本机单点改选服务器后服务器的调度器、CPU
+          // 默认值都不再带入（2026-10-22 复查 DeepSeek 的提交）。
+          if (server && !hadSavedSettings.current && !(siteCasesOnly && !host)) {
             setThreads(String(server.threads || 1));
             setScheduler(server.scheduler || 'auto');
             setCpus(server.cpus > 0 ? String(server.cpus) : '');
@@ -259,7 +265,7 @@ export default function RunPanel({
       current = false;
       alive.current = false;
     };
-  }, [notify, host, localSiteOnly]);
+  }, [notify, host, siteCasesOnly]);
   useEffect(() => {
     let current = true;
     setRecovering(true);
@@ -479,7 +485,8 @@ export default function RunPanel({
         );
       const nums = [
         engine === 'rust' ? '1' : ranks,
-        siteBatch ? '1' : threads,
+        // 本机单点固定 1 线程；从服务器切回本机时，线程框藏起来了，但里面可能还是服务器的值。
+        siteBatch || localSiteNow ? '1' : threads,
         siteBatch ? String(stationConcurrency) : workers,
       ].map(Number);
       if (nums.some((n) => !Number.isSafeInteger(n) || n < 1) || nums[1] > 256)
@@ -1094,7 +1101,7 @@ export default function RunPanel({
       ...(engine === 'fortran'
         ? [['ranks', t('每个算例的 MPI 进程数', 'MPI ranks per case'), ranks, setRanks] as const]
         : []),
-      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch && !localSiteOnly
+      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch && !localSiteNow
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
         : []),
       ...(batchCases && !siteBatch
@@ -1416,7 +1423,7 @@ export default function RunPanel({
           return field ? [render(field)] : [];
         })}
       </div>
-      {localSiteOnly && (
+      {localSiteNow && (
         <p className="muted">
           {batchCases
             ? t(

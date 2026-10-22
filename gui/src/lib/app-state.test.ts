@@ -248,7 +248,7 @@ test('declining the rebind leaves the case unopened with a plain explanation', a
   assert.equal((app.current.current as { route?: string }).route, undefined);
 });
 
-function booting(prune: () => Promise<unknown>, failOn = '') {
+function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
   let failing = failOn;
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
@@ -295,7 +295,8 @@ function booting(prune: () => Promise<unknown>, failOn = '') {
     notify: (message: string) => notices.push(message),
     invoke,
     invokeJson,
-    withTimeout: <T>(promise: Promise<T>) => promise,
+    withTimeout: <T>(promise: Promise<T>, _ms: number, what: string) =>
+      what === timeoutOn ? Promise.reject(new Error(`${what} timed out`)) : promise,
     bilingual: (_zh: string, en: string) => en,
     tidyModelsAfterStartup,
     withoutRevisions,
@@ -448,4 +449,18 @@ test('the remembered theme and language apply before the app scripts load', () =
   assert.ok(html.indexOf('start-cover-status') < html.indexOf('/theme-boot.js'));
   assert.match(boot, /colm-ui-theme/);
   assert.match(boot, /colm-ui-language/);
+});
+
+// 超时只是不再干等：命令晚到的结果照样接上，失败封面随之收起（2026-10-22 复查）。
+test('a startup call that answers after its timeout still completes the startup', async () => {
+  const late = booting(
+    async () => ({ removed: [], kept: [], bytes: 0, dry_run: false }),
+    '',
+    'list_kernels',
+  );
+  await late.boot();
+  for (let i = 0; i < 5; i++) await settle();
+  assert.deepEqual(late.state.kernels, []);
+  assert.ok(Array.isArray(late.state.versions));
+  assert.notEqual((late.state.startup as { phase?: string } | undefined)?.phase, 'failed');
 });

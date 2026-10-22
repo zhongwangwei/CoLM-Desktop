@@ -631,7 +631,8 @@ test('delayed server defaults are not mistaken for automatically saved batch pre
     hadSavedSettings: { current: false },
     alive: { current: true },
     host: 'server',
-    localSiteOnly: false,
+    // 单点算例改到服务器上跑：服务器的调度器、CPU 默认值照样带入（只看当前运行位置）。
+    siteCasesOnly: true,
     settings: { threads: '1', scheduler: 'auto', cpus: '' },
     invoke: () =>
       new Promise((done) => {

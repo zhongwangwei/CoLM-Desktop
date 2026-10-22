@@ -84,7 +84,8 @@ export default function PreparationPage() {
     [busy, setBusy] = useState(false),
     [advanced, setAdvanced] = useState(state.expert),
     [result, setResult] = useState<unknown>(null),
-    [error, setError] = useState('');
+    [error, setError] = useState(''),
+    [declined, setDeclined] = useState('');
   const lock = useRef(false);
   // 上次"检查"自动推出的输出路径。换了源文件就作废：原来选 A 检查后再换成 B，输出路径还是
   // A 的推荐名，B 的数据被写进 A 的文件（GUI 审查 2026-10-22，P1-1）。用户自己改过的路径不动。
@@ -113,6 +114,7 @@ export default function PreparationPage() {
     lock.current = true;
     setBusy(true);
     setError('');
+    setDeclined('');
     try {
       const value = await fn();
       setResult(value);
@@ -125,7 +127,11 @@ export default function PreparationPage() {
       // 自由标识符会让抽取出来的函数在测试上下文里 ReferenceError。
       const declined =
         !!e && typeof e === 'object' && (e as { userDeclined?: boolean }).userDeclined === true;
-      if (!declined) notify(String(e), true);
+      if (declined) {
+        // 页面内也按提示显示，不是红色的 "Error: …"。
+        setError('');
+        setDeclined((e as Error).message);
+      } else notify(String(e), true);
       throw e;
     } finally {
       setBusy(false);
@@ -637,6 +643,7 @@ export default function PreparationPage() {
       </Notice>
       {/* 这一页原来只把失败放进 PageContract/全局通知；页面内没有落点，用户取消覆盖后看不到任何说明。 */}
       {error && <Notice tone="error">{error}</Notice>}
+      {declined && <Notice>{declined}</Notice>}
       <Card>
         <div className="form-grid">
           {fields

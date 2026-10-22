@@ -114,6 +114,7 @@ function panel(
     host: options.remote ? 'server' : '',
     siteBatch: !!options.remote && !!options.remoteBatch && !options.single,
     stationConcurrency: options.stationConcurrency ?? 1,
+    localSiteNow: false,
     monitor: false,
     remotePermissions: { cancel: false, fetch: true },
     setMonitor: options.setMonitor ?? (() => {}),
