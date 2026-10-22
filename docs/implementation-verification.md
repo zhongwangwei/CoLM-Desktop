@@ -35380,3 +35380,17 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 **验证**：typecheck、lint、prettier、787 条前端测试、build、`check-gui` 通过。
 
 **没做 / 下一步**：P1-2 最小版（退出应用时终止在途远程提交/编引擎）尚未动代码；之后的 JobRegistry、后端算例租约、PageContract 单一来源、科学选项单一事实源等第 1 批项按方案继续。
+
+## 第 726 轮：退出应用终止在途远程提交（P1-2 最小版，2026-10-22）
+
+**来历**：第 725 轮之后按方案继续 P1-2。界面在 `RunPanel.tsx` 明写"关闭窗口后已交上去的站点照常运行，没交上去的停止"，但远程提交/编引擎/取回走 `remote.rs:ssh_cli_json_untracked` 的 `spawn_blocking + Command::output`，不在 `RunProcesses` 里，关窗/退出只取消本地运行与建例，子进程会继续在登录节点上提交。
+
+**改了**（commit `2eda8fca`）：
+- `remote.rs`：远程 colm-cli 改用 `top_level_sidecar`（自建进程组），spawn 后登记远程子进程 guard；传凭据失败时按进程组终止。
+- `sidecar.rs`：新增 `REMOTE_CHILDREN` 静态登记表 + `RemoteChildGuard`（结束时移除，防 PID 复用误杀）+ `cancel_remote_children()`（按组 TERM→KILL）；`kill_remote_child()` 供失败路径用。
+- `lib.rs`：`CloseRequested` 与 `RunEvent::ExitRequested/Exit` 都追加取消远程子进程。
+- `sidecar_tests.rs`：新增 Unix 单测（启动 `sh sleep` 进程组→登记→cancel→等待退出→guard 移除后再 cancel 返回 0）。
+
+**验证**：`cargo fmt --all -- --check`、`cargo clippy --all-targets -- -D warnings`、目标单测通过；`cargo test` 423 通过，唯一失败仍是本审查沙箱禁止 `ps` 的既有环境失败（与改动无关）。
+
+**没做 / 下一步**：单站远程提交期的界面停止按钮；真实服务器 + 关窗的实机回归；随后按方案做 JobRegistry（统一本地/远程/研究/重放/捕获作业）、后端算例租约、PageContract 单一来源、科学选项单一事实源。
