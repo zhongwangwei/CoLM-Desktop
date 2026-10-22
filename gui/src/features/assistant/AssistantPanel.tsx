@@ -344,6 +344,8 @@ export default function AssistantPanel() {
         <Button
           disabled={running}
           onClick={() => {
+            // 设置面板开着时它占住了对话区，点了看不出变化（2026-10-22 用户反馈"无反应"）：先收起设置。
+            if (state.assistantSettingsOpen) update({ assistantSettingsOpen: false });
             conversationRequest.current++;
             session.current = null;
             fresh.current = true;
@@ -360,11 +362,16 @@ export default function AssistantPanel() {
         </Button>
         <Button
           disabled={!ready || running}
-          onClick={() =>
+          onClick={() => {
+            if (state.assistantSettingsOpen) update({ assistantSettingsOpen: false });
             void perform(async () =>
-              setSessions(sessions ? null : await invokeJson<Session[]>('assistant_sessions', {})),
-            )
-          }
+              setSessions(
+                sessions && !state.assistantSettingsOpen
+                  ? null
+                  : await invokeJson<Session[]>('assistant_sessions', {}),
+              ),
+            );
+          }}
         >
           {t('会话历史', 'Conversation history')}
         </Button>

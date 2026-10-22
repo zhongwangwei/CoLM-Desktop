@@ -665,6 +665,21 @@ test('an unfinished simulation is recorded from step 2 and saved again when the 
   assert.equal(left.id, 'draft-1');
   assert.equal(left.seed.form.kind, 'site');
 });
+// 第 1 步填了名称就离开（点侧栏），也要留一条能找回的记录（2026-10-22 用户实测：回来全空，历史里也没有）。
+test('leaving step 1 after filling it in keeps an unfinished simulation record', async () => {
+  const p = page('NewCasePage');
+  await p.mount();
+  const drafts = () => p.calls.filter((call) => call.command === 'new_simulation_draft_save');
+  p.set('new-name', 'CN-Cng');
+  await p.settle();
+  assert.equal(drafts().length, 0);
+  await p.remount();
+  await p.settle();
+  assert.equal(drafts().length, 1);
+  const left = drafts()[0].args as { step: number; seed: { form: Record<string, string> } };
+  assert.equal(left.step, 1);
+  assert.equal(left.seed.form.name, 'CN-Cng');
+});
 test('a simulation resumed from history keeps its record and closes it once created', async () => {
   const p = page('NewCasePage', { form, sites: [site], step: 3, draftId: 'draft-7' });
   await p.mount();

@@ -823,8 +823,12 @@ test('preparation sends only active case or pending case settings to native data
       profile: { classification: 'USGS' as const, subgrid: 'USGS', urban: false, crop: false },
     },
   };
+  const produced: Record<string, string>[] = [];
   const run = async (preparation: ReturnType<typeof casePreparationOptions>, mode: string) => {
     const execute = callback(prep, 'execute', {
+      // 做好的站点文件记下来，"用于新算例"带着它去新建模拟。
+      setProduced: (next: (old: Record<string, string>) => Record<string, string>) =>
+        produced.push(next({})),
       work: async (fn: () => Promise<unknown>) => fn(),
       state,
       preparation,
@@ -845,6 +849,7 @@ test('preparation sends only active case or pending case settings to native data
     return calls.at(-1)!;
   };
   let call = await run(casePreparationOptions(state.selectedCase.profile), 'site');
+  assert.deepEqual(produced.at(-1), { site: '/new-data.nc' });
   assert.equal(call.args.mode, 'usgs');
   assert.equal(call.args.crop, false);
   call = await run(

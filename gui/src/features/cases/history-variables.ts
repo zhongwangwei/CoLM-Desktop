@@ -386,3 +386,17 @@ export function historyPreset(
       ]),
   );
 }
+
+/**
+ * 后端写不出某个历史变量的原因（`histvars.rs` 的 blocked_by）是中文；英文界面里按已知句式翻成英文，
+ * 认不出的原样显示。原来英文界面直接显示"需要 DEF_USE_BGC"（2026-10-22 用户实测）。
+ */
+export function historyBlockedReason(reason: string, en: boolean): string {
+  if (!en) return reason;
+  if (reason === '需要 CH4 甲烷示踪物') return 'Requires the CH4 methane tracer';
+  const kernel = /^本内核未编入：需要 (.+)$/.exec(reason);
+  if (kernel) return `Not compiled into this kernel: requires ${kernel[1]}`;
+  const needs = /^需要 (.+)$/.exec(reason);
+  if (needs) return `Requires ${needs[1]}`;
+  return reason;
+}

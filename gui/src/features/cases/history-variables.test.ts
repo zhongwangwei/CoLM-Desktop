@@ -5,6 +5,7 @@ import {
   coreHistoryVariables,
   historyKey,
   historyPreset,
+  historyBlockedReason,
   historySelection,
 } from './history-variables';
 
@@ -43,4 +44,13 @@ test('presets switch only writable variables and clear-all leaves nothing select
   assert.equal(historySelection(variables, all).selected, 3);
   assert.ok(!(historyKey('cropprod1c') in all), 'unwritable variables are left untouched');
   assert.equal(historySelection(variables, historyPreset(variables, 'none')).selected, 0);
+});
+
+test('blocked history variables explain themselves in English too', () => {
+  assert.equal(historyBlockedReason('需要 DEF_USE_BGC', true), 'Requires DEF_USE_BGC');
+  assert.equal(
+    historyBlockedReason('本内核未编入：需要 CROP', true),
+    'Not compiled into this kernel: requires CROP',
+  );
+  assert.equal(historyBlockedReason('需要 DEF_USE_BGC', false), '需要 DEF_USE_BGC');
 });

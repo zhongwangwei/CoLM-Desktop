@@ -572,9 +572,13 @@ export default function NewCasePage() {
   }
   // 记录失败不挡向导：这只是方便找回，写不进去时照样能建模拟。保存排成一队，免得第一次保存还没
   // 拿到记录号时，下一次又另起一条。
+  // 第 1 步填的内容：起初的项目目录来自默认路径，只有改过目录或填了名称才算用户填过。
+  const firstRoot = useRef(form.root);
   function saveDraft(at: SimulationStep) {
     const record = draft.current;
-    if (!record.record || record.closed || (at < 2 && !record.id)) return;
+    // 第 1 步原来不记：填了目录和名称、点侧栏离开再回来，全都没了，历史里也找不到（2026-10-22 用户实测）。
+    const filledFirstStep = !!form.name?.trim() || (form.root ?? '') !== (firstRoot.current ?? '');
+    if (!record.record || record.closed || (at < 2 && !record.id && !filledFirstStep)) return;
     const snapshot = wizardSeed(at),
       name = (form.name ?? '').trim() || t('未命名模拟', 'Untitled simulation');
     record.queue = record.queue

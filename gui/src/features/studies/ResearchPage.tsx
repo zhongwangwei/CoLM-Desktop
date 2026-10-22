@@ -2064,6 +2064,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           </div>
         </header>
         {error && <Notice tone="error">{error}</Notice>}
+        {/* 率定、不确定性和 AI 都在项目的算例上跑；还没打开项目时先说清楚，不让人选了方法才发现没算例。 */}
+        {!state.cases.length && (
+          <Notice>
+            {tr(
+              '率定、不确定性分析和 AI 研究要在项目的算例上跑：先在"项目"里打开项目或新建模拟。手动改参数和修改源码不需要算例。',
+              'Calibration, uncertainty and AI studies run on the cases of a project: open a project or create a simulation first. Manual parameter changes and source edits need no case.',
+            )}
+          </Notice>
+        )}
         <div className="research-methods" role="group" aria-label={homeMethod.label}>
           {hubMethods.map((item) => (
             <Button

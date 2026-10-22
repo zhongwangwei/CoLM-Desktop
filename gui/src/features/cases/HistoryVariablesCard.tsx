@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Button, Card, Input } from '../../components/ui';
 import {
   RECOMMENDED_VARIABLES,
+  historyBlockedReason,
   historyKey,
   historyPreset,
   historySelection,
@@ -200,7 +201,7 @@ export default function HistoryVariablesCard({
                   <td>
                     <strong>{en ? item.label_en : item.label_zh}</strong>
                     {!item.settable && item.reason ? (
-                      <div className="muted">{item.reason}</div>
+                      <div className="muted">{historyBlockedReason(item.reason, en)}</div>
                     ) : (
                       item.long_name &&
                       item.long_name !== item.label_zh &&

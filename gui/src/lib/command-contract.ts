@@ -651,6 +651,10 @@ export const commandContract = {
     "project": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "case": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "history_clear": {
@@ -663,6 +667,10 @@ export const commandContract = {
       "rust_type": "Option<bool>"
     },
     "project": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "case": {
       "required": false,
       "rust_type": "Option<String>"
     }

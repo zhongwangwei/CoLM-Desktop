@@ -50,7 +50,7 @@ interface Probe {
 let currentLang = 'zh';
 const t = (zh: string, enText: string) => (currentLang === 'en' ? enText : zh);
 export default function PreparationPage() {
-  const { state, notify, navigate } = useApp();
+  const { state, notify, navigate, update } = useApp();
   currentLang = state.language;
   const [imported, setImported] = useState<Imported[]>([]),
     [mode, setMode] = useState('netcdf'),
@@ -85,7 +85,9 @@ export default function PreparationPage() {
     [advanced, setAdvanced] = useState(state.expert),
     [result, setResult] = useState<unknown>(null),
     [error, setError] = useState(''),
-    [declined, setDeclined] = useState('');
+    [declined, setDeclined] = useState(''),
+    // 这一页做出来、能直接给新算例用的文件：站点文件、转换或修补好的强迫场。
+    [produced, setProduced] = useState<{ site?: string; met?: string }>({});
   const lock = useRef(false);
   // 上次"检查"自动推出的输出路径。换了源文件就作废：原来选 A 检查后再换成 B，输出路径还是
   // A 的推荐名，B 的数据被写进 A 的文件（GUI 审查 2026-10-22，P1-1）。用户自己改过的路径不动。
@@ -274,7 +276,8 @@ export default function PreparationPage() {
     }
   }
   async function execute() {
-    return work(async () => {
+    const output = form.dst;
+    const done = await work(async () => {
       if (!form.dst) throw new Error(t('请选择独立的输出路径', 'Destination path required'));
       if (mode === 'site')
         return invoke('make_site', {
@@ -353,6 +356,28 @@ export default function PreparationPage() {
         }),
       );
     });
+    if (done !== undefined) {
+      if (mode === 'site') setProduced((p) => ({ ...p, site: output }));
+      if (mode === 'netcdf' || mode === 'gaps') setProduced((p) => ({ ...p, met: output }));
+    }
+    return done;
+  }
+  // 带着这一页做好的文件去新建模拟；原来什么都没做也能点，进去是空白向导（2026-10-22 用户实测）。
+  const canUse = !!produced.site || !!produced.met;
+  function useForNewCase() {
+    if (!canUse) return false;
+    update({
+      newCaseSeed: {
+        form: {
+          kind: 'site',
+          ...(produced.site ? { site: produced.site } : {}),
+          ...(produced.met ? { met: produced.met } : {}),
+        },
+        sites: [],
+        ownData: true,
+      },
+    });
+    return navigate('new-case');
   }
   async function finish(item: Imported) {
     return work(async () => {
@@ -550,8 +575,8 @@ export default function PreparationPage() {
         id: 'prep-new-case',
         label: t('用于新算例', 'Use for new case'),
         kind: 'click',
-        enabled: !busy,
-        run: () => navigate('new-case'),
+        enabled: !busy && canUse,
+        run: useForNewCase,
       },
       ...basic
         .filter(
@@ -706,7 +731,15 @@ export default function PreparationPage() {
           >
             {t('生成数据', 'Generate data')}
           </Button>
-          <Button disabled={busy} onClick={() => navigate('new-case')}>
+          <Button
+            disabled={busy || !canUse}
+            title={
+              canUse
+                ? undefined
+                : t('先生成站点文件或强迫场', 'Generate a site file or forcing first')
+            }
+            onClick={useForNewCase}
+          >
             {t('用于新算例', 'Use for new case')}
           </Button>
         </div>

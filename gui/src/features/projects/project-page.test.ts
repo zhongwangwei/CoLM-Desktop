@@ -579,6 +579,7 @@ test('bundled example is not rejected by case switches retained in a legacy froz
   };
   const state = {
     root: '/project',
+    cases: [] as { dir: string; name: string }[],
     version: {
       overlay: { physics: { DEF_URBAN_RUN: '.true.', DEF_TUNING_CROP_PLANTING_DAY: '0' } },
     },
@@ -612,6 +613,14 @@ test('bundled example is not rejected by case switches retained in a legacy froz
   );
   assert.equal(seed.form.name, 'CN-Cng');
   assert.equal(state.version.overlay.physics.DEF_URBAN_RUN, '.true.');
+  // 项目里已经有 CN-Cng（再开一次示例）：换个不冲突的名字。
+  state.cases = [
+    { dir: '/project/CN-Cng', name: 'CN-Cng' },
+    { dir: '/project/CN-Cng-2', name: 'CN-Cng-2' },
+  ];
+  await example();
+  const again = (updates.at(-1) as { newCaseSeed: { form: Record<string, string> } }).newCaseSeed;
+  assert.equal(again.form.name, 'CN-Cng-3');
 });
 
 test('project location displays shared server project without a selected case', () => {

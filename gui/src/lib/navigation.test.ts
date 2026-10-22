@@ -29,8 +29,7 @@ test('sidebar groups model/data work under Project and opens real case tabs', ()
     researchHome: true,
   });
   assert.equal(activeNavigation({ route: 'new-case', caseTab: 'settings' }), 'simulation');
-  for (const tab of ['settings', 'runs'] as const)
-    assert.equal(activeNavigation({ route: 'case', caseTab: tab }), 'simulation');
+  assert.equal(activeNavigation({ route: 'case', caseTab: 'settings' }), 'simulation');
   assert.equal(activeNavigation({ route: 'case', caseTab: 'results' }), 'results');
   assert.deepEqual(
     navigation.find((item) => item.id === 'results'),
@@ -183,4 +182,10 @@ test('projects are named by their server folder or their own folder', () => {
   );
   assert.equal(projectName('/Users/me/Desktop/my-project/', []), 'my-project');
   assert.equal(projectName('D:\\runs\\basin', []), 'basin');
+});
+
+test("a case's run records light up History in the sidebar", () => {
+  assert.equal(activeNavigation({ route: 'case', caseTab: 'runs' }), 'history');
+  assert.equal(activeNavigation({ route: 'case', caseTab: 'settings' }), 'simulation');
+  assert.equal(activeNavigation({ route: 'case', caseTab: 'results' }), 'results');
 });

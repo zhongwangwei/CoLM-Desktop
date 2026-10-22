@@ -313,11 +313,25 @@ export default function ProjectPage() {
           site?.problem ||
             t('CN-Cng 示例输入不完整。', 'The CN-Cng example inputs are incomplete.'),
         );
+      // 当前项目里已经有同名算例（再开一次示例）时换个名字，不预填一个建不出来的目录（2026-10-22 用户实测）。
+      const root = state.root || paths.root;
+      const taken = new Set(
+        state.root === root
+          ? state.cases.map((entry) =>
+              entry.dir
+                .replace(/[\\/]+$/, '')
+                .split(/[\\/]/)
+                .pop(),
+            )
+          : [],
+      );
+      let name = site.name;
+      for (let n = 2; taken.has(name); n++) name = `${site.name}-${n}`;
       update({
         newCaseSeed: {
           form: {
-            root: state.root || paths.root,
-            name: site.name,
+            root,
+            name,
             sitedir: paths.sitedir,
             forcingdir: paths.forcingdir,
             runtime: paths.runtimedir,
@@ -825,9 +839,10 @@ export default function ProjectPage() {
             <span>
               <strong>{t('打开项目', 'Open project')}</strong>
               <span>
+                {/* 点了进历史记录（第 716 轮用户定的），文案原来写"浏览目录"，和行为对不上。 */}
                 {t(
-                  '浏览包含算例的项目目录，继续你的研究。',
-                  'Browse a project folder containing cases and continue your work.',
+                  '从历史记录里找回做过的项目；其他目录用下方的"选择目录"（或"切换目录"）。',
+                  'Pick a project you worked on from the history; for other folders use “Select folder” (or “Switch folder”) below.',
                 )}
               </span>
             </span>

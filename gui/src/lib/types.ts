@@ -201,6 +201,8 @@ export type AppState = {
     threads: string;
     ranks: string;
     workers: string;
+    /** 同时运行站点数还是自动值（按所选站点数与本机核数算）；为真时换了选择会跟着重算。 */
+    autoWorkers?: boolean;
     scheduler: string;
     cpus: string;
   };

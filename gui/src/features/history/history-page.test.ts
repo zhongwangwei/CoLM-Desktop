@@ -6,7 +6,10 @@ import * as history from './history';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Node = { type: string; props: Record<string, any>; children: unknown[] };
-function harness(running: Record<string, { running: boolean; run_id: string }> = {}) {
+function harness(
+  running: Record<string, { running: boolean; run_id: string }> = {},
+  props: { casePath?: string } = {},
+) {
   const source = readFileSync(new URL('./HistoryPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
     .replace('export default function', 'function');
@@ -105,7 +108,7 @@ function harness(running: Record<string, { running: boolean; run_id: string }> =
   let tree: Node;
   const render = () => {
     cursor = effectCursor = 0;
-    tree = Page({});
+    tree = Page(props);
     while (pending.length) pending.shift()!();
   };
   const nodes = (node: unknown): Node[] =>
@@ -790,4 +793,28 @@ test('a project card opens its timeline, batching stations, and a case opens its
   h.requests.at(-1)!.resolve([{ dir: '/cache/222/AT-Neu' }]);
   await h.settle();
   assert.deepEqual(h.opened.at(-1), ['/cache/222/AT-Neu', 'settings']);
+});
+
+// 算例里的"运行记录"页：清空只针对这个算例，原来清掉了整个应用的历史（2026-10-22 用户实测 59 条）。
+test('clearing from inside a case asks for and clears only that case', async () => {
+  const h = harness({}, { casePath: '/p/CN-Cng' });
+  h.requests[0].resolve({ items: [{ ...row('r1'), case_path: '/p/CN-Cng' }], total: 1 });
+  await h.settle();
+  h.click("Clear this case's records");
+  assert.equal(h.requests[1].command, 'history_clear_plan');
+  assert.deepEqual(h.requests[1].args, { case: '/p/CN-Cng' });
+  h.requests[1].resolve({
+    records: 2,
+    unconfirmed: 0,
+    unconfirmedRemote: 0,
+    cases: [{ path: '/p/CN-Cng', bytes: 10 }],
+    remoteCases: 0,
+    skipped: [],
+  });
+  await h.settle();
+  const dialog = h.nodes().find((n) => n.type === 'Dialog')!;
+  assert.equal(dialog.props.title, "Clear this case's records");
+  h.click('Confirm clearing records');
+  const request = h.requests.find((r) => r.command === 'history_clear')!;
+  assert.deepEqual(request.args, { cases: [], unconfirmed: false, case: '/p/CN-Cng' });
 });

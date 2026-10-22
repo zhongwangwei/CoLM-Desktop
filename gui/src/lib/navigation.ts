@@ -49,7 +49,13 @@ export function activeNavigation(
     !state.projectView.home
   )
     return 'simulation';
-  if (state.route === 'case') return state.caseTab === 'results' ? 'results' : 'simulation';
+  // 算例里的"运行记录"页内容就是这个算例的历史记录：侧栏点亮"历史记录"，不是"模拟"。
+  if (state.route === 'case')
+    return state.caseTab === 'results'
+      ? 'results'
+      : state.caseTab === 'runs'
+        ? 'history'
+        : 'simulation';
   if (state.route === 'new-case') return 'simulation';
   // 侧栏的"研究"先保留（2026-10-21 用户收回了去掉它的要求）；从"新建修改版"进去的研究也点亮它。
   if (['preparation', 'versions'].includes(state.route)) return 'project';

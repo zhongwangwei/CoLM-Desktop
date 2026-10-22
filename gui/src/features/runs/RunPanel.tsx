@@ -74,6 +74,7 @@ export default function RunPanel({
     threads: string;
     ranks: string;
     workers: string;
+    autoWorkers?: boolean;
     scheduler: string;
     cpus: string;
   };
@@ -164,6 +165,20 @@ export default function RunPanel({
     [loadBusy, setLoadBusy] = useState(false);
   // 当前选的是本机、算例全是单点：线程框不显示、固定 1 线程。
   const localSiteNow = siteCasesOnly && !host;
+  // "同时运行站点数"跟着选择走：批量页先读到混选（默认 1），取消格点算例后仍是 1，提示却说
+  // "默认填满本机核数"（2026-10-22 用户实测 2 站/8 核 → 1）。只改还是自动值的那个数，用户改过的不动；
+  // 存下的设置等于默认 1 或按站数算出的值时也当作自动值。
+  // 存下的设置里带着"还是自动值"的标记：批量页换选择时面板会重新挂载，只看数值分不出是不是用户填的。
+  const autoWorkers = useRef<string | null>(
+    !settings?.workers ||
+      settings.autoWorkers ||
+      settings.workers === '1' ||
+      (!!batchCases &&
+        settings.workers === String(siteBatchConcurrency(batchCases.length, localCores)))
+      ? workers
+      : null,
+  );
+  const batchCount = batchCases?.length ?? 0;
   const lock = useRef(false),
     alive = useRef(true),
     latest = useRef(state.running),
@@ -1053,6 +1068,7 @@ export default function RunPanel({
       ranks,
       threads,
       workers,
+      autoWorkers: autoWorkers.current !== null && workers === autoWorkers.current,
       scheduler,
       cpus,
     };
@@ -1081,6 +1097,13 @@ export default function RunPanel({
     if (host && serverLoad.host !== host) void refreshLoad();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host]);
+  // 放在最后：页面测试按位置取 effect。
+  useEffect(() => {
+    if (!batchCount || autoWorkers.current === null || workers !== autoWorkers.current) return;
+    const next = String(localSiteNow ? siteBatchConcurrency(batchCount, localCores) : 1);
+    autoWorkers.current = next;
+    if (next !== workers) setWorkers(next);
+  }, [localSiteNow, batchCount, localCores, workers]);
   const fields: UiField[] = [
     {
       id: 'run-host',
@@ -1604,10 +1627,12 @@ export default function RunPanel({
               {statusLabels[view.status] ?? view.status}
             </span>
           </div>
-          <p role="status" className="run-progress-status">
-            {statusLabels[view.status] ?? view.status}
-            {view.stage ? ` · ${stageLabels[view.stage] ?? view.stage}` : ''}
-          </p>
+          {/* 状态已经在右上角的标签里；这一行只说阶段，不再把"运行完成"重复一遍（2026-10-22 用户反馈）。 */}
+          {view.stage && (
+            <p role="status" className="run-progress-status">
+              {stageLabels[view.stage] ?? view.stage}
+            </p>
+          )}
           {serverActivity && <p className="run-progress-activity">{serverActivity}</p>}
           {!!view.total && (
             <div className="run-progress-bar">

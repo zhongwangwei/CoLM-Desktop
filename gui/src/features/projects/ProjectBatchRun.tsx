@@ -39,15 +39,31 @@ export default function ProjectBatchRun({
   fromCreation?: boolean;
 }) {
   const { state } = useApp();
+  // 项目里有格点算例时不叫"站点"（原来格点算例 hb 也被算成"站点"）。
+  const anySpatial = state.cases.some((entry) => entry.spatial);
   const en = state.language === 'en',
-    t = (zh: string, english: string) => (en ? english : zh);
+    t = (zh: string, english: string) =>
+      !anySpatial
+        ? en
+          ? english
+          : zh
+        : en
+          ? english.replace(/\b([Ss])tation(s?)\b/g, (_, s: string, plural: string) =>
+              s === 'S' ? `Case${plural}` : `case${plural}`,
+            )
+          : zh.replaceAll('站点', '算例');
   const handoff =
     state.projectRunSettings?.root === state.root ? state.projectRunSettings : undefined;
   const fixedSelection = fromCreation && !!handoff;
+  // 一份编译配置不能同时跑单点和格点：默认只选单点算例（没有单点时选全部格点）。原来默认全选，
+  // 混着格点算例时"开始运行"一直是灰的，提示还让人去版本页查（2026-10-22 用户实测）。
   const [selected, setSelected] = useState<string[]>(
     handoff && (fixedSelection || handoff.batch)
       ? handoff.cases
-      : state.cases.map((entry) => entry.dir),
+      : (state.cases.some((entry) => !entry.spatial)
+          ? state.cases.filter((entry) => !entry.spatial)
+          : state.cases
+        ).map((entry) => entry.dir),
   );
   const [selecting, setSelecting] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -82,20 +98,30 @@ export default function ProjectBatchRun({
           if (!active) return;
           const entries = Object.entries(profiles);
           const firstProfile = profiles[first];
+          const mixedKinds = entries.some(
+            ([, profile]) => !!profile.spatial !== !!firstProfile.spatial,
+          );
           const mixed = entries.some(
             ([, profile]) =>
               (profile.run_host || '') !== (firstProfile.run_host || '') ||
               (profile.engine || 'rust') !== (firstProfile.engine || 'rust'),
           );
           setContext(
-            mixed
+            mixedKinds
               ? {
                   key: contextKey,
                   error: en
-                    ? 'Select cases with the same run location and engine.'
-                    : '请选择运行位置和引擎相同的算例。',
+                    ? 'Single-point and gridded cases need separate batch runs: one build configuration cannot run both.'
+                    : '单点算例和格点算例要分开批量运行：一份编译配置不能同时跑两种。',
                 }
-              : { key: contextKey, profiles },
+              : mixed
+                ? {
+                    key: contextKey,
+                    error: en
+                      ? 'Select cases with the same run location and engine.'
+                      : '请选择运行位置和引擎相同的算例。',
+                  }
+                : { key: contextKey, profiles },
           );
         },
         (error: unknown) => {
@@ -433,6 +459,9 @@ export default function ProjectBatchRun({
                     />
                     <span className="batch-dot" aria-hidden="true" />
                     <span className="batch-station-name">{entry.name}</span>
+                    {entry.spatial && anySpatial && state.cases.some((c) => !c.spatial) && (
+                      <span className="muted">{t('格点', 'gridded')}</span>
+                    )}
                   </label>
                 );
               })}

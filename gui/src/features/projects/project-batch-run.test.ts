@@ -643,3 +643,26 @@ test('monitor tiles show one status at a time and pick failed stations for a rer
   page.render();
   assert.deepEqual(articles(), ['Busy', 'Broke', 'Halted'], 'the running station stays selected');
 });
+
+// 单点和格点不能用同一份编译配置：默认只选单点，混选时说清楚要分开跑，格点算例不叫"站点"。
+test('a project with gridded cases selects its single-point cases and explains mixing', async () => {
+  const page = screen();
+  page.state.cases = [
+    { dir: '/a', name: 'A', spatial: false },
+    { dir: '/h', name: 'H', spatial: true },
+  ] as unknown as typeof page.state.cases;
+  page.render();
+  assert.deepEqual(
+    page.requests.map((request) => (request.args as { dir: string }).dir),
+    ['/a'],
+  );
+  assert.ok(page.text.some((line) => line.includes('Cases to run')));
+  page.select('/h', true);
+  page.render();
+  for (const [index, spatial] of [false, true].entries())
+    page.requests.at(index - 2)!.resolve({ profile: { spatial, engine: 'rust' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  page.render();
+  assert.equal(page.panels.length, 0);
+  assert.ok(page.text.some((line) => line.includes('need separate batch runs')));
+});

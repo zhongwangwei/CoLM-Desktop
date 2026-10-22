@@ -847,7 +847,8 @@ export default function CasesPage() {
             id: 'case-project',
             label: t('打开项目', 'Open project'),
             kind: 'click',
-            run: () => navigate('project'),
+            // 和首页的"打开项目"去同一个地方（历史记录），不先回首页再点一次。
+            run: () => navigate('history'),
           },
           {
             id: 'case-new',
@@ -1008,7 +1009,7 @@ export default function CasesPage() {
             <Button variant="primary" onClick={() => navigate('new-case')}>
               ＋ {t('新建模拟', 'New simulation')}
             </Button>
-            <Button onClick={() => navigate('project')}>{t('打开项目', 'Open project')}</Button>
+            <Button onClick={() => navigate('history')}>{t('打开项目', 'Open project')}</Button>
           </div>
         </Card>
       </div>
