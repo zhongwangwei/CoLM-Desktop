@@ -5,7 +5,7 @@ import ts from 'typescript';
 import * as seriesHelpers from './series';
 import * as overviewHelpers from './result-overview';
 import * as variableLabels from './variable-labels';
-import type { PageContract } from '../../lib/guide';
+import type { PageContract, UiAction } from '../../lib/guide';
 
 type Element = { type: string | { name: string }; props: Record<string, unknown> };
 const normal = {
@@ -43,9 +43,12 @@ function harness(
   delayedSeries?: Promise<unknown>,
   openError = '',
   initialCase = '/case',
+  options: { remoteRun?: boolean; withBack?: boolean } = {},
 ) {
   let selectedCase = initialCase;
-  const opened: string[] = [];
+  const opened: string[] = [],
+    routes: string[] = [],
+    updates: unknown[] = [];
   const requests: { command: string; args: Record<string, unknown> }[] = [];
   const source = readFileSync(new URL('./ResultsPage.tsx', import.meta.url), 'utf8')
     .replace(/^import\b[\s\S]*?;\n/gm, '')
@@ -73,6 +76,7 @@ function harness(
           run_case: '/case/.colm/runs/a',
           version: { id: 'official', revision: 2 },
           status: 'succeeded',
+          ...(options.remoteRun ? { server: 'server', outputs_local: false } : {}),
         },
       ];
     if (command === 'history_catalog')
@@ -121,7 +125,13 @@ function harness(
           : [{ dir: '/case' }],
         running: {},
       },
-      navigate() {},
+      navigate(route: string) {
+        routes.push(route);
+        return true;
+      },
+      update(patch: unknown) {
+        updates.push(patch);
+      },
       async openCase(dir: string) {
         opened.push(dir);
         if (openError === 'blocked') return null;
@@ -171,6 +181,7 @@ function harness(
     },
   };
   for (const name of [
+    'ActionButton',
     'Button',
     'Card',
     'Field',
@@ -189,7 +200,10 @@ function harness(
     for (let n = 0; n < 15; n++) {
       dirty = false;
       cursor = 0;
-      tree = Page({ casePath: selectedCase });
+      tree = Page({
+        casePath: selectedCase,
+        onBack: options.withBack ? () => routes.push('back') : undefined,
+      });
       const pending = effects;
       effects = [];
       pending.forEach((fn) => fn());
@@ -209,11 +223,86 @@ function harness(
       ...charts(element.props?.children),
     ];
   }
+  // 动作由按钮登记（第 737 轮）：只收此刻显示着的 ActionButton；有打开的对话框时只收最上层对话框里的。
+  // 对话框在 Radix 里关闭时不挂载内容，所以关着的 Dialog 子树整棵跳过。
+  function treeActions(): UiAction[] {
+    const collected: UiAction[] = [];
+    const visit = (node: unknown) => {
+      if (Array.isArray(node)) {
+        node.forEach(visit);
+        return;
+      }
+      if (!node || typeof node !== 'object') return;
+      const element = node as Element;
+      const props = element.props as Record<string, unknown> & {
+        action?: string;
+        actionLabel?: string;
+        title?: string;
+        kind?: UiAction['kind'];
+        disabled?: boolean;
+        open?: boolean;
+        onOpenChange?: (open: boolean) => void;
+        run?: () => unknown;
+        label?: string;
+        closeAction?: string;
+      };
+      if (element.type === 'Dialog') {
+        if (!props.open) return;
+        if (props.closeAction && props.showClose !== false)
+          collected.push({
+            id: props.closeAction,
+            label: 'Close',
+            kind: 'click',
+            run: () => props.onOpenChange!(false),
+          });
+        visit(props.children);
+        return;
+      }
+      if (element.type === 'ActionButton')
+        collected.push({
+          id: String(props.action),
+          label: String(props.label),
+          kind: props.kind ?? 'click',
+          enabled: !props.disabled,
+          run: props.run!,
+        });
+      if (element.type === 'Advanced' && props.action)
+        collected.push({
+          id: String(props.action),
+          label: String(props.actionLabel ?? props.title ?? ''),
+          kind: 'click',
+          run: () => props.onOpenChange!(!props.open),
+        });
+      // 合上的折叠区内容在真实界面里不可见（details 未展开），里面的按钮不算显示着。
+      if (element.type === 'Advanced' && props.open === false) return;
+      if (element.type === 'details' && !props.open) return;
+      visit(props.children);
+    };
+    const dialogs: Element[] = [];
+    const collectDialogs = (node: unknown) => {
+      if (Array.isArray(node)) return node.forEach(collectDialogs);
+      if (!node || typeof node !== 'object') return;
+      const element = node as Element;
+      if (element.type === 'Dialog' && element.props.open) dialogs.push(element);
+      collectDialogs(element.props?.children);
+    };
+    collectDialogs(tree);
+    if (dialogs.length) visit(dialogs[dialogs.length - 1]);
+    else visit(tree);
+    return collected;
+  }
+  const guide = (): PageContract => ({
+    ...contract,
+    actions: [...contract.actions, ...treeActions()],
+  });
   return {
     render,
     exports,
     opened,
+    routes,
+    updates,
     requests,
+    field: (id: string) => contract.fields!.find((field) => field.id === id),
     station: () => contract.fields!.find((field) => field.id === 'result-station'),
     async chooseStation(dir: string) {
       contract.fields!.find((field) => field.id === 'result-station')!.set!(dir);
@@ -229,8 +318,11 @@ function harness(
       contract.fields!.find((f) => f.id === 'result-tab')!.set!(value);
       await render();
     },
+    guide,
     async action(id: string) {
-      await contract.actions!.find((a) => a.id === id)!.run();
+      await guide()
+        .actions.find((a) => a.id === id)!
+        .run();
       await render();
     },
   };
@@ -344,4 +436,174 @@ test('the default result is the recorded run, not the legacy placeholder listed 
   const catalogs = h.requests.filter((request) => request.command === 'history_catalog');
   assert.ok(catalogs.length);
   assert.ok(catalogs.every((request) => request.args.case === '/case/.colm/runs/a'));
+});
+
+// 第 737 轮：助手看到的动作必须就是界面上此刻显示着的按钮（名字、可用状态都取自按钮本身）。
+// 原来 PageContract 里另写一份 actions 清单，和 JSX 是两份；这些用例直接从渲染树收集 ActionButton。
+const actionIds = (h: ReturnType<typeof harness>) =>
+  h
+    .guide()
+    .actions.map((action) => action.id)
+    .sort();
+const actionById = (h: ReturnType<typeof harness>, id: string) =>
+  h.guide().actions.find((action) => action.id === id);
+
+test('the assistant sees exactly the result buttons on the overview screen', async () => {
+  const h = harness();
+  await h.render();
+  assert.deepEqual(actionIds(h), [
+    'export-full-series-csv',
+    'result-closure',
+    'result-improve',
+    'result-runs',
+    'result-settings',
+  ]);
+  assert.equal(actionById(h, 'export-full-series-csv')?.kind, 'commit');
+  assert.equal(actionById(h, 'result-runs')?.kind, 'click');
+  assert.equal(actionById(h, 'result-runs')?.enabled, true);
+});
+
+test('without a recorded run the assistant sees the header and export buttons as disabled', async () => {
+  const h = harness(false, undefined, '', '/empty');
+  await h.render();
+  assert.deepEqual(actionIds(h), [
+    'export-full-series-csv',
+    'result-closure',
+    'result-improve',
+    'result-runs',
+    'result-settings',
+  ]);
+  // 没有运行记录时，界面上这些按钮是灰的，助手看到的也必须是不能按；
+  // "诊断偏差""模型改进"只切页，没有运行也仍可按。
+  for (const id of ['export-full-series-csv', 'result-runs', 'result-settings'])
+    assert.equal(actionById(h, id)?.enabled, false, id);
+  for (const id of ['result-closure', 'result-improve'])
+    assert.equal(actionById(h, id)?.enabled, true, id);
+});
+
+test('an open evaluation dialog hides the page actions and exposes only its own', async () => {
+  const h = harness();
+  await h.render();
+  await h.action('result-settings');
+  assert.deepEqual(actionIds(h), [
+    'evaluate-observations',
+    'plot-series',
+    'result-advanced-settings',
+    'result-pick-observation',
+    'result-settings-close',
+  ]);
+  assert.equal(actionById(h, 'evaluate-observations')?.enabled, false, 'no observation yet');
+  assert.equal(actionById(h, 'plot-series')?.enabled, true);
+  await h.action('result-settings-close');
+  assert.deepEqual(actionIds(h), [
+    'export-full-series-csv',
+    'result-closure',
+    'result-improve',
+    'result-runs',
+    'result-settings',
+  ]);
+});
+
+test('an open run chooser lists the recorded runs and keeps the page buttons out', async () => {
+  const h = harness();
+  await h.render();
+  await h.action('result-runs');
+  assert.deepEqual(actionIds(h), [
+    'result-run-0',
+    'result-run-1',
+    'result-run-comparison',
+    'result-runs-close',
+  ]);
+  await h.action('result-run-1');
+  assert.ok(!actionIds(h).includes('result-runs-close'), 'choosing a run closes the dialog');
+  assert.ok(actionIds(h).includes('result-runs'));
+});
+
+test('每个结果 tab 的动作跟着该 tab 上真实的按钮走', async () => {
+  const h = harness();
+  await h.render();
+  await h.tab('report');
+  assert.deepEqual(actionIds(h), [
+    'export-report',
+    'result-improve',
+    'result-overview',
+    'result-runs',
+  ]);
+  assert.equal(actionById(h, 'export-report')?.kind, 'commit');
+  await h.tab('series');
+  assert.deepEqual(actionIds(h), [
+    'export-full-series-csv',
+    'export-series-data',
+    'plot-series',
+    'result-improve',
+    'result-overview',
+    'result-runs',
+  ]);
+  await h.tab('diagnostics');
+  assert.deepEqual(actionIds(h), [
+    'diagnose-closure',
+    'result-improve',
+    'result-overview',
+    'result-runs',
+  ]);
+  await h.action('diagnose-closure');
+  assert.ok(actionIds(h).includes('export-series-data'));
+});
+
+test('远程运行的取回结果与返回模拟按钮只在对应状态下登记', async () => {
+  const remote = harness(false, undefined, '', '/case', { remoteRun: true });
+  await remote.render();
+  assert.equal(actionById(remote, 'result-fetch')?.kind, 'commit');
+  assert.equal(actionById(remote, 'result-fetch')?.enabled, true);
+  const back = harness(false, undefined, '', '/case', { withBack: true });
+  await back.render();
+  assert.equal(actionById(back, 'result-back')?.kind, 'click');
+  assert.equal(actionById(back, 'result-back')?.enabled, true);
+});
+
+test('返回总览与模型改进按钮真的执行各自的导航', async () => {
+  const h = harness();
+  await h.render();
+  await h.tab('diagnostics');
+  await h.action('result-overview');
+  assert.equal(h.field('result-tab')?.value, 'overview');
+  await h.action('result-improve');
+  assert.deepEqual(h.updates.at(-1), { versionsView: 'create' });
+  assert.equal(h.routes.at(-1), 'versions');
+});
+
+test('评估、比较与数据目录页签只登记该页签真实的按钮', async () => {
+  const h = harness();
+  await h.render();
+  await h.tab('evaluation');
+  assert.deepEqual(actionIds(h), [
+    'evaluate-observations',
+    'result-improve',
+    'result-overview',
+    'result-runs',
+  ]);
+  assert.equal(actionById(h, 'evaluate-observations')?.enabled, false, '没有观测文件');
+  await h.tab('comparison');
+  assert.deepEqual(actionIds(h), [
+    'compare-sites',
+    'result-improve',
+    'result-overview',
+    'result-runs',
+  ]);
+  assert.equal(actionById(h, 'compare-sites')?.enabled, false, '还没有比较输入');
+  await h.tab('catalog');
+  assert.deepEqual(actionIds(h), ['result-improve', 'result-overview', 'result-runs']);
+});
+
+test('导出按钮的 kind 与高级评估折叠的展开动作', async () => {
+  const h = harness();
+  await h.render();
+  await h.tab('series');
+  assert.equal(actionById(h, 'export-series-data')?.kind, 'commit');
+  assert.equal(actionById(h, 'plot-series')?.kind, 'click');
+  await h.tab('overview');
+  await h.action('result-settings');
+  assert.equal(actionById(h, 'result-advanced-settings')?.kind, 'click');
+  await h.action('result-advanced-settings');
+  assert.equal(h.field('result-advanced')?.value, 'true', '展开后字段也反映出来');
 });

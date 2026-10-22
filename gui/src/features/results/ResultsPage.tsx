@@ -7,8 +7,9 @@ import { utcSeconds } from '../../lib/dates';
 import 'uplot/dist/uPlot.min.css';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
-import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
-import { Button, Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../components/ui';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { Card, Field, Input, Select, Notice, Advanced, Dialog } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import {
   boundedMap,
   download,
@@ -908,203 +909,6 @@ export default function ResultsPage({
       set: (value) => setReportFormat(value as ReportFormat),
     });
   const displayedSeries = tab === 'diagnostics' ? diagnostic?.series : series;
-  const actions: UiAction[] = [
-    ...(tab === 'overview'
-      ? [
-          {
-            id: 'result-closure',
-            enabled: !busy,
-            label: tr('诊断偏差', 'Diagnose deviations'),
-            kind: 'click' as const,
-            run: () => setTab('diagnostics'),
-          },
-          {
-            id: 'result-improve',
-            enabled: !busy,
-            label: tr('模型改进', 'Improve model'),
-            kind: 'click' as const,
-            run: improveModel,
-          },
-        ]
-      : []),
-    ...(tab !== 'overview'
-      ? [
-          {
-            id: 'result-overview',
-            enabled: !busy,
-            label: tr('返回结果总览', 'Back to results overview'),
-            kind: 'click' as const,
-            run: () => setTab('overview'),
-          },
-          {
-            id: 'result-improve',
-            enabled: !busy,
-            label: tr('模型改进', 'Improve model'),
-            kind: 'click' as const,
-            run: improveModel,
-          },
-        ]
-      : []),
-    ...(tab === 'series' || tab === 'overview'
-      ? [
-          {
-            id: 'plot-series',
-            label: tr('绘制时序', 'Plot series'),
-            kind: 'click' as const,
-            enabled: !!source && !!variable && !busy,
-            run: plot,
-          },
-          {
-            id: 'export-full-series-csv',
-            label: tr('导出完整时序 CSV', 'Export full time-series CSV'),
-            kind: 'commit' as const,
-            enabled: !!source && !!variable && !busy,
-            run: exportFullSeries,
-          },
-        ]
-      : []),
-    ...(tab === 'evaluation' || tab === 'overview'
-      ? [
-          {
-            id: 'evaluate-observations',
-            label: tr('评估观测', 'Evaluate observations'),
-            kind: 'click' as const,
-            enabled: !!source && !!obs && !busy,
-            run: evaluate,
-          },
-        ]
-      : []),
-    ...(tab === 'comparison'
-      ? [
-          {
-            id: 'compare-sites',
-            label: tr('比较站点', 'Compare sites'),
-            kind: 'click' as const,
-            enabled: !!comparison && !busy,
-            run: compare,
-          },
-        ]
-      : []),
-    ...(tab === 'diagnostics'
-      ? [
-          {
-            id: 'diagnose-closure',
-            label: tr('统计能量通量残差', 'Summarize energy flux residual'),
-            kind: 'click' as const,
-            enabled: !!catalog && !busy,
-            run: diagnose,
-          },
-        ]
-      : []),
-    ...((tab === 'series' || tab === 'diagnostics') && displayedSeries
-      ? [
-          {
-            id: 'export-series-data',
-            label: tr('导出显示数据（抽样 JSON）', 'Export displayed data (sampled JSON)'),
-            kind: 'commit' as const,
-            enabled: !busy,
-            run: () =>
-              task(async (current) => {
-                setExportNotice('');
-                const result = await download(
-                  'series-sampled.json',
-                  JSON.stringify({ source, ...displayedSeries }),
-                );
-                if (current()) setExportNotice(exportMessage(result));
-                return result;
-              }),
-          },
-        ]
-      : []),
-    ...(tab === 'report'
-      ? [
-          {
-            id: 'export-report',
-            label:
-              reportFormat === 'pdf'
-                ? tr('打印 / 另存为 PDF', 'Print / Save as PDF')
-                : tr('导出报告', 'Export report'),
-            kind: 'commit' as const,
-            enabled: !!catalog && !busy,
-            run: report,
-          },
-        ]
-      : []),
-  ];
-  const pageActions: UiAction[] = runChooser
-    ? [
-        {
-          id: 'result-runs-close',
-          label: tr('关闭', 'Close'),
-          kind: 'click',
-          enabled: !busy,
-          run: () => changeRunChooser(false),
-        },
-        {
-          id: 'result-run-comparison',
-          label: tr('进入多运行比较', 'Open multi-run comparison'),
-          kind: 'click',
-          enabled: !busy,
-          run: () => {
-            setRunChooser(false);
-            setTab('comparison');
-          },
-        },
-      ]
-    : settingsOpen
-      ? [
-          ...actions.filter(
-            (action) => action.id === 'evaluate-observations' || action.id === 'plot-series',
-          ),
-          {
-            id: 'result-settings-close',
-            label: tr('关闭', 'Close'),
-            kind: 'click',
-            enabled: !busy,
-            run: () => changeSettings(false),
-          },
-          {
-            id: 'result-pick-observation',
-            label: tr('选择文件', 'Choose a file'),
-            kind: 'click',
-            enabled: !busy,
-            run: async () => {
-              const file = await invoke<string | null>('pick_file', {
-                key: 'result-observations',
-                filter: 'nc',
-              });
-              if (file) chooseObservation(file);
-              return file;
-            },
-          },
-        ]
-      : [
-          {
-            id: 'result-runs',
-            label: tr('比较其他运行', 'Compare other runs'),
-            kind: 'click',
-            enabled: !busy && runs.some((item) => item.run_case),
-            run: () => changeRunChooser(true),
-          },
-          ...(tab === 'overview'
-            ? [
-                {
-                  id: 'result-settings',
-                  label: tr('评估设置', 'Evaluation settings'),
-                  kind: 'click' as const,
-                  enabled: !!catalog && !busy,
-                  run: () => changeSettings(true),
-                },
-                ...actions
-                  .filter((action) =>
-                    ['result-closure', 'result-improve', 'export-full-series-csv'].includes(
-                      action.id,
-                    ),
-                  )
-                  .map((action) => ({ ...action, enabled: action.enabled !== false && !busy })),
-              ]
-            : actions),
-        ];
   usePageContract({
     title: runChooser
       ? tr('选择运行', 'Choose a run')
@@ -1115,7 +919,7 @@ export default function ResultsPage({
     modal: runChooser || settingsOpen,
     status: busy ? 'working' : error || 'ready',
     fields,
-    actions: pageActions,
+    actions: [],
     details: {
       source,
       provenance: selectedRun,
@@ -1170,13 +974,16 @@ export default function ResultsPage({
             </span>
           </div>
         </div>
-        <Button
+        <ActionButton
+          action="result-runs"
+          label={tr('比较其他运行', 'Compare other runs')}
+          kind="click"
           disabled={busy || !runs.some((item) => item.run_case)}
-          onClick={() => changeRunChooser(true)}
+          run={() => changeRunChooser(true)}
         >
           <NavIcon name="results" />
           {tr('比较其他运行', 'Compare other runs')}
-        </Button>
+        </ActionButton>
       </header>
       {state.cases.length > 0 && (!caseDir || state.cases.length > 1) && (
         <Field label={tr('站点', 'Station')}>
@@ -1204,9 +1011,15 @@ export default function ResultsPage({
             `数据在服务器 ${selectedRun?.server ?? ''} 上：变量和曲线直接在服务器上读取，只传回画图要用的数据，每次切换要几秒。要 NetCDF 文件或评估指标时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
             `Data stays on ${selectedRun?.server ?? ''}: variables and curves are read there and only the plotted values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files or evaluation metrics.`,
           )}
-          <Button disabled={busy} onClick={() => run(fetchSelectedRun)}>
+          <ActionButton
+            action="result-fetch"
+            label={tr('取回结果', 'Fetch results')}
+            kind="commit"
+            disabled={busy}
+            run={fetchSelectedRun}
+          >
             {busy ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}
-          </Button>
+          </ActionButton>
         </Notice>
       )}
       {source && !selectedRun?.version && (
@@ -1300,14 +1113,17 @@ export default function ResultsPage({
                     </option>
                   ))}
                 </Select>
-                <Button
+                <ActionButton
+                  action="result-settings"
+                  label={tr('评估设置', 'Evaluation settings')}
+                  kind="click"
                   variant="ghost"
                   disabled={!catalog || busy}
-                  onClick={() => changeSettings(true)}
+                  run={() => changeSettings(true)}
                 >
                   <NavIcon name="settings" />
                   {tr('评估设置', 'Evaluation settings')}
-                </Button>
+                </ActionButton>
               </div>
             </div>
             <div className="results-plot-meta">
@@ -1415,18 +1231,26 @@ export default function ResultsPage({
               <p>{tr('候选原因需要进一步验证。', 'Candidate causes need further validation.')}</p>
             </div>
             <div>
-              {actions
-                .filter((action) => ['result-closure', 'result-improve'].includes(action.id))
-                .map((action, index) => (
-                  <Button
-                    key={action.id}
-                    disabled={busy}
-                    onClick={() => run(async () => action.run())}
-                  >
-                    <NavIcon name={(['simulation', 'settings', 'results'] as const)[index]} />
-                    {action.label}
-                  </Button>
-                ))}
+              <ActionButton
+                action="result-closure"
+                label={tr('诊断偏差', 'Diagnose deviations')}
+                kind="click"
+                disabled={busy}
+                run={() => setTab('diagnostics')}
+              >
+                <NavIcon name="simulation" />
+                {tr('诊断偏差', 'Diagnose deviations')}
+              </ActionButton>
+              <ActionButton
+                action="result-improve"
+                label={tr('模型改进', 'Improve model')}
+                kind="click"
+                disabled={busy}
+                run={improveModel}
+              >
+                <NavIcon name="settings" />
+                {tr('模型改进', 'Improve model')}
+              </ActionButton>
             </div>
           </Card>
         </section>
@@ -1434,12 +1258,25 @@ export default function ResultsPage({
       <footer className="results-secondary">
         {tab !== 'overview' && (
           <>
-            <Button variant="ghost" disabled={busy} onClick={() => setTab('overview')}>
+            <ActionButton
+              action="result-overview"
+              label={tr('返回结果总览', 'Back to results overview')}
+              kind="click"
+              variant="ghost"
+              disabled={busy}
+              run={() => setTab('overview')}
+            >
               {tr('← 返回结果总览', '← Back to results overview')}
-            </Button>
-            <Button disabled={busy} onClick={improveModel}>
+            </ActionButton>
+            <ActionButton
+              action="result-improve"
+              label={tr('模型改进', 'Improve model')}
+              kind="click"
+              disabled={busy}
+              run={improveModel}
+            >
               {tr('模型改进', 'Improve model')}
-            </Button>
+            </ActionButton>
           </>
         )}
         <Field label={tr('更多分析与导出', 'More analyses and exports')}>
@@ -1474,18 +1311,27 @@ export default function ResultsPage({
           </Select>
         </Field>
         {tab === 'overview' && (
-          <Button
+          <ActionButton
+            action="export-full-series-csv"
+            label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
+            kind="commit"
             variant="ghost"
             disabled={!source || !variable || busy}
-            onClick={() => run(exportFullSeries)}
+            run={exportFullSeries}
           >
             {tr('导出完整 CSV', 'Export full CSV')}
-          </Button>
+          </ActionButton>
         )}
         {onBack && (
-          <Button variant="ghost" onClick={onBack}>
+          <ActionButton
+            action="result-back"
+            label={tr('返回模拟', 'Back to simulation')}
+            kind="click"
+            variant="ghost"
+            run={onBack}
+          >
             {tr('返回模拟', 'Back to simulation')}
-          </Button>
+          </ActionButton>
         )}
       </footer>
       <Dialog
@@ -1496,31 +1342,38 @@ export default function ResultsPage({
         )}
         open={runChooser}
         onOpenChange={changeRunChooser}
+        closeAction="result-runs-close"
       >
         <div className="result-run-choices">
           {runs
             .filter((item) => item.run_case)
             .map((item, index) => (
-              <Button
+              <ActionButton
                 key={index}
+                action={`result-run-${index}`}
+                label={`${overviewRunLabel(item, en)} · ${overviewRunStatus(item, en)}`}
+                kind="click"
                 disabled={busy}
                 aria-pressed={source === item.run_case}
-                onClick={() => chooseRecordedRun(item.run_case!)}
+                run={() => chooseRecordedRun(item.run_case!)}
               >
                 <strong>{overviewRunLabel(item, en)}</strong>
                 <span>{overviewRunStatus(item, en)}</span>
-              </Button>
+              </ActionButton>
             ))}
         </div>
-        <Button
+        <ActionButton
+          action="result-run-comparison"
+          label={tr('进入多运行比较', 'Open multi-run comparison')}
+          kind="click"
           disabled={busy}
-          onClick={() => {
+          run={() => {
             setRunChooser(false);
             setTab('comparison');
           }}
         >
           {tr('进入多运行比较', 'Open multi-run comparison')}
-        </Button>
+        </ActionButton>
       </Dialog>
       <Dialog
         title={tr('评估设置', 'Evaluation settings')}
@@ -1530,6 +1383,7 @@ export default function ResultsPage({
         )}
         open={settingsOpen}
         onOpenChange={changeSettings}
+        closeAction="result-settings-close"
       >
         {error && <Notice tone="error">{error}</Notice>}
         <Field label={tr('观测文件', 'Observation file')}>
@@ -1539,25 +1393,28 @@ export default function ResultsPage({
               disabled={busy}
               onChange={(event) => chooseObservation(event.target.value)}
             />
-            <Button
+            <ActionButton
+              action="result-pick-observation"
+              label={tr('选择文件', 'Choose a file')}
+              kind="click"
               disabled={busy}
-              onClick={() =>
-                run(async () => {
-                  const file = await invoke<string | null>('pick_file', {
-                    key: 'result-observations',
-                    filter: 'nc',
-                  });
-                  if (file) chooseObservation(file);
-                  return file;
-                })
-              }
+              run={async () => {
+                const file = await invoke<string | null>('pick_file', {
+                  key: 'result-observations',
+                  filter: 'nc',
+                });
+                if (file) chooseObservation(file);
+                return file;
+              }}
             >
               {tr('选择文件', 'Choose a file')}
-            </Button>
+            </ActionButton>
           </div>
         </Field>
         <Advanced
           title={tr('高级评估设置', 'Advanced evaluation settings')}
+          action="result-advanced-settings"
+          actionLabel={tr('高级评估设置', 'Advanced evaluation settings')}
           open={advanced}
           onOpenChange={setAdvanced}
         >
@@ -1599,16 +1456,25 @@ export default function ResultsPage({
           </label>
         </Advanced>
         <div className="actions">
-          <Button
+          <ActionButton
+            action="evaluate-observations"
+            label={tr('更新评估', 'Update evaluation')}
+            kind="click"
             variant="primary"
             disabled={!source || !obs.trim() || busy}
-            onClick={() => run(evaluate)}
+            run={evaluate}
           >
             {busy ? tr('正在评估…', 'Evaluating…') : tr('更新评估', 'Update evaluation')}
-          </Button>
-          <Button disabled={!source || !variable || busy} onClick={() => run(plot)}>
+          </ActionButton>
+          <ActionButton
+            action="plot-series"
+            label={tr('刷新模拟曲线', 'Refresh simulation curve')}
+            kind="click"
+            disabled={!source || !variable || busy}
+            run={plot}
+          >
             {tr('刷新模拟曲线', 'Refresh simulation curve')}
-          </Button>
+          </ActionButton>
         </div>
       </Dialog>
       <details className="results-advanced">
@@ -1819,13 +1685,82 @@ export default function ResultsPage({
               </label>
             </div>
           )}
-          {actions
-            .filter((a) => a.id !== 'result-overview' && a.id !== 'result-improve')
-            .map((a) => (
-              <Button key={a.id} disabled={!a.enabled} onClick={() => run(async () => a.run())}>
-                {a.label}
-              </Button>
-            ))}
+          {tab === 'series' && (
+            <>
+              <ActionButton
+                action="plot-series"
+                label={tr('绘制时序', 'Plot series')}
+                kind="click"
+                disabled={!source || !variable || busy}
+                run={plot}
+              >
+                {tr('绘制时序', 'Plot series')}
+              </ActionButton>
+              <ActionButton
+                action="export-full-series-csv"
+                label={tr('导出完整时序 CSV', 'Export full time-series CSV')}
+                kind="commit"
+                disabled={!source || !variable || busy}
+                run={exportFullSeries}
+              >
+                {tr('导出完整时序 CSV', 'Export full time-series CSV')}
+              </ActionButton>
+            </>
+          )}
+          {tab === 'evaluation' && (
+            <ActionButton
+              action="evaluate-observations"
+              label={tr('评估观测', 'Evaluate observations')}
+              kind="click"
+              disabled={!source || !obs || busy}
+              run={evaluate}
+            >
+              {tr('评估观测', 'Evaluate observations')}
+            </ActionButton>
+          )}
+          {tab === 'comparison' && (
+            <ActionButton
+              action="compare-sites"
+              label={tr('比较站点', 'Compare sites')}
+              kind="click"
+              disabled={!comparison || busy}
+              run={compare}
+            >
+              {tr('比较站点', 'Compare sites')}
+            </ActionButton>
+          )}
+          {tab === 'diagnostics' && (
+            <ActionButton
+              action="diagnose-closure"
+              label={tr('统计能量通量残差', 'Summarize energy flux residual')}
+              kind="click"
+              disabled={!catalog || busy}
+              run={diagnose}
+            >
+              {tr('统计能量通量残差', 'Summarize energy flux residual')}
+            </ActionButton>
+          )}
+          {(tab === 'series' || tab === 'diagnostics') && displayedSeries && (
+            <ActionButton
+              action="export-series-data"
+              label={tr('导出显示数据（抽样 JSON）', 'Export displayed data (sampled JSON)')}
+              kind="commit"
+              disabled={busy}
+              run={() =>
+                task(async (current) => {
+                  setExportNotice('');
+                  const result = await download(
+                    'series-sampled.json',
+                    JSON.stringify({ source, ...displayedSeries }),
+                  );
+                  if (current()) setExportNotice(exportMessage(result));
+                  return result;
+                })
+              }
+            >
+              {tr('导出显示数据（抽样 JSON）', 'Export displayed data (sampled JSON)')}
+            </ActionButton>
+          )}
           {tab === 'diagnostics' && (
             <p>
               {tr(
@@ -1973,15 +1908,21 @@ export default function ResultsPage({
                 ))}
             </Select>
           </Field>
-          {actions.map((action) => (
-            <Button
-              key={action.id}
-              disabled={!action.enabled}
-              onClick={() => run(async () => action.run())}
-            >
-              {action.label}
-            </Button>
-          ))}
+          <ActionButton
+            action="export-report"
+            label={
+              reportFormat === 'pdf'
+                ? tr('打印 / 另存为 PDF', 'Print / Save as PDF')
+                : tr('导出报告', 'Export report')
+            }
+            kind="commit"
+            disabled={!catalog || busy}
+            run={report}
+          >
+            {reportFormat === 'pdf'
+              ? tr('打印 / 另存为 PDF', 'Print / Save as PDF')
+              : tr('导出报告', 'Export report')}
+          </ActionButton>
           <pre className="overflow-auto">
             {JSON.stringify(
               runs.find((r) => r.run_case === source) || { run_case: source },

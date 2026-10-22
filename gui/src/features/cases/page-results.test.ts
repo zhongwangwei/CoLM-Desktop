@@ -363,22 +363,6 @@ test('Results full CSV uses the native unlimited reader and returns actual downl
     /selection changed/,
   );
   assert.equal(downloads.length, 0, 'a late response does not download a different selection');
-  const actions = callback(page, 'actions', {
-    improveModel: () => {},
-    tab: 'series',
-    source: '/copy',
-    variable: 'f_fsena',
-    busy: false,
-    series: data,
-    displayedSeries: data,
-    plot: noop,
-    exportFullSeries: noop,
-    download: noop,
-    tr: (zh: string) => zh,
-  }) as unknown as { id: string; kind: string }[];
-  assert.equal(actions.find((action) => action.id === 'export-full-series-csv')?.kind, 'commit');
-  assert.equal(actions.find((action) => action.id === 'export-series-data')?.kind, 'commit');
-  assert.equal(actions.find((action) => action.id === 'plot-series')?.kind, 'click');
 });
 
 test('Results report formats retain summary metrics and route native PDF through print_report', async () => {
@@ -478,16 +462,6 @@ test('Results report formats retain summary metrics and route native PDF through
     })(),
     /native print failed/,
   );
-  const actions = callback(page, 'actions', {
-    improveModel: () => {},
-    tab: 'report',
-    reportFormat: 'pdf',
-    catalog: { steps: 2 },
-    busy: false,
-    report: noop,
-    tr: (zh: string) => zh,
-  }) as unknown as { id: string; kind: string }[];
-  assert.equal(actions.find((action) => action.id === 'export-report')?.kind, 'commit');
   const css = readFileSync(new URL('../../styles.css', import.meta.url), 'utf8');
   assert.match(
     css,
@@ -554,45 +528,26 @@ test('Results evaluation binds full metrics to the selected conditions and ignor
   assert.deepEqual(published.at(-1), { key: 'verified-selection', rows: [] });
 });
 
-test('result navigation opens 新建修改版 and returns diagnostics to overview', async () => {
-  const destinations: string[] = [],
-    noop = () => {};
-  for (const tab of ['overview', 'diagnostics']) {
-    const actions = callback('../results/ResultsPage.tsx', 'actions', {
-      tab,
-      source: '',
-      variable: '',
-      obs: '',
-      busy: false,
-      series: null,
-      displayedSeries: null,
-      catalog: null,
-      plot: noop,
-      exportFullSeries: noop,
-      evaluate: noop,
-      diagnose: noop,
-      setTab: (step: string) => destinations.push(step),
-      tr: (zh: string) => zh,
-      navigate: (page: string) => destinations.push(page),
-      improveModel: () => destinations.push('versions'),
-    }) as unknown as { id: string; enabled?: boolean; run: () => Promise<unknown> }[];
-    const improve = actions.find((action) => action.id === 'result-improve')!;
-    assert.equal(improve.enabled, true);
-    await improve.run();
-    if (tab === 'diagnostics') {
-      const back = actions.find((action) => action.id === 'result-overview')!;
-      assert.equal(back.enabled, true);
-      await back.run();
-    }
-  }
+test('result navigation opens 新建修改版 from the model-improvement action', async () => {
+  const updates: unknown[] = [],
+    routes: string[] = [];
+  const improve = callback('../results/ResultsPage.tsx', 'improveModel', {
+    update: (patch: unknown) => updates.push(patch),
+    navigate: (route: string) => {
+      routes.push(route);
+      return true;
+    },
+  }) as unknown as () => boolean;
+  assert.equal(improve(), true);
   // 模型改进 goes to 新建修改版 (research has no sidebar entry of its own).
-  assert.deepEqual(destinations, ['versions', 'versions', 'overview']);
+  assert.deepEqual(updates, [{ versionsView: 'create' }]);
+  assert.deepEqual(routes, ['versions']);
 });
 
 test('overview contract exposes optional evaluation conditions only while advanced settings are visible', () => {
   const page = readFileSync(new URL('../results/ResultsPage.tsx', import.meta.url), 'utf8');
   const start = page.indexOf('const fields: UiField[] ='),
-    end = page.indexOf('const actions: UiAction[] =', start);
+    end = page.indexOf('const displayedSeries', start);
   const js = ts.transpileModule(page.slice(start, end), {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
@@ -742,48 +697,6 @@ test('automatic result preview requires the current catalog and rejects late rep
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(shown.at(-1), 'current-series');
-});
-
-test('result dialogs expose their own controls and keep background navigation and exports out', () => {
-  const noop = () => {},
-    baseActions = [
-      { id: 'result-tuning', kind: 'click' },
-      { id: 'export-full-series-csv', kind: 'commit', enabled: true },
-      { id: 'evaluate-observations', kind: 'click', enabled: true },
-      { id: 'plot-series', kind: 'click', enabled: true },
-    ];
-  const common = {
-    runChooser: false,
-    settingsOpen: false,
-    tr: (zh: string) => zh,
-    busy: false,
-    runs: [{ run_case: '/run' }],
-    actions: baseActions,
-    tab: 'overview',
-    catalog: {},
-    changeRunChooser: noop,
-    changeSettings: noop,
-    setRunChooser: noop,
-    setTab: noop,
-  };
-  const pageActions = (extra: Record<string, unknown>) =>
-    callback('../results/ResultsPage.tsx', 'pageActions', { ...common, ...extra }) as unknown as {
-      id: string;
-      kind: string;
-      enabled: boolean;
-    }[];
-  const home = pageActions({});
-  assert.ok(!home.some((action) => action.id === 'evaluate-observations'));
-  assert.equal(home.find((action) => action.id === 'export-full-series-csv')?.kind, 'commit');
-  assert.ok(pageActions({ busy: true }).every((action) => !action.enabled));
-  const modal = pageActions({ settingsOpen: true });
-  assert.ok(modal.some((action) => action.id === 'evaluate-observations'));
-  assert.ok(!modal.some((action) => action.id === 'result-tuning' || action.kind === 'commit'));
-  const chooser = pageActions({ runChooser: true });
-  assert.deepEqual(
-    chooser.map((action) => action.id),
-    ['result-runs-close', 'result-run-comparison'],
-  );
 });
 
 test('result time-window changes clear sampled curves while observation edits preserve the simulation', () => {
