@@ -4,7 +4,7 @@ import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { withCatalogLabels } from '../../lib/param-presentation';
 import { askConfirm } from '../../lib/confirm';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
 import type {
   AppState,
   FrozenRevision,
@@ -14,10 +14,10 @@ import type {
   VersionRef,
 } from '../../lib/types';
 import { Advanced, Button, Card, Field, Input, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { download } from '../history/history';
 import {
   importParameters,
-  makeRecord,
   parameterKey,
   recordType,
   type ParameterType,
@@ -545,36 +545,6 @@ export default function VersionsPage() {
       );
     });
   }
-  // 研究的结果写进这个版本：选一个已完成的率定或敏感性研究，把它最优成员的参数值写成参数改值。
-  async function importStudyParameters() {
-    await execute(async () => {
-      if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
-      const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
-      if (!studyDir) return;
-      const current = dirtyNow.current ? await save() : draft;
-      const result = await invokeJson<{ draft: ModelDraft; member: string; parameters: number }>(
-        'model_import_study',
-        {
-          id: current.id,
-          studyDir,
-          member: null,
-          expectedGeneration: current.generation,
-          preview: null,
-          only: null,
-        },
-      );
-      setDraft(result.draft);
-      dirtyNow.current = false;
-      setDirty(false);
-      setDrafts(await invokeJson('model_drafts'));
-      setStudyNotice(
-        t(
-          `已把研究最优成员 ${result.member} 的 ${result.parameters} 个参数写进这个版本，并记下了研究的站点与时段。`,
-          `Wrote ${result.parameters} parameters of the study's best member ${result.member} into this version and recorded the study's sites and periods.`,
-        ),
-      );
-    });
-  }
   const setup = state.simulationReturn?.route === 'new-case' ? state.newCaseSeed?.form : null;
   const configurationProfile = setup
     ? {
@@ -595,8 +565,7 @@ export default function VersionsPage() {
       (d.storage !== 'case-nml' ||
         fields.some((f) => f.name.toLowerCase() === d.raw_key.toLowerCase())),
   );
-  const descriptor = allowed.find((d) => d.id === parameter),
-    modelField = fields.find((f) => f.name === physics);
+  const descriptor = allowed.find((d) => d.id === parameter);
   function selectParameter(id: string) {
     setParameter(id);
     const d = allowed.find((x) => x.id === id);
@@ -607,29 +576,6 @@ export default function VersionsPage() {
   function selectPhysics(name: string) {
     setPhysics(name);
     setPhysicsValue(fields.find((f) => f.name === name)?.default ?? '');
-  }
-  function addParameter() {
-    if (!draft || !descriptor) return;
-    const record = makeRecord(descriptor, value, index, process);
-    if (
-      record.scope_instance.process_file &&
-      !draft.overlay.process_files.some(
-        (a) => a.relative_path === record.scope_instance.process_file,
-      )
-    )
-      throw new Error(bilingual('过程参数文件不在这个版本里', 'Process asset missing'));
-    if (
-      Object.keys(draft.overlay.physics).some(
-        (k) => k.toLowerCase() === record.raw_key.toLowerCase(),
-      )
-    )
-      throw new Error(
-        t('该字段已在物理设置中覆盖，请先重置', 'Reset the physics override for this field first'),
-      );
-    edit({
-      ...draft,
-      overlay: { ...draft.overlay, parameters: upsertParameter(draft.overlay.parameters, record) },
-    });
   }
   async function importFile() {
     if (!draft) return;
@@ -665,26 +611,6 @@ export default function VersionsPage() {
       setDraft(saved);
       setDirty(false);
     }
-  }
-  async function deriveVersion() {
-    if (!parentVersion) return null;
-    const d = await invokeJson<ModelDraft>('model_create', {
-      name,
-      note,
-      parent: parentVersion.version,
-      workspace: null,
-      branchCode: codeMode === 'branch',
-    });
-    setAssetRoot('');
-    setDraft(d);
-    setDirty(false);
-    setViewKey(null);
-    setTab(codeMode === 'branch' ? 'code' : 'changes');
-    setName('');
-    setNote('');
-    setCodeMode('inherit');
-    setDrafts(await invokeJson('model_drafts'));
-    return d;
   }
   const guideFields: UiField[] = [
     {
@@ -733,95 +659,6 @@ export default function VersionsPage() {
       set: setParentKey,
     },
   ];
-  const guideActions: UiAction[] = [
-    {
-      id: 'version-create',
-      label: t('派生新版本', 'Derive version'),
-      kind: 'commit',
-      enabled: !busy && !codeBusy && !dirty && !!name && !!note && !!parentVersion,
-      run: () => execute(deriveVersion),
-    },
-    ...state.versions.map((v) => ({
-      id: `version-select-${v.version.id}-${v.version.revision}`,
-      label: `${v.name} r${v.version.revision}`,
-      kind: 'click' as const,
-      enabled: !busy && !codeBusy && !dirty,
-      run: () => execute(() => select(v)),
-    })),
-    ...hubMethods.map((m) => ({
-      id: `version-method-${m.id}`,
-      label: state.language === 'en' ? m.en : m.zh,
-      kind: (m.id === 'manual' || m.id === 'source' ? 'commit' : 'click') as 'commit' | 'click',
-      enabled: !busy && !codeBusy && !dirty && !!parentVersion,
-      run: () => execute(() => startMethod(m.id)),
-    })),
-    ...state.versions.map((v) => ({
-      id: `version-use-${v.version.id}-${v.version.revision}`,
-      label: t(
-        `设为模拟使用：${v.name} r${v.version.revision}`,
-        `Use for simulations: ${v.name} r${v.version.revision}`,
-      ),
-      kind: 'click' as const,
-      enabled: !busy && !codeBusy && !dirty,
-      run: () => chooseForSimulation(v),
-    })),
-    ...drafts.map((d) => ({
-      id: `version-draft-${d.id}`,
-      label: d.name,
-      kind: 'click' as const,
-      enabled: !busy && !codeBusy && !dirty,
-      run: () => execute(() => loadDraft(d.id)),
-    })),
-  ];
-  if (state.simulationReturn)
-    guideActions.push({
-      id: 'version-return-simulation',
-      label: t('返回模拟配置', 'Return to simulation setup'),
-      kind: 'click',
-      enabled: !busy && !codeBusy && !dirty,
-      run: returnToSimulation,
-    });
-  if (shown) {
-    guideActions.push(
-      {
-        id: 'version-export-parameters',
-        enabled: !busy && !codeBusy,
-        label: t('导出参数 JSON', 'Export parameters JSON'),
-        kind: 'click',
-        run: () =>
-          execute(() =>
-            download(
-              JSON.stringify({ records: shown.overlay.parameters }, null, 2),
-              'model-parameters.json',
-              'application/json',
-            ),
-          ),
-      },
-      {
-        id: 'version-research',
-        label: draft
-          ? t('保存、冻结并进入研究', 'Save, freeze and open research')
-          : t('打开研究与网络', 'Open research and networks'),
-        kind: draft ? 'commit' : 'click',
-        enabled: !busy && !codeBusy,
-        run: () => execute(openResearch),
-      },
-      {
-        id: 'version-history',
-        label: t('完整历史', 'Full history'),
-        kind: 'click',
-        run: () => navigate('history'),
-      },
-    );
-  }
-  if (editable && draft && !draft.code.workspace)
-    guideActions.push({
-      id: 'version-branch-code',
-      label: t('开始修改代码', 'Start editing code'),
-      kind: 'commit',
-      enabled: !busy && !codeBusy,
-      run: () => execute(branchCode),
-    });
   if (editable && draft) {
     guideFields.push(
       {
@@ -939,78 +776,15 @@ export default function VersionsPage() {
         ],
         set: setProcess,
       });
-    guideActions.push(
-      {
-        id: 'version-discard',
-        label: t('放弃本地修改', 'Discard local edits'),
-        kind: 'click',
-        enabled: !busy && !codeBusy && dirty,
-        run: () => execute(discardLocal),
-      },
-      {
-        id: 'version-save',
-        label: t('保存草稿', 'Save draft'),
-        kind: 'commit',
-        enabled: !busy && !codeBusy && dirty,
-        run: () => execute(save),
-      },
-      {
-        id: 'version-freeze',
-        label: t('冻结修订', 'Freeze revision'),
-        kind: 'commit',
-        enabled: !busy && !codeBusy && freezeCheck?.ready !== false,
-        run: () => execute(freeze),
-      },
-      {
-        id: 'version-parameter-add',
-        label: t('应用参数到草稿', 'Apply parameter to draft'),
-        kind: 'click',
-        enabled: !busy && !codeBusy && !!descriptor && !!value,
-        run: addParameter,
-      },
-      {
-        id: 'version-import-study',
-        label: t('从研究导入最优参数', 'Import the best parameters from a study'),
-        kind: 'commit',
-        enabled: !busy && !codeBusy,
-        run: () => importStudyParameters(),
-      },
-      {
-        id: 'version-import-parameters',
-        label: t('导入参数 JSON', 'Import parameters JSON'),
-        kind: 'click',
-        enabled: !busy && !codeBusy,
-        run: () => execute(importFile),
-      },
-      {
-        id: 'version-physics-apply',
-        label: t('应用物理设置', 'Apply physics setting'),
-        kind: 'click',
-        enabled: !busy && !codeBusy && !!modelField && !!physicsValue,
-        run: () => {
-          if (
-            draft.overlay.parameters.some((r) => r.raw_key.toLowerCase() === physics.toLowerCase())
-          )
-            throw new Error(
-              bilingual('请先恢复这个参数的默认值', 'Reset the parameter override first'),
-            );
-          edit({
-            ...draft,
-            overlay: {
-              ...draft.overlay,
-              physics: { ...draft.overlay.physics, [physics]: physicsValue },
-            },
-          });
-        },
-      },
-    );
   }
   usePageContract({
     title: t('模型版本', 'Model versions'),
     step: 'versions',
     status: error || (dirty ? t('未保存', 'Unsaved') : ''),
     fields: guideFields.map((f) => ({ ...f, disabled: !!f.disabled || busy || codeBusy })),
-    actions: guideActions,
+    // 按钮自己登记（第 737 轮）。原来这里另写一份动作清单，清单和界面是两份：出过"助手能按、
+    // 界面上没有"的幽灵按钮。现在助手只看到此刻真的显示着、不被对话框挡住的按钮。
+    actions: [],
   });
 
   const parentOf = (ref: VersionRef | null | undefined) => {
@@ -1102,9 +876,14 @@ export default function VersionsPage() {
     <div className="page-stack versions-page">
       {state.simulationReturn && (
         <div className="button-row">
-          <Button disabled={busy || codeBusy || dirty} onClick={returnToSimulation}>
+          <ActionButton
+            action="version-return-simulation"
+            label={t('返回模拟配置', 'Return to simulation setup')}
+            disabled={busy || codeBusy || dirty}
+            run={returnToSimulation}
+          >
             ← {t('返回模拟配置', 'Back to simulation setup')}
-          </Button>
+          </ActionButton>
           {dirty ? (
             <span className="muted">
               {t(
@@ -1150,13 +929,15 @@ export default function VersionsPage() {
                 )}
               </p>
             </div>
-            <Button
+            <ActionButton
+              action="version-new"
+              label={t('新建修改版', 'New modified version')}
               variant="primary"
               disabled={busy || codeBusy}
-              onClick={() => update({ versionsView: 'create' })}
+              run={() => update({ versionsView: 'create' })}
             >
               {`＋ ${t('新建修改版', 'New modified version')}`}
-            </Button>
+            </ActionButton>
           </div>
           {error && <Notice tone="error">{error}</Notice>}
           <VersionLibrary
@@ -1177,10 +958,18 @@ export default function VersionsPage() {
       ) : (
         <>
           <div className="versions-crumbs">
-            <button
-              type="button"
+            <ActionButton
+              bare
+              action="version-back"
+              label={
+                backToResearch
+                  ? t('研究首页', 'Research home')
+                  : state.versionsView === 'library'
+                    ? t('所有版本', 'All versions')
+                    : t('新建修改版', 'New modified version')
+              }
               disabled={busy || codeBusy}
-              onClick={() =>
+              run={() =>
                 run(async () => {
                   // run 正拿着执行锁，离开保护会把跳转拦下（预览里实测停在了汇总页）；这里只剩离开，放开再走。
                   lock.current = false;
@@ -1194,7 +983,7 @@ export default function VersionsPage() {
                 : state.versionsView === 'library'
                   ? t('所有版本', 'All versions')
                   : t('新建修改版', 'New modified version')}
-            </button>
+            </ActionButton>
             {lineage.length > 0 && (
               <span className="muted">
                 {lineage.join(' › ')} › <strong>{shown.name}</strong>
@@ -1244,9 +1033,12 @@ export default function VersionsPage() {
                   </strong>
                   <span className="button-row freeze-check-actions">
                     {freezeCheck.items.some((item) => item.blocking && fixes[item.code]) && (
-                      <Button
+                      <ActionButton
+                        action="version-fix-freeze"
+                        label={t('一键处理', 'Fix all')}
+                        kind="commit"
                         disabled={busy || codeBusy || dirty}
-                        onClick={() =>
+                        run={() =>
                           run(() =>
                             fixFreezeItems(
                               freezeCheck.items
@@ -1257,15 +1049,17 @@ export default function VersionsPage() {
                         }
                       >
                         {busy ? t('处理中…', 'Working…') : t('一键处理', 'Fix all')}
-                      </Button>
+                      </ActionButton>
                     )}
-                    <Button
+                    <ActionButton
+                      action="version-recheck"
+                      label={t('重新检查', 'Check again')}
                       variant="ghost"
                       disabled={busy || codeBusy}
-                      onClick={() => setCheckTick((value) => value + 1)}
+                      run={() => setCheckTick((value) => value + 1)}
                     >
                       {t('重新检查', 'Check again')}
-                    </Button>
+                    </ActionButton>
                   </span>
                 </div>
                 {fixing && busy && (
@@ -1292,11 +1086,23 @@ export default function VersionsPage() {
                       <span aria-hidden="true">{item.blocking ? '✕' : item.ok ? '✓' : 'i'}</span>
                       <span className="freeze-check-message">{item.message}</span>
                       {item.blocking && fixes[item.code] && (
-                        <button
-                          type="button"
+                        <ActionButton
+                          bare
+                          action={`version-fix-${item.code}`}
+                          label={
+                            item.code === 'drift'
+                              ? t('现在检查', 'Check now')
+                              : item.code === 'kernel_built'
+                                ? t(
+                                    `编译内核（${configurationKernel?.preset ?? 'default'}）`,
+                                    `Build kernel (${configurationKernel?.preset ?? 'default'})`,
+                                  )
+                                : t('编译引擎', 'Build engine')
+                          }
+                          kind="commit"
                           className="library-action"
                           disabled={busy || codeBusy || dirty}
-                          onClick={() => run(() => fixFreezeItems([item.code]))}
+                          run={() => run(() => fixFreezeItems([item.code]))}
                         >
                           {item.code === 'drift'
                             ? t('现在检查', 'Check now')
@@ -1306,7 +1112,7 @@ export default function VersionsPage() {
                                   `Build kernel (${configurationKernel?.preset ?? 'default'})`,
                                 )
                               : t('编译引擎', 'Build engine')}
-                        </button>
+                        </ActionButton>
                       )}
                     </li>
                   ))}
@@ -1344,16 +1150,18 @@ export default function VersionsPage() {
             </div>
             <div className="versions-tabs" role="tablist">
               {tabs.map(([id, label]) => (
-                <button
+                <ActionButton
                   key={id}
-                  type="button"
+                  bare
+                  action={`version-tab-${id}`}
+                  label={label}
                   role="tab"
                   aria-selected={tab === id}
                   className={`versions-tab${tab === id ? ' is-active' : ''}`}
-                  onClick={() => setTab(id)}
+                  run={() => setTab(id)}
                 >
                   {label}
-                </button>
+                </ActionButton>
               ))}
             </div>
           </Card>
@@ -1387,22 +1195,38 @@ export default function VersionsPage() {
               )}
             >
               <div className="button-row versions-card-actions">
-                <Button variant={editable ? 'primary' : undefined} onClick={() => openParameters()}>
+                <ActionButton
+                  action="version-parameters"
+                  label={
+                    editable
+                      ? t('修改参数…', 'Edit parameters…')
+                      : t('查看全部参数…', 'All parameters…')
+                  }
+                  variant={editable ? 'primary' : undefined}
+                  run={() => openParameters()}
+                >
                   {editable
                     ? t('修改参数…', 'Edit parameters…')
                     : t('查看全部参数…', 'All parameters…')}
-                </Button>
+                </ActionButton>
                 {/* 研究结果从研究页"写入新版本 / 写回草稿"进来，别处做的研究在"研究"页签导入；
                     这里原来也有一个"从研究导入最优参数…"，是研究并进版本之前留下的重复入口（2026-10-21 用户指出）。 */}
                 {editable && (
-                  <Button disabled={busy || codeBusy} onClick={() => run(importFile)}>
+                  <ActionButton
+                    action="version-import-parameters"
+                    label={t('导入参数 JSON', 'Import parameters JSON')}
+                    disabled={busy || codeBusy}
+                    run={() => run(importFile)}
+                  >
                     {t('导入参数 JSON', 'Import parameters JSON')}
-                  </Button>
+                  </ActionButton>
                 )}
-                <Button
+                <ActionButton
+                  action="version-export-parameters"
+                  label={t('导出参数 JSON', 'Export parameters JSON')}
                   variant="ghost"
                   disabled={busy || codeBusy}
-                  onClick={() =>
+                  run={() =>
                     run(() =>
                       download(
                         JSON.stringify({ records: shown.overlay.parameters }, null, 2),
@@ -1413,7 +1237,7 @@ export default function VersionsPage() {
                   }
                 >
                   {t('导出参数 JSON', 'Export parameters JSON')}
-                </Button>
+                </ActionButton>
               </div>
               {studyNotice && <Notice tone="success">{studyNotice}</Notice>}
               {sortedParameters.length === 0 ? (
@@ -1445,13 +1269,15 @@ export default function VersionsPage() {
                         return (many ? [r] : group).map((row) => (
                           <tr key={many ? key : parameterKey(row)}>
                             <td>
-                              <button
-                                type="button"
+                              <ActionButton
+                                bare
+                                action={`version-parameter-view-${parameterKey(row)}`}
+                                label={typeName[recordType(row)]}
                                 className="library-action"
-                                onClick={() => openParameters(recordType(row), row.parameter_id)}
+                                run={() => openParameters(recordType(row), row.parameter_id)}
                               >
                                 {typeName[recordType(row)]}
-                              </button>
+                              </ActionButton>
                             </td>
                             <td>
                               {/* 和参数表一样名字在前、键名在后；名称表里没有的只显示键名。 */}
@@ -1487,12 +1313,14 @@ export default function VersionsPage() {
                             </td>
                             <td className="versions-table-action">
                               {many && (
-                                <Button
+                                <ActionButton
+                                  action={`version-parameter-matrix-${parameterKey(row)}`}
+                                  label={t('在矩阵里看', 'Open matrix')}
                                   variant="ghost"
-                                  onClick={() => openParameters(recordType(row), row.parameter_id)}
+                                  run={() => openParameters(recordType(row), row.parameter_id)}
                                 >
                                   {t('在矩阵里看', 'Open matrix')}
-                                </Button>
+                                </ActionButton>
                               )}
                               {editable && (
                                 <Button
@@ -1639,13 +1467,16 @@ export default function VersionsPage() {
                       )}
                     </p>
                     <div className="button-row">
-                      <Button
+                      <ActionButton
+                        action="version-branch-code"
+                        label={t('开始修改代码', 'Start editing code')}
+                        kind="commit"
                         variant="primary"
                         disabled={busy || codeBusy}
-                        onClick={() => run(branchCode)}
+                        run={() => run(branchCode)}
                       >
                         {t('开始修改代码', 'Start editing code')}
-                      </Button>
+                      </ActionButton>
                     </div>
                     <h3 className="versions-subhead">
                       {t('父版本的代码（只读）', 'The parent’s code (read-only)')}
@@ -1659,6 +1490,7 @@ export default function VersionsPage() {
                       source={draft.parent}
                     />
                     <Advanced
+                      action="version-reuse-workspace-advanced"
                       title={t(
                         '改用一个已有的代码工作区',
                         'Use an existing code workspace instead',
@@ -1667,12 +1499,15 @@ export default function VersionsPage() {
                       <Field label={t('代码工作区名称', 'Code workspace name')}>
                         <Input value={workspace} onChange={(e) => setWorkspace(e.target.value)} />
                       </Field>
-                      <Button
+                      <ActionButton
+                        action="version-adopt-workspace"
+                        label={t('使用这个工作区', 'Use this workspace')}
+                        kind="commit"
                         disabled={busy || codeBusy || !workspace.trim()}
-                        onClick={() => run(() => adoptWorkspace(workspace))}
+                        run={() => run(() => adoptWorkspace(workspace))}
                       >
                         {t('使用这个工作区', 'Use this workspace')}
-                      </Button>
+                      </ActionButton>
                     </Advanced>
                   </>
                 ) : (
@@ -1691,13 +1526,16 @@ export default function VersionsPage() {
                             )}
                     </p>
                     <div className="button-row">
-                      <Button
+                      <ActionButton
+                        action="version-method-source"
+                        label={t('修改代码…', 'Change the code…')}
+                        kind="commit"
                         variant="primary"
                         disabled={busy || codeBusy}
-                        onClick={() => run(() => startMethod('source', viewing))}
+                        run={() => run(() => startMethod('source', viewing))}
                       >
                         {t('修改代码…', 'Change the code…')}
-                      </Button>
+                      </ActionButton>
                       <span className="muted">
                         {t(
                           '基于这个版本新建一个草稿，并直接复制它的代码来改。',
@@ -1718,6 +1556,7 @@ export default function VersionsPage() {
                   </>
                 )}
                 <Advanced
+                  action="version-new-workspace-advanced"
                   title={t(
                     '从其他代码仓库建一个代码工作区',
                     'Create a code workspace from another repository',
@@ -1764,11 +1603,15 @@ export default function VersionsPage() {
                 {hubMethods
                   .filter((m) => m.id !== 'manual' && m.id !== 'source')
                   .map((m, i) => (
-                    <Button
+                    <ActionButton
                       key={m.id}
+                      action={`version-method-${m.id}`}
+                      label={state.language === 'en' ? m.en : m.zh}
+                      // 草稿上按这个按钮会先保存并冻结一个修订给研究用，是写盘动作；冻结版本上只是切过去。
+                      kind={draft ? 'commit' : 'click'}
                       variant={i === 0 ? 'primary' : undefined}
                       disabled={busy || codeBusy}
-                      onClick={() => {
+                      run={() => {
                         update({
                           researchSeed: picks.length ? { parameters: picks } : null,
                           researchMethod: m.id,
@@ -1789,7 +1632,7 @@ export default function VersionsPage() {
                       }}
                     >
                       {state.language === 'en' ? m.en : m.zh}
-                    </Button>
+                    </ActionButton>
                   ))}
               </div>
             </Card>
@@ -1803,12 +1646,14 @@ export default function VersionsPage() {
               >
                 <div className="button-row">
                   {editable && (
-                    <Button
+                    <ActionButton
+                      action="version-import-study"
+                      label={t('从研究导入最优参数…', 'Import the best parameters from a study…')}
                       disabled={busy || codeBusy}
-                      onClick={() => void previewStudy().catch(() => {})}
+                      run={() => void previewStudy().catch(() => {})}
                     >
                       {t('从研究导入最优参数…', 'Import the best parameters from a study…')}
-                    </Button>
+                    </ActionButton>
                   )}
                 </div>
                 {draft && (
@@ -1866,9 +1711,14 @@ export default function VersionsPage() {
                   </table>
                 </div>
               )}
-              <Button variant="ghost" onClick={() => navigate('history')}>
+              <ActionButton
+                action="version-history"
+                label={t('完整历史', 'Full history')}
+                variant="ghost"
+                run={() => navigate('history')}
+              >
                 {t('完整历史', 'Full history')}
-              </Button>
+              </ActionButton>
             </Card>
           </div>
           {/* 保存、放弃、冻结是改完才做的事：放在底部，贴着窗口底边，长页面滚到哪里都点得到
@@ -1907,9 +1757,12 @@ export default function VersionsPage() {
                   >
                     {t('放弃修改', 'Discard edits')}
                   </Button>
-                  <Button
+                  <ActionButton
+                    action="version-save"
+                    label={t('保存草稿', 'Save draft')}
+                    kind="commit"
                     disabled={busy || codeBusy || !dirty}
-                    onClick={() =>
+                    run={() =>
                       run(async () => {
                         const saved = await save();
                         // 用户问"保存到了哪里、从哪里找到草稿"（2026-10-21）：说清楚在应用里从哪儿再打开它。
@@ -1924,11 +1777,14 @@ export default function VersionsPage() {
                     }
                   >
                     {t('保存草稿', 'Save draft')}
-                  </Button>
-                  <Button
+                  </ActionButton>
+                  <ActionButton
+                    action="version-freeze"
+                    label={t('冻结为新版本', 'Freeze as a version')}
+                    kind="commit"
                     disabled={busy || codeBusy || freezeCheck?.ready === false}
                     variant="primary"
-                    onClick={() =>
+                    run={() =>
                       run(async () => {
                         const frozen = await freeze();
                         notify(
@@ -1942,7 +1798,7 @@ export default function VersionsPage() {
                     }
                   >
                     {t('冻结为新版本', 'Freeze as a version')}
-                  </Button>
+                  </ActionButton>
                 </div>
               </>
             ) : (
@@ -1961,17 +1817,21 @@ export default function VersionsPage() {
                 </span>
                 <div className="button-row">
                   {!inUse && viewing && (
-                    <Button
+                    <ActionButton
+                      action={`version-use-${viewing.version.id}-${viewing.version.revision}`}
+                      label={t('设为模拟使用', 'Use for simulations')}
                       disabled={busy || codeBusy}
-                      onClick={() => chooseForSimulation(viewing)}
+                      run={() => chooseForSimulation(viewing)}
                     >
                       {t('设为模拟使用', 'Use for simulations')}
-                    </Button>
+                    </ActionButton>
                   )}
-                  <Button
+                  <ActionButton
+                    action="version-derive"
+                    label={t('基于它新建修改版', 'Derive from it')}
                     variant="primary"
                     disabled={busy || codeBusy}
-                    onClick={() =>
+                    run={() =>
                       run(async () => {
                         setParentKey(viewing ? keyOf(viewing.version) : '');
                         backToLibrary();
@@ -1980,7 +1840,7 @@ export default function VersionsPage() {
                     }
                   >
                     {t('基于它新建修改版', 'Derive from it')}
-                  </Button>
+                  </ActionButton>
                 </div>
               </>
             )}

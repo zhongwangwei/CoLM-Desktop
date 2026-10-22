@@ -82,3 +82,61 @@ test('every draft can be deleted from the library', async () => {
   assert.ok(rows.every((row) => row.includes('Official CoLM · r101')));
   assert.ok(rows[1]!.includes('自己的代码'), 'a draft with its own code says so');
 });
+
+test('version and draft rows register their buttons while deletion stays manual', async () => {
+  const { createElement } = await import('react');
+  const { renderToStaticMarkup } = await import('react-dom/server');
+  const { default: RevisionLibrary } = await import('./VersionLibrary');
+  const official = {
+    version: { id: 'official', revision: 101 },
+    name: 'Official CoLM',
+    parent: null,
+    code: { kind: 'official', workspace: null, commit: null },
+    overlay: { parameters: [], physics: {}, process_files: [], hybrid: null },
+    created_unix: 0,
+    note: '',
+  } as unknown as import('../../lib/types').FrozenRevision;
+  const modified = {
+    ...official,
+    version: { id: 'soil', revision: 2 },
+    name: 'Soil change',
+    parent: official.version,
+    code: { kind: 'workspace', workspace: 'ver-1', commit: 'abc' },
+  } as unknown as import('../../lib/types').FrozenRevision;
+  const draft = {
+    id: 'draft-1',
+    name: 'Draft',
+    parent: modified.version,
+    code: { kind: 'workspace', workspace: 'ver-2', commit: 'def' },
+    overlay: { parameters: [], physics: {}, process_files: [], hybrid: null },
+    created_unix: 0,
+  } as unknown as import('../../lib/types').ModelDraft;
+  const html = renderToStaticMarkup(
+    createElement(RevisionLibrary, {
+      versions: [official, modified],
+      drafts: [draft],
+      inUse: official,
+      disabled: false,
+      en: true,
+      onOpen: () => {},
+      onUse: () => {},
+      onOpenDraft: () => {},
+      onDeleted: async () => {},
+      onDraftDeleted: async () => {},
+    }),
+  );
+  // 点版本名、行里的打开/设为模拟使用、草稿名和继续编辑，都是助手能按的动作。
+  for (const action of [
+    'version-select-official-101',
+    'version-open-official-101',
+    'version-select-soil-2',
+    'version-open-soil-2',
+    'version-use-soil-2',
+    'version-draft-draft-1',
+    'version-resume-draft-1',
+  ])
+    assert.ok(html.includes(`data-action="${action}"`), action);
+  // 删除版本、删除草稿、"清理没用的版本"属于 D 级：界面上有按钮，但没有登记。
+  assert.ok(html.includes('>Delete<'), '草稿的删除按钮在界面上');
+  assert.doesNotMatch(html, /data-action="[^"]*(delete|remove|cleanup)/i);
+});

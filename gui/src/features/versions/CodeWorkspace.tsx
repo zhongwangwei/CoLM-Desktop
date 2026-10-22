@@ -2,8 +2,9 @@ import { useEffect, useState, useRef } from 'react';
 import { invokeJson, invoke } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { useApp } from '../../lib/app-state';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import CodeFiles from './CodeFiles';
 type Status = {
   workspace?: { base_commit?: string };
@@ -99,7 +100,6 @@ export default function CodeWorkspace({
       set: setMessage,
     },
   ];
-  const guideActions: UiAction[] = [];
   if (name) {
     guideFields.push(
       {
@@ -134,45 +134,6 @@ export default function CodeWorkspace({
         set: setOut,
       },
     );
-    guideActions.push(
-      {
-        id: 'workspace-patch',
-        label: t('导入补丁', 'Import patch'),
-        kind: 'commit',
-        enabled: !busy && !disabled && !!message,
-        run: () => execute(patch),
-      },
-      {
-        id: 'workspace-check',
-        label: t('执行检查', 'Run check'),
-        kind: 'commit',
-        enabled: !busy && !disabled,
-        run: () =>
-          execute(() =>
-            invokeJson('workspace_check', {
-              name,
-              action,
-              preset,
-              package: pkg,
-              case: state.selectedCase?.dir ?? null,
-            }),
-          ),
-      },
-      {
-        id: 'workspace-export',
-        label: t('导出改动', 'Export changes'),
-        kind: 'commit',
-        enabled: !busy && !disabled && !!out,
-        run: () => execute(() => invokeJson('workspace_export', { name, out })),
-      },
-      ...(status?.changed_files ?? []).map((file) => ({
-        id: `workspace-diff-${file.path}`,
-        label: `${t('差异', 'Diff')} ${file.path}`,
-        kind: 'click' as const,
-        enabled: !busy && !disabled,
-        run: () => execute(() => invokeJson('workspace_diff', { name, path: file.path })),
-      })),
-    );
   } else {
     guideFields.push(
       {
@@ -190,27 +151,15 @@ export default function CodeWorkspace({
         set: setSource,
       },
     );
-    guideActions.push({
-      id: 'workspace-create',
-      label: t('创建工作区', 'Create workspace'),
-      kind: 'commit',
-      enabled: !busy && !disabled && !!newName,
-      run: () =>
-        execute(() =>
-          invokeJson('workspace_create', {
-            name: newName,
-            source: source || null,
-            note: message || null,
-          }),
-        ),
-    });
   }
   usePageContract({
     title: t('代码工作区', 'Code workspace'),
     step: 'versions',
     status: error,
     fields: guideFields.map((f) => ({ ...f, disabled: busy || disabled })),
-    actions: guideActions,
+    // 按钮自己登记（第 737 轮）。导入补丁、执行检查是 C 级写操作，按 commit 登记；导出补丁、
+    // 恢复文件和删除工作区属于 D 级，只在界面上做。
+    actions: [],
   });
 
   return (
@@ -240,9 +189,12 @@ export default function CodeWorkspace({
             >
               <Input value={source} onChange={(e) => setSource(e.target.value)} />
             </Field>
-            <Button
-              disabled={busy || !newName}
-              onClick={() =>
+            <ActionButton
+              action="workspace-create"
+              label={t('创建工作区', 'Create workspace')}
+              kind="commit"
+              disabled={disabled || busy || !newName}
+              run={() =>
                 run(() =>
                   invokeJson('workspace_create', {
                     name: newName,
@@ -253,7 +205,7 @@ export default function CodeWorkspace({
               }
             >
               {t('创建工作区', 'Create workspace')}
-            </Button>
+            </ActionButton>
           </>
         ) : (
           <>
@@ -267,20 +219,28 @@ export default function CodeWorkspace({
                 await onChanged();
               }}
             />
-            <Button disabled={busy || !message} onClick={() => run(patch)}>
+            <ActionButton
+              action="workspace-patch"
+              label={t('导入补丁', 'Import patch')}
+              kind="commit"
+              disabled={disabled || busy || !message}
+              run={() => run(patch)}
+            >
               {t('导入补丁', 'Import patch')}
-            </Button>
+            </ActionButton>
             {status?.changed_files?.map((file) => (
               <div key={file.path}>
                 <code>
                   {file.path} +{file.added ?? 0} −{file.removed ?? 0}
                 </code>
-                <Button
-                  disabled={busy}
-                  onClick={() => run(() => invokeJson('workspace_diff', { name, path: file.path }))}
+                <ActionButton
+                  action={`workspace-diff-${file.path}`}
+                  label={`${t('差异', 'Diff')} ${file.path}`}
+                  disabled={disabled || busy}
+                  run={() => run(() => invokeJson('workspace_diff', { name, path: file.path }))}
                 >
                   {t('差异', 'Diff')}
-                </Button>
+                </ActionButton>
                 <Button
                   disabled={busy || !message}
                   variant="danger"
@@ -318,9 +278,12 @@ export default function CodeWorkspace({
             <Field label={t('测试包', 'Test package')}>
               <Input value={pkg} onChange={(e) => setPkg(e.target.value)} />
             </Field>
-            <Button
-              disabled={busy}
-              onClick={() =>
+            <ActionButton
+              action="workspace-check"
+              label={t('执行检查', 'Run check')}
+              kind="commit"
+              disabled={disabled || busy}
+              run={() =>
                 run(() =>
                   invokeJson('workspace_check', {
                     name,
@@ -333,7 +296,7 @@ export default function CodeWorkspace({
               }
             >
               {t('执行检查', 'Run check')}
-            </Button>
+            </ActionButton>
             <Field label={t('导出补丁路径', 'Export patch path')}>
               <Input value={out} onChange={(e) => setOut(e.target.value)} />
             </Field>

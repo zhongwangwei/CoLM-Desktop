@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
+import { useRenderedAction } from '../../lib/guide';
 import type { FrozenRevision, ModelDraft, Overlay, VersionRef } from '../../lib/types';
 import { Card, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { versionDepth } from './model';
 import { appLocale } from '../history/history';
 
@@ -224,6 +226,35 @@ export default function VersionLibrary({
     }
   }
   const lock = disabled || busy;
+  // 版本行、草稿行上真正显示着的按钮由它们自己登记（第 737 轮）。删除版本/草稿、"清理没用的版本"
+  // 属于 D 级，只在界面上做，不登记。
+  const act = (action: string, text: string, run: () => void) => (
+    <ActionButton
+      bare
+      action={action}
+      label={text}
+      className="library-action"
+      disabled={lock}
+      run={run}
+    >
+      {text}
+    </ActionButton>
+  );
+  // "更早的官方版本"是原生 details/summary：展开/收起也登记，否则助手看不到旧修订。
+  const olderDetails = useRef<HTMLDetailsElement>(null);
+  const olderSummary = useRef<HTMLElement>(null);
+  useRenderedAction(
+    {
+      id: 'version-older-official',
+      label: t('更早的官方版本', 'Earlier official versions'),
+      kind: 'click',
+      run: () => {
+        const details = olderDetails.current;
+        if (details) details.open = !details.open;
+      },
+    },
+    olderSummary,
+  );
   const action = (text: string, run: () => void, danger = false) => (
     <button
       type="button"
@@ -246,9 +277,15 @@ export default function VersionLibrary({
                 └
               </span>
             )}
-            <button type="button" disabled={lock} onClick={() => onOpen(v)}>
+            <ActionButton
+              bare
+              action={`version-select-${v.version.id}-${v.version.revision}`}
+              label={`${v.name} r${v.version.revision}`}
+              disabled={lock}
+              run={() => onOpen(v)}
+            >
               {v.name}
-            </button>
+            </ActionButton>
             <span className="library-rev">r{v.version.revision}</span>
             {used && (
               <span className="badge versions-badge is-used">
@@ -267,8 +304,15 @@ export default function VersionLibrary({
         <td className="muted">{used ? '' : usageLabel(use, chosen, en)}</td>
         <td className="muted library-date">{date(v.created_unix)}</td>
         <td className="library-actions">
-          {action(t('打开', 'Open'), () => onOpen(v))}
-          {!used && action(t('设为模拟使用', 'Use for simulations'), () => onUse(v))}
+          {act(`version-open-${v.version.id}-${v.version.revision}`, t('打开', 'Open'), () =>
+            onOpen(v),
+          )}
+          {!used &&
+            act(
+              `version-use-${v.version.id}-${v.version.revision}`,
+              t('设为模拟使用', 'Use for simulations'),
+              () => onUse(v),
+            )}
           {removable(use, chosen) && action(t('删除', 'Delete'), () => void remove([v]), true)}
         </td>
       </tr>
@@ -339,9 +383,15 @@ export default function VersionLibrary({
                   <tr key={d.id}>
                     <td>
                       <div className="library-name">
-                        <button type="button" disabled={lock} onClick={() => onOpenDraft(d.id)}>
+                        <ActionButton
+                          bare
+                          action={`version-draft-${d.id}`}
+                          label={d.name}
+                          disabled={lock}
+                          run={() => onOpenDraft(d.id)}
+                        >
                           {d.name}
-                        </button>
+                        </ActionButton>
                       </div>
                       {d.note && <p className="library-note">{d.note}</p>}
                     </td>
@@ -349,7 +399,9 @@ export default function VersionLibrary({
                     <td>{changeSummary(d.overlay, !!d.code.workspace, en)}</td>
                     <td className="muted library-date">{date(d.created_unix)}</td>
                     <td className="library-actions">
-                      {action(t('继续编辑', 'Edit'), () => onOpenDraft(d.id))}
+                      {act(`version-resume-${d.id}`, t('继续编辑', 'Edit'), () =>
+                        onOpenDraft(d.id),
+                      )}
                       {action(t('删除', 'Delete'), () => void removeDraft(d), true)}
                     </td>
                   </tr>
@@ -374,10 +426,11 @@ export default function VersionLibrary({
         </div>
         {older.length > 0 && (
           <details
+            ref={olderDetails}
             className="version-older"
             open={older.some((v) => same(v.version, chosen)) || undefined}
           >
-            <summary>
+            <summary ref={olderSummary}>
               {t(
                 `更早的官方版本（${older.length}）`,
                 `Earlier official versions (${older.length})`,

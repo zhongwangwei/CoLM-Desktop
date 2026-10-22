@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { Overlay, ParameterOverride } from '../../lib/types';
-import { Button, Dialog, Notice } from '../../components/ui';
+import { Dialog, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { IGBP, PFT, USGS } from './scope-labels';
 import { fieldLabel } from '../../lib/param-presentation';
 
@@ -130,16 +131,24 @@ export default function StudyImportDialog({
       </table>
       {error && <Notice tone="error">{error}</Notice>}
       <div className="button-row">
-        <Button disabled={busy} onClick={onClose}>
+        <ActionButton
+          action="version-import-study-cancel"
+          label={t('取消', 'Cancel')}
+          disabled={busy}
+          run={onClose}
+        >
           {t('取消', 'Cancel')}
-        </Button>
-        <Button
+        </ActionButton>
+        <ActionButton
+          action="version-import-study-apply"
+          label={t('写进草稿', 'Write into the draft')}
+          kind="commit"
           variant="primary"
           disabled={busy || chosen.length === 0}
-          onClick={() => onImport(chosen.map(chosenKey))}
+          run={() => onImport(chosen.map(chosenKey))}
         >
           {t(`写进草稿（${chosen.length} 个）`, `Write into the draft (${chosen.length})`)}
-        </Button>
+        </ActionButton>
       </div>
     </Dialog>
   );

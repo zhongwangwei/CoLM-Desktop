@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { invoke, invokeJson } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { Button, Field, Input, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 
 type Entry = { name: string; path: string; kind: 'file' | 'dir' | 'link'; size: number };
 type FileText = { path: string; size: number; text: string | null };
@@ -226,15 +227,21 @@ export default function CodeFiles({
               disabled={busy}
               onChange={(e) => setNewPath(e.target.value)}
             />
-            <Button
+            <ActionButton
+              action="code-file-create"
+              label={t('新建文件', 'New file')}
+              kind="commit"
               disabled={busy || disabled || needMessage || !newPath.trim()}
-              onClick={createFile}
+              run={createFile}
             >
               {t('新建文件', 'New file')}
-            </Button>
-            <Button
+            </ActionButton>
+            <ActionButton
+              action="code-file-add"
+              label={t('从本机加入文件…', 'Add a file from this computer…')}
+              kind="commit"
               disabled={busy || disabled || needMessage}
-              onClick={() =>
+              run={() =>
                 void (async () => {
                   const from = await invoke<string | null>('pick_file', { key: 'workspace-put' });
                   if (!from) return;
@@ -254,7 +261,7 @@ export default function CodeFiles({
               }
             >
               {t('从本机加入文件…', 'Add a file from this computer…')}
-            </Button>
+            </ActionButton>
             {dir && (
               <>
                 <Button
@@ -310,25 +317,31 @@ export default function CodeFiles({
               )}
               <div className="code-files-actions" hidden={readOnly}>
                 {open.text != null && (
-                  <Button
+                  <ActionButton
+                    action="code-file-save"
+                    label={t('保存', 'Save')}
+                    kind="commit"
                     variant="primary"
                     disabled={busy || disabled || needMessage || !edited}
-                    onClick={save}
+                    run={save}
                   >
                     {t('保存', 'Save')}
-                  </Button>
+                  </ActionButton>
                 )}
                 {edited && (
                   <Button disabled={busy} onClick={() => setDraft(open.text ?? '')}>
                     {t('放弃修改', 'Discard edits')}
                   </Button>
                 )}
-                <Button
+                <ActionButton
+                  action="code-file-replace"
+                  label={t('用本机文件替换…', 'Replace from this computer…')}
+                  kind="commit"
                   disabled={busy || disabled || needMessage}
-                  onClick={() => replaceWithFile(open.path)}
+                  run={() => replaceWithFile(open.path)}
                 >
                   {t('用本机文件替换…', 'Replace from this computer…')}
-                </Button>
+                </ActionButton>
                 <Button
                   variant="danger"
                   disabled={busy || disabled || needMessage}

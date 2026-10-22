@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
 import type { Overlay } from '../../lib/types';
 import { Dialog, Input, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import {
   makeRecord,
   parameterType,
@@ -357,6 +358,8 @@ export default function ParameterDialog({
     <Dialog
       open={open}
       onOpenChange={onOpenChange}
+      // 对话框自带的"关闭"也是助手能按的动作（第 737 轮）。
+      closeAction="version-parameters-close"
       className="param-dialog"
       title={editable ? t('修改参数', 'Edit parameters') : t('全部参数', 'All parameters')}
       description={
@@ -370,17 +373,19 @@ export default function ParameterDialog({
     >
       <div className="param-tabs" role="tablist">
         {tabs.map(([id, text]) => (
-          <button
+          <ActionButton
             key={id}
-            type="button"
+            bare
+            action={`version-parameters-tab-${id}`}
+            label={text}
             role="tab"
             aria-selected={type === id}
             className={`versions-tab${type === id ? ' is-active' : ''}`}
-            onClick={() => setType(id)}
+            run={() => setType(id)}
           >
             {text}
             {changedIn(id) > 0 && <span className="param-count">{changedIn(id)}</span>}
-          </button>
+          </ActionButton>
         ))}
       </div>
       <div className="param-toolbar">
@@ -410,16 +415,18 @@ export default function ParameterDialog({
                 ],
               ] as const
             ).map(([id, text]) => (
-              <button
+              <ActionButton
                 key={id}
-                type="button"
+                bare
+                action={`version-parameters-mode-${id}`}
+                label={text}
                 role="radio"
                 aria-checked={mode === id}
                 className={`versions-tab${mode === id ? ' is-active' : ''}`}
-                onClick={() => setMode(id)}
+                run={() => setMode(id)}
               >
                 {text}
-              </button>
+              </ActionButton>
             ))}
           </div>
         )}
@@ -611,25 +618,39 @@ export default function ParameterDialog({
                     ? sharedChanged
                     : records.filter((r) => r.scope_instance.process_file === file).length;
                 return (
-                  <button
+                  <ActionButton
                     key={file}
-                    type="button"
+                    bare
+                    action={`version-parameters-file-${file}`}
+                    label={
+                      file === SHARED
+                        ? t('所有示踪物共用', 'Shared by all tracers')
+                        : (tracerFiles[file]?.[en ? 1 : 0] ?? file)
+                    }
                     role="radio"
                     aria-checked={chosenFile === file}
                     className={`versions-tab${chosenFile === file ? ' is-active' : ''}`}
-                    onClick={() => setProcessFile(file)}
+                    run={() => setProcessFile(file)}
                   >
                     {file === SHARED
                       ? t('所有示踪物共用', 'Shared by all tracers')
                       : (tracerFiles[file]?.[en ? 1 : 0] ?? file)}
                     {count > 0 && <span className="param-count">{count}</span>}
-                  </button>
+                  </ActionButton>
                 );
               })}
               {editable && onImportProcessFile && (
-                <button type="button" className="library-action" onClick={onImportProcessFile}>
+                // 把专家的参数文件整份带进版本：写盘动作，按 commit 登记。
+                <ActionButton
+                  bare
+                  action="version-import-process"
+                  label={t('导入自己的参数文件…', 'Import your own parameter file…')}
+                  kind="commit"
+                  className="library-action"
+                  run={onImportProcessFile}
+                >
                   {t('导入自己的参数文件…', 'Import your own parameter file…')}
-                </button>
+                </ActionButton>
               )}
             </div>
             {chosenFile === SHARED ? (

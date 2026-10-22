@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import type { Descriptor } from './model';
 import { applyResearchSeed, type ParameterContext } from '../studies/study';
 const store = new Map<string, string>();
@@ -10,7 +12,7 @@ Object.defineProperty(globalThis, 'localStorage', {
     setItem: (k: string, v: string) => store.set(k, v),
   },
 });
-const { defaultRange, loadPicks } = await import('./StudyPicks');
+const { default: StudyPicks, defaultRange, loadPicks } = await import('./StudyPicks');
 
 const descriptor = (min: string | null, max: string | null) =>
   ({ validation: { min, max, allowed_values: [], finite: true } }) as unknown as Descriptor;
@@ -57,4 +59,52 @@ test('picks from the version page tick the matching research rows only', () => {
   ]);
   assert.deepEqual(Object.keys(picked).sort(), ['1', '2', '3'], 'PFT 7 is not in these cases');
   assert.deepEqual(picked['1'], { enabled: true, min: '1', max: '2', scale: 'linear' });
+});
+
+test('the add button registers itself while removing a pick stays manual', () => {
+  const catalog = [
+    {
+      id: 'case:DEF_X',
+      raw_key: 'DEF_X',
+      label_zh: '参数 X',
+      label_en: 'Parameter X',
+      scope: 'case-scalar',
+      storage: 'case-nml',
+      section: '',
+      value_kind: 'real',
+      unit: null,
+      calibration_eligible: true,
+      default: '1',
+      recommended_scale: 'linear',
+      validation: { min: '0', max: '1', allowed_values: [], finite: true },
+      visibility: 'editable-scientific',
+      activation: [],
+    },
+  ] as unknown as Descriptor[];
+  const render = (owner: string) =>
+    renderToStaticMarkup(
+      createElement(StudyPicks, { owner, catalog, en: true, disabled: false, onChange: () => {} }),
+    );
+  // 还没选参数时"加入"是灰的，但助手能看到它（不可用），不会误以为没有这个按钮。
+  const empty = render('owner-empty');
+  assert.ok(empty.includes('data-action="version-study-pick-add"'));
+  assert.match(empty, /data-action="version-study-pick-add"[^>]*disabled/);
+  // 已经选了参数时"移除"在界面上，但移除属于破坏性动作，不登记。
+  store.set(
+    'colm.versions.studyPicks.owner-picked',
+    JSON.stringify([
+      {
+        parameter_id: 'case:DEF_X',
+        raw_key: 'DEF_X',
+        scheme: null,
+        index: null,
+        min: '0.5',
+        max: '1.5',
+        scale: 'linear',
+      },
+    ]),
+  );
+  const picked = render('owner-picked');
+  assert.ok(picked.includes('>Remove<'));
+  assert.doesNotMatch(picked, /data-action="[^"]*remove/i);
 });

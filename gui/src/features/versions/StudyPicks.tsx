@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { invokeJson } from '../../lib/ipc';
 import type { StudyPick } from '../../lib/types';
 import { Button, Input, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { parameterType, type Descriptor } from './model';
 import { literalNumber } from './ParameterDialog';
 import { IGBP, PFT, USGS } from './scope-labels';
@@ -161,12 +162,14 @@ export default function StudyPicks({
             ))}
           </Select>
         )}
-        <Button
+        <ActionButton
+          action="version-study-pick-add"
+          label={t('加入', 'Add')}
           disabled={disabled || !descriptor}
-          onClick={() => void add().catch((e) => setProblem(String(e)))}
+          run={() => void add().catch((e) => setProblem(String(e)))}
         >
           {t('加入', 'Add')}
-        </Button>
+        </ActionButton>
       </div>
       {problem && <p className="param-problem">{problem}</p>}
       {picks.length === 0 ? (

@@ -1,5 +1,6 @@
 import type { FrozenRevision, ModelDraft, VersionRef } from '../../lib/types';
-import { Button, Card, Field, Select } from '../../components/ui';
+import { Card, Field, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { hubMethods, type HubMethod } from './hub-methods';
 import { changeSummary } from './VersionLibrary';
 // 和原研究首页同一套方式卡片的样式（研究页是按需加载的，这里不能指望它已经载入）。
@@ -45,9 +46,14 @@ export default function VersionHub({
             )}
           </p>
         </div>
-        <Button variant="ghost" onClick={onLibrary}>
+        <ActionButton
+          action="version-library"
+          label={t('所有版本', 'All versions')}
+          variant="ghost"
+          run={onLibrary}
+        >
           {t('所有版本 →', 'All versions →')}
-        </Button>
+        </ActionButton>
       </div>
       <div className="version-hub-base">
         <Field label={t('基于哪个版本', 'Based on')}>
@@ -75,12 +81,16 @@ export default function VersionHub({
       </div>
       <div className="research-methods version-hub-methods" role="group">
         {hubMethods.map((item) => (
-          <Button
+          // 手动改参数和修改源码会建草稿（写盘），按 commit 登记；四种研究只是切到研究页。
+          <ActionButton
             key={item.id}
             id={`version-method-${item.id}`}
+            action={`version-method-${item.id}`}
+            label={en ? item.en : item.zh}
+            kind={research(item.id) ? 'click' : 'commit'}
             className="research-method"
             disabled={disabled || !base}
-            onClick={() => onMethod(item.id)}
+            run={() => onMethod(item.id)}
           >
             <span className="research-method-icon">
               <svg
@@ -107,7 +117,7 @@ export default function VersionHub({
             <span className="research-method-arrow" aria-hidden="true">
               ›
             </span>
-          </Button>
+          </ActionButton>
         ))}
       </div>
       {drafts.length > 0 && (
@@ -115,10 +125,16 @@ export default function VersionHub({
           <ul className="version-hub-drafts">
             {drafts.map((d) => (
               <li key={d.id}>
-                <button type="button" disabled={disabled} onClick={() => onOpenDraft(d.id)}>
+                <ActionButton
+                  bare
+                  action={`version-draft-${d.id}`}
+                  label={d.name}
+                  disabled={disabled}
+                  run={() => onOpenDraft(d.id)}
+                >
                   <strong>{d.name}</strong>
                   <span className="muted">{changeSummary(d.overlay, !!d.code.workspace, en)}</span>
-                </button>
+                </ActionButton>
               </li>
             ))}
           </ul>

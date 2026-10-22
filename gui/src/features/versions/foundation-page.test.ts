@@ -4,16 +4,47 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import * as model from './model';
 import * as setup from './scientific-setup';
+import * as presentation from '../../lib/param-presentation';
+import { bilingual } from '../../lib/bilingual';
 import { researchVersion } from './research-version';
 import { hubMethods } from './hub-methods';
-import { appLocale } from '../history/history';
+import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 import { schemeVersionName } from './version-tree';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
-import { withCatalogLabels } from '../../lib/param-presentation';
-import type { UiField, UiAction } from '../../lib/guide';
-type Element = { type: string; props: Record<string, unknown>; children: unknown[] };
+import type { UiAction, UiField } from '../../lib/guide';
+
+// StudyPicks 用 localStorage 记住选过的研究参数；node 里没有，给个空的。
+Object.defineProperty(globalThis, 'localStorage', {
+  configurable: true,
+  value: { getItem: () => null, setItem: () => {} },
+});
+
+type Element = { type: unknown; props: Record<string, unknown>; children: unknown[] };
+type Contract = {
+  title?: string;
+  step?: string;
+  fields: UiField[];
+  actions: UiAction[];
+  status?: string;
+};
+type Store = {
+  slots: unknown[];
+  cursor: number;
+  effectCursor: number;
+  registered: Set<number>;
+  deps: Map<number, unknown[] | undefined>;
+  cleanups: (void | (() => void))[];
+};
+
+/**
+ * 版本页的测试框架。第 737 轮起动作由按钮自己登记（`ActionButton`、`Dialog` 的 closeAction），
+ * 所以这里把页面源码和它渲染的子组件源码都拿出来执行，得到一个元素树，再从树里收集按钮：
+ * 只算此刻显示着的（隐藏页签、收起的折叠项不算），有打开的对话框时只算对话框里的。
+ * 子组件按函数名编译成一个微型渲染器（每个组件实例有自己的 hook 槽位），这样版本库、参数对话框、
+ * 代码文件面板里的按钮也都是它们自己登记的，测试不用再重写一遍动作清单。
+ */
 function page(
   subgrid?: 'LCT' | 'PFT' | 'PC',
   physics: Record<string, string> = {},
@@ -30,6 +61,7 @@ function page(
   };
   let failedCommand = '';
   let draft = { ...version, id: 'custom', generation: 1 };
+  let folderPick: string | null = null;
   const notices: string[] = [];
   const calls: { command: string; args: Record<string, unknown> }[] = [],
     scrolls: unknown[] = [],
@@ -49,67 +81,142 @@ function page(
     selectedCase: undefined as { entry: { dir: string }; profile: { engine: string } } | undefined,
     expert: false,
     kernels: [],
+    versionsView: undefined as 'library' | 'create' | undefined,
+    usage: [] as {
+      version: { id: string; revision: number };
+      cases: number;
+      history: number;
+      blocker: string | null;
+    }[],
   };
   let guard: (() => string | null) | undefined;
-  let cursor = 0,
-    effectCursor = 0,
-    contract: { fields: UiField[]; actions: UiAction[]; status: string };
-  const slots: unknown[] = [],
-    registered = new Set<number>(),
-    effectDeps = new Map<number, unknown[]>(),
-    effects: (() => unknown)[] = [],
-    elements: Element[] = [];
-  const context = {
-    document: {
-      querySelector: (selector: string) => {
-        assert.equal(selector, '.main-pane');
-        return { scrollTo: (position: unknown) => scrolls.push(position) };
+  const stores = new Map<string, Store>();
+  let active: Store | null = null;
+  const pending: (() => void)[] = [];
+  const contracts: Contract[] = [];
+  const elements: Element[] = [];
+  const components = new Map<string, (props: Record<string, unknown>) => unknown>();
+  let tree: unknown = null;
+  function storeFor(key: string) {
+    let value = stores.get(key);
+    if (!value) {
+      value = {
+        slots: [],
+        cursor: 0,
+        effectCursor: 0,
+        registered: new Set(),
+        deps: new Map(),
+        cleanups: [],
+      };
+      stores.set(key, value);
+    }
+    return value;
+  }
+  const useState = (initial: unknown) => {
+    const store = active!;
+    const key = store.cursor++;
+    if (!(key in store.slots))
+      store.slots[key] = typeof initial === 'function' ? (initial as () => unknown)() : initial;
+    return [
+      store.slots[key],
+      (value: unknown) => {
+        store.slots[key] =
+          typeof value === 'function'
+            ? (value as (current: unknown) => unknown)(store.slots[key])
+            : value;
       },
-    },
+    ];
+  };
+  const useRef = (initial: unknown) => {
+    const store = active!;
+    const key = store.cursor++;
+    if (!(key in store.slots)) store.slots[key] = { current: initial };
+    return store.slots[key];
+  };
+  const useEffect = (fn: () => void | (() => void), deps?: unknown[]) => {
+    const store = active!;
+    const key = store.effectCursor++;
+    let changed = !store.registered.has(key);
+    if (!changed && deps) {
+      const previous = store.deps.get(key);
+      changed = !previous || deps.some((value, index) => !Object.is(value, previous[index]));
+    }
+    if (!changed) return;
+    store.registered.add(key);
+    store.deps.set(key, deps);
+    pending.push(() => {
+      store.cleanups[key]?.();
+      store.cleanups[key] = fn() ?? undefined;
+    });
+  };
+  const useMemo = (fn: () => unknown) => fn();
+  function update(patch: Record<string, unknown>) {
+    Object.assign(state, patch);
+  }
+  const context: Record<string, unknown> = {
     ...model,
     ...setup,
-    ScientificSetupCards: 'ScientificSetupCards',
+    ...presentation,
+    bilingual,
+    historyKindLabel,
+    historyStatusLabel,
     researchVersion,
     hubMethods,
     appLocale,
     schemeVersionName,
     compatibleKernel,
     effectiveModelFields,
-    withCatalogLabels,
-    ConfigurationOptions: 'ConfigurationOptions',
-    React: {
-      createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => {
-        const result = { type, props: props ?? {}, children };
-        elements.push(result);
-        return result;
-      },
-    },
-    ...Object.fromEntries(
-      [
-        'Button',
-        'Card',
-        'Field',
-        'Input',
-        'Select',
-        'Notice',
-        'Advanced',
-        'CodeWorkspace',
-        'CodeFiles',
-        'StudyPicks',
-        'StudyImportDialog',
-        'VersionChanges',
-        'VersionLibrary',
-        'VersionHub',
-        'ParameterDialog',
-      ].map((k) => [k, k]),
-    ),
     IGBP: [],
     USGS: [],
     PFT: [],
+    useState,
+    useRef,
+    useEffect,
+    useMemo,
+    React: {
+      // 动作按钮按它渲染出的样子收：普通按钮，onClick 就是 run，没写子节点时显示 label。
+      createElement: (
+        type: unknown,
+        props: Record<string, unknown> | null,
+        ...children: unknown[]
+      ) => {
+        const merged = props ?? {};
+        if (type === 'ActionButton')
+          return {
+            type: 'Button',
+            props: { ...merged, onClick: merged.run },
+            children: children.length ? children : [String(merged.label)],
+          };
+        return { type, props: merged, children };
+      },
+      Fragment: 'Fragment',
+    },
+    ...Object.fromEntries(
+      [
+        'ActionButton',
+        'Advanced',
+        'Button',
+        'Card',
+        'ConfigurationOptions',
+        'Dialog',
+        'Field',
+        'Input',
+        'Notice',
+        'ScientificSetupCards',
+        'Select',
+        'VersionChanges',
+      ].map((name) => [name, name]),
+    ),
+    document: {
+      querySelector: (selector: string) => {
+        assert.equal(selector, '.main-pane');
+        return { scrollTo: (position: unknown) => scrolls.push(position) };
+      },
+    },
     useApp: () => ({
       state,
       notify: (message: string) => notices.push(message),
-      update: (patch: object) => Object.assign(state, patch),
+      update,
       // Like the app: a page's leave guard can refuse the navigation.
       navigate: (route: string) => {
         if (guard?.()) return false;
@@ -118,39 +225,18 @@ function page(
       },
       refreshVersions: async () => {},
     }),
-    useNavigationGuard: (g: () => string | null) => {
-      guard = g;
+    useNavigationGuard: (next: () => string | null) => {
+      guard = next;
     },
-    usePageContract: (c: typeof contract) => {
-      contract = c;
-    },
-    useState: (initial: unknown) => {
-      const key = cursor++;
-      if (!(key in slots)) slots[key] = initial;
-      return [
-        slots[key],
-        (value: unknown) => {
-          slots[key] = value;
+    // 组件在真实界面里用这个 hook 登记动作；这个框架直接从元素树里收集，所以空实现。
+    useRenderedAction: () => {},
+    usePageContract: (value: Contract) => {
+      contracts.push({
+        ...value,
+        get actions() {
+          return [...value.actions, ...visibleActions()];
         },
-      ];
-    },
-    useRef: (initial: unknown) => {
-      const key = cursor++;
-      if (!(key in slots)) slots[key] = { current: initial };
-      return slots[key];
-    },
-    useEffect: (fn: () => unknown, deps?: unknown[]) => {
-      const key = effectCursor++;
-      const previous = effectDeps.get(key);
-      // Like React: run once, and again whenever a dependency changes.
-      if (
-        !registered.has(key) ||
-        (deps && previous && deps.some((value, index) => !Object.is(value, previous[index])))
-      ) {
-        registered.add(key);
-        effects.push(fn);
-      }
-      if (deps) effectDeps.set(key, deps);
+      });
     },
     invokeJson: async (command: string, args: Record<string, unknown> = {}) => {
       calls.push({ command, args });
@@ -201,176 +287,382 @@ function page(
               },
             ],
           };
+        case 'model_usage':
+          return state.usage;
+        case 'model_code_files':
+        case 'workspace_files':
+          return { entries: [] };
+        case 'model_code_file':
+        case 'workspace_file':
+          return { path: '', size: 0, text: null };
+        case 'parameter_type_defaults':
+          return [];
+        case 'standard_process_parameters':
+          return [];
+        case 'workspace_status':
+          return { changed_files: [] };
+        case 'workspace_check':
+          return {};
+        case 'model_delete_draft':
+        case 'model_branch_code':
+        case 'model_refresh_code':
+          return {};
+        case 'pick_folder':
+          return folderPick;
+        case 'model_import_study':
+          if (args.preview)
+            return {
+              study: '/study',
+              member: 'm000001',
+              objective: 1.25,
+              records: parameters,
+            };
+          return { draft, member: 'm000001', parameters: (args.only as unknown[]).length };
         default:
           throw Error(command);
       }
     },
+    invoke: async (command: string) => {
+      calls.push({ command, args: {} });
+      if (command === 'pick_file') return null;
+      if (command === 'pick_folder') return folderPick;
+      throw new Error(command);
+    },
+    askConfirm: async () => false,
+    download: async () => {},
   };
-  const source = readFileSync(new URL('./VersionsPage.tsx', import.meta.url), 'utf8')
-    .replace(/^import\b[\s\S]*?;$/gm, '')
-    .replace('export default function', 'function');
-  const code = ts.transpileModule(source, {
-    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
-  }).outputText;
-  const Component = new Function(...Object.keys(context), `${code};return VersionsPage;`)(
-    ...Object.values(context),
-  );
-  function render() {
-    cursor = 0;
-    effectCursor = 0;
-    elements.length = 0;
-    Component();
-    return contract;
+  function compile(name: string, exported: string[] = []) {
+    const source = readFileSync(new URL(`./${name}.tsx`, import.meta.url), 'utf8')
+      .replace(/^import\b[\s\S]*?;$/gm, '')
+      .replace('export default function', 'function')
+      .replace(/^export /gm, '');
+    const code = ts.transpileModule(source, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+    }).outputText;
+    const body = `${code}\nreturn { default: ${name}${exported
+      .map((key) => `, ${key}`)
+      .join('')} };`;
+    const factory = new Function(...Object.keys(context), body) as (
+      ...args: unknown[]
+    ) => Record<string, unknown>;
+    const module = factory(...Object.values(context));
+    components.set(name, module.default as (props: Record<string, unknown>) => unknown);
+    for (const key of exported) context[key] = module[key];
   }
-  // 版本页先显示版本库；这些测试看的是一个版本的工作台，所以像用户一样先打开模拟正在用的那个版本。
-  let opened = false;
-  async function mount() {
-    render();
-    effects.splice(0).forEach((f) => f());
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    if (!opened) {
-      opened = true;
-      await render()
-        .actions.find(
-          (a) => a.id === `version-select-${version.version.id}-${version.version.revision}`,
-        )
-        ?.run();
+  // 依赖顺序：被引用的组件先编译，编译后把它的存在回填给后面的组件源码。
+  compile('ParameterDialog', ['literalNumber', 'valueProblem', 'docOf', 'rangeText', 'typesOf']);
+  context.ParameterDialog = 'ParameterDialog';
+  compile('CodeFiles');
+  context.CodeFiles = 'CodeFiles';
+  compile('StudyImportDialog', ['chosenKey']);
+  context.StudyImportDialog = 'StudyImportDialog';
+  compile('VersionLibrary', ['changeSummary']);
+  context.VersionLibrary = 'VersionLibrary';
+  compile('VersionHub');
+  context.VersionHub = 'VersionHub';
+  compile('StudyPicks');
+  context.StudyPicks = 'StudyPicks';
+  compile('CodeWorkspace');
+  context.CodeWorkspace = 'CodeWorkspace';
+  compile('VersionsPage');
+  const Component = components.get('VersionsPage')!;
+
+  function renderComponent(
+    component: (props: Record<string, unknown>) => unknown,
+    props: Record<string, unknown>,
+    key: string,
+  ) {
+    const store = storeFor(key);
+    store.cursor = 0;
+    store.effectCursor = 0;
+    const previous = active;
+    active = store;
+    try {
+      return component(props);
+    } finally {
+      active = previous;
     }
-    effects.splice(0).forEach((f) => f());
-    for (let i = 0; i < 12; i++) await Promise.resolve();
-    return render();
   }
-  function card() {
-    return elements.find((e) => e.type === 'ScientificSetupCards')!;
+  function materialize(node: unknown, key: string): unknown {
+    if (Array.isArray(node))
+      return node.map((child, index) => materialize(child, `${key}.${index}`));
+    if (!node || typeof node !== 'object') return node;
+    const element = node as Element;
+    if (typeof element.type === 'string' && components.has(element.type)) {
+      const rendered = renderComponent(
+        components.get(element.type)!,
+        element.props,
+        `${key}:${element.type}`,
+      );
+      return {
+        type: element.type,
+        props: element.props,
+        children: [materialize(rendered, `${key}:${element.type}.out`)],
+      };
+    }
+    // 关着的对话框在真实界面里不渲染里面的东西（Radix 只在打开时挂载内容）。
+    if (element.type === 'Dialog' && !element.props.open)
+      return { type: 'Dialog', props: element.props, children: [] };
+    return {
+      type: element.type,
+      props: element.props,
+      children: element.children.map((child, index) => materialize(child, `${key}.${index}`)),
+    };
   }
-  function choose(id: string, value: string) {
-    const p = card().props;
-    if (p.disabled || !p.onChange) throw new Error('当前版本不可修改');
-    (p.onChange as (overlay: unknown) => void)(
-      setup.applySetupRequest(
-        p.overlay as Parameters<typeof setup.applySetupRequest>[0],
-        setup.setupHandledKeys.map((name) => ({
-          name,
-          kind: name === 'DEF_TUNING_CROP_PLANTING_DAY' ? 'integer' : 'logical',
-          derived: false,
-          default: '.false.',
-          values: [],
-          section: '',
-        })),
-        { id, value },
-        p.environment as setup.SetupEnvironment,
-      ),
-    );
-    return render();
+  function flatten(node: unknown, out: Element[] = []): Element[] {
+    if (Array.isArray(node)) {
+      node.forEach((child) => flatten(child, out));
+      return out;
+    }
+    if (node && typeof node === 'object') {
+      const element = node as Element;
+      out.push(element);
+      flatten(element.children, out);
+    }
+    return out;
+  }
+  function eachElement(node: unknown, visit: (element: Element) => void) {
+    if (Array.isArray(node)) {
+      node.forEach((child) => eachElement(child, visit));
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const element = node as Element;
+    visit(element);
+    eachElement(element.children, visit);
+  }
+  function topDialog() {
+    const dialogs: Element[] = [];
+    eachElement(tree, (element) => {
+      if (element.type === 'Dialog' && element.props.open) dialogs.push(element);
+    });
+    return dialogs.at(-1) ?? null;
+  }
+  function collectActions(node: unknown, out: UiAction[]) {
+    if (Array.isArray(node)) {
+      node.forEach((child) => collectActions(child, out));
+      return;
+    }
+    if (!node || typeof node !== 'object') return;
+    const element = node as Element;
+    const props = element.props;
+    // 隐藏的页签、收起的折叠项，界面上看不到里面的按钮。
+    if (element.type === 'div' && props.hidden) return;
+    if (element.type === 'Advanced') {
+      if (typeof props.action === 'string' && props.action)
+        out.push({
+          id: props.action,
+          label: String(props.actionLabel ?? props.title ?? props.action),
+          kind: 'click',
+          run: () => {},
+        });
+      if (props.open !== true) return;
+    }
+    if (element.type === 'details') {
+      if (props.open !== true) return;
+    }
+    if (element.type === 'Dialog' && props.open && props.closeAction && props.showClose !== false)
+      out.push({
+        id: String(props.closeAction),
+        label: 'close',
+        kind: 'click',
+        run: () => (props.onOpenChange as (open: boolean) => void)(false),
+      });
+    if (typeof props.action === 'string' && props.action)
+      out.push({
+        id: props.action,
+        label: String(props.label ?? props.action),
+        kind: (props.kind as UiAction['kind']) ?? 'click',
+        enabled: !props.disabled,
+        run: props.run as UiAction['run'],
+      });
+    collectActions(element.children, out);
+  }
+  function visibleActions() {
+    const out: UiAction[] = [];
+    collectActions(topDialog() ?? tree, out);
+    return out;
+  }
+  function render() {
+    contracts.length = 0;
+    const root = renderComponent(Component, {}, 'page');
+    tree = materialize(root, 'tree');
+    elements.length = 0;
+    elements.push(...flatten(tree));
+    return contracts[0]!;
+  }
+  function flush() {
+    while (pending.length) pending.splice(0).forEach((effect) => effect());
+  }
+  async function settle() {
+    for (let round = 0; round < 8; round++) {
+      flush();
+      for (let index = 0; index < 24; index++) await Promise.resolve();
+      render();
+      if (!pending.length) break;
+    }
+    return contracts[0]!;
+  }
+  async function click(id: string) {
+    const action = contracts[0]?.actions.find((item) => item.id === id);
+    assert.ok(action, `缺少可见动作 ${id}`);
+    await action.run();
+  }
+  // 版本页先显示"新建修改版"；这些测试要的是某个版本的工作台，所以像用户一样点进版本库再打开它。
+  let opened = false;
+  async function mount(open = true) {
+    render();
+    await settle();
+    if (open && !opened) {
+      opened = true;
+      await click('version-library');
+      await settle();
+      await click(`version-select-${version.version.id}-${version.version.revision}`);
+      await settle();
+    }
+    await settle();
+    return contracts[0]!;
+  }
+  async function mountHub() {
+    render();
+    return settle();
+  }
+  async function openDraft(id: string) {
+    const find = () => contracts[0]?.actions.find((item) => item.id === `version-draft-${id}`);
+    if (!find()) {
+      const back = contracts[0]!.actions.find((item) => item.id === 'version-back');
+      if (back) {
+        await back.run();
+        await settle();
+      }
+    }
+    if (!find()) {
+      const library = contracts[0]!.actions.find((item) => item.id === 'version-library');
+      if (library) {
+        await library.run();
+        await settle();
+      }
+    }
+    const action = find();
+    assert.ok(action, `缺少草稿按钮 version-draft-${id}`);
+    await action.run();
+    await settle();
   }
   return {
     render,
     mount,
+    mountHub,
+    openDraft,
+    click,
+    settle,
     elements,
     state,
     calls,
     notices,
     routes,
     version,
-    card,
-    choose,
     scrolls,
+    pickFolder: (value: string | null) => {
+      folderPick = value;
+    },
     fail: (command: string) => {
       failedCommand = command;
     },
-    settle: async () => {
-      for (let i = 0; i < 24; i++) await Promise.resolve();
-      return render();
-    },
+    actions: () => visibleActions(),
   };
 }
-for (const mode of ['PFT', 'PC', 'LCT'] as const)
-  test(`${mode} legacy return context cannot create a vegetation revision`, async () => {
-    const p = page(mode),
-      c = await p.mount();
+
+test('legacy return context cannot create a vegetation revision', async () => {
+  for (const mode of ['PFT', 'PC', 'LCT'] as const) {
+    const p = page(mode);
+    const c = await p.mount();
     assert.equal(
-      c.actions.some((a) => a.id === 'version-apply-simulation-structure'),
+      c.actions.some((action) => action.id === 'version-apply-simulation-structure'),
       false,
     );
     assert.equal(
       p.elements.some((e) => e.type === 'ScientificSetupCards'),
       false,
     );
-    assert.ok(c.actions.find((a) => a.id === 'version-return-simulation')?.enabled);
-    assert.ok(!p.calls.some((c) => c.command === 'model_create'));
-  });
+    assert.ok(c.actions.find((action) => action.id === 'version-return-simulation')?.enabled);
+    assert.ok(!p.calls.some((call) => call.command === 'model_create'));
+  }
+});
 test('saved drafts can return while unsaved model edits keep the return button locked', async () => {
   const p = page('PFT');
-  let c = await p.mount();
-  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
+  await p.mount();
+  await p.openDraft('custom');
+  let c = p.render();
+  assert.equal(
+    c.actions.find((action) => action.id === 'version-return-simulation')?.enabled,
+    true,
+  );
+  c.fields.find((field) => field.id === 'draft-name')!.set('changed draft');
   c = p.render();
-  assert.equal(c.actions.find((a) => a.id === 'version-return-simulation')?.enabled, true);
-  c.fields.find((f) => f.id === 'draft-name')!.set('changed draft');
-  c = p.render();
-  assert.equal(c.actions.find((a) => a.id === 'version-return-simulation')?.enabled, false);
-  await c.actions.find((a) => a.id === 'version-save')!.run();
-  c = p.render();
-  assert.equal(c.actions.find((a) => a.id === 'version-return-simulation')?.enabled, true);
-  await c.actions.find((a) => a.id === 'version-return-simulation')!.run();
+  assert.equal(
+    c.actions.find((action) => action.id === 'version-return-simulation')?.enabled,
+    false,
+  );
+  await c.actions.find((action) => action.id === 'version-save')!.run();
+  c = await p.settle();
+  assert.equal(
+    c.actions.find((action) => action.id === 'version-return-simulation')?.enabled,
+    true,
+  );
+  await c.actions.find((action) => action.id === 'version-return-simulation')!.run();
   assert.deepEqual(p.routes, ['new-case']);
   assert.equal(p.state.versionRef.id, 'official');
-  assert.ok(!p.calls.some((c) => c.command === 'model_freeze'));
+  assert.ok(!p.calls.some((call) => call.command === 'model_freeze'));
 });
 
 test('tracer and sediment parameters live in the parameter dialog, not a separate block', async () => {
   const p = page('PFT');
-  const c = await p.mount();
+  await p.mount();
   assert.ok(!p.elements.some((e) => e.type === 'ConfigurationOptions'));
   // A frozen version opens read-only: no importing files into it.
   const dialog = () => p.elements.find((e) => e.type === 'ParameterDialog')!.props;
   assert.equal(dialog().onImportProcessFile, undefined);
-  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
-  await p.mount();
+  await p.openDraft('custom');
   assert.equal(typeof dialog().onImportProcessFile, 'function');
 });
 
-test('a new version can copy its parent code into a workspace of its own', async () => {
+test('the source-code method starts a draft with its own copy of the parent code', async () => {
   const p = page('PFT');
-  let c = await p.mount();
-  const set = (id: string, value: string) => {
-    c.fields.find((field) => field.id === id)!.set(value);
-    c = p.render();
-  };
-  set('version-name', 'Soil change');
-  set('version-note', 'New soil evaporation scheme');
-  assert.ok(
-    !c.fields.some((field) => field.id === 'version-workspace'),
-    'no workspace box unless chosen',
-  );
-  set('version-code', 'branch');
-  await c.actions.find((action) => action.id === 'version-create')!.run();
+  const c = await p.mountHub();
+  assert.ok(c.actions.find((action) => action.id === 'version-method-source'));
+  await c.actions.find((action) => action.id === 'version-method-source')!.run();
+  await p.settle();
   const call = p.calls.find((entry) => entry.command === 'model_create')!;
   assert.equal(call.args.branchCode, true);
   assert.equal(call.args.workspace, null);
-  assert.deepEqual(
-    c.fields.find((field) => field.id === 'version-code')!.options!.map((o) => o.value),
-    ['inherit', 'branch'],
-    'an existing workspace is chosen from the draft’s code tab, not when creating',
-  );
+  assert.match(String(call.args.name), /^修改源码 /);
+  // 手动改参数同样是写盘动作：直接建草稿并打开参数表。
+  const q = page('PFT');
+  const d = await q.mountHub();
+  await d.actions.find((action) => action.id === 'version-method-manual')!.run();
+  await q.settle();
+  assert.equal(q.calls.filter((entry) => entry.command === 'model_create').length, 1);
+  assert.equal(q.elements.find((e) => e.type === 'ParameterDialog')!.props.open, true);
 });
 
 test('a draft on its own code shows what blocks freezing and cannot be frozen until it is fixed', async () => {
   const p = page(undefined, {}, [], { kind: 'workspace', workspace: 'ver-1', commit: 'abc' });
-  let c = await p.mount();
-  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
-  c = await p.mount();
+  await p.mount();
+  await p.openDraft('custom');
+  await p.mount();
   assert.ok(p.calls.some((call) => call.command === 'model_freeze_check'));
-  assert.equal(c.actions.find((a) => a.id === 'version-freeze')?.enabled, false);
-  const texts = p.elements.flatMap((e) =>
-    ((e as { children?: unknown[] }).children ?? []).filter((x) => typeof x === 'string'),
+  assert.equal(
+    (await p.settle()).actions.find((action) => action.id === 'version-freeze')?.enabled,
+    false,
   );
+  const texts = p.elements.flatMap((e) => e.children.filter((x) => typeof x === 'string'));
   assert.ok(texts.includes('先在当前提交上编译 Rust 引擎'));
 });
 
 test('the version page shows one version in tabs that hide panels without unmounting them', async () => {
   const p = page('PFT');
   await p.mount();
-  const tabs = p.elements.filter((e) => e.props.role === 'tab');
+  const tabs = p.elements.filter((e) => e.props.role === 'tab' && e.type === 'Button');
   // A frozen version: "what changed" instead of an editing page; no usage tab while nothing used it.
   assert.deepEqual(
     tabs.map((e) => e.children.flat().join('')),
@@ -390,8 +682,10 @@ test('the version page shows one version in tabs that hide panels without unmoun
 
 test('新建修改版 offers six ways and starts each without a confirmation form', async () => {
   const p = page();
-  const c = await p.mount();
-  const ids = c.actions.filter((a) => a.id.startsWith('version-method-')).map((a) => a.id);
+  const c = await p.mountHub();
+  const ids = c.actions
+    .filter((action) => action.id.startsWith('version-method-'))
+    .map((a) => a.id);
   assert.deepEqual(ids, [
     'version-method-manual',
     'version-method-tuning',
@@ -401,7 +695,7 @@ test('新建修改版 offers six ways and starts each without a confirmation for
     'version-method-source',
   ]);
   // By hand: a draft is created straight away, named automatically, and the parameter dialog opens.
-  await c.actions.find((a) => a.id === 'version-method-manual')!.run();
+  await c.actions.find((action) => action.id === 'version-method-manual')!.run();
   await p.settle();
   const create = p.calls.find((call) => call.command === 'model_create')!;
   assert.equal(create.args.branchCode, false);
@@ -411,8 +705,8 @@ test('新建修改版 offers six ways and starts each without a confirmation for
   assert.equal(dialog.props.open, true);
   // A study method goes to the research page with that method chosen.
   const q = page();
-  const d = await q.mount();
-  await d.actions.find((a) => a.id === 'version-method-tuning')!.run();
+  const d = await q.mountHub();
+  await d.actions.find((action) => action.id === 'version-method-tuning')!.run();
   assert.equal(q.routes.at(-1), 'research');
   assert.equal((q.state as { researchMethod?: string }).researchMethod, 'tuning');
 });
@@ -434,7 +728,7 @@ test('the research home starts 修改参数（手动） and 修改源码 here, o
   assert.equal(creates().length, 1);
   // Back goes where the user came from: research home, not 新建修改版.
   const back = p.elements.find(
-    (e) => e.type === 'button' && e.children.flat().includes('研究首页'),
+    (e) => e.type === 'Button' && e.children.flat().includes('研究首页'),
   )!;
   (back.props.onClick as () => void)();
   await p.settle();
@@ -466,8 +760,8 @@ test('closing the parameter table of a fresh hand-edit draft without changes can
   assert.equal(r.routes.at(-1), 'research');
   // From 新建修改版: back to the six ways on the same page.
   const h = page();
-  const c = await h.mount();
-  await c.actions.find((a) => a.id === 'version-method-manual')!.run();
+  const c = await h.mountHub();
+  await c.actions.find((action) => action.id === 'version-method-manual')!.run();
   await h.settle();
   dialog(h).onOpenChange(false);
   await h.settle();
@@ -476,8 +770,8 @@ test('closing the parameter table of a fresh hand-edit draft without changes can
   assert.ok(h.elements.some((el) => el.type === 'VersionHub'));
   // Something was changed: closing keeps the draft open for saving and freezing.
   const e = page();
-  const d = await e.mount();
-  await d.actions.find((a) => a.id === 'version-method-manual')!.run();
+  const d = await e.mountHub();
+  await d.actions.find((action) => action.id === 'version-method-manual')!.run();
   await e.settle();
   dialog(e).onChange({ ...dialog(e).overlay, physics: { DEF_USE_PLANTHYDRAULICS: '.true.' } });
   e.render();
@@ -494,9 +788,8 @@ test('closing the parameter table of a fresh hand-edit draft without changes can
 
 test('a draft offers importing a study only on its research tab', async () => {
   const p = page();
-  const c = await p.mount();
-  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
   await p.mount();
+  await p.openDraft('custom');
   const imports = p.elements.filter(
     (e) => e.type === 'Button' && e.children.flat().includes('从研究导入最优参数…'),
   );
@@ -514,10 +807,159 @@ test('frozen versions keep their next steps in the bottom bar, and freezing says
   assert.ok(bar());
   assert.ok(button('基于它新建修改版'));
   assert.ok(!button('冻结为新版本'));
-  await c.actions.find((a) => a.id === 'version-draft-custom')!.run();
-  await p.mount();
-  assert.ok(bar());
-  (button('冻结为新版本')!.props.onClick as () => void)();
+  await c.actions.find((action) => action.id === 'version-derive')!.run();
   await p.settle();
-  assert.match(p.notices.at(-1) ?? '', /已冻结为.*模拟已改用这个版本/);
+  assert.ok(p.state.versionsView === 'create', 'deriving opens the six ways');
+  const q = page();
+  await q.mount();
+  await q.openDraft('custom');
+  await q.mount();
+  const freeze = q.elements.find(
+    (e) => e.type === 'Button' && e.children.flat().includes('冻结为新版本'),
+  )!;
+  (freeze.props.onClick as () => void)();
+  await q.settle();
+  assert.match(q.notices.at(-1) ?? '', /已冻结为.*模拟已改用这个版本/);
+});
+
+test('the version library registers open, use and draft buttons but never deletion', async () => {
+  const p = page();
+  const modified = {
+    ...p.version,
+    name: 'Modified',
+    version: { id: 'modified', revision: 1 },
+    parent: p.version.version,
+    created_unix: 0,
+  };
+  p.state.versions.push(modified);
+  // 修改版没有算例/研究绑定，界面上会显示"删除"；助手不应该看到这个动作。
+  p.state.usage = [
+    { version: { id: 'modified', revision: 1 }, cases: 0, history: 0, blocker: null },
+  ];
+  await p.mount();
+  await p.click('version-back');
+  const c = await p.settle();
+  const ids = c.actions.map((action) => action.id);
+  assert.ok(ids.includes('version-new'), '新建修改版');
+  assert.ok(ids.includes('version-select-modified-1'), '点版本名打开');
+  assert.ok(ids.includes('version-open-modified-1'), '行里的"打开"');
+  assert.ok(ids.includes('version-use-modified-1'), '设为模拟使用');
+  assert.ok(ids.includes('version-draft-custom'), '草稿行');
+  assert.ok(ids.includes('version-resume-custom'), '继续编辑');
+  // 界面上确实有删除（修改版可删），但它是 D 级动作，不登记。
+  assert.ok(
+    p.elements.some((e) => e.type === 'button' && e.children.flat().includes('删除')),
+    '删除按钮在界面上',
+  );
+  assert.equal(
+    ids.some((id) => /delete|remove|cleanup/i.test(id)),
+    false,
+    '删除版本、草稿与清理旧官方版本属于 D 级，助手看不到',
+  );
+  assert.equal(new Set(ids).size, ids.length, '同时显示的动作 id 不能重复');
+});
+
+test('an open parameter dialog hides the page behind it and registers its own controls', async () => {
+  const p = page();
+  await p.mount();
+  await p.openDraft('custom');
+  const c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-parameters')!.run();
+  await p.settle();
+  const ids = p.actions().map((action) => action.id);
+  assert.ok(ids.includes('version-parameters-close'));
+  assert.ok(ids.includes('version-parameters-tab-global'));
+  assert.ok(ids.includes('version-parameters-tab-process'));
+  assert.equal(ids.includes('version-save'), false, '对话框打开时页面底部的保存按钮被挡住');
+  assert.equal(new Set(ids).size, ids.length);
+  // 关着的时候这些都不存在；底部动作重新可见。
+  await p.settle();
+  const dialog = p.elements.find((e) => e.type === 'ParameterDialog')!;
+  (dialog.props.onOpenChange as (open: boolean) => void)(false);
+  const closed = await p.settle();
+  const visible = closed.actions.map((action) => action.id);
+  assert.equal(
+    visible.some((id) => id.startsWith('version-parameters-tab-')),
+    false,
+  );
+  assert.ok(visible.includes('version-save'));
+});
+
+test('importing study parameters first previews them in a dialog the assistant cannot skip', async () => {
+  const record = {
+    parameter_id: 'case:DEF_X',
+    raw_key: 'DEF_X',
+    value: '0.5',
+    unit: null,
+    scope_instance: { kind: 'case-scalar', scheme: null, index: null },
+  } as unknown as ParameterOverride;
+  const p = page(undefined, {}, [record]);
+  await p.mount();
+  await p.openDraft('custom');
+  // 列表里的"从研究导入"以前直接全写进草稿；界面上的按钮先打开勾选对话框，现在两者一致。
+  p.pickFolder('/study');
+  await p.click('version-tab-research');
+  const c = await p.settle();
+  await c.actions.find((action) => action.id === 'version-import-study')!.run();
+  await p.settle();
+  const ids = p.actions().map((action) => action.id);
+  assert.deepEqual(ids, ['version-import-study-cancel', 'version-import-study-apply']);
+  assert.equal(
+    p.calls.some((call) => call.command === 'model_import_study' && !call.args.preview),
+    false,
+    '预览之前不写草稿',
+  );
+  await p.click('version-import-study-apply');
+  await p.settle();
+  const write = p.calls.find(
+    (call) => call.command === 'model_import_study' && call.args.preview === null,
+  )!;
+  assert.deepEqual(write.args.only, [['case:DEF_X', null, null]]);
+});
+
+test('the code tab registers its own actions and keeps export and revert out of reach', async () => {
+  const p = page();
+  await p.mount();
+  await p.click('version-tab-code');
+  let c = await p.settle();
+  // A frozen official version can start a code-changing draft; the changes tab's buttons are hidden.
+  assert.ok(c.actions.some((action) => action.id === 'version-method-source'));
+  // 冻结版本代码页的两个折叠区（用已有工作区 / 从其他仓库建）也登记展开动作。
+  assert.ok(c.actions.some((action) => action.id === 'version-new-workspace-advanced'));
+  // 草稿还没有自己的代码时：开始修改代码 + 两个折叠入口都可见。
+  const d = page();
+  await d.mount();
+  await d.openDraft('custom');
+  await d.click('version-tab-code');
+  const draftCode = await d.settle();
+  assert.ok(draftCode.actions.some((action) => action.id === 'version-branch-code'));
+  assert.ok(draftCode.actions.some((action) => action.id === 'version-reuse-workspace-advanced'));
+  // 参数页签里挂着一个代码工作区：创建、检查能按，导出补丁和删除工作区不登记。
+  const q = page(undefined, {}, [], { kind: 'workspace', workspace: 'ver-1', commit: 'abc' });
+  await q.mount();
+  await q.openDraft('custom');
+  await q.click('version-tab-code');
+  c = await q.settle();
+  assert.ok(c.actions.some((action) => action.id === 'workspace-check'));
+  assert.ok(c.actions.some((action) => action.id === 'workspace-patch'));
+  assert.equal(
+    c.actions.some((action) => /export|revert|delete/.test(action.id)),
+    false,
+    '导出补丁、恢复与删除工作区属于 D 级',
+  );
+});
+
+test('a study button is visible on the research tab but adding a pick needs a chosen parameter', async () => {
+  const p = page();
+  await p.mount();
+  await p.openDraft('custom');
+  await p.click('version-tab-research');
+  const c = await p.settle();
+  const add = c.actions.find((action) => action.id === 'version-study-pick-add');
+  assert.ok(add);
+  assert.equal(add.enabled, false, '没选参数时"加入"是灰的，助手看到的也是不可用');
+  assert.equal(
+    c.actions.some((action) => action.id.includes('study-pick-remove')),
+    false,
+  );
 });
