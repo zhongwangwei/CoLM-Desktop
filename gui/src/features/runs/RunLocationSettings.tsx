@@ -1,6 +1,7 @@
-import { Button, Field, Input, Notice, Select } from '../../components/ui';
+import { Field, Input, Notice, Select } from '../../components/ui';
 import type { Server } from '../resources/resource';
 import LiveServerLoad from './LiveServerLoad';
+import { ActionButton } from '../../components/ActionButton';
 
 export default function RunLocationSettings({
   host,
@@ -10,6 +11,7 @@ export default function RunLocationSettings({
   en,
   onChange,
   onConfigure,
+  configureAction,
   serverNative = false,
   locationLocked = false,
 }: {
@@ -22,6 +24,8 @@ export default function RunLocationSettings({
   en: boolean;
   onChange: (host: string) => void;
   onConfigure: () => void;
+  /** 助手动作名：配置计算资源。 */
+  configureAction: string;
 }) {
   const t = (zh: string, english: string) => (en ? english : zh);
   const server = servers?.find((item) => item.host === host);
@@ -106,11 +110,16 @@ export default function RunLocationSettings({
           )}
         </p>
       )}
-      <Button disabled={disabled} onClick={onConfigure}>
-        {serverNative
-          ? t('配置计算资源', 'Configure resources')
-          : t('配置计算资源与路径对应', 'Configure resources and path mappings')}
-      </Button>
+      <ActionButton
+        action={configureAction}
+        label={
+          serverNative
+            ? t('配置计算资源', 'Configure resources')
+            : t('配置计算资源与路径对应', 'Configure resources and path mappings')
+        }
+        disabled={disabled}
+        run={onConfigure}
+      />
     </section>
   );
 }

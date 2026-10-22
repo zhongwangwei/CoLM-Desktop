@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, listen } from '../../lib/ipc';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import {
   Button,
   Card,
@@ -40,7 +41,6 @@ import {
   nodePlan,
   nodePlanText,
   kindPathPrefill,
-  simulationSteps,
   spinupProblem,
   type SimulationStep,
 } from './simulation-model';
@@ -2206,185 +2206,12 @@ export default function NewCasePage() {
     }
   }
 
-  const actions: UiAction[] = [
-    ...(step === 3 && templateForcing
-      ? [
-          {
-            id: 'new-detect-forcing',
-            label: t('识别数据集', 'Identify dataset'),
-            kind: 'click' as const,
-            enabled:
-              enabled && !!form.spatial_forcingdir.trim() && forcingProbe?.status !== 'loading',
-            run: () => detectForcing(),
-          },
-        ]
-      : []),
-    ...(step === 1
-      ? [
-          {
-            id: 'new-run-resources',
-            label: t('配置计算资源', 'Configure resources'),
-            kind: 'click' as const,
-            enabled,
-            run: openResources,
-          },
-        ]
-      : []),
-    ...(multiSite && multiResults.length
-      ? [
-          {
-            id: 'new-multi-edit-unfinished',
-            label: t('修改尚未创建的站点', 'Edit uncreated sites'),
-            kind: 'click' as const,
-            enabled:
-              !busy &&
-              !state.busy &&
-              !multiResults.some((result) => result.created && result.error) &&
-              siteDrafts.some(
-                (draft) =>
-                  !multiResults.some((result) => result.site === draft.site && result.created),
-              ),
-            run: editUnfinishedSites,
-          },
-          {
-            id: 'new-multi-retry',
-            label: t('重试未完成的站点', 'Retry unfinished sites'),
-            kind: 'commit' as const,
-            enabled:
-              !busy &&
-              !state.busy &&
-              (multiResults.some((result) => result.error) ||
-                multiResults.length < siteDrafts.length),
-            run: create,
-          },
-          {
-            id: 'new-multi-project',
-            label: t('查看已创建的项目', 'View created project'),
-            kind: 'click' as const,
-            enabled: !busy && !state.busy && multiResults.some((result) => !result.error),
-            run: viewCreatedProject,
-          },
-        ]
-      : []),
-    ...(creationDir && (!form.host || batchProgress)
-      ? [
-          {
-            id: 'new-cancel-creation',
-            label: t('取消创建', 'Cancel creation'),
-            kind: 'click' as const,
-            enabled: !cancellingCreation,
-            run: cancelCreation,
-          },
-        ]
-      : []),
-    ...simulationSteps.slice(0, step - 1).map((label, i) => ({
-      id: `new-step-${i + 1}`,
-      label: label[en ? 1 : 0],
-      kind: 'click' as const,
-      enabled,
-      run: () => {
-        setError('');
-        setStep((i + 1) as SimulationStep);
-      },
-    })),
-    ...keys
-      .filter((k) => folderKeys.includes(k) || fileKeys.includes(k))
-      .map((k) => ({
-        id: `new-pick-${k}`,
-        label: labels[k],
-        kind: 'click' as const,
-        enabled,
-        run: () => pick(k),
-      })),
-    ...(step > 1
-      ? [
-          {
-            id: 'new-previous',
-            label: t('上一步', 'Back'),
-            kind: 'click' as const,
-            enabled: backEnabled,
-            run: goBack,
-          },
-        ]
-      : []),
-    ...(step < 5
-      ? [
-          {
-            id: 'new-next',
-            label: t('下一步', 'Next'),
-            kind: 'click' as const,
-            enabled: enabled && (step === 1 || schemaReady) && !blocker,
-            run: next,
-          },
-        ]
-      : [
-          {
-            id: 'new-create',
-            label: t('创建算例', 'Create case'),
-            kind: 'commit' as const,
-            enabled: enabled && schemaReady && !!state.version && !blocker,
-            run: create,
-          },
-        ]),
-    ...(step === 3 && form.kind === 'site'
-      ? [
-          ...(!form.host
-            ? [
-                {
-                  id: 'new-example',
-                  label: t('使用内置示例', 'Use bundled examples'),
-                  kind: 'commit' as const,
-                  enabled,
-                  run: example,
-                },
-              ]
-            : []),
-          {
-            id: 'new-own-data',
-            label: t('使用自己的数据', 'Use your data'),
-            kind: 'click' as const,
-            enabled,
-            run: selectOwnData,
-          },
-          ...(ownData
-            ? [
-                {
-                  id: 'new-scan',
-                  label: scanning
-                    ? t('正在读取站点…', 'Reading sites…')
-                    : t('读取站点与覆盖时段', 'Read sites and coverage'),
-                  kind: 'click' as const,
-                  enabled: enabled && !!form.sitedir && !scanning,
-                  run: () => readSites(),
-                },
-                ...(scanning
-                  ? [
-                      {
-                        id: 'new-scan-stop',
-                        label: t('停止读取', 'Stop reading'),
-                        kind: 'click' as const,
-                        run: stopReading,
-                      },
-                    ]
-                  : []),
-              ]
-            : []),
-          ...(!multiSite ? sites : []).map((s) => ({
-            id: `new-select-${s.name}`,
-            label: s.name,
-            kind: 'click' as const,
-            enabled: enabled && !s.problem,
-            run: () => selectSite(s.site_file),
-          })),
-        ]
-      : []),
-  ];
-
   usePageContract({
     title: t('新建模拟', 'New simulation'),
     step: 'new-case',
     fields,
-    actions,
+    // 按钮自己登记（第 737 轮）。原来清单里"选站点"直接选中，界面上的按钮会先按站点调整方案再选。
+    actions: [],
     status: busy ? 'busy' : scanning ? 'reading' : error || 'ready',
     details: {
       step,
@@ -2420,13 +2247,15 @@ export default function NewCasePage() {
             onBlur={k === 'spatial_forcingdir' ? () => void detectForcing() : undefined}
           />
           {(folderKeys.includes(k) || fileKeys.includes(k)) && (
-            <Button
+            <ActionButton
+              action={`new-pick-${k}`}
+              label={labels[k]}
               disabled={!enabled}
               aria-label={`${labels[k]} · ${t('选择', 'Browse')}`}
-              onClick={() => void pick(k).catch(() => {})}
+              run={() => pick(k)}
             >
               …
-            </Button>
+            </ActionButton>
           )}
         </div>
       )}
@@ -2524,6 +2353,7 @@ export default function NewCasePage() {
         step={step}
         en={en}
         disabled={!enabled}
+        actionPrefix="new"
         onChange={(value) => {
           setError('');
           setStep(value);
@@ -2558,23 +2388,30 @@ export default function NewCasePage() {
                 (draft) =>
                   !multiResults.some((result) => result.site === draft.site && result.created),
               ) && (
-                <Button disabled={busy || state.busy} onClick={editUnfinishedSites}>
-                  {t('修改尚未创建的站点', 'Edit uncreated sites')}
-                </Button>
+                <ActionButton
+                  action="new-multi-edit-unfinished"
+                  label={t('修改尚未创建的站点', 'Edit uncreated sites')}
+                  disabled={busy || state.busy}
+                  run={editUnfinishedSites}
+                />
               )}
             {(multiResults.some((result) => result.error) ||
               multiResults.length < siteDrafts.length) && (
-              <Button disabled={busy || state.busy} onClick={() => void create().catch(() => {})}>
-                {t('重试未完成的站点', 'Retry unfinished sites')}
-              </Button>
+              <ActionButton
+                action="new-multi-retry"
+                kind="commit"
+                label={t('重试未完成的站点', 'Retry unfinished sites')}
+                disabled={busy || state.busy}
+                run={create}
+              />
             )}
             {multiResults.some((result) => !result.error) && (
-              <Button
+              <ActionButton
+                action="new-multi-project"
+                label={t('查看已创建的项目', 'View created project')}
                 disabled={busy || state.busy}
-                onClick={() => void viewCreatedProject().catch(() => {})}
-              >
-                {t('查看已创建的项目', 'View created project')}
-              </Button>
+                run={viewCreatedProject}
+              />
             )}
           </div>
         </Card>
@@ -2631,9 +2468,12 @@ export default function NewCasePage() {
           detail={scanLabel()}
           hint={t('读取期间可以继续填写其它设置。', 'Other settings stay editable meanwhile.')}
           action={
-            <Button variant="ghost" onClick={stopReading}>
-              {t('停止读取', 'Stop reading')}
-            </Button>
+            <ActionButton
+              action="new-scan-stop"
+              label={t('停止读取', 'Stop reading')}
+              variant="ghost"
+              run={stopReading}
+            />
           }
         />
       )}
@@ -2659,9 +2499,12 @@ export default function NewCasePage() {
         />
       )}
       {creationDir && (!form.host || batchProgress) && (
-        <Button disabled={cancellingCreation} onClick={() => void cancelCreation().catch(() => {})}>
-          {t('取消创建', 'Cancel creation')}
-        </Button>
+        <ActionButton
+          action="new-cancel-creation"
+          label={t('取消创建', 'Cancel creation')}
+          disabled={cancellingCreation}
+          run={cancelCreation}
+        />
       )}
       {step === 1 && (
         <Card
@@ -2680,6 +2523,7 @@ export default function NewCasePage() {
             en={en}
             onChange={(value) => set('host', value)}
             onConfigure={openResources}
+            configureAction="new-run-resources"
           />
           <section className="simulation-choice-group">
             <h3>{t('计算引擎', 'Computation engine')}</h3>
@@ -2817,23 +2661,24 @@ export default function NewCasePage() {
             <>
               <div className="actions simulation-source">
                 {!form.host && (
-                  <Button
+                  <ActionButton
+                    action="new-example"
+                    kind="commit"
+                    label={t('使用内置示例', 'Use bundled examples')}
                     className={!ownData && sites.length > 0 ? 'selected' : ''}
                     aria-pressed={!ownData && sites.length > 0}
                     disabled={!enabled}
-                    onClick={() => void example().catch(() => {})}
-                  >
-                    {t('使用内置示例', 'Use bundled examples')}
-                  </Button>
+                    run={example}
+                  />
                 )}
-                <Button
+                <ActionButton
+                  action="new-own-data"
+                  label={t('使用自己的数据', 'Use your data')}
                   className={ownData ? 'selected' : ''}
                   aria-pressed={ownData}
                   disabled={!enabled}
-                  onClick={selectOwnData}
-                >
-                  {t('使用自己的数据', 'Use your data')}
-                </Button>
+                  run={selectOwnData}
+                />
               </div>
               {form.host && (
                 <Notice>
@@ -2846,14 +2691,16 @@ export default function NewCasePage() {
               {ownData && (
                 <div className="simulation-own-data">
                   <div className="form-grid">{['sitedir', 'forcingdir'].map(render)}</div>
-                  <Button
+                  <ActionButton
+                    action="new-scan"
+                    label={
+                      scanning
+                        ? t('正在读取站点…', 'Reading sites…')
+                        : t('读取站点与覆盖时段', 'Read sites and coverage')
+                    }
                     disabled={!enabled || !form.sitedir || scanning}
-                    onClick={() => void readSites().catch(() => {})}
-                  >
-                    {scanning
-                      ? t('正在读取站点…', 'Reading sites…')
-                      : t('读取站点与覆盖时段', 'Read sites and coverage')}
-                  </Button>
+                    run={() => readSites()}
+                  />
                 </div>
               )}
               {hint && <Notice>{hint}</Notice>}
@@ -2897,11 +2744,13 @@ export default function NewCasePage() {
                         key={s.site_file}
                         style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}
                       >
-                        <Button
+                        <ActionButton
+                          action={`new-select-${s.name}`}
+                          label={s.name}
                           className={isSelected ? 'selected' : ''}
                           disabled={!enabled || Boolean(s.problem)}
                           title={issue ?? undefined}
-                          onClick={() => adaptAndSelectSite(s)}
+                          run={() => adaptAndSelectSite(s)}
                         >
                           <div
                             style={{
@@ -2926,7 +2775,7 @@ export default function NewCasePage() {
                           <span style={{ fontSize: '11px' }}>
                             {issue ?? `${info.desc} · ${s.lat.toFixed(2)}°, ${s.lon.toFixed(2)}°`}
                           </span>
-                        </Button>
+                        </ActionButton>
                         {!s.problem &&
                           (isSelected ? (
                             <span
@@ -3108,6 +2957,8 @@ export default function NewCasePage() {
               onDirectoryChange={(value) => set('spatial_forcingdir', value)}
               onDirectoryBlur={() => void detectForcing()}
               onPick={() => void pick('spatial_forcingdir').catch(() => {})}
+              pickAction="new-pick-spatial_forcingdir"
+              detectAction="new-detect-forcing"
               onDatasetChange={(value) => set('forcing_dataset', value)}
               onDetect={() => void detectForcing()}
             />
@@ -3376,6 +3227,7 @@ export default function NewCasePage() {
           </Card>
 
           <HistoryVariablesCard
+            actionPrefix="new"
             variables={historyVariables.map((v) => ({
               name: v.name,
               settable: true,
@@ -3409,33 +3261,35 @@ export default function NewCasePage() {
       )}
       <footer className="simulation-footer">
         {step > 1 ? (
-          <Button disabled={!backEnabled} onClick={goBack}>
-            {t('上一步', 'Back')}
-          </Button>
+          <ActionButton
+            action="new-previous"
+            label={t('上一步', 'Back')}
+            disabled={!backEnabled}
+            run={goBack}
+          />
         ) : (
           <span />
         )}
         {step < 5 ? (
-          <Button
+          <ActionButton
+            action="new-next"
+            label={t('下一步', 'Next')}
             variant="primary"
             disabled={!enabled || (step > 1 && !schemaReady) || !!blocker}
             title={blocker ?? undefined}
-            onClick={() => {
-              try {
-                next();
-              } catch {
-                /* The inline error explains the failed check. */
-              }
-            }}
+            run={next}
           >
             {t('下一步', 'Next')} →
-          </Button>
+          </ActionButton>
         ) : (
-          <Button
+          <ActionButton
+            action="new-create"
+            kind="commit"
+            label={t('创建算例', 'Create case')}
             variant="primary"
             disabled={!enabled || !schemaReady || !state.version || !!blocker}
             title={blocker ?? undefined}
-            onClick={() => void create().catch(() => {})}
+            run={create}
           >
             {multiSite && busy
               ? t(
@@ -3445,7 +3299,7 @@ export default function NewCasePage() {
               : multiSite
                 ? t('创建所选站点', 'Create selected sites')
                 : t('创建算例', 'Create case')}
-          </Button>
+          </ActionButton>
         )}
       </footer>
     </div>

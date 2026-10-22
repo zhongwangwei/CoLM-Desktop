@@ -13,6 +13,8 @@ function render(currentDataset: string | undefined, failed = false) {
   return renderToStaticMarkup(
     createElement(SpatialForcingFields, {
       directory: '/forcing',
+      pickAction: 'case-pick-forcing-directory',
+      detectAction: 'case-detect-forcing',
       dataset: '',
       datasets: ['MSWX'],
       currentDataset,

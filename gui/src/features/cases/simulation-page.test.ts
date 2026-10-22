@@ -143,7 +143,15 @@ function page(
     siteBatchConcurrency: (count: number, cores = 8) => Math.min(count, cores),
     React: {
       createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => {
-        const element = { type, props: props ?? {}, children };
+        // ActionButton 按它渲染出的样子收：普通按钮，onClick 就是 run，没写子节点时显示 label。
+        const element =
+          type === 'ActionButton'
+            ? {
+                type: 'Button',
+                props: { ...props, onClick: props.run },
+                children: children.length ? children : [String(props.label)],
+              }
+            : { type, props: props ?? {}, children };
         elements.push(element);
         return element;
       },
@@ -151,6 +159,7 @@ function page(
     ...Object.fromEntries(
       [
         'Button',
+        'ActionButton',
         'Card',
         'Field',
         'Input',
@@ -184,8 +193,14 @@ function page(
     useNavigationGuard: (value: () => unknown) => {
       guard = value;
     },
+    // 动作由页面上的按钮登记（第 737 轮）。子组件在这里是占位，按它们收到的属性推出各自登记的按钮。
     usePageContract: (value: Contract) => {
-      contract = value;
+      contract = {
+        ...value,
+        get actions() {
+          return [...value.actions, ...renderedActions()];
+        },
+      };
     },
     useRef: (initial: unknown) => {
       const key = cursor++;
@@ -372,6 +387,76 @@ function page(
     render();
     return settle();
   }
+  function renderedActions(): UiAction[] {
+    return elements.flatMap((element): UiAction[] => {
+      const p = element.props as Record<string, never>;
+      if (typeof p.action === 'string')
+        return [
+          {
+            id: p.action,
+            label: String(p.label),
+            kind: (p.kind as UiAction['kind']) ?? 'click',
+            enabled: !p.disabled,
+            run: p.run,
+          },
+        ];
+      if (element.type === 'SimulationSteps')
+        return [1, 2, 3, 4, 5].map((n) => ({
+          id: `${p.actionPrefix}-step-${n}`,
+          label: String(n),
+          kind: 'click',
+          enabled: !p.disabled && n <= Number(p.step),
+          run: () => (p.onChange as (step: number) => void)(n),
+        }));
+      if (element.type === 'RunLocationSettings')
+        return [
+          {
+            id: p.configureAction,
+            label: 'configure',
+            kind: 'click',
+            enabled: !p.disabled,
+            run: p.onConfigure,
+          },
+        ];
+      if (element.type === 'SpatialForcingFields')
+        return [
+          { id: p.pickAction, label: 'pick', kind: 'click', enabled: !p.disabled, run: p.onPick },
+          {
+            id: p.detectAction,
+            label: 'detect',
+            kind: 'click',
+            enabled:
+              !p.disabled &&
+              !!String(p.directory).trim() &&
+              (p.probe as { status?: string } | null)?.status !== 'loading',
+            run: p.onDetect,
+          },
+        ];
+      if (element.type === 'HistoryVariablesCard')
+        return (['core', 'all', 'none'] as const).map((preset) => ({
+          id: `${p.actionPrefix}-history-${preset}`,
+          label: preset,
+          kind: 'click',
+          enabled: !p.disabled,
+          run: () =>
+            (p.onChange as (patch: Record<string, string>) => void)(
+              historyVariables.historyPreset(p.variables, preset),
+            ),
+        }));
+      return [];
+    });
+  }
+  // 按钮因时段或预热问题不可用：界面上要写出原因（第 737 轮起不能再靠点击后的报错）。
+  function blocked(id: string, reason: RegExp) {
+    const c = render();
+    assert.equal(c.actions.find((a) => a.id === id)?.enabled, false, `${id} disabled`);
+    const notices = elements
+      .filter((e) => e.type === 'Notice')
+      .flatMap((e) => e.children)
+      .map(String)
+      .join(' ');
+    assert.match(notices, reason);
+  }
   function set(id: string, value: string) {
     const target = contract.fields.find((item) => item.id === id);
     assert.ok(target, `visible field ${id}`);
@@ -386,7 +471,7 @@ function page(
         (contract.details as { simulation_step?: number } | undefined)?.simulation_step,
     );
     if (current === target) return render();
-    if (contract.actions.some((item) => item.id === id)) return click(id);
+    if (contract.actions.some((item) => item.id === id && item.enabled !== false)) return click(id);
     for (
       let i = 0;
       i < 6 &&
@@ -432,6 +517,7 @@ function page(
     opened,
     scrolls,
     elements,
+    blocked,
     render,
     mount,
     settle,
@@ -781,7 +867,8 @@ test('typing 2001 dates keeps partial input visible, blocks save, and preserves 
     assert.equal(c.fields.find((f) => f.id === 'case-start-date')?.value, partial);
     assert.equal(c.status, 'unsaved');
     assert.ok(!c.actions.some((a) => a.id === 'case-next'));
-    await assert.rejects(p.click('case-save'), /时段/);
+    // 时段不完整时界面上的"保存并继续"不可用，助手看到的也是不可用（第 737 轮起以按钮为准）。
+    p.blocked('case-save', /时段/);
   }
   assert.equal(
     p.calls.filter((call) => call.command === 'case_data_save').length,
@@ -934,7 +1021,7 @@ test('existing case refuses spinup cutoff outside its period and clearing it sav
   await p.mount();
   await p.goto('case-step-3');
   p.set('case-spinup-date', '2030-01-01');
-  await assert.rejects(p.click('case-save'), /预热|Spinup/i);
+  p.blocked('case-save', /预热|Spinup/i);
   assert.equal(p.calls.filter((call) => call.command === 'case_data_save').length, 0);
   p.set('case-spinup-date', '');
   await p.click('case-save');
@@ -948,7 +1035,7 @@ test('moving simulation start beyond the existing spinup cutoff refuses to save 
   await p.mount();
   await p.goto('case-step-3');
   p.set('case-start-date', '2001-08-01');
-  await assert.rejects(p.click('case-save'), /预热|Spinup/i);
+  p.blocked('case-save', /预热|Spinup/i);
   assert.equal(p.calls.filter((call) => call.command === 'case_data_save').length, 0);
   assert.equal(p.render().details.simulation_step, 3);
   assert.ok(p.guard());
@@ -1116,7 +1203,7 @@ test('existing case can reach its data step to repair dates after first reviewin
   await p.goto('case-step-4');
   const data = await p.click('case-previous');
   assert.equal(data.details.simulation_step, 3);
-  await assert.rejects(p.click('case-next'), /时段/);
+  p.blocked('case-next', /时段/);
   assert.equal(p.render().details.simulation_step, 3);
 });
 
@@ -1232,7 +1319,11 @@ test('existing case run and result tabs never expose settings-only process data 
     await p.click(`case-tab-${tab}`);
     assert.ok(!p.render().actions.some((a) => a.id.startsWith('case-data-group-')));
     assert.deepEqual(p.render().fields, []);
-    await p.click('case-tab-settings');
+    // 结果页不显示算例页头，返回模拟走结果页自己的返回按钮。
+    if (tab === 'results')
+      (p.elements.find((e) => e.type === 'ResultsPage')!.props.onBack as () => void)();
+    else await p.click('case-tab-settings');
+    p.render();
   }
 });
 
@@ -4294,9 +4385,10 @@ test('failed project loading keeps completed results and manual retry never recr
     p.render().actions.find((action) => action.id === 'new-multi-project')?.enabled,
     true,
   );
-  assert.equal(
+  // 没有可重试的站点时界面上不显示"重试"，助手也看不到。
+  assert.notEqual(
     p.render().actions.find((action) => action.id === 'new-multi-retry')?.enabled,
-    false,
+    true,
   );
   const resultIndex = p.elements.findIndex(
     (element) => element.type === 'Card' && element.props.title === '创建结果',
@@ -4430,7 +4522,7 @@ test('existing case calendar fields save dates without changing time-of-day or s
     target: { value: '20010101' },
   });
   assert.equal(p.render().fields.find((f) => f.id === 'case-start-date')?.value, '20010101');
-  await assert.rejects(p.click('case-save'), /时段/);
+  p.blocked('case-save', /时段/);
   (dates[0].props.onChange as (event: { target: { value: string } }) => void)({
     target: { value: '2001-01-01' },
   });

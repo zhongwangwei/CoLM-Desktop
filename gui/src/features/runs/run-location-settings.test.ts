@@ -27,6 +27,7 @@ const render = (host: string, serverNative = false, locationLocked = false) =>
       en: true,
       onChange: () => {},
       onConfigure: () => {},
+      configureAction: 'case-run-resources',
     }),
   );
 

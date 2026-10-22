@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Button, Card, Input } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import {
   RECOMMENDED_VARIABLES,
   historyBlockedReason,
@@ -24,6 +25,8 @@ const CATEGORY_LABELS: Record<string, [string, string]> = {
 };
 
 type Props = {
+  /** 助手动作名前缀（`case` / `new`），预设按钮登记为 `<前缀>-history-core|all|none`。 */
+  actionPrefix: string;
   // 当前内核与配置下 CoLM 历史场全集；settable=false 的写不出来，只读展示原因。
   variables: HistoryVariable[];
   // 已有算例给出每个开关的实际值；新建算例未写的开关沿用 CoLM 默认（开启）。
@@ -42,6 +45,7 @@ export default function HistoryVariablesCard({
   defaultOn = false,
   disabled = false,
   en = false,
+  actionPrefix,
   onChange,
 }: Props) {
   const t = (zh: string, eng: string) => (en ? eng : zh);
@@ -109,24 +113,28 @@ export default function HistoryVariablesCard({
       className="history-variables-card"
     >
       <div className="button-row history-variable-actions">
-        <Button
+        <ActionButton
+          action={`${actionPrefix}-history-core`}
+          label={t('仅推荐核心量', 'Recommended only')}
           disabled={disabled || !selection.core.length}
-          onClick={() => onChange(historyPreset(variables, 'core'))}
+          run={() => onChange(historyPreset(variables, 'core'))}
         >
           ★ {t('仅推荐核心量', 'Recommended only')} ({selection.core.length})
-        </Button>
-        <Button
+        </ActionButton>
+        <ActionButton
+          action={`${actionPrefix}-history-all`}
+          label={t('一键全开启', 'Turn all on')}
           disabled={disabled || !selection.available.length}
-          onClick={() => onChange(historyPreset(variables, 'all'))}
+          run={() => onChange(historyPreset(variables, 'all'))}
         >
           {t('一键全开启', 'Turn all on')} ({selection.available.length})
-        </Button>
-        <Button
+        </ActionButton>
+        <ActionButton
+          action={`${actionPrefix}-history-none`}
+          label={t('一键全清除', 'Clear all')}
           disabled={disabled || !selection.selected}
-          onClick={() => onChange(historyPreset(variables, 'none'))}
-        >
-          {t('一键全清除', 'Clear all')}
-        </Button>
+          run={() => onChange(historyPreset(variables, 'none'))}
+        />
         <span className="muted history-variable-count">
           {t(
             `已开启 ${selection.selected} / ${selection.available.length}`,

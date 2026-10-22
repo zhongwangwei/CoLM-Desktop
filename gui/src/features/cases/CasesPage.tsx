@@ -1,17 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
+import { ActionButton } from '../../components/ActionButton';
 import { usePageContract, type UiField } from '../../lib/guide';
-import {
-  Button,
-  Card,
-  Input,
-  DateInput,
-  Select,
-  Field,
-  Notice,
-  Advanced,
-} from '../../components/ui';
+import { Card, Input, DateInput, Select, Field, Notice, Advanced } from '../../components/ui';
 import {
   isCaseField,
   displayLiteral,
@@ -29,7 +21,6 @@ import {
   simulationFields,
   isSiteConfiguration,
   caseRangeKeys,
-  simulationSteps,
   validDate,
   type SimulationStep,
 } from './simulation-model';
@@ -43,7 +34,7 @@ import {
   caseSimulationDomain,
 } from './model-settings';
 import HistoryVariablesCard from './HistoryVariablesCard';
-import { historyKey, historyPreset, type HistoryVariable } from './history-variables';
+import { historyKey, type HistoryVariable } from './history-variables';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
 import { caseSchemeFields, type SimulationMode } from './model-settings';
@@ -846,143 +837,8 @@ export default function CasesPage() {
             ...(step === 3 && forcingInput ? { forcing: forcingProbe } : {}),
           }
         : undefined,
-    actions: !dir
-      ? [
-          {
-            id: 'case-project',
-            label: t('打开项目', 'Open project'),
-            kind: 'click',
-            // 和首页的"打开项目"去同一个地方（历史记录），不先回首页再点一次。
-            run: () => navigate('history'),
-          },
-          {
-            id: 'case-new',
-            label: t('新建模拟', 'New simulation'),
-            kind: 'click',
-            run: () => navigate('new-case'),
-          },
-        ]
-      : [
-          ...(state.caseTab === 'settings' && step === 1
-            ? [
-                {
-                  id: 'case-run-resources',
-                  label: t('配置计算资源与路径对应', 'Configure resources and path mappings'),
-                  kind: 'click' as const,
-                  enabled: !editingDisabled && !dirty,
-                  run: openResources,
-                },
-              ]
-            : []),
-          ...(state.caseTab === 'settings'
-            ? (['runs', 'results'] as const)
-            : (['settings'] as const)
-          ).map((tab) => ({
-            id: `case-tab-${tab}`,
-            label:
-              tab === 'runs'
-                ? t('运行记录', 'Run history')
-                : tab === 'results'
-                  ? t('查看结果', 'View results')
-                  : t('返回模拟', 'Back to simulation'),
-            kind: 'click' as const,
-            run: () => (tab === 'settings' ? backToSimulation() : update({ caseTab: tab })),
-          })),
-          ...(dirty
-            ? [
-                {
-                  id: 'case-discard',
-                  label: t('放弃本地修改', 'Discard local edits'),
-                  kind: 'click' as const,
-                  enabled: !editingDisabled,
-                  run: discard,
-                },
-              ]
-            : []),
-          ...(state.caseTab === 'settings' && step === 5 && historyVars.length
-            ? (
-                [
-                  ['core', t('仅核心变量', 'Core variables only')],
-                  ['all', t('一键全部开启', 'Enable all')],
-                  ['none', t('一键全部清除', 'Clear all')],
-                ] as const
-              ).map(([preset, label]) => ({
-                id: `case-history-${preset}`,
-                label,
-                kind: 'click' as const,
-                enabled: !editingDisabled,
-                run: () => setValues((x) => ({ ...x, ...historyPreset(historyVars, preset) })),
-              }))
-            : []),
-          ...(state.caseTab === 'settings'
-            ? [
-                ...(step === 3 && forcingInput
-                  ? [
-                      {
-                        id: 'case-pick-forcing-directory',
-                        label: t('选择强迫场数据路径', 'Choose forcing data path'),
-                        kind: 'click' as const,
-                        enabled: !forcingEditingDisabled,
-                        run: pickForcingDirectory,
-                      },
-                      {
-                        id: 'case-detect-forcing',
-                        label: t('识别数据集', 'Identify dataset'),
-                        kind: 'click' as const,
-                        enabled:
-                          !forcingEditingDisabled &&
-                          !!forcingInput.directory.trim() &&
-                          forcingProbe?.status !== 'loading',
-                        run: () => detectCaseForcing(),
-                      },
-                    ]
-                  : []),
-                ...simulationSteps.slice(0, step - 1).map((label, i) => ({
-                  id: `case-step-${i + 1}`,
-                  label: label[en ? 1 : 0],
-                  kind: 'click' as const,
-                  enabled: !editingDisabled,
-                  run: () => setStep((i + 1) as SimulationStep),
-                })),
-                ...(step > 1
-                  ? [
-                      {
-                        id: 'case-previous',
-                        label: t('上一步', 'Back'),
-                        kind: 'click' as const,
-                        enabled: !editingDisabled,
-                        run: () => setStep((step - 1) as SimulationStep),
-                      },
-                    ]
-                  : []),
-                ...(step < 5 && !dirty
-                  ? [
-                      {
-                        id: 'case-next',
-                        label: t('下一步', 'Next'),
-                        kind: 'click' as const,
-                        enabled: !editingDisabled && !!schema.length,
-                        run: next,
-                      },
-                    ]
-                  : []),
-                ...(dirty
-                  ? [
-                      {
-                        id: 'case-save',
-                        label:
-                          step < 5
-                            ? t('保存并继续', 'Save and continue')
-                            : t('保存设置', 'Save settings'),
-                        kind: 'commit' as const,
-                        enabled: !editingDisabled,
-                        run: step < 5 ? saveAndContinue : save,
-                      },
-                    ]
-                  : []),
-              ]
-            : []),
-        ],
+    // 按钮自己登记（第 737 轮）。
+    actions: [],
   });
   // 项目里有算例、只是没选（批量运行之后）：结果页自带选站点。一个算例都没有时结果页什么都选不了，
   // 原来照样铺开一整页空的评估界面、按钮点了也没用，和模拟页一样给出打开项目或新建模拟。
@@ -1024,10 +880,20 @@ export default function CasesPage() {
           }
         >
           <div className="actions">
-            <Button variant="primary" onClick={() => navigate('new-case')}>
+            <ActionButton
+              action="case-new"
+              label={t('新建模拟', 'New simulation')}
+              variant="primary"
+              run={() => navigate('new-case')}
+            >
               ＋ {t('新建模拟', 'New simulation')}
-            </Button>
-            <Button onClick={() => navigate('history')}>{t('打开项目', 'Open project')}</Button>
+            </ActionButton>
+            {/* 和首页的"打开项目"去同一个地方（历史记录），不先回首页再点一次。 */}
+            <ActionButton
+              action="case-project"
+              label={t('打开项目', 'Open project')}
+              run={() => navigate('history')}
+            />
           </div>
         </Card>
       </div>
@@ -1135,22 +1001,38 @@ export default function CasesPage() {
           <div className="actions">
             {state.caseTab === 'settings' ? (
               <>
-                <Button variant="ghost" onClick={() => update({ caseTab: 'runs' })}>
-                  {t('运行记录', 'Run history')}
-                </Button>
-                <Button variant="ghost" onClick={() => update({ caseTab: 'results' })}>
-                  {t('查看结果', 'View results')}
-                </Button>
+                <ActionButton
+                  action="case-tab-runs"
+                  label={t('运行记录', 'Run history')}
+                  variant="ghost"
+                  run={() => update({ caseTab: 'runs' })}
+                />
+                <ActionButton
+                  action="case-tab-results"
+                  label={t('查看结果', 'View results')}
+                  variant="ghost"
+                  run={() => update({ caseTab: 'results' })}
+                />
               </>
             ) : (
-              <Button onClick={backToSimulation}>{t('返回模拟', 'Back to simulation')}</Button>
+              <ActionButton
+                action="case-tab-settings"
+                label={t('返回模拟', 'Back to simulation')}
+                run={backToSimulation}
+              />
             )}
           </div>
         </header>
       )}
       {state.caseTab === 'settings' && (
         <>
-          <SimulationSteps step={step} en={en} disabled={editingDisabled} onChange={setStep} />
+          <SimulationSteps
+            step={step}
+            en={en}
+            disabled={editingDisabled}
+            actionPrefix="case"
+            onChange={setStep}
+          />
           {error && <Notice tone="error">{error}</Notice>}
           {optionError && <Notice tone="warning">{optionError}</Notice>}
           {busy && (
@@ -1162,9 +1044,14 @@ export default function CasesPage() {
                 '设置尚未保存，保存后才能开始运行或调整模型。',
                 'Save your changes before running or changing the model.',
               )}{' '}
-              <Button disabled={editingDisabled} onClick={discard}>
+              <ActionButton
+                action="case-discard"
+                label={t('放弃本地修改', 'Discard local edits')}
+                disabled={editingDisabled}
+                run={discard}
+              >
                 {t('放弃修改', 'Discard edits')}
-              </Button>
+              </ActionButton>
             </Notice>
           )}
           {step === 1 && (
@@ -1185,6 +1072,7 @@ export default function CasesPage() {
                 en={en}
                 onChange={(host) => void changeRunHost(host).catch(() => {})}
                 onConfigure={openResources}
+                configureAction="case-run-resources"
               />
               {remoteDirectory && (
                 <Notice>
@@ -1326,6 +1214,8 @@ export default function CasesPage() {
                     void pickForcingDirectory().catch((error) => setError(String(error)))
                   }
                   onDatasetChange={setForcingTemplate}
+                  pickAction="case-pick-forcing-directory"
+                  detectAction="case-detect-forcing"
                   onDetect={() => void detectCaseForcing()}
                 />
               )}
@@ -1409,6 +1299,7 @@ export default function CasesPage() {
               </Card>
               {historyVars.length > 0 && (
                 <HistoryVariablesCard
+                  actionPrefix="case"
                   variables={historyVars}
                   values={values}
                   disabled={editingDisabled}
@@ -1421,33 +1312,32 @@ export default function CasesPage() {
           {step < 5 && (
             <footer className="simulation-footer">
               {step > 1 ? (
-                <Button
+                <ActionButton
+                  action="case-previous"
+                  label={t('上一步', 'Back')}
                   disabled={editingDisabled}
-                  onClick={() => setStep((step - 1) as SimulationStep)}
-                >
-                  {t('上一步', 'Back')}
-                </Button>
+                  run={() => setStep((step - 1) as SimulationStep)}
+                />
               ) : (
                 <span />
               )}
-              <Button
+              <ActionButton
+                action={dirty ? 'case-save' : 'case-next'}
+                kind={dirty ? 'commit' : 'click'}
+                label={dirty ? t('保存并继续', 'Save and continue') : t('下一步', 'Next')}
                 variant="primary"
                 disabled={
                   editingDisabled || !schema.length || (step >= 3 && periodProblem() !== null)
                 }
-                onClick={() => {
-                  if (dirty) void saveAndContinue().catch(() => {});
-                  else
-                    try {
-                      next();
-                    } catch {
-                      /* The inline message describes the invalid period. */
-                    }
-                }}
+                run={dirty ? saveAndContinue : next}
               >
                 {dirty ? t('保存并继续', 'Save and continue') : t('下一步', 'Next')} →
-              </Button>
+              </ActionButton>
             </footer>
+          )}
+          {/* 时段或预热截止不对时保存/下一步不可用；原来原因只出现在点击后的报错里，按钮置灰后就看不到了。 */}
+          {step >= 3 && !editingDisabled && periodProblem() && (
+            <Notice tone="warning">{periodProblem()}</Notice>
           )}
           <div hidden={step !== 5}>
             <RunPanel
@@ -1465,13 +1355,14 @@ export default function CasesPage() {
             />
           </div>
           {step === 5 && dirty && (
-            <Button
+            <ActionButton
+              action="case-save"
+              kind="commit"
+              label={t('保存设置', 'Save settings')}
               variant="primary"
               disabled={editingDisabled || periodProblem() !== null}
-              onClick={() => void save().catch(() => {})}
-            >
-              {t('保存设置', 'Save settings')}
-            </Button>
+              run={save}
+            />
           )}
         </>
       )}

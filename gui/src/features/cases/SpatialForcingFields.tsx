@@ -1,4 +1,5 @@
-import { Button, Field, Input, Notice, Select } from '../../components/ui';
+import { Field, Input, Notice, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 
 export type ForcingLayoutProbe = {
   status: 'loading' | 'done' | 'error';
@@ -21,6 +22,8 @@ export default function SpatialForcingFields({
   onDirectoryChange,
   onDirectoryBlur,
   onPick,
+  pickAction,
+  detectAction,
   onDatasetChange,
   onDetect,
 }: {
@@ -35,6 +38,9 @@ export default function SpatialForcingFields({
   onDirectoryChange: (value: string) => void;
   onDirectoryBlur: () => void;
   onPick: () => void;
+  /** 助手动作名：选择强迫场路径、识别数据集。 */
+  pickAction: string;
+  detectAction: string;
   onDatasetChange: (value: string) => void;
   onDetect: () => void;
 }) {
@@ -50,13 +56,15 @@ export default function SpatialForcingFields({
               onChange={(event) => onDirectoryChange(event.target.value)}
               onBlur={onDirectoryBlur}
             />
-            <Button
+            <ActionButton
+              action={pickAction}
+              label={t('选择强迫场数据路径', 'Choose forcing data path')}
               disabled={disabled}
               aria-label={t('强迫场数据路径 · 选择', 'Forcing data path · Browse')}
-              onClick={onPick}
+              run={onPick}
             >
               …
-            </Button>
+            </ActionButton>
           </div>
         </Field>
         <Field label={t('强迫场数据集', 'Forcing dataset')}>
@@ -77,12 +85,12 @@ export default function SpatialForcingFields({
                 </option>
               ))}
             </Select>
-            <Button
+            <ActionButton
+              action={detectAction}
+              label={t('识别数据集', 'Identify dataset')}
               disabled={disabled || !directory.trim() || probe?.status === 'loading'}
-              onClick={onDetect}
-            >
-              {t('识别数据集', 'Identify dataset')}
-            </Button>
+              run={onDetect}
+            />
           </div>
         </Field>
       </div>
