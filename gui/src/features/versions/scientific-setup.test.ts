@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import {
   applySetupRequest,
   setupChoices,
@@ -437,4 +438,46 @@ test('tracer eligibility uses displayed defaults and runtime VG semantics withou
   draft.physics.DEF_USE_Campbell_SOIL_MODEL = '.false.';
   draft.physics.DEF_URBAN_RUN = '.true.';
   assert.throws(() => apply(draft, 'DEF_USE_TRACER', '.true.'), /urban/);
+});
+
+// 与后端 config_tests.rs 共用的判例（第 736 轮）：后端会拒、内核会停机的组合，前端卡片必须先拦；
+// 两边都放行的组合，前端也不能拦。
+test('setup cards block exactly the combinations the backend rejects', () => {
+  const shared = JSON.parse(
+    readFileSync(new URL('./option-combinations.json', import.meta.url), 'utf8'),
+  ) as {
+    cases: {
+      name: string;
+      domain: string;
+      grid: string | null;
+      subgrid: string;
+      classification: 'IGBP' | 'USGS';
+      kernel_macros: string[];
+      values: Record<string, string>;
+      control: string;
+      choice: string;
+      kernel_rejects: boolean;
+    }[];
+  };
+  for (const c of shared.cases) {
+    const kernel = { dir: '/kernel', macros: c.kernel_macros } as KernelEntry;
+    const env: SetupEnvironment = {
+      subgrid: c.subgrid,
+      domain: c.domain,
+      grid: c.grid,
+      classification: c.classification,
+      kernel,
+      cropKernel: { ...kernel, macros: [...new Set([...c.kernel_macros, 'CROP'])] },
+    };
+    const physics = {
+      ...c.values,
+      DEF_USE_LCT: c.subgrid === 'LCT' ? '.true.' : '.false.',
+      DEF_USE_PFT: c.subgrid === 'PFT' ? '.true.' : '.false.',
+      DEF_USE_PC: c.subgrid === 'PC' ? '.true.' : '.false.',
+    };
+    const reason = setupChoices({ physics, parameters: [], process_files: [] }, fields, env)
+      .find((choice) => choice.id === c.control)!
+      .choices.find((choice) => choice.value === c.choice)!.reason;
+    assert.equal(!!reason, c.kernel_rejects, `${c.name}: ${reason || 'allowed'}`);
+  }
 });

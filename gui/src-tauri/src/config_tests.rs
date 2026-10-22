@@ -4777,3 +4777,62 @@ fn standard_tracer_parameters_list_numbers_a_version_may_change() {
     }
     colm_model::validate_overlay(&overlay).unwrap();
 }
+
+// 与前端 `scientific-setup.test.ts` 共用的判例：同一份清单，两边各自判断是否拦下（第 736 轮）。
+#[test]
+fn option_combinations_agree_with_the_shared_cases() {
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../src/features/versions/option-combinations.json"
+    ))
+    .unwrap();
+    for case in cases["cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let macros: Vec<&str> = case["kernel_macros"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        let facts = super::KernelFacts {
+            single: macros.contains(&"SinglePoint"),
+            usgs: macros.contains(&"LULC_USGS"),
+            crop: macros.contains(&"CROP"),
+            catchment: macros.contains(&"CATCHMENT"),
+            grid_river: macros.contains(&"GridRiverLakeFlow"),
+        };
+        let subgrid = case["subgrid"].as_str().unwrap();
+        let mut text = String::from("&nl_colm\n DEF_simulation_time%start_year=2005\n");
+        for (key, on) in [
+            ("DEF_USE_LCT", subgrid == "LCT"),
+            ("DEF_USE_PFT", subgrid == "PFT"),
+            ("DEF_USE_PC", subgrid == "PC"),
+        ] {
+            text.push_str(&format!(
+                " {key}={}\n",
+                if on { ".true." } else { ".false." }
+            ));
+        }
+        let control = case["control"].as_str().unwrap();
+        for (key, value) in case["values"].as_object().unwrap() {
+            if key != control {
+                text.push_str(&format!(" {key}={}\n", value.as_str().unwrap()));
+            }
+        }
+        text.push_str(&format!(
+            " {control}={}\n/\n",
+            case["choice"].as_str().unwrap()
+        ));
+        let doc = colm_namelist::parse(&text).unwrap();
+        let outcome = super::validate_runtime_contract(&doc, &std::env::temp_dir(), Some(facts));
+        // 放行的组合接着会去查运行期数据文件（BGC 的氮沉降等）；测试机上没有这些文件，
+        // 那是数据问题，不是组合被拒。
+        let rejected = outcome
+            .as_ref()
+            .is_err_and(|error| !error.contains("数据缺失"));
+        assert_eq!(
+            rejected,
+            case["kernel_rejects"].as_bool().unwrap(),
+            "{name}: {outcome:?}"
+        );
+    }
+}
