@@ -47,8 +47,12 @@ export default function ProjectPage() {
         : 'cases'
       : savedView?.home
         ? undefined
-        : savedView?.page,
-    chooser = page === 'results' ? 'results' : page ? 'simulation' : null,
+        : savedView?.page === 'results'
+          ? 'cases'
+          : savedView?.page,
+    // 首页只有"新建模拟 / 打开项目 / 准备输入数据"三张卡，不再有"直接查看结果"入口；
+    // 结果从侧栏"结果"进入已打开算例的结果页。旧会话存下的 results 视图按算例列表处理。
+    chooser = page ? 'simulation' : null,
     batchPage = page === 'batch',
     batchFromCreation = createdBatch || (batchPage && !!savedView?.fromCreation);
   const lock = useRef(false),
@@ -137,12 +141,10 @@ export default function ProjectPage() {
     state.versionRef.revision === official?.version.revision;
   const existingSelected = modelChosen && !officialSelected;
   const versionKey = (version: FrozenRevision) => JSON.stringify(version.version);
-  function setChooser(next: 'simulation' | 'results' | null) {
+  function setChooser(next: 'simulation' | null) {
     if (!active.current) return;
     update({
-      projectView: next
-        ? { root: state.root, page: next === 'simulation' ? 'cases' : 'results' }
-        : undefined,
+      projectView: next ? { root: state.root, page: 'cases' } : undefined,
     });
   }
   function openBatch() {
@@ -269,14 +271,6 @@ export default function ProjectPage() {
     setChooser(null);
     return opened;
   }
-  const otherResults = () =>
-    work(async () => {
-      const dir = await invoke<string | null>('pick_folder', { key: 'project-results-case' });
-      if (!dir) return { cancelled: true };
-      const opened = await openCase(dir, 'results');
-      setChooser(null);
-      return opened;
-    });
   // Choosing a new simulation leaves the project worked on until now: the sidebar's current
   // project becomes the new one once it is created, not the old one meanwhile.
   const newSimulation = () => {
@@ -417,14 +411,14 @@ export default function ProjectPage() {
       label: entry.name,
       kind: 'click' as const,
       enabled,
-      run: () => chooseCase(entry.dir, chooser === 'results' ? 'results' : 'settings'),
+      run: () => chooseCase(entry.dir, 'settings'),
     })),
     {
       id: 'project-choose-other',
       label: t('选择其他目录', 'Browse another folder'),
       kind: 'click',
       enabled,
-      run: chooser === 'results' ? otherResults : browseProject,
+      run: browseProject,
     },
     {
       id: 'project-back',
@@ -512,11 +506,9 @@ export default function ProjectPage() {
     {
       title: versionChooser
         ? t('选择已有版本', 'Choose an existing version')
-        : chooser === 'results'
-          ? t('选择要分析的算例', 'Choose a case to analyze')
-          : chooser
-            ? t('项目中的算例', 'Cases in this project')
-            : t('项目', 'Project'),
+        : chooser
+          ? t('项目中的算例', 'Cases in this project')
+          : t('项目', 'Project'),
       step: 'project',
       modal: versionChooser,
       status: busy
@@ -541,11 +533,7 @@ export default function ProjectPage() {
     return (
       <div className="page-stack">
         <div className="page-heading">
-          <h1>
-            {chooser === 'results'
-              ? t('选择要分析的算例', 'Choose a case to analyze')
-              : t('项目中的算例', 'Cases in this project')}
-          </h1>
+          <h1>{t('项目中的算例', 'Cases in this project')}</h1>
           <Button disabled={!enabled} onClick={() => setChooser(null)}>
             {t('返回项目首页', 'Back to project home')}
           </Button>
@@ -555,12 +543,10 @@ export default function ProjectPage() {
         {busy && <Notice>{t('正在打开，请稍候…', 'Opening, please wait…')}</Notice>}
         {!state.cases.length && (
           <p className="muted">
-            {chooser === 'results'
-              ? t('可以选择一个已有算例目录。', 'Select an existing case folder.')
-              : t(
-                  '这个目录中还没有算例，可以新建模拟。',
-                  'This folder has no cases yet. Create a new simulation.',
-                )}
+            {t(
+              '这个目录中还没有算例，可以新建模拟。',
+              'This folder has no cases yet. Create a new simulation.',
+            )}
           </p>
         )}
         <div className="project-case-choices">
@@ -568,11 +554,7 @@ export default function ProjectPage() {
             <Button
               key={entry.dir}
               disabled={!enabled}
-              onClick={() =>
-                void chooseCase(entry.dir, chooser === 'results' ? 'results' : 'settings').catch(
-                  () => {},
-                )
-              }
+              onClick={() => void chooseCase(entry.dir, 'settings').catch(() => {})}
             >
               <span>{entry.name}</span>
               {entry.has_history && (
@@ -583,24 +565,15 @@ export default function ProjectPage() {
           ))}
         </div>
         <div className="actions">
-          <Button
-            disabled={!enabled}
-            onClick={() =>
-              void (chooser === 'results' ? otherResults() : browseProject()).catch(() => {})
-            }
-          >
+          <Button disabled={!enabled} onClick={() => void browseProject().catch(() => {})}>
             {t('选择其他目录', 'Browse another folder')}
           </Button>
-          {chooser === 'simulation' && (
-            <Button disabled={!enabled || !state.cases.length} onClick={openBatch}>
-              {t('批量运行', 'Batch run')}
-            </Button>
-          )}
-          {chooser === 'simulation' && (
-            <Button disabled={!enabled} variant="primary" onClick={newSimulation}>
-              {t('新建模拟', 'New simulation')}
-            </Button>
-          )}
+          <Button disabled={!enabled || !state.cases.length} onClick={openBatch}>
+            {t('批量运行', 'Batch run')}
+          </Button>
+          <Button disabled={!enabled} variant="primary" onClick={newSimulation}>
+            {t('新建模拟', 'New simulation')}
+          </Button>
         </div>
       </div>
     );
