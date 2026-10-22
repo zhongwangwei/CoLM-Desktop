@@ -10,6 +10,7 @@ import {
   readSavedProject,
 } from './lib/navigation';
 import NavIcon from './components/NavIcon';
+import { ActionButton } from './components/ActionButton';
 import appManifest from '../package.json';
 import { GuideBinding, usePageContract } from './lib/guide';
 import { Button, Notice } from './components/ui';
@@ -33,14 +34,7 @@ function Help() {
     title: en ? 'Help' : '帮助',
     step: 'help',
     fields: [],
-    actions: [
-      {
-        id: 'help-example',
-        label: en ? 'Try an example' : '试用示例',
-        kind: 'click',
-        run: () => navigate('new-case'),
-      },
-    ],
+    actions: [],
   });
   return (
     <div className="page-stack">
@@ -62,7 +56,11 @@ function Help() {
             ? 'Use Results to evaluate outputs, Research to calibrate or train, Versions to review changes, and History to retrace operations.'
             : '在结果页评估输出，在研究页率定或学习，在版本页核对修改，在历史里追溯操作。'}
         </p>
-        <Button onClick={() => navigate('new-case')}>{en ? 'Try an example' : '试用示例'}</Button>
+        <ActionButton
+          action="help-example"
+          label={en ? 'Try an example' : '试用示例'}
+          run={() => navigate('new-case')}
+        />
       </div>
     </div>
   );
@@ -112,40 +110,26 @@ export default function App() {
     return true;
   };
   const navButton = (item: (typeof navigation)[number]) => (
-    <Button
+    <ActionButton
       key={item.id}
+      action={`nav-${item.id}`}
+      label={tr(item.zh, item.en)}
       className={`nav-button ${active === item.id ? 'active' : ''}`}
       variant="ghost"
       aria-current={active === item.id ? 'page' : undefined}
-      onClick={() => openNavigation(item)}
+      run={() => openNavigation(item)}
     >
       <NavIcon name={item.id} />
       {tr(item.zh, item.en)}
-    </Button>
+    </ActionButton>
   );
   usePageContract({
     title: 'CoLM Desktop',
     step: state.route,
     scope: 'shell',
     fields: [],
-    actions: [
-      ...(state.root
-        ? [
-            {
-              id: 'nav-current-project',
-              label: tr('回到当前项目', 'Back to current project'),
-              kind: 'click' as const,
-              run: openCurrentProject,
-            },
-          ]
-        : []),
-      ...navigation.map((item) => ({
-        id: `nav-${item.id}`,
-        label: tr(item.zh, item.en),
-        kind: 'click' as const,
-        run: () => openNavigation(item),
-      })),
-    ],
+    // 侧栏按钮自己登记（第 737 轮）。
+    actions: [],
   });
   // 研究页打开过一次就常驻：本机研究一跑几小时，离开研究页不能把它（和它的进度）一起卸掉。
   const [researchKept, setResearchKept] = useState(false);
@@ -204,16 +188,18 @@ export default function App() {
         </header>
         <aside className="sidebar" aria-label={tr('主导航', 'Main navigation')}>
           {state.root ? (
-            <button
-              type="button"
+            <ActionButton
+              bare
+              action="nav-current-project"
+              label={tr('回到当前项目', 'Back to current project')}
               className={`current-project ${onCurrentProject ? 'active' : ''}`}
               title={state.root}
               aria-current={onCurrentProject ? 'page' : undefined}
-              onClick={() => openCurrentProject()}
+              run={() => openCurrentProject()}
             >
               <span className="current-project-label">{tr('当前项目', 'Current project')}</span>
               <span className="current-project-name">{projectName(state.root, state.cases)}</span>
-            </button>
+            </ActionButton>
           ) : (
             // 启动时不自动打开上次的项目：这里写明还没选，点一下去首页的"最近的项目"里选。
             <button

@@ -11,6 +11,7 @@ export function ActionButton({
   label,
   kind = 'click',
   run,
+  bare = false,
   children,
   ...props
 }: Omit<ComponentProps<typeof Button>, 'onClick'> & {
@@ -21,24 +22,37 @@ export function ActionButton({
   /** `commit`：会保存或运行东西，助手要先征得用户同意。 */
   kind?: 'click' | 'commit';
   run: () => unknown | Promise<unknown>;
+  /** 渲染不带按钮样式的原生 `<button>`（侧栏"当前项目"这类自带样式的控件）。 */
+  bare?: boolean;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   useRenderedAction({ id: action, label, kind, run }, ref);
+  const onClick = () => {
+    // 同步抛出的错误也要接住：run 自己已经提示过用户。
+    try {
+      void Promise.resolve(run()).catch(() => {});
+    } catch {
+      /* 已由 run 提示 */
+    }
+  };
+  const content = children ?? label;
+  if (bare) {
+    // 按钮样式相关的两个属性不传给原生 button。
+    const native: ComponentProps<'button'> & { variant?: unknown; asChild?: unknown } = {
+      ...props,
+    };
+    delete native.variant;
+    delete native.asChild;
+    const type = native.type ?? 'button';
+    return (
+      <button ref={ref} data-action={action} onClick={onClick} {...native} type={type}>
+        {content}
+      </button>
+    );
+  }
   return (
-    <Button
-      ref={ref}
-      data-action={action}
-      onClick={() => {
-        // 同步抛出的错误也要接住：run 自己已经提示过用户。
-        try {
-          void Promise.resolve(run()).catch(() => {});
-        } catch {
-          /* 已由 run 提示 */
-        }
-      }}
-      {...props}
-    >
-      {children ?? label}
+    <Button ref={ref} data-action={action} onClick={onClick} {...props}>
+      {content}
     </Button>
   );
 }

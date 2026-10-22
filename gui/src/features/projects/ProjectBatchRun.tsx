@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react';
-import { Button, Notice } from '../../components/ui';
+import { Notice } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invoke } from '../../lib/ipc';
 import type { CaseEntry, CaseProfile } from '../../lib/types';
 import RunPanel from '../runs/RunPanel';
 import { remoteActivity, restoreRunView } from '../runs/run-model';
+import { ActionButton } from '../../components/ActionButton';
 
 type Tone = 'running' | 'waiting' | 'succeeded' | 'failed' | 'cancelled' | 'unknown';
 // 选站点时还要区分没有运行记录的站点：本地已有结果的算 previous，其余算 idle。
@@ -272,47 +273,9 @@ export default function ProjectBatchRun({
             set: (value) => select(entry.dir, value === 'true'),
           }))
         : [],
-    actions: [
-      ...(!fixedSelection
-        ? [
-            {
-              id: 'project-batch-selection',
-              label: t('调整运行站点（可选）', 'Adjust stations (optional)'),
-              kind: 'click' as const,
-              enabled: !locked,
-              run: () => {
-                if (!locked) setSelecting((value) => !value);
-              },
-            },
-            ...(selecting
-              ? [
-                  {
-                    id: 'project-batch-select-all',
-                    label: t('全选站点', 'Select all stations'),
-                    kind: 'click' as const,
-                    enabled: !locked,
-                    run: () => {
-                      if (!locked) setSelected(state.cases.map((entry) => entry.dir));
-                    },
-                  },
-                ]
-              : []),
-          ]
-        : []),
-      ...(!current?.profiles
-        ? [
-            {
-              id: 'project-batch-back',
-              label: t('返回算例列表', 'Back to cases'),
-              kind: 'click' as const,
-              enabled: !locked,
-              run: () => {
-                if (!locked) onBack();
-              },
-            },
-          ]
-        : []),
-    ],
+    // 按钮自己登记（第 737 轮）。原来清单里的"全选站点"直接选中全部算例，界面上的按钮选的却是
+    // 当前筛选列出的站点；"全不选""只选没有结果的"和筛选标签则只有界面上有。
+    actions: [],
   });
   return (
     <div className="page-stack batch-page">
@@ -328,9 +291,12 @@ export default function ProjectBatchRun({
           </div>
         </div>
         {!current?.profiles && (
-          <Button disabled={!!locked} onClick={onBack}>
-            {t('返回算例列表', 'Back to cases')}
-          </Button>
+          <ActionButton
+            action="project-batch-back"
+            label={t('返回算例列表', 'Back to cases')}
+            disabled={!!locked}
+            run={onBack}
+          />
         )}
       </div>
       <section className="card batch-picker" aria-label={t('运行站点', 'Stations')}>
@@ -349,11 +315,16 @@ export default function ProjectBatchRun({
             </p>
           </div>
           {!fixedSelection && (
-            <Button disabled={!!locked} onClick={() => setSelecting((value) => !value)}>
-              {selecting
-                ? t('收起站点列表', 'Hide station list')
-                : t('调整运行站点（可选）', 'Adjust stations (optional)')}
-            </Button>
+            <ActionButton
+              action="project-batch-selection"
+              label={
+                selecting
+                  ? t('收起站点列表', 'Hide station list')
+                  : t('调整运行站点（可选）', 'Adjust stations (optional)')
+              }
+              disabled={!!locked}
+              run={() => setSelecting((value) => !value)}
+            />
           )}
         </div>
         {!fixedSelection && selecting && (
@@ -376,58 +347,67 @@ export default function ProjectBatchRun({
                   const count = state.cases.filter((entry) => inFilter(entry, filter)).length;
                   return filter === 'all' || count
                     ? [
-                        <button
+                        <ActionButton
+                          bare
                           key={filter}
-                          type="button"
+                          action={`project-batch-filter-${filter}`}
+                          label={t(
+                            `只列出：${pickLabels[filter]}`,
+                            `List only: ${pickLabels[filter]}`,
+                          )}
                           className="batch-chip"
                           aria-pressed={pickFilter === filter}
-                          onClick={() => setPickFilter(filter)}
+                          run={() => setPickFilter(filter)}
                         >
                           {pickLabels[filter]}
                           <span className="batch-chip-count">{count}</span>
-                        </button>,
+                        </ActionButton>,
                       ]
                     : [];
                 })}
               </div>
             </div>
             <div className="batch-quick">
-              <Button
+              <ActionButton
+                action="project-batch-select-all"
+                label={
+                  narrowed
+                    ? t('全选列出的站点', 'Select listed')
+                    : t('全选站点', 'Select all stations')
+                }
                 variant="ghost"
                 disabled={!!locked}
-                onClick={() =>
+                run={() =>
                   choose(
                     listed.map((entry) => entry.dir),
                     'add',
                   )
                 }
-              >
-                {narrowed
-                  ? t('全选列出的站点', 'Select listed')
-                  : t('全选站点', 'Select all stations')}
-              </Button>
-              <Button
+              />
+              <ActionButton
+                action="project-batch-select-none"
+                label={
+                  narrowed ? t('取消列出的站点', 'Deselect listed') : t('全不选', 'Select none')
+                }
                 variant="ghost"
                 disabled={!!locked}
-                onClick={() =>
+                run={() =>
                   choose(
                     listed.map((entry) => entry.dir),
                     'remove',
                   )
                 }
-              >
-                {narrowed ? t('取消列出的站点', 'Deselect listed') : t('全不选', 'Select none')}
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={!!locked || !unfinished.length}
-                onClick={() => choose(unfinished, 'only')}
-              >
-                {t(
+              />
+              <ActionButton
+                action="project-batch-select-unfinished"
+                label={t(
                   `只选还没有结果的站点（${unfinished.length}）`,
                   `Only stations without results (${unfinished.length})`,
                 )}
-              </Button>
+                variant="ghost"
+                disabled={!!locked || !unfinished.length}
+                run={() => choose(unfinished, 'only')}
+              />
               <span className="batch-quick-count">
                 {t(
                   `已选 ${cases.length} / ${state.cases.length}`,
@@ -534,17 +514,19 @@ export default function ProjectBatchRun({
           <div className="batch-tiles" role="group" aria-label={t('按状态查看', 'Show by status')}>
             {(['running', 'waiting', 'succeeded', 'failed', 'cancelled', 'unknown'] as Tone[]).map(
               (tone) => (
-                <button
+                <ActionButton
+                  bare
                   key={tone}
-                  type="button"
+                  action={`project-batch-monitor-${tone}`}
+                  label={t(`只看：${toneLabels[tone]}`, `Show only: ${toneLabels[tone]}`)}
                   className={`batch-tile is-${tone}`}
                   aria-pressed={monitorFilter === tone}
                   disabled={!counts[tone] && monitorFilter !== tone}
-                  onClick={() => setMonitorFilter((value) => (value === tone ? 'all' : tone))}
+                  run={() => setMonitorFilter((value) => (value === tone ? 'all' : tone))}
                 >
                   <span className="batch-tile-count">{counts[tone]}</span>
                   <span className="batch-tile-label">{toneLabels[tone]}</span>
-                </button>
+                </ActionButton>
               ),
             )}
           </div>
@@ -558,17 +540,24 @@ export default function ProjectBatchRun({
               onChange={(event) => setMonitorQuery(event.target.value)}
             />
             {monitorFilter !== 'all' && (
-              <Button variant="ghost" onClick={() => setMonitorFilter('all')}>
-                {t('显示全部站点', 'Show all stations')}
-              </Button>
+              <ActionButton
+                action="project-batch-monitor-all"
+                label={t('显示全部站点', 'Show all stations')}
+                variant="ghost"
+                run={() => setMonitorFilter('all')}
+              />
             )}
             {!fixedSelection && !!problems.length && (
-              <Button variant="ghost" disabled={!!locked} onClick={() => choose(problems, 'only')}>
-                {t(
+              <ActionButton
+                action="project-batch-select-problems"
+                label={t(
                   `只选失败或已停止的 ${problems.length} 个站点重跑`,
                   `Select the ${problems.length} failed or stopped stations to rerun`,
                 )}
-              </Button>
+                variant="ghost"
+                disabled={!!locked}
+                run={() => choose(problems, 'only')}
+              />
             )}
           </div>
           {monitorFilter === 'all' ? (

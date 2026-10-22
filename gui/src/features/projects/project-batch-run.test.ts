@@ -53,12 +53,22 @@ function screen(
   const text: string[] = [];
   const elements: { type: unknown; props: Record<string, unknown>; children: unknown[] }[] = [];
   const RunPanel = () => {};
+  const ActionButton = () => {};
   const context = {
     React: {
       createElement: (type: unknown, props: Record<string, unknown>, ...children: unknown[]) => {
         text.push(...children.filter((child): child is string => typeof child === 'string'));
+        if (type === ActionButton && !children.length) text.push(String(props.label));
         if (type === RunPanel) panels.push(props);
-        const element = { type, props, children };
+        // ActionButton 按它渲染出的样子收：onClick 就是 run，bare 的是原生 button，没写子节点时显示 label。
+        const element =
+          type === ActionButton
+            ? {
+                type: props.bare ? 'button' : ActionButton,
+                props: { ...props, onClick: props.run },
+                children: children.length ? children : [String(props.label)],
+              }
+            : { type, props, children };
         elements.push(element);
         return element;
       },
@@ -67,6 +77,7 @@ function screen(
     Advanced: () => {},
     Notice: () => {},
     RunPanel,
+    ActionButton,
     restoreRunView,
     remoteActivity,
     useApp: () => ({ state }),
@@ -134,6 +145,17 @@ function screen(
       fromCreation,
     });
   }
+  // 动作由页面上的 ActionButton 登记（第 737 轮）：从这次渲染出的元素里取。
+  const actionsNow = () => [
+    ...contract.actions,
+    ...elements
+      .filter((element) => typeof element.props?.action === 'string')
+      .map((element) => ({
+        id: String(element.props.action),
+        enabled: !element.props.disabled,
+        run: element.props.run as () => void,
+      })),
+  ];
   function select(dir: string, checked: boolean) {
     if (!contract.fields.length) adjust();
     contract.fields.find((field) => field.id === `project-batch-case:${dir}`)!.set(String(checked));
@@ -141,11 +163,15 @@ function screen(
   }
   function selectAll() {
     if (!contract.fields.length) adjust();
-    contract.actions.find((action) => action.id === 'project-batch-select-all')!.run();
+    actionsNow()
+      .find((action) => action.id === 'project-batch-select-all')!
+      .run();
     render();
   }
   function adjust() {
-    contract.actions.find((action) => action.id === 'project-batch-selection')!.run();
+    actionsNow()
+      .find((action) => action.id === 'project-batch-selection')!
+      .run();
     render();
   }
   return {
@@ -159,7 +185,7 @@ function screen(
     select,
     selectAll,
     fields: () => contract.fields,
-    actions: () => contract.actions,
+    actions: actionsNow,
   };
 }
 
