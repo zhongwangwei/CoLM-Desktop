@@ -482,18 +482,30 @@ fn frontend_timeout(action: &str, args: &Value) -> Duration {
                     | "hybrid-climate"
                     | "new-create"
                     | "new-example"
+                    | "new-multi-retry"
                     | "workspace-create"
+                    | "workspace-patch"
                     | "workspace-check"
-                    | "workspace-export"
                     | "prep-execute"
+                    | "result-fetch"
                     | "export-full-series-csv"
+                    | "export-series-data"
                     | "export-report"
+                    | "resource-build"
+                    | "resource-workspace-submit"
+                    | "resource-workspace-fetch"
+                    | "resource-workspace-cancel"
+                    | "code-file-add"
+                    | "code-file-replace"
+                    | "version-import-process"
+                    | "configuration-process-import"
             )
         ) || args["target"].as_str().is_some_and(|target| {
             target.starts_with("hybrid-climate-")
                 || target.starts_with("prep-finish-")
-                || target.starts_with("resource-build-")
-                || target.starts_with("resource-workspace-submit-")
+                // 编译引擎/内核一跑几分钟；文件选择框要等用户选完。
+                || target.starts_with("version-fix-")
+                || target.starts_with("history-export-")
                 || (target.starts_with("resource-") && target.contains("-fetch-"))
         }));
     let long_analysis = action == "click"
@@ -1381,16 +1393,27 @@ mod tests {
             "hybrid-climate",
             "new-create",
             "new-example",
+            "new-multi-retry",
             "workspace-create",
+            "workspace-patch",
             "workspace-check",
-            "workspace-export",
             "remote-fetch",
             "remote-study-fetch",
-            "resource-build-7920l",
-            "resource-workspace-submit-7920l",
+            "resource-build",
+            "resource-workspace-submit",
+            "resource-workspace-fetch",
+            "resource-workspace-cancel",
             "resource-study-fetch-/a/study",
+            "code-file-add",
+            "code-file-replace",
+            "version-import-process",
+            "configuration-process-import",
+            "version-fix-drift",
+            "history-export-json",
+            "result-fetch",
             "prep-execute",
             "export-full-series-csv",
+            "export-series-data",
             "export-report",
             "prep-finish-0",
             "prep-finish-12",

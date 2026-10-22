@@ -79,6 +79,31 @@ fn ui_tools_forward_to_the_window_and_only_set_and_commit_need_approval() {
         ),
         "填写：a = 1；b = x"
     );
+    // 改代码/编译/导入代码文件的按钮按 C 级审批，且不记"本会话允许"；其余 commit 仍是 B 级。
+    for target in [
+        "workspace-create",
+        "version-fix-drift",
+        "version-fix-engine_built",
+        "version-branch-code",
+        "version-import-process",
+        "code-file-save",
+        "code-file-replace",
+        "resource-build",
+    ] {
+        let args = json!({ "target": target, "purpose": "x" });
+        assert_eq!(UiCommit.tier_for(&args), Tier::Code, "{target}");
+        assert!(!UiCommit.session_allowance_for(&args), "{target}");
+    }
+    for target in [
+        "run-submit",
+        "version-freeze",
+        "study-create",
+        "result-fetch",
+    ] {
+        let args = json!({ "target": target, "purpose": "x" });
+        assert_eq!(UiCommit.tier_for(&args), Tier::Act, "{target}");
+        assert!(UiCommit.session_allowance_for(&args), "{target}");
+    }
     // 没有窗口可驱动时报错，不假装成功。
     assert!(UiState.call(&json!({}), &ToolContext::default()).is_err());
 }

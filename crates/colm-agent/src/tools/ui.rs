@@ -185,12 +185,20 @@ impl Tool for UiClick {
 pub struct UiCommit;
 
 fn code_commit(args: &Value) -> bool {
+    // 改代码/编译/导入代码文件的按钮按 C 级处理：不沿用"本会话允许"，每次都问。
     args["target"].as_str().is_some_and(|target| {
         matches!(
             target,
-            "workspace-create" | "workspace-patch" | "workspace-check" | "workspace-export"
-        ) || target.starts_with("resource-build-")
-            || target.starts_with("resource-workspace-submit-")
+            "workspace-create"
+                | "workspace-patch"
+                | "workspace-check"
+                | "workspace-export"
+                | "version-branch-code"
+                | "version-import-process"
+        ) || target.starts_with("resource-build")
+            || target.starts_with("resource-workspace-submit")
+            || target.starts_with("version-fix-")
+            || target.starts_with("code-file-")
     })
 }
 

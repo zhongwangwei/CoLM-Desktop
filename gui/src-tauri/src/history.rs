@@ -257,33 +257,47 @@ fn assistant_ui_event(
         "workspace_remote" => {
             target.is_some_and(|target| matches!(target, "submit" | "cancel" | "fetch"))
         }
+        // 这张表是助手改动的审计白名单：前端 `<ActionButton kind="commit">` 的 action 名必须在这里，
+        // 否则 ui_commit 会被当成"未知的界面改动"拒绝（第 737 轮迁移后全量核对过一遍）。
         _ => target.is_some_and(|target| {
             matches!(
                 target,
                 "new-example"
                     | "new-create"
+                    | "new-multi-retry"
                     | "case-save"
+                    | "project-example"
                     | "run-submit"
                     | "run-cancel"
                     | "remote-cancel"
                     | "remote-fetch"
                     | "remote-study-cancel"
                     | "remote-study-fetch"
-                    | "version-create"
-                    | "version-save"
-                    | "version-freeze"
-                    | "version-import-process"
-                    | "version-research"
+                    | "prep-execute"
                     | "export-full-series-csv"
                     | "export-series-data"
                     | "export-report"
-                    | "prep-execute"
+                    | "result-fetch"
+                    | "resource-build"
                     | "resource-save"
-                    | "resource-delete-confirm"
+                    | "resource-local-data-save"
+                    | "resource-workspace-submit"
+                    | "resource-workspace-fetch"
+                    | "resource-workspace-cancel"
+                    | "configuration-process-import"
                     | "workspace-create"
                     | "workspace-patch"
                     | "workspace-check"
-                    | "workspace-export"
+                    | "code-file-create"
+                    | "code-file-add"
+                    | "code-file-save"
+                    | "code-file-replace"
+                    | "version-save"
+                    | "version-freeze"
+                    | "version-branch-code"
+                    | "version-adopt-workspace"
+                    | "version-import-process"
+                    | "version-import-study-apply"
                     | "study-create"
                     | "study-run"
                     | "study-pause"
@@ -291,20 +305,22 @@ fn assistant_ui_event(
                     | "study-retry"
                     | "study-cancel"
                     | "study-export"
-                    | "study-save-version"
-                    | "study-clone"
+                    | "study-write-version"
                     | "hybrid-climate"
                     | "hybrid-fit"
                     | "hybrid-save-version"
+                    | "history-replay"
             ) || [
                 "prep-finish-",
+                "history-export-",
                 "resource-build-",
-                "resource-workspace-submit-",
                 "resource-case-fetch-",
                 "resource-study-fetch-",
                 "resource-case-cancel-",
                 "resource-local-cancel-",
                 "resource-study-cancel-",
+                "version-fix-",
+                "version-method-",
             ]
             .iter()
             .any(|prefix| target.starts_with(prefix) && target.len() > prefix.len())
@@ -1134,16 +1150,30 @@ mod tests {
             "export-full-series-csv",
             "export-series-data",
             "export-report",
+            "result-fetch",
+            "resource-build",
+            "resource-workspace-submit",
+            "version-fix-drift",
+            "version-method-manual",
+            "version-branch-code",
+            "code-file-save",
+            "history-export-json",
+            "study-write-version",
         ] {
-            assert!(assistant_ui_event("ui-1", "commit", Some(target))
-                .unwrap()
-                .is_some());
+            assert!(
+                assistant_ui_event("ui-1", "commit", Some(target))
+                    .unwrap()
+                    .is_some(),
+                "{target}"
+            );
         }
-        assert!(
-            assistant_ui_event("ui-1", "commit", Some("version-research"))
-                .unwrap()
-                .is_some()
-        );
+        // 只有前缀本身不构成一个已知目标。
+        for target in ["version-create", "resource-build-", "version-fix-"] {
+            assert!(
+                assistant_ui_event("ui-1", "commit", Some(target)).is_err(),
+                "{target}"
+            );
+        }
         let event = assistant_ui_event("ui-2", "commit", Some("run-submit"))
             .unwrap()
             .unwrap();
