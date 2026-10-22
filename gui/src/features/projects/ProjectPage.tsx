@@ -862,6 +862,26 @@ export default function ProjectPage() {
           </Button>
         </div>
       </section>
+      {/* 设计里 CN-Cng 示例与数据准备是次要可见入口；只留在助手契约里等于界面上不存在。 */}
+      <section className="project-example" aria-label={t('内置示例', 'Bundled example')}>
+        <img src="assets/grassland-example.svg" alt="" />
+        <div>
+          <h2>{t('CN-Cng 草地示例', 'CN-Cng grassland example')}</h2>
+          <p>
+            {t(
+              '内置草地站点的强迫场与观测，点开就能建一个示例算例。',
+              'Bundled forcing and observations for a grassland site; open it to start an example case.',
+            )}
+          </p>
+        </div>
+        <Button
+          variant="secondary"
+          disabled={!enabled || !state.version}
+          onClick={() => void example().catch(() => {})}
+        >
+          {t('打开示例', 'Open example')}
+        </Button>
+      </section>
       <section
         className="project-readiness-section"
         aria-label={t('系统与数据就绪状态', 'System & data readiness')}
@@ -903,6 +923,24 @@ export default function ProjectPage() {
                 onClick={() => void browseProject().catch(() => {})}
               >
                 {state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
+              </Button>
+            </div>
+          </div>
+
+          <div className="readiness-item">
+            <span className="status-indicator active" />
+            <div className="readiness-info">
+              <strong>{t('输入数据准备', 'Prepare input data')}</strong>
+              <span>
+                {t(
+                  '制作站点文件、转换或修复强迫场，供新建算例使用。',
+                  'Make site files or convert and repair forcing for a new case.',
+                )}
+              </span>
+            </div>
+            <div className="readiness-actions">
+              <Button variant="ghost" disabled={!enabled} onClick={() => navigate('preparation')}>
+                {t('准备输入数据', 'Prepare inputs')}
               </Button>
             </div>
           </div>
