@@ -53,13 +53,14 @@
 }
 .project-task-section .project-actions {
   margin-bottom: 0;
-  gap: 14px;
-  /* 只剩"新建模拟"和"打开项目"两张：两列等宽，不在三列网格里空出一格。 */
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  /* 三张任务卡（新建模拟 / 打开项目 / 准备输入数据）始终一行三列。 */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 @container (max-width:480px) {
   .project-task-section .project-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
   }
 }
 .project-task-section .project-action {
