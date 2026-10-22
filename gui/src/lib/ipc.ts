@@ -13,6 +13,36 @@ declare global {
   }
 }
 export const hasBackend = () => !!window.__TAURI__?.core?.invoke;
+/**
+ * Bound one startup/background call so a backend that never answers becomes a reported failure
+ * instead of leaving the window busy forever (GUI 审查 2026-10-22 P1-3).
+ */
+export function withTimeout<T>(promise: Promise<T>, timeoutMs: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            bilingual(
+              `等待 ${what} 超过 ${Math.round(timeoutMs / 1000)} 秒仍未完成`,
+              `Timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${what}`,
+            ),
+          ),
+        ),
+      timeoutMs,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
 let runningTargets: () => Set<string> = () => new Set();
 export const bindRunningTargets = (get: () => Set<string>) => {
   runningTargets = get;

@@ -168,6 +168,13 @@ export type Route =
 export type AppState = {
   /** True until the first backend/kernel/version load has finished; the cover shows meanwhile. */
   starting?: boolean;
+  /** Startup progress; absent once the first load succeeded. The cover stays on `failed` with a retry. */
+  startup?: {
+    phase: 'booting' | 'failed';
+    stage: 'backend' | 'kernels' | 'versions';
+    startedAt: number;
+    error?: string;
+  };
   route: Route;
   caseTab: 'settings' | 'runs' | 'results';
   selectedCase: OpenedCase | null;

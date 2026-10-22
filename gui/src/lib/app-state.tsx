@@ -9,7 +9,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { invoke, invokeJson, listen, hasBackend, bindRunningTargets } from './ipc';
+import { invoke, invokeJson, listen, hasBackend, bindRunningTargets, withTimeout } from './ipc';
 import { applyRunEvent } from './run-events';
 import {
   askToRebind,
@@ -63,6 +63,8 @@ const initial: AppState = {
   notices: [],
   busy: false,
   starting: true,
+  // 封面显示到首次加载完成；失败时保留封面并给"重试启动"，不再 20 秒后无声消失（GUI 审查 P1-3）。
+  startup: { phase: 'booting', stage: 'backend', startedAt: Date.now() },
 };
 type AppContextValue = {
   state: AppState;
@@ -70,6 +72,8 @@ type AppContextValue = {
   navigate: (route: Route, tab?: AppState['caseTab']) => boolean;
   registerNavigationGuard: (guard: NavigationGuard) => () => void;
   notify: (message: string, error?: boolean) => void;
+  /** 重新尝试启动期失败的阶段；封面上的"重试启动"用它。 */
+  retryStartup: () => void;
   refreshCases: () => Promise<void>;
   /** `null`：打开还没完成就被后来的页面切换或另一次打开取代了，界面以后来的为准，不算出错。 */
   openCase: (dir: string, tab?: AppState['caseTab']) => Promise<OpenedCase | null>;
@@ -100,6 +104,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     promise: Promise<OpenedCase | null>;
   } | null>(null);
   const guards = useRef(new Set<NavigationGuard>());
+  // 启动流程放在 effect 里（事件监听也一起），重试按钮通过这个 ref 重新调用同一次 boot。
+  const bootRef = useRef<(() => Promise<void>) | null>(null);
   const update = useCallback(
     (patch: AppPatch) =>
       setState((old) => {
@@ -127,6 +133,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return () => {
       guards.current.delete(guard);
     };
+  }, []);
+  const retryStartup = useCallback(() => {
+    // 已经在启动中就不要叠第二次。
+    if (current.current.startup?.phase === 'booting') return;
+    void bootRef.current?.();
   }, []);
   const blocked = useCallback(
     (target: NavigationTarget) =>
@@ -319,7 +330,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         ),
     );
     if (!hasBackend()) {
-      update({ starting: false });
+      update({ starting: false, startup: undefined });
       notify(
         bilingual(
           '请使用桌面软件执行模型操作；浏览器仅能查看界面。',
@@ -332,44 +343,77 @@ export function AppProvider({ children }: { children: ReactNode }) {
       };
     }
     async function boot() {
-      update({ busy: true });
+      if (!alive) return;
+      const startedAt = Date.now();
+      let stage: NonNullable<AppState['startup']>['stage'] = 'backend';
+      update({
+        busy: true,
+        starting: true,
+        startup: { phase: 'booting', stage, startedAt },
+      });
       try {
-        await invoke('backend_ready');
-        const [kernels, versions] = await Promise.all([
-          invoke<KernelEntry[]>('list_kernels'),
-          invokeJson<FrozenRevision[]>('model_list'),
+        // 每个阶段都有上限：命令永不返回时也要落到"失败 + 重试"，而不是一直转圈。
+        await withTimeout(invoke('backend_ready'), 15_000, 'backend_ready');
+        if (!alive) return;
+        stage = 'kernels';
+        update({ startup: { phase: 'booting', stage, startedAt } });
+        // 内核与版本互不依赖：一个失败仍保留另一个的结果，避免一次失败把整屏都清空。
+        const [kernelResult, versionResult] = await Promise.allSettled([
+          withTimeout(invoke<KernelEntry[]>('list_kernels'), 30_000, 'list_kernels'),
+          withTimeout(invokeJson<FrozenRevision[]>('model_list'), 30_000, 'model_list'),
         ]);
         if (!alive) return;
-        const official = versions
-          .filter((v) => v.version.id === 'official')
-          .sort((a, b) => b.version.revision - a.version.revision)[0];
-        if (alive)
+        const problems: string[] = [];
+        if (kernelResult.status === 'fulfilled') {
+          const kernels = kernelResult.value;
           update({
             kernels,
             kernelDir: kernels.find((k) => k.preset === 'default')?.dir ?? kernels[0]?.dir ?? null,
+          });
+        } else {
+          problems.push(
+            bilingual(
+              `模型内核读取失败：${String(kernelResult.reason)}`,
+              `Reading model kernels failed: ${String(kernelResult.reason)}`,
+            ),
+          );
+        }
+        if (versionResult.status === 'fulfilled') {
+          const versions = versionResult.value;
+          const official = versions
+            .filter((v) => v.version.id === 'official')
+            .sort((a, b) => b.version.revision - a.version.revision)[0];
+          update({
             versions,
             version: official ?? null,
             ...(official ? { versionRef: official.version } : {}),
           });
+        } else {
+          problems.push(
+            bilingual(
+              `模型版本读取失败：${String(versionResult.reason)}`,
+              `Reading model versions failed: ${String(versionResult.reason)}`,
+            ),
+          );
+        }
+        if (problems.length) throw new Error(problems.join('；'));
+        update({ startup: undefined });
         // 版本列表到手之后，在后台整理没人用的旧官方修订（运行或创建中时后端会拒绝，只记日志）。
         void tidyModelsAfterStartup(invokeJson).then((removed) => {
           if (alive && removed.length)
             update((old) => ({ versions: withoutRevisions(old.versions, removed) }));
         });
       } catch (error) {
-        // 启动失败用错误样式，并说清是哪一步（原来是普通提示样式的原始错误，GUI 审查 S11）。
+        // 失败留在封面上（含阶段和原因），并给"重试启动"；不再只发一条可被清掉的通知。
         if (alive)
-          notify(
-            bilingual(
-              `启动时读取模型内核与版本失败：${String(error)}`,
-              `Reading model kernels and versions at startup failed: ${String(error)}`,
-            ),
-            true,
-          );
+          update({
+            startup: { phase: 'failed', stage, startedAt, error: String(error) },
+          });
       } finally {
         if (alive) update({ busy: false, starting: false });
       }
     }
+    bootRef.current = boot;
     void boot();
     const events = [
       'run://started',
@@ -398,6 +442,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
     return () => {
       alive = false;
+      bootRef.current = null;
       identity.current++;
       for (const stop of unlisten) stop();
       bindRunningTargets(() => new Set());
@@ -411,6 +456,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         navigate,
         registerNavigationGuard,
         notify,
+        retryStartup,
         refreshCases,
         openCase,
         refreshVersions,

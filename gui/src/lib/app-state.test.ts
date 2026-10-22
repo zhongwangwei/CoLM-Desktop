@@ -248,7 +248,8 @@ test('declining the rebind leaves the case unopened with a plain explanation', a
   assert.equal((app.current.current as { route?: string }).route, undefined);
 });
 
-function booting(prune: () => Promise<unknown>) {
+function booting(prune: () => Promise<unknown>, failOn = '') {
+  let failing = failOn;
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
     path.pathname,
@@ -269,8 +270,12 @@ function booting(prune: () => Promise<unknown>) {
   const calls: string[] = [];
   const notices: string[] = [];
   const state: Record<string, unknown> = {};
+  const guard = (command: string) => {
+    if (command === failing) throw new Error(`${command} is unreachable`);
+  };
   const invoke = async (command: string) => {
     calls.push(command);
+    guard(command);
     if (command === 'load_recent') return { root: '/last/project' };
     if (command === 'list_cases') return [{ dir: '/last/project/a', name: 'a' }];
     if (command === 'list_kernels') return [];
@@ -278,6 +283,7 @@ function booting(prune: () => Promise<unknown>) {
   };
   const invokeJson = async (command: string) => {
     calls.push(command);
+    guard(command);
     if (command === 'model_list') return versions;
     if (command === 'model_prune') return prune();
     throw new Error(`Unexpected command: ${command}`);
@@ -289,6 +295,8 @@ function booting(prune: () => Promise<unknown>) {
     notify: (message: string) => notices.push(message),
     invoke,
     invokeJson,
+    withTimeout: <T>(promise: Promise<T>) => promise,
+    bilingual: (_zh: string, en: string) => en,
     tidyModelsAfterStartup,
     withoutRevisions,
   };
@@ -298,7 +306,15 @@ function booting(prune: () => Promise<unknown>) {
   const boot = new Function(...Object.keys(context), `${code}; return boot;`)(
     ...Object.values(context),
   ) as () => Promise<void>;
-  return { boot, calls, notices, state };
+  return {
+    boot,
+    calls,
+    notices,
+    state,
+    setFailure: (command = '') => {
+      failing = command;
+    },
+  };
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -338,14 +354,55 @@ test('the start cover shows from the first paint until the first load finishes',
   const state = readFileSync(new URL('./app-state.tsx', import.meta.url), 'utf8');
   const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
   const app = readFileSync(new URL('../App.tsx', import.meta.url), 'utf8');
+  const cover = readFileSync(new URL('../components/StartCover.tsx', import.meta.url), 'utf8');
   // The page itself carries a static cover, so there is no blank window before the scripts load.
   assert.match(html, /<div id="root"><div class="start-cover"/);
   // The app starts in the "starting" state and always leaves it: after the load, or at once
   // without a backend (a plain browser).
-  assert.match(state, /busy: false,\n {2}starting: true,\n\};/);
+  assert.match(state, /busy: false,\n {2}starting: true,/);
+  assert.match(
+    state,
+    /startup: \{ phase: 'booting', stage: 'backend', startedAt: Date\.now\(\) \}/,
+  );
   assert.match(state, /update\(\{ busy: false, starting: false \}\)/);
-  assert.match(state, /if \(!hasBackend\(\)\) \{\n {6}update\(\{ starting: false \}\);/);
+  assert.match(state, /update\(\{ starting: false, startup: undefined \}\)/);
+  // A failed boot stays on the cover with a retry, and a stale boot can be retried after 30 s.
+  assert.match(cover, /retryStartup/);
+  assert.match(cover, /重试启动/);
   assert.match(app, /<StartCover \/>/);
+});
+
+test('a startup command that never answers times out instead of spinning forever', async () => {
+  const { withTimeout } = await import('./ipc');
+  await assert.rejects(
+    withTimeout(new Promise(() => {}), 20, 'backend_ready'),
+    /timed out .*backend_ready/i,
+  );
+});
+
+test('a failed startup stage is kept on the cover state, and retrying can recover', async () => {
+  const app = booting(async () => ({ removed: [] }), 'model_list');
+  await app.boot();
+  await settle();
+  const failed = app.state.startup as { phase: string; stage: string; error: string };
+  assert.equal(failed.phase, 'failed');
+  assert.equal(failed.stage, 'kernels');
+  assert.match(failed.error, /model versions/i);
+  // Kernels succeeded before versions failed: keep that half instead of clearing everything.
+  assert.deepEqual(app.state.kernels, []);
+  assert.equal(app.state.busy, false);
+  assert.deepEqual(app.notices, [], 'the cover is the error outlet, not a transient notice');
+
+  app.setFailure('');
+  await app.boot();
+  await settle();
+  assert.equal(app.state.startup, undefined);
+  assert.deepEqual(
+    (app.state.versions as { version: VersionRef }[]).map((v) => v.version.revision),
+    [1, 2, 3],
+  );
+  assert.equal(app.state.starting, false);
+  assert.equal(app.state.busy, false);
 });
 
 test('an open overtaken by leaving the page or by another open ends quietly', async () => {

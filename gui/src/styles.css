@@ -2705,6 +2705,25 @@ table input {
   margin: 0;
   color: var(--muted);
 }
+.start-cover-panel .button {
+  margin-top: 12px;
+}
+.start-cover-error {
+  max-height: 38vh;
+  margin: 12px 0;
+  padding: 10px 12px;
+  overflow: auto;
+  text-align: left;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--danger);
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--danger);
+  border-radius: var(--r-sm);
+  overflow-wrap: anywhere;
+}
 
 /* 单个算例的运行进度：状态标签、服务器在做什么、步数与日期、作业信息、直接可见的最新日志。 */
 .run-progress-head {
