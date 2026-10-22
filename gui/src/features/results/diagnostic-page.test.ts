@@ -191,6 +191,7 @@ function harness(
     'Advanced',
     'Dialog',
     'NavIcon',
+    'RemotePathBrowser',
   ])
     env[name] = name;
   const Page = new Function(...Object.keys(env), `${code};return ResultsPage;`)(
@@ -606,4 +607,29 @@ test('导出按钮的 kind 与高级评估折叠的展开动作', async () => {
   assert.equal(actionById(h, 'result-advanced-settings')?.kind, 'click');
   await h.action('result-advanced-settings');
   assert.equal(h.field('result-advanced')?.value, 'true', '展开后字段也反映出来');
+});
+
+test('a server run picks its observation on the server, not with the local file dialog', async () => {
+  const h = harness(false, undefined, '', '/case', { remoteRun: true });
+  await h.render();
+  await h.action('result-settings');
+  await h.action('result-pick-observation');
+  const walk = (node: unknown): { type: unknown; props: Record<string, unknown> }[] => {
+    if (Array.isArray(node)) return node.flatMap(walk);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as { type: unknown; props: Record<string, unknown> };
+    return [element, ...walk(element.props?.children)];
+  };
+  const browser = walk(h.tree()).find((node) => node.type === 'RemotePathBrowser');
+  assert.ok(browser, 'the server file browser opens');
+  assert.equal(browser.props.host, 'server');
+  assert.equal(browser.props.directory, false);
+  assert.ok(!h.requests.some((request) => request.command === 'pick_file'));
+  (browser.props.onSelect as (path: string) => void)('/srv/PLUMBER2s/Observation/X_Flux.nc');
+  await h.render();
+  assert.equal(h.field('result-observation')?.value, '/srv/PLUMBER2s/Observation/X_Flux.nc');
+  assert.ok(
+    !walk(h.tree()).some((node) => node.type === 'RemotePathBrowser'),
+    'closed after choosing',
+  );
 });

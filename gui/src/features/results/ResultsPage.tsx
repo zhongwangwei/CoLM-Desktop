@@ -43,6 +43,7 @@ import {
 } from './variable-labels';
 import GridMap from './GridMap';
 import NavIcon from '../../components/NavIcon';
+import RemotePathBrowser from '../../components/RemotePathBrowser';
 import { defaultObservation } from './default-observation';
 import './results-page.css';
 type Catalog = {
@@ -214,6 +215,10 @@ export default function ResultsPage({
     observationEdited.current = true;
     setObs(path);
   };
+  // 服务器项目的观测在服务器上，评估也在那里算：选文件要浏览服务器的目录，不是本机文件框。
+  const [observationBrowser, setObservationBrowser] = useState(false);
+  // 只有真在取回时按钮才写"正在取回…"：原来看的是整页 busy，服务器上算评估时也显示成正在取回 0.5 GB。
+  const [fetching, setFetching] = useState(false);
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [spinup, setSpinup] = useState('0');
@@ -446,16 +451,21 @@ export default function ResultsPage({
   async function fetchSelectedRun() {
     const target = source,
       dir = caseDir;
-    await task(async (current) => {
-      await invokeJson('remote_fetch', {
-        case: target,
-        host: null,
-        all: false,
-        overwriteNewer: false,
+    setFetching(true);
+    try {
+      await task(async (current) => {
+        await invokeJson('remote_fetch', {
+          case: target,
+          host: null,
+          all: false,
+          overwriteNewer: false,
+        });
+        const data = await invokeJson<Run[]>('model_case_runs', { dir });
+        if (current() && stationTarget.current === dir) setRuns(data);
       });
-      const data = await invokeJson<Run[]>('model_case_runs', { dir });
-      if (current() && stationTarget.current === dir) setRuns(data);
-    });
+    } finally {
+      setFetching(false);
+    }
   }
   const windowArgs = useCallback(() => {
     const parse = (value: string) => {
@@ -1008,8 +1018,8 @@ export default function ResultsPage({
       {awaitingFetch && (
         <Notice>
           {tr(
-            `数据在服务器 ${selectedRun?.server ?? ''} 上：变量和曲线直接在服务器上读取，只传回画图要用的数据，每次切换要几秒。要 NetCDF 文件或评估指标时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
-            `Data stays on ${selectedRun?.server ?? ''}: variables and curves are read there and only the plotted values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files or evaluation metrics.`,
+            `数据在服务器 ${selectedRun?.server ?? ''} 上：变量、曲线和评估指标都在服务器上计算，只传回要显示的数据，每次几秒。要 NetCDF 文件时，再取回这一个站点、这一次运行的结果（约 0.5 GB）。`,
+            `Data stays on ${selectedRun?.server ?? ''}: variables, curves and evaluation metrics are computed there and only the displayed values come back, a few seconds each. Fetch this station's run (about 0.5 GB) when you need the NetCDF files.`,
           )}
           <ActionButton
             action="result-fetch"
@@ -1018,7 +1028,7 @@ export default function ResultsPage({
             disabled={busy}
             run={fetchSelectedRun}
           >
-            {busy ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}
+            {fetching ? tr('正在取回…', 'Fetching…') : tr('取回结果', 'Fetch results')}
           </ActionButton>
         </Notice>
       )}
@@ -1399,6 +1409,10 @@ export default function ResultsPage({
               kind="click"
               disabled={busy}
               run={async () => {
+                if (selectedRun?.server) {
+                  setObservationBrowser(true);
+                  return null;
+                }
                 const file = await invoke<string | null>('pick_file', {
                   key: 'result-observations',
                   filter: 'nc',
@@ -1409,6 +1423,19 @@ export default function ResultsPage({
             >
               {tr('选择文件', 'Choose a file')}
             </ActionButton>
+            {observationBrowser && selectedRun?.server && (
+              <RemotePathBrowser
+                host={selectedRun.server}
+                initialPath={obs.includes('/') ? obs.slice(0, obs.lastIndexOf('/')) : undefined}
+                directory={false}
+                en={en}
+                onSelect={(path) => {
+                  chooseObservation(path);
+                  setObservationBrowser(false);
+                }}
+                onClose={() => setObservationBrowser(false)}
+              />
+            )}
           </div>
         </Field>
         <Advanced

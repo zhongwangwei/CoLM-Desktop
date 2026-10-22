@@ -179,7 +179,9 @@ test('a server run is read in place, and fetching takes only that run', async ()
   assert.ok(catalog && fetchBody);
   const calls: { command: string; args: unknown }[] = [];
   const noop = () => {};
+  const fetching: boolean[] = [];
   const context = (runs: unknown[]) => ({
+    setFetching: (value: boolean) => fetching.push(value),
     epoch: { current: 0 },
     stationTarget: { current: '/case' },
     caseDir: '/case',
@@ -225,4 +227,6 @@ test('a server run is read in place, and fetching takes only that run', async ()
     { command: 'model_case_runs', args: { dir: '/case' } },
   ]);
   assert.deepEqual(runs, []);
+  // 按钮只在真取回时写"正在取回…"，结束后复原。
+  assert.deepEqual(fetching, [true, false]);
 });
