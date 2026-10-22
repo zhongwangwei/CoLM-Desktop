@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import type { CaseEntry, HistoryOperation, Server, WizardSeed } from '../../lib/types';
 import {
   Advanced,
@@ -747,107 +748,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           ),
         ),
     }));
-  const guideActions: UiAction[] = [
-    {
-      id: 'history-search',
-      label: t('查询', 'Search'),
-      kind: 'click',
-      enabled: !busy,
-      run: search,
-    },
-    {
-      id: 'history-export-json',
-      label: t('完整导出 JSON', 'Export all JSON'),
-      kind: 'commit',
-      enabled: !busy,
-      run: () => action(() => exportAll('json')),
-    },
-    {
-      id: 'history-export-csv',
-      label: t('完整导出 CSV', 'Export all CSV'),
-      kind: 'commit',
-      enabled: !busy,
-      run: () => action(() => exportAll('csv')),
-    },
-    {
-      id: 'history-previous',
-      label: t('上一页', 'Previous'),
-      kind: 'click',
-      enabled: !busy && offset > 0,
-      run: () => setOffset(Math.max(0, offset - 30)),
-    },
-    {
-      id: 'history-clear',
-      label: casePath
-        ? t('清空这个算例的记录', "Clear this case's records")
-        : t('清空历史记录', 'Clear history'),
-      kind: 'click',
-      enabled: !busy,
-      run: () => action(() => openClear()),
-    },
-    {
-      id: 'history-next',
-      label: t('下一页', 'Next'),
-      kind: 'click',
-      enabled: !busy && offset + 30 < page.total,
-      run: () => setOffset(offset + 30),
-    },
-    ...page.items.map((item) => ({
-      id: `history-detail-${item.operation_id}`,
-      label: `${t('详情', 'Details')} ${item.operation_id}`,
-      kind: 'click' as const,
-      enabled: !busy,
-      run: () => action(() => showItem(item)),
-    })),
-  ];
-  if (group?.project_group) {
-    const path = group.project_group.path;
-    guideActions.push({
-      id: 'history-open-project',
-      label: t('打开这个项目', 'Open this project'),
-      kind: 'click',
-      enabled: !busy,
-      run: () => action(() => openProject(path)),
-    });
-  }
-  if (group?.run_group) {
-    guideActions.push(
-      ...group.run_group.members.map((member) => ({
-        id: `history-member-${member.operation_id}`,
-        label: `${t('站点详情', 'Station details')} ${historyObject(member, en)}`,
-        kind: 'click' as const,
-        enabled: !busy,
-        run: () => action(() => show(member.operation_id)),
-      })),
-      {
-        id: 'history-export-run',
-        label: t('导出本次运行 JSON', 'Export this run JSON'),
-        kind: 'click',
-        enabled: !busy,
-        run: () => action(exportGroup),
-      },
-    );
-  }
-  if (detail) {
-    guideActions.push(
-      {
-        id: 'history-export-record',
-        label: t('导出本条记录 JSON', 'Export this record JSON'),
-        kind: 'commit',
-        enabled: !busy,
-        run: () => action(exportRecord),
-      },
-      ...references.map((reference, index) => ({
-        id: `history-reference-${index}`,
-        label: `${t(reference.zh, reference.en)} · ${reference.path}`,
-        kind: 'click' as const,
-        enabled: !busy,
-        run: () =>
-          action(async () => {
-            await invoke('open_path', { path: reference.path });
-          }),
-      })),
-    );
+  if (detail)
     guideFields.push({
       id: 'history-compare-id',
       label: t('与实际历史比较', 'Compare real history'),
@@ -863,64 +764,6 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
       disabled: busy,
       set: changeComparedRun,
     });
-    guideActions.push(
-      {
-        id: 'history-replay',
-        label: t('按记录设置重跑', 'Replay recorded settings'),
-        kind: 'commit',
-        visible: canReplay(detail.operation),
-        enabled: !busy && canReplay(detail.operation),
-        run: () =>
-          action(async () =>
-            setResult(await invokeJson('history_replay', { id: detail.operation.operation_id })),
-          ),
-      },
-      {
-        id: 'history-compare',
-        label: t('核对条件并比较', 'Check conditions and compare'),
-        kind: 'click',
-        enabled: compareEnabled,
-        run: () => action(compareRuns),
-      },
-      ...detail.related.map((item) => ({
-        id: `history-related-${item.operation_id}`,
-        label: `${item.kind} · ${item.operation_id}`,
-        kind: 'click' as const,
-        enabled: !busy,
-        run: () => action(() => show(item.operation_id)),
-      })),
-    );
-    if (openPath)
-      guideActions.push({
-        id: 'history-open-path',
-        label: t('打开路径', 'Open path'),
-        kind: 'click',
-        enabled: !busy,
-        run: () =>
-          action(async () => {
-            await invoke('open_path', { path: openPath });
-          }),
-      });
-    if (detail.operation.case_path)
-      guideActions.push({
-        id: 'history-open-case',
-        label: t('打开算例', 'Open case'),
-        kind: 'click',
-        enabled: !busy,
-        run: () =>
-          action(async () => {
-            await openCase(detail.operation.case_path!);
-          }),
-      });
-    if (detail.operation.version_id && detail.operation.revision)
-      guideActions.push({
-        id: 'history-open-version',
-        label: t('打开版本', 'Open version'),
-        kind: 'click',
-        enabled: !busy,
-        run: () => action(openVersion),
-      });
-  }
   if (detail) {
     for (const key of ['obs', 'from', 'to', 'spinup'] as const)
       guideFields.push({
@@ -956,45 +799,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         set: (v) => changeComparison('corrected', v === 'true'),
       },
     );
-    guideActions.push(
-      {
-        id: 'history-pick-observation',
-        label: t('选择观测文件', 'Choose observations'),
-        kind: 'click',
-        enabled: !busy,
-        run: () => action(pickObservation),
-      },
-      {
-        id: 'history-evaluation-catalog',
-        label: t('读取共同可用变量', 'Read common variables'),
-        kind: 'click',
-        enabled: !busy && !!compare && !!comparisonInput.obs,
-        run: () => action(loadVariables),
-      },
-    );
   }
-  guideActions.push({
-    id: 'history-filters',
-    label: t(filtersOpen ? '收起筛选' : '更多筛选', filtersOpen ? 'Hide filters' : 'More filters'),
-    kind: 'click',
-    enabled: !busy,
-    run: () => setFiltersOpen(!filtersOpen),
-  });
-  if (detail)
-    guideActions.push({
-      id: 'history-advanced',
-      label: t('依据、比较与完整记录', 'Evidence, comparison and full record'),
-      kind: 'click',
-      enabled: !busy,
-      run: () => setDetailsOpen(!detailsOpen),
-    });
-  const summaryActions = new Set([
-    'history-export-record',
-    'history-open-path',
-    'history-open-case',
-    'history-open-version',
-    'history-replay',
-  ]);
   usePageContract({
     title: t('历史记录', 'History'),
     step: 'history',
@@ -1004,16 +809,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
         detailsOpen ||
         (!field.id.startsWith('history-evaluation-') && field.id !== 'history-compare-id'),
     ),
-    actions: guideActions.filter(
-      (item) =>
-        detailsOpen ||
-        summaryActions.has(item.id) ||
-        (!item.id.startsWith('history-reference-') &&
-          !item.id.startsWith('history-related-') &&
-          !['history-compare', 'history-pick-observation', 'history-evaluation-catalog'].includes(
-            item.id,
-          )),
-    ),
+    // 按钮自己登记（第 737 轮）。清空记录、删除算例文件夹属于 D 级，只在界面上做。详情是对话框：
+    // 打开时只有对话框里的按钮可按，原来清单里列表和分页按钮与详情动作同时可按。
+    actions: [],
   });
 
   return (
@@ -1407,11 +1205,16 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 ))}
               </Select>
             </Field>
-            <Button type="submit" variant="primary" disabled={busy}>
-              {t('查询', 'Search')}
-            </Button>
+            <ActionButton
+              action="history-search"
+              label={t('查询', 'Search')}
+              variant="primary"
+              disabled={busy}
+              run={() => action(async () => search())}
+            />
           </div>
           <Advanced
+            action="history-filters"
             title={t('更多筛选', 'More filters')}
             open={filtersOpen}
             onOpenChange={setFiltersOpen}
@@ -1473,9 +1276,16 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 : t('清空历史记录', 'Clear history')}
             </Button>
             {(['csv', 'json'] as const).map((format) => (
-              <Button key={format} disabled={busy} onClick={() => run(() => exportAll(format))}>
+              <ActionButton
+                key={format}
+                action={`history-export-${format}`}
+                kind="commit"
+                label={t(`完整导出 ${format.toUpperCase()}`, `Export all ${format.toUpperCase()}`)}
+                disabled={busy}
+                run={() => action(() => exportAll(format))}
+              >
                 {t('导出', 'Export')} {format.toUpperCase()}
-              </Button>
+              </ActionButton>
             ))}
           </div>
         </div>
@@ -1513,7 +1323,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 items={deleteItems(item)}
                 onOpenChange={(open) => menuChanged(item, open)}
               >
-                <Button
+                <ActionButton
+                  action={`history-detail-${item.operation_id}`}
+                  label={`${t('详情', 'Details')} ${historyObject(item, en)}`}
                   variant="ghost"
                   role="listitem"
                   className={`history-card history-card-${status} ${selected ? 'is-selected' : ''} ${historyInternal(item) ? 'is-routine' : ''}`}
@@ -1521,7 +1333,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   aria-label={`${t('查看记录', 'View record')} ${historyObject(item, en)}`}
                   title={item.case_path ?? item.operation_id}
                   disabled={busy}
-                  onClick={() => run(() => showItem(item))}
+                  run={() => action(() => showItem(item))}
                 >
                   <span className="history-card-head">
                     <span className="history-card-kind">{historyActionLabel(item, en)}</span>
@@ -1585,7 +1397,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       </time>
                     )}
                   </span>
-                </Button>
+                </ActionButton>
               </ContextMenu>
             );
           })}
@@ -1601,21 +1413,21 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           </Notice>
         )}
         <div className="history-pagination">
-          <Button
+          <ActionButton
+            action="history-previous"
+            label={t('上一页', 'Previous')}
             disabled={busy || offset === 0}
-            onClick={() => setOffset(Math.max(0, offset - 30))}
-          >
-            {t('上一页', 'Previous')}
-          </Button>
+            run={() => setOffset(Math.max(0, offset - 30))}
+          />
           <span>
             {page.total ? offset + 1 : 0}–{offset + page.items.length} / {page.total}
           </span>
-          <Button
+          <ActionButton
+            action="history-next"
+            label={t('下一页', 'Next')}
             disabled={busy || offset + 30 >= page.total}
-            onClick={() => setOffset(offset + 30)}
-          >
-            {t('下一页', 'Next')}
-          </Button>
+            run={() => setOffset(offset + 30)}
+          />
         </div>
       </section>
       {(group || detail) && (
@@ -1632,32 +1444,39 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
           onOpenChange={(open) => {
             if (!open && !busy && !deletion) closeDetails();
           }}
+          closeAction="history-close"
         >
           <div className="history-inspector" aria-label={t('记录详情', 'Record details')}>
             {group?.project_group && detail && (
               <div className="history-timeline-back">
-                <Button variant="ghost" disabled={busy} onClick={() => setDetail(null)}>
-                  {t('← 返回项目时间线', '← Back to project timeline')}
-                </Button>
-                <span className="muted">{group.project_group.name}</span>
-                <Button
+                <ActionButton
+                  action="history-timeline"
+                  label={t('返回项目时间线', 'Back to project timeline')}
+                  variant="ghost"
                   disabled={busy}
-                  onClick={() => run(() => openProject(group.project_group!.path))}
+                  run={() => setDetail(null)}
                 >
-                  {t('打开这个项目', 'Open this project')}
-                </Button>
+                  {t('← 返回项目时间线', '← Back to project timeline')}
+                </ActionButton>
+                <span className="muted">{group.project_group.name}</span>
+                <ActionButton
+                  action="history-open-project"
+                  label={t('打开这个项目', 'Open this project')}
+                  disabled={busy}
+                  run={() => action(() => openProject(group.project_group!.path))}
+                />
               </div>
             )}
             {group?.project_group && !detail && (
               <Card title={t('项目时间线', 'Project timeline')}>
                 <div className="button-row">
-                  <Button
+                  <ActionButton
+                    action="history-open-project"
+                    label={t('打开这个项目', 'Open this project')}
                     variant="primary"
                     disabled={busy}
-                    onClick={() => run(() => openProject(group.project_group!.path))}
-                  >
-                    {t('打开这个项目', 'Open this project')}
-                  </Button>
+                    run={() => action(() => openProject(group.project_group!.path))}
+                  />
                 </div>
                 <p className="muted">
                   {group.project_group.path} ·{' '}
@@ -1696,7 +1515,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                               items={deleteItems(member)}
                               onOpenChange={(open) => menuChanged(member, open)}
                             >
-                              <Button
+                              <ActionButton
+                                action={`history-member-${member.operation_id}`}
+                                label={`${t('站点详情', 'Station details')} ${historyObject(member, en)}`}
                                 disabled={busy}
                                 title={
                                   member.needs_reconciliation
@@ -1707,13 +1528,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                                       )
                                     : undefined
                                 }
-                                onClick={() => run(() => show(member.operation_id))}
+                                run={() => action(() => show(member.operation_id))}
                               >
                                 {historyObject(member, en)} ·{' '}
                                 {member.needs_reconciliation
                                   ? t('待核对', 'Needs reconciliation')
                                   : historyStatusLabel(member.status, en)}
-                              </Button>
+                              </ActionButton>
                             </ContextMenu>
                           ))}
                         </div>
@@ -1742,7 +1563,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       items={deleteItems(member)}
                       onOpenChange={(open) => menuChanged(member, open)}
                     >
-                      <Button
+                      <ActionButton
+                        action={`history-member-${member.operation_id}`}
+                        label={`${t('站点详情', 'Station details')} ${historyObject(member, en)}`}
                         disabled={busy}
                         title={
                           member.needs_reconciliation
@@ -1754,19 +1577,23 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                             : undefined
                         }
                         aria-pressed={detail?.operation.operation_id === member.operation_id}
-                        onClick={() => run(() => show(member.operation_id))}
+                        run={() => action(() => show(member.operation_id))}
                       >
                         {historyObject(member, en)} ·{' '}
                         {member.needs_reconciliation
                           ? t('待核对', 'Needs reconciliation')
                           : historyStatusLabel(member.status, en)}
-                      </Button>
+                      </ActionButton>
                     </ContextMenu>
                   ))}
                 </div>
-                <Button disabled={busy} onClick={() => run(exportGroup)}>
-                  {t('导出本次运行 JSON', 'Export this run JSON')}
-                </Button>
+                <ActionButton
+                  action="history-export-run"
+                  kind="commit"
+                  label={t('导出本次运行 JSON', 'Export this run JSON')}
+                  disabled={busy}
+                  run={() => action(exportGroup)}
+                />
               </Card>
             )}
             {detail ? (
@@ -1832,52 +1659,60 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                 )}
                 <div className="button-row">
                   {simulationDraft(detail.operation) && (
-                    <Button
+                    <ActionButton
+                      action="history-resume"
+                      label={t('继续新建模拟', 'Continue the new simulation')}
                       variant="primary"
                       disabled={busy}
-                      onClick={() => resumeSimulation(detail.operation)}
+                      run={() => resumeSimulation(detail.operation)}
                     >
                       {t(
                         `继续新建（第 ${simulationDraft(detail.operation)!.step} 步）`,
                         `Continue (step ${simulationDraft(detail.operation)!.step})`,
                       )}
-                    </Button>
+                    </ActionButton>
                   )}
                   {detail.operation.case_path && (
-                    <Button
+                    <ActionButton
+                      action="history-open-case"
+                      label={t('打开算例', 'Open case')}
                       variant="primary"
                       disabled={busy}
-                      onClick={() =>
-                        run(async () => {
+                      run={() =>
+                        action(async () => {
                           await openCase(detail.operation.case_path!);
                         })
                       }
-                    >
-                      {t('打开算例', 'Open case')}
-                    </Button>
+                    />
                   )}
                   {openPath && (
-                    <Button
+                    <ActionButton
+                      action="history-open-path"
+                      label={t('打开路径', 'Open path')}
                       disabled={busy}
-                      onClick={() =>
-                        run(async () => {
+                      run={() =>
+                        action(async () => {
                           await invoke('open_path', { path: openPath });
                         })
                       }
-                    >
-                      {t('打开路径', 'Open path')}
-                    </Button>
+                    />
                   )}
                   {detail.operation.version_id && detail.operation.revision && (
-                    <Button disabled={busy} onClick={() => run(openVersion)}>
-                      {t('打开版本', 'Open version')}
-                    </Button>
+                    <ActionButton
+                      action="history-open-version"
+                      label={t('打开版本', 'Open version')}
+                      disabled={busy}
+                      run={() => action(openVersion)}
+                    />
                   )}
                   {canReplay(detail.operation) && (
-                    <Button
+                    <ActionButton
+                      action="history-replay"
+                      kind="commit"
+                      label={t('按记录设置重跑', 'Replay recorded settings')}
                       disabled={busy}
-                      onClick={() =>
-                        run(async () =>
+                      run={() =>
+                        action(async () =>
                           setResult(
                             await invokeJson('history_replay', {
                               id: detail.operation.operation_id,
@@ -1885,13 +1720,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                           ),
                         )
                       }
-                    >
-                      {t('按记录设置重跑', 'Replay recorded settings')}
-                    </Button>
+                    />
                   )}
-                  <Button disabled={busy} onClick={() => run(exportRecord)}>
-                    {t('导出本条记录 JSON', 'Export this record JSON')}
-                  </Button>
+                  <ActionButton
+                    action="history-export-record"
+                    kind="commit"
+                    label={t('导出本条记录 JSON', 'Export this record JSON')}
+                    disabled={busy}
+                    run={() => action(exportRecord)}
+                  />
                 </div>
                 {result != null && (
                   <Notice tone="warning">
@@ -1900,6 +1737,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   </Notice>
                 )}
                 <Advanced
+                  action="history-advanced"
                   title={t('依据、比较与完整记录', 'Evidence, comparison and full record')}
                   open={detailsOpen}
                   onOpenChange={setDetailsOpen}
@@ -1934,18 +1772,18 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     )}
                   </p>
                   <div className="button-row">
-                    {references.map((reference) => (
-                      <Button
+                    {references.map((reference, index) => (
+                      <ActionButton
                         key={reference.path}
+                        action={`history-reference-${index}`}
+                        label={`${t(reference.zh, reference.en)} · ${reference.path}`}
                         disabled={busy}
-                        onClick={() =>
-                          run(async () => {
+                        run={() =>
+                          action(async () => {
                             await invoke('open_path', { path: reference.path });
                           })
                         }
-                      >
-                        {t(reference.zh, reference.en)} · {reference.path}
-                      </Button>
+                      />
                     ))}
                   </div>
                   <Field label={t('与实际历史比较', 'Compare real history')}>
@@ -2009,18 +1847,24 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                     </Field>
                   </div>
                   <div className="button-row">
-                    <Button disabled={busy} onClick={() => run(pickObservation)}>
-                      {t('选择观测文件', 'Choose observations')}
-                    </Button>
-                    <Button
+                    <ActionButton
+                      action="history-pick-observation"
+                      label={t('选择观测文件', 'Choose observations')}
+                      disabled={busy}
+                      run={() => action(pickObservation)}
+                    />
+                    <ActionButton
+                      action="history-evaluation-catalog"
+                      label={t('读取共同可用变量', 'Read common variables')}
                       disabled={busy || !compare || !comparisonInput.obs}
-                      onClick={() => run(loadVariables)}
-                    >
-                      {t('读取共同可用变量', 'Read common variables')}
-                    </Button>
-                    <Button disabled={!compareEnabled} onClick={() => run(compareRuns)}>
-                      {t('核对条件并比较', 'Check conditions and compare')}
-                    </Button>
+                      run={() => action(loadVariables)}
+                    />
+                    <ActionButton
+                      action="history-compare"
+                      label={t('核对条件并比较', 'Check conditions and compare')}
+                      disabled={!compareEnabled}
+                      run={() => action(compareRuns)}
+                    />
                   </div>
                   {comparisonResult != null && (
                     <>
@@ -2043,13 +1887,13 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   {result != null && <pre>{JSON.stringify(result, null, 2)}</pre>}
                   <h3>{t('关联记录', 'Related operations')}</h3>
                   {detail.related.map((item) => (
-                    <Button
+                    <ActionButton
                       key={item.operation_id}
+                      action={`history-related-${item.operation_id}`}
+                      label={`${item.kind} · ${item.operation_id}`}
                       disabled={busy}
-                      onClick={() => run(() => show(item.operation_id))}
-                    >
-                      {item.kind} · {item.operation_id}
-                    </Button>
+                      run={() => action(() => show(item.operation_id))}
+                    />
                   ))}
                   <h3>{t('事件', 'Events')}</h3>
                   <div>

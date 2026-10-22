@@ -39,15 +39,20 @@ function harness(
       downloads.push({ content, name, type });
     },
     React: {
-      createElement: (type: string, props: Node['props'], ...children: unknown[]) => ({
-        type,
-        props: props ?? {},
-        children,
-      }),
+      // ActionButton 按它渲染出的样子收：普通按钮，onClick 就是 run，没写子节点时显示 label。
+      createElement: (type: string, props: Node['props'], ...children: unknown[]) =>
+        type === 'ActionButton'
+          ? {
+              type: 'Button',
+              props: { ...props, onClick: props.run },
+              children: children.length ? children : [String(props.label)],
+            }
+          : { type, props: props ?? {}, children },
     },
     ...Object.fromEntries(
       [
         'Advanced',
+        'ActionButton',
         'Button',
         'Card',
         'ContextMenu',
@@ -71,8 +76,14 @@ function harness(
         return true;
       },
     }),
+    // 动作由按钮登记（第 737 轮）：从渲染树里收集；打开的对话框挡住页面，只算对话框里的。
     usePageContract: (value: typeof contract) => {
-      contract = value;
+      contract = {
+        ...value,
+        get actions() {
+          return [...value.actions, ...treeActions()];
+        },
+      };
     },
     useState: (initial: unknown) => {
       const i = cursor++;
@@ -125,6 +136,27 @@ function harness(
         : node == null || node === false
           ? ''
           : String(node);
+  function treeActions() {
+    const dialogs = nodes(tree).filter((n) => n.type === 'Dialog');
+    const scope = dialogs.length ? dialogs[dialogs.length - 1] : tree;
+    return nodes(scope).flatMap((n) => {
+      const p = n.props as Record<string, unknown> & {
+        action?: string;
+        closeAction?: string;
+        open?: boolean;
+        disabled?: boolean;
+        run?: () => unknown;
+        onOpenChange?: (open: boolean) => void;
+      };
+      if (n.type === 'Dialog' && p.closeAction)
+        return [{ id: p.closeAction, enabled: true, run: () => p.onOpenChange!(false) }];
+      if (n.type === 'Advanced' && p.action)
+        return [{ id: p.action, enabled: true, run: () => p.onOpenChange!(!p.open) }];
+      if (typeof p.action === 'string')
+        return [{ id: p.action, enabled: !p.disabled, run: p.run! }];
+      return [];
+    });
+  }
   const menu = (index = 0) => nodes(tree).filter((n) => n.type === 'ContextMenu')[index];
   const click = (label: string) => {
     const button = nodes(tree).find((n) => n.type === 'Button' && text(n) === label);
