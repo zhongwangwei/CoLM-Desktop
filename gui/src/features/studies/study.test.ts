@@ -205,6 +205,24 @@ describe('gridded study targets', () => {
       period: 'daily',
     });
   });
+  it('lets one target use its own metric and the rest follow the study metric', () => {
+    const flux = gridTargetSpec(
+      { ...gridTargetDefaults.grid, path: '/obs/gleam.nc', obsVariable: 'E', scale: '1' },
+      0,
+      windows,
+      'nrmse',
+      20,
+    );
+    const discharge = gridTargetSpec(
+      { ...gridTargetDefaults.gauge, path: '/obs/q.csv', lon: '113.2', lat: '23.4', metric: 'nse' },
+      1,
+      windows,
+      'nrmse',
+      20,
+    );
+    assert.equal(flux.metric, 'nrmse');
+    assert.equal(discharge.metric, 'nse');
+  });
   it('refuses incomplete targets before they reach the engine', () => {
     assert.throws(() => gridTargetSpec(gridTargetDefaults.grid, 0, windows, 'kge', 20));
     assert.throws(() =>

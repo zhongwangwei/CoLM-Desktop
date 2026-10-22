@@ -284,6 +284,8 @@ export interface GridTargetDraft {
   /** `station`：观测时间比世界时早几小时（PLUMBER2 是当地标准时，中国的站填 8）；空着按 0。 */
   utcOffset: string;
   period: '' | 'daily' | 'monthly';
+  /** 这个目标单独用的比较指标；空着沿用研究的总体指标。 */
+  metric?: string;
 }
 
 export const gridTargetDefaults: Record<GridTargetDraft['kind'], GridTargetDraft> = {
@@ -398,7 +400,7 @@ export function gridTargetSpec(
   return {
     key: `${variable}@${draft.kind}${index + 1}`,
     variable,
-    metric,
+    metric: draft.metric || metric,
     weight: 1,
     min_pairs: minPairs,
     ...windows,

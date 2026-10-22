@@ -702,13 +702,31 @@ export function projectTimeline(members: HistoryOperation[]): ProjectTimelineRow
   return rows;
 }
 /** How many cases a project touched and how its latest operations ended. */
+// 研究放在 <项目>/.colm/studies/<id>，成员的运行副本在它下面的 members/ 里；`.colm` 下还有
+// model-inputs 这类内部目录。它们都不是项目里的算例，原来按路径去重时一个成员目录就算一个算例。
+const STUDY_DIR = /[\\/]\.colm[\\/]studies[\\/]([^\\/]+)/;
+const INTERNAL_DIR = /[\\/]\.colm([\\/]|$)/;
+const trimmed = (path: string) => path.replace(/[\\/]+$/, '');
 export function projectSummary(group: NonNullable<HistoryOperation['project_group']>) {
   const real = group.members.filter((member) => member.phase !== 'imported');
   const latestPerCase = new Map<string, HistoryOperation>();
-  for (const member of [...(real.length ? real : group.members)].sort((a, b) => when(b) - when(a)))
-    if (member.case_path && !latestPerCase.has(member.case_path))
-      latestPerCase.set(member.case_path, member);
-  return { cases: latestPerCase.size, counts: countStatuses([...latestPerCase.values()]) };
+  const studies = new Set<string>();
+  for (const member of [...(real.length ? real : group.members)].sort(
+    (a, b) => when(b) - when(a),
+  )) {
+    const path = member.case_path;
+    if (!path) continue;
+    const study = STUDY_DIR.exec(path);
+    if (study) studies.add(study[1]);
+    // 建研究那条记的是项目目录本身。
+    if (INTERNAL_DIR.test(path) || trimmed(path) === trimmed(group.path)) continue;
+    if (!latestPerCase.has(path)) latestPerCase.set(path, member);
+  }
+  return {
+    cases: latestPerCase.size,
+    studies: studies.size,
+    counts: countStatuses([...latestPerCase.values()]),
+  };
 }
 export function statusCountsLabel(counts: ProjectTimelineRow['counts'], en = false): string {
   const parts = [

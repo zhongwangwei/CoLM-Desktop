@@ -1486,6 +1486,7 @@ fn finish_task(
             }
         }
     }
+    state.completed_candidates = state.finished_candidates(&manifest.spec.base_cases);
     super::checkpoint::write_next(checkpoint_dir, state)?;
     Ok(())
 }

@@ -1,6 +1,6 @@
 //! Durable Study/task state. The latest valid checkpoint is authoritative.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use anyhow::{bail, Result};
@@ -119,6 +119,31 @@ impl StudyState {
             no_improvement_generations: 0,
             warnings: Vec::new(),
         })
+    }
+
+    /// 所有站点任务都已结束（成功、失败或取消）的候选数，不含基线 `m000000`。
+    /// 和 `refresh_candidates` 写入 `candidates` 的判据相同，但不用打分：每个任务结束时就能重算。
+    /// 原来只在一整批成员跑完后才更新，差分进化跑一代的几十分钟里界面一直显示 0（第 734 轮）。
+    pub fn finished_candidates(&self, sites: &[String]) -> usize {
+        let members: BTreeSet<&str> = self
+            .tasks
+            .values()
+            .map(|task| task.member.as_str())
+            .filter(|member| *member != "m000000")
+            .collect();
+        members
+            .into_iter()
+            .filter(|member| {
+                sites.iter().all(|site| {
+                    self.tasks.get(&task_id(member, site)).is_some_and(|task| {
+                        matches!(
+                            task.status,
+                            TaskStatus::Succeeded | TaskStatus::Failed | TaskStatus::Cancelled
+                        )
+                    })
+                })
+            })
+            .count()
     }
 
     pub fn insert_task(&mut self, task: TaskState) -> Result<()> {
@@ -281,6 +306,31 @@ mod tests {
             validation_objective: None,
             process: None,
         }
+    }
+
+    #[test]
+    fn finished_candidates_count_members_whose_every_site_ended() {
+        let at = |member: &str, site: &str, status| TaskState {
+            member: member.into(),
+            site: site.into(),
+            ..task(status)
+        };
+        let state = StudyState::new(
+            "s-test".into(),
+            [
+                at("m000000", "A", TaskStatus::Succeeded),
+                at("m000000", "B", TaskStatus::Succeeded),
+                at("m000001", "A", TaskStatus::Succeeded),
+                at("m000001", "B", TaskStatus::Failed),
+                at("m000002", "A", TaskStatus::Succeeded),
+                at("m000002", "B", TaskStatus::Running),
+                at("m000003", "A", TaskStatus::Cancelled),
+                at("m000003", "B", TaskStatus::Succeeded),
+            ],
+        )
+        .unwrap();
+        // 基线不算；m000002 还有站点在跑。
+        assert_eq!(state.finished_candidates(&["A".into(), "B".into()]), 2);
     }
 
     #[test]

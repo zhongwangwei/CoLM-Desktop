@@ -477,6 +477,21 @@ test('project timelines batch consecutive actions and summarize the latest resul
   assert.equal(summary.cases, 3);
   assert.deepEqual(summary.counts, { succeeded: 2, failed: 1, running: 0, pending: 0 });
   assert.equal(statusCountsLabel(summary.counts), '成功 2 · 失败 1');
+  // 研究成员的运行副本与建研究那条（记的是项目目录）不算算例，研究单独计数。
+  const withStudy = projectSummary({
+    path: '/p',
+    name: 'p',
+    members: [
+      ...members,
+      op('e', 'study-create', 'succeeded', 11 * 60_000, ''),
+      op('f', 'run', 'succeeded', 12 * 60_000, '.colm/studies/s-1/members/m000001/a'),
+      op('g', 'run', 'failed', 12 * 60_000, '.colm/studies/s-1/members/m000002/a'),
+      op('h', 'study-run', 'succeeded', 13 * 60_000, '.colm/studies/s-2'),
+    ],
+  });
+  assert.equal(withStudy.cases, 3);
+  assert.equal(withStudy.studies, 2);
+  assert.deepEqual(withStudy.counts, summary.counts);
   assert.equal(
     statusCountsLabel({ succeeded: 0, failed: 0, running: 1, pending: 2 }, true),
     '1 running · 2 to reconcile',

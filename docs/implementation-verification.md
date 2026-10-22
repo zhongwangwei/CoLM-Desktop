@@ -35566,3 +35566,29 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 **分支**：`claude/colm202x-code-update-374d5d` 已完全并入 main，删除了本地 worktree、本地分支和远程分支。
 
 **测试**：两个 workspace 的 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过；保留的 xtask 测试 `basic_settings` 2 条、`batch_edit` 3 条、`windows_console` 3 条通过；`cargo test -p colm-workspace --lib` 73 条通过；`xtask check-gui` 通过；`parameter-audit` 重新生成后无差异。前端 tsc 通过，804 条测试通过（多出的 1 条是移植过来的标签测试）。
+
+## 第 734 轮：研究的三个问题——进度、格点目标各自的指标、历史里的算例数（2026-10-22）
+
+**来历**：第 732 轮后列出的"研究功能"一组，用户同意接着做。
+
+- **研究进度要等一整批成员跑完才动**：
+  - 原因：`completed_candidates` 只在 `refresh_candidates` 里重算，而它只在 `run_members` 整批返回后才调用。差分进化跑一代的几十分钟里，界面一直显示 0；页面每 3 秒轮询一次，读到的始终是旧数。
+  - 修法：新增 `StudyState::finished_candidates(sites)`，判据和 `refresh_candidates` 相同（候选的所有站点任务都已成功、失败或取消，不含基线 `m000000`），但不需要打分，所以在每个任务结束时（`finish_task`）就能重算，并随检查点写盘。
+  - 整批结束后仍由 `refresh_candidates` 写入正式值，两者判据相同，不会来回跳。服务器研究读的是同一个状态字段，也一起受益。
+- **格点率定的所有目标只能共用一个比较指标**：
+  - 后端 `TargetSpec.metric` 本来就是逐目标的，`science::objective_loss` 也先把每个目标各自换算成越小越好的损失再合并，NSE 和 NRMSE 混用没有问题。限制只在页面上：`gridTargetSpec` 给所有目标填的是同一个总体指标。
+  - 修法：`GridTargetDraft` 加可选的 `metric`。每个目标卡片多一个"比较指标"下拉框，默认"沿用总体指标（X）"；总体那一栏在格点研究里标为"各目标可另选"；换目标种类时保留已选的指标。
+  - 顺带修正 `metricNames` 的定义位置：它原在 `gridTargetEditor` 之后，而后者在渲染时立即求值，引用它会触发 TDZ 错误，所以挪到了前面。
+- **历史记录把研究成员的运行算成了算例**：
+  - 原因：研究放在 `<项目>/.colm/studies/<id>`，`project_path` 会把成员运行归进项目，而 `projectSummary` 按 `case_path` 去重，于是每个成员目录都算一个"算例"。建研究那条记录的 `case_path` 是项目目录本身，也被算成了一个。
+  - 修法：`.colm` 下的路径和项目目录本身都不算算例，研究按 `.colm/studies/<id>` 单独计数，项目卡片显示为"N 个算例 · M 个研究 · K 条操作"。状态统计只统计算例。
+
+**测试**：
+- 新增：`state.rs` 的 `finished_candidates_count_members_whose_every_site_ended`；`study.test.ts` 的"各目标可单独指定指标"；`history.test.ts` 的项目摘要用例，加入研究成员运行、建研究记录和研究运行后，算例仍为 3、研究为 2、状态统计不变。
+- 通过：
+  - `cargo test -p colm-cli --bin colm-cli -- --test-threads=1` 483 条；`cargo test -p colm-cli --test study_cli_tuning -- --test-threads=1` 23 条（跑的是真实 CLI 调度和差分进化路径）。
+  - `cargo clippy --workspace --all-targets -- -D warnings` 与两个 workspace 的 fmt 检查。
+  - 前端 tsc、eslint、prettier、`check-gui`、805 条测试。
+- 窗口实测（隔离 HOME，项目 ep）：研究页 → 参数率定 → 选格点算例 hb → 勾一个参数 → 第 3 步。目标卡片里有"比较指标"（默认"沿用总体指标（NRMSE）"，8 个选项），总体那一栏显示"总体比较指标（各目标可另选）"，页面渲染正常。
+
+**没做**：差分进化的进度没有跑一次真实研究、在窗口里看着它逐个增长，只由单元测试和 CLI 调度测试覆盖。

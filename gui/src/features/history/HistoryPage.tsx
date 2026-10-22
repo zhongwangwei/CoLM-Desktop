@@ -1538,7 +1538,15 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                   {(item.run_group || item.project_group || subject.project) && (
                     <span className="history-card-sub">
                       {item.project_group
-                        ? `${projectSummary(item.project_group).cases} ${t('个算例', 'cases')} · ${item.project_group.members.length} ${t('条操作', 'operations')}`
+                        ? [
+                            `${projectSummary(item.project_group).cases} ${t('个算例', 'cases')}`,
+                            projectSummary(item.project_group).studies
+                              ? `${projectSummary(item.project_group).studies} ${t('个研究', 'studies')}`
+                              : '',
+                            `${item.project_group.members.length} ${t('条操作', 'operations')}`,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
                         : item.run_group
                           ? `${item.run_group.members.length} ${t('个站点', 'stations')}`
                           : `${t('项目', 'Project')} ${subject.project}`}

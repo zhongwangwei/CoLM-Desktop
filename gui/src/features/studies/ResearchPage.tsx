@@ -2239,6 +2239,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     ['station', '区域里的通量站', 'Flux station in the domain'],
     ['gauge', '水文站流量', 'River gauge discharge'],
   ];
+  const metricNames: Record<string, [string, string]> = {
+    nrmse: ['NRMSE 归一化均方根误差（越小越好）', 'NRMSE (lower is better)'],
+    mae: ['MAE 平均绝对误差（越小越好）', 'MAE (lower is better)'],
+    abs_bias: ['绝对偏差（越小越好）', 'Absolute bias (lower is better)'],
+    nse: ['NSE 效率系数（越大越好）', 'NSE (higher is better)'],
+    kge: ['KGE 效率系数（越大越好）', 'KGE (higher is better)'],
+    r2: ['R² 决定系数（越大越好）', 'R² (higher is better)'],
+    r: ['r 相关系数（越大越好）', 'Correlation r (higher is better)'],
+  };
   const gridTargetEditor = (
     <>
       <h3 className="study-subhead">{tr('率定目标', 'Calibration targets')}</h3>
@@ -2256,7 +2265,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 value={t.kind}
                 onChange={(e) => {
                   const kind = e.target.value as GridTargetDraft['kind'];
-                  setGridTarget(index, { ...gridTargetDefaults[kind], path: t.path });
+                  setGridTarget(index, {
+                    ...gridTargetDefaults[kind],
+                    path: t.path,
+                    metric: t.metric,
+                  });
                 }}
               >
                 {targetKinds.map(([value, zh, english]) => (
@@ -2346,6 +2359,25 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 </Select>
               </Field>
             )}
+            {/* 格点率定常同时比流量与通量：流量看 NSE/KGE，通量看 NRMSE，原来只能共用一个（第 734 轮）。 */}
+            <Field label={tr('比较指标', 'Metric')}>
+              <Select
+                value={t.metric ?? ''}
+                onChange={(e) => setGridTarget(index, { metric: e.target.value || undefined })}
+              >
+                <option value="">
+                  {tr(
+                    `沿用总体指标（${metricNames[metric]?.[0].split(' ')[0] ?? metric}）`,
+                    `Same as the study metric (${metricNames[metric]?.[1].split(' ')[0] ?? metric})`,
+                  )}
+                </option>
+                {Object.entries(metricNames).map(([value, [zh, english]]) => (
+                  <option key={value} value={value}>
+                    {en ? english : zh}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <div className="study-path study-wide">
               <Input
                 value={t.path}
@@ -2390,15 +2422,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       if (path) set(path);
     });
   const resultFiles = shownResultFiles(envelope?.results);
-  const metricNames: Record<string, [string, string]> = {
-    nrmse: ['NRMSE 归一化均方根误差（越小越好）', 'NRMSE (lower is better)'],
-    mae: ['MAE 平均绝对误差（越小越好）', 'MAE (lower is better)'],
-    abs_bias: ['绝对偏差（越小越好）', 'Absolute bias (lower is better)'],
-    nse: ['NSE 效率系数（越大越好）', 'NSE (higher is better)'],
-    kge: ['KGE 效率系数（越大越好）', 'KGE (higher is better)'],
-    r2: ['R² 决定系数（越大越好）', 'R² (higher is better)'],
-    r: ['r 相关系数（越大越好）', 'Correlation r (higher is better)'],
-  };
   const chosenCount = Object.values(parameters).filter((p) => p.enabled).length;
   let budgetSummary: string;
   let budgetOk = true;
@@ -3098,7 +3121,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                     onChange={(e) => setValTo(e.target.value)}
                   />
                 </Field>
-                <Field label={tr('比较指标', 'Metric')}>
+                <Field
+                  label={
+                    spatialStudy
+                      ? tr('总体比较指标（各目标可另选）', 'Study metric (targets may override)')
+                      : tr('比较指标', 'Metric')
+                  }
+                >
                   <Select value={metric} onChange={(e) => setMetric(e.target.value)}>
                     {Object.entries(metricNames).map(([value, [zh, english]]) => (
                       <option key={value} value={value}>
