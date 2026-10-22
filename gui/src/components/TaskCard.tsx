@@ -26,10 +26,13 @@ export default function TaskCard({
   action?: ReactNode;
 }) {
   return (
-    <section className="task-card" role="status" aria-live="polite">
+    // 只播报阶段说明：原来整张卡是 live region，"已等 N 秒"每秒一变，读屏跟着每秒重播（GUI 审查 S09）。
+    <section className="task-card">
       <header className="task-card-head">
         <strong>{title}</strong>
-        <span className="task-card-time">{waited}</span>
+        <span className="task-card-time" aria-hidden="true">
+          {waited}
+        </span>
       </header>
       {steps && steps.length > 1 && (
         <ol className="task-card-steps" style={{ '--steps': steps.length } as CSSProperties}>
@@ -54,7 +57,9 @@ export default function TaskCard({
         <span style={percent === null ? undefined : { width: `${Math.max(percent, 2)}%` }} />
       </div>
       <div className="task-card-meta">
-        <span className="task-card-detail">{detail}</span>
+        <span className="task-card-detail" role="status" aria-live="polite">
+          {detail}
+        </span>
         {percent !== null && <span className="task-card-percent">{percent}%</span>}
       </div>
       {(hint || action) && (

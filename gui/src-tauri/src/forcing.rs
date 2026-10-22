@@ -361,6 +361,17 @@ pub async fn convert_forcing_table(
     })
 }
 
+/// 产物已存在时不直接覆盖：转换会截断重写它，而它可能正被某个算例的强迫场引用。前处理页换了源文件、
+/// 输出路径还沿用上一个源的推荐名时，原来会把新数据静默写进旧文件（GUI 审查 2026-10-22，P1-1）。
+/// 界面认这句开头，问过用户再带 `overwrite` 重来。
+pub(crate) const EXISTING_PRODUCT: &str = "产物已存在，未覆盖";
+fn refuse_existing(dst: &str, overwrite: Option<bool>) -> Result<(), String> {
+    if overwrite != Some(true) && std::path::Path::new(dst).exists() {
+        return Err(format!("{EXISTING_PRODUCT}：{dst}"));
+    }
+    Ok(())
+}
+
 /// 拒绝产物与源文件放在同一目录。
 ///
 /// **先 `canonicalize()` 再比较。** macOS 上 `/tmp` 与 `/private/tmp` 是
@@ -405,8 +416,10 @@ pub async fn convert_forcing(
     dst: String,
     slots: Vec<SlotChoice>,
     heights: Option<[f64; 3]>,
+    overwrite: Option<bool>,
 ) -> Result<String, String> {
     reject_same_dir(std::path::Path::new(&src), std::path::Path::new(&dst))?;
+    refuse_existing(&dst, overwrite)?;
     let args = build_convert_args(&src, &dst, &slots, heights);
     crate::sidecar::capture_async(args).await?;
     Ok(dst)
@@ -522,10 +535,12 @@ pub async fn repair_forcing(
     dst: String,
     slots: Vec<SlotChoice>,
     options: GapOptions,
+    overwrite: Option<bool>,
 ) -> Result<GapReport, String> {
     if std::path::Path::new(&src) == std::path::Path::new(&dst) {
         return Err("修复产物不能覆盖原始强迫场".into());
     }
+    refuse_existing(&dst, overwrite)?;
     let args = build_gap_args("forcing-repair", &src, Some(&dst), &slots, &options);
     let json = crate::sidecar::capture_async(args).await?;
     serde_json::from_str(&json).map_err(|error| {

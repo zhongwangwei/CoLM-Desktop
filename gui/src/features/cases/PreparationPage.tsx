@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { invoke } from '../../lib/ipc';
+import { askConfirm } from '../../lib/confirm';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
@@ -85,13 +86,26 @@ export default function PreparationPage() {
     [result, setResult] = useState<unknown>(null),
     [error, setError] = useState('');
   const lock = useRef(false);
+  // 上次"检查"自动推出的输出路径。换了源文件就作废：原来选 A 检查后再换成 B，输出路径还是
+  // A 的推荐名，B 的数据被写进 A 的文件（GUI 审查 2026-10-22，P1-1）。用户自己改过的路径不动。
+  const autoDst = useRef('');
   const observationVariables = (probe?.variables ?? []).filter((v) => typeof v !== 'string');
   const sourceNames = [
     ...(probe?.variables ?? []).filter((v): v is string => typeof v === 'string'),
     ...(probe?.columns ?? []).map((v) => v.name),
   ];
   const preparation = casePreparationOptions(state.selectedCase?.profile, state.newCaseSeed);
-  const set = (k: string, v: string) => setForm((f) => ({ ...f, [k]: v }));
+  const set = (k: string, v: string) => {
+    if (k === 'src' && v !== form.src) {
+      setProbe(null);
+      setSlots([]);
+    }
+    setForm((f) =>
+      k !== 'src' || v === f.src
+        ? { ...f, [k]: v }
+        : { ...f, src: v, dst: f.dst === autoDst.current ? '' : f.dst },
+    );
+  };
   const num = (k: string) => requiredNumber(form[k], k);
   const optional = (k: string) => (form[k].trim() ? num(k) : null);
   async function work(fn: () => Promise<unknown>) {
@@ -126,13 +140,7 @@ export default function PreparationPage() {
         k === 'rawdata' || (k === 'dst' && ['table', 'observation'].includes(mode))
           ? await invoke<string | null>('pick_folder', { key: `prep-${k}` })
           : await invoke<string | null>('pick_file', { key: `prep-${k}`, filter: null });
-      if (path) {
-        set(k, path);
-        if (k === 'src') {
-          setProbe(null);
-          setSlots([]);
-        }
-      }
+      if (path) set(k, path);
       return null;
     });
   }
@@ -159,26 +167,29 @@ export default function PreparationPage() {
             s.index === 4 && (s.guessed ?? s.column) === 'Rainf' && hasSnow ? ['Snowf'] : [],
         })),
       );
-      setForm((f) => ({
-        ...f,
-        dst:
-          f.dst ||
-          (p.suggest_dst
-            ? ['netcdf', 'gaps'].includes(mode)
-              ? preparedDestination(p.suggest_dst, form.src)
-              : p.suggest_dst
-            : ''),
-        ...Object.fromEntries(
-          [
-            'time_column',
-            'site_column',
-            'latitude_column',
-            'longitude_column',
-            'landtype_column',
-            'utc_offset_column',
-          ].map((k) => [k, (p as unknown as Record<string, string>)[k] ?? f[k]]),
-        ),
-      }));
+      const suggested = p.suggest_dst
+        ? ['netcdf', 'gaps'].includes(mode)
+          ? preparedDestination(p.suggest_dst, form.src)
+          : p.suggest_dst
+        : '';
+      setForm((f) => {
+        const keep = !!f.dst && f.dst !== autoDst.current;
+        if (!keep) autoDst.current = suggested;
+        return {
+          ...f,
+          dst: keep ? f.dst : suggested,
+          ...Object.fromEntries(
+            [
+              'time_column',
+              'site_column',
+              'latitude_column',
+              'longitude_column',
+              'landtype_column',
+              'utc_offset_column',
+            ].map((k) => [k, (p as unknown as Record<string, string>)[k] ?? f[k]]),
+          ),
+        };
+      });
       return p;
     });
   }
@@ -225,6 +236,26 @@ export default function PreparationPage() {
       longitude: optional('lon'),
       era5: form.era5 || null,
     };
+  }
+  // 产物已存在时后端不覆盖（它可能正被某个算例引用）：问过再带 overwrite 重来。
+  async function confirmOverwrite<T>(write: (overwrite: boolean) => Promise<T>): Promise<T> {
+    try {
+      return await write(false);
+    } catch (error) {
+      if (!String(error).includes('产物已存在，未覆盖')) throw error;
+      const ok = await askConfirm(
+        t(
+          `输出文件已经存在：${form.dst}。覆盖会改掉引用它的算例所用的强迫场。要覆盖吗？`,
+          `The output file already exists: ${form.dst}. Overwriting changes the forcing of any case that uses it. Overwrite?`,
+        ),
+        { confirmLabel: t('覆盖', 'Overwrite'), danger: true },
+      );
+      if (!ok)
+        throw new Error(t('没有覆盖已有的输出文件。', 'The existing output file was kept.'), {
+          cause: error,
+        });
+      return await write(true);
+    }
   }
   async function execute() {
     return work(async () => {
@@ -287,18 +318,24 @@ export default function PreparationPage() {
         return batch;
       }
       if (mode === 'gaps')
-        return invoke('repair_forcing', {
+        return confirmOverwrite((overwrite) =>
+          invoke('repair_forcing', {
+            src: form.src,
+            dst: form.dst,
+            slots: mapped,
+            options: gapOptions(),
+            overwrite,
+          }),
+        );
+      return confirmOverwrite((overwrite) =>
+        invoke('convert_forcing', {
           src: form.src,
           dst: form.dst,
           slots: mapped,
-          options: gapOptions(),
-        });
-      return invoke('convert_forcing', {
-        src: form.src,
-        dst: form.dst,
-        slots: mapped,
-        heights: heights(),
-      });
+          heights: heights(),
+          overwrite,
+        }),
+      );
     });
   }
   async function finish(item: Imported) {

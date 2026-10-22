@@ -2603,6 +2603,14 @@ fn field_runtime_state(
     if name == "DEF_USE_Dynamic_Lake" && c.have.contains("CatchLateralFlow") {
         return hidden("流域侧向流自动打开动态湖泊");
     }
+    // 上游非流域内核在没开变饱和流时把动态湖泊关掉（`MOD_Namelist.F90` dynamic lake 段，`colm-rs` 同一判定：
+    // 选 van Genuchten 时变饱和流自动打开）。原来照常可选，存进去了运行时也不生效（GUI 审查 2026-10-22）。
+    if name == "DEF_USE_Dynamic_Lake"
+        && !(logical(c.doc, "DEF_USE_VariablySaturatedFlow")
+            || !logical(c.doc, "DEF_USE_Campbell_SOIL_MODEL"))
+    {
+        return hidden("没开变饱和流（VSF）时 CoLM 会自动关闭动态湖泊");
+    }
     if name == "DEF_USE_Dynamic_Lake" && c.urban {
         return rust_unported(
             logical(c.doc, name),

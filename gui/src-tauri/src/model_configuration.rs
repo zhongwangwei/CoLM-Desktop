@@ -312,6 +312,40 @@ fn confirmed_gate(
         return true;
     }
     gate_switch(reason).is_some_and(|key| matches!(doc.get(key), Some(NmlValue::Bool(false))))
+        || forced_by_explicit_switch(reason, doc, have, kernel)
+}
+
+/// 运行期会被内核静默改写的字段：决定它的开关在算例或版本里显式写了，结论就是确定的。原来这些
+/// 都降级成"适用条件待核对"、照常可选可存：城市算例里能选 WUE，运行时两个引擎都把它关掉，界面
+/// 却一直显示 WUE（GUI 审查 2026-10-22，P1-6）。开关没显式写时仍按源码默认待核对。
+fn forced_by_explicit_switch(
+    reason: Option<&str>,
+    doc: &Document,
+    have: &BTreeSet<&str>,
+    kernel: bool,
+) -> bool {
+    let explicit =
+        |key: &str, value: bool| matches!(doc.get(key), Some(NmlValue::Bool(v)) if *v == value);
+    match reason {
+        Some("城市模式会自动关闭这个过程") => explicit("DEF_URBAN_RUN", true),
+        Some("LCT + van Genuchten 下 CoLM 会自动关闭土壤表面阻抗") => {
+            explicit("DEF_USE_LCT", true) && explicit("DEF_USE_Campbell_SOIL_MODEL", false)
+        }
+        Some("van Genuchten 下 CoLM 会自动启用 VSF") => {
+            explicit("DEF_USE_Campbell_SOIL_MODEL", false)
+        }
+        Some("没开变饱和流（VSF）时 CoLM 会自动关闭动态湖泊") => {
+            explicit("DEF_USE_VariablySaturatedFlow", false)
+                && explicit("DEF_USE_Campbell_SOIL_MODEL", true)
+        }
+        Some("流域侧向流自动打开动态湖泊") => {
+            kernel && have.contains("CatchLateralFlow")
+        }
+        Some("由甲烷淹没方案决定：dynamic_wtd / hybrid 时打开，其余关闭") => {
+            explicit("DEF_USE_TRACER", true) && doc.get("DEF_TRACER_NAMES").is_some()
+        }
+        _ => false,
+    }
 }
 
 fn gate_switch(reason: Option<&str>) -> Option<&'static str> {
@@ -693,6 +727,54 @@ mod tests {
                 .as_bool()
                 .unwrap());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 城市算例里 WUE 等过程会在运行期被两个引擎关掉；没开 VSF 的动态湖泊同理。开关显式写了，
+    /// 界面就要灰掉并说明原因，不能照常可选可存。
+    #[test]
+    fn switches_the_kernel_overrides_at_run_time_are_not_offered() {
+        let (root, _, draft) = fixture();
+        let case = root.join("case");
+        std::fs::create_dir(&case).unwrap();
+        let check = |entries: &str, name: &str, reason: &str| {
+            std::fs::write(case.join("case.nml"), format!("&nl_colm\n{entries}/\n")).unwrap();
+            let result = query(
+                &root,
+                source(&draft, Overlay::default()),
+                case.to_str(),
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            let state = field(&result, name);
+            assert_eq!(state["mode"], "disabled", "{name}: {state}");
+            assert_eq!(state["reason"], reason, "{name}");
+            assert_eq!(state["pending"], false, "{name}");
+        };
+        check(
+            "DEF_URBAN_RUN=.true.\n",
+            "DEF_USE_WUEST",
+            "城市模式会自动关闭这个过程",
+        );
+        check(
+            "DEF_USE_VariablySaturatedFlow=.false.\nDEF_USE_Campbell_SOIL_MODEL=.true.\n",
+            "DEF_USE_Dynamic_Lake",
+            "没开变饱和流（VSF）时 CoLM 会自动关闭动态湖泊",
+        );
+        // 城市开关没显式写：照旧待核对，不替源码默认下结论。
+        std::fs::write(case.join("case.nml"), "&nl_colm\n/\n").unwrap();
+        let result = query(
+            &root,
+            source(&draft, Overlay::default()),
+            case.to_str(),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(field(&result, "DEF_USE_WUEST")["mode"], "editable");
         std::fs::remove_dir_all(root).unwrap();
     }
 

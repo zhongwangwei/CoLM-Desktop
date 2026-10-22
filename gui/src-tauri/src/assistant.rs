@@ -634,11 +634,11 @@ pub fn assistant_save_settings(
             "approval":settings.approval,
         }),
     )?;
-    let result = std::fs::write(
+    // 与 remote.json 同理：替换而不是原地截断重写。
+    let result = crate::config::write_export_text_atomic(
         &path,
         serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()));
+    );
     finish_assistant_action(&event, result)
 }
 

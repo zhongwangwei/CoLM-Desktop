@@ -1,5 +1,5 @@
-import RemotePathBrowser from '../../components/RemotePathBrowser';
 import { bilingual } from '../../lib/bilingual';
+import RemotePathBrowser from '../../components/RemotePathBrowser';
 import { useEffect, useRef, useState } from 'react';
 import { Advanced, Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
@@ -645,7 +645,16 @@ export default function ConfigurationOptions({
         (modelSettingValue(overlay, name) ??
           values.fields.find((field) => field.name === name)?.configured_value) != null,
     );
+    const closed = (name: string) =>
+      ['disabled', 'readonly', 'read-only'].includes(
+        values.fields.find((f) => f.name === name)?.mode ?? '',
+      );
+    // 城市算例里 WUE 在运行期被两个引擎关掉：只灰掉 WUE 这一项，按实际运行的方案显示，
+    // 其余两种照常可选（原来 WUE 照常可选可存，界面一直显示 WUE，GUI 审查 2026-10-22）。
+    const wueClosed = closed('DEF_USE_WUEST');
+    const wueReason = values.fields.find((f) => f.name === 'DEF_USE_WUEST')?.reason;
     const flags = stomatalFields.map((name) => {
+      if (name === 'DEF_USE_WUEST' && wueClosed) return '.false.';
       const context = values.fields.find((field) => field.name === name);
       const configured = removedCaseKeys.includes(name)
         ? null
@@ -667,20 +676,15 @@ export default function ConfigurationOptions({
             ? 'WUE'
             : 'BALL_BERRY'
       : '';
-    const unavailable =
-      !ready ||
-      stomatalFields.some((name) =>
-        ['disabled', 'readonly', 'read-only'].includes(
-          values.fields.find((f) => f.name === name)?.mode ?? '',
-        ),
-      );
+    const unavailable = !ready || closed('DEF_USE_MEDLYNST');
     const options = [
       ['BALL_BERRY', 'Ball–Berry'],
       ['MEDLYN', 'Medlyn'],
       ['WUE', t('水分利用效率 WUE', 'Water-use efficiency WUE')],
-    ];
+    ].filter(([value]) => value !== 'WUE' || !wueClosed);
     const set = (value: string) => {
-      if (unavailable) throw new Error('Stomatal scheme unavailable');
+      if (unavailable || (value === 'WUE' && wueClosed))
+        throw new Error('Stomatal scheme unavailable');
       write(() => setStomatalScheme(overlay, fields, value));
     };
     controls.push({
@@ -725,6 +729,9 @@ export default function ConfigurationOptions({
             </Button>
           ))}
         </div>
+        {wueClosed && wueReason && (
+          <p className="muted">{t(`WUE：${wueReason}`, `WUE: ${wueReason}`)}</p>
+        )}
         {!selected && (
           <p className="muted">
             {t(

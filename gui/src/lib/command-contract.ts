@@ -477,6 +477,10 @@ export const commandContract = {
     "heights": {
       "required": false,
       "rust_type": "Option<[f64; 3]>"
+    },
+    "overwrite": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "probe_forcing_gaps": {
@@ -509,6 +513,10 @@ export const commandContract = {
     "options": {
       "required": true,
       "rust_type": "GapOptions"
+    },
+    "overwrite": {
+      "required": false,
+      "rust_type": "Option<bool>"
     }
   },
   "download_era5land": {

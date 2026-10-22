@@ -124,7 +124,8 @@
 }
 .project-version-delete-button {
   flex-shrink: 0;
-  color: #b42318 !important;
+  /* 原来写死 #b42318，深色主题底上对比度只有 2.24:1（GUI 审查 S10）。 */
+  color: var(--danger) !important;
   border: 1px solid var(--border) !important;
 }
 .project-version-delete-reason {

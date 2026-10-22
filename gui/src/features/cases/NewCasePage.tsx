@@ -1891,11 +1891,8 @@ export default function NewCasePage() {
               ...(!multiSite ? ['start', 'end', 'spinup_end'] : []),
               ...(form.kind === 'site' && ownData ? ['sitedir', 'forcingdir'] : []),
             ]
-          : step === 5
-            ? multiSite
-              ? []
-              : ['spinup_end']
-            : [];
+          : // 第 5 步不显示预热日期（它在第 3 步）；原来仍注册进契约，助手能改一个看不见的字段（GUI 审查 F9）。
+            [];
   const visibleSchema = schema.filter(
     (field) =>
       (form.kind === 'site' || !isSiteConfiguration(field.name)) &&

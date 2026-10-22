@@ -1,4 +1,3 @@
-import { bilingual } from './bilingual';
 //! 参数字段的用户界面名称与离散方案说明。
 //!
 //! case.nml 仍保存 CoLM 的原始键和值；这里仅负责展示。技术键放在 tooltip，
@@ -1028,10 +1027,8 @@ const OPTIONS: Readonly<Record<string, Record<string, readonly string[]>>> = Obj
     ppbv: pair('ppbv', 'ppbv'),
   },
   DEF_precip_phase_discrimination_scheme: {
-    I: pair(
-      bilingual('湿球温度经验方案（Wang', 'Behrangi）'),
-      'Wet-bulb empirical scheme (Wang / Behrangi)',
-    ),
+    // 原来误写成 bilingual('…（Wang', 'Behrangi）')，中文只剩"湿球温度经验方案（Wang"（GUI 审查 #10）。
+    I: pair('湿球温度经验方案（Wang / Behrangi）', 'Wet-bulb empirical scheme (Wang / Behrangi)'),
     II: pair('气温线性阈值方案', 'Air-temperature linear-threshold scheme'),
     III: pair(
       '湿空气能量平衡方案（Harder–Pomeroy）',

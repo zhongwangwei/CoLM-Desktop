@@ -31,8 +31,9 @@ export default function ConfirmHost() {
       className="confirm-dialog"
       title={en ? 'Please confirm' : '请确认'}
       onOpenChange={(open) => !open && close(false)}
+      // 问题本身作对话框的描述（aria-describedby）：原来是普通段落，读屏只念"请确认"和两个按钮（GUI 审查 S08）。
+      description={<span className="confirm-message">{request.message}</span>}
     >
-      <p className="confirm-message">{request.message}</p>
       <div className="button-row confirm-actions">
         <Button onClick={() => close(false)}>
           {request.cancelLabel ?? (en ? 'Cancel' : '取消')}

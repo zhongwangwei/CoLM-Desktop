@@ -617,6 +617,12 @@ test('only visible configuration fields and selected maintenance actions enter t
   await page.action('resource-select-server-7920mp');
   contract = await page.action('resource-maintenance-toggle');
   assert.ok(contract.actions.some((action) => action.id === 'resource-build'));
+  // 编译配置与集群预设各有自己的 id：字段 id 不重复，编译用的是这里填的配置。
+  const ids = contract.fields.map((field) => field.id);
+  assert.equal(new Set(ids).size, ids.length, `duplicate field ids: ${ids}`);
+  page.fill('resource-build-preset', 'urban');
+  await page.action('resource-build');
+  assert.equal((page.calls.at(-1)!.args as { preset?: string }).preset, 'urban');
   await page.action('resource-kernels');
   assert.deepEqual(page.calls.at(-1), { command: 'remote_kernels', args: { host: '7920mp' } });
   assert.ok(!contract.actions.some((action) => /clean|delete|recover/.test(action.id)));

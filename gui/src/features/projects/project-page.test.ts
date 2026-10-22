@@ -503,7 +503,8 @@ test('a failed version read keeps the current model and leaves the version modal
   );
 });
 test('opening a version only shows it; choosing it for simulations and freezing record it', async () => {
-  const model = { version: { id: 'modified', revision: 2 } },
+  const model = { name: 'modified', version: { id: 'modified', revision: 2 } },
+    notices: string[] = [],
     updates: unknown[] = [],
     viewed: unknown[] = [];
   await expression(
@@ -536,7 +537,10 @@ test('opening a version only shows it; choosing it for simulations and freezing 
     'freeze',
     {
       researchVersion: async () => model,
-      draft: {},
+      // 草稿与已有版本等价：后端直接返回那个版本，界面说一句，不当成错误。
+      draft: { id: 'draft-1' },
+      t: (zh: string) => zh,
+      notify: (message: string) => notices.push(message),
       dirtyNow: { current: false },
       selected: null,
       viewing: null,
@@ -560,6 +564,7 @@ test('opening a version only shows it; choosing it for simulations and freezing 
     chosenVersion: model.version,
   });
   assert.equal(viewed.pop(), 'modified#2', 'the frozen version is shown afterwards');
+  assert.match(notices[0]!, /一样，直接用它/);
 });
 
 test('bundled example is not rejected by case switches retained in a legacy frozen revision', async () => {
@@ -692,4 +697,48 @@ test('deleting a version asks first, removes all its revisions and reports what 
   ]);
   assert.equal(pending, null);
   assert.deepEqual((report as { deleted: unknown[] }).deleted, [soil[1].version]);
+});
+
+// recent.json 坏了也照样打开项目，只提示；好好的项目不会因此从"最近的项目"里拿掉（GUI 审查 P1-4）。
+test('a broken recent-projects file does not stop a project from opening', async () => {
+  const notices: string[] = [];
+  const updates: Record<string, unknown>[] = [];
+  const invoke = async (command: string) => {
+    if (command === 'list_cases') return [{ dir: '/p/a', name: 'a' }];
+    if (command === 'save_recent') throw new Error('recent.json unreadable');
+    return null;
+  };
+  const loadProject = expression('loadProject', {
+    invoke,
+    rememberProject: (roots: string[], root: string) => [root, ...roots],
+    shownRoots: [],
+    RECENT_PROJECTS_KEY: 'ui-project-roots',
+    notify: (message: string) => notices.push(message),
+    t: (zh: string) => zh,
+    active: { current: true },
+    setRoots: () => {},
+    update: (patch: Record<string, unknown>) => updates.push(patch),
+    state: { root: '' },
+  });
+  const opened = await loadProject('/p');
+  assert.deepEqual(opened.cases, [{ dir: '/p/a', name: 'a' }]);
+  assert.equal(updates[0]!.root, '/p');
+  assert.match(notices[0]!, /没记下来/);
+  let saved: string | null = null;
+  const openRecent = expression('openRecent', {
+    work: (fn: () => Promise<unknown>) => fn(),
+    loadProject: async () => {
+      throw new Error('some later step failed');
+    },
+    invoke: async (command: string, args: { value?: string }) => {
+      if (command === 'save_recent') saved = args.value ?? null;
+      return [];
+    },
+    roots: ['/p'],
+    active: { current: true },
+    setRoots: () => {},
+    RECENT_PROJECTS_KEY: 'ui-project-roots',
+  });
+  await assert.rejects(openRecent('/p'), /later step/);
+  assert.equal(saved, null, 'a readable project stays in the recent list');
 });

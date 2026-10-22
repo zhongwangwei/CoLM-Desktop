@@ -141,7 +141,7 @@ usage:
   colm-cli model-list|prune|get|create|draft|save-draft|freeze|migrate-case|rollback|make-run|attach-network
                    --model-root DIR [--model-id ID --model-revision N] [--json JSON|-]
                    # create JSON: {name,note,parent:{id,revision},workspace?}; save-draft: ModelDraft + --expected-generation N
-                   # freeze: --model-id ID --asset-root DIR; migrate-case/rollback: <case-dir>
+                   # freeze: --model-id ID --asset-root DIR [--keep-draft 1]; migrate-case/rollback: <case-dir>
                    # prune JSON: {keep:[{id,revision}],dry_run?}: drop unused old official revisions
                    # make-run: <case-dir> --out DIR --operation-id ID; attach-network: --model-id ID --expected-generation N + hybrid-install flags
   colm-cli model-code-ls|model-code-file --model-root DIR --version ID --revision N [--dir D | --path P]

@@ -35326,3 +35326,20 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 - 差分进化的进度在一批成员全跑完前一直是 0（`completed_candidates` 只在批次结束时刷新）。
 - 研究页的格点目标对所有目标用同一个比较指标，流量常用的 NSE 和通量常用的 NRMSE 不能分别选。
 - 失败的"写入新版本"会在历史里留下一条"新建版本"（草稿随后删掉了）。
+
+## 第 723 轮：GUI 审查报告第 0 批快修（2026-10-22）
+
+**来历**：另一会话的只读审查报告（`tmp/gui-audit-2026-10-22/`，不入库）列了 8 条 P1。抽查属实后，用户同意先做第 0 批。
+
+**修了**：
+- P1-7：`run_one` 核对算例身份放进 `released_on_error`，坏 `.colm-desktop.json` 不再让算例（批量时整批）本次会话一直"已在运行"。
+- P1-8：运行已结束、只是台账写不进时照实返回退出码，台账错误写进该算例日志；批量不再补一条相反的 `run://done`。
+- P1-5：等价配置复用已有版本时，前端提示"和已有版本一样，直接用它"，不再报"冻结版本不匹配"；为研究冻结（`finish` 非真）时带 `--keep-draft 1`，草稿留着接研究结果（`Registry::freeze_keeping`）。
+- P1-6：`forced_by_explicit_switch`：城市显式开启时 WUE 等、LCT+vG 的 RSS、vG 的 VSF、流域侧向流的动态湖泊、甲烷淹没方案的动态湿地，成为确定的禁用并给原因；新增"没开 VSF 时自动关闭动态湖泊"规则。气孔卡只去掉 WUE 一项。
+- P1-1：前处理换源文件时作废自动推出的输出路径；转换、修补遇到已存在的产物不覆盖（`overwrite` 参数），问过再覆盖。
+- P1-4：`loadProject` 记"最近的项目"失败只提示；`openRecent` 只在目录真读不出算例时才移出列表。
+- 其余：`remote.json`/`assistant.json` 原子写；`caseWrites` 补 `set_case_run_host`、`mark_results_stale`、`redirect_output_dir`（认 `dir`/`caseDir`）；资源页编译配置改 id `resource-build-preset`；第 5 步去掉隐藏的预热字段；助手 `ui_go('project')` 从批量页回项目首页；约 40 条用户可见报错改中英；降水方案 I 标签截断；确认框问题进 `aria-describedby`；TaskCard 只播报阶段说明；深色删除按钮用 `--danger`；`theme-boot.js` 首帧应用外观与语言；发布包不带 sourcemap（`COLM_SOURCEMAP=1` 打开）；启动失败用错误样式。
+
+**测试**：新增 GUI 后端 3 条、colm-model 断言 1 处、前端 6 条。`cargo fmt --check`（两个 workspace）、两边 clippy `-D warnings`、colm-model 39、colm-cli 482、GUI 后端 423、前端 785、tsc、eslint、`check-gui` 全部通过。真实窗口：城市算例经应用 IPC 查到 WUE 与植物水力为 disabled 并带原因；首帧脚本在模块脚本前加载。
+
+**没做**：P1-2（退出不终止在途远程提交）、P1-3（启动状态机）与第 1 批结构性改造，需先出方案；"准备输入数据"、CN-Cng 示例只有助手能用，待用户决定；原生保存对话框标题仍是中文；冻结复用与前处理覆盖确认没在窗口里点过（参数对话框的输入提交没驱动成功），由单元测试覆盖。

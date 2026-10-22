@@ -593,7 +593,9 @@ export default function ResourcesPage() {
     guideFields.push(
       ...([
         {
-          id: 'resource-preset',
+          // 与上面的"集群预设"原来同为 resource-preset：维护区渲染出的是集群预设下拉，编译配置永远
+          // 停在 default，助手按 id 设置也报"不唯一"（GUI 审查 2026-10-22）。
+          id: 'resource-build-preset',
           label: t('编译配置', 'Build configuration'),
           value: preset,
           type: 'text',
@@ -1487,7 +1489,7 @@ export default function ResourcesPage() {
             >
               <div className="form-grid">
                 {[
-                  'preset',
+                  'build-preset',
                   'workspace',
                   'workspace-action',
                   'remote-case',

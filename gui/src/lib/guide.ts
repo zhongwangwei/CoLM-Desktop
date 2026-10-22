@@ -195,6 +195,11 @@ export async function openPage(step: string) {
         'Save or discard current edits before navigating.',
       ),
     );
+  // 批量运行页也在 project 路由下，只注册 project-batch-run：像侧栏"项目"一样回项目首页，
+  // 否则一直等不到 project 页的契约，10 秒后超时（GUI 审查 2026-10-22，S05）。
+  const view = app.state.projectView;
+  if (target.route === 'project' && view && view.root === app.state.root && !view.home)
+    app.update({ projectView: { ...view, home: true }, projectCasesOpen: false });
   await rendered();
   await waitForContract(
     () =>

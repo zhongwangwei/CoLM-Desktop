@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { choosableVersions, latestOfficial } from '../versions/version-tree';
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
@@ -24,7 +25,7 @@ import {
 } from './project-model';
 
 export default function ProjectPage() {
-  const { state, update, navigate, openCase, refreshVersions } = useApp();
+  const { state, update, navigate, openCase, refreshVersions, notify } = useApp();
   const en = state.language === 'en',
     t = (zh: string, english: string) => (en ? english : zh);
   const [roots, setRoots] = useState<string[]>([]),
@@ -212,8 +213,20 @@ export default function ProjectPage() {
   async function loadProject(root: string) {
     const cases = await invoke<CaseEntry[]>('list_cases', { root });
     const next = rememberProject(shownRoots, root);
-    await invoke('save_recent', { key: 'root', value: root });
-    await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(next) });
+    // 记"最近的项目"只是方便：recent.json 坏了也照样打开项目，只提示一句（和 openCase 同一条规矩）。
+    // 原来写不进就中止打开，openRecent 再把好好的项目当成"目录已删"从列表里拿掉（GUI 审查 2026-10-22，P1-4）。
+    try {
+      await invoke('save_recent', { key: 'root', value: root });
+      await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(next) });
+    } catch (error) {
+      notify(
+        t(
+          `项目已打开，但"最近的项目"没记下来：${String(error)}`,
+          `The project opened, but it could not be added to recent projects: ${String(error)}`,
+        ),
+        true,
+      );
+    }
     if (!active.current) return { root, cases };
     setRoots(next);
     update({
@@ -231,6 +244,12 @@ export default function ProjectPage() {
       try {
         return await loadProject(root);
       } catch (error) {
+        // 只有目录真的读不出算例时才从列表里拿掉；其余失败（比如别处的写入错误）不动列表。
+        const gone = await invoke<CaseEntry[]>('list_cases', { root }).then(
+          () => false,
+          () => true,
+        );
+        if (!gone) throw error;
         const next = roots.filter((item) => item !== root);
         if (active.current) setRoots(next);
         await invoke('save_recent', {
@@ -287,7 +306,13 @@ export default function ProjectPage() {
         forcingDir: paths.forcingdir,
         quick: false,
       });
-      if (!active.current) throw new Error('The project page changed while preparing the example.');
+      if (!active.current)
+        throw new Error(
+          bilingual(
+            '准备示例期间离开了项目页，示例没有打开。',
+            'The project page changed while preparing the example.',
+          ),
+        );
       const site = found.sites.find((item) => item.name === 'CN-Cng');
       if (!site || site.problem || !site.met_file || !site.start || !site.end)
         throw new Error(

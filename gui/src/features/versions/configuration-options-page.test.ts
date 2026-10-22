@@ -1948,3 +1948,21 @@ for (const site of ['scope', 'macro', 'spatial']) {
     }
   });
 }
+
+// 城市算例里 WUE 在运行期被关掉：只去掉 WUE 这一项并按实际方案显示，其余照常可选（GUI 审查 P1-6）。
+test('a run-time closed WUE removes only that stomatal choice', async () => {
+  const h = harness();
+  h.render();
+  const response = h.response();
+  const wue = response.fields.find((f) => f.name === 'DEF_USE_WUEST')!;
+  wue.mode = 'disabled';
+  wue.reason = '城市模式会自动关闭这个过程';
+  h.requests.at(-1)!.resolve(response);
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+  const c = h.render();
+  const scheme = c.fields.find((f) => f.id === 'configuration-stomatal-scheme')!;
+  assert.equal(scheme.disabled, false);
+  assert.ok(!scheme.options!.some((o) => o.value === 'WUE'));
+  assert.notEqual(scheme.value, 'WUE');
+  assert.throws(() => scheme.set('WUE'));
+});

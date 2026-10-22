@@ -382,3 +382,13 @@ test('startup does not reopen the project worked on last', async () => {
   assert.ok(!app.calls.includes('list_cases'), String(app.calls));
   assert.equal(app.state.busy, false);
 });
+
+// 首帧就用记住的外观与语言：同源脚本紧跟静态封面，先于模块脚本执行（GUI 审查 S10）。
+test('the remembered theme and language apply before the app scripts load', () => {
+  const html = readFileSync(new URL('../../index.html', import.meta.url), 'utf8');
+  const boot = readFileSync(new URL('../../public/theme-boot.js', import.meta.url), 'utf8');
+  assert.ok(html.indexOf('/theme-boot.js') < html.indexOf('/src/main.tsx'));
+  assert.ok(html.indexOf('start-cover-status') < html.indexOf('/theme-boot.js'));
+  assert.match(boot, /colm-ui-theme/);
+  assert.match(boot, /colm-ui-language/);
+});

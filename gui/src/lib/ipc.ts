@@ -33,6 +33,10 @@ const caseWrites = new Set([
   'hybrid_install',
   'hybrid_remove',
   'hybrid_climate',
+  // 也改算例目录（GUI 审查 2026-10-22 发现漏在清单外）。参数是 `dirs`、单个 `dir` 或 `caseDir`。
+  'set_case_run_host',
+  'mark_results_stale',
+  'redirect_output_dir',
 ]);
 export async function invoke<T = unknown>(
   command: IpcCommand,
@@ -51,7 +55,12 @@ export async function invoke<T = unknown>(
             : [],
         )
       : [];
-    const dirs = [...(Array.isArray(args.dirs) ? args.dirs : []), ...nested];
+    const dirs = [
+      ...(Array.isArray(args.dirs) ? args.dirs : []),
+      ...(typeof args.dir === 'string' ? [args.dir] : []),
+      ...(typeof args.caseDir === 'string' ? [args.caseDir] : []),
+      ...nested,
+    ];
     const busy = dirs.filter((dir) => typeof dir === 'string' && runningTargets().has(dir));
     if (busy.length)
       throw new Error(

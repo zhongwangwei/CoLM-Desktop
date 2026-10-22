@@ -74,7 +74,8 @@ export function makeRecord(
   index: number,
   processFile: string,
 ): ParameterOverride {
-  if (!value.trim() || /[\r\n]/.test(value)) throw new Error('Parameter value required');
+  if (!value.trim() || /[\r\n]/.test(value))
+    throw new Error(bilingual('请填写参数值（单行）', 'Parameter value required'));
   const scope =
     d.storage === 'pft-override'
       ? 'pft'
@@ -90,14 +91,14 @@ export function makeRecord(
     scope === 'land-cover-class' &&
     (!Number.isInteger(index) || index < 1 || index > (scheme === 'USGS' ? 24 : 17))
   )
-    throw new Error('Invalid land class');
+    throw new Error(bilingual('地类编号不在这个分类里', 'Invalid land class'));
   if (
     (scope === 'pft' || scope === 'pc-pft') &&
     (!Number.isInteger(index) || index < 0 || index > 78)
   )
-    throw new Error('Invalid PFT');
+    throw new Error(bilingual('植物功能型编号不对', 'Invalid PFT'));
   if (scope === 'process-file' && (!processFile || processFile.split('/').some((p) => p === '..')))
-    throw new Error('Process asset required');
+    throw new Error(bilingual('请先选过程参数文件', 'Process asset required'));
   return {
     parameter_id: d.id,
     raw_key: d.raw_key,
@@ -119,7 +120,8 @@ export function importParameters(
 ): ParameterOverride[] {
   const data = JSON.parse(text);
   const rows = Array.isArray(data) ? data : data.records;
-  if (!Array.isArray(rows)) throw new Error('Expected records array');
+  if (!Array.isArray(rows))
+    throw new Error(bilingual('导入文件不对：应是参数记录的数组', 'Expected records array'));
   const seen = new Set<string>();
   return rows.map((raw: ParameterOverride) => {
     const descriptor = catalog.find((d) => d.id === raw.parameter_id);
@@ -145,11 +147,14 @@ export function importParameters(
       (a.index ?? null) !== (b.index ?? null) ||
       (a.process_file ?? null) !== (b.process_file ?? null)
     )
-      throw new Error('Parameter scope mismatch');
+      throw new Error(
+        bilingual('导入的参数作用范围（地类、PFT 等）和参数目录对不上', 'Parameter scope mismatch'),
+      );
     if (record.scope_instance.process_file && !assets.includes(record.scope_instance.process_file))
-      throw new Error('Process asset missing');
+      throw new Error(bilingual('过程参数文件不在这个版本里', 'Process asset missing'));
     const key = parameterKey(record);
-    if (seen.has(key)) throw new Error('Duplicate parameter');
+    if (seen.has(key))
+      throw new Error(bilingual('导入文件里同一个参数出现了两次', 'Duplicate parameter'));
     seen.add(key);
     return record;
   });

@@ -320,11 +320,11 @@ pub fn remote_save_config(app: tauri::AppHandle, config: RemoteConfig) -> Result
     let path = config_path(&app)?;
     let saved = read_remote_config(&path)?;
     keep_kind_paths(&mut config, saved);
-    std::fs::write(
+    // 先写临时文件再替换：直接 `fs::write` 中途崩溃或磁盘满会把 remote.json 截断，服务器设置整份丢失。
+    crate::config::write_export_text_atomic(
         &path,
         serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| format!("{}: {e}", path.display()))?;
+    )?;
     passwords()
         .lock()
         .map_err(|_| "密码会话不可用")?
@@ -459,11 +459,10 @@ fn update_remote_config(
     let mut config = read_remote_config(&path)?;
     let changed = change(&mut config)?;
     if changed {
-        std::fs::write(
+        crate::config::write_export_text_atomic(
             &path,
             serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        )?;
     }
     Ok(changed)
 }
@@ -572,11 +571,10 @@ pub fn remote_remember_data_paths(
         ],
     )?;
     if changed {
-        std::fs::write(
+        crate::config::write_export_text_atomic(
             &path,
             serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| format!("{}: {e}", path.display()))?;
+        )?;
     }
     Ok(changed)
 }

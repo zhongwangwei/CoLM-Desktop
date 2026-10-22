@@ -202,3 +202,39 @@ test('the actual guide isolates modal controls from parent pages and restores na
   await guide.drive('go', { step: 'project' });
   assert.equal(navigations, 1);
 });
+
+// 批量运行页也在 project 路由下：助手 `ui_go('project')` 要回到项目首页，而不是等 10 秒超时（GUI 审查 S05）。
+test('going to the project page from the batch run page returns to the project home', async () => {
+  const source = readFileSync(new URL('./guide.ts', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;$/gm, '')
+    .replace(/^export /gm, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const guide = new Function(
+    'pageExecutionContext',
+    'publicUiResult',
+    'waitForContract',
+    'requestAnimationFrame',
+    'bilingual',
+    `${js};return {pages,drive,bind:value=>{app=value;}};`,
+  )(pageExecutionContext, publicUiResult, waitForContract, (fn: () => void) => fn(), bilingual);
+  const page = Symbol();
+  guide.pages.set(page, { title: 'Batch', step: 'project-batch-run', fields: [], actions: [] });
+  const state = {
+    route: 'project',
+    root: '/p',
+    busy: false,
+    projectView: { root: '/p', page: 'batch', home: false },
+  };
+  guide.bind({
+    state,
+    navigate: () => true,
+    update: (patch: { projectView: typeof state.projectView }) => {
+      state.projectView = patch.projectView;
+      guide.pages.set(page, { title: 'Project', step: 'project', fields: [], actions: [] });
+    },
+  });
+  await guide.drive('go', { step: 'project' });
+  assert.equal(state.projectView.home, true);
+});

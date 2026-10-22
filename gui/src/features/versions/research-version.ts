@@ -18,10 +18,10 @@ export async function researchVersion(
   const saved = dirty ? await operations.save(draft) : draft;
   if (saved.id !== draft.id)
     throw new Error(bilingual('保存的草稿不匹配', 'Saved draft identity does not match.'));
-  const frozen = await operations.freeze(saved.id, assetRoot || null);
-  if (frozen.version.id !== saved.id)
-    throw new Error(bilingual('冻结版本不匹配', 'Frozen revision identity does not match.'));
-  return frozen;
+  // 配置与已有版本等价时，后端直接返回那个版本（不另起修订号），id 自然和草稿不同。原来把它当成
+  // "冻结版本不匹配"报错，而后端已经把草稿删了，重试只剩"找不到草稿"（GUI 审查 2026-10-22）。
+  // 调用方按 id 是否等于草稿判断是新冻结的还是复用的。
+  return await operations.freeze(saved.id, assetRoot || null);
 }
 export async function refreshDraftCode(
   draft: ModelDraft,

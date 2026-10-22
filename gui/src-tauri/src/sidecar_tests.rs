@@ -1409,6 +1409,27 @@ fn preparation_failure_releases_reservation_for_retry() {
 }
 
 #[test]
+fn a_case_with_broken_metadata_does_not_stay_running() {
+    let dir = std::env::temp_dir().join(format!("colm-broken-meta-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(".colm-desktop.json"), "{ not json").unwrap();
+    let case = dir.to_string_lossy().into_owned();
+    let processes = RunProcesses::default();
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    assert!(released_on_error(&processes, &case, || {
+        crate::remote::server_case_args(&case, "").map(|_| ())
+    })
+    .is_err());
+    processes.prepare(std::slice::from_ref(&case)).unwrap();
+    processes
+        .with_idle(|| Ok(()))
+        .expect_err("the retry holds the reservation");
+    processes.forget(&case).unwrap();
+    processes.with_idle(|| Ok(())).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn batch_budget_tracks_the_selected_stage_implementations() {
     let budget = batch_cpu_budget(None, Some("fortran"), Some("rust"), 4, Some(1));
     assert_eq!(batch_width(8, 8, budget), 2);

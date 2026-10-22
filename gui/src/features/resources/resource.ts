@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import type { KindPaths, RunState, Server } from '../../lib/types';
 import { remoteStudyReply, remoteStudyPermissions } from '../studies/remote-study';
 export type { Server } from '../../lib/types';
@@ -150,11 +151,15 @@ export function applyServerPreset(server: Server, preset: ServerPreset): Server 
 
 export function replaceServer(servers: Server[], original: string | null, next: Server) {
   if (!next.host.trim() || next.host.startsWith('-') || /\s/.test(next.host))
-    throw new Error('Invalid SSH host');
+    throw new Error(
+      bilingual('SSH 主机名不对：只能用字母、数字、点、下划线和连字符', 'Invalid SSH host'),
+    );
   if (servers.some((s) => s.host === next.host && s.host !== original))
-    throw new Error('Duplicate SSH host');
+    throw new Error(bilingual('这个 SSH 主机已经添加过了', 'Duplicate SSH host'));
   if (original && !servers.some((s) => s.host === original))
-    throw new Error('Server was removed; reload before saving');
+    throw new Error(
+      bilingual('这台服务器已被删除，请刷新后再保存', 'Server was removed; reload before saving'),
+    );
   return original ? servers.map((s) => (s.host === original ? next : s)) : [...servers, next];
 }
 
@@ -167,13 +172,16 @@ export function remoteCheckRequest(
 ) {
   const request: Record<string, string> = { action, preset: preset.trim() || 'default' };
   if (action === 'verify' || action === 'test') {
-    if (!/^[A-Za-z0-9_-]+$/.test(packageName)) throw new Error('Invalid test package');
+    if (!/^[A-Za-z0-9_-]+$/.test(packageName))
+      throw new Error(bilingual('测试包名只能用字母、数字、- 和 _', 'Invalid test package'));
     request.kind = action === 'verify' ? kind : 'cargo';
     request.package = packageName;
   }
   if (action === 'verify') {
     if (!casePath.startsWith('/') || /[\0\r\n]/.test(casePath))
-      throw new Error('Absolute remote case path required');
+      throw new Error(
+        bilingual('服务器上的算例路径要写绝对路径', 'Absolute remote case path required'),
+      );
     request.case = casePath;
   }
   return request;

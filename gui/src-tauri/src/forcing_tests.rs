@@ -300,3 +300,18 @@ fn forcing_dir_always_ends_with_a_separator() {
         "/data/forcing/"
     );
 }
+
+#[test]
+fn an_existing_product_is_overwritten_only_on_request() {
+    let dir = std::env::temp_dir().join(format!("colm-existing-product-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let dst = dir.join("A_colm.nc");
+    let dst = dst.to_string_lossy();
+    assert!(refuse_existing(&dst, None).is_ok(), "nothing there yet");
+    std::fs::write(&*dst, "referenced by a case").unwrap();
+    let error = refuse_existing(&dst, None).unwrap_err();
+    assert!(error.starts_with(EXISTING_PRODUCT), "{error}");
+    assert!(refuse_existing(&dst, Some(false)).is_err());
+    assert!(refuse_existing(&dst, Some(true)).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}

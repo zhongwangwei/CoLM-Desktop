@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useEffect, useRef, useState } from 'react';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { invoke, invokeJson } from '../../lib/ipc';
@@ -315,6 +316,13 @@ export default function VersionsPage() {
       freeze: (id, root) =>
         invokeJson<FrozenRevision>('model_freeze', { id, assetRoot: root, finish }),
     });
+    if (target && frozen.version.id !== target.id)
+      notify(
+        t(
+          `这份配置和已有的版本"${frozen.name}" r${frozen.version.revision} 一样，直接用它，没有另建新版本。`,
+          `This configuration equals the existing version "${frozen.name}" r${frozen.version.revision}; it is used as is and no new version was created.`,
+        ),
+      );
     update({ version: frozen, versionRef: frozen.version, chosenVersion: frozen.version });
     setDraft(null);
     dirtyNow.current = false;
@@ -473,7 +481,7 @@ export default function VersionsPage() {
   // 专家把自己的参数文件整份带进版本，用文件自己的名字（标准示踪物参数不用导入，直接在修改参数里改）。
   async function importConfigurationProcess() {
     await execute(async () => {
-      if (!draft) throw new Error('No current draft');
+      if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
       const file = await invoke<string | null>('pick_file', {
         key: 'model-process',
         filter: 'nml',
@@ -495,7 +503,7 @@ export default function VersionsPage() {
   // 先列出研究最优成员会带进来的参数，勾选后再写（previewStudy → importChosen）。
   async function previewStudy() {
     await execute(async () => {
-      if (!draft) throw new Error('No current draft');
+      if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
       const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
       if (!studyDir) return;
       const result = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
@@ -540,7 +548,7 @@ export default function VersionsPage() {
   // 研究的结果写进这个版本：选一个已完成的率定或敏感性研究，把它最优成员的参数值写成参数改值。
   async function importStudyParameters() {
     await execute(async () => {
-      if (!draft) throw new Error('No current draft');
+      if (!draft) throw new Error(bilingual('没有正在编辑的草稿', 'No current draft'));
       const studyDir = await invoke<string | null>('pick_folder', { key: 'model-study' });
       if (!studyDir) return;
       const current = dirtyNow.current ? await save() : draft;
@@ -609,7 +617,7 @@ export default function VersionsPage() {
         (a) => a.relative_path === record.scope_instance.process_file,
       )
     )
-      throw new Error('Process asset missing');
+      throw new Error(bilingual('过程参数文件不在这个版本里', 'Process asset missing'));
     if (
       Object.keys(draft.overlay.physics).some(
         (k) => k.toLowerCase() === record.raw_key.toLowerCase(),
@@ -983,7 +991,9 @@ export default function VersionsPage() {
           if (
             draft.overlay.parameters.some((r) => r.raw_key.toLowerCase() === physics.toLowerCase())
           )
-            throw new Error('Reset the parameter override first');
+            throw new Error(
+              bilingual('请先恢复这个参数的默认值', 'Reset the parameter override first'),
+            );
           edit({
             ...draft,
             overlay: {

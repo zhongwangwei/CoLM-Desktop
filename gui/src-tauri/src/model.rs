@@ -623,6 +623,10 @@ pub async fn model_freeze(
     if let Some(root) = asset_root {
         args.extend(["--asset-root".into(), root]);
     }
+    // 为做研究冻结：配置与已有版本等价时后端复用那个版本，草稿要留着接研究结果。
+    if finish != Some(true) {
+        args.extend(["--keep-draft".into(), "1".into()]);
+    }
     let frozen: FrozenRevision = decode(cli(args).await?)?;
     if finish == Some(true) {
         // 冻结已经成功；草稿删不掉只是多留一个，不把成功的冻结报成失败。

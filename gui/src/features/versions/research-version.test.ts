@@ -45,10 +45,13 @@ test('saved drafts still freeze and failed saves never freeze or select a parent
   assert.equal(await researchVersion(null, false, parent, '', operations), parent);
   assert.equal(freezes, 1);
 });
-test('a mismatched frozen identity cannot enter research', async () => {
-  await assert.rejects(
-    researchVersion(draft, false, parent, '', { save: async (d) => d, freeze: async () => parent }),
-    /identity/,
+test('freezing a configuration that already exists returns that version', async () => {
+  assert.equal(
+    await researchVersion(draft, false, parent, '', {
+      save: async (d) => d,
+      freeze: async () => parent,
+    }),
+    parent,
   );
 });
 test('code refresh cannot overwrite edits created before or during its pending operation', async () => {

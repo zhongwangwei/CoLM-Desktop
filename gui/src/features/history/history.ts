@@ -31,14 +31,14 @@ export function historyFilter(filter: Filter, offset = 0, limit = 30) {
     if (value === undefined || value === '' || value === null) continue;
     if (key === 'from' || key === 'to') {
       const time = new Date(value as string).getTime();
-      if (!Number.isFinite(time)) throw new Error('Invalid date');
+      if (!Number.isFinite(time)) throw new Error(bilingual('日期格式不对', 'Invalid date'));
       result[key] = time;
     } else if (key === 'includeRoutine') {
       if (value) result.includeRoutine = true;
     } else result[key] = value;
   }
   if (typeof result.from === 'number' && typeof result.to === 'number' && result.from > result.to)
-    throw new Error('Start is after end');
+    throw new Error(bilingual('开始日期晚于结束日期', 'Start is after end'));
   return result;
 }
 export function dayGroups(items: HistoryOperation[], en = false) {
@@ -119,21 +119,26 @@ export type ComparisonInput = {
   corrected: boolean;
 };
 export function comparisonArgs(a: string, b: string, input: ComparisonInput) {
-  if (!a || !b || a === b) throw new Error('Select two different recorded runs');
+  if (!a || !b || a === b)
+    throw new Error(bilingual('请选两次不同的运行', 'Select two different recorded runs'));
   if (!input.obs.trim() || !input.variable.trim())
     throw new Error(bilingual('真实观测与变量必填', 'Observations and variable required'));
   const time = (value: string) => {
     if (!value) return null;
     const seconds = utcSeconds(value);
-    if (!Number.isSafeInteger(seconds)) throw new Error('Invalid UTC date');
+    if (!Number.isSafeInteger(seconds))
+      throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
     return seconds;
   };
   const from = time(input.from),
     to = time(input.to);
-  if (from != null && to != null && from >= to) throw new Error('Start must precede end');
+  if (from != null && to != null && from >= to)
+    throw new Error(bilingual('开始时间要早于结束时间', 'Start must precede end'));
   const spinup = Number(input.spinup);
   if (!input.spinup.trim() || !Number.isSafeInteger(spinup) || spinup < 0)
-    throw new Error('Invalid skipped model record count');
+    throw new Error(
+      bilingual('跳过的模型记录数要是非负整数', 'Invalid skipped model record count'),
+    );
   return {
     a,
     b,

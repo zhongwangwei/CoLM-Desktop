@@ -222,7 +222,8 @@ pub(crate) fn cmd(command: &str, opts: &Opts) -> Result<()> {
                     root
                 }
             };
-            serde_json::to_value(store.freeze(&id, &root)?)?
+            let keep_draft = opts.get("--keep-draft").is_some_and(|v| v == "1");
+            serde_json::to_value(store.freeze_keeping(&id, &root, keep_draft)?)?
         }
         "model-migrate-case" => {
             let source = code(

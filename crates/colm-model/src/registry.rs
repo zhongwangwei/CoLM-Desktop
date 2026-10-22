@@ -422,6 +422,16 @@ impl Registry {
         validate_overlay(&draft.overlay)
     }
     pub fn freeze(&self, id: &str, asset_root: &Path) -> Result<FrozenRevision> {
+        self.freeze_keeping(id, asset_root, false)
+    }
+    /// [`Self::freeze`]；`keep_draft` 时等价配置复用已有版本也不删草稿。为做研究而冻结时草稿还要
+    /// 接研究结果，原来复用分支照删，研究跑完写回时草稿已经不在了（GUI 审查 2026-10-22）。
+    pub fn freeze_keeping(
+        &self,
+        id: &str,
+        asset_root: &Path,
+        keep_draft: bool,
+    ) -> Result<FrozenRevision> {
         let _lock = self.lock()?;
         let mut draft = self.draft(id)?;
         normalize_overlay(&mut draft.overlay);
@@ -472,7 +482,9 @@ impl Registry {
                     &v.applicability,
                 )
             }) {
-                let _ = fs::remove_file(self.root.join("drafts").join(format!("{id}.json")));
+                if !keep_draft {
+                    let _ = fs::remove_file(self.root.join("drafts").join(format!("{id}.json")));
+                }
                 return Ok(existing);
             }
         }

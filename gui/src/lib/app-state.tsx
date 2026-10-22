@@ -357,7 +357,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
             update((old) => ({ versions: withoutRevisions(old.versions, removed) }));
         });
       } catch (error) {
-        if (alive) notify(String(error));
+        // 启动失败用错误样式，并说清是哪一步（原来是普通提示样式的原始错误，GUI 审查 S11）。
+        if (alive)
+          notify(
+            bilingual(
+              `启动时读取模型内核与版本失败：${String(error)}`,
+              `Reading model kernels and versions at startup failed: ${String(error)}`,
+            ),
+            true,
+          );
       } finally {
         if (alive) update({ busy: false, starting: false });
       }

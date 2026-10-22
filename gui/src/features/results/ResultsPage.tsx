@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import uPlot from 'uplot';
 import { timeTicks } from './time-ticks';
@@ -367,7 +368,9 @@ export default function ResultsPage({
         }
         const records = Number(spinup);
         if (!Number.isInteger(records) || records < 0)
-          throw new Error('Invalid skipped record count');
+          throw new Error(
+            bilingual('跳过的模型记录数要是非负整数', 'Invalid skipped record count'),
+          );
         const parse = (value: string) => (value ? utcSeconds(value) : null);
         const start = parse(from),
           end = parse(to);
@@ -376,7 +379,7 @@ export default function ResultsPage({
           (end !== null && !Number.isFinite(end)) ||
           (start !== null && end !== null && start >= end)
         )
-          throw new Error('Invalid evaluation window');
+          throw new Error(bilingual('评估时段不对：开始要早于结束', 'Invalid evaluation window'));
         for (const candidate of candidates) {
           if (cancelled) return;
           const result = await invokeJson<BaselineComparison>('history_compare', {
@@ -442,12 +445,13 @@ export default function ResultsPage({
     const parse = (value: string) => {
       if (!value) return null;
       const n = utcSeconds(value);
-      if (!Number.isFinite(n)) throw new Error('Invalid UTC date');
+      if (!Number.isFinite(n)) throw new Error(bilingual('日期格式不对', 'Invalid UTC date'));
       return n;
     };
     const a = parse(from),
       b = parse(to);
-    if (a !== null && b !== null && a >= b) throw new Error('Start must precede end');
+    if (a !== null && b !== null && a >= b)
+      throw new Error(bilingual('开始时间要早于结束时间', 'Start must precede end'));
     return { from: a, to: b };
   }, [from, to]);
   const readSeries = useCallback(
@@ -496,7 +500,8 @@ export default function ResultsPage({
     task(async (current) => {
       if (!obs.trim()) throw new Error(tr('请填写真实观测文件路径', 'Provide an observation file'));
       const days = Number(spinup);
-      if (!Number.isInteger(days) || days < 0) throw new Error('Invalid spinup');
+      if (!Number.isInteger(days) || days < 0)
+        throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
       const available = await invokeJson<typeof evaluation>('evaluation_catalog', {
         case: source,
         obs,
@@ -560,7 +565,7 @@ export default function ResultsPage({
   const compare = () =>
     task(async (current) => {
       if (!Number.isInteger(Number(spinup)) || Number(spinup) < 0)
-        throw new Error('Invalid spinup');
+        throw new Error(bilingual('预热要是非负整数', 'Invalid spinup'));
       const entries = comparison
         .split('\n')
         .filter(Boolean)
@@ -570,7 +575,12 @@ export default function ResultsPage({
         entries.length > 20 ||
         entries.some((x) => x.length !== 2 || !x[0] || !x[1])
       )
-        throw new Error('Use 1–20 lines: run_case | observation');
+        throw new Error(
+          bilingual(
+            '要填 1–20 行，每行"运行目录 | 观测文件"',
+            'Use 1–20 lines: run_case | observation',
+          ),
+        );
       const inventories = await boundedMap(
         [...new Set([caseDir, ...state.cases.map((c) => c.dir)].filter(Boolean))],
         2,
@@ -612,7 +622,10 @@ export default function ResultsPage({
   const exportFullSeries = () =>
     task(async (current) => {
       setExportNotice('');
-      if (!source || !variable) throw new Error('Select a recorded run and variable');
+      if (!source || !variable)
+        throw new Error(
+          bilingual('请先选一次运行和一个变量', 'Select a recorded run and variable'),
+        );
       const data = await readSeries(variable, null);
       const text = fullSeriesCsv(data, variable);
       if (!current()) throw new Error('Analysis selection changed before the export');
@@ -648,7 +661,10 @@ export default function ResultsPage({
   const report = () =>
     task(async (current) => {
       setExportNotice('');
-      if (!catalog) throw new Error('Load a recorded result before exporting');
+      if (!catalog)
+        throw new Error(
+          bilingual('请先读出一次运行的结果再导出', 'Load a recorded result before exporting'),
+        );
       const data = reportData();
       if (reportFormat === 'pdf') {
         const result = await printReport(

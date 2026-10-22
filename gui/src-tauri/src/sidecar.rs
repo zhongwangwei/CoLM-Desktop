@@ -1549,6 +1549,19 @@ fn run_case_blocking(
     )
 }
 
+/// 启动前的一步：失败就放掉 `prepare` 留下的登记。原来核对算例身份（`server_case_args`）放在这之外，
+/// 算例的 `.colm-desktop.json` 坏了就早退、登记一直留着：这个算例（批量时整批）在本次会话里永远
+/// "already running"，删历史、整理模型也一起被拒（GUI 审查 2026-10-22，B01）。
+fn released_on_error<T>(
+    processes: &RunProcesses,
+    case: &str,
+    step: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    step().inspect_err(|_| {
+        let _ = processes.forget(case);
+    })
+}
+
 /// `run_case` 里除去日志缓冲区那部分的逻辑，批量与单算例共用。
 #[allow(clippy::too_many_arguments)]
 fn run_one(
@@ -1567,23 +1580,20 @@ fn run_one(
     preprocessors: Option<&str>,
     record_input_fingerprints: Option<bool>,
 ) -> Result<i32, String> {
-    crate::remote::server_case_args(case, "")?;
     let cli = resolve_cli();
     let mut cmd = sidecar_command(&cli);
     // 用户自己在环境里设了就听用户的。
     if let Some(threads) = threads.filter(|_| std::env::var_os("RAYON_NUM_THREADS").is_none()) {
         cmd.env("RAYON_NUM_THREADS", threads.to_string());
     }
-    let prepared = (|| {
+    let (mut args, event) = released_on_error(processes, case, || {
+        crate::remote::server_case_args(case, "")?;
         let mut args = run_args(case, kernel, force, stage, mpi_ranks, engine, model_version)?;
         add_input_fingerprints(&mut args, record_input_fingerprints);
         crate::model::options(&mut args, model_revision)?;
         add_preprocessors(&mut args, preprocessors)?;
         let event = crate::history::command_start_for_run(&args, Some(run_id))?;
-        Ok::<_, String>((args, event))
-    })();
-    let (mut args, event) = prepared.inspect_err(|_| {
-        let _ = processes.forget(case);
+        Ok((args, event))
     })?;
     if let Some(event) = &event {
         args.extend(["--operation-id".into(), event.operation_id.clone()]);
@@ -1664,7 +1674,29 @@ fn run_one(
         Ok(-1) => "cancelled",
         _ => "failed",
     };
-    crate::history::command_finish(event.as_ref(), result, status)
+    let code = result.as_ref().ok().copied();
+    match (
+        crate::history::command_finish(event.as_ref(), result, status),
+        code,
+    ) {
+        // 运行已经结束、终态也发过了，只是台账没写进去：照实报运行结果，台账的问题记进这个算例的日志。
+        // 原来把它当成运行失败返回，批量 worker 再补一条 code -1 的终态，同一站点两条相反的结果
+        //（GUI 审查 2026-10-22，B09）。
+        (Err(error), Some(code)) => {
+            let _ = app.emit(
+                "run://lines",
+                Lines {
+                    run_id: run_id.to_string(),
+                    case: case.to_string(),
+                    lines: vec![format!(
+                        "运行已结束（退出码 {code}），但历史记录没能写入：{error}"
+                    )],
+                },
+            );
+            Ok(code)
+        }
+        (finished, _) => finished,
+    }
 }
 
 /// 新建一个算例。sidecar 会补齐站点文件、生成强迫场与算例 namelist。

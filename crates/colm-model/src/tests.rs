@@ -904,6 +904,14 @@ fn freezing_an_existing_configuration_returns_that_version_and_drops_the_draft()
         .physics
         .insert("DEF_TUNING_CSOILC".into(), "0.006".into());
     reg.create_draft(again).unwrap();
+    // 为做研究而冻结：同样复用已有版本，但草稿留着接研究结果。
+    assert_eq!(
+        reg.freeze_keeping("pc-again", &tmp.0, true)
+            .unwrap()
+            .version,
+        pc.version
+    );
+    assert!(reg.drafts().unwrap().iter().any(|d| d.id == "pc-again"));
     assert_eq!(reg.freeze("pc-again", &tmp.0).unwrap().version, pc.version);
     assert!(reg.drafts().unwrap().iter().all(|d| d.id != "pc-again"));
     // Undoing every change is the official model itself.

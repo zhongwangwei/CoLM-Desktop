@@ -1,3 +1,4 @@
+import { bilingual } from '../../lib/bilingual';
 import { download as exportText } from '../../lib/utils';
 export interface SeriesData {
   time: number[];
@@ -287,7 +288,7 @@ export async function printReport(
     );
     if (nativePrint) await nativePrint();
     else if (typeof window.print === 'function') window.print();
-    else throw new Error('Printing is unavailable');
+    else throw new Error(bilingual('这个窗口不能打印', 'Printing is unavailable'));
     timer = setTimeout(cleanup, 300_000);
     return { status: 'printdialog_requested' as const, format: 'pdf' as const };
   } catch (error) {
