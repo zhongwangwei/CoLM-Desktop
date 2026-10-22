@@ -530,3 +530,41 @@ fn shell_open_receives_plain_windows_paths() {
         "/Users/me/out.nc"
     );
 }
+
+// 服务器项目：观测按 Sitedata/../Observation 的约定在服务器上推路径，不要求本机有这个文件。
+#[test]
+fn server_projects_take_the_observation_beside_their_server_sitedata() {
+    let record = CaseRecord {
+        site: Some(
+            "/media/zhwei/data02/zhwei/training2026/PLUMBER2s/Sitedata/US-MMS_1999-2014_FLUXNET2015_site.nc"
+                .into(),
+        ),
+        run_host: Some("7920mp".into()),
+        remote_directory: Some("/media/zhwei/data02/zhwei/colm-desktop/ttt/US-MMS".into()),
+        ..Default::default()
+    };
+    assert_eq!(
+        case_default_observation(std::path::Path::new("/nonexistent"), &record).as_deref(),
+        Some(
+            "/media/zhwei/data02/zhwei/training2026/PLUMBER2s/Observation/US-MMS_1999-2014_FLUXNET2015_Flux.nc"
+        )
+    );
+    // 用户自己指定过的观测优先。
+    let chosen = CaseRecord {
+        obs_file: Some("/data/obs/custom.nc".into()),
+        ..record.clone()
+    };
+    assert_eq!(
+        case_default_observation(std::path::Path::new("/nonexistent"), &chosen).as_deref(),
+        Some("/data/obs/custom.nc")
+    );
+    // 认不出命名约定就不猜。
+    let unknown = CaseRecord {
+        site: Some("/data/sites/odd-name.nc".into()),
+        ..record
+    };
+    assert_eq!(
+        case_default_observation(std::path::Path::new("/nonexistent"), &unknown),
+        None
+    );
+}

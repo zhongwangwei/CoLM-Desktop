@@ -2451,6 +2451,7 @@ fn validate_bgc_runtime(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn metrics(
+    app: tauri::AppHandle,
     case: String,
     obs: String,
     spinup: usize,
@@ -2461,13 +2462,9 @@ pub async fn metrics(
     from: Option<i64>,
     to: Option<i64>,
 ) -> Result<String, String> {
-    if let Some(host) = crate::remote::results_on_server(&case) {
-        return Err(format!(
-            "这次运行的结果在服务器 {host} 上；在服务器上算评估指标还没做，请先在结果页点\"取回结果\""
-        ));
-    }
-    capture_async(metrics_args(
-        case,
+    let server = crate::remote::evaluation_server(&case, &obs);
+    let args = metrics_args(
+        case.clone(),
         obs,
         spinup,
         corrected,
@@ -2476,8 +2473,24 @@ pub async fn metrics(
         max_points,
         from,
         to,
-    ))
-    .await
+    );
+    // 结果在服务器上就在服务器上算（`obs` 是服务器上的路径），只回传指标与抽样后的配对点：
+    // 原来要先把整份 history 取回本机、再把观测文件也弄到本机才能评估（2026-10-22 用户定的）。
+    if let Some(host) = server {
+        return crate::remote::read_on_server(&app, &host, case, "metrics", flag_pairs(&args[2..]))
+            .await;
+    }
+    capture_async(args).await
+}
+
+/// `["--flag", "value", …]` 拆成成对的参数，转给 `remote-read`。
+fn flag_pairs(args: &[String]) -> Vec<(&str, String)> {
+    args.chunks(2)
+        .filter_map(|pair| match pair {
+            [flag, value] => Some((flag.as_str(), value.clone())),
+            _ => None,
+        })
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2533,7 +2546,21 @@ fn metrics_args(
 /// 当前算例与观测文件共同支持哪些评估变量。只读首个 history 文件的结构，
 /// 不加载长时间序列，供 GUI 在真正计算前展示完整可选清单和缺失原因。
 #[tauri::command]
-pub async fn evaluation_catalog(case: String, obs: String) -> Result<String, String> {
+pub async fn evaluation_catalog(
+    app: tauri::AppHandle,
+    case: String,
+    obs: String,
+) -> Result<String, String> {
+    if let Some(host) = crate::remote::evaluation_server(&case, &obs) {
+        return crate::remote::read_on_server(
+            &app,
+            &host,
+            case,
+            "evaluation-catalog",
+            vec![("--obs", obs)],
+        )
+        .await;
+    }
     capture_async(vec![
         "evaluation-catalog".to_string(),
         case,

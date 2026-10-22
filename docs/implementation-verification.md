@@ -35853,3 +35853,48 @@ Slurm、LSF、PBS 的载体由 `sbatch`/`bsub`/`qsub` 交给调度系统起，�
 - 根 workspace fmt、clippy 通过；`colm-cli` 485 条（`--test-threads=1`）、`colm-remote` 116 条、`colm-model` 39 条、`study_cli_tuning` 23 条、`engine_pack` 1 条通过。
 
 **没做**：没有重跑一次 90 站批量来量整批准备时间；上面的"约 6 秒"是按单次 0.06 s 估算的。
+
+## 第 742 轮：服务器端评估；按本机 CPU 编译引擎的实验（否决）（2026-10-22）
+
+**来历**：用户觉得服务器上的批量运行没有想象的快，选了"服务器引擎按本机 CPU 编译"一项，并问能否按服务器自动设定。同时提出：评估设置应自动载入 `Sitedata/../Observation` 里的观测文件，而且评估应在服务器上完成，只回传结果。
+
+### 一、按本机 CPU 编译：实测无收益，否决
+
+- 实现过一版：没有作业调度系统的 x86_64 单机自动按本机 CPU 编（集群上登录节点和计算节点 CPU 可能不同，保持通用），在 `bin/.cpu` 里记下编译方式，对不上就重编；`COLM_ENGINE_CPU` 可以强制指定。测试也写好了。
+- T7920（Xeon Gold 6248R，支持 AVX-512/AVX2/FMA）上的实验，全部放在获准目录 `/media/zhwei/data02/zhwei/colm-desktop/cpu-bench`，跑完已删除：
+  - 用同一份源码，加 `-C target-cpu=native` 另编一份（322 s），与正式引擎目录里的通用版对比；
+  - 跑同一个 DE-SfN 算例（3 年，`RAYON_NUM_THREADS=1`，`--force 1`），两种程序交替各跑两轮。
+
+| 程序 | 第 1 轮 | 第 2 轮 |
+|---|---|---|
+| 通用 | 21.9 s | 20.2 s |
+| 本机 CPU | 21.9 s | 20.9 s |
+
+- 两者 77 个输出文件逐字节相同：代码里常用的 `contract()` 在 x86 上走不融合路径，Rust 也不会自动把乘加合成 FMA，所以结果不变；但速度也没变。单点模型逐时间步推进、以标量计算为主，宽向量指令用不上。
+- 结论：没有收益，却会让每台服务器重编一次引擎，还多一套编译方式的判断要维护。改动已撤回，没有提交。
+
+**更正第 740 轮后对"为什么慢"的说法**：我当时说服务器单核大约只有 M4 Max 的一半，这不对。DE-SfN 单独跑时每模拟一年 7.3 s，和 Mac 上 AT-Neu 的 6.6 s 相当。批量里 DE-SfN 是每年 10.7 s，同时挤满机器的影响约 1.5 倍。各站点每模拟一年 10–49 s 的差别主要来自站点本身的计算量，并不主要是 CPU。
+
+### 二、评估在服务器上算
+
+- `colm-cli remote-read` 原来只放行读结果的命令（`history-catalog`、`series` 等），现在加上 `evaluation-catalog` 与 `metrics`，并转发 `--obs`、`--spinup`、`--json`、`--corrected`、`--summary-only`、`--pairs-var`；`--pairs-var` 可以给多次，所以每个参数出现几次就转几次。
+- GUI 后端新增 `remote::evaluation_server(case, obs)`，判断评估该到哪台服务器上算：
+  - 结果还在服务器上；
+  - 或结果已取回、但观测文件在本机不存在（服务器项目的默认观测是服务器路径）。
+  - `metrics`、`evaluation_catalog` 按它改走 `remote-read`，原来的报错"在服务器上算评估指标还没做，请先取回结果"随之删除。
+- 默认观测：
+  - 后端原本就按原始站点文件找 `…/Sitedata/../Observation/<站>_Flux.nc`，但要求本机存在这个文件，服务器项目永远找不到。现在服务器项目（记录里有 `remote_directory`）直接用正斜杠拼出服务器路径（`server_observation`），不在本机检查；用户自己指定过的观测优先，认不出命名约定的不猜。
+  - 前端 `defaultObservation` 优先用后端给出的 `profile.obs_file`，不再拿服务器路径在本机扫描。
+- 实测（本机新编的 `colm-cli`，对用户 US-MMS 的服务器运行记录，经 `7920mp`，`COLM_AUDIT_BY_PARENT=1` 不写账本）：
+  - `evaluation-catalog` 1.4 s：11 个评估变量里 10 个可用；
+  - `metrics --pairs-var Qle --pairs-var Qh --max-points 2400` 6.9 s，传回 225 KB；Qh 123388 对、Qle 120853 对。
+  - 服务器上 `Sitedata` 与 `Observation` 各 90 个文件，US-MMS 的观测文件按约定存在。
+- 测试：
+  - 新增 `server_projects_take_the_observation_beside_their_server_sitedata`；
+  - 新增 `evaluation_runs_where_both_the_results_and_the_observation_are`，覆盖本机运行、结果在服务器、结果已取回但观测在服务器三种情况；
+  - 前端新增"后端找到的观测直接用、不在本机扫描服务器路径"。
+  - 两个 workspace 的 fmt 与 clippy 通过；GUI 后端 431 条、`colm-cli` 485 条、前端 832 条测试通过。
+
+**没做**：
+- 评估设置里的"选择文件"仍打开本机文件对话框；服务器项目要换观测文件时，目前只能直接填服务器上的路径。
+- 没有在窗口里点一遍服务器项目的评估，只在命令行层面实测。

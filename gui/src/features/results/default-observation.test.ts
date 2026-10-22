@@ -14,13 +14,14 @@ function fixture({
   ],
   spatial = false,
   namelist = '/cases/custom/forcing.nml',
+  obs_file = undefined as string | undefined,
 } = {}) {
   const calls: { command: string; args: Record<string, unknown> }[] = [];
   const call = (async (command: string, args: Record<string, unknown>) => {
     calls.push({ command, args });
     if (command === 'install_example') return {};
     if (command === 'open_case')
-      return { profile: { spatial, inputs: { forcing_namelist: namelist } } };
+      return { profile: { spatial, obs_file, inputs: { forcing_namelist: namelist } } };
     if (command === 'read_text') return 'forcing namelist';
     if (command === 'read_case')
       return [
@@ -146,4 +147,13 @@ test('filesystem, drive, and UNC share roots remain rooted during dataset scanni
     assert.equal(await defaultObservation('/cases/site', call), `${base}flux.nc`);
     assert.deepEqual(calls.at(-1)?.args, { dir: `${base}Sitedata`, forcingDir: root, quick: true });
   }
+});
+
+test('the observation the backend found is used as is, including server paths', async () => {
+  const server =
+    '/media/zhwei/data02/zhwei/training2026/PLUMBER2s/Observation/US-MMS_1999-2014_FLUXNET2015_Flux.nc';
+  const { call, calls } = fixture({ obs_file: server });
+  assert.equal(await defaultObservation('/cases/US-MMS', call), server);
+  // 服务器上的路径不能拿到本机去扫描。
+  assert.ok(!calls.some((c) => c.command === 'scan_sites'));
 });

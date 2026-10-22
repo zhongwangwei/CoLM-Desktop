@@ -1773,6 +1773,22 @@ pub(crate) fn results_on_server(case: &str) -> Option<String> {
     record["host"].as_str().map(str::to_owned)
 }
 
+/// 评估该在哪台服务器上算：结果还在服务器上；或者结果已取回、但观测文件只在服务器上（服务器项目的默认观测是
+/// 服务器路径，本机打不开）。本机运行、或观测在本机的，返回 `None`，照旧在本机算。
+pub(crate) fn evaluation_server(case: &str, obs: &str) -> Option<String> {
+    if let Some(host) = results_on_server(case) {
+        return Some(host);
+    }
+    if std::path::Path::new(obs).is_file() {
+        return None;
+    }
+    let record: Value = serde_json::from_slice(
+        &std::fs::read(std::path::Path::new(case).join(".colm-remote.json")).ok()?,
+    )
+    .ok()?;
+    record["host"].as_str().map(str::to_owned)
+}
+
 pub(crate) async fn read_on_server(
     app: &tauri::AppHandle,
     host: &str,

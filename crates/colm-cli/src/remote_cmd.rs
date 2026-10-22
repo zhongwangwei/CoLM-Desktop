@@ -2387,13 +2387,20 @@ pub(super) fn cmd_read(opts: &Opts) -> Result<()> {
     ensure!(
         matches!(
             command.as_str(),
-            "history-catalog" | "series" | "energy-summary" | "history-map"
+            "history-catalog"
+                | "series"
+                | "energy-summary"
+                | "history-map"
+                | "evaluation-catalog"
+                | "metrics"
         ),
-        "remote-read only reads results (history-catalog, series, energy-summary, history-map), not {command}"
+        "remote-read only reads results (history-catalog, series, energy-summary, history-map, evaluation-catalog, metrics), not {command}"
     );
     let case = opts.positional_case()?;
     let record = read_record(&case)?;
     let mut args = vec![command, record.remote_case.clone()];
+    // 评估在服务器上算（2026-10-22 用户定的）：观测文件和模型输出都在那边，回传的只是指标与抽样后的
+    // 配对点。`--obs` 是服务器上的路径。`--pairs-var` 可以给多次，所以每个参数出现几次就转几次。
     for flag in [
         "--vars",
         "--from",
@@ -2401,8 +2408,14 @@ pub(super) fn cmd_read(opts: &Opts) -> Result<()> {
         "--max-points",
         "--var",
         "--index",
+        "--obs",
+        "--spinup",
+        "--json",
+        "--corrected",
+        "--summary-only",
+        "--pairs-var",
     ] {
-        if let Some(value) = opts.get(flag) {
+        for value in opts.get_all(flag) {
             args.extend([flag.to_owned(), value]);
         }
     }

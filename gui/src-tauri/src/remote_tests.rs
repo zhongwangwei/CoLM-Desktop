@@ -1194,3 +1194,29 @@ fn an_interrupted_first_submission_still_answers_the_resent_request() {
     let answer = waiter.join().unwrap();
     assert!(answer.unwrap_err().contains("interrupted"));
 }
+
+// 评估在哪算：结果取回了、但观测只在服务器上（服务器项目的默认观测是服务器路径），仍到服务器上算。
+#[test]
+fn evaluation_runs_where_both_the_results_and_the_observation_are() {
+    let dir = std::env::temp_dir().join(format!("colm-evaluation-server-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let case = dir.to_str().unwrap();
+    let local_obs = dir.join("obs.nc");
+    std::fs::write(&local_obs, "").unwrap();
+    let server_obs = "/srv/data/Observation/US-MMS_Flux.nc";
+    assert_eq!(evaluation_server(case, server_obs), None, "a local run");
+    std::fs::write(dir.join(".colm-remote.json"), r#"{"host":"7920"}"#).unwrap();
+    // 没有本地 history，结果在服务器上。
+    assert_eq!(
+        evaluation_server(case, local_obs.to_str().unwrap()).as_deref(),
+        Some("7920")
+    );
+    assert_eq!(evaluation_server(case, server_obs).as_deref(), Some("7920"));
+    // 结果已取回本机：观测在本机就本机算，观测只在服务器上就还去服务器算。
+    std::fs::create_dir_all(dir.join("out/US-MMS/history")).unwrap();
+    std::fs::write(dir.join("out/US-MMS/history/h.nc"), "").unwrap();
+    assert_eq!(evaluation_server(case, local_obs.to_str().unwrap()), None);
+    assert_eq!(evaluation_server(case, server_obs).as_deref(), Some("7920"));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

@@ -530,7 +530,26 @@ pub(crate) fn companion_name(site: &Path, which: usize) -> Option<String> {
     None
 }
 
+/// 服务器项目的观测文件：站点文件在服务器的 `…/Sitedata/<站>_site.nc`，观测按约定在 `…/Observation/<站>_Flux.nc`。
+/// 只拼路径，不在本机查存在（本机没有这个文件）；评估在服务器上算，路径不对由服务器报错。
+/// 用正斜杠拼：这是服务器上的路径，Windows 上用 `Path::join` 会拼出反斜杠。
+pub(crate) fn server_observation(site: &str) -> Option<String> {
+    let (dir, name) = site.rsplit_once('/')?;
+    let (root, _) = dir.rsplit_once('/')?;
+    Some(format!(
+        "{root}/Observation/{}",
+        companion_name(Path::new(name), 1)?
+    ))
+}
+
 pub fn case_default_observation(case_dir: &Path, record: &CaseRecord) -> Option<String> {
+    // 服务器项目的数据和评估都在服务器上（2026-10-22 用户定的），本机 `is_file` 永远是假。
+    if record.remote_directory.is_some() {
+        return record
+            .obs_file
+            .clone()
+            .or_else(|| record.site.as_deref().and_then(server_observation));
+    }
     if let Some(obs) = &record.obs_file {
         if Path::new(obs).is_file() {
             return Some(obs.clone());

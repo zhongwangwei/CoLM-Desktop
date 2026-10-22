@@ -28,6 +28,8 @@ const absolute = (path: string, base: string) => {
 export async function defaultObservation(caseDir: string, call: typeof invoke = invoke) {
   const opened = await call<OpenedCase>('open_case', { dir: caseDir });
   if (opened.profile.spatial) return '';
+  // 后端按 Sitedata/../Observation 的约定已经找好（服务器项目给的是服务器上的路径，评估也在服务器上算）。
+  if (opened.profile.obs_file) return opened.profile.obs_file;
   // Install release dataset corrections while preserving user-edited examples.
   await call('install_example', {}).catch(() => {});
   const forcingNamelist = opened.profile.inputs.forcing_namelist;
