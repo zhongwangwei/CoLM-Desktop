@@ -35363,3 +35363,20 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 - P1-2（退出应用不终止在途远程提交）、P1-3（启动无失败出口/重试）与第 1 批结构性改造：方案见 `tmp/gui-audit-2026-10-22/10-plan-p1-2-p1-3-batch1.md`（不入库），等批准后实施。
 - 原生保存对话框标题没有截屏肉眼确认：e2e 下 rfd 保存面板不弹（`COLM_E2E_SAVE_DIR` 旁路），由单元测试断言 `title` 参数；可在英文界面导出一次核实。
 - "准备输入数据" 与 CN-Cng 示例的去留仍待用户决定；本轮前处理页验证靠临时注入助手事件进入。
+
+## 第 725 轮：首页次要入口恢复与启动失败出口（2026-10-22）
+
+**来历**：第 724 轮末尾把"准备输入数据"/CN-Cng 示例的去留和 P1-2/P1-3/第 1 批方案交给用户；用户回"按你的建议来吧"——采用"保留并恢复可见入口"，并按方案顺序开工。
+
+**改了**：
+- `62f73798`：项目首页恢复 CN-Cng 示例横卡（`project-example`）和"准备输入数据"次要入口（`project-prepare`）。这两项之前只在 PageContract 里，界面上没有控件，准备页只能靠助手进入；示例图 `grassland-example.svg` 与 `.project-example` 样式本来就在，只是渲染时被删掉了。
+- `6a2402c4`：启动状态机。`ipc.ts` 增加 `withTimeout`；boot 分阶段（backend 15s、kernels/versions 各 30s），内核与版本用 `Promise.allSettled` 独立降级；失败把阶段和原始原因留在 `startup` 上；`StartCover` 失败时不消失，显示"应用无法启动"、原始原因和"重试启动"（`retryStartup` 重跑同一次 boot）；启动超过 30s 时给一句说明。移除了原来"20s 后无条件撤封面、busy 可能永久为真"的行为。新增前端两条测试（超时、失败+重试）。
+
+**真实窗口验证**（`--features e2e-driver`，隔离 HOME）：
+- 首页：可见"打开示例"和"准备输入数据"；点"打开示例"进入新建模拟并带上 CN-Cng 种子，点"准备输入数据"直接进入前处理页（不再需要注入助手事件）。
+- 启动失败：用 `COLM_CLI=/tmp/bad-colm-cli`（存在但不可执行）启动，封面保留并显示"应用没有启动完成。"、原始原因 `cannot start /tmp/bad-colm-cli: Permission denied (os error 13)` 和"重试启动"；点重试仍失败但无卡死；换正常 `COLM_CLI` 重启后封面消失、首页正常、无通知。
+- 普通 `.app` 用 `cargo tauri build --config tauri.bundle.conf.json --bundles app` 重建并重新打开。
+
+**验证**：typecheck、lint、prettier、787 条前端测试、build、`check-gui` 通过。
+
+**没做 / 下一步**：P1-2 最小版（退出应用时终止在途远程提交/编引擎）尚未动代码；之后的 JobRegistry、后端算例租约、PageContract 单一来源、科学选项单一事实源等第 1 批项按方案继续。
