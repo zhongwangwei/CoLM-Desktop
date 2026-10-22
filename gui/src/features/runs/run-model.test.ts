@@ -11,6 +11,10 @@ import {
   settleRuns,
   submittingHost,
   remoteEndStatus,
+  localCoreCount,
+  siteBatchConcurrency,
+  spatialThreads,
+  defaultLocalThreads,
 } from './run-model';
 const run: RunState = {
   run_id: 'new',
@@ -312,4 +316,24 @@ test('a server job the scheduler cancelled before it ran is over, with nothing t
     remoteEndStatus({ record, status: { state: 'finished', exit_code: 0 } }),
     'succeeded',
   );
+});
+
+describe('local parallelism defaults', () => {
+  it('single-point work is single-threaded per station and parallelised across stations', () => {
+    assert.equal(defaultLocalThreads(false, false, 12), 1);
+    assert.equal(defaultLocalThreads(false, true, 12), 1);
+    assert.equal(siteBatchConcurrency(90, 12), 12);
+    assert.equal(siteBatchConcurrency(3, 12), 3);
+    assert.equal(siteBatchConcurrency(0, 12), 1);
+    assert.equal(siteBatchConcurrency(90, 0), 1);
+  });
+  it('a spatial single case may use every logical core, with a hard cap', () => {
+    assert.equal(defaultLocalThreads(true, false, 12), 12);
+    assert.equal(defaultLocalThreads(true, true, 12), 1, 'spatial batches stay explicit');
+    assert.equal(spatialThreads(512), 256);
+    assert.equal(spatialThreads(0), 1);
+  });
+  it('falls back to one core when the webview reports no usable count', () => {
+    assert.ok(localCoreCount() >= 1);
+  });
 });

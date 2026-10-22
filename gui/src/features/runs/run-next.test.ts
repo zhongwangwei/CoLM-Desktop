@@ -631,6 +631,7 @@ test('delayed server defaults are not mistaken for automatically saved batch pre
     hadSavedSettings: { current: false },
     alive: { current: true },
     host: 'server',
+    localSiteOnly: false,
     settings: { threads: '1', scheduler: 'auto', cpus: '' },
     invoke: () =>
       new Promise((done) => {

@@ -31,6 +31,10 @@ import {
   submittingHost,
   remoteEndStatus,
   remoteActivity,
+  localCoreCount,
+  siteBatchConcurrency,
+  spatialThreads,
+  SITE_THREADS,
 } from './run-model';
 // A batch is submitted by a loop that outlives the page showing it: leaving the page (or coming
 // back to it) must not stop the stations still waiting to be submitted. Only the Stop button does,
@@ -94,9 +98,21 @@ export default function RunPanel({
         ? ''
         : recoveringRun.progress?.host
       : undefined;
-  const [host, setHost] = useState(
-      typeof restoredHost === 'string' ? restoredHost : (initialHost ?? savedHost),
-    ),
+  const initialHostValue =
+    typeof restoredHost === 'string' ? restoredHost : (initialHost ?? savedHost);
+  // 本机单点：主模型是单个垂直柱、时间步串行，多线程没有可拆的活；并行只能靠同时跑多个站点。
+  // 所以本机单点固定 1 线程，界面不再给线程数，批量只给"同时运行的站点数"（GUI 审查 2026-10-22）。
+  const localCores = localCoreCount();
+  const singleSpatialCase =
+    !batchCases && !initialHostValue && state.selectedCase?.profile?.spatial === true;
+  const batchSiteCases =
+    !!batchCases &&
+    !initialHostValue &&
+    !!batchProfiles &&
+    Object.keys(batchProfiles).length > 0 &&
+    Object.values(batchProfiles).every((profile) => !profile.spatial);
+  const localSiteOnly = !singleSpatialCase && !initialHostValue && (!batchCases || batchSiteCases);
+  const [host, setHost] = useState(initialHostValue),
     [servers, setServers] = useState<Server[]>([]),
     [kernel, setKernel] = useState(''),
     [preprocessors, setPreprocessors] = useState('rust'),
@@ -105,8 +121,15 @@ export default function RunPanel({
     ),
     [stage, setStage] = useState(''),
     [ranks, setRanks] = useState(settings?.ranks || '1'),
-    [threads, setThreads] = useState(settings?.threads || '1'),
-    [workers, setWorkers] = useState(settings?.workers || '1'),
+    [threads, setThreads] = useState(
+      settings?.threads || String(singleSpatialCase ? spatialThreads(localCores) : SITE_THREADS),
+    ),
+    [workers, setWorkers] = useState(
+      settings?.workers ||
+        String(
+          localSiteOnly && batchCases ? siteBatchConcurrency(batchCases.length, localCores) : 1,
+        ),
+    ),
     [scheduler, setScheduler] = useState(settings?.scheduler || 'auto'),
     [cpus, setCpus] = useState(settings?.cpus || ''),
     [force, setForce] = useState(false),
@@ -222,7 +245,7 @@ export default function RunPanel({
         if (current) {
           setServers(c.servers);
           const server = c.servers.find((entry) => entry.host === host);
-          if (server && !hadSavedSettings.current) {
+          if (server && !hadSavedSettings.current && !localSiteOnly) {
             setThreads(String(server.threads || 1));
             setScheduler(server.scheduler || 'auto');
             setCpus(server.cpus > 0 ? String(server.cpus) : '');
@@ -236,7 +259,7 @@ export default function RunPanel({
       current = false;
       alive.current = false;
     };
-  }, [notify, host]);
+  }, [notify, host, localSiteOnly]);
   useEffect(() => {
     let current = true;
     setRecovering(true);
@@ -1071,7 +1094,7 @@ export default function RunPanel({
       ...(engine === 'fortran'
         ? [['ranks', t('每个算例的 MPI 进程数', 'MPI ranks per case'), ranks, setRanks] as const]
         : []),
-      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch
+      ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch && !localSiteOnly
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]
         : []),
       ...(batchCases && !siteBatch
@@ -1393,6 +1416,19 @@ export default function RunPanel({
           return field ? [render(field)] : [];
         })}
       </div>
+      {localSiteOnly && (
+        <p className="muted">
+          {batchCases
+            ? t(
+                '单点每站固定 1 线程；"同时运行的站点数"决定本机并行度，默认填满本机核数。',
+                'Each single-point station runs one thread; the number of stations at once is the local parallelism, defaulting to the core count.',
+              )
+            : t(
+                '单点模型单线程运行；要加速请批量跑多个站点。',
+                'A single-point model runs one thread; run several stations to use the machine in parallel.',
+              )}
+        </p>
+      )}
       {host &&
         !siteBatch &&
         (scheduler === 'slurm' ||

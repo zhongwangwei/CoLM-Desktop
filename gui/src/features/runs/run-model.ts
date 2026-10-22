@@ -2,6 +2,40 @@
 export const REMOTE_CHECK_MS = 10_000;
 import { cropEnabled } from '../cases/case-model';
 import type { LastRun, RunState } from '../../lib/types';
+
+/** Logical cores on this machine; WebKit exposes the count as `hardwareConcurrency`. */
+export function localCoreCount(): number {
+  const cores = typeof navigator === 'undefined' ? undefined : navigator.hardwareConcurrency;
+  return Number.isInteger(cores) && (cores ?? 0) > 0 ? Math.min(256, cores as number) : 1;
+}
+
+/**
+ * 单点算例是一个垂直柱、时间步串行推进：主模型没有可以拆给多线程的循环
+ * （rayon 只用在空间格点、河网汇流与历史汇总）。所以单点每站固定 1 线程，
+ * 并行度只能来自"同时跑几个站点"（GUI 审查 2026-10-22）。
+ */
+export const SITE_THREADS = 1;
+
+/** 本机单点批量的默认并发：填满本机逻辑核，且不超过站点数。 */
+export function siteBatchConcurrency(count: number, cores = localCoreCount()): number {
+  const stations = Math.max(1, Math.floor(count));
+  return Math.min(stations, Math.max(1, Math.floor(cores)));
+}
+
+/** 本机单个空间算例的默认线程数：一个算例可以用满本机逻辑核。 */
+export function spatialThreads(cores = localCoreCount()): number {
+  return Math.max(1, Math.min(256, Math.floor(cores)));
+}
+
+/** 本机运行的默认线程数：单点固定 1；空间单算例用满核；空间批量保持 1（由用户显式调）。 */
+export function defaultLocalThreads(
+  spatial: boolean,
+  batch = false,
+  cores = localCoreCount(),
+): number {
+  return spatial && !batch ? spatialThreads(cores) : SITE_THREADS;
+}
+
 export interface RunView {
   runId: string;
   casePath: string;

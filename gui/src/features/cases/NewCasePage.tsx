@@ -54,7 +54,12 @@ import {
   unquote,
   type ConfigurationField,
 } from '../versions/configuration-options';
-import { compatibleKernel } from '../runs/run-model';
+import {
+  compatibleKernel,
+  localCoreCount,
+  SITE_THREADS,
+  siteBatchConcurrency,
+} from '../runs/run-model';
 import { configurationReason, simulationOptionField, modelSettingValue } from './model-settings';
 import SimulationSteps from './SimulationSteps';
 import ModelSettings from './ModelSettings';
@@ -188,7 +193,7 @@ export default function NewCasePage() {
     timestep: '1800',
     run_threads: '',
     run_ranks: '1',
-    run_workers: '1',
+    run_workers: '',
     run_scheduler: '',
     run_cpus: '',
     ...seed?.form,
@@ -346,17 +351,28 @@ export default function NewCasePage() {
     resolve: (path: string | null) => void;
   } | null>(null);
   const multiSite = ownData && form.kind === 'site' && multiSiteEnabled;
+  const singlePoint = form.kind === 'site';
+  // 单点本地运行每站固定 1 线程：单点是垂直柱、时间步串行，主模型没有可拆的并行工作
+  // （GUI 审查 2026-10-22）。空间算例本地单例默认用满本机逻辑核。
+  const localSite = singlePoint && !form.host;
+  const localCores = localCoreCount();
+  const siteCount = multiSite ? Math.max(1, siteDrafts.length) : 1;
   const scheduler = form.run_scheduler || resourceServer?.scheduler || 'auto';
   // Direct execution allocates nothing, so the CPUs a case uses are simply its threads.
   const directRun = !!form.host && scheduler === 'bare' && !multiSite;
   // Rust 引擎只有一个进程：申请的核数就是线程数，不另填。只有 Fortran（MPI）要按进程填 CPU 数。
   const cpusFollowThreads = directRun || form.engine !== 'fortran';
-  const runThreads = form.run_threads || String(resourceServer?.threads || 1);
+  const runThreads = localSite
+    ? String(SITE_THREADS)
+    : form.run_threads || String(resourceServer?.threads || (form.host ? 1 : localCores));
+  const runWorkers = multiSite
+    ? form.run_workers || String(siteBatchConcurrency(siteCount, localCores))
+    : '1';
   const runSettings = {
     host: form.host,
     threads: runThreads,
     ranks: form.engine === 'fortran' ? form.run_ranks : '1',
-    workers: form.run_workers,
+    workers: runWorkers,
     scheduler,
     cpus: cpusFollowThreads
       ? runThreads
@@ -2001,7 +2017,7 @@ export default function NewCasePage() {
       });
   }
   const resourceFields: UiField[] = [
-    ...(multiSite && form.host
+    ...(localSite || (multiSite && form.host)
       ? []
       : [
           {
@@ -3188,15 +3204,25 @@ export default function NewCasePage() {
               </p>
             )}
             <p className="muted">
-              {multiSite
-                ? t(
-                    '站点并发控制同时运行几个站点；线程和 MPI 进程用于每个站点。本机并发还会按可用 CPU 限制。',
-                    'Station concurrency controls simultaneous sites; threads and MPI ranks apply to each site. Local concurrency also respects available CPUs.',
-                  )
-                : t(
-                    '空间算例使用线程或 MPI 进程并行计算；单点线程也用于前处理。',
-                    'Spatial cases use threads or MPI ranks; site preprocessing can also use threads.',
-                  )}
+              {localSite
+                ? multiSite
+                  ? t(
+                      '单点每站固定 1 线程；这里只决定同时跑几个站点，默认填满本机核数。',
+                      'Each single-point station is one thread; only the number of stations running at once is configurable, defaulting to the local core count.',
+                    )
+                  : t(
+                      '单点模型每个站点单线程运行；要加速请创建多个站点，并调整同时运行的站点数。',
+                      'A single-point model runs one thread per station; create several stations to run them in parallel.',
+                    )
+                : multiSite
+                  ? t(
+                      '站点并发控制同时运行几个站点；线程和 MPI 进程用于每个站点。本机并发还会按可用 CPU 限制。',
+                      'Station concurrency controls simultaneous sites; threads and MPI ranks apply to each site. Local concurrency also respects available CPUs.',
+                    )
+                  : t(
+                      '空间算例使用线程或 MPI 进程并行计算；单点算例每站单线程运行。',
+                      'Spatial cases use threads or MPI ranks; single-point cases run one thread per station.',
+                    )}
             </p>
             {form.host && (
               <p className="muted">

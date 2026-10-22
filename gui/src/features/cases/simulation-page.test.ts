@@ -137,6 +137,10 @@ function page(
     fieldLabel,
     optionLabel,
     compatibleKernel,
+    // Deterministic local parallelism for the page harness.
+    localCoreCount: () => 8,
+    SITE_THREADS: 1,
+    siteBatchConcurrency: (count: number, cores = 8) => Math.min(count, cores),
     React: {
       createElement: (type: string, props: Record<string, unknown>, ...children: unknown[]) => {
         const element = { type, props: props ?? {}, children };
@@ -1421,7 +1425,7 @@ for (const subgrid of ['PFT', 'PC'])
       forcing_dataset: '',
       run_threads: '',
       run_ranks: '1',
-      run_workers: '1',
+      run_workers: '',
       run_scheduler: '',
       run_cpus: '',
     });
@@ -4000,6 +4004,24 @@ test('own-data single station keeps a single-level destination and user name', a
   assert.equal(p.state.root, '/project');
 });
 
+test('a local single-point case exposes no per-case thread or concurrency setting', async () => {
+  const p = page(
+    'NewCasePage',
+    {
+      multiSiteEnabled: false,
+      form: { ...form, name: 'test' },
+      ownData: true,
+      sites: [site],
+      step: 5,
+    },
+    [site],
+  );
+  await p.mount();
+  const fields = p.render().fields.map((field) => field.id);
+  assert.ok(!fields.includes('new-run-threads'), 'one vertical column has no threads to split');
+  assert.ok(!fields.includes('new-run-workers'), 'a single station has nothing to run in parallel');
+});
+
 test('invalid bundled station names cannot escape the simulation container', async () => {
   const invalid = { ...site, name: '../escape' };
   const p = page('NewCasePage', { form: { ...form, name: 'test' }, sites: [invalid], step: 5 }, [
@@ -4019,10 +4041,13 @@ test('creation review exposes station concurrency and carries resource choices t
     '同时运行的站点数',
   );
   assert.ok(!p.render().fields.some((field) => field.id === 'new-run-ranks'));
-  p.set('new-run-threads', '2');
+  assert.ok(
+    !p.render().fields.some((field) => field.id === 'new-run-threads'),
+    'single-point stations are one thread each; there is nothing to tune per station',
+  );
   p.set('new-run-workers', '3');
   await p.click('new-create');
-  assert.equal(p.state.projectRunSettings?.threads, '2');
+  assert.equal(p.state.projectRunSettings?.threads, '1');
   assert.equal(p.state.projectRunSettings?.workers, '3');
   assert.equal(p.state.projectRunSettings?.cases.length, 2);
   assert.ok(!p.calls.some((call) => call.command === 'run_batch'));
@@ -4221,7 +4246,8 @@ test('multi-site success opens the created project only after all spinup writes 
     host: '',
     threads: '1',
     ranks: '1',
-    workers: '1',
+    // Two single-point stations fill two local cores by default; each station is one thread.
+    workers: '2',
     scheduler: 'auto',
     cpus: '1',
   });
