@@ -56,6 +56,8 @@ test('all desktop text exports await the native chooser and never enter WebKit d
           suggestedName: 'full.csv',
           content: 'a,b\n1,2\n',
           mimeType: 'text/csv;charset=utf-8',
+          // The test document has no language element, so bilingual() falls back to Chinese.
+          title: '保存导出文件',
         },
       });
       finish('/chosen/full.csv');

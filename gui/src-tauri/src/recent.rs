@@ -185,11 +185,16 @@ fn finish_text_export(
 }
 
 /// Native save authorization avoids WebKit's sandboxed anchor-download path.
+///
+/// `title` is localized by the page: the window has no reliable way to infer the app's
+/// language (the system locale may differ from the selected UI language), and a Chinese
+/// title next to an English interface was a reported defect.
 #[tauri::command]
 pub async fn export_text_file(
     suggested_name: String,
     content: String,
     mime_type: String,
+    title: Option<String>,
 ) -> Result<Option<String>, String> {
     let extension = text_export_filter(&suggested_name, &mime_type)?;
     #[cfg(feature = "e2e-driver")]
@@ -201,10 +206,13 @@ pub async fn export_text_file(
         .await
         .map_err(|error| error.to_string())?;
     }
-    let selected = rfd::AsyncFileDialog::new()
-        .set_title("导出文件")
+    let mut dialog = rfd::AsyncFileDialog::new()
         .set_file_name(suggested_name)
-        .add_filter(extension.to_ascii_uppercase(), &[extension])
+        .add_filter(extension.to_ascii_uppercase(), &[extension]);
+    if let Some(title) = title.filter(|value| !value.trim().is_empty()) {
+        dialog = dialog.set_title(title);
+    }
+    let selected = dialog
         .save_file()
         .await
         .map(|file| file.path().to_path_buf());

@@ -1,4 +1,5 @@
 import { hasBackend, invoke } from './ipc';
+import { bilingual } from './bilingual';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 export const cn = (...inputs: ClassValue[]) => twMerge(clsx(inputs));
@@ -10,6 +11,9 @@ export async function download(name: string, text: string, type = 'text/plain') 
       suggestedName: name,
       content: text,
       mimeType: type,
+      // The native save panel has no access to the page's language; pass the same title the
+      // rest of the export flow shows so an English window does not open a Chinese dialog.
+      title: bilingual('保存导出文件', 'Save exported file'),
     });
     return {
       status: path === null ? ('cancelled' as const) : ('saved' as const),

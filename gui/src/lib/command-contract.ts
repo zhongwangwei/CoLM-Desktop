@@ -1149,6 +1149,10 @@ export const commandContract = {
     "mimeType": {
       "required": true,
       "rust_type": "String"
+    },
+    "title": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "remote_set_password": {
