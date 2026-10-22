@@ -60,6 +60,53 @@ export function usePageContract(contract: PageContract, active = true) {
     };
   });
 }
+// 由按钮自己登记的动作（`ActionButton`）。原来每个页面在 PageContract 里另写一份动作清单，
+// 助手调用的是清单里的回调，和界面上的按钮是两份：出过"助手能按、界面上没有"的按钮（第 737 轮）。
+// 这里只认此刻真的显示着、并且不被打开的对话框挡住的按钮；能不能按看按钮自己的 disabled。
+type RenderedAction = {
+  action: Omit<UiAction, 'enabled' | 'visible'>;
+  element: () => Element | null;
+};
+const renderedActions = new Map<symbol, RenderedAction>();
+/** 登记一个按钮动作，返回注销函数。`useRenderedAction` 在按钮挂载期间调用它。 */
+export function registerRenderedAction(
+  action: RenderedAction['action'],
+  element: RenderedAction['element'],
+) {
+  const key = Symbol('action');
+  renderedActions.set(key, { action, element });
+  return () => {
+    renderedActions.delete(key);
+  };
+}
+export function useRenderedAction(
+  action: RenderedAction['action'],
+  ref: { current: Element | null },
+) {
+  useLayoutEffect(() => registerRenderedAction(action, () => ref.current));
+}
+const shown = (element: Element) =>
+  element.isConnected &&
+  element.getClientRects().length > 0 &&
+  !element.closest('[hidden], [aria-hidden="true"]');
+/** 最上层打开着的对话框：有它时，只有它里面的按钮算数。 */
+function topDialog(): Element | null {
+  const query = globalThis.document?.querySelectorAll;
+  if (typeof query !== 'function') return null;
+  const dialogs = [
+    ...query.call(globalThis.document, '[role="dialog"], [role="alertdialog"], dialog[open]'),
+  ].filter(shown);
+  return dialogs.at(-1) ?? null;
+}
+export function renderedButtons(): UiAction[] {
+  if (!renderedActions.size) return [];
+  const dialog = topDialog();
+  return [...renderedActions.values()].flatMap(({ action, element }) => {
+    const el = element();
+    if (!el || !shown(el) || (dialog && !dialog.contains(el))) return [];
+    return [{ ...action, enabled: !(el as HTMLButtonElement).disabled }];
+  });
+}
 const pageContracts = () => {
   const contracts = [...pages.values()];
   const modal = [...contracts].reverse().find((page) => page.modal);
@@ -69,10 +116,12 @@ const fields = () =>
   pageContracts()
     .flatMap((page) => page.fields)
     .filter((field) => field.visible !== false);
-const actions = () =>
-  pageContracts()
+const actions = () => [
+  ...pageContracts()
     .flatMap((page) => page.actions)
-    .filter((action) => action.visible !== false);
+    .filter((action) => action.visible !== false),
+  ...renderedButtons(),
+];
 export function guideState() {
   const state = app?.state;
   const contracts = pageContracts();

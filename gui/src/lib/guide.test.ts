@@ -238,3 +238,76 @@ test('going to the project page from the batch run page returns to the project h
   await guide.drive('go', { step: 'project' });
   assert.equal(state.projectView.home, true);
 });
+
+test('assistant buttons are exactly the visible ones, and only those inside an open dialog', async () => {
+  // guide.ts 经 app-state 在加载时读 localStorage；node 下没有它。
+  Object.assign(globalThis, {
+    localStorage: globalThis.localStorage ?? { getItem: () => null, setItem() {} },
+  });
+  const { registerRenderedAction, renderedButtons } = await import('./guide');
+  type Fake = {
+    isConnected: boolean;
+    disabled?: boolean;
+    visible: boolean;
+    inside?: Fake;
+    getClientRects: () => unknown[];
+    closest: () => null;
+    contains: (other: Fake) => boolean;
+  };
+  const fake = (visible: boolean, fields: Partial<Fake> = {}): Fake => {
+    const element: Fake = {
+      isConnected: true,
+      visible,
+      getClientRects: () => (element.visible ? [{}] : []),
+      closest: () => null,
+      contains: (other) => other.inside === element,
+      ...fields,
+    };
+    return element;
+  };
+  const saved = globalThis.document;
+  let dialogs: Fake[] = [];
+  Object.assign(globalThis, { document: { querySelectorAll: () => dialogs } });
+  try {
+    const run = () => 'ran';
+    const shown = fake(true);
+    const hidden = fake(false);
+    const off = fake(true, { disabled: true });
+    const dialog = fake(true);
+    const inDialog = fake(true, { inside: dialog });
+    const unregister = [
+      registerRenderedAction(
+        { id: 'shown', label: 'Shown', kind: 'click', run },
+        () => shown as never,
+      ),
+      registerRenderedAction(
+        { id: 'hidden', label: 'Hidden', kind: 'click', run },
+        () => hidden as never,
+      ),
+      registerRenderedAction({ id: 'off', label: 'Off', kind: 'commit', run }, () => off as never),
+      registerRenderedAction({ id: 'gone', label: 'Gone', kind: 'click', run }, () => null),
+      registerRenderedAction(
+        { id: 'dlg', label: 'In dialog', kind: 'click', run },
+        () => inDialog as never,
+      ),
+    ];
+    assert.deepEqual(
+      renderedButtons().map((a) => [a.id, a.enabled]),
+      [
+        ['shown', true],
+        ['off', false],
+        ['dlg', true],
+      ],
+    );
+    dialogs = [dialog];
+    assert.deepEqual(
+      renderedButtons().map((a) => a.id),
+      ['dlg'],
+      'an open dialog hides the page behind it',
+    );
+    unregister.forEach((done) => done());
+    assert.deepEqual(renderedButtons(), []);
+  } finally {
+    Object.assign(globalThis, { document: saved });
+  }
+});

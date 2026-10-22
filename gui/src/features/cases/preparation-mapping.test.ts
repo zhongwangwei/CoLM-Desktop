@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import ts from 'typescript';
+import { ActionButtonStub, treeActions, treeReact } from '../../lib/rendered-tree';
 
 type Contract = {
   fields: { id: string; value: unknown; set: (v: string) => void }[];
@@ -23,7 +24,8 @@ function page(total = false, snow = true) {
     'LWdown',
   ];
   const context: Record<string, unknown> = {
-    React: { createElement: () => null },
+    React: treeReact,
+    ActionButton: ActionButtonStub,
     useState: (initial: unknown) => {
       const i = cursor++;
       if (!(i in values)) values[i] = initial;
@@ -84,8 +86,8 @@ function page(total = false, snow = true) {
   );
   const render = () => {
     cursor = 0;
-    component();
-    return contract;
+    const tree = component();
+    return { ...contract, actions: [...contract.actions, ...treeActions(tree)] };
   };
   return {
     render,

@@ -125,9 +125,11 @@ function render(
                       (n) => [n, n],
                     ),
                   )
-                : name === '../../lib/bilingual'
-                  ? { bilingual: (zh: string) => zh }
-                  : require(name);
+                : name === '../../components/ActionButton'
+                  ? { ActionButton: 'ActionButton' }
+                  : name === '../../lib/bilingual'
+                    ? { bilingual: (zh: string) => zh }
+                    : require(name);
   new Function('require', 'exports', 'React', js)(dependencies, exports, react);
   const tree = exports.default!({ casePath: '/case', batchCases, effectiveProfile: null, onBack });
   const elements: Element[] = [];
@@ -137,7 +139,17 @@ function render(
       return;
     }
     if (value && typeof value === 'object' && 'children' in value) {
-      const el = value as Element;
+      let el = value as Element;
+      // ActionButton 是界面按钮兼助手动作：按普通按钮的样子收进来，onClick 就是它的 run。
+      if (el.type === 'ActionButton') {
+        const props = el.props as { run: () => unknown; label: string };
+        el = {
+          ...el,
+          type: 'Button',
+          props: { ...el.props, onClick: () => props.run() },
+          children: el.children.length ? el.children : [props.label],
+        };
+      }
       elements.push(el);
       el.children.forEach(visit);
     }

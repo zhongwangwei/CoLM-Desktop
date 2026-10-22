@@ -13,6 +13,7 @@ import { elapsedLabel } from '../cases/simulation-model';
 import type { CaseProfile, LastRun, RunState, Server, VersionRef } from '../../lib/types';
 import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Select, Advanced, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import {
   compatibleKernel,
   endedRun,
@@ -1266,66 +1267,8 @@ export default function RunPanel({
           }
         : { run: view, remote, error: persisted?.error },
       fields,
-      actions: [
-        ...(onBack
-          ? [
-              {
-                id: 'run-back',
-                label: t('上一步', 'Back'),
-                kind: 'click' as const,
-                enabled: !pending,
-                run: back,
-              },
-            ]
-          : []),
-        {
-          id: 'run-view-results',
-          label: resultsLabel,
-          kind: 'click',
-          enabled: !!completed && !resultsBlocked,
-          run: viewResults,
-        },
-        {
-          id: 'run-submit',
-          label: t('开始运行', 'Start run'),
-          kind: 'commit',
-          enabled:
-            !disabled && !pending && kernelMatches && (!host || !remoteSubmissionBlocked(remote)),
-          run,
-        },
-        {
-          id: 'run-cancel',
-          label: bilingual('停止运行', 'Stop'),
-          kind: 'commit',
-          enabled: canCancel,
-          run: cancel,
-        },
-        ...(remote
-          ? [
-              {
-                id: 'remote-status',
-                label: bilingual('核对服务器状态', 'Check'),
-                kind: 'click' as const,
-                enabled: !monitor,
-                run: () => checkServerStatus(),
-              },
-              {
-                id: 'remote-cancel',
-                label: bilingual('取消服务器任务', 'Cancel'),
-                kind: 'commit' as const,
-                enabled: !monitor && remotePermissions.cancel,
-                run: () => remoteAction('remote_cancel'),
-              },
-              {
-                id: 'remote-fetch',
-                label: bilingual('取回结果', 'Fetch'),
-                kind: 'commit' as const,
-                enabled: !monitor && remotePermissions.fetch,
-                run: () => remoteAction('remote_fetch'),
-              },
-            ]
-          : []),
-      ],
+      // 动作由页面上的 ActionButton 自己登记（第 737 轮）。
+      actions: [],
     },
     active,
   );
@@ -1607,39 +1550,49 @@ export default function RunPanel({
       />
       <footer className="simulation-footer">
         {onBack ? (
-          <Button disabled={pending} onClick={back}>
-            {t('上一步', 'Back')}
-          </Button>
+          <ActionButton
+            action="run-back"
+            label={t('上一步', 'Back')}
+            disabled={pending}
+            run={back}
+          />
         ) : (
           <span />
         )}
         <div className="actions">
           {canCancel && (
-            <Button variant="danger" onClick={() => void cancel().catch(() => {})}>
-              {t('停止运行', 'Stop run')}
-            </Button>
+            <ActionButton
+              action="run-cancel"
+              kind="commit"
+              label={t('停止运行', 'Stop run')}
+              variant="danger"
+              run={cancel}
+            />
           )}
-          <Button
+          <ActionButton
+            action="run-submit"
+            kind="commit"
+            label={t('开始运行', 'Start run')}
             variant={completed ? 'secondary' : 'primary'}
             disabled={
               disabled || pending || !kernelMatches || (!!host && remoteSubmissionBlocked(remote))
             }
-            onClick={() => void run().catch(() => {})}
+            run={run}
           >
             {recovering
               ? t('核对运行记录…', 'Checking run records…')
               : pending
                 ? t('运行中…', 'Running…')
                 : t('开始运行', 'Start run')}
-          </Button>
+          </ActionButton>
           {completed && (
-            <Button
+            <ActionButton
+              action="run-view-results"
+              label={resultsLabel}
               variant="primary"
               disabled={resultsBlocked}
-              onClick={() => void viewResults().catch((e) => notify(String(e), true))}
-            >
-              {resultsLabel}
-            </Button>
+              run={() => viewResults().catch((e) => notify(String(e), true))}
+            />
           )}
         </div>
       </footer>
@@ -1713,21 +1666,26 @@ export default function RunPanel({
             </Notice>
           )}
           <div className="actions">
-            <Button disabled={monitor} onClick={() => void checkServerStatus().catch(() => {})}>
-              {t('核对服务器状态', 'Check server status')}
-            </Button>
-            <Button
+            <ActionButton
+              action="remote-status"
+              label={t('核对服务器状态', 'Check server status')}
+              disabled={monitor}
+              run={() => checkServerStatus()}
+            />
+            <ActionButton
+              action="remote-cancel"
+              kind="commit"
+              label={t('取消任务', 'Cancel job')}
               disabled={monitor || !remotePermissions.cancel}
-              onClick={() => void remoteAction('remote_cancel').catch(() => {})}
-            >
-              {t('取消任务', 'Cancel job')}
-            </Button>
-            <Button
+              run={() => remoteAction('remote_cancel')}
+            />
+            <ActionButton
+              action="remote-fetch"
+              kind="commit"
+              label={t('取回结果', 'Fetch results')}
               disabled={monitor || !remotePermissions.fetch}
-              onClick={() => void remoteAction('remote_fetch').catch(() => {})}
-            >
-              {t('取回结果', 'Fetch results')}
-            </Button>
+              run={() => remoteAction('remote_fetch')}
+            />
           </div>
           {lastCheck && (
             <p className="muted" role="status">

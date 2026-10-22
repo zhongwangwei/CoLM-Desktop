@@ -3,7 +3,8 @@ import { invoke } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { useApp } from '../../lib/app-state';
 import { usePageContract, type UiField } from '../../lib/guide';
-import { Button, Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
+import { Card, Input, Select, Field, Advanced, Notice } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 import { requiredNumber, preparedDestination, casePreparationOptions } from './case-model';
 interface Slot {
   index: number;
@@ -593,78 +594,8 @@ export default function PreparationPage() {
     status: busy ? 'busy' : error || 'ready',
     details: { probe, result, error, imported },
     fields,
-    actions: [
-      {
-        id: 'prep-new-case',
-        label: t('用于新算例', 'Use for new case'),
-        kind: 'click',
-        enabled: !busy && canUse,
-        run: useForNewCase,
-      },
-      ...basic
-        .filter(
-          (k) =>
-            ['src', 'rawdata'].includes(k) ||
-            (k === 'dst' && ['table', 'observation'].includes(mode)),
-        )
-        .map((k) => ({
-          id: `prep-pick-${k}`,
-          label: t(`选择 ${labels[k]}`, `Choose ${labels[k]}`),
-          kind: 'click' as const,
-          enabled: !busy,
-          run: () => pick(k),
-        })),
-      ...(canInspect
-        ? [
-            {
-              id: 'prep-inspect',
-              label: t('检查输入', 'Inspect input'),
-              kind: 'click' as const,
-              enabled: !busy && !!form.src,
-              run: inspect,
-            },
-          ]
-        : []),
-      {
-        id: 'prep-stop',
-        label: t('停止', 'Stop'),
-        kind: 'click',
-        enabled: busy,
-        run: stopPreparation,
-      },
-      {
-        id: 'prep-execute',
-        label: t('生成数据', 'Generate data'),
-        kind: 'commit',
-        enabled: !busy && !!form.dst && (!canInspect || !!probe),
-        run: execute,
-      },
-      ...imported.map((item, i) => ({
-        id: `prep-finish-${i}`,
-        label: t(`修复并完成 ${item.site}`, `Fix and finalize ${item.site}`),
-        kind: 'commit' as const,
-        enabled: !busy,
-        run: () => finish(item),
-      })),
-      ...(mode === 'gaps'
-        ? [
-            {
-              id: 'prep-gaps',
-              label: t('检查缺测', 'Inspect gaps'),
-              kind: 'click' as const,
-              enabled: !busy && !!probe,
-              run: () =>
-                work(() =>
-                  invoke('probe_forcing_gaps', {
-                    src: form.src,
-                    slots: choices(),
-                    options: gapOptions(),
-                  }),
-                ),
-            },
-          ]
-        : []),
-    ],
+    // 动作由页面上的 ActionButton 自己登记（第 737 轮）。
+    actions: [],
   });
   const render = (f: UiField) => (
     <Field key={f.id} label={f.label}>
@@ -681,9 +612,14 @@ export default function PreparationPage() {
       )}
       {(['prep-src', 'prep-rawdata'].includes(f.id) ||
         (f.id === 'prep-dst' && ['table', 'observation'].includes(mode))) && (
-        <Button disabled={busy} onClick={() => void pick(f.id.slice(5)).catch(() => {})}>
+        <ActionButton
+          action={`prep-pick-${f.id.slice(5)}`}
+          label={t(`选择 ${labels[f.id.slice(5)]}`, `Choose ${labels[f.id.slice(5)]}`)}
+          disabled={busy}
+          run={() => pick(f.id.slice(5))}
+        >
           {t('选择…', 'Browse…')}
-        </Button>
+        </ActionButton>
       )}
     </Field>
   );
@@ -706,9 +642,12 @@ export default function PreparationPage() {
             .map(render)}
         </div>
         {canInspect && (
-          <Button disabled={busy || !form.src} onClick={() => void inspect().catch(() => {})}>
-            {t('检查输入', 'Inspect input')}
-          </Button>
+          <ActionButton
+            action="prep-inspect"
+            label={t('检查输入', 'Inspect input')}
+            disabled={busy || !form.src}
+            run={inspect}
+          />
         )}
         {sourceNames.includes('Rainf') && sourceNames.includes('Snowf') && (
           <Notice>
@@ -739,44 +678,51 @@ export default function PreparationPage() {
         </Advanced>
         <div className="actions">
           {mode === 'gaps' && (
-            <Button
+            <ActionButton
+              action="prep-gaps"
+              label={t('检查缺测', 'Inspect gaps')}
               disabled={busy || !probe}
-              onClick={() =>
-                void work(() =>
+              run={() =>
+                work(() =>
                   invoke('probe_forcing_gaps', {
                     src: form.src,
                     slots: choices(),
                     options: gapOptions(),
                   }),
-                ).catch(() => {})
+                )
               }
             >
               {t('检查缺测', 'Check gaps')}
-            </Button>
+            </ActionButton>
           )}
-          <Button
+          <ActionButton
+            action="prep-execute"
+            kind="commit"
+            label={t('生成数据', 'Generate data')}
             variant="primary"
             disabled={busy || !form.dst || (canInspect && !probe)}
-            onClick={() => void execute().catch(() => {})}
-          >
-            {t('生成数据', 'Generate data')}
-          </Button>
+            run={execute}
+          />
           {busy && (
-            <Button onClick={() => void stopPreparation().catch((e) => notify(String(e), true))}>
-              {t('停止', 'Stop')}
-            </Button>
+            <ActionButton
+              action="prep-stop"
+              label={t('停止', 'Stop')}
+              run={() => stopPreparation().catch((e) => notify(String(e), true))}
+            />
           )}
-          <Button
+          <ActionButton
+            action="prep-new-case"
+            label={t('用于新算例', 'Use for new case')}
             disabled={busy || !canUse}
             title={
               canUse
                 ? undefined
                 : t('先生成站点文件或强迫场', 'Generate a site file or forcing first')
             }
-            onClick={useForNewCase}
+            run={useForNewCase}
           >
             {t('用于新算例', 'Use for new case')}
-          </Button>
+          </ActionButton>
         </div>
       </Card>
       {imported.length > 0 && (
@@ -795,14 +741,20 @@ export default function PreparationPage() {
           <Field label={t('ERA5 辅助文件', 'ERA5 auxiliary file')}>
             <Input value={form.era5} onChange={(e) => set('era5', e.target.value)} />
           </Field>
-          {imported.map((item) => (
+          {imported.map((item, i) => (
             <div key={item.staged_path}>
               <span>
                 {item.site} · {item.staged_path}
               </span>
-              <Button disabled={busy} onClick={() => void finish(item).catch(() => {})}>
+              <ActionButton
+                action={`prep-finish-${i}`}
+                kind="commit"
+                label={t(`修复并完成 ${item.site}`, `Fix and finalize ${item.site}`)}
+                disabled={busy}
+                run={() => finish(item)}
+              >
                 {t('修复并完成', 'Finalize')}
-              </Button>
+              </ActionButton>
             </div>
           ))}
         </Card>
