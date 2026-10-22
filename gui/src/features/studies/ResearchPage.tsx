@@ -6,6 +6,7 @@ import { askConfirm } from '../../lib/confirm';
 import { withCatalogLabels } from '../../lib/param-presentation';
 import { useApp, useNavigationGuard } from '../../lib/app-state';
 import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import { Button, Card, Field, Input, Select, Notice, Advanced } from '../../components/ui';
 import {
   calibrationWindows,
@@ -1849,12 +1850,6 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         ),
       ]
     : [];
-  const resourcesAction = action(
-    'research-resources',
-    tr('管理计算资源', 'Manage compute resources'),
-    () => navigate('resources'),
-    !launching,
-  );
   const advancedField = {
     ...field(
       'research-advanced',
@@ -2022,13 +2017,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             ...remoteFields,
             advancedField,
           ],
-          actions: [
-            backAction,
-            ...designActions,
-            ...lifecycleActions,
-            ...aiActions,
-            resourcesAction,
-          ],
+          // 按钮自己登记（第 737 轮）：原来清单里另有一份动作，助手按的是清单里的回调，
+          // 界面改了清单不一定跟着改（出过幽灵按钮）。现在只认真正渲染出来的按钮。
+          actions: [],
           details: {
             studyDir,
             envelope,
@@ -2048,7 +2039,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           step: 'research',
           status: busy ? 'working' : error || currentState,
           fields: [homeMethod],
-          actions: homeActions,
+          actions: [],
           details: {
             studyDir: hasStudy ? studyDir : null,
             status: hasStudy ? currentState : null,
@@ -2059,25 +2050,43 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     active,
   );
 
-  const renderActions = (actions: UiAction[]) =>
-    actions.map((a) => (
-      <Button
-        key={a.id}
-        disabled={!a.enabled}
-        variant={a.id === 'study-cancel' ? 'danger' : a.kind === 'commit' ? 'primary' : 'secondary'}
-        onClick={() => execute(a.run)}
-      >
-        {a.label}
-      </Button>
-    ));
+  // 动作由渲染出的按钮自己登记：助手看到的 enabled 和是否显示都与按钮本身一致。
+  // `plain` 里的动作只渲染普通按钮、不登记：同一个动作在界面上有两个按钮时（研究首页顶部的
+  // "返回模拟配置"和"当前研究"卡片里的同一个），动作 id 只能登记一次，否则助手按 id 找不到唯一按钮。
+  const renderActions = (actions: UiAction[], plain: string[] = []) =>
+    actions.map((a) => {
+      const variant = (
+        a.id === 'study-cancel' ? 'danger' : a.kind === 'commit' ? 'primary' : 'secondary'
+      ) as 'primary' | 'secondary' | 'danger';
+      return plain.includes(a.id) ? (
+        <Button key={a.id} disabled={!a.enabled} variant={variant} onClick={() => execute(a.run)}>
+          {a.label}
+        </Button>
+      ) : (
+        <ActionButton
+          key={a.id}
+          action={a.id}
+          label={a.label}
+          kind={a.kind}
+          disabled={!a.enabled}
+          variant={variant}
+          run={a.run}
+        />
+      );
+    });
   if (!workbench)
     return (
       <div className="research-home">
         {state.simulationReturn && (
           <div className="button-row">
-            <Button onClick={returnToSimulation}>
+            {/* 首页顶部的返回按钮始终显示，交给它登记；"当前研究"卡片里那个同名按钮只渲染、不登记。 */}
+            <ActionButton
+              action="research-return-simulation"
+              label={tr('← 返回模拟配置', '← Back to simulation setup')}
+              run={returnToSimulation}
+            >
               ← {tr('返回模拟配置', 'Back to simulation setup')}
-            </Button>
+            </ActionButton>
           </div>
         )}
         <header className="research-heading">
@@ -2103,20 +2112,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         )}
         <div className="research-methods" role="group" aria-label={homeMethod.label}>
           {hubMethods.map((item) => (
-            <Button
+            <ActionButton
               key={item.id}
+              action={`research-method-${item.id}`}
+              label={en ? item.en : item.zh}
               id={`research-method-${item.id}`}
               className="research-method"
               disabled={homeMethod.disabled}
-              onClick={() =>
-                execute(() => {
-                  // 研究首页新开的研究不写回之前的草稿。
-                  setFromHub(false);
-                  // 草稿页签带来的参数和要写回的草稿只属于从那里进来的那次研究。
-                  update({ researchTarget: null, researchSeed: null });
-                  chooseMethod(item.id);
-                })
-              }
+              run={() => {
+                // 研究首页新开的研究不写回之前的草稿。
+                setFromHub(false);
+                // 草稿页签带来的参数和要写回的草稿只属于从那里进来的那次研究。
+                update({ researchTarget: null, researchSeed: null });
+                chooseMethod(item.id);
+              }}
             >
               <span className="research-method-icon">
                 <svg
@@ -2143,7 +2152,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               <span className="research-method-arrow" aria-hidden="true">
                 ›
               </span>
-            </Button>
+            </ActionButton>
           ))}
         </div>
         <section aria-label={tr('当前研究', 'Current study')}>
@@ -2177,7 +2186,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                     : `${tr('已完成候选', 'Completed candidates')}: ${completed}`}
                 </span>
               </div>
-              {renderActions(homeActions.slice(1))}
+              {/* 顶部的返回按钮已经登记了这个动作，卡片里这个是同一个动作的第二个按钮。 */}
+              {renderActions(homeActions.slice(1), ['research-return-simulation'])}
             </div>
           ) : (
             <div className="research-empty">
@@ -2391,29 +2401,39 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 }
                 onChange={(e) => setGridTarget(index, { path: e.target.value })}
               />
-              <Button onClick={() => pickTargetFile(index)}>{tr('选择…', 'Choose…')}</Button>
+              <ActionButton
+                action={`study-target-${index}-pick`}
+                label={tr('选择观测文件', 'Choose observation file')}
+                run={() => pickTargetFile(index)}
+              >
+                {tr('选择…', 'Choose…')}
+              </ActionButton>
             </div>
             {gridTargets.length > 1 && (
               <div className="study-wide">
-                <button
-                  type="button"
+                <ActionButton
+                  bare
+                  action={`study-target-${index}-remove`}
+                  label={tr('删掉这个目标', 'Remove this target')}
                   className="library-action"
-                  onClick={() => setGridTargets((old) => old.filter((_, i) => i !== index))}
+                  run={() => setGridTargets((old) => old.filter((_, i) => i !== index))}
                 >
                   {tr('删掉这个目标', 'Remove this target')}
-                </button>
+                </ActionButton>
               </div>
             )}
           </div>
         ))}
       </div>
-      <button
-        type="button"
+      <ActionButton
+        bare
+        action="study-target-add"
+        label={tr('再加一个目标', 'Add another target')}
         className="library-action"
-        onClick={() => setGridTargets((old) => [...old, { ...gridTargetDefaults.grid }])}
+        run={() => setGridTargets((old) => [...old, { ...gridTargetDefaults.grid }])}
       >
         {tr('再加一个目标', 'Add another target')}
-      </button>
+      </ActionButton>
     </>
   );
   const pickFolder = (key: string, set: (path: string) => void) =>
@@ -2614,14 +2634,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           {busy
             ? tr('正在读取这些算例能研究的参数…', 'Reading the parameters these cases can study…')
             : tr('还没读到参数。', 'No parameters loaded yet.')}{' '}
-          <button
-            type="button"
+          <ActionButton
+            bare
+            action="load-parameter-contexts"
+            label={tr('读取适用参数', 'Load applicable parameters')}
             className="library-action"
             disabled={!designActions[0]!.enabled}
-            onClick={() => execute(designActions[0]!.run)}
+            run={() => designActions[0]!.run()}
           >
             {tr('重新读取', 'Load again')}
-          </button>
+          </ActionButton>
         </p>
       ) : (
         <div className="table-scroll">
@@ -2718,14 +2740,25 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const footer = (back: boolean, next?: { label: string; enabled: boolean; to: 1 | 2 | 3 | 4 }) => (
     <div className="study-footer">
       {back && (
-        <Button variant="ghost" onClick={() => setStep((step - 1) as 1 | 2 | 3)}>
+        <ActionButton
+          action="research-step-back"
+          label={tr('上一步', 'Back')}
+          variant="ghost"
+          run={() => setStep((step - 1) as 1 | 2 | 3)}
+        >
           ← {tr('上一步', 'Back')}
-        </Button>
+        </ActionButton>
       )}
       {next && (
-        <Button variant="primary" disabled={!next.enabled} onClick={() => setStep(next.to)}>
+        <ActionButton
+          action="research-step-next"
+          label={next.label}
+          variant="primary"
+          disabled={!next.enabled}
+          run={() => setStep(next.to)}
+        >
           {next.label} →
-        </Button>
+        </ActionButton>
       )}
     </div>
   );
@@ -2733,9 +2766,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     <div className="research-workbench study-workbench">
       {state.simulationReturn && (
         <div className="button-row">
-          <Button onClick={returnToSimulation}>
+          <ActionButton
+            action="research-return-simulation"
+            label={tr('← 返回模拟配置', '← Back to simulation setup')}
+            run={returnToSimulation}
+          >
             ← {tr('返回模拟配置', 'Back to simulation setup')}
-          </Button>
+          </ActionButton>
         </div>
       )}
       <header className="research-heading">
@@ -2755,14 +2792,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               `正在构建草稿"${state.researchTarget.name}"：研究用它冻结的修订运行，跑完把结果写回这个草稿，在版本页审阅后冻结。`,
               `Building draft "${state.researchTarget.name}": the study runs on its frozen revision and the results go back into the draft, which you review and freeze on the versions page.`,
             )}{' '}
-            <button
-              type="button"
+            <ActionButton
+              bare
+              action="research-new-version"
+              label={tr('改为另建新版本', 'Use a new version instead')}
               className="library-action"
               disabled={busy || launching}
-              onClick={() => update({ researchTarget: null })}
+              run={() => update({ researchTarget: null })}
             >
               {tr('改为另建新版本', 'Use a new version instead')}
-            </button>
+            </ActionButton>
           </>
         ) : studyDir && envelope && !modelUsed ? (
           tr('这个研究没有记下所用的模型版本。', 'This study did not record its model version.')
@@ -2776,10 +2815,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       <ol className="study-steps">
         {stepNames.map(([n, label]) => (
           <li key={n} className={n === step ? 'is-current' : n < step ? 'is-done' : undefined}>
-            <button type="button" disabled={!canStep(n)} onClick={() => setStep(n)}>
+            <ActionButton
+              bare
+              action={`research-step-${n}`}
+              label={label}
+              disabled={!canStep(n)}
+              run={() => setStep(n)}
+            >
               <span className="study-step-number">{n < step ? '✓' : n}</span>
               {label}
-            </button>
+            </ActionButton>
           </li>
         ))}
       </ol>
@@ -2896,13 +2941,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 '服务器的登录、资源和数据路径用"计算资源"里的设置；提交后研究在服务器上独立运行，跑完取回结果。',
                 'Server login, resources and data paths come from Compute resources; a submitted study runs on the server by itself and its results are fetched when done.',
               )}{' '}
-              <button
-                type="button"
+              <ActionButton
+                bare
+                action="research-resources"
+                label={tr('管理计算资源', 'Manage compute resources')}
                 className="library-action"
-                onClick={() => navigate('resources')}
+                run={() => navigate('resources')}
               >
                 {tr('计算资源 →', 'Compute resources →')}
-              </button>
+              </ActionButton>
             </p>
           )}
           {footer(false, {
@@ -3079,9 +3126,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                             )}
                             onChange={(e) => setObservation(name, e.target.value)}
                           />
-                          <Button onClick={() => pickObservation(name)}>
+                          <ActionButton
+                            action={`study-observation-pick:${d}`}
+                            label={tr('选择观测文件', 'Choose observation file')}
+                            run={() => pickObservation(name)}
+                          >
                             {tr('选择…', 'Choose…')}
-                          </Button>
+                          </ActionButton>
                         </div>
                       );
                     })}
@@ -3251,22 +3302,32 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             </>
           )}
           <div className="study-footer">
-            <Button variant="ghost" onClick={() => setStep(2)}>
+            <ActionButton
+              action="research-step-back"
+              label={tr('上一步', 'Back')}
+              variant="ghost"
+              run={() => setStep(2)}
+            >
               ← {tr('上一步', 'Back')}
-            </Button>
-            <Button
+            </ActionButton>
+            <ActionButton
+              action="study-preflight"
+              label={tr('预检', 'Preflight')}
               disabled={!designActions[1]!.enabled}
-              onClick={() => execute(designActions[1]!.run)}
+              run={() => designActions[1]!.run()}
             >
               {tr('预检', 'Preflight')}
-            </Button>
-            <Button
+            </ActionButton>
+            <ActionButton
+              action="study-create"
+              label={tr('创建研究任务', 'Create study')}
+              kind="commit"
               variant="primary"
               disabled={!designActions[2]!.enabled}
-              onClick={() => execute(designActions[2]!.run)}
+              run={() => designActions[2]!.run()}
             >
               {tr('创建研究 →', 'Create study →')}
-            </Button>
+            </ActionButton>
           </div>
         </Card>
       )}
@@ -3557,13 +3618,18 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 <p className="versions-empty">{tr('还没有结果文件。', 'No result files yet.')}</p>
               )}
               {result && <StudyResult text={result} theme={state.theme} en={en} />}
-              <Advanced title={tr('导出研究', 'Export the study')}>
+              {/* 导出按钮在这个折叠区里：标题本身登记为动作，助手先展开才能按到"导出研究"。 */}
+              <Advanced action="research-export-panel" title={tr('导出研究', 'Export the study')}>
                 <Field label={tr('导出到哪个目录', 'Export to')}>
                   <div className="study-path">
                     <Input value={exportDir} onChange={(e) => setExportDir(e.target.value)} />
-                    <Button onClick={() => pickFolder('study-export', setExportDir)}>
+                    <ActionButton
+                      action="study-export-pick"
+                      label={tr('选择导出目录', 'Choose export directory')}
+                      run={() => pickFolder('study-export', setExportDir)}
+                    >
                       {tr('选择…', 'Choose…')}
-                    </Button>
+                    </ActionButton>
                   </div>
                 </Field>
                 <div className="button-row">{renderActions([byId('study-export')!])}</div>
@@ -3619,9 +3685,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 <Field label={tr('拟合结果放在哪个目录', 'Fit output directory')}>
                   <div className="study-path">
                     <Input value={out} onChange={(e) => setOut(e.target.value)} />
-                    <Button onClick={() => pickFolder('hybrid-fit-out', setOut)}>
+                    <ActionButton
+                      action="hybrid-fit-output-pick"
+                      label={tr('选择拟合法输出目录', 'Choose fit output directory')}
+                      run={() => pickFolder('hybrid-fit-out', setOut)}
+                    >
                       {tr('选择…', 'Choose…')}
-                    </Button>
+                    </ActionButton>
                   </div>
                 </Field>
               </div>

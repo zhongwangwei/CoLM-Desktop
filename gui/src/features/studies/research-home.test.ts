@@ -7,7 +7,25 @@ import {
   completedCandidates,
   resultFileLabel,
   shownResultFiles,
+  researchMethods,
 } from './research-home';
+import {
+  applyResearchSeed,
+  calibrationWindows,
+  candidateBudget,
+  fitValidation,
+  gridTargetDefaults,
+  gridTargetSpec,
+  networkDefaults,
+  networkSpec,
+  parameterSpec,
+  studyPermissions,
+} from './study';
+import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
+import { hubMethods } from '../versions/hub-methods';
+import { IGBP, PFT, USGS } from '../versions/scope-labels';
+import { REMOTE_CHECK_MS, compatibleKernel } from '../runs/run-model';
+import { withCatalogLabels } from '../../lib/param-presentation';
 it('opens existing studies in the matching built-in method', () => {
   assert.equal(methodFromStudy({ kind: 'uncertainty' }), 'uncertainty');
   assert.equal(methodFromStudy({ kind: 'tuning', hybrid: { slot: 'soil_stress' } }), 'process');
@@ -387,4 +405,448 @@ it('a server submission that recorded nothing can be submitted again', async () 
     if (recorded) assert.equal((reply as { status: { state: string } }).status.state, 'unknown');
     else assert.equal(reply, null);
   }
+});
+
+// 第 737 轮：动作由界面按钮自己登记（ActionButton）。这里执行整个页面组件（去掉 import，
+// 用保留元素树的假 React），从渲染结果里收集助手此刻能按的动作，规则与 lib/guide.ts 的
+// renderedButtons() 一致：只算显示着的按钮；合上的折叠区里的按钮不算；有打开的对话框时只算
+// 最上层对话框里的按钮。旧的 PageContract 手写清单已清空，所以下面断言的就是助手看到的全部。
+type TreeProps = Record<string, unknown> & {
+  action?: string;
+  label?: string;
+  kind?: 'click' | 'commit';
+  disabled?: boolean;
+  open?: boolean;
+  title?: unknown;
+  run?: () => unknown;
+};
+type Tree = { type: unknown; props: TreeProps; children: unknown[] };
+type Action = {
+  id: string;
+  label: string;
+  kind: 'click' | 'commit';
+  enabled: boolean;
+  run: () => unknown;
+};
+type Contract = { actions: Action[] } & Record<string, unknown>;
+type Request = {
+  command: string;
+  args: Record<string, unknown>;
+  resolve: (value: unknown) => void;
+  reject: (error: unknown) => void;
+};
+function researchPage(overrides: Record<string, unknown> = {}) {
+  const source = readFileSync(new URL('./ResearchPage.tsx', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;\n/gm, '')
+    .replace('export default function', 'function');
+  const code = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  const state: Record<string, unknown> = {
+    language: 'zh',
+    selectedCase: { dir: '/p/site1', name: 'site1' },
+    versionRef: { id: 'official', revision: 1 },
+    versions: [{ version: { id: 'official', revision: 1 }, name: 'Official CoLM' }],
+    kernels: [
+      { dir: '/kernels/default', preset: 'default', platform: 'macos', macros: ['SinglePoint'] },
+    ],
+    kernelDir: '/kernels/default',
+    cases: [{ dir: '/p/site1', name: 'site1', spatial: false, has_history: false }],
+    root: '/p',
+    theme: 'light',
+    busy: false,
+    ...overrides,
+  };
+  const slots: unknown[] = [];
+  const callbacks: { deps: unknown[]; fn: unknown }[] = [];
+  const effects: { deps: unknown[]; cleanup?: () => void }[] = [];
+  const requested: Request[] = [];
+  const updates: unknown[] = [];
+  const routes: unknown[] = [];
+  const notices: unknown[] = [];
+  let cursor = 0,
+    callbackCursor = 0,
+    effectCursor = 0;
+  const pending: (() => void)[] = [];
+  let tree: Tree | null = null;
+  let contract: Contract = { actions: [] };
+  // remote_config 与 model_case_profiles 是页面自己读的环境信息，不是动作；直接给空结果，
+  // 免得每个用例先处理它们。
+  const invoke = (command: string, args: Record<string, unknown>) =>
+    new Promise((resolve, reject) => {
+      if (command === 'remote_config') return resolve({ servers: [] });
+      if (command === 'model_case_profiles') return resolve({});
+      requested.push({ command, args, resolve, reject });
+    });
+  const app = {
+    state,
+    notify: (message: string, error?: boolean) => notices.push([message, error]),
+    refreshVersions: async () => {},
+    navigate: (route: string, tab?: string) => {
+      routes.push([route, tab]);
+      return true;
+    },
+    update: (patch: Record<string, unknown>) => Object.assign(state, patch),
+  };
+  const env: Record<string, unknown> = {
+    React: {
+      createElement: (type: unknown, props: TreeProps | null, ...children: unknown[]) => ({
+        type,
+        props: props ?? {},
+        children,
+      }),
+      Fragment: 'Fragment',
+    },
+    ActionButton: 'ActionButton',
+    Advanced: 'Advanced',
+    Button: 'Button',
+    Card: 'Card',
+    Field: 'Field',
+    // 参数表用 <Fragment key> 分组，JSX 会编译成 React.createElement(Fragment, ...)。
+    Fragment: 'Fragment',
+    Input: 'Input',
+    LiveServerLoad: 'LiveServerLoad',
+    Notice: 'Notice',
+    ScienceChart: 'ScienceChart',
+    Select: 'Select',
+    StudyImportDialog: 'StudyImportDialog',
+    askConfirm: async () => true,
+    applyResearchSeed,
+    calibrationWindows,
+    candidateBudget,
+    compatibleKernel,
+    completedCandidates,
+    fitValidation,
+    gridTargetDefaults,
+    gridTargetSpec,
+    hubMethods,
+    IGBP,
+    invoke,
+    invokeJson: invoke,
+    methodFromStudy,
+    networkDefaults,
+    networkSpec,
+    parameterSpec,
+    PFT,
+    remoteStudyPermissions,
+    remoteStudyReply,
+    REMOTE_CHECK_MS,
+    researchMethods,
+    resultFileLabel,
+    shownResultFiles,
+    studyModelRevision,
+    studyPermissions,
+    USGS,
+    withCatalogLabels,
+    useApp: () => app,
+    useNavigationGuard: () => {},
+    usePageContract: (value: Contract) => {
+      contract = value;
+    },
+    useCallback: (fn: unknown, deps: unknown[]) => {
+      const i = callbackCursor++;
+      if (!callbacks[i] || deps.some((value, j) => value !== callbacks[i]!.deps[j]))
+        callbacks[i] = { deps, fn };
+      return callbacks[i]!.fn;
+    },
+    useEffect: (effect: () => () => void, deps: unknown[]) => {
+      const i = effectCursor++;
+      if (!effects[i] || deps.some((value, j) => value !== effects[i]!.deps[j])) {
+        effects[i]?.cleanup?.();
+        effects[i] = { deps };
+        pending.push(() => {
+          effects[i]!.cleanup = effect();
+        });
+      }
+    },
+    useRef: (initial: unknown) => {
+      const i = cursor++;
+      if (!(i in slots)) slots[i] = { current: initial };
+      return slots[i];
+    },
+    useState: (initial: unknown) => {
+      const i = cursor++;
+      if (!(i in slots)) slots[i] = initial;
+      return [
+        slots[i],
+        (value: unknown) => {
+          slots[i] =
+            typeof value === 'function' ? (value as (old: unknown) => unknown)(slots[i]) : value;
+        },
+      ];
+    },
+    // 轮询用的计时器：用例里不真的跑定时器。
+    setTimeout: () => 0,
+    clearTimeout: () => {},
+  };
+  const Page = new Function(...Object.keys(env), `${code}; return ResearchPage;`)(
+    ...Object.values(env),
+  ) as (props: { active?: boolean }) => Tree;
+  const render = () => {
+    cursor = callbackCursor = effectCursor = 0;
+    tree = Page({ active: true });
+    while (pending.length) pending.shift()!();
+    return tree;
+  };
+  const nodes = (node: unknown): Tree[] =>
+    Array.isArray(node)
+      ? node.flatMap(nodes)
+      : node && typeof node === 'object'
+        ? [node as Tree, ...(node as Tree).children.flatMap(nodes)]
+        : [];
+  function collect(node: unknown): Action[] {
+    if (Array.isArray(node)) return node.flatMap(collect);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as Tree;
+    const own: Action[] = [];
+    if (element.type === 'ActionButton' && typeof element.props.action === 'string')
+      own.push({
+        id: element.props.action,
+        label: String(element.props.label ?? ''),
+        kind: element.props.kind ?? 'click',
+        enabled: element.props.disabled !== true,
+        run: element.props.run as () => unknown,
+      });
+    // 折叠区标题（Advanced 的 action）本身也是按钮；合上时里面的按钮在界面上不显示。
+    if (element.type === 'Advanced' && typeof element.props.action === 'string')
+      own.push({
+        id: element.props.action,
+        label: typeof element.props.title === 'string' ? element.props.title : 'Advanced',
+        kind: 'click',
+        enabled: true,
+        run: () => {},
+      });
+    if (element.type === 'Advanced' && element.props.open !== true) return own;
+    return [...own, ...collect(element.children)];
+  }
+  function actions(): Action[] {
+    const all = nodes(tree);
+    // 打开的对话框挡住房面上的按钮：只算最上层对话框里面的动作。
+    const dialogs = all.filter(
+      (node) => node.type === 'Dialog' || node.type === 'StudyImportDialog',
+    );
+    if (dialogs.length) return collect(dialogs.at(-1)!.children);
+    return collect(tree);
+  }
+  // 界面点击不等待异步结果（和真实按钮一致）；用例随后 resolve 页面发出的请求再 settle。
+  const press = (id: string) => {
+    const action = actions().find((item) => item.id === id);
+    assert.ok(action, `${id} is registered`);
+    assert.notEqual(action.enabled, false, `${id} is enabled`);
+    void Promise.resolve(action.run()).catch(() => {});
+    return render();
+  };
+  const settle = async () => {
+    for (let i = 0; i < 6; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      render();
+    }
+  };
+  render();
+  render();
+  return {
+    state,
+    requests: requested,
+    updates,
+    routes,
+    notices,
+    render,
+    press,
+    settle,
+    actions,
+    ids: () =>
+      actions()
+        .map((action) => action.id)
+        .sort(),
+    contract: () => contract,
+    nodes: () => nodes(tree),
+  };
+}
+const parameterRow = () => ({
+  id: 'test',
+  name: 'DEF_TEST',
+  label_en: 'Test parameter',
+  label_zh: '测试参数',
+  scope: 'pft',
+  scope_instance: { kind: 'case-scalar', scheme: null, index: null },
+  default: 1,
+  min: 0,
+  max: 10,
+  min_inclusive: true,
+  max_inclusive: true,
+  scale: 'linear',
+});
+const completedEnvelope = () => ({
+  manifest: { id: 's-1', spec: { kind: 'tuning', kernel_dir: '/kernels/default' } },
+  state: {
+    status: 'Completed',
+    best_member: 'm1',
+    completed_candidates: 2,
+    candidates: { m1: { calibration: 0.1 }, m000000: { calibration: 0.2 } },
+  },
+  results: ['objectives.csv', 'provenance/m1/cng.json'],
+  model_version: { model_revision: { version: { id: 'official', revision: 1 } } },
+  remote: null,
+});
+// 打开一个本机已完成的研究，停在运行与结果那一步。
+async function openCompletedStudy() {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('study-browse');
+  assert.equal(page.requests.at(-1)!.command, 'pick_folder');
+  page.requests.at(-1)!.resolve('/study');
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_status');
+  page.requests.at(-1)!.resolve(completedEnvelope());
+  await page.settle();
+  return page;
+}
+it('the research home offers exactly the method cards and the open-study button', () => {
+  const page = researchPage();
+  page.render();
+  assert.deepEqual(page.ids(), [
+    'research-method-manual',
+    'research-method-parameters',
+    'research-method-process',
+    'research-method-source',
+    'research-method-tuning',
+    'research-method-uncertainty',
+    'study-browse',
+  ]);
+  // PageContract 不再手写动作清单：助手看到的全部来自渲染出的按钮。
+  assert.deepEqual(page.contract().actions, []);
+});
+it('a method card opens the workbench and each step lists only the buttons on screen', () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  assert.deepEqual(page.ids(), [
+    'research-home',
+    'research-step-1',
+    'research-step-2',
+    'research-step-3',
+    'research-step-4',
+    'research-step-next',
+    'study-browse',
+  ]);
+  const enabled = (id: string) => page.actions().find((action) => action.id === id)!.enabled;
+  assert.equal(enabled('research-step-1'), true);
+  assert.equal(enabled('research-step-2'), true);
+  // 第 3 步要勾参数、第 4 步要建好研究：界面灰着，助手看到的也是不可用。
+  assert.equal(enabled('research-step-3'), false);
+  assert.equal(enabled('research-step-4'), false);
+  // 本机运行没有"计算资源"链接，旧清单却一直列着它（幽灵动作）。
+  assert.equal(
+    page.actions().some((action) => action.id === 'research-resources'),
+    false,
+  );
+});
+it('step 2 loads the parameter table and step 3 gates preflight and create on the review checkbox', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  // 页面用 execute 把读参数推到下一个微任务，读请求在 settle 之后才发出来。
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'model_case_context');
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'study_parameter_contexts');
+  page.requests.at(-1)!.resolve([parameterRow()]);
+  await page.settle();
+  assert.deepEqual(page.ids(), [
+    'research-home',
+    'research-step-1',
+    'research-step-2',
+    'research-step-3',
+    'research-step-4',
+    'research-step-back',
+    'research-step-next',
+    'study-browse',
+  ]);
+  const enabled = (id: string) => page.actions().find((action) => action.id === id)!.enabled;
+  assert.equal(enabled('research-step-next'), false, 'nothing ticked yet');
+  const parameter = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  assert.ok(parameter);
+  (parameter.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  assert.equal(enabled('research-step-next'), true);
+  page.press('research-step-3');
+  assert.deepEqual(page.ids(), [
+    'research-home',
+    'research-step-1',
+    'research-step-2',
+    'research-step-3',
+    'research-step-4',
+    'research-step-back',
+    'study-browse',
+    'study-create',
+    // 每个已选站点的观测文件"选择…"按钮都在界面上，按站点路径区分。
+    'study-observation-pick:/p/site1',
+    'study-preflight',
+  ]);
+  assert.equal(enabled('study-preflight'), false);
+  assert.equal(enabled('study-create'), false);
+  const confirm = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props.type === 'checkbox');
+  assert.ok(confirm);
+  (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  assert.equal(enabled('study-preflight'), true);
+  const create = page.actions().find((action) => action.id === 'study-create')!;
+  assert.equal(create.enabled, true);
+  assert.equal(create.kind, 'commit');
+});
+it('step 4 lists the run-and-results buttons on screen and a write-back dialog blocks them', async () => {
+  const page = await openCompletedStudy();
+  assert.deepEqual(page.ids(), [
+    'research-export-panel',
+    'research-home',
+    'research-step-1',
+    'research-step-2',
+    'research-step-3',
+    'research-step-4',
+    'study-browse',
+    'study-results',
+    'study-status',
+    'study-write-version',
+  ]);
+  // 导出按钮在合着的"导出研究"折叠区里：先登记折叠区标题，导出按钮此刻不列。
+  assert.equal(
+    page.actions().some((action) => action.id === 'study-export'),
+    false,
+  );
+  // 已完成的本机研究没有可用的运行/暂停按钮，界面不渲染它们，旧清单却一直列着。
+  assert.equal(
+    page.actions().some((action) => action.id === 'study-run'),
+    false,
+  );
+  page.press('study-write-version');
+  assert.equal(page.requests.at(-1)!.command, 'model_create');
+  page.requests.at(-1)!.resolve({ id: 'd1', name: 'Calibration s-1', generation: 3, overlay: {} });
+  await page.settle();
+  assert.equal(page.requests.at(-1)!.command, 'model_import_study');
+  page.requests.at(-1)!.resolve({ member: 'm1', parameters: 3 });
+  await page.settle();
+  assert.ok(page.nodes().some((node) => node.type === 'StudyImportDialog'));
+  // 写回对话框打开时，研究页自己的按钮全被挡住（截图里的 StudyImportDialog 是版本页那批的文件，
+  // 它里面的取消/写进草稿由它自己登记，不在这棵树里）。
+  assert.deepEqual(page.actions(), []);
+});
+it('the home page lists one return-to-simulation action even though it shows two buttons', async () => {
+  const page = await openCompletedStudy();
+  page.press('research-home');
+  page.state.simulationReturn = { route: 'case' };
+  page.render();
+  assert.equal(
+    page.actions().filter((action) => action.id === 'research-return-simulation').length,
+    1,
+  );
+  assert.ok(page.actions().some((action) => action.id === 'research-current'));
+  page.press('research-return-simulation');
+  assert.deepEqual(page.routes.at(-1), ['case', 'settings']);
 });
