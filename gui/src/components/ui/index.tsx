@@ -15,6 +15,7 @@ import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { useApp } from '../../lib/app-state';
 import { validDate } from '../../lib/dates';
+import { useRenderedAction } from '../../lib/guide';
 const buttonStyle = cva('button', {
   variants: {
     variant: {
@@ -256,25 +257,40 @@ export function Advanced({
   children,
   open,
   onOpenChange,
+  action,
+  actionLabel,
 }: {
   title?: ReactNode;
   children: ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  /** 给出时，展开/收起作为助手可按的动作登记（第 737 轮）。 */
+  action?: string;
+  actionLabel?: string;
 }) {
   const { state } = useApp();
   const [own, setOwn] = useState(state.expert);
+  const isOpen = open ?? own;
+  const summary = useRef<HTMLElement>(null);
+  const toggle = (value: boolean) => {
+    if (onOpenChange) onOpenChange(value);
+    else setOwn(value);
+  };
+  const fallback = state.language === 'en' ? 'Advanced' : '高级设置';
+  useRenderedAction(
+    action
+      ? {
+          id: action,
+          label: actionLabel ?? (typeof title === 'string' ? title : fallback),
+          kind: 'click',
+          run: () => toggle(!isOpen),
+        }
+      : null,
+    summary,
+  );
   return (
-    <details
-      className="advanced"
-      open={open ?? own}
-      onToggle={(e) => {
-        const value = e.currentTarget.open;
-        if (onOpenChange) onOpenChange(value);
-        else setOwn(value);
-      }}
-    >
-      <summary>{title ?? (state.language === 'en' ? 'Advanced' : '高级设置')}</summary>
+    <details className="advanced" open={isOpen} onToggle={(e) => toggle(e.currentTarget.open)}>
+      <summary ref={summary}>{title ?? fallback}</summary>
       <div className="advanced-content">{children}</div>
     </details>
   );

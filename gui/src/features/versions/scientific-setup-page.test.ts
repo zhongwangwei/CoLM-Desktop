@@ -70,10 +70,29 @@ function harness() {
         return node;
       },
     },
-    ...Object.fromEntries(['Button', 'Card', 'Field', 'Input', 'Notice'].map((k) => [k, k])),
+    ...Object.fromEntries(
+      ['Button', 'ActionButton', 'Card', 'Field', 'Input', 'Notice'].map((k) => [k, k]),
+    ),
     useApp: () => ({ state: { language: 'zh' } }),
+    // 动作由 ActionButton 登记（第 737 轮）：取最近一次渲染出的按钮。
     usePageContract: (c: Contract) => {
-      contract = c;
+      contract = {
+        ...c,
+        get actions() {
+          return [
+            ...c.actions,
+            ...nodes
+              .filter((node) => node.type === 'ActionButton')
+              .map((node) => ({
+                id: String(node.props.action),
+                label: String(node.props.label),
+                kind: 'click' as const,
+                enabled: !node.props.disabled,
+                run: node.props.run as () => unknown,
+              })),
+          ];
+        },
+      };
     },
     useState: (initial: unknown) => {
       const i = cursor++;
@@ -230,7 +249,9 @@ test('tracer choice opens species configuration before saving, including incompa
       tracer.options!.some((option) => option.value === '.true.' && option.label === '选择示踪剂'),
     );
     await tracer.set('.true.');
-    await c.actions.find((action) => action.id === 'setup-DEF_USE_TRACER-settings')!.run();
+    // 界面上示踪剂没有单独的"设置"按钮，再次进入就是再选一次"选择示踪剂"（第 737 轮起清单与界面一致）。
+    assert.ok(!c.actions.some((action) => action.id === 'setup-DEF_USE_TRACER-settings'));
+    await tracer.set('.true.');
     assert.deepEqual(opened, ['DEF_USE_TRACER', 'DEF_USE_TRACER']);
     assert.deepEqual(patches, []);
     assert.equal(h.props.environment.caseValues.DEF_USE_TRACER, enabled ? '.true.' : '.false.');

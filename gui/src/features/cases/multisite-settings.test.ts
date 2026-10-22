@@ -58,10 +58,28 @@ function screen() {
     calendarLabel: string;
     onChange: (event: { target: { value: string } }) => void;
   }[] = [];
+  const buttons: PageContract['actions'] = [];
   const context = {
     React: {
       createElement: (_type: unknown, _props: unknown, ...children: unknown[]) => {
         if (_type === context.DateInput) dateInputs.push(_props as (typeof dateInputs)[number]);
+        // 动作由 ActionButton 登记（第 737 轮）：按渲染出的按钮收集。
+        if (_type === context.ActionButton) {
+          const button = _props as {
+            action: string;
+            label: string;
+            disabled?: boolean;
+            run: () => void;
+          };
+          buttons.push({
+            id: button.action,
+            label: button.label,
+            kind: 'click',
+            enabled: !button.disabled,
+            run: button.run,
+          });
+          if (!children.length) text.push(button.label);
+        }
         text.push(...children.filter((child): child is string => typeof child === 'string'));
         return null;
       },
@@ -77,6 +95,7 @@ function screen() {
       ];
     },
     Button: () => {},
+    ActionButton: () => {},
     Field: () => {},
     Input: () => {},
     DateInput: () => {},
@@ -102,18 +121,22 @@ function screen() {
     cursor = 0;
     text.length = 0;
     dateInputs.length = 0;
+    buttons.length = 0;
     Page(props);
   }
   function fill(id: string, value: string) {
     contract.fields.find((field) => field.id === id)!.set(value);
     render();
   }
+  const current = () => ({ ...contract, actions: [...contract.actions, ...buttons] });
   function click(id: string) {
-    contract.actions.find((action) => action.id === id)!.run();
+    current()
+      .actions.find((action) => action.id === id)!
+      .run();
     render();
   }
   render();
-  return { props, text, dateInputs, fill, click, render, contract: () => contract };
+  return { props, text, dateInputs, fill, click, render, contract: current };
 }
 
 test('multi-site selection excludes incomplete data and preserves edited names when selecting all', () => {

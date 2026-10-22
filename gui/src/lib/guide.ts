@@ -80,10 +80,10 @@ export function registerRenderedAction(
   };
 }
 export function useRenderedAction(
-  action: RenderedAction['action'],
+  action: RenderedAction['action'] | null,
   ref: { current: Element | null },
 ) {
-  useLayoutEffect(() => registerRenderedAction(action, () => ref.current));
+  useLayoutEffect(() => (action ? registerRenderedAction(action, () => ref.current) : undefined));
 }
 const shown = (element: Element) =>
   element.isConnected &&

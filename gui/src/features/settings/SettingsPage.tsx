@@ -4,6 +4,7 @@ import { usePageContract } from '../../lib/guide';
 import { invokeJson } from '../../lib/ipc';
 import { formatBytes, withoutRevisions, type PruneReport } from '../../lib/model-tidy';
 import { Button, Card, Field, Select } from '../../components/ui';
+import { ActionButton } from '../../components/ActionButton';
 
 /** Check how much the old official revisions take, and tidy them on request. */
 function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
@@ -108,15 +109,8 @@ export default function SettingsPage() {
         set: (value) => update({ expert: value === 'true' }),
       },
     ],
-    actions: [
-      {
-        id: 'app-assistant-settings',
-        label: t('配置 AI 助手', 'Configure AI assistant'),
-        kind: 'click',
-        run: assistantSettings,
-      },
-      { id: 'app-help', label: t('帮助', 'Help'), kind: 'click', run: () => navigate('help') },
-    ],
+    // 按钮自己登记（第 737 轮）。整理模型缓存会删文件，按规矩只在界面上做，不给助手。
+    actions: [],
   });
   return (
     <div className="page-stack">
@@ -158,10 +152,14 @@ export default function SettingsPage() {
           'Configure the service, model and reasoning in assistant settings.',
         )}
       >
-        <Button onClick={assistantSettings}>{t('配置 AI 助手', 'Configure AI assistant')}</Button>
+        <ActionButton
+          action="app-assistant-settings"
+          label={t('配置 AI 助手', 'Configure AI assistant')}
+          run={assistantSettings}
+        />
       </Card>
       <ModelCacheCard t={t} />
-      <Button onClick={() => navigate('help')}>{t('帮助', 'Help')}</Button>
+      <ActionButton action="app-help" label={t('帮助', 'Help')} run={() => navigate('help')} />
     </div>
   );
 }

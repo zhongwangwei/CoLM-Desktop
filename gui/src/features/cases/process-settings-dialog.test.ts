@@ -51,6 +51,7 @@ function dialog(process = 'DEF_USE_BGC') {
     Dialog: 'Dialog',
     ConfigurationOptions: 'ConfigurationOptions',
     Button: 'Button',
+    ActionButton: 'ActionButton',
     Notice: 'Notice',
     setupHandledKeys: ['DEF_USE_BGC', 'DEF_TUNING_CROP_PLANTING_DAY'],
     spatialOnlySchemeKeys: ['DEF_SOLO_PFT', 'DEF_FAST_PC'],
@@ -90,7 +91,18 @@ function dialog(process = 'DEF_USE_BGC') {
     cursor = 0;
     nodes.length = 0;
     Component(props);
-    return nodes.find((n) => n.type === 'ConfigurationOptions')!.props as {
+    // 保存、取消由对话框里的 ActionButton 登记（第 737 轮），不再经 modalActions 传进去。
+    const buttons = nodes
+      .filter((n) => n.type === 'ActionButton')
+      .map((n) => ({
+        id: String(n.props.action),
+        label: String(n.props.label),
+        kind: 'click' as const,
+        enabled: !n.props.disabled,
+        run: n.props.run as () => unknown,
+      }));
+    const options = nodes.find((n) => n.type === 'ConfigurationOptions')!.props;
+    return { ...options, modalActions: [...(options.modalActions as UiAction[]), ...buttons] } as {
       onCaseChange: (patch: CaseOptionPatch) => void;
       onReady: (ready: boolean) => void;
       modalActions: UiAction[];

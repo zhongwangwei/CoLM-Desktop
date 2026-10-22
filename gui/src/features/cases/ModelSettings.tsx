@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
+import { Advanced, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { invoke } from '../../lib/ipc';
 import { withCatalogLabels } from '../../lib/param-presentation';
-import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import type { FrozenRevision, KernelEntry } from '../../lib/types';
 import ConfigurationOptions from '../versions/ConfigurationOptions';
 import ScientificSetupCards from '../versions/ScientificSetupCards';
@@ -195,50 +196,6 @@ export default function ModelSettings({
     if (onModeChange) onModeChange(value);
     else if (value === 'IGBP' || value === 'USGS') onClassificationChange?.(value);
   };
-  const actions: UiAction[] = [
-    {
-      id: 'simulation-model-edit',
-      label: t('研究与参数调整', 'Research and parameter adjustment'),
-      kind: 'click',
-      enabled: !disabled && !!version,
-      run: onEdit,
-    },
-  ];
-  for (const value of ['IGBP', 'USGS', 'PFT', 'PC'] as const) {
-    if (modeAvailable(value))
-      actions.push({
-        id: modeActionId(value),
-        label: value,
-        kind: 'click',
-        enabled: !disabled,
-        run: () => changeMode(value),
-      });
-  }
-  if (vegetationMode && onClassificationChange)
-    for (const value of ['IGBP', 'USGS'] as const)
-      actions.push({
-        id: `simulation-classification-${value.toLowerCase()}`,
-        label: value,
-        kind: 'click',
-        enabled: !disabled,
-        run: () => onClassificationChange(value),
-      });
-  if (onCaseChange && vegetationMode && schemeSettings(selectedMode))
-    actions.push({
-      id: 'simulation-scheme-settings',
-      label: t(`${selectedMode} 专属设置`, `${selectedMode} settings`),
-      kind: 'click',
-      enabled: !disabled && ready,
-      run: () => setSettings({ id: selectedMode!, identity: currentIdentity.current }),
-    });
-  if (ready)
-    actions.push({
-      id: 'simulation-parameter-catalog-toggle',
-      label: t('完整参数目录', 'Full parameter catalog'),
-      kind: 'click',
-      enabled: !disabled,
-      run: () => setCatalogOpen(!catalogOpen),
-    });
   const guideFields: UiField[] =
     ready && catalogOpen
       ? [
@@ -268,7 +225,8 @@ export default function ModelSettings({
     title: t('算例方案', 'Case settings'),
     step: 'simulation-model',
     fields: guideFields,
-    actions,
+    // 按钮自己登记（第 737 轮）。
+    actions: [],
     status: error || (loading ? 'loading' : 'ready'),
     details: {
       version: version?.version,
@@ -297,13 +255,15 @@ export default function ModelSettings({
       </p>
       <div className="form-grid">
         {(['IGBP', 'USGS', 'PFT', 'PC'] as const).map((value) => (
-          <Button
+          <ActionButton
             key={value}
+            action={modeActionId(value)}
+            label={value}
             className="simulation-choice-card"
             aria-pressed={selectedMode === value}
             variant={selectedMode === value ? 'primary' : 'secondary'}
             disabled={disabled || !modeAvailable(value)}
-            onClick={() => changeMode(value)}
+            run={() => changeMode(value)}
           >
             <strong>{value}</strong>
             <span>
@@ -316,7 +276,7 @@ export default function ModelSettings({
                     : t('植物群落结构', 'Plant communities')}
             </span>
             <small>{schemeDetail(value)}</small>
-          </Button>
+          </ActionButton>
         ))}
       </div>
       {!selectedMode && (
@@ -329,27 +289,29 @@ export default function ModelSettings({
       )}
       {onCaseChange && vegetationMode && schemeSettings(selectedMode) && (
         <div className="button-row">
-          <Button
+          <ActionButton
+            action="simulation-scheme-settings"
+            label={t(`${selectedMode} 专属设置`, `${selectedMode} settings`)}
             disabled={disabled || loading}
-            onClick={() => setSettings({ id: selectedMode!, identity: currentIdentity.current })}
-          >
-            {t(`${selectedMode} 专属设置`, `${selectedMode} settings`)}
-          </Button>
+            run={() => setSettings({ id: selectedMode!, identity: currentIdentity.current })}
+          />
         </div>
       )}
       {vegetationMode && (
         <Field label={t('地类数据来源', 'Land-cover data classification')}>
           <div className="button-row">
             {(['IGBP', 'USGS'] as const).map((value) => (
-              <Button
+              <ActionButton
                 key={value}
+                action={`simulation-classification-${value.toLowerCase()}`}
+                label={value}
                 aria-pressed={facts === value}
                 variant={facts === value ? 'primary' : 'secondary'}
                 disabled={disabled || !onClassificationChange}
-                onClick={() => onClassificationChange?.(value)}
+                run={() => onClassificationChange?.(value)}
               >
                 {value}
-              </Button>
+              </ActionButton>
             ))}
           </div>
           {!onClassificationChange && (
@@ -380,9 +342,12 @@ export default function ModelSettings({
             <strong>
               {version.name} · r{version.version.revision}
             </strong>
-            <Button disabled={disabled} onClick={onEdit}>
-              {t('研究与参数调整', 'Research and parameter adjustment')}
-            </Button>
+            <ActionButton
+              action="simulation-model-edit"
+              label={t('研究与参数调整', 'Research and parameter adjustment')}
+              disabled={disabled || !version}
+              run={onEdit}
+            />
           </div>
           <Notice>
             {t(
@@ -475,6 +440,8 @@ export default function ModelSettings({
                 />
               )}
               <Advanced
+                action={disabled ? undefined : 'simulation-parameter-catalog-toggle'}
+                actionLabel={t('完整参数目录', 'Full parameter catalog')}
                 title={`${t('完整参数目录', 'Full parameter catalog')} · ${catalog.length}`}
                 open={catalogOpen}
                 onOpenChange={(open) => {
@@ -672,22 +639,6 @@ function ProcessSettingsDialog({
       }
     }
   };
-  const actions: UiAction[] = [
-    {
-      id: 'process-settings-save',
-      label: saveLabel,
-      kind: 'click',
-      enabled: ready && !disabled && !saving,
-      run: save,
-    },
-    {
-      id: 'process-settings-cancel',
-      label: t('取消', 'Cancel'),
-      kind: 'click',
-      enabled: !saving,
-      run: close,
-    },
-  ];
   return (
     <Dialog
       title={t(...title)}
@@ -745,7 +696,7 @@ function ProcessSettingsDialog({
       <ConfigurationOptions
         process={process}
         engine={environment?.engine}
-        modalActions={actions}
+        modalActions={[]}
         onReady={setReady}
         source={{ kind: 'frozen', version: version.version }}
         overlay={version.overlay}
@@ -781,17 +732,18 @@ function ProcessSettingsDialog({
         }}
       />
       <div className="button-row">
-        <Button
+        <ActionButton
+          action="process-settings-save"
+          label={saveLabel}
           disabled={!ready || disabled || saving}
-          onClick={() => {
-            void save();
-          }}
-        >
-          {saveLabel}
-        </Button>
-        <Button disabled={saving} onClick={close}>
-          {t('取消', 'Cancel')}
-        </Button>
+          run={save}
+        />
+        <ActionButton
+          action="process-settings-cancel"
+          label={t('取消', 'Cancel')}
+          disabled={saving}
+          run={close}
+        />
       </div>
     </Dialog>
   );

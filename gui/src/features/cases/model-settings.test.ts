@@ -146,19 +146,22 @@ test('model settings guide exposes classification only with a callback and catal
       fields: { id: string; disabled?: boolean }[];
     };
   const slots: unknown[] = [[], [], '', false, false, '', ''];
-  const nodes: { props: Record<string, unknown>; children: unknown[] }[] = [];
+  const nodes: { type: unknown; props: Record<string, unknown>; children: unknown[] }[] = [];
+  const ActionButton = () => {};
+  const Advanced = () => {};
   const context = {
     ...helpers,
     setupHandledKeys: [],
     React: {
       createElement: (_type: unknown, props: Record<string, unknown>, ...children: unknown[]) => {
-        nodes.push({ props: props ?? {}, children });
+        nodes.push({ type: _type, props: props ?? {}, children });
         return null;
       },
     },
     ScientificSetupCards: () => {},
     ConfigurationOptions: () => {},
-    Advanced: () => {},
+    Advanced,
+    ActionButton,
     Button: () => {},
     Card: () => {},
     Field: () => {},
@@ -207,7 +210,23 @@ test('model settings guide exposes classification only with a callback and catal
       disabled,
       ...(callback ? { onClassificationChange: (value: string) => choices.push(value) } : {}),
     });
-    return contract;
+    // 动作由 ActionButton 与带 action 的 Advanced 登记（第 737 轮）。
+    const rendered = nodes
+      .filter((node) => typeof node.props.action === 'string')
+      .map((node) =>
+        node.type === Advanced
+          ? {
+              id: String(node.props.action),
+              enabled: true,
+              run: () => (node.props.onOpenChange as (open: boolean) => void)(!node.props.open),
+            }
+          : {
+              id: String(node.props.action),
+              enabled: !node.props.disabled,
+              run: node.props.run as () => unknown,
+            },
+      );
+    return { ...contract, actions: [...contract.actions, ...rendered] };
   };
   let result = render();
   const settings = nodes.find((node) => typeof node.props.hasSettings === 'function')!.props
@@ -216,12 +235,15 @@ test('model settings guide exposes classification only with a callback and catal
   assert.deepEqual(result.fields, []);
   result.actions.find((action) => action.id === 'simulation-classification-usgs')!.run();
   assert.deepEqual(choices, ['USGS']);
-  // 站点文件只带 IGBP 分类：USGS 卡片不能直接切，不再出现可点的动作。
+  // 站点文件只带 IGBP 分类：USGS 卡片不能直接切，按钮还在、但按不了。
   result = render(true, false, {
     classification: 'IGBP',
     siteClassifications: { igbp: true, usgs: false },
   });
-  assert.ok(!result.actions.some((action) => action.id === 'simulation-classification-usgs'));
+  assert.equal(
+    result.actions.find((action) => action.id === 'simulation-classification-usgs')?.enabled,
+    false,
+  );
   assert.ok(result.actions.some((action) => action.id === 'simulation-classification-igbp'));
   assert.deepEqual(version.overlay.physics, {});
   result.actions.find((action) => action.id === 'simulation-parameter-catalog-toggle')!.run();
@@ -233,7 +255,6 @@ test('model settings guide exposes classification only with a callback and catal
   result = render(false, true);
   assert.ok(result.fields.every((f) => f.disabled));
   assert.ok(result.actions.every((a) => a.enabled === false));
-  assert.ok(!result.actions.some((a) => a.id.startsWith('simulation-classification-')));
   const processChildren = [
     ['crop', 'DEF_USE_FERT', '生态与生地化', 'DEF_USE_CROP'],
     ['DEF_USE_BGC', 'DEF_USE_NITRIF', '生态与生地化', 'DEF_USE_BGC'],

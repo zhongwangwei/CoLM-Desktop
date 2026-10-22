@@ -3,7 +3,8 @@ import { useEffect, useRef, useState } from 'react';
 import { Button, Card, Field, Input, Notice } from '../../components/ui';
 import { useApp } from '../../lib/app-state';
 import { invokeJson } from '../../lib/ipc';
-import { usePageContract, type UiField, type UiAction } from '../../lib/guide';
+import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import type { Overlay } from '../../lib/types';
 import type { ModelField } from './model';
 import { modelSettingValue } from '../cases/model-settings';
@@ -120,8 +121,7 @@ export default function ScientificSetupCards({
     cropInput?.key === key
       ? cropInput.value
       : (modelSettingValue(effective, 'DEF_TUNING_CROP_PLANTING_DAY') ?? '');
-  const guideFields: UiField[] = [],
-    actions: UiAction[] = [];
+  const guideFields: UiField[] = [];
   function write(request: SetupRequest) {
     if (locked || writeLocked.current || current.current !== key)
       throw new Error(bilingual('配置不可修改或已切换', 'Configuration is locked or stale'));
@@ -202,14 +202,6 @@ export default function ScientificSetupCards({
         (!!control.value &&
           control.value !== '.false.' &&
           !control.choices.find((choice) => choice.value === control.value)?.reason));
-    if (settingsAvailable)
-      actions.push({
-        id: `setup-${control.id}-settings`,
-        label: tracerSetup ? t('选择示踪剂', 'Choose tracers') : t('设置', 'Settings'),
-        kind: 'click',
-        enabled: !locked,
-        run: () => write({ id: control.id, value: tracerSetup ? '.true.' : control.value! }),
-      });
     const label = `${index + (includeSubgrid ? 1 : 2)}. ${t(control.zh, control.en)}`;
     const available = control.choices.filter(
       (c) => !c.reason || (tracerSetup && c.value === '.true.'),
@@ -262,12 +254,17 @@ export default function ScientificSetupCards({
           ))}
         </div>
         {settingsAvailable && !tracerSetup && (
-          <Button
+          <ActionButton
+            action={`setup-${control.id}-settings`}
+            label={t(
+              `${t(control.zh, control.en)}：设置`,
+              `${t(control.zh, control.en)}: settings`,
+            )}
             disabled={locked}
-            onClick={() => invoke({ id: control.id, value: control.value! })}
+            run={() => write({ id: control.id, value: control.value! })}
           >
             {t('设置', 'Settings')}
-          </Button>
+          </ActionButton>
         )}
         {control.pending && result?.context_complete && (
           <p className="muted">
@@ -314,12 +311,12 @@ export default function ScientificSetupCards({
               aria-label={t('种植日', 'Planting day')}
               onChange={(e) => setCropInput({ key, value: e.target.value })}
             />
-            <Button
+            <ActionButton
+              action="setup-crop-apply"
+              label={t('应用种植日', 'Apply planting day')}
               disabled={locked || !planting.trim()}
-              onClick={() => invoke({ id: 'crop', value: planting })}
-            >
-              {t('应用种植日', 'Apply planting day')}
-            </Button>
+              run={() => write({ id: 'crop', value: planting })}
+            />
           </Field>
         )}
       </Card>
@@ -338,19 +335,13 @@ export default function ScientificSetupCards({
         setCropInput({ key, value });
       },
     });
-    actions.push({
-      id: 'setup-crop-apply',
-      label: t('应用种植日', 'Apply planting day'),
-      kind: 'click',
-      enabled: !locked && !!planting.trim(),
-      run: () => write({ id: 'crop', value: planting }),
-    });
   }
   usePageContract({
     title: t('按顺序配置模型结构', 'Configure model structure in order'),
     step: 'scientific-setup',
     fields: guideFields,
-    actions,
+    // 按钮自己登记（第 737 轮）。示踪剂的"设置"原来在清单里另有一条，界面上它是选项卡片本身。
+    actions: [],
     status:
       error ||
       (busy ? 'loading' : result?.context_complete ? 'ready' : 'pending_source_verification'),

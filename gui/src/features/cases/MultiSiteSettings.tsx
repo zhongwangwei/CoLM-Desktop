@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { Button, Field, Input, DateInput, Notice, Select } from '../../components/ui';
+import { Field, Input, DateInput, Notice, Select } from '../../components/ui';
 import { usePageContract, type UiField } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import { caseDirectory, type Site } from './case-model';
 import {
   firstYearCutoff,
@@ -182,22 +183,8 @@ export default function MultiSiteSettings({
     title: t('多站点设置', 'Multi-site settings'),
     step: 'new-case',
     fields,
-    actions: [
-      {
-        id: 'multisite-select-all',
-        label: selectAllLabel,
-        kind: 'click',
-        enabled: !disabled,
-        run: selectAll,
-      },
-      {
-        id: 'multisite-clear',
-        label: t('清空选择', 'Clear selection'),
-        kind: 'click',
-        enabled: !disabled,
-        run: clear,
-      },
-    ],
+    // 按钮自己登记（第 737 轮）。
+    actions: [],
   });
   return (
     <div className="page-stack">
@@ -212,12 +199,18 @@ export default function MultiSiteSettings({
             onChange={(event) => setFilter(event.target.value)}
           />
         )}
-        <Button disabled={disabled} onClick={selectAll}>
-          {selectAllLabel}
-        </Button>
-        <Button disabled={disabled} onClick={clear}>
-          {t('清空选择', 'Clear selection')}
-        </Button>
+        <ActionButton
+          action="multisite-select-all"
+          label={selectAllLabel}
+          disabled={disabled}
+          run={selectAll}
+        />
+        <ActionButton
+          action="multisite-clear"
+          label={t('清空选择', 'Clear selection')}
+          disabled={disabled}
+          run={clear}
+        />
         <span className="multisite-count">
           {t(
             `已选 ${drafts.length} · 可用 ${availableCount} · 共 ${sites.length}`,
