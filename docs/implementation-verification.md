@@ -35634,7 +35634,7 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 
 **规矩**：改任何一边的开关组合规则，都要在这份判例里加一条对应的组合。
 
-## 第 737 轮：助手可按的动作由界面按钮自己登记（进行中，按页面分批）
+## 第 737 轮：助手可按的动作由界面按钮自己登记（完成，按页面分批）
 
 **来历**：第 735 轮后提出的 A 项，用户同意按页面分批做。
 
@@ -35698,3 +35698,57 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
   - 项目时间线展开后的站点按钮原来不在清单里，现在登记为 `history-member-<id>`（折叠时不显示，也就不列出）。
   - 草稿记录的"继续新建"原来不在清单里，现在登记为 `history-resume`。
 - 测试框架按渲染出的样子收集按钮，并按对话框遮挡规则筛选。前端 808 条测试通过。
+
+**第七批：结果页**（第 737 轮续）：
+- 结果页的 `actions`/`pageActions` 两份手写清单（7 个页签 + 两个对话框，共 16 个动作 id）改为按钮自己登记，`PageContract.actions` 清空；运行选择与评估设置两个对话框的关闭按钮用 `Dialog` 的 `closeAction` 登记。
+- 界面有、清单没有的按钮补登记：运行选择对话框里每个运行副本（`result-run-<i>`）、远程运行"取回结果"（`result-fetch`，commit）、footer"返回模拟"（`result-back`）。
+- 清单原来按"当前 tab"拼装（overview 一套、其它 tab 一套），现在每个按钮在各自 JSX 处登记；同一 id 只会在互斥的 tab/对话框状态下出现。
+- 行为变化：评估设置里的"更新评估"按界面条件（观测路径去空白后非空）灰显；旧清单用 `!!obs`，空白路径时会误报可按。
+- 测试：`page-results.test.ts` 不再从源码抽 `actions`/`pageActions`；`diagnostic-page.test.ts` 的整页 harness 增加 ActionButton 收集（关闭的 Dialog 子树不挂载、打开时只算最上层对话框、收起的折叠区内容不算），新增 9 条用例覆盖 overview 精确集合、无运行记录时灰按钮不可用、两个对话框只露自己的按钮、每个页签的动作集合、返回总览与模型改进的真实导航、远程取回与返回模拟按钮。前端 831 条测试通过。
+
+**第八批：版本页与改代码页**（第 737 轮续）：
+- 版本库、草稿、六种方式卡、工作台页签与底栏、冻结前检查、参数对话框（含自带关闭）、研究导入对话框、代码工作区与代码文件面板的按钮改为自己登记；`VersionsPage` 与 `CodeWorkspace` 两个契约的 `actions` 清空。
+- 对出的不一致：
+  - 删掉四个幽灵动作：`version-create`（新建表单第 719 轮已从界面拿掉）、`version-research`、`version-parameter-add`、`version-physics-apply`（改参数与开关已全在参数对话框里）；只给清单用的 `deriveVersion`、`importStudyParameters`、`addParameter` 一并删除。
+  - "从研究导入最优参数"清单写的是直接全部写入，界面先开逐个勾选的预览对话框：现在以界面为准，登记打开预览（click），写入是对话框里的"写进草稿"（commit）。
+  - 研究页签四个方式按钮在草稿上会先保存并冻结修订（写盘），草稿上标 commit、冻结版本上仍为 click。
+  - `version-discard`（放弃修改）不登记：撤回类，且界面先弹应用自己的确认框，助手走不完。
+- D 级不登记：删除版本/草稿、清理旧官方版本、放弃修改、导出补丁/恢复文件/恢复工作区/删除工作区、代码文件的删除与整目录替换。
+- 界面有、清单没有的补登记：版本库的打开/设为模拟使用/继续编辑/更早官方版本、工作台返回与页签、基于它新建修改版、冻结前检查的一键处理与逐项编译（`version-fix-*`）、代码文件保存/新建/加入/替换（`code-file-*`）、参数对话框的页签/模式/文件选择/导入参数文件。
+- 测试：`foundation-page.test.ts` 的框架改为递归执行页面与 7 个子组件源码的微型渲染器（每个实例独立 hook 槽位），从元素树收集 `ActionButton`/`closeAction`/`Advanced action`，并按隐藏页签、收起折叠项、打开对话框的遮挡规则筛选；新增断言覆盖删除类不可见、对话框遮挡、研究导入先预览后写、灰按钮不可用、同时显示的动作 id 不重复。前端 831 条测试通过。
+
+**第九批：配置选项页与计算资源页**（第 737 轮续）：
+- 两页手写动作清单（资源页 27 类、配置选项 16 类）改为由界面按钮、可折叠区与对话框关闭按钮自己登记，`PageContract.actions` 清空；配置选项的 `modalActions` 只保留"这是对话框、按对话框合并契约"的语义（`ModelSettings` 传 `[]` 的用法未变）。
+- 对出的不一致：
+  - 配置选项旧清单给每行都列"恢复默认"，VIC 文件行界面上只有"使用预设路径/选择文件"，该 id 是幽灵按钮，已删。
+  - 配置锁定时折叠区动作原来列出但不可用，现在按界面为准不列出（`Advanced` 没有 disabled，沿用模型设置"完整参数目录"的做法）。
+  - 资源页识别出集群后出现的"套用预设"按钮原来只在界面上，现登记为 `resource-apply-preset`。
+- D 级收回：资源页原把"删除连接设置"（`resource-delete-confirm`）与"清除各类型记住的路径"（`resource-forget-*`）开放给助手，现均为普通按钮；清理快照、核对租约、登记密码本来就不在清单里，保持不登记；删除对话框的"关闭"用 `closeAction` 登记。"移除映射行""移除示踪物行"只改内存草稿，保留原 id 与 `kind=click`。
+- 测试框架改为从渲染元素树收集按钮（折叠区、打开的对话框按 `renderedButtons` 规则过滤），保留原有用例并断言删除/清除类动作界面上有按钮而助手看不到。前端 831 条测试通过。
+
+**第十批：研究页**（第 737 轮续）：
+- 工作台与首页两套 `PageContract` 的 `actions` 清空，`renderActions` 改为渲染 `<ActionButton>`（id/label/kind/disabled 都取自按钮本身），26 个既有动作 id 全部保留、改由渲染处登记。
+- 界面有、清单没有的补登记：首页 6 个方法卡片（`research-method-<id>`）、步骤条与上一步/下一步（`research-step-1..4`/`back`/`next`）、改为另建新版本、计算资源链接、率定目标选择/增删（列表项带序号）、按站点的观测文件选择（带算例目录）、导出/拟合目录选择、导出折叠标题（`research-export-panel`）。
+- 对出的不一致：`research-resources` 旧清单不选服务器也列，界面只在选了服务器时显示；运行/暂停/恢复/重试/取消与 AI 动作旧清单不看步骤/页签一直列，界面只在第 2/4 步与对应页签（禁用时根本不显示）；`study-export` 藏在合着的"导出研究"折叠区，旧清单一直可按——全部以界面为准。
+- 首页"返回模拟配置"有两处按钮（顶部横幅与"当前研究"卡片）：同一动作 id 只能登记一次，否则助手按 id 找不到唯一按钮；登记始终显示的顶部按钮，卡片里那个保持普通按钮。
+- D 级：本页没有删除类动作；取消研究属运行控制，保留 `kind=commit`；"删掉这个目标"只移除未保存的列表行，登记为 click；写回草稿对话框的按钮属版本页批次。
+- 测试：新增整页 harness（执行页面源码 + 保留元素树的假 React，按 `renderedButtons()` 规则收集按钮），覆盖 home 与工作台第 1/2/3/4 步的动作集合/`enabled`/`kind`、无幽灵动作、折叠区与对话框遮挡、首页两个返回按钮只登记一次。前端 831 条测试通过。
+
+**全部迁移完成后**：
+- 18 个 `usePageContract` 页面的 `actions` 现在都是 `[]`；助手只从 `renderedButtons()` 取按钮，按钮的可见性、对话框遮挡与 disabled 全部取自界面。
+- **同步后端表**：`gui/src-tauri/src/history.rs` 的助手改动审计白名单、`crates/colm-agent` 的 `ui_commit` 长超时名单与 C 级分级函数原先只覆盖部分旧 id。全量核对 `kind="commit"` 的 `ActionButton` 后补齐（含前几批漏的 `project-example`、`history-replay`、`history-export-*`、`new-multi-retry`、`resource-build`、`resource-workspace-*`、`result-fetch`、`version-fix-*`、`code-file-*` 等），并删掉已不存在的手写动作 id；不补时助手按这些按钮会被"未知界面改动"拒绝。`version-fix-*`（编译引擎/内核）与会打开系统文件选择框的按钮加入长超时名单；`code-file-*`、`version-fix-*`、`version-import-process` 纳入 C 级审批。
+- **前一批的 CI**：六次提交（head `fdf18490`）的 `ci`（24m43s）、`windows-kernel`（34m9s）、`release`（11s）三个 workflow 全部成功。
+- 验证：前端 `npm test` 831 条、`npm run typecheck`、`npm run lint`、`npx prettier --check src`、`npm run build`、`check-gui` 通过；GUI 后端 427 条通过（`sidecar` 的"清理残留子进程"用例要调 `ps`，在本机沙箱里被拒而超时，CI 上过）、两个 workspace 的 fmt 与 clippy 通过；`colm-agent` 196 条 + 7 条通过（`terminal` 的 pty 用例在本机沙箱报 "out of pty devices"，属环境限制）；根工作区其余 crate 的测试受同一沙箱限制（`colm-cli` 462 条通过、21 条因临时目录/NetCDF 文件操作被拒而失败），以 CI 为准。
+
+**窗口实测（隔离 HOME，`--features e2e-driver`，测试包单独命名/标识）**：
+- 结果页：页面显示 `result-runs`、`result-settings`、`result-closure`、`result-improve`、`export-full-series-csv`、`result-back`；打开评估设置后只在该对话框里看到 `result-pick-observation`、`result-advanced-settings`、`evaluate-observations`、`plot-series`、`result-settings-close`；运行选择对话框里是 `result-run-0`、`result-run-comparison`、`result-runs-close`。真实跑完一个 5 天算例（4 秒）后，结果页读出 110 组配对与指标。
+- 版本页/改代码页：新建修改版 hub 看到 `version-library` 与 6 个 `version-method-*`；手动修改工作台看到保存/冻结/页签/参数对话框；修改源码页看到 `version-tab-*`、`version-fix-*`、`version-recheck`、`code-file-create/add`、`workspace-patch/check`，而"导出改动""恢复工作区""删除工作区""放弃修改"没有 `data-action`。
+- 配置选项（算例第 4 步）：`simulation-classification-*`、`simulation-mode-*`、`simulation-model-edit` 已登记；方案选项/开关的"开启/关闭"是字段的另一种呈现，未登记（助手用字段），与运行面板的阶段 chips 同类。
+- 计算资源页：`resource-new/select-local/local/local-pick-*/resource-local-data-save/refresh` 已登记，页面按钮无遗漏。
+- 研究页：首页 6 个 `research-method-*` 与 `study-browse`；打开已有研究的工作台动作由单测覆盖。
+- 历史记录页：搜索/导出/详情/翻页可见，而"清空历史记录""清空这个算例的记录"没有 `data-action`。
+- 设置页：助手的设置入口与帮助入口已登记；"整理模型缓存"（删文件，D 级）没有 `data-action`。
+- 项目页/批量运行页/新建模拟页/准备页/帮助页/侧栏：动作齐备；批量运行展开站点选择后，筛选标签、全选/全不选/只选未完成、监控方块都已登记。
+- 窗口实测发现并修了两处：设置页"检查可释放的空间"只查不删，原来没登记（第 3 批遗留），现登记为 `settings-cache-check`；`Advanced` 的折叠标题此前只在 `useRenderedAction` 里登记、DOM 上没有 `data-action`，端到端与审查脚本看不到它，现在补上 `data-action`（助手本来就能看到）。
+- 未在窗口里走到：多站点设置的"多站点"模式要先生成/选择站点目录才会出现，本轮隔离环境里没走完建例向导；该组件由第 3 批单元测试覆盖。项目页版本选择对话框里的"删除版本/清理旧官方版本"要存在可删版本才出现，D 级不可见由第 5 批测试覆盖。
+- 普通 `.app` 已用 `cargo tauri build --config src-tauri/tauri.bundle.conf.json --bundles app` 重建；测试包用单独的 `CARGO_TARGET_DIR` 与应用标识，不覆盖用户手上的正式包。

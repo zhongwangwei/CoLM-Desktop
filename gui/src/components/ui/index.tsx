@@ -290,7 +290,10 @@ export function Advanced({
   );
   return (
     <details className="advanced" open={isOpen} onToggle={(e) => toggle(e.currentTarget.open)}>
-      <summary ref={summary}>{title ?? fallback}</summary>
+      {/* data-action 只为窗口审查/端到端脚本能认出这个折叠区也登记了动作（第 737 轮）。 */}
+      <summary ref={summary} data-action={action}>
+        {title ?? fallback}
+      </summary>
       <div className="advanced-content">{children}</div>
     </details>
   );

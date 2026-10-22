@@ -57,9 +57,16 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
       )}
       {message && <p className="muted">{message}</p>}
       <div className="actions">
-        <Button disabled={busy} onClick={() => void run(true)}>
+        <ActionButton
+          action="settings-cache-check"
+          label={t('检查可释放的空间', 'Check reclaimable space')}
+          kind="click"
+          disabled={busy}
+          run={() => run(true)}
+        >
           {t('检查可释放的空间', 'Check reclaimable space')}
-        </Button>
+        </ActionButton>
+        {/* 整理模型缓存会删文件，按 D 级规则只在界面上做，不登记给助手。 */}
         <Button disabled={busy || !removable} onClick={() => void run(false)}>
           {t('整理模型缓存', 'Tidy model cache')}
         </Button>
