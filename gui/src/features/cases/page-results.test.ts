@@ -145,9 +145,31 @@ test('research inspection and saved-model callbacks return backend evidence even
       withCatalogLabels,
       spatialStudy: false,
       types: [],
+      contextsRef: { current: [] },
+      setParameters: ignored,
     })(),
     rows,
   );
+  // 格点研究改勾类型后行序会变：已勾的参数按参数与作用域搬到新行号上，不留在旧行号指向别的参数。
+  const at = (index: number) => ({
+    id: 'gradm',
+    name: 'DEF_LC_GRADM',
+    scope_instance: { kind: 'land-cover-class', scheme: 'IGBP', index },
+  });
+  let ticks: Record<string, unknown> = { '0': { enabled: true, min: '4', max: '9' } };
+  await callback(research, 'loadContexts', {
+    ...common,
+    sites: ['/case'],
+    invokeJson: async () => [at(1), at(10)],
+    withCatalogLabels,
+    spatialStudy: true,
+    types: [1, 10],
+    contextsRef: { current: [at(10)] },
+    setParameters: (next: (old: typeof ticks) => typeof ticks) => {
+      ticks = next(ticks);
+    },
+  })();
+  assert.deepEqual(ticks, { '1': { enabled: true, min: '4', max: '9' } });
   const text = '[{"member":"m000001","validated":false}]';
   assert.equal(
     await callback(research, 'loadResult', {

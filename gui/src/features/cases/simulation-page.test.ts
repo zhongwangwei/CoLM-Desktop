@@ -98,6 +98,7 @@ function page(
     simulationReturn: null as unknown,
     projectRunSettings: undefined as AppState['projectRunSettings'],
     projectView: undefined as AppState['projectView'],
+    cases: undefined as { dir: string; name: string }[] | undefined,
   };
   const listeners: { event: string; callback: (payload: unknown) => void }[] = [];
   const calls: { command: string; args: Record<string, unknown> }[] = [],
@@ -486,6 +487,7 @@ test('Results opens the station chooser before a case has been selected', async 
   const p = page('CasesPage');
   p.state.selectedCase.entry.dir = '';
   p.state.caseTab = 'results';
+  p.state.cases = [{ dir: '/project/station-a', name: 'station-a' }];
   await p.mount();
   assert.ok(p.element('ResultsPage'));
   assert.ok(!p.elements.some((element) => element.type === 'Card'));
@@ -494,6 +496,16 @@ test('Results opens the station chooser before a case has been selected', async 
   (p.element('ResultsPage').props.onBack as () => void)();
   assert.deepEqual(p.routes, ['project'], 'results returns to the original batch');
   assert.equal(p.state.projectView?.home, false);
+});
+
+test('Results without any case in the project offers to open one instead of an empty results page', async () => {
+  const p = page('CasesPage');
+  p.state.selectedCase.entry.dir = '';
+  p.state.caseTab = 'results';
+  p.state.cases = [];
+  await p.mount();
+  assert.ok(!p.elements.some((element) => element.type === 'ResultsPage'));
+  assert.ok(p.elements.some((element) => element.type === 'Card'));
 });
 
 test('selecting a station defaults to its entire forcing period and subsequent manual dates remain editable', async () => {

@@ -36,21 +36,39 @@ export function parameterSpec(
     !Number.isFinite(max) ||
     min >= max
   )
-    throw new Error(`${row.name}: finite min < max required`);
-  if (scale === 'log' && min <= 0) throw new Error(`${row.name}: log range must be positive`);
+    throw new Error(
+      bilingual(
+        `${row.name}：下限和上限都要填数，且下限小于上限`,
+        `${row.name}: finite min < max required`,
+      ),
+    );
+  if (scale === 'log' && min <= 0)
+    throw new Error(
+      bilingual(`${row.name}：对数尺度的范围要大于 0`, `${row.name}: log range must be positive`),
+    );
   if (
     (row.min != null && (min < row.min || (!row.min_inclusive && min === row.min))) ||
     (row.max != null && (max > row.max || (!row.max_inclusive && max === row.max))) ||
     min === row.sentinel ||
     max === row.sentinel
   )
-    throw new Error(`${row.name}: outside physical bounds or sentinel`);
+    throw new Error(
+      bilingual(
+        `${row.name}：超出了物理允许的范围（或用了表示缺省的特殊值）`,
+        `${row.name}: outside physical bounds or sentinel`,
+      ),
+    );
   // 参数目录的作用域来自 colm-model（多一个 process_file，读出来恒为 null），
   // 研究规格的作用域没有这个字段且拒绝未知字段：原样转发时预检报
   // `unknown field process_file`（实测：GUI 参数率定预检全部失败）。只带研究规格认识的字段。
   const { kind, scheme, index, type_name, process_file } = row.scope_instance;
   if (process_file != null)
-    throw new Error(`${row.name}: process-file parameters cannot be sampled by a study`);
+    throw new Error(
+      bilingual(
+        `${row.name}：过程文件里的参数不能用研究抽样`,
+        `${row.name}: process-file parameters cannot be sampled by a study`,
+      ),
+    );
   const scope_instance = Object.fromEntries(
     Object.entries({ kind, scheme, index, type_name }).filter(([, v]) => v != null),
   );
@@ -110,7 +128,7 @@ export function candidateBudget(
   const candidates =
     kind === 'tuning' ? population * (generations + 1) : method === 'oat' ? 2 * parameters : count;
   if (!Number.isInteger(candidates) || candidates < 1 || candidates > 1000)
-    throw new Error('Candidate budget must be 1–1000');
+    throw new Error(bilingual('候选成员总数要在 1–1000 之间', 'Candidate budget must be 1–1000'));
   if (
     kind === 'tuning' &&
     (!Number.isInteger(population) ||
@@ -118,7 +136,9 @@ export function candidateBudget(
       !Number.isInteger(generations) ||
       generations < 1)
   )
-    throw new Error('Population ≥4 and generations ≥1 required');
+    throw new Error(
+      bilingual('种群至少 4、迭代至少 1 代', 'Population ≥4 and generations ≥1 required'),
+    );
   return { candidates, tasks: (candidates + 1) * sites, stageRuns: 3 * (candidates + 1) * sites };
 }
 export function studyPermissions(status: string) {
@@ -141,7 +161,8 @@ export function networkSpec(
   hidden: string,
   relative: boolean,
 ) {
-  if (!['linear', '4', '8'].includes(hidden)) throw new Error('Unsupported network size');
+  if (!['linear', '4', '8'].includes(hidden))
+    throw new Error(bilingual('不支持这个网络结构', 'Unsupported network size'));
   const names = features
     .split(/[,，\s]+/)
     .map((v) => v.trim())
@@ -158,14 +179,31 @@ export function networkSpec(
     !Number.isFinite(max) ||
     min >= max
   )
-    throw new Error('Invalid network features or output range');
+    throw new Error(
+      bilingual(
+        '网络的输入特征或输出范围不对：特征不能为空或重复，下限要小于上限',
+        'Invalid network features or output range',
+      ),
+    );
   output = slot === 'soil_stress' ? output.trim().toLowerCase() : output.trim().toUpperCase();
   if (slot !== 'soil_stress' && !output.startsWith(slot === 'land_class' ? 'DEF_LC_' : 'DEF_PFT_'))
-    throw new Error('Output parameter does not match network slot');
-  if (slot === 'soil_stress' && output !== 'beta') throw new Error('soil_stress outputs beta');
+    throw new Error(
+      bilingual(
+        '输出参数和网络作用位置不配：每个植物功能型用 DEF_PFT_ 参数，每个地类用 DEF_LC_ 参数',
+        'Output parameter does not match network slot',
+      ),
+    );
+  if (slot === 'soil_stress' && output !== 'beta')
+    throw new Error(bilingual('土壤水分胁迫网络的输出只能是 beta', 'soil_stress outputs beta'));
   if (slot === 'soil_stress' && (min < 0 || (!relative && max > 1 + 1e-10)))
-    throw new Error('Absolute beta must stay in [0,1]; relative beta is a non-negative multiplier');
-  if (!['pft', 'land_class', 'soil_stress'].includes(slot)) throw new Error('Invalid slot');
+    throw new Error(
+      bilingual(
+        'β 取绝对值时要在 [0,1] 内；取相对值时是非负的倍数',
+        'Absolute beta must stay in [0,1]; relative beta is a non-negative multiplier',
+      ),
+    );
+  if (!['pft', 'land_class', 'soil_stress'].includes(slot))
+    throw new Error(bilingual('网络作用位置不对', 'Invalid slot'));
   return {
     slot,
     features: names,
@@ -187,7 +225,8 @@ export function fitValidation(report: unknown): boolean | null {
 }
 
 export function networkDefaults(slot: string) {
-  if (!['pft', 'land_class', 'soil_stress'].includes(slot)) throw new Error('Invalid network slot');
+  if (!['pft', 'land_class', 'soil_stress'].includes(slot))
+    throw new Error(bilingual('网络作用位置不对', 'Invalid network slot'));
   return slot === 'soil_stress'
     ? {
         slot,

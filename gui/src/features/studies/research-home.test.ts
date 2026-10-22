@@ -168,6 +168,7 @@ it('local polling stops during study selection and a scheduled callback rechecks
     lock = { current: false };
   let reads = 0;
   const context = {
+    active: true,
     studyDir: '/old',
     busy: false,
     launching: false,
@@ -185,6 +186,9 @@ it('local polling stops during study selection and a scheduled callback rechecks
     clearTimeout: () => {},
   };
   pageCallback('localStudyPoll', { ...context, busy: true })();
+  assert.equal(scheduled.length, 0);
+  // 研究页常驻但隐藏时不轮询，回到研究页再接着刷新。
+  pageCallback('localStudyPoll', { ...context, active: false })();
   assert.equal(scheduled.length, 0);
   pageCallback('localStudyPoll', context)();
   assert.equal(scheduled.length, 1);
@@ -228,6 +232,7 @@ function writeBackContext(overrides: Record<string, unknown>) {
     methodTitle: { zh: '参数率定', en: 'Calibration' },
     envelope: { manifest: { id: 's-1' } },
     member: '',
+    defaultMember: () => '',
     setWriting: (value: unknown) => written.push(value),
     invokeJson: async (command: string, args: Record<string, unknown>) => {
       calls.push([command, args]);
@@ -287,6 +292,15 @@ it('refuses a new version for a study without a recorded version and cleans up f
     ['model_create', 'model_import_study', 'model_delete_draft'],
   );
   assert.equal(failing.written.length, 0);
+});
+
+// 不确定性分析没有最优成员：下拉框显示的和写入的都是第一个样本成员，不是空值（后端当 best 拒绝）。
+it('the member written by default is the one the member list shows', () => {
+  const pick = (state: unknown) => pageCallback('defaultMember', { envelope: { state } })();
+  assert.equal(pick({ best_member: 'm000004', candidates: { m000004: {} } }), 'm000004');
+  assert.equal(pick({ candidates: { m000002: {}, m000000: {}, m000001: {} } }), 'm000001');
+  assert.equal(pick({ candidates: { m000000: {} } }), 'm000000');
+  assert.equal(pick({}), '');
 });
 
 it('result files list the results people read, not every member record', () => {

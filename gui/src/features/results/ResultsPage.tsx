@@ -134,6 +134,11 @@ export function ScienceChart({
   }, [data, labels, theme, paired, compact]);
   return <div ref={ref} aria-label={labels.join(', ')} style={{ minWidth: 0 }} />;
 }
+function runLabel(path: string) {
+  const parts = path.replace(/[\\/]+$/, '').split(/[\\/]/);
+  const at = parts.lastIndexOf('runs');
+  return at > 0 && parts[at + 1] ? `${parts[at - 1]} · ${parts[at + 1].slice(0, 8)}` : path;
+}
 const number = (v: unknown, digits = 3) =>
   typeof v === 'number' && Number.isFinite(v) ? v.toFixed(digits) : '—';
 export default function ResultsPage({
@@ -796,8 +801,13 @@ export default function ResultsPage({
   )
     fields.push(
       ...[
-        { id: 'result-from', label: 'UTC start', value: from, set: setFrom },
-        { id: 'result-to', label: 'UTC end', value: to, set: setTo },
+        {
+          id: 'result-from',
+          label: tr('开始时间（UTC）', 'Start (UTC)'),
+          value: from,
+          set: setFrom,
+        },
+        { id: 'result-to', label: tr('结束时间（UTC）', 'End (UTC)'), value: to, set: setTo },
       ].map((f) => ({ ...f, type: 'text' as const, disabled: busy })),
     );
   if (!runChooser && !settingsOpen && (tab === 'series' || tab === 'overview'))
@@ -1521,7 +1531,7 @@ export default function ResultsPage({
           onOpenChange={setAdvanced}
         >
           <div className="form-grid">
-            <Field label="UTC start">
+            <Field label={tr('开始时间（UTC）', 'Start (UTC)')}>
               <Input
                 type="datetime-local"
                 value={from}
@@ -1529,7 +1539,7 @@ export default function ResultsPage({
                 onChange={(event) => setFrom(event.target.value)}
               />
             </Field>
-            <Field label="UTC end">
+            <Field label={tr('结束时间（UTC）', 'End (UTC)')}>
               <Input
                 type="datetime-local"
                 value={to}
@@ -1613,7 +1623,7 @@ export default function ResultsPage({
                 <table>
                   <thead>
                     <tr>
-                      <th>Variable</th>
+                      <th>{tr('变量', 'Variable')}</th>
                       <th>A RMSE</th>
                       <th>B RMSE</th>
                       <th>{tr('配对一致', 'Same pairs')}</th>
@@ -1642,8 +1652,11 @@ export default function ResultsPage({
       {tab === 'catalog' && catalog && (
         <Card title={tr('History 数据目录', 'History catalog')}>
           <p>
-            {catalog.files} files · {catalog.steps} steps ·{' '}
-            {new Date(catalog.start * 1000).toISOString()} —{' '}
+            {tr(
+              `${catalog.files} 个文件 · ${catalog.steps} 个时间步`,
+              `${catalog.files} files · ${catalog.steps} steps`,
+            )}{' '}
+            · {new Date(catalog.start * 1000).toISOString()} —{' '}
             {new Date(catalog.end * 1000).toISOString()}
           </p>
           <table>
@@ -1671,7 +1684,7 @@ export default function ResultsPage({
       {['series', 'evaluation', 'comparison', 'diagnostics'].includes(tab) && (
         <Card>
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="UTC start">
+            <Field label={tr('开始时间（UTC）', 'Start (UTC)')}>
               <Input
                 type="datetime-local"
                 value={from}
@@ -1683,7 +1696,7 @@ export default function ResultsPage({
                 }}
               />
             </Field>
-            <Field label="UTC end">
+            <Field label={tr('结束时间（UTC）', 'End (UTC)')}>
               <Input
                 type="datetime-local"
                 value={to}
@@ -1734,7 +1747,12 @@ export default function ResultsPage({
           )}
           {tab === 'comparison' && (
             <>
-              <Field label="run_case | observation (one station per line)">
+              <Field
+                label={tr(
+                  '要比较的运行与观测（每行一个站点："运行目录 | 观测文件"）',
+                  'Runs and observations to compare (one station per line: "run folder | observation file")',
+                )}
+              >
                 <textarea
                   className="w-full"
                   rows={4}
@@ -1819,8 +1837,10 @@ export default function ResultsPage({
                 theme={state.theme}
               />
               <p>
-                {displayedSeries!.n}/{displayedSeries!.source_n} points{' '}
-                {displayedSeries!.downsampled ? '(sampled)' : ''}
+                {tr(
+                  `${displayedSeries!.n}/${displayedSeries!.source_n} 个点${displayedSeries!.downsampled ? '（已抽样）' : ''}`,
+                  `${displayedSeries!.n}/${displayedSeries!.source_n} points${displayedSeries!.downsampled ? ' (sampled)' : ''}`,
+                )}
               </p>
             </>
           )}
@@ -1831,17 +1851,27 @@ export default function ResultsPage({
           <table>
             <thead>
               <tr>
-                {['Site', 'Variable', 'n', 'RMSE', 'MAE', 'Bias', 'R²', 'r', 'NSE', 'KGE'].map(
-                  (s) => (
-                    <th key={s}>{s}</th>
-                  ),
-                )}
+                {[
+                  tr('站点', 'Site'),
+                  tr('变量', 'Variable'),
+                  tr('配对数', 'n'),
+                  'RMSE',
+                  'MAE',
+                  tr('偏差', 'Bias'),
+                  'R²',
+                  'r',
+                  'NSE',
+                  'KGE',
+                ].map((s) => (
+                  <th key={s}>{s}</th>
+                ))}
               </tr>
             </thead>
             <tbody>
               {metrics.map((m, i) => (
                 <tr key={i}>
-                  <td>{m.site || source}</td>
+                  {/* 多运行比较的站点是运行目录（<算例>/runs/<编号>），整条路径占满一列：显示算例名和编号前 8 位。 */}
+                  <td title={m.site || source}>{runLabel(m.site || source)}</td>
                   <td>{m.name}</td>
                   <td>{m.n}</td>
                   {[m.rmse, m.mae, m.bias, m.r2, m.correlation, m.nse, m.kge].map((v, j) => (

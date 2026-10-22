@@ -38,7 +38,7 @@ import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
 import { IGBP, USGS, PFT } from './scope-labels';
 import { researchVersion, refreshDraftCode } from './research-version';
-import { appLocale } from '../history/history';
+import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 export default function VersionsPage() {
   const { state, update, navigate, refreshVersions, notify } = useApp(),
     t = (a: string, b: string) => (state.language === 'en' ? b : a);
@@ -190,6 +190,16 @@ export default function VersionsPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.openDraft]);
+  // 历史记录点"打开版本"：直接打开那个冻结版本看。
+  useEffect(() => {
+    const ref = state.openVersion;
+    if (!ref) return;
+    update({ openVersion: null });
+    setDraft(null);
+    setViewKey(keyOf(ref));
+    setTab('changes');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.openVersion]);
   // 研究首页点了"修改参数（手动）"或"修改源码"：进来就建草稿。开发模式下副作用会挂两次，靠 startedMethod
   // 只认一次请求，否则会多建一个空草稿；也不按 live 丢弃结果（第一次挂载的清理会把它作废，草稿就打不开了）。
   // 不走 execute，理由同上。
@@ -216,10 +226,20 @@ export default function VersionsPage() {
     let live = true;
     setReferences([]);
     invokeJson<{ items: HistoryOperation[] }>('history_list', {
-      filter: { versionId: draft?.id ?? viewing?.version.id ?? state.versionRef.id, limit: 100 },
+      // 一条一条列操作：默认按项目合并，原来这里显示成"project completed"，算例和修订都是空的。
+      filter: {
+        versionId: draft?.id ?? viewing?.version.id ?? state.versionRef.id,
+        limit: 100,
+        groupProjects: false,
+      },
     })
       .then((h) => {
-        if (live) setReferences(h.items);
+        // 台账按版本名查；同名的其他修订（官方 r1、r2…）不是这个版本的使用记录。草稿没有修订号。
+        const revision = draft ? null : (viewing?.version.revision ?? state.versionRef.revision);
+        if (live)
+          setReferences(
+            h.items.filter((r) => revision == null || String(r.revision) === String(revision)),
+          );
       })
       .catch((e) => {
         if (live) setError(String(e));
@@ -227,7 +247,14 @@ export default function VersionsPage() {
     return () => {
       live = false;
     };
-  }, [draft?.id, viewing?.version.id, state.versionRef.id]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    draft?.id,
+    viewing?.version.id,
+    viewing?.version.revision,
+    state.versionRef.id,
+    state.versionRef.revision,
+  ]);
   // 用自己代码的草稿：冻结前要编过引擎、改了 Fortran 要编过内核、改了生成表来源要过 drift、继承的参数
   // 在新代码里还在。代码一变（提交号变了）或草稿保存后重查。
   useEffect(() => {
@@ -1819,8 +1846,8 @@ export default function VersionsPage() {
                                   appLocale(state.language === 'en'),
                                 )}
                           </td>
-                          <td>{r.kind}</td>
-                          <td>{r.status}</td>
+                          <td>{historyKindLabel(r.kind, state.language === 'en')}</td>
+                          <td>{historyStatusLabel(r.status, state.language === 'en')}</td>
                           <td className="versions-table-path">{r.case_path ?? r.host ?? '—'}</td>
                           <td>{r.revision ? `r${r.revision}` : '—'}</td>
                         </tr>
@@ -1954,6 +1981,7 @@ export default function VersionsPage() {
               overlay={draft.overlay}
               en={state.language === 'en'}
               busy={busy}
+              error={error}
               onClose={() => setStudyPreview(null)}
               onImport={(chosen) => void importChosen(chosen).catch(() => {})}
             />

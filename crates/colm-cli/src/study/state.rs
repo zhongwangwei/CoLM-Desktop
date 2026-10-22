@@ -177,6 +177,23 @@ impl StudyState {
     /// A previous supervisor disappeared while a model task was marked running.
     /// Without a verified child identity it is unsafe to double-run, so recovery
     /// deliberately requires review rather than guessing that the child exited.
+    /// 一批成员跑完、研究还要接着跑（率定先单独跑基准，再跑种群、下一代）时的状态。原来每批跑完都用
+    /// `finish_status` 落盘：基准跑完、种群还排着就记成 Paused，一代跑完、下一代还没建就记成
+    /// Completed，一直留到下一批跑完。研究页实跑（2026-10-22）看到运行中先显示"已暂停"、给出"恢复"，
+    /// 后显示"已完成"、放开"写入新版本"。批次之间研究仍在运行；只有请求了暂停或取消、或有成员待复核
+    /// 才停在那里，最终状态由调用方在全部跑完后用 `finish_status` 再定。
+    pub fn finish_batch_status(&mut self, stopping: bool) {
+        self.finish_status();
+        if !stopping
+            && matches!(
+                self.status,
+                StudyStatus::Paused | StudyStatus::Completed | StudyStatus::CompletedWithFailures
+            )
+        {
+            self.status = StudyStatus::Running;
+        }
+    }
+
     #[allow(dead_code)]
     pub fn reconcile_unverified_running(&mut self) {
         for task in self.tasks.values_mut() {
@@ -281,6 +298,46 @@ mod tests {
         state
             .set_task("m000001", "AT-Neu", TaskStatus::Succeeded)
             .unwrap();
+        state.finish_status();
+        assert_eq!(state.status, StudyStatus::Completed);
+    }
+
+    #[test]
+    fn the_study_stays_running_between_batches() {
+        let mut state = StudyState::new(
+            "s-test".into(),
+            [
+                task(TaskStatus::Pending),
+                TaskState {
+                    member: "m000000".into(),
+                    ..task(TaskStatus::Pending)
+                },
+            ],
+        )
+        .unwrap();
+        for status in [
+            TaskStatus::Queued,
+            TaskStatus::Running,
+            TaskStatus::Succeeded,
+        ] {
+            state.set_task("m000000", "AT-Neu", status).unwrap();
+        }
+        state.finish_batch_status(false);
+        assert_eq!(state.status, StudyStatus::Running);
+        state.finish_batch_status(true);
+        assert_eq!(state.status, StudyStatus::Paused);
+        state
+            .set_task("m000001", "AT-Neu", TaskStatus::Queued)
+            .unwrap();
+        state
+            .set_task("m000001", "AT-Neu", TaskStatus::Running)
+            .unwrap();
+        state
+            .set_task("m000001", "AT-Neu", TaskStatus::Succeeded)
+            .unwrap();
+        // 这一代全跑完了，下一代还没建：研究仍在运行，不是已完成。
+        state.finish_batch_status(false);
+        assert_eq!(state.status, StudyStatus::Running);
         state.finish_status();
         assert_eq!(state.status, StudyStatus::Completed);
     }

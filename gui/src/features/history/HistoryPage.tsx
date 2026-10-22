@@ -620,7 +620,9 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     });
     if (!navigate('versions'))
       throw new Error(t('请先保存或放弃当前修改', 'Save or discard current edits first'));
-    update({ version, versionRef: version.version });
+    // 打开来看，不顺手改模拟所用的版本（版本页 2026-10-20 已把两者拆开）。原来改了 versionRef 却没打开它：
+    // 落在"新建修改版"首页，模拟用的版本还被悄悄换掉。
+    update({ openVersion: version.version, versionsView: 'library' });
   }
   function changeComparison<K extends keyof ComparisonInput>(key: K, value: ComparisonInput[K]) {
     setComparisonInput((input) => ({

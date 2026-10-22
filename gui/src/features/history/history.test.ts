@@ -515,3 +515,20 @@ test('a record awaiting reconciliation says why and how it becomes completed', a
   );
   assert.match(pendingReason(older, false, true), /只核对最新的那次/);
 });
+
+// 台账记下的每个命令（colm-cli history_cmd::action_kind）都要有中文名，否则历史页显示成命令名
+//（2026-10-22 实测"研究结果写进草稿"显示成 model-import-study）。
+test('every command the ledger records has a history label', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { historyKindLabel } = await import('./history');
+  const source = readFileSync(
+    new URL('../../../../crates/colm-cli/src/history_cmd.rs', import.meta.url),
+    'utf8',
+  );
+  const start = source.indexOf('fn action_kind');
+  const body = source.slice(start, source.indexOf('})', start));
+  const commands = [...body.matchAll(/"([a-z0-9-]+)"/g)].map((match) => match[1]!);
+  assert.ok(commands.length > 50);
+  for (const command of commands)
+    assert.notEqual(historyKindLabel(command), command, `${command} has no label`);
+});

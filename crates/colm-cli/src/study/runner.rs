@@ -1419,10 +1419,11 @@ fn run_members(
         Ok::<(), anyhow::Error>(())
     })?;
 
-    if super::state::cancel_requested(study_dir) {
+    let cancelled = super::state::cancel_requested(study_dir);
+    if cancelled {
         cancel_unstarted(state);
     }
-    state.finish_status();
+    state.finish_batch_status(cancelled || super::state::pause_requested(study_dir));
     super::checkpoint::write_next(checkpoint_dir, state)?;
     Ok(())
 }
@@ -1700,16 +1701,26 @@ pub(crate) fn verify_member_evidence(
         .candidates
         .get(member)
         .context("Study member has no recorded candidate objective")?;
-    let actual = recalculated
-        .candidates
-        .get(member)
-        .context("Study member objective cannot be recalculated")?;
+    // 记下的分数来自检查点，经过一次 JSON 往返（末位可能变）；重算的也走同一遍再比。
+    let actual = super::checkpoint::as_checkpointed(
+        recalculated
+            .candidates
+            .get(member)
+            .context("Study member objective cannot be recalculated")?,
+    )?;
     anyhow::ensure!(
         recorded.feasible
             && actual.feasible
             && recorded.calibration == actual.calibration
             && recorded.validation == actual.validation,
-        "Study candidate score differs from its verified evaluation results"
+        "Study candidate score differs from its verified evaluation results \
+         ({member}: recorded {:?}/{:?}, recalculated {:?}/{:?}, feasible {}/{})",
+        recorded.calibration,
+        recorded.validation,
+        actual.calibration,
+        actual.validation,
+        recorded.feasible,
+        actual.feasible
     );
     Ok(())
 }

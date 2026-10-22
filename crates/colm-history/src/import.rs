@@ -177,6 +177,31 @@ impl History {
                         }
                     }
                 }
+                // 研究也一样：历史页列出应用自己记的研究运行时会顺手导入它的检查点，导入出来的占位记录
+                // 没有位置和时间（"位置未记录 时间未记录"），每个研究在历史里都成了两条（2026-10-22）。
+                // 应用自己记过的研究不再导入，以前导入的占位记录一并隐藏。
+                if matches!(kind, ImportKind::Study) {
+                    if let Some(study) = study_dir_of(source) {
+                        if self.tracks_study(study)? {
+                            if let Some(id) =
+                                row["study_id"].as_str().or_else(|| row["id"].as_str())
+                            {
+                                self.connection.execute(
+                                    "INSERT INTO history_removed_operations(operation_id,removed_ms)
+                                     SELECT DISTINCT operation_id,?2 FROM history_events
+                                     WHERE operation_id=?1
+                                     ON CONFLICT(operation_id) DO NOTHING",
+                                    rusqlite::params![
+                                        format!("study-{}", hash(id.as_bytes())),
+                                        crate::now_ms()
+                                    ],
+                                )?;
+                            }
+                            tracked += 1;
+                            continue;
+                        }
+                    }
+                }
                 let mut event = legacy_event(row, kind, source, case, None)?;
                 if sequence.is_some() {
                     // Envelope hashes differ between legacy typed and normalized readers;
@@ -217,6 +242,22 @@ impl History {
             duplicates: events.len() - imported + tracked,
             sources: vec![source.to_owned()],
         })
+    }
+    /// Whether an operation the app recorded itself (not an import) ran this Study directory.
+    pub fn tracks_study(&self, study: &Path) -> Result<bool> {
+        let mut statement = self.connection.prepare(
+            "SELECT DISTINCT json_extract(payload,'$.case_path') FROM history_events
+             WHERE operation_id NOT LIKE 'legacy-%' AND operation_id NOT LIKE 'study-%'
+             AND json_extract(payload,'$.phase') != 'imported'
+             AND json_extract(payload,'$.kind') LIKE '%study%'
+             AND json_extract(payload,'$.case_path') IS NOT NULL",
+        )?;
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(paths.iter().any(|path| {
+            Path::new(path) == study || std::fs::canonicalize(path).is_ok_and(|path| path == study)
+        }))
     }
     /// Whether an operation the app recorded itself (not an import) is bound to this server job.
     pub fn tracks_remote_job(&self, job: &str) -> Result<bool> {
@@ -296,6 +337,18 @@ impl History {
         }
         Ok(report)
     }
+}
+/// The Study directory a Study source belongs to: its `manifest.json` or a `checkpoints/state` file.
+fn study_dir_of(source: &str) -> Option<&Path> {
+    let path = Path::new(source);
+    if path.file_name()? == "manifest.json" {
+        return path.parent();
+    }
+    let state = path.parent()?;
+    let checkpoints = state.parent()?;
+    (state.file_name()? == "state" && checkpoints.file_name()? == "checkpoints")
+        .then(|| checkpoints.parent())
+        .flatten()
 }
 fn merge(a: &mut ImportReport, b: ImportReport) {
     a.imported += b.imported;

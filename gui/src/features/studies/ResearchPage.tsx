@@ -68,7 +68,8 @@ type Envelope = {
 };
 type HybridStudy = { dir: string; sites: string[]; parameters: string[]; status: string };
 
-function StudyResult({ text, theme }: { text: string; theme: string }) {
+function StudyResult({ text, theme, en }: { text: string; theme: string; en: boolean }) {
+  const tr = (zh: string, english: string) => (en ? english : zh);
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -98,12 +99,14 @@ function StudyResult({ text, theme }: { text: string; theme: string }) {
                 ...['baseline', 'p05', 'p50', 'p95'].map((key) => sample(data[key])),
               ] as uPlot.AlignedData
             }
-            labels={['Baseline', 'P05', 'Median', 'P95']}
+            labels={[tr('基准', 'Baseline'), 'P05', tr('中位数', 'Median'), 'P95']}
             theme={theme}
           />
           <p>
-            {length} source points; chart stride {stride}. Quantiles describe this sampling design,
-            not a predictive confidence interval.
+            {tr(
+              `${length} 个时刻，图上每 ${stride} 个取一个。分位数描述的是这次抽样设计下的分布，不是预测的置信区间。`,
+              `${length} source points; chart stride ${stride}. Quantiles describe this sampling design, not a predictive confidence interval.`,
+            )}
           </p>
         </>
       );
@@ -145,14 +148,25 @@ function StudyResult({ text, theme }: { text: string; theme: string }) {
             ))}
           </tbody>
         </table>
-        {rows.length > 1000 && <p>Showing first 1000 rows; export includes all records.</p>}
+        {rows.length > 1000 && (
+          <p>
+            {tr(
+              '只显示前 1000 行；导出的研究包含全部记录。',
+              'Showing first 1000 rows; export includes all records.',
+            )}
+          </p>
+        )}
       </div>
     );
   }
   return <pre className="max-h-96 overflow-auto">{text}</pre>;
 }
 
-export default function ResearchPage() {
+/**
+ * `active`：研究页打开过一次就常驻（App 里隐藏而不卸载）。本机跑研究要几十分钟到几小时，原来靠导航守卫
+ * 把整个应用锁在研究页（卸载就丢了正在跑的研究和它的进度）；现在可以离开去看结果、历史，回来还是那个研究。
+ */
+export default function ResearchPage({ active = true }: { active?: boolean }) {
   const { state, notify, refreshVersions, navigate, update } = useApp();
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
@@ -183,6 +197,8 @@ export default function ResearchPage() {
       '',
   );
   const [contexts, setContexts] = useState<ParameterContext[]>([]);
+  const contextsRef = useRef<ParameterContext[]>([]);
+  contextsRef.current = contexts;
   const [parameters, setParameters] = useState<
     Record<string, { enabled: boolean; min: string; max: string; scale: string }>
   >({});
@@ -195,6 +211,9 @@ export default function ResearchPage() {
     { ...gridTargetDefaults.grid },
   ]);
   const [variables, setVariables] = useState('Qle');
+  // 不确定性分析的输出是模型 history 变量名（f_lfevpa 一类），和率定目标的观测名（Qle）不是一套：
+  // 原来两者共用一个框、默认 Qle，切到不确定性分析直接预检就报"算例没开这个输出"。
+  const [outputs, setOutputs] = useState('f_lfevpa');
   const [method, setMethod] = useState('lhs');
   const [count, setCount] = useState('40');
   const [population, setPopulation] = useState('8');
@@ -253,10 +272,13 @@ export default function ResearchPage() {
     lock = useRef(false),
     runLock = useRef(false),
     remoteRequest = useRef(0);
+  const shown = useRef(active);
+  shown.current = active;
   const ai = tab === 'parameters' || tab === 'process';
   const tuning = tab !== 'uncertainty';
+  // 只拦短操作（读参数、预检、建研究、提交服务器）；本机研究跑起来以后可以离开，页面常驻不丢。
   useNavigationGuard(() =>
-    runLock.current || lock.current
+    active && (lock.current || (runLock.current && !!host))
       ? tr(
           '研究操作正在执行，请等待当前操作完成。',
           'Wait for the current study operation to finish.',
@@ -289,9 +311,12 @@ export default function ResearchPage() {
     const requestEpoch = epoch;
     requestEpoch.current++;
     setSites(dir ? [dir] : []);
-    setStudyDir('');
-    setEnvelope(null);
-    setRemoteReply(null);
+    // 本机研究正在跑时离开研究页去开了别的算例：设计部分照常重置，正在跑的研究留着，回来还看得到进度。
+    if (!runLock.current) {
+      setStudyDir('');
+      setEnvelope(null);
+      setRemoteReply(null);
+    }
     setContexts([]);
     setParameters({});
     setPreflight('');
@@ -314,9 +339,13 @@ export default function ResearchPage() {
     setTypeChoices(null);
     setTypes([]);
     setPreflight('');
-    setEnvelope(null);
-    setRemoteReply(null);
-    setStudyDir('');
+    if (!runLock.current) {
+      setEnvelope(null);
+      setRemoteReply(null);
+      setStudyDir('');
+      // 换了算例或编译配置就是另一个研究，上一个研究勾的"已核对预算"不能带过来。
+      setConfirmed(false);
+    }
     setFit(null);
   }, [sites, kernel]);
   useEffect(() => {
@@ -326,6 +355,7 @@ export default function ResearchPage() {
     tab,
     observations,
     variables,
+    outputs,
     method,
     count,
     population,
@@ -422,6 +452,7 @@ export default function ResearchPage() {
   }, [studyDir]);
   useEffect(() => {
     if (
+      !active ||
       !studyDir ||
       busy ||
       remotePermissions.exists ||
@@ -444,9 +475,17 @@ export default function ResearchPage() {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [studyDir, busy, launching, remotePermissions.exists, envelope?.state?.status, readStatus]);
+  }, [
+    active,
+    studyDir,
+    busy,
+    launching,
+    remotePermissions.exists,
+    envelope?.state?.status,
+    readStatus,
+  ]);
   useEffect(() => {
-    if (!studyDir || busy || launching || !remotePermissions.poll) return;
+    if (!active || !studyDir || busy || launching || !remotePermissions.poll) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
@@ -462,7 +501,7 @@ export default function ResearchPage() {
       stopped = true;
       clearTimeout(timer);
     };
-  }, [studyDir, busy, launching, remotePermissions.poll, readRemoteStatus]);
+  }, [active, studyDir, busy, launching, remotePermissions.poll, readRemoteStatus]);
   async function effectiveCase(path: string) {
     const context = await invokeJson<{ entry: { dir: string } }>('model_case_context', {
       dir: path,
@@ -472,7 +511,8 @@ export default function ResearchPage() {
   }
   const loadContexts = () =>
     task(async (current) => {
-      if (!sites.length || !kernel) throw new Error('Select cases and a build configuration');
+      if (!sites.length || !kernel)
+        throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
       const effective = [];
       for (const path of sites) {
         effective.push(await effectiveCase(path));
@@ -484,6 +524,19 @@ export default function ResearchPage() {
         types: spatialStudy ? types : null,
       });
       if (current()) {
+        // 勾选按行号记；格点研究改勾地类后重新读出的行序会变（新类型的行插在中间），原来已勾的参数
+        // 会悄悄落到别的参数上。按参数与作用域把已勾的搬到新行号上，读不到的丢掉。
+        const keyOf = (row: ParameterContext) => `${row.id}|${JSON.stringify(row.scope_instance)}`;
+        const previous = contextsRef.current;
+        setParameters((old) => {
+          const byKey = new Map(previous.map((row, i) => [keyOf(row), old[String(i)]]));
+          return Object.fromEntries(
+            rows.flatMap((row, i) => {
+              const kept = byKey.get(keyOf(row));
+              return kept ? [[String(i), kept]] : [];
+            }),
+          );
+        });
         setContexts(withCatalogLabels(rows));
         const seed = state.researchSeed?.parameters;
         if (seed?.length) {
@@ -515,15 +568,28 @@ export default function ResearchPage() {
   }
   function spec() {
     if (!sites.length || !kernel || !confirmed)
-      throw new Error('Select cases, a build configuration and confirm reviewed ranges');
+      throw new Error(
+        tr(
+          '请先选算例和编译配置，并勾选"我已核对参数范围、预算和适用范围"',
+          'Select cases, a build configuration and confirm reviewed ranges',
+        ),
+      );
     const roots = new Set(sites.map((s) => s.replace(/[/\\][^/\\]+$/, '')));
-    if (roots.size !== 1) throw new Error('All cases must share a project directory');
+    if (roots.size !== 1)
+      throw new Error(
+        tr('所选算例要在同一个项目目录里', 'All cases must share a project directory'),
+      );
     const params = contexts.flatMap((row, i) => {
       const p = parameters[String(i)];
       return p?.enabled ? [parameterSpec(row, p.min, p.max, p.scale)] : [];
     });
     if (!params.length && !(ai && trainNetwork))
-      throw new Error('Select at least one parameter or network training');
+      throw new Error(
+        tr(
+          '请至少勾选一个参数，或选择训练网络',
+          'Select at least one parameter or network training',
+        ),
+      );
     const budget = candidateBudget(
       tuning ? 'tuning' : 'uncertainty',
       method,
@@ -542,13 +608,18 @@ export default function ResearchPage() {
       !Number.isSafeInteger(random) ||
       random < 0
     )
-      throw new Error('Jobs must be 1–16; seed must be a nonnegative integer');
-    const names = variables
+      throw new Error(
+        tr(
+          '同时运行的模拟数要在 1–16 之间，随机种子要是非负整数',
+          'Jobs must be 1–16; seed must be a nonnegative integer',
+        ),
+      );
+    const names = (tuning ? variables : outputs)
       .split(',')
       .map((v) => v.trim())
       .filter(Boolean);
     if (!names.length && !(tuning && spatialStudy))
-      throw new Error('Choose target/output variables');
+      throw new Error(tr('请填写目标或输出变量', 'Choose target/output variables'));
     const base = {
       kind: tuning ? 'tuning' : 'uncertainty',
       method: tuning ? 'differential-evolution' : method,
@@ -581,10 +652,12 @@ export default function ResearchPage() {
     );
     const windows = calibrationWindows(from, to, valFrom, valTo);
     const pairs = Number(minPairs);
-    if (!Number.isInteger(pairs) || pairs < 2) throw new Error('Minimum pairs must be ≥2');
+    if (!Number.isInteger(pairs) || pairs < 2)
+      throw new Error(tr('最少观测配对数至少是 2', 'Minimum pairs must be ≥2'));
     // 格点算例：每个目标自带观测文件（格点产品、通量站、水文站），不按站点给观测。
     if (spatialStudy) {
-      if (!gridTargets.length) throw new Error('Add at least one calibration target');
+      if (!gridTargets.length)
+        throw new Error(tr('请至少加一个率定目标', 'Add at least one calibration target'));
       return {
         caseRoot: [...roots][0]!,
         specJson: JSON.stringify({
@@ -601,7 +674,8 @@ export default function ResearchPage() {
     }
     const targets = sites.flatMap((path) => {
       const site = path.split(/[/\\]/).pop()!;
-      if (!obs[site]) throw new Error(`Observation missing: ${site}`);
+      if (!obs[site])
+        throw new Error(tr(`站点 ${site} 还没选观测文件`, `Observation missing: ${site}`));
       return names.map((variable) => ({
         key: `${variable}@${site}`,
         site,
@@ -655,9 +729,20 @@ export default function ResearchPage() {
       } else notify(`Created study: ${path}`);
       return path.trim();
     });
+  // 已建好的研究按它冻结的编译配置运行。打开已有研究时页面上选的可能是别的配置（格点研究冻结的是格点
+  // 配置，没勾算例时这里默认单点的 default），原来照传，后端报"Study was created for kernel …"。
+  const frozenKernel = (envelope?.manifest?.spec as { kernel_dir?: unknown } | undefined)
+    ?.kernel_dir;
+  const runKernel =
+    typeof frozenKernel === 'string' && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(frozenKernel)
+      ? frozenKernel
+      : kernel;
   const start = async () => {
     if (runLock.current || lock.current)
-      throw new Error('A study operation is already in progress');
+      throw new Error(
+        tr('研究操作正在进行，请等它结束', 'A study operation is already in progress'),
+      );
+    const kernel = runKernel;
     if (!studyDir || !kernel || !envelope || !confirmed)
       throw new Error(
         'Select a study and build configuration, refresh its status and review its frozen budget',
@@ -668,7 +753,7 @@ export default function ResearchPage() {
       );
     const concurrency = Number(jobs);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
-      throw new Error('Jobs must be 1–16');
+      throw new Error(tr('同时运行的模拟数要在 1–16 之间', 'Jobs must be 1–16'));
     const modelRevision = studyModelRevision(state.versionRef, envelope.model_version);
     runLock.current = true;
     remoteRequest.current++;
@@ -712,6 +797,14 @@ export default function ResearchPage() {
         modelVersion: null,
         modelRevision,
       });
+      // 跑完时人在别的页面：提示一句，回研究页看结果。
+      if (!shown.current)
+        notify(
+          tr(
+            `研究 ${studyDir.split(/[/\\]/).pop()} 已运行结束，到"研究"页查看结果。`,
+            `Study ${studyDir.split(/[/\\]/).pop()} finished running; open Research to see the results.`,
+          ),
+        );
       if (token === epoch.current) return await readStatus();
       return response;
     } catch (e) {
@@ -735,7 +828,12 @@ export default function ResearchPage() {
     command: 'study_pause' | 'study_resume' | 'study_cancel' | 'study_retry',
   ) => {
     if (remotePermissions.exists)
-      throw new Error('Use the recorded server controls for this study');
+      throw new Error(
+        tr(
+          '这个研究在服务器上，请用服务器的操作按钮',
+          'Use the recorded server controls for this study',
+        ),
+      );
     const token = epoch.current;
     const value = await task(async (current) => {
       const response = await invoke(command, {
@@ -764,7 +862,12 @@ export default function ResearchPage() {
   const fetchRemote = () =>
     task(async (current) => {
       if (!remotePermissions.fetch)
-        throw new Error('A confirmed server exit is required before fetching');
+        throw new Error(
+          tr(
+            '要等服务器确认作业已退出才能取回结果',
+            'A confirmed server exit is required before fetching',
+          ),
+        );
       remoteRequest.current++;
       const answer = await invokeJson<{
         fetched: boolean;
@@ -773,7 +876,10 @@ export default function ResearchPage() {
         scientific_verified?: boolean;
         verification_error?: string;
       }>('remote_study_fetch', { studyDir });
-      if (!answer.fetched) throw new Error('Server did not confirm a successful fetch');
+      if (!answer.fetched)
+        throw new Error(
+          tr('服务器没有确认结果已取回', 'Server did not confirm a successful fetch'),
+        );
       if (current()) {
         setRemoteReply((previous) => ({
           ...previous,
@@ -824,10 +930,18 @@ export default function ResearchPage() {
   // 研究结果进模型版本和手动改参数走同一条路：先写进草稿，到版本页审阅、冻结。从草稿进来的写回那个草稿，
   // 否则以研究所用的版本为父版本新建一个。原来要么直接冻结成版本（跳过审阅和冻结检查），要么回版本页
   // 再手动找研究目录导入（2026-10-21 用户要求把研究理进"构建新版本"）。
+  // 下拉框显示的和真正写入的是同一个成员：没选时用最优；不确定性分析没有最优，原来下拉框显示
+  // m000000、实际传空值（后端当作 best），报"Study has no best member yet"。没有最优时取第一个样本成员。
+  const defaultMember = () => {
+    const best = envelope?.state?.best_member;
+    if (best) return best;
+    const keys = Object.keys(envelope?.state?.candidates ?? {}).sort();
+    return keys.find((key) => key !== 'm000000') ?? keys[0] ?? '';
+  };
   const writeBack = () =>
     task(async (current) => {
       const target = state.researchTarget;
-      if (!studyDir) throw new Error('Open a finished study first');
+      if (!studyDir) throw new Error(tr('请先打开一个跑完的研究', 'Open a finished study first'));
       // 新草稿的父版本只能是研究真正用的版本；没记下来就不猜（当前选的版本未必是它）。
       if (!target && !modelUsed)
         throw new Error(
@@ -864,7 +978,7 @@ export default function ResearchPage() {
         const preview = await invokeJson<Omit<StudyPreview, 'study'>>('model_import_study', {
           id: draft.id,
           studyDir,
-          member: member || null,
+          member: member || defaultMember() || null,
           expectedGeneration: draft.generation,
           preview: true,
           only: null,
@@ -954,9 +1068,19 @@ export default function ResearchPage() {
   const fitNetwork = () =>
     task(async (current) => {
       if (!/^[A-Za-z0-9_-]+$/.test(name))
-        throw new Error('Fit name must contain only letters, numbers, - and _');
+        throw new Error(
+          tr(
+            '拟合名称只能用字母、数字、- 和 _',
+            'Fit name must contain only letters, numbers, - and _',
+          ),
+        );
       if (!chosenStudies.length || !out.trim())
-        throw new Error('Select completed studies and an output directory');
+        throw new Error(
+          tr(
+            '请勾选已完成的研究并选好输出目录',
+            'Select completed studies and an output directory',
+          ),
+        );
       const net = network();
       const penalty = Number(ridge),
         iterations = Number(epochs);
@@ -966,7 +1090,9 @@ export default function ResearchPage() {
         !Number.isInteger(iterations) ||
         iterations < 1
       )
-        throw new Error('Invalid fit settings');
+        throw new Error(
+          tr('拟合设置不对：岭回归正则要非负，训练轮数要是正整数', 'Invalid fit settings'),
+        );
       const data = await invokeJson<Record<string, unknown>>('hybrid_fit', {
         request: {
           studies: chosenStudies,
@@ -991,8 +1117,9 @@ export default function ResearchPage() {
   const saveFitVersion = () =>
     task(async (current) => {
       if (!fit || typeof fit.model !== 'string' || !fit.networkSpec)
-        throw new Error('Complete a fit first');
-      if (fitValidation(fit.report) === false) throw new Error('Cross-validation gate failed');
+        throw new Error(tr('请先完成拟合', 'Complete a fit first'));
+      if (fitValidation(fit.report) === false)
+        throw new Error(tr('交叉验证没通过，不能存成版本', 'Cross-validation gate failed'));
       const net = fit.networkSpec as ReturnType<typeof networkSpec>;
       const draft = await invokeJson<{ id: string }>('model_create', {
         name,
@@ -1061,7 +1188,9 @@ export default function ResearchPage() {
     const hit = names[key];
     return hit ? tr(hit[0], hit[1]) : value;
   };
-  const permissions = studyPermissions(launching && status === 'Ready' ? 'Running' : status);
+  // 本机这次运行还没返回时一律按运行中算：中途读到的检查点状态（旧版后端在批次之间记 Paused、
+  // Completed）不能放开"恢复""写入新版本"。
+  const permissions = studyPermissions(launching ? 'Running' : status);
   let budgetText: string;
   try {
     const b = candidateBudget(
@@ -1112,7 +1241,12 @@ export default function ResearchPage() {
     remotePermissions.exists && !remotePermissions.terminal && !remotePermissions.fetched;
   function chooseMethod(value: string) {
     if (lock.current || runLock.current || unresolvedRemote)
-      throw new Error('Wait for the current study operation or server record to be resolved');
+      throw new Error(
+        tr(
+          '请等当前研究操作结束，或先核对服务器上的研究',
+          'Wait for the current study operation or server record to be resolved',
+        ),
+      );
     if (!hubMethods.some((item) => item.id === value)) throw new Error('Unknown research method');
     if (value === 'manual' || value === 'source') {
       startVersionMethod(value);
@@ -1122,6 +1256,7 @@ export default function ResearchPage() {
       epoch.current++;
       setTab(value);
       setStep(1);
+      setConfirmed(false);
       setResult('');
       setFit(null);
       if (value === 'process') chooseSlot('soil_stress');
@@ -1206,13 +1341,10 @@ export default function ResearchPage() {
   useEffect(() => {
     if (!state.researchHome) return;
     update({ researchHome: false });
+    // 研究正在跑（页面常驻，离开期间一直在跑）：回来直接看它的进度，不回首页、也不报错。
     if (lock.current || runLock.current) {
-      setError(
-        tr(
-          '研究操作还在进行，结束后再回研究首页。',
-          'A study operation is in progress; return to research home when it finishes.',
-        ),
-      );
+      setWorkbench(true);
+      if (studyDir) setStep(4);
       return;
     }
     setFromHub(false);
@@ -1222,7 +1354,8 @@ export default function ResearchPage() {
   }, [state.researchHome]);
   // 返回到进来的地方：草稿、"新建修改版"或侧栏的研究首页（侧栏的研究 2026-10-21 先保留）。
   function showHome() {
-    if (lock.current || runLock.current) throw new Error('A study operation is in progress');
+    if (lock.current || runLock.current)
+      throw new Error(tr('研究操作正在进行，请等它结束', 'A study operation is in progress'));
     const target = state.researchTarget;
     // 没用上的参数种子不留到下一次研究。
     update({ researchSeed: null });
@@ -1307,9 +1440,12 @@ export default function ResearchPage() {
       'research-variables',
       tuning
         ? tr('目标变量（逗号分隔）', 'Target variables (comma separated)')
-        : tr('输出变量（逗号分隔）', 'Output variables (comma separated)'),
-      variables,
-      setVariables,
+        : tr(
+            '输出变量（模型 history 变量名，逗号分隔）',
+            'Output variables (model history names, comma separated)',
+          ),
+      tuning ? variables : outputs,
+      tuning ? setVariables : setOutputs,
     ),
     ...(tuning
       ? [
@@ -1559,7 +1695,7 @@ export default function ResearchPage() {
       'study-run',
       host ? tr('提交服务器', 'Submit to server') : tr('开始运行', 'Run study'),
       start,
-      permissions.run && !!kernel && confirmed && !launching && !remotePermissions.exists,
+      permissions.run && !!runKernel && confirmed && !launching && !remotePermissions.exists,
       true,
     ),
     ...(!remotePermissions.exists
@@ -1575,7 +1711,8 @@ export default function ResearchPage() {
             'study-resume',
             tr('恢复', 'Resume'),
             () => control('study_resume'),
-            permissions.resume,
+            // 恢复之后接着就是运行，同样要先核对过冻结的预算。
+            permissions.resume && confirmed,
             true,
           ),
           action(
@@ -1704,6 +1841,10 @@ export default function ResearchPage() {
     envelope?.manifest?.spec && typeof envelope.manifest.spec === 'object'
       ? (envelope.manifest.spec as Record<string, unknown>)
       : null;
+  // 冻结的编译配置不带 SinglePoint 就是格点研究（打开的已有研究不一定勾着算例，不能看 sites）。
+  const frozenSpatial = !!state.kernels
+    .find((k) => k.dir === runKernel)
+    ?.macros.every((macro) => macro !== 'SinglePoint');
   const remoteIdentity =
     envelope?.remote ?? envelope?.remote_pending ?? remoteReply?.record ?? remoteReply;
   const remoteStatus = remotePermissions.fetched
@@ -1759,7 +1900,7 @@ export default function ResearchPage() {
   const completed = completedCandidates(
     remoteReply?.study?.completed_candidates ?? envelope?.state?.completed_candidates,
   );
-  const currentState = remotePermissions.exists ? remoteStatus : status;
+  const currentState = remotePermissions.exists ? remoteStatus : launching ? 'Running' : status;
   const methodTitle = researchMethods.find((item) => item.id === tab)!;
   const currentMethod = researchMethods.find((item) => item.id === methodFromStudy(frozenSpec))!;
   // 编译配置：没选、或选的与算例种类不配时重挑。单点挑 default；格点按第一个算例的网格与分类挑
@@ -1887,6 +2028,7 @@ export default function ResearchPage() {
             error,
           },
         },
+    active,
   );
 
   const renderActions = (actions: UiAction[]) =>
@@ -1981,7 +2123,7 @@ export default function ResearchPage() {
                 </h3>
                 <p>
                   {envelope?.model_version?.model_revision?.version
-                    ? `${envelope.model_version.model_revision.version.id}@${envelope.model_version.model_revision.version.revision}`
+                    ? versionLabel(envelope.model_version.model_revision.version)
                     : tr('模型修订待核对', 'Model revision unverified')}{' '}
                   ·{' '}
                   {envelope
@@ -1991,7 +2133,7 @@ export default function ResearchPage() {
                 <p className="path">{studyDir}</p>
               </div>
               <div className="research-progress">
-                {envelope ? currentState : tr('状态待核对', 'Status unverified')}
+                {envelope ? statusText(currentState) : tr('状态待核对', 'Status unverified')}
                 <span>
                   {completed === null
                     ? tr('尚无候选完成记录', 'No candidate progress recorded')
@@ -2234,8 +2376,8 @@ export default function ResearchPage() {
       sites.length,
     );
     budgetSummary = tr(
-      `${b.candidates} 组参数 + 1 组基准，${sites.length} 个站点，共 ${b.tasks} 次模拟`,
-      `${b.candidates} parameter sets + 1 baseline across ${sites.length} sites: ${b.tasks} simulations`,
+      `${b.candidates} 组参数 + 1 组基准，${sites.length} 个${spatialStudy ? '算例' : '站点'}，共 ${b.tasks} 次模拟`,
+      `${b.candidates} parameter sets + 1 baseline across ${sites.length} ${spatialStudy ? 'case' : 'site'}${sites.length === 1 ? '' : 's'}: ${b.tasks} simulations`,
     );
   } catch {
     budgetOk = false;
@@ -2587,8 +2729,8 @@ export default function ResearchPage() {
         <Card
           title={tr('选算例与运行位置', 'Cases and where to run')}
           description={tr(
-            '研究在这些算例上反复运行模型。目前只支持单点算例；选多个站点时参数在所有站点共用。',
-            'The study runs the model repeatedly on these cases. Only single-point cases are supported for now; with several sites the parameters are shared.',
+            '研究在这些算例上反复运行模型。一次研究里只能是同一种算例：单点（可选多个站点，参数在各站点共用），或格点（流域、区域、全球）。',
+            'The study runs the model repeatedly on these cases, all of one kind: single-point (several sites share the parameters) or gridded (basin, region or globe).',
           )}
         >
           {state.cases.length === 0 ? (
@@ -2813,10 +2955,15 @@ export default function ResearchPage() {
           }
           description={
             tuning
-              ? tr(
-                  '率定按观测找参数：每个站点选一个观测文件，定好率定期（可再留一段验证期）和比较指标。',
-                  'Calibration fits parameters to observations: choose an observation file per site, a calibration period (optionally a validation period) and a metric.',
-                )
+              ? spatialStudy
+                ? tr(
+                    '率定按观测找参数：逐个加率定目标（格点产品、通量站或水文站），定好率定期（可再留一段验证期）和比较指标。',
+                    'Calibration fits parameters to observations: add calibration targets (gridded product, flux station or river gauge), a calibration period (optionally a validation period) and a metric.',
+                  )
+                : tr(
+                    '率定按观测找参数：每个站点选一个观测文件，定好率定期（可再留一段验证期）和比较指标。',
+                    'Calibration fits parameters to observations: choose an observation file per site, a calibration period (optionally a validation period) and a metric.',
+                  )
               : tr(
                   '不确定性分析在参数范围里抽样，看输出变化有多大。',
                   'Uncertainty analysis samples the parameter ranges and shows how much the outputs vary.',
@@ -2831,10 +2978,16 @@ export default function ResearchPage() {
                       '目标变量（逗号分隔，如 Qle, Qh）',
                       'Target variables (comma separated, e.g. Qle, Qh)',
                     )
-                  : tr('输出变量（逗号分隔）', 'Output variables (comma separated)')
+                  : tr(
+                      '输出变量（模型 history 变量名，逗号分隔，如 f_lfevpa, f_fsena）',
+                      'Output variables (model history names, comma separated, e.g. f_lfevpa, f_fsena)',
+                    )
               }
             >
-              <Input value={variables} onChange={(e) => setVariables(e.target.value)} />
+              <Input
+                value={tuning ? variables : outputs}
+                onChange={(e) => (tuning ? setVariables : setOutputs)(e.target.value)}
+              />
             </Field>
           )}
           {!tuning && spatialStudy && (
@@ -2917,7 +3070,13 @@ export default function ResearchPage() {
                     ))}
                   </Select>
                 </Field>
-                <Field label={tr('每个站点至少多少对观测', 'Minimum observation pairs per site')}>
+                <Field
+                  label={
+                    spatialStudy
+                      ? tr('每个目标至少多少对观测', 'Minimum observation pairs per target')
+                      : tr('每个站点至少多少对观测', 'Minimum observation pairs per site')
+                  }
+                >
                   <Input
                     type="number"
                     value={minPairs}
@@ -3065,10 +3224,8 @@ export default function ResearchPage() {
                     : ` · ${tr('本机', 'this computer')}`}
                 </p>
               </div>
-              <span
-                className={`badge study-state is-${(remotePermissions.exists ? remoteStatus : status).toLowerCase()}`}
-              >
-                {statusText(remotePermissions.exists ? remoteStatus : status)}
+              <span className={`badge study-state is-${currentState.toLowerCase()}`}>
+                {statusText(currentState)}
                 {launching ? tr(' · 正在执行', ' · working') : ''}
               </span>
             </div>
@@ -3107,10 +3264,15 @@ export default function ResearchPage() {
                       `${frozenSpec.parameters.length} parameter${frozenSpec.parameters.length === 1 ? '' : 's'}`,
                     ),
                   Array.isArray(frozenSpec.base_cases) &&
-                    tr(
-                      `${frozenSpec.base_cases.length} 个站点`,
-                      `${frozenSpec.base_cases.length} site${frozenSpec.base_cases.length === 1 ? '' : 's'}`,
-                    ),
+                    (frozenSpatial
+                      ? tr(
+                          `${frozenSpec.base_cases.length} 个格点算例`,
+                          `${frozenSpec.base_cases.length} gridded case${frozenSpec.base_cases.length === 1 ? '' : 's'}`,
+                        )
+                      : tr(
+                          `${frozenSpec.base_cases.length} 个站点`,
+                          `${frozenSpec.base_cases.length} site${frozenSpec.base_cases.length === 1 ? '' : 's'}`,
+                        )),
                   Array.isArray(frozenSpec.targets) &&
                     tr(
                       `${frozenSpec.targets.length} 个目标`,
@@ -3121,6 +3283,21 @@ export default function ResearchPage() {
                   .join(' · ')}
                 {tr('。改设计要新建研究。', '. Create a new study to change the design.')}
               </p>
+            )}
+            {/* 打开的已有研究还没核对过：原来勾选框只在第 3 步，这一步的"开始运行""恢复"一直不出现。 */}
+            {!confirmed && !remotePermissions.exists && (permissions.run || permissions.resume) && (
+              <label className="param-check study-confirm">
+                <input
+                  type="checkbox"
+                  checked={confirmed}
+                  disabled={busy || launching}
+                  onChange={(e) => setConfirmed(e.target.checked)}
+                />
+                {tr(
+                  '我已核对这个研究冻结的参数范围和预算（运行会真的跑这么多次模拟）',
+                  "I reviewed this study's frozen ranges and budget (running really performs this many simulations)",
+                )}
+              </label>
             )}
             <div className="button-row">
               {renderActions(controls)}
@@ -3260,7 +3437,10 @@ export default function ResearchPage() {
               <div className="study-grid">
                 <Field label={tr('用哪个成员', 'Member')}>
                   {/* 原来是手填成员编号的输入框；成员就是上面成绩表里那些，直接选。 */}
-                  <Select value={member || best || ''} onChange={(e) => setMember(e.target.value)}>
+                  <Select
+                    value={member || defaultMember()}
+                    onChange={(e) => setMember(e.target.value)}
+                  >
                     {ranked.map(([key, c]) => (
                       <option key={key} value={key}>
                         {key}
@@ -3310,7 +3490,7 @@ export default function ResearchPage() {
               ) : (
                 <p className="versions-empty">{tr('还没有结果文件。', 'No result files yet.')}</p>
               )}
-              {result && <StudyResult text={result} theme={state.theme} />}
+              {result && <StudyResult text={result} theme={state.theme} en={en} />}
               <Advanced title={tr('导出研究', 'Export the study')}>
                 <Field label={tr('导出到哪个目录', 'Export to')}>
                   <div className="study-path">
@@ -3444,6 +3624,7 @@ export default function ResearchPage() {
           overlay={writing.draft.overlay}
           en={en}
           busy={busy}
+          error={error}
           onClose={cancelWriteBack}
           onImport={(chosen) => execute(() => confirmWriteBack(chosen))}
         />

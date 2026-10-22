@@ -147,6 +147,9 @@ export default function App() {
       })),
     ],
   });
+  // 研究页打开过一次就常驻：本机研究一跑几小时，离开研究页不能把它（和它的进度）一起卸掉。
+  const [researchKept, setResearchKept] = useState(false);
+  if (state.route === 'research' && !researchKept) setResearchKept(true);
   const content =
     state.route === 'project' ? (
       <ProjectPage />
@@ -162,9 +165,7 @@ export default function App() {
       <ResourcesPage />
     ) : state.route === 'history' ? (
       <HistoryPage />
-    ) : state.route === 'research' ? (
-      <ResearchPage />
-    ) : state.route === 'settings' ? (
+    ) : state.route === 'research' ? null : state.route === 'settings' ? (
       <SettingsPage />
     ) : (
       <Help />
@@ -252,6 +253,11 @@ export default function App() {
           </div>
           <Suspense fallback={<Notice>{tr('正在打开页面…', 'Opening page…')}</Notice>}>
             {content}
+            {researchKept && (
+              <div hidden={state.route !== 'research'}>
+                <ResearchPage active={state.route === 'research'} />
+              </div>
+            )}
           </Suspense>
         </main>
         {state.assistantOpen && (

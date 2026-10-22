@@ -34,11 +34,39 @@ pub(crate) fn owning_case(path: &str) -> &Path {
     }
 }
 
+/// 研究放在 `<项目>/.colm/studies/<编号>` 下，成员算例在研究目录里面：它们都属于那个项目。
+/// 原来按"算例的上一级"分组，研究运行在历史里成了一个叫 studies 的项目（2026-10-22）。
+fn study_project(path: &str) -> Option<String> {
+    Path::new(path)
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().is_some_and(|name| name == ".colm"))?
+        .parent()
+        .map(|project| project.to_string_lossy().into_owned())
+        .filter(|project| !project.is_empty())
+}
+
 /// The project folder an operation belongs to: the recorded `detail.subject.project_path`, else
-/// the folder containing its case.
+/// the folder containing its case. Studies belong to the project they were created in.
 pub fn project_path(event: &Event) -> Option<String> {
-    if let Some(path) = event.detail["subject"]["project_path"].as_str() {
-        return Some(path.to_owned()).filter(|path| !path.is_empty());
+    // 建研究记下的是项目目录本身，不是项目里的一个算例；原来再取上一级，归到了项目的父目录下。
+    if event.kind == "study-create" {
+        if let Some(path) = event.case_path.as_deref() {
+            return Some(path.trim_end_matches(['/', '\\']).to_owned()).filter(|p| !p.is_empty());
+        }
+    }
+    let recorded = event.detail["subject"]["project_path"]
+        .as_str()
+        .filter(|path| !path.is_empty());
+    if let Some(project) = event
+        .case_path
+        .as_deref()
+        .or(recorded)
+        .and_then(study_project)
+    {
+        return Some(project);
+    }
+    if let Some(path) = recorded {
+        return Some(path.to_owned());
     }
     owning_case(event.case_path.as_deref()?)
         .parent()
@@ -274,6 +302,30 @@ mod tests {
         let mut done = event.next(EventPhase::Finished, status);
         done.time_ms = Some(time + 10);
         history.append(&done).unwrap();
+    }
+
+    /// 建研究、研究运行、研究成员的运行都归到建研究的那个项目，不再成为叫 studies 或项目父目录的"项目"。
+    #[test]
+    fn studies_belong_to_the_project_they_were_created_in() {
+        let event = |kind: &str, path: &str| {
+            let mut event = Event::start(kind);
+            event.case_path = Some(path.into());
+            event
+        };
+        let project = Some("/work/ep".to_owned());
+        assert_eq!(project_path(&event("study-create", "/work/ep")), project);
+        assert_eq!(
+            project_path(&event("study", "/work/ep/.colm/studies/s-1")),
+            project
+        );
+        assert_eq!(
+            project_path(&event(
+                "run",
+                "/work/ep/.colm/studies/s-1/members/m000001/hb"
+            )),
+            project
+        );
+        assert_eq!(project_path(&event("run", "/work/ep/hb")), project);
     }
 
     #[test]

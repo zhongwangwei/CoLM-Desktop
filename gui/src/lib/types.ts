@@ -240,6 +240,8 @@ export type AppState = {
   versionMethod?: { method: 'manual' | 'source' } | null;
   /** 版本页进来时直接打开的草稿（研究结果写进去之后去审阅、冻结），版本页用完清掉。 */
   openDraft?: string | null;
+  /** 版本页进来时直接打开查看的冻结版本（历史记录的"打开版本"），只看不改模拟所用的版本，用完清掉。 */
+  openVersion?: VersionRef | null;
   expert: boolean;
   language: 'zh' | 'en';
   theme: 'light' | 'dark';

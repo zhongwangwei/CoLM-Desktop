@@ -123,6 +123,19 @@ pub fn load_latest<T: DeserializeOwned + Serialize>(dir: &Path) -> Result<Option
 /// 写入下一个不可变 generation，并在验证成功后只保留最近两个。
 ///
 /// Study 调度器保证单写者；最终文件名使用 `create_new` 语义，检测意外的并发写。
+/// 一个值写进检查点、再读回来以后的样子（和 [`write_next`]、`read_one` 同一串 JSON 往返）。
+/// serde_json 默认的浮点解析末位可能变，读回的分数和当场算出的差一位；拿检查点里记的值和重算值
+/// 比较时，重算值也要先走这一遍（2026-10-22：格点率定"写入新版本"因此一律被拒）。
+pub fn as_checkpointed<T>(value: &T) -> Result<T>
+where
+    T: Serialize + DeserializeOwned,
+{
+    let once: serde_json::Value =
+        serde_json::from_slice(&serde_json::to_vec(&serde_json::to_value(value)?)?)?;
+    let stored: serde_json::Value = serde_json::from_slice(&serde_json::to_vec_pretty(&once)?)?;
+    Ok(serde_json::from_value(stored)?)
+}
+
 pub fn write_next<T>(dir: &Path, payload: &T) -> Result<Loaded<T>>
 where
     T: Serialize + DeserializeOwned,
@@ -215,6 +228,19 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 格点率定实测的最优分数：写进检查点再读回来末位变了，重算值要走同一遍往返才比得上。
+    #[test]
+    fn checkpointed_scores_compare_equal_after_the_same_round_trip() {
+        let exact = FloatState {
+            score: 0.401_168_436_505_665_47,
+        };
+        let dir = temp("float-compare");
+        let stored = write_next(&dir, &exact).unwrap().payload;
+        assert_eq!(as_checkpointed(&exact).unwrap(), stored);
+        assert_eq!(as_checkpointed(&stored).unwrap(), stored);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

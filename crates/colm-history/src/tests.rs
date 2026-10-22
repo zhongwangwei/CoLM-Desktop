@@ -323,6 +323,34 @@ fn study_generations_share_operation_and_old_import_cannot_rewind_state() {
     assert!(!page.items[0].needs_reconciliation);
 }
 
+/// 应用自己记了研究运行，再导入同一个研究的清单和检查点：不能再多出一条没有位置和时间的占位记录，
+/// 先导入、后记运行时留下的占位记录也要藏起来。
+#[test]
+fn studies_the_app_recorded_are_not_imported_again_as_placeholders() {
+    let dir = Temp::new();
+    let h = ledger();
+    let study = dir.0.join("s-1");
+    let manifest = dir.file("s-1/manifest.json", &json!({"id":"s-1","created_unix":10}));
+    h.import_file(&manifest, ImportKind::Study, None).unwrap();
+    assert_eq!(h.query(&Query::default()).unwrap().total, 1);
+    let mut run = Event::start("study");
+    run.time_ms = Some(20_000);
+    run.case_path = Some(study.to_string_lossy().into_owned());
+    run.location = Some("local".into());
+    h.append(&run).unwrap();
+    h.append(&run.next(EventPhase::Finished, "completed"))
+        .unwrap();
+    let payload = json!({"study_id":"s-1","status":"completed","tasks":{}});
+    let envelope = json!({"schema_version":1,"sequence":1,"payload_sha256":hash(&serde_json::to_vec(&payload).unwrap()),"payload":payload});
+    let checkpoint = dir.file("s-1/checkpoints/state/000000000001.json", &envelope);
+    let report = h.import_file(checkpoint, ImportKind::Study, None).unwrap();
+    assert_eq!(report.imported, 0);
+    h.import_file(&manifest, ImportKind::Study, None).unwrap();
+    let page = h.query(&Query::default()).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].latest.operation_id, run.operation_id);
+}
+
 #[test]
 fn command_credentials_in_urls_and_shell_are_not_stored() {
     let mut command = Command {

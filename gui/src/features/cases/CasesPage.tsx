@@ -978,17 +978,31 @@ export default function CasesPage() {
             : []),
         ],
   });
-  if (!dir && state.caseTab === 'results') return <ResultsPage onBack={backToSimulation} />;
+  // 项目里有算例、只是没选（批量运行之后）：结果页自带选站点。一个算例都没有时结果页什么都选不了，
+  // 原来照样铺开一整页空的评估界面、按钮点了也没用，和模拟页一样给出打开项目或新建模拟。
+  if (!dir && state.caseTab === 'results' && state.cases.length > 0)
+    return <ResultsPage onBack={backToSimulation} />;
   if (!dir)
     return (
       <div className="page-stack simulation-page">
-        <h1>{t('模拟', 'Simulation')}</h1>
+        <h1>{state.caseTab === 'results' ? t('结果', 'Results') : t('模拟', 'Simulation')}</h1>
         <Card
-          title={t('开始一次模拟', 'Start a simulation')}
-          description={t(
-            '新建模拟，或从项目中打开已有算例。',
-            'Create a simulation or open an existing case from a project.',
-          )}
+          title={
+            state.caseTab === 'results'
+              ? t('还没有可看的结果', 'No results to show yet')
+              : t('开始一次模拟', 'Start a simulation')
+          }
+          description={
+            state.caseTab === 'results'
+              ? t(
+                  '打开一个项目选算例，或新建模拟跑完后在这里看结果。',
+                  'Open a project and choose a case, or create a simulation and view its results here once it has run.',
+                )
+              : t(
+                  '新建模拟，或从项目中打开已有算例。',
+                  'Create a simulation or open an existing case from a project.',
+                )
+          }
         >
           <div className="actions">
             <Button variant="primary" onClick={() => navigate('new-case')}>

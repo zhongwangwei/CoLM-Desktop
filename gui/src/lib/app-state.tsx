@@ -53,7 +53,8 @@ const initial: AppState = {
   root: '',
   newCaseSeed: null,
   simulationReturn: null,
-  expert: false,
+  // 设置页的"默认展开专家设置"：和语言、外观一样记住，原来每次重开都回到不展开。
+  expert: localStorage.getItem('colm-ui-expert') === 'true',
   language: localStorage.getItem('colm-ui-language') === 'en' ? 'en' : 'zh',
   theme: localStorage.getItem('colm-ui-theme') === 'dark' ? 'dark' : 'light',
   assistantOpen: localStorage.getItem('colm-ui-assistant') !== 'false',
@@ -275,7 +276,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('colm-ui-language', state.language);
     localStorage.setItem('colm-ui-theme', state.theme);
     localStorage.setItem('colm-ui-assistant', String(state.assistantOpen));
-  }, [state.language, state.theme, state.assistantOpen]);
+    localStorage.setItem('colm-ui-expert', String(state.expert));
+  }, [state.language, state.theme, state.assistantOpen, state.expert]);
   // 当前项目只在这次打开的应用里有效：启动时不再自动打开上次的项目（2026-10-21 用户：重新打开总显示
   // "当前项目 tianhe:uuu"，不合理）。首页列出最近的项目，点一下再打开；本次会话里各页之间仍能回到它。
   useEffect(() => {

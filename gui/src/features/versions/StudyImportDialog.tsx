@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { Overlay, ParameterOverride } from '../../lib/types';
-import { Button, Dialog } from '../../components/ui';
+import { Button, Dialog, Notice } from '../../components/ui';
 import { IGBP, PFT, USGS } from './scope-labels';
 import { fieldLabel } from '../../lib/param-presentation';
 
@@ -27,6 +27,7 @@ export default function StudyImportDialog({
   overlay,
   en,
   busy,
+  error,
   onClose,
   onImport,
 }: {
@@ -34,6 +35,8 @@ export default function StudyImportDialog({
   overlay: Overlay;
   en: boolean;
   busy: boolean;
+  /** 写入失败的原因。对话框是模态的，页面上的错误提示被遮在后面看不见，写不进去时按钮像没反应。 */
+  error?: string;
   onClose: () => void;
   onImport: (chosen: [string, string | null, number | null][]) => void;
 }) {
@@ -125,6 +128,7 @@ export default function StudyImportDialog({
           ))}
         </tbody>
       </table>
+      {error && <Notice tone="error">{error}</Notice>}
       <div className="button-row">
         <Button disabled={busy} onClick={onClose}>
           {t('取消', 'Cancel')}
