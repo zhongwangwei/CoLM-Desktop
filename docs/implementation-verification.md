@@ -35819,3 +35819,37 @@ Slurm、LSF、PBS 的载体由 `sbatch`/`bsub`/`qsub` 交给调度系统起，�
 - 根 workspace fmt、clippy 通过；`cargo test -p colm-remote --lib` 114 条、`cargo test -p colm-cli --bin colm-cli -- --test-threads=1` 484 条通过。
 
 **没做**：运行前逐站顺序重新绑定版本这约 45 秒没有动。它对已绑好的站点什么也不改；要跳过或并行，得先处理"准备阶段按停止"的语义（现有测试要求停止后不再迁移后面的站点）。也没有在 T7920 上重跑一整批 90 站来确认提交不再停顿。
+
+## 第 741 轮：每条 `model-*` 命令从 0.45 s 降到 0.06 s（2026-10-22）
+
+**来历**：第 740 轮查服务器批量的准备时间时，发现运行前逐站绑定版本（`model_migrate_case`）90 个站点花了约 45 秒；每个站点其实早已绑在目标版本上，这一步什么也不改。
+
+**实测（隔离 HOME，发布版 `colm-cli`，对已绑好的 AT-Neu 执行 `model-migrate-case`）**：单次 0.44–0.45 s。`--version` 是 0.00 s，`model-list` 也是 0.55 s，说明慢在所有 `model-*` 命令共用的部分。临时加计时（量完已撤掉）后分解如下：
+
+| 步骤 | 耗时 |
+|---|---|
+| `app_source_dir`（自带源码压缩包 16 MB 的哈希） | 33 ms |
+| `code()`：整棵自带源码树（约 1500 个文件、49 MB）的内容哈希 | 约 200 ms，缓存后 50 ms |
+| `cache_code` → `cached_options`：7 个冻结程序共 85 MB 的哈希 | 177 ms |
+| 同上：编译戳校验 | 134 ms |
+| 同上：缓存里整棵源码树再哈希一遍 | 约 200 ms |
+| 真正的迁移（已绑好时只读几个小文件） | < 1 ms |
+
+我先只缓存了 `code()` 的源码哈希，单次耗时几乎没变，计时之后才看清大头在 `cached_options` 的三项重复校验。
+
+**改法**：被校验的对象（按压缩包哈希解压的自带源码、冻结后的代码缓存）都不再改动，所以校验结果可以缓存，并用目录元数据指纹判断缓存是否还有效。
+- `colm_remote::engine::tree_fingerprint(root, skip)`：只读元数据（文件的路径、类型、大小、修改时间；目录只记路径），不跟随符号链接，跳过 `.git`、`target` 与 `skip` 里的名字。
+  - 目录不记修改时间，是踩坑后改的：第一版把目录的修改时间也算了进去，往缓存目录里写标记文件就会改变目录时间，指纹永远对不上，提速完全没生效。
+- `cached_source_content_sha256`：自带源码的内容哈希连同指纹，记在解压目录旁的 `<哈希>.content-sha256`。代码工作区经常改动，仍然每次全量算。
+- `cached_options`：三项校验通过后，在代码缓存里写 `.verified-fingerprint`；下次指纹相同就跳过，有文件的大小或修改时间变了就照旧全量校验。缓存写不进去不算错，只是下次再校验一遍。
+- 代价：只防得住意外损坏和普通改动，防不住刻意保留大小与时间戳的篡改。这里的校验原本就是为了发现意外改动，用户此前也定过"速度优先"。
+
+**效果**：同一命令 0.45 s → 0.06 s，`model-list` 同样是 0.06 s；每份缓存只在第一次全量校验（1.3 s）。运行一个算例前要调用好几条 `model-*` 命令，单站运行也跟着变快；90 站批量前的绑定从约 45 秒降到约 6 秒。
+
+**测试**：
+- 新增 `cached_source_identity_is_reused_until_a_file_changes`：确认缓存命中时不重算，改文件后重算，缓存文件损坏不报错。
+- 新增 `a_tree_fingerprint_ignores_directory_times_and_skipped_markers`。
+- 新增 `a_verified_code_cache_still_rejects_a_changed_program`：已记下校验结果的缓存里程序被改，仍报 `frozen program content changed`。
+- 根 workspace fmt、clippy 通过；`colm-cli` 485 条（`--test-threads=1`）、`colm-remote` 116 条、`colm-model` 39 条、`study_cli_tuning` 23 条、`engine_pack` 1 条通过。
+
+**没做**：没有重跑一次 90 站批量来量整批准备时间；上面的"约 6 秒"是按单次 0.06 s 估算的。

@@ -297,6 +297,96 @@ pub fn source_content_sha256(root: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// 应用自带源码的内容哈希，带缓存。
+///
+/// `source_content_sha256` 每次把整棵源码树（约 1500 个文件、49 MB）读一遍，要 0.45 s 左右；每条
+/// `model-*` 命令都要它，批量运行前逐站绑定版本时 90 个站点光这一项就是 40 多秒（2026-10-22）。
+/// 自带源码按压缩包哈希解压、之后不再改，所以把结果连同整棵树的元数据指纹（路径、类型、大小、修改
+/// 时间）记在 `cache` 里：指纹一样就直接用，改过任何文件就重算。只读元数据，1500 个文件几毫秒。
+/// 代码工作区经常改，不走这里。缓存写不进去不算错，照样返回算出的哈希。
+pub fn cached_source_content_sha256(root: &Path, cache: &Path) -> Result<String> {
+    let fingerprint = tree_fingerprint(root, &[])?;
+    if let Ok(text) = std::fs::read_to_string(cache) {
+        if let Some((seen, hash)) = text.trim().split_once(' ') {
+            if seen == fingerprint
+                && hash.len() == 64
+                && hash.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Ok(hash.to_owned());
+            }
+        }
+    }
+    let hash = source_content_sha256(root)?;
+    ensure!(
+        tree_fingerprint(root, &[])? == fingerprint,
+        "source changed while hashing"
+    );
+    if let Some(dir) = cache.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let staging = cache.with_extension(format!("tmp-{}", std::process::id()));
+    if std::fs::write(&staging, format!("{fingerprint} {hash}\n")).is_ok()
+        && std::fs::rename(&staging, cache).is_err()
+    {
+        let _ = std::fs::remove_file(&staging);
+    }
+    Ok(hash)
+}
+
+/// 整棵树的元数据指纹（路径、类型、大小、修改时间）：不跟随符号链接，跳过 `.git`、`target` 与
+/// `skip` 里的名字（放在树里的标记文件自己不能算进指纹）。
+pub fn tree_fingerprint(root: &Path, skip: &[&str]) -> Result<String> {
+    fn walk(root: &Path, relative: &Path, skip: &[&str], out: &mut Vec<String>) -> Result<()> {
+        let path = root.join(relative);
+        let meta = std::fs::symlink_metadata(&path)?;
+        let modified = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|time| time.as_nanos())
+            .unwrap_or(0);
+        let kind = if meta.file_type().is_symlink() {
+            'l'
+        } else if meta.is_dir() {
+            'd'
+        } else {
+            'f'
+        };
+        // 目录只记路径：在目录里写个标记文件就会改它的修改时间，算进去指纹就永远对不上。
+        // 文件增删已经体现在路径列表里。
+        if kind == 'd' {
+            out.push(format!("d\t{}", relative.to_string_lossy()));
+        } else {
+            out.push(format!(
+                "{kind}\t{}\t{}\t{modified}",
+                relative.to_string_lossy(),
+                meta.len()
+            ));
+        }
+        if meta.is_dir() {
+            for entry in std::fs::read_dir(&path)? {
+                let name = entry?.file_name();
+                if matches!(name.to_str(), Some(".git" | "target"))
+                    || name.to_str().is_some_and(|name| skip.contains(&name))
+                {
+                    continue;
+                }
+                walk(root, &relative.join(name), skip, out)?;
+            }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    walk(root, Path::new(""), skip, &mut entries)?;
+    entries.sort();
+    let mut hasher = Sha256::new();
+    for entry in entries {
+        hasher.update(entry.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
 /// 引擎源码从哪来。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {

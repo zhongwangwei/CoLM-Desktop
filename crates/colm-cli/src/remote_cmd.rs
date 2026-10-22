@@ -824,6 +824,21 @@ pub(crate) fn source_content_sha256(root: &Path) -> Result<String> {
     colm_remote::engine::source_content_sha256(root)
 }
 
+/// 自带源码（`app_source_dir`）的内容哈希：压缩包解压出来的目录走带指纹的缓存，仓库检出照常全量算。
+pub(crate) fn app_source_content_sha256(root: &Path) -> Result<String> {
+    match engine_source()? {
+        Source::Tarball(_) => {
+            let name = root
+                .file_name()
+                .context("bundled source directory has no name")?
+                .to_string_lossy();
+            let cache = root.with_file_name(format!("{name}.content-sha256"));
+            colm_remote::engine::cached_source_content_sha256(root, &cache)
+        }
+        Source::Checkout(_) => source_content_sha256(root),
+    }
+}
+
 fn file_sha256(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();

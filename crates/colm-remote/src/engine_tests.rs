@@ -24,6 +24,51 @@ fn source_identity_tracks_fortran_include_content() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn cached_source_identity_is_reused_until_a_file_changes() {
+    let base = std::env::temp_dir().join(format!(
+        "colm-source-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let root = base.join("digest");
+    let cache = base.join("digest.content-sha256");
+    let include = root.join("vendor/CoLM202X/include/pft_override_fields.inc");
+    std::fs::create_dir_all(include.parent().unwrap()).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[workspace]\n").unwrap();
+    std::fs::write(&include, "real :: pft_parameter = 1.0\n").unwrap();
+    let first = cached_source_content_sha256(&root, &cache).unwrap();
+    assert_eq!(first, source_content_sha256(&root).unwrap());
+    assert!(cache.is_file(), "the identity is remembered");
+    // 记下的哈希被直接采用：把缓存里的哈希换掉，指纹不变时照用（证明没有重算）。
+    let (fingerprint, _) = std::fs::read_to_string(&cache)
+        .unwrap()
+        .trim()
+        .split_once(' ')
+        .map(|(a, b)| (a.to_owned(), b.to_owned()))
+        .unwrap();
+    std::fs::write(&cache, format!("{fingerprint} {}\n", "a".repeat(64))).unwrap();
+    assert_eq!(
+        cached_source_content_sha256(&root, &cache).unwrap(),
+        "a".repeat(64)
+    );
+    // 改了文件，指纹变了，就重算。
+    std::fs::write(&include, "real :: pft_parameter = 2.0\n").unwrap();
+    let changed = cached_source_content_sha256(&root, &cache).unwrap();
+    assert_eq!(changed, source_content_sha256(&root).unwrap());
+    assert_ne!(changed, first);
+    // 缓存文件坏了也不算错。
+    std::fs::write(&cache, "garbage").unwrap();
+    assert_eq!(
+        cached_source_content_sha256(&root, &cache).unwrap(),
+        changed
+    );
+    std::fs::remove_dir_all(base).unwrap();
+}
+
 #[cfg(unix)]
 fn linked_source_fixture(label: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(
@@ -607,4 +652,29 @@ fn the_engine_being_built_reports_cargo_progress() {
         Some("colm-core, netcdf-sys(build)")
     );
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+#[test]
+fn a_tree_fingerprint_ignores_directory_times_and_skipped_markers() {
+    let root = std::env::temp_dir().join(format!(
+        "colm-tree-fingerprint-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(root.join("bin")).unwrap();
+    std::fs::write(root.join("bin/colm-rs"), "program").unwrap();
+    let before = tree_fingerprint(&root, &[".marker"]).unwrap();
+    // 在树里写标记文件会改目录的修改时间，指纹不能因此变化。
+    std::fs::write(root.join(".marker"), before.as_bytes()).unwrap();
+    assert_eq!(tree_fingerprint(&root, &[".marker"]).unwrap(), before);
+    // 多一个文件、改一个文件都要变。
+    std::fs::write(root.join("bin/extra"), "x").unwrap();
+    let added = tree_fingerprint(&root, &[".marker"]).unwrap();
+    assert_ne!(added, before);
+    std::fs::write(root.join("bin/colm-rs"), "program, changed").unwrap();
+    assert_ne!(tree_fingerprint(&root, &[".marker"]).unwrap(), added);
+    std::fs::remove_dir_all(root).unwrap();
 }

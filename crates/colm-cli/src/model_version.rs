@@ -46,7 +46,11 @@ pub(crate) fn code(opts: &Opts, workspace: Option<&str>) -> Result<CodeRef> {
         kind,
         workspace: workspace.map(str::to_owned),
         commit,
-        source_sha256: crate::remote_cmd::source_content_sha256(&root)?,
+        source_sha256: if workspace.is_some() {
+            crate::remote_cmd::source_content_sha256(&root)?
+        } else {
+            crate::remote_cmd::app_source_content_sha256(&root)?
+        },
     })
 }
 pub(crate) fn verify_code(opts: &Opts, expected: &CodeRef) -> Result<()> {
@@ -1039,18 +1043,38 @@ pub(crate) fn cached_options(opts: &Opts, code: &CodeRef) -> Result<Option<Opts>
         Some(name) => dest.join("workspaces").join(name),
         None => dest.clone(),
     };
-    for (path, expected) in programs {
-        ensure!(
-            colm_kernel::sha256_hex(&std::fs::read(program_root.join(path))?) == expected,
-            "frozen program content changed"
-        );
+    // 冻结后的代码缓存不再改动，下面三项校验（程序 85 MB 的哈希、编译戳、整棵源码树的哈希）原来每条
+    // `model-*` 命令都从头做一遍，约 0.5 s；批量运行前逐站绑定版本时，90 个站点光这一项就是 45 s
+    // （2026-10-22）。校验通过后记下整个目录的元数据指纹，指纹没变就不再重做；改动过任何文件
+    // （大小或修改时间变了）就照旧全量校验。只防得住意外损坏和普通改动，防不住刻意保留大小与时间戳的篡改。
+    const VERIFIED: &str = ".verified-fingerprint";
+    let fingerprint = colm_remote::engine::tree_fingerprint(&dest, &[VERIFIED])?;
+    let verified =
+        std::fs::read_to_string(dest.join(VERIFIED)).is_ok_and(|seen| seen.trim() == fingerprint);
+    if !verified {
+        for (path, expected) in programs {
+            ensure!(
+                colm_kernel::sha256_hex(&std::fs::read(program_root.join(path))?) == expected,
+                "frozen program content changed"
+            );
+        }
+        if code.kind == CodeKind::Official {
+            verify_build_stamp(&dest.join("bin"), &code.source_sha256)?;
+            ensure!(
+                crate::remote_cmd::source_content_sha256(&dest.join("source"))?
+                    == code.source_sha256,
+                "cached official source changed"
+            );
+        }
+        // 写不进去不算错：下次再校验一遍而已。
+        let staging = dest.join(format!("{VERIFIED}.{}", std::process::id()));
+        if std::fs::write(&staging, &fingerprint).is_ok()
+            && std::fs::rename(&staging, dest.join(VERIFIED)).is_err()
+        {
+            let _ = std::fs::remove_file(&staging);
+        }
     }
     if code.kind == CodeKind::Official {
-        verify_build_stamp(&dest.join("bin"), &code.source_sha256)?;
-        ensure!(
-            crate::remote_cmd::source_content_sha256(&dest.join("source"))? == code.source_sha256,
-            "cached official source changed"
-        );
         return Ok(None);
     }
     let mut flags = opts
@@ -3531,4 +3555,55 @@ pub(crate) fn study_member_revision(case: &std::path::Path) -> Result<Option<Ver
     Ok(crate::study_version::pinned(study)?
         .and_then(|pin| pin.model_revision)
         .map(|revision| revision.version))
+}
+
+#[cfg(test)]
+mod verified_cache_tests {
+    use super::*;
+    // 校验过的代码缓存不再重算哈希，但程序文件一旦被改（大小或修改时间变了），仍要被拒。
+    #[test]
+    fn a_verified_code_cache_still_rejects_a_changed_program() {
+        let root = std::env::temp_dir().join(unique_id());
+        let opts = Opts {
+            positional: vec![],
+            flags: vec![(
+                "--model-root".into(),
+                root.join("models").to_string_lossy().into(),
+            )],
+        };
+        let code = CodeRef {
+            kind: CodeKind::Workspace,
+            workspace: Some("w".into()),
+            commit: Some("abc".into()),
+            source_sha256: "0".repeat(64),
+        };
+        let dest = cache_dir(&opts, &code).unwrap();
+        let program = dest.join("workspaces/w/bin/colm-rs");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"frozen program").unwrap();
+        std::fs::write(dest.join("code.json"), serde_json::to_vec(&code).unwrap()).unwrap();
+        let artifacts = std::collections::BTreeMap::from([(
+            "bin/colm-rs".to_string(),
+            colm_kernel::sha256_hex(b"frozen program"),
+        )]);
+        std::fs::write(
+            dest.join("artifacts.json"),
+            serde_json::to_vec(&artifacts).unwrap(),
+        )
+        .unwrap();
+        cached_options(&opts, &code).unwrap();
+        assert!(
+            dest.join(".verified-fingerprint").is_file(),
+            "a verified cache is remembered"
+        );
+        // 记住之后照样可用（走的是不重算的那条路）。
+        cached_options(&opts, &code).unwrap();
+        std::fs::write(&program, b"tampered program!").unwrap();
+        let error = match cached_options(&opts, &code) {
+            Ok(_) => panic!("a changed program must be rejected"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("frozen program content changed"), "{error}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
