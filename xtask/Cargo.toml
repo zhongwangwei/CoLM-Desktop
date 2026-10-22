@@ -9,7 +9,6 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-# 只给 tests/params_groups.rs 用：核对前端分类表里的名字是真字段。
 colm-schema = { path = "../crates/colm-schema" }
 colm-case = { path = "../crates/colm-case" }
 colm-remote = { path = "../crates/colm-remote" }

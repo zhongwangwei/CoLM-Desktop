@@ -35543,3 +35543,26 @@ AI 学习参数、AI 替换过程能否用于单点到全球。第 720 轮替这
 **测试**：GUI 后端 fmt、clippy、426 条测试通过；根 workspace fmt 通过。前端 tsc、eslint、prettier、契约重新生成（214 条命令）、`check-gui`、803 条测试通过。
 
 **没做**：数据准备的"停止"没在窗口里实际停下一次。`make_site` 在本机不到 4 秒就做完了，ERA5 下载在隔离 HOME 里没有 CDS 凭据，而凭据不复制进测试目录。这项只由真实进程组的单元测试覆盖。
+
+## 第 733 轮：删除旧的纯静态前端 gui/dist 及其测试（2026-10-22）
+
+**来历**：第 732 轮后列出的剩余项里，用户同意先做"文档和遗留"一组：删除旧前端、更新过时文档、删除已合并的分支。
+
+**依据**：Tauri 的入口早已是 Vite 产物 `gui/build`（`tauri.conf.json` 的 `frontendDist`），`gui/dist` 不再打进安装包。可它和 33 个 `gui/tests/*.mjs` 还在仓库里，CI 每次还要跑其中 15 个。这些测试只守旧文件，新界面坏了它们也照样是绿的。
+
+**删了什么**：
+- `gui/dist`（56 个文件）、`gui/tests`（33 个文件）、`scripts/test-gui.mjs`，以及 `gui/package.json` 里的 `test:legacy`；CI 去掉 16 行 `node gui/tests/*.mjs`。
+- `xtask/tests` 里只读旧前端文件的测试：
+  - 整个文件删除：`params_groups.rs`、`spinup_naming.rs`、`style_layout.rs`；
+  - `basic_settings.rs` 删 5 条，保留 2 条甲烷后端测试；
+  - `batch_edit.rs` 删 11 条，保留 3 条：命令表不再注册单份写入、参数预设后端已删、安装包带可运行示例。最后这条的界面入口检查改查 React 的 `ProjectPage.tsx`；
+  - `windows_console.rs` 删去检查旧前端路径拼接的 1 条。
+- `colm-workspace` 的两处测试只把 `gui/dist/...` 当路径分类的样例字符串，换成 `gui/src` 下的真实路径，断言不变。
+
+**保留并搬过来的**：`labels.mjs` 守的规则（参数目录里会出现在设定页和专家页的字段，都要有真正的中英文名）新界面同样需要，`param-presentation.ts` 的注释也指着它。这条已移植为 `param-presentation.test.ts` 的一条测试，并已对新界面通过。旧的 `i18n.mjs` 不再需要：新界面的 `t(zh, en)` 必须同时写出两种语言。
+
+**文档**：`DESIGN.md` 改为说明旧前端已删。本机的 `CLAUDE.md`（被 `.gitignore` 忽略，不入库）的验证表、"GUI 前端"和"界面文案"三节改成描述 React 前端，补上契约生成、测试抽取的三条约束，以及长任务必须登记的规矩。
+
+**分支**：`claude/colm202x-code-update-374d5d` 已完全并入 main，删除了本地 worktree、本地分支和远程分支。
+
+**测试**：两个 workspace 的 `cargo fmt --check`、`cargo clippy --workspace --all-targets -- -D warnings` 通过；保留的 xtask 测试 `basic_settings` 2 条、`batch_edit` 3 条、`windows_console` 3 条通过；`cargo test -p colm-workspace --lib` 73 条通过；`xtask check-gui` 通过；`parameter-audit` 重新生成后无差异。前端 tsc 通过，804 条测试通过（多出的 1 条是移植过来的标签测试）。

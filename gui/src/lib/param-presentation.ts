@@ -1189,7 +1189,7 @@ export function fieldLabel(path: string, lang = 'zh') {
   if (exact) return exact;
   // 没配名字的字段显示去掉 DEF_/USE_SITE_/SITE_ 前缀的 CoLM 原名：拆词拼出来的「目录 · existing ·
   // srfdata」中英混杂、读不懂，原名至少清楚、能搜。参数目录里的字段都必须在 LABELS 里有名字
-  // （gui/tests/labels.mjs 会查），这里只兜上游新加、还没配名字的字段。
+  // （param-presentation.test.ts 会查），这里只兜上游新加、还没配名字的字段。
   return path.replace(/^(DEF_|USE_SITE_|SITE_)/i, '');
 }
 

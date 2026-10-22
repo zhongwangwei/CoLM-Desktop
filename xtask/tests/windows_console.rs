@@ -70,31 +70,6 @@ fn every_spawned_process_is_told_not_to_open_a_window() {
 }
 
 #[test]
-fn the_frontend_does_not_assume_forward_slashes() {
-    // Windows 上算例目录是 `C:\Users\…\CN-Cng`。只按 `/` 切会原样返回整条
-    // 路径 —— 横幅上写的就不是「CN-Cng」而是一长串绝对路径。
-    // 这一条在 macOS 上永远看不出来。
-    for f in [
-        "params.js",
-        "sites.js",
-        "runner.js",
-        "results.js",
-        "timing.js",
-    ] {
-        let t = read(&format!("gui/dist/app/{f}"));
-        assert!(
-            !t.contains(".split('/')"),
-            "{f} 按 `/` 切路径 —— Windows 上切不开"
-        );
-        assert!(!t.contains("+ '/' +"), "{f} 用 `/` 拼路径 —— 该走 joinPath");
-    }
-    // 判断只写一份，在没有依赖的那一层。
-    let ui = read("gui/dist/app/ui.js");
-    assert!(ui.contains("export function baseName"));
-    assert!(ui.contains("export function joinPath"));
-}
-
-#[test]
 fn the_kernel_creates_directories_without_cmd_expansion() {
     let sh = read("oracle/scripts/build_kernel.sh");
     assert!(sh.contains("tar -h --exclude=.git"));

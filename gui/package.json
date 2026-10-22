@@ -9,7 +9,6 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
     "test": "node ../scripts/check-gui.mjs --self-test && node ../scripts/test-react.mjs",
-    "test:legacy": "node ../scripts/test-gui.mjs",
     "contract": "python3 ../scripts/generate-gui-contract.py",
     "format": "prettier --write src",
     "format:check": "prettier --check src"

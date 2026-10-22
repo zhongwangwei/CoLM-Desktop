@@ -107,7 +107,7 @@ fn parity_is_needed_only_for_changes_that_can_alter_results() {
         "crates/colm-agent/src/prompt.md",
         "crates/colm-workspace/src/gates.rs",
         "crates/colm-cli/src/ws_cmd.rs",
-        "gui/dist/app/research.js",
+        "gui/src/features/studies/ResearchPage.tsx",
         "docs/implementation-verification.md",
         "oracle/scripts/regress.sh",
         "crates/colm-core-extra/README.md",
@@ -116,7 +116,7 @@ fn parity_is_needed_only_for_changes_that_can_alter_results() {
     }
     // 一个文件碰了就需要；没有改动就不需要。
     assert!(parity_needed([
-        "gui/dist/index.html",
+        "gui/index.html",
         "crates/colm-core/src/lib.rs"
     ]));
     assert!(!parity_needed(std::iter::empty::<&str>()));

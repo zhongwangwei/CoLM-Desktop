@@ -57,7 +57,7 @@ fn changed_paths_are_sorted_into_engine_and_kernel() {
     );
     assert_eq!(
         touches([
-            "gui/dist/app/shell.js",
+            "gui/src/App.tsx",
             "docs/a.md",
             "crates/colm-hybrid/src/a.rs"
         ]),

@@ -145,29 +145,14 @@ jobs:
           cargo test -p xtask --test windows_console
           cargo test -p xtask --test ci_golden_status
           bash vendor/CoLM202X/run/scripts/test_create_newcase_runtime_contract.sh
-      # GUI 的前端是纯静态 JS，没有类型检查器 —— 一个拼错的命令名要等到
-      # 点下去才会以「command not found」暴露。这条把它提前到 CI。
+      # 前端调用的命令名、参数名要和后端注册的对上；tsc 看不到 Rust 那边，拼错的命令
+      # 要等点下去才会以「command not found」暴露。check-gui 把它提前到 CI。
       - name: GUI interface
         shell: bash
         run: |
           cargo run -q -p xtask -- parameter-audit
           git diff --exit-code -- artifacts/parameter-audit
           cargo run -q -p xtask -- check-gui
-          node gui/tests/domain.mjs
-          node gui/tests/batch.mjs
-          node gui/tests/params.mjs
-          node gui/tests/params-race.mjs
-          node gui/tests/runview.mjs
-          node gui/tests/i18n.mjs
-          node gui/tests/labels.mjs
-          node gui/tests/sitepaths.mjs
-          node gui/tests/prep-workbench.mjs
-          node gui/tests/forcing-gapfill.mjs
-          node gui/tests/results.mjs
-          node gui/tests/study-model.mjs
-          node gui/tests/hybrid.mjs
-          node gui/tests/research.mjs
-          node gui/tests/assistant.mjs
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings

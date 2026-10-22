@@ -1,6 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withCatalogLabels } from './param-presentation';
+import { readFileSync } from 'node:fs';
+import { fieldLabel, withCatalogLabels } from './param-presentation';
+
+interface CatalogItem {
+  raw_key: string;
+  storage?: string;
+  section?: string;
+}
 
 test('catalog entries get the named labels instead of the split CoLM key', () => {
   const [global, landCover, pft, context, unknown] = withCatalogLabels([
@@ -25,4 +32,33 @@ test('catalog entries get the named labels instead of the split CoLM key', () =>
   assert.equal(context!.label_zh, '根轴向水力导度系数');
   assert.equal(unknown!.label_zh, 'NEW_KNOB');
   assert.equal(unknown!.raw_key, 'DEF_NEW_KNOB');
+});
+
+// 原来由旧界面的 gui/tests/labels.mjs 守着；旧界面删掉后搬到这里（第 733 轮）。
+test('every catalog field shown on the settings or expert pages has Chinese and English names', () => {
+  const catalog = JSON.parse(
+    readFileSync(
+      new URL('../../../artifacts/parameter-audit/catalog.json', import.meta.url),
+      'utf8',
+    ),
+  ) as { parameters?: CatalogItem[] } | CatalogItem[];
+  const items = Array.isArray(catalog) ? catalog : (catalog.parameters ?? []);
+  const keys = [
+    ...new Set(
+      items
+        .filter(
+          (item) =>
+            (item.storage === 'case-nml' && item.section !== '输出变量') ||
+            item.storage === 'process-parameter-file',
+        )
+        .map((item) => item.raw_key),
+    ),
+  ];
+  assert.ok(keys.length > 100, `only ${keys.length} catalog fields found`);
+  const missing = keys.filter((key) => {
+    const zh = fieldLabel(key, 'zh');
+    const en = fieldLabel(key, 'en');
+    return zh === key || en === key || /[一-鿿]/.test(en) || zh.includes(' · ');
+  });
+  assert.deepEqual(missing, [], `fields without real labels:\n${missing.join('\n')}`);
 });

@@ -88,7 +88,7 @@
 - Microcopy rules: 按钮使用动词+对象；区分“生成任务”和“开始计算”；暂停说明“不再派发新成员，不强杀正在运行成员”。
 
 ## Implementation constraints
-- 新前端源码在 `gui/src`，Vite 产物在 `gui/build`，Tauri 入口已经改为 build。旧 `gui/dist` 是过渡参考，不是新包入口。
+- 新前端源码在 `gui/src`，Vite 产物在 `gui/build`，Tauri 入口已经改为 build。旧的纯静态前端 `gui/dist` 与 `gui/tests` 已在第 733 轮删除。
 - IPC 合约从已注册 Rust commands 生成；构建检查命令名称、必需参数、额外参数与事件 emitter。语言、主题、路由等状态不能覆盖后端事实。
 - 科学结果、率定与 AI 使用内置分析路径。任何排名需要输入、时段、观测与评估条件相同且证据可验证；缺失证据明确不给排名。
 - 本机程序、服务器快照和文档与实际冻结源码身份相绑定。运行时覆盖只有兼容已有程序/内核才免编译；编译期开关按匹配内核，网络仅支持 Rust。
