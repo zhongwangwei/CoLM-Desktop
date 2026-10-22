@@ -314,6 +314,7 @@ export function Dialog({
   open,
   onOpenChange,
   showClose = true,
+  closeAction,
   className,
   children,
 }: {
@@ -322,12 +323,21 @@ export function Dialog({
   open: boolean;
   onOpenChange: (open: boolean) => void;
   showClose?: boolean;
+  /** 给出时，"关闭"按钮作为助手可按的动作登记（第 737 轮）。 */
+  closeAction?: string;
   className?: string;
   children: ReactNode;
 }) {
   const id = useId();
   const { state } = useApp();
   const closeLabel = state.language === 'en' ? 'Close' : '关闭';
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useRenderedAction(
+    closeAction && showClose
+      ? { id: closeAction, label: closeLabel, kind: 'click', run: () => onOpenChange(false) }
+      : null,
+    closeButton,
+  );
   return (
     <RadixDialog.Root open={open} onOpenChange={onOpenChange}>
       <RadixDialog.Portal>
@@ -341,7 +351,9 @@ export function Dialog({
           {children}
           {showClose && (
             <RadixDialog.Close asChild>
-              <Button variant="ghost">{closeLabel}</Button>
+              <Button ref={closeButton} variant="ghost" data-action={closeAction}>
+                {closeLabel}
+              </Button>
             </RadixDialog.Close>
           )}
         </RadixDialog.Content>

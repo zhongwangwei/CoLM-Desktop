@@ -158,60 +158,6 @@ test('version modal closes only after a successful frozen revision read', async 
   close(false);
   assert.equal(events.length, 2, 'the modal stays open during a model read');
 });
-test('project contract exposes only version dialog actions while the dialog is open', async () => {
-  const model = { version: { id: 'soil', revision: 4 }, name: 'Soil experiment' },
-    chosen: string[] = [];
-  const versionActions = expression('versionActions', {
-    state: { versions: [model] },
-    versionRows: [{ version: model, depth: 0 }],
-    versionKey: (value: typeof model) => JSON.stringify(value.version),
-    versionEnabled: true,
-    chooseVersion: async (key: string) => chosen.push(key),
-    changeVersionChooser: () => {},
-    pendingDelete: null,
-    selectedId: 'official',
-    oldOfficial: [],
-    askDelete: () => {},
-    askCleanup: () => {},
-    deleteVersions: async () => {},
-    t: (zh: string) => zh,
-  });
-  const context = {
-    versionChooser: true,
-    chooser: null,
-    busy: false,
-    error: '',
-    modelChosen: false,
-    t: (zh: string) => zh,
-    versionActions,
-    chooserActions: [{ id: 'case' }],
-    actions: [{ id: 'project-existing' }],
-  };
-  const modal = expression('contract', context);
-  assert.equal(modal.modal, true);
-  assert.deepEqual(modal.fields, []);
-  assert.deepEqual(
-    modal.actions.map((action: { id: string }) => action.id),
-    [
-      `project-version:${JSON.stringify(model.version)}`,
-      'project-version-delete:soil',
-      'project-version-close',
-    ],
-  );
-  await modal.actions[0].run();
-  assert.deepEqual(chosen, [JSON.stringify(model.version)]);
-  const home = expression('contract', { ...context, versionChooser: false });
-  assert.equal(home.modal, false);
-  assert.deepEqual(home.fields, []);
-  assert.deepEqual(home.actions, [{ id: 'project-existing' }]);
-  const cases = expression('contract', {
-    ...context,
-    versionChooser: false,
-    chooser: 'simulation',
-  });
-  assert.deepEqual(cases.actions, [{ id: 'case' }]);
-});
-
 test('version cards distinguish latest official from older official and modified revisions', () => {
   const official = { version: { id: 'official', revision: 3 } };
   for (const [versionRef, expectedOfficial] of [
@@ -277,14 +223,15 @@ function home() {
     batchProps: Record<string, unknown>[] = [];
   const context = {
     React: {
-      createElement: (type: unknown, props: Record<string, unknown>) => {
+      createElement: (type: unknown, props: Record<string, unknown>, ...children: unknown[]) => {
         nodes.push(type);
         if (type === 'ProjectBatchRun') batchProps.push(props);
-        return null;
+        return { type, props: props ?? {}, children };
       },
     },
     Button: () => {},
-    Dialog: () => {},
+    ActionButton: 'ActionButton',
+    Dialog: 'Dialog',
     Notice: () => {},
     NavIcon: () => {},
     ProjectBatchRun: 'ProjectBatchRun',
@@ -316,8 +263,15 @@ function home() {
         },
       ];
     },
+    // 动作由按钮登记（第 737 轮）：从渲染树里收集。打开的对话框挡住页面，只算对话框里的按钮；
+    // 关着的对话框在真实界面里不渲染，里面的按钮也不算。
     usePageContract: (value: typeof contract) => {
-      contract = value;
+      contract = {
+        ...value,
+        get actions() {
+          return [...value.actions, ...treeButtons()];
+        },
+      };
     },
     recentProjectRoots: () => [],
     rememberProject: (_roots: unknown, root: string) => [root],
@@ -333,10 +287,47 @@ function home() {
   const Page = new Function(...Object.keys(context), `${code};return ProjectPage;`)(
     ...Object.values(context),
   );
+  type Tree = { type: unknown; props: Record<string, unknown>; children: unknown[] };
+  let tree: unknown = null;
+  function buttonsIn(node: unknown): typeof contract.actions {
+    if (Array.isArray(node)) return node.flatMap(buttonsIn);
+    if (!node || typeof node !== 'object') return [];
+    const element = node as Tree;
+    if (element.type === 'Dialog' && !element.props.open) return [];
+    const own =
+      element.type === 'ActionButton'
+        ? [
+            {
+              id: String(element.props.action),
+              enabled: !element.props.disabled,
+              run: element.props.run as () => unknown,
+            },
+          ]
+        : element.type === 'Dialog' && element.props.closeAction
+          ? [
+              {
+                id: String(element.props.closeAction),
+                enabled: true,
+                run: () => (element.props.onOpenChange as (open: boolean) => void)(false),
+              },
+            ]
+          : [];
+    return [...own, ...buttonsIn(element.children)];
+  }
+  function openDialog(node: unknown): Tree | null {
+    if (Array.isArray(node)) return node.map(openDialog).find(Boolean) ?? null;
+    if (!node || typeof node !== 'object') return null;
+    const element = node as Tree;
+    if (element.type === 'Dialog' && element.props.open) return element;
+    return openDialog(element.children);
+  }
+  function treeButtons() {
+    return buttonsIn(openDialog(tree) ?? tree);
+  }
   function render() {
     cursor = 0;
     nodes.length = 0;
-    Page();
+    tree = Page();
     effects.splice(0).forEach((effect) => effect());
     return contract;
   }
@@ -750,4 +741,16 @@ test('a broken recent-projects file does not stop a project from opening', async
   });
   await assert.rejects(openRecent('/p'), /later step/);
   assert.equal(saved, null, 'a readable project stays in the recent list');
+});
+
+test('version dialog hides the page behind it and never offers deletions to the assistant', async () => {
+  const page = home();
+  page.render();
+  await page.click('project-existing');
+  const ids = page.render().actions.map((action) => action.id);
+  assert.ok(ids.includes('project-version-close'));
+  assert.ok(ids.some((id) => id.startsWith('project-version:')));
+  assert.ok(!ids.includes('project-new-simulation'), 'the page behind the dialog is hidden');
+  // 删除版本、清理旧官方版属于 D 级，只在界面上做（docs/design-ai-assistant.md）。
+  assert.ok(!ids.some((id) => id.includes('delete') || id.includes('cleanup')));
 });

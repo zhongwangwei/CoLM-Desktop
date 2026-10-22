@@ -3,7 +3,8 @@ import { choosableVersions, latestOfficial } from '../versions/version-tree';
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { hasBackend, invoke, invokeJson } from '../../lib/ipc';
-import { usePageContract, type UiAction } from '../../lib/guide';
+import { usePageContract } from '../../lib/guide';
+import { ActionButton } from '../../components/ActionButton';
 import { Button, Dialog, Notice } from '../../components/ui';
 import './project-version.css';
 import ProjectBatchRun from './ProjectBatchRun';
@@ -358,164 +359,6 @@ export default function ProjectPage() {
       setVersionChooser(open);
     }
   }
-  const actions: UiAction[] = [
-    {
-      id: 'project-new-simulation',
-      label: t('新建模拟', 'New simulation'),
-      kind: 'click',
-      enabled,
-      run: newSimulation,
-    },
-    {
-      id: 'project-open',
-      label: t('打开项目', 'Open project'),
-      kind: 'click',
-      enabled: enabled && ready,
-      run: openProjectFromHistory,
-    },
-    {
-      id: 'project-example',
-      label: t('打开 CN-Cng 示例', 'Open CN-Cng example'),
-      kind: 'commit',
-      enabled: enabled && !!state.version,
-      run: example,
-    },
-    {
-      id: 'project-model',
-      label: t('新建修改版', 'New modified model'),
-      kind: 'click',
-      enabled: versionEnabled && modelReady,
-      run: () => {
-        update({ versionsView: 'create' });
-        return navigate('versions');
-      },
-    },
-    {
-      id: 'project-official',
-      label: t('选择官方版', 'Select official model'),
-      kind: 'click',
-      enabled: versionEnabled && !!official,
-      run: () => chooseVersion(versionKey(official!)),
-    },
-    {
-      id: 'project-existing',
-      label: t('已有版本', 'Existing versions'),
-      kind: 'click',
-      enabled: versionEnabled,
-      run: () => changeVersionChooser(true),
-    },
-    {
-      id: 'project-prepare',
-      label: t('准备输入数据', 'Prepare input data'),
-      kind: 'click',
-      enabled,
-      run: () => navigate('preparation'),
-    },
-    ...shownRoots.map((root) => ({
-      id: `project-recent:${root}`,
-      label: projectName(root),
-      kind: 'click' as const,
-      enabled: enabled && ready,
-      run: () => work(() => loadProject(root)),
-    })),
-  ];
-  const chooserActions: UiAction[] = [
-    ...state.cases.map((entry) => ({
-      id: `project-case:${entry.dir}`,
-      label: entry.name,
-      kind: 'click' as const,
-      enabled,
-      run: () => chooseCase(entry.dir, 'settings'),
-    })),
-    {
-      id: 'project-choose-other',
-      label: t('选择其他目录', 'Browse another folder'),
-      kind: 'click',
-      enabled,
-      run: browseProject,
-    },
-    {
-      id: 'project-back',
-      label: t('返回项目首页', 'Back to project home'),
-      kind: 'click',
-      enabled,
-      run: () => setChooser(null),
-    },
-    ...(chooser === 'simulation'
-      ? [
-          {
-            id: 'project-batch-run',
-            label: t('批量运行', 'Batch run'),
-            kind: 'click' as const,
-            enabled: enabled && state.cases.length > 0,
-            run: openBatch,
-          },
-          {
-            id: 'project-new-simulation',
-            label: t('新建模拟', 'New simulation'),
-            kind: 'click' as const,
-            enabled,
-            run: newSimulation,
-          },
-        ]
-      : []),
-  ];
-  const versionActions: UiAction[] = pendingDelete
-    ? [
-        {
-          id: 'project-version-delete-confirm',
-          label: t('确认删除', 'Confirm deletion'),
-          kind: 'commit',
-          enabled: versionEnabled,
-          run: deleteVersions,
-        },
-        {
-          id: 'project-version-delete-cancel',
-          label: t('取消', 'Cancel'),
-          kind: 'click',
-          enabled: versionEnabled,
-          run: () => setPendingDelete(null),
-        },
-      ]
-    : [
-        ...versionRows.map(({ version }) => ({
-          id: `project-version:${versionKey(version)}`,
-          label: `${version.name} · r${version.version.revision}`,
-          kind: 'click' as const,
-          enabled: versionEnabled,
-          run: () => chooseVersion(versionKey(version)),
-        })),
-        ...versionRows
-          .filter(({ version }) => version.version.id !== 'official')
-          .map(({ version }) => ({
-            id: `project-version-delete:${version.version.id}`,
-            label: `${t('删除版本', 'Delete version')} ${version.name}`,
-            kind: 'click' as const,
-            enabled: versionEnabled && version.version.id !== selectedId,
-            run: () => askDelete(version),
-          })),
-        ...(oldOfficial.length
-          ? [
-              {
-                id: 'project-version-cleanup-official',
-                label: t(
-                  `清理旧的官方版本（${oldOfficial.length} 个）`,
-                  `Clean up older official revisions (${oldOfficial.length})`,
-                ),
-                kind: 'click' as const,
-                enabled: versionEnabled,
-                run: askCleanup,
-              },
-            ]
-          : []),
-        {
-          id: 'project-version-close',
-          label: t('关闭', 'Close'),
-          kind: 'click',
-          enabled: versionEnabled,
-          run: () => changeVersionChooser(false),
-        },
-      ];
   usePageContract(
     {
       title: versionChooser
@@ -529,7 +372,10 @@ export default function ProjectPage() {
         ? 'working'
         : error || (modelChosen ? 'ready' : t('正在读取模型版本', 'Loading the model version')),
       fields: [],
-      actions: versionChooser ? versionActions : chooser ? chooserActions : actions,
+      // 按钮自己登记（第 737 轮）。删除版本、清理旧官方版属于 D 级，只在界面上做，原来清单里
+      // 却开放给了助手；最近项目原来列出全部、走 loadProject，界面只显示 5 个、走能处理坏记录的
+      // openRecent。
+      actions: [],
     },
     !batchPage,
   );
@@ -548,9 +394,12 @@ export default function ProjectPage() {
       <div className="page-stack">
         <div className="page-heading">
           <h1>{t('项目中的算例', 'Cases in this project')}</h1>
-          <Button disabled={!enabled} onClick={() => setChooser(null)}>
-            {t('返回项目首页', 'Back to project home')}
-          </Button>
+          <ActionButton
+            action="project-back"
+            label={t('返回项目首页', 'Back to project home')}
+            disabled={!enabled}
+            run={() => setChooser(null)}
+          />
         </div>
         <p className="path">{projectLocation}</p>
         {error && <Notice tone="error">{error}</Notice>}
@@ -565,29 +414,41 @@ export default function ProjectPage() {
         )}
         <div className="project-case-choices">
           {state.cases.map((entry) => (
-            <Button
+            <ActionButton
               key={entry.dir}
+              action={`project-case:${entry.dir}`}
+              label={entry.name}
               disabled={!enabled}
-              onClick={() => void chooseCase(entry.dir, 'settings').catch(() => {})}
+              run={() => chooseCase(entry.dir, 'settings')}
             >
               <span>{entry.name}</span>
               {entry.has_history && (
                 <span className="badge">{t('已有结果', 'Results available')}</span>
               )}
               <span className="project-chevron">›</span>
-            </Button>
+            </ActionButton>
           ))}
         </div>
         <div className="actions">
-          <Button disabled={!enabled} onClick={() => void browseProject().catch(() => {})}>
-            {t('选择其他目录', 'Browse another folder')}
-          </Button>
-          <Button disabled={!enabled || !state.cases.length} onClick={openBatch}>
-            {t('批量运行', 'Batch run')}
-          </Button>
-          <Button disabled={!enabled} variant="primary" onClick={newSimulation}>
-            {t('新建模拟', 'New simulation')}
-          </Button>
+          <ActionButton
+            action="project-choose-other"
+            label={t('选择其他目录', 'Browse another folder')}
+            disabled={!enabled}
+            run={browseProject}
+          />
+          <ActionButton
+            action="project-batch-run"
+            label={t('批量运行', 'Batch run')}
+            disabled={!enabled || !state.cases.length}
+            run={openBatch}
+          />
+          <ActionButton
+            action="project-new-simulation"
+            label={t('新建模拟', 'New simulation')}
+            disabled={!enabled}
+            variant="primary"
+            run={newSimulation}
+          />
         </div>
       </div>
     );
@@ -625,12 +486,14 @@ export default function ProjectPage() {
           )}
         </p>
         <div className="project-actions">
-          <Button
+          <ActionButton
+            action="project-official"
+            label={t('选择官方版', 'Select official model')}
             className="project-action project-version-card"
             variant="ghost"
             aria-pressed={officialSelected}
             disabled={!versionEnabled || !official}
-            onClick={() => void chooseVersion(versionKey(official!)).catch(() => {})}
+            run={() => chooseVersion(versionKey(official!))}
           >
             <span className="project-action-icon primary">
               <NavIcon name="project" />
@@ -640,13 +503,15 @@ export default function ProjectPage() {
               <span>{t('使用随软件提供的模型版本', 'Use the model bundled with CoLM')}</span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
-          <Button
+          </ActionButton>
+          <ActionButton
+            action="project-existing"
+            label={t('已有版本', 'Existing versions')}
             className="project-action project-version-card"
             variant="ghost"
             aria-pressed={existingSelected}
             disabled={!versionEnabled}
-            onClick={() => changeVersionChooser(true)}
+            run={() => changeVersionChooser(true)}
           >
             <span className="project-action-icon">
               <NavIcon name="history" />
@@ -656,14 +521,16 @@ export default function ProjectPage() {
               <span>{t('选择已保存的模型版本', 'Choose a saved model revision')}</span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
-          <Button
+          </ActionButton>
+          <ActionButton
+            action="project-model"
+            label={t('新建修改版', 'New modified model')}
             className="project-action project-version-card"
             variant="ghost"
             disabled={!versionEnabled || !modelReady}
-            onClick={() => {
+            run={() => {
               update({ versionsView: 'create' });
-              navigate('versions');
+              return navigate('versions');
             }}
           >
             <span className="project-action-icon">＋</span>
@@ -677,13 +544,14 @@ export default function ProjectPage() {
               </span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
+          </ActionButton>
         </div>
       </section>
       <Dialog
         title={t('选择已有版本', 'Choose an existing version')}
         open={versionChooser}
         onOpenChange={changeVersionChooser}
+        closeAction="project-version-close"
       >
         {error && <Notice tone="error">{error}</Notice>}
         {busy && <Notice>{t('正在读取版本…', 'Loading the revision…')}</Notice>}
@@ -733,12 +601,14 @@ export default function ProjectPage() {
                     className="project-version-row"
                     style={{ paddingLeft: `${depth * 1.5}rem` }}
                   >
-                    <Button
+                    <ActionButton
+                      action={`project-version:${versionKey(version)}`}
+                      label={`${version.name} · r${version.version.revision}`}
                       className="project-version-option"
                       variant="ghost"
                       disabled={!versionEnabled}
                       aria-pressed={versionKey(version) === JSON.stringify(state.versionRef)}
-                      onClick={() => void chooseVersion(versionKey(version)).catch(() => {})}
+                      run={() => chooseVersion(versionKey(version))}
                     >
                       <span>
                         <strong>
@@ -757,7 +627,7 @@ export default function ProjectPage() {
                           ? t('当前选择', 'Selected')
                           : '›'}
                       </span>
-                    </Button>
+                    </ActionButton>
                     {version.version.id !== 'official' && (
                       <Button
                         variant="ghost"
@@ -809,11 +679,13 @@ export default function ProjectPage() {
           </p>
         </div>
         <div className="project-actions">
-          <Button
+          <ActionButton
+            action="project-new-simulation"
+            label={t('新建模拟', 'New simulation')}
             className="project-action"
             variant="ghost"
             disabled={!enabled}
-            onClick={newSimulation}
+            run={newSimulation}
           >
             <span className="project-action-icon primary">＋</span>
             <span>
@@ -826,12 +698,14 @@ export default function ProjectPage() {
               </span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
-          <Button
+          </ActionButton>
+          <ActionButton
+            action="project-open"
+            label={t('打开项目', 'Open project')}
             className="project-action"
             variant="ghost"
             disabled={!enabled || !ready}
-            onClick={() => void openProjectFromHistory()}
+            run={openProjectFromHistory}
           >
             <span className="project-action-icon">
               <NavIcon name="project" />
@@ -847,12 +721,14 @@ export default function ProjectPage() {
               </span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
-          <Button
+          </ActionButton>
+          <ActionButton
+            action="project-prepare"
+            label={t('准备输入数据', 'Prepare input data')}
             className="project-action"
             variant="ghost"
             disabled={!enabled}
-            onClick={() => navigate('preparation')}
+            run={() => navigate('preparation')}
           >
             <span className="project-action-icon">
               <NavIcon name="data" />
@@ -867,7 +743,7 @@ export default function ProjectPage() {
               </span>
             </span>
             <span className="project-chevron">›</span>
-          </Button>
+          </ActionButton>
         </div>
       </section>
       {/* 设计里 CN-Cng 示例与数据准备是次要可见入口；只留在助手契约里等于界面上不存在。 */}
@@ -882,13 +758,16 @@ export default function ProjectPage() {
             )}
           </p>
         </div>
-        <Button
+        <ActionButton
+          action="project-example"
+          kind="commit"
+          label={t('打开 CN-Cng 示例', 'Open CN-Cng example')}
           variant="secondary"
           disabled={!enabled || !state.version}
-          onClick={() => void example().catch(() => {})}
+          run={example}
         >
           {t('打开示例', 'Open example')}
-        </Button>
+        </ActionButton>
       </section>
       <section
         className="project-readiness-section"
@@ -925,13 +804,13 @@ export default function ProjectPage() {
               </span>
             </div>
             <div className="readiness-actions">
-              <Button
+              <ActionButton
+                action="project-browse"
+                label={state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
                 variant="ghost"
                 disabled={!enabled || !ready}
-                onClick={() => void browseProject().catch(() => {})}
-              >
-                {state.root ? t('切换目录', 'Switch folder') : t('选择目录', 'Select folder')}
-              </Button>
+                run={browseProject}
+              />
             </div>
           </div>
 
@@ -940,16 +819,16 @@ export default function ProjectPage() {
               <span className="muted">{t('最近的项目:', 'Recent projects:')}</span>
               {/* 启动时不再自动打开上次的项目，这里是重新打开的主要入口，所以多列几个。 */}
               {shownRoots.slice(0, 5).map((root) => (
-                <Button
+                <ActionButton
                   key={root}
+                  action={`project-recent:${root}`}
+                  label={names[root] ?? projectName(root)}
                   variant="ghost"
                   className="readiness-recent-chip"
                   disabled={!enabled || !ready}
                   title={root}
-                  onClick={() => void openRecent(root).catch(() => {})}
-                >
-                  {names[root] ?? projectName(root)}
-                </Button>
+                  run={() => openRecent(root)}
+                />
               ))}
             </div>
           )}
