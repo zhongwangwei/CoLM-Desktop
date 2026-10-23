@@ -6,6 +6,7 @@ import {
   calibrationWindows,
   candidateBudget,
   convergenceRows,
+  crossValidationRows,
   fitValidation,
   frozenDesign,
   frozenParameterKey,
@@ -665,4 +666,18 @@ it('convergence tracks the best so far per generation and near-optimal spread sa
     ['tight', 'free'],
   );
   assert.deepEqual(nearOptimalRows(null), { count: 0, margin: 0.05, parameters: [] });
+});
+
+it('cross-validation folds say whether the parameters still help at the held-out site', () => {
+  assert.deepEqual(
+    crossValidationRows({
+      folds: [
+        { site: 'a', chosen: 'm2', held_out: 0.6, baseline: 0.8 },
+        { site: 'b', chosen: 'm1', held_out: 1.6, baseline: 0.8 },
+        { site: 'c', chosen: 'm1', held_out: null, baseline: 0.8 },
+      ],
+    }).map((r) => r.better),
+    [true, false, null],
+  );
+  assert.deepEqual(crossValidationRows(undefined), []);
 });

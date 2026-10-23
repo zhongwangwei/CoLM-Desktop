@@ -2080,8 +2080,52 @@ fn target_result(
             row.n
         );
     }
-    let support_hash = pair_support_hash(time, obs);
-    let value = metric_value(&row, target.metric);
+    // 要按日或按月比时，把逐时配对平均成时段再算指标（支持集也换成时段）。
+    let (support_hash, pairs, value, observation_sd, model_mean, observation_mean) = if let Some(
+        aggregate,
+    ) =
+        target.aggregate
+    {
+        let model = row.model.as_ref().with_context(|| {
+            format!(
+                "target {} ({}) did not return full paired model values",
+                target.key, target.variable
+            )
+        })?;
+        let paired = super::targets::aggregate_pairs(time, model, obs, aggregate)?;
+        let metrics = colm_hist::metric::compute(&paired.pairs()).with_context(|| {
+                format!(
+                    "target {} ({}) has fewer than two {aggregate:?} means with enough data for {site} in the {period} window",
+                    target.key, target.variable
+                )
+            })?;
+        let value = match target.metric {
+            ObjectiveMetric::Nrmse => metrics.rmse,
+            ObjectiveMetric::Mae => metrics.mae,
+            ObjectiveMetric::AbsBias => metrics.bias,
+            ObjectiveMetric::Nse => metrics.nse,
+            ObjectiveMetric::Kge => metrics.kge,
+            ObjectiveMetric::R2 => metrics.r2,
+            ObjectiveMetric::R => metrics.correlation,
+        };
+        (
+            pair_support_hash(&paired.support, &paired.obs),
+            metrics.n,
+            value,
+            metrics.obs_sd,
+            metrics.model_mean,
+            metrics.obs_mean,
+        )
+    } else {
+        (
+            pair_support_hash(time, obs),
+            row.n,
+            metric_value(&row, target.metric),
+            row.obs_sd,
+            row.model_mean,
+            row.obs_mean,
+        )
+    };
     let weight = if target.site.is_none() {
         target.weight / site_count.max(1) as f64
     } else {
@@ -2090,9 +2134,9 @@ fn target_result(
     let term = ObjectiveTerm {
         metric: target.metric,
         value,
-        observation_sd: Some(row.obs_sd),
+        observation_sd: Some(observation_sd),
         weight,
-        pairs: row.n,
+        pairs,
     };
     let loss = super::science::objective_loss(&term, target.min_pairs)
         .map_err(|reason| anyhow::anyhow!("target {} {reason}", target.key))?;
@@ -2104,12 +2148,12 @@ fn target_result(
         metric: target.metric,
         weight,
         min_pairs: target.min_pairs,
-        pairs: row.n,
+        pairs,
         value,
-        observation_sd: Some(row.obs_sd),
+        observation_sd: Some(observation_sd),
         loss,
-        model_mean: row.model_mean,
-        observation_mean: row.obs_mean,
+        model_mean,
+        observation_mean,
         support_hash,
     })
 }
@@ -3287,6 +3331,53 @@ fn near_optimal(
     }))
 }
 
+/// 多站点共享参数的留一站交叉验证：每次拿掉一个站，只按其余站的成绩挑最优成员，再看它在拿掉的那个站上
+/// 是否仍比基准好。全站一起挑出的最优可能只是在拟合个别站；这一步回答"换到没参与率定的站还灵不灵"。
+/// 用的是已有的成员结果，不额外运行模型。
+fn leave_one_site_out(manifest: &Manifest, state: &StudyState) -> Option<serde_json::Value> {
+    let sites = &manifest.spec.base_cases;
+    if sites.len() < 2 {
+        return None;
+    }
+    let rows = |member: &str, site: &str| {
+        read_task_result(manifest, member, site)
+            .ok()
+            .map(|result| result.calibration)
+    };
+    let members = state
+        .candidates
+        .iter()
+        .filter(|(id, candidate)| id.as_str() != "m000000" && candidate.feasible)
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    let mut folds = Vec::new();
+    for held in sites {
+        let chosen = members
+            .iter()
+            .filter_map(|member| {
+                let mut kept = Vec::new();
+                for site in sites.iter().filter(|site| *site != held) {
+                    kept.extend(rows(member, site)?);
+                }
+                fixed_score(&kept).map(|score| (member, score))
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1));
+        let Some((chosen, trained)) = chosen else {
+            continue;
+        };
+        let held_out = rows(chosen, held).and_then(|rows| fixed_score(&rows));
+        let baseline = rows("m000000", held).and_then(|rows| fixed_score(&rows));
+        folds.push(serde_json::json!({
+            "site": held,
+            "chosen": chosen,
+            "trained": trained,
+            "held_out": held_out,
+            "baseline": baseline,
+        }));
+    }
+    (!folds.is_empty()).then(|| serde_json::json!({ "folds": folds }))
+}
+
 pub(super) fn write_objective_tables_to(
     manifest: &Manifest,
     state: &StudyState,
@@ -3300,6 +3391,9 @@ pub(super) fn write_objective_tables_to(
             .and_then(|members| near_optimal(manifest, &members, state))
         {
             write_json(&results.join("near_optimal.json"), &near)?;
+        }
+        if let Some(cross) = leave_one_site_out(manifest, state) {
+            write_json(&results.join("cross_validation.json"), &cross)?;
         }
     }
     let mut objectives = String::from("member,generation,feasible,calibration,validation,reason\n");
@@ -4453,6 +4547,60 @@ mod tests {
     }
 
     #[test]
+    fn leave_one_site_out_picks_on_the_other_sites_and_scores_the_held_out_one() {
+        let root = std::env::temp_dir().join(format!("colm-loso-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let mut manifest = tuning_manifest(&root);
+        manifest.spec.base_cases = vec!["a".into(), "b".into()];
+        manifest.spec.targets[0].validation_from = None;
+        manifest.spec.targets[0].validation_to = None;
+        // value / obs_sd(2.0) 就是损失。m000001 只在站 a 好、在站 b 差；m000002 两站都比基准好一点。
+        let losses = [
+            ("m000000", "a", 0.8),
+            ("m000000", "b", 0.8),
+            ("m000001", "a", 0.2),
+            ("m000001", "b", 1.6),
+            ("m000002", "a", 0.6),
+            ("m000002", "b", 0.6),
+        ];
+        let mut state = StudyState::new("s".into(), []).unwrap();
+        for (member, site, loss) in losses {
+            let mut row = target_row("calibration", vec![1, 2]);
+            row.site = site.into();
+            row.weight = 0.5;
+            row.value = loss * 2.0;
+            row.loss = loss;
+            let result = TaskResult {
+                member: member.into(),
+                site: site.into(),
+                outputs: Vec::new(),
+                calibration: vec![row],
+                validation: Vec::new(),
+                validation_errors: Vec::new(),
+            };
+            let path = task_result_path(&manifest, member, site);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, serde_json::to_vec(&result).unwrap()).unwrap();
+            state
+                .candidates
+                .insert(member.into(), candidate(Some(loss)));
+        }
+        let cross = leave_one_site_out(&manifest, &state).unwrap();
+        let folds = cross["folds"].as_array().unwrap();
+        // 拿掉 b：只看 a 会挑 m000001，可它在 b 上 1.6，比基准 0.8 差 —— 这就是交叉验证要揭出来的。
+        let held_b = folds.iter().find(|f| f["site"] == "b").unwrap();
+        assert_eq!(held_b["chosen"], "m000001");
+        assert_eq!(held_b["held_out"], 1.6);
+        assert_eq!(held_b["baseline"], 0.8);
+        let held_a = folds.iter().find(|f| f["site"] == "a").unwrap();
+        assert_eq!(held_a["chosen"], "m000002");
+        assert!(held_a["held_out"].as_f64().unwrap() < held_a["baseline"].as_f64().unwrap());
+        manifest.spec.base_cases.truncate(1);
+        assert!(leave_one_site_out(&manifest, &state).is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn near_optimal_members_show_how_wide_each_parameter_stays_unpinned() {
         let manifest = manifest_with_range(0.1, 0.9);
         let mut state = StudyState::new("s".into(), []).unwrap();
@@ -4532,6 +4680,7 @@ mod tests {
                     min_pairs: 2,
                     source: None,
                     corrected: false,
+                    aggregate: None,
                 }],
                 budget: Default::default(),
                 hybrid: None,
@@ -6467,6 +6616,7 @@ mod tests {
                     min_pairs: 2,
                     source: None,
                     corrected: false,
+                    aggregate: None,
                 }],
                 budget: Default::default(),
                 hybrid: None,

@@ -1004,3 +1004,21 @@ export function nearOptimalRows(value: unknown) {
     }),
   };
 }
+
+/** `cross_validation.json` → 每个拿掉的站：只按其余站挑出的成员，在这个站上比基准好还是差。 */
+export function crossValidationRows(value: unknown) {
+  const folds = ((value ?? {}) as { folds?: unknown }).folds;
+  const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return (Array.isArray(folds) ? folds : []).map((raw) => {
+    const fold = (raw ?? {}) as Record<string, unknown>;
+    const heldOut = num(fold.held_out),
+      baseline = num(fold.baseline);
+    return {
+      site: String(fold.site ?? ''),
+      chosen: String(fold.chosen ?? ''),
+      heldOut,
+      baseline,
+      better: heldOut != null && baseline != null ? heldOut < baseline : null,
+    };
+  });
+}

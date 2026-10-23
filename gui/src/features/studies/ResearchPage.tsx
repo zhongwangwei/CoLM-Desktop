@@ -31,6 +31,7 @@ import {
   studyProgress,
   convergenceRows,
   nearOptimalRows,
+  crossValidationRows,
   suggestedRange,
   suggestedWindows,
   type ParameterContext,
@@ -333,6 +334,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [carryKeys, setCarryKeys] = useState<string[]>([]);
   // 率定的近优集合（results/near_optimal.json）：参数能被观测定到多准。
   const [nearOptimal, setNearOptimal] = useState<unknown>(null);
+  // 多站点共享参数的留一站交叉验证（results/cross_validation.json）。
+  const [crossValidation, setCrossValidation] = useState<unknown>(null);
   const [out, setOut] = useState('');
   // 导出研究的目录；原来和 AI 拟合的输出目录共用 out，填了一个另一个也跟着变。
   const [exportDir, setExportDir] = useState('');
@@ -343,6 +346,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [overrideFor, setOverrideFor] = useState('');
   // Qle/Qh 是否拿能量闭合订正后的观测比（只对站点观测有效）。
   const [corrected, setCorrected] = useState(false);
+  // 站点目标按什么时间尺度比：空 = 观测原来的分辨率（半小时）；daily/monthly 先平均再比。
+  const [aggregate, setAggregate] = useState<'' | 'daily' | 'monthly'>('');
+  // 对照几个变量时各自的权重（变量名 → 文本）；没填的按 1。
+  const [weights, setWeights] = useState<Record<string, string>>({});
   // 率定期、验证期是怎么预填的，告诉用户扣了什么。
   const [windowNote, setWindowNote] = useState<[string, string] | null>(null);
   const [busy, setBusy] = useState(false);
@@ -679,6 +686,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       } else superseded();
       return rows;
     });
+  // 站点目标的权重与时间尺度（单点率定、带目标的不确定性分析、区域里的通量站共用）。
+  function siteTargetExtras(variable: string) {
+    const text = weights[variable]?.trim() ?? '';
+    const weight = text ? Number(text) : 1;
+    if (!Number.isFinite(weight) || weight <= 0)
+      throw new Error(
+        tr(`${variable} 的权重要是正数`, `The weight of ${variable} must be a positive number`),
+      );
+    return { weight, ...(aggregate ? { aggregate } : {}) };
+  }
   // 只有湍流通量有能量闭合订正版（`colm_hist::obs::corrected`）。
   function fluxCorrected(variable: string) {
     return ['qle', 'qh'].includes(variable.trim().toLowerCase());
@@ -838,9 +855,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               site: siteName(path),
               variable,
               metric,
-              weight: 1,
               min_pairs: pairs,
               ...window,
+              ...siteTargetExtras(variable),
               ...(corrected && fluxCorrected(variable) ? { corrected: true } : {}),
             })),
           ),
@@ -878,6 +895,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           ...base,
           targets: gridTargets.map((t, i) => ({
             ...gridTargetSpec(t, i, windows, metric, pairs),
+            ...(t.kind === 'station' && aggregate ? { aggregate } : {}),
             ...(corrected && t.kind === 'station' && fluxCorrected(t.variable)
               ? { corrected: true }
               : {}),
@@ -902,9 +920,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         site,
         variable,
         metric,
-        weight: 1,
         min_pairs: pairs,
         ...windows,
+        ...siteTargetExtras(variable),
         ...(corrected && fluxCorrected(variable) ? { corrected: true } : {}),
       }));
     });
@@ -2523,6 +2541,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     trainNetwork,
     scoreObjective,
     patience,
+    aggregate,
+    weights,
   ]);
   // 换了研究，"用哪个成员"还留着上一个研究的成员编号（GUI 审查 A-07），"仍要写入"也一样。
   useEffect(() => {
@@ -2576,6 +2596,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
   }, [studyDir, hasNearOptimal]);
+  const hasCrossValidation = (envelope?.results ?? []).some(
+    (entry) => (typeof entry === 'string' ? entry : entry.path) === 'cross_validation.json',
+  );
+  useEffect(() => {
+    setCrossValidation(null);
+    if (!studyDir || !hasCrossValidation) return;
+    let live = true;
+    void invoke<string>('study_result', { studyDir, path: 'cross_validation.json' })
+      .then((text) => {
+        if (live) setCrossValidation(JSON.parse(text));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [studyDir, hasCrossValidation]);
   usePageContract(
     workbench
       ? {
@@ -3131,6 +3167,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const diagnostics = studyDiagnostics(envelope?.state?.warnings);
   const convergence = convergenceRows(envelope?.state?.candidates);
   const near = nearOptimalRows(nearOptimal);
+  const folds = crossValidationRows(crossValidation);
   const responses = sensitivityResponses(importance);
   const ranking = sensitivityRanking(importance, sensitivityKey, frozenSpec);
   const objectiveView = responses.find((r) => r.key === sensitivityKey)?.variable === 'objective';
@@ -3997,6 +4034,48 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                     )}
                   </label>
                 )}
+                <Field label={tr('比较的时间尺度', 'Time scale of the comparison')}>
+                  <Select
+                    value={aggregate}
+                    onChange={(e) => setAggregate(e.target.value as '' | 'daily' | 'monthly')}
+                  >
+                    <option value="">{tr('观测原来的分辨率', 'Observation resolution')}</option>
+                    <option value="daily">
+                      {tr('逐日平均（推荐）', 'Daily means (recommended)')}
+                    </option>
+                    <option value="monthly">{tr('逐月平均', 'Monthly means')}</option>
+                  </Select>
+                </Field>
+                <p className="muted study-hint study-wide">
+                  {tr(
+                    '半小时尺度的误差主要来自日变化，看不出季节和水分限制；逐日平均更接近率定想调的东西。模型和观测在同一批有效时刻上平均，有效时刻不到一半的那天不算。"最少观测配对数"相应变成最少天数（或月数）。',
+                    'Half-hourly errors are dominated by the diurnal cycle and hide seasonal and water limitation; daily means are closer to what calibration should tune. Model and observations are averaged over the same valid steps, and days with less than half their steps are dropped. The minimum pairs then counts days (or months).',
+                  )}
+                </p>
+                {!spatialStudy && variableNames.length > 1 && (
+                  <div className="study-wide">
+                    <p className="muted study-hint">
+                      {tr(
+                        '几个变量的权重（各自先按指标归一化，再按权重合并；没填的按 1）：',
+                        'Weights of the variables (each is normalised by its metric first, then combined by weight; blank means 1):',
+                      )}
+                    </p>
+                    <div className="study-grid">
+                      {variableNames.map((name) => (
+                        <Field key={name} label={name}>
+                          <Input
+                            type="number"
+                            value={weights[name] ?? ''}
+                            placeholder="1"
+                            onChange={(e) =>
+                              setWeights((old) => ({ ...old, [name]: e.target.value }))
+                            }
+                          />
+                        </Field>
+                      ))}
+                    </div>
+                  </div>
+                )}
                 {tuning && (
                   <>
                     <Field
@@ -4484,7 +4563,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           )}
           {studyDir &&
             frozenSpec?.kind === 'tuning' &&
-            (convergence.length > 1 || near.count > 0) && (
+            (convergence.length > 1 || near.count > 0 || folds.length > 0) && (
               <Card
                 title={tr('收敛与可信度', 'Convergence and confidence')}
                 description={tr(
@@ -4561,6 +4640,53 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                                     : tr(
                                         '定不住：这份观测分不出它的取值',
                                         'not pinned: these observations cannot tell its value',
+                                      )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+                {folds.length > 0 && (
+                  <>
+                    <p className="muted study-hint">
+                      {tr(
+                        '留一站交叉验证：每次拿掉一个站，只按其余站挑最优参数，再看它在拿掉的站上是否仍比默认参数好。',
+                        'Leave-one-site-out: each time one site is left out, the best set is picked on the others and scored at the left-out site against the defaults.',
+                      )}
+                    </p>
+                    <div className="table-scroll">
+                      <table className="versions-table">
+                        <thead>
+                          <tr>
+                            <th>{tr('拿掉的站', 'Left-out site')}</th>
+                            <th>{tr('挑出的成员', 'Chosen member')}</th>
+                            <th>{tr('在该站：挑出的 / 默认', 'There: chosen / default')}</th>
+                            <th>{tr('判断', 'Reading')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {folds.map((fold) => (
+                            <tr key={fold.site}>
+                              <td>{fold.site}</td>
+                              <td>
+                                <code>{fold.chosen}</code>
+                              </td>
+                              <td>
+                                {fold.heldOut == null ? '—' : Number(fold.heldOut.toPrecision(4))}
+                                {' / '}
+                                {fold.baseline == null ? '—' : Number(fold.baseline.toPrecision(4))}
+                              </td>
+                              <td>
+                                {fold.better == null
+                                  ? tr('算不出', 'unavailable')
+                                  : fold.better
+                                    ? tr('换到这个站仍然更好', 'still better at this site')
+                                    : tr(
+                                        '换到这个站反而更差：参数在拟合别的站',
+                                        'worse at this site: the parameters fit the other sites',
                                       )}
                               </td>
                             </tr>

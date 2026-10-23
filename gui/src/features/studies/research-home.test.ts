@@ -29,6 +29,7 @@ import {
   studyProgress,
   convergenceRows,
   nearOptimalRows,
+  crossValidationRows,
   sensitivityRanking,
   sensitivityResponses,
   studyDiagnostics,
@@ -562,6 +563,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     studyProgress,
     convergenceRows,
     nearOptimalRows,
+    crossValidationRows,
     sensitivityRanking,
     sensitivityResponses,
     studyDiagnostics,
@@ -1359,4 +1361,69 @@ it('the uncertainty envelope names its site and units and draws the band apart f
   const styles = chart.props.styles as { stroke: string; dash?: number[] }[];
   assert.notEqual(styles[0]!.stroke, styles[3]!.stroke, 'P95 no longer shares the baseline colour');
   assert.ok(styles[1]!.dash && styles[3]!.dash, 'the band edges are dashed');
+});
+it('daily comparison and per-variable weights reach the study spec', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  page.requests.at(-1)!.resolve([parameterRow()]);
+  await page.settle();
+  const parameter = page
+    .nodes()
+    .find((node) => node.type === 'input' && node.props['aria-label'] === 'DEF_TEST');
+  (parameter!.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  page.press('research-step-3');
+  await page.settle();
+  const input = (match: (node: Tree) => boolean) => page.nodes().find(match)!;
+  const set = (node: Tree, value: string) =>
+    (node.props.onChange as (event: unknown) => void)({ target: { value } });
+  set(
+    input((n) => n.type === 'Input' && String(n.props.placeholder ?? '').includes('*_Flux.nc')),
+    '/obs/site1_Flux.nc',
+  );
+  await page.settle();
+  set(
+    input((n) => n.type === 'Input' && n.props.value === 'Qle'),
+    'Qle, Qh',
+  );
+  page.render();
+  set(
+    input((n) => n.type === 'Select' && n.props.value === ''),
+    'daily',
+  );
+  page.render();
+  set(
+    input((n) => n.type === 'Input' && n.props.placeholder === '1'),
+    '3',
+  );
+  page.render();
+  for (const [id, value] of [
+    ['training-from', '2003-01-01T00:00'],
+    ['training-to', '2006-01-01T00:00'],
+  ]) {
+    const field = (page.contract().fields as { id: string; set: (v: string) => void }[]).find(
+      (f) => f.id === id,
+    );
+    field?.set(value);
+  }
+  await page.settle();
+  page.press('study-preflight');
+  await page.settle();
+  const request = page.requests.find((r) => r.command === 'study_preflight_json');
+  assert.ok(request, 'preflight was sent');
+  const spec = JSON.parse(String(request.args.specJson)) as {
+    targets: { variable: string; weight: number; aggregate?: string }[];
+  };
+  assert.deepEqual(
+    spec.targets.map((t) => [t.variable, t.weight, t.aggregate]),
+    [
+      ['Qle', 3, 'daily'],
+      ['Qh', 1, 'daily'],
+    ],
+  );
 });

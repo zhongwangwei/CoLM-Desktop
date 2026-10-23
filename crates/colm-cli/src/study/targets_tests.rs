@@ -193,3 +193,37 @@ fn gauge_text_files_are_read_by_day_and_skip_headers() {
     assert_eq!(means.len(), 2);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn site_pairs_average_over_the_same_valid_steps_and_drop_thin_days() {
+    // 第 1 天：48 个半小时全有；第 2 天只有 10 个（不到一半），丢掉；第 3 天 30 个，有一个模型值是 NaN。
+    let mut time = Vec::new();
+    let mut model = Vec::new();
+    let mut obs = Vec::new();
+    for i in 0..48 {
+        time.push(i * 1800);
+        model.push(2.0);
+        obs.push(1.0);
+    }
+    for i in 0..10 {
+        time.push(86_400 + i * 1800);
+        model.push(100.0);
+        obs.push(100.0);
+    }
+    for i in 0..30 {
+        time.push(2 * 86_400 + i * 1800);
+        model.push(if i == 0 { f64::NAN } else { 4.0 });
+        obs.push(if i == 0 { 999.0 } else { 3.0 });
+    }
+    let paired = aggregate_pairs(&time, &model, &obs, TargetPeriod::Daily).unwrap();
+    assert_eq!(paired.support, vec![0, 2 * 86_400]);
+    assert_eq!(paired.model, vec![2.0, 4.0]);
+    // 模型缺测的那一刻观测也不进平均（999 不会混进来）。
+    assert_eq!(paired.obs, vec![1.0, 3.0]);
+    let monthly = aggregate_pairs(&time, &model, &obs, TargetPeriod::Monthly).unwrap();
+    assert!(
+        monthly.support.is_empty(),
+        "three days cannot cover half a month"
+    );
+    assert!(aggregate_pairs(&[0], &[1.0, 2.0], &[1.0], TargetPeriod::Daily).is_err());
+}

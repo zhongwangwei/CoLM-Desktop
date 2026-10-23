@@ -329,6 +329,10 @@ pub struct TargetSpec {
     /// 不写时不序列化，旧研究的 `spec_sha256` 不变。
     #[serde(default, skip_serializing_if = "is_false")]
     pub corrected: bool,
+    /// 站点目标先按日或按月平均再比（格点产品、水文站的时段写在各自的 `source` 里）。不写就按观测原来的
+    /// 时间分辨率比；不写时不序列化，旧研究的 `spec_sha256` 不变。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<TargetPeriod>,
 }
 
 /// 格点算例（流域、区域、全球）的率定目标。`TargetSpec::variable` 的含义随种类变：
@@ -878,6 +882,14 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         if let Some(source) = &target.source {
             validate_target_source(&target.key, source)?;
         }
+        if target.aggregate.is_some()
+            && !matches!(target.source, None | Some(TargetSource::Station { .. }))
+        {
+            bail!(
+                "target {} sets its averaging period inside its gridded or gauge source",
+                target.key
+            );
+        }
         if target.corrected && !matches!(target.source, None | Some(TargetSource::Station { .. })) {
             bail!(
                 "target {} can use energy-balance-corrected observations only for flux stations",
@@ -1077,6 +1089,7 @@ mod tests {
             min_pairs: 30,
             source: None,
             corrected: false,
+            aggregate: None,
         }
     }
 
@@ -1253,6 +1266,24 @@ mod tests {
             error.to_string().contains("only for flux stations"),
             "{error}"
         );
+        let mut daily = tuning_target("Qle", false);
+        daily.aggregate = Some(TargetPeriod::Daily);
+        validate_spec(&tuning_spec(vec![daily.clone()])).unwrap();
+        assert!(serde_json::to_value(tuning_target("Qle", false))
+            .unwrap()
+            .get("aggregate")
+            .is_none());
+        daily.source = Some(TargetSource::Gauge {
+            path: "/q.csv".into(),
+            variable: None,
+            lon: 113.0,
+            lat: 23.0,
+            period: None,
+        });
+        assert!(validate_spec(&tuning_spec(vec![daily]))
+            .unwrap_err()
+            .to_string()
+            .contains("averaging period"));
     }
 
     #[test]

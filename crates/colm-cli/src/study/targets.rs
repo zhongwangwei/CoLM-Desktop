@@ -31,6 +31,65 @@ impl Paired {
     }
 }
 
+/// 站点目标聚合时，一个时段至少要有这么多比例的时刻配上对才算数。半小时尺度下 QC 只留实测，夜间和雨天
+/// 缺得多；只剩几个白天时刻的"日均"会系统偏高，所以覆盖不到一半的时段丢掉。
+const AGGREGATE_MIN_COVERAGE: f64 = 0.5;
+
+/// 站点目标的逐时配对按日或按月平均：模型和观测在**同一组**配上对的时刻上平均，覆盖不足的时段丢掉。
+/// 半小时尺度的误差主要是日变化，看不出季节与水分限制；按日比更接近率定想调的东西。
+pub(super) fn aggregate_pairs(
+    time: &[i64],
+    model: &[f64],
+    obs: &[f64],
+    period: TargetPeriod,
+) -> Result<Paired> {
+    anyhow::ensure!(
+        time.len() == model.len() && time.len() == obs.len(),
+        "paired time, model and observation lengths differ"
+    );
+    let mut steps = time
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .filter(|step| *step > 0)
+        .collect::<Vec<_>>();
+    steps.sort_unstable();
+    let Some(&step) = steps.get(steps.len() / 2) else {
+        return Ok(Paired::default());
+    };
+    let mut sums: std::collections::BTreeMap<i64, (f64, f64, usize)> = Default::default();
+    for ((&t, &m), &o) in time.iter().zip(model).zip(obs) {
+        if m.is_finite() && o.is_finite() {
+            let entry = sums.entry(period_start(t, period)).or_default();
+            entry.0 += m;
+            entry.1 += o;
+            entry.2 += 1;
+        }
+    }
+    let mut out = Paired::default();
+    for (start, (model_sum, obs_sum, count)) in sums {
+        let length = match period {
+            TargetPeriod::Daily => 86_400,
+            TargetPeriod::Monthly => {
+                let (year, month, _) = civil_from_days(start.div_euclid(86_400));
+                let (next_year, next_month) = if month == 12 {
+                    (year + 1, 1)
+                } else {
+                    (year, month + 1)
+                };
+                days_from_civil(next_year, next_month, 1) * 86_400 - start
+            }
+        };
+        let expected = length as f64 / step as f64;
+        if (count as f64) < AGGREGATE_MIN_COVERAGE * expected {
+            continue;
+        }
+        out.support.push(start);
+        out.model.push(model_sum / count as f64);
+        out.obs.push(obs_sum / count as f64);
+    }
+    Ok(out)
+}
+
 /// 时间窗 `[from, to)`（Unix 秒）。
 pub(super) type Window = (i64, i64);
 
