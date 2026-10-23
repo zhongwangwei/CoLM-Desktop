@@ -698,7 +698,7 @@ fn now() -> u64 {
         .unwrap_or_default()
 }
 
-fn root_of(opts: &Opts) -> Result<String> {
+pub(super) fn root_of(opts: &Opts) -> Result<String> {
     let root = opts.need_str("--root")?;
     ensure!(
         root.starts_with('/') && !root.contains(char::is_whitespace) && root != "/",

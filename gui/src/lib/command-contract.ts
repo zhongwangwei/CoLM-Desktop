@@ -137,6 +137,10 @@ export const commandContract = {
     "source": {
       "required": false,
       "rust_type": "Option<String>"
+    },
+    "index": {
+      "required": false,
+      "rust_type": "Option<String>"
     }
   },
   "bench_cancel": {},
@@ -218,6 +222,150 @@ export const commandContract = {
     }
   },
   "bench_pick_report": {},
+  "bench_remote_status": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_install": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "step": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "source": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "index": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "bench_remote_job": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "job": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "lines": {
+      "required": false,
+      "rust_type": "Option<u32>"
+    }
+  },
+  "bench_remote_cancel": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "job": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_inspect": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_references": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_register": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "rootDir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dataType": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "timRes": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "years": {
+      "required": true,
+      "rust_type": "(i32, i32)"
+    },
+    "category": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "fulllist": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "variables": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    }
+  },
+  "bench_remote_scan": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_run": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "config": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "sites": {
+      "required": false,
+      "rust_type": "Option<Vec<crate::bench::BenchSite>>"
+    },
+    "refRoot": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "bench_remote_fetch": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "case_namelist_preview": {
     "dir": {
       "required": true,

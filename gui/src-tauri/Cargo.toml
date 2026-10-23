@@ -46,6 +46,8 @@ colm-hist = { path = "../../crates/colm-hist" }
 # 过程参数保存前的校验（`validate_methane_namelist` 的移植），与引擎同一份规则。
 # 它只依赖 colm-namelist 与 colm-lapack，0 个 netcdf 依赖节点。
 colm-core = { path = "../../crates/colm-core" }
+# 比较页的配方（固定版本、校验和、环境变量、Python 脚本），与 colm-cli 的服务器端共用；0 个依赖。
+colm-bench = { path = "../../crates/colm-bench" }
 # 原生的文件/文件夹选择器。**路径不该让人手打** —— 一个 Sitedata 目录
 # 的绝对路径打错一个字符，报错会出现在完全无关的地方。
 # 沿用 rfd 原生选择器，React 通过已有 IPC 获取选择结果。

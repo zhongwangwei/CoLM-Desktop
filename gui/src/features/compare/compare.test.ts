@@ -122,27 +122,29 @@ it('comparison folders match the backend layout on both separators', () => {
   assert.equal(comparisonDir('C:\\ob', 'x'), 'C:\\ob\\projects\\x');
 });
 
-it('lists only variables whose references match the chosen simulations', () => {
+it('lists every variable with its references, same-kind ones first', () => {
   const refs = [
-    { name: 'FLUX', data_type: 'stn', variables: ['Latent_Heat', 'Sensible_Heat'] },
     { name: 'GLEAM', data_type: 'grid', variables: ['Evapotranspiration', 'Latent_Heat'] },
+    { name: 'FLUX', data_type: 'stn', variables: ['Latent_Heat', 'Sensible_Heat'] },
     { name: 'Any', variables: ['Albedo'] },
   ];
   assert.deepEqual(comparableVariables(refs, []), []);
+  // 站点模拟也能拿格点产品比（OpenBench 在站点处取值）：不排除，只把同种的排前面。
   const station = comparableVariables(refs, [{ spatial: false }]);
   assert.deepEqual(
     station.map((v) => [v.variable, v.references.map((r) => r.name)]),
     [
       ['Albedo', ['Any']],
-      ['Latent_Heat', ['FLUX']],
+      ['Evapotranspiration', ['GLEAM']],
+      ['Latent_Heat', ['FLUX', 'GLEAM']],
       ['Sensible_Heat', ['FLUX']],
     ],
   );
-  const both = comparableVariables(refs, [{ spatial: false }, { spatial: true }], 'heat');
+  const gridded = comparableVariables(refs, [{ spatial: true }], 'heat');
   assert.deepEqual(
-    both.map((v) => [v.variable, v.references.map((r) => r.name)]),
+    gridded.map((v) => [v.variable, v.references.map((r) => r.name)]),
     [
-      ['Latent_Heat', ['FLUX', 'GLEAM']],
+      ['Latent_Heat', ['GLEAM', 'FLUX']],
       ['Sensible_Heat', ['FLUX']],
     ],
   );

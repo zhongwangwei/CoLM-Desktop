@@ -522,6 +522,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-bench"
+version = "0.3.0-beta.4"
+
+[[package]]
 name = "colm-case"
 version = "0.3.0-beta.4"
 dependencies = [
@@ -546,6 +550,7 @@ dependencies = [
 name = "colm-desktop-gui"
 version = "0.3.0-beta.4"
 dependencies = [
+ "colm-bench",
  "colm-case",
  "colm-core",
  "colm-hist",

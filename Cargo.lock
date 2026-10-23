@@ -141,6 +141,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "colm-bench"
+version = "0.3.0-beta.4"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "colm-case"
 version = "0.3.0-beta.4"
 dependencies = [
@@ -156,6 +163,7 @@ name = "colm-cli"
 version = "0.3.0-beta.4"
 dependencies = [
  "anyhow",
+ "colm-bench",
  "colm-case",
  "colm-forcing",
  "colm-hist",

@@ -317,6 +317,35 @@ pub fn submit_with(
     })
 }
 
+/// 不带引擎快照的作业（比较页在服务器上装 OpenBench、跑评估）：作业目录、日志、阶段、退出码与取消都和
+/// 模拟作业一样，只是作业体不用服务器上的 CoLM 引擎，所以不写快照标记。不支持打包。
+pub fn submit_plain(ssh: &Ssh, root: &str, id: &str, body: &str, spec: &Spec) -> Result<Submitted> {
+    check_id(id)?;
+    let out = ssh.run_ok(&submit_script(root, id, body, spec)?)?;
+    let last = out
+        .trim()
+        .lines()
+        .last()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .context("the job did not report an id")?;
+    Ok(match spec.scheduler {
+        Scheduler::Bare => Submitted {
+            scheduler: "bare",
+            pid: Some(
+                last.parse()
+                    .context("the job did not report a process id")?,
+            ),
+            scheduler_id: None,
+        },
+        other => Submitted {
+            scheduler: other.name(),
+            pid: None,
+            scheduler_id: Some(last.to_owned()),
+        },
+    })
+}
+
 pub fn status(ssh: &Ssh, root: &str, id: &str, lines: usize) -> Result<Status> {
     check_id(id)?;
     Ok(parse_status(&ssh.run_ok(&status_script(root, id, lines))?))

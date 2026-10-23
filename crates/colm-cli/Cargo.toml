@@ -24,6 +24,8 @@ colm-srfdata = { path = "../colm-srfdata" }
 colm-hybrid = { path = "../colm-hybrid", default-features = false }
 # 远程运行（remote-*）：经用户自己的 ssh 在服务器上编 Rust 引擎、跑算例、取回结果。
 colm-remote = { path = "../colm-remote" }
+# 比较页在服务器上评估：与窗口进程共用同一份 OpenBench 配方。
+colm-bench = { path = "../colm-bench" }
 # 开发工作区（ws-*）：助手改源码、编译、测试、对照、登记实验内核。
 colm-workspace = { path = "../colm-workspace" }
 anyhow.workspace = true

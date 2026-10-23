@@ -11,6 +11,7 @@
 
 mod assistant;
 mod bench;
+mod bench_remote;
 mod config;
 #[cfg(feature = "e2e-driver")]
 mod e2e_driver;
@@ -306,6 +307,16 @@ pub fn run() {
             bench::bench_run,
             bench::bench_report,
             bench::bench_pick_report,
+            bench_remote::bench_remote_status,
+            bench_remote::bench_remote_install,
+            bench_remote::bench_remote_job,
+            bench_remote::bench_remote_cancel,
+            bench_remote::bench_remote_inspect,
+            bench_remote::bench_remote_references,
+            bench_remote::bench_remote_register,
+            bench_remote::bench_remote_scan,
+            bench_remote::bench_remote_run,
+            bench_remote::bench_remote_fetch,
             bench::bench_inspect,
             bench::bench_register,
             bench::bench_scan_preview,

@@ -76,6 +76,7 @@ mod hybrid_fit;
 mod model_version;
 mod observation_table;
 mod provenance;
+mod remote_bench;
 mod remote_cmd;
 mod remote_files;
 mod remote_workspace_cmd;
@@ -514,6 +515,16 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-case-sync" => remote_cmd::remote_cases::cmd(opts, "sync")?,
         "remote-case-abort" => remote_cmd::remote_cases::cmd(opts, "abort")?,
         "remote-browse" => remote_files::run(opts)?,
+        "remote-bench-status" => remote_bench::status(opts)?,
+        "remote-bench-install" => remote_bench::install(opts)?,
+        "remote-bench-run" => remote_bench::run(opts)?,
+        "remote-bench-job" => remote_bench::job_status(opts)?,
+        "remote-bench-cancel" => remote_bench::cancel(opts)?,
+        "remote-bench-inspect" => remote_bench::inspect(opts)?,
+        "remote-bench-references" => remote_bench::references(opts)?,
+        "remote-bench-register" => remote_bench::register(opts)?,
+        "remote-bench-scan" => remote_bench::scan(opts)?,
+        "remote-bench-fetch" => remote_bench::fetch(opts)?,
         "forcing-directory-probe" => forcing_directory::run(opts)?,
         "remote-mkdir" => remote_files::mkdir(opts)?,
         "remote-history-cleanup" => history_cleanup::run(opts)?,

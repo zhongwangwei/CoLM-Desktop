@@ -231,9 +231,10 @@ export function benchLogText(line: string): string {
 }
 
 /**
- * 能评估的变量：只列参考数据与所选模拟同种（站点 / 格点）的变量，再按输入筛选。原来把 152 个参考
- * 数据集的变量并集一次列成 82 个下拉，选了单点算例也列格点产品的变量（复验 C2-05）。
- * 没写种类的参考数据两种都算。还没选模拟时不列。
+ * 能评估的变量与各自可用的参考数据（按名字筛选）。参考数据不按种类排除：站点模拟可以拿格点产品比
+ * （在站点处取值），格点模拟也可以拿站点观测比，OpenBench 都支持（2026-10-23 在 7920 上实测站点模拟对
+ * ERA5-Land 格点）；同种的排在前面。原来一次给 82 个变量各列一个下拉（复验 C2-05），现在页面只给加进来的
+ * 变量列下拉。还没选模拟时不列。
  */
 export function comparableVariables(
   references: BenchReference[],
@@ -244,14 +245,16 @@ export function comparableVariables(
   if (!kinds.size) return [];
   const needle = query.trim().toLowerCase();
   const byVariable = new Map<string, BenchReference[]>();
-  for (const reference of references) {
-    if (reference.data_type && !kinds.has(reference.data_type)) continue;
+  for (const reference of references)
     for (const variable of reference.variables) {
       if (needle && !variable.toLowerCase().includes(needle)) continue;
       byVariable.set(variable, [...(byVariable.get(variable) ?? []), reference]);
     }
-  }
+  const sameKind = (r: BenchReference) => (!r.data_type || kinds.has(r.data_type) ? 0 : 1);
   return [...byVariable.entries()]
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([variable, refs]) => ({ variable, references: refs }));
+    .map(([variable, refs]) => ({
+      variable,
+      references: [...refs].sort((a, b) => sameKind(a) - sameKind(b)),
+    }));
 }

@@ -1,0 +1,18 @@
+[package]
+name = "colm-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# 比较页（OpenBench）本机与服务器共用的配方：固定的版本与校验和、环境变量怎么改指、两段 Python 脚本。
+# 窗口进程（gui/src-tauri）与 colm-cli 都依赖它，两边装出来的环境才一模一样。不依赖 NetCDF。
+[dependencies]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -16,50 +16,13 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
+use colm_bench::{
+    local_value, strict_json, uv_archive, valid_name, valid_station, INSPECT_SCRIPT,
+    OPENBENCH_VERSION, PREPARE_SCRIPT, PROGRAM_ENV, PYTHON_VERSION, UV_ENV, UV_VERSION,
+};
+
 use crate::sidecar::{register_child, ChildOwner};
 
-/// 固定的 uv 版本（2026-08-14 发布）。换版本要连同下面的校验和一起换，并用官方 `.sha256` 与实际下载核对。
-const UV_VERSION: &str = "0.12.5";
-/// (平台, 发布页上的压缩包, SHA-256)。2026-10-23 从发布页取得，并下载 aarch64-apple-darwin 一份核对过。
-/// Linux 用静态链接的 musl 版：gnu 版的 uv 自己就挑 glibc，老系统上可能连 uv 都起不来；musl 版照样认出宿主是
-/// glibc，下载 gnu 的 Python 和 manylinux 包（7920 上实测 `uv python list` 给出 `linux-x86_64-gnu`）。
-const UV_ARCHIVES: [(&str, &str, &str); 6] = [
-    (
-        "macos-aarch64",
-        "uv-aarch64-apple-darwin.tar.gz",
-        "5bb0e5fe008a773c3dbcb97ff79cd89e1241464fe9d2f986d52ad8f1b037bd62",
-    ),
-    (
-        "macos-x86_64",
-        "uv-x86_64-apple-darwin.tar.gz",
-        "b3b2137477cf96c9686ebfb71524614cec780c673fd73e59bce099aef02e70e8",
-    ),
-    (
-        "linux-x86_64",
-        "uv-x86_64-unknown-linux-musl.tar.gz",
-        "a4742988791c9aeae68c78150d6cba762062ad2a47e53738c2779d2b596bfcdb",
-    ),
-    (
-        "linux-aarch64",
-        "uv-aarch64-unknown-linux-musl.tar.gz",
-        "8767a0e77f2cd45436401b1b42bf7e9ed5a4a91a74a5305d6fe93249d0f6dbc5",
-    ),
-    (
-        "windows-x86_64",
-        "uv-x86_64-pc-windows-msvc.zip",
-        "4c4d49d8738847d9b71ba319e49a5688c93eac0fe6204b1df24e98528dddf39a",
-    ),
-    (
-        "windows-aarch64",
-        "uv-aarch64-pc-windows-msvc.zip",
-        "724279317fee6e5fa8ad1908e4eba2bbe764ef1ece5b3f4597927b62b1fe562a",
-    ),
-];
-/// PyPI 上装的 OpenBench 版本。只实测过这一版（登记表 JSON 里的 Infinity、`check` 与 `run` 对相对
-/// fulllist 的解析不一致都是按它处理的）；不锁版本时新发布会悄悄换掉行为（复验 D2-03）。换版本要重跑一次评估。
-pub(crate) const OPENBENCH_VERSION: &str = "3.0.8";
-/// OpenBench 要求 Python ≥ 3.10；3.12 的科学计算轮子（cartopy、netCDF4）三个平台都齐。
-const PYTHON_VERSION: &str = "3.12";
 /// 在软件里直接显示的报告大小上限；独立报告把图嵌在 HTML 里，更大的交给浏览器打开。
 const INLINE_REPORT_LIMIT: u64 = 40 * 1024 * 1024;
 
@@ -78,12 +41,9 @@ pub(crate) fn root() -> Result<PathBuf, String> {
         .join("openbench"))
 }
 
-fn uv_archive() -> Result<(&'static str, &'static str), String> {
+fn this_uv_archive() -> Result<(&'static str, &'static str), String> {
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    UV_ARCHIVES
-        .iter()
-        .find(|(key, _, _)| *key == platform)
-        .map(|(_, archive, sha)| (*archive, *sha))
+    uv_archive(&platform)
         .ok_or_else(|| format!("没有给 {platform} 准备 uv，请自行安装 Python 与 colm-openbench"))
 }
 
@@ -108,29 +68,18 @@ fn env_bin(root: &Path, name: &str) -> PathBuf {
 
 fn uv_command(root: &Path, uv: &Path) -> Command {
     let mut command = Command::new(uv);
-    command
-        .env("UV_PYTHON_INSTALL_DIR", root.join("python"))
-        .env("UV_PYTHON_BIN_DIR", root.join("python").join("bin"))
-        .env("UV_CACHE_DIR", root.join("cache"))
-        .env("UV_TOOL_DIR", root.join("tools").join("uv-tools"))
-        .env("UV_NO_CONFIG", "1")
-        .env("UV_NO_PROGRESS", "1");
+    for (key, value) in UV_ENV {
+        command.env(key, local_value(root, value));
+    }
     command
 }
 
-/// 专用环境里的程序（python、openbench）。OpenBench 默认把参考数据登记表写进 `~/.openbench`，
-/// matplotlib、cartopy 也各自往 HOME 下写缓存（实测 `~/.matplotlib`、`~/.local/share/cartopy`）；
-/// 全部改指到 `home/`，删掉整个 openbench 目录就不留痕迹，也不和用户自己装的 OpenBench 共用登记表。
+/// 专用环境里的程序（python、openbench），环境变量见 [`colm_bench::PROGRAM_ENV`]。
 fn env_command(root: &Path, name: &str) -> Command {
-    let home = root.join("home");
     let mut command = Command::new(env_bin(root, name));
-    command
-        .env("OPENBENCH_HOME", &home)
-        .env("MPLCONFIGDIR", home.join("matplotlib"))
-        .env("XDG_CONFIG_HOME", home.join("config"))
-        .env("XDG_CACHE_HOME", home.join("cache"))
-        .env("XDG_DATA_HOME", home.join("share"))
-        .env("PYTHONNOUSERSITE", "1");
+    for (key, value) in PROGRAM_ENV {
+        command.env(key, local_value(root, value));
+    }
     command
 }
 
@@ -294,7 +243,7 @@ fn projects(root: &Path) -> Vec<Value> {
 }
 
 /// `output/<项目>/reports/` 下的报告：优先把图嵌在里面的独立版。
-fn find_report(output: &Path) -> Option<PathBuf> {
+pub(crate) fn find_report(output: &Path) -> Option<PathBuf> {
     let projects = std::fs::read_dir(output).ok()?;
     let mut found = None;
     for project in projects.filter_map(Result::ok) {
@@ -318,11 +267,13 @@ fn find_report(output: &Path) -> Option<PathBuf> {
 
 /// 装环境的一步：`uv`（下载并校验 uv）、`python`（专用 Python 与虚拟环境）、`openbench`（OpenBench 与全部依赖）。
 /// `source` 只对 `openbench` 有意义：空着装 PyPI 发布版，给一个本地目录就从源码装（可编辑安装，改了源码立即生效）。
+/// `index` 是 PyPI 镜像（见 [`colm_bench::valid_index_url`]），空着用官方 PyPI。
 #[tauri::command]
 pub async fn bench_install(
     app: AppHandle,
     step: String,
     source: Option<String>,
+    index: Option<String>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = root()?;
@@ -347,6 +298,12 @@ pub async fn bench_install(
                 }
                 let mut command = uv_command(&root, &uv);
                 command.args(["pip", "install", "--python"]).arg(&python);
+                if let Some(url) = index.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty()) {
+                    if !colm_bench::valid_index_url(&url) {
+                        return Err(format!("镜像地址不合适：{url}"));
+                    }
+                    command.args(["--default-index", &url]);
+                }
                 match source
                     .map(|s| s.trim().to_owned())
                     .filter(|s| !s.is_empty())
@@ -376,7 +333,7 @@ pub async fn bench_install(
 }
 
 fn install_uv(app: &AppHandle, root: &Path) -> Result<PathBuf, String> {
-    let (archive, sha) = uv_archive()?;
+    let (archive, sha) = this_uv_archive()?;
     let tools = root.join("tools");
     std::fs::create_dir_all(&tools).map_err(|e| e.to_string())?;
     let file = tools.join(archive);
@@ -489,123 +446,11 @@ pub async fn bench_references() -> Result<Value, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// OpenBench 用 Python 的 `json.dumps` 输出，值里会有 `NaN`、`Infinity`（实测登记表里 23 处，如
-/// `max_uparea: Infinity`），严格的 JSON 解析器不认。字符串外、作为值出现的这几个记号换成 `null`。
-fn strict_json(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut last = ' ';
-    let mut rest = text;
-    while let Some(c) = rest.chars().next() {
-        if in_string {
-            out.push(c);
-            if escaped {
-                escaped = false;
-            } else if c == '\\' {
-                escaped = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            rest = &rest[c.len_utf8()..];
-            continue;
-        }
-        if matches!(last, ':' | ',' | '[') {
-            if let Some(token) = ["-Infinity", "Infinity", "NaN"]
-                .iter()
-                .find(|token| rest.starts_with(**token))
-            {
-                out.push_str("null");
-                rest = &rest[token.len()..];
-                last = 'l';
-                continue;
-            }
-        }
-        if c == '"' {
-            in_string = true;
-        }
-        if !c.is_whitespace() {
-            last = c;
-        }
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
-    }
-    out
-}
-
-fn valid_project(name: &str) -> Result<(), String> {
-    let ok = !name.is_empty()
-        && name.len() <= 60
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    ok.then_some(())
+pub(crate) fn valid_project(name: &str) -> Result<(), String> {
+    valid_name(name)
+        .then_some(())
         .ok_or_else(|| format!("比较名只能用字母、数字、- 和 _：{name:?}"))
 }
-
-/// 看一个 history 目录：文件前缀、时间分辨率、年份、是不是格点、单点的经纬度。用专用环境里的 xarray 读，
-/// 窗口进程不链接 NetCDF。
-const INSPECT_SCRIPT: &str = r#"
-import glob, json, os, sys
-import numpy as np, xarray as xr
-folder = sys.argv[1]
-files = sorted(glob.glob(os.path.join(folder, "*_hist_*.nc")))
-if not files:
-    # 给的是算例目录：history 在 out/<DEF_CASE_NAME>/history（名字不一定和目录名一样）。
-    nested = sorted(glob.glob(os.path.join(folder, "out", "*", "history", "*_hist_*.nc")))
-    if nested:
-        folder = os.path.dirname(nested[0])
-        files = sorted(glob.glob(os.path.join(folder, "*_hist_*.nc")))
-if not files:
-    raise SystemExit(f"no *_hist_*.nc in {folder}")
-name = os.path.basename(files[0])
-prefix = name[: name.index("_hist_") + len("_hist_")]
-with xr.open_dataset(files[0]) as first:
-    times = first["time"].values
-    step = float((times[1] - times[0]) / np.timedelta64(1, "s")) if len(times) > 1 else 2.6e6
-    spatial = any(first.sizes.get(d, 1) > 1 for d in ("lat", "lon", "lat_cama", "lon_cama"))
-    lon = float(first["lon"].values.ravel()[0]) if "lon" in first and not spatial else None
-    lat = float(first["lat"].values.ravel()[0]) if "lat" in first and not spatial else None
-    start = int(str(times[0])[:4])
-with xr.open_dataset(files[-1]) as last:
-    end = int(str(last["time"].values[-1])[:4])
-tim = "Hour" if step <= 3600 else "3Hour" if step <= 3 * 3600 else "Day" if step <= 86400 else "Month"
-print(json.dumps({"history_dir": os.path.abspath(folder), "prefix": prefix, "tim_res": tim, "syear": start, "eyear": end,
-                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files)}))
-"#;
-
-/// 单点算例的 history 是每月一个文件；OpenBench 的站点模拟要一个站一个文件。只并只随时间变的地表变量
-/// （维度只有 `time`、`patch`）：带上土壤层、积雪层这些维度一起并，实测 AT-Neu 48 个文件吃到 17 GB 内存
-/// 十分钟还没完；只并地表变量 9.5 秒、360 MB。站点清单（ID,SYEAR,EYEAR,LON,LAT,DIR）用文件自己的经纬度与年份。
-const PREPARE_SCRIPT: &str = r#"
-import glob, os, sys
-import xarray as xr
-folder, prefix, out_nc, out_csv, station = sys.argv[1:6]
-files = sorted(glob.glob(os.path.join(folder, prefix + "*.nc")))
-if not files:
-    raise SystemExit(f"no {prefix}*.nc in {folder}")
-parts = []
-for path in files:
-    with xr.open_dataset(path) as ds:
-        keep = [v for v in ds.data_vars if "time" in ds[v].dims and set(ds[v].dims) <= {"time", "patch"}]
-        part = ds[keep]
-        if "patch" in part.dims:
-            part = part.squeeze("patch", drop=True)
-        parts.append(part.load())
-merged = xr.concat(parts, dim="time")
-with xr.open_dataset(files[0]) as first:
-    lon = float(first["lon"].values.ravel()[0])
-    lat = float(first["lat"].values.ravel()[0])
-merged["lon"] = lon
-merged["lat"] = lat
-merged.to_netcdf(out_nc)
-start = int(str(merged["time"].values[0])[:4])
-end = int(str(merged["time"].values[-1])[:4])
-with open(out_csv, "w") as handle:
-    handle.write("ID,SYEAR,EYEAR,LON,LAT,DIR\n")
-    handle.write(f"{station},{start},{end},{lon},{lat},{os.path.abspath(out_nc)}\n")
-print(f"{station}: {len(files)} files, {merged.sizes['time']} steps, {len(merged.data_vars)} variables")
-"#;
 
 /// 一个 history 目录的概况（[`INSPECT_SCRIPT`]）。比较页加模拟时调，填前缀、时间分辨率、年份与种类。
 #[tauri::command]
@@ -654,14 +499,7 @@ pub async fn bench_run(
     valid_project(&name)?;
     for site in sites.iter().flatten() {
         valid_project(&site.id)?;
-        // 站点 ID 写进 CSV：不能有逗号、引号、换行。
-        if site.station.is_empty()
-            || site.station.len() > 80
-            || site
-                .station
-                .chars()
-                .any(|c| matches!(c, ',' | '"' | '\n' | '\r'))
-        {
+        if !valid_station(&site.station) {
             return Err(format!("站点名不合适：{:?}", site.station));
         }
     }
