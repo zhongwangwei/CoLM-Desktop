@@ -21,6 +21,8 @@ use crate::sidecar::{register_child, ChildOwner};
 /// 固定的 uv 版本（2026-08-14 发布）。换版本要连同下面的校验和一起换，并用官方 `.sha256` 与实际下载核对。
 const UV_VERSION: &str = "0.12.5";
 /// (平台, 发布页上的压缩包, SHA-256)。2026-10-23 从发布页取得，并下载 aarch64-apple-darwin 一份核对过。
+/// Linux 用静态链接的 musl 版：gnu 版的 uv 自己就挑 glibc，老系统上可能连 uv 都起不来；musl 版照样认出宿主是
+/// glibc，下载 gnu 的 Python 和 manylinux 包（7920 上实测 `uv python list` 给出 `linux-x86_64-gnu`）。
 const UV_ARCHIVES: [(&str, &str, &str); 6] = [
     (
         "macos-aarch64",
@@ -34,13 +36,13 @@ const UV_ARCHIVES: [(&str, &str, &str); 6] = [
     ),
     (
         "linux-x86_64",
-        "uv-x86_64-unknown-linux-gnu.tar.gz",
-        "68a509da24b06b4223a1c0175fb5eb5bc79342b76cbeff0cfe51ac3f5b17b6b2",
+        "uv-x86_64-unknown-linux-musl.tar.gz",
+        "a4742988791c9aeae68c78150d6cba762062ad2a47e53738c2779d2b596bfcdb",
     ),
     (
         "linux-aarch64",
-        "uv-aarch64-unknown-linux-gnu.tar.gz",
-        "9bf43b4d1a07665bf64d4c4e710930b382321a785e0eb10aac07f46471f86a31",
+        "uv-aarch64-unknown-linux-musl.tar.gz",
+        "8767a0e77f2cd45436401b1b42bf7e9ed5a4a91a74a5305d6fe93249d0f6dbc5",
     ),
     (
         "windows-x86_64",
@@ -86,20 +88,10 @@ fn own_uv(root: &Path) -> PathBuf {
     root.join("tools").join(exe("uv"))
 }
 
-/// 用哪个 uv：自己装的优先，没有就用系统里已有的。
+/// 只用自己装的 uv：系统里的 uv 版本不受控，还会读用户自己的 `uv.toml`，装出来的东西也就不全在这个目录下。
 fn uv(root: &Path) -> Option<PathBuf> {
     let own = own_uv(root);
-    if own.is_file() {
-        return Some(own);
-    }
-    which("uv")
-}
-
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(exe(name)))
-        .find(|candidate| candidate.is_file())
+    own.is_file().then_some(own)
 }
 
 fn env_bin(root: &Path, name: &str) -> PathBuf {
@@ -115,8 +107,27 @@ fn uv_command(root: &Path, uv: &Path) -> Command {
     let mut command = Command::new(uv);
     command
         .env("UV_PYTHON_INSTALL_DIR", root.join("python"))
+        .env("UV_PYTHON_BIN_DIR", root.join("python").join("bin"))
         .env("UV_CACHE_DIR", root.join("cache"))
+        .env("UV_TOOL_DIR", root.join("tools").join("uv-tools"))
+        .env("UV_NO_CONFIG", "1")
         .env("UV_NO_PROGRESS", "1");
+    command
+}
+
+/// 专用环境里的程序（python、openbench）。OpenBench 默认把参考数据登记表写进 `~/.openbench`，
+/// matplotlib、cartopy 也各自往 HOME 下写缓存（实测 `~/.matplotlib`、`~/.local/share/cartopy`）；
+/// 全部改指到 `home/`，删掉整个 openbench 目录就不留痕迹，也不和用户自己装的 OpenBench 共用登记表。
+fn env_command(root: &Path, name: &str) -> Command {
+    let home = root.join("home");
+    let mut command = Command::new(env_bin(root, name));
+    command
+        .env("OPENBENCH_HOME", &home)
+        .env("MPLCONFIGDIR", home.join("matplotlib"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_DATA_HOME", home.join("share"))
+        .env("PYTHONNOUSERSITE", "1");
     command
 }
 
@@ -196,7 +207,7 @@ pub async fn bench_status() -> Result<Value, String> {
         let python_version = python
             .is_file()
             .then(|| {
-                let mut command = Command::new(&python);
+                let mut command = env_command(&root, "python");
                 command.arg("--version");
                 quiet(command)
             })
@@ -204,7 +215,7 @@ pub async fn bench_status() -> Result<Value, String> {
         let openbench = python
             .is_file()
             .then(|| {
-                let mut command = Command::new(&python);
+                let mut command = env_command(&root, "python");
                 command.args(["-c", "import openbench; print(openbench.__version__)"]);
                 quiet(command)
             })
@@ -433,7 +444,7 @@ pub async fn bench_references() -> Result<Value, String> {
         if !openbench.is_file() {
             return Err("先装 OpenBench".into());
         }
-        let mut command = Command::new(openbench);
+        let mut command = env_command(&root, "openbench");
         command
             .args(["ref", "list", "--format", "json"])
             .env("NO_COLOR", "1");
@@ -576,7 +587,7 @@ pub async fn bench_inspect(dir: String) -> Result<Value, String> {
         if !python.is_file() {
             return Err("先装专用 Python 和 OpenBench".into());
         }
-        let mut command = Command::new(python);
+        let mut command = env_command(&root, "python");
         command.args(["-c", INSPECT_SCRIPT]).arg(&dir);
         colm_kernel::run::no_console(&mut command);
         let output = command.output().map_err(|e| e.to_string())?;
@@ -638,7 +649,7 @@ pub async fn bench_run(
         std::fs::write(&file, config).map_err(|e| e.to_string())?;
         for site in sites.unwrap_or_default() {
             say(&app, "prepare", &format!("合并 {} 的 history", site.id));
-            let mut command = Command::new(env_bin(&root, "python"));
+            let mut command = env_command(&root, "python");
             command
                 .args(["-c", PREPARE_SCRIPT])
                 .arg(&site.history_dir)
@@ -652,7 +663,7 @@ pub async fn bench_run(
         let ref_root = ref_root.filter(|r| !r.trim().is_empty());
         for stage in ["check", "run"] {
             say(&app, stage, &format!("openbench {stage} openbench.yaml"));
-            let mut command = Command::new(&openbench);
+            let mut command = env_command(&root, "openbench");
             command.arg(stage).arg("openbench.yaml").current_dir(&dir);
             if let Some(root) = &ref_root {
                 command.env("OPENBENCH_REF_ROOT", root);
@@ -696,7 +707,7 @@ pub async fn bench_register(
         if !openbench.is_file() {
             return Err("先装 OpenBench".into());
         }
-        let mut command = Command::new(openbench);
+        let mut command = env_command(&root, "openbench");
         command
             .args(["ref", "register", &name, "--root-dir", &root_dir])
             .args(["--data-type", &data_type, "--tim-res", &tim_res])
@@ -737,7 +748,7 @@ pub async fn bench_scan_preview(dir: String) -> Result<String, String> {
         if !openbench.is_file() {
             return Err("先装 OpenBench".into());
         }
-        let mut command = Command::new(openbench);
+        let mut command = env_command(&root, "openbench");
         command
             .args(["ref", "scan", &dir, "--dry-run", "--allow-skip"])
             .env("NO_COLOR", "1");

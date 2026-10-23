@@ -36239,3 +36239,50 @@ Slurm、LSF、PBS 的载体由 `sbatch`/`bsub`/`qsub` 交给调度系统起，�
 - 在没有 uv 的机器上下载 uv 的那条路径只有校验和表与单元测试，没在窗口里跑过（这台机器已有 uv）；
 - 格点算例的比较只验证了识别，没有跑完一次评估；
 - Windows、Linux 上的安装还没实测。
+
+## 第 755 轮：OpenBench 的一切都留在软件自己的目录里；Linux 改用 musl 版 uv；各平台能否装上（2026-10-23）
+
+**漏出去的东西**（第 754 轮的隔离 HOME 里查到）：
+- OpenBench 把参考数据登记表写进 `~/.openbench`；
+- matplotlib 写 `~/.matplotlib`，cartopy 写 `~/.local/share/cartopy`（下载 Natural Earth 底图）；
+- 系统里有 uv 时用的是系统那个 uv，它还会读用户自己的 `uv.toml`。
+
+**改法**：
+- 专用环境里的程序一律经 `env_command` 启动，这些位置都改指到 `openbench/home/`：
+  - OpenBench 自己的 `OPENBENCH_HOME`；
+  - `MPLCONFIGDIR`；
+  - `XDG_CONFIG_HOME`、`XDG_CACHE_HOME`、`XDG_DATA_HOME`（cartopy 读 `XDG_DATA_HOME`）；
+  - 另加 `PYTHONNOUSERSITE=1`。
+- 只用软件自己下载的 uv，同时设 `UV_NO_CONFIG`、`UV_PYTHON_BIN_DIR`、`UV_TOOL_DIR`。
+- 结果：删掉 `openbench/` 就不留痕迹，也不和用户自己装的 OpenBench 共用登记表。
+
+**复验**（真实窗口，全新的隔离 HOME `tmp/ob3`）：
+- 这次走的是软件自己下载、校验 uv 的路径，"一键安装（3 步）"全部完成：uv 0.12.5、Python 3.12.14、OpenBench 3.0.8；
+- 用表单登记参考数据，登记表到 152 个；加 AT-Neu 的 history 目录后评估完成；
+- 指标与第 754 轮逐位一致：KGESS 0.6016882、RMSE 26.924637、r 0.9141505、bias 16.522755、Overall 0.6999289；
+- HOME 下 CoLM-Desktop 目录之外只多出软件本身的 `edu.sysu.colm.desktop/assistant`；`.openbench`、`matplotlib`、`share/cartopy` 都在 `openbench/home/` 里。
+
+**Linux 用 musl 版 uv**：
+- gnu 版 uv 本身就依赖宿主的 glibc；musl 版是静态链接（`static-pie linked`），不依赖。
+- 在 7920（Ubuntu glibc 2.43）上实测，musl 版照样认出宿主是 glibc，给出 `cpython-3.12.14-linux-x86_64-gnu`。
+- 两个 musl 包的 SHA-256 都下载后与官方 `.sha256` 核对过。
+
+**各平台能否装上**：用 `uv pip compile colm-openbench==3.0.8 --python-version 3.12 --python-platform … --only-binary :all:` 逐个解析，即所有依赖都必须有现成的二进制包、不许现场编译：
+
+| 平台 | 结果 |
+|---|---|
+| Linux x86_64，glibc 2.28 及以上 | 可以，55 个包 |
+| Linux x86_64，glibc 2.17（CentOS 7 一代） | 可以，51 个包，自动退到较老的版本：numpy 2.2.6、pandas 2.3.2、scipy 1.16.3、cartopy 0.24.1 |
+| Linux aarch64，glibc 2.28 及以上 | 可以 |
+| Linux aarch64，glibc 2.17 | **不行**：cartopy 没有可用的二进制包 |
+| Windows x86_64 | 可以，56 个包 |
+| Windows ARM64 | **不行**：cartopy 没有可用的二进制包 |
+| Intel Mac，macOS 10.15 及以上 | 可以 |
+| Apple 芯片 Mac，macOS 12 及以上 | 可以 |
+| Apple 芯片 Mac，macOS 11 | **不行**：scikit-learn 没有可用的二进制包 |
+
+其他前提：
+- 要能连上 github.com（uv 和 Python 都从 GitHub 发布页下载）和 pypi.org；
+- Windows 要有系统自带的 `curl.exe`、`tar.exe`（Windows 10 1803 起才有）。
+
+Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结果。

@@ -251,15 +251,24 @@ export default function ComparePage() {
       <Card
         title={t('评估环境', 'Evaluation environment')}
         description={t(
-          '用 OpenBench 评估。环境装在软件自己的数据目录里，不碰系统里的 Python：先装 uv（约 20 MB，校验后才用），再装专用 Python 3.12，最后装 OpenBench 和它的全部依赖（约 400 MB，需要联网）。',
-          'Evaluation uses OpenBench. Everything installs into the app’s own data folder without touching the system Python: uv first (about 20 MB, verified before use), then a private Python 3.12, then OpenBench with all its dependencies (about 400 MB, needs the internet).',
+          '用 OpenBench 评估。uv、Python、OpenBench 和它的登记表、缓存全部装在软件自己的数据目录里，不碰系统里的 Python，也不和你自己装的 OpenBench 混用：先装 uv（约 20 MB，校验后才用），再装专用 Python 3.12，最后装 OpenBench 和它的全部依赖（约 400 MB，需要联网）。',
+          'Evaluation uses OpenBench. uv, Python, OpenBench, its reference registry and caches all live in the app’s own data folder, apart from the system Python and any OpenBench you installed yourself: uv first (about 20 MB, verified before use), then a private Python 3.12, then OpenBench with all its dependencies (about 400 MB, needs the internet).',
         )}
       >
         <ul className="compare-status">
+          {status?.root && (
+            <li>
+              {t('安装位置：', 'Installed in: ')}
+              {status.root}{' '}
+              <Button onClick={() => void invoke('open_path', { path: status.root })}>
+                {t('打开', 'Open')}
+              </Button>
+            </li>
+          )}
           <li>
             uv：
             {status?.uv
-              ? `${status.uv_own ? t('软件自带', 'bundled') : t('系统已有', 'from the system')} · ${status.uv}`
+              ? `${t('软件自带', 'bundled')} · ${status.uv}`
               : t('未安装', 'not installed')}
           </li>
           <li>
