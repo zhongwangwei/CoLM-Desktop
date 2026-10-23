@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import type { VersionRef } from './types';
 import { plainError } from './bilingual';
+import { closeReasons } from './navigation-guard';
 import {
   missingRevision,
   rebindQuestion,
@@ -485,4 +486,19 @@ test('a startup call that answers after its timeout still completes the startup'
   assert.deepEqual(late.state.kernels, []);
   assert.ok(Array.isArray(late.state.versions));
   assert.notEqual((late.state.startup as { phase?: string } | undefined)?.phase, 'failed');
+});
+
+test('closing asks about unsaved edits once each and about local runs, never about remote jobs', () => {
+  const unsaved = () => 'The case settings are not saved.';
+  const reasons = closeReasons(
+    [unsaved, unsaved, () => null],
+    {
+      '/a': { running: true },
+      '/b': { running: true, location: 'remote' },
+      '/c': { running: false },
+    },
+    (count) => `${count} local`,
+  );
+  assert.deepEqual(reasons, ['The case settings are not saved.', '1 local']);
+  assert.deepEqual(closeReasons([], {}, String), []);
 });

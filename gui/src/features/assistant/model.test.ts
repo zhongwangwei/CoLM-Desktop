@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  rejectedBeforeTurn,
   appendDelta,
   apiEfforts,
   assistantModels,
@@ -310,4 +311,14 @@ it('ships finite per-conversation limits and keeps them on the saved settings', 
   );
   assert.equal(saved.session_turn_limit, 7);
   assert.equal(saved.session_token_limit, 0);
+});
+
+it('refusals before a turn starts are recognised so the input can be restored', () => {
+  assert.equal(
+    rejectedBeforeTurn('session limit reached: this conversation has used its 100 turns'),
+    true,
+  );
+  assert.equal(rejectedBeforeTurn('Error: still answering the previous message'), true);
+  assert.equal(rejectedBeforeTurn('no API key is stored for this service; set it'), true);
+  assert.equal(rejectedBeforeTurn('HTTP 500 from the model'), false);
 });

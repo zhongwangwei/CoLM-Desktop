@@ -389,6 +389,12 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "app_close": {
+    "close": {
+      "required": true,
+      "rust_type": "bool"
+    }
+  },
   "backend_ready": {},
   "probe_log": {
     "msg": {

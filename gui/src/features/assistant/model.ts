@@ -369,3 +369,17 @@ export function selectAssistantModel(settings: Settings, model: string) {
       : {}),
   };
 }
+
+/**
+ * 助手在开始这一轮之前就拒绝了这条消息（没有记进会话）：会话到上限、上一条还在答、没有登记 Key。
+ * 这时前端要撤回刚显示的气泡、恢复输入与附件（GUI 审查 D-06）。按 colm-agent 的固定英文识别。
+ */
+export function rejectedBeforeTurn(message: string) {
+  const text = message.replace(/^(?:Error: )+/, '');
+  return (
+    text.startsWith('session limit reached:') ||
+    text.includes('still answering the previous message') ||
+    text.includes('no API key is stored') ||
+    text.includes('no API key is configured')
+  );
+}

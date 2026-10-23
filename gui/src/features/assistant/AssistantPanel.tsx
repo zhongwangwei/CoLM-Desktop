@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { invoke, invokeJson, listen, hasBackend } from '../../lib/ipc';
 import { useApp } from '../../lib/app-state';
+import { askConfirm } from '../../lib/confirm';
 import { guideState, drive } from '../../lib/guide';
 import { Button, Select, Notice } from '../../components/ui';
 import AssistantSettings from './Settings';
@@ -18,6 +19,7 @@ import {
   withChoice,
   EXAMPLE_STARTERS,
   examplePrompt,
+  rejectedBeforeTurn,
   type AgentEvent,
   type Message,
   type Settings,
@@ -110,6 +112,8 @@ export default function AssistantPanel() {
   const runningRef = useRef(false);
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<DocumentAttachment[]>([]);
+  // 刚发出、助手还没开始回应的那条消息：被拒绝时用来恢复输入框与附件（D-06）。
+  const pendingSend = useRef<{ typed: string; attachments: DocumentAttachment[] } | null>(null);
   const [attaching, setAttaching] = useState(false);
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState<Session[] | null>(null);
@@ -167,6 +171,9 @@ export default function AssistantPanel() {
     let active = true;
     let unlisten: (() => void) | undefined;
     const handler = (event: AgentEvent) => {
+      // 助手开始回应（任何输出）后，这条消息就算被接下了，不再恢复输入框。
+      if (event.type !== 'error' && event.type !== 'ready' && event.type !== 'exited')
+        pendingSend.current = null;
       if (!active) return;
       switch (event.type) {
         case 'ready':
@@ -266,16 +273,29 @@ export default function AssistantPanel() {
           grant.current = null;
           setApproval(null);
           break;
-        case 'error':
+        case 'error': {
           busy(false);
           grant.current = null;
           setApproval(null);
+          // 助手在开始这一轮之前就拒绝了（会话到上限、上一条还在答、没有 Key）：这条消息没被记下，
+          // 撤回刚显示的气泡，把输入和附件放回去，免得用户打的字和附件白白没了（GUI 审查 D-06）。
+          const sent = pendingSend.current;
+          pendingSend.current = null;
+          if (sent && rejectedBeforeTurn(event.message || '')) {
+            setMessages((old) => {
+              const at = old.map((m) => m.kind).lastIndexOf('user');
+              return at >= 0 ? [...old.slice(0, at), ...old.slice(at + 1)] : old;
+            });
+            setInput((value) => value || sent.typed);
+            setAttachments((items) => (items.length ? items : sent.attachments));
+          }
           setError(
             event.message === 'cancelled'
               ? t('已停止。', 'Stopped.')
               : errorText(event.message || t('助手错误', 'Assistant error')),
           );
           break;
+        }
         case 'exited':
           busy(false);
           grant.current = null;
@@ -438,6 +458,7 @@ export default function AssistantPanel() {
         ? `${prompt}\n\n${t('附件：', 'Attachments: ')}${attachments.map((item) => item.name).join('、')}`
         : prompt;
       setMessages((old) => [...old, { kind: 'user', text: shown }]);
+      pendingSend.current = { typed, attachments };
       await invoke('assistant_send', { text, context: JSON.stringify(guideState()) });
       setInput((value) => (value.trim() === typed ? '' : value));
       setAttachments([]);
@@ -449,6 +470,14 @@ export default function AssistantPanel() {
       historyDraft.current = '';
     } catch (e) {
       busy(false);
+      // 发送本身失败（例如后端拒绝）：刚显示的气泡撤回，输入与附件本来就还在。
+      if (pendingSend.current) {
+        pendingSend.current = null;
+        setMessages((old) => {
+          const at = old.map((m) => m.kind).lastIndexOf('user');
+          return at >= 0 ? [...old.slice(0, at), ...old.slice(at + 1)] : old;
+        });
+      }
       setError(errorText(String(e)));
     }
   }
@@ -567,6 +596,15 @@ export default function AssistantPanel() {
                 variant="ghost"
                 onClick={() =>
                   void perform(async () => {
+                    // 删除会话连同对话、审计记录一起删掉，不能恢复：先确认（GUI 审查 D-05）。
+                    const ok = await askConfirm(
+                      t(
+                        `删除会话"${item.title}"？对话记录会一起删掉，不能恢复。`,
+                        `Delete the conversation "${item.title}"? Its messages are deleted too and cannot be restored.`,
+                      ),
+                      { confirmLabel: t('删除', 'Delete'), danger: true },
+                    );
+                    if (!ok) return;
                     await invoke('assistant_delete_session', { id: item.id });
                     setSessions((old) => old?.filter((value) => value.id !== item.id) || null);
                     if (session.current === item.id) {

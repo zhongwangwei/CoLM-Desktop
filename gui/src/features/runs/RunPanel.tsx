@@ -25,6 +25,7 @@ import {
   remoteSubmissionBlocked,
   REMOTE_CHECK_MS,
   remoteRunPermissions,
+  neverSubmitted,
   reconcileRemoteRun,
   matchesRemoteRun,
   restoreRunView,
@@ -790,6 +791,29 @@ export default function RunPanel({
       });
       return merged;
     } catch (e) {
+      // 本机既没有提交记录也没有提交意图：这次提交根本没到服务器（提交前就失败、或在写下意图前被停）。
+      // 原来状态停在"未核对、运行中"，开始按钮灰着、核对也清不掉，只能重启应用（GUI 审查 G-06）。
+      if (command === 'remote_status' && neverSubmitted(String(e))) {
+        update((old) => {
+          const previous = old.running[target];
+          if (!previous?.running || previous.location !== 'remote') return {};
+          return {
+            running: {
+              ...old.running,
+              [target]: {
+                ...previous,
+                status: 'failed',
+                running: false,
+                error: bilingual(
+                  '这次提交没有到达服务器，可以重新提交。',
+                  'This submission never reached the server; it can be submitted again.',
+                ),
+              },
+            },
+          };
+        });
+        if (alive.current && currentCase.current === target) setRemote(null);
+      }
       if (!quiet) notify(String(e), true);
       throw e;
     } finally {

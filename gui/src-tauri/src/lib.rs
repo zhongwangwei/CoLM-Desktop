@@ -12,6 +12,7 @@
 mod assistant;
 mod bench;
 mod bench_remote;
+mod close_gate;
 mod config;
 #[cfg(feature = "e2e-driver")]
 mod e2e_driver;
@@ -61,7 +62,7 @@ fn print_report(window: tauri::WebviewWindow) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 /// 关窗与退出走同一套停止规则。原来两处各写一份，退出路径漏了 AI 助手（第 732 轮）。
 /// 两个事件在单窗口下都会触发；每一步都是幂等的，重复调用无害。
-fn stop_everything(app: &tauri::AppHandle, when: &str) {
+pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
     if let Err(error) = app.state::<RunProcesses>().cancel_on_shutdown() {
         eprintln!("failed to stop every run while {when}: {error}");
     }
@@ -118,10 +119,20 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
-            if matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
-                stop_everything(window.app_handle(), "closing");
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // 先问前端有没有未保存的东西、在跑的任务（GUI 审查 G-01），确认后由 `app_close` 停掉一切再关。
+                if window
+                    .app_handle()
+                    .state::<close_gate::CloseGate>()
+                    .intercept(window.app_handle())
+                {
+                    api.prevent_close();
+                } else {
+                    stop_everything(window.app_handle(), "closing");
+                }
             }
         })
+        .manage(close_gate::CloseGate::default())
         .manage(run_processes)
         .manage(CaseCreations::default())
         .manage(remote_cases::RemoteCreationBatches::default())
@@ -372,15 +383,20 @@ pub fn run() {
             pick_file,
             export_text_file,
             print_report,
+            close_gate::app_close,
         ])
         .build(tauri::generate_context!())
         .expect("error building CoLM Desktop")
-        .run(|app, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                stop_everything(app, "exiting");
+        .run(|app, event| match event {
+            // ⌘Q 与关窗一样先问前端；`code` 不为空的是程序自己要退出（`app_close` 确认后），直接放行。
+            tauri::RunEvent::ExitRequested { api, code, .. } => {
+                if code.is_none() && app.state::<close_gate::CloseGate>().intercept(app) {
+                    api.prevent_exit();
+                } else {
+                    stop_everything(app, "exiting");
+                }
             }
+            tauri::RunEvent::Exit => stop_everything(app, "exiting"),
+            _ => {}
         });
 }

@@ -2287,6 +2287,17 @@ const ADOPT_SLURM_JOB: &str = r#"  if [ -z "$ID" ] && [ "$S" = slurm ]; then
   fi
 "#;
 
+/// 提交意图写下多久之后，服务器上还没有作业目录才算"没到服务器"：上传引擎快照、建算例副本在建作业目录之前，
+/// 慢的线路上要几分钟。
+const PENDING_GRACE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+fn pending_age(case: &Path) -> Option<std::time::Duration> {
+    std::fs::metadata(case.join(PENDING))
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|time| time.elapsed().ok())
+}
+
 fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<()> {
     colm_remote::auth::check_connection(pending.record.ssh_auth.as_ref())?;
     let ssh = Ssh::new(&pending.record.host)?;
@@ -2307,6 +2318,34 @@ fn cmd_pending_status(opts: &Opts, pending: PendingRun, lines: usize) -> Result<
         let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":true,"ended":"failed","status":status});
         crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
         std::fs::remove_file(pending.source_case.join(PENDING))?;
+        sync_directory(&pending.source_case)?;
+        println!(
+            "{}",
+            json!({"record":pending.record,"pending":serde_json::Value::Null,"status":status,"ended":"failed"})
+        );
+        return Ok(());
+    }
+    // 服务器上根本没有这个作业目录，而且提交意图已经放了一阵子：提交没到服务器（提交中途被停、SSH 断了）。
+    // 原来一律当"身份不全、不要重新提交"，算例从此卡在待核对，只能重启应用（GUI 审查 G-06）。刚写下的意图
+    // 不算：提交可能还在传引擎，作业目录稍后才建。
+    if identity.lines().next() == Some("identity=missing")
+        && pending_age(&pending.source_case).is_some_and(|age| age > PENDING_GRACE)
+    {
+        let status = job::Status {
+            state: job::State::Lost,
+            phase: None,
+            detail: Some("FAILED: the submission never reached the server".into()),
+            log_tail: String::new(),
+        };
+        let outcome = json!({"job":pending.record.job,"outcome":"observed","terminal":true,"ended":"failed","status":status});
+        crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&pending)?, &outcome)?;
+        std::fs::rename(
+            pending.source_case.join(PENDING),
+            pending.source_case.join(format!(
+                ".colm-remote-pending-never-submitted-{}.json",
+                now()
+            )),
+        )?;
         sync_directory(&pending.source_case)?;
         println!(
             "{}",

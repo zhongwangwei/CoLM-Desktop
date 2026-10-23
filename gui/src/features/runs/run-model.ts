@@ -571,3 +571,11 @@ export function submittingHost(
 ): string {
   return host && targets.some((dir) => running[dir]?.status === 'submitting') ? host : '';
 }
+
+/**
+ * `remote_status` 说这个算例本机既没有提交记录也没有提交意图（colm-cli 的 "has not been run remotely"）：
+ * 提交根本没到服务器，可以放开重新提交（GUI 审查 G-06）。
+ */
+export function neverSubmitted(error: string) {
+  return error.includes('has not been run remotely');
+}

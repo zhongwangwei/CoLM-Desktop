@@ -130,7 +130,8 @@ export type AppEvent =
   | 'bench://log'
   | 'assistant://event'
   | 'remote-create://progress'
-  | 'colm-about';
+  | 'colm-about'
+  | 'app://close-requested';
 export async function listen<T = unknown>(
   event: AppEvent,
   callback: (payload: T) => void,

@@ -21,7 +21,13 @@ import {
   versionLabel,
   withoutRevisions,
 } from './model-tidy';
-import { navigationBlock, type NavigationGuard, type NavigationTarget } from './navigation-guard';
+import {
+  closeReasons,
+  navigationBlock,
+  type NavigationGuard,
+  type NavigationTarget,
+} from './navigation-guard';
+import { askConfirm } from './confirm';
 import { projectName, projectToSave, readSavedProject, writeSavedProject } from './navigation';
 import {
   RECENT_PROJECTS_KEY,
@@ -484,6 +490,44 @@ export function AppProvider({ children }: { children: ReactNode }) {
       bindRunningTargets(() => new Set());
     };
   }, [notify, update]);
+  // 关窗、⌘Q：后端先拦下来问这里（GUI 审查 G-01）。有未保存的编辑或在跑的本机任务就请用户确认，
+  // 没有就直接关。答复只给一次：连点关闭时不叠第二个对话框。
+  const askingClose = useRef(false);
+  useEffect(() => {
+    let alive = true;
+    let stop: (() => void) | undefined;
+    void listen('app://close-requested', () => {
+      if (askingClose.current) return;
+      askingClose.current = true;
+      const reasons = closeReasons(guards.current, current.current.running, (count) =>
+        bilingual(
+          `有 ${count} 个本机模拟正在运行，关闭会停止它们。`,
+          `${count} local simulation${count > 1 ? 's are' : ' is'} running; closing stops ${count > 1 ? 'them' : 'it'}.`,
+        ),
+      );
+      const answer = reasons.length
+        ? askConfirm(
+            `${bilingual('现在关闭 CoLM Desktop？', 'Close CoLM Desktop now?')}\n\n${reasons.join('\n')}`,
+            {
+              confirmLabel: bilingual('仍然关闭', 'Close anyway'),
+              cancelLabel: bilingual('取消', 'Cancel'),
+              danger: true,
+            },
+          )
+        : Promise.resolve(true);
+      void answer.then((close) => {
+        askingClose.current = false;
+        return invoke('app_close', { close });
+      });
+    }).then((unlisten) => {
+      if (alive) stop = unlisten;
+      else unlisten();
+    });
+    return () => {
+      alive = false;
+      stop?.();
+    };
+  }, []);
   return (
     <Context.Provider
       value={{

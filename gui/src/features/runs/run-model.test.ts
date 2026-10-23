@@ -2,6 +2,7 @@ import test, { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import type { RunState } from '../../lib/types';
 import {
+  neverSubmitted,
   remoteSubmissionBlocked,
   remoteRunPermissions,
   reconcileRemoteRun,
@@ -336,4 +337,12 @@ describe('local parallelism defaults', () => {
   it('falls back to one core when the webview reports no usable count', () => {
     assert.ok(localCoreCount() >= 1);
   });
+});
+
+test('a status reply saying the case was never run remotely releases a stuck submission', () => {
+  assert.equal(
+    neverSubmitted('Error: /p/a has not been run remotely (no .colm-remote.json)'),
+    true,
+  );
+  assert.equal(neverSubmitted('remote submission is pending; inspect remote-status'), false);
 });

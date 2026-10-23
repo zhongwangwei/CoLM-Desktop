@@ -501,3 +501,24 @@ fn only_a_truly_lost_job_can_be_closed() {
     closable(&status(job::State::Lost, None)).unwrap();
     closable(&status(job::State::Unknown, None)).unwrap();
 }
+
+#[test]
+fn the_job_probe_tells_a_lost_submission_from_one_on_the_server() {
+    assert_eq!(
+        parse_job_probe("colm-job-probe=absent\n"),
+        Some((false, String::new(), None))
+    );
+    assert_eq!(
+        parse_job_probe(
+            "colm-job-probe=present\ncolm-job-scheduler=slurm\ncolm-job-sched-id=119890\n"
+        ),
+        Some((true, "slurm".into(), Some("119890".into())))
+    );
+    // 直接后台运行的作业目录里没有 scheduler 文件；登录横幅不影响识别。
+    assert_eq!(
+        parse_job_probe("Welcome to land\ncolm-job-probe=present\n"),
+        Some((true, "bare".into(), None))
+    );
+    assert_eq!(parse_job_probe("Welcome\n"), None);
+    assert_eq!(parse_job_probe(""), None);
+}

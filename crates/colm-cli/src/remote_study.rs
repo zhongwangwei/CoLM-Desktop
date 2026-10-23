@@ -807,8 +807,126 @@ pub(crate) fn verified_comparison(study_dir: &Path) -> Result<study::model::Stud
 }
 
 /// `remote-study-status`：作业状态，加上服务器上研究的进度（建好之后）。
+/// 只有提交意图（`PENDING`）、没有正式记录时怎么办（GUI 审查 G-05）。原来这种研究只能看状态：作业已经到了服务器、
+/// 本机记录没写成时，运行中取消不了、结束了取不回，服务器白耗机时。
+enum PendingOutcome {
+    /// 没有待核对的提交。
+    None,
+    /// 另一个进程正在提交（它持有研究锁）：别动。
+    Busy,
+    /// 服务器上确有这个作业，而且身份对得上：补写正式记录，之后取消、取回照常。
+    Adopted,
+    /// 服务器上没有这个作业目录：提交没到服务器。意图改名留档，可以重新提交。
+    NeverSubmitted(PathBuf),
+}
+
+/// 服务器探测的输出：`colm-job-probe=present|absent`，作业目录在时再给调度系统与作业号（没有调度系统时两者都没有，
+/// 按直接后台运行）。用带前缀的标记行、在整段输出里找：集群的登录脚本可能先打印横幅。认不出时返回 `None`，不猜。
+fn parse_job_probe(text: &str) -> Option<(bool, String, Option<String>)> {
+    let field = |key: &str| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix(key))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    match field("colm-job-probe=")?.as_str() {
+        "absent" => Some((false, String::new(), None)),
+        "present" => Some((
+            true,
+            field("colm-job-scheduler=").unwrap_or_else(|| "bare".into()),
+            field("colm-job-sched-id="),
+        )),
+        _ => None,
+    }
+}
+
+fn adopt_pending(study_dir: &Path) -> Result<PendingOutcome> {
+    if study_dir.join(RECORD).exists() || !study_dir.join(PENDING).exists() {
+        return Ok(PendingOutcome::None);
+    }
+    // 提交全程持有研究锁：拿不到锁就是还在提交，这时没有作业目录也不能当成"没到服务器"，否则会重复提交。
+    let Ok(_lock) = study::runner::StudyRunLock::acquire(study_dir) else {
+        return Ok(PendingOutcome::Busy);
+    };
+    if study_dir.join(RECORD).exists() {
+        return Ok(PendingOutcome::None);
+    }
+    let pending = read_pending(study_dir)?;
+    colm_remote::auth::check_connection(pending.ssh_auth.as_ref())?;
+    let ssh = Ssh::new(&pending.host)?;
+    let dir = quote(&job::job_dir(&pending.root, &pending.job));
+    let probe = ssh.run_ok(&format!(
+        "if [ -d {dir} ]; then echo colm-job-probe=present; cat {dir}/scheduler 2>/dev/null | head -n 1 | sed 's/^/colm-job-scheduler=/'; cat {dir}/sched_id 2>/dev/null | head -n 1 | sed 's/^/colm-job-sched-id=/'; else echo colm-job-probe=absent; fi"
+    ))?;
+    let Some((present, scheduler, sched_id)) = parse_job_probe(&probe) else {
+        bail!(
+            "cannot tell whether the pending Study job reached {}",
+            pending.host
+        );
+    };
+    if !present {
+        let target = study_dir.join(format!(
+            ".colm-remote-study-pending-never-submitted-{}.json",
+            now()
+        ));
+        std::fs::rename(study_dir.join(PENDING), &target)
+            .with_context(|| format!("cannot archive {}", PENDING))?;
+        return Ok(PendingOutcome::NeverSubmitted(target));
+    }
+    ssh.run_ok(&pending_identity_script(&pending)?)?;
+    ensure!(
+        matches!(scheduler.as_str(), "bare" | "slurm" | "pbs" | "lsf"),
+        "the pending Study job has an unknown scheduler {scheduler:?}"
+    );
+    let engine = pending
+        .engine
+        .clone()
+        .context("the pending Study submission did not record its engine snapshot")?;
+    let mut provenance = pending.provenance.clone();
+    if !provenance.is_object() {
+        provenance = json!({});
+    }
+    provenance["schema"] = json!(1);
+    provenance["adopted_from_pending"] = json!(true);
+    provenance["model_revision"] = serde_json::to_value(
+        crate::study_version::pinned(study_dir)?.and_then(|pin| pin.model_revision),
+    )?;
+    provenance["location"] = json!({ "kind": "server", "host": pending.host });
+    provenance["engine_snapshot"] = json!(engine);
+    let record = StudyRecord {
+        ssh_auth: pending.ssh_auth.clone(),
+        host: pending.host.clone(),
+        root: pending.root.clone(),
+        job: pending.job.clone(),
+        remote_project: pending.remote_project.clone(),
+        engine,
+        submitted_at: now(),
+        scheduler,
+        scheduler_id: sched_id,
+        provenance,
+        fetched_at: None,
+    };
+    std::fs::write(
+        study_dir.join(RECORD),
+        serde_json::to_string_pretty(&record)?,
+    )?;
+    std::fs::remove_file(study_dir.join(PENDING))?;
+    Ok(PendingOutcome::Adopted)
+}
+
 pub(crate) fn cmd_status(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    match adopt_pending(&study_dir)? {
+        PendingOutcome::NeverSubmitted(archived) => {
+            println!(
+                "{}",
+                json!({"record":Value::Null,"pending":Value::Null,"outcome":"never_submitted","archived":archived,"status":{"state":"unknown"},"study":Value::Null})
+            );
+            return Ok(());
+        }
+        PendingOutcome::None | PendingOutcome::Busy | PendingOutcome::Adopted => {}
+    }
     if !study_dir.join(RECORD).exists() {
         let pending = read_pending(&study_dir)?;
         colm_remote::auth::check_connection(pending.ssh_auth.as_ref())?;
@@ -857,6 +975,14 @@ pub(crate) fn cmd_status(opts: &Opts) -> Result<()> {
 /// Cancel only the job named by this Study's captured connection and submission record.
 pub(crate) fn cmd_cancel(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    // 只有提交意图时先核对补记，否则作业到了服务器也取消不了（G-05）。要在拿研究锁之前做。
+    if let PendingOutcome::NeverSubmitted(archived) = adopt_pending(&study_dir)? {
+        println!(
+            "{}",
+            json!({"outcome":"never_submitted","archived":archived,"request_accepted":false,"terminal":true})
+        );
+        return Ok(());
+    }
     let _lock = study::runner::StudyRunLock::acquire(&study_dir)?;
     study::engine::status(&study_dir)?;
     let record = read_record(&study_dir)?;
@@ -1377,6 +1503,10 @@ fn install_fetched_study(study_dir: &Path, staged: &Path) -> Result<()> {
 
 pub(crate) fn cmd_fetch(opts: &Opts) -> Result<()> {
     let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    // 同 `cmd_cancel`：只有提交意图、作业其实跑完了的，先补记再取回（G-05）。
+    if let PendingOutcome::NeverSubmitted(_) = adopt_pending(&study_dir)? {
+        bail!("this Study's submission never reached the server; there is nothing to fetch, and it can be submitted again");
+    }
     ensure_fetch_boundary(&study_dir)?;
     let _fetch_lock = study::runner::StudyRunLock::acquire(&study_dir)?;
     let manifest = study::engine::status(&study_dir)?;
