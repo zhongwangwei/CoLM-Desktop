@@ -1,4 +1,5 @@
 import { loadPercent, myJobsText, type ServerLoad } from './server-load';
+import { plainError } from '../../lib/bilingual';
 
 function Meter({ value, label }: { value: number; label: string }) {
   const level = value >= 85 ? ' is-high' : value >= 60 ? ' is-mid' : '';
@@ -59,7 +60,7 @@ export default function ServerLoadPanel({
           {busy ? t('读取中…', 'Reading…') : t('刷新', 'Refresh')}
         </button>
       </header>
-      {error && <p className="server-load-error">{error}</p>}
+      {error && <p className="server-load-error">{plainError(error)}</p>}
       {!load && !error && (
         <p className="muted">
           {busy

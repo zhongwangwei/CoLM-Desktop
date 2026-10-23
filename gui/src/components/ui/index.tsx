@@ -15,6 +15,7 @@ import { cva } from 'class-variance-authority';
 import { cn } from '../../lib/utils';
 import { useApp } from '../../lib/app-state';
 import { validDate } from '../../lib/dates';
+import { plainError } from '../../lib/bilingual';
 import { useRenderedAction } from '../../lib/guide';
 const buttonStyle = cva('button', {
   variants: {
@@ -307,7 +308,7 @@ export function Notice({
 }) {
   return (
     <div className={`notice notice-${tone}`} role={tone === 'error' ? 'alert' : 'status'}>
-      {children}
+      {typeof children === 'string' ? plainError(children) : children}
     </div>
   );
 }

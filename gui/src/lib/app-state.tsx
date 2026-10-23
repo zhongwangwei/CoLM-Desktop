@@ -1,4 +1,4 @@
-import { bilingual } from './bilingual';
+import { bilingual, plainError } from './bilingual';
 import {
   createContext,
   useContext,
@@ -117,8 +117,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [],
   );
   const notify = useCallback(
-    (message: string, error = false) =>
+    (text: string, error = false) =>
       update((old) => {
+        const message = plainError(text);
         const notices =
           old.notices.at(-1) === message ? old.notices : [...old.notices.slice(-4), message];
         const errors = (old.errorNotices ?? []).filter((item) => notices.includes(item));

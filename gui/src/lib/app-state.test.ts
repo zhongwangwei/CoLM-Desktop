@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import type { VersionRef } from './types';
+import { plainError } from './bilingual';
 import {
   missingRevision,
   rebindQuestion,
@@ -202,12 +203,13 @@ test('error notices keep their error style until they scroll out or are dismisse
   const code = ts.transpileModule(`const callback = (${body});`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  const notify = new Function('update', 'useCallback', `${code}; return callback;`)(
+  const notify = new Function('update', 'useCallback', 'plainError', `${code}; return callback;`)(
     update,
     (callback: unknown) => callback,
+    plainError,
   ) as (message: string, error?: boolean) => void;
   notify('saved');
-  notify('cannot reach server', true);
+  notify('Error: cannot reach server', true);
   assert.deepEqual(state.notices, ['saved', 'cannot reach server']);
   assert.deepEqual(state.errorNotices, ['cannot reach server']);
   for (const message of ['a', 'b', 'c', 'd', 'e']) notify(message);

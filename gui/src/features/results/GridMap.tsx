@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { plainError } from '../../lib/bilingual';
 import { invokeJson } from '../../lib/ipc';
 import { readErrorText } from './variable-labels';
 
@@ -161,7 +162,7 @@ export default function GridMap({
         </span>
       </div>
       {error ? (
-        <p className="grid-map-error">{error}</p>
+        <p className="grid-map-error">{plainError(error)}</p>
       ) : (
         <div className={`grid-map-canvas${busy ? ' is-busy' : ''}`}>
           {data ? (
