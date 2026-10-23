@@ -812,6 +812,33 @@ export default function AssistantPanel() {
           }
         }}
       />
+      {/* 添加文档、发送、停止紧跟在输入框下面；模型与思考程度的快捷选择放到它们后面（用户指出按钮离输入框太远）。 */}
+      <div className="flex flex-wrap gap-2">
+        <Button
+          variant="ghost"
+          disabled={!ready || running || attaching || state.assistantSettingsOpen}
+          onClick={() => void perform(attachDocument)}
+        >
+          {attaching ? t('读取中…', 'Reading…') : t('添加文档', 'Attach document')}
+        </Button>
+        <Button
+          variant="primary"
+          disabled={!ready || running || (!input.trim() && !attachments.length)}
+          onClick={() => void send()}
+        >
+          {t('发送', 'Send')}
+        </Button>
+        <Button
+          disabled={!running}
+          onClick={() =>
+            void perform(async () => {
+              await invoke('assistant_cancel', {});
+            })
+          }
+        >
+          {t('停止', 'Stop')}
+        </Button>
+      </div>
       <div className="assistant-choices">
         <label>
           <span>{t('模型', 'Model')}</span>
@@ -869,32 +896,6 @@ export default function AssistantPanel() {
             ))}
           </Select>
         </label>
-      </div>
-      <div className="flex flex-wrap gap-2">
-        <Button
-          variant="ghost"
-          disabled={!ready || running || attaching || state.assistantSettingsOpen}
-          onClick={() => void perform(attachDocument)}
-        >
-          {attaching ? t('读取中…', 'Reading…') : t('添加文档', 'Attach document')}
-        </Button>
-        <Button
-          variant="primary"
-          disabled={!ready || running || (!input.trim() && !attachments.length)}
-          onClick={() => void send()}
-        >
-          {t('发送', 'Send')}
-        </Button>
-        <Button
-          disabled={!running}
-          onClick={() =>
-            void perform(async () => {
-              await invoke('assistant_cancel', {});
-            })
-          }
-        >
-          {t('停止', 'Stop')}
-        </Button>
       </div>
       <p className="text-xs text-muted-foreground" role="status">
         {running
