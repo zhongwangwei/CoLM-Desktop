@@ -27,7 +27,8 @@ import {
   sensitivityResponses,
   sensitivityRanking,
   calibrationSeed,
-  plannedCandidates,
+  networkWeightCount,
+  studyProgress,
   suggestedRange,
   suggestedWindows,
   type ParameterContext,
@@ -78,6 +79,8 @@ type Envelope = {
   manifest?: { id?: string; spec?: unknown };
   results?: (string | { path: string })[];
   model_version?: { model_revision?: { version?: VersionRef } | null } | null;
+  /** 第一次运行时记下的引擎与前处理（`run-options.json`）；之后的运行都用它。 */
+  run_options?: { engine: string; preprocessors: string } | null;
   remote?: RemoteStudyRecord | null;
   remote_pending?: RemoteStudyRecord | null;
 };
@@ -274,6 +277,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setPopulation(value);
   };
   const [seed, setSeed] = useState('1');
+  // 差分进化连续多少代没有改善就提前停；0 表示跑满（后端缺省 3）。原来没有入口，提前停也关不掉。
+  const [patience, setPatience] = useState('3');
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [valFrom, setValFrom] = useState('');
@@ -723,10 +728,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       site_mode: 'shared',
     };
     if (!tuning) {
+      // 分析时段：输出统计、分位带和目标函数都只看这一段。原来不写，统计里混进初值还没稳定的
+      // 第一年（GUI 审查 C-04）。两个框都空着才表示整段模拟期。
+      const analysis = from.trim() || to.trim() ? calibrationWindows(from, to, '', '') : null;
       // Morris 的 candidate_count 是轨迹数，后端按 轨迹数 × (k+1) 生成样本。
       const uncertainty = {
         ...base,
         outputs: names,
+        ...(analysis ? { analysis_from: analysis.from, analysis_to: analysis.to } : {}),
         budget: {
           candidate_count:
             method === 'oat' ? undefined : method === 'morris' ? Number(count) : budget.candidates,
@@ -810,6 +819,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         }),
     );
     const windows = calibrationWindows(from, to, valFrom, valTo);
+    const stopAfter = Number(patience);
+    if (!Number.isInteger(stopAfter) || stopAfter < 0)
+      throw new Error(
+        tr(
+          '"连续几代没有改善就停"要填 0 或正整数（0 表示跑满全部代数）',
+          'Stop-after-generations must be 0 or a positive integer (0 runs every generation)',
+        ),
+      );
     const pairs = Number(minPairs);
     if (!Number.isInteger(pairs) || pairs < 2)
       throw new Error(tr('最少观测配对数至少是 2', 'Minimum pairs must be ≥2'));
@@ -832,6 +849,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             generations: Number(generations),
             jobs: concurrency,
             include_baseline: true,
+            patience: stopAfter,
           },
           ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
         }),
@@ -863,6 +881,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           generations: Number(generations),
           jobs: concurrency,
           include_baseline: true,
+          patience: stopAfter,
         },
         ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
       }),
@@ -966,7 +985,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         stream: true,
         jobs: concurrency,
         retryFailed: false,
-        engine: ai ? 'rust' : engine,
+        // 研究跑过就用它记下的引擎，不用页面当前的选择（后端会拒绝中途换引擎，GUI 审查 R8）。
+        engine: envelope.run_options?.engine ?? (ai ? 'rust' : engine),
         modelVersion: null,
         modelRevision,
       });
@@ -1560,13 +1580,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       : null;
     if (!live()) return;
     const day = (text: string) => (text ? `${text}T00:00` : '');
+    // 不确定性分析不留验证期：分析时段是扣掉预热后的整段。
     const next = windows
-      ? {
-          from: day(windows.from),
-          to: day(windows.to),
-          valFrom: day(windows.validationFrom),
-          valTo: day(windows.validationTo),
-        }
+      ? tuning
+        ? {
+            from: day(windows.from),
+            to: day(windows.to),
+            valFrom: day(windows.validationFrom),
+            valTo: day(windows.validationTo),
+          }
+        : {
+            from: day(windows.from),
+            to: day(windows.validationTo || windows.to),
+            valFrom: '',
+            valTo: '',
+          }
       : period
         ? { from: day(period[0]), to: day(period[1]), valFrom: '', valTo: '' }
         : { from: '', to: '', valFrom: '', valTo: '' };
@@ -1584,6 +1612,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       return;
     }
     const w = windows;
+    if (!tuning) {
+      setWindowNote(
+        w.warmup
+          ? [
+              '算例没有设预热，分析时段从第二年开始，避开初值还没稳定的第一年。',
+              'The cases have no spin-up, so the analysis starts in the second year, after the initial state settles.',
+            ]
+          : null,
+      );
+      return;
+    }
     setWindowNote([
       [
         w.warmup ? '算例没有设预热，率定期从第二年开始，避开初值还没稳定的第一年。' : '',
@@ -1605,10 +1644,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       ].join(''),
     ]);
   };
+  const siteKey = sites.join('|');
   useEffect(() => {
-    const key = `${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
-    if (!workbench || step !== 3 || !scoring || !sites.length || prefilledFor.current === key)
-      return;
+    // 率定和不确定性分析的预填不同（后者不留验证期），换了方法要重算。
+    const key = `${tuning}|${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
+    if (!workbench || step !== 3 || ai || !sites.length || prefilledFor.current === key) return;
     prefilledFor.current = key;
     let live = true;
     void invoke<Record<string, CaseProfile>>('model_case_profiles', {
@@ -1651,7 +1691,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workbench, step, scoring, sites.join('|'), state.versionRef.id, state.versionRef.revision]);
+  }, [workbench, step, ai, tuning, siteKey, state.versionRef.id, state.versionRef.revision]);
   // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
   // 任何研究都会写回那个草稿。但为那个草稿跑的研究本身仍该写回它：原来跑完从侧栏回来，
   // 写回悄悄从"写回草稿 X"变成"新建版本"（GUI 审查 B-05）。按研究目录记下它的草稿，
@@ -2279,7 +2319,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   // 编译配置：没选、或选的与算例种类不配时重挑。单点挑 default；格点按第一个算例的网格与分类挑
   // （与项目页运行时同一个 compatibleKernel）。界面上只显示配置名。
   useEffect(() => {
-    if (!studyKernels.length || studyKernels.some((k) => k.dir === kernel)) return;
+    // 没有与算例种类相配的编译配置（比如只有单点配置却选了格点算例）：清掉旧的选择，后面的步骤
+    // 才会真的拦住，原来沿用单点配置还能一路点下去（GUI 审查 R11）。
+    if (!studyKernels.length) {
+      if (kernel) setKernel('');
+      return;
+    }
+    if (studyKernels.some((k) => k.dir === kernel)) return;
     if (!spatialStudy) {
       setKernel((studyKernels.find((k) => k.preset === 'default') ?? studyKernels[0]!).dir);
       return;
@@ -2389,6 +2435,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     };
   }, [step, scoring, spatialStudy, host, kernel, sites, observations]);
   const tickedCount = Object.values(parameters).filter((p) => p.enabled).length;
+  // 差分进化的维数 = 勾选的参数 + 要训练的网络权重。原来只数勾选的参数：训练网络时通常一个都不勾，
+  // 种群停在 8，而默认网络有 4–41 个权重（GUI 审查 B-02）。网络设计没填好时按 0 个权重算。
+  const weightCount = (() => {
+    if (!(ai && (trainNetwork || tab === 'process'))) return 0;
+    try {
+      return networkWeightCount(network());
+    } catch {
+      return 0;
+    }
+  })();
+  const dimensionCount = tickedCount + weightCount;
   useEffect(() => {
     // 原来固定 4：16 核的本机和 48 核的服务器都只跑 4 个。本机留四分之一给界面和系统；
     // 服务器取研究规格允许的上限 16。
@@ -2396,9 +2453,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const cores = globalThis.navigator?.hardwareConcurrency || 4;
       setJobs(String(host ? 16 : Math.min(16, Math.max(1, Math.floor(cores * 0.75)))));
     }
-    // 差分进化的种群太小会早熟收敛；常用的经验是参数个数的 5–10 倍，这里取 5 倍、至少 8 组。
-    if (!populationEdited.current) setPopulation(String(Math.max(8, 5 * tickedCount)));
-  }, [host, tickedCount]);
+    // 差分进化的种群太小会早熟收敛；常用的经验是维数的 5–10 倍，这里取 5 倍、至少 8 组。
+    // 上限 100：再大一代就要跑上百次模拟，网络很大时预算提示会建议缩小网络或减少代数。
+    if (!populationEdited.current)
+      setPopulation(String(Math.min(100, Math.max(8, 5 * dimensionCount))));
+  }, [host, dimensionCount]);
   // 勾过"我已核对参数范围、预算和适用范围"之后又改了设计，勾选还留着，核对的已不是要建的那个研究
   //（GUI 审查 B-06）。已打开的研究核对的是冻结的规格，与这些框无关，不动它。
   useEffect(() => {
@@ -2425,6 +2484,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     gridTargets,
     trainNetwork,
     scoreObjective,
+    patience,
   ]);
   // 换了研究，"用哪个成员"还留着上一个研究的成员编号（GUI 审查 A-07），"仍要写入"也一样。
   useEffect(() => {
@@ -2999,13 +3059,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       };
       return { ...old, [String(i)]: withSuggestedRange(row, { ...p, ...patch }) };
     });
-  const plannedTotal = plannedCandidates(frozenSpec);
   const ranked = Object.entries(envelope?.state?.candidates ?? {})
     .sort(
       ([, a], [, b]) =>
         (a.calibration ?? Number.POSITIVE_INFINITY) - (b.calibration ?? Number.POSITIVE_INFINITY),
     )
     .slice(0, 200);
+  const windowHint = casePeriod && (
+    <p className="muted study-hint study-wide">
+      {tr(
+        `所选算例的模拟期：${casePeriod[0]} 至 ${casePeriod[1]}。`,
+        `Simulation period of the chosen cases: ${casePeriod[0]} to ${casePeriod[1]}.`,
+      )}
+      {windowNote && ` ${tr(windowNote[0], windowNote[1])}`}
+    </p>
+  );
   const diagnostics = studyDiagnostics(envelope?.state?.warnings);
   const responses = sensitivityResponses(importance);
   const ranking = sensitivityRanking(importance, sensitivityKey, frozenSpec);
@@ -3061,6 +3129,30 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     (n === 2 && sites.length > 0 && !!kernel) ||
     (n === 3 && sites.length > 0 && !!kernel && (ai || chosenCount > 0)) ||
     (n === 4 && !!studyDir);
+  // 步骤灰着时说清缺什么（GUI 审查 C-08），原来只有灰掉的按钮，要用户自己猜。
+  const stepBlocked = (n: number) =>
+    canStep(n)
+      ? ''
+      : !sites.length
+        ? tr('先在第 1 步勾选算例。', 'Choose cases in step 1 first.')
+        : !kernel
+          ? spatialStudy
+            ? tr(
+                '没有格点用的编译配置：先到"计算资源"编译一个格点配置。',
+                'No gridded build configuration: build one under Compute resources first.',
+              )
+            : tr(
+                '没有单点用的编译配置：先到"计算资源"编译 default 配置。',
+                'No single-point build configuration: build the default one under Compute resources first.',
+              )
+          : n === 3 && !ai && !chosenCount
+            ? tr('先在第 2 步勾选至少一个参数。', 'Tick at least one parameter in step 2 first.')
+            : n === 4
+              ? tr(
+                  '建好或打开一个研究后才有运行与结果。',
+                  'Create or open a study to see its run and results.',
+                )
+              : '';
   const typeTable = !typeChoices
     ? []
     : typeChoices.kind === 'igbp'
@@ -3272,6 +3364,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           {next.label} →
         </ActionButton>
       )}
+      {next && !next.enabled && stepBlocked(next.to) && (
+        <span className="muted study-hint">{stepBlocked(next.to)}</span>
+      )}
     </div>
   );
   return (
@@ -3332,6 +3427,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               action={`research-step-${n}`}
               label={label}
               disabled={!canStep(n)}
+              title={stepBlocked(n) || undefined}
               run={() => setStep(n)}
             >
               <span className="study-step-number">{n < step ? '✓' : n}</span>
@@ -3643,6 +3739,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             </Field>
           )}
           {!tuning && (
+            <div className="study-grid">
+              {windowHint}
+              <Field label={tr('分析时段开始（UTC，可空）', 'Analysis start (UTC, optional)')}>
+                <Input
+                  type="datetime-local"
+                  value={from}
+                  onChange={(e) => setFrom(e.target.value)}
+                />
+              </Field>
+              <Field label={tr('分析时段结束（UTC，可空）', 'Analysis end (UTC, optional)')}>
+                <Input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
+              </Field>
+            </div>
+          )}
+          {!tuning && (
             <label className="param-check">
               <input
                 type="checkbox"
@@ -3752,40 +3863,24 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 </>
               )}
               <div className="study-grid">
-                {casePeriod && (
-                  <p className="muted study-hint study-wide">
-                    {tr(
-                      `所选算例的模拟期：${casePeriod[0]} 至 ${casePeriod[1]}。`,
-                      `Simulation period of the chosen cases: ${casePeriod[0]} to ${casePeriod[1]}.`,
-                    )}
-                    {windowNote && ` ${tr(windowNote[0], windowNote[1])}`}
-                  </p>
-                )}
-                <Field
-                  label={
-                    tuning
-                      ? tr('率定期开始（UTC）', 'Calibration start (UTC)')
-                      : tr('评价时段开始（UTC）', 'Scoring start (UTC)')
-                  }
-                >
-                  <Input
-                    type="datetime-local"
-                    value={from}
-                    onChange={(e) => setFrom(e.target.value)}
-                  />
-                </Field>
-                <Field
-                  label={
-                    tuning
-                      ? tr('率定期结束（UTC）', 'Calibration end (UTC)')
-                      : tr('评价时段结束（UTC）', 'Scoring end (UTC)')
-                  }
-                >
-                  <Input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
-                </Field>
-                {/* 不确定性分析只看一个时段；留出验证是率定的事（后端也拒绝）。 */}
+                {/* 不确定性分析的时段在上面"分析时段"里，输出统计和目标函数共用；留出验证是率定的事。 */}
                 {tuning && (
                   <>
+                    {windowHint}
+                    <Field label={tr('率定期开始（UTC）', 'Calibration start (UTC)')}>
+                      <Input
+                        type="datetime-local"
+                        value={from}
+                        onChange={(e) => setFrom(e.target.value)}
+                      />
+                    </Field>
+                    <Field label={tr('率定期结束（UTC）', 'Calibration end (UTC)')}>
+                      <Input
+                        type="datetime-local"
+                        value={to}
+                        onChange={(e) => setTo(e.target.value)}
+                      />
+                    </Field>
                     <Field label={tr('验证期开始（可空）', 'Validation start (optional)')}>
                       <Input
                         type="datetime-local"
@@ -3918,6 +4013,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               <Field label={tr('随机种子', 'Random seed')}>
                 <Input type="number" value={seed} onChange={(e) => setSeed(e.target.value)} />
               </Field>
+              {tuning && (
+                <Field
+                  label={tr(
+                    '连续几代没有改善就停（0 = 跑满全部代数）',
+                    'Stop after generations without improvement (0 = run all)',
+                  )}
+                >
+                  <Input
+                    type="number"
+                    value={patience}
+                    onChange={(e) => setPatience(e.target.value)}
+                  />
+                </Field>
+              )}
               {host && (
                 <Field label={tr('服务器前处理引擎', 'Server preprocessors')}>
                   <Select value={preprocessors} onChange={(e) => setPreprocessors(e.target.value)}>
@@ -3934,7 +4043,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           </div>
           {tuning &&
             budgetOk &&
-            budgetAdvice(chosenCount, Number(population), Number(generations)).map(
+            budgetAdvice(dimensionCount, Number(population), Number(generations)).map(
               ([zh, english]) => (
                 <p key={zh} className="muted study-hint">
                   {tr(zh, english)}
@@ -4030,24 +4139,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </span>
             </div>
             {(() => {
-              const done = completed ?? 0;
-              const pct = plannedTotal
-                ? Math.min(100, Math.round((done / plannedTotal) * 100))
-                : null;
+              const progress = studyProgress(frozenSpec, completed ?? 0, currentState);
               return (
                 <div className="study-progress">
                   <div className="study-progress-bar">
-                    <span style={{ width: `${pct ?? 0}%` }} />
+                    <span style={{ width: `${progress.percent}%` }} />
                   </div>
                   <span>
-                    {plannedTotal
-                      ? tr(
-                          `已完成 ${done} / ${plannedTotal} 组参数`,
-                          `${done} of ${plannedTotal} parameter sets done`,
-                        )
-                      : tr(`已完成 ${done} 组参数`, `${done} parameter sets done`)}
+                    {tr(progress.zh, progress.en)}
                     {best ? tr(` · 当前最优 ${best}`, ` · best so far ${best}`) : ''}
                   </span>
+                  {progress.note && (
+                    <p className="muted study-hint">{tr(progress.note[0], progress.note[1])}</p>
+                  )}
                 </div>
               );
             })()}
@@ -4107,6 +4211,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   </tbody>
                 </table>
               </div>
+            )}
+            {envelope?.run_options && (
+              <p className="muted study-hint">
+                {tr(
+                  `运行用 ${envelope.run_options.engine === 'fortran' ? 'Fortran' : 'Rust'} 模型、${envelope.run_options.preprocessors === 'fortran' ? 'Fortran' : 'Rust'} 前处理（第一次运行时定下，之后不变）。`,
+                  `Runs with the ${envelope.run_options.engine === 'fortran' ? 'Fortran' : 'Rust'} model and ${envelope.run_options.preprocessors === 'fortran' ? 'Fortran' : 'Rust'} preprocessors (fixed at the first run).`,
+                )}
+              </p>
             )}
             {frozen.budget.length > 0 && (
               <p className="muted study-hint">

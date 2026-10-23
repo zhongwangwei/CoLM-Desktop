@@ -245,6 +245,14 @@ export function networkSpec(
     );
   if (!['pft', 'land_class', 'soil_stress'].includes(slot))
     throw new Error(bilingual('网络作用位置不对', 'Invalid slot'));
+  // 相对输出是乘在查表值上的乘数，不能为负（后端同样拒绝；绝对输出的参数硬边界由后端按参数目录查）。
+  if (relative && min < 0)
+    throw new Error(
+      bilingual(
+        '相对输出是乘在默认值上的倍数，下限不能小于 0',
+        'A relative output multiplies the default value, so its lower bound cannot be negative',
+      ),
+    );
   return {
     slot,
     features: names,
@@ -510,8 +518,8 @@ export function budgetAdvice(
   const advice: [string, string][] = [];
   if (parameters > 8)
     advice.push([
-      `一次率定 ${parameters} 个参数，差分进化很难在有限预算里收敛；建议先做不确定性分析，只率定其中最敏感的几个。`,
-      `Calibrating ${parameters} parameters at once rarely converges on a limited budget; run an uncertainty analysis first and calibrate only the most sensitive few.`,
+      `一次要搜 ${parameters} 维（参数加网络权重），差分进化很难在有限预算里收敛；参数先用不确定性分析筛出最敏感的几个，网络可以减少输入特征或用线性网络。`,
+      `Searching ${parameters} dimensions (parameters plus network weights) rarely converges on a limited budget; screen parameters with an uncertainty analysis first, and use fewer features or a linear network.`,
     ]);
   if (population < 5 * parameters)
     advice.push([
@@ -734,10 +742,14 @@ export function frozenDesign(spec: Record<string, unknown> | null) {
   else if (n(budget.candidate_count) != null)
     lines.push([`样本 ${budget.candidate_count} 组`, `${budget.candidate_count} samples`]);
   if (n(budget.patience) != null && n(budget.generations) != null)
-    lines.push([
-      `连续 ${budget.patience} 代没有改善就提前停止`,
-      `stops early after ${budget.patience} generations without improvement`,
-    ]);
+    lines.push(
+      budget.patience === 0
+        ? ['跑满全部代数，不提前停止', 'runs every generation without stopping early']
+        : [
+            `连续 ${budget.patience} 代没有改善就提前停止`,
+            `stops early after ${budget.patience} generations without improvement`,
+          ],
+    );
   if (n(budget.jobs) != null)
     lines.push([`每个研究同时 ${budget.jobs} 个模拟`, `${budget.jobs} simulations at a time`]);
   if (n(spec?.seed) != null) lines.push([`随机种子 ${spec!.seed}`, `seed ${spec!.seed}`]);
@@ -887,4 +899,61 @@ export function plannedCandidates(spec: Record<string, unknown> | null): number 
   const population = Number(budget.population),
     generations = Number(budget.generations);
   return population > 0 && generations >= 0 ? population * (generations + 1) : null;
+}
+
+/** 网络要训练的权重个数：逐层 输入×输出 + 偏置，与后端 `HybridStudySpec::weight_count` 一致。 */
+export function networkWeightCount(network: {
+  features: unknown[];
+  hidden: number[];
+  outputs: unknown[];
+}): number {
+  const widths = [network.features.length, ...network.hidden, network.outputs.length];
+  let count = 0;
+  for (let i = 0; i + 1 < widths.length; i++) count += widths[i]! * widths[i + 1]! + widths[i + 1]!;
+  return count;
+}
+
+/**
+ * 进度条与文字。差分进化的计划总数只是上限：连续 `patience` 代没有改善就提前结束（后端缺省 3，
+ * 0 表示跑满）。原来按上限画进度，提前收敛的研究停在"42 / 70"，看起来像被中断（GUI 审查 R9/C-07）。
+ */
+export function studyProgress(spec: Record<string, unknown> | null, done: number, status: string) {
+  const total = plannedCandidates(spec);
+  const finished = ['completed', 'completedwithfailures'].includes(
+    status.replace(/_/g, '').toLowerCase(),
+  );
+  const budget = (spec?.budget ?? {}) as Record<string, unknown>;
+  const de = spec?.method === 'differential-evolution';
+  const patience = typeof budget.patience === 'number' ? budget.patience : 3;
+  if (!total)
+    return {
+      percent: finished ? 100 : 0,
+      zh: `已完成 ${done} 组参数`,
+      en: `${done} parameter sets done`,
+      note: null as [string, string] | null,
+    };
+  if (de && finished && done < total)
+    return {
+      percent: 100,
+      zh: `已完成 ${done} 组参数（最多 ${total} 组）`,
+      en: `${done} parameter sets done (at most ${total})`,
+      note: [
+        `连续 ${patience} 代没有明显改善，提前结束：这是收敛了，不是中断。`,
+        `Stopped early after ${patience} generations without clear improvement: it converged, it was not interrupted.`,
+      ] as [string, string],
+    };
+  return {
+    percent: Math.min(100, Math.round((done / total) * 100)),
+    zh: de ? `已完成 ${done} / 最多 ${total} 组参数` : `已完成 ${done} / ${total} 组参数`,
+    en: de
+      ? `${done} of at most ${total} parameter sets done`
+      : `${done} of ${total} parameter sets done`,
+    note:
+      de && !finished && patience > 0
+        ? ([
+            `连续 ${patience} 代没有改善会提前结束，实际可能少于上限。`,
+            `It stops early after ${patience} generations without improvement, so it may run fewer.`,
+          ] as [string, string])
+        : null,
+  };
 }

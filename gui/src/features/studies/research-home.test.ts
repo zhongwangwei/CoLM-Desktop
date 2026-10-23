@@ -25,6 +25,8 @@ import {
   calibrationSeed,
   frozenDesign,
   plannedCandidates,
+  networkWeightCount,
+  studyProgress,
   sensitivityRanking,
   sensitivityResponses,
   studyDiagnostics,
@@ -554,6 +556,8 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     calibrationSeed,
     frozenDesign,
     plannedCandidates,
+    networkWeightCount,
+    studyProgress,
     sensitivityRanking,
     sensitivityResponses,
     studyDiagnostics,
@@ -1027,6 +1031,7 @@ it('prefilled windows follow each case spin-up and are recomputed when the cases
   type Run = (period: [string, string] | null, live: () => boolean) => Promise<void>;
   const prefill = (invoke: (command: string, args: unknown) => Promise<unknown>) =>
     pageCallback('prefillWindows', {
+      tuning: true,
       sites: ['/p/site1'],
       invoke,
       suggestedWindows,
@@ -1234,4 +1239,50 @@ it('a parameter read cut short by another design change lets step 2 read again',
   });
   await load();
   assert.equal(loadedFor.current, '', 'the stale read clears the marker so the effect reads again');
+});
+it('an uncertainty analysis prefills the whole period after warm-up and sends it as the analysis window', async () => {
+  const filled: Record<string, string> = { from: '', to: '', valFrom: '', valTo: '' };
+  const setter = (key: string) => (value: (old: string) => string) => {
+    filled[key] = value(filled[key]!);
+  };
+  const run = pageCallback('prefillWindows', {
+    tuning: false,
+    sites: ['/p/site1'],
+    invoke: async () => ({
+      start: '2002-01-01',
+      end: '2012-12-31',
+      output_start: '2002-01-01',
+      spinup_years: 0,
+    }),
+    suggestedWindows,
+    autoWindows: { current: { from: '', to: '', valFrom: '', valTo: '' } },
+    setFrom: setter('from'),
+    setTo: setter('to'),
+    setValFrom: setter('valFrom'),
+    setValTo: setter('valTo'),
+    setCasePeriod: () => {},
+    setWindowNote: () => {},
+  }) as unknown as (period: [string, string] | null, live: () => boolean) => Promise<void>;
+  await run(['2002-01-01', '2012-12-31'], () => true);
+  assert.deepEqual(filled, {
+    from: '2003-01-01T00:00',
+    to: '2012-12-31T00:00',
+    valFrom: '',
+    valTo: '',
+  });
+});
+it('a disabled next step says what is missing', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('research-step-2');
+  await page.settle();
+  page.requests.at(-1)!.resolve({ entry: { dir: '/p/site1' } });
+  await page.settle();
+  page.requests.at(-1)!.resolve([parameterRow()]);
+  await page.settle();
+  const text = JSON.stringify(page.nodes().map((node) => node.children));
+  assert.match(text, /先在第 2 步勾选至少一个参数/);
+  const step3 = page.nodes().find((n) => n.props.action === 'research-step-3');
+  assert.match(String(step3?.props.title), /勾选至少一个参数/);
 });

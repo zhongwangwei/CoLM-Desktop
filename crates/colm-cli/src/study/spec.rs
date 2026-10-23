@@ -589,6 +589,32 @@ impl HybridStudySpec {
                     output.name
                 );
             }
+            // 原来只查 lo < hi：相对输出能给出负乘数，绝对输出能越过参数的硬边界，网络会产出负的光合参数
+            // 这类无意义的成员（GUI 审查 R10）。相对输出是乘数，不能为负；绝对输出两端都要过参数自己的校验。
+            if output.relative && lo < 0.0 {
+                bail!(
+                    "hybrid output {} is a multiplier; its range cannot go below 0",
+                    output.name
+                );
+            }
+            if !output.relative {
+                let check = |value: f64| {
+                    if self.slot == "pft" {
+                        colm_case::pft::validate_override(&output.name, value)
+                    } else if self.slot == "land_class" {
+                        colm_case::land_cover::validate_override(&output.name, value)
+                    } else if (0.0..=1.0).contains(&value) {
+                        Ok(())
+                    } else {
+                        bail!("absolute beta must stay in [0,1]")
+                    }
+                };
+                for value in [lo, hi] {
+                    check(value).with_context(|| {
+                        format!("hybrid output {} range [{lo}, {hi}]", output.name)
+                    })?;
+                }
+            }
             if !matches!(
                 output.transform,
                 colm_hybrid::Transform::Sigmoid | colm_hybrid::Transform::Clamp

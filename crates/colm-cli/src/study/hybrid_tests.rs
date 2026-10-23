@@ -209,3 +209,41 @@ fn the_soil_stress_process_slot_trains_one_beta_output() {
         .to_string()
         .contains("exactly one output, beta"));
 }
+
+#[test]
+fn network_outputs_stay_meaningful_multipliers_or_inside_parameter_bounds() {
+    let rejects = |network: serde_json::Value, needle: &str| {
+        let error = validate_spec(&spec(network)).unwrap_err();
+        assert!(format!("{error:#}").contains(needle), "{error:#}");
+    };
+    rejects(
+        serde_json::json!({
+            "slot": "soil_stress",
+            "features": ["beta_physics"],
+            "outputs": [{"name": "beta", "range": [-0.5, 2.0], "transform": "sigmoid", "relative": true}],
+        }),
+        "cannot go below 0",
+    );
+    rejects(
+        serde_json::json!({
+            "slot": "soil_stress",
+            "features": ["beta_physics"],
+            "outputs": [{"name": "beta", "range": [0.0, 1.5], "transform": "sigmoid"}],
+        }),
+        "[0,1]",
+    );
+    rejects(
+        serde_json::json!({
+            "slot": "pft",
+            "features": ["clim_tair"],
+            "outputs": [{"name": "DEF_PFT_VMAX25", "range": [-10.0, 50.0], "transform": "sigmoid"}],
+        }),
+        "DEF_PFT_VMAX25",
+    );
+    validate_spec(&spec(serde_json::json!({
+        "slot": "pft",
+        "features": ["clim_tair"],
+        "outputs": [{"name": "DEF_PFT_VMAX25", "range": [0.5, 2.0], "transform": "sigmoid", "relative": true}],
+    })))
+    .unwrap();
+}

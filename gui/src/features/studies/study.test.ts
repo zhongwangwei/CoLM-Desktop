@@ -11,7 +11,9 @@ import {
   gridTargetDefaults,
   gridTargetSpec,
   memberVerdict,
+  networkWeightCount,
   plannedCandidates,
+  studyProgress,
   networkSpec,
   networkDefaults,
   parameterSpec,
@@ -573,4 +575,60 @@ it('planned samples follow each method, not the raw candidate_count', () => {
     frozenDesign({ method: 'morris', parameters, budget: { candidate_count: 8 } }).budget[0]![0],
     /Morris 8 条轨迹，共 40 组/,
   );
+});
+
+it('network weights count every layer like the backend', () => {
+  const linear = networkSpec(
+    'pft',
+    'clim_tair, clim_vpd, clim_prec',
+    'DEF_PFT_VMAX25',
+    '0.5',
+    '2',
+    'linear',
+    true,
+  );
+  assert.equal(networkWeightCount(linear), 3 * 1 + 1);
+  const hidden = networkSpec(
+    'pft',
+    'clim_tair, clim_vpd, clim_prec',
+    'DEF_PFT_VMAX25',
+    '0.5',
+    '2',
+    '8',
+    true,
+  );
+  assert.equal(networkWeightCount(hidden), 3 * 8 + 8 + 8 * 1 + 1);
+});
+
+it('an early-stopped calibration reads as converged, not interrupted', () => {
+  const de = {
+    method: 'differential-evolution',
+    parameters: [{}, {}],
+    budget: { population: 10, generations: 4, patience: 3 },
+  };
+  const running = studyProgress(de, 20, 'Running');
+  assert.equal(running.zh, '已完成 20 / 最多 50 组参数');
+  assert.match(running.note![0], /连续 3 代没有改善会提前结束/);
+  const stopped = studyProgress(de, 40, 'Completed');
+  assert.equal(stopped.percent, 100);
+  assert.match(stopped.note![0], /提前结束：这是收敛了/);
+  assert.equal(studyProgress(de, 50, 'Completed').note, null);
+  const lhs = studyProgress(
+    { method: 'lhs', parameters: [{}], budget: { candidate_count: 40 } },
+    10,
+    'Running',
+  );
+  assert.deepEqual([lhs.percent, lhs.zh, lhs.note], [25, '已完成 10 / 40 组参数', null]);
+  assert.match(
+    frozenDesign({ ...de, budget: { ...de.budget, patience: 0 } }).budget.join(' '),
+    /跑满全部代数/,
+  );
+});
+
+it('a relative network output cannot be a negative multiplier', () => {
+  assert.throws(
+    () => networkSpec('pft', 'clim_tair', 'DEF_PFT_VMAX25', '-0.5', '2', 'linear', true),
+    /倍数|multiplies/,
+  );
+  networkSpec('pft', 'clim_tair', 'DEF_PFT_VMAX25', '0', '2', 'linear', true);
 });
