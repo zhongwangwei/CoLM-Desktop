@@ -36662,7 +36662,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - 再附加一个 36 万字符的文本，显示"（已截断）"。
 - **文档编号**：DeepSeek 又把这两轮记成第 765、766 轮，与已有的重号，顺延为第 767、768 轮，代码与设计文档里的引用一起改。
 
-## 第 767 轮：旧官方修订被整理后的“读 revision.json”原始错误（2026-10-23）
+## 第 770 轮：旧官方修订被整理后的“读 revision.json”原始错误（2026-10-23）
 
 - 现象：`read .../models/versions/official/118/revision.json Caused by: No such file or directory`。后台启动时会整理没人用的旧官方修订；若命令仍拿着旧 `VersionRef`（算例绑定、研究 pin、页面/保存状态），`Registry::get` 直接读文件，把系统错误漏给用户，绕过了“改绑”识别。
 - 修复：`Registry::get` 在 `revision.json` 不存在时返回 `missing_revision_message(version)`（`model revision official#118 is no longer in the model registry...`），与 `migrate_case_to` 已有的可识别错误一致；打开旧算例会走前端 `missingRevision` 改绑提示，不再显示裸路径。
