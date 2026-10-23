@@ -210,7 +210,9 @@ fn write_failures(state: &StudyState, path: &Path) -> Result<()> {
 
 fn report_markdown(manifest: &Manifest, state: Option<&StudyState>) -> String {
     let mut report = format!(
-        "# CoLM Study {}\n\n- Kind: `{:?}`\n- Method: `{:?}`\n- Seed: `{}`\n- Sites: {}\n- Parameters: {}\n- Planned candidates (including baseline): {}\n",
+        // 报告中英对照：GUI 的中文界面导出后原来只有英文（GUI 审查 A-05）。只有这么几行，不必为它
+        // 给导出命令再加一个语言参数。
+        "# CoLM 研究 / CoLM Study {}\n\n- 研究种类 / Kind: `{:?}`\n- 方法 / Method: `{:?}`\n- 随机种子 / Seed: `{}`\n- 站点数 / Sites: {}\n- 参数个数 / Parameters: {}\n- 计划的参数组（含基准）/ Planned candidates (including baseline): {}\n",
         manifest.id,
         manifest.spec.kind,
         manifest.spec.method,
@@ -219,7 +221,7 @@ fn report_markdown(manifest: &Manifest, state: Option<&StudyState>) -> String {
         manifest.spec.parameters.len(),
         planned_candidate_count(manifest)
             .map(|count| count.to_string())
-            .unwrap_or_else(|| "unavailable (invalid budget)".into())
+            .unwrap_or_else(|| "预算无效 / unavailable (invalid budget)".into())
     );
     if let Some(state) = state {
         let succeeded = state
@@ -238,22 +240,24 @@ fn report_markdown(manifest: &Manifest, state: Option<&StudyState>) -> String {
             .filter(|task| task.status != TaskStatus::Succeeded)
             .count();
         report.push_str(&format!(
-            "- Status: `{:?}`\n- Tasks succeeded/execution-failed/non-success/total: {succeeded}/{failed}/{non_success}/{}\n",
+            "- 状态 / Status: `{:?}`\n- 任务 成功/运行失败/未成功/总数 / Tasks succeeded/execution-failed/non-success/total: {succeeded}/{failed}/{non_success}/{}\n",
             state.status,
             state.tasks.len()
         ));
         if let (Some(member), Some(score)) = (&state.best_member, state.best_objective) {
-            report.push_str(&format!("- Best candidate: `{member}` ({score:.6})\n"));
+            report.push_str(&format!(
+                "- 最优参数组 / Best candidate: `{member}` ({score:.6})\n"
+            ));
         }
         if !state.warnings.is_empty() {
-            report.push_str("\n## Warnings\n\n");
+            report.push_str("\n## 提示 / Warnings\n\n");
             for warning in &state.warnings {
                 report.push_str(&format!("- {warning}\n"));
             }
         }
     }
     report.push_str(
-        "\n## Interpretation\n\nUncertainty bands are finite-sample scenario quantiles, not confidence intervals. Tuning scores use the frozen required-target denominator stored in the manifest.\n",
+        "\n## 怎么读 / Interpretation\n\n不确定性分析的分位带是有限样本下的情景分位数，不是置信区间。率定的成绩用的是规格里冻结的目标与归一化分母。\n\nUncertainty bands are finite-sample scenario quantiles, not confidence intervals. Tuning scores use the frozen required-target denominator stored in the manifest.\n",
     );
     report
 }

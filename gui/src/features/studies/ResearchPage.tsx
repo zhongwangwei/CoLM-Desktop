@@ -696,6 +696,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       );
     return { weight, ...(aggregate ? { aggregate } : {}) };
   }
+  // 率定、不确定性和两种 AI 方法都在算例上跑；手动改参数和修改源码不用算例。
+  function needsCases(method: string) {
+    return method !== 'manual' && method !== 'source';
+  }
   // 只有湍流通量有能量闭合订正版（`colm_hist::obs::corrected`）。
   function fluxCorrected(variable: string) {
     return ['qle', 'qh'].includes(variable.trim().toLowerCase());
@@ -2227,6 +2231,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         task(async (current) => {
           const value = await invoke('study_export', { studyDir, out: exportDir });
           if (current()) setResult(String(value));
+          // 原来导出成功没有任何提示（GUI 审查 A-06）。
+          notify(tr(`研究已导出到 ${exportDir}`, `Study exported to ${exportDir}`));
           return value;
         }),
       !!studyDir && !!exportDir && !launching && !unresolvedRemote,
@@ -2549,6 +2555,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setMember('');
     setOverrideFor('');
   }, [studyDir]);
+  // 研究页离开后只是被隐藏，写回对话框挂在 body 上（Radix Portal），会浮在新页面上并锁住焦点
+  //（GUI 审查 R12/C-10）。离开就关掉；草稿此时还没写，回来重新点"写入"即可。
+  useEffect(() => {
+    if (!active) setWriting(null);
+  }, [active]);
   // 不确定性研究跑完就读敏感性，不用再从结果文件下拉框里找 importance.json。默认看目标函数，
   // 勾上影响最大的前三个（影响为 0 的不勾）。
   const hasImportance = (envelope?.results ?? []).some(
@@ -2633,9 +2644,26 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           // 按钮自己登记（第 737 轮）：原来清单里另有一份动作，助手按的是清单里的回调，
           // 界面改了清单不一定跟着改（出过幽灵按钮）。现在只认真正渲染出来的按钮。
           actions: [],
+          // 给助手的是研究摘要，不是整份 envelope：候选、任务、事件在合法上限下几百 KiB，每条消息都带上
+          // 又慢又贵（GUI 审查 D-03）。要看成员细节，助手可以读结果文件。
           details: {
             studyDir,
-            envelope,
+            study: envelope && {
+              id: envelope.manifest?.id,
+              status: envelope.state?.status,
+              completed_candidates: envelope.state?.completed_candidates,
+              best_member: envelope.state?.best_member,
+              best: envelope.state?.best_member
+                ? envelope.state?.candidates?.[envelope.state.best_member]
+                : undefined,
+              baseline: envelope.state?.candidates?.m000000,
+              warnings: studyDiagnostics(envelope.state?.warnings).map(([zh, english]) =>
+                en ? english : zh,
+              ),
+              results: shownResultFiles(envelope.results),
+              run_options: envelope.run_options,
+              spec: frozenSpec,
+            },
             remote: remoteReply,
             preflight,
             budget: budgetText,
@@ -2687,6 +2715,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         />
       );
     });
+  // 没有算例时给出能点的下一步，而不是只写一句"先去项目里"（GUI 审查 C-09）。
+  const noCasesActions = (
+    <div className="button-row">
+      <ActionButton
+        action="research-open-project"
+        label={tr('打开项目', 'Open a project')}
+        run={() => navigate('project')}
+      />
+      <ActionButton
+        action="research-new-case"
+        label={tr('新建模拟', 'Create a simulation')}
+        run={() => navigate('new-case')}
+      />
+    </div>
+  );
   if (!workbench)
     return (
       <div className="research-home">
@@ -2718,9 +2761,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         {!state.cases.length && (
           <Notice>
             {tr(
-              '率定、不确定性分析和 AI 研究要在项目的算例上跑：先在"项目"里打开项目或新建模拟。手动改参数和修改源码不需要算例。',
+              '率定、不确定性分析和 AI 研究要在项目的算例上跑：先打开项目或新建模拟。手动改参数和修改源码不需要算例。',
               'Calibration, uncertainty and AI studies run on the cases of a project: open a project or create a simulation first. Manual parameter changes and source edits need no case.',
             )}
+            {noCasesActions}
           </Notice>
         )}
         <div className="research-methods" role="group" aria-label={homeMethod.label}>
@@ -2731,7 +2775,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               label={en ? item.en : item.zh}
               id={`research-method-${item.id}`}
               className="research-method"
-              disabled={homeMethod.disabled}
+              // 没有算例时要算例的方法点进去是死路（GUI 审查 C-09）：灰着并说明，手动改参数、改源码照常可点。
+              disabled={homeMethod.disabled || (!state.cases.length && needsCases(item.id))}
+              title={
+                !state.cases.length && needsCases(item.id)
+                  ? tr('先打开项目或新建模拟', 'Open a project or create a simulation first')
+                  : undefined
+              }
               run={() => {
                 // 研究首页新开的研究不写回之前的草稿。
                 setFromHub(false);
@@ -2805,10 +2855,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           ) : (
             <div className="research-empty">
               <p>
-                {tr(
-                  '尚未打开研究任务。选择上方方法开始，或打开已有研究。',
-                  'No study is open. Choose a method above or open an existing study.',
-                )}
+                {state.cases.length
+                  ? tr(
+                      '尚未打开研究任务。选择上方方法开始，或打开已有研究。',
+                      'No study is open. Choose a method above or open an existing study.',
+                    )
+                  : tr(
+                      '尚未打开研究任务。打开项目、有了算例之后，就能在上方选方法开始；也可以打开已有研究。',
+                      'No study is open. Once a project with cases is open you can choose a method above, or open an existing study.',
+                    )}
               </p>
               <p>
                 {tr(
@@ -3540,12 +3595,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           )}
         >
           {state.cases.length === 0 ? (
-            <p className="versions-empty">
-              {tr(
-                '当前项目里还没有算例。先在"项目"里打开项目或新建模拟。',
-                'The current project has no cases yet. Open a project or create a simulation first.',
-              )}
-            </p>
+            <div className="versions-empty">
+              <p>
+                {tr(
+                  '当前项目里还没有算例。先打开项目或新建模拟。',
+                  'The current project has no cases yet. Open a project or create a simulation first.',
+                )}
+              </p>
+              {noCasesActions}
+            </div>
           ) : (
             <div className="study-cases">
               {state.cases.map((c) => {

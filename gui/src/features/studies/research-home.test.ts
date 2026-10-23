@@ -1427,3 +1427,15 @@ it('daily comparison and per-variable weights reach the study spec', async () =>
     ],
   );
 });
+it('without cases the home offers to open a project instead of methods that lead nowhere', () => {
+  const page = researchPage({ cases: [], selectedCase: null });
+  page.render();
+  const enabled = (id: string) => page.actions().find((a) => a.id === id)?.enabled;
+  assert.equal(enabled('research-method-tuning'), false);
+  assert.equal(enabled('research-method-uncertainty'), false);
+  assert.equal(enabled('research-method-manual'), true, 'manual edits need no case');
+  assert.equal(enabled('research-open-project'), true);
+  assert.equal(enabled('research-new-case'), true);
+  page.press('research-open-project');
+  assert.deepEqual(page.routes.at(-1), ['project', undefined]);
+});

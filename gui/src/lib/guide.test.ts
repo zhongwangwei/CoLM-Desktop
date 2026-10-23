@@ -311,3 +311,33 @@ test('assistant buttons are exactly the visible ones, and only those inside an o
     Object.assign(globalThis, { document: saved });
   }
 });
+
+test('page details fit the assistant budget by dropping the largest entries first', () => {
+  const source = readFileSync(new URL('./guide.ts', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;$/gm, '')
+    .replace(/^export /gm, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { budgetUiDetails } = new Function(
+    'pageExecutionContext',
+    'publicUiResult',
+    'waitForContract',
+    'requestAnimationFrame',
+    'bilingual',
+    `${js};return {budgetUiDetails};`,
+  )(pageExecutionContext, publicUiResult, waitForContract, (fn: () => void) => fn(), bilingual) as {
+    budgetUiDetails: (details: unknown, limit?: number) => unknown;
+  };
+  const small = [{ studyDir: '/s', status: 'ok' }];
+  assert.deepEqual(budgetUiDetails(small, 1000), small);
+  const big = [{ studyDir: '/s', huge: 'x'.repeat(5000), medium: 'y'.repeat(800) }];
+  const fitted = budgetUiDetails(big, 1200) as Record<string, unknown>[];
+  assert.equal(fitted[0]!.studyDir, '/s');
+  assert.equal(fitted[0]!.medium, 'y'.repeat(800), 'only as much is dropped as needed');
+  assert.match(
+    JSON.stringify(fitted[0]!.huge),
+    /5002 characters over the assistant context budget/,
+  );
+  assert.ok(JSON.stringify(fitted).length <= 1200);
+});

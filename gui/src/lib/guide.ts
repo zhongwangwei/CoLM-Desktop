@@ -167,7 +167,7 @@ export function guideState() {
       enabled: enabled !== false,
     })),
     status: contracts.map((page) => page.status).filter(Boolean),
-    details: publicUiResult(contracts.map((page) => page.details).filter(Boolean)),
+    details: budgetUiDetails(publicUiResult(contracts.map((page) => page.details).filter(Boolean))),
   };
 }
 const routes: Route[] = [
@@ -341,4 +341,34 @@ export async function drive(action: string, args: Record<string, unknown> = {}) 
   } finally {
     pending = false;
   }
+}
+
+/**
+ * 页面细节的总预算：`publicUiResult` 只截单个数组和字符串，对象没有总量上限。一个合法上限的研究
+ * （1000 候选、1000 任务）实测 469 KiB，每条助手消息都带上（GUI 审查 D-03）。超了就从最大的条目起
+ * 换成一句"省略了多少字符"，直到放得下。
+ */
+// 放在这里而不是 utils.ts：几个测试把 guide.ts 单独转译、手工注入它的导入，放在本文件就不用逐个补。
+export function budgetUiDetails(details: unknown, limit = 48_000): unknown {
+  const size = (value: unknown) => JSON.stringify(value)?.length ?? 0;
+  if (size(details) <= limit || !Array.isArray(details)) return details;
+  const pages = details.map((page) =>
+    page && typeof page === 'object' && !Array.isArray(page)
+      ? { ...(page as Record<string, unknown>) }
+      : page,
+  );
+  const entries = pages
+    .flatMap((page, index) =>
+      page && typeof page === 'object' && !Array.isArray(page)
+        ? Object.entries(page).map(([key, value]) => ({ index, key, length: size(value) }))
+        : [],
+    )
+    .sort((a, b) => b.length - a.length);
+  for (const entry of entries) {
+    (pages[entry.index] as Record<string, unknown>)[entry.key] = {
+      omitted: `${entry.length} characters over the assistant context budget`,
+    };
+    if (size(pages) <= limit) break;
+  }
+  return pages;
 }
