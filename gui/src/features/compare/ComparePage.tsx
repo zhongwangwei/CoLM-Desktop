@@ -379,6 +379,25 @@ export default function ComparePage() {
       alive.current = false;
     };
   }, []);
+  // 生成配置之后又改了模拟、变量、名字、年份、时间尺度或分辨率：旧配置和旧站点清单已经不对，清掉，要求重新生成。
+  // 原来照样拿旧 YAML 去跑（GUI 审查 C-05）。手改 YAML 文本不在这里：那是用户有意改的。
+  const design = JSON.stringify([
+    picks.map((p) => [p.dir, p.label]),
+    chosen,
+    name,
+    from,
+    to,
+    timRes,
+    gridRes,
+  ]);
+  const generatedFor = useRef('');
+  useEffect(() => {
+    if (yaml && generatedFor.current && generatedFor.current !== design) {
+      setYaml('');
+      setSites([]);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [design]);
   const allVariables = comparableVariables(
     references,
     ok.map((p) => p.info),
@@ -402,6 +421,7 @@ export default function ComparePage() {
       });
       setYaml(built.config);
       setSites(built.sites);
+      generatedFor.current = design;
       setError('');
     } catch (e) {
       setError(shown(e));

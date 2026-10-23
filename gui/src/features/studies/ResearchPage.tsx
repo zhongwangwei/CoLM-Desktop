@@ -562,6 +562,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         if (adopt) setStudyDir(path);
         setEnvelope(safe);
         if (remote?.host || pending?.host) setHost(remote?.host || pending?.host || '');
+        // 打开一个没交过服务器的研究：不沿用上一个研究的服务器。原来留着旧的 host，一点运行就交到了旧集群
+        //（GUI 审查 C-04）。要交服务器时用户在第 1 步重新选。
+        else if (adopt) setHost('');
         // 轮询刷新时保留用户在下拉框里选的成员，只有它不在成员里时才回到最优。
         setMember((previous) =>
           previous && data.state?.candidates?.[previous] ? previous : data.state?.best_member || '',

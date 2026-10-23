@@ -866,6 +866,15 @@ export default function NewCasePage() {
       }));
       return;
     }
+    // 改站点一律走 selectSite：直接写字段（包括助手）原来只配上强迫场，绕过作物、甲烷配置的检查；
+    // 不在扫描结果里的站点文件还留着上一个站的强迫场，站点和强迫场成了两个站（GUI 审查 B-09）。
+    if (k === 'site' && v !== form.site) {
+      const scanned = sites.find((site) => site.site_file === v);
+      if (scanned) {
+        selectSite(v);
+        return;
+      }
+    }
     delete exampleValues.current[k];
     if (k === 'kind' || k === 'grid')
       reconcile(
@@ -880,6 +889,8 @@ export default function NewCasePage() {
         ...f,
         [k]: v,
         ...(k === 'spatial_forcingdir' && v !== f[k] ? { forcing_dataset: '' } : {}),
+        // 手选的站点文件不知道配哪个强迫场：清掉旧的，要用户自己选，不能沿用上一个站的。
+        ...(k === 'site' && v !== f.site && !s ? { met: '' } : {}),
         ...(s
           ? {
               name: f.name || s.name,
@@ -1059,7 +1070,13 @@ export default function NewCasePage() {
           (f.met && f.met !== s.met_file && f.met !== selected?.met_file)
         )
           return f;
-        return { ...f, met: s.met_file ?? '', start: s.start ?? '', end: s.end ?? '' };
+        // 扫描期间用户改过的起止日期不覆盖（GUI 审查 B-04）：扫描结果回来得晚，原来把手改的日期冲掉了。
+        return {
+          ...f,
+          met: s.met_file ?? '',
+          start: forcingDateEdits.current.has('start') ? f.start : (s.start ?? ''),
+          end: forcingDateEdits.current.has('end') ? f.end : (s.end ?? ''),
+        };
       });
     }
     return result;
@@ -1223,6 +1240,8 @@ export default function NewCasePage() {
         start: site.start ?? '',
         end: site.end ?? '',
       });
+    // 换了站点就用新站点的起止日期；之前手改过日期的记号随之作废（B-04）。
+    forcingDateEdits.current.clear();
     setForm((previous) => ({
       ...previous,
       site: path,

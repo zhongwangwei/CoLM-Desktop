@@ -478,6 +478,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
           const next = applyRunEvent(old.running[dir], event, payload);
           return next ? { running: { ...old.running, [dir]: next } } : {};
         });
+        // 本机运行成功结束：按这次运行的操作号找到它冻结的运行副本，记进状态。原来只在打开运行面板时从运行记录
+        // 读一次，这次会话里刚跑完的运行没有 `run_case`，结果页"完成后自动选中新运行"永远不触发（GUI 审查 B-08）。
+        const finished = current.current.running[dir];
+        if (
+          event === 'run://done' &&
+          payload.code === 0 &&
+          finished?.location !== 'remote' &&
+          finished?.operation_id &&
+          !finished.run_case
+        ) {
+          const operation = finished.operation_id;
+          void invokeJson<{ operation_id?: string; run_case?: string }[]>('model_case_runs', {
+            dir,
+          })
+            .then((runs) => {
+              const run = runs.find((item) => item.operation_id === operation);
+              if (!alive || !run?.run_case) return;
+              update((old) =>
+                old.running[dir]?.operation_id === operation
+                  ? {
+                      running: {
+                        ...old.running,
+                        [dir]: { ...old.running[dir]!, run_case: run.run_case },
+                      },
+                    }
+                  : {},
+              );
+            })
+            .catch(() => {});
+        }
       }).then((stop) => {
         if (alive) unlisten.push(stop);
         else stop();
