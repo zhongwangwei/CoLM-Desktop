@@ -568,23 +568,3 @@ fn entity_decoding_looks_only_a_few_bytes_ahead() {
     assert_eq!(decode_entities("&#x10FFFF;"), "\u{10FFFF}");
     assert_eq!(decode_entities("&amp ; far away;"), "&amp ; far away;");
 }
-
-#[test]
-fn pdf_text_extracts_the_repository_fixture() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../vendor/CoLM202X/preprocess/Forcings/Potential_spikes.pdf");
-    let bytes = std::fs::read(&path).unwrap();
-    let (pages, text, truncated) = pdf_text(&bytes).unwrap();
-    assert!(pages >= 1, "{pages}");
-    assert!(!truncated);
-    assert!(text.contains("ERA5"), "{}", &text[..text.len().min(300)]);
-}
-
-#[test]
-fn pdf_text_rejects_bytes_that_are_not_a_pdf() {
-    let error = pdf_text(b"not a pdf").unwrap_err();
-    assert!(
-        error.to_string().contains("PDF") || error.to_string().contains("pdf"),
-        "{error}"
-    );
-}

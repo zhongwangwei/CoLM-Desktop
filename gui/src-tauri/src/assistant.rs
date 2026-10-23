@@ -768,6 +768,25 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
+/// 本地文档附件：让 `colm-agent` 抽 PDF/DOCX/DOC/文本，原件不经过网络。
+#[tauri::command]
+pub async fn assistant_extract_document(path: String) -> Result<Value, String> {
+    let mut command = std::process::Command::new(agent_path());
+    command.arg("--extract-document").arg(&path);
+    colm_kernel::run::no_console(&mut command);
+    tauri::async_runtime::spawn_blocking(move || {
+        let output = command
+            .output()
+            .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// 本机外部后端的安装与配置状态（问 CLI 自己，不读凭据）。
 #[tauri::command]
 pub async fn assistant_backend_status(app: tauri::AppHandle) -> Result<Value, String> {

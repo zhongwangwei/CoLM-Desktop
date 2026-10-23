@@ -12,6 +12,7 @@
 //! colm-agent --backend-status                              # 本机 Codex / Claude Code 的安装与登录状态（JSON）
 //! colm-agent --codex-models                                # 本机 Codex 可用的模型与各自的思考强度（JSON）
 //! colm-agent --opencode-models                             # OpenCode V2 启用的模型与变体（JSON）
+//! colm-agent --extract-document <文件>                     # 本地抽取 PDF/DOCX/DOC/文本（JSON，不读 Key）
 //! ```
 //!
 //! stdout 只输出协议消息；诊断写 stderr。stdin 关闭即退出。
@@ -68,6 +69,11 @@ fn run() -> Result<()> {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
+    if let Some(path) = value("--extract-document") {
+        let document = colm_agent::document::extract(std::path::Path::new(&path))?;
+        println!("{}", serde_json::to_string(&document)?);
+        return Ok(());
+    }
     if args.iter().any(|a| a == "--backend-status") {
         println!(
             "{}",

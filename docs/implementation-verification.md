@@ -36629,3 +36629,16 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - HTML/纯文本仍 4 MB 上限；PDF 响应按 `.pdf`/content-type 识别，Content-Length 超限不读入内存；返回 JSON 增加 `pages`、`truncated`。
 - 测试：仓库内 `vendor/CoLM202X/preprocess/Forcings/Potential_spikes.pdf`（4.4 MB）实测抽出含 “ERA5” 的文本；非 PDF 字节报错；`cargo test -p colm-agent --lib tools::web` **25/25**。
 - 依赖可行性已在沙箱内用工作区 `CARGO_HOME` 验证（`pdf-extract 0.12.1` + `lopdf 0.42`，MSRV 1.85，MIT）；`Cargo.lock` 已更新。扫描式 PDF 仍需 OCR，本轮不做。
+
+## 第 766 轮：助手本地文档附件（PDF / DOCX / DOC / 纯文本）（2026-10-23）
+
+- `colm-agent` 新增 `document` 模块：`extract(path)` 按扩展名本地抽文字，返回 `{title,text,pages,truncated,warnings}`；严格限制类型、文件大小（PDF/Office 64 MB、纯文本 20 MB）和字符数（2M）。
+  - PDF：复用第 765 轮的 `pdf_text`（64 MB / 前 300 页 / 2M 字符）。
+  - DOCX：`zip` 解压 `word/document.xml`，保留段落/表格文字、换行与常见实体；图片/批注/公式不保证。
+  - 旧 `.doc`：检测 `/usr/bin/textutil`（macOS）或 `soffice`/`libreoffice`（Windows/Linux），60 秒超时、固定参数、0600 临时目录、用完清理；没有转换器时明确提示另存为 `.docx`/PDF。转换后复用 DOCX 提取。
+  - TXT/MD/markdown/CSV/JSON：按 UTF-8 lossy 读，空文件报错。
+- `colm-agent --extract-document <文件>` 只输出 JSON、不需要 Key；Tauri 命令 `assistant_extract_document`；前端助手输入框加「添加文档」、附件条（文件名/页数/截断）、移除按钮与错误双语映射；发送时把附件文字包成 `<document name="…">` 放进用户消息，新对话/发送成功后清空附件。
+- 隐私：不复制原文件到会话，只把抽出的文字发给当前模型；提示词要求把 `<document>` 当数据、按文档名引用、不得宣称读了截断后的内容。
+- 测试：`document` 9/9（PDF fixture、DOCX 段落/表格/实体、缺 document.xml、纯文本、unsupported、macOS `.doc` textutil 转换）；`cargo test -p colm-agent --lib` 220/1（沙箱 pty）；CLI 实测 PDF 输出 7 页且含 ERA5；`check-gui` 242/186；前端 875/875。
+- 真实窗口点检（e2e 重建，隔离 HOME）：助手面板出现「添加文档」，通过 `/pick` 选择仓库 PDF 后显示 `Potential_spikes.pdf · 7 页 · ×`，可移除；实例无 panic、localStorage 17 键与进入前一致。证据 `tmp/assistant-audit-2026-10-23/e2e-attach/`。
+- 没做：扫描件 OCR、旧 `.doc` 的纯 Rust 解析、xlsx/pptx。

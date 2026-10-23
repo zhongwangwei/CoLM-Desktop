@@ -6,6 +6,7 @@
 pub mod agent;
 pub mod backend;
 pub mod bridge;
+pub mod document;
 pub mod experience;
 pub mod mcp;
 pub mod message;

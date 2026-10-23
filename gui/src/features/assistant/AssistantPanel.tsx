@@ -37,6 +37,21 @@ interface Session {
   turns: number;
   updated_ms: number;
 }
+
+/** 本地附件：只保留抽出来的文字与元信息，原文件不写进会话。 */
+interface DocumentAttachment {
+  path: string;
+  name: string;
+  text: string;
+  title?: string | null;
+  pages?: number | null;
+  truncated?: boolean;
+  warnings?: string[];
+}
+
+type ExtractedDocument = Omit<DocumentAttachment, 'path' | 'name'>;
+
+const ATTACHMENT_CHARS_LIMIT = 4_000_000;
 export default function AssistantPanel() {
   const { state, navigate, update } = useApp();
   const app = useRef(state);
@@ -63,6 +78,27 @@ export default function AssistantPanel() {
       );
     return text;
   }
+  function attachmentErrorText(message: string) {
+    const text = String(message);
+    if (text.includes('unsupported document type'))
+      return t(
+        '不支持这种文件；可附加 PDF、DOCX、DOC、TXT、MD、CSV 或 JSON。',
+        'Unsupported file type; attach PDF, DOCX, DOC, TXT, MD, CSV or JSON.',
+      );
+    if (text.includes('no embedded text') || text.includes('scanned image'))
+      return t(
+        '这个 PDF 没有可提取的文字（可能是扫描件）；请找它的 HTML 版或 OCR 版。',
+        'This PDF has no embedded text (it may be scanned); find its HTML or OCR version.',
+      );
+    if (text.includes('no .doc converter'))
+      return t(
+        '这台电脑没有 .doc 转换器；请把文件另存为 .docx 或 PDF 再附加。',
+        'This computer has no .doc converter; save the file as .docx or PDF and attach it again.',
+      );
+    if (text.includes('larger than'))
+      return t('文件超过附件的体积上限。', 'The file is larger than the attachment size limit.');
+    return errorText(message);
+  }
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -70,6 +106,8 @@ export default function AssistantPanel() {
   const [running, setRunning] = useState(false);
   const runningRef = useRef(false);
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<DocumentAttachment[]>([]);
+  const [attaching, setAttaching] = useState(false);
   const [error, setError] = useState('');
   const [sessions, setSessions] = useState<Session[] | null>(null);
   const [approval, setApproval] = useState<AgentEvent | null>(null);
@@ -309,9 +347,53 @@ export default function AssistantPanel() {
     setSettings(next);
     setModel('');
   }
+  async function attachDocument() {
+    if (runningRef.current || !ready) return;
+    try {
+      const path = await invoke<string | null>('pick_file', {
+        key: 'assistant-attachment',
+        filter: 'pdf,docx,doc,txt,md,markdown,csv,json',
+      });
+      if (!path) return;
+      setAttaching(true);
+      const extracted = await invoke<ExtractedDocument>('assistant_extract_document', { path });
+      if (!extracted.text.trim())
+        throw new Error(t('这个文件没有可读文字。', 'This file has no readable text.'));
+      const name = path.split(/[\\/]/).pop() || path;
+      const used = attachments.reduce((total, item) => total + item.text.length, 0);
+      if (used + extracted.text.length > ATTACHMENT_CHARS_LIMIT)
+        throw new Error(
+          t(
+            '附件文字总量超过上限；请删掉一个附件或换一个更小的文件。',
+            'The attached text exceeds the limit; remove an attachment or use a smaller file.',
+          ),
+        );
+      setAttachments((old) => [...old, { path, name, ...extracted }]);
+    } catch (e) {
+      setError(attachmentErrorText(String(e)));
+    } finally {
+      setAttaching(false);
+    }
+  }
   async function send() {
-    const text = input.trim();
-    if (!text || runningRef.current || !ready) return;
+    const typed = input.trim();
+    const fallback = attachments.length
+      ? t(
+          '请阅读这些附件并总结要点。',
+          'Please read the attached documents and summarize the key points.',
+        )
+      : '';
+    const prompt = typed || fallback;
+    if (!prompt || runningRef.current || !ready) return;
+    const documentText = attachments
+      .map((attachment) => {
+        const name = attachment.name.replaceAll('"', '');
+        const pages = attachment.pages ? ` pages="${attachment.pages}"` : '';
+        const truncated = attachment.truncated ? ' truncated="true"' : '';
+        return `<document name="${name}"${pages}${truncated}>\n${attachment.text}\n</document>`;
+      })
+      .join('\n\n');
+    const text = documentText ? `${documentText}\n\n${prompt}` : prompt;
     const current = settingsRef.current;
     const target = egressTarget(current);
     if (current.egress_acknowledged !== target) {
@@ -342,10 +424,17 @@ export default function AssistantPanel() {
           ),
         );
       streamed.current = false;
-      setMessages((old) => [...old, { kind: 'user', text }]);
+      const shown = attachments.length
+        ? `${prompt}\n\n${t('附件：', 'Attachments: ')}${attachments.map((item) => item.name).join('、')}`
+        : prompt;
+      setMessages((old) => [...old, { kind: 'user', text: shown }]);
       await invoke('assistant_send', { text, context: JSON.stringify(guideState()) });
-      setInput((value) => (value.trim() === text ? '' : value));
-      if (history.current.at(-1) !== text) history.current = [...history.current, text].slice(-100);
+      setInput((value) => (value.trim() === typed ? '' : value));
+      setAttachments([]);
+      if (typed && history.current.at(-1) !== typed)
+        history.current = [...history.current, typed].slice(-100);
+      else if (!typed && history.current.at(-1) !== prompt)
+        history.current = [...history.current, prompt].slice(-100);
       historyIndex.current = null;
       historyDraft.current = '';
     } catch (e) {
@@ -404,6 +493,7 @@ export default function AssistantPanel() {
             setMessages([]);
             setApproval(null);
             setInput('');
+            setAttachments([]);
             setUsage('');
             setSessionUsage({ turns: 0, tokens: 0 });
             setError('');
@@ -648,6 +738,34 @@ export default function AssistantPanel() {
         </section>
       )}
       {error && <Notice tone="error">{error}</Notice>}
+      {attachments.length > 0 && (
+        <div className="flex flex-col gap-1" aria-label={t('已附加的文档', 'Attached documents')}>
+          {attachments.map((attachment, index) => (
+            <div
+              key={`${attachment.name}-${index}`}
+              className="flex items-center gap-2 rounded border px-2 py-1 text-xs"
+            >
+              <span className="min-w-0 flex-1 truncate" title={attachment.name}>
+                {attachment.name}
+              </span>
+              <span className="shrink-0 text-muted-foreground">
+                {attachment.pages
+                  ? t(`${attachment.pages} 页`, `${attachment.pages} pages`)
+                  : t('文字', 'text')}
+                {attachment.truncated ? t('（已截断）', ' (truncated)') : ''}
+              </span>
+              <Button
+                variant="ghost"
+                aria-label={t(`移除 ${attachment.name}`, `Remove ${attachment.name}`)}
+                disabled={running}
+                onClick={() => setAttachments((old) => old.filter((_item, at) => at !== index))}
+              >
+                ×
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
       <textarea
         aria-label={t('给助手的消息', 'Message to assistant')}
         placeholder={t(
@@ -744,8 +862,15 @@ export default function AssistantPanel() {
       </div>
       <div className="flex flex-wrap gap-2">
         <Button
+          variant="ghost"
+          disabled={!ready || running || attaching || state.assistantSettingsOpen}
+          onClick={() => void perform(attachDocument)}
+        >
+          {attaching ? t('读取中…', 'Reading…') : t('添加文档', 'Attach document')}
+        </Button>
+        <Button
           variant="primary"
-          disabled={!ready || running || !input.trim()}
+          disabled={!ready || running || (!input.trim() && !attachments.length)}
           onClick={() => void send()}
         >
           {t('发送', 'Send')}

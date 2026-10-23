@@ -21,6 +21,8 @@ use serde_json::{json, Value};
 use ureq::unversioned::resolver::{DefaultResolver, ResolvedSocketAddrs, Resolver};
 use ureq::unversioned::transport::{DefaultConnector, NextTimeout};
 
+use crate::document::{pdf_text, MAX_PDF_BYTES};
+
 use super::{object, req_str, Tier, Tool, ToolContext};
 
 /// DeepSeek 官方 Search API 的完整端点。
@@ -491,13 +493,6 @@ pub struct FetchUrl;
 
 /// 本地抓取 HTML/文本最多读这么多字节（网页过大时截断）。
 const MAX_BODY_BYTES: u64 = 4 * 1024 * 1024;
-/// PDF 默认上限：只收文字层，64 MB 覆盖绝大多数论文/报告；再大就明确拒绝。
-const MAX_PDF_BYTES: u64 = 64 * 1024 * 1024;
-/// 最多返回的 PDF 页数；超出部分截断并标记，避免整本手册把上下文塞满。
-const MAX_PDF_PAGES: usize = 300;
-/// 最多返回给模型的 PDF 文本字符数（约 2M 字符，留出 offset 分页空间）。
-const MAX_PDF_TEXT_CHARS: usize = 2_000_000;
-
 /// 本机、内网、链路本地、组播等地址不许访问（防止借模型访问本机服务）。
 fn public_address(ip: IpAddr) -> bool {
     match ip {
@@ -761,39 +756,6 @@ fn decode_entities(text: &str) -> String {
     }
     out.push_str(rest);
     out
-}
-
-/// 从 PDF 文字层提取文本。扫描件没有文字层，这里只能报错，不能假装读到了内容。
-fn pdf_text(bytes: &[u8]) -> Result<(usize, String, bool)> {
-    let document = pdf_extract::Document::load_mem(bytes).context("cannot parse the PDF")?;
-    let pages = document.get_pages().len();
-    if pages == 0 {
-        bail!("the PDF has no pages");
-    }
-    drop(document);
-    // 解析器对损坏/恶意 PDF 可能 panic；一个工具调用不应把 agent 线程带走（上层还会 catch，但这里先隔离）。
-    let pages_text =
-        std::panic::catch_unwind(|| pdf_extract::extract_text_from_mem_by_pages(bytes))
-            .map_err(|_| anyhow::anyhow!("the PDF text extractor crashed"))?
-            .context("cannot extract text from the PDF")?;
-    let truncated_pages = pages_text.len() > MAX_PDF_PAGES;
-    let mut text = pages_text
-        .into_iter()
-        .take(MAX_PDF_PAGES)
-        .map(|page| page.trim().to_owned())
-        .filter(|page| !page.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    if text.trim().is_empty() {
-        bail!(
-            "the PDF has no embedded text (it is probably a scanned image); look for its HTML page or an OCR copy"
-        );
-    }
-    let truncated_text = text.chars().count() > MAX_PDF_TEXT_CHARS;
-    if truncated_text {
-        text = text.chars().take(MAX_PDF_TEXT_CHARS).collect();
-    }
-    Ok((pages, text, truncated_pages || truncated_text))
 }
 
 /// 本地抓取：免费、内容不经第三方；失败时由上层决定是否回退官方 Fetch。
