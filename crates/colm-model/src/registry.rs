@@ -120,6 +120,10 @@ impl Registry {
     }
     pub fn get(&self, version: &VersionRef) -> Result<FrozenRevision> {
         let dir = self.revision_dir(version)?;
+        // 旧官方修订会被 `prune_official` 整理掉；调用方可能还拿着 UI/算例里的旧引用。
+        // 这里要给出可被前端识别的“修订已不在模型库”，而不是一句 read .../revision.json 的
+        // 系统错误（GUI 审查：打开旧算例只看到 No such file，没有改绑入口）。
+        ensure!(dir.is_dir(), "{}", missing_revision_message(version));
         let frozen: FrozenRevision = read_json(&dir.join("revision.json"))?;
         ensure!(
             frozen.schema == SCHEMA && frozen.version == *version,

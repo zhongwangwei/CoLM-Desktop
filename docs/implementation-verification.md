@@ -36661,3 +36661,11 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - 经 `/pick` 预设对话框结果附加 `Potential_spikes.pdf`，显示"7 页"；
   - 再附加一个 36 万字符的文本，显示"（已截断）"。
 - **文档编号**：DeepSeek 又把这两轮记成第 765、766 轮，与已有的重号，顺延为第 767、768 轮，代码与设计文档里的引用一起改。
+
+## 第 767 轮：旧官方修订被整理后的“读 revision.json”原始错误（2026-10-23）
+
+- 现象：`read .../models/versions/official/118/revision.json Caused by: No such file or directory`。后台启动时会整理没人用的旧官方修订；若命令仍拿着旧 `VersionRef`（算例绑定、研究 pin、页面/保存状态），`Registry::get` 直接读文件，把系统错误漏给用户，绕过了“改绑”识别。
+- 修复：`Registry::get` 在 `revision.json` 不存在时返回 `missing_revision_message(version)`（`model revision official#118 is no longer in the model registry...`），与 `migrate_case_to` 已有的可识别错误一致；打开旧算例会走前端 `missingRevision` 改绑提示，不再显示裸路径。
+- 同时修正启动期整理后的选择：`selectionAfterPrune` 在 pruning 删掉当前选中的官方修订时回退到最新的保留版本，避免悬空 `versionRef`。
+- 测试：`cargo test -p colm-model --lib` **39/39**（新增 `Registry::get` 与改绑目标的 missing message 断言）；前端 `npm test` **876/876**（新增 prune 后选择回退）；GUI 未改。
+- 没做/未验证：用户实际出错的那条操作路径（算例/研究/助手）未复现；研究 pin 到 118 的情况没有自动改绑命令，只能明确报错。

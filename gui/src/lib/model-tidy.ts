@@ -33,6 +33,25 @@ export function withoutRevisions(versions: FrozenRevision[], removed: VersionRef
   return versions.filter((v) => !removed.some((r) => same(r, v.version)));
 }
 
+/** 整理旧修订后，当前选择若也被删掉，回退到最新官方版（启动期 prune 不能留下悬空 VersionRef）。 */
+export function selectionAfterPrune(
+  versions: FrozenRevision[],
+  removed: VersionRef[],
+  current: VersionRef | null | undefined,
+): FrozenRevision | null {
+  const kept = withoutRevisions(versions, removed);
+  const selected = current
+    ? kept.find((v) => v.version.id === current.id && v.version.revision === current.revision)
+    : undefined;
+  return (
+    selected ??
+    kept
+      .filter((v) => v.version.id === 'official')
+      .sort((a, b) => b.version.revision - a.version.revision)[0] ??
+    null
+  );
+}
+
 export const versionLabel = (v: VersionRef) => `${v.id}#${v.revision}`;
 
 export function formatBytes(bytes: number) {

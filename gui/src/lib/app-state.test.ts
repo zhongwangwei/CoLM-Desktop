@@ -7,6 +7,7 @@ import { plainError } from './bilingual';
 import {
   missingRevision,
   rebindQuestion,
+  selectionAfterPrune,
   tidyModelsAfterStartup,
   versionLabel,
   withoutRevisions,
@@ -302,6 +303,7 @@ function booting(prune: () => Promise<unknown>, failOn = '', timeoutOn = '') {
     bilingual: (_zh: string, en: string) => en,
     errorText: (error: unknown) => (error instanceof Error ? error.message : String(error)),
     tidyModelsAfterStartup,
+    selectionAfterPrune,
     withoutRevisions,
   };
   const code = ts.transpileModule(body, {
@@ -333,6 +335,17 @@ test('startup tidies old official revisions only after the version list is loade
     [1, 3],
   );
   assert.equal(app.state.busy, false);
+});
+
+test('a prune that removes the selected official revision falls back to the latest kept one', async () => {
+  const app = booting(async () => ({ removed: [{ id: 'official', revision: 3 }] }));
+  await app.boot();
+  await settle();
+  assert.deepEqual(
+    (app.state.versions as { version: VersionRef }[]).map((v) => v.version.revision),
+    [1, 2],
+  );
+  assert.deepEqual(app.state.versionRef, { id: 'official', revision: 2 });
 });
 
 test('a refused or failed startup tidy is only logged, never shown to the user', async () => {

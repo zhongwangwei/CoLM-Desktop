@@ -1517,6 +1517,18 @@ fn a_case_bound_to_a_tidied_revision_says_so_and_can_be_rebound() {
         .unwrap_err()
         .to_string();
     assert_eq!(error, missing_revision_message(&old));
+    // 直接读一个被整理掉的修订也要给可识别消息，不能漏出 revision.json 的路径错误。
+    assert_eq!(
+        reg.get(&old).unwrap_err().to_string(),
+        missing_revision_message(&old)
+    );
+    // 持有旧目标改绑时同样可识别。
+    assert_eq!(
+        reg.migrate_case_to(&case, code(), Some(old.clone()))
+            .unwrap_err()
+            .to_string(),
+        missing_revision_message(&old)
+    );
     assert!(error.starts_with("model revision official#1 is no longer in the model registry"));
     let rebound = reg
         .migrate_case_to(&case, code(), Some(latest.clone()))

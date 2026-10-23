@@ -16,6 +16,7 @@ import {
   askToRebind,
   missingRevision,
   rebindQuestion,
+  selectionAfterPrune,
   tidyModelsAfterStartup,
   versionLabel,
   withoutRevisions,
@@ -429,7 +430,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         // 版本列表到手之后，在后台整理没人用的旧官方修订（运行或创建中时后端会拒绝，只记日志）。
         void tidyModelsAfterStartup(invokeJson).then((removed) => {
           if (alive && removed.length)
-            update((old) => ({ versions: withoutRevisions(old.versions, removed) }));
+            update((old) => {
+              const version = selectionAfterPrune(old.versions, removed, old.versionRef);
+              return {
+                versions: withoutRevisions(old.versions, removed),
+                version,
+                ...(version ? { versionRef: version.version } : {}),
+              };
+            });
         });
       } catch (error) {
         // 失败留在封面上（含阶段和原因），并给"重试启动"；不再只发一条可被清掉的通知。
