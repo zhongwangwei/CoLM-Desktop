@@ -17,6 +17,8 @@ colm-case = { path = "../colm-case" }
 colm-schema = { path = "../colm-schema" }
 # 同步 HTTP 客户端（rustls），流式读 SSE。agent 是独立 sidecar，不需要异步运行时。
 ureq = { version = "3", features = ["json"] }
+# 纯 Rust PDF 文字层提取：本地 fetch 用，避免把 PDF 交给第三方（第 765 轮）。
+pdf-extract = "0.12.1"
 
 # Atomic no-replace recycling requires native rename APIs; only that helper permits FFI.
 [lints.rust]

@@ -117,7 +117,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 内置后端的 `web_search` 走 DeepSeek 官方 `POST https://api.deepseek.com/v1/tools/search`（2026-10-17 GA，与 V4.1-Flash-1017 同日发布）：Bearer 认证，`query` 1–128 字符（支持 `site:`、`-site:`、`after:`、`before:`、`lang:` 与引号短语），`count` 1–50（工具默认 5、最多 10），`need_content` 为 false。每条结果返回 title、url、`date`（UTC RFC 3339）、`summary`（600–800 字符，官方明确“给模型读”）和 `authority`（0–4，-1 未知）；通常不需要再逐页 `fetch_url`。它按成功请求计费（$0.75/1000 次，失败/空结果/超时不收），不再消耗模型 token，也不再依赖退役模型别名或 Anthropic 兼容层。
 
-搜索固定使用 DeepSeek 的 Key（会话模型可以是别家），由设置里的“联网搜索”开关注册。`fetch_url` **本地优先、失败回退官方 Fetch**：先走本机抓取（免费、页面内容不经过 DeepSeek、HTML 转纯文本、逐跳私网/白名单检查）；本地失败（JS 页面、PDF、站点拦本地 IP 等）且用户有 DeepSeek Key 时，再调 `POST /v1/tools/fetch`（Markdown，按成功页约 $0.00075，URL 与页面内容会发给 DeepSeek）。2026-10-23 真实 Key 实测：官方 Fetch HTML 可取但 Markdown 转义重、PDF 404/504、DOI/大页面 10–16 秒、目标站 403/418 都映射成 404；因此只把它当回退，不作为默认路径（第 763/764 轮）。
+搜索固定使用 DeepSeek 的 Key（会话模型可以是别家），由设置里的“联网搜索”开关注册。`fetch_url` **本地优先、失败回退官方 Fetch**：先走本机抓取（免费、页面内容不经过 DeepSeek、HTML 转纯文本、PDF 用纯 Rust 解析文字层（64 MB / 300 页 / 2M 字符上限）、逐跳私网/白名单检查）；本地失败（JS 页面、扫描式 PDF、站点拦本地 IP 等）且用户有 DeepSeek Key 时，再调 `POST /v1/tools/fetch`（Markdown，按成功页约 $0.00075，URL 与页面内容会发给 DeepSeek）。2026-10-23 真实 Key 实测：官方 Fetch HTML 可取但 Markdown 转义重、PDF 404/504、DOI/大页面 10–16 秒、目标站 403/418 都映射成 404；因此只把它当回退，不作为默认路径（第 763/764 轮）。
 
 错误处理按官方口径：408/429/5xx 退避重试（工具内最多 2 次并检查取消），402 提示余额不足，401 提示 Key 无效，其余 4xx 不原样重试。旧实现（Anthropic 兼容 Messages + `web_search_20250305` + `deepseek-v4-flash`）保留为 `COLM_AGENT_SEARCH_LEGACY=1` 的显式回退，一个版本后删除；`COLM_AGENT_SEARCH_URL` 现在表示完整端点，供测试/e2e 注入本地 mock。官方参考：[Search & Fetch 指南](https://api-docs.deepseek.com/guides/search)、[Search API](https://api-docs.deepseek.com/api/search)、[Fetch API](https://api-docs.deepseek.com/api/fetch)、[模型与价格](https://api-docs.deepseek.com/quick_start/models)、[变更日志](https://api-docs.deepseek.com/updates)。
 
@@ -310,7 +310,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 | 数据外发 | 第一次使用和每次换服务商时提示：配置、指标、日志与源码片段会发给模型服务商。内置后端且联网搜索打开时，确认目标同时写明搜索查询会发往 DeepSeek Search API；确认也由后端在 `assistant_start`/`assistant_send` 复核，不能只靠前端调用点。可以切换到本地模型 |
 | 失控 | 每个会话设调用次数、token 用量与费用上限；任何时候都能取消；后台任务（编译、运行、Study）都可单独取消 |
 | 可追溯 | 审计日志记下每次工具调用（参数、结果摘要、耗时）、每个补丁的提交号、每次审批的决定与时间 |
-| 联网抓取边界 | `fetch_url` 只打开会话搜索结果/用户消息里出现过的站点；本地路径逐跳重定向复查允许列表，解析器只返回公网地址并直接连接（不二次解析，防 DNS rebinding）；本地失败回退 DeepSeek Fetch API（URL/页面内容发往 DeepSeek，按成功页计费）；`COLM_AGENT_SEARCH_URL`/`COLM_AGENT_FETCH_URL` 只允许覆盖为回环测试端点 |
+| 联网抓取边界 | `fetch_url` 只打开会话搜索结果/用户消息里出现过的站点；本地路径逐跳重定向复查允许列表，解析器只返回公网地址并直接连接（不二次解析，防 DNS rebinding）；PDF 本地解析文字层，上限 64 MB、前 300 页、2M 字符，扫描件无文字层则失败；本地失败回退 DeepSeek Fetch API（URL/页面内容发往 DeepSeek，按成功页计费）；`COLM_AGENT_SEARCH_URL`/`COLM_AGENT_FETCH_URL` 只允许覆盖为回环测试端点 |
 
 ## 8. 界面
 

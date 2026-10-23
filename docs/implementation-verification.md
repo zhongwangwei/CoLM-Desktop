@@ -36621,3 +36621,11 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 面板收起时来了审批卡，工具栏没有提示，这一轮会一直等下去；
 - 回退官方 Fetch 的真实窗口端到端（第 765 轮已注明）；
 - 停助手进程时最多同步等 2 秒。
+
+## 第 765 轮：本地 PDF 文字层提取（2026-10-23）
+
+- `fetch_url` 本地路径不再遇 PDF 直接拒绝：新增纯 Rust `pdf-extract 0.12.1`（MIT，依赖 lopdf；在 `colm-agent` sidecar 内，不进 GUI）。
+- 边界：PDF 原始大小 **64 MB**；只返回前 **300 页**；文本最多 **2,000,000 字符**；超出截断并返回 `truncated: true`；解析放在 `catch_unwind` 里，损坏/恶意 PDF 不会带走 worker；没有文字层（扫描件）明确报“没有可提取文字”，再走官方回退。
+- HTML/纯文本仍 4 MB 上限；PDF 响应按 `.pdf`/content-type 识别，Content-Length 超限不读入内存；返回 JSON 增加 `pages`、`truncated`。
+- 测试：仓库内 `vendor/CoLM202X/preprocess/Forcings/Potential_spikes.pdf`（4.4 MB）实测抽出含 “ERA5” 的文本；非 PDF 字节报错；`cargo test -p colm-agent --lib tools::web` **25/25**。
+- 依赖可行性已在沙箱内用工作区 `CARGO_HOME` 验证（`pdf-extract 0.12.1` + `lopdf 0.42`，MSRV 1.85，MIT）；`Cargo.lock` 已更新。扫描式 PDF 仍需 OCR，本轮不做。
