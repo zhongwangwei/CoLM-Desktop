@@ -584,6 +584,41 @@ export function memberVerdict(
   };
 }
 
+/**
+ * 预检里最常见的拒绝：观测不够。后端用英文报，按固定文字识别后给中英两种说法；不认得的原样返回。
+ * 按日、按月比时说清数的是日均、月均个数（复验 A2-03：默认 20 对，14 天的算例只有 14 个日均）。
+ */
+export function studyErrorText(error: string): [string, string] {
+  const period = (p: string): [string, string] =>
+    p === 'validation' ? ['验证期', 'validation period'] : ['率定期', 'calibration period'];
+  const points =
+    /target (\S+) \((\S+)\) has only (\d+) usable observation points in the (calibration|validation) window for (\S+); need at least (\d+)/.exec(
+      error,
+    );
+  if (points) {
+    const [, key, variable, count, which, site, need] = points;
+    const [zh, en] = period(which!);
+    return [
+      `${site} 的 ${key}（${variable}）在${zh}里只有 ${count} 个可用观测，至少要 ${need} 个：放宽时段，或调低"每个站点至少多少对观测"。`,
+      `${site} ${key} (${variable}) has only ${count} usable observations in the ${en}; at least ${need} are needed. Widen the period or lower the minimum number of pairs.`,
+    ];
+  }
+  const means =
+    /target (\S+) \((\S+)\) has only (\d+) (daily|monthly) means with enough observations in the (calibration|validation) window for (\S+); need at least (\d+)/.exec(
+      error,
+    );
+  if (means) {
+    const [, key, variable, count, unit, which, site, need] = means;
+    const [zh, en] = period(which!);
+    const [zhUnit, enUnit] = unit === 'daily' ? ['天', 'daily'] : ['个月', 'monthly'];
+    return [
+      `${site} 的 ${key}（${variable}）在${zh}里观测够用的只有 ${count} ${zhUnit}，至少要 ${need}：按${unit === 'daily' ? '日' : '月'}比时"每个站点至少多少对观测"数的是${unit === 'daily' ? '天数' : '月数'}，调低它或放宽时段。`,
+      `${site} ${key} (${variable}) has only ${count} ${enUnit} means with enough observations in the ${en}; at least ${need} are needed. With ${enUnit} comparison the minimum counts ${unit === 'daily' ? 'days' : 'months'}: lower it or widen the period.`,
+    ];
+  }
+  return [error, error];
+}
+
 /** 后端研究状态里的一条提示换成中英两种说法；不认得的原样返回（后端错误原样显示）。 */
 export function studyWarningText(warning: string): [string, string] {
   if (warning.startsWith('overfitting:'))
@@ -604,6 +639,11 @@ export function studyWarningText(warning: string): [string, string] {
           `The best ${key} (${value}) sits on the upper bound: the optimum may lie above; widen the upper bound and rerun.`,
         ];
   }
+  if (warning === 'no independent validation window was configured')
+    return [
+      '没有设独立的验证期：率定期上的改善有没有过拟合，这次检验不了。',
+      'No independent validation period was set, so overfitting to the calibration period cannot be checked.',
+    ];
   if (warning.startsWith('tuning baseline failed'))
     return [
       '默认参数（基准）没有跑成，其余参数组都没有运行。先看基准的运行日志修好问题，再点"重试失败任务"。',
@@ -932,15 +972,23 @@ export function studyProgress(spec: Record<string, unknown> | null, done: number
       en: `${done} parameter sets done`,
       note: null as [string, string] | null,
     };
+  // 只有干净结束、确有成员跑完、且开了早停，少于上限才是收敛。带失败结束时少于上限多半是失败把研究
+  // 挡住了（实测：基准算指标失败，0 组完成也写成"收敛了"，复验 A2-01/B2-01）。
+  const clean = status.replace(/_/g, '').toLowerCase() === 'completed';
   if (de && finished && done < total)
     return {
       percent: 100,
       zh: `已完成 ${done} 组参数（最多 ${total} 组）`,
       en: `${done} parameter sets done (at most ${total})`,
-      note: [
-        `连续 ${patience} 代没有明显改善，提前结束：这是收敛了，不是中断。`,
-        `Stopped early after ${patience} generations without clear improvement: it converged, it was not interrupted.`,
-      ] as [string, string],
+      note: (clean && done > 0 && patience > 0
+        ? [
+            `连续 ${patience} 代没有明显改善，提前结束：这是收敛了，不是中断。`,
+            `Stopped early after ${patience} generations without clear improvement: it converged, it was not interrupted.`,
+          ]
+        : [
+            '有参数组失败，研究没有跑到上限就结束了：这不是收敛，先看下面的失败原因。',
+            'Some parameter sets failed and the study ended before its limit: this is not convergence; check the failures below.',
+          ]) as [string, string],
     };
   return {
     percent: Math.min(100, Math.round((done / total) * 100)),
@@ -983,14 +1031,23 @@ export function convergenceRows(
 }
 
 /**
+ * 近优集合至少要这么多组才判读"定没定住"。只有一两组时范围天然是 0，会把没被观测约束的参数
+ * 说成"定得住"——与这张表要回答的问题正相反（复验 B2-02：1 组时每个参数都是"0% · 定得住"）。
+ */
+export const NEAR_OPTIMAL_MIN_MEMBERS = 5;
+
+/**
  * `near_optimal.json` → 每个参数在近优集合里的取值范围与它占抽样范围的比例。占得越宽，观测越定不住它。
  */
 export function nearOptimalRows(value: unknown) {
   const data = (value ?? {}) as { members?: unknown; margin?: unknown; parameters?: unknown };
   const rows = (Array.isArray(data.parameters) ? data.parameters : []) as Record<string, unknown>[];
   const finiteNumber = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const count = Array.isArray(data.members) ? data.members.length : 0;
+  const tooFew = count < NEAR_OPTIMAL_MIN_MEMBERS;
   return {
-    count: Array.isArray(data.members) ? data.members.length : 0,
+    count,
+    tooFew,
     margin: finiteNumber(data.margin) ?? 0.05,
     parameters: rows.map((row) => {
       const spread = finiteNumber(row.spread) ?? 0;
@@ -999,7 +1056,7 @@ export function nearOptimalRows(value: unknown) {
         min: finiteNumber(row.min),
         max: finiteNumber(row.max),
         spread,
-        pinned: spread < 0.2 ? 'tight' : spread < 0.5 ? 'loose' : 'free',
+        pinned: tooFew ? 'few' : spread < 0.2 ? 'tight' : spread < 0.5 ? 'loose' : 'free',
       } as const;
     }),
   };

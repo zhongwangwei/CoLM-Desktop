@@ -1685,6 +1685,46 @@ fn tuning_preflight_rejects_windows_with_too_few_usable_observations() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// 按日比时预检要数日均个数：5 天的率定期有几百个逐时观测点，却只有 5 个日均（复验 A2-03）。
+#[cfg(unix)]
+#[test]
+fn tuning_preflight_counts_daily_means_when_targets_are_aggregated() {
+    let _guard = netcdf_lock();
+    let root = temp_root("pair-preflight-daily");
+    let kernel = fake_kernel(&root, None);
+    for site in ["siteA", "siteB"] {
+        write_case(&root, site);
+        write_obs(&root.join(format!("{site}-obs.nc")), usize::MAX);
+    }
+    let daily = |min_pairs: usize| {
+        let spec = write_tuning_spec(&root, &kernel, min_pairs);
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&spec).unwrap()).unwrap();
+        value["targets"][0]["aggregate"] = "daily".into();
+        fs::write(&spec, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        spec
+    };
+    let spec = daily(10);
+    let error = run_fail(&[
+        "study-preflight",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ]);
+    assert!(
+        error.contains("only 5 daily means") && error.contains("need at least 10"),
+        "{error}"
+    );
+    let spec = daily(5);
+    run_ok(&[
+        "study-preflight",
+        root.to_str().unwrap(),
+        "--spec",
+        spec.to_str().unwrap(),
+    ]);
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn tuning_baseline_blocks_candidates_when_real_pairs_do_not_align() {

@@ -23,6 +23,7 @@ import {
   studyPermissions,
   studyDiagnostics,
   studyRunOutcome,
+  studyErrorText,
   frozenDesign,
   sensitivityResponses,
   sensitivityRanking,
@@ -31,6 +32,7 @@ import {
   studyProgress,
   convergenceRows,
   nearOptimalRows,
+  NEAR_OPTIMAL_MIN_MEMBERS,
   crossValidationRows,
   suggestedRange,
   suggestedWindows,
@@ -535,7 +537,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     try {
       return await fn(() => token === epoch.current);
     } catch (e) {
-      if (token === epoch.current) setError(String(e));
+      if (token === epoch.current) setError(tr(...studyErrorText(String(e))));
       throw e;
     } finally {
       lock.current = false;
@@ -1021,8 +1023,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             host,
             kernel,
             jobs: concurrency,
-            engine: ai ? 'rust' : engine,
-            preprocessors,
+            // 远程也用研究第一次运行时冻结的引擎与前处理，与本机一致（复验 C2-01：原来远程用页面值）。
+            engine: envelope.run_options?.engine ?? (ai ? 'rust' : engine),
+            preprocessors: envelope.run_options?.preprocessors ?? preprocessors,
             modelVersion: null,
             modelRevision,
           }),
@@ -1817,10 +1820,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     },
     ...(!ai
       ? [
-          field('research-engine', tr('执行引擎', 'Engine'), engine, setEngine, 'choice', [
-            { value: 'rust', label: 'Rust' },
-            { value: 'fortran', label: 'Fortran' },
-          ]),
+          {
+            ...field(
+              'research-engine',
+              tr('执行引擎', 'Engine'),
+              envelope?.run_options?.engine ?? engine,
+              setEngine,
+              'choice',
+              [
+                { value: 'rust', label: 'Rust' },
+                { value: 'fortran', label: 'Fortran' },
+              ],
+            ),
+            disabled: busy || launching || unresolvedRemote || !!envelope?.run_options,
+          },
         ]
       : []),
     field('research-tab', tr('研究类型', 'Research type'), tab, chooseMethod, 'choice', [
@@ -2071,17 +2084,20 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const remoteFields =
     advanced && host
       ? [
-          field(
-            'research-preprocessors',
-            tr('服务器前处理引擎', 'Server preprocessors'),
-            preprocessors,
-            setPreprocessors,
-            'choice',
-            [
-              { value: 'rust', label: 'Rust' },
-              { value: 'fortran', label: 'Fortran' },
-            ],
-          ),
+          {
+            ...field(
+              'research-preprocessors',
+              tr('服务器前处理引擎', 'Server preprocessors'),
+              envelope?.run_options?.preprocessors ?? preprocessors,
+              setPreprocessors,
+              'choice',
+              [
+                { value: 'rust', label: 'Rust' },
+                { value: 'fortran', label: 'Fortran' },
+              ],
+            ),
+            disabled: busy || launching || unresolvedRemote || !!envelope?.run_options,
+          },
         ]
       : [];
   const action = (
@@ -3282,7 +3298,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     canStep(n)
       ? ''
       : !sites.length
-        ? tr('先在第 1 步勾选算例。', 'Choose cases in step 1 first.')
+        ? // 项目里一个算例都没有时，"勾选算例"做不到；与空态的两个按钮说同一件事（复验 A2-04）。
+          !state.cases.length
+          ? tr(
+              '项目里还没有算例：先打开项目或新建模拟。',
+              'This project has no cases: open a project or create a simulation first.',
+            )
+          : tr('先在第 1 步勾选算例。', 'Choose cases in step 1 first.')
         : !kernel
           ? spatialStudy
             ? tr(
@@ -3662,8 +3684,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             {!ai && (
               <Field label={tr('计算引擎', 'Engine')}>
                 <Select
-                  value={engine}
-                  disabled={busy || launching}
+                  value={envelope?.run_options?.engine ?? engine}
+                  disabled={busy || launching || !!envelope?.run_options}
+                  title={
+                    envelope?.run_options
+                      ? tr(
+                          '这个研究第一次运行时已定下引擎，之后不能换；要换引擎就新建研究。',
+                          'This study fixed its engine at the first run; create a new study to use another.',
+                        )
+                      : undefined
+                  }
                   onChange={(e) => setEngine(e.target.value)}
                 >
                   <option value="rust">Rust</option>
@@ -4222,7 +4252,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               )}
               {host && (
                 <Field label={tr('服务器前处理引擎', 'Server preprocessors')}>
-                  <Select value={preprocessors} onChange={(e) => setPreprocessors(e.target.value)}>
+                  <Select
+                    value={envelope?.run_options?.preprocessors ?? preprocessors}
+                    disabled={!!envelope?.run_options}
+                    title={
+                      envelope?.run_options
+                        ? tr(
+                            '这个研究第一次运行时已定下前处理，之后不能换；要换就新建研究。',
+                            'This study fixed its preprocessors at the first run; create a new study to change them.',
+                          )
+                        : undefined
+                    }
+                    onChange={(e) => setPreprocessors(e.target.value)}
+                  >
                     <option value="rust">Rust</option>
                     <option value="fortran">Fortran</option>
                   </Select>
@@ -4412,6 +4454,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   `Runs with the ${envelope.run_options.engine === 'fortran' ? 'Fortran' : 'Rust'} model and ${envelope.run_options.preprocessors === 'fortran' ? 'Fortran' : 'Rust'} preprocessors (fixed at the first run).`,
                 )}
               </p>
+            )}
+            {/* 引擎冻结（第 750 轮）之前建的研究没有 run-options.json：继续运行会按页面上的选择定下引擎，
+                与它早先跑的成员不一定一样（复验 B2-05），要让人先核对。 */}
+            {envelope && !envelope.run_options && (completed ?? 0) > 0 && (
+              <Notice tone="warning">
+                {tr(
+                  '这个研究建得早，没有记下当初用的计算引擎。继续运行会用第 1 步选的引擎并从此固定；请先确认它和已经跑完的那些参数组用的是同一个，否则结果混用了两种引擎。',
+                  'This study predates engine recording, so the engine it used is unknown. Continuing uses the engine chosen in step 1 and fixes it from then on; make sure it matches the one the finished parameter sets used, or the results mix two engines.',
+                )}
+              </Notice>
             )}
             {frozen.budget.length > 0 && (
               <p className="muted study-hint">
@@ -4667,6 +4719,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                         `目标函数在最优值 ${Math.round(near.margin * 100)}% 以内的有 ${near.count} 组参数。各参数在这些组里取值的范围：`,
                         `${near.count} parameter sets score within ${Math.round(near.margin * 100)}% of the best. The range each parameter takes across them:`,
                       )}
+                      {near.tooFew &&
+                        tr(
+                          ` 少于 ${NEAR_OPTIMAL_MIN_MEMBERS} 组，范围必然偏窄，判断不了参数有没有被观测定住；想判读就加大种群或代数。`,
+                          ` With fewer than ${NEAR_OPTIMAL_MIN_MEMBERS} sets the ranges are bound to look narrow, so they cannot tell whether the observations pin the parameters; use a larger population or more generations to judge.`,
+                        )}
                     </p>
                     <div className="table-scroll">
                       <table className="versions-table">
@@ -4691,14 +4748,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                               </td>
                               <td>{Math.round(row.spread * 100)}%</td>
                               <td>
-                                {row.pinned === 'tight'
-                                  ? tr('定得住', 'well pinned')
-                                  : row.pinned === 'loose'
-                                    ? tr('大致定得住', 'loosely pinned')
-                                    : tr(
-                                        '定不住：这份观测分不出它的取值',
-                                        'not pinned: these observations cannot tell its value',
-                                      )}
+                                {row.pinned === 'few'
+                                  ? tr('组数太少，判断不了', 'too few sets to judge')
+                                  : row.pinned === 'tight'
+                                    ? tr('定得住', 'well pinned')
+                                    : row.pinned === 'loose'
+                                      ? tr('大致定得住', 'loosely pinned')
+                                      : tr(
+                                          '定不住：这份观测分不出它的取值',
+                                          'not pinned: these observations cannot tell its value',
+                                        )}
                               </td>
                             </tr>
                           ))}

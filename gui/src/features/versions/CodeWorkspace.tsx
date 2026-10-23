@@ -6,6 +6,7 @@ import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import CodeFiles from './CodeFiles';
+import { workspaceErrorText } from './workspace-errors';
 /** 选来打开源码的本地程序（VS Code、记事本……）；空着就用系统默认程序。每台机器各记各的。 */
 const EDITOR_KEY = 'colm.externalEditor';
 function storedEditor(): string {
@@ -97,7 +98,7 @@ export default function CodeWorkspace({
           await onChanged();
         })
         .catch((e) => {
-          if (live) setError(String(e));
+          if (live) setError(t(...workspaceErrorText(String(e))));
         });
     };
     check();
@@ -128,7 +129,7 @@ export default function CodeWorkspace({
         if (name && refresh) setStatus(await invokeJson<Status>('workspace_status', { name }));
       }
     } catch (e) {
-      if (token.active && token === epoch.current) setError(String(e));
+      if (token.active && token === epoch.current) setError(t(...workspaceErrorText(String(e))));
       throw e;
     } finally {
       lock.current = false;

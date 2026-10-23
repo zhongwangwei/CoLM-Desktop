@@ -155,6 +155,20 @@ pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
         return Ok(None);
     }
     git::run(&src, &["add", "-A"])?;
+    // 上面查的是 status 那一刻的文件；编辑器在这之后、add 之前又写的文件也会被 add 带进来，没经过检查
+    // （复验 D2-06）。按真正要提交的那一份重查，有违规就撤回暂存、整次拒绝。
+    let staged = git::run(&src, &["diff", "--cached", "--name-only", "-z"])?;
+    let mut files = Vec::new();
+    for path in staged.split('\0').filter(|path| !path.is_empty()) {
+        if let Err(error) = check_path(path) {
+            let _ = git::run(&src, &["reset", "-q"]);
+            return Err(error.context(format!("{path} was changed outside the app")));
+        }
+        files.push(path.to_owned());
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
     let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
     let more = files.len().saturating_sub(5);
     let message = if more > 0 {

@@ -265,6 +265,31 @@ fn a_workspace_starts_from_a_frozen_plain_source_snapshot() {
     assert_eq!(ws.info.branch, "ws/ver-1");
 }
 
+/// 源码检出运行时官方版本的缓存是只 init + add、没有提交的 `.git`；原来被当仓库 clone，
+/// rev-parse HEAD 失败，"开始修改代码"打不开（复验 A2-02）。
+#[test]
+fn a_snapshot_with_an_index_but_no_commit_is_copied_as_plain_files() {
+    let root = temp("snapshot-index-only");
+    let snapshot = root.join("cache/source");
+    std::fs::create_dir_all(snapshot.join("main")).unwrap();
+    std::fs::write(
+        snapshot.join("main/MOD_A.F90"),
+        "MODULE MOD_A\nEND MODULE\n",
+    )
+    .unwrap();
+    git::run(&snapshot, &["init", "-q"]).unwrap();
+    git::run(&snapshot, &["add", "-A", "-f"]).unwrap();
+    assert!(!git::has_head(&snapshot));
+    let ws =
+        Workspace::create_from_snapshot(&root.join("ws"), "ver-5", &snapshot, "official r24", None)
+            .unwrap();
+    assert!(git::has_head(&ws.src()));
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let tracked = git::run(&ws.src(), &["ls-files"]).unwrap();
+    assert_eq!(tracked, "main/MOD_A.F90");
+    assert_eq!(ws.info.branch, "ws/ver-5");
+}
+
 #[test]
 fn a_workspace_starts_from_the_frozen_commit_of_a_git_snapshot() {
     let root = temp("snapshot-git");

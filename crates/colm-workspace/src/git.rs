@@ -70,6 +70,11 @@ pub fn run_with_input(dir: &Path, args: &[&str], input: &[u8]) -> Result<String>
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
+/// 这个目录的仓库有没有提交（`git init` 之后只 add 没 commit 的没有）。
+pub fn has_head(dir: &Path) -> bool {
+    run(dir, &["rev-parse", "--verify", "-q", "HEAD"]).is_ok()
+}
+
 pub fn head(dir: &Path) -> Result<String> {
     run(dir, &["rev-parse", "HEAD"])
 }

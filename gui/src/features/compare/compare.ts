@@ -154,3 +154,104 @@ export function comparisonDir(root: string, name: string): string {
 export function comparisonName(name: string): string {
   return name.replace(/[^A-Za-z0-9_-]+/g, '_') || 'comparison';
 }
+
+/**
+ * 后端（`bench.rs`）报的是固定的中文句子；按固定文字识别后给出中英两种说法，英文界面不再中英混排
+ * （复验 C2-06/A2-05）。不认得的（OpenBench 自己的输出）原样返回。
+ */
+export function benchErrorText(error: string): [string, string] {
+  const text = error.replace(/^(?:Error: )+/, '');
+  const fixed: Record<string, string> = {
+    已停止: 'Stopped',
+    '先装 uv': 'Install uv first',
+    '先装专用 Python': 'Install the private Python first',
+    '先装 OpenBench': 'Install OpenBench first',
+    '先装专用 Python 和 OpenBench': 'Install the private Python and OpenBench first',
+    子进程没有输出管道: 'The child process has no output pipes',
+    '压缩包里没有 uv': 'The archive has no uv in it',
+    '类型只能是 grid 或 stn': 'The type must be grid or stn',
+    至少给一个变量: 'Give at least one variable',
+    '报告应是 .html 文件': 'A report must be an .html file',
+    读不了这个目录: 'This folder cannot be read',
+    '只能显示这里跑出来的报告；别处的报告请用"载入报告…"':
+      'Only reports produced here can be shown directly; use “Load a report…” for others',
+  };
+  if (text in fixed) return [text, fixed[text]!];
+  const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    [
+      /^没有给 (\S+) 准备 uv，请自行安装 Python 与 colm-openbench$/,
+      (m) => `No uv is prepared for ${m[1]}; install Python and colm-openbench yourself`,
+    ],
+    [/^无法启动(?: (\S+))?：([\s\S]*)$/, (m) => `Cannot start${m[1] ? ` ${m[1]}` : ''}: ${m[2]}`],
+    [/^(\S+) 失败（([^）]*)）：\n?([\s\S]*)$/, (m) => `${m[1]} failed (${m[2]}):\n${m[3]}`],
+    [
+      /^([\s\S]+) 不是 OpenBench 源码目录（没有 pyproject\.toml）$/,
+      (m) => `${m[1]} is not an OpenBench source folder (no pyproject.toml)`,
+    ],
+    [/^没有这一步：(.*)$/, (m) => `No such step: ${m[1]}`],
+    [/^没有这一项：(.*)$/, (m) => `No such item: ${m[1]}`],
+    [
+      /^下载的 uv 校验不对（(\w+)，应为 (\w+)），已删除，请重试$/,
+      (m) =>
+        `The downloaded uv failed its checksum (${m[1]}, expected ${m[2]}); it was deleted, try again`,
+    ],
+    [/^删不掉 ([\s\S]+)：([\s\S]*)$/, (m) => `Cannot remove ${m[1]}: ${m[2]}`],
+    [/^参考数据列表读不懂：([\s\S]*)$/, (m) => `The reference list cannot be read: ${m[1]}`],
+    [
+      /^比较名只能用字母、数字、- 和 _：(.*)$/,
+      (m) => `A comparison name may only use letters, digits, - and _: ${m[1]}`,
+    ],
+    [/^站点名不合适：(.*)$/, (m) => `Unsuitable station name: ${m[1]}`],
+    [
+      /^报告有 (\d+) MB，太大不在软件里显示；请用浏览器打开$/,
+      (m) => `The report is ${m[1]} MB, too large to show here; open it in a browser`,
+    ],
+    [/^扫描失败：([\s\S]*)$/, (m) => `Scan failed: ${m[1]}`],
+  ];
+  for (const [pattern, english] of patterns) {
+    const m = pattern.exec(text);
+    if (m) return [text, english(m)];
+  }
+  return [text, text];
+}
+
+/** 后端自己写进日志的几行（`say`）的英文；OpenBench、uv 的输出原样。 */
+export function benchLogText(line: string): string {
+  const patterns: [RegExp, (m: RegExpExecArray) => string][] = [
+    [/^下载 (\S+)$/, (m) => `Downloading ${m[1]}`],
+    [/^校验通过，解压$/, () => 'Checksum verified; unpacking'],
+    [/^uv (\S+) 装好了$/, (m) => `uv ${m[1]} installed`],
+    [/^合并 (.+) 的 history$/, (m) => `Merging the history of ${m[1]}`],
+  ];
+  for (const [pattern, english] of patterns) {
+    const m = pattern.exec(line);
+    if (m) return english(m);
+  }
+  return line;
+}
+
+/**
+ * 能评估的变量：只列参考数据与所选模拟同种（站点 / 格点）的变量，再按输入筛选。原来把 152 个参考
+ * 数据集的变量并集一次列成 82 个下拉，选了单点算例也列格点产品的变量（复验 C2-05）。
+ * 没写种类的参考数据两种都算。还没选模拟时不列。
+ */
+export function comparableVariables(
+  references: BenchReference[],
+  simulations: { spatial: boolean }[],
+  query = '',
+): { variable: string; references: BenchReference[] }[] {
+  const kinds = new Set<string>(simulations.map((s) => (s.spatial ? 'grid' : 'stn')));
+  if (!kinds.size) return [];
+  const needle = query.trim().toLowerCase();
+  const byVariable = new Map<string, BenchReference[]>();
+  for (const reference of references) {
+    if (reference.data_type && !kinds.has(reference.data_type)) continue;
+    for (const variable of reference.variables) {
+      if (needle && !variable.toLowerCase().includes(needle)) continue;
+      byVariable.set(variable, [...(byVariable.get(variable) ?? []), reference]);
+    }
+  }
+  return [...byVariable.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([variable, refs]) => ({ variable, references: refs }));
+}

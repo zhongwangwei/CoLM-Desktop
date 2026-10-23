@@ -25,6 +25,7 @@ import {
   sensitivityResponses,
   studyDiagnostics,
   studyRunOutcome,
+  studyErrorText,
   studyWarningText,
   suggestedRange,
   suggestedWindows,
@@ -616,6 +617,16 @@ it('an early-stopped calibration reads as converged, not interrupted', () => {
   assert.equal(stopped.percent, 100);
   assert.match(stopped.note![0], /提前结束：这是收敛了/);
   assert.equal(studyProgress(de, 50, 'Completed').note, null);
+  // 带失败结束、0 组完成、或没开早停时都不是收敛（复验 A2-01）。
+  for (const [done, status, spec] of [
+    [0, 'CompletedWithFailures', de],
+    [12, 'completed_with_failures', de],
+    [0, 'Completed', de],
+    [12, 'Completed', { ...de, budget: { ...de.budget, patience: 0 } }],
+  ] as const) {
+    const note = studyProgress(spec, done, status).note![0];
+    assert.match(note, /这不是收敛/, `${done} ${status}`);
+  }
   const lhs = studyProgress(
     { method: 'lhs', parameters: [{}], budget: { candidate_count: 40 } },
     10,
@@ -653,19 +664,30 @@ it('convergence tracks the best so far per generation and near-optimal spread sa
     ],
   );
   const near = nearOptimalRows({
-    members: ['m1', 'm2', 'm3'],
+    members: ['m1', 'm2', 'm3', 'm4', 'm5'],
     margin: 0.05,
     parameters: [
       { parameter: 'A', min: 26, max: 28, spread: 0.04 },
       { parameter: 'B', min: 0.3, max: 0.7, spread: 0.8 },
     ],
   });
-  assert.equal(near.count, 3);
+  assert.equal(near.count, 5);
   assert.deepEqual(
     near.parameters.map((p) => p.pinned),
     ['tight', 'free'],
   );
-  assert.deepEqual(nearOptimalRows(null), { count: 0, margin: 0.05, parameters: [] });
+  assert.deepEqual(nearOptimalRows(null), {
+    count: 0,
+    tooFew: true,
+    margin: 0.05,
+    parameters: [],
+  });
+  // 只有一组时范围天然为 0，不能判成"定得住"（复验 B2-02）。
+  const single = nearOptimalRows({
+    members: ['m1'],
+    parameters: [{ parameter: 'A', min: 26, max: 26, spread: 0 }],
+  });
+  assert.deepEqual([single.tooFew, single.parameters[0]!.pinned], [true, 'few']);
 });
 
 it('cross-validation folds say whether the parameters still help at the held-out site', () => {
@@ -680,4 +702,23 @@ it('cross-validation folds say whether the parameters still help at the held-out
     [true, false, null],
   );
   assert.deepEqual(crossValidationRows(undefined), []);
+});
+
+it('reads the common preflight refusals and the missing-validation warning in both languages', () => {
+  const [zh, en] = studyErrorText(
+    'Error: target Qle (Qle) has only 14 daily means with enough observations in the calibration window for CN-Cng; need at least 20',
+  );
+  assert.match(zh, /CN-Cng 的 Qle（Qle）在率定期里观测够用的只有 14 天，至少要 20/);
+  assert.match(en, /14 daily means .* calibration period; at least 20/);
+  assert.match(
+    studyErrorText(
+      'target Qh (Qh) has only 3 usable observation points in the validation window for AT-Neu; need at least 30',
+    )[0],
+    /AT-Neu 的 Qh（Qh）在验证期里只有 3 个可用观测/,
+  );
+  assert.deepEqual(studyErrorText('boom'), ['boom', 'boom']);
+  assert.match(
+    studyWarningText('no independent validation window was configured')[0],
+    /没有设独立的验证期/,
+  );
 });

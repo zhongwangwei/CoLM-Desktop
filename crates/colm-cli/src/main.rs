@@ -5000,12 +5000,13 @@ fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn observation_usable_count(
+/// 观测在 `[from, to)` 里能用（实测、非缺测）的时刻，Unix 秒。
+pub(crate) fn observation_usable_times(
     obs_path: &Path,
     variable_name: &str,
     from: i64,
     to: i64,
-) -> Result<usize> {
+) -> Result<Vec<i64>> {
     if from >= to {
         bail!("observation window is empty");
     }
@@ -5044,7 +5045,8 @@ pub(crate) fn observation_usable_count(
                 && value.is_finite()
                 && **value > colm_hist::pair::FILL_VALUE + 1.0
         })
-        .count())
+        .map(|(seconds, _)| (origin_unix + seconds).round() as i64)
+        .collect())
 }
 
 fn cmd_metrics(request: MetricsRequest<'_>) -> Result<()> {

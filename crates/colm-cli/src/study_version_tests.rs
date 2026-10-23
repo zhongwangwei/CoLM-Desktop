@@ -486,9 +486,18 @@ fn an_older_revision_drops_the_baseline_seed_but_refuses_designs_it_cannot_read(
         .to_string();
     assert!(error.contains("draft-a r3"), "{error}");
     assert!(error.contains("unknown variant `morris`"), "{error}");
-    // 普通的预检错误不在这里判（交给当前程序的预检）。
+    // 普通的预检错误不在这里判（交给当前程序的预检）：当前程序也拒绝。
     let spec = write("differential-evolution", false, "bad");
-    ensure_revision_reads_spec(&cli, &root, &spec, &revision).unwrap();
+    ensure_revision_reads_spec_with(&cli, &root, &spec, &revision, || false).unwrap();
+    // 旧程序按旧规则拒绝、当前程序却接受：是旧代码做不了，拒绝建研究并带上旧程序的原因（复验 B2-04）。
+    let error = ensure_revision_reads_spec_with(&cli, &root, &spec, &revision, || true)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("draft-a r3"), "{error}");
+    assert!(
+        error.contains("target Qle has 1 usable observation"),
+        "{error}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

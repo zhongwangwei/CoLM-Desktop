@@ -1,7 +1,10 @@
 import { it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  benchErrorText,
+  benchLogText,
   buildOpenbenchConfig,
+  comparableVariables,
   commonYears,
   comparisonDir,
   parseReferences,
@@ -117,4 +120,45 @@ it('reads the reference list in either shape', () => {
 it('comparison folders match the backend layout on both separators', () => {
   assert.equal(comparisonDir('/data/openbench', 'a b'), '/data/openbench/projects/a_b');
   assert.equal(comparisonDir('C:\\ob', 'x'), 'C:\\ob\\projects\\x');
+});
+
+it('lists only variables whose references match the chosen simulations', () => {
+  const refs = [
+    { name: 'FLUX', data_type: 'stn', variables: ['Latent_Heat', 'Sensible_Heat'] },
+    { name: 'GLEAM', data_type: 'grid', variables: ['Evapotranspiration', 'Latent_Heat'] },
+    { name: 'Any', variables: ['Albedo'] },
+  ];
+  assert.deepEqual(comparableVariables(refs, []), []);
+  const station = comparableVariables(refs, [{ spatial: false }]);
+  assert.deepEqual(
+    station.map((v) => [v.variable, v.references.map((r) => r.name)]),
+    [
+      ['Albedo', ['Any']],
+      ['Latent_Heat', ['FLUX']],
+      ['Sensible_Heat', ['FLUX']],
+    ],
+  );
+  const both = comparableVariables(refs, [{ spatial: false }, { spatial: true }], 'heat');
+  assert.deepEqual(
+    both.map((v) => [v.variable, v.references.map((r) => r.name)]),
+    [
+      ['Latent_Heat', ['FLUX', 'GLEAM']],
+      ['Sensible_Heat', ['FLUX']],
+    ],
+  );
+});
+
+it('backend messages read in both languages', () => {
+  assert.deepEqual(benchErrorText('Error: 已停止'), ['已停止', 'Stopped']);
+  assert.equal(
+    benchErrorText('check 失败（exit status: 1）：\nboom')[1],
+    'check failed (exit status: 1):\nboom',
+  );
+  assert.equal(
+    benchErrorText('报告有 52 MB，太大不在软件里显示；请用浏览器打开')[1],
+    'The report is 52 MB, too large to show here; open it in a browser',
+  );
+  assert.deepEqual(benchErrorText('Traceback x'), ['Traceback x', 'Traceback x']);
+  assert.equal(benchLogText('合并 AT_Neu 的 history'), 'Merging the history of AT_Neu');
+  assert.equal(benchLogText('Resolved 55 packages'), 'Resolved 55 packages');
 });

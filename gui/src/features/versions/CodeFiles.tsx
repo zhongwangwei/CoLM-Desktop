@@ -3,6 +3,7 @@ import { invoke, invokeJson } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
 import { Button, Field, Input, Notice } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
+import { workspaceErrorText } from './workspace-errors';
 
 type Entry = { name: string; path: string; kind: 'file' | 'dir' | 'link'; size: number };
 type FileText = { path: string; size: number; text: string | null };
@@ -342,7 +343,7 @@ export default function CodeFiles({
                   disabled={busy || disabled}
                   run={() =>
                     invoke('workspace_open', { name, path: open.path, app: editor || null }).catch(
-                      (e) => setError(String(e)),
+                      (e) => setError(t(...workspaceErrorText(String(e)))),
                     )
                   }
                 >

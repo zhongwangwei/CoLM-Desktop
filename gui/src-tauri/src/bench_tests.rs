@@ -73,3 +73,27 @@ fn python_style_infinity_and_nan_become_null_outside_strings() {
     assert_eq!(value[0]["x"][1], 1);
     assert_eq!(value[0]["note"], "NaN, Infinity stay");
 }
+
+#[test]
+fn reports_are_read_only_from_inside_the_projects_folder() {
+    let root = temp("inside");
+    let projects = root.join("projects");
+    std::fs::create_dir_all(projects.join("a/output")).unwrap();
+    let report = projects.join("a/output/r.html");
+    std::fs::write(&report, "<p>ok</p>").unwrap();
+    let outside = root.join("secret.html");
+    std::fs::write(&outside, "no").unwrap();
+    assert!(inside(&projects, &report));
+    assert!(!inside(&projects, &outside));
+    // `..` 规范化后出了 projects 就不认；不存在的路径也不认。
+    assert!(!inside(&projects, &projects.join("a/../../secret.html")));
+    assert!(!inside(&projects, &projects.join("missing.html")));
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, projects.join("link.html")).unwrap();
+        assert!(!inside(&projects, &projects.join("link.html")));
+    }
+    assert!(read_report(&projects.join("a/output/r.txt")).is_err());
+    assert_eq!(read_report(&report).unwrap(), "<p>ok</p>");
+    std::fs::remove_dir_all(root).unwrap();
+}

@@ -6,7 +6,10 @@ import { askConfirm } from '../../lib/confirm';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import {
+  benchErrorText,
+  benchLogText,
   buildOpenbenchConfig,
+  comparableVariables,
   commonYears,
   comparisonDir,
   comparisonName,
@@ -21,7 +24,9 @@ type Status = {
   root: string;
   uv: string | null;
   uv_own: boolean;
-  uv_version: string;
+  uv_version: string | null;
+  uv_pinned: string;
+  openbench_pinned: string;
   python: string | null;
   openbench: string | null;
   projects: Project[];
@@ -36,6 +41,10 @@ export default function ComparePage() {
   const { state } = useApp();
   const en = state.language === 'en';
   const t = (zh: string, english: string) => (en ? english : zh);
+  const shown = (e: unknown) => {
+    const [zh, english] = benchErrorText(String(e));
+    return t(zh, english);
+  };
   const [status, setStatus] = useState<Status | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
@@ -50,6 +59,7 @@ export default function ComparePage() {
   const [to, setTo] = useState('');
   const [timRes, setTimRes] = useState('Day');
   const [chosen, setChosen] = useState<Record<string, string>>({});
+  const [variableQuery, setVariableQuery] = useState('');
   const [yaml, setYaml] = useState('');
   const [sites, setSites] = useState<
     { id: string; station: string; history_dir: string; prefix: string }[]
@@ -93,7 +103,7 @@ export default function ComparePage() {
       setReferences(
         parseReferences(
           await invokeJson('bench_references').catch((e) => {
-            setError(String(e).replace(/^Error: /, ''));
+            setError(shown(e));
             return [];
           }),
         ),
@@ -101,15 +111,17 @@ export default function ComparePage() {
     return next;
   };
   useEffect(() => {
-    void refresh().catch((e) => setError(String(e)));
+    void refresh().catch((e) => setError(shown(e)));
     let stop: (() => void) | undefined;
     void listen<{ stage?: string; line?: string }>('bench://log', (payload) =>
       setLog((old) => [...old.slice(-299), `[${payload.stage ?? ''}] ${payload.line ?? ''}`]),
     ).then((unlisten) => (stop = unlisten));
     return () => stop?.();
+    // 只在打开页面时读一次状态、订阅一次日志；之后的刷新由每个操作结束时的 refresh 负责。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 一次只做一件事；报错原样显示（后端已是中文）。
+  // 一次只做一件事。后端的固定句子换成当前语言；点"停止"结束的不是错误，作为提示显示（复验 C2-06）。
   const task = async (fn: () => Promise<unknown>, done?: string) => {
     if (lock.current) return;
     lock.current = true;
@@ -120,7 +132,8 @@ export default function ComparePage() {
       await fn();
       if (done) setNotice(done);
     } catch (e) {
-      setError(String(e).replace(/^Error: /, ''));
+      if (benchErrorText(String(e))[0] === '已停止') setNotice(t('已停止', 'Stopped'));
+      else setError(shown(e));
     } finally {
       lock.current = false;
       setBusy(false);
@@ -169,7 +182,7 @@ export default function ComparePage() {
       const info = await invokeJson<HistoryInfo>('bench_inspect', { dir });
       setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, info } : p)));
     } catch (e) {
-      setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: String(e) } : p)));
+      setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: shown(e) } : p)));
     }
   };
   const ok = picks.filter((p): p is Pick & { info: HistoryInfo } => !!p.info);
@@ -181,7 +194,11 @@ export default function ComparePage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ok.length]);
-  const variables = [...new Set(references.flatMap((r) => r.variables))].sort();
+  const variables = comparableVariables(
+    references,
+    ok.map((p) => p.info),
+    variableQuery,
+  );
   const generate = () => {
     try {
       const sims: BenchSimulation[] = ok.map((p) => ({ label: p.label, info: p.info }));
@@ -197,7 +214,7 @@ export default function ComparePage() {
       setSites(built.sites);
       setError('');
     } catch (e) {
-      setError(String(e).replace(/^Error: /, ''));
+      setError(shown(e));
     }
   };
   const run = () =>
@@ -246,6 +263,17 @@ export default function ComparePage() {
   const caseDirs = state.cases ?? [];
   return (
     <div className="page-stack">
+      <header className="research-heading">
+        <div>
+          <h1>{t('比较与评估', 'Compare and evaluate')}</h1>
+          <p>
+            {t(
+              '用 OpenBench 把几个模拟（不同项目、不同模型版本）放在同一批参考数据上打分，生成评估报告。"研究"负责调参数，这里负责比结果。',
+              'Score several simulations (from different projects or model versions) against the same reference data with OpenBench and get an evaluation report. Research tunes parameters; this page compares results.',
+            )}
+          </p>
+        </div>
+      </header>
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
       <Card
@@ -265,23 +293,42 @@ export default function ComparePage() {
               </Button>
             </li>
           )}
-          <li>
-            uv：
-            {status?.uv
-              ? `${t('软件自带', 'bundled')} · ${status.uv}`
-              : t('未安装', 'not installed')}
-          </li>
-          <li>
-            {t('专用 Python：', 'Private Python: ')}
-            {status?.python ?? t('未安装', 'not installed')}
-          </li>
-          <li>OpenBench：{status?.openbench ?? t('未安装', 'not installed')}</li>
+          {/* 状态回来之前不说"未安装"：要起两次 Python，已装好的机器上首屏会误报（复验 C2-07）。 */}
+          {!status ? (
+            <li>{t('正在检查已经装了什么…', 'Checking what is installed…')}</li>
+          ) : (
+            <>
+              <li>
+                {t('uv：', 'uv: ')}
+                {status.uv
+                  ? `${status.uv_version ?? '?'} · ${status.uv}`
+                  : t('未安装', 'not installed')}
+              </li>
+              <li>
+                {t('专用 Python：', 'Private Python: ')}
+                {status.python ?? t('未安装', 'not installed')}
+              </li>
+              <li>
+                {t('OpenBench：', 'OpenBench: ')}
+                {status.openbench ?? t('未安装', 'not installed')}
+                {status.openbench &&
+                  status.openbench !== status.openbench_pinned &&
+                  t(
+                    `（软件验证过的是 ${status.openbench_pinned}；装的是别的版本或本地源码，评估结果以它为准）`,
+                    ` (the app was verified with ${status.openbench_pinned}; this is another version or a local source, so results follow it)`,
+                  )}
+              </li>
+            </>
+          )}
         </ul>
         <div className="form-grid">
           <Field label={t('OpenBench 从哪装', 'Install OpenBench from')}>
             <Select value={source} onChange={(e) => setSource(e.target.value as 'pypi' | 'local')}>
               <option value="pypi">
-                {t('PyPI 发布版（colm-openbench）', 'PyPI release (colm-openbench)')}
+                {t(
+                  `PyPI 发布版（colm-openbench ${status?.openbench_pinned ?? ''}）`,
+                  `PyPI release (colm-openbench ${status?.openbench_pinned ?? ''})`,
+                )}
               </option>
               <option value="local">
                 {t('本地源码目录（可编辑安装）', 'Local source folder (editable install)')}
@@ -310,13 +357,18 @@ export default function ComparePage() {
           <ActionButton
             action="compare-install-all"
             label={
-              steps.length
-                ? t(`一键安装（${steps.length} 步）`, `Install everything (${steps.length} steps)`)
-                : t('已全部装好', 'Everything is installed')
+              !status
+                ? t('一键安装', 'Install everything')
+                : steps.length
+                  ? t(
+                      `一键安装（${steps.length} 步）`,
+                      `Install everything (${steps.length} steps)`,
+                    )
+                  : t('已全部装好', 'Everything is installed')
             }
             kind="commit"
             variant="primary"
-            disabled={busy || !steps.length || (source === 'local' && !localSource)}
+            disabled={busy || !status || !steps.length || (source === 'local' && !localSource)}
             run={() => install(steps)}
           />
           {ready && (
@@ -340,7 +392,17 @@ export default function ComparePage() {
             </Button>
           )}
         </div>
-        {log.length > 0 && <pre className="compare-log">{log.slice(-80).join('\n')}</pre>}
+        {log.length > 0 && (
+          <pre className="compare-log">
+            {log
+              .slice(-80)
+              .map((line) => {
+                const m = /^(\[[^\]]*\] )([\s\S]*)$/.exec(line);
+                return en && m ? m[1] + benchLogText(m[2]!) : line;
+              })
+              .join('\n')}
+          </pre>
+        )}
       </Card>
 
       {ready && (
@@ -579,9 +641,24 @@ export default function ComparePage() {
             </Field>
           </div>
           <h3 className="study-subhead">{t('变量和参考数据', 'Variables and references')}</h3>
+          {!ok.length ? (
+            <p className="muted study-hint">
+              {t(
+                '先在上面选模拟：这里只列和所选模拟同种（站点或格点）的参考数据能评估的变量。',
+                'Pick simulations above first: only variables with references of the same kind (station or gridded) are listed.',
+              )}
+            </p>
+          ) : (
+            <Field label={t('筛选变量', 'Filter variables')}>
+              <Input
+                value={variableQuery}
+                placeholder={t('如 Heat、Runoff', 'e.g. Heat, Runoff')}
+                onChange={(e) => setVariableQuery(e.target.value)}
+              />
+            </Field>
+          )}
           <div className="form-grid">
-            {variables.map((variable) => {
-              const options = references.filter((r) => r.variables.includes(variable));
+            {variables.map(({ variable, references: options }) => {
               return (
                 <Field key={variable} label={variable}>
                   <Select
@@ -691,11 +768,11 @@ export default function ComparePage() {
             label={t('载入报告…', 'Load a report…')}
             run={() =>
               task(async () => {
-                const path = await invoke<string | null>('pick_file', {
-                  key: 'openbench-report',
-                  filter: 'html',
-                });
-                if (path) await view(path);
+                // 选文件和读文件都在后端：前端不能拿一个任意路径去读（复验 D2-05）。
+                const picked = await invokeJson<{ path: string; html: string } | null>(
+                  'bench_pick_report',
+                );
+                if (picked) setReport(picked);
               })
             }
           />
@@ -703,11 +780,13 @@ export default function ComparePage() {
         {report && (
           <>
             <p className="muted">{report.path}</p>
-            {/* 报告是 OpenBench 生成的独立 HTML：放进沙箱，允许它自己的脚本，不给同源权限。 */}
+            {/* 报告放进完全的沙箱：不跑脚本、不给同源权限。OpenBench 3.0.8 的报告里没有一个 <script>
+                （实测两份都是 0 个），用不着脚本；Windows 上 wry 会往子框架注入 IPC 初始化脚本，
+                允许脚本就只剩 origin 校验一层兜底（复验 D2-04）。 */}
             <iframe
               className="compare-report"
               title={t('OpenBench 报告', 'OpenBench report')}
-              sandbox="allow-scripts"
+              sandbox=""
               srcDoc={report.html}
             />
           </>

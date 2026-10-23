@@ -55,6 +55,9 @@ const UV_ARCHIVES: [(&str, &str, &str); 6] = [
         "724279317fee6e5fa8ad1908e4eba2bbe764ef1ece5b3f4597927b62b1fe562a",
     ),
 ];
+/// PyPI 上装的 OpenBench 版本。只实测过这一版（登记表 JSON 里的 Infinity、`check` 与 `run` 对相对
+/// fulllist 的解析不一致都是按它处理的）；不锁版本时新发布会悄悄换掉行为（复验 D2-03）。换版本要重跑一次评估。
+pub(crate) const OPENBENCH_VERSION: &str = "3.0.8";
 /// OpenBench 要求 Python ≥ 3.10；3.12 的科学计算轮子（cartopy、netCDF4）三个平台都齐。
 const PYTHON_VERSION: &str = "3.12";
 /// 在软件里直接显示的报告大小上限；独立报告把图嵌在 HTML 里，更大的交给浏览器打开。
@@ -131,9 +134,27 @@ fn env_command(root: &Path, name: &str) -> Command {
     command
 }
 
-fn quiet(mut command: Command) -> Option<String> {
-    colm_kernel::run::no_console(&mut command);
-    let output = command.stderr(Stdio::null()).output().ok()?;
+/// 跑一个短命令收齐输出。也登记成 [`ChildOwner::Bench`]、进自己的进程组：读登记表、看 history 这些
+/// 命令要起 Python，慢的时候几十秒，原来不登记，停止按钮和关窗都杀不到（复验 D2-02）。
+fn output(mut command: Command) -> Result<std::process::Output, String> {
+    command
+        .env("PYTHONIOENCODING", "utf-8")
+        .env("NO_COLOR", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    colm_kernel::run::top_level_sidecar(&mut command);
+    let child = command.spawn().map_err(|e| format!("无法启动：{e}"))?;
+    let guard = register_child(child.id(), ChildOwner::Bench);
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() && guard.stopped() {
+        return Err("已停止".into());
+    }
+    Ok(output)
+}
+
+fn quiet(command: Command) -> Option<String> {
+    let output = output(command).ok()?;
     output
         .status
         .success()
@@ -203,6 +224,15 @@ pub async fn bench_status() -> Result<Value, String> {
     tauri::async_runtime::spawn_blocking(|| -> Result<Value, String> {
         let root = root()?;
         let uv = uv(&root);
+        // 如实报 uv 自己说的版本：文件可能是旧版本留下的（复验 D2-03）。
+        let uv_version = uv
+            .as_ref()
+            .and_then(|uv| {
+                let mut command = Command::new(uv);
+                command.arg("--version");
+                quiet(command)
+            })
+            .and_then(|text| text.split_whitespace().nth(1).map(str::to_owned));
         let python = env_bin(&root, "python");
         let python_version = python
             .is_file()
@@ -224,7 +254,9 @@ pub async fn bench_status() -> Result<Value, String> {
             "root": root,
             "uv": uv,
             "uv_own": own_uv(&root).is_file(),
-            "uv_version": UV_VERSION,
+            "uv_version": uv_version,
+            "uv_pinned": UV_VERSION,
+            "openbench_pinned": OPENBENCH_VERSION,
             "python": python_version,
             "openbench": openbench,
             "projects": projects(&root),
@@ -320,7 +352,7 @@ pub async fn bench_install(
                     .filter(|s| !s.is_empty())
                 {
                     None => {
-                        command.arg("colm-openbench");
+                        command.arg(format!("colm-openbench=={OPENBENCH_VERSION}"));
                     }
                     Some(dir) => {
                         let dir = PathBuf::from(dir);
@@ -445,11 +477,8 @@ pub async fn bench_references() -> Result<Value, String> {
             return Err("先装 OpenBench".into());
         }
         let mut command = env_command(&root, "openbench");
-        command
-            .args(["ref", "list", "--format", "json"])
-            .env("NO_COLOR", "1");
-        colm_kernel::run::no_console(&mut command);
-        let output = command.output().map_err(|e| e.to_string())?;
+        command.args(["ref", "list", "--format", "json"]);
+        let output = output(command)?;
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
@@ -589,8 +618,7 @@ pub async fn bench_inspect(dir: String) -> Result<Value, String> {
         }
         let mut command = env_command(&root, "python");
         command.args(["-c", INSPECT_SCRIPT]).arg(&dir);
-        colm_kernel::run::no_console(&mut command);
-        let output = command.output().map_err(|e| e.to_string())?;
+        let output = output(command)?;
         if !output.status.success() {
             let text = String::from_utf8_lossy(&output.stderr);
             return Err(text.lines().last().unwrap_or("读不了这个目录").to_owned());
@@ -711,8 +739,7 @@ pub async fn bench_register(
         command
             .args(["ref", "register", &name, "--root-dir", &root_dir])
             .args(["--data-type", &data_type, "--tim-res", &tim_res])
-            .args(["--years", &years.0.to_string(), &years.1.to_string()])
-            .env("NO_COLOR", "1");
+            .args(["--years", &years.0.to_string(), &years.1.to_string()]);
         if let Some(category) = category.filter(|c| !c.trim().is_empty()) {
             command.args(["--category", &category]);
         }
@@ -722,8 +749,7 @@ pub async fn bench_register(
         for variable in &variables {
             command.args(["-v", variable]);
         }
-        colm_kernel::run::no_console(&mut command);
-        let output = command.output().map_err(|e| e.to_string())?;
+        let output = output(command)?;
         let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
@@ -749,44 +775,80 @@ pub async fn bench_scan_preview(dir: String) -> Result<String, String> {
             return Err("先装 OpenBench".into());
         }
         let mut command = env_command(&root, "openbench");
-        command
-            .args(["ref", "scan", &dir, "--dry-run", "--allow-skip"])
-            .env("NO_COLOR", "1");
-        colm_kernel::run::no_console(&mut command);
-        let output = command.output().map_err(|e| e.to_string())?;
-        Ok(format!(
+        command.args(["ref", "scan", &dir, "--dry-run", "--allow-skip"]);
+        let output = output(command)?;
+        let text = format!(
             "{}{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
-        ))
+        );
+        // 扫描失败要报错，不能当成预览结果显示（复验 D2 P3：原来忽略退出码）。
+        if output.status.success() {
+            Ok(text)
+        } else {
+            Err(format!("扫描失败：{}", text.trim()))
+        }
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
-/// 读一份 OpenBench 报告在软件里显示。报告可以是这里跑出来的，也可以是用户选的任何一份
-/// （"载入报告"）；只读 `.html`，过大的请用浏览器打开。
+/// 读一份这里跑出来的报告在软件里显示：只认 `projects/` 下的 `.html`（规范化后再比，`..` 和符号链接
+/// 绕不出去）。前端不持有读任意路径的能力（复验 D2-05）；别处的报告走 [`bench_pick_report`]。
 #[tauri::command]
 pub async fn bench_report(path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let projects = root()?.join("projects");
         let path = PathBuf::from(path);
-        let is_html = path
-            .extension()
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
-        if !is_html {
-            return Err("报告应是 .html 文件".into());
+        if !inside(&projects, &path) {
+            return Err("只能显示这里跑出来的报告；别处的报告请用\"载入报告…\"".into());
         }
-        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
-        if size > INLINE_REPORT_LIMIT {
-            return Err(format!(
-                "报告有 {} MB，太大不在软件里显示；请用浏览器打开",
-                size / 1024 / 1024
-            ));
-        }
-        std::fs::read_to_string(&path).map_err(|e| e.to_string())
+        read_report(&path)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// "载入报告…"：用户在文件对话框里亲自选一份报告，返回路径和内容。路径由后端的对话框给出，
+/// 不由前端传入。
+#[tauri::command]
+pub async fn bench_pick_report(app: AppHandle) -> Result<Option<Value>, String> {
+    let Some(path) =
+        crate::recent::pick_file(app, "openbench-report".into(), Some("html,htm".into())).await
+    else {
+        return Ok(None);
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let html = read_report(Path::new(&path))?;
+        Ok(Some(json!({ "path": path, "html": html })))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn inside(dir: &Path, path: &Path) -> bool {
+    match (dir.canonicalize(), path.canonicalize()) {
+        (Ok(dir), Ok(path)) => path.starts_with(dir),
+        _ => false,
+    }
+}
+
+/// 只读 `.html`，过大的请用浏览器打开。
+fn read_report(path: &Path) -> Result<String, String> {
+    let is_html = path
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm"));
+    if !is_html {
+        return Err("报告应是 .html 文件".into());
+    }
+    let size = std::fs::metadata(path).map_err(|e| e.to_string())?.len();
+    if size > INLINE_REPORT_LIMIT {
+        return Err(format!(
+            "报告有 {} MB，太大不在软件里显示；请用浏览器打开",
+            size / 1024 / 1024
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

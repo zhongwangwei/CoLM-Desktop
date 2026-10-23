@@ -305,6 +305,7 @@ pub fn run() {
             bench::bench_references,
             bench::bench_run,
             bench::bench_report,
+            bench::bench_pick_report,
             bench::bench_inspect,
             bench::bench_register,
             bench::bench_scan_preview,

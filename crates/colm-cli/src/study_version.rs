@@ -734,12 +734,26 @@ pub(crate) fn revision_cli(
 /// `corrected`、`morris`）。建研究时先让那个程序预检一遍准备好的设定：
 /// - 只是不认得 `include_baseline`（GUI 自动加的增强，不改研究的含义）：去掉它再试；
 /// - 不认得别的设定（Morris、订正观测、不确定性分析的目标……）：拒绝建研究并说明原因；
-/// - 其他预检错误不在这里判，照旧交给当前程序的预检。
+/// - 旧程序读得懂、却按旧规则拒绝（如旧程序不许不确定性分析带对照观测），而当前程序的预检通过：
+///   同样拒绝。原来只认 unknown field，这种拒绝被放过，旧程序运行时静默丢掉目标（复验 B2-04）；
+/// - 两边都拒绝的是普通预检错误，不在这里判，照旧交给当前程序的预检报。
 pub(crate) fn ensure_revision_reads_spec(
     cli: &Path,
     case_root: &Path,
     spec_file: &Path,
     revision: &colm_model::FrozenRevision,
+) -> Result<()> {
+    ensure_revision_reads_spec_with(cli, case_root, spec_file, revision, || {
+        study::runner::preflight_create(case_root, spec_file).is_ok()
+    })
+}
+
+fn ensure_revision_reads_spec_with(
+    cli: &Path,
+    case_root: &Path,
+    spec_file: &Path,
+    revision: &colm_model::FrozenRevision,
+    current_accepts: impl Fn() -> bool,
 ) -> Result<()> {
     let probe = || -> Result<Option<String>> {
         let output = std::process::Command::new(cli)
@@ -754,7 +768,8 @@ pub(crate) fn ensure_revision_reads_spec(
             return Ok(None);
         }
         let text = String::from_utf8_lossy(&output.stderr).into_owned();
-        Ok((text.contains("unknown field") || text.contains("unknown variant")).then_some(text))
+        let unknown = text.contains("unknown field") || text.contains("unknown variant");
+        Ok((unknown || current_accepts()).then_some(text))
     };
     let Some(error) = probe()? else {
         return Ok(());
@@ -775,6 +790,7 @@ fn unreadable(revision: &colm_model::FrozenRevision, error: &str) -> anyhow::Err
     let detail = error
         .lines()
         .find(|line| line.contains("unknown field") || line.contains("unknown variant"))
+        .or_else(|| error.lines().rev().find(|line| !line.trim().is_empty()))
         .unwrap_or(error)
         .trim();
     anyhow::anyhow!(

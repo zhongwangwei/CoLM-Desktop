@@ -646,6 +646,11 @@ export default function PreparationPage() {
             action="prep-inspect"
             label={t('检查输入', 'Inspect input')}
             disabled={busy || !form.src}
+            title={
+              busy || form.src
+                ? undefined
+                : t('先选原始输入文件', 'Choose the raw input file first')
+            }
             run={inspect}
           />
         )}
@@ -701,6 +706,15 @@ export default function PreparationPage() {
             label={t('生成数据', 'Generate data')}
             variant="primary"
             disabled={busy || !form.dst || (canInspect && !probe)}
+            title={
+              busy
+                ? undefined
+                : !form.dst
+                  ? t('先填输出位置', 'Fill in the output location first')
+                  : canInspect && !probe
+                    ? t('先点"检查输入"核对字段', 'Click “Inspect input” to check the fields first')
+                    : undefined
+            }
             run={execute}
           />
           {busy && (

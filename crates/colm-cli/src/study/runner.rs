@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 
 use super::science::{ObjectiveMetric, ObjectiveTerm};
 use super::spec::{
-    Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetSource, TargetSpec,
+    Manifest, MemberPlan, StudyKind, StudyMethod, StudySpec, TargetPeriod, TargetSource, TargetSpec,
 };
 use super::state::{CandidateState, ProcessIdentity, StudyState, StudyStatus, TaskStatus};
 use crate::{Layout, MetricsRequest, RunNotice, VarMetrics};
@@ -1033,10 +1033,33 @@ fn preflight_observation_window(
     } else {
         (target.from, target.to, "calibration")
     };
-    let count = crate::observation_usable_count(observation, &target.variable, from, to)?;
+    let times = crate::observation_usable_times(observation, &target.variable, from, to)?;
+    // 按日、按月比时，运行时数的是凑够观测的时段个数，不是逐时观测点数。原来预检按点数判 `min_pairs`：
+    // 14 天的逐时观测有几百个点，预检通过，运行时只有 14 个日均，跑完基准才失败（复验 A2-03，25 次模拟白跑）。
+    // 模型每个时刻都有值，所以按观测自己能凑够的时段数判，是运行时配对数的上界，与 `aggregate_pairs` 同一口径。
+    let Some(aggregate) = target.aggregate else {
+        if times.len() < target.min_pairs {
+            bail!(
+                "target {} ({}) has only {} usable observation points in the {period} window for {site}; need at least {}",
+                target.key,
+                target.variable,
+                times.len(),
+                target.min_pairs
+            );
+        }
+        return Ok(());
+    };
+    let zeros = vec![0.0; times.len()];
+    let count = super::targets::aggregate_pairs(&times, &zeros, &zeros, aggregate)?
+        .support
+        .len();
     if count < target.min_pairs {
+        let unit = match aggregate {
+            TargetPeriod::Daily => "daily",
+            TargetPeriod::Monthly => "monthly",
+        };
         bail!(
-            "target {} ({}) has only {count} usable observation points in the {period} window for {site}; need at least {}",
+            "target {} ({}) has only {count} {unit} means with enough observations in the {period} window for {site}; need at least {}",
             target.key, target.variable, target.min_pairs
         );
     }

@@ -10,6 +10,7 @@ import { researchVersion } from './research-version';
 import { hubMethods } from './hub-methods';
 import { appLocale, historyKindLabel, historyStatusLabel } from '../history/history';
 import { schemeVersionName } from './version-tree';
+import { workspaceErrorText } from './workspace-errors';
 import type { ParameterOverride } from '../../lib/types';
 import { compatibleKernel } from '../runs/run-model';
 import { effectiveModelFields } from '../cases/case-model';
@@ -329,6 +330,7 @@ function page(
       throw new Error(command);
     },
     askConfirm: async () => false,
+    workspaceErrorText,
     download: async () => {},
   };
   function compile(name: string, exported: string[] = []) {

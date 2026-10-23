@@ -217,8 +217,11 @@ impl Workspace {
         std::fs::create_dir(&dir).with_context(|| format!("cannot reserve {}", dir.display()))?;
         let filled = (|| -> Result<Self> {
             let text = git_spelling(snapshot.to_str().context("snapshot path is not UTF-8")?);
-            if snapshot.join(".git").exists() || text.ends_with(".tar.gz") || text.ends_with(".tgz")
-            {
+            // 源码检出运行时，官方版本的缓存是"只有索引、没有提交"的 `.git`（摘要按 git 列出的文件算，
+            // 见 colm-cli 的 cache_code）。按仓库 clone 它会在 rev-parse HEAD 失败（复验 A2-02），所以
+            // 只有真有提交的才当仓库，其余当普通目录复制。
+            let repository = snapshot.join(".git").exists() && git::has_head(snapshot);
+            if repository || text.ends_with(".tar.gz") || text.ends_with(".tgz") {
                 return Self::populate(&dir, name, &text, rev);
             }
             ensure!(
@@ -477,6 +480,10 @@ fn copy_plain_tree_in(from: &Path, to: &Path, top: &Path) -> Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
+        // 快照顶层残留的 `.git`（没有提交的索引）不带进工作区：工作区自己 init 并提交基线。
+        if from == top && entry.file_name() == ".git" {
+            continue;
+        }
         let kind = entry.file_type()?;
         let target = to.join(entry.file_name());
         if kind.is_symlink() {

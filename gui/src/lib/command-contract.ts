@@ -217,6 +217,7 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "bench_pick_report": {},
   "case_namelist_preview": {
     "dir": {
       "required": true,
