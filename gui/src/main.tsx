@@ -5,8 +5,9 @@ import App from './App';
 import { AppProvider } from './lib/app-state';
 import './styles.css';
 import { normalizeBrowserLocale } from './lib/browser-locale';
+import { readStored } from './lib/storage';
 // Run before React loads any lazy chart module. Preserve valid browser locales.
-normalizeBrowserLocale(navigator, localStorage.getItem('colm-ui-language') === 'en');
+normalizeBrowserLocale(navigator, readStored('colm-ui-language') === 'en');
 class ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
   static getDerivedStateFromError(error: Error) {

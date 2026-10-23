@@ -59,6 +59,9 @@ export default function CasesPage() {
     ),
     [error, setError] = useState('');
   const [runPending, setRunPending] = useState(false);
+  // 读设置失败（历史库被锁、目录暂时读不到）后能就地再读一次，不必切走算例再回来（GUI 审查 B-11）。
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [reloadCount, setReloadCount] = useState(0);
   const [servers, setServers] = useState<Server[] | null>(null);
   const [resourceError, setResourceError] = useState('');
   const [forcingInput, setForcingInput] = useState<ForcingInput | null>(null);
@@ -307,6 +310,7 @@ export default function CasesPage() {
     setModelContext(null);
     setOptionStates([]);
     setError('');
+    setLoadFailed(false);
     ++forcingSequence.current;
     setForcingInput(null);
     setSavedForcing(null);
@@ -423,7 +427,9 @@ export default function CasesPage() {
     }
     void load()
       .catch((e) => {
-        if (request.active) setError(String(e));
+        if (!request.active) return;
+        setError(String(e));
+        setLoadFailed(true);
       })
       .finally(() => {
         if (request.active) setBusy(false);
@@ -431,7 +437,7 @@ export default function CasesPage() {
     return () => {
       request.active = false;
     };
-  }, [dir, versionId, revision, state.kernels, overlay, notify]);
+  }, [dir, versionId, revision, state.kernels, overlay, notify, reloadCount]);
   const configurationKernel = effectiveProfile
     ? compatibleKernel(state.kernels, effectiveProfile, physics)
     : undefined;
@@ -1034,6 +1040,15 @@ export default function CasesPage() {
             onChange={setStep}
           />
           {error && <Notice tone="error">{error}</Notice>}
+          {loadFailed && !busy && (
+            <div className="flex gap-2">
+              <ActionButton
+                action="case-reload"
+                label={t('重新读取算例设置', 'Read the case settings again')}
+                run={() => setReloadCount((count) => count + 1)}
+              />
+            </div>
+          )}
           {optionError && <Notice tone="warning">{optionError}</Notice>}
           {busy && (
             <Notice>{t('正在读取模型与算例设置…', 'Reading model and case settings…')}</Notice>

@@ -126,7 +126,6 @@ export type AppEvent =
   | 'run://progress'
   | 'run://lines'
   | 'run://done'
-  | 'study://event'
   | 'bench://log'
   | 'assistant://event'
   | 'remote-create://progress'

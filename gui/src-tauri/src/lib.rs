@@ -21,6 +21,7 @@ mod forcing;
 mod history;
 mod history_delete;
 mod histvars;
+mod live_runs;
 mod model;
 mod observation;
 mod project;
@@ -77,6 +78,8 @@ pub(crate) fn stop_everything(app: &tauri::AppHandle, when: &str) {
 }
 
 pub fn run() {
+    // 先清上次崩溃/强退留下的本机运行，再接受新的运行（GUI 审查 B-12）。
+    live_runs::enable();
     let run_processes = RunProcesses::default();
     crate::sidecar::install_run_registry(&run_processes);
     let builder = tauri::Builder::default();
@@ -385,6 +388,7 @@ pub fn run() {
             print_report,
             close_gate::app_close,
             sidecar::history_replay_cancel,
+            live_runs::live_runs_swept,
         ])
         .build(tauri::generate_context!())
         .expect("error building CoLM Desktop")

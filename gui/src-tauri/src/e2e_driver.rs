@@ -14,6 +14,7 @@
 //!
 //! 原生文件对话框（rfd）同样点不到，所以另有两个旁路：`POST /pick` 预置下一次
 //! `pick_file`/`pick_folder` 的结果；设了 `COLM_E2E_SAVE_DIR` 时导出直接写进那个目录。
+//! `POST /close` 像点窗口关闭按钮一样请求关窗（验证关窗前的确认）。
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -117,6 +118,15 @@ fn serve(
             serde_json::json!({"ok": true, "value": "armed"})
         }
         "/eval" => eval(app, pending, next, &String::from_utf8_lossy(&body), timeout),
+        // 像用户点窗口的关闭按钮一样请求关窗（走 `CloseRequested`，前端会先确认）：JS 那边的
+        // `plugin:window|close` 被权限表拒绝，借系统辅助功能点按钮又会弹授权框。
+        "/close" => match app.get_webview_window("main") {
+            Some(window) => match window.close() {
+                Ok(()) => serde_json::json!({"ok": true, "value": "close requested"}),
+                Err(error) => serde_json::json!({"ok": false, "value": error.to_string()}),
+            },
+            None => serde_json::json!({"ok": false, "value": "no main window"}),
+        },
         _ => serde_json::json!({"ok": false, "value": format!("unknown path {path}")}),
     };
     let text = reply.to_string();

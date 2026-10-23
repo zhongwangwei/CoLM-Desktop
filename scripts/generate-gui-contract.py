@@ -21,11 +21,14 @@ handler=re.search(r'generate_handler!\[([\s\S]*?)\]',lib)
 if not handler:raise SystemExit('No Tauri command registration found.')
 registered={name.strip().split('::')[-1] for name in handler.group(1).split(',') if name.strip()}
 commands={}
-for path in sorted((ROOT/'gui/src-tauri/src').glob('*.rs')):
+# rglob: commands in submodule folders must not vanish from the contract (GUI audit A-13).
+for path in sorted((ROOT/'gui/src-tauri/src').rglob('*.rs')):
     source=path.read_text(encoding='utf-8')
     source=re.sub(r'^\s*//[^\n]*', '', source, flags=re.M)
     for match in re.finditer(r'^\s*#\[tauri::command(?:\([^\]]*\))?\]\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+(\w+)\s*\(',source,re.M):
         if match.group(1) not in registered:continue
+        # Argument renaming would break the snake_case -> camelCase mapping below; refuse instead of guessing.
+        if 'rename_all' in match.group(0):raise SystemExit(f'{path.name}: {match.group(1)} uses rename_all, which this generator does not map.')
         depth=1; end=match.end()
         while depth and end<len(source):
             depth+= (source[end]=='(')-(source[end]==')'); end+=1
@@ -35,7 +38,8 @@ for path in sorted((ROOT/'gui/src-tauri/src').glob('*.rs')):
             name,typ=item.split(':',1); name=name.strip(); typ=typ.strip()
             if re.search(r'\b(State|AppHandle|WebviewWindow|Window)\b',typ):continue
             if not re.fullmatch(r'\w+',name):continue
-            parameters[camel(name)]={'required':not typ.startswith('Option<'),'rust_type':typ}
+            optional=re.fullmatch(r'(?:(?:std|core)::option::)?Option\s*<[\s\S]*>',typ) is not None
+            parameters[camel(name)]={'required':not optional,'rust_type':typ}
         commands[match.group(1)]=parameters
 missing=registered-set(commands)
 if missing:raise SystemExit('Registered command declarations not found: '+', '.join(sorted(missing)))

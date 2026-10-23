@@ -36669,3 +36669,20 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 同时修正启动期整理后的选择：`selectionAfterPrune` 在 pruning 删掉当前选中的官方修订时回退到最新的保留版本，避免悬空 `versionRef`。
 - 测试：`cargo test -p colm-model --lib` **39/39**（新增 `Registry::get` 与改绑目标的 missing message 断言）；前端 `npm test` **876/876**（新增 prune 后选择回退）；GUI 未改。
 - 没做/未验证：用户实际出错的那条操作路径（算例/研究/助手）未复现；研究 pin 到 118 的情况没有自动改绑命令，只能明确报错。
+
+## 第 771 轮：GUI 全量审查（2026-10-23）的修复与真实窗口验证（2026-10-24）
+
+审查报告在 `tmp/gui-full-audit-2026-10-23/`（不入库）。P0/P1 与列出的 P2 逐条处理，分 7 次提交（28c6cef9 … 本轮）。
+
+- **关窗（G-01）**：`CloseRequested` 与 ⌘Q（`ExitRequested` 且 `code` 为空）先交给 `CloseGate`：发 `app://close-requested`，前端汇总各页 navigation guard 的未保存原因与本机运行数弹确认，确认后 `app_close` 停掉一切再 `app.exit(0)`。前端 8 秒内不应答（页面卡死/加载失败）时第二次关窗直接放行，否则窗口永远关不掉。JS 侧的 `plugin:window|close` 被 ACL 拒绝，e2e 驱动新增 `POST /close` 走 Rust 的 `window.close()`。
+- **助手**：Stop 能中断流式生成（`complete_cancellable`，每读一行 SSE 查一次取消标志，G-02）；`ui_click` 的丢弃/停止类按钮升为需确认的 Act 级且不能"本会话允许"（G-03）；"本会话允许"按工具+目标按钮/字段记，不再按工具名一把放开（D-03）；token 用量写 `usage.json`，resume 后接着计（D-04）；删会话先确认（D-05）；被后端在开轮前拒绝的消息撤回气泡并还原输入与附件（D-06）；附件抽取 120 s 超时并按进程树终止（D-07）；同意卡写明网页读取可能经 DeepSeek（D-28）。
+- **长任务**：历史重跑登记为 `ChildOwner::Replay`，一次一个，有"停止重跑"（G-04）。远程研究 PENDING 记录可被 status/cancel/fetch 收养或判为从未提交（G-05，探测用带前缀的标记行，集群登录横幅不会打乱解析）；远程单算例 pending 超过 10 分钟仍无身份即判"未到达服务器"，前端在 `remote_status` 报"未远程运行"时把条目置 failed，批量里被 pinned 的站点随之可取消（G-06；条目进入 unknown 后面板每 10 s 自动核对，不需用户再点）。
+- **崩溃后的孤儿运行（B-12）**：每个登记进 `RunProcesses` 的本机运行写 `<历史库目录>/live-runs/<pid>.json`，结束时删；下一次启动（`live_runs::enable`，在建 Builder 之前）对仍活着、自成进程组、命令行含 colm-cli 的进程按组终止（研究再跑 `study-finalize-cancel`），登记一律删，前端启动后提示一次。否决"接回界面继续显示"：stdout 管道已随旧窗口断开，进度和日志接不回来。只在真正的应用里打开，单元测试里的 `RunProcesses` 不碰用户目录。
+- **科学一致性**：比较页改了模拟/变量/名称/时段后清掉旧 YAML（C-05）；打开本机研究清掉旧 host（C-04）；手填站点文件清掉配对的强迫（B-09）；扫描期间用户改过的起止日期不被覆盖（B-04）；本机运行完成后按 `operation_id` 补 `run_case`，结果页能选中新运行（B-08）。
+- **状态健壮性**：最近项目坏值就地修复、读写串行（A-02/A-03）；确认框参与 guide 的 modal 判定，助手不能绕过它导航（A-04）；明确选的版本只管当前项目，换项目回到算例自己的绑定（A-05）；本机偏好读写统一走 `lib/storage.ts`，存储被禁用时不再整窗停在"正在加载…"（A-09）；算例设置读取失败给"重新读取"（B-11）；代码文件连点只认最后一次（B-07）；手动整理修订时同步 `versionRef`（C-12）；研究开始前的校验错误不再被按钮吞掉（C-03）；路径含空格在第一步就双语拒绝（B-03）。
+- **删除规则统一（B-05）**：`model_delete` 无论哪个入口都先数现存算例/研究的绑定，有就不删；`keep_history` 只决定"历史记录提到它"是否也拦。原来项目页不带 `keep_history`，从没跑过的算例绑着的修订照删，留下悬空 binding。
+- **门禁（A-13）**：`check-gui` 把命令名解析成候选字面量（条件表达式、参数的字面量联合类型、`as const` 数组上的 for-of），解析不出就报错；覆盖从 186 升到 207 个命令（22 个经动态名）。新增反向检查：`AppEvent` 里每个事件必须有前端 `listen`，因此删去了没人听的 `study://event`（React 前端改为每 3 s 读 `study_status`）。生成器递归扫描子目录，遇到 `rename_all` 直接报错，`std::option::Option<…>` 也算可选。`npm test` 现在跑完整契约检查，不只是自检。
+- **真实窗口验证**（e2e 驱动，隔离 HOME=`tmp/ob3`）：在计算资源页改一个字段后 `POST /close` → 弹"现在关闭 CoLM Desktop？…仍然关闭/取消"；取消后窗口仍在（`/ping` 正常）；再关并点"仍然关闭"后进程退出；无未保存内容时直接关闭。B-12：建 CN-Cng 算例并开始运行，`live-runs/<pid>.json` 出现且 pid 对应 `colm-cli run`；另起一个自成进程组的 `colm-cli run`（mkinidata 已完成、主循环中）并写登记、`kill -9` 窗口，重启后该进程组 0 个进程、登记目录为空，界面提示"上次异常退出时还在运行的 1 个本机任务已停止，输出可能不完整：CN-Cng"。
+- **踩坑**：e2e 只重编 GUI 不跑 `xtask stage-sidecar` 时，`target/release/colm-build-source.json` 的源码哈希落后，启动卡在"模型版本读取失败：official programs were not built from the current source"——这是构建步骤漏了，不是回归。
+- **测试**：前端 `npm test` 884/884（含完整契约检查 245 个命令）；GUI Rust `--lib --bins` 441 通过 1 忽略；`colm-agent` 226、`colm-cli` remote 115 + remote_study 22（前几次提交时）；`xtask check-gui` 245/245。
+- **没做/未验证**：真实 SSH/集群上的 pending 收养与"未到达服务器"判定（只有单元测试与源码路径）；Windows 上 `tasklist` 判活与 `taskkill /T` 清理没在真机跑过；B-12 不补写历史台账里那条未结束的运行事件。

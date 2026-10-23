@@ -401,6 +401,7 @@ impl RunProcesses {
         }
         state.pending.remove(key);
         state.pids.insert(key.to_string(), pid);
+        crate::live_runs::record(key, pid);
         Ok(true)
     }
 
@@ -421,7 +422,9 @@ impl RunProcesses {
             .inner
             .lock()
             .map_err(|_| "run process registry poisoned")?;
-        state.pids.remove(key);
+        if let Some(pid) = state.pids.remove(key) {
+            crate::live_runs::clear(pid);
+        }
         state.pending.remove(key);
         Ok(state.cancelled.remove(key))
     }
@@ -591,7 +594,7 @@ pub(crate) fn refuse_writes_into_running_cases(paths: &[&std::path::Path]) -> Re
     Ok(())
 }
 
-fn sidecar_command(program: impl AsRef<OsStr>) -> std::process::Command {
+pub(crate) fn sidecar_command(program: impl AsRef<OsStr>) -> std::process::Command {
     let mut command = std::process::Command::new(program);
     colm_kernel::run::no_console(&mut command);
     command.env("COLM_AUDIT_BY_PARENT", "1");
@@ -3643,8 +3646,8 @@ fn study_run_args(
     if !kernel.trim().is_empty() {
         args.extend(["--kernel".into(), kernel]);
     }
-    // Study runs are always streamed: progress is NDJSON and the GUI listens
-    // to one `study://event` channel instead of waiting for a giant capture.
+    // Study runs are always streamed: progress is NDJSON on one `study://event` channel instead of
+    // a giant capture. React 前端改为每 3 秒读 `study_status`，不再订阅这个事件（GUI 审查 A-13）。
     args.extend(["--stream".into(), "1".into()]);
     if let Some(jobs) = jobs {
         args.push("--jobs".into());

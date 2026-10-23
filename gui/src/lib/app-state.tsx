@@ -47,6 +47,7 @@ import type {
   Route,
   VersionRef,
 } from './types';
+import { readStored, writeStored } from './storage';
 const initial: AppState = {
   route: 'project',
   caseTab: 'settings',
@@ -62,10 +63,10 @@ const initial: AppState = {
   newCaseSeed: null,
   simulationReturn: null,
   // 设置页的"默认展开专家设置"：和语言、外观一样记住，原来每次重开都回到不展开。
-  expert: localStorage.getItem('colm-ui-expert') === 'true',
-  language: localStorage.getItem('colm-ui-language') === 'en' ? 'en' : 'zh',
-  theme: localStorage.getItem('colm-ui-theme') === 'dark' ? 'dark' : 'light',
-  assistantOpen: localStorage.getItem('colm-ui-assistant') !== 'false',
+  expert: readStored('colm-ui-expert') === 'true',
+  language: readStored('colm-ui-language') === 'en' ? 'en' : 'zh',
+  theme: readStored('colm-ui-theme') === 'dark' ? 'dark' : 'light',
+  assistantOpen: readStored('colm-ui-assistant') !== 'false',
   assistantSettingsOpen: false,
   running: {},
   notices: [],
@@ -210,6 +211,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const opening = (async (): Promise<OpenedCase | null> => {
         try {
           const opened = await invoke<OpenedCase>('open_case', { dir });
+          // 明确选的版本只管当前项目；换到别的项目就回到各算例自己的绑定，否则一次选择会一直盖住
+          // 之后打开的所有项目，且界面上没有办法回到算例绑定（GUI 审查 A-05）。
+          const previousRoot = current.current.root;
+          const chosenVersion =
+            previousRoot && previousRoot !== opened.root ? null : current.current.chosenVersion;
           const latestOfficial = current.current.versions
             .filter((v) => v.version.id === 'official')
             .sort((a, b) => b.version.revision - a.version.revision)[0]?.version;
@@ -218,7 +224,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           }).catch(async (error: unknown) => {
             // 绑定的修订已被整理（或删除）：问一句改绑到哪个版本，而不是抛出读不到 revision.json。
             const missing = missingRevision(error);
-            const target = current.current.chosenVersion ?? latestOfficial;
+            const target = chosenVersion ?? latestOfficial;
             if (!missing || !target) throw error;
             if (!(await askToRebind(rebindQuestion(missing, target, bilingual))))
               throw new Error(
@@ -250,7 +256,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             );
           // 只认用户明确选的版本（`chosenVersion`）；打开上一个算例时带出的版本不能串到别的算例上。
           const selectedVersion =
-            current.current.chosenVersion ??
+            chosenVersion ??
             (bound ? binding.version : (latestOfficial ?? current.current.versionRef));
           const version = await invokeJson<FrozenRevision>('model_get', { ...selectedVersion });
           const cases = await invoke<CaseEntry[]>('list_cases', { root: opened.root });
@@ -264,6 +270,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
             cases,
             version,
             versionRef: selectedVersion,
+            chosenVersion,
             route: 'case',
             caseTab: tab,
           });
@@ -295,15 +302,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     document.documentElement.lang = state.language === 'en' ? 'en' : 'zh-CN';
     document.documentElement.dataset.theme = state.theme;
-    localStorage.setItem('colm-ui-language', state.language);
-    localStorage.setItem('colm-ui-theme', state.theme);
-    localStorage.setItem('colm-ui-assistant', String(state.assistantOpen));
-    localStorage.setItem('colm-ui-expert', String(state.expert));
+    writeStored('colm-ui-language', state.language);
+    writeStored('colm-ui-theme', state.theme);
+    writeStored('colm-ui-assistant', String(state.assistantOpen));
+    writeStored('colm-ui-expert', String(state.expert));
   }, [state.language, state.theme, state.assistantOpen, state.expert]);
   // 当前项目只在这次打开的应用里有效：启动时不再自动打开上次的项目（2026-10-21 用户：重新打开总显示
   // "当前项目 tianhe:uuu"，不合理）。首页列出最近的项目，点一下再打开；本次会话里各页之间仍能回到它。
   useEffect(() => {
-    writeSavedProject(localStorage, projectToSave(state, readSavedProject(localStorage)));
+    try {
+      writeSavedProject(localStorage, projectToSave(state, readSavedProject(localStorage)));
+    } catch {
+      /* 存储不可用：本次会话里各页之间照样能回到项目，只是不记到下次。 */
+    }
     // Only the project and its view are remembered.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.root, state.projectView]);
@@ -375,6 +386,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
           bilingual('后台整理运行记录', 'the backend to load the run history'),
         );
         if (!alive) return;
+        // 上次崩溃/强退时还在跑的本机模拟：后端启动时已停掉，这里只是告诉用户（GUI 审查 B-12）。
+        void invoke<string[]>('live_runs_swept')
+          .then((keys) => {
+            if (!alive || !keys.length) return;
+            const names = keys.map((key) =>
+              key
+                .replace(/^study:/, '')
+                .split(/[\\/]/)
+                .pop(),
+            );
+            notify(
+              bilingual(
+                `上次异常退出时还在运行的 ${keys.length} 个本机任务已停止，输出可能不完整：${names.join('、')}`,
+                `${keys.length} local task${keys.length > 1 ? 's' : ''} still running when the app last quit unexpectedly ${keys.length > 1 ? 'were' : 'was'} stopped; ${keys.length > 1 ? 'their' : 'its'} output may be incomplete: ${names.join(', ')}`,
+              ),
+            );
+          })
+          .catch(() => {});
         stage = 'kernels';
         update({ startup: { phase: 'booting', stage, startedAt } });
         // 内核与版本互不依赖：一个失败仍保留另一个的结果，避免一次失败把整屏都清空。

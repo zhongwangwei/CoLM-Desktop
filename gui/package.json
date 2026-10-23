@@ -8,7 +8,7 @@
     "build": "node ../scripts/check-gui.mjs && tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
-    "test": "node ../scripts/check-gui.mjs --self-test && node ../scripts/test-react.mjs",
+    "test": "node ../scripts/check-gui.mjs --self-test && node ../scripts/check-gui.mjs && node ../scripts/test-react.mjs",
     "contract": "python3 ../scripts/generate-gui-contract.py",
     "format": "prettier --write src",
     "format:check": "prettier --check src"

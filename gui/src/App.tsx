@@ -17,6 +17,7 @@ import { Button, Notice } from './components/ui';
 import AboutDialog, { betaNote } from './components/AboutDialog';
 import ConfirmHost from './components/ConfirmHost';
 import StartCover from './components/StartCover';
+import { readStored, writeStored } from './lib/storage';
 const ProjectPage = lazy(() => import('./features/projects/ProjectPage'));
 const CasesPage = lazy(() => import('./features/cases/CasesPage'));
 const NewCasePage = lazy(() => import('./features/cases/NewCasePage'));
@@ -68,14 +69,11 @@ function Help() {
 }
 export default function App() {
   const [assistantWidth, setAssistantWidth] = useState(() =>
-    assistantPanelWidth(
-      Number(localStorage.getItem('colm-ui-assistant-width')) || 320,
-      window.innerWidth,
-    ),
+    assistantPanelWidth(Number(readStored('colm-ui-assistant-width')) || 320, window.innerWidth),
   );
   const drag = useRef<{ id: number; x: number; width: number } | null>(null);
   useEffect(() => {
-    localStorage.setItem('colm-ui-assistant-width', String(assistantWidth));
+    writeStored('colm-ui-assistant-width', String(assistantWidth));
   }, [assistantWidth]);
   useEffect(() => {
     const resize = () =>

@@ -51,6 +51,7 @@ export default function CodeFiles({
   const [notice, setNotice] = useState('');
   const [busy, setBusy] = useState(false);
   const token = useRef(0);
+  const opening = useRef(0);
   const edited = open?.text != null && draft !== open.text;
   async function load(next = dir) {
     const mine = ++token.current;
@@ -63,6 +64,7 @@ export default function CodeFiles({
     }
   }
   useEffect(() => {
+    opening.current++;
     setOpen(null);
     void load('').catch((e) => setError(String(e)));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -93,11 +95,18 @@ export default function CodeFiles({
     )
       return;
     setError('');
-    const file = source
-      ? await invokeJson<FileText>('model_code_file', { ...source, path })
-      : await invokeJson<FileText>('workspace_file', { name, path });
-    setOpen(file);
-    setDraft(file.text ?? '');
+    // 连点两个文件时后发先至：只认最后一次点的那个，否则编辑框里是 B、保存却写进 A（GUI 审查 B-07）。
+    const mine = ++opening.current;
+    try {
+      const file = source
+        ? await invokeJson<FileText>('model_code_file', { ...source, path })
+        : await invokeJson<FileText>('workspace_file', { name, path });
+      if (mine !== opening.current) return;
+      setOpen(file);
+      setDraft(file.text ?? '');
+    } catch (e) {
+      if (mine === opening.current) setError(String(e));
+    }
   }
   const needMessage = !readOnly && !message.trim();
   const save = () =>

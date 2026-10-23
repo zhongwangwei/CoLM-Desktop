@@ -19,6 +19,7 @@ function opening(
   recentFails = false,
   rebind = true,
   listing?: Promise<void>,
+  root = '',
 ) {
   const path = new URL('./app-state.tsx', import.meta.url);
   const source = ts.createSourceFile(
@@ -41,6 +42,7 @@ function opening(
   const current = {
     current: {
       chosenVersion,
+      root,
       versionRef: chosenVersion ?? official,
       versions: [soil, { id: 'soil', revision: 2 }, official, { id: 'official', revision: 1 }].map(
         (version) => ({ version }),
@@ -135,6 +137,18 @@ test('openCase respects an explicitly chosen revision over a saved custom bindin
   assert.deepEqual(app.current.current.versionRef, chosen);
   assert.deepEqual(opened?.binding.version, app.soil);
   assert.equal(app.current.current.busy, false);
+});
+
+test('an explicit choice does not follow the user into another project', async () => {
+  const chosen = { id: 'soil', revision: 2 };
+  const same = opening(chosen, false, true, undefined, '/project');
+  await same.openCase('/official');
+  assert.deepEqual(same.current.current.versionRef, chosen);
+  const other = opening(chosen, false, true, undefined, '/elsewhere');
+  await other.openCase('/soil');
+  assert.deepEqual(other.reads, [other.soil]);
+  assert.deepEqual(other.current.current.versionRef, other.soil);
+  assert.equal(other.current.current.chosenVersion, null);
 });
 
 test('openCase enters the requested tab as part of the same navigation', async () => {

@@ -987,6 +987,7 @@ export const commandContract = {
     }
   },
   "print_report": {},
+  "live_runs_swept": {},
   "model_list": {},
   "model_delete": {
     "versions": {

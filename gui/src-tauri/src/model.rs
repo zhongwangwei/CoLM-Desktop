@@ -137,25 +137,24 @@ fn delete_revision(
     registry: &Registry,
     ledger: &colm_history::History,
     version: &VersionRef,
-    bound: Option<&Uses>,
+    bound: &Uses,
+    keep_history: bool,
 ) -> Result<Vec<String>, String> {
-    match bound {
-        // 版本页的"清理"：只看现存的算例和研究。历史记录照样保留，只是不能再按这个版本重放。
-        Some(uses) => {
-            let cases = Uses::count(&uses.bound, version);
-            if cases > 0 {
-                return Err(format!(
-                    "仍有 {cases} 个算例或研究绑定此版本；先把它们换到别的版本，再删除"
-                ));
-            }
-        }
-        None => {
-            let references = history_references(ledger, version)?;
-            if references > 0 {
-                return Err(format!(
-                    "仍有 {references} 条历史记录使用此版本；先在历史记录中删除或清空这些记录，再删除版本"
-                ));
-            }
+    // 现存算例与研究的绑定两个入口都查：原来项目页不带 `keep_history`，就只看历史记录，
+    // 从没跑过的算例绑着的修订照删，留下悬空 binding（GUI 审查 B-05）。
+    let cases = Uses::count(&bound.bound, version);
+    if cases > 0 {
+        return Err(format!(
+            "仍有 {cases} 个算例或研究绑定此版本；先把它们换到别的版本，再删除"
+        ));
+    }
+    // 版本页的"清理"（`keep_history`）：历史记录照样保留，只是不能再按这个版本重放。
+    if !keep_history {
+        let references = history_references(ledger, version)?;
+        if references > 0 {
+            return Err(format!(
+                "仍有 {references} 条历史记录使用此版本；先在历史记录中删除或清空这些记录，再删除版本"
+            ));
         }
     }
     registry
@@ -181,7 +180,8 @@ fn delete_revisions(
     registry: &Registry,
     ledger: &colm_history::History,
     versions: Vec<VersionRef>,
-    bound: Option<&Uses>,
+    bound: &Uses,
+    keep_history: bool,
 ) -> DeleteReport {
     let mut report = DeleteReport {
         deleted: Vec::new(),
@@ -189,7 +189,7 @@ fn delete_revisions(
         removed: Vec::new(),
     };
     for version in versions {
-        match delete_revision(registry, ledger, &version, bound) {
+        match delete_revision(registry, ledger, &version, bound, keep_history) {
             Ok(removed) => {
                 report.removed.extend(removed);
                 report.deleted.push(version);
@@ -203,8 +203,8 @@ fn delete_revisions(
 /// Delete saved model revisions and the source snapshots only they used. Each revision is
 /// checked on its own; the report says which stayed and why.
 ///
-/// `keep_history`：只要没有现存的算例或研究绑定就删，提到它的历史记录留着（不能再按它重放）。
-/// 不给时沿用原规则：还有历史记录提到它就不删。
+/// 有现存的算例或研究绑定就不删。`keep_history`：提到它的历史记录留着（不能再按它重放）；
+/// 不给时还要求没有历史记录提到它。
 #[tauri::command]
 pub async fn model_delete(
     app: tauri::AppHandle,
@@ -214,13 +214,11 @@ pub async fn model_delete(
     keep_history: Option<bool>,
 ) -> Result<DeleteReport, String> {
     use tauri::Manager;
-    let roots = match keep_history {
-        Some(true) => Some(known_project_roots(
-            &crate::recent::load_recent_strict(&app)?,
-            &app.path().app_data_dir().map_err(|e| e.to_string())?,
-        )?),
-        _ => None,
-    };
+    let keep_history = keep_history == Some(true);
+    let roots = known_project_roots(
+        &crate::recent::load_recent_strict(&app)?,
+        &app.path().app_data_dir().map_err(|e| e.to_string())?,
+    )?;
     let processes = processes.inner().clone();
     let creations = creations.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -228,15 +226,13 @@ pub async fn model_delete(
         let ledger = colm_history::History::open_default().map_err(|e| e.to_string())?;
         while_idle(&processes, &creations, || {
             // 在空闲锁里重新数绑定：算例创建与运行都停着，数完到删完之间不会有新绑定落到它上面。
-            let bound = roots
-                .as_deref()
-                .map(|roots| uses(&ledger, roots))
-                .transpose()?;
+            let bound = uses(&ledger, &roots)?;
             Ok(delete_revisions(
                 &registry,
                 &ledger,
                 versions,
-                bound.as_ref(),
+                &bound,
+                keep_history,
             ))
         })
     })
@@ -1021,14 +1017,20 @@ mod tests {
         ledger.append(&run).unwrap();
         let end = run.next(colm_history::EventPhase::Finished, "succeeded");
         ledger.append(&end).unwrap();
-        let error = delete_revision(&registry, &ledger, &old, None).unwrap_err();
+        let error = delete_revision(&registry, &ledger, &old, &Uses::default(), false).unwrap_err();
         assert!(error.contains("1 条历史记录"), "{error}");
         ledger.remove_operation(&end.operation_id).unwrap();
         let latest = VersionRef {
             id: "official".into(),
             revision: 2,
         };
-        let report = delete_revisions(&registry, &ledger, vec![old.clone(), latest.clone()], None);
+        let report = delete_revisions(
+            &registry,
+            &ledger,
+            vec![old.clone(), latest.clone()],
+            &Uses::default(),
+            false,
+        );
         assert_eq!(report.deleted, vec![old.clone()]);
         assert_eq!(report.failed.len(), 1, "the latest official baseline stays");
         assert_eq!(report.failed[0].version, latest);
@@ -1080,7 +1082,8 @@ mod tests {
             &registry,
             &ledger,
             vec![first.clone(), second.clone()],
-            Some(&found),
+            &found,
+            true,
         );
         assert_eq!(report.deleted, vec![first.clone()]);
         assert_eq!(report.failed.len(), 1);
@@ -1090,6 +1093,15 @@ mod tests {
             report.failed[0].reason
         );
         assert!(registry.get(&first).is_err());
+        assert!(registry.get(&second).is_ok());
+        // 项目页的删除不带 keep_history，也不能删掉算例绑着的修订（B-05）。
+        let strict = delete_revisions(&registry, &ledger, vec![second.clone()], &found, false);
+        assert!(strict.deleted.is_empty());
+        assert!(
+            strict.failed[0].reason.contains("1 个算例"),
+            "{}",
+            strict.failed[0].reason
+        );
         assert!(registry.get(&second).is_ok());
         // The history record stays; only its replay is gone.
         assert_eq!(uses(&ledger, &[]).unwrap().history.len(), 1);
