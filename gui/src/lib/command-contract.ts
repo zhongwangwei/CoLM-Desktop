@@ -1914,6 +1914,7 @@ export const commandContract = {
     }
   },
   "cancel_preparation": {},
+  "history_replay_cancel": {},
   "list_kernels": {},
   "run_case": {
     "runId": {

@@ -384,6 +384,7 @@ pub fn run() {
             export_text_file,
             print_report,
             close_gate::app_close,
+            sidecar::history_replay_cancel,
         ])
         .build(tauri::generate_context!())
         .expect("error building CoLM Desktop")

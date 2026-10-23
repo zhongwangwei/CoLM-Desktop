@@ -726,6 +726,8 @@ pub(crate) enum ChildOwner {
     Preparation,
     /// "比较"页的 OpenBench：装环境、检查配置、运行评估。同一时间只跑一件。
     Bench,
+    /// 历史记录里"按记录设置重跑"：真的把整段模型跑一遍。同一时间只跑一件。
+    Replay,
 }
 
 fn detached_children() -> &'static Mutex<HashMap<u32, (ChildOwner, bool)>> {
@@ -824,6 +826,52 @@ pub(crate) fn cancel_bench_children() -> Result<usize, String> {
 #[tauri::command]
 pub fn cancel_preparation() -> Result<usize, String> {
     cancel_children_where(|owner| *owner == ChildOwner::Preparation)
+}
+
+/// 停掉正在跑的历史重跑。返回终止的进程数。
+#[tauri::command]
+pub fn history_replay_cancel() -> Result<usize, String> {
+    cancel_children_where(|owner| *owner == ChildOwner::Replay)
+}
+
+/// 历史重跑专用的 [`capture_async`]：它真的跑整段模型，原来走不登记的 `capture_untracked`：没有停止、关窗
+/// 不停、同一个算例还能再开一次（GUI 审查 G-04）。现在自成进程组并登记，同一时间只许一个。
+pub(crate) async fn capture_replay_async(args: Vec<String>) -> Result<String, String> {
+    {
+        let children = detached_children()
+            .lock()
+            .map_err(|_| "child process registry poisoned")?;
+        if children
+            .values()
+            .any(|(owner, _)| *owner == ChildOwner::Replay)
+        {
+            return Err("已经有一个历史重跑在进行，请等它结束或先停止它".into());
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || capture_with(&args, capture_replay))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn capture_replay(args: &[String]) -> Result<String, String> {
+    let cli = resolve_cli();
+    let mut command = sidecar_command(&cli);
+    command
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let child = colm_kernel::run::top_level_sidecar(&mut command)
+        .spawn()
+        .map_err(|e| format!("cannot start {}: {e}", cli.display()))?;
+    let guard = register_child(child.id(), ChildOwner::Replay);
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        if guard.stopped() {
+            return Err("已停止：重跑被中断".into());
+        }
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// 数据准备专用的 [`capture_async`]：子进程自成进程组并登记，停止按钮和关窗都能按组终止。

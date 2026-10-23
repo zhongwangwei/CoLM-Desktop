@@ -124,6 +124,7 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
     [detail, setDetail] = useState<Detail | null>(null),
     [compare, setCompare] = useState(''),
     [result, setResult] = useState<unknown>(null),
+    [replaying, setReplaying] = useState(false),
     [comparisonInput, setComparisonInput] = useState<ComparisonInput>({
       obs: '',
       variable: '',
@@ -1712,15 +1713,26 @@ export default function HistoryPage({ casePath }: { casePath?: string }) {
                       label={t('按记录设置重跑', 'Replay recorded settings')}
                       disabled={busy}
                       run={() =>
-                        action(async () =>
-                          setResult(
-                            await invokeJson('history_replay', {
-                              id: detail.operation.operation_id,
-                            }),
-                          ),
-                        )
+                        action(async () => {
+                          setReplaying(true);
+                          try {
+                            setResult(
+                              await invokeJson('history_replay', {
+                                id: detail.operation.operation_id,
+                              }),
+                            );
+                          } finally {
+                            setReplaying(false);
+                          }
+                        })
                       }
                     />
+                  )}
+                  {/* 重跑会真的把整段模型跑一遍：要能停（GUI 审查 G-04）。 */}
+                  {replaying && (
+                    <Button onClick={() => void invoke('history_replay_cancel').catch(() => {})}>
+                      {t('停止重跑', 'Stop replay')}
+                    </Button>
                   )}
                   <ActionButton
                     action="history-export-record"

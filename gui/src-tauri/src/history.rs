@@ -186,7 +186,10 @@ fn write_export(path: &std::path::Path, content: &str) -> Result<(), String> {
 }
 #[tauri::command]
 pub async fn history_replay(id: String) -> Result<serde_json::Value, String> {
-    crate::model::cli(vec!["history-replay".into(), "--id".into(), id]).await
+    let mut args = vec!["history-replay".into(), "--id".into(), id];
+    crate::model::options(&mut args, None)?;
+    let output = crate::sidecar::capture_replay_async(args).await?;
+    serde_json::from_str(output.trim()).map_err(|e| format!("invalid model CLI response: {e}"))
 }
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
