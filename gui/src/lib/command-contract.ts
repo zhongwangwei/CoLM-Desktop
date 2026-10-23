@@ -1354,12 +1354,19 @@ export const commandContract = {
       "rust_type": "Vec<String>"
     }
   },
-  "read_text": {
+  "read_case_nml": {
+    "caseDir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "read_forcing_namelist": {
     "path": {
       "required": true,
       "rust_type": "String"
     }
   },
+  "pick_parameter_file": {},
   "open_path": {
     "path": {
       "required": true,
@@ -1780,6 +1787,12 @@ export const commandContract = {
     }
   },
   "remote_study_fetch": {
+    "studyDir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "remote_study_close": {
     "studyDir": {
       "required": true,
       "rust_type": "String"

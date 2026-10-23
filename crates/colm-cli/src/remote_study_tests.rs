@@ -480,3 +480,24 @@ fn comparison_probes_forcing_exclusion_before_dispatching_evidence() {
     assert_eq!(commands[1], "EVIDENCE");
     assert_eq!(result["forcing_contents_verified"], false);
 }
+
+#[test]
+fn only_a_truly_lost_job_can_be_closed() {
+    let status = |state: job::State, detail: Option<&str>| job::Status {
+        state,
+        phase: None,
+        detail: detail.map(str::to_owned),
+        log_tail: String::new(),
+    };
+    assert!(closable(&status(job::State::Running, None)).is_err());
+    assert!(closable(&status(job::State::Finished { exit_code: 0 }, None)).is_err());
+    // 作业已经结束、退出码还没经 NFS 传过来（land02 实测 sacct 是 COMPLETED|0:0）：不能当丢失关掉。
+    let lagging = closable(&status(job::State::Lost, Some("COMPLETED|0:0"))).unwrap_err();
+    assert!(
+        lagging.to_string().contains("check the status again"),
+        "{lagging}"
+    );
+    closable(&status(job::State::Lost, Some("CANCELLED by 1026|0:0"))).unwrap();
+    closable(&status(job::State::Lost, None)).unwrap();
+    closable(&status(job::State::Unknown, None)).unwrap();
+}

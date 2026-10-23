@@ -69,6 +69,27 @@ impl Tool for Echo {
     }
 }
 
+/// 故意 panic 的工具：验证工具 panic 不会让整轮/助手进程卡死。
+struct Panics;
+
+impl Tool for Panics {
+    fn name(&self) -> &'static str {
+        "panic_tool"
+    }
+    fn description(&self) -> &'static str {
+        "test tool that panics"
+    }
+    fn parameters(&self) -> Value {
+        object(serde_json::json!({}))
+    }
+    fn tier(&self) -> Tier {
+        Tier::Read
+    }
+    fn call(&self, _args: &Value, _ctx: &ToolContext) -> Result<Value> {
+        panic!("boom from a tool")
+    }
+}
+
 struct Answers(Vec<Decision>, usize);
 
 impl Approver for Answers {
@@ -161,6 +182,42 @@ fn read_tools_run_without_approval_and_results_feed_the_next_step() {
     assert!(events
         .iter()
         .any(|e| matches!(e, Outbound::AssistantDelta { text } if text == "x doubled is 4")));
+}
+
+#[test]
+fn a_panicking_tool_becomes_an_error_result_and_the_turn_continues() {
+    let provider = Scripted::new(vec![
+        tool_turn(vec![call("a", "panic_tool", "{}")]),
+        answer("recovered from the tool panic"),
+    ]);
+    let registry = Registry::with(vec![Box::new(Panics)]);
+    let mut history = vec![Message::User {
+        content: "go".into(),
+    }];
+    let mut events = Vec::new();
+    let mut approver = Answers(Vec::new(), 0);
+    let outcome = agent(&provider, &registry)
+        .run_turn(
+            &mut history,
+            &mut |e| events.push(e),
+            &mut approver,
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    assert_eq!(outcome.content, "recovered from the tool panic");
+    assert_eq!(outcome.steps, 2);
+    let second = &provider.seen.lock().unwrap()[1];
+    let tool_text = second
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool { content, .. } => Some(content.as_str()),
+            _ => None,
+        })
+        .expect("the panicking tool result should be fed back");
+    assert!(tool_text.contains("internal tool failure"), "{tool_text}");
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Outbound::ToolResult { ok: false, .. })));
 }
 
 #[test]
@@ -775,6 +832,9 @@ fn code_page_commits_require_fresh_decisions_despite_auto_or_remembered_ui_commi
     struct Automatic(usize);
     impl Approver for Automatic {
         fn preapproved(&self, _: &str, _: Tier) -> bool {
+            true
+        }
+        fn auto_policy(&self) -> bool {
             true
         }
         fn decide(&mut self, request: &Outbound) -> Decision {

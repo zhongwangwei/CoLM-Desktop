@@ -94,12 +94,27 @@ fn ui_tools_forward_to_the_window_and_only_set_and_commit_need_approval() {
         assert_eq!(UiCommit.tier_for(&args), Tier::Code, "{target}");
         assert!(!UiCommit.session_allowance_for(&args), "{target}");
     }
+    // 运行、写回、冻结、提交、生成数据这类按钮逐个审批，不沿用"本会话允许"（R13/B-04）。
     for target in [
         "run-submit",
         "version-freeze",
+        "version-save",
         "study-create",
-        "result-fetch",
+        "study-run",
+        "study-write-version",
+        "remote-study-fetch",
+        "prep-execute",
+        "history-replay",
+        "compare-run",
+        // 关掉远程研究记录后结果就取不回来了。
+        "remote-study-close",
     ] {
+        let args = json!({ "target": target, "purpose": "x" });
+        assert_eq!(UiCommit.tier_for(&args), Tier::Act, "{target}");
+        assert!(!UiCommit.session_allowance_for(&args), "{target}");
+    }
+    // 仍可按会话放行的普通提交（例如读取/轻量设置）保持原行为。
+    for target in ["result-fetch", "configuration-tracers-apply"] {
         let args = json!({ "target": target, "purpose": "x" });
         assert_eq!(UiCommit.tier_for(&args), Tier::Act, "{target}");
         assert!(UiCommit.session_allowance_for(&args), "{target}");

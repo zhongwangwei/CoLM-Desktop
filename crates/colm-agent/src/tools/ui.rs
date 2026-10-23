@@ -184,6 +184,49 @@ impl Tool for UiClick {
 
 pub struct UiCommit;
 
+/// 这些提交按钮会写回/冻结/提交/重跑或生成数据：点一次"本会话允许同类操作"不能把后续同类动作全部
+/// 免审，审批卡逐次出现（GUI 审查 R13/B-04）。注意它只排除"本会话允许"的记忆；用户把审批方式整体设成
+/// "自动"时，Act 级操作照样自动放行（`execute_tool` 里的 `auto_policy`），那是用户明确选的。
+/// 代码类操作另有 `code_commit`（升 C 级，"自动"也不放行）。
+fn always_confirm(args: &Value) -> bool {
+    args["target"].as_str().is_some_and(|target| {
+        matches!(
+            target,
+            "run-submit"
+                | "run-cancel"
+                | "study-create"
+                | "study-run"
+                | "study-pause"
+                | "study-resume"
+                | "study-retry"
+                | "study-cancel"
+                | "study-write-version"
+                | "hybrid-save-version"
+                | "remote-study-fetch"
+                | "remote-study-cancel"
+                | "remote-study-close"
+                | "remote-fetch"
+                | "remote-cancel"
+                | "version-save"
+                | "version-freeze"
+                | "version-import-parameters"
+                | "version-import-process"
+                | "version-import-study"
+                | "prep-execute"
+                | "history-replay"
+                | "history-resume"
+                | "project-batch-run"
+                | "project-example"
+                | "case-discard"
+                | "workspace-snapshot"
+                | "compare-install-all"
+                | "compare-reinstall-openbench"
+                | "compare-register"
+                | "compare-run"
+        )
+    })
+}
+
 fn code_commit(args: &Value) -> bool {
     // 改代码/编译/导入代码文件的按钮按 C 级处理：不沿用"本会话允许"，每次都问。
     args["target"].as_str().is_some_and(|target| {
@@ -225,7 +268,7 @@ impl Tool for UiCommit {
         }
     }
     fn session_allowance_for(&self, args: &Value) -> bool {
-        !code_commit(args)
+        !code_commit(args) && !always_confirm(args)
     }
     fn summary(&self, args: &Value) -> String {
         format!(

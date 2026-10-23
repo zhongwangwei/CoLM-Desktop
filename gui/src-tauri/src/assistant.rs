@@ -94,9 +94,30 @@ impl AssistantProcess {
                 pending.requests.clear();
                 pending.approvals.clear();
             }
-            if let Some((mut child, stdin)) = guard.take() {
+            if let Some((mut child, mut stdin)) = guard.take() {
+                // 先发取消、关 stdin，让 agent 自己结束正在跑的命令组（cli_long 轮询 cancel 标志）；
+                // 等不到退出再按进程组强杀，避免它启动的运行变成孤儿（GUI 审查 B-07）。
+                let _ = writeln!(stdin, "{{\"type\":\"cancel\"}}");
+                let _ = stdin.flush();
                 drop(stdin);
-                let _ = child.kill();
+                let mut exited = false;
+                for _ in 0..20 {
+                    match child.try_wait() {
+                        Ok(Some(_)) => {
+                            exited = true;
+                            break;
+                        }
+                        _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    }
+                }
+                if !exited {
+                    let pid = child.id();
+                    if crate::sidecar::terminate_process_tree(pid).is_err() {
+                        // 进程组已经退出或没有权限时退回单进程 kill；至少不留这个直接子进程。
+                        let _ = child.kill();
+                    }
+                    let _ = child.wait();
+                }
             }
         }
     }
@@ -133,6 +154,12 @@ pub struct AssistantSettings {
     /// 联网搜索（DeepSeek 原生搜索，用 DeepSeek 的 Key）与读网页。
     #[serde(default = "default_web_search")]
     pub web_search: bool,
+    /// 每个会话最多多少条用户消息；0 = 不限（B-12 的会话预算）。
+    #[serde(default = "default_session_turn_limit")]
+    pub session_turn_limit: u32,
+    /// 每个会话累计 prompt+completion token 上限；0 = 不限。
+    #[serde(default = "default_session_token_limit")]
+    pub session_token_limit: u64,
     /// 后端：API 服务或用户本机配置的 Codex、Claude Code、OpenCode。
     #[serde(default = "default_backend")]
     pub backend: String,
@@ -219,6 +246,8 @@ impl Default for AssistantSettings {
             reasoning_effort: None,
             approval: default_approval(),
             web_search: default_web_search(),
+            session_turn_limit: default_session_turn_limit(),
+            session_token_limit: default_session_token_limit(),
             backend: default_backend(),
             egress_acknowledged: None,
             external: Default::default(),
@@ -232,6 +261,14 @@ fn default_approval() -> String {
 
 fn default_web_search() -> bool {
     true
+}
+
+fn default_session_turn_limit() -> u32 {
+    100
+}
+
+fn default_session_token_limit() -> u64 {
+    5_000_000
 }
 
 fn default_backend() -> String {
@@ -542,6 +579,38 @@ pub(crate) fn docs_root(starts: &[PathBuf]) -> Option<PathBuf> {
 }
 
 /// 设置校验：服务地址只接受 https，或本机回环的 http（本地模型）。
+/// 数据外发确认的规范化目标：必须与前端 `egressTarget` 完全一致。内置后端联网时额外写明
+/// 搜索请求会发往 DeepSeek Search API；外部后端用它们自带的搜索/模型，目标就是后端本身。
+pub(crate) fn egress_target(settings: &AssistantSettings) -> String {
+    let model = match settings.backend.as_str() {
+        "builtin" => settings.base_url.clone(),
+        "opencode" => format!(
+            "opencode:{}",
+            settings
+                .external
+                .get("opencode")
+                .and_then(|choice| choice.model.clone())
+                .unwrap_or_default()
+        ),
+        backend => backend.to_owned(),
+    };
+    if settings.backend == "builtin" && settings.web_search {
+        format!("{model} (web search & fetch: DeepSeek APIs)")
+    } else {
+        model
+    }
+}
+
+/// 后端也要校验数据外发确认：只靠前端调用点的话，绕过面板的直接 invoke（e2e、脚本、未来调用）
+/// 就能在用户没看过提示时把消息和页面上下文发出去（GUI 审查 B-03）。
+pub(crate) fn require_egress_acknowledged(settings: &AssistantSettings) -> Result<(), String> {
+    let target = egress_target(settings);
+    if settings.egress_acknowledged.as_deref() != Some(target.as_str()) {
+        return Err("请先确认数据外发目标（模型服务与联网搜索）后再使用助手。".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), String> {
     validate_api_profile(&settings.api_profile())?;
     if !settings.provider_id.is_empty() && !PROVIDERS.contains(&settings.provider_id.as_str()) {
@@ -561,6 +630,9 @@ pub(crate) fn validate_settings(settings: &AssistantSettings) -> Result<(), Stri
     }
     if !matches!(settings.approval.as_str(), "ask" | "auto") {
         return Err("审批方式只能是 ask 或 auto".into());
+    }
+    if settings.session_turn_limit > 100_000 || settings.session_token_limit > 1_000_000_000 {
+        return Err("会话上限过大".into());
     }
     for (backend, choice) in &settings.external {
         if !matches!(backend.as_str(), "codex" | "claude_code" | "opencode") {
@@ -978,6 +1050,8 @@ pub(crate) fn configure_message(
         },
         "approval": settings.approval,
         "web_search": settings.web_search,
+        "session_turn_limit": settings.session_turn_limit,
+        "session_token_limit": settings.session_token_limit,
         "backend": settings.backend,
         "external": settings.external.get(&settings.backend).cloned().unwrap_or_default(),
         // 窗口能被助手驱动（引导模式）。
@@ -1002,6 +1076,7 @@ pub async fn assistant_start(
 ) -> Result<(), String> {
     let settings = assistant_settings(app.clone());
     validate_settings(&settings)?;
+    require_egress_acknowledged(&settings)?;
     let model_context = match model_revision {
         Some(version) => Some(crate::model::assistant_context(version, case_dir.as_deref()).await?),
         None => None,
@@ -1023,7 +1098,9 @@ pub async fn assistant_start(
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
-            colm_kernel::run::no_console(&mut command);
+            // agent 领导自己的进程组：应用退出/换 Key 停它时，连它启动的命令与运行一起结束，
+            // 不留下孙进程（GUI 审查 B-07）。
+            colm_kernel::run::top_level_sidecar(&mut command);
             let mut child = command
                 .spawn()
                 .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
@@ -1136,6 +1213,7 @@ pub async fn assistant_start(
 
 #[tauri::command]
 pub fn assistant_send(
+    app: tauri::AppHandle,
     process: tauri::State<'_, AssistantProcess>,
     text: String,
     context: Option<String>,
@@ -1143,6 +1221,7 @@ pub fn assistant_send(
     if text.trim().is_empty() {
         return Err("消息是空的".into());
     }
+    require_egress_acknowledged(&assistant_settings(app))?;
     send(
         &process,
         &json!({ "type": "user_message", "text": text, "context": context }),

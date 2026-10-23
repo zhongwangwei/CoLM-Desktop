@@ -536,6 +536,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-run" => remote_cmd::cmd_run(opts)?,
         "remote-study-run" => remote_cmd::remote_study::cmd_run(opts)?,
         "remote-study-cancel" => remote_cmd::remote_study::cmd_cancel(opts)?,
+        "remote-study-close" => remote_cmd::remote_study::cmd_close(opts)?,
         "remote-study-status" => remote_cmd::remote_study::cmd_status(opts)?,
         "remote-study-fetch" => remote_cmd::remote_study::cmd_fetch(opts)?,
         "remote-dist" => remote_cmd::cmd_dist(opts)?,

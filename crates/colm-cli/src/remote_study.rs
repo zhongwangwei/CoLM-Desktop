@@ -6,6 +6,7 @@
 //!                              [--model-version official|<修改版>] [--workspace-root DIR] [调度选项同 remote-run] [--dry-run 1]
 //! colm-cli remote-study-status <本机研究>
 //! colm-cli remote-study-fetch  <本机研究>
+//! colm-cli remote-study-close  <本机研究>   # 确认服务器作业已丢失/无法核对后关闭本机远程记录
 //! ```
 //!
 //! 研究里到处是本机的绝对路径（`manifest.root`、任务的 `case_dir`、观测、成员算例的 namelist），不能原样搬走。这里在
@@ -865,6 +866,84 @@ pub(crate) fn cmd_cancel(opts: &Opts) -> Result<()> {
     crate::history_cmd::observe_remote_outcome(&result);
     crate::history_cmd::reconcile_remote(opts, &serde_json::to_value(&record)?, &result)?;
     println!("{result}");
+    Ok(())
+}
+
+/// `remote-study-close`：服务器作业已经丢失、状态无法再核对时，由用户确认后关闭本机远程记录。
+///
+/// 只允许 Lost/Unknown：排队中/运行中的作业必须先取消；已经正常结束的应取回结果，不能当作丢失丢掉。
+/// 记录改名留档（`.colm-remote-study.closed-*.json`），本机研究之后可重新提交或在本机运行。
+pub(crate) fn cmd_close(opts: &Opts) -> Result<()> {
+    let study_dir = colm_kernel::manifest::absolute(&opts.positional_case()?)?;
+    let _lock = study::runner::StudyRunLock::acquire(&study_dir)?;
+    study::engine::status(&study_dir)?;
+    let record_path = study_dir.join(RECORD);
+    let pending_path = study_dir.join(PENDING);
+    ensure!(
+        record_path.exists() || pending_path.exists(),
+        "this Study has no server submission to close"
+    );
+    let (job, status) = if record_path.exists() {
+        let record = read_record(&study_dir)?;
+        let ssh = Ssh::new(&record.host)?;
+        ssh.run_ok(&cancel_identity_script(&record)?)?;
+        let status = job::status(&ssh, &record.root, &record.job, 20)?;
+        (record.job, status)
+    } else {
+        let pending = read_pending(&study_dir)?;
+        colm_remote::auth::check_connection(pending.ssh_auth.as_ref())?;
+        let ssh = Ssh::new(&pending.host)?;
+        ssh.run_ok(&pending_identity_script(&pending)?)?;
+        let status = job::status(&ssh, &pending.root, &pending.job, 20)?;
+        (pending.job, status)
+    };
+    closable(&status)?;
+    let stamp = now();
+    let mut archived = Vec::new();
+    for (path, suffix) in [(record_path, ""), (pending_path, "-pending")] {
+        if path.exists() {
+            let target =
+                study_dir.join(format!(".colm-remote-study{}-closed-{stamp}.json", suffix));
+            std::fs::rename(&path, &target)
+                .with_context(|| format!("cannot archive {}", path.display()))?;
+            archived.push(target);
+        }
+    }
+    println!(
+        "{}",
+        json!({
+            "outcome": "closed",
+            "job": job,
+            "previous_state": status,
+            "archived": archived,
+        })
+    );
+    Ok(())
+}
+
+/// 远程研究记录能不能当"丢失"关掉：排队或运行中的要先取消，正常结束的要取回结果；调度系统说已经结束、
+/// 退出码还没出现的（NFS 延迟）要等一会儿再查。只有真正查不到的 Lost/Unknown 才能关。
+fn closable(status: &job::Status) -> Result<()> {
+    match status.state {
+        job::State::Queued | job::State::Running => {
+            bail!("the server job is still queued or running; cancel it before closing the record")
+        }
+        job::State::Finished { .. } => {
+            bail!("the server job finished; fetch its results instead of closing the record")
+        }
+        // 调度系统说作业已经结束（Slurm 的 COMPLETED）却还没看到退出码：多半是计算节点写下的 exit_code
+        // 还没经 NFS 传到登录节点（2026-10-23 land02 实测，过一会儿就出现）。这时当成丢失关掉，跑完的
+        // 结果就再也取不回来；要求等一会儿重新查看状态。
+        job::State::Lost
+            if status
+                .detail
+                .as_deref()
+                .is_some_and(|detail| detail.to_ascii_uppercase().contains("COMPLETED")) =>
+        {
+            bail!("the scheduler reports the job as completed but its exit code is not visible yet (shared file systems can lag); check the status again in a minute and fetch the results instead of closing the record")
+        }
+        job::State::Lost | job::State::Unknown => {}
+    }
     Ok(())
 }
 

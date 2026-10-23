@@ -35,7 +35,7 @@ export async function defaultObservation(caseDir: string, call: typeof invoke = 
   const forcingNamelist = opened.profile.inputs.forcing_namelist;
   if (typeof forcingNamelist !== 'string' || !forcingNamelist) return '';
   const path = absolute(forcingNamelist, caseDir);
-  const text = await call<string>('read_text', { path });
+  const text = await call<string>('read_forcing_namelist', { path });
   const entries = await call<{ path: string; value: string }[]>('read_case', { text });
   const value = (key: string) =>
     unquote(entries.find((entry) => entry.path.toLowerCase() === key.toLowerCase())?.value || '');

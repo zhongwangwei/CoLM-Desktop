@@ -22,7 +22,7 @@ function fixture({
     if (command === 'install_example') return {};
     if (command === 'open_case')
       return { profile: { spatial, obs_file, inputs: { forcing_namelist: namelist } } };
-    if (command === 'read_text') return 'forcing namelist';
+    if (command === 'read_forcing_namelist') return 'forcing namelist';
     if (command === 'read_case')
       return [
         { path: 'DEF_dir_forcing', value: `'${dir.replaceAll("'", "''")}'` },
@@ -98,7 +98,7 @@ test('nested forcing namelists resolve data against the case working directory',
     ],
   });
   assert.equal(await defaultObservation('/cases/site', call), correct);
-  assert.deepEqual(calls.find((call) => call.command === 'read_text')?.args, {
+  assert.deepEqual(calls.find((call) => call.command === 'read_forcing_namelist')?.args, {
     path: '/cases/site/config/forcing.nml',
   });
   assert.deepEqual(calls.at(-1)?.args, {
@@ -123,7 +123,7 @@ test('UNC forcing directories and namelists stay absolute', async () => {
     await defaultObservation('C:\\cases\\site', call),
     '\\\\server\\share\\Observation\\flux.nc',
   );
-  assert.deepEqual(calls.find((call) => call.command === 'read_text')?.args, {
+  assert.deepEqual(calls.find((call) => call.command === 'read_forcing_namelist')?.args, {
     path: '//server/share/config/forcing.nml',
   });
   assert.deepEqual(calls.at(-1)?.args, {

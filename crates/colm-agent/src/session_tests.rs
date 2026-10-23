@@ -332,3 +332,29 @@ fn input_history_recovers_recent_input_from_a_large_or_torn_transcript() {
     assert_eq!(input_history(&root).unwrap(), ["尾部输入"]);
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn conversation_and_audit_files_are_owner_only_on_unix() {
+    let root = temp_dir("private");
+    let mut session = Session::new(Some(&root), "prompt v1").unwrap();
+    session
+        .push(Message::User {
+            content: "hello".into(),
+        })
+        .unwrap();
+    session
+        .audit(&Outbound::Error {
+            message: "boom".into(),
+        })
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for file in ["messages.jsonl", "audit.jsonl"] {
+            let path = root.join("sessions").join(&session.id).join(file);
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "{}", path.display());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&root);
+}

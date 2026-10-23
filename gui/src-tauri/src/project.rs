@@ -949,10 +949,69 @@ fn history_of(case: &Path, name: &str) -> Option<PathBuf> {
     h.pop()
 }
 
-/// 读一份文本文件（前端拿 case.nml 来编辑）。
+/// 读文件的上限：这些命令只服务具体用途，不是通用的任意读。
+const MAX_READ_BYTES: u64 = 4 * 1024 * 1024;
+
+fn read_limited(path: &std::path::Path, purpose: &str) -> Result<String, String> {
+    let metadata = std::fs::metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("{} is not a file", path.display()));
+    }
+    if metadata.len() > MAX_READ_BYTES {
+        return Err(format!(
+            "{} is too large for {purpose} ({} bytes)",
+            path.display(),
+            metadata.len()
+        ));
+    }
+    std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+fn checked_extension(path: &std::path::Path, extension: &str, purpose: &str) -> Result<(), String> {
+    let ok = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case(extension));
+    if !ok {
+        return Err(format!(
+            "{} is not a .{extension} file for {purpose}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 读算例目录里的 case.nml（前端编辑与历史变量检查用）。
 #[tauri::command]
-pub fn read_text(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))
+pub fn read_case_nml(case_dir: String) -> Result<String, String> {
+    let path = std::path::Path::new(&case_dir).join("case.nml");
+    read_limited(&path, "the case configuration")
+}
+
+/// 读算例引用的强迫场 namelist（路径来自 case.nml 或算例 profile；只接受 .nml）。
+#[tauri::command]
+pub fn read_forcing_namelist(path: String) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&path);
+    checked_extension(&path, "nml", "the forcing namelist")?;
+    read_limited(&path, "the forcing namelist")
+}
+
+/// 参数导入：后端弹文件对话框、读用户亲自选的那份 JSON，返回 `{path, text}`；取消时返回空。
+/// 原来前端先 `pick_file` 再把路径交给 `read_parameter_file`，只查扩展名，等于能读任意 `.json`
+/// ——包括应用数据目录里明文存 Key 的 `assistant-keys.json`（DeepSeek 改动复查）。路径不再由前端传入。
+#[tauri::command]
+pub async fn pick_parameter_file(
+    app: tauri::AppHandle,
+) -> Result<Option<serde_json::Value>, String> {
+    let Some(path) =
+        crate::recent::pick_file(app, "model-parameters".into(), Some("json".into())).await
+    else {
+        return Ok(None);
+    };
+    let file = std::path::PathBuf::from(&path);
+    checked_extension(&file, "json", "parameter import")?;
+    let text = read_limited(&file, "parameter import")?;
+    Ok(Some(serde_json::json!({ "path": path, "text": text })))
 }
 
 // 这里原来有一个 `write_text` —— 前端拿它把改过的 case.nml 写回去。

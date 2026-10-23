@@ -27,6 +27,11 @@ pub trait Approver {
     fn preapproved(&self, _name: &str, _tier: Tier) -> bool {
         false
     }
+    /// 整体审批策略是否为“自动”。它只放行普通后端操作，不替代危险操作的逐次确认；
+    /// 与“本会话允许同类操作”的按工具名记忆分开判断（GUI 审查 R13/B-04）。
+    fn auto_policy(&self) -> bool {
+        false
+    }
     fn recovery_requires_approval(&self) -> bool {
         false
     }
@@ -233,7 +238,7 @@ pub fn execute_tool(
     let preapproved = tier.needs_approval()
         && !tool.requires_explicit_approval()
         && !approver.recovery_requires_approval()
-        && session_allowance
+        && (session_allowance || (approver.auto_policy() && tier == Tier::Act))
         && approver.preapproved(&call.name, tier);
     emit(Outbound::ToolCall {
         id: call.id.clone(),
@@ -287,9 +292,16 @@ pub fn execute_tool(
         return "error: cancelled".to_owned();
     }
     let started = Instant::now();
-    let (ok, text) = match tool.call(&args, context) {
-        Ok(value) => (true, result_text(&value)),
-        Err(error) => (false, format!("error: {error:#}")),
+    // 一个工具 panic 不能让整个助手进程卡死：捕获后变成一条错误结果，本轮继续。
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tool.call(&args, context)));
+    let (ok, text) = match outcome {
+        Ok(Ok(value)) => (true, result_text(&value)),
+        Ok(Err(error)) => (false, format!("error: {error:#}")),
+        Err(_) => (
+            false,
+            "error: internal tool failure (the tool panicked); its effects may be incomplete; inspect the state before retrying".to_owned(),
+        ),
     };
     emit(Outbound::ToolResult {
         id: call.id.clone(),

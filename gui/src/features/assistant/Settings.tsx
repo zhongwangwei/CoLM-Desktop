@@ -29,6 +29,15 @@ export default function AssistantSettings({
 }) {
   const { state } = useApp();
   const t = (zh: string, en: string) => (state.language === 'en' ? en : zh);
+  function settingsError(error: unknown) {
+    const text = String(error).replace(/^Error: /, '');
+    if (text.includes('no API key is stored') || text.includes('no API key is configured'))
+      return t(
+        '这个服务还没有登记 API Key；先登记 Key 再刷新模型或保存。',
+        'No API key is registered for this service; register one before refreshing models or saving.',
+      );
+    return text;
+  }
   const lock = useRef(false);
   const [draft, setDraft] = useState(settings);
   const [options, setOptions] = useState(JSON.stringify(settings.api_options, null, 2));
@@ -42,6 +51,10 @@ export default function AssistantSettings({
     setDraft(settings);
     setOptions(JSON.stringify(settings.api_options, null, 2));
   }, [settings]);
+  // 状态字符串是生成时语言的文本，切换语言后清掉，避免英文界面残留中文。
+  useEffect(() => {
+    setStatus('');
+  }, [state.language]);
   useEffect(() => {
     let active = true;
     const sourceRequest = request;
@@ -72,7 +85,7 @@ export default function AssistantSettings({
     try {
       await action();
     } catch (error) {
-      setStatus(String(error));
+      setStatus(settingsError(error));
     } finally {
       lock.current = false;
       setBusy(false);
@@ -92,7 +105,18 @@ export default function AssistantSettings({
           ? await invokeJson<ModelChoice[]>('assistant_codex_models', {})
           : draft.backend === 'opencode'
             ? await invokeJson<ModelChoice[]>('assistant_opencode_models', {})
-            : [{ id: 'fable' }, { id: 'opus' }, { id: 'sonnet' }, { id: 'haiku' }];
+            : null;
+    // Claude Code 没有列模型的接口；不要编造 fable/opus/sonnet/haiku 之类的假清单。
+    if (found === null) {
+      setModels([]);
+      setStatus(
+        t(
+          'Claude Code 不能列出模型；请直接填写模型名（例如 sonnet、opus 或完整模型名）。',
+          'Claude Code cannot list models; type the model name directly (for example sonnet, opus or the full name).',
+        ),
+      );
+      return;
+    }
     if (sequence === request.current) {
       setModels(found);
       setStatus(
@@ -108,8 +132,36 @@ export default function AssistantSettings({
     : [
         '',
         ...(models.find((item) => item.id === model)?.efforts ||
-          (draft.backend === 'opencode' ? [] : ['low', 'medium', 'high', 'xhigh', 'max'])),
+          (draft.backend === 'opencode'
+            ? []
+            : draft.backend === 'claude_code'
+              ? ['low', 'medium', 'high']
+              : ['low', 'medium', 'high', 'xhigh', 'max'])),
       ];
+  const customProvider = builtin && providerId(draft) === 'custom';
+  const presetBase = API_PROVIDERS.find((provider) => provider.id === providerId(draft))?.base_url;
+  const editedPreset = builtin && !customProvider && presetBase !== draft.base_url;
+  // 自定义服务的地址是必填项，不能藏在"高级设置"里（GUI 审查 A-02/R14）；预设服务改过地址时
+  // 把实际目标地址显示出来，避免用户以为还在用预设站点。
+  const serviceUrlField = (
+    <Field label={t('服务地址', 'Service URL')}>
+      <Input
+        value={draft.base_url}
+        onChange={(e) => {
+          if (key) {
+            setStatus(
+              t(
+                '请先登记或清空 Key 再修改地址。',
+                'Register or clear the key before changing the address.',
+              ),
+            );
+            return;
+          }
+          patch({ base_url: e.target.value });
+        }}
+      />
+    </Field>
+  );
   return (
     <section aria-label={t('助手设置', 'Assistant settings')} className="space-y-3">
       <fieldset disabled={disabled || busy || !hasBackend()} className="space-y-3">
@@ -127,6 +179,8 @@ export default function AssistantSettings({
                 return;
               }
               patch({ backend: e.target.value });
+              setStatus('');
+              setModels([]);
             }}
           >
             <option value="builtin">{t('API 服务', 'API service')}</option>
@@ -167,6 +221,13 @@ export default function AssistantSettings({
                 ))}
               </Select>
             </Field>
+            {customProvider && serviceUrlField}
+            {editedPreset && (
+              <p className="text-xs text-muted-foreground">
+                {t('实际目标地址：', 'Actual target: ')}
+                {draft.base_url}
+              </p>
+            )}
             <Field
               label="API Key"
               hint={
@@ -250,26 +311,36 @@ export default function AssistantSettings({
             ))}
           </Select>
         </Field>
+        <Field label={t('操作审批', 'Operation approval')}>
+          <Select value={draft.approval} onChange={(e) => patch({ approval: e.target.value })}>
+            <option value="ask">{t('每次询问', 'Ask each time')}</option>
+            <option value="auto">
+              {t('自动允许后端常规操作', 'Automatically allow routine backend operations')}
+            </option>
+          </Select>
+        </Field>
+        {draft.backend !== 'opencode' && (
+          <>
+            <label>
+              <input
+                type="checkbox"
+                checked={draft.web_search}
+                onChange={(e) => patch({ web_search: e.target.checked })}
+              />{' '}
+              {t('联网搜索与读网页（DeepSeek API）', 'Web search and page fetch (DeepSeek APIs)')}
+            </label>
+            <p className="text-xs text-muted-foreground">
+              {t(
+                '每次搜索约 $0.00075；读网页先在本机免费尝试，失败时回退 DeepSeek Fetch API（每成功一页约 $0.00075，URL 与页面内容会发给 DeepSeek）。失败/空结果不计费。需要 DeepSeek Key。',
+                'Each search costs about $0.00075. Pages are tried locally for free first; if that fails, the DeepSeek Fetch API is used (about $0.00075 per successful page, and the URL and content are sent to DeepSeek). Failed or empty requests are free. Requires a DeepSeek key.',
+              )}
+            </p>
+          </>
+        )}
         <Advanced title={t('高级设置', 'Advanced')}>
+          {builtin && !customProvider && serviceUrlField}
           {builtin && (
             <>
-              <Field label={t('服务地址', 'Service URL')}>
-                <Input
-                  value={draft.base_url}
-                  onChange={(e) => {
-                    if (key) {
-                      setStatus(
-                        t(
-                          '请先登记或清空 Key 再修改地址。',
-                          'Register or clear the key before changing the address.',
-                        ),
-                      );
-                      return;
-                    }
-                    patch({ base_url: e.target.value });
-                  }}
-                />
-              </Field>
               <Field label={t('接口格式', 'API format')}>
                 <Select
                   value={draft.api_format}
@@ -313,22 +384,34 @@ export default function AssistantSettings({
               </label>
             </>
           )}
-          <Field label={t('操作审批', 'Operation approval')}>
-            <Select value={draft.approval} onChange={(e) => patch({ approval: e.target.value })}>
-              <option value="ask">{t('每次询问', 'Ask each time')}</option>
-              <option value="auto">
-                {t('自动允许后端常规操作', 'Automatically allow routine backend operations')}
-              </option>
-            </Select>
+          <Field
+            label={t('每会话最多轮数', 'Turns per conversation')}
+            hint={t(
+              '0 = 不限；达到后开始新对话可继续。',
+              '0 = unlimited; start a new conversation to continue after the limit.',
+            )}
+          >
+            <Input
+              type="number"
+              min={0}
+              value={draft.session_turn_limit}
+              onChange={(e) => patch({ session_turn_limit: Number(e.target.value) })}
+            />
           </Field>
-          <label>
-            <input
-              type="checkbox"
-              checked={draft.web_search}
-              onChange={(e) => patch({ web_search: e.target.checked })}
-            />{' '}
-            {t('联网搜索', 'Web search')}
-          </label>
+          <Field
+            label={t('每会话最多 token', 'Tokens per conversation')}
+            hint={t(
+              '0 = 不限；累计 prompt + completion。每次调用模型都会把整段对话和工具说明重新计入一遍（一次约 1–2 万），一轮带工具调用常有好几次。',
+              '0 = unlimited; cumulative prompt + completion. Every model call counts the whole conversation and tool descriptions again (about 10–20k each), and a turn with tool calls often makes several.',
+            )}
+          >
+            <Input
+              type="number"
+              min={0}
+              value={draft.session_token_limit}
+              onChange={(e) => patch({ session_token_limit: Number(e.target.value) })}
+            />
+          </Field>
           <Button
             onClick={() =>
               void run(async () =>
@@ -349,12 +432,15 @@ export default function AssistantSettings({
               if (
                 ![draft.max_output_tokens, draft.timeout_seconds].every(
                   (n) => Number.isSafeInteger(n) && n > 0,
+                ) ||
+                ![draft.session_turn_limit, draft.session_token_limit].every(
+                  (n) => Number.isSafeInteger(n) && n >= 0,
                 )
               )
                 throw new Error(
                   t(
-                    '输出上限和超时必须是正整数。',
-                    'Output limit and timeout must be positive integers.',
+                    '输出上限和超时必须是正整数；会话上限必须是非负整数。',
+                    'Output limit and timeout must be positive integers; session limits must be non-negative integers.',
                   ),
                 );
               const next = settingsForSave(

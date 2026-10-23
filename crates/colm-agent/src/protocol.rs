@@ -47,6 +47,12 @@ pub enum Inbound {
         /// 外部后端的模型与思考强度（内置后端用 `provider` 里的）。
         #[serde(default)]
         external: crate::backend::ExternalChoice,
+        /// 每个会话最多多少条用户消息；0 = 不限（GUI 设置里的会话上限，B-12）。
+        #[serde(default = "default_session_turn_limit")]
+        session_turn_limit: u32,
+        /// 每个会话累计 prompt+completion token 上限；0 = 不限。
+        #[serde(default = "default_session_token_limit")]
+        session_token_limit: u64,
     },
     /// 用户的一条消息；`context` 是界面自动附上的当前页面信息（选中的算例、Study 等）。
     UserMessage {
@@ -134,6 +140,9 @@ pub enum Outbound {
         completion_tokens: u64,
         session_prompt_tokens: u64,
         session_completion_tokens: u64,
+        /// 这个会话已经完成的用户轮数；旧事件没有这个字段时按 0 处理。
+        #[serde(default)]
+        session_turns: u32,
     },
     TurnDone {
         content: String,
@@ -142,4 +151,12 @@ pub enum Outbound {
     Error {
         message: String,
     },
+}
+
+fn default_session_turn_limit() -> u32 {
+    100
+}
+
+fn default_session_token_limit() -> u64 {
+    5_000_000
 }

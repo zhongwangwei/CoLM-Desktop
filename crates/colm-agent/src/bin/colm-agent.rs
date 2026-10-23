@@ -38,6 +38,16 @@ use colm_agent::provider::{OpenAiCompatible, ProviderConfig, DEEPSEEK_BASE_URL};
 use colm_agent::session::{self, Session};
 use colm_agent::tools::ui::{UiBridge, UiHandle};
 use colm_agent::tools::{web, Registry, Tier, ToolContext};
+
+/// 线程 panic 时也让 `busy` 复位：否则助手会一直回答 “still answering the previous message”，
+/// 只能重启应用（GUI 审查 B-01 的后果）。
+struct BusyReset(Arc<AtomicBool>);
+
+impl Drop for BusyReset {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
 use serde_json::Value;
 
 fn main() {
@@ -235,6 +245,10 @@ impl Approver for ChannelApprover {
         }
     }
 
+    fn auto_policy(&self) -> bool {
+        self.policy == ApprovalPolicy::Auto
+    }
+
     fn remember(&mut self, name: &str) {
         if self.reconciliation {
             return;
@@ -268,12 +282,35 @@ struct Settings {
     remote: bool,
     backend: BackendKind,
     external: ExternalChoice,
+    /// 每个会话的用户轮数与累计 token 上限；0 = 不限（GUI 设置的会话预算，B-12）。
+    session_turn_limit: u32,
+    session_token_limit: u64,
 }
 
 impl Settings {
     fn display_model(&self) -> String {
         display_model(self.backend, &self.provider.model, &self.external)
     }
+}
+
+/// 会话预算（B-12）：0 表示不限。到限后拒绝下一条用户消息，已完成的轮次保留。
+fn session_limit_error(
+    turns_completed: u32,
+    tokens_used: u64,
+    turn_limit: u32,
+    token_limit: u64,
+) -> Option<String> {
+    if turn_limit > 0 && turns_completed >= turn_limit {
+        return Some(format!(
+            "session limit reached: this conversation has used its {turn_limit} turns; start a new conversation to continue"
+        ));
+    }
+    if token_limit > 0 && tokens_used >= token_limit {
+        return Some(format!(
+            "session limit reached: this conversation has used {tokens_used} of {token_limit} tokens; start a new conversation to continue"
+        ));
+    }
+    None
 }
 
 /// 面板头部显示的模型名：外部后端显示后端名，选了模型时再加上模型名。
@@ -679,6 +716,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                 remote,
                 backend,
                 external: choice,
+                session_turn_limit,
+                session_token_limit,
             } => {
                 if let Some(error) = model_context
                     .as_ref()
@@ -712,6 +751,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     remote,
                     backend,
                     external: choice,
+                    session_turn_limit,
+                    session_token_limit,
                 });
                 // 换了后端就丢掉旧的外部会话（Codex 的进程随之结束）。
                 if external
@@ -825,6 +866,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     remote,
                     backend,
                     choice,
+                    session_turn_limit,
+                    session_token_limit,
                 )) = settings.lock().unwrap().as_ref().map(|s| {
                     (
                         s.provider.clone(),
@@ -835,6 +878,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         s.remote,
                         s.backend,
                         s.external.clone(),
+                        s.session_turn_limit,
+                        s.session_token_limit,
                     )
                 })
                 else {
@@ -844,6 +889,27 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                     });
                     continue;
                 };
+                let (turns_completed, tokens_used) = {
+                    let session = session.lock().unwrap();
+                    (
+                        session
+                            .history
+                            .iter()
+                            .filter(|message| matches!(message, Message::User { .. }))
+                            .count() as u32,
+                        session.usage.prompt_tokens + session.usage.completion_tokens,
+                    )
+                };
+                if let Some(message) = session_limit_error(
+                    turns_completed,
+                    tokens_used,
+                    session_turn_limit,
+                    session_token_limit,
+                ) {
+                    busy.store(false, Ordering::SeqCst);
+                    emitter.emit(Outbound::Error { message });
+                    continue;
+                }
                 cancel.store(false, Ordering::SeqCst);
                 let reconciliation =
                     session
@@ -907,17 +973,18 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         bridge: Arc::clone(&bridge),
                     };
                     worker = Some(std::thread::spawn(move || {
+                        let _busy = BusyReset(Arc::clone(&busy));
                         let emitter = turn.emitter.clone();
                         if let Err(error) = turn.run() {
                             emitter.emit(Outbound::Error {
                                 message: format!("{error:#}"),
                             });
                         }
-                        busy.store(false, Ordering::SeqCst);
                     }));
                     continue;
                 }
                 worker = Some(std::thread::spawn(move || {
+                    let _busy = BusyReset(Arc::clone(&busy));
                     let result = (|| -> Result<()> {
                         provider.api_key = cached_key(&keys, &key_file, &provider.base_url)?;
                         if web_search {
@@ -925,8 +992,27 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             let search_key =
                                 cached_key(&keys, &key_file, DEEPSEEK_BASE_URL).unwrap_or_default();
                             let mut access = web::WebAccess::deepseek(search_key, allowed_hosts);
-                            if let Ok(base) = std::env::var("COLM_AGENT_SEARCH_URL") {
-                                access.search_base = base;
+                            // 测试/e2e 用完整 URL 注入 mock；只接受本机回环，免得环境变量把 Key 发到任意主机。
+                            if let Ok(url) = std::env::var("COLM_AGENT_SEARCH_URL") {
+                                if web::loopback_url(&url) {
+                                    access.search_url = url;
+                                } else {
+                                    eprintln!(
+                                        "ignoring COLM_AGENT_SEARCH_URL: only loopback test endpoints are allowed"
+                                    );
+                                }
+                            }
+                            if let Ok(url) = std::env::var("COLM_AGENT_FETCH_URL") {
+                                if web::loopback_url(&url) {
+                                    access.fetch_url = url;
+                                } else {
+                                    eprintln!(
+                                        "ignoring COLM_AGENT_FETCH_URL: only loopback test endpoints are allowed"
+                                    );
+                                }
+                            }
+                            if std::env::var("COLM_AGENT_SEARCH_LEGACY").as_deref() == Ok("1") {
+                                access.legacy = true;
                             }
                             tool_context.web = Some(access);
                         }
@@ -986,11 +1072,20 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             session.usage
                         };
                         let outcome = outcome?;
+                        let session_turns = {
+                            let session = session.lock().unwrap();
+                            session
+                                .history
+                                .iter()
+                                .filter(|message| matches!(message, Message::User { .. }))
+                                .count() as u32
+                        };
                         emitter.emit(Outbound::Usage {
                             prompt_tokens: outcome.usage.prompt_tokens,
                             completion_tokens: outcome.usage.completion_tokens,
                             session_prompt_tokens: totals.prompt_tokens,
                             session_completion_tokens: totals.completion_tokens,
+                            session_turns,
                         });
                         emitter.emit(Outbound::TurnDone {
                             content: outcome.content,
@@ -1003,7 +1098,6 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             message: format!("{error:#}"),
                         });
                     }
-                    busy.store(false, Ordering::SeqCst);
                 }));
             }
         }
@@ -1219,11 +1313,20 @@ impl ExternalTurn {
             session.usage.completion_tokens += outcome.usage.completion_tokens;
             session.usage
         };
+        let session_turns = {
+            let session = self.session.lock().unwrap();
+            session
+                .history
+                .iter()
+                .filter(|message| matches!(message, Message::User { .. }))
+                .count() as u32
+        };
         self.emitter.emit(Outbound::Usage {
             prompt_tokens: outcome.usage.prompt_tokens,
             completion_tokens: outcome.usage.completion_tokens,
             session_prompt_tokens: totals.prompt_tokens,
             session_completion_tokens: totals.completion_tokens,
+            session_turns,
         });
         self.emitter.emit(Outbound::TurnDone {
             content: outcome.content,
@@ -1255,6 +1358,19 @@ fn external_launch_cwd(root: &std::path::Path) -> Result<PathBuf> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_limits_stop_before_the_next_turn_and_zero_means_unlimited() {
+        assert!(session_limit_error(99, 0, 100, 0).is_none());
+        assert!(session_limit_error(100, 0, 100, 0)
+            .unwrap()
+            .contains("session limit reached"));
+        assert!(session_limit_error(0, 199_999, 0, 200_000).is_none());
+        assert!(session_limit_error(0, 200_000, 0, 200_000)
+            .unwrap()
+            .contains("200000 of 200000"));
+        assert!(session_limit_error(10_000, 10_000_000, 0, 0).is_none());
+    }
 
     #[test]
     fn external_bridge_exposes_successful_audit_id() {

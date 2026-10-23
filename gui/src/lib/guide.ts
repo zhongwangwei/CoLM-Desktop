@@ -12,6 +12,8 @@ export type UiField = {
   options?: { value: string; label: string }[];
   disabled?: boolean;
   readOnly?: boolean;
+  /// 会随时间/轮询自己变化的值（例如候选列表里的默认成员）：审批快照不比较它，避免假阳性。
+  volatile?: boolean;
   saves?: boolean;
   visible?: boolean;
   set: (value: string) => void | Promise<void>;
@@ -148,18 +150,21 @@ export function guideState() {
     steps: contracts.some((contract) => contract.modal)
       ? []
       : [...routes, ...Object.keys(pageAliases)].map((id) => ({ id, label: id })),
-    fields: fields().map(({ id, label, value, type, options, disabled, readOnly, saves }) => ({
-      id,
-      name: id,
-      label,
-      value,
-      kind: type,
-      options,
-      disabled: !!disabled,
-      readOnly: !!readOnly,
-      read_only: !!readOnly,
-      saves: !!saves,
-    })),
+    fields: fields().map(
+      ({ id, label, value, type, options, disabled, readOnly, volatile, saves }) => ({
+        id,
+        name: id,
+        label,
+        value,
+        kind: type,
+        options,
+        disabled: !!disabled,
+        readOnly: !!readOnly,
+        read_only: !!readOnly,
+        volatile: !!volatile,
+        saves: !!saves,
+      }),
+    ),
     buttons: actions().map(({ id, label, kind, enabled }) => ({
       name: id,
       label,

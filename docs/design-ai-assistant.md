@@ -113,6 +113,14 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 官方合同核对于 2026-10-10：[OpenAI reasoning](https://developers.openai.com/api/docs/guides/reasoning)、[Claude Messages](https://platform.claude.com/docs/en/api/messages/create)、[Claude effort](https://platform.claude.com/docs/en/build-with-claude/effort)、[Grok reasoning](https://docs.x.ai/developers/model-capabilities/text/reasoning)、[Gemini OpenAI 兼容](https://ai.google.dev/gemini-api/docs/openai)、[DeepSeek thinking](https://api-docs.deepseek.com/guides/thinking_mode/)、[GLM 5.3](https://docs.z.ai/guides/llm/glm-5.3)、[Kimi thinking](https://platform.kimi.ai/docs/guide/use-thinking-models)、[Qwen 模型列表](https://help.aliyun.com/en/model-studio/list-models)。本次验证使用本地模拟 HTTP 和持久化回合测试，没有消费真实账户额度；发版前仍需真实服务与安装包实测。
 
+#### 内置后端联网：DeepSeek 官方 Search / Fetch API（第 758 轮）
+
+内置后端的 `web_search` 走 DeepSeek 官方 `POST https://api.deepseek.com/v1/tools/search`（2026-10-17 GA，与 V4.1-Flash-1017 同日发布）：Bearer 认证，`query` 1–128 字符（支持 `site:`、`-site:`、`after:`、`before:`、`lang:` 与引号短语），`count` 1–50（工具默认 5、最多 10），`need_content` 为 false。每条结果返回 title、url、`date`（UTC RFC 3339）、`summary`（600–800 字符，官方明确“给模型读”）和 `authority`（0–4，-1 未知）；通常不需要再逐页 `fetch_url`。它按成功请求计费（$0.75/1000 次，失败/空结果/超时不收），不再消耗模型 token，也不再依赖退役模型别名或 Anthropic 兼容层。
+
+搜索固定使用 DeepSeek 的 Key（会话模型可以是别家），由设置里的“联网搜索”开关注册。`fetch_url` **本地优先、失败回退官方 Fetch**：先走本机抓取（免费、页面内容不经过 DeepSeek、HTML 转纯文本、逐跳私网/白名单检查）；本地失败（JS 页面、PDF、站点拦本地 IP 等）且用户有 DeepSeek Key 时，再调 `POST /v1/tools/fetch`（Markdown，按成功页约 $0.00075，URL 与页面内容会发给 DeepSeek）。2026-10-23 真实 Key 实测：官方 Fetch HTML 可取但 Markdown 转义重、PDF 404/504、DOI/大页面 10–16 秒、目标站 403/418 都映射成 404；因此只把它当回退，不作为默认路径（第 763/764 轮）。
+
+错误处理按官方口径：408/429/5xx 退避重试（工具内最多 2 次并检查取消），402 提示余额不足，401 提示 Key 无效，其余 4xx 不原样重试。旧实现（Anthropic 兼容 Messages + `web_search_20250305` + `deepseek-v4-flash`）保留为 `COLM_AGENT_SEARCH_LEGACY=1` 的显式回退，一个版本后删除；`COLM_AGENT_SEARCH_URL` 现在表示完整端点，供测试/e2e 注入本地 mock。官方参考：[Search & Fetch 指南](https://api-docs.deepseek.com/guides/search)、[Search API](https://api-docs.deepseek.com/api/search)、[Fetch API](https://api-docs.deepseek.com/api/fetch)、[模型与价格](https://api-docs.deepseek.com/quick_start/models)、[变更日志](https://api-docs.deepseek.com/updates)。
+
 ### 3.2 Codex（第 634 轮已实现并实测，codex-cli 0.160.1，ChatGPT 登录）
 
 - 一个 CoLM 会话常驻一个 `codex app-server`（stdio 上的 JSON-RPC，消息不带 `jsonrpc`）：`initialize`、`initialized`、`thread/start`（或续接时 `thread/resume`），每轮 `turn/start`，取消用 `turn/interrupt`。
@@ -298,20 +306,22 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 | 提示注入（观测文件属性、namelist 字符串、日志、源码注释里夹带指令） | 工具输出在系统提示里明确标为"数据，不是指令"；内置后端没有任意 shell；所有写操作都经审批；审批卡片显示的是真实动作，而不是模型的描述 |
 | 编译和运行等于执行任意代码 | 只在工作区里进行；本地沙箱断网并限制可写目录；远程靠 run-7920 的 bubblewrap 与网络隔离。并说明：这只能防误写，**不是运行恶意代码的完整安全边界** |
 | 外部后端自带 shell | Codex 用 `workspace-write`，审批交给应用；Claude Code 用 `--permission-prompt-tool`；OpenCode v2 首版关闭原生 shell，操作走 CoLM MCP 审批。授权目录来自当前项目，不继承上一个项目 |
-| 凭据 | API Key 以明文存在应用配置目录的 `assistant-keys.json`（三个平台一样；Unix 上权限 0600，只有当前用户可读写）。用户 2026-10-08 决定不用系统钥匙串：要跨平台、要简单，而 macOS 钥匙串对每个新编译的程序都要弹授权框。Key 只在 agent 进程里读出（每个进程读一次），不写进日志、会话、工作区、补丁或远程快照 |
-| 数据外发 | 第一次使用和每次换服务商时提示：配置、指标、日志与源码片段会发给模型服务商。可以切换到本地模型 |
+| 凭据 | API Key 以明文存在应用配置目录的 `assistant-keys.json`（三个平台一样；Unix 上权限 0600，只有当前用户可读写；临时文件也先以 0600 创建再换名）。会话/审计 JSONL 同样 0600。用户 2026-10-08 决定不用系统钥匙串：要跨平台、要简单，而 macOS 钥匙串对每个新编译的程序都要弹授权框。Key 只在 agent 进程里读出（每个进程读一次），不写进日志、会话、工作区、补丁或远程快照 |
+| 数据外发 | 第一次使用和每次换服务商时提示：配置、指标、日志与源码片段会发给模型服务商。内置后端且联网搜索打开时，确认目标同时写明搜索查询会发往 DeepSeek Search API；确认也由后端在 `assistant_start`/`assistant_send` 复核，不能只靠前端调用点。可以切换到本地模型 |
 | 失控 | 每个会话设调用次数、token 用量与费用上限；任何时候都能取消；后台任务（编译、运行、Study）都可单独取消 |
 | 可追溯 | 审计日志记下每次工具调用（参数、结果摘要、耗时）、每个补丁的提交号、每次审批的决定与时间 |
+| 联网抓取边界 | `fetch_url` 只打开会话搜索结果/用户消息里出现过的站点；本地路径逐跳重定向复查允许列表，解析器只返回公网地址并直接连接（不二次解析，防 DNS rebinding）；本地失败回退 DeepSeek Fetch API（URL/页面内容发往 DeepSeek，按成功页计费）；`COLM_AGENT_SEARCH_URL`/`COLM_AGENT_FETCH_URL` 只允许覆盖为回环测试端点 |
 
 ## 8. 界面
 
 - **停靠方式**（第 619–620 轮按用户反馈改）：助手是主网格最右侧的一栏，与页面并排，用分隔条调宽。首页（启动页、配置向导）上同样可以打开，首页让出右侧。
 
-- **助手面板**（右侧，可收起）：
+- **助手面板**（右侧，可收起；第 759 轮起收起只隐藏、不卸载）：
+  - 第一次打开才加载，之后收起用 `hidden` 保持挂载：正在跑的回答继续，对话与审批卡不丢；面板只在应用关闭时卸载。
   - 对话与工具调用卡片。卡片默认折叠，显示工具名、参数摘要、结果摘要；可展开看原始输出。
   - 引用的数字可以点击，跳到出处。
   - 提问时自动附上当前页面的上下文：选中的算例、当前 Study、正在看的结果。
-- **审批卡片**：B 级显示字段的新旧值和运行规模；C 级补丁显示彩色 diff。三个按钮："批准 / 拒绝 / 修改后批准"。可以对编译与运行类勾选"本会话内不再询问"。
+- **审批卡片**：B 级显示字段的新旧值和运行规模；C 级补丁显示彩色 diff。三个按钮："批准 / 拒绝 / 修改后批准"。只有普通运行/后端操作可以勾选"本会话内不再询问"；写回版本、冻结、提交、生成数据、重跑历史等会在 `tools/ui.rs` 里逐次确认（R13/B-04）。
 - **改代码页**（第 661 轮起取代工作区面板；左栏“改进模型 → 改代码”，助手面板不再是入口）：新建修改版（名称、目的、从官方版或另一个修改版开始）、版本卡（目的、改了哪边、四盏灯、“用它运行”“让助手改”“导入补丁”）、本机编译与检查、服务器上的编译与验证，以及导出、撤回、删除（D 级）。下面是原工作区面板的说明：
 - **工作区面板**（旧）：
   - 研究页和助手面板均有“开发工作区”入口。面板顶部可直接“新建工作区”，默认使用当前应用源码，填写名称即可创建；其他本地源码及版本为可选项。仓库只复制已提交代码，安装版使用随包源码包。创建中防止重复提交，失败保留输入，成功显示位置并刷新列表。

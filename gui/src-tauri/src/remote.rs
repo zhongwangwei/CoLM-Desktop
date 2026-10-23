@@ -2050,6 +2050,19 @@ pub async fn remote_study_fetch(app: tauri::AppHandle, study_dir: String) -> Res
     .await
 }
 
+/// Close a lost/unknown remote Study record after the user confirms (R25).
+#[tauri::command]
+pub async fn remote_study_close(app: tauri::AppHandle, study_dir: String) -> Result<Value, String> {
+    absolute_study(&study_dir)?;
+    let server = study_server(&remote_config(app)?, &study_dir)?;
+    ssh_cli_json(
+        vec!["remote-study-close".into(), study_dir],
+        None,
+        Some(&server),
+    )
+    .await
+}
+
 /// Request cancellation of the recorded server job; status remains authoritative.
 #[tauri::command]
 pub async fn remote_study_cancel(

@@ -392,6 +392,7 @@ it('a server submission that recorded nothing can be submitted again', async () 
     const start = pageCallback('start', {
       runLock: { current: false },
       lock: { current: false },
+      resumeRequested: { current: false },
       runKernel: '/kernel',
       studyDir: '/s',
       envelope: { state: { status: 'Ready' } },

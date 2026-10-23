@@ -17,7 +17,7 @@ use crate::message::{Message, ToolCall, Usage};
 pub const DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com";
 
 /// 模型服务的配置。Key 不在这里持久化，由调用方从本地 Key 文件取出后填入。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderConfig {
     #[serde(default)]
     pub provider_id: String,
@@ -61,6 +61,28 @@ fn default_max_tokens() -> u32 {
 
 fn default_timeout() -> u64 {
     600
+}
+
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Key 只在内存里；Debug 供日志/错误细节使用，绝不能打出明文（B-10）。
+        f.debug_struct("ProviderConfig")
+            .field("provider_id", &self.provider_id)
+            .field("api_format", &self.api_format)
+            .field("api_options", &self.api_options)
+            .field("max_output_tokens", &self.max_output_tokens)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field(
+                "api_key",
+                &if self.api_key.is_empty() { "" } else { "<set>" },
+            )
+            .field("thinking", &self.thinking)
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("strict", &self.strict)
+            .field("timeout_seconds", &self.timeout_seconds)
+            .finish()
+    }
 }
 
 impl ProviderConfig {

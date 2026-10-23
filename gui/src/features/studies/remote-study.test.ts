@@ -75,6 +75,40 @@ describe('server study lifecycle', () => {
     assert.equal(lost.submit, false);
     assert.equal(lost.fetch, false);
     assert.equal(lost.cancel, false);
+    // 丢失的作业可以由用户确认后关闭记录；运行中/正常结束的不行（R25）。
+    assert.equal(lost.close, true);
+    assert.equal(
+      remoteStudyPermissions(
+        null,
+        { host: '7920l', job: 'intent' },
+        remoteStudyReply({ status: { state: 'unknown' } }),
+      ).close,
+      true,
+    );
+    assert.equal(
+      remoteStudyPermissions(
+        { job: 'one' },
+        null,
+        remoteStudyReply({ status: { state: 'running' } }),
+      ).close,
+      false,
+    );
+    assert.equal(
+      remoteStudyPermissions(
+        { job: 'one' },
+        null,
+        remoteStudyReply({ status: { state: 'finished', exit_code: 1 } }),
+      ).close,
+      false,
+    );
+    assert.equal(
+      remoteStudyPermissions(
+        { job: 'one', fetched_at: 123 },
+        null,
+        remoteStudyReply({ status: { state: 'lost' } }),
+      ).close,
+      false,
+    );
   });
   it('keeps credentials and unrelated configuration out of the assistant snapshot', () => {
     const parsed = remoteStudyReply({

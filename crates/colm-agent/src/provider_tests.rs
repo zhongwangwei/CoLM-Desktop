@@ -848,3 +848,11 @@ fn stream_errors_preserve_bounded_redacted_service_reasons() {
     assert!(error.len() < 500);
     assert!(!error.contains("secret"));
 }
+
+#[test]
+fn provider_debug_redacts_the_api_key() {
+    let config = ProviderConfig::deepseek("deepseek-flash", "sk-secret-value".into());
+    let text = format!("{config:?}");
+    assert!(!text.contains("sk-secret-value"), "{text}");
+    assert!(text.contains("<set>"), "{text}");
+}

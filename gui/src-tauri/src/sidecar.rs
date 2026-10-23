@@ -620,7 +620,7 @@ fn terminate_all<T: Send>(targets: Vec<(T, u32)>) -> Vec<(T, Result<(), String>)
 }
 
 #[cfg(unix)]
-fn terminate_process_tree(pid: u32) -> Result<(), String> {
+pub(crate) fn terminate_process_tree(pid: u32) -> Result<(), String> {
     // `top_level_sidecar` made the process group id equal to `pid`; negative pid
     // addresses that group, so the active Fortran child dies with colm-cli.
     let group = format!("-{pid}");
@@ -650,7 +650,7 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn terminate_process_tree(pid: u32) -> Result<(), String> {
+pub(crate) fn terminate_process_tree(pid: u32) -> Result<(), String> {
     let status = sidecar_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .stdout(Stdio::null())
@@ -665,7 +665,7 @@ fn terminate_process_tree(pid: u32) -> Result<(), String> {
 }
 
 #[cfg(not(any(unix, windows)))]
-fn terminate_process_tree(pid: u32) -> Result<(), String> {
+pub(crate) fn terminate_process_tree(pid: u32) -> Result<(), String> {
     let status = sidecar_command("kill")
         .arg(pid.to_string())
         .stdout(Stdio::null())

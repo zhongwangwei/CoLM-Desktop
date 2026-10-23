@@ -128,6 +128,7 @@ export function approvalSnapshot(identity: Record<string, unknown>, page: unknow
         Boolean(field) &&
         typeof field === 'object' &&
         field.readOnly !== true &&
+        field.volatile !== true &&
         field.visible !== false,
     )
     .map((field) => ({ id: String(field.id ?? field.name ?? ''), value: field.value }))

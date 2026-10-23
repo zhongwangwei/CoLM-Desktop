@@ -579,12 +579,10 @@ export default function VersionsPage() {
   }
   async function importFile() {
     if (!draft) return;
-    const path = await invoke<string | null>('pick_file', {
-      key: 'model-parameters',
-      filter: 'json',
-    });
-    if (!path) return;
-    const text = await invoke<string>('read_text', { path });
+    // 选文件和读文件都在后端：前端不能拿一个任意路径去读（例如存 Key 的 JSON）。
+    const picked = await invokeJson<{ path: string; text: string } | null>('pick_parameter_file');
+    if (!picked) return;
+    const text = picked.text;
     const rows = importParameters(
       text,
       catalog,

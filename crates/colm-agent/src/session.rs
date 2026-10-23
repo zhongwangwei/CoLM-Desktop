@@ -171,12 +171,23 @@ impl Session {
         }
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join(file);
-        let mut handle = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut handle = options
             .open(&path)
             .with_context(|| format!("cannot open {}", path.display()))?;
+        // 会话/审计可能含路径、配置片段和工具输出；新文件用 0600，旧文件也收紧（B-08）。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("cannot protect {}", path.display()))?;
+        }
         // Keep a torn final record separate so the next valid checkpoint can be recovered.
         if handle.metadata()?.len() > 0 {
             handle.seek(SeekFrom::End(-1))?;

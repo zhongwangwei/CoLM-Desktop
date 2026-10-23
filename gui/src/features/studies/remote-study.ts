@@ -111,6 +111,12 @@ export function remoteStudyPermissions(
     submit: !exists,
     cancel: Boolean(record) && !fetched && ['queued', 'running'].includes(state ?? ''),
     fetch: Boolean(record) && terminal && !fetched,
+    // 服务器作业已丢失/无法核对：用户确认后可以关闭本机记录（R25）。排队/运行中不能关，正常结束的应取回。
+    close:
+      Boolean(record || pending) &&
+      !fetched &&
+      !terminal &&
+      ['lost', 'unknown'].includes(state ?? ''),
     poll: exists && !fetched && !terminal && state !== 'lost',
   };
 }

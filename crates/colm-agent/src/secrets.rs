@@ -28,10 +28,25 @@ fn save(path: &Path, keys: &BTreeMap<String, String>) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
-    // 先写临时文件、设好权限再换名，任何时刻都不会有一个所有人可读的 Key 文件。
+    // 先建 0600 的临时文件再写内容、换名，任何时刻都不会出现所有人可读的 Key（B-09）。
     let temp = path.with_extension("json.tmp");
-    std::fs::write(&temp, serde_json::to_string_pretty(keys)?)
-        .with_context(|| format!("cannot write {}", temp.display()))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp)
+        .with_context(|| format!("cannot create {}", temp.display()))?;
+    {
+        use std::io::Write;
+        file.write_all(serde_json::to_string_pretty(keys)?.as_bytes())
+            .with_context(|| format!("cannot write {}", temp.display()))?;
+        file.sync_all()?;
+    }
+    drop(file);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

@@ -623,3 +623,50 @@ fn selected_model_configure_carries_native_identity_without_rebinding_to_app_doc
     let colm_agent_protocol::Inbound::Configure { model_context, .. } = parsed;
     assert_eq!(model_context, Some(context));
 }
+
+#[test]
+fn egress_confirmation_names_the_model_and_web_search_recipients() {
+    let mut settings = AssistantSettings::default();
+    assert_eq!(
+        egress_target(&settings),
+        "https://api.deepseek.com (web search & fetch: DeepSeek APIs)"
+    );
+    settings.egress_acknowledged = Some(egress_target(&settings));
+    assert!(require_egress_acknowledged(&settings).is_ok());
+    settings.web_search = false;
+    assert_eq!(egress_target(&settings), "https://api.deepseek.com");
+    assert!(require_egress_acknowledged(&settings).is_err());
+
+    settings.backend = "codex".into();
+    settings.egress_acknowledged = Some("codex".into());
+    assert!(require_egress_acknowledged(&settings).is_ok());
+
+    let mut opencode = AssistantSettings {
+        backend: "opencode".into(),
+        ..AssistantSettings::default()
+    };
+    opencode.external.insert(
+        "opencode".into(),
+        ExternalChoice {
+            model: Some("provider/model".into()),
+            effort: None,
+        },
+    );
+    assert_eq!(egress_target(&opencode), "opencode:provider/model");
+    opencode.egress_acknowledged = None;
+    assert!(require_egress_acknowledged(&opencode).is_err());
+}
+
+#[test]
+fn session_limits_default_to_a_finite_budget_and_allow_unlimited_zero() {
+    let settings = AssistantSettings::default();
+    assert_eq!(settings.session_turn_limit, 100);
+    assert_eq!(settings.session_token_limit, 5_000_000);
+    assert!(validate_settings(&settings).is_ok());
+    let unlimited = AssistantSettings {
+        session_turn_limit: 0,
+        session_token_limit: 0,
+        ..AssistantSettings::default()
+    };
+    assert!(validate_settings(&unlimited).is_ok());
+}

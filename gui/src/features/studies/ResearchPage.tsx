@@ -389,6 +389,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const epoch = useRef(0),
     lock = useRef(false),
     runLock = useRef(false),
+    // 暂停收尾期间点“恢复”：旧 start() 还占着 runLock，先记下意图，等它结束再启动（R27）。
+    resumeRequested = useRef(false),
     remoteRequest = useRef(0);
   const shown = useRef(active);
   shown.current = active;
@@ -1091,6 +1093,14 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     } finally {
       runLock.current = false;
       setLaunching(false);
+      if (resumeRequested.current) {
+        resumeRequested.current = false;
+        // 用 setTimeout 走出当前 finally，避免和刚结束的一次 start() 递归叠栈。
+        setTimeout(() => {
+          if (epoch.current !== token) return;
+          void start().catch((e) => setError(String(e)));
+        }, 0);
+      }
     }
   };
   const control = async (
@@ -1142,8 +1152,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       });
       return current() ? await readStatus() : response;
     });
-    if (command === 'study_resume' && !runLock.current && token === epoch.current)
-      return await start();
+    if (command === 'study_resume') {
+      if (runLock.current) {
+        resumeRequested.current = true;
+        return value;
+      }
+      if (token === epoch.current) return await start();
+    }
     return value;
   };
   const loadResult = () =>
@@ -1173,6 +1188,34 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       if (current()) setRemoteReply(answer);
       return answer;
     });
+  const closeRemote = async () => {
+    // 丢失的服务器作业不会有退出码；关闭只清本机远程记录，结果不可能再取回（R25）。
+    if (
+      !(await askConfirm(
+        tr(
+          '确认服务器作业已经丢失？关闭后不能取回结果，这条本机研究可以重新提交或在本机运行；远端记录会改名留档。',
+          'Confirm the server job is lost? After closing, its results cannot be fetched; this local study can be submitted or run locally again. The remote record is archived.',
+        ),
+        { confirmLabel: tr('确认丢失并关闭', 'Confirm lost and close') },
+      ))
+    )
+      return null;
+    return task(async (current) => {
+      remoteRequest.current++;
+      const answer = await invokeJson('remote_study_close', { studyDir });
+      if (current()) {
+        setRemoteReply(null);
+        await readStatus();
+        notify(
+          tr(
+            '已关闭丢失的服务器记录；可以重新提交或在本机运行。',
+            'The lost server record is closed; the study can be submitted or run again.',
+          ),
+        );
+      }
+      return answer;
+    });
+  };
   const fetchRemote = () =>
     task(async (current) => {
       if (!remotePermissions.fetch)
@@ -1800,6 +1843,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     set: (v: string) => void,
     type: UiField['type'] = 'text',
     options?: { value: string; label: string }[],
+    volatile = false,
   ): UiField => ({
     id,
     label: en ? label : fieldLabels[label] || label,
@@ -1808,6 +1852,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     type,
     options,
     disabled: busy || launching || unresolvedRemote,
+    volatile,
   });
   const knownHosts = [...new Set([...servers, ...(host ? [host] : [])])];
   const baseFields: UiField[] = [
@@ -2055,6 +2100,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               value: path,
               label: resultFileLabel(path, en),
             })),
+            true,
           ),
         ]
       : []),
@@ -2237,6 +2283,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             tr('取回服务器结果', 'Fetch server results'),
             fetchRemote,
             remotePermissions.fetch && !launching,
+            true,
+          ),
+          action(
+            'remote-study-close',
+            tr('确认服务器作业已丢失…', 'Mark the server job as lost…'),
+            closeRemote,
+            remotePermissions.close && !launching,
             true,
           ),
         ]),
@@ -2766,8 +2819,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             <h1>{tr('研究与模型改进', 'Research and model improvement')}</h1>
             <p>
               {tr(
-                '先明确研究目标，再选择方法。研究跑完可以把结果写进一个新的模型版本。',
-                'Start with a research question, then choose a method. Finished results can go into a new model version.',
+                '先明确研究目标，再选择方法。研究跑完可以把结果写进一个新版本的草稿，审阅后冻结。',
+                'Start with a research question, then choose a method. Finished results can be written into a new-version draft, then reviewed and frozen.',
               )}
             </p>
           </div>
@@ -3259,6 +3312,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     'remote-study-status',
     'remote-study-cancel',
     'remote-study-fetch',
+    'remote-study-close',
   ];
   // 运行、恢复原来只在可用时才渲染：打开一个待运行的研究，"开始运行"整颗不存在，勾了核对才凭空出现
   //（GUI 审查 C-29）。这两个按状态该出现就出现，不可用时灰着并说明原因；其余仍只在可用时出现。
@@ -4516,8 +4570,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   remoteReply?.outcome === 'uncertain') && (
                   <Notice tone="warning">
                     {tr(
-                      '服务器状态还没核对，不能当作完成、失败或已取消，也不会重复提交。',
-                      'The server state is unconfirmed; it is not treated as finished, failed or cancelled, and will not be resubmitted.',
+                      '服务器状态还没核对，不能当作完成、失败或已取消，也不会重复提交。确认作业已经丢失时，可用下面的「确认服务器作业已丢失…」关闭记录。',
+                      'The server state is unconfirmed; it is not treated as finished, failed or cancelled, and will not be resubmitted. If the job is lost, use "Mark the server job as lost…" to close the record.',
                     )}
                   </Notice>
                 )}

@@ -299,7 +299,7 @@ function page(
           return { entry: { dir: '/preview/site' }, profile: options.profile ?? {} };
         case 'hist_vars':
           return options.histories ?? [];
-        case 'read_text':
+        case 'read_case_nml':
           return '';
         case 'read_case':
           return Object.entries(sourceValues).map(([path, value]) => ({ path, value }));

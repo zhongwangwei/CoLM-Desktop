@@ -84,6 +84,12 @@ export default function App() {
     return () => window.removeEventListener('resize', resize);
   }, []);
   const { state, update, navigate } = useApp();
+  // 助手面板收起时保持挂载：否则正在跑的回答会被卸载 cleanup 取消，对话也随组件状态丢掉。
+  // 第一次打开才加载，之后用 hidden 收起，和 researchKept 同一做法。
+  const [assistantMounted, setAssistantMounted] = useState(state.assistantOpen);
+  useEffect(() => {
+    if (state.assistantOpen) setAssistantMounted(true);
+  }, [state.assistantOpen]);
   const en = state.language === 'en';
   const tr = (zh: string, english: string) => (en ? english : zh);
   const active = activeNavigation(state);
@@ -250,70 +256,73 @@ export default function App() {
           </Suspense>
         </main>
         {state.assistantOpen && (
-          <>
-            <div
-              className="assistant-splitter"
-              role="separator"
-              aria-label={tr('调整助手宽度', 'Resize assistant')}
-              aria-orientation="vertical"
-              aria-controls="assistant-pane"
-              aria-valuemin={280}
-              aria-valuemax={assistantPanelWidth(600, window.innerWidth)}
-              aria-valuenow={assistantWidth}
-              tabIndex={0}
-              onPointerDown={(event) => {
+          <div
+            className="assistant-splitter"
+            role="separator"
+            aria-label={tr('调整助手宽度', 'Resize assistant')}
+            aria-orientation="vertical"
+            aria-controls="assistant-pane"
+            aria-valuemin={280}
+            aria-valuemax={assistantPanelWidth(600, window.innerWidth)}
+            aria-valuenow={assistantWidth}
+            aria-valuetext={`${assistantWidth} px`}
+            tabIndex={0}
+            onPointerDown={(event) => {
+              event.preventDefault();
+              event.currentTarget.focus({ preventScroll: true });
+              event.currentTarget.setPointerCapture(event.pointerId);
+              drag.current = { id: event.pointerId, x: event.clientX, width: assistantWidth };
+            }}
+            onPointerMove={(event) => {
+              if (drag.current?.id === event.pointerId)
+                setAssistantWidth(
+                  assistantPanelWidth(
+                    drag.current.width + drag.current.x - event.clientX,
+                    window.innerWidth,
+                  ),
+                );
+            }}
+            onPointerUp={(event) => {
+              if (drag.current?.id === event.pointerId) {
+                drag.current = null;
+                if (event.currentTarget.hasPointerCapture(event.pointerId))
+                  event.currentTarget.releasePointerCapture(event.pointerId);
+              }
+            }}
+            onPointerCancel={() => {
+              drag.current = null;
+            }}
+            onLostPointerCapture={() => {
+              drag.current = null;
+            }}
+            onKeyDown={(event) => {
+              if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
                 event.preventDefault();
-                event.currentTarget.setPointerCapture(event.pointerId);
-                drag.current = { id: event.pointerId, x: event.clientX, width: assistantWidth };
-              }}
-              onPointerMove={(event) => {
-                if (drag.current?.id === event.pointerId)
-                  setAssistantWidth(
-                    assistantPanelWidth(
-                      drag.current.width + drag.current.x - event.clientX,
-                      window.innerWidth,
-                    ),
-                  );
-              }}
-              onPointerUp={(event) => {
-                if (drag.current?.id === event.pointerId) {
-                  drag.current = null;
-                  if (event.currentTarget.hasPointerCapture(event.pointerId))
-                    event.currentTarget.releasePointerCapture(event.pointerId);
-                }
-              }}
-              onPointerCancel={() => {
-                drag.current = null;
-              }}
-              onLostPointerCapture={() => {
-                drag.current = null;
-              }}
-              onKeyDown={(event) => {
-                if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
-                  event.preventDefault();
-                  setAssistantWidth(
-                    assistantPanelWidth(
-                      event.key === 'Home'
-                        ? 280
-                        : event.key === 'End'
-                          ? 600
-                          : assistantWidth + (event.key === 'ArrowLeft' ? 16 : -16),
-                      window.innerWidth,
-                    ),
-                  );
-                }
-              }}
-            />
-            <aside
-              id="assistant-pane"
-              className="assistant-pane"
-              aria-label={tr('AI 助手', 'AI assistant')}
-            >
-              <Suspense fallback={<Notice>{tr('正在读取助手…', 'Loading assistant…')}</Notice>}>
-                <AssistantPanel />
-              </Suspense>
-            </aside>
-          </>
+                setAssistantWidth(
+                  assistantPanelWidth(
+                    event.key === 'Home'
+                      ? 280
+                      : event.key === 'End'
+                        ? 600
+                        : assistantWidth + (event.key === 'ArrowLeft' ? 16 : -16),
+                    window.innerWidth,
+                  ),
+                );
+              }
+            }}
+          />
+        )}
+        {assistantMounted && (
+          <aside
+            id="assistant-pane"
+            className="assistant-pane"
+            aria-label={tr('AI 助手', 'AI assistant')}
+            hidden={!state.assistantOpen}
+          >
+            <Suspense fallback={<Notice>{tr('正在读取助手…', 'Loading assistant…')}</Notice>}>
+              <AssistantPanel />
+            </Suspense>
+          </aside>
         )}
       </div>
     </>

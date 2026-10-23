@@ -15,6 +15,10 @@ export interface Settings extends ApiProfile {
   api_profiles: Record<string, ApiProfile>;
   approval: string;
   web_search: boolean;
+  /** 每个会话最多多少条用户消息；0 = 不限（B-12）。 */
+  session_turn_limit: number;
+  /** 每个会话累计 prompt+completion token 上限；0 = 不限。 */
+  session_token_limit: number;
   backend: string;
   egress_acknowledged: string | null;
   external: Record<string, { model: string | null; effort: string | null }>;
@@ -33,6 +37,8 @@ export const defaultSettings: Settings = {
   reasoning_effort: null,
   approval: 'ask',
   web_search: true,
+  session_turn_limit: 100,
+  session_token_limit: 5_000_000,
   backend: 'builtin',
   egress_acknowledged: null,
   external: {},
@@ -241,11 +247,16 @@ export function withChoice(
   };
 }
 export function egressTarget(settings: Settings) {
-  return settings.backend === 'builtin'
-    ? settings.base_url
-    : settings.backend === 'opencode'
-      ? `opencode:${settings.external.opencode?.model || ''}`
-      : settings.backend;
+  const model =
+    settings.backend === 'builtin'
+      ? settings.base_url
+      : settings.backend === 'opencode'
+        ? `opencode:${settings.external.opencode?.model || ''}`
+        : settings.backend;
+  // 联网搜索固定用 DeepSeek 的 Search API（即使会话模型是别家），确认文案必须把它写出来。
+  return settings.backend === 'builtin' && settings.web_search
+    ? `${model} (web search & fetch: DeepSeek APIs)`
+    : model;
 }
 export interface ModelChoice {
   id: string;
@@ -275,6 +286,9 @@ export interface AgentEvent {
   task?: Record<string, unknown>;
   prompt_tokens?: number;
   completion_tokens?: number;
+  session_prompt_tokens?: number;
+  session_completion_tokens?: number;
+  session_turns?: number;
 }
 export interface Message {
   kind: string;

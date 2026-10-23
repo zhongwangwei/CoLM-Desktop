@@ -44,6 +44,25 @@ export default function AssistantPanel() {
   function t(zh: string, en: string) {
     return app.current.language === 'en' ? en : zh;
   }
+  function errorText(message: string) {
+    const text = String(message).replace(/^Error: /, '');
+    if (text.includes('no API key is stored') || text.includes('no API key is configured'))
+      return t(
+        '这个服务还没有登记 API Key；点上面的"设置"登记后再发送。',
+        'No API key is stored for this service; open Settings, register one, then send again.',
+      );
+    if (text.startsWith('session limit reached:'))
+      return t(
+        '本会话已达到设置里的会话上限；开始新对话可以继续。',
+        'This conversation reached its configured session limit; start a new conversation to continue.',
+      );
+    if (text.includes('still answering the previous message'))
+      return t(
+        '上一条还在回答，请先点"停止"或等它结束。',
+        'The previous answer is still running; stop it or wait for it to finish.',
+      );
+    return text;
+  }
   const [settings, setSettings] = useState<Settings>(defaultSettings);
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -57,8 +76,11 @@ export default function AssistantPanel() {
   const [deciding, setDeciding] = useState(false);
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
+  const [sessionUsage, setSessionUsage] = useState({ turns: 0, tokens: 0 });
   const [model, setModel] = useState('');
   const [ready, setReady] = useState(false);
+  // 当前内置服务商是否登记过 Key；欢迎页据此给"去设置登记"的入口，而不是等发送后报英文错误。
+  const [hasKey, setHasKey] = useState<boolean | null>(null);
   const session = useRef<string | null>(null);
   const conversationRequest = useRef(0);
   const streamed = useRef(false);
@@ -93,7 +115,7 @@ export default function AssistantPanel() {
     try {
       await action();
     } catch (e) {
-      setError(String(e));
+      setError(errorText(String(e)));
     }
   }
   useEffect(() => {
@@ -191,6 +213,10 @@ export default function AssistantPanel() {
           break;
         case 'usage':
           setUsage(`${event.prompt_tokens || 0} + ${event.completion_tokens || 0} tokens`);
+          setSessionUsage({
+            turns: event.session_turns || 0,
+            tokens: (event.session_prompt_tokens || 0) + (event.session_completion_tokens || 0),
+          });
           break;
         case 'turn_done':
           if (!streamed.current && event.content)
@@ -206,18 +232,21 @@ export default function AssistantPanel() {
           setError(
             event.message === 'cancelled'
               ? t('已停止。', 'Stopped.')
-              : event.message || t('助手错误', 'Assistant error'),
+              : errorText(event.message || t('助手错误', 'Assistant error')),
           );
           break;
         case 'exited':
           busy(false);
           grant.current = null;
           setApproval(null);
+          // 登记/删除 Key 会主动停掉进程；设置开着时不把它当异常报红。
           setError(
-            t(
-              '助手进程已退出，下次发送时重新启动。',
-              'The assistant process exited. It will restart on the next message.',
-            ),
+            app.current.assistantSettingsOpen
+              ? ''
+              : t(
+                  '助手进程已退出，下次发送时重新启动。',
+                  'The assistant process exited. It will restart on the next message.',
+                ),
           );
           break;
       }
@@ -246,7 +275,31 @@ export default function AssistantPanel() {
       grant.current = null;
       if (runningRef.current) void invoke('assistant_cancel', {}).catch(() => {});
     };
+    // 只在挂载时订阅一次；处理函数里的 t/errorText 读的是最新页面语言。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  // 设置对话框关闭后重新问一次 Key 状态（可能刚登记/删除过）。
+  useEffect(() => {
+    if (!hasBackend() || settings.backend !== 'builtin') {
+      setHasKey(null);
+      return;
+    }
+    let active = true;
+    void invoke<boolean>('assistant_has_key', { baseUrl: settings.base_url })
+      .then((value) => {
+        if (active) setHasKey(value);
+      })
+      .catch(() => {
+        if (active) setHasKey(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [settings.backend, settings.base_url, state.assistantSettingsOpen]);
+  // 已生成的错误/提示是当时语言的字符串，切换语言后清掉，避免中英混排。
+  useEffect(() => {
+    setError('');
+  }, [state.language]);
   async function save(next: Settings) {
     if (runningRef.current)
       throw new Error(
@@ -297,7 +350,7 @@ export default function AssistantPanel() {
       historyDraft.current = '';
     } catch (e) {
       busy(false);
-      setError(String(e));
+      setError(errorText(String(e)));
     }
   }
   async function decide(approve: boolean, remember = false) {
@@ -320,6 +373,7 @@ export default function AssistantPanel() {
       setDeciding(false);
     }
   }
+  const view = guideState();
   const builtin = settings.backend === 'builtin';
   const selectedModel = builtin ? settings.model : settings.external[settings.backend]?.model || '';
   const effort = builtin ? thinkValue(settings) : settings.external[settings.backend]?.effort || '';
@@ -327,10 +381,7 @@ export default function AssistantPanel() {
     ? apiEfforts(providerId(settings), settings.model)
     : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
   return (
-    <aside
-      aria-label={t('AI 助手', 'AI assistant')}
-      className="flex h-full min-h-0 flex-col gap-3 border-l p-4"
-    >
+    <div className="flex h-full min-h-0 flex-col gap-3 border-l p-4">
       <header className="flex items-center justify-between">
         <strong>{t('AI 助手', 'AI assistant')}</strong>
         <Button
@@ -354,6 +405,7 @@ export default function AssistantPanel() {
             setApproval(null);
             setInput('');
             setUsage('');
+            setSessionUsage({ turns: 0, tokens: 0 });
             setError('');
             historyIndex.current = null;
           }}
@@ -421,7 +473,13 @@ export default function AssistantPanel() {
                       session.current = null;
                       fresh.current = true;
                       setMessages([]);
+                      setUsage('');
+                      setSessionUsage({ turns: 0, tokens: 0 });
                     }
+                    const inputs = await invoke<string[]>('assistant_input_history').catch(
+                      () => null,
+                    );
+                    if (inputs) history.current = inputs;
                   })
                 }
               >
@@ -437,8 +495,9 @@ export default function AssistantPanel() {
         </div>
       )}
       <p className="text-xs text-muted-foreground">
-        {t('上下文：当前可见页面', 'Context: currently visible page')} · {state.versionRef?.id}@
-        {state.versionRef?.revision} · {model || selectedModel || t('默认模型', 'Default model')}
+        {t('上下文：', 'Context: ')}
+        {view.title} · {state.versionRef?.id}@{state.versionRef?.revision} ·{' '}
+        {model || selectedModel || t('默认模型', 'Default model')}
       </p>
       <div
         ref={log}
@@ -448,6 +507,19 @@ export default function AssistantPanel() {
       >
         {messages.length === 0 && (
           <section className="space-y-2">
+            {hasBackend() && settings.backend === 'builtin' && hasKey === false && (
+              <Notice>
+                <p>
+                  {t(
+                    '这个服务还没有登记 API Key；登记后才能发送，联网搜索也需要 DeepSeek Key。',
+                    'No API key is registered for this service yet; register one before sending. Web search also needs a DeepSeek key.',
+                  )}
+                </p>
+                <Button onClick={() => update({ assistantSettingsOpen: true })}>
+                  {t('去设置登记 Key', 'Register a key in Settings')}
+                </Button>
+              </Notice>
+            )}
             <p>
               {t('有四个内置站点示例，要不要试试？', 'Try one of our four bundled site examples.')}
             </p>
@@ -517,10 +589,14 @@ export default function AssistantPanel() {
       {approval && (
         <section
           aria-label={t('工具审批', 'Tool approval')}
+          role="alert"
+          aria-live="assertive"
           className="space-y-2 rounded border p-3"
         >
           <strong>{t('需要你的批准', 'Your approval is required')}</strong>
-          <p>{approval.summary}</p>
+          {/* 摘要写的是这次具体要做什么（后端用中文写）；英文界面也照样给出，只看工具名等于盲批。 */}
+          {state.language === 'en' && <p>{`${approval.name || 'tool'} requires your approval`}</p>}
+          {approval.summary && <p>{approval.summary}</p>}
           <pre className="max-h-40 overflow-auto whitespace-pre-wrap text-xs">
             {approval.arguments}
           </pre>
@@ -528,6 +604,8 @@ export default function AssistantPanel() {
             <Button disabled={deciding} onClick={() => void decide(false)}>
               {t('拒绝', 'Decline')}
             </Button>
+            {/* 不自动聚焦"批准"：审批卡在用户打字时弹出，一个回车就会批准（DeepSeek 改动复查）。
+                卡片本身是 role="alert"，读屏软件照样会播报。 */}
             <Button disabled={deciding} onClick={() => void decide(true)}>
               {t('批准', 'Approve')}
             </Button>
@@ -548,6 +626,14 @@ export default function AssistantPanel() {
             )}{' '}
             {consent}. {t('确认使用该服务？', 'Use this service?')}
           </p>
+          {settings.backend === 'builtin' && settings.web_search && (
+            <p className="text-xs text-muted-foreground">
+              {t(
+                '其中联网搜索的查询会发往 DeepSeek Search API（api.deepseek.com）；网页内容在本机读取。',
+                'Web search queries are also sent to the DeepSeek Search API (api.deepseek.com); pages are read on this computer.',
+              )}
+            </p>
+          )}
           <Button onClick={() => setConsent(null)}>{t('取消', 'Cancel')}</Button>
           <Button
             onClick={() =>
@@ -576,8 +662,9 @@ export default function AssistantPanel() {
         }}
         onKeyDown={(event) => {
           if (
-            (event.key === 'ArrowUp' && event.currentTarget.selectionStart === 0) ||
-            (event.key === 'ArrowDown' && event.currentTarget.selectionEnd === input.length)
+            !event.nativeEvent.isComposing &&
+            ((event.key === 'ArrowUp' && event.currentTarget.selectionStart === 0) ||
+              (event.key === 'ArrowDown' && event.currentTarget.selectionEnd === input.length))
           ) {
             if (!history.current.length) return;
             event.preventDefault();
@@ -602,7 +689,15 @@ export default function AssistantPanel() {
           <span>{t('模型', 'Model')}</span>
           <Select
             aria-label={t('助手模型', 'Assistant model')}
-            disabled={running || !ready}
+            title={
+              state.assistantSettingsOpen
+                ? t(
+                    '先保存或关闭设置，再切换模型',
+                    'Save or close Settings before changing the model',
+                  )
+                : undefined
+            }
+            disabled={running || !ready || state.assistantSettingsOpen}
             value={selectedModel}
             onChange={(e) =>
               void perform(() => save(selectAssistantModel(settings, e.target.value)))
@@ -619,7 +714,15 @@ export default function AssistantPanel() {
           <span>{t('思考程度', 'Reasoning')}</span>
           <Select
             aria-label={t('即时思考强度', 'Reasoning effort')}
-            disabled={running || !ready}
+            title={
+              state.assistantSettingsOpen
+                ? t(
+                    '先保存或关闭设置，再切换思考强度',
+                    'Save or close Settings before changing reasoning effort',
+                  )
+                : undefined
+            }
+            disabled={running || !ready || state.assistantSettingsOpen}
             value={effort}
             onChange={(e) =>
               void perform(() =>
@@ -659,8 +762,27 @@ export default function AssistantPanel() {
         </Button>
       </div>
       <p className="text-xs text-muted-foreground" role="status">
-        {running ? t('正在处理…', 'Working…') : usage}
+        {running
+          ? t('正在处理…', 'Working…')
+          : sessionUsage.turns || sessionUsage.tokens
+            ? `${t('本会话', 'This conversation')}: ${[
+                sessionUsage.turns && `${sessionUsage.turns} ${t('轮', 'turns')}`,
+                `${sessionUsage.tokens} tokens`,
+                settings.session_turn_limit || settings.session_token_limit
+                  ? [
+                      settings.session_turn_limit &&
+                        `${sessionUsage.turns}/${settings.session_turn_limit}`,
+                      settings.session_token_limit &&
+                        `${sessionUsage.tokens}/${settings.session_token_limit}`,
+                    ]
+                      .filter(Boolean)
+                      .join(' · ')
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' · ')}`
+            : usage}
       </p>
-    </aside>
+    </div>
   );
 }

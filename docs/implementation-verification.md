@@ -36393,6 +36393,107 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 服务器上的格点模拟评估；
 - Python 下载镜像（7920 从 GitHub 下 Python 很快，没有需要）。
 
+## 第 758 轮：AI 助手的 web_search 改用 DeepSeek 官方 Search API（2026-10-23）
+
+**背景**：DeepSeek 于 2026-10-17 开放官方 Search / Fetch API（与 V4.1-Flash-1017 同日），`POST https://api.deepseek.com/v1/tools/search`、`POST https://api.deepseek.com/v1/tools/fetch`，Bearer 认证、按成功请求 $0.75/1000 次计费。旧实现走 Anthropic 兼容 Messages + `web_search_20250305` 服务器工具 + 退役模型别名 `deepseek-v4-flash`：单次约 6k 输入 + 120 输出 token、只拿得到标题/网址，而且官方说明 2026-11-01 00:00（北京）起这类 server-side 搜索开始按请求计费。官方 Search 每条结果带 600–800 字 `summary`（官方写明“给模型读”）、发布时间与权威度，零模型 token，通常不必再逐页抓取。
+
+**改动**：
+- `crates/colm-agent/src/tools/web.rs`：
+  - `web_search` 改为 `POST {DEEPSEEK_SEARCH_URL}`，请求体 `{query, count, need_content:false}`（不带 model/ori_question/localization）；query 按 Unicode 字符校验 1–128（官方限制），`max_results` 默认 5、最多 10；
+  - 解析官方 `results[]`：title/url/date（裁成日期）/summary（空时回退 snippet）/authority（-1 未知归一为 null），按 URL 去重，空数组视为合法“无结果”；
+  - 错误映射：402 余额不足、401 Key 无效、408/429/5xx 给出可重试提示，其余 4xx 不原样重试；408/429/5xx 在工具内退避重试最多 2 次（400ms→800ms），重试之间检查取消；
+  - fetch_url 暂不切官方 Fetch API：官方对其 PDF/重定向/大小/编码未定义，本地实现免费且内容不经第三方；host 白名单/私网检查保留；
+  - 旧 shim 的请求/解析保留为 `legacy_search_body`/`legacy_search_results`，只在 `COLM_AGENT_SEARCH_LEGACY=1` 时使用，一个版本后删除。
+- `crates/colm-agent/src/bin/colm-agent.rs`：`COLM_AGENT_SEARCH_URL` 语义由 base 改为完整端点（测试/e2e 注入 mock 用）；新增 `COLM_AGENT_SEARCH_LEGACY=1` 回退开关。搜索 Key 仍固定取 DeepSeek 的。
+- 设置与提示：`Settings.tsx` 的联网开关改名为“联网搜索（DeepSeek Search API）”并写明每次约 $0.00075、失败不计费、读网页在本机完成、需要 DeepSeek Key；`prompt.md` 说明结果已带摘要、只在需要细节时 fetch、可用 site:/after:/before: 运算符；`docs/design-ai-assistant.md` 新增内置联网一节。
+
+**实测**：`cargo test -p colm-agent --lib tools::web` → **15 通过**（官方请求体/解析/错误与重试策略/129 字符拒绝/mock HTTP 429→200 重试、402 不重试/legacy 解析/fetch 白名单与 HTML 测试）。
+- 未使用真实 DeepSeek Key 调用（本环境无 Key，避免费用）；官方端点存在性用无 Key `curl` 验证为 HTTP 401 认证错误，字段/计费/限流来自官方文档（[Search & Fetch](https://api-docs.deepseek.com/guides/search)、[Search API](https://api-docs.deepseek.com/api/search)、[Fetch API](https://api-docs.deepseek.com/api/fetch)）。
+- 未做：真实 Key 下的时延、summary 长度、错误码与账单核对；官方 Fetch 的 PDF/302/JS/大页面矩阵；GUI 内真实网络搜索回合（需用户 Key）。
+
+**同批修复 P1（fetch_url 让助手永久卡死，GUI 审查 B-01）**：
+- `fetch_url` → `html_to_text` → `decode_entities` 旧实现把 `&str` 按字节切 `tail[..len.min(12)]`；实体后紧跟中文/日文（如 `&lt;中文字`）时切在多字节字符中间会 panic。现在只按 ASCII 分号找实体（超 11 字节按普通 `&`），并用 CJK 实体用例守住。
+- `crates/colm-agent/src/agent.rs` 的 `tool.call` 外包 `std::panic::catch_unwind`：工具 panic 变成一条 `error: internal tool failure…` 工具结果，本轮继续，不再杀死 turn 线程。
+- `crates/colm-agent/src/bin/colm-agent.rs` 的两个 turn worker（内置/外部后端）改用 `BusyReset` RAII 守卫：即使 worker 仍然 panic，`busy` 也会复位，不会留下“still answering the previous message”且只能重启应用的状态。
+- 实测：`cargo test -p colm-agent --lib` → **204 passed / 1 failed**（唯一失败仍是沙箱无 pty 的终端测试）；`cargo test -p colm-agent --bins` → **7/7**；新增 `chinese_text_next_to_entities_does_not_panic`、`a_panicking_tool_becomes_an_error_result_and_the_turn_continues`。
+
+**没做**：
+- 官方 Fetch API 的接入（等真实 Key 实测后决定）；
+- `COLM_AGENT_SEARCH_LEGACY` 的删除（保留一个版本）。
+
+## 第 759 轮：助手面板保活、审批名单收紧、数据外发披露与设置项外移（2026-10-23）
+
+**改动**：
+- **R1 面板保活**（`gui/src/App.tsx`）：`AssistantPanel` 第一次打开后保持挂载，收起时用 `hidden` 隐藏，不再条件卸载。以前收起面板会在卸载 cleanup 里调 `assistant_cancel` 并丢掉组件内的对话，正在跑的回答被取消、重开回欢迎页；现在收起只隐藏，回答继续、对话和审批卡保留。面板只在应用关闭时卸载。
+- **R13/B-04 审批名单收紧**（`crates/colm-agent/src/tools/ui.rs`）：`ui_commit` 新增不可“本会话允许”的名单——`run-submit`、`run-cancel`、`study-create/run/pause/resume/retry/cancel`、`study-write-version`、`hybrid-save-version`、`remote-*fetch/cancel`、`version-save/freeze`、`version-import-*`、`prep-execute`、`history-replay/resume`、`project-batch-run`、`project-example`、`case-discard`、`workspace-snapshot`、`compare-install-all`、`compare-reinstall-openbench`、`compare-register`、`compare-run` 等，逐个弹审批且审批卡不显示“本会话允许”。普通 Act 提交仍可记忆。
+  - 为不改变 Auto 模式对普通操作的放行，`Approver` 新增 `auto_policy()`；`execute_tool` 的预批准条件改为“本会话允许（可记忆）或 Auto 且 Act 级”，代码类/C 级不因 Auto 放行（`agent.rs`、`bin/colm-agent.rs`、`agent_tests.rs` 相应测试）。
+- **R14/A-02 设置项外移**（`gui/src/features/assistant/Settings.tsx`）：操作审批、联网搜索移出“高级设置”，自定义服务地址在常规区显示（必填），预设地址被改过时显示“实际目标地址”；高级设置只留接口格式、输出上限、超时、额外 JSON、严格工具等。OpenCode 后端隐藏联网开关（它用自带搜索）。
+- **B-02/B-03 数据外发披露与后端校验**：
+  - 前端 `egressTarget` 在内置后端联网时把确认目标写成“模型地址 + (web search: DeepSeek Search API)”，确认卡额外说明搜索查询发往 DeepSeek、网页在本机读取；
+  - 后端新增 `egress_target`/`require_egress_acknowledged`，`assistant_start` 与 `assistant_send` 都校验 `egress_acknowledged` 与规范化目标一致；只靠前端调用点可被直接 invoke 绕过（B-03）。
+  - `assistant_send` 增加 `AppHandle` 参数读取设置（命令契约前端参数不变，`check-gui` 238 条通过）。
+
+**实测**：
+- `npm --prefix gui test` → **873 passed / 0 failed**；typecheck/lint/format:check 全过。
+- `cargo test -p colm-agent --lib` → **204 passed / 1 failed**（唯一失败是 `terminal::tests::aborted_password_input…`，沙箱无 pty，环境性）；`cargo test -p colm-agent --bins` → 7/7；`cargo clippy -p colm-agent --all-targets -- -D warnings`、`cargo fmt --all --check` 通过。
+- `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib assistant` → 14/14；GUI 全量 lib 436/437（`sidecar::creation_drains…` 为沙箱 kill/ps 环境失败）。
+- `xtask check-gui` → 238 条命令注册、183 条静态调用、事件全解析（其中 `bench_remote_uninstall` 来自另一会话的未提交改动）。
+
+**没做/未验证**：
+- 收起面板再打开、设置项外移与确认卡的真实窗口点检（本轮没有启动 e2e 实例；R1 只做了代码路径与既有组件状态验证）；
+- 从旧版 `egress_acknowledged` 升级时会重新弹一次确认（内置后端+联网搜索的目标串变了），未在真实窗口走一遍；
+- `egress_target` 前端/后端两份字符串的一致性由两边的单元测试守住，尚未用真实设置文件联调。
+
+## 第 760 轮：AI 助手剩余审查项（前端交互、外部后端、抓取安全、文件权限）（2026-10-23）
+
+**前端（GUI 审查 A-06/A-07/A-08/A-09/A-10/A-11/A-12/A-15、R15/R16/B-14）**：
+- **R15**：设置面板打开时禁用输入框下方的模型/思考快捷选择，未保存草稿不再被快捷保存静默覆盖。
+- **A-06**：面板查询并显示当前内置服务是否登记 Key；没 Key 时欢迎页给「去设置登记 Key」按钮；`no API key…` 等错误映射成双语提示。
+- **R16**：Claude Code 的「发现模型」不再编造 fable/opus/sonnet/haiku；明确提示手动输入，思考档位只给 low/medium/high。
+- **A-07**：输入法组合期间 ↑/↓ 不再抢占历史浏览。
+- **A-08**：登记/删除 Key 会主动停助手进程；设置开着时的 `exited` 不再显示红色错误。
+- **A-09**：助手面板内层 `<aside>` 改为普通容器（不再和外层导航 aside 同名）；审批卡加 `role="alert"`/`aria-live` 并在出现时聚焦「批准」；分隔条加 `aria-valuetext`，按下即聚焦。
+- **A-10**：删除会话后刷新 ↑ 输入历史；删的是当前会话时清掉 usage。
+- **A-11/B-14**：切换语言清掉已生成的状态/错误；英文界面审批卡摘要改为英文（工具名 + requires your approval）。
+- **A-12**：切换运行后端时清掉旧校验状态与模型清单。
+- **A-15**：「上下文」行显示当前页面标题，不再只写“当前可见页面”。
+
+**后端/安全（B-05/B-06/B-07/B-08/B-09/B-10/B-11/B-13）**：
+- **B-05**：`fetch_url` 每一跳重定向都复查 host 允许列表，302 不能把请求带出会话里出现过的站点。
+- **B-06**：抓网页改用只返回公网地址的自定义 resolver，连接直接使用解析结果，堵住 DNS rebinding TOCTOU（搜索仍是普通 agent）。
+- **B-07**：agent 作为自己的进程组启动；停止时先发 `cancel`、等 agent 自行结束命令组，超时才按进程组强杀，减少孤儿运行。
+- **B-08**：`messages.jsonl`/`audit.jsonl` 创建/打开时使用 0600（旧文件也收紧）。
+- **B-09**：Key 临时文件先以 0600 创建再写入、换名，不再有默认权限窗口。
+- **B-10**：`ProviderConfig` 手写 `Debug`，`api_key` 只显示 `<set>`。
+- **B-11**：`COLM_AGENT_SEARCH_URL` 只接受回环端点，环境变量不能把 DeepSeek Key 发到任意主机。
+- **B-13**：重定向目标支持 `?query` 与 `#fragment`，不再把查询串重定向拼错路径。
+
+**实测**：
+- `npm --prefix gui test` 873/873；typecheck/lint/format:check 通过。
+- `cargo test -p colm-agent --lib` **209 passed / 1 failed**（唯一失败为沙箱无 pty 的终端测试）；新增 `query_and_fragment_redirects_stay_on_the_same_page`、`the_search_endpoint_override_is_loopback_only`、`the_fetch_resolver_never_returns_loopback_addresses`、`provider_debug_redacts_the_api_key`、`conversation_and_audit_files_are_owner_only_on_unix`。
+- `cargo test -p colm-agent --bins` 7/7；`cargo test --manifest-path gui/src-tauri/Cargo.toml --lib assistant` 14/14。
+- `cargo clippy`（两个 workspace 的 lib/all-targets）+ `cargo fmt --check`（两个 workspace）通过；`check-gui` 238 条命令/183 静态调用。
+
+**续：B-15/B-18/A-14（同日）**：
+- B-15：删除通用的 `read_text(path)` 任意读命令，换成三个用途固定的命令：`read_case_nml(case_dir)`（算例目录下的 case.nml）、`read_forcing_namelist(path)`（仅 .nml）、`read_parameter_file(path)`（仅 .json）；前端 CasesPage、默认观测与版本参数导入改用它们，页面测试同步。
+- B-18/R17：PageContract 字段增加 `volatile`；`study-member`、`study-result-file` 这类随轮询变化的字段不再进入审批快照，避免页面内容没变却拒绝已批准操作；`approvalSnapshot` 过滤 volatile 字段并加测试。
+- A-14/R28：研究首页文案改为“结果写进新版本草稿，审阅后冻结”。
+- 实测：`npm test` **874/874**；`check-gui` **240 命令 / 184 静态调用**；GUI lib 与 clippy/fmt 见下。
+
+**真实窗口复验（2026-10-23 21:16，当前源码重建 frontend + e2e 二进制，隔离 HOME `tmp/eh`）**：
+- 助手首次打开：显示「这个服务还没有登记 API Key」+「去设置登记 Key」按钮（A-06）；
+- 设置中「操作审批」「联网搜索（DeepSeek Search API）」不在 `details.advanced` 内，默认折叠时也可见（R14）；
+- 注入 `assistant_delta` 事件后收起面板：面板 `hidden=true` 但未卸载；重新打开消息仍在、没有回到欢迎页（R1）；
+- 上下文行显示当前页面标题（项目 / 设置，A-15）；
+- 实例点击后正常结束、无 panic；localStorage 17 个键与进入前一致；e2e 用 `tmp/e2e/target/release/colm-desktop-gui`，端口 18899。
+- 说明：本次窗口里“模型版本”显示 `official@1`（工作树被另一会话并发修改、二进制与 stamp 不完全同期），不是助手缺陷。
+
+**仍没做（需要单独准备或属于其他页面/结构改造）**：
+- B-12 设计里的“会话调用/token/费用上限”仍未实现（目前只有每轮 `max_steps`），需要先定产品口径；
+- A-13（R25/R27）研究页远端 `lost/unknown` 的恢复/结案入口与恢复竞态（研究页远端状态机，属另一块改造）；
+- 官方 Fetch API 的 Phase 2（PDF/重定向/大小矩阵需真实 Key）；
+- 本轮前端交互（收起保活、无 Key 引导、设置布局、快捷键）与后端停止/权限没有真实窗口 e2e 点检。
+
 ## 第 761 轮：比较页在 Slurm、LSF 上实测；服务器上的格点评估；从页面删除服务器环境（2026-10-23）
 
 **格点模拟要按自己的范围比**：
@@ -36434,3 +36535,89 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **还没做**：
 - tianhe（Slurm）的登录节点不能上网，要离线装：先在本机下载好再传上去，还没做；
 - 删除前没有检查服务器上是不是还有在跑的评估作业。
+
+## 第 762 轮：远端研究丢失记录的结案入口（R25）；恢复竞态（R27）（2026-10-23）
+
+- **R25 远端 lost/unknown 结案**：
+  - 新增 `colm-cli remote-study-close <本机研究>`：只允许 `Lost`/`Unknown`；`Queued`/`Running` 要求先取消，`Finished` 要求先取回结果，否则拒绝。关闭前仍用记录里的身份脚本核对是同一个研究/作业；记录改名留档为 `.colm-remote-study.closed-<时间>.json`（有 pending 时一并归档），之后本机研究可以重新提交或在本机运行。
+  - Tauri 命令 `remote_study_close`；GUI 的远端操作组在 `lost/unknown` 时出现「确认服务器作业已丢失…」，二次确认后关闭并刷新状态；原来的“状态未核对”提示补上该入口。
+  - 前端权限 `remoteStudyPermissions.close`：只对 `lost/unknown`、未取回、非排队/运行中为真；新增权限测试。
+- **R27 恢复竞态**：暂停收尾期间点「恢复」时，若旧 `start()` 还占着 `runLock`，先记下恢复意图；旧 `start()` 的 `finally` 结束后（同一 epoch）再真正启动，避免只清 pause 标志却没有运行进程。
+- 实测：`npm --prefix gui test` **874/874**；`cargo test -p colm-cli --bin colm-cli remote_study` **20/20**；`check-gui` **241 命令 / 185 静态调用**；前端 typecheck/lint/format 与两个 workspace 的 clippy/fmt 通过。
+- 没做/未验证：真实服务器上的 lost 场景（需造一个被调度系统杀掉的作业）与暂停收尾窗口的动态复现；B-12 已在第 763 轮按“轮数 + token”口径实现（费用上限未做）。
+
+## 第 763 轮：助手的会话预算（B-12：轮数 + token 上限）（2026-10-23）
+
+- **口径**：v1 采用“每会话最多用户轮数 + 累计 prompt/completion token 上限”，**不按费用**（各服务商缓存/峰谷价与订阅后端无法统一折算，费用只保留后续估算）。
+- 设置（助手设置 → 高级设置，所有后端可见）：
+  - 「每会话最多轮数」默认 **100**，0 = 不限；
+  - 「每会话最多 token」默认 **200_000**（第 766 轮复查后改为 5_000_000），0 = 不限；
+  - 保存时校验非负整数；旧 `assistant.json` 缺这两项时用默认值。
+- 后端：`Configure` 消息带 `session_turn_limit`/`session_token_limit`；每条用户消息开始前统计该会话已有用户轮数与累计 token，达到上限就发双语错误（前端映射为“本会话已达到设置里的会话上限；开始新对话可以继续”）并恢复到可操作状态；`Usage` 事件新增 `session_turns`。
+- 前端：面板状态行显示本会话已用轮数/token 与上限；新对话、删除当前会话时清零显示。
+- 语义：上限在**用户消息边界**检查；单轮仍受 `max_steps=24` 限制，因此单轮可能超过 token 上限一点，下一条消息会被拒绝。`new_session` 会重置预算。
+- 实测：`npm --prefix gui test` **875/875**；`cargo test -p colm-agent --lib` 209/1（沙箱 pty）；`cargo test -p colm-agent --bins` **8/8**；GUI `assistant` 15/15；两个 workspace clippy/fmt、typecheck/lint/format、`check-gui` 241/185 全过。
+- 没验证：真实会话跑满 100 轮/token 上限的窗口行为（需真实 Key 与长对话，成本考虑未跑）；费用上限（C）未实现。
+
+## 第 764 轮：DeepSeek 官方 Fetch API 真实探测与取舍（2026-10-23）
+
+用用户提供的 Key（仅从 0600 文件读取，未写入仓库/日志）实测官方 Search/Fetch：
+
+- Search：`count=5` 延迟 0.41 s；summary 实测 216–4562 字符（典型 600–800 只是文档值）；`need_content=true` 时 PDF 结果可返回 17–18k 字符；部分 URL 带 `#1` 片段标记。已据此让 `web_search` 截断 summary 到 1500 字符并标记 `summary_truncated`，去掉结果 URL 的片段。
+- Fetch：docs/MDN/Nature/DOI 等 HTML 页面可读（10k–90k 字符），但返回 Markdown 对 `# - ( ) , \` 等做了转义；Copernicus/arXiv PDF 分别 504/404；DOI→出版社 16 s、Nature 10 s；目标站 403/418 都统一返回 404，无法区分。JS 重的 gov.cn 只拿到 144 字符导航。
+- **当时的结论**：官方 Fetch 单独用不划算（转义/PDF/错误不可区分）。**用户随后决定两种都保留**，实现为本地优先、失败自动回退官方 Fetch（见第 765 轮）；Search 保持官方 API。
+- 费用：本次成功 Search 2 次 + Fetch 9 次，按官方价约 $0.008；Key 文件在探测后删除。
+- 测试：`cargo test -p colm-agent --lib tools::web` 18/18（含 summary 截断/URL 片段测试）。
+
+## 第 765 轮：fetch_url 本地优先 + 官方 Fetch 回退（2026-10-23）
+
+- 保留第 764 轮实测后否掉的官方单路径方案，同时保留本地实现：`fetch_url` 先本地抓取（免费、HTML→纯文本、私网/白名单、逐跳重定向检查、DNS pinning），本地失败且配置了 DeepSeek Key 时自动回退 `POST /v1/tools/fetch`（Markdown；URL 与页面内容发往 DeepSeek；按成功页计费）。
+- 回退结果会去掉官方 Markdown 的多余反斜杠转义；同一用户消息内按 URL 缓存，offset 分页不重复计费；本地成功返回 `fetched_with: "local"`，回退成功返回 `"deepseek"`。
+- 回退失败时错误同时包含本地与官方原因，便于用户判断是 JS 页面/PDF/站点拦截还是 Key/余额问题；没有 Key 时保持原来的本地错误，不发起官方请求。
+- 设置/同意文案更新：读网页先本机尝试，失败回退 DeepSeek Fetch（URL 与页面内容会发给 DeepSeek，每成功页约 $0.00075）；外发确认目标改为 `(web search & fetch: DeepSeek APIs)`。
+- 测试：`cargo test -p colm-agent --lib tools::web` **21/21**（新增回退成功/缓存、双失败、无 Key 不请求、URL 校验）；本机路径的私网/解析器/重定向/实体测试保留。
+- 没验证：真实 Key 下自动回退的端到端窗口行为（官方单路径已实测，回退逻辑只在 mock 上验证）。
+
+## 第 766 轮：复查 DeepSeek 的助手改动（第 758–765 轮）并修正（2026-10-23）
+
+逐文件读了全部改动（40 多个文件）。所有门禁都通过：clippy、fmt、前端测试、colm-agent、GUI Rust、check-gui。
+
+**外部事实逐条核对官方文档，都属实**：
+- 端点 `POST /v1/tools/search` 与 `/v1/tools/fetch`；
+- `query` 1–128 个 Unicode 字符，`count` 1–50；
+- `summary` 600–800 字（文档值；第 764 轮实测 216–4562）；`authority` −1–4；
+- $0.75/千次成功请求；Search 100 QPS、Fetch 25 QPS；
+- Harness、Claude Code、Codex 走的 server-side 搜索从 2026-11-01 00:00（北京）起按次计费；
+- 查询运算符 `site:`、`-site:`、`-词`、引号短语、`lang:`、`after:`、`before:`；
+- 更新日志 2026-10-17 一条同时宣布了 "Opening up the in-house search API" 与 "DeepSeek-V4.1-Flash-1017"。
+
+我起初怀疑 `after:`、`before:`、`lang:` 和 "2026-10-17 GA" 没有依据，核对后都对，撤回。
+
+**修正**：
+- **审批卡不再自动聚焦"批准"**：原来审批卡在用户打字时弹出，一个回车就批准了。卡片仍是 `role="alert"`，读屏照样播报。真实窗口里注入审批请求核对过，焦点留在输入框，输入内容不变。
+- **英文界面的审批卡**：同时显示 "<工具> requires your approval" 和这次具体要做什么的摘要。原来只显示工具名，等于盲批。
+- **撤回 `study-member` 的 `volatile`**：它是"写进新版本的成员"，批准之后若变了，写入应当重新确认。它只在首次轮询（空值时填最优）或所选成员消失时才变，"随轮询变化"这个前提不成立。`study-result-file` 只影响显示哪个结果文件，保留 `volatile`。
+- **会话预算的 token 缺省改为 5_000_000**（用户定）：
+  - 每次调用模型都把整段上下文重新计入：系统提示约 22.9k 字符英文（约 5.5k token），51 个工具声明另有约 5–10k，一次请求就是 1–2 万；
+  - 原来缺省 20 万，2–4 轮带工具的对话后助手就拒绝继续；
+  - 设置里的说明写清了这个计法；三处缺省（前端、窗口后端、协议）一起改。
+- **`fetch_url` 回退官方 Fetch 不再绕开安全规则**：
+  - 本地按规则拒绝的（不在允许的网站、本机或内网地址、重定向离开允许的网站）改用 `PolicyRefusal` 错误，这类不回退；
+  - 原因：DeepSeek 服务端会自己跟随重定向，原来回退等于把第 760 轮刚加的逐跳检查（B-05）整个绕开；
+  - DeepSeek 写的两条回退测试正是靠"本地拒绝回环地址"触发回退的，改用永远解析不了的 `.invalid` 域名（RFC 2606）当作非安全原因的本地失败；
+  - 新增测试 `policy_refusals_never_fall_back_to_the_official_fetch`。
+- **`decode_entities` 只往后看 11 个字节**：按字节找 `;`，不切 &str，所以不会 panic；也不再往后找到页尾。原来满是 `&` 少有 `;` 的大页面是 O(n²)。新增测试：160 万字符、40 万个 `&`，1 秒内完成，`&#x10FFFF;` 照常解码。
+- **`read_parameter_file` 换成 `pick_parameter_file`**：
+  - 原来只查 `.json` 扩展名，能读任意 JSON，包括应用数据目录里明文存 Key 的 `assistant-keys.json`；
+  - 现在由后端弹对话框、读用户亲自选的文件，前端不再传路径；
+  - 窗口实测：旧命令返回 "not found"，经 `/pick` 预设的文件读出正确内容。
+- **`remote-study-close`**：
+  - 调度系统报 COMPLETED、退出码还没出现时拒绝关闭，并提示过一会儿再查、去取回结果。这就是第 761 轮在 land02 实测的 NFS 延迟窗口，原来会把已经跑完的研究当成丢失归档。判断抽成 `closable` 并有测试。
+  - 它也加入 `always_confirm`：关掉以后结果再也取不回，不能沿用"本会话允许"。
+- **`always_confirm` 的注释说清了**：它只排除"本会话允许"的记忆；用户把审批方式设成"自动"时，Act 级照样自动放行（DeepSeek 有意保留的行为）。
+- **文档编号**：DeepSeek 写的"第 761–764 轮"与已推送的第 761 轮重号，顺延为第 762–765 轮，交叉引用一起改。
+
+**仍然没做**：
+- 面板收起时来了审批卡，工具栏没有提示，这一轮会一直等下去；
+- 回退官方 Fetch 的真实窗口端到端（第 765 轮已注明）；
+- 停助手进程时最多同步等 2 秒。

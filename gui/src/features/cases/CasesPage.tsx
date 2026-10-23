@@ -246,7 +246,7 @@ export default function CasesPage() {
   ) {
     const kernel = compatibleKernel(state.kernels, context.profile);
     const text = kernel
-      ? await invoke<string>('read_text', { path: `${context.entry.dir}/case.nml` })
+      ? await invoke<string>('read_case_nml', { caseDir: context.entry.dir })
       : '';
     const histories = kernel
       ? await invoke<
@@ -356,8 +356,8 @@ export default function CasesPage() {
         kernel = compatibleKernel(state.kernels, context.profile);
       const [all, text, sourceText, modelFields] = await Promise.all([
         invoke<SchemaField[]>('describe_fields', {}),
-        invoke<string>('read_text', { path: `${preview}/case.nml` }),
-        invoke<string>('read_text', { path: `${dir}/case.nml` }),
+        invoke<string>('read_case_nml', { caseDir: preview }),
+        invoke<string>('read_case_nml', { caseDir: dir }),
         invoke<SchemaField[]>('model_fields', {}),
       ]);
       // Display source paths; the preview is the authority for model-dependent gates.

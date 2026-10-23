@@ -17,6 +17,7 @@ import {
   EXAMPLE_STARTERS,
   examplePrompt,
   providerLabel,
+  egressTarget,
 } from './model';
 import { approvalSnapshot, matchesGrant, respondToUiRequest, uiGrant } from './ui-request';
 
@@ -259,4 +260,54 @@ it('compact model choice preserves provider and external settings, resetting inc
   const external = selectAssistantModel({ ...custom, backend: 'opencode' }, 'provider/model');
   assert.equal(external.model, 'custom');
   assert.equal(external.external.opencode.model, 'provider/model');
+});
+
+it('names both the model service and the web-search service in the egress confirmation', () => {
+  assert.equal(
+    egressTarget({ ...defaultSettings, base_url: 'https://api.openai.com/v1', web_search: true }),
+    'https://api.openai.com/v1 (web search & fetch: DeepSeek APIs)',
+  );
+  assert.equal(egressTarget({ ...defaultSettings, web_search: false }), 'https://api.deepseek.com');
+  assert.equal(
+    egressTarget({
+      ...defaultSettings,
+      backend: 'codex',
+      web_search: true,
+    }),
+    'codex',
+  );
+  assert.equal(
+    egressTarget({
+      ...defaultSettings,
+      backend: 'opencode',
+      web_search: true,
+      external: { opencode: { model: 'provider/model', effort: null } },
+    }),
+    'opencode:provider/model',
+  );
+});
+
+it('approval snapshots ignore volatile fields that change while polling', () => {
+  const identity = { route: 'research' };
+  const page = {
+    step: 'research',
+    fields: [
+      { id: 'name', value: 'coLM', volatile: false },
+      { id: 'study-member', value: 'm000001', volatile: true },
+    ],
+  };
+  const before = approvalSnapshot(identity, page);
+  page.fields[1].value = 'm000002';
+  assert.equal(approvalSnapshot(identity, page), before);
+});
+
+it('ships finite per-conversation limits and keeps them on the saved settings', () => {
+  assert.equal(defaultSettings.session_turn_limit, 100);
+  assert.equal(defaultSettings.session_token_limit, 5_000_000);
+  const saved = settingsForSave(
+    { ...defaultSettings, session_turn_limit: 7, session_token_limit: 0 },
+    defaultSettings,
+  );
+  assert.equal(saved.session_turn_limit, 7);
+  assert.equal(saved.session_token_limit, 0);
 });

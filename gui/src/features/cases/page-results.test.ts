@@ -837,8 +837,8 @@ test('process saves refresh history availability in both directions without rese
         return { dir: '/new-kernel' };
       },
       invoke: async (name: string, args: Record<string, unknown>) => {
-        if (name === 'read_text') {
-          assert.equal(args.path, '/new-preview/case.nml');
+        if (name === 'read_case_nml') {
+          assert.equal(args.caseDir, '/new-preview');
           return 'effective';
         }
         assert.equal(name, 'hist_vars');
@@ -916,7 +916,7 @@ test('history refresh ignores a response after leaving the case', async () => {
     state: { kernels: [] },
     compatibleKernel: () => ({ dir: '/kernel' }),
     invoke: async (name: string) => {
-      if (name === 'read_text') return 'effective';
+      if (name === 'read_case_nml') return 'effective';
       request.active = false;
       return [];
     },
