@@ -236,7 +236,15 @@ function finishedState() {
 }
 export async function openPage(step: string) {
   if (!app) throw new Error('The interface is not ready.');
-  if (pageContracts().some((page) => page.modal))
+  // 页面里的对话框（服务器目录、参数、导入……）多数没有登记成 modal：开着时也不许切页面，免得助手把用户正在
+  // 看的对话框连同页面一起丢掉（GUI 审查 A-04）。确认框另外登记成没有任何控件的 modal，见 ConfirmHost。
+  const dialogOpen =
+    typeof document !== 'undefined' &&
+    typeof document.querySelectorAll === 'function' &&
+    Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"]') ?? []).some(
+      (element) => element.getClientRects?.().length > 0,
+    );
+  if (dialogOpen || pageContracts().some((page) => page.modal))
     throw new Error(
       bilingual('请先关闭当前对话框，再切换页面', 'Close the current dialog before navigating.'),
     );

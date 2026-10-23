@@ -1,10 +1,24 @@
 export const RECENT_PROJECTS_KEY = 'ui-project-roots';
+/**
+ * 读最近项目列表。坏了不抛错：从里面捞出还认得的路径，调用方照常回写成合法 JSON。原来抛错，回写也跟着失败，
+ * 这个坏值就一直留着：最近项目永远是空的，后台整理模型版本也因读不懂这份列表而一直跳过（GUI 审查 A-02）。
+ */
 export function recentProjectRoots(value: string | undefined): string[] {
   if (!value) return [];
-  const parsed: unknown = JSON.parse(value);
-  if (!Array.isArray(parsed)) throw new Error('Invalid recent project list');
+  let items: unknown[];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    items = Array.isArray(parsed) ? parsed : [];
+  } catch {
+    items = [...value.matchAll(/"([^"\n]+)"/g)].map((match) => match[1]);
+  }
   return [
-    ...new Set(parsed.filter((item): item is string => typeof item === 'string' && !!item.trim())),
+    ...new Set(
+      items.filter(
+        (item): item is string =>
+          typeof item === 'string' && !!item.trim() && /^(\/|[A-Za-z]:[\\/]|\\\\)/.test(item),
+      ),
+    ),
   ].slice(0, 8);
 }
 export function rememberProject(roots: readonly string[], root: string): string[] {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useApp } from '../lib/app-state';
 import { setConfirmHost, type ConfirmRequest } from '../lib/confirm';
+import { usePageContract } from '../lib/guide';
 import { Button, Dialog } from './ui';
 
 /** `askConfirm` 的对话框；整个应用挂一个。新的确认来了，还没答的那个当作"不确认"。 */
@@ -23,6 +24,19 @@ export default function ConfirmHost() {
     setRequest(null);
     answered?.resolve(ok);
   };
+  // 确认框开着时登记成助手眼里的"对话框"，而且不给它任何字段和按钮：助手不能替用户回答确认，也不能趁
+  // 对话框开着去切页面、改后面的字段（GUI 审查 A-04；原来这个对话框不在 guide 的 modal 判断里）。
+  usePageContract(
+    {
+      title: en ? 'Please confirm' : '请确认',
+      step: 'confirm',
+      modal: true,
+      status: request?.message ?? '',
+      fields: [],
+      actions: [],
+    },
+    !!request,
+  );
   if (!request) return null;
   return (
     <Dialog

@@ -112,6 +112,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     promise: Promise<OpenedCase | null>;
   } | null>(null);
   const guards = useRef(new Set<NavigationGuard>());
+  // 最近项目的读改写排成一队（A-03）。
+  const recentQueue = useRef<Promise<void>>(Promise.resolve());
   // 启动流程放在 effect 里（事件监听也一起），重试按钮通过这个 ref 重新调用同一次 boot。
   const bootRef = useRef<(() => Promise<void>) | null>(null);
   const update = useCallback(
@@ -313,18 +315,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!root || !hasBackend()) return;
     // 算例还没读到时取不出服务器项目的名字，不拿哈希目录名去覆盖已有的名字。
     const name = state.cases.length ? projectName(root, state.cases) : '';
-    void (async () => {
-      const recent = await invoke<Record<string, string>>('load_recent');
-      const roots = rememberProject(recentProjectRoots(recent[RECENT_PROJECTS_KEY]), root);
-      const names = recentProjectNames(recent[RECENT_PROJECT_NAMES_KEY]);
-      if (name) names[root] = name;
-      await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(roots) });
-      await invoke('save_recent', {
-        key: RECENT_PROJECT_NAMES_KEY,
-        value: JSON.stringify(namesFor(roots, names)),
-      });
-      await invoke('save_recent', { key: 'root', value: root });
-    })().catch(() => {});
+    // 一次只做一份读改写，按切换的先后排队：原来几次快速切项目的读写交错，后写的可能是更早读到的列表，
+    // 丢掉刚记下的项目，最后的 `root` 也可能写回旧项目（GUI 审查 A-03）。
+    recentQueue.current = recentQueue.current
+      .then(async () => {
+        const recent = await invoke<Record<string, string>>('load_recent');
+        const roots = rememberProject(recentProjectRoots(recent[RECENT_PROJECTS_KEY]), root);
+        const names = recentProjectNames(recent[RECENT_PROJECT_NAMES_KEY]);
+        if (name) names[root] = name;
+        await invoke('save_recent', { key: RECENT_PROJECTS_KEY, value: JSON.stringify(roots) });
+        await invoke('save_recent', {
+          key: RECENT_PROJECT_NAMES_KEY,
+          value: JSON.stringify(namesFor(roots, names)),
+        });
+        await invoke('save_recent', { key: 'root', value: root });
+      })
+      .catch(() => {});
   }, [state.root, state.cases]);
   useEffect(() => {
     let alive = true;

@@ -18,7 +18,10 @@ test('recent projects keep actual distinct roots in opening order without invent
     ).length,
     8,
   );
-  assert.throws(() => recentProjectRoots('{}'));
+  // 坏值不抛错（A-02）：捞出还认得的路径，其余丢掉，调用方回写成合法 JSON。
+  assert.deepEqual(recentProjectRoots('{}'), []);
+  assert.deepEqual(recentProjectRoots('["/a","/b'), ['/a']);
+  assert.deepEqual(recentProjectRoots('not json'), []);
   assert.equal(projectName('/work/grass/'), 'grass');
   assert.equal(projectName('C:\\work\\grass\\'), 'grass');
 });
