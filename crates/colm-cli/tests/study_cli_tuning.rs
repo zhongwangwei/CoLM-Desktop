@@ -964,7 +964,7 @@ fn study_run_default_rust_rejects_hyperspectral_before_dispatching_tasks() {
 
 #[cfg(unix)]
 #[test]
-fn switching_completed_closed_de_study_from_fortran_to_default_rust_marks_closed_members_stale() {
+fn a_completed_de_study_keeps_its_first_backend_and_only_legacy_switches_mark_members_stale() {
     let _guard = netcdf_lock();
     let root = temp_root("backend-stale");
     let cli = private_cli(&root);
@@ -1001,6 +1001,7 @@ fn switching_completed_closed_de_study_from_fortran_to_default_rust_marks_closed
     .unwrap();
     assert_eq!(completed["status"], "completed");
 
+    // 第一次运行记下了 Fortran 前处理（run-options.json）：不带参数续跑沿用它，什么都不过期。
     let rerun: Value = serde_json::from_str(&run_with_bin_ok(
         &cli,
         &[
@@ -1013,7 +1014,39 @@ fn switching_completed_closed_de_study_from_fortran_to_default_rust_marks_closed
         ],
     ))
     .unwrap();
-    let task = &rerun["tasks"]["m000005/siteA"];
+    assert_eq!(rerun["tasks"]["m000005/siteA"]["status"], "succeeded");
+
+    // 明确要换成 Rust 前处理：拒绝，不让一个研究混两种前处理的结果。
+    let refused = run_with_bin_fail(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+            "--preprocessors",
+            "rust",
+        ],
+    );
+    assert!(refused.contains("cannot switch to rust"), "{refused}");
+
+    // 没有 run-options.json 的旧研究按缺省的 Rust 跑：已收代的成员仍判过期并要求新建研究（原来的保护）。
+    fs::remove_file(Path::new(&study).join("run-options.json")).unwrap();
+    let legacy: Value = serde_json::from_str(&run_with_bin_ok(
+        &cli,
+        &[
+            "study-run",
+            &study,
+            "--kernel",
+            kernel.to_str().unwrap(),
+            "--jobs",
+            "1",
+        ],
+    ))
+    .unwrap();
+    let task = &legacy["tasks"]["m000005/siteA"];
     assert_eq!(task["status"], "failed");
     let reason = task["reason"].as_str().unwrap();
     assert!(reason.contains("closed DE generation"), "{reason}");
