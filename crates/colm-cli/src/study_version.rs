@@ -700,6 +700,149 @@ pub(crate) fn clone_study(study_dir: &Path) -> Result<PathBuf> {
 #[path = "study_version_tests.rs"]
 mod study_version_tests;
 
+/// 冻结的模型修订用哪个 `colm-cli` 跑研究（修改版用它工作区里编出的，否则用该修订源码缓存的官方程序），
+/// 以及它改动了哪些部分。
+pub(crate) fn revision_cli(
+    opts: &crate::Opts,
+    revision: &colm_model::FrozenRevision,
+) -> Result<(PathBuf, colm_workspace::version::Touches)> {
+    let cached = crate::model_version::cached_options(opts, &revision.code)?;
+    if let Some(name) = revision.code.workspace.as_deref() {
+        let flags = cached.as_ref().unwrap_or(opts);
+        let workspace = colm_workspace::Workspace::open(
+            &crate::provenance::workspace_root(flags.get("--workspace-root")),
+            name,
+        )?;
+        let changed = workspace.changes_from_official()?;
+        Ok((
+            workspace.bin().join(exe("colm-cli")),
+            colm_workspace::version::touches(changed.iter().map(|c| c.path.as_str())),
+        ))
+    } else {
+        Ok((
+            crate::model_version::cached_official_cli(opts, &revision.code)?,
+            colm_workspace::version::Touches {
+                engine: false,
+                kernel: false,
+            },
+        ))
+    }
+}
+
+/// 研究交给冻结修订自己的 `colm-cli` 跑，而研究设定是 `deny_unknown_fields`：代码早于某个新设定的修订
+/// 读不了它，研究要到运行时才报 "unknown field"（2026-10-23 实测：10-22 的程序拒绝 `include_baseline`、
+/// `corrected`、`morris`）。建研究时先让那个程序预检一遍准备好的设定：
+/// - 只是不认得 `include_baseline`（GUI 自动加的增强，不改研究的含义）：去掉它再试；
+/// - 不认得别的设定（Morris、订正观测、不确定性分析的目标……）：拒绝建研究并说明原因；
+/// - 其他预检错误不在这里判，照旧交给当前程序的预检。
+pub(crate) fn ensure_revision_reads_spec(
+    cli: &Path,
+    case_root: &Path,
+    spec_file: &Path,
+    revision: &colm_model::FrozenRevision,
+) -> Result<()> {
+    let probe = || -> Result<Option<String>> {
+        let output = std::process::Command::new(cli)
+            .arg("study-preflight")
+            .arg(case_root)
+            .arg("--spec")
+            .arg(spec_file)
+            .env(DELEGATED_ENV, "1")
+            .output()
+            .with_context(|| format!("cannot start {}", cli.display()))?;
+        if output.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&output.stderr).into_owned();
+        Ok((text.contains("unknown field") || text.contains("unknown variant")).then_some(text))
+    };
+    let Some(error) = probe()? else {
+        return Ok(());
+    };
+    if error.contains("unknown field `include_baseline`") {
+        let mut spec = study::spec::read_spec(spec_file)?;
+        spec.budget.include_baseline = false;
+        std::fs::write(spec_file, serde_json::to_vec_pretty(&spec)?)?;
+        let Some(error) = probe()? else {
+            return Ok(());
+        };
+        return Err(unreadable(revision, &error));
+    }
+    Err(unreadable(revision, &error))
+}
+
+fn unreadable(revision: &colm_model::FrozenRevision, error: &str) -> anyhow::Error {
+    let detail = error
+        .lines()
+        .find(|line| line.contains("unknown field") || line.contains("unknown variant"))
+        .unwrap_or(error)
+        .trim();
+    anyhow::anyhow!(
+        "model version {} r{} was built from older code that cannot read this study design ({detail}); create the study with the official version, or rebuild this version on the current code",
+        revision.version.id,
+        revision.version.revision
+    )
+}
+
+/// 研究第一次运行用的引擎与前处理。和模型版本一样记在单独的文件里而不是研究设定里：设定交给冻结修订的
+/// 旧 `colm-cli` 去读，新字段会被 `deny_unknown_fields` 拒绝（见 [`ensure_revision_reads_spec`]）。
+pub(crate) const RUN_OPTIONS_FILE: &str = "run-options.json";
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub(crate) struct RunOptions {
+    pub engine: String,
+    pub preprocessors: String,
+}
+
+pub(crate) fn run_options(study_dir: &Path) -> Result<Option<RunOptions>> {
+    let path = study_dir.join(RUN_OPTIONS_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(Some(serde_json::from_str(&text)?))
+}
+
+/// 这次运行该用的引擎与前处理。原来续跑用的是界面当时的选择（缺省 Rust）：用 Fortran 跑了一半的研究，
+/// 打开后点"恢复"会把已完成的成员判成过期、换 Rust 整批重跑，一个研究里混着两种引擎的结果（GUI 审查 R8）。
+/// 没记过就按这次的请求（不给就是 Rust）记下；记过的沿用，明确要另一种就拒绝。
+pub(crate) fn frozen_run_options(
+    study_dir: &Path,
+    engine: Option<&str>,
+    preprocessors: Option<&str>,
+) -> Result<RunOptions> {
+    let recorded = run_options(study_dir)?;
+    let pick = |label: &str,
+                requested: Option<&str>,
+                recorded: Option<&String>|
+     -> Result<String> {
+        match (requested, recorded) {
+            (Some(requested), Some(recorded)) if requested != recorded => bail!(
+                "this Study runs with the {recorded} {label}; it cannot switch to {requested}. Create a new Study for another {label}"
+            ),
+            (Some(requested), _) => Ok(requested.to_string()),
+            (None, Some(recorded)) => Ok(recorded.clone()),
+            (None, None) => Ok("rust".into()),
+        }
+    };
+    let options = RunOptions {
+        engine: pick("engine", engine, recorded.as_ref().map(|r| &r.engine))?,
+        preprocessors: pick(
+            "preprocessors",
+            preprocessors,
+            recorded.as_ref().map(|r| &r.preprocessors),
+        )?,
+    };
+    if recorded.is_none() {
+        std::fs::write(
+            study_dir.join(RUN_OPTIONS_FILE),
+            serde_json::to_vec_pretty(&options)?,
+        )?;
+    }
+    Ok(options)
+}
+
 pub(crate) fn pin_revision(
     study_dir: &Path,
     revision: &colm_model::FrozenRevision,
@@ -721,27 +864,7 @@ pub(crate) fn pin_revision(
     } else {
         kernel
     };
-    let cached = crate::model_version::cached_options(opts, &revision.code)?;
-    let (cli, touches) = if let Some(name) = revision.code.workspace.as_deref() {
-        let flags = cached.as_ref().unwrap_or(opts);
-        let workspace = colm_workspace::Workspace::open(
-            &crate::provenance::workspace_root(flags.get("--workspace-root")),
-            name,
-        )?;
-        let changed = workspace.changes_from_official()?;
-        (
-            workspace.bin().join(exe("colm-cli")),
-            colm_workspace::version::touches(changed.iter().map(|c| c.path.as_str())),
-        )
-    } else {
-        (
-            crate::model_version::cached_official_cli(opts, &revision.code)?,
-            colm_workspace::version::Touches {
-                engine: false,
-                kernel: false,
-            },
-        )
-    };
+    let (cli, touches) = revision_cli(opts, revision)?;
     let pinned = Pinned {
         name: revision.version.id.clone(),
         head: revision

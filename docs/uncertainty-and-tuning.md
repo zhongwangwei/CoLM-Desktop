@@ -78,6 +78,13 @@ objective = sum(frozen_weight_i * loss_i) / sum(frozen_weight_i)
 - 多个站点独立 Study 使用同一个 GUI 并发上限：最多同时运行 `jobs` 个 Study，每个 Study 内只使用 1 个 worker，避免变成 `jobs²` 个模型进程。
 - GUI 和 CLI 都会把 `jobs` 限制在本机可用逻辑 CPU 数之内；CLI 的限制是最终安全边界。
 
+## 冻结模型修订与旧程序
+
+- 研究冻结了模型修订时，建研究用当前程序，**运行交给该修订自己缓存的 `colm-cli`**。研究设定是 `deny_unknown_fields`，所以修订的代码早于某个新设定时，它读不了这份设定。
+- 建研究时先让修订的程序预检准备好的设定：只是不认得 `include_baseline` 就去掉它再试（这是增强项，不改研究含义）；不认得 Morris、`corrected`、不确定性分析的目标等设定时，拒绝建研究并说明原因。
+- 运行时的选择不进研究设定，单独记在研究目录里：`model-version.json`（模型版本）、`run-options.json`（第一次运行时的引擎与前处理；之后沿用，明确要另一种就拒绝）。
+- 已知问题：参数来源哈希（`parameter_source_sha256`）由建研究的程序按它自己编进去的 vendor 文件计算，修订的程序运行时用的是它自己那份。两者的 vendor 文件不同（如 10/21 上午冻结的修订）时，运行报 "Study parameter source files changed"。修法要让建研究和运行用同一个程序，尚未做。
+
 ## 暂停、恢复与失败
 
 - 暂停只停止派发新任务，正在运行的模型正常结束。

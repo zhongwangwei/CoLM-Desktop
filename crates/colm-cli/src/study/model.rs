@@ -208,6 +208,8 @@ pub(crate) fn prepare_create(
         }
         let spec_file = root.join("spec.json");
         std::fs::write(&spec_file, serde_json::to_vec_pretty(&spec)?)?;
+        let (cli, _) = crate::study_version::revision_cli(opts, &revision)?;
+        crate::study_version::ensure_revision_reads_spec(&cli, &root, &spec_file, &revision)?;
         Ok(Some(Prepared {
             case_root: root.clone(),
             spec_file,

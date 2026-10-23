@@ -419,3 +419,102 @@ fn same_design_compares_observation_contents_separately_from_their_host_paths() 
     right.observations.clear();
     assert!(!same_design(&left, &right).unwrap());
 }
+
+/// 早于新设定的修订程序：设定里出现它不认得的字段就像旧版 serde 那样报错。
+#[cfg(unix)]
+fn old_cli(root: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let cli = root.join("old-colm-cli");
+    std::fs::write(
+        &cli,
+        "#!/bin/sh\nspec=\"$4\"\nif grep -q '\"include_baseline\"' \"$spec\"; then echo 'Error: unknown field `include_baseline`, expected one of `jobs`' >&2; exit 1; fi\nif grep -q '\"morris\"' \"$spec\"; then echo 'Error: cannot parse\\n\\nCaused by:\\n    unknown variant `morris`, expected one of `oat`' >&2; exit 1; fi\nif grep -q '\"bad\"' \"$spec\"; then echo 'Error: target Qle has 1 usable observation' >&2; exit 1; fi\necho ok\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    cli
+}
+
+#[cfg(unix)]
+#[test]
+fn an_older_revision_drops_the_baseline_seed_but_refuses_designs_it_cannot_read() {
+    let root = temp("old-cli");
+    let cli = old_cli(&root);
+    let revision: colm_model::FrozenRevision = serde_json::from_value(serde_json::json!({
+        "schema": colm_model::SCHEMA,
+        "version": {"id": "draft-a", "revision": 3},
+        "name": "draft-a",
+        "note": "",
+        "parent": null,
+        "code": {"kind": "official", "workspace": null, "commit": null, "source_sha256": "x"},
+        "overlay": {},
+        "overlay_sha256": "",
+        "fingerprint": "",
+        "created_unix": 0,
+        "applicability": {}
+    }))
+    .unwrap();
+    let write = |method: &str, include_baseline: bool, key: &str| {
+        let spec = root.join("spec.json");
+        let mut value = serde_json::json!({
+            "kind": if method == "differential-evolution" { "tuning" } else { "uncertainty" },
+            "method": method,
+            "base_cases": ["site"],
+            "observations": {"site": "obs.nc"},
+            "parameters": [],
+            "targets": [{"key": key, "variable": "Qle", "from": 0, "to": 10}],
+            "budget": {"population": 4, "generations": 1},
+        });
+        if include_baseline {
+            value["budget"]["include_baseline"] = true.into();
+        }
+        std::fs::write(&spec, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        spec
+    };
+    // 只是不认得 include_baseline：去掉它，研究照常建。
+    let spec = write("differential-evolution", true, "Qle");
+    ensure_revision_reads_spec(&cli, &root, &spec, &revision).unwrap();
+    assert!(
+        !crate::study::spec::read_spec(&spec)
+            .unwrap()
+            .budget
+            .include_baseline
+    );
+    // 不认得 Morris：拒绝，并说清是哪个版本、读不了什么。
+    let spec = write("morris", false, "Qle");
+    let error = ensure_revision_reads_spec(&cli, &root, &spec, &revision)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("draft-a r3"), "{error}");
+    assert!(error.contains("unknown variant `morris`"), "{error}");
+    // 普通的预检错误不在这里判（交给当前程序的预检）。
+    let spec = write("differential-evolution", false, "bad");
+    ensure_revision_reads_spec(&cli, &root, &spec, &revision).unwrap();
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_first_run_freezes_engine_and_preprocessors_for_later_runs() {
+    let root = temp("run-options");
+    // 没记过：按请求记下（不给就是 Rust）。
+    let first = frozen_run_options(&root, Some("fortran"), None).unwrap();
+    assert_eq!(
+        first,
+        RunOptions {
+            engine: "fortran".into(),
+            preprocessors: "rust".into()
+        }
+    );
+    // 续跑不给参数：沿用记下的，而不是退回缺省的 Rust。
+    assert_eq!(frozen_run_options(&root, None, None).unwrap(), first);
+    assert_eq!(
+        frozen_run_options(&root, Some("fortran"), Some("rust")).unwrap(),
+        first
+    );
+    // 明确要另一种：拒绝，不让一个研究混两种引擎的结果。
+    let error = frozen_run_options(&root, Some("rust"), None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("runs with the fortran engine"), "{error}");
+    assert_eq!(run_options(&root).unwrap(), Some(first));
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -636,6 +636,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                 events: Vec<serde_json::Value>,
                 /// 这个研究固定的模型版本；官方版为空。
                 model_version: Option<study_version::Pinned>,
+                /// 第一次运行时记下的引擎与前处理；还没运行过为空。
+                run_options: Option<study_version::RunOptions>,
                 /// 交给服务器跑过的记录（`remote-study-run`）；没有为空。
                 remote: Option<serde_json::Value>,
                 remote_pending: Option<serde_json::Value>,
@@ -651,6 +653,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     results: study::runner::result_files(&study_dir)?,
                     events: study::runner::event_log_tail(&study_dir, 300)?,
                     model_version: study_version::pinned(&study_dir)?,
+                    run_options: study_version::run_options(&study_dir)?,
                     remote_pending: remote_cmd::remote_study::pending_status(&study_dir)?,
                     remote: std::fs::read_to_string(
                         study_dir.join(remote_cmd::remote_study::RECORD),
@@ -691,15 +694,35 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
             let study_dir = opts.positional_case()?;
             let manifest = study::engine::status(&study_dir)?;
             study_version::validate_revision_request(&study_dir, opts)?;
+            // 交给快照程序的子进程（带 DELEGATED_ENV）收到的就是父进程定好的值，不再记一次。
+            let run_options = if std::env::var_os(study_version::DELEGATED_ENV).is_none() {
+                // 先校验再记：拼错的值不能写进研究目录，害得之后每次运行都失败。
+                requested_engine(opts.get("--engine").as_deref())?;
+                requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+                Some(study_version::frozen_run_options(
+                    &study_dir,
+                    opts.get("--engine").as_deref(),
+                    opts.get("--preprocessors").as_deref(),
+                )?)
+            } else {
+                None
+            };
+            let engine_flag = run_options
+                .as_ref()
+                .map(|o| o.engine.clone())
+                .or_else(|| opts.get("--engine"));
+            let preprocessors_flag = run_options
+                .as_ref()
+                .map(|o| o.preprocessors.clone())
+                .or_else(|| opts.get("--preprocessors"));
             let kernel = opts
                 .get("--kernel")
                 .or_else(|| manifest.spec.kernel_dir.clone())
                 .context("study-run needs --kernel or spec.kernel_dir")?;
             // 模型版本：第一次给 `--model-version` 时拍快照，之后一直用快照（见 study_version.rs）。
             if std::env::var_os(study_version::DELEGATED_ENV).is_none() {
-                let engine = requested_engine(opts.get("--engine").as_deref())?;
-                let preprocessors =
-                    requested_preprocessors(opts.get("--preprocessors").as_deref())?;
+                let engine = requested_engine(engine_flag.as_deref())?;
+                let preprocessors = requested_preprocessors(preprocessors_flag.as_deref())?;
                 if let Some(mut pinned) = study_version::ensure(
                     &study_dir,
                     opts.get("--model-version").as_deref(),
@@ -722,6 +745,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                         "--model-root",
                         "--model-id",
                         "--model-revision",
+                        "--engine",
+                        "--preprocessors",
                     ];
                     let mut args: Vec<String> = opts.positional.clone();
                     for (flag, value) in &opts.flags {
@@ -729,6 +754,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                             args.extend([flag.clone(), value.clone()]);
                         }
                     }
+                    args.extend(["--engine".into(), engine.as_str().into()]);
+                    args.extend(["--preprocessors".into(), preprocessors.as_str().into()]);
                     let code = study_version::delegate(&pinned, &args)?;
                     ensure!(code == 0, "study program exited with status {code}");
                     return Ok(());
@@ -743,8 +770,8 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
                     .transpose()?
                     .unwrap_or(manifest.spec.budget.jobs),
                 opts.get("--retry-failed").is_some(),
-                requested_preprocessors(opts.get("--preprocessors").as_deref())?,
-                requested_engine(opts.get("--engine").as_deref())?,
+                requested_preprocessors(preprocessors_flag.as_deref())?,
+                requested_engine(engine_flag.as_deref())?,
             )?;
         }
         "study-clone" => println!(
