@@ -92,12 +92,15 @@ export function ScienceChart({
   theme,
   paired = false,
   compact = false,
+  styles,
 }: {
   data: uPlot.AlignedData;
   labels: string[];
   theme: string;
   paired?: boolean;
   compact?: boolean;
+  /** 逐系列的线色、虚线、线宽；不给就用默认的三色循环（研究的分位带要两色加虚线，见 StudyResult）。 */
+  styles?: { stroke: string; dash?: number[]; width?: number }[];
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const plotRef = useRef<uPlot | null>(null);
@@ -108,10 +111,13 @@ export function ScienceChart({
   if (!sameSeries(stableData.current, data)) stableData.current = data;
   const shownData = stableData.current;
   const labelKey = labels.join('\u0000');
+  const styleKey = JSON.stringify(styles ?? null);
   const hasData = data[0].length > 0;
   useEffect(() => {
     if (!ref.current || !hasData) return;
     const host = ref.current;
+    // 调用方每次渲染都新建 styles 数组：按内容（styleKey）重建，不按引用。
+    const seriesStyles = JSON.parse(styleKey) as typeof styles;
     const plot = new uPlot(
       {
         width: Math.max(160, host.clientWidth),
@@ -122,9 +128,11 @@ export function ScienceChart({
           {},
           ...labelKey.split('\u0000').map((label, i) => ({
             label,
-            stroke: (paired ? ['#0d9488', '#858b94'] : ['#0d9488', '#e87945', '#6366f1'])[i % 3],
-            dash: paired && i === 1 ? [6, 3] : [],
-            width: 1.5,
+            stroke:
+              seriesStyles?.[i]?.stroke ??
+              (paired ? ['#0d9488', '#858b94'] : ['#0d9488', '#e87945', '#6366f1'])[i % 3],
+            dash: seriesStyles?.[i]?.dash ?? (paired && i === 1 ? [6, 3] : []),
+            width: seriesStyles?.[i]?.width ?? 1.5,
             points: compact ? { show: false } : undefined,
           })),
         ],
@@ -146,7 +154,7 @@ export function ScienceChart({
       plot.destroy();
       plotRef.current = null;
     };
-  }, [hasData, labelKey, theme, paired, compact]);
+  }, [hasData, labelKey, theme, paired, compact, styleKey]);
   useEffect(() => {
     plotRef.current?.setData(shownData);
   }, [shownData]);

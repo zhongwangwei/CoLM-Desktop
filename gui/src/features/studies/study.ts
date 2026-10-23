@@ -957,3 +957,50 @@ export function studyProgress(spec: Record<string, unknown> | null, done: number
         : null,
   };
 }
+
+/**
+ * 每代的最优与"到这一代为止的最优"（不含基准、只算可行的）。到此为止的最优几代不动，再加代数也没用；
+ * 最后几代还在降，说明预算给少了。
+ */
+export function convergenceRows(
+  candidates:
+    Record<string, { generation?: number; feasible?: boolean; calibration?: number }> | undefined,
+) {
+  const byGeneration = new Map<number, number>();
+  for (const [id, c] of Object.entries(candidates ?? {})) {
+    if (id === 'm000000' || c.feasible === false || typeof c.calibration !== 'number') continue;
+    const g = c.generation ?? 0;
+    byGeneration.set(g, Math.min(byGeneration.get(g) ?? Infinity, c.calibration));
+  }
+  let soFar = Infinity;
+  return [...byGeneration.keys()]
+    .sort((a, b) => a - b)
+    .map((generation) => {
+      const best = byGeneration.get(generation)!;
+      soFar = Math.min(soFar, best);
+      return { generation, best, bestSoFar: soFar };
+    });
+}
+
+/**
+ * `near_optimal.json` → 每个参数在近优集合里的取值范围与它占抽样范围的比例。占得越宽，观测越定不住它。
+ */
+export function nearOptimalRows(value: unknown) {
+  const data = (value ?? {}) as { members?: unknown; margin?: unknown; parameters?: unknown };
+  const rows = (Array.isArray(data.parameters) ? data.parameters : []) as Record<string, unknown>[];
+  const finiteNumber = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  return {
+    count: Array.isArray(data.members) ? data.members.length : 0,
+    margin: finiteNumber(data.margin) ?? 0.05,
+    parameters: rows.map((row) => {
+      const spread = finiteNumber(row.spread) ?? 0;
+      return {
+        parameter: String(row.parameter ?? ''),
+        min: finiteNumber(row.min),
+        max: finiteNumber(row.max),
+        spread,
+        pinned: spread < 0.2 ? 'tight' : spread < 0.5 ? 'loose' : 'free',
+      } as const;
+    }),
+  };
+}

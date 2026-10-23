@@ -27,6 +27,8 @@ import {
   plannedCandidates,
   networkWeightCount,
   studyProgress,
+  convergenceRows,
+  nearOptimalRows,
   sensitivityRanking,
   sensitivityResponses,
   studyDiagnostics,
@@ -558,6 +560,8 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     plannedCandidates,
     networkWeightCount,
     studyProgress,
+    convergenceRows,
+    nearOptimalRows,
     sensitivityRanking,
     sensitivityResponses,
     studyDiagnostics,
@@ -1285,4 +1289,74 @@ it('a disabled next step says what is missing', async () => {
   assert.match(text, /先在第 2 步勾选至少一个参数/);
   const step3 = page.nodes().find((n) => n.props.action === 'research-step-3');
   assert.match(String(step3?.props.title), /勾选至少一个参数/);
+});
+it('the uncertainty envelope names its site and units and draws the band apart from the baseline', () => {
+  type Node = { type: unknown; props: Record<string, unknown>; children: unknown[] };
+  // StudyResult 返回 JSX，pageCallback 只转译不编 JSX：这里按 React 方式转译整个函数。
+  const path = new URL('./ResearchPage.tsx', import.meta.url);
+  const source = ts.createSourceFile(
+    path.pathname,
+    readFileSync(path, 'utf8'),
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.TSX,
+  );
+  let body = '';
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionDeclaration(node) && node.name?.text === 'StudyResult')
+      body = node.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source);
+  const js = ts.transpileModule(`${body}`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
+  }).outputText;
+  const React = {
+    createElement: (
+      type: unknown,
+      props: Record<string, unknown> | null,
+      ...children: unknown[]
+    ) => ({
+      type,
+      props: props ?? {},
+      children,
+    }),
+    Fragment: 'Fragment',
+  };
+  const render = new Function('React', 'ScienceChart', `${js}; return StudyResult;`)(
+    React,
+    'ScienceChart',
+  ) as (props: { text: string; theme: string; en: boolean }) => Node;
+  const tree = render({
+    text: JSON.stringify({
+      site: 'AT-Neu',
+      variable: 'f_lfevpa',
+      units: 'W/m2',
+      members: 20,
+      time: [0, 1, 2],
+      baseline: [1, 2, 3],
+      p05: [0.5, null, 2.5],
+      p50: [1, null, 3],
+      p95: [1.5, null, 3.5],
+      stable: [true, false, true],
+    }),
+    theme: 'light',
+    en: false,
+  });
+  const all = (node: unknown): Node[] =>
+    node && typeof node === 'object' && 'children' in (node as Node)
+      ? [node as Node, ...(node as Node).children.flatMap(all)]
+      : Array.isArray(node)
+        ? node.flatMap(all)
+        : [];
+  const nodes = all(tree);
+  const text = JSON.stringify(nodes.map((n) => n.children));
+  assert.match(text, /AT-Neu/);
+  assert.match(text, /W\/m2/);
+  assert.match(text, /20 个样本成员/);
+  assert.match(text, /有 1 个时刻成功的成员太少/);
+  const chart = nodes.find((n) => n.type === 'ScienceChart')!;
+  const styles = chart.props.styles as { stroke: string; dash?: number[] }[];
+  assert.notEqual(styles[0]!.stroke, styles[3]!.stroke, 'P95 no longer shares the baseline colour');
+  assert.ok(styles[1]!.dash && styles[3]!.dash, 'the band edges are dashed');
 });

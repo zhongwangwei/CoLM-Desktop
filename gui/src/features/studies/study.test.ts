@@ -5,12 +5,14 @@ import {
   calibrationSeed,
   calibrationWindows,
   candidateBudget,
+  convergenceRows,
   fitValidation,
   frozenDesign,
   frozenParameterKey,
   gridTargetDefaults,
   gridTargetSpec,
   memberVerdict,
+  nearOptimalRows,
   networkWeightCount,
   plannedCandidates,
   studyProgress,
@@ -631,4 +633,36 @@ it('a relative network output cannot be a negative multiplier', () => {
     /倍数|multiplies/,
   );
   networkSpec('pft', 'clim_tair', 'DEF_PFT_VMAX25', '0', '2', 'linear', true);
+});
+
+it('convergence tracks the best so far per generation and near-optimal spread says how pinned a parameter is', () => {
+  assert.deepEqual(
+    convergenceRows({
+      m000000: { generation: 0, feasible: true, calibration: 0.01 },
+      m000001: { generation: 0, feasible: true, calibration: 0.6 },
+      m000002: { generation: 0, feasible: true, calibration: 0.5 },
+      m000003: { generation: 1, feasible: true, calibration: 0.55 },
+      m000004: { generation: 2, feasible: true, calibration: 0.4 },
+      m000005: { generation: 2, feasible: false },
+    }),
+    [
+      { generation: 0, best: 0.5, bestSoFar: 0.5 },
+      { generation: 1, best: 0.55, bestSoFar: 0.5 },
+      { generation: 2, best: 0.4, bestSoFar: 0.4 },
+    ],
+  );
+  const near = nearOptimalRows({
+    members: ['m1', 'm2', 'm3'],
+    margin: 0.05,
+    parameters: [
+      { parameter: 'A', min: 26, max: 28, spread: 0.04 },
+      { parameter: 'B', min: 0.3, max: 0.7, spread: 0.8 },
+    ],
+  });
+  assert.equal(near.count, 3);
+  assert.deepEqual(
+    near.parameters.map((p) => p.pinned),
+    ['tight', 'free'],
+  );
+  assert.deepEqual(nearOptimalRows(null), { count: 0, margin: 0.05, parameters: [] });
 });

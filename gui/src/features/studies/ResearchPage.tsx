@@ -29,6 +29,8 @@ import {
   calibrationSeed,
   networkWeightCount,
   studyProgress,
+  convergenceRows,
+  nearOptimalRows,
   suggestedRange,
   suggestedWindows,
   type ParameterContext,
@@ -71,7 +73,13 @@ type Envelope = {
     completed_candidates?: number;
     candidates?: Record<
       string,
-      { feasible?: boolean; calibration?: number; validation?: number; reason?: string }
+      {
+        generation?: number;
+        feasible?: boolean;
+        calibration?: number;
+        validation?: number;
+        reason?: string;
+      }
     >;
     tasks?: Record<string, unknown>;
     warnings?: string[];
@@ -108,8 +116,22 @@ function StudyResult({ text, theme, en }: { text: string; theme: string; en: boo
       const stride = Math.max(1, Math.ceil(length / 2400));
       const sample = (values: unknown) =>
         (values as (number | null)[]).filter((_, i) => i % stride === 0);
+      // 基准一个色相；P05/P50/P95 是集合的分位带，同一个色相，上下沿用虚线（颜色之外的第二种区分）。
+      // 原来四条线三色循环，P95 和基准同色（GUI 审查 C-05）。两色已用 dataviz 校验器在亮、暗两种底色下校验。
+      const ensemble = '#6366f1';
+      const unstable = Array.isArray(data.stable)
+        ? (data.stable as unknown[]).filter((v) => v === false).length
+        : 0;
+      const units = typeof data.units === 'string' && data.units ? ` (${data.units})` : '';
       return (
         <>
+          <p className="study-subhead">
+            {String(data.site ?? '')} · {String(data.variable ?? '')}
+            {units}
+            {typeof data.members === 'number'
+              ? tr(` · ${data.members} 个样本成员`, ` · ${data.members} sample members`)
+              : ''}
+          </p>
           <ScienceChart
             data={
               [
@@ -118,8 +140,22 @@ function StudyResult({ text, theme, en }: { text: string; theme: string; en: boo
               ] as uPlot.AlignedData
             }
             labels={[tr('基准', 'Baseline'), 'P05', tr('中位数', 'Median'), 'P95']}
+            styles={[
+              { stroke: '#0d9488', width: 2 },
+              { stroke: ensemble, dash: [5, 4] },
+              { stroke: ensemble, width: 2 },
+              { stroke: ensemble, dash: [5, 4] },
+            ]}
             theme={theme}
           />
+          {unstable > 0 && (
+            <p className="muted study-hint">
+              {tr(
+                `有 ${unstable} 个时刻成功的成员太少，那里不画分位带（线是断开的），只有基准。`,
+                `At ${unstable} timestamps too few members succeeded, so the band is left out there (the lines break) and only the baseline is drawn.`,
+              )}
+            </p>
+          )}
           <p>
             {tr(
               `${length} 个时刻，图上每 ${stride} 个取一个。分位数描述的是这次抽样设计下的分布，不是预测的置信区间。`,
@@ -295,6 +331,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [importance, setImportance] = useState<unknown>(null);
   const [sensitivityKey, setSensitivityKey] = useState('');
   const [carryKeys, setCarryKeys] = useState<string[]>([]);
+  // 率定的近优集合（results/near_optimal.json）：参数能被观测定到多准。
+  const [nearOptimal, setNearOptimal] = useState<unknown>(null);
   const [out, setOut] = useState('');
   // 导出研究的目录；原来和 AI 拟合的输出目录共用 out，填了一个另一个也跟着变。
   const [exportDir, setExportDir] = useState('');
@@ -2522,6 +2560,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [studyDir, hasImportance]);
+  const hasNearOptimal = (envelope?.results ?? []).some(
+    (entry) => (typeof entry === 'string' ? entry : entry.path) === 'near_optimal.json',
+  );
+  useEffect(() => {
+    setNearOptimal(null);
+    if (!studyDir || !hasNearOptimal) return;
+    let live = true;
+    void invoke<string>('study_result', { studyDir, path: 'near_optimal.json' })
+      .then((text) => {
+        if (live) setNearOptimal(JSON.parse(text));
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [studyDir, hasNearOptimal]);
   usePageContract(
     workbench
       ? {
@@ -3075,6 +3129,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     </p>
   );
   const diagnostics = studyDiagnostics(envelope?.state?.warnings);
+  const convergence = convergenceRows(envelope?.state?.candidates);
+  const near = nearOptimalRows(nearOptimal);
   const responses = sensitivityResponses(importance);
   const ranking = sensitivityRanking(importance, sensitivityKey, frozenSpec);
   const objectiveView = responses.find((r) => r.key === sensitivityKey)?.variable === 'objective';
@@ -4426,6 +4482,96 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </p>
             </Card>
           )}
+          {studyDir &&
+            frozenSpec?.kind === 'tuning' &&
+            (convergence.length > 1 || near.count > 0) && (
+              <Card
+                title={tr('收敛与可信度', 'Convergence and confidence')}
+                description={tr(
+                  '看这次率定是不是已经收敛、找到的参数能被观测定到多准。',
+                  'Whether the calibration has converged and how tightly the observations pin the parameters.',
+                )}
+              >
+                {convergence.length > 1 && (
+                  <div className="table-scroll">
+                    <table className="versions-table">
+                      <thead>
+                        <tr>
+                          <th>{tr('代', 'Generation')}</th>
+                          <th>{tr('这一代最好', 'Best in generation')}</th>
+                          <th>{tr('到此为止最好', 'Best so far')}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {convergence.map((row) => (
+                          <tr key={row.generation}>
+                            <td>{row.generation}</td>
+                            <td>{Number(row.best.toPrecision(4))}</td>
+                            <td>{Number(row.bestSoFar.toPrecision(4))}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {convergence.length > 2 &&
+                  convergence.at(-1)!.bestSoFar < convergence.at(-2)!.bestSoFar && (
+                    <p className="muted study-hint">
+                      {tr(
+                        '最后一代还在变好：再加几代可能还能改善。',
+                        'The last generation still improved: more generations may help.',
+                      )}
+                    </p>
+                  )}
+                {near.count > 0 && (
+                  <>
+                    <p className="muted study-hint">
+                      {tr(
+                        `目标函数在最优值 ${Math.round(near.margin * 100)}% 以内的有 ${near.count} 组参数。各参数在这些组里取值的范围：`,
+                        `${near.count} parameter sets score within ${Math.round(near.margin * 100)}% of the best. The range each parameter takes across them:`,
+                      )}
+                    </p>
+                    <div className="table-scroll">
+                      <table className="versions-table">
+                        <thead>
+                          <tr>
+                            <th>{tr('参数', 'Parameter')}</th>
+                            <th>{tr('近优范围', 'Near-optimal range')}</th>
+                            <th>{tr('占抽样范围', 'Share of sampling range')}</th>
+                            <th>{tr('判断', 'Reading')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {near.parameters.map((row) => (
+                            <tr key={row.parameter}>
+                              <td>
+                                <code>{row.parameter}</code>
+                              </td>
+                              <td>
+                                {row.min == null || row.max == null
+                                  ? '—'
+                                  : `${Number(row.min.toPrecision(4))} – ${Number(row.max.toPrecision(4))}`}
+                              </td>
+                              <td>{Math.round(row.spread * 100)}%</td>
+                              <td>
+                                {row.pinned === 'tight'
+                                  ? tr('定得住', 'well pinned')
+                                  : row.pinned === 'loose'
+                                    ? tr('大致定得住', 'loosely pinned')
+                                    : tr(
+                                        '定不住：这份观测分不出它的取值',
+                                        'not pinned: these observations cannot tell its value',
+                                      )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </Card>
+            )}
           {studyDir && diagnostics.length > 0 && (
             <Card title={tr('诊断与提示', 'Diagnostics')}>
               {diagnostics.map(([zh, english], i) => (

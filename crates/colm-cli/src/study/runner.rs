@@ -3229,12 +3229,79 @@ fn write_objective_tables(manifest: &Manifest, state: &StudyState) -> Result<()>
     write_objective_tables_to(manifest, state, &Path::new(&manifest.root).join("results"))
 }
 
+/// 近优集合的门槛：目标函数不超过最优值的 (1 + NEAR_OPTIMAL_MARGIN) 倍。
+const NEAR_OPTIMAL_MARGIN: f64 = 0.05;
+
+/// 目标函数在最优值 5% 以内的候选，各参数取值占抽样范围的多宽。只看最优一组会以为参数被定住了；
+/// 近优的那些散满整个范围，说明这份观测定不住它（异参同效）。网络权重不是物理参数，不列。
+fn near_optimal(
+    manifest: &Manifest,
+    members: &[MemberPlan],
+    state: &StudyState,
+) -> Option<serde_json::Value> {
+    let score = |member: &MemberPlan| {
+        state
+            .candidates
+            .get(&member.id)
+            .filter(|candidate| candidate.feasible && !member.baseline)
+            .and_then(|candidate| candidate.calibration)
+    };
+    let best = members.iter().filter_map(score).min_by(f64::total_cmp)?;
+    let threshold = best + best.abs() * NEAR_OPTIMAL_MARGIN;
+    let near = members
+        .iter()
+        .filter(|member| score(member).is_some_and(|value| value <= threshold))
+        .collect::<Vec<_>>();
+    let parameters = super::sample::dimensions(&manifest.spec)
+        .into_iter()
+        .filter(|dim| !dim.key.starts_with(super::hybrid::WEIGHT_PREFIX))
+        .filter_map(|dim| {
+            let values = near
+                .iter()
+                .filter_map(|member| member.parameters.get(&dim.key).copied())
+                .collect::<Vec<_>>();
+            let positions = values
+                .iter()
+                .filter_map(|&value| super::generation::unit_position(value, &dim))
+                .collect::<Vec<_>>();
+            let min = values.iter().copied().reduce(f64::min)?;
+            let max = values.iter().copied().reduce(f64::max)?;
+            let spread = positions.iter().copied().reduce(f64::max)?
+                - positions.iter().copied().reduce(f64::min)?;
+            Some(serde_json::json!({
+                "parameter": dim.key,
+                "min": min,
+                "max": max,
+                "sample_min": dim.min,
+                "sample_max": dim.max,
+                "spread": spread,
+            }))
+        })
+        .collect::<Vec<_>>();
+    Some(serde_json::json!({
+        "best": best,
+        "threshold": threshold,
+        "margin": NEAR_OPTIMAL_MARGIN,
+        "members": near.iter().map(|member| member.id.clone()).collect::<Vec<_>>(),
+        "parameters": parameters,
+    }))
+}
+
 pub(super) fn write_objective_tables_to(
     manifest: &Manifest,
     state: &StudyState,
     results: &Path,
 ) -> Result<()> {
     write_json(&results.join("objectives.json"), &state.candidates)?;
+    // 近优集合是派生的辅助结果：读不到样本文件就不写它，不连累成绩表本身。
+    if manifest.spec.kind == StudyKind::Tuning {
+        if let Some(near) = super::generation::load_members(manifest)
+            .ok()
+            .and_then(|members| near_optimal(manifest, &members, state))
+        {
+            write_json(&results.join("near_optimal.json"), &near)?;
+        }
+    }
     let mut objectives = String::from("member,generation,feasible,calibration,validation,reason\n");
     for (member, candidate) in &state.candidates {
         objectives.push_str(&format!(
@@ -4383,6 +4450,39 @@ mod tests {
             seeded(Some(0.1), [Some(0.4), Some(0.9), Some(0.6)], (0.6, 0.9)),
             untouched
         );
+    }
+
+    #[test]
+    fn near_optimal_members_show_how_wide_each_parameter_stays_unpinned() {
+        let manifest = manifest_with_range(0.1, 0.9);
+        let mut state = StudyState::new("s".into(), []).unwrap();
+        let members = vec![
+            member("m000000", 0.5),
+            member("m000001", 0.2),
+            member("m000002", 0.8),
+            member("m000003", 0.5),
+            member("m000004", 0.9),
+        ];
+        // 基准再好也不算；0.104 在最优 0.1 的 5% 以内，0.2 不在；不可行的不算。
+        state
+            .candidates
+            .insert("m000000".into(), candidate(Some(0.01)));
+        state
+            .candidates
+            .insert("m000001".into(), candidate(Some(0.1)));
+        state
+            .candidates
+            .insert("m000002".into(), candidate(Some(0.104)));
+        state
+            .candidates
+            .insert("m000003".into(), candidate(Some(0.2)));
+        state.candidates.insert("m000004".into(), candidate(None));
+        let near = near_optimal(&manifest, &members, &state).unwrap();
+        assert_eq!(near["best"], 0.1);
+        assert_eq!(near["members"], serde_json::json!(["m000001", "m000002"]));
+        let spread = near["parameters"][0]["spread"].as_f64().unwrap();
+        assert!((spread - 0.75).abs() < 1e-12, "{spread}");
+        assert!(near_optimal(&manifest, &members[..1], &state).is_none());
     }
 
     #[test]
