@@ -146,6 +146,9 @@ impl Tool for UiSet {
     fn tier(&self) -> Tier {
         Tier::Act
     }
+    fn allowance_key(&self, args: &Value) -> String {
+        field_key(self.name(), args)
+    }
     fn summary(&self, args: &Value) -> String {
         UiFill.summary(args).replacen("填写", "修改并保存", 1)
     }
@@ -157,7 +160,46 @@ impl Tool for UiSet {
     }
 }
 
+/// 按具体按钮记"本会话允许"（D-03）。
+fn target_key(tool: &str, args: &Value) -> String {
+    format!("{tool}#{}", args["target"].as_str().unwrap_or_default())
+}
+
+/// 按改的是哪些字段记"本会话允许"：字段编号排序后拼起来，同一组字段才算同类。
+fn field_key(tool: &str, args: &Value) -> String {
+    let mut ids = args["fields"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|field| field["field"].as_str())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    format!("{tool}#{}", ids.join(","))
+}
+
 pub struct UiClick;
+
+/// 这些按钮在页面上登记成普通点击（不进提交），但会丢掉用户未保存的编辑、停掉正在跑的预处理或建例。
+/// 原来 `ui_click` 一律只读级、不审批，助手或网页里的提示注入一点就丢（GUI 审查 G-03）。逐次审批，
+/// 不沿用"本会话允许"。
+fn destructive_click(args: &Value) -> bool {
+    args["target"].as_str().is_some_and(|target| {
+        matches!(
+            target,
+            "case-discard"
+                | "resource-discard"
+                | "process-settings-cancel"
+                | "multisite-clear"
+                | "configuration-tracers-remove"
+                | "configuration-stomatal-reset"
+                | "prep-stop"
+                | "new-scan-stop"
+                | "new-cancel-creation"
+        )
+    })
+}
 
 impl Tool for UiClick {
     fn name(&self) -> &'static str {
@@ -174,8 +216,26 @@ impl Tool for UiClick {
     fn tier(&self) -> Tier {
         Tier::Read
     }
+    fn tier_for(&self, args: &Value) -> Tier {
+        if destructive_click(args) {
+            Tier::Act
+        } else {
+            Tier::Read
+        }
+    }
+    fn session_allowance_for(&self, args: &Value) -> bool {
+        !destructive_click(args)
+    }
+    fn allowance_key(&self, args: &Value) -> String {
+        target_key(self.name(), args)
+    }
     fn summary(&self, args: &Value) -> String {
-        format!("点击 {}", args["target"].as_str().unwrap_or_default())
+        let target = args["target"].as_str().unwrap_or_default();
+        if destructive_click(args) {
+            format!("点击 {target}（会丢掉未保存的编辑或停止正在进行的处理）")
+        } else {
+            format!("点击 {target}")
+        }
     }
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value> {
         ui(ctx)?.request("click", json!({ "target": req_str(args, "target")? }))
@@ -269,6 +329,9 @@ impl Tool for UiCommit {
     }
     fn session_allowance_for(&self, args: &Value) -> bool {
         !code_commit(args) && !always_confirm(args)
+    }
+    fn allowance_key(&self, args: &Value) -> String {
+        target_key(self.name(), args)
     }
     fn summary(&self, args: &Value) -> String {
         format!(

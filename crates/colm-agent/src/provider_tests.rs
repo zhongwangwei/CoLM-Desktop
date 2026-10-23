@@ -856,3 +856,19 @@ fn provider_debug_redacts_the_api_key() {
     assert!(!text.contains("sk-secret-value"), "{text}");
     assert!(text.contains("<set>"), "{text}");
 }
+
+#[test]
+fn a_cancelled_stream_stops_at_the_next_line() {
+    // 点"停止"之后不再读模型流（G-02）：第一段之后置位，第二段不再交出去。
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let wire = "data: {\"a\":1}\n\ndata: {\"a\":2}\n\ndata: [DONE]\n";
+    let mut seen = Vec::new();
+    let error = crate::provider::read_sse_cancellable(wire.as_bytes(), &cancel, |data| {
+        seen.push(data.to_owned());
+        cancel.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+    .unwrap_err();
+    assert_eq!(error.to_string(), "cancelled");
+    assert_eq!(seen, ["{\"a\":1}"]);
+}

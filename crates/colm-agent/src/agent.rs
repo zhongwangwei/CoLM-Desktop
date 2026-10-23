@@ -115,7 +115,7 @@ impl Agent<'_> {
                 &*history
             };
             let mut final_events = Vec::new();
-            let mut turn = self.provider.complete(
+            let mut turn = self.provider.complete_cancellable(
                 messages,
                 if finalizing { &[] } else { &tools },
                 &mut |event| {
@@ -128,7 +128,12 @@ impl Agent<'_> {
                         StreamEvent::Reasoning(text) => Outbound::ReasoningDelta { text },
                     })
                 },
+                cancel,
             )?;
+            // 停止之后才返回的这次生成不算数：不记进历史，也不当成正常结束发 usage 与 turn_done（G-02）。
+            if cancel.load(Ordering::SeqCst) {
+                bail!("cancelled");
+            }
             outcome.steps = step;
             outcome.usage.prompt_tokens += turn.usage.prompt_tokens;
             outcome.usage.completion_tokens += turn.usage.completion_tokens;
@@ -235,11 +240,12 @@ pub fn execute_tool(
     let summary = tool.summary(&args);
     let tier = tool.tier_for(&args);
     let session_allowance = tool.session_allowance_for(&args);
+    let allowance = tool.allowance_key(&args);
     let preapproved = tier.needs_approval()
         && !tool.requires_explicit_approval()
         && !approver.recovery_requires_approval()
         && (session_allowance || (approver.auto_policy() && tier == Tier::Act))
-        && approver.preapproved(&call.name, tier);
+        && approver.preapproved(&allowance, tier);
     emit(Outbound::ToolCall {
         id: call.id.clone(),
         name: call.name.clone(),
@@ -271,7 +277,7 @@ pub fn execute_tool(
             && session_allowance
             && !approver.recovery_requires_approval()
         {
-            approver.remember(&call.name);
+            approver.remember(&allowance);
         }
         if let Decision::Deny(note) = decision {
             let text = match note {

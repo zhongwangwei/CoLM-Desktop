@@ -402,6 +402,7 @@ pub(super) fn complete_http(
     messages: &[Message],
     tools: &[Value],
     on_event: &mut dyn FnMut(StreamEvent),
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Turn> {
     validate(c)?;
     if c.model.trim().is_empty() {
@@ -432,7 +433,7 @@ pub(super) fn complete_http(
     if !(200..300).contains(&status) {
         return Err(service_error(c, status, response.into_body().as_reader()));
     }
-    parse_stream(c, response.into_body().as_reader(), on_event)
+    parse_stream_cancellable(c, response.into_body().as_reader(), on_event, cancel)
 }
 
 fn validate_turn(turn: &Turn) -> Result<()> {
@@ -452,17 +453,32 @@ fn validate_turn(turn: &Turn) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn parse_stream(
     c: &ProviderConfig,
     reader: impl Read,
     on_event: &mut dyn FnMut(StreamEvent),
+) -> Result<Turn> {
+    parse_stream_cancellable(
+        c,
+        reader,
+        on_event,
+        &std::sync::atomic::AtomicBool::new(false),
+    )
+}
+
+pub(super) fn parse_stream_cancellable(
+    c: &ProviderConfig,
+    reader: impl Read,
+    on_event: &mut dyn FnMut(StreamEvent),
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<Turn> {
     let mut chat = StreamAssembler::default();
     let mut turn = Turn::default();
     let mut items = std::collections::BTreeMap::<u64, Value>::new();
     let mut complete = false;
     let mut bytes = 0usize;
-    let done = read_sse(reader, |data| {
+    let done = super::read_sse_cancellable(reader, cancel, |data| {
         bytes = bytes.saturating_add(data.len());
         if bytes > 16 * 1024 * 1024 {
             bail!("model stream exceeded size limit");

@@ -142,6 +142,17 @@ pub trait Provider: Send + Sync {
         tools: &[Value],
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<Turn>;
+    /// 同 [`Provider::complete`]，但 `cancel` 置位后在读到下一段流时就停下来。原来 SSE 读到底才返回：点"停止"之后
+    /// 模型照样生成，最长要等到服务商超时（GUI 审查 G-02）。缺省不能中途停（测试用的脚本服务商）。
+    fn complete_cancellable(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(StreamEvent),
+        _cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Turn> {
+        self.complete(messages, tools, on_event)
+    }
 }
 
 fn qwen_38(config: &ProviderConfig) -> bool {
@@ -298,8 +309,20 @@ impl StreamAssembler {
 }
 
 /// 逐行读 SSE：`data: {...}` 交给 `on_data`，遇到 `data: [DONE]` 结束。注释行与空行忽略。
-pub fn read_sse(reader: impl Read, mut on_data: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+pub fn read_sse(reader: impl Read, on_data: impl FnMut(&str) -> Result<()>) -> Result<bool> {
+    read_sse_cancellable(reader, &std::sync::atomic::AtomicBool::new(false), on_data)
+}
+
+/// 同 [`read_sse`]，每读一行查一次 `cancel`，置位就以 `cancelled` 结束。
+pub fn read_sse_cancellable(
+    reader: impl Read,
+    cancel: &std::sync::atomic::AtomicBool,
+    mut on_data: impl FnMut(&str) -> Result<()>,
+) -> Result<bool> {
     for line in BufReader::new(reader.take(16 * 1024 * 1024 + 1)).lines() {
+        if cancel.load(std::sync::atomic::Ordering::SeqCst) {
+            bail!("cancelled");
+        }
         let line = line.context("the model stream was interrupted")?;
         let Some(data) = line.strip_prefix("data:") else {
             continue;
@@ -341,7 +364,23 @@ impl Provider for OpenAiCompatible {
         tools: &[Value],
         on_event: &mut dyn FnMut(StreamEvent),
     ) -> Result<Turn> {
-        complete_http(&self.config, &self.agent, messages, tools, on_event)
+        complete_http(
+            &self.config,
+            &self.agent,
+            messages,
+            tools,
+            on_event,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+    fn complete_cancellable(
+        &self,
+        messages: &[Message],
+        tools: &[Value],
+        on_event: &mut dyn FnMut(StreamEvent),
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> Result<Turn> {
+        complete_http(&self.config, &self.agent, messages, tools, on_event, cancel)
     }
 }
 

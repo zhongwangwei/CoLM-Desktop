@@ -122,3 +122,33 @@ fn ui_tools_forward_to_the_window_and_only_set_and_commit_need_approval() {
     // 没有窗口可驱动时报错，不假装成功。
     assert!(UiState.call(&json!({}), &ToolContext::default()).is_err());
 }
+
+#[test]
+fn clicks_that_drop_edits_or_stop_work_need_approval_every_time() {
+    for target in [
+        "case-discard",
+        "resource-discard",
+        "prep-stop",
+        "new-cancel-creation",
+    ] {
+        let args = json!({ "target": target });
+        assert_eq!(UiClick.tier_for(&args), Tier::Act, "{target}");
+        assert!(!UiClick.session_allowance_for(&args), "{target}");
+    }
+    let args = json!({ "target": "case-tab-output" });
+    assert_eq!(UiClick.tier_for(&args), Tier::Read);
+}
+
+#[test]
+fn session_approval_covers_one_button_or_one_set_of_fields_not_the_whole_tool() {
+    // 批准一次"保存设置"不能顺带放行运行、写回（D-03）。
+    let save = UiCommit.allowance_key(&json!({ "target": "case-save" }));
+    let run = UiCommit.allowance_key(&json!({ "target": "run-submit" }));
+    assert_ne!(save, run);
+    assert_eq!(save, "ui_commit#case-save");
+    let a = UiSet.allowance_key(&json!({ "fields": [{ "field": "b" }, { "field": "a" }] }));
+    let b = UiSet.allowance_key(&json!({ "fields": [{ "field": "a" }, { "field": "b" }] }));
+    let c = UiSet.allowance_key(&json!({ "fields": [{ "field": "a" }] }));
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+}

@@ -399,6 +399,11 @@ pub trait Tool: Send + Sync {
     fn session_allowance_for(&self, _args: &Value) -> bool {
         self.session_allowance()
     }
+    /// "本会话允许同类操作"记住的范围。缺省是工具名；界面工具一个名字管着所有按钮和字段，改成"工具 + 具体按钮/字段"：
+    /// 原来批准一次"保存设置"，之后所有 ui_commit（运行、写回、冻结）都不再问（GUI 审查 D-03）。
+    fn allowance_key(&self, _args: &Value) -> String {
+        self.name().to_owned()
+    }
     /// Destructive or restorative actions always require a fresh decision, even in Auto mode.
     fn requires_explicit_approval(&self) -> bool {
         false
