@@ -6,6 +6,24 @@ import { usePageContract, type UiField } from '../../lib/guide';
 import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import CodeFiles from './CodeFiles';
+/** 选来打开源码的本地程序（VS Code、记事本……）；空着就用系统默认程序。每台机器各记各的。 */
+const EDITOR_KEY = 'colm.externalEditor';
+function storedEditor(): string {
+  try {
+    return globalThis.localStorage?.getItem(EDITOR_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+function storeEditor(app: string) {
+  try {
+    if (app) globalThis.localStorage?.setItem(EDITOR_KEY, app);
+    else globalThis.localStorage?.removeItem(EDITOR_KEY);
+  } catch {
+    /* 存不下就只在这次会话里用 */
+  }
+}
+type Snapshot = { applied: { short?: string; files: string[] } | null };
 type Status = {
   workspace?: { base_commit?: string };
   changed_files?: { path: string; added?: number; removed?: number }[];
@@ -36,7 +54,9 @@ export default function CodeWorkspace({
     [commit, setCommit] = useState(''),
     [action, setAction] = useState('test-drift'),
     [preset, setPreset] = useState('default'),
-    [pkg, setPkg] = useState('colm-core');
+    [pkg, setPkg] = useState('colm-core'),
+    [editor, setEditor] = useState(storedEditor),
+    [snapshotNote, setSnapshotNote] = useState('');
   const lock = useRef(false),
     epoch = useRef({ active: false });
   useEffect(() => {
@@ -56,6 +76,44 @@ export default function CodeWorkspace({
       token.active = false;
     };
   }, [name]);
+  // 用本地软件改过的文件：打开这个版本时、窗口回到前台时检查一次，有改动就记成一次提交，差异列表、
+  // 编译与冻结随之看得到它们。不用用户记得点"保存"。
+  useEffect(() => {
+    if (!name || disabled) return;
+    let live = true;
+    const check = () => {
+      if (!live || lock.current) return;
+      void invokeJson<Snapshot>('workspace_snapshot', { name })
+        .then(async (result) => {
+          if (!live || !result.applied) return;
+          const files = result.applied.files;
+          setSnapshotNote(
+            t(
+              `已记下在本地软件里改的 ${files.length} 个文件：${files.slice(0, 5).join('、')}${files.length > 5 ? ' 等' : ''}`,
+              `Recorded ${files.length} file${files.length === 1 ? '' : 's'} changed in a local app: ${files.slice(0, 5).join(', ')}${files.length > 5 ? ' …' : ''}`,
+            ),
+          );
+          setStatus(await invokeJson<Status>('workspace_status', { name }));
+          await onChanged();
+        })
+        .catch((e) => {
+          if (live) setError(String(e));
+        });
+    };
+    check();
+    globalThis.addEventListener?.('focus', check);
+    return () => {
+      live = false;
+      globalThis.removeEventListener?.('focus', check);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [name, disabled]);
+  async function chooseEditor() {
+    const app = await invoke<string | null>('pick_file', { key: 'external-editor' });
+    if (!app) return;
+    storeEditor(app);
+    setEditor(app);
+  }
   async function execute(fn: () => Promise<unknown>, refresh = true) {
     if (lock.current || disabled) return;
     lock.current = true;
@@ -211,6 +269,7 @@ export default function CodeWorkspace({
           <>
             <CodeFiles
               name={name}
+              editor={editor}
               message={message}
               en={state.language === 'en'}
               disabled={busy || disabled}
@@ -219,6 +278,66 @@ export default function CodeWorkspace({
                 await onChanged();
               }}
             />
+            <div className="button-row">
+              <ActionButton
+                action="workspace-open-folder"
+                label={t('用本地软件打开源码文件夹', 'Open the source folder in a local app')}
+                disabled={disabled || busy}
+                run={() =>
+                  run(
+                    () => invoke('workspace_open', { name, path: null, app: editor || null }),
+                    false,
+                  )
+                }
+              />
+              <ActionButton
+                action="workspace-choose-editor"
+                label={t('选择用哪个程序打开…', 'Choose the app to open with…')}
+                disabled={disabled || busy}
+                run={chooseEditor}
+              />
+              {editor && (
+                <Button
+                  disabled={disabled || busy}
+                  onClick={() => {
+                    storeEditor('');
+                    setEditor('');
+                  }}
+                >
+                  {t('改用系统默认程序', 'Use the system default')}
+                </Button>
+              )}
+              <ActionButton
+                action="workspace-snapshot"
+                label={t('检查本地软件的修改', 'Check for changes made in local apps')}
+                disabled={disabled || busy}
+                run={() =>
+                  run(async () => {
+                    const result = await invokeJson<Snapshot>('workspace_snapshot', { name });
+                    setSnapshotNote(
+                      result.applied
+                        ? t(
+                            `已记下 ${result.applied.files.length} 个文件的修改`,
+                            `Recorded changes to ${result.applied.files.length} file${result.applied.files.length === 1 ? '' : 's'}`,
+                          )
+                        : t('没有新的修改', 'No new changes'),
+                    );
+                    if (result.applied) await onChanged();
+                    return result;
+                  })
+                }
+              />
+            </div>
+            <p className="muted">
+              {editor
+                ? t(`用 ${editor} 打开。`, `Opens with ${editor}.`)
+                : t('用系统默认程序打开。', 'Opens with the system default app.')}
+              {t(
+                '在 VS Code、记事本等任何软件里改源码，回到这里时会自动记下和原版的差异；被 .gitignore 忽略的编译产物和编辑器自己的设置文件不算修改，黄金参考（oracle/golden）不能改。',
+                ' Edit the source in VS Code, Notepad or any app; when you come back the differences from the official source are recorded automatically. Build outputs ignored by .gitignore and editor settings do not count, and the golden references (oracle/golden) cannot be changed.',
+              )}
+            </p>
+            {snapshotNote && <Notice tone="success">{snapshotNote}</Notice>}
             <ActionButton
               action="workspace-patch"
               label={t('导入补丁', 'Import patch')}

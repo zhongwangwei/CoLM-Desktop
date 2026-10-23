@@ -116,3 +116,49 @@ fn protected_paths_links_and_dirty_trees_are_refused() {
         .to_string();
     assert!(error.contains("uncommitted"), "{error}");
 }
+
+#[test]
+fn edits_made_with_outside_editors_are_snapshotted_against_the_official_source() {
+    let (_root, ws) = fresh("files-external");
+    assert!(
+        snapshot_external(&ws).unwrap().is_none(),
+        "nothing changed yet"
+    );
+    // VS Code 改了一个模块、新建了一个文件，还留下了它自己的设置和交换文件。
+    let module = ws.src().join(MODULE);
+    let text = std::fs::read_to_string(&module).unwrap();
+    std::fs::write(&module, text.replace("k = 2.0", "k = 4.0")).unwrap();
+    std::fs::create_dir_all(ws.src().join("vendor/CoLM202X/extra")).unwrap();
+    std::fs::write(
+        ws.src().join("vendor/CoLM202X/extra/MOD_X.F90"),
+        "MODULE X\nEND MODULE\n",
+    )
+    .unwrap();
+    std::fs::create_dir_all(ws.src().join(".vscode")).unwrap();
+    std::fs::write(ws.src().join(".vscode/settings.json"), "{}").unwrap();
+    std::fs::write(ws.src().join("vendor/CoLM202X/main/.MOD_Demo.F90.swp"), "x").unwrap();
+    let applied = snapshot_external(&ws).unwrap().unwrap();
+    let mut files = applied.files.clone();
+    files.sort();
+    assert_eq!(files, ["vendor/CoLM202X/extra/MOD_X.F90", MODULE]);
+    assert!(!git::is_dirty(&ws.src()).unwrap());
+    let changed = ws
+        .changes_from_official()
+        .unwrap()
+        .into_iter()
+        .map(|change| change.path)
+        .collect::<Vec<_>>();
+    assert!(changed.contains(&MODULE.to_string()), "{changed:?}");
+    assert!(!changed
+        .iter()
+        .any(|path| path.contains(".vscode") || path.ends_with(".swp")));
+    assert!(
+        snapshot_external(&ws).unwrap().is_none(),
+        "a second look finds nothing new"
+    );
+    // 黄金参考在外部被改了：拒绝记下，并说出是哪个文件。
+    std::fs::create_dir_all(ws.src().join("oracle/golden")).unwrap();
+    std::fs::write(ws.src().join("oracle/golden/answer.txt"), "changed").unwrap();
+    let error = format!("{:#}", snapshot_external(&ws).unwrap_err());
+    assert!(error.contains("oracle/golden/answer.txt"), "{error}");
+}

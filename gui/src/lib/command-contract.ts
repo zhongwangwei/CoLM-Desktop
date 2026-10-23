@@ -2487,6 +2487,26 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "workspace_snapshot": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "workspace_open": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "path": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "app": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
   "workspace_diff": {
     "name": {
       "required": true,

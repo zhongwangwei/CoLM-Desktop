@@ -218,6 +218,7 @@ fn action_kind(command: &str) -> Option<&'static str> {
         | "ws-create"
         | "ws-patch"
         | "ws-write"
+        | "ws-snapshot"
         | "ws-put"
         | "ws-put-dir"
         | "ws-rm"

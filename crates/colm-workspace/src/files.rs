@@ -88,6 +88,89 @@ fn commit(workspace: &Workspace, path: &str, message: &str) -> Result<Applied> {
     })
 }
 
+/// 编辑器自己留下的东西：不是对模型的修改，记进快照会被当成"相对原版改了"。写进仓库自己的
+/// `.git/info/exclude`（只对本地生效，不进版本库）。
+const EDITOR_LEFTOVERS: [&str; 9] = [
+    ".vscode/",
+    ".idea/",
+    ".DS_Store",
+    "Thumbs.db",
+    "*.swp",
+    "*.swo",
+    "*~",
+    "*.orig",
+    "*.bak",
+];
+
+fn exclude_editor_leftovers(src: &Path) -> Result<()> {
+    let path = src.join(".git/info/exclude");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let missing = EDITOR_LEFTOVERS
+        .iter()
+        .filter(|pattern| !existing.lines().any(|line| line.trim() == **pattern))
+        .collect::<Vec<_>>();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text.push_str("# CoLM Desktop：外部编辑器留下的文件不算对模型的修改\n");
+    for pattern in missing {
+        text.push_str(pattern);
+        text.push('\n');
+    }
+    std::fs::write(&path, text)?;
+    Ok(())
+}
+
+/// 用本地软件（VS Code、记事本……）在工作区里改过的文件，记成一次提交，于是和原版的差异、编译与
+/// 冻结都看得到它们。没改什么就返回 `None`。规则与界面里改同：不能碰黄金参考与 `.git`；
+/// 被 `.gitignore` 忽略的编译产物不记。
+pub fn snapshot_external(workspace: &Workspace) -> Result<Option<Applied>> {
+    let src = workspace.src();
+    exclude_editor_leftovers(&src)?;
+    let status = git::run(
+        &src,
+        &["status", "--porcelain", "-z", "--untracked-files=all"],
+    )?;
+    let mut files = Vec::new();
+    let mut entries = status.split('\0').filter(|entry| !entry.is_empty());
+    while let Some(entry) = entries.next() {
+        let Some(path) = entry.get(3..) else {
+            continue;
+        };
+        // 改名的那一项后面紧跟原来的名字，原名不单独算一个改动。
+        if entry.starts_with('R') || entry.starts_with('C') {
+            entries.next();
+        }
+        check_path(path).with_context(|| format!("{path} was changed outside the app"))?;
+        files.push(path.to_owned());
+    }
+    if files.is_empty() {
+        return Ok(None);
+    }
+    git::run(&src, &["add", "-A"])?;
+    let shown = files.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let more = files.len().saturating_sub(5);
+    let message = if more > 0 {
+        format!("ws: external edit of {shown} and {more} more")
+    } else {
+        format!("ws: external edit of {shown}")
+    };
+    git::run(&src, &["commit", "-q", "-m", &message])?;
+    let commit = git::head(&src)?;
+    Ok(Some(Applied {
+        short: git::short(&src, &commit)?,
+        commit,
+        files,
+    }))
+}
+
 /// 列出一个目录（空串是源码根目录）；不列 `.git`。
 pub fn list(workspace: &Workspace, dir: &str) -> Result<Vec<Entry>> {
     let base = if dir.is_empty() {

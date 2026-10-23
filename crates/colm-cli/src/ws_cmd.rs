@@ -255,6 +255,8 @@ pub(super) fn dispatch(command: &str, opts: &Opts) -> Result<()> {
             "entries": files::list(&open(opts)?, &opts.get("--dir").unwrap_or_default())?
         })),
         "ws-file" => print(json!(files::read(&open(opts)?, &opts.need_str("--path")?)?)),
+        // 用本地软件改过的文件记成一次提交（界面回到前台、打开版本时调；没改什么就是 null）。
+        "ws-snapshot" => print(json!({ "applied": files::snapshot_external(&open(opts)?)? })),
         "ws-write" => {
             let file = opts.need_str("--text-file")?;
             let text =

@@ -483,6 +483,7 @@ export function historyKindLabel(kind: string, en = false): string {
     'ws-readiness': ['检查工作区', 'Check workspace'],
     'ws-regress': ['工作区回归检查', 'Workspace regression check'],
     'ws-write': ['修改代码文件', 'Edit code file'],
+    'ws-snapshot': ['记下外部软件的代码修改', 'Record code edits made in a local app'],
     'ws-put': ['写入代码文件', 'Write code file'],
     'ws-put-dir': ['写入代码目录', 'Write code folder'],
     'ws-rm': ['删除代码文件', 'Delete code file'],

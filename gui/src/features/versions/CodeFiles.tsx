@@ -28,6 +28,7 @@ export default function CodeFiles({
   disabled,
   onChanged,
   source,
+  editor = '',
 }: {
   name: string;
   message: string;
@@ -35,6 +36,8 @@ export default function CodeFiles({
   disabled: boolean;
   onChanged: () => Promise<void>;
   source?: { id: string; revision: number };
+  /** 用来打开文件的本地程序（`CodeWorkspace` 里选的）；空着用系统默认程序。 */
+  editor?: string;
 }) {
   const readOnly = !!source;
   const t = (zh: string, english: string) => (en ? english : zh);
@@ -333,6 +336,18 @@ export default function CodeFiles({
                     {t('放弃修改', 'Discard edits')}
                   </Button>
                 )}
+                <ActionButton
+                  action="code-file-open-external"
+                  label={t('用本地软件打开', 'Open in a local app')}
+                  disabled={busy || disabled}
+                  run={() =>
+                    invoke('workspace_open', { name, path: open.path, app: editor || null }).catch(
+                      (e) => setError(String(e)),
+                    )
+                  }
+                >
+                  {t('用本地软件打开', 'Open in a local app')}
+                </ActionButton>
                 <ActionButton
                   action="code-file-replace"
                   label={t('用本机文件替换…', 'Replace from this computer…')}

@@ -189,7 +189,7 @@ usage:
                    # 列出全部支持的评估变量及当前算例/观测是否可用
   colm-cli evaluation-plan <case-dir> --obs <Flux.nc> --kernel <dir>
                    # 不依赖 history，按 case.nml + 内核预览可评估目标
-  colm-cli ws-create|ws-note|ws-list|ws-status|ws-search|ws-read|ws-symbols|ws-patch|ws-ls|ws-file|ws-write|ws-put|ws-put-dir|ws-rm|ws-revert|ws-build-engine|ws-build-kernel|
+  colm-cli ws-create|ws-note|ws-list|ws-status|ws-search|ws-read|ws-symbols|ws-patch|ws-ls|ws-file|ws-write|ws-snapshot|ws-put|ws-put-dir|ws-rm|ws-revert|ws-build-engine|ws-build-kernel|
                     ws-test|ws-run|ws-compare|ws-parity|ws-regress|ws-kernels|ws-export|ws-delete ...
                     # 开发工作区：助手改源码、编译、测试、对照、登记实验内核（用法见 ws_cmd.rs 头部）
   colm-cli history-subset <case-dir> --out <dir> [--vars f_a,f_b] [--from YYYY-MM] [--to YYYY-MM] [--compress N] [--list 1]

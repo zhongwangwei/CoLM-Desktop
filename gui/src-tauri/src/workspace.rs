@@ -230,6 +230,75 @@ pub async fn workspace_status(name: String) -> Result<Value, String> {
     cli_json(args("ws-status", &["--name", &name]), None).await
 }
 
+/// 把用本地软件（VS Code、记事本……）改过的文件记成一次提交。回到软件、打开这个版本时调；
+/// 没改什么就返回 `{"applied": null}`。
+#[tauri::command]
+pub async fn workspace_snapshot(name: String) -> Result<Value, String> {
+    valid_name(&name)?;
+    cli_json(args("ws-snapshot", &["--name", &name]), None).await
+}
+
+/// 用本地软件打开工作区源码里的文件或文件夹（`path` 为空就是源码根目录）。`app` 为空用系统默认程序，
+/// 否则用这个程序打开（macOS 是 `.app`，其他平台是可执行文件）。改完回到软件会自动记下差异。
+#[tauri::command]
+pub async fn workspace_open(
+    name: String,
+    path: Option<String>,
+    app: Option<String>,
+) -> Result<(), String> {
+    valid_name(&name)?;
+    let path = path.filter(|p| !p.trim().is_empty());
+    if let Some(path) = &path {
+        checked_path(path)?;
+    }
+    let status = cli_json(args("ws-status", &["--name", &name]), None).await?;
+    let dir = status
+        .get("dir")
+        .and_then(Value::as_str)
+        .ok_or("工作区状态里没有目录")?;
+    let mut target = PathBuf::from(dir).join("src");
+    if let Some(path) = &path {
+        target.extend(path.split('/'));
+    }
+    if !target.exists() {
+        return Err(format!("{} 不存在", target.display()));
+    }
+    match app.map(|a| a.trim().to_owned()).filter(|a| !a.is_empty()) {
+        None => crate::project::open_path(target.to_string_lossy().into_owned()),
+        Some(app) => open_with(&app, &target),
+    }
+}
+
+fn open_with(app: &str, target: &std::path::Path) -> Result<(), String> {
+    if !std::path::Path::new(app).exists() {
+        return Err(format!("找不到程序 {app}"));
+    }
+    // macOS 的程序是 `.app` 目录，交给 `open -a`：它转交后立即退出，所以等它、并把它的报错带回来。
+    // 其他平台直接启动编辑器本身，编辑器一直开着，不能等。
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg("-a")
+            .arg(app)
+            .arg(target)
+            .status()
+            .map_err(|e| format!("打不开 {app}：{e}"))?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(format!("{app} 没能打开 {}", target.display()))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        std::process::Command::new(app)
+            .arg(target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("打不开 {app}：{e}"))
+    }
+}
+
 /// 工作区里的相对路径：与 `colm-workspace` 的补丁规则一致（拼进命令行前先在这一层挡住）。
 fn checked_path(path: &str) -> Result<(), String> {
     let lower = path.to_ascii_lowercase();

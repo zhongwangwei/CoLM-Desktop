@@ -296,6 +296,8 @@ pub fn run() {
             workspace::workspace_create,
             workspace::workspace_remote,
             workspace::workspace_status,
+            workspace::workspace_snapshot,
+            workspace::workspace_open,
             workspace::workspace_export,
             workspace::workspace_revert,
             workspace::workspace_delete,
