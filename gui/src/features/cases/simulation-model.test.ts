@@ -338,3 +338,10 @@ test('a run bigger than one node plans its nodes from the cores a node has', () 
   assert.match(nodePlanText(plan(96, 1, 48)), /单个进程要 96 个核/);
   assert.equal(nodePlanText(null), '');
 });
+
+test('a simulation folder with spaces is refused at the first step, in both languages', () => {
+  const form = { engine: 'rust', root: '/Users/me/My Projects', name: 'site1' };
+  assert.match(newCaseGeneralProblem(form) ?? '', /不能有空格/);
+  assert.match(newCaseGeneralProblem(form, true) ?? '', /must not contain spaces/);
+  assert.equal(newCaseGeneralProblem({ ...form, root: '/Users/me/projects' }), null);
+});

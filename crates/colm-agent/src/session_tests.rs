@@ -358,3 +358,32 @@ fn conversation_and_audit_files_are_owner_only_on_unix() {
     }
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_resumed_session_keeps_counting_from_its_earlier_usage() {
+    // 续接不能把会话预算清零（D-04）。
+    let root = temp_dir("usage");
+    let mut session = Session::new(Some(&root), "prompt").unwrap();
+    session
+        .push(Message::User {
+            content: "hello".into(),
+        })
+        .unwrap();
+    session.add_usage(Usage {
+        prompt_tokens: 1200,
+        completion_tokens: 30,
+    });
+    session.add_usage(Usage {
+        prompt_tokens: 800,
+        completion_tokens: 20,
+    });
+    let resumed = Session::open(&root, &session.id, "prompt").unwrap();
+    assert_eq!(
+        resumed.usage,
+        Usage {
+            prompt_tokens: 2000,
+            completion_tokens: 50
+        }
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}

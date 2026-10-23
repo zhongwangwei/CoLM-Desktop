@@ -2231,7 +2231,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     action(
       'study-run',
       host ? tr('提交服务器', 'Submit to server') : tr('开始运行', 'Run study'),
-      start,
+      // 前置检查（没勾核对、引擎、并发数……）在 start 进入 try 之前就抛：按钮会吞掉错误，原来页面上什么都不显示
+      //（GUI 审查 C-03）。显示出来，再抛给调用方（助手照样收到）。
+      () =>
+        start().catch((e) => {
+          setError(String(e));
+          throw e;
+        }),
       permissions.run && !!runKernel && confirmed && !launching && !remotePermissions.exists,
       true,
     ),

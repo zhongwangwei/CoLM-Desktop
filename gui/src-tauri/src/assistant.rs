@@ -768,6 +768,9 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
+/// 读一份附件最多等这么久：64 MB、300 页的 PDF 在本机几十秒内能抽完，旧 `.doc` 转换器自己另有 60 s 上限。
+const DOCUMENT_EXTRACT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// 本地文档附件：后端弹文件对话框，让 `colm-agent` 抽用户亲自选的那份 PDF/DOCX/DOC/文本，原件不经过网络。
 /// 返回 `{path, name, title, text, pages, truncated, warnings}`；取消时返回空。路径不由前端传入：原来的
 /// `assistant_extract_document(path)` 收任意路径、认 `.json`，前端就能把明文存 Key 的 `assistant-keys.json`
@@ -784,12 +787,33 @@ pub async fn assistant_pick_document(app: tauri::AppHandle) -> Result<Option<Val
         return Ok(None);
     };
     let mut command = std::process::Command::new(agent_path());
-    command.arg("--extract-document").arg(&path);
-    colm_kernel::run::no_console(&mut command);
+    command
+        .arg("--extract-document")
+        .arg(&path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    colm_kernel::run::top_level_sidecar(&mut command);
     tauri::async_runtime::spawn_blocking(move || {
-        let output = command
-            .output()
+        let child = command
+            .spawn()
             .map_err(|e| format!("cannot start {}: {e}", agent_path().display()))?;
+        // 抽取要有上限：损坏或巨大的 PDF、卡住的 .doc 转换器会让附件一直"读取中"（GUI 审查 D-07）。
+        let pid = child.id();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(child.wait_with_output());
+        });
+        let output = match receiver.recv_timeout(DOCUMENT_EXTRACT_TIMEOUT) {
+            Ok(output) => output.map_err(|e| e.to_string())?,
+            Err(_) => {
+                let _ = crate::sidecar::terminate_process_tree(pid);
+                return Err(format!(
+                    "reading the document took longer than {} seconds and was stopped",
+                    DOCUMENT_EXTRACT_TIMEOUT.as_secs()
+                ));
+            }
+        };
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }

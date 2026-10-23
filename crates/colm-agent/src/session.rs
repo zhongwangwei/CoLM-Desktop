@@ -19,6 +19,28 @@ use crate::protocol::Outbound;
 mod tasks;
 pub use tasks::TaskSnapshot;
 
+/// 会话累计用量的文件名（与 `messages.jsonl` 同目录）。
+const USAGE_FILE: &str = "usage.json";
+
+/// 只有自己能读的小文件，先写临时文件再换名。
+fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
+    let temp = path.with_extension("json.tmp");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    {
+        use std::io::Write;
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+    }
+    std::fs::rename(&temp, path)?;
+    Ok(())
+}
+
 pub struct Session {
     pub id: String,
     dir: Option<PathBuf>,
@@ -67,12 +89,32 @@ impl Session {
                 content.push_str(&context);
             }
         }
+        // 续接时把这个会话以前的用量读回来：原来每次续接都从 0 记起，会话预算形同虚设（GUI 审查 D-04）。
+        let usage = std::fs::read(dir.join(USAGE_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Usage>(&bytes).ok())
+            .unwrap_or_default();
         Ok(Self {
             id: id.to_owned(),
             dir: Some(dir),
             history,
-            usage: Usage::default(),
+            usage,
         })
+    }
+
+    /// 计入一轮的用量，并写进会话目录的 `usage.json`（续接时读回，D-04）。写不成不影响这一轮。
+    pub fn add_usage(&mut self, usage: Usage) -> Usage {
+        self.usage.prompt_tokens += usage.prompt_tokens;
+        self.usage.completion_tokens += usage.completion_tokens;
+        if let Some(dir) = &self.dir {
+            if dir.join("messages.jsonl").exists() {
+                let _ = write_private(
+                    &dir.join(USAGE_FILE),
+                    &serde_json::to_vec(&self.usage).unwrap_or_default(),
+                );
+            }
+        }
+        self.usage
     }
 
     /// 追加一条消息（并写进 `messages.jsonl`）。第一次写时把之前只在内存里的消息（系统提示）一并写出。

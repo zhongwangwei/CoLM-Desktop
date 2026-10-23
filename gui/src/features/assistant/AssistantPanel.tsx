@@ -100,6 +100,11 @@ export default function AssistantPanel() {
         '这台电脑没有 .doc 转换器；请把文件另存为 .docx 或 PDF 再附加。',
         'This computer has no .doc converter; save the file as .docx or PDF and attach it again.',
       );
+    if (text.includes('took longer than'))
+      return t(
+        '这个文件读了两分钟还没读完，已经停下；可能是文件损坏、太大，或转换器卡住了。',
+        'Reading this file took over two minutes and was stopped; it may be damaged or too large, or the converter hung.',
+      );
     if (text.includes('larger than'))
       return t('文件超过附件的体积上限。', 'The file is larger than the attachment size limit.');
     return errorText(message);
@@ -412,7 +417,8 @@ export default function AssistantPanel() {
         )
       : '';
     const prompt = typed || fallback;
-    if (!prompt || runningRef.current || !ready) return;
+    // 附件还在读：先等它读完，否则这条消息不带附件就发出去了，读完的附件又挂到下一条上（GUI 审查 D-07）。
+    if (!prompt || runningRef.current || !ready || attaching) return;
     const documentText = attachments
       .map((attachment) => {
         const name = attachment.name.replaceAll('"', '');
@@ -767,8 +773,10 @@ export default function AssistantPanel() {
           {settings.backend === 'builtin' && settings.web_search && (
             <p className="text-xs text-muted-foreground">
               {t(
-                '其中联网搜索的查询会发往 DeepSeek Search API（api.deepseek.com）；网页内容在本机读取。',
-                'Web search queries are also sent to the DeepSeek Search API (api.deepseek.com); pages are read on this computer.',
+                // 读网页先在本机试，读不了（JS 页面、被站点拦截等）会交给 DeepSeek Fetch：网址和网页内容都经过 DeepSeek。
+                // 原来写"网页内容在本机读取"，和回退行为矛盾（GUI 审查 D-28）。
+                '联网搜索的查询会发往 DeepSeek Search API（api.deepseek.com）；读网页先在本机读取，读不了时会把网址交给 DeepSeek Fetch API，网页内容也会经过 DeepSeek。',
+                'Web search queries go to the DeepSeek Search API (api.deepseek.com); pages are read on this computer first, and when that fails the URL goes to the DeepSeek Fetch API, so the page content also passes through DeepSeek.',
               )}
             </p>
           )}
@@ -861,7 +869,7 @@ export default function AssistantPanel() {
         </Button>
         <Button
           variant="primary"
-          disabled={!ready || running || (!input.trim() && !attachments.length)}
+          disabled={!ready || running || attaching || (!input.trim() && !attachments.length)}
           onClick={() => void send()}
         >
           {t('发送', 'Send')}

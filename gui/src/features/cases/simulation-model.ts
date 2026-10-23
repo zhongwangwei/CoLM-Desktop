@@ -263,11 +263,19 @@ export function newCaseGeneralProblem(form: Record<string, string>, en = false):
   if (!form.root?.trim())
     return t('请选择保存模拟的项目目录。', 'Choose a project folder for this simulation.');
   if (!form.name?.trim()) return t('请填写模拟名称。', 'Enter a simulation name.');
+  let dir: string;
   try {
-    caseDirectory(form.root, form.name);
+    dir = caseDirectory(form.root, form.name);
   } catch {
     return t('请填写有效的模拟名称。', 'Enter a valid simulation name.');
   }
+  // CoLM 用不加引号的 `mkdir -p` 建输出目录，路径里有空格会建错目录、之后报一句误导人的 Permission denied，
+  // 所以后端拒绝。原来到建例最后一步才被后端用英文拒绝（GUI 审查 B-03），这里第一步就说。
+  if (dir.includes(' '))
+    return t(
+      `模拟目录里不能有空格：${dir}。请换一个不含空格的项目目录或模拟名称。`,
+      `The simulation folder must not contain spaces: ${dir}. Choose a project folder and name without spaces.`,
+    );
   return null;
 }
 export function newCaseRangeProblem(form: Record<string, string>, en = false): string | null {

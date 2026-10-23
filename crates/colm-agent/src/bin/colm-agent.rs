@@ -1072,8 +1072,7 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                             session.history = history;
                             session.persist_from(from)?;
                             if let Ok(outcome) = &outcome {
-                                session.usage.prompt_tokens += outcome.usage.prompt_tokens;
-                                session.usage.completion_tokens += outcome.usage.completion_tokens;
+                                session.add_usage(outcome.usage);
                             }
                             session.usage
                         };
@@ -1315,9 +1314,7 @@ impl ExternalTurn {
             if let Some(id) = &resume {
                 session.save_backend_context(self.backend, id, Some(&memory_fingerprint))?;
             }
-            session.usage.prompt_tokens += outcome.usage.prompt_tokens;
-            session.usage.completion_tokens += outcome.usage.completion_tokens;
-            session.usage
+            session.add_usage(outcome.usage)
         };
         let session_turns = {
             let session = self.session.lock().unwrap();

@@ -2,7 +2,12 @@ import { useState } from 'react';
 import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invokeJson } from '../../lib/ipc';
-import { formatBytes, withoutRevisions, type PruneReport } from '../../lib/model-tidy';
+import {
+  formatBytes,
+  selectionAfterPrune,
+  withoutRevisions,
+  type PruneReport,
+} from '../../lib/model-tidy';
 import { Button, Card, Field, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 
@@ -19,7 +24,15 @@ function ModelCacheCard({ t }: { t: (zh: string, en: string) => string }) {
       const result = await invokeJson<PruneReport>('model_prune', { dryRun });
       setReport(result);
       if (!dryRun) {
-        update((old) => ({ versions: withoutRevisions(old.versions, result.removed) }));
+        // 和启动期整理一样：当前选中的修订若被删了，回到最新的保留版本，不留悬空的 versionRef（GUI 审查 C-12）。
+        update((old) => {
+          const version = selectionAfterPrune(old.versions, result.removed, old.versionRef);
+          return {
+            versions: withoutRevisions(old.versions, result.removed),
+            version,
+            ...(version ? { versionRef: version.version } : {}),
+          };
+        });
         setMessage(
           t(
             `已整理 ${result.removed.length} 个旧官方修订，释放 ${formatBytes(result.bytes)}`,
