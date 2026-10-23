@@ -27,6 +27,7 @@ import {
   sensitivityResponses,
   sensitivityRanking,
   calibrationSeed,
+  plannedCandidates,
   suggestedRange,
   suggestedWindows,
   type ParameterContext,
@@ -588,10 +589,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     task(async (current) => {
       if (!sites.length || !kernel)
         throw new Error(tr('请先选算例和编译配置', 'Select cases and a build configuration'));
+      // 被别的设计改动打断（epoch 变了）就清掉"已读过"的标记：这次任务结束时 busy 翻回 false，
+      // 自动读取的 effect 会按当前算例重读。原来标记留着，同一次更新里既换算例又进第 2 步时
+      //（敏感性"带入率定"）读取被丢弃、再也不读，参数表一直是空的（2026-10-23 真实窗口实测）。
+      const superseded = () => {
+        loadedFor.current = '';
+      };
       const effective = [];
       for (const path of sites) {
         effective.push(await effectiveCase(path));
-        if (!current()) return;
+        if (!current()) return superseded();
       }
       const rows = await invokeJson<ParameterContext[]>('study_parameter_contexts', {
         dirs: effective,
@@ -620,13 +627,13 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           const matched = Object.keys(picked).length;
           setSeedNotice(
             tr(
-              `已按版本页选的参数勾上 ${matched} 个${matched < seed.length ? `；另 ${seed.length - matched} 个在这些算例里没有（比如算例里没有那个地类或植物类型）` : ''}。`,
-              `Ticked ${matched} of the parameters chosen on the version page${matched < seed.length ? `; ${seed.length - matched} do not apply to these cases (for example, the class or plant type is absent)` : ''}.`,
+              `已勾上带来的 ${matched} 个参数${matched < seed.length ? `；另 ${seed.length - matched} 个在这些算例里没有（比如算例里没有那个地类或植物类型）` : ''}。`,
+              `Ticked ${matched} of the parameters brought along${matched < seed.length ? `; ${seed.length - matched} do not apply to these cases (for example, the class or plant type is absent)` : ''}.`,
             ),
           );
           update({ researchSeed: null });
         }
-      }
+      } else superseded();
       return rows;
     });
   // 只有湍流通量有能量闭合订正版（`colm_hist::obs::corrected`）。
@@ -2992,15 +2999,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       };
       return { ...old, [String(i)]: withSuggestedRange(row, { ...p, ...patch }) };
     });
-  const plannedTotal = (() => {
-    const b = frozenSpec?.budget as Record<string, unknown> | undefined;
-    if (!b) return null;
-    const c = Number(b.candidate_count);
-    if (c > 0) return c;
-    const p = Number(b.population),
-      g = Number(b.generations);
-    return p > 0 && g >= 0 ? p * (g + 1) : null;
-  })();
+  const plannedTotal = plannedCandidates(frozenSpec);
   const ranked = Object.entries(envelope?.state?.candidates ?? {})
     .sort(
       ([, a], [, b]) =>
@@ -3122,8 +3121,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       {state.researchSeed?.parameters.length && !contexts.length ? (
         <Notice>
           {tr(
-            `从版本页带来 ${state.researchSeed.parameters.length} 个参数，读出参数后会自动勾上。`,
-            `${state.researchSeed.parameters.length} parameters came from the version page and are ticked once loaded.`,
+            `带来了 ${state.researchSeed.parameters.length} 个参数，读出参数后会自动勾上。`,
+            `${state.researchSeed.parameters.length} parameters were brought along and are ticked once loaded.`,
           )}
         </Notice>
       ) : null}

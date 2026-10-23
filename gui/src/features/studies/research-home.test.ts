@@ -24,6 +24,7 @@ import {
   studyPermissions,
   calibrationSeed,
   frozenDesign,
+  plannedCandidates,
   sensitivityRanking,
   sensitivityResponses,
   studyDiagnostics,
@@ -552,6 +553,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     studyPermissions,
     calibrationSeed,
     frozenDesign,
+    plannedCandidates,
     sensitivityRanking,
     sensitivityResponses,
     studyDiagnostics,
@@ -1219,4 +1221,17 @@ it('a finished uncertainty study shows its sensitivity ranking with the top para
     )
     .map((n) => n.props['aria-label']);
   assert.deepEqual(ticked, ['DEF_A', 'DEF_D', 'DEF_C'], 'zero-impact DEF_B is left out');
+});
+it('a parameter read cut short by another design change lets step 2 read again', async () => {
+  const loadedFor = { current: '/kernel|/p/AT-Neu|' };
+  const load = pageCallback('loadContexts', {
+    task: async (fn: (current: () => boolean) => Promise<unknown>) => await fn(() => false),
+    sites: ['/p/AT-Neu'],
+    kernel: '/kernel',
+    tr: (zh: string) => zh,
+    effectiveCase: async (path: string) => path,
+    loadedFor,
+  });
+  await load();
+  assert.equal(loadedFor.current, '', 'the stale read clears the marker so the effect reads again');
 });

@@ -11,6 +11,7 @@ import {
   gridTargetDefaults,
   gridTargetSpec,
   memberVerdict,
+  plannedCandidates,
   networkSpec,
   networkDefaults,
   parameterSpec,
@@ -544,5 +545,32 @@ it('a Morris budget counts trajectories times parameters plus one', () => {
   assert.throws(
     () => candidateBudget('uncertainty', 'morris', 3, 1, 0, 0, 1),
     /至少要 2 条轨迹|at least two trajectories/,
+  );
+});
+
+it('planned samples follow each method, not the raw candidate_count', () => {
+  const parameters = [{}, {}, {}, {}];
+  assert.equal(
+    plannedCandidates({ method: 'morris', parameters, budget: { candidate_count: 8 } }),
+    40,
+  );
+  assert.equal(plannedCandidates({ method: 'morris', parameters, budget: {} }), 50);
+  assert.equal(plannedCandidates({ method: 'oat', parameters, budget: {} }), 8);
+  assert.equal(
+    plannedCandidates({ method: 'lhs', parameters, budget: { candidate_count: 40 } }),
+    40,
+  );
+  assert.equal(
+    plannedCandidates({
+      method: 'differential-evolution',
+      parameters,
+      budget: { population: 10, generations: 4 },
+    }),
+    50,
+  );
+  assert.equal(plannedCandidates(null), null);
+  assert.match(
+    frozenDesign({ method: 'morris', parameters, budget: { candidate_count: 8 } }).budget[0]![0],
+    /Morris 8 条轨迹，共 40 组/,
   );
 });

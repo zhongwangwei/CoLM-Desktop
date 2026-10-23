@@ -389,6 +389,22 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
                     target.variable
                 );
             }
+            // 订正目标要求观测里真有订正版：缺了运行时才发现，基准已经白跑一轮。
+            if let Some(wanted) = target
+                .corrected
+                .then(|| colm_hist::obs::corrected(&row.name))
+                .flatten()
+            {
+                let file = netcdf::open(&observation)
+                    .with_context(|| format!("cannot open {}", observation.display()))?;
+                if file.variable(wanted).is_none() {
+                    bail!(
+                        "target {} asks for energy-balance-corrected {wanted}, but {} has none",
+                        target.key,
+                        observation.display()
+                    );
+                }
+            }
             preflight_observation_window(&observation, site, target, false)?;
             if target.validation_from.is_some() {
                 preflight_observation_window(&observation, site, target, true)?;
@@ -6517,6 +6533,27 @@ mod tests {
         .unwrap();
         let error = preflight_create(&root, &spec).unwrap_err().to_string();
         assert!(error.contains("usable observation"), "{error}");
+        // 订正目标而观测里没有 Qle_cor：预检就拒，不等基准跑完才在评价阶段失败。
+        std::fs::write(
+            &spec,
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "kind": "tuning",
+                "method": "differential-evolution",
+                "kernel_dir": kernel,
+                "base_cases": ["site"],
+                "observations": {"site": observation},
+                "parameters": [{"name":"DEF_TUNING_CNFAC","sample_min":0.4,"sample_max":0.6}],
+                "targets": [{"key":"Qle","variable":"Qle","from":0,"to":10,"min_pairs":2,"corrected":true}],
+                "budget": {"population":4,"generations":1}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let error = preflight_create(&root, &spec).unwrap_err().to_string();
+        assert!(
+            error.contains("energy-balance-corrected Qle_cor"),
+            "{error}"
+        );
         // Windows netCDF may release its final test-file handle after this assertion returns.
         let _ = std::fs::remove_dir_all(root);
     }

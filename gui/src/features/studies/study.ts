@@ -723,7 +723,15 @@ export function frozenDesign(spec: Record<string, unknown> | null) {
       `差分进化：种群 ${budget.population}、迭代 ${budget.generations} 代${budget.include_baseline ? '、默认参数可进初代' : ''}`,
       `Differential evolution: population ${budget.population}, ${budget.generations} generations${budget.include_baseline ? ', baseline may join the first generation' : ''}`,
     ]);
-  if (n(budget.candidate_count) != null)
+  const total = plannedCandidates(spec);
+  if (spec?.method === 'morris')
+    lines.push([
+      `Morris ${morrisTrajectories(spec)} 条轨迹，共 ${total} 组`,
+      `Morris: ${morrisTrajectories(spec)} trajectories, ${total} samples`,
+    ]);
+  else if (spec?.method === 'oat')
+    lines.push([`一次改一个，共 ${total} 组`, `One at a time: ${total} samples`]);
+  else if (n(budget.candidate_count) != null)
     lines.push([`样本 ${budget.candidate_count} 组`, `${budget.candidate_count} samples`]);
   if (n(budget.patience) != null && n(budget.generations) != null)
     lines.push([
@@ -854,4 +862,29 @@ export function calibrationSeed(
       max: String(finite(p.sample_max) ?? ''),
       scale: p.scale === 'log' ? 'log' : 'linear',
     }));
+}
+
+/** 后端 `MORRIS_DEFAULT_TRAJECTORIES`：规格没写轨迹数时用它。 */
+const MORRIS_DEFAULT_TRAJECTORIES = 10;
+const morrisTrajectories = (spec: Record<string, unknown> | null) => {
+  const count = Number((spec?.budget as Record<string, unknown> | undefined)?.candidate_count);
+  return count > 0 ? count : MORRIS_DEFAULT_TRAJECTORIES;
+};
+
+/**
+ * 冻结规格计划跑的参数组数（不含基准），和后端 `default_candidate_count` 同一规则。原来一律取
+ * `candidate_count`：Morris 的它是轨迹数，进度显示成"已完成 40 / 8"；OAT 没写它，进度没有分母
+ *（2026-10-23 真实窗口实测）。
+ */
+export function plannedCandidates(spec: Record<string, unknown> | null): number | null {
+  const budget = spec?.budget as Record<string, unknown> | undefined;
+  if (!spec || !budget) return null;
+  const k = Array.isArray(spec.parameters) ? spec.parameters.length : 0;
+  if (spec.method === 'morris') return morrisTrajectories(spec) * (k + 1);
+  if (spec.method === 'oat') return 2 * k;
+  const count = Number(budget.candidate_count);
+  if (count > 0) return count;
+  const population = Number(budget.population),
+    generations = Number(budget.generations);
+  return population > 0 && generations >= 0 ? population * (generations + 1) : null;
 }
