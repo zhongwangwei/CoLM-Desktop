@@ -204,6 +204,7 @@ jobs:
             mingw-w64-x86_64-netcdf-fortran
             mingw-w64-x86_64-lapack
             mingw-w64-x86_64-msmpi
+            mingw-w64-x86_64-ntldd
 
       - name: Microsoft MPI launcher (Windows)
         if: runner.os == 'Windows'
@@ -273,10 +274,15 @@ jobs:
           #
           # 这里是 `*.exe` 不是 `*.x`：`build_kernel.sh` 在 Windows 上把
           # 拷进内核目录的那份改了名，因为 `PATHEXT` 不含 `.x`。
+          # 清单用 ldd 加 `ntldd -R` 的并集：netcdf 4.10.1 起依赖树深到 ldd 列不全
+          # （见 windows-kernel.yml 同一步的说明）。
           for d in kernels/*/; do
             for x in "$d"*.exe; do
-              ldd "$x" | grep -io '/mingw64/bin/[^ ]*\.dll'
-            done | sort -u | while read -r dll; do cp -n "$dll" "$d"; done
+              ldd "$x"
+              ntldd -R "$x"
+            done | grep -io '[^ \\/]*\.dll' | sort -fu | while read -r name; do
+              if [ -f "/mingw64/bin/$name" ]; then cp -n "/mingw64/bin/$name" "$d"; fi
+            done
             echo "$d: $(ls "$d"*.dll | wc -l) DLLs"
           done
 

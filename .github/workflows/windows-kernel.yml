@@ -56,6 +56,7 @@ jobs:
             mingw-w64-x86_64-netcdf-fortran
             mingw-w64-x86_64-lapack
             mingw-w64-x86_64-msmpi
+            mingw-w64-x86_64-ntldd
 
       - name: What the toolchain actually is
         shell: msys2 {0}
@@ -119,8 +120,16 @@ jobs:
           done
           echo "=== 去重后的清单 ==="
           # 写进文件，下一步（PowerShell）要按它把 DLL 摆到二进制旁边。
-          for p in mksrfdata mkinidata colm; do ldd "kernels/default/$p.exe"; done \
-            | grep -io '/mingw64/bin/[^ ]*\.dll' | sort -u | tee dlls.txt
+          # 2026-10-23：MSYS2 的 netcdf 4.10.1 带上了 S3（aws-sdk-cpp、curl、ngtcp2……），依赖树深到
+          # MSYS2 的 `ldd` 列不全（mksrfdata 列到 libssh2 就停了，它要的 libcrypto 不在清单里），
+          # 34 个 DLL 摆好仍是 STATUS_DLL_NOT_FOUND。`ntldd -R` 静态地递归读 PE 导入表，不靠真的
+          # 加载；两者取并集，只留 /mingw64/bin 里真有的文件。
+          for p in mksrfdata mkinidata colm; do
+            ldd "kernels/default/$p.exe"
+            ntldd -R "kernels/default/$p.exe"
+          done | grep -io '[^ \\/]*\.dll' | sort -fu | while read -r name; do
+            if [ -f "/mingw64/bin/$name" ]; then echo "/mingw64/bin/$name"; fi
+          done | sort -fu | tee dlls.txt
           echo "共 $(wc -l < dlls.txt) 个"
           # **在这里就把它们拷出来**，而不是让下一步（PowerShell）去翻译路径。
           # `/mingw64/bin` 只在 MSYS2 里成立；它的 Windows 真实路径由
