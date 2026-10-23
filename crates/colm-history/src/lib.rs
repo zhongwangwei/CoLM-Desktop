@@ -327,6 +327,12 @@ impl History {
                 ON history_events(json_extract(payload,'$.detail.remote_record.job'));
             CREATE INDEX IF NOT EXISTS history_remote_record_record_job
                 ON history_events(json_extract(payload,'$.detail.remote_record.record.job'));
+            -- `tracks_study` 每个研究查一次，原来也是整表扫描（2.2 万条时 100 ms）。部分索引只收研究事件。
+            CREATE INDEX IF NOT EXISTS history_study_case
+                ON history_events(json_extract(payload,'$.case_path'))
+                WHERE operation_id NOT LIKE 'legacy-%' AND operation_id NOT LIKE 'study-%'
+                AND json_extract(payload,'$.phase') != 'imported'
+                AND json_extract(payload,'$.kind') LIKE '%study%';
             CREATE TRIGGER IF NOT EXISTS history_no_update BEFORE UPDATE ON history_events
                 BEGIN SELECT RAISE(ABORT,'history is append-only'); END;
             CREATE TRIGGER IF NOT EXISTS history_no_delete BEFORE DELETE ON history_events

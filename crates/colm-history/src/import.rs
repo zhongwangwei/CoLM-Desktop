@@ -245,13 +245,7 @@ impl History {
     }
     /// Whether an operation the app recorded itself (not an import) ran this Study directory.
     pub fn tracks_study(&self, study: &Path) -> Result<bool> {
-        let mut statement = self.connection.prepare(
-            "SELECT DISTINCT json_extract(payload,'$.case_path') FROM history_events
-             WHERE operation_id NOT LIKE 'legacy-%' AND operation_id NOT LIKE 'study-%'
-             AND json_extract(payload,'$.phase') != 'imported'
-             AND json_extract(payload,'$.kind') LIKE '%study%'
-             AND json_extract(payload,'$.case_path') IS NOT NULL",
-        )?;
+        let mut statement = self.connection.prepare(TRACKED_STUDY_PATHS)?;
         let paths = statement
             .query_map([], |row| row.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -456,3 +450,11 @@ pub(crate) const TRACKS_REMOTE_JOB: &str =
      AND (json_extract(payload,'$.detail.job') = ?1
           OR json_extract(payload,'$.detail.remote_record.job') = ?1
           OR json_extract(payload,'$.detail.remote_record.record.job') = ?1))";
+
+/// 条件要和 `lib.rs` 里部分索引 `history_study_case` 的 WHERE 逐字一致，规划器才只扫那几行研究事件。
+pub(crate) const TRACKED_STUDY_PATHS: &str =
+    "SELECT DISTINCT json_extract(payload,'$.case_path') FROM history_events
+     WHERE operation_id NOT LIKE 'legacy-%' AND operation_id NOT LIKE 'study-%'
+     AND json_extract(payload,'$.phase') != 'imported'
+     AND json_extract(payload,'$.kind') LIKE '%study%'
+     AND json_extract(payload,'$.case_path') IS NOT NULL";

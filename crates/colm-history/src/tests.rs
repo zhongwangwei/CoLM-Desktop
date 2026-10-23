@@ -1131,3 +1131,24 @@ fn remote_job_lookup_uses_the_job_indexes() {
         "{plan:?}"
     );
 }
+
+#[test]
+fn tracked_study_lookup_reads_only_the_study_index() {
+    let h = ledger();
+    let plan = h
+        .connection
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            crate::import::TRACKED_STUDY_PATHS
+        ))
+        .unwrap()
+        .query_map([], |row| row.get::<_, String>(3))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap();
+    assert!(
+        plan.iter()
+            .any(|step| step.contains("USING INDEX history_study_case")),
+        "{plan:?}"
+    );
+}
