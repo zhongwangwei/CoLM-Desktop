@@ -9,18 +9,28 @@ import { usePageContract, type UiAction, type UiField } from '../../lib/guide';
 import { ActionButton } from '../../components/ActionButton';
 import { Button, Card, Field, Input, Select, Notice, Advanced } from '../../components/ui';
 import {
+  budgetAdvice,
   calibrationWindows,
   candidateBudget,
   fitValidation,
   gridTargetDefaults,
   gridTargetSpec,
   type GridTargetDraft,
+  memberVerdict,
   networkSpec,
   networkDefaults,
   parameterSpec,
   studyPermissions,
+  studyDiagnostics,
+  studyRunOutcome,
+  frozenDesign,
+  sensitivityResponses,
+  sensitivityRanking,
+  calibrationSeed,
   suggestedRange,
+  suggestedWindows,
   type ParameterContext,
+  type SiteTiming,
   applyResearchSeed,
 } from './study';
 import {
@@ -62,6 +72,7 @@ type Envelope = {
       { feasible?: boolean; calibration?: number; validation?: number; reason?: string }
     >;
     tasks?: Record<string, unknown>;
+    warnings?: string[];
   };
   manifest?: { id?: string; spec?: unknown };
   results?: (string | { path: string })[];
@@ -236,6 +247,16 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [outputs, setOutputs] = useState('f_lfevpa');
   const [method, setMethod] = useState('lhs');
   const [count, setCount] = useState('40');
+  // 样本数和 Morris 轨迹数共用一个框，含义不同：换方法时没手改过就换成该方法的缺省（LHS 40 组、Morris 10 条）。
+  const countEdited = useRef(false);
+  const chooseSampling = (value: string) => {
+    setMethod(value);
+    if (!countEdited.current) setCount(value === 'morris' ? '10' : '40');
+  };
+  const editCount = (value: string) => {
+    countEdited.current = true;
+    setCount(value);
+  };
   const [population, setPopulation] = useState('8');
   const [generations, setGenerations] = useState('4');
   // 单点模拟很轻，默认同时跑 4 个；原来默认 1 个，几十次模拟一个接一个跑。
@@ -264,11 +285,22 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   const [preflight, setPreflight] = useState('');
   const [resultPath, setResultPath] = useState('');
   const [result, setResult] = useState('');
+  // 不确定性研究的敏感性（results/importance.json）、正在看的响应量、要带去率定的参数。
+  const [importance, setImportance] = useState<unknown>(null);
+  const [sensitivityKey, setSensitivityKey] = useState('');
+  const [carryKeys, setCarryKeys] = useState<string[]>([]);
   const [out, setOut] = useState('');
   // 导出研究的目录；原来和 AI 拟合的输出目录共用 out，填了一个另一个也跟着变。
   const [exportDir, setExportDir] = useState('');
   const [name, setName] = useState('research-model');
   const [member, setMember] = useState('');
+  // 选中的成员不比默认参数好时，写回默认是灰的；对这个研究的这个成员明确勾了"仍要写入"才放开。
+  // 记成"研究目录#成员"，换研究或换成员就自动失效。
+  const [overrideFor, setOverrideFor] = useState('');
+  // Qle/Qh 是否拿能量闭合订正后的观测比（只对站点观测有效）。
+  const [corrected, setCorrected] = useState(false);
+  // 率定期、验证期是怎么预填的，告诉用户扣了什么。
+  const [windowNote, setWindowNote] = useState<[string, string] | null>(null);
   const [busy, setBusy] = useState(false);
   const [launching, setLaunching] = useState(false);
   const [error, setError] = useState('');
@@ -309,6 +341,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   shown.current = active;
   const ai = tab === 'parameters' || tab === 'process';
   const tuning = tab !== 'uncertainty';
+  // 不确定性分析也对照观测算目标函数（默认勾上）：敏感性就能按"调这个参数能不能让拟合变好"排，
+  // 而不只是"它会不会让输出变"，排出来的参数可以直接带去率定。没有观测时取消勾选。
+  const [scoreObjective, setScoreObjective] = useState(true);
+  const scoring = tuning || scoreObjective;
   // 只拦短操作（读参数、预检、建研究、提交服务器）；本机研究跑起来以后可以离开，页面常驻不丢。
   useNavigationGuard(() =>
     active && (lock.current || (runLock.current && !!host))
@@ -413,6 +449,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     hidden,
     relative,
     trainNetwork,
+    corrected,
+    gridTargets,
+    scoreObjective,
   ]);
   useEffect(() => {
     epoch.current++;
@@ -436,7 +475,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     name,
   ]);
   async function task<T>(fn: (current: () => boolean) => Promise<T>): Promise<T> {
-    if (lock.current) throw new Error('Operation in progress');
+    if (lock.current)
+      throw new Error(tr('上一个研究操作还没结束', 'Another study operation is in progress'));
     lock.current = true;
     setBusy(true);
     setError('');
@@ -589,6 +629,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       }
       return rows;
     });
+  // 只有湍流通量有能量闭合订正版（`colm_hist::obs::corrected`）。
+  function fluxCorrected(variable: string) {
+    return ['qle', 'qh'].includes(variable.trim().toLowerCase());
+  }
   function network() {
     return networkSpec(slot, features, output, lower, upper, hidden, relative);
   }
@@ -600,6 +644,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     setLower(defaults.lower);
     setUpper(defaults.upper);
     setRelative(defaults.relative);
+    // AI 方法默认就是训练网络。原来默认不勾、勾选框又在第 3 步最下面：替换过程照默认走必然报错，
+    // 学习参数静默退化成普通率定，网络设计全被忽略（GUI 审查 C-03）。
+    setTrainNetwork(true);
   }
   // 预检只是把规格交给引擎检查，不落盘也不跑，所以不要求先勾"已核查"；
   // 原来两个按钮都卡在这个勾上，没勾时预检是灰的，看不出为什么。只有创建研究要它。
@@ -622,7 +669,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const p = parameters[String(i)];
       return p?.enabled ? [parameterSpec(row, p.min, p.max, p.scale)] : [];
     });
-    if (!params.length && !(ai && trainNetwork))
+    if (!params.length && !(ai && (trainNetwork || tab === 'process')))
       throw new Error(
         tr(
           '请至少勾选一个参数，或选择训练网络',
@@ -668,18 +715,84 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       parameters: params,
       site_mode: 'shared',
     };
-    if (!tuning)
+    if (!tuning) {
+      // Morris 的 candidate_count 是轨迹数，后端按 轨迹数 × (k+1) 生成样本。
+      const uncertainty = {
+        ...base,
+        outputs: names,
+        budget: {
+          candidate_count:
+            method === 'oat' ? undefined : method === 'morris' ? Number(count) : budget.candidates,
+          jobs: concurrency,
+        },
+      };
+      if (!scoreObjective)
+        return { caseRoot: [...roots][0]!, specJson: JSON.stringify(uncertainty) };
+      const window = calibrationWindows(from, to, '', '');
+      const pairs = Number(minPairs);
+      if (!Number.isInteger(pairs) || pairs < 2)
+        throw new Error(tr('最少观测配对数至少是 2', 'Minimum pairs must be ≥2'));
+      if (spatialStudy) {
+        if (!gridTargets.length)
+          throw new Error(
+            tr(
+              '请至少加一个对照目标，或取消"对照观测算目标函数"',
+              'Add at least one target, or untick scoring against observations',
+            ),
+          );
+        return {
+          caseRoot: [...roots][0]!,
+          specJson: JSON.stringify({
+            ...uncertainty,
+            targets: gridTargets.map((t, i) => ({
+              ...gridTargetSpec(t, i, window, metric, pairs),
+              ...(corrected && t.kind === 'station' && fluxCorrected(t.variable)
+                ? { corrected: true }
+                : {}),
+            })),
+          }),
+        };
+      }
+      const targetNames = variableNames;
+      if (!targetNames.length)
+        throw new Error(
+          tr(
+            '请选要对照的观测变量，或取消"对照观测算目标函数"',
+            'Choose observed variables to score, or untick scoring against observations',
+          ),
+        );
       return {
         caseRoot: [...roots][0]!,
         specJson: JSON.stringify({
-          ...base,
-          outputs: names,
-          budget: {
-            candidate_count: method === 'oat' ? undefined : budget.candidates,
-            jobs: concurrency,
-          },
+          ...uncertainty,
+          observations: Object.fromEntries(
+            sites.map((path) => {
+              const site = siteName(path);
+              if (!observationOf[site])
+                throw new Error(
+                  tr(
+                    `站点 ${site} 还没选观测文件；没有观测就取消"对照观测算目标函数"`,
+                    `Observation missing for ${site}; without observations untick scoring`,
+                  ),
+                );
+              return [site, observationOf[site]];
+            }),
+          ),
+          targets: sites.flatMap((path) =>
+            targetNames.map((variable) => ({
+              key: `${variable}@${siteName(path)}`,
+              site: siteName(path),
+              variable,
+              metric,
+              weight: 1,
+              min_pairs: pairs,
+              ...window,
+              ...(corrected && fluxCorrected(variable) ? { corrected: true } : {}),
+            })),
+          ),
         }),
       };
+    }
     const obs = Object.fromEntries(
       observations
         .split('\n')
@@ -701,13 +814,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         caseRoot: [...roots][0]!,
         specJson: JSON.stringify({
           ...base,
-          targets: gridTargets.map((t, i) => gridTargetSpec(t, i, windows, metric, pairs)),
+          targets: gridTargets.map((t, i) => ({
+            ...gridTargetSpec(t, i, windows, metric, pairs),
+            ...(corrected && t.kind === 'station' && fluxCorrected(t.variable)
+              ? { corrected: true }
+              : {}),
+          })),
           budget: {
             population: Number(population),
             generations: Number(generations),
             jobs: concurrency,
+            include_baseline: true,
           },
-          ...(ai && trainNetwork ? { hybrid: network() } : {}),
+          ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
         }),
       };
     }
@@ -723,6 +842,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         weight: 1,
         min_pairs: pairs,
         ...windows,
+        ...(corrected && fluxCorrected(variable) ? { corrected: true } : {}),
       }));
     });
     return {
@@ -735,8 +855,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           population: Number(population),
           generations: Number(generations),
           jobs: concurrency,
+          include_baseline: true,
         },
-        ...(ai && trainNetwork ? { hybrid: network() } : {}),
+        ...(ai && (trainNetwork || tab === 'process') ? { hybrid: network() } : {}),
       }),
     };
   }
@@ -784,11 +905,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     const kernel = runKernel;
     if (!studyDir || !kernel || !envelope || !confirmed)
       throw new Error(
-        'Select a study and build configuration, refresh its status and review its frozen budget',
+        tr(
+          '请先打开研究、选好编译配置，并勾选"我已核对冻结的范围和预算"',
+          'Open a study, choose a build configuration and confirm the frozen ranges and budget',
+        ),
       );
     if (remotePermissions.exists)
       throw new Error(
-        'This study has a server submission; inspect or fetch it instead of starting another run',
+        tr(
+          '这个研究已经提交到服务器，请核对或取回服务器上的结果，不要再开一次运行',
+          'This study has a server submission; inspect or fetch it instead of starting another run',
+        ),
       );
     const concurrency = Number(jobs);
     if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 16)
@@ -848,7 +975,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       return response;
     } catch (e) {
       if (token === epoch.current) {
-        setError(String(e));
+        // 后端把取消、失败都当错误返回一段 JSON（`study_cancelled`/`study_failed`），原来整段当红字显示
+        //（GUI 审查 B-04）。取消是正常操作，只提示一句；失败只显示原因。
+        const outcome = studyRunOutcome(e);
+        if (outcome.cancelled) notify(tr(outcome.zh, outcome.en));
+        else setError(tr(outcome.zh, outcome.en));
         if (host) {
           // 提交失败时，研究自己的记录里既没有服务器作业、也没有"已发出提交"的意图，说明什么都没交上去：
           // 收回本地的"提交中"占位，可以改了再交。原来一律记成"状态未确认"，"开始运行"从此一直灰着，
@@ -900,6 +1031,19 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       !includeReview
     )
       return null;
+    // 取消不可撤销：排队的成员标成已取消，之后不能重试（DE 已收代的成员重跑会改写选择历史，
+    // 所以后端有意不重试 Cancelled）。原来一点就生效，同屏的重试反倒有确认（GUI 审查 C-01）。
+    if (
+      command === 'study_cancel' &&
+      !(await askConfirm(
+        tr(
+          '取消后，还没跑的成员不再运行，之后也不能重试；已经跑完的成员结果会保留。要重新跑，只能用同样的设定新建一个研究。确定取消？',
+          'Cancelling stops the members that have not run yet, and they cannot be retried later; finished members keep their results. Running them again needs a new study with the same design. Cancel the study?',
+        ),
+        { confirmLabel: tr('取消研究', 'Cancel study') },
+      ))
+    )
+      return null;
     const token = epoch.current;
     const value = await task(async (current) => {
       const response = await invoke(command, {
@@ -918,7 +1062,21 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       if (current()) setResult(text);
       return text;
     });
-  const cancelRemote = () =>
+  const cancelRemote = async () => {
+    // 和本机取消一样不可撤销，先问（GUI 审查 C-01）。
+    if (
+      !(await askConfirm(
+        tr(
+          '请求服务器取消这个研究：还没跑的成员不再运行，之后也不能重试；已经跑完的成员结果会保留。确定取消？',
+          'Ask the server to cancel this study: members that have not run will not run and cannot be retried; finished members keep their results. Cancel it?',
+        ),
+        { confirmLabel: tr('取消研究', 'Cancel study') },
+      ))
+    )
+      return null;
+    return cancelRemoteNow();
+  };
+  const cancelRemoteNow = () =>
     task(async (current) => {
       remoteRequest.current++;
       const answer = remoteStudyReply(await invokeJson('remote_study_cancel', { studyDir }));
@@ -1279,6 +1437,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     'Validation end UTC': '验证结束 UTC',
     Objective: '目标指标',
     'Minimum paired observations': '最少有效观测配对数',
+    Trajectories: 'Morris 轨迹数',
+    'Score samples against observations': '对照观测算目标函数',
     Population: '种群数量',
     Generations: '迭代代数',
     'Sampling method': '采样方法',
@@ -1313,18 +1473,25 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'Wait for the current study operation or server record to be resolved',
         ),
       );
-    if (!hubMethods.some((item) => item.id === value)) throw new Error('Unknown research method');
+    if (!hubMethods.some((item) => item.id === value))
+      throw new Error(tr('没有这种研究方法', 'Unknown research method'));
     if (value === 'manual' || value === 'source') {
       startVersionMethod(value);
       return;
     }
-    if (value !== tab) {
+    // 点方法卡片就是新建这个方法的研究。原来方法没变时直接回到已打开研究的第 4 步，
+    // 想用同一方法再建一个研究没有入口（GUI 审查 A-02）；已打开的研究从首页"查看进度"回去。
+    if (value !== tab || studyDir) {
       epoch.current++;
       setTab(value);
       setStep(1);
       setConfirmed(false);
       setResult('');
       setFit(null);
+      setStudyDir('');
+      setEnvelope(null);
+      setRemoteReply(null);
+      setMember('');
       if (value === 'process') chooseSlot('soil_stress');
       else if (value === 'parameters') chooseSlot('pft');
     }
@@ -1354,13 +1521,86 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.researchMethod]);
   // 第 3 步的率定期和观测文件原来全空着，要手填日期和绝对路径。所选算例的模拟期和算例记下的观测文件
-  // 都现成：进第 3 步时把空着的填上（几个算例取共同的模拟期）。只填空的、每组算例只填一次，
-  // 用户改过或清空的不再动。
+  // 都现成：进第 3 步时自动填上（几个算例取共同的模拟期），每组算例只算一次。
+  // 换了算例要重算：原来只填空着的框，从 4 年的算例换到 3 年的，验证期还是旧值、超出了新的模拟期
+  //（GUI 审查 A-01）。现在记住上次自动填的值，框里还是那个值（或空着）就换成新的；用户改过的不动。
   const [casePeriod, setCasePeriod] = useState<[string, string] | null>(null);
   const prefilledFor = useRef('');
+  const autoWindows = useRef({ from: '', to: '', valFrom: '', valTo: '' });
+  // 每个算例的预热设置决定 history 从哪天开始、要不要再扣一年预热（`suggestedWindows`）。
+  // 读不到预热设置就退回整段模拟期，不留验证期；没有共同模拟期（period 为 null）就清掉自动填的值。
+  const prefillWindows = async (period: [string, string] | null, live: () => boolean) => {
+    const windows = period
+      ? await Promise.all(
+          sites.map((dir) =>
+            invoke<{ start: string; end: string; output_start: string; spinup_years: number }>(
+              'read_timing',
+              { dirs: [dir] },
+            ),
+          ),
+        )
+          .then((timings) =>
+            suggestedWindows(
+              timings.map((t): SiteTiming => ({
+                start: t.start,
+                end: t.end,
+                outputStart: t.output_start,
+                spinupYears: t.spinup_years,
+              })),
+            ),
+          )
+          .catch(() => null)
+      : null;
+    if (!live()) return;
+    const day = (text: string) => (text ? `${text}T00:00` : '');
+    const next = windows
+      ? {
+          from: day(windows.from),
+          to: day(windows.to),
+          valFrom: day(windows.validationFrom),
+          valTo: day(windows.validationTo),
+        }
+      : period
+        ? { from: day(period[0]), to: day(period[1]), valFrom: '', valTo: '' }
+        : { from: '', to: '', valFrom: '', valTo: '' };
+    const auto = autoWindows.current;
+    const pick = (key: keyof typeof next) => (old: string) =>
+      !old || old === auto[key] ? next[key] : old;
+    autoWindows.current = next;
+    setFrom(pick('from'));
+    setTo(pick('to'));
+    setValFrom(pick('valFrom'));
+    setValTo(pick('valTo'));
+    setCasePeriod(period);
+    if (!windows) {
+      setWindowNote(null);
+      return;
+    }
+    const w = windows;
+    setWindowNote([
+      [
+        w.warmup ? '算例没有设预热，率定期从第二年开始，避开初值还没稳定的第一年。' : '',
+        w.validationYears
+          ? `最后 ${w.validationYears} 年留作验证期，用来检查率定出的参数换个时段是否仍然更好。`
+          : w.warmup
+            ? '扣掉预热的第一年后不足三年，没有留验证期。'
+            : '模拟期不足三年，没有留验证期。',
+      ].join(''),
+      [
+        w.warmup
+          ? 'The cases have no spin-up, so calibration starts in the second year, after the initial state settles. '
+          : '',
+        w.validationYears
+          ? `The last ${w.validationYears} year${w.validationYears === 1 ? '' : 's'} are held out for validation, to check that the calibrated parameters still do better in another period.`
+          : w.warmup
+            ? 'Less than three years remain after the warm-up year, so no validation period is held out.'
+            : 'The simulation is shorter than three years, so no validation period is held out.',
+      ].join(''),
+    ]);
+  };
   useEffect(() => {
     const key = `${sites.join('|')}#${state.versionRef.id}@${state.versionRef.revision}`;
-    if (!workbench || step !== 3 || !tuning || !sites.length || prefilledFor.current === key)
+    if (!workbench || step !== 3 || !scoring || !sites.length || prefilledFor.current === key)
       return;
     prefilledFor.current = key;
     let live = true;
@@ -1373,15 +1613,18 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         const all = sites.map((d) => profiles[d]).filter((p): p is CaseProfile => !!p);
         const starts = all.map((p) => p.inputs.start).filter(Boolean);
         const ends = all.map((p) => p.inputs.end).filter(Boolean);
-        if (starts.length === sites.length && ends.length === sites.length) {
-          const latestStart = [...starts].sort().at(-1)!,
-            earliestEnd = [...ends].sort()[0]!;
-          if (latestStart < earliestEnd) {
-            setCasePeriod([latestStart, earliestEnd]);
-            setFrom((old) => old || `${latestStart}T00:00`);
-            setTo((old) => old || `${earliestEnd}T00:00`);
-          }
-        }
+        const latestStart = [...starts].sort().at(-1),
+          earliestEnd = [...ends].sort()[0];
+        void prefillWindows(
+          starts.length === sites.length &&
+            ends.length === sites.length &&
+            latestStart &&
+            earliestEnd &&
+            latestStart < earliestEnd
+            ? [latestStart, earliestEnd]
+            : null,
+          () => live,
+        );
         const base = (path: string) =>
           path
             .replace(/[/\\]+$/, '')
@@ -1401,9 +1644,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       live = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [workbench, step, tuning, sites.join('|'), state.versionRef.id, state.versionRef.revision]);
+  }, [workbench, step, scoring, sites.join('|'), state.versionRef.id, state.versionRef.revision]);
   // 侧栏的"研究"：回研究首页。离开草稿时留在全局状态里的写回目标若不清掉，之后从首页打开的
-  // 任何研究都会写回那个草稿。
+  // 任何研究都会写回那个草稿。但为那个草稿跑的研究本身仍该写回它：原来跑完从侧栏回来，
+  // 写回悄悄从"写回草稿 X"变成"新建版本"（GUI 审查 B-05）。按研究目录记下它的草稿，
+  // 从首页"查看进度"回到同一个研究时还原。
+  const studyTargets = useRef<Record<string, NonNullable<typeof state.researchTarget>>>({});
   useEffect(() => {
     if (!state.researchHome) return;
     update({ researchHome: false });
@@ -1414,6 +1660,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       return;
     }
     setFromHub(false);
+    if (studyDir && state.researchTarget) studyTargets.current[studyDir] = state.researchTarget;
     update({ researchTarget: null, researchSeed: null });
     setWorkbench(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1541,13 +1788,23 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           field('generations', 'Generations', generations, setGenerations, 'number'),
         ]
       : [
-          field('sampling-method', 'Sampling method', method, setMethod, 'choice', [
+          field('sampling-method', 'Sampling method', method, chooseSampling, 'choice', [
             { value: 'lhs', label: 'Latin hypercube' },
             { value: 'oat', label: 'One at a time' },
+            { value: 'morris', label: 'Morris screening' },
           ]),
           ...(method === 'lhs'
-            ? [field('candidate-count', 'Candidates', count, setCount, 'number')]
-            : []),
+            ? [field('candidate-count', 'Candidates', count, editCount, 'number')]
+            : method === 'morris'
+              ? [field('morris-trajectories', 'Trajectories', count, editCount, 'number')]
+              : []),
+          field(
+            'score-objective',
+            'Score samples against observations',
+            String(scoreObjective),
+            (v) => setScoreObjective(v === 'true'),
+            'switch',
+          ),
         ]),
     field('research-jobs', 'Concurrent jobs (1–16)', jobs, editJobs, 'number'),
     field('research-seed', 'Seed', seed, setSeed, 'number'),
@@ -1647,7 +1904,8 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           'network-training',
           'Train network with differential evolution',
           String(trainNetwork),
-          (v) => setTrainNetwork(v === 'true'),
+          // 替换过程必须训练网络（不训练就没有东西替换）。
+          (v) => setTrainNetwork(v === 'true' || tab === 'process'),
           'switch',
         ),
       ]
@@ -1747,6 +2005,44 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       true,
     ),
   ];
+  // 敏感性"带入率定"：换到参数率定，算例、对照的观测与变量、指标照这个不确定性研究，勾上选中的参数
+  // （范围与尺度用它冻结的）。参数靠研究种子在第 2 步读出参数后勾上，和版本页带参数进来是同一条路。
+  function carryToCalibration() {
+    const spec = frozenSpec;
+    const picks = calibrationSeed(spec, carryKeys);
+    if (!spec || !picks.length)
+      throw new Error(
+        tr('请先勾选要带去率定的参数', 'Tick the parameters to carry into calibration'),
+      );
+    const root = studyDir.replace(/[/\\]\.colm[/\\]studies[/\\][^/\\]+[/\\]?$/, '');
+    const sep = studyDir.includes('/') ? '/' : '\\';
+    const names = Array.isArray(spec.base_cases) ? spec.base_cases.map(String) : [];
+    const targets = (Array.isArray(spec.targets) ? spec.targets : []) as {
+      variable?: unknown;
+      metric?: unknown;
+      corrected?: unknown;
+      source?: unknown;
+    }[];
+    const observed = (spec.observations ?? {}) as Record<string, unknown>;
+    chooseMethod('tuning');
+    setSites(names.map((name) => `${root}${sep}${name}`));
+    if (targets.length && targets.every((t) => !t.source)) {
+      setVariables([...new Set(targets.map((t) => String(t.variable)))].join(', '));
+      if (typeof targets[0]!.metric === 'string') setMetric(targets[0]!.metric);
+      setCorrected(targets.some((t) => t.corrected === true));
+      setObservations(
+        Object.entries(observed)
+          .map(([site, path]) => `${site} | ${String(path)}`)
+          .join('\n'),
+      );
+    }
+    loadedFor.current = '';
+    update({ researchSeed: { parameters: picks } });
+    setStep(2);
+  }
+  const writeMember = member || defaultMember();
+  const writeVerdict = tuning ? memberVerdict(envelope?.state?.candidates, writeMember) : null;
+  const writeAllowed = !writeVerdict?.blocked || overrideFor === `${studyDir}#${writeMember}`;
   const lifecycleActions = [
     action(
       'study-browse',
@@ -1848,7 +2144,10 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           )
         : tr('写入新版本…', 'Write into a new version…'),
       writeBack,
-      permissions.results && (!!state.researchTarget || !!modelUsed) && !unresolvedRemote,
+      permissions.results &&
+        (!!state.researchTarget || !!modelUsed) &&
+        !unresolvedRemote &&
+        writeAllowed,
       true,
     ),
   ];
@@ -1935,7 +2234,11 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
           action(
             'research-current',
             tr('查看进度', 'View progress'),
-            () => setWorkbench(true),
+            () => {
+              const kept = studyTargets.current[studyDir];
+              if (kept && !state.researchTarget) update({ researchTarget: kept });
+              setWorkbench(true);
+            },
             !launching,
           ),
         ]
@@ -2042,7 +2345,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
   useEffect(() => {
     setTargetChoices(null);
     // 交服务器的研究，观测是服务器上的路径，本机读不到；格点率定用目标编辑器。
-    if (step !== 3 || !tuning || spatialStudy || host || !kernel || !sites.length) return;
+    if (step !== 3 || !scoring || spatialStudy || host || !kernel || !sites.length) return;
     const obsOf = new Map(
       observations
         .split('\n')
@@ -2077,7 +2380,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     return () => {
       live = false;
     };
-  }, [step, tuning, spatialStudy, host, kernel, sites, observations]);
+  }, [step, scoring, spatialStudy, host, kernel, sites, observations]);
   const tickedCount = Object.values(parameters).filter((p) => p.enabled).length;
   useEffect(() => {
     // 原来固定 4：16 核的本机和 48 核的服务器都只跑 4 个。本机留四分之一给界面和系统；
@@ -2086,9 +2389,72 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       const cores = globalThis.navigator?.hardwareConcurrency || 4;
       setJobs(String(host ? 16 : Math.min(16, Math.max(1, Math.floor(cores * 0.75)))));
     }
-    // 差分进化的种群太小会早熟收敛；按每个参数 4 组、至少 8 组。
-    if (!populationEdited.current) setPopulation(String(Math.max(8, 4 * tickedCount)));
+    // 差分进化的种群太小会早熟收敛；常用的经验是参数个数的 5–10 倍，这里取 5 倍、至少 8 组。
+    if (!populationEdited.current) setPopulation(String(Math.max(8, 5 * tickedCount)));
   }, [host, tickedCount]);
+  // 勾过"我已核对参数范围、预算和适用范围"之后又改了设计，勾选还留着，核对的已不是要建的那个研究
+  //（GUI 审查 B-06）。已打开的研究核对的是冻结的规格，与这些框无关，不动它。
+  useEffect(() => {
+    if (!studyDir) setConfirmed(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    tab,
+    observations,
+    variables,
+    outputs,
+    method,
+    count,
+    population,
+    generations,
+    seed,
+    from,
+    to,
+    valFrom,
+    valTo,
+    metric,
+    minPairs,
+    parameters,
+    corrected,
+    gridTargets,
+    trainNetwork,
+    scoreObjective,
+  ]);
+  // 换了研究，"用哪个成员"还留着上一个研究的成员编号（GUI 审查 A-07），"仍要写入"也一样。
+  useEffect(() => {
+    setMember('');
+    setOverrideFor('');
+  }, [studyDir]);
+  // 不确定性研究跑完就读敏感性，不用再从结果文件下拉框里找 importance.json。默认看目标函数，
+  // 勾上影响最大的前三个（影响为 0 的不勾）。
+  const hasImportance = (envelope?.results ?? []).some(
+    (entry) => (typeof entry === 'string' ? entry : entry.path) === 'importance.json',
+  );
+  useEffect(() => {
+    setImportance(null);
+    setCarryKeys([]);
+    if (!studyDir || !hasImportance) return;
+    let live = true;
+    void invoke<string>('study_result', { studyDir, path: 'importance.json' })
+      .then((text) => {
+        if (!live) return;
+        const rows: unknown = JSON.parse(text);
+        const first = sensitivityResponses(rows)[0]?.key ?? '';
+        setImportance(rows);
+        setSensitivityKey(first);
+        setCarryKeys(
+          sensitivityRanking(rows, first, frozenSpec)
+            .filter((row) => (row.impact ?? 0) > 0)
+            .slice(0, 3)
+            .map((row) => row.parameter),
+        );
+      })
+      // 读不到就不显示这张卡片；结果文件下拉框里仍能打开它看原因。
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [studyDir, hasImportance]);
   usePageContract(
     workbench
       ? {
@@ -2537,8 +2903,9 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     .split(',')
     .map((name) => name.trim())
     .filter(Boolean);
+  // 和后端一样不分大小写（GUI 审查 B-01）。
   const unknownTargets = variableNames.filter(
-    (name) => !targetChoices?.some((row) => row.name === name),
+    (name) => !targetChoices?.some((row) => row.name.toLowerCase() === name.toLowerCase()),
   );
   const unranged = contexts.flatMap((row, i) => {
     const p = parameters[String(i)];
@@ -2640,6 +3007,17 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
         (a.calibration ?? Number.POSITIVE_INFINITY) - (b.calibration ?? Number.POSITIVE_INFINITY),
     )
     .slice(0, 200);
+  const diagnostics = studyDiagnostics(envelope?.state?.warnings);
+  const responses = sensitivityResponses(importance);
+  const ranking = sensitivityRanking(importance, sensitivityKey, frozenSpec);
+  const objectiveView = responses.find((r) => r.key === sensitivityKey)?.variable === 'objective';
+  const rankingMethod = ranking[0]?.method ?? '';
+  const carryAction = action(
+    'study-carry-calibration',
+    tr(`带入率定（${carryKeys.length} 个参数）`, `Carry into calibration (${carryKeys.length})`),
+    carryToCalibration,
+    carryKeys.length > 0 && !launching && !lock.current,
+  );
   const best = envelope?.state?.best_member;
   const controlIds = [
     'study-run',
@@ -2651,7 +3029,27 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
     'remote-study-cancel',
     'remote-study-fetch',
   ];
-  const controls = lifecycleActions.filter((a) => controlIds.includes(a.id) && a.enabled);
+  // 运行、恢复原来只在可用时才渲染：打开一个待运行的研究，"开始运行"整颗不存在，勾了核对才凭空出现
+  //（GUI 审查 C-29）。这两个按状态该出现就出现，不可用时灰着并说明原因；其余仍只在可用时出现。
+  const shownWhenDisabled: Record<string, boolean> = {
+    'study-run': permissions.run && !remotePermissions.exists,
+    'study-resume': permissions.resume && !remotePermissions.exists,
+  };
+  const controls = lifecycleActions.filter(
+    (a) => controlIds.includes(a.id) && (a.enabled || shownWhenDisabled[a.id]),
+  );
+  const runBlocked = controls.some((a) => shownWhenDisabled[a.id] && !a.enabled)
+    ? !confirmed
+      ? tr('先勾选上面的"我已核对……"才能运行。', 'Tick the review box above to run.')
+      : !runKernel
+        ? tr('没有可用的编译配置。', 'No build configuration is available.')
+        : launching
+          ? tr('研究正在运行。', 'The study is running.')
+          : busy
+            ? tr('上一个操作还没结束。', 'Another operation is still in progress.')
+            : ''
+    : '';
+  const frozen = frozenDesign(frozenSpec);
   const byId = (id: string) => lifecycleActions.find((a) => a.id === id);
   const stepNames: [1 | 2 | 3 | 4, string][] = [
     [1, tr('选算例', 'Cases')],
@@ -2835,6 +3233,12 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
       )}
       <p className="muted study-hint">
         {tr(`已选 ${chosenCount} 个参数。`, `${chosenCount} parameters chosen.`)}
+        {/* 预填范围与"不替用户猜物理先验"的约定冲突过（GUI 审查 C-12）：保留预填，但写明它只是起点。 */}
+        {chosenCount > 0 &&
+          tr(
+            '勾选时预填的范围是默认值的 0.5–1.5 倍（夹在参数允许的范围内），只是起点，不是物理先验，请按你掌握的文献或观测改。研究跑完若提示最优值贴着边界，就把那一侧放宽重跑。',
+            ' The prefilled range is 0.5–1.5 × the default (kept inside the allowed bounds): a starting point, not a physical prior; adjust it to what the literature or observations support. If the study reports the best value on a bound, widen that side and rerun.',
+          )}
       </p>
       {unranged.length > 0 && (
         <Notice tone="warning">
@@ -3186,6 +3590,39 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 )
           }
         >
+          {ai && (
+            <>
+              <label className="param-check">
+                <input
+                  type="checkbox"
+                  checked={trainNetwork || tab === 'process'}
+                  disabled={tab === 'process'}
+                  onChange={(e) => setTrainNetwork(e.target.checked)}
+                />
+                {tr(
+                  '这次研究用差分进化训练上一步设计的网络',
+                  'Train the network designed in the previous step with differential evolution',
+                )}
+              </label>
+              {tab === 'process' ? (
+                <p className="muted study-hint">
+                  {tr(
+                    '替换过程一定要训练网络，这一项不能关。',
+                    'Process replacement always trains the network.',
+                  )}
+                </p>
+              ) : (
+                !trainNetwork && (
+                  <p className="muted study-hint">
+                    {tr(
+                      '不训练网络时，这个研究只是普通的参数率定，上一步的网络设计不会用上。',
+                      'Without training, this is a plain parameter calibration and the network design is not used.',
+                    )}
+                  </p>
+                )
+              )}
+            </>
+          )}
           {!(tuning && spatialStudy) && (
             <Field
               label={
@@ -3206,7 +3643,31 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               />
             </Field>
           )}
-          {tuning && !spatialStudy && targetChoices && (
+          {!tuning && (
+            <label className="param-check">
+              <input
+                type="checkbox"
+                checked={scoreObjective}
+                disabled={busy || launching}
+                onChange={(e) => setScoreObjective(e.target.checked)}
+              />
+              {tr(
+                '同时对照观测算目标函数，敏感性按"调这个参数能不能让拟合变好"排（推荐；排出来的参数可以直接带去率定）',
+                'Also score each sample against observations, so sensitivity ranks parameters by whether they improve the fit (recommended; the ranking can be carried into calibration)',
+              )}
+            </label>
+          )}
+          {!tuning && scoreObjective && !spatialStudy && (
+            <Field
+              label={tr(
+                '对照的观测变量（逗号分隔，如 Qle, Qh）',
+                'Observed variables to score (comma separated, e.g. Qle, Qh)',
+              )}
+            >
+              <Input value={variables} onChange={(e) => setVariables(e.target.value)} />
+            </Field>
+          )}
+          {scoring && !spatialStudy && targetChoices && (
             <div className="study-type-grid">
               {targetChoices.length ? (
                 targetChoices.map((row) => {
@@ -3241,7 +3702,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               )}
             </div>
           )}
-          {tuning && !spatialStudy && targetChoices && unknownTargets.length > 0 && (
+          {scoring && !spatialStudy && targetChoices && unknownTargets.length > 0 && (
             <Notice tone="warning">
               {tr(
                 `${unknownTargets.join('、')} 不是所有站都能比的变量，预检会拒。`,
@@ -3257,7 +3718,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               )}
             </p>
           )}
-          {tuning && (
+          {scoring && (
             <>
               {spatialStudy ? (
                 gridTargetEditor
@@ -3295,35 +3756,53 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 {casePeriod && (
                   <p className="muted study-hint study-wide">
                     {tr(
-                      `所选算例的模拟期：${casePeriod[0]} 至 ${casePeriod[1]}，率定期默认取这一段。`,
-                      `Simulation period of the chosen cases: ${casePeriod[0]} to ${casePeriod[1]}; the calibration period defaults to it.`,
+                      `所选算例的模拟期：${casePeriod[0]} 至 ${casePeriod[1]}。`,
+                      `Simulation period of the chosen cases: ${casePeriod[0]} to ${casePeriod[1]}.`,
                     )}
+                    {windowNote && ` ${tr(windowNote[0], windowNote[1])}`}
                   </p>
                 )}
-                <Field label={tr('率定期开始（UTC）', 'Calibration start (UTC)')}>
+                <Field
+                  label={
+                    tuning
+                      ? tr('率定期开始（UTC）', 'Calibration start (UTC)')
+                      : tr('评价时段开始（UTC）', 'Scoring start (UTC)')
+                  }
+                >
                   <Input
                     type="datetime-local"
                     value={from}
                     onChange={(e) => setFrom(e.target.value)}
                   />
                 </Field>
-                <Field label={tr('率定期结束（UTC）', 'Calibration end (UTC)')}>
+                <Field
+                  label={
+                    tuning
+                      ? tr('率定期结束（UTC）', 'Calibration end (UTC)')
+                      : tr('评价时段结束（UTC）', 'Scoring end (UTC)')
+                  }
+                >
                   <Input type="datetime-local" value={to} onChange={(e) => setTo(e.target.value)} />
                 </Field>
-                <Field label={tr('验证期开始（可空）', 'Validation start (optional)')}>
-                  <Input
-                    type="datetime-local"
-                    value={valFrom}
-                    onChange={(e) => setValFrom(e.target.value)}
-                  />
-                </Field>
-                <Field label={tr('验证期结束（可空）', 'Validation end (optional)')}>
-                  <Input
-                    type="datetime-local"
-                    value={valTo}
-                    onChange={(e) => setValTo(e.target.value)}
-                  />
-                </Field>
+                {/* 不确定性分析只看一个时段；留出验证是率定的事（后端也拒绝）。 */}
+                {tuning && (
+                  <>
+                    <Field label={tr('验证期开始（可空）', 'Validation start (optional)')}>
+                      <Input
+                        type="datetime-local"
+                        value={valFrom}
+                        onChange={(e) => setValFrom(e.target.value)}
+                      />
+                    </Field>
+                    <Field label={tr('验证期结束（可空）', 'Validation end (optional)')}>
+                      <Input
+                        type="datetime-local"
+                        value={valTo}
+                        onChange={(e) => setValTo(e.target.value)}
+                      />
+                    </Field>
+                  </>
+                )}
                 <Field
                   label={
                     spatialStudy
@@ -3352,57 +3831,83 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                     onChange={(e) => setMinPairs(e.target.value)}
                   />
                 </Field>
-                <Field
-                  label={tr(
-                    '种群大小（每代多少组参数）',
-                    'Population (parameter sets per generation)',
-                  )}
-                >
-                  <Input
-                    type="number"
-                    value={population}
-                    onChange={(e) => editPopulation(e.target.value)}
-                  />
-                </Field>
-                <Field label={tr('迭代代数', 'Generations')}>
-                  <Input
-                    type="number"
-                    value={generations}
-                    onChange={(e) => setGenerations(e.target.value)}
-                  />
-                </Field>
+                {/* 只有 Qle/Qh 有订正版：目标里没有它们时这一项是空操作，不显示（GUI 审查 A-03）。 */}
+                {(spatialStudy
+                  ? gridTargets.some((t) => t.kind === 'station' && fluxCorrected(t.variable))
+                  : variableNames.some(fluxCorrected)) && (
+                  <label className="param-check study-wide">
+                    <input
+                      type="checkbox"
+                      checked={corrected}
+                      onChange={(e) => setCorrected(e.target.checked)}
+                    />
+                    {tr(
+                      '潜热、感热（Qle、Qh）用能量闭合订正后的通量站观测。通量站测到的湍流通量通常比可用能量少一截，拿未订正的率定会把模型的湍流通量压低；观测文件里要有 Qle_cor、Qh_cor。',
+                      'Compare latent and sensible heat (Qle, Qh) with energy-balance-corrected flux-tower observations. Measured turbulent fluxes usually fall short of the available energy, so calibrating against uncorrected ones pulls the model low; the observation file needs Qle_cor and Qh_cor.',
+                    )}
+                  </label>
+                )}
+                {tuning && (
+                  <>
+                    <Field
+                      label={tr(
+                        '种群大小（每代多少组参数）',
+                        'Population (parameter sets per generation)',
+                      )}
+                    >
+                      <Input
+                        type="number"
+                        value={population}
+                        onChange={(e) => editPopulation(e.target.value)}
+                      />
+                    </Field>
+                    <Field label={tr('迭代代数', 'Generations')}>
+                      <Input
+                        type="number"
+                        value={generations}
+                        onChange={(e) => setGenerations(e.target.value)}
+                      />
+                    </Field>
+                  </>
+                )}
               </div>
-              {ai && (
-                <label className="param-check">
-                  <input
-                    type="checkbox"
-                    checked={trainNetwork}
-                    onChange={(e) => setTrainNetwork(e.target.checked)}
-                  />
-                  {tr(
-                    '这次研究直接用差分进化训练网络（不选就只率定上一步的参数）',
-                    'Train the network with differential evolution in this study',
-                  )}
-                </label>
-              )}
             </>
           )}
           {!tuning && (
             <div className="study-grid">
               <Field label={tr('抽样方法', 'Sampling')}>
-                <Select value={method} onChange={(e) => setMethod(e.target.value)}>
+                <Select value={method} onChange={(e) => chooseSampling(e.target.value)}>
                   <option value="lhs">
                     {tr('拉丁超立方（整体不确定性）', 'Latin hypercube (overall uncertainty)')}
                   </option>
                   <option value="oat">
                     {tr('一次改一个（逐个看敏感性）', 'One at a time (per-parameter sensitivity)')}
                   </option>
+                  <option value="morris">
+                    {tr(
+                      'Morris 筛选（挑出值得率定的参数）',
+                      'Morris screening (find the parameters worth calibrating)',
+                    )}
+                  </option>
                 </Select>
               </Field>
               {method === 'lhs' && (
                 <Field label={tr('样本数', 'Samples')}>
-                  <Input type="number" value={count} onChange={(e) => setCount(e.target.value)} />
+                  <Input type="number" value={count} onChange={(e) => editCount(e.target.value)} />
                 </Field>
+              )}
+              {method === 'morris' && (
+                <Field label={tr('轨迹数（常用 10–20）', 'Trajectories (10–20 is typical)')}>
+                  <Input type="number" value={count} onChange={(e) => editCount(e.target.value)} />
+                </Field>
+              )}
+              {method === 'morris' && (
+                <p className="muted study-hint study-wide">
+                  {tr(
+                    'Morris 每条轨迹从一个随机点出发，每步只改一个参数（跨抽样范围的 2/3），共跑 轨迹数 ×（参数数 + 1）次。比一次改一个多看到非线性和参数间的交互，比拉丁超立方更省，适合在率定前先挑参数。',
+                    'Each Morris trajectory starts at a random point and changes one parameter per step (by 2/3 of its range): trajectories × (parameters + 1) runs. It sees non-linearity and interactions that one-at-a-time misses, at less cost than Latin hypercube, so it suits picking parameters before calibration.',
+                  )}
+                </p>
               )}
             </div>
           )}
@@ -3428,6 +3933,15 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
             <span>{tr('预算', 'Budget')}</span>
             <strong>{budgetSummary}</strong>
           </div>
+          {tuning &&
+            budgetOk &&
+            budgetAdvice(chosenCount, Number(population), Number(generations)).map(
+              ([zh, english]) => (
+                <p key={zh} className="muted study-hint">
+                  {tr(zh, english)}
+                </p>
+              ),
+            )}
           <label className="param-check study-confirm">
             <input
               type="checkbox"
@@ -3571,6 +4085,35 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                 {tr('。改设计要新建研究。', '. Create a new study to change the design.')}
               </p>
             )}
+            {frozen.parameters.length > 0 && (
+              <div className="table-scroll">
+                <table className="versions-table">
+                  <thead>
+                    <tr>
+                      <th>{tr('参数', 'Parameter')}</th>
+                      <th>{tr('抽样范围', 'Sampling range')}</th>
+                      <th>{tr('尺度', 'Scale')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {frozen.parameters.map((p, i) => (
+                      <tr key={i}>
+                        <td>
+                          <code>{p.name}</code>
+                        </td>
+                        <td>{p.range}</td>
+                        <td>{p.log ? tr('对数', 'log') : tr('线性', 'linear')}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {frozen.budget.length > 0 && (
+              <p className="muted study-hint">
+                {frozen.budget.map(([zh, english]) => tr(zh, english)).join(en ? '; ' : '；')}
+              </p>
+            )}
             {/* 打开的已有研究还没核对过：原来勾选框只在第 3 步，这一步的"开始运行""恢复"一直不出现。 */}
             {!confirmed && !remotePermissions.exists && (permissions.run || permissions.resume) && (
               <label className="param-check study-confirm">
@@ -3590,6 +4133,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               {renderActions(controls)}
               {renderActions([byId('study-status')!].filter((a) => a.enabled))}
             </div>
+            {runBlocked && <p className="muted study-hint">{runBlocked}</p>}
             {remotePermissions.exists && (
               <div className="study-remote">
                 <p className="muted">
@@ -3655,6 +4199,131 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               </div>
             )}
           </Card>
+          {/* 诊断原来放在成绩表卡片里，没有成绩（基准失败、不确定性分析）时整块不显示，
+              最该看的提示反而看不到（GUI 审查 B-03）。 */}
+          {studyDir && responses.length > 0 && (
+            <Card
+              title={tr('参数敏感性', 'Parameter sensitivity')}
+              description={
+                rankingMethod === 'morris'
+                  ? tr(
+                      '按 Morris μ*（参数在抽样范围内变化时响应量的平均绝对变化）排序；σ 大说明影响随别的参数或参数本身的取值而变（非线性、交互）。',
+                      'Ranked by Morris μ* (mean absolute change of the response across the sampling range); a large σ means the effect depends on other parameters or on the value itself (non-linearity, interaction).',
+                    )
+                  : rankingMethod === 'spearman'
+                    ? tr(
+                        '按 |Spearman ρ| 排序：样本里参数和响应量的单调相关有多强。',
+                        'Ranked by |Spearman ρ|: how strongly the response follows the parameter across the samples.',
+                      )
+                    : tr(
+                        '按参数从下限扫到上限时响应量的变化排序（其余参数取默认值）。',
+                        'Ranked by the change of the response when the parameter sweeps its range (others at default).',
+                      )
+              }
+            >
+              <div className="study-grid">
+                <Field label={tr('看哪个响应量', 'Response')}>
+                  <Select
+                    value={sensitivityKey}
+                    onChange={(e) => setSensitivityKey(e.target.value)}
+                  >
+                    {responses.map((r) => (
+                      <option key={r.key} value={r.key}>
+                        {r.variable === 'objective'
+                          ? tr('目标函数（与观测的差距）', 'Objective (misfit to observations)')
+                          : r.key}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+              </div>
+              {!responses.some((r) => r.variable === 'objective') && (
+                <p className="muted study-hint">
+                  {tr(
+                    '这个研究没有对照观测，只能看参数对输出的影响；要按拟合好坏挑参数，新建研究时勾上"对照观测算目标函数"。',
+                    'This study was not scored against observations, so it only shows effects on outputs; to pick parameters by fit, tick scoring against observations in a new study.',
+                  )}
+                </p>
+              )}
+              <div className="table-scroll">
+                <table className="versions-table">
+                  <thead>
+                    <tr>
+                      <th>{tr('带去率定', 'Carry')}</th>
+                      <th>{tr('参数', 'Parameter')}</th>
+                      <th>{tr('影响', 'Impact')}</th>
+                      <th>{tr('增大参数时', 'When increased')}</th>
+                      {rankingMethod === 'morris' && <th>σ</th>}
+                      <th>n</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ranking.map((row) => (
+                      <tr key={row.parameter}>
+                        <td>
+                          <input
+                            type="checkbox"
+                            aria-label={row.parameter}
+                            checked={carryKeys.includes(row.parameter)}
+                            onChange={(e) =>
+                              setCarryKeys((old) =>
+                                e.target.checked
+                                  ? [...old, row.parameter]
+                                  : old.filter((key) => key !== row.parameter),
+                              )
+                            }
+                          />
+                        </td>
+                        <td>
+                          <code>{row.parameter}</code>
+                        </td>
+                        <td>{row.impact == null ? '—' : Number(row.impact.toPrecision(3))}</td>
+                        <td>
+                          {row.direction === 0
+                            ? '—'
+                            : objectiveView
+                              ? row.direction < 0
+                                ? tr('拟合变好', 'fit improves')
+                                : tr('拟合变差', 'fit worsens')
+                              : row.direction > 0
+                                ? tr('变大', 'increases')
+                                : tr('变小', 'decreases')}
+                        </td>
+                        {rankingMethod === 'morris' && (
+                          <td>{row.sigma == null ? '—' : Number(row.sigma.toPrecision(3))}</td>
+                        )}
+                        <td>{row.n}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {objectiveView && rankingMethod === 'morris' && (
+                <p className="muted study-hint">
+                  {tr(
+                    '"拟合变好/变差"取的是各条轨迹效应的平均方向；σ 和 μ* 相当时方向不稳定，率定时保留整个范围。',
+                    'Fit direction is the mean sign over trajectories; when σ is comparable to μ* the direction is unstable, so keep the whole range when calibrating.',
+                  )}
+                </p>
+              )}
+              <div className="button-row">{renderActions([carryAction])}</div>
+              <p className="muted study-hint">
+                {tr(
+                  '带入率定会换到"参数率定"，用同样的算例、观测和指标，并勾上选中的参数（范围用这个研究的）。',
+                  'Carrying switches to calibration with the same cases, observations and metric, and ticks the chosen parameters with this study’s ranges.',
+                )}
+              </p>
+            </Card>
+          )}
+          {studyDir && diagnostics.length > 0 && (
+            <Card title={tr('诊断与提示', 'Diagnostics')}>
+              {diagnostics.map(([zh, english], i) => (
+                <p key={i} className="muted study-hint">
+                  {tr(zh, english)}
+                </p>
+              ))}
+            </Card>
+          )}
           {ranked.some(([, c]) => c.calibration != null) && (
             <Card
               title={tr('各组参数的成绩', 'Scores of each parameter set')}
@@ -3724,10 +4393,7 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
               <div className="study-grid">
                 <Field label={tr('用哪个成员', 'Member')}>
                   {/* 原来是手填成员编号的输入框；成员就是上面成绩表里那些，直接选。 */}
-                  <Select
-                    value={member || defaultMember()}
-                    onChange={(e) => setMember(e.target.value)}
-                  >
+                  <Select value={writeMember} onChange={(e) => setMember(e.target.value)}>
                     {ranked.map(([key, c]) => (
                       <option key={key} value={key}>
                         {key}
@@ -3739,6 +4405,24 @@ export default function ResearchPage({ active = true }: { active?: boolean }) {
                   </Select>
                 </Field>
               </div>
+              {writeVerdict && (
+                <p className="muted study-hint">{tr(writeVerdict.zh, writeVerdict.en)}</p>
+              )}
+              {writeVerdict?.blocked && (
+                <label className="param-check">
+                  <input
+                    type="checkbox"
+                    checked={overrideFor === `${studyDir}#${writeMember}`}
+                    onChange={(e) =>
+                      setOverrideFor(e.target.checked ? `${studyDir}#${writeMember}` : '')
+                    }
+                  />
+                  {tr(
+                    '我知道这组参数不比默认参数好，仍要写入草稿',
+                    'I know this set does not beat the default parameters; write it anyway',
+                  )}
+                </label>
+              )}
               {!permissions.results ? (
                 <p className="muted study-hint">
                   {tr('研究完成后才能写入。', 'Available once the study has finished.')}

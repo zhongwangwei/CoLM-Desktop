@@ -1,16 +1,27 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  budgetAdvice,
+  calibrationSeed,
   calibrationWindows,
   candidateBudget,
   fitValidation,
+  frozenDesign,
+  frozenParameterKey,
   gridTargetDefaults,
   gridTargetSpec,
+  memberVerdict,
   networkSpec,
   networkDefaults,
   parameterSpec,
   studyPermissions,
+  sensitivityRanking,
+  sensitivityResponses,
+  studyDiagnostics,
+  studyRunOutcome,
+  studyWarningText,
   suggestedRange,
+  suggestedWindows,
   type ParameterContext,
 } from './study';
 const parameter: ParameterContext = {
@@ -272,4 +283,266 @@ describe('gridded study targets', () => {
       ),
     );
   });
+});
+
+it('prefilled windows drop a warm-up year without spin-up and hold out the last 30% for validation', () => {
+  const site = (start: string, end: string, spinupYears = 0, outputStart = start) => ({
+    start,
+    end,
+    outputStart,
+    spinupYears,
+  });
+  assert.deepEqual(suggestedWindows([site('2002-01-01', '2012-12-31')]), {
+    from: '2003-01-01',
+    to: '2010-01-01',
+    validationFrom: '2010-01-01',
+    validationTo: '2012-12-31',
+    warmup: true,
+    validationYears: 3,
+  });
+  // 算例自带预热：history 从预热截止日开始，不再扣第一年。
+  const warmed = suggestedWindows([site('2000-01-01', '2012-12-31', 2, '2002-01-01')])!;
+  assert.equal(warmed.from, '2002-01-01');
+  assert.equal(warmed.warmup, false);
+  assert.equal(warmed.validationYears, 3);
+  // 不足三年留不出验证期；不足两年也不扣预热。
+  assert.deepEqual(suggestedWindows([site('2005-01-01', '2006-12-31')]), {
+    from: '2006-01-01',
+    to: '2006-12-31',
+    validationFrom: '',
+    validationTo: '',
+    warmup: true,
+    validationYears: 0,
+  });
+  assert.equal(suggestedWindows([site('2005-01-01', '2005-12-31')])!.warmup, false);
+  // 多个站点取共同时段，有一个没预热就按没预热算。
+  const both = suggestedWindows([
+    site('2000-01-01', '2010-12-31', 1, '2001-01-01'),
+    site('2003-01-01', '2012-12-31'),
+  ])!;
+  assert.equal(both.from, '2004-01-01');
+  assert.equal(both.validationTo, '2010-12-31');
+  assert.equal(suggestedWindows([site('2005-01-01', '2004-01-01')]), null);
+  assert.equal(suggestedWindows([site('bad', '2004-01-01')]), null);
+  // 预填的窗口一定能过 calibrationWindows。
+  const w = suggestedWindows([site('2002-01-01', '2012-12-31')])!;
+  calibrationWindows(
+    `${w.from}T00:00`,
+    `${w.to}T00:00`,
+    `${w.validationFrom}T00:00`,
+    `${w.validationTo}T00:00`,
+  );
+});
+
+it('budget advice flags too many parameters, small populations and too few runs per parameter', () => {
+  assert.deepEqual(budgetAdvice(3, 15, 4), []);
+  assert.equal(budgetAdvice(3, 12, 6).length, 1, 'population below 5 x parameters');
+  assert.equal(budgetAdvice(3, 8, 1).length, 2, 'and fewer than 20 runs per parameter');
+  assert.match(budgetAdvice(10, 50, 4)[0]![0], /不确定性分析/);
+  assert.deepEqual(budgetAdvice(0, 8, 4), []);
+});
+
+it('write-back is blocked unless the member beats the baseline in calibration and validation', () => {
+  const base = { feasible: true, calibration: 1, validation: 1 };
+  const verdict = (chosen: Record<string, unknown>, baseline: Record<string, unknown> = base) =>
+    memberVerdict({ m000000: baseline, m000004: chosen }, 'm000004');
+  assert.equal(verdict({ feasible: true, calibration: 0.8, validation: 0.9 })!.blocked, false);
+  assert.match(verdict({ feasible: true, calibration: 0.8, validation: 0.9 })!.zh, /降低 20%/);
+  assert.equal(verdict({ feasible: true, calibration: 1, validation: 0.5 })!.blocked, true);
+  assert.match(verdict({ feasible: true, calibration: 0.8, validation: 1.1 })!.zh, /过拟合/);
+  assert.equal(verdict({ feasible: false })!.blocked, true);
+  const noValidation = verdict(
+    { feasible: true, calibration: 0.8 },
+    { feasible: true, calibration: 1 },
+  )!;
+  assert.equal(noValidation.blocked, false);
+  assert.match(noValidation.zh, /没有验证期/);
+  assert.equal(memberVerdict({ m000000: base }, 'm000000'), null);
+  assert.equal(memberVerdict({ m000004: base }, 'm000004'), null, 'no baseline score');
+  assert.equal(memberVerdict(undefined, 'm000004'), null);
+});
+
+it('study warnings are shown in both languages and per-member validation notes are counted', () => {
+  assert.match(
+    studyWarningText('overfitting: calibration improved while validation became worse')[0],
+    /过拟合/,
+  );
+  const [zh, en] = studyWarningText('bound: DEF_TUNING_CNFAC upper 0.895');
+  assert.match(zh, /DEF_TUNING_CNFAC 的最优值 0.895 贴着范围上限/);
+  assert.match(en, /upper bound/);
+  assert.match(studyWarningText('bound: DEF_LC_VMAX25(10) lower 20')[0], /下限/);
+  assert.match(
+    studyWarningText(
+      'tuning baseline failed; candidates were not run and can be retried after fixing the baseline',
+    )[0],
+    /基准/,
+  );
+  assert.match(
+    studyWarningText(
+      'AT-Neu / f_lfevpa: 12 timestamps have insufficient ensemble support (need at least 20)',
+    )[0],
+    /AT-Neu 的 f_lfevpa 有 12 个时刻成功的成员不足 20 个/,
+  );
+  assert.match(
+    studyWarningText('m000003 / AT-Neu / f_fsena was excluded: cannot open x.nc')[0],
+    /m000003.*cannot open x.nc/,
+  );
+  assert.deepEqual(studyWarningText('something new'), ['something new', 'something new']);
+  const notes = studyDiagnostics([
+    'm000003 / site validation unavailable: x',
+    'm000004 / site validation target Qle unavailable: y',
+    'm000003 / site2 validation unavailable: z',
+    'bound: A lower 1',
+  ]);
+  assert.equal(notes.length, 2);
+  assert.match(notes[1]![0], /^2 组参数的验证期成绩算不出来/);
+  assert.deepEqual(studyDiagnostics(undefined), []);
+});
+
+it('a cancelled run is a notice and a failed run shows only its reason', () => {
+  const cancelled = studyRunOutcome(
+    new Error(
+      '{"type":"study_cancelled","kind":"study_cancelled","study_dir":"/s","reason":"运行已取消"}',
+    ),
+  );
+  assert.equal(cancelled.cancelled, true);
+  assert.doesNotMatch(cancelled.zh, /study_cancelled/);
+  const failed = studyRunOutcome('{"type":"study_failed","reason":"kernel exited 2"}');
+  assert.equal(failed.cancelled, false);
+  assert.equal(failed.zh, '研究运行失败：kernel exited 2');
+  assert.deepEqual(studyRunOutcome(new Error('ssh: connection refused')), {
+    cancelled: false,
+    zh: 'ssh: connection refused',
+    en: 'ssh: connection refused',
+  });
+});
+
+it('the frozen design lists every parameter range and the budget to review', () => {
+  const frozen = frozenDesign({
+    seed: 7,
+    parameters: [
+      {
+        name: 'DEF_LC_VMAX25',
+        scope_instance: { kind: 'land-cover-class', scheme: 'IGBP', index: 10 },
+        sample_min: 26,
+        sample_max: 78,
+        scale: 'linear',
+      },
+      { name: 'DEF_TUNING_TRSMX0', sample_min: 1e-4, sample_max: 3e-4, scale: 'log' },
+    ],
+    budget: { population: 10, generations: 4, jobs: 12, patience: 3, include_baseline: true },
+  });
+  assert.deepEqual(frozen.parameters, [
+    { name: 'DEF_LC_VMAX25 (IGBP 10)', range: '26 – 78', log: false },
+    { name: 'DEF_TUNING_TRSMX0', range: '0.0001 – 0.0003', log: true },
+  ]);
+  assert.match(frozen.budget[0]![0], /种群 10、迭代 4 代、默认参数可进初代/);
+  assert.ok(frozen.budget.some(([zh]) => zh === '随机种子 7'));
+  assert.deepEqual(frozenDesign(null), { parameters: [], budget: [] });
+});
+
+it('sensitivity ranks by comparable impact and carries frozen ranges into calibration', () => {
+  const spec = {
+    parameters: [
+      {
+        name: 'DEF_LC_VMAX25',
+        parameter_id: 'lct:IGBP:DEF_LC_VMAX25',
+        scope_instance: { kind: 'land-cover-class', scheme: 'IGBP', index: 10 },
+        sample_min: 26,
+        sample_max: 78,
+        scale: 'linear',
+      },
+      {
+        name: 'DEF_PFT_G1',
+        parameter_id: 'pft:DEF_PFT_G1',
+        scope_instance: { kind: 'pft-type', index: 13 },
+        sample_min: 1,
+        sample_max: 8,
+        scale: 'log',
+      },
+    ],
+  };
+  const rows = [
+    {
+      site: 'AT-Neu',
+      variable: 'f_lfevpa',
+      parameter: 'DEF_LC_VMAX25',
+      method: 'morris',
+      value: 2,
+      mu: 2,
+      sigma: 0.1,
+      n: 10,
+    },
+    {
+      site: null,
+      variable: 'objective',
+      parameter: 'DEF_LC_VMAX25',
+      method: 'morris',
+      value: 0.05,
+      mu: -0.05,
+      sigma: 0.01,
+      n: 10,
+    },
+    {
+      site: null,
+      variable: 'objective',
+      parameter: 'DEF_PFT_G1(14)',
+      method: 'morris',
+      value: 0.2,
+      mu: 0.1,
+      sigma: 0.2,
+      n: 10,
+    },
+  ];
+  assert.deepEqual(
+    sensitivityResponses(rows).map((r) => r.key),
+    ['objective', 'AT-Neu / f_lfevpa'],
+  );
+  const ranked = sensitivityRanking(rows, 'objective', spec);
+  assert.deepEqual(
+    ranked.map((r) => [r.parameter, r.impact, r.direction]),
+    [
+      ['DEF_PFT_G1(14)', 0.2, 1],
+      ['DEF_LC_VMAX25', 0.05, -1],
+    ],
+  );
+  // OAT 的斜率乘上抽样范围才和别的参数可比。
+  const oat = sensitivityRanking(
+    [
+      {
+        site: null,
+        variable: 'objective',
+        parameter: 'DEF_LC_VMAX25',
+        method: 'oat_finite_difference_slope',
+        value: -0.01,
+        n: 2,
+      },
+    ],
+    'objective',
+    spec,
+  );
+  assert.ok(Math.abs(oat[0]!.impact! - 0.52) < 1e-12);
+  assert.equal(oat[0]!.direction, -1);
+  assert.equal(frozenParameterKey(spec.parameters[1]!), 'DEF_PFT_G1(14)');
+  assert.deepEqual(calibrationSeed(spec, ['DEF_PFT_G1(14)']), [
+    {
+      parameter_id: 'pft:DEF_PFT_G1',
+      raw_key: 'DEF_PFT_G1',
+      scheme: null,
+      index: 13,
+      min: '1',
+      max: '8',
+      scale: 'log',
+    },
+  ]);
+  assert.deepEqual(sensitivityResponses(null), []);
+});
+
+it('a Morris budget counts trajectories times parameters plus one', () => {
+  assert.equal(candidateBudget('uncertainty', 'morris', 3, 10, 0, 0, 2).candidates, 40);
+  assert.equal(candidateBudget('uncertainty', 'morris', 3, 10, 0, 0, 2).tasks, 82);
+  assert.throws(
+    () => candidateBudget('uncertainty', 'morris', 3, 1, 0, 0, 1),
+    /至少要 2 条轨迹|at least two trajectories/,
+  );
 });

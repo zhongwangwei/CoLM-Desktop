@@ -214,6 +214,34 @@ fn integer_calendar_ranges_are_rejected_by_the_shared_study_validator() {
 }
 
 #[test]
+fn transpiration_cap_is_only_studied_without_plant_hydraulics() {
+    let root = std::env::temp_dir().join(format!("colm-tuning-trsmx0-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("case.nml");
+    let active = |text: &str| {
+        std::fs::write(&path, text).unwrap();
+        tuning::validate_case_parameter_activity(
+            &path,
+            &["DEF_TUNING_TRSMX0".into()],
+            &["SinglePoint".into(), "LULC_IGBP".into()],
+            None,
+        )
+        .is_ok()
+    };
+    assert!(
+        !active("&nl_colm\n SITE_landtype=10\n/\n"),
+        "plant hydraulics is on by default"
+    );
+    assert!(active(
+        "&nl_colm\n SITE_landtype=10\n DEF_USE_PLANTHYDRAULICS=.false.\n/\n"
+    ));
+    assert!(active(
+        "&nl_colm\n SITE_landtype=13\n DEF_URBAN_RUN=.true.\n/\n"
+    ));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
 fn study_accepts_active_sentinel_baselines_and_rejects_inactive_parameters() {
     let root = std::env::temp_dir().join(format!("colm-tuning-active-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

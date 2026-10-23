@@ -10,7 +10,7 @@ use serde::Deserialize;
 
 use super::spec::{HybridNormalization, HybridStudySpec, StudySpec};
 
-const WEIGHT_PREFIX: &str = "hybrid:w";
+pub(super) const WEIGHT_PREFIX: &str = "hybrid:w";
 const MODEL: &str = "models/study.mlp.json";
 const NORMALIZE: &str = "models/study.norm.json";
 

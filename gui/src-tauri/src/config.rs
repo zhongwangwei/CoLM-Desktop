@@ -2058,6 +2058,14 @@ fn expert_tuning_runtime_state(
     {
         return Some(hidden("仅植被或城市地表使用"));
     }
+    // 蒸腾上限 etrc = trsmx0·roota 只在关闭植物水力时截断蒸腾（`MOD_LeafTemperature.F90:877`、
+    // `MOD_LeafTemperaturePC.F90:1565`）；城市模型会强制关掉植物水力，所以城市算例照常可调。
+    // 2026-10-23 AT-Neu 的 Morris 筛选实测：默认开着植物水力时它的基本效应精确为 0。
+    if name == "DEF_TUNING_TRSMX0" && c.plant_hydraulics {
+        return Some(hidden(
+            "开启植物水力过程时不使用（蒸腾上限只在关闭植物水力时起作用）",
+        ));
+    }
     // 区域里总可能有湿地 patch；只有单点才能按站点地表类型判断。
     if name == "DEF_TUNING_WETWATMAX" && c.single && !(c.wetland() || c.dynamic_wetland) {
         return Some(hidden("仅湿地或动态湿地过程使用"));

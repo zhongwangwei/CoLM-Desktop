@@ -2488,6 +2488,33 @@ fn expert_core_tuning_fields_follow_runtime_switches() {
     );
     assert_eq!(mode(&urban, "DEF_TUNING_CSOILC"), &FieldMode::Editable);
     assert_eq!(
+        mode(&urban, "DEF_TUNING_TRSMX0"),
+        &FieldMode::Editable,
+        "urban runs force plant hydraulics off, so the transpiration cap applies"
+    );
+    let hydraulics = runtime_states(
+        "&nl_colm
+ SITE_landtype=10
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_ne!(
+        mode(&hydraulics, "DEF_TUNING_TRSMX0"),
+        &FieldMode::Editable,
+        "plant hydraulics (on by default) never reads the transpiration cap"
+    );
+    let no_hydraulics = runtime_states(
+        "&nl_colm
+ SITE_landtype=10
+ DEF_USE_PLANTHYDRAULICS=.false.
+/\n",
+        &["SinglePoint", "LULC_IGBP"],
+    );
+    assert_eq!(
+        mode(&no_hydraulics, "DEF_TUNING_TRSMX0"),
+        &FieldMode::Editable
+    );
+    assert_eq!(
         mode(&urban, "DEF_TUNING_SOIL_ICE_IMPEDANCE"),
         &FieldMode::Editable,
         "urban pervious ground uses WATER_2014 soil hydraulics"

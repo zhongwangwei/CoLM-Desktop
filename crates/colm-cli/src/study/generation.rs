@@ -179,17 +179,32 @@ pub fn normalized(member: &MemberPlan, manifest: &Manifest) -> Result<Vec<f64>> 
                 .parameters
                 .get(&dim.key)
                 .with_context(|| format!("{} has no value for {}", member.id, dim.key))?;
-            let u = match dim.scale {
-                ScaleSpec::Linear => (value - dim.min) / (dim.max - dim.min),
-                ScaleSpec::Log => (value.ln() - dim.min.ln()) / (dim.max.ln() - dim.min.ln()),
-            };
-            if u.is_finite() {
-                Ok(u.clamp(0.0, 1.0))
-            } else {
-                bail!("{} cannot be normalized", dim.key)
+            match unit_position(value, &dim) {
+                Some(u) => Ok(u.clamp(0.0, 1.0)),
+                None => bail!("{} cannot be normalized", dim.key),
             }
         })
         .collect()
+}
+
+/// 参数值在抽样范围里的相对位置（不夹到 [0,1]；范围外的会小于 0 或大于 1）。
+pub(super) fn unit_position(value: f64, dim: &super::sample::Dimension) -> Option<f64> {
+    let u = match dim.scale {
+        ScaleSpec::Linear => (value - dim.min) / (dim.max - dim.min),
+        ScaleSpec::Log => (value.ln() - dim.min.ln()) / (dim.max.ln() - dim.min.ln()),
+    };
+    u.is_finite().then_some(u)
+}
+
+/// 成员的每个抽样维度都有值且在范围内（含端点）。基准可能没有网络权重这类维度，算不在范围内。
+pub(super) fn inside_sample_box(member: &MemberPlan, manifest: &Manifest) -> bool {
+    super::sample::dimensions(&manifest.spec).iter().all(|dim| {
+        member
+            .parameters
+            .get(&dim.key)
+            .and_then(|&value| unit_position(value, dim))
+            .is_some_and(|u| (0.0..=1.0).contains(&u))
+    })
 }
 
 pub fn physical(manifest: &Manifest, vector: &[f64]) -> Result<Vec<f64>> {

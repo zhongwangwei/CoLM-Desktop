@@ -37,6 +37,22 @@ pub fn design(spec: &StudySpec, baseline: &BTreeMap<String, f64>) -> Result<Vec<
                 }
             }
         }
+        StudyMethod::Morris => {
+            let trajectories = count / (k + 1);
+            let mut n = 1;
+            for trajectory in 0..trajectories {
+                for parameters in morris_trajectory(spec, &dims, trajectory)? {
+                    out.push(MemberPlan {
+                        id: format!("m{n:06}"),
+                        generation: 0,
+                        candidate_index: n,
+                        baseline: false,
+                        parameters,
+                    });
+                    n += 1;
+                }
+            }
+        }
         StudyMethod::Lhs | StudyMethod::DifferentialEvolution => {
             let permutations = lhs_permutations(spec.seed, k, count);
             for i in 0..count {
@@ -78,6 +94,58 @@ fn lhs_member(
         }
     }
     anyhow::bail!("cannot sample a valid parameter vector after 1000 deterministic retries")
+}
+
+/// Morris 网格的层数 p，步长 Δ = p / (2(p-1))（Saltelli 等推荐 p = 4、Δ = 2/3）。网格按整数层号走，
+/// 一步跨 p/2 层，不在浮点上判断"加 Δ 会不会出界"。
+pub(super) const MORRIS_LEVELS: usize = 4;
+
+/// 一条 Morris 轨迹：k+1 个点，按随机次序每步只改一个参数 ±Δ（归一化尺度，对数参数在对数空间里走）。
+/// 某个点违反跨字段约束时整条轨迹按确定的序号重抽，和 LHS 一样最多 1000 次。
+fn morris_trajectory(
+    spec: &StudySpec,
+    dims: &[Dimension],
+    trajectory: usize,
+) -> Result<Vec<BTreeMap<String, f64>>> {
+    let k = dims.len();
+    let jump = MORRIS_LEVELS / 2;
+    let top = MORRIS_LEVELS - 1;
+    let salt = spec.seed ^ 0x6d6f_7272_6973;
+    for attempt in 0..1000 {
+        let stream = trajectory * 1000 + attempt;
+        let mut levels = (0..k)
+            .map(|d| bounded_index(salt, stream, d, MORRIS_LEVELS))
+            .collect::<Vec<_>>();
+        let mut order = (0..k).collect::<Vec<_>>();
+        for i in (1..k).rev() {
+            order.swap(i, bounded_index(salt, stream, k + i, i + 1));
+        }
+        let point = |levels: &[usize]| {
+            dims.iter()
+                .zip(levels)
+                .map(|(dim, &level)| {
+                    let u = level as f64 / top as f64;
+                    (dim.key.clone(), map_sample(dim.min, dim.max, dim.scale, u))
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        let mut points = vec![point(&levels)];
+        for &d in &order {
+            levels[d] = if levels[d] + jump <= top {
+                levels[d] + jump
+            } else {
+                levels[d] - jump
+            };
+            points.push(point(&levels));
+        }
+        if points
+            .iter()
+            .all(|parameters| validate_vector(spec, parameters).is_ok())
+        {
+            return Ok(points);
+        }
+    }
+    anyhow::bail!("cannot place a valid Morris trajectory after 1000 deterministic retries")
 }
 
 pub(crate) fn validate_vector(spec: &StudySpec, values: &BTreeMap<String, f64>) -> Result<()> {
@@ -205,6 +273,101 @@ mod tests {
         ParameterScopeInstance, ParameterScopeKind, ParameterSpec, SiteMode, StudyBudget,
         StudyKind, StudyMethod, StudySpec,
     };
+
+    fn morris_spec(trajectories: Option<usize>) -> StudySpec {
+        let parameter = |name: &str, min: f64, max: f64, scale: ScaleSpec| ParameterSpec {
+            name: name.into(),
+            parameter_id: None,
+            scope_instance: None,
+            sample_min: min,
+            sample_max: max,
+            scale: Some(scale),
+        };
+        StudySpec {
+            kind: StudyKind::Uncertainty,
+            method: StudyMethod::Morris,
+            seed: 3,
+            kernel_dir: None,
+            base_cases: vec!["x".into()],
+            observations: BTreeMap::new(),
+            site_mode: SiteMode::Shared,
+            parameters: vec![
+                parameter("DEF_TUNING_CNFAC", 0.1, 0.9, ScaleSpec::Linear),
+                parameter("DEF_TUNING_ZLND", 0.001, 0.1, ScaleSpec::Log),
+                parameter("DEF_TUNING_TRSMX0", 1e-4, 3e-4, ScaleSpec::Linear),
+            ],
+            outputs: vec!["f_lfevpa".into()],
+            analysis_from: None,
+            analysis_to: None,
+            targets: vec![],
+            budget: StudyBudget {
+                candidate_count: trajectories,
+                ..Default::default()
+            },
+            hybrid: None,
+        }
+    }
+
+    #[test]
+    fn morris_trajectories_step_one_parameter_by_two_thirds_on_a_four_level_grid() {
+        let spec = morris_spec(Some(6));
+        let baseline = BTreeMap::from([
+            ("DEF_TUNING_CNFAC".into(), 0.5),
+            ("DEF_TUNING_ZLND".into(), 0.01),
+            ("DEF_TUNING_TRSMX0".into(), 2e-4),
+        ]);
+        let members = design(&spec, &baseline).unwrap();
+        assert_eq!(
+            serde_json::to_string(&members).unwrap(),
+            serde_json::to_string(&design(&spec, &baseline).unwrap()).unwrap()
+        );
+        assert_eq!(members.len(), 1 + 6 * 4);
+        let dims = dimensions(&spec);
+        let unit = |member: &MemberPlan| {
+            dims.iter()
+                .map(|dim| {
+                    super::super::generation::unit_position(member.parameters[&dim.key], dim)
+                        .unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut visited = vec![std::collections::BTreeSet::new(); dims.len()];
+        for trajectory in members[1..].chunks(4) {
+            let points = trajectory.iter().map(unit).collect::<Vec<_>>();
+            for point in &points {
+                for (d, &u) in point.iter().enumerate() {
+                    let level = u * 3.0;
+                    assert!((level - level.round()).abs() < 1e-9, "off the grid: {u}");
+                    visited[d].insert(level.round() as i64);
+                }
+            }
+            let mut moved = Vec::new();
+            for step in points.windows(2) {
+                let changed = (0..dims.len())
+                    .filter(|&d| (step[0][d] - step[1][d]).abs() > 1e-9)
+                    .collect::<Vec<_>>();
+                assert_eq!(changed.len(), 1, "exactly one parameter per step");
+                let d = changed[0];
+                assert!(((step[1][d] - step[0][d]).abs() - 2.0 / 3.0).abs() < 1e-9);
+                moved.push(d);
+            }
+            moved.sort_unstable();
+            assert_eq!(
+                moved,
+                vec![0, 1, 2],
+                "every parameter moves once per trajectory"
+            );
+        }
+        assert!(
+            visited.iter().all(|levels| levels.len() == 4),
+            "{visited:?}"
+        );
+        assert_eq!(
+            design(&morris_spec(None), &baseline).unwrap().len(),
+            1 + 10 * 4
+        );
+        assert!(design(&morris_spec(Some(1)), &baseline).is_err());
+    }
 
     #[test]
     fn lhs_is_deterministic_stratified_and_inside_bounds() {

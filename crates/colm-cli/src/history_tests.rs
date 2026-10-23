@@ -16,6 +16,11 @@ fn metric_variable_filter_rejects_unknown_names() {
 }
 
 #[test]
+fn metric_variable_filter_ignores_case_like_the_study_preflight() {
+    super::validate_pair_vars(&["qle".into(), "RNET".into()]).unwrap();
+}
+
+#[test]
 fn auxiliary_history_files_are_separate_streams() {
     let files = [
         "/tmp/Case_hist_2001-01.nc",

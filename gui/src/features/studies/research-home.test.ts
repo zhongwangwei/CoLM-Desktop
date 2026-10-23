@@ -11,16 +11,25 @@ import {
 } from './research-home';
 import {
   applyResearchSeed,
+  budgetAdvice,
   calibrationWindows,
   candidateBudget,
   fitValidation,
   gridTargetDefaults,
   gridTargetSpec,
+  memberVerdict,
   networkDefaults,
   networkSpec,
   parameterSpec,
   studyPermissions,
+  calibrationSeed,
+  frozenDesign,
+  sensitivityRanking,
+  sensitivityResponses,
+  studyDiagnostics,
+  studyRunOutcome,
   suggestedRange,
+  suggestedWindows,
 } from './study';
 import { remoteStudyPermissions, remoteStudyReply, studyModelRevision } from './remote-study';
 import { hubMethods } from '../versions/hub-methods';
@@ -387,6 +396,8 @@ it('a server submission that recorded nothing can be submitted again', async () 
       remoteRequest: { current: 0 },
       setLaunching: () => {},
       setError: () => {},
+      notify: () => {},
+      studyRunOutcome,
       epoch: { current: 1 },
       host: 'server',
       setRemoteReply: (next: unknown) => {
@@ -513,6 +524,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     StudyImportDialog: 'StudyImportDialog',
     askConfirm: async () => true,
     applyResearchSeed,
+    budgetAdvice,
     calibrationWindows,
     candidateBudget,
     compatibleKernel,
@@ -524,6 +536,7 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     IGBP,
     invoke,
     invokeJson: invoke,
+    memberVerdict,
     methodFromStudy,
     networkDefaults,
     networkSpec,
@@ -537,6 +550,13 @@ function researchPage(overrides: Record<string, unknown> = {}) {
     shownResultFiles,
     studyModelRevision,
     studyPermissions,
+    calibrationSeed,
+    frozenDesign,
+    sensitivityRanking,
+    sensitivityResponses,
+    studyDiagnostics,
+    studyRunOutcome,
+    suggestedWindows,
     USGS,
     withCatalogLabels,
     suggestedRange,
@@ -798,9 +818,15 @@ it('step 2 prefills a ticked range and step 3 gates only create on the review ch
   // 预检不落盘，不必先勾核对项；创建才要。
   assert.equal(enabled('study-preflight'), true);
   assert.equal(enabled('study-create'), false);
+  // 第 3 步还有别的勾选框（订正观测），核对项在 study-confirm 那一行里。
   const confirm = page
     .nodes()
-    .find((node) => node.type === 'input' && node.props.type === 'checkbox');
+    .find((node) => node.type === 'label' && node.props.className === 'param-check study-confirm')
+    ?.children.flat()
+    .find(
+      (node): node is Tree =>
+        !!node && typeof node === 'object' && (node as Tree).props?.type === 'checkbox',
+    );
   assert.ok(confirm);
   (confirm.props.onChange as (event: unknown) => void)({ target: { checked: true } });
   page.render();
@@ -895,7 +921,7 @@ it('defaults concurrency to the machine and population to the ticked parameters 
   };
   ['DEF_T0', 'DEF_T1', 'DEF_T2'].forEach(tick);
   await page.settle();
-  assert.equal(field('population').value, '12', 'four sets per parameter');
+  assert.equal(field('population').value, '15', 'five sets per parameter');
   field('population').set('20');
   field('research-jobs').set('2');
   await page.settle();
@@ -953,4 +979,244 @@ it('the home page lists one return-to-simulation action even though it shows two
   assert.ok(page.actions().some((action) => action.id === 'research-current'));
   page.press('research-return-simulation');
   assert.deepEqual(page.routes.at(-1), ['case', 'settings']);
+});
+it('a member that does not beat the baseline is written back only after an explicit override', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-tuning');
+  page.press('study-browse');
+  page.requests.at(-1)!.resolve('/study');
+  await page.settle();
+  const envelope = completedEnvelope();
+  envelope.state.candidates = { m1: { calibration: 0.3 }, m000000: { calibration: 0.2 } };
+  (envelope.state as { warnings?: string[] }).warnings = [
+    'bound: DEF_TEST upper 1.49',
+    'm1 / site1 validation unavailable: x',
+  ];
+  page.requests.at(-1)!.resolve(envelope);
+  await page.settle();
+  const write = () => page.actions().find((action) => action.id === 'study-write-version')!;
+  assert.equal(write().enabled, false);
+  const texts = JSON.stringify(page.nodes().map((node) => node.children));
+  assert.match(texts, /不比默认参数好/);
+  assert.match(texts, /DEF_TEST 的最优值 1.49 贴着范围上限/);
+  assert.doesNotMatch(texts, /validation unavailable/, 'per-member notes stay in the report');
+  const override = page
+    .nodes()
+    .find(
+      (node) =>
+        node.type === 'input' &&
+        node.props.type === 'checkbox' &&
+        node.props.checked === false &&
+        typeof node.props.onChange === 'function',
+    );
+  assert.ok(override);
+  (override.props.onChange as (event: unknown) => void)({ target: { checked: true } });
+  page.render();
+  assert.equal(write().enabled, true);
+});
+it('prefilled windows follow each case spin-up and are recomputed when the cases change', async () => {
+  const filled: Record<string, string> = { from: '', to: '', valFrom: '', valTo: '' };
+  const setter = (key: string) => (value: (old: string) => string) => {
+    filled[key] = value(filled[key]!);
+  };
+  let note: unknown = null;
+  const autoWindows = { current: { from: '', to: '', valFrom: '', valTo: '' } };
+  type Run = (period: [string, string] | null, live: () => boolean) => Promise<void>;
+  const prefill = (invoke: (command: string, args: unknown) => Promise<unknown>) =>
+    pageCallback('prefillWindows', {
+      sites: ['/p/site1'],
+      invoke,
+      suggestedWindows,
+      autoWindows,
+      setFrom: setter('from'),
+      setTo: setter('to'),
+      setValFrom: setter('valFrom'),
+      setValTo: setter('valTo'),
+      setCasePeriod: () => {},
+      setWindowNote: (value: unknown) => (note = value),
+    }) as unknown as Run;
+  const timing = (end: string) => async (command: string) => {
+    assert.equal(command, 'read_timing');
+    return { start: '2002-01-01', end, output_start: '2002-01-01', spinup_years: 0 };
+  };
+  await prefill(timing('2012-12-31'))(['2002-01-01', '2012-12-31'], () => true);
+  assert.deepEqual(filled, {
+    from: '2003-01-01T00:00',
+    to: '2010-01-01T00:00',
+    valFrom: '2010-01-01T00:00',
+    valTo: '2012-12-31T00:00',
+  });
+  assert.match(String((note as string[])[0]), /从第二年开始/);
+  // 换成更短的算例：自动填的验证期跟着重算，用户改过的率定期开始不动。
+  filled.from = '2004-06-01T00:00';
+  await prefill(timing('2006-12-31'))(['2002-01-01', '2006-12-31'], () => true);
+  assert.deepEqual(filled, {
+    from: '2004-06-01T00:00',
+    to: '2006-01-01T00:00',
+    valFrom: '2006-01-01T00:00',
+    valTo: '2006-12-31T00:00',
+  });
+  // 读不到预热设置：退回整段模拟期，不留验证期；没有共同模拟期：清掉自动填的值。
+  filled.from = '';
+  await prefill(async () => {
+    throw new Error('no case.nml');
+  })(['2002-01-01', '2012-12-31'], () => true);
+  assert.deepEqual(filled, {
+    from: '2002-01-01T00:00',
+    to: '2012-12-31T00:00',
+    valFrom: '',
+    valTo: '',
+  });
+  assert.equal(note, null);
+  await prefill(timing('2012-12-31'))(null, () => true);
+  assert.deepEqual(filled, { from: '', to: '', valFrom: '', valTo: '' });
+});
+it('cancelling a study asks first and does nothing when declined', async () => {
+  for (const answer of [false, true]) {
+    const calls: string[] = [];
+    const control = pageCallback('control', {
+      remotePermissions: { exists: false },
+      status: 'Running',
+      tr: (zh: string) => zh,
+      askConfirm: async (message: string) => {
+        assert.match(message, /不能重试/);
+        return answer;
+      },
+      epoch: { current: 1 },
+      task: async (fn: (current: () => boolean) => Promise<unknown>) => await fn(() => true),
+      invoke: async (command: string) => {
+        calls.push(command);
+        return {};
+      },
+      studyDir: '/s',
+      readStatus: async () => ({}),
+      notify: () => {},
+    }) as unknown as (command: string) => Promise<unknown>;
+    const value = await control('study_cancel').catch((e: unknown) => e);
+    if (!answer) {
+      assert.equal(value, null);
+      assert.deepEqual(calls, []);
+    } else assert.deepEqual(calls.slice(0, 1), ['study_cancel']);
+  }
+});
+it('carrying sensitivity into calibration keeps the cases, observations and frozen ranges', () => {
+  const calls: Record<string, unknown> = {};
+  const set = (name: string) => (value: unknown) => {
+    calls[name] = value;
+  };
+  const loadedFor = { current: 'old' };
+  const carry = pageCallback('carryToCalibration', {
+    frozenSpec: {
+      kind: 'uncertainty',
+      base_cases: ['AT-Neu'],
+      observations: { 'AT-Neu': '/obs/AT-Neu_Flux.nc' },
+      targets: [{ variable: 'Qle', metric: 'kge', corrected: true }],
+      parameters: [
+        {
+          name: 'DEF_TUNING_TRSMX0',
+          parameter_id: 'case:DEF_TUNING_TRSMX0',
+          sample_min: 1e-4,
+          sample_max: 3e-4,
+          scale: 'log',
+        },
+        {
+          name: 'DEF_TUNING_CNFAC',
+          parameter_id: 'case:DEF_TUNING_CNFAC',
+          sample_min: 0.1,
+          sample_max: 0.9,
+          scale: 'linear',
+        },
+      ],
+    },
+    carryKeys: ['DEF_TUNING_TRSMX0'],
+    studyDir: '/p/.colm/studies/s-abc',
+    calibrationSeed,
+    tr: (zh: string) => zh,
+    chooseMethod: set('method'),
+    setSites: set('sites'),
+    setVariables: set('variables'),
+    setMetric: set('metric'),
+    setCorrected: set('corrected'),
+    setObservations: set('observations'),
+    loadedFor,
+    update: set('update'),
+    setStep: set('step'),
+  }) as unknown as () => void;
+  carry();
+  assert.equal(calls.method, 'tuning');
+  assert.deepEqual(calls.sites, ['/p/AT-Neu']);
+  assert.equal(calls.variables, 'Qle');
+  assert.equal(calls.metric, 'kge');
+  assert.equal(calls.corrected, true);
+  assert.equal(calls.observations, 'AT-Neu | /obs/AT-Neu_Flux.nc');
+  assert.equal(loadedFor.current, '', 'step 2 reads the parameters again and applies the seed');
+  assert.deepEqual(
+    (
+      calls.update as { researchSeed: { parameters: { parameter_id: string; scale: string }[] } }
+    ).researchSeed.parameters.map((p) => [p.parameter_id, p.scale]),
+    [['case:DEF_TUNING_TRSMX0', 'log']],
+  );
+  assert.equal(calls.step, 2);
+});
+it('a finished uncertainty study shows its sensitivity ranking with the top parameters ticked', async () => {
+  const page = researchPage();
+  page.render();
+  page.press('research-method-uncertainty');
+  page.press('study-browse');
+  page.requests.at(-1)!.resolve('/p/.colm/studies/s-u');
+  await page.settle();
+  page.requests.at(-1)!.resolve({
+    manifest: {
+      id: 's-u',
+      spec: {
+        kind: 'uncertainty',
+        method: 'morris',
+        kernel_dir: '/kernels/default',
+        base_cases: ['site1'],
+        parameters: [
+          { name: 'DEF_A', sample_min: 0, sample_max: 1, scale: 'linear' },
+          { name: 'DEF_B', sample_min: 0, sample_max: 1, scale: 'linear' },
+          { name: 'DEF_C', sample_min: 0, sample_max: 1, scale: 'linear' },
+          { name: 'DEF_D', sample_min: 0, sample_max: 1, scale: 'linear' },
+        ],
+      },
+    },
+    state: { status: 'Completed', candidates: {} },
+    results: ['importance.json', 'members.csv'],
+    remote: null,
+  });
+  await page.settle();
+  const read = page.requests.find((r) => r.command === 'study_result');
+  assert.ok(read, 'importance.json is read without picking it from the file list');
+  assert.equal(read.args.path, 'importance.json');
+  read.resolve(
+    JSON.stringify(
+      ['DEF_A', 'DEF_B', 'DEF_C', 'DEF_D'].map((parameter, i) => ({
+        site: null,
+        variable: 'objective',
+        parameter,
+        method: 'morris',
+        value: [0.3, 0, 0.1, 0.2][i],
+        mu: -0.1,
+        sigma: 0.05,
+        n: 10,
+      })),
+    ),
+  );
+  await page.settle();
+  const carry = page.actions().find((a) => a.id === 'study-carry-calibration');
+  assert.ok(carry);
+  assert.equal(carry.enabled, true);
+  assert.match(carry.label, /3/);
+  const ticked = page
+    .nodes()
+    .filter(
+      (n) =>
+        n.type === 'input' &&
+        n.props.checked === true &&
+        String(n.props['aria-label']).startsWith('DEF_'),
+    )
+    .map((n) => n.props['aria-label']);
+  assert.deepEqual(ticked, ['DEF_A', 'DEF_D', 'DEF_C'], 'zero-impact DEF_B is left out');
 });

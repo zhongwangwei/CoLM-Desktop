@@ -101,6 +101,26 @@ pub fn objective_loss(term: &ObjectiveTerm, min_pairs: usize) -> std::result::Re
         .ok_or_else(|| "produced a non-finite loss".into())
 }
 
+/// Morris 基本效应的汇总：μ*（|EE| 的均值，排序用）、μ（带符号的均值，看方向）、σ（样本标准差，
+/// 大说明非线性或与别的参数有交互）。没有效应时三个都是 None；只有一个时 σ 为 None。
+pub fn morris_summary(effects: &[f64]) -> (Option<f64>, Option<f64>, Option<f64>) {
+    let abs = effects.iter().map(|value| value.abs()).collect::<Vec<_>>();
+    let mu_star = finite_mean(&abs);
+    let mu = finite_mean(effects);
+    let sigma = (effects.len() >= 2)
+        .then(|| {
+            let mean = mu?;
+            let sum = effects
+                .iter()
+                .map(|value| (value - mean).powi(2))
+                .sum::<f64>();
+            let sd = (sum / (effects.len() - 1) as f64).sqrt();
+            sd.is_finite().then_some(sd)
+        })
+        .flatten();
+    (mu_star, mu, sigma)
+}
+
 pub fn finite_mean(values: &[f64]) -> Option<f64> {
     let finite = values.iter().copied().filter(|value| value.is_finite());
     let count = finite.clone().count();
@@ -196,6 +216,17 @@ fn pearson(x: &[f64], y: &[f64]) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn morris_summary_ranks_by_absolute_effect_and_reports_spread() {
+        // 正负相抵：μ 接近 0，μ* 仍然大 —— 这正是排序用 μ* 而不是 μ 的原因。
+        let (mu_star, mu, sigma) = morris_summary(&[2.0, -2.0, 2.0, -2.0]);
+        assert_eq!(mu_star, Some(2.0));
+        assert_eq!(mu, Some(0.0));
+        assert!((sigma.unwrap() - (16.0f64 / 3.0).sqrt()).abs() < 1e-12);
+        assert_eq!(morris_summary(&[3.0]), (Some(3.0), Some(3.0), None));
+        assert_eq!(morris_summary(&[]), (None, None, None));
+    }
 
     #[test]
     fn objective_metrics_reject_impossible_domains_but_allow_roundoff() {

@@ -428,8 +428,11 @@ pub fn validate_case_parameter_activity(
             "DEF_BALL_BERRY_GRADM" | "DEF_BALL_BERRY_BINTER" => biological && !medlyn && !wue,
             "DEF_MEDLYN_G1" | "DEF_MEDLYN_G0" => biological && medlyn && !wue,
             "DEF_WUE_LAMBDA" => biological && wue && !medlyn,
-            "DEF_TUNING_CSOILC" | "DEF_TUNING_DEWMX" | "DEF_TUNING_TRSMX0" => {
-                !single || biological || urban
+            "DEF_TUNING_CSOILC" | "DEF_TUNING_DEWMX" => !single || biological || urban,
+            // 蒸腾上限只在关闭植物水力时起作用；城市模型强制关掉植物水力（与 GUI 字段条件同一规则）。
+            "DEF_TUNING_TRSMX0" => {
+                (!single || biological || urban)
+                    && (urban || !logical(&doc, "DEF_USE_PLANTHYDRAULICS"))
             }
             "DEF_TUNING_WETWATMAX" => wetland || logical(&doc, "DEF_USE_Dynamic_Wetland"),
             "DEF_TUNING_SMPMIN" => soil_hydrology,

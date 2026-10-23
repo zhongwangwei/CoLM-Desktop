@@ -4744,7 +4744,9 @@ fn compute_metric_rows(request: MetricsRequest<'_>) -> Result<Vec<VarMetrics>> {
             pair_vars.is_empty()
                 || pair_vars
                     .iter()
-                    .any(|wanted| wanted == variable.observation)
+                    // 研究预检按大小写不敏感认目标变量，这里原来精确比较：填 `qle` 能建研究，
+                    // 每个成员跑完才在评价阶段全部 infeasible（GUI 审查 B-01）。
+                    .any(|wanted| wanted.eq_ignore_ascii_case(variable.observation))
         })
         .filter_map(|variable| {
             let available = evaluation_availability(variable, &hists, &obs_file);
@@ -4953,7 +4955,7 @@ fn validate_pair_vars(pair_vars: &[String]) -> Result<()> {
         .filter(|wanted| {
             !colm_hist::obs::EVALUATION_VARIABLES
                 .iter()
-                .any(|variable| variable.observation == wanted.as_str())
+                .any(|variable| variable.observation.eq_ignore_ascii_case(wanted))
         })
         .cloned()
         .collect::<Vec<_>>();

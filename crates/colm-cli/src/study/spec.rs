@@ -21,6 +21,9 @@ pub enum StudyKind {
 pub enum StudyMethod {
     Oat,
     Lhs,
+    /// Morris 筛选：`candidate_count` 条轨迹，每条 k+1 个点、每步只改一个参数。比 OAT 多看到
+    /// 非线性与交互（σ），成本 r·(k+1)，比 LHS 的 Spearman 更适合先挑出要率定的参数。
+    Morris,
     DifferentialEvolution,
 }
 
@@ -50,6 +53,11 @@ pub struct StudyBudget {
     pub patience: usize,
     #[serde(default = "default_min_improvement")]
     pub min_improvement: f64,
+    /// 差分进化初代评完后，基准（默认参数）比最差的初代成员好、且落在抽样范围内时顶替它。
+    /// 初代全是 LHS 样本时，预算小的研究里"最优"可能还不如默认参数，而默认参数通常已是
+    /// 不错的起点。不写时不序列化，旧研究的 `spec_sha256` 与行为都不变。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub include_baseline: bool,
 }
 
 fn one() -> usize {
@@ -83,6 +91,7 @@ impl Default for StudyBudget {
             crossover: default_crossover(),
             patience: default_patience(),
             min_improvement: default_min_improvement(),
+            include_baseline: false,
         }
     }
 }
@@ -315,6 +324,11 @@ pub struct TargetSpec {
     /// 不写时不序列化，旧研究的 `spec_sha256` 不变。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<TargetSource>,
+    /// 通量站的 Qle/Qh 用能量闭合订正后的观测（`Qle_cor`/`Qh_cor`）。未订正的湍流通量
+    /// 普遍比可用能量少一截，拿它率定会把模型的湍流通量压低。只对站点观测有效；
+    /// 不写时不序列化，旧研究的 `spec_sha256` 不变。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub corrected: bool,
 }
 
 /// 格点算例（流域、区域、全球）的率定目标。`TargetSpec::variable` 的含义随种类变：
@@ -380,6 +394,10 @@ impl TargetSource {
 pub enum TargetPeriod {
     Daily,
     Monthly,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 fn is_zero(value: &f64) -> bool {
@@ -686,18 +704,15 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         hybrid.validate(&spec.parameters)?;
     }
     match (&spec.kind, &spec.method) {
-        (StudyKind::Uncertainty, StudyMethod::Oat | StudyMethod::Lhs) => {}
+        (StudyKind::Uncertainty, StudyMethod::Oat | StudyMethod::Lhs | StudyMethod::Morris) => {}
         (StudyKind::Tuning, StudyMethod::DifferentialEvolution) => {}
         _ => bail!("study kind and method do not match"),
     }
     if spec.kind == StudyKind::Tuning && spec.targets.is_empty() {
         bail!("parameter tuning needs at least one target");
     }
-    if spec.kind == StudyKind::Tuning
-        && spec.observations.is_empty()
-        && spec.targets.iter().any(|target| target.source.is_none())
-    {
-        bail!("parameter tuning needs an observation file for every base case");
+    if spec.observations.is_empty() && spec.targets.iter().any(|target| target.source.is_none()) {
+        bail!("calibration targets need an observation file for every base case");
     }
     if spec.kind == StudyKind::Uncertainty && spec.outputs.is_empty() {
         bail!("uncertainty analysis needs at least one history output");
@@ -837,6 +852,12 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
         if let Some(source) = &target.source {
             validate_target_source(&target.key, source)?;
         }
+        if target.corrected && !matches!(target.source, None | Some(TargetSource::Station { .. })) {
+            bail!(
+                "target {} can use energy-balance-corrected observations only for flux stations",
+                target.key
+            );
+        }
         match (target.validation_from, target.validation_to) {
             (None, None) => {}
             (Some(from), Some(to)) if from < to && (to <= target.from || from >= target.to) => {
@@ -854,8 +875,15 @@ pub fn validate_spec(spec: &StudySpec) -> Result<()> {
     if validation_targets != 0 && validation_targets != spec.targets.len() {
         bail!("validation windows must be provided for every tuning target or for none");
     }
-    if spec.kind == StudyKind::Uncertainty && !spec.targets.is_empty() {
-        bail!("uncertainty analysis uses outputs, not tuning targets");
+    // 不确定性分析可以带目标：每个成员算一遍目标函数，敏感性就能回答"调这个参数能不能改善拟合"，
+    // 而不只是"它会不会让输出变"。这里只看一个时段，留出验证是率定的事。
+    if spec.kind == StudyKind::Uncertainty
+        && spec
+            .targets
+            .iter()
+            .any(|target| target.validation_from.is_some() || target.validation_to.is_some())
+    {
+        bail!("uncertainty objective targets use one window; validation windows belong to calibration");
     }
     let mut outputs = BTreeSet::new();
     for output in &spec.outputs {
@@ -928,7 +956,7 @@ fn validate_target_source(key: &str, source: &TargetSource) -> Result<()> {
 }
 
 pub fn validate_target_site_coverage(spec: &StudySpec, sites: &[String]) -> Result<()> {
-    if spec.kind != StudyKind::Tuning {
+    if spec.targets.is_empty() {
         return Ok(());
     }
     for site in sites {
@@ -959,6 +987,9 @@ pub fn dimension_count(spec: &StudySpec) -> usize {
             .map_or(0, HybridStudySpec::weight_count)
 }
 
+/// Morris 轨迹数的缺省。文献里常用 10–20 条；10 条已能稳定排出前几个参数。
+pub const MORRIS_DEFAULT_TRAJECTORIES: usize = 10;
+
 pub fn default_candidate_count(
     method: &StudyMethod,
     k: usize,
@@ -973,6 +1004,17 @@ pub fn default_candidate_count(
                 .context("LHS candidate budget overflow")?
                 .max(40),
         },
+        StudyMethod::Morris => {
+            let trajectories = budget
+                .candidate_count
+                .unwrap_or(MORRIS_DEFAULT_TRAJECTORIES);
+            if trajectories < 2 {
+                bail!("Morris screening needs at least two trajectories");
+            }
+            trajectories
+                .checked_mul(k + 1)
+                .context("Morris candidate budget overflow")?
+        }
         StudyMethod::DifferentialEvolution => {
             // Only the initial population is immutable at create time. Later DE
             // generations are written as samples/gXXXXXX.csv after selection.
@@ -1008,6 +1050,7 @@ mod tests {
             validation_to: validation.then_some(20),
             min_pairs: 30,
             source: None,
+            corrected: false,
         }
     }
 
@@ -1130,6 +1173,59 @@ mod tests {
                 ("DEF_MEDLYN_G1".to_string(), 4.0),
                 ("hybrid_weight".to_string(), 1.0),
             ]
+        );
+    }
+
+    #[test]
+    fn uncertainty_may_score_targets_in_one_window_and_morris_needs_two_trajectories() {
+        let mut spec = tuning_spec(vec![tuning_target("Qle", false)]);
+        spec.kind = StudyKind::Uncertainty;
+        spec.method = StudyMethod::Morris;
+        spec.outputs = vec!["f_lfevpa".into()];
+        spec.budget = StudyBudget::default();
+        validate_spec(&spec).unwrap();
+        assert_eq!(
+            default_candidate_count(&spec.method, 1, &spec.budget).unwrap(),
+            MORRIS_DEFAULT_TRAJECTORIES * 2
+        );
+        spec.budget.candidate_count = Some(1);
+        assert!(default_candidate_count(&spec.method, 1, &spec.budget).is_err());
+        spec.budget.candidate_count = None;
+        spec.targets = vec![tuning_target("Qle", true)];
+        let error = validate_spec(&spec).unwrap_err();
+        assert!(error.to_string().contains("one window"), "{error}");
+        spec.targets = vec![tuning_target("Qle", false)];
+        spec.observations.clear();
+        assert!(
+            validate_spec(&spec).is_err(),
+            "station targets need observations"
+        );
+        spec.method = StudyMethod::DifferentialEvolution;
+        assert!(validate_spec(&spec).is_err());
+    }
+
+    #[test]
+    fn corrected_observations_are_only_for_flux_stations_and_absent_flags_keep_old_hashes() {
+        let mut target = tuning_target("Qle", false);
+        let unflagged = serde_json::to_value(&target).unwrap();
+        assert!(unflagged.get("corrected").is_none());
+        assert!(serde_json::to_value(StudyBudget::default())
+            .unwrap()
+            .get("include_baseline")
+            .is_none());
+        target.corrected = true;
+        validate_spec(&tuning_spec(vec![target.clone()])).unwrap();
+        target.source = Some(TargetSource::Grid {
+            path: "/obs.nc".into(),
+            variable: "E".into(),
+            scale: 1.0,
+            offset: 0.0,
+            period: None,
+        });
+        let error = validate_spec(&tuning_spec(vec![target])).unwrap_err();
+        assert!(
+            error.to_string().contains("only for flux stations"),
+            "{error}"
         );
     }
 

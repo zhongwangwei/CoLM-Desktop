@@ -340,7 +340,10 @@ pub fn preflight_create(case_root: &Path, spec_file: &Path) -> Result<()> {
                 }
             }
         }
-        return Ok(());
+        // 带目标的不确定性分析：目标照率定的规矩预检（变量可比、观测时段里配对够数）。
+        if spec.targets.is_empty() {
+            return Ok(());
+        }
     }
     for (site, case) in &sites {
         let planned = crate::planned_history_variables(&case.join("case.nml"), &resolved)?;
@@ -1835,6 +1838,70 @@ fn same_file_contents(
         })
 }
 
+/// 这个站点的目标逐个配对：率定期必算；有验证期的再算验证期，验证期失败只记原因、不让任务失败。
+fn evaluate_targets(
+    manifest: &Manifest,
+    site: &str,
+    case: &Path,
+    result: &mut TaskResult,
+) -> Result<()> {
+    for target in manifest
+        .spec
+        .targets
+        .iter()
+        .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
+    {
+        // 单点比 `observations` 里该站的文件；区域里的通量站比它自己的文件；格点产品与水文站自己配对。
+        let observation = match &target.source {
+            Some(source) => PathBuf::from(source.path()),
+            None => PathBuf::from(
+                manifest
+                    .spec
+                    .observations
+                    .get(site)
+                    .with_context(|| format!("missing frozen observation for {site}"))?,
+            ),
+        };
+        let evaluate = |validation: bool| {
+            if matches!(
+                target.source,
+                Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. })
+            ) {
+                paired_target_result(
+                    case,
+                    site,
+                    target,
+                    validation,
+                    manifest.spec.base_cases.len(),
+                )
+            } else {
+                target_result(
+                    case,
+                    &observation,
+                    site,
+                    target,
+                    validation,
+                    manifest.spec.base_cases.len(),
+                )
+            }
+        };
+        result.calibration.push(evaluate(false)?);
+        if target.validation_from.is_some() {
+            match evaluate(true) {
+                Ok(row) => result.validation.push(row),
+                Err(error) => result.validation_errors.push(TargetError {
+                    key: target.key.clone(),
+                    site: site.into(),
+                    variable: target.variable.clone(),
+                    period: "validation".into(),
+                    reason: error.to_string(),
+                }),
+            }
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> Result<TaskResult> {
     let evidence = before_evaluation(manifest, site, case)?;
     let mut result = TaskResult {
@@ -1872,61 +1939,11 @@ fn evaluate_task(manifest: &Manifest, member: &str, site: &str, case: &Path) -> 
                     max: finite.iter().copied().fold(f64::NEG_INFINITY, f64::max),
                 });
             }
+            // 带了目标的不确定性分析：每个成员也算目标函数，敏感性才能对着"拟合好不好"排。
+            evaluate_targets(manifest, site, case, &mut result)?;
         }
         StudyKind::Tuning => {
-            for target in manifest
-                .spec
-                .targets
-                .iter()
-                .filter(|target| target.site.as_deref().is_none_or(|wanted| wanted == site))
-            {
-                // 单点比 `observations` 里该站的文件；区域里的通量站比它自己的文件；格点产品与水文站自己配对。
-                let observation =
-                    match &target.source {
-                        Some(source) => PathBuf::from(source.path()),
-                        None => {
-                            PathBuf::from(manifest.spec.observations.get(site).with_context(
-                                || format!("missing frozen observation for {site}"),
-                            )?)
-                        }
-                    };
-                let evaluate = |validation: bool| {
-                    if matches!(
-                        target.source,
-                        Some(TargetSource::Grid { .. } | TargetSource::Gauge { .. })
-                    ) {
-                        paired_target_result(
-                            case,
-                            site,
-                            target,
-                            validation,
-                            manifest.spec.base_cases.len(),
-                        )
-                    } else {
-                        target_result(
-                            case,
-                            &observation,
-                            site,
-                            target,
-                            validation,
-                            manifest.spec.base_cases.len(),
-                        )
-                    }
-                };
-                result.calibration.push(evaluate(false)?);
-                if target.validation_from.is_some() {
-                    match evaluate(true) {
-                        Ok(row) => result.validation.push(row),
-                        Err(error) => result.validation_errors.push(TargetError {
-                            key: target.key.clone(),
-                            site: site.into(),
-                            variable: target.variable.clone(),
-                            period: "validation".into(),
-                            reason: error.to_string(),
-                        }),
-                    }
-                }
-            }
+            evaluate_targets(manifest, site, case, &mut result)?;
             if result.calibration.is_empty() {
                 bail!("parameter tuning has no target covering site {site}");
             }
@@ -1996,7 +2013,7 @@ fn target_result(
         obs_path: observation,
         spinup: 0,
         json: true,
-        corrected: false,
+        corrected: target.corrected,
         summary_only: false,
         pair_vars: vec![target.variable.clone()],
         pair_max_points: None,
@@ -2013,6 +2030,20 @@ fn target_result(
                 target.key, target.variable
             )
         })?;
+    // 观测文件没有订正版时 `compute_metric_rows` 会退回未订正的那条；研究里那等于悄悄换了目标，
+    // 所以要求实际读到的就是订正版。
+    if let Some(wanted) = target
+        .corrected
+        .then(|| colm_hist::obs::corrected(&row.name))
+        .flatten()
+    {
+        if !row.obs_var.eq_ignore_ascii_case(wanted) {
+            bail!(
+                "target {} asks for energy-balance-corrected {wanted}, but the observation file for {site} has none",
+                target.key
+            );
+        }
+    }
     let time = row.time.as_ref().with_context(|| {
         format!(
             "target {} ({}) did not return full pair support",
@@ -2224,7 +2255,7 @@ fn validate_task_result(
             result.site
         );
     }
-    if manifest.spec.kind != StudyKind::Tuning {
+    if manifest.spec.targets.is_empty() {
         return Ok(());
     }
     let mut rows = BTreeMap::new();
@@ -2416,11 +2447,12 @@ fn refresh_candidates(
             for site in &manifest.spec.base_cases {
                 match read_task_result(manifest, &member.id, site) {
                     Ok(result) => {
-                        let baseline = (manifest.spec.kind == StudyKind::Tuning
-                            && member.id != "m000000")
+                        // 目标函数只有和基准同一组配对时刻、同一份观测才可比；带目标的不确定性分析也一样。
+                        let scored = !manifest.spec.targets.is_empty() && member.id != "m000000";
+                        let baseline = scored
                             .then(|| read_task_result(manifest, "m000000", site))
                             .transpose()?;
-                        if manifest.spec.kind == StudyKind::Tuning && member.id != "m000000" {
+                        if scored {
                             let baseline = baseline.as_ref().expect("baseline loaded");
                             if let Err(error) = comparable_to_baseline(&result, baseline) {
                                 reason = Some(error.to_string());
@@ -2464,8 +2496,8 @@ fn refresh_candidates(
         } else {
             fixed_score(&validation)
         };
-        let feasible = reason.is_none()
-            && (manifest.spec.kind == StudyKind::Uncertainty || calibration_score.is_some());
+        let feasible =
+            reason.is_none() && (manifest.spec.targets.is_empty() || calibration_score.is_some());
         if !feasible && reason.is_none() {
             reason = Some("required target set is incomplete".into());
         }
@@ -2497,9 +2529,12 @@ fn refresh_candidates(
                 .map(|score| (member.id.clone(), score))
         })
         .min_by(|a, b| a.1.total_cmp(&b.1));
+    // 不确定性分析的样本也有目标函数，但它不是在找"最优"：不选最优，也就没有最优可写回、贴边界可报。
+    let best = best.filter(|_| manifest.spec.kind == StudyKind::Tuning);
     state.best_member = best.as_ref().map(|best| best.0.clone());
     state.best_objective = best.map(|best| best.1);
     update_overfit_warning(state);
+    update_bound_warnings(manifest, members, state)?;
     Ok(())
 }
 
@@ -2555,6 +2590,9 @@ fn run_de_generations(
             .take(population_size)
             .map(|member| member.id.clone())
             .collect();
+        if manifest.spec.budget.include_baseline {
+            seed_population_with_baseline(manifest, members, state)?;
+        }
     }
     if state.population.len() != population_size {
         bail!("DE checkpoint population size does not match the manifest");
@@ -2680,6 +2718,44 @@ fn run_de_generations(
             stream,
             serde_json::json!({"type":"generation_done","kind":"generation_done","generation":generation,"best_member":state.best_member,"best_objective":state.best_objective}),
         )?;
+    }
+    Ok(())
+}
+
+/// 基准顶替初代里最差的成员（不可行的算最差，同分取靠后的，保证确定）。只在基准可行、严格更好、
+/// 且每个参数都落在抽样范围内时顶替：范围外的基准归一化时会被夹到边上，进种群的就不再是基准本身。
+/// 被顶替的初代成员不再是父代，之后也不会重试。
+fn seed_population_with_baseline(
+    manifest: &Manifest,
+    members: &[MemberPlan],
+    state: &mut StudyState,
+) -> Result<()> {
+    let score = |member: &str| {
+        state
+            .candidates
+            .get(member)
+            .filter(|candidate| candidate.feasible)
+            .and_then(|candidate| candidate.calibration)
+    };
+    let Some(baseline_score) = score("m000000") else {
+        return Ok(());
+    };
+    let Some(baseline) = members.iter().find(|member| member.baseline) else {
+        return Ok(());
+    };
+    if !super::generation::inside_sample_box(baseline, manifest) {
+        return Ok(());
+    }
+    let worst = state
+        .population
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (index, score(id).unwrap_or(f64::INFINITY)))
+        .reduce(|worst, next| if next.1 >= worst.1 { next } else { worst });
+    if let Some((index, worst_score)) = worst {
+        if baseline_score < worst_score {
+            state.population[index] = baseline.id.clone();
+        }
     }
     Ok(())
 }
@@ -2887,7 +2963,7 @@ fn write_uncertainty_results(
             )?;
         }
     }
-    write_importance(manifest, members, &means)?;
+    write_importance(manifest, members, &means, state)?;
     write_member_table(manifest, members, state, &means)?;
     Ok(())
 }
@@ -2896,75 +2972,174 @@ fn write_importance(
     manifest: &Manifest,
     members: &[MemberPlan],
     means: &BTreeMap<(String, String, String), f64>,
+    state: &StudyState,
 ) -> Result<()> {
     let mut rows = Vec::new();
     for site in &manifest.spec.base_cases {
         for variable in &manifest.spec.outputs {
-            for parameter in &manifest.spec.parameters {
-                let parameter_key = parameter.member_key();
-                match manifest.spec.method {
-                    StudyMethod::Lhs => {
-                        let pairs = members
-                            .iter()
-                            .filter(|member| !member.baseline)
-                            .filter_map(|member| {
-                                means
-                                    .get(&(member.id.clone(), site.clone(), variable.clone()))
-                                    .map(|mean| (member.parameters[&parameter_key], *mean))
-                            })
-                            .collect::<Vec<_>>();
-                        let (x, y): (Vec<_>, Vec<_>) = pairs.into_iter().unzip();
-                        rows.push(serde_json::json!({
-                            "site":site,"variable":variable,"parameter":parameter_key,
-                            "method":"spearman","value":super::science::spearman(&x,&y),"n":x.len()
-                        }));
-                    }
-                    StudyMethod::Oat => {
-                        let baseline = members
-                            .iter()
-                            .find(|member| member.baseline)
-                            .context("OAT Study has no baseline member")?;
-                        let parameter_index = super::sample::sorted_parameter_names(&manifest.spec)
-                            .iter()
-                            .position(|name| name == &parameter_key)
-                            .context("OAT parameter is missing from the frozen design")?;
-                        let candidate_indices = [2 * parameter_index + 1, 2 * parameter_index + 2];
-                        let changed = members
-                            .iter()
-                            .filter(|member| candidate_indices.contains(&member.candidate_index))
-                            .collect::<Vec<_>>();
-                        if changed.len() == 2 {
-                            let mut changed = changed;
-                            changed.sort_by(|a, b| {
-                                a.parameters[&parameter_key]
-                                    .total_cmp(&b.parameters[&parameter_key])
-                            });
-                            let low = changed[0];
-                            let high = changed[1];
-                            if let (Some(y_low), Some(y_high), Some(y0)) = (
-                                means.get(&(low.id.clone(), site.clone(), variable.clone())),
-                                means.get(&(high.id.clone(), site.clone(), variable.clone())),
-                                means.get(&(baseline.id.clone(), site.clone(), variable.clone())),
-                            ) {
-                                let dx = high.parameters[&parameter_key]
-                                    - low.parameters[&parameter_key];
-                                rows.push(serde_json::json!({
-                                    "site":site,"variable":variable,"parameter":parameter_key,
-                                    "method":"oat_finite_difference_slope","value":(*y_high-*y_low)/dx,
-                                    "asymmetry":(*y_high-*y0)-(*y0-*y_low),"n":2
-                                }));
-                            }
-                        }
-                    }
-                    StudyMethod::DifferentialEvolution => {}
-                }
-            }
+            let y = |member: &str| {
+                means
+                    .get(&(member.to_string(), site.clone(), variable.clone()))
+                    .copied()
+            };
+            importance_rows(
+                manifest,
+                members,
+                &y,
+                serde_json::json!({"site":site,"variable":variable}),
+                &mut rows,
+            )?;
         }
+    }
+    // 对目标函数的敏感性：一个成员一个值（各站、各目标已按冻结权重合并），所以不分站点。
+    // 输出均值的敏感性只说明参数会不会让输出变；要挑率定参数，看的是它能不能让拟合变好。
+    if !manifest.spec.targets.is_empty() {
+        let y = |member: &str| {
+            state
+                .candidates
+                .get(member)
+                .filter(|candidate| candidate.feasible)
+                .and_then(|candidate| candidate.calibration)
+        };
+        importance_rows(
+            manifest,
+            members,
+            &y,
+            serde_json::json!({"site":null,"variable":"objective","target":"objective"}),
+            &mut rows,
+        )?;
     }
     write_json(
         &Path::new(&manifest.root).join("results/importance.json"),
         &rows,
     )
+}
+
+/// 一个响应量（某站某输出的均值，或目标函数）对每个参数的敏感性，按研究方法选算法。
+fn importance_rows(
+    manifest: &Manifest,
+    members: &[MemberPlan],
+    y: &dyn Fn(&str) -> Option<f64>,
+    label: serde_json::Value,
+    rows: &mut Vec<serde_json::Value>,
+) -> Result<()> {
+    let mut push = |extra: serde_json::Value| {
+        let mut row = label.clone();
+        if let (Some(row), Some(extra)) = (row.as_object_mut(), extra.as_object()) {
+            row.extend(extra.clone());
+        }
+        rows.push(row);
+    };
+    let morris =
+        (manifest.spec.method == StudyMethod::Morris).then(|| morris_effects(manifest, members, y));
+    for parameter in &manifest.spec.parameters {
+        let parameter_key = parameter.member_key();
+        match manifest.spec.method {
+            StudyMethod::Lhs => {
+                let (x, values): (Vec<_>, Vec<_>) = members
+                    .iter()
+                    .filter(|member| !member.baseline)
+                    .filter_map(|member| {
+                        Some((*member.parameters.get(&parameter_key)?, y(&member.id)?))
+                    })
+                    .unzip();
+                push(serde_json::json!({
+                    "parameter":parameter_key,"method":"spearman",
+                    "value":super::science::spearman(&x,&values),"n":x.len()
+                }));
+            }
+            StudyMethod::Oat => {
+                let baseline = members
+                    .iter()
+                    .find(|member| member.baseline)
+                    .context("OAT Study has no baseline member")?;
+                let parameter_index = super::sample::sorted_parameter_names(&manifest.spec)
+                    .iter()
+                    .position(|name| name == &parameter_key)
+                    .context("OAT parameter is missing from the frozen design")?;
+                let candidate_indices = [2 * parameter_index + 1, 2 * parameter_index + 2];
+                let mut changed = members
+                    .iter()
+                    .filter(|member| candidate_indices.contains(&member.candidate_index))
+                    .collect::<Vec<_>>();
+                if changed.len() == 2 {
+                    changed.sort_by(|a, b| {
+                        a.parameters[&parameter_key].total_cmp(&b.parameters[&parameter_key])
+                    });
+                    let (low, high) = (changed[0], changed[1]);
+                    if let (Some(y_low), Some(y_high), Some(y0)) =
+                        (y(&low.id), y(&high.id), y(&baseline.id))
+                    {
+                        let dx = high.parameters[&parameter_key] - low.parameters[&parameter_key];
+                        push(serde_json::json!({
+                            "parameter":parameter_key,"method":"oat_finite_difference_slope",
+                            "value":(y_high-y_low)/dx,"asymmetry":(y_high-y0)-(y0-y_low),"n":2
+                        }));
+                    }
+                }
+            }
+            StudyMethod::Morris => {
+                let effects = morris
+                    .as_ref()
+                    .and_then(|effects| effects.get(&parameter_key))
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                let (mu_star, mu, sigma) = super::science::morris_summary(effects);
+                push(serde_json::json!({
+                    "parameter":parameter_key,"method":"morris",
+                    "value":mu_star,"mu":mu,"sigma":sigma,"n":effects.len()
+                }));
+            }
+            StudyMethod::DifferentialEvolution => {}
+        }
+    }
+    Ok(())
+}
+
+/// 每个参数在各条 Morris 轨迹上的基本效应 EE = Δy / Δu（u 是归一化位置，对数参数取对数尺度）。
+/// 相邻两点恰好只有一个参数不同；对不上（不该发生）或任一端没有响应值的那一步跳过。
+fn morris_effects(
+    manifest: &Manifest,
+    members: &[MemberPlan],
+    y: &dyn Fn(&str) -> Option<f64>,
+) -> BTreeMap<String, Vec<f64>> {
+    let dims = super::sample::dimensions(&manifest.spec);
+    let mut ordered = members
+        .iter()
+        .filter(|member| !member.baseline)
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|member| member.candidate_index);
+    let mut effects: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+    for trajectory in ordered.chunks(dims.len() + 1) {
+        if trajectory.len() != dims.len() + 1 {
+            continue;
+        }
+        for step in trajectory.windows(2) {
+            let (a, b) = (step[0], step[1]);
+            let changed = dims
+                .iter()
+                .filter(|dim| a.parameters.get(&dim.key) != b.parameters.get(&dim.key))
+                .collect::<Vec<_>>();
+            let [dim] = changed.as_slice() else {
+                continue;
+            };
+            let position = |member: &MemberPlan| {
+                member
+                    .parameters
+                    .get(&dim.key)
+                    .and_then(|&value| super::generation::unit_position(value, dim))
+            };
+            if let (Some(ua), Some(ub), Some(ya), Some(yb)) =
+                (position(a), position(b), y(&a.id), y(&b.id))
+            {
+                let effect = (yb - ya) / (ub - ua);
+                if effect.is_finite() {
+                    effects.entry(dim.key.clone()).or_default().push(effect);
+                }
+            }
+        }
+    }
+    effects
 }
 
 fn write_member_table(
@@ -2983,6 +3158,10 @@ fn write_member_table(
         csv.push(',');
         csv.push_str(variable);
         csv.push_str("_mean");
+    }
+    let scored = !manifest.spec.targets.is_empty();
+    if scored {
+        csv.push_str(",objective");
     }
     csv.push('\n');
     for member in members {
@@ -3007,6 +3186,16 @@ fn write_member_table(
             for variable in &manifest.spec.outputs {
                 csv.push(',');
                 if let Some(value) = means.get(&(member.id.clone(), site.clone(), variable.clone()))
+                {
+                    csv.push_str(&value.to_string());
+                }
+            }
+            if scored {
+                csv.push(',');
+                if let Some(value) = state
+                    .candidates
+                    .get(&member.id)
+                    .and_then(|candidate| candidate.calibration)
                 {
                     csv.push_str(&value.to_string());
                 }
@@ -3604,6 +3793,44 @@ fn cancel_unstarted(state: &mut StudyState) {
     }
 }
 
+/// 最优候选的参数贴着抽样范围的边（归一化后离边不到 2%）：真正的最优很可能在范围外，
+/// 该放宽范围重跑。网络权重不是物理参数，不报。
+fn update_bound_warnings(
+    manifest: &Manifest,
+    members: &[MemberPlan],
+    state: &mut StudyState,
+) -> Result<()> {
+    state
+        .warnings
+        .retain(|warning| !warning.starts_with("bound:"));
+    let Some(best) = state
+        .best_member
+        .as_ref()
+        .and_then(|id| members.iter().find(|member| &member.id == id))
+    else {
+        return Ok(());
+    };
+    for dim in super::sample::dimensions(&manifest.spec) {
+        if dim.key.starts_with(super::hybrid::WEIGHT_PREFIX) {
+            continue;
+        }
+        let Some(&value) = best.parameters.get(&dim.key) else {
+            continue;
+        };
+        let side = match super::generation::unit_position(value, &dim) {
+            Some(u) if u <= BOUND_MARGIN => "lower",
+            Some(u) if u >= 1.0 - BOUND_MARGIN => "upper",
+            _ => continue,
+        };
+        state
+            .warnings
+            .push(format!("bound: {} {side} {}", dim.key, value));
+    }
+    Ok(())
+}
+
+const BOUND_MARGIN: f64 = 0.02;
+
 fn update_overfit_warning(state: &mut StudyState) {
     state
         .warnings
@@ -4009,6 +4236,155 @@ mod tests {
         assert!(generation_improved(Some(1.0), Some(0.98), 0.02));
     }
 
+    fn candidate(score: Option<f64>) -> CandidateState {
+        CandidateState {
+            generation: 0,
+            feasible: score.is_some(),
+            calibration: score,
+            validation: None,
+            reason: score.is_none().then(|| "failed".into()),
+        }
+    }
+
+    fn member(id: &str, value: f64) -> MemberPlan {
+        MemberPlan {
+            id: id.into(),
+            generation: 0,
+            candidate_index: id[1..].parse().unwrap(),
+            baseline: id == "m000000",
+            parameters: BTreeMap::from([("DEF_TUNING_CNFAC".to_string(), value)]),
+        }
+    }
+
+    fn manifest_with_range(min: f64, max: f64) -> Manifest {
+        let mut manifest = tuning_manifest(Path::new("/unused"));
+        manifest.spec.parameters = vec![super::super::spec::ParameterSpec {
+            name: "DEF_TUNING_CNFAC".into(),
+            parameter_id: None,
+            scope_instance: None,
+            sample_min: min,
+            sample_max: max,
+            scale: Some(super::super::spec::ScaleSpec::Linear),
+        }];
+        manifest
+    }
+
+    #[test]
+    fn morris_effects_recover_linear_slopes_in_normalized_units() {
+        let mut manifest = manifest_with_range(0.1, 0.9);
+        manifest.spec.kind = StudyKind::Uncertainty;
+        manifest.spec.method = StudyMethod::Morris;
+        manifest.spec.targets.clear();
+        let mut second = manifest.spec.parameters[0].clone();
+        second.name = "DEF_TUNING_ZLND".into();
+        second.sample_min = 0.001;
+        second.sample_max = 0.1;
+        second.scale = Some(super::super::spec::ScaleSpec::Log);
+        manifest.spec.parameters.push(second);
+        manifest.spec.budget.candidate_count = Some(4);
+        let baseline = BTreeMap::from([
+            ("DEF_TUNING_CNFAC".to_string(), 0.5),
+            ("DEF_TUNING_ZLND".to_string(), 0.01),
+        ]);
+        let members = super::super::sample::design(&manifest.spec, &baseline).unwrap();
+        // y = 2·CNFAC + 0·ZLND：在归一化尺度上 CNFAC 的基本效应恒为 2 × 0.8 = 1.6，ZLND 恒为 0。
+        let y = |id: &str| {
+            members
+                .iter()
+                .find(|member| member.id == id)
+                .map(|member| 2.0 * member.parameters["DEF_TUNING_CNFAC"])
+        };
+        let effects = morris_effects(&manifest, &members, &y);
+        assert_eq!(effects["DEF_TUNING_CNFAC"].len(), 4);
+        assert!(effects["DEF_TUNING_CNFAC"]
+            .iter()
+            .all(|effect| (effect - 1.6).abs() < 1e-9));
+        assert!(effects["DEF_TUNING_ZLND"]
+            .iter()
+            .all(|effect| effect.abs() < 1e-9));
+        let mut rows = Vec::new();
+        importance_rows(
+            &manifest,
+            &members,
+            &y,
+            serde_json::json!({"site":null,"variable":"objective","target":"objective"}),
+            &mut rows,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["variable"], "objective");
+        assert_eq!(rows[0]["method"], "morris");
+        assert_eq!(rows[0]["n"], 4);
+        // 缺了一个成员的响应值：只少那一步，不让整个参数没结果。
+        let missing = members[2].id.clone();
+        let partial = |id: &str| if id == missing { None } else { y(id) };
+        let effects = morris_effects(&manifest, &members, &partial);
+        assert!(effects.values().map(Vec::len).sum::<usize>() < 8);
+    }
+
+    #[test]
+    fn baseline_replaces_the_worst_initial_member_only_when_better_and_inside_the_box() {
+        let members = vec![
+            member("m000000", 0.5),
+            member("m000001", 0.2),
+            member("m000002", 0.8),
+            member("m000003", 0.3),
+        ];
+        let seeded = |baseline: Option<f64>, scores: [Option<f64>; 3], range: (f64, f64)| {
+            let manifest = manifest_with_range(range.0, range.1);
+            let mut state = StudyState::new("s".into(), []).unwrap();
+            state.population = vec!["m000001".into(), "m000002".into(), "m000003".into()];
+            state
+                .candidates
+                .insert("m000000".into(), candidate(baseline));
+            for (id, score) in ["m000001", "m000002", "m000003"].iter().zip(scores) {
+                state.candidates.insert((*id).into(), candidate(score));
+            }
+            seed_population_with_baseline(&manifest, &members, &mut state).unwrap();
+            state.population
+        };
+        // 最差的是 m000002，基准更好就顶替它。
+        assert_eq!(
+            seeded(Some(0.5), [Some(0.4), Some(0.9), Some(0.6)], (0.1, 0.9)),
+            ["m000001", "m000000", "m000003"]
+        );
+        // 不可行的初代成员算最差；同为不可行时取靠后的。
+        assert_eq!(
+            seeded(Some(0.5), [None, Some(0.4), None], (0.1, 0.9)),
+            ["m000001", "m000002", "m000000"]
+        );
+        // 基准不比最差的好、基准不可行、基准在抽样范围外：都不动。
+        let untouched = ["m000001", "m000002", "m000003"];
+        assert_eq!(
+            seeded(Some(0.9), [Some(0.4), Some(0.9), Some(0.6)], (0.1, 0.9)),
+            untouched
+        );
+        assert_eq!(
+            seeded(None, [Some(0.4), Some(0.9), Some(0.6)], (0.1, 0.9)),
+            untouched
+        );
+        assert_eq!(
+            seeded(Some(0.1), [Some(0.4), Some(0.9), Some(0.6)], (0.6, 0.9)),
+            untouched
+        );
+    }
+
+    #[test]
+    fn best_member_on_a_sampling_bound_is_warned_and_cleared_when_it_moves_inside() {
+        let manifest = manifest_with_range(0.1, 0.9);
+        let mut state = StudyState::new("s".into(), []).unwrap();
+        state.best_member = Some("m000001".into());
+        let members = vec![member("m000001", 0.895)];
+        update_bound_warnings(&manifest, &members, &mut state).unwrap();
+        assert_eq!(state.warnings, ["bound: DEF_TUNING_CNFAC upper 0.895"]);
+        let members = vec![member("m000001", 0.5)];
+        update_bound_warnings(&manifest, &members, &mut state).unwrap();
+        assert!(state.warnings.is_empty());
+        let members = vec![member("m000001", 0.1)];
+        update_bound_warnings(&manifest, &members, &mut state).unwrap();
+        assert_eq!(state.warnings, ["bound: DEF_TUNING_CNFAC lower 0.1"]);
+    }
+
     fn tuning_manifest(root: &Path) -> Manifest {
         Manifest {
             schema_version: 1,
@@ -4039,6 +4415,7 @@ mod tests {
                     validation_to: Some(20),
                     min_pairs: 2,
                     source: None,
+                    corrected: false,
                 }],
                 budget: Default::default(),
                 hybrid: None,
@@ -5973,6 +6350,7 @@ mod tests {
                     validation_to: None,
                     min_pairs: 2,
                     source: None,
+                    corrected: false,
                 }],
                 budget: Default::default(),
                 hybrid: None,
