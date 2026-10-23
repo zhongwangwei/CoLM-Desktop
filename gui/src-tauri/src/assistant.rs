@@ -768,9 +768,21 @@ async fn session_command(app: &tauri::AppHandle, args: Vec<String>) -> Result<St
     .map_err(|e| e.to_string())?
 }
 
-/// 本地文档附件：让 `colm-agent` 抽 PDF/DOCX/DOC/文本，原件不经过网络。
+/// 本地文档附件：后端弹文件对话框，让 `colm-agent` 抽用户亲自选的那份 PDF/DOCX/DOC/文本，原件不经过网络。
+/// 返回 `{path, name, title, text, pages, truncated, warnings}`；取消时返回空。路径不由前端传入：原来的
+/// `assistant_extract_document(path)` 收任意路径、认 `.json`，前端就能把明文存 Key 的 `assistant-keys.json`
+/// 抽出来发给模型服务（DeepSeek 改动复查，同 `pick_parameter_file`）。
 #[tauri::command]
-pub async fn assistant_extract_document(path: String) -> Result<Value, String> {
+pub async fn assistant_pick_document(app: tauri::AppHandle) -> Result<Option<Value>, String> {
+    let Some(path) = crate::recent::pick_file(
+        app,
+        "assistant-attachment".into(),
+        Some("pdf,docx,doc,txt,md,markdown,csv,json".into()),
+    )
+    .await
+    else {
+        return Ok(None);
+    };
     let mut command = std::process::Command::new(agent_path());
     command.arg("--extract-document").arg(&path);
     colm_kernel::run::no_console(&mut command);
@@ -781,7 +793,15 @@ pub async fn assistant_extract_document(path: String) -> Result<Value, String> {
         if !output.status.success() {
             return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
         }
-        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())
+        let mut document: Value =
+            serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+        let name = std::path::Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone());
+        document["path"] = Value::String(path);
+        document["name"] = Value::String(name);
+        Ok(Some(document))
     })
     .await
     .map_err(|e| e.to_string())?

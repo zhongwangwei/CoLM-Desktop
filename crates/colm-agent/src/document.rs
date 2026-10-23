@@ -1,6 +1,6 @@
 //! 本地文档附件：把用户选择的 PDF / DOCX / DOC / 纯文本抽成文字，供助手作为上下文读取。
 //!
-//! 规则（第 766 轮）：只在本地解析，原件不上传；PDF 只读文字层（扫描件明确报错），
+//! 规则（第 768 轮）：只在本地解析，原件不上传；PDF 只读文字层（扫描件明确报错），
 //! DOCX 用 zip + `word/document.xml`，旧 `.doc` 仅在系统有 textutil/soffice 时尽力转成 DOCX。
 //! 所有格式都有大小与字符上限，避免一个附件把 sidecar 或模型上下文拖死。
 
@@ -18,6 +18,12 @@ pub(crate) const MAX_PDF_PAGES: usize = 300;
 pub(crate) const MAX_PDF_TEXT_CHARS: usize = 2_000_000;
 /// DOCX/DOC 原始大小上限。
 const MAX_OFFICE_BYTES: u64 = 64 * 1024 * 1024;
+/// DOCX 里 `word/document.xml` 解压后最多读这么多字节（防 zip 炸弹；正常论文、报告只有几 MB）。
+/// 测试里用 1 MB，免得为了验证上限去压一个 64 MB 的文件。
+#[cfg(not(test))]
+const MAX_DOCX_XML_BYTES: u64 = 64 * 1024 * 1024;
+#[cfg(test)]
+const MAX_DOCX_XML_BYTES: u64 = 1024 * 1024;
 /// 纯文本文件原始大小上限。
 const MAX_TEXT_BYTES: u64 = 20 * 1024 * 1024;
 /// 所有附件最终最多返回的字符数（每条消息前端的合计上限另算）。
@@ -127,17 +133,26 @@ fn extract_docx(path: &Path, name: String) -> Result<ExtractedDocument> {
     let file =
         std::fs::File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let mut archive = zip::ZipArchive::new(file).context("not a valid DOCX (zip) file")?;
+    // 解压出来的大小要设上限：几 MB 的 DOCX 可以把 document.xml 压成几 GB（zip 炸弹），
+    // `read_to_string` 不设上限会把 sidecar 的内存撑爆。正文 XML 超过上限就截断并标记。
     let mut xml = String::new();
-    archive
+    let entry = archive
         .by_name("word/document.xml")
-        .context("DOCX has no word/document.xml")?
-        .read_to_string(&mut xml)
+        .context("DOCX has no word/document.xml")?;
+    let mut xml_bytes = Vec::new();
+    entry
+        .take(MAX_DOCX_XML_BYTES + 1)
+        .read_to_end(&mut xml_bytes)
         .context("cannot read word/document.xml")?;
+    let xml_truncated = xml_bytes.len() as u64 > MAX_DOCX_XML_BYTES;
+    xml_bytes.truncate(MAX_DOCX_XML_BYTES as usize);
+    xml.push_str(&String::from_utf8_lossy(&xml_bytes));
     let mut text = docx_xml_text(&xml);
     if text.trim().is_empty() {
         bail!("{name} has no readable text (it may contain only images)");
     }
     let (text, truncated) = ensure_text(std::mem::take(&mut text));
+    let truncated = truncated || xml_truncated;
     Ok(ExtractedDocument {
         title: Some(name),
         text,

@@ -36622,7 +36622,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 回退官方 Fetch 的真实窗口端到端（第 765 轮已注明）；
 - 停助手进程时最多同步等 2 秒。
 
-## 第 765 轮：本地 PDF 文字层提取（2026-10-23）
+## 第 767 轮：本地 PDF 文字层提取（2026-10-23）
 
 - `fetch_url` 本地路径不再遇 PDF 直接拒绝：新增纯 Rust `pdf-extract 0.12.1`（MIT，依赖 lopdf；在 `colm-agent` sidecar 内，不进 GUI）。
 - 边界：PDF 原始大小 **64 MB**；只返回前 **300 页**；文本最多 **2,000,000 字符**；超出截断并返回 `truncated: true`；解析放在 `catch_unwind` 里，损坏/恶意 PDF 不会带走 worker；没有文字层（扫描件）明确报“没有可提取文字”，再走官方回退。
@@ -36630,7 +36630,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 测试：仓库内 `vendor/CoLM202X/preprocess/Forcings/Potential_spikes.pdf`（4.4 MB）实测抽出含 “ERA5” 的文本；非 PDF 字节报错；`cargo test -p colm-agent --lib tools::web` **25/25**。
 - 依赖可行性已在沙箱内用工作区 `CARGO_HOME` 验证（`pdf-extract 0.12.1` + `lopdf 0.42`，MSRV 1.85，MIT）；`Cargo.lock` 已更新。扫描式 PDF 仍需 OCR，本轮不做。
 
-## 第 766 轮：助手本地文档附件（PDF / DOCX / DOC / 纯文本）（2026-10-23）
+## 第 768 轮：助手本地文档附件（PDF / DOCX / DOC / 纯文本）（2026-10-23）
 
 - `colm-agent` 新增 `document` 模块：`extract(path)` 按扩展名本地抽文字，返回 `{title,text,pages,truncated,warnings}`；严格限制类型、文件大小（PDF/Office 64 MB、纯文本 20 MB）和字符数（2M）。
   - PDF：复用第 765 轮的 `pdf_text`（64 MB / 前 300 页 / 2M 字符）。
@@ -36642,3 +36642,22 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 测试：`document` 9/9（PDF fixture、DOCX 段落/表格/实体、缺 document.xml、纯文本、unsupported、macOS `.doc` textutil 转换）；`cargo test -p colm-agent --lib` 220/1（沙箱 pty）；CLI 实测 PDF 输出 7 页且含 ERA5；`check-gui` 242/186；前端 875/875。
 - 真实窗口点检（e2e 重建，隔离 HOME）：助手面板出现「添加文档」，通过 `/pick` 选择仓库 PDF 后显示 `Potential_spikes.pdf · 7 页 · ×`，可移除；实例无 panic、localStorage 17 键与进入前一致。证据 `tmp/assistant-audit-2026-10-23/e2e-attach/`。
 - 没做：扫描件 OCR、旧 `.doc` 的纯 Rust 解析、xlsx/pptx。
+
+## 第 769 轮：复查 DeepSeek 的 PDF 与文档附件（第 767–768 轮）并修正（2026-10-23）
+
+**第 767 轮（本地读 PDF，已推送 `fd397773`）**：
+- 门禁：在只含这个提交的干净工作区里全部通过。
+- 新依赖：37 个包的 MSRV 都不高于 1.85，在本项目的 1.85.1 之内；许可证都是 MIT 或 Apache 一类；GUI 那个 workspace 的 `Cargo.lock` 没动，窗口进程不多一个 PDF 依赖。
+- CI：rust (windows-latest) 从上一次的 14 分钟变成 24 分钟，原因是 `Cargo.lock` 变了、依赖缓存失效后重编；ci 与 windows-kernel 都通过。
+- 记下的隐患：`extract_text_from_mem_by_pages` 先抽完所有页再取前 300 页，文档还解析两遍。几十 MB、上千页的手册会又慢又占内存，而且中途不能停。这次没改。
+
+**第 768 轮（本地 PDF、DOCX、DOC、文本附件）的问题与修正**：
+- **任意路径读文件**：`assistant_extract_document(path)` 收前端给的任意路径，又认 `.json`、`.txt`。前端就能把明文存 Key 的 `assistant-keys.json` 或任意文本抽出来、跟着消息发给模型服务，和第 766 轮修掉的 `read_parameter_file` 是同一个洞。改成 `assistant_pick_document`：后端弹对话框、抽取用户亲自选的文件，前端不再传路径。
+- **zip 炸弹**：DOCX 的 `word/document.xml` 原来 `read_to_string` 不设上限，几 KB 的文件能解压出几 GB。现在最多读 64 MB（测试里用 1 MB），超过就截断并标记。新增测试 `a_docx_that_inflates_past_the_limit_is_cut_not_read_whole`。
+- **一条消息的附件上限 400 万字符太大**：附件直接放进用户消息，以后每次请求还会连同历史再发一遍。400 万字符英文约 100 万 token、中文约 400 万 token，远超模型上下文，那次请求必失败；而且它留在会话里，此后每次请求都超长、都计入会话预算。改为 20 万字符，超出的部分截断并标明 `truncated`，不整份拒绝。
+- **`</document>` 冒充用户的话**：正文里出现 `</document>` 会提前闭合标签，让文档内容冒充成用户的话；现在转义成 `<\/document`。
+- **真实窗口验证**：
+  - 旧命令 `assistant_extract_document` 返回 not found；
+  - 经 `/pick` 预设对话框结果附加 `Potential_spikes.pdf`，显示"7 页"；
+  - 再附加一个 36 万字符的文本，显示"（已截断）"。
+- **文档编号**：DeepSeek 又把这两轮记成第 765、766 轮，与已有的重号，顺延为第 767、768 轮，代码与设计文档里的引用一起改。

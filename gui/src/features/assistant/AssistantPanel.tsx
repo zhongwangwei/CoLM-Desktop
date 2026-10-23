@@ -49,9 +49,12 @@ interface DocumentAttachment {
   warnings?: string[];
 }
 
-type ExtractedDocument = Omit<DocumentAttachment, 'path' | 'name'>;
-
-const ATTACHMENT_CHARS_LIMIT = 4_000_000;
+/**
+ * 一条消息里附件文字的合计上限。附件直接放进用户消息，之后每次请求都会连同历史再发一遍：原来的 400 万字符
+ * （英文约 100 万 token、中文约 400 万）远超模型上下文，那一次请求必失败，而且留在会话里，此后每次请求都超长、
+ * 每次都计入会话预算（DeepSeek 改动复查）。20 万字符约 5–20 万 token；超出的部分截断并标明，不整份拒绝。
+ */
+const ATTACHMENT_CHARS_LIMIT = 200_000;
 export default function AssistantPanel() {
   const { state, navigate, update } = useApp();
   const app = useRef(state);
@@ -350,25 +353,30 @@ export default function AssistantPanel() {
   async function attachDocument() {
     if (runningRef.current || !ready) return;
     try {
-      const path = await invoke<string | null>('pick_file', {
-        key: 'assistant-attachment',
-        filter: 'pdf,docx,doc,txt,md,markdown,csv,json',
-      });
-      if (!path) return;
       setAttaching(true);
-      const extracted = await invoke<ExtractedDocument>('assistant_extract_document', { path });
-      if (!extracted.text.trim())
+      // 选文件和读文件都在后端：前端不能拿一个任意路径去读（例如存 Key 的 JSON）再发给模型。
+      const picked = await invokeJson<DocumentAttachment | null>('assistant_pick_document');
+      if (!picked) return;
+      if (!picked.text.trim())
         throw new Error(t('这个文件没有可读文字。', 'This file has no readable text.'));
-      const name = path.split(/[\\/]/).pop() || path;
       const used = attachments.reduce((total, item) => total + item.text.length, 0);
-      if (used + extracted.text.length > ATTACHMENT_CHARS_LIMIT)
+      const room = ATTACHMENT_CHARS_LIMIT - used;
+      if (room <= 0)
         throw new Error(
           t(
-            '附件文字总量超过上限；请删掉一个附件或换一个更小的文件。',
-            'The attached text exceeds the limit; remove an attachment or use a smaller file.',
+            '这条消息的附件文字已经到上限；先发送，或删掉一个附件。',
+            'The attachments for this message are at their limit; send first or remove one.',
           ),
         );
-      setAttachments((old) => [...old, { path, name, ...extracted }]);
+      const cut = picked.text.length > room;
+      setAttachments((old) => [
+        ...old,
+        {
+          ...picked,
+          text: cut ? picked.text.slice(0, room) : picked.text,
+          truncated: picked.truncated || cut,
+        },
+      ]);
     } catch (e) {
       setError(attachmentErrorText(String(e)));
     } finally {
@@ -390,7 +398,9 @@ export default function AssistantPanel() {
         const name = attachment.name.replaceAll('"', '');
         const pages = attachment.pages ? ` pages="${attachment.pages}"` : '';
         const truncated = attachment.truncated ? ' truncated="true"' : '';
-        return `<document name="${name}"${pages}${truncated}>\n${attachment.text}\n</document>`;
+        // 正文里的 `</document>` 会提前闭合标签，让文档内容冒充成用户的话；转义掉。
+        const body = attachment.text.replace(/<\/document/gi, '<\\/document');
+        return `<document name="${name}"${pages}${truncated}>\n${body}\n</document>`;
       })
       .join('\n\n');
     const text = documentText ? `${documentText}\n\n${prompt}` : prompt;

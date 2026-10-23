@@ -121,7 +121,7 @@ OpenAI 原生 Responses 保存并回传完整输出及加密 reasoning；Claude 
 
 错误处理按官方口径：408/429/5xx 退避重试（工具内最多 2 次并检查取消），402 提示余额不足，401 提示 Key 无效，其余 4xx 不原样重试。旧实现（Anthropic 兼容 Messages + `web_search_20250305` + `deepseek-v4-flash`）保留为 `COLM_AGENT_SEARCH_LEGACY=1` 的显式回退，一个版本后删除；`COLM_AGENT_SEARCH_URL` 现在表示完整端点，供测试/e2e 注入本地 mock。官方参考：[Search & Fetch 指南](https://api-docs.deepseek.com/guides/search)、[Search API](https://api-docs.deepseek.com/api/search)、[Fetch API](https://api-docs.deepseek.com/api/fetch)、[模型与价格](https://api-docs.deepseek.com/quick_start/models)、[变更日志](https://api-docs.deepseek.com/updates)。
 
-#### 本地文档附件（第 766 轮）
+#### 本地文档附件（第 768 轮）
 
 助手输入框支持附加本地文档：PDF（只读文字层，64 MB / 前 300 页 / 2M 字符）、DOCX（zip + `word/document.xml`）、旧 `.doc`（仅有系统转换器时尽力转 DOCX：macOS `textutil`，其他平台 `soffice`/`libreoffice`；60 秒超时、固定参数、临时目录清理）、TXT/MD/CSV/JSON。解析在 `colm-agent` sidecar 的 `document` 模块完成，原件不上传；抽出的文字以 `<document name="…">` 包进用户消息，作为普通上下文发给当前模型，因此仍受现有外发同意覆盖。扫描件没有文字层时明确报错，不伪造内容；每个附件/每条消息有字符上限并在 UI 标注截断。
 

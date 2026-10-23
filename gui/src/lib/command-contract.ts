@@ -7,12 +7,7 @@ export const commandContract = {
       "rust_type": "AssistantSettings"
     }
   },
-  "assistant_extract_document": {
-    "path": {
-      "required": true,
-      "rust_type": "String"
-    }
-  },
+  "assistant_pick_document": {},
   "assistant_backend_status": {},
   "assistant_codex_models": {},
   "assistant_opencode_models": {},

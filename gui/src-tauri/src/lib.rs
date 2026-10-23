@@ -263,7 +263,7 @@ pub fn run() {
             assistant_delete_session,
             assistant_resume,
             assistant_ui_result,
-            assistant_extract_document,
+            assistant_pick_document,
             assistant_backend_status,
             assistant::assistant_codex_models,
             assistant::assistant_opencode_models,

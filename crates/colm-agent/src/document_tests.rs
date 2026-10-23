@@ -140,3 +140,20 @@ fn legacy_doc_is_converted_with_the_system_converter() {
     );
     assert!(!extracted.warnings.is_empty());
 }
+
+#[test]
+fn a_docx_that_inflates_past_the_limit_is_cut_not_read_whole() {
+    // zip 炸弹：几 KB 的 DOCX 解压出远超上限的 document.xml。只读到上限，并标记截断。
+    let scratch = Scratch::new();
+    let path = scratch.path("bomb.docx");
+    let paragraph = "<w:p><w:r><w:t>aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa</w:t></w:r></w:p>";
+    let body = paragraph.repeat((2 * MAX_DOCX_XML_BYTES as usize) / paragraph.len() + 1);
+    docx(
+        &path,
+        &format!("<w:document><w:body>{body}</w:body></w:document>"),
+    );
+    assert!(std::fs::metadata(&path).unwrap().len() < MAX_DOCX_XML_BYTES / 10);
+    let document = extract(&path).unwrap();
+    assert!(document.truncated);
+    assert!((document.text.len() as u64) < MAX_DOCX_XML_BYTES);
+}
