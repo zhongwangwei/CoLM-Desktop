@@ -323,6 +323,10 @@ pub async fn bench_install(
                     }
                 }
                 stream(&app, command, "openbench")?;
+                say(&app, "openbench", "预取地图底图");
+                let mut prefetch = env_command(&root, "python");
+                prefetch.args(["-c", colm_bench::PREFETCH_SCRIPT]);
+                stream(&app, prefetch, "openbench")?;
                 Ok("ok".into())
             }
             other => Err(format!("没有这一步：{other}")),

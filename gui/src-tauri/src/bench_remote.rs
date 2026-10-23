@@ -98,6 +98,19 @@ fn check_job(job: &str) -> Result<(), String> {
         .ok_or_else(|| format!("不是比较页的作业：{job}"))
 }
 
+/// 删掉服务器上的环境：`env` 只删虚拟环境，`all` 连 uv、专用 Python 和下载缓存；登记表与比较留着。
+#[tauri::command]
+pub async fn bench_remote_uninstall(
+    app: tauri::AppHandle,
+    host: String,
+    what: String,
+) -> Result<Value, String> {
+    if !["env", "all"].contains(&what.as_str()) {
+        return Err(format!("没有这一项：{what}"));
+    }
+    call(app, &host, "uninstall", &[("--what", what)]).await
+}
+
 /// 服务器上一个作业的状态与日志末尾。
 #[tauri::command]
 pub async fn bench_remote_job(

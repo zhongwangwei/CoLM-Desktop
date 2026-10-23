@@ -6,6 +6,7 @@
 //!                                  [--index-url PyPI 镜像]
 //! colm-cli remote-bench-run        --host H --root R --json '{"name","config","sites","ref_root"}' [调度选项同 remote-run]
 //! colm-cli remote-bench-job        --host H --root R --job ID [--lines N]
+//! colm-cli remote-bench-uninstall  --host H --root R --what env|all
 //! colm-cli remote-bench-cancel     --host H --root R --job ID
 //! colm-cli remote-bench-inspect    --host H --root R --dir 服务器上的 history 或算例目录
 //! colm-cli remote-bench-references --host H --root R
@@ -22,8 +23,8 @@
 use anyhow::{bail, ensure, Context, Result};
 use colm_bench::{
     platform_from_uname, posix_value, strict_json, uv_archive, valid_name, valid_station,
-    INSPECT_SCRIPT, OPENBENCH_VERSION, PREPARE_SCRIPT, PROGRAM_ENV, PYTHON_VERSION, UV_ENV,
-    UV_VERSION,
+    INSPECT_SCRIPT, OPENBENCH_VERSION, PREFETCH_SCRIPT, PREPARE_SCRIPT, PROGRAM_ENV,
+    PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 use colm_remote::job::{self, Spec};
 use colm_remote::sched::{self, Resources, Scheduler};
@@ -193,10 +194,12 @@ pub(super) fn install(opts: &Opts) -> Result<()> {
                 }
             };
             format!(
-                "test -x {python} || {{ echo '先装专用 Python' >&2; exit 1; }}\n{uv_env}{uv} pip install --python {python}{index} {target}\n",
+                "test -x {python} || {{ echo '先装专用 Python' >&2; exit 1; }}\n{uv_env}{uv} pip install --python {python}{index} {target}\n{env}echo '预取地图底图'\n{prefetch}",
                 python = quote(&format!("{root}/env/bin/python")),
                 uv_env = exports(&root, &UV_ENV),
                 uv = quote(&format!("{root}/tools/uv")),
+                env = program_env(&root),
+                prefetch = python_here(&root, PREFETCH_SCRIPT, &[], "COLM_BENCH_PREFETCH"),
             )
         }
         other => bail!("no such install step: {other}"),
@@ -372,6 +375,32 @@ fn run_body(root: &str, request: &RunRequest) -> Result<String> {
         ));
     }
     Ok(body)
+}
+
+/// `remote-bench-uninstall`：删掉服务器上的环境。`env` 只删虚拟环境（OpenBench 与依赖），`all` 连 uv、专用
+/// Python 和下载缓存一起删；登记表（`home/`）和比较（`projects/`）都留着，和本机的"删掉"一样。
+pub(super) fn uninstall(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = bench_root(opts)?;
+    let what = opts.need_str("--what")?;
+    let targets: &[&str] = match what.as_str() {
+        "env" => &["env"],
+        "all" => &["env", "python", "cache", "tools"],
+        other => bail!("no such item: {other}"),
+    };
+    ssh.run_ok(&uninstall_script(&root, targets))?;
+    println!("{}", json!({ "removed": targets }));
+    Ok(())
+}
+
+fn uninstall_script(root: &str, targets: &[&str]) -> String {
+    let paths = targets
+        .iter()
+        .map(|t| quote(&format!("{root}/{t}")))
+        .collect::<Vec<_>>()
+        .join(" ");
+    // uv 装的 Python 有只读文件（缓存里的 wheel 解压目录），先放开写权限再删。
+    format!("chmod -R u+w {paths} 2>/dev/null || true\nrm -rf {paths}\n")
 }
 
 /// `remote-bench-job`：作业状态与日志末尾。

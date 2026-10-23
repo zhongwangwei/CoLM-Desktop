@@ -11,6 +11,9 @@ export interface HistoryInfo {
   lon: number | null;
   lat: number | null;
   files: number;
+  /** 格点：[西, 东, 南, 北]（格子边界，度）与分辨率（度）；单点或读不出时为空。 */
+  extent?: [number, number, number, number] | null;
+  resolution?: number | null;
 }
 
 /** 比较里的一个模拟：一个算例（或别的 history 目录）的一次输出。 */
@@ -61,6 +64,40 @@ export function parseReferences(value: unknown): BenchReference[] {
     .filter((row) => row.name);
 }
 
+/**
+ * 有格点模拟时按它们覆盖的范围（并集）裁，按给定分辨率比。不写时 OpenBench 按全球 0.5 度比：2026-10-23 在 7920
+ * 上实测 GreaterBay 1 km 对 ERA5-Land，全球格网里只有 4 个格子有值；裁到模拟范围、按 0.25 度比是 39 个陆地格子。
+ * 范围向外取到 0.01 度，免得边上的格子被截掉。
+ */
+function gridLines(simulations: BenchSimulation[], gridRes?: number | null): string[] {
+  const extents = simulations
+    .filter((s) => s.info.spatial && s.info.extent)
+    .map((s) => s.info.extent!);
+  if (!extents.length) return [];
+  const round = (v: number, up: boolean) => (up ? Math.ceil(v * 100) : Math.floor(v * 100)) / 100;
+  const west = round(Math.max(-180, Math.min(...extents.map((e) => e[0]))), false);
+  const east = round(Math.min(180, Math.max(...extents.map((e) => e[1]))), true);
+  const south = round(Math.max(-90, Math.min(...extents.map((e) => e[2]))), false);
+  const north = round(Math.min(90, Math.max(...extents.map((e) => e[3]))), true);
+  return [
+    `  lat_range: [${south}, ${north}]`,
+    `  lon_range: [${west}, ${east}]`,
+    ...(gridRes && gridRes > 0 ? [`  grid_res: ${gridRes}`] : []),
+  ];
+}
+
+/**
+ * 比较网格的缺省分辨率：所选格点模拟里最粗的那个，但不细于 0.25 度。参考产品大多是 0.25 度或更粗，
+ * 把它们插到 1 km 上比只是放大误差、拖慢计算。
+ */
+export function defaultGridRes(simulations: { spatial: boolean; resolution?: number | null }[]) {
+  const resolutions = simulations
+    .filter((s) => s.spatial && s.resolution)
+    .map((s) => s.resolution!);
+  if (!resolutions.length) return null;
+  return Math.max(0.25, Math.round(Math.max(...resolutions) * 1000) / 1000);
+}
+
 /** YAML 里的字符串一律用 JSON 的双引号写法：路径里有空格、冒号、`#` 也不会被读错。 */
 const quote = (value: string) => JSON.stringify(value);
 
@@ -77,6 +114,8 @@ export function buildOpenbenchConfig(design: {
   simulations: BenchSimulation[];
   /** 这个比较的目录（绝对路径）：单点模拟的站点文件与清单放在它的 `sim/` 下。 */
   projectDir: string;
+  /** 比较用的网格分辨率（度）；有格点模拟时写进 `grid_res`。 */
+  gridRes?: number | null;
 }) {
   const [from, to] = design.years;
   if (!Number.isInteger(from) || !Number.isInteger(to) || from > to)
@@ -98,6 +137,7 @@ export function buildOpenbenchConfig(design: {
     '  output_dir: ./output',
     `  years: [${from}, ${to}]`,
     `  tim_res: ${design.timRes}`,
+    ...gridLines(design.simulations, design.gridRes),
     'evaluation:',
     `  variables: [${variables.map(([variable]) => variable).join(', ')}]`,
     'reference:',

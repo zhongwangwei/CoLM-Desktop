@@ -311,6 +311,7 @@ pub fn run() {
             bench_remote::bench_remote_install,
             bench_remote::bench_remote_job,
             bench_remote::bench_remote_cancel,
+            bench_remote::bench_remote_uninstall,
             bench_remote::bench_remote_inspect,
             bench_remote::bench_remote_references,
             bench_remote::bench_remote_register,

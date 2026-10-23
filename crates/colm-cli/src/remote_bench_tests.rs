@@ -134,3 +134,27 @@ fn server_status_lines_become_the_same_shape_as_the_local_status() {
     assert!(empty["uv_version"].is_null() && empty["downloader"].is_null());
     assert_eq!(empty["platform"], "linux-aarch64");
 }
+
+#[test]
+fn uninstall_removes_only_the_named_folders_under_the_environment_root() {
+    let script = uninstall_script("/srv/colm/openbench", &["env", "tools"]);
+    assert!(
+        script.contains("rm -rf '/srv/colm/openbench/env' '/srv/colm/openbench/tools'"),
+        "{script}"
+    );
+    // 登记表与比较不在其中。
+    assert!(
+        !script.contains("/home") && !script.contains("/projects"),
+        "{script}"
+    );
+    #[cfg(unix)]
+    assert_bash_parses(&script);
+}
+
+#[test]
+fn the_openbench_install_prefetches_basemaps_for_offline_compute_nodes() {
+    let body = python_here("/srv/ob", PREFETCH_SCRIPT, &[], "COLM_BENCH_PREFETCH");
+    assert!(body.contains("natural_earth"), "{body}");
+    #[cfg(unix)]
+    assert_bash_parses(&body);
+}

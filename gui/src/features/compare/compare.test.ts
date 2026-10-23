@@ -7,6 +7,7 @@ import {
   comparableVariables,
   commonYears,
   comparisonDir,
+  defaultGridRes,
   parseReferences,
   simulationKey,
   type BenchSimulation,
@@ -163,4 +164,37 @@ it('backend messages read in both languages', () => {
   assert.deepEqual(benchErrorText('Traceback x'), ['Traceback x', 'Traceback x']);
   assert.equal(benchLogText('合并 AT_Neu 的 history'), 'Merging the history of AT_Neu');
   assert.equal(benchLogText('Resolved 55 packages'), 'Resolved 55 packages');
+});
+
+it('gridded simulations are clipped to their own extent and compared at a chosen resolution', () => {
+  const gba = {
+    label: 'GreaterBay 1km',
+    info: {
+      ...basin.info,
+      extent: [111.0, 115.5, 21.5, 24.5] as [number, number, number, number],
+      resolution: 0.008333,
+    },
+  };
+  const pearl = {
+    label: 'Pearl 0.1',
+    info: {
+      ...gba.info,
+      extent: [104.004, 117.2, 21.5, 26.9] as [number, number, number, number],
+      resolution: 0.1,
+    },
+  };
+  assert.equal(defaultGridRes([gba.info]), 0.25);
+  assert.equal(defaultGridRes([gba.info, { spatial: true, resolution: 0.5 }]), 0.5);
+  assert.equal(defaultGridRes([site.info]), null);
+  const { config } = buildOpenbenchConfig({
+    ...base,
+    simulations: [gba, pearl],
+    gridRes: 0.25,
+  });
+  assert.match(config, /lat_range: \[21\.5, 26\.9\]/);
+  assert.match(config, /lon_range: \[104, 117\.2\]/);
+  assert.match(config, /grid_res: 0\.25/);
+  // 只有单点模拟时不写范围。
+  const stations = buildOpenbenchConfig({ ...base, simulations: [site] }).config;
+  assert.doesNotMatch(stations, /lat_range|grid_res/);
 });

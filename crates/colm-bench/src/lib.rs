@@ -216,11 +216,42 @@ with xr.open_dataset(files[0]) as first:
     lon = float(first["lon"].values.ravel()[0]) if "lon" in first and not spatial else None
     lat = float(first["lat"].values.ravel()[0]) if "lat" in first and not spatial else None
     start = int(str(times[0])[:4])
+    # 格点：范围（格子边界）与分辨率。OpenBench 缺省按全球 0.5 度比，区域模拟大半是空格子（实测 GreaterBay
+    # 只有 4 个格子有值）；配置里按模拟的范围裁，比较才落在模拟覆盖的地方。
+    extent = resolution = None
+    if spatial and "lon" in first and "lat" in first:
+        xs = np.unique(first["lon"].values.ravel())
+        ys = np.unique(first["lat"].values.ravel())
+        if len(xs) > 1 and len(ys) > 1:
+            resolution = float(max(np.median(np.diff(xs)), np.median(np.diff(ys))))
+            half = resolution / 2
+            extent = [float(xs.min() - half), float(xs.max() + half), float(ys.min() - half), float(ys.max() + half)]
 with xr.open_dataset(files[-1]) as last:
     end = int(str(last["time"].values[-1])[:4])
 tim = "Hour" if step <= 3600 else "3Hour" if step <= 3 * 3600 else "Day" if step <= 86400 else "Month"
 print(json.dumps({"history_dir": os.path.abspath(folder), "prefix": prefix, "tim_res": tim, "syear": start, "eyear": end,
-                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files)}))
+                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files), "extent": extent, "resolution": resolution}))
+"#;
+
+/// OpenBench 画地图时 cartopy 要 Natural Earth 底图，缺了现下载（7920 实测下载 110m 的陆地、海岸线、河流、湖泊）。
+/// 集群的计算节点多半不能上网（摆渡船只有登录节点能上网），评估作业到那里画图就失败；所以装 OpenBench 时在
+/// 能上网的那台机器上先取好，放进 `XDG_DATA_HOME` 下 cartopy 自己的目录，之后不再下载。取不到只警告，不算装失败。
+pub const PREFETCH_SCRIPT: &str = r#"
+import sys
+try:
+    import cartopy.io.shapereader as shp
+except Exception as error:
+    print(f"cartopy unavailable, skipping basemap prefetch: {error}")
+    sys.exit(0)
+for category, name in [("physical", "land"), ("physical", "coastline"), ("physical", "ocean"),
+                       ("physical", "rivers_lake_centerlines"), ("physical", "lakes"),
+                       ("cultural", "admin_0_boundary_lines_land")]:
+    for scale in ("110m", "50m"):
+        try:
+            shp.natural_earth(resolution=scale, category=category, name=name)
+            print(f"basemap {scale} {name} ready")
+        except Exception as error:
+            print(f"basemap {scale} {name} not fetched: {error}")
 "#;
 
 /// 单点算例的 history 是每月一个文件；OpenBench 的站点模拟要一个站一个文件。只并只随时间变的地表变量

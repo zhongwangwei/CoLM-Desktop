@@ -14,6 +14,7 @@ import {
   commonYears,
   comparisonDir,
   comparisonName,
+  defaultGridRes,
   parseReferences,
   type BenchReference,
   type BenchSimulation,
@@ -106,6 +107,8 @@ export default function ComparePage() {
   const [from, setFrom] = useState('');
   const [to, setTo] = useState('');
   const [timRes, setTimRes] = useState('Day');
+  // 格点比较的网格分辨率（度）：加了格点模拟时按 defaultGridRes 预填，可以改。
+  const [gridRes, setGridRes] = useState('');
   const [chosen, setChosen] = useState<Record<string, string>>({});
   const [variableQuery, setVariableQuery] = useState('');
   const [yaml, setYaml] = useState('');
@@ -229,8 +232,12 @@ export default function ComparePage() {
         }
         if (reply.ended === 'cancelled' || (stopping.current && state !== 'running'))
           throw new Error('已停止');
-        // 进程没了、退出码还没写下：可能正在收尾，多看两次再下结论（2026-10-23 窗口实测停止时的竞态）。
-        if ((state === 'lost' || state === 'unknown') && ++unsure > 2)
+        // 进程没了、退出码还没写下：可能正在收尾，多看几次再下结论（2026-10-23 窗口实测停止时的竞态）。
+        // 调度系统说已经结束（Slurm 的 COMPLETED）时多等一会儿：计算节点写下的退出码，登录节点经 NFS
+        // 要过一阵才看得到（land02 实测：作业已不在队列、sacct 是 COMPLETED|0:0，exit_code 稍后才出现）。
+        // 只凭 COMPLETED 不能算成功：作业脚本最后一行写退出码，评估失败时作业本身照样以 0 结束。
+        const settling = /COMPLETED/i.test(reply.status.detail ?? '');
+        if ((state === 'lost' || state === 'unknown') && ++unsure > (settling ? 30 : 2))
           throw new Error(
             t(
               `服务器上找不到这个作业的结果（${reply.status.detail ?? state}）。`,
@@ -276,19 +283,27 @@ export default function ComparePage() {
     } else void invoke('bench_cancel');
   };
   const uninstall = async (what: 'env' | 'all') => {
+    const where = remote ? t(`服务器 ${host} 上的`, `on server ${host} `) : '';
     const ok = await askConfirm(
       what === 'all'
         ? t(
-            '删掉 OpenBench、专用 Python、uv 和下载缓存？比较项目和报告不删。',
-            'Remove OpenBench, the private Python, uv and the download cache? Comparisons and reports stay.',
+            `删掉${where} OpenBench、专用 Python、uv 和下载缓存？参考数据登记表、比较项目和报告不删。`,
+            `Remove OpenBench, the private Python, uv and the download cache ${where}? The reference registry, comparisons and reports stay.`,
           )
         : t(
-            '删掉 OpenBench 和它的依赖（虚拟环境）？比较项目和报告不删。',
-            'Remove OpenBench and its dependencies (the virtual environment)? Comparisons and reports stay.',
+            `删掉${where} OpenBench 和它的依赖（虚拟环境）？参考数据登记表、比较项目和报告不删。`,
+            `Remove OpenBench and its dependencies (the virtual environment) ${where}? The reference registry, comparisons and reports stay.`,
           ),
       { confirmLabel: t('删除', 'Remove') },
     );
-    if (ok) await task(() => invoke('bench_uninstall', { what }), t('已删除', 'Removed'));
+    if (ok)
+      await task(
+        () =>
+          remote
+            ? invoke('bench_remote_uninstall', { host, what })
+            : invoke('bench_uninstall', { what }),
+        t('已删除', 'Removed'),
+      );
   };
 
   const ready = !!status?.openbench;
@@ -325,6 +340,8 @@ export default function ComparePage() {
       setFrom(String(years[0]));
       setTo(String(years[1]));
     }
+    const res = defaultGridRes(ok.map((p) => p.info));
+    setGridRes(res ? String(res) : '');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ok.length]);
   // 换了评估的机器：状态、登记表、参考数据根目录都换成那台的；所选模拟的路径属于原来那台，清掉。
@@ -381,6 +398,7 @@ export default function ComparePage() {
         variables: chosen,
         simulations: sims,
         projectDir: comparisonDir(status?.root ?? '', name),
+        gridRes: Number(gridRes) || null,
       });
       setYaml(built.config);
       setSites(built.sites);
@@ -633,12 +651,12 @@ export default function ComparePage() {
             />
           )}
           {busy && <Button onClick={stop}>{t('停止', 'Stop')}</Button>}
-          {!remote && (status?.python || ready) && (
+          {(status?.python || ready) && (
             <Button disabled={busy} onClick={() => void uninstall('env')}>
               {t('删掉 OpenBench', 'Remove OpenBench')}
             </Button>
           )}
-          {!remote && status?.uv_own && (
+          {(remote ? !!status?.uv_version : status?.uv_own) && (
             <Button variant="danger" disabled={busy} onClick={() => void uninstall('all')}>
               {t('全部删掉', 'Remove everything')}
             </Button>
@@ -920,6 +938,16 @@ export default function ComparePage() {
                 <option value="Hour">{t('逐时', 'Hourly')}</option>
               </Select>
             </Field>
+            {ok.some((p) => p.info.spatial) && (
+              <Field
+                label={t(
+                  '比较的网格分辨率（度；范围按格点模拟覆盖的区域裁）',
+                  'Comparison grid resolution (degrees; the region follows the gridded simulations)',
+                )}
+              >
+                <Input type="number" value={gridRes} onChange={(e) => setGridRes(e.target.value)} />
+              </Field>
+            )}
           </div>
           <h3 className="study-subhead">{t('变量和参考数据', 'Variables and references')}</h3>
           {!ok.length ? (

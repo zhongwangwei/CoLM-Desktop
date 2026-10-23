@@ -246,6 +246,16 @@ export const commandContract = {
       "rust_type": "Option<String>"
     }
   },
+  "bench_remote_uninstall": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "what": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "bench_remote_job": {
     "host": {
       "required": true,

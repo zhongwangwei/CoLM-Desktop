@@ -520,6 +520,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-bench-run" => remote_bench::run(opts)?,
         "remote-bench-job" => remote_bench::job_status(opts)?,
         "remote-bench-cancel" => remote_bench::cancel(opts)?,
+        "remote-bench-uninstall" => remote_bench::uninstall(opts)?,
         "remote-bench-inspect" => remote_bench::inspect(opts)?,
         "remote-bench-references" => remote_bench::references(opts)?,
         "remote-bench-register" => remote_bench::register(opts)?,
