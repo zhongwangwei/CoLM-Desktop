@@ -1,0 +1,120 @@
+import { it } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  buildOpenbenchConfig,
+  commonYears,
+  comparisonDir,
+  parseReferences,
+  simulationKey,
+  type BenchSimulation,
+} from './compare';
+
+const site: BenchSimulation = {
+  label: 'AT-Neu (official)',
+  info: {
+    history_dir: '/p/AT-Neu/out/AT-Neu/history',
+    prefix: 'AT-Neu_hist_',
+    tim_res: 'Hour',
+    syear: 2003,
+    eyear: 2006,
+    spatial: false,
+    lon: 11.3,
+    lat: 47.1,
+    files: 48,
+  },
+};
+const basin: BenchSimulation = {
+  label: 'hb draft 2',
+  info: {
+    ...site.info,
+    history_dir: '/p/hb dir/out/hb/history',
+    prefix: 'hb_hist_',
+    spatial: true,
+    syear: 2002,
+    eyear: 2005,
+  },
+};
+const base = {
+  name: 'versions vs flux',
+  years: [2003, 2005] as [number, number],
+  timRes: 'Day',
+  variables: { Latent_Heat: 'OpenBench_LH_Daily', Sensible_Heat: '' } as Record<string, string>,
+  simulations: [site, basin],
+  projectDir: '/data/openbench/projects/versions_vs_flux',
+};
+
+it('builds a config with grid simulations pointing at history and sites as station lists', () => {
+  const { config, sites } = buildOpenbenchConfig(base);
+  assert.match(config, /name: "versions_vs_flux"/);
+  assert.match(config, /years: \[2003, 2005\]/);
+  assert.match(config, /variables: \[Latent_Heat\]/, 'variables without a reference are left out');
+  assert.ok(
+    config.includes(
+      [
+        '  AT_Neu_official:',
+        '    model: CoLM2024',
+        '    root_dir: "/data/openbench/projects/versions_vs_flux/sim"',
+        '    data_type: stn',
+        '    tim_res: Hour',
+        // 绝对路径：OpenBench 的 check 与 run 对相对 fulllist 的解析不一致。
+        '    fulllist: "/data/openbench/projects/versions_vs_flux/sim/AT_Neu_official.csv"',
+      ].join('\n'),
+    ),
+    config,
+  );
+  assert.match(
+    config,
+    /hb_draft_2:[\s\S]*root_dir: "\/p\/hb dir\/out\/hb\/history"[\s\S]*data_type: grid/,
+  );
+  assert.deepEqual(sites, [
+    {
+      id: 'AT_Neu_official',
+      station: 'AT-Neu',
+      history_dir: '/p/AT-Neu/out/AT-Neu/history',
+      prefix: 'AT-Neu_hist_',
+    },
+  ]);
+  assert.deepEqual(commonYears([site, basin]), [2003, 2005]);
+  assert.equal(commonYears([]), null);
+});
+
+it('station paths follow the platform separator of the comparison folder', () => {
+  const { config } = buildOpenbenchConfig({
+    ...base,
+    simulations: [site],
+    projectDir: 'C:\\Users\\me\\openbench\\projects\\w',
+  });
+  assert.ok(
+    config.includes(
+      `fulllist: ${JSON.stringify('C:\\Users\\me\\openbench\\projects\\w\\sim\\AT_Neu_official.csv')}`,
+    ),
+    config,
+  );
+});
+
+it('refuses designs OpenBench would reject', () => {
+  assert.throws(() => buildOpenbenchConfig({ ...base, years: [2006, 2003] }), /年份|years/);
+  assert.throws(() => buildOpenbenchConfig({ ...base, variables: {} }), /变量|variable/);
+  assert.throws(
+    () => buildOpenbenchConfig({ ...base, simulations: [site, { ...site }] }),
+    /重复|unique/,
+  );
+  assert.equal(simulationKey('2026 run'), 'sim_2026_run');
+});
+
+it('reads the reference list in either shape', () => {
+  const rows = [
+    { name: 'GLEAM', data_type: 'grid', tim_res: 'Month', variables: ['Evapotranspiration'] },
+  ];
+  assert.deepEqual(parseReferences(rows)[0]!.variables, ['Evapotranspiration']);
+  assert.deepEqual(
+    parseReferences({ datasets: [{ name: 'LH', variables: { Latent_Heat: {} } }] })[0]!.variables,
+    ['Latent_Heat'],
+  );
+  assert.deepEqual(parseReferences(null), []);
+});
+
+it('comparison folders match the backend layout on both separators', () => {
+  assert.equal(comparisonDir('/data/openbench', 'a b'), '/data/openbench/projects/a_b');
+  assert.equal(comparisonDir('C:\\ob', 'x'), 'C:\\ob\\projects\\x');
+});

@@ -128,6 +128,95 @@ export const commandContract = {
   },
   "assistant_cancel": {},
   "assistant_new_session": {},
+  "bench_status": {},
+  "bench_install": {
+    "step": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "source": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "bench_cancel": {},
+  "bench_uninstall": {
+    "what": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_references": {},
+  "bench_inspect": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_run": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "config": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "sites": {
+      "required": false,
+      "rust_type": "Option<Vec<BenchSite>>"
+    },
+    "refRoot": {
+      "required": false,
+      "rust_type": "Option<String>"
+    }
+  },
+  "bench_register": {
+    "name": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "rootDir": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "dataType": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "timRes": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "years": {
+      "required": true,
+      "rust_type": "(i32, i32)"
+    },
+    "category": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "fulllist": {
+      "required": false,
+      "rust_type": "Option<String>"
+    },
+    "variables": {
+      "required": true,
+      "rust_type": "Vec<String>"
+    }
+  },
+  "bench_scan_preview": {
+    "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_report": {
+    "path": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "case_namelist_preview": {
     "dir": {
       "required": true,

@@ -36204,3 +36204,38 @@ Slurm、LSF、PBS 的载体由 `sbatch`/`bsub`/`qsub` 交给调度系统起，�
 - 再次 `ws-snapshot` 返回 `null`。
 
 **没做**：真实窗口里"选程序打开"、窗口回到前台时自动记下这两处还没点过。
+
+## 第 754 轮：侧栏"比较"——用 OpenBench 在模拟之间、版本之间评估并载入报告（2026-10-23）
+
+**环境**（`gui/src-tauri/src/bench.rs`，全部装在应用数据目录的 `openbench/` 下，不碰系统）：
+- uv 固定在 0.12.5。六个平台的压缩包 SHA-256 写死在代码里（取自官方 `.sha256`，并下载 aarch64-apple-darwin 一份核对过）；用系统的 `curl`、`tar` 下载解压，校验通过才用，不执行远程脚本。系统里已有 uv 就直接用。
+- 专用 Python 3.12：`uv venv --python-preference only-managed`，不借用系统 Python。
+- OpenBench：默认装 PyPI 的 `colm-openbench`，也可以从本地源码目录可编辑安装。
+- 每个子进程都登记成 `ChildOwner::Bench`，停止按钮和关窗都能终止；日志经 `bench://log` 逐行送到页面。
+- 实测：Python 10 s；OpenBench 3.0.8 及全部依赖 51 s；总共 458 MB。
+
+**评估**：
+- `bench_inspect`：用专用环境里的 xarray 读一个算例或 history 目录，得出前缀、时间分辨率、年份、是否格点、单点的经纬度。窗口进程仍不链接 NetCDF。
+- 格点算例直接指向 `out/<名>/history`（`prefix <名>_hist_`、`data_groupby: month`）。
+- 单点算例的 history 没有 `lon`/`lat` 变量，不能当一格的格点（实测报 `No variable named 'lon'`）；而 OpenBench 的站点模拟要一个站一个文件。所以先并成站点文件，再写站点清单（ID,SYEAR,EYEAR,LON,LAT,DIR）。
+  - 只并只随时间变的地表变量：带上土壤层、积雪层维度一起并，实测 AT-Neu 48 个文件吃到 17 GB 内存、十分钟还没完；只并地表变量 9.5 s、360 MB、108 个变量。
+- 站点 ID 必须用站点自己的名字（`AT-Neu`），OpenBench 按 ID 与参考数据里的站点对上；用整理过的键（`AT_Neu`）报 "Station not found in merged station file"。
+- 站点清单写绝对路径：OpenBench 3.0.8 的 `check` 按 `root_dir` 解析 `fulllist`，`run` 却按工作目录打开它，相对路径总有一边找不到（实测 `sim/sim/x.csv` 与 `x.csv` 各错一次）。**这是 OpenBench 的不一致，应在 OpenBench 里统一。**
+- 内置登记表的路径写成 `${OPENBENCH_REF_ROOT}/…`；页面的"参考数据根目录"按机器记住，运行时作为这个环境变量传给 OpenBench。
+- `ref list --format json` 的输出里有 Python 风格的 `Infinity`、`NaN`（23 处），严格 JSON 解析器不认；在字符串之外、作为值出现的这几个记号换成 `null`。
+- 参考数据：可以预览扫描（`ref scan --dry-run`）。一个文件里有多个候选变量时扫描会停下来问（实测 OpenBench_LH_Daily 有 37 个候选），所以另有不交互的登记表单（`ref register -v 变量:名字:单位`）。
+- 生成的 `openbench.yaml` 显示在页面上，可以先改再运行；运行是 `check` 之后再 `run`。报告可以嵌在页面里看（沙箱 iframe，只允许脚本），也可以用浏览器打开，还能载入别处生成的报告。
+
+**真实窗口验证**（e2e 驱动，隔离 HOME `tmp/eh`；安装落在隔离 HOME 的应用数据目录，没碰真实目录；localStorage 结束时已逐键恢复）：
+1. 页面"一键安装（2 步）"：用了系统已有的 uv，约 40 s 装好 OpenBench 3.0.8，日志实时显示；
+2. 登记表 151 个数据集；用表单登记 OpenBench_LH_Daily（站点，日尺度，`Latent_Heat:LE:W m-2`）后变成 152 个；
+3. 勾 AT-Neu：识别为单点（站点）、2003–2006、逐时，并预填年份；Latent_Heat 选 OpenBench_LH_Daily，生成配置；
+4. "检查并运行"：合并 48 个文件、`check` 通过、`run` 完成，623 KB 的报告嵌在页面里显示。指标与脚本单独跑完全一致：日尺度潜热 RMSE 26.92 W m⁻²、r 0.914、bias +16.5 W m⁻²、Overall_Score 0.70；
+5. "载入报告…"打开了别处生成的报告。
+
+窗口里一路查出并修好四处：参考数据列表读不懂（Infinity/NaN）、页面吞掉这个错误显示"0 个"、`OPENBENCH_REF_ROOT` 没传、站点 ID 与 fulllist 的路径。
+
+**没做**：
+- 在没有 uv 的机器上下载 uv 的那条路径只有校验和表与单元测试，没在窗口里跑过（这台机器已有 uv）；
+- 格点算例的比较只验证了识别，没有跑完一次评估；
+- Windows、Linux 上的安装还没实测。

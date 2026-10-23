@@ -26,6 +26,7 @@ const ResourcesPage = lazy(() => import('./features/resources/ResourcesPage'));
 const HistoryPage = lazy(() => import('./features/history/HistoryPage'));
 const ResearchPage = lazy(() => import('./features/studies/ResearchPage'));
 const SettingsPage = lazy(() => import('./features/settings/SettingsPage'));
+const ComparePage = lazy(() => import('./features/compare/ComparePage'));
 const AssistantPanel = lazy(() => import('./features/assistant/AssistantPanel'));
 function Help() {
   const { state, navigate } = useApp();
@@ -149,7 +150,9 @@ export default function App() {
       <ResourcesPage />
     ) : state.route === 'history' ? (
       <HistoryPage />
-    ) : state.route === 'research' ? null : state.route === 'settings' ? (
+    ) : state.route === 'research' ? null : state.route === 'compare' ? (
+      <ComparePage />
+    ) : state.route === 'settings' ? (
       <SettingsPage />
     ) : (
       <Help />
@@ -211,9 +214,9 @@ export default function App() {
               <span className="current-project-name">{tr('未选项目', 'None selected')}</span>
             </button>
           )}
-          <nav className="sidebar-links">{navigation.slice(0, 5).map(navButton)}</nav>
+          <nav className="sidebar-links">{navigation.slice(0, 6).map(navButton)}</nav>
           <div className="sidebar-bottom">
-            <nav className="sidebar-links">{navigation.slice(5).map(navButton)}</nav>
+            <nav className="sidebar-links">{navigation.slice(6).map(navButton)}</nav>
             <div className="app-version" title={betaNote(en)}>
               <span>CoLM Desktop</span>
               <span>v{appManifest.version}</span>

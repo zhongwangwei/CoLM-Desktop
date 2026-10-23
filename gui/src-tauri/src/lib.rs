@@ -10,6 +10,7 @@
 //! 所以页面用 `window.__TAURI__.core.invoke(...)` 跟这里说话。
 
 mod assistant;
+mod bench;
 mod config;
 #[cfg(feature = "e2e-driver")]
 mod e2e_driver;
@@ -297,6 +298,16 @@ pub fn run() {
             workspace::workspace_remote,
             workspace::workspace_status,
             workspace::workspace_snapshot,
+            bench::bench_status,
+            bench::bench_install,
+            bench::bench_cancel,
+            bench::bench_uninstall,
+            bench::bench_references,
+            bench::bench_run,
+            bench::bench_report,
+            bench::bench_inspect,
+            bench::bench_register,
+            bench::bench_scan_preview,
             workspace::workspace_open,
             workspace::workspace_export,
             workspace::workspace_revert,

@@ -5,6 +5,8 @@ export const navigation = [
   { id: 'simulation', zh: '模拟', en: 'Simulation', route: 'case', tab: 'settings' },
   { id: 'results', zh: '结果', en: 'Results', route: 'case', tab: 'results' },
   { id: 'research', zh: '研究', en: 'Research', route: 'research' },
+  // 研究的下一项：用 OpenBench 在模拟之间、版本之间比较与评估，载入报告。
+  { id: 'compare', zh: '比较', en: 'Compare', route: 'compare' },
   { id: 'history', zh: '历史记录', en: 'History', route: 'history' },
   { id: 'resources', zh: '计算资源', en: 'Compute resources', route: 'resources' },
   { id: 'settings', zh: '设置', en: 'Settings', route: 'settings' },

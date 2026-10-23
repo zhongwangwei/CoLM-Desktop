@@ -127,6 +127,7 @@ export type AppEvent =
   | 'run://lines'
   | 'run://done'
   | 'study://event'
+  | 'bench://log'
   | 'assistant://event'
   | 'remote-create://progress'
   | 'colm-about';

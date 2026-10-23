@@ -16,12 +16,13 @@ import {
 test('sidebar groups model/data work under Project and opens real case tabs', () => {
   assert.deepEqual(
     navigation.map((item) => item.zh),
-    ['项目', '模拟', '结果', '研究', '历史记录', '计算资源', '设置'],
+    ['项目', '模拟', '结果', '研究', '比较', '历史记录', '计算资源', '设置'],
   );
   // Research keeps its own sidebar entry; it is also reached from 新建修改版.
   for (const route of ['project', 'preparation', 'versions'] as const)
     assert.equal(activeNavigation({ route, caseTab: 'results' }), 'project');
   assert.equal(activeNavigation({ route: 'research', caseTab: 'results' }), 'research');
+  assert.equal(activeNavigation({ route: 'compare', caseTab: 'results' }), 'compare');
   // The sidebar entry always lands on research home, also when research is already open.
   const research = navigation.find((item) => item.id === 'research')!;
   assert.deepEqual(navigationTarget(research, { root: '/p' }), {

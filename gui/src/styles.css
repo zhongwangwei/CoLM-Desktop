@@ -3647,3 +3647,32 @@ table input {
   font-size: 12px;
   font-weight: 600;
 }
+
+/* 比较页（OpenBench）。 */
+.compare-status {
+  margin: 0 0 12px;
+  padding-left: 18px;
+  line-height: 1.7;
+}
+.compare-log {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.compare-text {
+  min-height: 72px;
+}
+.compare-report {
+  width: 100%;
+  height: 72vh;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: #fff;
+}

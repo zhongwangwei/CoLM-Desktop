@@ -163,6 +163,7 @@ export type Route =
   | 'resources'
   | 'history'
   | 'research'
+  | 'compare'
   | 'settings'
   | 'help';
 export type AppState = {

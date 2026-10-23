@@ -179,6 +179,7 @@ const routes: Route[] = [
   'resources',
   'history',
   'research',
+  'compare',
   'settings',
   'help',
 ];

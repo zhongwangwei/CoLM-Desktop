@@ -3,6 +3,7 @@ const paths = {
   simulation: 'M2 12h4l3-8 4 16 3-8h6',
   results: 'M5 20V12h3v8 M11 20V4h3v16 M17 20V8h3v12 M3 20h19',
   research: 'M9 3h6 M10 3v7l-5 9a1 1 0 001 2h12a1 1 0 001-2l-5-9V3 M8 15h8',
+  compare: 'M4 20V10h4v10 M10 20V4h4v16 M16 20v-7h4v7 M3 20h18 M4 7l6-3 6 4 4-2',
   history: 'M21 12a9 9 0 11-18 0 9 9 0 0118 0 M12 7v5l3 2',
   resources: 'M4 3h16v7H4z M4 14h16v7H4z M7 6h1 M7 17h1',
   data: 'M4 6c0-1.7 3.6-3 8-3s8 1.3 8 3-3.6 3-8 3-8-1.3-8-3z M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6 M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3',

@@ -724,6 +724,8 @@ pub(crate) enum ChildOwner {
     Remote(Option<String>),
     /// 准备页的数据准备。页面同一时间只跑一件，停止就停全部。
     Preparation,
+    /// "比较"页的 OpenBench：装环境、检查配置、运行评估。同一时间只跑一件。
+    Bench,
 }
 
 fn detached_children() -> &'static Mutex<HashMap<u32, (ChildOwner, bool)>> {
@@ -737,7 +739,7 @@ pub(crate) struct DetachedChildGuard {
 
 impl DetachedChildGuard {
     /// 这个子进程是否被停止按钮或关窗终止过。
-    fn stopped(&self) -> bool {
+    pub(crate) fn stopped(&self) -> bool {
         detached_children()
             .lock()
             .map(|children| children.get(&self.pid).is_some_and(|(_, stopped)| *stopped))
@@ -811,6 +813,11 @@ fn cancel_children_where(wanted: impl Fn(&ChildOwner) -> bool) -> Result<usize, 
 #[tauri::command]
 pub fn cancel_remote_submission(case: String) -> Result<usize, String> {
     cancel_children_where(|owner| *owner == ChildOwner::Remote(Some(case.clone())))
+}
+
+/// 停掉"比较"页正在跑的 OpenBench 任务（安装或评估）。
+pub(crate) fn cancel_bench_children() -> Result<usize, String> {
+    cancel_children_where(|owner| *owner == ChildOwner::Bench)
 }
 
 /// 停掉准备页正在跑的数据准备。返回终止的进程数；0 表示没有在跑的（例如已经结束）。

@@ -310,6 +310,10 @@ fn assistant_ui_event(
                     | "hybrid-fit"
                     | "hybrid-save-version"
                     | "history-replay"
+                    | "compare-install-all"
+                    | "compare-reinstall-openbench"
+                    | "compare-register"
+                    | "compare-run"
             ) || [
                 "prep-finish-",
                 "history-export-",
