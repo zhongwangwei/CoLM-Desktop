@@ -14,6 +14,8 @@ export interface HistoryInfo {
   /** 格点：[西, 东, 南, 北]（格子边界，度）与分辨率（度）；单点或读不出时为空。 */
   extent?: [number, number, number, number] | null;
   resolution?: number | null;
+  /** history 文件按年/月/日切，还是 single；OpenBench 用它找文件。 */
+  data_groupby?: string | null;
 }
 
 /** 比较里的一个模拟：一个算例（或别的 history 目录）的一次输出。 */
@@ -21,6 +23,11 @@ export interface BenchSimulation {
   /** 报告里显示的名字，也是 `simulation` 下的键。 */
   label: string;
   info: HistoryInfo;
+  /** 这个模拟的 per-simulation 变量覆盖（新模块的新模拟变量）。 */
+  variables?: Record<string, { varname: string; varunit: string }>;
+  /** 手动登记时覆盖自动推断的分组/原生分辨率。 */
+  dataGroupby?: string | null;
+  gridRes?: number | null;
 }
 
 /** OpenBench 登记表里的一个参考数据集（`ref list --format json` 的一项，只取用得上的字段）。 */
@@ -110,17 +117,32 @@ export function buildOpenbenchConfig(design: {
   name: string;
   years: [number, number];
   timRes: string;
-  variables: Record<string, string>;
+  variables: Record<string, string | string[]>;
   simulations: BenchSimulation[];
   /** 这个比较的目录（绝对路径）：单点模拟的站点文件与清单放在它的 `sim/` 下。 */
   projectDir: string;
   /** 比较用的网格分辨率（度）；有格点模拟时写进 `grid_res`。 */
   gridRes?: number | null;
+  /** OpenBench 项目级选项；空表示用 OpenBench 默认值。 */
+  weight?: string | null;
+  minYear?: number | null;
+  timeAlignment?: string | null;
+  numCores?: number | null;
+  metrics?: string[];
+  scores?: string[];
 }) {
   const [from, to] = design.years;
   if (!Number.isInteger(from) || !Number.isInteger(to) || from > to)
     throw new Error(bilingual('评估年份要先小后大', 'The evaluation years must run forward'));
-  const variables = Object.entries(design.variables).filter(([, ref]) => ref);
+  const variables = Object.entries(design.variables)
+    .map(
+      ([variable, refs]) =>
+        [
+          variable,
+          (Array.isArray(refs) ? refs : [refs]).filter((ref) => typeof ref === 'string' && ref),
+        ] as const,
+    )
+    .filter(([, refs]) => refs.length > 0);
   if (!variables.length)
     throw new Error(
       bilingual('至少选一个变量和它的参考数据', 'Choose at least one variable and its reference'),
@@ -138,24 +160,40 @@ export function buildOpenbenchConfig(design: {
     `  years: [${from}, ${to}]`,
     `  tim_res: ${design.timRes}`,
     ...gridLines(design.simulations, design.gridRes),
+    ...(design.weight ? [`  weight: ${design.weight}`] : []),
+    ...(design.minYear != null && design.minYear >= 0
+      ? [`  min_year_threshold: ${design.minYear}`]
+      : []),
+    ...(design.timeAlignment ? [`  time_alignment: ${design.timeAlignment}`] : []),
+    ...(design.numCores != null && design.numCores >= 0 ? [`  num_cores: ${design.numCores}`] : []),
     'evaluation:',
     `  variables: [${variables.map(([variable]) => variable).join(', ')}]`,
     'reference:',
-    ...variables.map(([variable, ref]) => `  ${variable}: ${quote(ref)}`),
-    'simulation:',
   ];
+  for (const [variable, refs] of variables) {
+    if (refs.length === 1) lines.push(`  ${variable}: ${quote(refs[0]!)}`);
+    else {
+      lines.push(`  ${variable}:`);
+      for (const ref of refs) lines.push(`    - ${quote(ref)}`);
+    }
+  }
+  lines.push('simulation:');
   const sites: { id: string; station: string; history_dir: string; prefix: string }[] = [];
   design.simulations.forEach((sim, i) => {
     const key = keys[i]!;
     lines.push(`  ${key}:`, '    model: CoLM2024');
     if (sim.info.spatial) {
+      const groupby =
+        sim.dataGroupby || sim.info.data_groupby || (sim.info.files === 1 ? 'single' : 'month');
+      const native = sim.gridRes ?? sim.info.resolution;
       lines.push(
         `    root_dir: ${quote(sim.info.history_dir)}`,
         `    prefix: ${quote(sim.info.prefix)}`,
-        '    data_groupby: month',
+        `    data_groupby: ${groupby}`,
         '    data_type: grid',
         `    tim_res: ${sim.info.tim_res}`,
       );
+      if (native != null && native > 0) lines.push(`    grid_res: ${native}`);
     } else {
       // 站点 ID 用站点自己的名字（history 前缀去掉 `_hist_`，如 AT-Neu）：OpenBench 按 ID 和参考数据里的站点
       // 对上，整理过的键（AT_Neu）对不上。
@@ -168,11 +206,27 @@ export function buildOpenbenchConfig(design: {
       lines.push(
         `    root_dir: ${quote(simDir)}`,
         '    data_type: stn',
+        '    data_groupby: single',
         `    tim_res: ${sim.info.tim_res}`,
         `    fulllist: ${quote(`${simDir}${sep}${key}.csv`)}`,
       );
     }
+    const overrides = Object.entries(sim.variables ?? {}).filter(([, mapping]) =>
+      mapping.varname.trim(),
+    );
+    if (overrides.length) {
+      lines.push('    variables:');
+      for (const [variable, mapping] of overrides) {
+        lines.push(
+          `      ${quote(variable)}:`,
+          `        varname: ${quote(mapping.varname)}`,
+          `        varunit: ${quote(mapping.varunit)}`,
+        );
+      }
+    }
   });
+  if (design.metrics?.length) lines.push(`metrics: [${design.metrics.map(quote).join(', ')}]`);
+  if (design.scores?.length) lines.push(`scores: [${design.scores.map(quote).join(', ')}]`);
   return { config: `${lines.join('\n')}\n`, sites };
 }
 

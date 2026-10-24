@@ -210,6 +210,24 @@ export const commandContract = {
       "rust_type": "Vec<String>"
     }
   },
+  "bench_register_model_variable": {
+    "model": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "variable": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "varname": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "unit": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
   "bench_scan_preview": {
     "dir": {
       "required": true,
@@ -333,6 +351,28 @@ export const commandContract = {
     "variables": {
       "required": true,
       "rust_type": "Vec<String>"
+    }
+  },
+  "bench_remote_register_model_variable": {
+    "host": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "model": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "variable": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "varname": {
+      "required": true,
+      "rust_type": "String"
+    },
+    "unit": {
+      "required": true,
+      "rust_type": "String"
     }
   },
   "bench_remote_scan": {

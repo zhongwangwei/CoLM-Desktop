@@ -36686,3 +36686,24 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - **踩坑**：e2e 只重编 GUI 不跑 `xtask stage-sidecar` 时，`target/release/colm-build-source.json` 的源码哈希落后，启动卡在"模型版本读取失败：official programs were not built from the current source"——这是构建步骤漏了，不是回归。
 - **测试**：前端 `npm test` 884/884（含完整契约检查 245 个命令）；GUI Rust `--lib --bins` 441 通过 1 忽略；`colm-agent` 226、`colm-cli` remote 115 + remote_study 22（前几次提交时）；`xtask check-gui` 245/245。
 - **没做/未验证**：真实 SSH/集群上的 pending 收养与"未到达服务器"判定（只有单元测试与源码路径）；Windows 上 `tasklist` 判活与 `taskkill /T` 清理没在真机跑过；B-12 不补写历史台账里那条未结束的运行事件。
+
+## 第 771 轮：比较页的 OpenBench 注册入口、多参考与必要设定（2026-10-24）
+
+- 比较页新增三个按钮/弹窗（OpenBench 安装后可用）：
+  - **注册模型变量**：新模块输出变量在 CoLM2024 profile 里没有时，登记 `标准变量:NetCDF变量:单位`；本机 `bench_register_model_variable`，服务器 `remote-bench-register-model-variable`（`openbench model register … --append-only`），本机/服务器各写各的 registry。
+  - **注册参考数据**：把原来常驻页面的表单收进弹窗，仍调用既有 `bench_register`/`bench_remote_register`；注册后刷新登记表。
+  - **注册模拟数据**：手动登记 history/算例目录（可先 `bench_inspect` 预填，也可手填 prefix/tim_res/年份/data_groupby/grid_res），并登记该模拟的新模块变量覆盖；写入 `simulation.<label>.variables`，只影响本次比较。
+- **一个变量可选择多份参考数据**：`chosen` 改为 `string[]`，生成 YAML 的 `reference.<变量>` 写成列表；OpenBench 会对每个 sim×ref 分别评估。界面用可搜索/复选的参考数据列表，不再自动只取第一份。
+- **补齐 OpenBench 必要设定**：
+  - `simulation.<label>.grid_res` 使用 `bench_inspect` 的原生分辨率（非 0.5° 的格点模拟不再被模型 profile 的默认值误导）；
+  - `bench_inspect` 从 history 文件名推断并返回 `data_groupby`（Year/Month/Day/single），生成配置按实际值写；单个文件写 single；
+  - 站点模拟显式 `data_groupby: single`；
+  - 项目级高级设置：`weight`、`min_year_threshold`、`time_alignment`、`num_cores`、`metrics`、`scores`（留空保持 OpenBench 默认）。
+- 验证：
+  - 用本机 OpenBench 3.0.8 `load_config()` 加载新生成的含多参考/新字段 YAML：通过；`reference` 数组、`grid_res: 0.01`、`data_groupby: Month`、`weight: mass`、`metrics` 均被正确解析。
+  - 真实窗口（e2e，隔离 HOME `tmp/ob3`）：三个按钮各弹出对应弹窗；加入测试 history 后变量列表出现 83 个变量，`Latent_Heat` 勾选两份参考，生成 YAML 为 `reference:
+  Latent_Heat:
+    - "FLUXNET_PLUMBER2"
+    - "OpenBench_LH_Daily"`；localStorage 已恢复。
+  - 测试：前端 **886/886**；`cargo test -p colm-bench --lib` 6/6；GUI `bench_tests` 4/4；`check-gui` **247 命令 / 209 静态调用 / 24 动态**。
+- 没做/未验证：真实新模块的模型变量注册与服务器端注册（命令只编译/单测校验了名字与参数）；参考数据注册弹窗的真实后台上传；OpenBench `check/run` 的真实多参考评估（本机缺完整参考根目录）。

@@ -195,7 +195,7 @@ pub fn strict_json(text: &str) -> String {
 /// 看一个 history 目录：文件前缀、时间分辨率、年份、是不是格点、单点的经纬度。用专用环境里的 xarray 读，
 /// 窗口进程不链接 NetCDF。
 pub const INSPECT_SCRIPT: &str = r#"
-import glob, json, os, sys
+import glob, json, os, re, sys
 import numpy as np, xarray as xr
 folder = sys.argv[1]
 files = sorted(glob.glob(os.path.join(folder, "*_hist_*.nc")))
@@ -229,8 +229,15 @@ with xr.open_dataset(files[0]) as first:
 with xr.open_dataset(files[-1]) as last:
     end = int(str(last["time"].values[-1])[:4])
 tim = "Hour" if step <= 3600 else "3Hour" if step <= 3 * 3600 else "Day" if step <= 86400 else "Month"
+# 文件按年/月/日切，还是只有一个文件：OpenBench 的 data_groupby 必须和实际命名一致
+# （默认 month 只在 CoLM 的 *_hist_YYYY-MM.nc 下成立）。
+tail = os.path.basename(files[0])[len(prefix):]
+groupby = "Day" if re.search(r"\d{4}-\d{2}-\d{2}", tail) else "Month" if re.search(r"\d{4}-\d{2}", tail) else "Year" if re.search(r"\d{4}", tail) else "single"
+if len(files) == 1:
+    groupby = "single"
 print(json.dumps({"history_dir": os.path.abspath(folder), "prefix": prefix, "tim_res": tim, "syear": start, "eyear": end,
-                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files), "extent": extent, "resolution": resolution}))
+                  "spatial": spatial, "lon": lon, "lat": lat, "files": len(files), "extent": extent, "resolution": resolution,
+                  "data_groupby": groupby}))
 "#;
 
 /// OpenBench 画地图时 cartopy 要 Natural Earth 底图，缺了现下载（7920 实测下载 110m 的陆地、海岸线、河流、湖泊）。

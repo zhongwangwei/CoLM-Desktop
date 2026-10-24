@@ -70,3 +70,15 @@ fn reports_are_read_only_from_inside_the_projects_folder() {
     assert_eq!(read_report(&report).unwrap(), "<p>ok</p>");
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn model_variable_registration_accepts_only_safe_names_and_colon_free_fields() {
+    assert!(valid_model("CoLM2024"));
+    for bad in ["", "../CoLM", "a b", "a:b", "名字"] {
+        assert!(!valid_model(bad), "{bad:?}");
+    }
+    // 变量、变量名、单位经 ':' 拼成 OpenBench 的 -v 规格；带冒号会把字段拆错，命令层直接拒绝。
+    for value in ["Latent_Heat", "f_lfevpa", "W m-2"] {
+        assert!(!value.contains(':') && !value.chars().any(char::is_control));
+    }
+}

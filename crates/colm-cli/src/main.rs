@@ -524,6 +524,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-bench-inspect" => remote_bench::inspect(opts)?,
         "remote-bench-references" => remote_bench::references(opts)?,
         "remote-bench-register" => remote_bench::register(opts)?,
+        "remote-bench-register-model-variable" => remote_bench::register_model_variable(opts)?,
         "remote-bench-scan" => remote_bench::scan(opts)?,
         "remote-bench-fetch" => remote_bench::fetch(opts)?,
         "forcing-directory-probe" => forcing_directory::run(opts)?,

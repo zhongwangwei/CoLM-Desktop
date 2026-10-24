@@ -184,6 +184,28 @@ pub async fn bench_remote_register(
     call(app, &host, "register", &[("--json", request.to_string())]).await
 }
 
+/// 在服务器的 OpenBench 模型 profile 里增加一个变量映射。
+#[tauri::command]
+pub async fn bench_remote_register_model_variable(
+    app: tauri::AppHandle,
+    host: String,
+    model: String,
+    variable: String,
+    varname: String,
+    unit: String,
+) -> Result<Value, String> {
+    let request = serde_json::json!({
+        "model": model, "variable": variable, "varname": varname, "unit": unit,
+    });
+    call(
+        app,
+        &host,
+        "register-model-variable",
+        &[("--json", request.to_string())],
+    )
+    .await
+}
+
 /// 预览服务器上一个参考数据目录能认出哪些。
 #[tauri::command]
 pub async fn bench_remote_scan(

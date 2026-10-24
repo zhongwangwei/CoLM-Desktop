@@ -59,6 +59,7 @@ it('builds a config with grid simulations pointing at history and sites as stati
         '    model: CoLM2024',
         '    root_dir: "/data/openbench/projects/versions_vs_flux/sim"',
         '    data_type: stn',
+        '    data_groupby: single',
         '    tim_res: Hour',
         // 绝对路径：OpenBench 的 check 与 run 对相对 fulllist 的解析不一致。
         '    fulllist: "/data/openbench/projects/versions_vs_flux/sim/AT_Neu_official.csv"',
@@ -197,4 +198,63 @@ it('gridded simulations are clipped to their own extent and compared at a chosen
   // 只有单点模拟时不写范围。
   const stations = buildOpenbenchConfig({ ...base, simulations: [site] }).config;
   assert.doesNotMatch(stations, /lat_range|grid_res/);
+});
+
+it('builds one reference list per variable and per-simulation variable overrides', () => {
+  const { config } = buildOpenbenchConfig({
+    ...base,
+    variables: {
+      Latent_Heat: ['ERA5LAND_LowRes', 'OpenBench_LH_Daily'],
+      Sensible_Heat: 'ERA5LAND_LowRes',
+    },
+    simulations: [
+      {
+        ...site,
+        info: { ...site.info, resolution: 0.1, data_groupby: 'Month' },
+        gridRes: 0.25,
+        dataGroupby: 'Day',
+        variables: {
+          New_Module_Flux: { varname: 'f_newflux', varunit: 'W m-2' },
+        },
+      },
+      basin,
+    ],
+    weight: 'mass',
+    minYear: 0,
+    timeAlignment: 'per_pair',
+    numCores: 4,
+    metrics: ['bias', 'KGE'],
+    scores: ['Overall_Score'],
+  });
+  assert.ok(
+    config.includes(
+      'reference:\n  Latent_Heat:\n    - "ERA5LAND_LowRes"\n    - "OpenBench_LH_Daily"',
+    ),
+    config,
+  );
+  for (const line of [
+    '  weight: mass',
+    '  min_year_threshold: 0',
+    '  time_alignment: per_pair',
+    '  num_cores: 4',
+  ])
+    assert.ok(config.includes(line), config);
+  assert.ok(config.includes('metrics: ["bias", "KGE"]'), config);
+  assert.ok(config.includes('scores: ["Overall_Score"]'), config);
+  assert.ok(
+    config.includes(
+      'variables:\n      "New_Module_Flux":\n        varname: "f_newflux"\n        varunit: "W m-2"',
+    ),
+    config,
+  );
+});
+
+it('writes each gridded simulation native resolution and grouping', () => {
+  const gba = {
+    ...basin,
+    info: { ...basin.info, resolution: 0.0083333, data_groupby: 'Day' },
+  };
+  const { config } = buildOpenbenchConfig({ ...base, simulations: [gba] });
+  assert.match(config, /data_groupby: Day/);
+  assert.match(config, /grid_res: 0\.0083333/);
 });

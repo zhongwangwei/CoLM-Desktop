@@ -3,7 +3,7 @@ import { useApp } from '../../lib/app-state';
 import { usePageContract } from '../../lib/guide';
 import { invoke, invokeJson, listen } from '../../lib/ipc';
 import { askConfirm } from '../../lib/confirm';
-import { Button, Card, Field, Input, Notice, Select } from '../../components/ui';
+import { Advanced, Button, Card, Dialog, Field, Input, Notice, Select } from '../../components/ui';
 import { ActionButton } from '../../components/ActionButton';
 import RemotePathBrowser from '../../components/RemotePathBrowser';
 import {
@@ -37,7 +37,18 @@ type Status = {
   openbench: string | null;
   projects: Project[];
 };
-type Pick = { dir: string; label: string; info: HistoryInfo | null; error?: string };
+type Pick = {
+  dir: string;
+  label: string;
+  info: HistoryInfo | null;
+  error?: string;
+  /** 新模块的模拟变量覆盖（per-simulation variables）。 */
+  variables?: Record<string, { varname: string; varunit: string }>;
+  dataGroupby?: string | null;
+  gridRes?: number | null;
+};
+type RegisterDialog = 'variable' | 'reference' | 'simulation' | null;
+type SimVariableRow = { variable: string; varname: string; unit: string };
 type RemoteJob = {
   job: string;
   status: { state: string; exit_code?: number; log_tail: string; detail?: string | null };
@@ -88,7 +99,7 @@ export default function ComparePage() {
   const [host, setHostState] = useState(() => stored('colm.benchHost'));
   const [servers, setServers] = useState<string[]>([]);
   // 服务器上挑目录：给哪一项挑（模拟的 history，或参考数据根目录）。
-  const [browsing, setBrowsing] = useState<'sim' | 'ref' | null>(null);
+  const [browsing, setBrowsing] = useState<'sim' | 'ref' | 'simRegister' | null>(null);
   const [index, setIndexState] = useState(() => stored('colm.benchIndex'));
   const setIndex = (value: string) => {
     setIndexState(value);
@@ -109,9 +120,38 @@ export default function ComparePage() {
   const [timRes, setTimRes] = useState('Day');
   // 格点比较的网格分辨率（度）：加了格点模拟时按 defaultGridRes 预填，可以改。
   const [gridRes, setGridRes] = useState('');
-  const [chosen, setChosen] = useState<Record<string, string>>({});
+  const [chosen, setChosen] = useState<Record<string, string[]>>({});
   const [variableQuery, setVariableQuery] = useState('');
   const [yaml, setYaml] = useState('');
+  // OpenBench 项目级选项；空串表示用 OpenBench 默认值。
+  const [weight, setWeight] = useState('');
+  const [minYear, setMinYear] = useState('');
+  const [timeAlignment, setTimeAlignment] = useState('');
+  const [numCores, setNumCores] = useState('');
+  const [metrics, setMetrics] = useState('bias, RMSE, correlation');
+  const [scores, setScores] = useState('Overall_Score');
+  const [dialog, setDialog] = useState<RegisterDialog>(null);
+  const [modelVar, setModelVar] = useState({
+    model: 'CoLM2024',
+    variable: '',
+    varname: '',
+    unit: '',
+    description: '',
+  });
+  const [simForm, setSimForm] = useState({
+    dir: '',
+    label: '',
+    dataType: 'auto',
+    prefix: '',
+    suffix: '',
+    timRes: 'Day',
+    from: '',
+    to: '',
+    dataGroupby: '',
+    gridRes: '',
+    variables: [] as SimVariableRow[],
+  });
+  const [simEditing, setSimEditing] = useState<string | null>(null);
   const [sites, setSites] = useState<
     { id: string; station: string; history_dir: string; prefix: string }[]
   >([]);
@@ -333,6 +373,175 @@ export default function ComparePage() {
       setPicks((old) => old.map((p) => (p.dir === dir ? { ...p, error: shown(e) } : p)));
     }
   };
+  const registerModelVariable = () =>
+    task(
+      async () => {
+        if (!modelVar.variable.trim() || !modelVar.varname.trim() || !modelVar.unit.trim())
+          throw new Error(
+            t('变量、变量名和单位都要填。', 'Variable, variable name and unit are required.'),
+          );
+        await invoke(
+          remote ? 'bench_remote_register_model_variable' : 'bench_register_model_variable',
+          {
+            ...(remote ? { host } : {}),
+            model: modelVar.model.trim(),
+            variable: modelVar.variable.trim(),
+            varname: modelVar.varname.trim(),
+            unit: modelVar.unit.trim(),
+          },
+        );
+        setDialog(null);
+        setModelVar({ model: 'CoLM2024', variable: '', varname: '', unit: '', description: '' });
+      },
+      t('模型变量已注册', 'Model variable registered'),
+    );
+  const registerReference = () =>
+    task(
+      async () => {
+        await invoke(remote ? 'bench_remote_register' : 'bench_register', {
+          ...(remote ? { host } : {}),
+          name: reg.name.trim(),
+          rootDir: reg.rootDir.trim(),
+          dataType: reg.dataType,
+          timRes: reg.timRes,
+          years: [Number(reg.from), Number(reg.to)],
+          category: null,
+          fulllist: reg.fulllist.trim() || null,
+          variables: reg.variables
+            .split('\n')
+            .map((v) => v.trim())
+            .filter(Boolean),
+        });
+        setDialog(null);
+      },
+      t('参考数据已登记', 'Reference dataset registered'),
+    );
+  const resetSimulationForm = () =>
+    setSimForm({
+      dir: '',
+      label: '',
+      dataType: 'auto',
+      prefix: '',
+      suffix: '',
+      timRes: 'Day',
+      from: '',
+      to: '',
+      dataGroupby: '',
+      gridRes: '',
+      variables: [],
+    });
+  const editSimulation = (pick?: Pick) => {
+    setSimEditing(pick?.dir ?? null);
+    if (pick) {
+      setSimForm({
+        dir: pick.dir,
+        label: pick.label,
+        dataType: pick.info?.spatial ? 'grid' : pick.info ? 'stn' : 'auto',
+        prefix: pick.info?.prefix ?? '',
+        suffix: '',
+        timRes: pick.info?.tim_res ?? 'Day',
+        from: pick.info ? String(pick.info.syear) : '',
+        to: pick.info ? String(pick.info.eyear) : '',
+        dataGroupby: pick.dataGroupby ?? pick.info?.data_groupby ?? '',
+        gridRes:
+          pick.gridRes != null
+            ? String(pick.gridRes)
+            : pick.info?.resolution != null
+              ? String(pick.info.resolution)
+              : '',
+        variables: Object.entries(pick.variables ?? {}).map(([variable, mapping]) => ({
+          variable,
+          varname: mapping.varname,
+          unit: mapping.varunit,
+        })),
+      });
+    } else resetSimulationForm();
+    setDialog('simulation');
+  };
+  const inspectSimulation = () => {
+    const dir = simForm.dir.trim();
+    if (!dir) throw new Error(t('请先填模拟目录。', 'Enter the simulation folder first.'));
+    return task(
+      async () => {
+        const info = await invokeJson<HistoryInfo>(
+          remote ? 'bench_remote_inspect' : 'bench_inspect',
+          remote ? { host, dir } : { dir },
+        );
+        setSimForm((old) => ({
+          ...old,
+          label: old.label || pickLabel(dir),
+          dataType: info.spatial ? 'grid' : 'stn',
+          prefix: info.prefix,
+          timRes: info.tim_res,
+          from: String(info.syear),
+          to: String(info.eyear),
+          dataGroupby: info.data_groupby ?? '',
+          gridRes: info.resolution != null ? String(info.resolution) : old.gridRes,
+        }));
+      },
+      t('已读取目录概况', 'Folder inspected'),
+    );
+  };
+  const saveSimulation = () => {
+    const dir = simForm.dir.trim();
+    if (!dir) throw new Error(t('请先填模拟目录。', 'Enter the simulation folder first.'));
+    const existing = picks.find((p) => p.dir === dir);
+    const spatial =
+      simForm.dataType === 'grid' ||
+      (simForm.dataType === 'auto' && (existing?.info?.spatial ?? false));
+    if (simForm.dataType === 'auto' && !existing?.info)
+      throw new Error(
+        t(
+          '先读取目录概况，或明确选择格点/站点。',
+          'Inspect the folder or choose grid/station first.',
+        ),
+      );
+    const num = (value: string) => (value.trim() === '' ? null : Number(value));
+    const info: HistoryInfo = existing?.info
+      ? {
+          ...existing.info,
+          prefix: simForm.prefix || existing.info.prefix,
+          tim_res: simForm.timRes,
+          syear: num(simForm.from) ?? existing.info.syear,
+          eyear: num(simForm.to) ?? existing.info.eyear,
+          data_groupby: simForm.dataGroupby || null,
+          resolution: num(simForm.gridRes),
+        }
+      : {
+          history_dir: dir,
+          prefix: simForm.prefix,
+          tim_res: simForm.timRes,
+          syear: num(simForm.from) ?? 0,
+          eyear: num(simForm.to) ?? 0,
+          spatial,
+          lon: null,
+          lat: null,
+          files: 0,
+          data_groupby: simForm.dataGroupby || null,
+          resolution: num(simForm.gridRes),
+        };
+    if (!info.syear || !info.eyear)
+      throw new Error(t('请填起止年份。', 'Enter start and end years.'));
+    const variables = Object.fromEntries(
+      simForm.variables
+        .map((row) => ({
+          variable: row.variable.trim(),
+          varname: row.varname.trim(),
+          unit: row.unit.trim(),
+        }))
+        .filter((row) => row.variable && row.varname)
+        .map((row) => [row.variable, { varname: row.varname, varunit: row.unit }]),
+    );
+    setPicks((old) => {
+      const next = { dir, label: simForm.label.trim() || pickLabel(dir), info, variables };
+      const at = old.findIndex((p) => p.dir === dir);
+      return at >= 0
+        ? old.map((p, i) => (i === at ? { ...p, ...next, error: undefined } : p))
+        : [...old, next];
+    });
+    setDialog(null);
+    setSimEditing(null);
+  };
   const ok = picks.filter((p): p is Pick & { info: HistoryInfo } => !!p.info);
   useEffect(() => {
     const years = commonYears(ok.map((p) => ({ label: p.label, info: p.info })));
@@ -389,6 +598,13 @@ export default function ComparePage() {
     to,
     timRes,
     gridRes,
+    weight,
+    minYear,
+    timeAlignment,
+    numCores,
+    metrics,
+    scores,
+    picks.map((p) => [p.variables, p.dataGroupby, p.gridRes]),
   ]);
   const generatedFor = useRef('');
   useEffect(() => {
@@ -409,7 +625,13 @@ export default function ComparePage() {
   );
   const generate = () => {
     try {
-      const sims: BenchSimulation[] = ok.map((p) => ({ label: p.label, info: p.info }));
+      const sims: BenchSimulation[] = ok.map((p) => ({
+        label: p.label,
+        info: p.info,
+        variables: p.variables,
+        dataGroupby: p.dataGroupby,
+        gridRes: p.gridRes,
+      }));
       const built = buildOpenbenchConfig({
         name,
         years: [Number(from), Number(to)],
@@ -418,6 +640,18 @@ export default function ComparePage() {
         simulations: sims,
         projectDir: comparisonDir(status?.root ?? '', name),
         gridRes: Number(gridRes) || null,
+        weight: weight || null,
+        minYear: minYear.trim() === '' ? null : Number(minYear),
+        timeAlignment: timeAlignment || null,
+        numCores: numCores.trim() === '' ? null : Number(numCores),
+        metrics: metrics
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        scores: scores
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
       });
       setYaml(built.config);
       setSites(built.sites);
@@ -505,6 +739,29 @@ export default function ComparePage() {
           </p>
         </div>
       </header>
+      <div className="button-row">
+        <Button
+          disabled={busy || !ready}
+          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+          onClick={() => setDialog('variable')}
+        >
+          {t('注册模型变量…', 'Register model variable…')}
+        </Button>
+        <Button
+          disabled={busy || !ready}
+          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+          onClick={() => setDialog('reference')}
+        >
+          {t('注册参考数据…', 'Register reference data…')}
+        </Button>
+        <Button
+          disabled={busy || !ready}
+          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+          onClick={() => editSimulation()}
+        >
+          {t('注册模拟数据…', 'Register simulation data…')}
+        </Button>
+      </div>
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
       <Card
@@ -701,8 +958,8 @@ export default function ComparePage() {
         <Card
           title={t('参考数据', 'Reference data')}
           description={t(
-            `OpenBench 登记表里有 ${references.length} 个参考数据集。自己的数据先登记：扫描能认出目录结构标准的数据集；一个文件里有多个候选变量时扫描会停下来问，这时用下面的表单写清楚变量。`,
-            `The OpenBench registry lists ${references.length} reference datasets. Register your own data first: a scan recognises datasets laid out in the standard structure; when a file has several candidate variables, register it with the form below and name the variable.`,
+            `OpenBench 登记表里有 ${references.length} 个参考数据集。自己的数据用上面的「注册参考数据…」登记；扫描能认出目录结构标准的数据集，一个文件里多个候选变量时在注册表单里写清楚。`,
+            `The OpenBench registry lists ${references.length} reference datasets. Register your own data with “Register reference data…” above; a scan recognises standard layouts, and the registration form names variables when a file has several candidates.`,
           )}
         >
           <div className="form-grid">
@@ -745,89 +1002,12 @@ export default function ComparePage() {
             />
           </div>
           {scanText && <pre className="compare-log">{scanText}</pre>}
-          <h3 className="study-subhead">
-            {t('登记一个参考数据集', 'Register a reference dataset')}
-          </h3>
-          <div className="form-grid">
-            {(
-              [
-                ['name', t('名字', 'Name')],
-                ['rootDir', t('数据目录', 'Data folder')],
-                ['fulllist', t('站点清单 CSV（站点数据要）', 'Station list CSV (station data)')],
-                ['from', t('起始年', 'From year')],
-                ['to', t('结束年', 'To year')],
-              ] as const
-            ).map(([key, label]) => (
-              <Field key={key} label={label}>
-                <Input
-                  value={reg[key]}
-                  onChange={(e) => setReg((old) => ({ ...old, [key]: e.target.value }))}
-                />
-              </Field>
-            ))}
-            <Field label={t('类型', 'Type')}>
-              <Select
-                value={reg.dataType}
-                onChange={(e) => setReg((old) => ({ ...old, dataType: e.target.value }))}
-              >
-                <option value="stn">{t('站点', 'Station')}</option>
-                <option value="grid">{t('格点', 'Grid')}</option>
-              </Select>
-            </Field>
-            <Field label={t('时间分辨率', 'Time resolution')}>
-              <Select
-                value={reg.timRes}
-                onChange={(e) => setReg((old) => ({ ...old, timRes: e.target.value }))}
-              >
-                {['Hour', 'Day', 'Month', 'Year'].map((v) => (
-                  <option key={v} value={v}>
-                    {v}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Field
-              label={t(
-                '变量（每行 变量:文件里的名字:单位[:文件名前缀[:文件名后缀]]，如 Latent_Heat:LE:W m-2；按年分文件的格点数据写上前后缀，如 Latent_Heat:slhf:W m-2:ERA5LAND_:_daymean）',
-                'Variables (one per line, variable:name in file:unit[:file prefix[:file suffix]], e.g. Latent_Heat:LE:W m-2; for gridded data split by year give the prefix and suffix, e.g. Latent_Heat:slhf:W m-2:ERA5LAND_:_daymean)',
-              )}
-            >
-              <textarea
-                className="code-files-text compare-text"
-                rows={3}
-                value={reg.variables}
-                onChange={(e) => setReg((old) => ({ ...old, variables: e.target.value }))}
-              />
-            </Field>
-          </div>
-          <div className="button-row">
-            <ActionButton
-              action="compare-register"
-              label={t('登记', 'Register')}
-              kind="commit"
-              disabled={busy || !reg.name || !reg.rootDir || !reg.variables.trim()}
-              run={() =>
-                task(
-                  () =>
-                    invoke(remote ? 'bench_remote_register' : 'bench_register', {
-                      ...(remote ? { host } : {}),
-                      name: reg.name.trim(),
-                      rootDir: reg.rootDir.trim(),
-                      dataType: reg.dataType,
-                      timRes: reg.timRes,
-                      years: [Number(reg.from), Number(reg.to)],
-                      category: null,
-                      fulllist: reg.fulllist.trim() || null,
-                      variables: reg.variables
-                        .split('\n')
-                        .map((v) => v.trim())
-                        .filter(Boolean),
-                    }),
-                  t('已登记', 'Registered'),
-                )
-              }
-            />
-          </div>
+          <p className="muted study-hint">
+            {t(
+              '注册自己的参考数据用上面的「注册参考数据…」按钮；注册后会出现在下面的变量参考数据选择里。',
+              'Use “Register reference data…” above to add your own dataset; it becomes selectable under the variables below after registration.',
+            )}
+          </p>
         </Card>
       )}
 
@@ -929,11 +1109,16 @@ export default function ComparePage() {
                       <td>{p.info ? `${p.info.syear}–${p.info.eyear}` : '—'}</td>
                       <td>{p.info?.tim_res ?? '—'}</td>
                       <td>
-                        <Button
-                          onClick={() => setPicks((old) => old.filter((q) => q.dir !== p.dir))}
-                        >
-                          {t('去掉', 'Remove')}
-                        </Button>
+                        <div className="button-row">
+                          <Button disabled={busy} onClick={() => editSimulation(p)}>
+                            {t('变量…', 'Variables…')}
+                          </Button>
+                          <Button
+                            onClick={() => setPicks((old) => old.filter((q) => q.dir !== p.dir))}
+                          >
+                            {t('去掉', 'Remove')}
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -969,6 +1154,78 @@ export default function ComparePage() {
               </Field>
             )}
           </div>
+          <Advanced title={t('OpenBench 高级设置', 'OpenBench advanced settings')}>
+            <div className="form-grid">
+              <Field
+                label={t('聚合权重', 'Aggregation weight')}
+                hint={t(
+                  '只影响聚合后的 Overall/分数；空=OpenBench 默认 area，通量变量常用 mass。',
+                  'Affects aggregated Overall/scores only; empty = OpenBench default area, flux variables often use mass.',
+                )}
+              >
+                <Select value={weight} onChange={(e) => setWeight(e.target.value)}>
+                  <option value="">{t('默认（area）', 'Default (area)')}</option>
+                  <option value="area">area</option>
+                  <option value="mass">mass</option>
+                  <option value="none">{t('none（等权）', 'none (equal weight)')}</option>
+                </Select>
+              </Field>
+              <Field
+                label={t('站点最少有效年数', 'Minimum station years')}
+                hint={t(
+                  '只影响站点参考；空=OpenBench 默认。',
+                  'Station references only; empty = OpenBench default.',
+                )}
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  value={minYear}
+                  onChange={(e) => setMinYear(e.target.value)}
+                />
+              </Field>
+              <Field
+                label={t('时间对齐', 'Time alignment')}
+                hint={t(
+                  '模拟与参考时段不一致时怎么取交集。',
+                  'How to align simulation and reference periods.',
+                )}
+              >
+                <Select value={timeAlignment} onChange={(e) => setTimeAlignment(e.target.value)}>
+                  <option value="">{t('默认（intersection）', 'Default (intersection)')}</option>
+                  <option value="intersection">intersection</option>
+                  <option value="per_pair">per_pair</option>
+                  <option value="strict">strict</option>
+                </Select>
+              </Field>
+              <Field
+                label={t('并行核数', 'Parallel cores')}
+                hint={t(
+                  '空=OpenBench 用全部 CPU；共享机器建议填。',
+                  'Empty = all CPUs; set this on shared machines.',
+                )}
+              >
+                <Input
+                  type="number"
+                  min={0}
+                  value={numCores}
+                  onChange={(e) => setNumCores(e.target.value)}
+                />
+              </Field>
+              <Field
+                label={t('指标 metrics', 'Metrics')}
+                hint={t('逗号分隔；空=默认。', 'Comma separated; empty = defaults.')}
+              >
+                <Input value={metrics} onChange={(e) => setMetrics(e.target.value)} />
+              </Field>
+              <Field
+                label={t('评分 scores', 'Scores')}
+                hint={t('逗号分隔；空=默认。', 'Comma separated; empty = defaults.')}
+              >
+                <Input value={scores} onChange={(e) => setScores(e.target.value)} />
+              </Field>
+            </div>
+          </Advanced>
           <h3 className="study-subhead">{t('变量和参考数据', 'Variables and references')}</h3>
           {!ok.length ? (
             <p className="muted study-hint">
@@ -995,7 +1252,7 @@ export default function ComparePage() {
                     if (picked)
                       setChosen((old) => ({
                         ...old,
-                        [picked.variable]: picked.references[0]?.name ?? '',
+                        [picked.variable]: picked.references[0] ? [picked.references[0].name] : [],
                       }));
                   }}
                 >
@@ -1021,23 +1278,35 @@ export default function ComparePage() {
               .sort()
               .map((variable) => {
                 const options = allVariables.find((v) => v.variable === variable)?.references ?? [];
+                const selected = chosen[variable] ?? [];
                 return (
                   <Field key={variable} label={variable}>
-                    <div className="study-path">
-                      <Select
-                        value={chosen[variable] ?? ''}
-                        onChange={(e) =>
-                          setChosen((old) => ({ ...old, [variable]: e.target.value }))
-                        }
-                      >
-                        {options.map((r) => (
-                          <option key={r.name} value={r.name}>
-                            {r.name}
-                            {r.data_type ? ` · ${r.data_type}` : ''}
-                            {r.tim_res ? ` · ${r.tim_res}` : ''}
-                          </option>
-                        ))}
-                      </Select>
+                    <div className="reference-picker">
+                      <div className="reference-options">
+                        {options.map((r) => {
+                          const on = selected.includes(r.name);
+                          return (
+                            <label key={r.name} className="param-check">
+                              <input
+                                type="checkbox"
+                                checked={on}
+                                onChange={(e) =>
+                                  setChosen((old) => {
+                                    const current = old[variable] ?? [];
+                                    const next = e.target.checked
+                                      ? [...current, r.name]
+                                      : current.filter((name) => name !== r.name);
+                                    return { ...old, [variable]: next };
+                                  })
+                                }
+                              />
+                              {r.name}
+                              {r.data_type ? ` · ${r.data_type}` : ''}
+                              {r.tim_res ? ` · ${r.tim_res}` : ''}
+                            </label>
+                          );
+                        })}
+                      </div>
                       <Button
                         onClick={() =>
                           setChosen((old) => {
@@ -1174,16 +1443,330 @@ export default function ComparePage() {
           </>
         )}
       </Card>
+      <Dialog
+        open={dialog === 'variable'}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title={t('注册模型变量', 'Register a model variable')}
+        description={t(
+          '新模块的输出变量如果不在 CoLM2024 profile 里，先在这里登记；参考数据里也要有同名标准变量才能评估。',
+          'Register a new module output variable that is missing from the CoLM2024 profile; the reference data must also expose the same standard variable before it can be evaluated.',
+        )}
+      >
+        <div className="form-grid">
+          <Field label={t('模型 profile', 'Model profile')}>
+            <Input
+              value={modelVar.model}
+              onChange={(e) => setModelVar((old) => ({ ...old, model: e.target.value }))}
+            />
+          </Field>
+          <Field
+            label={t('标准变量名', 'Standard variable')}
+            hint={t('如 New_Module_Flux', 'e.g. New_Module_Flux')}
+          >
+            <Input
+              value={modelVar.variable}
+              onChange={(e) => setModelVar((old) => ({ ...old, variable: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('NetCDF 变量名', 'Variable name in NetCDF')}>
+            <Input
+              value={modelVar.varname}
+              onChange={(e) => setModelVar((old) => ({ ...old, varname: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('单位', 'Unit')}>
+            <Input
+              value={modelVar.unit}
+              onChange={(e) => setModelVar((old) => ({ ...old, unit: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <div className="button-row">
+          <Button disabled={busy} onClick={() => void registerModelVariable()}>
+            {t('注册', 'Register')}
+          </Button>
+          <Button variant="ghost" disabled={busy} onClick={() => setDialog(null)}>
+            {t('取消', 'Cancel')}
+          </Button>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === 'reference'}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title={t('注册参考数据', 'Register reference data')}
+        description={t(
+          '登记到当前所选机器（本机或服务器）的 OpenBench 登记表；变量行格式：标准变量:文件变量:单位[:前缀[:后缀]]。',
+          'Register into the current machine’s OpenBench registry; variable lines use standard:file variable:unit[:prefix[:suffix]].',
+        )}
+      >
+        <div className="form-grid">
+          {(
+            [
+              ['name', t('名字', 'Name')],
+              ['rootDir', t('数据目录', 'Data folder')],
+              ['fulllist', t('站点清单 CSV（站点数据要）', 'Station list CSV (station data)')],
+              ['from', t('起始年', 'From year')],
+              ['to', t('结束年', 'To year')],
+            ] as const
+          ).map(([key, label]) => (
+            <Field key={key} label={label}>
+              <Input
+                value={reg[key]}
+                onChange={(e) => setReg((old) => ({ ...old, [key]: e.target.value }))}
+              />
+            </Field>
+          ))}
+          <Field label={t('类型', 'Type')}>
+            <Select
+              value={reg.dataType}
+              onChange={(e) => setReg((old) => ({ ...old, dataType: e.target.value }))}
+            >
+              <option value="stn">{t('站点', 'Station')}</option>
+              <option value="grid">{t('格点', 'Grid')}</option>
+            </Select>
+          </Field>
+          <Field label={t('时间分辨率', 'Time resolution')}>
+            <Select
+              value={reg.timRes}
+              onChange={(e) => setReg((old) => ({ ...old, timRes: e.target.value }))}
+            >
+              {['Hour', 'Day', 'Month', 'Year'].map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field
+            label={t(
+              '变量（每行 标准变量:文件变量:单位[:前缀[:后缀]]）',
+              'Variables (one per line: standard:file variable:unit[:prefix[:suffix]])',
+            )}
+          >
+            <textarea
+              className="code-files-text compare-text"
+              rows={4}
+              value={reg.variables}
+              onChange={(e) => setReg((old) => ({ ...old, variables: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <div className="button-row">
+          <Button
+            disabled={busy || !reg.name || !reg.rootDir || !reg.variables.trim()}
+            onClick={() => void registerReference()}
+          >
+            {t('注册', 'Register')}
+          </Button>
+          <Button variant="ghost" disabled={busy} onClick={() => setDialog(null)}>
+            {t('取消', 'Cancel')}
+          </Button>
+        </div>
+      </Dialog>
+
+      <Dialog
+        open={dialog === 'simulation'}
+        onOpenChange={(open) => !open && setDialog(null)}
+        title={
+          simEditing
+            ? t('编辑模拟数据', 'Edit simulation data')
+            : t('注册模拟数据', 'Register simulation data')
+        }
+        description={t(
+          '手动登记一个 history/算例目录，并登记新模块在这个模拟里的变量名和单位；这些变量覆盖只用于本次比较。',
+          'Add a history/case folder manually and register the new module’s variable names/units for this simulation; these overrides apply only to this comparison.',
+        )}
+      >
+        <div className="form-grid">
+          <Field label={t('目录', 'Folder')}>
+            <div className="study-path">
+              <Input
+                value={simForm.dir}
+                onChange={(e) => setSimForm((old) => ({ ...old, dir: e.target.value }))}
+              />
+              <Button
+                disabled={busy}
+                onClick={() => {
+                  if (remote) setBrowsing('simRegister');
+                  else
+                    void invoke<string | null>('pick_folder', { key: 'openbench-sim' }).then(
+                      (dir) => {
+                        if (dir) setSimForm((old) => ({ ...old, dir }));
+                      },
+                    );
+                }}
+              >
+                {t('选择…', 'Choose…')}
+              </Button>
+              <Button
+                disabled={busy || !simForm.dir.trim()}
+                onClick={() => void inspectSimulation()}
+              >
+                {t('读取概况', 'Inspect')}
+              </Button>
+            </div>
+          </Field>
+          <Field label={t('报告里的名字', 'Name in report')}>
+            <Input
+              value={simForm.label}
+              onChange={(e) => setSimForm((old) => ({ ...old, label: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('类型', 'Type')}>
+            <Select
+              value={simForm.dataType}
+              onChange={(e) => setSimForm((old) => ({ ...old, dataType: e.target.value }))}
+            >
+              <option value="auto">{t('自动/按概况', 'Auto/inspected')}</option>
+              <option value="grid">{t('格点', 'Grid')}</option>
+              <option value="stn">{t('站点', 'Station')}</option>
+            </Select>
+          </Field>
+          <Field label={t('文件前缀', 'File prefix')}>
+            <Input
+              value={simForm.prefix}
+              onChange={(e) => setSimForm((old) => ({ ...old, prefix: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('时间分辨率', 'Time resolution')}>
+            <Input
+              value={simForm.timRes}
+              onChange={(e) => setSimForm((old) => ({ ...old, timRes: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('起始年', 'From year')}>
+            <Input
+              type="number"
+              value={simForm.from}
+              onChange={(e) => setSimForm((old) => ({ ...old, from: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('结束年', 'To year')}>
+            <Input
+              type="number"
+              value={simForm.to}
+              onChange={(e) => setSimForm((old) => ({ ...old, to: e.target.value }))}
+            />
+          </Field>
+          <Field label={t('文件分组 data_groupby', 'File grouping (data_groupby)')}>
+            <Select
+              value={simForm.dataGroupby}
+              onChange={(e) => setSimForm((old) => ({ ...old, dataGroupby: e.target.value }))}
+            >
+              <option value="">{t('自动', 'Auto')}</option>
+              {['Year', 'Month', 'Day', 'single'].map((v) => (
+                <option key={v} value={v}>
+                  {v}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label={t('原生网格分辨率（度）', 'Native grid resolution (degrees)')}>
+            <Input
+              type="number"
+              value={simForm.gridRes}
+              onChange={(e) => setSimForm((old) => ({ ...old, gridRes: e.target.value }))}
+            />
+          </Field>
+        </div>
+        <h3 className="study-subhead">
+          {t('新模拟变量覆盖', 'New simulation variable overrides')}
+        </h3>
+        {simForm.variables.map((row, at) => (
+          <div className="form-grid" key={`${at}-${row.variable}`}>
+            <Field label={t('标准变量', 'Standard variable')}>
+              <Input
+                value={row.variable}
+                onChange={(e) =>
+                  setSimForm((old) => ({
+                    ...old,
+                    variables: old.variables.map((item, i) =>
+                      i === at ? { ...item, variable: e.target.value } : item,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <Field label={t('变量名', 'NetCDF variable')}>
+              <Input
+                value={row.varname}
+                onChange={(e) =>
+                  setSimForm((old) => ({
+                    ...old,
+                    variables: old.variables.map((item, i) =>
+                      i === at ? { ...item, varname: e.target.value } : item,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <Field label={t('单位', 'Unit')}>
+              <Input
+                value={row.unit}
+                onChange={(e) =>
+                  setSimForm((old) => ({
+                    ...old,
+                    variables: old.variables.map((item, i) =>
+                      i === at ? { ...item, unit: e.target.value } : item,
+                    ),
+                  }))
+                }
+              />
+            </Field>
+            <Field label="">
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  setSimForm((old) => ({
+                    ...old,
+                    variables: old.variables.filter((_item, i) => i !== at),
+                  }))
+                }
+              >
+                {t('去掉', 'Remove')}
+              </Button>
+            </Field>
+          </div>
+        ))}
+        <div className="button-row">
+          <Button
+            variant="ghost"
+            onClick={() =>
+              setSimForm((old) => ({
+                ...old,
+                variables: [...old.variables, { variable: '', varname: '', unit: '' }],
+              }))
+            }
+          >
+            {t('加一个变量', 'Add variable')}
+          </Button>
+          <Button disabled={busy} onClick={() => void saveSimulation()}>
+            {t('保存模拟', 'Save simulation')}
+          </Button>
+          <Button variant="ghost" disabled={busy} onClick={() => setDialog(null)}>
+            {t('取消', 'Cancel')}
+          </Button>
+        </div>
+      </Dialog>
+
       {remote && browsing && (
         <RemotePathBrowser
           host={host}
           directory
           en={en}
-          initialPath={browsing === 'ref' ? scanDir || undefined : undefined}
+          initialPath={
+            browsing === 'ref'
+              ? scanDir || undefined
+              : browsing === 'simRegister'
+                ? simForm.dir || undefined
+                : undefined
+          }
           onSelect={(dir) => {
             const target = browsing;
             setBrowsing(null);
             if (target === 'ref') setScanDir(dir);
+            else if (target === 'simRegister') setSimForm((old) => ({ ...old, dir }));
             else void addPick(dir, pickLabel(dir));
           }}
           onClose={() => setBrowsing(null)}

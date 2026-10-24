@@ -3443,6 +3443,18 @@ table input {
   gap: 6px;
   font-size: 13px;
 }
+.reference-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.reference-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 160px;
+  overflow: auto;
+}
 .param-problem {
   margin: 0;
   color: var(--danger);

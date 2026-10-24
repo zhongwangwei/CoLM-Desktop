@@ -607,6 +607,59 @@ pub async fn bench_register(
     .map_err(|e| e.to_string())?
 }
 
+/// 给 OpenBench 的模型 profile 增加一个变量映射（新模块加进 CoLM 后，profile 里没有这个变量）。
+#[tauri::command]
+pub async fn bench_register_model_variable(
+    model: String,
+    variable: String,
+    varname: String,
+    unit: String,
+) -> Result<String, String> {
+    if !valid_model(&model) {
+        return Err(format!("模型名不合适：{model:?}"));
+    }
+    for (label, value) in [("变量", &variable), ("变量名", &varname), ("单位", &unit)] {
+        if value.trim().is_empty() || value.chars().any(char::is_control) || value.contains(':') {
+            return Err(format!("{label}不合适：{value:?}"));
+        }
+    }
+    tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
+        let root = root()?;
+        let openbench = env_bin(&root, "openbench");
+        if !openbench.is_file() {
+            return Err("先装 OpenBench".into());
+        }
+        let spec = format!("{}:{}:{}", variable.trim(), varname.trim(), unit.trim());
+        let mut command = env_command(&root, "openbench");
+        command
+            .args(["model", "register", &model])
+            .arg("-v")
+            .arg(&spec)
+            .arg("--append-only");
+        let output = output(command)?;
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if output.status.success() {
+            Ok(text)
+        } else {
+            Err(text.trim().to_owned())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn valid_model(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
 /// 预览一个参考数据目录里能自动认出哪些数据集（`openbench ref scan --dry-run`，不写登记表）。
 #[tauri::command]
 pub async fn bench_scan_preview(dir: String) -> Result<String, String> {

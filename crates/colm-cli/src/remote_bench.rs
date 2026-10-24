@@ -11,6 +11,7 @@
 //! colm-cli remote-bench-inspect    --host H --root R --dir 服务器上的 history 或算例目录
 //! colm-cli remote-bench-references --host H --root R
 //! colm-cli remote-bench-register   --host H --root R --json '{"name","root_dir","data_type",…}'
+//! colm-cli remote-bench-register-model-variable --host H --root R --json '{"model","variable","varname","unit"}'
 //! colm-cli remote-bench-scan       --host H --root R --dir 服务器上的参考数据目录
 //! colm-cli remote-bench-fetch      --host H --root R --name N --out 本机目录
 //! ```
@@ -551,6 +552,48 @@ fn register_script(root: &str, request: &Register) -> Result<String> {
         command.push_str(&format!(" -v {}", quote(variable)));
     }
     Ok(format!("{}{command} 2>&1\n", program_env(root)))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RegisterModelVariable {
+    model: String,
+    variable: String,
+    varname: String,
+    unit: String,
+}
+
+/// `remote-bench-register-model-variable`：给 OpenBench 的模型 profile 增加一个变量映射（新模块输出变量）。
+pub(super) fn register_model_variable(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = bench_root(opts)?;
+    let request: RegisterModelVariable = read_json(opts)?;
+    ensure!(
+        valid_name(&request.model),
+        "bad model profile name {:?}",
+        request.model
+    );
+    for (label, value) in [
+        ("variable", &request.variable),
+        ("varname", &request.varname),
+        ("unit", &request.unit),
+    ] {
+        ensure!(
+            !value.is_empty() && !value.chars().any(char::is_control),
+            "bad {label} {value:?}"
+        );
+    }
+    let spec = format!("{}:{}:{}", request.variable, request.varname, request.unit);
+    ensure!(!spec.contains('\n'), "bad model variable mapping");
+    let script = format!(
+        "{}{} model register {} -v {} --append-only 2>&1\n",
+        program_env(&root),
+        env_program(&root, "openbench"),
+        quote(&request.model),
+        quote(&spec)
+    );
+    println!("{}", json!({ "output": ssh.run_ok(&script)? }));
+    Ok(())
 }
 
 /// `remote-bench-scan`：预览一个参考数据目录能自动认出哪些（`--dry-run`，不写登记表）。
