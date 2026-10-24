@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 
 use colm_bench::{
-    local_value, strict_json, uv_archive, valid_name, valid_station, INSPECT_SCRIPT,
+    local_value, strict_json, uv_archive, valid_name, valid_station, INSPECT_SCRIPT, METRIC_SCRIPT,
     OPENBENCH_VERSION, PREPARE_SCRIPT, PROGRAM_ENV, PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 
@@ -663,6 +663,27 @@ fn valid_model(name: &str) -> bool {
         && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// 问已安装的 OpenBench 有哪些可选指标和评分（名称 + 显示名），用于比较页的多选。
+#[tauri::command]
+pub async fn bench_metric_options() -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(|| -> Result<Value, String> {
+        let root = root()?;
+        let openbench = env_bin(&root, "openbench");
+        if !openbench.is_file() {
+            return Err("先装 OpenBench".into());
+        }
+        let mut command = env_command(&root, "python");
+        command.args(["-c", METRIC_SCRIPT]);
+        let output = output(command)?;
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).trim().to_owned());
+        }
+        serde_json::from_slice(&output.stdout).map_err(|e| format!("指标列表读不懂：{e}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 预览一个参考数据目录里能自动认出哪些数据集（`openbench ref scan --dry-run`，不写登记表）。

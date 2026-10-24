@@ -522,6 +522,7 @@ fn execute(cmd: &str, opts: &Opts) -> Result<()> {
         "remote-bench-cancel" => remote_bench::cancel(opts)?,
         "remote-bench-uninstall" => remote_bench::uninstall(opts)?,
         "remote-bench-inspect" => remote_bench::inspect(opts)?,
+        "remote-bench-metric-options" => remote_bench::metric_options(opts)?,
         "remote-bench-references" => remote_bench::references(opts)?,
         "remote-bench-register" => remote_bench::register(opts)?,
         "remote-bench-register-model-variable" => remote_bench::register_model_variable(opts)?,

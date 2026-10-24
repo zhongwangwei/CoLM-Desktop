@@ -228,6 +228,7 @@ export const commandContract = {
       "rust_type": "String"
     }
   },
+  "bench_metric_options": {},
   "bench_scan_preview": {
     "dir": {
       "required": true,
@@ -305,6 +306,12 @@ export const commandContract = {
       "rust_type": "String"
     },
     "dir": {
+      "required": true,
+      "rust_type": "String"
+    }
+  },
+  "bench_remote_metric_options": {
+    "host": {
       "required": true,
       "rust_type": "String"
     }

@@ -240,6 +240,18 @@ print(json.dumps({"history_dir": os.path.abspath(folder), "prefix": prefix, "tim
                   "data_groupby": groupby}))
 "#;
 
+/// OpenBench 可选指标/评分及显示名：直接问已安装的 OpenBench registry，避免 GUI 自己维护一份会过期的清单。
+pub const METRIC_SCRIPT: &str = r#"
+import json
+from openbench.core.registry import (
+    IMPLEMENTED_METRIC_NAMES, IMPLEMENTED_SCORE_NAMES, METRIC_LABELS, SCORE_LABELS,
+)
+print(json.dumps({
+    "metrics": [{"name": n, "label": METRIC_LABELS.get(n, n)} for n in IMPLEMENTED_METRIC_NAMES],
+    "scores": [{"name": n, "label": SCORE_LABELS.get(n, n)} for n in IMPLEMENTED_SCORE_NAMES],
+}))
+"#;
+
 /// OpenBench 画地图时 cartopy 要 Natural Earth 底图，缺了现下载（7920 实测下载 110m 的陆地、海岸线、河流、湖泊）。
 /// 集群的计算节点多半不能上网（摆渡船只有登录节点能上网），评估作业到那里画图就失败；所以装 OpenBench 时在
 /// 能上网的那台机器上先取好，放进 `XDG_DATA_HOME` 下 cartopy 自己的目录，之后不再下载。取不到只警告，不算装失败。

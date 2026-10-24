@@ -154,6 +154,15 @@ pub async fn bench_remote_inspect(
     call(app, &host, "inspect", &[("--dir", dir)]).await
 }
 
+/// 服务器上已安装的 OpenBench 有哪些可选指标/评分。
+#[tauri::command]
+pub async fn bench_remote_metric_options(
+    app: tauri::AppHandle,
+    host: String,
+) -> Result<Value, String> {
+    call(app, &host, "metric-options", &[]).await
+}
+
 /// 服务器上的登记表。
 #[tauri::command]
 pub async fn bench_remote_references(app: tauri::AppHandle, host: String) -> Result<Value, String> {

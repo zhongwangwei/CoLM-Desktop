@@ -48,6 +48,25 @@ type Pick = {
   gridRes?: number | null;
 };
 type RegisterDialog = 'variable' | 'reference' | 'simulation' | null;
+type MetricOption = { name: string; label: string };
+type MetricOptions = { metrics: MetricOption[]; scores: MetricOption[] };
+// OpenBench 未装好或读取失败时的常用兜底；装好后以已安装 OpenBench 的 registry 为准。
+const FALLBACK_METRICS: MetricOption[] = [
+  { name: 'bias', label: 'Bias (BIAS)' },
+  { name: 'RMSE', label: 'Root Mean Squared Error (RMSE)' },
+  { name: 'correlation', label: 'Correlation Coefficient (r)' },
+  { name: 'NSE', label: 'Nash–Sutcliffe Efficiency (NSE)' },
+  { name: 'KGE', label: 'Kling–Gupta Efficiency (KGE)' },
+  { name: 'ubRMSE', label: 'Unbiased Root Mean Squared Error (ubRMSE)' },
+  { name: 'NRMSE', label: 'Normalized Root Mean Squared Error (NRMSE)' },
+  { name: 'rSpearman', label: 'Spearman Rank Correlation (rSpearman)' },
+];
+const FALLBACK_SCORES: MetricOption[] = [
+  { name: 'Overall_Score', label: 'Overall Score (OS)' },
+  { name: 'nBiasScore', label: 'Normalized Bias Score (nBiasScore)' },
+  { name: 'nRMSEScore', label: 'Normalized RMSE Score (nRMSEScore)' },
+  { name: 'nSpatialScore', label: 'Normalized Spatial Score (nSpatialScore)' },
+];
 type SimVariableRow = { variable: string; varname: string; unit: string };
 type RemoteJob = {
   job: string;
@@ -128,8 +147,10 @@ export default function ComparePage() {
   const [minYear, setMinYear] = useState('1');
   const [timeAlignment, setTimeAlignment] = useState('');
   const [numCores, setNumCores] = useState('');
-  const [metrics, setMetrics] = useState('bias, RMSE, correlation');
-  const [scores, setScores] = useState('Overall_Score');
+  const [metrics, setMetrics] = useState<string[]>(['bias', 'RMSE', 'correlation']);
+  const [scores, setScores] = useState<string[]>(['Overall_Score']);
+  const [metricOptions, setMetricOptions] = useState<MetricOption[]>(FALLBACK_METRICS);
+  const [scoreOptions, setScoreOptions] = useState<MetricOption[]>(FALLBACK_SCORES);
   const [dialog, setDialog] = useState<RegisterDialog>(null);
   const [modelVar, setModelVar] = useState({
     model: 'CoLM2024',
@@ -347,6 +368,35 @@ export default function ComparePage() {
   };
 
   const ready = !!status?.openbench;
+  // 指标/评分清单从当前机器的 OpenBench registry 读取；读失败时保留常用兜底，不挡住生成配置。
+  useEffect(() => {
+    if (!ready) return;
+    let alive = true;
+    void invokeJson<MetricOptions>(
+      remote ? 'bench_remote_metric_options' : 'bench_metric_options',
+      remote ? { host } : undefined,
+    )
+      .then((options) => {
+        if (!alive) return;
+        const metricList = options.metrics?.length ? options.metrics : FALLBACK_METRICS;
+        const scoreList = options.scores?.length ? options.scores : FALLBACK_SCORES;
+        setMetricOptions(metricList);
+        setScoreOptions(scoreList);
+        setMetrics((old) => {
+          const kept = old.filter((name) => metricList.some((item) => item.name === name));
+          return kept.length ? kept : metricList.slice(0, 3).map((item) => item.name);
+        });
+        setScores((old) => {
+          const kept = old.filter((name) => scoreList.some((item) => item.name === name));
+          return kept.length ? kept : scoreList.slice(0, 1).map((item) => item.name);
+        });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // 只在切换机器/OpenBench 就绪时读一次；远端状态变化不重新拉清单。
+  }, [ready, remote, host]);
   const steps: ('uv' | 'python' | 'openbench')[] = [
     ...(status?.uv || status?.uv_version ? [] : (['uv'] as const)),
     ...(status?.python ? [] : (['python'] as const)),
@@ -656,14 +706,8 @@ export default function ComparePage() {
         minYear: minYear.trim() === '' ? null : Number(minYear),
         timeAlignment: timeAlignment || null,
         numCores: numCores.trim() === '' ? null : Number(numCores),
-        metrics: metrics
-          .split(',')
-          .map((item) => item.trim())
-          .filter(Boolean),
-        scores: scores
-          .split(',')
-          .map((item) => item.trim())
-          .filter(Boolean),
+        metrics,
+        scores,
       });
       setYaml(built.config);
       setSites(built.sites);
@@ -1251,15 +1295,83 @@ export default function ComparePage() {
               </Field>
               <Field
                 label={t('指标 metrics', 'Metrics')}
-                hint={t('逗号分隔；空=默认。', 'Comma separated; empty = defaults.')}
+                hint={t(
+                  '从当前机器已安装的 OpenBench 读取；勾选要计算的指标，至少保留一个指标或评分。',
+                  'Read from the installed OpenBench on this machine; tick the metrics to compute. Keep at least one metric or score.',
+                )}
               >
-                <Input value={metrics} onChange={(e) => setMetrics(e.target.value)} />
+                <div className="metric-picker">
+                  <div className="button-row">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setMetrics(metricOptions.map((option) => option.name))}
+                    >
+                      {t('全选', 'All')}
+                    </Button>
+                    <Button variant="ghost" onClick={() => setMetrics([])}>
+                      {t('清空', 'Clear')}
+                    </Button>
+                  </div>
+                  <div className="metric-options">
+                    {metricOptions.map((option) => (
+                      <label key={option.name} className="param-check">
+                        <input
+                          type="checkbox"
+                          checked={metrics.includes(option.name)}
+                          onChange={(e) =>
+                            setMetrics((old) =>
+                              e.target.checked
+                                ? [...old, option.name]
+                                : old.filter((name) => name !== option.name),
+                            )
+                          }
+                        />
+                        <span>{option.label}</span>
+                        <span className="muted">{option.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </Field>
               <Field
                 label={t('评分 scores', 'Scores')}
-                hint={t('逗号分隔；空=默认。', 'Comma separated; empty = defaults.')}
+                hint={t(
+                  'OpenBench 的归一化评分；与指标至少保留一个。',
+                  'OpenBench normalized scores; keep at least one metric or score.',
+                )}
               >
-                <Input value={scores} onChange={(e) => setScores(e.target.value)} />
+                <div className="metric-picker">
+                  <div className="button-row">
+                    <Button
+                      variant="ghost"
+                      onClick={() => setScores(scoreOptions.map((option) => option.name))}
+                    >
+                      {t('全选', 'All')}
+                    </Button>
+                    <Button variant="ghost" onClick={() => setScores([])}>
+                      {t('清空', 'Clear')}
+                    </Button>
+                  </div>
+                  <div className="metric-options">
+                    {scoreOptions.map((option) => (
+                      <label key={option.name} className="param-check">
+                        <input
+                          type="checkbox"
+                          checked={scores.includes(option.name)}
+                          onChange={(e) =>
+                            setScores((old) =>
+                              e.target.checked
+                                ? [...old, option.name]
+                                : old.filter((name) => name !== option.name),
+                            )
+                          }
+                        />
+                        <span>{option.label}</span>
+                        <span className="muted">{option.name}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </Field>
             </div>
           </Advanced>

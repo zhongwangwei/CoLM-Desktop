@@ -36708,3 +36708,14 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - 测试：前端 **886/886**；`cargo test -p colm-bench --lib` 6/6；GUI `bench_tests` 4/4；`check-gui` **247 命令 / 209 静态调用 / 24 动态**。
 - 复核补丁：服务器端 `remote-bench-register-model-variable` 原来不拒绝字段里的冒号（`f:new` 会被 OpenBench 当成 prefix/suffix 段静默拆开），现与本机同用一条规则（`model_variable_spec`，并去首尾空白）；本机校验抽成 `valid_mapping_field`，原测试的第二个循环只断言常量、没调到校验。三个注册弹窗里显示错误（原来错误只出现在被弹窗挡住的页面上，且服务器路径是英文原文），打开弹窗时清掉旧错误，冒号在前端先用双语拒绝。真实窗口：变量名填 `f:new` 点注册，弹窗内显示"变量、变量名和单位里不能有冒号（:）。"，换开另一个弹窗不带旧错误。OpenBench 的 `data_groupby` 大小写核对过：schema 注释为 `Year | Month | Day | single`，统计模块 `.lower()` 后比较，官方 smoke 配置写 `Month`。
 - 没做/未验证：真实新模块的模型变量注册与服务器端注册（命令只编译/单测校验了名字与参数）；参考数据注册弹窗的真实后台上传；OpenBench `check/run` 的真实多参考评估（本机缺完整参考根目录）。
+
+## 第 772 轮：比较页的指标/评分改为从已安装 OpenBench 选择（2026-10-24）
+
+- 原来比较页高级设置里的 `metrics`/`scores` 是两个逗号分隔的文本框，用户不知道 OpenBench 支持哪些指标。现在改为勾选列表：
+  - 本机 `bench_metric_options`、服务器 `remote-bench-metric-options` 通过专用 Python 读取 `openbench.core.registry` 的 `IMPLEMENTED_METRIC_NAMES` / `IMPLEMENTED_SCORE_NAMES` 与显示名；
+  - 前端在 OpenBench 就绪/切换机器时加载选项，默认勾选 `bias`、`RMSE`、`correlation`、`Overall_Score`，并保留当前仍存在的选择；
+  - 提供全选/清空；显示名称 + 内部名称（如 `Percent Bias (PBIAS) percent_bias`），列表可滚动；
+  - 读取失败时保留常用兜底清单，不阻塞生成配置；生成的 YAML 仍写 `metrics: [...]` / `scores: [...]`。
+- 指标列表来自已安装版本（3.0.8 实测 49 个指标、7 个评分），不写死一份会过期的清单；服务器端新增 CLI `remote-bench-metric-options`。
+- 验证：前端 **887/887**；`check-gui` **249 命令 / 211 静态调用 / 26 动态**；真实窗口读取到 **56 个勾选项**（49 metrics + 7 scores），默认三项指标和 Overall_Score 已勾选；localStorage 已恢复。
+- 没做：真实 OpenBench `check/run` 用全部指标跑一轮；服务器端 metric-options 未连集群实测。

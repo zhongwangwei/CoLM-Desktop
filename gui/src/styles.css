@@ -3467,6 +3467,22 @@ table input {
   max-height: 160px;
   overflow: auto;
 }
+.metric-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.metric-options {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 180px;
+  overflow: auto;
+}
+.metric-options .muted {
+  font-size: 11px;
+  margin-left: 4px;
+}
 .param-problem {
   margin: 0;
   color: var(--danger);

@@ -9,6 +9,7 @@
 //! colm-cli remote-bench-uninstall  --host H --root R --what env|all
 //! colm-cli remote-bench-cancel     --host H --root R --job ID
 //! colm-cli remote-bench-inspect    --host H --root R --dir 服务器上的 history 或算例目录
+//! colm-cli remote-bench-metric-options --host H --root R
 //! colm-cli remote-bench-references --host H --root R
 //! colm-cli remote-bench-register   --host H --root R --json '{"name","root_dir","data_type",…}'
 //! colm-cli remote-bench-register-model-variable --host H --root R --json '{"model","variable","varname","unit"}'
@@ -24,7 +25,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use colm_bench::{
     platform_from_uname, posix_value, strict_json, uv_archive, valid_name, valid_station,
-    INSPECT_SCRIPT, OPENBENCH_VERSION, PREFETCH_SCRIPT, PREPARE_SCRIPT, PROGRAM_ENV,
+    INSPECT_SCRIPT, METRIC_SCRIPT, OPENBENCH_VERSION, PREFETCH_SCRIPT, PREPARE_SCRIPT, PROGRAM_ENV,
     PYTHON_VERSION, UV_ENV, UV_VERSION,
 };
 use colm_remote::job::{self, Spec};
@@ -464,6 +465,21 @@ pub(super) fn inspect(opts: &Opts) -> Result<()> {
         .find(|l| !l.trim().is_empty())
         .context("no inspection result")?;
     let value: serde_json::Value = serde_json::from_str(last)?;
+    println!("{value}");
+    Ok(())
+}
+
+/// `remote-bench-metric-options`：服务器上已安装的 OpenBench 有哪些可选指标/评分。
+pub(super) fn metric_options(opts: &Opts) -> Result<()> {
+    let ssh = Ssh::new(&opts.need_str("--host")?)?;
+    let root = bench_root(opts)?;
+    let text = ssh.run_ok(&python_here(
+        &root,
+        METRIC_SCRIPT,
+        &[],
+        "COLM_METRIC_OPTIONS",
+    ))?;
+    let value: serde_json::Value = serde_json::from_str(text.trim()).context("指标列表读不懂")?;
     println!("{value}");
     Ok(())
 }
