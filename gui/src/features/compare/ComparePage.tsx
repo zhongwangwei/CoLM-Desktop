@@ -1165,11 +1165,19 @@ export default function ComparePage() {
             <Field label={t('结束年', 'To year')}>
               <Input type="number" value={to} onChange={(e) => setTo(e.target.value)} />
             </Field>
-            <Field label={t('比较的时间尺度', 'Time scale of the comparison')}>
+            <Field
+              label={t('比较的时间尺度', 'Time scale of the comparison')}
+              hint={t(
+                '气候态是多年平均的评估模式；OpenBench 另有年气候态、月气候态两种时间尺度。',
+                'Climatology evaluates multi-year means; OpenBench also provides annual and monthly climatology scales.',
+              )}
+            >
               <Select value={timRes} onChange={(e) => setTimRes(e.target.value)}>
+                <option value="Hour">{t('逐时', 'Hourly')}</option>
                 <option value="Day">{t('逐日', 'Daily')}</option>
                 <option value="Month">{t('逐月', 'Monthly')}</option>
-                <option value="Hour">{t('逐时', 'Hourly')}</option>
+                <option value="climatology-year">{t('年气候态', 'Annual climatology')}</option>
+                <option value="climatology-month">{t('月气候态', 'Monthly climatology')}</option>
               </Select>
             </Field>
             {ok.some((p) => p.info.spatial) && (

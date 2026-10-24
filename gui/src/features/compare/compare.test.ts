@@ -258,3 +258,10 @@ it('writes each gridded simulation native resolution and grouping', () => {
   assert.match(config, /data_groupby: Day/);
   assert.match(config, /grid_res: 0\.0083333/);
 });
+
+it('passes the two climatology time scales through to OpenBench', () => {
+  for (const scale of ['climatology-year', 'climatology-month']) {
+    const { config } = buildOpenbenchConfig({ ...base, timRes: scale });
+    assert.ok(config.includes(`  tim_res: ${scale}`), config);
+  }
+});
