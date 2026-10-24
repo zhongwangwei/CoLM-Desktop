@@ -36687,7 +36687,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - **测试**：前端 `npm test` 884/884（含完整契约检查 245 个命令）；GUI Rust `--lib --bins` 441 通过 1 忽略；`colm-agent` 226、`colm-cli` remote 115 + remote_study 22（前几次提交时）；`xtask check-gui` 245/245。
 - **没做/未验证**：真实 SSH/集群上的 pending 收养与"未到达服务器"判定（只有单元测试与源码路径）；Windows 上 `tasklist` 判活与 `taskkill /T` 清理没在真机跑过；B-12 不补写历史台账里那条未结束的运行事件。
 
-## 第 771 轮：比较页的 OpenBench 注册入口、多参考与必要设定（2026-10-24）
+## 第 772 轮：比较页的 OpenBench 注册入口、多参考与必要设定（2026-10-24）
 
 - 比较页新增三个按钮/弹窗（OpenBench 安装后可用）：
   - **注册模型变量**：新模块输出变量在 CoLM2024 profile 里没有时，登记 `标准变量:NetCDF变量:单位`；本机 `bench_register_model_variable`，服务器 `remote-bench-register-model-variable`（`openbench model register … --append-only`），本机/服务器各写各的 registry。
@@ -36706,4 +36706,5 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
     - "FLUXNET_PLUMBER2"
     - "OpenBench_LH_Daily"`；localStorage 已恢复。
   - 测试：前端 **886/886**；`cargo test -p colm-bench --lib` 6/6；GUI `bench_tests` 4/4；`check-gui` **247 命令 / 209 静态调用 / 24 动态**。
+- 复核补丁：服务器端 `remote-bench-register-model-variable` 原来不拒绝字段里的冒号（`f:new` 会被 OpenBench 当成 prefix/suffix 段静默拆开），现与本机同用一条规则（`model_variable_spec`，并去首尾空白）；本机校验抽成 `valid_mapping_field`，原测试的第二个循环只断言常量、没调到校验。三个注册弹窗里显示错误（原来错误只出现在被弹窗挡住的页面上，且服务器路径是英文原文），打开弹窗时清掉旧错误，冒号在前端先用双语拒绝。真实窗口：变量名填 `f:new` 点注册，弹窗内显示"变量、变量名和单位里不能有冒号（:）。"，换开另一个弹窗不带旧错误。OpenBench 的 `data_groupby` 大小写核对过：schema 注释为 `Year | Month | Day | single`，统计模块 `.lower()` 后比较，官方 smoke 配置写 `Month`。
 - 没做/未验证：真实新模块的模型变量注册与服务器端注册（命令只编译/单测校验了名字与参数）；参考数据注册弹窗的真实后台上传；OpenBench `check/run` 的真实多参考评估（本机缺完整参考根目录）。

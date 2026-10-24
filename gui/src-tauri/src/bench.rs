@@ -619,7 +619,7 @@ pub async fn bench_register_model_variable(
         return Err(format!("模型名不合适：{model:?}"));
     }
     for (label, value) in [("变量", &variable), ("变量名", &varname), ("单位", &unit)] {
-        if value.trim().is_empty() || value.chars().any(char::is_control) || value.contains(':') {
+        if !valid_mapping_field(value) {
             return Err(format!("{label}不合适：{value:?}"));
         }
     }
@@ -650,6 +650,11 @@ pub async fn bench_register_model_variable(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// 三段经 ':' 拼成 OpenBench 的 `-v` 规格；带冒号会被拆成 prefix/suffix 段，控制字符会弄坏命令行。
+fn valid_mapping_field(value: &str) -> bool {
+    !value.trim().is_empty() && !value.chars().any(char::is_control) && !value.contains(':')
 }
 
 fn valid_model(name: &str) -> bool {

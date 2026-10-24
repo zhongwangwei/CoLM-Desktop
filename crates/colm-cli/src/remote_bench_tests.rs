@@ -158,3 +158,22 @@ fn the_openbench_install_prefetches_basemaps_for_offline_compute_nodes() {
     #[cfg(unix)]
     assert_bash_parses(&body);
 }
+
+#[test]
+fn a_model_variable_mapping_refuses_colons_and_trims_fields() {
+    assert_eq!(
+        model_variable_spec(" Latent_Heat", "f_lfevpa ", "W m-2").unwrap(),
+        "Latent_Heat:f_lfevpa:W m-2"
+    );
+    for (variable, varname, unit) in [
+        ("Latent_Heat", "f:lfevpa", "W m-2"),
+        ("Latent_Heat", "f_lfevpa", "W m-2:x"),
+        ("", "f_lfevpa", "W m-2"),
+        ("Latent_Heat", "f_lfevpa", "W\nm-2"),
+    ] {
+        assert!(
+            model_variable_spec(variable, varname, unit).is_err(),
+            "{variable:?} {varname:?} {unit:?}"
+        );
+    }
+}

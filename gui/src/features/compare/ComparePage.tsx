@@ -380,6 +380,17 @@ export default function ComparePage() {
           throw new Error(
             t('变量、变量名和单位都要填。', 'Variable, variable name and unit are required.'),
           );
+        // OpenBench 把 `标准名:变量名:单位` 按冒号拆段，字段里的冒号会被静默当成前缀/后缀；后端也拒绝，
+        // 但服务器那条路径的拒绝是英文原文，这里先用两种语言说清楚。
+        if (
+          [modelVar.variable, modelVar.varname, modelVar.unit].some((value) => value.includes(':'))
+        )
+          throw new Error(
+            t(
+              '变量、变量名和单位里不能有冒号（:）。',
+              'Variable, variable name and unit cannot contain a colon (:).',
+            ),
+          );
         await invoke(
           remote ? 'bench_remote_register_model_variable' : 'bench_register_model_variable',
           {
@@ -456,6 +467,7 @@ export default function ComparePage() {
         })),
       });
     } else resetSimulationForm();
+    setError('');
     setDialog('simulation');
   };
   const inspectSimulation = () => {
@@ -743,14 +755,20 @@ export default function ComparePage() {
         <Button
           disabled={busy || !ready}
           title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-          onClick={() => setDialog('variable')}
+          onClick={() => {
+            setError('');
+            setDialog('variable');
+          }}
         >
           {t('注册模型变量…', 'Register model variable…')}
         </Button>
         <Button
           disabled={busy || !ready}
           title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-          onClick={() => setDialog('reference')}
+          onClick={() => {
+            setError('');
+            setDialog('reference');
+          }}
         >
           {t('注册参考数据…', 'Register reference data…')}
         </Button>
@@ -1481,6 +1499,8 @@ export default function ComparePage() {
             />
           </Field>
         </div>
+        {/* 弹窗盖住了页面上的错误提示：注册失败的原因要在弹窗里看得到。 */}
+        {error && <Notice tone="error">{error}</Notice>}
         <div className="button-row">
           <Button disabled={busy} onClick={() => void registerModelVariable()}>
             {t('注册', 'Register')}
@@ -1552,6 +1572,7 @@ export default function ComparePage() {
             />
           </Field>
         </div>
+        {error && <Notice tone="error">{error}</Notice>}
         <div className="button-row">
           <Button
             disabled={busy || !reg.name || !reg.rootDir || !reg.variables.trim()}
@@ -1729,6 +1750,7 @@ export default function ComparePage() {
             </Field>
           </div>
         ))}
+        {error && <Notice tone="error">{error}</Notice>}
         <div className="button-row">
           <Button
             variant="ghost"

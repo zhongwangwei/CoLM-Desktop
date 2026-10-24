@@ -79,6 +79,9 @@ fn model_variable_registration_accepts_only_safe_names_and_colon_free_fields() {
     }
     // 变量、变量名、单位经 ':' 拼成 OpenBench 的 -v 规格；带冒号会把字段拆错，命令层直接拒绝。
     for value in ["Latent_Heat", "f_lfevpa", "W m-2"] {
-        assert!(!value.contains(':') && !value.chars().any(char::is_control));
+        assert!(valid_mapping_field(value), "{value:?}");
+    }
+    for bad in ["", "  ", "f:lfevpa", "W\nm-2"] {
+        assert!(!valid_mapping_field(bad), "{bad:?}");
     }
 }

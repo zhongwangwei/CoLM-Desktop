@@ -563,6 +563,25 @@ struct RegisterModelVariable {
     unit: String,
 }
 
+/// OpenBench `-v` 的 `标准名:变量名:单位`。字段里带冒号会被它当成第 4、5 段（prefix/suffix）静默拆开，
+/// 所以和本机命令一样直接拒绝；首尾空白去掉，免得登记成 " W m-2"。
+fn model_variable_spec(variable: &str, varname: &str, unit: &str) -> Result<String> {
+    let fields = [("variable", variable), ("varname", varname), ("unit", unit)];
+    for (label, value) in fields {
+        let value = value.trim();
+        ensure!(
+            !value.is_empty() && !value.chars().any(char::is_control) && !value.contains(':'),
+            "bad {label} {value:?}"
+        );
+    }
+    Ok(format!(
+        "{}:{}:{}",
+        variable.trim(),
+        varname.trim(),
+        unit.trim()
+    ))
+}
+
 /// `remote-bench-register-model-variable`：给 OpenBench 的模型 profile 增加一个变量映射（新模块输出变量）。
 pub(super) fn register_model_variable(opts: &Opts) -> Result<()> {
     let ssh = Ssh::new(&opts.need_str("--host")?)?;
@@ -573,18 +592,7 @@ pub(super) fn register_model_variable(opts: &Opts) -> Result<()> {
         "bad model profile name {:?}",
         request.model
     );
-    for (label, value) in [
-        ("variable", &request.variable),
-        ("varname", &request.varname),
-        ("unit", &request.unit),
-    ] {
-        ensure!(
-            !value.is_empty() && !value.chars().any(char::is_control),
-            "bad {label} {value:?}"
-        );
-    }
-    let spec = format!("{}:{}:{}", request.variable, request.varname, request.unit);
-    ensure!(!spec.contains('\n'), "bad model variable mapping");
+    let spec = model_variable_spec(&request.variable, &request.varname, &request.unit)?;
     let script = format!(
         "{}{} model register {} -v {} --append-only 2>&1\n",
         program_env(&root),
