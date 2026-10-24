@@ -1095,6 +1095,8 @@ fn serve(data_dir: Option<PathBuf>, cli: PathBuf, key_file: PathBuf) -> Result<(
                         emitter.emit(Outbound::TurnDone {
                             content: outcome.content,
                             steps: outcome.steps,
+                            limit_reached: outcome.limit_reached,
+                            step_limit: outcome.step_limit,
                         });
                         Ok(())
                     })();
@@ -1334,6 +1336,8 @@ impl ExternalTurn {
         self.emitter.emit(Outbound::TurnDone {
             content: outcome.content,
             steps: 1,
+            limit_reached: false,
+            step_limit: 0,
         });
         Ok(())
     }

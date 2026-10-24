@@ -57,6 +57,12 @@ interface DocumentAttachment {
  * 每次都计入会话预算（DeepSeek 改动复查）。20 万字符约 5–20 万 token；超出的部分截断并标明，不整份拒绝。
  */
 const ATTACHMENT_CHARS_LIMIT = 200_000;
+const CONTEXT_WARN_RATIO = 0.8;
+function tokenLabel(value: number) {
+  if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(2)}M`;
+  if (value >= 1_000) return `${Math.round(value / 1_000)}k`;
+  return String(Math.round(value));
+}
 export default function AssistantPanel() {
   const { state, navigate, update } = useApp();
   const app = useRef(state);
@@ -127,6 +133,13 @@ export default function AssistantPanel() {
   const [consent, setConsent] = useState<string | null>(null);
   const [usage, setUsage] = useState('');
   const [sessionUsage, setSessionUsage] = useState({ turns: 0, tokens: 0 });
+  const [contextUsage, setContextUsage] = useState<{
+    tokens: number;
+    window: number;
+    compressed: number;
+  } | null>(null);
+  const [limitReached, setLimitReached] = useState(false);
+  const [stepLimit, setStepLimit] = useState(0);
   const [model, setModel] = useState('');
   const [ready, setReady] = useState(false);
   // 当前内置服务商是否登记过 Key；欢迎页据此给"去设置登记"的入口，而不是等发送后报英文错误。
@@ -271,9 +284,18 @@ export default function AssistantPanel() {
             tokens: (event.session_prompt_tokens || 0) + (event.session_completion_tokens || 0),
           });
           break;
+        case 'context':
+          setContextUsage({
+            tokens: event.estimated_tokens || 0,
+            window: event.window_tokens || 0,
+            compressed: event.compressed_tools || 0,
+          });
+          break;
         case 'turn_done':
           if (!streamed.current && event.content)
             setMessages((old) => [...old, { kind: 'assistant', text: event.content }]);
+          setLimitReached(!!event.limit_reached);
+          setStepLimit(event.step_limit || 0);
           busy(false);
           grant.current = null;
           setApproval(null);
@@ -408,8 +430,8 @@ export default function AssistantPanel() {
       setAttaching(false);
     }
   }
-  async function send() {
-    const typed = input.trim();
+  async function send(next?: string) {
+    const typed = (next ?? input).trim();
     const fallback = attachments.length
       ? t(
           '请阅读这些附件并总结要点。',
@@ -438,6 +460,7 @@ export default function AssistantPanel() {
     }
     busy(true);
     setError('');
+    setLimitReached(false);
     try {
       const page = app.current;
       const identity = currentApprovalSnapshot();
@@ -514,6 +537,14 @@ export default function AssistantPanel() {
   const efforts = builtin
     ? apiEfforts(providerId(settings), settings.model)
     : ['', 'low', 'medium', 'high', 'xhigh', 'max'];
+  const contextWarning =
+    !!contextUsage &&
+    contextUsage.window > 0 &&
+    contextUsage.tokens >= contextUsage.window * CONTEXT_WARN_RATIO;
+  const sessionWarning =
+    settings.session_token_limit > 0 &&
+    sessionUsage.tokens >= settings.session_token_limit * CONTEXT_WARN_RATIO;
+  const continuePrompt = t('继续未完成的工作。', 'Continue the unfinished work.');
   return (
     <div className="flex h-full min-h-0 flex-col gap-3 border-l p-4">
       <header className="flex items-center justify-between">
@@ -541,6 +572,9 @@ export default function AssistantPanel() {
             setAttachments([]);
             setUsage('');
             setSessionUsage({ turns: 0, tokens: 0 });
+            setContextUsage(null);
+            setLimitReached(false);
+            setStepLimit(0);
             setError('');
             historyIndex.current = null;
           }}
@@ -591,6 +625,9 @@ export default function AssistantPanel() {
                     session.current = item.id;
                     fresh.current = false;
                     setMessages(transcript);
+                    setContextUsage(null);
+                    setLimitReached(false);
+                    setStepLimit(0);
                     setSessions(null);
                   })
                 }
@@ -822,6 +859,43 @@ export default function AssistantPanel() {
           ))}
         </div>
       )}
+      {limitReached && (
+        <Notice tone="warning">
+          <p>
+            {t(
+              `本轮达到 ${stepLimit || 40} 次生成上限，任务未完成。已有操作和结果都保留；继续会在同一会话里接着做，不会清空前面的内容。`,
+              `This turn reached its ${stepLimit || 40}-generation limit before completion. Existing actions and results are kept; Continue resumes in the same conversation without clearing earlier content.`,
+            )}
+          </p>
+          <Button disabled={running || !ready} onClick={() => void send(continuePrompt)}>
+            {t('继续', 'Continue')}
+          </Button>
+        </Notice>
+      )}
+      {contextWarning && (
+        <Notice tone="warning">
+          {t(
+            `当前上下文估算约 ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens，已接近模型窗口；下一步会自动折叠较早的工具结果。`,
+            `Estimated context is about ${tokenLabel(contextUsage!.tokens)} / ${tokenLabel(contextUsage!.window)} tokens, near the model window; the next step will automatically fold older tool results.`,
+          )}
+        </Notice>
+      )}
+      {!!contextUsage?.compressed && (
+        <p className="text-xs text-muted-foreground">
+          {t(
+            `已自动折叠 ${contextUsage.compressed} 条较早的工具结果；原始记录仍在本机会话文件里，界面历史不清空。`,
+            `${contextUsage.compressed} older tool results were folded automatically; the original records stay in the local session file and the visible history is not cleared.`,
+          )}
+        </p>
+      )}
+      {sessionWarning && (
+        <Notice tone="warning">
+          {t(
+            `本会话已用约 ${tokenLabel(sessionUsage.tokens)} / ${tokenLabel(settings.session_token_limit)} tokens，接近会话预算；压缩只影响上下文，不会退还已用 token。`,
+            `This conversation has used about ${tokenLabel(sessionUsage.tokens)} / ${tokenLabel(settings.session_token_limit)} tokens and is near its budget; compression only reduces context and does not refund spent tokens.`,
+          )}
+        </Notice>
+      )}
       <textarea
         aria-label={t('给助手的消息', 'Message to assistant')}
         placeholder={t(
@@ -986,6 +1060,8 @@ export default function AssistantPanel() {
                 .filter(Boolean)
                 .join(' · ')}`
             : usage}
+        {contextUsage &&
+          ` · ${t('上下文估算', 'Context estimate')}: ${tokenLabel(contextUsage.tokens)} / ${tokenLabel(contextUsage.window)} tokens`}
       </p>
     </div>
   );

@@ -144,9 +144,21 @@ pub enum Outbound {
         #[serde(default)]
         session_turns: u32,
     },
+    /// 单次请求的上下文估算；GUI 在接近窗口时提示，并显示自动折叠了多少条旧工具结果。
+    Context {
+        estimated_tokens: u64,
+        window_tokens: u64,
+        compressed_tools: usize,
+    },
     TurnDone {
         content: String,
         steps: usize,
+        /// 本轮是因为达到生成步数上限而收尾的（不是正常完成）。
+        #[serde(default)]
+        limit_reached: bool,
+        /// 本轮的生成步数上限；旧事件没有时按 0 处理。
+        #[serde(default)]
+        step_limit: usize,
     },
     Error {
         message: String,

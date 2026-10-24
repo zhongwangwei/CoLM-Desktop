@@ -36755,3 +36755,18 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 保留原有收尾机制：第 40 次生成仍不提供工具，只让模型总结；连续三轮相同只读调用仍会提前收尾。
 - 代价：长任务每轮最多多消耗 16 次生成，prompt 历史更长、费用和单请求上下文压力都增加；如果 40 步仍“搞到一半停”，下一步按用户要求加“本轮达到步数上限，未完成”的明确提示和“继续”入口。
 - 验证：`cargo test -p colm-agent --lib agent_tests::default_turn_budget_allows_forty_generations`；`cargo test -p colm-agent --lib tools::`；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+## 第 777 轮：1M 上下文预算、自动折叠旧工具结果、40 步继续入口（2026-10-24）
+
+- DeepSeek V4 的 `deepseek-flash` / `deepseek-v4-pro` 上下文窗口是 **1M token**（`docs/design-ai-assistant.md:70`），不是先前口误的 128k；会话累计预算按 B 方案保持 **5M**。
+- agent 新增 `context` 模块：按字符数保守估算 token；**80% 提示、90% 自动折叠**。折叠只改发给模型的请求副本：保留最近 8 条工具结果（不够再降到 4/2 条），更早的 `Message::Tool` 内容换成带原始字符数和前 240 字的摘要；tool_call id、助手消息、用户消息和转录不动。会话 JSONL 里的原始记录不删。
+- 协议新增 `context` 事件（估算 tokens、窗口 1M、折叠条数），`turn_done` 新增 `limit_reached` / `step_limit`；GUI：
+  - 输入区上方显示上下文估算、接近窗口警告、自动折叠提示、会话预算 80% 警告；
+  - 40 步收尾时显示“本轮达到 40 次生成上限，任务未完成”，并有「继续」按钮；
+  - 「继续」在同一会话追加一轮，**不清空**界面历史；只有「新对话」清空。
+- 验证：
+  - `cargo test -p colm-agent --lib`：**229 通过、1 失败**；失败仍是既有的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat`（沙箱拒绝 `kill`，Operation not permitted），与本次无关；
+  - `context::` 2/2，`every_generation_reports...` 1/1，`cancelling_stops...` 1/1；
+  - `cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`；
+  - 前端 typecheck/lint/format 通过，`npm test` **888/888**。
+- 没做/未验证：真实 AI 会话跑满 80%/90% 窗口的端到端压缩效果；外部 Codex/Claude/OpenCode 后端不使用这个内置循环，压缩只覆盖 builtin API 后端；没有按真实 tokenizer 校准估算（按字符保守估）。

@@ -289,6 +289,11 @@ export interface AgentEvent {
   session_prompt_tokens?: number;
   session_completion_tokens?: number;
   session_turns?: number;
+  estimated_tokens?: number;
+  window_tokens?: number;
+  compressed_tools?: number;
+  limit_reached?: boolean;
+  step_limit?: number;
 }
 export interface Message {
   kind: string;

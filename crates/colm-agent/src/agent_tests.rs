@@ -393,6 +393,37 @@ fn a_patch_is_asked_about_every_time_even_if_the_user_chose_always_allow() {
 }
 
 #[test]
+fn every_generation_reports_the_context_estimate_and_window() {
+    let provider = Scripted::new(vec![answer("done")]);
+    let registry = Registry::with(vec![]);
+    let mut events = Vec::new();
+    agent(&provider, &registry)
+        .run_turn(
+            &mut vec![Message::User {
+                content: "inspect".into(),
+            }],
+            &mut |event| events.push(event),
+            &mut Answers(Vec::new(), 0),
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+    let context = events
+        .iter()
+        .find_map(|event| match event {
+            Outbound::Context {
+                estimated_tokens,
+                window_tokens,
+                compressed_tools,
+            } => Some((*estimated_tokens, *window_tokens, *compressed_tools)),
+            _ => None,
+        })
+        .expect("a context event must be emitted before the provider call");
+    assert!(context.0 > 0);
+    assert_eq!(context.1, crate::context::CONTEXT_WINDOW_TOKENS);
+    assert_eq!(context.2, 0);
+}
+
+#[test]
 fn cancelling_stops_the_turn_and_budget_exhaustion_returns_a_summary() {
     let registry = Registry::with(vec![Box::new(Echo(Tier::Read))]);
     let provider = Scripted::new(vec![answer("never")]);
@@ -434,6 +465,8 @@ fn cancelling_stops_the_turn_and_budget_exhaustion_returns_a_summary() {
         )
         .unwrap();
     assert_eq!(outcome.steps, 5);
+    assert!(outcome.limit_reached);
+    assert_eq!(outcome.step_limit, 5);
     assert!(outcome.content.contains("unverified"));
     assert!(provider.seen_tools.lock().unwrap()[4].is_empty());
     assert!(

@@ -66,6 +66,9 @@ pub struct TurnOutcome {
     pub content: String,
     pub steps: usize,
     pub usage: Usage,
+    /// 本轮的收尾是否由生成步数上限触发；正常完成或重复读取收尾为 false。
+    pub limit_reached: bool,
+    pub step_limit: usize,
 }
 
 impl Agent<'_> {
@@ -82,12 +85,16 @@ impl Agent<'_> {
         anyhow::ensure!(self.limits.max_steps > 0, "max_steps must be positive");
         let mut previous_reads = Vec::new();
         let mut repeated_reads = 0;
+        let mut limit_reached = false;
         for step in 1..=self.limits.max_steps {
             if cancel.load(Ordering::SeqCst) {
                 bail!("cancelled");
             }
             let finalizing = step == self.limits.max_steps || repeated_reads >= 3;
             if finalizing {
+                if repeated_reads < 3 && step == self.limits.max_steps {
+                    limit_reached = true;
+                }
                 self.context.note_failure(
                     if repeated_reads >= 3 {
                         "repeated_read_queries"
@@ -114,9 +121,29 @@ impl Agent<'_> {
             } else {
                 &*history
             };
+            // 只压缩发给模型的副本；history/会话记录保持原文。接近 90% 窗口时才折叠旧工具结果，
+            // 每次仍把估算和折叠数量告诉 GUI，80% 起用户就能看到提示。
+            let prepared = crate::context::prepare(messages);
+            let (request_messages, estimated_tokens, compressed_tools) = match prepared {
+                Some(prepared) => (
+                    prepared.messages,
+                    prepared.estimated_tokens,
+                    prepared.compressed_tools,
+                ),
+                None => (
+                    messages.to_vec(),
+                    crate::context::estimate_tokens(messages),
+                    0,
+                ),
+            };
+            emit(Outbound::Context {
+                estimated_tokens,
+                window_tokens: crate::context::CONTEXT_WINDOW_TOKENS,
+                compressed_tools,
+            });
             let mut final_events = Vec::new();
             let mut turn = self.provider.complete_cancellable(
-                messages,
+                &request_messages,
                 if finalizing { &[] } else { &tools },
                 &mut |event| {
                     if finalizing {
@@ -162,6 +189,8 @@ impl Agent<'_> {
             history.push(turn.message());
             if turn.tool_calls.is_empty() {
                 outcome.content = turn.content;
+                outcome.limit_reached = limit_reached;
+                outcome.step_limit = self.limits.max_steps;
                 return Ok(outcome);
             }
             let mut results = Vec::new();
