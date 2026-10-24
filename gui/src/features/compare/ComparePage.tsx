@@ -1016,7 +1016,7 @@ export default function ComparePage() {
           <div className="button-row">
             <ActionButton
               action="compare-scan-preview"
-              label={t('预览能认出哪些（不登记）', 'Preview what is recognised (no changes)')}
+              label={t('预览扫描（只读）', 'Preview scan (read-only)')}
               disabled={busy || !scanDir}
               run={() =>
                 task(async () =>
@@ -1034,6 +1034,12 @@ export default function ComparePage() {
               }
             />
           </div>
+          <p className="muted study-hint">
+            {t(
+              '预览只调用 OpenBench 的扫描（dry run）：显示参考数据根目录里哪些目录符合标准结构、会被认成什么数据集，不写登记表、不改文件。用来看自己的数据布局能不能被识别；确认后再用「注册参考数据…」正式登记。',
+              'Preview only runs OpenBench’s scan in dry-run mode: it shows which folders under the reference root match the standard layout and what datasets they would become, without writing the registry or changing files. Use it to check a custom layout, then register it with “Register reference data…”.',
+            )}
+          </p>
           {scanText && <pre className="compare-log">{scanText}</pre>}
           <p className="muted study-hint">
             {t(

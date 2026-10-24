@@ -3455,6 +3455,21 @@ table input {
   gap: 6px;
   font-size: 13px;
 }
+/* 输入框 + 选择/读取按钮排成一行；以前这个类没有样式，按钮会掉到输入框下面。 */
+.study-path {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.study-path > .input,
+.study-path > input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.study-path > .button {
+  flex: 0 0 auto;
+}
 .reference-picker {
   display: flex;
   flex-direction: column;
