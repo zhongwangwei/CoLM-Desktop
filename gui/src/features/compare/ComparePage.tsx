@@ -751,35 +751,6 @@ export default function ComparePage() {
           </p>
         </div>
       </header>
-      <div className="button-row">
-        <Button
-          disabled={busy || !ready}
-          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-          onClick={() => {
-            setError('');
-            setDialog('variable');
-          }}
-        >
-          {t('注册模型变量…', 'Register model variable…')}
-        </Button>
-        <Button
-          disabled={busy || !ready}
-          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-          onClick={() => {
-            setError('');
-            setDialog('reference');
-          }}
-        >
-          {t('注册参考数据…', 'Register reference data…')}
-        </Button>
-        <Button
-          disabled={busy || !ready}
-          title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
-          onClick={() => editSimulation()}
-        >
-          {t('注册模拟数据…', 'Register simulation data…')}
-        </Button>
-      </div>
       {error && <Notice tone="error">{error}</Notice>}
       {notice && <Notice tone="success">{notice}</Notice>}
       <Card
@@ -976,8 +947,8 @@ export default function ComparePage() {
         <Card
           title={t('参考数据', 'Reference data')}
           description={t(
-            `OpenBench 登记表里有 ${references.length} 个参考数据集。自己的数据用上面的「注册参考数据…」登记；扫描能认出目录结构标准的数据集，一个文件里多个候选变量时在注册表单里写清楚。`,
-            `The OpenBench registry lists ${references.length} reference datasets. Register your own data with “Register reference data…” above; a scan recognises standard layouts, and the registration form names variables when a file has several candidates.`,
+            `OpenBench 登记表里有 ${references.length} 个参考数据集。自己的数据用下面的「注册参考数据…」登记；扫描能认出目录结构标准的数据集，一个文件里多个候选变量时在注册表单里写清楚。`,
+            `The OpenBench registry lists ${references.length} reference datasets. Register your own data with “Register reference data…” below; a scan recognises standard layouts, and the registration form names variables when a file has several candidates.`,
           )}
         >
           <div className="form-grid">
@@ -1022,10 +993,50 @@ export default function ComparePage() {
           {scanText && <pre className="compare-log">{scanText}</pre>}
           <p className="muted study-hint">
             {t(
-              '注册自己的参考数据用上面的「注册参考数据…」按钮；注册后会出现在下面的变量参考数据选择里。',
-              'Use “Register reference data…” above to add your own dataset; it becomes selectable under the variables below after registration.',
+              '注册自己的参考数据用下面的「注册参考数据…」按钮；注册后会出现在下面的变量参考数据选择里。',
+              'Use “Register reference data…” below to add your own dataset; it becomes selectable under the variables below after registration.',
             )}
           </p>
+        </Card>
+      )}
+
+      {ready && (
+        <Card
+          title={t('注册 OpenBench 数据', 'Register OpenBench data')}
+          description={t(
+            '新模块模型变量、参考数据和非标准模拟数据都在这里登记；注册后即可在下面的本次比较里选择。本机和每台服务器各管各的登记表。',
+            'Register new-module model variables, reference data and non-standard simulations here; they become available to the comparison below. This computer and each server keep separate registries.',
+          )}
+        >
+          <div className="button-row">
+            <Button
+              disabled={busy || !ready}
+              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+              onClick={() => {
+                setError('');
+                setDialog('variable');
+              }}
+            >
+              {t('注册模型变量…', 'Register model variable…')}
+            </Button>
+            <Button
+              disabled={busy || !ready}
+              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+              onClick={() => {
+                setError('');
+                setDialog('reference');
+              }}
+            >
+              {t('注册参考数据…', 'Register reference data…')}
+            </Button>
+            <Button
+              disabled={busy || !ready}
+              title={!ready ? t('先安装 OpenBench', 'Install OpenBench first') : undefined}
+              onClick={() => editSimulation()}
+            >
+              {t('注册模拟数据…', 'Register simulation data…')}
+            </Button>
+          </div>
         </Card>
       )}
 
