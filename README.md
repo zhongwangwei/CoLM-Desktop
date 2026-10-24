@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4"><img src="https://img.shields.io/badge/version-v0.3.0--beta.4-orange" alt="当前测试版：v0.3.0-beta.4"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.5"><img src="https://img.shields.io/badge/version-v0.3.0--beta.5-orange" alt="当前测试版：v0.3.0-beta.5"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="状态：Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="许可证：MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="平台">
@@ -20,14 +20,14 @@
 CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运行和结果评估整合到一个图形界面中。地表数据（`mksrfdata`）、初始场（`mkinidata`）与模型主循环（`colm`）三个阶段全部由 **Rust 引擎**完成，结果与 CoLM202X 原版**逐位一致**。安装包开箱即用，无需安装 Rust、Fortran、MPI 或 NetCDF 编译环境。
 
 > [!WARNING]
-> **当前版本为 `0.3.0-beta.4` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
+> **当前版本为 `0.3.0-beta.5` 测试版。** 功能仍在快速迭代，可能存在已知或未知缺陷。请保留原始数据与算例备份，正式科研使用前务必独立核验结果。
 
 > [!IMPORTANT]
-> 支持**站点**与**空间**两类模拟。空间模拟覆盖流域、区域与全球范围，可用经纬度网格、非结构网格与流域网格；多个站点可作为独立算例并发运行。空间模式下**参数调优和不确定性分析暂不可用**，切回站点模式后恢复。
+> 支持**站点**与**空间**两类模拟。空间模拟覆盖流域、区域与全球范围，可用经纬度网格、非结构网格与流域网格；多个站点可作为独立算例并发运行。参数率定、不确定性分析和 AI 研究也可用于流域、区域和全球算例。
 
 ## 下载
 
-前往 [v0.3.0-beta.4 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4) 下载对应平台的安装包：
+前往 [v0.3.0-beta.5 测试版发布页](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.5) 下载对应平台的安装包：
 
 | 平台 | 架构 | 发行格式 |
 |---|---|---|
@@ -44,7 +44,18 @@ CoLM Desktop 将 CoLM202X 的站点与空间建例、参数约束、三阶段运
 
 pip 分发暂时停用，不再生成或发布 wheel。桌面端与原生 CLI 继续可用，详见 [终端助手使用说明](docs/terminal-assistant.md)。
 
-## 0.3.0-beta.4 的主要变化（发布记录）
+## 0.3.0-beta.5 的主要变化（发布记录）
+
+- **比较页（OpenBench 评估）**：OpenBench 私有安装在软件自己的目录里；跨项目、跨版本比较模拟，可在本机或服务器上评估（日志实时显示、可停止，只取回报告）。可登记模型变量、参考数据和非标准模拟；一个变量可选多份参考；指标和评分从已安装的 OpenBench 里勾选；时间尺度增加年、月气候态。
+- **研究（率定、不确定性分析、AI）**：并入"新建修改版"，四步向导，结果经草稿写进新版本；支持流域、区域和全球算例；显示收敛过程和观测对各参数的约束程度；站点目标可按日或月平均比较、变量可加权、共享参数可按站点交叉验证；结果不比默认参数好时拒绝写回。
+- **模型版本**：版本库与工作台分开；可在软件里或任意外部编辑器里修改版本源码，自动记录改动；冻结前检查编译与测试；可比较任意两个版本。
+- **地类参数**：地类参数表按类别覆盖，在各尺度生效；气孔参数表按地类调；示踪物与河流泥沙参数可在参数对话框中修改。
+- **服务器运行**：站点批次按节点打包，支持 Slurm、LSF、PBS 和没有调度器的机器；登录节点先编引擎，不能上网的服务器可由桌面端送去依赖；结果在服务器上读取，只传回要画的部分；常用集群有内置预设。
+- **AI 助手**：可附加本机 PDF、DOCX 和文本文档；网页搜索改用 DeepSeek Search API；页面上的按钮都登记为助手可执行的操作，危险操作仍要人工确认；接近 1M 上下文窗口时提示并自动折叠较早的工具结果；单轮生成上限提高到 40 次，到上限可一键继续。
+- **界面与安全**：关窗或退出前，如有未保存的修改或在跑的任务会先询问；崩溃后残留的本机运行在下次启动时清理；侧栏改为"历史""资源"；按逐页点验和外部审查修复了一批界面问题。
+- 两个引擎的结果仍然逐位一致。
+
+## 0.3.0-beta.4 的主要变化
 
 - **界面重建**：以模型版本为中心的新界面；历史记录改为卡片，点击即在对话框中查看详情，可一键清空（可选同时删除本机算例文件夹与未确认结束的记录）。
 - **计算资源默认路径**：本机与每台服务器可登记默认项目目录、地表数据、Runtime 与强迫场路径；新建模拟自动填入，新建后改用的路径同步回计算资源。

@@ -523,11 +523,11 @@ dependencies = [
 
 [[package]]
 name = "colm-bench"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 
 [[package]]
 name = "colm-case"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "colm-core"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-lapack",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "colm-desktop-gui"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "colm-bench",
  "colm-case",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hist"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-numeric",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "colm-history"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -587,7 +587,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hybrid"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "colm-kernel"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -609,7 +609,7 @@ dependencies = [
 
 [[package]]
 name = "colm-lapack"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-numeric",
@@ -617,7 +617,7 @@ dependencies = [
 
 [[package]]
 name = "colm-model"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -632,18 +632,18 @@ dependencies = [
 
 [[package]]
 name = "colm-namelist"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-numeric"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 
 [[package]]
 name = "colm-schema"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 
 [[package]]
 name = "combine"

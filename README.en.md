@@ -11,7 +11,7 @@
 
 <p align="center">
   <a href="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml"><img src="https://github.com/zhongwangwei/CoLM-Desktop/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4"><img src="https://img.shields.io/badge/version-v0.3.0--beta.4-orange" alt="Current beta version: v0.3.0-beta.4"></a>
+  <a href="https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.5"><img src="https://img.shields.io/badge/version-v0.3.0--beta.5-orange" alt="Current beta version: v0.3.0-beta.5"></a>
   <img src="https://img.shields.io/badge/status-Beta-orange" alt="Status: Beta">
   <img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue" alt="License: MIT OR Apache-2.0">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey" alt="Platforms">
@@ -20,14 +20,14 @@
 CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints, the three-stage run and result evaluation together in one graphical interface. All three stages — surface data (`mksrfdata`), initial conditions (`mkinidata`) and the model main loop (`colm`) — run on the **Rust engine**, and the results are **bit-for-bit identical** to the original CoLM202X. The installers work out of the box: you do not need a Rust, Fortran, MPI or NetCDF toolchain.
 
 > [!WARNING]
-> **This is the `0.3.0-beta.4` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
+> **This is the `0.3.0-beta.5` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
-> Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. **Parameter tuning and uncertainty analysis are not yet available in spatial mode.** They come back when you switch to site mode.
+> Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. Calibration, uncertainty analysis and AI studies also work on basin, regional and global cases.
 
 ## Download
 
-Get the installer for your platform from the [v0.3.0-beta.4 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.4):
+Get the installer for your platform from the [v0.3.0-beta.5 prerelease page](https://github.com/zhongwangwei/CoLM-Desktop/releases/tag/v0.3.0-beta.5):
 
 | Platform | Architecture | Format |
 |---|---|---|
@@ -44,7 +44,18 @@ Run `colm-agent chat --project-root /your/project` without the desktop window. I
 
 pip distribution is temporarily paused: wheel generation and publishing are disabled. The desktop app and native CLI remain available. See [terminal usage](docs/terminal-assistant.md).
 
-## What's new in 0.3.0-beta.4 (release notes)
+## What's new in 0.3.0-beta.5 (release notes)
+
+- **Compare page (OpenBench evaluation)**: OpenBench is installed privately in the app's own folder; compare simulations across projects and versions on this computer or a server (live logs, Stop, only the report comes back). Register model variables, reference data and non-standard simulations; choose several references per variable; tick metrics and scores read from the installed OpenBench; annual and monthly climatology time scales.
+- **Research (calibration, uncertainty, AI)**: now part of New modified version as a four-step wizard whose results become a new version through a draft; works on basin, regional and global cases; shows convergence and how tightly observations pin each parameter; site targets can be compared as daily or monthly means, variables weighted, and shared parameters cross-validated by site; results no better than the defaults are refused.
+- **Model versions**: a version library beside a workbench; edit a version's source in the app or any external editor with changes recorded automatically; build and test checks before freezing; compare any two versions.
+- **Land-class parameters**: land-class table overrides apply per class at every scale; stomatal tables are tuned per land class; tracer and river-sediment parameters are editable in the parameter dialog.
+- **Server runs**: station batches are packed onto nodes on Slurm, LSF, PBS and machines without a scheduler; the engine is built on the login node, and servers without internet get dependencies sent from the desktop; results are read on the server and only what is plotted comes back; built-in presets for common clusters.
+- **AI assistant**: attach local PDF, DOCX and text documents; web search uses DeepSeek's Search API; every page button is registered as an assistant action, with dangerous ones still confirmed by hand; a warning near the 1M context window and automatic folding of older tool results; 40 generations per turn with a one-click Continue.
+- **Interface and safety**: closing or quitting asks first when edits are unsaved or work is running; runs a crash left behind are stopped at the next start; the sidebar reads History and Resources; a batch of interface fixes from page-by-page click-throughs and external audits.
+- Both engines still give bit-identical results.
+
+## What's new in 0.3.0-beta.4
 
 - **Rebuilt interface**: a version-first UI; History shows records as cards whose details open in a dialog, and can be cleared (optionally with local case folders and records whose end was never confirmed).
 - **Default paths per compute resource**: this machine and each server can store default project, surface data, runtime and forcing paths; new simulations fill them in and sync edits back.

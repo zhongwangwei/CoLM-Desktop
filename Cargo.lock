@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "colm-agent"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -224,14 +224,14 @@ dependencies = [
 
 [[package]]
 name = "colm-bench"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "colm-case"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -242,7 +242,7 @@ dependencies = [
 
 [[package]]
 name = "colm-cli"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-bench",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "colm-core"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-lapack",
@@ -276,7 +276,7 @@ dependencies = [
 
 [[package]]
 name = "colm-forcing"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-core",
@@ -287,7 +287,7 @@ dependencies = [
 
 [[package]]
 name = "colm-h5chunk"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "hdf5-metno-sys",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hist"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-h5chunk",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "colm-history"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -320,7 +320,7 @@ dependencies = [
 
 [[package]]
 name = "colm-hybrid"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "serde",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "colm-init"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "colm-kernel"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-namelist",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "colm-lapack"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-numeric",
@@ -366,7 +366,7 @@ dependencies = [
 
 [[package]]
 name = "colm-model"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -381,25 +381,25 @@ dependencies = [
 
 [[package]]
 name = "colm-namelist"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "colm-ncchar"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "netcdf",
 ]
 
 [[package]]
 name = "colm-numeric"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 
 [[package]]
 name = "colm-remote"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "flate2",
@@ -412,7 +412,7 @@ dependencies = [
 
 [[package]]
 name = "colm-runtime"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -432,11 +432,11 @@ dependencies = [
 
 [[package]]
 name = "colm-schema"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 
 [[package]]
 name = "colm-srfdata"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-h5chunk",
@@ -448,7 +448,7 @@ dependencies = [
 
 [[package]]
 name = "colm-workspace"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-schema",
@@ -1386,7 +1386,7 @@ dependencies = [
 
 [[package]]
 name = "oracle"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
@@ -2655,7 +2655,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.3.0-beta.4"
+version = "0.3.0-beta.5"
 dependencies = [
  "anyhow",
  "colm-case",
