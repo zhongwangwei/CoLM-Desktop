@@ -3044,6 +3044,285 @@ table input {
   }
 }
 
+/* 代码工作区：把“是什么、能做什么、危险操作”分层，而不是把 CLI 按钮平铺。 */
+.code-workspace-page {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.workspace-hero {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  box-shadow: 0 2px 7px #10243a04;
+}
+.workspace-hero-main {
+  min-width: 0;
+}
+.workspace-eyebrow {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.workspace-hero h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.workspace-hero p {
+  margin: 0;
+  max-width: 70ch;
+}
+.workspace-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 9px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.workspace-meta code {
+  color: var(--foreground);
+}
+.workspace-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 200px;
+}
+.workspace-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.workspace-chip.is-warning {
+  color: var(--warning);
+  border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+  background: color-mix(in srgb, var(--warning) 8%, transparent);
+}
+.workspace-chip.light-pass {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+.workspace-chip.light-fail {
+  color: var(--danger);
+  border-color: color-mix(in srgb, var(--danger) 35%, var(--border));
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+.workspace-chip.light-stale {
+  color: var(--warning);
+}
+.workspace-chip.light-not_needed {
+  opacity: 0.8;
+}
+.workspace-busy {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.workspace-section {
+  padding: 18px 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.workspace-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.workspace-section-head h3 {
+  margin: 0 0 3px;
+  font-size: 15px;
+}
+.workspace-section-head .muted {
+  margin: 0;
+  max-width: 78ch;
+  font-size: 12px;
+}
+.workspace-count {
+  flex: none;
+  min-width: 24px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--foreground);
+  font-size: 11px;
+  text-align: center;
+}
+.workspace-section > .code-files {
+  margin-top: 12px;
+}
+.workspace-actions {
+  margin-top: 0;
+}
+.workspace-footnote {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+.workspace-empty {
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px dashed var(--border);
+  border-radius: var(--r-sm);
+  color: var(--muted);
+  font-size: 13px;
+}
+.workspace-change-list,
+.workspace-commit-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workspace-change-row,
+.workspace-commit-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border);
+}
+.workspace-change-row:first-child,
+.workspace-commit-row:first-child {
+  border-top: 0;
+}
+.workspace-change-path {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.workspace-change-stat {
+  flex: none;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11px;
+}
+.workspace-change-stat .is-added {
+  color: var(--ok);
+}
+.workspace-change-stat .is-removed {
+  color: var(--danger);
+}
+.workspace-row-actions {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.workspace-row-actions .button {
+  min-height: 28px;
+  padding: 4px 9px;
+  font-size: 12px;
+}
+.workspace-commit-main {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+.workspace-commit-main strong {
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  font-weight: 550;
+}
+.workspace-commit-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+.workspace-subsection,
+.workspace-result,
+.workspace-danger {
+  margin-top: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--background);
+}
+.workspace-subsection > summary,
+.workspace-result > summary,
+.workspace-danger > summary {
+  padding: 9px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.workspace-subsection[open] > summary,
+.workspace-result[open] > summary,
+.workspace-danger[open] > summary {
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+}
+.workspace-subsection > *:not(summary),
+.workspace-result > *:not(summary),
+.workspace-danger > *:not(summary) {
+  display: block;
+  margin: 10px 12px;
+}
+.workspace-result pre {
+  max-height: 280px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.workspace-danger {
+  border-color: color-mix(in srgb, var(--danger) 30%, var(--border));
+}
+.workspace-danger > summary {
+  color: var(--danger);
+}
+.workspace-danger p {
+  color: var(--muted);
+  font-size: 12px;
+}
+.workspace-check-fields {
+  margin-top: 4px;
+}
+.workspace-check-fields:empty {
+  display: none;
+}
+@media (max-width: 860px) {
+  .workspace-hero {
+    flex-direction: column;
+    gap: 12px;
+  }
+  .workspace-chips {
+    justify-content: flex-start;
+    min-width: 0;
+  }
+  .workspace-change-row,
+  .workspace-commit-row {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+  .workspace-row-actions {
+    width: 100%;
+  }
+}
+
 /* 冻结前检查清单。 */
 .freeze-check {
   margin: 10px 0;
