@@ -125,7 +125,7 @@ export default function ComparePage() {
   const [yaml, setYaml] = useState('');
   // OpenBench 项目级选项；空串表示用 OpenBench 默认值。
   const [weight, setWeight] = useState('');
-  const [minYear, setMinYear] = useState('');
+  const [minYear, setMinYear] = useState('1');
   const [timeAlignment, setTimeAlignment] = useState('');
   const [numCores, setNumCores] = useState('');
   const [metrics, setMetrics] = useState('bias, RMSE, correlation');
@@ -1208,10 +1208,10 @@ export default function ComparePage() {
                 </Select>
               </Field>
               <Field
-                label={t('站点最少有效年数', 'Minimum station years')}
+                label={t('最少有效年数', 'Minimum valid years')}
                 hint={t(
-                  '只影响站点参考；空=OpenBench 默认。',
-                  'Station references only; empty = OpenBench default.',
+                  '有效数据不足这个年数的记录会被剔除，默认 1；留空则用 OpenBench 默认值。',
+                  'Records with fewer valid years are dropped; the default is 1. Empty uses the OpenBench default.',
                 )}
               >
                 <Input
