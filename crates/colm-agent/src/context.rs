@@ -90,7 +90,7 @@ pub fn prepare(messages: &[Message]) -> Option<PreparedHistory> {
             estimated_tokens: estimated,
             compressed_tools: compressed,
         };
-        // 先保留 8 条最近结果；如果仍然超预算，再逐步折叠到 4、2、0 条。
+        // 先保留 8 条最近结果；仍然超预算就只保留 4 条、再 2 条。最近的结果是模型下一步要用的，不折到 0。
         if estimate_tokens(&prepared.messages) < CONTEXT_COMPACT_TOKENS {
             return Some(prepared);
         }

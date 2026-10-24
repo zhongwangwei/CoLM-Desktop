@@ -658,7 +658,11 @@ export default function CodeWorkspace({
                     <Button
                       variant="ghost"
                       disabled={disabled || busy || !message.trim()}
-                      title={t('先填写修改说明', 'Enter a change message first')}
+                      title={
+                        message.trim()
+                          ? undefined
+                          : t('先填写修改说明', 'Enter a change message first')
+                      }
                       onClick={() => void revertFile(file.path)}
                     >
                       {t('撤销文件改动', 'Revert file')}

@@ -149,6 +149,9 @@ export function buildOpenbenchConfig(design: {
     );
   if (!design.simulations.length)
     throw new Error(bilingual('至少选一个模拟', 'Choose at least one simulation'));
+  // OpenBench 把缺省和空列表分开：不写用默认，写 [] 表示一个都不要，两者都 [] 直接报错。
+  if (design.metrics?.length === 0 && design.scores?.length === 0)
+    throw new Error(bilingual('指标和评分至少勾一个', 'Tick at least one metric or score'));
   const keys = design.simulations.map((sim) => simulationKey(sim.label));
   if (new Set(keys).size !== keys.length)
     throw new Error(bilingual('模拟的名字不能重复', 'Simulation names must be unique'));
@@ -225,8 +228,9 @@ export function buildOpenbenchConfig(design: {
       }
     }
   });
-  if (design.metrics?.length) lines.push(`metrics: [${design.metrics.map(quote).join(', ')}]`);
-  if (design.scores?.length) lines.push(`scores: [${design.scores.map(quote).join(', ')}]`);
+  // 勾选结果原样写出：用户全部取消勾选指标、只要评分时，省掉这一行会让 OpenBench 改跑默认指标。
+  if (design.metrics) lines.push(`metrics: [${design.metrics.map(quote).join(', ')}]`);
+  if (design.scores) lines.push(`scores: [${design.scores.map(quote).join(', ')}]`);
   return { config: `${lines.join('\n')}\n`, sites };
 }
 

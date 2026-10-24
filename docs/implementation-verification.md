@@ -36709,7 +36709,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 复核补丁：服务器端 `remote-bench-register-model-variable` 原来不拒绝字段里的冒号（`f:new` 会被 OpenBench 当成 prefix/suffix 段静默拆开），现与本机同用一条规则（`model_variable_spec`，并去首尾空白）；本机校验抽成 `valid_mapping_field`，原测试的第二个循环只断言常量、没调到校验。三个注册弹窗里显示错误（原来错误只出现在被弹窗挡住的页面上，且服务器路径是英文原文），打开弹窗时清掉旧错误，冒号在前端先用双语拒绝。真实窗口：变量名填 `f:new` 点注册，弹窗内显示"变量、变量名和单位里不能有冒号（:）。"，换开另一个弹窗不带旧错误。OpenBench 的 `data_groupby` 大小写核对过：schema 注释为 `Year | Month | Day | single`，统计模块 `.lower()` 后比较，官方 smoke 配置写 `Month`。
 - 没做/未验证：真实新模块的模型变量注册与服务器端注册（命令只编译/单测校验了名字与参数）；参考数据注册弹窗的真实后台上传；OpenBench `check/run` 的真实多参考评估（本机缺完整参考根目录）。
 
-## 第 772 轮：比较页的指标/评分改为从已安装 OpenBench 选择（2026-10-24）
+## 第 773 轮：比较页的指标/评分改为从已安装 OpenBench 选择（2026-10-24）
 
 - 原来比较页高级设置里的 `metrics`/`scores` 是两个逗号分隔的文本框，用户不知道 OpenBench 支持哪些指标。现在改为勾选列表：
   - 本机 `bench_metric_options`、服务器 `remote-bench-metric-options` 通过专用 Python 读取 `openbench.core.registry` 的 `IMPLEMENTED_METRIC_NAMES` / `IMPLEMENTED_SCORE_NAMES` 与显示名；
@@ -36719,8 +36719,9 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 指标列表来自已安装版本（3.0.8 实测 49 个指标、7 个评分），不写死一份会过期的清单；服务器端新增 CLI `remote-bench-metric-options`。
 - 验证：前端 **887/887**；`check-gui` **249 命令 / 211 静态调用 / 26 动态**；真实窗口读取到 **56 个勾选项**（49 metrics + 7 scores），默认三项指标和 Overall_Score 已勾选；localStorage 已恢复。
 - 没做：真实 OpenBench `check/run` 用全部指标跑一轮；服务器端 metric-options 未连集群实测。
+- 复核补丁：OpenBench 3.0.8 的 `config/loader.py` 区分缺省和空列表——不写 `metrics` 用默认指标，写 `[]` 表示不要，两者都是 `[]` 直接报 `metrics and scores cannot both be empty`。原生成器 `if (design.metrics?.length)` 把"全部取消勾选"当成缺省省掉，用户只想要评分时 OpenBench 会改跑默认指标。现在勾选结果原样写出（含 `metrics: []`），两者都空在生成前就给中英文提示；补了一条测试。7920 上同版本 registry 实测 49 个指标、7 个评分，前端兜底清单里的 8 个指标和 4 个评分名都在其中；`climatology-year` / `climatology-month` 的拼写与 OpenBench 绘图代码里的判断一致。
 
-## 第 773 轮：参考数据登记的数据目录/站点清单加选择按钮（2026-10-24）
+## 第 774 轮：参考数据登记的数据目录/站点清单加选择按钮（2026-10-24）
 
 - 注册参考数据弹窗里，「数据目录」和「站点清单 CSV」原来只能手输，现在各自带选择按钮：
   - 本机：`pick_folder` / `pick_file`（CSV 过滤），与系统文件选择器一致；
@@ -36729,7 +36730,7 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 验证：真实窗口参考数据弹窗显示「选择…」「选择 CSV…」；本机 `/pick` 模拟选择后两个输入框分别填入 `/tmp/openbench-ref-data`、`/tmp/stations.csv`；前端 887/887。
 - 没做：没有真实服务器账号可点远程文件浏览器，只做了代码路径和既有 RemotePathBrowser 复用；没有在 Windows 上点系统文件选择器。
 
-## 第 774 轮：助手 ui_state 被历史变量截断，导致 AI 退回准备输入数据（2026-10-24）
+## 第 775 轮：助手 ui_state 被历史变量截断，导致 AI 退回准备输入数据（2026-10-24）
 
 - 用户现象：AI 建完算例后总要跳回「准备输入数据」一下。查最近一次真实会话的 audit（`assistant/sessions/1792818099304-938`）：AI 确实显式调用 `ui_go({"step":"preparation"})`，不是界面链接自己乱跳；但在那之前，当前算例页的 `ui_state` 结果 **215,232 字符**，被 agent 的 24,000 字符上限截成失效 JSON。
 - 原因：算例第 5 步把几百个 `DEF_hist_vars%*` 历史变量都注册成 UI 字段；`guideState` 先写 `fields` 再写 `buttons`，截断后助手看不到任何可点按钮（尤其 `case-step-*`、保存/运行），只能去 preparation 等页面找控件。表面上像是“链接没做对”，实际是 UI 状态过大导致助手丢失当前页控件。
@@ -36739,9 +36740,9 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - 页面 details 预算从 48,000 降到 6,000，保证整个 ui_state 能完整落在 agent 的 24k 结果限制内。
 - 验证：新增 `budgetGuideFields` 单元测试（120 个历史变量 + 一个控制按钮，预算 1,200 字符下按钮保留、数量明确、JSON 不超预算）；前端 **888/888**；typecheck/lint/format 通过。没有重跑真实 AI 会话（需要重启应用并再次建例观察），所以“AI 不再跳 preparation”是机制推断，不是端到端实测。
 
-## 第 775 轮：工具结果截断后仍是有效 JSON（2026-10-24）
+## 第 776 轮：工具结果截断后仍是有效 JSON（2026-10-24）
 
-- 用户问 24,000 字符是否太小。结论：24k 字符本身不算小（中英混合约 1–2 万 token），上次的问题是 215k 的 UI 状态，提高到 48k 仍会截断且多吃上下文；上限保持 24k，并已在第 774 轮把 UI 状态压回预算。
+- 用户问 24,000 字符是否太小。结论：24k 字符本身不算小（中英混合约 1–2 万 token），上次的问题是 215k 的 UI 状态，提高到 48k 仍会截断且多吃上下文；上限保持 24k，并已在第 775 轮把 UI 状态压回预算。
 - 修掉真正的截断缺陷：`result_text` 原来把 JSON 字符串硬切到 24k，再接一句 `[truncated]`，返回的是无效 JSON。现在超长时返回有效对象：
   `{"truncated": true, "original_chars": N, "preview": "原文前缀", "note": "…narrow the request…"}`，
   并按序列化后的字符数收缩 preview，保证整个返回不超过 24k（含引号/换行/中文转义）。
@@ -36749,14 +36750,14 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 验证：`cargo test -p colm-agent --lib tools::` **109/109**；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。完整 `cargo test -p colm-agent --lib --bins` 为 225 通过、1 失败，失败是既有的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat`（环境里 `kill` 被沙箱拒绝，报 `Operation not permitted`），与本次改动无关；单独重跑同样失败。
 - 没做：没在真实助手会话里再触发一次超长工具结果（要重建并重启应用）；上限没有调大。
 
-## 第 776 轮：单轮 agent 生成步数 24 → 40（2026-10-24）
+## 第 777 轮：单轮 agent 生成步数 24 → 40（2026-10-24）
 
 - 用户观察到长任务做到一半停。最近会话里有整轮正好 24 次模型生成（agent 默认 `max_steps`），最后一次只能总结；会话 token 上限 500 万未到，日志也没有 context-length 错误，所以先按用户决定把单轮生成上限从 **24 提到 40**。
 - 保留原有收尾机制：第 40 次生成仍不提供工具，只让模型总结；连续三轮相同只读调用仍会提前收尾。
 - 代价：长任务每轮最多多消耗 16 次生成，prompt 历史更长、费用和单请求上下文压力都增加；如果 40 步仍“搞到一半停”，下一步按用户要求加“本轮达到步数上限，未完成”的明确提示和“继续”入口。
 - 验证：`cargo test -p colm-agent --lib agent_tests::default_turn_budget_allows_forty_generations`；`cargo test -p colm-agent --lib tools::`；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。
 
-## 第 777 轮：1M 上下文预算、自动折叠旧工具结果、40 步继续入口（2026-10-24）
+## 第 778 轮：1M 上下文预算、自动折叠旧工具结果、40 步继续入口（2026-10-24）
 
 - DeepSeek V4 的 `deepseek-flash` / `deepseek-v4-pro` 上下文窗口是 **1M token**（`docs/design-ai-assistant.md:70`），不是先前口误的 128k；会话累计预算按 B 方案保持 **5M**。
 - agent 新增 `context` 模块：按字符数保守估算 token；**80% 提示、90% 自动折叠**。折叠只改发给模型的请求副本：保留最近 8 条工具结果（不够再降到 4/2 条），更早的 `Message::Tool` 内容换成带原始字符数和前 240 字的摘要；tool_call id、助手消息、用户消息和转录不动。会话 JSONL 里的原始记录不删。
@@ -36770,8 +36771,9 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - `cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`；
   - 前端 typecheck/lint/format 通过，`npm test` **888/888**。
 - 没做/未验证：真实 AI 会话跑满 80%/90% 窗口的端到端压缩效果；外部 Codex/Claude/OpenCode 后端不使用这个内置循环，压缩只覆盖 builtin API 后端；没有按真实 tokenizer 校准估算（按字符保守估）。
+- 复核补丁：`context::prepare` 的注释写“逐步折叠到 4、2、0 条”，代码只有 8/4/2 三档；最近的工具结果正是模型下一步要用的，不该折到 0，改注释与代码一致。
 
-## 第 778 轮：重排“修改源码”页（2026-10-24）
+## 第 779 轮：重排“修改源码”页（2026-10-24）
 
 - 用户反馈代码工作区页面像后台 CLI 平铺：`build-engine`/`test-drift` 等原始代号、自由输入提交号的“恢复到提交”、突然出现的“工作区”和删除/恢复按钮、原始 JSON，都让人看不懂。
 - 页面重排为六段，先解释再操作：
@@ -36785,3 +36787,4 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 不显示原始 `workspace_status` JSON；不改变任何 `workspace_*` 命令或 `data-action`，保留助手/测试依赖。新增 CSS 只用现有颜色变量，桌面和窄窗口分别排版。
 - 验证：前端 **888/888**，typecheck/lint/format 通过；`foundation-page` 的 action 可见性测试仍通过（检查、导入补丁可登记，导出/回滚/删除保持 D 级）。
 - 没做：没有真实窗口截图对比；没有在窄窗口下逐按钮点验（CSS 有 860px 断点）。
+- 复核补丁：“撤销文件改动”按钮的悬停提示原来一直是“先填写修改说明”，填了说明、按钮可点时也这么写；改为只在缺说明时显示。

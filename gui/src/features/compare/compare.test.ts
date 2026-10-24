@@ -265,3 +265,12 @@ it('passes the two climatology time scales through to OpenBench', () => {
     assert.ok(config.includes(`  tim_res: ${scale}`), config);
   }
 });
+
+it('writes an explicitly cleared metric list and refuses clearing both', () => {
+  const { config } = buildOpenbenchConfig({ ...base, metrics: [], scores: ['Overall_Score'] });
+  assert.ok(config.includes('metrics: []'), config);
+  assert.throws(
+    () => buildOpenbenchConfig({ ...base, metrics: [], scores: [] }),
+    /at least one metric or score/,
+  );
+});
