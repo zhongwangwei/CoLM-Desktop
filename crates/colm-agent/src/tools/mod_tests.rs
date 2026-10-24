@@ -66,13 +66,30 @@ fn every_standard_tool_has_a_strict_mode_schema() {
 }
 
 #[test]
-fn long_results_are_truncated_with_a_note() {
+fn long_results_are_truncated_to_valid_json_with_a_note() {
     let small = json!({"a": 1});
     assert_eq!(result_text(&small), r#"{"a":1}"#);
     let big = json!({ "text": "中".repeat(MAX_RESULT_CHARS) });
     let text = result_text(&big);
-    assert!(text.contains("[truncated"));
-    assert!(text.chars().count() < MAX_RESULT_CHARS + 200);
+    let parsed: Value =
+        serde_json::from_str(&text).expect("truncated result must remain valid JSON");
+    assert_eq!(parsed["truncated"], true);
+    assert!(parsed["original_chars"].as_u64().unwrap() > MAX_RESULT_CHARS as u64);
+    assert!(parsed["preview"]
+        .as_str()
+        .unwrap()
+        .starts_with("{\"text\":\"中"));
+    assert!(parsed["note"]
+        .as_str()
+        .unwrap()
+        .contains("Narrow the request"));
+    assert!(text.chars().count() <= MAX_RESULT_CHARS);
+
+    // Escaped characters also fit: quotes/newlines expand during serialization.
+    let escaped = json!({ "text": "\n\"".repeat(MAX_RESULT_CHARS / 2) });
+    let escaped_text = result_text(&escaped);
+    assert!(serde_json::from_str::<Value>(&escaped_text).is_ok());
+    assert!(escaped_text.chars().count() <= MAX_RESULT_CHARS);
 }
 
 #[test]

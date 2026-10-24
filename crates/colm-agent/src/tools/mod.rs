@@ -415,20 +415,35 @@ pub trait Tool: Send + Sync {
     fn call(&self, args: &Value, ctx: &ToolContext) -> Result<Value>;
 }
 
-/// 返回给模型的内容上限（字符）。超出的部分截掉，并告诉模型被截断了。
+/// 返回给模型的内容上限（字符）。超出时改成带 truncated/original_chars/preview 的有效 JSON，
+/// 不做会破坏 JSON 结构的硬截断。
 pub const MAX_RESULT_CHARS: usize = 24_000;
 
-/// 工具结果的文本：截断时附说明。
+/// 工具结果的文本。超长时也必须返回有效 JSON：原来直接把 JSON 字符串切成两半再拼一句说明，模型
+/// 看到的是坏 JSON，容易误判结果；现在返回带 `truncated`/`original_chars`/`preview` 的对象。
 pub fn result_text(value: &Value) -> String {
     let text = serde_json::to_string(value).unwrap_or_else(|_| "null".into());
-    if text.chars().count() <= MAX_RESULT_CHARS {
+    let total = text.chars().count();
+    if total <= MAX_RESULT_CHARS {
         return text;
     }
-    let head: String = text.chars().take(MAX_RESULT_CHARS).collect();
-    format!(
-        "{head}… [truncated: the result had {} characters; narrow the request]",
-        text.chars().count()
-    )
+    // 预览是原文的前缀；序列化会把引号、换行和中文转义，先估一个上限，再按需要收缩，保证最终
+    // 字符串也不超过 MAX_RESULT_CHARS。预览为空时对象本身一定有界，循环最多几十次。
+    let mut take = MAX_RESULT_CHARS;
+    loop {
+        let preview: String = text.chars().take(take).collect();
+        let out = json!({
+            "truncated": true,
+            "original_chars": total,
+            "preview": preview,
+            "note": "The tool result was too large and was truncated. Narrow the request (line range, filter, page or path) instead of retrying the same call.",
+        })
+        .to_string();
+        if out.chars().count() <= MAX_RESULT_CHARS || take == 0 {
+            return out;
+        }
+        take = take.saturating_mul(4) / 5;
+    }
 }
 
 pub struct Registry {

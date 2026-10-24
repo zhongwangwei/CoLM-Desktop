@@ -36738,3 +36738,13 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
   - 新增 `budgetGuideFields`：核心字段优先、历史变量其次，单次 fields 预算 8,000 字符，省略数量通过 `fields_total` / `fields_omitted` 明确返回；
   - 页面 details 预算从 48,000 降到 6,000，保证整个 ui_state 能完整落在 agent 的 24k 结果限制内。
 - 验证：新增 `budgetGuideFields` 单元测试（120 个历史变量 + 一个控制按钮，预算 1,200 字符下按钮保留、数量明确、JSON 不超预算）；前端 **888/888**；typecheck/lint/format 通过。没有重跑真实 AI 会话（需要重启应用并再次建例观察），所以“AI 不再跳 preparation”是机制推断，不是端到端实测。
+
+## 第 775 轮：工具结果截断后仍是有效 JSON（2026-10-24）
+
+- 用户问 24,000 字符是否太小。结论：24k 字符本身不算小（中英混合约 1–2 万 token），上次的问题是 215k 的 UI 状态，提高到 48k 仍会截断且多吃上下文；上限保持 24k，并已在第 774 轮把 UI 状态压回预算。
+- 修掉真正的截断缺陷：`result_text` 原来把 JSON 字符串硬切到 24k，再接一句 `[truncated]`，返回的是无效 JSON。现在超长时返回有效对象：
+  `{"truncated": true, "original_chars": N, "preview": "原文前缀", "note": "…narrow the request…"}`，
+  并按序列化后的字符数收缩 preview，保证整个返回不超过 24k（含引号/换行/中文转义）。
+- 小结果保持逐字节原样；MCP 与内置 agent 共用同一个 `result_text`，两条路径一起受益。
+- 验证：`cargo test -p colm-agent --lib tools::` **109/109**；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。完整 `cargo test -p colm-agent --lib --bins` 为 225 通过、1 失败，失败是既有的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat`（环境里 `kill` 被沙箱拒绝，报 `Operation not permitted`），与本次改动无关；单独重跑同样失败。
+- 没做：没在真实助手会话里再触发一次超长工具结果（要重建并重启应用）；上限没有调大。
