@@ -341,3 +341,34 @@ test('page details fit the assistant budget by dropping the largest entries firs
   );
   assert.ok(JSON.stringify(fitted).length <= 1200);
 });
+
+test('page fields keep controls visible and stay under the assistant result budget', () => {
+  const source = readFileSync(new URL('./guide.ts', import.meta.url), 'utf8')
+    .replace(/^import\b[\s\S]*?;$/gm, '')
+    .replace(/^export /gm, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022 },
+  }).outputText;
+  const { budgetGuideFields } = new Function(
+    'pageExecutionContext',
+    'publicUiResult',
+    'waitForContract',
+    'requestAnimationFrame',
+    'bilingual',
+    `${js};return {budgetGuideFields};`,
+  )(pageExecutionContext, publicUiResult, waitForContract, (fn: () => void) => fn(), bilingual) as {
+    budgetGuideFields: (
+      fields: { id: string; label: string }[],
+      limit?: number,
+    ) => { fields: { id: string; label: string }[]; total: number; omitted: number };
+  };
+  const history = Array.from({ length: 120 }, (_, index) => ({
+    id: `case-DEF_hist_vars%v${index}`,
+    label: `history variable ${index} with a deliberately long label`.repeat(2),
+  }));
+  const fitted = budgetGuideFields([{ id: 'case-step-5', label: 'Run' }, ...history], 1200);
+  assert.equal(fitted.fields[0]!.id, 'case-step-5');
+  assert.equal(fitted.total, 121);
+  assert.ok(fitted.omitted > 0);
+  assert.ok(JSON.stringify(fitted.fields).length <= 1200);
+});

@@ -36728,3 +36728,13 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 用 `.study-path` 横向排列输入框和按钮；之前参考数据根目录的选择按钮掉到输入框下面，也是同一个缺失样式，本次一并修正。
 - 验证：真实窗口参考数据弹窗显示「选择…」「选择 CSV…」；本机 `/pick` 模拟选择后两个输入框分别填入 `/tmp/openbench-ref-data`、`/tmp/stations.csv`；前端 887/887。
 - 没做：没有真实服务器账号可点远程文件浏览器，只做了代码路径和既有 RemotePathBrowser 复用；没有在 Windows 上点系统文件选择器。
+
+## 第 774 轮：助手 ui_state 被历史变量截断，导致 AI 退回准备输入数据（2026-10-24）
+
+- 用户现象：AI 建完算例后总要跳回「准备输入数据」一下。查最近一次真实会话的 audit（`assistant/sessions/1792818099304-938`）：AI 确实显式调用 `ui_go({"step":"preparation"})`，不是界面链接自己乱跳；但在那之前，当前算例页的 `ui_state` 结果 **215,232 字符**，被 agent 的 24,000 字符上限截成失效 JSON。
+- 原因：算例第 5 步把几百个 `DEF_hist_vars%*` 历史变量都注册成 UI 字段；`guideState` 先写 `fields` 再写 `buttons`，截断后助手看不到任何可点按钮（尤其 `case-step-*`、保存/运行），只能去 preparation 等页面找控件。表面上像是“链接没做对”，实际是 UI 状态过大导致助手丢失当前页控件。
+- 修复：
+  - `guideState` 现在把 `buttons`、`steps` 放在 `fields` 前面；
+  - 新增 `budgetGuideFields`：核心字段优先、历史变量其次，单次 fields 预算 8,000 字符，省略数量通过 `fields_total` / `fields_omitted` 明确返回；
+  - 页面 details 预算从 48,000 降到 6,000，保证整个 ui_state 能完整落在 agent 的 24k 结果限制内。
+- 验证：新增 `budgetGuideFields` 单元测试（120 个历史变量 + 一个控制按钮，预算 1,200 字符下按钮保留、数量明确、JSON 不超预算）；前端 **888/888**；typecheck/lint/format 通过。没有重跑真实 AI 会话（需要重启应用并再次建例观察），所以“AI 不再跳 preparation”是机制推断，不是端到端实测。

@@ -129,6 +129,21 @@ export function guideState() {
   const contracts = pageContracts();
   const page = contracts.find((contract) => contract.scope !== 'shell');
   const execution = pageExecutionContext(contracts);
+  const fieldState = budgetGuideFields(
+    fields().map(({ id, label, value, type, options, disabled, readOnly, volatile, saves }) => ({
+      id,
+      name: id,
+      label,
+      value,
+      kind: type,
+      options,
+      disabled: !!disabled,
+      readOnly: !!readOnly,
+      read_only: !!readOnly,
+      volatile: !!volatile,
+      saves: !!saves,
+    })),
+  );
   return {
     ...execution,
     screen: 'workbench',
@@ -150,29 +165,22 @@ export function guideState() {
     steps: contracts.some((contract) => contract.modal)
       ? []
       : [...routes, ...Object.keys(pageAliases)].map((id) => ({ id, label: id })),
-    fields: fields().map(
-      ({ id, label, value, type, options, disabled, readOnly, volatile, saves }) => ({
-        id,
-        name: id,
-        label,
-        value,
-        kind: type,
-        options,
-        disabled: !!disabled,
-        readOnly: !!readOnly,
-        read_only: !!readOnly,
-        volatile: !!volatile,
-        saves: !!saves,
-      }),
-    ),
+    // 按钮放 fields 前面：某一页的 fields 可能成百上千（当前算例第 5 步的历史变量），AI 的结果又被
+    // 24k 字符截断；如果按钮在后面，助手会看不到任何可点控件，只能退回 preparation/等别的页去找。
     buttons: actions().map(({ id, label, kind, enabled }) => ({
       name: id,
       label,
       kind,
       enabled: enabled !== false,
     })),
+    fields: fieldState.fields,
+    fields_total: fieldState.total,
+    ...(fieldState.omitted ? { fields_omitted: fieldState.omitted } : {}),
     status: contracts.map((page) => page.status).filter(Boolean),
-    details: budgetUiDetails(publicUiResult(contracts.map((page) => page.details).filter(Boolean))),
+    details: budgetUiDetails(
+      publicUiResult(contracts.map((page) => page.details).filter(Boolean)),
+      6_000,
+    ),
   };
 }
 const routes: Route[] = [
@@ -355,6 +363,29 @@ export async function drive(action: string, args: Record<string, unknown> = {}) 
   } finally {
     pending = false;
   }
+}
+
+/**
+ * 页面字段的预算。一个真实算例第 5 步把几百个 history 变量都登记成字段，单次 ui_state 实测 215k
+ * 字符，超过 agent 的 24k 结果上限；助手看不到末尾的按钮，就会退回 preparation 等页面找控件。
+ * 核心字段优先，历史变量字段其次，尽量保留页面能操作的最小集合；被省略的数量明确写回。
+ */
+export function budgetGuideFields<T extends { id: string }>(
+  fields: T[],
+  limit = 8_000,
+): { fields: T[]; total: number; omitted: number } {
+  const core = fields.filter((field) => !field.id.startsWith('case-DEF_hist_vars%'));
+  const history = fields.filter((field) => field.id.startsWith('case-DEF_hist_vars%'));
+  const ordered = [...core, ...history];
+  const kept: T[] = [];
+  let used = 0;
+  for (const field of ordered) {
+    const size = JSON.stringify(field).length;
+    if (used + size > limit) continue;
+    kept.push(field);
+    used += size;
+  }
+  return { fields: kept, total: fields.length, omitted: fields.length - kept.length };
 }
 
 /**
