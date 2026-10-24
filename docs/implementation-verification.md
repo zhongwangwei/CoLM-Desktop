@@ -36719,3 +36719,12 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 指标列表来自已安装版本（3.0.8 实测 49 个指标、7 个评分），不写死一份会过期的清单；服务器端新增 CLI `remote-bench-metric-options`。
 - 验证：前端 **887/887**；`check-gui` **249 命令 / 211 静态调用 / 26 动态**；真实窗口读取到 **56 个勾选项**（49 metrics + 7 scores），默认三项指标和 Overall_Score 已勾选；localStorage 已恢复。
 - 没做：真实 OpenBench `check/run` 用全部指标跑一轮；服务器端 metric-options 未连集群实测。
+
+## 第 773 轮：参考数据登记的数据目录/站点清单加选择按钮（2026-10-24）
+
+- 注册参考数据弹窗里，「数据目录」和「站点清单 CSV」原来只能手输，现在各自带选择按钮：
+  - 本机：`pick_folder` / `pick_file`（CSV 过滤），与系统文件选择器一致；
+  - 服务器：复用 `RemotePathBrowser`，数据目录用目录模式，站点清单用文件模式（`directory=false`），初始路径取已填 CSV 的父目录；选中的是服务器路径，直接写回表单。
+- 用 `.study-path` 横向排列输入框和按钮；之前参考数据根目录的选择按钮掉到输入框下面，也是同一个缺失样式，本次一并修正。
+- 验证：真实窗口参考数据弹窗显示「选择…」「选择 CSV…」；本机 `/pick` 模拟选择后两个输入框分别填入 `/tmp/openbench-ref-data`、`/tmp/stations.csv`；前端 887/887。
+- 没做：没有真实服务器账号可点远程文件浏览器，只做了代码路径和既有 RemotePathBrowser 复用；没有在 Windows 上点系统文件选择器。

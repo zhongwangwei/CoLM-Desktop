@@ -118,7 +118,9 @@ export default function ComparePage() {
   const [host, setHostState] = useState(() => stored('colm.benchHost'));
   const [servers, setServers] = useState<string[]>([]);
   // 服务器上挑目录：给哪一项挑（模拟的 history，或参考数据根目录）。
-  const [browsing, setBrowsing] = useState<'sim' | 'ref' | 'simRegister' | null>(null);
+  const [browsing, setBrowsing] = useState<
+    'sim' | 'ref' | 'simRegister' | 'refDataDir' | 'refList' | null
+  >(null);
   const [index, setIndexState] = useState(() => stored('colm.benchIndex'));
   const setIndex = (value: string) => {
     setIndexState(value);
@@ -408,6 +410,37 @@ export default function ComparePage() {
     const parts = dir.split(/[/\\]/).filter(Boolean);
     const last = parts.pop() ?? 'sim';
     return last === 'history' ? (parts.pop() ?? last) : last;
+  };
+  // 远程文件浏览器要目录作为起点；登记表单里的 CSV 很可能已经填了完整文件路径。
+  const parentPath = (path: string) => {
+    const clean = path.replace(/[/\\]+$/, '');
+    const cut = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+    return cut > 0 ? clean.slice(0, cut) : undefined;
+  };
+  // 参考数据登记的两个路径：本机用系统选择器，服务器用远程浏览器（和挑选模拟目录同一套）。
+  const pickReferenceDir = () => {
+    if (remote) {
+      setBrowsing('refDataDir');
+      return;
+    }
+    void invoke<string | null>('pick_folder', { key: 'openbench-ref-data' }).then(
+      (path) => {
+        if (path) setReg((old) => ({ ...old, rootDir: path }));
+      },
+      (e) => setError(shown(e)),
+    );
+  };
+  const pickReferenceList = () => {
+    if (remote) {
+      setBrowsing('refList');
+      return;
+    }
+    void invoke<string | null>('pick_file', { key: 'openbench-ref-list', filter: 'csv' }).then(
+      (path) => {
+        if (path) setReg((old) => ({ ...old, fulllist: path }));
+      },
+      (e) => setError(shown(e)),
+    );
   };
   // 选模拟：勾一个算例（或加一个别的目录）就读它的 history 概况，填年份与种类。
   const addPick = async (dir: string, label: string) => {
@@ -1668,10 +1701,26 @@ export default function ComparePage() {
             ] as const
           ).map(([key, label]) => (
             <Field key={key} label={label}>
-              <Input
-                value={reg[key]}
-                onChange={(e) => setReg((old) => ({ ...old, [key]: e.target.value }))}
-              />
+              {key === 'rootDir' || key === 'fulllist' ? (
+                <div className="study-path">
+                  <Input
+                    value={reg[key]}
+                    onChange={(e) => setReg((old) => ({ ...old, [key]: e.target.value }))}
+                  />
+                  <Button
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={key === 'rootDir' ? pickReferenceDir : pickReferenceList}
+                  >
+                    {key === 'rootDir' ? t('选择…', 'Choose…') : t('选择 CSV…', 'Choose CSV…')}
+                  </Button>
+                </div>
+              ) : (
+                <Input
+                  value={reg[key]}
+                  onChange={(e) => setReg((old) => ({ ...old, [key]: e.target.value }))}
+                />
+              )}
             </Field>
           ))}
           <Field label={t('类型', 'Type')}>
@@ -1912,21 +1961,27 @@ export default function ComparePage() {
       {remote && browsing && (
         <RemotePathBrowser
           host={host}
-          directory
+          directory={browsing !== 'refList'}
           en={en}
           initialPath={
             browsing === 'ref'
               ? scanDir || undefined
               : browsing === 'simRegister'
                 ? simForm.dir || undefined
-                : undefined
+                : browsing === 'refDataDir'
+                  ? reg.rootDir || undefined
+                  : browsing === 'refList'
+                    ? parentPath(reg.fulllist)
+                    : undefined
           }
-          onSelect={(dir) => {
+          onSelect={(path) => {
             const target = browsing;
             setBrowsing(null);
-            if (target === 'ref') setScanDir(dir);
-            else if (target === 'simRegister') setSimForm((old) => ({ ...old, dir }));
-            else void addPick(dir, pickLabel(dir));
+            if (target === 'ref') setScanDir(path);
+            else if (target === 'simRegister') setSimForm((old) => ({ ...old, dir: path }));
+            else if (target === 'refDataDir') setReg((old) => ({ ...old, rootDir: path }));
+            else if (target === 'refList') setReg((old) => ({ ...old, fulllist: path }));
+            else void addPick(path, pickLabel(path));
           }}
           onClose={() => setBrowsing(null)}
         />
