@@ -787,6 +787,18 @@ table input {
   opacity: 0.55;
   outline: none;
 }
+.assistant-attach-button {
+  align-items: center;
+  display: inline-flex;
+  height: 34px;
+  justify-content: center;
+  min-width: 34px;
+  padding: 0;
+  width: 34px;
+}
+.assistant-attach-button[aria-busy='true'] {
+  opacity: 0.55;
+}
 .assistant-choices {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);

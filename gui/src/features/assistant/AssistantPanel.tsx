@@ -858,32 +858,54 @@ export default function AssistantPanel() {
           }
         }}
       />
-      {/* 添加文档、发送、停止紧跟在输入框下面；模型与思考程度的快捷选择放到它们后面（用户指出按钮离输入框太远）。 */}
-      <div className="flex flex-wrap gap-2">
+      {/* 附件用图标，发送/停止靠右：输入框下面一行只留三个动作，模型快捷选择在下一行。 */}
+      <div className="flex flex-wrap items-center gap-2">
         <Button
           variant="ghost"
+          className="assistant-attach-button"
+          aria-label={
+            attaching ? t('正在读取文档', 'Reading document') : t('添加文档', 'Attach document')
+          }
+          aria-busy={attaching}
+          title={
+            attaching ? t('正在读取文档…', 'Reading document…') : t('添加文档', 'Attach document')
+          }
           disabled={!ready || running || attaching || state.assistantSettingsOpen}
           onClick={() => void perform(attachDocument)}
         >
-          {attaching ? t('读取中…', 'Reading…') : t('添加文档', 'Attach document')}
+          <svg
+            aria-hidden="true"
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.8"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.82-2.82l8.49-8.48" />
+          </svg>
         </Button>
-        <Button
-          variant="primary"
-          disabled={!ready || running || attaching || (!input.trim() && !attachments.length)}
-          onClick={() => void send()}
-        >
-          {t('发送', 'Send')}
-        </Button>
-        <Button
-          disabled={!running}
-          onClick={() =>
-            void perform(async () => {
-              await invoke('assistant_cancel', {});
-            })
-          }
-        >
-          {t('停止', 'Stop')}
-        </Button>
+        <div className="ml-auto flex gap-2">
+          <Button
+            variant="primary"
+            disabled={!ready || running || attaching || (!input.trim() && !attachments.length)}
+            onClick={() => void send()}
+          >
+            {t('发送', 'Send')}
+          </Button>
+          <Button
+            disabled={!running}
+            onClick={() =>
+              void perform(async () => {
+                await invoke('assistant_cancel', {});
+              })
+            }
+          >
+            {t('停止', 'Stop')}
+          </Button>
+        </div>
       </div>
       <div className="assistant-choices">
         <label>
