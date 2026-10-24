@@ -7,8 +7,8 @@ export const navigation = [
   { id: 'research', zh: '研究', en: 'Research', route: 'research' },
   // 研究的下一项：用 OpenBench 在模拟之间、版本之间比较与评估，载入报告。
   { id: 'compare', zh: '比较', en: 'Compare', route: 'compare' },
-  { id: 'history', zh: '历史记录', en: 'History', route: 'history' },
-  { id: 'resources', zh: '计算资源', en: 'Compute resources', route: 'resources' },
+  { id: 'history', zh: '历史', en: 'History', route: 'history' },
+  { id: 'resources', zh: '资源', en: 'Resources', route: 'resources' },
   { id: 'settings', zh: '设置', en: 'Settings', route: 'settings' },
 ] as const satisfies readonly {
   id: string;
@@ -51,7 +51,7 @@ export function activeNavigation(
     !state.projectView.home
   )
     return 'simulation';
-  // 算例里的"运行记录"页内容就是这个算例的历史记录：侧栏点亮"历史记录"，不是"模拟"。
+  // 算例里的"运行记录"页内容就是这个算例的历史记录：侧栏点亮"历史"，不是"模拟"。
   if (state.route === 'case')
     return state.caseTab === 'results'
       ? 'results'

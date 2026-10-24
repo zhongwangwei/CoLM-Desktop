@@ -336,7 +336,7 @@ def run(args):
         active_id = active_submission['args']['runId']
         driver.wait('return window.__multisiteQA.events.some(e=>e.event==="run://started"&&e.payload.run_id==='+json.dumps(active_id)+');', args.timeout)
         checkpoint('04-started')
-        driver.press('历史记录', 'History', root='$(".sidebar")')
+        driver.press('历史', 'History', root='$(".sidebar")')
         checkpoint('05-history')
         driver.press('模拟', 'Simulation', root='$(".sidebar")')
         driver.wait('return !!$(".simulation-monitor");')
@@ -397,7 +397,7 @@ def run(args):
             report.setdefault('result_sources', {})[name] = {'runs': sorted(run_paths), 'series': series[-1]}
         if args.stop_and_return:
             # UI query only; inspect actual backend replies rather than fabricating history.
-            driver.press('历史记录', 'History', root='$(".sidebar")')
+            driver.press('历史', 'History', root='$(".sidebar")')
             driver.fill(['类型', 'Kind'], 'run')
             history_cursor = driver.js('return window.__multisiteQA.ipc.length;')
             driver.press('查询', 'Search', root='$(".history-filters")')
