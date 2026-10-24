@@ -48,7 +48,7 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self { max_steps: 24 }
+        Self { max_steps: 40 }
     }
 }
 

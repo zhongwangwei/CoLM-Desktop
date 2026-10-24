@@ -36748,3 +36748,10 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 小结果保持逐字节原样；MCP 与内置 agent 共用同一个 `result_text`，两条路径一起受益。
 - 验证：`cargo test -p colm-agent --lib tools::` **109/109**；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。完整 `cargo test -p colm-agent --lib --bins` 为 225 通过、1 失败，失败是既有的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat`（环境里 `kill` 被沙箱拒绝，报 `Operation not permitted`），与本次改动无关；单独重跑同样失败。
 - 没做：没在真实助手会话里再触发一次超长工具结果（要重建并重启应用）；上限没有调大。
+
+## 第 776 轮：单轮 agent 生成步数 24 → 40（2026-10-24）
+
+- 用户观察到长任务做到一半停。最近会话里有整轮正好 24 次模型生成（agent 默认 `max_steps`），最后一次只能总结；会话 token 上限 500 万未到，日志也没有 context-length 错误，所以先按用户决定把单轮生成上限从 **24 提到 40**。
+- 保留原有收尾机制：第 40 次生成仍不提供工具，只让模型总结；连续三轮相同只读调用仍会提前收尾。
+- 代价：长任务每轮最多多消耗 16 次生成，prompt 历史更长、费用和单请求上下文压力都增加；如果 40 步仍“搞到一半停”，下一步按用户要求加“本轮达到步数上限，未完成”的明确提示和“继续”入口。
+- 验证：`cargo test -p colm-agent --lib agent_tests::default_turn_budget_allows_forty_generations`；`cargo test -p colm-agent --lib tools::`；`cargo clippy -p colm-agent --all-targets -- -D warnings`；`cargo fmt --all --check`。

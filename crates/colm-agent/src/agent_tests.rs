@@ -618,6 +618,11 @@ fn final_generation_never_executes_unsolicited_tools_or_persists_control_prompts
 }
 
 #[test]
+fn default_turn_budget_allows_forty_generations() {
+    assert_eq!(Limits::default().max_steps, 40);
+}
+
+#[test]
 fn zero_step_budget_is_rejected_before_calling_the_provider() {
     let provider = Scripted::new(vec![]);
     let registry = Registry::with(vec![]);
