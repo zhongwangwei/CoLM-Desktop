@@ -37194,3 +37194,15 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **Phase 3 未覆盖**：mpiexec 端到端（tianhe 系统 mpiexec 的跨节点启动未验证，srun 已过）；`colm-cli remote-run` 端到端（需要包含 `colm-cli` 的 engine snapshot；本轮 tianhe 只重构建 `colm-rs`）。
 
 **结论**：多节点实现、单节点 N=1/2/4 与 tianhe 2 节点验收均已完成；Phase 4 的 history/重启/预处理测量已做；0.1° 全球 V3 受预处理数据（全球 landdata/mkinidata）阻塞，不是代码缺陷。剩余工作需单独安排一次全球预处理作业。
+
+## 第 802 轮：0.1° 全球预处理尝试——mesh 已生成，mksrfdata 受串行 raw-pixel 上限阻塞（2026-10-25）
+
+**已生成**：用 tianhe 30 arcsec `landtype`（43200×86400）按 24×24 细化单元聚合出 0.1° 全球 landmask：**2,211,055 / 6,480,000 个活跃格**；生成 `global_mesh_0p1.nc`（25 MB，`equal-lat-lon-landmask-v1`，global_nlon=3600、global_nlat=1800）。
+
+**mksrfdata 阻塞**：直接跑全球 mesh 报
+`assimilated pixel window exceeds the 400000000-pixel serial limit; use block-distributed preprocessing`。
+- 这个限制是 `crates/colm-srfdata/src/spatial.rs` 的 `MAX_SERIAL_RAW_PIXELS`；已加环境变量 `COLM_SRFDATA_MAX_RAW_PIXELS` 显式覆盖（默认仍 400M，避免普通交互/CI 误开），并用它启动全球作业（Slurm job 8762700，deimos 1 节点 64 核 / 12h，cnode2317）。
+- 5° tile 试验（mesh 窗口 + global block layout）成功：2500 elements / 5092 LCT patches，输出 12 MB，`block.nc` 是 72×36 全球布局、`pixel.nc` 是窗口 raw 轴；说明"按 tile 预处理 + 合并"可行，但合并 pixel/elmpixels 索引与 `pixel.nc` 需要额外工具。
+- 全球作业截至记录时运行约 25 min，单核 103% CPU、RSS 30 GB，尚无输出（mksrfdata 在 raw 格点同化阶段没有进度日志）。
+
+**下一步**：若全球串行作业能在 12h 内完成，直接得到全球 landdata；否则转为按 tile/band 的块并行预处理 + 合并（需要实现 pixel 索引重映射）。mkinidata 全球初场与 V3 尚未开始。

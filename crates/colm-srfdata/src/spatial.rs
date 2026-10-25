@@ -28,6 +28,16 @@ use crate::{
 /// 2500 万挡住了 3″ MERIT 流域网格（珠江 250 km² 集水区约 9400 万像元，64 GB 机器上
 /// 实测可行）；Fortran 端用分块 + MPI 读，没有对应的语义上限。
 const MAX_SERIAL_RAW_PIXELS: usize = 400_000_000;
+
+/// 串行预处理的 raw-pixel 上限。默认 400M 是为普通交互/CI 留的安全线；合成全球
+/// 0.1° 预处理（43200×86400 = 3.7G raw pixel）需要显式抬高，故允许环境变量覆盖。
+fn serial_raw_pixel_limit() -> usize {
+    std::env::var("COLM_SRFDATA_MAX_RAW_PIXELS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|&value: &usize| value > 0)
+        .unwrap_or(MAX_SERIAL_RAW_PIXELS)
+}
 const ALIGNMENT_EPSILON: f64 = 1e-9;
 
 /// The two spatial mesh encodings whose cell values can form a flat mesh.
@@ -547,9 +557,10 @@ pub fn build_catchment_spatial_topology_with_filter_and_raw_grids(
         .nlat
         .checked_mul(summary.nlon)
         .context("catchment source cell count overflows usize")?;
+    let limit = serial_raw_pixel_limit();
     ensure!(
-        source_cells <= MAX_SERIAL_RAW_PIXELS,
-        "catchment input has {source_cells} source cells; the serial topology path is limited to {MAX_SERIAL_RAW_PIXELS}. Use the block-distributed spatial path for this domain"
+        source_cells <= limit,
+        "catchment input has {source_cells} source cells; the serial topology path is limited to {limit}. Use the block-distributed spatial path for this domain, or raise COLM_SRFDATA_MAX_RAW_PIXELS"
     );
     let file = netcdf::open(path).with_context(|| format!("cannot open {}", path.display()))?;
     let grid = catchment_grid(&file, raw_grid)?;
@@ -5130,7 +5141,13 @@ fn assimilated_pixels(
     }
     ys.sort_by(f64::total_cmp);
     ys.dedup();
-    ensure!((xs.len() - 1).checked_mul(ys.len() - 1).is_some_and(|n| n <= MAX_SERIAL_RAW_PIXELS), "assimilated pixel window exceeds the {MAX_SERIAL_RAW_PIXELS}-pixel serial limit; use block-distributed preprocessing");
+    let limit = serial_raw_pixel_limit();
+    ensure!(
+        (xs.len() - 1)
+            .checked_mul(ys.len() - 1)
+            .is_some_and(|n| n <= limit),
+        "assimilated pixel window exceeds the {limit}-pixel serial limit; use block-distributed preprocessing or raise COLM_SRFDATA_MAX_RAW_PIXELS"
+    );
     let columns = xs
         .windows(2)
         .map(|cell| {
