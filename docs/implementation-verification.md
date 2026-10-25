@@ -37263,3 +37263,27 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - phase（root）：patches 396.5 s（64.4%）、forcing 172.9 s（28.1%）、lai/optimizer/restarts 40.9 s（6.6%）、other 5.6 s（0.9%）、state clone 0；
 - 8→16 节点主循环 1281→616 s（**2.08×**），每步 2.67→1.29 s；墙钟 29:56→16:26（1.82×）；
 - 16 节点下最终 restart 写盘仍是约 5.6 min（480 步主循环后）；下一步若要再压墙钟，应把 restart 写盘并行化（按块），而不是继续加节点。
+
+## 第 805 轮：8 节点河湖开启——全局 gridriver 初场、river gather 是瓶颈（tianhe，2026-10-26）
+
+**初场**：`mkinidata-rs global-case/case.nml --land-cover igbp --block e000_n05 --grid-river` 用全局
+`DEF_UnitCatchment_file = .../grid_routing_data_15min.nc` 生成
+`restart/2003-001-00000/hb_restart_gridriver_2003-001-00000_lc2005.nc`（1.7 MB），不再缺文件。
+
+**8 节点 48 步 profile（河湖开、history none）**：
+- 主循环 203–213 s，约 **4.2–4.4 s/步**；
+- `river gather` 28–80 s/rank（0.58–1.66 s/步），`river step` **5.24 s / 48 = 0.11 s/步**；
+  river 阶段几乎全是 all-gather 通信：默认 flood feedback 关闭时，原来每步仍 gather
+  `runoff + evap + infil` 三份 45.7 MB 数组；本轮改成只有 flood 开启才 gather 后两份，
+  主循环从 228.5 s 降到 210.4 s（约 8%）。
+- `patches` 75–133 s（各 rank 负载不均）；`forcing` 约 0.7 s/步。
+
+**尝试过的 root-only 河网（否决）**：只在 root 跑 `RiverModel::step`、worker 只发 runoff，
+48 步主循环 189.7 s（约 3.96 s/步，仅比复制方案快 ~10%）；但 hb64 河湖开 1 vs 2 node 的
+块旁车出现 **32 个 `hb_restart_hist_*` 文件不同**（worker 河网状态不再推进，`history_river_required`
+等旁车字段与 root 不一致），违反逐字节契约，已回退。保留的是“flood 关时不 gather evap/infil”
+这一不改变数值的优化；hb64 河湖开 1 vs 2 node 复验 **130 个 restart/旁车文件全部相同**。
+
+**结论**：8 节点河湖开启的主循环约 4.2–4.4 s/步；480 步（10 天）预计 ~35 min 主循环 + ~9 min
+最终 restart 写出 ≈ **44 min**。下一步要么把河网按 system 分到各 rank（去掉每步全局 broadcast，
+实现和逐位验证工作量较大），要么接受河湖开启的额外成本；最终 restart 并行化仍是另一条 8–9 min 的尾巴。

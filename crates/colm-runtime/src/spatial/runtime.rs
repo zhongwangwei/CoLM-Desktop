@@ -460,29 +460,13 @@ impl SpatialRuntime {
                                     .map_or(0.0, |output| output.view().total_runoff_mm_s())
                             })
                             .collect::<Vec<_>>();
-                        // `CoLMDRIVER` 把 `fevpg_fld`/`qinfl_fld` 写进 `flood_evap/infil_patch`。
-                        // 先保留上一步的值（被遮蔽的 patch 不写），再写本 rank 本步写过的 patch。
-                        let mut local_evap = vec![0.0; local_runoff.len()];
-                        let mut local_infil = vec![0.0; local_runoff.len()];
-                        if let Some(flood) = river.flood.as_ref() {
-                            let end = flood_offset + local_runoff.len();
-                            if end <= flood.evap_mm_s.len() {
-                                local_evap.copy_from_slice(&flood.evap_mm_s[flood_offset..end]);
-                                local_infil.copy_from_slice(&flood.infil_mm_s[flood_offset..end]);
-                            }
-                        }
-                        for (index, output) in outputs.iter().enumerate() {
-                            let Some(output) = output else { continue };
-                            let (evaporation, infiltration) = output.view().flood_exchange_mm_s();
-                            local_evap[index] = evaporation;
-                            local_infil[index] = infiltration;
-                        }
                         if let Some(exchange) = exchange.as_deref_mut() {
                             // 复制河网方案：各 rank 拿同一份全局输入、同一份全局河网状态，
                             // 跑同一个 `RiverModel::step`，所以结果与单进程逐位相同。
+                            //
+                            // 只有漫滩回馈开着才需要 `fevpg_fld`/`qinfl_fld`；默认 flood 关，
+                            // 原来仍每步 all-gather 两份 45.7 MB 数组，白付 2/3 通信。
                             let runoff = exchange.all_gather_f64(&local_runoff)?;
-                            let evaporation = exchange.all_gather_f64(&local_evap)?;
-                            let infiltration = exchange.all_gather_f64(&local_infil)?;
                             ensure!(
                                 runoff.len() == included.len(),
                                 "the gathered runoff has {} patches but the river filter has {}",
@@ -490,6 +474,26 @@ impl SpatialRuntime {
                                 included.len()
                             );
                             if let Some(flood) = river.flood.as_mut() {
+                                // `CoLMDRIVER` 把 `fevpg_fld`/`qinfl_fld` 写进
+                                // `flood_evap/infil_patch`。先保留上一步的值（被遮蔽的 patch
+                                // 不写），再写本 rank 本步写过的 patch。
+                                let mut local_evap = vec![0.0; local_runoff.len()];
+                                let mut local_infil = vec![0.0; local_runoff.len()];
+                                let end = flood_offset + local_runoff.len();
+                                if end <= flood.evap_mm_s.len() {
+                                    local_evap.copy_from_slice(&flood.evap_mm_s[flood_offset..end]);
+                                    local_infil
+                                        .copy_from_slice(&flood.infil_mm_s[flood_offset..end]);
+                                }
+                                for (index, output) in outputs.iter().enumerate() {
+                                    let Some(output) = output else { continue };
+                                    let (evaporation, infiltration) =
+                                        output.view().flood_exchange_mm_s();
+                                    local_evap[index] = evaporation;
+                                    local_infil[index] = infiltration;
+                                }
+                                let evaporation = exchange.all_gather_f64(&local_evap)?;
+                                let infiltration = exchange.all_gather_f64(&local_infil)?;
                                 ensure!(
                                     flood.evap_mm_s.len() == evaporation.len()
                                         && flood.infil_mm_s.len() == infiltration.len(),
@@ -498,6 +502,7 @@ impl SpatialRuntime {
                                 flood.evap_mm_s = evaporation;
                                 flood.infil_mm_s = infiltration;
                             }
+                            timer.mark("river gather");
                             river.step(
                                 &runoff,
                                 None,
@@ -506,6 +511,7 @@ impl SpatialRuntime {
                                 time_step_seconds,
                                 clock.end_time.year,
                             )?;
+                            timer.mark("river step");
                             ensure!(
                                 river.methane_flood.is_none(),
                                 "multi-process river methane flood is not supported yet"
@@ -558,6 +564,7 @@ impl SpatialRuntime {
                                     .map(|forcing| (forcing.prc, forcing.prl))
                                     .collect::<Vec<_>>()
                             });
+                            timer.mark("river gather");
                             river.step(
                                 &local_runoff,
                                 tracer_runoff.as_deref(),
@@ -566,6 +573,7 @@ impl SpatialRuntime {
                                 time_step_seconds,
                                 clock.end_time.year,
                             )?;
+                            timer.mark("river step");
                             // `ch4_reactive_publish_flood`/`_levee_flood`：汇流过就覆盖甲烷状态里的三个比例。
                             if let Some(flood) = river.methane_flood.as_mut() {
                                 if std::mem::take(&mut flood.published) {
