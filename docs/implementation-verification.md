@@ -37183,3 +37183,14 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 按 0.1° 全球约 2,300 个 5° 活跃块、每块分钟级固定成本估算，单进程预处理是小时级；Phase 4 的"按块并行"仍未实现/测量。要得到可信数字，需要带 `elmindex` 的完整网格与全球 rawdata 的 0.1° 块（hb probe 的 mesh 只有 landmask，不能作为 mksrfdata 输入）。
 
 **结论**：0.1° 就绪的剩余工作集中在：(1) history 聚合/块写进一步优化（当前 221 变量外推 77.7 s/记录）；(2) mksrfdata 按块并行的实现与全球测量；(3) V3 真实 0.1° 全球算例（缺预处理后的全球 landdata）。本轮不开始 V3。
+
+## 第 801 轮：V3 0.1° 全球算例的阻塞条件（2026-10-25）
+
+**已确认的数据条件**：
+- tianhe `~/SHARE01/CoLMdata/CoLMrawdata` 不是区域子集：`landtypes/landtype-igbp-modis-2005.nc` 是 43200×86400（30 arcsec）全球 landtype，`elevation.nc` 6.6 GB、`topography.nc`、`soil/`、`lai_15s_8day/` 等也在；从数据角度具备 0.1° 全球预处理的基础。
+- 但仓库/服务器上**没有** 0.1° 全球 `landdata` 与 `mkinidata` 初场；hb probe 的 mesh 只有 landmask、没有 mksrfdata 需要的 `elmindex`/可用网格。必须先生成全球 mesh（或 `elmindex`），再跑完整 mksrfdata + mkinidata，才能启动 V3（10 天片、8 节点、5.8M patch）。这是多小时到多天的预处理任务，超出本会话范围。
+- V3 还要求 8 节点 × 64 核、状态约 360–480 GB、每记录 history 约 8 GB；本会话可用于短作业，但不可能完成全球预处理 + 10 天片。
+
+**Phase 3 未覆盖**：mpiexec 端到端（tianhe 系统 mpiexec 的跨节点启动未验证，srun 已过）；`colm-cli remote-run` 端到端（需要包含 `colm-cli` 的 engine snapshot；本轮 tianhe 只重构建 `colm-rs`）。
+
+**结论**：多节点实现、单节点 N=1/2/4 与 tianhe 2 节点验收均已完成；Phase 4 的 history/重启/预处理测量已做；0.1° 全球 V3 受预处理数据（全球 landdata/mkinidata）阻塞，不是代码缺陷。剩余工作需单独安排一次全球预处理作业。
