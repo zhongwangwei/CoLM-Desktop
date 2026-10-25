@@ -2300,6 +2300,10 @@ fn run_spatial_segment(
     let mut last: Option<Vec<RestartSnapshot>> = None;
     // 复制河网时各 rank 的河道状态相同，但河道重启是一份全局文件：只让 root 写，避免并发写同一路径。
     let write_river_restart = spmd.is_none_or(|plan| plan.is_root());
+    // 每步都给 5.7M patch 建两份 Vec 快照（smp/hk，各 715k 个 heap 分配）是 0.1° 全球
+    // 跑不快的主因之一：普通步完全用不到快照，只有到期/最后一步要落盘。这里每步只维护
+    // 四个“会保持上一步值”的诊断量（`rst`/`rss`/`gs0sun`/`gs0sha`），到期时才建完整快照。
+    let mut diagnostics_carry = vec![DiagnosticsCarry::default(); states.len()];
     let steps = runtime.run(
         &templates,
         &mut states,
@@ -2307,84 +2311,102 @@ fn run_spatial_segment(
         history_writer.as_mut(),
         exchange,
         |steps, states, outputs, river, tracer_cache, lateral| {
-            let mut snapshots = states
-                .iter()
-                .zip(outputs)
-                .zip(steps)
-                .map(|((state, output), step)| {
-                    let Some(output) = output else {
-                        return Ok(RestartSnapshot::masked());
-                    };
-                    let mut snapshot =
-                        RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
-                    // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
-                    snapshot.lai_refreshed = step.clock.update_lai
-                        && !(segment.end == SegmentEnd::Lulcc && step.clock.end_time == config.end);
-                    Ok(snapshot)
-                })
-                .collect::<Result<Vec<_>>>()?;
-            if let Some(previous) = &last {
-                for (snapshot, previous) in snapshots.iter_mut().zip(previous) {
-                    snapshot.diagnostics.carry_forward(&previous.diagnostics);
+            for (carry, output) in diagnostics_carry.iter_mut().zip(outputs) {
+                if let Some(output) = output {
+                    carry.update(*output);
                 }
             }
             let step = steps[0];
-            if step.clock.write_restart && normalized_day_end(step.clock.end_time) != end_time {
-                write_block_restarts(
-                    &topology.blocks,
-                    &block_files,
-                    &periodic,
-                    step.clock.end_time,
-                    &templates,
-                    states,
-                    &snapshots,
-                    &history_restart,
-                    river,
-                    write_river_restart,
-                    tracer_cache,
-                    empty_land_tracer,
-                )?;
-                if let Some(river) = river {
-                    if write_river_restart {
-                        let label = date_label(normalized_day_end(step.clock.end_time));
-                        let path = river_restart_path(&out.join("restart"), name, &label, year);
-                        colm_runtime::river::restart::write_river_state(
-                            &path,
-                            &river.network,
-                            &river.state,
-                            river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
-                            rest_compression,
-                        )?;
-                        if let Some(tracers) = river.tracers.as_ref() {
-                            colm_runtime::river::restart::write_river_tracers(
-                                &path,
-                                &river.network,
-                                &mut tracers.clone(),
-                                rest_compression,
-                            )?;
-                        }
-                        if river.tracers.is_none() && river.empty_tracer_transaction {
-                            colm_runtime::river::restart::write_empty_river_tracers(&path)?;
-                        }
-                        if let Some(sediment) = river.sediment.as_ref() {
-                            sediment.write_restart(&path, &river.network, rest_compression)?;
-                        }
-                    }
-                }
-                if let Some(lateral) = lateral {
-                    write_catchment_restarts(
-                        lateral,
+            let need_snapshots = step.clock.write_restart || step.clock.end_time == config.end;
+            let snapshots = if need_snapshots {
+                Some(
+                    states
+                        .iter()
+                        .zip(outputs)
+                        .zip(steps)
+                        .zip(&diagnostics_carry)
+                        .map(|(((state, output), step), carry)| {
+                            let Some(output) = output else {
+                                return Ok(RestartSnapshot::masked());
+                            };
+                            let mut snapshot =
+                                RestartSnapshot::new(state, *output, step.surface_cosine_zenith)?;
+                            snapshot.diagnostics.stomatal_resistance = carry.stomatal_resistance;
+                            snapshot.diagnostics.soil_surface_resistance =
+                                carry.soil_surface_resistance;
+                            snapshot.diagnostics.gs0sun = carry.gs0sun;
+                            snapshot.diagnostics.gs0sha = carry.gs0sha;
+                            // LULCC 年末那一步没重读 LAI（`defer_lai_refresh_at`）。
+                            snapshot.lai_refreshed = step.clock.update_lai
+                                && !(segment.end == SegmentEnd::Lulcc
+                                    && step.clock.end_time == config.end);
+                            Ok(snapshot)
+                        })
+                        .collect::<Result<Vec<_>>>()?,
+                )
+            } else {
+                None
+            };
+            if let Some(snapshots) = &snapshots {
+                if step.clock.write_restart && normalized_day_end(step.clock.end_time) != end_time {
+                    write_block_restarts(
                         &topology.blocks,
+                        &block_files,
                         &periodic,
                         step.clock.end_time,
-                        name,
-                        year,
+                        &templates,
                         states,
-                        rest_compression,
+                        snapshots,
+                        &history_restart,
+                        river,
+                        write_river_restart,
+                        tracer_cache,
+                        empty_land_tracer,
                     )?;
+                    if let Some(river) = river {
+                        if write_river_restart {
+                            let label = date_label(normalized_day_end(step.clock.end_time));
+                            let path = river_restart_path(&out.join("restart"), name, &label, year);
+                            colm_runtime::river::restart::write_river_state(
+                                &path,
+                                &river.network,
+                                &river.state,
+                                river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
+                                rest_compression,
+                            )?;
+                            if let Some(tracers) = river.tracers.as_ref() {
+                                colm_runtime::river::restart::write_river_tracers(
+                                    &path,
+                                    &river.network,
+                                    &mut tracers.clone(),
+                                    rest_compression,
+                                )?;
+                            }
+                            if river.tracers.is_none() && river.empty_tracer_transaction {
+                                colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+                            }
+                            if let Some(sediment) = river.sediment.as_ref() {
+                                sediment.write_restart(&path, &river.network, rest_compression)?;
+                            }
+                        }
+                    }
+                    if let Some(lateral) = lateral {
+                        write_catchment_restarts(
+                            lateral,
+                            &topology.blocks,
+                            &periodic,
+                            step.clock.end_time,
+                            name,
+                            year,
+                            states,
+                            rest_compression,
+                        )?;
+                    }
                 }
             }
-            last = Some(snapshots);
+            if step.clock.end_time == config.end {
+                last = snapshots;
+            }
             Ok(())
         },
     )?;
@@ -5258,6 +5280,43 @@ fn mark_history_restart_with_river(
             .put_values(&vec![1.0; patches], ..)?,
     }
     Ok(())
+}
+
+/// 续跑里 `rst`/`rss`/`gs0sun`/`gs0sha` 的“保持上一次赋值”状态。
+///
+/// 上游这几个是 module 时间变量：某一步没赋值时保留上一步的值。以前每步都建完整
+/// [`RestartSnapshot`] 再 `carry_forward`，0.1° 全球时每步给 715k patch 各 clone 两条
+/// `Vec<f64>`，普通步纯属浪费。这里只留四个 `Option<f64>`，到期写重启时才建快照。
+#[derive(Debug, Clone, Copy, Default)]
+struct DiagnosticsCarry {
+    stomatal_resistance: Option<f64>,
+    soil_surface_resistance: Option<f64>,
+    gs0sun: Option<f64>,
+    gs0sha: Option<f64>,
+}
+
+impl DiagnosticsCarry {
+    fn update(&mut self, output: PatchStepOutput<'_>) {
+        match output {
+            PatchStepOutput::Soil(output) => {
+                let leaf = &output.energy.leaf;
+                self.stomatal_resistance = Some(leaf.canopy_stomatal_resistance_s_m);
+                self.soil_surface_resistance = Some(output.energy.soil_surface_resistance_s_m);
+                self.gs0sun = leaf
+                    .maximum_sunlit_leaf_conductance_umol_m2_s
+                    .or(self.gs0sun);
+                self.gs0sha = leaf
+                    .maximum_shaded_leaf_conductance_umol_m2_s
+                    .or(self.gs0sha);
+            }
+            PatchStepOutput::Urban(output) => {
+                self.stomatal_resistance = Some(output.thermal.rst);
+                self.soil_surface_resistance = Some(output.thermal.rss);
+            }
+            // 冰川/湖分支上游不碰这四个量，保持上一步值。
+            PatchStepOutput::Glacier(_) | PatchStepOutput::Lake(_) => {}
+        }
+    }
 }
 
 /// 续跑写出要的、状态里没有的那部分步输出。

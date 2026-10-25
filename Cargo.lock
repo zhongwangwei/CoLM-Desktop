@@ -343,6 +343,7 @@ dependencies = [
  "colm-numeric",
  "colm-srfdata",
  "netcdf",
+ "rayon",
 ]
 
 [[package]]

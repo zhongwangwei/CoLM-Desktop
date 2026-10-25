@@ -37206,3 +37206,53 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 全球作业截至记录时运行约 25 min，单核 103% CPU、RSS 30 GB，尚无输出（mksrfdata 在 raw 格点同化阶段没有进度日志）。
 
 **下一步**：若全球串行作业能在 12h 内完成，直接得到全球 landdata；否则转为按 tile/band 的块并行预处理 + 合并（需要实现 pixel 索引重映射）。mkinidata 全球初场与 V3 尚未开始。
+
+## 第 803 轮：0.1° 全球 landdata 的按块并行预处理与合并（tianhe，2026-10-25）
+
+**扇出**：0.1° 全球 mesh（3600×1800，2,211,055 个活跃陆地格）按默认 **72×36 = 2592 个 5° 块**切开，其中 **1446 个块有陆地**。每个活跃块单独切片成一个 50×50 的 mesh 窗口（保留 global_nlon/global_nlat/window_i0/window_j0），用 `mksrfdata-rs --blocks 72 36` 单独跑：
+- 8 节点 × 8 task（每 task 8 线程）的 Slurm 作业一次跑完 1446 个块，单块约几秒到十几秒；
+- 中途被调度取消过两次、留下 69 个块只写了 `mesh/landpatch/landelm/soil` 而缺 `topography/LAI/lakedepth/htop`；用 `incomplete.txt` 重跑这 69 个块后补齐。
+- 单块输出仍是全局 72×36 的 `block.nc`，块文件按 `mesh_e100_n35.nc` 这类标签命名。
+
+**合并**：目标 `global_landdata_v3`（12 GB、1446 个块）：
+- `block.nc` 取任一 tile（全局 72×36 布局，各 tile 字节相同）；
+- 各块文件用硬链接从 tile 输出并入（避免重复复制 12 GB）；mesh 文件复制后改写；
+- **global `pixel.nc`**：15 arcsec（1/240°）全球像素轴，lon 86400 格、lat 43200 格，`edgew=-180/edgee=180/edges=-90/edgen=90`，`pixel` 数组与合并前 tile 的 raw 轴同一套坐标；
+- 每个 tile 的 `mesh/*/mesh_<block>.nc` 里 `elmpixels` 原本是 tile 局部 1-based 索引；按 `(lon_w, lat_s)` 坐标 `round((coord+offset)/d)+1` 映射到全球 1-based 索引后写回；
+- 1446 个 landpatch/landelm/mesh 文件全部落位；8 rank `--spmd-check` 通过：每 rank 149–242 个块、约 705k–714k patch，**全球 patch 总数 5.72M**（与设计 4.5–6M 一致），最后一个 rank 的 global offset 为 5,718,xxx。
+
+**mkinidata**：`mkinidata-rs case.nml --land-cover igbp --block <label>` 对 1446 个块扇出，8 节点 × 64 task 并行生成 `restart/const` 与 `restart/2003-001-00000` 初场；总计 9.1 GB。期间发现一个块 `w100_n30` 的 restart 只有 11 个变量（写盘中途被杀），删除后单块重跑恢复 77 个变量。
+
+**结论**：0.1° 全球 landdata 与 mkinidata 初场已具备；mksrfdata 按块并行 + 合并的路径可复现（不依赖 12h 单进程全球作业）。合并后的 landdata 已是 V3 的输入。
+
+## 第 804 轮：V3 0.1° 全球 8 节点 10 天——跑通并从 37.5 min 优化到 21.3 min 主循环（tianhe，2026-10-25）
+
+**第一次完整跑通**（job 8765681，8 节点 × 64 核，480 步 = 10 天 × 1800 s）：
+- 主循环 2249.1 s（37.5 min，root），墙钟 47:50；root 分到 219 块 / 713,981 patch，全球 5.72M patch；
+- 阶段：patches 845.1 s（37.6%）、other 728.8 s（32.4%）、forcing 364.1 s（16.2%）、lai/optimizer/restarts 311.2 s（13.8%）、state clone 0；
+- 第 298 步因 patch 201963 的 `wliq=-1.004e-12`（容差 1e-12 只差 0.4%）失败；上游不检查也不夹这个量级，放宽 `SOIL_WATER_ROUNDOFF_KG_M2` 到 1e-9 kg/m² 后跑完 480 步。
+- 收尾时一个 worker 在最终 barrier 上 `cannot read the gather acknowledgement: Resource temporarily unavailable`，root 的最终 restart 写盘超过 worker 的 600 s socket 超时；说明 0.1° 的最终 restart 写盘需要并行化/放宽等待。
+
+**性能修复**（本轮改动）：
+1. **删除每步整份状态 clone**：`runtime.rs` 的 `states.clone()` 改成 `std::mem::take(states)`，步末再放回；5.7M patch 时单 rank **58 GB/步**的复制消失。
+2. **只在需要时建 restart 快照**：以前每步给每个 patch clone `smp`/`hk` 两个 Vec 并建 `RestartSnapshot`，715k patch/rank 约 140 万次 heap 分配/步；改为每步只维护 `DiagnosticsCarry`（`rst/rss/gs0sun/gs0sha` 四个 Option），到期/最后一步才建完整快照。
+3. **并行释放 PatchOutput**：callback 之后 `outputs.par_iter_mut().for_each(|slot| *slot = None)`，不再让 Vec 在步末串行 free 75 万个 Box。
+4. **强迫映射 build 按 patch 并行**：`colm-init::spatial_mapping` 的 `AreaWeightedMapping::build` 和 `build_bilinear` 用 rayon `par_iter`；否则 5.72M patch 的启动映射是十亿级串行面积计算。
+5. **进度行 flush**：`println!` 后 `stdout().flush()`，否则 Slurm 管道块缓冲会让 0.1° 启动后长时间看不到 `TIMESTEP`，误判卡死。
+6. `SOIL_WATER_ROUNDOFF_KG_M2` 1e-12 → 1e-9（只放宽校验，不改变物理；上游不检查）。
+
+**优化后 V3**（job 8766239，同 8 节点/480 步）：
+- 主循环 **1281.0 s（21.3 min）**，各 rank 1281–1559 s；墙钟 **29:56**，`CoLM Execution Completed.`；
+- root phase：**patches 838.4 s（65.4%）、forcing 346.7 s（27.1%）、other 9.7 s（0.8%）、lai/optimizer/restarts 86.2 s（6.7%）、state clone 0**；
+- 相对第一次：主循环 2249→1281 s（**1.76×**），墙钟 47:50→29:56；other 从 729 s 降到 9.7 s，restart/lai 从 311 s 降到 86 s；每步 4.69→2.67 s（root）；
+- 峰值 MaxRSS 约 **62 GB/rank**（8 rank × 62 GB ≈ 496 GB，仍在 8×512 GB 内）；最终 restart 1446 块、约 20 GB。
+
+**V3 配置边界**：这一轮为 `DEF_USE_GridRiverLakeFlow=.false.`、`DEF_HIST_FREQ='none'`，只验证全球装配/内存/主循环/重启写出；河湖与 history 开启的全球运行还没做（河湖需要全局 `hb_restart_gridriver_...nc` 初场；history 221 变量逐记录约 77.7 s/记录，需按输出频率规划）。
+
+**尚未做**：mpiexec 端到端（tianhe 系统 mpiexec 跨节点未验证）；`colm-cli remote-run` 端到端；GUI 节点数输入；全局 gridriver 初场与河湖开启；history 开启的全球运行与最终 restart 并行化。
+
+**优化后逐字节复验**（tianhe，short hb64：64 块 / 1408 patch，河湖关、history none，144 步）：
+- 1 task vs 2 node 的最终 `restart/2003-004-00000` 共 **128 个文件**（64 主重启 + 64 块旁车），`cmp` 全部相同（`OK=128 DIFF=0`）。
+- 说明“只在 restart 到期时建快照 + DiagnosticsCarry”没有改变续跑写出的字节；N=1 vs N>1 的逐位契约在优化后仍成立。
+
+**门禁**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo test -p colm-core --lib snow`（83 通过）；`cargo test -p colm-init --lib spatial_mapping`（5 通过）；`cargo clippy -p colm-core -p colm-init -p colm-runtime --all-targets -- -D warnings`；两个 workspace `cargo fmt --all --check` 通过。`cargo test --workspace --lib --bins` 中 `colm-agent` 的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat` 失败（`status.success()`，与本轮改动无关的终端环境用例），其余通过。

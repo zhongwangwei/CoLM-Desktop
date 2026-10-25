@@ -210,7 +210,10 @@ pub const MISSING: f64 = -1.0e36;
 /// `wliq - min(max(wliq-cap,0), max(wliq,0))` 在孔隙剩余容量接近 0 时会留下
 /// 1 ulp 量级的负残差（实测 bc 算例 -9e-54），之后被雪层合并、地表光学、地温等照常使用。
 /// 各模块的输入校验放行这个量级，真正的亏缺仍然拦下。
-pub(crate) const SOIL_WATER_ROUNDOFF_KG_M2: f64 = 1.0e-12;
+///
+/// 全球 0.1° V3 在 2003-01-07 的 patch 201963 上出现 -1.004e-12 kg m-2（wice 5.33），
+/// 比 1e-12 只多 0.4%，但足以让整步失败；上游不检查也不夹这个量级，因此放行到 1 ng m-2。
+pub(crate) const SOIL_WATER_ROUNDOFF_KG_M2: f64 = 1.0e-9;
 
 pub use albedo::{land_cover_soil_reflectance, LandCoverScheme, SoilReflectance};
 pub use atmosphere::{

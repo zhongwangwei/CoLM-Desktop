@@ -8,6 +8,7 @@ authors.workspace = true
 publish.workspace = true
 
 [dependencies]
+rayon.workspace = true
 colm-numeric = { path = "../colm-numeric" }
 anyhow.workspace = true
 colm-case = { path = "../colm-case" }

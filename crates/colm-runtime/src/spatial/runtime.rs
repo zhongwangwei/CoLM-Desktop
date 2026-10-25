@@ -301,6 +301,10 @@ impl SpatialRuntime {
                 timer.mark("other");
                 if !self.quiet_progress {
                     println!("\n{}", clock.progress_line(self.clock.spinup_repeats())?);
+                    // 写到管道时 Rust 的 stdout 仍可能块缓冲；步进进度必须逐行可见，
+                    // 否则 0.1° 全球启动后完全看不出是在跑还是卡住。
+                    use std::io::Write as _;
+                    let _ = std::io::stdout().flush();
                 }
                 let (month, _) = colm_core::month_day(clock.forcing_time)?;
                 let co2 =
@@ -350,7 +354,10 @@ impl SpatialRuntime {
                     })
                     .collect::<Vec<_>>();
                 timer.mark("forcing");
-                let mut next_states = states.clone();
+                // 每步都 clone 整份 patch 状态是 0.1° 全球的灾难：5.7M patch × ~81 KB，
+                // 单 rank 58 GB/步。patch 物理只改自己的状态，且上一步状态的最后使用
+                // （降尺度、initial_totals）都在这一行之前，所以直接 move 出来、步末放回。
+                let mut next_states = std::mem::take(states);
                 timer.mark("state clone");
                 // patch 之间在一步之内互不依赖：每个只读本步强迫与共享的只读数据、只改自己的状态，
                 // 所以用 rayon 并行推进（`RAYON_NUM_THREADS` 控制线程数，相当于 OpenMP）。`collect`
@@ -368,7 +375,7 @@ impl SpatialRuntime {
                     .map(|(template, state)| crate::initial_total_water_mm(template, state))
                     .collect::<Vec<_>>();
                 // 被遮蔽的 patch 没有输出（`None`）。
-                let outputs: Vec<Option<PatchOutput>> = templates
+                let mut outputs: Vec<Option<PatchOutput>> = templates
                     .par_iter()
                     .zip(next_states.par_iter_mut())
                     .zip(steps.par_iter())
@@ -747,6 +754,9 @@ impl SpatialRuntime {
                     cache.as_ref(),
                     self.catchment.as_ref(),
                 )?;
+                // 715k 个 PatchOutput 的 Box 若等 Vec 在步末析构，会串行 free 上秒级；
+                // 回调之后已经没人引用，直接并行释放（0.1° 全球实测 “other” 占 32%）。
+                outputs.par_iter_mut().for_each(|slot| *slot = None);
                 timer.mark("lai, optimizer, restarts");
                 crate::tracer::clamp_restart_dust_after_step(
                     steps[0].clock.write_restart,
