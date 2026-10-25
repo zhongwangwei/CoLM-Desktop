@@ -896,6 +896,183 @@ enum Accumulated {
     Column { sum: Vec<f64>, count: usize },
 }
 
+impl HistoryAccumulator {
+    /// 把一个区间累加状态编码成字节，供多进程在写记录时收给 root。
+    ///
+    /// 只编码已累加完的一步（`overrides` 必须已经清空）；字段全部按 `BTreeMap`/`BTreeSet`
+    /// 的排序输出，因此同一状态每次编码得到的字节相同。
+    pub fn encode(&self) -> Result<Vec<u8>> {
+        ensure!(
+            self.overrides.is_none(),
+            "cannot export a history accumulator with pending overrides"
+        );
+        let mut out = Vec::new();
+        out.push(1u8); // 格式版本
+        write_u64(&mut out, self.steps as u64);
+        write_u64(&mut out, self.sums.len() as u64);
+        for (name, accumulated) in &self.sums {
+            write_str(&mut out, name);
+            match accumulated {
+                Accumulated::Scalar { sum, count } => {
+                    out.push(0);
+                    write_u64(&mut out, *count as u64);
+                    write_f64(&mut out, *sum);
+                }
+                Accumulated::Column { sum, count } => {
+                    out.push(1);
+                    write_u64(&mut out, *count as u64);
+                    write_u64(&mut out, sum.len() as u64);
+                    for value in sum {
+                        write_f64(&mut out, *value);
+                    }
+                }
+            }
+        }
+        write_string_set(&mut out, &self.filtered);
+        write_string_set(&mut out, &self.offered);
+        Ok(out)
+    }
+
+    /// [`HistoryAccumulator::encode`] 的逆操作；坏数据返回错误，不 panic。
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let mut reader = ByteReader::new(bytes);
+        let version = reader.u8()?;
+        ensure!(version == 1, "unknown history accumulator format {version}");
+        let steps = usize::try_from(reader.u64()?)
+            .context("history accumulator step count does not fit in usize")?;
+        let sums_len = usize::try_from(reader.u64()?)
+            .context("history accumulator variable count does not fit in usize")?;
+        let mut sums = std::collections::BTreeMap::new();
+        for _ in 0..sums_len {
+            let name = reader.string()?;
+            let kind = reader.u8()?;
+            let count = usize::try_from(reader.u64()?)
+                .context("history accumulator count does not fit in usize")?;
+            let accumulated = match kind {
+                0 => Accumulated::Scalar {
+                    sum: reader.f64()?,
+                    count,
+                },
+                1 => {
+                    let len = usize::try_from(reader.u64()?)
+                        .context("history accumulator column length does not fit in usize")?;
+                    let mut sum = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        sum.push(reader.f64()?);
+                    }
+                    Accumulated::Column { sum, count }
+                }
+                other => anyhow::bail!("unknown history accumulator kind {other}"),
+            };
+            sums.insert(name, accumulated);
+        }
+        let filtered = reader.string_set()?;
+        let offered = reader.string_set()?;
+        ensure!(
+            reader.finished(),
+            "history accumulator payload has trailing bytes"
+        );
+        Ok(Self {
+            sums,
+            steps,
+            filtered,
+            offered,
+            overrides: None,
+        })
+    }
+}
+
+fn write_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(out: &mut Vec<u8>, value: u32) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_f64(out: &mut Vec<u8>, value: f64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_str(out: &mut Vec<u8>, value: &str) {
+    write_u32(out, value.len() as u32);
+    out.extend_from_slice(value.as_bytes());
+}
+
+fn write_string_set(out: &mut Vec<u8>, values: &std::collections::BTreeSet<String>) {
+    write_u64(out, values.len() as u64);
+    for value in values {
+        write_str(out, value);
+    }
+}
+
+struct ByteReader<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> ByteReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8]> {
+        let end = self
+            .offset
+            .checked_add(count)
+            .context("byte offset overflow")?;
+        ensure!(
+            end <= self.bytes.len(),
+            "history accumulator payload is truncated"
+        );
+        let slice = &self.bytes[self.offset..end];
+        self.offset = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take(1)?[0])
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(
+            self.take(4)?.try_into().expect("4 bytes"),
+        ))
+    }
+
+    fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_le_bytes(
+            self.take(8)?.try_into().expect("8 bytes"),
+        ))
+    }
+
+    fn string(&mut self) -> Result<String> {
+        let len = usize::try_from(self.u32()?).context("string length does not fit in usize")?;
+        let bytes = self.take(len)?;
+        String::from_utf8(bytes.to_vec()).context("history accumulator name is not UTF-8")
+    }
+
+    fn string_set(&mut self) -> Result<std::collections::BTreeSet<String>> {
+        let len = usize::try_from(self.u64()?)
+            .context("history accumulator set length does not fit in usize")?;
+        let mut set = std::collections::BTreeSet::new();
+        for _ in 0..len {
+            set.insert(self.string()?);
+        }
+        Ok(set)
+    }
+
+    fn finished(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+}
+
 /// 按自身有效步数平均的历史量：`f_alb`（`nac_dt`）与本地正午的 8 个短波量（`nac_ln`）。
 const OWN_COUNT_VARIABLES: [&str; 9] = [
     "alb", "solvdln", "solviln", "solndln", "solniln", "srvdln", "srviln", "srndln", "srniln",
@@ -3046,6 +3223,13 @@ pub struct HistorySession {
     pending_overrides: Option<HistoryOverrides>,
     /// 本步末是否更新续跑旁车用的窗口快照（[`Self::set_snapshot`]）；缺省每步都拍。
     snapshot_this_step: bool,
+    /// 多进程 history：本 rank 只累加、不写文件；到记录时刻把累加器导出给 root。
+    external: bool,
+    /// 最近一次到期的原始累加器（[`Self::take_export`] 取走）。
+    exported: Option<(ScheduledRecord, Vec<HistoryAccumulator>)>,
+    /// 网格 history 逐条记录写（`prepare_buffer(records = 1)` + `netcdf::append`），
+    /// 不再整组缓冲。默认关，空间 history 与多进程 root writer 显式打开。
+    stream: bool,
 }
 
 /// 本进程的 `DEF_hist_vars` 开关状态。上游它是 namelist 模块里的全局量，读一次、整个运行不变；
@@ -3353,6 +3537,9 @@ impl HistorySession {
             selection: SELECTION.get().cloned(),
             pending_overrides: None,
             snapshot_this_step: true,
+            external: false,
+            exported: None,
+            stream: false,
         })
     }
 
@@ -3360,6 +3547,74 @@ impl HistorySession {
     /// 只在写续跑时被读）。
     pub fn set_snapshot(&mut self, needed: bool) {
         self.snapshot_this_step = needed;
+    }
+
+    /// 多进程 history：本地只累加、不写文件；记录到期时把原始累加器留给调用方导出。
+    ///
+    /// 每步仍走 `push_jobs`，所以累加值与单进程逐位相同；只是 `finish_step` 不再平均/写盘，
+    /// 而是 `take_export` 出来的原始状态交给 root，由 root 的全局会话写出。
+    pub fn with_external_writer(mut self) -> Self {
+        self.external = true;
+        self
+    }
+
+    /// 网格 history 改为逐条记录追加写：每条记录只装一个 [`HistoryBuffers`]，内存是一条记录
+    /// 而不是整组（0.1° 全球 8 GB/记录 vs 240 GB/月）。文件布局仍是同一个 `<stem>_hist_<suffix>.nc`。
+    pub fn with_streaming(mut self) -> Self {
+        self.stream = true;
+        self
+    }
+
+    /// 条件版 [`Self::with_streaming`]：示踪物窗口还没有流式支持，那里保持整组写。
+    pub fn with_streaming_if(mut self, streaming: bool) -> Self {
+        self.stream = streaming;
+        self
+    }
+
+    /// 取走最近一次到期的原始累加器（每个本地 patch 一份）。只在外部写模式下有值。
+    pub fn take_export(&mut self) -> Option<(ScheduledRecord, Vec<HistoryAccumulator>)> {
+        self.exported.take()
+    }
+
+    /// 多进程 root 的全局写会话从本地累加会话继承"文件里声明哪些条件列"的开关。
+    ///
+    /// 这些开关由第一次 `push_*` 现场设定（`plant_hydraulics`、`variably_saturated`、城市、
+    /// BGC、动态湿地/湖）；全局写会话不推进 patch，所以要在写记录前复制一份，否则 schema
+    /// 会按缺省值少列/多列（实测 hb：单进程有 `f_qlayer`/`f_vegwp`，2 rank 的对不上）。
+    pub fn copy_schema_flags_from(&mut self, other: &Self) {
+        self.plant_hydraulics = other.plant_hydraulics;
+        self.variably_saturated = other.variably_saturated;
+        self.urban = other.urban;
+        self.bgc = other.bgc;
+        self.dynamic_wetland = other.dynamic_wetland;
+        self.dynamic_lake = other.dynamic_lake;
+        self.tracer_time_step_seconds = other.tracer_time_step_seconds;
+    }
+
+    /// root 的全局会话：装上从各 rank 收来的原始累加器（按全局 patch 顺序），随后
+    /// [`HistorySession::write_due_record`] 平均并写出。
+    pub fn install_accumulators(&mut self, accumulators: Vec<HistoryAccumulator>) -> Result<()> {
+        ensure!(
+            !self.external,
+            "the external-writer session cannot be a writer"
+        );
+        ensure!(
+            accumulators.len() == self.accumulators.len(),
+            "installed {} accumulators into a session with {} patches",
+            accumulators.len(),
+            self.accumulators.len()
+        );
+        self.accumulators = accumulators;
+        Ok(())
+    }
+
+    /// root 的全局会话：写出当前到期记录（调用前必须 [`Self::install_accumulators`]）。
+    pub fn write_due_record(&mut self, end: CalendarTime) -> Result<Option<PathBuf>> {
+        ensure!(
+            !self.external,
+            "the external-writer session cannot be a writer"
+        );
+        self.finish_step(end)
     }
 
     /// 下一个 `push_*` 累加时替换/补交的值（`CatchLateralFlow`，见 [`HistoryOverrides`]）。
@@ -4765,6 +5020,81 @@ impl HistorySession {
         pushed
     }
 
+    /// 为一个记录分组准备 [`HistoryBuffers`]：按会话开关声明本层能负责的变量。
+    ///
+    /// 整组写法和逐条记录写法共用；后者传 `records = 1`。
+    fn prepare_buffer(
+        &self,
+        means: &[HistoryAccumulator],
+        records: usize,
+    ) -> Result<HistoryBuffers> {
+        let mut buffer = HistoryBuffers::new(self.dimensions, self.site, records);
+        if let Some(selection) = &self.selection {
+            buffer = buffer.with_selection(std::sync::Arc::clone(selection));
+        }
+        if let Some(grid) = &self.grid {
+            buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
+            if !self.gridded_names.is_empty() {
+                buffer.declare_gridded(&self.gridded_names)?;
+            }
+        }
+        if let Some(vector) = &self.vector {
+            // 上游 `write_history_variable_urb_2d` 的 `Vector` 支自己标了 TODO：把城市长度（`numurban`）的
+            // 累加数组当 patch 长度的向量交给 `aggregate_to_vector_and_write_2d`（越界读、也不除 `nac`），
+            // 没有确定的结果可对齐。
+            ensure!(
+                !self.urban,
+                "vector history with urban variables has no defined upstream result (the Vector \
+                 branch of write_history_variable_urb_2d passes urban-length arrays as patch \
+                 vectors; upstream marks it TODO); use gridded history"
+            );
+            buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
+            buffer.declare_patch_fields(&self.patch_field_names)?;
+            for (name, long_name, units, values) in &self.vector_statics {
+                buffer.add_vector_static(name, long_name, units, values.clone())?;
+            }
+        }
+        // 声明本层能负责的变量；写出的文件因此只包含它们。
+        declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
+        if self.urban {
+            buffer.declare(&URBAN_VARIABLES)?;
+        }
+        if let Some(switches) = self.bgc {
+            buffer.declare(&bgc_history_variables(switches))?;
+        }
+        // `MOD_Hist.F90:4518`/`:4533`：动态湖写 `f_dz_lake`、不写 `f_lake_deficit`。
+        if self.dynamic_lake {
+            buffer.declare(&["dz_lake"])?;
+            buffer.undeclare("lake_deficit");
+        }
+        if self.tracer_time_step_seconds.is_some() {
+            buffer.enable_windows();
+        }
+        // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`（`MOD_Hist.F90:538`）。
+        // `DEF_USE_OZONESTRESS`：`f_o3uptakesun/sha`（`MOD_Hist.F90:545-553`）；`f_xy_ozone` 写在
+        // `IF (DEF_USE_BGC)` 段里（`:2357-2362`），不开 BGC 时只累加进旁车。
+        if means
+            .iter()
+            .any(|means| means.offered.contains("o3uptakesun"))
+        {
+            buffer.declare(&["o3uptakesun", "o3uptakesha"])?;
+            if self.bgc.is_some() {
+                buffer.declare(&["xy_ozone"])?;
+            }
+        }
+        if means.iter().any(|means| means.offered.contains("xy_hpbl")) {
+            buffer.declare(&["xy_hpbl"])?;
+        }
+        // `CatchLateralFlow`（`MOD_Hist.F90:670-722`）：写 `f_xwsur`/`f_xwsub`/`f_fldarea`，
+        // 不写 `f_rsur_se`/`f_rsur_ie`。
+        if means.iter().any(|means| means.offered.contains("fldarea")) {
+            buffer.declare(&["xwsur", "xwsub", "fldarea"])?;
+            buffer.undeclare("rsur_se");
+            buffer.undeclare("rsur_ie");
+        }
+        Ok(buffer)
+    }
+
     /// 全部 patch 累加完之后：到期就写记录。
     fn finish_step(&mut self, end: CalendarTime) -> Result<Option<PathBuf>> {
         // 2. 没到期就到此为止。
@@ -4783,6 +5113,24 @@ impl HistorySession {
             return Ok(None);
         }
 
+        if self.external {
+            // 多进程：本 rank 不写文件，只把原始累加器导出给 root。
+            if !record.natural_boundary {
+                self.raw_at_end = Some(
+                    self.accumulators
+                        .iter()
+                        .map(HistoryAccumulator::window)
+                        .collect(),
+                );
+            }
+            let accumulators = self.accumulators.iter_mut().map(std::mem::take).collect();
+            self.cursor += 1;
+            self.staged.clear();
+            self.staged_patch.clear();
+            self.exported = Some((record, accumulators));
+            return Ok(None);
+        }
+
         // 3. 到期：取平均、写记录、把累加器清零（`mem::take` 就是清零）。
         //    运行终点不在自然边界上时，上游先把原始窗口存进旁车再写这一条。
         if !record.natural_boundary {
@@ -4795,77 +5143,83 @@ impl HistorySession {
         }
         let means: Vec<HistoryAccumulator> =
             self.accumulators.iter_mut().map(std::mem::take).collect();
+        if self.stream && self.vector.is_none() {
+            ensure!(
+                self.grid.is_some(),
+                "streaming history needs a grid; enable streaming only for gridded history"
+            );
+            ensure!(
+                self.tracer_time_step_seconds.is_none(),
+                "streaming history with tracer windows is not supported yet"
+            );
+            let total = self.record_count(&record.suffix);
+            let mut buffer = self.prepare_buffer(&means, 1)?;
+            buffer.set_time(
+                0,
+                i32::try_from(record.label_minutes).with_context(|| {
+                    format!(
+                        "the history label {} does not fit an i32",
+                        record.label_minutes
+                    )
+                })?,
+            )?;
+            let forcing_mask = self.forcing_mask.clone();
+            let split = means_are_split(self.accumulators.len());
+            let crop = self.bgc.is_some_and(|bgc| bgc.crop);
+            let dynamic_wetland = self.dynamic_wetland;
+            let writes = {
+                use rayon::prelude::*;
+                let buffer: &HistoryBuffers = &buffer;
+                means
+                    .par_iter()
+                    .enumerate()
+                    .map(
+                        |(patch, means)| -> Result<Option<colm_hist::history::PatchOps>> {
+                            let masked = forcing_mask
+                                .as_ref()
+                                .is_some_and(|mask| !mask.get(patch).copied().unwrap_or(true));
+                            if masked && !(crop && means.steps > 0) {
+                                return Ok(None);
+                            }
+                            let mut writes = buffer.patch_writes(0, split.then_some(patch))?;
+                            if masked {
+                                means.write_masked_crop_means(&mut writes, 0)?;
+                            } else {
+                                means.write_means(&mut writes, 0)?;
+                                if dynamic_wetland {
+                                    means.write_dynamic_wetland_storage(&mut writes, 0)?;
+                                }
+                            }
+                            Ok(Some(writes.finish()))
+                        },
+                    )
+                    .collect::<Vec<_>>()
+            };
+            for writes in writes {
+                if let Some(writes) = writes? {
+                    buffer.apply(writes)?;
+                }
+            }
+            buffer.select_patch(None)?;
+            for (name, values) in self.staged.drain(..) {
+                buffer.set_gridded(name, 0, &values)?;
+            }
+            for (name, values, included) in self.staged_patch.drain(..) {
+                buffer.set_patch_field(name, 0, &values, &included)?;
+            }
+            let path = self
+                .directory
+                .join(format!("{}_hist_{}.nc", self.stem, record.suffix));
+            std::fs::create_dir_all(&self.directory)
+                .with_context(|| format!("cannot create {}", self.directory.display()))?;
+            buffer.write_gridded_record(&path, total, record.record)?;
+            self.cursor += 1;
+            return Ok((record.record + 1 == total).then_some(path));
+        }
         let mut written = None;
         if self.open.as_ref().map(|(suffix, _)| suffix) != Some(&record.suffix) {
             written = self.finish_main()?.pop();
-            let mut buffer = HistoryBuffers::new(
-                self.dimensions,
-                self.site,
-                self.record_count(&record.suffix),
-            );
-            if let Some(selection) = &self.selection {
-                buffer = buffer.with_selection(std::sync::Arc::clone(selection));
-            }
-            if let Some(grid) = &self.grid {
-                buffer = buffer.with_grid(std::sync::Arc::clone(grid))?;
-                if !self.gridded_names.is_empty() {
-                    buffer.declare_gridded(&self.gridded_names)?;
-                }
-            }
-            if let Some(vector) = &self.vector {
-                // 上游 `write_history_variable_urb_2d` 的 `Vector` 支自己标了 TODO：把城市长度（`numurban`）的
-                // 累加数组当 patch 长度的向量交给 `aggregate_to_vector_and_write_2d`（越界读、也不除 `nac`），
-                // 没有确定的结果可对齐。
-                ensure!(
-                    !self.urban,
-                    "vector history with urban variables has no defined upstream result (the Vector \
-                     branch of write_history_variable_urb_2d passes urban-length arrays as patch \
-                     vectors; upstream marks it TODO); use gridded history"
-                );
-                buffer = buffer.with_vector(std::sync::Arc::clone(vector))?;
-                buffer.declare_patch_fields(&self.patch_field_names)?;
-                for (name, long_name, units, values) in &self.vector_statics {
-                    buffer.add_vector_static(name, long_name, units, values.clone())?;
-                }
-            }
-            // 声明本层能负责的变量；写出的文件因此只包含它们。
-            declare_lct_variables(&mut buffer, self.plant_hydraulics, self.variably_saturated)?;
-            if self.urban {
-                buffer.declare(&URBAN_VARIABLES)?;
-            }
-            if let Some(switches) = self.bgc {
-                buffer.declare(&bgc_history_variables(switches))?;
-            }
-            // `MOD_Hist.F90:4518`/`:4533`：动态湖写 `f_dz_lake`、不写 `f_lake_deficit`。
-            if self.dynamic_lake {
-                buffer.declare(&["dz_lake"])?;
-                buffer.undeclare("lake_deficit");
-            }
-            if self.tracer_time_step_seconds.is_some() {
-                buffer.enable_windows();
-            }
-            // `DEF_USE_CBL_HEIGHT`：`acc1d (forc_hpbl, a_hpbl)` → `f_xy_hpbl`（`MOD_Hist.F90:538`）。
-            // `DEF_USE_OZONESTRESS`：`f_o3uptakesun/sha`（`MOD_Hist.F90:545-553`）；`f_xy_ozone` 写在
-            // `IF (DEF_USE_BGC)` 段里（`:2357-2362`），不开 BGC 时只累加进旁车。
-            if means
-                .iter()
-                .any(|means| means.offered.contains("o3uptakesun"))
-            {
-                buffer.declare(&["o3uptakesun", "o3uptakesha"])?;
-                if self.bgc.is_some() {
-                    buffer.declare(&["xy_ozone"])?;
-                }
-            }
-            if means.iter().any(|means| means.offered.contains("xy_hpbl")) {
-                buffer.declare(&["xy_hpbl"])?;
-            }
-            // `CatchLateralFlow`（`MOD_Hist.F90:670-722`）：写 `f_xwsur`/`f_xwsub`/`f_fldarea`，
-            // 不写 `f_rsur_se`/`f_rsur_ie`。
-            if means.iter().any(|means| means.offered.contains("fldarea")) {
-                buffer.declare(&["xwsur", "xwsub", "fldarea"])?;
-                buffer.undeclare("rsur_se");
-                buffer.undeclare("rsur_ie");
-            }
+            let buffer = self.prepare_buffer(&means, self.record_count(&record.suffix))?;
             self.open = Some((record.suffix.clone(), buffer));
         }
         let forcing_mask = self.forcing_mask.clone();

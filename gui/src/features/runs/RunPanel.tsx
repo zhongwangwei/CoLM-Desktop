@@ -503,7 +503,9 @@ export default function RunPanel({
           bilingual('请选择与当前模型匹配的编译配置', 'Select a compatible build configuration'),
         );
       const nums = [
-        engine === 'rust' ? '1' : ranks,
+        // 本机 Rust 只能单进程；远程 Rust 由 srun/mpiexec 启动，rank 数交给启动器。
+        // 站点批量按节点打包（一个站点一个 CPU），每个算例仍是单进程。
+        engine === 'rust' && (!host || siteBatch) ? '1' : ranks,
         // 本机单点固定 1 线程；从服务器切回本机时，线程框藏起来了，但里面可能还是服务器的值。
         siteBatch || localSiteNow ? '1' : threads,
         siteBatch ? String(stationConcurrency) : workers,
@@ -1153,6 +1155,7 @@ export default function RunPanel({
     autoWorkers.current = next;
     if (next !== workers) setWorkers(next);
   }, [localSiteNow, batchCount, localCores, workers]);
+  const showRanks = engine === 'fortran' || (engine === 'rust' && !!host && !siteBatch);
   const fields: UiField[] = [
     {
       id: 'run-host',
@@ -1170,8 +1173,17 @@ export default function RunPanel({
       set: changeHost,
     },
     ...[
-      ...(engine === 'fortran'
-        ? [['ranks', t('每个算例的 MPI 进程数', 'MPI ranks per case'), ranks, setRanks] as const]
+      ...(showRanks
+        ? [
+            [
+              'ranks',
+              engine === 'rust'
+                ? t('每个算例的进程数', 'Processes per case')
+                : t('每个算例的 MPI 进程数', 'MPI ranks per case'),
+              ranks,
+              setRanks,
+            ] as const,
+          ]
         : []),
       ...((engine === 'rust' || preprocessors === 'rust') && !siteBatch && !localSiteNow
         ? [['threads', t('每个算例的线程数', 'Threads per case'), threads, setThreads] as const]

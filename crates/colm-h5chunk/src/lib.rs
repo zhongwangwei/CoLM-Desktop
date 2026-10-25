@@ -86,6 +86,42 @@ impl ChunkWriter {
         Ok(())
     }
 
+    /// 写一条记录的数据：`packed` 按「一条记录」打包（形状第一维为 1），这里把数据集
+    /// 的时间维扩到 `total_records`，再把各块 origin 的第一维加 `record`。
+    ///
+    /// 逐记录写 history 时用：块形状第一维本来就是 1，先扩时间维再按记录偏移写块，
+    /// 避免每条记录走一遍 HDF5 的串行 deflate。
+    pub fn write_record(
+        &mut self,
+        packed: &PackedVariable,
+        record: usize,
+        total_records: usize,
+    ) -> Result<()> {
+        ensure!(
+            record < total_records,
+            "record {record} is outside a group of {total_records}"
+        );
+        let dataset = ffi::open_dataset(&self.file, &packed.name)?;
+        let mut shape = packed.shape.clone();
+        ensure!(
+            !shape.is_empty() && shape[0] == 1,
+            "{}: a record payload must have shape[0] == 1",
+            packed.name
+        );
+        shape[0] = total_records;
+        ffi::set_extent(&dataset, &shape)
+            .with_context(|| format!("cannot size {}", packed.name))?;
+        for (origin, bytes) in &packed.chunks {
+            let mut origin = origin.clone();
+            ensure!(!origin.is_empty(), "{}: empty chunk origin", packed.name);
+            origin[0] += record;
+            ffi::write_chunk(&dataset, &origin, bytes).with_context(|| {
+                format!("cannot write a chunk of {} at {origin:?}", packed.name)
+            })?;
+        }
+        Ok(())
+    }
+
     pub fn close(self) -> Result<()> {
         ffi::close_file(self.file)
     }

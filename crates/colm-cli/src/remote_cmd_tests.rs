@@ -180,7 +180,7 @@ fn opts(args: &[&str]) -> Opts {
 }
 
 #[test]
-fn the_run_plan_defaults_to_rust_and_only_fortran_may_use_mpi() {
+fn the_run_plan_defaults_to_rust_and_supports_remote_ranks_for_both_engines() {
     let plan = RunPlan::from_opts(&opts(&[])).unwrap();
     assert_eq!(
         (plan.engine.as_str(), plan.ranks, plan.nodes),
@@ -192,10 +192,8 @@ fn the_run_plan_defaults_to_rust_and_only_fortran_may_use_mpi() {
     ]))
     .unwrap();
     assert_eq!((plan.ranks, plan.nodes), (8, 2));
-    assert!(
-        RunPlan::from_opts(&opts(&["--ranks", "4"])).is_err(),
-        "the Rust engine uses threads"
-    );
+    let rust = RunPlan::from_opts(&opts(&["--ranks", "4"])).unwrap();
+    assert_eq!((rust.engine.as_str(), rust.ranks), ("rust", 4));
     assert!(RunPlan::from_opts(&opts(&["--engine", "fortran", "--ranks", "0"])).is_err());
     assert!(RunPlan::from_opts(&opts(&["--engine", "cobol"])).is_err());
     assert!(RunPlan::from_opts(&opts(&["--launcher", "ssh"])).is_err());
@@ -2010,4 +2008,39 @@ fn kernel_manifest_is_written_without_an_empty_window() {
         "a changed manifest is replaced by rename, not rewritten"
     );
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn rust_multi_process_gets_a_launcher_and_node_args() {
+    let body = |args: &[&str], scheduler| {
+        let plan = RunPlan::from_opts(&opts(args)).unwrap();
+        job_body(
+            "/r",
+            "eng",
+            "/r/cases/c",
+            "/r/kernels/k",
+            4,
+            &plan,
+            scheduler,
+            &opts(args),
+        )
+        .unwrap()
+    };
+    let slurm = body(
+        &["--engine", "rust", "--ranks", "4", "--nodes", "2"],
+        Scheduler::Slurm,
+    );
+    assert!(slurm.contains("--ranks 4"), "{slurm}");
+    assert!(slurm.contains("export COLM_MPIEXEC=srun\n"), "{slurm}");
+    assert!(
+        slurm.contains(
+            "COLM_MPIEXEC_ARGS=\"--nodes=2 --ntasks-per-node=2 --distribution=block:block\""
+        ),
+        "{slurm}"
+    );
+    let bare = body(&["--engine", "rust", "--ranks", "4"], Scheduler::Bare);
+    assert!(bare.contains("export COLM_MPIEXEC=mpiexec"), "{bare}");
+    // 一个进程仍走原来的直接执行，不产生启动器变量。
+    let single = body(&["--engine", "rust"], Scheduler::Slurm);
+    assert!(!single.contains("COLM_MPIEXEC"), "{single}");
 }

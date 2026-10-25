@@ -133,7 +133,7 @@ usage:
                    # --stage 只运行指定阶段；与 --force 合用时强制重跑该阶段
                    # --record-input-fingerprints 1 记录文件指纹（非驱动输入/程序/输出；默认关闭；驱动数据始终跳过）
                    # --stream 把子进程每一行原样转发出来（GUI 用；终端下嫌吵）
-                   # --ranks 使用 MPI 启动；进程角色由内核决定，默认 1
+                   # --ranks >1：Fortran 内核用 MPI 启动；Rust 引擎只在远程由 COLM_MPIEXEC（srun/mpiexec）启动，默认 1
                    # --preprocessors 选 mksrfdata/mkinidata 的实现，--engine 选 colm 主循环；
                    # 两者默认都是 rust。Rust 主循环覆盖 SinglePoint + LCT 土面 patch，
                    # 跑不了的算例会在第一段之前被预检拒绝，并提示改用 --engine fortran
@@ -2483,10 +2483,14 @@ fn preflight_spinup_replay(case: &Path, engine: ModelEngine, cli: &Path) -> Resu
 /// mksrfdata/mkinidata 跑完才在第三段失败 —— 用 rawdata 时那是几分钟的白等。
 /// patchtype（湖/冰川/城市）要读重启才知道，预检挡不住，仍由 `colm-rs` 在第三段报。
 fn preflight_rust_model(case_nml: &Path, kernel: &Kernel, ranks: usize) -> Result<()> {
-    ensure!(
-        ranks == 1,
-        "the Rust model engine runs one process; --ranks {ranks} needs --engine fortran"
-    );
+    if ranks > 1 {
+        // Rust 引擎不链接 MPI：多进程只在远程/集群里由 `COLM_MPIEXEC`（srun/mpiexec）启动，
+        // 本地直接 `colm-cli run --ranks>1` 没有启动器，会退化成 N 个各跑一份的进程。
+        ensure!(
+            std::env::var_os("COLM_MPIEXEC").is_some(),
+            "the Rust model engine runs one process locally; --ranks {ranks} needs a remote launcher              (COLM_MPIEXEC, e.g. srun) or --engine fortran"
+        );
+    }
     // 空间算例：Rust 主循环接 GRIDBASED、UNSTRUCTURED（`GridRiverLakeFlow` 默认汇流）与 CATCHMENT
     // （`CatchLateralFlow`）内核。各自未移植的选项由 `colm-rs --preflight` 挡。
     if colm_case::is_spatial_case(case_nml)? {
@@ -3484,7 +3488,10 @@ fn run_case(
     if ranks == 0 {
         bail!("--ranks must be at least 1");
     }
-    if ranks > 1 && !kernel.manifest.macros.iter().any(|m| m == "USEMPI") {
+    if ranks > 1
+        && engine == ModelEngine::Fortran
+        && !kernel.manifest.macros.iter().any(|m| m == "USEMPI")
+    {
         bail!("--ranks > 1 requires a USEMPI kernel");
     }
     if !quiet {
@@ -3695,25 +3702,41 @@ fn run_case(
             }
         };
         let r = if let (Stage::Colm, Some(land_cover)) = (*stage, rust_model_land_cover) {
-            colm_kernel::run_stage_streaming_with_executable(
-                &kernel,
-                *stage,
-                &rust_model_executable()?,
-                &layout.case_nml(),
-                case,
-                artifacts,
-                &[
-                    vec![
-                        "--land-cover".to_owned(),
-                        land_cover.to_owned(),
-                        "--case-outputs".to_owned(),
-                    ],
-                    rust_model_crop_arguments(&kernel),
-                    rust_model_hybrid_arguments(&layout.case_nml()),
-                ]
-                .concat(),
-                &mut forward,
-            )?
+            let executable = rust_model_executable()?;
+            let arguments = [
+                vec![
+                    "--land-cover".to_owned(),
+                    land_cover.to_owned(),
+                    "--case-outputs".to_owned(),
+                ],
+                rust_model_crop_arguments(&kernel),
+                rust_model_hybrid_arguments(&layout.case_nml()),
+            ]
+            .concat();
+            if ranks > 1 {
+                colm_kernel::run_stage_streaming_external_ranks(
+                    &kernel,
+                    *stage,
+                    &executable,
+                    &layout.case_nml(),
+                    case,
+                    artifacts,
+                    &arguments,
+                    ranks,
+                    &mut forward,
+                )?
+            } else {
+                colm_kernel::run_stage_streaming_with_executable(
+                    &kernel,
+                    *stage,
+                    &executable,
+                    &layout.case_nml(),
+                    case,
+                    artifacts,
+                    &arguments,
+                    &mut forward,
+                )?
+            }
         } else if preprocessors == PreprocessorMode::Rust
             && matches!(stage, Stage::MkSrfData | Stage::MkIniData)
         {

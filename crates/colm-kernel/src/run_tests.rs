@@ -4,19 +4,19 @@ use super::*;
 fn mpi_uses_plain_spmd_launch_without_process_roles() {
     let exe = Path::new("/kernel/colm.x");
     let (program, args) =
-        launch_command(exe, Path::new("/case/case.nml"), &[], 4, true).expect("mpi");
+        launch_command(exe, Path::new("/case/case.nml"), &[], 4, true, false).expect("mpi");
     assert_eq!(program, PathBuf::from("mpiexec"));
     assert_eq!(args, ["-n", "4", "/kernel/colm.x", "/case/case.nml"]);
     assert!(!args
         .iter()
         .any(|arg| matches!(arg.as_str(), "master" | "io" | "worker")));
     let (program, args) =
-        launch_command(exe, Path::new("/case/case.nml"), &[], 1, false).expect("serial");
+        launch_command(exe, Path::new("/case/case.nml"), &[], 1, false, false).expect("serial");
     assert_eq!(program, exe);
     assert_eq!(args, ["/case/case.nml"]);
 
-    let (program, args) =
-        launch_command(exe, Path::new("/case/case.nml"), &[], 1, true).expect("one MPI rank");
+    let (program, args) = launch_command(exe, Path::new("/case/case.nml"), &[], 1, true, false)
+        .expect("one MPI rank");
     assert_eq!(program, PathBuf::from("mpiexec"));
     assert_eq!(args, ["-n", "1", "/kernel/colm.x", "/case/case.nml"]);
 }
@@ -52,7 +52,7 @@ fn mpi_prefers_the_runtime_bundled_beside_kernel_presets() {
 
     let exe = preset.join(if cfg!(windows) { "colm.exe" } else { "colm.x" });
     let (program, args) =
-        launch_command(&exe, Path::new("case.nml"), &[], 2, true).expect("mpi launch");
+        launch_command(&exe, Path::new("case.nml"), &[], 2, true, false).expect("mpi launch");
     assert_eq!(program, launcher);
     assert_eq!(args[0..2], ["-n", "2"]);
 
@@ -385,4 +385,29 @@ fn an_observed_stage_reports_the_child_it_actually_started() {
     assert_eq!(seen.len(), 1);
     assert_eq!(seen[0].0.to_string(), printed, "the child's own PID");
     assert_eq!(seen[0].1, k.dir.join(crate::manifest::program_file("colm")));
+}
+
+#[test]
+fn the_external_launcher_runs_a_plain_executable_on_every_rank() {
+    let exe = Path::new("/kernel/colm-rs");
+    let (program, args) = launch_command(
+        exe,
+        Path::new("/case/case.nml"),
+        &["--case-outputs".to_owned()],
+        3,
+        false,
+        true,
+    )
+    .expect("external launch");
+    assert_eq!(program, PathBuf::from("mpiexec"));
+    assert_eq!(
+        args,
+        [
+            "-n",
+            "3",
+            "/kernel/colm-rs",
+            "/case/case.nml",
+            "--case-outputs"
+        ]
+    );
 }

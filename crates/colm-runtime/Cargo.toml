@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 colm-numeric = { path = "../colm-numeric" }
+# 多进程传输层（docs/design-multi-node.md §5）：只依赖 std，不要 MPI。
+colm-spmd = { path = "../colm-spmd" }
 anyhow.workspace = true
 colm-core = { path = "../colm-core" }
 colm-forcing = { path = "../colm-forcing" }

@@ -1078,10 +1078,6 @@ impl RunPlan {
             .context("--ranks must be a whole number")?
             .unwrap_or(1);
         ensure!(ranks >= 1, "--ranks must be at least 1");
-        ensure!(
-            engine == "fortran" || ranks == 1,
-            "--ranks only applies to --engine fortran (the Rust engine uses threads)"
-        );
         let nodes: u32 = opts
             .get("--nodes")
             .map(|v| v.parse())
@@ -1526,9 +1522,26 @@ fn job_body(
         _ => scheduler == Scheduler::Slurm,
     };
     let launcher = if plan.ranks > 1 && srun {
-        "export COLM_MPIEXEC=srun\n"
+        if plan.engine == "rust" {
+            // Rust 引擎不链接 MPI：远程多进程由 srun 启动，rank 数从 SLURM_* 读。
+            let nodes = if plan.nodes > 0 {
+                plan.nodes
+            } else {
+                plan.ranks
+            };
+            let per_node = plan.ranks.div_ceil(nodes.max(1)).max(1);
+            format!(
+                "export COLM_MPIEXEC=srun\nexport COLM_MPIEXEC_ARGS=\"--nodes={} --ntasks-per-node={} --distribution=block:block\"\n",
+                nodes.max(1),
+                per_node
+            )
+        } else {
+            "export COLM_MPIEXEC=srun\n".to_owned()
+        }
+    } else if plan.ranks > 1 && plan.engine == "rust" {
+        "export COLM_MPIEXEC=mpiexec\n".to_owned()
     } else {
-        ""
+        String::new()
     };
     if let Some(stage) = opts.get("--stage") {
         ensure!(

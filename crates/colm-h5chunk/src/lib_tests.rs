@@ -231,3 +231,43 @@ fn bench_parallel_chunks_against_put_values() {
     std::fs::remove_file(&serial).unwrap();
     std::fs::remove_file(&parallel).unwrap();
 }
+
+#[test]
+fn records_can_be_written_one_at_a_time_after_sizing_the_time_extent() {
+    let dir = std::env::temp_dir().join(format!("colm-h5chunk-records-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("records.nc");
+    let records = 3usize;
+    let lon = 4usize;
+    let shape = [records, lon];
+    let chunk = chunk_shape(&shape);
+    {
+        let mut file = netcdf::create(&path).unwrap();
+        file.add_unlimited_dimension("time").unwrap();
+        file.add_dimension("lon", lon).unwrap();
+        let mut variable = file.add_variable::<f64>("f_x", &["time", "lon"]).unwrap();
+        variable.set_chunking(&chunk).unwrap();
+        variable.set_compression(1, false).unwrap();
+        file.close().unwrap();
+    }
+    let mut writer = ChunkWriter::open(&path).unwrap();
+    for record in 0..records {
+        let data = vec![record as f64; lon];
+        let packed = pack_f64("f_x", &[1, lon], &[1, chunk[1]], &data, 1).unwrap();
+        writer.write_record(&packed, record, records).unwrap();
+    }
+    writer.close().unwrap();
+    let file = netcdf::open(&path).unwrap();
+    assert_eq!(file.dimension("time").unwrap().len(), records);
+    let read: Vec<f64> = file
+        .variable("f_x")
+        .unwrap()
+        .get_values(netcdf::Extents::All)
+        .unwrap();
+    let expected: Vec<f64> = (0..records)
+        .flat_map(|record| vec![record as f64; lon])
+        .collect();
+    assert_eq!(read, expected);
+    drop(file);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

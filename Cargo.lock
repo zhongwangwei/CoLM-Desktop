@@ -424,6 +424,7 @@ dependencies = [
  "colm-namelist",
  "colm-numeric",
  "colm-schema",
+ "colm-spmd",
  "netcdf",
  "rayon",
  "serde",
@@ -433,6 +434,13 @@ dependencies = [
 [[package]]
 name = "colm-schema"
 version = "0.3.0-beta.5"
+
+[[package]]
+name = "colm-spmd"
+version = "0.3.0-beta.5"
+dependencies = [
+ "anyhow",
+]
 
 [[package]]
 name = "colm-srfdata"

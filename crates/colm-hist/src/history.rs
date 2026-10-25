@@ -1275,9 +1275,11 @@ impl HistoryBuffers {
             set_history_compression(&mut variable, grid.compress_level)?;
             if grid.compress_level > 0 {
                 // 压缩的量走并行直写块（见下面数据段），块形状必须在定义时定下。
-                variable.set_chunking(&colm_h5chunk::chunk_shape(
-                    &self.gridded_shape(entry, grid)?,
-                ))?;
+                variable.set_chunking(&colm_h5chunk::chunk_shape(&self.gridded_shape(
+                    entry,
+                    grid,
+                    self.records,
+                )?))?;
             }
             if let Some(long_name) = entry.long_name {
                 variable.put_attribute("long_name", long_name)?;
@@ -1352,7 +1354,7 @@ impl HistoryBuffers {
                             .iter()
                             .find(|entry| entry.name == name)
                             .expect("declare() only stores names found in the gate table");
-                        let shape = self.gridded_shape(entry, grid)?;
+                        let shape = self.gridded_shape(entry, grid, self.records)?;
                         colm_h5chunk::pack_f64(
                             &file_variable_name(name),
                             &shape,
@@ -1371,9 +1373,354 @@ impl HistoryBuffers {
         Ok(())
     }
 
+    /// 网格 history 的**逐条记录**写法：本缓冲必须只有一条记录（`records == 1`）。
+    ///
+    /// 首条记录建文件、写维度/坐标/静态场与变量定义；之后每条记录 `netcdf::append`，
+    /// 按时间片把本记录的网格值写进同一个文件。内存因此只占一条记录，而不是整个分组
+    /// （0.1° 全球一条记录约 8 GB、月度分组约 240 GB；见设计稿 §2.3）。
+    ///
+    /// 与 [`Self::write_gridded`] 的整组写法相比，数据变量的块形状按 `total_records` 定，
+    /// 时间片下标是 `record`；压缩级别仍由 `grid.compress_level` 决定。整组写法不经过这里，
+    /// 单进程/多 rank 只共用同一条流式路径。
+    pub fn write_gridded_record(
+        &self,
+        path: impl AsRef<Path>,
+        total_records: usize,
+        record: usize,
+    ) -> Result<()> {
+        let path = path.as_ref();
+        let grid = self
+            .grid
+            .as_deref()
+            .context("streaming history needs a history grid")?;
+        ensure!(
+            self.records == 1,
+            "a streaming history buffer must hold exactly one record"
+        );
+        ensure!(
+            record < total_records,
+            "record {record} is outside a group of {total_records}"
+        );
+        if record == 0 {
+            self.create_gridded_stream(path, grid, total_records)?;
+        }
+        if grid.compress_level > 0 {
+            // 压缩路径：数据变量逐条并行压缩后按记录直写块；time/河道量仍走 netcdf 追加。
+            self.append_compressed_gridded_record(path, grid, total_records, record)?;
+            return Ok(());
+        }
+        let mut file = netcdf::append(path)
+            .with_context(|| format!("cannot reopen {} for a history record", path.display()))?;
+        self.append_gridded_record(&mut file, grid, record)?;
+        file.close()?;
+        Ok(())
+    }
+
+    /// 压缩 history 的单条记录：每个已声明变量按「一条记录」打包（块时间长为 1），
+    /// `ChunkWriter::write_record` 扩时间维并把块写到 `record` 的时间片；并行 deflate 不再串行。
+    fn append_compressed_gridded_record(
+        &self,
+        path: &Path,
+        grid: &HistoryGrid,
+        total_records: usize,
+        record: usize,
+    ) -> Result<()> {
+        let (nlat, nlon) = (grid.lat.len(), grid.lon.len());
+        let mut writer = colm_h5chunk::ChunkWriter::open(path)
+            .with_context(|| format!("cannot reopen {} for record chunks", path.display()))?;
+        // 一个变量在 0.1° 全球只有十来个时间片块；只按变量内部并行只能用到十几个核。
+        // 按批把多个量一起打包（每个量内部仍并行），让 64 核真正跑满，再串行写盘。
+        const BATCH: usize = 8;
+        use rayon::prelude::*;
+        let declared = self.declared().collect::<Vec<_>>();
+        for batch in declared.chunks(BATCH) {
+            let packed = batch
+                .par_iter()
+                .map(|&(name, slot)| -> Result<colm_h5chunk::PackedVariable> {
+                    let entry = VARS
+                        .iter()
+                        .find(|entry| entry.name == name)
+                        .expect("declare() only stores names found in the gate table");
+                    let mut shape = vec![1usize];
+                    for dimension in entry.dims {
+                        shape.push(self.dims.layer_length(dimension).with_context(|| {
+                            format!("{name} has unsized dimension {dimension}")
+                        })?);
+                    }
+                    shape.push(nlat);
+                    shape.push(nlon);
+                    let mut full_shape = shape.clone();
+                    full_shape[0] = total_records;
+                    let chunk = colm_h5chunk::chunk_shape(&full_shape);
+                    let data = self.aggregate_to_grid(slot, grid);
+                    colm_h5chunk::pack_f64(
+                        &file_variable_name(name),
+                        &shape,
+                        &chunk,
+                        &data,
+                        grid.compress_level,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            for packed in &packed {
+                writer.write_record(packed, record, total_records)?;
+            }
+        }
+        writer.close()?;
+
+        // netcdf 只负责 i32 的 time 和少量未压缩的河道量；数据变量已直写块。
+        let mut file = netcdf::append(path)
+            .with_context(|| format!("cannot reopen {} for a history record", path.display()))?;
+        let time_slice = netcdf::Extent::SliceCount {
+            start: record,
+            count: 1,
+            stride: 1,
+        };
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(&self.times, [time_slice])?;
+        if let Some(windows) = &self.windows {
+            let window = windows
+                .first()
+                .context("a streaming window buffer holds no window")?;
+            file.variable_mut("history_window_seconds")
+                .context("history_window_seconds disappeared")?
+                .put_values(&[window.0], [time_slice])?;
+            file.variable_mut("history_window_end_minutes")
+                .context("history_window_end_minutes disappeared")?
+                .put_values(&[window.1], [time_slice])?;
+        }
+        for (name, values) in &self.gridded {
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(
+                    values,
+                    [
+                        time_slice,
+                        netcdf::Extent::SliceCount {
+                            start: 0,
+                            count: nlat,
+                            stride: 1,
+                        },
+                        netcdf::Extent::SliceCount {
+                            start: 0,
+                            count: nlon,
+                            stride: 1,
+                        },
+                    ],
+                )?;
+        }
+        file.close()?;
+        Ok(())
+    }
+
+    fn create_gridded_stream(
+        &self,
+        path: &Path,
+        grid: &HistoryGrid,
+        total_records: usize,
+    ) -> Result<()> {
+        let mut file =
+            netcdf::create(path).with_context(|| format!("cannot create {}", path.display()))?;
+        file.add_dimension("sensor", self.dims.sensor)?;
+        file.add_unlimited_dimension("time")?;
+        self.define_grid(&mut file, grid)?;
+        {
+            let mut time = file.add_variable::<i32>("time", &["time"])?;
+            time.put_attribute("long_name", "time")?;
+            time.put_attribute("units", TIME_UNITS)?;
+        }
+        self.define_windows(&mut file)?;
+        for (name, long_name, units, _) in &grid.statics {
+            let mut variable = file.add_variable::<f64>(name, &["lat", "lon"])?;
+            set_history_compression(&mut variable, STATIC_COMPRESS_LEVEL)?;
+            variable.put_attribute("long_name", long_name.as_str())?;
+            variable.put_attribute("units", units.as_str())?;
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        for (name, long_name, units, _) in &grid.first_record_statics {
+            let mut variable = file.add_variable::<f64>(name, &["time", "lat", "lon"])?;
+            set_history_compression(&mut variable, STATIC_COMPRESS_LEVEL)?;
+            variable.put_attribute("long_name", long_name.as_str())?;
+            variable.put_attribute("units", units.as_str())?;
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        for name in self.order.keys() {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .expect("declare() only stores names found in the gate table");
+            let mut dimensions = Vec::with_capacity(3 + entry.dims.len());
+            dimensions.push("time");
+            dimensions.extend_from_slice(entry.dims);
+            dimensions.push("lat");
+            dimensions.push("lon");
+            let mut variable =
+                file.add_variable::<f64>(&file_variable_name(entry.name), &dimensions)?;
+            set_history_compression(&mut variable, grid.compress_level)?;
+            if grid.compress_level > 0 {
+                variable.set_chunking(&colm_h5chunk::chunk_shape(&self.gridded_shape(
+                    entry,
+                    grid,
+                    total_records,
+                )?))?;
+            }
+            if let Some(long_name) = entry.long_name {
+                variable.put_attribute("long_name", long_name)?;
+            }
+            if let Some(units) = entry.units {
+                variable.put_attribute("units", units)?;
+            }
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        for name in self.gridded.keys() {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == *name)
+                .expect("declare_gridded() only stores names found in the gate table");
+            let mut variable =
+                file.add_variable::<f64>(&file_variable_name(entry.name), &["time", "lat", "lon"])?;
+            set_history_compression(&mut variable, grid.compress_level)?;
+            if let Some(long_name) = entry.long_name {
+                variable.put_attribute("long_name", long_name)?;
+            }
+            if let Some(units) = entry.units {
+                variable.put_attribute("units", units)?;
+            }
+            variable.put_attribute("missing_value", MISSING_VALUE)?;
+        }
+        self.put_grid_coordinates(&mut file, grid)?;
+        for (name, _, _, values) in &grid.statics {
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(values, netcdf::Extents::All)?;
+        }
+        for (name, _, _, values) in &grid.first_record_statics {
+            let (nlat, nlon) = (grid.lat.len(), grid.lon.len());
+            file.variable_mut(name)
+                .with_context(|| format!("{name} disappeared after definition"))?
+                .put_values(values, [0..1, 0..nlat, 0..nlon])?;
+        }
+        file.close()?;
+        Ok(())
+    }
+
+    fn append_gridded_record(
+        &self,
+        file: &mut netcdf::FileMut,
+        grid: &HistoryGrid,
+        record: usize,
+    ) -> Result<()> {
+        let time_slice = netcdf::Extent::SliceCount {
+            start: record,
+            count: 1,
+            stride: 1,
+        };
+        file.variable_mut("time")
+            .context("time disappeared after definition")?
+            .put_values(
+                &self.times,
+                [netcdf::Extent::SliceCount {
+                    start: record,
+                    count: 1,
+                    stride: 1,
+                }],
+            )?;
+        if let Some(windows) = &self.windows {
+            let window = windows
+                .first()
+                .context("a streaming window buffer holds no window")?;
+            file.variable_mut("history_window_seconds")
+                .context("history_window_seconds disappeared")?
+                .put_values(
+                    &[window.0],
+                    [netcdf::Extent::SliceCount {
+                        start: record,
+                        count: 1,
+                        stride: 1,
+                    }],
+                )?;
+            file.variable_mut("history_window_end_minutes")
+                .context("history_window_end_minutes disappeared")?
+                .put_values(
+                    &[window.1],
+                    [netcdf::Extent::SliceCount {
+                        start: record,
+                        count: 1,
+                        stride: 1,
+                    }],
+                )?;
+        }
+        let (nlat, nlon) = (grid.lat.len(), grid.lon.len());
+        for (name, slot) in self.declared() {
+            let entry = VARS
+                .iter()
+                .find(|entry| entry.name == name)
+                .expect("declare() only stores names found in the gate table");
+            let mut extents = Vec::with_capacity(2 + entry.dims.len());
+            extents.push(time_slice);
+            for dimension in entry.dims {
+                extents.push(netcdf::Extent::SliceCount {
+                    start: 0,
+                    count: self
+                        .dims
+                        .layer_length(dimension)
+                        .with_context(|| format!("{name} has unsized dimension {dimension}"))?,
+                    stride: 1,
+                });
+            }
+            extents.push(netcdf::Extent::SliceCount {
+                start: 0,
+                count: nlat,
+                stride: 1,
+            });
+            extents.push(netcdf::Extent::SliceCount {
+                start: 0,
+                count: nlon,
+                stride: 1,
+            });
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(&self.aggregate_to_grid(slot, grid), extents)?;
+        }
+        for (name, values) in &self.gridded {
+            let file_name = file_variable_name(name);
+            file.variable_mut(&file_name)
+                .with_context(|| format!("{file_name} disappeared after definition"))?
+                .put_values(
+                    values,
+                    [
+                        netcdf::Extent::SliceCount {
+                            start: record,
+                            count: 1,
+                            stride: 1,
+                        },
+                        netcdf::Extent::SliceCount {
+                            start: 0,
+                            count: nlat,
+                            stride: 1,
+                        },
+                        netcdf::Extent::SliceCount {
+                            start: 0,
+                            count: nlon,
+                            stride: 1,
+                        },
+                    ],
+                )?;
+        }
+        Ok(())
+    }
+
     /// 网格文件里一个 history 量的形状：`(time, 层维…, lat, lon)`。
-    fn gridded_shape(&self, entry: &crate::Var, grid: &HistoryGrid) -> Result<Vec<usize>> {
-        let mut shape = vec![self.records];
+    fn gridded_shape(
+        &self,
+        entry: &crate::Var,
+        grid: &HistoryGrid,
+        records: usize,
+    ) -> Result<Vec<usize>> {
+        let mut shape = vec![records];
         for dimension in entry.dims {
             shape.push(
                 self.dims

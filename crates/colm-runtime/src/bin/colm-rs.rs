@@ -5,7 +5,12 @@
 //!         [--patch N] [--history-dir <dir>] [--history-stem <stem>] \
 //!         [--allow-unported-branches]
 //! colm-rs <case-dir|case.nml> --land-cover igbp|usgs --case-outputs [--preflight]
+//! colm-rs <case-dir|case.nml> --land-cover igbp|usgs --case-outputs --spmd-check \
+//!         [--rank I --ranks N]
 //! ```
+//!
+//! `--spmd-check` 是多进程启动期的只读自检：建连、比对分片表、读本 rank 的块拓扑，
+//! 不推进模型也不写输出；`--rank/--ranks` 缺省由 `srun`/`mpiexec` 环境给出。
 //!
 //! `--case-outputs` 是 `colm-cli run --engine rust` 用的形态：重启、history 目录与
 //! 前缀都按 Fortran `colm.x` 在算例目录里的落点推出（见 [`CaseOutputs`]），于是下游的
@@ -97,6 +102,14 @@ fn run() -> Result<()> {
         return run_spatial(&arguments, &layout, &name, &case_nml, hybrid.as_ref());
     }
 
+    ensure!(
+        !arguments.spmd_check,
+        "--spmd-check is for spatial cases only"
+    );
+    ensure!(
+        arguments.rank.is_none() && arguments.ranks.is_none(),
+        "--rank/--ranks are for spatial multi-process runs only"
+    );
     let config = read_point_runtime_config(&case_nml)?;
     let document = read_document(&case_nml)?;
     let mut physics = land_physics_parameters(
@@ -500,6 +513,80 @@ fn point_downscaling(
     )
 }
 
+/// 只有在显式 `--ranks N`（N>1）或启动器环境 size>1 时才返回 `Some`。
+///
+/// 单进程路径必须完全不受影响：没有 `srun`/`mpiexec` 环境时这里不解析任何东西。
+fn requested_rank_info(arguments: &Arguments) -> Result<Option<colm_spmd::RankInfo>> {
+    if let Some(size) = arguments.ranks {
+        ensure!(size >= 1, "--ranks must be at least 1");
+        if size == 1 {
+            ensure!(
+                arguments.rank == Some(0),
+                "--ranks 1 needs --rank 0 (or omit both)"
+            );
+            return Ok(None);
+        }
+        return Ok(Some(colm_spmd::RankInfo::resolve(
+            arguments.rank,
+            arguments.ranks,
+        )?));
+    }
+    let size = ["SLURM_NTASKS", "OMPI_COMM_WORLD_SIZE", "PMI_SIZE"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok()?.parse::<usize>().ok());
+    match size {
+        Some(size) if size > 1 => Ok(Some(colm_spmd::RankInfo::resolve(None, None)?)),
+        _ => Ok(None),
+    }
+}
+
+/// 多进程启动：读块清单、分片、建连并让 root 比对分片表。失败在任何装配之前暴露。
+/// 多进程启动用 rendezvous 文件：默认 `out/.colm-spmd/endpoint`，但在 Slurm 下带 job/step 号，
+/// 避免上一次 `--spmd-check` 留下的 endpoint 在 root 覆盖之前被 worker 读到（实测 tianhe 两次
+/// srun 落在不同节点时，worker 读到旧节点名，连接超时 600 s）。`COLM_SPMD_RENDEZVOUS` 可显式覆盖。
+fn spmd_rendezvous_path(out: &Path, env: impl Fn(&str) -> Option<String>) -> PathBuf {
+    if let Some(path) = env("COLM_SPMD_RENDEZVOUS").filter(|path| !path.trim().is_empty()) {
+        return PathBuf::from(path);
+    }
+    let mut name = String::from("endpoint");
+    if let Some(job) = env("SLURM_JOB_ID").filter(|value| !value.trim().is_empty()) {
+        name.push_str("-job");
+        name.extend(job.chars().filter(char::is_ascii_alphanumeric));
+        if let Some(step) = env("SLURM_STEP_ID")
+            .or_else(|| env("SLURM_STEPID"))
+            .filter(|value| !value.trim().is_empty())
+        {
+            name.push_str("-step");
+            name.extend(step.chars().filter(char::is_ascii_alphanumeric));
+        }
+    }
+    out.join(".colm-spmd").join(name)
+}
+
+/// 多进程启动：rank 数来自 `--rank/--ranks` 或启动器环境；root 写 rendezvous 文件，worker 轮询后
+/// 连上，所有 rank 用同一份块清单校验启动计划（见 [`colm_runtime::spmd::SpmdSession`]）。
+fn open_spatial_spmd(
+    arguments: &Arguments,
+    out: &Path,
+    year: i64,
+) -> Result<Option<colm_runtime::spmd::SpmdSession>> {
+    let Some(info) = requested_rank_info(arguments)? else {
+        return Ok(None);
+    };
+    let year = i32::try_from(year).context("DEF_LC_YEAR does not fit an i32")?;
+    let landdata = out.join("landdata");
+    let rendezvous = spmd_rendezvous_path(out, |name| std::env::var(name).ok());
+    let session = colm_runtime::spmd::SpmdSession::open(
+        &landdata,
+        year,
+        Some(info.rank()),
+        Some(info.size()),
+        &rendezvous,
+        None,
+    )?;
+    Ok(Some(session))
+}
+
 /// 空间算例（`GRIDBASED`）：patch 拓扑来自 `landdata`，强迫是网格强迫经面积加权映射到每个 patch。
 ///
 /// 物理与单点完全相同（同一个 `advance_patch`）；history 写成经纬网格（`HistForm = 'Gridded'`），
@@ -650,6 +737,42 @@ fn run_spatial(
     } else {
         integer_field(&document, "DEF_LC_YEAR")?
     };
+    if arguments.spmd_check {
+        ensure!(
+            !lulcc,
+            "--spmd-check does not support DEF_USE_LULCC (the block layout changes per year)"
+        );
+        return run_spmd_check(arguments, &out, year);
+    }
+    // 多进程：显式 `--ranks N`（N>1）或启动器环境 size>1 才进入；单进程路径不建连、不读块清单。
+    let spmd_session = open_spatial_spmd(arguments, &out, year)?;
+    let spmd_plan = spmd_session.as_ref().map(|session| session.plan().clone());
+    if spmd_plan.is_some() {
+        ensure!(
+            !arguments.hybrid_climate && !arguments.hybrid_dry_run,
+            "--hybrid-climate/--hybrid-dry-run are single-process diagnostics"
+        );
+        ensure!(
+            hybrid.is_none(),
+            "multi-process spatial runs do not support --hybrid yet"
+        );
+    }
+    let mut spmd_exchange = match spmd_session {
+        Some(session) => {
+            let plan = session.plan();
+            let patch_offset = plan.local_global_offsets().first().copied().unwrap_or(0);
+            let local_patches = plan.local_patch_count();
+            let global_patches = plan.inventory().total_patches();
+            let comms = session.into_parts().1;
+            Some(colm_runtime::spatial::exchange::PatchExchange::new(
+                comms,
+                patch_offset,
+                local_patches,
+                global_patches,
+            )?)
+        }
+        None => None,
+    };
     if arguments.hybrid_climate {
         return spatial_hybrid_climate(&config, &arguments.case_directory, &out, year, name);
     }
@@ -681,6 +804,31 @@ fn run_spatial(
     }
     let vector_history =
         arguments.unstructured && logical_field(&document, "DEF_HISTORY_IN_VECTOR")?;
+    if spmd_plan.is_some() {
+        // 第一版多进程只跑“纯 patch 物理 + 块级重启”。这些全局耦合/输出路径要么还没交换协议，
+        // 要么会让逐位对照失去意义，先拒绝而不是静默降级。
+        ensure!(
+            !lulcc,
+            "multi-process spatial runs do not support DEF_USE_LULCC yet (the block layout changes per year)"
+        );
+        ensure!(
+            !arguments.catchment,
+            "multi-process spatial runs do not support CatchLateralFlow yet"
+        );
+        ensure!(
+            !vector_history,
+            "multi-process spatial runs do not support vector history yet"
+        );
+        ensure!(
+            !logical_field(&document, "DEF_Optimize_Baseflow")?,
+            "multi-process spatial runs do not support DEF_Optimize_Baseflow yet"
+        );
+
+        ensure!(
+            physics.bgc.is_none(),
+            "multi-process spatial runs do not support BGC yet"
+        );
+    }
     let case = SpatialCase {
         layout,
         name,
@@ -690,6 +838,7 @@ fn run_spatial(
         vector_history,
         catchment: arguments.catchment,
         hybrid,
+        spmd: spmd_plan.clone(),
     };
     let restart_root = out.join("restart");
     let scratch = restart_root.join(LULCC_SCRATCH);
@@ -719,6 +868,7 @@ fn run_spatial(
             input,
             std::mem::take(&mut carried),
             rewind,
+            spmd_exchange.as_mut(),
         )?;
         if !rewind {
             break;
@@ -766,7 +916,14 @@ fn run_spatial(
         std::fs::remove_dir_all(&scratch)
             .with_context(|| format!("cannot remove {}", scratch.display()))?;
     }
-    println!("{SUCCESS_MARKER}");
+    if let Some(exchange) = spmd_exchange.as_mut() {
+        // 所有 rank 都在这里汇合，root 之后才打成功标记；否则 srun/mpiexec 下 worker 可能
+        // 还在写自己块的重启，而 GUI/调度器已经把作业判成完成。
+        exchange.comms_mut().barrier()?;
+    }
+    if spmd_plan.as_ref().is_none_or(|plan| plan.is_root()) {
+        println!("{SUCCESS_MARKER}");
+    }
     Ok(())
 }
 
@@ -808,6 +965,7 @@ fn run_spatial_chain(
     input: PathBuf,
     carried: Carried,
     rewind: bool,
+    mut exchange: Option<&mut colm_runtime::spatial::exchange::PatchExchange>,
 ) -> Result<ChainEnd> {
     let lulcc = logical_field(case.document, "DEF_USE_LULCC")?;
     let restart_root = case.out.join("restart");
@@ -839,7 +997,8 @@ fn run_spatial_chain(
             segment.config.end = boundary;
             segment.end = SegmentEnd::Lulcc;
         }
-        let (river, baseflow, optimizer) = run_spatial_segment(case, &segment)?;
+        let (river, baseflow, optimizer) =
+            run_spatial_segment(case, &segment, exchange.as_deref_mut())?;
         let Some(boundary) = boundary else {
             return Ok(ChainEnd {
                 year,
@@ -927,6 +1086,8 @@ struct SpatialCase<'a> {
     catchment: bool,
     /// 混合模型插槽（`--hybrid`）。
     hybrid: Option<&'a HybridMode>,
+    /// 多进程分片表；`None` 是单进程路径（行为与以前完全相同）。
+    spmd: Option<colm_runtime::spmd::SpmdPlan>,
 }
 
 /// 空间算例里一个 patch 的块内信息：PFT 区间（`patch_pft_s/e`）与像元
@@ -979,10 +1140,60 @@ type SegmentRiverEnd = (
     Option<colm_runtime::river::sediment::Sediment>,
 );
 
+/// `--spmd-check`：多进程启动期的只读自检。
+///
+/// 所有 rank 建好连接、比对同一张块分片表，再各自读本 rank 的块拓扑；最后一次 barrier 之后
+/// root 打完成行。它不推进模型、不写输出，专门用来先验证“srun/mpiexec 启动 + rank 环境 +
+/// rendezvous 文件 + 共享盘上的 landdata”这一层，避免把启动问题误诊成后面的交换问题。
+fn run_spmd_check(arguments: &Arguments, out: &Path, year: i64) -> Result<()> {
+    use colm_runtime::spatial::topology::SpatialTopology;
+    use colm_runtime::spmd::SpmdSession;
+
+    let year = i32::try_from(year).context("DEF_LC_YEAR does not fit an i32")?;
+    let landdata = out.join("landdata");
+    let rendezvous = spmd_rendezvous_path(out, |name| std::env::var(name).ok());
+    let mut session = SpmdSession::open(
+        &landdata,
+        year,
+        arguments.rank,
+        arguments.ranks,
+        &rendezvous,
+        None,
+    )?;
+    let names = session
+        .plan()
+        .local_block_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let topology = SpatialTopology::read_selected(&landdata, year, Some(&names))?;
+    ensure!(
+        topology.patch_count() == session.plan().local_patch_count(),
+        "rank {} read {} patches from its blocks but the block plan says {}",
+        session.plan().rank(),
+        topology.patch_count(),
+        session.plan().local_patch_count()
+    );
+    println!(
+        "spmd-check rank {}/{}: {} block(s), {} patch(es), global offsets {:?}",
+        session.plan().rank(),
+        session.plan().size(),
+        names.len(),
+        topology.patch_count(),
+        session.plan().local_global_offsets()
+    );
+    session.comms_mut().barrier()?;
+    if session.plan().is_root() {
+        println!("CoLM SPMD plan check completed.");
+    }
+    Ok(())
+}
+
 /// 跑一段，返回终点的河道状态（LULCC 过渡要接着用）。
 fn run_spatial_segment(
     case: &SpatialCase<'_>,
     segment: &SpatialSegment,
+    mut exchange: Option<&mut colm_runtime::spatial::exchange::PatchExchange>,
 ) -> Result<(Option<SegmentRiverEnd>, Vec<f64>, Option<BaseflowOptimizer>)> {
     use colm_runtime::spatial::{
         forcing::GriddedForcing,
@@ -1000,10 +1211,25 @@ fn run_spatial_segment(
         vector_history,
         catchment,
         hybrid,
+        ..
     } = *case;
+    let spmd = case.spmd.as_ref();
     let config = &segment.config;
     let year = segment.year;
-    let topology = SpatialTopology::read(&out.join("landdata"), i32::try_from(year)?)?;
+    let landdata = out.join("landdata");
+    let year_i32 = i32::try_from(year)?;
+    // 多进程只读本 rank 的块；单进程仍读全部块（行为不变）。
+    let topology = match spmd {
+        Some(plan) => {
+            let names = plan
+                .local_block_names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            SpatialTopology::read_selected(&landdata, year_i32, Some(&names))?
+        }
+        None => SpatialTopology::read(&landdata, year_i32)?,
+    };
     let start_label = date_label(config.start);
     // 每个分块一份常数重启、一份时间重启；patch 在块内的下标就是它在那两份文件里的行。
     let block_files = topology
@@ -1042,7 +1268,17 @@ fn run_spatial_segment(
     let mut downscaling_patches = Vec::new();
     // 同一份 namelist、同一套土层：PFT 参数按地类缓存，装配循环结束即关。
     let pft_cache = colm_runtime::pft::PftParameterCache::enable();
-    for ((block, patches), files) in topology.blocks.iter().zip(&block_files) {
+    for (block_index, ((block, patches), files)) in
+        topology.blocks.iter().zip(&block_files).enumerate()
+    {
+        // `worker_patch` 是全局 patch 下标：单进程时就是块内偏移累加，多进程时来自分片表。
+        let block_global_base = match spmd {
+            Some(plan) => *plan
+                .local_global_offsets()
+                .get(block_index)
+                .with_context(|| format!("block {block} has no global offset in the SPMD plan"))?,
+            None => patches.start,
+        };
         // `DEF_USE_PFT`：土壤 patch 的 PFT 区间来自本块的 `landpft`。
         let pft_ranges = if physics.use_pft {
             Some(colm_runtime::pft::spatial_pft_ranges(
@@ -1080,7 +1316,7 @@ fn run_spatial_segment(
             document,
         )?;
         for (patch, physics) in patch_physics.into_iter().enumerate() {
-            let global = patches.start + patch;
+            let local_patch = patches.start + patch;
             let pfts = pft_ranges
                 .as_ref()
                 .map_or(0..0, |ranges| ranges[patch].clone());
@@ -1093,8 +1329,8 @@ fn run_spatial_segment(
             let spatial_patch = SpatialPatch {
                 pfts,
                 pixel: &topology.pixel,
-                cells: &topology.cells[global],
-                shared_fraction: topology.shared_fraction[global],
+                cells: &topology.cells[local_patch],
+                shared_fraction: topology.shared_fraction[local_patch],
                 pft_cells,
                 pft_shared,
             };
@@ -1112,7 +1348,7 @@ fn run_spatial_segment(
                 )
                 .with_context(|| format!("cannot assemble patch {patch} of block {block}"))?,
             );
-            let worker_patch = templates.len() - 1;
+            let worker_patch = block_global_base + patch;
             if let Some(template) = templates.last_mut() {
                 template.worker_patch = worker_patch;
             }
@@ -1173,6 +1409,12 @@ fn run_spatial_segment(
     // `land_tracer_init`：逐块读续跑里的示踪物事务（或按水量冷启动）。
     // `tracer_forcing_init`：网格主强迫给出总降水/总比湿的配置。
     let mut tracer_forcing_config = None;
+    if spmd.is_some() {
+        ensure!(
+            colm_runtime::tracer::TracerRuntime::from_document(document)?.is_none(),
+            "multi-process spatial runs do not support tracers yet"
+        );
+    }
     let tracer_runtime = colm_runtime::tracer::TracerRuntime::from_document(document)?
         .map(|mut tracer| -> Result<_> {
             let totals =
@@ -1252,47 +1494,48 @@ fn run_spatial_segment(
         // 已对齐：BGC（含 CROP）、火灾 `tsoi17` 广播（第 541、542 轮）、LULCC（第 539 轮）、漫滩回馈（第 540 轮）。
     }
     // 静态面积（`landarea` 等）的过滤也与上 `forcmask_pch`，所以 history 网格在掩膜之后建。
-    let mut history_grid = if writes_history && !vector_history {
-        let patch_types = templates
-            .iter()
-            .map(|template| template.patch_type)
-            .collect::<Vec<_>>();
-        let crop_classes = physics.bgc.is_some_and(|bgc| bgc.crop).then(|| {
-            templates
+    let mut history_grid: Option<colm_hist::history::HistoryGrid> =
+        if writes_history && !vector_history && spmd.is_none() {
+            let patch_types = templates
                 .iter()
-                .map(|template| template.land_class)
-                .collect::<Vec<_>>()
-        });
-        // `filter_irrig`：农田 patch 的首个 PFT 是灌溉型作物（`>= npcropmin` 且为偶数）。
-        let irrigated = physics.irrigation.is_some().then(|| {
-            templates
-                .iter()
-                .map(|template| {
-                    template.land_class == 12
-                        && template
-                            .pft
-                            .as_ref()
-                            .and_then(|pft| pft.initial.parameters.first())
-                            .is_some_and(|first| {
-                                first.class >= colm_core::bgc_driver::NPCROPMIN
-                                    && first.class % 2 == 0
-                            })
-                })
-                .collect::<Vec<_>>()
-        });
-        Some(build_history_grid(
-            &HistoryGridConfig::read(document)?,
-            &grid,
-            &topology,
-            &patch_types,
-            &patch_mask,
-            &forcing_mask,
-            crop_classes.as_deref(),
-            irrigated.as_deref(),
-        )?)
-    } else {
-        None
-    };
+                .map(|template| template.patch_type)
+                .collect::<Vec<_>>();
+            let crop_classes = physics.bgc.is_some_and(|bgc| bgc.crop).then(|| {
+                templates
+                    .iter()
+                    .map(|template| template.land_class)
+                    .collect::<Vec<_>>()
+            });
+            // `filter_irrig`：农田 patch 的首个 PFT 是灌溉型作物（`>= npcropmin` 且为偶数）。
+            let irrigated = physics.irrigation.is_some().then(|| {
+                templates
+                    .iter()
+                    .map(|template| {
+                        template.land_class == 12
+                            && template
+                                .pft
+                                .as_ref()
+                                .and_then(|pft| pft.initial.parameters.first())
+                                .is_some_and(|first| {
+                                    first.class >= colm_core::bgc_driver::NPCROPMIN
+                                        && first.class % 2 == 0
+                                })
+                    })
+                    .collect::<Vec<_>>()
+            });
+            Some(build_history_grid(
+                &HistoryGridConfig::read(document)?,
+                &grid,
+                &topology,
+                &patch_types,
+                &patch_mask,
+                &forcing_mask,
+                crop_classes.as_deref(),
+                irrigated.as_deref(),
+            )?)
+        } else {
+            None
+        };
     let mut runtime = SpatialRuntime::new(
         config.clock()?,
         forcing,
@@ -1301,6 +1544,9 @@ fn run_spatial_segment(
         config.co2_scenario,
         forcing_mask.clone(),
     )?;
+    if spmd.is_some_and(|plan| !plan.is_root()) {
+        runtime = runtime.with_quiet_progress();
+    }
     if let Some(settings) = config.downscaling {
         runtime = runtime.with_downscaling(settings, downscaling_patches)?;
     }
@@ -1336,7 +1582,51 @@ fn run_spatial_segment(
     if segment.end == SegmentEnd::Lulcc {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
-    let (history_grid, river_writer, history_vector, mut runtime) = if catchment {
+    // 多进程复制河网：各 rank 需要全局的 patch_type/patch_mask/forcing_mask 来构造同一份
+    // runoff filter（单进程用本地 templates/patch_mask/forcing_mask，行为不变）。
+    let (global_patch_types, global_patch_mask, global_forcing_mask) = match exchange.as_deref_mut()
+    {
+        Some(exchange) => {
+            let local_types = templates
+                .iter()
+                .map(|template| f64::from(template.patch_type))
+                .collect::<Vec<_>>();
+            let types = exchange
+                .all_gather_f64(&local_types)?
+                .into_iter()
+                .map(|value| value as i32)
+                .collect::<Vec<_>>();
+            let mask = exchange.all_gather_bools(&patch_mask)?;
+            let forcing = exchange.all_gather_bools(&forcing_mask)?;
+            (Some(types), Some(mask), Some(forcing))
+        }
+        None => (None, None, None),
+    };
+    // 多进程 history：root 用全局 topology + 全局 patch 元数据建一份全局网格；worker 不建。
+    let global_topology = match spmd {
+        Some(_) => Some(SpatialTopology::read(&landdata, year_i32)?),
+        None => None,
+    };
+    if writes_history && !vector_history && spmd.is_some_and(|plan| plan.is_root()) {
+        if let (Some(types), Some(mask), Some(forcing), Some(topology_global)) = (
+            global_patch_types.as_ref(),
+            global_patch_mask.as_ref(),
+            global_forcing_mask.as_ref(),
+            global_topology.as_ref(),
+        ) {
+            history_grid = Some(build_history_grid(
+                &HistoryGridConfig::read(document)?,
+                &grid,
+                topology_global,
+                types,
+                mask,
+                forcing,
+                None,
+                None,
+            )?);
+        }
+    }
+    let (mut history_grid, river_writer, history_vector, mut runtime) = if catchment {
         let history_grid = history_grid.take().map(std::sync::Arc::new);
         let landdata = out.join("landdata");
         let mesh = PathBuf::from(string_field(document, "DEF_CatchmentMesh_data")?);
@@ -1405,18 +1695,32 @@ fn run_spatial_segment(
         (history_grid, None, history_vector, runtime)
     } else {
         let mut runtime = runtime;
+        // 多进程时每个 rank 持有一份全局河网与全局 runoff filter，同步跑同一个 step。
+        let river_topology = global_topology.as_ref().unwrap_or(&topology);
         let network = colm_runtime::river::network::RiverNetwork::read(
             &unit_catchment_file(document, out)?,
             logical_field(document, "DEF_GridRiverLake_FloodplainStorageFix")?,
         )?;
-        let routing = colm_runtime::river::network::RunoffRouting::build(&network, &topology)?;
+        let routing = colm_runtime::river::network::RunoffRouting::build(&network, river_topology)?;
         // `filter_rnof`/`filter_basic`：`patchtype < 99 .and. patchmask .and. forcmask_pch`。
-        let runoff_filter = templates
-            .iter()
-            .zip(&patch_mask)
-            .zip(&forcing_mask)
-            .map(|((template, &mask), &active)| template.patch_type < 99 && mask && active)
-            .collect::<Vec<_>>();
+        let runoff_filter = match (
+            &global_patch_types,
+            &global_patch_mask,
+            &global_forcing_mask,
+        ) {
+            (Some(types), Some(mask), Some(forcing)) => types
+                .iter()
+                .zip(mask)
+                .zip(forcing)
+                .map(|((&patch_type, &mask), &active)| patch_type < 99 && mask && active)
+                .collect::<Vec<_>>(),
+            _ => templates
+                .iter()
+                .zip(&patch_mask)
+                .zip(&forcing_mask)
+                .map(|((template, &mask), &active)| template.patch_type < 99 && mask && active)
+                .collect::<Vec<_>>(),
+        };
         // 网格 history 多一个静态场与 6 个河道量（`MOD_Hist.F90:4749-4790`）。
         let history_grid = history_grid.take().map(|mut grid| {
             grid.statics.push((
@@ -1694,7 +1998,12 @@ fn run_spatial_segment(
                 }
             }
         }
-        runtime = runtime.with_river(river, runoff_filter)?;
+        let global_patches = runoff_filter.len();
+        runtime = if spmd.is_some() {
+            runtime.with_river_for_spmd(river, runoff_filter, global_patches)?
+        } else {
+            runtime.with_river(river, runoff_filter)?
+        };
         (history_grid, river_writer, history_vector, runtime)
     };
     let rest_compression = u8::try_from(integer_field(document, "DEF_REST_CompressLevel")?)
@@ -1726,9 +2035,10 @@ fn run_spatial_segment(
     }
     // 网格 history（`HistForm = 'Gridded'`）：会话与单点同一套，写文件时聚合到 `ghist`。
     // 区间跨过重启时的续跑旁车要带河道累加器，还没移植：`write_sidecar` 在那时拒绝。
-    let mut history = match history_grid {
-        Some(grid) => Some(SpatialHistory {
-            session: colm_runtime::open_history_session(
+    let mut history_writer: Option<SpatialHistory> = None;
+    let mut history = if spmd.is_some() {
+        if writes_history {
+            let local_session = colm_runtime::open_history_session(
                 config.history_window(),
                 colm_runtime::history::point_dimensions(),
                 colm_hist::history::HistorySite {
@@ -1739,55 +2049,60 @@ fn run_spatial_segment(
                 name,
             )?
             .with_patches(patch_count)?
-            .with_grid(grid)
-            .with_gridded(if catchment || river_writer.is_none() {
-                &[]
-            } else {
-                &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
-            })
-            .with_tracer_history(
-                logical_field(document, "DEF_USE_TRACER")?
-                    .then(|| real_field(document, "DEF_simulation_time%timestep"))
-                    .transpose()?,
-            )
-            .map(|session| {
-                // 有输运示踪物或 CH4 provider 时写变量（`tracer_hist_out` 与
-                // `methane_reactive_history`），否则只有文件骨架。
-                match tracer_runtime.as_ref().filter(|t| {
-                    t.has_transport()
-                        || t.set
-                            .tracers
-                            .iter()
-                            .any(colm_runtime::methane::is_methane_tracer)
-                }) {
-                    Some(tracer) => session.with_tracer_variables(
-                        tracer.set.clone(),
-                        templates
-                            .iter()
-                            .map(|template| template.patch_type)
-                            .collect(),
-                        methane_core_history(&templates),
-                    ),
-                    None => session,
-                }
-            })?,
-            river: river_writer,
-            elements: ElementGroups::from_topology(&topology)?,
-            files: Vec::new(),
-            basin: catchment
-                .then(|| -> Result<_> {
-                    Ok(colm_runtime::spatial::history::BasinHistoryTarget {
-                        directory: out.join("history"),
-                        stem: name.to_owned(),
-                        compress_level: colm_runtime::spatial::history::hist_compress_level(
-                            document,
-                        )?,
-                    })
+            .with_external_writer();
+            if let Some(plan) = spmd.filter(|plan| plan.is_root()) {
+                ensure!(
+                    !vector_history,
+                    "multi-process vector history is not wired yet"
+                );
+                let grid = history_grid
+                    .take()
+                    .context("the root has history enabled but no global history grid")?;
+                let global_patches = plan.inventory().total_patches();
+                let mut session = colm_runtime::open_history_session(
+                    config.history_window(),
+                    colm_runtime::history::point_dimensions(),
+                    colm_hist::history::HistorySite {
+                        latitude_degrees: 0.0,
+                        longitude_degrees: 0.0,
+                    },
+                    out.join("history"),
+                    name,
+                )?
+                .with_patches(global_patches)?
+                .with_grid(grid)
+                .with_gridded(if river_writer.is_none() {
+                    &[]
+                } else {
+                    &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
                 })
-                .transpose()?,
-        }),
-        None => match history_vector {
-            Some((vector, statics)) => Some(SpatialHistory {
+                .with_streaming();
+                if let Some(forcing) = &global_forcing_mask {
+                    if forcing.iter().any(|active| !active) {
+                        session.set_forcing_mask(Some(forcing.clone()));
+                    }
+                }
+                history_writer = Some(SpatialHistory {
+                    session,
+                    river: river_writer,
+                    elements: ElementGroups::from_topology(&topology)?,
+                    files: Vec::new(),
+                    basin: None,
+                });
+            }
+            Some(SpatialHistory {
+                session: local_session,
+                river: None,
+                elements: ElementGroups::from_topology(&topology)?,
+                files: Vec::new(),
+                basin: None,
+            })
+        } else {
+            None
+        }
+    } else {
+        match history_grid {
+            Some(grid) => Some(SpatialHistory {
                 session: colm_runtime::open_history_session(
                     config.history_window(),
                     colm_runtime::history::point_dimensions(),
@@ -1799,19 +2114,28 @@ fn run_spatial_segment(
                     name,
                 )?
                 .with_patches(patch_count)?
-                .with_vector(
-                    vector,
-                    if river_writer.is_some() {
-                        &colm_runtime::river::history::VECTOR_RIVER_VARIABLES
-                    } else {
-                        &[]
-                    },
-                    statics,
+                .with_grid(grid)
+                .with_gridded(if catchment || river_writer.is_none() {
+                    &[]
+                } else {
+                    &colm_runtime::river::history::GRIDDED_RIVER_VARIABLES
+                })
+                .with_streaming_if(tracer_runtime.is_none())
+                .with_tracer_history(
+                    logical_field(document, "DEF_USE_TRACER")?
+                        .then(|| real_field(document, "DEF_simulation_time%timestep"))
+                        .transpose()?,
                 )
                 .map(|session| {
-                    // 向量写出（没有窗口变量，所以不调 `with_tracer_history`）：开了示踪物就写示踪物文件（`MOD_Tracer_Hist` 的 `Vector` 支），
-                    // 没有输运示踪物也没有 CH4 时只有维与坐标。
-                    match tracer_runtime.as_ref() {
+                    // 有输运示踪物或 CH4 provider 时写变量（`tracer_hist_out` 与
+                    // `methane_reactive_history`），否则只有文件骨架。
+                    match tracer_runtime.as_ref().filter(|t| {
+                        t.has_transport()
+                            || t.set
+                                .tracers
+                                .iter()
+                                .any(colm_runtime::methane::is_methane_tracer)
+                    }) {
                         Some(tracer) => session.with_tracer_variables(
                             tracer.set.clone(),
                             templates
@@ -1826,10 +2150,63 @@ fn run_spatial_segment(
                 river: river_writer,
                 elements: ElementGroups::from_topology(&topology)?,
                 files: Vec::new(),
-                basin: None,
+                basin: catchment
+                    .then(|| -> Result<_> {
+                        Ok(colm_runtime::spatial::history::BasinHistoryTarget {
+                            directory: out.join("history"),
+                            stem: name.to_owned(),
+                            compress_level: colm_runtime::spatial::history::hist_compress_level(
+                                document,
+                            )?,
+                        })
+                    })
+                    .transpose()?,
             }),
-            None => None,
-        },
+            None => match history_vector {
+                Some((vector, statics)) => Some(SpatialHistory {
+                    session: colm_runtime::open_history_session(
+                        config.history_window(),
+                        colm_runtime::history::point_dimensions(),
+                        colm_hist::history::HistorySite {
+                            latitude_degrees: 0.0,
+                            longitude_degrees: 0.0,
+                        },
+                        out.join("history"),
+                        name,
+                    )?
+                    .with_patches(patch_count)?
+                    .with_vector(
+                        vector,
+                        if river_writer.is_some() {
+                            &colm_runtime::river::history::VECTOR_RIVER_VARIABLES
+                        } else {
+                            &[]
+                        },
+                        statics,
+                    )
+                    .map(|session| {
+                        // 向量写出（没有窗口变量，所以不调 `with_tracer_history`）：开了示踪物就写示踪物文件（`MOD_Tracer_Hist` 的 `Vector` 支），
+                        // 没有输运示踪物也没有 CH4 时只有维与坐标。
+                        match tracer_runtime.as_ref() {
+                            Some(tracer) => session.with_tracer_variables(
+                                tracer.set.clone(),
+                                templates
+                                    .iter()
+                                    .map(|template| template.patch_type)
+                                    .collect(),
+                                methane_core_history(&templates),
+                            ),
+                            None => session,
+                        }
+                    })?,
+                    river: river_writer,
+                    elements: ElementGroups::from_topology(&topology)?,
+                    files: Vec::new(),
+                    basin: None,
+                }),
+                None => None,
+            },
+        }
     };
 
     if let Some(history) = history.as_mut() {
@@ -1921,10 +2298,14 @@ fn run_spatial_segment(
         .map(StandardLctRestartTemplate::snow_state)
         .collect();
     let mut last: Option<Vec<RestartSnapshot>> = None;
+    // 复制河网时各 rank 的河道状态相同，但河道重启是一份全局文件：只让 root 写，避免并发写同一路径。
+    let write_river_restart = spmd.is_none_or(|plan| plan.is_root());
     let steps = runtime.run(
         &templates,
         &mut states,
         history.as_mut(),
+        history_writer.as_mut(),
+        exchange,
         |steps, states, outputs, river, tracer_cache, lateral| {
             let mut snapshots = states
                 .iter()
@@ -1959,32 +2340,35 @@ fn run_spatial_segment(
                     &snapshots,
                     &history_restart,
                     river,
+                    write_river_restart,
                     tracer_cache,
                     empty_land_tracer,
                 )?;
                 if let Some(river) = river {
-                    let label = date_label(normalized_day_end(step.clock.end_time));
-                    let path = river_restart_path(&out.join("restart"), name, &label, year);
-                    colm_runtime::river::restart::write_river_state(
-                        &path,
-                        &river.network,
-                        &river.state,
-                        river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
-                        rest_compression,
-                    )?;
-                    if let Some(tracers) = river.tracers.as_ref() {
-                        colm_runtime::river::restart::write_river_tracers(
+                    if write_river_restart {
+                        let label = date_label(normalized_day_end(step.clock.end_time));
+                        let path = river_restart_path(&out.join("restart"), name, &label, year);
+                        colm_runtime::river::restart::write_river_state(
                             &path,
                             &river.network,
-                            &mut tracers.clone(),
+                            &river.state,
+                            river.reservoir.as_ref().map(|r| r.identity()).as_deref(),
                             rest_compression,
                         )?;
-                    }
-                    if river.tracers.is_none() && river.empty_tracer_transaction {
-                        colm_runtime::river::restart::write_empty_river_tracers(&path)?;
-                    }
-                    if let Some(sediment) = river.sediment.as_ref() {
-                        sediment.write_restart(&path, &river.network, rest_compression)?;
+                        if let Some(tracers) = river.tracers.as_ref() {
+                            colm_runtime::river::restart::write_river_tracers(
+                                &path,
+                                &river.network,
+                                &mut tracers.clone(),
+                                rest_compression,
+                            )?;
+                        }
+                        if river.tracers.is_none() && river.empty_tracer_transaction {
+                            colm_runtime::river::restart::write_empty_river_tracers(&path)?;
+                        }
+                        if let Some(sediment) = river.sediment.as_ref() {
+                            sediment.write_restart(&path, &river.network, rest_compression)?;
+                        }
                     }
                 }
                 if let Some(lateral) = lateral {
@@ -2031,6 +2415,7 @@ fn run_spatial_segment(
         &last,
         &history_restart,
         runtime.river(),
+        write_river_restart,
         runtime
             .tracer_forcing()
             .map(|forcing| forcing.cache())
@@ -2053,7 +2438,9 @@ fn run_spatial_segment(
             rest_compression,
         )?;
     }
-    if let (Some(river), SegmentEnd::Run) = (runtime.river(), segment.end) {
+    if let (Some(river), SegmentEnd::Run, true) =
+        (runtime.river(), segment.end, write_river_restart)
+    {
         let label = date_label(normalized_day_end(config.end));
         let path = river_restart_path(&out.join("restart"), name, &label, year);
         colm_runtime::river::restart::write_river_state(
@@ -2078,19 +2465,22 @@ fn run_spatial_segment(
             sediment.write_restart(&path, &river.network, rest_compression)?;
         }
     }
-    // 逐个列出全部块的重启路径会占满一行，只报个数与目录。
-    let restart_dirs: std::collections::BTreeSet<_> =
-        written.iter().filter_map(|path| path.parent()).collect();
-    println!(
-        "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {} restart file(s) to {}",
-        topology.blocks.len(),
-        written.len(),
-        restart_dirs
-            .iter()
-            .map(|dir| dir.display().to_string())
-            .collect::<Vec<_>>()
-            .join(", ")
-    );
+    // 逐个列出全部块的重启路径会占满一行，只报个数与目录。多进程时只让 root 打，
+    // worker 的日志留给失败诊断。
+    if spmd.is_none_or(|plan| plan.is_root()) {
+        let restart_dirs: std::collections::BTreeSet<_> =
+            written.iter().filter_map(|path| path.parent()).collect();
+        println!(
+            "colm-rs: {steps} step(s) on {patch_count} spatial patch(es) in {} block(s); wrote {} restart file(s) to {}",
+            topology.blocks.len(),
+            written.len(),
+            restart_dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     if segment.end != SegmentEnd::Run {
         // 上游在 LULCC 时 `hist_final` 再 `hist_init`：没写完的区间就丢了。年末之前的区间
         // 都在这一步关上，跨年的区间不会出现；真出现就拒绝，而不是写一条上游没有的记录。
@@ -2107,7 +2497,25 @@ fn run_spatial_segment(
             date_label(normalized_day_end(config.end))
         );
     }
-    if let Some(mut history) = history {
+    if spmd.is_some() {
+        if let Some(writer) = history_writer.as_mut() {
+            writer.files.extend(writer.session.finish()?);
+            ensure!(
+                writer.session.remaining() == 0,
+                "the run ended with {} history record(s) still unwritten",
+                writer.session.remaining()
+            );
+            println!("colm-rs: {} history file(s)", writer.files.len());
+        }
+        if let Some(local) = history.as_mut() {
+            ensure!(
+                local.session.remaining() == 0,
+                "the run ended with {} history record(s) still unwritten on a worker",
+                local.session.remaining()
+            );
+            local.files.extend(local.session.finish()?);
+        }
+    } else if let Some(mut history) = history {
         history.files.extend(history.session.finish()?);
         ensure!(
             history.session.remaining() == 0,
@@ -3909,6 +4317,7 @@ fn write_block_restarts(
     snapshots: &[RestartSnapshot],
     history: &HistoryRestart,
     river: Option<&colm_runtime::river::RiverModel>,
+    write_river_history: bool,
     tracer_cache: Option<&colm_runtime::tracer::ForcingCache<'_>>,
     empty_land_tracer: Option<f64>,
 ) -> Result<Vec<PathBuf>> {
@@ -3948,7 +4357,7 @@ fn write_block_restarts(
         )?;
         written.push(path);
     }
-    if let (Some(history), true) = (river_history, river_required) {
+    if let (Some(history), true, true) = (river_history, river_required, write_river_history) {
         // `history_river_acc_file`：陆面旁车的基名（不带块后缀）加 `.river`。
         let label = date_label(normalized_day_end(end_time));
         let base = periodic
@@ -5562,6 +5971,12 @@ struct Arguments {
     hybrid_dry_run: bool,
     /// `--hybrid-climate`：在运行时段内累积强迫，写出各 patch 的气候特征（`hybrid_climate/`）后退出。
     hybrid_climate: bool,
+    /// `--spmd-check`：多进程启动期自检 —— 建连、比对分片表、读本 rank 的块拓扑，不推进模型。
+    /// 用来在真集群上先验证 srun/rendezvous/共享盘，再谈跑模拟。
+    spmd_check: bool,
+    /// `--rank/--ranks`：显式进程编号；缺省从启动器环境（`SLURM_*` 等）读。
+    rank: Option<usize>,
+    ranks: Option<usize>,
 }
 
 impl Arguments {
@@ -5583,6 +5998,9 @@ impl Arguments {
         let mut hybrid_tap = None;
         let mut hybrid_dry_run = false;
         let mut hybrid_climate = false;
+        let mut spmd_check = false;
+        let mut rank = None;
+        let mut ranks = None;
         while let Some(flag) = values.next() {
             let mut value = |name: &str| -> Result<String> {
                 values
@@ -5619,6 +6037,21 @@ impl Arguments {
                 "--hybrid-tap" => hybrid_tap = Some(PathBuf::from(value("--hybrid-tap")?)),
                 "--hybrid-dry-run" => hybrid_dry_run = true,
                 "--hybrid-climate" => hybrid_climate = true,
+                "--spmd-check" => spmd_check = true,
+                "--rank" => {
+                    rank = Some(
+                        value("--rank")?
+                            .parse()
+                            .context("--rank must be a nonnegative integer")?,
+                    );
+                }
+                "--ranks" => {
+                    ranks = Some(
+                        value("--ranks")?
+                            .parse()
+                            .context("--ranks must be a positive integer")?,
+                    );
+                }
                 other if other.starts_with("--") => {
                     bail!("unknown option {other}; the accepted set is documented in this binary's module docs")
                 }
@@ -5661,6 +6094,16 @@ impl Arguments {
                 "--history-stem without --history-dir would be silently ignored"
             );
         }
+        ensure!(
+            rank.is_some() == ranks.is_some(),
+            "--rank and --ranks must be given together"
+        );
+        if let Some(size) = ranks {
+            ensure!(size >= 1, "--ranks must be at least 1");
+            if let Some(rank) = rank {
+                ensure!(rank < size, "--rank {rank} is outside 0..{size}");
+            }
+        }
         let outputs = if case_outputs {
             // 两套来源混用时谁说了算不明确，干脆不许。
             ensure!(
@@ -5668,8 +6111,8 @@ impl Arguments {
                 "--case-outputs derives --restart-out and --history-dir; do not pass them too"
             );
             OutputSpec::CaseOutputs
-        } else if preflight {
-            // 预检不写任何东西，落点无意义。
+        } else if preflight || spmd_check {
+            // 预检与多进程自检不写任何东西，落点无意义。
             OutputSpec::CaseOutputs
         } else {
             OutputSpec::Explicit {
@@ -5697,6 +6140,9 @@ impl Arguments {
             hybrid_tap,
             hybrid_dry_run,
             hybrid_climate,
+            spmd_check,
+            rank,
+            ranks,
         })
     }
 }

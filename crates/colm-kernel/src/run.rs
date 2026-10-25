@@ -227,6 +227,7 @@ pub fn run_stage_streaming_ranks(
         &[],
         ranks,
         uses_mpi,
+        false,
         on_line,
     )
 }
@@ -246,7 +247,31 @@ pub fn run_stage_streaming_with_executable(
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
     run_stage_streaming_with_command(
-        kernel, stage, executable, namelist, work, artifacts, arguments, 1, false, on_line,
+        kernel, stage, executable, namelist, work, artifacts, arguments, 1, false, false, on_line,
+    )
+}
+
+/// 用外部 launcher（`COLM_MPIEXEC`/`COLM_MPIEXEC_ARGS`，例如 `srun`）启动一个普通可执行文件，
+/// 每个 rank 跑同一份 namelist。Rust 引擎的多进程走这里：它不链接 MPI，只认 `SLURM_*` 等环境变量。
+#[allow(clippy::too_many_arguments)]
+pub fn run_stage_streaming_external_ranks(
+    kernel: &Kernel,
+    stage: Stage,
+    executable: &Path,
+    namelist: &Path,
+    work: &Path,
+    artifacts: &[PathBuf],
+    arguments: &[String],
+    ranks: usize,
+    on_line: &mut dyn FnMut(&str),
+) -> Result<StageReport> {
+    anyhow::ensure!(
+        ranks > 1,
+        "an external launcher is only needed for more than one rank"
+    );
+    run_stage_streaming_with_command(
+        kernel, stage, executable, namelist, work, artifacts, arguments, ranks, false, true,
+        on_line,
     )
 }
 
@@ -261,9 +286,17 @@ fn run_stage_streaming_with_command(
     extra_args: &[String],
     ranks: usize,
     uses_mpi: bool,
+    external_launcher: bool,
     on_line: &mut dyn FnMut(&str),
 ) -> Result<StageReport> {
-    let (program, args) = launch_command(exe, namelist, extra_args, ranks, uses_mpi)?;
+    let (program, args) = launch_command(
+        exe,
+        namelist,
+        extra_args,
+        ranks,
+        uses_mpi,
+        external_launcher,
+    )?;
     let mut cmd = Command::new(&program);
     let hdf5_file_locking = std::env::var_os("HDF5_USE_FILE_LOCKING");
     configure_hdf5_file_locking(&mut cmd, hdf5_file_locking.as_deref());
@@ -373,9 +406,10 @@ fn launch_command(
     extra_args: &[String],
     ranks: usize,
     uses_mpi: bool,
+    external_launcher: bool,
 ) -> Result<(PathBuf, Vec<String>)> {
     anyhow::ensure!(ranks > 0, "MPI rank count must be at least 1");
-    if !uses_mpi {
+    if !uses_mpi && !external_launcher {
         anyhow::ensure!(ranks == 1, "non-MPI kernels only support one rank");
         let mut args = vec![namelist.to_string_lossy().into_owned()];
         args.extend_from_slice(extra_args);

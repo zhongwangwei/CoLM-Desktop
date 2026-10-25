@@ -3,6 +3,7 @@
 //! patch 的顺序就是上游 `landpatch` 在 worker 上的顺序：多个分块时按 `block_set_local_blocks` 的
 //! 遍历顺序拼接（外层经度块、内层纬度块，都自西南向东北），每块的重启是自己的一份文件。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use std::ops::Range;
@@ -29,31 +30,48 @@ pub struct SpatialTopology {
 }
 
 impl SpatialTopology {
-    /// 读 `landdata` 下某一土地覆盖年份的拓扑。
+    /// 读 `landdata` 下某一土地覆盖年份的全部块（单进程路径，行为不变）。
     pub fn read(landdata: &Path, year: i32) -> Result<Self> {
-        let directory = landdata.join("landpatch").join(format!("{year:04}"));
-        let blocks = std::fs::read_dir(&directory)
-            .with_context(|| format!("cannot list {}", directory.display()))?
-            .filter_map(|entry| entry.ok())
-            .filter_map(|entry| {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                name.strip_prefix("landpatch_")
-                    .and_then(|rest| rest.strip_suffix(".nc"))
-                    .map(str::to_string)
-            })
-            .collect::<Vec<_>>();
-        ensure!(
-            !blocks.is_empty(),
-            "{} holds no landpatch block file",
-            directory.display()
-        );
-        let mut keyed = blocks
-            .into_iter()
-            .map(|block| block_origin(&block).map(|origin| (origin, block)))
-            .collect::<Result<Vec<_>>>()?;
-        keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("block origins are finite"));
+        Self::read_selected(landdata, year, None)
+    }
+
+    /// 只读 `selected` 里的块；`None` 与 [`SpatialTopology::read`] 相同。
+    ///
+    /// 局部 patch 下标从 0 开始，块顺序仍按上游（外层经度、内层纬度，自西南向东北），
+    /// 因此选中块的相对次序与全量读时一致。全局 patch 下标由
+    /// [`super::partition::BlockInventory::offsets`] 给出，调用方自己加。
+    pub fn read_selected(landdata: &Path, year: i32, selected: Option<&[String]>) -> Result<Self> {
+        let names = block_names(landdata, year)?;
+        let blocks = match selected {
+            None => names,
+            Some(selected) => {
+                ensure!(
+                    !selected.is_empty(),
+                    "a multi-process topology read needs at least one landpatch block"
+                );
+                let wanted = selected.iter().map(String::as_str).collect::<BTreeSet<_>>();
+                ensure!(
+                    wanted.len() == selected.len(),
+                    "a landpatch block is selected more than once"
+                );
+                let missing = wanted
+                    .iter()
+                    .copied()
+                    .filter(|name| !names.iter().any(|known| known == name))
+                    .collect::<Vec<_>>();
+                ensure!(
+                    missing.is_empty(),
+                    "landdata has no landpatch block for {:?}",
+                    missing
+                );
+                names
+                    .into_iter()
+                    .filter(|name| wanted.contains(name.as_str()))
+                    .collect()
+            }
+        };
         let mut topology = Self {
-            blocks: Vec::with_capacity(keyed.len()),
+            blocks: Vec::with_capacity(blocks.len()),
             pixel: PixelAxes {
                 lon_w: Vec::new(),
                 lon_e: Vec::new(),
@@ -66,7 +84,7 @@ impl SpatialTopology {
             shared_fraction: Vec::new(),
         };
         let mut any_shared = false;
-        for (_, block) in keyed {
+        for block in blocks {
             let path = landpatch_path(landdata, year, &block);
             let file =
                 netcdf::open(&path).with_context(|| format!("cannot open {}", path.display()))?;
@@ -137,6 +155,34 @@ impl SpatialTopology {
     }
 }
 
+/// `landdata/landpatch/<year>/` 下的块名，按上游顺序（外层经度、内层纬度，自西南向东北）。
+///
+/// 只列目录与解析块名，不打开任何 NetCDF；多进程启动期用它算分片账本。
+pub fn block_names(landdata: &Path, year: i32) -> Result<Vec<String>> {
+    let directory = landdata.join("landpatch").join(format!("{year:04}"));
+    let mut blocks = std::fs::read_dir(&directory)
+        .with_context(|| format!("cannot list {}", directory.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.strip_prefix("landpatch_")
+                .and_then(|rest| rest.strip_suffix(".nc"))
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        !blocks.is_empty(),
+        "{} holds no landpatch block file",
+        directory.display()
+    );
+    let mut keyed = blocks
+        .drain(..)
+        .map(|block| block_origin(&block).map(|origin| (origin, block)))
+        .collect::<Result<Vec<_>>>()?;
+    keyed.sort_by(|a, b| a.0.partial_cmp(&b.0).expect("block origins are finite"));
+    Ok(keyed.into_iter().map(|(_, block)| block).collect())
+}
+
 /// `pixelset_load_from_file`：相邻两个集合 `ielm` 与 `ipxstt` 都相同才算共享像元，
 /// 此时才读 `pctshared`。
 fn has_shared(element: &[i64], start: &[i32]) -> bool {
@@ -166,7 +212,7 @@ fn block_origin(name: &str) -> Result<(f64, f64)> {
     Ok((parse(lon, 'e', 'w')?, parse(lat, 'n', 's')?))
 }
 
-fn landpatch_path(landdata: &Path, year: i32, block: &str) -> PathBuf {
+pub(crate) fn landpatch_path(landdata: &Path, year: i32, block: &str) -> PathBuf {
     landdata
         .join("landpatch")
         .join(format!("{year:04}"))

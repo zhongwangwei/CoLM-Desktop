@@ -651,3 +651,84 @@ fn chunked_writes_match_put_values_bitwise() {
         assert!(written[0]["f_BD_all"].len() == records * 10 * if vector_form { 3 } else { 6 });
     }
 }
+
+/// 逐条记录写与整组写在**数值**上必须一致（文件字节允许因块写顺序不同，但 1 vs N rank 都走同一
+/// 流式路径，仍逐字节）。这里比较两个文件的变量值与 time 维长度。
+#[test]
+fn streamed_gridded_records_match_the_group_hook_values() {
+    let dims = HistoryDimensions {
+        patch: 1,
+        soil: 10,
+        lake: 10,
+        snow_layers: 5,
+        vegnodes: 4,
+        band: 2,
+        radiation_types: 2,
+        sensor: 1,
+    };
+    let site = HistorySite {
+        latitude_degrees: 0.0,
+        longitude_degrees: 0.0,
+    };
+    let grid = || {
+        std::sync::Arc::new(HistoryGrid {
+            lat: vec![0.25],
+            lon: vec![0.25, 0.75],
+            lat_s: vec![0.0],
+            lat_n: vec![0.5],
+            lon_w: vec![0.0, 0.5],
+            lon_e: vec![0.5, 1.0],
+            parts: vec![vec![(0, 1.0), (1, 1.0)]],
+            patch_area: vec![2.0],
+            statics: Vec::new(),
+            first_record_statics: Vec::new(),
+            compress_level: 1,
+        })
+    };
+    let fill = |buffers: &mut HistoryBuffers, record: usize, value: f64, time: i32| {
+        buffers.set_time(record, time).unwrap();
+        buffers.select_patch(Some(0)).unwrap();
+        buffers.set_patch_scalar("t_grnd", record, value).unwrap();
+        buffers.include("t_grnd", record).unwrap();
+        buffers.select_patch(None).unwrap();
+    };
+    let group_path = scratch("stream-group");
+    let mut group = HistoryBuffers::new(dims, site, 2)
+        .with_grid(grid())
+        .unwrap();
+    group.declare(&["t_grnd"]).unwrap();
+    fill(&mut group, 0, 270.0, 60);
+    fill(&mut group, 1, 271.0, 120);
+    group.write(&group_path).unwrap();
+
+    let stream_path = scratch("stream-record");
+    for (record, (value, time)) in [(270.0, 60), (271.0, 120)].into_iter().enumerate() {
+        let mut one = HistoryBuffers::new(dims, site, 1)
+            .with_grid(grid())
+            .unwrap();
+        one.declare(&["t_grnd"]).unwrap();
+        fill(&mut one, 0, value, time);
+        one.write_gridded_record(&stream_path, 2, record).unwrap();
+    }
+
+    let read = |path: &std::path::Path| {
+        let file = netcdf::open(path).unwrap();
+        let time = file
+            .variable("time")
+            .unwrap()
+            .get_values::<i32, _>(..)
+            .unwrap();
+        let t = file
+            .variable("f_t_grnd")
+            .unwrap()
+            .get_values::<f64, _>(..)
+            .unwrap();
+        (time, t)
+    };
+    let (group_time, group_values) = read(&group_path);
+    let (stream_time, stream_values) = read(&stream_path);
+    assert_eq!(stream_time, group_time);
+    assert_eq!(stream_values, group_values);
+    let file = netcdf::open(&stream_path).unwrap();
+    assert_eq!(file.dimension("time").unwrap().len(), 2);
+}

@@ -4,9 +4,11 @@
 //! 差别只在强迫怎么落到 patch、结果怎么聚合回网格。
 
 pub mod downscaling;
+pub mod exchange;
 pub mod forcing;
 mod forcing_reader;
 pub mod history;
+pub mod partition;
 pub mod runtime;
 // 经纬网格与面积加权映射在 colm-init 里（mkinidata 的 `build_arealweighted`/`grid2pset` 也用同一份）。
 pub use colm_init::spatial_grid as grid;

@@ -1350,3 +1350,89 @@ fn a_masked_patch_accumulates_states_and_restart_diagnostics_only() {
         );
     }
 }
+
+#[test]
+fn history_accumulators_round_trip_through_bytes() {
+    let mut accumulator = HistoryAccumulator::default();
+    // 标量、分层、只进旁车的过滤量都覆盖到；两次累加让 count = 2。
+    accumulator.scalar("f_test", 0, 1.5).unwrap();
+    accumulator.scalar("f_test", 0, -0.5).unwrap();
+    accumulator.layer("f_layer", 0, &[1.0, -2.0]).unwrap();
+    accumulator.layer("f_layer", 0, &[0.5, 0.25]).unwrap();
+    accumulator.keep_filtered("f_wet");
+    // 步数由会话的 `accumulate_one` 记；这里直接构造累加器，所以手动补上。
+    accumulator.steps = 2;
+    let bytes = accumulator.encode().unwrap();
+    let decoded = HistoryAccumulator::decode(&bytes).unwrap();
+    assert_eq!(decoded.window(), accumulator.window());
+    assert_eq!(decoded.window().steps, 2);
+    // 再编码应逐字节相同；截断/多余字节都要报错。
+    assert_eq!(decoded.encode().unwrap(), bytes);
+    assert!(HistoryAccumulator::decode(&bytes[..bytes.len() - 1]).is_err());
+    let mut extra = bytes.clone();
+    extra.push(0);
+    assert!(HistoryAccumulator::decode(&extra).is_err());
+}
+
+#[test]
+fn the_external_writer_exports_ready_accumulators_without_writing() {
+    let root = temp_dir("external-writer");
+    let window = SimulationWindow {
+        start_year: 2008,
+        start_julian_day: 1,
+        start_seconds: 0,
+        end_year: 2008,
+        end_julian_day: 1,
+        end_seconds: 3600,
+        timestep_seconds: 1800,
+    };
+    let dimensions = HistoryDimensions {
+        patch: 2,
+        ..dimensions()
+    };
+    let mut session = HistorySession::new(
+        dimensions,
+        site(),
+        window,
+        HistoryFrequency::Timestep,
+        HistoryGrouping::Month,
+        root.join("out"),
+        "ext",
+    )
+    .unwrap()
+    .with_external_writer();
+    let end = colm_core::CalendarTime {
+        year: 2008,
+        julian_day: 1,
+        seconds: 1800,
+    };
+    let jobs: Vec<(HistoryJob<'_>, Option<HistoryOverrides>)> = vec![
+        (
+            Box::new(|accumulator: &mut HistoryAccumulator| {
+                accumulator.scalar("f_test", 0, 1.0)?;
+                Ok(())
+            }),
+            None,
+        ),
+        (
+            Box::new(|accumulator: &mut HistoryAccumulator| {
+                accumulator.scalar("f_test", 0, 2.0)?;
+                Ok(())
+            }),
+            None,
+        ),
+    ];
+    assert!(session.push_jobs(end, jobs).unwrap().is_none());
+    let (record, accumulators) = session
+        .take_export()
+        .expect("a due record must be exported");
+    assert_eq!(record.record, 0);
+    assert_eq!(accumulators.len(), 2);
+    assert!(accumulators
+        .iter()
+        .all(|accumulator| accumulator.window().steps == 1));
+    // 外部写模式不创建任何文件；root 的全局会话才写。
+    assert!(!root.join("out").exists());
+    assert!(session.take_export().is_none());
+    let _ = std::fs::remove_dir_all(&root);
+}

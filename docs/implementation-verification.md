@@ -36794,3 +36794,392 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 版本号从 0.3.0-beta.4 升到 0.3.0-beta.5：根 `Cargo.toml`、`gui/src-tauri/Cargo.toml`、`tauri.conf.json`、`gui/package.json` 与三份锁文件。推到 main 后 release 流水线看到尚未发布的新版本，自动编三平台安装包并建 `v0.3.0-beta.5` 预发布。
 - README 中英文的版本徽章、下载链接、测试版提示改为 beta.5，新增 beta.5 发布记录，汇总 beta.4 以来 165 个提交：比较页（OpenBench）、研究向导与网格研究、版本源码编辑、地类参数、服务器批次打包与离线编引擎、AI 助手附件与上下文预算、关窗确认与崩溃残留清理。
 - README 的"空间模式下参数调优和不确定性分析暂不可用"已过时：第 f19a7288 提交起研究页接受流域、区域和全球算例，并实跑过网格 DE、OAT 与 hybrid 研究；改为说明空间算例也可做研究。`docs/uncertainty-and-tuning.md` 第 15 行仍是旧说法，留待那份文档整体修订。
+
+## 第 781 轮：Rust 引擎多节点 Phase 1——分片账本与子集读（2026-10-25）
+
+**背景**：`docs/design-multi-node.md` 定下 0.1° 全球多节点的方案：整块分片、root 汇聚全局阶段、纯 Rust TCP、逐位一致。本轮落 Phase 1 的第一刀，不动 N=1 的运行路径。
+
+**改动**：
+- 新 `crates/colm-runtime/src/spatial/partition.rs`：`BlockInventory`（块清单、每块 patch 数、全局 patch 偏移）、`BlockAssignment`/`RankBlocks`；`split(ranks)` 用确定性 LPT 贪心（按 patch 数从大到小，平局取小编号，rank 内再按全局顺序排）。只打开每块读 `ipxstt` 长度，启动开销 O(块数) 而不是 O(patch 数)。
+- `crates/colm-runtime/src/spatial/topology.rs`：新增 `block_names`（只解析目录，不打开 NetCDF）；新增 `SpatialTopology::read_selected`（只读选中块，局部 patch 从 0 编号，块序仍按上游）；`read` 变为 `read_selected(None)`，行为不变；`landpatch_path` 改 `pub(crate)` 供分片账本读 patch 数。
+- 测试：`spatial/partition_tests.rs` 9 项（覆盖/互斥/全局序/LPT 上界/确定性/越界/空清单）；`spatial/topology_tests.rs` 新增 `block_names` 排序测试和 ignored 的真实 fixture 子集读对照。
+
+**验证**：
+- `cargo test -p colm-runtime --lib --bins`：lib **202 通过 / 1 ignored**，bin 1 通过。
+- `COLM_SPATIAL_FIXTURE="$PWD/tmp/ep/hb/out/hb/landdata" cargo test -p colm-runtime --lib selected_blocks -- --ignored`：**1 通过**。测试把该 fixture 复制成两个几何相同的块，分别比较 `element/land_type/cells/shared_fraction/pixel` 与全量读里对应块的切片，并验证未知块、重复选择报错。
+- `cargo clippy -p colm-runtime --all-targets -- -D warnings` 通过；`cargo fmt --all --check` 通过。
+- `cargo test --workspace --lib --bins --no-fail-fast`：`colm-runtime` 202 通过；其余失败集中在本机沙箱/环境（`colm-agent` 的 pty、`/var/folders` 临时 NetCDF 的 HDF 错误、`sandbox-exec` 被拒、以及依赖内核/数据的用例），与 `colm-runtime` 改动无关。正常终端里需要复跑一次完整门禁。
+
+**未做**：`--rank/--ranks` CLI 与装配循环接线（随 Phase 2 的交换层一起做，先不暴露不能跑的开关）；没有真多进程运行；没有提交。
+
+## 第 782 轮：Rust 引擎多节点 Phase 2——多进程传输层 `colm-spmd`（2026-10-25）
+
+**背景**：继续 `docs/design-multi-node.md` 的 Phase 2。先落传输层，它不依赖任何集群资源，可以本机把协议与失败路径测干净，再往 `colm-rs` 里接。
+
+**改动**：
+- 新 crate `crates/colm-spmd`（只依赖 `anyhow`，`[lints] workspace = true`，无 unsafe）：
+  - `RankInfo`：显式 `--rank/--ranks` 优先，其次 `SLURM_PROCID/SLURM_NTASKS`、`OMPI_COMM_WORLD_RANK/SIZE`、`PMI_RANK/SIZE`；`resolve_with` 注入环境供测试。
+  - `Comms`：root 监听 `0.0.0.0:0`，把 `host\nport\n` 原子写进 rendezvous 文件；worker 轮询后连接并握手（8 字节 rank/size + 1 字节 ack）。集合操作 `gather`/`scatter`/`broadcast`/`barrier` 全部按 rank 顺序收发，worker 侧不掌握全局缓冲。
+  - 单条消息 `u64` 长度前缀 + 小端字节，上限 16 GiB；`encode/decode_f64s`、`encode/decode_bools`。
+- 加入根 workspace members。尚未接入 `colm-runtime`（下一轮）。
+- 测试 `src/lib_tests.rs` 7 项：显式值、launcher 环境优先级、`f64`/`bool` 往返、**3 进程真实 TCP** gather/scatter/broadcast/barrier 按 rank 序、worker 等不到 root 的超时、root 等不到 worker 的超时。
+
+**踩坑**：gather 的第一版 ack 用裸字节写，worker 却按帧读，第一次运行两个 worker 卡满 10 s 超时、root 跟着读到 EOF。改为空帧 ack 后通过。记一条规矩：**同一条连接上除握手外全部走帧**，握手单独写在注释里，否则下一个人还会在另一个集合操作上踩一次。
+
+**验证**：
+- `cargo test -p colm-spmd`：**7 通过**；Doc-tests 0。
+- `cargo clippy -p colm-spmd --all-targets -- -D warnings`；`cargo fmt --all --check`。
+- `cargo test -p colm-runtime --lib --bins`：202 通过 / 1 ignored（本轮未改 runtime，确认没有连带影响）。
+- `cargo test --workspace --lib --bins --no-fail-fast` 的环境性失败与第 781 轮相同，未重跑。
+
+**未做**：没接进 `colm-rs`/`colm-cli`，没有 `--rank/--ranks` 参数，没有多进程运行；root 消息上限 16 GiB，history 流式化留到 Phase 4；没有真集群。
+
+## 第 783 轮：多节点启动期分片握手 `spmd`（2026-10-25）
+
+**背景**：Phase 2 的第二层。传输层会收发字节，但先要证明各 rank 看到的是同一张分片表 —— 否则后面每步交换的数组长度与全局 patch 偏移会错位，而且会以“某个 rank 的 patch 数不对”这种间接形式暴露。
+
+**改动**：
+- `crates/colm-runtime/src/spmd.rs`：
+  - `SpmdPlan`：读 `landdata` 的块清单并做确定性分片（复用 `spatial::partition`），提供本 rank 的块名、全局 patch 偏移、本地 patch 数；计划表编码为带版本号的 u64 序列（版本、rank、块数、总 patch 数、块清单指纹、本地块数、本地 patch 数、块下标、全局偏移）。
+  - `SpmdSession`：建 TCP 会话后让 root 收齐各 rank 的计划表逐项比对；不一致时先广播错误再返回，worker 不会空等；`SpmdPlan::read` 走 `RankInfo` 的启动器环境解析。
+- `colm-spmd` 增 `encode_u64s`/`decode_u64s`。
+- 测试：`spmd_tests.rs` 5 项 —— 覆盖/唯一性、编码稳定、单 rank 无 peer、**3 个真实 TCP 进程同意同一计划**、**一个 rank 的 landdata 被改后全员拒绝**；另 1 项 ignored 的真实 fixture 清单读取。
+
+**验证**：
+- `cargo test -p colm-runtime --lib --bins`：lib **207 通过 / 2 ignored**，bin 1 通过；其中 `spmd` 5 通过。
+- `COLM_SPATIAL_FIXTURE="$PWD/tmp/ep/hb/out/hb/landdata" cargo test -p colm-runtime --lib a_real_landdata_inventory -- --ignored`：1 通过。
+- `cargo test -p colm-spmd`：8 通过（新增 u64 往返）。
+- `cargo clippy -p colm-runtime -p colm-spmd --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：`colm-rs` 的 `--rank/--ranks` 参数与 `SpmdSession` 接线、局部装配、root 全局阶段、逐条 history；还没有多进程实跑。`SpmdSession` 目前只在测试里用过。
+
+## 第 784 轮：多进程启动自检 `colm-rs --spmd-check`（2026-10-25）
+
+**背景**：传输层与分片握手都只在本机测试里用过，还没有从 `colm-rs` 的真实入口跑过。先把“真实算例的 landdata + 两个进程 + 共享目录 + rank 环境”这一层验通，后面接每步交换时才能把启动失败与交换失败分开。
+
+**改动**：
+- `colm-rs` 新增 `--spmd-check`、`--rank`、`--ranks`；前两者必须一起给，越界拒绝；`--spmd-check` 只对空间算例且不支持 LULCC。
+- `run_spatial` 在读完 `DEF_LC_YEAR` 后进入 `run_spmd_check`：`SpmdSession` 建连并让 root 比对分片表 → 每个 rank 用 `SpatialTopology::read_selected` 只读自己的块 → 校验本地 patch 数与计划一致 → barrier → root 打 `CoLM SPMD plan check completed.`。不推进模型、不写输出。
+- 参数解析测试 1 项（成对校验、越界）。
+
+**真实数据手工验证**：把本地 `tmp/ep/hb` 的 landdata 复制成两块（`landpatch_e100_n35.nc` 复制为 `e110_n35.nc`，`mesh` 同样），`DEF_dir_output` 改到 `tmp/spmd-check-hb/out/`，在同一个输出目录上跑：
+- `colm-rs tmp/spmd-check-hb --land-cover igbp --case-outputs --spmd-check --rank 0 --ranks 2` 与 `--rank 1 --ranks 2` 两个进程并发：rank0 打印 `1 block(s), 22 patch(es), global offsets [0]`，rank1 打印 `1 block(s), 22 patch(es), global offsets [22]`，root 打印完成行，两个进程 exit 0。
+- 单 rank 对照：`--rank 0 --ranks 1` 打印 `2 block(s), 44 patch(es), global offsets [0, 22]`。
+- 说明：重复块只用于验证“分片 + 本地读 + 建连”；不是真实空间几何。
+
+**验证**：
+- `cargo test -p colm-runtime --lib --bins`：lib 207 通过 / 2 ignored，bin 2 通过。
+- `cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：自检不推进模型；`--spmd-check` 仍要求 `--land-cover`（沿用 parse 契约）；没有在真集群跑过 `srun`；每步交换与多 rank 模拟是下一层。
+
+## 第 785 轮：tianhe 多节点实测——TCP 带宽、patch 单价与内存、JRA3Q 强迫（2026-10-25）
+
+用户 2026-10-25 同意在 tianhe 提交短测作业。全部为 `srun` 短作业（≤10 min），测完 `squeue` 为空；中间文件在 `~/HDD_POOL/colm-desktop/probes/{hb,hb64}`，未入仓。
+
+**环境坑**：计算节点没有 `iperf3`、没有 `/usr/bin/time`。前者把登录节点的 `/usr/bin/iperf3` 和 `libiperf.so.0`/`libsctp.so.1`/`libcrypto.so.3` 放到 `~/HDD_POOL/colm-desktop/tools/iperf`，`LD_LIBRARY_PATH` 指过去即可；后者改用 `/proc/<pid>/status` 的 `VmHWM` 逐秒采样。另：`srun -N2 -n2` 会把两个任务挤到同一节点，必须写 `--nodes=2 --ntasks=2 --ntasks-per-node=1 --distribution=block:block`（同一写法下 rank0/rank1 才分别落到 cnode4691/cnode4710）。
+
+**M1 网络**（两节点，iperf3 8 流 10 s）：
+- ping 平均 0.032 ms（最小 0.027 / 最大 0.043）；
+- 聚合 **40.1 Gb/s 发 / 40.08 Gb/s 收**，单流约 5.0 Gb/s；
+- 接口是 `gn0`（12.4.75.32 / 12.4.76.99），IB 只用于存储挂载，不是 IPoIB；
+- 对设计的含义：0.1° 全球每步约 0.3 GB 的交换在 40 Gb/s 下约 60 ms；按实测每步 5–11 s 计算占 0.5–1.2%，TCP 星形足够，Phase 5 的 MPI 后置。
+
+**M2 patch 单价与内存**（tianhe deimos 单节点 64 核 / 512 GB，JRA3Q 强迫，关 `DEF_USE_GridRiverLakeFlow` 与 history）：
+- 基线：本地 `tmp/ep/hb`（LCT IGBP，22 patch，2003-01-01..10，480 步）上传到 tianhe，用引擎 `7752a17c7aa1aacc`。
+  - t=1：墙钟 22 s，主循环 20.5 s（forcing 15.34 s、patch 5.10 s），峰值 RSS 562 MB；
+  - t=8：墙钟 17 s，主循环 15.4 s（forcing 12.02、patch 3.32），峰值 563 MB；
+  - t=64：墙钟 17 s，主循环 15.2 s（forcing 11.38、patch 3.73），峰值 568 MB。
+- 把块复制到 64 块（1,408 patch，2003-01-01..03，144 步）：
+  - t=1：主循环 108.8 s，patch **107.36 s → 0.53 ms/patch/步**，峰值 674 MB；
+  - t=8：patch 14.27 s（**7.5×**），主循环 15.5 s，峰值 678 MB，墙钟 30 s；
+  - t=64：patch 2.92 s（**36.8×**，并行效率 57%），主循环 5.5 s，峰值 694 MB，墙钟 17 s；
+  - 两次峰值差 → **约 81 KB/patch**（无 history；旧锚点 120 KB/patch 含两份状态+模板+history 缓冲）。
+- 投影（LCT、不含 I/O/PC/BGC）：单节点 t=64 吞吐约 69.4k patch/步/s；5.8M patch 理论 72 s/步/节点，8 节点 × 64 线程约 9 s/步，模型年约 44 h；按保守的 0.53 ms/patch 串行算则 25 h/模型年（1 核），说明测得的并行效率才是主导。
+  - 注意：0.1° 全球是 64 节点级任务，上述 8 节点只是线性外推；PC/BGC/河湖/history 会另加时间。
+
+**M4 强迫读取**：
+- 22 patch 冷启动首次：forcing 15.34 s / 480 步 ≈ 32 ms/步；按 JRA3Q 月文件（每变量约 550 MB、每条记录一整张全球场分块），即使 1°×1° 窗口也要解压整条记录；
+- 页缓存热后 1,408 patch 运行里为 0.86–1.77 s / 144 步 ≈ 6–12 ms/步；
+- 对 0.1° 每步 5–11 s 可忽略；暂不需要“按 rank 预裁强迫”，但 N 个 rank 各自解压一次，总量是 N×，Phase 4 再实测。
+
+**对设计数字的修正**（已回填 `docs/design-multi-node.md`）：
+- patch 物理单价从旧锚点 1.1–6.5 ms 改为 **LCT 实测 0.53 ms/patch/步（1 线程）**，并保留 PC 旧锚点作上界；
+- 每 patch 状态内存 **81 KB/patch（无 history）**；
+- 0.1° 全球状态总量 360–480 GB（原 540–720 GB 是基于 120 KB/patch 且含 history 缓冲的高估）；
+- 每步 5–11 s、模型年 1–2.2 天（512 核，LCT，不含 I/O）；
+- 通信每步约 60 ms（40 Gb/s 实测）。
+
+**未做**：多节点计算（所有 M2/M4 都是单节点）；真实 0.1° landdata；PC/BGC/河湖/history；M3 history 写吞吐。
+
+## 第 786 轮：Phase 2c——局部装配 + 多 rank 主循环跑通（受限配置），1 vs 2 rank 逐字节（2026-10-25）
+
+**目标**：把 Phase 2 的传输层/分片表接到 `colm-rs` 的真实运行路径，先跑通一个“只有 patch 物理 + 块级重启”的受限配置，验证 N rank 与 1 rank 全输出逐字节；河湖/history 等全局阶段留在下一步。
+
+**改动**：
+- `SpatialCase` 携带 `Option<SpmdPlan>`；`run_spatial` 在 `--ranks>1` 或启动器环境（`SLURM_NTASKS`/`OMPI_COMM_WORLD_SIZE`/`PMI_SIZE`）>1 时调用 `SpmdSession`（读块清单、分片、建连、root 比对）。**单进程不建连、不解析环境**。
+- 多进程首版拒绝：LULCC、`CatchLateralFlow`、vector history、`GridRiverLakeFlow`、`DEF_Optimize_Baseflow`、history 输出（`DEF_HIST_FREQ` 非 none）、BGC、tracer、`--hybrid`；错误在装配前给出。
+- `run_spatial_segment` 多进程时用 `SpatialTopology::read_selected` 只读本 rank 块；装配的 `worker_patch` 改成“全局块起始偏移 + 块内 patch”（单进程时等于原来的 `patches.start + patch`，全链路行为不变）；每个 rank 只写自己的块重启/旁车。
+- `SpatialRuntime` 增 `with_quiet_progress`：非 root 不打每步进度；`run_spatial` 末尾在 `barrier` 后由 root 打成功标记；非 root 的段摘要也不打。
+- 测试：新增 `requested_rank_info` 的显式 `--ranks`/单进程判定。
+
+**验收（本机 Mac，`tmp/spmd-run-1` / `tmp/spmd-run-2`，由 `tmp/ep/hb` 复制成 2 块，关河湖/history，`end_day=3`，144 步，JRA3Q 强迫）**：
+- 1 rank（普通单进程路径，44 patch / 2 块）：exit 0，写出 2 份主重启 + 2 份 restart-hist 旁车；
+- 2 rank（`--rank 0/--ranks 2` 与 `--rank 1 --ranks 2`，各 22 patch / 1 块）：两个进程 exit 0；root 日志有进度与 `CoLM Execution Completed.`，worker 日志为空（安静）；
+- 四个输出逐字节相同：
+  - 主重启 `hb_restart_2003-004-00000_lc2005_{e100,e110}_n35.nc`：sha256 都是 `034b35ceb7446daaf224da6c740e684ccd8155bc4fd4e371f637b40b91f5a03c`（1 rank 与 2 rank 一致）；
+  - 旁车 `hb_restart_hist_2003-004-00000_{e100,e110}_n35.nc`：sha256 都是 `bf39f3d075b90dafa662611b669952d3789b9768c02927a0daefe46a49c486cf`。
+- 反向：同一 2 rank 命令跑河湖打开的 `tmp/spmd-check-hb`，两个进程都在装配前报 `multi-process spatial runs do not support grid river-lake routing yet; set DEF_USE_GridRiverLakeFlow = .false.`，exit 1，没有空等。
+
+**验证**：`cargo test -p colm-runtime --lib --bins`（lib 207 通过 / 2 ignored，bin 3 通过）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：河湖/history/catchment/tracer/BGC；真多节点 `srun`；`worker_patch` 的全局偏移只通过代码路径保证、没有外部检查；N=1 与改前发布版的逐字节回归未跑（本地只验证了受限配置的 1 vs 2 rank）。
+
+## 第 787 轮：连续块分片 + patch 数组 all-gather（2026-10-25）
+
+**背景**：Phase 2c 接下来要接河湖的每步交换。原来的 LPT 分片把任意块分给任意 rank，局部数组按 rank 拼起来不是全局 patch 顺序，每步都要按全局索引重排；改成“全局连续块区间”后，各 rank 的局部数组按 rank 顺序拼接就是全局顺序，交换层不需要索引表。这是接河湖前的地基。
+
+**改动**：
+- `crates/colm-runtime/src/spatial/partition.rs`：`BlockInventory::split` 从 LPT 改为**连续块区间**切分（按全局块顺序的前缀 patch 数取均分边界；每 rank 的块连续、offsets 仍等于全局前缀和）。单 rank 结果不变（全部块）。
+- 新增 `crates/colm-runtime/src/spatial/exchange.rs`：`PatchExchange`（`patch_offset`/`local_patches`/`global_patches` + `all_gather_f64`/`all_gather_bools`）。root 先 gather 再 broadcast，所有 rank 拿到同一份按全局 patch 顺序排列的数组；长度在本地先校验，坏长度/越界在触网前拒绝。3 进程真实 TCP 测试（长度 2/3/1、offset 0/2/5）验证拼接顺序与重复 all-gather。
+- 分区测试改写为连续切分语义（每 rank 块连续、段间衔接、确定性、负载界）；其余测试不动。
+
+**验证**：
+- `cargo test -p colm-runtime --lib spatial::partition spatial::exchange`：分片 9 项、交换 3 项全过。
+- 连续切分下重跑第 786 轮的本地 1 vs 2 rank 验收（hb 复制成 2 块、关河湖/history、144 步）：两进程 exit 0，4 个重启/旁车仍逐字节相同（主重启 sha256 `034b35…`、旁车 `bf39f3…`）。
+- `cargo test -p colm-runtime --lib --bins`：lib 210 通过 / 2 ignored，bin 3 通过（交换测试并入 lib）。
+- `cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**没做**：`PatchExchange` 还没有接进 `SpatialRuntime`（下一步：河湖 gather/broadcast 的每步输入与 flood 回写）；history 逐条写仍未实现；没有多节点。
+
+## 第 788 轮：复制河网接入多进程——河湖开、1 vs 2 rank 全输出逐字节（2026-10-25）
+
+**目标**：把第 787 轮的 `PatchExchange` 接进 `SpatialRuntime`，跑通河湖汇流的多进程路径。方案按设计稿 §4 末尾：**每个 rank 持一份全局河网、每步 all-gather 后同步跑同一个 `RiverModel::step`**（不做 root-only，也不 scatter flood）。
+
+**改动**：
+- `SpatialRuntime::run` 增加 `Option<&mut PatchExchange>`：每步先把局部 runoff、漫滩 evap/infil 填好，再 all-gather 成全局数组；各 rank 用同一份全局输入与同一份河网状态跑 `river.step`。flood 回馈在下一步按 `patch_offset + local_index` 索引；单进程路径保留原来的顺序写法。
+- 新增 `with_river_for_spmd`：`included` filter 接受全局 patch 数（各 rank 河网是全局的）。运行时检查 exchange 的 local/global patch 数与 river filter 长度一致。
+- `run_spatial_segment` 多进程时每 rank 再读一份全局 topology、gather 全局 `patch_type/patch_mask/forcing_mask`，构造同一份 network/routing/runoff filter；河道重启、`.river` 历史文件只由 root 写，块旁车与 `history_river_required` 标记在所有 rank 上保持一致（`write_block_restarts` 新增 `write_river_history` 开关）。
+- `run_spatial` 不再拒绝 `DEF_USE_GridRiverLakeFlow` 的多进程；仍需 history=none、非 tracer/BGC/catchment/LULCC/hybrid。
+
+**验证（本机 Mac，hb 复制成 2 块，河湖开、`DEF_HIST_FREQ='none'`、end_day=1，48 步，JRA3Q）**：
+- 1 rank：44 patch / 2 块，墙钟 32.8 s（user 3m40s，河湖按系统并行），输出 2 份主重启、2 份旁车、1 份 `gridriver` 重启（6.7 MB）、1 份 `.nc.river` 历史文件（20 MB）。
+- 2 rank（各 22 patch / 1 块）：两进程 exit 0，42 s（两 rank 各跑一份全局河湖），输出齐全。
+- 1 rank vs 2 rank 的 **6 个文件全部逐字节相同**：
+  - 主重启 `b1c677b50126017cc937a89f3f5a6fe2e09f4a11699ab70d446ff72f61e7a40e`
+  - `gridriver` 重启 `98d321af86707dda2f9e0db42e3103561c6a92321c7e6d095ab1620ef336e071`
+  - 块旁车 `37cb6f722a013e52a8d2a48c7deccc12fb5478f1c9de61a9e6da85d5abd0c556`
+  - `.river` 历史 `e67643c720df501bec0ea94504bef4658c787e140d97bde0f2d8f44c4c7aa103`
+
+**验证命令**：`cargo test -p colm-runtime --lib --bins`（lib 210 通过 / 2 ignored，bin 3 通过）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：history 输出（逐条写与 cell 收集）、多节点 `srun`、PC/BGC/tracer/catchment/LULCC；复制河网以 N 倍河湖 CPU 换简单一致，多节点上要复测河湖占比。
+
+## 第 789 轮：多进程 history 地基——累加器序列化与外部写模式（2026-10-25）
+
+**背景**：Phase 2c 只剩 history。方向是把“每个 rank 的区间累加器”在记录时刻收给 root，由 root 的全局会话照原路径平均、聚合、写文件；这样输出与单进程逐位一致，不需要改历史变量的聚合/压缩逻辑。本轮先落可测试的底层原语，不接运行循环。
+
+**改动**：
+- `HistoryAccumulator::encode/decode`（`crates/colm-runtime/src/history.rs`）：把 `sums`（标量/分层）、`steps`、`filtered`、`offered` 编成版本化小端字节；`BTreeMap/BTreeSet` 排序保证同一状态编码字节固定；带待处理 `overrides` 的状态拒绝导出；截断/多余字节/未知版本/非 UTF-8 名字都报错。
+- `HistorySession` 外部写模式：
+  - `with_external_writer()`：本地只累加、不写文件；
+  - 到期时 `finish_step` 不平均/不写盘，而是把原始累加器 `mem::take` 后存进 `take_export()`（同时推进 cursor、清空 staged）；
+  - root 侧 `install_accumulators()` + `write_due_record()`：装入全局顺序的原始累加器后走原 `finish_step` 平均/聚合/写文件；
+  - 仍保留 `raw_at_end` 与窗口快照逻辑，续跑旁车语义不变。
+- 测试 2 项：累加器编解码往返（标量/分层/过滤量/步数/截断/多余字节）；外部写会话到期导出 2 个累加器且不创建任何文件、cursor 前进。
+
+**验证**：`cargo test -p colm-runtime --lib --bins` → lib **212 通过 / 2 ignored**、bin 3 通过；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**下一步**：在 `colm-rs` 里为多进程 history 建 root 的全局 writer 会话（全局 patch 数、全局 grid、river writer 仅 root 暂存），每步各 rank 本地 `push_jobs`、到期用 exchange 收原始累加器字节给 root，root `install_accumulators` 后写记录；河道 history/unitcat 与 `.river` 只由 root 写。验收目标：hb 河湖开 + history 开，1 vs 2 rank 的 history 文件（含 unitcat）逐字节相同。
+
+## 第 790 轮：多进程 history 打通（河湖关闭）——1 vs 2 rank 的 history 文件逐字节（2026-10-25）
+
+**目标**：把第 789 轮的累加器导出原语接进运行循环，先验证河湖关闭的网格 history；河湖开 + history 的 unitcat/河道量留到下一轮。
+
+**实现**：
+- `SpatialRuntime::run` 增加独立的 `writer: Option<&mut SpatialHistory>`：
+  - 每个 rank（含 root）仍用**本地外部写会话**（`with_external_writer`）逐 patch 累加；
+  - 每步结束把"是否到期 + 到期原始累加器"编码，用 `PatchExchange::all_gather_bytes` 收给 root；未到期也发一个小状态包，保证各 rank 记录调度一致（不一致当场报错）；
+  - root 的**全局写会话**（全局 patch 数、全局 history 网格、全局 `forcing_mask`）装入按 rank 顺序拼接的累加器，再 `write_due_record` 走原来的平均/聚合/写文件路径。
+- 新增 `HistorySession::copy_schema_flags_from`：全局写会话不推进 patch，文件里 `f_qlayer/f_vegwp` 等条件列由第一次 `push_*` 现场决定；root 在写前从本地会话复制这些开关。**这是第一版 hb 对照失败的根因**（2 rank 少了 `f_qlayer`/`f_vegwp`、多了 `f_qcharge`，即 schema 按缺省值走）。
+- `run_spatial_segment`：多进程时 root 用全局 topology + 全局 `patch_type/patch_mask/forcing_mask` 建全局 history 网格；本地会话只累加、不建网格；root 另建全局 writer。块重启/旁车仍各 rank 写自己的块。
+- 多进程 history 暂时只允许 `DEF_USE_GridRiverLakeFlow = .false.`；河湖开 + history 明确报错，避免写到一半的 unitcat/河道量。
+
+**验证（本机 Mac，hb 复制成 2 块，河湖关，`DEF_HIST_FREQ='HOURLY'`，end_day=1，48 步，JRA3Q）**：
+- 1 rank（44 patch/2 块）与 2 rank（各 22 patch/1 块）均 exit 0；2 rank worker 静默。
+- `hb_hist_2003-01.nc` **逐字节相同**，sha256 两边都是 `5f3c8e79de9820896eb870f522461d9e19453491ffa3154a9000cd6ca53f40c5`。
+- 同一算例的 4 个块重启/旁车文件也逐字节相同。
+- 单进程 2.4 s；2 rank 4.5 s（含两份全局 writer/通信开销，测试规模下正常）。
+
+**验证命令**：`cargo test -p colm-runtime --lib --bins`（lib 212 通过 / 2 ignored，bin 3 通过）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：河湖开 + history（unitcat 与 `GRIDDED_RIVER_VARIABLES` 的 root 暂存）、逐条写（0.1° 记录约 8 GB，当前仍是组缓冲）、多节点。
+
+## 第 791 轮：河湖开 + history 的多进程——1 vs 2 rank 全部输出逐字节（2026-10-25）
+
+**目标**：把河湖 history（unitcat、`GRIDDED_RIVER_VARIABLES`、`.river` 标记）接进多进程，完成 hb 配置下 Phase 2c 的"河湖 + history"组合。
+
+**实现**：
+- `SpatialRuntime` 的河道 history 暂存改用 `writer` 会话：多进程只有 root 有全局 writer（`river_writer` + 全局 grid），worker 跳过；单进程仍走 `history`。
+- 放开了"多进程 history + GridRiverLakeFlow"的拒绝。
+- **关键修复**：root 的 `RiverHistoryWriter::write_record` 会清零 root 的 `river.history` 累加器，worker 没有 writer、不清零，导致块旁车 `history_river_required` 不一致（实测 2 rank 的 e110 旁车为 1、单进程为 0，重启会找不存在的 `.river` 文件）。现在每个到期记录所有 rank 都 `river.history.reset()`；worker 在非自然边界记录前先把原始累加器存进 `raw_history_at_end`，与 root 的暂存语义一致。河道 restart 与 `.river` 仍只由 root 写。
+
+**验证（本机 Mac，hb 复制成 2 块，河湖开，`DEF_HIST_FREQ='HOURLY'`，end_day=1，48 步，JRA3Q）**：
+- 1 rank（44 patch/2 块，67.9 s）与 2 rank（各 22 patch/1 块，109.2 s）均 exit 0、worker 静默。
+- **7 个输出全部逐字节相同**：`hb_hist_2003-01.nc`（sha256 `930876e0262c31b4…`）、`hb_hist_unitcat_2003-01.nc`（`1a73fbd407bfad99…`）、2 份主重启、2 份块旁车、1 份 `gridriver` 重启。
+- 起始旁车 `history_river_required` 两边都是 0，没有生成多余的 `.river` 文件。
+
+**验证命令**：`cargo test -p colm-runtime --lib --bins`（lib 212 通过 / 2 ignored，bin 3 通过）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：逐条记录写（当前 history 仍整组缓冲，0.1° 单记录约 8 GB）、N=4、多节点。
+
+## 第 792 轮：河湖 + history 的 N=4 验收——1 vs 4 rank 全部输出逐字节（2026-10-25）
+
+**目标**：补上 Phase 2c 的 N=4 证据（目标配置：河湖开、history HOURLY）。hb 复制成 4 个块（e100/e110/e120/e130）。
+
+**验证（本机 Mac，河湖开，`DEF_HIST_FREQ='HOURLY'`，end_day=1，48 步，JRA3Q）**：
+- 1 rank：88 patch/4 块，67.6 s；4 rank：各 22 patch/1 块，四进程 exit 0，3 m 52 s（每 rank 复制一份全局河网，测试规模下河湖/通信开销占比高）。
+- **10 个输出全部逐字节相同**：`hb_hist_2003-01.nc`、`hb_hist_unitcat_2003-01.nc`、4 份主重启、4 份块旁车、`gridriver` 重启。
+- worker 静默，root 打印 48 步与完成标记。
+
+**验证命令**：`cargo test -p colm-runtime --lib --bins`（lib 212 通过 / 2 ignored，bin 3 通过）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
+
+**未做**：逐条记录写（当前仍整组缓冲，0.1° 单记录约 8 GB，月度组约 240 GB）、多节点 `srun`。
+
+## 第 793 轮：history 逐条记录写——内存从整组降到一条记录（2026-10-25）
+
+**目标**：0.1° 全球一条 history 记录约 7.8 GB、月度整组约 240 GB；本轮把网格 history 改成逐条记录追加写，同时保持单进程/多 rank 的同一路径与逐字节一致。
+
+**实现**：
+- `colm-hist`：
+  - `HistoryBuffers::write_gridded_record(path, total_records, record)`：首条记录建文件、写维/坐标/静态场与变量定义；之后每条 `netcdf::append`，按时间片写本记录的网格值。变量块形状按 `total_records` 定（时间维 1），压缩级别不变。
+  - `gridded_shape` 显式接收 `records` 参数，整组写与逐条写共用。
+- `colm-runtime`：
+  - `HistorySession::with_streaming()`/`with_streaming_if()`；网格 history 到期时只建 **1 条记录**的 `HistoryBuffers`，填本记录后立即追加，不再保留整组。
+  - 单进程网格 history 与多进程 root 全局 writer 都打开 streaming；示踪物窗口（`tracer_time_step_seconds`）暂不支持流式，仍整组写（多进程本就拒绝 tracer）。
+  - 分组最后一条返回文件路径；`finish()` 对流式会话是空操作，运行终点不需要再落盘。
+- `colm-hist` 测试：逐条写与整组写的 `time`/`t_grnd` 值逐值相同、`time` 维长度相同。
+
+**验证（本机 Mac，hb 2/4 块，河湖开，HOURLY，48 步）**：
+- 1 vs 2 rank：history、unitcat、2 份主重启、2 份块旁车、`gridriver` 全部逐字节相同。
+- 1 vs 4 rank：history、unitcat、4 份主重启、4 份块旁车、`gridriver` 同样全部逐字节相同。
+- 单进程 4 块 streaming 55.3 s（整组写 67.6 s）；1 rank vs 4 rank 用时 2 m 58 s。
+- **数值对照**：新流式文件与旧整组文件的 `ncdump` 完全一致（0 行 diff）；文件字节不同（例如 2 块算例 674,337 → 673,068 B，块写顺序/压缩落盘布局不同）。逐位契约是“同一条 writer 路径下 N=1 vs N>1 逐字节”，不是跨版本字节相同；下游读值/结构不受影响。
+
+**验证命令**：`cargo test -p colm-runtime --lib --bins`（lib 212 通过 / 2 ignored，bin 3 通过）；`cargo test -p colm-hist --lib --features io`（60 通过）；`cargo clippy -p colm-runtime/-p colm-hist --all-targets --features io -- -D warnings`；两个 workspace 的 `cargo fmt --all --check`。
+
+**未做 / 下一阶段**：逐条写现在逐记录调用 netcdf 的 `put_values`，压缩由 HDF5 串行 deflate；0.1° 单记录 8 GB 的写吞吐要 Phase 4 用 `h5chunk` 按记录并行压缩直写（块长 1，正好可并行）。Phase 3（tianhe 多节点 `srun`、CLI/GUI）与 Phase 4（0.1° 预处理/重启/写吞吐）仍未开始。
+
+## 第 794 轮：天河两节点 srun——`--spmd-check` 与河湖+history 真算，1 task vs 2 node 全部输出逐字节（2026-10-25）
+
+**构建**：把当前工作树同步到 tianhe `~/HDD_POOL/colm-desktop/engine/7752a17c7aa1aacc/src`（保留原快照到 `engine/phase3/original-src`），用仓库自带工具链 `~/.local/share/colm/toolchain/{cmake,rust}/bin`（cmake 4.4.4，系统 cmake 3.22 不够）和共享 `CARGO_TARGET_DIR=~/HDD_POOL/colm-desktop/target` 增量构建 release。tianhe 的 vendor 缺 `colm-agent` 的依赖，构建时把 workspace members 临时缩到 `colm-runtime` + `colm-spmd`；`colm-rs` LTO 链接约 10–20 min。**这是远程构建的临时做法，不是仓库改动。**
+
+**启动**：
+- 计算节点名字互相可解析（`srun -N2 -n2 hostname; getent hosts $(hostname)`：`cnode4751` ↔ `12.4.82.224`，`cnode4752` ↔ `12.4.83.3`）。
+- `--spmd-check` 在 2 节点通过：rank 0/1 各 32 块 / 704 patch，全局 offset 从 0 与 704 起连续，root 打印 `CoLM SPMD plan check completed.`。
+- **踩坑**：第一次 2 节点真算，worker 读到上一次 `--spmd-check` 留在 `out/hb/.colm-spmd/endpoint` 的旧节点名（cnode4751），而本次分配是 cnode4770/4779，连接超时 600 s。已改 `spmd_rendezvous_path`：Slurm 下 endpoint 带 `SLURM_JOB_ID`/`SLURM_STEP_ID`，并支持 `COLM_SPMD_RENDEZVOUS` 覆盖；单元测试覆盖三种路径。tianhe 上的 binary 是修复前构建，成功用例是手工删旧 endpoint 后跑的；下一次远程构建会验证修复。
+
+**真算（hb64：64 块 / 1408 patch，河湖开，HOURLY，48 步，JRA3Q）**：
+- 1 task / 1 节点：主循环 6.8 s（forcing 0.63、patch 1.07、河湖 3.17、history 1.60 s）。
+- 2 task / 2 节点（`--nodes=2 --ntasks=2 --ntasks-per-node=1 --cpus-per-task=64 --distribution=block:block`）：两 rank 各 704 patch / 32 块，主循环 19.9 s（河湖 12.7/15.4、history 2.9/5.6、patch 0.85 s）；两进程 exit 0。
+- **1 task vs 2 node 的 131 个输出文件全部逐字节相同**：history 2 个（`hb_hist_2003-01.nc`、`hb_hist_unitcat_2003-01.nc`）+ 129 个重启/旁车（64 主重启 + 64 旁车 + `gridriver`），`cmp` 全部通过。
+
+**观察**：2 节点的河湖段比 1 节点慢 4–5 倍（复制河网 + 每步 all-gather，且两 rank 各跑一份全局河湖）；Phase 4 要在 0.1° 真实规模上确认占比，必要时回到 root-only/分布式河湖。测试规模（1408 patch）下河湖占比过高，不代表 0.1° 全球（河湖占比 <1%）的行为。
+
+**本地门禁**：`cargo test -p colm-runtime --lib --bins`（lib 212 通过 / 2 ignored，bin 4 通过）；`cargo test -p colm-hist --lib --features io`（60 通过）；clippy `-D warnings`；两个 workspace fmt 通过。
+
+## 第 795 轮：Rust 引擎远程多进程的 CLI 入口（2026-10-25）
+
+**目标**：让 `colm-cli` 的远程运行路径能启动 Rust 引擎多进程，而不是继续报“--ranks 只给 Fortran”。
+
+**实现**：
+- `colm-kernel` 新增 `run_stage_streaming_external_ranks`：用 `COLM_MPIEXEC`（srun/mpiexec）+ `COLM_MPIEXEC_ARGS` 启动普通可执行文件，每个 rank 同一份 namelist；不链接 MPI、不做 bundled MPI 运行时配置。`launch_command` 增加 `external_launcher` 分支，保留 Fortran MPI 原路径。
+- `colm-cli`：
+  - `RunPlan::from_opts` 允许 Rust `--ranks>1`（远程运行本身就在服务器上）；远程 command 在 Slurm 下生成
+    `export COLM_MPIEXEC=srun` 与 `COLM_MPIEXEC_ARGS="--nodes=N --ntasks-per-node=K --distribution=block:block"`，
+    非 Slurm 生成 `COLM_MPIEXEC=mpiexec`。
+  - `preflight_rust_model` 本地仍拒绝 `--ranks>1`：Rust 多进程必须由远程 launcher 启动（要求 `COLM_MPIEXEC` 存在）；`run_case` 的 USEMPI 检查只约束 Fortran。
+  - Rust 模型阶段在 `ranks>1` 时走新的 external runner，`ranks==1` 保持原来的直接执行。
+  - 更新 `--ranks` 的 CLI 帮助文案。
+- 测试：remote plan 允许 Rust 4 rank；Slurm 生成 `--nodes=2 --ntasks-per-node=2`、Bare 生成 mpiexec；单进程不产生环境变量；kernel `launch_command` 外部分支参数顺序 `-n 3 exe namelist extra`。
+
+**验证**：`cargo test -p colm-cli --bins remote_cmd_tests`（49 通过）；`cargo test -p colm-kernel --lib external_launcher`（1 通过）；clippy 通过；两个 workspace fmt 通过。`cargo test -p colm-cli --bins` 全量有 29 个与本轮无关的环境失败（rawdata/netcdf 临时文件），单独检查过失败列表。
+
+**未做/待验**：GUI 的进程数/节点数入口；`remote-run` 端到端（需要先在 tianhe 重建包含 `colm-cli` 的 engine snapshot）；tianhe 重新构建后用新 rendezvous 路径重测 2 节点。
+
+## 第 796 轮：tianhe 重构建后复验——job/step 级 rendezvous + 2 节点 131 文件仍逐字节（2026-10-25）
+
+**修复验证**：保留上一次运行留下的 `out/hb/.colm-spmd/endpoint`（内容 `cnode1796/22313`，指向旧节点），重新构建 tianhe 上的 `colm-rs` 后：
+- `--spmd-check` 2 节点通过；目录里同时出现旧 `endpoint` 与新 `endpoint-job8762031-step0`，worker 读的是新文件，没有连旧节点。
+- 48 步河湖+history 真算（hb64，2 节点各 64 核）exit 0；与 1 task 基准的 **131 个输出全部逐字节相同**（`OK=131 DIFF=0`）。
+- 2 节点主循环 19.9 s 量级不变（河湖 ~12.9 s、history ~5.7 s）；worker 静默。
+
+**构建**：只用 `cargo build --release -p colm-runtime --bin colm-rs`，LTO 链接约 5 min（依赖缓存已热）。tianhe 的 workspace members 仍临时缩为 `colm-runtime` + `colm-spmd`（vendor 缺 `colm-agent` 依赖），只影响远程构建。
+
+**本地门禁**：`cargo test -p colm-cli --bins remote_cmd_tests` 49 通过；`cargo test -p colm-kernel --lib external_launcher` 1 通过；clippy 通过；两个 fmt 通过。`colm-kernel` 全量 lib 有一个环境失败（`ps` 权限，sandbox 下无法读进程组），与本轮无关。
+
+## 第 797 轮：GUI 解锁远程 Rust 进程数（2026-10-25）
+
+**实现**：
+- `RunPanel` 原来只有 `engine === 'fortran'` 才显示 rank 数；Rust 引擎的 `nums[0]` 还被硬编码成 1。现在：
+  - 远程（`host` 非空）Rust 显示“每个算例的进程数”，站批量（按节点打包、每站一个 CPU）仍隐藏并固定 1；
+  - 本机 Rust 仍固定 1 且不显示进程数；
+  - 提交时 `mpiRanks` 使用界面值（远程 Rust），本地/站批量仍为 1。
+- `remote_run` 本来就带 `ranks` 参数，`run_args` 会生成 `--ranks`；本轮只改界面条件与本地/站批量分支，后端命令无签名变化。
+
+**验证**：`npm run typecheck`、`npm run lint`、`npm run format:check`、`npm test`（889 通过，0 失败；含 check-gui 与契约检查）。Rust 侧 `cargo test -p colm-cli --bins remote_cmd_tests` 49 通过；`cargo clippy -p colm-cli -p colm-kernel --all-targets -- -D warnings`；两个 workspace fmt 通过。
+
+**未做**：GUI 的节点数（nodes）输入；`remote-run` 端到端在 tianhe 上重跑（需要包含 `colm-cli` 的 engine snapshot；本轮 tianhe 只重构建了 `colm-rs`）。
+
+## 第 798 轮：0.1° history 逐条写的实测吞吐（tianhe，2026-10-25）
+
+**探针**：新增 `crates/colm-hist/examples/gridded_stream_probe.rs`（Phase 4 测量工具，不是生产入口）。用真实的 `HistoryBuffers::write_gridded_record` 写 0.1° 全球尺寸网格：1800×3600 = **6.48M 格**，每格一个 patch（≈全球 patch 数），5 个二维标量（`t_grnd/fsena/fevpa/tref/qref`），值随 patch 变化以避免整场常数被压缩到几 MB。填值不计时；只计 writer 的聚合+压缩+落盘。
+
+**tianhe 实测（登录节点，HDD_POOL，2 条记录）**：
+
+| 压缩 | 每记录（5 变量） | 等效吞吐 | 外推 221 变量/记录 |
+|---|---|---|---|
+| 0 | 259 MB，1.04–1.11 s | **~240 MB/s** | **47.5 s/记录，11.46 GB/记录** |
+| 1 | 76 MB，3.94–4.00 s | **~19 MB/s** | **175.3 s/记录，3.36 GB/记录** |
+
+- 未压缩的 11.46 GB/记录是“6.48M 格 × 221 × 8 B”的上界；陆地 patch 约占 1/3–1/2 时与设计稿 7.8 GB/记录一致。磁盘 `dd` 直写 HDD_POOL：**440 MB/s**（20 GiB / 48.8 s）。
+- **瓶颈是压缩**：逐记录 `netcdf::append` 的 deflate 由 HDF5 串行完成，19 MB/s 远低于磁盘；221 变量单记录约 3 min。Phase 4 的优化项是把每条记录的块用 `colm-h5chunk` 并行压缩后直写（时间块长本来就是 1，天然可并行），未做前 history 输出频率应保守（日/月，避免小时）。
+- 磁盘基准给出重启 I/O 上界：110 GB/次 / 440 MB/s ≈ 250 s（若落在单块盘；按 rank 分散写时每 rank 约 14 GB → ~32 s/rank）。
+
+**未做**：并行压缩直写、mksrfdata 按块并行测量、V3 真实 0.1° 全球算例。
+
+## 第 799 轮：history 压缩逐记录并行直写——175 s/记录降到 ~78 s，1 vs 2 rank 仍逐字节（2026-10-25）
+
+**实现**：
+- `colm-h5chunk::ChunkWriter::write_record`：一条记录按 `shape[0] == 1` 打包，先把数据集时间维扩到 `total_records`，再把各块 origin 的时间坐标加 `record` 后直写；新增测试验证逐记录写后 `time` 维与数值。
+- `colm-hist::HistoryBuffers::write_gridded_record` 在 `compress_level > 0` 时改走并行直写：
+  - 首条记录只建 schema/坐标/静态场；
+  - 每条记录的已声明变量按批（8 个变量）用 `pack_f64` 并行 deflate，再 `write_record` 直写块；`time` 与少量未压缩河道量仍用 netcdf 追加；
+  - 未压缩（level 0）保留原 netcdf 逐记录路径。
+- 新路径经真实 `HistorySession` 用的同一 API 验证：把 hb 算例设 `DEF_HIST_CompressLevel=1`，1 rank 与 2 rank 的 `hb_hist_2003-01.nc` 逐字节相同（sha256 `d33159b2…`）。
+
+**探针（tianhe HDD_POOL，1800×3600 = 6.48M 格、每格一个 patch）**：
+
+| 版本 | 5 变量/记录 | 40 变量/记录 | 外推 221 变量/记录 |
+|---|---|---|---|
+| 逐记录 netcdf deflate（第 798 轮） | 3.94–4.00 s | — | **175.3 s，3.36 GB** |
+| 并行直写（本轮） | 2.13–2.34 s | 14.07 s，607.7 MB | **77.7 s，3.36 GB（约 2.3×）** |
+| 未压缩路径 | 1.04–1.11 s | — | 47.5 s，11.46 GB |
+
+- 40 变量探针压缩文件 607.7 MB、43.2 MB/s；仍未到磁盘上限（440 MB/s），剩余成本主要是 patch→grid 聚合（6.48M patch/变量）与 HDF5 块写开销；下一步可调块大小/按变量聚合并行度，但已不再是压缩串行瓶颈。
+- 压缩路径与旧 netcdf deflate 路径的文件字节不同（块直写）；逐位契约仍是同一 writer 路径下 N=1 vs N>1。
+
+**门禁**：`cargo test -p colm-hist --lib --features io`（60 通过）；`cargo test -p colm-h5chunk --lib`（10 通过 / 2 ignored）；`cargo test -p colm-runtime --lib --bins`（lib 212/2 ignored、bin 4）；`cargo clippy -p colm-hist -p colm-h5chunk --all-targets --features io -- -D warnings`；fmt 通过。
+
+## 第 800 轮：Phase 4 其余 I/O 测量——重启体积与 mksrfdata 单块成本（tianhe，2026-10-25）
+
+**重启**（hb64 1 task 48 步输出，64 块 / 1408 patch）：
+- 主重启 64 个文件共 5.8 MB → **4.12 KB/patch**；块旁车 768 KB → 0.55 KB/patch；合计 4.67 KB/patch。
+- 按 0.1° 5.8M patch 外推约 **27 GB/次重启**（这套 LCT/IGBP、无 BGC 状态；设计稿 110 GB 是更重的状态估计）。磁盘直写 440 MB/s → 单流约 62 s；按 8 rank 分散约 8 s/rank。
+- 另：`.river`/history 已按逐条写/root 单写，不再整组缓冲。
+
+**mksrfdata**（当前源码构建的 `mksrfdata-rs`，tianhe）：
+- `case.nml --grid-kind latlon --land-cover igbp --blocks 1..5` 在 hb64 的 2×2 mesh 窗口上均为 **~10.5 s 热运行**（首次冷运行 32.4 s）；窗口只有一个活跃 land cell，`--blocks` 没有额外输出块，因此这组数字只能代表**单块/小窗口的固定成本**（主要是 rawdata 读取），不能直接外推全球。
+- 按 0.1° 全球约 2,300 个 5° 活跃块、每块分钟级固定成本估算，单进程预处理是小时级；Phase 4 的"按块并行"仍未实现/测量。要得到可信数字，需要带 `elmindex` 的完整网格与全球 rawdata 的 0.1° 块（hb probe 的 mesh 只有 landmask，不能作为 mksrfdata 输入）。
+
+**结论**：0.1° 就绪的剩余工作集中在：(1) history 聚合/块写进一步优化（当前 221 变量外推 77.7 s/记录）；(2) mksrfdata 按块并行的实现与全球测量；(3) V3 真实 0.1° 全球算例（缺预处理后的全球 landdata）。本轮不开始 V3。

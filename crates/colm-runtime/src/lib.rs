@@ -24,6 +24,7 @@ pub mod pft;
 pub mod physics;
 pub mod river;
 pub mod spatial;
+pub mod spmd;
 pub mod tracer;
 pub mod tracer_sidecar;
 
