@@ -315,3 +315,5 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
 **Phase 4 全球预处理进展（2026-10-25）**：已从 tianhe 30 arcsec landtype 聚合出 0.1° 全球 mesh（2,211,055 个活跃格，`equal-lat-lon-landmask-v1`）。mksrfdata 全球 mesh 触发串行 raw-pixel 上限（400M），已加 `COLM_SRFDATA_MAX_RAW_PIXELS` 覆盖并提交全球 Slurm 作业；5° tile 试验成功（2500 elements/5092 patches），块并行+合并是备选路径。V3 尚未开始。
 
 **Phase 4 全球预处理与 V3 进展（2026-10-25，续）**：0.1° 全球 mesh 已按 72×36 块扇出，1446 个活跃 5° tile 各自跑 mksrfdata，硬链接合并并重映射 `elmpixels` 到全球 `pixel.nc`，得到 **5.72M patch / 12 GB** 的 `global_landdata_v3`；8 rank `--spmd-check` 通过。`mkinidata-rs --block` 扇出生成 1446 块初场。**V3 已跑通**：8 节点、480 步（10 天 × 1800 s）、`CoLM Execution Completed.`；从第一次 37.5 min 主循环优化到 **21.3 min**（2.67 s/步 root），峰值约 62 GB/rank。优化项：删除每步 58 GB/rank 的状态 clone、只在 restart 到期时建快照、并行强迫映射、并行释放 PatchOutput、进度 flush、土壤水舍入容差 1e-12→1e-9。当前 V3 边界为河湖关闭、history 关闭；全局 `gridriver` 初场、河湖/history 开启、mpiexec 端到端仍未做。
+
+**16 节点 V3 扩展（2026-10-25）**：同一 0.1° 全球 480 步算例，16 nodes × 64 核时主循环 616–634 s（10.3–10.6 min）、墙钟 16:26，相对 8 节点 1281 s 为 2.08×，每步 1.29 s；patches 占 64%、forcing 28%、restart 写出 6.6%。当前墙钟瓶颈已从主循环转到最终 restart 写盘（约 5.6 min），再优化应并行化每 rank 的按块重启写出。

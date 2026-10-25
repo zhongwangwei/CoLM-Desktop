@@ -37256,3 +37256,10 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 说明“只在 restart 到期时建快照 + DiagnosticsCarry”没有改变续跑写出的字节；N=1 vs N>1 的逐位契约在优化后仍成立。
 
 **门禁**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo test -p colm-core --lib snow`（83 通过）；`cargo test -p colm-init --lib spatial_mapping`（5 通过）；`cargo clippy -p colm-core -p colm-init -p colm-runtime --all-targets -- -D warnings`；两个 workspace `cargo fmt --all --check` 通过。`cargo test --workspace --lib --bins` 中 `colm-agent` 的 `terminal::tests::aborted_password_input_is_hidden_and_never_sent_as_chat` 失败（`status.success()`，与本轮改动无关的终端环境用例），其余通过。
+
+**16 节点扩展**（job 8766586，同算例 480 步）：
+- 16 node × 64 核，每 rank 146 块 / **356,976 patch**（全球仍 5.72M patch）；
+- 主循环 **616–634 s（10.3–10.6 min）**，墙钟 **16:26**，`CoLM Execution Completed.`；
+- phase（root）：patches 396.5 s（64.4%）、forcing 172.9 s（28.1%）、lai/optimizer/restarts 40.9 s（6.6%）、other 5.6 s（0.9%）、state clone 0；
+- 8→16 节点主循环 1281→616 s（**2.08×**），每步 2.67→1.29 s；墙钟 29:56→16:26（1.82×）；
+- 16 节点下最终 restart 写盘仍是约 5.6 min（480 步主循环后）；下一步若要再压墙钟，应把 restart 写盘并行化（按块），而不是继续加节点。
