@@ -37474,3 +37474,15 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - V3 1 天主循环 59.7–80.8 s，墙钟 4:40（4 写线程、carry），旧版 4:50；差异主要是节点噪声，carry 的价值是把普通步的 715k 个 Box 从内存/串行释放中移走。
 
 **边界**：history-on/river-on 的 `patch_outputs_required=true`，行为不变；复验 hb64 河湖开 + HOURLY history 在 carry 代码上 1 task vs 2 node **635/635** 逐字节相同。8 节点 10 天 carry 版（job 8776408）已提交，但 deimos 被其他作业占满，仍 `PENDING`。
+
+## 第 820 轮：10 天 carry 版 8 节点实测——21:55（tianhe，2026-10-26）
+
+job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry 路径、默认 4 restart 写线程：
+
+- 墙钟 **21:55**，`CoLM Execution Completed.`；
+- 主循环 1157.5 s：**patches 1124.7 s（97.2%）**、forcing 12.2 s、other 11.0 s、lai/optimizer/restarts 9.5 s、state clone 0.01 s；
+- 启动 `runtime assembled` 约 103–109 s；
+- 最终 `2003-011-00000` 2892 个文件、11 GB，4 写线程下墙钟尾部约 100 s 量级（不再是最早的 ~6 min）；
+- 对比：carry 前 4 写线程版 22:27，旧 1 写线程/旧主循环 23:51；本轮节点 patches 1124.7 s 仍偏高，但墙钟已降到 **21:55**。
+
+**结论**：forcing、restart 写出、状态 clone 都已不再是主循环大头；patches 物理占 97%，下一步再要显著加速只能动 patch 内核内部（每 patch 的临时分配/输出构造）。
