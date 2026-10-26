@@ -37473,4 +37473,4 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 8 节点 0.1° 全球 1 天：carry 路径最终 restart 目录与优化前参考 **2894/2894 个文件全部 `cmp` 相同**（含旧日期文件）；
 - V3 1 天主循环 59.7–80.8 s，墙钟 4:40（4 写线程、carry），旧版 4:50；差异主要是节点噪声，carry 的价值是把普通步的 715k 个 Box 从内存/串行释放中移走。
 
-**边界**：history-on/river-on 的 `patch_outputs_required=true`，行为不变（历史 635/635 路径仍需后续复验）；8 节点 10 天 carry 版尚未重跑。
+**边界**：history-on/river-on 的 `patch_outputs_required=true`，行为不变；复验 hb64 河湖开 + HOURLY history 在 carry 代码上 1 task vs 2 node **635/635** 逐字节相同。8 节点 10 天 carry 版（job 8776408）已提交，但 deimos 被其他作业占满，仍 `PENDING`。
