@@ -5,7 +5,7 @@
 <h1 align="center">CoLM Desktop</h1>
 
 <p align="center">
-  A cross-platform desktop workbench for CoLM202X site and spatial simulations<br>
+  A cross-platform desktop workbench for CoLM202X site, regional and global simulations<br>
   <a href="README.md">中文</a> | <strong>English</strong>
 </p>
 
@@ -23,7 +23,7 @@ CoLM Desktop brings CoLM202X site and spatial case setup, parameter constraints,
 > **This is the `0.3.0-beta.5` prerelease.** Features are still changing quickly and there may be known or unknown defects. Keep backups of your original data and cases, and validate results independently before research use.
 
 > [!IMPORTANT]
-> Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and global extents on lat-lon, unstructured and catchment grids. Several sites can run concurrently as independent cases. Calibration, uncertainty analysis and AI studies also work on basin, regional and global cases.
+> Both **site** and **spatial** simulations are supported. Spatial runs cover watershed, regional and **0.1° global** extents on lat-lon, unstructured and catchment grids. The Rust engine's spatial loop supports **Linux multi-node** execution (`srun`/`mpiexec`) with block-level SPMD, validated by a 10-day 0.1° global run on 8 tianhe nodes. Several sites can run concurrently as independent cases. Calibration, uncertainty analysis and AI studies also work on basin, regional and global cases.
 
 ## Download
 
@@ -100,7 +100,8 @@ This section preserves the released interface description. For the current sourc
 | CSV/TXT multi-site preparation | Detects comma, tab, semicolon or whitespace long tables, splits them by site and writes standard single-site NetCDF; can also generate site files in bulk |
 | Forcing gap repair | Short gaps are interpolated according to each variable's physics. Long gaps are converted to UTC, matched to the nearest ERA5-Land cell and bias-corrected against overlapping observations, with an hourly QC trail |
 | Rust model engine | Surface data, initial conditions and the main loop are all in Rust. Coverage includes LCT / PFT / PC, BGC, crops, urban, lakes, ozone, tracers, LULCC, grid river/reservoir routing and catchment lateral flow |
-| Spatial simulation | Watershed, regional and global extents on lat-lon, unstructured and catchment grids. Regional cases turn on regional unit-catchment routing by default |
+| Spatial simulation | Watershed, regional and 0.1° global extents on lat-lon, unstructured and catchment grids. Regional cases turn on regional unit-catchment routing by default |
+| Multi-node | Block-level SPMD for the Rust spatial loop; `srun`/`mpiexec` launch; validated with a 10-day 0.1° global run on 8 tianhe nodes |
 | Parallelism | Shared-memory multithreading in one process (patch updates and large river systems run per cell). `RAYON_NUM_THREADS` sets the thread count; the default is every logical core |
 | Concurrent sites | Run independent cases at the same time with CPU cores shared automatically; each site shows its own progress, stage and log |
 | Staged runs | Run `mksrfdata`, `mkinidata` and `colm` separately, or all stages in one go |
