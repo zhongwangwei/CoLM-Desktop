@@ -37317,3 +37317,16 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **保留**：`COLM_RS_STARTUP_TIMING=1` 的逐阶段 eprintln，后续启动优化先看这个而不是猜。
 
 **下一步**：模板装配仍占 70–76 s，是启动最大的剩余项；按块并行装配是下一步候选（需处理 NetCDF 读与 PFT thread-local cache）。
+
+## 第 808 轮：按 block 并行装配——N=1 挂起，否决（tianhe，2026-10-26）
+
+**尝试**：把 5.7M patch 的模板装配按 block `par_iter`，结果按原 block 顺序拼接；启动计时显示装配约 70–76 s，是最有希望再省的一块。
+
+**结果**：hb64 2 node（32 块/rank）能完成；但 hb64 **1 node（64 块）** 在装配阶段挂起超过 5 min 没有任何进度，stderr 也没有错误。症状符合 NetCDF-C/HDF5 在多线程里并发打开/读取不同文件的已知非线程安全：不是算错，而是死锁/无界等待。装配阶段不能像写 restart 那样简单套 rayon。
+
+**处置**：回退，不提交。启动仍保留第 807 轮的 `needs_global_metadata` 门控（省约 60 s）；装配 70–76 s 的进一步优化需要：
+
+- 每个 block 只 `RestartFile::open` 一次并把句柄传给 `assemble_patch`（当前每 patch 多次打开），或
+- 用 **block 级进程/线程池 + 每线程独立 NetCDF 状态**（不是共享 NetCDF-C），成本更高。
+
+**当前 8 节点基线**：河湖关主循环 ~21.2 min、10 天墙钟 ~29 min；河湖开 ~4.2–4.4 s/步、10 天预计 ~43–44 min。
