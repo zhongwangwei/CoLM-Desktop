@@ -1216,6 +1216,17 @@ fn run_spatial_segment(
     let spmd = case.spmd.as_ref();
     let config = &segment.config;
     let year = segment.year;
+    // 0.1° 全球的启动阶段（读 landdata/restart、装配 5.7M patch、建映射）在 8 节点上
+    // 占墙钟不可忽略；用 env 打开逐阶段计时，避免再靠猜。
+    let startup_started = std::time::Instant::now();
+    let startup_mark = |label: &str| {
+        if std::env::var_os("COLM_RS_STARTUP_TIMING").is_some() {
+            eprintln!(
+                "colm-rs startup [{:8.2} s] {label}",
+                startup_started.elapsed().as_secs_f64()
+            );
+        }
+    };
     let landdata = out.join("landdata");
     let year_i32 = i32::try_from(year)?;
     // 多进程只读本 rank 的块；单进程仍读全部块（行为不变）。
@@ -1230,6 +1241,7 @@ fn run_spatial_segment(
         }
         None => SpatialTopology::read(&landdata, year_i32)?,
     };
+    startup_mark("topology read");
     let start_label = date_label(config.start);
     // 每个分块一份常数重启、一份时间重启；patch 在块内的下标就是它在那两份文件里的行。
     let block_files = topology
@@ -1261,6 +1273,7 @@ fn run_spatial_segment(
             Ok(files)
         })
         .collect::<Result<Vec<_>>>()?;
+    startup_mark("block restart files checked");
     let patch_count = topology.patch_count();
     let mut templates = Vec::with_capacity(patch_count);
     let mut coordinates = Vec::with_capacity(patch_count);
@@ -1387,6 +1400,7 @@ fn run_spatial_segment(
         }
     }
     drop(pft_cache);
+    startup_mark("patch templates assembled");
     // LULCC 之后的段：`scale_baseflow` 用上一段按 SAT 配对搬过来的（upstream-bugs 第 43 条，vendor 已修），
     // 不再按新 patch 编号重读标定文件。
     if let Some(baseflow) = &segment.baseflow {
@@ -1536,6 +1550,7 @@ fn run_spatial_segment(
         } else {
             None
         };
+    startup_mark("forcing mapping built");
     let mut runtime = SpatialRuntime::new(
         config.clock()?,
         forcing,
@@ -1582,11 +1597,15 @@ fn run_spatial_segment(
     if segment.end == SegmentEnd::Lulcc {
         runtime = runtime.defer_lai_refresh_at(config.end);
     }
-    // 多进程复制河网：各 rank 需要全局的 patch_type/patch_mask/forcing_mask 来构造同一份
-    // runoff filter（单进程用本地 templates/patch_mask/forcing_mask，行为不变）。
+    // 多进程复制河网/全局 history 才需要全局 patch 元数据与全局 topology；河湖关且
+    // history=none 的全球 V3 原来仍每 rank 读一遍 12 GB 全局 landdata、再 all-gather
+    // 5.7M 的 patch_type/mask，启动白付 20–40 s。这里只在真正有消费者时做。
+    let needs_global_metadata = catchment
+        || logical_field(document, "DEF_USE_GridRiverLakeFlow")?
+        || (writes_history && spmd.is_some());
     let (global_patch_types, global_patch_mask, global_forcing_mask) = match exchange.as_deref_mut()
     {
-        Some(exchange) => {
+        Some(exchange) if needs_global_metadata => {
             let local_types = templates
                 .iter()
                 .map(|template| f64::from(template.patch_type))
@@ -1600,12 +1619,12 @@ fn run_spatial_segment(
             let forcing = exchange.all_gather_bools(&forcing_mask)?;
             (Some(types), Some(mask), Some(forcing))
         }
-        None => (None, None, None),
+        _ => (None, None, None),
     };
     // 多进程 history：root 用全局 topology + 全局 patch 元数据建一份全局网格；worker 不建。
     let global_topology = match spmd {
-        Some(_) => Some(SpatialTopology::read(&landdata, year_i32)?),
-        None => None,
+        Some(_) if needs_global_metadata => Some(SpatialTopology::read(&landdata, year_i32)?),
+        _ => None,
     };
     if writes_history && !vector_history && spmd.is_some_and(|plan| plan.is_root()) {
         if let (Some(types), Some(mask), Some(forcing), Some(topology_global)) = (
@@ -2304,6 +2323,7 @@ fn run_spatial_segment(
     // 跑不快的主因之一：普通步完全用不到快照，只有到期/最后一步要落盘。这里每步只维护
     // 四个“会保持上一步值”的诊断量（`rst`/`rss`/`gs0sun`/`gs0sha`），到期时才建完整快照。
     let mut diagnostics_carry = vec![DiagnosticsCarry::default(); states.len()];
+    startup_mark("runtime assembled");
     let steps = runtime.run(
         &templates,
         &mut states,

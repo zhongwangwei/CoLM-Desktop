@@ -37299,3 +37299,21 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 1 天短测里文件 mtime 跨度只有 7 s，是因为短算例的 restart 目录已有大量旧文件、只有部分重写，不能用它代表 10 天首写。
 
 **结论**：并行 restart 写在逐字节上安全，但在 tianhe HDD_POOL 上对 8 节点墙钟是负收益，已回退。要压缩 restart 尾巴只能减少文件数/换更快文件系统，或让 restart 写在主循环后台重叠，而不是简单加线程。
+
+## 第 807 轮：启动阶段测量与跳过全局元数据（8 节点，2026-10-26）
+
+**启动计时**（1 天河湖关，8 节点，`COLM_RS_STARTUP_TIMING=1`）：
+- topology 读本 rank 块：7–10 s；
+- 每块常数/时间 restart 检查：到 30–35 s（约 22–25 s）；
+- **5.7M patch 的模板装配：到 106 s（约 70–76 s）**；
+- mapping/history grid：到 110–116 s（约 4 s）；
+- runtime 组装：到 **177–181 s**（约 63–67 s）。
+
+**发现并修掉的白工**：`needs_global_metadata` 原来无条件成立——每个 rank 都 `SpatialTopology::read` 一遍 **12 GB 全局 landdata**，再 all-gather 5.7M 的 `patch_type`/`patch_mask`/`forcing_mask`；这些只有 **河湖开或 history 开** 才需要。现在按 `catchment || DEF_USE_GridRiverLakeFlow || (writes_history && spmd)` 门控：
+- 河湖关 + history none 的 V3 不再读全局 landdata、不再做元数据 all-gather；
+- runtime 组装从 **177–181 s 降到 112–119 s**（省约 **60 s/次运行**）；
+- 单进程/河湖/history 路径变量保持原样；hb64 河湖关 1 vs 2 node 复验 **128/128 个 restart/旁车文件相同**。
+
+**保留**：`COLM_RS_STARTUP_TIMING=1` 的逐阶段 eprintln，后续启动优化先看这个而不是猜。
+
+**下一步**：模板装配仍占 70–76 s，是启动最大的剩余项；按块并行装配是下一步候选（需处理 NetCDF 读与 PFT thread-local cache）。
