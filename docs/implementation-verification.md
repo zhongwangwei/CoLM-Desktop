@@ -37330,3 +37330,16 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - 用 **block 级进程/线程池 + 每线程独立 NetCDF 状态**（不是共享 NetCDF-C），成本更高。
 
 **当前 8 节点基线**：河湖关主循环 ~21.2 min、10 天墙钟 ~29 min；河湖开 ~4.2–4.4 s/步、10 天预计 ~43–44 min。
+
+## 第 809 轮：forcing → patch 映射：并行 + 单遍融合（本地改动，未上 tianhe）
+
+**背景**：8 节点河湖关的主循环 21.2 min 中，forcing 阶段约 0.7 s/步（27%）。`map_to_patches` 对每个 patch 的 20 个强迫量各调一次 `grid_to_set`，每次把该 patch 的 mapping parts 扫一遍；5.7M patch 时是大量重复循环/闭包分派。
+
+**改动**：
+- `into_par_iter` 按 patch 并行，collect 保持 patch 顺序；
+- 把 20 个 `grid_to_set` 合成一次 parts 遍历：同一 parts 顺序、同一 `area.contract(value, sum)` FMA、同一除 `mapping.area[iset]`，零面积 part 仍跳过；逐量累加序列不变，所以每个量的浮点结果与旧路径相同；
+- 常量高度（`hgt_u/hgt_t/hgt_q`）也在同一遍累加。
+
+**未做**：tianhe 本轮按要求不连接，所以没有新的 8 节点 wall clock 或 1 vs 2 node 字节对照；`GriddedForcing::step` 的格点插值/`metpreprocess` 仍是串行，下一步可继续。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；`cargo clippy -p colm-runtime --all-targets -- -D warnings`；`cargo fmt --all --check`。
