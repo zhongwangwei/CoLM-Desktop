@@ -1420,40 +1420,81 @@ pub fn map_to_patches(
     let heights = &forcing.config;
     // 每个 patch 的映射只读该 set 的 parts；5.7M patch 串行映射是 forcing 阶段的大头之一。
     // 逐 patch 结果与顺序无关，`into_par_iter` 保持 collect 后的 patch 顺序。
+    //
+    // 原来对每个 patch 的 20 个量各调一次 `grid_to_set`，每次把 parts 扫一遍；这里合成
+    // 一次遍历：同一 parts 顺序、同一 `area.contract(value, sum)` 累加次序，所以每个量的
+    // 浮点结果与逐个 `grid_to_set` 完全相同，只省掉 19 遍循环与闭包分派。
     (0..mapping.parts.len())
         .into_par_iter()
         .map(|iset| {
-            let map = |field: &[f64]| {
-                mapping.grid_to_set(iset, |ilon, ilat| field[forcing.cell_index(ilon, ilat)])
+            let area = mapping.area[iset];
+            let parts = &mapping.parts[iset];
+            let has_hpbl = !cells.hpbl.is_empty();
+            let nsums = if has_hpbl { 20 } else { 19 };
+            let mut sums = vec![0.0; nsums];
+            if area > 0.0 {
+                for part in parts {
+                    let a = part.area;
+                    if a <= 0.0 {
+                        continue;
+                    }
+                    let index = forcing.cell_index(part.ilon, part.ilat);
+                    sums[0] = a.contract(cells.t[index], sums[0]);
+                    sums[1] = a.contract(cells.q[index], sums[1]);
+                    sums[2] = a.contract(cells.psrf[index], sums[2]);
+                    sums[3] = a.contract(cells.pbot[index], sums[3]);
+                    sums[4] = a.contract(cells.prc[index], sums[4]);
+                    sums[5] = a.contract(cells.prl[index], sums[5]);
+                    sums[6] = a.contract(cells.us[index], sums[6]);
+                    sums[7] = a.contract(cells.vs[index], sums[7]);
+                    sums[8] = a.contract(cells.sols[index], sums[8]);
+                    sums[9] = a.contract(cells.soll[index], sums[9]);
+                    sums[10] = a.contract(cells.solsd[index], sums[10]);
+                    sums[11] = a.contract(cells.solld[index], sums[11]);
+                    sums[12] = a.contract(cells.frl[index], sums[12]);
+                    sums[13] = a.contract(cells.pco2m[index], sums[13]);
+                    sums[14] = a.contract(cells.po2m[index], sums[14]);
+                    sums[15] = a.contract(cells.solarin[index], sums[15]);
+                    sums[16] = a.contract(heights.height_wind_m, sums[16]);
+                    sums[17] = a.contract(heights.height_temperature_m, sums[17]);
+                    sums[18] = a.contract(heights.height_humidity_m, sums[18]);
+                    if has_hpbl {
+                        sums[19] = a.contract(cells.hpbl[index], sums[19]);
+                    }
+                }
+            }
+            let value = |sum: f64| {
+                if area > 0.0 {
+                    sum / area
+                } else {
+                    colm_core::MISSING
+                }
             };
-            let constant = |value: f64| mapping.grid_to_set(iset, |_, _| value);
-            let mut t = map(&cells.t);
-            let q = map(&cells.q);
-            let pbot = map(&cells.pbot);
-            // `IF (forc_t < 180.) forc_t = 180.`、`IF (forc_t > 326.) forc_t = 326.`
-            t = t.clamp(180.0, 326.0);
+            let t = value(sums[0]).clamp(180.0, 326.0);
+            let q = value(sums[1]);
+            let pbot = value(sums[3]);
             PatchForcing {
                 t,
                 q,
-                psrf: map(&cells.psrf),
+                psrf: value(sums[2]),
                 pbot,
-                prc: map(&cells.prc),
-                prl: map(&cells.prl),
-                us: map(&cells.us),
-                vs: map(&cells.vs),
-                sols: map(&cells.sols),
-                soll: map(&cells.soll),
-                solsd: map(&cells.solsd),
-                solld: map(&cells.solld),
-                frl: map(&cells.frl),
+                prc: value(sums[4]),
+                prl: value(sums[5]),
+                us: value(sums[6]),
+                vs: value(sums[7]),
+                sols: value(sums[8]),
+                soll: value(sums[9]),
+                solsd: value(sums[10]),
+                solld: value(sums[11]),
+                frl: value(sums[12]),
                 rhoair: colm_core::air_density_kg_m3(pbot, q, t),
-                pco2m: map(&cells.pco2m),
-                po2m: map(&cells.po2m),
-                hgt_u: constant(heights.height_wind_m),
-                hgt_t: constant(heights.height_temperature_m),
-                hgt_q: constant(heights.height_humidity_m),
-                solarin: map(&cells.solarin),
-                hpbl: (!cells.hpbl.is_empty()).then(|| map(&cells.hpbl)),
+                pco2m: value(sums[13]),
+                po2m: value(sums[14]),
+                hgt_u: value(sums[16]),
+                hgt_t: value(sums[17]),
+                hgt_q: value(sums[18]),
+                solarin: value(sums[15]),
+                hpbl: has_hpbl.then(|| value(sums[19])),
             }
         })
         .collect()
