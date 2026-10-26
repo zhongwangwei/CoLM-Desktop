@@ -98,10 +98,19 @@ impl PatchExchange {
         Ok(values)
     }
 
-    /// 不定长字节数组 all-gather：调用方自己带长度前缀（history 累加器用）。
+    /// 不定长字节数组 all-gather：调用方自己带长度前缀（一般用途）。
     pub fn all_gather_bytes(&mut self, local: &[u8]) -> Result<Vec<u8>> {
         let gathered = self.comms.gather(local)?;
         self.comms.broadcast(gathered.as_deref())
+    }
+
+    /// 只把各 rank 的字节收给 root，worker 返回 `None`。
+    ///
+    /// history 到期的原始累加器在 0.1° 全球是 31 GB 量级；旧路径先 gather 再 broadcast，
+    /// 会把整份全局累加器发给每个 rank，既超过 `colm-spmd` 的 16 GiB 单帧上限，也浪费
+    /// 了 8 倍的网络/内存。只有 root 要写文件，worker 收到 `None` 即可继续。
+    pub fn gather_bytes(&mut self, local: &[u8]) -> Result<Option<Vec<u8>>> {
+        self.comms.gather(local)
     }
 
     pub fn rank(&self) -> usize {

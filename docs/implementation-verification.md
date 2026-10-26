@@ -37565,3 +37565,28 @@ job **8778693**，8 节点 × 64 核，480 步，`DEF_USE_GridRiverLakeFlow=.tru
 **结论**：8 节点全球河湖开启 10 天已跑通，输出/重启完整；下一档优化若还要做，应减少 river exchange 的全局 gather（按河系/分片收集），而不是继续改 forcing/重启写出。
 
 **未验证**：全球 1 vs 2/4 rank 的主重启 + `.river` + unitcat 逐字节（河湖版 hb64 已有 130/130）；history 开启的全球 10 天。
+
+
+## 第 825 轮：8 节点 0.1° 全球 history 开启 10 天——1:37:09（tianhe，2026-10-26）
+
+**第一次失败**（job 8779307）：第 48 步第一条日记录时 root 报
+
+```text
+cannot broadcast to rank 1: message of 31440481854 bytes exceeds the 17179869184 byte limit
+```
+
+原因是 history 到期把各 rank 的 31.4 GB 全局原始累加器 `gather` 后又 `broadcast` 给每个 rank；既超过 16 GiB 单帧上限，也让 worker 白收整份全局数据。
+
+**修复**：新增 `PatchExchange::gather_bytes`，只把各 rank 字节收给 root，worker 不再接全局 history；root 解析并写文件。`all_gather_bytes` 仍保留给其它用途。修复后 hb64 history 开 1 vs 2 node **633/633 逐字节相同**。
+
+**全球结果**（job 8780132，8 节点 × 64 核、480 步、`DEF_HIST_FREQ='DAILY'`、河湖关、4 restart 写线程）：
+
+- 墙钟 **1:37:09**，`CoLM Execution Completed.`；
+- 主循环 **5271.8–5579.7 s**：patches 874–1072 s、**history 4101.6–4302.9 s（77.8–81.6%）**、forcing 16–17 s、lai/optimizer/restarts 64 s；
+- 峰值 MaxRSS **354 GB**（root 收集 31 GB 累加器 + 运行时状态）；
+- 启动 `runtime assembled` 约 **175 s**；
+- 输出：`hb_hist_2003-01.nc` **940 MB**（10 条日记录），最终 restart 2894 文件 / 11 GB。
+
+**结论**：全球 history 开启 10 天已跑通；“31.4 GB/记录”的 gather 仍是主瓶颈（77–82% 主循环），下一步要按变量/块分块流式收集，而不是继续 broadcast 或直接调大帧上限。历史记录本身压缩后只有约 94 MB/天。
+
+**边界**：河湖 + history 同时开启的全球 10 天尚未跑；history 多 writer/按天十年仍未设计。

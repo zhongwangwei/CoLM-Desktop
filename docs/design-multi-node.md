@@ -2,6 +2,8 @@
 
 > 状态：Phase 0 方案稿（2026-10-24）。用户已定四件事：目标是 **0.1° 级全球**空间算例；**只做远程 Linux**，桌面本机不开放多进程；跨 rank **逐位一致是硬门槛**；按本文阶段实施。
 > 实测结论照例追加到 `docs/implementation-verification.md`；本文只写设计 + Phase 0 的只读实测。文中数字凡标“估算”的，都要在 Phase 0 测量后回来改。
+>
+> 问题、源码、提交与实验结果的对应关系见 [`traceability-multi-node.md`](traceability-multi-node.md)。
 
 ## 0. 一句话方案
 
@@ -311,6 +313,8 @@ root 的额外内存：全局 topology 元数据（6M patch 的 `element/cells/l
 **Phase 4 进展（2026-10-25）**：新增 `crates/colm-hist/examples/gridded_stream_probe.rs`，用真实逐条 writer 写 0.1° 尺寸（6.48M 格、每格一个 patch）的 5 变量记录：未压缩 ~240 MB/s，外推 221 变量 47.5 s/记录、11.46 GB/记录；压缩 1 级只有 ~19 MB/s，外推 175.3 s/记录、3.36 GB/记录。磁盘 HDD_POOL 直写 440 MB/s。结论：history 的下一步优化是**逐记录并行压缩直写**（复用 `colm-h5chunk`，时间块长 1 正好并行）。2026-10-25 已实现：`ChunkWriter::write_record` + 按批 8 个变量并行打包，0.1° 探针 221 变量外推从 175 s/记录降到 **77.7 s/记录**（40 变量实测 14.07 s、607.7 MB），1 vs 2 rank 压缩 history 仍逐字节；重启 110 GB/次按磁盘上界约 250 s 单流、按 rank 分散约 32 s/rank。mksrfdata 按块并行与 V3 真实全球算例仍未做。
 
 **Phase 4 进展（2026-10-25，续）**：history 已从串行 deflate（175 s/记录）优化到按记录并行直写（221 变量外推 77.7 s/记录，1 vs 2 rank 仍逐字节）；磁盘 HDD_POOL 直写 440 MB/s。重启实测 hb64 主重启 4.12 KB/patch、旁车 0.55 KB/patch → 0.1° 5.8M patch 约 27 GB/次（该配置），单流 ~62 s、8 rank 约 8 s/rank。mksrfdata 当前单块（hb 2×2 mesh 窗口）热运行 ~10.5 s、冷 ~32 s，`--blocks` 在小窗口不产生额外块；按块并行与全球测量仍未做。V3 需要带 `elmindex` 的 0.1° 网格与全球 rawdata，hb probe 的 mesh 不能作为 mksrfdata 输入，因此本环境无法完成 V3。
+
+**2026-10-26 全球 history 实测**：8 节点全球 0.1° 480 步、DAILY history、河湖关，墙钟 **1:37:09**；history 占主循环 77.8–81.6%，root 峰值 MaxRSS 354 GB；日文件 940 MB。第一次尝试在 31.4 GB 累加器 broadcast 处超过 16 GiB 单帧上限，已改为只 gather 给 root；后续应做分块流式收集。详见 `implementation-verification.md` 第 825 轮。
 
 **Phase 4 全球预处理进展（2026-10-25）**：已从 tianhe 30 arcsec landtype 聚合出 0.1° 全球 mesh（2,211,055 个活跃格，`equal-lat-lon-landmask-v1`）。mksrfdata 全球 mesh 触发串行 raw-pixel 上限（400M），已加 `COLM_SRFDATA_MAX_RAW_PIXELS` 覆盖并提交全球 Slurm 作业；5° tile 试验成功（2500 elements/5092 patches），块并行+合并是备选路径。V3 尚未开始。
 

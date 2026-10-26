@@ -730,8 +730,12 @@ impl SpatialRuntime {
                                 .as_ref()
                                 .map(|(_, accumulators)| accumulators.as_slice()),
                         )?;
-                        let gathered = exchange.all_gather_bytes(&payload)?;
+                        // 只 gather 给 root：全球 31 GB 的原始累加器不能再 broadcast 给每个 rank
+                        // （会超过 16 GiB 单帧上限，也浪费 8 倍网络/内存）。
+                        let gathered = exchange.gather_bytes(&payload)?;
                         if exchange.is_root() {
+                            let gathered =
+                                gathered.context("the root did not receive the history gather")?;
                             let mut exports = parse_history_exports(&gathered, exchange.size())?;
                             ensure!(
                                 exports.iter().all(|export| export.is_some() == due),
