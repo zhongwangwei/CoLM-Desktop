@@ -37367,3 +37367,10 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。
 
 **未做**：tianhe wall clock、1 vs 2 node 字节对照（本轮按要求不连天河）。
+
+## 第 812 轮：短波平均余弦与 forcing 格点读取并行（本地）
+
+- `average_cosine`：每个时间 stamp 内 `average[cells]` 按格并行累加；stamp 之间仍按原顺序串行，单格求和顺序不变。
+- `read_cells`：从已读入的 NetCDF block 里按 `self.cells` 取值改为 `par_iter`，collect 保持格顺序。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。

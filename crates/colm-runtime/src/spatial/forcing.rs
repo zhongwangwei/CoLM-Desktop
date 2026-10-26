@@ -1269,15 +1269,18 @@ impl GriddedForcing {
         let mut stamp = now;
         while stamp.less_than(upper) {
             let calendar_day = colm_core::orbital_calendar_day(stamp.calendar(), true, 0.0)?;
-            for (i, &(ilon, ilat)) in self.cells.iter().enumerate() {
-                let cosz = colm_core::orbital_cosine_zenith(
-                    calendar_day,
-                    self.grid.rlon[ilon],
-                    self.grid.rlat[ilat],
-                )
-                .max(0.001);
-                average[i] += cosz / f64::from(steps);
-            }
+            // 每个 stamp 内各格独立；stamp 之间仍按原顺序累加，逐格求和顺序不变。
+            average.par_iter_mut().zip(self.cells.par_iter()).for_each(
+                |(average, &(ilon, ilat))| {
+                    let cosz = colm_core::orbital_cosine_zenith(
+                        calendar_day,
+                        self.grid.rlon[ilon],
+                        self.grid.rlat[ilat],
+                    )
+                    .max(0.001);
+                    *average += cosz / f64::from(steps);
+                },
+            );
             stamp = stamp.add_seconds(self.time_step_seconds);
         }
         self.average_cosine = average;
@@ -1300,7 +1303,7 @@ impl GriddedForcing {
         let width = lon1 - lon0 + 1;
         Ok(self
             .cells
-            .iter()
+            .par_iter()
             .map(|&(ilon, ilat)| block[(ilat - lat0) * width + (ilon - lon0)])
             .collect())
     }
