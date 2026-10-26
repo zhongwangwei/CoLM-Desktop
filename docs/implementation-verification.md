@@ -37486,3 +37486,21 @@ job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry �
 - 对比：carry 前 4 写线程版 22:27，旧 1 写线程/旧主循环 23:51；本轮节点 patches 1124.7 s 仍偏高，但墙钟已降到 **21:55**。
 
 **结论**：forcing、restart 写出、状态 clone 都已不再是主循环大头；patches 物理占 97%，下一步再要显著加速只能动 patch 内核内部（每 patch 的临时分配/输出构造）。
+
+## 第 821 轮：GUI 河湖/湖泊开关审计与两处修复（2026-10-26）
+
+**审计结论**：
+- `DEF_USE_GridRiverLakeFlow` 在新建页基础开关与「河道与水库」过程页父开关；关闭时其余河道字段隐藏；
+- 河道路由、水库、堤防、分汊、漫滩回馈、FloodplainStorageFix、FloodInfiltMax 都有字段与中英文 label；
+- `DEF_GridRiverLake_FloodFeedback` 按 FloodplainStorageFix、TOPMODEL runoff 0、LCT、VSF、非 LULCC、非城市门控；
+- `DEF_Use_Dynamic_Lake` 在「水热过程」而非河湖页，符合它控制湖 patch 蓄水/热力、不是河道路由开关的语义；VSF、Catchment、城市、单点水体站点逻辑已存在。
+
+**修复**：
+1. `DEF_ReservoirPara_file` 之前只要河湖流开着就显示，`DEF_Reservoir_Method=0` 时摆出来会误导；`field_runtime_state` 现在在 method 0 时把它隐藏，`method=1` 才出现。
+2. `DEF_USE_Dynamic_Lake` 的中文/英文 label 改为「启用动态湖泊（湖 patch，非河道路由）」/「Enable dynamic lake (lake patch, not river routing)」，避免与河湖流混淆。
+
+**测试**：
+- 新增 `reservoir_parameter_file_only_shows_with_reservoir_method_one`：method 0 为 Hidden、method 1 为 Editable；
+- 新增 `dynamic lake label says it is a lake patch and not river routing`；
+- GUI `npm test` **890 通过 / 0 失败**；`config::` 后端测试 **158 通过 / 0 失败**；typecheck、lint、format、clippy、两套 fmt 均通过。
+- 完整 `cargo test --manifest-path gui/src-tauri/Cargo.toml --lib` 仍有 2 个与本改动无关的环境失败（sidecar 创建超时 / 崩溃窗口清理），已确认新测试与 config 测试全过。

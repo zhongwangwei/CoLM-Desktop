@@ -86,7 +86,10 @@ const LABELS: Readonly<Record<string, readonly string[]>> = Object.freeze({
   DEF_USE_BEDROCK: pair('启用基岩过程', 'Enable bedrock process'),
   DEF_USE_Campbell_SOIL_MODEL: pair('土壤水力模型', 'Soil-hydraulics model'),
   DEF_precip_phase_discrimination_scheme: pair('降水雨雪拆分方案', 'Rain–snow partitioning scheme'),
-  DEF_USE_Dynamic_Lake: pair('启用动态湖泊', 'Enable dynamic lake'),
+  DEF_USE_Dynamic_Lake: pair(
+    '启用动态湖泊（湖 patch，非河道路由）',
+    'Enable dynamic lake (lake patch, not river routing)',
+  ),
   DEF_USE_Dynamic_Wetland: pair('启用动态湿地', 'Enable dynamic wetland'),
 
   DEF_USE_OZONESTRESS: pair('启用臭氧胁迫', 'Enable ozone stress'),

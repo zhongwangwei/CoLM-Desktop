@@ -35,6 +35,14 @@ test('catalog entries get the named labels instead of the split CoLM key', () =>
 });
 
 // 原来由旧界面的 gui/tests/labels.mjs 守着；旧界面删掉后搬到这里（第 733 轮）。
+test('dynamic lake label says it is a lake patch and not river routing', () => {
+  assert.equal(fieldLabel('DEF_USE_Dynamic_Lake', 'zh'), '启用动态湖泊（湖 patch，非河道路由）');
+  assert.equal(
+    fieldLabel('DEF_USE_Dynamic_Lake', 'en'),
+    'Enable dynamic lake (lake patch, not river routing)',
+  );
+});
+
 test('every catalog field shown on the settings or expert pages has Chinese and English names', () => {
   const catalog = JSON.parse(
     readFileSync(

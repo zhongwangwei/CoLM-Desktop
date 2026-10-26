@@ -2169,6 +2169,11 @@ fn field_runtime_state(
         return hidden("河湖流已关闭");
     }
 
+    // 水库参数文件只有调度方案为 1 时才会被读；方案 0 时摆出来只会让人以为设了有用。
+    if name == "DEF_ReservoirPara_file" && integer(c.doc, "DEF_Reservoir_Method") == 0 {
+        return hidden("仅水库调度方案为 1 时使用");
+    }
+
     // 区域单元流域汇流只影响速度：建例时按范围与 LULCC 自动写入，打开 LULCC 时参数页自动关掉。
     if name == "DEF_UnitCatchment_regional" {
         return hidden("由软件按模拟范围与 LULCC 自动决定");

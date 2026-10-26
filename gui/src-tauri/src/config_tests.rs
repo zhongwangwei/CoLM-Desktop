@@ -3244,6 +3244,22 @@ fn the_river_switch_hides_the_other_river_fields() {
     ));
 }
 
+#[test]
+fn reservoir_parameter_file_only_shows_with_reservoir_method_one() {
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n/\n";
+    let states = runtime_states(text, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_ReservoirPara_file"),
+        FieldMode::Hidden
+    ));
+    let text = "&nl_colm\n DEF_USE_LCT = .true.\n DEF_Reservoir_Method = 1\n/\n";
+    let states = runtime_states(text, LATLON_KERNEL);
+    assert!(matches!(
+        mode(&states, "DEF_ReservoirPara_file"),
+        FieldMode::Editable
+    ));
+}
+
 const CATCHMENT_KERNEL: &[&str] = &["CATCHMENT", "CatchLateralFlow", "LULC_IGBP", "URBAN_MODEL"];
 const LATLON_KERNEL: &[&str] = &["GRIDBASED", "GridRiverLakeFlow", "LULC_IGBP", "URBAN_MODEL"];
 const UNSTRUCTURED_KERNEL: &[&str] = &[
