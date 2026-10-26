@@ -339,9 +339,11 @@ impl SpatialRuntime {
                 }
                 let surface_calendar_day = orbital_calendar_day(clock.end_time, true, 0.0)?;
                 let seconds_of_day = crate::seconds_of_day(clock.end_time)?;
+                // 逐 patch 的元数据只依赖本 patch 的 forcing 与坐标，按 patch 并行，
+                // collect 保持原顺序。
                 let steps = patch_forcing
-                    .iter()
-                    .zip(&self.coordinates)
+                    .par_iter()
+                    .zip(self.coordinates.par_iter())
                     .map(|(forcing, &(lon, lat))| {
                         patch_step(
                             clock,
@@ -369,9 +371,10 @@ impl SpatialRuntime {
                 let river = self.river.as_ref().map(|(river, _)| river);
                 let tracer_forcing = self.tracer_forcing.as_ref();
                 let scales = optimizer.as_ref();
+                // history 的水量收支参考态；逐 patch 独立，按 patch 并行。
                 let initial_totals = templates
-                    .iter()
-                    .zip(states.iter())
+                    .par_iter()
+                    .zip(states.par_iter())
                     .map(|(template, state)| crate::initial_total_water_mm(template, state))
                     .collect::<Vec<_>>();
                 // 被遮蔽的 patch 没有输出（`None`）。

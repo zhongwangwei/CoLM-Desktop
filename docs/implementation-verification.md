@@ -37374,3 +37374,10 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 - `read_cells`：从已读入的 NetCDF block 里按 `self.cells` 取值改为 `par_iter`，collect 保持格顺序。
 
 **门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。
+
+## 第 813 轮：每步 step 元数据与 initial_totals 并行（本地）
+
+- `patch_step` 的 `PointRuntimeStep` 构造：5.7M patch 从串行 `iter` 改为 `par_iter`，按 patch 独立，collect 保持顺序。
+- `initial_totals`（history 收支参考态）：同样按 patch 并行；每 patch 只读自己的 template/state，求和顺序不变。
+
+**门禁（本地）**：`cargo test -p colm-runtime --lib`（212 通过 / 2 ignored）；clippy `-D warnings`；fmt。
