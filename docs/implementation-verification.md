@@ -37453,3 +37453,8 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **optimizer 无关键**：`forcings` 的 715k 个 `PatchForcing` 拷贝原来每步无条件做；`baseflow_optimizer` 不在时直接跳过，V3 不再白付。
 
 **待补**：8 节点 10 天 + 4 写线程的 wall clock（job 8774754 运行中）。
+
+**8 节点 10 天，默认 4 写线程 + optimizer 无关键**（job 8774754）：
+- 墙钟 **22:27**，相对 1 写线程/旧代码的 23:51 少 **1:24**；
+- 主循环 1212.7 s：patches 1114.4 s（91.9%）、lai/optimizer/restarts 73.7 s、forcing 11.6 s、other 10.3 s、state clone 2.6 s；
+- 该次分配到的节点比上一轮慢（patches 从 822–841 s 涨到 1114 s），所以主循环数字带节点噪声；1 天受控扫描里 4 写线程仍比串行少约 23 s，且 hb64 河湖开 + HOURLY history 在 4 线程下 1 vs 2 node **635/635** 逐字节相同。
