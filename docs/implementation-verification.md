@@ -37545,3 +37545,23 @@ job 8776408，8 节点 × 64 核，480 步，河湖关、history none、carry �
 - 实际 tianhe config 模式 `remote-probe` 成功（临时 history DB，未写用户配置）。
 
 **同轮补充 UI 提示**：资源页 key 模式提示「带口令私钥先用 ssh-add 加入 ssh-agent，应用不保存口令」；password 模式提示「只支持 SSH password，不支持键盘交互/一次性动态口令，OTP 请用 SSH config」。前端 `npm test` **892 通过 / 0 失败**，typecheck/lint/format 通过。
+
+## 第 824 轮：8 节点 0.1° 全球河湖开启 10 天——28:30（tianhe，2026-10-26）
+
+job **8778693**，8 节点 × 64 核，480 步，`DEF_USE_GridRiverLakeFlow=.true.`、`DEF_HIST_FREQ='none'`、默认 4 restart 写线程、carry 路径。初场为已有的全球 `hb_restart_gridriver_2003-001-00000_lc2005.nc`（1.7 MB）。
+
+- 墙钟 **28:30**，`CoLM Execution Completed.`；
+- 主循环 **1444.0–1446.6 s（24.1 min）**：
+  - patches 772–866 s（53–60%）
+  - **river gather 437–539 s（30–37%）**
+  - river step 49–51 s（3.4%）
+  - forcing 11.5–12.5 s、other 11.5 s、state clone 2.5 s、grid river 1 s
+- startup `runtime assembled` 约 **180 s**；
+- 峰值 MaxRSS 约 **64.5 GB/rank**；
+- 最终 restart 2894 个文件、11 GB，含 `<case>_restart_gridriver_...nc` 与 `<case>_restart_hist_...nc.river`；4 写线程下墙钟尾部约 1–2 min。
+
+对比河湖关的 21:55（job 8776408）：河湖开启后墙钟 +6:35，主循环 +4.8 min；增量几乎全在**每步全局 runoff 的 all-gather**（30–37% 主循环），river step 本身只有 3.4%。
+
+**结论**：8 节点全球河湖开启 10 天已跑通，输出/重启完整；下一档优化若还要做，应减少 river exchange 的全局 gather（按河系/分片收集），而不是继续改 forcing/重启写出。
+
+**未验证**：全球 1 vs 2/4 rank 的主重启 + `.river` + unitcat 逐字节（河湖版 hb64 已有 130/130）；history 开启的全球 10 天。
