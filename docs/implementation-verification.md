@@ -37421,3 +37421,17 @@ Windows、Linux 上的真机安装仍未实测，表里只是依赖解析的结�
 **逐字节**：同源 hb64 河湖开 144 步，1 task 与 2 node 的 **130/130** restart/旁车文件与优化前串行参考完全一致。
 
 **结论**：forcing 的并行/融合把 forcing 阶段从 27% 压到 1.3%，8 节点河湖关 10 天墙钟从 29:56 降到 **23:51**。现在主循环 88% 是 patch 物理（1.75 s/步/rank 量级），下一阶段要动的是 patch 步进内部的分配/输出，而不是 forcing。最终 restart 写出仍约 6 min 尾巴。
+
+## 第 817 轮：history-on 复验抓到并修复 `initial_totals` 回归（tianhe，2026-10-26）
+
+**回归**：`std::mem::take(states)` 前的注释原本声称 `initial_totals` 在 take 之前算；实际代码在 take 之后用 `states.iter()`，history 关闭时这个空 Vec 没人索引所以 V3 没暴露；history 开启后 `push_history` 第一 Step 就 `index out of bounds: len 0` panic。
+
+**修复**：把 `initial_totals` 的计算移到 `std::mem::take(states)` 之前，仍按 patch 并行。
+
+**复验**（hb64，河湖开 + `DEF_HIST_FREQ='HOURLY'`，144 步）：
+- 1 task 与 2 node 均 `CoLM Execution Completed.`；
+- 两边各 635 个输出文件，排除 `.colm-spmd` 端点后 **635/635 逐字节相同**（含 history 文件、主重启、旁车）。
+
+**其它已关闭的 Not-tested**：
+- 8 节点 10 天 V3 新墙钟 **23:51**（job 8773503），forcing 12.0 s / patches 822–841 s；
+- hb64 河湖开（history none）1 task vs 2 node **130/130** 逐字节相同。

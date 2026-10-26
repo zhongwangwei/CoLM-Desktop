@@ -356,9 +356,17 @@ impl SpatialRuntime {
                     })
                     .collect::<Vec<_>>();
                 timer.mark("forcing");
+                // history 的水量收支参考态必须在 `states` 被 move 之前算；逐 patch 独立，
+                // 按 patch 并行。之前把它放在 `mem::take(states)` 之后，history 开启时拿到
+                // 的是空 Vec，第一 Step 就越界 panic（本轮 history-on 复验抓到的回归）。
+                let initial_totals = templates
+                    .par_iter()
+                    .zip(states.par_iter())
+                    .map(|(template, state)| crate::initial_total_water_mm(template, state))
+                    .collect::<Vec<_>>();
                 // 每步都 clone 整份 patch 状态是 0.1° 全球的灾难：5.7M patch × ~81 KB，
-                // 单 rank 58 GB/步。patch 物理只改自己的状态，且上一步状态的最后使用
-                // （降尺度、initial_totals）都在这一行之前，所以直接 move 出来、步末放回。
+                // 单 rank 58 GB/步。patch 物理只改自己的状态；降尺度与 initial_totals 都在
+                // 这一行之前用完上一步的状态，所以直接 move 出来、步末放回。
                 let mut next_states = std::mem::take(states);
                 timer.mark("state clone");
                 // patch 之间在一步之内互不依赖：每个只读本步强迫与共享的只读数据、只改自己的状态，
@@ -371,12 +379,6 @@ impl SpatialRuntime {
                 let river = self.river.as_ref().map(|(river, _)| river);
                 let tracer_forcing = self.tracer_forcing.as_ref();
                 let scales = optimizer.as_ref();
-                // history 的水量收支参考态；逐 patch 独立，按 patch 并行。
-                let initial_totals = templates
-                    .par_iter()
-                    .zip(states.par_iter())
-                    .map(|(template, state)| crate::initial_total_water_mm(template, state))
-                    .collect::<Vec<_>>();
                 // 被遮蔽的 patch 没有输出（`None`）。
                 let mut outputs: Vec<Option<PatchOutput>> = templates
                     .par_iter()
